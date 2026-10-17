@@ -8,8 +8,7 @@ import { BatchAllocationOrder, calculateFIFOAllocations, deductStockFIFOInTx, lo
 import { adjustInventoryStockInTx } from '../dashboard/productInventory.service'
 import { checkAndCreateLowStockAlert } from '../dashboard/rawMaterial.service'
 import { getUserAccess, hasPermission, UserAccess } from '../access/access.service'
-import { getEffectiveRolePermissions, resolvePermissions } from '../../lib/permissions'
-import { getEffectivePermissions } from '../../lib/resolveEffectivePermissions'
+import { resolveStaffVenuePermissions } from '../../lib/resolveEffectivePermissions'
 import { resolveUserRoleForVenue } from '../../middlewares/checkPermission.middleware'
 import { isWasteReasonCode, WasteReasonCode, WASTE_REASONS } from './wasteReasons'
 import { WASTE_KEY_PATTERN } from './wasteKey'
@@ -272,10 +271,10 @@ export async function getWasteAccess(staffId: string, venueId: string): Promise<
 /**
  * Los permisos que el rol o el Conjunto conceden en el local ANTES del filtro de activación
  * white-label: la misma lista que `getUserAccess` arma antes de filtrar
- * (access.service.ts, `basePermissions` → `resolvePermissions`), con las MISMAS funciones y
- * en el mismo orden. 🔴 No es `resolveStaffVenuePermissions`: ése resuelve las dependencias un
- * nivel menos en la rama del rol y ya da otra lista para OWNER (medido). Una prueba de
- * integración compara las dos listas en un local sin white-label para que no se separen.
+ * (access.service.ts), con la MISMA función: `resolveStaffVenuePermissions`, la que también usa
+ * `checkPermission`. 🔴 Sin segunda vuelta de `resolvePermissions`: esa vuelta devolvía lo que las
+ * exclusiones del venue habían quitado («quitar nunca concede», 16-oct). Una prueba de integración
+ * compara las dos listas en un local sin white-label para que no se separen.
  */
 export async function grantedPermissionsBeforeActivation(staffId: string, venueId: string, role: StaffRole): Promise<string[]> {
   const [membership, rolePermission] = await Promise.all([
@@ -289,11 +288,10 @@ export async function grantedPermissionsBeforeActivation(staffId: string, venueI
     }),
   ])
 
-  const base =
-    membership?.permissionSetId && membership.permissionSet
-      ? getEffectivePermissions(membership, [])
-      : getEffectiveRolePermissions(role, rolePermission?.permissions ?? null, rolePermission?.deniedPermissions ?? null)
-  return Array.from(resolvePermissions(base))
+  return resolveStaffVenuePermissions(
+    { role, permissionSetId: membership?.permissionSetId, permissionSet: membership?.permissionSet },
+    rolePermission,
+  )
 }
 
 /**

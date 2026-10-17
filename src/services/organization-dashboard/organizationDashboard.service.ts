@@ -18,7 +18,7 @@ import { Prisma, StaffRole } from '@prisma/client'
 import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { localWallClock, utcTs } from '../../utils/sqlDates'
-import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 import {
   DEFAULT_TIMEZONE,
@@ -308,6 +308,19 @@ async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): 
     GROUP BY te."id"
   `
   return new Map(rows.map(r => [r.timeEntryId, Number(r.cash) || 0]))
+}
+
+export const SELF_VALIDATION_FORBIDDEN = 'SELF_VALIDATION_FORBIDDEN'
+
+/**
+ * Nadie valida ni regresa a pendiente SU PROPIA checada: separación de funciones, la misma regla del
+ * founder para las horas extra (30-ago-2026, `overtimeApproval.service.ts`). Por persona, no por rol.
+ * Sin quién actúa, falla cerrado: no se puede comprobar.
+ */
+function asegurarQueNoEsSuPropiaChecada(duenoDeLaChecada: string, quienActua: string | undefined, accion: string): void {
+  if (!quienActua || duenoDeLaChecada === quienActua) {
+    throw new ForbiddenError(`No puedes ${accion} tu propia checada: tiene que hacerlo otra persona.`, SELF_VALIDATION_FORBIDDEN)
+  }
 }
 
 class OrganizationDashboardService {
@@ -2654,9 +2667,21 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
+    // 🔴 SEPARACIÓN DE FUNCIONES: nadie valida su propia checada (la regla del founder para las horas
+    // extra, 30-ago-2026: «si puedes aprobarte, no controla nada»). Es por PERSONA, no por rol: el dueño
+    // de la organización tampoco. Vive aquí y no en la ruta para que la cumplan las DOS puertas que
+    // validan (la de la organización y la del panel white-label de la sucursal). Antes de escribir nada.
+    asegurarQueNoEsSuPropiaChecada(timeEntry.staffId, validatedById, 'validar')
+
+    // 🔴 IDEMPOTENTE (P1-5, Codex, 15-oct): repetir la aprobación —el dashboard reintenta ante un error de red,
+    // o dos supervisores aprueban la misma— creaba un SEGUNDO `CashDeposit` APROBADO. La transición es atómica:
+    // sólo una checada PENDIENTE pasa a aprobada o rechazada (`updateMany` con el estado previo en el `where`;
+    // Postgres vuelve a evaluar el `where` tras el candado de fila, así que de dos peticiones simultáneas sólo
+    // una escribe), y el depósito se crea sólo si ESA transición ocurrió, en la misma transacción. Sin cambio de
+    // esquema: no hace falta un vínculo único checada↔depósito para esto.
     const result = await prisma.$transaction(async tx => {
-      const updated = await tx.timeEntry.update({
-        where: { id: timeEntryId },
+      const transicion = await tx.timeEntry.updateMany({
+        where: { id: timeEntryId, validationStatus: 'PENDING' },
         data: {
           validationStatus: status,
           validatedBy: validatedById,
@@ -2664,6 +2689,7 @@ class OrganizationDashboardService {
           validationNote: note || null,
         },
       })
+      if (transicion.count !== 1) return null
 
       // Create CashDeposit when approving with a deposit amount
       if (status === 'APPROVED' && depositAmount != null && depositAmount > 0) {
@@ -2680,12 +2706,24 @@ class OrganizationDashboardService {
         })
       }
 
-      return updated
+      return tx.timeEntry.findUnique({ where: { id: timeEntryId } })
     })
+
+    if (!result) {
+      // Ya no estaba pendiente. Si ya quedó en lo que se pide, es una repetición: se responde la checada como está,
+      // sin otro depósito ni otro asiento. Si quedó en lo contrario (aprobar una rechazada o al revés), se dice.
+      const actual = await prisma.timeEntry.findFirst({ where: { id: timeEntryId, venue: { organizationId: orgId } } })
+      if (actual?.validationStatus === status) return actual
+      throw new ConflictError(
+        `Esta checada ya fue ${actual?.validationStatus === 'APPROVED' ? 'aprobada' : 'rechazada'}. Regrésala a pendiente antes de cambiarla.`,
+        'TIME_ENTRY_ALREADY_VALIDATED',
+      )
+    }
 
     logAction({
       staffId: validatedById,
       venueId: timeEntry.venueId,
+      organizationId: orgId,
       action: `TIME_ENTRY_${status}`,
       entity: 'TimeEntry',
       entityId: timeEntryId,
@@ -2698,8 +2736,10 @@ class OrganizationDashboardService {
   /**
    * Reset a time entry validation back to PENDING
    * Also deletes any associated CashDeposit created during approval
+   *
+   * @param performedBy quién la regresa a pendiente: nadie regresa la suya (misma regla que validar).
    */
-  async resetTimeEntryValidation(timeEntryId: string, orgId: string) {
+  async resetTimeEntryValidation(timeEntryId: string, orgId: string, performedBy: string) {
     const timeEntry = await prisma.timeEntry.findFirst({
       where: {
         id: timeEntryId,
@@ -2711,7 +2751,30 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
+    asegurarQueNoEsSuPropiaChecada(timeEntry.staffId, performedBy, 'regresar a pendiente')
+
+    // 🔴 CAS sobre la validación que se LEYÓ (Codex r2, 16-oct): la lectura de arriba es anterior a la transacción.
+    // Dos «deshacer» que leen la misma checada rechazada: el primero termina, alguien la aprueba ($150), y el segundo,
+    // tarde, la regresaba a PENDING (borrando por la fecha VIEJA, o sea sin tocar el depósito nuevo) → otra
+    // aprobación = $300. Ahora sólo se regresa si sigue en el mismo estado, con la misma fecha y el mismo autor de
+    // validación; y el borrado de depósitos va DESPUÉS de ganar esa transición, en la misma transacción.
     const result = await prisma.$transaction(async tx => {
+      const transicion = await tx.timeEntry.updateMany({
+        where: {
+          id: timeEntryId,
+          validationStatus: timeEntry.validationStatus,
+          validatedAt: timeEntry.validatedAt,
+          validatedBy: timeEntry.validatedBy,
+        },
+        data: {
+          validationStatus: 'PENDING',
+          validatedBy: null,
+          validatedAt: null,
+          validationNote: null,
+        },
+      })
+      if (transicion.count !== 1) return null
+
       // Delete any CashDeposit created around the same time as validation
       if (timeEntry.validatedAt) {
         const windowStart = new Date(timeEntry.validatedAt.getTime() - 5000)
@@ -2726,19 +2789,24 @@ class OrganizationDashboardService {
         })
       }
 
-      return tx.timeEntry.update({
-        where: { id: timeEntryId },
-        data: {
-          validationStatus: 'PENDING',
-          validatedBy: null,
-          validatedAt: null,
-          validationNote: null,
-        },
-      })
+      return tx.timeEntry.findUnique({ where: { id: timeEntryId } })
     })
 
+    if (!result) {
+      // Ya no era la validación que se leyó. Si ya está pendiente, es una repetición (doble clic, reintento de red):
+      // se responde como está, sin borrar nada ni otro asiento. Si alguien la volvió a validar, se dice.
+      const actual = await prisma.timeEntry.findFirst({ where: { id: timeEntryId, venue: { organizationId: orgId } } })
+      if (actual?.validationStatus === 'PENDING') return actual
+      throw new ConflictError(
+        'La checada cambió mientras la regresabas a pendiente (alguien la volvió a validar). Actualiza y vuelve a intentar.',
+        'TIME_ENTRY_CHANGED',
+      )
+    }
+
     logAction({
+      staffId: performedBy,
       venueId: timeEntry.venueId,
+      organizationId: orgId,
       action: 'TIME_ENTRY_VALIDATION_RESET',
       entity: 'TimeEntry',
       entityId: timeEntryId,
@@ -2761,12 +2829,16 @@ class OrganizationDashboardService {
     })
   }
 
-  async createZone(orgId: string, name: string, slug: string) {
+  // `performedBy` (quién lo hizo) y la org van a la bitácora: sin ellos el asiento no tenía autor ni
+  // aparecía en ninguna pantalla de auditoría (no llevaba org ni venue).
+  async createZone(orgId: string, name: string, slug: string, performedBy?: string) {
     const zone = await prisma.zone.create({
       data: { organizationId: orgId, name, slug },
     })
 
     logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
       action: 'ZONE_CREATED',
       entity: 'Zone',
       entityId: zone.id,
@@ -2776,7 +2848,7 @@ class OrganizationDashboardService {
     return zone
   }
 
-  async updateZone(orgId: string, zoneId: string, data: { name?: string; slug?: string }) {
+  async updateZone(orgId: string, zoneId: string, data: { name?: string; slug?: string }, performedBy?: string) {
     await this.assertZoneInOrg(orgId, zoneId)
     const zone = await prisma.zone.update({
       where: { id: zoneId, organizationId: orgId },
@@ -2784,6 +2856,8 @@ class OrganizationDashboardService {
     })
 
     logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
       action: 'ZONE_UPDATED',
       entity: 'Zone',
       entityId: zoneId,
@@ -2793,7 +2867,7 @@ class OrganizationDashboardService {
     return zone
   }
 
-  async deleteZone(orgId: string, zoneId: string) {
+  async deleteZone(orgId: string, zoneId: string, performedBy?: string) {
     await this.assertZoneInOrg(orgId, zoneId)
     // Desvincular los venues de la org y borrar, en una transacción y con el borrado acotado a
     // la org: la escritura no depende sólo del chequeo previo. (Un venue de OTRA org que apunte
@@ -2805,6 +2879,8 @@ class OrganizationDashboardService {
     ])
 
     logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
       action: 'ZONE_DELETED',
       entity: 'Zone',
       entityId: zoneId,

@@ -280,6 +280,8 @@ describe('Equipo de la organización — la respuesta no puede mentir', () => {
   describe('PATCH /team/:staffId/venues', () => {
     beforeEach(() => {
       prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-1', staffId: STAFF_ID } as any)
+      // La persona sigue activa: desde la ronda 7 la ruta no le devuelve sucursales a alguien dado de baja.
+      prismaMock.staff.findUnique.mockResolvedValue({ id: STAFF_ID, active: true } as any)
       prismaMock.venue.findMany.mockResolvedValue([
         { id: VENUE_A, name: 'BAE CANDILES' },
         { id: VENUE_B, name: 'BAE QUINTANA' },

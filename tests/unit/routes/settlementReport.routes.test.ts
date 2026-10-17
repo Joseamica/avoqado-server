@@ -16,7 +16,8 @@ jest.mock('@/utils/prismaClient', () => ({
     staff: { findUnique: jest.fn() },
     staffVenue: { findFirst: jest.fn(), findUnique: jest.fn() },
     venue: { findUnique: jest.fn() },
-    staffOrganization: { findUnique: jest.fn() },
+    // Con una fila menor que OWNER, el resolutor pregunta en UNA consulta si es dueña de la org del venue (P2-6).
+    staffOrganization: { findUnique: jest.fn(), findFirst: jest.fn(async () => null) },
     venueRolePermission: { findUnique: jest.fn() },
     capabilityGrant: { findFirst: jest.fn().mockResolvedValue(null), groupBy: jest.fn().mockResolvedValue([]) },
     venueFeature: { findFirst: jest.fn(), findMany: jest.fn() },

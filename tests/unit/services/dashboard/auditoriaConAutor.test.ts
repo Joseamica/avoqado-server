@@ -13,6 +13,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
 
 import { deleteRolePermissions } from '@/services/dashboard/rolePermission.service'
 import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
+import * as salesGoalService from '@/services/dashboard/commission/sales-goal.service'
 
 beforeEach(() => mockLogAction.mockReset())
 
@@ -40,4 +41,57 @@ it('🔴 ORG_GOAL_UPDATED lleva a quien cambió la meta', async () => {
   expect(mockLogAction).toHaveBeenCalledWith(
     expect.objectContaining({ action: 'ORG_GOAL_UPDATED', staffId: 'staff-dueno', organizationId: 'org-1' }),
   )
+})
+
+// Ronda 6 (15-oct): las zonas y las metas por tienda tampoco llevaban autor ni org en la bitácora.
+describe('zonas: ZONE_* lleva a quien lo hizo y la organización', () => {
+  beforeEach(() => {
+    ;(prismaMock as any).zone = {
+      create: jest.fn().mockResolvedValue({ id: 'zona-1', organizationId: 'org-1' }),
+      update: jest.fn().mockResolvedValue({ id: 'zona-1' }),
+      delete: jest.fn().mockResolvedValue({ id: 'zona-1' }),
+      findFirst: jest.fn().mockResolvedValue({ id: 'zona-1' }),
+    }
+    prismaMock.venue.updateMany.mockResolvedValue({ count: 0 } as any)
+    prismaMock.$transaction.mockImplementation((arg: any) => (Array.isArray(arg) ? Promise.all(arg) : arg(prismaMock)))
+  })
+
+  it.each([
+    ['ZONE_CREATED', () => organizationDashboardService.createZone('org-1', 'Norte', 'norte', 'staff-gerente')],
+    ['ZONE_UPDATED', () => organizationDashboardService.updateZone('org-1', 'zona-1', { name: 'Norte 2' }, 'staff-gerente')],
+    ['ZONE_DELETED', () => organizationDashboardService.deleteZone('org-1', 'zona-1', 'staff-gerente')],
+  ])('🔴 %s', async (action, hacer) => {
+    await hacer()
+    expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ action, staffId: 'staff-gerente', organizationId: 'org-1' }))
+  })
+})
+
+describe('metas por tienda: SALES_GOAL_* lleva a quien lo hizo y la organización', () => {
+  const META = { id: 'g1', staffId: null, goal: 1000, goalType: 'AMOUNT', period: 'MONTHLY', active: true, createdAt: 'x', updatedAt: 'x' }
+
+  beforeEach(() => {
+    prismaMock.$transaction.mockImplementation((arg: any) => (Array.isArray(arg) ? Promise.all(arg) : arg(prismaMock)))
+    prismaMock.module.upsert.mockResolvedValue({ id: 'module-commissions' } as any)
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'module-commissions', code: 'COMMISSIONS', scope: 'BOTH' }])
+    prismaMock.venueModule.upsert.mockResolvedValue({ id: 'vm-1', config: { salesGoals: [META] } } as any)
+    prismaMock.venueModule.update.mockResolvedValue({} as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' } as any)
+    prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null } } as any)
+  })
+
+  const AUDITORIA = { staffId: 'staff-gerente', organizationId: 'org-1' }
+
+  it.each([
+    [
+      'SALES_GOAL_CREATED',
+      () => salesGoalService.createSalesGoal('venue-b', { goal: 500, goalType: 'AMOUNT', period: 'WEEKLY' } as any, AUDITORIA),
+    ],
+    ['SALES_GOAL_UPDATED', () => salesGoalService.updateSalesGoal('venue-b', 'g1', { goal: 2000 }, AUDITORIA)],
+    ['SALES_GOAL_DELETED', () => salesGoalService.deleteSalesGoal('venue-b', 'g1', AUDITORIA)],
+  ])('🔴 %s', async (action, hacer) => {
+    await hacer()
+    expect(mockLogAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action, staffId: 'staff-gerente', venueId: 'venue-b', organizationId: 'org-1' }),
+    )
+  })
 })

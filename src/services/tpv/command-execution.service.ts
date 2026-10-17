@@ -220,6 +220,15 @@ export class TpvCommandExecutionService {
       throw new NotFoundError(`Command ${commandId} not found`)
     }
 
+    // 🔴 La entrega va a la terminal donde esté HOY; el comando se autorizó contra SU venue. Si la discrepancia es real,
+    // el comando queda retirado y no se emite nada (Codex r2); una lectura vieja nunca lo cancela (Codex r3).
+    const traslado = await tpvCommandQueueService.revisarTraslado(command, command.terminal.venueId, 'entrega')
+    if (traslado.retirado) return
+
+    // Protocolo 2: lo que se emite es sólo la SUGERENCIA «hay comandos» (sin el comando); la TPV hace su pull durable y
+    // ese pull decide con la ubicación de HOY (reclamo condicionado y permiso). Por eso va aunque lo leído no coincida:
+    // los latidos normales no entregan durables, y sin ella un comando legítimo con una lectura vieja quedaba PENDING
+    // sin nada que lo despertara (Codex r4). Va a la sala del venue DEL comando, nunca a la del leído.
     if ((command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2) {
       if (['PENDING', 'QUEUED', 'SENT'].includes(command.status) && (!command.scheduledFor || command.scheduledFor <= new Date())) {
         broadcastTpvCommand(command.terminal.serialNumber || command.terminal.id, command.venueId, {
@@ -232,6 +241,10 @@ export class TpvCommandExecutionService {
       }
       return
     }
+
+    // TPV vieja: aquí sí se emite el comando completo, y con lo leído no coincidiendo iría a la sala de un venue que quizá
+    // no es el suyo. No se emite: su latido normal lo entrega con la ubicación de hoy (Codex r3).
+    if (traslado.discrepanciaLeida) return
 
     // Check if terminal is online
     const cutoff = new Date(Date.now() - this.ONLINE_THRESHOLD_MS)
