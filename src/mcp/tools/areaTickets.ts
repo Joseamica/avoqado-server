@@ -1,6 +1,7 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
+import { sesionesPorConciliar } from '@/services/dashboard/areaTicket.dashboard.service'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import type { McpScope } from '../scope'
@@ -255,8 +256,9 @@ export function registerAreaTicketTools(server: McpServer, scope: McpScope): voi
       guard.venueFilter(venueId)
       guard.requirePermission('area-tickets:configure', venueId, 'read')
       const [sessions, externalIncidents] = await Promise.all([
+        // R12-4: lo mismo que cuenta y lista el panel (RR o con un intento UNKNOWN).
         prisma.areaTicketCheckoutSession.findMany({
-          where: { venueId, status: 'RECONCILIATION_REQUIRED' },
+          where: sesionesPorConciliar(venueId),
           select: {
             id: true,
             status: true,

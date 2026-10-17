@@ -2,6 +2,10 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { logAction } from '../services/dashboard/activity-log.service'
+import {
+  cerrarSesionDeVentaCerradaPorOtroCanal,
+  findSesionesDeVentasCerradasPorOtroCanal,
+} from '../services/mobile/areaTicketV7.mobile.service'
 import { findPaidButOpenOrders, type CandidataPagadaAbierta } from '../services/shared/pagadaPeroAbierta'
 import { findSesionesDeValesAtoradas, reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '../services/tpv/payment.tpv.service'
 import prisma from '../utils/prismaClient'
@@ -54,6 +58,11 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * COMPLETED (`findSesionesDeValesAtoradas`), con una espera que se duplica en cada fallo: cuando se
  * repone la mercancía, inventario, lealtad y comanda se terminan una vez. Asiento: `AREA_TICKET_SESSION_RECOVERED`.
  *
+ * 🔴 Y R12-3 (17-oct-2026): una tercera pasada, acotada, cierra la sesión de las ventas que otro canal cerró ANTES de R10-2 (venta PAID
+ * con su vale SALE y la sesión PARTIALLY_PAID con la reserva del vale ACTIVE: disponibilidad de menos para siempre) y suelta esas
+ * reservas sin mover stock (`cerrarSesionDeVentaCerradaPorOtroCanal`). Sin pagos, descuentos, lealtad ni comanda. Asiento:
+ * `AREA_TICKET_SESSION_CLOSED_BY_SALE`.
+ *
  * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
  * tienen que compartir aritmética, o una orden quedaría elegida por uno y rechazada por el otro
  * en cada pasada, para siempre. Hoy la base del criterio vive en `shared/pagadaPeroAbierta.ts`
@@ -93,6 +102,8 @@ export interface ReconcileResult {
   candidates: CandidataPagadaAbierta[]
   /** R11-4: sesiones de vales atoradas que esta pasada terminó (la venta ya estaba cerrada de estado). */
   sessionsRecovered: number
+  /** R12-3: sesiones de ventas que otro canal cerró antes de R10-2, cerradas con sus reservas sueltas. */
+  sessionsClosed: number
 }
 
 interface Dependencies {
@@ -105,6 +116,10 @@ interface Dependencies {
   retomarVale: (venueId: string, orderId: string, ahora?: Date) => Promise<string | null>
   /** R11-4: las sesiones de vales atoradas aunque la venta ya esté COMPLETED (acotadas, con espera creciente por fallo). */
   findSesionesAtoradas: (opts: { limit: number; now: Date; since: Date }) => Promise<Array<{ venueId: string; orderId: string }>>
+  /** R12-3: ventas cerradas por otro canal con su sesión sin cerrar (acotadas, orden estable). */
+  findSesionesDeVentasCerradas: (opts: { limit: number; since: Date }) => Promise<Array<{ venueId: string; orderId: string }>>
+  /** R12-3: la cierra bajo la jerarquía de vales y suelta sus reservas; `false` = bajo el candado ya no cumple. */
+  cerrarSesionDeVentaCerrada: (venueId: string, orderId: string) => Promise<boolean>
 }
 
 export const defaults: Dependencies = {
@@ -114,6 +129,8 @@ export const defaults: Dependencies = {
   reconcile: reconcileOrderFromPayments,
   retomarVale: retomarCobroDeValesAtorado,
   findSesionesAtoradas: opts => findSesionesDeValesAtoradas(prisma, opts),
+  findSesionesDeVentasCerradas: opts => findSesionesDeVentasCerradasPorOtroCanal(prisma, opts),
+  cerrarSesionDeVentaCerrada: cerrarSesionDeVentaCerradaPorOtroCanal,
 }
 
 export class PaidOrderReconcilerJob {
@@ -163,6 +180,7 @@ export class PaidOrderReconcilerJob {
       dryRun,
       candidates: [],
       sessionsRecovered: 0,
+      sessionsClosed: 0,
     }
     if (this.running) return { ...empty, skipped: 1 }
     this.running = true
@@ -247,7 +265,8 @@ export class PaidOrderReconcilerJob {
         }
       }
       await this.retomarSesionesAtoradas(now, since, result, new Set(candidates.map(c => c.id)))
-      if (result.scanned > 0 || result.sessionsRecovered > 0)
+      await this.cerrarSesionesDeVentasCerradas(since, result)
+      if (result.scanned > 0 || result.sessionsRecovered > 0 || result.sessionsClosed > 0)
         logger.info('🧾 [paid-order-reconciler] barrido', { ...result, candidates: undefined })
       return result
     } finally {
@@ -284,6 +303,37 @@ export class PaidOrderReconcilerJob {
       } catch (error) {
         result.failed += 1
         logger.warn('🧾 [paid-order-reconciler] no se pudo retomar la sesión de vales atorada; se reintenta más tarde', {
+          orderId: s.orderId,
+          venueId: s.venueId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
+  /** 🔴 R12-3: la tercera pasada. Un fallo no detiene a las demás; la que ya no cumple bajo el candado no se asienta. */
+  private async cerrarSesionesDeVentasCerradas(since: Date, result: ReconcileResult): Promise<void> {
+    const sesiones = await this.d.retryEntry(() => this.d.findSesionesDeVentasCerradas({ limit: SESSION_BATCH_LIMIT, since }), {
+      retries: 2,
+      initialDelay: 1500,
+      shouldRetry: shouldRetryDbConnectionError,
+      context: 'paid-order-reconciler.find-closed-sales',
+    })
+    for (const s of sesiones) {
+      try {
+        if (!(await this.d.cerrarSesionDeVentaCerrada(s.venueId, s.orderId))) continue
+        result.sessionsClosed += 1
+        await logAction({
+          staffId: null,
+          venueId: s.venueId,
+          action: 'AREA_TICKET_SESSION_CLOSED_BY_SALE',
+          entity: 'Order',
+          entityId: s.orderId,
+          data: { sweep: 'paid-order-reconciler', effects: 'RESERVATIONS_RELEASED' },
+        })
+      } catch (error) {
+        result.failed += 1
+        logger.warn('🧾 [paid-order-reconciler] no se pudo cerrar la sesión ni soltar las reservas de una venta ya cerrada', {
           orderId: s.orderId,
           venueId: s.venueId,
           error: error instanceof Error ? error.message : String(error),

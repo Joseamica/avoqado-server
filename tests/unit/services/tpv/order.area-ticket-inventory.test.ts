@@ -227,6 +227,60 @@ describe('deductTrackedInventoryForFreeCart — vales por área', () => {
 })
 
 // ── Issues que la deducción devuelve al cajero (Square-parity, toast post-cobro) ──
+/**
+ * 🔴 R12-1 (Codex recheck-16 #1): el `PAY_CASH` de la cola sin red (y la cola HTTP de Android/iOS) ya ocurrió: es dinero capturado. La
+ * sesión de vales no le responde 409 por su estado (cerrada, en conciliación o cancelada); el efectivo EN VIVO sigue siendo cobro nuevo.
+ */
+describe('🔴 R12-1: payCashOrder le dice a la sesión de vales si el dinero ya se capturó', () => {
+  const { lockAreaTicketCheckoutForPayment } = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+  const baseOrder = {
+    id: 'order-area',
+    orderNumber: 'AREA-1',
+    paymentStatus: 'PENDING',
+    status: 'PENDING',
+    subtotal: new Decimal(50.5),
+    discountAmount: new Decimal(0),
+    serviceChargeAmount: new Decimal(0),
+    tipAmount: new Decimal(0),
+    total: new Decimal(50.5),
+    remainingBalance: new Decimal(50.5),
+    venueId: 'venue-1',
+    version: 1,
+    areaTicketCode: 'AREA-CODE',
+    areaTicketCheckoutSession: { id: 'session-1' },
+    items: [],
+  }
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
+    prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
+    prismaMock.payment.findUnique.mockResolvedValue(null)
+    prismaMock.payment.findMany.mockResolvedValue([])
+    prismaMock.shift.findFirst.mockResolvedValue(null)
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.payment.create.mockResolvedValue({ id: 'payment-1' })
+    prismaMock.venueTransaction.create.mockResolvedValue({ id: 'transaction-1' })
+    prismaMock.paymentAllocation.create.mockResolvedValue({ id: 'allocation-1' })
+    prismaMock.order.findUnique.mockResolvedValue(baseOrder)
+    finalizeAreaTicketPaymentMock.mockResolvedValue({ areaTicketOrder: true, sessionId: 'session-1' })
+  })
+
+  it.each([
+    ['la cola sin red (isOfflineReplay)', true, true],
+    ['el efectivo en vivo', false, false],
+  ])('%s ⇒ dineroCapturado: %s', async (_caso, isOfflineReplay, dineroCapturado) => {
+    await payCashOrder('venue-1', 'order-area', {
+      amount: 5050,
+      tip: 0,
+      staffId: 'staff-1',
+      idempotencyKey: 'area-payment-r12',
+      isOfflineReplay,
+    })
+
+    expect(lockAreaTicketCheckoutForPayment).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ dineroCapturado }))
+  })
+})
+
 describe('deductTrackedInventoryForFreeCart — issues de inventario', () => {
   beforeEach(() => {
     jest.clearAllMocks()

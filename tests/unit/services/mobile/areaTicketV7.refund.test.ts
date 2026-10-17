@@ -58,6 +58,8 @@ function makeTx(order: Record<string, any>, payments: FakePayment[]) {
     areaTicketPaymentAttempt: {
       findFirst: jest.fn().mockResolvedValue({ id: ATTEMPT_ID, status: 'PENDING', paymentId: null }),
       update: jest.fn().mockResolvedValue({}),
+      // R12-4: al cerrar PAID, los intentos UNKNOWN hermanos con su cobro COMPLETED quedan SUCCEEDED (aquí: ninguno).
+      updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
     areaTicketCheckoutSession: {
       update: jest.fn().mockResolvedValue({}),

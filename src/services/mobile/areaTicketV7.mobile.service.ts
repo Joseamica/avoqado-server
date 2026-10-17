@@ -46,11 +46,12 @@ import { createStockBatch } from '../dashboard/fifoBatch.service'
 import { convertUnit } from '../../utils/unitConversion'
 import prisma from '../../utils/prismaClient'
 import { withSerializableRetry } from '../../utils/serializableRetry'
+import { utcTs } from '../../utils/sqlDates'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro.
-import { computeOrderBalance, esVentaCerrada, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
+import { claseDeEstado, computeOrderBalance, esVentaCerrada, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
@@ -2357,6 +2358,24 @@ export async function lockAreaTicketCheckoutForPayment(
   const locked = await lockAreaTicketCheckoutHierarchy(tx, { venueId: input.venueId, orderId: input.orderId })
   if (!locked) return null
   const { session } = locked
+  // 🔴 R12-1 (ronda 12; Codex recheck-16 #1): $100 recibidos en la TPV, el registro se demora y un gerente cancela la sesión desde el
+  // POS. El dinero ya capturado no recibe 409 por eso: sigue la MISMA regla de nivel venta que una venta sin vales cancelada (se registra
+  // y la cuenta se reabre, `reabrirSiRecibeDinero`, con su bitácora `ORDER_REOPENED_BY_CAPTURED_PAYMENT`). Por eso `null`: ni intento,
+  // ni sesión (sigue cancelada), ni los vales que la cancelación liberó (no se consumen ni se apropian: `createSalePostingInTx` sólo
+  // toma los renglones cuyo vale sigue siendo de esta venta). El cobro NUEVO sigue rechazado abajo, antes de tomar el dinero.
+  if (input.dineroCapturado && checkoutStatusIn(session.status, [AreaTicketCheckoutStatus.CANCELLED, AreaTicketCheckoutStatus.EXPIRED])) {
+    logger.error(
+      '🚨 [AREA TICKETS v7] Dinero capturado sobre una sesión de vales ya cerrada sin cobro: se registra a nivel venta; requiere conciliación',
+      {
+        venueId: input.venueId,
+        orderId: input.orderId,
+        checkoutSessionId: session.id,
+        estadoDeLaSesion: session.status,
+        idempotencyKey: input.idempotencyKey ?? null,
+      },
+    )
+    return null
+  }
   const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
 
   const existing = await tx.areaTicketPaymentAttempt.findUnique({
@@ -3369,13 +3388,34 @@ async function cerrarSesionComoPagada(
       version: { increment: 1 },
     },
   })
+  // 🔴 R12-4 (re-revisión r11): el intento UNKNOWN hermano (A capturó, su finalización falló; B cerró) cuyo cobro está COMPLETED en esta
+  // venta ya contó en el saldo que la cierra: queda SUCCEEDED, con su cobro como evidencia, y deja de pedir conciliación. Uno sin cobro
+  // COMPLETED se queda UNKNOWN y sale en la cola (`sesionesPorConciliar`, el mismo predicado del contador).
+  const ahora = new Date()
+  await tx.areaTicketPaymentAttempt.updateMany({
+    where: {
+      checkoutSessionId: input.sessionId,
+      orderId: input.orderId,
+      status: AreaTicketPaymentAttemptStatus.UNKNOWN,
+      payment: { is: { status: 'COMPLETED', orderId: input.orderId } },
+    },
+    data: { status: AreaTicketPaymentAttemptStatus.SUCCEEDED, completedAt: ahora, lastCheckedAt: ahora },
+  })
+}
+
+/** Las reservas ACTIVE de los vales de la sesión pasan a RELEASED SIN mover stock: la obligación de inventario ya la tomó el vale SALE. */
+async function soltarReservasDeLaSesion(tx: Prisma.TransactionClient, venueId: string, sessionId: string): Promise<void> {
+  await tx.areaTicketInventoryReservation.updateMany({
+    where: { venueId, areaTicket: { checkoutSessionId: sessionId }, status: AreaTicketInventoryReservationStatus.ACTIVE },
+    data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date() },
+  })
 }
 
 /**
  * 🔴 R11-8 (ronda 11; decisión A del controlador para R10-5): otro canal —pago manual, liquidar desde el panel, el saldo del cliente,
  * cripto— CERRÓ esta venta de vales y su vale SALE ya tomó todos los renglones. La sesión deja de presentarse como cobrable (Android
  * e iOS restauran una PARTIALLY_PAID como carrito y ofrecían «cobrar el resto»): cierra PAID con sus vales, y se suelta el reclamo de
- * la terminal sobre la venta. Las reservas las suelta el aplicador de ese vale al descontar cada renglón (R11-7).
+ * la terminal sobre la venta. Las reservas ya las soltó ese vale al crearse (`createSalePostingInTx`, R10-2).
  *
  * `sesion` es la que devolvió `lockAreaTicketCheckoutHierarchy` como PRIMERA sentencia de la transacción del cierre: exigirla es la
  * prueba de que sesión → vales → venta ya se bloquearon en ese orden. Esta función NUNCA toma por primera vez el candado de la sesión
@@ -3405,6 +3445,62 @@ export async function cerrarSesionDeValesAlCerrarLaVenta(
     data: { claimedByTerminalId: null, claimedAt: null },
   })
   return true
+}
+
+/**
+ * 🔴 R12-3 (ronda 12; Codex recheck-16 #4): las ventas que otro canal cerró ANTES de R10-2 (abono de la terminal $50 + pago manual
+ * $50 ⇒ venta PAID, vale SALE APPLIED, stock 10 → 9) se quedaron con la reserva del vale ACTIVE y la sesión PARTIALLY_PAID:
+ * disponibilidad 8. Nada lo disparaba (el rescate de R11-4 sólo mira sesiones en conciliación o pendientes).
+ *
+ * La selección del barrido: venta PAID (ni cancelada ni borrada) con su vale SALE y su sesión sin cerrar (MATERIALIZED o
+ * PARTIALLY_PAID, sin intento vivo). Una consulta, tope de quien llama, orden estable `(creación de la sesión, id)` y la ventana `since`
+ * del barrido (el rezago más viejo lo alcanza el script a mano con su propio `since`). Sin reintentos: la que se cierra sale del
+ * predicado, y la recuperación revisa EXACTAMENTE lo mismo bajo sus candados.
+ */
+export async function findSesionesDeVentasCerradasPorOtroCanal(
+  db: Pick<typeof prisma, '$queryRaw'>,
+  opts: { limit: number; since: Date },
+): Promise<Array<{ venueId: string; orderId: string }>> {
+  return db.$queryRaw<Array<{ venueId: string; orderId: string }>>`
+    SELECT s."venueId", s."orderId"
+    FROM "AreaTicketCheckoutSession" s
+    JOIN "Order" o ON o.id = s."orderId" AND o."venueId" = s."venueId"
+    WHERE s.status IN ('MATERIALIZED', 'PARTIALLY_PAID')
+      AND s."activePaymentAttemptId" IS NULL
+      AND o."paymentStatus" = 'PAID'
+      AND o.status NOT IN ('CANCELLED', 'DELETED')
+      AND EXISTS (
+        SELECT 1 FROM "InventoryPosting" ip
+        WHERE ip."venueId" = s."venueId" AND ip."sourceKind" = 'ORDER' AND ip."sourceId" = s."orderId" AND ip."effectKind" = 'SALE')
+      AND s."createdAt" >= ${utcTs(opts.since)}
+    ORDER BY s."createdAt" ASC, s.id ASC
+    LIMIT ${opts.limit}
+  `
+}
+
+/**
+ * 🔴 R12-3: bajo la jerarquía de vales (sesión → vales → venta), la venta sigue cerrada con el vale SALE de otro canal y la sesión
+ * sin cerrar ⇒ la sesión cierra con el MISMO helper de R11-8 y sus reservas ACTIVE se sueltan sin mover stock (el vale SALE ya tomó la
+ * obligación). Sin pagos, sin descuentos, sin lealtad, sin comanda. Devuelve si la cerró.
+ */
+export async function cerrarSesionDeVentaCerradaPorOtroCanal(venueId: string, orderId: string): Promise<boolean> {
+  return prisma.$transaction(async tx => {
+    const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+    if (!vales || vales.session.activePaymentAttemptId) return false
+    if (!checkoutStatusIn(vales.session.status, [AreaTicketCheckoutStatus.MATERIALIZED, AreaTicketCheckoutStatus.PARTIALLY_PAID])) {
+      return false
+    }
+    const venta = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true, status: true } })
+    if (venta?.paymentStatus !== 'PAID' || claseDeEstado(venta.status) === 'CANCELADA') return false
+    const valeDeVenta = await tx.inventoryPosting.findUnique({
+      where: { venueId_sourceKind_sourceId_effectKind: { venueId, sourceKind: 'ORDER', sourceId: orderId, effectKind: 'SALE' } },
+      select: { id: true },
+    })
+    if (!valeDeVenta) return false
+    await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId })
+    await soltarReservasDeLaSesion(tx, venueId, vales.session.id)
+    return true
+  })
 }
 
 /**
@@ -3516,8 +3612,6 @@ export async function finalizeAreaTicketPaymentInTransaction(
   let finalFullyPaid = input.fullyPaid
   let ventaYaCerrada = false
   let inventarioYaTomado = false
-  /** R11-7: el vale SALE que ya tomó la obligación sigue PENDIENTE de aplicarse (su aplicador soltará cada reserva al descontarla). */
-  let valePendienteDeAplicar = false
   let consumoPrevio: ConsumoPrevioDeLaSesion = 'NINGUNO'
   let primerSaldado = false
   if (input.reconcileCapturedPayment) {
@@ -3567,8 +3661,10 @@ export async function finalizeAreaTicketPaymentInTransaction(
     // transacción que la pasa a PAID: el pago manual, liquidar desde el panel, cripto, la terminal y —desde R10-1— la propia sesión
     // (`AREA_TICKET_TRANSACTIONAL`, abajo). En CUALQUIER estado: PENDING/APPLYING/PARTIAL_FAILED los termina su dueño (el sweeper o
     // la conciliación manual); exigir APPLIED duplicaría lo ya aplicado. El barrido de pagadas-abiertas es el único que cierra sin él.
-    const valeDeVenta = ventaYaCerrada
-      ? await tx.inventoryPosting.findUnique({
+    inventarioYaTomado =
+      ventaYaCerrada &&
+      Boolean(
+        await tx.inventoryPosting.findUnique({
           where: {
             venueId_sourceKind_sourceId_effectKind: {
               venueId: input.venueId,
@@ -3577,11 +3673,9 @@ export async function finalizeAreaTicketPaymentInTransaction(
               effectKind: 'SALE',
             },
           },
-          select: { id: true, status: true },
-        })
-      : null
-    inventarioYaTomado = Boolean(valeDeVenta)
-    valePendienteDeAplicar = ['PENDING', 'APPLYING', 'PARTIAL_FAILED'].includes(String(valeDeVenta?.status))
+          select: { id: true },
+        }),
+      )
     // 🔴 R11-3 (Codex recheck-15 #1): antes de consumir una venta SIN vale SALE, la huella de una finalización de ANTES de la
     // constancia de R10-1 (que el `catch` viejo degradó): si acredita el consumo completo, no se repite; si es ambigua, no se
     // consume y la sesión se queda en conciliación (el `catch` de quien llama la congela, sin escribir nada aquí).
@@ -3702,20 +3796,12 @@ export async function finalizeAreaTicketPaymentInTransaction(
       staffId: input.staffId,
       skipReason: 'AREA_TICKET_TRANSACTIONAL',
     })
-  } else if (!valePendienteDeAplicar) {
-    // 🔴 R10-2 (Codex recheck-14 #2): el vale de VENTA del otro cierre ya descontó TODOS los renglones, también los del vale. Sus
-    // reservas ACTIVE quedaban apartando mercancía ya vendida para siempre (la expiración sólo libera sesiones OPEN). Se sueltan SIN
-    // mover stock, como al cancelar un vale sin cobrar. Cubre las ventas cerradas antes de que el aplicador las soltara él mismo.
-    // R11-7: sólo si ese vale ya se aplicó; si sigue pendiente (o falló una línea), su aplicador suelta cada reserva al descontar su
-    // renglón, y mientras tanto la reserva sigue compensando la pieza que todavía no sale.
-    await tx.areaTicketInventoryReservation.updateMany({
-      where: {
-        venueId: input.venueId,
-        areaTicket: { checkoutSessionId: input.locked.sessionId },
-        status: AreaTicketInventoryReservationStatus.ACTIVE,
-      },
-      data: { status: AreaTicketInventoryReservationStatus.RELEASED, releasedAt: new Date() },
-    })
+  } else {
+    // 🔴 R10-2 (Codex recheck-14 #2): el vale de VENTA del otro cierre ya tomó TODOS los renglones, también los del vale. Sus reservas
+    // ACTIVE quedaban apartando mercancía ya vendida para siempre (la expiración sólo libera sesiones OPEN). Se sueltan SIN mover stock,
+    // como al cancelar un vale sin cobrar. Hoy el cierre ya las suelta al crear su vale (`createSalePostingInTx`); esto cubre las ventas
+    // cerradas antes de ese cambio (sin cobro tardío, las recupera el barrido: `cerrarSesionDeVentaCerradaPorOtroCanal`, R12-3).
+    await soltarReservasDeLaSesion(tx, input.venueId, input.locked.sessionId)
   }
   await cerrarSesionComoPagada(tx, { venueId: input.venueId, sessionId: input.locked.sessionId, orderId: input.orderId, tickets })
   return {

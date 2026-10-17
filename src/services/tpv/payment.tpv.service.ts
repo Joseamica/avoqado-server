@@ -426,6 +426,7 @@ import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
+import { KITCHEN_STALENESS_MS } from '../kds/kitchenTicketPlanning'
 
 /**
  * Se lanza DENTRO de la transacción para abortarla sin escribir DINERO; el `catch` la convierte
@@ -3250,7 +3251,8 @@ async function resumeCapturedAreaTicketPayment(
 ): Promise<'PAID' | 'PARTIALLY_PAID' | 'RECONCILIATION_REQUIRED' | null> {
   const session = await prisma.areaTicketCheckoutSession.findFirst({
     where: { venueId, orderId },
-    select: { id: true, status: true, activePaymentAttemptId: true },
+    // R12-5: la hora de la venta acota su cocina (abajo).
+    select: { id: true, status: true, activePaymentAttemptId: true, order: { select: { createdAt: true } } },
   })
   if (!session) return null
 
@@ -3270,7 +3272,10 @@ async function resumeCapturedAreaTicketPayment(
   }
 
   // Aquí no se arma tras el commit: la marca basta, el barrido arma la comanda ≤ 90 s después. `debeMarcarCocina` nunca lanza.
-  const marcarCocina = await debeMarcarCocina(venueId)
+  // 🔴 R12-5 (re-revisión r11): el barrido rescata hasta 30 días atrás; la cocina de una venta más vieja que el umbral de las comandas
+  // viejas de la pantalla (`KITCHEN_STALENESS_MS`, 12 h: «ya no se prepara») no se marca ni se arma. Inventario y lealtad, sí.
+  const cocinaVigente = !session.order || Date.now() - session.order.createdAt.getTime() <= KITCHEN_STALENESS_MS
+  const marcarCocina = cocinaVigente && (await debeMarcarCocina(venueId))
   try {
     const finalizacion = await finalizeCapturedAreaTicketPayment({
       venueId,

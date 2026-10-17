@@ -1243,6 +1243,53 @@ describe('🔴 R10: el registrador de la terminal y la sesión de vales', () => 
       expect(efectosDeSaldar()).toEqual({ lealtad: 0, referido: 0, comanda: 0 })
     })
 
+    /**
+     * 🔴 R12-5 (re-revisión r11): el barrido rescata hasta 30 días atrás. La cocina de una venta de hace días ya no se prepara: el
+     * mismo umbral de las comandas viejas de la pantalla (`KITCHEN_STALENESS_MS`, 12 h) acota la marca y el armado del rescate.
+     * Inventario y lealtad NO se acotan.
+     */
+    it('🔴 R12-5: rescate de una venta de hace 3 días ⇒ ni marca de cocina ni comanda; lealtad y referido sí', async () => {
+      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+        id: 'session-1',
+        status: 'RECONCILIATION_REQUIRED',
+        activePaymentAttemptId: 'attempt-1',
+        order: { createdAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) },
+      })
+      finalizeAreaTicketPaymentMock.mockResolvedValue({
+        areaTicketOrder: true,
+        sessionId: 'session-1',
+        fullyPaid: true,
+        ventaYaCerrada: true,
+        primerSaldado: true,
+      })
+
+      await reenviar()
+
+      expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: false }))
+      expect(efectosDeSaldar()).toEqual({ lealtad: 1, referido: 1, comanda: 0 })
+    })
+
+    it('regresión R12-5: rescate de una venta de hace 1 h (dentro de las 12 h) ⇒ marca y comanda UNA vez', async () => {
+      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
+        id: 'session-1',
+        status: 'RECONCILIATION_REQUIRED',
+        activePaymentAttemptId: 'attempt-1',
+        order: { createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+      })
+      finalizeAreaTicketPaymentMock.mockResolvedValue({
+        areaTicketOrder: true,
+        sessionId: 'session-1',
+        fullyPaid: true,
+        ventaYaCerrada: true,
+        primerSaldado: true,
+      })
+
+      await reenviar()
+
+      expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: true }))
+      expect(efectosDeSaldar()).toEqual({ lealtad: 1, referido: 1, comanda: 1 })
+    })
+
     it('🔴 el reenvío que choca con otra petición que ya cerró la sesión ⇒ no la degrada y responde lo que quedó', async () => {
       finalizeAreaTicketPaymentMock.mockRejectedValue(new Error('could not serialize access due to concurrent update'))
       ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock)

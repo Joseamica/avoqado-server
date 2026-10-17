@@ -1,7 +1,9 @@
 import { AreaTicketCheckoutStatus, AreaTicketInventoryTarget, AreaTicketPaymentAttemptStatus, Prisma } from '@prisma/client'
 
+import logger from '@/config/logger'
 import {
   cerrarSesionDeValesAlCerrarLaVenta,
+  cerrarSesionDeVentaCerradaPorOtroCanal,
   finalizeAreaTicketPaymentInTransaction,
   lockAreaTicketCheckoutForPayment,
 } from '@/services/mobile/areaTicketV7.mobile.service'
@@ -1075,22 +1077,34 @@ describe('🔴 R11: consumo viejo, salida de sólo lectura, reservas del vale pe
     })
   })
 
-  describe('R11-7: las reservas cuando el vale SALE de otro canal no se ha aplicado', () => {
-    it.each(['PENDING', 'APPLYING', 'PARTIAL_FAILED'])(
-      '🔴 vale %s ⇒ la finalización NO suelta las reservas (las suelta su aplicador al descontar)',
+  describe('R12-2 (revierte R11-7; Codex recheck-16 #2/#3): las reservas de una venta que otro canal cerró', () => {
+    it.each(['PENDING', 'APPLYING', 'PARTIAL_FAILED', 'APPLIED'])(
+      '🔴 vale SALE del otro canal %s ⇒ la finalización tardía suelta las reservas ACTIVE, sin mover stock (la obligación vive en el vale)',
       async status => {
         await conciliar('PAID', ['80.00', '20.00'], { vale: { id: 'posting-del-pago-manual', status } })
 
-        expect(reservasSoltadas()).toEqual([])
+        expect(reservasSoltadas()).toHaveLength(1)
         expect(consumio()).toBe(false)
       },
     )
+  })
 
-    it('regresión: con el vale ya APPLIED (o de antes de este cambio) ⇒ las suelta, sin mover stock', async () => {
+  describe('R12-4: al cerrar PAID, el intento UNKNOWN hermano cuyo cobro ya contó queda SUCCEEDED', () => {
+    it('🔴 la finalización que cierra la sesión PAID resuelve los intentos UNKNOWN con su cobro COMPLETED de ESTA venta', async () => {
       await conciliar('PAID', ['80.00', '20.00'], { vale: { id: 'posting-del-pago-manual', status: 'APPLIED' } })
 
-      expect(reservasSoltadas()).toHaveLength(1)
-      expect(consumio()).toBe(false)
+      expect(prismaMock.areaTicketPaymentAttempt.updateMany).toHaveBeenCalledWith({
+        where: { checkoutSessionId: sessionId, orderId, status: 'UNKNOWN', payment: { is: { status: 'COMPLETED', orderId } } },
+        data: { status: 'SUCCEEDED', completedAt: expect.any(Date), lastCheckedAt: expect.any(Date) },
+      })
+    })
+
+    it('regresión: un abono que no cierra la sesión no toca a los hermanos', async () => {
+      await conciliar('PENDING', ['30.00'], {
+        sesion: { status: AreaTicketCheckoutStatus.PAYMENT_PENDING, activePaymentAttemptId: attemptId },
+      })
+
+      expect(prismaMock.areaTicketPaymentAttempt.updateMany).not.toHaveBeenCalled()
     })
   })
 
@@ -1219,8 +1233,13 @@ describe('🔴 R11-8: la sesión de vales ante el dinero capturado y ante el cie
           where: { id: orderId, venueId, areaTicketCode: { not: null } },
           data: { claimedByTerminalId: null, claimedAt: null },
         })
-        // Ni inventario ni reservas: el vale SALE del cierre ya tomó la obligación (su aplicador suelta las reservas, R11-7).
+        // Ni inventario ni reservas: el vale SALE del cierre ya tomó la obligación y soltó las reservas al crearse (R10-2/R12-2).
         expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
+        // R12-4: el intento UNKNOWN hermano cuyo cobro ya contó deja de pedir conciliación.
+        expect(prismaMock.areaTicketPaymentAttempt.updateMany).toHaveBeenCalledWith({
+          where: { checkoutSessionId: sessionId, orderId, status: 'UNKNOWN', payment: { is: { status: 'COMPLETED', orderId } } },
+          data: { status: 'SUCCEEDED', completedAt: expect.any(Date), lastCheckedAt: expect.any(Date) },
+        })
       },
     )
 
@@ -1235,6 +1254,111 @@ describe('🔴 R11-8: la sesión de vales ante el dinero capturado y ante el cie
       expect(prismaMock.areaTicket.updateMany).not.toHaveBeenCalled()
       expect(prismaMock.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
       expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    })
+  })
+})
+
+/**
+ * 🔴 Ronda 12 (Codex recheck-16 #1 y #4): el dinero ya capturado sobre una sesión CANCELADA o EXPIRADA sigue la regla de nivel venta (como
+ * una venta sin vales: se registra y la cuenta cancelada se reabre), sin apropiarse de los vales que la cancelación liberó; y la
+ * recuperación de las reservas que dejó un cierre por otro canal ANTES de R10-2.
+ */
+describe('🔴 R12: dinero capturado sobre una sesión cancelada y reservas viejas de otro canal', () => {
+  const sesion = (status: AreaTicketCheckoutStatus, activePaymentAttemptId: string | null = null) => ({
+    id: sessionId,
+    orderId,
+    status,
+    activePaymentAttemptId,
+    tickets: [{ id: 'ticket-r12', fulfillmentModeSnapshot: 'HOLD_UNTIL_PAID' }],
+    paymentAttempts: [{ sequence: 1 }],
+  })
+  const registrar = (dineroCapturado?: boolean) =>
+    lockAreaTicketCheckoutForPayment(prismaMock, {
+      venueId,
+      orderId,
+      idempotencyKey: 'llave-r12',
+      amount: new Prisma.Decimal('100.00'),
+      method: 'CASH' as any,
+      ...(dineroCapturado === undefined ? {} : { dineroCapturado }),
+    })
+  beforeEach(() => {
+    prismaMock.$queryRaw.mockResolvedValue([])
+    prismaMock.areaTicketPaymentAttempt.findUnique.mockResolvedValue(null)
+    prismaMock.areaTicketPaymentAttempt.create.mockResolvedValue({ id: 'intento-nuevo' } as any)
+  })
+
+  describe('R12-1: la sesión cancelada no es razón de 409 para el dinero ya capturado', () => {
+    it.each([AreaTicketCheckoutStatus.CANCELLED, AreaTicketCheckoutStatus.EXPIRED])(
+      '🔴 dinero capturado sobre una sesión %s ⇒ `null` (se registra como venta sin vales); ni intento, ni sesión, ni vales, y queda la alerta',
+      async status => {
+        prismaMock.areaTicketCheckoutSession.findFirst.mockResolvedValue(sesion(status) as any)
+
+        await expect(registrar(true)).resolves.toBeNull()
+
+        expect(prismaMock.areaTicketPaymentAttempt.findUnique).not.toHaveBeenCalled()
+        expect(prismaMock.areaTicketPaymentAttempt.create).not.toHaveBeenCalled()
+        expect(prismaMock.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
+        expect(prismaMock.areaTicket.updateMany).not.toHaveBeenCalled()
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining('🚨'),
+          expect.objectContaining({ checkoutSessionId: sessionId, orderId, estadoDeLaSesion: status }),
+        )
+      },
+    )
+
+    it.each([AreaTicketCheckoutStatus.CANCELLED, AreaTicketCheckoutStatus.EXPIRED])(
+      'regresión: un cobro NUEVO sobre una sesión %s ⇒ 409 antes de tomar el dinero',
+      async status => {
+        prismaMock.areaTicketCheckoutSession.findFirst.mockResolvedValue(sesion(status) as any)
+
+        await expect(registrar()).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_PAYMENT_NOT_ALLOWED' })
+        expect(prismaMock.areaTicketPaymentAttempt.create).not.toHaveBeenCalled()
+      },
+    )
+  })
+
+  describe('R12-3: la recuperación de una venta que otro canal cerró antes de R10-2 (`cerrarSesionDeVentaCerradaPorOtroCanal`)', () => {
+    const preparar = (o: { sesion?: AreaTicketCheckoutStatus; activo?: string | null; venta?: string; vale?: boolean } = {}) => {
+      prismaMock.areaTicketCheckoutSession.findFirst.mockResolvedValue(
+        sesion(o.sesion ?? AreaTicketCheckoutStatus.PARTIALLY_PAID, o.activo ?? null) as any,
+      )
+      prismaMock.order.findFirst.mockResolvedValue({ paymentStatus: o.venta ?? 'PAID', status: 'COMPLETED' } as any)
+      prismaMock.inventoryPosting.findUnique.mockResolvedValue((o.vale === false ? null : { id: 'vale-del-pago-manual' }) as any)
+      prismaMock.areaTicketInventoryReservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    }
+
+    it('🔴 venta PAID con el vale SALE del otro canal y su sesión PARTIALLY_PAID ⇒ la sesión cierra PAID y sus reservas ACTIVE se sueltan, sin stock, pagos ni efectos', async () => {
+      preparar()
+
+      await expect(cerrarSesionDeVentaCerradaPorOtroCanal(venueId, orderId)).resolves.toBe(true)
+
+      // La jerarquía (sesión → vales → venta) es lo primero que se bloquea.
+      expect(sqlText((prismaMock.$queryRaw as jest.Mock).mock.calls[0][0])).toContain('"AreaTicketCheckoutSession"')
+      expect(prismaMock.areaTicketCheckoutSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'PAID', activePaymentAttemptId: null }) }),
+      )
+      expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith({
+        where: { venueId, areaTicket: { checkoutSessionId: sessionId }, status: 'ACTIVE' },
+        data: { status: 'RELEASED', releasedAt: expect.any(Date) },
+      })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+      expect(prismaMock.inventoryPosting.create).not.toHaveBeenCalled()
+      expect(prismaMock.order.update).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['sin vale SALE (la cerró el barrido de estado: la retoma su propio camino)', { vale: false }],
+      ['la venta no está cobrada', { venta: 'PARTIAL' }],
+      ['la sesión está en conciliación', { sesion: AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED, activo: 'intento-viejo' }],
+      ['la sesión ya está PAID', { sesion: AreaTicketCheckoutStatus.PAID }],
+      ['la sesión está cancelada', { sesion: AreaTicketCheckoutStatus.CANCELLED }],
+    ] as const)('regresión: %s ⇒ no toca nada', async (_caso, o) => {
+      preparar(o as any)
+
+      await expect(cerrarSesionDeVentaCerradaPorOtroCanal(venueId, orderId)).resolves.toBe(false)
+      expect(prismaMock.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
+      expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
     })
   })
 })

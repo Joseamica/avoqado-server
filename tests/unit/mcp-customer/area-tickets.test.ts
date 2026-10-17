@@ -87,6 +87,16 @@ describe('area ticket MCP tools', () => {
     expect(result).toEqual({ count: 0, tickets: [] })
   })
 
+  it('🔴 R12-4: reconciliation lists what the dashboard counter counts — RECONCILIATION_REQUIRED sessions AND sessions with an UNKNOWN attempt', async () => {
+    await call('area_ticket_reconciliation_queue', { venueId: 'venue-1', limit: 20 })
+
+    expect(prismaMock.areaTicketCheckoutSession.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId: 'venue-1', OR: [{ status: 'RECONCILIATION_REQUIRED' }, { paymentAttempts: { some: { status: 'UNKNOWN' } } }] },
+      }),
+    )
+  })
+
   it('gates reconciliation with configure and never mutates state', async () => {
     const result = parse(
       await call('area_ticket_reconciliation_queue', {

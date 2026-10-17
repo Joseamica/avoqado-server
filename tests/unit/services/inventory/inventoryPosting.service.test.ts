@@ -170,18 +170,22 @@ describe('createSalePostingInTx', () => {
 })
 
 /**
- * 🔴 R10-2 → R11-7 (ronda 11): el vale de VENTA de otro canal (pago manual, liquidar, saldo del cliente, cripto) toma la obligación
- * de TODOS los renglones, también los de un vale v7 con su reserva ACTIVE. La reserva ya NO se suelta al CREAR el vale (inflaba la
- * disponibilidad hasta el descuento y no compensaba una línea fallida): se suelta cuando `applySalePosting` deja APPLIED la línea
- * de ese renglón (abajo).
+ * 🔴 R10-2 (de vuelta en la ronda 12: R12-2 revierte R11-7, Codex recheck-16 #2 y #3): quedan 2 piezas, un vale reserva 1 (ACTIVE) y
+ * otro canal cierra la venta (pago manual, liquidar, saldo del cliente, cripto). Su vale de VENTA toma la obligación de TODOS los
+ * renglones, también el reservado; en la MISMA transacción y sin mover stock suelta las reservas ACTIVE de sus renglones de vale. Con
+ * R11-7 sólo se soltaban al quedar APPLIED cada línea, y un vale sin líneas (NO_TRACKED_ITEMS) o una línea FAILED las dejaba para siempre.
+ * 🔴 R12-1: sólo los renglones cuyo vale sigue siendo de ESTA venta. El vale que una cancelación de la sesión liberó (vuelve a ISSUED,
+ * sin venta) conserva su reserva y no entra al descuento: el dinero tardío de la venta cancelada no se apropia de él.
  */
-describe('🔴 R11-7: crear el vale de VENTA de otro canal no suelta las reservas', () => {
+describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las reservas de SUS renglones de vale al crearse', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     getInventoryMethodsMock.mockImplementation(async (ids: string[]) => new Map(ids.map(id => [id, 'QUANTITY'])))
     prismaMock.inventoryPosting.findUnique.mockResolvedValue(null as any)
-    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-r11', status: 'PENDING' } as any)
+    prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-r12', status: 'PENDING' } as any)
     prismaMock.areaTicketInventoryReservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    // Por omisión los dos vales siguen ligados a esta venta.
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([{ id: 'line-vale' }, { id: 'line-vale-2' }] as any)
   })
 
   const conVale = [
@@ -189,26 +193,81 @@ describe('🔴 R11-7: crear el vale de VENTA de otro canal no suelta las reserva
     { id: 'oi-vale-2', productId: 'p-jamon', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: 'line-vale-2' },
     { id: 'oi-suelto', productId: 'p-pan', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: null },
   ]
+  const crear = (items = conVale, extra: Record<string, unknown> = {}) =>
+    createSalePostingInTx(prismaMock as any, { venueId: VENUE, orderId: ORDER, items: items as any, staffId: 'staff-1', ...extra })
+  const datosDelVale = () => (prismaMock.inventoryPosting.create.mock.calls[0][0] as any).data
 
-  it('🔴 venta con renglones de vale ⇒ el vale nace con sus 3 líneas y el renglón de vale en la foto, SIN soltar ninguna reserva', async () => {
-    await createSalePostingInTx(prismaMock as any, { venueId: VENUE, orderId: ORDER, items: conVale as any, staffId: 'staff-1' })
+  it('🔴 venta con renglones de vale ⇒ ACTIVE → RELEASED de ESOS renglones al CREAR el vale, sin tocar stock, y el vale nace con sus líneas', async () => {
+    await crear()
 
-    expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
-    const data = (prismaMock.inventoryPosting.create.mock.calls[0][0] as any).data
-    expect(data.lines.create).toHaveLength(3)
-    expect(data.payloadSnapshot.items.map((i: any) => i.areaTicketLineId ?? null)).toEqual(['line-vale', 'line-vale-2', null])
+    expect(prismaMock.areaTicketLine.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: { in: ['line-vale', 'line-vale-2'] }, areaTicket: { venueId: VENUE, orderId: ORDER } } }),
+    )
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith({
+      where: { venueId: VENUE, areaTicketLineId: { in: ['line-vale', 'line-vale-2'] }, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: expect.any(Date) },
+    })
+    // Sólo libera el apartado: ni un movimiento de inventario aquí (el aplicador del vale descuenta las 3 líneas).
+    expect(prismaMock.inventory.update).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+    expect(datosDelVale().lines.create).toHaveLength(3)
+    // R12-2: la foto ya no guarda el renglón de vale (sólo lo usaba el aplicador de R11-7).
+    expect(datosDelVale().payloadSnapshot.items.some((i: any) => 'areaTicketLineId' in i)).toBe(false)
   })
 
-  it('regresión: con `skipReason` (la sesión o el efectivo del POS ya consumieron en su transacción) tampoco', async () => {
-    await createSalePostingInTx(prismaMock as any, {
-      venueId: VENUE,
-      orderId: ORDER,
-      items: conVale as any,
-      staffId: 'staff-1',
-      skipReason: 'AREA_TICKET_TRANSACTIONAL',
-    })
+  it('🔴 Codex r16 #2: el producto dejó de inventariarse antes de liquidar ⇒ vale SKIPPED / NO_TRACKED_ITEMS sin líneas y la reserva se suelta IGUAL', async () => {
+    getInventoryMethodsMock.mockImplementation(async () => new Map())
+
+    await crear()
+
+    expect(datosDelVale()).toMatchObject({ status: 'SKIPPED', skipReason: 'NO_TRACKED_ITEMS' })
+    expect(datosDelVale().lines).toBeUndefined()
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ areaTicketLineId: { in: ['line-vale', 'line-vale-2'] } }) }),
+    )
+  })
+
+  it('🔴 R12-1: un renglón cuyo vale YA NO es de esta venta (la cancelación de la sesión lo liberó) ⇒ ni línea de descuento ni se suelta su reserva', async () => {
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([{ id: 'line-vale-2' }] as any)
+
+    await crear()
+
+    expect(datosDelVale().lines.create.map((l: any) => l.orderItemId)).toEqual(['oi-vale-2', 'oi-suelto'])
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ areaTicketLineId: { in: ['line-vale-2'] } }) }),
+    )
+  })
+
+  it('🔴 R12-1: ningún vale es ya de esta venta ⇒ sólo el suelto se descuenta y no se suelta ninguna reserva', async () => {
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([] as any)
+
+    await crear()
+
+    expect(datosDelVale().lines.create.map((l: any) => l.orderItemId)).toEqual(['oi-suelto'])
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('regresión: una venta sin renglones de vale no consulta vales ni reservas (cero costo en el cobro normal)', async () => {
+    await crear([conVale[2]])
+
+    expect(prismaMock.areaTicketLine.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('regresión: con `skipReason` (la sesión o el efectivo del POS ya consumieron en su transacción) no se suelta nada', async () => {
+    await crear(conVale, { skipReason: 'AREA_TICKET_TRANSACTIONAL' })
 
     expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('regresión: el vale ya existía (reintento) ⇒ se devuelve sin soltar nada', async () => {
+    prismaMock.inventoryPosting.findUnique.mockResolvedValue({ id: 'post-existente', status: 'APPLIED' } as any)
+
+    await crear()
+
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.inventoryPosting.create).not.toHaveBeenCalled()
   })
 })
 
@@ -468,7 +527,12 @@ describe('camino TPV — posting durable sin tocar la deducción probada', () =>
   })
 })
 
-describe('🔴 R11-7: aplicar el vale suelta la reserva del renglón de vale JUNTO con su línea', () => {
+/**
+ * 🔴 R12-2 (revierte R11-7): aplicar el vale ya no toca reservas —las soltó el vale al crearse (R10-2)—. Codex recheck-16 #3: con
+ * modificadores inventariables, una falla entre el descuento y el APPLIED deja la línea FAILED / PARTIAL_EFFECTS_MANUAL_RECONCILE; con
+ * R11-7 la reserva se quedaba ACTIVE para siempre (disponibilidad 0 con una pieza en el anaquel).
+ */
+describe('🔴 R12-2: aplicar el vale de VENTA no toca reservas', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 1 } as any)
@@ -476,6 +540,11 @@ describe('🔴 R11-7: aplicar el vale suelta la reserva del renglón de vale JUN
     prismaMock.inventoryMovement.count.mockResolvedValue(0 as any)
     prismaMock.rawMaterialMovement.count.mockResolvedValue(0 as any)
     prismaMock.areaTicketInventoryReservation.updateMany.mockResolvedValue({ count: 1 } as any)
+    prismaMock.orderItem.findMany.mockResolvedValue([
+      { id: 'oi-vale', productId: 'p-queso', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: 'line-vale' },
+    ] as any)
+  })
+  const vale = (conModificadores: boolean) =>
     prismaMock.inventoryPosting.findUnique.mockImplementation((async (args: any) =>
       args?.select?.updatedAt
         ? { updatedAt: (prismaMock.inventoryPosting.updateMany.mock.calls[0]?.[0] as any)?.data?.updatedAt }
@@ -485,7 +554,7 @@ describe('🔴 R11-7: aplicar el vale suelta la reserva del renglón de vale JUN
             orderId: ORDER,
             sourceId: ORDER,
             status: 'PENDING',
-            payloadSnapshot: { items: [{ id: 'oi-vale', areaTicketLineId: 'line-vale', hasInventoryModifiers: false }] },
+            payloadSnapshot: { items: [{ id: 'oi-vale', hasInventoryModifiers: conModificadores }] },
             lines: [
               {
                 id: 'line-v7',
@@ -497,94 +566,30 @@ describe('🔴 R11-7: aplicar el vale suelta la reserva del renglón de vale JUN
               },
             ],
           }) as any)
-  })
-  const reservasSoltadas = () => (prismaMock.areaTicketInventoryReservation.updateMany.mock.calls as any[]).map(([a]) => a)
 
-  it('🔴 la línea queda APPLIED ⇒ en la MISMA transacción su reserva ACTIVE pasa a RELEASED (sin mover stock)', async () => {
-    prismaMock.orderItem.findMany.mockResolvedValue([
-      { id: 'oi-vale', productId: 'p-queso', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: 'line-vale' },
-    ] as any)
+  it('🔴 la línea del renglón de vale queda APPLIED ⇒ sin transacción extra ni escritura de reservas', async () => {
+    vale(false)
     deductInventoryMock.mockResolvedValue({ inventoryMethod: 'QUANTITY', remainingStock: 1, productName: 'Queso' })
 
     await applySalePosting('post-v7', 'staff-1')
 
-    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
-    expect(reservasSoltadas()).toEqual([
-      {
-        where: { venueId: VENUE, areaTicketLineId: 'line-vale', status: 'ACTIVE' },
-        data: { status: 'RELEASED', releasedAt: expect.any(Date) },
-      },
-    ])
     expect(prismaMock.inventoryPostingLine.update).toHaveBeenCalledWith(
       expect.objectContaining({ where: { id: 'line-v7' }, data: expect.objectContaining({ status: 'APPLIED' }) }),
     )
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
   })
 
-  it('🔴 sin el OrderItem vivo, el renglón de vale sale de la foto del vale', async () => {
-    prismaMock.orderItem.findMany.mockResolvedValue([] as any)
-    deductInventoryMock.mockResolvedValue({ inventoryMethod: 'QUANTITY', remainingStock: 1, productName: 'Queso' })
-
-    await applySalePosting('post-v7', 'staff-1')
-
-    expect(reservasSoltadas()).toEqual([expect.objectContaining({ where: expect.objectContaining({ areaTicketLineId: 'line-vale' }) })])
-  })
-
-  it('🔴 la línea FALLA (sin existencia, receta rota) ⇒ la reserva se queda ACTIVE: sigue compensando lo que no se descontó', async () => {
-    prismaMock.orderItem.findMany.mockResolvedValue([
-      { id: 'oi-vale', productId: 'p-queso', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: 'line-vale' },
-    ] as any)
-    deductInventoryMock.mockRejectedValue(new Error('Los lotes FIFO no cubren la venta'))
-
-    await applySalePosting('post-v7', 'staff-1')
-
-    expect(reservasSoltadas()).toEqual([])
-    expect(prismaMock.inventoryPostingLine.update).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ status: 'FAILED' }) }),
-    )
-  })
-
-  it('🔴 la línea ya descontó pero no alcanzó a quedar APPLIED (crash) ⇒ al recuperarla por sus movimientos también suelta la reserva', async () => {
-    prismaMock.orderItem.findMany.mockResolvedValue([
-      { id: 'oi-vale', productId: 'p-queso', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: 'line-vale' },
-    ] as any)
+  it('🔴 Codex r16 #3: con modificadores, ya descontó y falló antes del APPLIED ⇒ el reintento la deja FAILED / PARTIAL_EFFECTS sin volver a descontar ni tocar reservas', async () => {
+    vale(true)
     prismaMock.inventoryMovement.count.mockResolvedValue(1 as any)
 
     await applySalePosting('post-v7', 'staff-1')
 
     expect(deductInventoryMock).not.toHaveBeenCalled()
-    expect(reservasSoltadas()).toHaveLength(1)
-  })
-
-  it('regresión: una línea sin renglón de vale ⇒ ni transacción extra ni reservas', async () => {
-    prismaMock.orderItem.findMany.mockResolvedValue([
-      { id: 'oi-vale', productId: 'p-queso', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: null },
-    ] as any)
-    prismaMock.inventoryPosting.findUnique.mockImplementation((async (args: any) =>
-      args?.select?.updatedAt
-        ? { updatedAt: (prismaMock.inventoryPosting.updateMany.mock.calls[0]?.[0] as any)?.data?.updatedAt }
-        : {
-            id: 'post-v7',
-            venueId: VENUE,
-            orderId: ORDER,
-            sourceId: ORDER,
-            status: 'PENDING',
-            payloadSnapshot: { items: [{ id: 'oi-vale' }] },
-            lines: [
-              {
-                id: 'line-v7',
-                effectKey: 'oi-vale',
-                orderItemId: 'oi-vale',
-                productId: 'p-queso',
-                status: 'PENDING',
-                expectedQuantityBase: new Prisma.Decimal(1),
-              },
-            ],
-          }) as any)
-    deductInventoryMock.mockResolvedValue({ inventoryMethod: 'QUANTITY', remainingStock: 1, productName: 'Queso' })
-
-    await applySalePosting('post-v7', 'staff-1')
-
-    expect(prismaMock.$transaction).not.toHaveBeenCalled()
-    expect(reservasSoltadas()).toEqual([])
+    expect(prismaMock.inventoryPostingLine.update).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { status: 'FAILED', reason: 'PARTIAL_EFFECTS_MANUAL_RECONCILE' } }),
+    )
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).not.toHaveBeenCalled()
   })
 })

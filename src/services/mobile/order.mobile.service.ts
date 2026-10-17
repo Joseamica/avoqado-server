@@ -2818,6 +2818,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           idempotencyKey: input.idempotencyKey,
           amount: new Prisma.Decimal(amountSolicitadoDecimal),
           method: paymentMethod,
+          // 🔴 R12-1 (Codex recheck-16 #1): la cola sin red ya ocurrió: es dinero capturado y la sesión no le responde 409 por su estado
+          // (cerrada, en conciliación o cancelada). El efectivo en vivo sigue siendo cobro NUEVO.
+          dineroCapturado: input.isOfflineReplay === true,
         })
         // Vales ya tomaron Order bajo su jerarquía session → tickets → Order;
         // para una orden normal este helper toma el primer lock. En ambos casos
