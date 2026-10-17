@@ -10,7 +10,7 @@ import type { OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
-import { getAcceptingStatus, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import { getAcceptingStatus, storeView, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
@@ -86,10 +86,7 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // R13: el restaurante ve si su tienda está abierta, pausada, fuera de horario o sin aparato; 1b: y hasta cuándo, o si la
     // pausa es la del gerente (`manualPause`, que no se va sola).
     const state = await getAcceptingStatus(venueId).catch(() => null)
-    const store = state
-      ? { status: state.status, reason: state.reason, pausedUntil: state.config.pausedUntil, manualPause: state.config.manualPause }
-      : null
-    return res.json({ success: true, data: { ...data, store } })
+    return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
   } catch (e) {
     return next(e)
   }

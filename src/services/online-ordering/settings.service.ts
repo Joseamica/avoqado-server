@@ -61,22 +61,35 @@ export function buildVenueContact(venue: VenueContactFields): VenueContact {
 export type StoreRequirement = 'address' | 'phone' | 'privacyNotice'
 
 /**
- * R18: encender exige domicilio, teléfono y aviso de privacidad PUBLICADO (LFPC 76 Bis y LFPDPPP: el responsable frente al
- * comensal es el restaurante). La plantilla de precarga (`esPlantilla: true`) no es un aviso publicado.
+ * R18: encender exige domicilio (la CALLE: ciudad, estado o CP solos no bastan), teléfono y aviso de privacidad PUBLICADO (LFPC
+ * 76 Bis y LFPDPPP: el responsable frente al comensal es el restaurante). La plantilla de precarga (`esPlantilla: true`) no es un
+ * aviso publicado.
  */
 export async function storeRequirements(venueId: string): Promise<Record<StoreRequirement, boolean>> {
   const [venue, notice] = await Promise.all([
-    prisma.venue.findUnique({ where: { id: venueId }, select: { address: true, city: true, state: true, zipCode: true, phone: true } }),
+    prisma.venue.findUnique({ where: { id: venueId }, select: { address: true, phone: true } }),
     getCurrentPrivacyNotice(venueId),
   ])
-  const contact = buildVenueContact(venue ?? {})
-  return { address: contact.address !== null, phone: contact.phone !== null, privacyNotice: notice.esPlantilla === false }
+  return { address: !!venue?.address?.trim(), phone: !!venue?.phone?.trim(), privacyNotice: notice.esPlantilla === false }
 }
 
 const REQUIREMENT_LABEL: Record<StoreRequirement, string> = {
   address: 'el domicilio del negocio',
   phone: 'el teléfono del negocio',
   privacyNotice: 'el aviso de privacidad publicado',
+}
+/** «a», «a y b», «a, b y c» (el `lib` del tsconfig no trae `Intl.ListFormat`). */
+const enLista = (xs: string[]): string => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}`)
+
+async function assertStoreRequirements(venueId: string): Promise<void> {
+  const met = await storeRequirements(venueId)
+  const missing = (Object.keys(REQUIREMENT_LABEL) as StoreRequirement[]).filter(r => !met[r])
+  if (missing.length === 0) return
+  throw new BadRequestError(
+    `Para encender la tienda ${missing.length === 1 ? 'falta' : 'faltan'} ${enLista(missing.map(r => REQUIREMENT_LABEL[r]))}.`,
+    'STORE_REQUIREMENTS_MISSING',
+    { missing },
+  )
 }
 
 /**
@@ -89,25 +102,15 @@ export async function updateSettings(
   patch: OnlineOrderingSettingsPatch,
   actorStaffId: string | null,
 ): Promise<OnlineOrderingConfig> {
-  // R18: sólo cuando se pide ENCENDER; apagar o cambiar otros campos nunca exige requisitos. Antes de la transacción: si falta
-  // algo no se guarda nada. Son datos del negocio, no de estos ajustes, así que el candado de abajo no los protege de todas formas.
-  if (patch.enabled === true) {
-    const met = await storeRequirements(venueId)
-    const missing = (Object.keys(REQUIREMENT_LABEL) as StoreRequirement[]).filter(r => !met[r])
-    if (missing.length > 0) {
-      throw new BadRequestError(
-        `Para encender la tienda en línea falta ${missing.map(r => REQUIREMENT_LABEL[r]).join(', ')}.`,
-        'STORE_REQUIREMENTS_MISSING',
-        { missing },
-      )
-    }
-  }
-
   const { row, preloadHours } = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-ordering-settings:' + venueId}))`
 
     const existing = await tx.onlineOrderingSettings.findUnique({ where: { venueId } })
     const current = existing ? rowToConfig(existing) : { ...DEFAULT_CONFIG, lastInboxPollAt: null }
+    // R18: sólo al PASAR de apagada (o sin fila) a encendida; apagar, otros campos o repetir `enabled: true` nunca lo exigen. Se
+    // decide sobre el estado leído bajo el candado; los requisitos son datos del negocio (fuera de este candado) y si falta algo
+    // la transacción se deshace sin escribir.
+    if (!current.enabled && patch.enabled === true) await assertStoreRequirements(venueId)
     const merged = { ...current, ...patch }
     if (merged.enabled && !merged.acceptsPayAtPickup) {
       throw new BadRequestError('Activa al menos un medio de pago para recibir pedidos.', 'NO_PAYMENT_MODE')

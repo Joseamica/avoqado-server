@@ -1,6 +1,6 @@
 import type { NextFunction, Request, Response } from 'express'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
-import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
+import { getAcceptingStatus, storeView } from '@/services/online-ordering/presence.service'
 import { getSettings, storeRequirements, updateSettings } from '@/services/online-ordering/settings.service'
 
 const staffOf = (req: Request): string | null => (req as any).authContext?.userId ?? null
@@ -17,7 +17,7 @@ export const getSettingsHandler = async (req: Request, res: Response, next: Next
       data: {
         ...config,
         lastInboxPollAt: lastInboxPollAt ? lastInboxPollAt.toISOString() : null,
-        store: { status: state.status, reason: state.reason, pausedUntil: config.pausedUntil, manualPause: config.manualPause },
+        store: storeView(state),
         requirements,
       },
     })

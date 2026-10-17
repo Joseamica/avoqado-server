@@ -203,12 +203,26 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     expect(r.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: true })
   })
 
-  it('PUT {enabled:true} sin teléfono: 400 STORE_REQUIREMENTS_MISSING con missing:[phone], y no guarda nada', async () => {
+  it('PUT {enabled:true} a una tienda APAGADA sin teléfono: 400 STORE_REQUIREMENTS_MISSING con missing:[phone], y no guarda nada', async () => {
     prismaMock.venue.findUnique.mockResolvedValue({ ...VENUE, phone: null } as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila({ enabled: false }) as any)
     const r = await request(panel).put('/venues/v1/settings').send({ enabled: true })
     expect(r.status).toBe(400)
-    expect(r.body).toMatchObject({ code: 'STORE_REQUIREMENTS_MISSING', details: { missing: ['phone'] } })
+    expect(r.body).toEqual({
+      message: 'Para encender la tienda falta el teléfono del negocio.',
+      code: 'STORE_REQUIREMENTS_MISSING',
+      details: { missing: ['phone'] },
+    })
     expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+  })
+
+  it('ronda 1: PUT {enabled:true, minOrderAmount:60} a una tienda YA encendida, aunque falte un requisito: 200', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue({ ...VENUE, phone: null } as any)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila({ minOrderAmount: new Prisma.Decimal('60') }) as any)
+    const r = await request(panel).put('/venues/v1/settings').send({ enabled: true, minOrderAmount: 60 })
+    expect(r.status).toBe(200)
+    expect(r.body.data.minOrderAmount).toBe(60)
   })
 
   it('PUT {enabled:true} con todo: 200', async () => {
