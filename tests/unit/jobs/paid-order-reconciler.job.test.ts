@@ -356,22 +356,43 @@ describe('paid-order-reconciler', () => {
       expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('reservas'), expect.objectContaining({ orderId: 'x' }))
     })
 
-    it('el modo simulación no cierra nada', async () => {
-      const findSesionesDeVentasCerradas = jest.fn().mockResolvedValue([{ venueId: 'v1', orderId: 'vieja' }])
-      await job({ findSesionesDeVentasCerradas }).runNow({ dryRun: true })
+    it('🔴 R13-4: el modo simulación las LISTA (la misma selección) y no cierra nada ni asienta', async () => {
+      const vieja = {
+        venueId: 'v1',
+        orderId: 'vieja',
+        orderNumber: 'ORD-vieja',
+        paymentStatus: 'REFUNDED',
+        sessionStatus: 'PAYMENT_PENDING',
+      }
+      const findSesionesDeVentasCerradas = jest.fn().mockResolvedValue([vieja])
+      const cerrarSesionDeVentaCerrada = jest.fn().mockResolvedValue(true)
+      const r = await job({ findSesionesDeVentasCerradas, cerrarSesionDeVentaCerrada }).runNow({ dryRun: true })
 
-      expect(findSesionesDeVentasCerradas).not.toHaveBeenCalled()
+      expect(findSesionesDeVentasCerradas).toHaveBeenCalledWith({ limit: 25, since: new Date('2026-08-03T20:00:00.000Z') })
+      expect(r).toMatchObject({ dryRun: true, sessionsToClose: [vieja], sessionsClosed: 0 })
+      expect(cerrarSesionDeVentaCerrada).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
     })
 
-    it('🔴 la selección es UNA consulta acotada: ventas PAID con vale SALE y su sesión sin cerrar ni intento vivo; tope, orden estable y ventana', async () => {
+    it('fuera de la simulación `sessionsToClose` va vacío (lo cerrado se cuenta en `sessionsClosed`)', async () => {
+      const r = await job({
+        findCandidates: jest.fn().mockResolvedValue([]),
+        findSesionesDeVentasCerradas: jest.fn().mockResolvedValue([{ venueId: 'v1', orderId: 'vieja' }]),
+        cerrarSesionDeVentaCerrada: jest.fn().mockResolvedValue(true),
+      }).runNow()
+
+      expect(r).toMatchObject({ sessionsClosed: 1, sessionsToClose: [] })
+    })
+
+    it('🔴 la selección es UNA consulta acotada: ventas PAID o REFUNDED (R13-4) con vale SALE y su sesión sin cerrar ni intento vivo; tope, orden estable y ventana', async () => {
       prismaMock.$queryRaw.mockResolvedValue([])
       await defaults.findSesionesDeVentasCerradas({ limit: 25, since: AHORA })
 
       expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
       const sql = Array.from(prismaMock.$queryRaw.mock.calls[0][0] as unknown as string[]).join('?')
-      expect(sql).toContain(`s.status IN ('MATERIALIZED', 'PARTIALLY_PAID')`)
+      expect(sql).toContain(`s.status IN ('MATERIALIZED', 'PARTIALLY_PAID', 'PAYMENT_PENDING')`)
       expect(sql).toContain('s."activePaymentAttemptId" IS NULL')
-      expect(sql).toContain(`o."paymentStatus" = 'PAID'`)
+      expect(sql).toContain(`o."paymentStatus" IN ('PAID', 'REFUNDED')`)
       expect(sql).toMatch(/EXISTS \(\s*SELECT 1 FROM "InventoryPosting" ip/)
       expect(sql).toContain('ORDER BY s."createdAt" ASC, s.id ASC')
       expect(sql).toContain('LIMIT ?')

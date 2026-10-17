@@ -5,6 +5,7 @@ import { logAction } from '../services/dashboard/activity-log.service'
 import {
   cerrarSesionDeVentaCerradaPorOtroCanal,
   findSesionesDeVentasCerradasPorOtroCanal,
+  type SesionDeVentaCerradaPorOtroCanal,
 } from '../services/mobile/areaTicketV7.mobile.service'
 import { findPaidButOpenOrders, type CandidataPagadaAbierta } from '../services/shared/pagadaPeroAbierta'
 import { findSesionesDeValesAtoradas, reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '../services/tpv/payment.tpv.service'
@@ -104,6 +105,8 @@ export interface ReconcileResult {
   sessionsRecovered: number
   /** R12-3: sesiones de ventas que otro canal cerró antes de R10-2, cerradas con sus reservas sueltas. */
   sessionsClosed: number
+  /** R13-4: en la simulación, las sesiones que la tercera pasada cerraría (la misma selección); fuera de ella, vacío. */
+  sessionsToClose: SesionDeVentaCerradaPorOtroCanal[]
 }
 
 interface Dependencies {
@@ -117,7 +120,7 @@ interface Dependencies {
   /** R11-4: las sesiones de vales atoradas aunque la venta ya esté COMPLETED (acotadas, con espera creciente por fallo). */
   findSesionesAtoradas: (opts: { limit: number; now: Date; since: Date }) => Promise<Array<{ venueId: string; orderId: string }>>
   /** R12-3: ventas cerradas por otro canal con su sesión sin cerrar (acotadas, orden estable). */
-  findSesionesDeVentasCerradas: (opts: { limit: number; since: Date }) => Promise<Array<{ venueId: string; orderId: string }>>
+  findSesionesDeVentasCerradas: (opts: { limit: number; since: Date }) => Promise<SesionDeVentaCerradaPorOtroCanal[]>
   /** R12-3: la cierra bajo la jerarquía de vales y suelta sus reservas; `false` = bajo el candado ya no cumple. */
   cerrarSesionDeVentaCerrada: (venueId: string, orderId: string) => Promise<boolean>
 }
@@ -181,6 +184,7 @@ export class PaidOrderReconcilerJob {
       candidates: [],
       sessionsRecovered: 0,
       sessionsClosed: 0,
+      sessionsToClose: [],
     }
     if (this.running) return { ...empty, skipped: 1 }
     this.running = true
@@ -195,7 +199,11 @@ export class PaidOrderReconcilerJob {
         context: 'paid-order-reconciler.find',
       })
       const result: ReconcileResult = { ...empty, scanned: candidates.length, candidates }
-      if (dryRun) return result
+      if (dryRun) {
+        // R13-4: la simulación también lista las sesiones de la tercera pasada (sólo lee), como lista las candidatas.
+        result.sessionsToClose = await this.buscarSesionesDeVentasCerradas(since)
+        return result
+      }
       for (const c of candidates) {
         try {
           // 🔴 R10-3: una venta de vales cuyo cobro capturado no se pudo finalizar se cierra por SU sesión (consume el inventario y
@@ -311,14 +319,18 @@ export class PaidOrderReconcilerJob {
     }
   }
 
-  /** 🔴 R12-3: la tercera pasada. Un fallo no detiene a las demás; la que ya no cumple bajo el candado no se asienta. */
-  private async cerrarSesionesDeVentasCerradas(since: Date, result: ReconcileResult): Promise<void> {
-    const sesiones = await this.d.retryEntry(() => this.d.findSesionesDeVentasCerradas({ limit: SESSION_BATCH_LIMIT, since }), {
+  private buscarSesionesDeVentasCerradas(since: Date): Promise<SesionDeVentaCerradaPorOtroCanal[]> {
+    return this.d.retryEntry(() => this.d.findSesionesDeVentasCerradas({ limit: SESSION_BATCH_LIMIT, since }), {
       retries: 2,
       initialDelay: 1500,
       shouldRetry: shouldRetryDbConnectionError,
       context: 'paid-order-reconciler.find-closed-sales',
     })
+  }
+
+  /** 🔴 R12-3: la tercera pasada. Un fallo no detiene a las demás; la que ya no cumple bajo el candado no se asienta. */
+  private async cerrarSesionesDeVentasCerradas(since: Date, result: ReconcileResult): Promise<void> {
+    const sesiones = await this.buscarSesionesDeVentasCerradas(since)
     for (const s of sesiones) {
       try {
         if (!(await this.d.cerrarSesionDeVentaCerrada(s.venueId, s.orderId))) continue

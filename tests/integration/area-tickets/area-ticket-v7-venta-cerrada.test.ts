@@ -49,7 +49,7 @@ import {
   issueAreaTicket,
   materializeAreaTicketCheckout,
 } from '@/services/mobile/areaTicketV7.mobile.service'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { payCashOrder, splitOrderItems } from '@/services/mobile/order.mobile.service'
 import { getOperations, getOverview } from '@/services/dashboard/areaTicket.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
@@ -1208,5 +1208,168 @@ describe('🔴 Ronda 12: dinero capturado sobre una sesión cancelada, reservas 
     expect(despues.contador).toBe(antes.contador)
     expect(despues.lista).not.toContain(venta.sessionId)
     expect(despues.contador).toBe(despues.lista.length)
+  })
+
+  /**
+   * 🔴 Ronda 13 (Codex r17 y re-revisión r12), todo real contra Postgres. La misma venta de vales de $100 (vale $60 + suelto $40).
+   *   · R13-1: transferencia (o terminal ajena) registrada EN VIVO desde el POS sobre la sesión CANCELADA ⇒ el dinero ya capturado se
+   *     registra con la regla de nivel venta (antes: 409, sin Payment).
+   *   · R13-2: dividir mueve el renglón del vale de A a B (el vale sigue apuntando a A); cobrar B ⇒ 10 → 9 y su reserva RELEASED
+   *     (antes: el guarda de R12-1 lo dejaba fuera: 10 y ACTIVE).
+   *   · R13-4: venta histórica REFUNDED (o sesión PAYMENT_PENDING sin intento) con la reserva ACTIVE ⇒ la simulación la lista; una pasada
+   *     del barrido cierra la sesión y suelta la reserva, sin mover stock ni crear pagos.
+   */
+  describe('🔴 Ronda 13: el cobro externo en vivo, el renglón dividido y las reservas viejas de ventas devueltas', () => {
+    it('🔴 R13-1: una transferencia registrada EN VIVO desde el POS con la sesión CANCELADA ⇒ queda el Payment y la cuenta se reabre (antes: 409); el vale liberado no se toca y sólo el suelto se descuenta', async () => {
+      const venta = await ventaCancelada()
+
+      const cobro = await payCashOrder(venueId!, venta.orderId, {
+        amount: 10000,
+        tip: 0,
+        staffId,
+        idempotencyKey: `r13-transferencia-${sello}`,
+        method: 'BANK_TRANSFER',
+      })
+
+      expect(cobro.paymentId).toEqual(expect.any(String))
+      const pagos = await prisma.payment.findMany({
+        where: { orderId: venta.orderId, status: 'COMPLETED' },
+        select: { method: true, amount: true },
+      })
+      expect(pagos.map(p => ({ method: p.method, amount: Number(p.amount) }))).toEqual([
+        { method: PaymentMethod.BANK_TRANSFER, amount: 100 },
+      ])
+      const orden = await prisma.order.findUniqueOrThrow({
+        where: { id: venta.orderId },
+        select: { status: true, paymentStatus: true, remainingBalance: true },
+      })
+      expect([orden.status, orden.paymentStatus, Number(orden.remainingBalance)]).toEqual(['COMPLETED', 'PAID', 0])
+      expect(await reaperturas(venta.orderId)).toBe(1)
+      expect(await valesLiberados(venta)).toEqual(LIBERADOS)
+      expect(await stockDe()).toEqual({ vale: 10, suelto: 9 })
+    })
+
+    it('🔴 R13-2: dividir pasa el renglón del vale ($60) de A a B y se cobra B ⇒ el queso baja 10 → 9 y su reserva queda RELEASED (antes: 10 y ACTIVE)', async () => {
+      await reiniciarInventario(10)
+      const venta = await ventaDeVales()
+      const renglonDelVale = await prisma.orderItem.findFirstOrThrow({
+        where: { orderId: venta.orderId, areaTicketLineId: { not: null } },
+        select: { id: true },
+      })
+
+      const division = await splitOrderItems(venueId!, venta.orderId, [renglonDelVale.id], staffId)
+      // El vale sigue apuntando a A: dividir no lo toca.
+      expect(await prisma.areaTicket.findUniqueOrThrow({ where: { id: venta.ticketId }, select: { orderId: true } })).toEqual({
+        orderId: venta.orderId,
+      })
+      await payCashOrder(venueId!, division.created.id, { amount: 6000, tip: 0, staffId, idempotencyKey: `r13-dividida-${sello}` })
+
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: division.created.id }, select: { paymentStatus: true } })).toEqual({
+        paymentStatus: 'PAID',
+      })
+      expect(await stockDe()).toEqual({ vale: 9, suelto: 10 })
+      expect(
+        (
+          await prisma.areaTicketInventoryReservation.findFirstOrThrow({
+            where: { areaTicketId: venta.ticketId },
+            select: { status: true },
+          })
+        ).status,
+      ).toBe('RELEASED')
+    })
+
+    it('🔴 R13-2, orden inverso: dividir, cobrar A por su sesión ($40: consume la reserva del vale, 10 → 9) y luego B ($60) ⇒ el queso se queda en 9 (sin el filtro de lo ya consumido: 10 → 8)', async () => {
+      await reiniciarInventario(10)
+      const venta = await ventaDeVales()
+      const renglonDelVale = await prisma.orderItem.findFirstOrThrow({
+        where: { orderId: venta.orderId, areaTicketLineId: { not: null } },
+        select: { id: true },
+      })
+      const division = await splitOrderItems(venueId!, venta.orderId, [renglonDelVale.id], staffId)
+      const reservaDelVale = async () =>
+        (
+          await prisma.areaTicketInventoryReservation.findFirstOrThrow({
+            where: { areaTicketId: venta.ticketId },
+            select: { status: true },
+          })
+        ).status
+
+      await payCashOrder(venueId!, venta.orderId, { amount: 4000, tip: 0, staffId, idempotencyKey: `r13-inverso-a-${sello}` })
+      expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+      expect(await reservaDelVale()).toBe('CONSUMED')
+      expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+
+      await payCashOrder(venueId!, division.created.id, { amount: 6000, tip: 0, staffId, idempotencyKey: `r13-inverso-b-${sello}` })
+
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: division.created.id }, select: { paymentStatus: true } })).toEqual({
+        paymentStatus: 'PAID',
+      })
+      expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+      expect(await reservaDelVale()).toBe('CONSUMED')
+    })
+
+    it.each([
+      ['venta REFUNDED con la sesión PARTIALLY_PAID', { paymentStatus: 'REFUNDED', sesion: 'PARTIALLY_PAID' }],
+      ['venta PAID con la sesión PAYMENT_PENDING sin intento', { paymentStatus: 'PAID', sesion: 'PAYMENT_PENDING' }],
+    ] as const)(
+      '🔴 R13-4: %s y la reserva ACTIVE (código viejo) ⇒ la simulación la lista; una pasada cierra la sesión y suelta la reserva, sin mover stock ni crear pagos; otra no encuentra nada',
+      async (_caso, historico) => {
+        await reiniciarInventario(10)
+        const venta = await ventaDeVales()
+        // Otro canal la cierra: el pago manual de $100 crea su vale SALE (10 → 9 del queso y del pan).
+        await createManualPayment(venueId!, staffId, {
+          orderId: venta.orderId,
+          amount: '100.00',
+          tipAmount: '0',
+          method: PaymentMethod.CASH,
+          source: PaymentSource.POS,
+        })
+        // Lo que dejaba el código de antes: la reserva del vale ACTIVE, la sesión sin cerrar con su vale reclamado y, en el primer caso,
+        // la venta marcada REFUNDED.
+        await prisma.areaTicketInventoryReservation.updateMany({
+          where: { areaTicketId: venta.ticketId },
+          data: { status: 'ACTIVE', releasedAt: null },
+        })
+        await prisma.areaTicketCheckoutSession.update({
+          where: { id: venta.sessionId },
+          data: { status: historico.sesion, activePaymentAttemptId: null },
+        })
+        await prisma.areaTicket.update({ where: { id: venta.ticketId }, data: { status: AreaTicketStatus.CLAIMED, paidAt: null } })
+        await prisma.order.update({ where: { id: venta.orderId }, data: { paymentStatus: historico.paymentStatus } })
+        const fotoDeLaVenta = async () => ({
+          stock: await stockDe(),
+          pagos: await prisma.payment.count({ where: { orderId: venta.orderId } }),
+          movimientos: await prisma.inventoryMovement.count({ where: { inventoryId: { in: [valeInventoryId, sueltoInventoryId] } } }),
+          vales: await prisma.inventoryPosting.count({ where: { venueId, orderId: venta.orderId } }),
+          venta: await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId }, select: { paymentStatus: true, status: true } }),
+        })
+        const antes = await fotoDeLaVenta()
+        expect(antes.stock).toEqual({ vale: 9, suelto: 9 })
+
+        const simulacion = await barridoDe(venta.orderId, 10).runNow({ dryRun: true })
+        expect(simulacion.sessionsToClose).toEqual([
+          expect.objectContaining({ orderId: venta.orderId, paymentStatus: historico.paymentStatus, sessionStatus: historico.sesion }),
+        ])
+        expect(await estadoDeLaSesion(venta.sessionId)).toBe(historico.sesion)
+
+        const pasada = await barridoDe(venta.orderId, 10).runNow()
+
+        expect(pasada).toMatchObject({ sessionsClosed: 1, failed: 0 })
+        expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
+        expect(
+          (
+            await prisma.areaTicketInventoryReservation.findFirstOrThrow({
+              where: { areaTicketId: venta.ticketId },
+              select: { status: true },
+            })
+          ).status,
+        ).toBe('RELEASED')
+        expect(await fotoDeLaVenta()).toEqual(antes)
+
+        expect(await barridoDe(venta.orderId, 20).runNow()).toMatchObject({ sessionsClosed: 0 })
+        expect((await barridoDe(venta.orderId, 20).runNow({ dryRun: true })).sessionsToClose).toEqual([])
+        expect(await fotoDeLaVenta()).toEqual(antes)
+      },
+    )
   })
 })

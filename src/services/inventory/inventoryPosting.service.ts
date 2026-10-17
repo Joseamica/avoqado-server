@@ -152,10 +152,13 @@ export async function createSalePostingInTx(
     expectedQuantityBase: Prisma.Decimal
   }> = []
 
-  // 🔴 R12-1 (ronda 12; Codex recheck-16 #1): los renglones de vale v7 que siguen siendo de ESTA venta. Cancelar la sesión devuelve sus
-  // vales a ISSUED, sin venta y con su reserva ACTIVE; si después llega dinero ya capturado, la venta cancelada se cobra con la regla de
-  // nivel venta (se reabre), pero esos vales ya no son suyos: ni se descuentan aquí ni se suelta su reserva. Sin renglones de vale (o
-  // con `skipReason`) no hay consulta.
+  // 🔴 R12-1 (ronda 12; Codex recheck-16 #1): los renglones de vale v7 cuyo vale NO liberó la cancelación. Cancelar la sesión devuelve
+  // sus vales a ISSUED, sin venta (`orderId: null`, el único escritor que lo vacía) y con su reserva ACTIVE; si después llega dinero ya
+  // capturado, la venta cancelada se cobra con la regla de nivel venta (se reabre), pero esos vales ya no son suyos: ni se descuentan aquí
+  // ni se suelta su reserva. R13-2 (Codex r17 #4): NO se exige que el vale sea de ESTA venta: dividir o fusionar mueve el renglón con su
+  // `areaTicketLineId` sin tocar `AreaTicket.orderId`, y ese renglón sí se descuenta en la venta que lo cobra (10 → 9). Salvo que su
+  // reserva ya esté CONSUMED: la sesión de la venta de origen ya lo sacó del stock al cobrarse ella primero (sin esto, 10 → 8). Sin
+  // renglones de vale (o con `skipReason`) no hay consulta.
   const lineasDeVale = skipReason
     ? []
     : [...new Set(items.map(i => i.areaTicketLineId).filter((id): id is string => typeof id === 'string' && id.length > 0))]
@@ -163,7 +166,11 @@ export async function createSalePostingInTx(
     lineasDeVale.length > 0
       ? (
           await tx.areaTicketLine.findMany({
-            where: { id: { in: lineasDeVale }, areaTicket: { venueId, orderId } },
+            where: {
+              id: { in: lineasDeVale },
+              areaTicket: { venueId, orderId: { not: null } },
+              reservations: { none: { status: 'CONSUMED' } },
+            },
             select: { id: true },
             take: lineasDeVale.length,
           })

@@ -279,6 +279,47 @@ describe('🔴 R12-1: payCashOrder le dice a la sesión de vales si el dinero ya
 
     expect(lockAreaTicketCheckoutForPayment).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ dineroCapturado }))
   })
+
+  /**
+   * 🔴 R13-1 (Codex r17 #1): venta de vales $100; el operador la cobra con una terminal ajena o por transferencia y lo registra EN VIVO
+   * en el POS justo después de que un gerente canceló la sesión. Ese dinero ya se capturó: la sesión no le responde 409. El medio se
+   * resuelve ANTES de la sesión con la clasificación que ya existe (`esCobroNuevo`), como la TPV (`cobroNuevo !== true`).
+   */
+  const tender = (countsAsPhysicalCash: boolean) => {
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tender-1',
+      baseMethod: countsAsPhysicalCash ? 'CASH' : 'BANK_TRANSFER',
+      active: true,
+      revision: 1,
+      name: countsAsPhysicalCash ? 'Efectivo dólares' : 'Transferencia',
+    } as any)
+    prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue({
+      revision: 1,
+      name: countsAsPhysicalCash ? 'Efectivo dólares' : 'Transferencia',
+      countsAsPhysicalCash,
+      captureTip: true,
+      satFormaPago: countsAsPhysicalCash ? '01' : '03',
+      commissionPercent: null,
+    } as any)
+    return { tenderTypeId: 'tender-1', tenderRevision: 1 }
+  }
+  it.each([
+    ['🔴 R13-1: una transferencia registrada en vivo (método fijo) ⇒ dinero capturado', () => ({ method: 'BANK_TRANSFER' as const }), true],
+    ['🔴 R13-1: una terminal ajena registrada en vivo (método fijo) ⇒ dinero capturado', () => ({ method: 'CREDIT_CARD' as const }), true],
+    ['🔴 R13-1: un tipo de pago del catálogo que NO entra al cajón, en vivo ⇒ dinero capturado', () => tender(false), true],
+    ['regresión R13-1: un tipo de pago del catálogo que SÍ entra al cajón, en vivo ⇒ cobro nuevo', () => tender(true), false],
+  ])('%s', async (_caso, medio, dineroCapturado) => {
+    await payCashOrder('venue-1', 'order-area', {
+      amount: 5050,
+      tip: 0,
+      staffId: 'staff-1',
+      idempotencyKey: 'area-payment-r13',
+      isOfflineReplay: false,
+      ...medio(),
+    })
+
+    expect(lockAreaTicketCheckoutForPayment).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ dineroCapturado }))
+  })
 })
 
 describe('deductTrackedInventoryForFreeCart — issues de inventario', () => {

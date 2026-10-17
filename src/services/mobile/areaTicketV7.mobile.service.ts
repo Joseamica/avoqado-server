@@ -3452,22 +3452,30 @@ export async function cerrarSesionDeValesAlCerrarLaVenta(
  * $50 ⇒ venta PAID, vale SALE APPLIED, stock 10 → 9) se quedaron con la reserva del vale ACTIVE y la sesión PARTIALLY_PAID:
  * disponibilidad 8. Nada lo disparaba (el rescate de R11-4 sólo mira sesiones en conciliación o pendientes).
  *
- * La selección del barrido: venta PAID (ni cancelada ni borrada) con su vale SALE y su sesión sin cerrar (MATERIALIZED o
- * PARTIALLY_PAID, sin intento vivo). Una consulta, tope de quien llama, orden estable `(creación de la sesión, id)` y la ventana `since`
- * del barrido (el rezago más viejo lo alcanza el script a mano con su propio `since`). Sin reintentos: la que se cierra sale del
- * predicado, y la recuperación revisa EXACTAMENTE lo mismo bajo sus candados.
+ * La selección del barrido: venta PAID o REFUNDED (ni cancelada ni borrada) con su vale SALE y su sesión sin cerrar (MATERIALIZED,
+ * PARTIALLY_PAID o PAYMENT_PENDING, sin intento vivo: lo que el helper de R11-8 cierra; R13-4 agrega REFUNDED y PAYMENT_PENDING). Una
+ * consulta, tope de quien llama, orden estable `(creación de la sesión, id)` y la ventana `since` del barrido (el rezago más viejo lo
+ * alcanza el script a mano con su propio `since`). Sin reintentos: la que se cierra sale del predicado, y la recuperación revisa
+ * EXACTAMENTE lo mismo bajo sus candados. Folio y estados van para la simulación del script, que los lista.
  */
+export type SesionDeVentaCerradaPorOtroCanal = {
+  venueId: string
+  orderId: string
+  orderNumber: string
+  paymentStatus: string
+  sessionStatus: string
+}
 export async function findSesionesDeVentasCerradasPorOtroCanal(
   db: Pick<typeof prisma, '$queryRaw'>,
   opts: { limit: number; since: Date },
-): Promise<Array<{ venueId: string; orderId: string }>> {
-  return db.$queryRaw<Array<{ venueId: string; orderId: string }>>`
-    SELECT s."venueId", s."orderId"
+): Promise<SesionDeVentaCerradaPorOtroCanal[]> {
+  return db.$queryRaw<SesionDeVentaCerradaPorOtroCanal[]>`
+    SELECT s."venueId", s."orderId", o."orderNumber", o."paymentStatus"::text AS "paymentStatus", s.status::text AS "sessionStatus"
     FROM "AreaTicketCheckoutSession" s
     JOIN "Order" o ON o.id = s."orderId" AND o."venueId" = s."venueId"
-    WHERE s.status IN ('MATERIALIZED', 'PARTIALLY_PAID')
+    WHERE s.status IN ('MATERIALIZED', 'PARTIALLY_PAID', 'PAYMENT_PENDING')
       AND s."activePaymentAttemptId" IS NULL
-      AND o."paymentStatus" = 'PAID'
+      AND o."paymentStatus" IN ('PAID', 'REFUNDED')
       AND o.status NOT IN ('CANCELLED', 'DELETED')
       AND EXISTS (
         SELECT 1 FROM "InventoryPosting" ip
@@ -3481,17 +3489,26 @@ export async function findSesionesDeVentasCerradasPorOtroCanal(
 /**
  * 🔴 R12-3: bajo la jerarquía de vales (sesión → vales → venta), la venta sigue cerrada con el vale SALE de otro canal y la sesión
  * sin cerrar ⇒ la sesión cierra con el MISMO helper de R11-8 y sus reservas ACTIVE se sueltan sin mover stock (el vale SALE ya tomó la
- * obligación). Sin pagos, sin descuentos, sin lealtad, sin comanda. Devuelve si la cerró.
+ * obligación). Sin pagos, sin descuentos, sin lealtad, sin comanda. Devuelve si la cerró. R13-4: también la venta ya REFUNDED y la
+ * sesión PAYMENT_PENDING sin intento (las dos conservaban la reserva fantasma).
  */
 export async function cerrarSesionDeVentaCerradaPorOtroCanal(venueId: string, orderId: string): Promise<boolean> {
   return prisma.$transaction(async tx => {
     const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
     if (!vales || vales.session.activePaymentAttemptId) return false
-    if (!checkoutStatusIn(vales.session.status, [AreaTicketCheckoutStatus.MATERIALIZED, AreaTicketCheckoutStatus.PARTIALLY_PAID])) {
+    if (
+      !checkoutStatusIn(vales.session.status, [
+        AreaTicketCheckoutStatus.MATERIALIZED,
+        AreaTicketCheckoutStatus.PARTIALLY_PAID,
+        AreaTicketCheckoutStatus.PAYMENT_PENDING,
+      ])
+    ) {
       return false
     }
     const venta = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { paymentStatus: true, status: true } })
-    if (venta?.paymentStatus !== 'PAID' || claseDeEstado(venta.status) === 'CANCELADA') return false
+    if ((venta?.paymentStatus !== 'PAID' && venta?.paymentStatus !== 'REFUNDED') || claseDeEstado(venta.status) === 'CANCELADA') {
+      return false
+    }
     const valeDeVenta = await tx.inventoryPosting.findUnique({
       where: { venueId_sourceKind_sourceId_effectKind: { venueId, sourceKind: 'ORDER', sourceId: orderId, effectKind: 'SALE' } },
       select: { id: true },

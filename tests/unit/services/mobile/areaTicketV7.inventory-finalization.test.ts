@@ -1347,9 +1347,36 @@ describe('🔴 R12: dinero capturado sobre una sesión cancelada y reservas viej
       expect(prismaMock.order.update).not.toHaveBeenCalled()
     })
 
+    /**
+     * 🔴 R13-4 (re-revisión r12): una venta de vales ya REFUNDED, o una sesión PAYMENT_PENDING sin intento, conservaban la reserva
+     * fantasma. El helper de R11-8 ya cierra la PAYMENT_PENDING sin intento; la venta devuelta sigue siendo una venta cerrada con su vale
+     * SALE. Mismo cierre: sin pagos, sin lealtad, sin comanda, sin mover stock.
+     */
+    it.each([
+      ['la venta ya está REFUNDED (sesión PARTIALLY_PAID)', { venta: 'REFUNDED' }],
+      ['la sesión está PAYMENT_PENDING sin intento (venta PAID)', { sesion: AreaTicketCheckoutStatus.PAYMENT_PENDING }],
+      ['venta REFUNDED y sesión PAYMENT_PENDING sin intento', { venta: 'REFUNDED', sesion: AreaTicketCheckoutStatus.PAYMENT_PENDING }],
+    ] as const)('🔴 R13-4: %s ⇒ la sesión cierra y sus reservas ACTIVE se sueltan, sin stock, pagos ni efectos', async (_caso, o) => {
+      preparar(o as any)
+
+      await expect(cerrarSesionDeVentaCerradaPorOtroCanal(venueId, orderId)).resolves.toBe(true)
+      expect(prismaMock.areaTicketCheckoutSession.update).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'PAID', activePaymentAttemptId: null }) }),
+      )
+      expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith({
+        where: { venueId, areaTicket: { checkoutSessionId: sessionId }, status: 'ACTIVE' },
+        data: { status: 'RELEASED', releasedAt: expect.any(Date) },
+      })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect(prismaMock.inventoryMovement.create).not.toHaveBeenCalled()
+      expect(prismaMock.inventoryPosting.create).not.toHaveBeenCalled()
+      expect(prismaMock.order.update).not.toHaveBeenCalled()
+    })
+
     it.each([
       ['sin vale SALE (la cerró el barrido de estado: la retoma su propio camino)', { vale: false }],
       ['la venta no está cobrada', { venta: 'PARTIAL' }],
+      ['la sesión está PAYMENT_PENDING CON su intento vivo', { sesion: AreaTicketCheckoutStatus.PAYMENT_PENDING, activo: 'intento-vivo' }],
       ['la sesión está en conciliación', { sesion: AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED, activo: 'intento-viejo' }],
       ['la sesión ya está PAID', { sesion: AreaTicketCheckoutStatus.PAID }],
       ['la sesión está cancelada', { sesion: AreaTicketCheckoutStatus.CANCELLED }],

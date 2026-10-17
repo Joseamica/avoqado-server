@@ -2809,6 +2809,40 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
     try {
       paymentResult = await prisma.$transaction(async tx => {
+        // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
+        // el dinero ya se capturó. Resolver la semántica ANTES de decidir si un exceso es cambio. Una
+        // tarjeta/transferencia externa ya capturada no produjo efectivo para
+        // devolver: recortarla escondería dinero real y rompería conciliación.
+        // (Tarea 6a: sube antes del saldo —sólo lee— porque la admisión de una cancelada
+        // también depende de si es efectivo de cajón.)
+        const resolvedTender =
+          input.tenderTypeId != null && input.tenderRevision != null
+            ? await resolveTenderForCharge(
+                venueId,
+                input.tenderTypeId,
+                input.tenderRevision,
+                tx,
+                input.isOfflineReplay ? 'replay' : 'online',
+              )
+            : null
+        tenderState.resolved = resolvedTender
+        const effectiveMethod = resolvedTender?.method ?? paymentMethod
+        const fundsFlow =
+          resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
+        const countsAsDrawerCash = paymentCountsAsDrawerCash({
+          method: effectiveMethod,
+          fundsFlow,
+          tenderTypeId: resolvedTender?.tenderTypeId ?? null,
+          tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
+        })
+
+        // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
+        // puede no cobrar—: sobre una cancelada ⇒ 400 con el texto del founder. Lo ya capturado (la cola; en vivo, una tarjeta ajena
+        // o una transferencia ya hechas) nunca se rechaza por la cancelación: reabre una cuenta de Avoqado (una externa, sólo cuando
+        // hoy salía de CANCELADA; Codex r13 #1). El importe, como hoy (el recorte y el «ya está pagada» son defectos previos del plan
+        // de registro de cobros). Vales: su sesión decide.
+        const cobroNuevo = esCobroNuevo({ enVivo: !input.isOfflineReplay, efectivoDeCajon: countsAsDrawerCash })
+
         // Vales v7 bloquean sesión → vales → orden ANTES del flujo monetario.
         // Para una orden normal devuelve null y el comportamiento queda idéntico.
         const areaTicketPayment = await import('./areaTicketV7.mobile.service')
@@ -2818,9 +2852,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           idempotencyKey: input.idempotencyKey,
           amount: new Prisma.Decimal(amountSolicitadoDecimal),
           method: paymentMethod,
-          // 🔴 R12-1 (Codex recheck-16 #1): la cola sin red ya ocurrió: es dinero capturado y la sesión no le responde 409 por su estado
-          // (cerrada, en conciliación o cancelada). El efectivo en vivo sigue siendo cobro NUEVO.
-          dineroCapturado: input.isOfflineReplay === true,
+          // 🔴 R12-1 / R13-1: lo ya capturado —la cola sin red, o en vivo una terminal ajena o una transferencia— no recibe 409 de la
+          // sesión por su estado (cerrada, en conciliación o cancelada), como en la TPV (`cobroNuevo !== true`). El efectivo de cajón
+          // en vivo sigue siendo cobro NUEVO.
+          dineroCapturado: !cobroNuevo,
         })
         // Vales ya tomaron Order bajo su jerarquía session → tickets → Order;
         // para una orden normal este helper toma el primer lock. En ambos casos
@@ -2897,39 +2932,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // propina: la propina va aparte y no se toca) y el resto regresa en la
         // respuesta como `changeCents`. El pago manual del dashboard rechaza el
         // exceso con 400; aquí no se bloquea porque el dinero sí entró al cajón.
-        //
-        // Resolver la semántica ANTES de decidir si un exceso es cambio. Una
-        // tarjeta/transferencia externa ya capturada no produjo efectivo para
-        // devolver: recortarla escondería dinero real y rompería conciliación.
-        // (Tarea 6a: sube antes del saldo —sólo lee— porque la admisión de una cancelada
-        // también depende de si es efectivo de cajón.)
-        const resolvedTender =
-          input.tenderTypeId != null && input.tenderRevision != null
-            ? await resolveTenderForCharge(
-                venueId,
-                input.tenderTypeId,
-                input.tenderRevision,
-                tx,
-                input.isOfflineReplay ? 'replay' : 'online',
-              )
-            : null
-        tenderState.resolved = resolvedTender
-        const effectiveMethod = resolvedTender?.method ?? paymentMethod
-        const fundsFlow =
-          resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
-        const countsAsDrawerCash = paymentCountsAsDrawerCash({
-          method: effectiveMethod,
-          fundsFlow,
-          tenderTypeId: resolvedTender?.tenderTypeId ?? null,
-          tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
-        })
-
-        // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
-        // puede no cobrar—: sobre una cancelada ⇒ 400 con el texto del founder. Lo ya capturado (la cola; en vivo, una tarjeta ajena
-        // o una transferencia ya hechas) nunca se rechaza por la cancelación: reabre una cuenta de Avoqado (una externa, sólo cuando
-        // hoy salía de CANCELADA; Codex r13 #1). El importe, como hoy (el recorte y el «ya está pagada» son defectos previos del plan
-        // de registro de cobros). Vales: su sesión decide.
-        const cobroNuevo = esCobroNuevo({ enVivo: !input.isOfflineReplay, efectivoDeCajon: countsAsDrawerCash })
+        // (El medio y `cobroNuevo` se resuelven arriba, antes de la sesión de vales: R13-1.)
         if (cobroNuevo && claseDeEstado(fresh.status) === 'CANCELADA') {
           // Codex r13 #2: antes del rechazo, la identidad del cobro otra vez, BAJO EL CANDADO. Si su llave ya tiene un Payment —el
           // ganador de una carrera que la consulta rápida de arriba no vio—, sale por la red de la carrera (P2002, abajo).

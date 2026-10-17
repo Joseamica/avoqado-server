@@ -174,8 +174,8 @@ describe('createSalePostingInTx', () => {
  * otro canal cierra la venta (pago manual, liquidar, saldo del cliente, cripto). Su vale de VENTA toma la obligación de TODOS los
  * renglones, también el reservado; en la MISMA transacción y sin mover stock suelta las reservas ACTIVE de sus renglones de vale. Con
  * R11-7 sólo se soltaban al quedar APPLIED cada línea, y un vale sin líneas (NO_TRACKED_ITEMS) o una línea FAILED las dejaba para siempre.
- * 🔴 R12-1: sólo los renglones cuyo vale sigue siendo de ESTA venta. El vale que una cancelación de la sesión liberó (vuelve a ISSUED,
- * sin venta) conserva su reserva y no entra al descuento: el dinero tardío de la venta cancelada no se apropia de él.
+ * 🔴 R12-1 (R13-2): sólo los renglones cuyo vale NO liberó una cancelación. El vale que una cancelación de la sesión liberó (vuelve a
+ * ISSUED, sin venta) conserva su reserva y no entra al descuento: el dinero tardío de la venta cancelada no se apropia de él.
  */
 describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las reservas de SUS renglones de vale al crearse', () => {
   beforeEach(() => {
@@ -201,7 +201,7 @@ describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las 
     await crear()
 
     expect(prismaMock.areaTicketLine.findMany).toHaveBeenCalledWith(
-      expect.objectContaining({ where: { id: { in: ['line-vale', 'line-vale-2'] }, areaTicket: { venueId: VENUE, orderId: ORDER } } }),
+      expect.objectContaining({ where: expect.objectContaining({ id: { in: ['line-vale', 'line-vale-2'] } }) }),
     )
     expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith({
@@ -228,7 +228,7 @@ describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las 
     )
   })
 
-  it('🔴 R12-1: un renglón cuyo vale YA NO es de esta venta (la cancelación de la sesión lo liberó) ⇒ ni línea de descuento ni se suelta su reserva', async () => {
+  it('🔴 R12-1: un renglón cuyo vale liberó la cancelación de la sesión (sin venta) ⇒ ni línea de descuento ni se suelta su reserva', async () => {
     prismaMock.areaTicketLine.findMany.mockResolvedValue([{ id: 'line-vale-2' }] as any)
 
     await crear()
@@ -239,7 +239,27 @@ describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las 
     )
   })
 
-  it('🔴 R12-1: ningún vale es ya de esta venta ⇒ sólo el suelto se descuenta y no se suelta ninguna reserva', async () => {
+  /**
+   * 🔴 R13-2 (Codex r17 #4): cuenta A de $100 (vale de $60 + suelto de $40); dividir mueve el renglón de $60 a B con su `areaTicketLineId`,
+   * pero el vale sigue apuntando a A. Al cobrar B ese renglón SÍ se descuenta (10 → 9) y su reserva se suelta: el criterio es «el vale NO
+   * lo liberó la cancelación» (`orderId` no nulo; cancelar es el único escritor que lo vacía), no «el vale es de ESTA venta». Y si A se
+   * cobró antes por su sesión, la reserva de ese vale ya está CONSUMED (10 → 9): B no lo vuelve a descontar (antes del filtro, 10 → 8).
+   */
+  it('🔴 R13-2: el renglón de vale que dividir o fusionar movió a esta venta (su vale sigue en la de origen) cuenta, salvo que su reserva ya se haya consumido: el criterio es «vale no liberado ni ya consumido»', async () => {
+    await crear()
+
+    expect(prismaMock.areaTicketLine.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: {
+          id: { in: ['line-vale', 'line-vale-2'] },
+          areaTicket: { venueId: VENUE, orderId: { not: null } },
+          reservations: { none: { status: 'CONSUMED' } },
+        },
+      }),
+    )
+  })
+
+  it('🔴 R12-1: la cancelación liberó todos sus vales ⇒ sólo el suelto se descuenta y no se suelta ninguna reserva', async () => {
     prismaMock.areaTicketLine.findMany.mockResolvedValue([] as any)
 
     await crear()

@@ -1244,37 +1244,17 @@ describe('🔴 R10: el registrador de la terminal y la sesión de vales', () => 
     })
 
     /**
-     * 🔴 R12-5 (re-revisión r11): el barrido rescata hasta 30 días atrás. La cocina de una venta de hace días ya no se prepara: el
-     * mismo umbral de las comandas viejas de la pantalla (`KITCHEN_STALENESS_MS`, 12 h) acota la marca y el armado del rescate.
-     * Inventario y lealtad NO se acotan.
+     * 🔴 R13-3 (Codex r17 #5; revierte R12-5): una cuenta de vales de $60 lleva 13 h abierta y un gerente fusiona en ella un pedido
+     * reciente de $40. Se capturan los $100, falla la finalización y el rescate llega minutos después. La edad de la CUENTA no decide su
+     * cocina: el rescate marca y arma como siempre, y el planificador del KDS descarta artículo por artículo los de más de 12 h
+     * (`kitchenTicketPlanning.test.ts`, «R13-3»).
      */
-    it('🔴 R12-5: rescate de una venta de hace 3 días ⇒ ni marca de cocina ni comanda; lealtad y referido sí', async () => {
+    it('🔴 R13-3: rescate de una cuenta de hace 13 h ⇒ marca y comanda UNA vez (el planificador filtra los artículos viejos)', async () => {
       ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
         id: 'session-1',
         status: 'RECONCILIATION_REQUIRED',
         activePaymentAttemptId: 'attempt-1',
-        order: { createdAt: new Date(Date.now() - 3 * 24 * 60 * 60 * 1000) },
-      })
-      finalizeAreaTicketPaymentMock.mockResolvedValue({
-        areaTicketOrder: true,
-        sessionId: 'session-1',
-        fullyPaid: true,
-        ventaYaCerrada: true,
-        primerSaldado: true,
-      })
-
-      await reenviar()
-
-      expect(finalizeAreaTicketPaymentMock).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ marcarCocina: false }))
-      expect(efectosDeSaldar()).toEqual({ lealtad: 1, referido: 1, comanda: 0 })
-    })
-
-    it('regresión R12-5: rescate de una venta de hace 1 h (dentro de las 12 h) ⇒ marca y comanda UNA vez', async () => {
-      ;(prisma.areaTicketCheckoutSession.findFirst as jest.Mock).mockResolvedValue({
-        id: 'session-1',
-        status: 'RECONCILIATION_REQUIRED',
-        activePaymentAttemptId: 'attempt-1',
-        order: { createdAt: new Date(Date.now() - 60 * 60 * 1000) },
+        order: { createdAt: new Date(Date.now() - 13 * 60 * 60 * 1000) },
       })
       finalizeAreaTicketPaymentMock.mockResolvedValue({
         areaTicketOrder: true,
