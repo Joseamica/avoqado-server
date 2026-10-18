@@ -252,6 +252,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   raw_material_presentations: 'read',
   reassign_sim_promoter: 'write',
   reassign_sim_supervisor: 'write',
+  collect_sims_from_supervisor: 'write',
   receipt_layout: 'read',
   service_courses: 'read',
   receive_inter_venue_transfer: 'write',
