@@ -606,9 +606,10 @@ async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | {
  * | cualquier PI no pagado                     | no              | se anula ⇒ «no existe» ⇒ intento nuevo (`lugarDescartado`) |
  * | la relectura ya dice `incomplete_expired`  | da igual        | descartada sin anular ⇒ intento nuevo                     |
  *
- * «Mismo intento» = la misma tarjeta (cada tarjeta tecleada es un `pm_` nuevo), el mismo plan, la misma campaña (o ninguna)
- * y pagar hoy: es el pedido que el propio navegador manda tras el reto. Cualquier lectura que falle ⇒ 503 con el lease
- * VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch` de lecturas.
+ * «Mismo intento» = la misma tarjeta (cada tarjeta tecleada es un `pm_` nuevo), el mismo plan, la misma campaña y versión de
+ * la oferta (o ninguna) y pagar hoy: es el pedido que el propio navegador manda tras el reto. Cualquier lectura que falle
+ * ⇒ 503 con el lease VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch`
+ * de lecturas. Cada 503 de «no sé» deja un `logger.warn` con organización, suscripción y estado (nunca el secreto).
  */
 async function resolverIntentoIncompleto(args: {
   sub: Stripe.Subscription
@@ -636,7 +637,14 @@ async function resolverIntentoIncompleto(args: {
   // Expiró entre las dos lecturas (las 23 h, o la anuló otra petición): ya está descartada, sin anular nada (Codex r1 #3).
   if (sub.status === 'incomplete_expired') return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
   if (esCobrada(sub.status)) return { recuperada: sub, lugarDescartado: null }
-  if (sub.status !== 'incomplete') throw pendiente(`la suscripción anterior quedó en estado ${sub.status}`)
+  if (sub.status !== 'incomplete') {
+    logger.warn('activate-plan: la relectura del intento incompleto dio un estado que no se sabe resolver', {
+      organizationId,
+      subscriptionId: sub.id,
+      status: sub.status,
+    })
+    throw pendiente(`la suscripción anterior quedó en estado ${sub.status}`)
+  }
 
   const factura = typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null
   const pagos = await leer(() => {
@@ -660,19 +668,36 @@ async function resolverIntentoIncompleto(args: {
     idDe(sub.default_payment_method) === input.paymentMethodId &&
     sub.metadata?.featureCode === (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO') &&
     (sub.metadata?.launchCampaignId ?? '') === (campaign?.id ?? '') &&
+    // 🔴 Ruling 8: también la VERSIÓN de la oferta. Si la campaña cambió a media autorización, reanudar cobraría lo de la
+    // versión vieja y el PASO 7 respondería OFFER_CHANGED (cobrado y sin acceso); así se anula y se estrena intento, y el
+    // avance libera el lugar de la versión vieja con la misma regla.
+    (sub.metadata?.launchOfferVersion ?? '') === (campaign ? String(campaign.offerVersion) : '') &&
     input.payNow
 
   if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
     // REANUDAR: volver a confirmar un PI que espera al banco se acepta (medido), así sirve también tras una recarga.
     const secreto = factura?.confirmation_secret?.client_secret
-    if (!secreto) throw pendiente('la factura del intento no trae su secreto de confirmación')
+    if (!secreto) {
+      logger.warn('activate-plan: el banco espera la autorización pero la factura no trae su secreto', {
+        organizationId,
+        subscriptionId: sub.id,
+        status: pi?.status,
+      })
+      throw pendiente('la factura del intento no trae su secreto de confirmación')
+    }
     await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, lease)
     logger.info('activate-plan: el banco sigue esperando que se autorice el primer cobro', { organizationId, subscriptionId: sub.id })
     throw requiereAutenticacion(secreto)
   }
   // Mismo intento con un PI en otro estado (o sin PI): no se sabe qué pasó; no se anula ni se cobra a ciegas.
-  if (mismoIntento && pi?.status !== 'requires_payment_method')
+  if (mismoIntento && pi?.status !== 'requires_payment_method') {
+    logger.warn('activate-plan: el pago del mismo intento quedó en un estado que no se sabe resolver', {
+      organizationId,
+      subscriptionId: sub.id,
+      status: pi?.status ?? null,
+    })
     throw pendiente(`el pago del intento quedó en ${pi?.status ?? 'sin estado'}`)
+  }
 
   const anulada = await anularIntento(sub)
   if (anulada === 'INCIERTO') throw pendiente('no se pudo descartar el intento anterior')
