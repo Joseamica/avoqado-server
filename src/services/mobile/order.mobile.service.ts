@@ -58,7 +58,16 @@ import {
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
-import { claseDeEstado, computeOrderBalance, impuestoQueSeCobraAparte, summarizeRefunds, type RefundState } from '../shared/orderBalance'
+import {
+  claseDeEstado,
+  computeOrderBalance,
+  esVentaCerrada,
+  estadoDeCobroAlRecibirDinero,
+  impuestoQueSeCobraAparte,
+  summarizeRefunds,
+  type RefundState,
+} from '../shared/orderBalance'
+import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
@@ -2614,9 +2623,9 @@ async function readOrderBalanceSnapshot(venueId: string, orderId: string): Promi
   const remaining = fresh.remainingBalance != null ? Number(fresh.remainingBalance) : orderTotal - totalPaid
   return {
     remainingBalanceCents: pesosToCents(Math.max(0, remaining)),
-    // Sólo PAID es PAID. PENDING no debería existir aquí (hay un pago), pero si
-    // apareciera, "falta dinero" es la lectura honesta y segura.
-    orderPaymentStatus: fresh.paymentStatus === 'PAID' ? 'PAID' : 'PARTIAL',
+    // Una venta CERRADA (PAID o REFUNDED: `esVentaCerrada`) es PAID, como responde el primer envío de un reenvío sobre ella
+    // (S1). PENDING no debería existir aquí (hay un pago), pero si apareciera, "falta dinero" es la lectura honesta y segura.
+    orderPaymentStatus: esVentaCerrada(fresh.paymentStatus) ? 'PAID' : 'PARTIAL',
     orderTotalCents: pesosToCents(orderTotal),
     totalPaidCents: pesosToCents(totalPaid),
   }
@@ -2810,7 +2819,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // Un 409 al perdedor rompería el split legítimo: dos meseros cobrando mitad y
   // mitad a la vez. Al reintentar, el perdedor RELEE el estado ya commiteado por el
   // ganador y recalcula sobre él:
-  //   · si la orden quedó PAID  → "Order is already paid" (UN solo Payment) ✅
+  //   · si la orden quedó PAID  → "Order is already paid" (UN solo Payment) ✅ — al efectivo NUEVO; lo ya
+  //     capturado (la cola sin red) se registra sobre la venta cerrada y la deja cerrada (S1)
   //   · si quedó PARTIAL        → cobra el restante real, no el que leyó primero ✅
   // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
@@ -2819,7 +2829,12 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         /** Caja OPEN al cobrar (leída en la misma transacción); el movimiento de efectivo va a ésa o a ninguna. */
         cajaAlCobrarId: string | null
         newPayment: any
+        /** Este cobro corre los efectos de saldar (inventario, lealtad, comanda, referido, mesa): la saldó, o recupera el saldado de un
+         *  vale. */
         isFullyPaid: boolean
+        /** S1: la venta ya estaba cerrada (PAID/REFUNDED) y recibió dinero ya capturado; se conservó cerrada
+         *  (`estadoDeCobroAlRecibirDinero`). */
+        ventaCerrada: boolean
         areaTicketOrder: boolean
         areaTicketSessionId?: string
         tableId?: string | null
@@ -2867,8 +2882,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
         // puede no cobrar—: sobre una cancelada ⇒ 400 con el texto del founder. Lo ya capturado (la cola; en vivo, una tarjeta ajena
         // o una transferencia ya hechas) nunca se rechaza por la cancelación: reabre una cuenta de Avoqado (una externa, sólo cuando
-        // hoy salía de CANCELADA; Codex r13 #1). El importe, como hoy (el recorte y el «ya está pagada» son defectos previos del plan
-        // de registro de cobros). Vales: su sesión decide.
+        // hoy salía de CANCELADA; Codex r13 #1). Lo ya capturado tampoco se recorta al saldo de hoy (S2) ni se rechaza sobre una venta
+        // ya cerrada (S1). Vales: su sesión decide.
         const cobroNuevo = esCobroNuevo({ enVivo: !input.isOfflineReplay, efectivoDeCajon: countsAsDrawerCash })
 
         // Vales v7 bloquean sesión → vales → orden ANTES del flujo monetario.
@@ -2918,8 +2933,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           throw new NotFoundError('Order not found')
         }
 
-        // 2️⃣ VALIDACIÓN DENTRO DE LA TRANSACCIÓN (era el bug: estaba fuera).
-        if (fresh.paymentStatus === 'PAID') {
+        // 2️⃣ VALIDACIÓN DENTRO DE LA TRANSACCIÓN (era el bug: estaba fuera). Sobre una venta CERRADA (PAID o REFUNDED) sólo se
+        // rechaza el cobro NUEVO —la persona todavía tiene el dinero en la mano— o un $0. 🔴 S1: lo ya capturado (la cola sin red, una
+        // tarjeta ajena ya aprobada) se registra: rechazarlo dejaba $200 en el cajón y $100 en la base. La venta se queda cerrada.
+        if (esVentaCerrada(fresh.paymentStatus) && (cobroNuevo || amount + tip === 0)) {
           throw new BadRequestError('Order is already paid')
         }
 
@@ -3007,7 +3024,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           )
         }
         const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
-        const cambioCents = countsAsDrawerCash ? Math.max(0, amount - saldoCents) : 0
+        // 🔴 S2: sólo el cobro NUEVO (efectivo de cajón en vivo) se recorta al saldo de HOY. Lo ya capturado —la cola sin red manda lo
+        // que el aparato APLICÓ, sin el cambio (que se quedó en el aparato)— se registra tal cual: recortarlo contra un saldo que otra
+        // caja movió después registraba $50 de $100 recibidos y le inventaba $50 de «cambio» que nadie entregó.
+        const cambioCents = cobroNuevo ? Math.max(0, amount - saldoCents) : 0
         const aplicadoCents = amount - cambioCents
         const amountDecimal = aplicadoCents / 100
 
@@ -3042,14 +3062,28 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
         // cierra).
         const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
+        // 🔴 S1 (R8-1, como la terminal): dinero ya capturado sobre una venta CERRADA (leída bajo el candado) ⇒ conserva su estado, saldo
+        // 0 y `cerrada`: no la vuelve a cerrar ni repite lo de saldar (inventario, lealtad, comanda, referido). El dinero se registra
+        // completo y sale el aviso de sobrepago después del commit.
+        const cobro = estadoDeCobroAlRecibirDinero(fresh.paymentStatus, amount + tip > 0, {
+          paymentStatus: isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
+          remainingBalance: Math.max(0, remainingAfterPayment),
+        })
+        const saldaAqui = isFullyPaid && !cobro.cerrada
 
         // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
         //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
         //    WHERE contra la fila nueva, no coincide, y count = 0. Nada se escribió.
+        //    Una venta cerrada se escribe sólo si SIGUE en el estado leído.
         const transition = await tx.order.updateMany({
-          where: { id: orderId, venueId, version: fresh.version, paymentStatus: { in: ['PENDING', 'PARTIAL'] } },
+          where: {
+            id: orderId,
+            venueId,
+            version: fresh.version,
+            paymentStatus: cobro.cerrada ? fresh.paymentStatus : { in: ['PENDING', 'PARTIAL'] },
+          },
           data: {
-            paymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
+            paymentStatus: cobro.paymentStatus,
             // 🔴 Un abono PARCIAL no toca `Order.status`. Antes escribía
             // `PENDING`, o sea que una comanda ya `CONFIRMED`/`PREPARING`
             // RETROCEDÍA de etapa porque el cliente pagó la mitad — cobrar no es
@@ -3059,11 +3093,11 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             // puede AVANZARLO a COMPLETED cuando la cuenta queda saldada.
             // (`payment.tpv.service`, `manualPayment.service` y el webhook de
             // cripto ya se comportaban así.)
-            ...(isFullyPaid ? { status: 'COMPLETED' as const } : {}),
-            ...(isFullyPaid ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
-            ...(isFullyPaid && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+            ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
+            ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
+            ...(saldaAqui && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
             paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
-            remainingBalance: Math.max(0, remainingAfterPayment),
+            remainingBalance: cobro.remainingBalance,
             tipAmount: totalTip,
             total: new Prisma.Decimal(newTotal),
             splitType: 'FULLPAYMENT',
@@ -3071,7 +3105,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             // Vales por área: al quedar pagada, la cuenta deja de estar reclamada por
             // la caja. El claim ya no significa nada y arrastrarlo confundiría la
             // pantalla de "vales pendientes".
-            ...(isFullyPaid && fresh.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
+            ...(saldaAqui && fresh.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
           },
         })
         if (transition.count === 0) {
@@ -3178,8 +3212,14 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           paymentId: newPayment.id,
           fullyPaid: isFullyPaid,
           staffId: effectiveStaffId,
+          // S1 (R9-1, como la terminal): sobre una venta ya cerrada, la finalización concilia el cobro capturado —sin volver a consumir
+          // lo que ya tomó su vale de inventario— y decide bajo sus candados si es el primer saldado (`primerSaldado`).
+          reconcileCapturedPayment: cobro.cerrada,
+          marcarCocina,
           locked: lockedAreaCheckout,
         })
+        // Quién corre los efectos de saldar: el cobro que la saldó, o el que recupera el saldado de un vale (venta cerrada por el barrido).
+        const efectosDeSaldar = saldaAqui || areaFinalization.primerSaldado === true
 
         // 🔴 Posting durable (fase 2, auditoría 2026-08-12): el "vale de
         // deducción" nace EN ESTA transacción — si el proceso muere después del
@@ -3188,7 +3228,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // Área-tickets: su propia finalización ya dedujo y dejó su vale SKIPPED
         // (`AREA_TICKET_TRANSACTIONAL`, R10-1) en esta misma transacción — aquí no se crea otro.
         let postingId: string | null = null
-        if (isFullyPaid && !areaFinalization.areaTicketOrder) {
+        if (saldaAqui && !areaFinalization.areaTicketOrder) {
           const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
           const txItems = await tx.orderItem.findMany({
             where: { orderId },
@@ -3208,7 +3248,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         await enqueuePaymentCommissionInTx(tx, newPayment.id)
         // Referido: obligación durable con el dinero, como la terminal (`payment.tpv.service.ts`). Si el proceso muere antes
         // de la llamada directa de abajo, el worker de efectos la completa; el consumidor deduplica.
-        if (isFullyPaid) {
+        if (efectosDeSaldar) {
           await enqueuePaymentEffect(tx, {
             venueId,
             paymentId: newPayment.id,
@@ -3229,7 +3269,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         return {
           cajaAlCobrarId: cajaAlCobrar?.id ?? null,
           newPayment,
-          isFullyPaid,
+          isFullyPaid: efectosDeSaldar,
+          ventaCerrada: cobro.cerrada,
           aplicadoCents,
           cambioCents,
           areaTicketOrder: areaFinalization.areaTicketOrder,
@@ -3239,9 +3280,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           // 🔴 Los MISMOS valores que se acaban de persistir arriba (que van en
           // pesos), no un recálculo: la respuesta no puede contradecir a la
           // base. `pesosToCents` es la única conversión, ya en la frontera.
+          // Una venta cerrada responde PAID con saldo 0 aunque siga REFUNDED: no debe nada.
           balance: {
-            remainingBalanceCents: pesosToCents(Math.max(0, remainingAfterPayment)),
-            orderPaymentStatus: isFullyPaid ? 'PAID' : 'PARTIAL',
+            remainingBalanceCents: pesosToCents(cobro.remainingBalance),
+            orderPaymentStatus: isFullyPaid || cobro.cerrada ? 'PAID' : 'PARTIAL',
             orderTotalCents: pesosToCents(newTotal),
             totalPaidCents: pesosToCents(totalPaidIncludingTip),
           },
@@ -3364,6 +3406,23 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   logger.info(`✅ [ORDER.MOBILE] Cash payment recorded | paymentId=${payment.id} | order=${order.orderNumber}`)
 
+  // 🚨 S1/S2, como la terminal: el dinero ya capturado que cae sobre una venta cerrada, o que la deja con más de lo que vale, se
+  // registró completo; aquí se grita y queda la bitácora. Sólo lo ya capturado: el efectivo nuevo en vivo se recortó al saldo (cambio),
+  // y la captura externa en vivo sobre una venta abierta conserva el comportamiento de hoy. Después del commit: nunca toca el cobro.
+  const sobrepagoCents = balance.totalPaidCents - balance.orderTotalCents
+  if (paymentResult.ventaCerrada || (input.isOfflineReplay && sobrepagoCents > 1)) {
+    avisarSobrepago({
+      orderId,
+      venueId,
+      totalPaid: balance.totalPaidCents / 100,
+      orderTotal: balance.orderTotalCents / 100,
+      overpaidBy: sobrepagoCents / 100,
+      wasAlreadyPaid: paymentResult.ventaCerrada,
+      paymentId: payment.id,
+      staffId: effectiveStaffId ?? null,
+    })
+  }
+
   // Como la terminal: el plano se libera después del commit y nunca desmiente un pago aprobado.
   if (orderFullyPaid && !paymentResult.areaTicketOrder && paymentResult.tableId) {
     try {
@@ -3426,7 +3485,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // from desktop/tablets never lowered stock. Reuses the never-throws helper
   // from the TPV free-cart path: payment success is NEVER at risk (errors are
   // logged, not thrown), and it only fires on the PENDING/PARTIAL → PAID
-  // transition (re-calls are blocked above by the "already paid" guard).
+  // transition (`saldaAqui`: a closed sale that receives captured money keeps its state and does not deduct again).
   // Weighted lines (weightQuantity) deduct kilos; see spec venta-por-peso.
   // La deducción se ESPERA (antes era fire-and-forget) para que la respuesta
   // pueda traer `inventoryWarning` y el POS pinte el toast ámbar post-cobro
@@ -3523,8 +3582,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // está commiteado y nada de aquí abajo puede desmentirlo.
   if (orderFullyPaid) {
     try {
-      const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
-      await awardLoyaltyForPaidOrder({
+      const lealtad = {
         venueId,
         orderId,
         orderTotal: loyaltyBase,
@@ -3532,7 +3590,16 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         legacyCustomer: order.customer
           ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
           : null,
-      })
+      }
+      if (paymentResult.ventaCerrada) {
+        // Recupera el saldado de un vale sobre una venta ya cerrada (que pudo devolverse): como la terminal (R11-1), sin sello vivo
+        // sobre una venta con reembolso.
+        const { otorgarLealtadRespetandoReembolsos } = await import('@/services/shared/loyaltyOnLateCustomer')
+        await otorgarLealtadRespetandoReembolsos(lealtad)
+      } else {
+        const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+        await awardLoyaltyForPaidOrder(lealtad)
+      }
     } catch (err) {
       logger.error('[ORDER.MOBILE] Post-payment loyalty failed (payment unaffected)', {
         orderId,

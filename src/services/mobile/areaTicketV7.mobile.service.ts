@@ -3589,7 +3589,14 @@ export async function finalizeAreaTicketPaymentInTransaction(
   if (!lockedOrder) {
     throw domainError(409, 'CHECKOUT_ORDER_MISSING', 'La orden materializada de esta sesión ya no existe.')
   }
-  if (lockedOrder.paymentStatus === 'REFUNDED' || lockedOrder.status === 'CANCELLED' || lockedOrder.status === 'DELETED') {
+  // S1 (efectivo sin red): una venta REFUNDED es una venta CERRADA. El dinero ya capturado (la terminal, la cola del POS) se concilia
+  // por la rama de la venta cerrada (R8-1/R9-1: se registra, se queda REFUNDED, sin volver a consumir); antes recibía este 409 y todo
+  // se revertía. Sólo el cobro sin conciliar (que no es dinero capturado) la sigue rechazando; una cancelada o borrada, siempre.
+  if (
+    (lockedOrder.paymentStatus === 'REFUNDED' && !input.reconcileCapturedPayment) ||
+    lockedOrder.status === 'CANCELLED' ||
+    lockedOrder.status === 'DELETED'
+  ) {
     throw domainError(409, 'CHECKOUT_ORDER_NOT_PAYABLE', 'La orden materializada ya no admite pagos.')
   }
   const attempt = await tx.areaTicketPaymentAttempt.findFirst({
@@ -3668,7 +3675,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
     }
 
     // 🔴 R8-1 (Codex recheck-12 P2): el cobro capturado ENTRA dinero y nunca reabre una venta cerrada (leída bajo el `FOR UPDATE` de
-    // arriba; REFUNDED ya se rechazó): conserva PAID, saldo 0, sin cierre nuevo ni lealtad ni marca de cocina otra vez.
+    // arriba; PAID o REFUNDED): conserva su estado, saldo 0, sin cierre nuevo ni lealtad ni marca de cocina otra vez.
     const cobro = estadoDeCobroAlRecibirDinero(lockedOrder.paymentStatus, true, {
       paymentStatus: finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING',
       remainingBalance,

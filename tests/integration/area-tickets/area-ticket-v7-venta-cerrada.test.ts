@@ -1472,3 +1472,124 @@ describe('🔴 Ronda 14: una cuenta con vales no se separa ni se junta; se paga 
     ).toBe('CONSUMED')
   })
 })
+
+/**
+ * 🔴 S1 del efectivo sin red (U7 del diseño, 18-oct): la COLA del POS (`payCashOrder` con `isOfflineReplay`) reenvía efectivo cobrado
+ * sin red sobre una venta de vales que otra caja YA cerró. Antes (medido): PAID ⇒ 400 «Order is already paid»; REFUNDED ⇒ 409
+ * `ORDER_PAYMENT_CONFLICT` tras 3 intentos (la terminal: 409 `CHECKOUT_ORDER_NOT_PAYABLE`); el dinero quedaba fuera. Ahora se
+ * registra por la rama de la venta cerrada (`reconcileCapturedPayment`): la venta conserva su estado con saldo 0, la sesión queda
+ * PAID y el inventario NO se toca otra vez.
+ */
+describe('🔴 S1: la cola sin red del POS sobre una venta de vales ya cerrada', () => {
+  const sobrepagos = async (orderId: string) => {
+    for (let i = 0; i < 40; i++) {
+      const c = await prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' } })
+      if (c > 0) break
+      await new Promise(resolve => setTimeout(resolve, 50))
+    }
+    return prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' } })
+  }
+  const alInicio = async () => {
+    await prisma.areaTicketInventoryReservation.updateMany({
+      where: { venueId, inventoryId: valeInventoryId, status: 'ACTIVE' },
+      data: { status: 'RELEASED', releasedAt: new Date() },
+    })
+    await prisma.inventory.updateMany({ where: { id: { in: [valeInventoryId, sueltoInventoryId] } }, data: { currentStock: 10 } })
+  }
+
+  it('🔴 PAID: la terminal cobró los $100 por la sesión; la cola reenvía $100 ⇒ se registran, PAID/0, sesión PAID, sin doble descuento, 🚨 una vez (antes: 400)', async () => {
+    await alInicio()
+    const venta = await ventaDeVales()
+    await cobroDeLaTerminal(venta.orderId, 100)
+    const antes = await foto(venta)
+    expect([
+      antes.venta.paymentStatus,
+      antes.sesion.status,
+      antes.inventarios.map((i: { currentStock: string }) => i.currentStock),
+    ]).toEqual(['PAID', 'PAID', ['9', '9']])
+
+    const r = await payCashOrder(venueId!, venta.orderId, {
+      amount: 10000,
+      tip: 0,
+      staffId,
+      idempotencyKey: `s1-vales-paid-${sello}`,
+      isOfflineReplay: true,
+    })
+
+    const despues = await foto(venta)
+    expect(despues).toEqual({
+      ...antes,
+      venta: { ...antes.venta, paidAmount: '200', remainingBalance: '0' },
+      pagos: antes.pagos + 1,
+    })
+    expect([r.amount, r.changeCents, r.orderPaymentStatus, r.remainingBalanceCents]).toEqual([10000, 0, 'PAID', 0])
+    expect(await sobrepagos(venta.orderId)).toBe(1)
+  })
+
+  it('🔴 REFUNDED: la venta se cobró por la sesión y se devolvió entera; la cola reenvía $100 ⇒ se registran, sigue REFUNDED/0, sin volver a consumir (antes: 409 y se revertía)', async () => {
+    await alInicio()
+    const venta = await ventaDeVales()
+    await cobroDeLaTerminal(venta.orderId, 100)
+    const cobro = await prisma.payment.findFirstOrThrow({ where: { venueId, orderId: venta.orderId, status: 'COMPLETED' } })
+    await issueRefund({
+      venueId: venueId!,
+      paymentId: cobro.id,
+      amount: 10000,
+      tipRefundCents: 0,
+      reason: 'CUSTOMER_REQUEST' as never,
+      staffId,
+    })
+    // Hoy un reembolso deja la venta PAID (no reabre); REFUNDED es como la dejaba el código viejo (R13-4) y la que el diseño cubre.
+    await prisma.order.update({ where: { id: venta.orderId }, data: { paymentStatus: 'REFUNDED' } })
+    const antes = await foto(venta)
+    expect(antes.venta.paymentStatus).toBe('REFUNDED')
+
+    const r = await payCashOrder(venueId!, venta.orderId, {
+      amount: 10000,
+      tip: 0,
+      staffId,
+      idempotencyKey: `s1-vales-refunded-${sello}`,
+      isOfflineReplay: true,
+    })
+
+    const despues = await foto(venta)
+    expect(despues).toEqual({
+      ...antes,
+      venta: { ...antes.venta, paidAmount: '200', remainingBalance: '0' },
+      pagos: antes.pagos + 1,
+      sesion: { status: 'PAID', activePaymentAttemptId: null },
+    })
+    expect([r.amount, r.changeCents, r.orderPaymentStatus]).toEqual([10000, 0, 'PAID'])
+    expect(await sobrepagos(venta.orderId)).toBe(1)
+  })
+
+  it('🔴 la TERMINAL registra $100 capturados sobre esa venta de vales REFUNDED ⇒ se registran por la rama de la venta cerrada, sigue REFUNDED, sesión PAID, sin volver a consumir (antes: 409 `CHECKOUT_ORDER_NOT_PAYABLE` y a conciliación)', async () => {
+    await alInicio()
+    const venta = await ventaDeVales()
+    await cobroDeLaTerminal(venta.orderId, 100)
+    // Como la dejaba el código viejo (R13-4): hoy un reembolso deja la venta PAID.
+    await prisma.order.update({ where: { id: venta.orderId }, data: { paymentStatus: 'REFUNDED' } })
+    const antes = await foto(venta)
+
+    const respuesta: any = await cobroDeLaTerminal(venta.orderId, 100)
+
+    expect(respuesta.areaTicketCheckoutState).toBe('PAID')
+    const despues = await foto(venta)
+    expect(despues).toEqual({
+      ...antes,
+      venta: { ...antes.venta, paidAmount: '200', remainingBalance: '0' },
+      pagos: antes.pagos + 1,
+    })
+  })
+
+  it('control: el efectivo EN VIVO del POS sobre esa venta cerrada se sigue rechazando (la sesión, 409) antes de tomar el dinero', async () => {
+    await alInicio()
+    const venta = await ventaDeVales()
+    await cobroDeLaTerminal(venta.orderId, 100)
+    const antes = await foto(venta)
+    await expect(
+      payCashOrder(venueId!, venta.orderId, { amount: 10000, tip: 0, staffId, idempotencyKey: `s1-vales-vivo-${sello}` }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_PAYMENT_NOT_ALLOWED' })
+    expect(await foto(venta)).toEqual(antes)
+  })
+})
