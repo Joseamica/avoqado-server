@@ -1022,9 +1022,18 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     )
   } catch (error) {
     const autenticar = input.autenticarEnElNavegador
-    if (!autenticar || input.paymentBehavior !== 'error_if_incomplete' || input.trialPeriodDays !== 0 || !pideAutenticacion(error)) {
+    // 🔴 Sin llave de idempotencia no hay #2 (Ruling 5): su `retry` podría mandar el mismo create dos veces sin nada que
+    // lo deduplique. El 402 sale intacto, como sin la opción.
+    if (
+      !autenticar ||
+      !input.idempotencyKey ||
+      input.paymentBehavior !== 'error_if_incomplete' ||
+      input.trialPeriodDays !== 0 ||
+      !pideAutenticacion(error)
+    ) {
       throw error
     }
+    const llaveDelReto = `${input.idempotencyKey}:autenticar`
     // 🔴 D2: el banco pide autenticar el primer cobro. Crear OTRA VEZ es seguro: ese 402 no deja nada vivo (ni
     // suscripción ni factura; sólo un PaymentIntent `canceled`, medido el 18-oct con 3155 y 3184), así que no hay
     // segundo cobro. Mismo cuerpo que el #1 (misma `planActivationKey`) salvo `default_incomplete`, el secreto expandido
@@ -1036,7 +1045,8 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
     // `code` ni `statusCode`): sale tal cual y el llamador lo trata como resultado desconocido.
     subscription = await retry(
       () => {
-        if (autenticar.terminarAntesDe - Date.now() < STRIPE_DENTRO_DEL_CANDADO.timeout) {
+        // Escrito como «¿alcanza?» negado para que un plazo que no es número (NaN) falle cerrado (Ruling 5).
+        if (!(autenticar.terminarAntesDe - Date.now() >= STRIPE_DENTRO_DEL_CANDADO.timeout)) {
           throw new Error('no quedó tiempo en el candado para el segundo intento')
         }
         return stripe.subscriptions.create(
@@ -1046,9 +1056,7 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
             payment_behavior: 'default_incomplete',
             expand: ['latest_invoice.confirmation_secret'],
           },
-          input.idempotencyKey
-            ? { idempotencyKey: `${input.idempotencyKey}:autenticar`, ...STRIPE_DENTRO_DEL_CANDADO }
-            : STRIPE_DENTRO_DEL_CANDADO,
+          { idempotencyKey: llaveDelReto, ...STRIPE_DENTRO_DEL_CANDADO },
         )
       },
       { retries: 1, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription.autenticar' },

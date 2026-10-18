@@ -350,6 +350,25 @@ describe('🔴 D2: el banco pide autenticar el primer cobro', () => {
     expect(alCrearEnStripe).not.toHaveBeenCalled()
   })
 
+  it('🔴 sin idempotencyKey el 402 de autenticación se propaga intacto: nunca un 2.º create sin llave (que el retry podría duplicar)', async () => {
+    const error = errorDeAutenticacion()
+    mockSubCreate.mockRejectedValueOnce(error).mockResolvedValueOnce(porAutenticar)
+
+    await expect(pedir({ idempotencyKey: undefined })).rejects.toBe(error)
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(alCrearEnStripe).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un terminarAntesDe que no es número (NaN) falla cerrado: el #2 no sale y lanza «no quedó tiempo»', async () => {
+    mockSubCreate.mockRejectedValueOnce(errorDeAutenticacion()).mockResolvedValueOnce(porAutenticar)
+
+    await expect(pedir({ autenticarEnElNavegador: { primerCobroEsperadoCents: 1000, terminarAntesDe: NaN } })).rejects.toThrow(
+      'no quedó tiempo en el candado para el segundo intento',
+    )
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(alCrearEnStripe).not.toHaveBeenCalled()
+  })
+
   it('el #2 queda active (factura de $0): devuelve conAutenticacion sin requiereAutenticacion (el monto lo juzga activatePlan, S2.10)', async () => {
     mockSubCreate.mockRejectedValueOnce(errorDeAutenticacion()).mockResolvedValueOnce({
       id: 'sub_3ds',
