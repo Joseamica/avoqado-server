@@ -686,13 +686,86 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
-  it('PAY_CASH zero with a tip stays INVALID_PAYLOAD without recording a payment', async () => {
+  // 🔴 R4-3 (Codex r3, P2 E): una propina sola ($0 + $50) es dinero real que YA está en el cajón; HTTP la registra y el reducer la
+  // rechazaba con INVALID_PAYLOAD (antes de este cambio, esta prueba fijaba ese rechazo). Ahora se registra como en HTTP.
+  it('🔴 R4-3: PAY_CASH de $0 con propina positiva ⇒ ACKED, payCashOrder con importe 0 y la propina', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-tip', orderNumber: 'A-0', digitalReceipt: null })
     const acks = await processIntents(
       baseParams([{ id: 'zero-with-tip', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents: 500 } }]),
     )
 
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-tip' } })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: 0, tip: 500, idempotencyKey: 'zero-with-tip', isOfflineReplay: true }),
+    )
+  })
+
+  it.each([
+    ['propina de texto', '500'],
+    ['fracción de centavo que se guarda en $0', 0.4],
+  ])('R4-3: PAY_CASH de $0 con %s sigue INVALID_PAYLOAD (la propina sola se valida como en HTTP)', async (_caso, tipCents) => {
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-tip-invalid', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents } }]),
+    )
+
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('R4-3: la propina sola en mesa ajena es dinero capturado ⇒ ACKED con la marca de la mesa ajena', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-tip-ajena',
+      orderNumber: 'A-0',
+      digitalReceipt: null,
+    })
+    const acks = await processIntents(
+      baseParams([{ id: 'tip-ajena', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0, tipCents: 5000 } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-tip-ajena' } })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2]).toMatchObject({
+      amount: 0,
+      tip: 5000,
+      mesaAjena: { ownerId: 'staff-otro', ownerName: 'Juan Pérez' },
+    })
+  })
+
+  // 🔴 R4-4 (Codex r3, P2 E): una fracción de centavo pasaba la guarda «dinero > 0» de la mesa ajena y se guarda $0.00. La positividad
+  // se mide en centavos enteros, como se guarda.
+  it('🔴 R4-4: PAY_CASH de 0.001 ¢ en mesa ajena cuenta como $0 ⇒ REJECTED TABLE_OWNED_BY_OTHER, sin tocar payCashOrder', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+    const acks = await processIntents(
+      baseParams([{ id: 'fraccion', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0.001, tipCents: 0.4 } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('R4-4: PAY_CASH de 1 ¢ en mesa ajena sí es dinero ⇒ ACKED con la marca de la mesa ajena', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-1c', orderNumber: 'A-1', digitalReceipt: null })
+    const acks = await processIntents(baseParams([{ id: 'un-centavo', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 1 } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1c' } })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].mesaAjena).toEqual({
+      ownerId: 'staff-otro',
+      ownerName: 'otro mesero',
+    })
   })
 
   it.each([false, '', ' ', [], '0'])('PAY_CASH coercion-only zero amount=%j stays INVALID_PAYLOAD', async amountCents => {

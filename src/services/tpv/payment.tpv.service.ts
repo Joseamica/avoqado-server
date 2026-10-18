@@ -388,6 +388,7 @@ import {
   computeOrderBalance,
   computeStoredOrderTotal,
   estadoDeCobroAlRecibirDinero,
+  estadoParaCalcular,
   esVentaCerrada,
   REFUND_PAYMENT_TYPE,
   type CompletedPaymentForBalance,
@@ -1403,7 +1404,9 @@ export async function settleStandalonePaymentInTx(
           paymentId: payment.id ?? null,
           staffId: staffId ?? null,
         })
-  const cuenta = { ...order, status }
+  // 🔴 R4-2 (Codex r3): la cancelada CERRADA se guarda cancelada, pero se calcula como cuando se cobró (base + IVA aparte): el total
+  // que se escribe aquí es el MISMO con el que mide el aviso de sobrepago de después del commit (`updateOrderTotalsForStandalonePayment`).
+  const cuenta = { ...order, status: estadoParaCalcular(status, order.paymentStatus, entraDinero) }
   const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
   const saldada = balance.isFullyPaid && cierreAutomaticoPermitido(status)
@@ -1665,7 +1668,15 @@ async function updateOrderTotalsForStandalonePayment(
   // dinero (`estadoParaCobrar`): una de Avoqado se reabre con cualquier dinero; una externa, sólo si cubre. Todo lo de abajo
   // —total, saldo, estado del pago, vale, lealtad y el cierre— se calcula con ESE estado, y la escritura lo persiste.
   const cubreComoCancelada = Math.max(0, totalesDeLaOrden(totalTip, order.status) - totalPaid) <= 0.01
-  const estado = estadoParaCobrar(order, totalPaid, cubreComoCancelada)
+  // 🔴 R4-5 (Codex r3; la decisión de R3-2/R4-2 del cierre transaccional): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED),
+  // aunque esté cancelada: conserva su estado operativo y se calcula como cuando se cobró (base + IVA aparte, `estadoParaCalcular`). La
+  // cancelada que DEBE se reabre como siempre. `estadoOperativo` decide el cierre; `estado`, los importes que se guardan Y los del aviso.
+  // El estado de cobro se leyó antes del candado: la huella de abajo (`standaloneTotalsInputs`: `paymentStatus` y la clase del estado)
+  // lo revalida bajo él, y la reapertura vuelve a mirar el estado de cobro releído allí.
+  const entraDinero = paymentAmount > 0
+  const conservaCerrada = entraDinero && esVentaCerrada(order.paymentStatus)
+  const estadoOperativo = conservaCerrada ? order.status : estadoParaCobrar(order, totalPaid, cubreComoCancelada)
+  const estado = estadoParaCalcular(estadoOperativo, order.paymentStatus, entraDinero)
   const newTotal = totalesDeLaOrden(totalTip, estado)
 
   // Calculate remaining amount (based on new total)
@@ -1677,7 +1688,7 @@ async function updateOrderTotalsForStandalonePayment(
   // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   // Account for floating point precision. Founder 3-oct: una cancelada nunca queda saldada (si cubría, ya salió de CANCELADA).
-  const isFullyPaid = remainingAmount <= 0.01 && cierreAutomaticoPermitido(estado)
+  const isFullyPaid = remainingAmount <= 0.01 && cierreAutomaticoPermitido(estadoOperativo)
   const newPaymentStatus = isFullyPaid ? 'PAID' : totalPaid > 0 ? 'PARTIAL' : order.paymentStatus
   // 🔴 R8-1 (Codex recheck-12 P2): un cobro que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED). Sólo cuando ESTA función
   // escribe (con `committedSettlement` lo aplicó ya el cierre transaccional; con el vale finalizado no se escribe). El estado previo
@@ -1902,17 +1913,20 @@ async function updateOrderTotalsForStandalonePayment(
           // Founder 3-oct / Codex r9 #2: la misma regla, bajo el candado y con lo que se acaba de releer, en la MISMA transacción
           // que los totales. La huella compara la CLASE del estado (Tarea 6d): dentro de la misma clase la regla da lo mismo;
           // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
-          await reabrirSiRecibeDinero(tx, {
-            venueId: order.venueId,
-            orderId,
-            status: current.status,
-            originSystem: order.originSystem,
-            cobrado: totalPaid,
-            cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
-            canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
-            paymentId: currentPaymentId ?? null,
-            staffId: staffId ?? null,
-          })
+          // R4-5: la venta CERRADA que recibe dinero no se reabre (decidido con el estado de cobro releído bajo el candado).
+          if (!(entraDinero && esVentaCerrada(current.paymentStatus))) {
+            await reabrirSiRecibeDinero(tx, {
+              venueId: order.venueId,
+              orderId,
+              status: current.status,
+              originSystem: order.originSystem,
+              cobrado: totalPaid,
+              cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
+              canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
+              paymentId: currentPaymentId ?? null,
+              staffId: staffId ?? null,
+            })
+          }
 
           const updated = await tx.order.update({
             where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },

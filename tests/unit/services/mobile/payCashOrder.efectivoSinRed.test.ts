@@ -458,6 +458,58 @@ describe('R2-2: recibir dinero nunca reabre una venta cerrada (CANCELLED + REFUN
   })
 })
 
+/**
+ * 🔴 R4-2 (Codex r3, P2; la misma raíz que R2-2 en el POS): una venta CERRADA conserva su estado operativo (sigue cancelada), pero su
+ * aritmética es la de cuando se cobró: base E IVA aparte. Con la aritmética de cancelada el IVA desaparecía del total: venta de
+ * $100 + $16 devuelta y cancelada + propina sola de $50 guardaba $150 contra $166 cobrados y gritaba un sobrepago FALSO de $16.
+ */
+describe('R4-2: venta cancelada ya cobrada con IVA aparte: lo guardado y el aviso salen del MISMO total', () => {
+  const conIvaAparte = (row: any) => Object.assign(row, { taxAmount: new Decimal(16), contratoDePrecio: 'IVA_APARTE' })
+  const devueltaYCancelada = () => {
+    const base = instalarBase({ paymentStatus: 'REFUNDED', status: 'CANCELLED', total: 100 }, [
+      { amount: 116 },
+      { amount: -116, type: 'REFUND' },
+    ])
+    conIvaAparte(base.row)
+    return base
+  }
+
+  it('🔴 propina sola de $50 ⇒ total guardado $166 (base + IVA + propina), sigue CANCELLED/REFUNDED, sin sobrepago falso', async () => {
+    const { row, cas } = devueltaYCancelada()
+
+    await payCashOrder('venue-1', 'order-1', { ...cola(0, 'r4-2-propina'), tip: 5000 })
+
+    expect([row.status, row.paymentStatus, Number(row.remainingBalance)]).toEqual(['CANCELLED', 'REFUNDED', 0])
+    expect(Number(cas.at(-1).data.total)).toBe(166)
+    expect([avisos().length, bitacoras().length]).toEqual([0, 0])
+    sinEfectosDeSaldar(cas)
+  })
+
+  it('🔴 $10 de más ⇒ total guardado $116 y el aviso dice el MISMO total y el sobrepago real de $10', async () => {
+    const { cas } = devueltaYCancelada()
+
+    await payCashOrder('venue-1', 'order-1', cola(1000, 'r4-2-diez'))
+
+    expect(Number(cas.at(-1).data.total)).toBe(116)
+    expect(avisos()).toHaveLength(1)
+    expect(avisos()[0][1]).toMatchObject({ orderTotal: 116, totalPaid: 126, overpaidBy: 10 })
+  })
+
+  it('control: la cancelada que DEBE con IVA aparte se reabre y cobra su IVA como siempre ($100 de $116 ⇒ PARTIAL, faltan $16)', async () => {
+    const { row, cas } = instalarBase({ paymentStatus: 'PENDING', status: 'CANCELLED', total: 100 })
+    conIvaAparte(row)
+
+    await payCashOrder('venue-1', 'order-1', cola(10000, 'r4-2-debe'))
+
+    expect([row.status, row.paymentStatus, Number(row.remainingBalance), Number(cas.at(-1).data.total)]).toEqual([
+      'PENDING',
+      'PARTIAL',
+      16,
+      116,
+    ])
+  })
+})
+
 describe('R2-4: el aviso de sobrepago sólo si sobra dinero (como la TPV: > $0.01)', () => {
   it('🔴 reenvío de SÓLO propina ($50) sobre una venta PAID ⇒ se registra sin aviso: no sobra nada (antes: 🚨 «Se cobró MÁS» con $0)', async () => {
     const { pagos } = instalarBase({ paymentStatus: 'PAID', total: 100 }, [{ amount: 100 }])

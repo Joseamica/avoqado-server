@@ -518,6 +518,65 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
       ])
     })
 
+    /**
+     * 🔴 R4-5 (Codex r3, P2 E): este recálculo (integradas, cuentas con vales) también reabría una venta CANCELADA ya cobrada: bajo el
+     * candado llamaba a `reabrirSiRecibeDinero` sin mirar PAID/REFUNDED. Ahora, la MISMA decisión que el cierre transaccional
+     * (R3-2/R4-2): no se reabre, conserva su estado de cobro y su saldo 0, y el total es el de cuando se cobró (base + IVA) — el mismo
+     * con el que mide el aviso.
+     */
+    const canceladaCobrada = (paymentStatus: 'PAID' | 'REFUNDED') =>
+      seedOrder(
+        paymentStatus === 'REFUNDED'
+          ? [
+              { amount: new Decimal(116), tipAmount: new Decimal(0), type: 'REGULAR' },
+              { amount: new Decimal(-116), tipAmount: new Decimal(0), type: 'REFUND' },
+            ]
+          : [{ amount: new Decimal(116), tipAmount: new Decimal(0), type: 'REGULAR' }],
+        {
+          status: 'CANCELLED',
+          originSystem: 'AVOQADO',
+          subtotal: new Decimal(100),
+          total: new Decimal(116),
+          taxAmount: new Decimal(16),
+          contratoDePrecio: 'IVA_APARTE',
+          paymentStatus,
+        },
+      )
+    const reaperturasR4 = () =>
+      (prisma.activityLog.create as jest.Mock).mock.calls
+        .map((c: any[]) => c[0].data)
+        .filter(d => d.action === 'ORDER_REOPENED_BY_CAPTURED_PAYMENT')
+    const sobrepagos = () =>
+      (logger.error as jest.Mock).mock.calls.filter(([m]) => typeof m === 'string' && m.includes('🚨 [Sobrepago]')).map(([, d]) => d)
+
+    it.each(['REFUNDED', 'PAID'] as const)(
+      '🔴 R4-5: CANCELLED + %s + propina sola de $50 de la terminal ⇒ NO se reabre, conserva su estado de cobro, total $166, sin sobrepago',
+      async paymentStatus => {
+        canceladaCobrada(paymentStatus)
+        await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(0, 5000), 'user-1')
+        const escrituras = (prisma.order.update as jest.Mock).mock.calls.map((c: any[]) => c[0].data)
+        expect(escrituras.map((d: any) => d.status)).not.toContain('PENDING')
+        expect(reaperturasR4()).toHaveLength(0)
+        const data = lastOrderUpdate()
+        expect([data.paymentStatus, Number(data.remainingBalance), Number(data.total), data.status, data.completedAt]).toEqual([
+          paymentStatus,
+          0,
+          166,
+          undefined,
+          undefined,
+        ])
+        expect(sobrepagos()).toHaveLength(0)
+      },
+    )
+
+    it('🔴 R4-5: CANCELLED + REFUNDED + $10 de más ⇒ no se reabre; total $116 guardado y el MISMO en el aviso (sobrepago real de $10)', async () => {
+      canceladaCobrada('REFUNDED')
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      expect(reaperturasR4()).toHaveLength(0)
+      expect(Number(lastOrderUpdate().total)).toBe(116)
+      expect(sobrepagos()).toEqual([expect.objectContaining({ orderTotal: 116, totalPaid: 126, overpaidBy: 10 })])
+    })
+
     it('regresión: la MISMA venta PENDING con $80 + $10 ⇒ PARTIAL con $10 por cobrar (como hoy)', async () => {
       seedOrder([{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }], {
         subtotal: new Decimal(100),

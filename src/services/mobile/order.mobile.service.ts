@@ -63,6 +63,7 @@ import {
   computeOrderBalance,
   esVentaCerrada,
   estadoDeCobroAlRecibirDinero,
+  estadoParaCalcular,
   impuestoQueSeCobraAparte,
   summarizeRefunds,
   type RefundState,
@@ -3026,9 +3027,11 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
                 staffId: effectiveStaffId ?? null,
               })
             : fresh.status
-        // La cuenta con el estado con el que RECIBE este dinero: los dos saldos y el cierre se calculan con él. La reapertura no toca
-        // `version`, así que la CAS de abajo sigue amarrada a la versión leída.
-        const cuenta = { ...fresh, status: estado }
+        // La cuenta con el estado con el que RECIBE este dinero: los dos saldos se calculan con él (el cierre, con `estado`). La reapertura
+        // no toca `version`, así que la CAS de abajo sigue amarrada a la versión leída.
+        // 🔴 R4-2 (Codex r3; la misma raíz que la terminal): la cancelada CERRADA sigue cancelada (R2-2) pero se calcula como cuando se
+        // cobró —base + IVA aparte—: con la aritmética de cancelada guardaba $150 contra $166 cobrados y gritaba un sobrepago falso.
+        const cuenta = { ...fresh, status: estadoParaCalcular(estado, fresh.paymentStatus, amount + tip > 0) }
 
         // Con devoluciones previas el saldo NO revive (`orderBalance.ts`), pero un
         // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):

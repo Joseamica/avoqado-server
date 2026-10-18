@@ -1032,6 +1032,82 @@ describe('recordOrderPayment — base de lealtad con el IVA cobrado aparte', () 
 })
 
 /**
+ * 🔴 R4-2 (Codex r3, P2): el cierre transaccional de la terminal (`settleStandalonePaymentInTx`) conserva CANCELLED en una venta ya
+ * cobrada (R3-2), pero calculaba con la aritmética de cancelada (sin el IVA aparte) mientras el aviso de después del commit calcula con
+ * su IVA: venta de $100 + $16 devuelta y cancelada + propina sola de $50 guardaba $150 y el aviso medía sobre $166. Lo guardado y el
+ * aviso salen ahora del MISMO total (base + IVA, como cuando se cobró).
+ */
+describe('🔴 R4-2: venta cancelada ya cobrada con IVA aparte: el cierre transaccional y el aviso usan el MISMO total', () => {
+  const sobrepagos = () =>
+    (logger.error as jest.Mock).mock.calls.filter(([m]) => typeof m === 'string' && m.includes('🚨 [Sobrepago]')).map(([, d]) => d)
+  const totalGuardado = () =>
+    Number(
+      (prisma.order.update as jest.Mock).mock.calls
+        .map(c => c[0].data)
+        .filter((d: any) => d.total !== undefined)
+        .at(-1)?.total,
+    )
+  const canceladaCobrada = (paymentStatus: 'PAID' | 'REFUNDED') => {
+    const order = makeOrder({
+      status: 'CANCELLED',
+      paymentStatus,
+      originSystem: 'AVOQADO',
+      contratoDePrecio: 'IVA_APARTE',
+      taxAmount: new Decimal(16),
+      total: new Decimal(116),
+      remainingBalance: new Decimal(0),
+      payments:
+        paymentStatus === 'REFUNDED'
+          ? [
+              { amount: new Decimal(116), tipAmount: new Decimal(0), type: null },
+              { amount: new Decimal(-116), tipAmount: new Decimal(0), type: 'REFUND' },
+            ]
+          : [{ amount: new Decimal(116), tipAmount: new Decimal(0), type: null }],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+  }
+  const cobro = (amount: number, tipAmount: number) =>
+    (prisma.payment.create as jest.Mock).mockResolvedValue({
+      id: 'payment-1',
+      status: 'COMPLETED',
+      feeAmount: 0,
+      netAmount: amount + tipAmount,
+      amount: new Decimal(amount),
+      tipAmount: new Decimal(tipAmount),
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+    })
+
+  it.each(['REFUNDED', 'PAID'] as const)(
+    '🔴 CANCELLED + %s + propina sola de $50 ⇒ guarda $166 (base + IVA + propinas) y no grita sobrepago (antes: $150 guardados)',
+    async paymentStatus => {
+      canceladaCobrada(paymentStatus)
+      cobro(0, 50)
+
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, amount: 0, tip: 5000 }, 'user-1')
+
+      expect(totalGuardado()).toBe(166)
+      const escrituras = (prisma.order.update as jest.Mock).mock.calls.map(c => c[0].data)
+      expect(escrituras.map((d: any) => d.status)).not.toContain('PENDING')
+      expect(escrituras.at(-1)).toMatchObject({ paymentStatus, remainingBalance: 0 })
+      expect(sobrepagos()).toHaveLength(0)
+    },
+  )
+
+  it('🔴 CANCELLED + REFUNDED + $10 de más ⇒ guarda $116 y el aviso mide sobre los MISMOS $116: sobrepago real de $10 (antes: $100 guardados)', async () => {
+    canceladaCobrada('REFUNDED')
+    cobro(10, 0)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, amount: 1000 }, 'user-1')
+
+    expect(totalGuardado()).toBe(116)
+    expect(sobrepagos()).toEqual([expect.objectContaining({ orderTotal: 116, totalPaid: 126, overpaidBy: 10 })])
+  })
+})
+
+/**
  * 🔴 Ronda 10 (Codex recheck-14), lado del registrador de la terminal. La venta de vales: un vale + un producto suelto.
  *   · R10-1: el `catch` de una petición que perdió la carrera NO degrada lo que la otra ya cerró (intento SUCCEEDED / sesión PAID).
  *   · R10-3: el cobro que es el PRIMER saldado de la venta —aunque el barrido la haya cerrado sin efectos, o llegue por un reenvío—
