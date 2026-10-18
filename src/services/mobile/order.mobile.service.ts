@@ -76,8 +76,10 @@ import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import {
   CobroYaRegistrado,
-  assertIdempotentPaymentOrder,
+  MesaAjenaSoloRecuperacion,
+  assertLlaveEsEsteCobro,
   cierreAutomaticoPermitido,
+  esCobroCompletadoDeLaOrden,
   esCobroNuevo,
   reabrirSiRecibeDinero,
   rechazarCobroNuevoSobreCancelada,
@@ -2680,6 +2682,13 @@ export interface CashPaymentInput {
    */
   mesaAjena?: { ownerId: string; ownerName: string }
   /**
+   * 🔴 R5-1 (Codex r4): la propiedad de mesa dejó pasar esta petición SÓLO para recuperar el pago que ya tiene su llave (el reintento
+   * de un cobro confirmado sobre una mesa que ahora es de otro). Marca INTERNA: la pone `checkTableOwnership` en `res.locals` o el
+   * reducer, nunca el body. Si ese pago ya no es un cobro completado de esta orden (lo borraron entre la consulta del middleware y
+   * la de aquí), se responde el 403 de mesa ajena y no se crea ningún pago.
+   */
+  soloRecuperarPago?: { ownerId: string | null; ownerName: string }
+  /**
    * Quién procesó el cobro cuando NO fue Avoqado ("Clip", "terminal del
    * negocio", "transferencia BBVA"). Se guarda en Payment.externalSource, que
    * ya existía para anotaciones manuales. Es lo que permite responder cuánto
@@ -2912,6 +2921,20 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
 
+  // 🛡️ El pago que YA tiene esta llave (si lo hay). Se lee aquí, antes de cualquier regla que pueda crear un pago, porque decide
+  // dos cosas: el retorno idempotente (abajo) y, con `soloRecuperarPago`, si esta petición puede seguir siquiera.
+  const existingByKey = input.idempotencyKey
+    ? await prisma.payment.findUnique({
+        where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+        include: { receipts: RECIBO_CANONICO },
+      })
+    : null
+  // 🔴 R5-1: autorizada SÓLO a recuperar. Sin un cobro completado de esta orden con esa llave, el mismo 403 de mesa ajena — nunca el
+  // camino del pago nuevo. Es la única lectura que decide: si el pago existe, el retorno de abajo lo devuelve sin otra consulta.
+  if (input.soloRecuperarPago && !(existingByKey && esCobroCompletadoDeLaOrden(existingByKey, orderId))) {
+    throw new MesaAjenaSoloRecuperacion(input.soloRecuperarPago)
+  }
+
   // 🔴 Cobro en $0 — cerrar una cuenta cortesiada al 100%.
   //
   // Una cuenta con artículos cuyo total quedó en 0 (cortesía completa, o un
@@ -2937,42 +2960,38 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // protege pagos COMPLETOS; un pago PARCIAL re-encolado dejaría la orden en
   // PARTIAL y crearía un segundo Payment. La llave dedup atrapa AMBOS casos.
   // Mismo patrón que recordFastPayment (payment.tpv.service.ts:1390).
-  if (input.idempotencyKey) {
-    const existingByKey = await prisma.payment.findUnique({
-      where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
-      include: { receipts: RECIBO_CANONICO },
-    })
-    if (existingByKey) {
-      assertIdempotentPaymentOrder(existingByKey, orderId)
-      logger.info(
-        `🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`,
-      )
-      await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
-      return {
-        paymentId: existingByKey.id,
-        orderId,
-        orderNumber: order.orderNumber,
-        // 🔴 `pesosToCents`, no un `* 100` pelón. Reconstruir estos dos desde el
-        // Decimal guardado dejaba ruido de float en el 13% de los importes, y en
-        // el 6.6% POR DEBAJO del entero (`19.99 → 1998.9999999999998`): un cliente
-        // que trunca al parsear leía $19.98 sobre un cobro de $19.99, y un decoder
-        // estricto lanzaba excepción y perdía el reintento entero. Redondear no
-        // cambia nombre, tipo ni unidad — sólo devuelve el entero que siempre se
-        // quiso devolver, y nadie puede depender del ruido.
-        amount: pesosToCents(Number(existingByKey.amount)),
-        tipAmount: pesosToCents(Number(existingByKey.tipAmount)),
-        changeCents: cambioDeReintento(amount, existingByKey.amount),
-        // El método REAL del pago que ya existe: devolver 'CASH' fijo haría
-        // que el reintento de un cobro con tarjeta se reportara como efectivo.
-        method: existingByKey.method as CashPaymentResponse['method'],
-        status: 'COMPLETED',
-        digitalReceipt: existingByKey.receipts?.[0]
-          ? mapDigitalReceiptResponse(existingByKey.receipts[0], await resolveAutofacturaAvailable(orderId))
-          : null,
-        // El saldo REAL de la orden ahora mismo, no 0: quien reintenta la parte 1
-        // de un cobro dividido tiene que seguir viendo lo que falta.
-        ...(await readOrderBalanceSnapshot(venueId, orderId)),
-      }
+  // R5-2 (Codex r4): sólo un COBRO COMPLETADO de esta orden es «el mismo cobro»; un intento fallido o una devolución con esa llave
+  // ⇒ 409 sin escribir nada (`assertLlaveEsEsteCobro`), nunca `status: 'COMPLETED'` ni otro pago con la llave ocupada.
+  if (existingByKey) {
+    assertLlaveEsEsteCobro(existingByKey, orderId)
+    logger.info(
+      `🔄 [ORDER.MOBILE] Reintento idempotente detectado (key=${input.idempotencyKey}) — devuelvo el pago existente ${existingByKey.id}`,
+    )
+    await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
+    return {
+      paymentId: existingByKey.id,
+      orderId,
+      orderNumber: order.orderNumber,
+      // 🔴 `pesosToCents`, no un `* 100` pelón. Reconstruir estos dos desde el
+      // Decimal guardado dejaba ruido de float en el 13% de los importes, y en
+      // el 6.6% POR DEBAJO del entero (`19.99 → 1998.9999999999998`): un cliente
+      // que trunca al parsear leía $19.98 sobre un cobro de $19.99, y un decoder
+      // estricto lanzaba excepción y perdía el reintento entero. Redondear no
+      // cambia nombre, tipo ni unidad — sólo devuelve el entero que siempre se
+      // quiso devolver, y nadie puede depender del ruido.
+      amount: pesosToCents(Number(existingByKey.amount)),
+      tipAmount: pesosToCents(Number(existingByKey.tipAmount)),
+      changeCents: cambioDeReintento(amount, existingByKey.amount),
+      // El método REAL del pago que ya existe: devolver 'CASH' fijo haría
+      // que el reintento de un cobro con tarjeta se reportara como efectivo.
+      method: existingByKey.method as CashPaymentResponse['method'],
+      status: 'COMPLETED',
+      digitalReceipt: existingByKey.receipts?.[0]
+        ? mapDigitalReceiptResponse(existingByKey.receipts[0], await resolveAutofacturaAvailable(orderId))
+        : null,
+      // El saldo REAL de la orden ahora mismo, no 0: quien reintenta la parte 1
+      // de un cobro dividido tiene que seguir viendo lo que falta.
+      ...(await readOrderBalanceSnapshot(venueId, orderId)),
     }
   }
 
@@ -3521,7 +3540,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
           include: { receipts: RECIBO_CANONICO },
         })
         if (winner) {
-          assertIdempotentPaymentOrder(winner, orderId)
+          assertLlaveEsEsteCobro(winner, orderId)
           logger.info(`🔄 [ORDER.MOBILE] Carrera idempotente (P2002) — devuelvo el pago ganador ${winner.id}`)
           await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
           return {
@@ -3567,7 +3586,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             include: { receipts: RECIBO_CANONICO },
           })
           if (mine) {
-            assertIdempotentPaymentOrder(mine, orderId)
+            assertLlaveEsEsteCobro(mine, orderId)
             await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
             return {
               paymentId: mine.id,

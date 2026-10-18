@@ -212,6 +212,7 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
       amount: new Decimal(90),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     })
 
@@ -231,6 +232,7 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
       amount: new Decimal(90),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     })
 
@@ -276,6 +278,7 @@ describe('D5: efectivo recibido gigante — importes exactos, un solo pago y �
       amount: new Decimal(pagoRegistrado().amount),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     })
     const repeticion = await payCashOrder('venue-1', 'order-1', pedido)
@@ -469,6 +472,7 @@ describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo
       amount: new Decimal(40),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     }
     // Codex r14 #2: las tres consultas, explícitas —la rápida (:2372), antes del commit del ganador ⇒ ausente; bajo el candado ⇒ el

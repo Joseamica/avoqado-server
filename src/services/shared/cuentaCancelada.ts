@@ -1,7 +1,7 @@
 import { Prisma, type OrderStatus } from '@prisma/client'
 
 import logger from '@/config/logger'
-import { BadRequestError, ConflictError } from '@/errors/AppError'
+import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { claseDeEstado, estadoAlRecibirDinero } from './orderBalance'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
@@ -63,6 +63,65 @@ export function assertIdempotentPaymentOrder(payment: { orderId?: string | null 
       'La idempotencyKey ya pertenece a otra orden. Genera una llave nueva para este cobro.',
       'IDEMPOTENCY_KEY_REUSED',
     )
+  }
+}
+
+/**
+ * 🔴 R5-2 (Codex r4, P2 E): ¿el pago de una llave es un COBRO COMPLETADO de esta orden? La misma columna `idempotencyKey` guarda
+ * cobros, intentos (FAILED/PENDING/PROCESSING) y devoluciones (`type: REFUND`, importe negativo); sólo un cobro completado es «la
+ * misma operación» que un reintento de cobro puede devolver como hecha. Lo comparten el atajo de mesa ajena del middleware y los
+ * retornos idempotentes de `payCashOrder`. `status` nunca es nulo en una fila real (default PENDING).
+ */
+export function esCobroCompletadoDeLaOrden(
+  payment: { orderId?: string | null; status?: string | null; type?: string | null },
+  orderId: string,
+): boolean {
+  return payment.orderId === orderId && payment.status === 'COMPLETED' && payment.type !== 'REFUND'
+}
+
+/**
+ * R5-2: la llave ya existe en ESTA orden pero NO es un cobro completado (un intento fallido, una devolución) ⇒ 409, sin escribir
+ * nada: ni se afirma un cobro que no ocurrió ni se inserta otro pago con una llave ocupada. Mismo código que la llave de otra orden
+ * (las apps ya lo conocen: Android lo reintenta y lo deja en cuarentena visible; el reducer lo rechaza a cuarentena).
+ */
+export function assertLlaveEsEsteCobro(
+  payment: { orderId?: string | null; status?: string | null; type?: string | null },
+  orderId: string,
+): void {
+  assertIdempotentPaymentOrder(payment, orderId)
+  if (!esCobroCompletadoDeLaOrden(payment, orderId)) {
+    throw new ConflictError(
+      'La idempotencyKey ya pertenece a otra operación de esta orden (un intento fallido o una devolución). Genera una llave nueva para este cobro.',
+      'IDEMPOTENCY_KEY_REUSED',
+    )
+  }
+}
+
+/** Dueño de la mesa ajena, como lo nombra el 403 de la propiedad de mesa. */
+export type DuenoDeMesa = { ownerId: string | null; ownerName: string }
+
+/** El cuerpo EXACTO del 403 de mesa ajena: lo comparten el middleware y el controller de cobro (R5-1). */
+export function cuerpoMesaAjena(dueno: DuenoDeMesa) {
+  return {
+    error: 'Forbidden',
+    code: 'TABLE_OWNED_BY_OTHER',
+    message: `Solo ${dueno.ownerName} puede modificar esta mesa`,
+    ownerId: dueno.ownerId,
+    ownerName: dueno.ownerName,
+  }
+}
+
+/**
+ * 🔴 R5-1 (Codex r4, P2 R): la petición sólo estaba autorizada a RECUPERAR el pago de su llave (mesa ajena) y ese pago ya no está
+ * —lo borraron entre el middleware y el servicio— o no es un cobro completado de esta orden. Es el mismo 403 de mesa ajena: no se
+ * entra al camino que crea un pago nuevo. El reducer lo lee por `code` (TABLE_OWNED_BY_OTHER ⇒ REJECTED, como `errorMesaAjena`).
+ */
+export class MesaAjenaSoloRecuperacion extends AppError {
+  constructor(readonly dueno: DuenoDeMesa) {
+    super(`Solo ${dueno.ownerName} puede modificar esta mesa`, 403, true, 'TABLE_OWNED_BY_OTHER', {
+      ownerId: dueno.ownerId,
+      ownerName: dueno.ownerName,
+    })
   }
 }
 

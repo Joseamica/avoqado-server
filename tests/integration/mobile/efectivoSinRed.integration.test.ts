@@ -42,6 +42,7 @@ import prisma from '@/utils/prismaClient'
 import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { deletePayment } from '@/services/dashboard/payment.dashboard.service'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 const express = require('express') as typeof import('express')
@@ -704,5 +705,121 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
       expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
       expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
     })
+  })
+
+  /**
+   * 🔴 R5-1 (Codex r4, P2 R): la excepción de R4-1 autorizaba la petición COMPLETA. Un administrador borra el pago de K (ruta del
+   * panel, `deletePayment`) justo después de que el middleware lo encontró: el servicio ya no lo ve y creaba un pago NUEVO en la mesa
+   * de Beto. Ahora la excepción sólo autoriza recuperar ese pago: sin él, el mismo 403 de mesa ajena y ningún pago.
+   */
+  async function conBorradoEntreLasDosConsultas(llave: string, paymentId: string, prueba: () => Promise<void>) {
+    const original = prisma.payment.findUnique.bind(prisma.payment)
+    let borrado = false
+    const espia = jest.spyOn(prisma.payment, 'findUnique').mockImplementation((async (args: any) => {
+      const r = await original(args)
+      // La PRIMERA consulta de la llave (la del middleware) encontró el pago; antes de la del servicio, el panel lo borra.
+      if (!borrado && r && args?.where?.venueId_idempotencyKey?.idempotencyKey === llave) {
+        borrado = true
+        await deletePayment(venueId, paymentId)
+      }
+      return r
+    }) as never)
+    try {
+      await prueba()
+    } finally {
+      espia.mockRestore()
+    }
+    expect(borrado).toBe(true)
+  }
+  const cobrarHttp = (orderId: string, cuerpo: Record<string, unknown>) =>
+    request(app)
+      .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+      .set('x-test-actor', ana)
+      .set('x-test-role', 'WAITER')
+      .send(cuerpo)
+
+  it('🔴 R5-1 $0: la cuenta cortesiada de Ana cerrada con K; el pago de K se borra entre el middleware y el servicio ⇒ 403 TABLE_OWNED_BY_OTHER y NINGÚN pago nuevo', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: ana, discountAmount: 100, total: 0, remainingBalance: 0 } })
+      const K = llaveHttp()
+      const primero = await cobrarHttp(orderId, { amount: 0, tip: 0, idempotencyKey: K })
+      expect(primero.status).toBe(200)
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: beto } })
+
+      await conBorradoEntreLasDosConsultas(K, primero.body.payment.paymentId, async () => {
+        const reintento = await cobrarHttp(orderId, { amount: 0, tip: 0, idempotencyKey: K })
+        expect([reintento.status, reintento.body]).toEqual([
+          403,
+          {
+            error: 'Forbidden',
+            code: 'TABLE_OWNED_BY_OTHER',
+            message: 'Solo Beto Mesero puede modificar esta mesa',
+            ownerId: beto,
+            ownerName: 'Beto Mesero',
+          },
+        ])
+      })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+      expect(await marcas(orderId)).toEqual([])
+    })
+  })
+
+  it('🔴 R5-1 $50: abono de $20 de Ana con K; el reintento EN VIVO por $50 devuelve ESE abono; si lo borran entre consultas ⇒ 403 y ningún pago de $50', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: ana } })
+      const K = llaveHttp()
+      const abono = await cobrarHttp(orderId, { amount: 2000, tip: 0, idempotencyKey: K })
+      expect(abono.status).toBe(200)
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: beto } })
+
+      // La recuperación normal sigue: el MISMO pago de $20, sin crear el de $50.
+      const recuperado = await cobrarHttp(orderId, { amount: 5000, tip: 0, idempotencyKey: K })
+      expect([recuperado.status, recuperado.body.payment?.paymentId, recuperado.body.payment?.amount]).toEqual([
+        200,
+        abono.body.payment.paymentId,
+        2000,
+      ])
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+
+      await conBorradoEntreLasDosConsultas(K, abono.body.payment.paymentId, async () => {
+        const reintento = await cobrarHttp(orderId, { amount: 5000, tip: 0, idempotencyKey: K })
+        expect([reintento.status, reintento.body.code, reintento.body.ownerName]).toEqual([403, 'TABLE_OWNED_BY_OTHER', 'Beto Mesero'])
+      })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+      expect(await marcas(orderId)).toEqual([])
+    })
+  })
+
+  /**
+   * 🔴 R5-2 (Codex r4, P2 E): la llave de un intento FAILED o de una devolución se respondía como cobro COMPLETED (con $100 de
+   * «cambio» en la devolución). Ningún cliente reusa así una llave (investigado en Android, Windows, iOS, TPV y el reducer), así que
+   * es un 409 claro y sin efectos: ni COMPLETED, ni cambio, ni otro pago con la llave ocupada.
+   */
+  it('🔴 R5-2: K de un intento FAILED de $100 ⇒ 409 IDEMPOTENCY_KEY_REUSED y la cuenta sigue debiendo $100; K de una devolución con $0 ⇒ 409', async () => {
+    const { orderId } = await cuentaDeA()
+    const comunes = { venueId, orderId, method: 'CASH' as const, feePercentage: 0, feeAmount: 0 }
+    const F = llaveHttp()
+    await prisma.payment.create({ data: { ...comunes, amount: 100, netAmount: 100, status: 'FAILED', idempotencyKey: F } })
+
+    await expect(payCashOrder(venueId, orderId, { amount: 10000, tip: 0, staffId: staffA, idempotencyKey: F })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    })
+    expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+    expect(await foto(orderId)).toMatchObject({ paymentStatus: 'PENDING', remainingBalance: 100, cobros: [] })
+
+    // La venta se cobra de verdad (otra llave) y aparece una devolución con la llave R; un «reintento» de $0 con R no es un cobro.
+    await payCashOrder(venueId, orderId, { amount: 10000, tip: 0, staffId: staffA, idempotencyKey: llaveHttp() })
+    const R = llaveHttp()
+    await prisma.payment.create({
+      data: { ...comunes, amount: -100, netAmount: -100, status: 'COMPLETED', type: 'REFUND', idempotencyKey: R },
+    })
+    await expect(payCashOrder(venueId, orderId, { amount: 0, tip: 0, staffId: staffA, idempotencyKey: R })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    })
+    expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(3)
   })
 })

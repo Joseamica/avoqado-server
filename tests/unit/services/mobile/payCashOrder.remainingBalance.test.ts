@@ -202,7 +202,17 @@ function installFakeStore(
   prismaMock.payment.findUnique.mockImplementation(async ({ where }: any) => {
     const key = where?.venueId_idempotencyKey?.idempotencyKey
     const found = payments.find(p => p.idempotencyKey === key)
-    return found ? { ...found, amount: new Decimal(found.amount), tipAmount: new Decimal(found.tipAmount), receipts: [] } : null
+    // R5-2: la fila real lleva su estado; el retorno idempotente sólo devuelve un cobro COMPLETED.
+    return found
+      ? {
+          ...found,
+          orderId: 'order-1',
+          status: 'COMPLETED',
+          amount: new Decimal(found.amount),
+          tipAmount: new Decimal(found.tipAmount),
+          receipts: [],
+        }
+      : null
   })
 
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })

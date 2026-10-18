@@ -281,12 +281,14 @@ describe('checkTableOwnership Middleware', () => {
      */
     const pagar = (res: Response) =>
       checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(mockReq as Request, res, mockNext)
+    /** El pago de la llave K: un cobro completado de esta orden (R5-2: sólo eso cuenta como «ya cobrada»). */
+    const COBRO = { orderId: 'order-1', status: 'COMPLETED', type: 'REGULAR' }
 
     it('🔴 R4-1: reintento de $0 con una llave que YA tiene pago de esta orden ⇒ pasa (el servicio devuelve ese pago)', async () => {
       setEnforced(true)
       setOrderOwnedByJuan()
       setCallerRoleWaiter(false)
-      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-1' })
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
       mockReq.body = { amount: 0, idempotencyKey: 'llave-K' }
       const res = conLocals()
       await pagar(res)
@@ -297,13 +299,69 @@ describe('checkTableOwnership Middleware', () => {
       )
       // No es dinero nuevo: no deja rastro de mesa ajena (no se registra nada).
       expect((res as any).locals.mesaAjena).toBeUndefined()
+      // R5-1: pasa SÓLO a recuperar ese pago; el servicio responde el 403 si ya no está.
+      expect((res as any).locals.soloRecuperarPago).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+      expect(prisma.payment.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ select: { orderId: true, status: true, type: true } }),
+      )
+    })
+
+    /**
+     * 🔴 R5-1 (Codex r4, P2 R): la excepción de R4-1 dejaba pasar la petición COMPLETA. Con un importe positivo en vivo y la llave K
+     * del abono de $20, si el pago se borraba antes de que el servicio lo releyera, se creaba un pago NUEVO de $50 en la mesa de
+     * Juan. Ahora la excepción sólo autoriza recuperar: la marca interna viaja al servicio, que la comprueba antes de crear nada.
+     */
+    it('🔴 R5-1: cobro EN VIVO de $50 con la llave K de un abono ya cobrado ⇒ pasa sólo a recuperarlo (marca interna), sin rastro de mesa ajena', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
+      mockReq.body = { amount: 5000, idempotencyKey: 'llave-K' }
+      const res = conLocals()
+      await pagar(res)
+      expect(mockNext).toHaveBeenCalled()
+      expect((res as any).locals.soloRecuperarPago).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+    })
+
+    it('R5-1: la marca sale del middleware, no del body: un `soloRecuperarPago` en el cuerpo no cambia nada (llave nueva ⇒ 403)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+      mockReq.body = { amount: 5000, idempotencyKey: 'llave-nueva', soloRecuperarPago: { ownerId: 'x', ownerName: 'x' } }
+      const res = conLocals()
+      await pagar(res)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect((res as any).locals.soloRecuperarPago).toBeUndefined()
+    })
+
+    /** 🔴 R5-2 (Codex r4, P2 E): sólo un COBRO COMPLETADO de esta orden es «ya cobrada»; un intento fallido o una devolución, no. */
+    it.each([
+      ['un intento FAILED', { orderId: 'order-1', status: 'FAILED', type: 'REGULAR' }],
+      ['un cobro PENDING', { orderId: 'order-1', status: 'PENDING', type: 'REGULAR' }],
+      ['una devolución (REFUND) completada', { orderId: 'order-1', status: 'COMPLETED', type: 'REFUND' }],
+    ])('🔴 R5-2: la llave es de %s de esta orden ⇒ 403 como una llave nueva', async (_caso, pago) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(pago)
+      mockReq.body = { amount: 0, idempotencyKey: 'llave-K' }
+      const res = conLocals()
+      await pagar(res)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(jsonMock).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'TABLE_OWNED_BY_OTHER', ownerId: JUAN, ownerName: 'Juan Pérez' }),
+      )
+      expect(mockNext).not.toHaveBeenCalled()
+      expect((res as any).locals.soloRecuperarPago).toBeUndefined()
     })
 
     it('R4-1: la misma llave también vale en la cola sin red ($0 con isOfflineReplay)', async () => {
       setEnforced(true)
       setOrderOwnedByJuan()
       setCallerRoleWaiter(false)
-      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-1' })
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
       mockReq.body = { isOfflineReplay: true, amount: 0, idempotencyKey: 'llave-K' }
       await pagar(conLocals())
       expect(mockNext).toHaveBeenCalled()
@@ -314,8 +372,8 @@ describe('checkTableOwnership Middleware', () => {
       ['una llave NUEVA (sin pago)', null, { amount: 0, idempotencyKey: 'llave-nueva' }],
       ['una llave cuyo pago es de OTRA orden', { orderId: 'order-otra' }, { amount: 0, idempotencyKey: 'llave-K' }],
       ['un pago sin orden', { orderId: null }, { amount: 0, idempotencyKey: 'llave-K' }],
-      ['una llave vacía', { orderId: 'order-1' }, { amount: 0, idempotencyKey: '' }],
-      ['una llave que no es texto', { orderId: 'order-1' }, { amount: 0, idempotencyKey: 123 }],
+      ['una llave vacía', COBRO, { amount: 0, idempotencyKey: '' }],
+      ['una llave que no es texto', COBRO, { amount: 0, idempotencyKey: 123 }],
     ])('R4-1: $0 sobre mesa ajena con %s ⇒ 403 como antes', async (_caso, pago, cuerpo) => {
       setEnforced(true)
       setOrderOwnedByJuan()
@@ -332,7 +390,7 @@ describe('checkTableOwnership Middleware', () => {
       setEnforced(true)
       setOrderOwnedByJuan()
       setCallerRoleWaiter(false)
-      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-1' })
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
       mockReq.body = { amount: 0, idempotencyKey: 'llave-K' }
       await checkTableOwnership('order')(mockReq as Request, conLocals(), mockNext)
       expect(statusMock).toHaveBeenCalledWith(403)

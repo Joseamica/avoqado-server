@@ -61,6 +61,8 @@ interface Pago {
   amount: number
   tipAmount: number
   type: 'REGULAR' | 'REFUND'
+  /** R5-2: el estado REAL de la fila (los retornos idempotentes sólo devuelven un cobro COMPLETED). */
+  status: 'COMPLETED' | 'FAILED' | 'PENDING'
   method: string
   idempotencyKey: string | null
 }
@@ -94,6 +96,7 @@ function instalarBase(inicial: { paymentStatus: Estado; status?: string; total: 
     amount: 0,
     tipAmount: 0,
     type: 'REGULAR',
+    status: 'COMPLETED',
     method: 'CASH',
     idempotencyKey: null,
     ...p,
@@ -143,6 +146,7 @@ function instalarBase(inicial: { paymentStatus: Estado; status?: string; total: 
       amount: Number(data.amount),
       tipAmount: Number(data.tipAmount),
       type: 'REGULAR',
+      status: 'COMPLETED',
       method: data.method,
       idempotencyKey: data.idempotencyKey ?? null,
     }
@@ -580,5 +584,116 @@ describe('R2-6: dinero capturado en una mesa que reasignaron', () => {
     instalarBase({ paymentStatus: 'PENDING', total: 100 })
     await payCashOrder('venue-1', 'order-1', cola(10000, 'mesa-propia'))
     expect(marcas()).toHaveLength(0)
+  })
+})
+
+/**
+ * 🔴 R5-1 (Codex r4, P2 R): la propiedad de mesa deja pasar a Ana SÓLO a recuperar el pago de su llave K (mesa ya de Beto). Si un
+ * administrador borra ese pago entre la consulta del middleware y la del servicio, antes se creaba un pago NUEVO en la mesa ajena.
+ * Ahora `soloRecuperarPago` se comprueba antes de cualquier creación: sin el cobro, el mismo 403 de mesa ajena.
+ */
+describe('R5-1: autorizada sólo a recuperar el pago de su llave', () => {
+  const BETO = { ownerId: 'staff-beto', ownerName: 'Beto Bravo' }
+  const enVivo = (amount: number, idempotencyKey: string) => ({
+    amount,
+    tip: 0,
+    staffId: 'staff-1',
+    idempotencyKey,
+    soloRecuperarPago: BETO,
+  })
+
+  it.each([
+    ['$0 (cuenta cortesiada)', 0, { paymentStatus: 'PAID' as const, total: 0 }],
+    ['$50 en vivo sobre una cuenta que debe', 5000, { paymentStatus: 'PARTIAL' as const, total: 100 }],
+  ])('🔴 el pago de K se borró antes de releerlo ⇒ %s: 403 TABLE_OWNED_BY_OTHER y ningún pago nuevo', async (_caso, amount, base) => {
+    const { pagos, cas } = instalarBase(base) // K ya no existe: lo borraron entre las dos consultas.
+
+    const error = await payCashOrder('venue-1', 'order-1', enVivo(amount, 'llave-K')).catch(e => e)
+
+    expect(error).toMatchObject({ statusCode: 403, code: 'TABLE_OWNED_BY_OTHER', dueno: BETO })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect([pagos.length, cas.length]).toEqual([0, 0])
+  })
+
+  it('🔴 la llave K es de OTRA orden ⇒ el mismo 403 (no el 409 de llave ajena), sin escribir nada', async () => {
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 20, idempotencyKey: 'llave-K' }])
+    prismaMock.payment.findUnique.mockResolvedValueOnce({ id: 'otro', orderId: 'order-otra', status: 'COMPLETED', type: 'REGULAR' } as any)
+
+    await expect(payCashOrder('venue-1', 'order-1', enVivo(5000, 'llave-K'))).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'TABLE_OWNED_BY_OTHER',
+    })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('control: el pago de K sigue ahí ⇒ se devuelve ESE pago ($20), sin crear otro ni rastro de mesa ajena', async () => {
+    const { pagos } = instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 20, idempotencyKey: 'llave-K' }])
+
+    const r = await payCashOrder('venue-1', 'order-1', enVivo(5000, 'llave-K'))
+
+    expect([r.paymentId, r.amount, r.status]).toEqual(['previo-1', 2000, 'COMPLETED'])
+    expect(pagos).toHaveLength(1)
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('control: sin la marca, la misma llave borrada es un cobro nuevo como siempre (mesa propia)', async () => {
+    const { pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    await payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-K' })
+    expect(pagos.map(p => p.amount)).toEqual([50])
+  })
+})
+
+/**
+ * 🔴 R5-2 (Codex r4, P2 E): el retorno idempotente respondía `status: 'COMPLETED'` fijo con lo que encontrara la llave. Un intento
+ * FAILED de $100 se presentaba como cobro de $100 (la cuenta seguía debiendo $100) y una devolución de −$100 como cobro con $100 de
+ * cambio. Sólo un cobro completado de esta orden es «la misma operación»; lo demás ⇒ 409 sin escribir nada.
+ */
+describe('R5-2: la llave de un intento fallido o de una devolución no es «el mismo cobro»', () => {
+  it.each([
+    ['un intento FAILED de $100', { amount: 100, status: 'FAILED' as const, idempotencyKey: 'llave-F' }, 10000, 'llave-F'],
+    ['una devolución (REFUND) de −$100', { amount: -100, type: 'REFUND' as const, idempotencyKey: 'llave-R' }, 0, 'llave-R'],
+  ])('🔴 %s ⇒ 409 IDEMPOTENCY_KEY_REUSED, ni COMPLETED ni cambio ni pago nuevo', async (_caso, previo, amount, llave) => {
+    const { pagos, cas } = instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [previo])
+
+    await expect(payCashOrder('venue-1', 'order-1', { amount, tip: 0, staffId: 'staff-1', idempotencyKey: llave })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect([pagos.length, cas.length]).toEqual([1, 0])
+  })
+
+  it('🔴 la cola sin red (isOfflineReplay) con la llave de un intento FAILED ⇒ el mismo 409: no se afirma un cobro que no ocurrió', async () => {
+    instalarBase({ paymentStatus: 'PENDING', total: 100 }, [{ amount: 100, status: 'FAILED', idempotencyKey: 'cola-F' }])
+    await expect(payCashOrder('venue-1', 'order-1', cola(10000, 'cola-F'))).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 carrera: bajo el candado la llave resulta ser de un intento FAILED ⇒ 409 por la red de la carrera, sin crear', async () => {
+    instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    // La consulta rápida no ve la llave; al crear choca con el índice único (P2002) y el «ganador» es un intento FAILED.
+    prismaMock.payment.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: 'f-1',
+        orderId: 'order-1',
+        status: 'FAILED',
+        type: 'REGULAR',
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        receipts: [],
+      } as any)
+    prismaMock.payment.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }))
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-c' }),
+    ).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_REUSED',
+    })
   })
 })
