@@ -432,6 +432,42 @@ describe('checkTableOwnership Middleware', () => {
       expect((res as any).locals.mesaAjena).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
     })
 
+    // 🔴 R6-3 (Codex r5 #3): lo que decide aquí puede quedar viejo antes del candado del cobro. En la ruta de cobro, con la regla
+    // encendida, deja la marca interna `propiedadDeMesa` para que el cobro la revise otra vez bajo el candado con la MISMA regla.
+    it('🔴 R6-3: el dueño cobra su mesa ⇒ pasa y deja `propiedadDeMesa` con su id y la MISMA regla de override (pay-any/manage-all)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      ;(mockReq as any).authContext.userId = JUAN
+      mockReq.body = { amount: 0, tip: 0, idempotencyKey: 'k' }
+      const res = conLocals()
+      await pagar(res)
+      expect(mockNext).toHaveBeenCalled()
+      const marca = (res as any).locals.propiedadDeMesa
+      expect(marca.userId).toBe(JUAN)
+
+      // La regla diferida es `staffCanManageAllTables` con los overrides de COBRO: sin permiso ⇒ false; con uno ⇒ true.
+      setCallerRoleWaiter(false)
+      await expect(marca.puedeCobrarAjena()).resolves.toBe(false)
+      setCallerRoleWaiter(true)
+      await expect(marca.puedeCobrarAjena()).resolves.toBe(true)
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith('WAITER', null, 'tables:pay-any', null)
+    })
+
+    it('R6-3: la marca sale del middleware, no del body; sin la regla encendida, o fuera de la ruta de cobro, no hay marca', async () => {
+      setOrderOwnedByJuan()
+      ;(mockReq as any).authContext.userId = JUAN
+      mockReq.body = { propiedadDeMesa: { userId: 'staff-x' } }
+      setEnforced(false)
+      const apagada = conLocals()
+      await pagar(apagada)
+      expect((apagada as any).locals.propiedadDeMesa).toBeUndefined()
+
+      setEnforced(true)
+      const edicion = conLocals()
+      await checkTableOwnership('order')(mockReq as Request, edicion, mockNext)
+      expect((edicion as any).locals.propiedadDeMesa).toBeUndefined()
+    })
+
     it('🔴 una ruta que EDITA la mesa no se exime aunque el cuerpo diga isOfflineReplay', async () => {
       setEnforced(true)
       setOrderOwnedByJuan()

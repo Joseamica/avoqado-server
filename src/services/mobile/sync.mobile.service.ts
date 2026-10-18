@@ -1410,6 +1410,17 @@ async function applyPayCash(
   // borraron entre esta lectura y la suya responde TABLE_OWNED_BY_OTHER en vez de crear un pago. Con dinero (> $0) es el registro
   // de efectivo capturado de R2-6, con su rastro; si el pago existe, payCashOrder lo devuelve y el rastro no se usa.
   const marcaDeMesaAjena = mesaAjena ? (hayDinero ? { mesaAjena } : { soloRecuperarPago: mesaAjena }) : {}
+  // 🔴 R6-3 (Codex r5 #3): la revisión de arriba va antes del candado del cobro. Con la regla encendida, payCashOrder la repite bajo
+  // el candado con la MISMA regla (overrides de cobro): un $0 sobre una cuenta que pasó a otro mesero en esa ventana ⇒
+  // TABLE_OWNED_BY_OTHER; el dinero capturado sigue y deja el rastro de mesa ajena.
+  const propiedadDeMesa = (await isTableOwnershipEnforced(venueId))
+    ? {
+        propiedadDeMesa: {
+          userId: staffId,
+          puedeCobrarAjena: () => staffCanManageAllTables(staffId, venueId, undefined, undefined, PAYMENT_OWNERSHIP_OVERRIDES),
+        },
+      }
+    : {}
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,
@@ -1431,6 +1442,7 @@ async function applyPayCash(
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
     ...marcaDeMesaAjena,
+    ...propiedadDeMesa,
     ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
   })
   return {

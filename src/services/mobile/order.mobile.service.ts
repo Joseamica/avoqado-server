@@ -64,6 +64,7 @@ import {
   esVentaCerrada,
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
+  hayDineroQueSeGuarda,
   impuestoQueSeCobraAparte,
   summarizeRefunds,
   type RefundState,
@@ -2689,6 +2690,13 @@ export interface CashPaymentInput {
    */
   soloRecuperarPago?: { ownerId: string | null; ownerName: string }
   /**
+   * 🔴 R6-3 (Codex r5 #3): la propiedad de mesa estaba encendida cuando se autorizó la petición. El middleware (o el reducer) la revisó
+   * ANTES del candado; si la cuenta cambia de dueño en esa ventana (una reasignación usa el mismo candado de la orden), el cobro la
+   * vuelve a revisar bajo el candado con la MISMA regla: `puedeCobrarAjena` = `staffCanManageAllTables` con los overrides de cobro
+   * (`tables:pay-any`/`tables:manage-all`). Marca INTERNA (res.locals o el reducer), nunca el body.
+   */
+  propiedadDeMesa?: { userId: string; puedeCobrarAjena: () => Promise<boolean> }
+  /**
    * Quién procesó el cobro cuando NO fue Avoqado ("Clip", "terminal del
    * negocio", "transferencia BBVA"). Se guarda en Payment.externalSource, que
    * ya existía para anotaciones manuales. Es lo que permite responder cuánto
@@ -3048,6 +3056,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   //   · si quedó PARTIAL        → cobra el restante real, no el que leyó primero ✅
   // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
+  // R6-3: la mesa resultó ajena BAJO el candado y entró dinero ya capturado ⇒ se registra con el mismo rastro de R2-6 (post-commit).
+  const propiedadBajoCandado: { mesaAjena: { ownerId: string; ownerName: string } | null } = { mesaAjena: null }
   // 🔴 R2-1: la cola de Android/Windows ≤ 2.23 (H1) manda el TOTAL de la cuenta; para ella, el cobro de antes de S1/S2.
   const conH1 = input.isOfflineReplay === true && input.colaConDefectoH1 === true
   let paymentResult:
@@ -3082,6 +3092,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
     try {
       paymentResult = await prisma.$transaction(async tx => {
+        propiedadBajoCandado.mesaAjena = null
         // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
         // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya
         // capturada no produjo efectivo para devolver: recortarla escondería dinero real y rompería la conciliación) y si se admite
@@ -3155,10 +3166,36 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             version: true,
             areaTicketCode: true,
             tableId: true,
+            // R6-3: la propiedad de mesa, releída bajo el candado.
+            servedById: true,
+            servedBy: { select: { firstName: true, lastName: true } },
           },
         })
         if (!fresh) {
           throw new NotFoundError('Order not found')
+        }
+
+        // 🔴 R6-3 (Codex r5 #3): la propiedad de mesa otra vez, bajo el candado (la de antes pudo quedar vieja: una reasignación usa
+        // este mismo candado). Misma regla que el middleware: mostrador, sin dueño o propia ⇒ sigue; ajena sin override ⇒ el cobro
+        // NUEVO recibe el mismo 403 sin crear nada; el dinero ya capturado (cola con > $0) se registra con el rastro de R2-6.
+        const propiedad = input.propiedadDeMesa
+        if (
+          propiedad &&
+          fresh.tableId &&
+          fresh.servedById &&
+          fresh.servedById !== propiedad.userId &&
+          !(await propiedad.puedeCobrarAjena())
+        ) {
+          const dueno = {
+            ownerId: fresh.servedById,
+            ownerName: fresh.servedBy ? `${fresh.servedBy.firstName} ${fresh.servedBy.lastName}`.trim() : 'otro mesero',
+          }
+          if (input.isOfflineReplay === true && hayDineroQueSeGuarda(amount, tip)) {
+            propiedadBajoCandado.mesaAjena = dueno
+          } else {
+            await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey })
+            throw new MesaAjenaSoloRecuperacion(dueno)
+          }
         }
 
         // 2️⃣ VALIDACIÓN DENTRO DE LA TRANSACCIÓN (era el bug: estaba fuera). Sobre una venta CERRADA (PAID o REFUNDED) sólo se
@@ -3166,6 +3203,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         // tarjeta ajena ya aprobada) se registra: rechazarlo dejaba $200 en el cajón y $100 en la base. La venta se queda cerrada.
         // R2-1: la cola con H1 conserva el guard de antes (sólo PAID; REFUNDED pierde la CAS de abajo ⇒ 409, como antes).
         if (conH1 ? fresh.paymentStatus === 'PAID' : esVentaCerrada(fresh.paymentStatus) && (cobroNuevo || amount + tip === 0)) {
+          // 🔴 R6-2 (Codex r5 #2): antes de rechazar, la llave otra vez BAJO el candado. Un reintento simultáneo con la misma llave
+          // consultó antes de que el primero confirmara; si ese cobro ya existe, es la misma operación: sale por la red de la carrera
+          // (devuelve ese pago; con un intento FAILED o una devolución, 409 de R5-2).
+          await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey })
           throw new BadRequestError('Order is already paid')
         }
 
@@ -3252,6 +3293,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         const saldoAntes = computeOrderBalance(cuenta, previousPayments)
         // Recheck after the Order lock: the zero-payment preflight balance can be stale.
         if (amount === 0 && tip === 0 && saldoAntes.remainingBalance.greaterThan(0.005)) {
+          await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey }) // R6-2
           throw new BadRequestError(
             `Esta cuenta debe ${saldoAntes.remainingBalance.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`,
           )
@@ -3662,8 +3704,10 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   }
 
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
-  // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo.
-  if (input.mesaAjena) {
+  // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
+  // resultó ajena hasta la relectura bajo el candado.
+  const mesaAjena = input.mesaAjena ?? propiedadBajoCandado.mesaAjena
+  if (mesaAjena) {
     void (await import('../dashboard/activity-log.service')).logAction({
       action: 'CAPTURED_PAYMENT_ON_FOREIGN_TABLE',
       entity: 'Order',
@@ -3672,8 +3716,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       staffId: effectiveStaffId ?? null,
       data: {
         paymentId: payment.id,
-        tableOwnerId: input.mesaAjena.ownerId,
-        tableOwnerName: input.mesaAjena.ownerName,
+        tableOwnerId: mesaAjena.ownerId,
+        tableOwnerName: mesaAjena.ownerName,
         amount: amountDecimal,
         tip: tipDecimal,
         idempotencyKey: input.idempotencyKey ?? null,

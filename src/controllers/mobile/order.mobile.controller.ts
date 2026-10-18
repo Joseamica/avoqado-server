@@ -385,6 +385,8 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       mesaAjena: res.locals?.mesaAjena,
       // R5-1: la propiedad de mesa sólo autorizó RECUPERAR el pago de esta llave (`checkTableOwnership`, ruta de cobro).
       soloRecuperarPago: res.locals?.soloRecuperarPago,
+      // R6-3: la propiedad de mesa estaba encendida; el cobro la vuelve a revisar bajo el candado (`checkTableOwnership`, ruta de cobro).
+      propiedadDeMesa: res.locals?.propiedadDeMesa,
     })
 
     res.status(200).json({
@@ -393,6 +395,7 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
     })
   } catch (error) {
     // R5-1: el MISMO 403 que responde `checkTableOwnership` a una mesa ajena (el pago que sólo podía recuperarse ya no está).
+    // R6-3: también cuando la cuenta resultó ajena hasta la relectura bajo el candado.
     if (error instanceof MesaAjenaSoloRecuperacion) {
       logger.info(`payCash: mesa ajena — el pago de la llave ya no existe; no se crea otro (${(error as Error).message})`)
       return res.status(403).json(cuerpoMesaAjena(error.dueno))

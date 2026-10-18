@@ -11,7 +11,16 @@
  */
 import { randomUUID } from 'crypto'
 import type { NextFunction, Request, Response } from 'express'
-import { InventoryMethod, Prisma, StaffRole, Unit } from '@prisma/client'
+import {
+  AreaTicketCheckoutStatus,
+  AreaTicketStatus,
+  InventoryMethod,
+  Prisma,
+  StaffRole,
+  TerminalStatus,
+  TerminalType,
+  Unit,
+} from '@prisma/client'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
@@ -43,6 +52,12 @@ import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.servic
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { deletePayment } from '@/services/dashboard/payment.dashboard.service'
+import {
+  addTicketToCheckout,
+  createAreaTicketCheckout,
+  issueAreaTicket,
+  materializeAreaTicketCheckout,
+} from '@/services/mobile/areaTicketV7.mobile.service'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 const express = require('express') as typeof import('express')
@@ -821,5 +836,308 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
       code: 'IDEMPOTENCY_KEY_REUSED',
     })
     expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(3)
+  })
+
+  /**
+   * 🔴 R6-3 (Codex r5 #3, P2): la propiedad se revisaba SÓLO en el middleware (o en el reducer, antes de cobrar). Si un encargado
+   * pasa la cuenta de Ana a Beto entre esa revisión y el candado del cobro, el cobro NUEVO de Ana (un $0 que cierra la cortesía)
+   * cerraba la mesa de Beto. Ahora el cobro vuelve a mirar la propiedad bajo el candado. La reasignación se intercala en la n-ésima
+   * consulta de la llave: la del servicio, justo antes de su transacción.
+   */
+  async function conReasignacionAntesDelCandado(llave: string, orderId: string, enLaConsulta: number, prueba: () => Promise<void>) {
+    const original = prisma.payment.findUnique.bind(prisma.payment)
+    let vistas = 0
+    const espia = jest.spyOn(prisma.payment, 'findUnique').mockImplementation((async (args: any) => {
+      const r = await original(args)
+      if (args?.where?.venueId_idempotencyKey?.idempotencyKey === llave && ++vistas === enLaConsulta) {
+        await prisma.order.update({ where: { id: orderId }, data: { servedById: beto } })
+      }
+      return r
+    }) as never)
+    try {
+      await prueba()
+    } finally {
+      espia.mockRestore()
+    }
+    expect(vistas).toBeGreaterThanOrEqual(enLaConsulta)
+  }
+  async function cortesiaDeAna() {
+    const { orderId, localOrderId } = await cuentaDeA()
+    await prisma.order.update({ where: { id: orderId }, data: { servedById: ana, discountAmount: 100, total: 0, remainingBalance: 0 } })
+    return { orderId, localOrderId }
+  }
+
+  it('🔴 R6-3 HTTP: la cortesía de Ana pasa a Beto entre el middleware y el candado ⇒ el $0 nuevo de Ana: 403 con el cuerpo exacto y ningún pago (antes: PAID con un pago de $0 de Ana en la mesa de Beto)', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cortesiaDeAna()
+      const K = llaveHttp()
+
+      await conReasignacionAntesDelCandado(K, orderId, 1, async () => {
+        const r = await cobrarHttp(orderId, { amount: 0, tip: 0, idempotencyKey: K })
+        expect([r.status, r.body]).toEqual([
+          403,
+          {
+            error: 'Forbidden',
+            code: 'TABLE_OWNED_BY_OTHER',
+            message: 'Solo Beto Mesero puede modificar esta mesa',
+            ownerId: beto,
+            ownerName: 'Beto Mesero',
+          },
+        ])
+      })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+      expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })).toEqual({
+        paymentStatus: 'PENDING',
+      })
+    })
+  })
+
+  it('🔴 R6-3 reducer: lo mismo con el PAY_CASH de $0 de Ana (la reasignación entre la revisión del reducer y el cobro) ⇒ REJECTED TABLE_OWNED_BY_OTHER y ningún pago', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cortesiaDeAna()
+      const intent = { id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: 0, tipCents: 0, method: 'CASH' } }
+
+      // 1.ª consulta de la llave: la del reducer (antes de su revisión de mesa); 2.ª: la del servicio.
+      await conReasignacionAntesDelCandado(intent.id, orderId, 2, async () => {
+        const [ack] = await processIntents(params([intent], ana))
+        expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+    })
+  })
+
+  it('🔴 R6-3: el dinero CAPTURADO de Ana ($100 de su cola) sobre la cuenta que pasó a Beto en esa ventana ⇒ se registra y deja el rastro de la mesa ajena (antes: sin rastro)', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: ana } })
+      const K = llaveHttp()
+
+      await conReasignacionAntesDelCandado(K, orderId, 1, async () => {
+        const r = await cobrarHttp(orderId, { amount: 10000, tip: 0, idempotencyKey: K, isOfflineReplay: true })
+        expect([r.status, r.body.payment?.amount]).toEqual([200, 10000])
+      })
+      expect(await marcasAsentadas(orderId, 1)).toEqual([{ staffId: ana, data: expect.objectContaining({ tableOwnerId: beto }) }])
+    })
+  })
+
+  it('control R6-3: sin reasignación, el $0 de Ana cierra SU cortesía como siempre y no deja rastro', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cortesiaDeAna()
+      const r = await cobrarHttp(orderId, { amount: 0, tip: 0, idempotencyKey: llaveHttp() })
+      expect(r.status).toBe(200)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })).paymentStatus).toBe('PAID')
+      expect(await marcas(orderId)).toEqual([])
+    })
+  })
+})
+
+/**
+ * 🔴 R6-2 (Codex r5 #2, P2): A y B mandan la MISMA llave e importe (el cliente reenvió mientras la primera seguía en vuelo). B consultó
+ * la llave antes de que A confirmara; bajo el candado veía la venta PAID y respondía 400 «ya pagada» en vez de devolver el cobro de A.
+ * Ahora, antes de rechazar por venta cerrada o por saldo, se vuelve a buscar la llave bajo el candado. A se intercala justo después de
+ * la primera consulta de B (que no ve nada).
+ */
+describe('R6-2 · el reintento simultáneo con la misma llave responde como la primera vez', () => {
+  async function conGanadorEntreLasDosLecturas<T>(llave: string, ganador: () => Promise<T>, prueba: () => Promise<void>) {
+    const original = prisma.payment.findUnique.bind(prisma.payment)
+    let primero: T | undefined
+    let disparado = false
+    const espia = jest.spyOn(prisma.payment, 'findUnique').mockImplementation((async (args: any) => {
+      const r = await original(args)
+      if (!disparado && args?.where?.venueId_idempotencyKey?.idempotencyKey === llave) {
+        disparado = true
+        primero = await ganador() // A cobra y confirma; B se queda con su lectura vieja (sin pago).
+      }
+      return r
+    }) as never)
+    try {
+      await prueba()
+    } finally {
+      espia.mockRestore()
+    }
+    expect(disparado).toBe(true)
+    return primero
+  }
+
+  it.each([
+    ['en vivo, $100', 10000, {}, false],
+    ['cola Android/Windows ≤ 2.23 (H1), $100', 10000, { isOfflineReplay: true, colaConDefectoH1: true }, false],
+    ['cortesía de $0', 0, {}, true],
+    ['control · cola moderna, $100 (ya se recuperaba)', 10000, { isOfflineReplay: true }, false],
+  ])(
+    '🔴 %s ⇒ B devuelve el MISMO cobro de A, un solo pago (antes: 400 «Order is already paid»)',
+    async (_caso, amount, extra, cortesia) => {
+      const { orderId } = await cuentaDeA()
+      if (cortesia) await prisma.order.update({ where: { id: orderId }, data: { discountAmount: 100, total: 0, remainingBalance: 0 } })
+      const K = `r6-2-${randomUUID()}`
+      const cobro = (staffId: string) => payCashOrder(venueId, orderId, { amount, tip: 0, staffId, idempotencyKey: K, ...extra })
+      let deB: Awaited<ReturnType<typeof payCashOrder>> | undefined
+
+      const deA = await conGanadorEntreLasDosLecturas(
+        K,
+        () => cobro(staffA),
+        async () => {
+          deB = await cobro(staffB)
+        },
+      )
+
+      expect(deA?.paymentId).toEqual(expect.any(String))
+      expect([deB?.paymentId, deB?.status, deB?.amount]).toEqual([deA?.paymentId, 'COMPLETED', deA?.amount])
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })).paymentStatus).toBe('PAID')
+    },
+  )
+})
+
+/**
+ * 🔴 R6-1 (Codex r5 #1, P1): una venta de vales cancelada por la ruta GENERAL (DELETE /orders/:id) dejaba su sesión MATERIALIZED; el
+ * efectivo ya capturado que llegaba después chocaba con la finalización del vale (409 `CHECKOUT_ORDER_NOT_PAYABLE`) y todo se revertía:
+ * el dinero se perdía. Por la ruta de vales sí había salida (R12-1: se registra a nivel venta). Ahora las dos cancelaciones llegan al
+ * MISMO estado. También la variante REFUNDED + cancelación general (la venta queda CANCELLED/REFUNDED y no se reabre).
+ */
+describe('R6-1 · venta de vales cancelada por la ruta general', () => {
+  let issueUid: string
+  let checkoutUid: string
+  beforeAll(async () => {
+    const areaId = (
+      await prisma.fulfillmentArea.create({ data: { venueId, name: `Barra ${fixture}`, fulfillmentMode: 'HOLD_UNTIL_PAID' } })
+    ).id
+    issueUid = `issue-${fixture}`
+    checkoutUid = `checkout-${fixture}`
+    await prisma.terminal.createMany({
+      data: [
+        {
+          venueId,
+          name: 'Barra',
+          type: TerminalType.POS_ANDROID,
+          status: TerminalStatus.ACTIVE,
+          deviceUid: issueUid,
+          fulfillmentAreaId: areaId,
+          canIssueAreaTickets: true,
+        },
+        {
+          venueId,
+          name: 'Caja',
+          type: TerminalType.POS_ANDROID,
+          status: TerminalStatus.ACTIVE,
+          deviceUid: checkoutUid,
+          canCheckoutAreaTickets: true,
+        },
+      ],
+    })
+    await prisma.venueAreaTicketSettings.create({ data: { venueId, enabled: true } })
+  })
+
+  /** Venta de vales de $100 materializada: un vale de un café. */
+  async function ventaDeVales() {
+    const k = randomUUID().slice(0, 8)
+    const ticket = await issueAreaTicket(venueId, {
+      idempotencyKey: `issue-${k}`,
+      deviceUid: issueUid,
+      staffId: staffA,
+      lines: [{ clientLineId: `line-${k}`, productId, quantity: '1' }],
+    })
+    const checkout = await createAreaTicketCheckout(venueId, { idempotencyKey: `checkout-${k}`, deviceUid: checkoutUid, staffId: staffA })
+    await addTicketToCheckout(venueId, checkout.id, ticket.code, { idempotencyKey: `claim-${k}`, deviceUid: checkoutUid, staffId: staffA })
+    const materializada = await materializeAreaTicketCheckout(venueId, checkout.id, {
+      idempotencyKey: `materialize-${k}`,
+      deviceUid: checkoutUid,
+      staffId: staffA,
+      source: 'AVOQADO_ANDROID',
+    })
+    expect(materializada.order.total).toBe('100.00')
+    return { orderId: materializada.order.id, sessionId: checkout.id, ticketId: ticket.id }
+  }
+  const cancelarPorLaRutaGeneral = async (orderId: string) => {
+    const r = await request(app)
+      .delete(`/api/v1/mobile/venues/${venueId}/orders/${orderId}`)
+      .set('x-test-actor', staffB)
+      .send({ reason: 'cancelada por el encargado' })
+    expect(r.status).toBe(200)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true } })).status).toBe('CANCELLED')
+  }
+  const payCashPorOrden = (orderId: string) => ({
+    id: randomUUID(),
+    seq: ++seq,
+    type: 'PAY_CASH' as const,
+    payload: { orderId, amountCents: 10000, tipCents: 0, method: 'CASH' },
+  })
+  const vales = async (v: { sessionId: string; ticketId: string }) => ({
+    sesion: (await prisma.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: v.sessionId }, select: { status: true } })).status,
+    vale: await prisma.areaTicket.findUniqueOrThrow({ where: { id: v.ticketId }, select: { status: true, orderId: true } }),
+  })
+  const reaperturas = (orderId: string) =>
+    prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT' } })
+
+  it('🔴 A cobra $100 sin red, el encargado la cancela por DELETE, A sincroniza ⇒ ACKED, el Payment queda y la cuenta se reabre; la sesión y el vale quedan como por la ruta de vales (CANCELLED, vale ISSUED); reenviar no cambia nada (antes: 409 y el dinero fuera)', async () => {
+    const venta = await ventaDeVales()
+    const stockInicial = (await foto(venta.orderId)).stock
+    const intentA = payCashPorOrden(venta.orderId)
+    await cancelarPorLaRutaGeneral(venta.orderId)
+
+    const [ack] = await processIntents(params([intentA]))
+
+    expect(ack).toMatchObject({ status: 'ACKED', result: expect.objectContaining({ amount: 10000 }) })
+    const tras = await fotoAsentada(venta.orderId, f => f.cajon === 1)
+    expect(tras).toMatchObject({ paymentStatus: 'PAID', remainingBalance: 0, cobros: [100], stock: stockInicial, cajon: 1 })
+    expect(await reaperturas(venta.orderId)).toBe(1)
+    expect(await vales(venta)).toEqual({
+      sesion: AreaTicketCheckoutStatus.CANCELLED,
+      vale: { status: AreaTicketStatus.ISSUED, orderId: null },
+    })
+
+    const [repetido] = await processIntents(params([intentA]))
+    expect([repetido.status, repetido.result?.paymentId]).toEqual(['ACKED', ack.result?.paymentId])
+    expect(await fotoAsentada(venta.orderId, () => false)).toEqual(tras)
+  })
+
+  it('🔴 REFUNDED + cancelación general: B cobró la venta de vales, se devolvió y el encargado la canceló; A sincroniza sus $100 ⇒ ACKED, sigue CANCELLED/REFUNDED con saldo 0, sin reabrirse ni volver a consumir, 🚨 una vez (antes: 409 y el dinero fuera)', async () => {
+    const venta = await ventaDeVales()
+    const cobroB = await payCashOrder(venueId, venta.orderId, {
+      amount: 10000,
+      tip: 0,
+      staffId: staffB,
+      idempotencyKey: `r6-1-vivo-B-${venta.orderId}`,
+    })
+    await issueRefund({
+      venueId,
+      paymentId: cobroB.paymentId,
+      amount: 10000,
+      tipRefundCents: 0,
+      reason: 'CUSTOMER_REQUEST' as never,
+      staffId: staffB,
+    })
+    // Como la dejaba el código viejo (R13-4): hoy un reembolso deja la venta PAID. El guard de cancelación deja cancelar una REFUNDED.
+    await prisma.order.update({ where: { id: venta.orderId }, data: { paymentStatus: 'REFUNDED' } })
+    await cancelarPorLaRutaGeneral(venta.orderId)
+    const antes = await fotoAsentada(venta.orderId, f => f.cajon === 1)
+    expect([antes.status, antes.paymentStatus]).toEqual(['CANCELLED', 'REFUNDED'])
+
+    const [ack] = await processIntents(params([payCashPorOrden(venta.orderId)]))
+
+    expect(ack).toMatchObject({ status: 'ACKED', result: expect.objectContaining({ amount: 10000 }) })
+    const tras = await fotoAsentada(venta.orderId, f => f.avisos === 1)
+    expect(tras).toMatchObject({
+      status: 'CANCELLED',
+      paymentStatus: 'REFUNDED',
+      remainingBalance: 0,
+      cobros: [100, 100],
+      vales: antes.vales,
+      stock: antes.stock,
+      cajon: antes.cajon + 1,
+      avisos: 1,
+    })
+    expect(await reaperturas(venta.orderId)).toBe(0)
+    expect((await vales(venta)).sesion).toBe(AreaTicketCheckoutStatus.PAID)
+  })
+
+  it('regresión R6-1: el efectivo EN VIVO del POS sobre la venta de vales cancelada por DELETE se rechaza antes de tomar el dinero', async () => {
+    const venta = await ventaDeVales()
+    await cancelarPorLaRutaGeneral(venta.orderId)
+
+    await expect(
+      payCashOrder(venueId, venta.orderId, { amount: 10000, tip: 0, staffId: staffA, idempotencyKey: `r6-1-vivo-${venta.orderId}` }),
+    ).rejects.toMatchObject({ statusCode: expect.any(Number) })
+    expect(await prisma.payment.count({ where: { venueId, orderId: venta.orderId } })).toBe(0)
   })
 })

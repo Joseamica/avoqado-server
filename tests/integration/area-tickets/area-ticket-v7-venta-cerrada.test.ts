@@ -49,7 +49,7 @@ import {
   issueAreaTicket,
   materializeAreaTicketCheckout,
 } from '@/services/mobile/areaTicketV7.mobile.service'
-import { mergeOrders, payCashOrder, splitOrderBySeat, splitOrderItems } from '@/services/mobile/order.mobile.service'
+import { cancelOrder, mergeOrders, payCashOrder, splitOrderBySeat, splitOrderItems } from '@/services/mobile/order.mobile.service'
 import * as cuentaConValesModule from '@/services/shared/cuentaConVales'
 import { moveOrderToTable } from '@/services/tpv/table.tpv.service'
 import { getOperations, getOverview } from '@/services/dashboard/areaTicket.dashboard.service'
@@ -1118,6 +1118,29 @@ describe('🔴 Ronda 12: dinero capturado sobre una sesión cancelada, reservas 
     expect(await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId }, select: { paymentStatus: true } })).toEqual({
       paymentStatus: 'PAID',
     })
+    expect(await reaperturas(venta.orderId)).toBe(1)
+    expect(await valesLiberados(venta)).toEqual(LIBERADOS)
+    expect(await stockDe()).toEqual({ vale: 10, suelto: 9 })
+  })
+
+  // 🔴 R6-1 (efectivo sin red, Codex r5 #1): la MISMA venta cancelada por la ruta GENERAL (`cancelOrder`, el DELETE móvil) dejaba la
+  // sesión MATERIALIZED y el registro de la terminal recibía 409 `CHECKOUT_ORDER_NOT_PAYABLE` (todo se revertía). Ahora queda igual que
+  // por la ruta de vales: el Payment, la cuenta reabierta, la sesión CANCELLED y el vale liberado; sólo el suelto se descuenta.
+  it('🔴 R6-1: venta cancelada por la ruta GENERAL y la terminal registra $100 capturados ⇒ igual que R12-1 (antes: 409, el dinero se perdía)', async () => {
+    await reiniciarInventario(10)
+    const venta = await ventaDeVales()
+    await cancelOrder(venueId!, venta.orderId, 'cancelada por el encargado', staffId)
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.MATERIALIZED)
+
+    const cobro: any = await cobroDeLaTerminal(venta.orderId, 100)
+
+    expect(cobro.id).toEqual(expect.any(String))
+    expect(await prisma.payment.count({ where: { orderId: venta.orderId, status: 'COMPLETED' } })).toBe(1)
+    const orden = await prisma.order.findUniqueOrThrow({
+      where: { id: venta.orderId },
+      select: { status: true, paymentStatus: true, remainingBalance: true },
+    })
+    expect([orden.status, orden.paymentStatus, Number(orden.remainingBalance)]).toEqual(['COMPLETED', 'PAID', 0])
     expect(await reaperturas(venta.orderId)).toBe(1)
     expect(await valesLiberados(venta)).toEqual(LIBERADOS)
     expect(await stockDe()).toEqual({ vale: 10, suelto: 9 })

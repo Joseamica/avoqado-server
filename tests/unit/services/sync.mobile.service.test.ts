@@ -596,6 +596,29 @@ describe('sync.mobile.service processIntents', () => {
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
   })
 
+  // 🔴 R6-3 (Codex r5 #3): la revisión de mesa del reducer va antes del candado del cobro; con la regla encendida, el reducer le pasa a
+  // payCashOrder la MISMA regla (overrides de cobro) para repetirla bajo el candado.
+  it('🔴 R6-3: con la regla encendida, PAY_CASH le pasa a payCashOrder `propiedadDeMesa` con el autor y los overrides de COBRO', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: STAFF, servedBy: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-6', orderNumber: 'A-6', digitalReceipt: null })
+    await processIntents(baseParams([{ id: 'i6p', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
+    const marca = (orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].propiedadDeMesa
+    expect(marca.userId).toBe(STAFF)
+    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
+    await expect(marca.puedeCobrarAjena()).resolves.toBe(true)
+    expect(tableOwnership.staffCanManageAllTables).toHaveBeenLastCalledWith(STAFF, VENUE, undefined, undefined, [
+      'tables:manage-all',
+      'tables:pay-any',
+    ])
+  })
+
+  it('R6-3: con la regla apagada no hay marca (nada que revisar bajo el candado)', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-7', orderNumber: 'A-7', digitalReceipt: null })
+    await processIntents(baseParams([{ id: 'i6a', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 10000 } }]))
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].propiedadDeMesa).toBeUndefined()
+  })
+
   it('PAY_CASH en mesa propia o con override ⇒ sin marca de mesa ajena', async () => {
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
     ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
