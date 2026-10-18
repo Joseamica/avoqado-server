@@ -1835,9 +1835,11 @@ model Product {
   type ProductType @default(FOOD)
 
   // Pricing
-  price   Decimal  @db.Decimal(10, 2)
-  cost    Decimal? @db.Decimal(10, 2)
-  taxRate Decimal  @default(0.16) @db.Decimal(5, 4)
+  price        Decimal               @db.Decimal(10, 2)
+  /// Cada precio que tuvo `price` y desde/hasta cuándo (lo escriben los disparadores de la base, ver el modelo).
+  priceHistory ProductPriceHistory[]
+  cost         Decimal?              @db.Decimal(10, 2)
+  taxRate      Decimal               @default(0.16) @db.Decimal(5, 4)
 
   // SAT keys for CFDI 4.0 (override category defaults when set)
   satProductKey String? // ClaveProdServ (8 digits)
@@ -2051,6 +2053,28 @@ model Product {
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
+}
+
+/// Historial de `Product.price`: cada precio con su intervalo `[validFrom, validTo)` en UTC; `validTo` nulo = vigente
+/// (a lo más UNA abierta por producto, índice parcial de la migración). Sirve para saber si el precio que vio el
+/// cliente fue real (spec 2026-10-17-precio-que-vio-el-cliente).
+/// 🔴 Lo escriben SÓLO los disparadores DIFERIDOS de `Product` (migración 20261017150000): fechan el cambio al
+/// CONFIRMARSE la transacción y cubren a todo escritor (Prisma, SQL directo, importaciones). Nunca escribas aquí.
+/// `id` autoincremental porque un disparador no genera cuid; nunca se expone.
+model ProductPriceHistory {
+  id         BigInt    @id @default(autoincrement())
+  venueId    String
+  productId  String
+  product    Product   @relation(fields: [productId, venueId], references: [id, venueId], onDelete: Cascade, onUpdate: Cascade)
+  price      Decimal   @db.Decimal(10, 2)
+  validFrom  DateTime
+  validTo    DateTime?
+  /// Transacción (xid8 de nivel superior, con época) que creó la fila. El disparador la usa para corregir en su lugar un
+  /// precio intermedio de la misma confirmación; la cascada de la FK no la toca. Nadie la escribe a mano.
+  /// Tras un restore LÓGICO (pg_dump/pg_restore a otro cluster) el xid8 no vale: `UPDATE "ProductPriceHistory" SET "creadoEnTx" = 0`.
+  creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+
+  @@index([productId, validFrom])
 }
 
 model Inventory {

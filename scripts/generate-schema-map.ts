@@ -220,6 +220,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   MenuCategory: 'Menu, Products & Modifiers',
   MenuCategoryAssignment: 'Menu, Products & Modifiers',
   Product: 'Menu, Products & Modifiers',
+  ProductPriceHistory: 'Menu, Products & Modifiers',
   ProductOption: 'Menu, Products & Modifiers',
   ProductOptionValue: 'Menu, Products & Modifiers',
   ProductModifierGroup: 'Menu, Products & Modifiers',

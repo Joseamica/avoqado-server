@@ -77,6 +77,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       stampRewardId,
       stampRewardAware,
       stampRewardExpectedDiscount,
+      isOfflineReplay,
+      createdAtLocal,
     } = req.body
 
     // Validate required fields
@@ -225,6 +227,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
         typeof stampRewardExpectedDiscount === 'number' && Number.isFinite(stampRewardExpectedDiscount)
           ? stampRewardExpectedDiscount
           : null,
+      // «Se cobra el precio que vio el cliente»: la cola sin red («la venta ya ocurrió») nunca recibe el 409 de precio
+      // cambiado. Sólo el `true` literal cuenta. La hora de captura la interpreta el servicio; los campos de línea, también.
+      isOfflineReplay: isOfflineReplay === true,
+      createdAtLocal: typeof createdAtLocal === 'number' || typeof createdAtLocal === 'string' ? createdAtLocal : null,
     })
 
     res.status(201).json({

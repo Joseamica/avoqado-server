@@ -989,7 +989,9 @@ describe('createOrderWithItems writes promotions and reaffirmed money in its cre
       expect(await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } } })).toBeNull()
       expect(await prisma.$transaction(tx => bloquearOrdenParaFacturar(tx, pendingOrderId!))).toBeNull()
       retry = resultOf(createOrderWithItems(venueId, input as any))
-      await waitingOn()
+      // Precio que vio el cliente, Task 4: el reintento ya no espera en el índice único de la orden sino ANTES, en el
+      // candado de su llave (`avoqado:order-mobile-external:v1:…`), detrás de la creación en vuelo.
+      await waitingOn('%pg_advisory_xact_lock%')
     } finally {
       resume.release()
       await creating

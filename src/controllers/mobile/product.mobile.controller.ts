@@ -90,6 +90,11 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId } = req.params
 
+    // "Se cobra el precio que vio el cliente": la hora del catálogo la sella el SERVIDOR ANTES de leer, para que un
+    // cambio de precio ocurrido durante la lectura nunca quede "antes" del catálogo que la tablet ya trae. Formato
+    // fijo (ISO UTC con milisegundos, 24 caracteres): iOS lo parsea con fracciones y ambas apps lo comparan como fecha.
+    const catalogAt = new Date().toISOString()
+
     const products = await prisma.product.findMany({
       where: {
         venueId,
@@ -102,7 +107,8 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
 
     const data = products.map(withAvailableQuantity)
 
-    return res.json({ success: true, data })
+    // `catalogAt` es aditivo y sólo vive en la raíz: `data` no cambia para las apps viejas.
+    return res.json({ success: true, data, catalogAt })
   } catch (error) {
     next(error)
   }
