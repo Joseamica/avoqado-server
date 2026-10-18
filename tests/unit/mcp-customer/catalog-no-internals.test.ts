@@ -70,3 +70,22 @@ describe('customer tool catalog', () => {
     expect(help.desc).toMatch(/plan/i)
   })
 })
+
+test('affiliation venue tools are registered only in the free superadmin catalog', () => {
+  const names = [
+    'list_venue_document_requests',
+    'list_document_request_venue_options',
+    'list_document_request_venue_links',
+    'get_venue_document_request',
+    'link_document_request_to_venue',
+    'preview_document_request_document',
+  ]
+  const admin = catalogFor({ isSuperAdmin: true })
+  const customer = catalogFor({ isSuperAdmin: false })
+  for (const name of names) {
+    expect(admin.some(t => t.name === name)).toBe(true)
+    expect(customer.some(t => t.name === name)).toBe(false)
+    expect(DIRECTORY_TOOLS.has(name)).toBe(false)
+    for (const [, pattern] of FORBIDDEN) expect(admin.find(t => t.name === name)!.desc).not.toMatch(pattern)
+  }
+})

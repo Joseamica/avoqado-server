@@ -107,3 +107,21 @@ export async function signPrivateAttachmentUrl(path: string): Promise<string> {
     .getSignedUrl({ action: 'read', version: 'v4', expires: Date.now() + 10 * 60000, responseDisposition: 'attachment' })
   return url
 }
+
+/** Temporary inline view: only formats already accepted by the document upload policy. */
+export async function signPrivatePreviewUrl(path: string, mimeType: string): Promise<string> {
+  assertPrivatePath(path)
+  if (!['application/pdf', 'image/jpeg', 'image/png'].includes(mimeType)) {
+    throw new BadRequestError('Este formato no admite vista previa')
+  }
+  const [url] = await requireBucket()
+    .file(path)
+    .getSignedUrl({
+      action: 'read',
+      version: 'v4',
+      expires: Date.now() + 10 * 60000,
+      responseDisposition: 'inline',
+      responseType: mimeType,
+    })
+  return url
+}
