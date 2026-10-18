@@ -10,13 +10,15 @@
  */
 import { OnlineOrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { ServiceUnavailableError } from '@/errors/AppError'
+import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
 import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import * as avisos from '@/services/online-ordering/notifications.service'
-import { createOnlineOrder } from '@/services/online-ordering/order.service'
+import { createOnlineOrder, type CreateOnlineOrderOptions } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
 import * as quoteModule from '@/services/online-ordering/quote.service'
@@ -82,7 +84,9 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
    */
   const PLAN_Y_NEGOCIO_PASAN = { assertCanCreate: async () => {} }
 
-  const newOrder = (o: { key?: string; phone?: string; expectedTotal?: string; items?: any[]; customer?: string } = {}) => {
+  const newOrder = (
+    o: { key?: string; phone?: string; expectedTotal?: string; items?: any[]; customer?: string; opts?: CreateOnlineOrderOptions } = {},
+  ) => {
     const phone = o.phone ?? nextPhone()
     return createOnlineOrder(
       {
@@ -97,7 +101,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
         note: null,
         whatsappConsent: false,
       },
-      PLAN_Y_NEGOCIO_PASAN,
+      o.opts ?? PLAN_Y_NEGOCIO_PASAN,
     )
   }
   // R23: cada caso que necesita presencia escribe su propio latido.
@@ -197,6 +201,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     if (!venueId) return
     const v = { venueId }
     await prisma.activityLog.deleteMany({ where: v })
+    await prisma.idempotencyRequest.deleteMany({ where: { organizationId: `venue:${venueId}` } }) // Codex r3: rechazos guardados
     await prisma.paymentEffect.deleteMany({ where: v })
     await prisma.inventoryPosting.deleteMany({ where: v })
     await prisma.venueTransaction.deleteMany({ where: v })
@@ -446,6 +451,80 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
         () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: false } }),
       ),
     )
+  })
+
+  /**
+   * Codex r3: el envío A de la llave se quedó detenido ANTES del servicio (en la red o en la autenticación) y llega tarde; se
+   * simula llamándolo después. Mientras, el reintento B de la MISMA llave y solicitud recibió un rechazo definitivo y la tienda
+   * soltó la llave. Aunque el cambio ya se deshizo, A recibe ESE MISMO rechazo y no crea; con otra llave queda UN pedido.
+   */
+  const sobre = (e: any) => JSON.parse(JSON.stringify({ status: e?.statusCode, code: e?.code, error: e?.message, details: e?.details }))
+  const rechazoQueQueda = async (
+    code: string,
+    cambiar: () => Promise<unknown>,
+    deshacer: () => Promise<unknown>,
+    opts?: CreateOnlineOrderOptions,
+  ) => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    await cambiar()
+    const b = await newOrder({ key, phone, opts })
+      .then(
+        r => r,
+        (e: unknown) => e,
+      )
+      .finally(deshacer)
+    expect(b).toMatchObject({ code })
+    const tarde = await newOrder({ key, phone, opts }).then(
+      r => r,
+      (e: unknown) => e,
+    )
+    expect(tarde).toMatchObject({ code })
+    expect(sobre(tarde)).toEqual(sobre(b)) // mismo status, código, mensaje y detalles
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+    await expect(newOrder({ key: nextKey(), phone, opts })).resolves.toMatchObject({ replay: false })
+    expect(await prisma.order.count({ where: { venueId: venueId!, customerPhone: phone } })).toBe(1)
+  }
+
+  it('Codex r3: el reintento de la llave recibe ORDERING_PAUSED; el envío tardío de esa llave, ya reanudada la tienda, recibe el MISMO 409 y no crea', async () => {
+    await rechazoQueQueda(
+      'ORDERING_PAUSED',
+      () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: true } }),
+      () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: false } }),
+    )
+  })
+
+  it('Codex r3: el reintento de la llave recibe PRICE_CHANGED; el envío tardío, con el precio de vuelta, recibe el MISMO 409 y no crea', async () => {
+    await rechazoQueQueda(
+      'PRICE_CHANGED',
+      () => prisma.product.update({ where: { id: productId }, data: { price: 113 } }),
+      () => prisma.product.update({ where: { id: productId }, data: { price: 93 } }),
+    )
+  })
+
+  it('Codex r3: con el negocio desactivado el reintento recibe VENUE_NOT_FOUND; el envío tardío, ya reactivado, recibe el MISMO 404', async () => {
+    await rechazoQueQueda(
+      'VENUE_NOT_FOUND',
+      () => prisma.venue.update({ where: { id: venueId! }, data: { active: false } }),
+      () => prisma.venue.update({ where: { id: venueId! }, data: { active: true } }),
+      { assertCanCreate: () => assertOperationalVenue(venueId!) },
+    )
+  })
+
+  it('Codex r3 (control): un 5xx dentro de la transacción NO deja rechazo guardado: el reintento de la MISMA llave sí crea', async () => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const espia = jest.spyOn(quoteModule, 'quoteCart').mockRejectedValueOnce(new ServiceUnavailableError('caída simulada'))
+    try {
+      await expect(newOrder({ key, phone })).rejects.toMatchObject({ statusCode: 503 })
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await prisma.idempotencyRequest.count({ where: { organizationId: `venue:${venueId}`, idempotencyKey: key } })).toBe(0)
+    await expect(newOrder({ key, phone })).resolves.toMatchObject({ replay: false })
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
   })
 
   it('dos aparatos aceptando a la vez: exactamente uno gana', async () => {
