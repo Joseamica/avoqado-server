@@ -1,3 +1,4 @@
+import { documentRequestsJob } from './jobs/documentRequests.job'
 // src/server.ts - Main entry point for the application
 
 // Ensure environment variables are loaded and checked first.
@@ -187,6 +188,7 @@ const gracefulShutdown = async (signal: string) => {
       shopifyReconcileJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
+      documentRequestsJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
 
@@ -537,6 +539,7 @@ const startApplication = async (retries = 3) => {
       shopifyReconcileJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
+      documentRequestsJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.

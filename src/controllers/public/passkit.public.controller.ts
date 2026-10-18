@@ -83,7 +83,12 @@ export async function downloadUpdatedPassHandler(req: Request, res: Response) {
   const pass = await resolvePassForDownload(serialNumber, leerToken(req))
   if (!pass) return res.sendStatus(401)
 
-  const buffer = await buildAndSignPassForCustomer(pass.venueId, pass.customerId)
+  // El MISMO pase que pidió Apple: si devolviera otro serial, el iPhone rechaza la actualización.
+  const buffer = await buildAndSignPassForCustomer(pass.venueId, pass.customerId, {
+    serialNumber: pass.serialNumber,
+    authToken: pass.authToken,
+    qrToken: pass.qrToken,
+  })
   if (!buffer) return res.sendStatus(500)
 
   res.setHeader('Content-Type', 'application/vnd.apple.pkpass')

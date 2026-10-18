@@ -10,6 +10,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as organizationService from '../../services/organization/organization.service'
 import { sinCamposReservados } from '../../services/access/camposReservados'
+import { cuerpoEditableDeOrganizacion } from '../../schemas/organization.schema'
 
 /**
  * GET /organizations/:orgId
@@ -104,10 +105,11 @@ export async function getOrganizationStats(req: Request, res: Response, next: Ne
 export async function updateOrganization(req: Request, res: Response, next: NextFunction) {
   try {
     const { orgId } = req.params
-    // Pago al personal y la exención de plan tienen su propio camino: aquí responden 400 (I4, fase 3).
-    const updateData = sinCamposReservados(req.body)
+    // Pago al personal y la exención de plan tienen su propio camino: aquí responden 400 (I4, fase 3). Después, sólo la
+    // lista blanca de escalares (ronda 3): ninguna relación anidada llega a Prisma.
+    const updateData = cuerpoEditableDeOrganizacion(sinCamposReservados(req.body))
 
-    const updated = await organizationService.updateOrganization(orgId, updateData)
+    const updated = await organizationService.updateOrganization(orgId, updateData, (req as any).authContext?.userId)
     res.json(updated)
   } catch (error) {
     next(error)
