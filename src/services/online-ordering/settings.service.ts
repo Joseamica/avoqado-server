@@ -101,7 +101,7 @@ export async function updateSettings(
   venueId: string,
   patch: OnlineOrderingSettingsPatch,
   actorStaffId: string | null,
-): Promise<OnlineOrderingConfig> {
+): Promise<OnlineOrderingConfig & { lastInboxPollAt: Date | null }> {
   const { row, preloadHours } = await prisma.$transaction(async tx => {
     await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-ordering-settings:' + venueId}))`
 

@@ -9,8 +9,8 @@ import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
-import { getAcceptingStatus, storeView } from '@/services/online-ordering/presence.service'
-import { getSettings, pauseOnlineOrdering, storeRequirements, updateSettings } from '@/services/online-ordering/settings.service'
+import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
+import { settingsView } from '@/services/online-ordering/settingsView.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByStaff,
@@ -219,16 +219,9 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
-      // Lo mismo que `GET /settings` del panel: los ajustes se leen una vez y el estado sale del mismo cálculo que la tienda.
-      const settings = await getSettings(venueId)
-      const [state, requirements] = await Promise.all([getAcceptingStatus(venueId, new Date(), settings), storeRequirements(venueId)])
-      const { lastInboxPollAt, ...ajustes } = settings
-      return text({
-        ok: true,
-        ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt ? lastInboxPollAt.toISOString() : null },
-        store: storeView(state),
-        requirements,
-      })
+      // Lo mismo que `GET /settings` del panel (un solo armador): los ajustes se leen una vez y el estado sale del mismo cálculo.
+      const { lastInboxPollAt, store, requirements, ...ajustes } = await settingsView(venueId)
+      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements })
     },
   )
 
@@ -274,7 +267,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         return text({ ok: false, error: 'Indica qué cambiar: los ajustes (changes) o los platillos en línea (availability).' })
       }
 
-      const { lastInboxPollAt: _latido, ...current } = await getSettings(venueId)
+      const settings = await getSettings(venueId)
+      const { lastInboxPollAt: _latido, ...current } = settings
       const actual = current as Record<string, unknown>
       const diff = Object.entries(changes ?? {})
         .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor))
@@ -290,7 +284,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
-      const ajustes = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : current
+      const actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
+      const ajustes = actualizados ?? current
       const platillos = availability ? await setOnlineAvailability({ venueId, ...availability, actorStaffId: scope.staffId }) : null
       await auditMcpWrite(scope, {
         action: 'ONLINE_ORDERING_CONFIGURED_VIA_MCP',
@@ -299,7 +294,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         venueId,
         data: { cambios: diff, platillosEnLinea: availability ?? null },
       })
-      return text({ ok: true, ajustes, platillosActualizados: platillos?.updated ?? 0 })
+      // Lo que quedó: el estado de la tienda y qué le falta para encenderla, del mismo armador que el panel (después de auditar:
+      // un fallo al leerlo no deja el cambio sin bitácora).
+      const { store, requirements } = await settingsView(venueId, actualizados ?? settings)
+      return text({ ok: true, ajustes, store, requirements, platillosActualizados: platillos?.updated ?? 0 })
     },
   )
 

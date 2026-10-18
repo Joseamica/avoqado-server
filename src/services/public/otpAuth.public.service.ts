@@ -1,4 +1,4 @@
-import { CustomerApprovalStatus, Prisma, type Customer } from '@prisma/client'
+import { CustomerApprovalStatus, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, UnauthorizedError } from '../../errors/AppError'
 import logger from '../../config/logger'
@@ -9,6 +9,7 @@ import { generateCustomerToken, generateOrderingCustomerToken } from '../../jwt.
 import { canonicalPhoneE164, phonesMatch, phoneLast10, normalizarTelefonoMx, formaLegadaDeTelefonoMx } from '@/utils/phone'
 import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
+import { ponerNombreSiFalta, splitName } from '@/services/customer/customerName'
 
 const TTL_MS = 10 * 60 * 1000
 
@@ -157,27 +158,6 @@ export async function verifyOtp(args: {
     approvalStatus,
     customer: { id: customer.id, firstName: customer.firstName, lastName: customer.lastName, email: customer.email, phone: customer.phone },
   }
-}
-
-// First word → firstName, remaining words → lastName. Mirrors the split used in
-// auth.consumer.service.ts (kept local to avoid a cross-bounded-context import).
-function splitName(name?: string | null): { firstName?: string; lastName?: string } {
-  if (!name) return {}
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return {}
-  return { firstName: parts[0], lastName: parts.slice(1).join(' ') || undefined }
-}
-
-// Nombre del alta (spec 2026-10-14 §3.3). 🔴 Nunca pisa uno existente: el cliente que el negocio dio de alta como «Daniela
-// Ruiz» no se vuelve «Dany» porque escribió otra cosa en su teléfono. El apellido sólo se llena si estaba vacío.
-async function ponerNombreSiFalta(tx: Prisma.TransactionClient, customer: Customer, nombre?: string | null): Promise<Customer> {
-  if (customer.firstName?.trim()) return customer
-  const partes = splitName(nombre)
-  if (!partes.firstName) return customer
-  return tx.customer.update({
-    where: { id: customer.id },
-    data: { firstName: partes.firstName, ...(partes.lastName && !customer.lastName?.trim() ? { lastName: partes.lastName } : {}) },
-  })
 }
 
 // Look up a name from this identity's most recent past guest reservation, so a
