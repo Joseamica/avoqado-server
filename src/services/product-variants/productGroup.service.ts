@@ -841,22 +841,28 @@ export async function addVariants(
 
 /** Archiva el padre y sus variantes vivas igual que `archivarProductos` (deletedAt + deletedBy + active=false). Nada se borra. */
 export async function archiveProductGroup(venueId: string, groupId: string, staffId: string | null): Promise<ProductGroupWriteResult> {
-  const result = await prisma.$transaction(async tx => {
-    await lockGroup(tx, venueId, groupId)
-    // Vivas ≤ 250 por el tope del alta: esta lista sí está acotada.
-    const vivas = await tx.product.findMany({
-      where: { productGroupId: groupId, venueId, deletedAt: null },
-      select: { id: true },
-      take: MAX_VARIANTS_PER_GROUP + 1, // uno de más: un exceso pide FULL_REFRESH en vez de cortar en silencio
+  const result = await prisma
+    .$transaction(async tx => {
+      await lockGroup(tx, venueId, groupId)
+      // Vivas ≤ 250 por el tope del alta: esta lista sí está acotada.
+      const vivas = await tx.product.findMany({
+        where: { productGroupId: groupId, venueId, deletedAt: null },
+        select: { id: true },
+        take: MAX_VARIANTS_PER_GROUP + 1, // uno de más: un exceso pide FULL_REFRESH en vez de cortar en silencio
+      })
+      const now = new Date()
+      const group = await tx.productGroup.update({ where: { id: groupId }, data: { deletedAt: now, deletedBy: staffId } })
+      await tx.product.updateMany({
+        where: { productGroupId: groupId, venueId, deletedAt: null },
+        data: { deletedAt: now, deletedBy: staffId, active: false },
+      })
+      return { groupId, productIds: vivas.map(v => v.id), categoryId: group.categoryId }
+    }, TX_OPTIONS)
+    .catch(e => {
+      // La otra víctima del choque con el primer encendido del IVA (Codex publicación r2): nada se archivó, se pide repetir.
+      if (isDeadlockError(e)) throw new ConflictError('Otro cambio tocó este producto al mismo tiempo. Vuelve a intentarlo.')
+      throw e
     })
-    const now = new Date()
-    const group = await tx.productGroup.update({ where: { id: groupId }, data: { deletedAt: now, deletedBy: staffId } })
-    await tx.product.updateMany({
-      where: { productGroupId: groupId, venueId, deletedAt: null },
-      data: { deletedAt: now, deletedBy: staffId, active: false },
-    })
-    return { groupId, productIds: vivas.map(v => v.id), categoryId: group.categoryId }
-  }, TX_OPTIONS)
   afterGroupWrite(venueId, result, 'PRODUCT_GROUP_ARCHIVED', 'ITEM_REMOVED', {}, staffId ?? undefined)
   return result
 }
