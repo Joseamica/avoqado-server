@@ -118,4 +118,16 @@ describe('sendPlanRenewalReminderEmail — zona horaria de la fecha', () => {
     })
     expect(enviado().subject).toContain('17 de noviembre')
   })
+
+  it('M8: una zona inválida («GMT-6») no revienta el correo: sale con la fecha de Ciudad de México', async () => {
+    const sent = await emailService.sendPlanRenewalReminderEmail('a@x.com', {
+      ...base,
+      locale: 'es',
+      renewalDate: CRUZA_MEDIANOCHE_UTC,
+      isTrialEnd: true,
+      timeZone: 'GMT-6',
+    })
+    expect(sent).toBe(true)
+    expect(enviado().subject).toBe('Tu prueba de Avoqado Pro termina el 16 de noviembre de 2026')
+  })
 })

@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import logger from '@/config/logger'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { zonaValida } from '@/utils/datetime'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
@@ -1075,7 +1076,8 @@ async function sendPlanTrialEndingNotifications(
 
     // OWNER/ADMIN of a venue are a handful; `take` is the cap the bounded-queries rule asks for.
     const staffMembers = await prisma.staffVenue.findMany({
-      where: { venueId, role: { in: [StaffRole.OWNER, StaffRole.ADMIN] } },
+      // `active: true`, como `resolvePlanNotificationTarget`: a un OWNER/ADMIN dado de baja no se le avisa.
+      where: { venueId, active: true, role: { in: [StaffRole.OWNER, StaffRole.ADMIN] } },
       select: { staff: { select: { id: true, email: true } } },
       take: 25,
     })
@@ -1083,8 +1085,8 @@ async function sendPlanTrialEndingNotifications(
     if (staffMembers.length === 0) logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
 
     const planName = venueFeature.feature.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro'
-    // `||`, not `??`: an empty zone makes toLocaleDateString throw.
-    const timeZone = venue.timezone || 'America/Mexico_City'
+    // An empty or non-IANA zone makes toLocaleDateString throw, and `fecha` is computed before BOTH notices.
+    const timeZone = zonaValida(venue.timezone)
     const billingPortalUrl = billingPageUrl(venue.slug)
     const fecha = trialEnd.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone })
     const cobro =

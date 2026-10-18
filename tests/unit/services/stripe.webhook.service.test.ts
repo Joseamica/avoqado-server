@@ -979,6 +979,27 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       expect(createNotification.mock.calls[0][0].message).toContain('20 de octubre de 2026')
     })
 
+    it('M8: una zona que no es IANA («GMT-6») cae a Ciudad de México: salen el correo y el aviso en la app', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro', { timezone: 'GMT-6' })
+
+      await handleSubscriptionTrialWillEnd(buildSub())
+
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
+      expect(emailService.sendPlanRenewalReminderEmail.mock.calls[0][1].timeZone).toBe('America/Mexico_City')
+      expect(createNotification).toHaveBeenCalledTimes(2)
+      expect(createNotification.mock.calls[0][0].message).toContain('20 de octubre de 2026')
+    })
+
+    it('el aviso en la app sólo va a OWNER/ADMIN ACTIVOS: a quien se dio de baja no se le avisa', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+
+      await handleSubscriptionTrialWillEnd(buildSub())
+
+      expect(prisma.staffVenue.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue_1', active: true }) }),
+      )
+    })
+
     it('un cobro de $0 (cupón del 100 %) es un monto válido: se avisa', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       montoDelSiguienteCobro.mockResolvedValue(0)

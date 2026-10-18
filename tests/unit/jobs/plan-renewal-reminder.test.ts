@@ -263,6 +263,17 @@ describe('PlanRenewalReminderJob.runNow', () => {
     expect(sendSpy.mock.calls[0][1]).toMatchObject({ timeZone: 'America/Mexico_City' })
   })
 
+  it('M8: invalid venue timezone ("GMT-6") → America/Mexico_City, and the reminder still goes out and stamps', async () => {
+    mockPrisma.venueFeature.findMany.mockResolvedValue([row({ venue: { slug: 'bar', timezone: 'GMT-6' } })])
+    mockRetrieve.mockResolvedValue(stripeSub(8))
+
+    await new PlanRenewalReminderJob().runNow()
+
+    expect(sendSpy).toHaveBeenCalledTimes(1)
+    expect(sendSpy.mock.calls[0][1]).toMatchObject({ timeZone: 'America/Mexico_City' })
+    expect(mockPrisma.venueFeature.update).toHaveBeenCalledTimes(1)
+  })
+
   it('preview throws → no send, no stamp, batch continues; next run with a healthy preview sends', async () => {
     mockPrisma.venueFeature.findMany.mockResolvedValue([row(), row({ id: 'vf2', venueId: 'v2', stripeSubscriptionId: 'sub_2' })])
     mockRetrieve.mockResolvedValue(stripeSub(8))
