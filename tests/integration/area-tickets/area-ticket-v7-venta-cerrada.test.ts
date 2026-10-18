@@ -1593,3 +1593,40 @@ describe('🔴 S1: la cola sin red del POS sobre una venta de vales ya cerrada',
     expect(await foto(venta)).toEqual(antes)
   })
 })
+
+/**
+ * 🔴 R2-3 (Codex sobre ceba0df1f, P2 R): S1 abrió la finalización de vales a una venta REFUNDED con dinero capturado. Si esa venta nunca
+ * tuvo su primer saldado (sin vale SALE ni `paidAt` en sus vales), `recuperaSaldado` la da por primer saldado y la TERMINAL corría la
+ * lealtad ORDINARIA: un sello EARN sobre una venta devuelta. Ahora, como la recuperación del Payment existente (R11-1), la lealtad
+ * respeta los reembolsos.
+ */
+describe('🔴 R2-3: la TERMINAL cobra una venta de vales devuelta que nunca se saldó', () => {
+  it('🔴 venta REFUNDED sin vale SALE ni paidAt, cliente ligado + un cobro NUEVO de $100 ⇒ se registra, la sesión cierra y el cliente NO queda con sello ni puntos (antes: sello EARN y puntos)', async () => {
+    const x = await nuevoCliente('Cliente R2-3')
+    const venta = await cobroAtorado(`r2-3-atorado-${sello}`, x)
+    await issueRefund({
+      venueId: venueId!,
+      paymentId: venta.cobroId,
+      amount: 10000,
+      tipRefundCents: 0,
+      reason: 'CUSTOMER_REQUEST' as never,
+      staffId,
+    })
+    // Como la dejaba el código viejo (R13-4): hoy un reembolso deja la venta como estaba.
+    await prisma.order.update({ where: { id: venta.orderId }, data: { paymentStatus: 'REFUNDED' } })
+    await prisma.inventory.update({ where: { id: valeInventoryId }, data: { currentStock: 10 } })
+    const [vales, pagados] = await Promise.all([
+      prisma.inventoryPosting.count({ where: { venueId, sourceKind: 'ORDER', sourceId: venta.orderId, effectKind: 'SALE' } }),
+      prisma.areaTicket.count({ where: { id: venta.ticketId, paidAt: { not: null } } }),
+    ])
+    expect([vales, pagados]).toEqual([0, 0])
+
+    const nuevo: any = await cobroDeLaTerminal(venta.orderId, 100)
+
+    expect(nuevo.areaTicketCheckoutState).toBe('PAID')
+    expect(await prisma.payment.count({ where: { orderId: venta.orderId, status: 'COMPLETED', type: { not: 'REFUND' } } })).toBe(2)
+    const { sellos, revertidos, puntos } = await lealtadDe(venta.orderId, x)
+    expect(sellos - revertidos).toBe(0)
+    expect(puntos).toBe(0)
+  })
+})

@@ -4619,6 +4619,9 @@ export async function recordOrderPayment(
               areaTicketAlreadyFinalized: true,
               ventaYaCerrada,
               primerSaldado,
+              // 🔴 R2-3 (Codex sobre S1): una venta que YA estaba cerrada (también REFUNDED) puede recuperar aquí su primer saldado;
+              // pudo devolverse: como la recuperación del Payment existente (R11-1), sin sello vivo sobre una venta con reembolso.
+              lealtadRespetandoReembolsos: ventaYaCerrada,
               venueId,
               // Codex 3.6 (S3): la finalización ya puso la marca al saldar; aquí sólo se arman los sueltos.
               marcarCocina: marcarCocina && areaTicketCheckoutState === 'PAID',

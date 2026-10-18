@@ -892,11 +892,12 @@ router.delete(
 // editar, descontar, cortesiar, cancelar, mover y fusionar CUALQUIER mesa. Toast y
 // Square resuelven igual: hay dueño de mesa para EDITAR el cheque, y la caja lo liquida.
 // Las demás rutas de esta orden conservan el override default.
+// R2-6: y sólo ésta deja pasar el dinero YA capturado (la cola sin red) sobre una mesa que reasignaron, con rastro.
 router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
-  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES, { dineroCapturado: true }),
   orderMobileController.payCash,
 )
 

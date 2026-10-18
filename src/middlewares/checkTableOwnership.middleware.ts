@@ -96,10 +96,15 @@ type OwnershipSource = 'order' | 'table'
  * @param overridePermissions permisos que eximen del candado. La ruta de COBRO monta
  *        `PAYMENT_OWNERSHIP_OVERRIDES` para que la caja pueda liquidar un cheque ajeno
  *        sin ganar el derecho a editarlo; todas las demás se quedan con el default.
+ * @param opciones.dineroCapturado 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde). SÓLO la ruta de
+ *        cobro: la propiedad de mesa decide quién INICIA un cobro, no quién REGISTRA dinero ya capturado. Ana cobró sin red y un
+ *        encargado pasó la mesa a Beto: su cola (`isOfflineReplay`) pasa, con la mesa ajena en `res.locals.mesaAjena` para el
+ *        rastro en `ActivityLog`. Autenticación, sucursal, `payments:create` e idempotencia se conservan; el cobro EN VIVO sigue 403.
  */
 export const checkTableOwnership = (
   source: OwnershipSource = 'order',
   overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
+  opciones: { dineroCapturado?: boolean } = {},
 ) => {
   const middleware = async (req: Request, res: Response, next: NextFunction) => {
     try {
@@ -161,6 +166,10 @@ export const checkTableOwnership = (
       }
 
       const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
+      if (opciones.dineroCapturado && req.body?.isOfflineReplay === true) {
+        res.locals.mesaAjena = { ownerId: foreign.servedById, ownerName }
+        return next()
+      }
       logger.info(
         `checkTableOwnership: ${authContext.userId} bloqueado — mesa propiedad de ${foreign.servedById} (${ownerName}) en venue ${venueId}`,
       )
@@ -180,5 +189,6 @@ export const checkTableOwnership = (
   // Expuesto para tests de auditoría de rutas: permite afirmar QUÉ override monta cada
   // endpoint sin ejecutar el middleware (mismo patrón que `requiredPermission`).
   ;(middleware as any).ownershipOverridePermissions = [...overridePermissions]
+  ;(middleware as any).dejaPasarDineroCapturado = opciones.dineroCapturado === true
   return middleware
 }

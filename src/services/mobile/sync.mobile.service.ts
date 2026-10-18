@@ -948,18 +948,30 @@ async function assertOwnership(
   orderId: string,
   overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
 ): Promise<void> {
-  if (!(await isTableOwnershipEnforced(venueId))) return
+  const ajena = await mesaAjenaDe(venueId, staffId, orderId, overridePermissions)
+  if (!ajena) return
+  const err: any = new Error(`Solo ${ajena.ownerName} puede modificar esta mesa`)
+  err.errorCode = 'TABLE_OWNED_BY_OTHER'
+  throw err
+}
+
+/** El dueño de la mesa cuando la regla de propiedad le prohíbe a `staffId` tocarla; null si no aplica o puede. */
+async function mesaAjenaDe(
+  venueId: string,
+  staffId: string,
+  orderId: string,
+  overridePermissions: readonly string[],
+): Promise<{ ownerId: string; ownerName: string } | null> {
+  if (!(await isTableOwnershipEnforced(venueId))) return null
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
     select: { tableId: true, servedById: true, servedBy: { select: { firstName: true, lastName: true } } },
   })
-  if (!order || !order.tableId) return // mostrador — la regla no aplica
-  if (!order.servedById || order.servedById === staffId) return
-  if (await staffCanManageAllTables(staffId, venueId, undefined, undefined, overridePermissions)) return
+  if (!order || !order.tableId) return null // mostrador — la regla no aplica
+  if (!order.servedById || order.servedById === staffId) return null
+  if (await staffCanManageAllTables(staffId, venueId, undefined, undefined, overridePermissions)) return null
   const ownerName = order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}`.trim() : 'otro mesero'
-  const err: any = new Error(`Solo ${ownerName} puede modificar esta mesa`)
-  err.errorCode = 'TABLE_OWNED_BY_OTHER'
-  throw err
+  return { ownerId: order.servedById, ownerName }
 }
 
 async function assertTableService(venueId: string): Promise<void> {
@@ -1370,13 +1382,15 @@ async function applyPayCash(
       message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 sin propina para cerrar una cuenta en $0)',
     }
   }
-  // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque. Un cobro que YA existe (misma llave)
-  // no se vuelve a juzgar: la mesa pudo cambiar de mesero después; payCashOrder devuelve ese pago si es de esta cuenta.
+  // 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde): el PAY_CASH es dinero que YA está en el cajón. La
+  // propiedad de mesa decide quién INICIA un cobro, no quién registra uno capturado: si un encargado pasó la mesa a otro mesero
+  // mientras el aparato estaba sin red, se registra con su autor real y deja rastro de la mesa ajena (payCashOrder). Mismo override
+  // que la ruta online del cobro. Un cobro que YA existe (misma llave) no deja otro rastro: payCashOrder devuelve ese pago.
   const yaCobrado = await prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
     select: { id: true },
   })
-  if (!yaCobrado) await assertOwnership(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  const mesaAjena = yaCobrado ? null : await mesaAjenaDe(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,
@@ -1397,6 +1411,7 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    ...(mesaAjena ? { mesaAjena } : {}),
     ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
   })
   return {
