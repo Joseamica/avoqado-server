@@ -125,6 +125,16 @@ describe('primerCobroCubierto (lector REAL de cobertura)', () => {
     await expect(primerCobroCubierto('venue-1', 'sub_3ds', 1000)).rejects.toMatchObject({ code: 'HYBRID_FUNDING_UNVERIFIED' })
   })
 
+  // Ruling 6a: la regla hermana de la entrega híbrida (`hybridPeriodInvalid`) da por inválido un periodo devuelto.
+  it.each([
+    ['en parte ($3 de $10)', 300],
+    ['completo', 1000],
+  ])('🔴 P9: el primer cobro se devolvió %s ⇒ NO cubierto', async (_caso, devuelto) => {
+    facturas = [factura({ total: 1000, tarjeta: 1000 })]
+    pagos.set('in_1', [pagoConTarjeta('in_1', 1000, devuelto)])
+    await expect(primerCobroCubierto('venue-1', 'sub_3ds', 1000)).resolves.toBe(false)
+  })
+
   it('P8: toma la factura subscription_create aunque la primera de la lista sea una renovación; sin ella, lanza', async () => {
     const renovacion = factura({ id: 'in_2', total: LISTA, tarjeta: LISTA, billing_reason: 'subscription_cycle' })
     facturas = [renovacion, factura({ total: 1000, tarjeta: 1000 })]
