@@ -15,7 +15,7 @@ import {
 import { createHash } from 'node:crypto'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
+import AppError, { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppError'
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
 import { canonicalPhoneE164, phonesMatch } from '@/utils/phone'
@@ -24,7 +24,7 @@ import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, O
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
-import { quoteCart, toPublicQuote, type CartItemInput } from './quote.service'
+import { quoteCart, toPublicQuote, type CartItemInput, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 
 export interface CreateOnlineOrderInput {
@@ -154,6 +154,23 @@ function lockKey(tx: Prisma.TransactionClient, venueId: string, externalId: stri
   return tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-order-key:' + venueId + ':' + externalId}))`
 }
 
+/**
+ * Codex r3: la primera DECISIÓN sobre una llave es durable (como Stripe, que también guarda el resultado de un error). Sin
+ * migración, en la tabla genérica `IdempotencyRequest` (custodia de SIMs y comandos de la TPV): los prefijos `venue:` y
+ * `customer:` nunca chocan con sus ids de organización y de staff. ponytail: sin purga (sólo nacen al rechazar, volumen bajo);
+ * si crecen, borrar por `expiresAt` (ya indexado).
+ */
+const rejectionKey = (venueId: string, customerId: string, idempotencyKey: string) => ({
+  organizationId: `venue:${venueId}`,
+  actorStaffId: `customer:${customerId}`,
+  endpoint: 'POST /public/ordering/orders',
+  idempotencyKey,
+})
+
+/** El rechazo que la tienda da por definitivo y con el que suelta la llave: todo 4xx salvo 401, 408 y 429 (`isDefinitive`). */
+const isDefinitiveRejection = (error: unknown): error is AppError =>
+  error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500 && ![401, 408, 429].includes(error.statusCode)
+
 /** Folio corto que no choque con otra cuenta ABIERTA del mismo negocio (dentro del candado de admisión). */
 async function pickOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
   for (let attempt = 0; attempt < 8; attempt++) {
@@ -198,69 +215,104 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   const zero = new Prisma.Decimal(0)
   const note = input.note?.trim() ? input.note.trim() : null
 
+  const keyOfRejection = rejectionKey(input.venueId, customerId, input.idempotencyKey)
+
   try {
-    // Codex r2: plan, tienda y cotización corren DENTRO de la transacción, bajo el candado de la llave; sus rechazos lanzan y la
-    // transacción no escribe nada. Sus lecturas usan el cliente raíz (otra conexión del pool mientras dura la transacción).
+    // Codex r2: plan, tienda y cotización corren DENTRO de la transacción, bajo el candado de la llave. Sus lecturas usan el
+    // cliente raíz (otra conexión del pool mientras dura la transacción). Codex r3: un rechazo definitivo se guarda y la
+    // transacción CONFIRMA (lo devuelve; se lanza tras el commit); cualquier otro error la deshace sin guardar nada.
     const result = await prisma.$transaction(
-      async (tx): Promise<CreateOnlineOrderResult> => {
+      async (tx): Promise<CreateOnlineOrderResult | AppError> => {
         await lockKey(tx, input.venueId, externalId)
 
         // 2. Repetición idempotente (R8). Antes de plan, negocio y tienda: un reintento tras perder la respuesta recibe SU pedido.
         const replay = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
         if (replay) return replay
 
-        // 3. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
-        await opts.assertCanCreate()
-
-        // 4. ¿La tienda está recibiendo pedidos?
-        const state = await getAcceptingStatus(input.venueId, now)
-        if (state.status !== 'OPEN') {
-          throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${state.status}`, {
-            status: state.status,
-            reason: state.reason,
-          })
-        }
-        if (!state.config.acceptsPayAtPickup) {
-          throw new BadRequestError('Este negocio no acepta pagar al recoger.', 'PAYMENT_MODE_NOT_ACCEPTED')
-        }
-
-        // 5. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).
-        const quote = await quoteCart(input.venueId, input.items, { now })
-        if (!quote.ok) {
-          throw new BadRequestError('Tu pedido tiene productos que ya no están disponibles o datos incompletos.', 'CART_INVALID', {
-            issues: quote.issues,
-          })
-        }
-        if (!quote.total.equals(expectedTotal)) {
-          throw new ConflictError('El precio de tu pedido cambió. Revisa el nuevo total antes de confirmar.', 'PRICE_CHANGED', {
-            quote: toPublicQuote(quote),
-          })
-        }
-
-        // 6. R4: la admisión se serializa por negocio. Dentro del candado se repiten la repetición, los topes y el folio:
-        //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
-        await lockAdmission(tx, input.venueId)
-
-        const again = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
-        if (again) return again
-
-        const pendingByPhone = await tx.onlineOrder.count({
-          where: { venueId: input.venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE, order: { customerPhone: phone } },
+        // 2b. Codex r3: la llave ya tuvo un rechazo definitivo ⇒ el MISMO, aunque plan, tienda o precio ya cambiaron (la tienda
+        //     soltó la llave con él; un envío tardío que creara duplicaría el pedido del siguiente intento).
+        const rejected = await tx.idempotencyRequest.findUnique({
+          where: { organizationId_actorStaffId_endpoint_idempotencyKey: keyOfRejection },
         })
-        if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
-          throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
-        }
-        const pendingInVenue = await tx.onlineOrder.count({
-          where: { venueId: input.venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE },
-        })
-        if (pendingInVenue >= MAX_PENDING_PER_VENUE) {
-          throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
-            status: 'PAUSED',
-            reason: 'TOO_BUSY',
-          })
+        if (rejected) {
+          if (rejected.requestHash !== requestHash) {
+            throw new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT')
+          }
+          const body = rejected.responseBody as { code?: string; message: string; details?: unknown }
+          throw new AppError(body.message, rejected.responseStatus, true, body.code, body.details)
         }
 
-        const orderNumber = await pickOrderNumber(tx, input.venueId)
+        let quote: QuoteResult
+        let orderNumber: string
+        try {
+          // Pasos 3 a 6: sólo lecturas y candados. La primera escritura (la cuenta) va fuera de este bloque: un rechazo guardado
+          // nunca confirma un pedido a medias.
+          // 3. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
+          await opts.assertCanCreate()
+
+          // 4. ¿La tienda está recibiendo pedidos?
+          const state = await getAcceptingStatus(input.venueId, now)
+          if (state.status !== 'OPEN') {
+            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${state.status}`, {
+              status: state.status,
+              reason: state.reason,
+            })
+          }
+          if (!state.config.acceptsPayAtPickup) {
+            throw new BadRequestError('Este negocio no acepta pagar al recoger.', 'PAYMENT_MODE_NOT_ACCEPTED')
+          }
+
+          // 5. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).
+          quote = await quoteCart(input.venueId, input.items, { now })
+          if (!quote.ok) {
+            throw new BadRequestError('Tu pedido tiene productos que ya no están disponibles o datos incompletos.', 'CART_INVALID', {
+              issues: quote.issues,
+            })
+          }
+          if (!quote.total.equals(expectedTotal)) {
+            throw new ConflictError('El precio de tu pedido cambió. Revisa el nuevo total antes de confirmar.', 'PRICE_CHANGED', {
+              quote: toPublicQuote(quote),
+            })
+          }
+
+          // 6. R4: la admisión se serializa por negocio. Dentro del candado se repiten la repetición, los topes y el folio:
+          //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
+          await lockAdmission(tx, input.venueId)
+
+          const again = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
+          if (again) return again
+
+          const pendingByPhone = await tx.onlineOrder.count({
+            where: { venueId: input.venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE, order: { customerPhone: phone } },
+          })
+          if (pendingByPhone >= MAX_PENDING_PER_PHONE) {
+            throw new ConflictError('Ya tienes pedidos esperando respuesta en este negocio.', 'TOO_MANY_PENDING_ORDERS')
+          }
+          const pendingInVenue = await tx.onlineOrder.count({
+            where: { venueId: input.venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE },
+          })
+          if (pendingInVenue >= MAX_PENDING_PER_VENUE) {
+            throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', {
+              status: 'PAUSED',
+              reason: 'TOO_BUSY',
+            })
+          }
+
+          orderNumber = await pickOrderNumber(tx, input.venueId)
+        } catch (error) {
+          if (!isDefinitiveRejection(error)) throw error
+          await tx.idempotencyRequest.create({
+            data: {
+              ...keyOfRejection,
+              requestHash,
+              responseStatus: error.statusCode,
+              responseBody: JSON.parse(JSON.stringify({ code: error.code, message: error.message, details: error.details })),
+              expiresAt: new Date(now.getTime() + 24 * 3600_000),
+            },
+          })
+          return error
+        }
+
         // 🔴 NO se estampa `shiftId`, y es DELIBERADO — no lo "arregles": el pedido nace desde el teléfono del comensal, no en el
         // mostrador con el cajero enfrente (criterio de `tests/unit/services/shared/ordenLlevaElTurno.guard.test.ts`, donde la
         // tarea 15b lo clasifica). El dinero SÍ cae en el turno: `payCashOrder` estampa `Payment.shiftId` al cobrar (tarea 15).
@@ -352,6 +404,7 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
       },
       { timeout: 15_000, maxWait: 5_000 },
     )
+    if (result instanceof AppError) throw result // Codex r3: el rechazo ya quedó guardado
 
     if (!result.replay) {
       try {

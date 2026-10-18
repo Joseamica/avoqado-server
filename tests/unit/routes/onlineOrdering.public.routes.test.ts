@@ -31,6 +31,11 @@ jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
     next()
   },
+  resolveVenueBySlugIncludingInactive: (req: any, _res: any, next: any) => {
+    mockRan.push('plain-including-inactive')
+    req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
+    next()
+  },
 }))
 jest.mock('@/middlewares/requirePublicVenueFeatureStrict.middleware', () => ({
   __esModule: true,
@@ -456,9 +461,9 @@ describe('cableado: qué candados corre cada ruta', () => {
     expect(mockRan).toEqual(NUEVOS)
   })
 
-  it('POST /orders: sólo venue ACTIVO → token de PEDIDOS; plan y negocio operativo NO van en la cadena (P1-06: los pide el servicio)', async () => {
+  it('POST /orders: el venue por slug AUNQUE esté desactivado → token de PEDIDOS; activo, operativo y plan los pide el servicio (P1-06, Codex r3)', async () => {
     expect((await post({ customer: true })).status).toBe(201)
-    expect(mockRan).toEqual(['plain', 'ordering-auth'])
+    expect(mockRan).toEqual(['plain-including-inactive', 'ordering-auth'])
   })
 
   it('seguimiento y cancelar: sólo el venue activo, SIN candado de plan ni exigir operativo (R14)', async () => {
@@ -550,7 +555,7 @@ describe('P1-06: crear pedido busca SU pedido antes de exigir plan y negocio ope
     const r = await post({ customer: true })
     expect(r.status).toBe(200)
     expect(r.body).toEqual({ success: true, data: REPLAY })
-    expect(mockRan).toEqual(['plain', 'ordering-auth'])
+    expect(mockRan).toEqual(['plain-including-inactive', 'ordering-auth'])
   })
 
   it('repetición con el negocio que ya NO opera ⇒ 200 con su pedido', async () => {
@@ -559,7 +564,7 @@ describe('P1-06: crear pedido busca SU pedido antes de exigir plan y negocio ope
     const r = await post({ customer: true })
     expect(r.status).toBe(200)
     expect(r.body.data).toMatchObject({ trackingToken: TOKEN, replay: true })
-    expect(mockRan).toEqual(['plain', 'ordering-auth'])
+    expect(mockRan).toEqual(['plain-including-inactive', 'ordering-auth'])
   })
 
   it('NUEVO con plan y negocio operativo ⇒ 201', async () => {
