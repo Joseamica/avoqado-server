@@ -21,6 +21,12 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
 }))
 // `sales_by_payment_method` es de Pro: el negocio de prueba no tiene plan; el candado no es lo que se prueba aquí.
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
+// Lo mismo para `sales_comparison` y `revenue_by_venue`: piden ADVANCED_REPORTS por lote (`venuesWithFeatureAccess`). El resto del servicio de
+// planes se queda real (lo usan los cobros con saldo).
+jest.mock('@/services/access/basePlan.service', () => ({
+  ...jest.requireActual('@/services/access/basePlan.service'),
+  venuesWithFeatureAccess: jest.fn(async (ids: string[]) => new Set(ids)),
+}))
 
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -36,6 +42,9 @@ import {
 } from '@/services/tpv/shift.tpv.service'
 import { aggregateGiftCardLoads, aggregatePaymentsByMethod } from '@/services/legacy/mergedPayments.service'
 import { registerSalesTools } from '@/mcp/tools/sales'
+import { registerOverviewTools } from '@/mcp/tools/overview'
+import { registerTrendTools } from '@/mcp/tools/trends'
+import { registerPaymentTools } from '@/mcp/tools/payments'
 import { registerShiftTools } from '@/mcp/tools/shifts'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import {
@@ -370,7 +379,7 @@ describe('B5 r1 · MCP contra Postgres real: dinero vs ventas (ejemplo del revis
     await prisma.payment.update({ where: { id: venta.pagos[0].id }, data: { merchantAccountId } })
     await sembrarCanje({ venueId, staffId, giftCardIds: venta.giftCardIds, total: 200, conSaldo: 200 })
 
-    const acceso = { role: 'OWNER', corePermissions: ['analytics:read'] }
+    const acceso = { role: 'OWNER', corePermissions: ['analytics:read', 'payments:read'] }
     const scope = {
       staffId,
       activeOrg: organizationId,
@@ -378,7 +387,11 @@ describe('B5 r1 · MCP contra Postgres real: dinero vs ventas (ejemplo del revis
       allowedVenueIds: [venueId],
       perVenueAccess: new Map([[venueId, acceso]]),
     } as unknown as McpScope
-    registerSalesTools({ tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+    const servidor = { tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never
+    registerSalesTools(servidor, scope)
+    registerOverviewTools(servidor, scope)
+    registerTrendTools(servidor, scope)
+    registerPaymentTools(servidor, scope)
   })
 
   afterAll(async () => {
@@ -411,6 +424,49 @@ describe('B5 r1 · MCP contra Postgres real: dinero vs ventas (ejemplo del revis
       ],
     })
     expect(out.giftCardLoads).toEqual({ total: 500, count: 1 })
+  })
+
+  // Pendientes 1a · tarea 1: lo vendido son $300 en efectivo + $200 pagados con saldo = $500. Los $500 de la carga son dinero, no venta.
+  it('🔴 pendientes 1a · today_overview: las ventas de hoy sin la carga de tarjetas y con el saldo', async () => {
+    const out = await llamar('today_overview', { venueId })
+    expect(out.salesToday.gross).toBe(500)
+    expect(out.salesToday.payments).toBe(2)
+  })
+
+  it('🔴 pendientes 1a · sales_comparison y revenue_by_venue cuentan ventas, no cargas', async () => {
+    const comparacion = await llamar('sales_comparison', { venueId })
+    expect(comparacion.current.gross).toBe(500)
+    expect(comparacion.current.transactions).toBe(2)
+
+    const porNegocio = await llamar('revenue_by_venue', {})
+    expect(porNegocio.venues.find((v: { venueId: string }) => v.venueId === venueId).gross).toBe(500)
+    expect(porNegocio.total).toBe(500)
+  })
+
+  it('🔴 pendientes 1a · staff_ranking, channel_mix y peak_hours no cuentan la cuenta de tarjetas', async () => {
+    // Las tres órdenes son del mismo cajero y del mismo canal: con la cuenta de tarjetas serían $1,000 y 3 órdenes.
+    const ranking = await llamar('staff_ranking', { venueId })
+    expect(ranking.staff).toMatchObject([{ revenue: 500, orders: 2 }])
+
+    const canales = await llamar('channel_mix', { venueId })
+    expect(canales.channels).toMatchObject([{ channel: 'TAKEOUT', revenue: 500, count: 2 }])
+
+    // Las horas se reparten por la hora de cada orden (pueden caer en dos horas): lo que importa es la suma.
+    const { hours } = await llamar('peak_hours', { venueId })
+    expect(hours.reduce((s: number, h: { sales: number }) => s + h.sales, 0)).toBe(500)
+    expect(hours.reduce((s: number, h: { transactions: number }) => s + h.transactions, 0)).toBe(2)
+  })
+
+  it('🔴 pendientes 1a · list_payments lista el cobro de la carga y su resumen dice giftCardLoads', async () => {
+    const out = await llamar('list_payments', { venueId })
+    // La lista es DINERO: el cobro de $500 de la carga se queda y el resumen sigue sumando los tres cobros.
+    expect(out.count).toBe(3)
+    expect(out.payments.map((p: { amount: number }) => p.amount).sort((a: number, b: number) => a - b)).toEqual([200, 300, 500])
+    expect(out.summary.completed.gross).toBe(1000)
+    // ...pero dice cuánto de ese bruto es la venta de tarjetas, para que el asistente no lo cuente como venta.
+    expect(out.summary.giftCardLoads).toEqual({ count: 1, amount: 500 })
+    expect(out.summary.note).toContain('$500.00')
+    expect(out.summary.note).toContain('tarjetas de regalo vendidas')
   })
 })
 

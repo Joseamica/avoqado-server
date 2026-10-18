@@ -1,10 +1,11 @@
-import { registerPaymentTools, buildPaymentsSummary, conCostoPendiente } from '../../../src/mcp/tools/payments'
+import { registerPaymentTools, buildPaymentsSummary, conCostoPendiente, conCargasDeTarjetas } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockVenueFind = jest.fn()
 const mockGroupBy = jest.fn()
 const mockFindMany = jest.fn()
 const mockCount = jest.fn()
+const mockAggregate = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -23,6 +24,7 @@ jest.mock('@/utils/prismaClient', () => ({
       groupBy: (...a: unknown[]) => mockGroupBy(...(a as [])),
       findMany: (...a: unknown[]) => mockFindMany(...(a as [])),
       count: (...a: unknown[]) => mockCount(...(a as [])),
+      aggregate: (...a: unknown[]) => mockAggregate(...(a as [])),
     },
   },
 }))
@@ -38,6 +40,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockCount.mockResolvedValue(0)
+  mockAggregate.mockResolvedValue({ _sum: { amount: null }, _count: { _all: 0 } }) // sin ventas de tarjetas de regalo
 })
 
 describe('buildPaymentsSummary (pure)', () => {
@@ -282,5 +285,48 @@ describe('Codex R1 · P2: el costo PENDIENTE (Payment nacido del webhook) se dec
     expect(porId.convergido).toMatchObject({ processorFee: 3, net: 97, costPending: false, feeProvisional: false })
     expect(porId.legacy).toMatchObject({ processorFee: 0, net: 100, costPending: false, feeProvisional: false })
     expect(porId.pendiente).not.toHaveProperty('processorData')
+  })
+})
+
+// Pendientes 1a · tarea 1: la lista de cobros es dinero (la venta de tarjetas de regalo se queda), pero su resumen dice cuánto del bruto es eso.
+describe('list_payments · tarjetas de regalo vendidas dentro del bruto', () => {
+  const base = () =>
+    buildPaymentsSummary([
+      { status: 'COMPLETED', type: 'REGULAR', _count: { _all: 3 }, _sum: { amount: 1000, tipAmount: 0, feeAmount: 0, netAmount: 1000 } },
+    ])
+
+  it('conCargasDeTarjetas (pura): con alguna carga dice cuántas y cuánto, y la nota; sin ninguna, ceros y sin nota', () => {
+    const con = conCargasDeTarjetas(base(), { count: 1, amount: 500 })
+    expect(con.giftCardLoads).toEqual({ count: 1, amount: 500 })
+    expect(con.note).toBe('completed.gross incluye $500.00 de tarjetas de regalo vendidas; eso no es venta.')
+    expect(con.completed.gross).toBe(1000) // el bruto es dinero: no se toca
+
+    const sin = conCargasDeTarjetas(base(), { count: 0, amount: 0 })
+    expect(sin.giftCardLoads).toEqual({ count: 0, amount: 0 })
+    expect(sin).not.toHaveProperty('note')
+    // Un conteo ilegible nunca se publica como número.
+    expect(conCargasDeTarjetas(base(), { count: Number.NaN, amount: 50 }).giftCardLoads).toEqual({ count: 0, amount: 0 })
+  })
+
+  it('list_payments agrega las cargas con el MISMO filtro del listado y sólo de cuentas de tarjetas (COMPLETED, no reembolsos)', async () => {
+    mockVenueFind.mockResolvedValue({ id: 'v1', timezone: 'America/Mexico_City' })
+    mockGroupBy.mockResolvedValueOnce([
+      { status: 'COMPLETED', type: 'REGULAR', _count: { _all: 3 }, _sum: { amount: 1000, tipAmount: 0, feeAmount: 0, netAmount: 1000 } },
+    ])
+    mockFindMany.mockResolvedValueOnce([])
+    mockAggregate.mockResolvedValueOnce({ _sum: { amount: 500 }, _count: { _all: 1 } })
+
+    const r = parse(await call({ venueId: 'v1' }))
+
+    expect(r.summary.giftCardLoads).toEqual({ count: 1, amount: 500 })
+    expect(r.summary.note).toContain('$500.00')
+    expect(r.summary.completed.gross).toBe(1000)
+    const { where } = mockAggregate.mock.calls[0][0]
+    expect(where.AND[0]).toEqual(mockGroupBy.mock.calls[0][0].where) // el mismo filtro que el resumen
+    expect(where.AND[1]).toEqual({
+      status: 'COMPLETED',
+      type: { not: 'REFUND' },
+      order: { items: { some: { giftCardId: { not: null } } } },
+    })
   })
 })

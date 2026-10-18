@@ -12,6 +12,7 @@ import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashbo
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
+import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
 import AppError from '@/errors/AppError'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
@@ -78,6 +79,10 @@ export interface PaymentsSummary {
   // WHY: separate refund line so "¿qué se reembolsó?" is answerable and `completed.gross` is
   // TRUE sales revenue. `amount`/`tips` stay NEGATIVE (money out), as stored on the refund rows.
   refunds: { count: number; amount: number; tips: number }
+  /** Tarjetas de regalo VENDIDAS dentro de `completed.gross`: es dinero que entró, no venta. */
+  giftCardLoads?: { count: number; amount: number }
+  /** Sólo cuando `giftCardLoads.count > 0`. */
+  note?: string
 }
 
 /**
@@ -134,6 +139,20 @@ export function buildPaymentsSummary(groups: PaymentStatusGroup[]): PaymentsSumm
 export function conCostoPendiente(summary: PaymentsSummary, costPendingCount: number): PaymentsSummary {
   const pendientes = Number.isFinite(costPendingCount) ? Math.max(0, Math.trunc(costPendingCount)) : 0
   return { ...summary, completed: { ...summary.completed, costPendingCount: pendientes, netProvisional: pendientes > 0 } }
+}
+
+/**
+ * La lista de cobros es DINERO: el cobro de una venta de tarjetas de regalo se queda en ella. Pero `completed.gross` lo incluye y no es
+ * venta, así que el resumen dice cuánto es (y, si hay alguna, lo aclara en la nota) para que el asistente no lo cuente como lo vendido.
+ */
+export function conCargasDeTarjetas(summary: PaymentsSummary, cargas: { count: number; amount: number }): PaymentsSummary {
+  const count = Number.isFinite(cargas.count) ? Math.max(0, Math.trunc(cargas.count)) : 0
+  const amount = count > 0 && Number.isFinite(cargas.amount) ? round2(cargas.amount) : 0
+  return {
+    ...summary,
+    giftCardLoads: { count, amount },
+    ...(count > 0 ? { note: `completed.gross incluye $${amount.toFixed(2)} de tarjetas de regalo vendidas; eso no es venta.` } : {}),
+  }
 }
 
 const STATUS_MAP: Record<string, TransactionStatus> = {
@@ -208,7 +227,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         ...(method ? { method: METHOD_MAP[method] } : {}),
       }
 
-      const [groups, payments, costPendingCount] = await Promise.all([
+      const [groups, payments, costPendingCount, cargasDeTarjetas] = await Promise.all([
         prisma.payment.groupBy({
           // WHY by status AND type: refunds are type=REFUND under status=COMPLETED — grouping by
           // status alone folded them into `completed` invisibly. `type` lets us split them out.
@@ -249,13 +268,25 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         prisma.payment.count({
           where: { ...where, status: TransactionStatus.COMPLETED, processorData: { path: ['costPending'], equals: true } },
         }),
+        // Lo que hay de venta de tarjetas de regalo en `completed.gross`: los mismos cobros que ese renglón (COMPLETED, no reembolsos) y el
+        // MISMO filtro del listado (AND, no un spread: con `status=failed` el resumen no trae cobros completados y ésta tampoco).
+        prisma.payment.aggregate({
+          where: {
+            AND: [where, { status: TransactionStatus.COMPLETED, type: { not: PaymentType.REFUND }, order: WHERE_ORDEN_DE_TARJETAS }],
+          },
+          _sum: { amount: true },
+          _count: { _all: true },
+        }),
       ])
 
       return text({
         venueId,
         window: { start: start.toISOString(), end: end.toISOString() },
         timezone: tz,
-        summary: conCostoPendiente(buildPaymentsSummary(groups as PaymentStatusGroup[]), costPendingCount),
+        summary: conCargasDeTarjetas(conCostoPendiente(buildPaymentsSummary(groups as PaymentStatusGroup[]), costPendingCount), {
+          count: cargasDeTarjetas._count._all,
+          amount: num(cargasDeTarjetas._sum.amount),
+        }),
         count: payments.length,
         payments: payments.map(p => ({
           id: p.id,

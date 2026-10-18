@@ -42,9 +42,12 @@ import { WHERE_ORDEN_SIN_TARJETAS, sqlOrdenSinTarjetas } from '../giftCards/gift
 /** El mismo filtro de estados que usaba el findMany: fuera borradores, canceladas y borradas. */
 const ORDER_NOT_DISCARDED = Prisma.raw(`o."status" NOT IN ('PENDING','CANCELLED','DELETED')`)
 
-/** venue + estados válidos + rango — el WHERE que comparten casi todas las agregaciones. */
+/**
+ * venue + estados válidos + rango — el WHERE que comparten casi todas las agregaciones.
+ * Sin la cuenta de tarjetas de regalo: es una orden, pero no una venta (ranking, canales, horas pico y las gráficas del panel).
+ */
 const orderScope = (venueId: string, fromDate: Date, toDate: Date) =>
-  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)}`
+  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} AND ${sqlOrdenSinTarjetas('o.id')}`
 
 /** El instante en la zona del venue — réplica SQL de `DateTime.fromJSDate(x, { zone: 'utc' }).setZone(tz)`. */
 const localTs = (tz: string, col: Prisma.Sql = Prisma.raw('o."createdAt"')) => Prisma.sql`((${col} AT TIME ZONE 'UTC') AT TIME ZONE ${tz})`

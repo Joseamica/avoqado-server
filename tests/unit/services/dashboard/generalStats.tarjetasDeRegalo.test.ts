@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { getBasicMetricsData, getBasicMetricsDetailsPage } from '@/services/dashboard/generalStats.dashboard.service'
+import { getBasicMetricsData, getBasicMetricsDetailsPage, getChartData } from '@/services/dashboard/generalStats.dashboard.service'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 jest.mock('@/services/legacy/qrPayments.legacy.service', () => ({
@@ -42,4 +42,20 @@ describe('Inicio (basic-metrics) · tarjetas de regalo', () => {
       items: { none: { giftCardId: { not: null } } },
     })
   })
+})
+
+describe('gráficas por orden (staff_ranking, channel_mix, peak_hours…) · tarjetas de regalo', () => {
+  // Todas comparten `orderScope`: la cuenta de tarjetas es una orden pero no una venta.
+  it.each(['staff-ranking', 'channel-mix', 'peak-hours', 'category-mix', 'revenue-trends'])(
+    '🔴 %s se agrega en SQL sin las cuentas de tarjetas',
+    async tipo => {
+      ;(prismaMock.$queryRaw as jest.Mock).mockResolvedValue([])
+      await getChartData('v1', tipo, RANGO)
+      const consultas = (prismaMock.$queryRaw as jest.Mock).mock.calls.map(textoDe)
+      expect(consultas.length).toBeGreaterThan(0)
+      for (const sql of consultas) {
+        expect(sql).toContain('gc_oi."orderId" = o.id AND gc_oi."giftCardId" IS NOT NULL')
+      }
+    },
+  )
 })
