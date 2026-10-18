@@ -25,6 +25,7 @@ jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValu
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getSalesSummary } from '@/services/dashboard/sales-summary.dashboard.service'
+import { getGiftCardDetail } from '@/services/giftCards/giftCardReports.service'
 import { getBasicMetricsData } from '@/services/dashboard/generalStats.dashboard.service'
 import {
   aggregateShiftPayments,
@@ -120,6 +121,19 @@ describe('B5 · ventas con tarjetas de regalo', () => {
     expect(r.giftCardBalanceBreakdown).toEqual({ amount: 200, count: 1, tips: 0, refunds: 0 })
   })
 
+  it('🔴 full-testing v2 #1 · «ventas por método» (la barra bajo el total): sin las cargas y con el saldo como GIFT_CARD', async () => {
+    const r = await getSalesSummary(venueId, { ...rango, groupBy: 'paymentMethod', timezone: 'America/Mexico_City' })
+    const filas = (r.salesByPaymentMethod ?? []).map(m => [m.method, m.amount, m.count]).sort()
+    // $300 en efectivo + $200 con saldo = lo vendido; la tarjeta de $500 y la cancelada (con su REFUND) son cargas, no ventas.
+    expect(filas).toEqual([
+      ['CASH', 300, 1],
+      ['GIFT_CARD', 200, 1],
+    ])
+    expect((r.salesByPaymentMethod ?? []).reduce((s, m) => s + m.percentage, 0)).toBeCloseTo(100)
+    // El «dinero» por método (B5) no cambia: la carga con tarjeta sigue ahí.
+    expect(r.byPaymentMethod?.find(m => m.method === 'CREDIT_CARD')?.amount).toBe(500)
+  })
+
   it('las barras por día suman lo mismo que la cabecera', async () => {
     const r = await getSalesSummary(venueId, { ...rango, reportType: 'days', timezone: 'America/Mexico_City' })
     const suma = (r.byPeriod ?? []).reduce((s, periodo) => s + (periodo.metrics.grossSales ?? 0), 0)
@@ -134,6 +148,7 @@ describe('B5 · ventas con tarjetas de regalo', () => {
     const r = await getSalesSummary(venueId, { ...rango, paymentMethod: 'CASH', timezone: 'America/Mexico_City' })
     expect(r.summary.giftCardLoads).toBeUndefined()
     expect(r.summary.paidWithGiftCardBalance).toBeUndefined()
+    expect(r.salesByPaymentMethod).toBeUndefined()
   })
 
   it('🔴 Inicio (basic-metrics) dice lo mismo que el reporte: la venta de tarjetas no es venta', async () => {
@@ -162,6 +177,52 @@ describe('B5 · ventas con tarjetas de regalo', () => {
     ])
     // $500 + $300 − $300 (la cancelación resta: el REFUND viene negativo); r1 (M-1): cuenta las dos cargas, no el reembolso.
     expect(await aggregateGiftCardLoads(venueId, filtros)).toEqual({ amount: 500, count: 2 })
+  })
+})
+
+describe('🔴 full-testing v2 · un negocio sin tarjetas en el rango no recibe «ventas por método» (el panel usa el dinero, que es igual)', () => {
+  let venueId: string
+
+  beforeAll(async () => {
+    const negocio = await crearNegocioDePrueba('ventas-sin-tarjetas')
+    venueId = negocio.venueId
+    await sembrarCobro({ venueId, staffId: negocio.staffId, saleCents: 30000 })
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('sin cargas ni saldo, el campo no va y el desglose de siempre sigue igual', async () => {
+    const rango = { startDate: new Date(Date.now() - 60 * 60_000).toISOString(), endDate: new Date(Date.now() + 60 * 60_000).toISOString() }
+    const r = await getSalesSummary(venueId, { ...rango, groupBy: 'paymentMethod', timezone: 'America/Mexico_City' })
+    expect(r.salesByPaymentMethod).toBeUndefined()
+    expect(r.byPaymentMethod?.map(m => [m.method, m.amount])).toEqual([['CASH', 300]])
+  })
+})
+
+describe('🔴 full-testing v2 #3 · el detalle dice de qué venta es la tarjeta: cuántas tarjetas y por cuánto', () => {
+  let venueId: string
+  let venta: Awaited<ReturnType<typeof sembrarVentaDeTarjetas>>
+
+  beforeAll(async () => {
+    const negocio = await crearNegocioDePrueba('detalle-venta')
+    venueId = negocio.venueId
+    const { staffId, organizationId } = negocio
+    venta = await sembrarVentaDeTarjetas({ venueId, organizationId, staffId, montos: [500, 300], metodo: 'CASH' })
+    // Un ajuste mueve el saldo, no lo que costó la venta.
+    await prisma.giftCard.update({ where: { id: venta.giftCardIds[0] }, data: { balance: D(450) } })
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('las 2 tarjetas de la venta y su suma ($800), desde cualquiera de las dos', async () => {
+    for (const id of venta.giftCardIds) {
+      const d = await getGiftCardDetail(venueId, id, {})
+      expect(d.sale).toEqual({ cards: 2, amount: 800 })
+    }
   })
 })
 

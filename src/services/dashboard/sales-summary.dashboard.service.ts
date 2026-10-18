@@ -191,6 +191,12 @@ export interface SalesSummaryResponse {
   reportType: ReportType
   summary: SalesSummaryMetrics
   byPaymentMethod?: PaymentMethodBreakdown[]
+  /**
+   * Aditivo (tarjetas de regalo, full-testing v2 #1): VENTAS por método para la barra bajo «Total de Ventas»: sin los cobros de
+   * cuentas de tarjetas y con lo pagado con saldo como `GIFT_CARD`. `byPaymentMethod` sigue siendo DINERO (B5). Sólo sin filtro y
+   * en negocios que tienen tarjetas; sin él, los dos son iguales.
+   */
+  salesByPaymentMethod?: PaymentMethodBreakdown[]
   byPaymentMethodDetailed?: PaymentMethodDetailedBreakdown[]
   byPeriod?: TimePeriodMetrics[] // Time-based breakdown
   byMerchantAccount?: MerchantAccountBreakdown[] // additive; present only when includeMerchantBreakdown=true
@@ -1257,6 +1263,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   // ============================================================
 
   let byPaymentMethod: PaymentMethodBreakdown[] | undefined
+  let salesByPaymentMethod: PaymentMethodBreakdown[] | undefined
 
   // Skip breakdown under filter — the user already drilled in to one bucket,
   // a single-row breakdown adds no information.
@@ -1301,6 +1308,38 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       byPaymentMethod = withPercentages([
         ...(byPaymentMethod ?? []),
         { method: 'QR_LEGACY', amount: legacyTotal, count: legacyAggregate.count, percentage: 0 },
+      ])
+    }
+
+    // Tarjetas de regalo (full-testing v2 #1): VENTAS por método para la barra bajo «Total de Ventas» (que es ventas): los mismos
+    // cobros SIN los de cuentas de tarjetas (sus cargas y sus cancelaciones) y CON lo pagado con saldo como `GIFT_CARD`, neto de
+    // reversos y con propina como las demás filas. Sólo en negocios con tarjetas (índice por venueId): sin ninguna, no hay cuentas de
+    // tarjetas ni saldo y las dos vistas son la misma, así que no se pregunta nada más.
+    if (tarjetas && (await prisma.giftCard.findFirst({ where: { venueId }, select: { id: true } }))) {
+      const ventas = await prisma.payment.groupBy({
+        by: ['method'],
+        where: {
+          venueId,
+          ...dateFilter,
+          status: 'COMPLETED',
+          ...merchantPaymentFilter,
+          AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_SIN_TARJETAS }],
+        },
+        _sum: { amount: true, tipAmount: true },
+        _count: true,
+      })
+      const saldo = summary.paidWithGiftCardBalance ?? 0
+      salesByPaymentMethod = withPercentages([
+        ...ventas.map(p => ({
+          method: String(p.method),
+          amount: Number(p._sum.amount || 0) + Number(p._sum.tipAmount || 0),
+          count: p._count,
+          percentage: 0,
+        })),
+        ...byPaymentMethod.filter(m => m.method === 'QR_LEGACY'),
+        ...(tarjetas.balanceCount > 0 || saldo !== 0
+          ? [{ method: 'GIFT_CARD', amount: saldo, count: tarjetas.balanceCount, percentage: 0 }]
+          : []),
       ])
     }
   }
@@ -1536,6 +1575,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     reportType,
     summary,
     byPaymentMethod,
+    ...(salesByPaymentMethod ? { salesByPaymentMethod } : {}),
     byPaymentMethodDetailed,
     byPeriod,
     byMerchantAccount,

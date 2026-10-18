@@ -114,6 +114,11 @@ export interface GiftCardDetail extends GiftCardRow {
    */
   cancel: CancelacionDeVenta
   /**
+   * Full-testing v2 #3: la venta de la tarjeta, para que «Cancelar la venta» diga qué cancela: cuántas tarjetas tiene esa cuenta y
+   * cuánto costaron (suma de `initialAmount`; los ajustes mueven el saldo, no esto). `null` sin venta. Aditivo.
+   */
+  sale: { cards: number; amount: number } | null
+  /**
    * Auditoría r1 D-2: el bloqueo VIGENTE (último BLOCK/UNBLOCK de la libreta, con `bloqueosVigentes` de B2), leído aparte de
    * la libreta paginada. `null` si la tarjeta no está BLOCKED. El panel decide con esto el motivo que enseña.
    */
@@ -416,6 +421,14 @@ export async function getGiftCardDetail(
   const vivo = tarjeta.status === GiftCardStatus.ACTIVE || tarjeta.status === GiftCardStatus.BLOCKED
   // Decisión 1 del coordinador: la misma regla que `iniciarCancelacionDeVenta` (B2), leída sin candados.
   const cancel: CancelacionDeVenta = tarjeta.orderItem ? await estadoDeCancelacionDeVenta(venueId, tarjeta.orderItem.orderId) : SIN_VENTA
+  const venta = tarjeta.orderItem
+    ? await prisma.giftCard.aggregate({
+        where: { venueId, orderItem: { is: { orderId: tarjeta.orderItem.orderId } } },
+        _count: { _all: true },
+        _sum: { initialAmount: true },
+      })
+    : null
+  const sale = venta ? { cards: venta._count._all, amount: pesos(venta._sum.initialAmount) } : null
   // Auditoría r1 D-2: el bloqueo VIGENTE sale de su propia lectura (último BLOCK/UNBLOCK, una consulta por el índice
   // `[giftCardId, createdAt]`, la misma lógica de B2), nunca de la página de la libreta: tras muchos ajustes con la tarjeta
   // bloqueada, el BLOCK ya no está en la primera página. Sólo se consulta si la tarjeta está BLOCKED.
@@ -437,6 +450,7 @@ export async function getGiftCardDetail(
     hasRedeem: usos > 0,
     canReplaceCode: tarjeta.customerId === null && usos === 0 && vivo,
     cancel,
+    sale,
     currentBlock,
     activities: {
       items: pagina.map(a => ({
