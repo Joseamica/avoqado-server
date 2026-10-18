@@ -42,6 +42,7 @@ describe('Variantes: modelo de datos', () => {
         data: { venueId, categoryId, sku: `P-${s}`, name: 'Playera · M', price: 10, productGroupId: g.id, variantKey: 'k1' } as any,
       })
     })
-    await expect(prisma.productGroup.delete({ where: { id: g.id } })).rejects.toMatchObject({ code: 'P2003' })
+    // Postgres 16 lo reporta como llave foránea (P2003); el 18 de producción como RESTRICT (23001, sin código de Prisma).
+    await expect(prisma.productGroup.delete({ where: { id: g.id } })).rejects.toThrow(/Product_productGroupId_fkey|Foreign key constraint/)
   })
 })
