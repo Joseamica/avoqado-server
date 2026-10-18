@@ -19,6 +19,7 @@ import {
   MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN,
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 
 /**
  * Codex R3 (P1-3) + R4 (R4-3): el slot que ocupa HOY una afiliación en la configuración efectiva del venue (venue →
@@ -1714,45 +1715,19 @@ async function updateOrderTotalsForStandalonePayment(
   // rechazo aquí dejaría dinero cobrado al cliente SIN registro en Avoqado — un cobro
   // fantasma, peor que el sobrepago. Por eso el pago SIEMPRE se registra; lo que se elimina
   // es la invisibilidad. `wasAlreadyPaid` distingue el caso Mindform exacto: un cobro nuevo
-  // aterrizando sobre una cuenta que YA estaba saldada.
+  // aterrizando sobre una cuenta que YA estaba saldada. El aviso lo comparte con el POS móvil.
   const overpaidBy = Math.round((totalPaid - newTotal) * 100) / 100
   if (overpaidBy > 0.01) {
-    const wasAlreadyPaid = order.paymentStatus === 'PAID'
-    // BetterStack debe alertar sobre '🚨 [Sobrepago]'.
-    logger.error('🚨 [Sobrepago] Se cobró MÁS de lo que vale la cuenta — el pago se registra, pero requiere revisión', {
+    avisarSobrepago({
       orderId,
       venueId: order.venueId,
       totalPaid,
       orderTotal: newTotal,
       overpaidBy,
-      wasAlreadyPaid,
+      wasAlreadyPaid: order.paymentStatus === 'PAID',
       paymentId: currentPaymentId ?? null,
       staffId: staffId ?? null,
     })
-    // Fire-and-forget FUERA de toda transacción: una falla del audit jamás puede tocar el cobro.
-    void prisma.activityLog
-      .create({
-        data: {
-          action: 'SOBREPAGO_DETECTADO',
-          entity: 'Order',
-          entityId: orderId,
-          staffId: staffId ?? null,
-          venueId: order.venueId,
-          data: {
-            totalPaid,
-            orderTotal: newTotal,
-            overpaidBy,
-            wasAlreadyPaid,
-            paymentId: currentPaymentId ?? null,
-          },
-        },
-      })
-      .catch(err => {
-        logger.error('🚨 [Sobrepago] No se pudo escribir el ActivityLog del sobrepago', {
-          orderId,
-          error: err instanceof Error ? err.message : err,
-        })
-      })
   }
 
   // 🚨 INVENTARIO INSUFICIENTE — detectar y gritar, NUNCA rechazar ni lanzar.
