@@ -15,6 +15,7 @@
 import prisma from '../../utils/prismaClient'
 import { logAction } from '../dashboard/activity-log.service'
 import { NotFoundError } from '../../errors/AppError'
+import { CAMPOS_EDITABLES_DE_ORGANIZACION } from '../../schemas/organization.schema'
 import { Prisma, VenueStatus, TransactionStatus } from '@prisma/client'
 import { utcTs } from '../../utils/sqlDates'
 
@@ -1131,15 +1132,22 @@ export async function getOrganizationTeam(orgId: string): Promise<OrganizationTe
  */
 export async function updateOrganization(
   orgId: string,
-  data: {
+  entrada: {
     name?: string
     email?: string
     phone?: string
     taxId?: string | null
     billingEmail?: string | null
-    billingAddress?: Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput
+    billingAddress?: Prisma.InputJsonValue | Prisma.NullableJsonNullValueInput | null
   },
+  performedBy?: string,
 ) {
+  // 🔴 Ronda 3 (Codex): sólo los escalares de la lista blanca, también aquí — así ningún llamador puede volver a mandar
+  // escrituras anidadas (`attendanceConfig.delete`, `venues.deleteMany`…) a `prisma.organization.update`.
+  const data = Object.fromEntries(
+    Object.entries(entrada ?? {}).filter(([campo]) => CAMPOS_EDITABLES_DE_ORGANIZACION.includes(campo)),
+  ) as typeof entrada
+
   const organization = await prisma.organization.findUnique({
     where: { id: orgId },
   })
@@ -1150,15 +1158,26 @@ export async function updateOrganization(
 
   const updated = await prisma.organization.update({
     where: { id: orgId },
-    data,
+    // Una columna JSON no acepta `null` crudo: vaciarla es `Prisma.DbNull`.
+    data: data.billingAddress === null ? { ...data, billingAddress: Prisma.DbNull } : (data as Prisma.OrganizationUpdateInput),
   })
 
-  logAction({
-    action: 'ORGANIZATION_UPDATED',
-    entity: 'Organization',
-    entityId: orgId,
-    data: { changes: Object.keys(data) },
-  })
+  // Quién, la org en su columna (la bitácora de la org filtra por ella) y sólo lo que cambió. Sin cambios, sin asiento.
+  const changes: Record<string, { from: any; to: any }> = {}
+  for (const [campo, to] of Object.entries(data)) {
+    const from = (organization as Record<string, any>)[campo] ?? null
+    if (JSON.stringify(from) !== JSON.stringify(to)) changes[campo] = { from, to }
+  }
+  if (Object.keys(changes).length > 0) {
+    void logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
+      action: 'ORGANIZATION_UPDATED',
+      entity: 'Organization',
+      entityId: orgId,
+      data: { changes },
+    })
+  }
 
   return updated
 }
