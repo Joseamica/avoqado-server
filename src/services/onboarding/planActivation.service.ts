@@ -549,6 +549,153 @@ async function exigirPrimerCobroPagado(venueId: string, subscriptionId: string, 
   throw pendiente('el primer cobro no está pagado por el monto consentido')
 }
 
+const esCobrada = (estado: string) => (SUSCRIPCION_COBRADA as readonly string[]).includes(estado)
+const idDe = (valor: string | { id: string } | null | undefined) => (typeof valor === 'string' ? valor : valor?.id)
+
+/** El lugar del cupo que apartó un intento, tal como lo dejó en la metadata de su suscripción. */
+type LugarDelIntento = { redemptionId: string; campaignId: string; offerVersion: string }
+
+/** Si falta cualquiera de los tres datos, `null`: no se libera nada que no se pueda nombrar completo. */
+function lugarDeLaMetadata(sub: Stripe.Subscription): LugarDelIntento | null {
+  const { launchRedemptionId, launchCampaignId, launchOfferVersion } = sub.metadata ?? {}
+  return launchRedemptionId && launchCampaignId && launchOfferVersion
+    ? { redemptionId: launchRedemptionId, campaignId: launchCampaignId, offerVersion: launchOfferVersion }
+    : null
+}
+
+/**
+ * 🔴 D2 (spec §6.3 (2)): descartar un intento que no se pagó = ANULAR su factura, nunca `subscriptions.cancel`.
+ *
+ * Medido en Stripe de prueba (18-oct): anular es CONDICIONAL —sobre una factura ya pagada Stripe responde 400 «Invoices
+ * with `paid` payments cannot be voided.»— y, si pasa, deja la suscripción en `incomplete_expired` al instante.
+ * `cancel` NO es condicional: si el navegador pagó un instante antes, cancelaría una suscripción PAGADA y el intento nuevo
+ * cobraría otra vez.
+ *
+ * Si anular falla se relee la suscripción: ya cobrada ⇒ se pagó en ese instante y se recupera (sin cobrar otra vez);
+ * `incomplete_expired` ⇒ ya estaba descartada; cualquier otra cosa, o Stripe sin contestar ⇒ 'INCIERTO' («no pude ver»
+ * nunca es «no existe»).
+ */
+async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | { cobrada: Stripe.Subscription } | 'INCIERTO'> {
+  try {
+    const facturaId = idDe(sub.latest_invoice)
+    if (!facturaId) throw new Error('la suscripción no trae su factura')
+    await stripe.invoices.voidInvoice(facturaId)
+    return 'DESCARTADA'
+  } catch (error) {
+    logger.warn('activate-plan: no se pudo anular la factura del intento anterior — se relee la suscripción', {
+      subscriptionId: sub.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  const fresca = await stripe.subscriptions.retrieve(sub.id).catch(() => null)
+  if (fresca && esCobrada(fresca.status)) return { cobrada: fresca }
+  if (fresca?.status === 'incomplete_expired') return 'DESCARTADA'
+  return 'INCIERTO'
+}
+
+/**
+ * 🔴 D2 (spec §6.3): la suscripción del intento anterior sigue `incomplete` —es la del 2.º create, que espera el reto del
+ * banco—. Antes esto era un 503 durante 23 h; ahora se decide con lo que dice Stripe AHORA (la sub con su secreto y el
+ * PaymentIntent de su primera factura):
+ *
+ * | Stripe                                    | ¿Mismo intento? | Qué pasa                                                 |
+ * |-------------------------------------------|-----------------|----------------------------------------------------------|
+ * | factura `paid` o PI `succeeded/processing` | da igual        | cobrada ⇒ se recupera; si Stripe aún no la activa ⇒ 503 y lease suelto |
+ * | PI `requires_action/requires_confirmation` | sí              | 409 con el MISMO secreto (reanudar), lease suelto         |
+ * | PI `requires_payment_method`               | sí              | se anula ⇒ DECLINED, lugar liberado, 402 del banco        |
+ * | cualquier PI no pagado                     | no              | se anula ⇒ «no existe» ⇒ intento nuevo (`lugarDescartado`) |
+ * | la relectura ya dice `incomplete_expired`  | da igual        | descartada sin anular ⇒ intento nuevo                     |
+ *
+ * «Mismo intento» = la misma tarjeta (cada tarjeta tecleada es un `pm_` nuevo), el mismo plan, la misma campaña (o ninguna)
+ * y pagar hoy: es el pedido que el propio navegador manda tras el reto. Cualquier lectura que falle ⇒ 503 con el lease
+ * VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch` de lecturas.
+ */
+async function resolverIntentoIncompleto(args: {
+  sub: Stripe.Subscription
+  input: ActivatePlanInput
+  campaign: LaunchCampaignRow | null
+  organizationId: string
+  attempt: number
+  lease: Date
+}): Promise<{ recuperada: Stripe.Subscription | null; lugarDescartado: LugarDelIntento | null }> {
+  const { input, campaign, organizationId, attempt, lease } = args
+  const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
+    try {
+      return await lectura()
+    } catch (error) {
+      logger.warn('activate-plan: no se pudo leer en Stripe el intento incompleto', {
+        organizationId,
+        subscriptionId: args.sub.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw pendiente('no se pudo consultar Stripe')
+    }
+  }
+
+  const sub = await leer(() => stripe.subscriptions.retrieve(args.sub.id, { expand: ['latest_invoice.confirmation_secret'] }))
+  // Expiró entre las dos lecturas (las 23 h, o la anuló otra petición): ya está descartada, sin anular nada (Codex r1 #3).
+  if (sub.status === 'incomplete_expired') return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
+  if (esCobrada(sub.status)) return { recuperada: sub, lugarDescartado: null }
+  if (sub.status !== 'incomplete') throw pendiente(`la suscripción anterior quedó en estado ${sub.status}`)
+
+  const factura = typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null
+  const pagos = await leer(() => {
+    if (!factura?.id) throw new Error('la suscripción no trae su factura')
+    return stripe.invoicePayments.list({ invoice: factura.id, expand: ['data.payment.payment_intent'] })
+  })
+  const delPi = pagos.data.filter(p => p.payment.type === 'payment_intent')
+  const pago = delPi.find(p => p.is_default) ?? delPi[0]
+  const pi = typeof pago?.payment.payment_intent === 'object' ? pago.payment.payment_intent : null
+
+  if (factura?.status === 'paid' || pi?.status === 'succeeded' || pi?.status === 'processing') {
+    const fresca = await leer(() => stripe.subscriptions.retrieve(sub.id))
+    if (esCobrada(fresca.status)) return { recuperada: fresca, lugarDescartado: null }
+    // Ya se autorizó, sólo falta que Stripe la active (medido: en el mismo instante). El lease se suelta para que el
+    // reintento de 10 s del tablero lo cierre sin chocar con «tu pago se está confirmando».
+    await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, lease)
+    throw pendiente('el pago ya se autorizó; Stripe todavía no activa la suscripción')
+  }
+
+  const mismoIntento =
+    idDe(sub.default_payment_method) === input.paymentMethodId &&
+    sub.metadata?.featureCode === (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO') &&
+    (sub.metadata?.launchCampaignId ?? '') === (campaign?.id ?? '') &&
+    input.payNow
+
+  if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
+    // REANUDAR: volver a confirmar un PI que espera al banco se acepta (medido), así sirve también tras una recarga.
+    const secreto = factura?.confirmation_secret?.client_secret
+    if (!secreto) throw pendiente('la factura del intento no trae su secreto de confirmación')
+    await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, lease)
+    logger.info('activate-plan: el banco sigue esperando que se autorice el primer cobro', { organizationId, subscriptionId: sub.id })
+    throw requiereAutenticacion(secreto)
+  }
+  // Mismo intento con un PI en otro estado (o sin PI): no se sabe qué pasó; no se anula ni se cobra a ciegas.
+  if (mismoIntento && pi?.status !== 'requires_payment_method')
+    throw pendiente(`el pago del intento quedó en ${pi?.status ?? 'sin estado'}`)
+
+  const anulada = await anularIntento(sub)
+  if (anulada === 'INCIERTO') throw pendiente('no se pudo descartar el intento anterior')
+  if (anulada !== 'DESCARTADA') return { recuperada: anulada.cobrada, lugarDescartado: null }
+  if (!mismoIntento) return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
+
+  // El reto falló o el banco rechazó después de autenticar: es un rechazo. Estado y lugar se cierran JUNTOS y sólo si el
+  // intento sigue siendo nuestro (Codex #14), igual que el PASO 10.
+  const { launchRedemptionId, launchCampaignId } = sub.metadata ?? {}
+  await cerrarIntentoYLiberarLugar({
+    organizationId,
+    attempt,
+    lease,
+    estadoFinal: PLAN_ACTIVATION_STATUS.DECLINED,
+    lugar:
+      launchRedemptionId && launchCampaignId
+        ? { redemptionId: launchRedemptionId, campaignId: launchCampaignId, motivo: 'PLAN_PAYMENT_DECLINED' }
+        : null,
+  })
+  const lpe = pi?.last_payment_error
+  throw rechazado(lpe?.message || 'Tu banco no autorizó el pago', lpe?.decline_code ?? lpe?.code)
+}
+
 export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePlanResult> {
   const { organizationId, staffId } = input
   const now = new Date()
@@ -748,13 +895,30 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     //   - viva (`active`/`trialing`/`past_due`/`unpaid`) ⇒ el dinero quedó: se reusa.
     //   - `incomplete_expired` ⇒ el primer cargo nunca se completó y Stripe la dio por muerta: no
     //     hay nada que reusar, se estrena intento.
-    //   - `canceled`/`incomplete` ⇒ AMBIGUO: pudo cobrar y pudo no cobrar. Ni conceder acceso ni
+    //   - `canceled` (u otro) ⇒ AMBIGUO: pudo cobrar y pudo no cobrar. Ni conceder acceso ni
     //     cobrar encima: 503 para que alguien lo mire.
-    // (Segunda auditoría de Codex, 18-sep.)
+    //   - `incomplete` ⇒ 🔴 D2: en el alta sólo la deja el 2.º create (el que espera el reto del banco), así que se resuelve
+    //     con el estado REAL en Stripe (`resolverIntentoIncompleto`), fuera de los try/catch de lectura de arriba para que
+    //     su 409, su 402 y sus 503 salgan tal cual.
+    // (Segunda auditoría de Codex, 18-sep; `incomplete`: D2, 18-oct.)
+    /** El lugar del cupo del intento descartado: se libera en el avance de abajo si este pedido no lo reusa. */
+    let lugarDescartado: LugarDelIntento | null = null
     if (suscripcionRecuperada) {
       const estado = suscripcionRecuperada.status
       if (estado === 'incomplete_expired') {
+        // 🔴 D2 (Codex r1 #3): expiró (las 23 h) o el proceso murió entre anularla y escribir aquí. Sin esto, su lugar quedaba
+        // RESERVED para siempre si el cliente volvía y terminaba con otra cosa (la prueba de 30 días).
+        lugarDescartado = lugarDeLaMetadata(suscripcionRecuperada)
         suscripcionRecuperada = null
+      } else if (estado === 'incomplete') {
+        ;({ recuperada: suscripcionRecuperada, lugarDescartado } = await resolverIntentoIncompleto({
+          sub: suscripcionRecuperada,
+          input,
+          campaign,
+          organizationId,
+          attempt,
+          lease: nuestroLease,
+        }))
       } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
         logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {
           organizationId,
@@ -767,17 +931,33 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     if (!suscripcionRecuperada) {
       // No existe de verdad: intento nuevo, llave nueva.
       attempt = prev.attempt + 1
-      const avanzado = await prisma.onboardingProgress.updateMany({
-        where: {
-          organizationId,
-          planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
-          planActivationAttempt: prev.attempt,
-          planActivationLeaseUntil: nuestroLease,
-        },
-        data: { planActivationAttempt: attempt },
+      const lugar = lugarDescartado
+      const avanzado = await prisma.$transaction(async tx => {
+        const { count } = await tx.onboardingProgress.updateMany({
+          where: {
+            organizationId,
+            planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+            planActivationAttempt: prev.attempt,
+            planActivationLeaseUntil: nuestroLease,
+          },
+          // 🔴 D2 (Codex r1 #1): el intento nuevo nace SIN el id del anterior. Si heredara el de la suscripción descartada, el
+          // reintento la leería por id, la daría por muerta sin buscar por la llave de ESTE intento, y cobraría encima.
+          data: { planActivationAttempt: attempt, planStripeSubscriptionId: null },
+        })
+        // 🔴 D2 (Codex r1 #3): el lugar del intento descartado se libera en la MISMA transacción que acredita que el intento es
+        // nuestro, salvo que este pedido lo reuse (misma campaña y versión: `apartarLugar` lo toma de nuevo). `liberarLugarEn`
+        // es CAS sobre RESERVED: liberar de más es imposible.
+        if (
+          count === 1 &&
+          lugar &&
+          (!campaign || campaign.id !== lugar.campaignId || String(campaign.offerVersion) !== lugar.offerVersion)
+        ) {
+          await liberarLugarEn(tx, lugar.redemptionId, lugar.campaignId, 'PLAN_ATTEMPT_DISCARDED')
+        }
+        return count
       })
       // Ya no es nuestro (el lease venció y otra petición lo tomó): no se cobra nada.
-      if (avanzado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+      if (avanzado === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
   }
 
