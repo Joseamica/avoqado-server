@@ -15,6 +15,7 @@ import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/serv
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
 
 /**
  * List orders for a venue (paginated)
@@ -260,6 +261,23 @@ export const getOrder = async (req: Request, res: Response, next: NextFunction) 
 }
 
 /**
+ * 🔴 H1 — la cola de cobros de Android ≤ 2.23 (y de su app de Windows, el mismo código: `x-device-platform: ANDROID`,
+ * `x-app-version` «2.23.0-escritorio») reenvía el TOTAL de la cuenta aunque el aparato sólo cobró su parte del split
+ * (`queueCashPayment(orderRequest = buildOrderRequest(cart))` ⇒ `amountCents = total − propina`; arreglado en avoqado-android
+ * `8c21d450`, que entra en `v2.24.0-64` y `tienda-windows/v2.24.0`). Antes de S1/S2 el recorte al saldo lo tapaba por accidente;
+ * con S1/S2 se registrarían $100 por $50 cobrados y el cajero firmaría un faltante falso. Para ESA cola, `payCashOrder` se porta
+ * como antes (`colaConDefectoH1`). Una versión ilegible de Android cuenta como vieja. El intent `PAY_CASH` de esas versiones sí
+ * manda la parte correcta: no pasa por aquí.
+ *
+ * Se puede QUITAR cuando no quede flota ≤ 2.23 (POS_ANDROID con latido en los últimos 30 días; medido el 17-oct-2026: 10 aparatos
+ * en 7 negocios con 2.22.2–2.23.0).
+ */
+export function esColaConDefectoH1(plataforma: unknown, version: unknown): boolean {
+  if (typeof plataforma !== 'string' || plataforma.trim().toUpperCase() !== 'ANDROID') return false
+  return !versionAlMenos(typeof version === 'string' ? version : null, '2.24.0')
+}
+
+/**
  * Pay order with cash
  * AUTHENTICATED endpoint - requires valid JWT
  *
@@ -354,6 +372,10 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // ventas del lunes que no habían sincronizado NO pueden quedar atoradas para
       // siempre. Un desenlace ya ocurrido es un hecho, no se re-litiga.
       isOfflineReplay: req.body.isOfflineReplay === true,
+      colaConDefectoH1:
+        req.body.isOfflineReplay === true && esColaConDefectoH1(req.headers?.['x-device-platform'], req.headers?.['x-app-version']),
+      // R2-6: la propiedad de mesa dejó pasar dinero ya capturado sobre una mesa ajena (`checkTableOwnership`, ruta de cobro).
+      mesaAjena: res.locals?.mesaAjena,
     })
 
     res.status(200).json({

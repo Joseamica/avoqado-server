@@ -17,6 +17,8 @@ jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBr
 jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
 jest.mock('@/services/wallet/firstStampEmail.service', () => ({ sendFirstStampEmailIfDue: jest.fn() }))
 jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn().mockResolvedValue(undefined) }))
+// R2-6: el rastro de la mesa ajena (ActivityLog) se escribe de verdad; la configuración de integración lo deja en `jest.fn()`.
+jest.mock('@/services/dashboard/activity-log.service', () => jest.requireActual('@/services/dashboard/activity-log.service'))
 jest.mock('@/services/access/basePlan.service', () => ({
   ...jest.requireActual('@/services/access/basePlan.service'),
   venueHasFeatureAccess: jest.fn().mockResolvedValue(true),
@@ -26,7 +28,8 @@ jest.mock('@/middlewares/authenticateToken.middleware', () => ({
   authenticateTokenMiddleware: (req: Request, res: Response, next: NextFunction) => {
     const actorId = req.get('x-test-actor')
     if (!actorId) return res.status(401).json({ success: false, message: 'Autenticación requerida' })
-    Object.assign(req, { authContext: { userId: actorId, venueId: req.params.venueId, orgId: req.params.venueId, role: 'OWNER' } })
+    const role = req.get('x-test-role') ?? 'OWNER'
+    Object.assign(req, { authContext: { userId: actorId, venueId: req.params.venueId, orgId: req.params.venueId, role } })
     next()
   },
 }))
@@ -36,7 +39,7 @@ jest.mock('@/middlewares/registerDevice.middleware', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
-import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
@@ -122,7 +125,7 @@ afterAll(async () => {
   await prisma.$disconnect()
 }) // La base es desechable: la corrida la borra entera.
 
-const params = (intents: any[]) => ({ venueId, staffId: staffA, deviceId: deviceA, intents, authorizeIntent: () => true })
+const params = (intents: any[], staffId = staffA) => ({ venueId, staffId, deviceId: deviceA, intents, authorizeIntent: () => true })
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
 
 /** A abre la mesa y pide UN café de $100 (con su cliente, para la lealtad). Devuelve la orden y su id local. */
@@ -338,6 +341,186 @@ describe('I4 · A y B al mismo tiempo', () => {
       lealtad: 1,
       cajon: entroB ? 2 : 1,
       avisos: entroB ? 1 : 0,
+    })
+  })
+})
+
+/**
+ * 🔴 Ronda 2 de S1/S2 contra Postgres REAL (revisiones de ceba0df1f).
+ *   I5 · R2-1: la cola HTTP de Android/Windows ≤ 2.23 (H1: manda el TOTAL de la cuenta, no su parte) se porta como antes de S1/S2.
+ *   I6 · R2-2: una venta REFUNDED que después se canceló recibe el reenvío y NO se reabre.
+ *   I7 · R2-6: Ana cobró sin red, un encargado pasó la mesa a Beto: el dinero se registra a nombre de Ana con rastro de la mesa ajena.
+ */
+const llaveHttp = () => randomUUID()
+const pagar = (orderId: string, actor: string, cuerpo: Record<string, unknown>, cabeceras: Record<string, string> = {}) => {
+  const r = request(app).post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`).set('x-test-actor', actor)
+  for (const [k, v] of Object.entries(cabeceras)) r.set(k, v)
+  return r.send(cuerpo)
+}
+
+describe('I5 · R2-1: la cola HTTP de Android/Windows ≤ 2.23 (H1)', () => {
+  const android223 = { 'x-device-platform': 'ANDROID', 'x-app-version': '2.23.0' }
+
+  it('🔴 cuenta $100 en 2×$50: B abona $50 y la cola 2.23 de A manda el TOTAL ($100) ⇒ $50 registrados y $50 de cambio, PAID, sin aviso (S2 registraba $100: faltante falso de $50)', async () => {
+    const { orderId } = await cuentaDeA()
+    await payCashOrder(venueId, orderId, { amount: 5000, tip: 0, staffId: staffB, idempotencyKey: `abono-B-${orderId}` })
+
+    const res = await pagar(orderId, staffA, { amount: 10000, tip: 0, idempotencyKey: llaveHttp(), isOfflineReplay: true }, android223)
+
+    expect(res.status).toBe(200)
+    expect(res.body.payment).toMatchObject({ amount: 5000, changeCents: 5000, orderPaymentStatus: 'PAID', remainingBalanceCents: 0 })
+    expect(await fotoAsentada(orderId, f => f.cajon === 2)).toMatchObject({
+      paymentStatus: 'PAID',
+      paidAmount: 100,
+      cobros: [50, 50],
+      cajon: 2,
+      avisos: 0,
+    })
+  })
+
+  it('🔴 Windows 2.23.0-escritorio sobre una venta YA PAID ⇒ 400 como antes y nada se escribe (S1 registraba $100 de más)', async () => {
+    const { orderId } = await cuentaDeA()
+    await payCashOrder(venueId, orderId, { amount: 10000, tip: 0, staffId: staffB, idempotencyKey: `vivo-B-${orderId}` })
+    const antes = await fotoAsentada(orderId, f => f.cajon === 1 && f.lealtad === 1)
+
+    const res = await pagar(
+      orderId,
+      staffA,
+      { amount: 10000, tip: 0, idempotencyKey: llaveHttp(), isOfflineReplay: true },
+      { 'x-device-platform': 'ANDROID', 'x-app-version': '2.23.0-escritorio' },
+    )
+
+    expect([res.status, res.body.message]).toEqual([400, 'Order is already paid'])
+    expect(await fotoAsentada(orderId, () => false)).toEqual(antes)
+  })
+
+  it('control: la MISMA cola desde Android 2.24.0 sigue con S2 ($100 registrados y 🚨 $50)', async () => {
+    const { orderId } = await cuentaDeA()
+    await payCashOrder(venueId, orderId, { amount: 5000, tip: 0, staffId: staffB, idempotencyKey: `abono-B-${orderId}` })
+
+    const res = await pagar(
+      orderId,
+      staffA,
+      { amount: 10000, tip: 0, idempotencyKey: llaveHttp(), isOfflineReplay: true },
+      { 'x-device-platform': 'ANDROID', 'x-app-version': '2.24.0' },
+    )
+
+    expect([res.status, res.body.payment.amount, res.body.payment.changeCents]).toEqual([200, 10000, 0])
+    expect(await fotoAsentada(orderId, f => f.avisos === 1)).toMatchObject({ cobros: [50, 100], avisos: 1 })
+  })
+})
+
+describe('I6 · R2-2: recibir dinero nunca reabre una venta cerrada', () => {
+  it('🔴 B cobra $100, lo devuelve y cancela la cuenta; A sincroniza sus $100 ⇒ se registran, sigue CANCELLED/REFUNDED con saldo 0, 🚨, sin reabrirse (antes: PENDING + ORDER_REOPENED_BY_CAPTURED_PAYMENT)', async () => {
+    const { orderId, localOrderId } = await cuentaDeA()
+    const intentA = payCashDeA(localOrderId, 10000)
+    const cobroB = await payCashOrder(venueId, orderId, { amount: 10000, tip: 0, staffId: staffB, idempotencyKey: `vivo-B-${orderId}` })
+    await issueRefund({
+      venueId,
+      paymentId: cobroB.paymentId,
+      amount: 10000,
+      tipRefundCents: 0,
+      reason: 'CUSTOMER_REQUEST' as never,
+      staffId: staffB,
+    })
+    // Como la dejaba el código viejo (R13-4); el guard de cancelación deja cancelar una REFUNDED.
+    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'REFUNDED' } })
+    await cancelOrder(venueId, orderId, 'cancelada después del reembolso', staffB)
+    const cancelada = await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, paymentStatus: true } })
+    expect(cancelada).toEqual({ status: 'CANCELLED', paymentStatus: 'REFUNDED' })
+
+    const [ack] = await processIntents(params([intentA]))
+
+    expect(ack).toMatchObject({ status: 'ACKED', result: expect.objectContaining({ amount: 10000, orderPaymentStatus: 'PAID' }) })
+    const tras = await fotoAsentada(orderId, f => f.avisos === 1)
+    expect(tras).toMatchObject({ status: 'CANCELLED', paymentStatus: 'REFUNDED', remainingBalance: 0, cobros: [100, 100], avisos: 1 })
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT' } })).toBe(0)
+  })
+})
+
+describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
+  let ana: string
+  let beto: string
+  beforeAll(async () => {
+    ana = (await prisma.staff.create({ data: { email: `ana-${fixture}@staff.test`, firstName: 'Ana', lastName: 'Mesera', active: true } }))
+      .id
+    beto = (
+      await prisma.staff.create({ data: { email: `beto-${fixture}@staff.test`, firstName: 'Beto', lastName: 'Mesero', active: true } })
+    ).id
+    await prisma.staffVenue.createMany({
+      data: [
+        { venueId, staffId: ana, role: StaffRole.WAITER },
+        { venueId, staffId: beto, role: StaffRole.WAITER },
+      ],
+    })
+  })
+  /** La mesa de Ana, ya pasada a Beto por un encargado, con la propiedad de mesa encendida. */
+  async function mesaPasadaABeto() {
+    const { orderId } = await cuentaDeA()
+    await prisma.order.update({ where: { id: orderId }, data: { servedById: beto } })
+    return orderId
+  }
+  const marcas = (orderId: string) =>
+    prisma.activityLog.findMany({
+      where: { venueId, entityId: orderId, action: 'CAPTURED_PAYMENT_ON_FOREIGN_TABLE' },
+      select: { staffId: true, data: true },
+      take: 5,
+    })
+  async function marcasAsentadas(orderId: string, n: number) {
+    for (let i = 0; i < 40 && (await marcas(orderId)).length < n; i++) await pausa(50)
+    await pausa(200)
+    return marcas(orderId)
+  }
+  const conPropiedad = async (prueba: () => Promise<void>) => {
+    await prisma.venueSettings.update({ where: { venueId }, data: { enforceTableOwnership: true } })
+    try {
+      await prueba()
+    } finally {
+      await prisma.venueSettings.update({ where: { venueId }, data: { enforceTableOwnership: false } })
+    }
+  }
+
+  it('🔴 PAY_CASH de Ana ⇒ ACKED, Payment de $100 a nombre de Ana, la mesa sigue de Beto y queda el rastro (antes: REJECTED TABLE_OWNED_BY_OTHER y $100 fuera)', async () => {
+    await conPropiedad(async () => {
+      const orderId = await mesaPasadaABeto()
+
+      const [ack] = await processIntents(
+        params(
+          [{ id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: 10000, tipCents: 0, method: 'CASH' } }],
+          ana,
+        ),
+      )
+
+      expect(ack).toMatchObject({ status: 'ACKED', result: expect.objectContaining({ amount: 10000 }) })
+      const pagos = await prisma.payment.findMany({ where: { venueId, orderId }, select: { processedById: true, amount: true }, take: 5 })
+      expect(pagos.map(p => [p.processedById, Number(p.amount)])).toEqual([[ana, 100]])
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { servedById: true } })).servedById).toBe(beto)
+      expect(await marcasAsentadas(orderId, 1)).toEqual([
+        { staffId: ana, data: expect.objectContaining({ tableOwnerId: beto, tableOwnerName: 'Beto Mesero' }) },
+      ])
+    })
+  })
+
+  it('🔴 por la ruta HTTP: el cobro EN VIVO de Ana sigue con 403; su cola (isOfflineReplay) ⇒ 200 con el rastro (antes: 403 también)', async () => {
+    await conPropiedad(async () => {
+      const orderId = await mesaPasadaABeto()
+
+      const vivo = await request(app)
+        .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+        .set('x-test-actor', ana)
+        .set('x-test-role', 'WAITER')
+        .send({ amount: 10000, tip: 0, idempotencyKey: llaveHttp() })
+      expect([vivo.status, vivo.body.code]).toEqual([403, 'TABLE_OWNED_BY_OTHER'])
+
+      const enCola = await request(app)
+        .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+        .set('x-test-actor', ana)
+        .set('x-test-role', 'WAITER')
+        .send({ amount: 10000, tip: 0, idempotencyKey: llaveHttp(), isOfflineReplay: true })
+      expect([enCola.status, enCola.body.payment?.amount]).toEqual([200, 10000])
+      const pagos = await prisma.payment.findMany({ where: { venueId, orderId }, select: { processedById: true }, take: 5 })
+      expect(pagos.map(p => p.processedById)).toEqual([ana])
+      expect(await marcasAsentadas(orderId, 1)).toEqual([{ staffId: ana, data: expect.objectContaining({ tableOwnerId: beto }) }])
     })
   })
 })

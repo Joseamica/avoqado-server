@@ -170,4 +170,56 @@ describe('checkTableOwnership Middleware', () => {
     await checkTableOwnership('order')(mockReq as Request, mockRes as Response, mockNext)
     expect(mockNext).toHaveBeenCalled()
   })
+
+  /**
+   * 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde). La propiedad de mesa decide quién INICIA un cobro, no
+   * quién REGISTRA dinero ya capturado: Ana cobró $100 sin red, un encargado pasó la mesa a Juan, y al volver la red la cola de Ana
+   * (`isOfflineReplay`) recibía 403 con el dinero ya en el cajón. Sólo la ruta de cobro lo pide (`dineroCapturado`).
+   */
+  describe('R2-6: dinero ya capturado en una mesa ajena', () => {
+    const conLocals = () => {
+      ;(mockRes as any).locals = {}
+      return mockRes as Response
+    }
+
+    it('🔴 cola sin red (isOfflineReplay) en la ruta de cobro ⇒ pasa y deja la mesa ajena para el rastro', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+    })
+
+    it('el cobro EN VIVO en la ruta de cobro sigue con 403', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { amount: 10000 }
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        conLocals(),
+        mockNext,
+      )
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    it('🔴 una ruta que EDITA la mesa no se exime aunque el cuerpo diga isOfflineReplay', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true }
+      await checkTableOwnership('order')(mockReq as Request, conLocals(), mockNext)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+  })
 })
