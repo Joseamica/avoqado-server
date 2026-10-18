@@ -55,9 +55,10 @@ describe('Trigger del escritor único de variantes', () => {
     ).rejects.toThrow(/PRODUCT_GROUP_FIELD_OWNED_BY_PARENT/)
   })
 
-  it('Postgres dispara los triggers por nombre: el del escritor único va al FINAL, después de los del IVA', async () => {
+  it('Postgres dispara los triggers por nombre: el del escritor único va al FINAL de los BEFORE, después de los del IVA', async () => {
+    // Sólo los BEFORE (tgtype & 2): los AFTER (p. ej. el historial de precio) corren después del guardado y no compiten.
     const filas = await prisma.$queryRaw<Array<{ tgname: string }>>`
-      SELECT tgname FROM pg_trigger WHERE tgrelid = '"Product"'::regclass AND NOT tgisinternal ORDER BY tgname`
+      SELECT tgname FROM pg_trigger WHERE tgrelid = '"Product"'::regclass AND NOT tgisinternal AND (tgtype & 2) = 2 ORDER BY tgname`
     const nombres = filas.map(f => f.tgname)
     expect(nombres.some(t => t.startsWith('Product_ivaTratamiento'))).toBe(true)
     expect(nombres[nombres.length - 1]).toBe('Product_zz_grupo_escritor_unico')
