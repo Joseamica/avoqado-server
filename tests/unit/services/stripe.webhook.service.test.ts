@@ -36,7 +36,8 @@ jest.mock('@/services/stripe.service', () => ({
   }),
   __esModule: true,
   default: jest.fn(),
-  stripe: {},
+  // Codex r1 (17-oct): `trial_will_end` de planes decide con la suscripción VIGENTE, no con la foto del evento.
+  stripe: { subscriptions: { retrieve: jest.fn() } },
   getOrCreateStripeCustomer: jest.fn(),
   createTrialSubscriptions: jest.fn(),
   cancelSubscription: jest.fn(),
@@ -883,6 +884,14 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         ...over,
       }) as unknown as Stripe.Subscription
 
+    // La suscripción que Stripe devuelve HOY. Por defecto es la misma foto del evento; las pruebas de Codex r1 la separan.
+    const { retrieve } = (jest.requireMock('@/services/stripe.service') as { stripe: { subscriptions: { retrieve: jest.Mock } } }).stripe
+      .subscriptions
+    const trialWillEnd = (evento: Stripe.Subscription, vigente: Stripe.Subscription = evento) => {
+      retrieve.mockResolvedValue(vigente)
+      return handleSubscriptionTrialWillEnd(evento)
+    }
+
     const givenFeature = (code: string, name: string, venueOver: Record<string, unknown> = {}) =>
       (prisma.venueFeature.findFirst as jest.Mock).mockResolvedValueOnce({
         id: 'vf_1',
@@ -917,7 +926,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     it('PLAN_PRO: manda el aviso de fin de prueba con el monto real y NO el correo de «desactivar»', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(montoDelSiguienteCobro).toHaveBeenCalledWith(expect.anything(), 'sub_plan_trial')
       // Un solo correo por suscripción (no uno por cada OWNER/ADMIN), al destinatario resuelto del negocio.
@@ -942,7 +951,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     it('PLAN_PRO: el aviso en la app dice el cobro, con fecha en la zona del negocio, y no «Actualiza tu método de pago»', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(createNotification).toHaveBeenCalledTimes(2) // uno por OWNER/ADMIN
       const call = createNotification.mock.calls[0][0]
@@ -957,7 +966,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     it('PLAN_PREMIUM y plan anual: nombre y periodo del correo', async () => {
       givenFeature('PLAN_PREMIUM', 'Avoqado Premium')
 
-      await handleSubscriptionTrialWillEnd(buildSub({ items: { data: [{ price: { recurring: { interval: 'year' } } }] } }))
+      await trialWillEnd(buildSub({ items: { data: [{ price: { recurring: { interval: 'year' } } }] } }))
 
       expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledWith(
         'negocio@test.com',
@@ -968,13 +977,13 @@ describe('Stripe Webhook Service - Critical Tests', () => {
 
     it('la zona del negocio viaja al correo; una zona vacía cae a Ciudad de México (nunca revienta toLocaleDateString)', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro', { timezone: 'America/Tijuana' })
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
       expect(emailService.sendPlanRenewalReminderEmail.mock.calls[0][1].timeZone).toBe('America/Tijuana')
 
       emailService.sendPlanRenewalReminderEmail.mockClear()
       createNotification.mockClear()
       givenFeature('PLAN_PRO', 'Avoqado Pro', { timezone: '' })
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
       expect(emailService.sendPlanRenewalReminderEmail.mock.calls[0][1].timeZone).toBe('America/Mexico_City')
       expect(createNotification.mock.calls[0][0].message).toContain('20 de octubre de 2026')
     })
@@ -982,7 +991,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     it('M8: una zona que no es IANA («GMT-6») cae a Ciudad de México: salen el correo y el aviso en la app', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro', { timezone: 'GMT-6' })
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
       expect(emailService.sendPlanRenewalReminderEmail.mock.calls[0][1].timeZone).toBe('America/Mexico_City')
@@ -993,7 +1002,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     it('el aviso en la app sólo va a OWNER/ADMIN ACTIVOS: a quien se dio de baja no se le avisa', async () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(prisma.staffVenue.findMany).toHaveBeenCalledWith(
         expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue_1', active: true }) }),
@@ -1004,7 +1013,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       montoDelSiguienteCobro.mockResolvedValue(0)
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledWith(
         'negocio@test.com',
@@ -1016,7 +1025,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       montoDelSiguienteCobro.mockResolvedValue(null)
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
       expect(emailService.sendTrialEndingEmail).not.toHaveBeenCalled()
@@ -1038,7 +1047,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
     ])('%s: no habrá cobro, así que ni correo ni aviso que hable de uno', async (_nombre, over) => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
 
-      await handleSubscriptionTrialWillEnd(buildSub(over))
+      await trialWillEnd(buildSub(over))
 
       expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
       expect(emailService.sendTrialEndingEmail).not.toHaveBeenCalled()
@@ -1050,7 +1059,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       ;(prisma.staffVenue.findMany as jest.Mock).mockResolvedValue([])
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(createNotification).not.toHaveBeenCalled()
       expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
@@ -1070,7 +1079,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
         staff: [],
       })
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
       expect(createNotification).toHaveBeenCalledTimes(2)
@@ -1083,7 +1092,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       nowSpy.mockReturnValue(ahoraS * 1000)
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
       expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
       expect(emailService.sendTrialEndingEmail).not.toHaveBeenCalled()
@@ -1095,7 +1104,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       createNotification.mockRejectedValue(new Error('db caída'))
 
-      await expect(handleSubscriptionTrialWillEnd(buildSub())).resolves.toBeUndefined()
+      await expect(trialWillEnd(buildSub())).resolves.toBeUndefined()
 
       expect(createNotification).toHaveBeenCalledTimes(2)
       expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledTimes(1)
@@ -1105,7 +1114,7 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       emailService.sendPlanRenewalReminderEmail.mockRejectedValue(new Error('SMTP caído'))
 
-      await expect(handleSubscriptionTrialWillEnd(buildSub())).resolves.toBeUndefined()
+      await expect(trialWillEnd(buildSub())).resolves.toBeUndefined()
 
       expect(createNotification).toHaveBeenCalledTimes(2)
     })
@@ -1114,16 +1123,80 @@ describe('Stripe Webhook Service - Critical Tests', () => {
       givenFeature('PLAN_PRO', 'Avoqado Pro')
       montoDelSiguienteCobro.mockRejectedValue(new Error('Stripe caído'))
 
-      await expect(handleSubscriptionTrialWillEnd(buildSub())).resolves.toBeUndefined()
+      await expect(trialWillEnd(buildSub())).resolves.toBeUndefined()
 
       expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
+    })
+
+    // 🔴 Codex r1 (17-oct): Stripe entrega eventos tarde y fuera de orden; la foto del evento puede ser anterior a cancelar.
+    it('evento anterior a cancelar, primera entrega posterior: la suscripción VIGENTE ya no cobrará, así que nada sale', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+
+      await trialWillEnd(buildSub(), buildSub({ cancel_at_period_end: true }))
+
+      expect(retrieve).toHaveBeenCalledWith('sub_plan_trial')
+      expect(createNotification).not.toHaveBeenCalled()
+      expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
+      expect(emailService.sendTrialEndingEmail).not.toHaveBeenCalled()
+      expect(montoDelSiguienteCobro).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['cancelada', { status: 'canceled' }],
+      ['ya activa (la prueba terminó antes)', { status: 'active' }],
+    ])('la suscripción vigente está %s: ya no es fin de prueba, ni aviso ni correo', async (_nombre, over) => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+
+      await trialWillEnd(buildSub(), buildSub(over))
+
+      expect(createNotification).not.toHaveBeenCalled()
+      expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
+      expect(montoDelSiguienteCobro).not.toHaveBeenCalled()
+    })
+
+    it('la fecha del aviso y del correo es el trial_end VIGENTE (prueba extendida), no el del evento', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      const extendido = TRIAL_END_S + 2 * 86400
+
+      await trialWillEnd(buildSub(), buildSub({ trial_end: extendido }))
+
+      expect(emailService.sendPlanRenewalReminderEmail).toHaveBeenCalledWith(
+        'negocio@test.com',
+        expect.objectContaining({ renewalDate: new Date(extendido * 1000), isTrialEnd: true }),
+      )
+      expect(createNotification.mock.calls[0][0].message).toContain('22 de octubre de 2026')
+    })
+
+    it('si no se puede consultar la suscripción vigente: nada sale y el evento queda FAILED para que el cron lo reproduzca', async () => {
+      givenFeature('PLAN_PRO', 'Avoqado Pro')
+      retrieve.mockRejectedValue(new Error('Stripe caído'))
+
+      await expect(
+        handleStripeWebhookEvent({
+          id: 'evt_trial_plan',
+          object: 'event',
+          type: 'customer.subscription.trial_will_end',
+          data: { object: buildSub() },
+        } as unknown as Stripe.Event),
+      ).rejects.toThrow('Stripe caído')
+
+      expect(createNotification).not.toHaveBeenCalled()
+      expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
+      expect(montoDelSiguienteCobro).not.toHaveBeenCalled()
+      expect(prisma.webhookEvent.update).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: 'webhook_default_id' },
+          data: expect.objectContaining({ status: 'FAILED', retryCount: { increment: 1 } }),
+        }),
+      )
     })
 
     it('regresión: una función suelta sigue por sendTrialEndingEmail, como hoy', async () => {
       givenFeature('ANALYTICS', 'Analytics')
 
-      await handleSubscriptionTrialWillEnd(buildSub())
+      await trialWillEnd(buildSub())
 
+      expect(retrieve).not.toHaveBeenCalled()
       expect(montoDelSiguienteCobro).not.toHaveBeenCalled()
       expect(emailService.sendPlanRenewalReminderEmail).not.toHaveBeenCalled()
       expect(emailService.sendTrialEndingEmail).toHaveBeenCalledTimes(2) // uno por OWNER/ADMIN, como hoy
