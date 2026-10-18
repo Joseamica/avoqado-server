@@ -186,7 +186,7 @@ describe('checkTableOwnership Middleware', () => {
       setEnforced(true)
       setOrderOwnedByJuan()
       setCallerRoleWaiter(false)
-      mockReq.body = { isOfflineReplay: true }
+      mockReq.body = { isOfflineReplay: true, amount: 10000 }
       const res = conLocals()
       await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
         mockReq as Request,
@@ -210,6 +210,65 @@ describe('checkTableOwnership Middleware', () => {
       )
       expect(statusMock).toHaveBeenCalledWith(403)
       expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    /**
+     * 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado. Beto tiene una cuenta de $100 con $100 de descuento (saldo $0); Ana
+     * mandaba una llave nueva con `isOfflineReplay` y $0 y le cerraba la mesa (PAID, inventario, mesa libre). El pase sólo vale con
+     * importe + propina estrictamente positivo y válido; lo demás conserva el 403 de antes.
+     */
+    it.each([
+      ['$0 + $0', { amount: 0 }],
+      ['$0 + propina $0 explícita', { amount: 0, tip: 0 }],
+      ['importe no numérico', { amount: '10000' }],
+      ['importe ausente', {}],
+      ['propina negativa que se come el importe', { amount: 10000, tip: -20000 }],
+      ['importe infinito', { amount: Infinity }],
+    ])('🔴 R3-1: cola sin red con %s en mesa ajena ⇒ 403 como antes', async (_caso, cuerpo) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, ...cuerpo }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+    })
+
+    it('R3-1: propina sola (importe $0 + propina $50) en mesa ajena es dinero capturado ⇒ pasa con rastro', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, amount: 0, tip: 5000 }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(mockNext).toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+    })
+
+    it('R3-1: $0 + $0 en la mesa PROPIA sigue pasando (cerrar una cuenta cortesiada)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      ;(mockReq as any).authContext.userId = JUAN
+      mockReq.body = { isOfflineReplay: true, amount: 0 }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toBeUndefined()
     })
 
     it('🔴 una ruta que EDITA la mesa no se exime aunque el cuerpo diga isOfflineReplay', async () => {

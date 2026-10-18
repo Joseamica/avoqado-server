@@ -657,6 +657,39 @@ describe('Founder 3-oct (Codex r8 #2, r9 #1-#3, r12 #5): el cierre transaccional
     expect(r.escrituras.map((d: any) => d.status)).toEqual(['COMPLETED'])
     expect([Number(r.totales.total), r.reconstruido, r.reaperturas]).toEqual([116, 0, 0])
   })
+  // 🔴 R3-2 (opus r2 Minor 3; la regla de R2-2 en el POS): recibir dinero nunca reabre una venta CERRADA, aunque esté cancelada. Venta
+  // de $100 devuelta y cancelada (CANCELLED + REFUNDED, o CANCELLED + PAID); la terminal registra un cobro capturado de $100 ⇒ antes
+  // quedaba PENDING + ORDER_REOPENED_BY_CAPTURED_PAYMENT. Ahora el dinero se registra y la venta sigue cancelada con su estado de
+  // cobro y saldo 0. La cancelada que todavía DEBE (PENDING) se reabre como siempre (las pruebas r9 de arriba).
+  it.each(['REFUNDED', 'PAID'])(
+    '🔴 R3-2: CANCELLED + %s que recibe $100 de la terminal ⇒ sigue CANCELLED, sin reapertura ni bitácora, conserva su estado de cobro y saldo 0',
+    async paymentStatus => {
+      const r = await cerrar({ ...cancelada('IVA_INCLUIDO'), taxAmount: new Decimal(0), paymentStatus }, 100)
+      expect(r.escrituras).toHaveLength(1)
+      expect([r.estado, r.reaperturas, r.totales.paymentStatus, Number(r.totales.remainingBalance), Number(r.totales.paidAmount)]).toEqual([
+        'CANCELLED',
+        0,
+        paymentStatus,
+        0,
+        100,
+      ])
+      expect([r.totales.status, r.totales.completedAt, r.totales.loyaltyEligibleAt]).toEqual([undefined, undefined, undefined])
+    },
+  )
+  it('R3-2 control: el ORIGEN de una reasignación (no entra dinero: pago $0, sin efectos) cancelado y PAID conserva lo de hoy', async () => {
+    const tx = txCierre({ ...cancelada('IVA_INCLUIDO'), taxAmount: new Decimal(0), paymentStatus: 'PAID' }, 100)
+    await (paymentService as any).settleStandalonePaymentInTx(
+      tx,
+      VENUE_ID,
+      ORDER_ID,
+      { amount: new Decimal(0), tipAmount: new Decimal(0) },
+      undefined,
+      false,
+      false,
+    )
+    const reaperturas = tx.activityLog.create.mock.calls.filter((c: any[]) => c[0].data.action === 'ORDER_REOPENED_BY_CAPTURED_PAYMENT')
+    expect(reaperturas).toHaveLength(1)
+  })
   const plataforma = {
     status: 'CANCELLED',
     originSystem: 'DELIVERY_PLATFORM',

@@ -523,4 +523,64 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
       expect(await marcasAsentadas(orderId, 1)).toEqual([{ staffId: ana, data: expect.objectContaining({ tableOwnerId: beto }) }])
     })
   })
+
+  // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado. Cuenta de Beto de $100 con $100 de descuento (saldo $0): la llave nueva
+  // de Ana con $0 cerraba la mesa ajena (PAID, inventario, mesa libre). Conserva el rechazo de antes; Beto sí la cierra.
+  it('🔴 R3-1: cuenta ajena en $0 ⇒ el $0 + $0 de Ana se rechaza por HTTP (403) y por el reducer (TABLE_OWNED_BY_OTHER); Beto sí la cierra', async () => {
+    await conPropiedad(async () => {
+      const orderId = await mesaPasadaABeto()
+      await prisma.order.update({ where: { id: orderId }, data: { discountAmount: 100, total: 0, remainingBalance: 0 } })
+
+      const http = await request(app)
+        .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+        .set('x-test-actor', ana)
+        .set('x-test-role', 'WAITER')
+        .send({ amount: 0, tip: 0, idempotencyKey: llaveHttp(), isOfflineReplay: true })
+      expect([http.status, http.body.code]).toEqual([403, 'TABLE_OWNED_BY_OTHER'])
+
+      const [ack] = await processIntents(
+        params(
+          [{ id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: 0, tipCents: 0, method: 'CASH' } }],
+          ana,
+        ),
+      )
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+      expect(
+        await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { status: true, paymentStatus: true } }),
+      ).not.toMatchObject({
+        paymentStatus: 'PAID',
+      })
+
+      const [deBeto] = await processIntents(
+        params(
+          [{ id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: 0, tipCents: 0, method: 'CASH' } }],
+          beto,
+        ),
+      )
+      expect(deBeto).toMatchObject({ status: 'ACKED' })
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })).paymentStatus).toBe('PAID')
+      expect(await marcas(orderId)).toEqual([])
+    })
+  })
+
+  it('R3-1: la cola de Ana reenviada con la MISMA llave sobre la mesa ajena sigue idempotente: un Payment y una sola marca', async () => {
+    await conPropiedad(async () => {
+      const orderId = await mesaPasadaABeto()
+      const idempotencyKey = llaveHttp()
+      const enviar = () =>
+        request(app)
+          .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+          .set('x-test-actor', ana)
+          .set('x-test-role', 'WAITER')
+          .send({ amount: 10000, tip: 0, idempotencyKey, isOfflineReplay: true })
+
+      const primero = await enviar()
+      const segundo = await enviar()
+      expect([primero.status, segundo.status]).toEqual([200, 200])
+      expect(segundo.body.payment?.paymentId).toBe(primero.body.payment?.paymentId)
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+      expect(await marcasAsentadas(orderId, 2)).toHaveLength(1)
+    })
+  })
 })

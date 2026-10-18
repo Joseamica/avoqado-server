@@ -100,7 +100,19 @@ type OwnershipSource = 'order' | 'table'
  *        cobro: la propiedad de mesa decide quién INICIA un cobro, no quién REGISTRA dinero ya capturado. Ana cobró sin red y un
  *        encargado pasó la mesa a Beto: su cola (`isOfflineReplay`) pasa, con la mesa ajena en `res.locals.mesaAjena` para el
  *        rastro en `ActivityLog`. Autenticación, sucursal, `payments:create` e idempotencia se conservan; el cobro EN VIVO sigue 403.
+ *        R3-1: sólo con importe + propina > 0 (`esDineroCapturado`); un $0 + $0 sobre mesa ajena sigue 403.
  */
+/**
+ * 🔴 R3-1 (Codex r2, P2): ¿el cuerpo trae dinero de verdad? Importe y propina válidos (las mismas reglas del controller de cobro) y
+ * su suma estrictamente positiva. $0 + $0 NO es dinero capturado: con una cuenta ajena en $0 (descuento del 100 %) dejaba cerrar la
+ * mesa de otro (PAID, inventario, mesa libre) sin un peso de por medio.
+ */
+function esDineroCapturado(body: { amount?: unknown; tip?: unknown }): boolean {
+  const { amount, tip = 0 } = body
+  const valido = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0
+  return valido(amount) && valido(tip) && amount + tip > 0
+}
+
 export const checkTableOwnership = (
   source: OwnershipSource = 'order',
   overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
@@ -166,7 +178,7 @@ export const checkTableOwnership = (
       }
 
       const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
-      if (opciones.dineroCapturado && req.body?.isOfflineReplay === true) {
+      if (opciones.dineroCapturado && req.body?.isOfflineReplay === true && esDineroCapturado(req.body)) {
         res.locals.mesaAjena = { ownerId: foreign.servedById, ownerName }
         return next()
       }
