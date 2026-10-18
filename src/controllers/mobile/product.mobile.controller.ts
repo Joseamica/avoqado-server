@@ -34,7 +34,6 @@ import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fisc
 import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
 import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
 import { categoriaParaProductoSinCategoria } from '../../services/mobile/categoriaGeneral.service'
-import { logAction } from '../../services/dashboard/activity-log.service'
 
 // ---------------------------------------------------------------------------
 // Helpers
