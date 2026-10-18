@@ -19,6 +19,7 @@ import * as avisos from '@/services/online-ordering/notifications.service'
 import { createOnlineOrder } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
+import * as quoteModule from '@/services/online-ordering/quote.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import {
@@ -365,6 +366,86 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     })
     if (espera.status === 'rejected') throw espera.reason // el reintento nunca quedó esperando: la prueba no probó la carrera
     expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
+  })
+
+  /**
+   * Codex r2: el PRIMER envío de la llave se detiene justo DESPUÉS de cotizar, antes de crear nada. Mientras sigue detenido,
+   * `cambiar()` mueve el precio o la tienda y entra el reintento con la MISMA llave y solicitud (la recarga de la tienda). Al
+   * final se suelta el primero y se deshace el cambio; devuelve los dos desenlaces y si el reintento llegó a esperar un candado.
+   */
+  const reintentoMientrasElPrimeroCotizo = async (cambiar: () => Promise<unknown>, deshacer: () => Promise<unknown>) => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const cotizarDeVerdad = quoteModule.quoteCart
+    let soltar!: () => void
+    const retenido = new Promise<void>(resolve => (soltar = resolve))
+    let avisarCotizado!: () => void
+    const cotizado = new Promise<void>(resolve => (avisarCotizado = resolve))
+    const espia = jest.spyOn(quoteModule, 'quoteCart').mockImplementationOnce(async (...args) => {
+      const cotizacion = await cotizarDeVerdad(...args)
+      avisarCotizado()
+      await retenido
+      return cotizacion
+    })
+    const primero = newOrder({ key, phone })
+    let reintento: ReturnType<typeof newOrder> | undefined
+    let reintentoTermino = false
+    let reintentoEspero = false
+    try {
+      await Promise.race([cotizado, primero])
+      await cambiar()
+      reintento = newOrder({ key, phone })
+      reintento.then(
+        () => (reintentoTermino = true),
+        () => (reintentoTermino = true),
+      )
+      // Acotada: alguna sesión de ESTA base espera un candado consultivo (el de la llave que retiene el primer envío).
+      for (let i = 0; i < 100 && !reintentoTermino && !reintentoEspero; i++) {
+        const [esperando] = await prisma.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`
+        reintentoEspero = Boolean(esperando)
+        if (!reintentoEspero) await new Promise(resolve => setTimeout(resolve, 50))
+      }
+    } finally {
+      soltar()
+      espia.mockRestore()
+      await Promise.allSettled([primero, reintento])
+      await deshacer()
+    }
+    const [a, b] = await Promise.allSettled([primero, reintento!])
+    return { key, a, b, reintentoEspero }
+  }
+
+  const unSoloPedido = async (r: Awaited<ReturnType<typeof reintentoMientrasElPrimeroCotizo>>) => {
+    expect(r.a).toMatchObject({ status: 'fulfilled', value: { replay: false } })
+    const creado = (r.a as PromiseFulfilledResult<Awaited<ReturnType<typeof newOrder>>>).value
+    // SU pedido como repetición, nunca un rechazo definitivo que suelte la llave mientras el primero aún podía crear.
+    expect(r.b).toEqual({
+      status: 'fulfilled',
+      value: expect.objectContaining({ replay: true, orderId: creado.orderId, trackingToken: creado.trackingToken }),
+    })
+    expect(r.reintentoEspero).toBe(true) // el reintento esperó el candado de la llave: la carrera sí ocurrió
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${r.key}` } })).toBe(1)
+  }
+
+  it('Codex r2: el precio cambia mientras el primer envío ya cotizó: el reintento de la MISMA llave espera y recibe SU pedido, no PRICE_CHANGED', async () => {
+    await unSoloPedido(
+      await reintentoMientrasElPrimeroCotizo(
+        () => prisma.product.update({ where: { id: productId }, data: { price: 113 } }),
+        () => prisma.product.update({ where: { id: productId }, data: { price: 93 } }),
+      ),
+    )
+  })
+
+  it('Codex r2: la tienda se pausa mientras el primer envío ya cotizó: el reintento de la MISMA llave espera y recibe SU pedido, no ORDERING_PAUSED', async () => {
+    await unSoloPedido(
+      await reintentoMientrasElPrimeroCotizo(
+        () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: true } }),
+        () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: false } }),
+      ),
+    )
   })
 
   it('dos aparatos aceptando a la vez: exactamente uno gana', async () => {
