@@ -388,6 +388,7 @@ import {
   computeOrderBalance,
   computeStoredOrderTotal,
   estadoDeCobroAlRecibirDinero,
+  esVentaCerrada,
   REFUND_PAYMENT_TYPE,
   type CompletedPaymentForBalance,
 } from '../shared/orderBalance'
@@ -1383,32 +1384,35 @@ export async function settleStandalonePaymentInTx(
   // queda saldada; una de la plataforma o de SoftRestaurant, como hoy (Codex r12 #5).
   // Codex r13 #1: `cubreComoCancelada` es el `isFullyPaid` de HOY —el saldo calculado con la orden tal como se leyó—.
   const cubreComoCancelada = computeOrderBalance(order, [{ amount, tipAmount }]).isFullyPaid
+  const entraDinero = new Prisma.Decimal(payment.amount).plus(payment.tipAmount).greaterThan(0)
+  // 🔴 R3-2 (la regla de R2-2 en `payCashOrder`): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED leída bajo el candado
+  // de quien llama), aunque esté cancelada: el dinero se registra y queda cancelada con su estado de cobro. La cancelada que DEBE se
+  // reabre como siempre, y el origen de una reasignación (no entra dinero) también, como hoy.
   // `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
-  const status = await reabrirSiRecibeDinero(tx, {
-    venueId,
-    orderId,
-    status: order.status,
-    originSystem: order.originSystem,
-    cobrado: amount.plus(tipAmount),
-    cubreComoCancelada,
-    canal: 'recordOrderPayment',
-    paymentId: payment.id ?? null,
-    staffId: staffId ?? null,
-  })
+  const status =
+    entraDinero && esVentaCerrada(order.paymentStatus)
+      ? order.status
+      : await reabrirSiRecibeDinero(tx, {
+          venueId,
+          orderId,
+          status: order.status,
+          originSystem: order.originSystem,
+          cobrado: amount.plus(tipAmount),
+          cubreComoCancelada,
+          canal: 'recordOrderPayment',
+          paymentId: payment.id ?? null,
+          staffId: staffId ?? null,
+        })
   const cuenta = { ...order, status }
   const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
   const saldada = balance.isFullyPaid && cierreAutomaticoPermitido(status)
   // 🔴 R8-1 (Codex recheck-12 P2): una venta que YA estaba cerrada (PAID/REFUNDED, leída bajo el candado de quien llama) y recibe
   // dinero no se reabre ni repite los efectos de saldar. El origen de una reasignación (sin dinero) se recalcula como hoy.
-  const cobro = estadoDeCobroAlRecibirDinero(
-    order.paymentStatus,
-    new Prisma.Decimal(payment.amount).plus(payment.tipAmount).greaterThan(0),
-    {
-      paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
-      remainingBalance: balance.remainingBalance,
-    },
-  )
+  const cobro = estadoDeCobroAlRecibirDinero(order.paymentStatus, entraDinero, {
+    paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
+    remainingBalance: balance.remainingBalance,
+  })
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
   const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid._count > 1 && previous.isFullyPaid)

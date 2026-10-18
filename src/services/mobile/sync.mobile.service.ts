@@ -949,10 +949,13 @@ async function assertOwnership(
   overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
 ): Promise<void> {
   const ajena = await mesaAjenaDe(venueId, staffId, orderId, overridePermissions)
-  if (!ajena) return
+  if (ajena) throw errorMesaAjena(ajena)
+}
+
+function errorMesaAjena(ajena: { ownerName: string }): Error {
   const err: any = new Error(`Solo ${ajena.ownerName} puede modificar esta mesa`)
   err.errorCode = 'TABLE_OWNED_BY_OTHER'
-  throw err
+  return err
 }
 
 /** El dueño de la mesa cuando la regla de propiedad le prohíbe a `staffId` tocarla; null si no aplica o puede. */
@@ -1391,6 +1394,8 @@ async function applyPayCash(
     select: { id: true },
   })
   const mesaAjena = yaCobrado ? null : await mesaAjenaDe(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado (cerraría la mesa de otro sin un peso): conserva el rechazo de antes.
+  if (mesaAjena && !(amountCents + tipCents > 0)) throw errorMesaAjena(mesaAjena)
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,
