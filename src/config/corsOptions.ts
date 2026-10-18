@@ -142,6 +142,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: [
       'Content-Type',
+      'X-Document-Token',
       'Authorization',
       'x-api-key',
       'x-client-type',

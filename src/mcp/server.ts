@@ -67,6 +67,7 @@ import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
+import { registerDocumentRequestTools } from './tools/documentRequests'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
 import { registerPassIntegrationTools } from './tools/passIntegrations'
@@ -161,6 +162,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   // vuelve a comprobarlo (defensa doble), y `catalog-no-internals.test.ts` recorre el catálogo
   // de clientes para fijar que aquí no aparecen.
   if (scope.isSuperAdmin) registerLaunchCampaignTools(server, scope)
+  if (scope.isSuperAdmin) registerDocumentRequestTools(server, scope)
   registerMerchantRoutingTools(server, scope)
   registerPassIntegrationTools(server, scope)
   registerShopifyTools(server, scope)

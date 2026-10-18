@@ -19673,3 +19673,80 @@ model StaffPayVenueWindow {
 
   @@index([organizationId, venueId, desde])
 }
+
+/// Platform onboarding invitations; deliberately independent of a venue.
+model DocumentRequest {
+  id String @id @default(cuid())
+  provider String
+  entityType String
+  businessName String
+  tokenHash String
+  tokenVersion Int @default(1)
+  status String @default("OPEN")
+  expiresAt DateTime
+  contactName String?
+  email String?
+  phone String?
+  identificationType String?
+  privacyAcceptedAt DateTime?
+  submittedAt DateTime?
+  submissionVersion Int @default(0)
+  notificationSnapshot Json?
+  onboardingNotification String @default("NONE")
+  danielNotification String @default("NONE")
+  notificationAttempts Int @default(0)
+  notificationNextAt DateTime?
+  notificationLease String?
+  notificationLeaseUntil DateTime?
+  uploadLease String?
+  uploadLeaseUntil DateTime?
+  uploadAttempts Int @default(0)
+  totalBytes Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  files DocumentRequestFile[]
+  deliveries DocumentRequestDelivery[]
+  @@index([status, createdAt])
+  @@index([notificationNextAt])
+  @@index([expiresAt])
+}
+
+model DocumentRequestFile {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  uploadId String
+  key String
+  fileName String
+  mimeType String
+  sizeBytes Int
+  contentHash String
+  storagePath String
+  status String @default("PENDING")
+  tokenVersion Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId, uploadId])
+  @@index([requestId, status])
+  @@index([status, updatedAt])
+}
+
+/// Immutable notification outbox per submission and recipient; invitation changes never cancel mail.
+model DocumentRequestDelivery {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields:[requestId],references:[id],onDelete:Restrict)
+  submissionVersion Int
+  recipient String
+  status String @default("PENDING")
+  snapshot Json
+  attempts Int @default(0)
+  firstAttemptAt DateTime?
+  nextAttemptAt DateTime? @default(now())
+  leaseToken String?
+  leaseUntil DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId,submissionVersion,recipient])
+  @@index([status,nextAttemptAt])
+}
