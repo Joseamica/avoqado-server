@@ -324,6 +324,7 @@ describe('API pública de pedidos en línea', () => {
     const estado = (o: Record<string, unknown>) => ({
       status: 'OPEN',
       reason: null,
+      ...o,
       config: {
         hours: null,
         acceptsPayAtPickup: true,
@@ -333,7 +334,6 @@ describe('API pública de pedidos en línea', () => {
         pausedUntil: null,
         ...(o.config as object),
       },
-      ...o,
     })
     const info = async (state: object) => {
       ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state)
