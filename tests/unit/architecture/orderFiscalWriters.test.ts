@@ -243,6 +243,7 @@ const CAPTURE = 'tests/integration/fiscal/writerCapture.test.ts'
 const RECONCILE = 'tests/integration/payments/reconcileFromPayments.atomic.integration.test.ts'
 const PAYMENT_GUARD = 'tests/unit/services/shared/paymentShiftClaim.callers.guard.test.ts'
 const REPARTO = 'tests/integration/payments/repartoDescuento.integration.test.ts'
+const ONLINE = 'tests/integration/online-ordering/lifecycle.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
 const LOCK = ['lockExistingOrderForPayment(']
@@ -643,6 +644,17 @@ const WRITERS: Record<string, Writer> = {
     creates: ['.order.create('],
     note: 'retroactive manual sale: new Order and line in one transaction',
   },
+  // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
+  'src/services/online-ordering/transitions.service.ts#casTransition': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: proof(
+      ONLINE,
+      'casTransition',
+      'el cobro real deja la orden cobrada y aceptar, listo y entregar no la reabren',
+      'vencer o rechazar un pedido ya cobrado no cancela la venta, y aceptarlo sigue posible',
+    ),
+  },
   // ── Fiscal sealing: runs inside the capture/cancel transaction that already holds the Order ──
   'src/services/fiscal/sellosIva.ts#sellarRenglones': {
     class: 'EXCLUDED',
@@ -731,10 +743,13 @@ const CANCEL = (marker: string) => ({
 
 /** Every other function that writes an Order row: none touches money columns or fiscal children. */
 const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
-  'src/services/tpv/order.tpv.service.ts#updateGuestInfo': { class: 'METADATA', why: 'covers/name/phone/requests/customerId' },
+  'src/services/tpv/order.tpv.service.ts#updateGuestInfo': {
+    class: 'METADATA',
+    why: 'covers/name/phone/requests/customerId (on a paid sale only with payments:create, under the link lock — R3-4)',
+  },
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': {
     class: 'METADATA',
-    why: 'status/customer/table/staff/createdAt/number/type; money inputs ignored; CANCELLED/DELETED go through the cancel guard',
+    why: 'status/customer (on a paid sale only with payments:create, under the link lock — R4-2)/table/staff/createdAt/number/type; money inputs ignored; CANCELLED/DELETED go through the cancel guard',
   },
   'src/services/mobile/order.mobile.service.ts#attachCustomerToOrder': {
     class: 'METADATA',
@@ -762,12 +777,30 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'status PENDING al recibir dinero ya capturado; lo llaman payCashOrder, settleStandalonePaymentInTx y updateOrderTotalsForStandalonePayment bajo su candado',
     markers: ['ORDER_REOPENED_BY_CAPTURED_PAYMENT'],
   },
-  'src/services/shared/loyaltyOnPaidOrder.ts#awardLoyaltyForPaidOrder': { class: 'METADATA', why: 'loyalty award marks' },
+  // H1 (15-oct): awardLoyaltyForPaidOrder and otorgarLealtadRespetandoReembolsos close/mark ONLY through these two.
+  'src/services/shared/cierreDeLealtad.ts#cerrarLealtadDeLaVenta': {
+    class: 'METADATA',
+    why: 'closes the loyalty marks; the B1 guard (no PRIMARY customer + no REABIERTA marker) for a run that read no customer (F1: a companion linked without payments:create is not a beneficiary)',
+    markers: ['orderCustomers: { none: { isPrimary: true } }', 'MARCA_LEALTAD_REABIERTA'],
+  },
+  'src/services/shared/cierreDeLealtad.ts#registrarErrorDeLealtad': {
+    class: 'METADATA',
+    why: 'loyalty error mark; never overwrites the REABIERTA marker of a late customer link (H2)',
+    markers: ['MARCA_LEALTAD_REABIERTA'],
+  },
+  'src/services/shared/loyaltyOnLateCustomer.ts#reabrirLealtadSiAplica': {
+    class: 'METADATA',
+    why: 'reopens the loyalty marks (processedAt/processingAt/lastError, eligibleAt if null) inside the customer-link tx',
+  },
   'src/jobs/kitchen-tickets-reconciliation.job.ts#KitchenTicketsReconciliationJob.runNow': {
     class: 'METADATA',
     why: 'KDS stage 3 sweep: only the kitchenPendingAt marker',
   },
-  'src/jobs/loyalty-reconciliation.job.ts#LoyaltyReconciliationJob.runNow': { class: 'METADATA', why: 'loyalty claim marks' },
+  'src/jobs/loyalty-reconciliation.job.ts#LoyaltyReconciliationJob.runNow': {
+    class: 'METADATA',
+    why: 'loyalty claim marks; its failure write keeps the REABIERTA marker (H2)',
+    markers: ['MARCA_LEALTAD_REABIERTA'],
+  },
   'src/jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSalesForRule': {
     class: 'METADATA',
     why: 'moves a sale between venues of one organization (PlayTelecom); capture rechecks the expected venue',
@@ -799,6 +832,13 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': CANCEL('assertOrderCancellableUnderLock'),
+  // R11-8 (sellos tardíos): otro canal cerró la venta de vales; la sesión cierra con ella. Sólo suelta el reclamo de la terminal
+  // (`claimedByTerminalId`/`claimedAt`), con la sesión, los vales y la venta ya bloqueados por la jerarquía del cierre.
+  'src/services/mobile/areaTicketV7.mobile.service.ts#cerrarSesionDeValesAlCerrarLaVenta': {
+    class: 'METADATA',
+    why: 'releases the terminal claim on the sale (claimedByTerminalId/claimedAt) under the closer session → tickets → Order hierarchy',
+    markers: ['claimedByTerminalId: null'],
+  },
   'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': CANCEL('lockExistingOrderForPayment('),
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': CANCEL('lockExistingOrderForPayment('),
   'src/services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido': {
@@ -806,6 +846,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+    class: 'PRIVATE_CREATION',
+    why: 'online order: new Order, lines and modifiers in one admission transaction',
+    markers: NEW_ORDER,
+  },
   'src/services/tpv/order.tpv.service.ts#sellSerializedItem': {
     class: 'PRIVATE_CREATION',
     why: 'new order with its nested serialized line; registration shares the transaction (T2)',
@@ -1036,6 +1081,17 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets': 1,
   // develop f97a82b1: the abandoned-order cleanup rereads each order under the lock
   'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce': 1,
+  // Sellos tardíos, ronda 1 post-QA (F1): «agregar cliente» de la TPV decide primario/acompañante bajo el candado de la venta
+  'src/services/tpv/order.tpv.service.ts#addCustomerToOrder': 1,
+  'src/services/tpv/order.tpv.service.ts#createAndAddCustomerToOrder': 1,
+  // … y «quitar cliente» (ronda 2): promover en una venta cobrada exige payments:create, decidido bajo el MISMO candado
+  'src/services/tpv/order.tpv.service.ts#removeCustomerFromOrder': 1,
+  // … y el «Agregar cliente» del POS toma el MISMO candado primero (mismo orden que la TPV: sin bloqueos mutuos)
+  'src/services/mobile/order.mobile.service.ts#attachCustomerToOrder': 1,
+  // Ronda 3: editar los datos del invitado (R3-4: Order.customerId en una venta cobrada exige payments:create, decidido bajo
+  // el candado) y el relleno de cliente de /fast (R3-2: venta → vínculo, como el POS; antes vínculo → venta, cruce A)
+  'src/services/tpv/order.tpv.service.ts#updateGuestInfo': 1,
+  'src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder': 1,
   // Already on the budget before the final wave
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': 1,
   'src/services/tpv/order.tpv.service.ts#removeOrderItem': 1,
@@ -1060,6 +1116,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/refund.tpv.service.ts#recordRefund': 1,
   'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': 1,
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
+  // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
+  'src/services/online-ordering/transitions.service.ts#casTransition': 1,
 }
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */
@@ -1129,7 +1187,9 @@ function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
 function orderLockHelpers(code: Map<string, string>, calls: Call[]): Set<string> {
   const calleesByOwner = new Map<string, Set<string>>()
   for (const c of calls) calleesByOwner.set(c.owner, (calleesByOwner.get(c.owner) ?? new Set()).add(c.callee))
-  const helpers = new Set(['lockExistingOrderForPayment'])
+  // `bloquearVentaParaLiga` (sellos tardíos, ronda 3): el candado de la venta de las LIGAS de cliente — la MISMA fila, en modo
+  // `FOR NO KEY UPDATE` (serializa contra el cobro y las demás ligas sin chocar con las llaves foráneas de las métricas).
+  const helpers = new Set(['lockExistingOrderForPayment', 'bloquearVentaParaLiga'])
   if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockTableOrderScope') ?? '')) helpers.add('lockTableOrderScope')
   for (let grew = true; grew; ) {
     grew = false

@@ -191,24 +191,39 @@ async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promi
     },
   })
 
-  if (staffVenue?.active) {
-    return {
-      role: staffVenue.role,
-      source: 'staffVenue',
-      permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null,
-    }
+  // Una fila OWNER (o superadmin) ya es lo más alto: no hace falta preguntar por la organización (ni pagar consultas).
+  if (staffVenue?.active && (staffVenue.role === StaffRole.OWNER || staffVenue.role === StaffRole.SUPERADMIN)) {
+    return { role: staffVenue.role, source: 'staffVenue', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
   }
 
+  // 🔴 El DUEÑO DE LA ORGANIZACIÓN manda sobre una fila MENOR en la sucursal (P2-6, Codex, 15-oct). Antes la
+  // fila ganaba: un dueño de la org que además era CAJERO en una tienda recibía 403 en `attendance:manage` y
+  // `teams:update`, mientras `getUserAccess` (dashboard, apps, MCP) ya lo trataba como OWNER. Misma precedencia
+  // que `getUserAccess`, con sus mismas piezas: el rol OWNER con lo que el venue le personalizó y le QUITÓ al
+  // OWNER (se cargan por rol más abajo) y, si su fila trae un Conjunto de Permisos, ese conjunto.
+  //
+  // Costo (Codex r2, 16-oct): sin `relationJoins`, cada relación en un `select` es otra consulta SQL. Por eso la
+  // fila no trae su venue, y para una fila menor la pregunta «¿es dueña de la org de ESTE venue?» es UNA sola
+  // consulta (la relación va en el `where`, que Prisma resuelve dentro del mismo SQL). Fijado en
+  // tests/unit/middlewares/resolveUserRole.costoPorRol.test.ts.
+  if (staffVenue?.active) {
+    const duena = await prisma.staffOrganization.findFirst({
+      where: { staffId: userId, role: OrgRole.OWNER, isActive: true, organization: { venues: { some: { id: targetVenueId } } } },
+      select: { id: true },
+    })
+    return duena
+      ? { role: StaffRole.OWNER, source: 'orgOwner', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
+      : { role: staffVenue.role, source: 'staffVenue', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
+  }
+
+  // Sin fila activa: el respaldo de siempre (dueño de la org del venue).
   const targetVenue = await prisma.venue.findUnique({
     where: { id: targetVenueId },
     select: { organizationId: true },
   })
 
   if (!targetVenue) {
-    return {
-      role: null,
-      source: 'none',
-    }
+    return { role: null, source: 'none' }
   }
 
   const orgMembership = await prisma.staffOrganization.findUnique({
@@ -228,13 +243,51 @@ async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promi
     return {
       role: StaffRole.OWNER,
       source: 'orgOwner',
+      // Igual que `getUserAccess`: el Conjunto de Permisos de su fila (aunque esté apagada) manda.
+      permissionSet: staffVenue?.permissionSetId ? staffVenue.permissionSet : null,
     }
   }
 
-  return {
-    role: null,
-    source: 'none',
+  return { role: null, source: 'none' }
+}
+
+/**
+ * ¿Este rol, en este negocio, tiene el permiso? La evaluación de `checkPermission`, exportada tal cual (pedidos en línea, H3: el
+ * latido de la bandeja exige `orders:update` efectivo). Con lista propia del empleado (`permissionSet`) se evalúa esa lista; si
+ * no, el rol con los permisos personalizados del negocio (`VenueRolePermission`, también los quitados).
+ */
+export async function evaluateRolePermission(p: {
+  venueId: string
+  role: StaffRole
+  permissionSet?: PermissionSet | null
+  permission: string
+}): Promise<boolean> {
+  // If a permission set is assigned, evaluate that effective list directly.
+  if (p.permissionSet) return evaluatePermissionList(p.permissionSet.permissions, p.permission)
+
+  // Load custom permissions from VenueRolePermission table
+  let customPermissions: string[] | null = null
+  const venueRolePermission = await prisma.venueRolePermission.findUnique({
+    where: {
+      venueId_role: {
+        venueId: p.venueId,
+        role: p.role,
+      },
+    },
+    select: {
+      permissions: true,
+      deniedPermissions: true,
+    },
+  })
+
+  let deniedPermissions: string[] | null = null
+  if (venueRolePermission) {
+    customPermissions = venueRolePermission.permissions as string[]
+    deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
   }
+
+  // Check if user has permission (uses override mode for wildcard roles)
+  return hasPermission(p.role, customPermissions, p.permission, deniedPermissions)
 }
 
 /**
@@ -367,36 +420,7 @@ export const checkPermission = (requiredPermission: string) => {
       // never their raw JWT role (which may belong to a different venue).
       ;(req as any).resolvedRole = userRole
 
-      // If a permission set is assigned, evaluate that effective list directly.
-      let authorized: boolean
-      if (permissionSet) {
-        authorized = evaluatePermissionList(permissionSet.permissions, requiredPermission)
-      } else {
-        // Load custom permissions from VenueRolePermission table
-        let customPermissions: string[] | null = null
-
-        const venueRolePermission = await prisma.venueRolePermission.findUnique({
-          where: {
-            venueId_role: {
-              venueId,
-              role: userRole,
-            },
-          },
-          select: {
-            permissions: true,
-            deniedPermissions: true,
-          },
-        })
-
-        let deniedPermissions: string[] | null = null
-        if (venueRolePermission) {
-          customPermissions = venueRolePermission.permissions as string[]
-          deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
-        }
-
-        // Check if user has permission (uses override mode for wildcard roles)
-        authorized = hasPermission(userRole, customPermissions, requiredPermission, deniedPermissions)
-      }
+      const authorized = await evaluateRolePermission({ venueId, role: userRole, permissionSet, permission: requiredPermission })
 
       if (!authorized) {
         // 🔴 PIN de autorización de gerente. Este es el ÚNICO punto de integración

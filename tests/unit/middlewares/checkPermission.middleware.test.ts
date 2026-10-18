@@ -29,6 +29,9 @@ jest.mock('@/utils/prismaClient', () => ({
     },
     staffOrganization: {
       findUnique: jest.fn(),
+      // Con una fila menor que OWNER, el resolutor pregunta en UNA consulta si es dueña de la org (P2-6). Función
+      // normal: nadie lo es en estas pruebas, y sobrevive a los reset de mocks.
+      findFirst: async () => null,
     },
     venueRolePermission: {
       findUnique: jest.fn(),

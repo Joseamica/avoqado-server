@@ -5,8 +5,10 @@ import {
   getVenueBenchmarks,
   getOrganizationVenues,
   getOrganizationTeam,
+  updateOrganization,
 } from '@/services/organization/organization.service'
 import { NotFoundError } from '@/errors/AppError'
+import { Prisma } from '@prisma/client'
 
 // Helper: Prisma Decimal mock with .toNumber()
 const dec = (value: number) => ({
@@ -361,5 +363,52 @@ describe('Organization Service', () => {
         venues: [{ venueId: 'v-a', venueName: 'Venue A', venueSlug: 'venue-a', role: 'CASHIER' }],
       })
     })
+  })
+})
+
+// 🔴 Ronda 3 (Codex, 17-oct): `updateOrganization` le pasaba a Prisma lo que llegara. La lista blanca vive también aquí,
+// para que ningún llamador nuevo pueda volver a mandar escrituras anidadas (`attendanceConfig.delete`, `venues.deleteMany`…).
+describe('updateOrganization — sólo escalares de la lista blanca, y asiento con autor', () => {
+  const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service') as { logAction: jest.Mock }
+  const ANTES = {
+    id: ORG_ID,
+    name: 'Avoqado Corp',
+    email: 'org@test.com',
+    phone: '555-0000',
+    taxId: null,
+    billingEmail: null,
+    billingAddress: null,
+  }
+
+  beforeEach(() => {
+    prismaMock.organization.findUnique.mockResolvedValue(ANTES as any)
+    prismaMock.organization.update.mockImplementation((({ data }: any) => Promise.resolve({ ...ANTES, ...data })) as any)
+  })
+
+  it('🔴 lo que no es un campo editable no llega a Prisma, aunque el llamador lo mande', async () => {
+    await updateOrganization(
+      ORG_ID,
+      { name: 'Nueva', attendanceConfig: { delete: true }, venues: { deleteMany: {} } } as any,
+      'staff-dueno',
+    )
+
+    expect(prismaMock.organization.update).toHaveBeenCalledWith({ where: { id: ORG_ID }, data: { name: 'Nueva' } })
+  })
+
+  it('vaciar la dirección de facturación (null) le llega a Prisma como DbNull, y el asiento dice de → null', async () => {
+    prismaMock.organization.findUnique.mockResolvedValue({ ...ANTES, billingAddress: { calle: 'Reforma 1' } } as any)
+
+    await updateOrganization(ORG_ID, { billingAddress: null }, 'staff-dueno')
+
+    expect(prismaMock.organization.update).toHaveBeenCalledWith({ where: { id: ORG_ID }, data: { billingAddress: Prisma.DbNull } })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { changes: { billingAddress: { from: { calle: 'Reforma 1' }, to: null } } } }),
+    )
+  })
+
+  it('sin cambios reales no deja asiento (no-op)', async () => {
+    await updateOrganization(ORG_ID, { name: 'Avoqado Corp', phone: '555-0000' }, 'staff-dueno')
+
+    expect(logAction).not.toHaveBeenCalled()
   })
 })

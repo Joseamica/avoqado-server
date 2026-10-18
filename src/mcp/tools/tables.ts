@@ -410,7 +410,11 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
       if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
       try {
-        const result = await updateOrderDetails(venueId, table.currentOrderId, { name, notes, covers, customerId })
+        // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): en una venta COBRADA, cambiar el cliente exige
+        // `payments:create`; el servicio lo decide bajo el candado de la venta (sin el permiso ⇒ 403, `ok: false` abajo).
+        const opciones =
+          customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: guard.tienePermiso('payments:create', venueId) } : {}
+        const result = await updateOrderDetails(venueId, table.currentOrderId, { name, notes, covers, customerId }, opciones)
         await auditMcpWrite(scope, {
           action: 'TABLE_CHECK_DETAILS_SET',
           entity: 'Order',

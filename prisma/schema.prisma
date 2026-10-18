@@ -183,6 +183,8 @@ model Zone {
 }
 
 model Venue {
+  onlineOrderingSettings OnlineOrderingSettings?
+  onlineOrders           OnlineOrder[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
   hybridContracts HybridContract[]
@@ -1819,6 +1821,8 @@ model MenuCategoryAssignment {
 // ==========================================
 
 model Product {
+  /// Pedidos en línea: el platillo sólo se muestra en la tienda pública si el restaurante lo marcó.
+  availableOnline Boolean @default(false)
   id      String @id @default(cuid())
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
@@ -1837,9 +1841,11 @@ model Product {
   type ProductType @default(FOOD)
 
   // Pricing
-  price   Decimal  @db.Decimal(10, 2)
-  cost    Decimal? @db.Decimal(10, 2)
-  taxRate Decimal  @default(0.16) @db.Decimal(5, 4)
+  price        Decimal               @db.Decimal(10, 2)
+  /// Cada precio que tuvo `price` y desde/hasta cuándo (lo escriben los disparadores de la base, ver el modelo).
+  priceHistory ProductPriceHistory[]
+  cost         Decimal?              @db.Decimal(10, 2)
+  taxRate      Decimal               @default(0.16) @db.Decimal(5, 4)
 
   // SAT keys for CFDI 4.0 (override category defaults when set)
   satProductKey String? // ClaveProdServ (8 digits)
@@ -2066,6 +2072,28 @@ model Product {
   @@index([venueId, upsellEnabled])
   // Also serves lookups by productGroupId alone (leading column): no separate index.
   @@unique([productGroupId, variantKey])
+}
+
+/// Historial de `Product.price`: cada precio con su intervalo `[validFrom, validTo)` en UTC; `validTo` nulo = vigente
+/// (a lo más UNA abierta por producto, índice parcial de la migración). Sirve para saber si el precio que vio el
+/// cliente fue real (spec 2026-10-17-precio-que-vio-el-cliente).
+/// 🔴 Lo escriben SÓLO los disparadores DIFERIDOS de `Product` (migración 20261017150000): fechan el cambio al
+/// CONFIRMARSE la transacción y cubren a todo escritor (Prisma, SQL directo, importaciones). Nunca escribas aquí.
+/// `id` autoincremental porque un disparador no genera cuid; nunca se expone.
+model ProductPriceHistory {
+  id         BigInt    @id @default(autoincrement())
+  venueId    String
+  productId  String
+  product    Product   @relation(fields: [productId, venueId], references: [id, venueId], onDelete: Cascade, onUpdate: Cascade)
+  price      Decimal   @db.Decimal(10, 2)
+  validFrom  DateTime
+  validTo    DateTime?
+  /// Transacción (xid8 de nivel superior, con época) que creó la fila. El disparador la usa para corregir en su lugar un
+  /// precio intermedio de la misma confirmación; la cascada de la FK no la toca. Nadie la escribe a mano.
+  /// Tras un restore LÓGICO (pg_dump/pg_restore a otro cluster) el xid8 no vale: `UPDATE "ProductPriceHistory" SET "creadoEnTx" = 0`.
+  creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+
+  @@index([productId, validFrom])
 }
 
 model Inventory {
@@ -3933,6 +3961,7 @@ enum PromoterLocationSource {
 }
 
 model Order {
+  onlineOrder    OnlineOrder?
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   venueId        String
@@ -7198,6 +7227,10 @@ model MerchantRevenueShare {
   /// Fracción 0..1 del margen agregador→venue que se queda Avoqado.
   /// El resto va al agregador. `null` cuando es venta directa.
   avoqadoShareOfAggregatorMargin Decimal? @db.Decimal(5, 4)
+
+  /// Cargo FINAL del banco/intermediario sobre lo recibido tras la tarifa del procesador.
+  /// No se suma IVA ni forma parte del margen del procesador. 0 conserva acuerdos anteriores.
+  intermediaryFeeRate Decimal @default(0) @db.Decimal(7, 6)
 
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4)
   active    Boolean  @default(true)
@@ -17167,6 +17200,7 @@ model McpToolCall {
   venueId    String? // the ONLY tool argument kept (opaque id, already in logs)
   outcome    String // 'ok' | 'error' | 'threw'  (see McpCallOutcome literals in code)
   detail     String? // short reason when not ok (permission denied / out of scope / not found / ambiguous / thrown message)
+  clientId   String? // OAuth app that made the call (mcp_oauth_clients.clientId: ChatGPT, Claude…); null for dev tokens and older rows
   durationMs Int
   createdAt  DateTime @default(now())
 
@@ -17430,6 +17464,8 @@ model Cfdi {
   @@index([venueId, status])
   @@index([fiscalEmisorId, isGlobal, createdAt])
   @@index([replacesCfdiId])
+  // M-5 (IVA C3/F6): las facturas de una orden se buscan por `orderId` en emisión, extracción, notas y devoluciones.
+  @@index([orderId])
 }
 
 /// IVA por producto, plan 3: el sello de un renglón (`OrderItem`) al facturarlo — a
@@ -19774,4 +19810,181 @@ model StaffPayVenueWindow {
   updatedAt      DateTime     @updatedAt
 
   @@index([organizationId, venueId, desde])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pedidos en línea (tienda web del restaurante) — spec 2026-10-15, ronda 1 aplicada
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ciclo de vida en línea. La fase 2 (tarjeta) agregará sus valores después: agregar un valor de enum es aditivo.
+enum OnlineOrderStatus {
+  PENDING_ACCEPTANCE // «por aceptar»
+  ACCEPTED // en preparación
+  READY // listo para recoger
+  COMPLETED // entregado
+  REJECTED // el restaurante no lo aceptó
+  EXPIRED // sin respuesta en 10 minutos
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_STAFF
+}
+
+enum OnlineOrderPaymentMode {
+  PAY_AT_PICKUP
+}
+
+enum OnlineOrderRejectReason {
+  OUT_OF_ITEMS
+  CLOSED
+  TOO_BUSY
+  OTHER
+}
+
+/// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
+model OnlineOrderingSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  enabled            Boolean   @default(false)
+  minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
+  defaultPrepMinutes Int       @default(15)
+  acceptsPayAtPickup Boolean   @default(true)
+  /// Pausa del gerente (ajustes, `online-orders:manage`).
+  manualPause        Boolean   @default(false)
+  /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
+  pausedUntil        DateTime?
+  /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
+  /// fila se precarga el horario de reservas si existe y es válido.
+  hours              Json?
+  /// Último sondeo de la BANDEJA ABIERTA (cabecera `x-online-orders-tray: 1`): es el «latido» de presencia.
+  lastInboxPollAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Ciclo de vida en línea de un pedido (1:1 con Order; aísla lo nuevo para no tocar `Order`).
+model OnlineOrder {
+  id      String @id @default(cuid())
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  status      OnlineOrderStatus      @default(PENDING_ACCEPTANCE)
+  paymentMode OnlineOrderPaymentMode
+
+  /// Capacidad de seguimiento (192 bits). En claro, como `Reservation.cancelSecret`: la repetición idempotente de
+  /// «crear pedido» devuelve el MISMO token. Lee el estado de ESTE pedido y lo cancela mientras está «por aceptar».
+  /// Es un secreto: el logger lo redacta de la ruta (`SECRET_SEGMENT_AFTER`).
+  trackingToken String  @unique
+  /// Huella sha256 de la solicitud con que se creó (carrito, cantidades, opciones, notas, total, modo y cliente). La repetición
+  /// idempotente la compara en vez del total de la cuenta, que la caja puede cambiar. Nula = se trata como solicitud distinta.
+  requestHash   String?
+
+  acceptDeadlineAt DateTime
+  acceptedAt       DateTime?
+  estimatedReadyAt DateTime?
+  readyAt          DateTime?
+  completedAt      DateTime?
+  rejectedAt       DateTime?
+  rejectReason     OnlineOrderRejectReason?
+  rejectNote       String?
+  expiredAt        DateTime?
+  cancelledAt      DateTime?
+  /// `'CUSTOMER'`, el id del staff que canceló, `'STAFF'` si no se supo, u `'ORDER_CANCELLED_ELSEWHERE'` cuando la cuenta se
+  /// canceló por otra vía (POS, panel, anular) y el pedido se sincronizó al leer.
+  cancelledBy      String?
+
+  whatsappConsent Boolean @default(false)
+
+  /// Quién imprime la comanda (mismo mecanismo de reclamo con TTL que la pantalla de cocina).
+  printClaimedAt DateTime?
+  printClaimedBy String?
+  printedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, status, acceptDeadlineAt])
+  @@index([venueId, createdAt])
+  /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
+  @@index([status, acceptDeadlineAt])
+}
+
+/// Platform onboarding invitations; deliberately independent of a venue.
+model DocumentRequest {
+  id String @id @default(cuid())
+  provider String
+  entityType String
+  businessName String
+  tokenHash String
+  tokenVersion Int @default(1)
+  status String @default("OPEN")
+  expiresAt DateTime
+  contactName String?
+  email String?
+  phone String?
+  identificationType String?
+  privacyAcceptedAt DateTime?
+  submittedAt DateTime?
+  submissionVersion Int @default(0)
+  notificationSnapshot Json?
+  onboardingNotification String @default("NONE")
+  danielNotification String @default("NONE")
+  notificationAttempts Int @default(0)
+  notificationNextAt DateTime?
+  notificationLease String?
+  notificationLeaseUntil DateTime?
+  uploadLease String?
+  uploadLeaseUntil DateTime?
+  uploadAttempts Int @default(0)
+  totalBytes Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  files DocumentRequestFile[]
+  deliveries DocumentRequestDelivery[]
+  @@index([status, createdAt])
+  @@index([notificationNextAt])
+  @@index([expiresAt])
+}
+
+model DocumentRequestFile {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  uploadId String
+  key String
+  fileName String
+  mimeType String
+  sizeBytes Int
+  contentHash String
+  storagePath String
+  status String @default("PENDING")
+  tokenVersion Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId, uploadId])
+  @@index([requestId, status])
+  @@index([status, updatedAt])
+}
+
+/// Immutable notification outbox per submission and recipient; invitation changes never cancel mail.
+model DocumentRequestDelivery {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields:[requestId],references:[id],onDelete:Restrict)
+  submissionVersion Int
+  recipient String
+  status String @default("PENDING")
+  snapshot Json
+  attempts Int @default(0)
+  firstAttemptAt DateTime?
+  nextAttemptAt DateTime? @default(now())
+  leaseToken String?
+  leaseUntil DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId,submissionVersion,recipient])
+  @@index([status,nextAttemptAt])
 }

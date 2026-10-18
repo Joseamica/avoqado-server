@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { z } from 'zod'
 import { configureToolCatalog, TOOL_EFFECTS } from '@/mcp/catalog'
+import { DIRECTORY_TIERS } from '@/mcp/directory/catalog'
 import { text } from '@/mcp/respond'
 import { instrumentTools } from '@/mcp/instrument'
 import type { McpScope } from '@/mcp/scope'
@@ -352,4 +353,28 @@ it('control — C1 · Tarea 11: `emit_global_invoice` es una escritura (timbra a
 it('🔴 C1 · Tarea 12: `global_invoice_excluded_sales` es una LECTURA (no pide confirmación) y nunca se publica en el directorio', () => {
   expect(TOOL_EFFECTS.global_invoice_excluded_sales).toBe('read')
   expect(NUNCA_EN_DIRECTORIO).toContain('global_invoice_excluded_sales')
+})
+
+describe('catálogo en bloque (sólo MCP libre)', () => {
+  const NOMBRES = ['find_products_by_code', 'set_prices_by_code', 'create_products', 'set_stock_by_code']
+
+  it('buscar por código sólo lee', () => {
+    expect(TOOL_EFFECTS.find_products_by_code).toBe('read')
+  })
+
+  it('poner precios en bloque escribe', () => {
+    expect(TOOL_EFFECTS.set_prices_by_code).toBe('write')
+  })
+
+  it('dar de alta en bloque escribe', () => {
+    expect(TOOL_EFFECTS.create_products).toBe('write')
+  })
+
+  it('cargar existencias en bloque escribe', () => {
+    expect(TOOL_EFFECTS.set_stock_by_code).toBe('write')
+  })
+
+  it('ninguna de las cuatro está en una tanda del directorio certificado', () => {
+    for (const tanda of DIRECTORY_TIERS) for (const nombre of NOMBRES) expect(tanda.tools).not.toContain(nombre)
+  })
 })

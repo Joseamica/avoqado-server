@@ -18,7 +18,7 @@ import { Prisma, StaffRole } from '@prisma/client'
 import { endOfDay, endOfMonth, format, startOfDay, subDays } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { localWallClock, utcTs } from '../../utils/sqlDates'
-import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
 import {
   DEFAULT_TIMEZONE,
@@ -308,6 +308,54 @@ async function cashSalesPerTimeEntry(venueIds: string[], from: Date, to: Date): 
     GROUP BY te."id"
   `
   return new Map(rows.map(r => [r.timeEntryId, Number(r.cash) || 0]))
+}
+
+export const SELF_VALIDATION_FORBIDDEN = 'SELF_VALIDATION_FORBIDDEN'
+
+/**
+ * Nadie valida ni regresa a pendiente SU PROPIA checada: separación de funciones, la misma regla del
+ * founder para las horas extra (30-ago-2026, `overtimeApproval.service.ts`). Por persona, no por rol.
+ * Sin quién actúa, falla cerrado: no se puede comprobar.
+ */
+function asegurarQueNoEsSuPropiaChecada(duenoDeLaChecada: string, quienActua: string | undefined, accion: string): void {
+  if (!quienActua || duenoDeLaChecada === quienActua) {
+    throw new ForbiddenError(`No puedes ${accion} tu propia checada: tiene que hacerlo otra persona.`, SELF_VALIDATION_FORBIDDEN)
+  }
+}
+
+/** Lo único que `upsertOrgAttendanceConfig` acepta del cuerpo (las columnas editables de `OrganizationAttendanceConfig`). */
+const CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA = [
+  'expectedCheckInTime',
+  'latenessThresholdMinutes',
+  'geofenceRadiusMeters',
+  'attendanceTracking',
+  'requireFacadePhoto',
+  'requireDepositPhoto',
+  'enableCashPayments',
+  'enableCardPayments',
+  'enableBarcodeScanner',
+  'trackPromoterLocation',
+  'promoterLocationStartHour',
+  'promoterLocationEndHour',
+]
+
+/**
+ * De → a de cada campo cuyo valor GUARDADO difiere del anterior (por valor JSON). La bitácora de los ajustes de la org se
+ * arma con esto y no con el cuerpo: el servidor deriva campos (`attendanceTracking` arrastra a `requireClockInPhoto` y
+ * `requireClockInToLogin`) y lo que se manda igual a lo que había no es un cambio (ronda 3, Codex).
+ */
+function cambiosGuardados(
+  antes: Record<string, any> | null | undefined,
+  guardado: Record<string, any>,
+  campos: string[] = Object.keys(guardado),
+): Record<string, { from: any; to: any }> {
+  const cambios: Record<string, { from: any; to: any }> = {}
+  for (const campo of campos) {
+    const from = antes?.[campo] ?? null
+    const to = guardado[campo] ?? null
+    if (JSON.stringify(from) !== JSON.stringify(to)) cambios[campo] = { from, to }
+  }
+  return cambios
 }
 
 class OrganizationDashboardService {
@@ -2654,9 +2702,21 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
+    // 🔴 SEPARACIÓN DE FUNCIONES: nadie valida su propia checada (la regla del founder para las horas
+    // extra, 30-ago-2026: «si puedes aprobarte, no controla nada»). Es por PERSONA, no por rol: el dueño
+    // de la organización tampoco. Vive aquí y no en la ruta para que la cumplan las DOS puertas que
+    // validan (la de la organización y la del panel white-label de la sucursal). Antes de escribir nada.
+    asegurarQueNoEsSuPropiaChecada(timeEntry.staffId, validatedById, 'validar')
+
+    // 🔴 IDEMPOTENTE (P1-5, Codex, 15-oct): repetir la aprobación —el dashboard reintenta ante un error de red,
+    // o dos supervisores aprueban la misma— creaba un SEGUNDO `CashDeposit` APROBADO. La transición es atómica:
+    // sólo una checada PENDIENTE pasa a aprobada o rechazada (`updateMany` con el estado previo en el `where`;
+    // Postgres vuelve a evaluar el `where` tras el candado de fila, así que de dos peticiones simultáneas sólo
+    // una escribe), y el depósito se crea sólo si ESA transición ocurrió, en la misma transacción. Sin cambio de
+    // esquema: no hace falta un vínculo único checada↔depósito para esto.
     const result = await prisma.$transaction(async tx => {
-      const updated = await tx.timeEntry.update({
-        where: { id: timeEntryId },
+      const transicion = await tx.timeEntry.updateMany({
+        where: { id: timeEntryId, validationStatus: 'PENDING' },
         data: {
           validationStatus: status,
           validatedBy: validatedById,
@@ -2664,6 +2724,7 @@ class OrganizationDashboardService {
           validationNote: note || null,
         },
       })
+      if (transicion.count !== 1) return null
 
       // Create CashDeposit when approving with a deposit amount
       if (status === 'APPROVED' && depositAmount != null && depositAmount > 0) {
@@ -2680,12 +2741,24 @@ class OrganizationDashboardService {
         })
       }
 
-      return updated
+      return tx.timeEntry.findUnique({ where: { id: timeEntryId } })
     })
+
+    if (!result) {
+      // Ya no estaba pendiente. Si ya quedó en lo que se pide, es una repetición: se responde la checada como está,
+      // sin otro depósito ni otro asiento. Si quedó en lo contrario (aprobar una rechazada o al revés), se dice.
+      const actual = await prisma.timeEntry.findFirst({ where: { id: timeEntryId, venue: { organizationId: orgId } } })
+      if (actual?.validationStatus === status) return actual
+      throw new ConflictError(
+        `Esta checada ya fue ${actual?.validationStatus === 'APPROVED' ? 'aprobada' : 'rechazada'}. Regrésala a pendiente antes de cambiarla.`,
+        'TIME_ENTRY_ALREADY_VALIDATED',
+      )
+    }
 
     logAction({
       staffId: validatedById,
       venueId: timeEntry.venueId,
+      organizationId: orgId,
       action: `TIME_ENTRY_${status}`,
       entity: 'TimeEntry',
       entityId: timeEntryId,
@@ -2698,8 +2771,10 @@ class OrganizationDashboardService {
   /**
    * Reset a time entry validation back to PENDING
    * Also deletes any associated CashDeposit created during approval
+   *
+   * @param performedBy quién la regresa a pendiente: nadie regresa la suya (misma regla que validar).
    */
-  async resetTimeEntryValidation(timeEntryId: string, orgId: string) {
+  async resetTimeEntryValidation(timeEntryId: string, orgId: string, performedBy: string) {
     const timeEntry = await prisma.timeEntry.findFirst({
       where: {
         id: timeEntryId,
@@ -2711,7 +2786,30 @@ class OrganizationDashboardService {
       throw new Error('Time entry not found in this organization')
     }
 
+    asegurarQueNoEsSuPropiaChecada(timeEntry.staffId, performedBy, 'regresar a pendiente')
+
+    // 🔴 CAS sobre la validación que se LEYÓ (Codex r2, 16-oct): la lectura de arriba es anterior a la transacción.
+    // Dos «deshacer» que leen la misma checada rechazada: el primero termina, alguien la aprueba ($150), y el segundo,
+    // tarde, la regresaba a PENDING (borrando por la fecha VIEJA, o sea sin tocar el depósito nuevo) → otra
+    // aprobación = $300. Ahora sólo se regresa si sigue en el mismo estado, con la misma fecha y el mismo autor de
+    // validación; y el borrado de depósitos va DESPUÉS de ganar esa transición, en la misma transacción.
     const result = await prisma.$transaction(async tx => {
+      const transicion = await tx.timeEntry.updateMany({
+        where: {
+          id: timeEntryId,
+          validationStatus: timeEntry.validationStatus,
+          validatedAt: timeEntry.validatedAt,
+          validatedBy: timeEntry.validatedBy,
+        },
+        data: {
+          validationStatus: 'PENDING',
+          validatedBy: null,
+          validatedAt: null,
+          validationNote: null,
+        },
+      })
+      if (transicion.count !== 1) return null
+
       // Delete any CashDeposit created around the same time as validation
       if (timeEntry.validatedAt) {
         const windowStart = new Date(timeEntry.validatedAt.getTime() - 5000)
@@ -2726,19 +2824,24 @@ class OrganizationDashboardService {
         })
       }
 
-      return tx.timeEntry.update({
-        where: { id: timeEntryId },
-        data: {
-          validationStatus: 'PENDING',
-          validatedBy: null,
-          validatedAt: null,
-          validationNote: null,
-        },
-      })
+      return tx.timeEntry.findUnique({ where: { id: timeEntryId } })
     })
 
+    if (!result) {
+      // Ya no era la validación que se leyó. Si ya está pendiente, es una repetición (doble clic, reintento de red):
+      // se responde como está, sin borrar nada ni otro asiento. Si alguien la volvió a validar, se dice.
+      const actual = await prisma.timeEntry.findFirst({ where: { id: timeEntryId, venue: { organizationId: orgId } } })
+      if (actual?.validationStatus === 'PENDING') return actual
+      throw new ConflictError(
+        'La checada cambió mientras la regresabas a pendiente (alguien la volvió a validar). Actualiza y vuelve a intentar.',
+        'TIME_ENTRY_CHANGED',
+      )
+    }
+
     logAction({
+      staffId: performedBy,
       venueId: timeEntry.venueId,
+      organizationId: orgId,
       action: 'TIME_ENTRY_VALIDATION_RESET',
       entity: 'TimeEntry',
       entityId: timeEntryId,
@@ -2761,12 +2864,16 @@ class OrganizationDashboardService {
     })
   }
 
-  async createZone(orgId: string, name: string, slug: string) {
+  // `performedBy` (quién lo hizo) y la org van a la bitácora: sin ellos el asiento no tenía autor ni
+  // aparecía en ninguna pantalla de auditoría (no llevaba org ni venue).
+  async createZone(orgId: string, name: string, slug: string, performedBy?: string) {
     const zone = await prisma.zone.create({
       data: { organizationId: orgId, name, slug },
     })
 
     logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
       action: 'ZONE_CREATED',
       entity: 'Zone',
       entityId: zone.id,
@@ -2776,7 +2883,7 @@ class OrganizationDashboardService {
     return zone
   }
 
-  async updateZone(orgId: string, zoneId: string, data: { name?: string; slug?: string }) {
+  async updateZone(orgId: string, zoneId: string, data: { name?: string; slug?: string }, performedBy?: string) {
     await this.assertZoneInOrg(orgId, zoneId)
     const zone = await prisma.zone.update({
       where: { id: zoneId, organizationId: orgId },
@@ -2784,6 +2891,8 @@ class OrganizationDashboardService {
     })
 
     logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
       action: 'ZONE_UPDATED',
       entity: 'Zone',
       entityId: zoneId,
@@ -2793,7 +2902,7 @@ class OrganizationDashboardService {
     return zone
   }
 
-  async deleteZone(orgId: string, zoneId: string) {
+  async deleteZone(orgId: string, zoneId: string, performedBy?: string) {
     await this.assertZoneInOrg(orgId, zoneId)
     // Desvincular los venues de la org y borrar, en una transacción y con el borrado acotado a
     // la org: la escritura no depende sólo del chequeo previo. (Un venue de OTRA org que apunte
@@ -2805,6 +2914,8 @@ class OrganizationDashboardService {
     ])
 
     logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
       action: 'ZONE_DELETED',
       entity: 'Zone',
       entityId: zoneId,
@@ -3393,7 +3504,7 @@ class OrganizationDashboardService {
 
   async upsertOrgAttendanceConfig(
     orgId: string,
-    data: {
+    entrada: {
       expectedCheckInTime?: string
       latenessThresholdMinutes?: number
       geofenceRadiusMeters?: number
@@ -3407,7 +3518,15 @@ class OrganizationDashboardService {
       promoterLocationStartHour?: number
       promoterLocationEndHour?: number
     },
+    performedBy?: string,
+    venueId?: string,
   ) {
+    // 🔴 Sólo los campos de la config. La puerta de la org pasaba el cuerpo CRUDO, y el `...data` del upsert aceptaba
+    // `organizationId`/`id`: escribía la config de OTRA organización (o mudaba ésta). Se filtra aquí, para las dos puertas.
+    const data = Object.fromEntries(
+      Object.entries(entrada ?? {}).filter(([campo]) => CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA.includes(campo)),
+    ) as typeof entrada
+
     // Venue-local capture window for promoter geolocation pings. start inclusive,
     // end exclusive, 0/24 = full 24h. Validate whichever of the pair is provided —
     // a partial update still needs a sane resulting window, so we validate each
@@ -3428,10 +3547,9 @@ class OrganizationDashboardService {
       }
     }
 
-    // Also sync individual columns → settings JSON for consistency
+    // Also sync individual columns → settings JSON for consistency (la fila entera: la bitácora compara contra ella)
     const existing = await prisma.organizationAttendanceConfig.findUnique({
       where: { organizationId: orgId },
-      select: { settings: true },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
     const settingsSync: Record<string, any> = { ...existingSettings }
@@ -3463,47 +3581,65 @@ class OrganizationDashboardService {
       },
     })
 
-    // Cambaceo is the ONE set of org defaults that cascade PHYSICALLY: the promoter-ping
-    // gate (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org
-    // fallback, and the TPV self-gates its capture window off VenueSettings.promoterLocation{Start,End}Hour
-    // (via getTerminalConfig) with no org fallback either — so saving any of the 3 fields
-    // here must propagate to every venue's VenueSettings row.
-    const cascadeData: { trackPromoterLocation?: boolean; promoterLocationStartHour?: number; promoterLocationEndHour?: number } = {}
-    if (data.trackPromoterLocation !== undefined) cascadeData.trackPromoterLocation = data.trackPromoterLocation
-    if (data.promoterLocationStartHour !== undefined) cascadeData.promoterLocationStartHour = data.promoterLocationStartHour
-    if (data.promoterLocationEndHour !== undefined) cascadeData.promoterLocationEndHour = data.promoterLocationEndHour
+    // 🔴 La config YA quedó guardada: pase lo que pase con la propagación a las sucursales, hay asiento (ronda 3, Codex).
+    // El detalle es lo guardado: las columnas escritas y lo que el servidor derivó en `settings` (sólo las llaves que no son
+    // columnas, para no contarlas dos veces).
+    const changes = {
+      ...cambiosGuardados(existing, data),
+      ...cambiosGuardados(
+        existingSettings,
+        settingsSync,
+        Object.keys(settingsSync).filter(campo => !CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA.includes(campo)),
+      ),
+    }
+    let propagacionCompleta = false
+    try {
+      // Cambaceo is the ONE set of org defaults that cascade PHYSICALLY: the promoter-ping
+      // gate (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org
+      // fallback, and the TPV self-gates its capture window off VenueSettings.promoterLocation{Start,End}Hour
+      // (via getTerminalConfig) with no org fallback either — so saving any of the 3 fields
+      // here must propagate to every venue's VenueSettings row.
+      const cascadeData: { trackPromoterLocation?: boolean; promoterLocationStartHour?: number; promoterLocationEndHour?: number } = {}
+      if (data.trackPromoterLocation !== undefined) cascadeData.trackPromoterLocation = data.trackPromoterLocation
+      if (data.promoterLocationStartHour !== undefined) cascadeData.promoterLocationStartHour = data.promoterLocationStartHour
+      if (data.promoterLocationEndHour !== undefined) cascadeData.promoterLocationEndHour = data.promoterLocationEndHour
 
-    if (Object.keys(cascadeData).length > 0) {
-      const venues = await prisma.venue.findMany({
-        where: { organizationId: orgId },
-        select: { id: true },
-      })
-      const venueIds = venues.map(v => v.id)
-      if (venueIds.length > 0) {
-        await prisma.venueSettings.updateMany({
-          where: { venueId: { in: venueIds } },
-          data: cascadeData,
+      if (Object.keys(cascadeData).length > 0) {
+        const venues = await prisma.venue.findMany({
+          where: { organizationId: orgId },
+          select: { id: true },
         })
-        const existingVs = await prisma.venueSettings.findMany({
-          where: { venueId: { in: venueIds } },
-          select: { venueId: true },
-        })
-        const have = new Set(existingVs.map(v => v.venueId))
-        const missing = venueIds.filter(id => !have.has(id))
-        if (missing.length > 0) {
-          await prisma.venueSettings.createMany({
-            data: missing.map(venueId => ({ venueId, ...cascadeData })),
+        const venueIds = venues.map(v => v.id)
+        if (venueIds.length > 0) {
+          await prisma.venueSettings.updateMany({
+            where: { venueId: { in: venueIds } },
+            data: cascadeData,
           })
+          const existingVs = await prisma.venueSettings.findMany({
+            where: { venueId: { in: venueIds } },
+            select: { venueId: true },
+          })
+          const have = new Set(existingVs.map(v => v.venueId))
+          const missing = venueIds.filter(id => !have.has(id))
+          if (missing.length > 0) {
+            await prisma.venueSettings.createMany({
+              data: missing.map(venueId => ({ venueId, ...cascadeData })),
+            })
+          }
         }
       }
+      propagacionCompleta = true
+    } finally {
+      void logAction({
+        staffId: performedBy ?? null,
+        organizationId: orgId,
+        ...(venueId ? { venueId } : {}),
+        action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
+        entity: 'OrganizationAttendanceConfig',
+        entityId: config.id,
+        data: { changes, ...(propagacionCompleta ? {} : { propagacionIncompleta: true }) },
+      })
     }
-
-    logAction({
-      action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
-      entity: 'OrganizationAttendanceConfig',
-      entityId: config.id,
-      data: { changes: Object.keys(data) },
-    })
 
     return config
   }
@@ -3593,14 +3729,22 @@ class OrganizationDashboardService {
     return updated
   }
 
-  async deleteOrgAttendanceConfig(orgId: string) {
-    await prisma.organizationAttendanceConfig.deleteMany({
+  // Borra la fila entera, `settings` (los defaults de TPV) incluido. Asiento con autor, org y sucursal; sin asiento si no
+  // había nada que borrar.
+  async deleteOrgAttendanceConfig(orgId: string, performedBy?: string, venueId?: string) {
+    const borrado = await prisma.organizationAttendanceConfig.deleteMany({
       where: { organizationId: orgId },
     })
+    if (!borrado?.count) return
 
-    logAction({
+    void logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
+      ...(venueId ? { venueId } : {}),
       action: 'ORG_ATTENDANCE_CONFIG_DELETED',
       entity: 'OrganizationAttendanceConfig',
+      entityId: orgId,
+      data: { deleted: borrado.count },
     })
   }
 
@@ -3623,10 +3767,14 @@ class OrganizationDashboardService {
    * Save org-level TPV defaults and push to ALL terminals in the org.
    * This overwrites terminal settings with the merged result (system defaults + org defaults).
    * kioskDefaultMerchantId is preserved per-terminal (not overwritten by org push).
+   *
+   * `performedBy` (quién) y `venueId` (la tienda desde cuya pantalla se guardó, si fue así) van a la bitácora.
    */
   async upsertOrgTpvDefaults(
     orgId: string,
     settings: Record<string, any>,
+    performedBy?: string,
+    venueId?: string,
   ): Promise<{ config: Record<string, any>; terminalsUpdated: number }> {
     // 1. Get existing settings to merge
     const existing = await prisma.organizationAttendanceConfig.findUnique({
@@ -3679,42 +3827,66 @@ class OrganizationDashboardService {
     })
 
     let terminalsUpdated = 0
-    if (terminals.length === 0) {
-      await upsertConfig
-    } else {
-      const BATCH_SIZE = 50
-      for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
-        const batch = terminals.slice(i, i + BATCH_SIZE)
-        const updates = batch.map(terminal => {
-          const existingConfig = (terminal.config as Record<string, any>) || {}
-          const overrides = (terminal.configOverrides as Record<string, any>) || {}
+    // 🔴 La config viaja en el PRIMER lote: si ése se confirma y uno posterior falla, la config y esas terminales ya
+    // cambiaron, y antes no quedaba asiento (ronda 3, Codex). Ahora el asiento sale en cuanto algo se guardó, con lo
+    // guardado (no el cuerpo: `attendanceTracking` arrastra a dos llaves más) y, si no terminó, `propagacionIncompleta`.
+    // Si el primer lote falla no se guardó nada y no hay asiento.
+    const changes = cambiosGuardados(existingSettings, mergedSettings)
+    let configGuardada = false
+    let propagacionCompleta = false
+    try {
+      if (terminals.length === 0) {
+        await upsertConfig
+        configGuardada = true
+      } else {
+        const BATCH_SIZE = 50
+        for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
+          const batch = terminals.slice(i, i + BATCH_SIZE)
+          const updates = batch.map(terminal => {
+            const existingConfig = (terminal.config as Record<string, any>) || {}
+            const overrides = (terminal.configOverrides as Record<string, any>) || {}
 
-          // Cascade merge: org defaults → per-terminal overrides
-          // Terminals with no overrides (null) get full org defaults
-          // Terminals with overrides keep their customized fields
-          const pushSettings = {
-            ...mergedSettings,
-            ...overrides,
-            // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
-            kioskDefaultMerchantId:
-              overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
-          }
+            // Cascade merge: org defaults → per-terminal overrides
+            // Terminals with no overrides (null) get full org defaults
+            // Terminals with overrides keep their customized fields
+            const pushSettings = {
+              ...mergedSettings,
+              ...overrides,
+              // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
+              kioskDefaultMerchantId:
+                overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
+            }
 
-          // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
-          // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
-          return prisma.terminal.updateMany({
-            where: scopedTerminalWhere(terminal.id, { organizationId: orgId }),
-            data: {
-              config: { ...existingConfig, settings: pushSettings },
-              updatedAt: new Date(),
-            },
+            // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
+            // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
+            return prisma.terminal.updateMany({
+              where: scopedTerminalWhere(terminal.id, { organizationId: orgId }),
+              data: {
+                config: { ...existingConfig, settings: pushSettings },
+                updatedAt: new Date(),
+              },
+            })
           })
-        })
 
-        const isFirstBatch = i === 0
-        const writes: Prisma.PrismaPromise<unknown>[] = isFirstBatch ? [upsertConfig, ...updates] : updates
-        const results = await prisma.$transaction(writes)
-        terminalsUpdated += countUpdatedTerminals(isFirstBatch ? results.slice(1) : results)
+          const isFirstBatch = i === 0
+          const writes: Prisma.PrismaPromise<unknown>[] = isFirstBatch ? [upsertConfig, ...updates] : updates
+          const results = await prisma.$transaction(writes)
+          configGuardada = true
+          terminalsUpdated += countUpdatedTerminals(isFirstBatch ? results.slice(1) : results)
+        }
+      }
+      propagacionCompleta = true
+    } finally {
+      if (configGuardada) {
+        void logAction({
+          staffId: performedBy ?? null,
+          organizationId: orgId,
+          ...(venueId ? { venueId } : {}),
+          action: 'ORG_TPV_DEFAULTS_UPDATED',
+          entity: 'Organization',
+          entityId: orgId,
+          data: { changes, terminalsUpdated, ...(propagacionCompleta ? {} : { propagacionIncompleta: true }) },
+        })
       }
     }
 
@@ -3725,12 +3897,6 @@ class OrganizationDashboardService {
         omittedTerminals,
       })
     }
-
-    logAction({
-      action: 'ORG_TPV_DEFAULTS_UPDATED',
-      entity: 'OrganizationAttendanceConfig',
-      data: { settingsKeys: Object.keys(settings), terminalsUpdated },
-    })
 
     return { config: mergedSettings, terminalsUpdated }
   }

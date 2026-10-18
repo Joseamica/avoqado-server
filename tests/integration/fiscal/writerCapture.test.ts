@@ -215,6 +215,10 @@ async function state(orderId: string) {
  * order, and a seal UPDATE (or free space reused by other tests) moves rows. Comparisons between two reads, and against
  * goldens, therefore order lines and concepts by content; everything else stays byte-for-byte.
  */
+/** The line of one product, by name (15-oct: `[0]` assumed Plato came first; physical order put Refresco there, run 38790634343). */
+const conceptoDe = (document: Awaited<ReturnType<typeof frozen>>['document'], nombre: string) =>
+  document.conceptos.find(c => c[0] === nombre)
+const lineaDe = (entrada: ReturnType<typeof capturarEntrada>, nombre: string) => entrada.params.items.find(i => i.description === nombre)
 const byContent = (a: unknown, b: unknown) => huellaDeEntrada(a).localeCompare(huellaDeEntrada(b))
 const sorted = (document: Awaited<ReturnType<typeof frozen>>['document']) => ({
   ...document,
@@ -811,8 +815,8 @@ describe('what the capture depends on, and what protects it', () => {
       }
       expect((await move!).error).toBeUndefined()
       const { document } = await frozen(o.id)
-      expect(document.conceptos[0]).toEqual(PLATO)
-      expect((await captureNow(o.id)).params.items[0]).toMatchObject({ satProductKey: '50192100', satUnitKey: 'KGM' })
+      expect(conceptoDe(document, 'Plato')).toEqual(PLATO)
+      expect(lineaDe(await captureNow(o.id), 'Plato')).toMatchObject({ satProductKey: '50192100', satUnitKey: 'KGM' })
     } finally {
       await prisma.product.update({ where: { id: platoId }, data: { categoryId } })
     }
@@ -847,8 +851,8 @@ describe('what the capture depends on, and what protects it', () => {
         expect(committed!.error).toBeUndefined()
         const { document } = await frozen(o.id)
         // Both keys come from the same row read: never half old, half new.
-        expect(document.conceptos[0]).toEqual(['Plato', ...expected, 1, 10000, 0, true])
-        expect((await captureNow(o.id)).params.items[0]).toMatchObject({ satProductKey: '50181900', satUnitKey: 'KGM' })
+        expect(conceptoDe(document, 'Plato')).toEqual(['Plato', ...expected, 1, 10000, 0, true])
+        expect(lineaDe(await captureNow(o.id), 'Plato')).toMatchObject({ satProductKey: '50181900', satUnitKey: 'KGM' })
       } finally {
         await prisma.menuCategory.update({
           where: { id: categoryId },

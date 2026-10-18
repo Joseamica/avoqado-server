@@ -241,6 +241,12 @@ export async function createTerminal(data: {
   generateActivationCode?: boolean
   staffId?: string
   configOverrides?: Partial<TpvSettings>
+  /**
+   * Qué comercios con el MISMO serial puede anexar el alta sola. Sin el campo (consola de superadmin): cualquiera,
+   * como siempre. `null`: ninguno. Un filtro: sólo los que lo cumplan — el panel de la org lo acota a los comercios
+   * de SU organización (P1-1 de Codex, 15-oct).
+   */
+  comerciosAutoAdjuntables?: Prisma.MerchantAccountWhereInput | null
 }) {
   logger.info('Creating terminal:', {
     venueId: data.venueId,
@@ -332,7 +338,7 @@ export async function createTerminal(data: {
   // MerchantAccount.blumonSerialNumber has raw serial ("2841548417")
   let autoAttachedMerchants: Array<{ id: string; displayName: string | null }> = []
 
-  if (data.serialNumber) {
+  if (data.serialNumber && data.comerciosAutoAdjuntables !== null) {
     // Extract raw serial by removing common prefixes (AVQD-, AVQ-, etc.)
     const rawSerial = data.serialNumber.replace(/^(AVQD-|AVQ-|AVO-)/i, '')
     logger.info('[Terminal Create] Searching for merchants to auto-attach', {
@@ -342,11 +348,16 @@ export async function createTerminal(data: {
 
     const matchingMerchants = await prisma.merchantAccount.findMany({
       where: {
-        OR: [
-          { blumonSerialNumber: data.serialNumber }, // Exact match
-          { blumonSerialNumber: rawSerial }, // Match raw serial
+        AND: [
+          {
+            OR: [
+              { blumonSerialNumber: data.serialNumber }, // Exact match
+              { blumonSerialNumber: rawSerial }, // Match raw serial
+            ],
+            active: true,
+          },
+          data.comerciosAutoAdjuntables ?? {},
         ],
-        active: true,
       },
       select: {
         id: true,

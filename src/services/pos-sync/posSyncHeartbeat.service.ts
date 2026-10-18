@@ -2,6 +2,8 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { PosStatus } from '@prisma/client'
+import { IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION } from '../fiscal/exclusionContable'
+import { conIvaApagado, IVA_ADMISION_OCUPADA, PosRechazadoPorIva } from './exclusionIva'
 
 // Venue validation cache to reduce database load
 interface VenueValidationCache {
@@ -233,44 +235,49 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
 
     // Si es el primer heartbeat o el InstanceId no ha cambiado
     if (!existingStatus || existingStatus.instanceId === instanceId) {
-      await prisma.posConnectionStatus.upsert({
-        where: { venueId },
-        update: {
-          status: 'ONLINE',
-          instanceId: instanceId,
-          producerVersion: producerVersion,
-          lastHeartbeatAt: new Date(),
-          venue: {
-            update: {
-              posStatus: PosStatus.CONNECTED,
+      // Plan 6b (spec §5.4): la escritura de la conexión (y del `posStatus` del negocio), bajo la guardia del IVA por producto.
+      await conIvaApagado(venueId, tx =>
+        tx.posConnectionStatus.upsert({
+          where: { venueId },
+          update: {
+            status: 'ONLINE',
+            instanceId: instanceId,
+            producerVersion: producerVersion,
+            lastHeartbeatAt: new Date(),
+            venue: {
+              update: {
+                posStatus: PosStatus.CONNECTED,
+              },
             },
           },
-        },
-        create: {
-          venue: { connect: { id: venueId } },
-          status: 'ONLINE',
-          instanceId: instanceId,
-          producerVersion: producerVersion,
-          lastHeartbeatAt: new Date(),
-        },
-      })
+          create: {
+            venue: { connect: { id: venueId } },
+            status: 'ONLINE',
+            instanceId: instanceId,
+            producerVersion: producerVersion,
+            lastHeartbeatAt: new Date(),
+          },
+        }),
+      )
       // logger.info(`[Heartbeat Service] Estado de Venue ${venueId} actualizado a ONLINE.`)
     } else {
       // ¡ALERTA! El InstanceId ha cambiado. La BD del POS fue probablemente restaurada.
-      await prisma.posConnectionStatus.update({
-        where: { venueId },
-        data: {
-          status: 'NEEDS_RECONCILIATION',
-          instanceId: instanceId, // Guardamos el nuevo InstanceId
-          producerVersion: producerVersion,
-          lastHeartbeatAt: new Date(),
-          venue: {
-            update: {
-              posStatus: PosStatus.ERROR,
+      await conIvaApagado(venueId, tx =>
+        tx.posConnectionStatus.update({
+          where: { venueId },
+          data: {
+            status: 'NEEDS_RECONCILIATION',
+            instanceId: instanceId, // Guardamos el nuevo InstanceId
+            producerVersion: producerVersion,
+            lastHeartbeatAt: new Date(),
+            venue: {
+              update: {
+                posStatus: PosStatus.ERROR,
+              },
             },
           },
-        },
-      })
+        }),
+      )
 
       await sendHighPriorityAlert(
         venueId,
@@ -278,6 +285,12 @@ export async function processPosHeartbeat(payload: { venueId: string; instanceId
       )
     }
   } catch (error) {
+    // Plan 6b (Codex r2 N3): el rechazo por IVA llega al despachador (ACK + warn + ActivityLog); tragarlo aquí lo dejaría como `error`.
+    if (error instanceof PosRechazadoPorIva) throw error
+    // Codex código r1 #3 (Ruling CX-3): los dos transitorios de la guardia tampoco se tragan: el consumidor los reencola. Absorbidos, el
+    // latido se confirmaba (ACK) sin haberse guardado (la conexión del POS o la alerta de una base restaurada se perdían).
+    const code = (error as { code?: unknown } | null)?.code
+    if (code === IVA_ADMISION_OCUPADA || code === IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION) throw error
     logger.error(`[Heartbeat Service] Error procesando el heartbeat para Venue ${venueId}:`, error)
   }
 }

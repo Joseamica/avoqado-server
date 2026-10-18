@@ -17,6 +17,7 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../../../../src/services/master-catalog/catalogGovernance.service'
 import AppError, { ConflictError } from '../../../../src/errors/AppError'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const humanActor = { type: 'HUMAN' as const, staffId: 'staff-1', impersonating: false }
 const serviceActor = { type: 'SERVICE' as const, servicePrincipalId: 'DEMO_VENUE_SEED' }
@@ -501,5 +502,77 @@ describe('createProduct — el catálogo ocupado sale 409 CATALOGO_OCUPADO tras 
     await expect(productService.createProduct('venue-xyz', alta, humanActor)).resolves.toMatchObject({ id: 'product-abc' })
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
     expect(prismaMock.product.create).toHaveBeenCalledTimes(1)
+  })
+})
+
+// Evidencia (founder, 15-oct): «producto actualizado» no decía QUIÉN lo cambió (113 de 113 filas sin persona en 30
+// días, también las del dashboard) ni de cuánto a cuánto quedó el precio.
+describe('updateProduct — la bitácora dice quién lo cambió y de cuánto a cuánto quedó el precio', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const bitacora = () => (logAction as jest.Mock).mock.calls.map(c => c[0]).find(p => p.action === 'PRODUCT_UPDATED')
+
+  // La lectura que el código hace DENTRO de la transacción, ya con el candado del catálogo.
+  const bajoCandado = (precio: number) =>
+    prismaMock.product.findFirstOrThrow.mockResolvedValueOnce({
+      ivaTratamiento: 'IVA_16',
+      taxRate: 0.16,
+      objetoImp: '02',
+      price: new Decimal(precio),
+    })
+
+  it('guarda a la persona y el precio anterior → nuevo', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct({ price: new Decimal(4850) }))
+    bajoCandado(4850)
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ price: new Decimal(4500) }))
+    await productService.updateProduct('venue-xyz', 'product-abc', { price: 4500 }, humanActor)
+    expect(bitacora()).toEqual({
+      venueId: 'venue-xyz',
+      staffId: 'staff-1',
+      action: 'PRODUCT_UPDATED',
+      entity: 'Product',
+      entityId: 'product-abc',
+      data: { changes: ['price'], price: { from: 4850, to: 4500 } },
+    })
+  })
+
+  // Codex 15-oct, su caso exacto: A lee $100 y sólo cambia el nombre; B cambió el precio a $120 en medio.
+  it('quien sólo cambió el nombre no queda con el cambio de precio que hizo otra persona en medio', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct({ price: new Decimal(100) }))
+    bajoCandado(120)
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ name: 'Nombre Nuevo', price: new Decimal(120) }))
+    await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Nuevo' }, humanActor)
+    expect(bitacora().data).toEqual({ changes: ['name'] })
+  })
+
+  it('el precio anterior es el vigente bajo el candado, no el que se leyó antes', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct({ price: new Decimal(100) }))
+    bajoCandado(120)
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ price: new Decimal(130) }))
+    await productService.updateProduct('venue-xyz', 'product-abc', { price: 130 }, humanActor)
+    expect(bitacora().data).toEqual({ changes: ['price'], price: { from: 120, to: 130 } })
+  })
+
+  it('si el precio no cambió, no inventa un «de → a»', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ name: 'Nombre Nuevo' }))
+    await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Nuevo' }, humanActor)
+    expect(bitacora()).toMatchObject({ staffId: 'staff-1', data: { changes: ['name'] } })
+    expect(bitacora().data).not.toHaveProperty('price')
+  })
+
+  it('un proceso automático no tiene persona: deja su identificador', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ name: 'Nombre Nuevo' }))
+    await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Nuevo' }, serviceActor)
+    expect(bitacora().staffId).toBeUndefined()
+    expect(bitacora().data).toEqual({ changes: ['name'], servicePrincipalId: 'DEMO_VENUE_SEED' })
+  })
+
+  it('un cambio hecho suplantando a alguien queda marcado', async () => {
+    prismaMock.product.findFirst.mockResolvedValue(makeMockProduct())
+    prismaMock.product.update.mockResolvedValue(makeMockProduct({ name: 'Nombre Nuevo' }))
+    await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Nuevo' }, { ...humanActor, impersonating: true })
+    expect(bitacora()).toMatchObject({ staffId: 'staff-1', data: { changes: ['name'], impersonating: true } })
   })
 })

@@ -62,6 +62,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // un dueño parado frente al POS no podría tocar el botón que sí ve su cocinero.
   'delivery-channels:manage': ['delivery-channels:manage', 'delivery-channels:read', 'delivery-channels:snooze'],
   'delivery-channels:snooze': ['delivery-channels:snooze'],
+  // Pedidos en línea: ajustes y menú en línea. Aceptar y rechazar usan `orders:update` (cocina y caja ya lo tienen); cancelar,
+  // `orders:cancel-unpaid`. Quien administra la tienda también puede frenarla un rato (igual que `delivery-channels:manage`).
+  // M-6: NO arrastra `orders:update`: un rol al que sólo le dan la tienda en línea no modifica cualquier cuenta del POS.
+  // Contestar pedidos se le da aparte.
+  'online-orders:manage': ['online-orders:manage', 'orders:read', 'products:read', 'menu:read', 'online-orders:pause'],
+  // Pausar desde el piso 15/30/60 min o reanudar (founder, 16-oct: gerente para arriba; en el POS, con el PIN del gerente).
+  'online-orders:pause': ['online-orders:pause', 'orders:read'],
 
   'orders:read': [
     'orders:read',
@@ -1145,6 +1152,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: tpv-factory-reset (OWNER only)
     // NO: commissions:create/update/delete/approve/payout (ADMIN+ only)
     // NO: cfdi:configure (OWNER/ADMIN only)
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
+    'online-orders:pause', // Pedidos en línea: pausar desde el piso (founder, 16-oct)
     // Facturación CFDI 4.0 (Pro-tier) — MANAGER can issue and view invoices
     'cfdi:issue',
     'cfdi:view',
@@ -1283,6 +1292,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
+    'online-orders:pause', // Pedidos en línea: pausar desde el piso (founder, 16-oct)
     // Facturación CFDI 4.0 (Pro-tier) — ADMIN has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1438,6 +1449,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Situación Fiscal). OWNER-only, NO ADMIN/MANAGER: son los datos legales del negocio
     // (RFC, razón social, régimen fiscal) y el dueño es quien responde por ellos ante el SAT.
     'venue-fiscal-profile:manage',
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
+    'online-orders:pause', // Pedidos en línea: pausar desde el piso (founder, 16-oct)
     // Facturación CFDI 4.0 (Pro-tier) — OWNER has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1642,7 +1655,42 @@ export function getEffectiveRolePermissions(
   })
 
   const sobreviven = abiertos.filter(p => !negados.has(p))
-  return Array.from(resolvePermissions(sobreviven))
+
+  // 🔴 QUITAR NUNCA CONCEDE (auditoría de Codex, 14-oct-2026). Al abrir un comodín, sus
+  // piezas sueltas arrastran dependencias que el comodín compacto nunca arrastró:
+  // VIEWER + `scale:*` no tiene `tpv-settings:update`, pero al excluir `scale:use` aparecía
+  // `scale:configure` suelto y con él `tpv-settings:update`. Y cualquier exclusión, aunque no
+  // tocara nada, disparaba una segunda vuelta de dependencias (las de las dependencias).
+  // Por eso lo que sobrevive se recorta a lo que la base SIN exclusiones ya concedía, medido
+  // con la misma regla de comodines con la que se autoriza. La decisión del 18-ago queda
+  // intacta: lo implicado por un permiso que el rol conserva vuelve — si la base lo concedía.
+  return Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+}
+
+/**
+ * ¿Una lista de permisos YA resuelta concede `requiredPermission`?
+ *
+ * Es la ÚNICA regla de comodines del backend: el permiso exacto, `recurso:*`, `*:acción`
+ * o `*:*`. La usan `hasPermission`, `evaluatePermissionList` y el recorte de exclusiones
+ * de `getEffectiveRolePermissions`, para que "lo que la base ya concedía" se mida con la
+ * misma vara con la que después se autoriza. Una segunda copia de esta regla sería otra
+ * forma de que dos candados contesten distinto.
+ */
+export function permissionListGrants(permissions: ReadonlySet<string> | readonly string[], requiredPermission: string): boolean {
+  const lista: ReadonlySet<string> = permissions instanceof Set ? permissions : new Set(permissions)
+
+  // Check for wildcard (all permissions)
+  if (lista.has('*:*')) return true
+
+  // Check exact permission
+  if (lista.has(requiredPermission)) return true
+
+  // Check wildcard permissions (e.g., 'tpv:*' matches 'tpv:create')
+  const [resource, action] = requiredPermission.split(':')
+  if (lista.has(`${resource}:*`)) return true
+  if (lista.has(`*:${action}`)) return true
+
+  return false
 }
 
 /**
@@ -1656,20 +1704,7 @@ export function hasPermission(
   /** Ver `getEffectiveRolePermissions`: lo que el venue QUITA, aparte de lo que agrega. */
   deniedPermissions?: string[] | null,
 ): boolean {
-  const allPermissions = getEffectiveRolePermissions(role, customPermissions, deniedPermissions)
-
-  // Check for wildcard (all permissions)
-  if (allPermissions.includes('*:*')) return true
-
-  // Check exact permission
-  if (allPermissions.includes(requiredPermission)) return true
-
-  // Check wildcard permissions (e.g., 'tpv:*' matches 'tpv:create')
-  const [resource, action] = requiredPermission.split(':')
-  if (allPermissions.includes(`${resource}:*`)) return true
-  if (allPermissions.includes(`*:${action}`)) return true
-
-  return false
+  return permissionListGrants(getEffectiveRolePermissions(role, customPermissions, deniedPermissions), requiredPermission)
 }
 
 /**
@@ -1679,17 +1714,7 @@ export function hasPermission(
  * instead of extending them.
  */
 export function evaluatePermissionList(effectivePermissions: string[], requiredPermission: string): boolean {
-  const resolvedSet = resolvePermissions(effectivePermissions)
-  const allPermissions = Array.from(resolvedSet)
-
-  if (allPermissions.includes('*:*')) return true
-  if (allPermissions.includes(requiredPermission)) return true
-
-  const [resource, action] = requiredPermission.split(':')
-  if (allPermissions.includes(`${resource}:*`)) return true
-  if (allPermissions.includes(`*:${action}`)) return true
-
-  return false
+  return permissionListGrants(resolvePermissions(effectivePermissions), requiredPermission)
 }
 
 /**
@@ -2112,6 +2137,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'venue-fiscal-profile': ['venue-fiscal-profile:manage'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
   'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request', 'delivery-channels:snooze'],
+  // Pedidos en línea (tienda del restaurante): ajustes y menú en línea (Pro, `ONLINE_ORDERING`).
+  'online-orders': ['online-orders:manage', 'online-orders:pause'],
 }
 
 /**

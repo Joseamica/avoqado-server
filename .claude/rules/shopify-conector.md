@@ -147,7 +147,7 @@ espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vi
 
 - **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
   que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
-  `catalog.service.ts:419`; `archivarPareja(…)`, `:1191`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `catalog.service.ts:419`; `archivarPareja(…)`, `:1200`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
   `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
 - **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
   buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final
@@ -457,5 +457,6 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   webhook y MCP `tests/unit/routes/shopify.*`, `tests/unit/controllers/dashboard/shopify.controller.test.ts` y
   `tests/unit/mcp-customer/shopify.tools.test.ts`.
 - **Verificar en GitHub:** sube TU commit a una rama `ci/<tema>` (carril del workspace); los deploys sólo corren en `main`. 🔴 NUNCA
-  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` publica en producción SIN importar la rama
-  (`ci-cd.yml:286`).
+  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` es el botón de publicar. Desde el 14-oct
+  sólo despliega si corre en `main` (antes publicaba main desde CUALQUIER rama); en otra rama gasta una corrida completa y no
+  verifica nada que el carril no verifique.

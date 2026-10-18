@@ -32,7 +32,10 @@ import {
 } from '../../services/master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
+import { registrarCambioDeIva } from '../../services/fiscal/encendidoIva.service'
 import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
+import { categoriaParaProductoSinCategoria } from '../../services/mobile/categoriaGeneral.service'
+import { logAction } from '../../services/dashboard/activity-log.service'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -97,6 +100,11 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId } = req.params
 
+    // "Se cobra el precio que vio el cliente": la hora del catálogo la sella el SERVIDOR ANTES de leer, para que un
+    // cambio de precio ocurrido durante la lectura nunca quede "antes" del catálogo que la tablet ya trae. Formato
+    // fijo (ISO UTC con milisegundos, 24 caracteres): iOS lo parsea con fracciones y ambas apps lo comparan como fecha.
+    const catalogAt = new Date().toISOString()
+
     const products = await prisma.product.findMany({
       where: {
         venueId,
@@ -109,7 +117,8 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
 
     const data = products.map(withAvailableQuantity)
 
-    return res.json({ success: true, data })
+    // `catalogAt` es aditivo y sólo vive en la raíz: `data` no cambia para las apps viejas.
+    return res.json({ success: true, data, catalogAt })
   } catch (error) {
     next(error)
   }
@@ -155,20 +164,6 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       return res.status(400).json({ success: false, message: NON_INVENTORIABLE_MESSAGE })
     }
 
-    // If no categoryId provided, use first category for this venue
-    let finalCategoryId = categoryId
-    if (!finalCategoryId) {
-      const firstCategory = await prisma.menuCategory.findFirst({
-        where: { venueId },
-        orderBy: { displayOrder: 'asc' },
-        select: { id: true },
-      })
-      if (!firstCategory) {
-        return res.status(400).json({ success: false, message: 'No hay categorías. Crea una categoría primero.' })
-      }
-      finalCategoryId = firstCategory.id
-    }
-
     // Generate SKU if not provided
     const finalSku = sku || `SKU-${Date.now().toString(36).toUpperCase()}`
 
@@ -177,6 +172,7 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       typeof unit === 'string' && (Object.values(Unit) as string[]).includes(unit.trim()) ? (unit.trim() as Unit) : undefined
 
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
+    let categoriaCreada: string | null = null
     const product = await prisma.$transaction(async tx => {
       // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco del negocio.
       if ([ivaTratamiento, taxRate].some(v => v !== undefined && v !== null)) await bloquearParaCambiarIva(tx, { venueId })
@@ -186,6 +182,10 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         willBeVendable: true,
         actor,
       })
+      // Sin categoría: la primera del negocio, o «General» si todavía no tiene ninguna (cuenta nueva).
+      const categoria = categoryId ? { id: categoryId as string, creada: false } : await categoriaParaProductoSinCategoria(tx, venueId)
+      const finalCategoryId = categoria.id
+      if (categoria.creada) categoriaCreada = categoria.id
       await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId: finalCategoryId })
       // IVA por producto: sólo se escribe `ivaTratamiento` (el trigger deriva taxRate/objetoImp).
       // `actual = null` porque el producto todavía no existe.
@@ -227,6 +227,16 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
         throw e
       }
       await ensureQuantityInventoryRow(tx, created)
+      // Plan 6b (H14): el móvil nunca enciende (D2), pero su alta con otro IVA deja rastro en la misma transacción.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId: created.id,
+        producto: created.name,
+        antes: null,
+        despues: created.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'MOVIL',
+      })
       // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
       if (!created.inventory && created.trackInventory && created.inventoryMethod === 'QUANTITY') {
         created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
@@ -237,9 +247,25 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       return created
     })
 
-    return res.status(201).json({ success: true, data: withAvailableQuantity(product) })
+    if (categoriaCreada) {
+      void logAction({
+        staffId: req.authContext?.userId,
+        venueId,
+        action: 'MENU_CATEGORY_CREATED',
+        entity: 'MenuCategory',
+        entityId: categoriaCreada,
+        data: { name: 'General', automatica: true, motivo: 'primer producto sin categoría', productId: product.id },
+      })
+    }
+
+    // Las apps de iPhone publicadas leen esta respuesta como producto plano (Artículos) o como `{ message, data }` (caja);
+    // con sólo `{ success, data }` pintaban «error» sobre un alta que SÍ se guardó y el cliente la repetía. Se mandan las
+    // tres formas (sólo se agregan campos: Android y las apps viejas siguen leyendo `data`).
+    const creado = withAvailableQuantity(product)
+    return res.status(201).json({ ...creado, success: true, message: 'Producto creado', data: creado })
   } catch (error) {
-    logger.error('Error creating product (mobile)', {
+    const esDelCliente = error instanceof AppError && error.statusCode < 500
+    logger[esDelCliente ? 'warn' : 'error']('Error creating product (mobile)', {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params.venueId,
     })
@@ -373,6 +399,16 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
         traducirErrorDeIva(e)
         throw e
       }
+      // Plan 6b (H14, §5.7): antes → después, autor y origen, en la MISMA transacción del cambio.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId,
+        producto: updated.name,
+        antes: actual.ivaTratamiento,
+        despues: updated.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'MOVIL',
+      })
       // Con el estado FINAL (el tipo puede no venir en el cuerpo): revierte toda la escritura.
       if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
       // P1-2 (Shopify): pasar a kilo o «por peso», a receta o sin control de existencias suspende la pareja; volver a pieza

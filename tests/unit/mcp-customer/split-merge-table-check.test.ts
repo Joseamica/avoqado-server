@@ -199,3 +199,44 @@ describe('merge_table_check', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 })
+
+// 🔴 R14-1 (founder, 17-oct): una cuenta con vales de mostrador no se separa ni se junta. Las tools llegan al guarda por el servicio
+// compartido (su descripción y el catálogo certificado NO cambian); el aviso escrito para el operador llega tal cual al agente.
+describe('🔴 R14-1: separar o juntar una cuenta con vales de mostrador', () => {
+  const rechazoDeVales = () => {
+    const { rechazarSiLaCuentaTieneVales } = jest.requireActual('@/services/shared/cuentaConVales')
+    try {
+      rechazarSiLaCuentaTieneVales({ areaTicketCheckoutSession: { id: 'sesion-vales' } })
+    } catch (error) {
+      return error
+    }
+    throw new Error('el guarda no rechazó la cuenta con vales')
+  }
+  const MENSAJE =
+    'Esta cuenta tiene vales de mostrador: no se puede separar ni juntar. Para pagar entre varios, registra abonos en la misma cuenta.'
+  const splitOrderItems = () => jest.requireMock('@/services/mobile/order.mobile.service').splitOrderItems as jest.Mock
+
+  it.each([
+    ['split_table_check', { venueId: 'v1', number: '8', itemIds: ['i1'] }, () => splitOrderItems()],
+    ['split_table_check_by_seat', { venueId: 'v1', number: '8' }, () => mockSplitOrderBySeat],
+  ] as const)('🔴 %s ⇒ ok:false con el aviso, sin auditar', async (tool, args, servicio) => {
+    mockTableFindFirst.mockResolvedValueOnce({ id: 't1', currentOrderId: 'ord-1' })
+    servicio().mockRejectedValueOnce(rechazoDeVales())
+
+    const out = parse(await call(tool, args))
+
+    expect(out).toEqual({ ok: false, error: MENSAJE })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
+  it('🔴 merge_table_check ⇒ ok:false con el aviso y su código, sin auditar', async () => {
+    mockTableFindFirst.mockResolvedValueOnce({ id: 't-target', currentOrderId: 'ord-target' })
+    mockTableFindFirst.mockResolvedValueOnce({ id: 't-source', currentOrderId: 'ord-source' })
+    mockMergeOrders.mockRejectedValueOnce(rechazoDeVales())
+
+    const out = parse(await call('merge_table_check', { venueId: 'v1', targetNumber: '12', sourceNumber: '8' }))
+
+    expect(out).toEqual({ ok: false, error: MENSAJE, code: 'AREA_TICKET_ORDER_NOT_SPLITTABLE' })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+})

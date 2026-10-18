@@ -7,6 +7,7 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
 import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { exigirIvaApagadoTx } from './exclusionIva'
 
 interface OrderItemPayload {
   venueId: string
@@ -52,6 +53,7 @@ async function applyPosOrderItemEvent({ venueId, parentOrderExternalId, itemData
 
   const result = await prisma.$transaction(
     async tx => {
+      await exigirIvaApagadoTx(tx, venueId) // Plan 6b: la PRIMERA sentencia (D10: admisión → organización → negocio → orden)
       const candidate = await tx.order.findUnique({ where: { venueId_externalId: parentKey }, select: { id: true } })
       if (!candidate) throw parentNotFound()
 

@@ -152,12 +152,15 @@ export async function activateTerminal(serialNumber: string, activationCode: str
     // IMPORTANT: Reactivate terminal if status is INACTIVE (but NOT RETIRED)
     // This handles the case where terminal went offline temporarily
     // 🚨 SECURITY: Never auto-reactivate RETIRED terminals
-    if (terminal.status === 'INACTIVE' || terminal.status === 'MAINTENANCE') {
-      await prisma.terminal.update({
-        where: { id: terminal.id },
+    // 🚨 SECURITY: Nor MAINTENANCE — this path is public and asks for no code (only the printed serial); leaving
+    // maintenance is the owner's EXIT_MAINTENANCE command, the same rule the heartbeat follows (tpv-health.service).
+    if (terminal.status === 'INACTIVE') {
+      // Guarded write: if the owner saved MAINTENANCE after our read, that wins (Codex r1 P2).
+      const { count } = await prisma.terminal.updateMany({
+        where: { id: terminal.id, status: 'INACTIVE' },
         data: { status: 'ACTIVE' },
       })
-      logger.info(`Terminal ${serialNumber} status updated from ${terminal.status} to ACTIVE`)
+      if (count === 1) logger.info(`Terminal ${serialNumber} status updated from ${terminal.status} to ACTIVE`)
     }
 
     return {

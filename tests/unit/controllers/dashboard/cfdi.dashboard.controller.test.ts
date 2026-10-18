@@ -543,6 +543,14 @@ describe('issueCfdiForOrderController', () => {
       expect(res.json.mock.calls[0][0]).toMatchObject({ devoluciones: 'DESCONTADAS' })
       expect(res.json.mock.calls[0][0]).not.toHaveProperty('notasDeDevolucion')
     })
+    it('🔴 C3: la factura de un ticket que salió de la global ⇒ 201 con `conExtraccion: true` (aditivo; el aviso lo dice)', async () => {
+      mockIssue.mockResolvedValue({ status: 'STAMPED', cfdi: emitida({ extraccion: { cfdiId: 'nc-56' } }) })
+      const res = mockRes()
+      await issueCfdiForOrderController(mockReq(), res)
+      expect(res.status).toHaveBeenCalledWith(201)
+      expect(res.json.mock.calls[0][0]).toMatchObject({ conExtraccion: true })
+      expect(res.json.mock.calls[0][0]).not.toHaveProperty('devoluciones')
+    })
     it('control — sin devoluciones, el 201 de hoy (sin campos nuevos)', async () => {
       mockIssue.mockResolvedValue({ status: 'STAMPED', cfdi: emitida() })
       const res = mockRes()

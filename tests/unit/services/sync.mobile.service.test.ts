@@ -563,6 +563,59 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
+  // D5 (mesas40, 14-oct): ni la nota larga ni el efectivo gigante son motivo de cuarentena. La cola reproduce algo que
+  // YA ocurrió: la nota pasa entera (el server no la recorta, D5 v5) y el importe se conserva exacto.
+  it('D5: ADD_ITEMS con una nota de 10,038 caracteres ⇒ ACKED (el reducer la pasa; nunca la rechaza)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 4, total: 50 })
+    const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'nota-larga',
+          seq: 1,
+          type: 'ADD_ITEMS',
+          payload: { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1, notes: notaLarga }] },
+        },
+      ]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-1' } })
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-1',
+      [expect.objectContaining({ productId: 'p1', notes: notaLarga })],
+      3,
+      true,
+      expect.any(Function),
+    )
+  })
+
+  it('D5: PAY_CASH gigante ⇒ ACKED con el importe EXACTO (ni se recorta ni se rechaza)', async () => {
+    const GIGANTE = 999_999_999_999
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-gigante',
+      orderNumber: 'A-9',
+      digitalReceipt: null,
+      amount: 9000,
+      tipAmount: 0,
+      changeCents: GIGANTE - 9000,
+      method: 'CASH',
+    })
+
+    const acks = await processIntents(
+      baseParams([{ id: 'cash-gigante', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: GIGANTE } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: GIGANTE, idempotencyKey: 'cash-gigante', isOfflineReplay: true }),
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-gigante', amount: 9000, changeCents: GIGANTE - 9000 } })
+  })
+
   it('PAY_CASH zero on an outstanding balance stays REJECTED with the payCashOrder reason', async () => {
     const message = 'Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.'
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new BadRequestError(message))
@@ -939,6 +992,37 @@ describe('sync.mobile.service processIntents', () => {
     },
   )
 
+  // 🔴 R14-1 (founder, 17-oct): una cuenta con vales de mostrador no se separa ni se junta. Sin red, el intent que choca con ese
+  // guarda es un rechazo de negocio PERMANENTE (cuarentena visible con el aviso), nunca RETRY: reintentarlo no lo arreglaría jamás
+  // y cortaría el FIFO del aparato.
+  it.each([
+    ['SPLIT_ORDER', () => orderMobileService.splitOrderItems, { orderId: 'order-12', itemRefs: [{ id: 'item-1' }] }],
+    ['SPLIT_BY_SEAT', () => orderMobileService.splitOrderBySeat, { orderId: 'order-12' }],
+    ['MERGE_ORDERS', () => orderMobileService.mergeOrders, { orderId: 'order-12', sourceOrderId: 'order-13' }],
+  ] as const)(
+    '🔴 R14-1: %s sobre una cuenta con vales → REJECTED AREA_TICKET_ORDER_NOT_SPLITTABLE con el aviso (no RETRY)',
+    async (type, escritor, payload) => {
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, status: 'PENDING', tableId: 't1', servedById: STAFF })
+      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-1' }])
+      const { rechazarSiLaCuentaTieneVales, MENSAJE_CUENTA_CON_VALES } = jest.requireActual('@/services/shared/cuentaConVales')
+      let rechazo: unknown
+      try {
+        rechazarSiLaCuentaTieneVales({ areaTicketCheckoutSession: { id: 'sesion-vales' } })
+      } catch (e) {
+        rechazo = e
+      }
+      expect(rechazo).toBeDefined()
+      ;(escritor() as jest.Mock).mockRejectedValueOnce(rechazo)
+      const acks = await processIntents(baseParams([{ id: `i-r14-${type}`, type, payload }]))
+      expect(acks[0]).toEqual({
+        id: `i-r14-${type}`,
+        status: 'REJECTED',
+        errorCode: 'AREA_TICKET_ORDER_NOT_SPLITTABLE',
+        message: MENSAJE_CUENTA_CON_VALES,
+      })
+    },
+  )
+
   it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
     const acks = await processIntents(
@@ -950,6 +1034,40 @@ describe('sync.mobile.service processIntents', () => {
     expect(orderMobileService.updateOrderDetails).toHaveBeenCalled()
     expect(orderMobileService.cancelOrder).toHaveBeenCalledWith(VENUE, 'order-12', 'Cliente se fue', STAFF, expect.any(Function))
     expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED'])
+  })
+
+  // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): el intent offline usa el MISMO servicio que la ruta online, y
+  // le pasa si quien lo encoló tiene `payments:create` (el `authorizeIntent` del lote): en una venta COBRADA, cambiar el cliente
+  // sin él ⇒ el servicio lo rechaza (403 ⇒ REJECTED, cuarentena visible). Sincronizar no es puerta trasera.
+  it.each([
+    ['sin payments:create', false],
+    ['con payments:create', true],
+  ])('🔴 UPDATE_DETAILS con customerId pasa el permiso de cobrar de quien lo encoló (%s)', async (_n, puede) => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const params = baseParams([
+      { id: 'i-r42', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K' } },
+    ])
+    params.authorizeIntent.mockImplementation((_i: any, permiso: string) => (permiso === 'payments:create' ? puede : true))
+    await processIntents(params)
+    expect(orderMobileService.updateOrderDetails).toHaveBeenCalledWith(
+      VENUE,
+      'order-12',
+      expect.objectContaining({ customerId: 'cust-K' }),
+      { puedeCambiarClienteEnVentaCobrada: puede },
+    )
+  })
+
+  it('🔴 UPDATE_DETAILS: el 403 del servicio (venta cobrada, sin permiso) queda REJECTED con su mensaje, no se reintenta', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const prohibido = Object.assign(new Error('Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.'), {
+      statusCode: 403,
+      code: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE',
+    })
+    ;(orderMobileService.updateOrderDetails as jest.Mock).mockRejectedValueOnce(prohibido)
+    const acks = await processIntents(
+      baseParams([{ id: 'i-r42b', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE' })
   })
 
   // ─── SPLIT_ORDER / MERGE_ORDERS (Fase 3, split offline) ───────────────────

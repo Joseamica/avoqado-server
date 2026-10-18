@@ -93,6 +93,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
+import { soloElDuenoBorraDeFabrica } from '../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
 import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
@@ -353,6 +354,7 @@ import {
   financialProviderRoutes,
 } from './dashboard/financialConnection.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
+import onlineOrderingDashboardRoutes from './dashboard/onlineOrdering.dashboard.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import activityLogRoutes from './dashboard/activityLog.routes'
 import reportsRoutes from './dashboard/reports.routes'
@@ -4538,6 +4540,7 @@ router.use('/', authenticateTokenMiddleware, financialProviderRoutes)
 
 // Payment Link Management routes (ADMIN+)
 router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)
+router.use('/venues/:venueId/online-ordering', authenticateTokenMiddleware, onlineOrderingDashboardRoutes)
 
 // Venue Crypto Config routes (OWNER+) - Per-venue B4Bit device management
 router.post(
@@ -5507,11 +5510,14 @@ router.get(
  *       404:
  *         description: Terminal not found or offline
  */
+// 🔴 `tpv:command` abre los comandos del piso (bloquear, reiniciar…); borrar de fábrica exige además
+// `tpv-factory-reset:execute` (dueño). Fijado en tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts.
 router.post(
   '/tpv/:terminalId/command',
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5614,6 +5620,7 @@ router.post(
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5685,6 +5692,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:write'),
   validateRequest(sendCommandSchema),
+  // El `confirmationPin` que exige el esquema para FACTORY_RESET no se valida contra nada: el candado es este permiso.
+  soloElDuenoBorraDeFabrica(req => req.body?.commandType),
   tpvCommandController.sendCommand,
 )
 
@@ -7563,6 +7572,32 @@ router.post(
   checkPermission('menu:create'),
   validateRequest(CreateProductSchema),
   productController.createProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/iva-por-producto:
+ *   get:
+ *     tags: [Products]
+ *     summary: Estado del IVA por producto del negocio
+ *     description: "Informativo y sin revisión (`revisado: false`). Encendido o apagado, contabilidad y los avisos de aparatos viejos. Los bloqueos del encendido se toman del 409 al guardar el producto."
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: "{ data: { encendido, habilitadoAt, contabilidad, bloqueos, avisos, facturasSinSello, revisado } }"
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/iva-por-producto',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(VenueIdParamsSchema),
+  productController.getIvaPorProductoHandler,
 )
 
 /**

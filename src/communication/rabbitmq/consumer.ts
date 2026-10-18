@@ -2,6 +2,8 @@ import { ConsumeMessage } from 'amqplib'
 import { getRabbitMQChannel, POS_EVENTS_EXCHANGE, AVOQADO_EVENTS_QUEUE } from './connection'
 import { dispatchPosEvent } from './dispacher'
 import logger from '../../config/logger'
+import { IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION } from '../../services/fiscal/exclusionContable'
+import { IVA_ADMISION_OCUPADA } from '../../services/pos-sync/exclusionIva'
 
 // Deduplication cache: messageId -> timestamp with TTL (time to live)
 interface MessageCache {
@@ -19,7 +21,14 @@ const TRANSIENT_REQUEUE_DELAY_MS = 1000
 const isTransientShiftConflict = (error: unknown): boolean => {
   if (!error || typeof error !== 'object' || !('code' in error)) return false
   const code = (error as { code?: unknown }).code
-  return code === 'SHIFT_CLOSE_IN_PROGRESS' || code === 'SHIFT_CONCURRENT_UPDATE'
+  // Plan 6b (revisión final, I-1): un encendido del IVA en curso en la organización, o el negocio que cambió de organización a media
+  // escritura, se resuelven solos: reencolar, nunca la cola muerta.
+  return (
+    code === 'SHIFT_CLOSE_IN_PROGRESS' ||
+    code === 'SHIFT_CONCURRENT_UPDATE' ||
+    code === IVA_ADMISION_OCUPADA ||
+    code === IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION
+  )
 }
 
 const waitBeforeRequeue = () => new Promise<void>(resolve => setTimeout(resolve, TRANSIENT_REQUEUE_DELAY_MS))

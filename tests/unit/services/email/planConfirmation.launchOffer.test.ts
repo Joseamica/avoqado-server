@@ -94,3 +94,29 @@ describe('sendPlanConfirmationEmail — montos de la campaña', () => {
     expect(cuerpo).toMatch(/Próxima renovación[^<\n]*1,158\.84/)
   })
 })
+
+// Founder (16-oct): al terminar el onboarding éste es el único correo que llega; también dice dónde bajar la app.
+describe('sendPlanConfirmationEmail — dónde descargar la app', () => {
+  const TIENDAS = [
+    'https://apps.apple.com/mx/app/avoqado/id6758351745',
+    'https://play.google.com/store/apps/details?id=com.avoqado.pos',
+    'https://apps.microsoft.com/detail/9PCZG05M3PVC',
+  ]
+
+  it.each([
+    ['es', true, 'Descarga y empieza a usar tu punto de venta'],
+    ['es', false, 'Descarga y empieza a usar tu punto de venta'],
+    ['en', true, 'Download and start using your point of sale'],
+    ['en', false, 'Download and start using your point of sale'],
+  ] as const)('locale %s, payNow %s: trae las tres tiendas en el HTML y en el texto', async (locale, payNow, titulo) => {
+    await emailService.sendPlanConfirmationEmail('a@x.com', { ...base, locale, payNow, firstChargeAmountCents: 115884 })
+    const { html, text } = spy.mock.calls[0][0]
+    expect(html).toContain(titulo)
+    expect(text).toContain(titulo)
+    for (const url of TIENDAS) {
+      expect(html).toContain(`href="${url}"`)
+      expect(text).toContain(url)
+    }
+    expect(html).toContain('src="https://avoqado.io/badges/microsoft-store-es.png"')
+  })
+})

@@ -190,6 +190,8 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       },
       ...(devoluciones?.modo ? { devoluciones: devoluciones.modo } : {}),
       ...(result.notasDeDevolucion ? { notasDeDevolucion: result.notasDeDevolucion } : {}),
+      // C3: el ticket iba en la factura global y salió de ella con su nota de extracción (aditivo: el aviso del dashboard lo dice).
+      ...(result.cfdi.entrada?.extraccion?.cfdiId ? { conExtraccion: true } : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)

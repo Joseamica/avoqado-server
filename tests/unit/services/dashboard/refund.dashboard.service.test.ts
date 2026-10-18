@@ -165,7 +165,7 @@ describe('refund.dashboard.service', () => {
         items: [{ orderItemId: 'oi-1', quantity: 2 }],
         reason: 'RETURNED_GOODS',
       }),
-    ).rejects.toThrow(/exceeds remaining refundable quantity/i)
+    ).rejects.toThrow(/No se pueden devolver \d+ de este artículo.*sólo quedan \d+ de \d+ por devolver/)
 
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
@@ -592,7 +592,7 @@ describe('refund.dashboard.service', () => {
           { id: 'refund-prev', amount: -100, tipAmount: 0, createdAt: new Date(), status: 'COMPLETED', processorData: {} },
         ])
 
-      await expect(reembolsar({ amount: 10000 })).rejects.toThrow(/exceeds remaining refundable/i)
+      await expect(reembolsar({ amount: 10000 })).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
       expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
     })
 
@@ -1130,7 +1130,7 @@ describe('refund.dashboard.service', () => {
           items: [{ orderItemId: 'oi-1', quantity: 1 }],
           reason: 'RETURNED_GOODS',
         }),
-      ).rejects.toThrow(/remaining refundable sale amount/i)
+      ).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ de venta por devolver/)
 
       expect(prismaMock.payment.create).not.toHaveBeenCalled()
       expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
@@ -1714,7 +1714,7 @@ describe('refund.dashboard.service', () => {
       ])
     })
 
-    it('🔴 E4 · la cortesía bruta de la TPV sola regresa $0 ⇒ el 400 de siempre «must be greater than zero», sin escribir nada', async () => {
+    it('🔴 E4 · la cortesía bruta de la TPV sola regresa $0 ⇒ el 400 de siempre «mayor que cero», sin escribir nada', async () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([cobro(150)]).mockResolvedValueOnce([])
       venta(
         [
@@ -1724,7 +1724,7 @@ describe('refund.dashboard.service', () => {
         100,
       )
 
-      await expect(reembolsar([{ orderItemId: 'regalo' }])).rejects.toThrow('Refund amount must be greater than zero')
+      await expect(reembolsar([{ orderItemId: 'regalo' }])).rejects.toThrow('El monto a devolver debe ser mayor que cero.')
       expect(prismaMock.payment.create).not.toHaveBeenCalled()
     })
 
@@ -1886,7 +1886,7 @@ describe('refund.dashboard.service', () => {
         { amount: 10, reparto: espejo({ A: 1000 }) },
       ])
 
-      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow('Refund (90.00) exceeds remaining refundable (40.00)')
+      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow('No se puede devolver $90.00: de este cobro sólo quedan $40.00 por devolver.')
       expect(prismaMock.payment.create).not.toHaveBeenCalled()
     })
   })

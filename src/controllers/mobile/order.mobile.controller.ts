@@ -14,6 +14,7 @@ import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 
 /**
  * List orders for a venue (paginated)
@@ -76,6 +77,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       stampRewardId,
       stampRewardAware,
       stampRewardExpectedDiscount,
+      isOfflineReplay,
+      createdAtLocal,
     } = req.body
 
     // Validate required fields
@@ -224,6 +227,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
         typeof stampRewardExpectedDiscount === 'number' && Number.isFinite(stampRewardExpectedDiscount)
           ? stampRewardExpectedDiscount
           : null,
+      // «Se cobra el precio que vio el cliente»: la cola sin red («la venta ya ocurrió») nunca recibe el 409 de precio
+      // cambiado. Sólo el `true` literal cuenta. La hora de captura la interpreta el servicio; los campos de línea, también.
+      isOfflineReplay: isOfflineReplay === true,
+      createdAtLocal: typeof createdAtLocal === 'number' || typeof createdAtLocal === 'string' ? createdAtLocal : null,
     })
 
     res.status(201).json({
@@ -619,8 +626,14 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     const { name, notes, covers, customerId, orderType } = req.body || {}
 
     const operation = parseHttpOperation(req.body)
+    // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
+    // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae un `customerId` (null = sin cambio).
+    const opciones =
+      customerId !== undefined && customerId !== null
+        ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) }
+        : {}
     if (!operation) {
-      const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType })
+      const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType }, opciones)
       return res.json({ success: true, data: result })
     }
     const actorId = (req as any).authContext?.userId as string | undefined
@@ -634,7 +647,7 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
     const reply = await executeHttpOperation({ venueId, actorId, operation, manifest }, async tx => {
-      const r = await orderMobileService.updateOrderDetailsInTransaction(tx, venueId, orderId, manifest.payload)
+      const r = await orderMobileService.updateOrderDetailsInTransaction(tx, venueId, orderId, manifest.payload, opciones)
       return {
         response: { status: 200, body: { success: true, data: r.data } },
         affectedRefs: [
@@ -647,6 +660,22 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
+  }
+}
+
+/**
+ * ¿Quien edita el detalle de la cuenta tiene `payments:create`? Con el resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`:
+ * el de `checkPermission`, con personalizaciones del negocio y conjuntos de permisos). Falla CERRADO: si no se puede resolver,
+ * no se cambia el cliente de una venta cobrada (403) y queda en el log.
+ */
+async function puedeCambiarClienteEnVentaCobrada(req: Request): Promise<boolean> {
+  try {
+    return await tienePermisoEnVenue(req, 'payments:create')
+  } catch (error) {
+    logger.warn('[ORDER.MOBILE] No se pudo resolver payments:create para cambiar el cliente: se trata como sin permiso', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
   }
 }
 

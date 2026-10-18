@@ -488,7 +488,7 @@ export async function writeRefundInTx(
   }
   const refundCents = input.salesRefundCents + input.tipRefundCents
   if (refundCents <= 0) {
-    throw new BadRequestError('Refund amount must be greater than zero')
+    throw new BadRequestError('El monto a devolver debe ser mayor que cero.')
   }
 
   let cobro = input.bloqueado
@@ -512,7 +512,7 @@ export async function writeRefundInTx(
   }
   if (refundCents > remainingBeforeCents) {
     throw new BadRequestError(
-      `Refund (${centsToNumber(refundCents).toFixed(2)}) exceeds remaining refundable (${centsToNumber(remainingBeforeCents).toFixed(2)})`,
+      `No se puede devolver $${centsToNumber(refundCents).toFixed(2)}: de este cobro sólo quedan $${centsToNumber(remainingBeforeCents).toFixed(2)} por devolver.`,
     )
   }
   const provenance = input.provenance ?? 'MANUAL'
@@ -876,8 +876,9 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
                 `Este artículo${nombre} ya se devolvió en otro cobro de la misma cuenta; quedan ${quedan} de ${orderItem.quantity} por devolver.`,
               )
             }
+            const nombre = orderItem.productName ? ` («${orderItem.productName}»)` : ''
             throw new BadRequestError(
-              `Refund quantity ${refundQty} for item ${orderItem.id} exceeds remaining refundable quantity (${orderItem.quantity - alreadyRefundedQty})`,
+              `No se pueden devolver ${refundQty} de este artículo${nombre}: sólo quedan ${orderItem.quantity - alreadyRefundedQty} de ${orderItem.quantity} por devolver.`,
             )
           }
 
@@ -924,11 +925,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       }
 
       if (refundCents <= 0) {
-        throw new BadRequestError('Refund amount must be greater than zero')
+        throw new BadRequestError('El monto a devolver debe ser mayor que cero.')
       }
       if (refundCents > remainingBeforeCents) {
         throw new BadRequestError(
-          `Refund (${centsToNumber(refundCents).toFixed(2)}) exceeds remaining refundable (${centsToNumber(remainingBeforeCents).toFixed(2)})`,
+          `No se puede devolver $${centsToNumber(refundCents).toFixed(2)}: de este cobro sólo quedan $${centsToNumber(remainingBeforeCents).toFixed(2)} por devolver.`,
         )
       }
 
@@ -953,7 +954,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
           const remainingSalesCents = Math.max(0, originalAmountCents - refundedSalesCents)
           if (salesRefundCents > remainingSalesCents) {
             throw new BadRequestError(
-              `Item refund sale portion (${salesRefundCents}) exceeds remaining refundable sale amount (${remainingSalesCents})`,
+              `No se puede devolver $${centsToNumber(salesRefundCents).toFixed(2)} de venta: de este cobro sólo quedan $${centsToNumber(remainingSalesCents).toFixed(2)} de venta por devolver.`,
             )
           }
         }

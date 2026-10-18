@@ -84,6 +84,10 @@ const INVENTARIO: Record<string, Clase> = {
 const ESCRITORES_CON_ESTADO_VARIABLE: Record<string, string[]> = {
   // El PUT del dashboard escribe `status` del cuerpo: a CANCELLED/DELETED va por la cancelación protegida.
   'services/dashboard/order.dashboard.service.ts#updateOrder': PROTEGIDA_POR_EL_GUARD,
+  // Pedidos en línea (plan 1a, R1/R2/R22): rechazar, vencer y cancelar el comensal escriben el estado de la regla de la
+  // transición bajo el candado de la orden, sin dinero y sin cobro de terminal vivo. Cancelar por personal usa
+  // `cancelOrderInTransaction` (PROTEGIDA arriba); las cancelaciones de otras vías se sincronizan al leer.
+  'services/online-ordering/transitions.service.ts#casTransition': ['lockExistingOrderForPayment', 'findLiveTerminalCharge'],
 }
 
 describe('Inventario de escritores que cancelan una orden (§C.6)', () => {

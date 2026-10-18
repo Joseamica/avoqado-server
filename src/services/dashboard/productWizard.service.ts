@@ -15,6 +15,7 @@ import {
 } from '../master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { registrarCambioDeIva } from '../fiscal/encendidoIva.service'
 import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
 
 /**
@@ -155,6 +156,16 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
             inventoryConfigured: false,
           },
         },
+      })
+      // Plan 6b (H14): con la tupla vieja del asistente (D18 lo cubre el normalizador del alta), un alta con otro IVA deja rastro.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId: created.id,
+        producto: created.name,
+        antes: null,
+        despues: created.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'DASHBOARD',
       })
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })

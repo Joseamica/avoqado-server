@@ -32,7 +32,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import { tpvCommandExecutionService } from '../../services/tpv/command-execution.service'
-import { BadRequestError, NotFoundError } from '../../errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import {
   SendCommandBody,
@@ -50,6 +50,7 @@ import {
   RetryCommandBody,
 } from '../../schemas/dashboard/tpv-command.schema'
 import { TpvCommandType } from '@prisma/client'
+import { esBorradoDeFabrica, exigirPermisoDeBorradoDeFabrica } from '../../middlewares/soloElDuenoBorraDeFabrica.middleware'
 
 // ==========================================
 // COMMAND OPERATIONS
@@ -299,6 +300,9 @@ export async function cancelCommand(
   }
 }
 
+const MENSAJE_TERMINAL_TRASLADADA =
+  'La terminal ya no está en esta sucursal (o el comando cambió), así que no se reintenta. Si hace falta, mándalo de nuevo desde la sucursal donde está ahora.'
+
 /**
  * Retry a failed command
  * @permission tpv-command:retry
@@ -330,9 +334,19 @@ export async function retryCommand(
       throw new BadRequestError(`Command ${commandId} cannot be retried (status: ${command.status})`)
     }
 
-    // Reset command for retry
-    const updatedCommand = await prisma.tpvCommandQueue.update({
-      where: { id: commandId },
+    // 🔴 Re-armar un borrado de fábrica es VOLVER a mandarlo: exige el mismo permiso del dueño que mandarlo.
+    if (esBorradoDeFabrica(command.commandType)) await exigirPermisoDeBorradoDeFabrica(req, venueId)
+
+    // 🔴 La autorización de arriba es contra el venue DEL COMANDO; la entrega va a la terminal donde esté HOY. Si la
+    // terminal se trasladó a otro negocio, reintentar mandaría el comando (un borrado de fábrica incluido) a una
+    // terminal que ya no es de aquí (P1-2, Codex, 15-oct). Se revisa antes, y el re-armado lo vuelve a exigir en el
+    // mismo UPDATE, para que un traslado entre la revisión y la escritura tampoco pase.
+    const terminalHoy = await prisma.terminal.findUnique({ where: { id: command.terminalId }, select: { venueId: true } })
+    if (terminalHoy?.venueId !== venueId) throw new ConflictError(MENSAJE_TERMINAL_TRASLADADA, 'TERMINAL_MOVED')
+
+    // Reset command for retry — sólo si sigue fallido/vencido y su terminal sigue en este venue.
+    const rearmado = await prisma.tpvCommandQueue.updateMany({
+      where: { id: commandId, venueId, status: { in: ['FAILED', 'EXPIRED'] }, terminal: { venueId } },
       data: {
         status: 'PENDING',
         attempts: 0,
@@ -344,9 +358,13 @@ export async function retryCommand(
         resultMessage: null,
       },
     })
+    if (rearmado.count !== 1) throw new ConflictError(MENSAJE_TERMINAL_TRASLADADA, 'TERMINAL_MOVED')
 
-    // Attempt to send again
+    // Attempt to send again. La entrega vuelve a exigir que la terminal siga aquí (ronda 8): si se trasladó justo
+    // después del re-armado, no emite y deja el comando retirado; el reintento lo dice en vez de responder «en cola».
     await tpvCommandExecutionService.sendCommandToTerminal(commandId)
+    const updatedCommand = await prisma.tpvCommandQueue.findUnique({ where: { id: commandId } })
+    if (updatedCommand?.status === 'CANCELLED') throw new ConflictError(MENSAJE_TERMINAL_TRASLADADA, 'TERMINAL_MOVED')
 
     res.status(200).json({
       success: true,

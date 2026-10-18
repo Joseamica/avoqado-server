@@ -72,7 +72,10 @@ startApiServer(() => app)
 const makeToken = (role: string) => {
   mirrorTokenRoleOnStaffVenue(role, VENUE_ID)
   // El candado de organización exige membresía ACTIVA en la base (Codex ronda 3): la del token.
-  prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-miembro' } as any)
+  // Es miembro, NO dueña de la org: la pregunta «¿es OWNER de la org?» de checkPermission (P2-6) contesta null,
+  // como la base real con un StaffOrganization MEMBER. Un doble que contesta lo mismo a todo la volvía dueña.
+  prismaMock.staffOrganization.findFirst.mockImplementation((async (args: any) =>
+    args?.where?.role === 'OWNER' ? null : { id: 'so-miembro' }) as any)
   return jwt.sign(
     {
       sub: STAFF_ID,

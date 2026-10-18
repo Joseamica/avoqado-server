@@ -7,6 +7,8 @@ import logger from '../../config/logger'
 import { PosShiftPayload } from '../../types/pos.types'
 import { posSyncStaffService } from './posSyncStaff.service'
 import { aggregateShiftPayments, readShiftPaymentsForClose } from '../tpv/shift.tpv.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
+import { conIvaApagado, exigirIvaApagadoTx } from './exclusionIva'
 
 const UNICO_TURNO_EXTERNO: UnicoParcial = {
   indice: 'Shift_venueId_externalId_key',
@@ -92,7 +94,8 @@ export async function getOrCreatePosShift(shiftPayload: PosShiftPayload, venueId
 
   try {
     return await prisma.$transaction(async tx => {
-      // Orden global: advisory del venue → fila Shift. Nunca se crea desde un lookup previo al lock.
+      // Orden global: guardia del IVA (admisión → organización) → advisory del venue → fila Shift. Nunca se crea desde un lookup previo al lock.
+      await exigirIvaApagadoTx(tx, venueId)
       await lockShiftLifecycleForVenue(tx, venueId)
 
       const exact = await findExactShift(tx, venueId, externalId)
@@ -111,7 +114,7 @@ export async function getOrCreatePosShift(shiftPayload: PosShiftPayload, venueId
         },
       })
       return created.id
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error: unknown) {
     const isOpenCollision = esChoqueDelUnico(error, UNICO_TURNO_ABIERTO)
     const isExternalCollision = esChoqueDelUnico(error, UNICO_TURNO_EXTERNO)
@@ -193,6 +196,7 @@ async function preparePosShiftLifecycle(
 
   try {
     return await prisma.$transaction(async tx => {
+      await exigirIvaApagadoTx(tx, venueId) // Plan 6b: un cierre atrasado tras el encendido no reclama el turno (Review Focus 7)
       await lockShiftLifecycleForVenue(tx, venueId)
 
       const current = await findExactShift(tx, venueId, externalId)
@@ -279,7 +283,7 @@ async function preparePosShiftLifecycle(
         },
       })
       return { kind: 'done', shift: created }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error: unknown) {
     return recoverCreateCollision(error, venueId, externalId)
   }
@@ -296,6 +300,8 @@ async function finalizeClaimedPosShift(
   totalOrders: number,
 ): Promise<Shift> {
   return prisma.$transaction(async tx => {
+    // Plan 6b: si el negocio se encendió entre el reclamo y aquí, lanza; el `catch` del llamador libera el reclamo propio.
+    await exigirIvaApagadoTx(tx, venueId)
     await lockShiftLifecycleForVenue(tx, venueId)
 
     const finalized = await tx.shift.updateMany({
@@ -331,9 +337,13 @@ async function finalizeClaimedPosShift(
     const signed = await findExactShift(tx, venueId, externalId)
     if (!signed) throw shiftConcurrentUpdate(externalId)
     return signed
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
+/**
+ * Plan 6b (spec §5.4): la ÚNICA escritura del POS externo sin la guardia del IVA por producto. No aplica nada del POS: sólo deshace el
+ * reclamo PROPIO (`CLOSING` → `OPEN`), y tiene que poder correr cuando la guardia rechazó el cierre, o el turno quedaría en `CLOSING`.
+ */
 async function releaseClaimedPosShift(venueId: string, externalId: string, shiftId: string, claimedAt: Date): Promise<void> {
   try {
     await prisma.$transaction(async tx => {
@@ -383,7 +393,9 @@ export async function processPosShiftEvent(
   if (observedShift?.status === ShiftStatus.CLOSED) return observedShift
 
   const cajeroId = shiftData.staffId || shiftData.posRawData?.cajero || shiftData.cajero
-  const staffId = await posSyncStaffService.syncPosStaff({ externalId: cajeroId, name: null, pin: null }, venueId, venue.organizationId)
+  const staffId = await conIvaApagado(venueId, tx =>
+    posSyncStaffService.syncPosStaff({ externalId: cajeroId, name: null, pin: null }, venueId, venue.organizationId, tx),
+  )
   if (!staffId) throw new Error(`No se pudo sincronizar el cajero ${cajeroId}.`)
 
   const rawData = shiftData.posRawData || shiftData

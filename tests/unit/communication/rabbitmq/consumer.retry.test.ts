@@ -109,6 +109,30 @@ it('SHIFT_CONCURRENT_UPDATE uses the same bounded requeue path', async () => {
   expect(channel.ack).not.toHaveBeenCalled()
 })
 
+// Plan 6b (revisión final, I-1 paso 3): la espera vencida de la admisión del IVA (un encendido en curso en la organización) y el negocio
+// que cambió de organización a media escritura son transitorios: se reencolan, nunca van a la cola muerta.
+it.each(['IVA_ADMISION_OCUPADA', 'IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION'])('%s se reencola con demora como los SHIFT_*', async code => {
+  const msg = message()
+  ;(dispatchPosEvent as jest.Mock).mockRejectedValue(Object.assign(new Error('transitorio'), { code }))
+
+  const handling = handler(msg)
+  await jest.advanceTimersByTimeAsync(1000)
+  await handling
+
+  expect(channel.nack).toHaveBeenCalledWith(msg, false, true)
+  expect(channel.nack).not.toHaveBeenCalledWith(msg, false, false)
+  expect(channel.ack).not.toHaveBeenCalled()
+})
+
+it('cualquier otro 409 del IVA (p. ej. CONTABILIDAD_IVA_MIXTO) sigue a la cola muerta: sólo esos dos códigos son transitorios', async () => {
+  const msg = message()
+  ;(dispatchPosEvent as jest.Mock).mockRejectedValue(Object.assign(new Error('pausada'), { code: 'CONTABILIDAD_IVA_MIXTO' }))
+
+  await handler(msg)
+
+  expect(channel.nack).toHaveBeenCalledWith(msg, false, false)
+})
+
 it('si el canal capturado cerró durante el backoff, el nack tardío no deja un rejection ni cambia de canal', async () => {
   const msg = message()
   const transient = Object.assign(new Error('close in progress'), { code: 'SHIFT_CLOSE_IN_PROGRESS' })

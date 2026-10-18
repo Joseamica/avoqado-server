@@ -19,12 +19,15 @@ import * as customerService from '@/services/dashboard/customer.dashboard.servic
 export async function getCustomers(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const { venueId } = req.params
-    const { page, pageSize, search, customerGroupId, noGroup, tags, sortBy, sortOrder, hasPendingBalance } = req.query
+    const { page, pageSize, limit, search, customerGroupId, noGroup, tags, sortBy, sortOrder, hasPendingBalance } = req.query
+    // `limit` = alias de `pageSize` (Android/iOS mandan ?limit=50 desde siempre y se ignoraba: salían 20). `pageSize` gana.
+    // El tope de 100 lo pone el servicio. En la ruta del dashboard, `CustomersQuerySchema` no declara `limit` y lo quita.
+    const tamanoPedido = pageSize ?? limit
 
     const result = await customerService.getCustomers(
       venueId,
       page ? Number(page) : undefined,
-      pageSize ? Number(pageSize) : undefined,
+      tamanoPedido ? Number(tamanoPedido) : undefined,
       search as string | undefined,
       customerGroupId as string | undefined,
       noGroup as boolean | undefined,

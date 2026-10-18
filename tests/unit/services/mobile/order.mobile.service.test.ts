@@ -207,6 +207,27 @@ describe('order.mobile.service', () => {
     )
   })
 
+  // D5 v5 (mesas40, 15-oct): el server NO recorta `OrderItem.notes`. La nota es identidad de la línea en el carrito
+  // completo de la TPV y una fila recortada por un escritor deja de reconocerse ahí ($100 → $200, Codex r3). El tope vive
+  // donde nace la nota: la captura del aparato. Producto y monto libre la guardan entera, como en `a2e999c0f`.
+  it('D5 v5: una nota de 10,038 caracteres se guarda COMPLETA (producto y monto libre)', async () => {
+    mockBaseOrderCreate()
+    const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [
+        { productId: 'prod-class', quantity: 1, notes: notaLarga },
+        { name: 'Otro importe', quantity: 1, unitPrice: 2500, notes: notaLarga },
+      ],
+      source: 'AVOQADO_ANDROID',
+    })
+
+    const creados = (prismaMock.order.create as jest.Mock).mock.calls[0][0].data.items.create
+    expect(notaLarga).toHaveLength(10_038)
+    expect(creados.map((item: { notes: string | null }) => item.notes)).toEqual([notaLarga, notaLarga])
+  })
+
   // ── Per-item discountId (mirrors TPV's itemDiscountId — order.tpv.service.ts) ──
 
   it('applies a PERCENTAGE item discount: reduces the line + rolls into order subtotal/discountAmount/total', async () => {

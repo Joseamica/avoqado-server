@@ -10,6 +10,7 @@
 import { Prisma } from '@prisma/client'
 import cuid from 'cuid'
 import { IvaTratamiento } from './ivaTratamiento'
+import { utcTs } from '../../utils/sqlDates'
 
 export type Tx = Prisma.TransactionClient
 
@@ -39,9 +40,11 @@ export async function sellarRenglones(
       }
     }
 
+    // createdAt explícito en UTC: el DEFAULT de la columna toma la hora de pared de la sesión de Postgres (la base
+    // local corre en America/Mexico_City ⇒ 6 h atrás; D4 del full-testing integral del 15-oct).
     await tx.$executeRaw`
-      INSERT INTO "OrderItemSelloIva" ("id", "orderItemId", "cfdiId", "intento")
-      VALUES (${cuid()}, ${r.orderItemId}, ${p.cfdiId}, ${p.intento})
+      INSERT INTO "OrderItemSelloIva" ("id", "orderItemId", "cfdiId", "intento", "createdAt")
+      VALUES (${cuid()}, ${r.orderItemId}, ${p.cfdiId}, ${p.intento}, ${utcTs(new Date())})
       ON CONFLICT ("orderItemId", "cfdiId") DO NOTHING
     `
   }

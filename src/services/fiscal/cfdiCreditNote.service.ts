@@ -47,7 +47,7 @@ import {
 } from './cfdi.service'
 import { TOPES_POR_ORDEN } from './librosDeOrdenes'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
-import { bloquearOrdenParaFacturar, tomarAdmisionCompartida } from './admisionIva'
+import { bloquearOrdenParaFacturar } from './admisionIva'
 import { huellaDeEntrada, leerEntrada, leerMontosPorRenglon } from './entradaDocumental'
 import { conceptoDesdeElPayload, documentoSegunElPac, MOTIVO_OCHO_SIN_REGLA } from './reglaDelPac'
 import { netoRenglonCents } from './descuentoPorRenglon'
@@ -1966,9 +1966,8 @@ export async function emitRefundCreditNote(
   const reserved = await deps.runInTransaction(async tx => {
     const scope = await bloquearOrdenParaFacturar(tx, loaded.refund.orderId)
     if (!scope || scope.venueId !== params.venueId) throw new Error('Reembolso no encontrado')
-    await tomarAdmisionCompartida(tx, scope.organizationId)
     // C2 · Tarea 8 (Codex C2-3): la nota a una global toma la fila de la global `FOR UPDATE` DESPUÉS de los candados de la orden y de la
-    // admisión (el orden de la cancelación de la global: órdenes → admisión → su fila), y relee ahí lo que queda del ticket y del documento:
+    // admisión (el orden de la cancelación de la global: admisión → órdenes → su fila), y relee ahí lo que queda del ticket y del documento:
     // dos notas de tickets distintos de la misma global se serializan y la segunda ve la reserva de la primera.
     const globalId = loaded.original?.esGlobal ? loaded.original.id : null
     if (globalId) await tx.$queryRaw`SELECT id FROM "Cfdi" WHERE id = ${globalId} FOR UPDATE`
@@ -2125,7 +2124,6 @@ async function emitirLegacy(
   const reserved = await deps.runInTransaction(async tx => {
     const scope = await bloquearOrdenParaFacturar(tx, cfdi.orderId)
     if (!scope || scope.venueId !== params.venueId) throw new Error('Reembolso no encontrado')
-    await tomarAdmisionCompartida(tx, scope.organizationId)
     const loaded = await cargadorConLaEleccion(deps, params)(tx, cfdi.id)
     if (!loaded || loaded.refund.orderId !== cfdi.orderId) throw new Error('Reembolso no encontrado')
     const eligible = checkCreditNoteEligibility(loaded)

@@ -12,6 +12,7 @@
  * 3. **Cada sello lleva su autor.** Es lo que hace vendible esto frente al cartón:
  *    ahí el empleado sella de más a su amiga y nadie se entera.
  */
+import { Prisma } from '@prisma/client'
 import { grantStamp } from '../../../../src/services/wallet/stampLedger.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
@@ -38,6 +39,7 @@ describe('grantStamp', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     prismaMock.stampEvent.findFirst.mockResolvedValue(null)
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue(null)
     prismaMock.stampEvent.count.mockResolvedValue(0)
     prismaMock.stampCard.findFirst.mockResolvedValue(null)
     prismaMock.stampCard.create.mockResolvedValue({ id: 'sc1', cycle: 1, stampsRequired: 7, stampsEarned: 0 } as any)
@@ -86,8 +88,12 @@ describe('grantStamp', () => {
     // Dos cobros simultáneos pasan los dos el chequeo previo; la base rechaza el
     // segundo. Si eso se propaga como error, el cobro se ve fallido aunque el
     // dinero entró — que es peor que no sellar.
-    const p2002: any = new Error('Unique constraint failed')
-    p2002.code = 'P2002'
+    // La forma REAL de este índice parcial (crudo, sin nombre en el esquema): la lista de columnas, como en turnoDeCaja.ts.
+    const p2002 = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+      code: 'P2002',
+      clientVersion: 'test',
+      meta: { modelName: 'StampEvent', target: ['venueId', 'orderId'] },
+    })
     prismaMock.$transaction.mockRejectedValueOnce(p2002)
 
     const r = await grantStamp('v1', 'c1', 'o1')
@@ -221,5 +227,132 @@ describe('grantStamp', () => {
     // Es la señal que dispara el premio (Tarea 3). Sin ella el cliente junta los
     // siete sellos y no pasa nada.
     expect(r.completed).toBe(true)
+  })
+
+  // ── Auditoría A #3 (14-oct): carrera entre dos ventas DISTINTAS del mismo cliente ────────────────────────────
+  it('🔴 el candado (negocio, cliente) es la PRIMERA sentencia de la transacción; el tope y la cartilla van detrás', async () => {
+    mockConfig({ maxStampsPerDay: 1 })
+    const orden: string[] = []
+    prismaMock.$transaction.mockImplementationOnce((async (cb: any) => {
+      orden.push('BEGIN')
+      return cb(prismaMock)
+    }) as never)
+    prismaMock.$executeRaw
+      .mockImplementationOnce((async () => {
+        orden.push('candado')
+        return 0
+      }) as never)
+      .mockImplementationOnce((async () => {
+        orden.push('candado de la venta')
+        return 0
+      }) as never)
+    // F2: el atajo de AFUERA (antes de BEGIN) no cuenta; dentro del candado la primera lectura es el sello de ESTA orden.
+    prismaMock.stampEvent.findFirst.mockImplementation((async () => {
+      if (orden.includes('BEGIN')) orden.push('propio')
+      return null
+    }) as never)
+    // H4, tercera ola: y luego, si OTRO cliente ya recibió los puntos de esta venta.
+    prismaMock.loyaltyTransaction.findFirst.mockImplementation((async () => {
+      orden.push('puntos de otro')
+      return null
+    }) as never)
+    prismaMock.stampEvent.count.mockImplementationOnce((async () => {
+      orden.push('tope')
+      return 0
+    }) as never)
+    prismaMock.stampCard.findFirst.mockImplementationOnce((async () => {
+      orden.push('cartilla')
+      return { id: 'sc7', cycle: 1, stampsRequired: 7, stampsEarned: 2 }
+    }) as never)
+    prismaMock.stampEvent.create.mockImplementationOnce((async () => {
+      orden.push('sello')
+      return { id: 'se1' }
+    }) as never)
+    prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 3, stampsRequired: 7 } as any)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r.granted).toBe(true)
+    expect(orden).toEqual(['BEGIN', 'candado', 'candado de la venta', 'propio', 'puntos de otro', 'tope', 'cartilla', 'sello'])
+    const [plantilla, ...valores] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
+    expect(plantilla.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
+    expect(valores).toEqual(['v1', 'c1'])
+    // H4, tercera ola: el SEGUNDO candado es el de la VENTA, el mismo que toma la escritura de los puntos.
+    const [plantilla2, ...valores2] = prismaMock.$executeRaw.mock.calls[1] as unknown as [TemplateStringsArray, ...unknown[]]
+    expect(plantilla2.join('?')).toContain('pg_advisory_xact_lock(hashtext(?), hashtext(?))')
+    expect(valores2).toEqual(['v1', 'o1'])
+  })
+
+  it('cuarta ola: la transacción del sello lleva el MISMO presupuesto explícito que la de los puntos (también espera el candado de la venta)', async () => {
+    mockConfig()
+    await grantStamp('v1', 'c1', 'o1')
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { maxWait: 10_000, timeout: 15_000 })
+  })
+
+  it('🔴 H4 (tercera ola): OTRO cliente ya recibió los PUNTOS de esta venta ⇒ OTHER_CUSTOMER, sin sello', async () => {
+    mockConfig()
+    prismaMock.loyaltyTransaction.findFirst.mockResolvedValue({ customerId: 'ana' } as any)
+    const r = await grantStamp('v1', 'c1', 'o1')
+    expect(r).toEqual({ granted: false, reason: 'OTHER_CUSTOMER' })
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+    expect(prismaMock.loyaltyTransaction.findFirst).toHaveBeenCalledWith({
+      where: { orderId: 'o1', type: 'EARN', customerId: { not: 'c1' }, customer: { venueId: 'v1' } },
+      select: { customerId: true },
+    })
+  })
+
+  // ── F2 (S3b minor #2, rulings del código 15-oct): la MISMA orden dos veces a la vez ──────────────────────────────────────
+  it('🔴 F2: el sello de ESTA orden aparece DENTRO del candado (la otra llamada lo hizo mientras ésta esperaba): ALREADY_STAMPED, no un DAILY_LIMIT engañoso', async () => {
+    mockConfig({ maxStampsPerDay: 1 })
+    // Afuera no había sello (la otra aún no hacía commit); al entrar al candado, ya está. Y el tope del día ya está lleno
+    // por ESE mismo sello: sin la relectura, la respuesta diría «ya recibió su sello de hoy», que es falso para esta venta.
+    // Con un contador y no con «Once»: si la relectura faltara, un valor «Once» sobrante se colaría en la prueba siguiente.
+    let lecturas = 0
+    prismaMock.stampEvent.findFirst.mockImplementation((async () => (++lecturas === 1 ? null : { id: 'ya', stampCardId: 'sc9' })) as never)
+    prismaMock.stampEvent.count.mockResolvedValue(1)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r).toEqual({ granted: false, reason: 'ALREADY_STAMPED', stampCardId: 'sc9' })
+    expect(prismaMock.stampEvent.count).not.toHaveBeenCalled()
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+    expect(prismaMock.stampCard.create).not.toHaveBeenCalled()
+    // La relectura es DENTRO del candado y busca el EARN de esta orden en este negocio.
+    expect(prismaMock.stampEvent.findFirst).toHaveBeenNthCalledWith(2, {
+      where: { venueId: 'v1', orderId: 'o1', type: 'EARN' },
+      select: { id: true, stampCardId: true },
+    })
+  })
+
+  it('el tope alcanzado DENTRO del candado: DAILY_LIMIT_REACHED, sin sello ni cartilla nueva', async () => {
+    mockConfig({ maxStampsPerDay: 1 })
+    prismaMock.stampEvent.count.mockResolvedValue(1)
+    const r = await grantStamp('v1', 'c1', 'o2')
+    expect(r).toEqual({ granted: false, reason: 'DAILY_LIMIT_REACHED' })
+    expect(prismaMock.stampEvent.create).not.toHaveBeenCalled()
+    expect(prismaMock.stampCard.create).not.toHaveBeenCalled()
+  })
+
+  it('el P2002 del índice del sello, reportado por NOMBRE, también es ya sellado', async () => {
+    mockConfig()
+    prismaMock.$transaction.mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: 'StampEvent_venueId_orderId_earn_unique' },
+      }),
+    )
+    expect(await grantStamp('v1', 'c1', 'o1')).toEqual({ granted: false, reason: 'ALREADY_STAMPED' })
+  })
+
+  it.each<[string, Record<string, unknown> | undefined]>([
+    ['🔴 el premio (dos ventas completando la misma cartilla)', { modelName: 'StampReward', target: ['stampCardId'] }],
+    ['🔴 la cartilla siguiente', { modelName: 'StampCard', target: ['customerId', 'venueId', 'cycle'] }],
+    ['un P2002 sin descriptor (no se adivina)', undefined],
+  ])('un P2002 de OTRO único (%s) NO es «ya sellado»: se relanza y el reconciliador reintenta', async (_n, meta) => {
+    mockConfig()
+    const otro = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta })
+    prismaMock.$transaction.mockRejectedValueOnce(otro)
+    await expect(grantStamp('v1', 'c1', 'o1')).rejects.toBe(otro)
   })
 })

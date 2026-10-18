@@ -1,3 +1,4 @@
+import { documentRequestsJob } from './jobs/documentRequests.job'
 // src/server.ts - Main entry point for the application
 
 // Ensure environment variables are loaded and checked first.
@@ -40,6 +41,7 @@ import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconc
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
+import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -167,6 +169,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
+      onlineOrderAcceptanceExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
@@ -185,6 +188,7 @@ const gracefulShutdown = async (signal: string) => {
       shopifyReconcileJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
+      documentRequestsJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
 
@@ -505,6 +509,7 @@ const startApplication = async (retries = 3) => {
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
+      onlineOrderAcceptanceExpiryJob.start()
       terminalPaymentWatchdogJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
@@ -534,6 +539,7 @@ const startApplication = async (retries = 3) => {
       shopifyReconcileJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
+      documentRequestsJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.

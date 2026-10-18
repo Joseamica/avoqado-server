@@ -12,6 +12,7 @@
 import express from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { checkOwnerAccess } from '../middlewares/checkOwnerAccess.middleware'
+import { soloElDuenoDeLaOrgCambia } from '../middlewares/soloElDuenoDeLaOrgCambiaAjustesDeLaOrg.middleware'
 import * as organizationController from '../controllers/organization/organization.controller'
 
 const router = express.Router()
@@ -54,8 +55,10 @@ router.get('/:orgId/stats', checkOwnerAccess, organizationController.getOrganiza
 /**
  * PUT /organizations/:orgId
  * Update organization details
+ * 🔴 Sólo el dueño de la ORGANIZACIÓN (o un superadmin de verdad), como las demás escrituras de la org (ronda 3, Codex):
+ * `checkOwnerAccess` deja pasar al OWNER de una sola tienda. La regla estrecha lo reemplaza sólo en este PUT.
  */
-router.put('/:orgId', checkOwnerAccess, organizationController.updateOrganization)
+router.put('/:orgId', soloElDuenoDeLaOrgCambia('ORGANIZATION_DETAILS'), organizationController.updateOrganization)
 
 // =============================================================================
 // Analytics Endpoints

@@ -532,7 +532,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('tests/unit/scripts/shopify-sandbox-arranque.test.ts')).toContain(
       "const itSi = process.env.SHOPIFY_SANDBOX === '1' ? it : it.skip",
     )
-    // workflow_dispatch con production publica sin importar la rama: la regla no puede dejar de avisarlo.
+    // workflow_dispatch con production es el botón de publicar (desde el 14-oct sólo en main): la regla no puede dejar de avisarlo.
     expect(leer('.github/workflows/ci-cd.yml')).toContain("github.event.inputs.environment == 'production'")
   })
 
@@ -1084,7 +1084,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const cortas: Record<string, [string, string]> = {
       '`:72`': [de('connect.service'), 'const tiendasPiloto'],
       '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1191`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1200`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),

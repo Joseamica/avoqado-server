@@ -332,6 +332,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/fiscal/journalEntry.service.ts': 2,
   'src/services/fiscal/nomina.service.ts': 2,
   'src/services/fiscal/nominaCfdi.service.ts': 1,
+  // 0 → 1 (2026-10-14, IVA por producto 6b T4): los renglones de UNA orden (`where: { orderId }`); sellarlos TODOS es la regla (un
+  // renglón sin sello se leería con el IVA vivo del producto). Nunca un `take`: sellaría sólo una parte de la factura.
+  'src/services/fiscal/sellosHeredados.ts': 1,
   'src/services/fiscal/trialBalance.service.ts': 1,
   'src/services/google-calendar/own-event-edit.service.ts': 1,
   'src/services/inventory/inventoryPosting.service.ts': 1,
@@ -394,7 +397,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/organization/organization.service.ts': 7,
   'src/services/partner/partner.service.ts': 1,
   'src/services/payments/reservation-deposit-webhook.service.ts': 3,
-  'src/services/payments/revenueShareReport.service.ts': 1,
   'src/services/printing/printConfig.service.ts': 4,
   'src/services/promoters/promoterLocation.service.ts': 3,
   'src/services/promoters/promoters.service.ts': 4,

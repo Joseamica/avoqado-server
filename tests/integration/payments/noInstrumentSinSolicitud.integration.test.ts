@@ -171,12 +171,30 @@ const consultar = (attemptId: string, serial = f.serial) =>
  * planificador con cuatro filas.
  */
 async function planSoloBusquedas(consulta: Prisma.Sql): Promise<string> {
-  const plan = await prisma.$transaction(async tx => {
-    await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
-    await tx.$executeRawUnsafe('SET LOCAL enable_indexscan = off')
-    await tx.$executeRawUnsafe('SET LOCAL enable_indexonlyscan = off')
-    return tx.$queryRaw<{ 'QUERY PLAN': string }[]>`EXPLAIN (COSTS OFF) ${consulta}`
-  })
+  // 15-oct: aun con sólo el bitmap, la elección seguía dependiendo de las estadísticas — con muchas llaves NULL en la tabla,
+  // `"idempotencyKey" IS NOT NULL` como `Index Cond` sobre la SEGUNDA columna de `Payment_venueId_idempotencyKey_key` sale más
+  // barato y gana (run 38659701895, integración en 4 procesos). Para medir ELEGIBILIDAD, la competidora se quita DENTRO de esta
+  // transacción y la transacción se DESHACE (en PostgreSQL el DDL es transaccional): nada queda cambiado, y si el índice del
+  // recorte no sirve, el plan sale `Seq Scan`/`Filter` y la prueba cae igual que antes.
+  const DESHACER = new Error('deshacer: sólo se quería el plan')
+  let plan: { 'QUERY PLAN': string }[] = []
+  await prisma
+    .$transaction(
+      async tx => {
+        await tx.$executeRawUnsafe("SET LOCAL lock_timeout = '10s'")
+        await tx.$executeRawUnsafe('SET LOCAL enable_seqscan = off')
+        await tx.$executeRawUnsafe('SET LOCAL enable_indexscan = off')
+        await tx.$executeRawUnsafe('SET LOCAL enable_indexonlyscan = off')
+        await tx.$executeRawUnsafe('DROP INDEX "Payment_venueId_idempotencyKey_key"')
+        plan = await tx.$queryRaw<{ 'QUERY PLAN': string }[]>`EXPLAIN (COSTS OFF) ${consulta}`
+        throw DESHACER
+      },
+      // Más que lock_timeout: si el DROP espera a otra sesión, cae por lock_timeout con su causa, no por el tope de 5 s de Prisma.
+      { timeout: 20_000 },
+    )
+    .catch(e => {
+      if (e !== DESHACER) throw e
+    })
   return plan.map(l => l['QUERY PLAN']).join('\n')
 }
 

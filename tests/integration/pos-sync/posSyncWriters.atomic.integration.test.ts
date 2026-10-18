@@ -4,7 +4,8 @@
  * authority, IVA_APARTE). A line that needs a placeholder Product takes the Venue governance fence BEFORE the Order
  * (deleteVenue holds the Venue first, then deletes the venue's OrderItems and Payments before its Orders — T8-R4
  * residual, kept); the existing-product fast path never takes it.
- * Last block: characterization of the upstream-completeness limit (§14), which Plan 3b does NOT resolve.
+ * Characterization block: the upstream-completeness limit (§14), which Plan 3b does NOT resolve.
+ * Plan 6b block (spec §5.4): with IVA por producto ON, no POS writer writes anything (the reverse exclusion).
  */
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
@@ -16,6 +17,18 @@ import { loadOrderForCfdiFromDb } from '@/services/fiscal/cfdi.service'
 import { cleanupPaymentCache, processPosOrderDeleteEvent, processPosOrderEvent } from '@/services/pos-sync/posSyncOrder.service'
 import { processPosOrderItemEvent } from '@/services/pos-sync/posSyncOrderItem.service'
 import type { PosOrderData, RichPosPayload } from '@/types/pos.types'
+import type { Request, Response } from 'express'
+import { dispatchPosEvent } from '@/communication/rabbitmq/dispacher'
+import { transferVenue } from '@/controllers/dashboard/venues.superadmin.controller'
+import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import * as exclusionIva from '@/services/pos-sync/exclusionIva'
+import { olvidarRechazos, PosRechazadoPorIva } from '@/services/pos-sync/exclusionIva'
+import { processPosAreaEvent } from '@/services/pos-sync/posSyncArea.service'
+import { processPosHeartbeat } from '@/services/pos-sync/posSyncHeartbeat.service'
+import { getOrCreatePosShift, processPosShiftEvent } from '@/services/pos-sync/posSyncShift.service'
+import { posSyncStaffService } from '@/services/pos-sync/posSyncStaff.service'
+import { lockShiftLifecycleForVenue } from '@/services/shared/shiftLifecycleLock'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   const sm = { getServer: jest.fn(), getBroadcastingService: jest.fn(() => null), broadcastToVenue: jest.fn() }
@@ -26,6 +39,13 @@ jest.mock('@/communication/sockets/terminal-registry', () => ({
   terminalRegistry: { getTerminal: jest.fn(), getAllTerminalIds: jest.fn(() => []) },
 }))
 jest.mock('@/services/alerts/opsAlert.service', () => ({ sendOpsAlert: jest.fn() }))
+// Plan 6b: el rastro del rechazo (ActivityLog) se escribe de verdad; la configuración de integración lo deja en `jest.fn()`.
+jest.mock('@/services/dashboard/activity-log.service', () => jest.requireActual('@/services/dashboard/activity-log.service'))
+// Plan 6b: la observación de 30 días de los aparatos se da por cumplida (su valor real lo prueba la Tarea 3).
+jest.mock('@/services/mobile/deviceRegistry.service', () => ({
+  ...jest.requireActual('@/services/mobile/deviceRegistry.service'),
+  OBSERVADOR_POS_DESDE: new Date('2026-08-01T00:00:00Z'),
+}))
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
@@ -734,5 +754,388 @@ describe('characterization: the numeric barrier cannot prove a complete POS snap
     expect({ total: bundle!.totalCents, paid: bundle!.paidCents }).toEqual({ total: 11600, paid: 11600 })
     const stale = await prisma.orderItem.findFirstOrThrow({ where: { orderId: o.id } })
     expect(bundle!.order.renglonesOrigen).toEqual([{ orderItemId: stale.id, tratamiento: 'IVA_16' }])
+  })
+})
+
+describe('Plan 6b (spec §5.4): con el IVA por producto encendido, el POS externo no escribe nada', () => {
+  const ORGS: string[] = []
+  const STAFFS: string[] = []
+  const P6B = `${fixture}-6b-`
+  const RECHAZO = 'POS_EXTERNO_RECHAZADO_POR_IVA'
+
+  /** Los backends que esperan un candado que tiene `pid` (sólo los de ESTE caso). */
+  async function esperarBloqueadosPor(pid: number, n = 1): Promise<number[]> {
+    for (let i = 0; i < 1200; i++) {
+      const filas = await prisma.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
+      if (filas.length >= n) return filas.map(f => f.pid)
+      await pause(25)
+    }
+    throw new Error(`nadie quedó esperando al backend ${pid}`)
+  }
+  /** Una transacción de la prueba que retiene un candado hasta `soltar()`; `tomado` entrega su pid ya con el candado. */
+  function tapon(retener: (t: Prisma.TransactionClient) => Promise<unknown>) {
+    const suelto = barrier()
+    const tomado = barrier<number>()
+    const tx = prisma.$transaction(
+      async t => {
+        const pid = await backendPid(t)
+        await retener(t)
+        tomado.release(pid)
+        await suelto.promise
+      },
+      { timeout: 45_000 },
+    )
+    return { tomado: tomado.promise, soltar: () => suelto.release(), tx }
+  }
+  /** El candado del ciclo de turnos del negocio: el reclamo y el cierre lo toman DESPUÉS de su guardia. */
+  const taponDeTurnos = (venueId: string) => tapon(t => lockShiftLifecycleForVenue(t, venueId))
+
+  const organizacion = async (etiqueta: string) => {
+    const id = `${P6B}${etiqueta}`
+    await prisma.organization.create({ data: { id, name: id, email: `${id}@example.test`, phone: '5500000000' } })
+    ORGS.push(id)
+    return id
+  }
+  /** Una organización con su negocio (mismo id), sin POS conectado: `posType` nulo, sin latido ni órdenes POS. */
+  const negocio = async (etiqueta: string) => {
+    const id = await organizacion(etiqueta)
+    await prisma.venue.create({ data: { id, organizationId: id, name: id, slug: id } })
+    return id
+  }
+  const persona = async (venueId: string, role: 'OWNER' | 'WAITER', posStaffId?: string) => {
+    const id = (await prisma.staff.create({ data: { email: `${venueId}-${randomUUID()}@staff.test`, firstName: 'IVA', lastName: '6b' } }))
+      .id
+    STAFFS.push(id)
+    await prisma.staffVenue.create({ data: { staffId: id, venueId, role, posStaffId } })
+    return id
+  }
+  /** Un turno del POS abierto con dos cobros (efectivo y tarjeta, con propina), sembrados directo: no son ventas recibidas del POS. */
+  const turnoConCobros = async (venueId: string, cajeroId: string) => {
+    const turno = await prisma.shift.create({
+      data: {
+        venueId,
+        staffId: cajeroId,
+        externalId: `${venueId}-turno`,
+        startTime: new Date(Date.now() - 3_600_000),
+        originSystem: 'POS_SOFTRESTAURANT',
+      },
+    })
+    const venta = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `${venueId}-1`,
+        subtotal: 150,
+        taxAmount: 0,
+        total: 150,
+        shiftId: turno.id,
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+      },
+    })
+    for (const [method, amount, tipAmount] of [
+      ['CASH', 100, 10],
+      ['CREDIT_CARD', 50, 5],
+    ] as const)
+      await prisma.payment.create({
+        data: {
+          venueId,
+          orderId: venta.id,
+          shiftId: turno.id,
+          method,
+          amount,
+          tipAmount,
+          feePercentage: 0,
+          feeAmount: 0,
+          netAmount: amount,
+          status: 'COMPLETED',
+        },
+      })
+    return turno
+  }
+  const cierreDe = (venueId: string, externalId: string) => ({
+    venueId,
+    shiftData: { externalId, staffId: 'C1', posRawData: { fondo: 500, efectivo: 610 } },
+  })
+  const productoDe = async (venueId: string) => {
+    const categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'IVA', slug: `iva-${randomUUID().slice(0, 8)}` } })).id
+    return prisma.product.create({
+      data: { venueId, categoryId, sku: `P6B-${randomUUID().slice(0, 8)}`, name: 'Café en grano', price: 100 },
+    })
+  }
+  /** El encendido REAL: el dueño elige 0 % en un negocio apagado. */
+  const encenderAlGuardar = (venueId: string, productId: string, staffId: string) =>
+    updateProduct(venueId, productId, { ivaTratamiento: 'IVA_0' } as any, { type: 'HUMAN', staffId, impersonating: false })
+  const rechazos = (venueId: string) => prisma.activityLog.count({ where: { venueId, action: RECHAZO } })
+  const turnoDe = async (id: string) =>
+    JSON.parse(
+      JSON.stringify(
+        await prisma.shift.findUniqueOrThrow({
+          where: { id },
+          select: { status: true, endTime: true, totalSales: true, totalTips: true, totalCashPayments: true, totalCardPayments: true },
+        }),
+      ),
+    )
+  /** Todo lo que el POS externo escribe en un negocio, para comparar antes y después (byte a byte). */
+  const foto = async (venueId: string) =>
+    JSON.parse(
+      JSON.stringify({
+        orders: await prisma.order.findMany({ where: { venueId }, orderBy: { id: 'asc' }, take: 50 }),
+        items: await prisma.orderItem.findMany({ where: { order: { venueId } }, orderBy: { id: 'asc' }, take: 50 }),
+        shifts: await prisma.shift.findMany({ where: { venueId }, orderBy: { id: 'asc' }, take: 50 }),
+        payments: await prisma.payment.findMany({ where: { venueId }, orderBy: { id: 'asc' }, take: 50 }),
+        staffVenues: await prisma.staffVenue.findMany({ where: { venueId }, include: { staff: true }, orderBy: { id: 'asc' }, take: 50 }),
+        tables: await prisma.table.findMany({ where: { venueId }, orderBy: { id: 'asc' }, take: 50 }),
+        areas: await prisma.area.findMany({ where: { venueId }, orderBy: { id: 'asc' }, take: 50 }),
+        conexion: await prisma.posConnectionStatus.findUnique({ where: { venueId } }),
+        venue: await prisma.venue.findUniqueOrThrow({
+          where: { id: venueId },
+          select: { organizationId: true, posStatus: true, updatedAt: true },
+        }),
+      }),
+    )
+  /** El controlador REAL del traslado, sin HTTP: el error que pasó a `next`, o `{ status }`. */
+  async function trasladar(venueId: string, targetOrganizationId: string): Promise<unknown> {
+    let error: unknown = null
+    let status = 0
+    const res = { status: (s: number) => ((status = s), res), json: () => res } as unknown as Response
+    const req = { params: { venueId }, body: { targetOrganizationId }, authContext: { userId: null } } as unknown as Request
+    await transferVenue(req, res, (e?: unknown) => (error = e))
+    return error ?? { status }
+  }
+
+  beforeEach(() => olvidarRechazos())
+  afterAll(async () => {
+    const venues = { in: ORGS }
+    await prisma.paymentAllocation.deleteMany({ where: { payment: { venueId: venues } } })
+    await prisma.payment.deleteMany({ where: { venueId: venues } })
+    await prisma.orderItem.deleteMany({ where: { order: { venueId: venues } } })
+    await prisma.order.deleteMany({ where: { venueId: venues } })
+    await prisma.shift.deleteMany({ where: { venueId: venues } })
+    await prisma.staffVenue.deleteMany({ where: { venueId: venues } })
+    await prisma.staffOrganization.deleteMany({ where: { OR: [{ organizationId: venues }, { staffId: { in: STAFFS } }] } })
+    await prisma.activityLog.deleteMany({ where: { OR: [{ venueId: venues }, { organizationId: venues }] } })
+    await prisma.staff.deleteMany({ where: { OR: [{ id: { in: STAFFS } }, { email: { startsWith: `pos-${P6B}` } }] } })
+    await prisma.table.deleteMany({ where: { venueId: venues } })
+    await prisma.area.deleteMany({ where: { venueId: venues } })
+    await prisma.product.deleteMany({ where: { venueId: venues } })
+    await prisma.menuCategory.deleteMany({ where: { venueId: venues } })
+    await prisma.venue.deleteMany({ where: { id: venues } })
+    await prisma.organization.deleteMany({ where: { id: venues } })
+  })
+
+  describe('negocio ya encendido', () => {
+    let v: string, pedido: { id: string; externalId: string }, turnoId: string, turnoExterno: string, area: { externalId: string }
+    const latido = { instanceId: 'SR-6B', producerVersion: '1.0.0' }
+    beforeAll(async () => {
+      v = await negocio('encendido')
+      // Lo que el POS escribió mientras el negocio estaba apagado: un mesero, una orden con su renglón, un turno con cobros, un área
+      // y su conexión.
+      await persona(v, 'WAITER', 'W1')
+      const cajero = await persona(v, 'WAITER', 'C1')
+      const externalId = `${INSTANCE}:1:${folio()}`
+      pedido = { id: (await processPosOrderEvent(header(externalId, {}, undefined, v))).id, externalId }
+      await processPosOrderItemEvent(line(externalId, `${externalId}:L0`, {}, v))
+      const turno = await turnoConCobros(v, cajero)
+      turnoId = turno.id
+      turnoExterno = turno.externalId!
+      area = { externalId: `${v}-area` }
+      await prisma.area.create({ data: { venueId: v, name: 'Terraza', externalId: area.externalId, originSystem: 'POS_SOFTRESTAURANT' } })
+      await prisma.posConnectionStatus.create({
+        data: { venueId: v, status: 'ONLINE', ...latido, lastHeartbeatAt: new Date('2026-10-01T12:00:00Z') },
+      })
+      await encenderIvaPorProducto(v)
+    })
+
+    it('alta tardía por el despachador: resuelve (ACK), nada nuevo (orden, mesero, mesa, turno) y UNA fila de rastro', async () => {
+      const antes = await foto(v)
+      const rastro = await rechazos(v)
+      const alta: RichPosPayload = {
+        ...header(`${INSTANCE}:1:${folio()}`, {}, 116, v),
+        staffData: { externalId: 'W9', name: 'Mesero nuevo', pin: '1234' },
+        tableData: { externalId: 'T9' },
+        shiftData: { externalId: `${v}-turno-nuevo`, startTime: new Date().toISOString() },
+      }
+      await expect(dispatchPosEvent('pos.softrestaurant.order.created', alta)).resolves.toBeUndefined()
+      expect(await foto(v)).toEqual(antes)
+      expect(await prisma.staff.count({ where: { email: { startsWith: `pos-${v}-` } } })).toBe(0)
+      expect(await rechazos(v)).toBe(rastro + 1)
+    })
+
+    it('la carrera, en cada escritor (sin la revisión del despachador): cada uno rechaza con PosRechazadoPorIva y NADA cambia', async () => {
+      const antes = await foto(v)
+      const escritores: Array<[string, () => Promise<unknown>]> = [
+        [
+          'alta de orden',
+          () =>
+            processPosOrderEvent({
+              ...header(`${INSTANCE}:1:${folio()}`, {}, 116, v),
+              staffData: POS_WAITER,
+              tableData: { externalId: 'T9' },
+              shiftData: { externalId: `${v}-turno-nuevo`, startTime: null },
+            }),
+        ],
+        ['borrado de orden (atrasado)', () => processPosOrderDeleteEvent(header(pedido.externalId, {}, undefined, v))],
+        ['renglón', () => processPosOrderItemEvent(line(pedido.externalId, `${pedido.externalId}:L1`, {}, v))],
+        ['cierre de turno (atrasado)', () => processPosShiftEvent(cierreDe(v, turnoExterno), 'closed')],
+        [
+          'personal',
+          () => posSyncStaffService.processPosStaffEvent({ venueId: v, staffData: { externalId: 'W77', name: 'Nuevo', pin: null } }),
+        ],
+        ['área', () => processPosAreaEvent({ venueId: v, areaData: { externalId: area.externalId, name: 'Cambiada', posRawData: {} } })],
+        ['latido', () => processPosHeartbeat({ venueId: v, ...latido }, 'softrestaurant')],
+        [
+          'latido con otra instancia',
+          () => processPosHeartbeat({ venueId: v, instanceId: 'SR-OTRA', producerVersion: '9' }, 'softrestaurant'),
+        ],
+      ]
+      for (const [nombre, escribir] of escritores) {
+        const r = await resultOf(escribir())
+        expect({ nombre, rechazado: r.error instanceof PosRechazadoPorIva }).toEqual({ nombre, rechazado: true })
+      }
+      expect(await foto(v)).toEqual(antes)
+      expect(await turnoDe(turnoId)).toMatchObject({ status: 'OPEN', endTime: null })
+    })
+
+    it('la carrera DENTRO de un evento: lo anterior ya pasó y la transacción siguiente ve la bandera (mesa, orden, reclamo, turno nuevo)', async () => {
+      const real = exclusionIva.conIvaApagado
+      // Lo que se escribió ANTES del encendido (el mesero, el cajero): la guardia de esa escritura ya pasó.
+      const yaPaso = <T>(_venueId: string, escribir: (tx: Prisma.TransactionClient) => Promise<T>) => prisma.$transaction(escribir)
+      const alta = (extra: Partial<RichPosPayload>) => ({ ...header(`${INSTANCE}:1:${folio()}`, {}, undefined, v), ...extra })
+      const tablas = await prisma.table.count({ where: { venueId: v } })
+      const ordenes = await prisma.order.count({ where: { venueId: v } })
+      const turno = JSON.stringify(await prisma.shift.findUniqueOrThrow({ where: { id: turnoId } }))
+
+      // El mesero ya pasó; la mesa rechaza.
+      jest.spyOn(exclusionIva, 'conIvaApagado').mockImplementationOnce(yaPaso).mockImplementation(real)
+      await expect(processPosOrderEvent(alta({ staffData: POS_WAITER, tableData: { externalId: 'T9' } }))).rejects.toBeInstanceOf(
+        PosRechazadoPorIva,
+      )
+      jest.restoreAllMocks()
+      expect(await prisma.table.count({ where: { venueId: v } })).toBe(tablas)
+
+      jest.spyOn(exclusionIva, 'conIvaApagado').mockImplementation(yaPaso)
+      // Sin mesero, mesa ni turno: la transacción de la orden rechaza.
+      await expect(processPosOrderEvent(alta({}))).rejects.toBeInstanceOf(PosRechazadoPorIva)
+      expect(await prisma.order.count({ where: { venueId: v } })).toBe(ordenes)
+      // El cajero ya pasó: el reclamo del cierre rechaza ANTES de tocar el turno (ni siquiera un CLOSING que luego se deshace).
+      await expect(processPosShiftEvent(cierreDe(v, turnoExterno), 'closed')).rejects.toBeInstanceOf(PosRechazadoPorIva)
+      expect(JSON.stringify(await prisma.shift.findUniqueOrThrow({ where: { id: turnoId } }))).toBe(turno)
+      jest.restoreAllMocks()
+
+      // La creación del turno del POS, en un negocio encendido sin turno abierto.
+      const sinTurno = await negocio('encendido-sin-turno')
+      const mesero = await persona(sinTurno, 'WAITER', 'W1')
+      await encenderIvaPorProducto(sinTurno)
+      await expect(getOrCreatePosShift({ externalId: `${sinTurno}-turno`, startTime: null }, sinTurno, mesero)).rejects.toBeInstanceOf(
+        PosRechazadoPorIva,
+      )
+      expect(await prisma.shift.count({ where: { venueId: sinTurno } })).toBe(0)
+    })
+
+    it('el latido en la carrera: la revisión previa llegó antes del encendido ⇒ ACK, la conexión no cambia y queda UNA fila de rastro (Codex r2 N3)', async () => {
+      const antes = await foto(v)
+      const rastro = await rechazos(v)
+      jest.spyOn(exclusionIva, 'rechazarSiIvaEncendido').mockResolvedValueOnce(false)
+      await expect(dispatchPosEvent('pos.softrestaurant.system.heartbeat', { venueId: v, ...latido })).resolves.toBeUndefined()
+      expect(await foto(v)).toEqual(antes)
+      expect(await rechazos(v)).toBe(rastro + 1)
+    })
+  })
+
+  // Casos 3 a 5: el negocio NO tiene POS conectado (posType nulo, sin latido ni órdenes POS recibidas: el turno, sus cobros y el área se
+  // siembran directo), para que el encendido real no se detenga por POS_EXTERNO; y lo enciende su dueño.
+  it('el encendido espera al cierre que FINALIZA: el turno se cierra con sus totales y después enciende (Codex r2 N8)', async () => {
+    const v = await negocio('cierre-gana')
+    const turno = await turnoConCobros(v, await persona(v, 'WAITER', 'C1'))
+    const dueno = await persona(v, 'OWNER')
+    const producto = await productoDe(v)
+    const L1 = taponDeTurnos(v)
+    let L2: ReturnType<typeof tapon> | undefined
+    let cierre: Promise<Outcome<unknown>> | undefined
+    let encendido: Promise<Outcome<unknown>> | undefined
+    try {
+      const pidL1 = await L1.tomado
+      cierre = resultOf(processPosShiftEvent(cierreDe(v, turno.externalId!), 'closed'))
+      await esperarBloqueadosPor(pidL1) // el reclamo pasó su guardia y espera L1
+      L2 = taponDeTurnos(v)
+      await esperarBloqueadosPor(pidL1, 2) // L2 queda en la fila DETRÁS del reclamo
+      L1.soltar() // el reclamo confirma CLOSING; L2 toma el candado antes que el cierre
+      const pidL2 = await L2.tomado
+      const [pidCierre] = await esperarBloqueadosPor(pidL2) // el cierre ya tiene su admisión compartida y espera L2
+      encendido = resultOf(encenderAlGuardar(v, producto.id, dueno))
+      await esperarBloqueadosPor(pidCierre) // el encendido espera la admisión que tiene el cierre
+    } finally {
+      L1.soltar()
+      L2?.soltar()
+      await Promise.allSettled([L1.tx, L2?.tx, cierre, encendido])
+    }
+    expect((await cierre!).error).toBeUndefined()
+    expect((await encendido!).error).toBeUndefined()
+    expect(await turnoDe(turno.id)).toMatchObject({
+      status: 'CLOSED',
+      totalSales: '150',
+      totalTips: '15',
+      totalCashPayments: '100',
+      totalCardPayments: '50',
+    })
+    expect(await prisma.venueIvaPorProducto.count({ where: { venueId: v } })).toBe(1)
+  })
+
+  it('el encendido gana entre el reclamo y el cierre: el cierre rechaza, libera su reclamo y el turno queda como estaba (Codex r2 N8)', async () => {
+    const v = await negocio('encendido-gana')
+    const turno = await turnoConCobros(v, await persona(v, 'WAITER', 'C1'))
+    const dueno = await persona(v, 'OWNER')
+    const producto = await productoDe(v)
+    const antes = await turnoDe(turno.id)
+    const cobros = await prisma.payment.findMany({ where: { venueId: v }, orderBy: { id: 'asc' }, take: 50 })
+    const L1 = taponDeTurnos(v)
+    let cierre: Promise<Outcome<unknown>> | undefined
+    let encendido: Promise<Outcome<unknown>> | undefined
+    try {
+      const pidL1 = await L1.tomado
+      cierre = resultOf(processPosShiftEvent(cierreDe(v, turno.externalId!), 'closed'))
+      const [pidReclamo] = await esperarBloqueadosPor(pidL1) // el reclamo, con su admisión compartida, espera L1
+      encendido = resultOf(encenderAlGuardar(v, producto.id, dueno))
+      await esperarBloqueadosPor(pidReclamo) // el encendido espera la admisión exclusiva DETRÁS del reclamo
+    } finally {
+      L1.soltar()
+      await Promise.allSettled([L1.tx, cierre, encendido])
+    }
+    expect((await encendido!).error).toBeUndefined()
+    expect((await cierre!).error).toBeInstanceOf(PosRechazadoPorIva)
+    expect(antes).toMatchObject({ status: 'OPEN', endTime: null })
+    expect(await turnoDe(turno.id)).toEqual(antes)
+    expect(await prisma.payment.findMany({ where: { venueId: v }, orderBy: { id: 'asc' }, take: 50 })).toEqual(cobros)
+  })
+
+  it('traslado a otra organización durante una escritura del POS: el traslado espera; ya en B y encendido, el POS no escribe (Codex r2 N1)', async () => {
+    const v = await negocio('traslado-a')
+    const destino = await organizacion('traslado-b')
+    const area = await prisma.area.create({
+      data: { venueId: v, name: 'Terraza', externalId: `${v}-area`, originSystem: 'POS_SOFTRESTAURANT' },
+    })
+    const evento = (name: string) => ({ venueId: v, areaData: { externalId: area.externalId!, name, posRawData: {} } })
+    const fila = tapon(t => t.$queryRaw`SELECT id FROM "Area" WHERE id = ${area.id} FOR UPDATE`)
+    let escritura: Promise<Outcome<unknown>> | undefined
+    let traslado: Promise<unknown> | undefined
+    try {
+      const pidFila = await fila.tomado
+      escritura = resultOf(processPosAreaEvent(evento('Terraza nueva')))
+      const [pidArea] = await esperarBloqueadosPor(pidFila) // pasó su guardia (admisión de A, A FOR SHARE, bandera apagada) y espera la fila
+      traslado = trasladar(v, destino)
+      await esperarBloqueadosPor(pidArea) // el traslado toma las organizaciones FOR NO KEY UPDATE y espera A
+    } finally {
+      fila.soltar()
+      await Promise.allSettled([fila.tx, escritura, traslado])
+    }
+    expect((await escritura!).error).toBeUndefined()
+    expect(await traslado).toEqual({ status: 200 })
+    expect(await prisma.area.findUniqueOrThrow({ where: { id: area.id }, select: { name: true } })).toEqual({ name: 'Terraza nueva' })
+    expect((await prisma.venue.findUniqueOrThrow({ where: { id: v } })).organizationId).toBe(destino)
+
+    await encenderIvaPorProducto(v)
+    await expect(processPosAreaEvent(evento('Otra'))).rejects.toBeInstanceOf(PosRechazadoPorIva)
+    expect(await prisma.area.findUniqueOrThrow({ where: { id: area.id }, select: { name: true } })).toEqual({ name: 'Terraza nueva' })
   })
 })

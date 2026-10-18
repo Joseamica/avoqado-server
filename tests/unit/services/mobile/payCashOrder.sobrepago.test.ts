@@ -250,6 +250,81 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
   })
 })
 
+/**
+ * D5 (mesas40, 14-oct): el efectivo RECIBIDO no tiene tope en el server, y NO se le pone uno que recorte ni rechace:
+ * - recortar el cambio altera el pago registrado (aplicado = recibido − cambio);
+ * - un 400 en línea perdería lo que `/pay` registra YA OCURRIDO (tarjeta de una terminal ajena, transferencia).
+ * El tope va en el teclado del aparato ANTES de confirmar. El server conserva los importes exactos y sólo deja
+ * `🚨 [Sobrepago]` en el log cuando lo recibido pasa de `MAX_TERMINAL_PAYMENT_CENTS` ($1,000,000.00).
+ */
+describe('D5: efectivo recibido gigante — importes exactos, un solo pago y 🚨 [Sobrepago] en el log', () => {
+  beforeEach(() => jest.clearAllMocks())
+  // El importe medido el 1-sep por API cruda: $9,999,999,999.99 «recibidos» sobre una cuenta de $90.
+  const GIGANTE = 999_999_999_999
+  const gritosDeSobrepago = (spy: jest.SpyInstance) => spy.mock.calls.filter(c => String(c[0]).includes('🚨 [Sobrepago]'))
+
+  it('🔴 primer envío y repetición dan el MISMO pago y el MISMO cambio; un solo Payment; recibido = aplicado + cambio; grita en el log', async () => {
+    seedOrder() // debe $90
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+    const pedido = { amount: GIGANTE, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-gigante' }
+
+    const primero = await payCashOrder('venue-1', 'order-1', pedido)
+    // La repetición (la cola o el reintento del POS) encuentra el pago que dejó el primer envío.
+    prismaMock.payment.findUnique.mockResolvedValue({
+      id: 'payment-1',
+      orderId: 'order-1',
+      amount: new Decimal(pagoRegistrado().amount),
+      tipAmount: new Decimal(0),
+      method: 'CASH',
+      receipts: [],
+    })
+    const repeticion = await payCashOrder('venue-1', 'order-1', pedido)
+
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(pagoRegistrado().amount).toBe(90)
+    expect([primero.paymentId, primero.amount, primero.changeCents]).toEqual(['payment-1', 9000, GIGANTE - 9000])
+    expect([repeticion.paymentId, repeticion.amount, repeticion.changeCents]).toEqual([
+      primero.paymentId,
+      primero.amount,
+      primero.changeCents,
+    ])
+    expect(primero.amount + primero.changeCents).toBe(GIGANTE)
+    expect(gritosDeSobrepago(error)).toHaveLength(2)
+    expect(gritosDeSobrepago(error)[0][1]).toMatchObject({ venueId: 'venue-1', orderId: 'order-1', amountCents: GIGANTE })
+  })
+
+  it.each(['CREDIT_CARD', 'BANK_TRANSFER'] as const)(
+    '%s registrado a mano por un importe gigante: se conserva COMPLETO (ya ocurrió), sin cambio ni rechazo, y grita en el log',
+    async method => {
+      seedOrder()
+      const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+
+      const r = await payCashOrder('venue-1', 'order-1', {
+        amount: GIGANTE,
+        tip: 0,
+        method,
+        externalSource: 'Terminal BBVA',
+        staffId: 'staff-1',
+        idempotencyKey: `k-${method}`,
+      })
+
+      expect(pagoRegistrado()).toMatchObject({ amount: GIGANTE / 100, method, fundsFlow: 'EXTERNAL_RECORDED' })
+      expect([r.amount, r.changeCents]).toEqual([GIGANTE, 0])
+      expect(gritosDeSobrepago(error)).toHaveLength(1)
+    },
+  )
+
+  it('control: justo en el tope ($1,000,000.00) no grita; el exceso sobre el saldo sigue siendo cambio como hoy', async () => {
+    seedOrder()
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+
+    const r = await payCashOrder('venue-1', 'order-1', { amount: 100_000_000, tip: 0, staffId: 'staff-1' })
+
+    expect([pagoRegistrado().amount, r.amount, r.changeCents]).toEqual([90, 9000, 100_000_000 - 9000])
+    expect(gritosDeSobrepago(error)).toHaveLength(0)
+  })
+})
+
 describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo se rechaza y lo ya capturado la reabre', () => {
   beforeEach(() => jest.clearAllMocks())
   const bitacoras = (accion: string) =>

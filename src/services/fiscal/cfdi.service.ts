@@ -1,6 +1,7 @@
 // src/services/fiscal/cfdi.service.ts
 import { BadRequestError, ConflictError, ProviderUnavailableError } from '../../errors/AppError'
-import { bloquearOrdenParaFacturar, bloquearOrdenesParaFacturar, tomarAdmisionCompartida } from './admisionIva'
+import { bloquearOrdenParaFacturar, bloquearOrdenesParaFacturar } from './admisionIva'
+import { negocioCambioDeOrganizacionError } from './exclusionContable'
 import {
   CFDI_VIVO,
   cfdiVivoSql,
@@ -983,7 +984,6 @@ export async function emitirConEntrada(
     // el POST ya se ve. Una devolución que llega después de esta admisión es de una venta ya facturada: va por nota de crédito (C2).
     if (!sustitucion && params.flow === 'AUTOFACTURA_A' && (await ventaConDevolucion(params.orderId, tx)))
       throw new ConflictError(MOTIVO_AUTOFACTURA_CON_DEVOLUCION)
-    await tomarAdmisionCompartida(tx, order.organizationId)
     // C3 (§4.5, D6; Codex C3-1/C3-13/C3-19, R3-1): un ticket en una global viva sólo se factura con su extracción TIMBRADA y sin cancelación
     // en trámite ni consumada, revisada bajo este candado de la orden (el que toma también la cancelación de la extracción). Y el antecedente
     // de extracción manda aunque su global ya no esté viva (la carrera entre la comprobación y la admisión): nunca la ruta ordinaria.
@@ -1370,8 +1370,6 @@ export async function enviarIntentoCapturado(
               after = page[page.length - 1].orderId
             }
             await bloquearOrdenesParaFacturar(tx, [...new Set(ids)].sort(), cfdi.venueId)
-            const venue = await tx.venue.findUniqueOrThrow({ where: { id: cfdi.venueId }, select: { organizationId: true } })
-            await tomarAdmisionCompartida(tx, venue.organizationId)
             const { count } = await tx.cfdi.updateMany({ where, data })
             if (count !== 1) return null
             await liberarSellosDe(tx, cfdi.id)
@@ -2675,7 +2673,7 @@ export const TEXTO_SUSTITUCION_ATORADA =
 
 /**
  * C2 (spec §4.5, Codex C2-5): la intención de cancelar se anota ANTES de llamar al PAC, con número de intento, bajo los candados de la
- * emisión (órdenes del CFDI → productos → admisión compartida). La misma cancelación ya en trámite devuelve su número; una distinta,
+ * emisión (admisión compartida → órdenes del CFDI → productos, D10). La misma cancelación ya en trámite devuelve su número; una distinta,
  * conflicto. C2-22: el sustituto SIEMPRE se escribe (también `null`), así un 02 tras un 01 rechazado no arrastra el UUID viejo.
  * C3 (Codex C3-5): la nota que saca un ticket de la global no se cancela mientras sostenga la factura del cliente.
  * `ganchos.despuesDeLosCandados`: SÓLO PARA PRUEBAS, con todos los candados tomados.
@@ -2693,9 +2691,17 @@ export async function anotarIntencionDeCancelar(
         UNION SELECT "orderId" FROM "CfdiGlobalOrden" WHERE "cfdiId" = ${cfdiId}
         ORDER BY "orderId"
       `
+      // Plan 6b (§5.3) y Codex código r1 #1 (Ruling CX-1): toda cancelación pasa por la admisión de la organización del negocio de la
+      // FACTURA (leída sin candado), además de las de sus órdenes (una pudo moverse a otra organización); el helper las pide todas, en orden,
+      // antes de la primera fila. Con el manifiesto vacío sólo queda la de la factura.
+      const organizacionDeLaFactura = (
+        await tx.cfdi.findUnique({ where: { id: cfdiId }, select: { venue: { select: { organizationId: true } } } })
+      )?.venue.organizationId
       await bloquearOrdenesParaFacturar(
         tx,
         orders.map(o => o.orderId),
+        undefined,
+        { organizacionesExtra: organizacionDeLaFactura ? [organizacionDeLaFactura] : [] },
       )
       const actual = await tx.cfdi.findUnique({
         where: { id: cfdiId },
@@ -2713,7 +2719,8 @@ export async function anotarIntencionDeCancelar(
         },
       })
       if (!actual) return { estado: 'PERDIDA' }
-      await tomarAdmisionCompartida(tx, actual.venue.organizationId)
+      // El negocio de la factura se movió de organización entre la lectura y los candados: su admisión no la tenemos ⇒ 409 y se reintenta.
+      if (actual.venue.organizationId !== organizacionDeLaFactura) throw negocioCambioDeOrganizacionError()
       await ganchos?.despuesDeLosCandados?.()
       if (
         actual.status !== 'STAMPED' ||
@@ -3242,7 +3249,18 @@ export async function aplicarCancelacion(
     // esta cancelación ya tomó con O1 ⇒ 40P01. `orders` ya llega sin repetidos y ordenado (UNION + ORDER BY). Sin negocio: por
     // id, como el bucle de antes — el manifiesto ya está acotado por la factura, y una orden movida de negocio sigue en él.
     const ids = orders.map(o => o.orderId)
-    await bloquearOrdenesParaFacturar(t, ids)
+    // Codex código r1 #1 (Ruling CX-1): también la admisión de la organización del negocio de la FACTURA, en el mismo orden ascendente que las
+    // de sus órdenes y antes de la primera fila (una orden pudo moverse a otra organización; sin órdenes, ésta es la única).
+    const organizacionDeLaFactura = async () =>
+      (
+        await t.$queryRaw<Array<{ organizationId: string }>>`
+          SELECT v."organizationId" FROM "Cfdi" c JOIN "Venue" v ON v.id = c."venueId" WHERE c.id = ${cfdiId}`
+      )[0]?.organizationId
+    const antes = await organizacionDeLaFactura()
+    await bloquearOrdenesParaFacturar(t, ids, undefined, { organizacionesExtra: antes ? [antes] : [] })
+    // Codex código r2 N2 (Ruling CX-12): este camino también METE una cancelación en trámite (REJECTED → REQUESTED). Si el negocio de la
+    // factura cambió de organización entre la lectura y los candados, su admisión no la tenemos ⇒ 409 y se reintenta (como la intención).
+    if ((await organizacionDeLaFactura()) !== antes) throw negocioCambioDeOrganizacionError()
     // 🔴 C2-32 (v7): la respuesta del PAC (`PENDIENTE`) sigue el rango explícito: un hecho confirmado sube desde REQUESTED o REJECTED (del
     // intento que pone el CAS); el negativo y el acuse, sólo desde REQUESTED. `DIRECTA` y `EXTERNA`, como antes.
     const cancelWhere: Prisma.CfdiWhereInput =

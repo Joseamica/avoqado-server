@@ -134,7 +134,7 @@ export async function handleIpn(p: HandleIpnParams): Promise<HandleIpnResult> {
   if (checkoutStatus === 'COMPLETED') {
     const { finalizeMercadoPagoCheckout } = await import('@/services/dashboard/paymentLink.service')
     try {
-      await finalizeMercadoPagoCheckout({ sessionId: session.sessionId, mpPaymentId: payment.id })
+      await finalizeMercadoPagoCheckout({ sessionId: session.sessionId, mpPaymentId: payment.id, paymentTypeId: payment.payment_type_id })
     } catch (err) {
       // The charge succeeded on MP but we failed to record the local
       // Order/Payment. Mark the webhook event 'error' (not 'processed') so it's

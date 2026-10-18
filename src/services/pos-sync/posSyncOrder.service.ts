@@ -19,6 +19,7 @@ import {
 } from '../shared/paymentShiftClaim'
 import { findLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { logAction } from '../dashboard/activity-log.service'
+import { conIvaApagado, exigirIvaApagadoTx } from './exclusionIva'
 
 // Cache to track recent payment commands to prevent double deduction
 interface RecentPayment {
@@ -191,7 +192,8 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   }
 
   // 1. Sincronizar entidades relacionadas para obtener sus IDs de Prisma
-  const staffId = await posSyncStaffService.syncPosStaff(staffData, venue.id, venue.organizationId)
+  // Plan 6b (spec §5.4): cada escritura del POS (personal, mesa, turno, orden) pasa por la guardia del IVA por producto.
+  const staffId = await conIvaApagado(venue.id, tx => posSyncStaffService.syncPosStaff(staffData, venue.id, venue.organizationId, tx))
   const tableId = await getOrCreatePosTable(tableData, venue.id) // Pasamos areaData
 
   const shiftId = await getOrCreatePosShift(shiftData, venue.id, staffId)
@@ -204,6 +206,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
   // 3. Ejecutar el upsert final de la Orden
   const order = await prisma.$transaction(async tx => {
+    await exigirIvaApagadoTx(tx, venue.id) // Plan 6b: la PRIMERA sentencia (D10: admisión → organización → lo demás)
     await lockPosOrderNaturalKey(tx, { venueId: venue.id, externalId })
     // La clasificación exterior era TOCTOU: un request podía observar null,
     // otro crear la fila, y el primero tomar Shift antes de actualizar esa
@@ -594,6 +597,7 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
     async tx => {
       // El id de arriba es sólo candidato: el candado es por negocio. Si la orden se fue de este negocio (o se borró)
       // mientras tanto, se trata igual que si no hubiera aparecido; nunca se marca por su id rancio.
+      await exigirIvaApagadoTx(tx, venueId) // Plan 6b: un borrado atrasado tras el encendido no marca nada (Review Focus 7)
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: order.id }))) return null
       const cobroVivo = await findLiveTerminalCharge(tx, { venueId, orderId: order.id })
       const updatedOrder = await tx.order.update({

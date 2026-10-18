@@ -218,12 +218,14 @@ describe('regla C: un producto con la marca de ajuste de delivery no cambia de I
   })
 
   // Pasa también HOY (la regla C va después de la barrera ≠ IVA_16).
+  // Plan 6b (PF-M3): la EDICIÓN del dashboard ahora enciende el negocio; el alta no, así que la barrera se prueba con un alta.
   it('con la bandera apagada manda IVA_POR_PRODUCTO_APAGADO, también en SQL directo', async () => {
     const x = await nuevoNegocio({ contabilidad: false })
-    const { productId } = await conProducto(x)
+    const { categoryId, productId } = await conProducto(x)
     await conReembolso(x, productId)
     await apagarIvaPorProducto(x.venueId)
-    expect(await desenlace(updateProduct(x.venueId, productId, { ivaTratamiento: 'IVA_0' }, actor()))).toMatchObject({
+    const alta = { name: 'Bolsa de café 3', price: 480, type: 'REGULAR', sku: `B3-${x.rfc}`, categoryId, ivaTratamiento: 'IVA_0' }
+    expect(await desenlace(createProduct(x.venueId, alta as CreateProductDto, actor()))).toMatchObject({
       statusCode: 409,
       code: 'IVA_POR_PRODUCTO_APAGADO',
     })

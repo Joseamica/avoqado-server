@@ -1,5 +1,5 @@
 // tests/unit/services/fiscal/normalizarIvaDeProducto.test.ts
-import { codigoDeBarreraIva, normalizarIvaDeProducto, traducirErrorDeIva } from '@/services/fiscal/normalizarIvaDeProducto'
+import { codigoDeBarreraIva, MENSAJES, normalizarIvaDeProducto, traducirErrorDeIva } from '@/services/fiscal/normalizarIvaDeProducto'
 
 const actual16 = { ivaTratamiento: 'IVA_16' as const, taxRate: 0.16, objetoImp: '02' }
 const actualExento = { ivaTratamiento: 'EXENTO' as const, taxRate: 0, objetoImp: '02' }
@@ -80,6 +80,28 @@ describe('normalizarIvaDeProducto', () => {
     expect(() => normalizarIvaDeProducto({ objetoImp: '01' }, actual16, false)).toThrow(
       expect.objectContaining({ statusCode: 409, code: 'IVA_POR_PRODUCTO_APAGADO' }),
     )
+  })
+
+  // D18 (spec planes 6-7): una app abierta antes del cambio a 0 % lo regresaba a 16 % al guardar el nombre (H16).
+  it('D18 · encendido: una tupla vieja que REGRESA a 16 % ⇒ 409 IVA_REQUIERE_APP_NUEVA', () => {
+    expect(() => normalizarIvaDeProducto({ taxRate: 0.16 }, actualExento, true)).toThrow(
+      expect.objectContaining({ statusCode: 409, code: 'IVA_REQUIERE_APP_NUEVA' }),
+    )
+    expect(() => normalizarIvaDeProducto({ taxRate: 0.16, objetoImp: '02' }, actualBloqueado04, true)).toThrow(
+      expect.objectContaining({ code: 'IVA_REQUIERE_APP_NUEVA' }),
+    )
+  })
+
+  it('D18 · apagado: la tupla hacia 16 % sigue permitida (nada cambia para un negocio apagado)', () => {
+    expect(normalizarIvaDeProducto({ taxRate: 0.16 }, actualExento, false)).toEqual({ ivaTratamiento: 'IVA_16' })
+  })
+
+  it('§5.7 · los 409 dicen dónde se cambia el IVA, sin pantallas que no existen', () => {
+    for (const code of ['IVA_POR_PRODUCTO_APAGADO', 'IVA_REQUIERE_APP_NUEVA'] as const) {
+      expect(MENSAJES[code]).toContain('dashboard → producto, junto al precio')
+      expect(MENSAJES[code]).not.toContain('Productos → IVA')
+      expect(MENSAJES[code]).not.toContain('Pídele a Avoqado')
+    }
   })
 })
 

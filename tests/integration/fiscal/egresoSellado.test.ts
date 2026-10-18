@@ -682,7 +682,7 @@ describe('egreso con entrada congelada', () => {
   })
   it('admisión org y recheck del reembolso ocurren dentro de la reserva', async () => {
     const s = await sale()
-    const spy = jest.spyOn(admission, 'tomarAdmisionCompartida')
+    const spy = jest.spyOn(admission, 'bloquearOrdenParaFacturar')
     await expect(
       emitRefundCreditNote(
         { venueId, refundPaymentId: s.refund.id, sandbox: true },
@@ -695,7 +695,7 @@ describe('egreso con entrada congelada', () => {
         },
       ),
     ).rejects.toThrow(/no está completado/)
-    expect(spy).toHaveBeenCalledWith(expect.anything(), fixture)
+    expect(spy).toHaveBeenCalledWith(expect.anything(), s.o.id)
     expect(provider.createCreditNote).not.toHaveBeenCalled()
     expect(await prisma.cfdi.count({ where: { idempotencyKey: `cfdi-refund-${s.refund.id}` } })).toBe(0)
   })
