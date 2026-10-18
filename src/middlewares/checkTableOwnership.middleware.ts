@@ -5,6 +5,7 @@ import prisma from '@/utils/prismaClient'
 import { resolveUserRoleForVenue } from './checkPermission.middleware'
 import { esSuperadminReal } from '@/services/access/rolVigente'
 import { hayDineroQueSeGuarda } from '@/services/shared/orderBalance'
+import { cuerpoMesaAjena, esCobroCompletadoDeLaOrden } from '@/services/shared/cuentaCancelada'
 
 /**
  * Propiedad de mesa — "Solo el propietario puede modificar sus mesas".
@@ -103,6 +104,7 @@ type OwnershipSource = 'order' | 'table'
  *        rastro en `ActivityLog`. Autenticación, sucursal, `payments:create` e idempotencia se conservan; el cobro EN VIVO sigue 403.
  *        R3-1: sólo con importe + propina > 0 (`esDineroCapturado`); un $0 + $0 sobre mesa ajena sigue 403.
  *        R4-1: el reintento cuya llave YA tiene pago de esta orden pasa siempre (`laLlaveYaTienePagoDeEstaOrden`): es idempotente.
+ *        R5-1: y pasa SÓLO a recuperar ese pago (`res.locals.soloRecuperarPago`): si desapareció, el servicio responde este 403.
  */
 /**
  * 🔴 R3-1 (Codex r2, P2): ¿el cuerpo trae dinero de verdad? Importe y propina válidos (las mismas reglas del controller de cobro) y
@@ -122,14 +124,16 @@ function esDineroCapturado(body: { amount?: unknown; tip?: unknown }): boolean {
  * aunque la mesa haya cambiado de dueño — con R3-1 un reintento de $0 recibía 403 antes de mirar la llave. Mismo criterio que
  * `payCashOrder` (llave de texto no vacía, `venueId_idempotencyKey`), y además la orden debe ser la misma: una llave de otra orden, o
  * una nueva, sigue con el 403 de siempre.
+ * R5-2 (Codex r4): y el pago debe ser un COBRO COMPLETADO (`esCobroCompletadoDeLaOrden`): un intento FAILED o una devolución con esa
+ * llave no son «ya cobrada».
  */
 async function laLlaveYaTienePagoDeEstaOrden(venueId: string, orderId: string | undefined, llave: unknown): Promise<boolean> {
   if (!orderId || typeof llave !== 'string' || !llave) return false
   const pago = await prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey: llave } },
-    select: { orderId: true },
+    select: { orderId: true, status: true, type: true },
   })
-  return pago?.orderId === orderId
+  return !!pago && esCobroCompletadoDeLaOrden(pago, orderId)
 }
 
 export const checkTableOwnership = (
@@ -202,18 +206,15 @@ export const checkTableOwnership = (
         return next()
       }
       if (opciones.dineroCapturado && (await laLlaveYaTienePagoDeEstaOrden(venueId, req.params?.orderId, req.body?.idempotencyKey))) {
+        // 🔴 R5-1 (Codex r4, P2): esta excepción autoriza SÓLO recuperar ese pago. Si lo borran antes de que el servicio lo relea,
+        // el servicio responde este mismo 403 en vez de crear un pago nuevo en la mesa ajena. Marca interna (nunca del body).
+        res.locals.soloRecuperarPago = { ownerId: foreign.servedById, ownerName }
         return next()
       }
       logger.info(
         `checkTableOwnership: ${authContext.userId} bloqueado — mesa propiedad de ${foreign.servedById} (${ownerName}) en venue ${venueId}`,
       )
-      return res.status(403).json({
-        error: 'Forbidden',
-        code: 'TABLE_OWNED_BY_OTHER',
-        message: `Solo ${ownerName} puede modificar esta mesa`,
-        ownerId: foreign.servedById,
-        ownerName,
-      })
+      return res.status(403).json(cuerpoMesaAjena({ ownerId: foreign.servedById, ownerName }))
     } catch (error) {
       logger.error('checkTableOwnership: error evaluando propiedad de mesa', error)
       return res.status(500).json({ error: 'Internal Server Error', message: 'Failed to verify table ownership' })

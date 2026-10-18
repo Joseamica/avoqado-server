@@ -153,7 +153,15 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}, options: { openSh
     const key = where?.venueId_idempotencyKey?.idempotencyKey
     const found = payments.find(p => p.idempotencyKey === key)
     return found
-      ? { ...found, method: 'CASH', amount: new Decimal(found.amount), tipAmount: new Decimal(found.tipAmount), receipts: [] }
+      ? {
+          ...found,
+          method: 'CASH',
+          orderId: 'order-1',
+          status: 'COMPLETED',
+          amount: new Decimal(found.amount),
+          tipAmount: new Decimal(found.tipAmount),
+          receipts: [],
+        }
       : null
   })
 

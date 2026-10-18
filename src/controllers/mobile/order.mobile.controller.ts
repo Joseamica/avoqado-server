@@ -16,6 +16,7 @@ import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
+import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 
 /**
  * List orders for a venue (paginated)
@@ -376,6 +377,8 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
         req.body.isOfflineReplay === true && esColaConDefectoH1(req.headers?.['x-device-platform'], req.headers?.['x-app-version']),
       // R2-6: la propiedad de mesa dejó pasar dinero ya capturado sobre una mesa ajena (`checkTableOwnership`, ruta de cobro).
       mesaAjena: res.locals?.mesaAjena,
+      // R5-1: la propiedad de mesa sólo autorizó RECUPERAR el pago de esta llave (`checkTableOwnership`, ruta de cobro).
+      soloRecuperarPago: res.locals?.soloRecuperarPago,
     })
 
     res.status(200).json({
@@ -383,6 +386,11 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       payment: result,
     })
   } catch (error) {
+    // R5-1: el MISMO 403 que responde `checkTableOwnership` a una mesa ajena (el pago que sólo podía recuperarse ya no está).
+    if (error instanceof MesaAjenaSoloRecuperacion) {
+      logger.info(`payCash: mesa ajena — el pago de la llave ya no existe; no se crea otro (${(error as Error).message})`)
+      return res.status(403).json(cuerpoMesaAjena(error.dueno))
+    }
     // Un rechazo de NEGOCIO (4xx: "ya está pagada", saldo, permisos) no es una falla del server:
     // logueado como `error:` ensuciaba el barrido de errores del log (/full-testing 2026-08-18).
     // El errorHandler ya lo registra con su nivel por status; aquí sólo se marca el 5xx real.

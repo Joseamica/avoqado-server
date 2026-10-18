@@ -32,6 +32,7 @@ import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { CODIGOS_TRANSITORIOS } from '../shared/erroresTransitorios'
 import { hayDineroQueSeGuarda } from '../shared/orderBalance'
+import { esCobroCompletadoDeLaOrden } from '../shared/cuentaCancelada'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import {
   DEFAULT_OWNERSHIP_OVERRIDES,
@@ -1394,14 +1395,21 @@ async function applyPayCash(
   // propiedad de mesa decide quién INICIA un cobro, no quién registra uno capturado: si un encargado pasó la mesa a otro mesero
   // mientras el aparato estaba sin red, se registra con su autor real y deja rastro de la mesa ajena (payCashOrder). Mismo override
   // que la ruta online del cobro. Un cobro que YA existe (misma llave) no deja otro rastro: payCashOrder devuelve ese pago.
-  const yaCobrado = await prisma.payment.findUnique({
+  const pagoDeLaLlave = await prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
-    select: { id: true },
+    select: { orderId: true, status: true, type: true },
   })
-  const mesaAjena = yaCobrado ? null : await mesaAjenaDe(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  // R5-2: «ya cobrado» = un COBRO COMPLETADO de esta orden (no un intento fallido ni una devolución con esa llave).
+  const yaCobrado = !!pagoDeLaLlave && esCobroCompletadoDeLaOrden(pagoDeLaLlave, orderId)
+  const mesaAjena = await mesaAjenaDe(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  const hayDinero = hayDineroQueSeGuarda(amountCents, tipCents)
   // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado (cerraría la mesa de otro sin un peso): conserva el rechazo de antes.
   // R4-4: medido como se guarda (centavos enteros): una fracción de centavo es $0.
-  if (mesaAjena && !hayDineroQueSeGuarda(amountCents, tipCents)) throw errorMesaAjena(mesaAjena)
+  if (mesaAjena && !hayDinero && !yaCobrado) throw errorMesaAjena(mesaAjena)
+  // 🔴 R5-1 (Codex r4): el $0 sobre mesa ajena pasó SÓLO porque su llave ya tiene ese cobro: payCashOrder lo devuelve, y si lo
+  // borraron entre esta lectura y la suya responde TABLE_OWNED_BY_OTHER en vez de crear un pago. Con dinero (> $0) es el registro
+  // de efectivo capturado de R2-6, con su rastro; si el pago existe, payCashOrder lo devuelve y el rastro no se usa.
+  const marcaDeMesaAjena = mesaAjena ? (hayDinero ? { mesaAjena } : { soloRecuperarPago: mesaAjena }) : {}
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,
@@ -1422,7 +1430,7 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
-    ...(mesaAjena ? { mesaAjena } : {}),
+    ...marcaDeMesaAjena,
     ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
   })
   return {
