@@ -3177,7 +3177,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
         // 🔴 R6-3 (Codex r5 #3): la propiedad de mesa otra vez, bajo el candado (la de antes pudo quedar vieja: una reasignación usa
         // este mismo candado). Misma regla que el middleware: mostrador, sin dueño o propia ⇒ sigue; ajena sin override ⇒ el cobro
-        // NUEVO recibe el mismo 403 sin crear nada; el dinero ya capturado (cola con > $0) se registra con el rastro de R2-6.
+        // NUEVO recibe el mismo 403 sin crear nada; el dinero ya capturado (> $0) se registra con el rastro de R2-6.
+        // 🔴 R7-1 (Codex r6 #1): «ya capturado» es la MISMA clasificación de arriba (`cobroNuevo`), no la marca de replay: una transferencia,
+        // una tarjeta externa, OTHER o un tipo con fondos externos registrados en vivo ya son dinero recibido.
         const propiedad = input.propiedadDeMesa
         if (
           propiedad &&
@@ -3190,7 +3192,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
             ownerId: fresh.servedById,
             ownerName: fresh.servedBy ? `${fresh.servedBy.firstName} ${fresh.servedBy.lastName}`.trim() : 'otro mesero',
           }
-          if (input.isOfflineReplay === true && hayDineroQueSeGuarda(amount, tip)) {
+          if (!cobroNuevo && hayDineroQueSeGuarda(amount, tip)) {
             propiedadBajoCandado.mesaAjena = dueno
           } else {
             await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey })

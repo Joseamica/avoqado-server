@@ -920,6 +920,53 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
     })
   })
 
+  /**
+   * 🔴 R7-1 (Codex r6 #1, P1): la excepción bajo el candado miraba la marca de replay. Una transferencia o una tarjeta externa registradas
+   * EN VIVO ya son dinero recibido; si la cuenta pasa a Beto entre el middleware y el candado, recibían 403 y el dinero quedaba fuera.
+   */
+  it.each([['BANK_TRANSFER'], ['CREDIT_CARD'], ['OTHER']])(
+    '🔴 R7-1: %s EN VIVO de Ana ($100 ya recibidos), la cuenta pasa a Beto antes del candado ⇒ 200, el Payment queda y el rastro UNA vez (antes: 403 y ningún pago)',
+    async method => {
+      await conPropiedad(async () => {
+        const { orderId } = await cuentaDeA()
+        await prisma.order.update({ where: { id: orderId }, data: { servedById: ana } })
+        const K = llaveHttp()
+
+        await conReasignacionAntesDelCandado(K, orderId, 1, async () => {
+          const r = await cobrarHttp(orderId, { amount: 10000, tip: 0, idempotencyKey: K, method })
+          expect([r.status, r.body.payment?.amount, r.body.payment?.method]).toEqual([200, 10000, method])
+        })
+        const pagos = await prisma.payment.findMany({ where: { venueId, orderId }, select: { amount: true, method: true }, take: 5 })
+        expect(pagos.map(p => [Number(p.amount), p.method])).toEqual([[100, method]])
+        expect(await marcasAsentadas(orderId, 1)).toEqual([{ staffId: ana, data: expect.objectContaining({ tableOwnerId: beto }) }])
+      })
+    },
+  )
+
+  it('control R7-1: el EFECTIVO nuevo en vivo de Ana en esa misma ventana sigue en 403 y ningún pago', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: ana } })
+      const K = llaveHttp()
+
+      await conReasignacionAntesDelCandado(K, orderId, 1, async () => {
+        const r = await cobrarHttp(orderId, { amount: 10000, tip: 0, idempotencyKey: K })
+        expect([r.status, r.body.code]).toEqual([403, 'TABLE_OWNED_BY_OTHER'])
+      })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+      expect(await marcas(orderId)).toEqual([])
+    })
+  })
+
+  it('control R7-1 (como la base 4624ddb3a): la transferencia en vivo sobre una cuenta que YA era de Beto al entrar ⇒ 403 del middleware, ningún pago', async () => {
+    await conPropiedad(async () => {
+      const orderId = await mesaPasadaABeto()
+      const r = await cobrarHttp(orderId, { amount: 10000, tip: 0, idempotencyKey: llaveHttp(), method: 'BANK_TRANSFER' })
+      expect([r.status, r.body.code]).toEqual([403, 'TABLE_OWNED_BY_OTHER'])
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+    })
+  })
+
   it('control R6-3: sin reasignación, el $0 de Ana cierra SU cortesía como siempre y no deja rastro', async () => {
     await conPropiedad(async () => {
       const { orderId } = await cortesiaDeAna()
@@ -1139,5 +1186,110 @@ describe('R6-1 · venta de vales cancelada por la ruta general', () => {
       payCashOrder(venueId, venta.orderId, { amount: 10000, tip: 0, staffId: staffA, idempotencyKey: `r6-1-vivo-${venta.orderId}` }),
     ).rejects.toMatchObject({ statusCode: expect.any(Number) })
     expect(await prisma.payment.count({ where: { venueId, orderId: venta.orderId } })).toBe(0)
+  })
+
+  /**
+   * 🔴 R7-2 (Codex r6 #2, P2): dos peticiones del MISMO abono de $50 con la llave K consultan antes de que exista el pago. La primera
+   * confirma (Payment, intento K SUCCEEDED, sesión PARTIALLY_PAID); antes de que la segunda tome el candado, OTRO cobro (T) deja la
+   * sesión en conciliación. La guarda de la sesión rechazaba con 409 el reintento de K por el estado que causó T. Ahora el intento
+   * EXITOSO de esta llave, con su pago, responde como la primera vez.
+   */
+  describe('R7-2 · el reintento de una llave ya confirmada no lo frena la conciliación de otro intento', () => {
+    async function conciliacionDeOtroIntento(sessionId: string, orderId: string) {
+      const ultimo = await prisma.areaTicketPaymentAttempt.findFirstOrThrow({
+        where: { checkoutSessionId: sessionId },
+        orderBy: { sequence: 'desc' },
+        select: { sequence: true },
+      })
+      const t = await prisma.areaTicketPaymentAttempt.create({
+        data: {
+          checkoutSessionId: sessionId,
+          orderId,
+          sequence: ultimo.sequence + 1,
+          idempotencyKey: `T-${randomUUID()}`,
+          amount: new Prisma.Decimal(50),
+          method: 'CREDIT_CARD',
+          status: 'UNKNOWN',
+        },
+      })
+      await prisma.areaTicketCheckoutSession.update({
+        where: { id: sessionId },
+        data: { status: AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED, activePaymentAttemptId: t.id },
+      })
+    }
+    /** El ganador A (abono de $50 con K) y la conciliación de T se intercalan en la n-ésima consulta de K del perdedor. */
+    async function conAbonoYConciliacionAntesDelCandado(K: string, venta: { orderId: string; sessionId: string }, enLaConsulta: number) {
+      const original = prisma.payment.findUnique.bind(prisma.payment)
+      let vistas = 0
+      let deA: Awaited<ReturnType<typeof payCashOrder>> | undefined
+      const espia = jest.spyOn(prisma.payment, 'findUnique').mockImplementation((async (args: any) => {
+        const r = await original(args)
+        if (deA === undefined && args?.where?.venueId_idempotencyKey?.idempotencyKey === K && ++vistas === enLaConsulta) {
+          deA = await payCashOrder(venueId, venta.orderId, { amount: 5000, tip: 0, staffId: staffA, idempotencyKey: K })
+          await conciliacionDeOtroIntento(venta.sessionId, venta.orderId)
+        }
+        return r
+      }) as never)
+      return {
+        primero: () => deA,
+        restaurar: () => espia.mockRestore(),
+      }
+    }
+
+    it.each([
+      ['en vivo', { extra: {} }],
+      ['cola moderna', { extra: { isOfflineReplay: true } }],
+      ['cola Android/Windows ≤ 2.23 (H1)', { extra: { isOfflineReplay: true, colaConDefectoH1: true } }],
+      ['reducer (PAY_CASH)', { reducer: true }],
+    ] as const)(
+      '🔴 %s: K ya confirmó y T dejó la sesión en conciliación ⇒ el MISMO pago de K, un solo cobro y la sesión sigue en conciliación (antes en vivo: 409 CHECKOUT_RECONCILIATION_REQUIRED)',
+      async (_caso, via) => {
+        const venta = await ventaDeVales()
+        const K = randomUUID()
+        // Reducer: 1.ª consulta de K la del reducer, 2.ª la del servicio (justo antes de su transacción).
+        const espia = await conAbonoYConciliacionAntesDelCandado(K, venta, 'reducer' in via ? 2 : 1)
+        let pagoDeB: { paymentId?: unknown; amount?: unknown } | undefined
+        try {
+          if ('reducer' in via) {
+            const intent = {
+              id: K,
+              seq: ++seq,
+              type: 'PAY_CASH' as const,
+              payload: { orderId: venta.orderId, amountCents: 5000, tipCents: 0, method: 'CASH' },
+            }
+            const [ack] = await processIntents(params([intent], staffB))
+            expect(ack.status).toBe('ACKED')
+            pagoDeB = ack.result as never
+          } else {
+            pagoDeB = await payCashOrder(venueId, venta.orderId, {
+              amount: 5000,
+              tip: 0,
+              staffId: staffB,
+              idempotencyKey: K,
+              ...via.extra,
+            })
+          }
+        } finally {
+          espia.restaurar()
+        }
+
+        const deA = espia.primero()
+        expect(deA?.paymentId).toEqual(expect.any(String))
+        expect([pagoDeB?.paymentId, pagoDeB?.amount]).toEqual([deA?.paymentId, 5000])
+        expect(await prisma.payment.count({ where: { venueId, orderId: venta.orderId } })).toBe(1)
+        expect((await vales(venta)).sesion).toBe(AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED)
+      },
+    )
+
+    it('control R7-2: un cobro NUEVO en vivo (otra llave) sobre esa sesión en conciliación sigue rechazado y no crea pago', async () => {
+      const venta = await ventaDeVales()
+      await payCashOrder(venueId, venta.orderId, { amount: 5000, tip: 0, staffId: staffA, idempotencyKey: `r7-2-A-${venta.orderId}` })
+      await conciliacionDeOtroIntento(venta.sessionId, venta.orderId)
+
+      await expect(
+        payCashOrder(venueId, venta.orderId, { amount: 5000, tip: 0, staffId: staffB, idempotencyKey: `r7-2-nuevo-${venta.orderId}` }),
+      ).rejects.toMatchObject({ statusCode: 409 })
+      expect(await prisma.payment.count({ where: { venueId, orderId: venta.orderId } })).toBe(1)
+    })
   })
 })

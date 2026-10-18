@@ -832,6 +832,115 @@ describe('R6-3: la propiedad de mesa otra vez, bajo el candado', () => {
     ])
   })
 
+  /**
+   * 🔴 R7-1 (Codex r6 #1, P1): la excepción de dinero capturado bajo el candado miraba la marca de replay. Una transferencia, una tarjeta
+   * externa, OTHER o un tipo del catálogo con fondos externos registrados EN VIVO ya son dinero que el negocio recibió (`esCobroNuevo`
+   * los clasifica así): si la cuenta pasa a Beto en esa ventana, recibían 403 y el dinero quedaba fuera. Ahora decide la MISMA
+   * clasificación del servicio; el efectivo nuevo en vivo y el $0 siguen en 403.
+   */
+  it.each([['BANK_TRANSFER'], ['CREDIT_CARD'], ['DEBIT_CARD'], ['OTHER']])(
+    '🔴 R7-1: %s EN VIVO de Ana ($100 ya recibidos) sobre la cuenta que pasó a Beto bajo el candado ⇒ se registra y deja el rastro UNA vez (antes: 403)',
+    async method => {
+      const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      deMesa(row, 'staff-beto')
+
+      await payCashOrder('venue-1', 'order-1', {
+        amount: 10000,
+        tip: 0,
+        staffId: 'staff-1',
+        idempotencyKey: `vivo-${method}`,
+        method: method as never,
+        propiedadDeMesa: propiedad(false),
+      })
+
+      expect(pagos.map(x => [x.amount, x.method])).toEqual([[100, method]])
+      expect(marcas()).toEqual([
+        expect.objectContaining({
+          staffId: 'staff-1',
+          data: expect.objectContaining({ paymentId: 'payment-1', tableOwnerId: 'staff-beto' }),
+        }),
+      ])
+    },
+  )
+
+  describe('R7-1: tipo del catálogo', () => {
+    const tender = (countsAsCash: boolean) => ({
+      tenderTypeId: 'tender-1',
+      tenderRevision: 1,
+      method: (countsAsCash ? 'CASH' : 'OTHER') as never,
+      tenderLabel: countsAsCash ? 'Efectivo dólares' : 'Uber Eats',
+      tenderCountsAsCash: countsAsCash,
+      tenderCaptureTip: true,
+      tenderSatFormaPago: null,
+      tenderCommissionPercent: null,
+      fundsFlow: (countsAsCash ? 'CASH_DRAWER' : 'EXTERNAL_RECORDED') as never,
+    })
+    const conTender = (countsAsCash: boolean) =>
+      jest
+        .spyOn(require('@/services/dashboard/tenderType.dashboard.service'), 'resolveTenderForCharge')
+        .mockResolvedValue(tender(countsAsCash))
+    afterEach(() => jest.restoreAllMocks())
+
+    it('🔴 con fondos externos EN VIVO ⇒ se registra con el rastro de la mesa ajena (antes: 403)', async () => {
+      conTender(false)
+      const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      deMesa(row, 'staff-beto')
+
+      await payCashOrder('venue-1', 'order-1', {
+        amount: 10000,
+        tip: 0,
+        staffId: 'staff-1',
+        idempotencyKey: 'vivo-uber',
+        tenderTypeId: 'tender-1',
+        tenderRevision: 1,
+        propiedadDeMesa: propiedad(false),
+      })
+
+      expect(pagos.map(x => x.amount)).toEqual([100])
+      expect(marcas()).toHaveLength(1)
+    })
+
+    it('control: un tipo del catálogo que ENTRA AL CAJÓN, en vivo, sigue siendo cobro nuevo ⇒ 403 y ningún pago', async () => {
+      conTender(true)
+      const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      deMesa(row, 'staff-beto')
+
+      await expect(
+        payCashOrder('venue-1', 'order-1', {
+          amount: 10000,
+          tip: 0,
+          staffId: 'staff-1',
+          idempotencyKey: 'vivo-dolares',
+          tenderTypeId: 'tender-1',
+          tenderRevision: 1,
+          propiedadDeMesa: propiedad(false),
+        }),
+      ).rejects.toMatchObject({ statusCode: 403, code: 'TABLE_OWNED_BY_OTHER' })
+      expect(pagos).toHaveLength(0)
+    })
+  })
+
+  it.each([
+    ['efectivo nuevo en vivo, $100', 'CASH', 10000, 100],
+    ['transferencia en vivo de $0 (cuenta cortesiada)', 'BANK_TRANSFER', 0, 0],
+  ])('control R7-1: %s sobre la cuenta que pasó a Beto ⇒ sigue 403 y ningún pago', async (_caso, method, amount, total) => {
+    const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total })
+    deMesa(row, 'staff-beto')
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', {
+        amount,
+        tip: 0,
+        staffId: 'staff-1',
+        idempotencyKey: `control-${method}`,
+        method: method as never,
+        propiedadDeMesa: propiedad(false),
+      }),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'TABLE_OWNED_BY_OTHER' })
+    expect(pagos).toHaveLength(0)
+    expect(marcas()).toEqual([])
+  })
+
   it('control: sin la marca (propiedad de mesa apagada) nada cambia: cobra la mesa ajena como siempre', async () => {
     const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
     deMesa(row, 'staff-beto')
