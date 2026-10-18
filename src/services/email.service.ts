@@ -1,6 +1,7 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
 
 // Initialize Resend client
@@ -4731,7 +4732,8 @@ Equipo de Avoqado`
       year: 'numeric',
       month: 'long',
       day: 'numeric',
-      timeZone: data.timeZone ?? 'America/Mexico_City',
+      // Una zona inválida lanzaría RangeError y el aviso de cobro no saldría.
+      timeZone: zonaValida(data.timeZone),
     })
     const planName = data.planName ?? 'Pro'
 

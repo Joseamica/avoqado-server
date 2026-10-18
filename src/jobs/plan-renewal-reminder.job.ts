@@ -32,6 +32,7 @@ import emailService from '@/services/email.service'
 import { resolvePlanNotificationTarget } from '@/services/access/planNotification.service'
 import { montoDelSiguienteCobro, noHabraCobro } from '@/services/billing/siguienteCobro'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { zonaValida } from '@/utils/datetime'
 import { scheduleJob } from '../observability/jobContext'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -159,8 +160,8 @@ export class PlanRenewalReminderJob {
           billingPortalUrl: billingPageUrl(vf.venue?.slug),
           planName: vf.feature?.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro',
           isTrialEnd: sub.status === 'trialing',
-          // `||`, not `??`: an empty zone makes toLocaleDateString throw.
-          timeZone: vf.venue?.timezone || 'America/Mexico_City',
+          // An empty or non-IANA zone ("GMT-6") makes toLocaleDateString throw: fall back to CDMX instead of never sending.
+          timeZone: zonaValida(vf.venue?.timezone),
         })
         // Not delivered → no stamp, so the next daily run retries.
         if (!sent) {
