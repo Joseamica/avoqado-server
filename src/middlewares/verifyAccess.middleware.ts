@@ -218,7 +218,10 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
       // Check if white-label is required for this route
       if (options.requireWhiteLabel && !access.whiteLabelEnabled) {
         logger.warn(`verifyAccess: User ${userId} denied - route requires white-label but venue ${targetVenueId} doesn't have it enabled`)
-        throw new ForbiddenError('This feature requires white-label dashboard to be enabled', 'MODULE_DISABLED')
+        throw new ForbiddenError(
+          'Esta función necesita el módulo white-label activado en esta sucursal. Pídeselo a Avoqado.',
+          'MODULE_DISABLED',
+        )
       }
 
       // If no specific checks requested, just validate venue access

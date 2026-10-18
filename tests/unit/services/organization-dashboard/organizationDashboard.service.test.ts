@@ -701,6 +701,9 @@ describe('upsertOrgAttendanceConfig / deleteOrgAttendanceConfig — bitácora y 
         changes: {
           attendanceTracking: { from: false, to: true },
           expectedCheckInTime: { from: '09:00', to: '10:00' },
+          // Ronda 3: también lo que el servidor derivó y guardó en `settings` (las terminales lo leen de ahí).
+          requireClockInPhoto: { from: null, to: true },
+          requireClockInToLogin: { from: null, to: true },
         },
       },
     })
@@ -745,5 +748,107 @@ describe('upsertOrgAttendanceConfig / deleteOrgAttendanceConfig — bitácora y 
     await organizationDashboardService.deleteOrgAttendanceConfig(orgId, 'staff-dueno')
 
     expect(logAction).not.toHaveBeenCalled()
+  })
+})
+
+// Ronda 3 (Codex, 17-oct): (1) si la config ya quedó guardada y la propagación falla a medias, el asiento se escribía
+// NUNCA (sólo al final); (2) el detalle se armaba con el cuerpo recibido, no con lo que de verdad quedó guardado
+// (`attendanceTracking` arrastra a `requireClockInPhoto` y `requireClockInToLogin`).
+describe('ajustes de la org — nunca un cambio guardado sin asiento, y el asiento dice lo guardado', () => {
+  const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service') as { logAction: jest.Mock }
+  const asientos = (action: string) => logAction.mock.calls.map(([p]) => p).filter(p => p?.action === action)
+
+  beforeEach(() => {
+    logAction.mockReset()
+    prismaMock.organizationAttendanceConfig.upsert.mockResolvedValue({ id: 'cfg-1' } as any)
+  })
+
+  it('🔴 TPV con 51 terminales: el primer lote se confirma y el segundo falla → asiento con lo guardado y propagación incompleta', async () => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({ settings: { enableCardPayments: true } } as any)
+    prismaMock.terminal.findMany.mockResolvedValue(
+      Array.from({ length: 51 }, (_, i) => ({ id: `t${i}`, config: { settings: {} }, configOverrides: null })) as any,
+    )
+    prismaMock.$transaction
+      .mockResolvedValueOnce([{}, ...Array.from({ length: 50 }, () => ({ count: 1 }))] as any)
+      .mockRejectedValueOnce(new Error('se cayó el lote 2'))
+
+    await expect(organizationDashboardService.upsertOrgTpvDefaults(orgId, { enableCardPayments: false }, 'staff-dueno')).rejects.toThrow(
+      'se cayó el lote 2',
+    )
+
+    expect(asientos('ORG_TPV_DEFAULTS_UPDATED')).toEqual([
+      expect.objectContaining({
+        staffId: 'staff-dueno',
+        organizationId: orgId,
+        data: {
+          changes: { enableCardPayments: { from: true, to: false } },
+          terminalsUpdated: 50,
+          propagacionIncompleta: true,
+        },
+      }),
+    ])
+  })
+
+  it('regresión: si el PRIMER lote falla no se guardó nada (va en la misma transacción) y no hay asiento', async () => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue(null)
+    prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: { settings: {} }, configOverrides: null }] as any)
+    prismaMock.$transaction.mockRejectedValueOnce(new Error('se cayó el lote 1'))
+
+    await expect(organizationDashboardService.upsertOrgTpvDefaults(orgId, { enableCardPayments: false }, 'staff-dueno')).rejects.toThrow()
+
+    expect(asientos('ORG_TPV_DEFAULTS_UPDATED')).toEqual([])
+  })
+
+  it('🔴 checador: se guarda trackPromoterLocation y falla la propagación a VenueSettings → asiento con propagación incompleta', async () => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({ trackPromoterLocation: false, settings: {} } as any)
+    prismaMock.venue.findMany.mockResolvedValue([{ id: 'v1' }, { id: 'v2' }] as any)
+    prismaMock.venueSettings.updateMany.mockRejectedValueOnce(new Error('se cayó la propagación'))
+
+    await expect(
+      organizationDashboardService.upsertOrgAttendanceConfig(orgId, { trackPromoterLocation: true }, 'staff-dueno', 'venue-a'),
+    ).rejects.toThrow('se cayó la propagación')
+
+    expect(asientos('ORG_ATTENDANCE_CONFIG_UPDATED')).toEqual([
+      expect.objectContaining({
+        staffId: 'staff-dueno',
+        organizationId: orgId,
+        venueId: 'venue-a',
+        data: { changes: { trackPromoterLocation: { from: false, to: true } }, propagacionIncompleta: true },
+      }),
+    ])
+  })
+
+  it('🔴 el cuerpo de Codex: el detalle dice los TRES que quedaron en false, no sólo el que se mandó distinto', async () => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+      settings: { attendanceTracking: true, requireClockInPhoto: true, requireClockInToLogin: true },
+    } as any)
+    prismaMock.terminal.findMany.mockResolvedValue([])
+
+    await organizationDashboardService.upsertOrgTpvDefaults(
+      orgId,
+      { attendanceTracking: false, requireClockInPhoto: true, requireClockInToLogin: true },
+      'staff-dueno',
+    )
+
+    expect(asientos('ORG_TPV_DEFAULTS_UPDATED')[0].data.changes).toEqual({
+      attendanceTracking: { from: true, to: false },
+      requireClockInPhoto: { from: true, to: false },
+      requireClockInToLogin: { from: true, to: false },
+    })
+  })
+
+  it('🔴 las llaves que el servidor deriva salen aunque el cuerpo ni las mencione', async () => {
+    prismaMock.organizationAttendanceConfig.findUnique.mockResolvedValue({
+      settings: { attendanceTracking: true, requireClockInPhoto: true, requireClockInToLogin: true },
+    } as any)
+    prismaMock.terminal.findMany.mockResolvedValue([])
+
+    await organizationDashboardService.upsertOrgTpvDefaults(orgId, { attendanceTracking: false }, 'staff-dueno')
+
+    expect(Object.keys(asientos('ORG_TPV_DEFAULTS_UPDATED')[0].data.changes).sort()).toEqual([
+      'attendanceTracking',
+      'requireClockInPhoto',
+      'requireClockInToLogin',
+    ])
   })
 })

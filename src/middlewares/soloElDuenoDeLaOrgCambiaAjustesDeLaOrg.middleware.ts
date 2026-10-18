@@ -25,6 +25,8 @@ export const MENSAJES_SOLO_DUENO_AJUSTES_DE_LA_ORG = {
   ORG_TPV_DEFAULTS: 'Sólo el dueño de la organización puede cambiar los valores por defecto de todas las terminales. Pídeselo al dueño.',
   ORG_ATTENDANCE_CONFIG:
     'Sólo el dueño de la organización puede cambiar la configuración de checador y terminales de todas las sucursales. Pídeselo al dueño.',
+  // `PUT /organizations/:orgId` (ronda 3): con escrituras anidadas era la puerta lateral a lo de arriba.
+  ORGANIZATION_DETAILS: 'Sólo el dueño de la organización puede cambiar los datos de la organización. Pídeselo al dueño.',
 } as const
 export type AjusteDeLaOrg = keyof typeof MENSAJES_SOLO_DUENO_AJUSTES_DE_LA_ORG
 

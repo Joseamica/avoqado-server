@@ -24,12 +24,34 @@ import storesAnalysisRouter from '@/routes/dashboard/storesAnalysis.routes'
 import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
 
 const ORG = 'org-pt'
+const OTRA_ORG = 'org-otra'
 const VA = 'venue-a'
+const VO = 'venue-otra' // tienda de OTRA organización
+const ORG_DE: Record<string, string> = { [VA]: ORG, [VO]: OTRA_ORG }
 
-/** Filas `StaffVenue` de la tienda A. */
-const SUCURSAL: Record<string, string> = { 'dueno-suc': 'OWNER', cajero: 'CASHIER' }
-/** Dueños ACTIVOS de la org (`StaffOrganization` OWNER). `dueno-org` no tiene fila en ninguna tienda. */
-const DUENOS_DE_LA_ORG = new Set(['dueno-org'])
+/** `Staff.active` de cada persona. Quien no está aquí no existe. */
+const PERSONAS: Record<string, boolean> = {
+  'dueno-suc': true,
+  cajero: true,
+  'dueno-org': true,
+  'dueno-org-baja': false, // su fila de dueño sigue viva; la PERSONA está dada de baja
+  'dueno-otra-org': true,
+}
+/** Filas `StaffVenue`. `dueno-org` no tiene fila en ninguna tienda. */
+const SUCURSAL = [
+  { staffId: 'dueno-suc', venueId: VA, role: 'OWNER', active: true },
+  { staffId: 'cajero', venueId: VA, role: 'CASHIER', active: true },
+  { staffId: 'dueno-otra-org', venueId: VO, role: 'OWNER', active: true },
+]
+/** Filas `StaffOrganization` con rol OWNER. */
+const DUENOS = [
+  { staffId: 'dueno-org', organizationId: ORG, isActive: true },
+  { staffId: 'dueno-org-baja', organizationId: ORG, isActive: true },
+  { staffId: 'dueno-otra-org', organizationId: OTRA_ORG, isActive: true },
+]
+const coincide = (filtro: unknown, valor: string) =>
+  filtro === undefined || (typeof filtro === 'string' ? filtro === valor : ((filtro as { in?: string[] }).in ?? []).includes(valor))
+const personaActiva = (staffId: string) => PERSONAS[staffId] === true
 
 function como(userId: string, role: string) {
   return { 'x-test-auth-context': JSON.stringify({ userId, orgId: ORG, venueId: VA, role }) }
@@ -56,45 +78,63 @@ describe('puerta de la sucursal con el verifyAccess REAL', () => {
       jest.spyOn(organizationDashboardService, 'getOrgTpvDefaults').mockResolvedValue({}),
       jest.spyOn(organizationDashboardService, 'upsertOrgTpvDefaults').mockResolvedValue({ config: {}, terminalsUpdated: 1 }),
       jest.spyOn(organizationDashboardService, 'upsertOrgAttendanceConfig').mockResolvedValue({ id: 'cfg' } as any),
+      jest.spyOn(organizationDashboardService, 'deleteOrgAttendanceConfig').mockResolvedValue(undefined),
     ]
 
-    // Superadmin: nadie aquí lo es (la consulta pide rol SUPERADMIN).
-    prismaMock.staffVenue.findFirst.mockImplementation((({ where }: any) =>
-      Promise.resolve(where?.role === 'SUPERADMIN' ? null : SUCURSAL[where?.staffId] ? { id: 'sv' } : null)) as any)
+    // Cada doble contesta según TODO su `where` (persona, rol, fila activa, persona activa, tienda, organización): uno
+    // que contestara igual a cualquier consulta volvería dueño a cualquiera.
+    prismaMock.staff.findUnique.mockImplementation((({ where }: any) =>
+      Promise.resolve(where?.id in PERSONAS ? { id: where.id, active: PERSONAS[where.id] } : null)) as any)
+    prismaMock.staffVenue.findFirst.mockImplementation((({ where }: any) => {
+      const fila = SUCURSAL.find(
+        f =>
+          f.staffId === where?.staffId &&
+          coincide(where?.role, f.role) &&
+          (where?.venueId === undefined || where.venueId === f.venueId) &&
+          (where?.active !== true || f.active) &&
+          (where?.staff?.active !== true || personaActiva(f.staffId)) &&
+          (!where?.venue?.organizationId || ORG_DE[f.venueId] === where.venue.organizationId),
+      )
+      return Promise.resolve(fila ? { id: `sv-${fila.staffId}` } : null)
+    }) as any)
     prismaMock.staffVenue.findUnique.mockImplementation((({ where }: any) => {
       const { staffId, venueId } = where?.staffId_venueId ?? {}
-      const rol = venueId === VA ? SUCURSAL[staffId] : undefined
+      const fila = SUCURSAL.find(f => f.staffId === staffId && f.venueId === venueId)
       return Promise.resolve(
-        rol ? { role: rol, active: true, permissionSetId: null, permissionSet: null, venue: { organizationId: ORG } } : null,
+        fila
+          ? { role: fila.role, active: fila.active, permissionSetId: null, permissionSet: null, venue: { organizationId: ORG_DE[venueId] } }
+          : null,
       )
     }) as any)
     prismaMock.venue.findUnique.mockImplementation((({ where }: any) =>
-      Promise.resolve(where?.id === VA ? { id: VA, organizationId: ORG } : null)) as any)
+      Promise.resolve(ORG_DE[where?.id] ? { id: where.id, organizationId: ORG_DE[where.id] } : null)) as any)
     // White-label: sin fila en la tienda, heredado de la org.
     prismaMock.venueModule.findFirst.mockResolvedValue(null)
     prismaMock.organizationModule.findFirst.mockImplementation((({ where }: any) =>
       Promise.resolve(
-        where?.organizationId === ORG && where?.enabled === true && where?.module?.code === 'WHITE_LABEL_DASHBOARD'
+        ORG_DE[VA] === where?.organizationId && where?.enabled === true && where?.module?.code === 'WHITE_LABEL_DASHBOARD'
           ? { config: null }
           : null,
       )) as any)
     prismaMock.venueRolePermission.findMany.mockResolvedValue([])
-    prismaMock.staff.findUnique.mockImplementation((({ where }: any) => Promise.resolve({ id: where?.id, active: true })) as any)
     prismaMock.staffOrganization.findMany.mockImplementation((({ where }: any) =>
       Promise.resolve(
-        where?.role === 'OWNER' && where?.isActive === true && DUENOS_DE_LA_ORG.has(where?.staffId) ? [{ organizationId: ORG }] : [],
+        DUENOS.filter(f => f.staffId === where?.staffId && coincide(where?.role, 'OWNER') && (where?.isActive !== true || f.isActive)).map(
+          f => ({ organizationId: f.organizationId }),
+        ),
       )) as any)
     // La regla estrecha.
-    prismaMock.staffOrganization.findFirst.mockImplementation((({ where }: any) =>
-      Promise.resolve(
-        where?.organizationId === ORG &&
-          where?.role === 'OWNER' &&
-          where?.isActive === true &&
-          where?.staff?.active === true &&
-          DUENOS_DE_LA_ORG.has(where?.staffId)
-          ? { id: 'so' }
-          : null,
-      )) as any)
+    prismaMock.staffOrganization.findFirst.mockImplementation((({ where }: any) => {
+      const fila = DUENOS.find(
+        f =>
+          f.staffId === where?.staffId &&
+          f.organizationId === where?.organizationId &&
+          coincide(where?.role, 'OWNER') &&
+          (where?.isActive !== true || f.isActive) &&
+          (where?.staff?.active !== true || personaActiva(f.staffId)),
+      )
+      return Promise.resolve(fila ? { id: `so-${fila.staffId}` } : null)
+    }) as any)
   })
   afterEach(() => spies.forEach(s => s.mockRestore()))
 
@@ -139,5 +179,40 @@ describe('puerta de la sucursal con el verifyAccess REAL', () => {
 
     expect(res.status).toBe(403)
     expect(res.body.message).toBe('Owner access required')
+  })
+
+  it('🔴 DELETE org-attendance-config: al OWNER de UNA tienda también lo frena la regla nueva', async () => {
+    const res = await request(makeApp()).delete(`${BASE}/org-attendance-config`).set(como('dueno-suc', 'OWNER'))
+
+    expect(res.status).toBe(403)
+    expect(res.body).toEqual({
+      message:
+        'Sólo el dueño de la organización puede cambiar la configuración de checador y terminales de todas las sucursales. Pídeselo al dueño.',
+      code: 'ORG_OWNER_REQUIRED',
+    })
+    expect(organizationDashboardService.deleteOrgAttendanceConfig).not.toHaveBeenCalled()
+  })
+
+  it('DELETE: el dueño de la org, sin fila en la tienda, borra', async () => {
+    const res = await request(makeApp()).delete(`${BASE}/org-attendance-config`).set(como('dueno-org', 'OWNER'))
+
+    expect(res.status).toBe(200)
+    expect(organizationDashboardService.deleteOrgAttendanceConfig).toHaveBeenCalledWith(ORG, 'dueno-org', VA)
+  })
+
+  it.each([
+    ['🔴 el dueño de la org dado de baja (fila viva, persona inactiva)', 'dueno-org-baja'],
+    ['🔴 el dueño de OTRA organización, por una tienda de ésta', 'dueno-otra-org'],
+  ])('%s no escribe nada', async (_l, actor) => {
+    const put = await request(makeApp())
+      .put(`${BASE}/org-tpv-defaults`)
+      .set(como(actor, 'OWNER'))
+      .send({ settings: { enableCardPayments: false } })
+    const del = await request(makeApp()).delete(`${BASE}/org-attendance-config`).set(como(actor, 'OWNER'))
+
+    expect(put.status).toBe(403)
+    expect(del.status).toBe(403)
+    expect(organizationDashboardService.upsertOrgTpvDefaults).not.toHaveBeenCalled()
+    expect(organizationDashboardService.deleteOrgAttendanceConfig).not.toHaveBeenCalled()
   })
 })
