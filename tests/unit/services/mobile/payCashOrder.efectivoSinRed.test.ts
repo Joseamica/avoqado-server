@@ -676,17 +676,15 @@ describe('R5-2: la llave de un intento fallido o de una devolución no es «el m
   it('🔴 carrera: bajo el candado la llave resulta ser de un intento FAILED ⇒ 409 por la red de la carrera, sin crear', async () => {
     instalarBase({ paymentStatus: 'PENDING', total: 100 })
     // La consulta rápida no ve la llave; al crear choca con el índice único (P2002) y el «ganador» es un intento FAILED.
-    prismaMock.payment.findUnique
-      .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({
-        id: 'f-1',
-        orderId: 'order-1',
-        status: 'FAILED',
-        type: 'REGULAR',
-        amount: new Decimal(100),
-        tipAmount: new Decimal(0),
-        receipts: [],
-      } as any)
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
+      id: 'f-1',
+      orderId: 'order-1',
+      status: 'FAILED',
+      type: 'REGULAR',
+      amount: new Decimal(100),
+      tipAmount: new Decimal(0),
+      receipts: [],
+    } as any)
     prismaMock.payment.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }))
 
     await expect(
@@ -695,5 +693,149 @@ describe('R5-2: la llave de un intento fallido o de una devolución no es «el m
       statusCode: 409,
       code: 'IDEMPOTENCY_KEY_REUSED',
     })
+  })
+})
+
+/**
+ * 🔴 R6-2 (Codex r5 #2, P2): A y B mandan la MISMA llave; B consultó la llave antes de que A confirmara. Bajo el candado veía la venta
+ * cerrada (o el saldo) y rechazaba con 400 en vez de devolver el cobro de A. Ahora, antes de esos rechazos, la llave se busca otra vez
+ * bajo el candado y sale por la red de la carrera, con las reglas de R5-2 (un intento FAILED o una devolución ⇒ 409).
+ */
+describe('R6-2: el reintento simultáneo con la misma llave', () => {
+  it.each([
+    ['en vivo, $100', 10000, {}, 100],
+    ['cola Android/Windows ≤ 2.23 (H1), $100', 10000, { isOfflineReplay: true, colaConDefectoH1: true }, 100],
+    ['cortesía de $0', 0, {}, 0],
+  ])(
+    '🔴 %s: la consulta rápida no vio a A y bajo el candado la venta ya está PAID ⇒ el MISMO cobro de A, sin 400 ni pago nuevo',
+    async (_caso, amount, extra, total) => {
+      const { pagos, cas } = instalarBase({ paymentStatus: 'PAID', total }, [{ amount: total, idempotencyKey: 'llave-K' }])
+      prismaMock.payment.findUnique.mockResolvedValueOnce(null) // la consulta rápida de B, antes de que A confirmara
+
+      const r = await payCashOrder('venue-1', 'order-1', { amount, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-K', ...extra })
+
+      expect([r.paymentId, r.status, r.amount]).toEqual(['previo-1', 'COMPLETED', total * 100])
+      expect([pagos.length, cas.length]).toEqual([1, 0])
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    },
+  )
+
+  it('🔴 por saldo: un $0 con la llave que bajo el candado ya tiene su cobro ⇒ ese cobro, no «Esta cuenta debe…»', async () => {
+    const { pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 }, [{ amount: 0, idempotencyKey: 'llave-0' }])
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null)
+
+    const r = await payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-0' })
+
+    expect([r.paymentId, r.status]).toEqual(['previo-1', 'COMPLETED'])
+    expect(pagos).toHaveLength(1)
+  })
+
+  it('🔴 bajo el candado la llave es de un intento FAILED ⇒ 409 IDEMPOTENCY_KEY_REUSED (R5-2), no el 400 de «ya pagada»', async () => {
+    instalarBase({ paymentStatus: 'PAID', total: 100 }, [{ amount: 100 }, { amount: 100, status: 'FAILED', idempotencyKey: 'llave-F' }])
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null)
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-F' }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('control: sin pago con esa llave, la venta cerrada sigue rechazando el cobro nuevo con 400 «ya pagada»', async () => {
+    instalarBase({ paymentStatus: 'PAID', total: 100 }, [{ amount: 100 }])
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-nueva' }),
+    ).rejects.toMatchObject({ statusCode: 400, message: 'Order is already paid' })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 R6-3 (Codex r5 #3, P2): la propiedad de mesa se revisaba antes del candado. Si la cuenta pasa a Beto en esa ventana, el cobro NUEVO
+ * de Ana (un $0 que cierra la cortesía, o efectivo en vivo) se creaba sobre la mesa de Beto. Ahora se vuelve a revisar bajo el candado
+ * con la MISMA regla (`propiedadDeMesa`, marca interna del middleware o del reducer). El dinero capturado sigue y deja su rastro.
+ */
+describe('R6-3: la propiedad de mesa otra vez, bajo el candado', () => {
+  const marcas = () => (logAction as jest.Mock).mock.calls.map(c => c[0]).filter(d => d.action === 'CAPTURED_PAYMENT_ON_FOREIGN_TABLE')
+  const propiedad = (puede = false) => ({ userId: 'staff-1', puedeCobrarAjena: jest.fn().mockResolvedValue(puede) })
+  const deMesa = (row: Record<string, unknown>, servedById: string | null) =>
+    Object.assign(row, {
+      tableId: 'mesa-1',
+      servedById,
+      servedBy: servedById === 'staff-beto' ? { firstName: 'Beto', lastName: 'Bravo' } : null,
+    })
+
+  it.each([
+    ['$0 que cierra la cortesía', 0, 0],
+    ['$50 en vivo', 5000, 100],
+  ])(
+    '🔴 %s de Ana; bajo el candado la cuenta ya es de Beto ⇒ 403 TABLE_OWNED_BY_OTHER con Beto y ningún pago',
+    async (_caso, amount, total) => {
+      const { row, pagos, cas } = instalarBase({ paymentStatus: 'PENDING', total })
+      deMesa(row, 'staff-beto')
+
+      const error = await payCashOrder('venue-1', 'order-1', {
+        amount,
+        tip: 0,
+        staffId: 'staff-1',
+        idempotencyKey: 'llave-nueva',
+        propiedadDeMesa: propiedad(false),
+      }).catch(e => e)
+
+      expect(error).toMatchObject({
+        statusCode: 403,
+        code: 'TABLE_OWNED_BY_OTHER',
+        dueno: { ownerId: 'staff-beto', ownerName: 'Beto Bravo' },
+      })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+      expect([pagos.length, cas.length]).toEqual([0, 0])
+    },
+  )
+
+  it('control: con `tables:pay-any` o `tables:manage-all` (la misma regla del middleware) ⇒ cobra la mesa de Beto', async () => {
+    const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    deMesa(row, 'staff-beto')
+    const p = propiedad(true)
+
+    await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k', propiedadDeMesa: p })
+
+    expect(pagos.map(x => x.amount)).toEqual([100])
+    expect(p.puedeCobrarAjena).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['sigue siendo de Ana', 'staff-1', 'mesa-1'],
+    ['sin dueño', null, 'mesa-1'],
+    ['mostrador (sin mesa)', 'staff-beto', null],
+  ])('control: %s ⇒ cobra sin preguntar permisos', async (_caso, servedById, tableId) => {
+    const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    Object.assign(deMesa(row, servedById), { tableId })
+    const p = propiedad(false)
+
+    await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k', propiedadDeMesa: p })
+
+    expect(pagos.map(x => x.amount)).toEqual([100])
+    expect(p.puedeCobrarAjena).not.toHaveBeenCalled()
+  })
+
+  it('🔴 dinero CAPTURADO (la cola, $100) sobre la cuenta que pasó a Beto en esa ventana ⇒ se registra a nombre de Ana y deja el rastro de la mesa ajena', async () => {
+    const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    deMesa(row, 'staff-beto')
+
+    await payCashOrder('venue-1', 'order-1', { ...cola(10000, 'cola-K'), propiedadDeMesa: propiedad(false) })
+
+    expect(pagos.map(x => x.amount)).toEqual([100])
+    expect(marcas()).toEqual([
+      expect.objectContaining({
+        staffId: 'staff-1',
+        data: expect.objectContaining({ paymentId: 'payment-1', tableOwnerId: 'staff-beto', tableOwnerName: 'Beto Bravo' }),
+      }),
+    ])
+  })
+
+  it('control: sin la marca (propiedad de mesa apagada) nada cambia: cobra la mesa ajena como siempre', async () => {
+    const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+    deMesa(row, 'staff-beto')
+    await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k' })
+    expect(pagos.map(x => x.amount)).toEqual([100])
   })
 })

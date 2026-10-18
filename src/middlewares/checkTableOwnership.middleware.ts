@@ -156,6 +156,16 @@ export const checkTableOwnership = (
       // Switch apagado (default) → no-op.
       if (!(await isTableOwnershipEnforced(venueId))) return next()
 
+      // 🔴 R6-3 (Codex r5 #3): lo de abajo se decide ANTES del candado del cobro; si la cuenta cambia de dueño en esa ventana, el cobro
+      // vuelve a revisar la propiedad bajo el candado con la MISMA regla. Marca interna (nunca del body), sólo en la ruta de cobro.
+      if (opciones.dineroCapturado) {
+        res.locals.propiedadDeMesa = {
+          userId: authContext.userId,
+          puedeCobrarAjena: () =>
+            staffCanManageAllTables(authContext.userId, venueId, authContext.venueId, authContext.role, overridePermissions, req),
+        }
+      }
+
       // Dueño(s) de la(s) orden(es) afectada(s).
       let owners: { servedById: string | null; servedBy: { firstName: string; lastName: string } | null }[] = []
       if (source === 'order') {
