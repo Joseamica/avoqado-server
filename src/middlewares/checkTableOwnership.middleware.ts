@@ -4,6 +4,7 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { resolveUserRoleForVenue } from './checkPermission.middleware'
 import { esSuperadminReal } from '@/services/access/rolVigente'
+import { hayDineroQueSeGuarda } from '@/services/shared/orderBalance'
 
 /**
  * Propiedad de mesa — "Solo el propietario puede modificar sus mesas".
@@ -101,6 +102,7 @@ type OwnershipSource = 'order' | 'table'
  *        encargado pasó la mesa a Beto: su cola (`isOfflineReplay`) pasa, con la mesa ajena en `res.locals.mesaAjena` para el
  *        rastro en `ActivityLog`. Autenticación, sucursal, `payments:create` e idempotencia se conservan; el cobro EN VIVO sigue 403.
  *        R3-1: sólo con importe + propina > 0 (`esDineroCapturado`); un $0 + $0 sobre mesa ajena sigue 403.
+ *        R4-1: el reintento cuya llave YA tiene pago de esta orden pasa siempre (`laLlaveYaTienePagoDeEstaOrden`): es idempotente.
  */
 /**
  * 🔴 R3-1 (Codex r2, P2): ¿el cuerpo trae dinero de verdad? Importe y propina válidos (las mismas reglas del controller de cobro) y
@@ -110,7 +112,24 @@ type OwnershipSource = 'order' | 'table'
 function esDineroCapturado(body: { amount?: unknown; tip?: unknown }): boolean {
   const { amount, tip = 0 } = body
   const valido = (n: unknown): n is number => typeof n === 'number' && Number.isFinite(n) && n >= 0
-  return valido(amount) && valido(tip) && amount + tip > 0
+  // R4-4: con la precisión con que se guarda (centavos enteros): 0.001 ¢ se guarda $0.00 y no es dinero.
+  return valido(amount) && valido(tip) && hayDineroQueSeGuarda(amount, tip)
+}
+
+/**
+ * 🔴 R4-1 (Codex r3, P2): ¿la llave de este cobro YA tiene un pago de ESTA orden en ESTE negocio? Es el reintento de una operación
+ * confirmada (la respuesta se perdió): el servicio devuelve ese pago sin cobrar otra vez, así que la propiedad de mesa no lo rechaza
+ * aunque la mesa haya cambiado de dueño — con R3-1 un reintento de $0 recibía 403 antes de mirar la llave. Mismo criterio que
+ * `payCashOrder` (llave de texto no vacía, `venueId_idempotencyKey`), y además la orden debe ser la misma: una llave de otra orden, o
+ * una nueva, sigue con el 403 de siempre.
+ */
+async function laLlaveYaTienePagoDeEstaOrden(venueId: string, orderId: string | undefined, llave: unknown): Promise<boolean> {
+  if (!orderId || typeof llave !== 'string' || !llave) return false
+  const pago = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey: llave } },
+    select: { orderId: true },
+  })
+  return pago?.orderId === orderId
 }
 
 export const checkTableOwnership = (
@@ -180,6 +199,9 @@ export const checkTableOwnership = (
       const ownerName = foreign.servedBy ? `${foreign.servedBy.firstName} ${foreign.servedBy.lastName}`.trim() : 'otro mesero'
       if (opciones.dineroCapturado && req.body?.isOfflineReplay === true && esDineroCapturado(req.body)) {
         res.locals.mesaAjena = { ownerId: foreign.servedById, ownerName }
+        return next()
+      }
+      if (opciones.dineroCapturado && (await laLlaveYaTienePagoDeEstaOrden(venueId, req.params?.orderId, req.body?.idempotencyKey))) {
         return next()
       }
       logger.info(

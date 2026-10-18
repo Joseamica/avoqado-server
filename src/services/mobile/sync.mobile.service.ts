@@ -31,6 +31,7 @@ import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { CODIGOS_TRANSITORIOS } from '../shared/erroresTransitorios'
+import { hayDineroQueSeGuarda } from '../shared/orderBalance'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import {
   DEFAULT_OWNERSHIP_OVERRIDES,
@@ -1377,12 +1378,16 @@ async function applyPayCash(
   }
   // Only numeric zero without a tip delegates the zero-balance decision to payCashOrder.
   const zeroWithoutTip = intent.payload.amountCents === 0 && (intent.payload.tipCents === undefined || intent.payload.tipCents === 0)
-  if (!orderId || !Number.isFinite(amountCents) || amountCents < 0 || (amountCents === 0 && !zeroWithoutTip)) {
+  // 🔴 R4-3 (Codex r3): la propina SOLA ($0 + $50) es dinero que ya está en el cajón; HTTP la registra y aquí se rechazaba. Mismas
+  // reglas que el controller: importe numérico 0 y propina numérica que se guarda (> 0 en centavos enteros, R4-4).
+  const soloPropina =
+    intent.payload.amountCents === 0 && typeof intent.payload.tipCents === 'number' && hayDineroQueSeGuarda(0, intent.payload.tipCents)
+  if (!orderId || !Number.isFinite(amountCents) || amountCents < 0 || (amountCents === 0 && !zeroWithoutTip && !soloPropina)) {
     return {
       id: intent.id,
       status: 'REJECTED',
       errorCode: 'INVALID_PAYLOAD',
-      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 sin propina para cerrar una cuenta en $0)',
+      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 con propina, o $0 sin propina para cerrar una cuenta en $0)',
     }
   }
   // 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde): el PAY_CASH es dinero que YA está en el cajón. La
@@ -1395,7 +1400,8 @@ async function applyPayCash(
   })
   const mesaAjena = yaCobrado ? null : await mesaAjenaDe(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
   // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado (cerraría la mesa de otro sin un peso): conserva el rechazo de antes.
-  if (mesaAjena && !(amountCents + tipCents > 0)) throw errorMesaAjena(mesaAjena)
+  // R4-4: medido como se guarda (centavos enteros): una fracción de centavo es $0.
+  if (mesaAjena && !hayDineroQueSeGuarda(amountCents, tipCents)) throw errorMesaAjena(mesaAjena)
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,

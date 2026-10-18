@@ -438,6 +438,73 @@ describe('I6 · R2-2: recibir dinero nunca reabre una venta cerrada', () => {
   })
 })
 
+/**
+ * 🔴 Ronda 4 contra Postgres real:
+ *   · R4-3: la propina SOLA ($0 + $50) de la cola sin red es dinero: el reducer la registra (antes: INVALID_PAYLOAD en cuarentena).
+ *   · R4-2: una venta de $100 + $16 de IVA aparte, devuelta y cancelada, que recibe dinero capturado sigue CANCELLED/REFUNDED, pero
+ *     guarda el total de cuando se cobró (base + IVA): $166 con la propina de $50 (antes $150 y 🚨 sobrepago falso de $16), y con $10
+ *     de más guarda $116 y el aviso mide sobre esos MISMOS $116.
+ */
+describe('R4 · la cancelada ya cobrada con IVA aparte y la propina sola', () => {
+  async function devueltaYCanceladaConIvaAparte() {
+    const { orderId, localOrderId } = await cuentaDeA()
+    await prisma.order.update({
+      where: { id: orderId },
+      data: { contratoDePrecio: 'IVA_APARTE', taxAmount: 16, total: 116, remainingBalance: 116 },
+    })
+    const cobroB = await payCashOrder(venueId, orderId, { amount: 11600, tip: 0, staffId: staffB, idempotencyKey: `vivo-B-${orderId}` })
+    await issueRefund({
+      venueId,
+      paymentId: cobroB.paymentId,
+      amount: 11600,
+      tipRefundCents: 0,
+      reason: 'CUSTOMER_REQUEST' as never,
+      staffId: staffB,
+    })
+    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'REFUNDED' } })
+    await cancelOrder(venueId, orderId, 'cancelada después del reembolso', staffB)
+    const cancelada = await prisma.order.findUniqueOrThrow({
+      where: { id: orderId },
+      select: { status: true, paymentStatus: true, total: true },
+    })
+    expect([cancelada.status, cancelada.paymentStatus, Number(cancelada.total)]).toEqual(['CANCELLED', 'REFUNDED', 116])
+    return { orderId, localOrderId }
+  }
+  const totalGuardado = async (orderId: string) =>
+    Number((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { total: true } })).total)
+  const avisosDe = (orderId: string) =>
+    prisma.activityLog.findMany({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' }, select: { data: true }, take: 5 })
+
+  it('🔴 R4-3 + R4-2: la propina sola de la cola ⇒ ACKED; sigue CANCELLED/REFUNDED con total $166 y sin sobrepago falso', async () => {
+    const { orderId, localOrderId } = await devueltaYCanceladaConIvaAparte()
+
+    const [ack] = await processIntents(
+      params([
+        { id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { localOrderId, amountCents: 0, tipCents: 5000, method: 'CASH' } },
+      ]),
+    )
+
+    expect(ack).toMatchObject({ status: 'ACKED' })
+    const tras = await fotoAsentada(orderId, () => false)
+    expect(tras).toMatchObject({ status: 'CANCELLED', paymentStatus: 'REFUNDED', remainingBalance: 0, avisos: 0 })
+    expect(await totalGuardado(orderId)).toBe(166)
+    expect(await prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT' } })).toBe(0)
+  })
+
+  it('🔴 R4-2: $10 de más ⇒ total $116 guardado y el aviso mide sobre los MISMOS $116 (sobrepago real de $10)', async () => {
+    const { orderId, localOrderId } = await devueltaYCanceladaConIvaAparte()
+
+    const [ack] = await processIntents(params([payCashDeA(localOrderId, 1000)]))
+
+    expect(ack).toMatchObject({ status: 'ACKED' })
+    await fotoAsentada(orderId, f => f.avisos === 1)
+    expect(await totalGuardado(orderId)).toBe(116)
+    expect((await avisosDe(orderId)).map(a => a.data)).toEqual([
+      expect.objectContaining({ orderTotal: 116, totalPaid: 126, overpaidBy: 10 }),
+    ])
+  })
+})
+
 describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
   let ana: string
   let beto: string
@@ -581,6 +648,61 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
       expect(segundo.body.payment?.paymentId).toBe(primero.body.payment?.paymentId)
       expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
       expect(await marcasAsentadas(orderId, 2)).toHaveLength(1)
+    })
+  })
+
+  // 🔴 R4-1 (Codex r3, P2): Ana cerró su cuenta cortesiada de $0 con la llave K; la respuesta se perdió y un encargado pasó la mesa a
+  // Beto. El reintento con K es la MISMA operación: con R3-1 recibía 403 antes de mirar la llave. Una llave nueva de $0 sigue en 403.
+  it('🔴 R4-1: el reintento HTTP de $0 con una llave que YA tiene pago ⇒ 200 con el MISMO pago y sin rastro; una llave nueva de $0 sigue 403', async () => {
+    await conPropiedad(async () => {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: ana, discountAmount: 100, total: 0, remainingBalance: 0 } })
+      const K = llaveHttp()
+      const enviar = (idempotencyKey: string) =>
+        request(app)
+          .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+          .set('x-test-actor', ana)
+          .set('x-test-role', 'WAITER')
+          .send({ amount: 0, tip: 0, idempotencyKey })
+
+      const primero = await enviar(K)
+      expect(primero.status).toBe(200)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })).paymentStatus).toBe('PAID')
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: beto } })
+
+      const reintento = await enviar(K)
+      expect(reintento.status).toBe(200)
+      expect(reintento.body.payment?.paymentId).toBe(primero.body.payment?.paymentId)
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+
+      const nueva = await enviar(llaveHttp())
+      expect([nueva.status, nueva.body.code]).toEqual([403, 'TABLE_OWNED_BY_OTHER'])
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+      expect(await marcas(orderId)).toEqual([])
+    })
+  })
+
+  // 🔴 R4-4 (Codex r3, P2 E): una fracción de centavo se guarda como $0.00: no abre el pase de mesa ajena (HTTP ni reducer).
+  it('🔴 R4-4: cuenta ajena en $0 ⇒ 0.001 ¢ de Ana se rechaza por HTTP (403) y por el reducer (TABLE_OWNED_BY_OTHER); nada se escribe', async () => {
+    await conPropiedad(async () => {
+      const orderId = await mesaPasadaABeto()
+      await prisma.order.update({ where: { id: orderId }, data: { discountAmount: 100, total: 0, remainingBalance: 0 } })
+
+      const http = await request(app)
+        .post(`/api/v1/mobile/venues/${venueId}/orders/${orderId}/pay`)
+        .set('x-test-actor', ana)
+        .set('x-test-role', 'WAITER')
+        .send({ amount: 0.001, tip: 0, idempotencyKey: llaveHttp(), isOfflineReplay: true })
+      expect([http.status, http.body.code]).toEqual([403, 'TABLE_OWNED_BY_OTHER'])
+
+      const [ack] = await processIntents(
+        params(
+          [{ id: randomUUID(), seq: ++seq, type: 'PAY_CASH', payload: { orderId, amountCents: 0.001, tipCents: 0, method: 'CASH' } }],
+          ana,
+        ),
+      )
+      expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
     })
   })
 })
