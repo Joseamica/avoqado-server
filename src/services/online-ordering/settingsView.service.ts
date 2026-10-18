@@ -9,9 +9,9 @@ import { getSettings, storeRequirements } from './settings.service'
  * `preloaded`: los ajustes que quien llama ya tiene (lo que acaba de escribir el PUT, o lo que ya leyó el MCP), para no leerlos
  * dos veces y para que el estado salga de ESOS ajustes.
  */
-export async function settingsView(venueId: string, preloaded?: Awaited<ReturnType<typeof getSettings>>, now: Date = new Date()) {
+export async function settingsView(venueId: string, preloaded?: Awaited<ReturnType<typeof getSettings>>) {
   const settings = preloaded ?? (await getSettings(venueId))
-  const [state, requirements] = await Promise.all([getAcceptingStatus(venueId, now, settings), storeRequirements(venueId)])
+  const [state, requirements] = await Promise.all([getAcceptingStatus(venueId, new Date(), settings), storeRequirements(venueId)])
   const { lastInboxPollAt, ...config } = settings
   return {
     ...config,
