@@ -35,7 +35,6 @@ import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
 import { registrarCambioDeIva } from '../../services/fiscal/encendidoIva.service'
 import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
 import { categoriaParaProductoSinCategoria } from '../../services/mobile/categoriaGeneral.service'
-import { logAction } from '../../services/dashboard/activity-log.service'
 
 // ---------------------------------------------------------------------------
 // Helpers

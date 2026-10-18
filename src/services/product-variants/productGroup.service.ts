@@ -10,6 +10,7 @@ import { assertLegacyCatalogGovernanceForVenue, assertLegacyProductReferencesFor
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
 import { encenderBajoCandados, prepararEncendido } from '../fiscal/encendidoIva.service'
+import { isDeadlockError } from '../../utils/serializableRetry'
 import { ETIQUETA_DE_IVA, TRATAMIENTOS_OFRECIDOS_V1, tuplaDesdeTratamiento } from '../fiscal/ivaTratamiento'
 import { ensureQuantityInventoryRow } from '../dashboard/quantityInventoryRow'
 import { GTIN_MAX_LENGTH, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
@@ -646,6 +647,9 @@ export async function updateProductGroup(
     // Sólo si otra escritura cuela un extra en una variante entre el borrado y el alta de arriba.
     if ((e as any)?.code === 'P2002')
       throw new ConflictError('Otro cambio tocó los extras de este producto al mismo tiempo. Recarga y vuelve a intentarlo.')
+    // Codex (publicación, r1 #2): el primer encendido del IVA bloquea productos de facturas viejas ANTES del cerco del catálogo
+    // (D10); si a la vez alguien archiva esa familia, Postgres corta una. Nada quedó a medias: se pide repetir, nunca un 500.
+    if (isDeadlockError(e)) throw new ConflictError('Otro cambio tocó este producto al mismo tiempo. Vuelve a intentarlo.')
     throw e
   }
   afterGroupWrite(
