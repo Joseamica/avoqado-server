@@ -19,6 +19,7 @@ import { BadRequestError, ConflictError, UnauthorizedError } from '@/errors/AppE
 import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { SocketEventType } from '@/communication/sockets/types'
 import { canonicalPhoneE164, phonesMatch } from '@/utils/phone'
+import { ponerNombreSiFalta } from '@/services/customer/customerName'
 import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, OPEN_ORDER_STATUSES } from './constants'
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
@@ -349,6 +350,11 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
             whatsappConsent: input.whatsappConsent === true,
           },
         })
+        // S3: `verify` para PEDIR no pone nombre (R7: no activa la cuenta de reservas) y la tienda no lo manda al verificar; sin esto
+        // el Customer nacía vacío y «Clientes» lo mostraba sin nombre. Sólo llena si estaba vacío, nunca pisa lo del negocio, y una
+        // repetición ya salió arriba sin llegar aquí. No toca la cuenta de reservas.
+        const cliente = await tx.customer.findFirst({ where: { id: customerId, venueId: input.venueId } })
+        if (cliente) await ponerNombreSiFalta(tx, cliente, input.customer.name)
         return {
           orderId: order.id,
           onlineOrderId: online.id,

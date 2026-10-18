@@ -420,6 +420,7 @@ describe('createOnlineOrder', () => {
         count: jest.fn().mockResolvedValue(0),
         create: jest.fn().mockImplementation(async (a: any) => ({ id: 'oo1', ...a.data })),
       },
+      customer: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() }, // S3: el nombre se completa en la misma transacción
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
 
@@ -673,5 +674,57 @@ describe('getTrackingByToken', () => {
   it('un token desconocido devuelve null', async () => {
     prismaMock.onlineOrder.findUnique.mockResolvedValue(null)
     await expect(getTrackingByToken('x'.repeat(32))).resolves.toBeNull()
+  })
+})
+
+/**
+ * S3 (ronda final, N1 de la QA): `verify` con `purpose:'ORDERING'` no pone el nombre (R7: no activa la cuenta de reservas) y la tienda
+ * no lo manda al verificar; el Customer nacía sin nombre y «Clientes» lo mostraba vacío. Al crear el pedido, dentro de la MISMA
+ * transacción, se completa el nombre si estaba vacío: nunca se pisa lo que el negocio escribió, y una repetición no escribe nada.
+ */
+describe('S3: el cliente que nace de un pedido conserva su nombre', () => {
+  const cliente = (o: Record<string, unknown> = {}) => ({ id: 'cust1', venueId: 'v1', firstName: null, lastName: null, ...o })
+
+  it('un cliente sin nombre queda con el del pedido (primera palabra y resto), en la transacción del pedido', async () => {
+    prismaMock.customer.findFirst.mockResolvedValue(cliente() as any)
+    await createOnlineOrder(input({ customer: { name: 'María Gómez Ruiz', phone: '55 4345 3965', email: null } }), PUEDE_CREAR)
+    expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({ where: { id: 'cust1', venueId: 'v1' } }) // del negocio, no de otro
+    expect(prismaMock.customer.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.customer.update).toHaveBeenCalledWith({
+      where: { id: 'cust1' },
+      data: { firstName: 'María', lastName: 'Gómez Ruiz' },
+    })
+    // Es parte de la admisión: se escribe después de crear el pedido, nunca antes del candado.
+    const lockAt = (prismaMock.$executeRaw as jest.Mock).mock.invocationCallOrder[0]
+    expect(lockAt).toBeLessThan(prismaMock.customer.update.mock.invocationCallOrder[0])
+  })
+
+  it('un cliente al que el negocio ya le escribió nombre queda intacto', async () => {
+    prismaMock.customer.findFirst.mockResolvedValue(cliente({ firstName: 'Daniela', lastName: 'Ruiz' }) as any)
+    await createOnlineOrder(input({ customer: { name: 'Dany', phone: '55 4345 3965', email: null } }), PUEDE_CREAR)
+    expect(prismaMock.customer.update).not.toHaveBeenCalled()
+  })
+
+  it('sin nombre que poner (sólo espacios) no escribe nada', async () => {
+    prismaMock.customer.findFirst.mockResolvedValue(cliente() as any)
+    await createOnlineOrder(input({ customer: { name: '   ', phone: '55 4345 3965', email: null } }), PUEDE_CREAR)
+    expect(prismaMock.customer.update).not.toHaveBeenCalled()
+  })
+
+  it('una repetición (fuera o dentro del candado) no escribe nada en el cliente', async () => {
+    prismaMock.customer.findFirst.mockResolvedValue(cliente() as any)
+    prismaMock.order.findUnique.mockResolvedValue(existing() as any)
+    await createOnlineOrder(input(), PUEDE_CREAR)
+    prismaMock.order.findUnique.mockReset()
+    prismaMock.order.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(existing() as any)
+    await createOnlineOrder(input(), PUEDE_CREAR)
+    expect(prismaMock.customer.update).not.toHaveBeenCalled()
+  })
+
+  it('un rechazo de la admisión (tope por teléfono) deja el cliente como estaba', async () => {
+    prismaMock.customer.findFirst.mockResolvedValue(cliente() as any)
+    prismaMock.onlineOrder.count.mockResolvedValueOnce(3)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'TOO_MANY_PENDING_ORDERS' })
+    expect(prismaMock.customer.update).not.toHaveBeenCalled()
   })
 })

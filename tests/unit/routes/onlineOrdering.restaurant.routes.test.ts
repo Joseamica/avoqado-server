@@ -281,6 +281,45 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     expect(r.body.data.enabled).toBe(true)
   })
 
+  /**
+   * S1 (ronda final, C1 de Opus = P1 de Codex): el panel mete la respuesta del PUT en la caché del GET; si el PUT no trae `store` ni
+   * `requirements`, la pestaña truena al leer `store.status`. Los dos responden la MISMA vista.
+   */
+  it('S1: PUT responde la misma vista que GET (ajustes + store + requirements + lastInboxPollAt en ISO)', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila({ minOrderAmount: new Prisma.Decimal('60') }) as any)
+
+    const put = await request(panel).put('/venues/v1/settings').send({ minOrderAmount: 60 })
+    const get = await request(panel).get('/venues/v1/settings')
+
+    expect(put.status).toBe(200)
+    expect(put.body.data.store).toEqual({ status: 'OPEN', reason: null, pausedUntil: null, manualPause: false })
+    expect(put.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: true })
+    expect(put.body.data.lastInboxPollAt).toBe(new Date(NOW - 10_000).toISOString())
+    expect(put.body.data.minOrderAmount).toBe(60)
+    // Misma forma: ni un campo de más ni de menos entre los dos.
+    expect(Object.keys(put.body.data).sort()).toEqual(Object.keys(get.body.data).sort())
+  })
+
+  it('S1: el `store` del PUT es el de DESPUÉS de guardar (pausa del gerente ⇒ PAUSED), sin leer los ajustes otra vez', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(fila() as any)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila({ manualPause: true }) as any)
+    const r = await request(panel).put('/venues/v1/settings').send({ manualPause: true })
+    expect(r.body.data.store).toEqual({ status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true })
+    // Una lectura bajo el candado de `updateSettings`; la vista usa lo que acaba de escribir.
+    expect(prismaMock.onlineOrderingSettings.findUnique).toHaveBeenCalledTimes(1)
+  })
+
+  it('S1: un PUT sin fila de ajustes previa (primer guardado) también responde la vista completa', async () => {
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(null)
+    prismaMock.reservationSettings.findUnique.mockResolvedValue(null)
+    prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(fila({ enabled: false, lastInboxPollAt: null }) as any)
+    const r = await request(panel).put('/venues/v1/settings').send({ minOrderAmount: 10 })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({ store: { status: 'DISABLED', reason: 'NOT_ENABLED' }, lastInboxPollAt: null })
+    expect(r.body.data.requirements).toEqual({ address: true, phone: true, privacyNotice: true })
+  })
+
   it('PUT {minOrderAmount: 50} y PUT {enabled:false} sin requisitos: 200', async () => {
     prismaMock.venue.findUnique.mockResolvedValue({ ...VENUE, address: null, city: null, state: null, zipCode: null, phone: null } as any)
     prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(null)

@@ -349,6 +349,20 @@ describe('online_ordering_configure', () => {
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDERING_CONFIGURED_VIA_MCP' }))
   })
 
+  it('S1 (ronda final): al aplicar, responde también el estado de la tienda y qué falta para encenderla (el armador del panel)', async () => {
+    const despues = { ...AJUSTES, enabled: false, manualPause: true }
+    mockUpdateSettings.mockResolvedValue(despues)
+    mockAccepting.mockResolvedValue({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { ...despues } })
+    const done = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { manualPause: true }, confirm: true }))
+    expect(done).toMatchObject({
+      ok: true,
+      store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true },
+      requirements: { address: true, phone: false, privacyNotice: true },
+    })
+    // El estado sale de lo que acaba de escribir (no de otra lectura): `getAcceptingStatus` recibe esos ajustes.
+    expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), despues)
+  })
+
   it('marca platillos en línea con la disponibilidad del menú', async () => {
     const availability = { availableOnline: true, categoryIds: ['c1'] }
     const preview = parse(await call('online_ordering_configure', { venueId: 'v1', availability }))

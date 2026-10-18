@@ -315,6 +315,64 @@ describe('API pública de pedidos en línea', () => {
     expect(r.body.data).toMatchObject({ status: 'OPEN', venue: { slug: 'flautas', name: 'Flautas Coyoacán' }, estimatedPrepMinutes: 20 })
   })
 
+  /**
+   * S2 (ronda final, M1 de Opus): la pausa de 15/30/60 min de la bandeja y la del gerente salen con el mismo `reason`
+   * (`MANUAL_PAUSE`). `/info` agrega `pausedUntil` SÓLO para la pausa con hora; la tienda dice «Volvemos a recibir pedidos a las HH:MM».
+   */
+  describe('S2: GET /info y pausedUntil (aditivo)', () => {
+    const FIN = new Date(Date.now() + 15 * 60_000)
+    const estado = (o: Record<string, unknown>) => ({
+      status: 'OPEN',
+      reason: null,
+      config: {
+        hours: null,
+        acceptsPayAtPickup: true,
+        minOrderAmount: 0,
+        defaultPrepMinutes: 20,
+        manualPause: false,
+        pausedUntil: null,
+        ...(o.config as object),
+      },
+      ...o,
+    })
+    const info = async (state: object) => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state)
+      prismaMock.venue.findUnique.mockResolvedValue({ name: 'Flautas', timezone: 'America/Mexico_City', currency: 'MXN' } as any)
+      return (await request(app).get('/venues/flautas/ordering/info')).body.data
+    }
+
+    it('pausa con hora de la bandeja, vigente: pausedUntil en ISO', async () => {
+      const data = await info(estado({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { pausedUntil: FIN.toISOString() } }))
+      expect(data.pausedUntil).toBe(FIN.toISOString())
+      expect(data).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+    })
+
+    it('pausa del gerente (aunque también tenga hora): null, porque no hay hora a la que volver', async () => {
+      const data = await info(
+        estado({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { manualPause: true, pausedUntil: FIN.toISOString() } }),
+      )
+      expect(data.pausedUntil).toBeNull()
+    })
+
+    it('una hora que ya pasó no se anuncia', async () => {
+      const data = await info(
+        estado({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { pausedUntil: new Date(Date.now() - 60_000).toISOString() } }),
+      )
+      expect(data.pausedUntil).toBeNull()
+    })
+
+    it('abierta, saturada o fuera de horario: null aunque haya una hora guardada', async () => {
+      for (const [status, reason] of [
+        ['OPEN', null],
+        ['PAUSED', 'TOO_BUSY'],
+        ['CLOSED', 'OUTSIDE_HOURS'],
+      ]) {
+        const data = await info(estado({ status, reason, config: { pausedUntil: FIN.toISOString() } }))
+        expect({ status, pausedUntil: data.pausedUntil }).toEqual({ status, pausedUntil: null })
+      }
+    })
+  })
+
   it('1b: el seguimiento entrega la zona y el contacto del NEGOCIO tal cual (sin venueId)', async () => {
     ;(getTrackingByToken as jest.Mock).mockResolvedValue({
       venueId: 'v1',
