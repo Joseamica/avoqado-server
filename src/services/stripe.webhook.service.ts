@@ -1056,6 +1056,9 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
  * `trial_will_end` of a PLAN_PRO / PLAN_PREMIUM subscription (≈3 days before the first charge): the plan trial-end reminder
  * with the amount Stripe will really charge, instead of the loose-feature "your feature will be deactivated" email.
  *
+ * - 🔴 Decides with the CURRENT subscription, never the event's copy (Codex r1, 17-oct): that copy is the state when
+ *   Stripe emitted it, and events arrive late and out of order, so a first delivery after the customer cancelled still
+ *   said «se cobrará». It must still be `trialing`, and the date announced is its current `trial_end`.
  * - No charge that day (canceled, `cancel_at` before it, collection paused through it): NO email and NO in-app notice
  *   that speaks of a charge.
  * - A delayed or replayed event (`trial_end` already ≤ now): the charge already happened, so NO email and NO notice.
@@ -1067,11 +1070,24 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
  */
 async function sendPlanTrialEndingNotifications(
   venueFeature: Prisma.VenueFeatureGetPayload<{ include: { feature: true; venue: true } }>,
-  subscription: Stripe.Subscription,
-  trialEnd: Date,
+  subscriptionId: string,
 ): Promise<void> {
   const { venueId, venue } = venueFeature
+  // A failed retrieve THROWS (outside the try below, which swallows): the event is marked FAILED and
+  // stripe-webhook-reconciliation replays it (the controller answers 200, so Stripe itself never redelivers). Nothing has
+  // been sent yet, so a replay cannot duplicate a notice, and we never announce a charge we could not confirm.
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId)
   try {
+    const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
+    if (subscription.status !== 'trialing' || !trialEnd) {
+      logger.info('ℹ️ Webhook: plan subscription no longer in trial; no notice sent', {
+        venueId,
+        subscriptionId,
+        status: subscription.status,
+      })
+      return
+    }
+
     if (trialEnd.getTime() <= Date.now()) {
       logger.info('ℹ️ Webhook: plan trial already ended; late event, no notice sent', { venueId, subscriptionId: subscription.id })
       return
@@ -1204,7 +1220,7 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
   // Send notifications to venue owners and admins
   if (trialEnd) {
     if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
-      await sendPlanTrialEndingNotifications(venueFeature, subscription, trialEnd)
+      await sendPlanTrialEndingNotifications(venueFeature, subscriptionId)
     } else {
       await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
     }
