@@ -24,7 +24,7 @@ import { ACCEPT_TIMEOUT_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, O
 import { generateOrderNumber } from './orderNumber'
 import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
-import { quoteCart, toPublicQuote, type CartItemInput, type QuoteResult } from './quote.service'
+import { quoteCart, toPublicQuote, type CartItemInput } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
 
 export interface CreateOnlineOrderInput {
@@ -146,23 +146,12 @@ function lockAdmission(tx: Prisma.TransactionClient, venueId: string) {
 }
 
 /**
- * R2-2: un rechazo previo al candado no prueba que el primer envío de esta llave falló: puede seguir DENTRO de su transacción,
- * con su pedido creado y sin confirmar. Antes de rechazar se espera el MISMO candado de admisión (el primer envío lo suelta al
- * confirmar o deshacer) y se vuelve a buscar la repetición.
+ * Codex r2: un solo envío de esta llave a la vez durante TODA su admisión (repetición, plan, tienda, cotización y creación). Un
+ * reintento espera a que el envío vivo termine: si creó, recibe su pedido; si no, decide con datos frescos. Ningún rechazo se
+ * adelanta a un envío de la misma llave que todavía puede crear. Siempre ANTES del candado del negocio (sin abrazo mortal).
  */
-async function replayUnderAdmissionLock(
-  venueId: string,
-  externalId: string,
-  customerId: string,
-  requestHash: string,
-): Promise<CreateOnlineOrderResult | null> {
-  return prisma.$transaction(
-    async tx => {
-      await lockAdmission(tx, venueId)
-      return findReplay(tx, venueId, externalId, customerId, requestHash)
-    },
-    { timeout: 15_000, maxWait: 5_000 },
-  )
+function lockKey(tx: Prisma.TransactionClient, venueId: string, externalId: string) {
+  return tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-order-key:' + venueId + ':' + externalId}))`
 }
 
 /** Folio corto que no choque con otra cuenta ABIERTA del mismo negocio (dentro del candado de admisión). */
@@ -204,55 +193,50 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
     customerPhone: phone,
   })
 
-  // 2. Repetición idempotente (R8). Antes de plan, negocio y tienda: un reintento tras perder la respuesta recibe SU pedido.
-  const replay = await findReplay(prisma, input.venueId, externalId, customerId, requestHash)
-  if (replay) return replay
-
-  let quote: QuoteResult
-  try {
-    // 3. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
-    await opts.assertCanCreate()
-
-    // 4. ¿La tienda está recibiendo pedidos?
-    const state = await getAcceptingStatus(input.venueId, now)
-    if (state.status !== 'OPEN') {
-      throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${state.status}`, {
-        status: state.status,
-        reason: state.reason,
-      })
-    }
-    if (!state.config.acceptsPayAtPickup) {
-      throw new BadRequestError('Este negocio no acepta pagar al recoger.', 'PAYMENT_MODE_NOT_ACCEPTED')
-    }
-
-    // 5. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).
-    quote = await quoteCart(input.venueId, input.items, { now })
-    if (!quote.ok) {
-      throw new BadRequestError('Tu pedido tiene productos que ya no están disponibles o datos incompletos.', 'CART_INVALID', {
-        issues: quote.issues,
-      })
-    }
-    if (!quote.total.equals(expectedTotal)) {
-      throw new ConflictError('El precio de tu pedido cambió. Revisa el nuevo total antes de confirmar.', 'PRICE_CHANGED', {
-        quote: toPublicQuote(quote),
-      })
-    }
-  } catch (rejection) {
-    // R2-2: ningún rechazo adelanta a un primer envío de esta llave que sigue en su transacción. Si esta búsqueda falla, sale
-    // SU error (5xx, reintentable), nunca el rechazo: sin buscar no se sabe si el primer envío quedó.
-    const replayed = await replayUnderAdmissionLock(input.venueId, externalId, customerId, requestHash)
-    if (replayed) return replayed
-    throw rejection
-  }
-
   const trackingToken = generateTrackingToken()
   const acceptDeadlineAt = new Date(now.getTime() + ACCEPT_TIMEOUT_MINUTES * 60_000)
   const zero = new Prisma.Decimal(0)
   const note = input.note?.trim() ? input.note.trim() : null
 
   try {
+    // Codex r2: plan, tienda y cotización corren DENTRO de la transacción, bajo el candado de la llave; sus rechazos lanzan y la
+    // transacción no escribe nada. Sus lecturas usan el cliente raíz (otra conexión del pool mientras dura la transacción).
     const result = await prisma.$transaction(
       async (tx): Promise<CreateOnlineOrderResult> => {
+        await lockKey(tx, input.venueId, externalId)
+
+        // 2. Repetición idempotente (R8). Antes de plan, negocio y tienda: un reintento tras perder la respuesta recibe SU pedido.
+        const replay = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
+        if (replay) return replay
+
+        // 3. P1-06: lo que exige un pedido NUEVO (negocio operativo y plan).
+        await opts.assertCanCreate()
+
+        // 4. ¿La tienda está recibiendo pedidos?
+        const state = await getAcceptingStatus(input.venueId, now)
+        if (state.status !== 'OPEN') {
+          throw new ConflictError('La tienda no está recibiendo pedidos en este momento.', `ORDERING_${state.status}`, {
+            status: state.status,
+            reason: state.reason,
+          })
+        }
+        if (!state.config.acceptsPayAtPickup) {
+          throw new BadRequestError('Este negocio no acepta pagar al recoger.', 'PAYMENT_MODE_NOT_ACCEPTED')
+        }
+
+        // 5. Cotizar en el servidor (única fuente de verdad) y exigir el total que vio el comensal (R5).
+        const quote = await quoteCart(input.venueId, input.items, { now })
+        if (!quote.ok) {
+          throw new BadRequestError('Tu pedido tiene productos que ya no están disponibles o datos incompletos.', 'CART_INVALID', {
+            issues: quote.issues,
+          })
+        }
+        if (!quote.total.equals(expectedTotal)) {
+          throw new ConflictError('El precio de tu pedido cambió. Revisa el nuevo total antes de confirmar.', 'PRICE_CHANGED', {
+            quote: toPublicQuote(quote),
+          })
+        }
+
         // 6. R4: la admisión se serializa por negocio. Dentro del candado se repiten la repetición, los topes y el folio:
         //    dos pedidos simultáneos no pasan juntos un tope ni toman el mismo folio. Sin Redis ni tabla de candados.
         await lockAdmission(tx, input.venueId)
