@@ -9,6 +9,7 @@ import type { CatalogActor } from '../../types/master-catalog'
 import { assertLegacyCatalogGovernanceForVenue, assertLegacyProductReferencesForVenue } from '../master-catalog/catalogGovernance.service'
 import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
 import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { encenderBajoCandados, prepararEncendido } from '../fiscal/encendidoIva.service'
 import { ETIQUETA_DE_IVA, TRATAMIENTOS_OFRECIDOS_V1, tuplaDesdeTratamiento } from '../fiscal/ivaTratamiento'
 import { ensureQuantityInventoryRow } from '../dashboard/quantityInventoryRow'
 import { GTIN_MAX_LENGTH, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
@@ -511,12 +512,32 @@ export async function updateProductGroup(
   const traeIva = input.ivaTratamiento !== undefined && input.ivaTratamiento !== null
   const modifierGroupIds = input.modifierGroupIds ? [...new Set(input.modifierGroupIds)] : undefined
 
+  // Plan 6b, igual que la edición de un producto suelto: el primer IVA distinto de 16 % ENCIENDE el IVA por producto del negocio.
+  // El XML de las facturas viejas se lee aquí, fuera de la transacción; dentro se revalida bajo los candados.
+  const staffId = actor.type === 'HUMAN' ? actor.staffId : null
+  let plan: Awaited<ReturnType<typeof prepararEncendido>> = null
+  if (traeIva) {
+    const grupo = await prisma.productGroup.findFirst({ where: { id: groupId, venueId }, select: { ivaTratamiento: true } })
+    if (!grupo) throw new NotFoundError('Ese producto con variantes no existe en esta sucursal.')
+    const conAjuste = await prisma.product.count({ where: { productGroupId: groupId, venueId, ajusteDeliveryAlgunaVez: true } })
+    plan = await prepararEncendido(
+      venueId,
+      input.ivaTratamiento,
+      { ivaTratamiento: grupo.ivaTratamiento, ajusteDeliveryAlgunaVez: conAjuste > 0 },
+      staffId,
+    )
+  }
+
   let result: ProductGroupWriteResult
   let cambioDeIva: { ivaAntes: IvaTratamiento; ivaDespues: IvaTratamiento } | undefined
   let categoriaAnterior: string[] = []
   try {
     result = await prisma.$transaction(async tx => {
-      if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
+      // D10: encender toma la admisión exclusiva ANTES de cualquier otro candado; sin encendido, el orden de siempre.
+      // ponytail: las variantes no van como productosExtra (se bloquean después del padre, como en todo escritor de familias);
+      // el encendido ocurre una vez por negocio, así que el cruce con otro escritor de la misma familia es improbable.
+      if (plan) await encenderBajoCandados(tx, { venueId, productId: null, plan, staffId, origen: 'DASHBOARD' })
+      else if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
       await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
       await assertNoMasterCatalog(tx, venueId) // spec D8: con catálogo maestro no se crean NI se editan familias
       await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId: input.categoryId, printStationId: input.printStationId })

@@ -161,6 +161,49 @@ describe('updateProductGroup', () => {
     })
   })
 
+  it('🔴 negocio con el IVA por producto APAGADO: el dueño elige 0 % en la familia y se enciende, igual que en un producto suelto', async () => {
+    const x = await crearNegocio('encender')
+    const mesero = await prisma.staff.create({ data: { email: `mesero-${Date.now()}@example.test`, firstName: 'Me', lastName: 'Sero' } })
+    try {
+      await prisma.staffVenue.create({ data: { staffId: x.staffId, venueId: x.venueId, role: 'OWNER', active: true } })
+      await prisma.staffVenue.create({ data: { staffId: mesero.id, venueId: x.venueId, role: 'WAITER', active: true } })
+      const r = await createProductWithVariants(
+        x.venueId,
+        {
+          name: 'Gorra',
+          categoryId: x.categoryId,
+          options: [{ name: 'Talla', values: ['S', 'M'] }],
+          variants: [
+            { values: ['S'], price: 100 },
+            { values: ['M'], price: 100 },
+          ],
+        },
+        x.actor,
+      )
+      // Sólo el dueño o un administrador hace el PRIMER encendido: el mesero recibe 403 y no cambia nada.
+      await expect(
+        updateProductGroup(x.venueId, r.groupId, { ivaTratamiento: 'IVA_0' }, { type: 'HUMAN', staffId: mesero.id, impersonating: false }),
+      ).rejects.toMatchObject({ code: 'IVA_ENCENDIDO_SOLO_DUENO' })
+      expect(await prisma.venueIvaPorProducto.findUnique({ where: { venueId: x.venueId } })).toBeNull()
+
+      await updateProductGroup(x.venueId, r.groupId, { ivaTratamiento: 'IVA_0' }, x.actor)
+      const vs = await prisma.product.findMany({ where: { productGroupId: r.groupId }, take: 10 })
+      expect(vs.every(v => v.ivaTratamiento === 'IVA_0' && Number(v.taxRate) === 0)).toBe(true)
+      expect((await prisma.productGroup.findUniqueOrThrow({ where: { id: r.groupId } })).ivaTratamiento).toBe('IVA_0')
+      expect(await prisma.venueIvaPorProducto.findUnique({ where: { venueId: x.venueId } })).toMatchObject({
+        habilitadoPorStaffId: x.staffId,
+      })
+      const activado = await prisma.activityLog.findMany({ where: { venueId: x.venueId, action: 'IVA_POR_PRODUCTO_ACTIVADO' }, take: 5 })
+      expect(activado).toHaveLength(1)
+      expect(activado[0]).toMatchObject({ staffId: x.staffId, data: { origen: 'DASHBOARD', productoId: null, facturasSelladas: [] } })
+    } finally {
+      await prisma.activityLog.deleteMany({ where: { venueId: x.venueId } })
+      await prisma.venueIvaPorProducto.deleteMany({ where: { venueId: x.venueId } })
+      await x.limpiar()
+      await prisma.staff.deleteMany({ where: { id: mesero.id } })
+    }
+  })
+
   it('los extras del padre reemplazan los de todas sus variantes', async () => {
     const mg = await prisma.modifierGroup.create({ data: { venueId: n.venueId, name: `Bordado ${Date.now()}` } as any })
     const r = await crear('Gorra')
