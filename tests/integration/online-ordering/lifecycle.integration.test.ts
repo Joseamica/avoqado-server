@@ -10,7 +10,7 @@
  */
 import { OnlineOrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { ServiceUnavailableError } from '@/errors/AppError'
+import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
@@ -420,37 +420,61 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       await deshacer()
     }
     const [a, b] = await Promise.allSettled([primero, reintento!])
-    return { key, a, b, reintentoEspero }
+    return { key, phone, a, b, reintentoEspero }
   }
 
-  const unSoloPedido = async (r: Awaited<ReturnType<typeof reintentoMientrasElPrimeroCotizo>>) => {
-    expect(r.a).toMatchObject({ status: 'fulfilled', value: { replay: false } })
-    const creado = (r.a as PromiseFulfilledResult<Awaited<ReturnType<typeof newOrder>>>).value
-    // SU pedido como repetición, nunca un rechazo definitivo que suelte la llave mientras el primero aún podía crear.
-    expect(r.b).toEqual({
-      status: 'fulfilled',
-      value: expect.objectContaining({ replay: true, orderId: creado.orderId, trackingToken: creado.trackingToken }),
-    })
-    expect(r.reintentoEspero).toBe(true) // el reintento esperó el candado de la llave: la carrera sí ocurrió
-    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${r.key}` } })).toBe(1)
+  /**
+   * Codex r4: el primer envío cotizó FUERA de la transacción (no retiene conexión ni candado mientras lee), así que el reintento
+   * no lo espera: decide y GUARDA su rechazo. El primero, que leyó datos viejos, encuentra ese rechazo ya bajo la llave y no crea.
+   * Una sola decisión por llave; con otra llave, un solo pedido.
+   */
+  const unaSolaDecision = async (r: Awaited<ReturnType<typeof reintentoMientrasElPrimeroCotizo>>, code: string) => {
+    expect(r.b).toMatchObject({ status: 'rejected', reason: { code, final: true } })
+    expect(r.a).toMatchObject({ status: 'rejected', reason: { code, final: true } })
+    expect(sobre((r.a as PromiseRejectedResult).reason)).toEqual(sobre((r.b as PromiseRejectedResult).reason))
+    expect(r.reintentoEspero).toBe(false) // el primero, detenido tras cotizar, no retenía el candado de la llave
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${r.key}` } })).toBe(0)
+    await expect(newOrder({ key: nextKey(), phone: r.phone })).resolves.toMatchObject({ replay: false })
+    expect(await prisma.order.count({ where: { venueId: venueId!, customerPhone: r.phone } })).toBe(1)
   }
 
-  it('Codex r2: el precio cambia mientras el primer envío ya cotizó: el reintento de la MISMA llave espera y recibe SU pedido, no PRICE_CHANGED', async () => {
-    await unSoloPedido(
+  it('Codex r2/r4: el precio cambia mientras el primer envío ya cotizó: el reintento recibe PRICE_CHANGED y el primero, el MISMO rechazo guardado', async () => {
+    await unaSolaDecision(
       await reintentoMientrasElPrimeroCotizo(
         () => prisma.product.update({ where: { id: productId }, data: { price: 113 } }),
         () => prisma.product.update({ where: { id: productId }, data: { price: 93 } }),
       ),
+      'PRICE_CHANGED',
     )
   })
 
-  it('Codex r2: la tienda se pausa mientras el primer envío ya cotizó: el reintento de la MISMA llave espera y recibe SU pedido, no ORDERING_PAUSED', async () => {
-    await unSoloPedido(
+  it('Codex r2/r4: la tienda se pausa mientras el primer envío ya cotizó: el reintento recibe ORDERING_PAUSED y el primero, el MISMO rechazo guardado', async () => {
+    await unaSolaDecision(
       await reintentoMientrasElPrimeroCotizo(
         () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: true } }),
         () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: false } }),
       ),
+      'ORDERING_PAUSED',
     )
+  })
+
+  it('Codex r4 (R8): con el plan ya vencido, el reintento de un pedido creado recibe SU pedido y no se guarda ningún rechazo', async () => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const creado = await newOrder({ key, phone })
+    const sinPlan = {
+      assertCanCreate: async () => {
+        throw new ForbiddenError('Sin plan.', 'PLAN_REQUIRED')
+      },
+    }
+    await expect(newOrder({ key, phone, opts: sinPlan })).resolves.toMatchObject({
+      replay: true,
+      orderId: creado.orderId,
+      trackingToken: creado.trackingToken,
+    })
+    expect(await prisma.idempotencyRequest.count({ where: { organizationId: `venue:${venueId}`, idempotencyKey: key } })).toBe(0)
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
   })
 
   /**
@@ -475,12 +499,12 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
         (e: unknown) => e,
       )
       .finally(deshacer)
-    expect(b).toMatchObject({ code })
+    expect(b).toMatchObject({ code, final: true }) // Codex r4: recién guardado
     const tarde = await newOrder({ key, phone, opts }).then(
       r => r,
       (e: unknown) => e,
     )
-    expect(tarde).toMatchObject({ code })
+    expect(tarde).toMatchObject({ code, final: true }) // Codex r4: repetido desde la tabla
     expect(sobre(tarde)).toEqual(sobre(b)) // mismo status, código, mensaje y detalles
     expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
     await expect(newOrder({ key: nextKey(), phone, opts })).resolves.toMatchObject({ replay: false })
