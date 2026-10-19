@@ -564,6 +564,18 @@ function lugarDeLaMetadata(sub: Stripe.Subscription): LugarDelIntento | null {
 }
 
 /**
+ * La única línea que deja descartar la suscripción incompleta de un intento anterior (QA 18-oct: no dejaba ninguna). Sólo
+ * ids y el motivo: el secreto del cobro nunca va al log.
+ */
+function registrarDescarte(organizationId: string, subscriptionId: string, motivo: 'PAGO_NO_AUTORIZADO' | 'OTRO_INTENTO' | 'YA_EXPIRADA') {
+  logger.info('activate-plan: se descartó la suscripción incompleta del intento anterior (no se cobró)', {
+    organizationId,
+    subscriptionId,
+    motivo,
+  })
+}
+
+/**
  * 🔴 D2 (spec §6.3 (2)): descartar un intento que no se pagó = ANULAR su factura, nunca `subscriptions.cancel`.
  *
  * Medido en Stripe de prueba (18-oct): anular es CONDICIONAL —sobre una factura ya pagada Stripe responde 400 «Invoices
@@ -635,7 +647,10 @@ async function resolverIntentoIncompleto(args: {
 
   const sub = await leer(() => stripe.subscriptions.retrieve(args.sub.id, { expand: ['latest_invoice.confirmation_secret'] }))
   // Expiró entre las dos lecturas (las 23 h, o la anuló otra petición): ya está descartada, sin anular nada (Codex r1 #3).
-  if (sub.status === 'incomplete_expired') return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
+  if (sub.status === 'incomplete_expired') {
+    registrarDescarte(organizationId, sub.id, 'YA_EXPIRADA')
+    return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
+  }
   if (esCobrada(sub.status)) return { recuperada: sub, lugarDescartado: null }
   if (sub.status !== 'incomplete') {
     logger.warn('activate-plan: la relectura del intento incompleto dio un estado que no se sabe resolver', {
@@ -702,6 +717,7 @@ async function resolverIntentoIncompleto(args: {
   const anulada = await anularIntento(sub)
   if (anulada === 'INCIERTO') throw pendiente('no se pudo descartar el intento anterior')
   if (anulada !== 'DESCARTADA') return { recuperada: anulada.cobrada, lugarDescartado: null }
+  registrarDescarte(organizationId, sub.id, mismoIntento ? 'PAGO_NO_AUTORIZADO' : 'OTRO_INTENTO')
   if (!mismoIntento) return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
 
   // El reto falló o el banco rechazó después de autenticar: es un rechazo. Estado y lugar se cierran JUNTOS y sólo si el
@@ -934,6 +950,7 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
         // 🔴 D2 (Codex r1 #3): expiró (las 23 h) o el proceso murió entre anularla y escribir aquí. Sin esto, su lugar quedaba
         // RESERVED para siempre si el cliente volvía y terminaba con otra cosa (la prueba de 30 días).
         lugarDescartado = lugarDeLaMetadata(suscripcionRecuperada)
+        registrarDescarte(organizationId, suscripcionRecuperada.id, 'YA_EXPIRADA')
         suscripcionRecuperada = null
       } else if (estado === 'incomplete') {
         ;({ recuperada: suscripcionRecuperada, lugarDescartado } = await resolverIntentoIncompleto({
