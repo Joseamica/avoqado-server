@@ -868,6 +868,7 @@ export async function settleOrder(
       amountPesos: shiftAmount,
       tipPesos: shiftTip,
       incrementTotalOrders: priorCompletedPaymentCount === 0,
+      orderId,
     })
 
     // Create a payment record to track the settlement

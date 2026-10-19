@@ -18,7 +18,7 @@ export type PaymentShiftReconciliationChannel =
   | 'settleCustomerBalance'
 export type PendingPaymentShiftReason = 'NO_SHIFT' | 'SHIFT_NOT_OPEN' | 'CLAIM_LOST' | 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY'
 
-type PaymentShiftTransaction = Pick<Prisma.TransactionClient, 'shift' | 'activityLog'>
+type PaymentShiftTransaction = Pick<Prisma.TransactionClient, 'shift' | 'activityLog' | 'orderItem'>
 type PaymentShiftSettingsReader = Pick<PrismaClient, 'venueSettings'> | Pick<Prisma.TransactionClient, 'venueSettings'>
 type ExistingOrderLockTransaction = Pick<Prisma.TransactionClient, '$queryRaw'>
 type ActivityLogReader = Pick<PrismaClient, 'activityLog'> | Pick<Prisma.TransactionClient, 'activityLog'>
@@ -36,6 +36,11 @@ interface ClaimCapturedPaymentShiftInput {
   tipPesos: Prisma.Decimal
   /** Los carriles cuya Order ya contó el turno (B4Bit/manual) no vuelven a incrementarla. */
   incrementTotalOrders: boolean
+  /**
+   * La Order del cobro, o `null` si todavía no existe (venta rápida, sombra del pago manual). OBLIGATORIO a propósito: una cuenta
+   * de tarjetas de regalo no suma una orden al turno, y un llamador que lo olvide debe enterarse en el compilador.
+   */
+  orderId: string | null
 }
 
 /**
@@ -240,6 +245,14 @@ export async function claimShiftForCapturedPayment(
     }
   }
 
+  // 🔴 Tarjetas de regalo (R3, pendientes 1a): la cuenta de tarjetas suma su dinero a `totalSales` —el turno sí lo cobró; su
+  // arreglo de ventas vive en lectura (`ventasDelTurno.ts`)— pero NO es una orden de venta del turno. Basta un renglón con
+  // `giftCardId`: las cuentas de tarjetas no se mezclan con mercancía (A5, `giftCardMarks.ts`). Sólo se lee si se iba a contar.
+  const esCuentaDeTarjetas =
+    input.incrementTotalOrders &&
+    input.orderId !== null &&
+    Boolean(await tx.orderItem.findFirst({ where: { orderId: input.orderId, giftCardId: { not: null } }, select: { id: true } }))
+
   const claimed = await tx.shift.updateMany({
     where: {
       id: candidate.id,
@@ -250,7 +263,7 @@ export async function claimShiftForCapturedPayment(
     data: {
       totalSales: { increment: input.amountPesos },
       totalTips: { increment: input.tipPesos },
-      ...(input.incrementTotalOrders ? { totalOrders: { increment: 1 } } : {}),
+      ...(input.incrementTotalOrders && !esCuentaDeTarjetas ? { totalOrders: { increment: 1 } } : {}),
     },
   })
 

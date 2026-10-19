@@ -338,6 +338,8 @@ beforeEach(() => {
       },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
+      // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+      orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
       areaTicketCheckoutSession: {
         findFirst: prisma.areaTicketCheckoutSession.findFirst,
         updateMany: prisma.areaTicketCheckoutSession.updateMany,

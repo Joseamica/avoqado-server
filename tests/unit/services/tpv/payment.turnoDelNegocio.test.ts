@@ -262,6 +262,8 @@ function installStatefulP2002Rollback() {
           return data
         }),
       },
+      // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+      orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
       venueSettings: { findUnique: prisma.venueSettings.findUnique },
       order: { ...(prisma as any).order, update: prisma.order.update },
       paymentAllocation: { create: prisma.paymentAllocation.create },
@@ -392,6 +394,8 @@ beforeEach(() => {
           return (prisma.activityLog.create as jest.Mock)(args)
         }),
       },
+      // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+      orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
       venueSettings: { findUnique: prisma.venueSettings.findUnique },
       areaTicketCheckoutSession: {
         findFirst: prisma.areaTicketCheckoutSession.findFirst,

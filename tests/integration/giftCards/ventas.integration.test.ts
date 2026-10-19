@@ -55,6 +55,7 @@ import {
 import type { McpScope } from '@/mcp/scope'
 import { abrirTurno, sembrarCobro } from '../dashboard/sembrarCobroParaReembolso'
 import {
+  crearCuentaDeMercancia,
   crearNegocioDePrueba,
   limpiarNegocioDePrueba,
   sembrarCanje,
@@ -546,5 +547,75 @@ describe('🔴 Codex #5 (cierre) · R3 en los lectores de turnos del PANEL y del
     expect((await llamar('list_shifts', { venueId, status: 'closed' })).shifts).toEqual([
       expect.objectContaining({ sales: 200, cash: 1200 }),
     ])
+  })
+})
+
+describe('🔴 pendientes 1a · turnos: la cuenta de tarjetas no suma órdenes', () => {
+  let venueId: string
+  let shiftId: string
+  let ventaEnDosCobros: string
+  // El contador del turno (`Shift.totalOrders` y `totalSales`) tras cada cobro, en orden. Se siembra todo en el `beforeAll` por
+  // el camino REAL (`payCashOrder` → `paymentShiftClaim`), para que una prueba que falla no deje a las siguientes sin datos.
+  type Paso = 'inicio' | 'tarjetas' | 'mercancia' | 'abono' | 'resto'
+  const contador = {} as Record<Paso, { ordenes: number; ventas: number }>
+  const delta = (de: Paso, a: Paso) => [contador[a].ordenes - contador[de].ordenes, contador[a].ventas - contador[de].ventas]
+
+  beforeAll(async () => {
+    const { venueId: v, organizationId, staffId } = await crearNegocioDePrueba('turno-ordenes')
+    venueId = v
+    shiftId = (await abrirTurno(venueId, staffId)).id
+    const leer = async (paso: Paso) => {
+      const t = await prisma.shift.findUniqueOrThrow({ where: { id: shiftId }, select: { totalOrders: true, totalSales: true } })
+      contador[paso] = { ordenes: t.totalOrders, ventas: Number(t.totalSales) }
+    }
+    const cobrarEnEfectivo = (orderId: string, pesos: number) =>
+      payCashOrder(venueId, orderId, { amount: pesos * 100, tip: 0, staffId, idempotencyKey: `to-${orderId}-${pesos}`.slice(0, 64) })
+
+    await leer('inicio')
+    await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [300], abonosEnEfectivo: [300] })
+    await leer('tarjetas')
+    const mercancia = await crearCuentaDeMercancia({ venueId, staffId, total: 150 })
+    await cobrarEnEfectivo(mercancia.orderId, 150)
+    await leer('mercancia')
+    // Review Focus 3: una venta de tarjetas pagada en dos cobros (abono + resto).
+    ventaEnDosCobros = (await sembrarVentaDeTarjetasSinPagar({ venueId, organizationId, staffId, montos: [400], abonosEnEfectivo: [100] }))
+      .orderId
+    await leer('abono')
+    await cobrarEnEfectivo(ventaEnDosCobros, 300)
+    await leer('resto')
+    // El turno abierto y el cierre cuentan por `Order.shiftId`: las tres ventas (dos de tarjetas, una de mercancía) son de este turno.
+    await prisma.order.updateMany({ where: { venueId }, data: { shiftId } })
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('cobrar una venta de tarjetas en efectivo por la ruta real no sube Shift.totalOrders; la mercancía sí', () => {
+    // El dinero sí entra al acumulado del turno (su arreglo de ventas vive en lectura, `ventasDelTurno.ts`); la orden no.
+    expect(delta('inicio', 'tarjetas')).toEqual([0, 300])
+    expect(delta('tarjetas', 'mercancia')).toEqual([1, 150])
+  })
+
+  it('una venta de tarjetas pagada en dos cobros no suma en ninguno', async () => {
+    expect(delta('mercancia', 'abono')).toEqual([0, 100])
+    expect(delta('abono', 'resto')).toEqual([0, 300])
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: ventaEnDosCobros } })).paymentStatus).toBe('PAID')
+  })
+
+  it('getCurrentShift no cuenta la cuenta de tarjetas en totalOrders ni sus renglones en totalProductsSold', async () => {
+    expect(await prisma.order.count({ where: { venueId, shiftId, status: 'COMPLETED' } })).toBe(3)
+
+    const turno = await getCurrentShift(venueId)
+    expect(turno?.id).toBe(shiftId)
+    expect([turno!.totalOrders, turno!.totalProductsSold]).toEqual([1, 1]) // sólo la playera
+  })
+
+  it('🔴 al CERRAR el turno, el totalOrders guardado no cuenta los renglones de la cuenta de tarjetas', async () => {
+    const { shift } = await closeShiftForVenueWithResult(venueId, shiftId, { cashReconciliationAction: 'SKIPPED' })
+    expect(shift.status).toBe('CLOSED')
+    expect([shift.totalOrders, shift.totalProductsSold]).toEqual([1, 1])
+    const reporte = shift.reportData as { sales?: { totalOrders?: number; productsSold?: number } } | null
+    expect([reporte?.sales?.totalOrders, reporte?.sales?.productsSold]).toEqual([1, 1])
   })
 })

@@ -952,6 +952,7 @@ export async function settleCustomerBalance(
         amountPesos: shiftAmount,
         tipPesos: shiftTip,
         incrementTotalOrders: priorCompletedPaymentCount === 0,
+        orderId,
       })
 
       // Create a payment record to track the settlement

@@ -330,6 +330,8 @@ beforeEach(() => {
       },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
+      // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+      orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
       // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
       // tickets v7. Este `tx` se arma A MANO, así que un modelo que la ruta toque
       // y no esté aquí sale undefined y el test truena con un TypeError en lugar

@@ -19,7 +19,7 @@ import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
-import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
+import { ORDEN_DE_TARJETAS_SELECT, WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 import { ventasDelTurnoSinTarjetas } from '../shared/ventasDelTurno'
 
 interface ShiftFilters {
@@ -157,7 +157,7 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
 
   totalSales = await ventasDelTurnoSinTarjetas(venueId, shift.id)
 
-  // Get order count
+  // Get order count — 🔴 sin la cuenta de tarjetas de regalo (R3, pendientes 1a): no es una orden de venta del turno.
   const orderCount = await prisma.order.count({
     where: {
       venueId,
@@ -165,13 +165,16 @@ export async function getCurrentShift(venueId: string, _orgId?: string, _posName
       status: {
         in: ['CONFIRMED', 'COMPLETED'],
       },
+      NOT: WHERE_ORDEN_DE_TARJETAS,
     },
   })
 
   // Get products sold count — misma suma, hecha en la base. Era el segundo `findMany` sin `take`
   // de este endpoint: traía una fila por RENGLÓN vendido en el día sólo para sumarle la cantidad.
+  // Una tarjeta vendida no es un producto vendido (R3): sus renglones no cuentan.
   const renglones = await prisma.orderItem.aggregate({
     where: {
+      giftCardId: null,
       order: {
         venueId,
         shiftId: shift.id,
@@ -1758,8 +1761,11 @@ async function closeShiftUsingRequest(
       totalDrawerExtra,
     } = aggregateShiftPayments(shiftPayments)
 
+    // 🔴 Sin los renglones de la cuenta de tarjetas de regalo (R3, pendientes 1a, Codex r1 #1): `.length` se firma abajo como
+    // `totalOrders` y la suma como productos vendidos. Que cuente RENGLONES y no órdenes es otro descuadre, que aquí no se toca.
     const orderItems = await prisma.orderItem.findMany({
       where: {
+        giftCardId: null,
         order: {
           shiftId,
           status: { in: ['COMPLETED'] },

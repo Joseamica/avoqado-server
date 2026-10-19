@@ -1097,6 +1097,7 @@ async function completeAndAttributeB4BitPaymentInTx(
     amountPesos,
     tipPesos,
     incrementTotalOrders: Boolean(paymentOrderId) && priorCompletedPaymentCount === 0,
+    orderId: paymentOrderId,
   })
 
   if (shiftClaim.shiftId) {

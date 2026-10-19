@@ -239,6 +239,8 @@ export async function createManualPayment(
           // Una Order se cuenta al primer cobro durable; abonos posteriores no la
           // vuelven a contar. La sombra nace y se salda con este primer cobro.
           incrementTotalOrders: !input.orderId || priorCompletedPaymentCount === 0,
+          // Sin orden, la sombra nace después de este claim y SIN renglones: nunca es una cuenta de tarjetas.
+          orderId: input.orderId ?? null,
         })
         const shiftId = shiftClaim.shiftId
 

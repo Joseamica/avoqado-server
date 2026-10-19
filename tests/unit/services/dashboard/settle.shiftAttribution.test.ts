@@ -215,7 +215,7 @@ describe('settleOrder — turno y señal atómica', () => {
             return { id: 'audit-staged' }
           }),
         },
-        orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+        orderItem: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
       }
       const result = await callback(tx)
       Object.assign(committed, staged)
@@ -274,7 +274,7 @@ describe('settleOrder — turno y señal atómica', () => {
             return { id: 'audit-staged' }
           }),
         },
-        orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+        orderItem: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
       }
       createSalePostingInTxMock.mockImplementationOnce(async () => {
         stagedBeforeFailure = { payments: [...staged.payments], audits: [...staged.audits] }
@@ -392,7 +392,7 @@ describe('settleCustomerBalance — un claim por cada Payment ganador', () => {
         }),
       },
       activityLog: { create: jest.fn().mockResolvedValue({ id: `audit-${name}` }) },
-      orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+      orderItem: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
     })
     const bulkTx = makeTx('bulk')
     const singleTx = makeTx('single')

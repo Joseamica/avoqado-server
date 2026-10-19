@@ -3931,6 +3931,7 @@ export async function recordOrderPayment(
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           incrementTotalOrders: priorCompletedPaymentCount === 0,
+          orderId: activeOrder.id,
         })
 
         // Create the payment record
@@ -5427,6 +5428,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           incrementTotalOrders: true,
+          // La venta rápida nace DESPUÉS del claim, sin tarjetas de regalo: nunca es una cuenta de tarjetas.
+          orderId: null,
         })
 
         // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)

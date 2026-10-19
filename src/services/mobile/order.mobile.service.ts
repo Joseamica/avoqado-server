@@ -3033,6 +3033,7 @@ export async function registrarAbonoEnTx(
     // La Order cuenta al primer cobro canónico; dos abonos del mismo
     // ticket nunca cuentan dos órdenes.
     incrementTotalOrders: !previousPayments.some(payment => payment.type !== 'REFUND'),
+    orderId,
   })
 
   // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
