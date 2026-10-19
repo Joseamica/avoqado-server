@@ -47,6 +47,8 @@ const cobro = (id: string, order: ReturnType<typeof orden>, over: Record<string,
     processedBy: { id: 'staff-1', firstName: 'Ana', lastName: 'López' },
     orderId: order.id,
     createdAt: new Date('2026-10-18T16:00:00Z'),
+    // La marca de tarjetas (`ORDEN_DE_TARJETAS_SELECT`): sin renglón de tarjeta, una venta normal. `contarOrdenesCobradas` la exige.
+    order: { items: [] as { id: string }[] },
     ...over,
   }
 }
