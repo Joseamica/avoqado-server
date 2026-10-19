@@ -141,19 +141,45 @@ describe('isItemLevelDiscount — only count a giveaway once', () => {
 })
 
 describe('shift top products — revenue is net of the line discount', () => {
-  const shiftRow = (items: any[]) => ({
-    id: 'shift-1',
-    venueId: 'venue-1',
-    staffId: 'staff-1',
-    startTime: new Date('2025-03-11T14:00:00.000Z'),
-    endTime: new Date('2025-03-11T22:00:00.000Z'),
-    startingCash: 0,
-    endingCash: 0,
-    staff: { id: 'staff-1', firstName: 'Ana', lastName: 'López', email: 'ana@example.test' },
-    venue: { id: 'venue-1', name: 'Venue', timezone: 'America/Mexico_City' },
+  // La orden del único cobro del turno, como la regresa la base (el detalle la pide por id).
+  const orderRow = (items: any[]) => ({
+    id: 'order-1',
+    orderNumber: 'A-1',
+    total: 77.29,
+    subtotal: 89,
+    createdAt: new Date(),
     payments: [],
-    orders: [{ id: 'order-1', orderNumber: 'A-1', total: 77.29, subtotal: 89, createdAt: new Date(), payments: [], items }],
+    items,
   })
+  const shiftRow = (items: any[]) => {
+    prismaMock.order.findMany.mockResolvedValue([orderRow(items)] as any)
+    return {
+      id: 'shift-1',
+      venueId: 'venue-1',
+      staffId: 'staff-1',
+      startTime: new Date('2025-03-11T14:00:00.000Z'),
+      endTime: new Date('2025-03-11T22:00:00.000Z'),
+      startingCash: 0,
+      endingCash: 0,
+      staff: { id: 'staff-1', firstName: 'Ana', lastName: 'López', email: 'ana@example.test' },
+      venue: { id: 'venue-1', name: 'Venue', timezone: 'America/Mexico_City' },
+      // El detalle toma las órdenes de los cobros del turno (las cuentas cobradas), no de `Order.shiftId`;
+      // `orders` sólo trae las del turno con un cobro sin turno (turnos sincronizados).
+      orders: [],
+      payments: [
+        {
+          id: 'pay-1',
+          amount: 77.29,
+          tipAmount: 0,
+          method: 'CASH',
+          type: 'REGULAR',
+          processedById: null,
+          orderId: 'order-1',
+          createdAt: new Date(),
+        },
+      ],
+    }
+  }
 
   beforeEach(() => {
     jest.clearAllMocks()
