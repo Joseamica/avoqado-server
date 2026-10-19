@@ -100,6 +100,47 @@ function pesos(valor: unknown, campo: string): Prisma.Decimal {
   return d
 }
 
+/**
+ * Las reglas de los montos y la vigencia sobre la MEZCLA (lo que llegó ∪ lo guardado): mínimo ≤ máximo, sugeridos dentro del
+ * rango, de 1 a 6, y una vigencia permitida. Pura y única: el guardado la corre bajo el candado y la vista previa del asistente
+ * con lo guardado hoy (full-testing v2 #3), así que una vista previa nunca ofrece lo que la confirmación rechaza.
+ */
+export function validarAjustes(
+  actual: {
+    minAmount: Prisma.Decimal.Value
+    maxAmount: Prisma.Decimal.Value
+    suggestedAmounts: ReadonlyArray<Prisma.Decimal.Value>
+    validityMonths: number | null
+  },
+  input: UpdateGiftCardSettingsInput,
+) {
+  const minAmount = input.minAmount !== undefined ? pesos(input.minAmount, 'minAmount') : new Prisma.Decimal(actual.minAmount)
+  const maxAmount = input.maxAmount !== undefined ? pesos(input.maxAmount, 'maxAmount') : new Prisma.Decimal(actual.maxAmount)
+  if (minAmount.lessThan(MINIMO_POR_SOBRE))
+    throw new BadRequestError(`El monto mínimo no puede ser menor a ${formatoPesos(MINIMO_POR_SOBRE)}.`)
+  if (maxAmount.greaterThan(MAXIMO_POR_SOBRE)) {
+    throw new BadRequestError(`El monto máximo no puede pasar de ${formatoPesos(MAXIMO_POR_SOBRE)} (la ley lo limita por tarjeta).`)
+  }
+  if (minAmount.greaterThan(maxAmount)) throw new BadRequestError('El monto mínimo no puede ser mayor que el máximo.')
+
+  const suggestedAmounts =
+    input.suggestedAmounts !== undefined
+      ? (Array.isArray(input.suggestedAmounts) ? input.suggestedAmounts : []).map(v => pesos(v, 'suggestedAmounts'))
+      : actual.suggestedAmounts.map(v => new Prisma.Decimal(v))
+  if (suggestedAmounts.length === 0 || suggestedAmounts.length > MAX_MONTOS_SUGERIDOS) {
+    throw new BadRequestError(`Captura de 1 a ${MAX_MONTOS_SUGERIDOS} montos sugeridos.`)
+  }
+  if (suggestedAmounts.some(v => v.lessThan(minAmount) || v.greaterThan(maxAmount))) {
+    throw new BadRequestError(`Los montos sugeridos deben estar entre ${formatoPesos(minAmount)} y ${formatoPesos(maxAmount)}.`)
+  }
+
+  const validityMonths = input.validityMonths !== undefined ? input.validityMonths : actual.validityMonths
+  if (validityMonths !== null && !VIGENCIAS_PERMITIDAS.has(validityMonths)) {
+    throw new BadRequestError('La vigencia debe ser 12, 24, 36 o 60 meses, o sin vencimiento.')
+  }
+  return { minAmount, maxAmount, suggestedAmounts, validityMonths }
+}
+
 export async function getGiftCardSettings(venueId: string): Promise<GiftCardSettingsView> {
   return vista(await leerAjustes(venueId))
 }
@@ -147,30 +188,7 @@ export async function updateGiftCardSettings(
 
     // Se valida la MEZCLA (lo que llegó ∪ lo guardado bajo el candado): las reglas cruzadas (mínimo ≤ máximo, sugeridos
     // dentro del rango) se cumplen sobre lo que va a quedar.
-    const minAmount = input.minAmount !== undefined ? pesos(input.minAmount, 'minAmount') : actual.minAmount
-    const maxAmount = input.maxAmount !== undefined ? pesos(input.maxAmount, 'maxAmount') : actual.maxAmount
-    if (minAmount.lessThan(MINIMO_POR_SOBRE))
-      throw new BadRequestError(`El monto mínimo no puede ser menor a ${formatoPesos(MINIMO_POR_SOBRE)}.`)
-    if (maxAmount.greaterThan(MAXIMO_POR_SOBRE)) {
-      throw new BadRequestError(`El monto máximo no puede pasar de ${formatoPesos(MAXIMO_POR_SOBRE)} (la ley lo limita por tarjeta).`)
-    }
-    if (minAmount.greaterThan(maxAmount)) throw new BadRequestError('El monto mínimo no puede ser mayor que el máximo.')
-
-    const suggestedAmounts =
-      input.suggestedAmounts !== undefined
-        ? (Array.isArray(input.suggestedAmounts) ? input.suggestedAmounts : []).map(v => pesos(v, 'suggestedAmounts'))
-        : actual.suggestedAmounts
-    if (suggestedAmounts.length === 0 || suggestedAmounts.length > MAX_MONTOS_SUGERIDOS) {
-      throw new BadRequestError(`Captura de 1 a ${MAX_MONTOS_SUGERIDOS} montos sugeridos.`)
-    }
-    if (suggestedAmounts.some(v => v.lessThan(minAmount) || v.greaterThan(maxAmount))) {
-      throw new BadRequestError(`Los montos sugeridos deben estar entre ${formatoPesos(minAmount)} y ${formatoPesos(maxAmount)}.`)
-    }
-
-    const validityMonths = input.validityMonths !== undefined ? input.validityMonths : actual.validityMonths
-    if (validityMonths !== null && !VIGENCIAS_PERMITIDAS.has(validityMonths)) {
-      throw new BadRequestError('La vigencia debe ser 12, 24, 36 o 60 meses, o sin vencimiento.')
-    }
+    const { minAmount, maxAmount, suggestedAmounts, validityMonths } = validarAjustes(actual, input)
 
     // Sólo un `true` explícito prende: cualquier otro valor que llegue apaga (nunca prende sin pasar por el plan de arriba).
     const enabled = input.enabled !== undefined ? input.enabled === true : actual.enabled

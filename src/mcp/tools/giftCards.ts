@@ -27,6 +27,7 @@ import { iniciarCancelacionDeVenta, liberarCancelacionDeVenta } from '@/services
 import {
   getGiftCardSettings,
   updateGiftCardSettings,
+  validarAjustes,
   type UpdateGiftCardSettingsInput,
 } from '@/services/giftCards/giftCardSettings.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
@@ -511,6 +512,13 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
       if (!confirm) {
         const actual = await getGiftCardSettings(venueId)
+        // Full-testing v2 #3: las MISMAS reglas que el guardado, sobre lo guardado hoy. Con datos inválidos responde el error de la
+        // confirmación y no hay vista previa (sin `requiresConfirmation`, el catálogo no emite token).
+        try {
+          validarAjustes(actual, cambios)
+        } catch (err) {
+          return rechazo(err)
+        }
         const changes = Object.fromEntries(
           Object.entries(cambios).map(([campo, nuevo]) => [campo, { from: actual[campo as keyof typeof actual], to: nuevo }]),
         )

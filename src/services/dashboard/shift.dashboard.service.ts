@@ -455,6 +455,10 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     totalTips: calculatedTotalTips,
   } = buildPaymentBreakdown(shift.payments as any)
 
+  // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
+  // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
+  const ordenesDeVenta = shift.orders.filter(order => !esCuentaDeTarjetas(order.items))
+
   // ============================================================
   // Calculate Staff Breakdown (sales per employee)
   // ============================================================
@@ -498,7 +502,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   }
 
   // Process orders to get order count per staff
-  for (const order of shift.orders) {
+  for (const order of ordenesDeVenta) {
     const staffId = order.servedById
     if (!staffId) continue
 
@@ -533,7 +537,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // ============================================================
   const productMap = new Map<string, { name: string; quantity: number; revenue: number }>()
 
-  for (const order of shift.orders) {
+  for (const order of ordenesDeVenta) {
     for (const item of order.items) {
       const productName = item.product?.name || 'Unknown Product'
       const quantity = item.quantity || 1
@@ -566,7 +570,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // ============================================================
   // Format orders for response (with payment method info)
   // ============================================================
-  const formattedOrders = shift.orders.slice(0, 50).map(order => {
+  const formattedOrders = ordenesDeVenta.slice(0, 50).map(order => {
     const orderPayment = order.payments[0] // Get first payment for display
     return {
       id: order.id,
@@ -605,9 +609,6 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     orderId: payment.orderId,
     createdAt: payment.createdAt,
   }))
-
-  // Cierre r1 (R3): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra al conteo ni al ticket promedio.
-  const ordenesDeVenta = shift.orders.filter(order => !esCuentaDeTarjetas(order.items)).length
 
   // Use calculated totals if they're more accurate than stored values. R3 (Codex #5 del cierre): el guardado de un turno SIN cerrar es
   // el acumulado en vivo, que cuenta las cargas de tarjetas; su respaldo es la agregación que ya las excluye.
@@ -649,7 +650,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     ...serializeShiftCashReconciliation(shift),
     totalSales: finalTotalSales,
     totalTips: finalTotalTips,
-    totalOrders: ordenesDeVenta,
+    totalOrders: ordenesDeVenta.length,
     status: effectiveStatus,
     staff: shift.staff,
     venue: shift.venue,
@@ -667,9 +668,9 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     // Summary stats
     stats: {
       totalPayments: shift.payments.length,
-      totalOrders: ordenesDeVenta,
+      totalOrders: ordenesDeVenta.length,
       totalProducts: topProducts.reduce((sum, p) => sum + p.quantity, 0),
-      avgOrderValue: ordenesDeVenta > 0 ? Number((finalTotalSales / ordenesDeVenta).toFixed(2)) : 0,
+      avgOrderValue: ordenesDeVenta.length > 0 ? Number((finalTotalSales / ordenesDeVenta.length).toFixed(2)) : 0,
       avgTipPercentage: finalTotalSales > 0 ? Number(((finalTotalTips / finalTotalSales) * 100).toFixed(1)) : 0,
     },
   }

@@ -532,6 +532,8 @@ describe('🔴 Codex #5 (cierre) · R3 en los lectores de turnos del PANEL y del
     expect(detalle.staffBreakdown.reduce((suma: number, s: { sales: number }) => suma + s.sales, 0)).toBe(200)
     // Cierre r1: la cuenta de tarjetas tampoco es una orden de venta del turno (ticket promedio = $200 / 1, no / 2).
     expect([detalle.totalOrders, detalle.stats.totalOrders, detalle.stats.avgOrderValue]).toEqual([1, 1, 200])
+    // Full-testing v2 #2: ni la lista de órdenes del detalle ni «Productos vendidos» la cuentan (sólo la blusa).
+    expect([detalle.orders.length, detalle.stats.totalProducts]).toEqual([1, 1])
 
     const lista = await turnosDelPanel(venueId, 1, 10, rango())
     expect(lista.data.find((t: { id: string }) => t.id === shiftId)?.totalSales).toBe(200)

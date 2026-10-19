@@ -35,6 +35,8 @@ jest.mock('@/services/giftCards/giftCardCancel.service', () => ({
   liberarCancelacionDeVenta: (...a: unknown[]) => mockLiberar(...a),
 }))
 jest.mock('@/services/giftCards/giftCardSettings.service', () => ({
+  // La regla del guardado es la de verdad (pura): la vista previa tiene que decir lo mismo que la confirmación.
+  validarAjustes: jest.requireActual('@/services/giftCards/giftCardSettings.service').validarAjustes,
   getGiftCardSettings: (...a: unknown[]) => mockAjustes(...a),
   updateGiftCardSettings: (...a: unknown[]) => mockGuardar(...a),
 }))
@@ -573,6 +575,26 @@ describe('update_gift_card_settings', () => {
       venueId: 'v1',
       data: { changes: { enabled: false, minAmount: 150 } },
     })
+  })
+
+  it('🔴 full-testing v2 #3 · la vista previa aplica las MISMAS reglas que el guardado: con datos inválidos responde su error, sin vista previa ni token', async () => {
+    mockAjustes.mockResolvedValue(AJUSTES) // guardado: mínimo $100, máximo $5,000, sugeridos [200, 500]
+    const casos: Array<[Record<string, unknown>, string]> = [
+      [{ minAmount: 6000 }, 'El monto mínimo no puede ser mayor que el máximo.'],
+      [{ minAmount: 300, maxAmount: 200 }, 'El monto mínimo no puede ser mayor que el máximo.'],
+      [{ suggestedAmounts: [200, 6000] }, 'Los montos sugeridos deben estar entre $100.00 y $5,000.00.'],
+      // Bajar el máximo deja fuera un sugerido YA guardado (la regla se cumple sobre la mezcla, igual que al guardar).
+      [{ maxAmount: 400 }, 'Los montos sugeridos deben estar entre $100.00 y $400.00.'],
+    ]
+    for (const [cambios, error] of casos) {
+      // Sin `requiresConfirmation` el catálogo no emite token (`catalog.ts`): no hay nada que confirmar.
+      expect({ cambios, r: await llamar('update_gift_card_settings', { venueId: 'v1', ...cambios }) }).toEqual({
+        cambios,
+        r: { ok: false, error },
+      })
+    }
+    expect(mockGuardar).not.toHaveBeenCalled()
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 
   it('un rechazo del servicio (mínimo mayor que el máximo) sale con su texto y sin bitácora', async () => {
