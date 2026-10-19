@@ -1,6 +1,7 @@
 import { calculateExpectedAmount } from '../mobile/cash-drawer.mobile.service'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
@@ -310,6 +311,42 @@ export async function resolveShiftCashDrawer(
   }
 }
 
+/** Lo que el detalle del turno lee de cada orden: renglones para los productos, y sus cobros para la forma de pago y
+ *  para saber si se cobró dentro del turno. */
+const ORDEN_DEL_DETALLE = {
+  id: true,
+  orderNumber: true,
+  total: true,
+  subtotal: true,
+  status: true,
+  table: { select: { id: true, number: true } },
+  createdAt: true,
+  servedById: true,
+  servedBy: { select: { id: true, firstName: true, lastName: true } },
+  items: {
+    select: {
+      id: true,
+      // Name the line was SOLD under (sales snapshot): a renamed product must not rewrite past shifts.
+      productName: true,
+      quantity: true,
+      unitPrice: true,
+      discountAmount: true,
+      // Both are REQUIRED by lineRevenue: without `modifiers` the
+      // modifier revenue vanishes, without `weightQuantity` a weighing
+      // is charged as a whole kilo.
+      weightQuantity: true,
+      modifiers: { select: { price: true, quantity: true } },
+      // Cierre r1 (R3): la marca de cuenta de tarjetas; no es una orden de venta del turno.
+      giftCardId: true,
+      product: { select: { id: true, name: true } },
+    },
+  },
+  payments: {
+    where: { status: 'COMPLETED' },
+    select: { id: true, method: true, cardBrand: true, maskedPan: true, shiftId: true, type: true, createdAt: true },
+  },
+} satisfies Prisma.OrderSelect
+
 export async function getShiftById(venueId: string, shiftId: string, incluirEsperado = false): Promise<any | null> {
   const shift = await prisma.shift.findFirst({
     where: {
@@ -361,77 +398,16 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
           createdAt: true,
           // R3 (Codex #5 del cierre): la marca de cuenta de tarjetas; su cobro no es venta del turno ni del empleado.
           order: { select: ORDEN_DE_TARJETAS_SELECT },
+          type: true,
         },
         orderBy: {
           createdAt: 'desc',
         },
       },
-      // Include orders with items for product breakdown
+      // Sólo las órdenes del turno con un cobro SIN turno (Testarudo sincroniza así sus turnos de SoftRestaurant).
       orders: {
-        where: {
-          status: {
-            in: ['COMPLETED', 'CONFIRMED'],
-          },
-        },
-        select: {
-          id: true,
-          orderNumber: true,
-          total: true,
-          subtotal: true,
-          status: true,
-          table: {
-            select: {
-              id: true,
-              number: true,
-            },
-          },
-          createdAt: true,
-          servedById: true,
-          servedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          items: {
-            select: {
-              id: true,
-              // Name the line was SOLD under (sales snapshot): a renamed product must not rewrite past shifts.
-              productName: true,
-              quantity: true,
-              unitPrice: true,
-              discountAmount: true,
-              // Both are REQUIRED by lineRevenue: without `modifiers` the
-              // modifier revenue vanishes, without `weightQuantity` a weighing
-              // is charged as a whole kilo.
-              weightQuantity: true,
-              modifiers: { select: { price: true, quantity: true } },
-              // Cierre r1 (R3): la marca de cuenta de tarjetas; no es una orden de venta del turno.
-              giftCardId: true,
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-            },
-          },
-          payments: {
-            where: {
-              status: 'COMPLETED',
-            },
-            select: {
-              id: true,
-              method: true,
-              cardBrand: true,
-              maskedPan: true,
-            },
-          },
-        },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        where: { payments: { some: { status: 'COMPLETED', shiftId: null } } },
+        select: ORDEN_DEL_DETALLE,
       },
     },
   })
@@ -439,6 +415,41 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   if (!shift) {
     return null
   }
+
+  // Las órdenes del detalle son las cuentas COBRADAS en el turno, con la misma membresía que firma el cierre y que
+  // enseña la lista (`readShiftPaymentsForClose` + `contarOrdenesCobradas`; no se importan porque shift.tpv.service
+  // ya importa este archivo): (1) los cobros estampados con el turno y (2) los cobros sin turno de una orden del turno,
+  // dentro de su horario. Medido en producción el 19-oct: así 0 de 511 turnos cerrados descuadran contra la lista (30
+  // con `Order.shiftId`, que dejaba en 0 los turnos cuyas órdenes no traían turno y contaba CONFIRMED sin cobro). Una
+  // cuenta pagada en partes cuenta una vez; una devolución sola, ninguna. El horario corta como el cierre
+  // (`cobroSinTurnoPerteneceAlTurno`): cerrado, en su `endTime`; cerrándose, en su `updatedAt` (= claimedAt); abierto, ahora.
+  const hasta = shift.endTime ?? (shift.status === 'CLOSING' ? shift.updatedAt : new Date())
+  const ordersById = new Map<string, (typeof shift.orders)[number]>()
+  // Toda orden ya leída se reusa, califique o no por la vía sin turno (p. ej. su único cobro sin turno es una devolución).
+  const leidas = new Map(shift.orders.map(order => [order.id, order]))
+  for (const order of shift.orders) {
+    const cobradaSinTurno = order.payments.some(
+      p => p.shiftId === null && p.type !== 'REFUND' && p.createdAt >= shift.startTime && p.createdAt <= hasta,
+    )
+    if (cobradaSinTurno) ordersById.set(order.id, order)
+  }
+  // Las cuentas de los cobros estampados con el turno, UNA vez cada una: una cuenta pagada en abonos no se trae N veces.
+  const delTurno = [...new Set(shift.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))]
+  const faltantes = delTurno.filter(id => !leidas.has(id))
+  if (faltantes.length > 0) {
+    const cobradas = await prisma.order.findMany({
+      where: { venueId, id: { in: faltantes } },
+      select: ORDEN_DEL_DETALLE,
+      // ids únicos del turno: el tope es exacto y nunca recorta.
+      take: faltantes.length,
+    })
+    for (const order of cobradas) leidas.set(order.id, order)
+  }
+  for (const id of delTurno) {
+    const order = leidas.get(id)
+    if (order) ordersById.set(id, order)
+  }
+  const orders = [...ordersById.values()].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
 
   // Determine effective status based on time logic
   const now = new Date()
@@ -459,7 +470,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
 
   // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
   // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
-  const ordenesDeVenta = shift.orders.filter(order => !esCuentaDeTarjetas(order.items))
+  const ordenesDeVenta = orders.filter(order => !esCuentaDeTarjetas(order.items))
 
   // ============================================================
   // Calculate Staff Breakdown (sales per employee)

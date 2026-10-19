@@ -118,4 +118,23 @@ describe('detalle del turno · la cuenta de tarjetas no es orden ni producto (FA
     expect([detalle.totalOrders, detalle.stats.totalOrders, detalle.stats.totalProducts]).toEqual([0, 0, 0])
     expect(detalle.payments).toHaveLength(1)
   })
+
+  it('con la membresía del cierre (19-oct), la cuenta de tarjetas que llega por sus cobros del turno tampoco cuenta', async () => {
+    // Lo normal: las dos se cobraron CON turno, así que `orders` del turno llega vacío y el detalle las pide aparte.
+    prismaMock.shift.findFirst.mockResolvedValue(
+      turno([], [cobro('pago-playera', 'orden-playera', 150, false), cobro('pago-tarjetas', 'orden-tarjetas', 800, true)], 150) as any,
+    )
+    prismaMock.order.findMany.mockResolvedValue([ventaDeMercancia, cuentaDeTarjetas] as any)
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    const pedidas = (prismaMock.order.findMany.mock.calls[0][0] as any).select.items.select
+    expect(pedidas.giftCardId).toBe(true)
+    expect(detalle.orders.map((o: { id: string }) => o.id)).toEqual(['orden-playera'])
+    expect(
+      detalle.staffBreakdown.map((s: { staffId: string; ordersCount: number; sales: number }) => [s.staffId, s.ordersCount, s.sales]),
+    ).toEqual([[CAJERA.id, 1, 150]])
+    expect(detalle.topProducts).toEqual([{ name: 'Playera', quantity: 1, revenue: 150 }])
+    expect([detalle.totalOrders, detalle.stats.totalOrders]).toEqual([1, 1])
+  })
 })
