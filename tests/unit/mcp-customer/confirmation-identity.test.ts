@@ -22,14 +22,20 @@ jest.mock('@/services/dashboard/product.dashboard.service', () => ({ updateProdu
 jest.mock('@/services/dashboard/team.dashboard.service', () => ({ updateTeamMember: (...a: unknown[]) => mockMemberWrite(...a) }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
 const mockGiftCards = jest.fn()
+const mockGiftCardDetail = jest.fn()
 const mockGiftCardWrite = jest.fn()
+const mockCancelStart = jest.fn()
 jest.mock('@/services/giftCards/giftCardReports.service', () => ({
   listGiftCards: (...a: unknown[]) => mockGiftCards(...a),
-  getGiftCardDetail: jest.fn(),
+  getGiftCardDetail: (...a: unknown[]) => mockGiftCardDetail(...a),
   getGiftCardSummary: jest.fn(),
   getGiftCardLiabilityAging: jest.fn(),
 }))
 jest.mock('@/services/giftCards/giftCardSurface.service', () => ({ operarSobreDeGerente: (...a: unknown[]) => mockGiftCardWrite(...a) }))
+jest.mock('@/services/giftCards/giftCardCancel.service', () => ({
+  iniciarCancelacionDeVenta: (...a: unknown[]) => mockCancelStart(...a),
+  liberarCancelacionDeVenta: jest.fn(),
+}))
 
 let server: McpServer
 let client: Client
@@ -49,7 +55,12 @@ beforeEach(async () => {
   mockProductWrite.mockResolvedValue({ ...product, price: 45 })
   mockMemberWrite.mockResolvedValue({})
   mockGiftCards.mockResolvedValue({ items: [giftCard], page: 1, pageSize: 10, total: 1, totalBalance: 400 })
+  mockGiftCardDetail.mockImplementation(async (_v: string, id: string) => {
+    if (id !== giftCard.id) throw new Error(`detalle inesperado de ${id}`)
+    return { ...giftCard, cancel: { allowed: true, reason: null, message: null }, sale: { cards: 1, amount: 400 } }
+  })
   mockGiftCardWrite.mockResolvedValue({ activityIds: ['act-1'], replayed: false })
+  mockCancelStart.mockResolvedValue({ giftCardIds: ['gc1'], bloqueadas: ['gc1'] })
   server = new McpServer({ name: 'identity', version: '1' })
   const scope = {
     staffId: 'owner',
@@ -145,4 +156,63 @@ it('🔴 manage_gift_card: la confirmación con otro monto u otra tarjeta que la
   ).toMatchObject({ ok: true })
   expect(mockGiftCardWrite).toHaveBeenCalledTimes(1)
   expect(mockGiftCardWrite.mock.calls[0].slice(0, 3)).toEqual(['centro', 'gc1', 'owner'])
+})
+
+describe('🔴 tarjetas: la confirmación opera la tarjeta que se VIO en la vista previa, nunca otra con los mismos 4', () => {
+  // Entre la vista previa y la confirmación reponen el código de A (gc1) y B (gc2, de otra venta) queda terminando en 4821.
+  const B = { id: 'gc2', last4: '4821', status: 'ACTIVE', balance: 900, order: { id: 'o2', orderNumber: 'ORD-2' } }
+  const elLectorDevuelveB = (aReponida: boolean) => {
+    mockGiftCards.mockResolvedValue({ items: [B], page: 1, pageSize: 10, total: 1, totalBalance: 900 })
+    mockGiftCardDetail.mockImplementation(async (_v: string, id: string) => {
+      const t = id === 'gc1' ? { ...giftCard, ...(aReponida ? { last4: '7777' } : {}) } : B
+      return { ...t, cancel: { allowed: true, reason: null, message: null }, sale: { cards: 1, amount: t.balance } }
+    })
+  }
+  const AJUSTE = {
+    venueId: 'centro',
+    last4: '4821',
+    action: 'adjust',
+    direction: 'add',
+    amount: 50,
+    reason: 'CASHIER_ERROR',
+    note: 'Se cobró doble',
+    idempotencyKey: 'mcp-tarjeta-0002',
+  }
+
+  it.each([
+    ['A ya no termina en 4821 ⇒ se rechaza', true],
+    ['A sigue terminando en 4821 ⇒ opera A', false],
+  ])('manage_gift_card: %s', async (_caso, aReponida) => {
+    const p = await call('manage_gift_card', AJUSTE)
+    expect(p.confirmationArguments).toMatchObject({ cardRef: 'gc1' })
+    elLectorDevuelveB(aReponida)
+    const r = await call('manage_gift_card', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+    expect(mockGiftCardWrite.mock.calls.map(c => c[1])).not.toContain('gc2')
+    if (aReponida) {
+      expect(r).toMatchObject({ ok: false, code: 'GIFT_CARD_NOT_FOUND' })
+      expect(mockGiftCardWrite).not.toHaveBeenCalled()
+    } else {
+      expect(r).toMatchObject({ ok: true })
+      expect(mockGiftCardWrite.mock.calls[0].slice(0, 3)).toEqual(['centro', 'gc1', 'owner'])
+    }
+  })
+
+  it.each([
+    ['A ya no termina en 4821 ⇒ se rechaza', true],
+    ['A sigue terminando en 4821 ⇒ cancela la venta de A', false],
+  ])('cancel_gift_card_sale: %s', async (_caso, aReponida) => {
+    const args = { venueId: 'centro', last4: '4821', action: 'start', idempotencyKey: 'mcp-cancelar-0001' }
+    const p = await call('cancel_gift_card_sale', args)
+    expect(p).toMatchObject({ requiresConfirmation: true, confirmationArguments: { cardRef: 'gc1' } })
+    elLectorDevuelveB(aReponida)
+    const r = await call('cancel_gift_card_sale', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken })
+    expect(mockCancelStart.mock.calls.map(c => c[1])).not.toContain('o2')
+    if (aReponida) {
+      expect(r).toMatchObject({ ok: false, code: 'GIFT_CARD_NOT_FOUND' })
+      expect(mockCancelStart).not.toHaveBeenCalled()
+    } else {
+      expect(r).toMatchObject({ ok: true })
+      expect(mockCancelStart.mock.calls[0].slice(0, 2)).toEqual(['centro', 'o1'])
+    }
+  })
 })

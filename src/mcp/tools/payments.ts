@@ -13,6 +13,7 @@ import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/s
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
 import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
+import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import AppError from '@/errors/AppError'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
@@ -79,7 +80,7 @@ export interface PaymentsSummary {
   // WHY: separate refund line so "¿qué se reembolsó?" is answerable and `completed.gross` is
   // TRUE sales revenue. `amount`/`tips` stay NEGATIVE (money out), as stored on the refund rows.
   refunds: { count: number; amount: number; tips: number }
-  /** Tarjetas de regalo VENDIDAS dentro de `completed.gross`: es dinero que entró, no venta. */
+  /** Cobros COMPLETED de cuentas de tarjetas de regalo dentro de `completed.gross` (abonos incluidos, antes de sus devoluciones): dinero que entró, no venta. */
   giftCardLoads?: { count: number; amount: number }
   /** Sólo cuando `giftCardLoads.count > 0`. */
   note?: string
@@ -151,7 +152,11 @@ export function conCargasDeTarjetas(summary: PaymentsSummary, cargas: { count: n
   return {
     ...summary,
     giftCardLoads: { count, amount },
-    ...(count > 0 ? { note: `completed.gross incluye $${amount.toFixed(2)} de tarjetas de regalo vendidas; eso no es venta.` } : {}),
+    ...(count > 0
+      ? {
+          note: `completed.gross incluye ${formatoPesos(amount)} cobrados en cuentas de tarjetas de regalo (abonos incluidos; sus devoluciones van en refunds); eso no es venta.`,
+        }
+      : {}),
   }
 }
 

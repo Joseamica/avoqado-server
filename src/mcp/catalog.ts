@@ -510,6 +510,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedUpdatedAt',
             'resolvedProductId',
             'resolvedStaffVenueId',
+            // Tarjetas de regalo: la confirmación opera la tarjeta (o la venta) que se VIO, no la que hoy termine en esos 4.
+            'cardRef',
             'fecha',
             'destinoFecha',
             'expectedRevision',

@@ -467,7 +467,7 @@ describe('B5 r1 · MCP contra Postgres real: dinero vs ventas (ejemplo del revis
     // ...pero dice cuánto de ese bruto es la venta de tarjetas, para que el asistente no lo cuente como venta.
     expect(out.summary.giftCardLoads).toEqual({ count: 1, amount: 500 })
     expect(out.summary.note).toContain('$500.00')
-    expect(out.summary.note).toContain('tarjetas de regalo vendidas')
+    expect(out.summary.note).toContain('cobrados en cuentas de tarjetas de regalo (abonos incluidos')
   })
 })
 

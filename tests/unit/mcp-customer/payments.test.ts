@@ -298,7 +298,12 @@ describe('list_payments · tarjetas de regalo vendidas dentro del bruto', () => 
   it('conCargasDeTarjetas (pura): con alguna carga dice cuántas y cuánto, y la nota; sin ninguna, ceros y sin nota', () => {
     const con = conCargasDeTarjetas(base(), { count: 1, amount: 500 })
     expect(con.giftCardLoads).toEqual({ count: 1, amount: 500 })
-    expect(con.note).toBe('completed.gross incluye $500.00 de tarjetas de regalo vendidas; eso no es venta.')
+    // Dice lo que de verdad cuenta: TODO cobro de cuentas de tarjetas (abonos incluidos), antes de sus devoluciones.
+    expect(con.note).toBe(
+      'completed.gross incluye $500.00 cobrados en cuentas de tarjetas de regalo (abonos incluidos; sus devoluciones van en refunds); eso no es venta.',
+    )
+    // El monto, con el formateador de pesos del resto del MCP (separador de miles).
+    expect(conCargasDeTarjetas(base(), { count: 2, amount: 1500 }).note).toContain('$1,500.00')
     expect(con.completed.gross).toBe(1000) // el bruto es dinero: no se toca
 
     const sin = conCargasDeTarjetas(base(), { count: 0, amount: 0 })

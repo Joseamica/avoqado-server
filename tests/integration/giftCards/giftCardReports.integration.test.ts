@@ -28,6 +28,8 @@ import {
   listPendingAccountingReview,
 } from '@/services/giftCards/giftCardReports.service'
 import { crearNegocioDePrueba, limpiarNegocioDePrueba, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
+import { registerGiftCardTools } from '@/mcp/tools/giftCards'
+import type { McpScope } from '@/mcp/scope'
 
 jest.setTimeout(120000)
 
@@ -192,6 +194,27 @@ describe('reportes de tarjetas de regalo contra Postgres', () => {
     const { codeLast4 } = await prisma.giftCard.findUniqueOrThrow({ where: { id: v.giftCardIds[0] }, select: { codeLast4: true } })
     expect((await listGiftCards(otro.venueId, { folio: orderNumber, last4: codeLast4 })).items.map(t => t.id)).toEqual([v.giftCardIds[0]])
     expect((await listGiftCards(otro.venueId, { folio: `${orderNumber}-X` })).total).toBe(0)
+
+    // Revisión final (B): el asistente cancela esa venta de 2 tarjetas por su folio: es UNA venta, no pregunta «cuál tarjeta».
+    const herramientas = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+    const scope = {
+      staffId: otro.staffId,
+      activeOrg: otro.organizationId,
+      scopes: ['mcp:read', 'mcp:write'],
+      allowedVenueIds: [otro.venueId],
+      perVenueAccess: new Map([[otro.venueId, { role: 'OWNER', corePermissions: ['giftCards:manage'] }]]),
+    } as unknown as McpScope
+    registerGiftCardTools({ tool: (...a: unknown[]) => herramientas.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+    const vista = JSON.parse(
+      (
+        await herramientas.get('cancel_gift_card_sale')!(
+          { venueId: otro.venueId, saleFolio: orderNumber.toLowerCase(), action: 'start', idempotencyKey: `mcp-${stamp}` },
+          {},
+        )
+      ).content[0].text,
+    )
+    expect(vista).toMatchObject({ requiresConfirmation: true, preview: { sale: `Venta #${orderNumber} · 2 tarjetas · $700.00` } })
+    expect(v.giftCardIds).toContain(vista.cardRef)
   })
 
   it('⭐ (D3 menor 6) «Activa» = se puede usar hoy: trae A y no E (vencida); la lista, el total y el saldo cuadran con la misma frontera', async () => {

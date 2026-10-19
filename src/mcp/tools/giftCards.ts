@@ -98,11 +98,13 @@ function rechazo(err: unknown): Respuesta {
  * La tarjeta sobre la que se opera: por sus últimos 4 y/o el folio de su venta (filtrados en la base), o por su `cardRef` (su
  * id: no es secreto, el secreto es el código). Nunca se adivina: con varias candidatas responde `ambiguous` con cada una para
  * que el usuario escoja. Un `cardRef` se busca DENTRO del negocio (otro negocio ⇒ «no encontrada») y debe cuadrar con los 4 y
- * el folio que lleguen.
+ * el folio que lleguen. Con `unaVentaBasta` (cancelar la venta), varias candidatas de la MISMA venta no son ambiguas.
+ * La vista previa devuelve el `cardRef` resuelto y el catálogo lo ata al token: la confirmación opera ESA tarjeta aunque otra
+ * tome sus mismos 4 (reponer un código) entre los dos pasos.
  */
 async function resolverTarjeta(
   venueId: string,
-  p: { cardRef?: string; last4?: string; saleFolio?: string },
+  p: { cardRef?: string; last4?: string; saleFolio?: string; unaVentaBasta?: boolean },
 ): Promise<{ tarjeta: GiftCardRow } | { respuesta: Respuesta }> {
   if (p.cardRef) {
     const tarjeta = await getGiftCardDetail(venueId, p.cardRef, { limit: 1 }).catch(err => {
@@ -118,6 +120,11 @@ async function resolverTarjeta(
   const pagina = await listGiftCards(venueId, { last4: p.last4, folio: p.saleFolio, pageSize: MAX_COINCIDENCIAS })
   if (pagina.total === 0) return { respuesta: noEncontrada() }
   if (pagina.total === 1) return { tarjeta: pagina.items[0] }
+  // ponytail: sólo se mira la página (hasta 10); una venta de más tarjetas sigue saliendo ambigua y se resuelve con su cardRef.
+  const ventas = new Set(pagina.items.map(t => t.order?.id ?? null))
+  if (p.unaVentaBasta && pagina.total === pagina.items.length && ventas.size === 1 && !ventas.has(null)) {
+    return { tarjeta: pagina.items[0] }
+  }
   return {
     respuesta: text({
       ok: false,
@@ -300,6 +307,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          cardRef: t.id, // el catálogo lo ata al token (resolverTarjeta)
           preview: {
             card: tarjeta,
             saleFolio: t.order?.orderNumber ?? null,
@@ -361,7 +369,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
       guard.venueFilter(venueId)
       guard.requirePermission('giftCards:manage', venueId)
       if (!idempotencyKey) return pideLlave()
-      if (!last4 && !saleFolio) {
+      if (!last4 && !saleFolio && !cardRef) {
         return text({
           ok: false,
           needsInput: true,
@@ -379,13 +387,19 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
           question: `${MENSAJE_CONFIRMAR_NO_DEVUELTO} Pasa confirmNotRefunded:true sólo si el usuario lo confirma.`,
         })
       }
-      const r = await resolverTarjeta(venueId, { cardRef, last4, saleFolio })
+      const r = await resolverTarjeta(venueId, { cardRef, last4, saleFolio, unaVentaBasta: true })
       if ('respuesta' in r) return r.respuesta
       const orden = r.tarjeta.order
       if (!orden) {
         return text({ ok: false, error: `La tarjeta ${enmascarada(r.tarjeta.last4)} no viene de una venta: no hay venta que cancelar.` })
       }
-      const { cancel, sale } = await getGiftCardDetail(venueId, r.tarjeta.id, { limit: 1 })
+      let detalle: Awaited<ReturnType<typeof getGiftCardDetail>>
+      try {
+        detalle = await getGiftCardDetail(venueId, r.tarjeta.id, { limit: 1 })
+      } catch (err) {
+        return rechazo(err)
+      }
+      const { cancel, sale } = detalle
       const venta = laVenta(orden.orderNumber, sale)
 
       if (!confirm) {
@@ -407,6 +421,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          cardRef: r.tarjeta.id, // ata la venta al token: una tarjeta no cambia de venta
           preview: { sale: venta, action },
           message:
             (action === 'start'

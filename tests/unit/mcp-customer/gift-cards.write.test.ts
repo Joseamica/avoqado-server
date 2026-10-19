@@ -463,6 +463,60 @@ describe('cancel_gift_card_sale', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  it('🔴 una venta de 2 tarjetas se cancela por su folio: es UNA venta, no hay «cuál tarjeta» que escoger', async () => {
+    mockList.mockImplementation(conFolio(fila(), fila({ id: 'gc2', last4: '7777', balance: 600 })))
+    mockDetail.mockResolvedValue(detalle({ allowed: true, reason: null, message: null }))
+    const vista = await llamar('cancel_gift_card_sale', { venueId: 'v1', saleFolio: 'ORD-1', action: 'start', idempotencyKey: LLAVE })
+    expect(vista).toMatchObject({
+      requiresConfirmation: true,
+      cardRef: 'gc1',
+      preview: { sale: 'Venta #ORD-1 · 2 tarjetas · $1,000.00', action: 'start' },
+    })
+    expect(vista.ambiguous).toBeUndefined()
+
+    mockIniciar.mockResolvedValueOnce({ giftCardIds: ['gc1', 'gc2'], bloqueadas: ['gc1', 'gc2'] })
+    const ok = await llamar('cancel_gift_card_sale', {
+      venueId: 'v1',
+      saleFolio: 'ORD-1',
+      action: 'start',
+      idempotencyKey: LLAVE,
+      confirm: true,
+    })
+    expect(ok).toMatchObject({ ok: true, blockedCards: 2 })
+    expect(mockIniciar).toHaveBeenCalledWith('v1', 'o1', { staffId: 's1', operationKey: LLAVE })
+  })
+
+  it('🔴 dos ventas DISTINTAS con el mismo folio siguen siendo ambiguas: nunca se escoge una', async () => {
+    mockList.mockImplementation(conFolio(fila(), fila({ id: 'gc2', order: { id: 'o2', orderNumber: 'ORD-1' } })))
+    const r = await llamar('cancel_gift_card_sale', {
+      venueId: 'v1',
+      saleFolio: 'ORD-1',
+      action: 'start',
+      idempotencyKey: LLAVE,
+      confirm: true,
+    })
+    expect(r).toMatchObject({ ok: false, ambiguous: true, total: 2 })
+    expect(mockDetail).not.toHaveBeenCalled()
+    expect(mockIniciar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 con sólo el cardRef de una de sus tarjetas resuelve su venta, sin volver a pedir el folio', async () => {
+    mockDetail.mockResolvedValue({ ...detalle({ allowed: true, reason: null, message: null }), id: 'gc2', last4: '7777' })
+    const vista = await llamar('cancel_gift_card_sale', { venueId: 'v1', cardRef: 'gc2', action: 'start', idempotencyKey: LLAVE })
+    expect(mockDetail).toHaveBeenCalledWith('v1', 'gc2', { limit: 1 })
+    expect(mockList).not.toHaveBeenCalled()
+    expect(vista).toMatchObject({ requiresConfirmation: true, cardRef: 'gc2', preview: { sale: 'Venta #ORD-1 · 2 tarjetas · $1,000.00' } })
+  })
+
+  it('un rechazo al leer el detalle de la venta sale como {ok:false, code}, no como error', async () => {
+    mockList.mockImplementation(conFolio(fila()))
+    // La tarjeta se borró entre la lista y el detalle.
+    mockDetail.mockRejectedValueOnce(new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio.', 404))
+    const r = await llamar('cancel_gift_card_sale', { venueId: 'v1', last4: '4821', action: 'start', idempotencyKey: LLAVE })
+    expect(r).toEqual({ ok: false, code: 'GIFT_CARD_NOT_FOUND', error: 'No encontramos esa tarjeta de regalo en este negocio.' })
+    expect(mockIniciar).not.toHaveBeenCalled()
+  })
+
   it('una tarjeta sin venta no tiene venta que cancelar', async () => {
     mockList.mockImplementation(async () => pagina(fila({ order: null })))
     const r = await llamar('cancel_gift_card_sale', { venueId: 'v1', last4: '4821', action: 'start', idempotencyKey: LLAVE })
