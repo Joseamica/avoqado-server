@@ -19,6 +19,7 @@ import {
   MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN,
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 
 /**
  * Codex R3 (P1-3) + R4 (R4-3): el slot que ocupa HOY una afiliación en la configuración efectiva del venue (venue →
@@ -387,6 +388,8 @@ import {
   computeOrderBalance,
   computeStoredOrderTotal,
   estadoDeCobroAlRecibirDinero,
+  estadoParaCalcular,
+  esVentaCerrada,
   REFUND_PAYMENT_TYPE,
   type CompletedPaymentForBalance,
 } from '../shared/orderBalance'
@@ -1382,32 +1385,37 @@ export async function settleStandalonePaymentInTx(
   // queda saldada; una de la plataforma o de SoftRestaurant, como hoy (Codex r12 #5).
   // Codex r13 #1: `cubreComoCancelada` es el `isFullyPaid` de HOY —el saldo calculado con la orden tal como se leyó—.
   const cubreComoCancelada = computeOrderBalance(order, [{ amount, tipAmount }]).isFullyPaid
+  const entraDinero = new Prisma.Decimal(payment.amount).plus(payment.tipAmount).greaterThan(0)
+  // 🔴 R3-2 (la regla de R2-2 en `payCashOrder`): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED leída bajo el candado
+  // de quien llama), aunque esté cancelada: el dinero se registra y queda cancelada con su estado de cobro. La cancelada que DEBE se
+  // reabre como siempre, y el origen de una reasignación (no entra dinero) también, como hoy.
   // `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
-  const status = await reabrirSiRecibeDinero(tx, {
-    venueId,
-    orderId,
-    status: order.status,
-    originSystem: order.originSystem,
-    cobrado: amount.plus(tipAmount),
-    cubreComoCancelada,
-    canal: 'recordOrderPayment',
-    paymentId: payment.id ?? null,
-    staffId: staffId ?? null,
-  })
-  const cuenta = { ...order, status }
+  const status =
+    entraDinero && esVentaCerrada(order.paymentStatus)
+      ? order.status
+      : await reabrirSiRecibeDinero(tx, {
+          venueId,
+          orderId,
+          status: order.status,
+          originSystem: order.originSystem,
+          cobrado: amount.plus(tipAmount),
+          cubreComoCancelada,
+          canal: 'recordOrderPayment',
+          paymentId: payment.id ?? null,
+          staffId: staffId ?? null,
+        })
+  // 🔴 R4-2 (Codex r3): la cancelada CERRADA se guarda cancelada, pero se calcula como cuando se cobró (base + IVA aparte): el total
+  // que se escribe aquí es el MISMO con el que mide el aviso de sobrepago de después del commit (`updateOrderTotalsForStandalonePayment`).
+  const cuenta = { ...order, status: estadoParaCalcular(status, order.paymentStatus, entraDinero) }
   const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
   const saldada = balance.isFullyPaid && cierreAutomaticoPermitido(status)
   // 🔴 R8-1 (Codex recheck-12 P2): una venta que YA estaba cerrada (PAID/REFUNDED, leída bajo el candado de quien llama) y recibe
   // dinero no se reabre ni repite los efectos de saldar. El origen de una reasignación (sin dinero) se recalcula como hoy.
-  const cobro = estadoDeCobroAlRecibirDinero(
-    order.paymentStatus,
-    new Prisma.Decimal(payment.amount).plus(payment.tipAmount).greaterThan(0),
-    {
-      paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
-      remainingBalance: balance.remainingBalance,
-    },
-  )
+  const cobro = estadoDeCobroAlRecibirDinero(order.paymentStatus, entraDinero, {
+    paymentStatus: saldada ? 'PAID' : balance.paidAmount.greaterThan(0) ? 'PARTIAL' : order.paymentStatus,
+    remainingBalance: balance.remainingBalance,
+  })
   // Codex r10 #6: la reasignación guarda así los totales del ORIGEN dentro de su transacción (`efectosDeCierre = false`): ni
   // lealtad, ni marca de cocina, ni vale de inventario — el origen ya los tuvo cuando se saldó.
   const firstSettlement = efectosDeCierre && saldada && !cobro.cerrada && !(paid._count > 1 && previous.isFullyPaid)
@@ -1660,7 +1668,15 @@ async function updateOrderTotalsForStandalonePayment(
   // dinero (`estadoParaCobrar`): una de Avoqado se reabre con cualquier dinero; una externa, sólo si cubre. Todo lo de abajo
   // —total, saldo, estado del pago, vale, lealtad y el cierre— se calcula con ESE estado, y la escritura lo persiste.
   const cubreComoCancelada = Math.max(0, totalesDeLaOrden(totalTip, order.status) - totalPaid) <= 0.01
-  const estado = estadoParaCobrar(order, totalPaid, cubreComoCancelada)
+  // 🔴 R4-5 (Codex r3; la decisión de R3-2/R4-2 del cierre transaccional): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED),
+  // aunque esté cancelada: conserva su estado operativo y se calcula como cuando se cobró (base + IVA aparte, `estadoParaCalcular`). La
+  // cancelada que DEBE se reabre como siempre. `estadoOperativo` decide el cierre; `estado`, los importes que se guardan Y los del aviso.
+  // El estado de cobro se leyó antes del candado: la huella de abajo (`standaloneTotalsInputs`: `paymentStatus` y la clase del estado)
+  // lo revalida bajo él, y la reapertura vuelve a mirar el estado de cobro releído allí.
+  const entraDinero = paymentAmount > 0
+  const conservaCerrada = entraDinero && esVentaCerrada(order.paymentStatus)
+  const estadoOperativo = conservaCerrada ? order.status : estadoParaCobrar(order, totalPaid, cubreComoCancelada)
+  const estado = estadoParaCalcular(estadoOperativo, order.paymentStatus, entraDinero)
   const newTotal = totalesDeLaOrden(totalTip, estado)
 
   // Calculate remaining amount (based on new total)
@@ -1672,7 +1688,7 @@ async function updateOrderTotalsForStandalonePayment(
   // esa invisibilidad sin cambiar el contrato de la API.
   const remainingAmount = Math.max(0, newTotal - totalPaid)
   // Account for floating point precision. Founder 3-oct: una cancelada nunca queda saldada (si cubría, ya salió de CANCELADA).
-  const isFullyPaid = remainingAmount <= 0.01 && cierreAutomaticoPermitido(estado)
+  const isFullyPaid = remainingAmount <= 0.01 && cierreAutomaticoPermitido(estadoOperativo)
   const newPaymentStatus = isFullyPaid ? 'PAID' : totalPaid > 0 ? 'PARTIAL' : order.paymentStatus
   // 🔴 R8-1 (Codex recheck-12 P2): un cobro que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED). Sólo cuando ESTA función
   // escribe (con `committedSettlement` lo aplicó ya el cierre transaccional; con el vale finalizado no se escribe). El estado previo
@@ -1714,45 +1730,19 @@ async function updateOrderTotalsForStandalonePayment(
   // rechazo aquí dejaría dinero cobrado al cliente SIN registro en Avoqado — un cobro
   // fantasma, peor que el sobrepago. Por eso el pago SIEMPRE se registra; lo que se elimina
   // es la invisibilidad. `wasAlreadyPaid` distingue el caso Mindform exacto: un cobro nuevo
-  // aterrizando sobre una cuenta que YA estaba saldada.
+  // aterrizando sobre una cuenta que YA estaba saldada. El aviso lo comparte con el POS móvil.
   const overpaidBy = Math.round((totalPaid - newTotal) * 100) / 100
   if (overpaidBy > 0.01) {
-    const wasAlreadyPaid = order.paymentStatus === 'PAID'
-    // BetterStack debe alertar sobre '🚨 [Sobrepago]'.
-    logger.error('🚨 [Sobrepago] Se cobró MÁS de lo que vale la cuenta — el pago se registra, pero requiere revisión', {
+    avisarSobrepago({
       orderId,
       venueId: order.venueId,
       totalPaid,
       orderTotal: newTotal,
       overpaidBy,
-      wasAlreadyPaid,
+      wasAlreadyPaid: order.paymentStatus === 'PAID',
       paymentId: currentPaymentId ?? null,
       staffId: staffId ?? null,
     })
-    // Fire-and-forget FUERA de toda transacción: una falla del audit jamás puede tocar el cobro.
-    void prisma.activityLog
-      .create({
-        data: {
-          action: 'SOBREPAGO_DETECTADO',
-          entity: 'Order',
-          entityId: orderId,
-          staffId: staffId ?? null,
-          venueId: order.venueId,
-          data: {
-            totalPaid,
-            orderTotal: newTotal,
-            overpaidBy,
-            wasAlreadyPaid,
-            paymentId: currentPaymentId ?? null,
-          },
-        },
-      })
-      .catch(err => {
-        logger.error('🚨 [Sobrepago] No se pudo escribir el ActivityLog del sobrepago', {
-          orderId,
-          error: err instanceof Error ? err.message : err,
-        })
-      })
   }
 
   // 🚨 INVENTARIO INSUFICIENTE — detectar y gritar, NUNCA rechazar ni lanzar.
@@ -1923,17 +1913,20 @@ async function updateOrderTotalsForStandalonePayment(
           // Founder 3-oct / Codex r9 #2: la misma regla, bajo el candado y con lo que se acaba de releer, en la MISMA transacción
           // que los totales. La huella compara la CLASE del estado (Tarea 6d): dentro de la misma clase la regla da lo mismo;
           // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
-          await reabrirSiRecibeDinero(tx, {
-            venueId: order.venueId,
-            orderId,
-            status: current.status,
-            originSystem: order.originSystem,
-            cobrado: totalPaid,
-            cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
-            canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
-            paymentId: currentPaymentId ?? null,
-            staffId: staffId ?? null,
-          })
+          // R4-5: la venta CERRADA que recibe dinero no se reabre (decidido con el estado de cobro releído bajo el candado).
+          if (!(entraDinero && esVentaCerrada(current.paymentStatus))) {
+            await reabrirSiRecibeDinero(tx, {
+              venueId: order.venueId,
+              orderId,
+              status: current.status,
+              originSystem: order.originSystem,
+              cobrado: totalPaid,
+              cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
+              canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
+              paymentId: currentPaymentId ?? null,
+              staffId: staffId ?? null,
+            })
+          }
 
           const updated = await tx.order.update({
             where: { id: orderId, ...(options?.venueId ? { venueId: options.venueId } : {}) },
@@ -3705,7 +3698,13 @@ export async function recordOrderPayment(
         // Codex R14-1: PRIMERA sentencia — el candado del intento (el mismo del ingreso del webhook, de S1 y de la consolidación):
         // la lectura de la primera evidencia y la creación del Payment quedan serializadas con la llegada de cualquier evento del
         // intento. Orden de candados: intento → referencia → sesión de vales → tickets → Order → TerminalPaymentRequest → Payment → Shift.
-        if (llaveDelIntento) await candadoDeIntento(tx, llaveDelIntento)
+        if (llaveDelIntento) {
+          await candadoDeIntento(tx, llaveDelIntento)
+          // 🔴 R8 (efectivo sin red): el punto único de la llave, el mismo de `payCashOrder`. Con el candado del intento, el registro
+          // que la consulta rápida no vio ya confirmó: si su pago existe, sale por la red de la carrera (`CobroYaRegistrado`, abajo) y
+          // responde como el atajo de arriba, ANTES de cualquier regla de estado (arbitraje, cancelada, sesión de vales en conciliación).
+          await salirSiLaLlaveYaTienePago(tx, { venueId, orderId: activeOrder.id, idempotencyKey: paymentData.idempotencyKey })
+        }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) como PRIMERA sentencia y vuelve a resolver
         // ya con el candado — la resolución de arriba corrió fuera de esta transacción y dos replays simultáneos veían
         // «ausencia» los dos. Con llave no aplica (índice único del intento).
@@ -3792,13 +3791,8 @@ export async function recordOrderPayment(
         // es dinero ya capturado y reabre en los cierres. La tarjeta nunca: la aprobó el banco.
         if (esCobroNuevo({ enVivo: paymentData.cobroNuevo === true, efectivoDeCajon: classicMethod === 'CASH' && !merchantAccountId })) {
           const { status } = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId }, select: { status: true } })
-          if (claseDeEstado(status) === 'CANCELADA') {
-            // Codex r13 #2: la misma resolución, bajo el candado del intento (`candadoDeIntento`, la PRIMERA sentencia de esta
-            // transacción) y el de la orden: si la llave ya tiene un Payment, sale por la red de la carrera (P2002, abajo), que
-            // lo devuelve.
-            await salirSiLaLlaveYaTienePago(tx, { venueId, orderId: activeOrder.id, idempotencyKey: paymentData.idempotencyKey })
-            rechazarCobroNuevoSobreCancelada(status)
-          }
+          // (Codex r13 #2 / R8: una llave que ya tiene su Payment salió arriba, en el punto de la llave, antes de llegar aquí.)
+          if (claseDeEstado(status) === 'CANCELADA') rechazarCobroNuevoSobreCancelada(status)
         }
 
         // La PREPARACIÓN del intento de vales va después del arbitraje y sólo para quien sigue (ganador, cobro sin
@@ -4644,6 +4638,9 @@ export async function recordOrderPayment(
               areaTicketAlreadyFinalized: true,
               ventaYaCerrada,
               primerSaldado,
+              // 🔴 R2-3 (Codex sobre S1): una venta que YA estaba cerrada (también REFUNDED) puede recuperar aquí su primer saldado;
+              // pudo devolverse: como la recuperación del Payment existente (R11-1), sin sello vivo sobre una venta con reembolso.
+              lealtadRespetandoReembolsos: ventaYaCerrada,
               venueId,
               // Codex 3.6 (S3): la finalización ya puso la marca al saldar; aquí sólo se arman los sueltos.
               marcarCocina: marcarCocina && areaTicketCheckoutState === 'PAID',

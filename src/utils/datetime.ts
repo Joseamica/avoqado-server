@@ -475,6 +475,14 @@ export function isValidTimezone(timezone: string): boolean {
 }
 
 /**
+ * La zona del negocio si es IANA válida; si no (vacía, `null`, un legado como «GMT-6»), `America/Mexico_City`.
+ * Formatear una fecha con una zona inválida lanza `RangeError`: un aviso de cobro no puede perderse por eso.
+ */
+export function zonaValida(timezone: string | null | undefined): string {
+  return timezone && isValidTimezone(timezone) ? timezone : DEFAULT_TIMEZONE
+}
+
+/**
  * Get timezone offset in hours for a given timezone
  *
  * @param timezone - IANA timezone

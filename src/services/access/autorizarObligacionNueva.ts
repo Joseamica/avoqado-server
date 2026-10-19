@@ -27,7 +27,7 @@ const STRIPE = STRIPE_DENTRO_DEL_CANDADO
  * se crea nada (503, ningún dinero se movió); y la transacción dura más que el peor caso de lecturas + creación.
  */
 const PRESUPUESTO_LECTURAS_MS = 45_000
-const TIMEOUT_DE_LA_TRANSACCION_MS = 150_000
+export const TIMEOUT_DE_LA_TRANSACCION_MS = 150_000
 
 /**
  * Cuánto puede estar EN VUELO el cobro del carril viejo del alta: la marca temprana (`OnboardingProgress.completedAt`)
