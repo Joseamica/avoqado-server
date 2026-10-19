@@ -153,7 +153,15 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}, options: { openSh
     const key = where?.venueId_idempotencyKey?.idempotencyKey
     const found = payments.find(p => p.idempotencyKey === key)
     return found
-      ? { ...found, method: 'CASH', amount: new Decimal(found.amount), tipAmount: new Decimal(found.tipAmount), receipts: [] }
+      ? {
+          ...found,
+          method: 'CASH',
+          orderId: 'order-1',
+          status: 'COMPLETED',
+          amount: new Decimal(found.amount),
+          tipAmount: new Decimal(found.tipAmount),
+          receipts: [],
+        }
       : null
   })
 
@@ -215,9 +223,11 @@ function installStatefulP2002RollbackStore() {
     customer: null,
   }))
   let paymentLookups = 0
+  // R8: ni la consulta rápida ni el punto de la llave bajo el candado ven al ganador (1.ª y 2.ª lectura); aparece hasta el índice único
+  // (P2002), que es lo que esta prueba ejercita: la red de la carrera revierte la CAS y el turno, y lo devuelve.
   prismaMock.payment.findUnique.mockImplementation(async () => {
     paymentLookups += 1
-    return paymentLookups === 1 ? null : winner
+    return paymentLookups <= 2 ? null : winner
   })
   prismaMock.staff.findUnique.mockResolvedValue({ id: 'staff-1' })
   prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })

@@ -27,6 +27,8 @@ jest.mock('@/utils/prismaClient', () => ({
     // Con una fila menor que OWNER, el resolutor pregunta en UNA consulta si es dueña de la org del venue (P2-6).
     staffOrganization: { findUnique: jest.fn(), findFirst: jest.fn(async () => null) },
     venueRolePermission: { findUnique: jest.fn() },
+    // R4-1: la llave de idempotencia que ya tiene pago (mismo criterio que `payCashOrder`).
+    payment: { findUnique: jest.fn() },
   },
 }))
 
@@ -79,6 +81,7 @@ describe('checkTableOwnership Middleware', () => {
 
   beforeEach(() => {
     jest.clearAllMocks()
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
     jsonMock = jest.fn()
     statusMock = jest.fn().mockReturnValue({ json: jsonMock })
     mockRes = { status: statusMock as any }
@@ -169,5 +172,310 @@ describe('checkTableOwnership Middleware', () => {
     })
     await checkTableOwnership('order')(mockReq as Request, mockRes as Response, mockNext)
     expect(mockNext).toHaveBeenCalled()
+  })
+
+  /**
+   * 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde). La propiedad de mesa decide quién INICIA un cobro, no
+   * quién REGISTRA dinero ya capturado: Ana cobró $100 sin red, un encargado pasó la mesa a Juan, y al volver la red la cola de Ana
+   * (`isOfflineReplay`) recibía 403 con el dinero ya en el cajón. Sólo la ruta de cobro lo pide (`dineroCapturado`).
+   */
+  describe('R2-6: dinero ya capturado en una mesa ajena', () => {
+    const conLocals = () => {
+      ;(mockRes as any).locals = {}
+      return mockRes as Response
+    }
+
+    it('🔴 cola sin red (isOfflineReplay) en la ruta de cobro ⇒ pasa y deja la mesa ajena para el rastro', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, amount: 10000 }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+    })
+
+    it('el cobro EN VIVO en la ruta de cobro sigue con 403', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { amount: 10000 }
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        conLocals(),
+        mockNext,
+      )
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    /**
+     * 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado. Beto tiene una cuenta de $100 con $100 de descuento (saldo $0); Ana
+     * mandaba una llave nueva con `isOfflineReplay` y $0 y le cerraba la mesa (PAID, inventario, mesa libre). El pase sólo vale con
+     * importe + propina estrictamente positivo y válido; lo demás conserva el 403 de antes.
+     */
+    it.each([
+      ['$0 + $0', { amount: 0 }],
+      ['$0 + propina $0 explícita', { amount: 0, tip: 0 }],
+      ['importe no numérico', { amount: '10000' }],
+      ['importe ausente', {}],
+      ['propina negativa que se come el importe', { amount: 10000, tip: -20000 }],
+      ['importe infinito', { amount: Infinity }],
+    ])('🔴 R3-1: cola sin red con %s en mesa ajena ⇒ 403 como antes', async (_caso, cuerpo) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, ...cuerpo }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+    })
+
+    it('R3-1: propina sola (importe $0 + propina $50) en mesa ajena es dinero capturado ⇒ pasa con rastro', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, amount: 0, tip: 5000 }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(mockNext).toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+    })
+
+    it('R3-1: $0 + $0 en la mesa PROPIA sigue pasando (cerrar una cuenta cortesiada)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      ;(mockReq as any).authContext.userId = JUAN
+      mockReq.body = { isOfflineReplay: true, amount: 0 }
+      const res = conLocals()
+      await checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(
+        mockReq as Request,
+        res,
+        mockNext,
+      )
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+    })
+
+    /**
+     * 🔴 R4-1 (Codex r3, P2): una cuenta de $100 con $100 de cortesía se cerró con un cobro de $0, llave K, y se perdió la respuesta.
+     * Al reintentar, la mesa ya es de Juan: R3-1 respondía 403 ANTES de mirar K y la operación ya confirmada se leía como rechazada.
+     * La llave que ya tiene pago de ESTA orden en ESTE negocio pasa: el servicio devuelve ese pago (idempotente, sin otro cobro).
+     */
+    const pagar = (res: Response) =>
+      checkTableOwnership('order', ['tables:manage-all', 'tables:pay-any'], { dineroCapturado: true })(mockReq as Request, res, mockNext)
+    /** El pago de la llave K: un cobro completado de esta orden (R5-2: sólo eso cuenta como «ya cobrada»). */
+    const COBRO = { orderId: 'order-1', status: 'COMPLETED', type: 'REGULAR' }
+
+    it('🔴 R4-1: reintento de $0 con una llave que YA tiene pago de esta orden ⇒ pasa (el servicio devuelve ese pago)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
+      mockReq.body = { amount: 0, idempotencyKey: 'llave-K' }
+      const res = conLocals()
+      await pagar(res)
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+      expect(prisma.payment.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { venueId_idempotencyKey: { venueId: VENUE, idempotencyKey: 'llave-K' } } }),
+      )
+      // No es dinero nuevo: no deja rastro de mesa ajena (no se registra nada).
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+      // R5-1: pasa SÓLO a recuperar ese pago; el servicio responde el 403 si ya no está.
+      expect((res as any).locals.soloRecuperarPago).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+      expect(prisma.payment.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ select: { orderId: true, status: true, type: true } }),
+      )
+    })
+
+    /**
+     * 🔴 R5-1 (Codex r4, P2 R): la excepción de R4-1 dejaba pasar la petición COMPLETA. Con un importe positivo en vivo y la llave K
+     * del abono de $20, si el pago se borraba antes de que el servicio lo releyera, se creaba un pago NUEVO de $50 en la mesa de
+     * Juan. Ahora la excepción sólo autoriza recuperar: la marca interna viaja al servicio, que la comprueba antes de crear nada.
+     */
+    it('🔴 R5-1: cobro EN VIVO de $50 con la llave K de un abono ya cobrado ⇒ pasa sólo a recuperarlo (marca interna), sin rastro de mesa ajena', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
+      mockReq.body = { amount: 5000, idempotencyKey: 'llave-K' }
+      const res = conLocals()
+      await pagar(res)
+      expect(mockNext).toHaveBeenCalled()
+      expect((res as any).locals.soloRecuperarPago).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+    })
+
+    it('R5-1: la marca sale del middleware, no del body: un `soloRecuperarPago` en el cuerpo no cambia nada (llave nueva ⇒ 403)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(null)
+      mockReq.body = { amount: 5000, idempotencyKey: 'llave-nueva', soloRecuperarPago: { ownerId: 'x', ownerName: 'x' } }
+      const res = conLocals()
+      await pagar(res)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect((res as any).locals.soloRecuperarPago).toBeUndefined()
+    })
+
+    /** 🔴 R5-2 (Codex r4, P2 E): sólo un COBRO COMPLETADO de esta orden es «ya cobrada»; un intento fallido o una devolución, no. */
+    it.each([
+      ['un intento FAILED', { orderId: 'order-1', status: 'FAILED', type: 'REGULAR' }],
+      ['un cobro PENDING', { orderId: 'order-1', status: 'PENDING', type: 'REGULAR' }],
+      ['una devolución (REFUND) completada', { orderId: 'order-1', status: 'COMPLETED', type: 'REFUND' }],
+    ])('🔴 R5-2: la llave es de %s de esta orden ⇒ 403 como una llave nueva', async (_caso, pago) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(pago)
+      mockReq.body = { amount: 0, idempotencyKey: 'llave-K' }
+      const res = conLocals()
+      await pagar(res)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(jsonMock).toHaveBeenCalledWith(
+        expect.objectContaining({ code: 'TABLE_OWNED_BY_OTHER', ownerId: JUAN, ownerName: 'Juan Pérez' }),
+      )
+      expect(mockNext).not.toHaveBeenCalled()
+      expect((res as any).locals.soloRecuperarPago).toBeUndefined()
+    })
+
+    it('R4-1: la misma llave también vale en la cola sin red ($0 con isOfflineReplay)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
+      mockReq.body = { isOfflineReplay: true, amount: 0, idempotencyKey: 'llave-K' }
+      await pagar(conLocals())
+      expect(mockNext).toHaveBeenCalled()
+      expect(statusMock).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['una llave NUEVA (sin pago)', null, { amount: 0, idempotencyKey: 'llave-nueva' }],
+      ['una llave cuyo pago es de OTRA orden', { orderId: 'order-otra' }, { amount: 0, idempotencyKey: 'llave-K' }],
+      ['un pago sin orden', { orderId: null }, { amount: 0, idempotencyKey: 'llave-K' }],
+      ['una llave vacía', COBRO, { amount: 0, idempotencyKey: '' }],
+      ['una llave que no es texto', COBRO, { amount: 0, idempotencyKey: 123 }],
+    ])('R4-1: $0 sobre mesa ajena con %s ⇒ 403 como antes', async (_caso, pago, cuerpo) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(pago)
+      mockReq.body = { isOfflineReplay: true, ...cuerpo }
+      const res = conLocals()
+      await pagar(res)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
+
+    it('R4-1: una ruta que EDITA la mesa no se exime aunque la llave ya tenga pago', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(COBRO)
+      mockReq.body = { amount: 0, idempotencyKey: 'llave-K' }
+      await checkTableOwnership('order')(mockReq as Request, conLocals(), mockNext)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(prisma.payment.findUnique).not.toHaveBeenCalled()
+    })
+
+    /**
+     * 🔴 R4-4 (Codex r3, P2 E): una fracción de centavo pasaba la guarda de «dinero > 0» y se guarda como $0.00 (columnas de dos
+     * decimales en pesos). La positividad se mide con la precisión con que se guarda: centavos enteros.
+     */
+    it.each([
+      ['0.001 ¢', { amount: 0.001 }],
+      ['0.4 ¢ + propina 0.4 ¢', { amount: 0.4, tip: 0.4 }],
+      ['$0 + propina 0.001 ¢', { amount: 0, tip: 0.001 }],
+    ])('🔴 R4-4: %s en mesa ajena cuenta como $0 ⇒ 403', async (_caso, cuerpo) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, ...cuerpo }
+      const res = conLocals()
+      await pagar(res)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toBeUndefined()
+    })
+
+    it.each([
+      ['1 ¢', { amount: 1 }],
+      ['$0 + propina 1 ¢', { amount: 0, tip: 1 }],
+      ['$123.45', { amount: 12345, tip: 0 }],
+    ])('R4-4: %s en mesa ajena sí es dinero ⇒ pasa con rastro', async (_caso, cuerpo) => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true, ...cuerpo }
+      const res = conLocals()
+      await pagar(res)
+      expect(mockNext).toHaveBeenCalled()
+      expect((res as any).locals.mesaAjena).toEqual({ ownerId: JUAN, ownerName: 'Juan Pérez' })
+    })
+
+    // 🔴 R6-3 (Codex r5 #3): lo que decide aquí puede quedar viejo antes del candado del cobro. En la ruta de cobro, con la regla
+    // encendida, deja la marca interna `propiedadDeMesa` para que el cobro la revise otra vez bajo el candado con la MISMA regla.
+    it('🔴 R6-3: el dueño cobra su mesa ⇒ pasa y deja `propiedadDeMesa` con su id y la MISMA regla de override (pay-any/manage-all)', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      ;(mockReq as any).authContext.userId = JUAN
+      mockReq.body = { amount: 0, tip: 0, idempotencyKey: 'k' }
+      const res = conLocals()
+      await pagar(res)
+      expect(mockNext).toHaveBeenCalled()
+      const marca = (res as any).locals.propiedadDeMesa
+      expect(marca.userId).toBe(JUAN)
+
+      // La regla diferida es `staffCanManageAllTables` con los overrides de COBRO: sin permiso ⇒ false; con uno ⇒ true.
+      setCallerRoleWaiter(false)
+      await expect(marca.puedeCobrarAjena()).resolves.toBe(false)
+      setCallerRoleWaiter(true)
+      await expect(marca.puedeCobrarAjena()).resolves.toBe(true)
+      expect(permissionsLib.hasPermission).toHaveBeenCalledWith('WAITER', null, 'tables:pay-any', null)
+    })
+
+    it('R6-3: la marca sale del middleware, no del body; sin la regla encendida, o fuera de la ruta de cobro, no hay marca', async () => {
+      setOrderOwnedByJuan()
+      ;(mockReq as any).authContext.userId = JUAN
+      mockReq.body = { propiedadDeMesa: { userId: 'staff-x' } }
+      setEnforced(false)
+      const apagada = conLocals()
+      await pagar(apagada)
+      expect((apagada as any).locals.propiedadDeMesa).toBeUndefined()
+
+      setEnforced(true)
+      const edicion = conLocals()
+      await checkTableOwnership('order')(mockReq as Request, edicion, mockNext)
+      expect((edicion as any).locals.propiedadDeMesa).toBeUndefined()
+    })
+
+    it('🔴 una ruta que EDITA la mesa no se exime aunque el cuerpo diga isOfflineReplay', async () => {
+      setEnforced(true)
+      setOrderOwnedByJuan()
+      setCallerRoleWaiter(false)
+      mockReq.body = { isOfflineReplay: true }
+      await checkTableOwnership('order')(mockReq as Request, conLocals(), mockNext)
+      expect(statusMock).toHaveBeenCalledWith(403)
+      expect(mockNext).not.toHaveBeenCalled()
+    })
   })
 })
