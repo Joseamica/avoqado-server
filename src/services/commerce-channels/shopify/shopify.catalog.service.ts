@@ -406,6 +406,7 @@ const SELECCION_CANDIDATO = {
   deletedAt: true,
   deletedBy: true,
   originSystem: true,
+  productGroupId: true,
   shopifyVariantLink: { select: { id: true } },
 } satisfies Prisma.ProductSelect
 type Candidato = Prisma.ProductGetPayload<{ select: typeof SELECCION_CANDIDATO }>
@@ -444,6 +445,8 @@ function sinAcentos(s: string): string {
 
 /** La elegibilidad va ANTES de restaurar (N07): un archivado por el conector que ya no es elegible se queda archivado. */
 function motivoParaNoLigar(p: Candidato, v: VarianteShopify, porSku: boolean): ShopifyIssueReason | 'RESTAURAR' | null {
+  // Variantes (A12, exclusión recíproca): quién manda nombre y foto entre Shopify y el padre llega en el bloque 5.
+  if (p.productGroupId) return 'PRODUCTO_CON_VARIANTES'
   if (p.shopifyVariantLink) return porSku ? 'SKU_REPETIDO' : 'CODIGO_REPETIDO'
   if (p.deletedAt && !archivadoPorShopify(p)) return 'PRODUCTO_ARCHIVADO'
   // El SKU de Shopify sólo coincide después de normalizarlo: es OTRO producto de Avoqado que se llama parecido. Un acento
@@ -1214,7 +1217,8 @@ export async function archivarPareja(
       await tx.$queryRaw`SELECT id FROM "ShopifyReviewItem" WHERE "productId" = ${p.productId} AND status = 'OPEN' ORDER BY id FOR UPDATE`
       await verificarEvento(tx, cerco?.evento) // el evento, último candado
       const archivado = !prod.deletedAt
-      if (archivado) await archivarProductos(tx, { venueId: p.venueId, id: p.productId }, ARCHIVADO_POR_SHOPIFY)
+      // El producto ya está bloqueado (arriba): sin el negocio después, que invertiría el orden (§10.3).
+      if (archivado) await archivarProductos(tx, { venueId: p.venueId, id: p.productId }, ARCHIVADO_POR_SHOPIFY, undefined, false)
       if (await envioEnCamino(tx, filas)) {
         await suspendPair(tx, p.id, 'NIVEL_INEXISTENTE') // descarta sólo lo que nunca salió (A6)
         return { estado: 'SUSPENDIDA' as const, archivado }

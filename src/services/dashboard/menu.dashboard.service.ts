@@ -21,6 +21,10 @@ import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
 import { archivarProductos } from './product.dashboard.service'
+import { productGroupInclude, withVariantFields } from '../product-variants/variantPayload'
+import { assertLooseProductForModifiers, assertNoGroupedProducts } from '../product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
+import { MAX_VARIANTS_PER_GROUP } from '../product-variants/variantNaming'
 import {
   ensureQuantityInventoryRow,
   inventoryMethodForNewProduct,
@@ -34,8 +38,9 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
 
-export async function getMenus(venueId: string): Promise<Menu[]> {
-  return prisma.menu.findMany({
+// Sin tipo de retorno explícito: lo lee la TPV (`/tpv/venues/:venueId/menus`) y cada producto lleva los 4 campos de variantes.
+export async function getMenus(venueId: string) {
+  const menus = await prisma.menu.findMany({
     where: { venueId },
     include: {
       categories: {
@@ -45,7 +50,7 @@ export async function getMenus(venueId: string): Promise<Menu[]> {
         include: {
           category: {
             include: {
-              products: { where: { deletedAt: null } },
+              products: { where: { deletedAt: null }, include: productGroupInclude },
             },
           },
         },
@@ -55,9 +60,30 @@ export async function getMenus(venueId: string): Promise<Menu[]> {
       displayOrder: 'asc',
     },
   })
+  // Variantes: productGroupId/Name/ImageUrl + variantOptions (nunca un campo «variants»).
+  return menus.map(menu => ({
+    ...menu,
+    categories: menu.categories.map(asignacion => ({
+      ...asignacion,
+      category: { ...asignacion.category, products: asignacion.category.products.map(withVariantFields) },
+    })),
+  }))
+}
+
+/** Lo agruparon entre el pre-chequeo y la escritura: el trigger del escritor único lo frena; 409 en español, nunca 500. */
+function rechazoDelEscritorUnico(e: unknown): never {
+  if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
+  throw e
 }
 
 export async function createMenuCategory(venueId: string, data: CreateMenuCategoryDto): Promise<MenuCategory> {
+  // Variantes (A9): mover una talla a otra categoría se hace desde su padre; se rechaza ANTES de crear la categoría.
+  await assertNoGroupedProducts(
+    prisma,
+    venueId,
+    (data.avoqadoProducts ?? []).map((p: { value: string }) => p.value),
+    'la categoría',
+  )
   const slug = generateSlug(data.name)
 
   const existingCategory = await prisma.menuCategory.findUnique({
@@ -135,15 +161,17 @@ export async function createMenuCategory(venueId: string, data: CreateMenuCatego
   if (data.avoqadoProducts && data.avoqadoProducts.length > 0) {
     const productIds = data.avoqadoProducts.map(product => product.value)
 
-    await prisma.product.updateMany({
-      where: {
-        id: { in: productIds },
-        venueId: venueId,
-      },
-      data: {
-        categoryId: category.id,
-      },
-    })
+    await prisma.product
+      .updateMany({
+        where: {
+          id: { in: productIds },
+          venueId: venueId,
+        },
+        data: {
+          categoryId: category.id,
+        },
+      })
+      .catch(rechazoDelEscritorUnico)
   }
 
   // 🔌 REAL-TIME: Broadcast category creation via Socket.IO
@@ -210,6 +238,14 @@ export async function listMenuCategoriesForVenue(venueId: string): Promise<MenuC
 }
 
 export async function updateMenuCategory(venueId: string, categoryId: string, data: UpdateMenuCategoryDto): Promise<MenuCategory> {
+  // Variantes (A9): igual que al crear — antes de tocar nada. Sólo cuentan los que CAMBIARÍAN de categoría (Codex #7).
+  await assertNoGroupedProducts(
+    prisma,
+    venueId,
+    (data.avoqadoProducts ?? []).map((p: { value: string }) => p.value),
+    'la categoría',
+    { categoryId },
+  )
   const category = await prisma.menuCategory.findUnique({
     where: { id: categoryId, venueId },
   })
@@ -322,15 +358,17 @@ export async function updateMenuCategory(venueId: string, categoryId: string, da
     const productIds = data.avoqadoProducts.map(product => product.value)
 
     // Move selected products to this category
-    await prisma.product.updateMany({
-      where: {
-        id: { in: productIds },
-        venueId: venueId,
-      },
-      data: {
-        categoryId: categoryId,
-      },
-    })
+    await prisma.product
+      .updateMany({
+        where: {
+          id: { in: productIds },
+          venueId: venueId,
+        },
+        data: {
+          categoryId: categoryId,
+        },
+      })
+      .catch(rechazoDelEscritorUnico)
   }
 
   const updatedCategory = await prisma.menuCategory.update({
@@ -398,7 +436,10 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
   if (category.children && category.children.length > 0) {
     throw new BadRequestError('Cannot delete category: it still has sub-categories. Please delete them first.')
   }
-  const conArchivados = (await prisma.product.count({ where: { categoryId } })) > 0
+  // Variantes (decisión 3a): `ProductGroup.categoryId` también es RESTRICT — una familia (aun archivada o deshecha) que la
+  // referencia la conserva apagada, igual que un archivado.
+  const conArchivados =
+    (await prisma.product.count({ where: { categoryId } })) > 0 || (await prisma.productGroup.count({ where: { categoryId } })) > 0
 
   // Delete image from Firebase Storage if it exists (apagada, la conserva para cuando una importación la traiga de vuelta)
   if (category.imageUrl && !conArchivados) {
@@ -984,7 +1025,13 @@ export async function deleteModifierGroup(venueId: string, modifierGroupId: stri
     throw new NotFoundError(`Modifier group with ID ${modifierGroupId} not found in venue ${venueId}.`)
   }
 
-  await prisma.modifierGroup.delete({ where: { id: modifierGroupId } })
+  // Codex #3: el negocio primero, como los escritores de extras (el motor de variantes toma su cerco antes de rehacer los
+  // enlaces de una familia). Sin él, el borrado bloqueaba el grupo y esperaba esos enlaces mientras la edición, al
+  // recrearlos, esperaba al grupo: deadlock.
+  await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
+    await tx.modifierGroup.delete({ where: { id: modifierGroupId } })
+  })
 
   logAction({ venueId, action: 'MODIFIER_GROUP_DELETED', entity: 'ModifierGroup', entityId: existing.id, data: { name: existing.name } })
 }
@@ -1169,51 +1216,49 @@ export async function assignModifierGroupToProduct(
   productId: string,
   data: AssignModifierGroupToProductDto,
 ): Promise<ProductModifierGroup> {
-  // Verify product belongs to venue
-  const product = await prisma.product.findFirst({ where: { id: productId, venueId } })
-  if (!product) {
-    throw new NotFoundError(`Product with ID ${productId} not found in venue ${venueId}.`)
-  }
+  return prisma.$transaction(async tx => {
+    // Verify product belongs to venue and is not a variant (its extras belong to the parent)
+    await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}.`)
 
-  // Verify group belongs to venue
-  const group = await prisma.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId } })
-  if (!group) {
-    throw new NotFoundError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}.`)
-  }
+    // Verify group belongs to venue
+    const group = await tx.modifierGroup.findFirst({ where: { id: data.modifierGroupId, venueId } })
+    if (!group) {
+      throw new NotFoundError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}.`)
+    }
 
-  // Check if assignment exists
-  const existing = await prisma.productModifierGroup.findUnique({
-    where: { productId_groupId: { productId, groupId: data.modifierGroupId } },
-  })
-  if (existing) {
-    throw new BadRequestError(`Modifier group ${data.modifierGroupId} is already assigned to product ${productId}.`)
-  }
+    // Check if assignment exists
+    const existing = await tx.productModifierGroup.findUnique({
+      where: { productId_groupId: { productId, groupId: data.modifierGroupId } },
+    })
+    if (existing) {
+      throw new BadRequestError(`Modifier group ${data.modifierGroupId} is already assigned to product ${productId}.`)
+    }
 
-  return prisma.productModifierGroup.create({
-    data: {
-      product: { connect: { id: productId } },
-      group: { connect: { id: data.modifierGroupId } },
-      displayOrder: data.displayOrder ?? 0,
-    },
+    return tx.productModifierGroup.create({
+      data: {
+        product: { connect: { id: productId } },
+        group: { connect: { id: data.modifierGroupId } },
+        displayOrder: data.displayOrder ?? 0,
+      },
+    })
   })
 }
 
 export async function removeModifierGroupFromProduct(venueId: string, productId: string, modifierGroupId: string): Promise<void> {
-  // Verify product belongs to venue
-  const product = await prisma.product.findFirst({ where: { id: productId, venueId } })
-  if (!product) {
-    throw new NotFoundError(`Product with ID ${productId} not found in venue ${venueId}.`)
-  }
+  await prisma.$transaction(async tx => {
+    // Verify product belongs to venue and is not a variant (its extras belong to the parent)
+    await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}.`)
 
-  const assignment = await prisma.productModifierGroup.findUnique({
-    where: { productId_groupId: { productId, groupId: modifierGroupId } },
-  })
-  if (!assignment) {
-    throw new NotFoundError(`Modifier group ${modifierGroupId} is not assigned to product ${productId}.`)
-  }
+    const assignment = await tx.productModifierGroup.findUnique({
+      where: { productId_groupId: { productId, groupId: modifierGroupId } },
+    })
+    if (!assignment) {
+      throw new NotFoundError(`Modifier group ${modifierGroupId} is not assigned to product ${productId}.`)
+    }
 
-  await prisma.productModifierGroup.delete({
-    where: { productId_groupId: { productId, groupId: modifierGroupId } },
+    await tx.productModifierGroup.delete({
+      where: { productId_groupId: { productId, groupId: modifierGroupId } },
+    })
   })
 }
 
@@ -1316,6 +1361,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   let productsRestored = 0
   let productsKeptOnRecipe = 0
   let productsKeptUntracked = 0
+  // Variantes: su nombre, categoría, foto y extras vienen del padre; el archivo no los pisa (se actualiza lo suyo: precio…).
+  let variantesConservadas = 0
+  // Variantes archivadas que el archivo trae de vuelta pero cuyo padre ya tiene 250 vivas: se quedan archivadas (tope del padre).
+  let variantesSinCupo = 0
+  // Ronda 1 (N2): padres que esta importación archiva (3c, en «reemplazar») o revive; su bitácora va DESPUÉS del commit.
+  const familiasArchivadas: string[] = []
+  const familiasRestauradas: string[] = []
 
   // Una clase, una cita, algo digital o un donativo no llevan existencias: se rechaza el archivo entero ANTES de escribir nada
   // (misma regla y mensaje que el alta y la edición de producto en el dashboard y en Artículos de Android/iOS).
@@ -1323,7 +1375,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   if (sinExistencias)
     throw new AppError(`${NON_INVENTORIABLE_MESSAGE} (SKU ${boundedGovernanceDiagnosticSku(sinExistencias.sku).sku})`, 400)
 
-  await prisma.$transaction(
+  const importacion = prisma.$transaction(
     async tx => {
       const incomingProducts = data.categories.flatMap((category, categoryIndex) =>
         category.products.map((product, productIndex) => ({ product, categoryIndex, productIndex })),
@@ -1370,8 +1422,24 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       // below, and an archived SKU comes back (D3). Assignments and menus are deleted as before; modifiers too, except the ones
       // something alive still uses (P5-R15).
       if (data.mode === 'replace') {
-        // 1. Remove product-modifier links first
-        await tx.productModifierGroup.deleteMany({ where: { product: { venueId } } })
+        // Codex #8: the ARCHIVED families the file brings back (an archived variant of theirs is in it). Under the Venue fence
+        // no family writer moves in between (they take it FOR SHARE first). Their category is not turned off (step 5), so the
+        // family comes back visible — and one turned off by hand stays off.
+        const revivir = (
+          await tx.productGroup.findMany({
+            where: {
+              venueId,
+              deletedAt: { not: null },
+              products: { some: { deletedAt: { not: null }, sku: { in: incomingProducts.map(entry => entry.product.sku) } } },
+            },
+            select: { id: true },
+            take: incomingProducts.length, // each file SKU revives at most one family
+          })
+        ).map(g => g.id)
+        const familiaVivaOQueVuelve: Prisma.ProductGroupWhereInput = { OR: [{ deletedAt: null }, { id: { in: revivir } }] }
+
+        // 1. Remove product-modifier links first — only LOOSE products' (variants keep their parent's; rondas 2-3, N1)
+        await tx.productModifierGroup.deleteMany({ where: { product: { venueId, productGroupId: null } } })
 
         // 2-3. Modifiers and groups (plan 5, P5-R15): a group a live payment link (one of its extras) or a variable recipe still
         //      uses is KEPT, turned OFF with all its extras — deleting it would cascade the link's paid extra away (the link would
@@ -1382,26 +1450,40 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         //      lock waits for this transaction and, if its extra was deleted, fails on the foreign key instead of losing it silently.
         await tx.$executeRaw`SELECT 1 FROM "ModifierGroup" WHERE "venueId" = ${venueId} FOR UPDATE`
         await tx.$executeRaw`SELECT 1 FROM "Modifier" m JOIN "ModifierGroup" g ON g."id" = m."groupId" WHERE g."venueId" = ${venueId} FOR UPDATE OF m`
+        // Variantes (Codex #1, ronda 2): a group ANY family uses — live or archived, through the parent or its variants' links —
+        // is the family's, not the file's: neither deleted nor turned off, its extras too. An archived family that a later
+        // import revives comes back with its extras exactly as they were, and one turned off by hand stays off.
+        const usadoPorFamilia: Prisma.ModifierGroupWhereInput = {
+          OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
+        }
         const extrasEnUso: Prisma.ModifierGroupWhereInput = {
-          OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }],
+          OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }, usadoPorFamilia],
         }
         await tx.modifier.deleteMany({ where: { group: { venueId, NOT: extrasEnUso } } })
         await tx.modifierGroup.deleteMany({ where: { venueId, NOT: extrasEnUso } })
-        await tx.modifier.updateMany({ where: { group: { venueId } }, data: { active: false } })
-        await tx.modifierGroup.updateMany({ where: { venueId }, data: { active: false } })
+        await tx.modifier.updateMany({ where: { group: { venueId, NOT: usadoPorFamilia } }, data: { active: false } })
+        await tx.modifierGroup.updateMany({ where: { venueId, NOT: usadoPorFamilia }, data: { active: false } })
 
         // 4. Archive (never delete) the products the file does not bring
         productsArchived = await archivarProductos(
           tx,
           { venueId, sku: { notIn: incomingProducts.map(entry => entry.product.sku) } },
           actor.type === 'HUMAN' ? actor.staffId : null,
+          familiasArchivadas,
         )
 
         // 5. Menu structure. Categories (D4): the ones with no product at all are deleted; the rest keep archived products
         //    (`Product.categoryId` is RESTRICT) and are turned OFF — the loop below turns back ON the ones the file brings.
         await tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } })
-        await tx.menuCategory.deleteMany({ where: { venueId, products: { none: {} } } })
-        await tx.menuCategory.updateMany({ where: { venueId }, data: { active: false } })
+        // Variantes (decisión 3b): `ProductGroup.categoryId` también es RESTRICT — una que referencia una familia se apaga.
+        await tx.menuCategory.deleteMany({ where: { venueId, products: { none: {} }, productGroups: { none: {} } } })
+        // Ronda 1 (N1): la de una familia VIVA tampoco se apaga — sus variantes no cambian de categoría con el archivo. Corre
+        // después del paso 4: la familia que se quedó sin variantes ya se archivó y su categoría sí se apaga. Codex #8: la de
+        // una familia que el archivo revive, tampoco (sin eso la familia vuelve invisible). La que ya estaba apagada, sigue así.
+        await tx.menuCategory.updateMany({
+          where: { venueId, NOT: { productGroups: { some: familiaVivaOQueVuelve } } },
+          data: { active: false },
+        })
         await tx.menu.deleteMany({ where: { venueId } })
       }
 
@@ -1498,12 +1580,31 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             ...(porCantidad && productData.inventoryByQuantity ? { unit: productData.inventoryByQuantity.unit } : {}),
           }
 
+          // Variantes: su nombre, categoría, foto y extras vienen del padre; el archivo no los pisa.
+          const grupoId = existingProduct?.productGroupId ?? null
+          const deGrupo = grupoId != null
+
           let product
           if (existingProduct) {
             // Plan 5 (D3, founder's option A): an ARCHIVED SKU brings back the SAME product (same id, its history, recipe,
             // inventory and IVA) through this same update; the fence above already counted it as a creation.
             const archivado = Boolean(existingProduct.deletedAt)
-            if (archivado) {
+            // Variantes (auditoría N6, ronda 3 N10): una variante archivada vuelve sólo si su padre tiene cupo (250 vivas). El padre
+            // se bloquea (orden negocio → padre → variantes: el cerco del negocio ya está tomado) y, si estaba archivado, revive con
+            // ella: una variante viva no puede colgar de un padre archivado que nadie puede editar.
+            let restaurar = archivado
+            if (grupoId && archivado) {
+              const [padre] = await tx.$queryRaw<Array<{ deletedAt: Date | null }>>`
+                SELECT "deletedAt" FROM "ProductGroup" WHERE id = ${grupoId} FOR UPDATE`
+              const vivas = await tx.product.count({ where: { productGroupId: grupoId, deletedAt: null } })
+              restaurar = vivas < MAX_VARIANTS_PER_GROUP
+              if (!restaurar) variantesSinCupo++
+              else if (padre?.deletedAt) {
+                await tx.productGroup.update({ where: { id: grupoId }, data: { deletedAt: null, deletedBy: null } })
+                familiasRestauradas.push(grupoId)
+              }
+            }
+            if (restaurar) {
               // P5-R16: the pre-count may have seen this SKU alive and another request archived it since (archiving does not
               // take the Venue fence). Restoring = activating ⇒ ask the fence again, in this transaction, before writing.
               // F5-2: redundant in replace by construction (its pre-count already counts every file SKU as a creation); it is
@@ -1511,15 +1612,20 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'ACTIVATE', willBeVendable: true, actor })
             }
             // Update existing product
+            const { imageUrl: _fotoDelArchivo, ...shopifySinFoto } = shopifyImportFields
             product = await tx.product.update({
               where: { id: existingProduct.id },
               data: {
-                name: productData.name,
+                ...(deGrupo
+                  ? {}
+                  : {
+                      name: productData.name,
+                      description: productData.description || null,
+                      type: productData.type || 'FOOD',
+                      categoryId: category.id,
+                    }),
                 price: productData.price,
                 cost: productData.cost ?? null,
-                description: productData.description || null,
-                type: productData.type || 'FOOD',
-                categoryId: category.id,
                 displayOrder: prodIndex,
                 tags: productData.tags || [],
                 allergens: productData.allergens || [],
@@ -1529,14 +1635,15 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                 // Sin `trackInventory` (undefined) la columna no se toca: re-importar no apaga lo que ya se contaba.
                 trackInventory: porCantidad ? true : undefined,
                 inventoryMethod: porCantidad ? 'QUANTITY' : undefined,
-                ...shopifyImportFields,
-                ...(archivado ? { deletedAt: null, deletedBy: null, active: true } : {}),
+                ...(deGrupo ? shopifySinFoto : shopifyImportFields),
+                ...(restaurar ? { deletedAt: null, deletedBy: null, active: true } : {}),
                 // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
                 isDemo: false,
               },
             })
             productsUpdated++
-            if (archivado) productsRestored++
+            if (restaurar) productsRestored++
+            if (deGrupo) variantesConservadas++
           } else {
             // Create new product
             product = await tx.product.create({
@@ -1636,8 +1743,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           // touched). A product kept on its recipe or kept off gets nothing (`porCantidad` is false).
           if (porCantidad && productData.inventoryByQuantity) await ensureQuantityInventoryRow(tx, product)
 
-          // Handle modifier groups
-          if (productData.modifierGroups && productData.modifierGroups.length > 0) {
+          // Handle modifier groups — a variant's extras are its parent's: the file does not touch them (counted above)
+          if (!deGrupo && productData.modifierGroups && productData.modifierGroups.length > 0) {
             // Remove existing modifier group assignments for this product
             await tx.productModifierGroup.deleteMany({
               where: { productId: product.id },
@@ -1731,6 +1838,31 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           }
         }
       }
+
+      // Ronda 1 (N1): «reemplazar» borró todos los menús; la categoría de una familia viva sigue prendida, pero sin lugar en el
+      // menú el POS no la ve. Vuelve al menú principal, después de las del archivo (las que el archivo trae ya están). Por
+      // páginas de familias, sin tope que deje alguna fuera.
+      if (data.mode === 'replace') {
+        for (let desde = ''; ; ) {
+          const familias = await tx.productGroup.findMany({
+            where: { venueId, deletedAt: null, category: { active: true }, id: { gt: desde } },
+            select: { id: true, categoryId: true },
+            orderBy: { id: 'asc' },
+            take: 500,
+          })
+          if (!familias.length) break
+          await tx.menuCategoryAssignment.createMany({
+            data: [...new Set(familias.map(f => f.categoryId))].map(categoryId => ({
+              menuId: defaultMenu.id,
+              categoryId,
+              displayOrder: data.categories.length,
+            })),
+            skipDuplicates: true,
+          })
+          if (familias.length < 500) break
+          desde = familias[familias.length - 1].id
+        }
+      }
     },
     {
       // Extended timeout for large menu imports (2 minutes)
@@ -1738,6 +1870,25 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       maxWait: 130000,
     },
   )
+  // El trigger del escritor único ganó una carrera (un producto se agrupó mientras se importaba): 409, nunca 500.
+  await importacion.catch(rechazoDelEscritorUnico)
+  // Ronda 1 (N2): los padres que la importación archivó (se quedaron sin variantes) o revivió, cada uno con su renglón.
+  const staffIdDelActor = actor.type === 'HUMAN' ? actor.staffId : undefined
+  for (const [ids, action] of [
+    [familiasArchivadas, 'PRODUCT_GROUP_ARCHIVED'],
+    [familiasRestauradas, 'PRODUCT_GROUP_RESTORED'],
+  ] as const) {
+    for (const groupId of ids) {
+      void logAction({
+        venueId,
+        staffId: staffIdDelActor,
+        action,
+        entity: 'ProductGroup',
+        entityId: groupId,
+        data: { reason: 'MENU_IMPORT', mode: data.mode },
+      })
+    }
+  }
 
   logAction({
     venueId,
@@ -1752,6 +1903,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       productsRestored,
       productsKeptOnRecipe,
       productsKeptUntracked,
+      variantesConservadas,
+      variantesSinCupo,
     },
   })
 
@@ -1770,6 +1923,10 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       productsKeptOnRecipe,
       // Filas con `trackInventory` de un producto que se apagó conservando su inventario: no se volvieron a prender.
       productsKeptUntracked,
+      // Variantes: su nombre, categoría, foto y extras vienen del padre; el archivo no los pisa.
+      variantesConservadas,
+      // Variantes archivadas que no volvieron porque su padre ya tiene 250 vivas.
+      variantesSinCupo,
     },
   }
 }

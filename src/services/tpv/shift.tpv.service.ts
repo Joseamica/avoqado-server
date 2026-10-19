@@ -1891,9 +1891,9 @@ async function closeShiftUsingRequest(
       },
       products: {
         totalSold: totalProductsSold,
-        uniqueProducts: new Set(orderItems.map(item => item.product?.name || item.productName || 'Unknown')).size,
+        uniqueProducts: new Set(orderItems.map(item => item.productName || item.product?.name || 'Unknown')).size,
         items: orderItems.map(item => ({
-          name: item.product?.name || item.productName || 'Unknown',
+          name: item.productName || item.product?.name || 'Unknown',
           quantity: item.quantity,
         })),
       },

@@ -131,6 +131,7 @@ const LEGACY_PLAN_CODES = new Set([
   'AGGREGATOR_PASSES', // Pro (founder D4, 2-oct): pases de TotalPass y Wellhub; suelta $199/mes.
   'SERVICE_PAY', // Pro (founder D3, 5-oct): pago al personal (clases, comisiones y propinas); suelta $199/mes por sucursal.
   'GIFT_CARDS', // Pro (founder D1, 14-oct): tarjetas de regalo; suelta $249/mes con IVA. El candado sólo cubre VENDER y PRENDER.
+  'PRODUCT_VARIANTS', // Pro (founder, 12-oct): variantes de producto (talla, color, presentación). Square y Clip las dan gratis; aquí se cobran en el plan.
   ...PREMIUM_ONLY_CODES,
   ...PREMIUM_ONLY_SIN_CATALOGO,
 ])

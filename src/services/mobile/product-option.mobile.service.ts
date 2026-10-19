@@ -18,11 +18,15 @@ interface CreateOptionValue {
   sortOrder?: number
 }
 
+/** Who asked, for the audit trail: the POS (default) or the dashboard's option library. */
+type OptionSource = 'MOBILE' | 'DASHBOARD'
+
 interface CreateOptionParams {
   venueId: string
   staffId: string
   name: string
   values: CreateOptionValue[]
+  source?: OptionSource
 }
 
 interface UpdateOptionParams {
@@ -31,6 +35,7 @@ interface UpdateOptionParams {
   optionId: string
   name?: string
   values?: CreateOptionValue[]
+  source?: OptionSource
 }
 
 // ============================================================================
@@ -62,7 +67,7 @@ export async function listProductOptions(venueId: string) {
  * Create a new product option with its values.
  */
 export async function createProductOption(params: CreateOptionParams) {
-  const { venueId, staffId, name, values } = params
+  const { venueId, staffId, name, values, source = 'MOBILE' } = params
 
   if (!name || !name.trim()) {
     throw new BadRequestError('name es requerido')
@@ -84,23 +89,7 @@ export async function createProductOption(params: CreateOptionParams) {
     throw new BadRequestError(`Ya existe una opción con el nombre "${name.trim()}"`)
   }
 
-  // Handle all formats: ["string"], [{value: "string"}], [{name: "string"}], or mixed
-  const normalizedValues = values
-    .map((v: any, index: number) => {
-      let val: string
-      if (typeof v === 'string') {
-        val = v
-      } else if (v && typeof v === 'object') {
-        val = v.value || v.name || v.label || String(v)
-      } else {
-        val = String(v ?? '')
-      }
-      return {
-        value: (val || '').trim(),
-        sortOrder: typeof v === 'object' && v !== null ? (v.sortOrder ?? index) : index,
-      }
-    })
-    .filter(v => v.value.length > 0)
+  const normalizedValues = normalizeOptionValues(values)
 
   const option = await prisma.productOption.create({
     data: {
@@ -123,7 +112,7 @@ export async function createProductOption(params: CreateOptionParams) {
     action: 'PRODUCT_OPTION_CREATED',
     entity: 'ProductOption',
     entityId: option.id,
-    data: { name: option.name, valueCount: values.length, source: 'MOBILE' },
+    data: { name: option.name, valueCount: values.length, source },
   })
 
   return formatOption(option)
@@ -137,7 +126,14 @@ export async function createProductOption(params: CreateOptionParams) {
  * Update a product option and optionally replace its values.
  */
 export async function updateProductOption(params: UpdateOptionParams) {
-  const { venueId, staffId, optionId, name, values } = params
+  const { venueId, staffId, optionId, name, values, source = 'MOBILE' } = params
+
+  // Validar y normalizar ANTES de tocar nada (auditoría R7): con `values: "x"` antes se borraban todos los valores y luego
+  // tronaba en `.map`. `null`/ausente = no cambiar los valores (el POS puede renombrar sólo la opción, auditoría N7).
+  if (values != null && !Array.isArray(values)) {
+    throw new BadRequestError('Los valores deben ser una lista')
+  }
+  const normalizedValues = values ? normalizeOptionValues(values) : []
 
   const option = await prisma.productOption.findFirst({
     where: { id: optionId, venueId },
@@ -162,51 +158,25 @@ export async function updateProductOption(params: UpdateOptionParams) {
     }
   }
 
-  // If values are provided, delete existing and create new ones
-  if (values && values.length > 0) {
-    await prisma.productOptionValue.deleteMany({
-      where: { optionId },
+  // Reemplazo todo o nada: si el alta de los nuevos falla, los valores de antes siguen ahí. Una lista que queda vacía al
+  // normalizar (sólo valores en blanco) no reemplaza nada, igual que una lista vacía.
+  const updated = await prisma.$transaction(async tx => {
+    // Candado de la opción: dos ediciones simultáneas se forman en fila. Sin él, el borrado de la segunda no ve los valores
+    // que la primera acaba de crear y quedan los dos juegos.
+    const fila = await tx.$queryRaw<Array<{ id: string }>>`
+      SELECT id FROM "ProductOption" WHERE id = ${optionId} AND "venueId" = ${venueId} FOR UPDATE`
+    if (!fila.length) throw new NotFoundError('Opción de producto no encontrada')
+    if (normalizedValues.length) {
+      await tx.productOptionValue.deleteMany({ where: { optionId } })
+      await tx.productOptionValue.createMany({ data: normalizedValues.map(v => ({ optionId, ...v })) })
+    }
+    if (name?.trim()) {
+      await tx.productOption.update({ where: { id: optionId }, data: { name: name.trim() } })
+    }
+    return tx.productOption.findUniqueOrThrow({
+      where: { id: optionId },
+      include: { values: { orderBy: { sortOrder: 'asc' } } },
     })
-  }
-
-  // Handle all formats: ["string"], [{value: "string"}], [{name: "string"}], or mixed
-  const normalizedValues =
-    values && values.length > 0
-      ? values
-          .map((v: any, index: number) => {
-            let val: string
-            if (typeof v === 'string') {
-              val = v
-            } else if (v && typeof v === 'object') {
-              val = v.value || v.name || v.label || String(v)
-            } else {
-              val = String(v ?? '')
-            }
-            return {
-              value: (val || '').trim(),
-              sortOrder: typeof v === 'object' && v !== null ? (v.sortOrder ?? index) : index,
-            }
-          })
-          .filter(v => v.value.length > 0)
-      : undefined
-
-  const updated = await prisma.productOption.update({
-    where: { id: optionId },
-    data: {
-      ...(name ? { name: name.trim() } : {}),
-      ...(normalizedValues
-        ? {
-            values: {
-              create: normalizedValues,
-            },
-          }
-        : {}),
-    },
-    include: {
-      values: {
-        orderBy: { sortOrder: 'asc' },
-      },
-    },
   })
 
   logAction({
@@ -215,7 +185,7 @@ export async function updateProductOption(params: UpdateOptionParams) {
     action: 'PRODUCT_OPTION_UPDATED',
     entity: 'ProductOption',
     entityId: option.id,
-    data: { name: updated.name, source: 'MOBILE' },
+    data: { name: updated.name, source },
   })
 
   return formatOption(updated)
@@ -228,7 +198,7 @@ export async function updateProductOption(params: UpdateOptionParams) {
 /**
  * Delete a product option and all its values (cascade).
  */
-export async function deleteProductOption(optionId: string, venueId: string, staffId: string) {
+export async function deleteProductOption(optionId: string, venueId: string, staffId: string, source: OptionSource = 'MOBILE') {
   const option = await prisma.productOption.findFirst({
     where: { id: optionId, venueId },
   })
@@ -247,7 +217,7 @@ export async function deleteProductOption(optionId: string, venueId: string, sta
     action: 'PRODUCT_OPTION_DELETED',
     entity: 'ProductOption',
     entityId: option.id,
-    data: { name: option.name, source: 'MOBILE' },
+    data: { name: option.name, source },
   })
 
   return { id: optionId, deleted: true }
@@ -256,6 +226,26 @@ export async function deleteProductOption(optionId: string, venueId: string, sta
 // ============================================================================
 // HELPERS
 // ============================================================================
+
+/** Acepta todos los formatos del POS: ["S"], [{ value: "S" }], [{ name: "S" }] o mezclados. Los vacíos se descartan. */
+function normalizeOptionValues(values: unknown[]): Array<{ value: string; sortOrder: number }> {
+  return values
+    .map((v: any, index: number) => {
+      let val: string
+      if (typeof v === 'string') {
+        val = v
+      } else if (v && typeof v === 'object') {
+        val = v.value || v.name || v.label || String(v)
+      } else {
+        val = String(v ?? '')
+      }
+      return {
+        value: (val || '').trim(),
+        sortOrder: typeof v === 'object' && v !== null ? (v.sortOrder ?? index) : index,
+      }
+    })
+    .filter(v => v.value.length > 0)
+}
 
 function formatOption(option: any) {
   return {

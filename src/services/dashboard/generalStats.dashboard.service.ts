@@ -165,18 +165,30 @@ export async function getGeneralStatsData(venueId: string, filters: GeneralStats
  * Cantidad vendida por producto en el rango — compartido por el resumen general y
  * la gráfica de más vendidos. INNER JOIN a Product: una línea cuyo producto fue
  * borrado no aparecía antes (`if (item.product)`) y sigue sin aparecer.
- * `name`/`type`/`price` son los del catálogo ACTUAL, como siempre fue.
+ * `name`/`type`/`price` son los del catálogo ACTUAL, como siempre fue; también la familia (padre) de cada variante.
  */
 async function aggregateProductQuantities(venueId: string, fromDate: Date, toDate: Date) {
-  const rows = await prisma.$queryRaw<Array<{ id: string; name: string; type: string; quantity: number; price: Prisma.Decimal }>>`
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string
+      name: string
+      type: string
+      quantity: number
+      price: Prisma.Decimal
+      productGroupId: string | null
+      productGroupName: string | null
+    }>
+  >`
     SELECT p."id", p."name", p."type"::text AS "type",
-           SUM(oi."quantity")::int AS "quantity", p."price"
+           SUM(oi."quantity")::int AS "quantity", p."price",
+           p."productGroupId" AS "productGroupId", pg."name" AS "productGroupName"
     FROM "OrderItem" oi
     JOIN "Order" o ON o."id" = oi."orderId"
     JOIN "Product" p ON p."id" = oi."productId"
+    LEFT JOIN "ProductGroup" pg ON pg."id" = p."productGroupId" AND pg."venueId" = o."venueId"
     WHERE ${orderScope(venueId, fromDate, toDate)}
       AND oi."removedAt" IS NULL -- a line the delivery provider removed sold nothing
-    GROUP BY p."id", p."name", p."type", p."price"
+    GROUP BY p."id", p."name", p."type", p."price", p."productGroupId", pg."name"
     ORDER BY SUM(oi."quantity") DESC, p."id"
   `
 
@@ -186,6 +198,8 @@ async function aggregateProductQuantities(venueId: string, fromDate: Date, toDat
     type: r.type || ProductType.OTHER,
     quantity: r.quantity,
     price: Number(r.price),
+    productGroupId: r.productGroupId,
+    productGroupName: r.productGroupName,
   }))
 }
 

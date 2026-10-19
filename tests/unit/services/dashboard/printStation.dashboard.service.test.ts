@@ -11,7 +11,8 @@ const mockPrisma: any = {
   },
   printGateway: { findUnique: jest.fn(), upsert: jest.fn() },
   menuCategory: { findMany: jest.fn(), updateMany: jest.fn() },
-  product: { findMany: jest.fn(), updateMany: jest.fn() },
+  // findFirst: assignRouting pregunta si algún producto es variante (tarea 11); sin valor = ninguno lo es.
+  product: { findMany: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
 }
 mockPrisma.$transaction = jest.fn((cb: any) => cb(mockPrisma))
 

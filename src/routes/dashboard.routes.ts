@@ -365,6 +365,8 @@ import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
 import floorPlanRoutes from './dashboard/floorPlan.routes'
+import productGroupRoutes from './dashboard/productGroup.routes'
+import productOptionRoutes from './dashboard/productOption.routes'
 import receiptLayoutRoutes from './dashboard/receiptLayout.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
@@ -4615,6 +4617,9 @@ router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFe
 router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
 // PLANO DE MESAS — editor del dashboard (2026-10-08). Permiso y Servicio de mesas dentro del sub-router.
 router.use('/venues/:venueId/floor-plan', authenticateTokenMiddleware, floorPlanRoutes)
+// VARIANTES DE PRODUCTO (spec 2026-10-14). Permisos y candado PRODUCT_VARIANTS dentro de cada sub-router.
+router.use('/venues/:venueId/product-groups', authenticateTokenMiddleware, productGroupRoutes)
+router.use('/venues/:venueId/product-options', authenticateTokenMiddleware, productOptionRoutes)
 router.use('/venues/:venueId/receipt-layout', authenticateTokenMiddleware, receiptLayoutRoutes)
 // Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
 // (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).

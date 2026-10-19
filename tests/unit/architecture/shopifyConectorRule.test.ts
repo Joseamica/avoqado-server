@@ -1070,7 +1070,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'connect.service.ts:861': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
       'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
-      'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
+      'catalog.service.ts:419': [de('catalog.service'), 'async function bloquearProductos('],
       'reconcile.service.ts:1290': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
       'reconcile.service.ts:735': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
@@ -1084,7 +1084,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const cortas: Record<string, [string, string]> = {
       '`:72`': [de('connect.service'), 'const tiendasPiloto'],
       '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1197`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1200`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),
