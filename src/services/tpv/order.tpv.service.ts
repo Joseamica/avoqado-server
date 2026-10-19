@@ -287,7 +287,7 @@ export async function getOrder(
   // 🐛 DEBUG: Log raw Prisma response to see if modifiers are included
   logger.info(`🔍 [GET ORDER] Order ${orderId} - Items count: ${order.items.length}`)
   order.items.forEach((item, idx) => {
-    logger.info(`   Item ${idx + 1}: ${item.product?.name || item.productName || 'DELETED'}`)
+    logger.info(`   Item ${idx + 1}: ${item.productName || item.product?.name || 'DELETED'}`)
     logger.info(`      Modifiers count: ${item.modifiers?.length || 0}`)
     if (item.modifiers && item.modifiers.length > 0) {
       item.modifiers.forEach((om: any) => {
@@ -310,7 +310,7 @@ export async function getOrder(
   // 🐛 DEBUG: Log flattened response to verify flattening worked
   logger.info(`🔍 [GET ORDER] After flattening - Items count: ${flattenedOrder.items.length}`)
   flattenedOrder.items.forEach((item: any, idx: number) => {
-    logger.info(`   Item ${idx + 1}: ${item.product?.name || item.productName || 'DELETED'}`)
+    logger.info(`   Item ${idx + 1}: ${item.productName || item.product?.name || 'DELETED'}`)
     logger.info(`      Flattened modifiers count: ${item.modifiers?.length || 0}`)
     if (item.modifiers && item.modifiers.length > 0) {
       item.modifiers.forEach((mod: any) => {
@@ -867,7 +867,7 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
         orderId: order.id,
         orderItemId: item.id,
         productId: item.productId,
-        productName: item.product?.name || item.productName,
+        productName: item.productName || item.product?.name,
         reason: 'UNTRACKED_PRODUCT',
       })
       continue
@@ -903,7 +903,7 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
       if (typeof result?.remainingStock === 'number' && result.remainingStock < 0) {
         issues.push({
           productId: item.productId,
-          productName: result.productName || item.product?.name || item.productName || 'Producto',
+          productName: result.productName || item.productName || item.product?.name || 'Producto',
           requested: effectiveQuantity ?? null,
           available: result.remainingStock,
           reason: 'la venta dejó el stock en negativo',
@@ -918,12 +918,12 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
       })
       deductionErrors.push({
         productId: item.productId,
-        productName: item.product?.name || item.productName || 'Unknown',
+        productName: item.productName || item.product?.name || 'Unknown',
         error: error.message,
       })
       issues.push({
         productId: item.productId,
-        productName: item.product?.name || item.productName || 'Producto',
+        productName: item.productName || item.product?.name || 'Producto',
         requested: item.weightQuantity != null ? Number(item.weightQuantity) : (item.quantity ?? null),
         available: null,
         reason: error.message,
@@ -2287,7 +2287,7 @@ export async function addItemsToOrder(
       updatedOrder.items.forEach(item => {
         const modifierCount = item.modifiers?.length || 0
         if (modifierCount > 0) {
-          logger.info(`  📦 [RESPONSE] OrderItem ${item.product?.name || item.productName} has ${modifierCount} modifiers in response`)
+          logger.info(`  📦 [RESPONSE] OrderItem ${item.productName || item.product?.name} has ${modifierCount} modifiers in response`)
           item.modifiers?.forEach(om => {
             logger.info(`     - ${om.modifier?.name || om.name}: $${om.price}`)
           })
@@ -2309,7 +2309,7 @@ export async function addItemsToOrder(
       newItems: newOrderItems.map(item => ({
         id: item.id,
         productId: item.productId,
-        productName: item.product?.name || item.productName || '',
+        productName: item.productName || item.product?.name || '',
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
@@ -2551,7 +2551,7 @@ export async function removeOrderItem(
         where: { id: orderItemId },
       })
 
-      logger.info(`✅ [ORDER SERVICE] Deleted item: ${itemToRemove.product?.name || itemToRemove.productName} (${itemToRemove.id})`)
+      logger.info(`✅ [ORDER SERVICE] Deleted item: ${itemToRemove.productName || itemToRemove.product?.name} (${itemToRemove.id})`)
 
       // Calculate new totals
       const remainingItems = order.items.filter(item => item.id !== orderItemId)
@@ -3354,7 +3354,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
         itemIds: input.itemIds,
         voidAmount,
         itemCount: itemsToVoid.length,
-        itemNames: itemsToVoid.map(item => item.product?.name || item.productName),
+        itemNames: itemsToVoid.map(item => item.productName || item.product?.name || ''),
         sentToKitchen: itemsToVoid.some(item => item.sentToKitchenAt !== null),
         voidedAllItems: isVoidingAllItems, // ⭐ Track if order was auto-closed
       },

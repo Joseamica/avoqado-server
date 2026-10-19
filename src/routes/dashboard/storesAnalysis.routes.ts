@@ -25,6 +25,7 @@ import { resolveStoresAnalysisVenueIds } from '../../services/organization-dashb
 import * as supervisorSalesExportService from '../../services/organization-dashboard/supervisorSalesExport.service'
 import { BadRequestError } from '../../errors/AppError'
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
+import { soloElDuenoDeLaOrgCambia } from '../../middlewares/soloElDuenoDeLaOrgCambiaAjustesDeLaOrg.middleware'
 import { esSupervisorOMasDeLaOrganizacion, MENSAJE_SE_REQUIERE_SUPERVISOR } from '../../services/access/supervisorDeLaOrganizacion'
 import { revisarCambioDeSucursales } from '../../services/organization-dashboard/reglasDeSucursalesDeUnaPersona'
 import { ROLE_HIERARCHY } from '../../lib/permissions'
@@ -1587,6 +1588,8 @@ const requireOwnerPlus = (req: Request, res: Response, next: NextFunction) => {
 }
 
 const orgAttendanceAccess = [authenticateTokenMiddleware, verifyAccess({ requireWhiteLabel: true }), requireOwnerPlus]
+// 🔴 Escribir la config de checador/terminales de la org (aplica a TODAS sus sucursales): además, sólo el dueño de la ORG.
+const orgAttendanceWriteAccess = [...orgAttendanceAccess, soloElDuenoDeLaOrgCambia('ORG_ATTENDANCE_CONFIG')]
 
 /**
  * GET /dashboard/venues/:venueId/stores-analysis/org-attendance-config
@@ -1612,7 +1615,7 @@ router.get('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
  * PUT /dashboard/venues/:venueId/stores-analysis/org-attendance-config
  * Creates or updates org-level attendance config
  */
-router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.put('/org-attendance-config', orgAttendanceWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const orgId = await getOrgIdFromVenue(venueId)
@@ -1635,7 +1638,7 @@ router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
       promoterLocationStartHour,
       promoterLocationEndHour,
     } = req.body
-    const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, {
+    const datos = {
       ...(expectedCheckInTime !== undefined && { expectedCheckInTime }),
       ...(latenessThresholdMinutes !== undefined && { latenessThresholdMinutes: Number(latenessThresholdMinutes) }),
       ...(geofenceRadiusMeters !== undefined && { geofenceRadiusMeters: Number(geofenceRadiusMeters) }),
@@ -1648,7 +1651,8 @@ router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
       ...(trackPromoterLocation !== undefined && { trackPromoterLocation: Boolean(trackPromoterLocation) }),
       ...(promoterLocationStartHour !== undefined && { promoterLocationStartHour: Number(promoterLocationStartHour) }),
       ...(promoterLocationEndHour !== undefined && { promoterLocationEndHour: Number(promoterLocationEndHour) }),
-    })
+    }
+    const config = await organizationDashboardService.upsertOrgAttendanceConfig(orgId, datos, (req as any).authContext?.userId, venueId)
     res.json({ success: true, data: config })
   } catch (error) {
     next(error)
@@ -1659,7 +1663,7 @@ router.put('/org-attendance-config', orgAttendanceAccess, async (req: Request, r
  * DELETE /dashboard/venues/:venueId/stores-analysis/org-attendance-config
  * Deletes org-level attendance config (venues fall back to hardcoded defaults)
  */
-router.delete('/org-attendance-config', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+router.delete('/org-attendance-config', orgAttendanceWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const orgId = await getOrgIdFromVenue(venueId)
@@ -1668,7 +1672,7 @@ router.delete('/org-attendance-config', orgAttendanceAccess, async (req: Request
       return res.status(404).json({ success: false, error: 'not_found', message: 'Organization not found for this venue' })
     }
 
-    await organizationDashboardService.deleteOrgAttendanceConfig(orgId)
+    await organizationDashboardService.deleteOrgAttendanceConfig(orgId, (req as any).authContext?.userId, venueId)
     res.json({ success: true, data: { message: 'Org attendance config deleted' } })
   } catch (error) {
     next(error)
@@ -1705,8 +1709,10 @@ router.get('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: R
  * PUT /dashboard/venues/:venueId/stores-analysis/org-tpv-defaults
  * Saves full TpvSettings JSON and pushes to ALL terminals in the org.
  * kioskDefaultMerchantId is preserved per-terminal.
+ * 🔴 Sólo el dueño de la ORGANIZACIÓN (o un superadmin de verdad): toca las terminales de todas las tiendas.
  */
-router.put('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: Response, next: NextFunction) => {
+const orgTpvDefaultsWriteAccess = [...orgAttendanceAccess, soloElDuenoDeLaOrgCambia('ORG_TPV_DEFAULTS')]
+router.put('/org-tpv-defaults', orgTpvDefaultsWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
   try {
     const venueId = req.params.venueId || (req as any).authContext?.venueId
     const orgId = await getOrgIdFromVenue(venueId)
@@ -1720,7 +1726,7 @@ router.put('/org-tpv-defaults', orgAttendanceAccess, async (req: Request, res: R
       return res.status(400).json({ success: false, error: 'bad_request', message: 'settings object is required' })
     }
 
-    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings)
+    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings, (req as any).authContext?.userId, venueId)
     res.json({ success: true, data: result })
   } catch (error) {
     next(error)

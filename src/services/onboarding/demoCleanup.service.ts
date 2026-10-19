@@ -339,6 +339,10 @@ export async function cleanDemoData(venueId: string): Promise<CleanupResult> {
       result.deletedProducts = deletedProducts.count
       logger.info(`  ✓ Deleted ${deletedProducts.count} demo products`)
 
+      // Variantes: un padre que se quedó sin productos (sus variantes eran demo) se borra; los que conservan productos reales
+      // siguen la misma regla que esos productos.
+      await tx.productGroup.deleteMany({ where: { venueId, products: { none: {} } } })
+
       // 15. Delete demo Modifiers (FK to ModifierGroup)
       const deletedModifiers = await tx.modifier.deleteMany({
         where: { isDemo: true, group: { venueId } },

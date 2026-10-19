@@ -252,6 +252,8 @@ export async function limpiarEscenarioShopify(e: EscenarioShopify): Promise<void
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.inventory.deleteMany({ where: { venueId } })
   await prisma.product.deleteMany({ where: { venueId } })
+  // Variantes: el padre va después de sus productos y antes de su categoría (las dos llaves son RESTRICT).
+  await prisma.productGroup.deleteMany({ where: { venueId } })
   await prisma.menu.deleteMany({ where: { venueId } })
   await prisma.menuCategory.deleteMany({ where: { venueId } })
   await prisma.terminal.deleteMany({ where: { venueId } })

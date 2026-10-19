@@ -1,7 +1,11 @@
 import { Request, Response, NextFunction } from 'express'
 import * as service from '../../services/superadmin/merchantRevenueShare.service'
 import { computeRevenueReport } from '../../services/payments/revenueShareReport.service'
-import { createMerchantRevenueShareSchema, updateMerchantRevenueShareSchema } from '../../schemas/dashboard/merchant-revenue-share.schema'
+import {
+  createMerchantRevenueShareSchema,
+  updateMerchantRevenueShareSchema,
+  saveMerchantEconomicsSchema,
+} from '../../schemas/dashboard/merchant-revenue-share.schema'
 import { BadRequestError } from '../../errors/AppError'
 import { logAction } from '../../services/dashboard/activity-log.service'
 
@@ -50,13 +54,14 @@ export async function createMerchantRevenueShare(req: Request, res: Response, ne
     const row = await service.createMerchantRevenueShare(parsed.data)
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: req.authContext?.userId ?? null,
       action: 'REVENUE_SHARE_CREATED',
       entity: 'MerchantRevenueShare',
       entityId: row.id,
       data: {
         merchantAccountId: row.merchantAccountId,
-        mode: (parsed.data as any).aggregatorPrice !== undefined ? 'aggregator' : 'direct',
+        mode: row.aggregatorPrice ? 'aggregator' : 'direct',
+        intermediaryFeeRate: Number(row.intermediaryFeeRate ?? 0),
       },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
@@ -76,13 +81,14 @@ export async function updateMerchantRevenueShare(req: Request, res: Response, ne
     const row = await service.updateMerchantRevenueShare(req.params.id, parsed.data)
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: req.authContext?.userId ?? null,
       action: 'REVENUE_SHARE_UPDATED',
       entity: 'MerchantRevenueShare',
       entityId: req.params.id,
       data: {
         merchantAccountId: row.merchantAccountId,
-        mode: (parsed.data as any).aggregatorPrice !== undefined ? 'aggregator' : 'direct',
+        mode: row.aggregatorPrice ? 'aggregator' : 'direct',
+        intermediaryFeeRate: Number(row.intermediaryFeeRate ?? 0),
       },
       ipAddress: req.ip,
       userAgent: req.headers?.['user-agent'],
@@ -98,6 +104,14 @@ export async function updateMerchantRevenueShare(req: Request, res: Response, ne
 export async function deleteMerchantRevenueShare(req: Request, res: Response, next: NextFunction) {
   try {
     await service.deleteMerchantRevenueShare(req.params.id)
+    void logAction({
+      staffId: req.authContext?.userId ?? null,
+      action: 'REVENUE_SHARE_DELETED',
+      entity: 'MerchantRevenueShare',
+      entityId: req.params.id,
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
     res.json({ success: true })
   } catch (error) {
     next(error)
@@ -138,6 +152,43 @@ export async function getRevenueShareReport(req: Request, res: Response, next: N
       { txCount: 0, volume: 0, providerNet: 0, avoqadoNet: 0, aggregatorNet: 0 },
     )
     res.json({ success: true, data: rows, meta: { count: rows.length, totals } })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** PUT /superadmin/merchant-accounts/:id/economics */
+export async function saveMerchantEconomics(req: Request, res: Response, next: NextFunction) {
+  try {
+    const parsed = saveMerchantEconomicsSchema.safeParse(req.body)
+    if (!parsed.success) {
+      const issue = parsed.error.issues[0]
+      throw new BadRequestError(
+        issue?.code === 'invalid_type'
+          ? 'Revisa los campos de costo y reparto: deben tener el formato indicado.'
+          : issue?.message || 'Datos inválidos',
+      )
+    }
+    const data = await service.saveMerchantEconomics(req.params.id, parsed.data)
+    void logAction({
+      staffId: req.authContext?.userId ?? null,
+      action: parsed.data.costId ? 'COST_STRUCTURE_UPDATED' : 'COST_STRUCTURE_CREATED',
+      entity: 'ProviderCostStructure',
+      entityId: data.cost.id,
+      data: { merchantAccountId: req.params.id, ...parsed.data.cost },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+    void logAction({
+      staffId: req.authContext?.userId ?? null,
+      action: parsed.data.revenueShareId ? 'REVENUE_SHARE_UPDATED' : 'REVENUE_SHARE_CREATED',
+      entity: 'MerchantRevenueShare',
+      entityId: data.revenueShare.id,
+      data: { merchantAccountId: req.params.id, ...parsed.data.revenueShare },
+      ipAddress: req.ip,
+      userAgent: req.headers?.['user-agent'],
+    })
+    res.json({ success: true, data })
   } catch (error) {
     next(error)
   }

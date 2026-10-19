@@ -20,6 +20,16 @@ function nestedCode(error: Record<string, unknown>): string | undefined {
   return [meta?.code, meta?.sqlState, cause?.code].find(value => typeof value === 'string') as string | undefined
 }
 
+/**
+ * Fallo de serialización: P2034 de Prisma, o el 40001 de Postgres directo o envuelto en P2010 (consulta cruda: un `FOR SHARE`
+ * en SERIALIZABLE sobre una fila que otro cambió después de la foto). Sin 55P03 ni 40P01: ésos los ven las funciones de al lado.
+ */
+export function isSerializationFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as Record<string, unknown>
+  return value.code === 'P2034' || value.code === '40001' || (value.code === 'P2010' && nestedCode(value) === '40001')
+}
+
 export function isRetryableDbError(error: unknown): boolean {
   if (!error || typeof error !== 'object') return false
 

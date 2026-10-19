@@ -74,6 +74,8 @@ export interface BestSellingProduct {
   type: string
   quantity: number
   price: number
+  productGroupId?: string | null
+  productGroupName?: string | null
 }
 
 export interface RankedProduct {

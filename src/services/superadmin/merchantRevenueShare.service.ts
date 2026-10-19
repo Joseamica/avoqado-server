@@ -8,6 +8,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { ConflictError, NotFoundError } from '../../errors/AppError'
 import type {
+  SaveMerchantEconomicsInput,
   CreateMerchantRevenueShareInput,
   UpdateMerchantRevenueShareInput,
 } from '../../schemas/dashboard/merchant-revenue-share.schema'
@@ -101,4 +102,34 @@ export async function deleteMerchantRevenueShare(id: string) {
     throw new NotFoundError('Revenue-share no encontrado')
   }
   await prisma.merchantRevenueShare.delete({ where: { id } })
+}
+
+/** Guarda costo y reparto juntos: si la segunda escritura falla, ninguna se conserva. */
+export async function saveMerchantEconomics(merchantAccountId: string, input: SaveMerchantEconomicsInput) {
+  return prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${merchantAccountId}))`
+    const merchant = await tx.merchantAccount.findUnique({ where: { id: merchantAccountId }, select: { id: true, providerId: true } })
+    if (!merchant) throw new NotFoundError('El merchant indicado no existe')
+    const now = new Date()
+    const cost = await tx.providerCostStructure.findFirst({
+      where: { merchantAccountId, active: true, effectiveFrom: { lte: now }, OR: [{ effectiveTo: null }, { effectiveTo: { gte: now } }] },
+      orderBy: [{ effectiveFrom: 'desc' }, { id: 'desc' }],
+    })
+    const share = await tx.merchantRevenueShare.findUnique({ where: { merchantAccountId } })
+    if (input.costId !== (cost?.id ?? null)) {
+      throw new ConflictError('El costo cambió. Recarga la economía antes de guardar.')
+    }
+    if (input.revenueShareId ? !share || share.id !== input.revenueShareId : !!share) {
+      throw new ConflictError('El reparto cambió. Recarga la economía antes de guardar.')
+    }
+    const savedCost = input.costId
+      ? await tx.providerCostStructure.update({ where: { id: input.costId }, data: input.cost })
+      : await tx.providerCostStructure.create({
+          data: { ...input.cost, merchantAccountId, providerId: merchant.providerId, effectiveFrom: now },
+        })
+    const savedShare = input.revenueShareId
+      ? await tx.merchantRevenueShare.update({ where: { id: input.revenueShareId }, data: toUpdateData(input.revenueShare) })
+      : await tx.merchantRevenueShare.create({ data: toCreateData({ ...input.revenueShare, merchantAccountId }) })
+    return { cost: savedCost, revenueShare: savedShare }
+  })
 }

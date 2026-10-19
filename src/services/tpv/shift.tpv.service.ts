@@ -297,6 +297,9 @@ const SHIFT_PAYMENT_TOTALS_SELECT = {
   fundsFlow: true,
   tenderTypeId: true,
   tenderCountsAsCash: true,
+  // Con qué contar las ÓRDENES cobradas del turno (`contarOrdenesCobradas`).
+  orderId: true,
+  type: true,
 } satisfies Prisma.PaymentSelect
 
 /** La proyección del cobro que el rollup necesita: los totales + con qué decidir de quién es. */
@@ -1645,6 +1648,19 @@ const SHIFT_CLOSE_PAYMENT_PAGE_SIZE = 500
 export type ShiftPaymentPageRow = Prisma.PaymentGetPayload<{ select: typeof SHIFT_PAYMENT_TOTALS_SELECT }>
 
 /**
+ * Las ÓRDENES cobradas de un turno: órdenes distintas con al menos un cobro que no es reembolso.
+ * Un pago dividido es UNA orden; un «Pago rápido» sin renglones también cuenta; un reembolso
+ * (testigo standalone o devolución de una venta) no suma una orden. Es lo que Square llama
+ * «order count» y Toast «number of checks».
+ *
+ * 🔴 Hasta el 18-oct-2026 el cierre guardaba aquí `orderItems.length` — renglones de producto.
+ * Los productos viven en `totalProductsSold`, no en este número.
+ */
+export function contarOrdenesCobradas(payments: Array<{ orderId: string; type?: PaymentType | string | null }>): number {
+  return new Set(payments.filter(p => p.type !== 'REFUND').map(p => p.orderId)).size
+}
+
+/**
  * La membresía canónica del snapshot firmado:
  *
  * 1. un cobro COMPLETED estampado con el turno cuenta siempre (su identidad gana a la fecha);
@@ -1722,6 +1738,7 @@ async function closeShiftUsingRequest(
       totalCashTips,
       totalDrawerExtra,
     } = aggregateShiftPayments(shiftPayments)
+    const totalOrders = contarOrdenesCobradas(shiftPayments)
 
     const orderItems = await prisma.orderItem.findMany({
       where: {
@@ -1805,7 +1822,7 @@ async function closeShiftUsingRequest(
       sales: {
         total: totalSales.toNumber(),
         totalTips: totalTips.toNumber(),
-        totalOrders: orderItems.length,
+        totalOrders,
         productsSold: totalProductsSold,
       },
       paymentMethods: {
@@ -1821,9 +1838,9 @@ async function closeShiftUsingRequest(
       },
       products: {
         totalSold: totalProductsSold,
-        uniqueProducts: new Set(orderItems.map(item => item.product?.name || item.productName || 'Unknown')).size,
+        uniqueProducts: new Set(orderItems.map(item => item.productName || item.product?.name || 'Unknown')).size,
         items: orderItems.map(item => ({
-          name: item.product?.name || item.productName || 'Unknown',
+          name: item.productName || item.product?.name || 'Unknown',
           quantity: item.quantity,
         })),
       },
@@ -1919,7 +1936,7 @@ async function closeShiftUsingRequest(
       otherDeclared: legacy?.otherDeclared ? new Decimal(legacy.otherDeclared) : null,
       totalSales,
       totalTips,
-      totalOrders: orderItems.length,
+      totalOrders,
       notes: legacy?.notes || null,
       totalCashPayments,
       totalCashTips,

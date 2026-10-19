@@ -448,6 +448,7 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
 
   // 5. Products
   await borrar(tx.product.deleteMany({ where: { venueId } }))
+  await borrar(tx.productGroup.deleteMany({ where: { venueId } }))
 
   // 6. Menu categories and menus
   await borrar(tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } }))

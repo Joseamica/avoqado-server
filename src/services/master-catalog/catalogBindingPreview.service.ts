@@ -41,6 +41,8 @@ const PRODUCT_SELECT = {
   active: true,
   deletedAt: true,
   updatedAt: true,
+  // Variantes: una variante no se liga al catálogo maestro (el padre manda nombre, categoría, IVA…). No entra a la proyección.
+  productGroupId: true,
 } as const
 
 type CatalogBindingTransaction = Prisma.TransactionClient
@@ -264,6 +266,7 @@ async function evaluateLine(
     proposal = 'LINK'
     if (!selectedCandidate) [status, errorCode] = ['INVALID', 'CATALOG_BINDING_LINK_NOT_CANDIDATE']
     else if (selectedCandidate.deletedAt) [status, errorCode] = ['INVALID', 'CATALOG_BINDING_PRODUCT_DELETED']
+    else if (selectedCandidate.productGroupId) [status, errorCode] = ['INVALID', 'CATALOG_BINDING_PRODUCT_HAS_VARIANTS']
     else if (productBindings.some(binding => binding.productId === selectedCandidate.id)) {
       ;[status, errorCode] = ['CONFLICT', 'CATALOG_PRODUCT_ALREADY_BOUND']
     }
@@ -290,6 +293,12 @@ async function evaluateLine(
     proposal = 'SKIP'
     status = 'READY'
     errorCode = null
+  }
+  // Variantes (Codex #5): un negocio con familias (vivas o archivadas) no se liga al catálogo maestro: desde el primer enlace sus
+  // familias ya no se podrían editar. Sin candado aquí (ronda 2: uno por línea se cruzaba con la publicación); la confirmación
+  // toma los negocios del lote FOR SHARE, juntos y por id, antes de re-evaluar.
+  if (proposal !== 'SKIP' && (await tx.productGroup.count({ where: { venueId: venue.id } }))) {
+    ;[status, errorCode] = ['INVALID', 'CATALOG_BINDING_VENUE_HAS_VARIANTS']
   }
   if (!productTypeValid) [status, errorCode] = ['INVALID', 'CATALOG_BINDING_PRODUCT_TYPE_INVALID']
 

@@ -1,3 +1,4 @@
+import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
 import express, { Router } from 'express'
 import { z } from 'zod'
@@ -92,6 +93,7 @@ import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.c
 import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
 
 const router = Router()
+router.use('/document-requests', documentRequestsRoutes)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
