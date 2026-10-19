@@ -2229,6 +2229,16 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
   /** El avance de intento (sube a 2): la toma de la recuperación escribe el MISMO número. */
   const avance = () => progresos().find(a => a?.data?.planActivationAttempt === 2)
   const ofertaEstandarDePrueba = { kind: 'STANDARD' as const, expectedFirstChargeCents: 0 }
+  /** QA 18-oct: descartar el intento incompleto no dejaba ninguna línea en el log. Ahora deja una, sin el secreto. */
+  const dejoRastroDelDescarte = (motivo: string) => {
+    expect(logger.info).toHaveBeenCalledWith('activate-plan: se descartó la suscripción incompleta del intento anterior (no se cobró)', {
+      organizationId: 'org-1',
+      subscriptionId: 'sub_3ds',
+      motivo,
+    })
+    const todo = (['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls)
+    expect(inspect(todo, { depth: 10 })).not.toContain('_secret_')
+  }
 
   /**
    * Qué transacción estaba abierta (1, 2, …; 0 = ninguna) en cada escritura de progreso, redención y cupo: prueba que dos
@@ -2377,6 +2387,7 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
     })
     expect(mockSubCreate).not.toHaveBeenCalled()
     expect(mockEntregar).not.toHaveBeenCalled()
+    dejoRastroDelDescarte('PAGO_NO_AUTORIZADO')
   })
 
   it('5. rechazo DESPUÉS de autenticar ⇒ 402 con su decline_code', async () => {
@@ -2425,6 +2436,7 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
         data: expect.objectContaining({ stripeSubscriptionId: 'sub_2' }),
       }),
     ])
+    dejoRastroDelDescarte('OTRO_INTENTO')
   })
 
   it('7. 🔴 anular falla porque ya se pagó ⇒ relee, la entrega como recuperada y NO cobra otra vez', async () => {
@@ -2639,6 +2651,7 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
     expect(mockSubCreate).toHaveBeenCalledTimes(1)
     expect(mockSubCreate.mock.calls[0][0].trial_period_days).toBe(30)
     expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    dejoRastroDelDescarte('YA_EXPIRADA')
   })
 
   it('15. 🔴 caída entre anular y escribir: el reintento ve incomplete_expired ⇒ con la MISMA oferta conserva el lugar y estrena intento', async () => {
@@ -2673,6 +2686,7 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
     expect(bajadas()).toHaveLength(1)
     expect(avance()?.data).toEqual({ planActivationAttempt: 2, planStripeSubscriptionId: null })
     expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    dejoRastroDelDescarte('YA_EXPIRADA')
   })
 
   it('17a. 🔴 recuperada active pero su PRIMERA factura no está pagada por el monto consentido ⇒ 503 sin entrega', async () => {
