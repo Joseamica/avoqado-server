@@ -1813,26 +1813,7 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
         })
         if (cancelacion.count > 0) ordenCancelada = fresh.orderId
       }
-      await tx.areaTicket.updateMany({
-        where: { venueId, checkoutSessionId: fresh.id, status: AreaTicketStatus.CLAIMED },
-        data: {
-          status: AreaTicketStatus.ISSUED,
-          checkoutSessionId: null,
-          orderId: null,
-          claimedAt: null,
-          claimExpiresAt: null,
-          version: { increment: 1 },
-        },
-      })
-      await tx.areaTicketCheckoutSession.update({
-        where: { id: fresh.id },
-        data: {
-          status: AreaTicketCheckoutStatus.CANCELLED,
-          cancelIdempotencyKey: idempotencyKey,
-          activePaymentAttemptId: null,
-          version: { increment: 1 },
-        },
-      })
+      await liberarValesYCancelarSesion(tx, { venueId, sessionId: fresh.id, cancelIdempotencyKey: idempotencyKey })
       return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
     },
     { timeout: 15_000, maxWait: 5_000 },
@@ -1851,6 +1832,38 @@ export async function cancelAreaTicketCheckout(venueId: string, sessionId: strin
     data: { orderId: cancelled.orderId, ticketIds: session.tickets.map(ticket => ticket.id) },
   })
   return mapCheckout(cancelled)
+}
+
+/**
+ * Lo que la cancelación de una venta de vales le hace a SU sesión: los vales reclamados vuelven a ISSUED (sin venta) y la sesión queda
+ * CANCELLED sin intento activo. CALLER_LOCKED: sesión → vales ya bloqueados. Lo comparten la ruta de vales (`cancelAreaTicketCheckout`)
+ * y el registro del dinero ya capturado sobre una venta que se canceló por la ruta GENERAL (R6-1, `lockAreaTicketCheckoutForPayment`),
+ * para que las dos cancelaciones lleguen al mismo estado.
+ */
+async function liberarValesYCancelarSesion(
+  tx: Prisma.TransactionClient,
+  a: { venueId: string; sessionId: string; cancelIdempotencyKey: string | null },
+): Promise<void> {
+  await tx.areaTicket.updateMany({
+    where: { venueId: a.venueId, checkoutSessionId: a.sessionId, status: AreaTicketStatus.CLAIMED },
+    data: {
+      status: AreaTicketStatus.ISSUED,
+      checkoutSessionId: null,
+      orderId: null,
+      claimedAt: null,
+      claimExpiresAt: null,
+      version: { increment: 1 },
+    },
+  })
+  await tx.areaTicketCheckoutSession.update({
+    where: { id: a.sessionId },
+    data: {
+      status: AreaTicketCheckoutStatus.CANCELLED,
+      ...(a.cancelIdempotencyKey ? { cancelIdempotencyKey: a.cancelIdempotencyKey } : {}),
+      activePaymentAttemptId: null,
+      version: { increment: 1 },
+    },
+  })
 }
 
 export async function recordAreaTicketPrintAttempt(venueId: string, ticketId: string, input: RecordPrintAttemptInput) {
@@ -2358,13 +2371,39 @@ export async function lockAreaTicketCheckoutForPayment(
   const locked = await lockAreaTicketCheckoutHierarchy(tx, { venueId: input.venueId, orderId: input.orderId })
   if (!locked) return null
   const { session } = locked
+  // 🔴 R6-1 (efectivo sin red; Codex r5 #1): la venta también se cancela por la ruta GENERAL (DELETE móvil, la cola, el panel), que no
+  // toca la sesión: queda MATERIALIZED (o PAID, si la venta se devolvió antes) con la orden CANCELLED, y la finalización rechazaba el
+  // dinero capturado con 409 `CHECKOUT_ORDER_NOT_PAYABLE` (todo se revertía). Con la orden ya bloqueada aquí (la jerarquía la toma al
+  // final), una orden anulada es lo mismo que una sesión cancelada: el dinero se registra a nivel venta. Si la sesión todavía no tenía
+  // cobro (OPEN/MATERIALIZED), se deja como la deja la ruta de vales (vales liberados, sesión CANCELLED); una sesión ya PAID (venta
+  // devuelta y cancelada) no se toca.
+  const ordenAnulada =
+    input.dineroCapturado === true &&
+    ['CANCELLED', 'DELETED'].includes(
+      (await tx.order.findFirst({ where: { id: input.orderId, venueId: input.venueId }, select: { status: true } }))?.status ?? '',
+    )
+  if (ordenAnulada && checkoutStatusIn(session.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) {
+    await liberarValesYCancelarSesion(tx, { venueId: input.venueId, sessionId: session.id, cancelIdempotencyKey: null })
+    await tx.activityLog.create({
+      data: {
+        action: 'AREA_TICKET_CHECKOUT_CANCELLED',
+        entity: 'AreaTicketCheckoutSession',
+        entityId: session.id,
+        venueId: input.venueId,
+        data: { orderId: input.orderId, motivo: 'ORDEN_CANCELADA_POR_LA_RUTA_GENERAL', idempotencyKey: input.idempotencyKey ?? null },
+      },
+    })
+  }
   // 🔴 R12-1 (ronda 12; Codex recheck-16 #1): $100 recibidos en la TPV, el registro se demora y un gerente cancela la sesión desde el
   // POS. El dinero ya capturado no recibe 409 por eso: sigue la MISMA regla de nivel venta que una venta sin vales cancelada (se registra
   // y la cuenta se reabre, `reabrirSiRecibeDinero`, con su bitácora `ORDER_REOPENED_BY_CAPTURED_PAYMENT`). Por eso `null`: ni intento,
   // ni sesión (sigue cancelada), ni los vales que la cancelación liberó (no se consumen ni se apropian: `createSalePostingInTx` deja
   // fuera el renglón cuyo vale liberó la cancelación o cuya reserva ya se consumió, R13-2). El cobro NUEVO sigue rechazado abajo,
   // antes de tomar el dinero.
-  if (input.dineroCapturado && checkoutStatusIn(session.status, [AreaTicketCheckoutStatus.CANCELLED, AreaTicketCheckoutStatus.EXPIRED])) {
+  if (
+    ordenAnulada ||
+    (input.dineroCapturado && checkoutStatusIn(session.status, [AreaTicketCheckoutStatus.CANCELLED, AreaTicketCheckoutStatus.EXPIRED]))
+  ) {
     logger.error(
       '🚨 [AREA TICKETS v7] Dinero capturado sobre una sesión de vales ya cerrada sin cobro: se registra a nivel venta; requiere conciliación',
       {
@@ -2372,6 +2411,7 @@ export async function lockAreaTicketCheckoutForPayment(
         orderId: input.orderId,
         checkoutSessionId: session.id,
         estadoDeLaSesion: session.status,
+        ordenAnulada,
         idempotencyKey: input.idempotencyKey ?? null,
       },
     )
@@ -2387,6 +2427,8 @@ export async function lockAreaTicketCheckoutForPayment(
       !input.dineroCapturado &&
       (existing.status === AreaTicketPaymentAttemptStatus.UNKNOWN || session.status === AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED)
     ) {
+      // R7-2/R8: si el pago de ESTA llave existe, quien llama ya lo devolvió antes de llegar aquí (el punto de la llave, bajo los mismos
+      // candados: `salirSiLaLlaveYaTienePago` en `payCashOrder` y en `recordOrderPayment`). Aquí sólo llega un cobro sin pago.
       throw domainError(
         409,
         'CHECKOUT_RECONCILIATION_REQUIRED',
@@ -3589,7 +3631,14 @@ export async function finalizeAreaTicketPaymentInTransaction(
   if (!lockedOrder) {
     throw domainError(409, 'CHECKOUT_ORDER_MISSING', 'La orden materializada de esta sesión ya no existe.')
   }
-  if (lockedOrder.paymentStatus === 'REFUNDED' || lockedOrder.status === 'CANCELLED' || lockedOrder.status === 'DELETED') {
+  // S1 (efectivo sin red): una venta REFUNDED es una venta CERRADA. El dinero ya capturado (la terminal, la cola del POS) se concilia
+  // por la rama de la venta cerrada (R8-1/R9-1: se registra, se queda REFUNDED, sin volver a consumir); antes recibía este 409 y todo
+  // se revertía. Sólo el cobro sin conciliar (que no es dinero capturado) la sigue rechazando; una cancelada o borrada, siempre.
+  if (
+    (lockedOrder.paymentStatus === 'REFUNDED' && !input.reconcileCapturedPayment) ||
+    lockedOrder.status === 'CANCELLED' ||
+    lockedOrder.status === 'DELETED'
+  ) {
     throw domainError(409, 'CHECKOUT_ORDER_NOT_PAYABLE', 'La orden materializada ya no admite pagos.')
   }
   const attempt = await tx.areaTicketPaymentAttempt.findFirst({
@@ -3668,7 +3717,7 @@ export async function finalizeAreaTicketPaymentInTransaction(
     }
 
     // 🔴 R8-1 (Codex recheck-12 P2): el cobro capturado ENTRA dinero y nunca reabre una venta cerrada (leída bajo el `FOR UPDATE` de
-    // arriba; REFUNDED ya se rechazó): conserva PAID, saldo 0, sin cierre nuevo ni lealtad ni marca de cocina otra vez.
+    // arriba; PAID o REFUNDED): conserva su estado, saldo 0, sin cierre nuevo ni lealtad ni marca de cocina otra vez.
     const cobro = estadoDeCobroAlRecibirDinero(lockedOrder.paymentStatus, true, {
       paymentStatus: finalFullyPaid ? 'PAID' : totalPaid.greaterThan(0) ? 'PARTIAL' : 'PENDING',
       remainingBalance,
