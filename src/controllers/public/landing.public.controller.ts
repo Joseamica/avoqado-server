@@ -9,9 +9,8 @@ import crypto from 'crypto'
 import prisma from '../../utils/prismaClient'
 import { descargarAppHtml, descargarAppTexto } from '../../services/emailDescargarApp'
 
-const CONTACT_NOTIFY_EMAIL = process.env.CONTACT_NOTIFY_EMAIL || 'hola@avoqado.io'
-// Onboarding recibe el mismo aviso que ventas: quien da de alta al cliente
-// necesita el lead sin esperar un reenvio manual (founder, 2026-08-17).
+// El aviso del prospecto va SÓLO a onboarding (founder, 18-oct-2026): hola@ y onboarding@ son alias del mismo buzón, y
+// mandar una copia a cada uno le llegaba doble. Antes iba a los dos (founder, 2026-08-17).
 const ONBOARDING_NOTIFY_EMAIL = process.env.ONBOARDING_NOTIFY_EMAIL || 'onboarding@avoqado.io'
 const LABS_NOTIFY_EMAIL = process.env.LABS_NOTIFY_EMAIL || 'hola@avoqado.io'
 
@@ -532,9 +531,8 @@ Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
 Política de Privacidad: https://avoqado.io/privacy
 `
 
-    // El aviso interno va a ventas Y a onboarding, para que quien da de alta al
-    // cliente reciba el lead sin depender de un reenvio manual.
-    const internos = [...new Set([CONTACT_NOTIFY_EMAIL, ONBOARDING_NOTIFY_EMAIL].filter(Boolean))]
+    // El aviso interno va UNA vez, a onboarding (ver ONBOARDING_NOTIFY_EMAIL arriba).
+    const internos = [ONBOARDING_NOTIFY_EMAIL]
 
     const [internosOk, confirmSent, crmOk] = await Promise.all([
       Promise.all(
