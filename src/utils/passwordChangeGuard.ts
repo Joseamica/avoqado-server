@@ -30,6 +30,7 @@ import logger from '../config/logger'
 import { revokeAllSessionsForStaff } from '../services/auth/session.service'
 import { invalidateSession } from '../services/auth/sessionCache'
 import socketManager from '../communication/sockets/managers/socketManager'
+import { retry, shouldRetryDbConnectionError } from './retry'
 
 /**
  * Margen para relojes desfasados entre procesos. Sin el, alguien que cambia su
@@ -263,17 +264,38 @@ export async function cerrarSesionesNuevasPorCambioDeContrasena(staffId: string)
  * «password_changed» en un cierre de sesión voluntario sería una bitácora que miente.
  */
 export async function cerrarSesionesDeStaff(staffId: string, motivo: string): Promise<void> {
+  // 🔴 «No se rinde» (19-oct): este cierre es lo ÚNICO que mata un token con `sid` emitido dentro del margen de 5 s
+  // anterior al corte (`MARGEN_RELOJ_MS`). Un tropiezo de conexión ya no lo deja a medias en silencio: se reintenta.
+  // Primero se cierra y DESPUÉS se leen las que cerró ESTA llamada (motivo y desde `inicio`), no las vivas de antes:
+  // así entra una sesión que nació a media operación (el UPDATE la alcanza aunque nadie la leyó) y la vuelta cuya
+  // respuesta se perdió (la base sí cerró; la siguiente vuelta ya no las vería vivas). Sin eso su caché seguiría
+  // diciendo «viva» hasta el TTL (Codex r1 de este trabajo).
+  const inicio = new Date()
+  let cerradas: { id: string }[]
   try {
-    const vivas = await prisma.session.findMany({ where: { staffId, revokedAt: null }, select: { id: true } })
-    await revokeAllSessionsForStaff(staffId, motivo)
-    await Promise.all(vivas.map(s => invalidateSession(s.id)))
+    cerradas = await retry(
+      async () => {
+        await revokeAllSessionsForStaff(staffId, motivo)
+        return prisma.session.findMany({
+          where: { staffId, revokedReason: motivo, revokedAt: { gte: inicio } },
+          select: { id: true },
+        })
+      },
+      { retries: 2, initialDelay: 150, shouldRetry: shouldRetryDbConnectionError, context: 'cerrarSesionesDeStaff' },
+    )
+  } catch (err) {
+    // error, no warn: pudieron quedar filas Session vivas tras un corte y el monitor tiene que verlo.
+    logger.error('[AUTH] No se pudieron cerrar las Session del staff tras el corte', { staffId, motivo, err })
+    return
+  }
+  try {
+    await Promise.all(cerradas.map(s => invalidateSession(s.id)))
     // Sesiones revocables (Parte A, Task 11): además de invalidar la caché, cerrar los
     // sockets que ya estaban abiertos con esas Session — si no, quien tenía el socket
     // abierto sigue recibiendo eventos en tiempo real con una sesión que ya no vive, hasta
-    // que algo más lo desconecte. Nunca truena (best-effort por diseño, ver su docstring);
-    // el try/catch de esta función es sólo la red de seguridad de las líneas de arriba.
-    vivas.forEach(s => socketManager.disconnectBySession(s.id))
+    // que algo más lo desconecte. Nunca truena (best-effort por diseño, ver su docstring).
+    cerradas.forEach(s => socketManager.disconnectBySession(s.id))
   } catch (err) {
-    logger.warn('[AUTH] No se pudieron cerrar las Session nuevas tras el cambio de contrasena', { staffId, err })
+    logger.warn('[AUTH] Las Session quedaron cerradas, pero no se pudo limpiar su caché o sus sockets', { staffId, motivo, err })
   }
 }
