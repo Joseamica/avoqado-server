@@ -86,6 +86,23 @@ describe('storeRequirements', () => {
     await expect(storeRequirements('v1')).resolves.toMatchObject({ address: false })
   })
 
+  it('r5: con `db` explícito lee de ahí (no del cliente raíz); el aviso está publicado ⇔ existe al menos una versión propia', async () => {
+    const db = (venue: unknown, version: unknown) =>
+      ({
+        venue: { findUnique: jest.fn().mockResolvedValue(venue) },
+        privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue(version) },
+      }) as any
+    const conVersion = db(VENUE_COMPLETO, { id: 'pnv1' })
+    await expect(storeRequirements('v1', conVersion)).resolves.toEqual({ address: true, phone: true, privacyNotice: true })
+    expect(conVersion.privacyNoticeVersion.findFirst).toHaveBeenCalledWith({ where: { venueId: 'v1' }, select: { id: true } })
+    // Sin versión propia el aviso NO está publicado (la plantilla de precarga no cuenta) y no se arma ninguna plantilla.
+    const sinVersion = db(VENUE_COMPLETO, null)
+    await expect(storeRequirements('v1', sinVersion)).resolves.toEqual({ address: true, phone: true, privacyNotice: false })
+    expect(sinVersion.venue.findUnique).toHaveBeenCalledTimes(1)
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.privacyNoticeVersion.findFirst).not.toHaveBeenCalled()
+  })
+
   it('ronda 1: el domicilio exige la CALLE; ciudad, estado y CP solos no bastan', async () => {
     conRequisitos({ ...VENUE_COMPLETO, address: '   ' })
     await expect(storeRequirements('v1')).resolves.toEqual({ address: false, phone: true, privacyNotice: true })
@@ -140,6 +157,8 @@ describe('settings.service', () => {
       $executeRaw: jest.fn().mockResolvedValue(0),
       onlineOrderingSettings: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn().mockResolvedValue(row()) },
       reservationSettings: { findUnique: jest.fn().mockResolvedValue(null) },
+      venue: { findUnique: jest.fn().mockResolvedValue(VENUE_COMPLETO) },
+      privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue({ id: 'pnv1' }) },
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
 
@@ -165,9 +184,52 @@ describe('settings.service', () => {
       tx.onlineOrderingSettings.upsert.mock.invocationCallOrder[0],
     )
     // Ronda 1: encender una tienda apagada revisa los requisitos DESPUÉS de tomar el candado (sobre el estado que leyó ahí).
-    expect(prismaMock.venue.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(
+    expect(tx.venue.findUnique.mock.invocationCallOrder[0]).toBeGreaterThan(
       tx.onlineOrderingSettings.findUnique.mock.invocationCallOrder[0],
     )
+    // r5: ...y con la MISMA conexión de la transacción, no con el cliente raíz (con el pool lleno de esperas del candado se atoraría).
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.privacyNoticeVersion.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('r5: encender una tienda apagada lee los requisitos con el tx de la transacción y NUNCA con el cliente raíz (que retiene otra conexión)', async () => {
+    const raiz = new Error('cliente raíz usado dentro de la transacción: con el pool lleno de esperas del candado se atora')
+    prismaMock.venue.findUnique.mockRejectedValue(raiz)
+    prismaMock.privacyNoticeVersion.findFirst.mockRejectedValue(raiz)
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: {
+        findUnique: jest.fn().mockResolvedValue(row({ enabled: false })),
+        upsert: jest.fn().mockResolvedValue(row({ enabled: true })),
+      },
+      venue: { findUnique: jest.fn().mockResolvedValue(VENUE_COMPLETO) },
+      privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue({ id: 'pnv1' }) },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+
+    await expect(updateSettings('v1', { enabled: true }, 'staff1')).resolves.toMatchObject({ enabled: true })
+
+    expect(tx.venue.findUnique).toHaveBeenCalledWith({ where: { id: 'v1' }, select: { address: true, phone: true } })
+    expect(tx.privacyNoticeVersion.findFirst).toHaveBeenCalledWith({ where: { venueId: 'v1' }, select: { id: true } })
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.privacyNoticeVersion.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('r5: con el tx, un negocio sin teléfono ni aviso sigue siendo 400 STORE_REQUIREMENTS_MISSING y no escribe', async () => {
+    const tx = {
+      $executeRaw: jest.fn().mockResolvedValue(0),
+      onlineOrderingSettings: { findUnique: jest.fn().mockResolvedValue(null), upsert: jest.fn() },
+      reservationSettings: { findUnique: jest.fn() },
+      venue: { findUnique: jest.fn().mockResolvedValue({ ...VENUE_COMPLETO, phone: null }) },
+      privacyNoticeVersion: { findFirst: jest.fn().mockResolvedValue(null) },
+    }
+    ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
+    await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({
+      code: 'STORE_REQUIREMENTS_MISSING',
+      details: { missing: ['phone', 'privacyNotice'] },
+    })
+    expect(tx.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    expect(prismaMock.venue.findUnique).not.toHaveBeenCalled()
   })
 
   it('R18: encender una tienda APAGADA sin teléfono es 400 STORE_REQUIREMENTS_MISSING con lo que falta, y no guarda ni audita nada', async () => {
