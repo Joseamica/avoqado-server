@@ -417,41 +417,53 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
       }
 
       try {
-        // Los servicios ya escriben su bitácora (sólo si cambiaron algo); ésta es la evidencia de qué app y quién lo pidió.
+        // Los servicios ya escriben su bitácora; ésta es la evidencia de qué app y quién lo pidió, y va SÓLO si esta llamada escribió
+        // algo: un reintento con la misma llave, o una cancelación que otra persona ya inició, no se firma a nombre de esta app.
         if (action === 'start') {
-          const { giftCardIds } = await iniciarCancelacionDeVenta(venueId, orden.id, {
+          const { bloqueadas } = await iniciarCancelacionDeVenta(venueId, orden.id, {
             staffId: scope.staffId,
             operationKey: idempotencyKey,
           })
-          await auditMcpWrite(scope, {
-            action: 'GIFT_CARD_SALE_CANCEL_STARTED',
-            entity: 'Order',
-            entityId: orden.id,
-            venueId,
-            data: { operationKey: idempotencyKey, giftCardIds },
-          })
+          if (bloqueadas.length > 0) {
+            await auditMcpWrite(scope, {
+              action: 'GIFT_CARD_SALE_CANCEL_STARTED',
+              entity: 'Order',
+              entityId: orden.id,
+              venueId,
+              data: { operationKey: idempotencyKey, giftCardIds: bloqueadas },
+            })
+          }
           return text({
             ok: true,
             sale: venta,
             action,
-            blockedCards: giftCardIds.length,
+            blockedCards: bloqueadas.length,
+            ...(bloqueadas.length === 0 ? { note: 'La cancelación ya estaba en curso: esta llamada no cambió nada.' } : {}),
             nextStep:
               'Devuelve el cobro de esa venta (issue_refund si fue en efectivo, refund_card_on_terminal si fue con tarjeta). Si al final no se devuelve, libera la cancelación.',
           })
         }
-        await liberarCancelacionDeVenta(venueId, orden.id, {
+        const { liberadas } = await liberarCancelacionDeVenta(venueId, orden.id, {
           staffId: scope.staffId,
           operationKey: idempotencyKey,
           confirmacionNoDevuelto: true,
         })
-        await auditMcpWrite(scope, {
-          action: 'GIFT_CARD_SALE_CANCEL_RELEASED',
-          entity: 'Order',
-          entityId: orden.id,
-          venueId,
-          data: { operationKey: idempotencyKey },
+        if (liberadas.length > 0) {
+          await auditMcpWrite(scope, {
+            action: 'GIFT_CARD_SALE_CANCEL_RELEASED',
+            entity: 'Order',
+            entityId: orden.id,
+            venueId,
+            data: { operationKey: idempotencyKey, giftCardIds: liberadas },
+          })
+        }
+        return text({
+          ok: true,
+          sale: venta,
+          action,
+          releasedCards: liberadas.length,
+          ...(liberadas.length === 0 ? { note: 'No había tarjetas por liberar: esta llamada no cambió nada.' } : {}),
         })
-        return text({ ok: true, sale: venta, action })
       } catch (err) {
         return rechazo(err)
       }

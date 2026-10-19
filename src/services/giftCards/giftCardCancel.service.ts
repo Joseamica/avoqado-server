@@ -648,12 +648,14 @@ export async function exigirCancelacionParaDevolverEnTerminal(venueId: string, o
  * GIFT_CARD_CANCEL_NOT_STARTED (r1 M3: una cancelación nueva lleva llave nueva); si otra operación ya ocupa una de esas llaves ⇒
  * 409 IDEMPOTENCY_KEY_REUSED. La bitácora
  * `GIFT_CARD_SALE_CANCEL_STARTED` sólo se escribe si esta llamada bloqueó algo (F9: lo decide la libreta bajo candado).
+ * `bloqueadas` = los sobres que bloqueó ESTA llamada (vacío en un reintento o si otra persona ya la había iniciado): quien llame
+ * escribe su propia bitácora sólo si no está vacío (el MCP, tarea 4 de los pendientes 1a). Las rutas responden sólo `giftCardIds`.
  */
 export async function iniciarCancelacionDeVenta(
   venueId: string,
   orderId: string,
   p: { staffId: string; operationKey: string },
-): Promise<{ giftCardIds: string[] }> {
+): Promise<{ giftCardIds: string[]; bloqueadas: string[] }> {
   const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   if (!venue) throw noEsVentaDeTarjetas()
   const timezone = venue.timezone || DEFAULT_TIMEZONE
@@ -679,15 +681,15 @@ export async function iniciarCancelacionDeVenta(
           409,
         )
       }
-      return { giftCardIds: ids, nueva: false }
+      return { giftCardIds: ids, bloqueadas: [] }
     }
 
     // La MISMA regla que pinta el botón del detalle (C4): `evaluarCancelacionDeVenta` (decisión 1 del coordinador).
     const e = await evaluarCancelacionDeVenta(tx, { venueId, orderId, ids, timezone, ahora: new Date() })
     if (e.error) throw e.error
     // Ya en cancelación (otra persona la inició con otra llave): se respeta tal cual y no se escribe nada.
-    if (e.reason === 'IN_PROGRESS') return { giftCardIds: ids, nueva: false }
-    let nueva = false
+    if (e.reason === 'IN_PROGRESS') return { giftCardIds: ids, bloqueadas: [] }
+    const bloqueadas: string[] = []
     for (const s of e.sobres) {
       // Sólo los ACTIVE: los que ya están BLOCKED aquí son de esta misma cancelación (la regla rechaza cualquier otro motivo).
       if (s.status !== 'ACTIVE' || repetidos.has(s.id)) continue
@@ -698,12 +700,12 @@ export async function iniciarCancelacionDeVenta(
         operationKey: claveDeSobre(p.operationKey, s.id),
         op,
       })
-      if (!hecho.replay) nueva = true
+      if (!hecho.replay) bloqueadas.push(s.id)
     }
-    return { giftCardIds: ids, nueva }
+    return { giftCardIds: ids, bloqueadas }
   }, ORDER_LOCK_WAIT_BUDGET)
 
-  if (r.nueva) {
+  if (r.bloqueadas.length > 0) {
     void logAction({
       staffId: p.staffId,
       venueId,
@@ -713,7 +715,7 @@ export async function iniciarCancelacionDeVenta(
       data: { giftCardIds: r.giftCardIds },
     })
   }
-  return { giftCardIds: r.giftCardIds }
+  return r
 }
 
 /**
@@ -722,13 +724,14 @@ export async function iniciarCancelacionDeVenta(
  * salió (la devolución puede registrarse después), así que liberar exige `confirmacionNoDevuelto: true` —la casilla del panel—, y
  * sin ella responde 400 ANTES de abrir la transacción; lo incierto se queda bloqueado y B7 avisa a las 24 h (`CANCEL_STUCK`). Nada
  * libera solo. Una venta ya devuelta no se libera (GIFT_CARD_SALE_ALREADY_CANCELLED). Idempotente por `operationKey` como iniciar:
- * el reintento no escribe otro UNBLOCK; otra operación con esa llave ⇒ IDEMPOTENCY_KEY_REUSED.
+ * el reintento no escribe otro UNBLOCK; otra operación con esa llave ⇒ IDEMPOTENCY_KEY_REUSED. `liberadas` = los sobres que liberó
+ * ESTA llamada (vacío en un reintento): quien llame escribe su propia bitácora sólo si no está vacío (el MCP).
  */
 export async function liberarCancelacionDeVenta(
   venueId: string,
   orderId: string,
   p: { staffId: string; operationKey: string; confirmacionNoDevuelto: true },
-): Promise<void> {
+): Promise<{ liberadas: string[] }> {
   if (p?.confirmacionNoDevuelto !== true) {
     throw new BadRequestError(
       'Para liberar confirma que comprobaste que la devolución NO se hizo. Si no lo sabes, la tarjeta se queda bloqueada.',
@@ -799,4 +802,5 @@ export async function liberarCancelacionDeVenta(
       data: { giftCardIds: liberadas },
     })
   }
+  return { liberadas }
 }

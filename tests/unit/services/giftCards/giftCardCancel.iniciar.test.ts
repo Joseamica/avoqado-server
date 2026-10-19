@@ -145,13 +145,13 @@ describe('M3 · reintento COMPLETO de iniciar con la misma llave: responde segú
       llavesOcupadas: ocupadas,
       bloqueos: sobres.map(giftCardId => ({ giftCardId, type: 'BLOCK' as const, reason: 'CANCEL_IN_PROGRESS' })),
     })
-    await expect(iniciar()).resolves.toEqual({ giftCardIds: sobres })
+    await expect(iniciar()).resolves.toEqual({ giftCardIds: sobres, bloqueadas: [] })
     expect(logAction).not.toHaveBeenCalled()
   })
 
   it('la cancelación ya terminó con la devolución (todos DEACTIVATED) ⇒ el reintento devuelve lo mismo', async () => {
     escenario({ sobres: sobres.map(id => ({ id, status: 'DEACTIVATED' as const })), llavesOcupadas: ocupadas })
-    await expect(iniciar()).resolves.toEqual({ giftCardIds: sobres })
+    await expect(iniciar()).resolves.toEqual({ giftCardIds: sobres, bloqueadas: [] })
     expect(logAction).not.toHaveBeenCalled()
   })
 })

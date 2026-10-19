@@ -385,7 +385,7 @@ describe('cancel_gift_card_sale', () => {
     expect(vista).toMatchObject({ requiresConfirmation: true, preview: { sale: 'Venta #ORD-1 · 2 tarjetas · $1,000.00', action: 'start' } })
     expect(mockIniciar).not.toHaveBeenCalled()
 
-    mockIniciar.mockResolvedValueOnce({ giftCardIds: ['gc1', 'gc2'] })
+    mockIniciar.mockResolvedValueOnce({ giftCardIds: ['gc1', 'gc2'], bloqueadas: ['gc1', 'gc2'] })
     const ok = await llamar('cancel_gift_card_sale', {
       venueId: 'v1',
       saleFolio: 'ord-1',
@@ -394,7 +394,7 @@ describe('cancel_gift_card_sale', () => {
       confirm: true,
     })
     expect(mockIniciar).toHaveBeenCalledWith('v1', 'o1', { staffId: 's1', operationKey: LLAVE })
-    expect(ok).toMatchObject({ ok: true, sale: 'Venta #ORD-1 · 2 tarjetas · $1,000.00' })
+    expect(ok).toMatchObject({ ok: true, sale: 'Venta #ORD-1 · 2 tarjetas · $1,000.00', blockedCards: 2 })
     expect(mockAudit).toHaveBeenCalledWith(scope, {
       action: 'GIFT_CARD_SALE_CANCEL_STARTED',
       entity: 'Order',
@@ -430,10 +430,37 @@ describe('cancel_gift_card_sale', () => {
     mockDetail.mockResolvedValue(detalle({ allowed: false, reason: 'IN_PROGRESS', message: null }))
     const args = { venueId: 'v1', last4: '4821', action: 'release', confirmNotRefunded: true, idempotencyKey: LLAVE }
     expect(await llamar('cancel_gift_card_sale', args)).toMatchObject({ requiresConfirmation: true, preview: { action: 'release' } })
-    mockLiberar.mockResolvedValueOnce(undefined)
-    expect(await llamar('cancel_gift_card_sale', { ...args, confirm: true })).toMatchObject({ ok: true })
+    mockLiberar.mockResolvedValueOnce({ liberadas: ['gc1', 'gc2'] })
+    expect(await llamar('cancel_gift_card_sale', { ...args, confirm: true })).toMatchObject({ ok: true, releasedCards: 2 })
     expect(mockLiberar).toHaveBeenCalledWith('v1', 'o1', { staffId: 's1', operationKey: LLAVE, confirmacionNoDevuelto: true })
-    expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'GIFT_CARD_SALE_CANCEL_RELEASED', entity: 'Order', entityId: 'o1' })
+    expect(mockAudit).toHaveBeenCalledWith(scope, {
+      action: 'GIFT_CARD_SALE_CANCEL_RELEASED',
+      entity: 'Order',
+      entityId: 'o1',
+      venueId: 'v1',
+      data: { operationKey: LLAVE, giftCardIds: ['gc1', 'gc2'] },
+    })
+  })
+
+  it('🔴 iniciar o liberar SIN escribir (un reintento, o una cancelación que ya inició otra persona) no deja bitácora a nombre de esta app', async () => {
+    mockList.mockImplementation(conFolio(fila()))
+    mockDetail.mockResolvedValue(detalle({ allowed: false, reason: 'IN_PROGRESS', message: null }))
+    const inicio = { venueId: 'v1', last4: '4821', action: 'start', idempotencyKey: LLAVE, confirm: true }
+    // Reintento con la misma llave, o «ya en curso» con otra llave: el servicio responde con éxito, pero no bloqueó nada.
+    mockIniciar.mockResolvedValueOnce({ giftCardIds: ['gc1', 'gc2'], bloqueadas: [] })
+    const r1 = await llamar('cancel_gift_card_sale', inicio)
+    expect(r1).toMatchObject({ ok: true, blockedCards: 0 })
+    expect(r1.note).toMatch(/no cambió nada/)
+    mockIniciar.mockResolvedValueOnce({ giftCardIds: ['gc1', 'gc2'], bloqueadas: [] })
+    expect(await llamar('cancel_gift_card_sale', { ...inicio, idempotencyKey: 'mcp-otra-persona-01' })).toMatchObject({ blockedCards: 0 })
+    // Liberar sin tarjetas liberadas (reintento de una liberación que ya se hizo).
+    mockLiberar.mockResolvedValueOnce({ liberadas: [] })
+    const r3 = await llamar('cancel_gift_card_sale', { ...inicio, action: 'release', confirmNotRefunded: true })
+    expect(r3).toMatchObject({ ok: true, releasedCards: 0 })
+    expect(r3.note).toMatch(/no cambió nada/)
+    expect(mockIniciar).toHaveBeenCalledTimes(2)
+    expect(mockLiberar).toHaveBeenCalledTimes(1)
+    expect(mockAudit).not.toHaveBeenCalled()
   })
 
   it('una tarjeta sin venta no tiene venta que cancelar', async () => {

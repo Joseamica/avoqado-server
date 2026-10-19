@@ -90,7 +90,9 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     const movimientos = await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds } } })
     const r2 = await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-venta-0001' })
     expect([...r1.giftCardIds].sort()).toEqual([...v.giftCardIds].sort())
-    expect(r2).toEqual(r1)
+    // Lo que bloqueó ESTA llamada: la primera, los dos; el reintento, nada (el MCP audita sólo si bloqueó algo).
+    expect([...r1.bloqueadas].sort()).toEqual([...v.giftCardIds].sort())
+    expect(r2).toEqual({ giftCardIds: r1.giftCardIds, bloqueadas: [] })
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds } } })).toBe(movimientos)
     const bloqueos = await bloqueosDe(v.giftCardIds)
     expect(bloqueos).toHaveLength(2)
@@ -111,6 +113,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     const antes = await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds } } })
     await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-otra-0002' })).resolves.toEqual({
       giftCardIds: v.giftCardIds,
+      bloqueadas: [],
     })
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: { in: v.giftCardIds } } })).toBe(antes)
     expect(bitacora('GIFT_CARD_SALE_CANCEL_STARTED', v.orderId)).toHaveLength(1)
@@ -407,11 +410,15 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
   it('liberar (el gerente comprobó que la devolución NO se hizo): los sobres vuelven a ACTIVE con UNBLOCK; después de la devolución ya no se puede liberar', async () => {
     const v = await venta()
     await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-liberar-0001' })
-    await liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true })
+    await expect(
+      liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true }),
+    ).resolves.toEqual({ liberadas: v.giftCardIds })
     expect((await prisma.giftCard.findUniqueOrThrow({ where: { id: v.giftCardIds[0] } })).status).toBe('ACTIVE')
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: v.giftCardIds[0], type: 'UNBLOCK' } })).toBe(1)
-    // Repetir la liberación con la misma llave no escribe otro UNBLOCK ni otra bitácora.
-    await liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true })
+    // Repetir la liberación con la misma llave no escribe otro UNBLOCK ni otra bitácora, y dice que no liberó nada.
+    await expect(
+      liberarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'liberar-venta-0001', confirmacionNoDevuelto: true }),
+    ).resolves.toEqual({ liberadas: [] })
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: v.giftCardIds[0], type: 'UNBLOCK' } })).toBe(1)
     expect(bitacora('GIFT_CARD_SALE_CANCEL_RELEASED', v.orderId)).toEqual([
       expect.objectContaining({ staffId, venueId, entity: 'Order', data: { giftCardIds: v.giftCardIds } }),
@@ -464,7 +471,10 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     // Una cancelación NUEVA lleva su propia llave; después de la devolución, su reintento (todos DEACTIVATED) responde lo mismo.
     const nueva = await iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0002' })
     await issueRefund({ venueId, paymentId: v.pagos[0].id, amount: 50000, reason: 'CANCELLED_ORDER', staffId })
-    await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0002' })).resolves.toEqual(nueva)
+    await expect(iniciarCancelacionDeVenta(venueId, v.orderId, { staffId, operationKey: 'cancelar-tardio-0002' })).resolves.toEqual({
+      giftCardIds: nueva.giftCardIds,
+      bloqueadas: [],
+    })
   })
 
   it('🔴 r1 F6: liberar SIN confirmar que la devolución no se hizo ⇒ 400 y los sobres siguen bloqueados (lo incierto no se libera)', async () => {
@@ -513,7 +523,7 @@ describe('B2 · cancelar la venta de una tarjeta de regalo', () => {
     const r1 = await iniciarCancelacionDeVenta(venueId, otra.orderId, { staffId, operationKey: 'cancelar-legitimo-0001' })
     const antes = await prisma.giftCardActivity.count({ where: { giftCardId: { in: otra.giftCardIds } } })
     const r2 = await iniciarCancelacionDeVenta(venueId, otra.orderId, { staffId, operationKey: 'cancelar-legitimo-0001' })
-    expect(r2).toEqual(r1)
+    expect(r2).toEqual({ ...r1, bloqueadas: [] })
     expect(await prisma.giftCardActivity.count({ where: { giftCardId: { in: otra.giftCardIds } } })).toBe(antes)
   })
 

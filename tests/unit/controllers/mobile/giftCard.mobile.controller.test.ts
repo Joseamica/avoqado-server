@@ -403,7 +403,8 @@ describe('regresar el saldo y cancelar la cuenta', () => {
 
 describe('cancelar la venta de una tarjeta (en tienda, el mismo día)', () => {
   it('inicia la cancelación (bloquea los sobres); la bitácora la deja B2, no esta capa', async () => {
-    m(iniciarCancelacionDeVenta).mockResolvedValue({ giftCardIds: ['g1', 'g2'] })
+    // El servicio también dice qué bloqueó ESTA llamada (lo usa el MCP); la respuesta HTTP no cambia.
+    m(iniciarCancelacionDeVenta).mockResolvedValue({ giftCardIds: ['g1', 'g2'], bloqueadas: ['g1'] })
     const r = await request(app).post(`${B}/gift-cards/orders/o1/cancel-sale`).send({ operationKey: 'cancela-0001-abc' })
     expect(r.body).toEqual({ success: true, data: { giftCardIds: ['g1', 'g2'] } })
     expect(iniciarCancelacionDeVenta).toHaveBeenCalledWith('v1', 'o1', { staffId: 'staff-1', operationKey: 'cancela-0001-abc' })
@@ -420,7 +421,7 @@ describe('cancelar la venta de una tarjeta (en tienda, el mismo día)', () => {
   })
 
   it('liberar la cancelación: el gerente confirmó que la devolución NO se hizo (F6)', async () => {
-    m(liberarCancelacionDeVenta).mockResolvedValue(undefined)
+    m(liberarCancelacionDeVenta).mockResolvedValue({ liberadas: ['g1'] })
     const r = await request(app)
       .post(`${B}/gift-cards/orders/o1/release-cancel`)
       .send({ operationKey: 'libera-0001-abc', confirmacionNoDevuelto: true })

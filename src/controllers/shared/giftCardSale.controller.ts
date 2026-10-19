@@ -19,8 +19,9 @@ export async function getSettings(req: Request, res: Response) {
 export async function cancelSale(req: Request, res: Response) {
   const { venueId, orderId } = req.params
   const { operationKey } = req.body as { operationKey: string }
-  const data = await iniciarCancelacionDeVenta(venueId, orderId, { staffId: staffDe(req), operationKey })
-  res.json({ success: true, data })
+  // Sólo `giftCardIds`: el contrato de la ruta no cambia (`bloqueadas` es para quien escribe su propia bitácora, el MCP).
+  const { giftCardIds } = await iniciarCancelacionDeVenta(venueId, orderId, { staffId: staffDe(req), operationKey })
+  res.json({ success: true, data: { giftCardIds } })
 }
 
 /** F6: el esquema ya exigió `confirmacionNoDevuelto: true` (el gerente comprobó que la devolución NO se hizo). */
