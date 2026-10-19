@@ -7,8 +7,10 @@ import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
+import { settingsView } from '@/services/online-ordering/settingsView.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByStaff,
@@ -22,6 +24,8 @@ import {
   activeCursor,
   floorPauseMinutes,
   menuAvailabilityBody,
+  menuCategoryId,
+  menuCursor,
   rejectSchema,
   settingsPatchBody,
 } from '@/schemas/online-ordering.schema'
@@ -210,13 +214,35 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas y cuándo consultó la bandeja un aparato por última vez.',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado).',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
-      const { lastInboxPollAt, ...ajustes } = await getSettings(venueId)
-      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt ? lastInboxPollAt.toISOString() : null } })
+      // Lo mismo que `GET /settings` del panel (un solo armador): los ajustes se leen una vez y el estado sale del mismo cálculo.
+      const { lastInboxPollAt, store, requirements, ...ajustes } = await settingsView(venueId)
+      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements })
+    },
+  )
+
+  server.tool(
+    'online_ordering_menu',
+    'Menú de la tienda en línea, sólo lectura. Sin categoryId: por categoría, cuántos platillos se podrían vender en línea, cuántos ya se ofrecen y cuántos de ésos no tienen foto. Con categoryId: los platillos de esa categoría (precio en pesos, si están activos y si se ofrecen en línea), por páginas con cursor.',
+    {
+      venueId: z.string().describe('Venue (debe estar en tu scope)'),
+      categoryId: menuCategoryId.optional().describe('Categoría cuyos platillos quieres ver; sin ella, el resumen por categoría'),
+      cursor: menuCursor.optional().describe('Sólo con categoryId: el nextCursor de la respuesta anterior, para la página siguiente'),
+      limit: z.number().int().min(1).max(50).optional().describe('Platillos por página (1 a 50; 50 por omisión)'),
+    },
+    async ({ venueId, categoryId, cursor, limit }) => {
+      guard.venueFilter(venueId)
+      // Es lectura aunque el permiso sea `:manage`: sin 'read' el guardia pediría el scope de escritura.
+      guard.requirePermission('online-orders:manage', venueId, 'read')
+      if (!categoryId) {
+        if (cursor) return text({ ok: false, error: 'El cursor sólo sirve con una categoría (categoryId).' })
+        return text({ ok: true, ...(await getOnlineMenuSummary(venueId)) })
+      }
+      return text({ ok: true, ...(await listOnlineMenuProducts({ venueId, categoryId, cursor, limit })) })
     },
   )
 
@@ -241,7 +267,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         return text({ ok: false, error: 'Indica qué cambiar: los ajustes (changes) o los platillos en línea (availability).' })
       }
 
-      const { lastInboxPollAt: _latido, ...current } = await getSettings(venueId)
+      const settings = await getSettings(venueId)
+      const { lastInboxPollAt: _latido, ...current } = settings
       const actual = current as Record<string, unknown>
       const diff = Object.entries(changes ?? {})
         .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor))
@@ -257,7 +284,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
-      const ajustes = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : current
+      const actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
+      const ajustes = actualizados ?? current
       const platillos = availability ? await setOnlineAvailability({ venueId, ...availability, actorStaffId: scope.staffId }) : null
       await auditMcpWrite(scope, {
         action: 'ONLINE_ORDERING_CONFIGURED_VIA_MCP',
@@ -266,7 +294,10 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         venueId,
         data: { cambios: diff, platillosEnLinea: availability ?? null },
       })
-      return text({ ok: true, ajustes, platillosActualizados: platillos?.updated ?? 0 })
+      // Lo que quedó: el estado de la tienda y qué le falta para encenderla, del mismo armador que el panel (después de auditar:
+      // un fallo al leerlo no deja el cambio sin bitácora).
+      const { store, requirements } = await settingsView(venueId, actualizados ?? settings)
+      return text({ ok: true, ajustes, store, requirements, platillosActualizados: platillos?.updated ?? 0 })
     },
   )
 

@@ -192,7 +192,14 @@ export async function listInbox(p: { venueId: string; filter?: InboxFilter; acti
   ])
 
   const count = (statuses: OnlineOrderStatus[]) => grouped.filter(g => statuses.includes(g.status)).reduce((s, g) => s + g._count._all, 0)
-  const counts = { pending: count(PENDING), active: count(ACTIVE), done: doneCount }
+  const counts = {
+    pending: count(PENDING),
+    active: count(ACTIVE),
+    done: doneCount,
+    // 1b: los activos por etapa, del mismo `groupBy` exacto (las pestañas del panel no cuentan sobre una lista con tope).
+    accepted: count([OnlineOrderStatus.ACCEPTED]),
+    ready: count([OnlineOrderStatus.READY]),
+  }
   const truncated = pendingRows.length > INBOX_PAGE_SIZE || activeRows.length > INBOX_PAGE_SIZE || doneRows.length > DONE_PAGE_SIZE
   const pending = pendingRows.slice(0, INBOX_PAGE_SIZE)
   const active = activeRows.slice(0, INBOX_PAGE_SIZE)

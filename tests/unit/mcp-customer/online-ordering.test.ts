@@ -20,7 +20,11 @@ const mockUpdateSettings = jest.fn()
 const mockPause = jest.fn()
 const mockSetAvailability = jest.fn()
 const mockTouch = jest.fn()
+const mockAccepting = jest.fn()
+const mockRequirements = jest.fn()
 const mockAudit = jest.fn()
+const mockMenuSummary = jest.fn()
+const mockMenuProducts = jest.fn()
 
 jest.mock('@/mcp/guard', () => {
   const real = jest.requireActual('@/mcp/guard')
@@ -59,11 +63,21 @@ jest.mock('@/services/online-ordering/settings.service', () => ({
   getSettings: (...a: unknown[]) => mockGetSettings(...(a as [])),
   updateSettings: (...a: unknown[]) => mockUpdateSettings(...(a as [])),
   pauseOnlineOrdering: (...a: unknown[]) => mockPause(...(a as [])),
+  storeRequirements: (...a: unknown[]) => mockRequirements(...(a as [])),
 }))
 jest.mock('@/services/online-ordering/menuAvailability.service', () => ({
   setOnlineAvailability: (...a: unknown[]) => mockSetAvailability(...(a as [])),
 }))
-jest.mock('@/services/online-ordering/presence.service', () => ({ touchInboxPoll: (...a: unknown[]) => mockTouch(...(a as [])) }))
+jest.mock('@/services/online-ordering/menuAdmin.service', () => ({
+  getOnlineMenuSummary: (...a: unknown[]) => mockMenuSummary(...(a as [])),
+  listOnlineMenuProducts: (...a: unknown[]) => mockMenuProducts(...(a as [])),
+}))
+jest.mock('@/services/online-ordering/presence.service', () => ({
+  touchInboxPoll: (...a: unknown[]) => mockTouch(...(a as [])),
+  getAcceptingStatus: (...a: unknown[]) => mockAccepting(...(a as [])),
+  // Ronda 1: el armado del estado es el REAL (el mismo del panel y la bandeja).
+  storeView: jest.requireActual('@/services/online-ordering/presence.service').storeView,
+}))
 
 type Handler = (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>
 const handlers = new Map<string, Handler>()
@@ -121,6 +135,8 @@ beforeEach(() => {
   mockListInbox.mockResolvedValue({ serverTime: 'x', counts: { pending: 1, active: 1, done: 0 }, orders: [pending], truncated: false })
   mockGetInboxOrder.mockResolvedValue(pending)
   mockGetSettings.mockResolvedValue(AJUSTES)
+  mockAccepting.mockResolvedValue({ status: 'OFFLINE', reason: 'NO_DEVICE', config: { ...AJUSTES } })
+  mockRequirements.mockResolvedValue({ address: true, phone: false, privacyNotice: true })
 })
 
 describe('online_orders_list', () => {
@@ -300,6 +316,15 @@ describe('online_ordering_settings', () => {
     expect(r).toMatchObject({ ok: true, ajustes: expect.objectContaining({ enabled: true, minOrderAmount: 50 }) })
     expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
+
+  it('ronda 1 (MCP en sync con el panel): trae el estado de la tienda y qué falta para encenderla, leyendo los ajustes UNA vez', async () => {
+    const r = parse(await call('online_ordering_settings', { venueId: 'v1' }))
+    expect(r.store).toEqual({ status: 'OFFLINE', reason: 'NO_DEVICE', pausedUntil: null, manualPause: false })
+    expect(r.requirements).toEqual({ address: true, phone: false, privacyNotice: true })
+    expect(mockGetSettings).toHaveBeenCalledTimes(1)
+    expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), AJUSTES)
+    expect(mockRequirements).toHaveBeenCalledWith('v1')
+  })
 })
 
 describe('online_ordering_configure', () => {
@@ -322,6 +347,20 @@ describe('online_ordering_configure', () => {
     expect(mockUpdateSettings).toHaveBeenCalledWith('v1', { minOrderAmount: 80, hours: HORARIO }, 's1')
     expect(done).toMatchObject({ ok: true })
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDERING_CONFIGURED_VIA_MCP' }))
+  })
+
+  it('S1 (ronda final): al aplicar, responde también el estado de la tienda y qué falta para encenderla (el armador del panel)', async () => {
+    const despues = { ...AJUSTES, enabled: false, manualPause: true }
+    mockUpdateSettings.mockResolvedValue(despues)
+    mockAccepting.mockResolvedValue({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { ...despues } })
+    const done = parse(await call('online_ordering_configure', { venueId: 'v1', changes: { manualPause: true }, confirm: true }))
+    expect(done).toMatchObject({
+      ok: true,
+      store: { status: 'PAUSED', reason: 'MANUAL_PAUSE', pausedUntil: null, manualPause: true },
+      requirements: { address: true, phone: false, privacyNotice: true },
+    })
+    // El estado sale de lo que acaba de escribir (no de otra lectura): `getAcceptingStatus` recibe esos ajustes.
+    expect(mockAccepting).toHaveBeenCalledWith('v1', expect.any(Date), despues)
   })
 
   it('marca platillos en línea con la disponibilidad del menú', async () => {
@@ -356,11 +395,66 @@ describe('online_ordering_pause', () => {
   })
 })
 
+describe('online_ordering_menu (1b: el menú en línea, sólo lectura)', () => {
+  const RESUMEN = {
+    categories: [{ id: 'c1', name: 'Tacos', active: true, total: 4, online: 3, onlineWithoutPhoto: 1 }],
+    totals: { total: 4, online: 3, onlineWithoutPhoto: 1 },
+    truncated: false,
+  }
+  const PAGINA = {
+    items: [{ id: 'p1', name: 'Flautas', price: 45.5, imageUrl: null, active: true, availableOnline: true, categoryId: 'c1' }],
+    nextCursor: 'p1',
+    total: 7,
+  }
+  beforeEach(() => {
+    mockMenuSummary.mockResolvedValue(RESUMEN)
+    mockMenuProducts.mockResolvedValue(PAGINA)
+  })
+
+  it('sin categoryId: el resumen por categoría, con online-orders:manage y sin candado de plan', async () => {
+    const r = parse(await call('online_ordering_menu', { venueId: 'v1' }))
+    // Es lectura aunque el permiso termine en `:manage`: sin 'read' el guardia exigiría mcp:write.
+    expect(mockRequirePermission).toHaveBeenCalledWith('online-orders:manage', 'v1', 'read')
+    expect(mockMenuSummary).toHaveBeenCalledWith('v1')
+    expect(mockMenuProducts).not.toHaveBeenCalled()
+    expect(mockPlanGate).not.toHaveBeenCalled()
+    expect(r).toEqual({ ok: true, ...RESUMEN })
+  })
+
+  it('con categoryId: una página de esa categoría (cursor y limit), con el nextCursor para la siguiente', async () => {
+    const r = parse(await call('online_ordering_menu', { venueId: 'v1', categoryId: 'c1', cursor: 'p0', limit: 20 }))
+    expect(mockMenuProducts).toHaveBeenCalledWith({ venueId: 'v1', categoryId: 'c1', cursor: 'p0', limit: 20 })
+    expect(mockMenuSummary).not.toHaveBeenCalled()
+    expect(r).toEqual({ ok: true, ...PAGINA })
+  })
+
+  it('limit es de 1 a 50 y los ids son seguros (mismo Zod que la API)', () => {
+    const esquema = z.object(shapes.get('online_ordering_menu')!)
+    expect(esquema.safeParse({ venueId: 'v1', categoryId: 'c1', limit: 50 }).success).toBe(true)
+    for (const limit of [0, 51, 2.5]) expect(esquema.safeParse({ venueId: 'v1', categoryId: 'c1', limit }).success).toBe(false)
+    expect(JSON.stringify(esquema.safeParse({ venueId: 'v1', categoryId: 'c 1' }))).toContain('Categoría inválida')
+    expect(JSON.stringify(esquema.safeParse({ venueId: 'v1', categoryId: 'c1', cursor: 'p'.repeat(41) }))).toContain('Cursor inválido')
+  })
+
+  it('un cursor sin categoría no lee nada', async () => {
+    const r = parse(await call('online_ordering_menu', { venueId: 'v1', cursor: 'p0' }))
+    expect(r).toMatchObject({ ok: false })
+    expect(mockMenuSummary).not.toHaveBeenCalled()
+    expect(mockMenuProducts).not.toHaveBeenCalled()
+  })
+
+  it('un venue fuera de scope se rechaza antes de leer', async () => {
+    await expect(call('online_ordering_menu', { venueId: 'foreign' })).rejects.toThrow(/out of scope/)
+    expect(mockMenuSummary).not.toHaveBeenCalled()
+  })
+})
+
 describe('descripciones', () => {
   it('no mencionan internos (tablas, modelos ni campos) y todas las herramientas son online_*', () => {
     expect([...descriptions.keys()].sort()).toEqual([
       'online_order_respond',
       'online_ordering_configure',
+      'online_ordering_menu',
       'online_ordering_pause',
       'online_ordering_settings',
       'online_orders_list',
@@ -445,6 +539,20 @@ describe('A14: seguridad con los guardias REALES (scope de la conexión y permis
   it('la lectura sí pasa con mcp:read', async () => {
     registrar(conexion(['mcp:read']))
     expect(parse(await real.get('online_orders_list')!({ venueId: 'v1' }, {}))).toMatchObject({ ok: true })
+  })
+
+  it('1b: el menú en línea se lee con mcp:read y online-orders:manage; sin ese permiso se rechaza antes de leer', async () => {
+    mockMenuSummary.mockResolvedValue({ categories: [], totals: { total: 0, online: 0, onlineWithoutPhoto: 0 }, truncated: false })
+    registrar(conexion(['mcp:read'], ['online-orders:manage']))
+    expect(parse(await real.get('online_ordering_menu')!({ venueId: 'v1' }, {}))).toMatchObject({ ok: true })
+    expect(mockMenuSummary).toHaveBeenCalledTimes(1)
+
+    mockMenuSummary.mockClear()
+    registrar(conexion(['mcp:read'], ['orders:read', 'orders:update', 'online-orders:pause']))
+    await expect(real.get('online_ordering_menu')!({ venueId: 'v1' }, {})).rejects.toThrow(/Missing permission/)
+    await expect(real.get('online_ordering_menu')!({ venueId: 'v1', categoryId: 'c1' }, {})).rejects.toThrow(/Missing permission/)
+    expect(mockMenuSummary).not.toHaveBeenCalled()
+    expect(mockMenuProducts).not.toHaveBeenCalled()
   })
 
   it('control: con mcp:write y el permiso, aceptar sí ejecuta y audita', async () => {

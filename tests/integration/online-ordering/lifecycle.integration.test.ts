@@ -8,17 +8,20 @@
  * dejó cobrada; tampoco revive una que la cancelación existente (`cancelOrder`) canceló. H6: el cobro cae en el turno abierto,
  * un rechazo que espera al cobro pierde, y un CAS perdido dentro de la cancelación revierte la `Order` en Postgres.
  */
-import { OnlineOrderStatus } from '@prisma/client'
+import { OnlineOrderStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
+import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
 import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { listInbox } from '@/services/online-ordering/inbox.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import * as avisos from '@/services/online-ordering/notifications.service'
-import { createOnlineOrder } from '@/services/online-ordering/order.service'
+import { createOnlineOrder, type CreateOnlineOrderOptions } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { claimOnlineOrderPrint, confirmOnlineOrderPrinted } from '@/services/online-ordering/printClaim.service'
+import * as quoteModule from '@/services/online-ordering/quote.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import {
@@ -75,21 +78,31 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   // R23: un teléfono distinto (y válido para libphonenumber) por pedido.
   const nextPhone = () => `+5255${40_000_000 + (((RUN % 100_000) * 100 + ++phoneSeq) % 60_000_000)}`
   const ITEMS = () => [{ productId, quantity: 2, modifiers: [{ modifierId }] }]
+  /**
+   * P1-06: `assertCanCreate` es obligatorio. Aquí plan y negocio operativo PASAN a propósito: el fixture no tiene suscripción y
+   * esta suite prueba la admisión contra Postgres; sus rechazos se prueban en las unitarias del servicio, la ruta y los middlewares.
+   */
+  const PLAN_Y_NEGOCIO_PASAN = { assertCanCreate: async () => {} }
 
-  const newOrder = (o: { key?: string; phone?: string; expectedTotal?: string; items?: any[]; customer?: string } = {}) => {
+  const newOrder = (
+    o: { key?: string; phone?: string; expectedTotal?: string; items?: any[]; customer?: string; opts?: CreateOnlineOrderOptions } = {},
+  ) => {
     const phone = o.phone ?? nextPhone()
-    return createOnlineOrder({
-      venueId: venueId!,
-      idempotencyKey: o.key ?? nextKey(),
-      items: o.items ?? ITEMS(),
-      paymentMode: 'PAY_AT_PICKUP',
-      expectedTotal: o.expectedTotal ?? '206.00',
-      customer: { name: 'María ITEST', phone },
-      customerId: o.customer ?? customerId,
-      verifiedPhone: phone,
-      note: null,
-      whatsappConsent: false,
-    })
+    return createOnlineOrder(
+      {
+        venueId: venueId!,
+        idempotencyKey: o.key ?? nextKey(),
+        items: o.items ?? ITEMS(),
+        paymentMode: 'PAY_AT_PICKUP',
+        expectedTotal: o.expectedTotal ?? '206.00',
+        customer: { name: 'María ITEST', phone },
+        customerId: o.customer ?? customerId,
+        verifiedPhone: phone,
+        note: null,
+        whatsappConsent: false,
+      },
+      o.opts ?? PLAN_Y_NEGOCIO_PASAN,
+    )
   }
   // R23: cada caso que necesita presencia escribe su propio latido.
   const beat = async () => {
@@ -101,19 +114,22 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
   const aceptar = (orderId: string) =>
     expect(acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null })).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
   /**
-   * H6: espera a que alguna sesión quede BLOQUEADA por la del cobro (la carrera es real, no secuencial). Se ata al proceso de
-   * Postgres que retiene el candado (`pg_blocking_pids`), no al texto de la consulta. Acotada: si no ocurre, INCONCLUSO.
+   * Espera a que alguna sesión quede BLOQUEADA por el proceso de Postgres `pid` (la carrera es real, no secuencial) y devuelve
+   * el proceso bloqueado. Se ata a quien retiene el candado (`pg_blocking_pids`), no al texto de la consulta. Acotada: si no
+   * ocurre, INCONCLUSO.
    */
-  const esperarQueAlguienEspereAlCobro = async (pidDelCobro: number | undefined) => {
-    for (let i = 0; pidDelCobro !== undefined && i < 100; i++) {
-      const [{ n }] = await prisma.$queryRaw<Array<{ n: number }>>`
-        SELECT count(*)::int AS n FROM pg_stat_activity
-        WHERE wait_event_type = 'Lock' AND ${pidDelCobro}::int = ANY(pg_blocking_pids(pid))`
-      if (n > 0) return
+  const esperarBloqueadoPor = async (pid: number | undefined, queNoPaso: string): Promise<number> => {
+    for (let i = 0; pid !== undefined && i < 100; i++) {
+      const [bloqueado] = await prisma.$queryRaw<Array<{ pid: number }>>`
+        SELECT pid FROM pg_stat_activity WHERE wait_event_type = 'Lock' AND ${pid}::int = ANY(pg_blocking_pids(pid))`
+      if (bloqueado) return bloqueado.pid
       await new Promise(resolve => setTimeout(resolve, 50))
     }
-    throw new Error('INCONCLUSO: el rechazo nunca quedó esperando el candado que retiene el cobro')
+    throw new Error(`INCONCLUSO: ${queNoPaso}`)
   }
+  /** H6: alguna sesión quedó esperando el candado que retiene el cobro. */
+  const esperarQueAlguienEspereAlCobro = (pidDelCobro: number | undefined) =>
+    esperarBloqueadoPor(pidDelCobro, 'el rechazo nunca quedó esperando el candado que retiene el cobro')
 
   const estadoDe = async (onlineOrderId: string) => (await prisma.onlineOrder.findUniqueOrThrow({ where: { id: onlineOrderId } })).status
   /** `logAction` es un simulacro en TODA la integración (`integration-setup.ts`): se miran sus llamadas para ESTE pedido. */
@@ -136,10 +152,22 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       data: { name: 'ITEST Pedidos Org', slug: `itest-pedidos-org-${RUN}`, email: `itest-pedidos-${RUN}@test.com`, phone: '5550000000' },
     })
     orgId = org.id
+    // R18 (1b): encender la tienda exige domicilio, teléfono y aviso de privacidad publicado del negocio.
     const venue = await prisma.venue.create({
-      data: { name: 'ITEST Pedidos Venue', slug: `itest-pedidos-${RUN}`, organizationId: org.id, timezone: 'America/Mexico_City' },
+      data: {
+        name: 'ITEST Pedidos Venue',
+        slug: `itest-pedidos-${RUN}`,
+        organizationId: org.id,
+        timezone: 'America/Mexico_City',
+        address: 'Av. Coyoacán 123',
+        city: 'CDMX',
+        state: 'CDMX',
+        zipCode: '04000',
+        phone: '5512345678',
+      },
     })
     venueId = venue.id
+    await prisma.privacyNoticeVersion.create({ data: { venueId, content: 'Aviso de privacidad ITEST', contentHash: `itest-${RUN}` } })
 
     // H6: un turno de caja ABIERTO del negocio (lo abre una persona). El cobro real lo reclama y estampa `Payment.shiftId`.
     staffId = (
@@ -173,6 +201,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     if (!venueId) return
     const v = { venueId }
     await prisma.activityLog.deleteMany({ where: v })
+    await prisma.idempotencyRequest.deleteMany({ where: { organizationId: `venue:${venueId}` } }) // Codex r3: rechazos guardados
     await prisma.paymentEffect.deleteMany({ where: v })
     await prisma.inventoryPosting.deleteMany({ where: v })
     await prisma.venueTransaction.deleteMany({ where: v })
@@ -187,6 +216,7 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
     await prisma.menuCategory.deleteMany({ where: v })
     await prisma.customer.deleteMany({ where: v })
     await prisma.onlineOrderingSettings.deleteMany({ where: v })
+    await prisma.privacyNoticeVersion.deleteMany({ where: v })
     await prisma.venue.deleteMany({ where: { id: venueId } })
     if (staffId) await prisma.staff.deleteMany({ where: { id: staffId } }) // ya sin turnos que la referencien
     if (orgId) await prisma.organization.deleteMany({ where: { id: orgId } })
@@ -274,6 +304,251 @@ describe('Pedidos en línea — ciclo de vida (integration, real DB)', () => {
       details: { quote: { total: 206 } },
     })
     expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+  })
+
+  it('R2-2: con la tienda ya cerrada, el reintento de una llave cuyo primer envío sigue en su transacción ESPERA y recibe SU pedido', async () => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const { hours: horarioAntes } = await prisma.onlineOrderingSettings.findUniqueOrThrow({ where: { venueId: venueId! } })
+    const dias = ['sunday', 'monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday']
+    const todoCerrado = Object.fromEntries(dias.map(d => [d, { enabled: false, ranges: [] }]))
+
+    let soltar!: () => void
+    const retenido = new Promise<void>(resolve => (soltar = resolve))
+    let avisarDentro!: () => void
+    const retenedorDentro = new Promise<void>(resolve => (avisarDentro = resolve))
+    let pidDelRetenedor: number | undefined
+    // El retenedor toma la fila del negocio. El primer envío entra a su transacción, toma el candado de admisión, crea la cuenta
+    // (su llave foránea a Venue pide esa fila) y se queda ESPERANDO ahí dentro: su pedido existe sin confirmar.
+    const retenedor = prisma.$transaction(
+      async tx => {
+        pidDelRetenedor = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`)[0].pid
+        await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+        avisarDentro()
+        await retenido
+      },
+      { timeout: 30_000 },
+    )
+    await Promise.race([retenedorDentro, retenedor])
+
+    const primero = newOrder({ key, phone })
+    let reintento: Promise<Awaited<ReturnType<typeof newOrder>>> | undefined
+    let primeroRetenido = false
+    const carrera = (async () => {
+      const pidDelPrimero = await esperarBloqueadoPor(pidDelRetenedor, 'el primer envío nunca quedó retenido dentro de su transacción')
+      primeroRetenido = true
+      // La tienda cierra mientras el primer envío sigue sin confirmar; el comensal reintenta con la MISMA llave y solicitud.
+      await prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { hours: todoCerrado } })
+      reintento = newOrder({ key, phone })
+      // El reintento queda formado detrás del candado de admisión que retiene el primer envío (no rechaza de inmediato).
+      await Promise.race([esperarBloqueadoPor(pidDelPrimero, 'el reintento nunca esperó el candado de admisión'), reintento])
+    })()
+    // Se suelta pase lo que pase, y todo se espera antes de afirmar: nada queda corriendo ni sin manejar.
+    const [espera, a, b] = await Promise.allSettled([
+      carrera.finally(soltar),
+      primero,
+      carrera.catch(() => undefined).then(() => reintento),
+    ])
+    await retenedor.catch(() => undefined)
+    await prisma.onlineOrderingSettings.update({
+      where: { venueId: venueId! },
+      data: { hours: horarioAntes === null ? Prisma.DbNull : (horarioAntes as Prisma.InputJsonValue) },
+    })
+
+    // Diagnóstico ANTES de afirmar sobre el reintento: sin el primer envío retenido, la carrera nunca ocurrió.
+    if (!primeroRetenido) {
+      throw new Error(
+        `montaje inconcluso: el primer envío nunca quedó retenido (${espera.status === 'rejected' ? String(espera.reason) : 'sin causa'})`,
+      )
+    }
+    expect(a).toMatchObject({ status: 'fulfilled', value: { replay: false } })
+    const creado = (a as PromiseFulfilledResult<Awaited<ReturnType<typeof newOrder>>>).value
+    // SU pedido, no ORDERING_CLOSED.
+    expect(b).toEqual({
+      status: 'fulfilled',
+      value: expect.objectContaining({ replay: true, orderId: creado.orderId, trackingToken: creado.trackingToken }),
+    })
+    if (espera.status === 'rejected') throw espera.reason // el reintento nunca quedó esperando: la prueba no probó la carrera
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
+  })
+
+  /**
+   * Codex r2: el PRIMER envío de la llave se detiene justo DESPUÉS de cotizar, antes de crear nada. Mientras sigue detenido,
+   * `cambiar()` mueve el precio o la tienda y entra el reintento con la MISMA llave y solicitud (la recarga de la tienda). Al
+   * final se suelta el primero y se deshace el cambio; devuelve los dos desenlaces y si el reintento llegó a esperar un candado.
+   */
+  const reintentoMientrasElPrimeroCotizo = async (cambiar: () => Promise<unknown>, deshacer: () => Promise<unknown>) => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const cotizarDeVerdad = quoteModule.quoteCart
+    let soltar!: () => void
+    const retenido = new Promise<void>(resolve => (soltar = resolve))
+    let avisarCotizado!: () => void
+    const cotizado = new Promise<void>(resolve => (avisarCotizado = resolve))
+    const espia = jest.spyOn(quoteModule, 'quoteCart').mockImplementationOnce(async (...args) => {
+      const cotizacion = await cotizarDeVerdad(...args)
+      avisarCotizado()
+      await retenido
+      return cotizacion
+    })
+    const primero = newOrder({ key, phone })
+    let reintento: ReturnType<typeof newOrder> | undefined
+    let reintentoTermino = false
+    let reintentoEspero = false
+    try {
+      await Promise.race([cotizado, primero])
+      await cambiar()
+      reintento = newOrder({ key, phone })
+      reintento.then(
+        () => (reintentoTermino = true),
+        () => (reintentoTermino = true),
+      )
+      // Acotada: alguna sesión de ESTA base espera un candado consultivo (el de la llave que retiene el primer envío).
+      for (let i = 0; i < 100 && !reintentoTermino && !reintentoEspero; i++) {
+        const [esperando] = await prisma.$queryRaw<Array<{ pid: number }>>`
+          SELECT pid FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND wait_event = 'advisory'`
+        reintentoEspero = Boolean(esperando)
+        if (!reintentoEspero) await new Promise(resolve => setTimeout(resolve, 50))
+      }
+    } finally {
+      soltar()
+      espia.mockRestore()
+      await Promise.allSettled([primero, reintento])
+      await deshacer()
+    }
+    const [a, b] = await Promise.allSettled([primero, reintento!])
+    return { key, phone, a, b, reintentoEspero }
+  }
+
+  /**
+   * Codex r4: el primer envío cotizó FUERA de la transacción (no retiene conexión ni candado mientras lee), así que el reintento
+   * no lo espera: decide y GUARDA su rechazo. El primero, que leyó datos viejos, encuentra ese rechazo ya bajo la llave y no crea.
+   * Una sola decisión por llave; con otra llave, un solo pedido.
+   */
+  const unaSolaDecision = async (r: Awaited<ReturnType<typeof reintentoMientrasElPrimeroCotizo>>, code: string) => {
+    expect(r.b).toMatchObject({ status: 'rejected', reason: { code, final: true } })
+    expect(r.a).toMatchObject({ status: 'rejected', reason: { code, final: true } })
+    expect(sobre((r.a as PromiseRejectedResult).reason)).toEqual(sobre((r.b as PromiseRejectedResult).reason))
+    expect(r.reintentoEspero).toBe(false) // el primero, detenido tras cotizar, no retenía el candado de la llave
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${r.key}` } })).toBe(0)
+    await expect(newOrder({ key: nextKey(), phone: r.phone })).resolves.toMatchObject({ replay: false })
+    expect(await prisma.order.count({ where: { venueId: venueId!, customerPhone: r.phone } })).toBe(1)
+  }
+
+  it('Codex r2/r4: el precio cambia mientras el primer envío ya cotizó: el reintento recibe PRICE_CHANGED y el primero, el MISMO rechazo guardado', async () => {
+    await unaSolaDecision(
+      await reintentoMientrasElPrimeroCotizo(
+        () => prisma.product.update({ where: { id: productId }, data: { price: 113 } }),
+        () => prisma.product.update({ where: { id: productId }, data: { price: 93 } }),
+      ),
+      'PRICE_CHANGED',
+    )
+  })
+
+  it('Codex r2/r4: la tienda se pausa mientras el primer envío ya cotizó: el reintento recibe ORDERING_PAUSED y el primero, el MISMO rechazo guardado', async () => {
+    await unaSolaDecision(
+      await reintentoMientrasElPrimeroCotizo(
+        () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: true } }),
+        () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: false } }),
+      ),
+      'ORDERING_PAUSED',
+    )
+  })
+
+  it('Codex r4 (R8): con el plan ya vencido, el reintento de un pedido creado recibe SU pedido y no se guarda ningún rechazo', async () => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const creado = await newOrder({ key, phone })
+    const sinPlan = {
+      assertCanCreate: async () => {
+        throw new ForbiddenError('Sin plan.', 'PLAN_REQUIRED')
+      },
+    }
+    await expect(newOrder({ key, phone, opts: sinPlan })).resolves.toMatchObject({
+      replay: true,
+      orderId: creado.orderId,
+      trackingToken: creado.trackingToken,
+    })
+    expect(await prisma.idempotencyRequest.count({ where: { organizationId: `venue:${venueId}`, idempotencyKey: key } })).toBe(0)
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
+  })
+
+  /**
+   * Codex r3: el envío A de la llave se quedó detenido ANTES del servicio (en la red o en la autenticación) y llega tarde; se
+   * simula llamándolo después. Mientras, el reintento B de la MISMA llave y solicitud recibió un rechazo definitivo y la tienda
+   * soltó la llave. Aunque el cambio ya se deshizo, A recibe ESE MISMO rechazo y no crea; con otra llave queda UN pedido.
+   */
+  const sobre = (e: any) => JSON.parse(JSON.stringify({ status: e?.statusCode, code: e?.code, error: e?.message, details: e?.details }))
+  const rechazoQueQueda = async (
+    code: string,
+    cambiar: () => Promise<unknown>,
+    deshacer: () => Promise<unknown>,
+    opts?: CreateOnlineOrderOptions,
+  ) => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    await cambiar()
+    const b = await newOrder({ key, phone, opts })
+      .then(
+        r => r,
+        (e: unknown) => e,
+      )
+      .finally(deshacer)
+    expect(b).toMatchObject({ code, final: true }) // Codex r4: recién guardado
+    const tarde = await newOrder({ key, phone, opts }).then(
+      r => r,
+      (e: unknown) => e,
+    )
+    expect(tarde).toMatchObject({ code, final: true }) // Codex r4: repetido desde la tabla
+    expect(sobre(tarde)).toEqual(sobre(b)) // mismo status, código, mensaje y detalles
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+    await expect(newOrder({ key: nextKey(), phone, opts })).resolves.toMatchObject({ replay: false })
+    expect(await prisma.order.count({ where: { venueId: venueId!, customerPhone: phone } })).toBe(1)
+  }
+
+  it('Codex r3: el reintento de la llave recibe ORDERING_PAUSED; el envío tardío de esa llave, ya reanudada la tienda, recibe el MISMO 409 y no crea', async () => {
+    await rechazoQueQueda(
+      'ORDERING_PAUSED',
+      () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: true } }),
+      () => prisma.onlineOrderingSettings.update({ where: { venueId: venueId! }, data: { manualPause: false } }),
+    )
+  })
+
+  it('Codex r3: el reintento de la llave recibe PRICE_CHANGED; el envío tardío, con el precio de vuelta, recibe el MISMO 409 y no crea', async () => {
+    await rechazoQueQueda(
+      'PRICE_CHANGED',
+      () => prisma.product.update({ where: { id: productId }, data: { price: 113 } }),
+      () => prisma.product.update({ where: { id: productId }, data: { price: 93 } }),
+    )
+  })
+
+  it('Codex r3: con el negocio desactivado el reintento recibe VENUE_NOT_FOUND; el envío tardío, ya reactivado, recibe el MISMO 404', async () => {
+    await rechazoQueQueda(
+      'VENUE_NOT_FOUND',
+      () => prisma.venue.update({ where: { id: venueId! }, data: { active: false } }),
+      () => prisma.venue.update({ where: { id: venueId! }, data: { active: true } }),
+      { assertCanCreate: () => assertOperationalVenue(venueId!) },
+    )
+  })
+
+  it('Codex r3 (control): un 5xx dentro de la transacción NO deja rechazo guardado: el reintento de la MISMA llave sí crea', async () => {
+    await beat()
+    const key = nextKey()
+    const phone = nextPhone()
+    const espia = jest.spyOn(quoteModule, 'quoteCart').mockRejectedValueOnce(new ServiceUnavailableError('caída simulada'))
+    try {
+      await expect(newOrder({ key, phone })).rejects.toMatchObject({ statusCode: 503 })
+    } finally {
+      espia.mockRestore()
+    }
+    expect(await prisma.idempotencyRequest.count({ where: { organizationId: `venue:${venueId}`, idempotencyKey: key } })).toBe(0)
+    await expect(newOrder({ key, phone })).resolves.toMatchObject({ replay: false })
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
   })
 
   it('dos aparatos aceptando a la vez: exactamente uno gana', async () => {

@@ -21,6 +21,36 @@ router.get('/suggestions', checkPermission('menu:read'), validateRequest(s.sugge
 router.post('/group-existing/preview', checkPermission('menu:update'), gate, validateRequest(s.groupExistingSchema), c.previewGroupExisting)
 router.post('/group-existing', checkPermission('menu:update'), gate, validateRequest(s.applyGroupExistingSchema), c.applyGroupExisting)
 router.post('/shopify-file/proposals', checkPermission('menu:update'), gate, validateRequest(s.shopifyFileSchema), c.shopifyFileProposals)
+// «Desde Shopify» (bloque 5): agrupar lo ligado a Shopify. El gid viaja codificado (`gid%3A%2F%2Fshopify%2FProduct%2F1`).
+router.get('/shopify-proposals', checkPermission('menu:update'), gate, validateRequest(s.shopifyProposalsSchema), c.shopifyProposals)
+router.post(
+  '/shopify-proposals/preview-all',
+  checkPermission('menu:update'),
+  gate,
+  validateRequest(s.shopifyProposalsPreviewAllSchema),
+  c.previewAllShopifyProposals,
+)
+router.post(
+  '/shopify-proposals/apply-batch',
+  checkPermission('menu:update'),
+  gate,
+  validateRequest(s.shopifyProposalsApplyBatchSchema),
+  c.applyShopifyProposalsBatch,
+)
+router.post(
+  '/shopify-proposals/:shopifyProductId/preview',
+  checkPermission('menu:update'),
+  gate,
+  validateRequest(s.shopifyProposalPreviewSchema),
+  c.previewShopifyProposal,
+)
+router.post(
+  '/shopify-proposals/:shopifyProductId/apply',
+  checkPermission('menu:update'),
+  gate,
+  validateRequest(s.shopifyProposalApplySchema),
+  c.applyShopifyProposal,
+)
 router.post('/', checkPermission('menu:create'), gate, validateRequest(s.createGroupSchema), c.createGroup)
 router.get('/:groupId', checkPermission('menu:read'), validateRequest(s.groupParamsSchema), c.getGroup)
 router.get('/:groupId/archived', checkPermission('menu:read'), validateRequest(s.archivedSchema), c.listArchived)

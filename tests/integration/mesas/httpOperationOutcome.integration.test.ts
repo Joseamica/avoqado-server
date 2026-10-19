@@ -4950,14 +4950,23 @@ async function task8ObserveWait(key: number) {
   )
 }
 async function task8ObserveBlockedBy(pid: number) {
-  return task8Eventually(
+  // pg_blocking_pids() lee los candados EN VIVO, pero pg_stat_activity es una FOTO tomada al primer acceso: en UNA consulta,
+  // la foto podía ser de antes de la espera y traer el texto viejo («BEGIN»; CI de develop, 19-oct, 1 de 6343). Primero se
+  // ve la espera; el texto se lee DESPUÉS, en otra consulta (foto nueva), cuando el proceso ya espera y su texto es el de
+  // la espera. El que bloquea sigue retenido por la prueba, así que la espera no se acaba entre las dos lecturas.
+  const waiter = await task8Eventually(
     async () =>
       (
         await prisma.$queryRaw<
-          Array<{ pid: number; blockers: number[]; query: string }>
-        >`SELECT pid,pg_blocking_pids(pid) blockers,query FROM pg_stat_activity WHERE ${pid}::int=ANY(pg_blocking_pids(pid))`
-      )[0],
+          Array<{ pid: number }>
+        >`SELECT pid FROM pg_locks WHERE NOT granted AND ${pid}::int=ANY(pg_blocking_pids(pid))`
+      )[0]?.pid,
   )
+  return (
+    await prisma.$queryRaw<
+      Array<{ pid: number; blockers: number[]; query: string }>
+    >`SELECT pid,pg_blocking_pids(pid) blockers,query FROM pg_stat_activity WHERE pid=${waiter}::int`
+  )[0]
 }
 async function task8NativeGate(
   relation: 'Order' | 'Table' | 'Payment' | 'TerminalPaymentRequest' | 'KdsOrder',

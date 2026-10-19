@@ -254,7 +254,9 @@ describe('emparejar y crear (12 bis.13, #11, #20, N07, N05)', () => {
     expect(await problema(e, 11)).toMatchObject({ reason: motivo, productId: ex.productId })
   })
 
-  it('🔴 variantes (A12): un existente que es variante de un producto de Avoqado ⇒ PRODUCTO_CON_VARIANTES; no se liga ni cambia', async () => {
+  // Antes (A12) ⇒ PRODUCTO_CON_VARIANTES; desde el bloque 5 (V2) una talla de cualquier familia se liga y el conector no le toca
+  // nada de la familia.
+  it('🔴 variantes (bloque 5, V2): un existente que es variante de un producto de Avoqado se liga y no cambia', async () => {
     const e = await conectando()
     const ex = await agregarProductoShopify(e, { sku: 'VAR-LIGA', pareja: false })
     await prisma.$transaction(async tx => {
@@ -264,13 +266,13 @@ describe('emparejar y crear (12 bis.13, #11, #20, N07, N05)', () => {
       await tx.product.update({ where: { id: ex.productId }, data: { productGroupId: g.id, originSystem: 'SHOPIFY' } })
     })
     const antes = await prisma.product.findUniqueOrThrow({ where: { id: ex.productId } })
-    expect(await upsertShopifyVariant(await contexto(e), variante(12, { sku: 'VAR-LIGA', barcode: null }))).toEqual({
-      kind: 'PROBLEMA',
-      reason: 'PRODUCTO_CON_VARIANTES',
+    expect(await upsertShopifyVariant(await contexto(e), variante(12, { sku: 'VAR-LIGA', barcode: null }))).toMatchObject({
+      kind: 'LIGADO',
+      productId: ex.productId,
     })
     expect(await prisma.product.findUniqueOrThrow({ where: { id: ex.productId } })).toEqual(antes)
-    expect(await prisma.shopifyVariantLink.count({ where: { productId: ex.productId } })).toBe(0)
-    expect(await problema(e, 12)).toMatchObject({ reason: 'PRODUCTO_CON_VARIANTES', productId: ex.productId })
+    expect(await prisma.shopifyVariantLink.count({ where: { productId: ex.productId } })).toBe(1)
+    expect(await problema(e, 12)).toBeNull()
   })
 
   it('#14: el plan se revisa DENTRO de la transacción común, con la sucursal ya bloqueada: sin plan, nada se escribe', async () => {

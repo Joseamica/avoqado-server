@@ -18,14 +18,27 @@ export interface PublicVenueContext {
   slug: string
 }
 
-export async function resolveVenueBySlug(req: Request, res: Response, next: NextFunction) {
+export function resolveVenueBySlug(req: Request, res: Response, next: NextFunction) {
+  return resolve(req, res, next, { active: true })
+}
+
+/**
+ * Codex r3: sólo para CREAR un pedido en línea. No exige `active`: el negocio desactivado lo rechaza el servicio bajo el candado
+ * de la llave y ese rechazo queda guardado; aquí, un 404 se adelantaría a un envío vivo de la misma llave que, al reactivarse
+ * el negocio, crearía el pedido.
+ */
+export function resolveVenueBySlugIncludingInactive(req: Request, res: Response, next: NextFunction) {
+  return resolve(req, res, next, {})
+}
+
+async function resolve(req: Request, res: Response, next: NextFunction, filter: { active?: true }) {
   const slug = typeof req.params?.venueSlug === 'string' ? req.params.venueSlug : ''
   if (!slug) {
     return res.status(404).json({ message: 'Negocio no encontrado', code: 'VENUE_NOT_FOUND' })
   }
 
   const venue = await prisma.venue.findFirst({
-    where: { slug, active: true },
+    where: { slug, ...filter },
     select: { id: true, slug: true },
   })
   if (!venue) {

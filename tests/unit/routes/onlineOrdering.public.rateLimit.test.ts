@@ -11,7 +11,15 @@ jest.mock('@/middlewares/resolveOperationalVenueBySlug.middleware', () => ({
 }))
 jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
   __esModule: true,
-  resolveVenueBySlug: (_req: any, _res: any, next: any) => next(),
+  resolveVenueBySlug: (req: any, _res: any, next: any) => {
+    req.publicVenue = { id: `id-${req.params.venueSlug}`, slug: req.params.venueSlug }
+    next()
+  },
+  // Codex r3: crear pedido resuelve el venue con éste (aunque esté desactivado); activo, operativo y plan los pide el servicio.
+  resolveVenueBySlugIncludingInactive: (req: any, _res: any, next: any) => {
+    req.publicVenue = { id: `id-${req.params.venueSlug}`, slug: req.params.venueSlug }
+    next()
+  },
 }))
 jest.mock('@/middlewares/requirePublicVenueFeatureStrict.middleware', () => ({
   __esModule: true,

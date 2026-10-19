@@ -62,7 +62,13 @@ jest.mock('@/services/email.service', () => ({
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
 
-import { activatePlan, hayCobroDelAltaSinCerrar, liberarLugar, LEASE_MS } from '@/services/onboarding/planActivation.service'
+import {
+  activatePlan,
+  cerrarAltaSinNavegador,
+  hayCobroDelAltaSinCerrar,
+  liberarLugar,
+  LEASE_MS,
+} from '@/services/onboarding/planActivation.service'
 import { standardPlanQuote } from '@/services/access/planPricing.constants'
 import { standardFirstChargeCents } from '@/services/launchCampaigns/launchOfferMath'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -2968,5 +2974,332 @@ describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción i
     })
     const todo = (['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls)
     expect(inspect(todo, { depth: 10 })).not.toContain('_secret_')
+  })
+})
+
+/**
+ * 🔴 R1 y R2 (promesa docs/audit/2026-10-18-campana-3ds-r1r2/promesa.md): el alta que se quedó «esperando al banco» sin nadie
+ * en la pantalla se resuelve sola. R2: el cliente autorizó y cerró la pestaña ⇒ se cierra igual que si hubiera vuelto (con
+ * la evidencia del primer cobro). R1: Stripe dio el cobro por expirado ⇒ su lugar vuelve a la campaña. El revisor NUNCA
+ * cobra, anula ni crea nada en Stripe.
+ */
+describe('🔴 R1/R2: el alta a medio pago se resuelve sin el navegador', () => {
+  const FIN_DEL_PERIODO = Math.floor(new Date('2026-11-18T00:00:00Z').getTime() / 1000)
+  const VENCIDO = new Date('2020-01-01T00:00:00Z')
+  const METADATA = {
+    organizationId: 'org-1',
+    featureCode: 'PLAN_PRO',
+    launchCampaignId: 'lc-1',
+    launchCampaignCode: 'POS22',
+    launchOfferVersion: '1',
+    launchRedemptionId: 'red-1',
+    planActivationKey: 'plan-activation:org-1:1',
+    primerCobroEsperadoCents: String(ANUNCIADO),
+  }
+  const laSub = (o: Record<string, unknown> = {}) => ({
+    id: 'sub_3ds',
+    status: 'active',
+    default_payment_method: 'pm_1',
+    metadata: METADATA,
+    latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO },
+    current_period_end: FIN_DEL_PERIODO,
+    items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'month' } } }] },
+    discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    ...o,
+  })
+  const enStripe = (sub: Record<string, unknown>) => mockSubRetrieve.mockResolvedValue(sub)
+  const elAlta = (o: Record<string, unknown> = {}) =>
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: null,
+        planStripeSubscriptionId: 'sub_3ds',
+        ...o,
+      }) as never,
+    )
+  const progresos = () => (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.map(c => c[0])
+  const conEstado = (estado: string) => progresos().filter(a => a?.data?.planActivationStatus === estado)
+  const redencionCon = (estado: string) =>
+    (prismaMock.launchCampaignRedemption.updateMany as jest.Mock).mock.calls.map(c => c[0]).filter(a => a?.data?.status === estado)
+  const bajadas = () =>
+    (prismaMock.launchCampaign.updateMany as jest.Mock).mock.calls.filter((c: any[]) => c[0]?.data?.redemptionCount?.decrement)
+  /** Nada se escribió en Stripe: ni cobro, ni anulación. */
+  const nadaEnStripe = () => {
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockVoid).not.toHaveBeenCalled()
+  }
+
+  beforeEach(() => {
+    elAlta()
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+      id: 'red-1',
+      status: 'RESERVED',
+      campaignId: 'lc-1',
+      offerVersion: 1,
+    } as never)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue({ staffId: 'owner-1' } as never)
+    facturaInicial({ total: ANUNCIADO, tarjeta: ANUNCIADO, saldo: 0, status: 'paid' })
+    enStripe(laSub())
+  })
+
+  describe('R2: autorizó y cerró la pestaña', () => {
+    it('R2.1 ⇒ cierra el alta como si hubiera vuelto: evidencia del primer cobro, entrega, ACTIVE, APPLIED, a nombre de la dueña, sin cobrar ni anular', async () => {
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
+
+      expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+      expect(mockEntregar).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: 'sub_3ds' }))
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(redencionCon('APPLIED')).toEqual([
+        expect.objectContaining({
+          where: { id: 'red-1', status: 'RESERVED' },
+          data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+        }),
+      ])
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'owner-1', action: 'LAUNCH_CAMPAIGN_REDEEMED' }))
+      nadaEnStripe()
+    })
+
+    it('R2.2 🔴 la primera factura NO está pagada por lo consentido ⇒ no cierra (503, sin entrega ni APPLIED)', async () => {
+      facturaInicial({ total: ANUNCIADO, tarjeta: 0, saldo: 0, status: 'open' })
+
+      await expect(cerrarAltaSinNavegador('org-1')).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' })
+
+      expect(mockEntregar).not.toHaveBeenCalled()
+      expect(conEstado('ACTIVE')).toEqual([])
+      expect(redencionCon('APPLIED')).toEqual([])
+      nadaEnStripe()
+    })
+
+    it('R2.3 sin campaña: reconstruye la oferta ESTÁNDAR con el monto de la marca y cierra', async () => {
+      const estandar = standardFirstChargeCents(standardPlanQuote(), 'PRO', 'monthly', true)
+      elAlta({ launchCampaignId: null })
+      const { launchCampaignId, launchCampaignCode, launchOfferVersion, launchRedemptionId, ...sinCampania } = METADATA
+      enStripe(laSub({ metadata: { ...sinCampania, primerCobroEsperadoCents: String(estandar) }, discounts: [] }))
+      facturaInicial({ total: estandar, tarjeta: estandar, saldo: 0, status: 'paid' })
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
+
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'owner-1', action: 'PLAN_ACTIVATED_ONBOARDING' }))
+      nadaEnStripe()
+    })
+
+    it('R2.4 🔴 un cobro CLÁSICO (sin la marca del reto) no es de este revisor ⇒ no toca nada', async () => {
+      const { primerCobroEsperadoCents, ...sinMarca } = METADATA
+      enStripe(laSub({ metadata: sinMarca }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+    })
+
+    it('R2.5 🔴 la suscripción es de OTRO intento (su llave no es la del intento actual) ⇒ no toca nada', async () => {
+      enStripe(laSub({ metadata: { ...METADATA, planActivationKey: 'plan-activation:org-1:7' } }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+    })
+
+    it('R2.6 🔴 (Codex plan r1 #1) la tarjeta se retiró del cliente después de pagar ⇒ igual cierra lo YA pagado y guarda su id', async () => {
+      mockPmRetrieve.mockResolvedValue({ id: 'pm_1', customer: null, card: { fingerprint: 'fp_1' } })
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
+
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(conEstado('ACTIVE')[0].data.v2SetupData.plan.paymentMethodId).toBe('pm_1')
+      expect(redencionCon('APPLIED')).toHaveLength(1)
+      nadaEnStripe()
+    })
+
+    it('R2.7 🔴 (Codex r1 #1) la suscripción ya NO trae tarjeta ⇒ no la cierra el revisor (sin tarjeta guardada «Terminar alta» se atora): 🚨 y queda el camino de hoy', async () => {
+      enStripe(laSub({ default_payment_method: null }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), { organizationId: 'org-1', subscriptionId: 'sub_3ds' })
+      nadaEnStripe()
+    })
+  })
+
+  describe('el candado `soloRecuperar` de activatePlan (el revisor nunca cobra, anula ni estrena intento)', () => {
+    const OFERTA = { ...BASE, staffId: 'owner-1', offer: OFERTA_LAUNCH }
+
+    it('S.1 🔴 la sub del intento sigue `incomplete` con el reto fallido ⇒ 503 y lease suelto en IN_PROGRESS, SIN anular, sin avance, sin crear', async () => {
+      enStripe(
+        laSub({
+          status: 'incomplete',
+          latest_invoice: { id: 'in_1', status: 'open', confirmation_secret: { client_secret: 'pi_1_secret_x' } },
+        }),
+      )
+      mockIpList.mockResolvedValue({
+        has_more: false,
+        data: [
+          { is_default: true, payment: { type: 'payment_intent', payment_intent: { id: 'pi_1', status: 'requires_payment_method' } } },
+        ],
+      })
+
+      await expect(activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })).rejects.toMatchObject({ statusCode: 503 })
+
+      nadaEnStripe()
+      expect(progresos().some(a => a?.data?.planActivationAttempt === 2)).toBe(false)
+      expect(conEstado('DECLINED')).toEqual([])
+      expect(progresos()).toContainEqual(
+        expect.objectContaining({ data: { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null } }),
+      )
+    })
+
+    it('S.2 🔴 la sub ya expiró ⇒ 503 sin estrenar intento ni cobrar (eso es de R1, no de la recuperación)', async () => {
+      enStripe(laSub({ status: 'incomplete_expired' }))
+
+      await expect(activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })).rejects.toMatchObject({ statusCode: 503 })
+
+      nadaEnStripe()
+      expect(progresos().some(a => a?.data?.planActivationAttempt === 2)).toBe(false)
+      expect(bajadas()).toEqual([])
+    })
+
+    it.each([
+      ['el alta no está IN_PROGRESS', { planActivationStatus: 'DECLINED' }],
+      ['el alta apunta a OTRA suscripción', { planStripeSubscriptionId: 'sub_otra' }],
+    ])('S.3 🔴 %s ⇒ 409 sin escribir nada ni tocar Stripe', async (_caso, o) => {
+      elAlta(o)
+
+      await expect(activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })).rejects.toMatchObject({ statusCode: 409 })
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      nadaEnStripe()
+    })
+
+    it('S.4 la toma del lease exige que el alta siga apuntando a ESA suscripción (CAS)', async () => {
+      await activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })
+
+      expect(progresos()[0].where).toMatchObject({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planStripeSubscriptionId: 'sub_3ds',
+      })
+    })
+  })
+
+  describe('R1: el cobro murió sin autorizar (Stripe lo dio por expirado)', () => {
+    beforeEach(() => enStripe(laSub({ status: 'incomplete_expired', latest_invoice: { id: 'in_1', status: 'void' } })))
+
+    /** Qué transacción estaba abierta en cada escritura (0 = ninguna): prueba que el CAS del alta y la liberación van JUNTOS. */
+    function rastrearTransacciones() {
+      let abierta = 0
+      let n = 0
+      const escrituras: Array<{ modelo: string; args: any; tx: number }> = []
+      prismaMock.$transaction.mockImplementation(async (cb: unknown) => {
+        abierta = ++n
+        try {
+          return await (cb as (tx: unknown) => unknown)(prismaMock)
+        } finally {
+          abierta = 0
+        }
+      })
+      for (const [modelo, mock] of [
+        ['progreso', prismaMock.onboardingProgress.updateMany],
+        ['redencion', prismaMock.launchCampaignRedemption.updateMany],
+        ['cupo', prismaMock.launchCampaign.updateMany],
+      ] as const) {
+        ;(mock as jest.Mock).mockImplementation(async (args: any) => {
+          escrituras.push({ modelo, args, tx: abierta })
+          return { count: 1 }
+        })
+      }
+      return escrituras
+    }
+
+    it('R1.1 🔴 alta → DECLINED y el lugar de ESA suscripción se libera, en la MISMA transacción, sin tocar Stripe', async () => {
+      const escrituras = rastrearTransacciones()
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('LIBERADA')
+
+      const cas = escrituras.find(e => e.modelo === 'progreso')
+      const liberada = escrituras.find(e => e.modelo === 'redencion')
+      const bajada = escrituras.find(e => e.modelo === 'cupo')
+      expect(cas?.args).toEqual({
+        where: {
+          organizationId: 'org-1',
+          completedAt: null,
+          planActivationStatus: 'IN_PROGRESS',
+          planActivationAttempt: 1,
+          planActivationLeaseUntil: null,
+          planStripeSubscriptionId: 'sub_3ds',
+        },
+        data: { planActivationStatus: 'DECLINED', planActivationLeaseUntil: null },
+      })
+      expect(liberada?.args).toEqual({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ status: 'RELEASED', lastError: 'PLAN_ATTEMPT_ABANDONED' }),
+      })
+      expect(bajada?.args).toEqual({ where: { id: 'lc-1', redemptionCount: { gt: 0 } }, data: { redemptionCount: { decrement: 1 } } })
+      expect(cas?.tx).toBeGreaterThan(0)
+      expect(liberada?.tx).toBe(cas?.tx)
+      expect(bajada?.tx).toBe(cas?.tx)
+      nadaEnStripe()
+    })
+
+    it('R1.2 🔴 el CAS no tocó la fila (el cliente volvió y tomó el lease) ⇒ NO libera nada', async () => {
+      prismaMock.onboardingProgress.updateMany.mockResolvedValue({ count: 0 } as never)
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.launchCampaignRedemption.updateMany).not.toHaveBeenCalled()
+      expect(bajadas()).toEqual([])
+    })
+
+    it('R1.3 un lease VENCIDO (no nulo) entra al CAS tal como se leyó', async () => {
+      elAlta({ planActivationLeaseUntil: VENCIDO })
+
+      await cerrarAltaSinNavegador('org-1')
+
+      expect(progresos()[0].where.planActivationLeaseUntil).toEqual(VENCIDO)
+    })
+
+    it('R1.4 sin lugar en la metadata (pago de hoy sin campaña) ⇒ DECLINED sin tocar ningún lugar', async () => {
+      const { launchRedemptionId, launchCampaignId, ...sinLugar } = METADATA
+      enStripe(laSub({ status: 'incomplete_expired', metadata: sinLugar }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('LIBERADA')
+
+      expect(conEstado('DECLINED')).toHaveLength(1)
+      expect(prismaMock.launchCampaignRedemption.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('lo que el revisor no toca', () => {
+    it.each([
+      ['el cobro sigue esperando al banco (incomplete)', () => enStripe(laSub({ status: 'incomplete' }))],
+      ['la suscripción quedó cancelada (ambiguo)', () => enStripe(laSub({ status: 'canceled' }))],
+    ])('N.1 %s ⇒ NADA, sin escribir', async (_caso, preparar) => {
+      preparar()
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      nadaEnStripe()
+    })
+
+    it.each([
+      ['el lease está VIVO (alguien está cobrando)', { planActivationLeaseUntil: new Date(Date.now() + LEASE_MS) }],
+      ['el alta ya terminó', { completedAt: new Date() }],
+      ['el alta no está a medio pago', { planActivationStatus: 'ACTIVE' }],
+      ['el alta no tiene suscripción', { planStripeSubscriptionId: null }],
+    ])('N.2 %s ⇒ NADA, sin preguntarle a Stripe', async (_caso, o) => {
+      elAlta(o)
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(mockSubRetrieve).not.toHaveBeenCalled()
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    })
   })
 })
