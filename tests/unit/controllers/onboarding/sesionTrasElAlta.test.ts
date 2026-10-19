@@ -58,6 +58,19 @@ jest.mock('../../../../src/services/dashboard/auth.service', () => ({
   switchVenueForStaff: jest.fn(),
 }))
 
+// El corte de sesiones se lee de VERDAD (`passwordChangeGuard` real sobre `prisma.staff`); sólo se espía el cierre
+// de la sesión nueva.
+jest.mock('../../../../src/services/auth/session.service', () => ({
+  __esModule: true,
+  ...jest.requireActual('../../../../src/services/auth/session.service'),
+  revokeSession: jest.fn(),
+}))
+jest.mock('../../../../src/services/auth/sessionCache', () => ({
+  __esModule: true,
+  ...jest.requireActual('../../../../src/services/auth/sessionCache'),
+  invalidateSession: jest.fn(),
+}))
+
 jest.mock('../../../../src/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), error: jest.fn(), warn: jest.fn(), debug: jest.fn() },
@@ -72,6 +85,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     onboardingProgress: { updateMany: jest.fn(), update: jest.fn(), findUnique: jest.fn() },
     venue: { findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn() },
     organization: { update: jest.fn() },
+    staff: { findUnique: jest.fn() },
   },
 }))
 
@@ -80,15 +94,24 @@ import * as onboardingProgressService from '../../../../src/services/onboarding/
 import * as venueCreationService from '../../../../src/services/onboarding/venueCreation.service'
 import * as authService from '../../../../src/services/dashboard/auth.service'
 import prisma from '../../../../src/utils/prismaClient'
+import { revokeSession } from '../../../../src/services/auth/session.service'
+import { invalidateSession } from '../../../../src/services/auth/sessionCache'
 
 const VENUE = { id: 'venue_real', slug: 'friedbros', name: 'FriedBros', status: 'ACTIVE' }
+
+// Cuándo se emitió el token del alta (lo pone el middleware desde `emitidoMs`/`iat`).
+const EMITIDO = Date.parse('2026-10-19T10:00:00Z')
 
 const buildReq = (authContext: Record<string, unknown> = {}): Partial<Request> =>
   ({
     params: { organizationId: 'org_1' },
     body: {},
-    authContext: { userId: 'user_1', orgId: 'org_1', venueId: 'pending', role: 'OWNER', ...authContext },
+    authContext: { userId: 'user_1', orgId: 'org_1', venueId: 'pending', role: 'OWNER', emitidoMs: EMITIDO, ...authContext },
   }) as any
+
+/** El corte de sesiones del staff, como lo guarda la base. */
+const corteEn = (sessionsRevokedAt: Date | null) =>
+  (prisma.staff.findUnique as jest.Mock).mockResolvedValue({ lastPasswordReset: null, sessionsRevokedAt })
 
 const buildRes = () => ({
   status: jest.fn().mockReturnThis(),
@@ -126,7 +149,12 @@ describe('terminar el alta reemite la sesión con la sucursal real', () => {
       productsCreated: 0,
       demoDataSeeded: false,
     })
-    ;(authService.switchVenueForStaff as jest.Mock).mockResolvedValue({ accessToken: 'access-real', refreshToken: 'refresh-real' })
+    ;(authService.switchVenueForStaff as jest.Mock).mockResolvedValue({
+      accessToken: 'access-real',
+      refreshToken: 'refresh-real',
+      sessionId: 'ses_nueva',
+    })
+    corteEn(null)
   })
 
   afterAll(() => {
@@ -207,6 +235,97 @@ describe('terminar el alta reemite la sesión con la sucursal real', () => {
     await completeV2Onboarding(buildReq({ isImpersonating: true }) as Request, res as unknown as Response, jest.fn() as NextFunction)
 
     expect(res.status).toHaveBeenCalledWith(201)
+    expect(authService.switchVenueForStaff).not.toHaveBeenCalled()
+    expect(res.cookie).not.toHaveBeenCalled()
+  })
+
+  it('V1 «ya estaba terminada» (reintento): también reemite con la sucursal existente', async () => {
+    ;(onboardingProgressService.getOnboardingProgress as jest.Mock).mockResolvedValue({
+      step2_onboardingType: 'REAL',
+      step3_businessInfo: { name: 'FriedBros' },
+      planActivationStatus: 'NONE',
+    })
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      completedAt: new Date(),
+      organization: { onboardingCompletedAt: new Date() },
+    })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(VENUE)
+
+    const res = buildRes()
+    await completeOnboarding(buildReq() as Request, res as unknown as Response, jest.fn() as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(authService.switchVenueForStaff).toHaveBeenCalledWith('user_1', 'org_1', 'venue_real')
+    expect(cookie(res, 'accessToken')?.[1]).toBe('access-real')
+  })
+
+  it('V2 con la sucursal provisional (el camino real de producción): reemite con ESA sucursal', async () => {
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue({ id: 'venue_provisional', slug: 'friedbros', status: 'ONBOARDING' })
+    ;(prisma.venue.update as jest.Mock).mockResolvedValue({ ...VENUE, id: 'venue_provisional' })
+    ;(venueCreationService.applyBusinessInfoToVenue as jest.Mock).mockResolvedValue(undefined)
+
+    const res = buildRes()
+    const next = jest.fn()
+    await completeV2Onboarding(buildReq() as Request, res as unknown as Response, next as NextFunction)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(venueCreationService.createVenueFromOnboarding).not.toHaveBeenCalled()
+    expect(authService.switchVenueForStaff).toHaveBeenCalledWith('user_1', 'org_1', 'venue_provisional')
+    expect(cookie(res, 'accessToken')?.[1]).toBe('access-real')
+  })
+
+  it('si cerró sus sesiones después de emitirse el token del alta, se cierra la sesión nueva y no hay cookie (Codex r1)', async () => {
+    corteEn(new Date(EMITIDO + 60_000)) // «cerrar todas mis sesiones» un minuto después
+
+    const res = buildRes()
+    const next = jest.fn()
+    await completeV2Onboarding(buildReq() as Request, res as unknown as Response, next as NextFunction)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(201) // el alta termina igual
+    expect(res.cookie).not.toHaveBeenCalled()
+    expect(revokeSession).toHaveBeenCalledWith('ses_nueva', 'sessions_revoked_during_onboarding')
+    expect(invalidateSession).toHaveBeenCalledWith('ses_nueva')
+  })
+
+  it('el corte que cae MIENTRAS se crea la sesión nueva también la cierra: se revisa después, no antes (Codex r2)', async () => {
+    ;(authService.switchVenueForStaff as jest.Mock).mockImplementation(async () => {
+      corteEn(new Date()) // otra pestaña corta justo ahora, entre la verificación de acceso y `createSession`
+      return { accessToken: 'access-real', refreshToken: 'refresh-real', sessionId: 'ses_nueva' }
+    })
+
+    const res = buildRes()
+    await completeV2Onboarding(buildReq() as Request, res as unknown as Response, jest.fn() as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(res.cookie).not.toHaveBeenCalled()
+    expect(revokeSession).toHaveBeenCalledWith('ses_nueva', 'sessions_revoked_during_onboarding')
+  })
+
+  it('un corte ANTERIOR al token del alta (cambió la contraseña y volvió a entrar) no impide reemitir', async () => {
+    corteEn(new Date(EMITIDO - 60_000))
+
+    const res = buildRes()
+    await completeV2Onboarding(buildReq() as Request, res as unknown as Response, jest.fn() as NextFunction)
+
+    expect(cookie(res, 'accessToken')?.[1]).toBe('access-real')
+    expect(revokeSession).not.toHaveBeenCalled()
+  })
+
+  it('una sesión que ya tenía sucursal real no se mueve (reintento desde otra sucursal, superadmin sin suplantar)', async () => {
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      completedAt: new Date(),
+      organization: { onboardingCompletedAt: new Date() },
+    })
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue(VENUE)
+
+    const res = buildRes()
+    await completeV2Onboarding(buildReq({ venueId: 'venue_otra' }) as Request, res as unknown as Response, jest.fn() as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(200)
     expect(authService.switchVenueForStaff).not.toHaveBeenCalled()
     expect(res.cookie).not.toHaveBeenCalled()
   })

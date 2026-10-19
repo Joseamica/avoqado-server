@@ -58,7 +58,7 @@ const esSinSucursal = (error: { statusCode?: number; message?: string } | undefi
 // El handler de `/me/access` vive dentro del router: se toma la última capa de la ruta (después del middleware de auth).
 const meAccess = (meRouter as any).stack.find((l: any) => l.route?.path === '/access').route.stack.at(-1).handle
 
-describe.each(['pending', undefined])('token sin sucursal real (venueId = %s)', venueId => {
+describe.each(['pending', 'pending-invitation', undefined])('token sin sucursal real (venueId = %s)', venueId => {
   it.each([
     ['GET /dashboard/tokens/status', tokenBudgetController.getStatus],
     ['GET /dashboard/tokens/history', tokenBudgetController.getHistory],
