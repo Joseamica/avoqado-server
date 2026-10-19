@@ -180,6 +180,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         },
         shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
         activityLog: { create: prisma.activityLog.create },
+        // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+        orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
         $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),

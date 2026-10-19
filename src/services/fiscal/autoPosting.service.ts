@@ -14,6 +14,7 @@ import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
 import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
 import logger from '../../config/logger'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -65,6 +66,11 @@ export interface GenerateResult {
   alreadyPosted: number
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
+  /**
+   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta y lo pagado con saldo—, porque su
+   * póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+   */
+  pendientesDeRevision: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
   cogsCents?: number
 }
@@ -81,7 +87,15 @@ interface PaymentRow {
   createdAt: Date
   merchantAccount: { fiscalConfig: { includeInAccounting: boolean } | null } | null
   ecommerceMerchant: { fiscalConfig: { includeInAccounting: boolean } | null } | null
-  order: (OrdenParaIva & { status: OrderStatus; orderNumber: string | null }) | null
+  /** Tarjetas de regalo: la marca del tender de sistema (un REFUND la hereda del cobro). */
+  tenderType?: { systemKind: string | null } | null
+  order:
+    | (OrdenParaIva & {
+        status: OrderStatus
+        orderNumber: string | null
+        items?: Array<RenglonParaIva & { giftCardId?: string | null }>
+      })
+    | null
 }
 
 /**
@@ -151,13 +165,48 @@ export function buildRefundLines(
 }
 
 /** ¿El pago es elegible para auto-postear? (espejo de las exclusiones del read-model de ingresos). */
-function isEligible(p: PaymentRow): boolean {
+export function isEligible(p: PaymentRow): boolean {
   if (p.type === PaymentType.TEST) return false // pagos de prueba no son contables
   if (p.type === PaymentType.ADJUSTMENT) return false // semántica ambigua → revisión manual
   if (p.method === PaymentMethod.CRYPTOCURRENCY) return false // no-MXN → manual (diferido)
   if (p.order && p.order.status === OrderStatus.CANCELLED) return false // orden cancelada → sin ingreso
   if (Math.abs(toCents(p.amount)) === 0 && Math.abs(toCents(p.tipAmount)) === 0) return false // nada que registrar
   return true
+}
+
+/**
+ * C4 (nota 1 del coordinador): todo lo de `WHERE_PAGO_CONTABILIZABLE` MENOS «orden no cancelada». Lo usa el listado del contador:
+ * una venta de tarjetas devuelta entera deja su `Order` en CANCELLED, y con esa cláusula la venta y su cancelación desaparecerían
+ * del listado (también de periodos que el contador ya registró a mano, que nunca vería el reverso).
+ */
+export const WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN = {
+  AND: [
+    { status: TransactionStatus.COMPLETED },
+    // NULL-safe: `type` es opcional y una fila vieja sin tipo cuenta como venta; `notIn` sola la descartaría (NOT IN con NULL).
+    { OR: [{ type: null }, { type: { notIn: [PaymentType.TEST, PaymentType.ADJUSTMENT] } }] },
+    { method: { not: PaymentMethod.CRYPTOCURRENCY } },
+    // «Nada que registrar»: monto y propina en cero. Las dos columnas son NOT NULL con 2 decimales: `= 0` ⇔ 0 centavos.
+    { NOT: { amount: 0, tipAmount: 0 } },
+  ],
+} satisfies Prisma.PaymentWhereInput
+
+/**
+ * B4 r1 (fix 3): en Prisma, lo mismo que el motor admite —su consulta (`COMPLETED`, orden no cancelada) más `isEligible`—. Va en `AND`
+ * para combinarse sin pisar el `OR` de otra marca: `{ venueId, createdAt, AND: [WHERE_PAGO_CONTABILIZABLE, WHERE_PAGO_PENDIENTE_…] }`.
+ * Una prueba de integración pasa las mismas filas por los dos y exige el mismo conjunto. El listado del contador (C4) usa la versión
+ * sin el estado de la orden (arriba).
+ */
+export const WHERE_PAGO_CONTABILIZABLE = {
+  AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { order: { status: { not: OrderStatus.CANCELLED } } }],
+} satisfies Prisma.PaymentWhereInput
+
+/** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */
+export function esPendienteDeRevisionContable(p: {
+  tenderType?: { systemKind: string | null } | null
+  order?: { items?: Array<{ giftCardId?: string | null }> } | null
+}): boolean {
+  if (isGiftCardTenderKind(p.tenderType?.systemKind)) return true
+  return (p.order?.items ?? []).some(it => !!it.giftCardId)
 }
 
 /**
@@ -177,6 +226,7 @@ export async function generatePoliciesForVenue(
     posted: 0,
     alreadyPosted: 0,
     skipped: 0,
+    pendientesDeRevision: 0,
   }
 
   const scope = await resolveScopeOrNull(venueId)
@@ -240,11 +290,15 @@ export async function generatePoliciesForVenue(
         // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
         merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
         ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+        // Tarjetas de regalo: la marca del tender de sistema.
+        tenderType: { select: { systemKind: true } },
         order: {
           select: {
             status: true,
             orderNumber: true,
             ...ordenParaIvaSelect,
+            // Tarjetas de regalo: la marca de cada renglón (mismos renglones, mismo tope, mismo orden que la póliza).
+            items: { ...ordenParaIvaSelect.items, select: { ...ordenParaIvaSelect.items.select, giftCardId: true } },
           },
         },
       },
@@ -274,6 +328,12 @@ export async function generatePoliciesForVenue(
     )
 
     for (const p of eligible) {
+      // Tarjetas de regalo (spec §7, fase 1): ni la venta de una tarjeta ni lo pagado con saldo se postean; el motor los trataría como
+      // venta con entrada a banco. Se cuentan y el contador los ve en «pendientes de revisión contable».
+      if (esPendienteDeRevisionContable(p)) {
+        base.pendientesDeRevision++
+        continue
+      }
       // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
       // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
       const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting

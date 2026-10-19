@@ -6,6 +6,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { aCentavos, capacidadRestante, comoJson, leerReparto, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
 import { RENGLON_PARA_REPARTO_SELECT, conservarDescuentoHistorico, filasDeLaOrden } from '../shared/repartoDescuentoTx'
 
@@ -113,6 +114,7 @@ export async function redeemStampReward(
     // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
     // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
     rechazarSiEsImportada(order)
+    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'premios de sellos')
     // 🔴 El dinero ya entró: meter un descuento después deja el cobro y la cuenta
     // discrepando, y el corte no cuadra al cerrar el turno.
     if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {

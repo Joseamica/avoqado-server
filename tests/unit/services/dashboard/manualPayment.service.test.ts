@@ -75,6 +75,13 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
   postCashSaleToDrawer: (...args: any[]) => postCashSaleToDrawerMock(...args),
 }))
 
+// R8 (tarjetas de regalo): el pago manual que salda una cuenta activa sus sobres con la MISMA transacción.
+const activarSobresMock = jest.fn().mockResolvedValue({ activated: [] })
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: any[]) => activarSobresMock(...a),
+}))
+
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
@@ -366,6 +373,18 @@ describe('manualPayment.service', () => {
       await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...pagoQueSalda, amount: '10' })
 
       expect(vales.cerrarSesionDeValesAlCerrarLaVenta).not.toHaveBeenCalled()
+    })
+
+    it('R8: el pago manual que salda la cuenta activa los sobres con la MISMA tx y sus renglones', async () => {
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(activarSobresMock).toHaveBeenCalledTimes(1)
+      expect(activarSobresMock.mock.calls[0][0]).toBe(txClient)
+      expect(activarSobresMock.mock.calls[0][1]).toEqual(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, items: ordenConProductos().items }),
+      )
     })
 
     it('aplicar el vale ocurre DESPUÉS del commit, no dentro de la transacción', async () => {

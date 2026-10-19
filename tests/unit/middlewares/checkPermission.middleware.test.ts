@@ -13,6 +13,7 @@ import { StaffRole } from '@prisma/client'
 import { checkPermission, checkAnyPermission, checkAllPermissions } from '@/middlewares/checkPermission.middleware'
 import * as permissionsLib from '@/lib/permissions'
 import prisma from '@/utils/prismaClient'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 // Mock dependencies
 jest.mock('@/utils/prismaClient', () => ({
@@ -45,6 +46,9 @@ jest.mock('@/utils/prismaClient', () => ({
     },
   },
 }))
+
+// A3 (cierre): la bitácora se espía para leer la ruta que escribe (fire-and-forget; nunca toca la base aquí).
+jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 
 jest.mock('@/lib/permissions', () => ({
   hasPermission: jest.fn(),
@@ -475,6 +479,49 @@ describe('checkPermission Middleware', () => {
       expect(mockNext).toHaveBeenCalled()
       expect(statusMock).not.toHaveBeenCalled()
       expect((mockReq as any).authContext.overrideAuthorizedBy).toBe('sv_manager')
+    })
+
+    describe('🔴 A3 (cierre): la ruta que se guarda va SIN query string (un código de tarjeta en la URL no llega a la base)', () => {
+      const CON_SECRETO = '/api/v1/mobile/venues/venue_123/gift-cards/lookup?code=K7QZ-ABCD-EFGH-JKMN-P'
+      const SIN_QUERY = '/api/v1/mobile/venues/venue_123/gift-cards/lookup'
+
+      it('override consumido: consumedRoute y la bitácora PERMISSION_OVERRIDE_USED', async () => {
+        ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+        ;(mockReq as any).headers = { 'x-permission-override': 'tok_abc' }
+        ;(mockReq as any).originalUrl = CON_SECRETO
+        ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
+
+        await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+        expect((prisma.permissionOverride.updateMany as jest.Mock).mock.calls[0][0].data.consumedRoute).toBe(`POST ${SIN_QUERY}`)
+        const usado = (logAction as jest.Mock).mock.calls.find(([e]) => e.action === 'PERMISSION_OVERRIDE_USED')?.[0]
+        expect(usado.data.path).toBe(SIN_QUERY)
+        expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toContain('K7QZ')
+      })
+
+      it('denegado: la bitácora PERMISSION_DENIED tampoco lleva la query', async () => {
+        ;(mockReq as any).originalUrl = CON_SECRETO
+
+        await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(statusMock).toHaveBeenCalledWith(403)
+        const negado = (logAction as jest.Mock).mock.calls.find(([e]) => e.action === 'PERMISSION_DENIED')?.[0]
+        expect(negado.data.path).toBe(SIN_QUERY)
+        expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toContain('K7QZ')
+      })
+
+      it('sin acceso al negocio: la bitácora de acceso cruzado tampoco lleva la query', async () => {
+        ;(mockReq as any).originalUrl = CON_SECRETO
+        ;(prisma.staffVenue.findUnique as jest.Mock).mockResolvedValue(null)
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(null)
+        ;(mockReq as any).params = { venueId: 'venue_ajeno' }
+
+        await checkPermission('orders:merge')(mockReq as Request, mockRes as Response, mockNext)
+
+        expect(statusMock).toHaveBeenCalledWith(403)
+        expect(JSON.stringify((logAction as jest.Mock).mock.calls)).not.toContain('K7QZ')
+      })
     })
 
     it('el consumo exige token + venue + permiso, sin usar y sin expirar', async () => {

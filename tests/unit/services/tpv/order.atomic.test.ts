@@ -12,6 +12,14 @@ jest.mock('@/services/modules/module.service', () => ({
 jest.mock('@/services/serialized-inventory/serializedInventory.service', () => ({
   serializedInventoryService: { scan: jest.fn(), register: jest.fn(), buildOrderItemData: jest.fn(), markAsSold: jest.fn() },
 }))
+// Tarjetas de regalo: este doble de transacción no modela sobres; la guardia de cuentas de tarjetas tiene su propia
+// suite (tests/unit/services/giftCards/cuentaDeTarjetas.test.ts y la integración de la cuenta).
+jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({
+  ...jest.requireActual('@/services/giftCards/cuentaDeTarjetas'),
+  rechazarSiEsCuentaDeTarjetas: jest.fn().mockResolvedValue(undefined),
+  esCuentaDeTarjetasEnTx: jest.fn().mockResolvedValue(false),
+  desactivarSobresPendientesDeCuentaEnTx: jest.fn().mockResolvedValue({ desactivados: [] }),
+}))
 import prisma from '@/utils/prismaClient'
 import {
   addItemsToOrder,

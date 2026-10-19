@@ -584,6 +584,17 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'creditPacks:redeem': ['creditPacks:redeem', 'creditPacks:read', 'customers:read'],
 
   // ===========================
+  // TARJETAS DE REGALO (fase 1a, spec §9)
+  // ===========================
+  // Dos ejes, como creditPacks: OPERAR en el mostrador (vender una tarjeta en su cuenta propia, cobrar con saldo) y
+  // ADMINISTRAR (ajustar, bloquear, reponer el código, cancelar una venta). Administrar NO concede vender ni cobrar.
+  // Ninguno arrastra `payments:create`: cobrar la cuenta de tarjetas con dinero se gatea en su propia ruta.
+  'giftCards:read': ['giftCards:read'],
+  'giftCards:sell': ['giftCards:sell', 'giftCards:read'],
+  'giftCards:redeem': ['giftCards:redeem', 'giftCards:read'],
+  'giftCards:manage': ['giftCards:manage', 'giftCards:read'],
+
+  // ===========================
   // ESTIMATES / PRESUPUESTOS
   // ===========================
   // Cotizar NO es tomar comanda: un presupuesto no mueve dinero ni abre cuenta. Con
@@ -959,6 +970,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'creditPacks:read', // Ver el catálogo de paquetes y el saldo de créditos del cliente
     'creditPacks:sell', // Vender un paquete en persona (cobrado por el POS)
     'creditPacks:redeem', // Descontar una sesión/clase ya pagada
+    // Tarjetas de regalo (spec §9): el mostrador VENDE, COBRA con saldo y CONSULTA; ajustar, bloquear y cancelar quedan en
+    // MANAGER+ (`giftCards:manage`). El mesero NO: el spec sólo se las da al cajero.
+    'giftCards:read',
+    'giftCards:sell',
+    'giftCards:redeem',
     'referral:read', // Referral Program: read-only access
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
@@ -1099,6 +1115,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
     'referral:read', // Referral Program: read-only access
     'referral:override-existing-customer', // Referral Program: can override existing-customer guard
     'referral:fulfill-courtesy', // Referral Program: can mark a FREE_PRODUCT courtesy as delivered
@@ -1206,6 +1223,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
     'marketing:*', // Fase 0: aviso de privacidad + (Fase 1) campañas de correo
     // Referral Program (full management except no SUPERADMIN-only powers)
     'referral:read',
@@ -1357,6 +1375,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
     'marketing:*', // Fase 0: aviso de privacidad + (Fase 1) campañas de correo
     // Referral Program (full management)
     'referral:read',
@@ -2038,6 +2057,9 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'creditPacks:sell',
     'creditPacks:redeem',
   ],
+  // Tarjetas de regalo (fase 1a). `sell` y `redeem` son de MOSTRADOR; `manage` (ajustar, bloquear, reponer, cancelar una
+  // venta) es de gerencia. Sin esta entrada `giftCards:*` no se expande y el editor de roles no puede asignarlos.
+  giftCards: ['giftCards:read', 'giftCards:sell', 'giftCards:redeem', 'giftCards:manage'],
   // Referral Program (was missing from the catalog entirely — pre-existing
   // CATALOG_GAP for the 5 perms below; adding this key fixes all of them
   // as a side effect of registering the new `referral:fulfill-courtesy`).

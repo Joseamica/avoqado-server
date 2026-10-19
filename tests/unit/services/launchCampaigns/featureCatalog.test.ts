@@ -3,10 +3,10 @@ import { listFeatureCatalog, featureCatalogQuery } from '@/services/launchCampai
 import { FREE_TIER_CODES, PREMIUM_ONLY_CODES } from '@/services/access/basePlan.service'
 
 describe('Catálogo completo para planes y funciones', () => {
-  it('representa las 43 capacidades, sin inventar precios ni revivir funciones retiradas', () => {
-    expect(FEATURE_CATALOG).toHaveLength(43)
-    expect(new Set(FEATURE_CATALOG.map(f => f.id)).size).toBe(43)
-    expect(FEATURE_CATALOG.filter(f => f.featureCode)).toHaveLength(37)
+  it('representa las 44 capacidades, sin inventar precios ni revivir funciones retiradas', () => {
+    expect(FEATURE_CATALOG).toHaveLength(44)
+    expect(new Set(FEATURE_CATALOG.map(f => f.id)).size).toBe(44)
+    expect(FEATURE_CATALOG.filter(f => f.featureCode)).toHaveLength(38)
     expect(FEATURE_CATALOG.some(f => f.featureCode === 'ADVANCED_ANALYTICS')).toBe(false)
     expect(FEATURE_CATALOG.every(f => !('price' in f) && !('monthlyPrice' in f))).toBe(true)
   })
@@ -26,10 +26,10 @@ describe('Catálogo completo para planes y funciones', () => {
 
   it('permite recorrer el total en páginas estables sin duplicar ni ocultar registros', () => {
     const first = listFeatureCatalog({ pageSize: 12 })
-    expect(first.total).toBe(43)
+    expect(first.total).toBe(44)
     expect(first.totalPages).toBe(4)
     const ids = [1, 2, 3, 4].flatMap(page => listFeatureCatalog({ page, pageSize: 12 }).items.map(f => f.id))
-    expect(new Set(ids).size).toBe(43)
+    expect(new Set(ids).size).toBe(44)
     expect(listFeatureCatalog({ page: 5, pageSize: 12 }).items).toEqual([])
     expect(listFeatureCatalog({}).catalogVersion).toBe(first.catalogVersion)
   })
@@ -39,7 +39,7 @@ describe('Catálogo completo para planes y funciones', () => {
     expect(page.items.map(f => f.featureCode)).toEqual(['CFDI'])
     expect(page.total).toBe(1)
     expect(listFeatureCatalog({ q: 'AREA_TICKETS' }).items[0].featureCode).toBe('AREA_TICKETS')
-    expect(listFeatureCatalog({ category: 'customers', pageSize: 1 }).total).toBe(5)
+    expect(listFeatureCatalog({ category: 'customers', pageSize: 1 }).total).toBe(6)
     expect(listFeatureCatalog({ q: '<script>' }).total).toBe(0)
   })
 
@@ -53,6 +53,6 @@ describe('Catálogo completo para planes y funciones', () => {
   it('acepta parámetros HTTP y limita el catálogo también fuera del controller', () => {
     expect(featureCatalogQuery.parse({ page: '2', pageSize: '12' })).toMatchObject({ page: 2, pageSize: 12 })
     expect(listFeatureCatalog({}).items).toHaveLength(25)
-    expect(listFeatureCatalog({ pageSize: 100 }).items).toHaveLength(43)
+    expect(listFeatureCatalog({ pageSize: 100 }).items).toHaveLength(44)
   })
 })

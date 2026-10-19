@@ -7,6 +7,7 @@ import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
 import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
 import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -115,6 +116,7 @@ async function applyPromotionInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'promociones')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'REFUNDED') {
     throw new BadRequestError('A una cuenta ya pagada no se le pueden agregar promociones.')
   }
@@ -285,6 +287,7 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
     // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
     // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
     rechazarSiEsImportada(found.order)
+    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de promoción')
     // De una cuenta pagada no se borra una venta: eso es un reembolso, con su
     // rastro. Borrar líneas históricas dejaría el corte sin cuadrar.
     if (found.order.paymentStatus === 'PAID' || found.order.paymentStatus === 'REFUNDED') {

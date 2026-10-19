@@ -369,6 +369,8 @@ describe('deleteVenueData — lo que bloquea el borrado del VENUE se quita antes
     'upsellAcceptance',
     'serializedItem',
     'cfdi', // D2 del 7a: Cfdi.venueId es RESTRICT y no cae en cascada con el venue
+    'giftCardActivity', // Tarjetas de regalo (E2): la libreta apunta al sobre con RESTRICT
+    'giftCard', // y el sobre al venue con RESTRICT: ninguno cae en cascada con el venue
   ] as const
 
   it.each(BLOQUEADORES_DEL_VENUE)('borra %s ANTES que el venue', async modelo => {
@@ -397,6 +399,23 @@ describe('deleteVenueData — lo que bloquea el borrado del VENUE se quita antes
 
     expect(prismaMock[hijo].deleteMany).toHaveBeenCalled()
     expect(prismaMock[hijo].deleteMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock[padre].deleteMany.mock.invocationCallOrder[0])
+  })
+
+  it('tarjetas de regalo (E2): la transacción declara el borrado del negocio ANTES de borrar la libreta, y la libreta antes que los sobres', async () => {
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    mockCascadeAlreadyDeletedSession()
+
+    await cleanupExpiredLiveDemos()
+
+    const declaracion = prismaMock.$executeRaw.mock.calls.findIndex(
+      (c: unknown[]) => Array.isArray(c[0]) && (c[0] as string[]).join('?').includes("SET LOCAL avoqado.borrado_de_negocio = 'on'"),
+    )
+    expect(declaracion).toBeGreaterThanOrEqual(0)
+    const orden = (fn: jest.Mock, i = 0) => fn.mock.invocationCallOrder[i]
+    expect(orden(prismaMock.$executeRaw, declaracion)).toBeLessThan(orden(prismaMock.giftCardActivity.deleteMany))
+    expect(orden(prismaMock.giftCardActivity.deleteMany)).toBeLessThan(orden(prismaMock.giftCard.deleteMany))
+    expect(prismaMock.giftCardActivity.deleteMany).toHaveBeenCalledWith({ where: { venueId: 'venue-1' } })
+    expect(prismaMock.giftCard.deleteMany).toHaveBeenCalledWith({ where: { venueId: 'venue-1' } })
   })
 })
 

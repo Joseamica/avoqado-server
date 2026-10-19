@@ -10,7 +10,9 @@ import type { AutomaticServiceChargeCapture } from './service-charge.mobile.serv
  * - Order Payment: Create order first, then pay via TPV
  */
 
+import { createHash } from 'crypto'
 import { OrderSource, OrderType, PaymentFundsFlow, PaymentMethod, Prisma } from '@prisma/client'
+import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, PaymentType } from '@prisma/client'
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
@@ -18,12 +20,12 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { resolveTenderForCharge, computeTenderCommission } from '../dashboard/tenderType.dashboard.service'
+import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
 import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
-import { enqueuePaymentCommissionInTx, enqueuePaymentEffect } from '../tpv/paymentEffects.service'
+import { enqueuePaymentCommissionInTx, enqueuePaymentEffect, enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -54,6 +56,7 @@ import {
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
+  type CapturedPaymentChannel,
 } from '../shared/paymentShiftClaim'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
@@ -72,6 +75,21 @@ import {
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiLaCuentaTieneVales } from '../shared/cuentaConVales'
+import { desactivarSobresPendientesDeCuentaEnTx, esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import {
+  activarSobresDeCuentaPagadaEnTx,
+  canjearSobresEnTx,
+  lockGiftCardsForUpdate,
+  rechazarSiRegresaASobreDesactivado,
+  revertirCanjeEnTx,
+  saldoUsable,
+  sobresDelCanje,
+  type LockedGiftCard,
+} from '../giftCards/giftCardLedger'
+import { hashGiftCardCode, normalizeGiftCardCode } from '../giftCards/giftCardCode'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import { MAX_SOBRES_POR_CUENTA, formatoPesos } from '../giftCards/giftCardLimits'
+import { ensureGiftCardTender, isGiftCardTenderKind, resolveGiftCardTenderForChargeInTx } from '../giftCards/giftCardTender'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
@@ -1802,6 +1820,7 @@ export async function applyOrderDiscountInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede descontar una orden ya pagada')
   }
@@ -1907,6 +1926,7 @@ export async function removeOrderDiscountInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede modificar una orden ya pagada')
   }
@@ -2006,6 +2026,7 @@ export async function splitOrderItemsInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'divisiones de cuenta')
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
     throw new BadRequestError('La cuenta ya está cerrada')
   }
@@ -2186,6 +2207,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'divisiones de cuenta')
   if (['COMPLETED', 'CANCELLED', 'DELETED'].includes(source.status)) {
     throw new BadRequestError('La cuenta ya está cerrada')
   }
@@ -2424,6 +2446,8 @@ export async function mergeOrdersInTransaction(
   // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
   rechazarSiEsImportada(freshSource)
   rechazarSiEsImportada(freshTarget)
+  await rechazarSiEsCuentaDeTarjetas(tx, sourceOrderId, 'uniones con otra cuenta')
+  await rechazarSiEsCuentaDeTarjetas(tx, targetOrderId, 'uniones con otra cuenta')
   if (freshSource._count.items === 0) {
     throw new BadRequestError('La cuenta origen no tiene artículos')
   }
@@ -2885,6 +2909,624 @@ async function liberarMesaSiQuedoSaldada(venueId: string, tableId: string | null
   }
 }
 
+/**
+ * La cuenta como la ve el núcleo justo después de tomar su candado (relectura + pagos previos, paso 3 del cobro).
+ * De SÓLO LECTURA (A8, ruling 4): el gancho recibe los objetos vivos que el núcleo usa después —`fresh.version` en la
+ * CAS, `previousPayments` en la aritmética—; un gancho que los mutara cambiaría el cobro sin que nadie lo viera.
+ */
+export interface CuentaBajoCandado {
+  readonly fresh: Readonly<{
+    id: string
+    orderNumber: string
+    paymentStatus: PaymentStatus
+    subtotal: Prisma.Decimal
+    discountAmount: Prisma.Decimal
+    serviceChargeAmount: Prisma.Decimal
+    status: OrderStatus
+    contratoDePrecio: ContratoDePrecio
+    taxAmount: Prisma.Decimal
+    originSystem: OriginSystem
+    version: number
+    areaTicketCode: string | null
+    tableId: string | null
+  }>
+  readonly previousPayments: ReadonlyArray<Readonly<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: PaymentType | null }>>
+}
+
+/** Lo que el núcleo recibe ya resuelto FUERA de la transacción (una caída de settings jamás revierte un cobro). */
+export interface AbonoEnTxContexto {
+  venueId: string
+  orderId: string
+  effectiveStaffId: string | undefined
+  marcarCocina: boolean
+  /** La orden tiene sesión de vales v7: el punto de la llave (R8) toma antes su jerarquía sesión → vales → Order. */
+  conSesionDeVales: boolean
+  /**
+   * 🔴 R8: el rechazo del personal (`validateStaffVenue`) que espera a la llave bajo el candado: un reintento simultáneo recibe su
+   * cobro, no un 400 porque desactivaron al cajero entre los dos. `null` si el personal es válido (o el llamador ya rechazó fuera).
+   */
+  rechazoDelPersonal: BadRequestError | null
+}
+
+export interface AbonoEnTxEntrada {
+  /** Lo SOLICITADO, en centavos enteros (la frontera de `payCashOrder`). */
+  amountCents: number
+  tipCents: number
+  method: NonNullable<CashPaymentInput['method']>
+  idempotencyKey?: string
+  isOfflineReplay?: boolean
+  externalSource?: string
+  /** `ref`: lo resuelve `resolveTenderForCharge` (que rechaza los tenders de sistema). `resuelto`: ya lo resolvió el llamador. */
+  tender: { ref: { id: string; revision: number } } | { resuelto: ResolvedTenderCharge } | null
+  /** Corre bajo el candado de la Order, con la cuenta releída y sus pagos previos, ANTES de cualquier escritura. */
+  trasCandadoDeOrden?: (tx: Prisma.TransactionClient, cuenta: CuentaBajoCandado) => Promise<void>
+  dentroDeLaTx?: CashPaymentInput['dentroDeLaTx']
+  /**
+   * A quién atribuye la auditoría este abono (A8, ruling 3): `turno` va a `PAYMENT_WITHOUT_SHIFT.data.channel` y al aviso
+   * de cobro sobre una cuenta con reembolsos; `reapertura`, a `ORDER_REOPENED_BY_CAPTURED_PAYMENT.data.canal`. Sin él,
+   * los de `payCashOrder` de siempre, byte por byte (`'payCashOrder'` y `'payCashOrder:cola'` / `'payCashOrder:registro'`).
+   */
+  canal?: { turno: CapturedPaymentChannel; reapertura: string }
+  /** R2-1 (S1/S2): la cola de Android/Windows ≤ 2.23 (`CashPaymentInput.colaConDefectoH1`). */
+  colaConDefectoH1?: boolean
+  /** R6-3: la propiedad de mesa, que el núcleo vuelve a revisar bajo el candado (`CashPaymentInput.propiedadDeMesa`). */
+  propiedadDeMesa?: CashPaymentInput['propiedadDeMesa']
+}
+
+export interface AbonoEnTx {
+  /** Caja OPEN al cobrar (leída en la misma transacción); el movimiento de efectivo va a ésa o a ninguna. */
+  cajaAlCobrarId: string | null
+  newPayment: any
+  /** El `paymentStatus` que se GUARDÓ (una venta cerrada conserva el suyo: REFUNDED sigue REFUNDED). */
+  paymentStatus: 'PAID' | 'PARTIAL' | 'REFUNDED'
+  /** Este cobro corre los efectos de saldar (inventario, lealtad, comanda, referido, mesa): la saldó, o recupera el saldado de un vale. */
+  isFullyPaid: boolean
+  /** S1: la venta ya estaba cerrada (PAID/REFUNDED) y recibió dinero ya capturado; se conservó cerrada (`estadoDeCobroAlRecibirDinero`). */
+  ventaCerrada: boolean
+  areaTicketOrder: boolean
+  areaTicketSessionId?: string
+  tableId?: string | null
+  postingId?: string | null
+  /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
+  aplicadoCents: number
+  cambioCents: number
+  /** Base de puntos en pesos, sin propinas. */
+  loyaltyBase: number
+  balance: OrderBalanceSnapshot
+  /** El tender que usó el cobro: lo leen cajón, socket y respuesta FUERA de la transacción. */
+  tenderResuelto: ResolvedTenderCharge | null
+  /** R6-3: la mesa resultó ajena hasta la relectura bajo el candado y el dinero ya capturado se registró (rastro de R2-6). */
+  mesaAjena: { ownerId: string; ownerName: string } | null
+}
+
+/**
+ * El núcleo del abono (pasos 1–21 de hechos A § 1.3), extraído de `payCashOrder` SIN cambiar una regla (Tarea A7).
+ * Recibe la transacción del llamador y no abre otra. Lo usan `payCashOrder` (efectivo, registro manual y la cola sin red
+ * `PAY_CASH`) y `payGiftCardBalanceOnOrder` (cobro con saldo). Jerarquía de candados: vales v7 → Order → (gancho) → Shift.
+ *
+ * `reconciliationEnabled` va como parámetro SUELTO, no dentro de `ctx`: la guardia AST de turnos
+ * (`paymentShiftClaim.callers.guard.test.ts`) sólo acepta el gate de la auditoría si lo puede seguir, de llamada en
+ * llamada, hasta un `await resolvePaymentShiftReconciliationEnabled(…)`, y sigue parámetros posicionales, no propiedades
+ * de un objeto. Cada llamador lo resuelve FUERA de la transacción, como siempre.
+ */
+export async function registrarAbonoEnTx(
+  tx: Prisma.TransactionClient,
+  ctx: AbonoEnTxContexto,
+  entrada: AbonoEnTxEntrada,
+  reconciliationEnabled: boolean,
+): Promise<AbonoEnTx> {
+  // Los mismos nombres que tenía el cuerpo dentro de `payCashOrder`: lo de abajo se movió tal cual.
+  const { venueId, orderId, effectiveStaffId, marcarCocina } = ctx
+  const amount = entrada.amountCents
+  const tip = entrada.tipCents
+  const paymentMethod = entrada.method
+  const amountSolicitadoDecimal = amount / 100
+  const tipDecimal = tip / 100
+  const input = {
+    idempotencyKey: entrada.idempotencyKey,
+    isOfflineReplay: entrada.isOfflineReplay,
+    externalSource: entrada.externalSource,
+    dentroDeLaTx: entrada.dentroDeLaTx,
+    tenderTypeId: entrada.tender && 'ref' in entrada.tender ? entrada.tender.ref.id : undefined,
+    tenderRevision: entrada.tender && 'ref' in entrada.tender ? entrada.tender.ref.revision : undefined,
+    colaConDefectoH1: entrada.colaConDefectoH1,
+    propiedadDeMesa: entrada.propiedadDeMesa,
+  }
+  // Tarea A8 (ruling 3): quién registra el abono en la auditoría. Sin `canal`, `payCashOrder` como siempre.
+  const canalDeTurno: CapturedPaymentChannel = entrada.canal?.turno ?? 'payCashOrder'
+  const canalDeReapertura = entrada.canal?.reapertura ?? (input.isOfflineReplay ? 'payCashOrder:cola' : 'payCashOrder:registro')
+  // Cierre de tarjetas: el cobro con saldo es el único que llega con el tender ya resuelto (`resuelto`).
+  const cobroConSaldo = entrada.tender != null && 'resuelto' in entrada.tender
+  // 🔴 R2-1: la cola de Android/Windows ≤ 2.23 (H1) manda el TOTAL de la cuenta; para ella, el cobro de antes de S1/S2.
+  const conH1 = input.isOfflineReplay === true && input.colaConDefectoH1 === true
+
+  // R6-3: la mesa resultó ajena BAJO el candado y entró dinero ya capturado ⇒ se registra con el mismo rastro de R2-6 (post-commit,
+  // `mesaAjena` del resultado).
+  let mesaAjenaBajoCandado: { ownerId: string; ownerName: string } | null = null
+  // 🔴 R8 — EL PUNTO ÚNICO DE LA LLAVE. Primero los candados (vales: sesión → vales → Order, la jerarquía de siempre; sin vales,
+  // Order) y, ya con ellos, la llave decide ANTES que cualquier regla de estado que pueda cambiar entre un intento y su
+  // reintento: catálogo de tipos de pago, venta cerrada o cancelada, saldo, sesión de vales, propiedad de mesa, personal.
+  //   · un cobro COMPLETADO de esta orden ⇒ sale por la red de la carrera (`CobroYaRegistrado`) y responde como la primera vez;
+  //   · un intento FAILED, una devolución o una llave de otra orden ⇒ 409 `IDEMPOTENCY_KEY_REUSED` (R5-2);
+  //   · sin pago con la llave ⇒ cobro nuevo: siguen TODAS las reglas de abajo, en su orden.
+  // Bajo estos candados nadie más registra esta llave en esta orden, así que las relecturas que iban junto a cada rechazo
+  // (R6-2 ×2, R6-3, Codex r13 #2 y R7-2 en la sesión de vales) quedaron subsumidas aquí.
+  const areaTicketPayment = await import('./areaTicketV7.mobile.service')
+  // La sesión de vales nace con la orden (se materializan juntas): la lectura de arriba basta para saber si hay jerarquía.
+  if (ctx.conSesionDeVales) await areaTicketPayment.lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+  await lockExistingOrderForPayment(tx, { venueId, orderId })
+  // Cierre de tarjetas (merge con R8): el cobro con saldo resuelve su llave él mismo —consulta rápida con `mismoCobro` y, ante
+  // CUALQUIER error, la ganadora por la llave (r1 A-2)—; aquí no se le aplica R5-2, como antes del núcleo compartido.
+  if (!cobroConSaldo) {
+    await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey, soloCobroCompletado: true })
+  }
+  if (ctx.rechazoDelPersonal) throw ctx.rechazoDelPersonal
+
+  // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
+  // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya
+  // capturada no produjo efectivo para devolver: recortarla escondería dinero real y rompería la conciliación) y si se admite
+  // sobre una cuenta cancelada (Tarea 6a: depende de si es efectivo de cajón).
+  const resolvedTender =
+    entrada.tender && 'resuelto' in entrada.tender
+      ? entrada.tender.resuelto
+      : input.tenderTypeId != null && input.tenderRevision != null
+        ? await resolveTenderForCharge(venueId, input.tenderTypeId, input.tenderRevision, tx, input.isOfflineReplay ? 'replay' : 'online')
+        : null
+  const effectiveMethod = resolvedTender?.method ?? paymentMethod
+  const fundsFlow =
+    resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
+  const countsAsDrawerCash = paymentCountsAsDrawerCash({
+    method: effectiveMethod,
+    fundsFlow,
+    tenderTypeId: resolvedTender?.tenderTypeId ?? null,
+    tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
+  })
+
+  // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
+  // puede no cobrar—: sobre una cancelada ⇒ 400 con el texto del founder. Lo ya capturado (la cola; en vivo, una tarjeta ajena
+  // o una transferencia ya hechas) nunca se rechaza por la cancelación: reabre una cuenta de Avoqado (una externa, sólo cuando
+  // hoy salía de CANCELADA; Codex r13 #1). Lo ya capturado tampoco se recorta al saldo de hoy (S2) ni se rechaza sobre una venta
+  // ya cerrada (S1). Vales: su sesión decide.
+  const cobroNuevo = esCobroNuevo({ enVivo: !input.isOfflineReplay, efectivoDeCajon: countsAsDrawerCash })
+
+  // Vales v7: las guardas de la sesión y su intento (los candados ya los tiene esta transacción: son reentrantes).
+  // Para una orden normal devuelve null y el comportamiento queda idéntico.
+  const lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
+    venueId,
+    orderId,
+    idempotencyKey: input.idempotencyKey,
+    amount: new Prisma.Decimal(amountSolicitadoDecimal),
+    method: paymentMethod,
+    // 🔴 R12-1 / R13-1: lo ya capturado —la cola sin red, o en vivo una terminal ajena o una transferencia— no recibe 409 de la
+    // sesión por su estado (cerrada, en conciliación o cancelada), como en la TPV (`cobroNuevo !== true`). El efectivo de cajón
+    // en vivo sigue siendo cobro NUEVO. Cierre de tarjetas (punto 17): el cobro con saldo también (su gancho lo dice: «un cobro con
+    // saldo es un cobro NUEVO»); hoy es el único que llega con el tender ya resuelto (`resuelto`). Inalcanzable hoy —el cobro con
+    // saldo rechaza las ventas con vales—, pero falla CERRADO como antes del núcleo compartido.
+    dineroCapturado: !cobroNuevo && !cobroConSaldo,
+  })
+  // Order ya está bloqueada (arriba, antes del punto de la llave): lo siguiente conserva Order → Payment (si aplica) → Shift.
+
+  // 1️⃣ RELECTURA DENTRO DE LA TRANSACCIÓN. Esta es la lectura que manda: la de
+  //    arriba pudo quedar vieja mientras validábamos staff y turno.
+  const fresh = await tx.order.findUnique({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      paymentStatus: true,
+      subtotal: true,
+      discountAmount: true,
+      serviceChargeAmount: true,
+      // P12 (Codex r2, r5): el saldo suma el IVA que va aparte y una cancelada no lo debe; sin estas tres el cobro
+      // móvil daba por saldada con $100 una cuenta de $100 + $16.
+      status: true,
+      contratoDePrecio: true,
+      taxAmount: true,
+      // Tarea 6a: una cancelada de Avoqado se reabre con cualquier dinero ya capturado; una externa, sólo cuando hoy salía
+      // de CANCELADA (Codex r12 #5, r13 #1).
+      originSystem: true,
+      version: true,
+      areaTicketCode: true,
+      tableId: true,
+      // R6-3: la propiedad de mesa, releída bajo el candado.
+      servedById: true,
+      servedBy: { select: { firstName: true, lastName: true } },
+    },
+  })
+  if (!fresh) {
+    throw new NotFoundError('Order not found')
+  }
+
+  // 🔴 R6-3 (Codex r5 #3): la propiedad de mesa otra vez, bajo el candado (la de antes pudo quedar vieja: una reasignación usa
+  // este mismo candado). Misma regla que el middleware: mostrador, sin dueño o propia ⇒ sigue; ajena sin override ⇒ el cobro
+  // NUEVO recibe el mismo 403 sin crear nada; el dinero ya capturado (> $0) se registra con el rastro de R2-6.
+  // 🔴 R7-1 (Codex r6 #1): «ya capturado» es la MISMA clasificación de arriba (`cobroNuevo`), no la marca de replay: una transferencia,
+  // una tarjeta externa, OTHER o un tipo con fondos externos registrados en vivo ya son dinero recibido.
+  const propiedad = input.propiedadDeMesa
+  if (propiedad && fresh.tableId && fresh.servedById && fresh.servedById !== propiedad.userId && !(await propiedad.puedeCobrarAjena())) {
+    const dueno = {
+      ownerId: fresh.servedById,
+      ownerName: fresh.servedBy ? `${fresh.servedBy.firstName} ${fresh.servedBy.lastName}`.trim() : 'otro mesero',
+    }
+    if (!cobroNuevo && hayDineroQueSeGuarda(amount, tip)) {
+      mesaAjenaBajoCandado = dueno
+    } else {
+      throw new MesaAjenaSoloRecuperacion(dueno)
+    }
+  }
+
+  // 2️⃣ VALIDACIÓN DENTRO DE LA TRANSACCIÓN (era el bug: estaba fuera). Sobre una venta CERRADA (PAID o REFUNDED) sólo se
+  // rechaza el cobro NUEVO —la persona todavía tiene el dinero en la mano— o un $0. 🔴 S1: lo ya capturado (la cola sin red, una
+  // tarjeta ajena ya aprobada) se registra: rechazarlo dejaba $200 en el cajón y $100 en la base. La venta se queda cerrada.
+  // R2-1: la cola con H1 conserva el guard de antes (sólo PAID; REFUNDED pierde la CAS de abajo ⇒ 409, como antes).
+  // (Un reintento con la llave ya cobrada no llega aquí: lo devolvió el punto de la llave, R8.)
+  // Cierre de tarjetas (merge con S1): el cobro con saldo es un cobro NUEVO (su gancho y el punto 17): sobre una venta cerrada
+  // se rechaza, como antes del núcleo compartido; nunca se descuenta saldo para una venta que ya no debe.
+  if (conH1 ? fresh.paymentStatus === 'PAID' : esVentaCerrada(fresh.paymentStatus) && (cobroNuevo || cobroConSaldo || amount + tip === 0)) {
+    throw new BadRequestError('Order is already paid')
+  }
+
+  // 3️⃣ Suma acumulada de pagos previos — split-the-bill. Leída aquí dentro
+  //    para que refleje al ganador de una carrera anterior.
+  //
+  // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
+  // `type: REFUND` colgado de la MISMA orden, y sin ese campo la aritmética
+  // no lo puede distinguir de un cobro. Se leen TODOS los COMPLETED (sin
+  // filtrar por `type` en la consulta) porque la función pura necesita los
+  // REFUND para reportar `refundState` — filtrarlos aquí los escondería.
+  const previousPayments = await tx.payment.findMany({
+    where: { orderId, status: 'COMPLETED' },
+    select: { amount: true, tipAmount: true, type: true },
+  })
+
+  // Tarea A7: el cobro con saldo bloquea aquí sus sobres (Order → sobres → turno) y valida el monto contra el saldo.
+  // En `payCashOrder` no viene: no cambia nada.
+  await entrada.trasCandadoDeOrden?.(tx, { fresh, previousPayments })
+
+  // 🔴 La aritmética canónica, ya no una copia local en FLOAT.
+  //
+  // Esta función se extrajo justo de aquí y este camino se había quedado
+  // con su copia. Volver a llamarla cierra dos cosas de golpe: la deriva
+  // entre canales, y el defecto que este trabajo ataca — un reembolso NO
+  // reabre saldo, porque `computeOrderBalance` excluye los `type: REFUND`
+  // de lo pagado y los lleva en su propio carril (`refundState`).
+  //
+  // Las reglas que ya aplicaba y siguen intactas (hay tests que las fijan):
+  // mercancía clampada a 0 ANTES de sumar cargos y propina —un
+  // `discountAmount` mayor que el subtotal existe de verdad en la base y
+  // sin el clamp la venta escribía un `Order.total` NEGATIVO que RESTA del
+  // corte del día (ORD-1779465117373, 2026-08-09)—, el cargo por servicio
+  // dentro del total, y la tolerancia de un centavo para darla por saldada.
+  // Lo único que cambia es que la suma va en `Decimal` y no en float.
+  // 🔴 Un cobro MAYOR al saldo no es una venta mayor: es CAMBIO. Medido el
+  // 2026-09-01: `amount: 3000` sobre una cuenta de $25 registraba un Payment de
+  // $30.00 (y `999999999999`, uno de $9,999,999,999.99) e inflaba ventas y
+  // VenueTransaction. La app manda siempre el total exacto y calcula el cambio
+  // en el aparato, así que esto sólo lo abre un cliente raro por API — por eso
+  // el aviso de abajo. Se registra como máximo lo que la cuenta DEBE (sin
+  // propina: la propina va aparte y no se toca) y el resto regresa en la
+  // respuesta como `changeCents`. El pago manual del dashboard rechaza el
+  // exceso con 400; aquí no se bloquea porque el dinero sí entró al cajón.
+  // (El medio y `cobroNuevo` se resuelven arriba, antes de la sesión de vales: R13-1.)
+  if (cobroNuevo && claseDeEstado(fresh.status) === 'CANCELADA') {
+    rechazarCobroNuevoSobreCancelada(fresh.status)
+  }
+  // Codex r13 #1: ¿lo cobrado cubre lo que la cuenta debe TAL COMO ESTÁ? Es lo que hoy decide el cierre. Con el importe bruto:
+  // el recorte al saldo (abajo) da el mismo `isFullyPaid`.
+  const cubreComoCancelada = computeOrderBalance(fresh, [
+    ...previousPayments,
+    { amount: amount / 100, tipAmount: tipDecimal, type: 'REGULAR' },
+  ]).isFullyPaid
+  // El `staffId` ya está validado contra el negocio (`validateStaffVenue`): la bitácora lo amarra por FK y un id inválido
+  // revertiría el cobro. Vales: lo que los excluye es la SESIÓN v7 (`lockedAreaCheckout`): su finalización decide y
+  // rechaza una orden cancelada (409 `CHECKOUT_ORDER_NOT_PAYABLE`, todo se revierte). NO `areaTicketCode`: ése sólo lo
+  // escriben los vales v6, que no tienen sesión y se cobran como cualquier cuenta (revisión de 6a-2, I-1).
+  // 🔴 R2-2 (R8-1): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED leída bajo el candado), aunque esté cancelada:
+  // se registra el dinero y queda cancelada con su estado de cobro. La cancelada que DEBE se reabre como siempre.
+  const estado =
+    !cobroNuevo && !lockedAreaCheckout && !esVentaCerrada(fresh.paymentStatus)
+      ? await reabrirSiRecibeDinero(tx, {
+          venueId,
+          orderId,
+          status: fresh.status,
+          originSystem: fresh.originSystem,
+          cobrado: new Prisma.Decimal(amount + tip).dividedBy(100),
+          cubreComoCancelada,
+          canal: canalDeReapertura,
+          idempotencyKey: input.idempotencyKey ?? null,
+          staffId: effectiveStaffId ?? null,
+        })
+      : fresh.status
+  // La cuenta con el estado con el que RECIBE este dinero: los dos saldos se calculan con él (el cierre, con `estado`). La reapertura
+  // no toca `version`, así que la CAS de abajo sigue amarrada a la versión leída.
+  // 🔴 R4-2 (Codex r3; la misma raíz que la terminal): la cancelada CERRADA sigue cancelada (R2-2) pero se calcula como cuando se
+  // cobró —base + IVA aparte—: con la aritmética de cancelada guardaba $150 contra $166 cobrados y gritaba un sobrepago falso.
+  const cuenta = { ...fresh, status: estadoParaCalcular(estado, fresh.paymentStatus, amount + tip > 0) }
+
+  // Con devoluciones previas el saldo NO revive (`orderBalance.ts`), pero un
+  // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):
+  // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
+  // sin devoluciones, es exactamente el saldo.
+  const saldoAntes = computeOrderBalance(cuenta, previousPayments)
+  // Recheck after the Order lock: the zero-payment preflight balance can be stale.
+  if (amount === 0 && tip === 0 && saldoAntes.remainingBalance.greaterThan(0.005)) {
+    throw new BadRequestError(
+      `Esta cuenta debe ${saldoAntes.remainingBalance.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`,
+    )
+  }
+  const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
+  // 🔴 S2: sólo el cobro NUEVO (efectivo de cajón en vivo) se recorta al saldo de HOY. Lo ya capturado —la cola sin red manda lo
+  // que el aparato APLICÓ, sin el cambio (que se quedó en el aparato)— se registra tal cual: recortarlo contra un saldo que otra
+  // caja movió después registraba $50 de $100 recibidos y le inventaba $50 de «cambio» que nadie entregó.
+  // R2-1: la cola con H1 manda el TOTAL, no lo aplicado: se recorta como antes (efectivo de cajón).
+  const cambioCents = (conH1 ? countsAsDrawerCash : cobroNuevo) ? Math.max(0, amount - saldoCents) : 0
+  const aplicadoCents = amount - cambioCents
+  const amountDecimal = aplicadoCents / 100
+
+  if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
+    throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
+  }
+
+  const balance = computeOrderBalance(cuenta, [...previousPayments, { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' }])
+
+  // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
+  // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
+  // humana, así que queda un rastro greppable — MISMO token en los cuatro
+  // canales de cobro.
+  if (balance.refundState !== 'NONE') {
+    logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
+      orderId,
+      venueId,
+      channel: canalDeTurno,
+      refundState: balance.refundState,
+      refundedAmount: balance.refundedAmount.toFixed(2),
+    })
+  }
+
+  const totalTip = balance.tipAmount.toNumber()
+  const newTotal = balance.total.toNumber()
+  const totalPaidIncludingTip = balance.paidAmount.toNumber()
+  const remainingAfterPayment = balance.remainingBalance.toNumber()
+  // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
+  // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
+  // cierra).
+  const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
+  // 🔴 S1 (R8-1, como la terminal): dinero ya capturado sobre una venta CERRADA (leída bajo el candado) ⇒ conserva su estado, saldo
+  // 0 y `cerrada`: no la vuelve a cerrar ni repite lo de saldar (inventario, lealtad, comanda, referido). El dinero se registra
+  // completo y sale el aviso de sobrepago después del commit. R2-1: la cola con H1 no pasa por aquí (sin estado previo cerrado:
+  // la CAS exige PENDING/PARTIAL, como antes).
+  const cobro = estadoDeCobroAlRecibirDinero(conH1 ? null : fresh.paymentStatus, amount + tip > 0, {
+    paymentStatus: isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
+    remainingBalance: Math.max(0, remainingAfterPayment),
+  })
+  const saldaAqui = isFullyPaid && !cobro.cerrada
+
+  // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
+  //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
+  //    WHERE contra la fila nueva, no coincide, y count = 0. Nada se escribió.
+  //    Una venta cerrada se escribe sólo si SIGUE en el estado leído.
+  const transition = await tx.order.updateMany({
+    where: {
+      id: orderId,
+      venueId,
+      version: fresh.version,
+      paymentStatus: cobro.cerrada ? fresh.paymentStatus : { in: ['PENDING', 'PARTIAL'] },
+    },
+    data: {
+      paymentStatus: cobro.paymentStatus,
+      // 🔴 Un abono PARCIAL no toca `Order.status`. Antes escribía
+      // `PENDING`, o sea que una comanda ya `CONFIRMED`/`PREPARING`
+      // RETROCEDÍA de etapa porque el cliente pagó la mitad — cobrar no es
+      // un evento de cocina. `status` es el interruptor "¿la cuenta sigue
+      // abierta?" (las listas de cuentas abiertas y el plano de mesas
+      // filtran por él); el dinero se lee de `paymentStatus`. Un cobro sólo
+      // puede AVANZARLO a COMPLETED cuando la cuenta queda saldada.
+      // (`payment.tpv.service`, `manualPayment.service` y el webhook de
+      // cripto ya se comportaban así.)
+      ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
+      ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
+      ...(saldaAqui && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+      paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
+      remainingBalance: cobro.remainingBalance,
+      tipAmount: totalTip,
+      total: new Prisma.Decimal(newTotal),
+      splitType: 'FULLPAYMENT',
+      version: { increment: 1 },
+      // Vales por área: al quedar pagada, la cuenta deja de estar reclamada por
+      // la caja. El claim ya no significa nada y arrastrarlo confundiría la
+      // pantalla de "vales pendientes".
+      ...(saldaAqui && fresh.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
+    },
+  })
+  if (transition.count === 0) {
+    const conflict: any = new Error('PAY_CASH_CAS_LOST')
+    conflict.code = 'PAY_CASH_CAS_LOST'
+    throw conflict
+  }
+
+  // La orden ya ganó su CAS; ahora el cobro reclama el turno dentro de
+  // esta misma tx y antes de crear el Payment. Si el cierre ganó, el
+  // Payment queda sin turno y se audita abajo, sin tocar el corte firmado.
+  const shiftAmount = new Prisma.Decimal(amountDecimal)
+  const shiftTip = new Prisma.Decimal(tipDecimal)
+  const shiftClaim = await claimShiftForCapturedPayment(tx, {
+    venueId,
+    amountPesos: shiftAmount,
+    tipPesos: shiftTip,
+    // La Order cuenta al primer cobro canónico; dos abonos del mismo
+    // ticket nunca cuentan dos órdenes.
+    incrementTotalOrders: !previousPayments.some(payment => payment.type !== 'REFUND'),
+    orderId,
+  })
+
+  // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
+  //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
+  const paymentSource = countsAsDrawerCash ? 'APP' : 'OTHER'
+  const externalSource = countsAsDrawerCash ? null : input.externalSource?.trim()?.slice(0, 50) || null
+
+  const newPayment = await tx.payment.create({
+    data: {
+      venueId,
+      orderId,
+      amount: amountDecimal,
+      tipAmount: tipDecimal,
+      method: resolvedTender?.method ?? paymentMethod,
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      splitType: 'FULLPAYMENT',
+      source: paymentSource,
+      externalSource,
+      fundsFlow: resolvedTender ? resolvedTender.fundsFlow : fundsFlow,
+      processedById: effectiveStaffId,
+      shiftId: shiftClaim.shiftId,
+      // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
+      // hace que un reintento del cliente choque (P2002) o se atrape arriba,
+      // nunca cree un segundo pago.
+      idempotencyKey: input.idempotencyKey ?? null,
+      // Cash payments have no card data or merchant account
+      merchantAccountId: null,
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: amountDecimal + tipDecimal,
+      // Snapshots inmutables del tender (todos resueltos por el server). Editar
+      // el catálogo mañana NO reinterpreta este cobro.
+      tenderTypeId: resolvedTender?.tenderTypeId,
+      tenderRevision: resolvedTender?.tenderRevision,
+      tenderLabel: resolvedTender?.tenderLabel,
+      tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
+      tenderCaptureTip: resolvedTender?.tenderCaptureTip,
+      tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
+      tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
+      tenderCommissionAmount: resolvedTender
+        ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
+        : undefined,
+    },
+  })
+
+  await recordPendingPaymentShiftReconciliation(tx, {
+    reconciliationEnabled,
+    claim: shiftClaim,
+    venueId,
+    paymentId: newPayment.id,
+    orderId,
+    staffId: effectiveStaffId ?? null,
+    channel: canalDeTurno,
+    amountPesos: shiftAmount,
+    tipPesos: shiftTip,
+  })
+
+  // Create VenueTransaction for financial tracking
+  await tx.venueTransaction.create({
+    data: {
+      venueId,
+      paymentId: newPayment.id,
+      type: 'PAYMENT',
+      grossAmount: amountDecimal + tipDecimal,
+      feeAmount: 0,
+      netAmount: amountDecimal + tipDecimal,
+      status: 'SETTLED', // Cash is immediately settled
+    },
+  })
+
+  // Create payment allocation
+  await tx.paymentAllocation.create({
+    data: {
+      paymentId: newPayment.id,
+      orderId,
+      amount: amountDecimal,
+    },
+  })
+
+  const areaFinalization = await areaTicketPayment.finalizeAreaTicketPaymentInTransaction(tx, {
+    venueId,
+    orderId,
+    paymentId: newPayment.id,
+    fullyPaid: isFullyPaid,
+    staffId: effectiveStaffId,
+    // S1 (R9-1, como la terminal): sobre una venta ya cerrada, la finalización concilia el cobro capturado —sin volver a consumir
+    // lo que ya tomó su vale de inventario— y decide bajo sus candados si es el primer saldado (`primerSaldado`).
+    reconcileCapturedPayment: cobro.cerrada,
+    marcarCocina,
+    locked: lockedAreaCheckout,
+  })
+  // Quién corre los efectos de saldar: el cobro que la saldó, o el que recupera el saldado de un vale (venta cerrada por el barrido).
+  const efectosDeSaldar = saldaAqui || areaFinalization.primerSaldado === true
+
+  // 🔴 Posting durable (fase 2, auditoría 2026-08-12): el "vale de
+  // deducción" nace EN ESTA transacción — si el proceso muere después del
+  // commit y antes de deducir, queda un posting PENDING visible que el
+  // job de respaldo reaplica, en vez de una deducción perdida invisible.
+  // Área-tickets: su propia finalización ya dedujo y dejó su vale SKIPPED
+  // (`AREA_TICKET_TRANSACTIONAL`, R10-1) en esta misma transacción — aquí no se crea otro.
+  let postingId: string | null = null
+  if (saldaAqui && !areaFinalization.areaTicketOrder) {
+    const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
+    const txItems = await tx.orderItem.findMany({
+      where: { orderId },
+      include: { modifiers: { include: { modifier: true } } },
+    })
+    const posting = await createSalePostingInTx(tx, {
+      venueId,
+      orderId,
+      items: txItems as any,
+      staffId: effectiveStaffId,
+    })
+    postingId = posting?.id ?? null
+    // R8 (tarjetas de regalo): la cuenta de tarjetas que queda pagada activa sus sobres en ESTA transacción.
+    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: effectiveStaffId ?? null, items: txItems })
+  }
+
+  // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
+  // él, este cobro y la cola sin red `PAY_CASH` (que lo reutiliza) no comisionaban. Un efecto por cobro: no se duplica.
+  await enqueuePaymentCommissionInTx(tx, newPayment.id)
+  // Referido: obligación durable con el dinero, como la terminal (`payment.tpv.service.ts`). Si el proceso muere antes
+  // de la llamada directa de abajo, el worker de efectos la completa; el consumidor deduplica.
+  if (efectosDeSaldar) {
+    await enqueuePaymentEffect(tx, {
+      venueId,
+      paymentId: newPayment.id,
+      orderId,
+      kind: 'REFERRAL',
+      dedupeKey: 'referral:' + orderId + ':v1',
+      payload: { expectsSettlement: true },
+    })
+  }
+  // La caja ABIERTA al cobrar se fija aquí: el movimiento de efectivo va a ESA sesión y sólo si sigue abierta. Una caja
+  // abierta DESPUÉS del cobro (cierre + apertura a media transacción) no se lo queda: lo repone el conciliador.
+  const cajaAlCobrar = await tx.cashDrawerSession.findFirst({
+    where: { venueId, status: 'OPEN', openedAt: { lte: newPayment.createdAt } },
+    select: { id: true },
+  })
+  await input.dentroDeLaTx?.(tx, { orderId, paymentId: newPayment.id })
+
+  return {
+    cajaAlCobrarId: cajaAlCobrar?.id ?? null,
+    newPayment,
+    paymentStatus: cobro.paymentStatus,
+    isFullyPaid: efectosDeSaldar,
+    ventaCerrada: cobro.cerrada,
+    aplicadoCents,
+    cambioCents,
+    areaTicketOrder: areaFinalization.areaTicketOrder,
+    areaTicketSessionId: areaFinalization.sessionId,
+    tableId: fresh.tableId,
+    postingId,
+    // 🔴 Los MISMOS valores que se acaban de persistir arriba (que van en
+    // pesos), no un recálculo: la respuesta no puede contradecir a la
+    // base. `pesosToCents` es la única conversión, ya en la frontera.
+    // Una venta cerrada responde PAID con saldo 0 aunque siga REFUNDED: no debe nada.
+    balance: {
+      remainingBalanceCents: pesosToCents(cobro.remainingBalance),
+      orderPaymentStatus: isFullyPaid || cobro.cerrada ? 'PAID' : 'PARTIAL',
+      orderTotalCents: pesosToCents(newTotal),
+      totalPaidCents: pesosToCents(totalPaidIncludingTip),
+    },
+    loyaltyBase: Math.max(0, newTotal - totalTip),
+    tenderResuelto: resolvedTender,
+    mesaAjena: mesaAjenaBajoCandado,
+  }
+}
+
 export async function payCashOrder(venueId: string, orderId: string, input: CashPaymentInput): Promise<CashPaymentResponse> {
   const amount = input.amount
   const tip = input.tip || 0
@@ -3026,9 +3668,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // la marca viaja en la MISMA escritura que salda la orden.
   const marcarCocina = await debeMarcarCocina(venueId, { orderId })
 
-  // Convert cents to decimal for database. `amount` es lo SOLICITADO; lo que se
-  // registra como pago se decide dentro de la transacción (ver `aplicadoCents`).
-  const amountSolicitadoDecimal = amount / 100
+  // Centavos → pesos para el post-commit. Lo SOLICITADO contra lo registrado se decide en el núcleo (`aplicadoCents`).
   const tipDecimal = tip / 100
 
   // ══════════════════════════════════════════════════════════════════════════════
@@ -3058,523 +3698,43 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   //   · si quedó PARTIAL        → cobra el restante real, no el que leyó primero ✅
   // Tres intentos: la contención real es de 2-4 dispositivos, no de cientos.
   const MAX_PAYMENT_CAS_ATTEMPTS = 3
-  // R6-3: la mesa resultó ajena BAJO el candado y entró dinero ya capturado ⇒ se registra con el mismo rastro de R2-6 (post-commit).
-  const propiedadBajoCandado: { mesaAjena: { ownerId: string; ownerName: string } | null } = { mesaAjena: null }
-  // 🔴 R2-1: la cola de Android/Windows ≤ 2.23 (H1) manda el TOTAL de la cuenta; para ella, el cobro de antes de S1/S2.
+  // 🔴 R2-1: la cola de Android/Windows ≤ 2.23 (H1) manda el TOTAL de la cuenta; para ella, el cobro de antes de S1/S2 (el núcleo lo
+  // decide con `colaConDefectoH1`; aquí, el aviso de sobrepago de después del commit).
   const conH1 = input.isOfflineReplay === true && input.colaConDefectoH1 === true
-  let paymentResult:
-    | {
-        /** Caja OPEN al cobrar (leída en la misma transacción); el movimiento de efectivo va a ésa o a ninguna. */
-        cajaAlCobrarId: string | null
-        newPayment: any
-        /** El `paymentStatus` que se GUARDÓ (una venta cerrada conserva el suyo: REFUNDED sigue REFUNDED). */
-        paymentStatus: 'PAID' | 'PARTIAL' | 'REFUNDED'
-        /** Este cobro corre los efectos de saldar (inventario, lealtad, comanda, referido, mesa): la saldó, o recupera el saldado de un
-         *  vale. */
-        isFullyPaid: boolean
-        /** S1: la venta ya estaba cerrada (PAID/REFUNDED) y recibió dinero ya capturado; se conservó cerrada
-         *  (`estadoDeCobroAlRecibirDinero`). */
-        ventaCerrada: boolean
-        areaTicketOrder: boolean
-        areaTicketSessionId?: string
-        tableId?: string | null
-        postingId?: string | null
-        /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
-        aplicadoCents: number
-        cambioCents: number
-        /** Base de puntos en pesos, sin propinas. */
-        loyaltyBase: number
-        // El saldo que la transacción YA calculó — antes se quedaba dentro y el
-        // código de abajo (respuesta, broadcast, hook de referidos) tenía que
-        // adivinarlo o mentir. Mismo patrón que `postingId`.
-        balance: OrderBalanceSnapshot
-      }
-    | undefined
+  const tenderRef =
+    input.tenderTypeId != null && input.tenderRevision != null ? { ref: { id: input.tenderTypeId, revision: input.tenderRevision } } : null
+  let paymentResult: AbonoEnTx | undefined
 
   for (let attempt = 1; attempt <= MAX_PAYMENT_CAS_ATTEMPTS; attempt++) {
     try {
-      paymentResult = await prisma.$transaction(async tx => {
-        propiedadBajoCandado.mesaAjena = null
-        // 🔴 R8 — EL PUNTO ÚNICO DE LA LLAVE. Primero los candados (vales: sesión → vales → Order, la jerarquía de siempre; sin vales,
-        // Order) y, ya con ellos, la llave decide ANTES que cualquier regla de estado que pueda cambiar entre un intento y su
-        // reintento: catálogo de tipos de pago, venta cerrada o cancelada, saldo, sesión de vales, propiedad de mesa, personal.
-        //   · un cobro COMPLETADO de esta orden ⇒ sale por la red de la carrera (`CobroYaRegistrado`) y responde como la primera vez;
-        //   · un intento FAILED, una devolución o una llave de otra orden ⇒ 409 `IDEMPOTENCY_KEY_REUSED` (R5-2);
-        //   · sin pago con la llave ⇒ cobro nuevo: siguen TODAS las reglas de abajo, en su orden.
-        // Bajo estos candados nadie más registra esta llave en esta orden, así que las relecturas que iban junto a cada rechazo
-        // (R6-2 ×2, R6-3, Codex r13 #2 y R7-2 en la sesión de vales) quedaron subsumidas aquí.
-        const areaTicketPayment = await import('./areaTicketV7.mobile.service')
-        // La sesión de vales nace con la orden (se materializan juntas): la lectura de arriba basta para saber si hay jerarquía.
-        if (order.areaTicketCheckoutSession) await areaTicketPayment.lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
-        await lockExistingOrderForPayment(tx, { venueId, orderId })
-        await salirSiLaLlaveYaTienePago(tx, { venueId, orderId, idempotencyKey: input.idempotencyKey, soloCobroCompletado: true })
-        if (rechazoDelPersonal) throw rechazoDelPersonal
-
-        // 🔴 R13-1 (Codex r17 #1): el medio se resuelve ANTES de la sesión de vales (sólo lee; ningún candado), para que ella sepa si
-        // el dinero ya se capturó. También va antes del saldo: decide si un exceso es cambio (una tarjeta o transferencia externa ya
-        // capturada no produjo efectivo para devolver: recortarla escondería dinero real y rompería la conciliación) y si se admite
-        // sobre una cuenta cancelada (Tarea 6a: depende de si es efectivo de cajón).
-        const resolvedTender =
-          input.tenderTypeId != null && input.tenderRevision != null
-            ? await resolveTenderForCharge(
-                venueId,
-                input.tenderTypeId,
-                input.tenderRevision,
-                tx,
-                input.isOfflineReplay ? 'replay' : 'online',
-              )
-            : null
-        tenderState.resolved = resolvedTender
-        const effectiveMethod = resolvedTender?.method ?? paymentMethod
-        const fundsFlow =
-          resolvedTender?.fundsFlow ?? (effectiveMethod === 'CASH' ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED)
-        const countsAsDrawerCash = paymentCountsAsDrawerCash({
-          method: effectiveMethod,
-          fundsFlow,
-          tenderTypeId: resolvedTender?.tenderTypeId ?? null,
-          tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? null,
-        })
-
-        // 🔴 Founder 3-oct (núcleo del servidor; Codex r10 #2): el efectivo de cajón EN VIVO es un cobro NUEVO —la persona todavía
-        // puede no cobrar—: sobre una cancelada ⇒ 400 con el texto del founder. Lo ya capturado (la cola; en vivo, una tarjeta ajena
-        // o una transferencia ya hechas) nunca se rechaza por la cancelación: reabre una cuenta de Avoqado (una externa, sólo cuando
-        // hoy salía de CANCELADA; Codex r13 #1). Lo ya capturado tampoco se recorta al saldo de hoy (S2) ni se rechaza sobre una venta
-        // ya cerrada (S1). Vales: su sesión decide.
-        const cobroNuevo = esCobroNuevo({ enVivo: !input.isOfflineReplay, efectivoDeCajon: countsAsDrawerCash })
-
-        // Vales v7: las guardas de la sesión y su intento (los candados ya los tiene esta transacción: son reentrantes).
-        // Para una orden normal devuelve null y el comportamiento queda idéntico.
-        const lockedAreaCheckout = await areaTicketPayment.lockAreaTicketCheckoutForPayment(tx, {
-          venueId,
-          orderId,
-          idempotencyKey: input.idempotencyKey,
-          amount: new Prisma.Decimal(amountSolicitadoDecimal),
-          method: paymentMethod,
-          // 🔴 R12-1 / R13-1: lo ya capturado —la cola sin red, o en vivo una terminal ajena o una transferencia— no recibe 409 de la
-          // sesión por su estado (cerrada, en conciliación o cancelada), como en la TPV (`cobroNuevo !== true`). El efectivo de cajón
-          // en vivo sigue siendo cobro NUEVO.
-          dineroCapturado: !cobroNuevo,
-        })
-        // Order ya está bloqueada (arriba, antes del punto de la llave): lo siguiente conserva Order → Payment (si aplica) → Shift.
-
-        // 1️⃣ RELECTURA DENTRO DE LA TRANSACCIÓN. Esta es la lectura que manda: la de
-        //    arriba pudo quedar vieja mientras validábamos staff y turno.
-        const fresh = await tx.order.findUnique({
-          where: { id: orderId, venueId },
-          select: {
-            id: true,
-            orderNumber: true,
-            paymentStatus: true,
-            subtotal: true,
-            discountAmount: true,
-            serviceChargeAmount: true,
-            // P12 (Codex r2, r5): el saldo suma el IVA que va aparte y una cancelada no lo debe; sin estas tres el cobro
-            // móvil daba por saldada con $100 una cuenta de $100 + $16.
-            status: true,
-            contratoDePrecio: true,
-            taxAmount: true,
-            // Tarea 6a: una cancelada de Avoqado se reabre con cualquier dinero ya capturado; una externa, sólo cuando hoy salía
-            // de CANCELADA (Codex r12 #5, r13 #1).
-            originSystem: true,
-            version: true,
-            areaTicketCode: true,
-            tableId: true,
-            // R6-3: la propiedad de mesa, releída bajo el candado.
-            servedById: true,
-            servedBy: { select: { firstName: true, lastName: true } },
-          },
-        })
-        if (!fresh) {
-          throw new NotFoundError('Order not found')
-        }
-
-        // 🔴 R6-3 (Codex r5 #3): la propiedad de mesa otra vez, bajo el candado (la de antes pudo quedar vieja: una reasignación usa
-        // este mismo candado). Misma regla que el middleware: mostrador, sin dueño o propia ⇒ sigue; ajena sin override ⇒ el cobro
-        // NUEVO recibe el mismo 403 sin crear nada; el dinero ya capturado (> $0) se registra con el rastro de R2-6.
-        // 🔴 R7-1 (Codex r6 #1): «ya capturado» es la MISMA clasificación de arriba (`cobroNuevo`), no la marca de replay: una transferencia,
-        // una tarjeta externa, OTHER o un tipo con fondos externos registrados en vivo ya son dinero recibido.
-        const propiedad = input.propiedadDeMesa
-        if (
-          propiedad &&
-          fresh.tableId &&
-          fresh.servedById &&
-          fresh.servedById !== propiedad.userId &&
-          !(await propiedad.puedeCobrarAjena())
-        ) {
-          const dueno = {
-            ownerId: fresh.servedById,
-            ownerName: fresh.servedBy ? `${fresh.servedBy.firstName} ${fresh.servedBy.lastName}`.trim() : 'otro mesero',
-          }
-          if (!cobroNuevo && hayDineroQueSeGuarda(amount, tip)) {
-            propiedadBajoCandado.mesaAjena = dueno
-          } else {
-            throw new MesaAjenaSoloRecuperacion(dueno)
-          }
-        }
-
-        // 2️⃣ VALIDACIÓN DENTRO DE LA TRANSACCIÓN (era el bug: estaba fuera). Sobre una venta CERRADA (PAID o REFUNDED) sólo se
-        // rechaza el cobro NUEVO —la persona todavía tiene el dinero en la mano— o un $0. 🔴 S1: lo ya capturado (la cola sin red, una
-        // tarjeta ajena ya aprobada) se registra: rechazarlo dejaba $200 en el cajón y $100 en la base. La venta se queda cerrada.
-        // R2-1: la cola con H1 conserva el guard de antes (sólo PAID; REFUNDED pierde la CAS de abajo ⇒ 409, como antes).
-        // (Un reintento con la llave ya cobrada no llega aquí: lo devolvió el punto de la llave, R8.)
-        if (conH1 ? fresh.paymentStatus === 'PAID' : esVentaCerrada(fresh.paymentStatus) && (cobroNuevo || amount + tip === 0)) {
-          throw new BadRequestError('Order is already paid')
-        }
-
-        // 3️⃣ Suma acumulada de pagos previos — split-the-bill. Leída aquí dentro
-        //    para que refleje al ganador de una carrera anterior.
-        //
-        // 🔴 `type` NO es decorativo: un reembolso vive como un `Payment` NEGATIVO
-        // `type: REFUND` colgado de la MISMA orden, y sin ese campo la aritmética
-        // no lo puede distinguir de un cobro. Se leen TODOS los COMPLETED (sin
-        // filtrar por `type` en la consulta) porque la función pura necesita los
-        // REFUND para reportar `refundState` — filtrarlos aquí los escondería.
-        const previousPayments = await tx.payment.findMany({
-          where: { orderId, status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true, type: true },
-        })
-
-        // 🔴 La aritmética canónica, ya no una copia local en FLOAT.
-        //
-        // Esta función se extrajo justo de aquí y este camino se había quedado
-        // con su copia. Volver a llamarla cierra dos cosas de golpe: la deriva
-        // entre canales, y el defecto que este trabajo ataca — un reembolso NO
-        // reabre saldo, porque `computeOrderBalance` excluye los `type: REFUND`
-        // de lo pagado y los lleva en su propio carril (`refundState`).
-        //
-        // Las reglas que ya aplicaba y siguen intactas (hay tests que las fijan):
-        // mercancía clampada a 0 ANTES de sumar cargos y propina —un
-        // `discountAmount` mayor que el subtotal existe de verdad en la base y
-        // sin el clamp la venta escribía un `Order.total` NEGATIVO que RESTA del
-        // corte del día (ORD-1779465117373, 2026-08-09)—, el cargo por servicio
-        // dentro del total, y la tolerancia de un centavo para darla por saldada.
-        // Lo único que cambia es que la suma va en `Decimal` y no en float.
-        // 🔴 Un cobro MAYOR al saldo no es una venta mayor: es CAMBIO. Medido el
-        // 2026-09-01: `amount: 3000` sobre una cuenta de $25 registraba un Payment de
-        // $30.00 (y `999999999999`, uno de $9,999,999,999.99) e inflaba ventas y
-        // VenueTransaction. La app manda siempre el total exacto y calcula el cambio
-        // en el aparato, así que esto sólo lo abre un cliente raro por API — por eso
-        // el aviso de abajo. Se registra como máximo lo que la cuenta DEBE (sin
-        // propina: la propina va aparte y no se toca) y el resto regresa en la
-        // respuesta como `changeCents`. El pago manual del dashboard rechaza el
-        // exceso con 400; aquí no se bloquea porque el dinero sí entró al cajón.
-        // (El medio y `cobroNuevo` se resuelven arriba, antes de la sesión de vales: R13-1.)
-        if (cobroNuevo && claseDeEstado(fresh.status) === 'CANCELADA') {
-          rechazarCobroNuevoSobreCancelada(fresh.status)
-        }
-        // Codex r13 #1: ¿lo cobrado cubre lo que la cuenta debe TAL COMO ESTÁ? Es lo que hoy decide el cierre. Con el importe bruto:
-        // el recorte al saldo (abajo) da el mismo `isFullyPaid`.
-        const cubreComoCancelada = computeOrderBalance(fresh, [
-          ...previousPayments,
-          { amount: amount / 100, tipAmount: tipDecimal, type: 'REGULAR' },
-        ]).isFullyPaid
-        // El `staffId` ya está validado contra el negocio (`validateStaffVenue`): la bitácora lo amarra por FK y un id inválido
-        // revertiría el cobro. Vales: lo que los excluye es la SESIÓN v7 (`lockedAreaCheckout`): su finalización decide y
-        // rechaza una orden cancelada (409 `CHECKOUT_ORDER_NOT_PAYABLE`, todo se revierte). NO `areaTicketCode`: ése sólo lo
-        // escriben los vales v6, que no tienen sesión y se cobran como cualquier cuenta (revisión de 6a-2, I-1).
-        // 🔴 R2-2 (R8-1): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED leída bajo el candado), aunque esté cancelada:
-        // se registra el dinero y queda cancelada con su estado de cobro. La cancelada que DEBE se reabre como siempre.
-        const estado =
-          !cobroNuevo && !lockedAreaCheckout && !esVentaCerrada(fresh.paymentStatus)
-            ? await reabrirSiRecibeDinero(tx, {
-                venueId,
-                orderId,
-                status: fresh.status,
-                originSystem: fresh.originSystem,
-                cobrado: new Prisma.Decimal(amount + tip).dividedBy(100),
-                cubreComoCancelada,
-                canal: input.isOfflineReplay ? 'payCashOrder:cola' : 'payCashOrder:registro',
-                idempotencyKey: input.idempotencyKey ?? null,
-                staffId: effectiveStaffId ?? null,
-              })
-            : fresh.status
-        // La cuenta con el estado con el que RECIBE este dinero: los dos saldos se calculan con él (el cierre, con `estado`). La reapertura
-        // no toca `version`, así que la CAS de abajo sigue amarrada a la versión leída.
-        // 🔴 R4-2 (Codex r3; la misma raíz que la terminal): la cancelada CERRADA sigue cancelada (R2-2) pero se calcula como cuando se
-        // cobró —base + IVA aparte—: con la aritmética de cancelada guardaba $150 contra $166 cobrados y gritaba un sobrepago falso.
-        const cuenta = { ...fresh, status: estadoParaCalcular(estado, fresh.paymentStatus, amount + tip > 0) }
-
-        // Con devoluciones previas el saldo NO revive (`orderBalance.ts`), pero un
-        // cobro nuevo sobre esa cuenta sí se registra (`payCashOrder.refund.test.ts`):
-        // lo devuelto se puede volver a cobrar. Por eso el tope es saldo + devuelto;
-        // sin devoluciones, es exactamente el saldo.
-        const saldoAntes = computeOrderBalance(cuenta, previousPayments)
-        // Recheck after the Order lock: the zero-payment preflight balance can be stale.
-        if (amount === 0 && tip === 0 && saldoAntes.remainingBalance.greaterThan(0.005)) {
-          throw new BadRequestError(
-            `Esta cuenta debe ${saldoAntes.remainingBalance.toFixed(2)}. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.`,
-          )
-        }
-        const saldoCents = Math.max(0, pesosToCents(saldoAntes.remainingBalance.plus(saldoAntes.refundedAmount).toNumber()))
-        // 🔴 S2: sólo el cobro NUEVO (efectivo de cajón en vivo) se recorta al saldo de HOY. Lo ya capturado —la cola sin red manda lo
-        // que el aparato APLICÓ, sin el cambio (que se quedó en el aparato)— se registra tal cual: recortarlo contra un saldo que otra
-        // caja movió después registraba $50 de $100 recibidos y le inventaba $50 de «cambio» que nadie entregó.
-        // R2-1: la cola con H1 manda el TOTAL, no lo aplicado: se recorta como antes (efectivo de cajón).
-        const cambioCents = (conH1 ? countsAsDrawerCash : cobroNuevo) ? Math.max(0, amount - saldoCents) : 0
-        const aplicadoCents = amount - cambioCents
-        const amountDecimal = aplicadoCents / 100
-
-        if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
-          throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
-        }
-
-        const balance = computeOrderBalance(cuenta, [
-          ...previousPayments,
-          { amount: amountDecimal, tipAmount: tipDecimal, type: 'REGULAR' },
-        ])
-
-        // No se BLOQUEA nada: el dinero es real y registrarlo siempre gana. Pero un
-        // cobro que aterriza sobre una cuenta con devoluciones merece una mirada
-        // humana, así que queda un rastro greppable — MISMO token en los cuatro
-        // canales de cobro.
-        if (balance.refundState !== 'NONE') {
-          logger.warn('⚠️ [Reembolso] cobro sobre una cuenta con reembolsos — el saldo NO los cuenta, revisar', {
-            orderId,
-            venueId,
-            channel: 'payCashOrder',
-            refundState: balance.refundState,
-            refundedAmount: balance.refundedAmount.toFixed(2),
-          })
-        }
-
-        const totalTip = balance.tipAmount.toNumber()
-        const newTotal = balance.total.toNumber()
-        const totalPaidIncludingTip = balance.paidAmount.toNumber()
-        const remainingAfterPayment = balance.remainingBalance.toNumber()
-        // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
-        // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
-        // cierra).
-        const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
-        // 🔴 S1 (R8-1, como la terminal): dinero ya capturado sobre una venta CERRADA (leída bajo el candado) ⇒ conserva su estado, saldo
-        // 0 y `cerrada`: no la vuelve a cerrar ni repite lo de saldar (inventario, lealtad, comanda, referido). El dinero se registra
-        // completo y sale el aviso de sobrepago después del commit. R2-1: la cola con H1 no pasa por aquí (sin estado previo cerrado:
-        // la CAS exige PENDING/PARTIAL, como antes).
-        const cobro = estadoDeCobroAlRecibirDinero(conH1 ? null : fresh.paymentStatus, amount + tip > 0, {
-          paymentStatus: isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
-          remainingBalance: Math.max(0, remainingAfterPayment),
-        })
-        const saldaAqui = isFullyPaid && !cobro.cerrada
-
-        // 4️⃣ TRANSICIÓN CONDICIONAL (CAS). `updateMany` con la versión leída: si otro
-        //    dispositivo cobró entre la relectura y este write, PostgreSQL reevalúa el
-        //    WHERE contra la fila nueva, no coincide, y count = 0. Nada se escribió.
-        //    Una venta cerrada se escribe sólo si SIGUE en el estado leído.
-        const transition = await tx.order.updateMany({
-          where: {
-            id: orderId,
-            venueId,
-            version: fresh.version,
-            paymentStatus: cobro.cerrada ? fresh.paymentStatus : { in: ['PENDING', 'PARTIAL'] },
-          },
-          data: {
-            paymentStatus: cobro.paymentStatus,
-            // 🔴 Un abono PARCIAL no toca `Order.status`. Antes escribía
-            // `PENDING`, o sea que una comanda ya `CONFIRMED`/`PREPARING`
-            // RETROCEDÍA de etapa porque el cliente pagó la mitad — cobrar no es
-            // un evento de cocina. `status` es el interruptor "¿la cuenta sigue
-            // abierta?" (las listas de cuentas abiertas y el plano de mesas
-            // filtran por él); el dinero se lee de `paymentStatus`. Un cobro sólo
-            // puede AVANZARLO a COMPLETED cuando la cuenta queda saldada.
-            // (`payment.tpv.service`, `manualPayment.service` y el webhook de
-            // cripto ya se comportaban así.)
-            ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
-            ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
-            ...(saldaAqui && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
-            paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
-            remainingBalance: cobro.remainingBalance,
-            tipAmount: totalTip,
-            total: new Prisma.Decimal(newTotal),
-            splitType: 'FULLPAYMENT',
-            version: { increment: 1 },
-            // Vales por área: al quedar pagada, la cuenta deja de estar reclamada por
-            // la caja. El claim ya no significa nada y arrastrarlo confundiría la
-            // pantalla de "vales pendientes".
-            ...(saldaAqui && fresh.areaTicketCode ? { claimedByTerminalId: null, claimedAt: null } : {}),
-          },
-        })
-        if (transition.count === 0) {
-          const conflict: any = new Error('PAY_CASH_CAS_LOST')
-          conflict.code = 'PAY_CASH_CAS_LOST'
-          throw conflict
-        }
-
-        // La orden ya ganó su CAS; ahora el cobro reclama el turno dentro de
-        // esta misma tx y antes de crear el Payment. Si el cierre ganó, el
-        // Payment queda sin turno y se audita abajo, sin tocar el corte firmado.
-        const shiftAmount = new Prisma.Decimal(amountDecimal)
-        const shiftTip = new Prisma.Decimal(tipDecimal)
-        const shiftClaim = await claimShiftForCapturedPayment(tx, {
-          venueId,
-          amountPesos: shiftAmount,
-          tipPesos: shiftTip,
-          // La Order cuenta al primer cobro canónico; dos abonos del mismo
-          // ticket nunca cuentan dos órdenes.
-          incrementTotalOrders: !previousPayments.some(payment => payment.type !== 'REFUND'),
-        })
-
-        // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
-        //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
-        const paymentSource = countsAsDrawerCash ? 'APP' : 'OTHER'
-        const externalSource = countsAsDrawerCash ? null : input.externalSource?.trim()?.slice(0, 50) || null
-
-        const newPayment = await tx.payment.create({
-          data: {
-            venueId,
-            orderId,
-            amount: amountDecimal,
-            tipAmount: tipDecimal,
-            method: resolvedTender?.method ?? paymentMethod,
-            status: 'COMPLETED',
-            type: 'REGULAR',
-            splitType: 'FULLPAYMENT',
-            source: paymentSource,
-            externalSource,
-            fundsFlow: resolvedTender ? resolvedTender.fundsFlow : fundsFlow,
-            processedById: effectiveStaffId,
-            shiftId: shiftClaim.shiftId,
-            // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
-            // hace que un reintento del cliente choque (P2002) o se atrape arriba,
-            // nunca cree un segundo pago.
-            idempotencyKey: input.idempotencyKey ?? null,
-            // Cash payments have no card data or merchant account
-            merchantAccountId: null,
-            feePercentage: 0,
-            feeAmount: 0,
-            netAmount: amountDecimal + tipDecimal,
-            // Snapshots inmutables del tender (todos resueltos por el server). Editar
-            // el catálogo mañana NO reinterpreta este cobro.
-            tenderTypeId: resolvedTender?.tenderTypeId,
-            tenderRevision: resolvedTender?.tenderRevision,
-            tenderLabel: resolvedTender?.tenderLabel,
-            tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
-            tenderCaptureTip: resolvedTender?.tenderCaptureTip,
-            tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
-            tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
-            tenderCommissionAmount: resolvedTender
-              ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
-              : undefined,
-          },
-        })
-
-        await recordPendingPaymentShiftReconciliation(tx, {
-          reconciliationEnabled,
-          claim: shiftClaim,
-          venueId,
-          paymentId: newPayment.id,
-          orderId,
-          staffId: effectiveStaffId ?? null,
-          channel: 'payCashOrder',
-          amountPesos: shiftAmount,
-          tipPesos: shiftTip,
-        })
-
-        // Create VenueTransaction for financial tracking
-        await tx.venueTransaction.create({
-          data: {
-            venueId,
-            paymentId: newPayment.id,
-            type: 'PAYMENT',
-            grossAmount: amountDecimal + tipDecimal,
-            feeAmount: 0,
-            netAmount: amountDecimal + tipDecimal,
-            status: 'SETTLED', // Cash is immediately settled
-          },
-        })
-
-        // Create payment allocation
-        await tx.paymentAllocation.create({
-          data: {
-            paymentId: newPayment.id,
-            orderId,
-            amount: amountDecimal,
-          },
-        })
-
-        const areaFinalization = await areaTicketPayment.finalizeAreaTicketPaymentInTransaction(tx, {
-          venueId,
-          orderId,
-          paymentId: newPayment.id,
-          fullyPaid: isFullyPaid,
-          staffId: effectiveStaffId,
-          // S1 (R9-1, como la terminal): sobre una venta ya cerrada, la finalización concilia el cobro capturado —sin volver a consumir
-          // lo que ya tomó su vale de inventario— y decide bajo sus candados si es el primer saldado (`primerSaldado`).
-          reconcileCapturedPayment: cobro.cerrada,
-          marcarCocina,
-          locked: lockedAreaCheckout,
-        })
-        // Quién corre los efectos de saldar: el cobro que la saldó, o el que recupera el saldado de un vale (venta cerrada por el barrido).
-        const efectosDeSaldar = saldaAqui || areaFinalization.primerSaldado === true
-
-        // 🔴 Posting durable (fase 2, auditoría 2026-08-12): el "vale de
-        // deducción" nace EN ESTA transacción — si el proceso muere después del
-        // commit y antes de deducir, queda un posting PENDING visible que el
-        // job de respaldo reaplica, en vez de una deducción perdida invisible.
-        // Área-tickets: su propia finalización ya dedujo y dejó su vale SKIPPED
-        // (`AREA_TICKET_TRANSACTIONAL`, R10-1) en esta misma transacción — aquí no se crea otro.
-        let postingId: string | null = null
-        if (saldaAqui && !areaFinalization.areaTicketOrder) {
-          const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
-          const txItems = await tx.orderItem.findMany({
-            where: { orderId },
-            include: { modifiers: { include: { modifier: true } } },
-          })
-          const posting = await createSalePostingInTx(tx, {
-            venueId,
-            orderId,
-            items: txItems as any,
-            staffId: effectiveStaffId,
-          })
-          postingId = posting?.id ?? null
-        }
-
-        // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
-        // él, este cobro y la cola sin red `PAY_CASH` (que lo reutiliza) no comisionaban. Un efecto por cobro: no se duplica.
-        await enqueuePaymentCommissionInTx(tx, newPayment.id)
-        // Referido: obligación durable con el dinero, como la terminal (`payment.tpv.service.ts`). Si el proceso muere antes
-        // de la llamada directa de abajo, el worker de efectos la completa; el consumidor deduplica.
-        if (efectosDeSaldar) {
-          await enqueuePaymentEffect(tx, {
-            venueId,
-            paymentId: newPayment.id,
-            orderId,
-            kind: 'REFERRAL',
-            dedupeKey: 'referral:' + orderId + ':v1',
-            payload: { expectsSettlement: true },
-          })
-        }
-        // La caja ABIERTA al cobrar se fija aquí: el movimiento de efectivo va a ESA sesión y sólo si sigue abierta. Una caja
-        // abierta DESPUÉS del cobro (cierre + apertura a media transacción) no se lo queda: lo repone el conciliador.
-        const cajaAlCobrar = await tx.cashDrawerSession.findFirst({
-          where: { venueId, status: 'OPEN', openedAt: { lte: newPayment.createdAt } },
-          select: { id: true },
-        })
-        await input.dentroDeLaTx?.(tx, { orderId, paymentId: newPayment.id })
-
-        return {
-          cajaAlCobrarId: cajaAlCobrar?.id ?? null,
-          newPayment,
-          paymentStatus: cobro.paymentStatus,
-          isFullyPaid: efectosDeSaldar,
-          ventaCerrada: cobro.cerrada,
-          aplicadoCents,
-          cambioCents,
-          areaTicketOrder: areaFinalization.areaTicketOrder,
-          areaTicketSessionId: areaFinalization.sessionId,
-          tableId: fresh.tableId,
-          postingId,
-          // 🔴 Los MISMOS valores que se acaban de persistir arriba (que van en
-          // pesos), no un recálculo: la respuesta no puede contradecir a la
-          // base. `pesosToCents` es la única conversión, ya en la frontera.
-          // Una venta cerrada responde PAID con saldo 0 aunque siga REFUNDED: no debe nada.
-          balance: {
-            remainingBalanceCents: pesosToCents(cobro.remainingBalance),
-            orderPaymentStatus: isFullyPaid || cobro.cerrada ? 'PAID' : 'PARTIAL',
-            orderTotalCents: pesosToCents(newTotal),
-            totalPaidCents: pesosToCents(totalPaidIncludingTip),
-          },
-          loyaltyBase: Math.max(0, newTotal - totalTip),
-        }
-      }, ORDER_LOCK_WAIT_BUDGET)
+      paymentResult = await prisma.$transaction(
+        async tx =>
+          await registrarAbonoEnTx(
+            tx,
+            {
+              venueId,
+              orderId,
+              effectiveStaffId,
+              marcarCocina,
+              conSesionDeVales: !!order.areaTicketCheckoutSession,
+              rechazoDelPersonal,
+            },
+            {
+              amountCents: amount,
+              tipCents: tip,
+              method: paymentMethod,
+              idempotencyKey: input.idempotencyKey,
+              isOfflineReplay: input.isOfflineReplay,
+              externalSource: input.externalSource,
+              tender: tenderRef,
+              dentroDeLaTx: input.dentroDeLaTx,
+              colaConDefectoH1: input.colaConDefectoH1,
+              propiedadDeMesa: input.propiedadDeMesa,
+            },
+            reconciliationEnabled,
+          ),
+        ORDER_LOCK_WAIT_BUDGET,
+      )
       break // ganamos la transición
     } catch (err: any) {
       // 🛡️ Carrera IDEMPOTENTE: si dos requests con la MISMA idempotencyKey pasan
@@ -3636,6 +3796,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // Inalcanzable: el bucle o devuelve, o asigna, o lanza. Guard para el tipo.
     throw new ConflictError('No se pudo registrar el cobro. Vuelve a intentar.', 'ORDER_PAYMENT_CONFLICT')
   }
+  // El tender lo resolvió el núcleo; el cajón, los sockets y la respuesta lo leen de este holder, como antes.
+  tenderState.resolved = paymentResult.tenderResuelto
   const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance, aplicadoCents, cambioCents, loyaltyBase } = paymentResult
   // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado.
   const amountDecimal = aplicadoCents / 100
@@ -3673,7 +3835,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
   // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
   // resultó ajena hasta la relectura bajo el candado.
-  const mesaAjena = input.mesaAjena ?? propiedadBajoCandado.mesaAjena
+  const mesaAjena = input.mesaAjena ?? paymentResult.mesaAjena
   if (mesaAjena) {
     void (await import('../dashboard/activity-log.service')).logAction({
       action: 'CAPTURED_PAYMENT_ON_FOREIGN_TABLE',
@@ -3921,6 +4083,649 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     // El POS ya no tiene que deducirlo del carrito.
     ...balance,
   }
+}
+
+// ══════════════════════════════════════════════════════════════════════════════
+// TARJETAS DE REGALO — cobrar con saldo (spec 2026-10-14 § 5.4, R5)
+// ══════════════════════════════════════════════════════════════════════════════
+
+const LLAVE_DE_COBRO_CON_SALDO = /^[A-Za-z0-9_-]{8,64}$/
+const LLAVE_DE_OPERACION_DE_SALDO = /^[A-Za-z0-9_:-]{8,128}$/
+/**
+ * A8, ruling 3: el cobro con saldo comparte el núcleo con `payCashOrder`, pero la auditoría del turno
+ * (`PAYMENT_WITHOUT_SHIFT`) y la de una reapertura lo nombran a él, nunca al efectivo.
+ */
+const CANAL_DEL_COBRO_CON_SALDO = { turno: 'payGiftCardBalanceOnOrder', reapertura: 'payGiftCardBalanceOnOrder' } as const
+
+/** Formas del índice («Adiciones al contrato» § 2, enmienda E7). C3 convierte los montos a Decimal desde su texto. */
+export interface PayGiftCardBalanceInput {
+  /** 8–64 [A-Za-z0-9_-]; la MISMA en cada reintento (Payment [venueId, idempotencyKey], R12). */
+  idempotencyKey: string
+  /** Prueba de posesión: el código tecleado o escaneado. La 1c agrega `{ kind: 'WALLET_PASS'; qrToken }`. */
+  proof: { kind: 'CODE'; code: string }
+  /** Pesos, venta SIN propina, > 0, centavos exactos. Nunca más de lo que debe la cuenta (R5). */
+  amount: Prisma.Decimal
+  /** Pesos, ≥ 0 (el tender de regalo captura propina, D8). */
+  tip: Prisma.Decimal
+  /** `Staff.id`. */
+  staffId: string
+  /** `X-Device-Id`. */
+  deviceId: string | null
+}
+
+export interface PayGiftCardBalanceResult {
+  paymentId: string
+  orderId: string
+  orderNumber: string
+  /** Pesos. */
+  amount: number
+  tipAmount: number
+  /** Un renglón por sobre descontado (venta + propina), con el saldo que le quedó. */
+  redeemed: Array<{ giftCardId: string; last4: string; amount: number; balanceAfter: number }>
+  /** Pesos que todavía debe la cuenta. */
+  orderRemaining: number
+  orderPaymentStatus: 'PARTIAL' | 'PAID'
+  /**
+   * Decisión del coordinador (conciliación 14-oct): el recibo digital con la MISMA forma y el MISMO armado que la respuesta
+   * de `payCashOrder` (`generateAndStoreReceipt` + `mapDigitalReceiptResponse`, después del commit). Un recibo que falla
+   * nunca tumba el cobro: llega `null`. En un reintento por llave, el recibo que ya se guardó.
+   */
+  digitalReceipt?: { accessKey: string; receiptUrl: string; autofacturaAvailable: boolean } | null
+  /**
+   * r1 (F9): `true` = la llave ya tenía su cobro —reintento o carrera perdida—; es la respuesta del primer cobro y no se
+   * movió saldo. `payGiftCardBalanceOnOrder` siempre lo manda (`false` sólo si ESTA llamada creó el Payment); C3 escribe
+   * `GIFT_CARD_REDEEMED` sólo con `false`. `getGiftCardPaymentByKey` no lo pone (es una consulta).
+   */
+  replay?: boolean
+}
+
+function pesosExactos(valor: unknown, campo: string): Prisma.Decimal {
+  if (!Prisma.Decimal.isDecimal(valor) || !valor.isFinite() || valor.isNegative()) {
+    throw new BadRequestError(`${campo} debe ser un monto en pesos (no negativo).`)
+  }
+  if (valor.decimalPlaces() > 2) throw new BadRequestError(`${campo} debe llevar centavos exactos.`)
+  return valor
+}
+
+/** Centavos enteros → pesos, exacto (no hay `centsToPesos` en el repo). */
+function centavosAPesos(centavos: number | undefined): number {
+  return new Prisma.Decimal(centavos ?? 0).dividedBy(100).toNumber()
+}
+
+function tarjetaNoEncontrada(): GiftCardError {
+  return new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio. Revisa el código.', 404)
+}
+
+/** El cobro con saldo de una llave, tal como lo devolvería el primer intento. `null` si no existe o no es de saldo. */
+export async function getGiftCardPaymentByKey(venueId: string, idempotencyKey: string): Promise<PayGiftCardBalanceResult | null> {
+  const payment = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
+    select: {
+      id: true,
+      orderId: true,
+      amount: true,
+      tipAmount: true,
+      tenderType: { select: { systemKind: true } },
+      order: { select: { orderNumber: true } },
+      receipts: RECIBO_CANONICO,
+    },
+  })
+  if (!payment?.orderId || !isGiftCardTenderKind(payment.tenderType?.systemKind)) return null
+  // Un cobro con saldo descuenta UN sobre en la 1a (una prueba de posesión), y nunca más de MAX_SOBRES_POR_CUENTA: este
+  // `take` lee todos (ruling 6).
+  const canjes = await prisma.giftCardActivity.findMany({
+    where: { venueId, paymentId: payment.id, type: 'REDEEM' },
+    select: { giftCardId: true, amount: true, balanceAfter: true, giftCard: { select: { codeLast4: true } } },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    take: MAX_SOBRES_POR_CUENTA,
+  })
+  const saldo = await readOrderBalanceSnapshot(venueId, payment.orderId)
+  return {
+    paymentId: payment.id,
+    orderId: payment.orderId,
+    orderNumber: payment.order?.orderNumber ?? '',
+    amount: Number(payment.amount),
+    tipAmount: Number(payment.tipAmount),
+    redeemed: canjes.map(c => ({
+      giftCardId: c.giftCardId,
+      last4: c.giftCard.codeLast4,
+      amount: Number(c.amount),
+      balanceAfter: Number(c.balanceAfter),
+    })),
+    orderRemaining: centavosAPesos(saldo.remainingBalanceCents),
+    orderPaymentStatus: saldo.orderPaymentStatus ?? 'PARTIAL',
+    // Como el reintento de `payCashOrder`: el recibo que ya se guardó para este cobro.
+    digitalReceipt: payment.receipts?.[0]
+      ? mapDigitalReceiptResponse(payment.receipts[0], await resolveAutofacturaAvailable(payment.orderId))
+      : null,
+  }
+}
+
+/**
+ * Cobrar con saldo de tarjeta de regalo en UNA transacción (R5): Order → sobre → turno; descuento condicionado; un REDEEM
+ * por sobre y UN Payment del tender de sistema. Online-only. Nunca efectivo ni cambio: el monto no pasa de lo que debe la
+ * cuenta y nunca hay vuelto. Cobrar no se gatea por plan (§ 6): una tarjeta vendida se honra aunque la función se apague.
+ */
+export async function payGiftCardBalanceOnOrder(
+  venueId: string,
+  orderId: string,
+  input: PayGiftCardBalanceInput,
+): Promise<PayGiftCardBalanceResult> {
+  if (!LLAVE_DE_COBRO_CON_SALDO.test(input?.idempotencyKey ?? '')) {
+    throw new BadRequestError('idempotencyKey debe tener de 8 a 64 caracteres (letras, números, guion o guion bajo).')
+  }
+  if (input?.proof?.kind !== 'CODE' || typeof input.proof.code !== 'string') {
+    throw new BadRequestError('Por ahora el saldo se cobra con el código de la tarjeta (proof.kind = CODE).')
+  }
+  const monto = pesosExactos(input.amount, 'amount')
+  const propina = pesosExactos(input.tip ?? new Prisma.Decimal(0), 'tip')
+  if (!monto.greaterThan(0))
+    throw new GiftCardError('GIFT_CARD_AMOUNT_OUT_OF_RANGE', 'El monto a pagar con saldo debe ser mayor a cero.', 422)
+
+  const order = await prisma.order.findUnique({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      orderNumber: true,
+      // Ronda 1 (fix 2): las salidas de repetición completan la liberación de la mesa, como `payCashOrder`.
+      tableId: true,
+      areaTicketCheckoutSession: { select: { id: true } },
+      customer: { select: { id: true, firstName: true, lastName: true } },
+    },
+  })
+  if (!order) throw new NotFoundError('Order not found')
+  if (order.areaTicketCheckoutSession) {
+    throw new GiftCardError(
+      'GIFT_CARD_TENDER_NOT_ALLOWED',
+      'Las ventas con vales por área no se pagan con saldo de tarjeta de regalo.',
+      409,
+    )
+  }
+
+  const normalizado = normalizeGiftCardCode(input.proof.code)
+  // La huella de la prueba presentada: resuelve el sobre aquí y se vuelve a comparar BAJO el candado (r1, A-1).
+  const huellaPresentada = normalizado ? hashGiftCardCode(normalizado) : null
+  const sobre = huellaPresentada
+    ? await prisma.giftCard.findFirst({ where: { venueId, codeHash: huellaPresentada }, select: { id: true, codeLast4: true } })
+    : null
+  if (!sobre) throw tarjetaNoEncontrada()
+
+  const conflicto = () =>
+    new GiftCardError('IDEMPOTENCY_KEY_REUSED', 'Esta llave ya registró otro cobro. Genera una llave nueva para este cobro.', 409)
+  const mismoCobro = (previo: PayGiftCardBalanceResult) =>
+    previo.orderId === orderId &&
+    new Prisma.Decimal(previo.amount).equals(monto) &&
+    new Prisma.Decimal(previo.tipAmount).equals(propina) &&
+    previo.redeemed.every(s => s.giftCardId === sobre.id)
+
+  const yaExiste = await prisma.payment.findUnique({
+    where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
+    select: { id: true },
+  })
+  if (yaExiste) {
+    const previo = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
+    if (!previo || !mismoCobro(previo)) throw conflicto()
+    // Si una caída se llevó la liberación de la mesa del primer cobro (que saldó la cuenta), el reintento la completa.
+    await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
+    return { ...previo, replay: true }
+  }
+
+  await ensureGiftCardTender(prisma, venueId)
+  const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
+  // El gate se resuelve FUERA de la transacción, como en `payCashOrder`, y viaja como 4º argumento del núcleo: la
+  // guardia AST de turnos lo sigue de llamada en llamada hasta esta lectura canónica (ruling 1 de A8).
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  const marcarCocina = await debeMarcarCocina(venueId, { orderId })
+
+  let bloqueados: LockedGiftCard[] = []
+  let canje: Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }> = []
+  let abono: AbonoEnTx
+  try {
+    abono = await prisma.$transaction(async tx => {
+      const tenderResuelto = await resolveGiftCardTenderForChargeInTx(tx, venueId)
+      return await registrarAbonoEnTx(
+        tx,
+        {
+          venueId,
+          orderId,
+          effectiveStaffId,
+          marcarCocina,
+          // Siempre `false`: arriba se rechazan las ventas con vales (GIFT_CARD_TENDER_NOT_ALLOWED).
+          conSesionDeVales: !!order.areaTicketCheckoutSession,
+          // El personal ya se validó arriba y su rechazo salió como siempre (el cobro con saldo no difiere ese 400).
+          rechazoDelPersonal: null,
+        },
+        {
+          amountCents: pesosToCents(monto.toNumber()),
+          tipCents: pesosToCents(propina.toNumber()),
+          method: 'OTHER',
+          idempotencyKey: input.idempotencyKey,
+          isOfflineReplay: false,
+          tender: { resuelto: tenderResuelto },
+          canal: CANAL_DEL_COBRO_CON_SALDO,
+          // Bajo el candado de la Order y ANTES de que el núcleo reclame el turno: aquí se rechaza todo lo que no puede
+          // pagar y se bloquea el sobre (E4: Order → sobre → turno; ruling 5). Después del turno no se toma ningún sobre.
+          trasCandadoDeOrden: async (txCandado, cuenta) => {
+            // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
+            rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
+            // Codex #1 (cierre): el candado de la Order serializa escrituras, no el desenlace del banco. Con un cobro de terminal
+            // cuyo resultado no está acreditado, el banco todavía puede aprobar ese dinero: descontar el saldo cobraría la venta
+            // dos veces. Las salidas de repetición (la llave que ya cobró, la ganadora de una carrera) siguen antes y en el catch.
+            await assertNoLiveTerminalCharge(
+              txCandado,
+              { venueId, orderId },
+              {
+                mensaje:
+                  'Hay un cobro en curso en la terminal para esta cuenta. Espera su resultado (o cancélalo) antes de cobrar con saldo.',
+              },
+            )
+            // D8 / ruling 8: una tarjeta no se paga con saldo de otra (spec: no se compran tarjetas con saldo).
+            if (await esCuentaDeTarjetasEnTx(txCandado, orderId)) {
+              throw new GiftCardError(
+                'GIFT_CARD_TENDER_NOT_ALLOWED',
+                'Una tarjeta de regalo no se paga con saldo de otra tarjeta de regalo.',
+                409,
+              )
+            }
+            const pendiente = computeOrderBalance(cuenta.fresh, cuenta.previousPayments).remainingBalance
+            if (monto.greaterThan(pendiente)) {
+              throw new GiftCardError(
+                'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
+                `Esta cuenta debe ${formatoPesos(pendiente)}: el saldo de la tarjeta no paga de más.`,
+                422,
+                { pendiente: pendiente.toNumber() },
+              )
+            }
+            // Una prueba de posesión = un sobre (ruling 6: un cobro nunca descuenta más de MAX_SOBRES_POR_CUENTA, así
+            // que las lecturas acotadas de la libreta —`sobresDelCanje`, `revertirCanjeEnTx`— lo ven completo).
+            bloqueados = await lockGiftCardsForUpdate(txCandado, [sobre.id])
+            const [card] = bloqueados
+            if (!card || card.venueId !== venueId || card.status === 'PENDING' || card.status === 'DEACTIVATED') throw tarjetaNoEncontrada()
+            // r1 (A-1): el código se resolvió a un sobre ANTES de la transacción; si el gerente lo reemplazó mientras
+            // esperábamos el candado, la huella vigente ya no es la de la prueba presentada: el código anterior no sirve.
+            if (card.codeHash !== huellaPresentada) throw tarjetaNoEncontrada()
+            if (card.status === 'BLOCKED') {
+              throw new GiftCardError('GIFT_CARD_BLOCKED', 'Esta tarjeta de regalo está bloqueada. Pide al gerente que la revise.', 409)
+            }
+            if (card.status !== 'ACTIVE') throw tarjetaNoEncontrada()
+            if (card.expiresAt && card.expiresAt.getTime() <= Date.now()) {
+              throw new GiftCardError('GIFT_CARD_EXPIRED', 'Esta tarjeta de regalo ya venció.', 409)
+            }
+            const disponible = saldoUsable(bloqueados, new Date())
+            if (disponible.lessThan(monto.plus(propina))) {
+              throw new GiftCardError(
+                'GIFT_CARD_INSUFFICIENT_BALANCE',
+                `Quedan ${formatoPesos(disponible)} en la tarjeta de regalo.`,
+                409,
+                {
+                  saldoDisponible: disponible.toNumber(),
+                },
+              )
+            }
+          },
+          // El descuento escribe en el sobre que el gancho YA bloqueó: no toma candado nuevo después del turno.
+          dentroDeLaTx: async (txCobro, cobro) => {
+            canje = await canjearSobresEnTx(txCobro, {
+              venueId,
+              orderId,
+              paymentId: cobro.paymentId,
+              amount: monto.plus(propina),
+              cards: bloqueados,
+              staffId: effectiveStaffId ?? null,
+              deviceId: input.deviceId ?? null,
+            })
+          },
+        },
+        reconciliationEnabled,
+      )
+    }, ORDER_LOCK_WAIT_BUDGET)
+  } catch (err: any) {
+    // r1 (A-2): carrera idempotente. Dos peticiones con la MISMA llave pasan la consulta de arriba; la segunda espera la
+    // Order y, cuando entra, la cuenta ya está pagada o el saldo ya se consumió: falla ANTES del índice único de Payment
+    // (cuenta PAGADA, GIFT_CARD_INSUFFICIENT_BALANCE, GIFT_CARD_AMOUNT_OUT_OF_RANGE por pendiente, CAS perdido). Antes
+    // de mostrar CUALQUIER error se busca el cobro de la ganadora por la llave: mismo contenido ⇒ su respuesta, como
+    // repetición; otro contenido ⇒ IDEMPOTENCY_KEY_REUSED. Sin ganadora, el error es real y sigue su camino.
+    // Ronda 1 (fix 3): si la búsqueda de la ganadora falla (la base no contesta), sale el error ORIGINAL del cobro.
+    let ganador: PayGiftCardBalanceResult | null
+    try {
+      ganador = await getGiftCardPaymentByKey(venueId, input.idempotencyKey)
+    } catch (busqueda) {
+      logger.warn('[ORDER.MOBILE] No se pudo buscar el cobro con saldo de esta llave tras un error; sale el error original', {
+        venueId,
+        orderId,
+        error: busqueda instanceof Error ? busqueda.message : String(busqueda),
+      })
+      throw err
+    }
+    if (ganador) {
+      if (mismoCobro(ganador)) {
+        await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
+        return { ...ganador, replay: true }
+      }
+      throw conflicto()
+    }
+    if (err?.code === 'P2002' || err instanceof CobroYaRegistrado) throw conflicto()
+    if (err?.code === 'PAY_CASH_CAS_LOST') {
+      throw new ConflictError(
+        // r1 (M3): lo ve la cajera, sin jerga; la app reintenta con la misma idempotencyKey (contrato § 4).
+        'Otro cobro cambió esta cuenta al mismo tiempo. Intenta otra vez.',
+        'ORDER_PAYMENT_CONFLICT',
+      )
+    }
+    throw err
+  }
+
+  const { newPayment: payment, isFullyPaid, postingId, balance, loyaltyBase } = abono
+  logger.info(`🎁 [ORDER.MOBILE] Cobro con saldo de tarjeta de regalo | paymentId=${payment.id} | order=${order.orderNumber}`)
+
+  if (isFullyPaid && !abono.areaTicketOrder && abono.tableId) {
+    try {
+      const { releaseTableIfSettled } = await import('../tpv/table.tpv.service')
+      await releaseTableIfSettled(venueId, abono.tableId)
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Liberar la mesa tras el cobro con saldo falló (el cobro quedó)', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (isFullyPaid && postingId) {
+    try {
+      const { applySalePosting } = await import('@/services/inventory/inventoryPosting.service')
+      await applySalePosting(postingId, effectiveStaffId || input.staffId || null)
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] El inventario tras el cobro con saldo falló (el cobro quedó)', {
+        orderId,
+        postingId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (isFullyPaid) {
+    void (async () => {
+      try {
+        const { runAutoReorderForVenue } = await import('@/services/dashboard/autoReorder.service')
+        await runAutoReorderForVenue(venueId)
+      } catch (error) {
+        logger.error('[ORDER.MOBILE] Auto-reorden tras el cobro con saldo falló', {
+          orderId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    })()
+  }
+  // El recibo digital, armado IGUAL que en `payCashOrder` (después del commit, esperado para que el accessKey viaje en ESTA
+  // respuesta); si falla, el cobro no se cae y llega `null` (decisión del coordinador, conciliación 14-oct).
+  let digitalReceipt: PayGiftCardBalanceResult['digitalReceipt'] = null
+  try {
+    const receipt = await generateAndStoreReceipt(venueId, payment.id)
+    digitalReceipt = mapDigitalReceiptResponse(receipt, await resolveAutofacturaAvailable(orderId))
+  } catch (error) {
+    logger.error('[ORDER.MOBILE] Recibo del cobro con saldo falló', {
+      paymentId: payment.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  if (isFullyPaid) {
+    try {
+      const { onOrderPaid } = await import('@/services/referrals/referralQualification.service')
+      await onOrderPaid({ orderId, venueId })
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Referidos tras el cobro con saldo fallaron', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+    // R1: USAR la tarjeta sí da sellos y puntos, como cualquier compra (spec § 5.4.5).
+    try {
+      const { awardLoyaltyForPaidOrder } = await import('@/services/shared/loyaltyOnPaidOrder')
+      await awardLoyaltyForPaidOrder({
+        venueId,
+        orderId,
+        orderTotal: loyaltyBase,
+        staffId: effectiveStaffId,
+        legacyCustomer: order.customer
+          ? { id: order.customer.id, firstName: order.customer.firstName, lastName: order.customer.lastName }
+          : null,
+      })
+    } catch (error) {
+      logger.error('[ORDER.MOBILE] Lealtad tras el cobro con saldo falló', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+    }
+  }
+  if (isFullyPaid && marcarCocina) await armarComandasTrasCommit(venueId, orderId, 'PAID')
+
+  const broadcastingService = socketManager.getBroadcastingService()
+  if (broadcastingService) {
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.PAYMENT_COMPLETED, {
+      paymentId: payment.id,
+      orderId,
+      orderNumber: order.orderNumber,
+      amount: monto.toNumber(),
+      tipAmount: propina.toNumber(),
+      method: 'OTHER',
+      status: 'completed',
+    })
+    broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, {
+      orderId,
+      orderNumber: order.orderNumber,
+      paymentStatus: balance.orderPaymentStatus,
+    })
+  }
+
+  return {
+    paymentId: payment.id,
+    orderId,
+    orderNumber: order.orderNumber,
+    amount: monto.toNumber(),
+    tipAmount: propina.toNumber(),
+    redeemed: canje.map(c => ({
+      giftCardId: c.giftCardId,
+      last4: sobre.codeLast4,
+      amount: c.amount.toNumber(),
+      balanceAfter: c.balanceAfter.toNumber(),
+    })),
+    orderRemaining: centavosAPesos(balance.remainingBalanceCents),
+    orderPaymentStatus: balance.orderPaymentStatus,
+    digitalReceipt,
+    replay: false,
+  }
+}
+
+/**
+ * «Regresar el saldo y cancelar la cuenta» (spec § 5.4.4): el cliente se fue después de pagar una parte con saldo. Sólo
+ * para cuentas NO pagadas cuyos únicos pagos vivos son del tender de regalo. Un camino propio bajo el mismo candado que
+ * `cancelOrderInTransaction`; el guardia general de cancelación no se relaja. Devuelve `replay: true` si la cuenta ya la
+ * había cancelado esta misma `operationKey` (r1, F9: la bitácora la escribe C3 sólo con `replay: false`; aquí no).
+ *
+ * Ruling 7 (A8): un sobre DEACTIVATED (la terminal ya devolvió el dinero de su compra, E1) nunca recibe saldo de vuelta en
+ * silencio: la operación se rechaza entera ANTES de escribir nada. El cobro con saldo sigue vivo y a la vista en la cuenta
+ * abierta, y ese sobre lleva su anomalía `REFUND_WITHOUT_CANCEL` (E1: la escribe el gancho de reembolsos de B1); el
+ * gerente decide.
+ */
+export async function returnGiftBalanceAndCancelOrder(
+  venueId: string,
+  orderId: string,
+  input: { staffId: string; operationKey: string },
+): Promise<{ replay: boolean }> {
+  if (!LLAVE_DE_OPERACION_DE_SALDO.test(input?.operationKey ?? '')) {
+    throw new BadRequestError(
+      'La llave de la operación debe tener de 8 a 128 caracteres (letras, números, guion, guion bajo o dos puntos).',
+    )
+  }
+  const staffId = await validateStaffVenue(input.staffId, venueId)
+  const raiz = 'gr' + createHash('sha256').update(input.operationKey).digest('hex').slice(0, 48)
+  const llaveDeReverso = (i: number) => `${raiz}:${i}`
+  const { bloquearCobroParaReembolso, writeRefundInTx } = await import('../shared/writeRefundInTx')
+  /** Lo que falta devolver de un cobro ya bloqueado (venta y propina por separado), en centavos. */
+  const pendienteDeDevolver = (b: Awaited<ReturnType<typeof bloquearCobroParaReembolso>>) => ({
+    ventaCents: Math.max(0, pesosToCents(Number(b.original.amount)) - b.refundedSalesCents),
+    propinaCents: Math.max(0, pesosToCents(Number(b.original.tipAmount)) - b.refundedTipsCents),
+  })
+
+  const resultado = await prisma.$transaction(async tx => {
+    let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
+    try {
+      scope = await lockTableOrderScope(tx, { venueId, orderIds: [orderId], kdsOrderIds: [orderId] })
+    } catch (error) {
+      if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
+      throw error
+    }
+    const cuenta = await tx.order.findUnique({ where: { id: orderId, venueId }, select: { id: true, status: true, paymentStatus: true } })
+    if (!cuenta) throw new NotFoundError('Order not found')
+    /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
+    const leerCobros = async () => ({
+      tender: await tx.venueTenderType.findFirst({ where: { venueId, systemKind: 'GIFT_CARD' }, select: { id: true } }),
+      cobros: await tx.payment.findMany({
+        where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+        select: { id: true, tenderTypeId: true },
+        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+        take: MAX_SOBRES_POR_CUENTA + 1,
+      }),
+    })
+
+    // La primera devolución ESCRITA lleva siempre la llave `:0` (abajo): si existe, esta operación ya corrió.
+    const previo = await tx.payment.findUnique({
+      where: { venueId_idempotencyKey: { venueId, idempotencyKey: llaveDeReverso(0) } },
+      select: { orderId: true },
+    })
+    if (previo && previo.orderId !== orderId) {
+      throw new GiftCardError(
+        'IDEMPOTENCY_KEY_REUSED',
+        'Esta llave ya se usó para regresar el saldo de otra cuenta. Vuelve a intentarlo desde la cuenta.',
+        409,
+      )
+    }
+    if (claseDeEstado(cuenta.status) === 'CANCELADA') {
+      if (previo) return null // reintento de una operación que ya terminó
+      // Ronda 1 (fix 1): si ya no quedaba nada que regresar, la primera llamada canceló SIN escribir ninguna devolución y
+      // no existe `:0`. Su reintento (la respuesta se perdió y la cola lo reenvía) se reconoce porque TODOS los pagos vivos
+      // de la cuenta son del tender de regalo y ya están devueltos completos: es una repetición y nada se escribe. Este
+      // camino es el único que cancela esa cuenta (el guardia general rechaza una PARTIAL), así que no se rechaza antes.
+      const { tender, cobros } = await leerCobros()
+      const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
+      if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
+        let todoDevuelto = true
+        for (const cobro of cobros) {
+          const pendiente = pendienteDeDevolver(
+            await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
+          )
+          if (pendiente.ventaCents + pendiente.propinaCents > 0) {
+            todoDevuelto = false
+            break
+          }
+        }
+        if (todoDevuelto) return null
+      }
+      throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
+    }
+    if (cuenta.paymentStatus === 'PAID') {
+      throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
+    }
+
+    const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId, reason: 'Saldo de tarjeta de regalo regresado' })
+    await assertNoLiveTerminalCharge(tx, { venueId, orderId })
+    const { tender, cobros } = await leerCobros()
+    if (!tender || cobros.length === 0 || cobros.some(c => c.tenderTypeId !== tender.id)) {
+      throw new GiftCardError(
+        'GIFT_CARD_TENDER_NOT_ALLOWED',
+        'Sólo se regresa el saldo y se cancela una cuenta cuyos únicos pagos son con tarjeta de regalo.',
+        409,
+      )
+    }
+    // Ronda 1 (fix 5): pasar del tope tiene su propio mensaje (antes decía que había pagos que no eran de saldo).
+    if (cobros.length > MAX_SOBRES_POR_CUENTA) {
+      throw new GiftCardError(
+        'GIFT_CARD_TENDER_NOT_ALLOWED',
+        `Esta cuenta tiene más de ${MAX_SOBRES_POR_CUENTA} cobros con saldo de tarjeta de regalo: no se pueden regresar todos de una vez. Pide al gerente que la revise.`,
+        409,
+        { motivo: 'DEMASIADOS_COBROS', maximo: MAX_SOBRES_POR_CUENTA },
+      )
+    }
+
+    // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
+    // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
+    // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
+    // de `cobros` y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
+    // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
+    // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
+    const bloqueos: Array<Awaited<ReturnType<typeof bloquearCobroParaReembolso>>> = []
+    for (const cobro of cobros) {
+      bloqueos.push(await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
+    }
+    // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
+    const porDevolver = cobros
+      .map((cobro, i) => ({ cobro, bloqueado: bloqueos[i], ...pendienteDeDevolver(bloqueos[i]) }))
+      .filter(p => p.ventaCents + p.propinaCents > 0)
+    const sobresDeLosCobros: string[] = []
+    for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))
+    const sobres = await lockGiftCardsForUpdate(tx, sobresDeLosCobros)
+
+    // Ruling 7: un sobre DEACTIVATED no recibe saldo de vuelta (`revertirCanjeEnTx` le sumaría saldo a una tarjeta muerta,
+    // fuera de la vista de todos). Se rechaza todo antes de escribir: el cobro con saldo sigue en la cuenta abierta. La regla es la
+    // de la libreta (B1 r1, fix 5); aquí sólo cambia el texto.
+    await rechazarSiRegresaASobreDesactivado(tx, venueId, sobres, (cuales, cuantos) =>
+      cuantos === 1
+        ? `La tarjeta de regalo terminación ${cuales} ya fue cancelada: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que la revise.`
+        : `Las tarjetas de regalo terminación ${cuales} ya fueron canceladas: su saldo no se puede regresar. Cobra lo que falta con otro medio o pide al gerente que las revise.`,
+    )
+
+    // Llaves `:0`, `:1`… en el orden en que se ESCRIBEN: la primera devolución siempre es `:0` (la que reconoce el reintento).
+    let escritas = 0
+    for (const p of porDevolver) {
+      const { refundPaymentId } = await writeRefundInTx(tx, {
+        originalPaymentId: p.cobro.id,
+        venueId,
+        salesRefundCents: p.ventaCents,
+        tipRefundCents: p.propinaCents,
+        refundedItems: [],
+        reason: 'CANCELLED_ORDER',
+        note: 'Saldo de tarjeta de regalo regresado al cancelar la cuenta',
+        staffId: staffId ?? null,
+        idempotencyKey: llaveDeReverso(escritas),
+        tenderCommission: 'NONE',
+        shift: 'CLAIM_LIVE',
+        provenance: 'MANUAL',
+        bloqueado: p.bloqueado,
+      })
+      escritas += 1
+      await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, p.cobro.id)
+      await revertirCanjeEnTx(tx, {
+        venueId,
+        originalPaymentId: p.cobro.id,
+        refundPaymentId,
+        amount: new Prisma.Decimal(p.ventaCents + p.propinaCents).dividedBy(100),
+        staffId: staffId ?? null,
+      })
+    }
+
+    const cancelada = await tx.order.update({
+      where: { id: orderId, venueId },
+      data: { status: 'CANCELLED', version: { increment: 1 } },
+      select: { tableId: true },
+    })
+    const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
+    const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')
+    const reconciled = await reconcileTableAfterOrderRemovedInTransaction(tx, scope, orderId)
+    const ownTable = reconciled.tables.find(table => table.id === cancelada.tableId)
+    const table = reconciled.tables.find(row => row.id === boundTable?.id) ?? ownTable ?? null
+    const tpvTableFreed = Boolean(ownTable?.status === 'AVAILABLE' && ownTable.currentOrderId === null)
+    const affectedRefs: HttpEnvelope['affectedRefs'] = [
+      { kind: 'Order', id: orderId },
+      ...reconciled.tables.map(row => ({ kind: 'Table' as const, id: row.id })),
+      ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
+      ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
+    ]
+    return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+  }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (!resultado) return { replay: true }
+  await publishCancelledOrder(venueId, resultado, staffId, 'Saldo de tarjeta de regalo regresado')
+  // r1 (F9): sin `logAction` aquí. `GIFT_CARD_BALANCE_RETURNED_ORDER_CANCELLED` tiene un solo dueño: el controller de C3,
+  // fuera de la transacción y sólo con `replay: false`.
+  return { replay: false }
 }
 
 /**
@@ -4241,6 +5046,9 @@ export async function cancelOrderInTransaction(
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
     select: { tableId: true },
   })
+  // Spec § 5.1.8: una cuenta de tarjetas cancelada ANTES de cobrarse deja sus sobres DEACTIVATED sin activarse.
+  // Para cualquier otra cuenta es una consulta que no encuentra sobres.
+  await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId, staffId: performedBy ?? null })
   await dentroDeLaTx?.(tx, { orderId })
   const boundTable = scope.tables.find(table => table.currentOrderId === orderId)
   const { reconcileTableAfterOrderRemovedInTransaction } = await import('../tpv/table.tpv.service')

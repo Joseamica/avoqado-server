@@ -141,7 +141,8 @@ const SELECT_ORDEN = {
   source: true,
   externalId: true,
   tableId: true,
-  items: { select: { areaTicketLineId: true } },
+  // ⭐ B6 M4 (cierre): `giftCardId` para rechazar una cuenta de tarjetas en los dos lados.
+  items: { select: { areaTicketLineId: true, giftCardId: true } },
   payments: {
     where: { status: 'COMPLETED' as const },
     select: { id: true, status: true, type: true, amount: true, tipAmount: true },
@@ -166,7 +167,7 @@ type OrdenCruda = {
   source: string
   externalId: string | null
   tableId: string | null
-  items: Array<{ areaTicketLineId: string | null }>
+  items: Array<{ areaTicketLineId: string | null; giftCardId: string | null }>
   payments: Array<{ id: string; status: string; type: string | null; amount: Prisma.Decimal; tipAmount: Prisma.Decimal }>
 }
 
@@ -191,6 +192,14 @@ const aFoto = (o: OrdenCruda): OrdenFoto & { total: Prisma.Decimal; tipGuardado:
   total: o.total,
   tipGuardado: o.tipAmount,
 })
+
+/** La foto del cobro con su `tenderType.systemKind` (⭐ B6 M4: un cobro con saldo de tarjeta de regalo no se reasigna). */
+function aCobroFoto<T extends { type: unknown; status: unknown; tenderType: { systemKind: string | null } | null }>(
+  c: T,
+): Omit<T, 'tenderType'> & { type: string | null; status: string; tenderSystemKind: string | null } {
+  const { tenderType, ...resto } = c
+  return { ...resto, type: c.type as string | null, status: c.status as string, tenderSystemKind: tenderType?.systemKind ?? null }
+}
 
 interface Cargado {
   caso: CasoReasignacion
@@ -217,6 +226,7 @@ async function cargarCaso(prisma: PrismaCliente, caso: CasoReasignacion): Promis
       shiftId: true,
       createdAt: true,
       method: true,
+      tenderType: { select: { systemKind: true } },
     },
   })
   if (!cobro) return { caso, faltante: `el cobro ${caso.paymentId} no existe en esta base` }
@@ -229,7 +239,7 @@ async function cargarCaso(prisma: PrismaCliente, caso: CasoReasignacion): Promis
   if (!destino) return { caso, faltante: `no hay orden ${caso.aOrden} en el negocio del cobro` }
   return {
     caso,
-    cobro: { ...cobro, type: cobro.type as string | null, status: cobro.status as string },
+    cobro: aCobroFoto(cobro),
     origen: aFoto(origen as OrdenCruda),
     destino: aFoto(destino as OrdenCruda),
     negocio: negocio?.name ?? cobro.venueId,
@@ -340,13 +350,14 @@ async function main(): Promise<void> {
                     tipAmount: true,
                     shiftId: true,
                     createdAt: true,
+                    tenderType: { select: { systemKind: true } },
                   },
                 })
                 const [origen, destino] = await Promise.all(
                   [antes.origen.id, antes.destino.id].map(id => tx.order.findUniqueOrThrow({ where: { id }, select: SELECT_ORDEN })),
                 )
                 return {
-                  cobro: { ...cobro, type: cobro.type as string | null, status: cobro.status as string },
+                  cobro: aCobroFoto(cobro),
                   origen: aFoto(origen as OrdenCruda),
                   destino: aFoto(destino as OrdenCruda),
                 }

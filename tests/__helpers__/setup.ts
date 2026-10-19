@@ -1,12 +1,15 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 // tests/__helpers__/setup.ts
 
@@ -70,6 +73,9 @@ process.env.MP_ACCESS_TOKEN_TEST = process.env.MP_ACCESS_TOKEN_TEST || 'TEST-at-
 process.env.MERCADO_PAGO_TOKEN_KEY =
   process.env.MERCADO_PAGO_TOKEN_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
 process.env.AGGREGATOR_TOKEN_KEY = process.env.AGGREGATOR_TOKEN_KEY || 'b'.repeat(64)
+// Tarjetas de regalo: llaves de prueba deterministas (hex de 32 bytes) ANTES de cualquier import.
+process.env.GIFT_CARD_CODE_KEY = process.env.GIFT_CARD_CODE_KEY || 'c'.repeat(64)
+process.env.GIFT_CARD_HMAC_KEY = process.env.GIFT_CARD_HMAC_KEY || 'd'.repeat(64)
 process.env.TOTALPASS_PARTNER_API_KEY = process.env.TOTALPASS_PARTNER_API_KEY || 'partner-test-key'
 process.env.MP_API_BASE_URL = process.env.MP_API_BASE_URL || 'https://api.mercadopago.com'
 process.env.MP_AUTH_BASE_URL = process.env.MP_AUTH_BASE_URL || 'https://auth.mercadopago.com.mx'
@@ -421,6 +427,10 @@ const prismaMock: any = {
   catalogPublicationFieldDecision: createMockModel(),
   // Money reconciliation (Fase 0.B: fulfillment fail-closed registra anomalías)
   moneyAnomaly: createMockModel(),
+  // Tarjetas de regalo (spec 2026-10-14): sobre, libreta y ajustes.
+  giftCard: createMockModel(),
+  giftCardActivity: createMockModel(),
+  giftCardSettings: createMockModel(),
   // Stripe webhook idempotency claims (Connect + platform)
   processedStripeEvent: createMockModel(),
   // Fase 1: outbox de avisos de aprobación de clientes (evento + entrega por destinatario)
@@ -533,6 +543,10 @@ prismaMock.shopifyLocationLink.findUnique.mockResolvedValue(null)
 prismaMock.shopifyVariantLink.findMany.mockResolvedValue([])
 prismaMock.shopifyVariantLink.findUnique.mockResolvedValue(null)
 prismaMock.orderItem.findMany.mockResolvedValue([])
+// Tarjetas de regalo: la activación, la cancelación de una cuenta sin cobrar y la revisión de la libreta consultan
+// sobres en caminos que muchas pruebas recorren sin saberlo. Sin sobres por default, igual que antes de la función.
+prismaMock.giftCard.findMany.mockResolvedValue([])
+prismaMock.giftCardActivity.findMany.mockResolvedValue([])
 // IVA por producto B2: los escritores de descuentos sincronizan los repartos leyendo las filas de la orden
 // (`sincronizarRepartos`). Mismo patrón que `orderItem`: una orden sin filas, salvo que la prueba diga otra cosa.
 prismaMock.orderDiscount.findMany.mockResolvedValue([])

@@ -106,6 +106,10 @@ export const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // Pases (TotalPass/Wellhub) — función AGGREGATOR_PASSES (Pro). Sin esto, en white-label el permiso pasaría el filtro.
   'reservations:manage-passes': 'AGGREGATOR_PASSES',
 
+  // Tarjetas de regalo — función GIFT_CARDS (Pro). SÓLO vender: cobrar con saldo, consultar y administrar lo ya vendido
+  // siguen aunque la función se apague (spec §6: el saldo es una deuda del negocio con su cliente).
+  'giftCards:sell': 'GIFT_CARDS',
+
   // Menu Management
   'menu:read': 'AVOQADO_MENU',
   'menu:write': 'AVOQADO_MENU',

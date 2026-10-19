@@ -17,6 +17,7 @@ import { DiscountScope, DiscountType, Prisma } from '@prisma/client'
 import { logAction, type LogActionParams } from './activity-log.service'
 import { computeStoredOrderTotal } from '../shared/orderBalance'
 import { esOrdenImportada, rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas, tieneRenglonDeTarjeta } from '../giftCards/cuentaDeTarjetas'
 import {
   aCentavos,
   comoJson,
@@ -946,6 +947,7 @@ async function applyEvaluatedDiscount(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. (`order` ya viene releída bajo el candado del llamador.)
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
   // Check if discount is already applied
   if (order.orderDiscounts.some(od => od.discountId === discount.discountId)) {
     return {
@@ -1118,6 +1120,7 @@ export async function removeDiscountFromOrder(
     // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
     // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
     rechazarSiEsImportada(order)
+    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de descuento')
     if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot remove discount from a paid order')
 
     const orderDiscount = await tx.orderDiscount.findFirst({
@@ -1245,6 +1248,8 @@ export async function applyAutomaticDiscounts(
     // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y
     // sus renglones traen el IVA dentro): el resultado vacío, antes de evaluar.
     if (esOrdenImportada(order)) return { applied: [], total: 0 }
+    // Tarjetas de regalo (R11): basta UN renglón de tarjeta para no rearmar la cuenta (como las demás guardias).
+    if (tieneRenglonDeTarjeta(order.items)) return { applied: [], total: 0 }
 
     const discounts = await evaluateOrderDiscounts(order, undefined, tx)
 
@@ -1316,6 +1321,7 @@ export async function applyManualDiscount(
     // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
     // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
     rechazarSiEsImportada(order)
+    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'descuentos')
     if (order.paymentStatus === 'PAID') throw new BadRequestError('Cannot apply discount to a paid order')
 
     // 🔴 MONEY: cada descuento se calcula contra lo que QUEDA por descontar, nunca contra el

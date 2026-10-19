@@ -12,6 +12,7 @@
  * es hacerlo caminar hasta el aparato para nada.
  */
 
+import { TenderSystemKind } from '@prisma/client'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 
 /** Lo que la regla necesita del cobro original. */
@@ -23,6 +24,11 @@ export interface CobroParaDevolver {
   fundsFlow: string | null
   tenderTypeId: string | null
   tenderCountsAsCash: boolean | null
+  /**
+   * Tarjetas de regalo (1a): la marca del tender de sistema. Opcional para no romper a quien no la lee; ausente = como siempre.
+   * Se compara contra el enum de Prisma (sin consulta): este archivo sigue siendo PURO.
+   */
+  tenderSystemKind?: string | null
 }
 
 export type DevolverCon = 'CASH' | 'BANK_TRANSFER'
@@ -136,6 +142,8 @@ export function resolveTerminalRefundTarget(payment: RefundablePaymentSnapshot |
 const CANALES_EN_LINEA = new Set(['WEB', 'QR', 'SDK', 'DASHBOARD_TEST'])
 
 export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean {
+  // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo. Nunca efectivo ni transferencia, aunque lo pida una app vieja.
+  if (payment.tenderSystemKind === TenderSystemKind.GIFT_CARD) return false
   if (CARD_METHODS.has(payment.method) || METODOS_DE_PROCESADOR.has(payment.method)) return false
   if (payment.tenderSatFormaPago && FORMAS_SAT_DE_TARJETA.has(payment.tenderSatFormaPago)) return false
   if (/^tarjeta/i.test(payment.externalSource ?? '')) return false

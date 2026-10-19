@@ -22,6 +22,7 @@ jest.mock('@/utils/prismaClient', () => ({
     staffVenue: { findFirst: jest.fn() },
     orderCustomer: { findMany: jest.fn() },
     order: { updateMany: jest.fn() },
+    orderItem: { findFirst: jest.fn() },
   },
 }))
 

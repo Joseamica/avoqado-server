@@ -169,7 +169,10 @@ describe('getShifts — la consulta tiene que TRAER `shiftId` de los cobros', ()
     // Sin estos dos no se puede decidir de quién es el cobro: uno da la rama estampada y el otro
     // la del huérfano. Estrecharlos deja al filtro sin el dato con el que decide.
     expect(select.shiftId).toBe(true)
-    expect(select.order).toEqual({ select: { shiftId: true } })
+    // + la marca de cuenta de tarjetas (R3, B5): un renglón con `giftCardId` basta para no sumarla a las ventas del turno.
+    expect(select.order).toEqual({
+      select: { shiftId: true, items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } },
+    })
   })
 
   it('🔴 un cobro SIN el campo `shiftId` (select estrechado) NO se cuenta: nunca se duplica dinero', async () => {

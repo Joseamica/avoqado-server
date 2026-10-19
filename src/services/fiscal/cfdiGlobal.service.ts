@@ -46,7 +46,8 @@ import {
   MOTIVO_ANIO_FUERA,
 } from './globalPeriod'
 import { validateBeforeStamp } from './cfdiValidation'
-import { mapFormaPago } from './satCatalog'
+import { formaGanadoraDeCobros } from './formaDePagoGanadora'
+import { WHERE_COBRO_ES_SALDO_DE_REGALO } from '../giftCards/giftCardMarks'
 import type { CfdiItemInput, GlobalInvoiceParams } from './providers/fiscal-provider.interface'
 import { bloquearOrdenesParaFacturar } from './admisionIva'
 import { liberarSellosDe, sellarRenglones } from './sellosIva'
@@ -2370,6 +2371,19 @@ export function dondePertenece(
   // Ajuste del founder (7-oct): lo cobrado SÓLO fuera de la terminal (ningún cobro con comercio), con un solo RFC, se revisa como efectivo o
   // candidata únicamente si el dueño pidió esas ventas en su global; si no, es SIN_TERMINAL. Con varios RFC sigue siendo SIN_EMISOR.
   const pedida = fueraDeTerminalPedida(emisor, unSoloEmisor)
+  // Tarjetas de regalo (B3 r1, opción A del coordinador): con un RFC y el interruptor apagado, una venta sin comercio CON un cobro con saldo
+  // se revisa como una de terminal (efectivo o candidata) sólo si la global de Avoqado está ENCENDIDA para este RFC: algún comercio suyo en
+  // ella (`configQueEntraALaGlobal`, la misma regla que `comercioEnLaGlobal`/`estaApagadaLaGlobal`). Apagada, sigue SIN_TERMINAL.
+  const canje: Prisma.OrderWhereInput | null =
+    unSoloEmisor && !emisor.includeOffTerminalSalesInGlobal
+      ? {
+          AND: [
+            ninguno(conComercio),
+            algun(WHERE_COBRO_ES_SALDO_DE_REGALO),
+            { venue: { fiscalEmisors: { some: { merchantConfigs: { some: configQueEntraALaGlobal(emisor.id) } } } } },
+          ],
+        }
+      : null
   switch (p) {
     case 'AJENA':
       return { AND: [ninguno(nuestro), algun(ajeno)] }
@@ -2382,6 +2396,7 @@ export function dondePertenece(
         OR: [
           { AND: [algun(compatible), ninguno(incompatible), conEfectivo] },
           pedida ? { AND: [ninguno(conComercio), conEfectivo] } : NUNCA,
+          ...(canje ? [{ AND: [canje, conEfectivo] }] : []),
         ],
       }
     case 'CANDIDATA':
@@ -2389,10 +2404,11 @@ export function dondePertenece(
         OR: [
           { AND: [algun(compatible), ninguno(incompatible), sinEfectivo] },
           pedida ? { AND: [ninguno(conComercio), sinEfectivo] } : NUNCA,
+          ...(canje ? [{ AND: [canje, sinEfectivo] }] : []),
         ],
       }
     case 'SIN_TERMINAL':
-      return unSoloEmisor && !emisor.includeOffTerminalSalesInGlobal ? ninguno(conComercio) : NUNCA
+      return canje ? { AND: [ninguno(conComercio), { NOT: canje }] } : NUNCA
   }
 }
 
@@ -2476,6 +2492,8 @@ export const ORDER_SELECT = {
       weightQuantity: true,
       orderPromotionId: true,
       isCortesia: true,
+      // Tarjetas de regalo (1a): una cuenta de VENTA de tarjetas sale entera con su motivo (`ticketParaGlobal`).
+      giftCardId: true,
       modifiers: { select: { name: true, price: true, quantity: true } },
       // Ronda 1 (I1): `name`, como la individual: un renglón sin `productName` toma el nombre del producto (`examinarRenglon`), no «Producto».
       product: {
@@ -2893,6 +2911,8 @@ export interface GlobalCandidateOrder {
     weightQuantity?: any
     orderPromotionId?: string | null
     isCortesia?: boolean | null
+    /** Tarjetas de regalo (1a): el sobre que vende este renglón. Ausente = renglón de mercancía. */
+    giftCardId?: string | null
     modifiers?: Array<{ name?: string | null; price: any; quantity?: number }> | null
     product: { name?: string | null; taxRate: any; objetoImp: string | null; ivaTratamiento?: IvaTratamiento | null } | null
   }>
@@ -2900,8 +2920,6 @@ export interface GlobalCandidateOrder {
 
 const aCentavos = (d: any): number => Math.round(Number(d ?? 0) * 100)
 const pesosTxt = (cents: number) => `$${(cents / 100).toFixed(2)}`
-/** Orden de ids estable en cualquier máquina (por código de carácter, no por idioma). */
-const porId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const tratamientoDelItem = (it: GlobalCandidateOrder['items'][number]): IvaTratamiento =>
   resolverTratamiento({ selladoIva: it.ivaTratamiento, productoIva: it.product?.ivaTratamiento, tieneProducto: !!it.product })
 
@@ -3008,15 +3026,7 @@ export function globalLinesFromOrder(o: GlobalCandidateOrder): GlobalInvoiceLine
  * `pagos` = los de la forma ganadora (para decir al dueño qué hacer).
  */
 function formaGanadoraDelTicket(pagos: GlobalCandidateOrder['payments']): { forma: string; pagos: GlobalCandidateOrder['payments'] } {
-  const grupos = new Map<string, { sumaCents: number; mayorCents: number; pagos: GlobalCandidateOrder['payments'] }>()
-  for (const p of pagos.filter(x => esCobroElegible(x))) {
-    const forma = mapFormaPago(p.method, p.tenderSatFormaPago)
-    const g = grupos.get(forma) ?? { sumaCents: 0, mayorCents: 0, pagos: [] }
-    const cents = aCentavos(p.amount)
-    grupos.set(forma, { sumaCents: g.sumaCents + cents, mayorCents: Math.max(g.mayorCents, cents), pagos: [...g.pagos, p] })
-  }
-  const [ganadora] = [...grupos].sort(([fa, a], [fb, b]) => b.sumaCents - a.sumaCents || b.mayorCents - a.mayorCents || porId(fa, fb))
-  return ganadora ? { forma: ganadora[0], pagos: ganadora[1].pagos } : { forma: '99', pagos: [] }
+  return formaGanadoraDeCobros(pagos.filter(x => esCobroElegible(x)))
 }
 
 /** La forma de pago del ticket: la de mayor suma de sus cobros elegibles (ver `formaGanadoraDelTicket`); '99' si no hay o si ésa no tiene forma. */
@@ -3106,6 +3116,12 @@ export function ticketParaGlobal(o: GlobalCandidateOrder): TicketGlobal {
     motivo,
     detalle,
   })
+  // Tarjetas de regalo (spec §7): la cuenta de VENTA de tarjetas no es mercancía; se factura al usar el saldo. Va PRIMERO para que el
+  // listado de excluidas, la captura y el conteo de corregidas lean siempre este motivo y no `SIN_PAGAR` ni `CONTRATO_DESCONOCIDO`:
+  // sus renglones son NO_OBJETO ⇒ la cuenta es MIXTA ⇒ con IVA incluido ENTRARÍA a la global como concepto objeto 01. (Encima sólo queda
+  // `DEVUELTA`, que pone `ticketsDeLaGlobal`: una venta de tarjetas cancelada con su dinero devuelto; fuera igual.)
+  // B3 r1 (fix 3): `some` (falla cerrada): una cuenta mezclada (A5 no la deja nacer) sale entera, sin un concepto objeto 01 de tarjeta.
+  if (o.items.some(it => !!it.giftCardId)) return fuera('TARJETA_DE_REGALO')
   const pagos = o.payments.filter(p => esCobroElegible(p))
   if (!pagos.length) return fuera('SIN_PAGAR')
   const paidCents = pagos.reduce((s, p) => s + aCentavos(p.amount), 0)

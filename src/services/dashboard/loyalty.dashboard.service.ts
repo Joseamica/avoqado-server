@@ -24,6 +24,7 @@ import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import { grantStamp, type GrantStampResult } from '../wallet/stampLedger.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * Get or create loyalty configuration for a venue
@@ -312,6 +313,10 @@ export async function earnPoints(
   if (!config.active) {
     return { pointsEarned: 0, newBalance: 0 }
   }
+
+  // R1 (tarjetas de regalo): comprar una tarjeta no da puntos ni sello. Cubre a quien llama directo (pago manual, ligas). Va después de
+  // las salidas baratas: sólo los negocios con lealtad activa pagan esta lectura.
+  if (await leerSiEsCuentaDeTarjetas(prisma, orderId)) return { pointsEarned: 0, newBalance: 0 }
 
   // ── SELLOS (Plan B) ────────────────────────────────────────────────────────
   //

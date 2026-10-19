@@ -22,6 +22,7 @@ import emailService from '@/services/email.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '@/services/tpv/candadoDeIntento'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
@@ -1752,6 +1753,13 @@ export async function finalizePaymentLinkCheckout(args: {
     // se calculaba después del commit sin esperarla: si el proceso moría ahí se perdía para siempre, y si la venta se
     // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
     if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+    // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+    await activarSobresDeCuentaPagadaEnTx(tx, {
+      venueId,
+      orderId: order.id,
+      staffId: primaryStaffId ?? session.paymentLink!.createdById,
+      items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+    })
     orderIdForReferral = order.id
     // A5 r1: congelar la comisión le suma consultas a esta transacción; el mismo tope de 10 s que el cobro de la terminal.
   }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
@@ -2593,6 +2601,13 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       })
       // Fase 3 (A5): la comisión se congela con el cobro, en esta transacción.
       if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+      await activarSobresDeCuentaPagadaEnTx(tx, {
+        venueId,
+        orderId: order.id,
+        staffId: primaryStaffId ?? session.paymentLink!.createdById,
+        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+      })
       orderIdForReferral = order.id
     }
     // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
@@ -3476,6 +3491,13 @@ export async function finalizeMercadoPagoCheckout(args: {
         select: { id: true },
       })
       if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+      await activarSobresDeCuentaPagadaEnTx(tx, {
+        venueId,
+        orderId: order.id,
+        staffId: session.paymentLink?.createdById ?? null,
+        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+      })
 
       await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
 
