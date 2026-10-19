@@ -78,6 +78,40 @@ describe('checkout del negocio (finalizeVenueCheckout)', () => {
     expect(paymentCountsAsDrawerCash(data)).toBe(false)
   })
 
+  // Cierre del techo OXXO (founder «A», 19-oct): sin tipo, el cargo es lo único que dice si fue OXXO. Con Stripe caído un momento
+  // se lanza (el webhook libera el reclamo y Stripe reintenta); con un error permanente sigue «tarjeta», para no atorar el cobro.
+  describe('sin tipo y la consulta del cargo falla', () => {
+    beforeEach(() =>
+      prismaMock.checkoutSession.findUnique.mockResolvedValue({
+        ...sesion(),
+        ecommerceMerchant: { id: 'em-1', venueId: 'FULLTEST-A', providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+      }),
+    )
+
+    it.each(['StripeConnectionError', 'StripeAPIError', 'StripeRateLimitError'])('%s (pasajero) → lanza sin guardar, para que Stripe reintente', async type => {
+      retrievePi.mockRejectedValueOnce(Object.assign(new Error('stripe caído'), { type }))
+
+      await expect(finalizeVenueCheckout({ stripeSessionId: 'pi_stripe_1', paymentIntentId: 'pi_1', stripePaymentMethodType: null })).rejects.toThrow(
+        'stripe caído',
+      )
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('StripeAuthenticationError (permanente) → se guarda como tarjeta, como antes', async () => {
+      retrievePi.mockRejectedValueOnce(Object.assign(new Error('llave mala'), { type: 'StripeAuthenticationError' }))
+
+      await finalizeVenueCheckout({ stripeSessionId: 'pi_stripe_1', paymentIntentId: 'pi_1', stripePaymentMethodType: null })
+      expect(prismaMock.payment.create.mock.calls[0][0].data.method).toBe('CREDIT_CARD')
+    })
+
+    it('con el tipo en el aviso, un error pasajero del cargo no frena el guardado (el tipo ya se sabe)', async () => {
+      retrievePi.mockRejectedValueOnce(Object.assign(new Error('stripe caído'), { type: 'StripeConnectionError' }))
+
+      await finalizeVenueCheckout({ stripeSessionId: 'pi_stripe_1', paymentIntentId: 'pi_1', stripePaymentMethodType: 'oxxo' })
+      expect(prismaMock.payment.create.mock.calls[0][0].data.method).toBe('OTHER')
+    })
+  })
+
   it('una tarjeta también queda sellada (antes este camino no sellaba nada)', async () => {
     await finalizeVenueCheckout({ stripeSessionId: 'pi_stripe_1', paymentIntentId: 'pi_1', stripePaymentMethodType: 'card' })
 

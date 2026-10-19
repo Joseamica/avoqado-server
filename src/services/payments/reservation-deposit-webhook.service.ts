@@ -16,6 +16,7 @@ type CheckoutSessionLike = {
   payment_status?: string | null
   payment_intent?: string | { id?: string } | null
   amount_total?: number | null
+  payment_method_types?: string[] | null
   metadata?: Record<string, string> | null
 }
 
@@ -187,6 +188,9 @@ async function processCheckoutCompleted(event: VerifiedWebhookEvent) {
           stripeSessionId: session.id,
           paymentIntentId,
           amountPaidCents: session.amount_total ?? null,
+          // Codex r2 del P1: sin tipo, el finalizador lanza si Stripe no contesta (cierre de OXXO). Esta página sólo acepta
+          // tarjeta: con un solo método permitido, ése es el tipo y el guardado no depende de consultar el cargo.
+          stripePaymentMethodType: session.payment_method_types?.length === 1 ? session.payment_method_types[0] : null,
         }),
       // Materialized = our CheckoutSession for this Stripe session is COMPLETED.
       async () => {
@@ -535,40 +539,41 @@ async function processPaymentIntentSucceeded(event: VerifiedWebhookEvent) {
     pi.charges?.data?.[0]?.payment_method_details?.type ||
     null
 
-  try {
-    // Idempotency guard via unique constraint — duplicate webhook deliveries
-    // throw P2002 below and we no-op.
-    await prisma.processedStripeEvent.create({
-      data: {
-        stripeEventId: event.id,
-        endpoint: 'connect',
-        eventType: event.type,
-        account: event.account,
-        payload: event.data as Prisma.InputJsonValue,
-      },
+  // Codex r1 del P1 (19-oct): el Checkout alojado guarda su sesión con `cs_…` y copia `type` al PaymentIntent, así que su
+  // `payment_intent.succeeded` también llega aquí; ese pago lo registra `checkout.session.completed`. Sin sesión `pi_…` no es
+  // nuestro: se reconoce, o la postcondición de abajo lo haría reintentar 3 días aunque el pago ya exista.
+  const sesionDelIntento = () => prisma.checkoutSession.findUnique({ where: { sessionId: pi.id! }, select: { status: true } })
+  if (!(await sesionDelIntento())) {
+    logger.info('ℹ️ [STRIPE CONNECT] payment_intent.succeeded without a local Elements session (hosted Checkout) — ignored', {
+      eventId: event.id,
+      paymentIntentId: pi.id,
     })
-    if (piType === 'venue_checkout') {
-      await finalizeVenueCheckout({
-        stripeSessionId: pi.id,
-        paymentIntentId: pi.id,
-        amountPaidCents: pi.amount_received ?? null,
-        stripePaymentMethodType,
-      })
-    } else {
-      await finalizePaymentLinkCheckout({
-        stripeSessionId: pi.id, // sessionId column stores the pi_XXX for Elements flow
-        paymentIntentId: pi.id,
-        amountPaidCents: pi.amount_received ?? null,
-        stripePaymentMethodType,
-      })
-    }
-  } catch (error: any) {
-    if (error?.code === 'P2002') {
-      logger.info('ℹ️ [STRIPE CONNECT] Duplicate payment_intent.succeeded ignored', { eventId: event.id })
-      return
-    }
-    throw error
+    return
   }
+
+  // P1 (19-oct): antes se reclamaba y LUEGO se finalizaba, fuera de transacción. Si el finalizador tronaba, el reclamo se quedaba
+  // y el reintento de Stripe se ignoraba como «duplicado»: cobrado en Stripe, sin registro local. Mismo contrato que la liga por
+  // Checkout: si truena se libera el reclamo y Stripe reintenta.
+  await withClaimedEvent(
+    event,
+    piType,
+    () =>
+      piType === 'venue_checkout'
+        ? finalizeVenueCheckout({
+            stripeSessionId: pi.id!,
+            paymentIntentId: pi.id,
+            amountPaidCents: pi.amount_received ?? null,
+            stripePaymentMethodType,
+          })
+        : finalizePaymentLinkCheckout({
+            stripeSessionId: pi.id!, // sessionId column stores the pi_XXX for Elements flow
+            paymentIntentId: pi.id,
+            amountPaidCents: pi.amount_received ?? null,
+            stripePaymentMethodType,
+          }),
+    // Materialized = our CheckoutSession for this PaymentIntent is COMPLETED (same transaction as the Payment).
+    async () => (await sesionDelIntento())?.status === 'COMPLETED',
+  )
 }
 
 /**
@@ -586,23 +591,26 @@ async function processPaymentIntentFailed(event: VerifiedWebhookEvent) {
   if (!pi.id || (pi.metadata?.type !== 'payment_link' && pi.metadata?.type !== 'venue_checkout')) return
 
   try {
-    await prisma.processedStripeEvent.create({
-      data: {
-        stripeEventId: event.id,
-        endpoint: 'connect',
-        eventType: event.type,
-        account: event.account,
-        payload: event.data as Prisma.InputJsonValue,
-      },
-    })
+    // P1 (19-oct): reclamo y marca en UNA transacción, como `expired`: si la marca truena, el reclamo no se queda.
+    await prisma.$transaction(async tx => {
+      await tx.processedStripeEvent.create({
+        data: {
+          stripeEventId: event.id,
+          endpoint: 'connect',
+          eventType: event.type,
+          account: event.account,
+          payload: event.data as Prisma.InputJsonValue,
+        },
+      })
 
-    await prisma.checkoutSession.updateMany({
-      where: { sessionId: pi.id, status: { in: ['PENDING', 'PROCESSING'] } },
-      data: {
-        status: 'FAILED',
-        failedAt: new Date(),
-        errorMessage: pi.last_payment_error?.message ?? 'PaymentIntent failed',
-      },
+      await tx.checkoutSession.updateMany({
+        where: { sessionId: pi.id, status: { in: ['PENDING', 'PROCESSING'] } },
+        data: {
+          status: 'FAILED',
+          failedAt: new Date(),
+          errorMessage: pi.last_payment_error?.message ?? 'PaymentIntent failed',
+        },
+      })
     })
 
     logger.warn('⚠️ [STRIPE CONNECT] PaymentIntent failed', {

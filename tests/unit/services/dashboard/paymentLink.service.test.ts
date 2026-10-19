@@ -916,6 +916,21 @@ describe('PaymentLink Service', () => {
       expect(paymentCountsAsDrawerCash(data)).toBe(false)
     })
 
+    // Cierre del techo OXXO (founder «A», 19-oct): sin tipo y con Stripe caído un momento, se lanza para que Stripe reintente.
+    it('Stripe: sin tipo y la consulta del cargo falla por algo pasajero → lanza sin guardar', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
+        ...createMockCheckoutSession(),
+        ecommerceMerchant: { id: 'merchant-123', providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+      })
+      // Sin `armarCobro`: lanza antes de cobrar, y sus `…Once` se derramarían a las pruebas siguientes.
+      retrieveStripePi.mockRejectedValueOnce(Object.assign(new Error('stripe caído'), { type: 'StripeConnectionError' }))
+
+      await expect(finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1', stripePaymentMethodType: null })).rejects.toThrow(
+        'stripe caído',
+      )
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
     it('Stripe: el vale nace en la transacción del cobro y se aplica después', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
         ...itemLinkSession(),
