@@ -31,6 +31,8 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_STATE_CHANGED'
   // Cierre (A1): con la cancelación de la venta en curso, el panel sólo devuelve el cobro COMPLETO (aditivo).
   | 'GIFT_CARD_SALE_REFUND_MUST_BE_FULL'
+  // Pendientes 1a (T3): la devolución SIN venta se rechaza en un negocio que ya cobró tarjetas (aditivo).
+  | 'GIFT_CARD_UNLINKED_REFUND_BLOCKED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422, extra?: Record<string, unknown>) {
