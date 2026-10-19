@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import { tokenBudgetService } from '@/services/dashboard/token-budget.service'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
+import { exigirSucursalDelToken } from '@/utils/sucursalDelToken'
 import { z } from 'zod'
 import type { TokenUsageRecord, TokenPurchase } from '@prisma/client'
 
@@ -51,16 +52,8 @@ const usageHistoryQuerySchema = z.object({
  */
 export const getStatus = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authContext = (req as any).authContext
-    const venueId = authContext?.venueId
-
-    if (!venueId) {
-      res.status(400).json({
-        success: false,
-        error: 'Venue ID required',
-      })
-      return
-    }
+    // Sin sucursal en la URL: la del token, y la sesión del alta ('pending') no es una sucursal → 409, nunca 500.
+    const venueId = exigirSucursalDelToken((req as any).authContext)
 
     // Get venue's currency
     const venue = await prisma.venue.findUnique({
@@ -97,10 +90,10 @@ export const getStatus = async (req: Request, res: Response, next: NextFunction)
 export const purchase = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
     const authContext = (req as any).authContext
-    const venueId = authContext?.venueId
+    const venueId = exigirSucursalDelToken(authContext)
     const userId = authContext?.userId
 
-    if (!venueId || !userId) {
+    if (!userId) {
       res.status(400).json({
         success: false,
         error: 'Authentication required',
@@ -230,16 +223,8 @@ export const purchase = async (req: Request, res: Response, next: NextFunction):
  */
 export const updateAutoRecharge = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authContext = (req as any).authContext
-    const venueId = authContext?.venueId
-
-    if (!venueId) {
-      res.status(400).json({
-        success: false,
-        error: 'Venue ID required',
-      })
-      return
-    }
+    // Sin sucursal en la URL: la del token, y la sesión del alta ('pending') no es una sucursal → 409, nunca 500.
+    const venueId = exigirSucursalDelToken((req as any).authContext)
 
     const validation = updateAutoRechargeSchema.safeParse(req.body)
     if (!validation.success) {
@@ -286,16 +271,8 @@ export const updateAutoRecharge = async (req: Request, res: Response, next: Next
  */
 export const getHistory = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authContext = (req as any).authContext
-    const venueId = authContext?.venueId
-
-    if (!venueId) {
-      res.status(400).json({
-        success: false,
-        error: 'Venue ID required',
-      })
-      return
-    }
+    // Sin sucursal en la URL: la del token, y la sesión del alta ('pending') no es una sucursal → 409, nunca 500.
+    const venueId = exigirSucursalDelToken((req as any).authContext)
 
     const validation = usageHistoryQuerySchema.safeParse(req.query)
     if (!validation.success) {
@@ -413,16 +390,8 @@ export const getHistory = async (req: Request, res: Response, next: NextFunction
  */
 export const getAnalytics = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const authContext = (req as any).authContext
-    const venueId = authContext?.venueId
-
-    if (!venueId) {
-      res.status(400).json({
-        success: false,
-        error: 'Venue ID required',
-      })
-      return
-    }
+    // Sin sucursal en la URL: la del token, y la sesión del alta ('pending') no es una sucursal → 409, nunca 500.
+    const venueId = exigirSucursalDelToken((req as any).authContext)
 
     const days = parseInt(req.query.days as string) || 30
 

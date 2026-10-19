@@ -17,6 +17,7 @@ import logger from '@/config/logger'
 import { Prisma, TokenQueryType, TokenPurchaseType, TokenPurchaseStatus } from '@prisma/client'
 import Stripe from 'stripe'
 import { logAction } from './activity-log.service'
+import { NotFoundError } from '@/errors/AppError'
 
 // Re-export enum for convenience
 export { TokenQueryType }
@@ -139,6 +140,11 @@ class TokenBudgetService {
     })
 
     if (!budget) {
+      // Crear con una sucursal que no existe rompe la llave foránea (P2003 → 500): pasó con la sesión del alta,
+      // `venueId = 'pending'` (monitor de producción, 19-oct). Sólo cuesta una consulta la primera vez.
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { id: true } })
+      if (!venue) throw new NotFoundError('Sucursal no encontrada', 'VENUE_NOT_FOUND')
+
       // Calculate end of current month
       const now = new Date()
       const periodEnd = new Date(now.getFullYear(), now.getMonth() + 1, 1) // First day of next month

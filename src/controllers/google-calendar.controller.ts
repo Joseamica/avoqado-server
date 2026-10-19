@@ -44,6 +44,7 @@ import {
 import { encryptToken } from '@/services/google-calendar/encryption.service'
 import { stopChannel } from '@/services/google-calendar/watch-channel.service'
 import prisma from '@/utils/prismaClient'
+import { exigirSucursalDelToken } from '@/utils/sucursalDelToken'
 import { emisionDelToken, motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 const DASHBOARD_BASE = process.env.DASHBOARD_URL ?? 'https://dashboard.avoqado.io'
@@ -73,7 +74,7 @@ export async function oauthInit(req: Request, res: Response, next: NextFunction)
     }
 
     const ctx = getAuthContext(req)
-    const access = await getUserAccess(ctx.userId, ctx.venueId)
+    const access = await getUserAccess(ctx.userId, exigirSucursalDelToken(ctx))
 
     if (intent === 'venue_master' && !hasPermission(access, 'calendar:manage_venue')) {
       throw new ForbiddenError('No tienes permiso para conectar el calendario del establecimiento')
@@ -368,7 +369,7 @@ export async function getConnectionDetail(req: Request, res: Response, next: Nex
 
     const isOwnPersonal = conn.scope === 'STAFF_PERSONAL' && conn.staffId === ctx.userId
     if (!isOwnPersonal) {
-      const access = await getUserAccess(ctx.userId, ctx.venueId)
+      const access = await getUserAccess(ctx.userId, exigirSucursalDelToken(ctx))
       if (!hasPermission(access, 'calendar:view_status')) {
         throw new ForbiddenError('No tienes permiso para ver el estado de esta conexión')
       }
@@ -438,7 +439,7 @@ export async function disconnectConnection(req: Request, res: Response, next: Ne
     })
     if (!conn) throw new NotFoundError('Conexión no encontrada')
 
-    const access = await getUserAccess(ctx.userId, ctx.venueId)
+    const access = await getUserAccess(ctx.userId, exigirSucursalDelToken(ctx))
 
     const isOwnPersonal = conn.scope === 'STAFF_PERSONAL' && conn.staffId === ctx.userId
     const isVenueAdmin = conn.scope === 'VENUE' && conn.venueId === ctx.venueId && hasPermission(access, 'calendar:manage_venue')

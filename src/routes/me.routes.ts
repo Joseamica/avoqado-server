@@ -10,7 +10,7 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { getUserAccess, createAccessCache } from '@/services/access/access.service'
 import logger from '@/config/logger'
-import { BadRequestError } from '@/errors/AppError'
+import { exigirSucursalDelToken } from '@/utils/sucursalDelToken'
 
 const router = Router()
 
@@ -41,12 +41,8 @@ router.get('/access', authenticateTokenMiddleware, async (req: Request, res: Res
     const authContext = (req as any).authContext
     const { userId } = authContext
 
-    // Get target venueId from query param or use the one from JWT
-    const targetVenueId = (req.query.venueId as string) || authContext.venueId
-
-    if (!targetVenueId) {
-      throw new BadRequestError('venueId is required either in query params or JWT token')
-    }
+    // La sucursal del query o, si no viene, la del token (la sesión del alta, 'pending', no es una sucursal → 409).
+    const targetVenueId = (req.query.venueId as string) || exigirSucursalDelToken(authContext)
 
     logger.info(`me.routes: Getting access for user ${userId} in venue ${targetVenueId}`, {
       isImpersonating: !!authContext.isImpersonating,
