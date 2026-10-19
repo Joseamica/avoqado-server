@@ -65,4 +65,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // (CDMX), hueco entre el sweeper de inventario (:44) y los efectos de pago (:46): sólo pide la vuelta; la corre el worker.
   shopifyWorker: '21,51 * * * * *',
   shopifyReconcile: '45 14 6 * * *',
+  // R1/R2 de la campaña 3DS: altas «esperando al banco» sin nadie en la pantalla. Cada 10 min en los minutos 3, 13, 23…
+  // (lejos del :00 y del reconciliador de planes, que corre en */10) y en el segundo :34, libre entre :32 y :35.
+  altasAMedioPago: '34 3-59/10 * * * *',
 } as const
