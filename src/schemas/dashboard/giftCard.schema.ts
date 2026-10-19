@@ -10,7 +10,8 @@ import { CAMPO_DE_MAS, DIA, mayuscula, montoPositivo, operationKey, pesosPositiv
 
 /** Los estados de la base más `EXPIRED` (decisión 1 del coordinador: ACTIVE con `expiresAt` ya pasado). */
 const ESTADOS = [...Object.values(GiftCardStatus), 'EXPIRED'] as string[]
-const MOTIVOS_DE_GERENTE = ['SUSPICIOUS_ACTIVITY', 'CASHIER_ERROR', 'CUSTOMER_REQUEST', 'LOST_CARD', 'CHARGEBACK', 'OTHER'] as const
+/** Los motivos que un gerente elige (panel y MCP `manage_gift_card`). */
+export const MOTIVOS_DE_GERENTE = ['SUSPICIOUS_ACTIVITY', 'CASHIER_ERROR', 'CUSTOMER_REQUEST', 'LOST_CARD', 'CHARGEBACK', 'OTHER'] as const
 
 const entero = (que: string) =>
   z.coerce

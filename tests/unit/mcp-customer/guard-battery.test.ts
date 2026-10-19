@@ -54,6 +54,7 @@ const SENSITIVE_PERMS = [
   'payment-links:create',
   'coupons:create',
   'tables:update',
+  'giftCards:manage',
 ]
 // Permissions no role should ever satisfy (except SUPERADMIN's `*:*`).
 const FAKE_PERMS = ['totally:fake', 'foo:bar', 'nonexistent:superpower', 'xyz:abc', 'drop:tables', 'god:mode']

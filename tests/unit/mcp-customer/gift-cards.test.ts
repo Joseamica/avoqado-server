@@ -1,5 +1,5 @@
 /**
- * Herramientas de lectura de tarjetas de regalo (C5): permiso exacto y alcance del negocio, sin candado de plan (el saldo
+ * Herramientas de lectura de tarjetas de regalo (C5; las del gerente, en gift-cards.write.test.ts): permiso exacto y alcance del negocio, sin candado de plan (el saldo
  * vendido siempre se puede leer, spec §6), pesos, días del negocio y nunca el código.
  */
 import fs from 'fs'
@@ -200,9 +200,11 @@ describe('reglas fijas', () => {
     expect(fuente).not.toMatch(/planGate|checkFeatureAccess|venueHasFeatureAccess|venuesWithFeatureAccess/)
   })
 
-  it('son lecturas declaradas y están registradas en el MCP libre', () => {
+  it('las de consulta son lecturas, las del gerente son escrituras, y están registradas en el MCP libre', () => {
     expect(TOOL_EFFECTS.gift_cards_summary).toBe('read')
     expect(TOOL_EFFECTS.gift_card_lookup).toBe('read')
+    for (const nombre of ['manage_gift_card', 'cancel_gift_card_sale', 'update_gift_card_settings'])
+      expect(TOOL_EFFECTS[nombre]).toBe('write')
     const server = fs.readFileSync(path.join(__dirname, '../../../src/mcp/server.ts'), 'utf8')
     expect(server).toMatch(/registerGiftCardTools\(server, scope\)/)
   })

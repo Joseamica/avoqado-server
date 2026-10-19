@@ -131,7 +131,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerReceiptLayoutTools(server, scope)
   registerServiceCourseTools(server, scope)
   registerCreditPackTools(server, scope)
-  registerGiftCardTools(server, scope) // sólo lectura; sin candado de plan (el saldo vendido siempre se lee)
+  registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
   registerUpsellTools(server, scope)

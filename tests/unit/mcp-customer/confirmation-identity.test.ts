@@ -4,6 +4,7 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { configureToolCatalog } from '@/mcp/catalog'
 import { registerMenuTools } from '@/mcp/tools/menu'
 import { registerStaffTools } from '@/mcp/tools/staff'
+import { registerGiftCardTools } from '@/mcp/tools/giftCards'
 import type { McpScope } from '@/mcp/scope'
 
 const mockProducts = jest.fn()
@@ -20,6 +21,15 @@ jest.mock('@/utils/prismaClient', () => ({
 jest.mock('@/services/dashboard/product.dashboard.service', () => ({ updateProduct: (...a: unknown[]) => mockProductWrite(...a) }))
 jest.mock('@/services/dashboard/team.dashboard.service', () => ({ updateTeamMember: (...a: unknown[]) => mockMemberWrite(...a) }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
+const mockGiftCards = jest.fn()
+const mockGiftCardWrite = jest.fn()
+jest.mock('@/services/giftCards/giftCardReports.service', () => ({
+  listGiftCards: (...a: unknown[]) => mockGiftCards(...a),
+  getGiftCardDetail: jest.fn(),
+  getGiftCardSummary: jest.fn(),
+  getGiftCardLiabilityAging: jest.fn(),
+}))
+jest.mock('@/services/giftCards/giftCardSurface.service', () => ({ operarSobreDeGerente: (...a: unknown[]) => mockGiftCardWrite(...a) }))
 
 let server: McpServer
 let client: Client
@@ -31,12 +41,15 @@ const member = {
   active: true,
   staff: { firstName: 'Juan', lastName: 'Perez', active: true },
 }
+const giftCard = { id: 'gc1', last4: '4821', status: 'ACTIVE', balance: 400, order: { id: 'o1', orderNumber: 'ORD-1' } }
 beforeEach(async () => {
   jest.clearAllMocks()
   mockProducts.mockResolvedValue([product])
   mockMembers.mockResolvedValue([member])
   mockProductWrite.mockResolvedValue({ ...product, price: 45 })
   mockMemberWrite.mockResolvedValue({})
+  mockGiftCards.mockResolvedValue({ items: [giftCard], page: 1, pageSize: 10, total: 1, totalBalance: 400 })
+  mockGiftCardWrite.mockResolvedValue({ activityIds: ['act-1'], replayed: false })
   server = new McpServer({ name: 'identity', version: '1' })
   const scope = {
     staffId: 'owner',
@@ -48,6 +61,7 @@ beforeEach(async () => {
   configureToolCatalog(server, scope)
   registerMenuTools(server, scope)
   registerStaffTools(server, scope)
+  registerGiftCardTools(server, scope)
   client = new Client({ name: 'identity-test', version: '1' })
   const [a, b] = InMemoryTransport.createLinkedPair()
   await Promise.all([server.connect(a), client.connect(b)])
@@ -105,4 +119,30 @@ it('el cambio de acceso liga StaffVenue y estado del local, no el estado global 
   expect(await call('update_staff_member', { venueId: 'centro', name: 'Juan', active: true })).toMatchObject({
     preview: { changes: { active: { from: false, to: true } } },
   })
+})
+
+it('🔴 manage_gift_card: la confirmación con otro monto u otra tarjeta que la vista previa se rechaza sin escribir', async () => {
+  const args = {
+    venueId: 'centro',
+    last4: '4821',
+    action: 'adjust',
+    direction: 'add',
+    amount: 50,
+    reason: 'CASHIER_ERROR',
+    note: 'Se cobró doble',
+    idempotencyKey: 'mcp-tarjeta-0001',
+  }
+  const p = await call('manage_gift_card', args)
+  expect(p).toMatchObject({ requiresConfirmation: true, confirmationArguments: args })
+  for (const cambio of [{ amount: 60 }, { direction: 'remove' }, { last4: '9999' }, { cardRef: 'gc-otra' }, { saleFolio: 'ORD-2' }]) {
+    expect(
+      await call('manage_gift_card', { ...p.confirmationArguments, ...cambio, confirm: true, confirmationToken: p.confirmationToken }),
+    ).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+  }
+  expect(mockGiftCardWrite).not.toHaveBeenCalled()
+  expect(
+    await call('manage_gift_card', { ...p.confirmationArguments, confirm: true, confirmationToken: p.confirmationToken }),
+  ).toMatchObject({ ok: true })
+  expect(mockGiftCardWrite).toHaveBeenCalledTimes(1)
+  expect(mockGiftCardWrite.mock.calls[0].slice(0, 3)).toEqual(['centro', 'gc1', 'owner'])
 })

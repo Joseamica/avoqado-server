@@ -204,6 +204,19 @@ describe('lista', () => {
     })
   })
 
+  it('filtra por el folio de la venta sin importar mayúsculas, en la base y en el total (lo usa el asistente para escoger la tarjeta)', async () => {
+    prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 0 }, _sum: { balance: null } })
+    prismaMock.giftCard.findMany.mockResolvedValue([])
+    await listGiftCards('v1', { last4: '4821', folio: ' ord-7 ', pageSize: 10 })
+    const where = {
+      venueId: 'v1',
+      codeLast4: '4821',
+      orderItem: { is: { order: { orderNumber: { equals: 'ord-7', mode: 'insensitive' } } } },
+    }
+    expect(prismaMock.giftCard.findMany.mock.calls[0][0].where).toEqual(where)
+    expect(prismaMock.giftCard.aggregate.mock.calls[0][0].where).toEqual(where)
+  })
+
   it('⭐ (D3 menor 6) ACTIVE = se puede usar hoy: ACTIVE sin vencer (la misma frontera que EXPIRED), dentro de un AND que no choca con la búsqueda', async () => {
     const ahora = new Date('2026-10-14T18:00:00.000Z')
     const vigente = { status: 'ACTIVE', OR: [{ expiresAt: null }, { expiresAt: { gt: ahora } }] }

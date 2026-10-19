@@ -180,6 +180,20 @@ describe('reportes de tarjetas de regalo contra Postgres', () => {
     expect((await listGiftCards(venueId, { last4 })).items.map(t => t.id)).toEqual([ids.E])
   })
 
+  it('por el folio de la venta (el asistente escoge así la tarjeta): sin importar mayúsculas, y junto con los últimos 4', async () => {
+    // Negocio aparte: sus sobres no mueven las cifras de las demás pruebas.
+    const otro = await crearNegocioDePrueba('reportes-folio')
+    negocios.push(otro.venueId)
+    const v = await sembrarVentaDeTarjetas({ ...otro, montos: [300, 400], metodo: 'CASH' })
+    const { orderNumber } = await prisma.order.findUniqueOrThrow({ where: { id: v.orderId }, select: { orderNumber: true } })
+    const porFolio = await listGiftCards(otro.venueId, { folio: ` ${orderNumber.toLowerCase()} ` })
+    expect(porFolio.items.map(t => t.id).sort()).toEqual([...v.giftCardIds].sort())
+    expect(porFolio.total).toBe(2)
+    const { codeLast4 } = await prisma.giftCard.findUniqueOrThrow({ where: { id: v.giftCardIds[0] }, select: { codeLast4: true } })
+    expect((await listGiftCards(otro.venueId, { folio: orderNumber, last4: codeLast4 })).items.map(t => t.id)).toEqual([v.giftCardIds[0]])
+    expect((await listGiftCards(otro.venueId, { folio: `${orderNumber}-X` })).total).toBe(0)
+  })
+
   it('⭐ (D3 menor 6) «Activa» = se puede usar hoy: trae A y no E (vencida); la lista, el total y el saldo cuadran con la misma frontera', async () => {
     const activas = await listGiftCards(venueId, { status: ['ACTIVE'] })
     expect([activas.items.map(t => t.id), activas.total, activas.totalBalance]).toEqual([[ids.A], 1, 400])

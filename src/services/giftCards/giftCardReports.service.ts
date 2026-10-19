@@ -51,6 +51,8 @@ export interface ListGiftCardsQuery {
   search?: string
   /** Últimos 4 exactos (el MCP los pide así). */
   last4?: string
+  /** Folio de la venta (`Order.orderNumber`) exacto, sin importar mayúsculas: el MCP escoge así la tarjeta (tarea 4). */
+  folio?: string
   status?: EstadoDeListaDeTarjetas[]
 }
 
@@ -309,10 +311,12 @@ export async function listGiftCards(venueId: string, q: ListGiftCardsQuery, ahor
   const page = clampPage(q.page)
   const pageSize = clampTamanoDePagina(q.pageSize)
   const termino = q.search?.trim() || undefined
+  const folio = q.folio?.trim() || undefined
   const where: Prisma.GiftCardWhereInput = {
     venueId,
     ...(q.status?.length ? filtroDeEstados(q.status, ahora) : {}),
     ...(q.last4 ? { codeLast4: q.last4.toUpperCase() } : {}),
+    ...(folio ? { orderItem: { is: { order: { orderNumber: { equals: folio, mode: 'insensitive' as const } } } } } : {}),
     ...(termino ? busquedaWhere(termino) : {}),
   }
   // Total y saldo del filtro en UN agregado con el MISMO where (decisión 1): nunca la suma de la página.
