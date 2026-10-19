@@ -1163,7 +1163,8 @@ export async function archivarProductos(
   archivedGroupIds?: string[],
   /**
    * `false` SÓLO para quien ya bloqueó el producto antes (Shopify, §10.3: Product → sucursal → tienda): tomar el negocio
-   * después invertiría el orden contra la importación y las ediciones (negocio → producto). Sus productos nunca son variantes.
+   * después invertiría el orden contra la importación y las ediciones (negocio → producto). Si el producto es una variante, ese
+   * llamador ya tomó el negocio y la familia ANTES del producto (Shopify, bloque 5: `lockGroupForCleanup`).
    */
   venueFirst = true,
 ): Promise<number> {

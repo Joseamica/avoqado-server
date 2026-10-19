@@ -605,8 +605,16 @@ export async function importMenuHandler(
       req.body,
       resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating)),
     )
-    res.status(200).json(result)
+    const { filasDeFamiliaRechazadas } = result.stats
+    res.status(200).json({ ...result, stats: { ...result.stats, filasDeFamiliaRechazadas: recortarRechazadas(filasDeFamiliaRechazadas) } })
   } catch (error) {
+    // El 400 de «reemplazar» con filas de familia malas lleva la misma lista: también se recorta por HTTP.
+    const details = (error as { details?: { filasDeFamiliaRechazadas?: RechazadasDelImport } })?.details
+    if (details?.filasDeFamiliaRechazadas) details.filasDeFamiliaRechazadas = recortarRechazadas(details.filasDeFamiliaRechazadas)
     next(error)
   }
 }
+
+type RechazadasDelImport = { total: number; ejemplos: unknown[] }
+/** Variantes (bloque 5): el servicio devuelve TODAS las filas rechazadas (el script del operador las necesita); por HTTP, 50 con el total. */
+const recortarRechazadas = (r: RechazadasDelImport): RechazadasDelImport => ({ total: r.total, ejemplos: r.ejemplos.slice(0, 50) })

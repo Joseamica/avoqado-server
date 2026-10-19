@@ -45,4 +45,13 @@ describe('Variantes: modelo de datos', () => {
     // Postgres 16 lo reporta como llave foránea (P2003); el 18 de producción como RESTRICT (23001, sin código de Prisma).
     await expect(prisma.productGroup.delete({ where: { id: g.id } })).rejects.toThrow(/Product_productGroupId_fkey|Foreign key constraint/)
   })
+
+  it('dos familias con el mismo externalId: viva + archivada conviven; dos vivas => P2002 (índice parcial)', async () => {
+    const data = { venueId, categoryId, source: 'SHOPIFY' as const, externalId: `gid://shopify/Product/${s}` }
+    await prisma.productGroup.create({ data: { ...data, name: 'Vieja', deletedAt: new Date() } })
+    await prisma.productGroup.create({ data: { ...data, name: 'Nueva' } })
+    // otra archivada con el mismo externalId también convive
+    await prisma.productGroup.create({ data: { ...data, name: 'Vieja 2', deletedAt: new Date() } })
+    await expect(prisma.productGroup.create({ data: { ...data, name: 'Otra viva' } })).rejects.toMatchObject({ code: 'P2002' })
+  })
 })

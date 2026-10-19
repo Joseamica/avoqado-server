@@ -151,6 +151,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   gift_cards_summary: 'read',
   global_invoice_excluded_sales: 'read',
   group_products_as_variants: 'write',
+  group_shopify_family: 'write',
   hybrid_campaign_redemptions: 'read',
   hybrid_contracts: 'read',
   hybrid_current_purchase: 'read',
@@ -343,6 +344,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   shopify_connect_apply: 'write',
   shopify_connect_preview: 'read',
   shopify_disconnect: 'write',
+  shopify_family_proposals: 'read',
   shopify_resync: 'write',
   shopify_review_list: 'read',
   shopify_review_resolve: 'write',
@@ -534,6 +536,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedShopifyQty',
             // Conector Shopify (D1): aplicar la conexión confirma las elecciones con las cantidades que se VIERON.
             'expectedElecciones',
+            // «Desde Shopify» (variantes, bloque 5): se confirman exactamente los pares producto + huella que se VIERON.
+            'expectedItems',
           ]) {
             if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
           }

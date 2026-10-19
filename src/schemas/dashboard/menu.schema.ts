@@ -739,6 +739,23 @@ export const ImportMenuSchema = z.object({
                 }),
               )
               .optional(),
+            // Variantes (bloque 5, V8): la familia de la fila. PERMISIVO a propósito (Codex r4 H4): sólo topes anti-abuso; los
+            // límites de verdad los aplica el servicio por fila y una fila mala se reporta sin tumbar el archivo.
+            family: z
+              .object({
+                key: z.string().max(1000, 'El identificador de la familia es demasiado largo.').optional(),
+                name: z.string().max(1000, 'El nombre de la familia es demasiado largo.').optional(),
+                options: z
+                  .array(
+                    z.object({
+                      name: z.string().max(1000, 'El nombre de la opción es demasiado largo.').optional(),
+                      value: z.string().max(1000, 'El valor de la opción es demasiado largo.').optional(),
+                    }),
+                  )
+                  .max(20, 'Una familia lleva a lo más 20 opciones por fila.')
+                  .optional(),
+              })
+              .optional(),
           }),
         ),
       }),
