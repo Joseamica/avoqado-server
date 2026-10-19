@@ -3698,7 +3698,13 @@ export async function recordOrderPayment(
         // Codex R14-1: PRIMERA sentencia — el candado del intento (el mismo del ingreso del webhook, de S1 y de la consolidación):
         // la lectura de la primera evidencia y la creación del Payment quedan serializadas con la llegada de cualquier evento del
         // intento. Orden de candados: intento → referencia → sesión de vales → tickets → Order → TerminalPaymentRequest → Payment → Shift.
-        if (llaveDelIntento) await candadoDeIntento(tx, llaveDelIntento)
+        if (llaveDelIntento) {
+          await candadoDeIntento(tx, llaveDelIntento)
+          // 🔴 R8 (efectivo sin red): el punto único de la llave, el mismo de `payCashOrder`. Con el candado del intento, el registro
+          // que la consulta rápida no vio ya confirmó: si su pago existe, sale por la red de la carrera (`CobroYaRegistrado`, abajo) y
+          // responde como el atajo de arriba, ANTES de cualquier regla de estado (arbitraje, cancelada, sesión de vales en conciliación).
+          await salirSiLaLlaveYaTienePago(tx, { venueId, orderId: activeOrder.id, idempotencyKey: paymentData.idempotencyKey })
+        }
         // Codex R12-7: un registro SIN llave se serializa por (venue, referencia) como PRIMERA sentencia y vuelve a resolver
         // ya con el candado — la resolución de arriba corrió fuera de esta transacción y dos replays simultáneos veían
         // «ausencia» los dos. Con llave no aplica (índice único del intento).
@@ -3785,13 +3791,8 @@ export async function recordOrderPayment(
         // es dinero ya capturado y reabre en los cierres. La tarjeta nunca: la aprobó el banco.
         if (esCobroNuevo({ enVivo: paymentData.cobroNuevo === true, efectivoDeCajon: classicMethod === 'CASH' && !merchantAccountId })) {
           const { status } = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId }, select: { status: true } })
-          if (claseDeEstado(status) === 'CANCELADA') {
-            // Codex r13 #2: la misma resolución, bajo el candado del intento (`candadoDeIntento`, la PRIMERA sentencia de esta
-            // transacción) y el de la orden: si la llave ya tiene un Payment, sale por la red de la carrera (P2002, abajo), que
-            // lo devuelve.
-            await salirSiLaLlaveYaTienePago(tx, { venueId, orderId: activeOrder.id, idempotencyKey: paymentData.idempotencyKey })
-            rechazarCobroNuevoSobreCancelada(status)
-          }
+          // (Codex r13 #2 / R8: una llave que ya tiene su Payment salió arriba, en el punto de la llave, antes de llegar aquí.)
+          if (claseDeEstado(status) === 'CANCELADA') rechazarCobroNuevoSobreCancelada(status)
         }
 
         // La PREPARACIÓN del intento de vales va después del arbitraje y sólo para quien sigue (ganador, cobro sin

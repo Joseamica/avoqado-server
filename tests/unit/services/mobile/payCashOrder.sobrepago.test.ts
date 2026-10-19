@@ -503,7 +503,7 @@ describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo
     prismaMock.payment.findUnique.mockReset()
     prismaMock.payment.findUnique
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'pay-ganador', orderId: 'order-1' } as any)
+      .mockResolvedValueOnce({ id: 'pay-ganador', orderId: 'order-1', status: 'COMPLETED', type: 'REGULAR' } as any)
       .mockResolvedValueOnce(null)
     await expect(
       payCashOrder('venue-1', 'order-1', { amount: 4000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-perdido' }),
@@ -559,9 +559,13 @@ describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo
   it('🔴 R6-1: una orden de una sesión de vales v7 cancelada por la ruta GENERAL que recibe dinero de la COLA ⇒ la sesión se cancela como por la ruta de vales y el dinero se registra a nivel venta, reabierta y con bitácora (antes: 409 `CHECKOUT_ORDER_NOT_PAYABLE` y todo se revertía)', async () => {
     seedOrder({ ...ivaAparteCancelada, areaTicketCheckoutSession: { id: 'ses-1' } })
     // La sesión v7 de verdad, MATERIALIZED (la ruta general no la toca); la orden, bajo el candado de la jerarquía, CANCELLED.
+    // R8: la jerarquía se toma dos veces en la misma transacción (antes del punto de la llave y en las guardas de la sesión; reentrante).
+    const sesion = { id: 'ses-1', status: 'MATERIALIZED', activePaymentAttemptId: null, tickets: [], paymentAttempts: [] }
     prismaMock.areaTicketCheckoutSession.findFirst
       .mockResolvedValueOnce({ id: 'ses-1' })
-      .mockResolvedValueOnce({ id: 'ses-1', status: 'MATERIALIZED', activePaymentAttemptId: null, tickets: [], paymentAttempts: [] })
+      .mockResolvedValueOnce(sesion)
+      .mockResolvedValueOnce({ id: 'ses-1' })
+      .mockResolvedValueOnce(sesion)
     prismaMock.order.findFirst.mockResolvedValueOnce({ status: 'CANCELLED' })
     prismaMock.areaTicket.updateMany.mockResolvedValueOnce({ count: 1 })
     prismaMock.areaTicketCheckoutSession.update.mockResolvedValueOnce({})

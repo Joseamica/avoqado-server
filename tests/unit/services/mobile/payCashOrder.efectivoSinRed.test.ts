@@ -675,16 +675,20 @@ describe('R5-2: la llave de un intento fallido o de una devolución no es «el m
 
   it('🔴 carrera: bajo el candado la llave resulta ser de un intento FAILED ⇒ 409 por la red de la carrera, sin crear', async () => {
     instalarBase({ paymentStatus: 'PENDING', total: 100 })
-    // La consulta rápida no ve la llave; al crear choca con el índice único (P2002) y el «ganador» es un intento FAILED.
-    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce({
-      id: 'f-1',
-      orderId: 'order-1',
-      status: 'FAILED',
-      type: 'REGULAR',
-      amount: new Decimal(100),
-      tipAmount: new Decimal(0),
-      receipts: [],
-    } as any)
+    // Ni la consulta rápida ni el punto bajo el candado (R8) ven la llave; al crear choca con el índice único (P2002: la escribió otra
+    // orden después del punto) y el «ganador» es un intento FAILED. La red de la carrera sigue aplicando R5-2.
+    prismaMock.payment.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({
+        id: 'f-1',
+        orderId: 'order-1',
+        status: 'FAILED',
+        type: 'REGULAR',
+        amount: new Decimal(100),
+        tipAmount: new Decimal(0),
+        receipts: [],
+      } as any)
     prismaMock.payment.create.mockRejectedValueOnce(Object.assign(new Error('Unique constraint failed'), { code: 'P2002' }))
 
     await expect(
@@ -946,5 +950,186 @@ describe('R6-3: la propiedad de mesa otra vez, bajo el candado', () => {
     deMesa(row, 'staff-beto')
     await payCashOrder('venue-1', 'order-1', { amount: 10000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k' })
     expect(pagos.map(x => x.amount)).toEqual([100])
+  })
+})
+
+/**
+ * 🔴 R8 (rediseño; Codex r5 #2, r6 #2 y r7 #1 son la MISMA familia): «un reintento con la misma llave responde distinto a la primera
+ * vez». La causa común: validaciones de estado que puede cambiar entre los dos (catálogo, venta cerrada o cancelada, saldo, sesión de
+ * vales, propiedad de mesa, personal) corrían ANTES de buscar la llave bajo el candado. Ahora, ya con los candados, la llave decide
+ * PRIMERO: un cobro completado de esta orden se devuelve sin correr ninguna otra regla. Modelo de la carrera: la consulta rápida de B
+ * no vio el cobro de A (`mockResolvedValueOnce(null)`); bajo el candado ya está confirmado y, entre los dos, algo cambió.
+ */
+describe('R8: el punto único de la llave, bajo el candado, antes de cualquier regla de estado', () => {
+  const tenderSvc = () => require('@/services/dashboard/tenderType.dashboard.service')
+  const rechazoDelCatalogo = (mensaje: string) =>
+    jest.spyOn(tenderSvc(), 'resolveTenderForCharge').mockRejectedValue(Object.assign(new Error(mensaje), { statusCode: 400 }))
+  afterEach(() => jest.restoreAllMocks())
+
+  const VIAS = [
+    ['en vivo', {}],
+    ['cola moderna', { isOfflineReplay: true }],
+    ['cola Android/Windows ≤ 2.23 (H1)', { isOfflineReplay: true, colaConDefectoH1: true }],
+  ] as const
+  /** El abono de $50 de A con K ya confirmado (cuenta de $100); B no lo vio en su consulta rápida. */
+  const abonoConfirmadoDeA = (base: { paymentStatus?: 'PARTIAL' | 'PAID' | 'REFUNDED'; status?: string } = {}) => {
+    const db = instalarBase({ paymentStatus: base.paymentStatus ?? 'PARTIAL', status: base.status, total: 100 }, [
+      { amount: 50, idempotencyKey: 'llave-K', method: 'OTHER' },
+    ])
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null) // la consulta rápida de B, antes de que A confirmara
+    return db
+  }
+  const reintentoDeB = (extra: Record<string, unknown> = {}) =>
+    payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-K', ...extra })
+  /** EXACTAMENTE lo de la primera vez: el mismo pago, su importe y su método; ni cobro nuevo ni otra escritura. */
+  const comoLaPrimeraVez = (r: Awaited<ReturnType<typeof payCashOrder>>, db: ReturnType<typeof instalarBase>) => {
+    expect([r.paymentId, r.status, r.amount, r.tipAmount, r.method, r.changeCents]).toEqual(['previo-1', 'COMPLETED', 5000, 0, 'OTHER', 0])
+    expect([db.pagos.length, db.cas.length]).toEqual([1, 0])
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  }
+
+  describe.each(VIAS)('%s', (_via, via) => {
+    it.each([
+      ['el tipo del catálogo se RENOMBRÓ (cambió de versión)', 'El tipo de pago "Uber Eats" cambió (versión 1 → 2).'],
+      ['el tipo del catálogo se DESACTIVÓ', 'El tipo de pago "Uber Eats" está desactivado.'],
+    ])('🔴 %s entre los dos ⇒ el MISMO cobro, sin consultar el catálogo (antes en vivo: 400)', async (_caso, mensaje) => {
+      const resolver = rechazoDelCatalogo(mensaje)
+      const db = abonoConfirmadoDeA()
+
+      const r = await reintentoDeB({ ...via, tenderTypeId: 'tender-1', tenderRevision: 1 })
+
+      comoLaPrimeraVez(r, db)
+      expect(resolver).not.toHaveBeenCalled()
+    })
+
+    it('🔴 desactivaron al cajero entre los dos ⇒ el MISMO cobro (antes: 400 «is not assigned to venue … or is inactive»)', async () => {
+      const db = abonoConfirmadoDeA()
+      prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+
+      comoLaPrimeraVez(await reintentoDeB(via), db)
+    })
+
+    it.each([
+      ['la venta quedó PAID (otra caja cobró el resto)', { paymentStatus: 'PAID' as const }],
+      ['la venta quedó REFUNDED', { paymentStatus: 'REFUNDED' as const }],
+      ['la venta se CANCELÓ', { status: 'CANCELLED' }],
+    ])('regresión: %s entre los dos ⇒ el MISMO cobro, sin crear', async (_caso, base) => {
+      const db = abonoConfirmadoDeA(base)
+      comoLaPrimeraVez(await reintentoDeB(via), db)
+    })
+
+    it('regresión: la mesa pasó a Beto entre los dos (propiedad de mesa encendida) ⇒ el MISMO cobro, sin 403 ni preguntar permisos', async () => {
+      const db = abonoConfirmadoDeA()
+      Object.assign(db.row, { tableId: 'mesa-1', servedById: 'staff-beto', servedBy: { firstName: 'Beto', lastName: 'Bravo' } })
+      const propiedadDeMesa = { userId: 'staff-1', puedeCobrarAjena: jest.fn().mockResolvedValue(false) }
+
+      comoLaPrimeraVez(await reintentoDeB({ ...via, propiedadDeMesa }), db)
+      expect(propiedadDeMesa.puedeCobrarAjena).not.toHaveBeenCalled()
+    })
+  })
+
+  it('🔴 $0 en secuencia: la cortesía ya se cerró con K y hoy la cuenta «debe» ⇒ el MISMO cobro, no «Esta cuenta debe…» (antes: 400)', async () => {
+    const db = instalarBase({ paymentStatus: 'PAID', total: 0 }, [{ amount: 0, idempotencyKey: 'llave-0' }])
+    db.row.remainingBalance = new Decimal(30) // p. ej. un ajuste del panel después del cierre
+
+    const r = await payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'llave-0' })
+
+    expect([r.paymentId, r.status, r.amount]).toEqual(['previo-1', 'COMPLETED', 0])
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la llave bajo el candado es de un intento FAILED ⇒ 409 IDEMPOTENCY_KEY_REUSED en el MISMO punto, antes del catálogo', async () => {
+    const resolver = rechazoDelCatalogo('cambió')
+    instalarBase({ paymentStatus: 'PARTIAL', total: 100 }, [{ amount: 50, status: 'FAILED', idempotencyKey: 'llave-F' }])
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null)
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', {
+        amount: 5000,
+        tip: 0,
+        staffId: 'staff-1',
+        idempotencyKey: 'llave-F',
+        tenderTypeId: 'tender-1',
+        tenderRevision: 1,
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_REUSED' })
+    expect(resolver).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  describe('controles: un cobro NUEVO (sin pago con su llave) con esas mismas condiciones sigue rechazado como hoy', () => {
+    it('el tipo del catálogo cambió ⇒ 400 y ningún pago', async () => {
+      rechazoDelCatalogo('El tipo de pago "Uber Eats" cambió (versión 1 → 2).')
+      const { pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      await expect(
+        payCashOrder('venue-1', 'order-1', {
+          amount: 5000,
+          tip: 0,
+          staffId: 'staff-1',
+          idempotencyKey: 'nueva',
+          tenderTypeId: 'tender-1',
+          tenderRevision: 1,
+        }),
+      ).rejects.toMatchObject({ statusCode: 400 })
+      expect(pagos).toHaveLength(0)
+    })
+
+    it('cajero inactivo CON llave ⇒ el mismo 400, ya bajo el candado, y ningún pago', async () => {
+      const { pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+      await expect(
+        payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1', idempotencyKey: 'nueva' }),
+      ).rejects.toMatchObject({ statusCode: 400, message: 'Staff staff-1 is not assigned to venue venue-1 or is inactive' })
+      expect(pagos).toHaveLength(0)
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('cajero inactivo SIN llave ⇒ el 400 de siempre, antes de abrir la transacción', async () => {
+      instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+      await expect(payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1' })).rejects.toMatchObject({
+        statusCode: 400,
+      })
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      ['venta PAID, efectivo en vivo', { paymentStatus: 'PAID' as const, total: 100 }, 'Order is already paid'],
+      ['venta REFUNDED, efectivo en vivo', { paymentStatus: 'REFUNDED' as const, total: 100 }, 'Order is already paid'],
+      [
+        'venta CANCELLED, efectivo en vivo',
+        { paymentStatus: 'PENDING' as const, status: 'CANCELLED', total: 100 },
+        'Esta cuenta está cancelada, abre una nueva.',
+      ],
+    ])('%s ⇒ 400 y ningún pago', async (_caso, base, mensaje) => {
+      const { pagos } = instalarBase(base, base.paymentStatus === 'PENDING' ? [] : [{ amount: 100 }])
+      await expect(
+        payCashOrder('venue-1', 'order-1', { amount: 5000, tip: 0, staffId: 'staff-1', idempotencyKey: 'nueva' }),
+      ).rejects.toMatchObject({ statusCode: 400, message: mensaje })
+      expect(pagos.filter(p => p.idempotencyKey === 'nueva')).toHaveLength(0)
+    })
+
+    it('$0 sobre una cuenta que debe ⇒ el 400 de la consulta rápida, sin transacción', async () => {
+      instalarBase({ paymentStatus: 'PENDING', total: 100 }).row.remainingBalance = new Decimal(100)
+      await expect(
+        payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'nueva' }),
+      ).rejects.toMatchObject({ statusCode: 400 })
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    })
+
+    it('mesa que pasó a Beto, efectivo nuevo en vivo ⇒ 403 y ningún pago', async () => {
+      const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 100 })
+      Object.assign(row, { tableId: 'mesa-1', servedById: 'staff-beto', servedBy: { firstName: 'Beto', lastName: 'Bravo' } })
+      await expect(
+        payCashOrder('venue-1', 'order-1', {
+          amount: 5000,
+          tip: 0,
+          staffId: 'staff-1',
+          idempotencyKey: 'nueva',
+          propiedadDeMesa: { userId: 'staff-1', puedeCobrarAjena: jest.fn().mockResolvedValue(false) },
+        }),
+      ).rejects.toMatchObject({ statusCode: 403, code: 'TABLE_OWNED_BY_OTHER' })
+      expect(pagos).toHaveLength(0)
+    })
   })
 })

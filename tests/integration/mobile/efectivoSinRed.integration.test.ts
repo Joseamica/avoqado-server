@@ -52,6 +52,8 @@ import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.servic
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { deletePayment } from '@/services/dashboard/payment.dashboard.service'
+import { createTenderType, updateTenderType } from '@/services/dashboard/tenderType.dashboard.service'
+import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import {
   addTicketToCheckout,
   createAreaTicketCheckout,
@@ -976,6 +978,48 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
       expect(await marcas(orderId)).toEqual([])
     })
   })
+
+  /**
+   * 🔴 R8 (matriz del reintento): Ana cobra $100 en vivo por HTTP con K y, mientras su reintento con la MISMA K viaja (su middleware ya
+   * pasó; su consulta rápida no vio el cobro), la mesa pasa a Beto y la propiedad de mesa se enciende o se apaga. El reintento devuelve
+   * el MISMO cobro, sin 403 y sin rastro de mesa ajena: no es un cobro nuevo.
+   */
+  it.each([
+    ['la mesa pasó a Beto (propiedad encendida)', true, true],
+    ['la mesa pasó a Beto y APAGARON la propiedad de mesa', true, false],
+    ['la mesa pasó a Beto y ENCENDIERON la propiedad de mesa', false, true],
+  ])('🔴 R8 HTTP en vivo: %s entre los dos ⇒ 200 con el MISMO cobro y uno solo', async (_caso, antes, despues) => {
+    const propiedad = (enforceTableOwnership: boolean) =>
+      prisma.venueSettings.update({ where: { venueId }, data: { enforceTableOwnership } })
+    await propiedad(antes)
+    try {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { servedById: ana } })
+      const K = llaveHttp()
+      const cobro = async () => {
+        const r = await cobrarHttp(orderId, { amount: 10000, tip: 0, idempotencyKey: K })
+        return { status: r.status, paymentId: r.body.payment?.paymentId, amount: r.body.payment?.amount }
+      }
+
+      const { primera, segunda } = await conLaPrimeraConfirmadaAntesDelCandado(
+        K,
+        1,
+        cobro,
+        async () => {
+          await prisma.order.update({ where: { id: orderId }, data: { servedById: beto } })
+          await propiedad(despues)
+        },
+        cobro,
+      )
+
+      expect(primera).toMatchObject({ status: 200, amount: 10000 })
+      expect(segunda).toEqual(primera)
+      expect(await prisma.payment.count({ where: { venueId, idempotencyKey: K } })).toBe(1)
+      expect(await marcas(orderId)).toEqual([])
+    } finally {
+      await propiedad(false)
+    }
+  })
 })
 
 /**
@@ -1034,6 +1078,228 @@ describe('R6-2 · el reintento simultáneo con la misma llave responde como la p
       expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { paymentStatus: true } })).paymentStatus).toBe('PAID')
     },
   )
+})
+
+/**
+ * 🔴 R8 — REDISEÑO de la familia «un reintento con la misma llave responde distinto a la primera vez» (Codex r5 #2, r6 #2, r7 #1: tres
+ * rondas seguidas, una variante nueva cada vez). La causa común: reglas de estado que pueden cambiar entre un intento y su reintento
+ * (venta cerrada o cancelada, saldo, catálogo de tipos de pago, personal, sesión de vales, propiedad de mesa) corrían ANTES de buscar la
+ * llave bajo el candado. Ahora la llave decide PRIMERO, bajo el candado. La matriz: la PRIMERA petición con K confirma; ENTRE las dos
+ * cambia cada cosa mutable; la SEGUNDA (que ya había hecho su consulta rápida sin ver nada) devuelve EXACTAMENTE la respuesta de la
+ * primera y deja un solo Payment de K, por cada vía: en vivo, cola moderna, cola H1 y reducer.
+ */
+describe('R8 · el reintento responde como la primera vez aunque ENTRE los dos cambie lo mutable', () => {
+  type Via = 'en vivo' | 'cola moderna' | 'cola H1' | 'reducer'
+  const VIAS: Via[] = ['en vivo', 'cola moderna', 'cola H1', 'reducer']
+  const extraDe = (via: Via) =>
+    via === 'en vivo' ? {} : via === 'cola H1' ? { isOfflineReplay: true, colaConDefectoH1: true } : { isOfflineReplay: true }
+  type Medio = { method: 'CASH' } | { tenderTypeId: string; tenderRevision: number }
+  type Respuesta = { paymentId?: unknown; amount?: unknown; tipAmount?: unknown; method?: unknown; changeCents?: unknown }
+
+  /** Un cobro con K por la vía dada (el reducer usa K como id del intent). La parte de la respuesta que debe repetirse idéntica. */
+  async function cobrar(via: Via, orderId: string, K: string, amountCents: number, medio: Medio, staffId: string): Promise<Respuesta> {
+    if (via === 'reducer') {
+      const intent = { id: K, seq: ++seq, type: 'PAY_CASH' as const, payload: { orderId, amountCents, tipCents: 0, ...medio } }
+      const [ack] = await processIntents(params([intent], staffId))
+      if (ack.status !== 'ACKED') throw Object.assign(new Error(String(ack.message ?? ack.status)), ack)
+      const { paymentId, amount, tipAmount, method, changeCents } = ack.result as Respuesta
+      return { paymentId, amount, tipAmount, method, changeCents }
+    }
+    const r = await payCashOrder(venueId, orderId, {
+      amount: amountCents,
+      tip: 0,
+      staffId,
+      idempotencyKey: K,
+      ...medio,
+      ...extraDe(via),
+    })
+    return { paymentId: r.paymentId, amount: r.amount, tipAmount: r.tipAmount, method: r.method, changeCents: r.changeCents }
+  }
+
+  async function cajeraNueva() {
+    const id = (
+      await prisma.staff.create({ data: { email: `c-${randomUUID()}@staff.test`, firstName: 'Caja', lastName: 'C', active: true } })
+    ).id
+    await prisma.staffVenue.create({ data: { venueId, staffId: id, role: StaffRole.OWNER } })
+    return id
+  }
+  const tipoUber = async () => (await createTenderType(venueId, { name: `Uber Eats ${randomUUID().slice(0, 8)}` })).id
+
+  type Caso = {
+    monto: number
+    /** Lo que cambia ENTRE las dos peticiones, ya confirmada la primera. */
+    entreLasDos: (c: { orderId: string; primera: Respuesta; tenderId: string; cajera: string }) => Promise<unknown>
+    conTipoDelCatalogo?: boolean
+    /** Payments REGULAR de la orden al final (la primera y, si la hay, la de otra caja). */
+    cobros?: number
+  }
+  const CASOS: Array<[string, Caso]> = [
+    ['la venta quedó PAID (la primera la saldó)', { monto: 10000, entreLasDos: async () => undefined }],
+    [
+      'la venta quedó REFUNDED',
+      {
+        monto: 10000,
+        entreLasDos: async ({ orderId, primera }) => {
+          await issueRefund({
+            venueId,
+            paymentId: String(primera.paymentId),
+            amount: 10000,
+            tipRefundCents: 0,
+            reason: 'CUSTOMER_REQUEST' as never,
+            staffId: staffB,
+          })
+          await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'REFUNDED' } })
+        },
+      },
+    ],
+    [
+      'la venta se CANCELÓ',
+      { monto: 5000, entreLasDos: ({ orderId }) => prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }) },
+    ],
+    [
+      'el saldo cambió: otra caja cobró el resto',
+      {
+        monto: 5000,
+        cobros: 2,
+        entreLasDos: ({ orderId }) =>
+          payCashOrder(venueId, orderId, { amount: 5000, tip: 0, staffId: staffB, idempotencyKey: randomUUID() }),
+      },
+    ],
+    [
+      'el tipo del catálogo se RENOMBRÓ (versión 1 → 2)',
+      {
+        monto: 5000,
+        conTipoDelCatalogo: true,
+        entreLasDos: ({ tenderId }) => updateTenderType(venueId, tenderId, 1, { name: `Uber ${randomUUID()}` }),
+      },
+    ],
+    [
+      'el tipo del catálogo se DESACTIVÓ',
+      { monto: 5000, conTipoDelCatalogo: true, entreLasDos: ({ tenderId }) => updateTenderType(venueId, tenderId, 1, { active: false }) },
+    ],
+    [
+      'desactivaron a la cajera',
+      {
+        monto: 5000,
+        entreLasDos: ({ cajera }) => prisma.staffVenue.updateMany({ where: { venueId, staffId: cajera }, data: { active: false } }),
+      },
+    ],
+  ]
+
+  describe.each(VIAS)('%s', via => {
+    it.each(CASOS)('🔴 %s ⇒ la MISMA respuesta que la primera vez y un solo Payment de K', async (_caso, caso) => {
+      const { orderId } = await cuentaDeA()
+      const [tenderId, cajera] = await Promise.all([caso.conTipoDelCatalogo ? tipoUber() : Promise.resolve(''), cajeraNueva()])
+      const medio: Medio = caso.conTipoDelCatalogo ? { tenderTypeId: tenderId, tenderRevision: 1 } : { method: 'CASH' }
+      const K = randomUUID()
+      // La primera es la MISMA operación: el reducer reproduce con `isOfflineReplay`, como la cola moderna.
+      const viaDeLaPrimera: Via = via === 'reducer' ? 'cola moderna' : via
+
+      // Reducer: 1.ª consulta de K la del propio reducer, 2.ª la rápida del servicio (justo antes de su transacción).
+      const { primera, segunda } = await conLaPrimeraConfirmadaAntesDelCandado(
+        K,
+        via === 'reducer' ? 2 : 1,
+        () => cobrar(viaDeLaPrimera, orderId, K, caso.monto, medio, cajera),
+        primera => caso.entreLasDos({ orderId, primera, tenderId, cajera }),
+        () => cobrar(via, orderId, K, caso.monto, medio, cajera),
+      )
+
+      expect(primera.paymentId).toEqual(expect.any(String))
+      expect(segunda).toEqual(primera)
+      expect(await prisma.payment.count({ where: { venueId, idempotencyKey: K } })).toBe(1)
+      expect(await prisma.payment.count({ where: { venueId, orderId, type: 'REGULAR' } })).toBe(caso.cobros ?? 1)
+    })
+  })
+
+  describe('controles: un cobro NUEVO en vivo con esas mismas condiciones sigue rechazado antes de tomar dinero', () => {
+    it.each([
+      ['el tipo del catálogo cambió de versión', (t: string) => updateTenderType(venueId, t, 1, { name: `Uber ${randomUUID()}` })],
+      ['el tipo del catálogo está desactivado', (t: string) => updateTenderType(venueId, t, 1, { active: false })],
+    ])('%s ⇒ 400 y ningún pago', async (_caso, cambiar) => {
+      const { orderId } = await cuentaDeA()
+      const tenderId = await tipoUber()
+      await cambiar(tenderId)
+      await expect(
+        payCashOrder(venueId, orderId, {
+          amount: 5000,
+          tip: 0,
+          staffId: staffA,
+          idempotencyKey: randomUUID(),
+          tenderTypeId: tenderId,
+          tenderRevision: 1,
+        }),
+      ).rejects.toMatchObject({ statusCode: 400 })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+    })
+
+    it.each([
+      ['con llave (el rechazo espera al punto de la llave)', true],
+      ['sin llave', false],
+    ])('cajera desactivada, %s ⇒ 400 y ningún pago', async (_caso, conLlave) => {
+      const { orderId } = await cuentaDeA()
+      const cajera = await cajeraNueva()
+      await prisma.staffVenue.updateMany({ where: { venueId, staffId: cajera }, data: { active: false } })
+      await expect(
+        payCashOrder(venueId, orderId, { amount: 5000, tip: 0, staffId: cajera, ...(conLlave ? { idempotencyKey: randomUUID() } : {}) }),
+      ).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('is not assigned to venue') })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+    })
+
+    it.each([
+      ['venta PAID', 'PAID', 'COMPLETED', 'Order is already paid'],
+      ['venta REFUNDED', 'REFUNDED', 'COMPLETED', 'Order is already paid'],
+      ['venta CANCELLED', 'PENDING', 'CANCELLED', 'Esta cuenta está cancelada, abre una nueva.'],
+    ] as const)('%s ⇒ 400 «%s» y ningún pago', async (_caso, paymentStatus, status, mensaje) => {
+      const { orderId } = await cuentaDeA()
+      await prisma.order.update({ where: { id: orderId }, data: { paymentStatus, status } })
+      await expect(
+        payCashOrder(venueId, orderId, { amount: 5000, tip: 0, staffId: staffA, idempotencyKey: randomUUID() }),
+      ).rejects.toMatchObject({ statusCode: 400, message: mensaje })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+    })
+  })
+
+  /**
+   * La TPV (`recordOrderPayment`) pasa por el MISMO punto de la llave (bajo el candado del intento). Efectivo de la terminal con
+   * `cobroNuevo`: la primera confirma un abono con K, la cuenta se cancela entre las dos, y la segunda devuelve ese mismo pago.
+   */
+  it('🔴 TPV, efectivo con cobroNuevo: la venta se CANCELÓ entre los dos ⇒ el MISMO pago y uno solo', async () => {
+    const { orderId } = await cuentaDeA()
+    const K = randomUUID()
+    const tpv = async () =>
+      (await recordOrderPayment(
+        venueId,
+        orderId,
+        {
+          venueId,
+          amount: 5000,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'CUSTOMAMOUNT',
+          tpvId: fixture,
+          staffId: staffA,
+          paidProductsId: [],
+          idempotencyKey: K,
+          currency: 'MXN',
+          isInternational: false,
+          cobroNuevo: true,
+        } as never,
+        staffA,
+      )) as { id: string }
+
+    const { primera, segunda } = await conLaPrimeraConfirmadaAntesDelCandado(
+      K,
+      1,
+      tpv,
+      () => prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } }),
+      tpv,
+    )
+
+    expect(segunda.id).toBe(primera.id)
+    expect(await prisma.payment.count({ where: { venueId, idempotencyKey: K } })).toBe(1)
+  })
 })
 
 /**
@@ -1291,5 +1557,112 @@ describe('R6-1 · venta de vales cancelada por la ruta general', () => {
       ).rejects.toMatchObject({ statusCode: 409 })
       expect(await prisma.payment.count({ where: { venueId, orderId: venta.orderId } })).toBe(1)
     })
+
+    /**
+     * 🔴 R8: la sesión de vales cambia ENTRE los dos por OTRO intento (T): incierto, en conciliación o saldando el resto. El reintento
+     * de K (en vivo, que es donde la sesión rechaza) devuelve el MISMO pago. La TPV también: el R7-2 que vivía dentro de las guardas de
+     * la sesión quedó subsumido por el punto de la llave en `payCashOrder` y en `recordOrderPayment`.
+     */
+    async function otroIntento(venta: { orderId: string; sessionId: string; ticketId: string }, modo: 'UNKNOWN' | 'RR' | 'PAID') {
+      if (modo === 'RR') return conciliacionDeOtroIntento(venta.sessionId, venta.orderId)
+      if (modo === 'PAID') {
+        await payCashOrder(venueId, venta.orderId, { amount: 5000, tip: 0, staffId: staffB, idempotencyKey: randomUUID() })
+        expect((await vales(venta)).sesion).toBe(AreaTicketCheckoutStatus.PAID)
+        return
+      }
+      const ultimo = await prisma.areaTicketPaymentAttempt.findFirstOrThrow({
+        where: { checkoutSessionId: venta.sessionId },
+        orderBy: { sequence: 'desc' },
+        select: { sequence: true },
+      })
+      const t = await prisma.areaTicketPaymentAttempt.create({
+        data: {
+          checkoutSessionId: venta.sessionId,
+          orderId: venta.orderId,
+          sequence: ultimo.sequence + 1,
+          idempotencyKey: `T-${randomUUID()}`,
+          amount: new Prisma.Decimal(50),
+          method: 'CREDIT_CARD',
+          status: 'UNKNOWN',
+        },
+      })
+      await prisma.areaTicketCheckoutSession.update({
+        where: { id: venta.sessionId },
+        data: { status: AreaTicketCheckoutStatus.PAYMENT_PENDING, activePaymentAttemptId: t.id },
+      })
+    }
+    const tpvDeVales = (orderId: string, K: string) => async () =>
+      (await recordOrderPayment(
+        venueId,
+        orderId,
+        {
+          venueId,
+          amount: 5000,
+          tip: 0,
+          status: 'COMPLETED',
+          method: 'CASH',
+          source: 'TPV',
+          splitType: 'CUSTOMAMOUNT',
+          tpvId: fixture,
+          staffId: staffA,
+          paidProductsId: [],
+          idempotencyKey: K,
+          currency: 'MXN',
+          isInternational: false,
+          cobroNuevo: true,
+        } as never,
+        staffA,
+      )) as { id: string }
+
+    it.each([
+      ['POS en vivo · T incierto (UNKNOWN)', 'pos', 'UNKNOWN'],
+      ['POS en vivo · T saldó el resto (sesión PAID)', 'pos', 'PAID'],
+      ['TPV con cobroNuevo · T dejó la sesión en conciliación', 'tpv', 'RR'],
+      ['TPV con cobroNuevo · T incierto (UNKNOWN)', 'tpv', 'UNKNOWN'],
+    ] as const)('🔴 R8 %s entre los dos ⇒ el MISMO pago de K y uno solo', async (_caso, canal, modo) => {
+      const venta = await ventaDeVales()
+      const K = randomUUID()
+      const pos = async () =>
+        (await payCashOrder(venueId, venta.orderId, { amount: 5000, tip: 0, staffId: staffA, idempotencyKey: K })) as { paymentId: string }
+      const cobro = canal === 'tpv' ? async () => ({ paymentId: (await tpvDeVales(venta.orderId, K)()).id }) : pos
+
+      const { primera, segunda } = await conLaPrimeraConfirmadaAntesDelCandado(K, 1, cobro, () => otroIntento(venta, modo), cobro)
+
+      expect(segunda.paymentId).toBe(primera.paymentId)
+      expect(await prisma.payment.count({ where: { venueId, idempotencyKey: K } })).toBe(1)
+    })
   })
 })
+
+/**
+ * 🔴 R8: la carrera del reintento con la misma llave. En la n-ésima consulta de K de la SEGUNDA petición (su consulta rápida, antes de su
+ * candado), la PRIMERA cobra y confirma con K y, ya confirmada, cambia lo mutable (`entreLasDos`). Devuelve las dos respuestas.
+ */
+async function conLaPrimeraConfirmadaAntesDelCandado<T>(
+  K: string,
+  enLaConsulta: number,
+  primeraPeticion: () => Promise<T>,
+  entreLasDos: (primera: T) => Promise<unknown>,
+  segundaPeticion: () => Promise<T>,
+): Promise<{ primera: T; segunda: T }> {
+  const original = prisma.payment.findUnique.bind(prisma.payment)
+  let vistas = 0
+  let primera: T | undefined
+  let disparada = false
+  const espia = jest.spyOn(prisma.payment, 'findUnique').mockImplementation((async (args: any) => {
+    const r = await original(args)
+    if (!disparada && args?.where?.venueId_idempotencyKey?.idempotencyKey === K && ++vistas === enLaConsulta) {
+      disparada = true
+      primera = await primeraPeticion()
+      await entreLasDos(primera)
+    }
+    return r
+  }) as never)
+  try {
+    const segunda = await segundaPeticion()
+    expect(disparada).toBe(true)
+    return { primera: primera as T, segunda }
+  } finally {
+    espia.mockRestore()
+  }
+}
