@@ -5,6 +5,11 @@ import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { crearNegocio, familiaAl8, NegocioDePrueba } from './fixtures'
 
+// La observación de 30 días de aparatos (plan 6b) se da por cumplida, como en encendidoAlGuardar: su valor real tiene su propia prueba.
+jest.mock('@/services/mobile/deviceRegistry.service', () => ({
+  ...jest.requireActual('@/services/mobile/deviceRegistry.service'),
+  OBSERVADOR_POS_DESDE: new Date('2026-08-01T00:00:00Z'),
+}))
 const mockBroadcastMenuUpdated = jest.fn()
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,

@@ -928,7 +928,7 @@ router.put(
  *       200: { description: "{ status, alreadyActive, firstChargeCents, nextChargeAt, launchOffer? }" }
  *       402: { description: PLAN_PAYMENT_DECLINED }
  *       403: { description: ORG_OWNER_REQUIRED }
- *       409: { description: OFFER_CHANGED · LAUNCH_OFFER_UNAVAILABLE · PLAN_ALREADY_ACTIVATED · PLAN_ACTIVE_WITHOUT_OFFER · PLAN_ACTIVATION_IN_PROGRESS · PLAN_PRICE_MISMATCH }
+ *       409: { description: "OFFER_CHANGED · LAUNCH_OFFER_UNAVAILABLE · PLAN_ALREADY_ACTIVATED · PLAN_ACTIVE_WITHOUT_OFFER · PLAN_ACTIVATION_IN_PROGRESS · PLAN_PRICE_MISMATCH · PLAN_PAYMENT_REQUIRES_ACTION (details.clientSecret: secreto del primer pago para confirmarlo con 3D Secure en el navegador)" }
  *       503: { description: PLAN_ACTIVATION_PENDING }
  */
 if (onboardingController.requiresBaseSubscriptionPlan()) {

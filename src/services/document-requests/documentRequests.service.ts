@@ -6,9 +6,17 @@ import { SocketEventType } from '../../communication/sockets/types'
 import prisma from '../../utils/prismaClient'
 import { FRONTEND_URL } from '../../config/env'
 import { BadRequestError, ConflictError, NotFoundError, TooManyRequestsError } from '../../errors/AppError'
-import { buildPrivateFilePath, savePrivateFileAtPath, signPrivateAttachmentUrl, deletePrivateFile } from '../privateStorage.service'
+import {
+  buildPrivateFilePath,
+  savePrivateFileAtPath,
+  signPrivateAttachmentUrl,
+  signPrivatePreviewUrl,
+  deletePrivateFile,
+} from '../privateStorage.service'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
 import { assertAccess, assertComplete, getRequirements, hashToken, LIMITS, validateFile } from './policy'
+
+import { captureSubmissionTx } from './venueLinks.service'
 
 type Tx = Prisma.TransactionClient
 export type UploadAdmission = { lease: string; tokenVersion: number }
@@ -189,12 +197,20 @@ export async function renewRequest(id: string, actorId?: string) {
     return result
   })
 }
-export async function getDownloadUrl(id: string, documentId: string) {
+async function getReadableDocument(id: string, documentId: string) {
   if (!idInput.safeParse(id).success) throw new NotFoundError('Enlace no disponible')
   parseInput(idInput, documentId)
   const file = await prisma.documentRequestFile.findFirst({ where: { id: documentId, requestId: id, status: 'READY' } })
   if (!file) throw new NotFoundError()
+  return file
+}
+export async function getDownloadUrl(id: string, documentId: string) {
+  const file = await getReadableDocument(id, documentId)
   return { url: await signPrivateAttachmentUrl(file.storagePath) }
+}
+export async function getPreviewUrl(id: string, documentId: string) {
+  const file = await getReadableDocument(id, documentId)
+  return { url: await signPrivatePreviewUrl(file.storagePath, file.mimeType), mimeType: file.mimeType, fileName: file.fileName }
 }
 export async function getPublicRequest(id: string, token: string) {
   if (!idInput.safeParse(id).success) throw new NotFoundError('Enlace no disponible')
@@ -332,9 +348,10 @@ export async function deleteDocument(id: string, token: string, documentId: stri
   parseInput(idInput, documentId)
   await locked(id, async (tx, r) => {
     assertAccess(r, token, true)
+    const referenced = await tx.documentRequestSubmissionFile.count({ where: { documentId } })
     const changed = await tx.documentRequestFile.updateMany({
       where: { requestId: id, id: documentId, status: 'READY' },
-      data: { status: 'DELETING' },
+      data: { status: referenced ? 'ARCHIVED' : 'DELETING' },
     })
     if (!changed.count) throw new NotFoundError()
     await audit(tx, id, 'DOCUMENT_REQUEST_FILE_DELETED', undefined, documentId)
@@ -347,8 +364,9 @@ export async function discardUpload(id: string, token: string, uploadId: string)
   await locked(id, async (tx, r) => {
     assertAccess(r, token, true)
     const row = await tx.documentRequestFile.findUnique({ where: { requestId_uploadId: { requestId: id, uploadId } } })
-    if (!row || ['DELETING', 'DELETED'].includes(row.status)) return
-    await tx.documentRequestFile.update({ where: { id: row.id }, data: { status: 'DELETING' } })
+    if (!row || ['DELETING', 'DELETED', 'ARCHIVED'].includes(row.status)) return
+    const referenced = await tx.documentRequestSubmissionFile.count({ where: { documentId: row.id } })
+    await tx.documentRequestFile.update({ where: { id: row.id }, data: { status: referenced ? 'ARCHIVED' : 'DELETING' } })
     await audit(tx, id, 'DOCUMENT_REQUEST_FILE_DISCARDED', undefined, row.id)
   })
   return { success: true as const }
@@ -365,7 +383,7 @@ export async function submitRequest(id: string, token: string, input: unknown) {
     assertComplete(r.provider, r.entityType, contact.identificationType, documents)
     const { privacyAccepted, ...data } = contact
     const version = r.submissionVersion + 1
-    await tx.documentRequest.update({
+    const submitted = await tx.documentRequest.update({
       where: { id },
       data: {
         ...data,
@@ -382,6 +400,7 @@ export async function submitRequest(id: string, token: string, input: unknown) {
         notificationSnapshot: { id, version, provider: r.provider, entityType: r.entityType },
       },
     })
+    await captureSubmissionTx(tx, submitted, documents)
     await tx.documentRequestDelivery.createMany({
       data: ['onboarding@avoqado.io', 'daniel@avoqado.io'].map(recipient => ({
         requestId: id,
@@ -403,6 +422,7 @@ export async function cleanupFiles(now = new Date()) {
     () =>
       prisma.documentRequestFile.findMany({
         where: {
+          submissionFiles: { none: {} },
           OR: [
             { status: 'DELETING', updatedAt: { lt: new Date(now.getTime() - 30 * 60000) } },
             { status: 'PENDING', updatedAt: { lt: new Date(now.getTime() - 30 * 60000) } },
@@ -427,6 +447,10 @@ export async function cleanupFiles(now = new Date()) {
         where: { id: file.id, requestId: file.requestId, status: file.status, updatedAt: file.updatedAt },
       })
       if (!row || (r.uploadLeaseUntil && r.uploadLeaseUntil > now)) return false
+      if (await tx.documentRequestSubmissionFile.count({ where: { documentId: file.id } })) {
+        await tx.documentRequestFile.update({ where: { id: file.id }, data: { status: 'ARCHIVED' } })
+        return false
+      }
       if (file.status === 'READY' && (r.submittedAt !== null || r.expiresAt.getTime() >= now.getTime() - 30 * 86400000)) return false
       await tx.documentRequestFile.update({ where: { id: file.id }, data: { status: 'DELETING' } })
       return true
