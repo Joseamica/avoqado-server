@@ -1,4 +1,5 @@
 import { Request, Response, NextFunction } from 'express'
+import { assertVenueHasNoDocumentLinksTx } from '../../services/document-requests/venueLinks.service'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
@@ -161,6 +162,8 @@ export async function transferVenue(req: Request, res: Response, next: NextFunct
       // 3. El negocio bajo candado EXCLUSIVO: si ya no está en el origen, otro traslado ganó.
       const relectura = await bloquearSedeExclusiva(tx, venueId, presupuesto)
       if (relectura?.organizationId !== fromOrganizationId) throw negocioCambioDeOrganizacionError()
+
+      await assertVenueHasNoDocumentLinksTx(tx, venueId)
 
       // 3b. Su historia de pago al personal, en OTRA sentencia y ya con el candado: ve lo que confirmó quien esperaba.
       if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('trasladar')

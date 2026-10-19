@@ -67,7 +67,12 @@ jest.mock('@/services/shared/parejaDeCierre', () => ({
 }))
 
 import prisma from '@/utils/prismaClient'
-import { closeShiftForVenueWithResult, cobroSinTurnoPerteneceAlTurno, getShifts } from '@/services/tpv/shift.tpv.service'
+import {
+  closeShiftForVenueWithResult,
+  cobroSinTurnoPerteneceAlTurno,
+  contarOrdenesCobradas,
+  getShifts,
+} from '@/services/tpv/shift.tpv.service'
 
 const m = prisma as any
 const VENUE = 'venue-5q'
@@ -162,6 +167,9 @@ function esperarMembresiaCanonica(args: any) {
     fundsFlow: true,
     tenderTypeId: true,
     tenderCountsAsCash: true,
+    // Con qué contar las ÓRDENES cobradas del turno (no los renglones de producto).
+    orderId: true,
+    type: true,
   })
   expect(args.orderBy).toEqual({ id: 'asc' })
   expect(args.take).toBe(500)
@@ -245,6 +253,55 @@ describe('cierre — membresía canónica del reporte', () => {
 
     expect(m.payment.update).not.toHaveBeenCalled()
     expect(m.payment.updateMany).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 Hasta el 18-oct-2026 el cierre escribía `totalOrders: orderItems.length` — los RENGLONES de
+ * producto, no las órdenes. Medido en prod: 47 de 47 turnos cerrados guardaban renglones (Testarudo
+ * 270 «órdenes» en un turno de 124), y un «Pago rápido» sin renglones contaba 0.
+ */
+describe('cierre — totalOrders son las ÓRDENES cobradas, no los renglones', () => {
+  it('cuenta órdenes distintas con cobro: un pago dividido es UNA orden y los renglones no cuentan', async () => {
+    prepararCierre()
+    // Cinco renglones de producto repartidos en dos órdenes: antes esto daba totalOrders = 5.
+    m.orderItem.findMany.mockResolvedValue(
+      Array.from({ length: 5 }, (_, i) => ({ id: `item-${i}`, quantity: 2, productName: 'Café', product: null })),
+    )
+    m.payment.findMany.mockResolvedValue([
+      pago({ id: 'a-1', orderId: 'orden-a', amount: new Decimal('50.00') }),
+      pago({ id: 'a-2', orderId: 'orden-a', amount: new Decimal('50.00'), method: 'CARD' }),
+      pago({ id: 'b-1', orderId: 'orden-b', amount: new Decimal('30.00') }),
+    ])
+
+    await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => CLAIMED_AT })
+
+    expect(cierreEscrito.totalOrders).toBe(2)
+    expect((cierreEscrito.reportData as any).sales.totalOrders).toBe(2)
+    // Los productos siguen en su propio número.
+    expect(cierreEscrito.totalProductsSold).toBe(10)
+  })
+
+  it('un «Pago rápido» sin renglones cuenta como orden', async () => {
+    prepararCierre()
+    m.orderItem.findMany.mockResolvedValue([])
+    m.payment.findMany.mockResolvedValue([pago({ id: 'rapido', orderId: 'orden-rapida', type: 'FAST' })])
+
+    await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => CLAIMED_AT })
+
+    expect(cierreEscrito.totalOrders).toBe(1)
+  })
+
+  it('un reembolso no es una orden cobrada: ni el testigo standalone ni la devolución de una venta', () => {
+    expect(
+      contarOrdenesCobradas([
+        { orderId: 'venta', type: 'REGULAR' },
+        { orderId: 'venta', type: 'REFUND' },
+        { orderId: 'testigo-standalone', type: 'REFUND' },
+        { orderId: 'carrito-gratis', type: null },
+      ]),
+    ).toBe(2)
+    expect(contarOrdenesCobradas([])).toBe(0)
   })
 })
 

@@ -16,6 +16,7 @@ datasource db {
 // ==========================================
 
 model Organization {
+  documentRequests DocumentRequest[]
   id    String       @id @default(cuid())
   name  String
   slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
@@ -185,6 +186,7 @@ model Zone {
 model Venue {
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
+  documentRequestLinks DocumentRequestVenueLink[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
   hybridContracts HybridContract[]
@@ -725,6 +727,7 @@ model Venue {
   @@index([slug])
   @@index([active])
   @@index([status]) // For filtering by operational status
+  @@index([name, id]) // Stable platform venue selector pagination
 }
 
 enum VenueChatMode {
@@ -1035,6 +1038,7 @@ model PosConnectionStatus {
 // ==========================================
 
 model Staff {
+  documentRequestLinks DocumentRequestVenueLink[]
   id String @id @default(cuid())
   // organizationId removed: use StaffOrganization junction table for multi-org membership
 
@@ -19914,6 +19918,12 @@ model OnlineOrder {
 
 /// Platform onboarding invitations; deliberately independent of a venue.
 model DocumentRequest {
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissions DocumentRequestSubmission[]
+  venueLinks DocumentRequestVenueLink[]
+  @@unique([id, organizationId])
+  @@index([organizationId])
   id String @id @default(cuid())
   provider String
   entityType String
@@ -19950,6 +19960,7 @@ model DocumentRequest {
 }
 
 model DocumentRequestFile {
+  submissionFiles DocumentRequestSubmissionFile[]
   id String @id @default(cuid())
   requestId String
   request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
@@ -19987,4 +19998,48 @@ model DocumentRequestDelivery {
   updatedAt DateTime @updatedAt
   @@unique([requestId,submissionVersion,recipient])
   @@index([status,nextAttemptAt])
+}
+
+/// Immutable record of one completed delivery. Never reconstructed from a later draft.
+model DocumentRequestSubmission {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissionVersion Int
+  snapshot Json
+  submittedAt DateTime
+  createdAt DateTime @default(now())
+  files DocumentRequestSubmissionFile[]
+  venueLinks DocumentRequestVenueLink[]
+  @@unique([requestId, submissionVersion])
+}
+
+model DocumentRequestSubmissionFile {
+  submissionId String
+  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documentId String
+  document DocumentRequestFile @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  @@id([submissionId, documentId])
+  @@index([documentId])
+}
+
+model DocumentRequestVenueLink {
+  id String @id @default(cuid())
+  requestId String
+  organizationId String
+  request DocumentRequest @relation(fields: [requestId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  submissionId String
+  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  venueId String
+  venue Venue @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  actorId String
+  actor Staff @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  linkedAt DateTime @default(now())
+  onboardingHash String? @unique
+  onboardingResult Json?
+  @@unique([venueId, submissionId])
+  @@index([venueId, linkedAt, id])
+  @@index([requestId, linkedAt, id])
+  @@index([submissionId])
+  @@index([actorId])
 }

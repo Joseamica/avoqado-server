@@ -66,6 +66,8 @@ describeDb('disposable Postgres document requests', () => {
     if (ids.length) {
       await db.activityLog.deleteMany({ where: { entity: 'DocumentRequest', entityId: { in: ids } } })
       await db.documentRequestDelivery.deleteMany({ where: { requestId: { in: ids } } })
+      await db.documentRequestSubmissionFile.deleteMany({ where: { submission: { requestId: { in: ids } } } })
+      await db.documentRequestSubmission.deleteMany({ where: { requestId: { in: ids } } })
       await db.documentRequestFile.deleteMany({ where: { requestId: { in: ids } } })
       await db.documentRequest.deleteMany({ where: { id: { in: ids } } })
     }
