@@ -676,7 +676,8 @@ export async function switchVenueForStaff(staffId: string, orgId: string, target
   // suicida en su primer uso. Misma línea, mismo motivo, que en los dos logins móviles.
   await issueGrant(session.id, crypto.randomUUID(), refreshToken, refreshGrantExpiry())
 
-  return { accessToken, refreshToken }
+  // `sessionId`: quien reemite a partir de otra sesión (fin del alta) tiene que poder cerrar ÉSTA si hubo un corte.
+  return { accessToken, refreshToken, sessionId: session.id }
 }
 
 /**
