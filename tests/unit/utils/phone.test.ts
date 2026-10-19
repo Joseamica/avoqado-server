@@ -1,4 +1,11 @@
-import { canonicalPhoneE164, formaLegadaDeTelefonoMx, normalizePhoneE164, normalizarTelefonoMx, phoneLast10, phonesMatch } from '@/utils/phone'
+import {
+  canonicalPhoneE164,
+  formaLegadaDeTelefonoMx,
+  normalizePhoneE164,
+  normalizarTelefonoMx,
+  phoneLast10,
+  phonesMatch,
+} from '@/utils/phone'
 
 // Lo que se GUARDA (y se compara en SQL) debe ser la misma forma que `phonesMatch` considera igual: si no, un `+521…` pasa la
 // identidad y se guarda aparte del `+52…` de la misma persona (tope por teléfono partido en dos).
