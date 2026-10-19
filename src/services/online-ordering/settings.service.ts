@@ -1,7 +1,6 @@
 import { Prisma, type OnlineOrderingSettings } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
-import { getCurrentPrivacyNotice } from '@/services/customer/consent.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 import { isValidOrderingHours } from './hours'
@@ -62,15 +61,21 @@ export type StoreRequirement = 'address' | 'phone' | 'privacyNotice'
 
 /**
  * R18: encender exige domicilio (la CALLE: ciudad, estado o CP solos no bastan), teléfono y aviso de privacidad PUBLICADO (LFPC
- * 76 Bis y LFPDPPP: el responsable frente al comensal es el restaurante). La plantilla de precarga (`esPlantilla: true`) no es un
- * aviso publicado.
+ * 76 Bis y LFPDPPP: el responsable frente al comensal es el restaurante). La plantilla de precarga no es un aviso publicado: «publicado»
+ * ⇔ el negocio tiene al menos UNA versión propia (`getCurrentPrivacyNotice` devuelve `esPlantilla: false` justo entonces).
+ *
+ * r5: `db` es la conexión con la que se lee. `updateSettings` pasa su `tx`: leer con el cliente raíz mientras la transacción retiene
+ * su conexión pedía una segunda por solicitud, y con el pool lleno de esperas del candado se atoraba hasta el timeout.
  */
-export async function storeRequirements(venueId: string): Promise<Record<StoreRequirement, boolean>> {
+export async function storeRequirements(
+  venueId: string,
+  db: Pick<Prisma.TransactionClient, 'venue' | 'privacyNoticeVersion'> = prisma,
+): Promise<Record<StoreRequirement, boolean>> {
   const [venue, notice] = await Promise.all([
-    prisma.venue.findUnique({ where: { id: venueId }, select: { address: true, phone: true } }),
-    getCurrentPrivacyNotice(venueId),
+    db.venue.findUnique({ where: { id: venueId }, select: { address: true, phone: true } }),
+    db.privacyNoticeVersion.findFirst({ where: { venueId }, select: { id: true } }),
   ])
-  return { address: !!venue?.address?.trim(), phone: !!venue?.phone?.trim(), privacyNotice: notice.esPlantilla === false }
+  return { address: !!venue?.address?.trim(), phone: !!venue?.phone?.trim(), privacyNotice: !!notice }
 }
 
 const REQUIREMENT_LABEL: Record<StoreRequirement, string> = {
@@ -81,8 +86,11 @@ const REQUIREMENT_LABEL: Record<StoreRequirement, string> = {
 /** «a», «a y b», «a, b y c» (el `lib` del tsconfig no trae `Intl.ListFormat`). */
 const enLista = (xs: string[]): string => (xs.length < 2 ? xs.join('') : `${xs.slice(0, -1).join(', ')} y ${xs[xs.length - 1]}`)
 
-async function assertStoreRequirements(venueId: string): Promise<void> {
-  const met = await storeRequirements(venueId)
+async function assertStoreRequirements(
+  venueId: string,
+  db: Pick<Prisma.TransactionClient, 'venue' | 'privacyNoticeVersion'>,
+): Promise<void> {
+  const met = await storeRequirements(venueId, db)
   const missing = (Object.keys(REQUIREMENT_LABEL) as StoreRequirement[]).filter(r => !met[r])
   if (missing.length === 0) return
   throw new BadRequestError(
@@ -108,9 +116,9 @@ export async function updateSettings(
     const existing = await tx.onlineOrderingSettings.findUnique({ where: { venueId } })
     const current = existing ? rowToConfig(existing) : { ...DEFAULT_CONFIG, lastInboxPollAt: null }
     // R18: sólo al PASAR de apagada (o sin fila) a encendida; apagar, otros campos o repetir `enabled: true` nunca lo exigen. Se
-    // decide sobre el estado leído bajo el candado; los requisitos son datos del negocio (fuera de este candado) y si falta algo
-    // la transacción se deshace sin escribir.
-    if (!current.enabled && patch.enabled === true) await assertStoreRequirements(venueId)
+    // decide sobre el estado leído bajo el candado; los requisitos son datos del negocio (fuera de este candado) pero se leen con
+    // el `tx` (r5: nunca el cliente raíz aquí dentro) y si falta algo la transacción se deshace sin escribir.
+    if (!current.enabled && patch.enabled === true) await assertStoreRequirements(venueId, tx)
     const merged = { ...current, ...patch }
     if (merged.enabled && !merged.acceptsPayAtPickup) {
       throw new BadRequestError('Activa al menos un medio de pago para recibir pedidos.', 'NO_PAYMENT_MODE')
