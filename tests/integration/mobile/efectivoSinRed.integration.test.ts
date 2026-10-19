@@ -140,8 +140,12 @@ beforeAll(async () => {
 })
 
 afterAll(async () => {
+  // En CI todas las suites comparten UNA base: los efectos de pago que esta suite deja PENDING (p. ej. REFERRAL de ventas que
+  // luego se devolvieron) los reclamaría el worker real de otra suite (`claimPaymentEffects` es global) y truena con
+  // REFERRAL_AWAITS_SETTLEMENT (paymentDashboard.protocolo, webhookPrimerConfirmador.costoReal). Se retiran los de ESTE negocio.
+  await prisma.paymentEffect.deleteMany({ where: { venueId } })
   await prisma.$disconnect()
-}) // La base es desechable: la corrida la borra entera.
+})
 
 const params = (intents: any[], staffId = staffA) => ({ venueId, staffId, deviceId: deviceA, intents, authorizeIntent: () => true })
 const pausa = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
