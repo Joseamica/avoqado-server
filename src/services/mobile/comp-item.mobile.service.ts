@@ -20,6 +20,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { importesDeLasFilas } from '../shared/repartoDescuento'
 import {
   RENGLON_PARA_REPARTO_SELECT,
@@ -57,6 +58,7 @@ export async function compOrderItemInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cortesías')
 
   // Never mutate the money of an order that was already paid (or partially).
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
@@ -150,6 +152,7 @@ export async function compWholeOrderInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cortesías')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
   }

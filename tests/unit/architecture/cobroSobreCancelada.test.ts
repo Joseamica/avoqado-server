@@ -30,14 +30,15 @@ const LLAVE = 'salirSiLaLlaveYaTienePago('
 const CIERRE = 'cierreAutomaticoPermitido('
 const PROPIA = '.order.create('
 const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, string]> }> = {
-  'services/mobile/order.mobile.service.ts#payCashOrder': {
+  // Tarea A7: el `payment.create` vive en el núcleo extraído; las reglas de cuenta cancelada se movieron con él, intactas.
+  'services/mobile/order.mobile.service.ts#registrarAbonoEnTx': {
     clase: 'RECHAZA el efectivo en vivo / REABRE lo ya capturado (cuentas de Avoqado)',
     marcadores: [
-      ['payCashOrder', CLASIFICA],
-      ['payCashOrder', LLAVE],
-      ['payCashOrder', RECHAZA],
-      ['payCashOrder', REABRE],
-      ['payCashOrder', CIERRE],
+      ['registrarAbonoEnTx', CLASIFICA],
+      ['registrarAbonoEnTx', LLAVE],
+      ['registrarAbonoEnTx', RECHAZA],
+      ['registrarAbonoEnTx', REABRE],
+      ['registrarAbonoEnTx', CIERRE],
     ],
   },
   'services/tpv/payment.tpv.service.ts#recordOrderPayment': {

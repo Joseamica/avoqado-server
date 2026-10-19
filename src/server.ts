@@ -85,6 +85,7 @@ import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
 import { shopifyWorkerJob } from './jobs/shopify-worker.job'
 import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
+import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
@@ -187,6 +188,7 @@ const gracefulShutdown = async (signal: string) => {
       aggregatorPassWorkerJob.stop()
       shopifyWorkerJob.stop()
       shopifyReconcileJob.stop()
+      giftCardReconciliationJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       documentRequestsJob.stop()
@@ -539,6 +541,8 @@ const startApplication = async (retries = 3) => {
       // Conector Shopify: buzón, eventos y una unidad por sucursal con su lease (sin candado global).
       shopifyWorkerJob.start()
       shopifyReconcileJob.start()
+      // Tarjetas de regalo: revisión nocturna (saldo contra libreta; activa cuentas pagadas con sobres PENDING; avisa lo demás).
+      giftCardReconciliationJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       documentRequestsJob.start()

@@ -243,6 +243,8 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
         fundsFlow: true,
         tenderTypeId: true,
         tenderCountsAsCash: true,
+        // Tarjetas de regalo (R3, B5): la marca de cuenta de tarjetas, para no sumarla a `totalSales` ni a las órdenes del cierre.
+        order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } },
         orderId: true,
         type: true,
       },

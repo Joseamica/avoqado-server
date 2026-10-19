@@ -2,6 +2,14 @@
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: { $transaction: jest.fn() } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 import { Prisma } from '@prisma/client'
+// Tarjetas de regalo: este doble de transacción no modela sobres; la guardia de cuentas de tarjetas tiene su propia
+// suite (tests/unit/services/giftCards/cuentaDeTarjetas.test.ts y la integración de la cuenta).
+jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({
+  ...jest.requireActual('@/services/giftCards/cuentaDeTarjetas'),
+  rechazarSiEsCuentaDeTarjetas: jest.fn().mockResolvedValue(undefined),
+  esCuentaDeTarjetasEnTx: jest.fn().mockResolvedValue(false),
+  desactivarSobresPendientesDeCuentaEnTx: jest.fn().mockResolvedValue({ desactivados: [] }),
+}))
 import prisma from '@/utils/prismaClient'
 import * as tpv from '@/services/tpv/discount.tpv.service'
 import * as engine from '@/services/dashboard/discountEngine.service'
@@ -926,5 +934,31 @@ describe('B2c R8 — el motor, al APLICAR un %, deja fuera lo ya regalado (y nad
     await tpv.applyPredefinedDiscount('venue', 'order', 'discount', 'staff')
     // Cambiar si un regalado cuenta para un 2×1 sería otra decisión comercial (residual R10), no R8.
     expect(tx.orderDiscount.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ amount: 100 }) }))
+  })
+})
+
+describe('tarjetas de regalo: los automáticos no tocan una cuenta con renglones de tarjeta (R11)', () => {
+  const renglon = (id: string, giftCardId: string | null) => ({
+    id,
+    productId: giftCardId ? null : 'p-1',
+    product: giftCardId ? null : { id: 'p-1', categoryId: 'c-1', taxRate: 0.16 },
+    modifiers: [],
+    quantity: 1,
+    unitPrice: 50,
+    total: 50,
+    discountAmount: 0,
+    giftCardId,
+  })
+
+  it.each([
+    ['sólo renglones de tarjeta', [renglon('oi-1', 'gc-1'), renglon('oi-2', 'gc-2')]],
+    // Defensa en profundidad: la guardia basta con UN renglón de tarjeta (como `esCuentaDeTarjetasEnTx`), no exige todos.
+    ['🔴 mezclada (un renglón de tarjeta y uno normal)', [renglon('oi-1', 'gc-1'), renglon('oi-2', null)]],
+  ])('%s: vacío, sin evaluar el catálogo ni escribir', async (_caso, items) => {
+    tx.order.findUnique.mockResolvedValue({ ...order(), items })
+    expect(await tpv.applyAutomaticDiscounts('venue', 'order', 'staff')).toMatchObject({ applied: 0, totalSavings: 0 })
+    expect(tx.discount.findMany).not.toHaveBeenCalled()
+    expect(tx.orderDiscount.create).not.toHaveBeenCalled()
+    expect(tx.order.update).not.toHaveBeenCalled()
   })
 })

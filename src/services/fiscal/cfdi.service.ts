@@ -43,6 +43,9 @@ import { filasDeDescuentoCompletas } from './filasDeDescuentoTx'
 import { DONDE_TIMBRE_EN_DUDA, timbreEnDuda } from './timbreEnDuda'
 import type { NotaDeDevolucion } from './facturaConDevolucion'
 import { leerReparto } from '../shared/repartoDescuento'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
+import { formaGanadoraDeCobros } from './formaDePagoGanadora'
 
 // ─── List CFDIs ───────────────────────────────────────────────────────────────
 
@@ -542,6 +545,11 @@ export interface IssueCfdiDeps {
   despuesDeLaComprobacionPrevia?: () => Promise<void>
   /** F6: emitir la nota de crédito de un reembolso (por omisión, `emitRefundCreditNote`); las pruebas la sustituyen. */
   emitRefundCreditNote?: typeof import('./cfdiCreditNote.service').emitRefundCreditNote
+  /**
+   * Tarjetas de regalo (spec §7): ¿la orden es una cuenta de VENTA de tarjetas? Se lee FUERA de candados, antes que todo: esa venta no
+   * se factura nunca (se factura al usar el saldo). Devuelve el negocio para no filtrar a otro que la orden existe.
+   */
+  cuentaDeTarjetasFuera?: (orderId: string) => Promise<{ venueId: string } | null>
 }
 
 export interface IssueCfdiResult {
@@ -615,6 +623,13 @@ export async function issueCfdiForOrder(
   overrides: Partial<IssueCfdiDeps> = {},
 ): Promise<IssueCfdiResult> {
   const deps = { ...defaultDeps, ...overrides }
+  // Tarjetas de regalo (spec §7): la venta de una tarjeta no es mercancía; se factura cuando el saldo paga una compra. Va antes que
+  // todo para que el panel y la autofactura lean ESTE motivo y no el genérico «sin emisor» que la carga devolvería con efectivo.
+  const deTarjetas = await deps.cuentaDeTarjetasFuera?.(params.orderId)
+  if (deTarjetas) {
+    if (params.expectedVenueId && deTarjetas.venueId !== params.expectedVenueId) throw new Error(`Order ${params.orderId} not found`)
+    return { status: 'VALIDATION_FAILED', cfdi: null, reasons: [MOTIVO_TARJETA_DE_REGALO] }
+  }
   let idempotencyKey = `cfdi-order-${params.orderId}`
 
   // 0. ¿La venta ya tuvo factura? Una sola factura VIGENTE por venta; después de cancelarla (confirmado
@@ -1525,6 +1540,15 @@ const defaultDeps: IssueCfdiDeps = {
       select: { id: true, venueId: true, fiscalEmisorId: true },
     }),
   extraccionDeLaOrdenFuera: async orderId => (await moduloDeExtraccion()).extraccionDeLaOrden(prisma, orderId),
+  // Tarjetas de regalo: `items.take: 1` sobre los renglones con tarjeta; un doble de Prisma que devuelva una orden sin `items` no
+  // dispara la regla por accidente.
+  cuentaDeTarjetasFuera: async orderId => {
+    const orden = await prisma.order.findFirst({
+      where: { id: orderId, ...WHERE_ORDEN_DE_TARJETAS },
+      select: { venueId: true, items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } },
+    })
+    return orden && (orden.items?.length ?? 0) > 0 ? { venueId: orden.venueId } : null
+  },
   // Acotado: una venta tiene un puñado de facturas (original, sustitutas, reemisiones). 50 sobra.
   findOrderInvoices: orderId =>
     prisma.cfdi.findMany({
@@ -2031,11 +2055,16 @@ export function reconstruirConceptos(order: OrdenParaConceptos, _orderId: string
  * (emisor.venueId MUST equal order.venueId) and merchant-resolution edge cases are unit-testable.
  */
 /**
- * Métodos que pueden facturarse sin comercio (el cobro no pasó por una terminal nuestra): efectivo,
- * transferencia, y tarjeta cobrada en otra terminal. Los tipos del catálogo (`OTHER`: Uber Eats, vales…)
- * y cripto quedan fuera: quién factura esa venta no es evidente.
+ * Métodos que pueden facturarse sin comercio (el cobro no pasó por una terminal nuestra): efectivo, transferencia y tarjeta cobrada
+ * en otra terminal. Los tipos del catálogo (`OTHER`: Uber Eats, vales…) y cripto quedan fuera: quién factura esa venta no es evidente.
+ * 🔴 Excepción (tarjetas de regalo, spec §7): el cobro con SALDO (`OTHER` del tender de sistema, forma 01) sí se factura sin comercio:
+ * el saldo es del negocio y la factura de la mercancía se emite al usarlo.
  */
 const METODOS_SIN_COMERCIO = new Set<string>(['CASH', 'BANK_TRANSFER', 'CREDIT_CARD', 'DEBIT_CARD'])
+
+/** Tarjetas de regalo (spec §7): el motivo que ve quien intenta facturar la VENTA de una tarjeta (panel, ticket y portal). */
+export const MOTIVO_TARJETA_DE_REGALO =
+  'Esta venta es de tarjetas de regalo: no se factura al venderla. Se factura cuando el cliente usa el saldo para pagar su compra.'
 
 export interface LoadOrderForCfdiOpts {
   /**
@@ -2089,7 +2118,16 @@ export async function loadOrderForCfdiFromDb(
         // no resta — la devolución lleva su propia nota de crédito (`cfdiCreditNote.service`).
         where: { status: 'COMPLETED', OR: [{ type: { in: ['REGULAR', 'FAST'] } }, { type: null }] },
         orderBy: { createdAt: 'desc' },
-        select: { method: true, merchantAccountId: true, ecommerceMerchantId: true, tenderSatFormaPago: true, amount: true, type: true },
+        select: {
+          method: true,
+          merchantAccountId: true,
+          ecommerceMerchantId: true,
+          tenderSatFormaPago: true,
+          amount: true,
+          type: true,
+          // Tarjetas de regalo: el cobro con saldo se factura sin comercio (ver METODOS_SIN_COMERCIO).
+          tenderType: { select: { systemKind: true } },
+        },
       },
       items: {
         select: {
@@ -2104,6 +2142,8 @@ export async function loadOrderForCfdiFromDb(
           weightQuantity: true,
           orderPromotionId: true,
           isCortesia: true,
+          // Tarjetas de regalo: la cuenta de VENTA de tarjetas no se factura (motivo propio, abajo).
+          giftCardId: true,
           modifiers: { select: { name: true, price: true, quantity: true } },
           product: {
             select: {
@@ -2166,7 +2206,7 @@ export async function loadOrderForCfdiFromDb(
     // 698 ventas en efectivo y una transferencia de $3,082 en 30 días no se podían facturar porque el
     // emisor sólo se sacaba del comercio de la terminal. El emisor es el del NEGOCIO, y sólo cuando es
     // inequívoco: con UN solo RFC. Con dos o más no se adivina (queda como antes).
-    if (pays.some(pp => !METODOS_SIN_COMERCIO.has(pp.method))) return null
+    if (pays.some(pp => !METODOS_SIN_COMERCIO.has(pp.method) && !isGiftCardTenderKind(pp.tenderType?.systemKind))) return null
     const emisores = await db.fiscalEmisor.findMany({
       where: { venueId: order.venueId },
       select: { ...EMISOR_SELECT, merchantConfigs: { select: { facturacionEnabled: true, autofacturaEnabled: true }, take: 50 } },
@@ -2319,6 +2359,13 @@ export async function loadOrderForCfdiFromDb(
     totalCents = peso(order.total)
   }
 
+  // Tarjetas de regalo (spec §7): una cuenta de VENTA de tarjetas nunca se factura al venderse. Este motivo sustituye a los demás
+  // para que el ticket (sin autofactura) y el portal digan exactamente por qué; y con un motivo, el cuadre de abajo no corre.
+  // B3 r1 (fix 3): `some` (falla cerrada): una cuenta mezclada (A5 no la deja nacer) tampoco se factura.
+  if (order.items.some(it => !!it.giftCardId)) {
+    unsupportedReasons.splice(0, unsupportedReasons.length, MOTIVO_TARJETA_DE_REGALO)
+  }
+
   // El documento que se mandaría al PAC tiene que cuadrar con lo cobrado. Se declara AQUÍ (y no sólo en
   // el motor) para que el ticket y el recibo tampoco ofrezcan una autofactura que después fallaría.
   // Ronda final F2: una diferencia de REDONDEO (≤ `cotaDeRedondeoCents`, p. ej. la de D16) sigue a la búsqueda de abajo, que la
@@ -2361,6 +2408,11 @@ export async function loadOrderForCfdiFromDb(
     }
   }
 
+  // r1 B-2 (Anexo 20, spec §7): en una cuenta con cobro con SALDO, la forma del CFDI es la de MAYOR importe, con la MISMA regla que la
+  // global; `pay` sigue siendo sólo quien resuelve el emisor (el cobro con comercio, arriba): $500 de saldo + $100 con tarjeta ⇒ 01.
+  // B3 r1 (fix 1): SÓLO con saldo. Sin él, la forma es la de siempre (la de `pay`): generalizar la regla es decisión del proyecto fiscal.
+  const conSaldo = pays.some(pp => isGiftCardTenderKind(pp.tenderType?.systemKind))
+  const porForma = conSaldo ? (formaGanadoraDeCobros(pays).pagos[0] ?? pay) : pay
   return {
     venueId: order.venueId,
     venueSlug: order.venue.slug,
@@ -2368,8 +2420,8 @@ export async function loadOrderForCfdiFromDb(
     emisor: cfg.fiscalEmisor,
     facturacionEnabled: cfg.facturacionEnabled,
     autofacturaEnabled: autofacturaTodos,
-    paymentMethod: pay.method,
-    tenderSatFormaPago: pay.tenderSatFormaPago ?? null,
+    paymentMethod: porForma.method,
+    tenderSatFormaPago: porForma.tenderSatFormaPago ?? null,
     metodoPago: 'PUE', // POS = PUE (PPD/REP deferred)
     subtotalCents,
     taxCents,

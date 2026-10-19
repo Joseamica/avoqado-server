@@ -51,6 +51,7 @@ const cobro = (over: Partial<CobroFoto> = {}): CobroFoto => ({
   tipAmount: D('7.01'),
   shiftId: 'shift-1',
   createdAt: new Date('2026-09-02T19:40:19Z'),
+  tenderSystemKind: null,
   ...over,
 })
 
@@ -171,6 +172,59 @@ describe('validarReasignacion — cuándo un cobro puede moverse', () => {
     expect(motivosDe(validarReasignacion(caso, cobro(), soloEseCobro, cancelada()))).toEqual(
       expect.arrayContaining([expect.stringContaining('origen quedaría')]),
     )
+  })
+
+  describe('⭐ B6 M4 / Codex #6 (cierre): tarjetas de regalo nunca se reasignan', () => {
+    const renglonDeTarjeta = { areaTicketLineId: null, giftCardId: 'gc-1' }
+
+    it('🔴 rechaza un cobro con SALDO de tarjeta de regalo (tender de sistema GIFT_CARD)', () => {
+      expect(motivosDe(validarReasignacion(caso, cobro({ tenderSystemKind: 'GIFT_CARD' }), vecina(), cancelada()))).toEqual(
+        expect.arrayContaining([expect.stringContaining('saldo de tarjeta de regalo')]),
+      )
+    })
+
+    it('🔴 rechaza si el DESTINO es una cuenta de tarjetas (cargaría tarjetas con un cobro ajeno)', () => {
+      expect(motivosDe(validarReasignacion(caso, cobro(), vecina(), cancelada({ items: [renglonDeTarjeta] })))).toEqual(
+        expect.arrayContaining([expect.stringContaining('el destino es una venta de tarjetas de regalo')]),
+      )
+    })
+
+    it('🔴 rechaza si el ORIGEN es una cuenta de tarjetas (sacarle el cobro deja sus tarjetas cargadas sin dinero)', () => {
+      expect(motivosDe(validarReasignacion(caso, cobro(), vecina({ items: [renglonDeTarjeta] }), cancelada()))).toEqual(
+        expect.arrayContaining([expect.stringContaining('el origen es una venta de tarjetas de regalo')]),
+      )
+    })
+
+    it('🔴 la validación que MANDA (la de lo releído bajo el candado) también rechaza: el destino se volvió de tarjetas', async () => {
+      const llamadas: string[] = []
+      const r = await aplicarReasignacion(
+        {
+          enTransaccion: fn =>
+            fn({
+              bloquear: async () => void llamadas.push('bloquear'),
+              releer: async antes => {
+                llamadas.push('releer')
+                return { ...antes, destino: { ...antes.destino, items: [renglonDeTarjeta] } }
+              },
+              moverCobro: async () => {
+                llamadas.push('mover')
+                return 1
+              },
+              prepararDestino: async () => void llamadas.push('preparar'),
+              guardarTotales: async () => void llamadas.push('totales'),
+              fijarCompletadoEn: async () => void llamadas.push('fecha'),
+              bitacora: async () => void llamadas.push('bitacora'),
+            }),
+          liberarMesa: async () => undefined,
+        },
+        caso,
+        cobro(),
+        vecina(),
+        cancelada(),
+      )
+      expect(r.ok).toBe(false)
+      expect(llamadas).toEqual(['bloquear', 'releer'])
+    })
   })
 
   it('acumula TODOS los motivos, no sólo el primero', () => {
@@ -368,7 +422,7 @@ describe('Codex r10 #6: la reasignación escribe TODO en una transacción, bajo 
 })
 
 describe('Tarea 6d, fix 1 (revisión): quién salda el destino, la mesa, y el estado efectivo con importe + propina', () => {
-  const conVales = () => cancelada({ items: [{ areaTicketLineId: 'atl-1' }] })
+  const conVales = () => cancelada({ items: [{ areaTicketLineId: 'atl-1', giftCardId: null }] })
   const integrada = () => cancelada({ source: 'POS', externalId: 'SR-123' })
 
   it.each([

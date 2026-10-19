@@ -12,6 +12,14 @@ import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/servic
 const METODOS_DE_LECTURA = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /**
+ * A3 (cierre): la ruta que se GUARDA (bitácora, `PermissionOverride.consumedRoute`) va sin query string. Una query puede traer un
+ * dato secreto —el código de una tarjeta de regalo viajaba así— y esos dos lugares lo escribían sin tapar. Defensa general.
+ */
+function rutaSinQuery(req: Request): string | undefined {
+  return req.originalUrl?.split('?')[0]
+}
+
+/**
  * ¿Esta denegación merece una fila en la bitácora que LEE EL DUEÑO?
  *
  * 🔴 Nació de un dato, no de una opinión: en el venue Testarudo Cafe los 122
@@ -400,7 +408,7 @@ export const checkPermission = (requiredPermission: string) => {
               permission: requiredPermission,
               reason: 'no_venue_access',
               method: req.method,
-              path: req.originalUrl,
+              path: rutaSinQuery(req),
             },
             ipAddress: req.ip,
             userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
@@ -432,7 +440,7 @@ export const checkPermission = (requiredPermission: string) => {
             token: overrideToken,
             venueId,
             permission: requiredPermission,
-            route: `${req.method} ${req.originalUrl}`,
+            route: `${req.method} ${rutaSinQuery(req)}`,
           })
 
           if (consumed) {
@@ -452,7 +460,7 @@ export const checkPermission = (requiredPermission: string) => {
                   userRole,
                   authorizedByStaffVenueId: consumed.authorizedById,
                   method: req.method,
-                  path: req.originalUrl,
+                  path: rutaSinQuery(req),
                 },
                 ipAddress: req.ip,
                 userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
@@ -511,7 +519,7 @@ export const checkPermission = (requiredPermission: string) => {
                 userRole,
                 roleSource,
                 method: req.method,
-                path: req.originalUrl,
+                path: rutaSinQuery(req),
                 hasPermissionSet: !!permissionSet,
               },
               ipAddress: req.ip,

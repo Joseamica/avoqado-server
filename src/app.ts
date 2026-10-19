@@ -21,6 +21,7 @@ import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
 import AppError, { BadRequestError, ConflictError } from './errors/AppError'
+import { GiftCardError } from './services/giftCards/giftCardErrors'
 import {
   AFILIACION_EN_VARIOS_SLOTS,
   MENSAJE_AFILIACION_EN_VARIOS_SLOTS,
@@ -475,6 +476,21 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
       message: 'JSON inválido en el cuerpo de la solicitud.',
       ...(NODE_ENV === 'development' && { errorName: bodyParseError.name }),
     })
+  }
+
+  // Tarjetas de regalo: el POS muestra `message` tal cual y decide por `code`. Los datos extra («quedan $X», el tope)
+  // van al MISMO nivel (contrato del índice) y TAMBIÉN en `details` (A2: `GiftCardError` extiende `AppError` con el extra
+  // en `details`). Va antes de la rama de `AppError`, que sólo los pondría en `details`; nunca pisan `message` ni `code`.
+  if (err instanceof GiftCardError) {
+    logger.warn(`GiftCardError ${err.code}: ${err.message}, StatusCode: ${err.statusCode}, CorrelationID: ${correlationId}`, {
+      code: err.code,
+      statusCode: err.statusCode,
+      correlationId,
+      request: { method: req.method, url: redactUrlSecrets(req.originalUrl), ip: req.ip },
+    })
+    const extra =
+      err.details && typeof err.details === 'object' && !Array.isArray(err.details) ? (err.details as Record<string, unknown>) : undefined
+    return res.status(err.statusCode).json({ ...(extra ?? {}), message: err.message, code: err.code, ...(extra ? { details: extra } : {}) })
   }
 
   if (err instanceof AppError) {

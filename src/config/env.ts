@@ -232,6 +232,11 @@ const envSchema = z.object({
   // Conector Shopify (spec 2026-10-07). Llave AES de 32 bytes en hex para el token de cada tienda. Opcional: sin ella el
   // conector no cifra ni descifra, y ninguna otra parte de la API se entera.
   SHOPIFY_TOKEN_KEY: z.string().length(64, 'SHOPIFY_TOKEN_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  // Tarjetas de regalo (spec 2026-10-14 § 4.1). Dos llaves PROPIAS, hex de 32 bytes: cifrar el código (AES-256-GCM,
+  // `createTokenCipher`) y su huella de búsqueda (HMAC-SHA256). Opcionales: sin ellas la función se apaga con
+  // GIFT_CARD_KEYS_MISSING y nada más de la API se entera. Rotar la de HMAC deja de encontrar las tarjetas emitidas.
+  GIFT_CARD_CODE_KEY: z.string().length(64, 'GIFT_CARD_CODE_KEY debe ser hex de 32 bytes (64 chars)').optional(),
+  GIFT_CARD_HMAC_KEY: z.string().length(64, 'GIFT_CARD_HMAC_KEY debe ser hex de 32 bytes (64 chars)').optional(),
   // App «Avoqado – Piloto» (custom distribution): Dev Dashboard de Shopify → la app → Credentials.
   SHOPIFY_PILOTO_CLIENT_ID: z.string().min(1, 'SHOPIFY_PILOTO_CLIENT_ID no puede ir vacío').optional(),
   SHOPIFY_PILOTO_CLIENT_SECRET: z.string().min(1, 'SHOPIFY_PILOTO_CLIENT_SECRET no puede ir vacío').optional(),

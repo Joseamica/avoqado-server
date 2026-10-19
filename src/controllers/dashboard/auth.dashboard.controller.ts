@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 import { confirmarCambioDeCorreo, solicitarCambioDeCorreo } from '../../services/dashboard/cambioDeCorreo.service'
 import jwt from 'jsonwebtoken'
 import { esTokenDeLaApi } from '../../utils/tokenDeLaApi'
+import { ponerCookiesDeSesion } from '../../utils/cookiesDeSesion'
 import prisma from '../../utils/prismaClient' // Corrected import path
 import { AuthenticationError } from '../../errors/AppError'
 import { StaffRole, VenueStatus } from '@prisma/client'
@@ -1017,23 +1018,6 @@ export const dashboardLogoutController = async (req: Request, res: Response) => 
     logger.error('[AUTH] 🚪 Logout error:', error)
     throw new AuthenticationError('Error al cerrar sesión')
   }
-}
-
-/**
- * Cookies de sesión del dashboard tras reemitir tokens (cambio de sucursal, cambio de contraseña).
- * maxAge igual a la vida del JWT (24 h; sin contexto de «recordarme» aquí).
- */
-function ponerCookiesDeSesion(res: Response, accessToken: string, refreshToken: string): void {
-  const entornoRemoto = process.env.NODE_ENV === 'production' || process.env.NODE_ENV === 'staging'
-  const base = {
-    httpOnly: true,
-    secure: entornoRemoto,
-    sameSite: entornoRemoto ? ('none' as const) : ('lax' as const), // 'none' para cross-domain en producción y staging
-    path: '/',
-    // Sin domain: despliegue cross-domain (Cloudflare + Render)
-  }
-  res.cookie('accessToken', accessToken, { ...base, maxAge: 24 * 60 * 60 * 1000 })
-  res.cookie('refreshToken', refreshToken, { ...base, maxAge: 7 * 24 * 60 * 60 * 1000 })
 }
 
 export async function switchVenueController(req: Request, res: Response, next: NextFunction): Promise<void> {

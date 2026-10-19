@@ -381,6 +381,58 @@ describe('authorKitchenTickets', () => {
     expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
   })
 
+  it('un renglón de tarjeta de regalo no se arma en cocina, y la marca se limpia igual', async () => {
+    const sobre = await prisma.giftCard.create({
+      data: {
+        venueId,
+        organizationId: orgId,
+        codeHash: `kds-${SUF}`,
+        codeEnc: 'cifrado-de-prueba',
+        codeLast4: 'ABCD',
+        pageToken: `kds-pt-${SUF}`,
+        initialAmount: new Prisma.Decimal(500),
+        balance: new Prisma.Decimal(0),
+        status: 'PENDING',
+        termsVersion: '2026-10-14',
+        deliveryChannel: 'PRINTED',
+      },
+      select: { id: true },
+    })
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `TR-${SUF}`,
+        subtotal: 500,
+        taxAmount: 0,
+        total: 500,
+        kitchenPendingAt: new Date(),
+        items: {
+          create: [
+            {
+              productName: 'Tarjeta de regalo',
+              quantity: 1,
+              unitPrice: new Prisma.Decimal(500),
+              taxAmount: new Prisma.Decimal(0),
+              total: new Prisma.Decimal(500),
+              ivaTratamiento: 'NO_OBJETO',
+              giftCardId: sobre.id,
+            },
+          ],
+        },
+      },
+      select: { id: true },
+    })
+    try {
+      expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toEqual([])
+      expect(await comandasDe(v.id)).toHaveLength(0)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+    } finally {
+      // El `afterAll` borra el negocio: el sobre (Restrict hacia Venue) se va antes, junto con su cuenta.
+      await prisma.order.delete({ where: { id: v.id } })
+      await prisma.giftCard.delete({ where: { id: sobre.id } })
+    }
+  })
+
   /** Crea una `AreaTicketLine` real (misma cadena que exige el schema) para marcar un renglón como vale de área. */
   async function nuevaLineaDeVale(productId: string) {
     const terminalId = (await prisma.terminal.create({ data: { venueId, name: `Terminal ${SUF}-${folio}`, type: 'TPV_ANDROID' } })).id

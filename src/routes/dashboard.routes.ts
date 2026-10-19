@@ -406,6 +406,7 @@ import saleVerificationOrgDashboardRoutes from './dashboard/saleVerification.org
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
+import giftCardsRoutes from './dashboard/giftCards.routes'
 // Campañas de correo a clientes (Fase 1C-A, Task 6)
 import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
 import birthdayAutomationRoutes from './dashboard/birthdayAutomation.routes'
@@ -4657,6 +4658,10 @@ router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, goog
 
 // Credit Packs / Bundles (multi-product packages with credits)
 router.use('/venues/:venueId/credit-packs', authenticateTokenMiddleware, creditPackRoutes)
+
+// Tarjetas de regalo (fase 1a): ajustes, lista, detalle con su libreta, acciones de gerente, cancelar una venta, reportes
+// para el contador y exportación de saldos vivos. Permisos `giftCards:*` dentro del sub-router; el plan sólo al prender (R9).
+router.use('/venues/:venueId/gift-cards', authenticateTokenMiddleware, giftCardsRoutes)
 
 // @temporary - Serialized Inventory Demo routes (delete after final implementation)
 // For PlayTelecom SIM sales visualization demo

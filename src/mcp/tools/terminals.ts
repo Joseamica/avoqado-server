@@ -9,6 +9,8 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { resolveTerminalRefundTarget } from '@/services/tpv/terminalRefundTarget'
+import { exigirCancelacionParaDevolverEnTerminal } from '@/services/giftCards/giftCardCancel.service'
+import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { readOperatorResolution } from '@/services/tpv/no-instrument-resolution.service'
 import {
   SOLO_BLOQUEA_EN_ESTRICTO,
@@ -884,7 +886,17 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
 
       const payment = await prisma.payment.findFirst({
         where: { id: paymentId, ...base },
-        select: { id: true, venueId: true, status: true, method: true, source: true, amount: true, tipAmount: true, processorData: true },
+        select: {
+          id: true,
+          venueId: true,
+          orderId: true,
+          status: true,
+          method: true,
+          source: true,
+          amount: true,
+          tipAmount: true,
+          processorData: true,
+        },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese cobro en tus locales.' })
 
@@ -903,6 +915,14 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
         venueId,
       )
       if (!target.eligible) return text({ ok: false, reason: target.reason, error: target.message })
+      // A2 del cierre (r1): la vista previa evalúa la MISMA regla que la confirmación (una venta de tarjetas de regalo pagada sólo se
+      // devuelve con su cancelación iniciada): nunca promete «ABRIRÁ» lo que el confirm va a rechazar.
+      try {
+        await exigirCancelacionParaDevolverEnTerminal(venueId, payment.orderId)
+      } catch (error) {
+        if (error instanceof GiftCardError) return text({ ok: false, code: error.code, error: error.message })
+        throw error
+      }
 
       const targetIdentity = terminalId.trim()
       const targetDevice = await prisma.terminal.findFirst({
@@ -974,7 +994,9 @@ export function registerTerminalTools(server: McpServer, scope: McpScope) {
               : `No se pudo abrir la devolución en la terminal ${terminalId}.`,
         })
       } catch (error) {
-        return text({ ok: false, error: error instanceof Error ? error.message : 'Error desconocido' })
+        // A2 del cierre (r1): el rechazo de negocio (la regla de tarjetas de regalo) llega con su `code`, como en la ruta del POS.
+        const code = error instanceof GiftCardError ? error.code : undefined
+        return text({ ok: false, ...(code ? { code } : {}), error: error instanceof Error ? error.message : 'Error desconocido' })
       }
     },
   )

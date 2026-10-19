@@ -177,6 +177,7 @@ describe('decideSaleStamp (pura)', () => {
     stampOwnerCustomerId: null,
     pointsOwnerCustomerIds: [],
     settledAt: new Date(AHORA - 30 * MIN),
+    esVentaDeTarjetas: false,
   }
   it.each<[string, Partial<SaleStampSnapshot>, string]>([
     ['elegible', {}, 'ELIGIBLE'],
@@ -195,6 +196,9 @@ describe('decideSaleStamp (pura)', () => {
     ['23 h 59 min', { settledAt: new Date(AHORA - (LATE_STAMP_WINDOW_MS - MIN)) }, 'ELIGIBLE'],
     ['24 h exactas', { settledAt: new Date(AHORA - LATE_STAMP_WINDOW_MS) }, 'ELIGIBLE'],
     ['24 h 01 min', { settledAt: new Date(AHORA - (LATE_STAMP_WINDOW_MS + MIN)) }, 'WINDOW_EXPIRED'],
+    // Cierre (punto 15, B6/R1): comprar tarjetas de regalo no da sellos; ni pagada ni abierta se promete uno.
+    ['🔴 venta de tarjetas de regalo pagada', { esVentaDeTarjetas: true }, 'NOT_APPLICABLE'],
+    ['🔴 venta de tarjetas de regalo abierta', { esVentaDeTarjetas: true, paymentStatus: 'PENDING' }, 'NOT_APPLICABLE'],
   ])('%s', (_n, over, esperado) => {
     expect(decideSaleStamp({ ...base, ...over }, AHORA)).toBe(esperado)
   })
@@ -205,6 +209,49 @@ describe('decideSaleStamp (pura)', () => {
     expect(decideSaleStamp({ ...base, settledAt: null }, AHORA, { ignorarPlazo: true })).toBe('ELIGIBLE')
     expect(decideSaleStamp({ ...vieja, reembolsada: true }, AHORA, { ignorarPlazo: true })).toBe('NOT_PAID')
     expect(decideSaleStamp({ ...vieja, primaryCustomerId: 'otro' }, AHORA, { ignorarPlazo: true })).toBe('OTHER_CUSTOMER')
+    // La reparación (S9) tampoco sella una venta de tarjetas.
+    expect(decideSaleStamp({ ...vieja, esVentaDeTarjetas: true }, AHORA, { ignorarPlazo: true })).toBe('NOT_APPLICABLE')
+  })
+})
+
+describe('🔴 cierre (punto 15): la venta de tarjetas de regalo nunca PROMETE un sello (el otorgamiento ya está bloqueado, B6)', () => {
+  // La marca COMPLETA de la cuenta, leída en la MISMA consulta de la venta (`SELECT_MARCA_DE_CUENTA_DE_TARJETAS`).
+  const deTarjetas = { items: [{ id: 'oi-gc' }], _count: { items: 0 } }
+
+  it('la vista previa del MCP dice NOT_APPLICABLE (no ELIGIBLE) y no mira el tope del día', async () => {
+    conVenta(deTarjetas)
+    const v = await previewSaleStamp({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(v?.decision).toBe('NOT_APPLICABLE')
+    expect(v?.dailyLimitReached).toBe(false)
+    expect((prismaMock.order.findFirst as jest.Mock).mock.calls[0][0].select).toMatchObject({
+      items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 },
+      _count: { select: { items: { where: { giftCardId: null } } } },
+    })
+  })
+
+  it('ligar al cliente no corre la lealtad, la app no pinta nada (null) y la liga queda auditada con la decisión', async () => {
+    conVenta(deTarjetas)
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF, ligaNueva: true })
+    expect(r).toBeNull()
+    expect(awardMock).not.toHaveBeenCalled()
+    expect(logActionMock).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'CUSTOMER_ATTACHED_TO_PAID_ORDER',
+        data: expect.objectContaining({ decision: 'NOT_APPLICABLE', stamped: false }),
+      }),
+    )
+  })
+
+  it('el GET tras el cobro no pinta nada (null), ni siquiera «pendiente»', async () => {
+    conVenta({ ...deTarjetas, loyaltyProcessedAt: null })
+    prismaMock.payment.findFirst.mockResolvedValue({ orderId: ORDER } as never)
+    await expect(describeSaleStampForPayment({ venueId: VENUE, paymentId: 'pay-1' })).resolves.toBeNull()
+  })
+
+  it('regresión: una cuenta con un renglón de tarjeta Y otro sin ella (marca completa) sigue la regla de siempre', async () => {
+    conVenta({ items: [{ id: 'oi-gc' }], _count: { items: 1 } })
+    const v = await previewSaleStamp({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(v?.decision).toBe('ELIGIBLE')
   })
 })
 
@@ -220,6 +267,7 @@ describe('esElegibleParaLealtad (¿se corre —o se COMPLETA— la lealtad? audi
     stampOwnerCustomerId: null,
     pointsOwnerCustomerIds: [],
     settledAt: new Date(AHORA - 30 * MIN),
+    esVentaDeTarjetas: false,
   }
   const vieja = new Date(AHORA - 3 * LATE_STAMP_WINDOW_MS)
   it.each<[string, Partial<SaleStampSnapshot>, boolean, boolean]>([

@@ -21,6 +21,14 @@ import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '.
 import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import {
+  MENSAJE_SALDO_SOLO_A_SALDO,
+  alRegistrarReembolsoEnTx,
+  avisarVentaDeTarjetasCanceladaPorReembolso,
+  bloquearSobresDelReembolsoEnTx,
+} from '../giftCards/giftCardCancel.service'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
 import { NO_SE_PUEDE_POR_ARTICULOS, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
@@ -194,6 +202,8 @@ interface RefundTransactionResult {
     tenderTypeId: string | null
     tenderCountsAsCash: boolean | null
   }
+  /** Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx. */
+  cuentaDeTarjetasCancelada: boolean
 }
 
 function toCents(value: unknown): number {
@@ -294,7 +304,8 @@ function refundAuthorityUnavailable(): ConflictError {
 
 /** El cobro original bloqueado y lo ya devuelto de él, leído dentro del tx del reembolso. */
 export interface CobroBloqueado {
-  original: LockedPaymentRow & { orderId: string }
+  /** `tenderSystemKind` (tarjetas de regalo, 1a): la marca del tender de sistema, leída bajo el candado. */
+  original: LockedPaymentRow & { orderId: string; tenderSystemKind: string | null }
   existingRefunds: RefundPaymentRow[]
   alreadyRefundedCents: number
   refundedSalesCents: number
@@ -401,8 +412,19 @@ export async function bloquearCobroParaReembolso(
   const unclassifiedPriorRefundCents = Math.max(0, alreadyRefundedCents - (refundedSalesCents + refundedTipsCents))
   const totalOriginalCents = toCents(original.amount) + toCents(original.tipAmount)
 
+  // Tarjetas de regalo (B1): la marca del tender de sistema viaja con el cobro bloqueado. Se lee aparte y NO como JOIN en el
+  // `FOR UPDATE` (bloquearía también la fila del tender, que comparten todos los cobros del negocio). Sin tender, ninguna consulta.
+  const tenderSystemKind = original.tenderTypeId
+    ? ((
+        await tx.venueTenderType.findFirst({
+          where: { venueId: input.venueId, id: original.tenderTypeId },
+          select: { systemKind: true },
+        })
+      )?.systemKind ?? null)
+    : null
+
   return {
-    original: { ...original, orderId: original.orderId },
+    original: { ...original, orderId: original.orderId, tenderSystemKind },
     existingRefunds,
     alreadyRefundedCents,
     refundedSalesCents,
@@ -507,6 +529,11 @@ export async function writeRefundInTx(
   const { original, alreadyRefundedCents, unclassifiedPriorRefundCents, remainingBeforeCents } = cobro
   // «Por el mismo medio» (ausente, igual al del cobro, o efectivo sobre algo que ya entra al cajón) = como siempre.
   const devolverCon = devolverConEfectivo(original, input.devolverCon)
+  // Tarjetas de regalo (spec §5.5, Review Focus 2): lo pagado con saldo sólo regresa al saldo, aunque una app vieja pida efectivo o
+  // transferencia. Va ANTES de la regla general para que el rechazo lleve el código de las tarjetas.
+  if (devolverCon && isGiftCardTenderKind(original.tenderSystemKind)) {
+    throw new GiftCardError('GIFT_CARD_REFUND_TO_BALANCE_ONLY', MENSAJE_SALDO_SOLO_A_SALDO, 400)
+  }
   if (devolverCon && !sePuedeEscogerComoDevolver(original)) {
     throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
   }
@@ -799,6 +826,13 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // Same original-payment lock as every refund channel: the second caller sees the first commit.
       const replayResult = await existingAttempt(tx)
       if (replayResult) return { replayResult }
+      // Tarjetas de regalo (B1): los sobres del cobro se bloquean AQUÍ —Order → Payment → sobres → Shift—, antes de que el núcleo
+      // reclame el turno. Un canje en otra caja toma Order → sobres → Shift; al revés se abrazarían (40P01).
+      await bloquearSobresDelReembolsoEnTx(tx, {
+        venueId: input.venueId,
+        originalPaymentId: cobro.original.id,
+        original: { orderId: cobro.original.orderId, tenderSystemKind: cobro.original.tenderSystemKind },
+      })
       const {
         original,
         existingRefunds,
@@ -1082,7 +1116,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // El tramo que ESCRIBE —turno, fila REFUND, acumulado del original, VenueTransaction y
       // obligación de costo— es el núcleo compartido con el ajuste de reparto. El dashboard lo
       // llama con los defaults de siempre: no revierte la comisión del TIPO DE PAGO, reclama el turno vivo, MANUAL.
-      const { refundPaymentId } = await writeRefundInTx(tx, {
+      const { refundPaymentId, replay } = await writeRefundInTx(tx, {
         originalPaymentId: original.id,
         venueId: input.venueId,
         salesRefundCents,
@@ -1109,6 +1143,20 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // ahí, la devolución quedaba sin reverso para siempre y el sobre de pago al personal pagaría la comisión de una venta
       // devuelta. Cubre también la devolución ligada de las apps (`refund.mobile.controller.ts`), que llega aquí.
       await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, original.id)
+      // Tarjetas de regalo (B1/B2, R2): el gancho único, en la MISMA transacción que el REFUND y sus reversas. Un cobro con saldo
+      // vuelve al saldo; la venta de tarjetas exige la cancelación iniciada. Un replay ya lo corrió cuando se escribió la fila.
+      const tarjetas = replay
+        ? { cuentaCancelada: false }
+        : await alRegistrarReembolsoEnTx(tx, {
+            venueId: input.venueId,
+            originalPaymentId: original.id,
+            refundPaymentId,
+            amount: centsToDecimal(refundCents),
+            staffId: input.staffId ?? null,
+            // A1 (cierre): lo que queda por devolver de este cobro tras ESTE reembolso (la misma cifra que la respuesta).
+            devuelveTodoElCobro: remainingBeforeCents - refundCents <= 0,
+            original: { orderId: original.orderId, tenderSystemKind: original.tenderSystemKind },
+          })
       const devolverCon = devolverConEfectivo(original, input.refundMethod)
 
       return {
@@ -1133,6 +1181,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
               tenderTypeId: original.tenderTypeId,
               tenderCountsAsCash: original.tenderCountsAsCash,
             },
+        cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
       }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
@@ -1286,6 +1335,16 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       source: 'DASHBOARD',
     },
   })
+
+  // Tarjetas de regalo (B1 r1, fix 1): si este reembolso cerró una venta de tarjetas sin pagar, se avisa como `deleteOrder`.
+  if (result.cuentaDeTarjetasCancelada) {
+    await avisarVentaDeTarjetasCanceladaPorReembolso({
+      venueId: input.venueId,
+      orderId: result.originalOrderId,
+      refundPaymentId: result.refundPaymentId,
+      staffId: input.staffId ?? null,
+    })
+  }
 
   return {
     refundId: result.refundPaymentId,

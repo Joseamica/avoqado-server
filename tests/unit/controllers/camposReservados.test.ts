@@ -89,3 +89,18 @@ describe('Hermano: PUT /dashboard/venues/:venueId tampoco', () => {
     expect(next).not.toHaveBeenCalled()
   })
 })
+
+describe('Tarjetas de regalo: su saldo sólo lo mueve la libreta, nunca una escritura anidada', () => {
+  it.each([
+    ['organización', 'org', { giftCards: { create: [{ balance: 10000, status: 'ACTIVE' }] } }, 'giftCards'],
+    ['organización', 'org', { name: 'IQ', giftCardActivities: { deleteMany: {} } }, 'giftCardActivities'],
+    ['sede', 'venue', { giftCardSettings: { upsert: { create: { enabled: true }, update: { enabled: true } } } }, 'giftCardSettings'],
+  ])('%s: rechaza con 400 y no escribe nada (%#)', async (_quien, donde, body, campo) => {
+    const { next, r } = donde === 'org' ? await organizacion(body) : await sede(body)
+    expect(organizationService.updateOrganization).not.toHaveBeenCalled()
+    expect(venueDashboardService.updateVenue).not.toHaveBeenCalled()
+    expect(r.json).not.toHaveBeenCalled()
+    expect(rechazo(next)).toMatchObject({ statusCode: 400, code: 'CAMPOS_RESERVADOS' })
+    expect(rechazo(next).message).toContain(campo)
+  })
+})

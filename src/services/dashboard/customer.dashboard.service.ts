@@ -15,6 +15,7 @@ import { CustomerApprovalStatus, OrderStatus, PaymentStatus, Prisma } from '@pri
 import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -951,6 +952,7 @@ export async function settleCustomerBalance(
         amountPesos: shiftAmount,
         tipPesos: shiftTip,
         incrementTotalOrders: priorCompletedPaymentCount === 0,
+        orderId,
       })
 
       // Create a payment record to track the settlement
@@ -1001,6 +1003,8 @@ export async function settleCustomerBalance(
       // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
       const sesion = sesionesDeVales.get(orderId)
       if (sesion && (await cerrarSesionDeValesAlCerrarLaVenta(tx, sesion, { venueId, orderId }))) sesionesDeValesCerradas += 1
+      // R8: liquidar el saldo de un cliente también activa los sobres de una cuenta de tarjetas.
+      await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: null, items: itemsParaPosting })
       // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
       await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
     }

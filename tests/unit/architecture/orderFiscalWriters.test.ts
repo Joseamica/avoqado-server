@@ -575,7 +575,13 @@ const WRITERS: Record<string, Writer> = {
     ],
   },
   // ── Payment lanes (pre-existing, unchanged by Plan 3b; lock order guarded by the payment inventory) ──
-  'src/services/mobile/order.mobile.service.ts#payCashOrder': { class: 'LOCKED', lock: LOCK, proof: PAYMENT_LANE('payCashOrder') },
+  // Tarea A7: la escritura de la Order se movió al núcleo `registrarAbonoEnTx`; `payCashOrder` sigue ABRIENDO la
+  // transacción con el presupuesto único (ORDER_LOCK_TRANSACTIONS) y el núcleo toma el candado (helper de candado).
+  'src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: PAYMENT_LANE('registrarAbonoEnTx'),
+  },
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': { class: 'LOCKED', lock: LOCK, proof: PAYMENT_LANE('settleOrder') },
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': {
     class: 'LOCKED',
@@ -830,6 +836,12 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'provider status marks',
   },
   'src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction': CANCEL('assertOrderCancellableUnderLock'),
+  // Tarjetas de regalo (A8): cancela bajo el candado de topología después de regresar el saldo; sin columnas de dinero.
+  'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': CANCEL('assertNoLiveTerminalCharge'),
+  // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela dentro de
+  // la tx del reembolso, que ya tiene la Order (issueRefund / recordRefund → lockExistingOrderForPayment); con un cobro de terminal
+  // vivo no cancela. Sólo `status` + `version` (CAS); ninguna columna de dinero.
+  'src/services/giftCards/giftCardCancel.service.ts#cerrarVentaSinPagarSiYaNoQuedaDinero': CANCEL('findLiveTerminalCharge('),
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': CANCEL('assertOrderCancellableUnderLock'),
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': CANCEL('assertOrderCancellableUnderLock'),
   // R11-8 (sellos tardíos): otro canal cerró la venta de vales; la sesión cierra con ella. Sólo suelta el reclamo de la terminal
@@ -849,6 +861,11 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/online-ordering/order.service.ts#createOnlineOrder': {
     class: 'PRIVATE_CREATION',
     why: 'online order: new Order, lines and modifiers in one admission transaction',
+    markers: NEW_ORDER,
+  },
+  'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
+    class: 'PRIVATE_CREATION',
+    why: 'new gift-card order (spec 2026-10-14 § 5.1): PENDING gift cards and one nested line per card in one transaction; replays return the committed order by externalId',
     markers: NEW_ORDER,
   },
   'src/services/tpv/order.tpv.service.ts#sellSerializedItem': {
@@ -1108,6 +1125,9 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent': 1,
   // Payment, refund and delivery lanes that take the same lock (outside the review's list; same rule)
   'src/services/mobile/order.mobile.service.ts#payCashOrder': 1,
+  // Tarjetas de regalo (A8): el cobro con saldo abre su tx y el núcleo toma la Order; regresar el saldo toma la topología.
+  'src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder': 1,
+  'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
   'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': 1,
@@ -1118,6 +1138,12 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
   // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
   'src/services/online-ordering/transitions.service.ts#casTransition': 1,
+  // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
+  // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
+  'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,
+  'src/services/giftCards/giftCardCancel.service.ts#liberarCancelacionDeVenta': 1,
+  // Tarjetas de regalo (B7): la revisión nocturna activa una cuenta pagada bajo el mismo candado que el cobro (Order → sobres).
+  'src/jobs/giftCardReconciliation.job.ts#activarCuentaEnDb': 1,
 }
 
 /** Lock-taking transactions whose wait is governed by their own protocol, pinned verbatim so a change is re-reviewed. */

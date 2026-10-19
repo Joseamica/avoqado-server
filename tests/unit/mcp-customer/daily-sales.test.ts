@@ -169,6 +169,7 @@ it('separa monedas en el resumen general sin inventar conversión ni sumar MXN c
       expect.objectContaining({ currency: 'USD', gross: 50 }),
     ]),
   )
-  expect(mockGroupBy).toHaveBeenCalledTimes(1)
+  // ventas, tarjetas cargadas y el dinero de tarjetas por comercio: tres consultas, nunca una por sucursal
+  expect(mockGroupBy).toHaveBeenCalledTimes(3)
   expect(out.completedCount).toBe(3)
 })

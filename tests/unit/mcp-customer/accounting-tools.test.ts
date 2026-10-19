@@ -73,6 +73,8 @@ jest.mock('@/services/dashboard/accounting.dashboard.service', () => ({
   getBankAndCashSummary: jest.fn(),
 }))
 jest.mock('@/services/dashboard/bankReconciliation.service', () => ({ listStatements: jest.fn() }))
+const mockIsr = jest.fn()
+jest.mock('@/services/fiscal/isr.service', () => ({ getIsrProvisional: (...a: unknown[]) => mockIsr(...(a as [])) }))
 jest.mock('@/services/fiscal/fixedAsset.service', () => ({
   registerFixedAsset: (...a: unknown[]) => mockRegisterFixedAsset(...(a as [])),
   disposeFixedAsset: (...a: unknown[]) => mockDisposeFixedAsset(...(a as [])),
@@ -539,6 +541,23 @@ describe('generate_journal_entries (write) — gated CFDI + accounting:manage', 
     expect(out.omitidos).toBe(2)
   })
 
+  it('tarjetas de regalo (spec §7, fase 1): responde cuántos cobros quedaron pendientes de revisión contable, sin pólizas', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockGenerate.mockResolvedValue({
+      needsFiscalSetup: false,
+      missingMappings: [],
+      period: '2026-10',
+      candidates: 5,
+      posted: 3,
+      alreadyPosted: 0,
+      skipped: 0,
+      pendientesDeRevision: 2,
+    })
+    const out = parse(await call('generate_journal_entries', { venueId: 'v1', period: '2026-10' }))
+    expect(out).toMatchObject({ ok: true, pagosElegibles: 5, polizasGeneradas: 3, yaEstaban: 0, omitidos: 0, pendientesDeRevision: 2 })
+    expect(out.nota).toContain('tarjetas de regalo')
+  })
+
   it('faltan mapeos → needsMapping, NO ok', async () => {
     mockPlanGate.mockResolvedValue(null)
     mockGenerate.mockResolvedValue({
@@ -561,6 +580,46 @@ describe('generate_journal_entries (write) — gated CFDI + accounting:manage', 
     const out = parse(await call('generate_journal_entries', { venueId: 'v1' }))
     expect(out.planRequired).toBe(true)
     expect(mockGenerate).not.toHaveBeenCalled()
+  })
+})
+
+describe('isr_provisional · tarjetas de regalo (B4 r1, fix 2): la diferencia con la base, sólo cuando la hay', () => {
+  const isr = (extra: Record<string, unknown>) => ({
+    needsFiscalSetup: false,
+    rfc: 'EKU9003173C9',
+    period: '2026-10',
+    regime: 'RESICO',
+    ingresosMesCents: 27241,
+    ingresosAcumCents: 27241,
+    tasaResico: 0.01,
+    excedeTopeResico: false,
+    isrCausadoCents: 272,
+    retencionesIsrCents: 0,
+    isrAPagarCents: 272,
+    zeroActivity: false,
+    tarjetasCobradasNoIncluidasCents: 0,
+    pagadoConSaldoIncluidoCents: 0,
+    ...extra,
+  })
+
+  it('con tarjetas: los dos importes en pesos y el aviso para el contador', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    const aviso =
+      'El ISR estimado no incluye $500.00 de tarjetas de regalo cobradas en el periodo y sí incluye $100.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.'
+    mockIsr.mockResolvedValue(
+      isr({ tarjetasCobradasNoIncluidasCents: 50000, pagadoConSaldoIncluidoCents: 10000, avisoTarjetasDeRegalo: aviso }),
+    )
+    const out = parse(await call('isr_provisional', { venueId: 'v1', period: '2026-10' }))
+    expect(out.tarjetasDeRegalo).toEqual({ cobradasNoIncluidas: 500, pagadoConSaldoIncluido: 100, aviso })
+    expect(out.isrAPagarEstimado).toBe(2.72) // la base y el ISR, sin recalcular
+  })
+
+  it('sin tarjetas: la respuesta de siempre, sin la sección', async () => {
+    mockPlanGate.mockResolvedValue(null)
+    mockIsr.mockResolvedValue(isr({}))
+    const out = parse(await call('isr_provisional', { venueId: 'v1', period: '2026-10' }))
+    expect(out).not.toHaveProperty('tarjetasDeRegalo')
+    expect(out.ok).toBe(true)
   })
 })
 

@@ -151,7 +151,8 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     expect((prismaMock as any).payment.findFirst).toHaveBeenCalledWith({
       where: { id: 'pay-orig', venueId: VENUE },
       // r4 R4-A1 (plan 7a T3b): sólo el recibo canónico, nunca todos los del cobro.
-      include: { order: true, receipts: RECIBO_CANONICO },
+      // Tarjetas de regalo (B1): y la marca del tender de sistema, para rechazar lo pagado con saldo antes de tocar nada.
+      include: { order: true, receipts: RECIBO_CANONICO, tenderType: { select: { systemKind: true } } },
     })
   })
 

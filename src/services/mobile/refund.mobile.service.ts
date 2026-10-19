@@ -7,6 +7,7 @@
 
 import prisma from '../../utils/prismaClient'
 import { BadRequestError } from '../../errors/AppError'
+import { GiftCardError } from '../giftCards/giftCardErrors'
 import { logAction } from '../dashboard/activity-log.service'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import {
@@ -59,6 +60,22 @@ export async function createRefund(params: CreateRefundParams) {
 
   if (!reason || !reason.trim()) {
     throw new BadRequestError('El motivo del reembolso es requerido')
+  }
+
+  // 🔴 Tarjetas de regalo (pendientes 1a, T3): un negocio que ya COBRÓ alguna tarjeta no registra devoluciones SIN venta.
+  // Es una medida de trazabilidad para cumplir la Ley Fintech, art. 24 fr. II (el saldo de una tarjeta no debe poder
+  // convertirse en efectivo): NO es una prohibición literal de devolver. Las devoluciones de un negocio con tarjetas se hacen
+  // desde su venta (las ligadas ya regresan el saldo a la tarjeta: `GIFT_CARD_REFUND_TO_BALANCE_ONLY`).
+  // La condición es «alguna tarjeta activada alguna vez», no el switch de la función (apagarla deja saldos vivos) ni
+  // `negocioTieneTarjetas` (una cuenta de tarjetas creada y nunca pagada, sobre PENDING, no bloquea devoluciones legítimas).
+  // Va antes de la transacción: al rechazar no se escribe Order, Payment ni VenueTransaction. Consulta por negocio con
+  // LIMIT 1 (`findFirst`), suficiente sin índice propio sobre `activatedAt`.
+  if (await prisma.giftCard.findFirst({ where: { venueId, activatedAt: { not: null } }, select: { id: true } })) {
+    throw new GiftCardError(
+      'GIFT_CARD_UNLINKED_REFUND_BLOCKED',
+      'En un negocio que vende tarjetas de regalo, la devolución se hace desde su venta, para que el saldo de una tarjeta nunca se devuelva en efectivo.',
+      409,
+    )
   }
 
   const amountDecimal = centsToDecimal(amount) // positive (e.g., 50.00)

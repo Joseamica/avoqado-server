@@ -30,6 +30,8 @@ jest.mock('../../../src/services/fiscal/salesRetention.service', () => ({ getSal
 jest.mock('../../../src/services/fiscal/cogs.service', () => ({ computePeriodCogsCentsRange: jest.fn() }))
 jest.mock('../../../src/services/fiscal/fixedAssetDepreciation.service', () => ({ getYearDepreciationCents: jest.fn() }))
 jest.mock('../../../src/services/fiscal/fiscalLoss.service', () => ({ getPendingLossCents: jest.fn() }))
+// B4 r1 (fix 2): lo que el ISR dice de las tarjetas de regalo sale de su propio módulo (en la misma foto); aquí, un doble.
+jest.mock('../../../src/services/fiscal/tarjetasDeRegaloEnElIsr', () => ({ tarjetasDeRegaloEnFoto: jest.fn() }))
 
 import prisma from '../../../src/utils/prismaClient'
 import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts.service'
@@ -43,6 +45,11 @@ import { computePeriodCogsCentsRange } from '../../../src/services/fiscal/cogs.s
 import { getYearDepreciationCents } from '../../../src/services/fiscal/fixedAssetDepreciation.service'
 import { getPendingLossCents } from '../../../src/services/fiscal/fiscalLoss.service'
 import { applyTariff, ART96_MONTHLY, getIsrProvisional, TIEMPO_MAXIMO_DEL_ISR_MS } from '../../../src/services/fiscal/isr.service'
+import { tarjetasDeRegaloEnFoto } from '../../../src/services/fiscal/tarjetasDeRegaloEnElIsr'
+
+const mTarjetas = tarjetasDeRegaloEnFoto as jest.Mock
+const SIN_TARJETAS = { cargasCents: 0, pagadoConSaldoSinIvaCents: 0 }
+beforeEach(() => mTarjetas.mockResolvedValue(SIN_TARJETAS))
 
 const p = prisma as unknown as {
   venue: { findMany: jest.Mock; findUnique: jest.Mock }
@@ -376,5 +383,92 @@ describe('B4b · T6 M5 (revisión final): el ISR es de UN mes, así que su error
     )
     mIncome.mockRejectedValue(porVenta)
     await expect(getIsrProvisional('v1', '2026-06', 'RESICO')).rejects.toBe(porVenta)
+  })
+})
+
+/**
+ * B4 r1 (fix 2; dictamen §3, fallo del contador = opción b para la fase 1): el ISR se causa al COBRAR, así que la venta de una tarjeta es
+ * ingreso del mes en que se cobra; el estado de resultados (la base) la deja fuera e incluye lo pagado con saldo. La base NO se recalcula:
+ * la respuesta dice cuánto falta y cuánto sobra, sobre el mismo tramo que usa la base (el mes en RESICO, el ejercicio en GENERAL).
+ */
+describe('B4 r1 (fix 2) · tarjetas de regalo en el ISR estimado: la diferencia, explícita y aditiva', () => {
+  it('🔴 sin tarjetas: los dos importes en 0 y SIN aviso; la base y el ISR, como siempre', async () => {
+    mIncome.mockResolvedValue(income(20_000_00))
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect([r.tarjetasCobradasNoIncluidasCents, r.pagadoConSaldoIncluidoCents, r.avisoTarjetasDeRegalo]).toEqual([0, 0, undefined])
+    expect([r.ingresosMesCents, r.isrCausadoCents]).toEqual([20_000_00, 200_00])
+  })
+
+  it('🔴 RESICO: los importes del MES pedido, en la misma foto y por local; el aviso los dice; la base no cambia', async () => {
+    p.venue.findMany.mockResolvedValue([
+      { id: 'v1', organizationId: 'org1', name: 'X', timezone: null },
+      { id: 'v2', organizationId: 'org1', name: 'Y', timezone: null },
+    ])
+    mIncome.mockResolvedValue(income(10_000_00))
+    // marzo: v1 vendió $500 en tarjetas y cobró $100 sin IVA con saldo; v2, $250 y $0. Enero y febrero traen otros importes.
+    mTarjetas.mockImplementation(async (_tx: unknown, v: { id: string }, f: { from: string }) =>
+      f.from === '2026-03-01'
+        ? v.id === 'v1'
+          ? { cargasCents: 500_00, pagadoConSaldoSinIvaCents: 100_00 }
+          : { cargasCents: 250_00, pagadoConSaldoSinIvaCents: 0 }
+        : { cargasCents: 1_000_00, pagadoConSaldoSinIvaCents: 1_00 },
+    )
+    const r = await getIsrProvisional('v1', '2026-03', 'RESICO')
+    expect([r.tarjetasCobradasNoIncluidasCents, r.pagadoConSaldoIncluidoCents]).toEqual([750_00, 100_00])
+    expect(r.avisoTarjetasDeRegalo).toBe(
+      'El ISR estimado no incluye $750.00 de tarjetas de regalo cobradas en el periodo y sí incluye $100.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
+    )
+    expect(r.ingresosMesCents).toBe(20_000_00) // 2 locales × $10,000: la base es la de siempre
+    // ⭐ (B4 r1): RESICO usa sólo el MES pedido, así que sólo ése se lee (enero y febrero no): una llamada por local, con la MISMA
+    // transacción del ISR y el rango del mes. El resultado es el mismo que cuando se leían los tres meses.
+    expect(mTarjetas).toHaveBeenCalledTimes(2)
+    expect(mTarjetas.mock.calls.every(c => c[2].from === '2026-03-01')).toBe(true)
+    expect(new Set(mTarjetas.mock.calls.map(c => c[0])).size).toBe(1)
+    expect(mTarjetas.mock.calls[0][0]).toEqual({ foto: 'del ISR' })
+    expect(mTarjetas).toHaveBeenCalledWith(
+      { foto: 'del ISR' },
+      expect.objectContaining({ id: 'v2' }),
+      { from: '2026-03-01', to: '2026-03-31' },
+      expect.anything(),
+    )
+  })
+
+  it('🔴 GENERAL: los importes del EJERCICIO (enero → mes), porque la base es acumulada; el aviso lo dice', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    mTarjetas.mockImplementation(async (_tx: unknown, _v: unknown, f: { from: string }) =>
+      f.from === '2026-02-01'
+        ? { cargasCents: 300_00, pagadoConSaldoSinIvaCents: 50_00 }
+        : { cargasCents: 200_00, pagadoConSaldoSinIvaCents: 0 },
+    )
+    const r = await getIsrProvisional('v1', '2026-02', 'GENERAL')
+    expect([r.tarjetasCobradasNoIncluidasCents, r.pagadoConSaldoIncluidoCents]).toEqual([500_00, 50_00])
+    expect(mTarjetas).toHaveBeenCalledTimes(2) // GENERAL sí lee enero y febrero: su base es acumulada
+    expect(r.avisoTarjetasDeRegalo).toBe(
+      'El ISR estimado no incluye $500.00 de tarjetas de regalo cobradas en lo que va del ejercicio y sí incluye $50.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
+    )
+  })
+
+  it('🔴 un mes con sólo la devolución de una tarjeta vendida antes: importe negativo y aviso (el hueco también existe)', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    mTarjetas.mockImplementation(async (_tx: unknown, _v: unknown, f: { from: string }) =>
+      f.from === '2026-06-01' ? { cargasCents: -300_00, pagadoConSaldoSinIvaCents: 0 } : SIN_TARJETAS,
+    )
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.tarjetasCobradasNoIncluidasCents).toBe(-300_00)
+    // ⭐ (B4 r1): con monto negativo el aviso dice «devueltas» y el monto en positivo, nunca «no incluye -$300.00 … cobradas».
+    expect(r.avisoTarjetasDeRegalo).toBe(
+      'El ISR estimado no descuenta $300.00 de tarjetas de regalo devueltas en el periodo y sí incluye $0.00 pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
+    )
+  })
+
+  it('⭐ (B4 r1) lo pagado con saldo NEGATIVO (más devoluciones que cobros) también se dice como devuelto', async () => {
+    mIncome.mockResolvedValue(income(10_000_00))
+    mTarjetas.mockImplementation(async (_tx: unknown, _v: unknown, f: { from: string }) =>
+      f.from === '2026-06-01' ? { cargasCents: 200_00, pagadoConSaldoSinIvaCents: -50_00 } : SIN_TARJETAS,
+    )
+    const r = await getIsrProvisional('v1', '2026-06', 'RESICO')
+    expect(r.avisoTarjetasDeRegalo).toBe(
+      'El ISR estimado no incluye $200.00 de tarjetas de regalo cobradas en el periodo y sí resta $50.00 de devoluciones de lo pagado con saldo de tarjetas; tu contador debe ajustarlo con el reporte de tarjetas.',
+    )
   })
 })

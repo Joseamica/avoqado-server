@@ -7,6 +7,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { venuesWithFeatureAccess } from '@/services/access/basePlan.service'
 import { hasPermission } from '@/services/access/access.service'
+import { WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -74,7 +75,8 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       const now = new Date()
       const curStart = new Date(now.getTime() - ms)
       const prevStart = new Date(now.getTime() - 2 * ms)
-      const completed = { status: TransactionStatus.COMPLETED }
+      // Ventas, no dinero: la venta de tarjetas de regalo se cobra pero no es venta (lo pagado con su saldo sí).
+      const completed = { status: TransactionStatus.COMPLETED, order: WHERE_ORDEN_SIN_TARJETAS }
 
       const [cur, prev, venues] = await Promise.all([
         prisma.payment.groupBy({
@@ -159,7 +161,7 @@ export function registerTrendTools(server: McpServer, scope: McpScope) {
       const [groups, venues] = await Promise.all([
         prisma.payment.groupBy({
           by: ['venueId'],
-          where: { ...base, status: TransactionStatus.COMPLETED, createdAt: { gte: start } },
+          where: { ...base, status: TransactionStatus.COMPLETED, order: WHERE_ORDEN_SIN_TARJETAS, createdAt: { gte: start } },
           _sum: { amount: true },
           _count: { _all: true },
         }),

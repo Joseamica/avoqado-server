@@ -21,7 +21,8 @@ jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     payment: { findUnique: jest.fn(), findMany: jest.fn(), count: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
-    orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+    // `findFirst`: el claim del turno pregunta si la orden es una cuenta de tarjetas de regalo (aquí, mercancía).
+    orderItem: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
     venueSettings: { findUnique: jest.fn() },
@@ -70,7 +71,7 @@ import prisma from '@/utils/prismaClient'
 const mockPrisma = prisma as unknown as {
   payment: { findUnique: jest.Mock; findMany: jest.Mock; count: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
   order: { findUnique: jest.Mock; updateMany: jest.Mock }
-  orderItem: { findMany: jest.Mock }
+  orderItem: { findMany: jest.Mock; findFirst: jest.Mock }
   shift: { findFirst: jest.Mock; updateMany: jest.Mock }
   venueSettings: { findUnique: jest.Mock }
   activityLog: { create: jest.Mock }

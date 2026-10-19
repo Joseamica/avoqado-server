@@ -301,6 +301,18 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'GIFT_CARDS',
+        featureCode: 'GIFT_CARDS',
+        name: 'Tarjetas de regalo',
+        description: 'Vende tarjetas de regalo en tu POS y cóbralas con su saldo, solo o combinado con otro medio.',
+        category: 'customers',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        // `fr` lo exige el tipo `FeatureCatalogEntry`; la plataforma sólo da soporte en es/en.
+        names: { es: 'Tarjetas de regalo', en: 'Gift cards', fr: 'Cartes cadeaux' },
+      },
+      {
         id: 'BASE_INVENTORYBASIC',
         featureCode: null,
         name: 'Inventario básico',

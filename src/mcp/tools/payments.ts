@@ -11,6 +11,10 @@ import { issueRefund, type RefundReason } from '@/services/dashboard/refund.dash
 import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashboard/manualPayment.service'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
+import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
+import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
+import { formatoPesos } from '@/services/giftCards/giftCardLimits'
+import AppError from '@/errors/AppError'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { esVentaCerrada, summarizeRefunds } from '@/services/shared/orderBalance'
@@ -76,6 +80,10 @@ export interface PaymentsSummary {
   // WHY: separate refund line so "¿qué se reembolsó?" is answerable and `completed.gross` is
   // TRUE sales revenue. `amount`/`tips` stay NEGATIVE (money out), as stored on the refund rows.
   refunds: { count: number; amount: number; tips: number }
+  /** Cobros COMPLETED de cuentas de tarjetas de regalo dentro de `completed.gross` (abonos incluidos, antes de sus devoluciones): dinero que entró, no venta. */
+  giftCardLoads?: { count: number; amount: number }
+  /** Sólo cuando `giftCardLoads.count > 0`. */
+  note?: string
 }
 
 /**
@@ -132,6 +140,24 @@ export function buildPaymentsSummary(groups: PaymentStatusGroup[]): PaymentsSumm
 export function conCostoPendiente(summary: PaymentsSummary, costPendingCount: number): PaymentsSummary {
   const pendientes = Number.isFinite(costPendingCount) ? Math.max(0, Math.trunc(costPendingCount)) : 0
   return { ...summary, completed: { ...summary.completed, costPendingCount: pendientes, netProvisional: pendientes > 0 } }
+}
+
+/**
+ * La lista de cobros es DINERO: el cobro de una venta de tarjetas de regalo se queda en ella. Pero `completed.gross` lo incluye y no es
+ * venta, así que el resumen dice cuánto es (y, si hay alguna, lo aclara en la nota) para que el asistente no lo cuente como lo vendido.
+ */
+export function conCargasDeTarjetas(summary: PaymentsSummary, cargas: { count: number; amount: number }): PaymentsSummary {
+  const count = Number.isFinite(cargas.count) ? Math.max(0, Math.trunc(cargas.count)) : 0
+  const amount = count > 0 && Number.isFinite(cargas.amount) ? round2(cargas.amount) : 0
+  return {
+    ...summary,
+    giftCardLoads: { count, amount },
+    ...(count > 0
+      ? {
+          note: `completed.gross incluye ${formatoPesos(amount)} cobrados en cuentas de tarjetas de regalo (abonos incluidos; sus devoluciones van en refunds); eso no es venta.`,
+        }
+      : {}),
+  }
 }
 
 const STATUS_MAP: Record<string, TransactionStatus> = {
@@ -206,7 +232,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         ...(method ? { method: METHOD_MAP[method] } : {}),
       }
 
-      const [groups, payments, costPendingCount] = await Promise.all([
+      const [groups, payments, costPendingCount, cargasDeTarjetas] = await Promise.all([
         prisma.payment.groupBy({
           // WHY by status AND type: refunds are type=REFUND under status=COMPLETED — grouping by
           // status alone folded them into `completed` invisibly. `type` lets us split them out.
@@ -247,13 +273,25 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
         prisma.payment.count({
           where: { ...where, status: TransactionStatus.COMPLETED, processorData: { path: ['costPending'], equals: true } },
         }),
+        // Lo que hay de venta de tarjetas de regalo en `completed.gross`: los mismos cobros que ese renglón (COMPLETED, no reembolsos) y el
+        // MISMO filtro del listado (AND, no un spread: con `status=failed` el resumen no trae cobros completados y ésta tampoco).
+        prisma.payment.aggregate({
+          where: {
+            AND: [where, { status: TransactionStatus.COMPLETED, type: { not: PaymentType.REFUND }, order: WHERE_ORDEN_DE_TARJETAS }],
+          },
+          _sum: { amount: true },
+          _count: { _all: true },
+        }),
       ])
 
       return text({
         venueId,
         window: { start: start.toISOString(), end: end.toISOString() },
         timezone: tz,
-        summary: conCostoPendiente(buildPaymentsSummary(groups as PaymentStatusGroup[]), costPendingCount),
+        summary: conCargasDeTarjetas(conCostoPendiente(buildPaymentsSummary(groups as PaymentStatusGroup[]), costPendingCount), {
+          count: cargasDeTarjetas._count._all,
+          amount: num(cargasDeTarjetas._sum.amount),
+        }),
         count: payments.length,
         payments: payments.map(p => ({
           id: p.id,
@@ -449,6 +487,7 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           type: true,
           createdAt: true,
           order: { select: { orderNumber: true } },
+          tenderType: { select: { systemKind: true } },
         },
       })
       if (!payment) return text({ ok: false, error: 'No encontré ese pago en tus locales.' })
@@ -468,8 +507,22 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           useInstead: 'refund_card_on_terminal',
         })
       }
+      const cobroParaDevolver = { ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }
+      const esSaldoDeRegalo = isGiftCardTenderKind(cobroParaDevolver.tenderSystemKind)
+      // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo. El servicio lo rechaza igual; aquí se dice antes.
+      if (esSaldoDeRegalo && refundMethod) {
+        return text({
+          ok: false,
+          code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
+          error: 'Lo pagado con tarjeta de regalo sólo regresa al saldo de la tarjeta; quita refundMethod para devolverlo al saldo.',
+        })
+      }
       // Escoger con qué se devuelve sólo aplica a lo que no fue tarjeta ni liquida un procesador (misma regla del servicio).
-      if (refundMethod && devolverConEfectivo(payment, refundMethod) !== undefined && !sePuedeEscogerComoDevolver(payment)) {
+      if (
+        refundMethod &&
+        devolverConEfectivo(cobroParaDevolver, refundMethod) !== undefined &&
+        !sePuedeEscogerComoDevolver(cobroParaDevolver)
+      ) {
         return text({ ok: false, error: 'Este cobro sólo se devuelve por el mismo medio con que se pagó.' })
       }
       const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
@@ -501,13 +554,15 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
             note: note ?? null,
             saleDeCajonDeEfectivo,
             refundMethod: refundMethod ?? null,
+            ...(esSaldoDeRegalo ? { regresaAlSaldoDeRegalo: true } : {}),
           },
           message:
             `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
             (saleDeCajonDeEfectivo
               ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
               : '') +
-            ' Vuelve a llamar con confirm:true para ejecutar.',
+            ' Vuelve a llamar con confirm:true para ejecutar.' +
+            (esSaldoDeRegalo ? ' Regresa al saldo de la tarjeta de regalo del cliente.' : ''),
         })
       }
 
@@ -545,7 +600,14 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
           },
         })
       } catch (err) {
-        return text({ ok: false, error: (err as Error).message })
+        // Tarjetas de regalo (B1 r1): el `code` y los `details` de un rechazo de negocio viajan al agente, para que distinga
+        // `GIFT_CARD_CANCEL_NOT_STARTED` de `SOBRE_DESACTIVADO` (y cualquier otro AppError) sin leer el texto.
+        return text({
+          ok: false,
+          error: (err as Error).message,
+          ...(err instanceof AppError && err.code ? { code: err.code } : {}),
+          ...(err instanceof AppError && err.details !== undefined ? { details: err.details } : {}),
+        })
       }
     },
   )

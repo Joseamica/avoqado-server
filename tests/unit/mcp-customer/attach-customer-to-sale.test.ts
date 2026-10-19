@@ -181,6 +181,8 @@ describe('attach_customer_to_sale', () => {
     [{ decision: 'NOT_PAID' }, /no \(la venta no está pagada completa/],
     [{ decision: 'OPEN' }, /todavía no \(la venta sigue abierta/],
     [{ decision: 'STAMPED' }, /no \(esta venta ya le sumó su sello a este cliente/],
+    // Cierre de tarjetas 1a (punto 15): comprar tarjetas de regalo no suma sellos; la vista previa no promete uno.
+    [{ decision: 'NOT_APPLICABLE' }, /no \(es una venta de tarjetas de regalo/],
     [{ decision: 'ELIGIBLE', dailyLimitReached: true }, /no \(ya recibió su sello de hoy/],
     [{ decision: 'ELIGIBLE', stampsEnabled: false }, /no \(el negocio no tiene activa la tarjeta de sellos/],
   ])('vista previa explica por qué no suma: %p', async (over, patron) => {

@@ -219,6 +219,7 @@ describe('🔴 la elegibilidad de la reparación es la del sello tardío sin el 
     stampOwnerCustomerId: null,
     pointsOwnerCustomerIds: [],
     settledAt: new Date(Date.UTC(2026, 8, 22, 17, 0, 0)),
+    esVentaDeTarjetas: false,
   }
   it('venta de hace 3 semanas: elegible para la reparación aunque ya no para el sello tardío', () => {
     expect(esElegibleParaLealtad(venta22sep, AHORA)).toBe(false)

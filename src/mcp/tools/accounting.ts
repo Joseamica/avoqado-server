@@ -683,9 +683,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizasGeneradas: r.posted,
         yaEstaban: r.alreadyPosted,
         omitidos: r.skipped,
+        // Tarjetas de regalo (spec §7, fase 1): venta de tarjetas y cobros con saldo, sin póliza; el contador los registra a mano.
+        pendientesDeRevision: r.pendientesDeRevision,
         // Costo de ventas del periodo (inventario consumido → cuenta de costo de ventas), si hubo consumo.
         costoDeVentas: r.cogsCents != null ? pesos(r.cogsCents) : 0,
-        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes).',
+        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes). Las tarjetas de regalo (su venta y lo pagado con saldo) no generan póliza por ahora: quedan en pendientesDeRevision para que tu contador las registre a mano.',
       })
     },
   )
@@ -1032,6 +1034,16 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         retencionesIsrVentas: pesos(r.retencionesIsrCents), // capturada por el contador (set_sales_retention)
         isrAPagarEstimado: pesos(r.isrAPagarCents),
         sinVentas: r.zeroActivity,
+        // Tarjetas de regalo (B4 r1): la base no se recalcula en la fase 1; la diferencia va aparte y sólo cuando la hay.
+        ...(r.avisoTarjetasDeRegalo
+          ? {
+              tarjetasDeRegalo: {
+                cobradasNoIncluidas: pesos(r.tarjetasCobradasNoIncluidasCents),
+                pagadoConSaldoIncluido: pesos(r.pagadoConSaldoIncluidoCents),
+                aviso: r.avisoTarjetasDeRegalo,
+              },
+            }
+          : {}),
         nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo y, en régimen GENERAL, las pérdidas de ejercicios anteriores topadas a la utilidad; no resta PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
       })
     },

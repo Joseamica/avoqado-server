@@ -139,3 +139,14 @@ describe('buildPaymentBreakdown — desglose del corte por método real', () => 
     })
   })
 })
+
+describe('buildPaymentBreakdown — tarjetas de regalo (R3, Codex #5 del cierre)', () => {
+  it('🔴 la carga de tarjetas no es venta del turno; su dinero sí está en el desglose por método y los % suman 100', () => {
+    const r = buildPaymentBreakdown([
+      { ...pago('CASH', 1000), order: { items: [{ id: 'oi-gc' }] } },
+      { ...pago('CASH', 200), order: { items: [] } },
+    ])
+    expect(r.totalSales).toBe(200)
+    expect(r.paymentMethodBreakdown).toEqual([expect.objectContaining({ method: 'CASH', total: 1200, percentage: 100 })])
+  })
+})

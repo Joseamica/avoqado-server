@@ -167,6 +167,8 @@ function esperarMembresiaCanonica(args: any) {
     fundsFlow: true,
     tenderTypeId: true,
     tenderCountsAsCash: true,
+    // Tarjetas de regalo (R3, B5): la marca de cuenta de tarjetas, para no sumarla a `totalSales` ni a las órdenes del cierre.
+    order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } },
     // Con qué contar las ÓRDENES cobradas del turno (no los renglones de producto).
     orderId: true,
     type: true,
@@ -293,15 +295,43 @@ describe('cierre — totalOrders son las ÓRDENES cobradas, no los renglones', (
   })
 
   it('un reembolso no es una orden cobrada: ni el testigo standalone ni la devolución de una venta', () => {
+    const sinTarjetas = { items: [] }
     expect(
       contarOrdenesCobradas([
-        { orderId: 'venta', type: 'REGULAR' },
-        { orderId: 'venta', type: 'REFUND' },
-        { orderId: 'testigo-standalone', type: 'REFUND' },
-        { orderId: 'carrito-gratis', type: null },
+        { orderId: 'venta', type: 'REGULAR', order: sinTarjetas },
+        { orderId: 'venta', type: 'REFUND', order: sinTarjetas },
+        { orderId: 'testigo-standalone', type: 'REFUND', order: sinTarjetas },
+        { orderId: 'carrito-gratis', type: null, order: sinTarjetas },
       ]),
     ).toBe(2)
     expect(contarOrdenesCobradas([])).toBe(0)
+  })
+
+  // 🔴 Tarjetas de regalo (R3): la cuenta de tarjetas no es venta del turno (`aggregateShiftPayments` no la suma a `totalSales`),
+  // así que tampoco es una orden cobrada del turno, aunque se pague en dos cobros.
+  it('🔴 R3: una cuenta de tarjetas de regalo cobrada en el turno NO cuenta como orden (ni en dos cobros)', () => {
+    const deTarjetas = { items: [{ id: 'oi-gc' }] }
+    expect(
+      contarOrdenesCobradas([
+        { orderId: 'venta', type: 'REGULAR', order: { items: [] } },
+        { orderId: 'cuenta-de-tarjetas', type: 'REGULAR', order: deTarjetas },
+        { orderId: 'cuenta-de-tarjetas', type: 'REGULAR', order: deTarjetas },
+      ]),
+    ).toBe(1)
+  })
+
+  it('🔴 R3: al CERRAR el turno, el cobro de una cuenta de tarjetas no suma a `totalOrders` ni al reporte', async () => {
+    prepararCierre()
+    m.orderItem.findMany.mockResolvedValue([])
+    m.payment.findMany.mockResolvedValue([
+      pago({ id: 'venta-1', orderId: 'orden-venta', amount: new Decimal('80.00') }),
+      pago({ id: 'gc-1', orderId: 'orden-tarjetas', amount: new Decimal('500.00'), order: { shiftId: TURNO, items: [{ id: 'oi-gc' }] } }),
+    ])
+
+    await closeShiftForVenueWithResult(VENUE, TURNO, {}, { now: () => CLAIMED_AT })
+
+    expect(cierreEscrito.totalOrders).toBe(1)
+    expect((cierreEscrito.reportData as any).sales.totalOrders).toBe(1)
   })
 })
 

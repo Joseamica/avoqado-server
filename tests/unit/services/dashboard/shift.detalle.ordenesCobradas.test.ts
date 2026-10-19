@@ -1,6 +1,7 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { getShiftById } from '@/services/dashboard/shift.dashboard.service'
 import { contarOrdenesCobradas } from '@/services/tpv/shift.tpv.service'
+import { ORDEN_DE_TARJETAS_SELECT } from '@/services/giftCards/giftCardMarks'
 
 /**
  * El detalle del turno cuenta las MISMAS órdenes que firma el cierre y enseña la lista: las cuentas COBRADAS en el turno
@@ -46,6 +47,8 @@ const cobro = (id: string, order: ReturnType<typeof orden>, over: Record<string,
     processedBy: { id: 'staff-1', firstName: 'Ana', lastName: 'López' },
     orderId: order.id,
     createdAt: new Date('2026-10-18T16:00:00Z'),
+    // La marca de tarjetas (`ORDEN_DE_TARJETAS_SELECT`): sin renglón de tarjeta, una venta normal. `contarOrdenesCobradas` la exige.
+    order: { items: [] as { id: string }[] },
     ...over,
   }
 }
@@ -159,14 +162,16 @@ describe('detalle del turno · órdenes = cuentas cobradas en el turno', () => {
     expect(r.stats.avgOrderValue).toBe(Number((r.totalSales / 2).toFixed(2)))
   })
 
-  it('la consulta del turno ya no anida la orden en cada cobro; `orders` trae sólo las de cobro sin turno', async () => {
+  it('la consulta del turno no anida la orden COMPLETA en cada cobro (sólo la marca de tarjetas); `orders` trae sólo las de cobro sin turno', async () => {
     prismaMock.shift.findFirst.mockResolvedValue(turno([]) as any)
 
     await getShiftById('venue-1', 'shift-1')
 
     const args = prismaMock.shift.findFirst.mock.calls[0][0] as any
     expect(args.include.payments.select.type).toBe(true)
-    expect(args.include.payments.select.order).toBeUndefined()
+    // Tarjetas de regalo (R3): cada cobro trae sólo la marca de cuenta de tarjetas (un renglón con tarjeta, `take: 1`), que el
+    // desglose y el «por empleado» necesitan para no contar la carga de tarjetas como venta. Nunca la orden completa.
+    expect(args.include.payments.select.order).toEqual({ select: ORDEN_DE_TARJETAS_SELECT })
     expect(args.include.orders.where).toEqual({ payments: { some: { status: 'COMPLETED', shiftId: null } } })
     expect(args.include.orders.select.items).toBeDefined()
   })

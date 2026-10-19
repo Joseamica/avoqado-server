@@ -436,6 +436,9 @@ model Venue {
   customerGroups   CustomerGroup[]
   loyaltyConfig    LoyaltyConfig?
   walletPasses     WalletPass[]
+  // Tarjetas de regalo (spec 2026-10-14): los sobres que este negocio emitió y sus ajustes.
+  giftCards        GiftCard[]
+  giftCardSettings GiftCardSettings?
   stampCards       StampCard[]
   walletCardDesign WalletCardDesign?
   stampEvents      StampEvent[]
@@ -4373,6 +4376,12 @@ model OrderItem {
   areaTicketLineId String?         @unique
   areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
 
+  /// Tarjetas de regalo (spec 2026-10-14 § 4.4): el sobre que esta línea VENDE. Una línea = un sobre (1:1, molde
+  /// `areaTicketLineId`). Una cuenta cuyas líneas TODAS tienen `giftCardId` es una «cuenta de tarjetas»: el servidor
+  /// rechaza agregarle productos, descuentos, cortesías, cargos y su envío a cocina. Restrict: un sobre no se borra.
+  giftCardId String?   @unique
+  giftCard   GiftCard? @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
+
   // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
   // An OrderItem has Product OR SerializedItem, never both.
@@ -4744,7 +4753,11 @@ model VenueTenderType {
   /// System rows: CASH / CREDIT_CARD / DEBIT_CARD / BANK_TRANSFER. Custom rows: ALWAYS OTHER.
   /// Immutable after creation (service-enforced).
   baseMethod PaymentMethod
-  isSystem   Boolean       @default(false)
+  isSystem   Boolean           @default(false)
+  /// Tender que Avoqado administra (spec tarjetas de regalo § 4.4). NULL para TODOS los demás, incluidos
+  /// Efectivo/Tarjetas/Transferencia. `GIFT_CARD` = «Tarjeta de regalo»: showOnPos=false, nadie lo edita ni lo apaga,
+  /// y `resolveTenderForCharge` lo rechaza; sólo lo usa el cobro con saldo.
+  systemKind TenderSystemKind?
 
   /// Does money received with this tender physically enter the cash drawer?
   /// (Vale de despensa: yes — it's counted at closeout. Uber Eats: no — informational only.)
@@ -4788,6 +4801,7 @@ model VenueTenderType {
 
   @@unique([venueId, normalizedName])
   @@unique([venueId, id]) // enables the composite FK from Payment (cross-venue-proof)
+  @@unique([venueId, systemKind]) // un tender de sistema de cada clase por negocio (NULL no choca en Postgres)
   @@index([venueId, active])
 }
 
@@ -7842,6 +7856,7 @@ model Customer {
   loyaltyTransactions  LoyaltyTransaction[]
   customerOrderMetrics CustomerOrderMetric[]
   walletPasses         WalletPass[]
+  giftCards            GiftCard[]
   stampCards           StampCard[]
   stampRewards         StampReward[]
 
@@ -8346,6 +8361,12 @@ model WalletPass {
   /// "que seriales cambiaron desde X".
   revision Int @default(1)
 
+  /// Tarjetas de regalo, fase 1c: sólo un pase VERIFICADO (emitido tras el código por WhatsApp) muestra y gasta saldo.
+  /// Se crea en 1a para no migrar dos veces; nadie lo escribe todavía.
+  verifiedAt           DateTime?
+  /// Última `revision` que Google ya recibió por PATCH; atrasada ⇒ la revisión nocturna reintenta (fase 1c).
+  googleSyncedRevision Int?
+
   active Boolean @default(true)
 
   createdAt DateTime @default(now())
@@ -8356,6 +8377,167 @@ model WalletPass {
 
   @@index([venueId, updatedAt])
   @@index([customerId])
+}
+
+// ==========================================
+// TARJETAS DE REGALO (spec docs/superpowers/specs/2026-10-14-tarjetas-de-regalo-design.md)
+// Un sobre = un regalo. El saldo SÓLO se mueve con renglones de la libreta (GiftCardActivity), que nunca se editan.
+// ==========================================
+
+enum GiftCardStatus {
+  PENDING // vendido, sin cobrar todavía
+  ACTIVE
+  BLOCKED
+  DEACTIVATED
+}
+
+enum GiftCardActivityType {
+  ACTIVATE
+  REDEEM
+  REDEEM_REVERSAL
+  ADJUST_INCREMENT
+  ADJUST_DECREMENT
+  BLOCK
+  UNBLOCK
+  DEACTIVATE
+  CLAIM
+  CODE_REPLACED
+}
+
+enum GiftCardReason {
+  SUSPICIOUS_ACTIVITY
+  CASHIER_ERROR
+  CUSTOMER_REQUEST
+  LOST_CARD
+  SALE_CANCELLED
+  ONLINE_REVOCATION
+  CHARGEBACK
+  CANCEL_IN_PROGRESS
+  OTHER // con nota obligatoria
+}
+
+enum GiftCardDeliveryChannel {
+  WHATSAPP
+  EMAIL
+  PRINTED
+  CUSTOMER_CARD // fase 1c
+  HANDED_TO_BUYER
+}
+
+enum GiftCardDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum GiftCardSource {
+  POS
+  ONLINE
+}
+
+enum TenderSystemKind {
+  GIFT_CARD
+}
+
+/// El sobre (un regalo). El código nunca se guarda en claro: `codeHash` (HMAC) para buscar, `codeEnc` (AES-GCM) para
+/// volver a mostrarlo. La política (vigencia y términos) se congela al crear el PENDING y nunca se acorta.
+model GiftCard {
+  id             String @id @default(cuid())
+  venueId        String
+  venue          Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  organizationId String
+
+  codeHash  String @unique
+  codeEnc   String
+  codeLast4 String
+  pageToken String @unique
+
+  initialAmount Decimal        @db.Decimal(12, 2)
+  /// Igual a la suma de la libreta (la revisión nocturna lo comprueba). La base lo restringe a >= 0.
+  balance       Decimal        @db.Decimal(12, 2)
+  status        GiftCardStatus @default(PENDING)
+
+  validityMonths Int?
+  termsVersion   String
+  expiresAt      DateTime?
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  purchaserName    String?
+  purchaserContact String?
+  recipientName    String?
+  recipientPhone   String?
+  recipientEmail   String?
+  message          String?                 @db.VarChar(200)
+  deliveryChannel  GiftCardDeliveryChannel
+  deliveryStatus   GiftCardDeliveryStatus  @default(PENDING)
+  deliveredAt      DateTime?
+
+  source      GiftCardSource @default(POS)
+  cancelToken String?        @unique
+
+  activatedAt   DateTime?
+  deactivatedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  orderItem  OrderItem?
+  activities GiftCardActivity[]
+
+  @@index([venueId, status, createdAt])
+  @@index([venueId, customerId])
+  @@index([venueId, expiresAt])
+}
+
+/// La libreta del sobre: SÓLO se insertan renglones (un trigger impide UPDATE y DELETE). `amount` siempre >= 0; el tipo
+/// dice si suma o resta. Idempotencia: el cobro por (paymentId, giftCardId, REDEEM); el reverso por (refundPaymentId,
+/// reversesActivityId); el gerente por (venueId, operationKey) con huella `operationHash`.
+model GiftCardActivity {
+  id         String   @id @default(cuid())
+  giftCardId String
+  giftCard   GiftCard @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
+  venueId    String
+
+  type         GiftCardActivityType
+  amount       Decimal              @db.Decimal(12, 2)
+  balanceAfter Decimal              @db.Decimal(12, 2)
+  reason       GiftCardReason?
+  note         String?
+
+  paymentId          String?
+  refundPaymentId    String?
+  reversesActivityId String?
+  orderId            String?
+  staffId            String?
+  deviceId           String?
+
+  operationKey  String?
+  operationHash String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([paymentId, giftCardId, type])
+  @@unique([refundPaymentId, reversesActivityId])
+  @@unique([venueId, operationKey])
+  @@index([giftCardId, createdAt])
+  @@index([venueId, createdAt])
+  @@index([reversesActivityId]) // acumulado de reversos por REDEEM
+}
+
+/// Ajustes de la función por negocio. Sin fila = defaults (apagada).
+model GiftCardSettings {
+  id               String    @id @default(cuid())
+  venueId          String    @unique
+  venue            Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  enabled          Boolean   @default(false)
+  suggestedAmounts Decimal[] @db.Decimal(12, 2)
+  minAmount        Decimal   @default(100) @db.Decimal(12, 2)
+  maxAmount        Decimal   @default(10000) @db.Decimal(12, 2)
+  validityMonths   Int?
+  termsVersion     String    @default("2026-10-14")
+  updatedAt        DateTime  @updatedAt
+  updatedById      String?
 }
 
 enum StampEventType {

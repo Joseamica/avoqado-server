@@ -16,6 +16,7 @@ import { DateTime } from 'luxon'
 // See: src/services/legacy/mergedPayments.service.ts for full context.
 import { fetchPaymentsForAnalytics } from '../legacy/mergedPayments.service'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage, getLegacyPayments } from '../legacy/qrPayments.legacy.service'
+import { WHERE_ORDEN_SIN_TARJETAS, sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * ── Reescritura 2026-09-01 (incidente del event loop) ────────────────────────
@@ -41,9 +42,12 @@ import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage, getLegacyPayments } fr
 /** El mismo filtro de estados que usaba el findMany: fuera borradores, canceladas y borradas. */
 const ORDER_NOT_DISCARDED = Prisma.raw(`o."status" NOT IN ('PENDING','CANCELLED','DELETED')`)
 
-/** venue + estados válidos + rango — el WHERE que comparten casi todas las agregaciones. */
+/**
+ * venue + estados válidos + rango — el WHERE que comparten casi todas las agregaciones.
+ * Sin la cuenta de tarjetas de regalo: es una orden, pero no una venta (ranking, canales, horas pico y las gráficas del panel).
+ */
 const orderScope = (venueId: string, fromDate: Date, toDate: Date) =>
-  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)}`
+  Prisma.sql`o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} AND ${sqlOrdenSinTarjetas('o.id')}`
 
 /** El instante en la zona del venue — réplica SQL de `DateTime.fromJSDate(x, { zone: 'utc' }).setZone(tz)`. */
 const localTs = (tz: string, col: Prisma.Sql = Prisma.raw('o."createdAt"')) => Prisma.sql`((${col} AT TIME ZONE 'UTC') AT TIME ZONE ${tz})`
@@ -537,6 +541,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
         AND p."type" <> 'REFUND'
         AND p."createdAt" >= ${utcTs(fromDate)} AND p."createdAt" <= ${utcTs(toDate)}
         AND (o."id" IS NULL OR o."status" <> 'CANCELLED')
+        AND ${sqlOrdenSinTarjetas('p."orderId"')}
       GROUP BY 1, 2
       ORDER BY 1, 2
     `,
@@ -652,7 +657,8 @@ async function fetchLegacyBasicMetricPayments(venueId: string, fromDate: Date, t
         status: TransactionStatus.COMPLETED,
         type: { not: 'REFUND' },
         createdAt: { gte: fromDate, lte: toDate },
-        order: { status: { not: 'CANCELLED' } },
+        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
       },
       select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -761,7 +767,8 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
         status: TransactionStatus.COMPLETED,
         type: { not: 'REFUND' },
         createdAt: { gte: fromDate, lte: toDate },
-        order: { status: { not: 'CANCELLED' } },
+        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
         ...(boundary
           ? {
               AND: [
@@ -807,7 +814,8 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
         status: TransactionStatus.COMPLETED,
         type: { not: 'REFUND' },
         createdAt: { gte: fromDate, lte: toDate },
-        order: { status: { not: 'CANCELLED' } },
+        // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
+        order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
       },
       select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],

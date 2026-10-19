@@ -427,6 +427,7 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
 
@@ -1435,6 +1436,13 @@ export async function settleStandalonePaymentInTx(
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   const posting = firstSettlement ? await createSalePostingInTx(tx, { venueId, orderId, items: order.items, staffId }) : null
+  // R8: la cuenta de tarjetas pagada por terminal activa sus sobres en la MISMA transacción que la salda. A6 r1: en CADA cierre
+  // con efectos (`efectosDeCierre && saldada`), no sólo en el primero: `paid` no cuenta los REFUND, así que tras devolver la
+  // venta los cobros previos la siguen «cubriendo» y un cobro tardío no es `firstSettlement`; sin esto ese cobro nunca llegaba a
+  // la alerta PAID_WITH_DEACTIVATED (el reconciliador, sitio 3, sí). Idempotente y sin consultas en una cuenta sin tarjetas.
+  if (efectosDeCierre && saldada) {
+    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: staffId ?? null, items: order.items })
+  }
   return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada }
 }
 
@@ -1986,6 +1994,11 @@ async function updateOrderTotalsForStandalonePayment(
               staffId,
             })
             tpvPostingId = posting?.id ?? null
+          }
+          // R8: también cuando los cobros YA cubrían la cuenta (reconciliador de pagadas): ahí no nace vale, pero los
+          // sobres de una cuenta de tarjetas sí se activan. La activación es idempotente.
+          if (isFullyPaid) {
+            await activarSobresDeCuentaPagadaEnTx(tx, { venueId: updated.venueId, orderId, staffId: staffId ?? null, items: updated.items })
           }
 
           return updated
@@ -3912,6 +3925,7 @@ export async function recordOrderPayment(
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           incrementTotalOrders: priorCompletedPaymentCount === 0,
+          orderId: activeOrder.id,
         })
 
         // Create the payment record
@@ -5411,6 +5425,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           amountPesos: shiftAmount,
           tipPesos: shiftTip,
           incrementTotalOrders: true,
+          // La venta rápida nace DESPUÉS del claim, sin tarjetas de regalo: nunca es una cuenta de tarjetas.
+          orderId: null,
         })
 
         // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)

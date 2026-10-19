@@ -7,6 +7,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
+import { WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -51,7 +52,13 @@ export function registerOverviewTools(server: McpServer, scope: McpScope) {
 
       const [sales, tabs, lowStockItems, openShifts, reservationsToday, nextReservation] = await Promise.all([
         prisma.payment.aggregate({
-          where: { ...base, status: TransactionStatus.COMPLETED, createdAt: { gte: dayStart, lte: dayEnd } },
+          // Ventas, no dinero: la venta de tarjetas de regalo se cobra pero no es venta (lo pagado con su saldo sí).
+          where: {
+            ...base,
+            status: TransactionStatus.COMPLETED,
+            createdAt: { gte: dayStart, lte: dayEnd },
+            order: WHERE_ORDEN_SIN_TARJETAS,
+          },
           _sum: { amount: true, tipAmount: true },
           _count: { _all: true },
         }),

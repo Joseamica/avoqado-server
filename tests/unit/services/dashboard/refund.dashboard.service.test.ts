@@ -1180,6 +1180,9 @@ describe('refund.dashboard.service', () => {
           },
           venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
           venueTransaction: { create: jest.fn() },
+          // Tarjetas de regalo (B1): el gancho pregunta si la cuenta es de tarjetas y la marca del tender; aquí no lo es.
+          orderItem: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
+          venueTenderType: { findFirst: jest.fn().mockResolvedValue(null) },
         }
 
         const result = await callback(tx)
@@ -1230,6 +1233,9 @@ describe('refund.dashboard.service', () => {
           },
           venueSettings: { findUnique: jest.fn().mockResolvedValue({ enableShifts: true }) },
           venueTransaction: { create: jest.fn() },
+          // Tarjetas de regalo (B1): el gancho pregunta si la cuenta es de tarjetas y la marca del tender; aquí no lo es.
+          orderItem: { findFirst: jest.fn().mockResolvedValue(null), findMany: jest.fn().mockResolvedValue([]) },
+          venueTenderType: { findFirst: jest.fn().mockResolvedValue(null) },
         }
 
         const result = await callback(tx)

@@ -46,6 +46,12 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
+import * as authService from '../services/dashboard/auth.service'
+import { ponerCookiesDeSesion } from '../utils/cookiesDeSesion'
+import { esSucursalReal } from '../utils/sucursalDelToken'
+import { motivoDeConcesionInvalidada } from '../utils/passwordChangeGuard'
+import { revokeSession } from '../services/auth/session.service'
+import { invalidateSession } from '../services/auth/sessionCache'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 /**
@@ -724,6 +730,41 @@ async function exigirAltaTerminada(organizationId: string): Promise<void> {
 }
 
 /**
+ * Terminar el alta reemite la sesión con la sucursal REAL (monitor de producción, 19-oct).
+ *
+ * El alta emite el token del panel con `venueId = 'pending'` (signup.service.ts) y la cookie dura 24 h: sin esto,
+ * todo lo que toma la sucursal sólo del token (`/dashboard/tokens/*`, `/google-calendar/oauth/init`) fallaba un día
+ * entero. Se hace EXACTAMENTE como el cambio de sucursal: `switchVenueForStaff` (misma verificación de acceso, misma
+ * Session y mismo grant de refresco) y las mismas cookies.
+ *
+ * Nunca bloquea el alta: la sucursal ya existe, y sin tokens nuevos la persona puede cambiar de sucursal o volver a
+ * entrar. No se reemite:
+ * - suplantando: sería darle al superadmin una sesión normal a nombre de la persona suplantada;
+ * - si la sesión YA tenía una sucursal real: un reintento desde otra pestaña no le cambia la sucursal en silencio;
+ * - si hubo un corte de sesiones («cerrar todas», cambio de contraseña, cuenta desactivada) después de emitirse el
+ *   token del alta (Codex r1/r2). Se revisa DESPUÉS de crear la sesión nueva, nunca antes: el corte escribe su fecha y
+ *   luego cierra las Session vivas (`cerrarSesionesDeStaff`), así que la nueva o ya existía y el corte la cierra, o el
+ *   corte ya se ve aquí y la cerramos nosotros. Revisar antes dejaba la ventana entre la revisión y `createSession`.
+ */
+async function renovarSesionConLaSucursal(req: Request, res: Response, venueId: string): Promise<void> {
+  const authContext = (req as any).authContext
+  if (!authContext?.userId || authContext.isImpersonating || esSucursalReal(authContext.venueId)) return
+  try {
+    const { accessToken, refreshToken, sessionId } = await authService.switchVenueForStaff(authContext.userId, authContext.orgId, venueId)
+    const emitido = typeof authContext.emitidoMs === 'number' ? new Date(authContext.emitidoMs) : undefined
+    if (await motivoDeConcesionInvalidada(authContext.userId, emitido)) {
+      await revokeSession(sessionId, 'sessions_revoked_during_onboarding')
+      await invalidateSession(sessionId)
+      return
+    }
+    ponerCookiesDeSesion(res, accessToken, refreshToken)
+  } catch (error) {
+    // error, no warn: sin esto la persona se queda 24 h en «sucursal pendiente» y el monitor debe verlo.
+    logger.error('No se pudo renovar la sesión con la sucursal al terminar el alta', { userId: authContext.userId, venueId, error })
+  }
+}
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/complete
  *
  * Completes onboarding and creates the venue
@@ -802,6 +843,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         logger.info(
           `⚠️ Onboarding already completed (race condition prevented) for organization ${organizationId}, returning existing venue ${existingVenue.id}`,
         )
+        await renovarSesionConLaSucursal(req, res, existingVenue.id)
         res.status(200).json({
           message: 'Onboarding already completed',
           venue: existingVenue,
@@ -862,6 +904,8 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     })
 
     logger.info(`✅ Onboarding completed for organization: ${organizationId}, venue: ${result.venue.id}, user: ${authContext.userId}`)
+
+    await renovarSesionConLaSucursal(req, res, result.venue.id)
 
     res.status(201).json({
       message: 'Onboarding completed successfully',
@@ -1268,6 +1312,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         logger.info(
           `⚠️ V2 Onboarding already completed (race condition prevented) for organization ${organizationId}, returning existing venue ${existingVenue.id}`,
         )
+        await renovarSesionConLaSucursal(req, res, existingVenue.id)
         res.status(200).json({
           success: true,
           message: 'Setup already completed',
@@ -1544,6 +1589,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     })
 
     logger.info(`✅ V2 Onboarding completed for organization ${organizationId}, venue: ${result.venue.id} (${result.venue.slug})`)
+
+    await renovarSesionConLaSucursal(req, res, result.venue.id)
 
     res.status(201).json({
       success: true,

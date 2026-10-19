@@ -3,6 +3,7 @@ import logger from '../../config/logger'
 import { earnPoints } from '../dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '../dashboard/customer.dashboard.service'
 import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealtad'
+import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * Lealtad al quedar PAGADA una orden: métricas de visita y puntos/sellos.
@@ -129,14 +130,19 @@ export async function awardLoyaltyForPaidOrder(
       staffVenueId = staffVenue?.id
     }
 
+    // R1 (tarjetas de regalo): vender una tarjeta no es una compra — sin métricas de gasto, puntos ni sello. La cuenta queda
+    // procesada abajo (`complete`), así el reconciliador no la repite. Usarla en otra cuenta sí acredita como cualquier compra.
+    const esVentaDeTarjetas = await leerSiEsCuentaDeTarjetas(prisma, orderId)
+
     // `?? []`: un mock sin lista (o una consulta rara) no puede convertir esto en
     // un TypeError que se trague el resto.
-    const todasLasLigas =
-      (await prisma.orderCustomer.findMany({
-        where: { orderId },
-        include: { customer: { select: { id: true, firstName: true, lastName: true } } },
-        orderBy: { addedAt: 'asc' },
-      })) ?? []
+    const todasLasLigas = esVentaDeTarjetas
+      ? []
+      : ((await prisma.orderCustomer.findMany({
+          where: { orderId },
+          include: { customer: { select: { id: true, firstName: true, lastName: true } } },
+          orderBy: { addedAt: 'asc' },
+        })) ?? [])
     // 🔴 F1: sin primario, las ligas no cuentan (acompañantes de una liga sin `payments:create` a una venta ya cobrada).
     const orderCustomers = todasLasLigas.some(oc => oc.isPrimary) ? todasLasLigas : []
 
@@ -145,7 +151,9 @@ export async function awardLoyaltyForPaidOrder(
     const resuelto =
       orderCustomers.length > 0 ? (orderCustomers.find(oc => oc.isPrimary)?.customerId ?? null) : (args.legacyCustomer?.id ?? null)
 
-    if (fijado && resuelto !== opciones.beneficiario) {
+    if (esVentaDeTarjetas) {
+      logger.info('⏭️ Lealtad omitida: la cuenta es de tarjetas de regalo (se premia al usarlas)', { orderId, venueId })
+    } else if (fijado && resuelto !== opciones.beneficiario) {
       errors.push(`beneficiario:cambió (validado ${opciones.beneficiario ?? 'ninguno'}, ahora ${resuelto ?? 'ninguno'})`)
       logger.warn('⚠️ Loyalty skipped: the order customer changed after it was validated; the next pass revalidates', {
         orderId,
