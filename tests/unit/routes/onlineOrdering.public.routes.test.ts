@@ -31,8 +31,12 @@ jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
     next()
   },
-  resolveVenueBySlugIncludingInactive: (req: any, _res: any, next: any) => {
+  resolveVenueBySlugIncludingInactive: (req: any, res: any, next: any) => {
     mockRan.push('plain-including-inactive')
+    // Codex r4: con este slug corre el resolver REAL (sobre `prisma.venue.findFirst` simulado), para ver su 404 tal cual.
+    if (req.params.venueSlug === 'no-existe') {
+      return jest.requireActual('@/middlewares/resolveVenueBySlug.middleware').resolveVenueBySlugIncludingInactive(req, res, next)
+    }
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
     next()
   },
@@ -617,5 +621,46 @@ describe('P1-06: crear pedido busca SU pedido antes de exigir plan y negocio ope
     const r = await post({ customer: true })
     expect(r.status).toBe(409)
     expect(r.body).toMatchObject({ success: false, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+  })
+})
+
+/**
+ * Codex r4 (S2): la tienda suelta la llave sólo ante una decisión DURABLE. El servidor la marca con `final: true` (aditivo: no
+ * cambia `code`, `error` ni `details`); un 404 previo a la decisión (el resolver con un slug que no existe) no la lleva.
+ */
+describe('Codex r4: la decisión definitiva viaja como final:true', () => {
+  it('un rechazo GUARDADO responde final:true con el mismo code, error y details', async () => {
+    const details = { status: 'PAUSED', reason: 'MANUAL_PAUSE' }
+    const guardado = Object.assign(new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', details), {
+      final: true as const,
+    })
+    ;(createOnlineOrder as jest.Mock).mockRejectedValueOnce(guardado)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(409)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'ORDERING_PAUSED',
+      error: 'La tienda no está recibiendo pedidos en este momento.',
+      details,
+      final: true,
+    })
+  })
+
+  it('sin decisión durable no lo trae: un 401 del servicio y el 404 del resolver con un slug que no existe', async () => {
+    ;(createOnlineOrder as jest.Mock).mockRejectedValueOnce(new UnauthorizedError('Verifica tu teléfono.', 'PHONE_VERIFICATION_REQUIRED'))
+    const r401 = await post({ customer: true })
+    expect(r401.status).toBe(401)
+    expect(r401.body).not.toHaveProperty('final')
+
+    prismaMock.venue.findFirst.mockResolvedValueOnce(null)
+    ;(createOnlineOrder as jest.Mock).mockClear()
+    const r404 = await request(app)
+      .post('/venues/no-existe/ordering/orders')
+      .set('Idempotency-Key', KEY)
+      .set('x-test-customer', '1')
+      .send(body)
+    expect(r404.status).toBe(404)
+    expect(r404.body).toEqual({ message: 'Negocio no encontrado', code: 'VENUE_NOT_FOUND' })
+    expect(createOnlineOrder).not.toHaveBeenCalled()
   })
 })

@@ -28,6 +28,8 @@ function fail(res: Response, error: any, fallback: string) {
     code: expose ? error?.code : undefined,
     error: expose ? error.message : fallback,
     details: expose ? error?.details : undefined,
+    // Codex r4: decisión DURABLE sobre la llave del pedido (`final()` en order.service): sólo con ella la tienda suelta un 404.
+    final: error?.final === true ? true : undefined,
   })
 }
 
@@ -150,7 +152,7 @@ export async function postOrder(req: Request, res: Response) {
         note: body.note ?? null,
         whatsappConsent: body.whatsappConsent === true,
       },
-      // P1-06: negocio operativo y plan sólo para un pedido NUEVO; el servicio los pide después de buscar la repetición.
+      // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
       { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) },
     )
     return res.status(result.replay ? 200 : 201).json({ success: true, data: result })
