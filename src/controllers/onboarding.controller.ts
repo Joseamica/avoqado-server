@@ -23,7 +23,13 @@ import {
 } from '../services/stripe.service'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
-import { LEGACY_INTRO_OFFER, STANDARD_PLAN_GROSS_CENTS, TRIAL_DAYS, isLegacyIntroEligible } from '../services/access/planPricing.constants'
+import {
+  LEGACY_INTRO_OFFER,
+  STANDARD_PLAN_GROSS_CENTS,
+  STANDARD_PLAN_NET_CENTS,
+  TRIAL_DAYS,
+  isLegacyIntroEligible,
+} from '../services/access/planPricing.constants'
 import emailService from '../services/email.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
@@ -280,6 +286,8 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
             PRO: {
               monthlyCents: quote.grossCents.PRO.monthly,
               annualCents: quote.grossCents.PRO.annual,
+              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PRO.monthly,
+              annualNetCents: STANDARD_PLAN_NET_CENTS.PRO.annual,
               intro: {
                 monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
                 months: LEGACY_INTRO_OFFER.months,
@@ -287,7 +295,13 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
                 requiresPayNow: true as const,
               },
             },
-            PREMIUM: { monthlyCents: quote.grossCents.PREMIUM.monthly, annualCents: quote.grossCents.PREMIUM.annual, intro: null },
+            PREMIUM: {
+              monthlyCents: quote.grossCents.PREMIUM.monthly,
+              annualCents: quote.grossCents.PREMIUM.annual,
+              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.monthly,
+              annualNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.annual,
+              intro: null,
+            },
           },
         },
         completedSteps: progress.completedSteps,

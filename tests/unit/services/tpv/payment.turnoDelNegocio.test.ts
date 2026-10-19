@@ -568,7 +568,8 @@ describe('fase 1 — el cobro cae en el turno abierto del NEGOCIO', () => {
       receipts: [],
       idempotencyKey: 'claim-race-p2002',
     }
-    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce(winner)
+    // R8: ni la consulta rápida ni el punto de la llave bajo el candado del intento lo ven (1.ª y 2.ª); aparece hasta el índice único.
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(winner)
     const rollback = installStatefulP2002Rollback()
 
     const result = await (paymentService as any).recordOrderPayment(

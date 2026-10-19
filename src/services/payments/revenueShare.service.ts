@@ -8,6 +8,8 @@
  * Spec: docs/superpowers/specs/2026-05-22-revenue-share-fee-model-design.md
  */
 
+import { Prisma } from '@prisma/client'
+
 export type CardType = 'DEBIT' | 'CREDIT' | 'AMEX' | 'INTERNATIONAL'
 
 export interface MerchantRevenueShareConfig {
@@ -20,6 +22,7 @@ export interface MerchantRevenueShareConfig {
   /** Fracción 0..1 del margen agregador→venue que se queda Avoqado. `null` si directo. */
   avoqadoShareOfAggregatorMargin: number | null
   taxRate: number
+  intermediaryFeeRate?: number
 }
 
 export interface RevenueSplitInput {
@@ -34,6 +37,8 @@ export interface RevenueSplitInput {
 }
 
 export interface RevenueSplit {
+  /** Cargo final del intermediario, deducido antes del reparto del segundo tramo. */
+  intermediaryFeeAmount: number
   /** Costo del procesador + la parte del margen que le toca. */
   providerNet: number
   /** Suma de las partes de Avoqado en cada margen. */
@@ -66,6 +71,7 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
   let avoqadoNet: number
   let aggregatorNet = 0
   let aggregatorPrice = 0
+  let intermediaryFeeAmount = 0
   let avoqadoFromProviderMargin: number
   let avoqadoFromAggregatorMargin: number
 
@@ -86,7 +92,16 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
     // Con agregador: 2 márgenes, 2 splits.
     aggregatorPrice = round2(preIva(amount * share.aggregatorPrice[cardType], share.aggregatorPriceIncludesTax, taxRate))
     const m1 = aggregatorPrice - providerCost
-    const m2 = venueCharge - aggregatorPrice
+    // La base es el depósito real después de IVA, no la venta ni el margen a repartir.
+    const processorCharge = new Prisma.Decimal(amount)
+      .mul(share.aggregatorPrice[cardType])
+      .mul(share.aggregatorPriceIncludesTax ? 1 : 1 + taxRate)
+    const received = Prisma.Decimal.max(0, new Prisma.Decimal(amount).minus(processorCharge))
+    intermediaryFeeAmount = received
+      .mul(share.intermediaryFeeRate ?? 0)
+      .toDecimalPlaces(2)
+      .toNumber()
+    const m2 = venueCharge - aggregatorPrice - intermediaryFeeAmount
     const aggShare = share.avoqadoShareOfAggregatorMargin ?? 0
     const avoFromM1 = round2(m1 * share.avoqadoShareOfProviderMargin)
     const avoFromM2 = round2(m2 * aggShare)
@@ -100,6 +115,7 @@ export function computeRevenueSplit(input: RevenueSplitInput): RevenueSplit {
   const iva = (fee: number, includesTax: boolean) => (includesTax ? 0 : round2(fee * taxRate))
 
   return {
+    intermediaryFeeAmount,
     providerNet,
     avoqadoNet,
     aggregatorNet,

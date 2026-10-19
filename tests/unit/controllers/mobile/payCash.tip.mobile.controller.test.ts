@@ -190,3 +190,55 @@ describe('payCash — frontera de monto y propina', () => {
     })
   })
 })
+
+/**
+ * 🔴 Ronda 2 de S1/S2 (17/18-oct-2026): lo que el controller le dice al servicio sobre QUIÉN manda el reenvío.
+ *   · R2-1: Android ≤ 2.23 y su app de Windows (mismo código, `x-app-version` «2.23.0-escritorio») tienen el defecto H1: su cola manda
+ *     el TOTAL de la cuenta en vez de la parte del split. Para esa cola el servicio se porta como antes de S1/S2.
+ *   · R2-6: si la propiedad de mesa dejó pasar dinero ya capturado sobre una mesa ajena, el controller lo entrega al servicio.
+ */
+describe('payCash — la cola con H1 y la mesa ajena', () => {
+  const next = jest.fn() as NextFunction
+  const reqCon = (headers: Record<string, string>, body: Record<string, unknown> = { amount: 10000, isOfflineReplay: true }) =>
+    ({ params: { venueId, orderId }, body: { staffId, ...body }, headers, authContext: { userId: staffId } }) as unknown as Request
+  const marcaH1 = () => (payCashOrderMock.mock.calls[0][2] as any).colaConDefectoH1
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    payCashOrderMock.mockResolvedValue({ paymentId: 'pay-1' } as Awaited<ReturnType<typeof orderMobileService.payCashOrder>>)
+  })
+
+  it.each([
+    ['Android 2.23.0', true, 'ANDROID', '2.23.0'],
+    ['Android 2.22.2', true, 'android', '2.22.2'],
+    ['Windows 2.23.0-escritorio', true, 'ANDROID', '2.23.0-escritorio'],
+    ['Android sin versión legible', true, 'ANDROID', 'desconocida'],
+    ['Android 2.24.0 (ya trae el arreglo de H1)', false, 'ANDROID', '2.24.0'],
+    ['Windows 2.25.0-escritorio', false, 'ANDROID', '2.25.0-escritorio'],
+    ['iOS', false, 'IOS', '1.15.0'],
+  ])('%s ⇒ colaConDefectoH1 = %s', async (_caso, esperado, plataforma, version) => {
+    await payCash(reqCon({ 'x-device-platform': plataforma, 'x-app-version': version }), buildRes(), next)
+    expect(marcaH1()).toBe(esperado)
+  })
+
+  it('Android sin la cabecera de versión ⇒ se trata como ≤ 2.23', async () => {
+    await payCash(reqCon({ 'x-device-platform': 'ANDROID' }), buildRes(), next)
+    expect(marcaH1()).toBe(true)
+  })
+
+  it('un cobro EN VIVO de Android 2.23 no es la cola: sin la marca', async () => {
+    await payCash(reqCon({ 'x-device-platform': 'ANDROID', 'x-app-version': '2.23.0' }, { amount: 10000 }), buildRes(), next)
+    expect(marcaH1()).toBe(false)
+  })
+
+  it('R2-6: la mesa ajena que dejó pasar la propiedad de mesa llega al servicio', async () => {
+    const res = buildRes() as Response & { locals: Record<string, unknown> }
+    res.locals = { mesaAjena: { ownerId: 'staff-beto', ownerName: 'Beto Bravo' } }
+    await payCash(reqCon({ 'x-device-platform': 'IOS' }), res, next)
+    expect(payCashOrderMock).toHaveBeenCalledWith(
+      venueId,
+      orderId,
+      expect.objectContaining({ mesaAjena: { ownerId: 'staff-beto', ownerName: 'Beto Bravo' } }),
+    )
+  })
+})

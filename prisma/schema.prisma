@@ -16,6 +16,7 @@ datasource db {
 // ==========================================
 
 model Organization {
+  documentRequests DocumentRequest[]
   id    String       @id @default(cuid())
   name  String
   slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
@@ -185,6 +186,7 @@ model Zone {
 model Venue {
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
+  documentRequestLinks DocumentRequestVenueLink[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
   hybridContracts HybridContract[]
@@ -727,6 +729,7 @@ model Venue {
   @@index([slug])
   @@index([active])
   @@index([status]) // For filtering by operational status
+  @@index([name, id]) // Stable platform venue selector pagination
 }
 
 enum VenueChatMode {
@@ -1037,6 +1040,7 @@ model PosConnectionStatus {
 // ==========================================
 
 model Staff {
+  documentRequestLinks DocumentRequestVenueLink[]
   id String @id @default(cuid())
   // organizationId removed: use StaffOrganization junction table for multi-org membership
 
@@ -1842,9 +1846,11 @@ model Product {
   type ProductType @default(FOOD)
 
   // Pricing
-  price   Decimal  @db.Decimal(10, 2)
-  cost    Decimal? @db.Decimal(10, 2)
-  taxRate Decimal  @default(0.16) @db.Decimal(5, 4)
+  price        Decimal               @db.Decimal(10, 2)
+  /// Cada precio que tuvo `price` y desde/hasta cuándo (lo escriben los disparadores de la base, ver el modelo).
+  priceHistory ProductPriceHistory[]
+  cost         Decimal?              @db.Decimal(10, 2)
+  taxRate      Decimal               @default(0.16) @db.Decimal(5, 4)
 
   // SAT keys for CFDI 4.0 (override category defaults when set)
   satProductKey String? // ClaveProdServ (8 digits)
@@ -2058,6 +2064,28 @@ model Product {
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
+}
+
+/// Historial de `Product.price`: cada precio con su intervalo `[validFrom, validTo)` en UTC; `validTo` nulo = vigente
+/// (a lo más UNA abierta por producto, índice parcial de la migración). Sirve para saber si el precio que vio el
+/// cliente fue real (spec 2026-10-17-precio-que-vio-el-cliente).
+/// 🔴 Lo escriben SÓLO los disparadores DIFERIDOS de `Product` (migración 20261017150000): fechan el cambio al
+/// CONFIRMARSE la transacción y cubren a todo escritor (Prisma, SQL directo, importaciones). Nunca escribas aquí.
+/// `id` autoincremental porque un disparador no genera cuid; nunca se expone.
+model ProductPriceHistory {
+  id         BigInt    @id @default(autoincrement())
+  venueId    String
+  productId  String
+  product    Product   @relation(fields: [productId, venueId], references: [id, venueId], onDelete: Cascade, onUpdate: Cascade)
+  price      Decimal   @db.Decimal(10, 2)
+  validFrom  DateTime
+  validTo    DateTime?
+  /// Transacción (xid8 de nivel superior, con época) que creó la fila. El disparador la usa para corregir en su lugar un
+  /// precio intermedio de la misma confirmación; la cascada de la FK no la toca. Nadie la escribe a mano.
+  /// Tras un restore LÓGICO (pg_dump/pg_restore a otro cluster) el xid8 no vale: `UPDATE "ProductPriceHistory" SET "creadoEnTx" = 0`.
+  creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+
+  @@index([productId, validFrom])
 }
 
 model Inventory {
@@ -7201,6 +7229,10 @@ model MerchantRevenueShare {
   /// Fracción 0..1 del margen agregador→venue que se queda Avoqado.
   /// El resto va al agregador. `null` cuando es venta directa.
   avoqadoShareOfAggregatorMargin Decimal? @db.Decimal(5, 4)
+
+  /// Cargo FINAL del banco/intermediario sobre lo recibido tras la tarifa del procesador.
+  /// No se suma IVA ni forma parte del margen del procesador. 0 conserva acuerdos anteriores.
+  intermediaryFeeRate Decimal @default(0) @db.Decimal(7, 6)
 
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4)
   active    Boolean  @default(true)
@@ -19955,4 +19987,132 @@ model OnlineOrder {
   @@index([venueId, createdAt])
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
+}
+
+/// Platform onboarding invitations; deliberately independent of a venue.
+model DocumentRequest {
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissions DocumentRequestSubmission[]
+  venueLinks DocumentRequestVenueLink[]
+  @@unique([id, organizationId])
+  @@index([organizationId])
+  id String @id @default(cuid())
+  provider String
+  entityType String
+  businessName String
+  tokenHash String
+  tokenVersion Int @default(1)
+  status String @default("OPEN")
+  expiresAt DateTime
+  contactName String?
+  email String?
+  phone String?
+  identificationType String?
+  privacyAcceptedAt DateTime?
+  submittedAt DateTime?
+  submissionVersion Int @default(0)
+  notificationSnapshot Json?
+  onboardingNotification String @default("NONE")
+  danielNotification String @default("NONE")
+  notificationAttempts Int @default(0)
+  notificationNextAt DateTime?
+  notificationLease String?
+  notificationLeaseUntil DateTime?
+  uploadLease String?
+  uploadLeaseUntil DateTime?
+  uploadAttempts Int @default(0)
+  totalBytes Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  files DocumentRequestFile[]
+  deliveries DocumentRequestDelivery[]
+  @@index([status, createdAt])
+  @@index([notificationNextAt])
+  @@index([expiresAt])
+}
+
+model DocumentRequestFile {
+  submissionFiles DocumentRequestSubmissionFile[]
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  uploadId String
+  key String
+  fileName String
+  mimeType String
+  sizeBytes Int
+  contentHash String
+  storagePath String
+  status String @default("PENDING")
+  tokenVersion Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId, uploadId])
+  @@index([requestId, status])
+  @@index([status, updatedAt])
+}
+
+/// Immutable notification outbox per submission and recipient; invitation changes never cancel mail.
+model DocumentRequestDelivery {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields:[requestId],references:[id],onDelete:Restrict)
+  submissionVersion Int
+  recipient String
+  status String @default("PENDING")
+  snapshot Json
+  attempts Int @default(0)
+  firstAttemptAt DateTime?
+  nextAttemptAt DateTime? @default(now())
+  leaseToken String?
+  leaseUntil DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId,submissionVersion,recipient])
+  @@index([status,nextAttemptAt])
+}
+
+/// Immutable record of one completed delivery. Never reconstructed from a later draft.
+model DocumentRequestSubmission {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissionVersion Int
+  snapshot Json
+  submittedAt DateTime
+  createdAt DateTime @default(now())
+  files DocumentRequestSubmissionFile[]
+  venueLinks DocumentRequestVenueLink[]
+  @@unique([requestId, submissionVersion])
+}
+
+model DocumentRequestSubmissionFile {
+  submissionId String
+  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documentId String
+  document DocumentRequestFile @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  @@id([submissionId, documentId])
+  @@index([documentId])
+}
+
+model DocumentRequestVenueLink {
+  id String @id @default(cuid())
+  requestId String
+  organizationId String
+  request DocumentRequest @relation(fields: [requestId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  submissionId String
+  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  venueId String
+  venue Venue @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  actorId String
+  actor Staff @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  linkedAt DateTime @default(now())
+  onboardingHash String? @unique
+  onboardingResult Json?
+  @@unique([venueId, submissionId])
+  @@index([venueId, linkedAt, id])
+  @@index([requestId, linkedAt, id])
+  @@index([submissionId])
+  @@index([actorId])
 }

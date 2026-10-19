@@ -307,7 +307,11 @@ const SHIFT_PAYMENT_TOTALS_SELECT = {
   fundsFlow: true,
   tenderTypeId: true,
   tenderCountsAsCash: true,
+  // R3: la marca de cuenta de tarjetas de regalo; la leen `aggregateShiftPayments` y `contarOrdenesCobradas`.
   order: { select: ORDEN_DE_TARJETAS_SELECT },
+  // Con qué contar las ÓRDENES cobradas del turno (`contarOrdenesCobradas`).
+  orderId: true,
+  type: true,
 } satisfies Prisma.PaymentSelect
 
 /** La proyección del cobro que el rollup necesita: los totales + con qué decidir de quién es. */
@@ -1683,6 +1687,30 @@ const SHIFT_CLOSE_PAYMENT_PAGE_SIZE = 500
 export type ShiftPaymentPageRow = Prisma.PaymentGetPayload<{ select: typeof SHIFT_PAYMENT_TOTALS_SELECT }>
 
 /**
+ * Las ÓRDENES cobradas de un turno: órdenes distintas con al menos un cobro que no es reembolso.
+ * Un pago dividido es UNA orden; un «Pago rápido» sin renglones también cuenta; un reembolso
+ * (testigo standalone o devolución de una venta) no suma una orden. Es lo que Square llama
+ * «order count» y Toast «number of checks».
+ *
+ * 🔴 Hasta el 18-oct-2026 el cierre guardaba aquí `orderItems.length` — renglones de producto.
+ * Los productos viven en `totalProductsSold`, no en este número.
+ */
+export function contarOrdenesCobradas(
+  payments: ReadonlyArray<{
+    orderId: string
+    type?: PaymentType | string | null
+    /**
+     * 🔴 R3 (tarjetas de regalo): la marca `ORDEN_DE_TARJETAS_SELECT`, OBLIGATORIA a propósito — un llamador cuyo `select` no la
+     * trae no compila, en vez de contar la venta de tarjetas como orden del turno en silencio. Una cuenta de tarjetas cobrada en el
+     * turno no es una orden del negocio (tampoco suma a `totalSales`, ver `aggregateShiftPayments`).
+     */
+    order: { items: ReadonlyArray<unknown> } | null
+  }>,
+): number {
+  return new Set(payments.filter(p => p.type !== 'REFUND' && !p.order?.items?.length).map(p => p.orderId)).size
+}
+
+/**
  * La membresía canónica del snapshot firmado:
  *
  * 1. un cobro COMPLETED estampado con el turno cuenta siempre (su identidad gana a la fecha);
@@ -1760,9 +1788,10 @@ async function closeShiftUsingRequest(
       totalCashTips,
       totalDrawerExtra,
     } = aggregateShiftPayments(shiftPayments)
+    const totalOrders = contarOrdenesCobradas(shiftPayments)
 
-    // 🔴 Sin los renglones de la cuenta de tarjetas de regalo (R3, pendientes 1a, Codex r1 #1): `.length` se firma abajo como
-    // `totalOrders` y la suma como productos vendidos. Que cuente RENGLONES y no órdenes es otro descuadre, que aquí no se toca.
+    // 🔴 Sin los renglones de la cuenta de tarjetas de regalo (R3, pendientes 1a, Codex r1 #1): la suma se firma abajo como productos
+    // vendidos. Las órdenes ya no salen de aquí (`contarOrdenesCobradas`, que también salta la cuenta de tarjetas).
     const orderItems = await prisma.orderItem.findMany({
       where: {
         giftCardId: null,
@@ -1846,7 +1875,7 @@ async function closeShiftUsingRequest(
       sales: {
         total: totalSales.toNumber(),
         totalTips: totalTips.toNumber(),
-        totalOrders: orderItems.length,
+        totalOrders,
         productsSold: totalProductsSold,
       },
       paymentMethods: {
@@ -1960,7 +1989,7 @@ async function closeShiftUsingRequest(
       otherDeclared: legacy?.otherDeclared ? new Decimal(legacy.otherDeclared) : null,
       totalSales,
       totalTips,
-      totalOrders: orderItems.length,
+      totalOrders,
       notes: legacy?.notes || null,
       totalCashPayments,
       totalCashTips,

@@ -323,6 +323,41 @@ function asegurarQueNoEsSuPropiaChecada(duenoDeLaChecada: string, quienActua: st
   }
 }
 
+/** Lo único que `upsertOrgAttendanceConfig` acepta del cuerpo (las columnas editables de `OrganizationAttendanceConfig`). */
+const CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA = [
+  'expectedCheckInTime',
+  'latenessThresholdMinutes',
+  'geofenceRadiusMeters',
+  'attendanceTracking',
+  'requireFacadePhoto',
+  'requireDepositPhoto',
+  'enableCashPayments',
+  'enableCardPayments',
+  'enableBarcodeScanner',
+  'trackPromoterLocation',
+  'promoterLocationStartHour',
+  'promoterLocationEndHour',
+]
+
+/**
+ * De → a de cada campo cuyo valor GUARDADO difiere del anterior (por valor JSON). La bitácora de los ajustes de la org se
+ * arma con esto y no con el cuerpo: el servidor deriva campos (`attendanceTracking` arrastra a `requireClockInPhoto` y
+ * `requireClockInToLogin`) y lo que se manda igual a lo que había no es un cambio (ronda 3, Codex).
+ */
+function cambiosGuardados(
+  antes: Record<string, any> | null | undefined,
+  guardado: Record<string, any>,
+  campos: string[] = Object.keys(guardado),
+): Record<string, { from: any; to: any }> {
+  const cambios: Record<string, { from: any; to: any }> = {}
+  for (const campo of campos) {
+    const from = antes?.[campo] ?? null
+    const to = guardado[campo] ?? null
+    if (JSON.stringify(from) !== JSON.stringify(to)) cambios[campo] = { from, to }
+  }
+  return cambios
+}
+
 class OrganizationDashboardService {
   /**
    * Get vision global summary for an organization (aggregate KPIs)
@@ -3469,7 +3504,7 @@ class OrganizationDashboardService {
 
   async upsertOrgAttendanceConfig(
     orgId: string,
-    data: {
+    entrada: {
       expectedCheckInTime?: string
       latenessThresholdMinutes?: number
       geofenceRadiusMeters?: number
@@ -3483,7 +3518,15 @@ class OrganizationDashboardService {
       promoterLocationStartHour?: number
       promoterLocationEndHour?: number
     },
+    performedBy?: string,
+    venueId?: string,
   ) {
+    // 🔴 Sólo los campos de la config. La puerta de la org pasaba el cuerpo CRUDO, y el `...data` del upsert aceptaba
+    // `organizationId`/`id`: escribía la config de OTRA organización (o mudaba ésta). Se filtra aquí, para las dos puertas.
+    const data = Object.fromEntries(
+      Object.entries(entrada ?? {}).filter(([campo]) => CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA.includes(campo)),
+    ) as typeof entrada
+
     // Venue-local capture window for promoter geolocation pings. start inclusive,
     // end exclusive, 0/24 = full 24h. Validate whichever of the pair is provided —
     // a partial update still needs a sane resulting window, so we validate each
@@ -3504,10 +3547,9 @@ class OrganizationDashboardService {
       }
     }
 
-    // Also sync individual columns → settings JSON for consistency
+    // Also sync individual columns → settings JSON for consistency (la fila entera: la bitácora compara contra ella)
     const existing = await prisma.organizationAttendanceConfig.findUnique({
       where: { organizationId: orgId },
-      select: { settings: true },
     })
     const existingSettings = (existing?.settings as Record<string, any>) || {}
     const settingsSync: Record<string, any> = { ...existingSettings }
@@ -3539,47 +3581,65 @@ class OrganizationDashboardService {
       },
     })
 
-    // Cambaceo is the ONE set of org defaults that cascade PHYSICALLY: the promoter-ping
-    // gate (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org
-    // fallback, and the TPV self-gates its capture window off VenueSettings.promoterLocation{Start,End}Hour
-    // (via getTerminalConfig) with no org fallback either — so saving any of the 3 fields
-    // here must propagate to every venue's VenueSettings row.
-    const cascadeData: { trackPromoterLocation?: boolean; promoterLocationStartHour?: number; promoterLocationEndHour?: number } = {}
-    if (data.trackPromoterLocation !== undefined) cascadeData.trackPromoterLocation = data.trackPromoterLocation
-    if (data.promoterLocationStartHour !== undefined) cascadeData.promoterLocationStartHour = data.promoterLocationStartHour
-    if (data.promoterLocationEndHour !== undefined) cascadeData.promoterLocationEndHour = data.promoterLocationEndHour
+    // 🔴 La config YA quedó guardada: pase lo que pase con la propagación a las sucursales, hay asiento (ronda 3, Codex).
+    // El detalle es lo guardado: las columnas escritas y lo que el servidor derivó en `settings` (sólo las llaves que no son
+    // columnas, para no contarlas dos veces).
+    const changes = {
+      ...cambiosGuardados(existing, data),
+      ...cambiosGuardados(
+        existingSettings,
+        settingsSync,
+        Object.keys(settingsSync).filter(campo => !CAMPOS_DE_LA_CONFIG_DE_ASISTENCIA.includes(campo)),
+      ),
+    }
+    let propagacionCompleta = false
+    try {
+      // Cambaceo is the ONE set of org defaults that cascade PHYSICALLY: the promoter-ping
+      // gate (recordPromoterPing) reads VenueSettings.trackPromoterLocation with no org
+      // fallback, and the TPV self-gates its capture window off VenueSettings.promoterLocation{Start,End}Hour
+      // (via getTerminalConfig) with no org fallback either — so saving any of the 3 fields
+      // here must propagate to every venue's VenueSettings row.
+      const cascadeData: { trackPromoterLocation?: boolean; promoterLocationStartHour?: number; promoterLocationEndHour?: number } = {}
+      if (data.trackPromoterLocation !== undefined) cascadeData.trackPromoterLocation = data.trackPromoterLocation
+      if (data.promoterLocationStartHour !== undefined) cascadeData.promoterLocationStartHour = data.promoterLocationStartHour
+      if (data.promoterLocationEndHour !== undefined) cascadeData.promoterLocationEndHour = data.promoterLocationEndHour
 
-    if (Object.keys(cascadeData).length > 0) {
-      const venues = await prisma.venue.findMany({
-        where: { organizationId: orgId },
-        select: { id: true },
-      })
-      const venueIds = venues.map(v => v.id)
-      if (venueIds.length > 0) {
-        await prisma.venueSettings.updateMany({
-          where: { venueId: { in: venueIds } },
-          data: cascadeData,
+      if (Object.keys(cascadeData).length > 0) {
+        const venues = await prisma.venue.findMany({
+          where: { organizationId: orgId },
+          select: { id: true },
         })
-        const existingVs = await prisma.venueSettings.findMany({
-          where: { venueId: { in: venueIds } },
-          select: { venueId: true },
-        })
-        const have = new Set(existingVs.map(v => v.venueId))
-        const missing = venueIds.filter(id => !have.has(id))
-        if (missing.length > 0) {
-          await prisma.venueSettings.createMany({
-            data: missing.map(venueId => ({ venueId, ...cascadeData })),
+        const venueIds = venues.map(v => v.id)
+        if (venueIds.length > 0) {
+          await prisma.venueSettings.updateMany({
+            where: { venueId: { in: venueIds } },
+            data: cascadeData,
           })
+          const existingVs = await prisma.venueSettings.findMany({
+            where: { venueId: { in: venueIds } },
+            select: { venueId: true },
+          })
+          const have = new Set(existingVs.map(v => v.venueId))
+          const missing = venueIds.filter(id => !have.has(id))
+          if (missing.length > 0) {
+            await prisma.venueSettings.createMany({
+              data: missing.map(venueId => ({ venueId, ...cascadeData })),
+            })
+          }
         }
       }
+      propagacionCompleta = true
+    } finally {
+      void logAction({
+        staffId: performedBy ?? null,
+        organizationId: orgId,
+        ...(venueId ? { venueId } : {}),
+        action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
+        entity: 'OrganizationAttendanceConfig',
+        entityId: config.id,
+        data: { changes, ...(propagacionCompleta ? {} : { propagacionIncompleta: true }) },
+      })
     }
-
-    logAction({
-      action: 'ORG_ATTENDANCE_CONFIG_UPDATED',
-      entity: 'OrganizationAttendanceConfig',
-      entityId: config.id,
-      data: { changes: Object.keys(data) },
-    })
 
     return config
   }
@@ -3669,14 +3729,22 @@ class OrganizationDashboardService {
     return updated
   }
 
-  async deleteOrgAttendanceConfig(orgId: string) {
-    await prisma.organizationAttendanceConfig.deleteMany({
+  // Borra la fila entera, `settings` (los defaults de TPV) incluido. Asiento con autor, org y sucursal; sin asiento si no
+  // había nada que borrar.
+  async deleteOrgAttendanceConfig(orgId: string, performedBy?: string, venueId?: string) {
+    const borrado = await prisma.organizationAttendanceConfig.deleteMany({
       where: { organizationId: orgId },
     })
+    if (!borrado?.count) return
 
-    logAction({
+    void logAction({
+      staffId: performedBy ?? null,
+      organizationId: orgId,
+      ...(venueId ? { venueId } : {}),
       action: 'ORG_ATTENDANCE_CONFIG_DELETED',
       entity: 'OrganizationAttendanceConfig',
+      entityId: orgId,
+      data: { deleted: borrado.count },
     })
   }
 
@@ -3699,10 +3767,14 @@ class OrganizationDashboardService {
    * Save org-level TPV defaults and push to ALL terminals in the org.
    * This overwrites terminal settings with the merged result (system defaults + org defaults).
    * kioskDefaultMerchantId is preserved per-terminal (not overwritten by org push).
+   *
+   * `performedBy` (quién) y `venueId` (la tienda desde cuya pantalla se guardó, si fue así) van a la bitácora.
    */
   async upsertOrgTpvDefaults(
     orgId: string,
     settings: Record<string, any>,
+    performedBy?: string,
+    venueId?: string,
   ): Promise<{ config: Record<string, any>; terminalsUpdated: number }> {
     // 1. Get existing settings to merge
     const existing = await prisma.organizationAttendanceConfig.findUnique({
@@ -3755,42 +3827,66 @@ class OrganizationDashboardService {
     })
 
     let terminalsUpdated = 0
-    if (terminals.length === 0) {
-      await upsertConfig
-    } else {
-      const BATCH_SIZE = 50
-      for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
-        const batch = terminals.slice(i, i + BATCH_SIZE)
-        const updates = batch.map(terminal => {
-          const existingConfig = (terminal.config as Record<string, any>) || {}
-          const overrides = (terminal.configOverrides as Record<string, any>) || {}
+    // 🔴 La config viaja en el PRIMER lote: si ése se confirma y uno posterior falla, la config y esas terminales ya
+    // cambiaron, y antes no quedaba asiento (ronda 3, Codex). Ahora el asiento sale en cuanto algo se guardó, con lo
+    // guardado (no el cuerpo: `attendanceTracking` arrastra a dos llaves más) y, si no terminó, `propagacionIncompleta`.
+    // Si el primer lote falla no se guardó nada y no hay asiento.
+    const changes = cambiosGuardados(existingSettings, mergedSettings)
+    let configGuardada = false
+    let propagacionCompleta = false
+    try {
+      if (terminals.length === 0) {
+        await upsertConfig
+        configGuardada = true
+      } else {
+        const BATCH_SIZE = 50
+        for (let i = 0; i < terminals.length; i += BATCH_SIZE) {
+          const batch = terminals.slice(i, i + BATCH_SIZE)
+          const updates = batch.map(terminal => {
+            const existingConfig = (terminal.config as Record<string, any>) || {}
+            const overrides = (terminal.configOverrides as Record<string, any>) || {}
 
-          // Cascade merge: org defaults → per-terminal overrides
-          // Terminals with no overrides (null) get full org defaults
-          // Terminals with overrides keep their customized fields
-          const pushSettings = {
-            ...mergedSettings,
-            ...overrides,
-            // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
-            kioskDefaultMerchantId:
-              overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
-          }
+            // Cascade merge: org defaults → per-terminal overrides
+            // Terminals with no overrides (null) get full org defaults
+            // Terminals with overrides keep their customized fields
+            const pushSettings = {
+              ...mergedSettings,
+              ...overrides,
+              // kioskDefaultMerchantId is always per-terminal (from overrides or existing)
+              kioskDefaultMerchantId:
+                overrides.kioskDefaultMerchantId ?? (existingConfig.settings as Record<string, any>)?.kioskDefaultMerchantId ?? null,
+            }
 
-          // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
-          // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
-          return prisma.terminal.updateMany({
-            where: scopedTerminalWhere(terminal.id, { organizationId: orgId }),
-            data: {
-              config: { ...existingConfig, settings: pushSettings },
-              updatedAt: new Date(),
-            },
+            // Acotada a la organización que escogió las terminales. Una que pasó a otra organización a media
+            // operación ya no es de ésta: cuenta cero y se omite (auditorías de Codex, 2026-09-16/17).
+            return prisma.terminal.updateMany({
+              where: scopedTerminalWhere(terminal.id, { organizationId: orgId }),
+              data: {
+                config: { ...existingConfig, settings: pushSettings },
+                updatedAt: new Date(),
+              },
+            })
           })
-        })
 
-        const isFirstBatch = i === 0
-        const writes: Prisma.PrismaPromise<unknown>[] = isFirstBatch ? [upsertConfig, ...updates] : updates
-        const results = await prisma.$transaction(writes)
-        terminalsUpdated += countUpdatedTerminals(isFirstBatch ? results.slice(1) : results)
+          const isFirstBatch = i === 0
+          const writes: Prisma.PrismaPromise<unknown>[] = isFirstBatch ? [upsertConfig, ...updates] : updates
+          const results = await prisma.$transaction(writes)
+          configGuardada = true
+          terminalsUpdated += countUpdatedTerminals(isFirstBatch ? results.slice(1) : results)
+        }
+      }
+      propagacionCompleta = true
+    } finally {
+      if (configGuardada) {
+        void logAction({
+          staffId: performedBy ?? null,
+          organizationId: orgId,
+          ...(venueId ? { venueId } : {}),
+          action: 'ORG_TPV_DEFAULTS_UPDATED',
+          entity: 'Organization',
+          entityId: orgId,
+          data: { changes, terminalsUpdated, ...(propagacionCompleta ? {} : { propagacionIncompleta: true }) },
+        })
       }
     }
 
@@ -3801,12 +3897,6 @@ class OrganizationDashboardService {
         omittedTerminals,
       })
     }
-
-    logAction({
-      action: 'ORG_TPV_DEFAULTS_UPDATED',
-      entity: 'OrganizationAttendanceConfig',
-      data: { settingsKeys: Object.keys(settings), terminalsUpdated },
-    })
 
     return { config: mergedSettings, terminalsUpdated }
   }

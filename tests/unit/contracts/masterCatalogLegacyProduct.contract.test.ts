@@ -362,7 +362,11 @@ describe('H1A legacy Product contracts', () => {
     const validationError = await request(app).post(`/venues/${venueId}/products`).send({ name: '   ' })
 
     expect(list.status).toBe(mobileFixture.list.status)
-    expect(list.body).toEqual(mobileFixture.list.body)
+    // "Se cobra el precio que vio el cliente" (T5): `catalogAt` es un campo ADITIVO en la raíz del listado; el resto del
+    // sobre (success + data, byte por byte) sigue congelado como lo leen las apps viejas.
+    const { catalogAt, ...listWithoutCatalogAt } = list.body
+    expect(catalogAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    expect(listWithoutCatalogAt).toEqual(mobileFixture.list.body)
     expect(created.status).toBe(mobileFixture.create.status)
     expect(created.body).toEqual(mobileFixture.create.body)
     expect(updated.status).toBe(mobileFixture.update.status)

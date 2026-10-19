@@ -918,7 +918,10 @@ describe('createOrderWithItems writes the sale money inside its creation transac
     })
     tx.orderDiscount.findMany.mockImplementation(async () => creadas)
     prismaMock.staffVenue.findFirst.mockResolvedValue({ staffId: 'staff' })
-    prismaMock.product.findMany.mockResolvedValue([
+    // Precio que vio el cliente, Task 4: las líneas se arman DENTRO de la transacción de la creación, con `tx`.
+    tx.product = { findMany: jest.fn() }
+    tx.modifier = { findMany: jest.fn() }
+    tx.product.findMany.mockResolvedValue([
       {
         id: 'p1',
         name: 'Plato',
@@ -929,7 +932,7 @@ describe('createOrderWithItems writes the sale money inside its creation transac
         category: { name: 'Comida' },
       },
     ])
-    prismaMock.modifier.findMany.mockResolvedValue([])
+    tx.modifier.findMany.mockResolvedValue([])
     tx.order.create.mockResolvedValue(CREATED)
     tx.order.findFirst.mockResolvedValue({ subtotal: new Prisma.Decimal(190), serviceChargeAmount: new Prisma.Decimal(0), paidAmount: 0 })
     tx.order.update.mockImplementation(async ({ data }: any) => ({ ...CREATED, ...data }))

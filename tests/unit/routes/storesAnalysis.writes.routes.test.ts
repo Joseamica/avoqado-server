@@ -66,6 +66,7 @@ jest.mock('@/middlewares/verifyAccess.middleware', () => ({
 import storesAnalysisRouter from '@/routes/dashboard/storesAnalysis.routes'
 import organizationDashboardRoutes from '@/routes/dashboard/organizationDashboard.routes'
 import organizationConfigRoutes from '@/routes/dashboard/organizationConfig.routes'
+import { organizationDashboardService } from '@/services/organization-dashboard/organizationDashboard.service'
 
 const ORG = 'org-pt'
 const VA = 'venue-a' // la sucursal de la petición
@@ -99,8 +100,10 @@ const ORGANIZACION: Array<{ staffId: string; role: string; isActive: boolean }> 
   { staffId: 'admin-org', role: 'ADMIN', isActive: true },
   { staffId: 'ex-miembro', role: 'MEMBER', isActive: false }, // sacado de la org
   { staffId: 'dueno-org-cajero', role: 'OWNER', isActive: true },
+  { staffId: 'ex-dueno-org', role: 'OWNER', isActive: false }, // fue dueño de la org; su fila ya está apagada
+  { staffId: 'dueno-org-baja', role: 'OWNER', isActive: true }, // fila de dueño viva, pero la persona está dada de baja
 ]
-const DADOS_DE_BAJA = new Set(['baja'])
+const DADOS_DE_BAJA = new Set(['baja', 'dueno-org-baja'])
 
 /** Checadas: id → de quién y de qué sucursal. */
 let ESTADO: Record<
@@ -144,6 +147,8 @@ const ROL_DEL_TOKEN: Record<string, string> = {
   'dueno-org': 'OWNER',
   'super-1': 'SUPERADMIN',
   'dueno-org-cajero': 'CASHIER',
+  'ex-dueno-org': 'OWNER', // el token se emitió cuando todavía lo era
+  'dueno-org-baja': 'OWNER',
 }
 
 /** `VenueRolePermission` por `venueId:rol` (lo que el negocio personalizó); se cambia por prueba. */
@@ -832,5 +837,186 @@ describe('regresar a pendiente es un CAS sobre la validación que se leyó', () 
     expect(res.status).toBe(200)
     expect(ESTADO['te-cajero']).toMatchObject({ validationStatus: 'PENDING', validatedAt: null, validatedBy: null })
     expect(prismaMock.cashDeposit.deleteMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Valores por defecto de TPV de la organización (17-oct): sólo el dueño de la org
+// ─────────────────────────────────────────────────────────────────────────────
+
+/**
+ * `PUT …/org-tpv-defaults` guarda los ajustes de TPV de la organización y los EMPUJA a todas las terminales de
+ * todas sus sucursales (cobro con tarjeta incluido). Las dos puertas lo dejaban al dueño de UNA sucursal: la de la
+ * sucursal con `requireOwnerPlus` (OWNER del token/acceso) y la de la org con el `requireOrgOwner` que acepta ser
+ * OWNER de cualquier tienda. Ahora las dos piden la regla estrecha `esDuenoDeEstaOrganizacionOSuperadmin`: fila
+ * ACTIVA de dueño de ESTA org, de una persona activa, o un superadmin de verdad. Leer (GET y /stats) no cambia.
+ */
+describe('PUT org-tpv-defaults — sólo el dueño de la organización (las dos puertas)', () => {
+  const AJUSTES = { enableCardPayments: false, requireAvoqadoServerForCardPayment: false }
+  const MENSAJE = 'Sólo el dueño de la organización puede cambiar los valores por defecto de todas las terminales. Pídeselo al dueño.'
+  const PUERTAS = [
+    ['la puerta de la sucursal', `${BASE}/org-tpv-defaults`],
+    ['la puerta de la organización', `/dashboard/organizations/${ORG}/org-tpv-defaults`],
+  ] as const
+
+  let guardar: jest.SpyInstance
+  let leer: jest.SpyInstance
+  let contar: jest.SpyInstance
+  beforeEach(() => {
+    guardar = jest.spyOn(organizationDashboardService, 'upsertOrgTpvDefaults').mockResolvedValue({ config: AJUSTES, terminalsUpdated: 3 })
+    leer = jest.spyOn(organizationDashboardService, 'getOrgTpvDefaults').mockResolvedValue(AJUSTES)
+    contar = jest.spyOn(organizationDashboardService, 'getOrgTpvStats').mockResolvedValue({ totalTerminals: 3, venues: [] } as any)
+  })
+  afterEach(() => {
+    guardar.mockRestore()
+    leer.mockRestore()
+    contar.mockRestore()
+  })
+
+  function guardarPor(ruta: string, actor: string) {
+    return request(makeApp()).put(ruta).set(como(actor)).send({ settings: AJUSTES })
+  }
+
+  describe.each(PUERTAS)('%s', (_puerta, ruta) => {
+    it.each([
+      ['🔴 el dueño de UNA sucursal que no es dueño de la org', 'dueno-suc'],
+      ['🔴 quien fue dueño de la org (fila apagada)', 'ex-dueno-org'],
+      ['🔴 el dueño de la org dado de baja (persona inactiva)', 'dueno-org-baja'],
+    ])('%s → 403 en español, con código, nada escrito y la negativa en la bitácora', async (_l, actor) => {
+      const res = await guardarPor(ruta, actor)
+
+      expect(res.status).toBe(403)
+      expect(res.body.message).toBe(MENSAJE)
+      expect(res.body.code).toBe('ORG_OWNER_REQUIRED')
+      expect(guardar).not.toHaveBeenCalled()
+      expect(prismaMock.organizationAttendanceConfig.upsert).not.toHaveBeenCalled()
+      expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
+      expect(bitacora('PERMISSION_DENIED')).toEqual([
+        expect.objectContaining({ staffId: actor, organizationId: ORG, entity: 'organization-owner', entityId: 'ORG_TPV_DEFAULTS' }),
+      ])
+    })
+
+    it.each([
+      ['el dueño de la org', 'dueno-org'],
+      ['el superadmin de verdad', 'super-1'],
+    ])('%s sí guarda, y el servicio recibe quién lo hizo', async (_l, actor) => {
+      const res = await guardarPor(ruta, actor)
+
+      expect(res.status).toBe(200)
+      expect(res.body.data.terminalsUpdated).toBe(3)
+      // La puerta de la sucursal pasa además SU sucursal, para que el asiento salga en la bitácora de esa tienda.
+      const sucursal = ruta.startsWith(BASE) ? [VA] : []
+      expect(guardar).toHaveBeenCalledWith(ORG, AJUSTES, actor, ...sucursal)
+      expect(bitacora('PERMISSION_DENIED')).toEqual([])
+    })
+
+    it.each([
+      ['GET', ''],
+      ['GET', '/stats'],
+    ])('regresión: leer (%s%s) sigue abierto al dueño de una sucursal', async (_m, sufijo) => {
+      const res = await request(makeApp()).get(`${ruta}${sufijo}`).set(como('dueno-suc'))
+
+      expect(res.status).toBe(200)
+      expect(sufijo ? contar : leer).toHaveBeenCalledWith(ORG)
+    })
+  })
+
+  it('el dueño de la org que además es CAJERO en una tienda sigue siendo el dueño (puerta de la org)', async () => {
+    const res = await guardarPor(`/dashboard/organizations/${ORG}/org-tpv-defaults`, 'dueno-org-cajero')
+
+    expect(res.status).toBe(200)
+    expect(guardar).toHaveBeenCalledWith(ORG, AJUSTES, 'dueno-org-cajero')
+  })
+
+  it('🔴 la consulta de dueño mira ESTA org, la fila activa, el rol OWNER y la persona activa', async () => {
+    await guardarPor(`${BASE}/org-tpv-defaults`, 'dueno-suc')
+
+    expect(prismaMock.staffOrganization.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { staffId: 'dueno-suc', organizationId: ORG, isActive: true, role: 'OWNER', staff: { active: true } },
+      }),
+    )
+  })
+})
+
+/**
+ * Ronda 2 (17-oct): el mismo hueco sobre el MISMO dato. `org-attendance-config` escribe la fila
+ * `OrganizationAttendanceConfig` (checador, cobro en efectivo/tarjeta, escáner, cambaceo — y su `settings` es el JSON
+ * de TPV de arriba, que las terminales heredan) y su DELETE la borra entera. Las dos puertas se la dejaban al dueño
+ * de UNA tienda. Ahora: la misma regla estrecha. Leer (GET) no cambia.
+ */
+describe('PUT/DELETE org-attendance-config — sólo el dueño de la organización (las dos puertas)', () => {
+  const CUERPO = { attendanceTracking: true, enableCardPayments: false }
+  const MENSAJE =
+    'Sólo el dueño de la organización puede cambiar la configuración de checador y terminales de todas las sucursales. Pídeselo al dueño.'
+  const ORG_BASE = `/dashboard/organizations/${ORG}`
+  const ESCRITURAS = [
+    ['PUT por la sucursal', 'put', `${BASE}/org-attendance-config`],
+    ['DELETE por la sucursal', 'delete', `${BASE}/org-attendance-config`],
+    ['PUT por la organización', 'put', `${ORG_BASE}/org-attendance-config`],
+    ['DELETE por la organización', 'delete', `${ORG_BASE}/org-attendance-config`],
+  ] as const
+
+  let guardar: jest.SpyInstance
+  let borrar: jest.SpyInstance
+  let leer: jest.SpyInstance
+  beforeEach(() => {
+    guardar = jest.spyOn(organizationDashboardService, 'upsertOrgAttendanceConfig').mockResolvedValue({ id: 'cfg-1' } as any)
+    borrar = jest.spyOn(organizationDashboardService, 'deleteOrgAttendanceConfig').mockResolvedValue(undefined)
+    leer = jest.spyOn(organizationDashboardService, 'getOrgAttendanceConfig').mockResolvedValue({ id: 'cfg-1' } as any)
+  })
+  afterEach(() => {
+    guardar.mockRestore()
+    borrar.mockRestore()
+    leer.mockRestore()
+  })
+
+  function escribir(metodo: 'put' | 'delete', ruta: string, actor: string) {
+    const r = request(makeApp())[metodo](ruta).set(como(actor))
+    return metodo === 'put' ? r.send(CUERPO) : r
+  }
+
+  describe.each(ESCRITURAS)('%s', (_l, metodo, ruta) => {
+    it.each([
+      ['🔴 el dueño de UNA sucursal que no es dueño de la org', 'dueno-suc'],
+      ['🔴 quien fue dueño de la org (fila apagada)', 'ex-dueno-org'],
+      ['🔴 el dueño de la org dado de baja (persona inactiva)', 'dueno-org-baja'],
+    ])('%s → 403 en español, con código, nada escrito y la negativa en la bitácora', async (_a, actor) => {
+      const res = await escribir(metodo, ruta, actor)
+
+      expect(res.status).toBe(403)
+      expect(res.body.message).toBe(MENSAJE)
+      expect(res.body.code).toBe('ORG_OWNER_REQUIRED')
+      expect(guardar).not.toHaveBeenCalled()
+      expect(borrar).not.toHaveBeenCalled()
+      expect(prismaMock.organizationAttendanceConfig.upsert).not.toHaveBeenCalled()
+      expect(prismaMock.organizationAttendanceConfig.deleteMany).not.toHaveBeenCalled()
+      expect(bitacora('PERMISSION_DENIED')).toEqual([
+        expect.objectContaining({ staffId: actor, organizationId: ORG, entity: 'organization-owner', entityId: 'ORG_ATTENDANCE_CONFIG' }),
+      ])
+    })
+
+    it.each([
+      ['el dueño de la org', 'dueno-org'],
+      ['el superadmin de verdad', 'super-1'],
+    ])('%s sí escribe, y el servicio recibe quién lo hizo', async (_a, actor) => {
+      const res = await escribir(metodo, ruta, actor)
+
+      expect(res.status).toBe(200)
+      const sucursal = ruta.startsWith(BASE) ? [VA] : []
+      if (metodo === 'put') expect(guardar).toHaveBeenCalledWith(ORG, CUERPO, actor, ...sucursal)
+      else expect(borrar).toHaveBeenCalledWith(ORG, actor, ...sucursal)
+      expect(bitacora('PERMISSION_DENIED')).toEqual([])
+    })
+  })
+
+  it.each([
+    ['la puerta de la sucursal', `${BASE}/org-attendance-config`],
+    ['la puerta de la organización', `${ORG_BASE}/org-attendance-config`],
+  ])('regresión: leer por %s sigue abierto al dueño de una sucursal', async (_l, ruta) => {
+    const res = await request(makeApp()).get(ruta).set(como('dueno-suc'))
+
+    expect(res.status).toBe(200)
+    expect(leer).toHaveBeenCalledWith(ORG)
   })
 })

@@ -226,6 +226,30 @@ export function esVentaCerrada(paymentStatus: string | null | undefined): boolea
 }
 
 /**
+ * 🔴 R4-2 (Codex r3): el estado con el que se CALCULAN los importes, separado del estado operativo que se GUARDA. Una venta CERRADA
+ * (PAID/REFUNDED) que recibe dinero conserva su estado operativo —puede seguir cancelada: R2-2/R3-2—, pero su aritmética es la de
+ * cuando se cobró: base e IVA aparte, como una viva (la de una cancelada reabierta, `estadoAlRecibirDinero`). Con la de cancelada el
+ * IVA desaparecía del total: $100 + $16 devuelta y cancelada + $50 de propina guardaba $150 contra $166 cobrados. Lo guardado y el
+ * aviso de sobrepago salen de ESTE estado. Cualquier otro caso, el estado que quien llama ya decidió.
+ */
+export function estadoParaCalcular<S extends string>(
+  estado: S,
+  paymentStatus: string | null | undefined,
+  entraDinero: boolean,
+): S | 'PENDING' {
+  return entraDinero && esVentaCerrada(paymentStatus) && claseDeEstado(estado) === 'CANCELADA' ? 'PENDING' : estado
+}
+
+/**
+ * 🔴 R4-4 (Codex r3): ¿el importe y la propina, en CENTAVOS, son dinero que se GUARDA? `Payment.amount`/`tipAmount` son pesos con dos
+ * decimales, así que cada uno vale lo que queda al redondearlo a centavos enteros: 0.001 ¢ se guarda $0.00 y cuenta como $0. Decide
+ * sólo si hay dinero de por medio (el pase de mesa ajena, la propina sola); no cambia lo que se registra. Entradas ya validadas ≥ 0.
+ */
+export function hayDineroQueSeGuarda(importeCentavos: number, propinaCentavos: number): boolean {
+  return Math.round(importeCentavos) + Math.round(propinaCentavos) > 0
+}
+
+/**
  * 🔴 R8-1 (ronda 8 post-QA de sellos tardíos; Codex recheck-12 P2): recibir dinero NUNCA reabre una venta cerrada.
  *
  * La cadena de Codex: venta $100 PAID → el panel corrige su cobro a $80 (`updatePayment` no recalcula: sigue PAID) → llega un cobro

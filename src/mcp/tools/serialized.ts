@@ -464,6 +464,80 @@ export function registerSerializedTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'collect_sims_from_supervisor',
+    'Collect SIMs / ICCIDs from their SUPERVISORS back to the admin warehouse in bulk — e.g. the back office pulls a batch of stock back from the field. Paste the list of ICCIDs (max 500). ONLY SIMs a supervisor still holds in their warehouse come back: a SIM a promoter already carries is NOT collected and comes back as HAS_DOWNSTREAM_CUSTODY (collect it from the promoter first). SIMs already in the admin warehouse are reported as ok without changes; sold or unknown ICCIDs are reported per row and never block the rest. Every collection is written to the custody timeline with its reason. Only for venues with the SERIALIZED_INVENTORY module (telecom / white-label). By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires sim-custody:collect-from-supervisor.',
+    {
+      venueId: z
+        .string()
+        .describe('A venue in the org that owns the SIMs (must be in your scope) — used for the module gate and to resolve the org'),
+      serialNumbers: z.array(z.string().min(1)).min(1).max(500).describe('ICCIDs / serial numbers to collect (max 500)'),
+      reason: z
+        .enum(['SUPERVISOR_COLLECTION', 'STAFF_TERMINATED', 'DAMAGED_SIM'])
+        .optional()
+        .describe('Why they are collected: SUPERVISOR_COLLECTION (default), STAFF_TERMINATED or DAMAGED_SIM'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+    },
+    async ({ venueId, serialNumbers, reason, confirm }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // SERIALIZED_INVENTORY is a MODULE — gate exactly like the platform (isModuleEnabled, incl.
+      // org-level fallback), NOT the Feature/tier resolver.
+      if (!(await moduleService.isModuleEnabled(venueId, MODULE_CODES.SERIALIZED_INVENTORY))) {
+        return text({ ok: false, moduleRequired: true, error: SERIALIZED_OFF_MSG })
+      }
+      guard.requirePermission('sim-custody:collect-from-supervisor', venueId)
+
+      const access = scope.perVenueAccess.get(venueId)
+      const callerRole = access?.role
+      const organizationId = access?.organizationId
+      if (!callerRole || !organizationId) {
+        return text({ ok: false, error: 'No pude resolver la organización de este venue.' })
+      }
+
+      const collectionReason = reason ?? 'SUPERVISOR_COLLECTION'
+      const REASON_LABEL = {
+        SUPERVISOR_COLLECTION: 'Recolección de Supervisor',
+        STAFF_TERMINATED: 'Baja de promotor',
+        DAMAGED_SIM: 'SIM defectuoso',
+      } as const
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          change: { serialCount: serialNumbers.length, reason: REASON_LABEL[collectionReason] },
+          message:
+            `Esto regresará ${serialNumbers.length} SIM(s) al almacén del administrador (motivo: ${REASON_LABEL[collectionReason]}). ` +
+            'Solo se recolectan los que un supervisor todavía tiene en bodega; los que ya trae un promotor se rechazan con ' +
+            'HAS_DOWNSTREAM_CUSTODY (hay que recolectarlos del promotor primero). Confirma con el operador; luego vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const result = await simCustodyService.collectFromSupervisorBulk({
+          actor: { staffId: scope.staffId, organizationId, role: callerRole },
+          serialNumbers,
+          reason: collectionReason,
+        })
+        await auditMcpWrite(scope, {
+          action: 'SIM_CUSTODY_COLLECTED_FROM_SUPERVISOR_BULK',
+          entity: 'SerializedItem',
+          entityId: venueId, // bulk op — no single entity; anchor the MCP audit on the venue
+          venueId,
+          data: { reason: collectionReason, summary: result.summary },
+        })
+        return text({
+          ok: result.summary.failed === 0,
+          reason: REASON_LABEL[collectionReason],
+          summary: result.summary,
+          results: result.results,
+        })
+      } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
     'reassign_sim_promoter',
     "Move SIMs / ICCIDs from one PROMOTER to another in bulk — e.g. a promoter quits mid-shift or goes on leave and the SIMs they are carrying have to pass to whoever covers them. Identify the target promoter by NAME (resolved among the active promoters of the org; ambiguous or unknown names return the candidate list instead of guessing). ONLY SIMs a promoter is currently carrying are moved — already accepted on the TPV (PROMOTER_HELD) or still pending acceptance (PROMOTER_PENDING). A SIM still in the warehouse or in the supervisor's hands is rejected with NOT_IN_PROMOTER_STATE: assign it down the chain instead. The custody state, the supervisor and the sale are never touched, and every move is written to the custody timeline. Only for venues with the SERIALIZED_INVENTORY module (telecom / white-label). By DEFAULT it only PREVIEWS; call again with confirm:true to apply. This WRITES — requires sim-custody:reassign.",
     {

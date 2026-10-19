@@ -32,6 +32,18 @@ function ownershipOverridesOf(router: any, method: string, path: string): string
   return undefined
 }
 
+/** ¿El candado de propiedad de esa ruta deja pasar dinero ya capturado (R2-6)? */
+function dejaPasarDineroCapturado(router: any, method: string, path: string): boolean | undefined {
+  for (const layer of router.stack ?? []) {
+    if (!layer.route || layer.route.path !== path) continue
+    const routeLayers: any[] = layer.route.stack ?? []
+    if (!routeLayers.some(rl => rl.method === method)) continue
+    const ownershipLayer = routeLayers.find(rl => Array.isArray((rl.handle as any)?.ownershipOverridePermissions))
+    return (ownershipLayer?.handle as any)?.dejaPasarDineroCapturado === true
+  }
+  return undefined
+}
+
 const PAY = '/venues/:venueId/orders/:orderId/pay'
 
 describe('Sólo la ruta de COBRO se exime del candado de propiedad de mesa', () => {
@@ -49,6 +61,11 @@ describe('Sólo la ruta de COBRO se exime del candado de propiedad de mesa', () 
     ['post', '/venues/:venueId/orders/:orderId/items'],
   ])('🔴 %s %s NO se exime: editar la mesa ajena sigue prohibido', (method, path) => {
     expect(ownershipOverridesOf(mobileRouter, method, path)).toEqual(['tables:manage-all'])
+    expect(dejaPasarDineroCapturado(mobileRouter, method, path)).toBe(false)
+  })
+
+  it('🔴 R2-6: sólo la ruta de COBRO deja pasar el dinero ya capturado (la cola sin red) sobre una mesa ajena', () => {
+    expect(dejaPasarDineroCapturado(mobileRouter, 'post', PAY)).toBe(true)
   })
 })
 

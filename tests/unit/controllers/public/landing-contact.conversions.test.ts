@@ -213,3 +213,23 @@ describe('submitContact conversion signals', () => {
     })
   })
 })
+
+describe('submitContact: aviso interno del prospecto', () => {
+  // Founder (18-oct-2026): hola@ y onboarding@ son alias del mismo buzón; mandar una copia a cada uno le llegaba doble.
+  // El prospecto es de onboarding: el aviso interno va UNA vez y sólo a onboarding@.
+  it('manda el aviso interno una sola vez y sólo a onboarding@avoqado.io', async () => {
+    mockSignupFromLanding.mockResolvedValue({
+      staff: { id: 'staff-new', email: contactBody.email },
+      organizationId: 'org-new',
+      magicLinkToken: 'token-new',
+      alreadyExisted: false,
+      yaEsCliente: false,
+    })
+
+    await submit()
+
+    const internos = mockSendEmail.mock.calls.map(([correo]) => correo).filter(correo => correo.to !== contactBody.email)
+    expect(internos).toHaveLength(1)
+    expect(internos[0]).toEqual(expect.objectContaining({ to: 'onboarding@avoqado.io', subject: 'Nuevo prospecto - Cafe Ana' }))
+  })
+})

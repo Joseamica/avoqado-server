@@ -1,3 +1,4 @@
+import documentRequestsRoutes from './superadmin/documentRequests.routes'
 import hybridCampaignRoutes from './superadmin/hybridCampaign.routes'
 import hybridPricingRoutes from './superadmin/hybridPricing.routes'
 // src/routes/superadmin.routes.ts
@@ -57,6 +58,7 @@ router.use(authorizeRole([StaffRole.SUPERADMIN]))
 // Mount superadmin sub-routes
 router.use('/announcements', announcementRoutes)
 // Campañas ligeras de lanzamiento (spec 2026-09-17). Hereda el guardia de SUPERADMIN del padre.
+router.use('/document-requests', documentRequestsRoutes)
 router.use('/launch-campaigns', launchCampaignRoutes)
 router.use('/hybrid-campaigns', hybridCampaignRoutes)
 // Precios de lista y «% de descuento» (spec 2026-09-30). Hereda el guardia de SUPERADMIN del padre.

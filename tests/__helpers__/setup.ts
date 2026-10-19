@@ -114,6 +114,12 @@ const prismaMock: any = {
   // necesitan; sin él, el TypeError sustituye a la aserción real.
   $executeRawUnsafe: jest.fn().mockResolvedValue(0),
   $executeRaw: jest.fn().mockResolvedValue(0),
+  documentRequest: createMockModel(),
+  documentRequestFile: createMockModel(),
+  documentRequestDelivery: createMockModel(),
+  documentRequestSubmission: createMockModel(),
+  documentRequestSubmissionFile: createMockModel(),
+  documentRequestVenueLink: createMockModel(),
   staff: createMockModel(),
   venue: createMockModel(),
   venueRolePermission: createMockModel(),

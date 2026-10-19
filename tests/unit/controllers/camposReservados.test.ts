@@ -62,7 +62,8 @@ describe('PUT /organizations/:orgId no escribe Pago al personal ni la exención 
   it('los datos de siempre se siguen guardando igual (regresión)', async () => {
     const body = { name: 'Mindform', email: 'hola@mindform.mx', phone: '555', taxId: null, billingEmail: null, billingAddress: null }
     const { next, r } = await organizacion(body)
-    expect(organizationService.updateOrganization).toHaveBeenCalledWith('org-1', body)
+    // El tercero es el autor (ronda 3); este request no trae sesión.
+    expect(organizationService.updateOrganization).toHaveBeenCalledWith('org-1', body, undefined)
     expect(r.json).toHaveBeenCalledWith({ id: 'org-1' })
     expect(next).not.toHaveBeenCalled()
   })

@@ -33,6 +33,12 @@ export const STANDARD_PLAN_GROSS_CENTS: Readonly<Record<PaidPlanTier, Readonly<R
   PREMIUM: { monthly: 197084, annual: 1970840 }, // round(1699 × 1.16 × 100) · round(16990 × 1.16 × 100)
 } as const
 
+/** Precio de lista por ciclo, SIN IVA, en centavos (las bases de los seeds). `round(neto × 1.16)` = bruto; lo fija una prueba. */
+export const STANDARD_PLAN_NET_CENTS: Readonly<Record<PaidPlanTier, Readonly<Record<PlanBillingInterval, number>>>> = {
+  PRO: { monthly: 99900, annual: 999000 },
+  PREMIUM: { monthly: 169900, annual: 1699000 },
+} as const
+
 /**
  * La promoción comercial que YA está viva en Stripe: PRO mensual pagando hoy, 3 ciclos a
  * $694.84 con IVA ($599 + IVA). El cupón `INTRO_PRO_3M` descuenta 46400 sobre los 115884

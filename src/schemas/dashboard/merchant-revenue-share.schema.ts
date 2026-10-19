@@ -30,6 +30,12 @@ export const createMerchantRevenueShareSchema = z.object({
     .nullable()
     .optional(),
   taxRate: z.number().min(0).max(1).default(0.16),
+  intermediaryFeeRate: z
+    .number({ invalid_type_error: 'El manejo del intermediario debe ser un número' })
+    .finite('El manejo del intermediario debe ser finito')
+    .min(0, 'El manejo del intermediario no puede ser negativo')
+    .max(1, 'El manejo del intermediario no puede superar el 100%')
+    .optional(),
   active: z.boolean().default(true),
   notes: z.string().optional(),
 })
@@ -38,3 +44,28 @@ export const updateMerchantRevenueShareSchema = createMerchantRevenueShareSchema
 
 export type CreateMerchantRevenueShareInput = z.infer<typeof createMerchantRevenueShareSchema>
 export type UpdateMerchantRevenueShareInput = z.infer<typeof updateMerchantRevenueShareSchema>
+
+/** Operación atómica de la consola; los CRUD anteriores conservan su contrato. */
+export const saveMerchantEconomicsSchema = z.object({
+  costId: z.string().cuid('El costo indicado no es válido').nullable(),
+  revenueShareId: z.string().cuid('El reparto indicado no es válido').nullable(),
+  cost: z.object({
+    debitRate: cardRates.shape.DEBIT,
+    creditRate: cardRates.shape.CREDIT,
+    amexRate: cardRates.shape.AMEX,
+    internationalRate: cardRates.shape.INTERNATIONAL,
+    includesTax: z.boolean({ invalid_type_error: 'Indica si el costo incluye IVA', required_error: 'Indica si el costo incluye IVA' }),
+    taxRate: z
+      .number({ invalid_type_error: 'La tasa de IVA debe ser un número', required_error: 'La tasa de IVA es obligatoria' })
+      .min(0, 'La tasa de IVA no puede ser negativa')
+      .max(1, 'La tasa de IVA no puede superar el 100%'),
+    fixedCostPerTransaction: z
+      .number({ invalid_type_error: 'El costo fijo debe ser un número' })
+      .finite('El costo fijo debe ser finito')
+      .min(0, 'El costo fijo no puede ser negativo')
+      .nullable()
+      .optional(),
+  }),
+  revenueShare: createMerchantRevenueShareSchema.omit({ merchantAccountId: true }),
+})
+export type SaveMerchantEconomicsInput = z.infer<typeof saveMerchantEconomicsSchema>

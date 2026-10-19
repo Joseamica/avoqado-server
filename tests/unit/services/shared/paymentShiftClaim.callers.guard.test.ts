@@ -3238,7 +3238,10 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
 
   it('mobile/TPV preservan session → tickets → Order → Shift para vales por área', () => {
     for (const [file, functionName, areaLockCallee] of [
-      ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'areaTicketPayment.lockAreaTicketCheckoutForPayment'],
+      // R8 (efectivo sin red): en el POS, como en la TPV, el CANDADO de vales es la jerarquía, tomada ANTES del punto de la llave; las
+      // guardas de la sesión (`lockAreaTicketCheckoutForPayment`) van después, con los candados ya tomados (reentrantes). Tarea A7: en
+      // el POS todo eso vive en el núcleo compartido `registrarAbonoEnTx` (efectivo y cobro con saldo).
+      ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy'],
       // S0 (13-sep): en la TPV el CANDADO de vales es la jerarquía (session → tickets → Order); la PREPARACIÓN del
       // intento (`lockAreaTicketCheckoutForPayment`) va después del arbitraje de la solicitud — ver la prueba siguiente.
       ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy'],

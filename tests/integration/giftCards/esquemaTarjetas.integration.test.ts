@@ -132,7 +132,7 @@ describe('tarjetas de regalo · garantías del esquema', () => {
     })
     // El `connect` anidado de Prisma, en una relación 1:1, primero le QUITA el sobre a la línea anterior
     // (UPDATE … SET "giftCardId" = NULL) y luego se lo pone a la nueva, sin P2002 (medido el 14-oct en A1).
-    // El trigger de 20261017180300 rechaza ese UPDATE: el sobre no se mueve.
+    // El trigger de 20261019000300 rechaza ese UPDATE: el sobre no se mueve.
     await expect(orden([{ ...renglon, giftCard: { connect: { id: s.id } } }])).rejects.toThrow(/TARJETA_LINEA_INMUTABLE/)
     // Soltarlo a mano tampoco.
     await expect(prisma.orderItem.updateMany({ where: { orderId: primera.id }, data: { giftCardId: null } })).rejects.toThrow(

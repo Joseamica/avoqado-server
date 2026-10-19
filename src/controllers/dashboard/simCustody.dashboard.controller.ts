@@ -6,6 +6,7 @@
  *   POST /assign-to-promoter       MANAGER (owning supervisor only)
  *   POST /collect-from-promoter    MANAGER
  *   POST /collect-from-supervisor  OWNER
+ *   POST /collect-from-supervisor-bulk  OWNER (bulk collect, SUPERVISOR_HELD only)
  *   GET  /events                   OWNER | MANAGER (timeline)
  *   POST /reassign-promoter        OWNER | ADMIN (bulk reassign between promoters)
  *   POST /reassign-supervisor      OWNER | ADMIN (bulk reassign between supervisors)
@@ -52,6 +53,11 @@ const CollectBody = z.object({
   reason: z.enum(['STAFF_TERMINATED', 'DAMAGED_SIM', 'SUPERVISOR_COLLECTION'], {
     errorMap: () => ({ message: 'Motivo inválido' }),
   }),
+})
+
+export const CollectFromSupervisorBulkBody = z.object({
+  serialNumbers: z.array(z.string().min(1)).min(1, 'Debes incluir al menos un SIM').max(500, 'Máximo 500 SIMs por solicitud'),
+  reason: CollectBody.shape.reason,
 })
 
 export const ReassignPromoterBody = z.object({
@@ -239,6 +245,37 @@ export async function collectFromSupervisor(req: Request, res: Response, next: N
       actor: { staffId: userId, organizationId: paramOrgId, role },
       serialNumber: parse.data.serialNumber,
       reason: parse.data.reason,
+    })
+    res.status(200).json(result)
+  } catch (err) {
+    if (respondSimCustodyError(res, err)) return
+    next(err)
+  }
+}
+
+/**
+ * Admin bulk-collects SIMs from their Supervisors back to the admin warehouse.
+ * Only SUPERVISOR_HELD SIMs move (Isaac, "opción A") — see custody.service.ts
+ * collectFromSupervisorBulk. Requires: sim-custody:collect-from-supervisor + SERIALIZED_INVENTORY module.
+ */
+export async function collectFromSupervisorBulk(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { userId, orgId, role } = (req as any).authContext ?? {}
+    const { orgId: paramOrgId } = req.params
+    // SUPERADMIN sólo si LO ES en la base, no porque lo diga el token (Codex ronda 3).
+    if (orgId !== paramOrgId && !(await esSuperadminDeLaSesion({ userId, role }))) {
+      const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
+      return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
+    }
+
+    const parse = CollectFromSupervisorBulkBody.safeParse(req.body)
+    if (!parse.success) return mapZodError(res, parse.error)
+
+    const result = await simCustodyService.collectFromSupervisorBulk({
+      actor: { staffId: userId, organizationId: paramOrgId, role },
+      serialNumbers: parse.data.serialNumbers,
+      reason: parse.data.reason,
+      idempotencyRequestId: req.idempotency?.requestId ?? null,
     })
     res.status(200).json(result)
   } catch (err) {

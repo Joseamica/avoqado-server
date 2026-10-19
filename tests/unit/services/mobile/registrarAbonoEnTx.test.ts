@@ -24,7 +24,14 @@ import type { ResolvedTenderCharge } from '@/services/dashboard/tenderType.dashb
 import { prismaMock } from '../../../__helpers__/setup'
 
 const D = (v: number) => new Prisma.Decimal(v)
-const CTX = { venueId: 'venue-1', orderId: 'order-1', effectiveStaffId: 'staff-1', marcarCocina: false }
+const CTX = {
+  venueId: 'venue-1',
+  orderId: 'order-1',
+  effectiveStaffId: 'staff-1',
+  marcarCocina: false,
+  conSesionDeVales: false,
+  rechazoDelPersonal: null,
+}
 // `reconciliationEnabled` va suelto (4º argumento), no dentro de `ctx`: la guardia AST de turnos lo sigue por parámetro.
 const RECONCILIACION = false
 const TENDER_DE_REGALO: ResolvedTenderCharge = {
