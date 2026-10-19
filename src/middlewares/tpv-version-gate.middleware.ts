@@ -10,10 +10,16 @@
  * cannot function until it's updated because every API call fails.
  *
  * **How it works:**
- * 1. TPV sends X-App-Version-Code header with every request
+ * 1. TPV sends X-App-Version-Code and X-App-Version-Name headers with every request
  * 2. Middleware checks if there's a FORCE update with higher versionCode
  * 3. If yes, returns 426 with update info
  * 4. TPV shows ForceUpdateDialog and blocks all functionality
+ *
+ * **Sólo aplica a la app TPV:** las apps POS (Android, Windows, iOS) también mandan
+ * `X-App-Version-Code` (su PROPIO versionCode) pero nunca `X-App-Version-Name`, y llaman a
+ * una ruta de `/tpv` (`POST /tpv/venues/:venueId/wallet/scan`). El mínimo FORCE es de
+ * versiones de la TPV, así que comparar el código de un POS contra él lo frenaría con 426
+ * sin razón. La TPV es la única que manda el nombre de versión: sin él, el control no aplica.
  *
  * **Usage:**
  * Apply to all authenticated TPV routes:
@@ -146,9 +152,14 @@ export async function tpvVersionGate(req: Request, res: Response, next: NextFunc
       return next() // Invalid header, allow request
     }
 
-    // Determine environment from version name header or default to sandbox
-    const versionName = req.headers['x-app-version-name'] as string | undefined
-    const isSandbox = versionName?.toLowerCase().includes('sandbox') ?? true
+    // Sin nombre de versión no es la TPV (los POS mandan su propio código y no el nombre): no aplica
+    const versionName = (req.headers['x-app-version-name'] as string | undefined)?.trim()
+    if (!versionName) {
+      return next()
+    }
+
+    // El ambiente sale del nombre de versión
+    const isSandbox = versionName.toLowerCase().includes('sandbox')
     const environment: AppEnvironment = isSandbox ? 'SANDBOX' : 'PRODUCTION'
 
     // Get minimum required version
