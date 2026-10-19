@@ -69,4 +69,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // (:08/:38 watchdog de pagos, :11/:41 conciliador de Blumon, :13/:43 AngelPay); lectura barata por índice
   // (status, acceptDeadlineAt).
   onlineOrderAcceptanceExpiry: '10,40 * * * * *',
+  // R1/R2 de la campaña 3DS: altas «esperando al banco» sin nadie en la pantalla. Cada 10 min en los minutos 3, 13, 23…
+  // (lejos del :00 y del reconciliador de planes, que corre en */10) y en el segundo :34, libre entre :32 y :35.
+  altasAMedioPago: '34 3-59/10 * * * *',
 } as const

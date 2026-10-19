@@ -15841,7 +15841,8 @@ model ProductGroup {
   modifierGroups ProductGroupModifierGroup[]
   products       Product[]
 
-  @@unique([venueId, source, externalId])
+  /// (venueId, source, externalId) es único sólo entre vivas: índice parcial "ProductGroup_venueId_source_externalId_vivo_key"
+  /// de la migración 20261018120000. Prisma no expresa el WHERE, así que no se declara aquí (como StaffPayTipWindow_una_abierta).
   @@index([venueId, deletedAt])
 }
 
@@ -19643,6 +19644,8 @@ model ShopifyVariantLink {
   connectChoiceById         String?
   /// Último barrido de catálogo que vio esta variante; las bajas se deciden sólo al terminar un barrido completo.
   lastSeenSweepId   Int?
+  /// Lo que Shopify dice del catálogo de esta variante: { title, options: [{ name, value }], productImage, variantImage }.
+  shopifyCatalog    Json?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 

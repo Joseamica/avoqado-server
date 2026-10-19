@@ -13,28 +13,37 @@ import { encenderBajoCandados, prepararEncendido } from '../fiscal/encendidoIva.
 import { isDeadlockError } from '../../utils/serializableRetry'
 import { ETIQUETA_DE_IVA, TRATAMIENTOS_OFRECIDOS_V1, tuplaDesdeTratamiento } from '../fiscal/ivaTratamiento'
 import { ensureQuantityInventoryRow } from '../dashboard/quantityInventoryRow'
-import { GTIN_MAX_LENGTH, SKU_REGEX } from '../../schemas/dashboard/menu.schema'
+import { SKU_REGEX } from '../../schemas/dashboard/menu.schema'
 import {
   MAX_OPTIONS,
   MAX_VALUES_PER_OPTION,
   MAX_VARIANTS_PER_GROUP,
-  VARIANT_NAME_SEPARATOR,
   assertAllowedGroupType,
-  isWholeCents,
   normalizeOptions,
   suggestSku,
   variantKeyOf,
   variantName,
 } from './variantNaming'
-import { PRODUCT_GROUP_WRITER_FLAG } from './variantErrors'
+import {
+  assertFamilyIdentityFree,
+  assertGroupNameFree,
+  createGroupTx,
+  groupContextOf,
+  loadGroupContextTx,
+  loadGroupForWrite,
+  markProductGroupWriter,
+  resolveVariantValues,
+  revisarFilasContraBase,
+  validateVariantRow,
+} from './groupWriterTx'
+
+// Se movieron a groupWriterTx (bloque 5); se re-exportan para quien ya los importaba de aquí.
+export { assertGroupNameFree, markProductGroupWriter }
 
 /** Las archivadas también reciben las copias del padre y pueden acumularse: se recorren por páginas, nunca con un tope que
  *  deje unas sí y otras no (auditoría R6). */
 export const PAGE = 500
 const TX_OPTIONS = { timeout: 30_000, maxWait: 10_000 }
-// Mismos topes que el esquema HTTP del plan: el motor no confía en que todo llamador pase por él.
-const MAX_MONEY = 10_000_000
-const MAX_INITIAL_STOCK = 1_000_000
 
 export interface VariantRowInput {
   values: string[]
@@ -44,6 +53,8 @@ export interface VariantRowInput {
   gtin?: string | null
   initialStock?: number | null
   variantImageUrl?: string | null
+  /** Manda sobre `GroupContext.trackInventory` para esta fila (import: cada fila pide o no inventario; bloque 5). */
+  trackInventory?: boolean
 }
 export interface CreateProductWithVariantsInput {
   name: string
@@ -106,11 +117,6 @@ export interface GroupContext {
   trackInventory: boolean
   createdById: string | null
   options: GroupOptionsLoaded[]
-}
-
-/** Sin esta marca, el trigger "Product_zz_grupo_escritor_unico" rechaza tocar los campos del padre en una variante. */
-export async function markProductGroupWriter(tx: Prisma.TransactionClient): Promise<void> {
-  await tx.$queryRaw`SELECT set_config(${PRODUCT_GROUP_WRITER_FLAG}, 'on', true)`
 }
 
 /**
@@ -184,14 +190,6 @@ async function allocateSkus(
   })
 }
 
-async function assertGtinsFree(tx: Prisma.TransactionClient, venueId: string, gtins: string[]): Promise<void> {
-  for (const g of gtins) if (g.length > GTIN_MAX_LENGTH) throw new BadRequestError(`El código «${g}» pasa de ${GTIN_MAX_LENGTH} dígitos.`)
-  if (new Set(gtins).size !== gtins.length) throw new BadRequestError('Hay códigos de barras repetidos en las variantes.')
-  if (!gtins.length) return
-  const dup = await tx.product.findFirst({ where: { venueId, gtin: { in: gtins } }, select: { name: true, gtin: true } })
-  if (dup) throw new ConflictError(`El código ${dup.gtin} ya lo tiene «${dup.name}».`)
-}
-
 /** Mismo patrón que el asistente (productWizard.setupSimpleStockStep3): el primer saldo deja su movimiento en el kardex. */
 async function setInitialStock(tx: Prisma.TransactionClient, productId: string, quantity: number, staffId: string | null): Promise<void> {
   if (!(quantity > 0)) return
@@ -211,7 +209,6 @@ async function setInitialStock(tx: Prisma.TransactionClient, productId: string, 
   })
 }
 
-const enRango = (x: unknown, max: number) => typeof x === 'number' && Number.isFinite(x) && x >= 0 && x <= max
 const igual = (a: string, b: string) => a.trim().toLocaleLowerCase('es-MX') === b.trim().toLocaleLowerCase('es-MX')
 
 /** v1 (spec D8): un negocio con catálogo maestro no tiene variantes. Se impide que convivan (la publicación del catálogo
@@ -223,38 +220,6 @@ export async function assertNoMasterCatalog(tx: Prisma.TransactionClient, venueI
       'Este negocio usa el catálogo maestro; las variantes todavía no están disponibles aquí.',
       'PRODUCT_VARIANTS_MASTER_CATALOG',
     )
-}
-
-const NAME_PAGE = 1000
-
-/**
- * Una familia VIVA por nombre en el negocio, sin importar mayúsculas ni espacios de los extremos (/full-testing I-1: un doble
- * clic o una confirmación repetida del MCP creaban otra con SKUs «-2»). Va DESPUÉS del cerco del negocio, que forma en fila las
- * altas: la segunda ya ve la primera. Una archivada no aparta el nombre.
- */
-export async function assertGroupNameFree(
-  tx: Prisma.TransactionClient,
-  venueId: string,
-  name: string,
-  exceptGroupId?: string,
-): Promise<void> {
-  // lower() de Postgres sigue el locale de la base (con «C» no baja «É»): se acota por largo y se compara aquí, como `igual`.
-  // Por páginas de 1,000 ordenadas por id hasta agotar los candidatos: ninguno queda sin revisar (Codex, ronda 4).
-  const largo = [...name.trim()].length
-  let cursor = ''
-  for (;;) {
-    const pagina = await tx.$queryRaw<Array<{ id: string; name: string }>>`
-      SELECT id, name FROM "ProductGroup"
-      WHERE "venueId" = ${venueId} AND "deletedAt" IS NULL AND id <> ${exceptGroupId ?? ''}
-        AND char_length(btrim(name)) = ${largo} AND id > ${cursor}
-      ORDER BY id
-      LIMIT ${NAME_PAGE}`
-    const dup = pagina.find(g => igual(g.name, name))
-    if (dup)
-      throw new ConflictError(`Ya existe la familia «${dup.name.trim()}». Ábrela para agregarle variantes.`, 'PRODUCT_GROUP_NAME_TAKEN')
-    if (pagina.length < NAME_PAGE) return
-    cursor = pagina[pagina.length - 1].id
-  }
 }
 
 /**
@@ -274,42 +239,15 @@ export async function createVariantRows(
   // transacción es inofensivo: toma el mismo cerco compartido.
   await assertLegacyCatalogGovernanceForVenue(tx, { venueId: ctx.venueId, operation: 'CREATE', willBeVendable: true, actor })
   await assertNoMasterCatalog(tx, ctx.venueId)
+  // Las mismas validaciones que el import usa fila por fila (groupWriterTx), con su mismo texto y en el mismo orden.
   const resueltas = rows.map(r => {
-    if (r.values.length !== ctx.options.length)
-      throw new BadRequestError(`Cada variante necesita un valor por opción (${ctx.options.map(o => o.name).join(', ')}).`)
-    const valores = r.values.map((v, k) => {
-      const hit = ctx.options[k].values.find(x => igual(x.value, v))
-      if (!hit) throw new BadRequestError(`«${v}» no es un valor de ${ctx.options[k].name}.`)
-      return hit
-    })
-    const combinacion = valores.map(v => v.value).join(VARIANT_NAME_SEPARATOR)
-    // Como el producto suelto: precio mayor a 0 y centavos exactos; nada se redondea en silencio (I-3).
-    if (!(enRango(r.price, MAX_MONEY) && r.price > 0))
-      throw new BadRequestError(`El precio de «${combinacion}» debe ser mayor a 0 y de hasta 10,000,000.`)
-    if (!isWholeCents(r.price)) throw new BadRequestError(`El precio de «${combinacion}» admite hasta 2 decimales.`)
-    // Igual que el producto suelto (menu.schema.ts: cost positive): un costo 0 haría que la variante no se pudiera volver a guardar.
-    if (r.cost != null && (!enRango(r.cost, MAX_MONEY) || r.cost <= 0))
-      throw new BadRequestError(`El costo de «${combinacion}» debe ser mayor a 0 y hasta 10,000,000.`)
-    if (r.cost != null && !isWholeCents(r.cost)) throw new BadRequestError(`El costo de «${combinacion}» admite hasta 2 decimales.`)
-    if (r.initialStock != null && !(Number.isInteger(r.initialStock) && enRango(r.initialStock, MAX_INITIAL_STOCK)))
-      throw new BadRequestError(`El inventario inicial de «${combinacion}» debe ser un número entero entre 0 y 1,000,000.`)
-    return { row: r, valores, combinacion, key: variantKeyOf(valores.map(x => x.id)) }
+    const v = resolveVariantValues(r.values, ctx)
+    const motivo = validateVariantRow(r, ctx) // si `v` es un motivo, éste es el mismo
+    if (typeof v === 'string' || motivo) throw new BadRequestError(motivo!)
+    return { row: r, ...v }
   })
-  const keys = resueltas.map(r => r.key)
-  if (new Set(keys).size !== keys.length) throw new BadRequestError('Hay combinaciones repetidas.')
-  const ya = await tx.product.findFirst({
-    where: { productGroupId: ctx.groupId, variantKey: { in: keys } },
-    select: { name: true, variantKey: true, deletedAt: true },
-  })
-  // Una archivada no sale en la lista viva: el dueño necesita saber que ya existe ahí (I-9).
-  if (ya?.deletedAt)
-    throw new ConflictError(`La combinación «${resueltas.find(r => r.key === ya.variantKey)!.combinacion}» ya existe, archivada.`)
-  if (ya) throw new ConflictError(`Esa combinación ya existe: «${ya.name}».`)
-  await assertGtinsFree(
-    tx,
-    ctx.venueId,
-    rows.map(r => r.gtin?.trim()).filter((g): g is string => !!g),
-  )
+  const { primera } = await revisarFilasContraBase(tx, ctx, rows)
+  if (primera) throw primera.conflicto ? new ConflictError(primera.motivo) : new BadRequestError(primera.motivo)
   const skus = await allocateSkus(
     tx,
     ctx.venueId,
@@ -349,7 +287,7 @@ export async function createVariantRows(
         displayOrder: displayOrderStart + i,
         active: true,
         createdById: ctx.createdById,
-        ...(ctx.trackInventory ? { trackInventory: true, inventoryMethod: 'QUANTITY' as const } : {}),
+        ...((r.row.trackInventory ?? ctx.trackInventory) ? { trackInventory: true, inventoryMethod: 'QUANTITY' as const } : {}),
         modifierGroups: ctx.modifierGroupIds.length
           ? { create: ctx.modifierGroupIds.map((groupId, index) => ({ groupId, displayOrder: index })) }
           : undefined,
@@ -358,7 +296,8 @@ export async function createVariantRows(
       select: { id: true, venueId: true, trackInventory: true, inventoryMethod: true },
     })
     await ensureQuantityInventoryRow(tx, creado)
-    if (ctx.trackInventory && r.row.initialStock) await setInitialStock(tx, creado.id, r.row.initialStock, ctx.createdById)
+    if ((r.row.trackInventory ?? ctx.trackInventory) && r.row.initialStock)
+      await setInitialStock(tx, creado.id, r.row.initialStock, ctx.createdById)
     ids.push(creado.id)
   }
   return ids
@@ -426,58 +365,26 @@ export async function createProductWithVariants(
       const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
       const iva = normalizarIvaDeProducto({ ivaTratamiento: input.ivaTratamiento }, null, encendido)
       await assertNoMasterCatalog(tx, venueId)
-      await assertGroupNameFree(tx, venueId, name)
-      await markProductGroupWriter(tx)
-      const group = await tx.productGroup.create({
-        data: {
-          venueId,
-          name,
-          description: input.description ?? null,
-          imageUrl: input.imageUrl ?? null,
-          categoryId: input.categoryId,
-          type,
-          printStationId: input.printStationId ?? null,
-          satProductKey: input.satProductKey ?? null,
-          satUnitKey: input.satUnitKey ?? null,
-          ...(iva.ivaTratamiento ? { ivaTratamiento: iva.ivaTratamiento } : {}),
-          options: {
-            create: options.map((o, i) => ({
-              name: o.name,
-              position: i,
-              values: { create: o.values.map((value, j) => ({ value, position: j })) },
-            })),
-          },
-          modifierGroups: modifierGroupIds.length
-            ? { create: modifierGroupIds.map((modifierGroupId, i) => ({ modifierGroupId, displayOrder: i })) }
-            : undefined,
-        },
-        include: { options: { orderBy: { position: 'asc' }, include: { values: { orderBy: { position: 'asc' } } } } },
+      // Sin IVA pedido, el de siempre (16 %: el valor por omisión de la columna).
+      const { groupId } = await createGroupTx(tx, venueId, {
+        name,
+        description: input.description ?? null,
+        imageUrl: input.imageUrl ?? null,
+        categoryId: input.categoryId,
+        type,
+        printStationId: input.printStationId ?? null,
+        satProductKey: input.satProductKey ?? null,
+        satUnitKey: input.satUnitKey ?? null,
+        ivaTratamiento: iva.ivaTratamiento ?? IvaTratamiento.IVA_16,
+        modifierGroupIds,
+        source: ProductGroupSource.MANUAL,
+        options,
       })
+      const ctx = await loadGroupContextTx(tx, groupId, { trackInventory: input.trackInventory === true, createdById })
       const maxOrder = await tx.product.findFirst({ where: { venueId }, orderBy: { displayOrder: 'desc' }, select: { displayOrder: true } })
-      const productIds = await createVariantRows(
-        tx,
-        {
-          venueId,
-          groupId: group.id,
-          parentName: name,
-          description: group.description,
-          imageUrl: group.imageUrl,
-          categoryId: group.categoryId,
-          type,
-          printStationId: group.printStationId,
-          satProductKey: group.satProductKey,
-          satUnitKey: group.satUnitKey,
-          iva,
-          modifierGroupIds,
-          trackInventory: input.trackInventory === true,
-          createdById,
-          options: group.options,
-        },
-        input.variants,
-        (maxOrder?.displayOrder ?? 0) + 1,
-        actor,
-      )
-      return { groupId: group.id, productIds, categoryId: group.categoryId }
+      // `iva` tal cual lo pidió el alta: sin IVA pedido, la variante toma el valor por omisión de su columna (como siempre).
+      const productIds = await createVariantRows(tx, { ...ctx, iva }, input.variants, (maxOrder?.displayOrder ?? 0) + 1, actor)
+      return { groupId, productIds, categoryId: ctx.categoryId }
     }, TX_OPTIONS)
   } catch (e) {
     traducirErrorDeIva(e)
@@ -546,10 +453,12 @@ export async function updateProductGroup(
       await lockGroup(tx, venueId, groupId)
       const actual = await tx.productGroup.findUniqueOrThrow({
         where: { id: groupId },
-        select: { ivaTratamiento: true, categoryId: true, name: true },
+        select: { ivaTratamiento: true, categoryId: true, name: true, source: true, externalId: true },
       })
       // Sólo un cambio REAL de nombre se revisa: el formulario reenvía el suyo y no debe chocar con un homónimo previo (I-1).
-      if (name && !igual(name, actual.name)) await assertGroupNameFree(tx, venueId, name, groupId)
+      // La misma política que al crear (bloque 5): una familia SHOPIFY no aparta nombre, así que renombrarla no choca con una MANUAL.
+      if (name && !igual(name, actual.name))
+        await assertFamilyIdentityFree(tx, venueId, { source: actual.source, name, externalId: actual.externalId }, groupId)
       if (input.categoryId && input.categoryId !== actual.categoryId) categoriaAnterior = [actual.categoryId]
 
       let iva: { ivaTratamiento?: IvaTratamiento } = {}
@@ -663,15 +572,6 @@ export async function updateProductGroup(
   )
   return result
 }
-
-const loadGroupForWrite = (tx: Prisma.TransactionClient, groupId: string) =>
-  tx.productGroup.findUniqueOrThrow({
-    where: { id: groupId },
-    include: {
-      options: { orderBy: { position: 'asc' }, include: { values: { orderBy: { position: 'asc' } } } },
-      modifierGroups: { orderBy: { displayOrder: 'asc' }, select: { modifierGroupId: true } },
-    },
-  })
 
 /**
  * Agrega valores y ejes nuevos y crea SÓLO las combinaciones nuevas (spec §6). Un eje nuevo exige el valor que toman las
@@ -789,23 +689,7 @@ export async function addVariants(
         })
         productIds = await createVariantRows(
           tx,
-          {
-            venueId,
-            groupId,
-            parentName: group.name,
-            description: group.description,
-            imageUrl: group.imageUrl,
-            categoryId: group.categoryId,
-            type: group.type,
-            printStationId: group.printStationId,
-            satProductKey: group.satProductKey,
-            satUnitKey: group.satUnitKey,
-            iva: { ivaTratamiento: group.ivaTratamiento },
-            modifierGroupIds: group.modifierGroups.map(m => m.modifierGroupId),
-            trackInventory: muestra?.trackInventory === true,
-            createdById,
-            options: group.options,
-          },
+          groupContextOf(group, { trackInventory: muestra?.trackInventory === true, createdById }),
           input.variants,
           (maxOrder?.displayOrder ?? 0) + 1,
           actor,

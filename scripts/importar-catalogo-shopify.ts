@@ -24,6 +24,10 @@
  *
  * Applying runs `importMenu` in chunks of CHUNK_SIZE products (one transaction each): re-running the same command after
  * a failure is safe — what was already loaded is reported as YA_EXISTE, the rest is loaded, nothing is duplicated.
+ *
+ * A Handle with real options travels as a `family` (column `familia` of the report): the server groups its variants when the
+ * venue has Variantes. A row it cannot import (code in use, name taken…) does NOT abort its chunk: after applying, the report is
+ * rewritten with those rows as RECHAZADO_FAMILIA plus their reason, and the summary says «Aplicado con N filas rechazadas».
  */
 import fs from 'node:fs'
 import Papa from 'papaparse'
@@ -34,7 +38,9 @@ import {
   parsePriceListCsv,
   type ShopifyPricing,
   type ShopifyProblemCode,
+  type ShopifyVariant,
 } from '../src/services/dashboard/shopifyCatalogImport'
+import type { ImportMenuData } from '../src/services/dashboard/menu.dashboard.service'
 
 const CHUNK_SIZE = 50
 
@@ -55,6 +61,94 @@ const PROBLEMS: Record<ShopifyProblemCode, string> = {
   CODIGO_EN_OTRO_PRODUCTO: 'se importa SIN código de barras: otro producto del negocio ya lo tiene',
   CODIGO_INVALIDO: 'se importa SIN código de barras: notación científica (lo dañó una hoja de cálculo) o más de 14 caracteres',
   VARIOS_CODIGOS: 'se importa con el PRIMER código de barras: traía varios',
+  FAMILIA_HOMONIMA: 'se importa SUELTO: otro producto del archivo se llama igual (familia homónima); agrúpalo con tu archivo',
+}
+
+/** Una fila de familia que el servicio no importó, con el lote en que pasó. */
+export interface FilaRechazada {
+  lote: number
+  sku: string
+  name: string
+  motivo: string
+}
+/** Lo que el script lee de `importMenu` (el servicio devuelve TODAS las rechazadas; sólo el controlador HTTP recorta a 50). */
+export interface ResultadoDeLote {
+  stats: {
+    products: number
+    productsKeptOnRecipe: number
+    productsKeptUntracked: number
+    filasDeFamiliaRechazadas: { total: number; ejemplos: Array<{ sku: string; name: string; motivo: string }> }
+  }
+}
+
+/** El reporte del operador: una fila por variante. `rechazos` (sku → motivo) son las que el servicio no importó al aplicar. */
+export function reporteCsv(
+  variants: ShopifyVariant[],
+  outcome: (sku: string, omitted: boolean) => string,
+  rechazos: ReadonlyMap<string, string>,
+): string {
+  return Papa.unparse(
+    variants.map(variant => {
+      const rechazo = rechazos.get(variant.sku)
+      return {
+        estado: rechazo !== undefined ? 'RECHAZADO_FAMILIA' : outcome(variant.sku, variant.omitted),
+        motivos: [...variant.problems.map(problem => problem.code), ...(rechazo !== undefined ? ['FAMILIA_RECHAZADA'] : [])].join(' '),
+        handle: variant.handle,
+        familia: variant.family?.key ?? '',
+        sku: variant.sku,
+        nombre: variant.name,
+        categoria: variant.category,
+        precio_shopify: variant.sourcePrice,
+        precio_mxn: variant.price ?? '',
+        codigo_barras: variant.barcode ?? '',
+        imagen: variant.imageUrl ?? '',
+        detalle: [
+          ...variant.problems.map(problem => problem.detail),
+          ...(rechazo !== undefined ? [`Rechazada por el servidor: ${rechazo}`] : []),
+        ].join(' | '),
+      }
+    }),
+  )
+}
+
+/**
+ * Aplica los lotes uno por uno (una transacción cada uno) y junta las filas de familia rechazadas de TODOS: un lote puede
+ * importarse a medias sin lanzar error. `importar` es `importMenu` ya con el negocio y el autor puestos.
+ */
+export async function aplicarLotes(
+  chunks: ImportMenuData[],
+  importar: (chunk: ImportMenuData) => Promise<ResultadoDeLote>,
+  log: (line: string) => void = console.log,
+): Promise<FilaRechazada[]> {
+  const rechazadas: FilaRechazada[] = []
+  for (const [index, chunk] of chunks.entries()) {
+    try {
+      const { stats } = await importar(chunk)
+      const kept = stats.productsKeptOnRecipe + stats.productsKeptUntracked
+      const malas = stats.filasDeFamiliaRechazadas.ejemplos
+      log(
+        `  lote ${index + 1}/${chunks.length}: ${stats.products} productos` +
+          (kept ? ` (${kept} se quedaron como estaban: receta o apagado a mano)` : '') +
+          (malas.length ? ` · ${malas.length} fila(s) de familia RECHAZADA(S)` : ''),
+      )
+      for (const mala of malas) {
+        rechazadas.push({ lote: index + 1, ...mala })
+        log(`      ✗ ${mala.sku} (${mala.name}): ${mala.motivo}`)
+      }
+    } catch (error) {
+      console.error(`\n🔴 Falló el lote ${index + 1}/${chunks.length}; los ${index} anteriores sí quedaron cargados.`)
+      console.error('   Corre de nuevo el MISMO comando: lo ya cargado sale como YA_EXISTE y se carga lo que faltó.')
+      throw error
+    }
+  }
+  return rechazadas
+}
+
+export function resumenFinal(lotes: number, bitacora: number, rechazadas: FilaRechazada[]): string {
+  return rechazadas.length
+    ? `\n⚠️  Aplicado con ${rechazadas.length} ${rechazadas.length === 1 ? 'fila rechazada' : 'filas rechazadas'} (lo demás quedó cargado): ` +
+        `${lotes} lote(s); bitácora: ${bitacora} registro(s) MENU_IMPORTED. Cada rechazo, con su motivo, está en el reporte (estado RECHAZADO_FAMILIA).`
+    : `\n✅ Aplicado: ${lotes} lote(s); bitácora: ${bitacora} registro(s) MENU_IMPORTED.`
 }
 
 function flag(name: string): string | undefined {
@@ -136,24 +230,7 @@ async function main() {
       omitted ? 'OMITIDO' : !known.has(sku) ? 'CREAR' : known.get(sku)!.archived ? 'RESTAURAR' : 'ACTUALIZAR'
 
     const reportPath = `${file.replace(/\.csv$/i, '')}.reporte.csv`
-    fs.writeFileSync(
-      reportPath,
-      Papa.unparse(
-        variants.map(variant => ({
-          estado: outcome(variant.sku, variant.omitted),
-          motivos: variant.problems.map(problem => problem.code).join(' '),
-          handle: variant.handle,
-          sku: variant.sku,
-          nombre: variant.name,
-          categoria: variant.category,
-          precio_shopify: variant.sourcePrice,
-          precio_mxn: variant.price ?? '',
-          codigo_barras: variant.barcode ?? '',
-          imagen: variant.imageUrl ?? '',
-          detalle: variant.problems.map(problem => problem.detail).join(' | '),
-        })),
-      ),
-    )
+    fs.writeFileSync(reportPath, reporteCsv(variants, outcome, new Map()))
 
     const count = (state: string) => variants.filter(variant => outcome(variant.sku, variant.omitted) === state).length
     console.log(`\nVariantes en el archivo: ${variants.length}`)
@@ -161,6 +238,8 @@ async function main() {
     console.log(`  a actualizar: ${count('ACTUALIZAR')}`)
     if (count('RESTAURAR')) console.log(`  a restaurar:  ${count('RESTAURAR')} (estaban archivados: vuelven a la venta)`)
     console.log(`  omitidas:     ${count('OMITIDO')}`)
+    const enFamilia = new Set(variants.filter(variant => !variant.omitted && variant.family).map(variant => variant.family!.key))
+    if (enFamilia.size) console.log(`  en familia:   ${enFamilia.size} familia(s) (las agrupa el servidor si el negocio tiene Variantes)`)
     const byCode = new Map<ShopifyProblemCode, number>()
     for (const problem of variants.flatMap(variant => variant.problems)) byCode.set(problem.code, (byCode.get(problem.code) ?? 0) + 1)
     if (byCode.size) console.log('\nProblemas:')
@@ -191,26 +270,15 @@ async function main() {
     const { resolveLegacyCatalogActor } = await import('../src/services/master-catalog/catalogGovernance.service')
     const actor = resolveLegacyCatalogActor(staffId!, false)
     const startedAt = new Date()
-    for (const [index, chunk] of chunks.entries()) {
-      try {
-        const result = await importMenu(venueId, chunk, actor)
-        const kept = result.stats.productsKeptOnRecipe + result.stats.productsKeptUntracked
-        console.log(
-          `  lote ${index + 1}/${chunks.length}: ${result.stats.products} productos` +
-            (kept ? ` (${kept} se quedaron como estaban: receta o apagado a mano)` : ''),
-        )
-      } catch (error) {
-        console.error(`\n🔴 Falló el lote ${index + 1}/${chunks.length}; los ${index} anteriores sí quedaron cargados.`)
-        console.error('   Corre de nuevo el MISMO comando: lo ya cargado sale como YA_EXISTE y se carga lo que faltó.')
-        throw error
-      }
-    }
+    const rechazadas = await aplicarLotes(chunks, chunk => importMenu(venueId, chunk, actor))
 
     // importMenu does not await its ActivityLog write; wait for it before the process exits, so the audit trail is complete.
     const logged = () => prisma.activityLog.count({ where: { venueId, action: 'MENU_IMPORTED', createdAt: { gte: startedAt } } })
     for (let attempt = 0; attempt < 50 && (await logged()) < chunks.length; attempt++)
       await new Promise(resolve => setTimeout(resolve, 100))
-    console.log(`\n✅ Aplicado: ${chunks.length} lote(s); bitácora: ${await logged()} registro(s) MENU_IMPORTED.`)
+    if (rechazadas.length)
+      fs.writeFileSync(reportPath, reporteCsv(variants, outcome, new Map(rechazadas.map(fila => [fila.sku, fila.motivo]))))
+    console.log(resumenFinal(chunks.length, await logged(), rechazadas))
   } finally {
     await prisma.$disconnect()
   }

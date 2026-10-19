@@ -1,4 +1,4 @@
-import { IvaTratamiento, Prisma, ProductType } from '@prisma/client'
+import { IvaTratamiento, Prisma, ProductGroupSource, ProductType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import type { CatalogActor } from '../../types/master-catalog'
@@ -14,7 +14,6 @@ import {
   VARIANT_NAME_SEPARATOR,
   assertAllowedGroupType,
   normalizeOptions,
-  variantKeyOf,
   variantName,
 } from './variantNaming'
 import {
@@ -24,8 +23,8 @@ import {
   assertModifierGroupsInVenue,
   assertNoMasterCatalog,
   assertNotDemoCategory,
-  markProductGroupWriter,
 } from './productGroup.service'
+import { attachProductsTx, createGroupTx, loadGroupContextTx, lockProductsNowait, transaccionDeAgrupar } from './groupWriterTx'
 
 export interface GroupExistingInput {
   name: string
@@ -90,6 +89,70 @@ const ORIGENES_AGRUPABLES = ['AVOQADO', 'SHOPIFY']
 const TX_OPTIONS = { timeout: 30_000, maxWait: 10_000 }
 const igual = (a: string, b: string) => a.trim().toLocaleLowerCase('es-MX') === b.trim().toLocaleLowerCase('es-MX')
 
+/** Una familia creada desde «Desde Shopify» (bloque 5): guarda su llave y no aparta nombre (V4). */
+export interface OrigenShopify {
+  source: 'SHOPIFY'
+  externalId: string
+}
+
+/** Lo que un producto cambia al tomar los campos del padre (el «qué cambia» de la vista previa). */
+export interface MiembroParaCambios {
+  name: string
+  categoryId: string
+  type: ProductType
+  ivaTratamiento: IvaTratamiento
+  description: string | null
+  printStationId: string | null
+  satProductKey: string | null
+  satUnitKey: string | null
+  ajusteDeliveryAlgunaVez: boolean
+  taxRate: Prisma.Decimal | number
+  objetoImp: string
+  modifierGroups: Array<{ groupId: string }>
+}
+
+/**
+ * Los cambios de un miembro al tomar los campos del padre, y la regla del IVA POR MIEMBRO con su estado vigente (auditoría A1):
+ * con ajuste de Uber o Rappi no cambia de IVA; si cambia, `normalizarIvaDeProducto` como al editar ese producto suelto. La usan la
+ * vista previa del bloque 2 (CREATE) y «Agregar a X» de «Desde Shopify» (ADD), antes de `attachProductsTx`, que no lo revisa.
+ */
+export function cambiosDeMiembro(
+  p: MiembroParaCambios,
+  parent: GroupExistingPreview['parent'],
+  newName: string,
+  encendido: boolean,
+): string[] {
+  const changes: string[] = []
+  if (p.name !== newName) changes.push(`Nombre: «${p.name}» → «${newName}»`)
+  if (p.categoryId !== parent.categoryId) changes.push('Categoría: toma la del producto padre')
+  if (p.ivaTratamiento !== parent.ivaTratamiento)
+    changes.push(`IVA: ${ETIQUETA_DE_IVA[p.ivaTratamiento]} → ${ETIQUETA_DE_IVA[parent.ivaTratamiento]}`)
+  // Entra en la huella: una clave SAT editada después de la vista previa la invalida.
+  if ((p.satProductKey ?? null) !== parent.satProductKey || (p.satUnitKey ?? null) !== parent.satUnitKey)
+    changes.push('Clave SAT: toma la del producto padre')
+  if (p.type !== parent.type) changes.push('Tipo: toma el del producto')
+  if ((p.description ?? null) !== (parent.description ?? null)) changes.push('Descripción: toma la del producto')
+  if ((p.printStationId ?? null) !== (parent.printStationId ?? null)) changes.push('Impresora: toma la del producto')
+  if (p.modifierGroups.map(x => x.groupId).join(',') !== parent.modifierGroupIds.join(',')) changes.push('Extras: toma los del producto')
+  if (p.ivaTratamiento !== parent.ivaTratamiento) {
+    if (p.ajusteDeliveryAlgunaVez)
+      throw new ConflictError(`«${p.name}» ya tuvo un ajuste de Uber o Rappi y no puede cambiar de IVA. Agrúpalo con el mismo IVA.`)
+    normalizarIvaDeProducto(
+      { ivaTratamiento: parent.ivaTratamiento },
+      { ivaTratamiento: p.ivaTratamiento, taxRate: Number(p.taxRate), objetoImp: p.objetoImp },
+      encendido,
+    )
+  }
+  return changes
+}
+
+/** Productos de otro sistema o de demostración no se agrupan (ni a mano ni desde Shopify). Null = sí se puede. */
+export function motivoNoAgrupable(p: { name: string; originSystem: unknown; isDemo: boolean }): string | null {
+  if (!ORIGENES_AGRUPABLES.includes(String(p.originSystem))) return `«${p.name}» viene de otro sistema y no se puede agrupar.`
+  if (p.isDemo) return `«${p.name}» es de demostración; empieza a vender con tus productos antes de agruparlos.`
+  return null
+}
+
 /** Checks without the database; apply needs the ids before it locks them. */
 function checkShape(input: GroupExistingInput) {
   const name = input.name.trim()
@@ -103,7 +166,11 @@ function checkShape(input: GroupExistingInput) {
   return { name, options, ids }
 }
 
-async function buildPreview(db: Prisma.TransactionClient, venueId: string, input: GroupExistingInput) {
+/**
+ * `shopify`: modo «Desde Shopify» (bloque 5): los miembros los eligió el servidor con lo que guardó cada pareja, así que se
+ * admiten productos ligados, y la familia SHOPIFY no aparta nombre (su identidad la revisa `createGroupTx` por su llave).
+ */
+export async function buildPreview(db: Prisma.TransactionClient, venueId: string, input: GroupExistingInput, shopify?: OrigenShopify) {
   const { name, options, ids } = checkShape(input)
   const encendido = (await db.venueIvaPorProducto.count({ where: { venueId } })) > 0
   const productos = await db.product.findMany({
@@ -138,15 +205,18 @@ async function buildPreview(db: Prisma.TransactionClient, venueId: string, input
   for (const p of productos) {
     if (p.deletedAt) throw new ConflictError(`«${p.name}» está archivado; restáuralo antes de agruparlo.`)
     if (p.productGroupId) throw new ConflictError(`«${p.name}» ya es variante de otro producto.`)
-    if (!ORIGENES_AGRUPABLES.includes(String(p.originSystem)))
-      throw new ConflictError(`«${p.name}» viene de otro sistema y no se puede agrupar.`)
-    // Bloque 5 (spec §18): quién manda nombre y foto entre Shopify y el padre se decide en la conexión (auditoría A12).
-    if (p.shopifyVariantLink) throw new ConflictError(`«${p.name}» está ligado a Shopify; se agrupará desde la conexión con Shopify.`)
-    if (p.isDemo) throw new ConflictError(`«${p.name}» es de demostración; empieza a vender con tus productos antes de agruparlos.`)
+    // Bloque 5 (B7): lo ligado a Shopify se agrupa con la propuesta que arma el servidor (todas sus tallas, nunca media familia).
+    if (p.shopifyVariantLink && !shopify)
+      throw new ConflictError(
+        `«${p.name}» está ligado a Shopify; se agrupa desde la pestaña Desde Shopify.`,
+        'PRODUCT_GROUP_SHOPIFY_LINKED',
+      )
+    const motivo = motivoNoAgrupable(p)
+    if (motivo) throw new ConflictError(motivo)
     assertAllowedGroupType(p.type)
   }
   // Vista previa y aplicar (éste ya dentro del cerco del negocio): no se crea una segunda familia viva con el mismo nombre (I-1).
-  await assertGroupNameFree(db, venueId, name)
+  if (!shopify) await assertGroupNameFree(db, venueId, name)
 
   const primero = porId.get(input.members[0].productId)!
   const ivaElegido = input.ivaTratamiento ?? primero.ivaTratamiento
@@ -204,28 +274,7 @@ async function buildPreview(db: Prisma.TransactionClient, venueId: string, input
     vistas.add(combo)
     const p = porId.get(m.productId)!
     const newName = variantName(name, values)
-    const changes: string[] = []
-    if (p.name !== newName) changes.push(`Nombre: «${p.name}» → «${newName}»`)
-    if (p.categoryId !== parent.categoryId) changes.push('Categoría: toma la del producto padre')
-    if (p.ivaTratamiento !== parent.ivaTratamiento)
-      changes.push(`IVA: ${ETIQUETA_DE_IVA[p.ivaTratamiento]} → ${ETIQUETA_DE_IVA[parent.ivaTratamiento]}`)
-    // Entra en la huella: una clave SAT editada después de la vista previa la invalida.
-    if ((p.satProductKey ?? null) !== parent.satProductKey || (p.satUnitKey ?? null) !== parent.satUnitKey)
-      changes.push('Clave SAT: toma la del producto padre')
-    if (p.type !== parent.type) changes.push('Tipo: toma el del producto')
-    if ((p.description ?? null) !== (parent.description ?? null)) changes.push('Descripción: toma la del producto')
-    if ((p.printStationId ?? null) !== (parent.printStationId ?? null)) changes.push('Impresora: toma la del producto')
-    if (p.modifierGroups.map(x => x.groupId).join(',') !== parent.modifierGroupIds.join(',')) changes.push('Extras: toma los del producto')
-    if (p.ivaTratamiento !== parent.ivaTratamiento) {
-      if (p.ajusteDeliveryAlgunaVez)
-        throw new ConflictError(`«${p.name}» ya tuvo un ajuste de Uber o Rappi y no puede cambiar de IVA. Agrúpalo con el mismo IVA.`)
-      // IVA por miembro, con SU estado vigente (auditoría A1): la misma regla que editar ese producto suelto.
-      normalizarIvaDeProducto(
-        { ivaTratamiento: parent.ivaTratamiento },
-        { ivaTratamiento: p.ivaTratamiento, taxRate: Number(p.taxRate), objetoImp: p.objetoImp },
-        encendido,
-      )
-    }
+    const changes = cambiosDeMiembro(p, parent, newName, encendido)
     return { productId: p.id, sku: p.sku, currentName: p.name, newName, values, changes }
   })
 
@@ -241,6 +290,8 @@ async function buildPreview(db: Prisma.TransactionClient, venueId: string, input
     // Codex #6: sin las opciones, «Talla: M» y «Color: M, L» daban la misma huella y la confirmación escribía otra cosa.
     options,
     members,
+    // Sólo en «Desde Shopify»: la huella de agrupar a mano no cambia.
+    ...(shopify ? { shopify: shopify.externalId } : {}),
   })
   const preview: GroupExistingPreview = { parent, options, members, warnings, fingerprint, firstMemberIva: primero.ivaTratamiento }
   return { preview, porId }
@@ -254,86 +305,57 @@ export async function previewGroupExisting(venueId: string, input: GroupExisting
 /**
  * Convierte productos sueltos en variantes de un padre nuevo: conservan id, SKU, código, precio, costo, inventario y receta.
  * Rehace la vista previa con las filas bloqueadas y exige la misma huella (409 si algo cambió).
- * Orden de candados: organización (IVA) → cerco del catálogo → catálogo maestro → filas de los productos.
+ * Orden de candados: organización (IVA) → cerco del catálogo → catálogo maestro → filas de los productos (`FOR UPDATE NOWAIT`:
+ * con una venta en curso sobre alguno, se reintenta y responde `PRODUCT_GROUP_BUSY`; nunca espera con candados tomados).
+ * `origen`: «Desde Shopify» (bloque 5) crea la familia SHOPIFY con su llave; los miembros los armó el servidor, y `rearmar` los
+ * vuelve a armar dentro del candado (la huella de lo rearmado tiene que ser la que vio el dueño).
  */
 export async function applyGroupExisting(
   venueId: string,
   input: GroupExistingInput & { expectedFingerprint: string },
   actor: CatalogActor,
+  origen?: OrigenShopify,
+  rearmar?: (tx: Prisma.TransactionClient) => Promise<GroupExistingInput>,
 ): Promise<ProductGroupWriteResult> {
   const { name, options, ids } = checkShape(input)
   let result: ProductGroupWriteResult
   let categoriasDeOrigen: string[] = []
   try {
-    result = await prisma.$transaction(async tx => {
+    result = await transaccionDeAgrupar(async tx => {
       await bloquearParaCambiarIva(tx, { venueId }) // agrupar puede cambiar el IVA de algún miembro
       await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
       await assertNoMasterCatalog(tx, venueId)
-      // ORDER BY id: dos agrupaciones con productos en común se forman en fila en vez de bloquearse una a la otra.
-      await tx.$queryRaw`SELECT id FROM "Product" WHERE "venueId" = ${venueId} AND id IN (${Prisma.join(ids)}) ORDER BY id FOR UPDATE`
-      const { preview: pv, porId } = await buildPreview(tx, venueId, input)
+      // ORDER BY id y NOWAIT: si otro (una venta, una edición, otra agrupación) tiene alguno, no se espera: se reintenta y, al
+      // agotarse, 409 PRODUCT_GROUP_BUSY.
+      await lockProductsNowait(tx, venueId, ids)
+      // «Desde Shopify» (CREATE): con los productos bloqueados se vuelve a armar la propuesta; si Shopify ligó o soltó una talla
+      // desde la vista previa, la huella ya no coincide y no se agrupa media familia.
+      const actual = rearmar ? await rearmar(tx) : input
+      const { preview: pv, porId } = await buildPreview(tx, venueId, actual, origen)
       categoriasDeOrigen = [...porId.values()].map(p => p.categoryId)
       if (pv.fingerprint !== input.expectedFingerprint)
         throw new ConflictError('Los productos cambiaron desde la vista previa. Revisa y confirma de nuevo.', 'PRODUCT_GROUP_PREVIEW_STALE')
       // Categoría, impresora y extras ya los validó buildPreview dentro de esta transacción.
-      await markProductGroupWriter(tx)
-      const group = await tx.productGroup.create({
-        data: {
-          venueId,
-          name: pv.parent.name,
-          description: pv.parent.description,
-          imageUrl: pv.parent.imageUrl,
-          categoryId: pv.parent.categoryId,
-          type: pv.parent.type,
-          printStationId: pv.parent.printStationId,
-          satProductKey: pv.parent.satProductKey,
-          satUnitKey: pv.parent.satUnitKey,
-          ivaTratamiento: pv.parent.ivaTratamiento,
-          options: {
-            create: options.map((o, i) => ({
-              name: o.name,
-              position: i,
-              values: { create: o.values.map((value, j) => ({ value, position: j })) },
-            })),
-          },
-          modifierGroups: pv.parent.modifierGroupIds.length
-            ? { create: pv.parent.modifierGroupIds.map((modifierGroupId, i) => ({ modifierGroupId, displayOrder: i })) }
-            : undefined,
-        },
-        include: { options: { orderBy: { position: 'asc' }, include: { values: { orderBy: { position: 'asc' } } } } },
+      const { groupId } = await createGroupTx(tx, venueId, {
+        ...pv.parent,
+        source: origen ? ProductGroupSource.SHOPIFY : ProductGroupSource.MANUAL,
+        externalId: origen?.externalId ?? null,
+        options,
       })
-      // ponytail: un UPDATE por miembro (≤ 250 por el tope); pasar a UPDATE … FROM (VALUES …) si el tope sube.
-      for (const m of pv.members) {
-        const valores = m.values.map((v, k) => group.options[k].values.find(x => x.value === v)!)
-        // Su foto queda como propia sólo si es distinta de la del padre; sin foto propia, la efectiva es la del padre.
-        const foto = porId.get(m.productId)!.imageUrl
-        const propia = foto && foto !== pv.parent.imageUrl ? foto : null
-        await tx.product.update({
-          where: { id: m.productId },
-          data: {
-            productGroupId: group.id,
-            variantKey: variantKeyOf(valores.map(v => v.id)),
-            variantImageUrl: propia,
-            imageUrl: propia ?? pv.parent.imageUrl,
-            name: m.newName,
-            categoryId: pv.parent.categoryId,
-            type: pv.parent.type,
-            description: pv.parent.description,
-            printStationId: pv.parent.printStationId,
-            satProductKey: pv.parent.satProductKey,
-            satUnitKey: pv.parent.satUnitKey,
-            ivaTratamiento: pv.parent.ivaTratamiento,
-            variantValues: { create: valores.map((v, k) => ({ optionId: group.options[k].id, optionValueId: v.id })) },
-          },
-        })
-      }
-      // Los extras son del padre: cada miembro queda con los mismos, en el mismo orden.
-      await tx.productModifierGroup.deleteMany({ where: { productId: { in: ids } } })
-      if (pv.parent.modifierGroupIds.length)
-        await tx.productModifierGroup.createMany({
-          data: ids.flatMap(productId => pv.parent.modifierGroupIds.map((groupId, i) => ({ productId, groupId, displayOrder: i }))),
-        })
-      return { groupId: group.id, productIds: ids, categoryId: group.categoryId }
+      const ctx = await loadGroupContextTx(tx, groupId, {
+        trackInventory: false, // agrupar no toca el inventario de nadie
+        createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+      })
+      await attachProductsTx(
+        tx,
+        ctx,
+        pv.members.map(m => {
+          // Su foto queda como propia sólo si es distinta de la del padre; sin foto propia, la efectiva es la del padre.
+          const foto = porId.get(m.productId)!.imageUrl
+          return { productId: m.productId, values: m.values, ownImage: foto && foto !== pv.parent.imageUrl ? foto : null }
+        }),
+      )
+      return { groupId, productIds: ids, categoryId: ctx.categoryId }
     }, TX_OPTIONS)
   } catch (e) {
     traducirErrorDeIva(e)
@@ -346,7 +368,7 @@ export async function applyGroupExisting(
     result,
     'PRODUCT_GROUP_GROUPED_EXISTING',
     'ITEM_ADDED',
-    { name, members: ids.length },
+    { name, members: ids.length, ...(origen ? { source: origen.source, externalId: origen.externalId } : {}) },
     actor.type === 'HUMAN' ? actor.staffId : undefined,
     categoriasDeOrigen, // los aparatos también recargan las categorías de donde salieron
   )

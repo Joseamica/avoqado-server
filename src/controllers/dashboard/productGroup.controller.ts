@@ -5,6 +5,7 @@
 import { NextFunction, Request, Response } from 'express'
 import * as groups from '../../services/product-variants/productGroup.service'
 import * as existing from '../../services/product-variants/groupExisting.service'
+import * as shopify from '../../services/product-variants/shopifyFamilies.service'
 import * as options from '../../services/mobile/product-option.mobile.service'
 import { resolveLegacyCatalogActor } from '../../services/master-catalog/catalogGovernance.service'
 
@@ -43,6 +44,15 @@ export const suggestions = h(req => existing.suggestGroups(req.params.venueId, r
 export const previewGroupExisting = h(req => existing.previewGroupExisting(req.params.venueId, req.body))
 export const applyGroupExisting = h(req => existing.applyGroupExisting(req.params.venueId, req.body, actorOf(req)), 201)
 export const shopifyFileProposals = h(req => existing.proposalsFromShopifyCsv(req.params.venueId, req.body.csv))
+// «Desde Shopify» (bloque 5): el servicio arma nombre, opciones y miembros; del cuerpo sólo toma lo de Avoqado.
+export const shopifyProposals = h(req => shopify.listShopifyFamilyProposals(req.params.venueId, req.query as any))
+export const previewShopifyProposal = h(req => shopify.previewShopifyProposal(req.params.venueId, req.params.shopifyProductId, req.body))
+export const applyShopifyProposal = h(
+  req => shopify.applyShopifyProposal(req.params.venueId, actorOf(req), req.params.shopifyProductId, req.body),
+  201,
+)
+export const previewAllShopifyProposals = h(req => shopify.previewAllShopifyProposals(req.params.venueId, { cursor: req.body.cursor }))
+export const applyShopifyProposalsBatch = h(req => shopify.applyShopifyProposalsBatch(req.params.venueId, actorOf(req), req.body.items))
 
 // Biblioteca de opciones: reusa el servicio del POS (la bitácora dice DASHBOARD); la lista del dashboard pagina por su cuenta.
 export const listOptions = h(req => groups.listProductOptionsPage(req.params.venueId, req.query as any))

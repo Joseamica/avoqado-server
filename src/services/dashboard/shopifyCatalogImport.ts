@@ -5,7 +5,9 @@
  * Why it exists: IQ Collection (Spanish clothing retailer) sells in Mexico with Avoqado only and keeps its catalog in a
  * Spanish Shopify store; each collection is loaded on top (merge), without typing it by hand.
  *
- * - Avoqado has no variants yet ⇒ ONE product per Shopify variant, named `Title · size · color`.
+ * - ONE product per Shopify variant, named `Title · size · color`. A Handle with real options also travels as a `family`
+ *   (key = Handle, name = Title, one option per Option N Name), so `importMenu` groups its variants (a venue without
+ *   PRODUCT_VARIANTS gets them loose, as before). Two Handles with the same Title enter loose: they would be one family.
  * - The price is MXN: the source price × a factor rounded to whole pesos, or a `sku,precio` list taken as is — always
  *   with Decimal arithmetic (1.005 × 100 is 100.5, not the float 100.49999…).
  * - What cannot be imported safely is NOT imported and is reported with its reason (never dropped silently): products
@@ -46,6 +48,7 @@ export type ShopifyProblemCode =
   | 'CODIGO_EN_OTRO_PRODUCTO'
   | 'CODIGO_INVALIDO'
   | 'VARIOS_CODIGOS'
+  | 'FAMILIA_HOMONIMA'
 
 export interface ShopifyProblem {
   code: ShopifyProblemCode
@@ -65,6 +68,8 @@ export interface ShopifyVariant {
   /** gtin that will be written; null when none (or it had to be dropped). */
   barcode: string | null
   imageUrl: string | null
+  /** The family this variant travels with (importMenu groups it); null = enters loose. */
+  family: ImportProduct['family'] | null
   omitted: boolean
   problems: ShopifyProblem[]
 }
@@ -209,6 +214,11 @@ export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, cont
     const category = type || get(head, 'productCategory').split('>').pop()!.trim() || NO_CATEGORY
     const productImage = productRows.map(row => get(row, 'imageSrc')).find(Boolean) ?? null
 
+    // The options that are real: named in the head row (not Shopify's placeholder «Title») and valued (not «Default Title»).
+    const axes = ([1, 2, 3] as const)
+      .map(n => ({ name: get(head, `option${n}Name`), valueKey: `option${n}` as const }))
+      .filter(axis => axis.name && axis.name !== 'Title' && get(head, axis.valueKey) !== DEFAULT_TITLE)
+
     // An image-only row (Handle + Image Src) is not a variant.
     const variantRows = productRows.filter(row => ['option1', 'sku', 'price', 'barcode'].some(key => get(row, key as Column)))
     for (const row of variantRows) {
@@ -229,6 +239,10 @@ export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, cont
         price: null,
         barcode: get(row, 'barcode'), // raw for now; resolved below for the variants that are imported
         imageUrl: get(row, 'variantImage') || productImage,
+        family:
+          handle && axes.length
+            ? { key: handle, name: title, options: axes.map(axis => ({ name: axis.name, value: get(row, axis.valueKey) })) }
+            : null,
         omitted: problems.length > 0,
         problems,
       })
@@ -318,6 +332,20 @@ export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, cont
     variant.barcode = null
   }
 
+  // Two Handles with the same Title would be ONE family (importMenu names a family by its Title): none travels as a family.
+  // Decided on the WHOLE file, before chunking, so the pair cannot end up in different chunks and half-join.
+  const titleKey = (family: NonNullable<ShopifyVariant['family']>) => family.name!.trim().replace(/\s+/g, ' ').toLocaleLowerCase('es-MX')
+  const handlesByTitle = new Map<string, Set<string>>()
+  for (const variant of variants)
+    if (variant.family)
+      handlesByTitle.set(titleKey(variant.family), (handlesByTitle.get(titleKey(variant.family)) ?? new Set()).add(variant.handle))
+  for (const variant of variants) {
+    if (!variant.family || handlesByTitle.get(titleKey(variant.family))!.size < 2) continue
+    variant.family = null
+    if (!variant.omitted)
+      variant.problems.push({ code: 'FAMILIA_HOMONIMA', detail: 'familia homónima: entra suelta; agrúpala con tu archivo' })
+  }
+
   const categories = new Map<string, ImportProduct[]>()
   for (const variant of live()) {
     const product: ImportProduct = {
@@ -328,6 +356,7 @@ export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, cont
       inventoryByQuantity: { unit: 'PIECE' },
       ...(variant.barcode ? { gtin: variant.barcode } : {}),
       ...(variant.imageUrl ? { imageUrl: variant.imageUrl } : {}),
+      ...(variant.family ? { family: variant.family } : {}),
     }
     categories.set(variant.category, [...(categories.get(variant.category) ?? []), product])
   }
@@ -345,6 +374,8 @@ export function convertShopifyCsv(csvText: string, pricing: ShopifyPricing, cont
  * Splits a payload into payloads of at most `maxProducts` products. `importMenu` runs ONE transaction (2-minute timeout,
  * holding the venue's catalog fence): a whole collection against the production database across the internet may not
  * fit, and would block the venue's product writes meanwhile. Each chunk is merge, so re-running after a failure is safe.
+ * A family (same `family.key`) is never split: its chunk may pass `maxProducts`. ponytail: members must be consecutive, as
+ * `convertShopifyCsv` leaves them; a hand-built payload with a key interleaved with others could still split it.
  */
 export function chunkImportMenuData(data: ImportMenuData, maxProducts: number): ImportMenuData[] {
   // Replace archives what the payload does not bring: each chunk would archive the products of the others.
@@ -352,10 +383,14 @@ export function chunkImportMenuData(data: ImportMenuData, maxProducts: number): 
   const chunks: ImportMenuData[] = []
   let current: ImportMenuData | null = null
   let count = 0
+  let lastKey: string | undefined
   for (const category of data.categories) {
     let slice: ImportMenuData['categories'][number] | null = null
     for (const product of category.products) {
-      if (!current || count === maxProducts) {
+      const key = product.family?.key
+      const sameFamily = key !== undefined && key === lastKey
+      lastKey = key
+      if (!current || (count >= maxProducts && !sameFamily)) {
         current = { mode: data.mode, categories: [] }
         chunks.push(current)
         count = 0
