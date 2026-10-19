@@ -1,6 +1,7 @@
 import { calculateExpectedAmount } from '../mobile/cash-drawer.mobile.service'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
@@ -306,6 +307,40 @@ export async function resolveShiftCashDrawer(
   }
 }
 
+/** Lo que el detalle del turno lee de cada orden: renglones para los productos, y sus cobros para la forma de pago y
+ *  para saber si se cobró dentro del turno. */
+const ORDEN_DEL_DETALLE = {
+  id: true,
+  orderNumber: true,
+  total: true,
+  subtotal: true,
+  status: true,
+  table: { select: { id: true, number: true } },
+  createdAt: true,
+  servedById: true,
+  servedBy: { select: { id: true, firstName: true, lastName: true } },
+  items: {
+    select: {
+      id: true,
+      // Name the line was SOLD under (sales snapshot): a renamed product must not rewrite past shifts.
+      productName: true,
+      quantity: true,
+      unitPrice: true,
+      discountAmount: true,
+      // Both are REQUIRED by lineRevenue: without `modifiers` the
+      // modifier revenue vanishes, without `weightQuantity` a weighing
+      // is charged as a whole kilo.
+      weightQuantity: true,
+      modifiers: { select: { price: true, quantity: true } },
+      product: { select: { id: true, name: true } },
+    },
+  },
+  payments: {
+    where: { status: 'COMPLETED' },
+    select: { id: true, method: true, cardBrand: true, maskedPan: true, shiftId: true, type: true, createdAt: true },
+  },
+} satisfies Prisma.OrderSelect
+
 export async function getShiftById(venueId: string, shiftId: string, incluirEsperado = false): Promise<any | null> {
   const shift = await prisma.shift.findFirst({
     where: {
@@ -355,75 +390,16 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
           },
           orderId: true,
           createdAt: true,
+          type: true,
         },
         orderBy: {
           createdAt: 'desc',
         },
       },
-      // Include orders with items for product breakdown
+      // Sólo las órdenes del turno con un cobro SIN turno (Testarudo sincroniza así sus turnos de SoftRestaurant).
       orders: {
-        where: {
-          status: {
-            in: ['COMPLETED', 'CONFIRMED'],
-          },
-        },
-        select: {
-          id: true,
-          orderNumber: true,
-          total: true,
-          subtotal: true,
-          status: true,
-          table: {
-            select: {
-              id: true,
-              number: true,
-            },
-          },
-          createdAt: true,
-          servedById: true,
-          servedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          items: {
-            select: {
-              id: true,
-              // Name the line was SOLD under (sales snapshot): a renamed product must not rewrite past shifts.
-              productName: true,
-              quantity: true,
-              unitPrice: true,
-              discountAmount: true,
-              // Both are REQUIRED by lineRevenue: without `modifiers` the
-              // modifier revenue vanishes, without `weightQuantity` a weighing
-              // is charged as a whole kilo.
-              weightQuantity: true,
-              modifiers: { select: { price: true, quantity: true } },
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-            },
-          },
-          payments: {
-            where: {
-              status: 'COMPLETED',
-            },
-            select: {
-              id: true,
-              method: true,
-              cardBrand: true,
-              maskedPan: true,
-            },
-          },
-        },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        where: { payments: { some: { status: 'COMPLETED', shiftId: null } } },
+        select: ORDEN_DEL_DETALLE,
       },
     },
   })
@@ -431,6 +407,41 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   if (!shift) {
     return null
   }
+
+  // Las órdenes del detalle son las cuentas COBRADAS en el turno, con la misma membresía que firma el cierre y que
+  // enseña la lista (`readShiftPaymentsForClose` + `contarOrdenesCobradas`; no se importan porque shift.tpv.service
+  // ya importa este archivo): (1) los cobros estampados con el turno y (2) los cobros sin turno de una orden del turno,
+  // dentro de su horario. Medido en producción el 19-oct: así 0 de 511 turnos cerrados descuadran contra la lista (30
+  // con `Order.shiftId`, que dejaba en 0 los turnos cuyas órdenes no traían turno y contaba CONFIRMED sin cobro). Una
+  // cuenta pagada en partes cuenta una vez; una devolución sola, ninguna. El horario corta como el cierre
+  // (`cobroSinTurnoPerteneceAlTurno`): cerrado, en su `endTime`; cerrándose, en su `updatedAt` (= claimedAt); abierto, ahora.
+  const hasta = shift.endTime ?? (shift.status === 'CLOSING' ? shift.updatedAt : new Date())
+  const ordersById = new Map<string, (typeof shift.orders)[number]>()
+  // Toda orden ya leída se reusa, califique o no por la vía sin turno (p. ej. su único cobro sin turno es una devolución).
+  const leidas = new Map(shift.orders.map(order => [order.id, order]))
+  for (const order of shift.orders) {
+    const cobradaSinTurno = order.payments.some(
+      p => p.shiftId === null && p.type !== 'REFUND' && p.createdAt >= shift.startTime && p.createdAt <= hasta,
+    )
+    if (cobradaSinTurno) ordersById.set(order.id, order)
+  }
+  // Las cuentas de los cobros estampados con el turno, UNA vez cada una: una cuenta pagada en abonos no se trae N veces.
+  const delTurno = [...new Set(shift.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))]
+  const faltantes = delTurno.filter(id => !leidas.has(id))
+  if (faltantes.length > 0) {
+    const cobradas = await prisma.order.findMany({
+      where: { venueId, id: { in: faltantes } },
+      select: ORDEN_DEL_DETALLE,
+      // ids únicos del turno: el tope es exacto y nunca recorta.
+      take: faltantes.length,
+    })
+    for (const order of cobradas) leidas.set(order.id, order)
+  }
+  for (const id of delTurno) {
+    const order = leidas.get(id)
+    if (order) ordersById.set(id, order)
+  }
+  const orders = [...ordersById.values()].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
 
   // Determine effective status based on time logic
   const now = new Date()
@@ -491,7 +502,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   }
 
   // Process orders to get order count per staff
-  for (const order of shift.orders) {
+  for (const order of orders) {
     const staffId = order.servedById
     if (!staffId) continue
 
@@ -526,7 +537,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // ============================================================
   const productMap = new Map<string, { name: string; quantity: number; revenue: number }>()
 
-  for (const order of shift.orders) {
+  for (const order of orders) {
     for (const item of order.items) {
       const productName = item.productName || item.product?.name || 'Unknown Product'
       const quantity = item.quantity || 1
@@ -559,7 +570,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // ============================================================
   // Format orders for response (with payment method info)
   // ============================================================
-  const formattedOrders = shift.orders.slice(0, 50).map(order => {
+  const formattedOrders = orders.slice(0, 50).map(order => {
     const orderPayment = order.payments[0] // Get first payment for display
     return {
       id: order.id,
@@ -633,7 +644,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     ...serializeShiftCashReconciliation(shift),
     totalSales: finalTotalSales,
     totalTips: finalTotalTips,
-    totalOrders: shift.orders.length,
+    totalOrders: orders.length,
     status: effectiveStatus,
     staff: shift.staff,
     venue: shift.venue,
@@ -651,9 +662,9 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     // Summary stats
     stats: {
       totalPayments: shift.payments.length,
-      totalOrders: shift.orders.length,
+      totalOrders: orders.length,
       totalProducts: topProducts.reduce((sum, p) => sum + p.quantity, 0),
-      avgOrderValue: shift.orders.length > 0 ? Number((finalTotalSales / shift.orders.length).toFixed(2)) : 0,
+      avgOrderValue: orders.length > 0 ? Number((finalTotalSales / orders.length).toFixed(2)) : 0,
       avgTipPercentage: finalTotalSales > 0 ? Number(((finalTotalTips / finalTotalSales) * 100).toFixed(1)) : 0,
     },
   }
