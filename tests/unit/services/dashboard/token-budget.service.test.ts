@@ -82,6 +82,8 @@ describe('TokenBudgetService', () => {
       })
 
       prismaMock.chatbotTokenBudget.findUnique.mockResolvedValue(null)
+      // Sólo se crea si la sucursal existe (sesión del alta con 'pending' → P2003, 19-oct).
+      prismaMock.venue.findUnique.mockResolvedValue({ id: 'venue-456' } as any)
       prismaMock.chatbotTokenBudget.create.mockResolvedValue(mockNewBudget as any)
 
       const result = await tokenBudgetService.getOrCreateBudget('venue-456')
