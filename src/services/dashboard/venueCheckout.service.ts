@@ -29,6 +29,7 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import {
   getPaymentLinkBranding,
   metodoDeStripe,
+  debeReintentarSinTipo,
   fundsFlowForStripePayment,
   mapStripeCardBrandToEnum,
   finalizeMercadoPagoCheckout,
@@ -523,6 +524,7 @@ export async function finalizeVenueCheckout(args: {
         chargeDetails.last4 = card?.last4 ?? null
       }
     } catch (err) {
+      if (debeReintentarSinTipo(args.stripePaymentMethodType, err)) throw err
       logger.warn('Failed to fetch Stripe charge details for venue checkout (non-fatal)', {
         paymentIntentId: args.paymentIntentId,
         error: err instanceof Error ? err.message : String(err),

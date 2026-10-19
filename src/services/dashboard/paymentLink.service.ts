@@ -1256,13 +1256,23 @@ export function fundsFlowForStripePayment(_stripeType: string | null | undefined
  * con forma SAT 01 sellada, igual que OXXO de Mercado Pago (`metodoDeMercadoPago`): como CASH, la conciliación, el saldo, la
  * póliza y el corte —que deciden por `method === 'CASH'` e ignoran `fundsFlow`— lo trataban como efectivo del cajón.
  *
- * ponytail: sin tipo (el aviso no lo trae y la consulta del cargo falló, o no hay `connectAccountId`) se asume tarjeta: el
- * cajón queda bien siempre, pero un OXXO así sale con SAT 04. Founder, 19-oct: se acepta («A»). Se cierra pidiéndole a Stripe
- * que reintente cuando no se sepa el tipo, y eso sólo es seguro tras arreglar la idempotencia del aviso (P1 en deuda-encontrada).
+ * ponytail: sin tipo se asume tarjeta. Si la consulta del cargo falló por algo PASAJERO, el finalizador ya no llega aquí: lanza y
+ * Stripe reintenta (`debeReintentarSinTipo`). Queda el techo con un error permanente de Stripe (llave, permiso) o sin
+ * `connectAccountId`: el cajón queda bien, pero un OXXO así sale con SAT 04 (founder «A», 19-oct: no atorar el cobro por eso).
  */
 export function metodoDeStripe(stripeType: string | null | undefined): { method: PaymentMethod; tenderSatFormaPago: string | null } {
   if (stripeType === 'oxxo') return { method: 'OTHER', tenderSatFormaPago: '01' }
   return { method: mapStripeMethodToPaymentMethod(stripeType), tenderSatFormaPago: null }
+}
+
+/**
+ * ¿El finalizador debe lanzar porque la consulta del cargo falló? Sólo si el aviso no trajo el tipo (el cargo es lo único que
+ * dice si fue OXXO) y el error es pasajero (red, 5xx, límite de peticiones): el webhook libera su reclamo (`withClaimedEvent`) y
+ * Stripe reintenta. Con un error permanente lanzar atoraría el cobro 3 días y luego se perdería (no hay barrido).
+ */
+export function debeReintentarSinTipo(stripeType: string | null | undefined, err: unknown): boolean {
+  const type = (err as { type?: string } | null)?.type
+  return !stripeType && (type === 'StripeConnectionError' || type === 'StripeAPIError' || type === 'StripeRateLimitError')
 }
 
 export function mapStripeMethodToPaymentMethod(
@@ -1559,6 +1569,7 @@ export async function finalizePaymentLinkCheckout(args: {
         chargeDetails.last4 = cardDetails?.last4 ?? null
       }
     } catch (err) {
+      if (debeReintentarSinTipo(args.stripePaymentMethodType, err)) throw err
       logger.warn('Failed to fetch Stripe charge details (non-fatal)', {
         paymentIntentId: args.paymentIntentId,
         error: err instanceof Error ? err.message : String(err),
