@@ -1243,22 +1243,33 @@ export async function createStripePaymentIntentForPaymentLink(
  */
 /**
  * Fase 2 de la unificación de caja: TODO pago que entra por Stripe lo liquida Stripe → Avoqado,
- * sin importar cómo lo pagó el cliente. OXXO se ledgea como CASH (`mapStripeMethodToPaymentMethod`)
- * porque así lo reporta el banco, pero ese efectivo lo cobró OXXO al cliente: NUNCA entró al cajón
- * del negocio. Sin este sello, el fallback legacy (`method === 'CASH'`) lo contaba como efectivo
+ * sin importar cómo lo pagó el cliente. El efectivo de OXXO lo cobró OXXO al cliente: NUNCA entró al
+ * cajón del negocio. Sin este sello, el fallback legacy (`method === 'CASH'`) lo contaba como efectivo
  * físico y el arqueo le exigía al cajero un dinero que jamás tuvo en la mano (auditoría 27-ago §2.2).
  */
 export function fundsFlowForStripePayment(_stripeType: string | null | undefined): 'AVOQADO_PROCESSED' {
   return 'AVOQADO_PROCESSED'
 }
 
+/**
+ * Método y forma SAT de un cobro de Stripe, para los DOS escritores (liga de pago y checkout del negocio). OXXO va como OTHER
+ * con forma SAT 01 sellada, igual que OXXO de Mercado Pago (`metodoDeMercadoPago`): como CASH, la conciliación, el saldo, la
+ * póliza y el corte —que deciden por `method === 'CASH'` e ignoran `fundsFlow`— lo trataban como efectivo del cajón.
+ *
+ * ponytail: sin tipo (el aviso no lo trae y la consulta del cargo falló, o no hay `connectAccountId`) se asume tarjeta: el
+ * cajón queda bien siempre, pero un OXXO así sale con SAT 04. Founder, 19-oct: se acepta («A»). Se cierra pidiéndole a Stripe
+ * que reintente cuando no se sepa el tipo, y eso sólo es seguro tras arreglar la idempotencia del aviso (P1 en deuda-encontrada).
+ */
+export function metodoDeStripe(stripeType: string | null | undefined): { method: PaymentMethod; tenderSatFormaPago: string | null } {
+  if (stripeType === 'oxxo') return { method: 'OTHER', tenderSatFormaPago: '01' }
+  return { method: mapStripeMethodToPaymentMethod(stripeType), tenderSatFormaPago: null }
+}
+
 export function mapStripeMethodToPaymentMethod(
   stripeType: string | null | undefined,
-): 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'CRYPTOCURRENCY' | 'OTHER' {
+): 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'CRYPTOCURRENCY' | 'OTHER' {
   if (!stripeType) return 'CREDIT_CARD'
-  // OXXO: customer pays cash at OXXO. We map to CASH because that's what
-  // hit the merchant's bank — even though the rail is "voucher".
-  if (stripeType === 'oxxo') return 'CASH'
+  // OXXO NO es CASH (ese efectivo nunca entró al cajón): cae a OTHER abajo; su forma SAT la sella `metodoDeStripe`.
   // Bank transfers: SPEI/CoDi (MX), ACH (US), SEPA (EU). All bank rails.
   if (stripeType === 'customer_balance' || stripeType === 'sepa_debit' || stripeType === 'us_bank_account') {
     return 'BANK_TRANSFER'
@@ -1526,7 +1537,9 @@ export async function finalizePaymentLinkCheckout(args: {
     cardBrand: string | null
     last4: string | null
     receiptUrl: string | null
-  } = { cardBrand: null, last4: null, receiptUrl: null }
+    /** Tipo real del cobro (`oxxo`, `card`, `customer_balance`…). El webhook casi nunca lo trae: no expande objetos. */
+    tipo: string | null
+  } = { cardBrand: null, last4: null, receiptUrl: null, tipo: null }
   const connectAccountId = (session.ecommerceMerchant?.providerCredentials as { connectAccountId?: string })?.connectAccountId
   if (connectAccountId && args.paymentIntentId && session.ecommerceMerchant?.provider?.code === 'STRIPE_CONNECT') {
     try {
@@ -1540,6 +1553,7 @@ export async function finalizePaymentLinkCheckout(args: {
       const charge = typeof pi.latest_charge === 'object' && pi.latest_charge ? pi.latest_charge : null
       if (charge) {
         chargeDetails.receiptUrl = charge.receipt_url ?? null
+        chargeDetails.tipo = charge.payment_method_details?.type ?? null
         const cardDetails = (charge.payment_method_details as { card?: { brand?: string; last4?: string } } | null)?.card
         chargeDetails.cardBrand = cardDetails?.brand ?? null
         chargeDetails.last4 = cardDetails?.last4 ?? null
@@ -1700,11 +1714,13 @@ export async function finalizePaymentLinkCheckout(args: {
     // feePercentage = feeAmount / gross (when gross>0). Keep 4 decimal precision.
     const feePercentage = grossForPayment.gt(0) ? feeAmount.div(grossForPayment).toDecimalPlaces(4) : new Prisma.Decimal(0)
 
-    // Map Stripe's payment_method.type to our PaymentMethod enum — keeps
-    // OXXO ledgered as CASH, SPEI as BANK_TRANSFER, etc. instead of every-
-    // thing falling into CREDIT_CARD. Useful for revenue breakdowns later.
-    const method = mapStripeMethodToPaymentMethod(args.stripePaymentMethodType)
-    const fundsFlow = fundsFlowForStripePayment(args.stripePaymentMethodType)
+    // Stripe's payment_method.type → nuestro método y forma SAT (OXXO = OTHER + '01', SPEI = BANK_TRANSFER…), en vez de
+    // que todo caiga en CREDIT_CARD. Ver `metodoDeStripe`.
+    // Codex r1 (19-oct): el webhook casi nunca trae el tipo (no expande `latest_charge`) y un OXXO caía a CREDIT_CARD/SAT 04.
+    // El cargo que ya se consultó arriba sí lo dice.
+    const tipoDeStripe = args.stripePaymentMethodType ?? chargeDetails.tipo
+    const { method, tenderSatFormaPago } = metodoDeStripe(tipoDeStripe)
+    const fundsFlow = fundsFlowForStripePayment(tipoDeStripe)
 
     const createdPayment = await tx.payment.create({
       data: {
@@ -1726,6 +1742,7 @@ export async function finalizePaymentLinkCheckout(args: {
         amount: grossForPayment,
         tipAmount,
         method,
+        tenderSatFormaPago,
         source: 'WEB',
         status: 'COMPLETED',
         // FAST signals "no inventory / no operational fulfilment" so

@@ -6,6 +6,14 @@ jest.mock('@/services/venueSalesGuard', () => ({
   assertVenueSalesEnabled: jest.fn(),
 }))
 
+// El finalizador de Stripe hace `new Stripe(...)` para leer el cargo; sin connectAccountId ni lo llama (casi todas las
+// pruebas). La del tipo del cargo (Codex r1, 19-oct) sí lo necesita.
+const retrieveStripePi = jest.fn()
+jest.mock('stripe', () => ({
+  __esModule: true,
+  default: jest.fn().mockImplementation(() => ({ paymentIntents: { retrieve: retrieveStripePi } })),
+}))
+
 // Mock nanoid before imports
 jest.mock('nanoid', () => ({
   nanoid: jest.fn(() => 'abc12345'),
@@ -888,6 +896,24 @@ describe('PaymentLink Service', () => {
       // Sin renglones el vale nace SKIPPED por el propio servicio de posting;
       // lo que este test fija es que la orden cobrada nunca se queda sin vale.
       expect(mockCreateSalePostingInTx).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ orderId: 'order-123' }))
+    })
+
+    // Codex r1 (19-oct): el webhook casi nunca trae el tipo (no expande `latest_charge`) y un OXXO caía a CREDIT_CARD / SAT 04.
+    it('Stripe: sin tipo en el webhook, el método sale del cargo — OXXO → OTHER + SAT 01, nunca efectivo del cajón', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
+        ...createMockCheckoutSession(),
+        ecommerceMerchant: { id: 'merchant-123', providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+      })
+      armarCobro('order-stripe-oxxo')
+      retrieveStripePi.mockResolvedValueOnce({ latest_charge: { receipt_url: null, payment_method_details: { type: 'oxxo' } } })
+
+      await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1', stripePaymentMethodType: null })
+
+      const data = prismaMock.payment.create.mock.calls[0][0].data
+      expect(data.method).toBe('OTHER')
+      expect(mapFormaPago(data.method, data.tenderSatFormaPago)).toBe('01')
+      expect(data.fundsFlow).toBe('AVOQADO_PROCESSED')
+      expect(paymentCountsAsDrawerCash(data)).toBe(false)
     })
 
     it('Stripe: el vale nace en la transacción del cobro y se aplica después', async () => {

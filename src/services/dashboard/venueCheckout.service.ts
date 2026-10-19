@@ -28,7 +28,8 @@ import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payme
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import {
   getPaymentLinkBranding,
-  mapStripeMethodToPaymentMethod,
+  metodoDeStripe,
+  fundsFlowForStripePayment,
   mapStripeCardBrandToEnum,
   finalizeMercadoPagoCheckout,
 } from '@/services/dashboard/paymentLink.service'
@@ -496,10 +497,12 @@ export async function finalizeVenueCheckout(args: {
   const venueId = session.ecommerceMerchant.venueId
 
   // Best-effort charge details (card brand / last4 / receipt URL) from Stripe.
-  const chargeDetails: { cardBrand: string | null; last4: string | null; receiptUrl: string | null } = {
+  // `tipo`: el tipo real del cobro (`oxxo`, `card`…); el webhook casi nunca lo trae porque no expande objetos.
+  const chargeDetails: { cardBrand: string | null; last4: string | null; receiptUrl: string | null; tipo: string | null } = {
     cardBrand: null,
     last4: null,
     receiptUrl: null,
+    tipo: null,
   }
   const connectAccountId = (session.ecommerceMerchant.providerCredentials as { connectAccountId?: string } | null)?.connectAccountId
   if (connectAccountId && args.paymentIntentId && session.ecommerceMerchant.provider?.code === 'STRIPE_CONNECT') {
@@ -514,6 +517,7 @@ export async function finalizeVenueCheckout(args: {
       const charge = typeof pi.latest_charge === 'object' && pi.latest_charge ? pi.latest_charge : null
       if (charge) {
         chargeDetails.receiptUrl = charge.receipt_url ?? null
+        chargeDetails.tipo = charge.payment_method_details?.type ?? null
         const card = (charge.payment_method_details as { card?: { brand?: string; last4?: string } } | null)?.card
         chargeDetails.cardBrand = card?.brand ?? null
         chargeDetails.last4 = card?.last4 ?? null
@@ -532,7 +536,9 @@ export async function finalizeVenueCheckout(args: {
   const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
   const netAmount = gross.sub(feeAmount).gte(0) ? gross.sub(feeAmount) : new Prisma.Decimal(0)
   const feePercentage = gross.gt(0) ? feeAmount.div(gross).toDecimalPlaces(4) : new Prisma.Decimal(0)
-  const method = mapStripeMethodToPaymentMethod(args.stripePaymentMethodType)
+  // Codex r1 (19-oct): sin el tipo del cargo, un OXXO caía a CREDIT_CARD/SAT 04 (el webhook no expande `latest_charge`).
+  const tipoDeStripe = args.stripePaymentMethodType ?? chargeDetails.tipo
+  const { method, tenderSatFormaPago } = metodoDeStripe(tipoDeStripe)
 
   await prisma.$transaction(async tx => {
     await tx.checkoutSession.update({
@@ -581,6 +587,9 @@ export async function finalizeVenueCheckout(args: {
         amount: gross,
         tipAmount: 0,
         method,
+        tenderSatFormaPago,
+        // 🔴 Este camino no sellaba: un OXXO de Stripe caía al fallback `method === 'CASH'` y contaba como efectivo del cajón.
+        fundsFlow: fundsFlowForStripePayment(tipoDeStripe),
         source: 'WEB',
         status: 'COMPLETED',
         type: 'FAST',
