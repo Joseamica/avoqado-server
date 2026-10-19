@@ -88,6 +88,7 @@ import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
 import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
+import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
@@ -191,6 +192,7 @@ const gracefulShutdown = async (signal: string) => {
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       documentRequestsJob.stop()
+      altasAMedioPagoJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
 
@@ -544,6 +546,7 @@ const startApplication = async (retries = 3) => {
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       documentRequestsJob.start()
+      altasAMedioPagoJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.

@@ -2,7 +2,7 @@ import express from 'express'
 import request from 'supertest'
 import { prismaMock } from '@tests/__helpers__/setup'
 import logger from '@/config/logger'
-import { ConflictError, UnauthorizedError } from '@/errors/AppError'
+import { ConflictError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
 
 /** Qué candados corrieron, en orden: cada simulacro de abajo se anota aquí (prueba el CABLEADO de cada ruta). */
@@ -16,6 +16,8 @@ jest.mock('express-rate-limit', () => ({
 }))
 jest.mock('@/middlewares/resolveOperationalVenueBySlug.middleware', () => ({
   __esModule: true,
+  // P1-06: `assertOperationalVenue` es el REAL (sobre `prisma.venue.findFirst` simulado); sólo el middleware se anota.
+  ...jest.requireActual('@/middlewares/resolveOperationalVenueBySlug.middleware'),
   resolveOperationalVenueBySlug: (req: any, _res: any, next: any) => {
     mockRan.push('operational')
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
@@ -29,9 +31,20 @@ jest.mock('@/middlewares/resolveVenueBySlug.middleware', () => ({
     req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
     next()
   },
+  resolveVenueBySlugIncludingInactive: (req: any, res: any, next: any) => {
+    mockRan.push('plain-including-inactive')
+    // Codex r4: con este slug corre el resolver REAL (sobre `prisma.venue.findFirst` simulado), para ver su 404 tal cual.
+    if (req.params.venueSlug === 'no-existe') {
+      return jest.requireActual('@/middlewares/resolveVenueBySlug.middleware').resolveVenueBySlugIncludingInactive(req, res, next)
+    }
+    req.publicVenue = { id: 'v1', slug: req.params.venueSlug }
+    next()
+  },
 }))
 jest.mock('@/middlewares/requirePublicVenueFeatureStrict.middleware', () => ({
   __esModule: true,
+  // P1-06: `assertOrderingPlan` es el REAL (sobre `venueHasFeatureAccess` simulado); sólo el middleware se anota.
+  ...jest.requireActual('@/middlewares/requirePublicVenueFeatureStrict.middleware'),
   requirePublicVenueFeatureStrict: (featureCode: string) => (_req: any, _res: any, next: any) => {
     mockRan.push(`strict:${featureCode}`)
     next()
@@ -52,6 +65,11 @@ jest.mock('@/middlewares/customerAuth.middleware', () => {
     },
   }
 })
+jest.mock('@/services/access/basePlan.service', () => ({
+  __esModule: true,
+  ...jest.requireActual('@/services/access/basePlan.service'),
+  venueHasFeatureAccess: jest.fn(),
+}))
 jest.mock('@/services/online-ordering/presence.service', () => ({ __esModule: true, getAcceptingStatus: jest.fn() }))
 jest.mock('@/services/online-ordering/menu.service', () => ({ __esModule: true, getPublicMenu: jest.fn() }))
 jest.mock('@/services/online-ordering/quote.service', () => ({
@@ -67,11 +85,13 @@ jest.mock('@/services/online-ordering/order.service', () => ({
 jest.mock('@/services/online-ordering/transitions.service', () => ({ __esModule: true, cancelOnlineOrderByCustomer: jest.fn() }))
 
 import router from '@/routes/public/onlineOrdering.public.routes'
+import publicRoutes from '@/routes/public.routes'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { quoteCart } from '@/services/online-ordering/quote.service'
+import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
 const app = express()
 app.use(express.json())
@@ -92,6 +112,8 @@ const post = (o: { key?: string | null; customer?: boolean; auth?: string; paylo
   if (o.auth) r = r.set('Authorization', o.auth)
   return r.send(o.payload ?? body)
 }
+/** P1-06: el controlador le pasa al servicio lo que exige un pedido NUEVO (negocio operativo y plan). */
+const PIDE_LO_DE_UN_PEDIDO_NUEVO = expect.objectContaining({ assertCanCreate: expect.any(Function) })
 const cancel = (token = TOKEN) => request(app).post(`/venues/flautas/ordering/orders/${token}/cancel`)
 
 beforeEach(() => {
@@ -200,13 +222,17 @@ describe('API pública de pedidos en línea', () => {
         verifiedPhone: '+525543453965',
         customer: expect.objectContaining({ phone: '55 4345 3965' }),
       }),
+      PIDE_LO_DE_UN_PEDIDO_NUEVO,
     )
   })
 
   it('sin sesión pasa cliente y teléfono vacíos; el 401 PHONE_VERIFICATION_REQUIRED del servicio se propaga', async () => {
     ;(createOnlineOrder as jest.Mock).mockRejectedValue(new UnauthorizedError('Verifica tu teléfono', 'PHONE_VERIFICATION_REQUIRED'))
     const r = await post()
-    expect(createOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, verifiedPhone: null }))
+    expect(createOnlineOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: null, verifiedPhone: null }),
+      PIDE_LO_DE_UN_PEDIDO_NUEVO,
+    )
     expect(r.status).toBe(401)
     expect(r.body).toMatchObject({ success: false, code: 'PHONE_VERIFICATION_REQUIRED' })
   })
@@ -215,7 +241,10 @@ describe('API pública de pedidos en línea', () => {
     ;(createOnlineOrder as jest.Mock).mockRejectedValue(new UnauthorizedError('Verifica tu teléfono', 'PHONE_VERIFICATION_REQUIRED'))
     const r = await post({ payload: { ...body, customerId: 'cust1', verifiedPhone: '+525543453965' } })
     expect(r.status).toBe(401)
-    expect(createOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ customerId: null, verifiedPhone: null }))
+    expect(createOnlineOrder).toHaveBeenCalledWith(
+      expect.objectContaining({ customerId: null, verifiedPhone: null }),
+      PIDE_LO_DE_UN_PEDIDO_NUEVO,
+    )
   })
 
   it('H1: un token de cliente GENERAL no basta para pedir: 401 y no se crea nada', async () => {
@@ -248,6 +277,11 @@ describe('API pública de pedidos en línea', () => {
       expect.any(String),
       expect.objectContaining({ error: 'se cayó la base', name: 'Error', stack: expect.stringContaining('se cayó la base') }),
     )
+    // Sólo FEATURE_CHECK_UNAVAILABLE conserva su código: cualquier otro 503 sigue genérico.
+    ;(createOnlineOrder as jest.Mock).mockRejectedValue(new ServiceUnavailableError('detalle interno', 'OTRO_503'))
+    const otro = await post({ customer: true })
+    expect(otro.status).toBe(503)
+    expect(otro.body).toEqual({ success: false, error: 'No se pudo crear tu pedido' })
   })
 
   it('el seguimiento de OTRO venue es el MISMO 404 que un token inexistente y nunca expone el venueId', async () => {
@@ -260,6 +294,108 @@ describe('API pública de pedidos en línea', () => {
     expect(inexistente.status).toBe(404)
     expect(ajeno.body).toEqual(inexistente.body)
     expect(JSON.stringify(ajeno.body)).not.toContain('OTRO')
+  })
+
+  it('1b: GET /info trae el contacto del negocio y la ruta de su aviso de privacidad (relativa al API público)', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+      status: 'OPEN',
+      reason: null,
+      config: { hours: null, acceptsPayAtPickup: true, minOrderAmount: 0, defaultPrepMinutes: 20 },
+    })
+    prismaMock.venue.findUnique.mockResolvedValue({
+      name: 'Flautas Coyoacán',
+      timezone: 'America/Mexico_City',
+      currency: 'MXN',
+      logo: null,
+      logoFull: null,
+      primaryColor: null,
+      secondaryColor: null,
+      address: 'Av. Coyoacán 123',
+      city: 'CDMX',
+      state: 'CDMX',
+      zipCode: '04000',
+      phone: '5512345678',
+    } as any)
+    const r = await request(app).get('/venues/flautas/ordering/info')
+    expect(r.status).toBe(200)
+    expect(r.body.data.contact).toEqual({ address: 'Av. Coyoacán 123, CDMX, CDMX, 04000', phone: '5512345678' })
+    expect(r.body.data.privacyNoticePath).toBe('/venues/v1/privacy-notice')
+    // Lo de antes sigue igual (campos aditivos).
+    expect(r.body.data).toMatchObject({ status: 'OPEN', venue: { slug: 'flautas', name: 'Flautas Coyoacán' }, estimatedPrepMinutes: 20 })
+  })
+
+  /**
+   * S2 (ronda final, M1 de Opus): la pausa de 15/30/60 min de la bandeja y la del gerente salen con el mismo `reason`
+   * (`MANUAL_PAUSE`). `/info` agrega `pausedUntil` SÓLO para la pausa con hora; la tienda dice «Volvemos a recibir pedidos a las HH:MM».
+   */
+  describe('S2: GET /info y pausedUntil (aditivo)', () => {
+    const FIN = new Date(Date.now() + 15 * 60_000)
+    const estado = (o: Record<string, unknown>) => ({
+      status: 'OPEN',
+      reason: null,
+      ...o,
+      config: {
+        hours: null,
+        acceptsPayAtPickup: true,
+        minOrderAmount: 0,
+        defaultPrepMinutes: 20,
+        manualPause: false,
+        pausedUntil: null,
+        ...(o.config as object),
+      },
+    })
+    const info = async (state: object) => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state)
+      prismaMock.venue.findUnique.mockResolvedValue({ name: 'Flautas', timezone: 'America/Mexico_City', currency: 'MXN' } as any)
+      return (await request(app).get('/venues/flautas/ordering/info')).body.data
+    }
+
+    it('pausa con hora de la bandeja, vigente: pausedUntil en ISO', async () => {
+      const data = await info(estado({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { pausedUntil: FIN.toISOString() } }))
+      expect(data.pausedUntil).toBe(FIN.toISOString())
+      expect(data).toMatchObject({ status: 'PAUSED', reason: 'MANUAL_PAUSE' })
+    })
+
+    it('pausa del gerente (aunque también tenga hora): null, porque no hay hora a la que volver', async () => {
+      const data = await info(
+        estado({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { manualPause: true, pausedUntil: FIN.toISOString() } }),
+      )
+      expect(data.pausedUntil).toBeNull()
+    })
+
+    it('una hora que ya pasó no se anuncia', async () => {
+      const data = await info(
+        estado({ status: 'PAUSED', reason: 'MANUAL_PAUSE', config: { pausedUntil: new Date(Date.now() - 60_000).toISOString() } }),
+      )
+      expect(data.pausedUntil).toBeNull()
+    })
+
+    it('abierta, saturada o fuera de horario: null aunque haya una hora guardada', async () => {
+      for (const [status, reason] of [
+        ['OPEN', null],
+        ['PAUSED', 'TOO_BUSY'],
+        ['CLOSED', 'OUTSIDE_HOURS'],
+      ]) {
+        const data = await info(estado({ status, reason, config: { pausedUntil: FIN.toISOString() } }))
+        expect({ status, pausedUntil: data.pausedUntil }).toEqual({ status, pausedUntil: null })
+      }
+    })
+  })
+
+  it('1b: el seguimiento entrega la zona y el contacto del NEGOCIO tal cual (sin venueId)', async () => {
+    ;(getTrackingByToken as jest.Mock).mockResolvedValue({
+      venueId: 'v1',
+      orderNumber: 'WABCD',
+      venueTimezone: 'America/Mexico_City',
+      venueContact: { address: 'Av. Coyoacán 123, CDMX', phone: '5512345678' },
+    })
+    const r = await request(app).get(`/venues/flautas/ordering/orders/${TOKEN}`)
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual({
+      orderNumber: 'WABCD',
+      venueTimezone: 'America/Mexico_City',
+      venueContact: { address: 'Av. Coyoacán 123, CDMX', phone: '5512345678' },
+    })
   })
 
   it('el seguimiento propio no incluye venueId', async () => {
@@ -329,9 +465,9 @@ describe('cableado: qué candados corre cada ruta', () => {
     expect(mockRan).toEqual(NUEVOS)
   })
 
-  it('POST /orders: venue operativo → token de PEDIDOS → candado de plan, en ese orden', async () => {
+  it('POST /orders: el venue por slug AUNQUE esté desactivado → token de PEDIDOS; activo, operativo y plan los pide el servicio (P1-06, Codex r3)', async () => {
     expect((await post({ customer: true })).status).toBe(201)
-    expect(mockRan).toEqual(['operational', 'ordering-auth', 'strict:ONLINE_ORDERING'])
+    expect(mockRan).toEqual(['plain-including-inactive', 'ordering-auth'])
   })
 
   it('seguimiento y cancelar: sólo el venue activo, SIN candado de plan ni exigir operativo (R14)', async () => {
@@ -373,5 +509,158 @@ describe('cableado: qué candados corre cada ruta', () => {
     expect(mockRan).toEqual([])
     expect(getTrackingByToken).not.toHaveBeenCalled()
     expect(cancelOnlineOrderByCustomer).not.toHaveBeenCalled()
+  })
+})
+
+describe('CORS de la tienda (montaje REAL de /api/v1/public, sin tocar corsOptions.ts)', () => {
+  const api = express()
+  api.use('/api/v1/public', publicRoutes)
+
+  it('el preflight de crear pedido desde pedidos.avoqado.io permite cualquier origen y las cabeceras de la tienda', async () => {
+    const r = await request(api)
+      .options('/api/v1/public/venues/x/ordering/orders')
+      .set('Origin', 'https://pedidos.avoqado.io')
+      .set('Access-Control-Request-Method', 'POST')
+      .set('Access-Control-Request-Headers', 'idempotency-key,authorization,content-type')
+    expect(r.status).toBe(204)
+    expect(r.headers['access-control-allow-origin']).toBe('*')
+    const permitidas = String(r.headers['access-control-allow-headers'])
+      .toLowerCase()
+      .split(/\s*,\s*/)
+    expect(permitidas).toEqual(expect.arrayContaining(['idempotency-key', 'authorization', 'content-type']))
+    expect(String(r.headers['access-control-allow-methods'])).toContain('POST')
+    expect(mockRan).toEqual([])
+  })
+})
+
+describe('P1-06: crear pedido busca SU pedido antes de exigir plan y negocio operativo', () => {
+  const REPLAY = { orderId: 'ord1', trackingToken: TOKEN, status: 'ACCEPTED', replay: true }
+  const NUEVO = { orderId: 'ord2', trackingToken: 'N'.repeat(32), status: 'PENDING_ACCEPTANCE', replay: false }
+  /** El contrato del servicio: con pedido previo responde la repetición; si no, corre `assertCanCreate` y sólo entonces crea. */
+  const servicio = (yaExiste: boolean) => {
+    const creado = jest.fn()
+    ;(createOnlineOrder as jest.Mock).mockImplementation(async (_input: unknown, opts?: { assertCanCreate?: () => Promise<void> }) => {
+      if (yaExiste) return REPLAY
+      await opts?.assertCanCreate?.()
+      creado()
+      return NUEVO
+    })
+    return creado
+  }
+
+  beforeEach(() => {
+    prismaMock.venue.findFirst.mockResolvedValue({ id: 'v1' } as any) // negocio operativo
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(true) // con plan
+  })
+
+  it('repetición con el plan VENCIDO ⇒ 200 con el mismo trackingToken y replay:true', async () => {
+    servicio(true)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ success: true, data: REPLAY })
+    expect(mockRan).toEqual(['plain-including-inactive', 'ordering-auth'])
+  })
+
+  it('repetición con el negocio que ya NO opera ⇒ 200 con su pedido', async () => {
+    servicio(true)
+    prismaMock.venue.findFirst.mockResolvedValue(null)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toMatchObject({ trackingToken: TOKEN, replay: true })
+    expect(mockRan).toEqual(['plain-including-inactive', 'ordering-auth'])
+  })
+
+  it('NUEVO con plan y negocio operativo ⇒ 201', async () => {
+    const creado = servicio(false)
+    expect((await post({ customer: true })).status).toBe(201)
+    expect(creado).toHaveBeenCalledTimes(1)
+  })
+
+  it('NUEVO sin plan ⇒ 403 PLAN_REQUIRED en el sobre público, sin crear nada', async () => {
+    const creado = servicio(false)
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(403)
+    expect(r.body).toEqual({ success: false, code: 'PLAN_REQUIRED', error: 'Este negocio no recibe pedidos en línea por el momento.' })
+    expect(venueHasFeatureAccess).toHaveBeenCalledWith('v1', 'ONLINE_ORDERING')
+    expect(creado).not.toHaveBeenCalled()
+  })
+
+  it('NUEVO con el negocio que no opera ⇒ 404 VENUE_NOT_FOUND, sin preguntar por el plan ni crear', async () => {
+    const creado = servicio(false)
+    prismaMock.venue.findFirst.mockResolvedValue(null)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(404)
+    expect(r.body).toMatchObject({ success: false, code: 'VENUE_NOT_FOUND' })
+    const where = (prismaMock.venue.findFirst.mock.calls[0][0] as any).where
+    expect(where).toMatchObject({ id: 'v1', active: true })
+    expect(where.status.in).toEqual(['TRIAL', 'ONBOARDING', 'PENDING_ACTIVATION', 'ACTIVE'])
+    expect(venueHasFeatureAccess).not.toHaveBeenCalled()
+    expect(creado).not.toHaveBeenCalled()
+  })
+
+  it('NUEVO con la verificación de plan caída ⇒ 503 FEATURE_CHECK_UNAVAILABLE CON su code (falla cerrado)', async () => {
+    const creado = servicio(false)
+    ;(venueHasFeatureAccess as jest.Mock).mockRejectedValue(new Error('db caída'))
+    const r = await post({ customer: true })
+    expect(r.status).toBe(503)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'FEATURE_CHECK_UNAVAILABLE',
+      error: 'No pudimos verificar la disponibilidad. Intenta de nuevo.',
+    })
+    expect(creado).not.toHaveBeenCalled()
+  })
+
+  it('la misma llave con OTRO cliente u OTRA solicitud ⇒ 409 IDEMPOTENCY_KEY_CONFLICT, aunque el plan haya vencido', async () => {
+    ;(venueHasFeatureAccess as jest.Mock).mockResolvedValue(false)
+    ;(createOnlineOrder as jest.Mock).mockRejectedValue(
+      new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'),
+    )
+    const r = await post({ customer: true })
+    expect(r.status).toBe(409)
+    expect(r.body).toMatchObject({ success: false, code: 'IDEMPOTENCY_KEY_CONFLICT' })
+  })
+})
+
+/**
+ * Codex r4 (S2): la tienda suelta la llave sólo ante una decisión DURABLE. El servidor la marca con `final: true` (aditivo: no
+ * cambia `code`, `error` ni `details`); un 404 previo a la decisión (el resolver con un slug que no existe) no la lleva.
+ */
+describe('Codex r4: la decisión definitiva viaja como final:true', () => {
+  it('un rechazo GUARDADO responde final:true con el mismo code, error y details', async () => {
+    const details = { status: 'PAUSED', reason: 'MANUAL_PAUSE' }
+    const guardado = Object.assign(new ConflictError('La tienda no está recibiendo pedidos en este momento.', 'ORDERING_PAUSED', details), {
+      final: true as const,
+    })
+    ;(createOnlineOrder as jest.Mock).mockRejectedValueOnce(guardado)
+    const r = await post({ customer: true })
+    expect(r.status).toBe(409)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'ORDERING_PAUSED',
+      error: 'La tienda no está recibiendo pedidos en este momento.',
+      details,
+      final: true,
+    })
+  })
+
+  it('sin decisión durable no lo trae: un 401 del servicio y el 404 del resolver con un slug que no existe', async () => {
+    ;(createOnlineOrder as jest.Mock).mockRejectedValueOnce(new UnauthorizedError('Verifica tu teléfono.', 'PHONE_VERIFICATION_REQUIRED'))
+    const r401 = await post({ customer: true })
+    expect(r401.status).toBe(401)
+    expect(r401.body).not.toHaveProperty('final')
+
+    prismaMock.venue.findFirst.mockResolvedValueOnce(null)
+    ;(createOnlineOrder as jest.Mock).mockClear()
+    const r404 = await request(app)
+      .post('/venues/no-existe/ordering/orders')
+      .set('Idempotency-Key', KEY)
+      .set('x-test-customer', '1')
+      .send(body)
+    expect(r404.status).toBe(404)
+    expect(r404.body).toEqual({ message: 'Negocio no encontrado', code: 'VENUE_NOT_FOUND' })
+    expect(createOnlineOrder).not.toHaveBeenCalled()
   })
 })

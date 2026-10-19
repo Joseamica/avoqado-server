@@ -1,6 +1,6 @@
 import { prismaMock } from '@tests/__helpers__/setup'
 import { MAX_PENDING_PER_VENUE } from '@/services/online-ordering/constants'
-import { __resetPresenceDebounceForTests, getAcceptingStatus, touchInboxPoll } from '@/services/online-ordering/presence.service'
+import { __resetPresenceDebounceForTests, getAcceptingStatus, storeView, touchInboxPoll } from '@/services/online-ordering/presence.service'
 
 const NOW = new Date('2026-10-14T18:30:00.000Z') // miércoles 12:30 CDMX
 const settingsRow = (o: Record<string, unknown> = {}) => ({
@@ -94,5 +94,29 @@ describe('getAcceptingStatus', () => {
     prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow() as any)
     prismaMock.onlineOrder.count.mockResolvedValue(MAX_PENDING_PER_VENUE)
     await expect(getAcceptingStatus('v1', NOW)).resolves.toMatchObject({ status: 'PAUSED', reason: 'TOO_BUSY' })
+  })
+})
+
+describe('storeView (ronda 1: un solo armado del estado de la tienda para el panel, la bandeja y el MCP)', () => {
+  it('toma estado y motivo del cálculo, y las dos pausas de los ajustes que usó', async () => {
+    const hasta = new Date(NOW.getTime() + 600_000)
+    prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(settingsRow({ pausedUntil: hasta, manualPause: true }) as any)
+    expect(storeView(await getAcceptingStatus('v1', NOW))).toEqual({
+      status: 'PAUSED',
+      reason: 'MANUAL_PAUSE',
+      pausedUntil: hasta.toISOString(),
+      manualPause: true,
+    })
+  })
+
+  it('con ajustes ya leídos no los vuelve a leer', async () => {
+    const leidos = { ...settingsRow(), minOrderAmount: 0, pausedUntil: null } as any
+    expect(storeView(await getAcceptingStatus('v1', NOW, leidos))).toEqual({
+      status: 'OPEN',
+      reason: null,
+      pausedUntil: null,
+      manualPause: false,
+    })
+    expect(prismaMock.onlineOrderingSettings.findUnique).not.toHaveBeenCalled()
   })
 })

@@ -2,10 +2,13 @@ import type { Request, Response } from 'express'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import type { CustomerAuthContext } from '@/middlewares/customerAuth.middleware'
+import { assertOrderingPlan } from '@/middlewares/requirePublicVenueFeatureStrict.middleware'
+import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
+import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
 
@@ -17,12 +20,16 @@ function fail(res: Response, error: any, fallback: string) {
   const status: number = error?.statusCode ?? 500
   // Nombre y pila SÓLO al log del servidor (para diagnosticar un 5xx en producción); al comensal, el texto genérico.
   if (status >= 500) logger.error('[OnlineOrdering] error público', { error: error?.message, name: error?.name, stack: error?.stack })
+  // Un 5xx no expone su código interno (p. ej. el de Prisma). Excepción explícita: «no pudimos verificar el plan» (503 nuestro,
+  // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar.
+  const expose = status < 500 || (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE')
   return res.status(status).json({
     success: false,
-    // Un 5xx no expone su código interno (p. ej. el de Prisma).
-    code: status >= 500 ? undefined : error?.code,
-    error: status >= 500 ? fallback : error.message,
-    details: status >= 500 ? undefined : error?.details,
+    code: expose ? error?.code : undefined,
+    error: expose ? error.message : fallback,
+    details: expose ? error?.details : undefined,
+    // Codex r4: decisión DURABLE sobre la llave del pedido (`final()` en order.service): sólo con ella la tienda suelta un 404.
+    final: error?.final === true ? true : undefined,
   })
 }
 
@@ -34,7 +41,20 @@ export async function getInfo(req: Request, res: Response) {
       getAcceptingStatus(venue.id),
       prisma.venue.findUnique({
         where: { id: venue.id },
-        select: { name: true, timezone: true, currency: true, logo: true, logoFull: true, primaryColor: true, secondaryColor: true },
+        select: {
+          name: true,
+          timezone: true,
+          currency: true,
+          logo: true,
+          logoFull: true,
+          primaryColor: true,
+          secondaryColor: true,
+          address: true,
+          city: true,
+          state: true,
+          zipCode: true,
+          phone: true,
+        },
       }),
     ])
     return res.json({
@@ -49,11 +69,25 @@ export async function getInfo(req: Request, res: Response) {
         },
         status: state.status,
         reason: state.reason,
+        // S2: la pausa de 15/30/60 min de la bandeja y la del gerente comparten `reason`; la hora sólo se anuncia en la primera
+        // (la del gerente no termina sola) y mientras siga vigente. La tienda dice «Volvemos a recibir pedidos a las HH:MM».
+        pausedUntil:
+          state.status === 'PAUSED' &&
+          state.reason === 'MANUAL_PAUSE' &&
+          !state.config.manualPause &&
+          state.config.pausedUntil &&
+          new Date(state.config.pausedUntil) > new Date()
+            ? state.config.pausedUntil
+            : null,
         hours: state.config.hours,
         paymentModes: { payAtPickup: state.config.acceptsPayAtPickup },
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
         acceptTimeoutMinutes: ACCEPT_TIMEOUT_MINUTES,
+        // 1b: a quién y dónde reclamar (LFPC 76 Bis) y su aviso integral (LFPDPPP). La ruta es relativa al API público
+        // (`GET /api/v1/public/venues/:venueId/privacy-notice`); la tienda le antepone su base.
+        contact: buildVenueContact(row ?? {}),
+        privacyNoticePath: `/venues/${venue.id}/privacy-notice`,
       },
     })
   } catch (error) {
@@ -105,18 +139,22 @@ export async function postOrder(req: Request, res: Response) {
     // exige que el teléfono del pedido sea ése; sin sesión responde 401 PHONE_VERIFICATION_REQUIRED.
     const auth = (req as any).customerAuth as CustomerAuthContext | null
 
-    const result = await createOnlineOrder({
-      venueId: venue.id,
-      idempotencyKey: key,
-      items: body.items,
-      paymentMode: body.paymentMode,
-      expectedTotal: body.expectedTotal,
-      customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
-      customerId: auth?.customerId ?? null,
-      verifiedPhone: auth?.verifiedPhone ?? null,
-      note: body.note ?? null,
-      whatsappConsent: body.whatsappConsent === true,
-    })
+    const result = await createOnlineOrder(
+      {
+        venueId: venue.id,
+        idempotencyKey: key,
+        items: body.items,
+        paymentMode: body.paymentMode,
+        expectedTotal: body.expectedTotal,
+        customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+        customerId: auth?.customerId ?? null,
+        verifiedPhone: auth?.verifiedPhone ?? null,
+        note: body.note ?? null,
+        whatsappConsent: body.whatsappConsent === true,
+      },
+      // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
+      { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) },
+    )
     return res.status(result.replay ? 200 : 201).json({ success: true, data: result })
   } catch (error) {
     return fail(res, error, 'No se pudo crear tu pedido')

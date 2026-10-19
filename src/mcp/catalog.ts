@@ -231,6 +231,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   my_class_now: 'read',
   online_order_respond: 'write',
   online_ordering_configure: 'write',
+  online_ordering_menu: 'read',
   online_ordering_pause: 'write',
   online_ordering_settings: 'read',
   online_orders_list: 'read',

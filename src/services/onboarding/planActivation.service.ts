@@ -737,7 +737,15 @@ async function resolverIntentoIncompleto(args: {
   throw rechazado(lpe?.message || 'Tu banco no autorizó el pago', lpe?.decline_code ?? lpe?.code)
 }
 
-export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePlanResult> {
+export async function activatePlan(
+  input: ActivatePlanInput,
+  /**
+   * 🔴 R2: `soloRecuperar` = el id de la suscripción que el revisor de altas a medio pago viene a cerrar. Con él, esta
+   * función sólo puede RECUPERAR esa suscripción ya cobrada: si el alta no apunta a ella, o si Stripe no la da por cobrada,
+   * sale sin cobrar, sin anular y sin estrenar intento.
+   */
+  opciones: { soloRecuperar?: string } = {},
+): Promise<ActivatePlanResult> {
   const { organizationId, staffId } = input
   const now = new Date()
 
@@ -758,6 +766,12 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   // con el dinero ya movido.
   if (!progress.termsAcceptedAt) {
     throw new ConflictError('Acepta los términos y el aviso de privacidad para continuar', 'TERMS_NOT_ACCEPTED')
+  }
+  if (
+    opciones.soloRecuperar &&
+    (progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || progress.planStripeSubscriptionId !== opciones.soloRecuperar)
+  ) {
+    throw new ConflictError('El alta ya no espera esa suscripción', 'PLAN_ACTIVATION_IN_PROGRESS')
   }
 
   const venue = await ensureVenueForOnboarding(organizationId, staffId)
@@ -844,7 +858,11 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     venueRecord?.name,
     venueRecord?.slug,
   )
-  const { fingerprint } = await assertPaymentMethodBelongsToCustomer(input.paymentMethodId, customerId)
+  // 🔴 R2 (Codex plan r1 #1): el revisor no cobra con esta tarjeta —sólo recupera lo ya pagado—, así que no se le exige.
+  // Si el cliente la retiró después de pagar, exigirla dejaba lo cobrado sin acceso en cada pasada.
+  const { fingerprint } = opciones.soloRecuperar
+    ? { fingerprint: null }
+    : await assertPaymentMethodBelongsToCustomer(input.paymentMethodId, customerId)
 
   // ---- PASO 5: lease con CAS ----
   const prev = {
@@ -871,6 +889,8 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       planActivationStatus: prev.status as never,
       planActivationAttempt: prev.attempt,
       planActivationLeaseUntil: prev.leaseUntil,
+      // R2: el revisor sólo toma el alta si sigue apuntando a la suscripción que vino a cerrar.
+      ...(opciones.soloRecuperar ? { planStripeSubscriptionId: opciones.soloRecuperar } : {}),
     },
     data: {
       planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
@@ -942,6 +962,12 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     //     con el estado REAL en Stripe (`resolverIntentoIncompleto`), fuera de los try/catch de lectura de arriba para que
     //     su 409, su 402 y sus 503 salgan tal cual.
     // (Segunda auditoría de Codex, 18-sep; `incomplete`: D2, 18-oct.)
+    // 🔴 R2: el revisor sólo cierra lo que Stripe YA cobró. Cualquier otra cosa sale aquí, antes de clasificarla: nunca llega
+    // a anular (resolverIntentoIncompleto), a estrenar intento ni a cobrar. Lo que expiró lo atiende R1, sin esta función.
+    if (opciones.soloRecuperar && !(suscripcionRecuperada && esCobrada(suscripcionRecuperada.status))) {
+      await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, prev.attempt, nuestroLease)
+      throw pendiente('la suscripción todavía no está cobrada')
+    }
     /** El lugar del cupo del intento descartado: se libera en el avance de abajo si este pedido no lo reusa. */
     let lugarDescartado: LugarDelIntento | null = null
     if (suscripcionRecuperada) {
@@ -1384,6 +1410,103 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
         }
       : {}),
   }
+}
+
+/**
+ * 🔴 R1 y R2 (promesa docs/audit/2026-10-18-campana-3ds-r1r2/promesa.md): el alta que se quedó «esperando al banco» sin nadie
+ * en la pantalla (lease suelto o vencido). La llama el barrido `altas-a-medio-pago` y decide con lo que dice Stripe AHORA:
+ *
+ * - `incomplete_expired` (R1: nadie autorizó y Stripe la dio por muerta a las ~23 h) ⇒ el alta pasa a DECLINED y el lugar
+ *   que nombra la metadata de ESA suscripción vuelve a la campaña, en UNA transacción y sólo si el CAS toca la fila. Antes:
+ *   el lugar quedaba apartado para siempre y la campaña podía verse agotada.
+ * - cobrada y con la marca del reto (R2: autorizó y cerró la pestaña) ⇒ `activatePlan` con `soloRecuperar`: el mismo cierre
+ *   que si hubiera vuelto (evidencia del primer cobro, entrega, ACTIVE, APPLIED, correo). Antes: cobrado sin acceso hasta
+ *   que volviera, y el mes 2 se cobraba igual.
+ * - cualquier otra cosa (esperando al banco, cancelada, cobro clásico sin la marca, suscripción de otro intento) ⇒ nada.
+ *
+ * 🔴 Nunca cobra, nunca anula ni crea nada en Stripe. Cada escritura es un CAS: si el cliente vuelve a la vez, gana uno.
+ */
+export async function cerrarAltaSinNavegador(organizationId: string): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
+  const p = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
+  const leaseVivo = p?.planActivationLeaseUntil != null && p.planActivationLeaseUntil > new Date()
+  if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || !p.planStripeSubscriptionId || leaseVivo)
+    return 'NADA'
+
+  const sub = await stripe.subscriptions.retrieve(p.planStripeSubscriptionId)
+  // Sólo la suscripción de ESTE intento: la de uno anterior (o la del carril viejo, con otra llave) no es de este revisor.
+  if (sub.metadata?.planActivationKey !== `plan-activation:${organizationId}:${p.planActivationAttempt}`) return 'NADA'
+
+  if (sub.status === 'incomplete_expired') {
+    const lugar = lugarDeLaMetadata(sub)
+    const declinada = await prisma.$transaction(async tx => {
+      const { count } = await tx.onboardingProgress.updateMany({
+        where: {
+          organizationId,
+          completedAt: null,
+          planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+          planActivationAttempt: p.planActivationAttempt,
+          planActivationLeaseUntil: p.planActivationLeaseUntil,
+          planStripeSubscriptionId: sub.id,
+        },
+        data: { planActivationStatus: PLAN_ACTIVATION_STATUS.DECLINED, planActivationLeaseUntil: null },
+      })
+      if (count === 0) return false
+      if (lugar) await liberarLugarEn(tx, lugar.redemptionId, lugar.campaignId, 'PLAN_ATTEMPT_ABANDONED')
+      return true
+    })
+    if (!declinada) return 'NADA'
+    logger.info('altas-a-medio-pago: el cobro expiró sin autorizarse — el alta queda DECLINED y su lugar vuelve a la campaña', {
+      organizationId,
+      subscriptionId: sub.id,
+      redemptionId: lugar?.redemptionId ?? null,
+    })
+    return 'LIBERADA'
+  }
+
+  const esperado = sub.metadata?.primerCobroEsperadoCents
+  if (!esCobrada(sub.status) || esperado == null) return 'NADA'
+
+  // 🔴 Codex r1 #1: sin tarjeta en la suscripción no se cierra aquí. El plan se guardaría sin tarjeta y «Terminar alta» lo
+  // rechaza (`completeV2Onboarding` la exige); queda el camino de hoy: el cliente vuelve con otra tarjeta y la recuperación
+  // del navegador entrega lo ya pagado sin cobrar otra vez. Una persona lo ve por el 🚨.
+  const paymentMethodId = idDe(sub.default_payment_method)
+  if (!paymentMethodId) {
+    logger.error('🚨 altas-a-medio-pago: pagado pero la suscripción ya no trae tarjeta — no se cierra sin el navegador', {
+      organizationId,
+      subscriptionId: sub.id,
+    })
+    return 'NADA'
+  }
+  const duena = await prisma.staffOrganization.findFirst({
+    where: { organizationId, role: 'OWNER' },
+    select: { staffId: true },
+    orderBy: { isPrimary: 'desc' },
+  })
+  if (!duena) throw new Error('la organización no tiene dueña')
+
+  const m = sub.metadata
+  const cents = Number(esperado)
+  await activatePlan(
+    {
+      organizationId,
+      staffId: duena.staffId,
+      tier: m.featureCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO',
+      interval: sub.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly',
+      // La marca sólo la pone el 2.º create, que nunca lleva prueba gratis: se pagó hoy.
+      payNow: true,
+      // Sólo queda como dato (con `soloRecuperar` no se cobra ni se comprueba): la tarjeta pudo retirarse después de pagar.
+      paymentMethodId,
+      offer: m.launchCampaignId
+        ? { kind: 'LAUNCH', code: m.launchCampaignCode ?? '', offerVersion: Number(m.launchOfferVersion), expectedFirstChargeCents: cents }
+        : { kind: 'STANDARD', expectedFirstChargeCents: cents },
+    },
+    { soloRecuperar: sub.id },
+  )
+  logger.info('altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador', {
+    organizationId,
+    subscriptionId: sub.id,
+  })
+  return 'CERRADA'
 }
 
 /**

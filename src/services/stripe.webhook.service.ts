@@ -510,6 +510,20 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
 }
 
 /**
+ * The subscription id of an invoice, in BOTH shapes Stripe sends.
+ *
+ * Since API 2025-03-31.basil the Invoice no longer carries `subscription`: it lives in
+ * `parent.subscription_details.subscription`. A webhook payload follows its ENDPOINT's version, and the
+ * plans endpoint has `api_version: null` (it follows the account default, 2020-03-02 on 19-oct-2026), so
+ * one «Upgrade API version» click in Stripe would drop the old field and both invoice handlers would skip
+ * every plan invoice in silence. The old field is read first, the new one second.
+ */
+function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+  const sub = (invoice as any).subscription ?? invoice.parent?.subscription_details?.subscription
+  return (typeof sub === 'string' ? sub : sub?.id) || null
+}
+
+/**
  * Handle invoice payment succeeded event
  * Triggered when subscription payment OR token purchase payment is successful
  *
@@ -568,9 +582,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   }
 
   // Handle subscription invoices (original logic)
-  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
-  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
-  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+  const subscriptionIdStr = invoiceSubscriptionId(invoice)
 
   if (!subscriptionIdStr) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
@@ -867,9 +879,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   }
 
   // Handle subscription invoices (original logic)
-  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
-  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
-  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+  const subscriptionIdStr = invoiceSubscriptionId(invoice)
 
   if (!subscriptionIdStr) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
@@ -1605,9 +1615,9 @@ export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { cla
     // Try to find venueId from subscription metadata
     if (eventData.metadata?.venueId) {
       venueId = eventData.metadata.venueId
-    } else if (eventData.subscription) {
-      // For invoice events, fetch subscription to get venueId
-      const subscriptionId = typeof eventData.subscription === 'string' ? eventData.subscription : eventData.subscription.id
+    } else if (invoiceSubscriptionId(eventData)) {
+      // For invoice events, fetch subscription to get venueId (both invoice shapes, see invoiceSubscriptionId)
+      const subscriptionId = invoiceSubscriptionId(eventData)
       const venueFeature = await prisma.venueFeature.findFirst({
         where: { stripeSubscriptionId: subscriptionId },
         select: { venueId: true },

@@ -1,5 +1,5 @@
 // H5 (r2): el Zod de ajustes usa la MISMA validación que la precarga (`isValidOrderingHours`, tarea 3).
-import { inboxSchema, menuAvailabilityBody, pauseSchema, settingsPatchBody } from '@/schemas/online-ordering.schema'
+import { inboxSchema, menuAvailabilityBody, menuProductsSchema, pauseSchema, settingsPatchBody } from '@/schemas/online-ordering.schema'
 
 const dia = (enabled: boolean, ranges: Array<{ open: string; close: string }> = []) => ({ enabled, ranges })
 const semana = (o: Record<string, unknown> = {}) => ({
@@ -96,5 +96,47 @@ describe('inboxSchema: cursor de los activos (A8)', () => {
     const otraLista = bandeja({ status: 'all', cursor: CURSOR })
     expect(otraLista.success).toBe(false)
     expect(JSON.stringify(otraLista)).toContain('El cursor sólo sirve para los pedidos activos (status=active)')
+  })
+})
+
+describe('menuProductsSchema: la lista del menú en línea del panel (1b)', () => {
+  const lista = (query: Record<string, unknown>) => menuProductsSchema.safeParse({ params: { venueId: 'v1' }, query })
+
+  it('todo es opcional; limit llega como texto en el query y sale como número (1..100)', () => {
+    expect(lista({}).success).toBe(true)
+    for (const [entrada, salida] of [
+      ['1', 1],
+      ['50', 50],
+      ['100', 100],
+    ] as const) {
+      const r = lista({ limit: entrada })
+      expect(r.success && r.data.query.limit).toBe(salida)
+    }
+    for (const mal of ['0', '101', '2.5', 'abc', '']) {
+      const r = lista({ limit: mal })
+      expect({ mal, success: r.success }).toEqual({ mal, success: false })
+      expect(JSON.stringify(r)).toContain('Límite inválido')
+    }
+  })
+
+  it('cursor y categoryId son ids seguros; uno inválido se rechaza en español', () => {
+    expect(lista({ cursor: 'cmgq0x0p30001abcd1234efgh', categoryId: 'cmgq0x0p30001abcd1234efgh' }).success).toBe(true)
+    for (const mal of ['p 1', 'p1\u0000', 'p'.repeat(41), '']) {
+      expect(JSON.stringify(lista({ cursor: mal }))).toContain('Cursor inválido')
+      expect(JSON.stringify(lista({ categoryId: mal }))).toContain('Categoría inválida')
+    }
+    expect(lista({ cursor: ['a', 'b'] }).success).toBe(false)
+  })
+
+  it('search se recorta y mide 1..80', () => {
+    const r = lista({ search: '  tacos  ' })
+    expect(r.success && r.data.query.search).toBe('tacos')
+    expect(lista({ search: 'x'.repeat(80) }).success).toBe(true)
+    // Postgres no guarda el byte nulo en un texto: llegaría como 500 si pasara la validación.
+    for (const mal of ['   ', 'x'.repeat(81), '\u0000', 'a\u0000b']) {
+      const m = lista({ search: mal })
+      expect(m.success).toBe(false)
+      expect(JSON.stringify(m)).toContain('Búsqueda inválida')
+    }
   })
 })
