@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { instrumentTools, recordCancelledToolCall, sanitizeThrownError, sanitizeToolResult } from '../../../src/mcp/instrument'
 import { ScopeError } from '../../../src/mcp/errors'
 import logger from '@/config/logger'
@@ -181,6 +182,14 @@ describe('sanitizeThrownError / thrown errors reaching the client', () => {
 describe('sanitizeToolResult (errors a tool RETURNS as ok:false)', () => {
   const asText = (o: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(o, null, 2) }] })
   const read = (r: unknown) => JSON.parse((r as { content: Array<{ text: string }> }).content[0].text)
+  /**
+   * Nada interno sobrevive en la respuesta. El folio se quita antes de buscar: es azar hexadecimal y puede
+   * contener «5432» sin que se haya filtrado el puerto (el mensaje con folio ya se compara exacto aparte).
+   */
+  const expectSinInternos = (out: unknown) =>
+    expect(JSON.stringify(out).replace(/\(ref [0-9a-f]{8}\)/g, '(ref <folio>)')).not.toMatch(
+      /prisma|SELECT|ECONNREFUSED|5432|\/app\/src|P2003/i,
+    )
 
   // NEW — internal shapes get redacted
   it.each([
@@ -199,7 +208,20 @@ describe('sanitizeToolResult (errors a tool RETURNS as ok:false)', () => {
     )
     expect(out.ok).toBe(false)
     expect(out.venueId).toBe('v1') // the rest of the payload survives
-    expect(JSON.stringify(out)).not.toMatch(/prisma|SELECT|ECONNREFUSED|5432|\/app\/src|P2003/i)
+    expectSinInternos(out)
+  })
+
+  // 🔴 El folio es azar (`randomBytes(4)`): el 18-oct-2026 salió `3654326b`, que contiene «5432», y
+  // esta prueba tumbó el CI de main sin defecto real. Se fija un folio así para que no vuelva.
+  it('un folio que por azar contiene «5432» no se confunde con el puerto de la base', () => {
+    const spy = jest.spyOn(crypto, 'randomBytes').mockImplementation((() => Buffer.from('00543200', 'hex')) as never)
+    try {
+      const { result, ref } = sanitizeToolResult(asText({ ok: false, error: 'connect ECONNREFUSED 10.0.0.5:5432' }), 'staff_schedule', ctx)
+      expect(ref).toBe('00543200')
+      expectSinInternos(read(result))
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   // NEW — operator-facing messages must survive untouched (this is the whole point of the denylist)
