@@ -6,13 +6,30 @@
  */
 
 import { Request, Response, NextFunction } from 'express'
-import { createSetupIntent } from '../../../../src/controllers/onboarding.controller'
+import { createSetupIntent, getOnboardingProgress } from '../../../../src/controllers/onboarding.controller'
 import * as stripeService from '../../../../src/services/stripe.service'
 
 // Mock Stripe service
 jest.mock('../../../../src/services/stripe.service', () => ({
   __esModule: true,
   createOnboardingSetupIntent: jest.fn(),
+}))
+
+// Mocks para GET progress (planQuote): sin base de datos ni venue real.
+jest.mock('../../../../src/services/onboarding/onboardingProgress.service', () => ({
+  __esModule: true,
+  getOnboardingProgress: jest.fn(),
+  getOnboardingCompletionPercentage: jest.fn(),
+  parseV2Step8: jest.fn(),
+  resolveTpvPurchaseForOnboarding: jest.fn(),
+}))
+jest.mock('../../../../src/services/onboarding/ensureVenue.service', () => ({
+  __esModule: true,
+  ensureVenueForOnboarding: jest.fn(),
+}))
+jest.mock('../../../../src/utils/prismaClient', () => ({
+  __esModule: true,
+  default: { launchCampaign: { findUnique: jest.fn() } },
 }))
 
 // Mock logger
@@ -117,6 +134,43 @@ describe('Onboarding Controller', () => {
           data: { clientSecret: mockClientSecret },
         })
       })
+    })
+  })
+})
+
+describe('GET progress — planQuote', () => {
+  it('manda el precio sin IVA junto al precio con IVA, y no quita nada de lo viejo', async () => {
+    const onboardingProgressService = jest.requireMock('../../../../src/services/onboarding/onboardingProgress.service')
+    const ensureVenue = jest.requireMock('../../../../src/services/onboarding/ensureVenue.service')
+    onboardingProgressService.getOnboardingProgress.mockResolvedValue({
+      id: 'p1',
+      currentStep: 1,
+      launchCampaignId: null,
+      termsVersion: null,
+    })
+    onboardingProgressService.getOnboardingCompletionPercentage.mockResolvedValue(0)
+    onboardingProgressService.parseV2Step8.mockReturnValue(null)
+    ensureVenue.ensureVenueForOnboarding.mockResolvedValue(null)
+
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
+    const next = jest.fn()
+    await getOnboardingProgress({ params: { organizationId: 'org_1' } } as unknown as Request, res as unknown as Response, next)
+
+    expect(next).not.toHaveBeenCalled()
+    const body = res.json.mock.calls[0][0]
+    expect(body.progress.planQuote.tiers.PRO).toMatchObject({
+      monthlyCents: 115884,
+      annualCents: 1158840,
+      monthlyNetCents: 99900,
+      annualNetCents: 999000,
+      intro: { monthlyCents: 69484 },
+    })
+    expect(body.progress.planQuote.tiers.PREMIUM).toMatchObject({
+      monthlyCents: 197084,
+      annualCents: 1970840,
+      monthlyNetCents: 169900,
+      annualNetCents: 1699000,
+      intro: null,
     })
   })
 })

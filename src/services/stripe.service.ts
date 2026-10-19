@@ -15,6 +15,7 @@ import logger from '@/config/logger'
 import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
+import { pausaDe } from '@/services/billing/siguienteCobro'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
@@ -1685,16 +1686,6 @@ export async function createWinbackPromotionCode(
  *
  * @param subscriptionId - Stripe subscription ID
  */
-/**
- * 🔴 Codex N3: la pausa de cobranza vigente de una suscripción. Una pausa SIN `resumes_at` (indefinida) cuenta como
- * vigente: es la más peligrosa de todas, no la más inocente.
- */
-function pausaDe(sub: Stripe.Subscription): Date | null {
-  const pausa = (sub as unknown as { pause_collection?: { resumes_at?: number | null } | null }).pause_collection
-  if (!pausa) return null
-  return pausa.resumes_at ? new Date(pausa.resumes_at * 1000) : new Date(8640000000000000)
-}
-
 export async function retrievePlanSubscription(subscriptionId: string): Promise<{
   status: string
   cancelAtPeriodEnd: boolean
