@@ -41,6 +41,14 @@ jest.mock('@/services/product-variants/groupExisting.service', () => ({
   previewGroupExisting: (...a: unknown[]) => mockPreviewGroup(...a),
   applyGroupExisting: (...a: unknown[]) => mockApplyGroup(...a),
 }))
+const mockShopifyPreview = jest.fn()
+const mockShopifyBatch = jest.fn()
+jest.mock('@/services/product-variants/shopifyFamilies.service', () => ({
+  listShopifyFamilyProposals: jest.fn(),
+  previewAllShopifyProposals: jest.fn(),
+  previewShopifyProposal: (...a: unknown[]) => mockShopifyPreview(...a),
+  applyShopifyProposalsBatch: (...a: unknown[]) => mockShopifyBatch(...a),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -511,6 +519,21 @@ describe('group_products_as_variants', () => {
     expect(mockAudit).not.toHaveBeenCalled()
   })
 
+  it('🔴 un producto ligado a Shopify ⇒ le dice al asistente que use group_shopify_family (no un error a secas)', async () => {
+    mockPreviewGroup.mockRejectedValue(
+      new ConflictError(
+        '«BODY HARBOR - Talla 34» está ligado a Shopify; se agrupa desde la pestaña Desde Shopify.',
+        'PRODUCT_GROUP_SHOPIFY_LINKED',
+      ),
+    )
+    const r = await call('group_products_as_variants', args)
+    expect(r).toMatchObject({ ok: false, code: 'PRODUCT_GROUP_SHOPIFY_LINKED', useTool: 'group_shopify_family' })
+    expect(r.error).toContain('está ligado a Shopify')
+    expect(r.message).toContain('shopify_family_proposals')
+    expect(r.message).toContain('group_shopify_family')
+    expect(mockApplyGroup).not.toHaveBeenCalled()
+  })
+
   it('un SKU que no existe en el negocio se nombra y no se llama al servicio', async () => {
     mockProducts.mockResolvedValue([{ id: 'p34', sku: 'BH-34' }])
     const r = await call('group_products_as_variants', args)
@@ -789,5 +812,59 @@ describe('catálogo', () => {
       false,
       false,
     ])
+  })
+})
+
+describe('group_shopify_family (confirmación en dos pasos del catálogo)', () => {
+  const spid = 'gid://shopify/Product/42'
+  beforeEach(() => {
+    mockShopifyPreview.mockResolvedValue({
+      mode: 'CREATE',
+      groupId: null,
+      parent: { name: 'Sudadera', ivaTratamiento: 'IVA_16' },
+      options: [{ name: 'Talla', values: ['S'] }],
+      members: [{ productId: 'p1', sku: 'SUD-S', currentName: 'Sudadera · S', newName: 'Sudadera · S', values: ['S'], changes: [] }],
+      skipped: [],
+      warnings: [],
+      fingerprint: 'huella-shopify',
+    })
+    mockShopifyBatch.mockResolvedValue({ applied: [{ shopifyProductId: spid, groupId: 'g7', mode: 'CREATE' }], skipped: [] })
+  })
+
+  it('🔴 la vista previa ata expectedItems al token: confirma exactamente esos pares, y otros pares piden otra vista previa', async () => {
+    const preview = await call('group_shopify_family', { venueId: 'v1', shopifyProductId: spid })
+    expect(preview).toMatchObject({
+      requiresConfirmation: true,
+      expectedItems: [{ shopifyProductId: spid, fingerprint: 'huella-shopify' }],
+    })
+    expect(preview.confirmationArguments.expectedItems).toEqual([{ shopifyProductId: spid, fingerprint: 'huella-shopify' }])
+    const cambiado = await call('group_shopify_family', {
+      ...preview.confirmationArguments,
+      expectedItems: [{ shopifyProductId: spid, fingerprint: 'otra' }],
+      confirm: true,
+      confirmationToken: preview.confirmationToken,
+    })
+    expect(cambiado).toMatchObject({ ok: false, needsInput: true, field: 'confirmationToken' })
+    expect(mockShopifyBatch).not.toHaveBeenCalled()
+    const r = await call('group_shopify_family', {
+      ...preview.confirmationArguments,
+      confirm: true,
+      confirmationToken: preview.confirmationToken,
+    })
+    expect(r).toMatchObject({ ok: true, applied: [{ groupId: 'g7' }] })
+    expect(mockShopifyBatch).toHaveBeenCalledWith('v1', expect.objectContaining({ staffId: 'owner' }), [
+      { shopifyProductId: spid, fingerprint: 'huella-shopify' },
+    ])
+    expect(mockAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'PRODUCT_GROUP_FROM_SHOPIFY', entityId: 'g7' }),
+    )
+  })
+
+  it('🔴 sin `menu:update` no muestra ni agrupa', async () => {
+    await reconnect({ role: 'WAITER', corePermissions: ['menu:read'], isSuperAdmin: false })
+    const r = await call('group_shopify_family', { venueId: 'v1', shopifyProductId: spid })
+    expect(r).toMatchObject({ ok: false, error: 'Missing permission menu:update for venue v1' })
+    expect(mockShopifyPreview).not.toHaveBeenCalled()
   })
 })

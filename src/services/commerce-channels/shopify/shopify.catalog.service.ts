@@ -23,6 +23,9 @@ import {
   writeLegacyServiceProductCreationAuditForVenue,
 } from '@/services/master-catalog/catalogGovernance.service'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
+import { NotFoundError } from '@/errors/AppError'
+import { familyIdentityConflict, lockGroupForCleanup, reviveGroupTx } from '@/services/product-variants/groupWriterTx'
+import { MAX_VARIANTS_PER_GROUP } from '@/services/product-variants/variantNaming'
 import { CATALOG_PAGE_SIZE, SHOPIFY_FEATURE, SHOPIFY_MAX_VARIANTS, SHOPIFY_SERVICE_ACTOR } from './shopify.constants'
 import { shopifyGraphql, type ShopifyResult } from './shopify.graphql'
 import {
@@ -256,8 +259,20 @@ export function normalizeSku(raw: string | null | undefined): string | null {
   return s.length > 0 ? s : null
 }
 
-const nombreDe = (v: VarianteShopify): string =>
-  [v.product.title, ...v.selectedOptions.map(o => o.value).filter(x => x && x !== 'Default Title')].join(' · ')
+/** Las opciones de verdad: «Default Title» es la de un producto de Shopify sin tallas, y un valor vacío no es opción. */
+export const opcionesReales = (v: VarianteShopify): Array<{ name: string; value: string }> =>
+  v.selectedOptions.filter(o => o.value && o.value !== 'Default Title').map(o => ({ name: o.name, value: o.value }))
+const nombreDe = (v: VarianteShopify): string => [v.product.title, ...opcionesReales(v).map(o => o.value)].join(' · ')
+/**
+ * Lo que Shopify dice de la variante (bloque 5, V2), guardado en su pareja al ligar y en cada actualización. Sólo informa: con
+ * esto «Desde Shopify» arma la propuesta de familia; nada lo aplica solo a una talla agrupada (su familia es de Avoqado).
+ */
+export const catalogoDe = (v: VarianteShopify) => ({
+  title: v.product.title,
+  options: opcionesReales(v),
+  productImage: v.product.featuredMedia?.preview?.image?.url ?? null,
+  variantImage: v.media.nodes[0]?.preview?.image?.url ?? null,
+})
 // ponytail: un código de más de 14 caracteres no cabe en el de Avoqado; se importa sin código. Si aparece, ampliar `gtin`.
 const gtinDe = (v: VarianteShopify): string | null => {
   const g = v.barcodes.nodes[0]?.value?.trim() ?? ''
@@ -443,10 +458,11 @@ function sinAcentos(s: string): string {
   return s.normalize('NFKD').replace(/\p{M}/gu, '')
 }
 
-/** La elegibilidad va ANTES de restaurar (N07): un archivado por el conector que ya no es elegible se queda archivado. */
+/**
+ * La elegibilidad va ANTES de restaurar (N07): un archivado por el conector que ya no es elegible se queda archivado. Una talla
+ * agrupada se liga como cualquier producto (bloque 5, V2: su familia es de Avoqado y el conector nunca la toca).
+ */
 function motivoParaNoLigar(p: Candidato, v: VarianteShopify, porSku: boolean): ShopifyIssueReason | 'RESTAURAR' | null {
-  // Variantes (A12, exclusión recíproca): quién manda nombre y foto entre Shopify y el padre llega en el bloque 5.
-  if (p.productGroupId) return 'PRODUCTO_CON_VARIANTES'
   if (p.shopifyVariantLink) return porSku ? 'SKU_REPETIDO' : 'CODIGO_REPETIDO'
   if (p.deletedAt && !archivadoPorShopify(p)) return 'PRODUCTO_ARCHIVADO'
   // El SKU de Shopify sólo coincide después de normalizarlo: es OTRO producto de Avoqado que se llama parecido. Un acento
@@ -464,7 +480,9 @@ export type UpsertOutcome =
   | { kind: 'OBSOLETO' }
 type Importado = { importedAvailable?: number | null; importedAt?: Date }
 /** Lo que la tx hizo y se registra en la bitácora DESPUÉS de comitear (K18). */
-type Efectos = { restaurado?: string }
+type Efectos = { restaurado?: string; familiaRevivida?: string }
+/** La familia de una talla, ya bloqueada (`lockGroupForCleanup`), por id de familia. */
+type Familias = Map<string, Awaited<ReturnType<typeof lockGroupForCleanup>>>
 
 /** Una sucursal con la que el catálogo trabaja: ACTIVE y sin error terminal (§12.2). Las demás esperan o no se tocan. */
 const sucursalTrabajable = (storeId: string): Prisma.ShopifyLocationLinkWhereInput => ({
@@ -528,7 +546,9 @@ export async function upsertShopifyVariant(ctx: ContextoCatalogo, v: VarianteSho
         !parejaVista && gtin
           ? await tx.product.findUnique({ where: { venueId_gtin: { venueId: ctx.venueId, gtin } }, select: { id: true } })
           : null
-      const productos = await bloquearProductos(tx, [parejaVista?.productId, skuVisto?.id, codigoVisto?.id])
+      const vistos = [parejaVista?.productId, skuVisto?.id, codigoVisto?.id]
+      const familias = await bloquearFamiliasPorRestaurar(tx, ctx.venueId, vistos)
+      const productos = await bloquearProductos(tx, vistos)
       const { sweepId } = await cercar(tx, ctx)
 
       if (parejaVista) {
@@ -551,7 +571,7 @@ export async function upsertShopifyVariant(ctx: ContextoCatalogo, v: VarianteSho
           await bloquearBuzon(tx, { productId: pareja.productId, locationLinkId: pareja.locationLinkId, generation: pareja.generation })
         }
         await verificarReclamo(tx, ctx.reclamo) // el evento, último candado
-        return actualizarPareja(tx, ctx, v, pareja, producto, importado, sweepId, cambios, efectos)
+        return actualizarPareja(tx, ctx, v, pareja, producto, importado, sweepId, cambios, familias, efectos)
       }
       // Sin pareja no hay más candados del estado (el alta de Inventory es INSERT ... ON CONFLICT DO NOTHING).
       await verificarReclamo(tx, ctx.reclamo)
@@ -578,8 +598,10 @@ export async function upsertShopifyVariant(ctx: ContextoCatalogo, v: VarianteSho
         await anotar(tx, ctx.venueId, v, motivo, null, candidato.id)
         return { kind: 'PROBLEMA', reason: motivo }
       }
-      // Restaurar = el MISMO producto con su historia (decisión del 29-sep): ya existía, así que se compara (§9.6).
-      if (motivo === 'RESTAURAR') await restaurar(tx, ctx.venueId, candidato.id, efectos)
+      // Restaurar = el MISMO producto con su historia (decisión del 29-sep): ya existía, así que se compara (§9.6). Si su familia
+      // no lo recibe (V7), se queda archivado con su aviso y no se liga (R5-4).
+      if (motivo === 'RESTAURAR' && (await restaurar(tx, ctx.venueId, v, candidato, familias, efectos)) === 'RECHAZADA')
+        return { kind: 'PROBLEMA', reason: 'PRODUCTO_ARCHIVADO' }
       return ligar(tx, ctx, v, candidato, importado, false, sweepId)
     })
   } catch (e) {
@@ -593,6 +615,15 @@ export async function upsertShopifyVariant(ctx: ContextoCatalogo, v: VarianteSho
       entity: 'Product',
       entityId: efectos.restaurado,
       data: { variante: v.id },
+    })
+  }
+  if (efectos.familiaRevivida) {
+    logAction({
+      venueId: ctx.venueId,
+      action: 'SHOPIFY_PRODUCT_GROUP_RESTORED',
+      entity: 'ProductGroup',
+      entityId: efectos.familiaRevivida,
+      data: { variante: v.id, producto: efectos.restaurado },
     })
   }
   return r
@@ -619,6 +650,7 @@ async function ligar(
       originalSku: v.sku,
       createdProduct: creada,
       lastSeenSweepId: sweepId,
+      shopifyCatalog: catalogoDe(v),
       // Nace sin espejo: «nunca leído». Con el `now()` por omisión, una lectura hecha ANTES de crearla (la del sync, B-1)
       // se vería vieja y `initializePair` nunca la iniciaría (REINTENTAR para siempre).
       mirrorAt: new Date(0),
@@ -685,9 +717,84 @@ async function crearProducto(
   return r
 }
 
-/** Saca del archivo un producto que archivó el conector (el producto ya está bloqueado y es elegible). */
-async function restaurar(tx: Prisma.TransactionClient, venueId: string, productId: string, efectos: Efectos): Promise<void> {
-  const actual = await tx.product.findUniqueOrThrow({ where: { id: productId }, select: { price: true } })
+/**
+ * V7 (bloque 5): restaurar una talla agrupada escribe su familia (puede revivirla), así que la familia va ANTES del producto, en
+ * el orden del motor (cerco del negocio → familia → producto). Qué familias podría tocar se lee sin candado (tallas que archivó el
+ * conector) y `restaurar` lo re-verifica con el producto ya bloqueado. Fuera de eso el upsert no bloquea familias: no las escribe.
+ */
+async function bloquearFamiliasPorRestaurar(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  ids: Array<string | null | undefined>,
+): Promise<Familias> {
+  const familias: Familias = new Map()
+  const unicos = [...new Set(ids.filter((x): x is string => !!x))]
+  if (unicos.length === 0) return familias
+  const tallas = await tx.product.findMany({
+    where: { id: { in: unicos }, venueId, productGroupId: { not: null }, deletedAt: { not: null }, deletedBy: ARCHIVADO_POR_SHOPIFY },
+    select: { productGroupId: true },
+    take: unicos.length,
+  })
+  for (const g of [...new Set(tallas.map(t => t.productGroupId as string))].sort()) {
+    familias.set(g, await bloquearFamilia(tx, venueId, g))
+  }
+  return familias
+}
+
+/** `lockGroupForCleanup` con la familia leída sin candado: si ya no existe, la lectura era vieja y se reintenta (no es un fallo). */
+async function bloquearFamilia(tx: Prisma.TransactionClient, venueId: string, groupId: string) {
+  try {
+    return await lockGroupForCleanup(tx, venueId, groupId)
+  } catch (e) {
+    if (e instanceof NotFoundError) throw new Error('la familia de la talla cambió mientras se leía; se reintenta')
+    throw e
+  }
+}
+
+export const FAMILIA_NO_RECIBE = 'Su familia está archivada o llena: restáurala en Avoqado.'
+
+/**
+ * V7: la familia (ya bloqueada) recibe a su talla si está viva con menos de 250 tallas vivas, o si la archivó el conector y su
+ * identidad sigue libre (`familyIdentityConflict`, la política única del motor: SHOPIFY por su llave (venueId, source,
+ * externalId); MANUAL también por su nombre): ésa revive con la talla. Archivada por el dueño, no.
+ */
+async function familiaRecibe(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  groupId: string,
+  f: Awaited<ReturnType<typeof lockGroupForCleanup>>,
+): Promise<boolean> {
+  if (!f.deletedAt) return (await tx.product.count({ where: { productGroupId: groupId, deletedAt: null } })) < MAX_VARIANTS_PER_GROUP
+  if (f.deletedBy !== ARCHIVADO_POR_SHOPIFY) return false
+  return (await familyIdentityConflict(tx, venueId, { source: f.source, name: f.name, externalId: f.externalId }, groupId)) === null
+}
+
+/**
+ * Saca del archivo un producto que archivó el conector (el producto ya está bloqueado y es elegible). Una talla agrupada vuelve
+ * sólo si su familia la recibe (`familiaRecibe`, V7); si no, queda archivada con `PRODUCTO_ARCHIVADO` y `'RECHAZADA'`: quien
+ * llama se detiene (no liga, no borra el aviso, no pide iniciar la pareja; Codex r5 R5-4).
+ */
+async function restaurar(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  v: VarianteShopify,
+  producto: Candidato,
+  familias: Familias,
+  efectos: Efectos,
+): Promise<'RESTAURADA' | 'RECHAZADA'> {
+  if (producto.productGroupId) {
+    const f = familias.get(producto.productGroupId)
+    if (!f) throw new Error('la talla cambió de familia mientras se leía; se reintenta')
+    if (!(await familiaRecibe(tx, venueId, producto.productGroupId, f))) {
+      await anotar(tx, venueId, v, 'PRODUCTO_ARCHIVADO', FAMILIA_NO_RECIBE, producto.id)
+      return 'RECHAZADA'
+    }
+    if (f.deletedAt) {
+      await reviveGroupTx(tx, producto.productGroupId)
+      efectos.familiaRevivida = producto.productGroupId
+    }
+  }
+  const actual = await tx.product.findUniqueOrThrow({ where: { id: producto.id }, select: { price: true } })
   const vendible = actual.price.gt(0)
   await assertLegacyCatalogGovernanceForVenue(tx, {
     venueId,
@@ -695,8 +802,13 @@ async function restaurar(tx: Prisma.TransactionClient, venueId: string, productI
     willBeVendable: vendible,
     actor: SHOPIFY_SERVICE_ACTOR,
   })
-  await tx.product.update({ where: { id: productId }, data: { deletedAt: null, deletedBy: null, active: vendible } })
-  efectos.restaurado = productId
+  await tx.product.update({ where: { id: producto.id }, data: { deletedAt: null, deletedBy: null, active: vendible } })
+  efectos.restaurado = producto.id
+  // Si un intento anterior la rechazó (familia llena o con la llave ocupada) y ahora sí vuelve, el aviso de V7 ya no aplica.
+  await tx.shopifyImportIssue.deleteMany({
+    where: { venueId, shopifyVariantId: v.id, reason: 'PRODUCTO_ARCHIVADO', detail: FAMILIA_NO_RECIBE },
+  })
+  return 'RESTAURADA'
 }
 
 /**
@@ -706,7 +818,9 @@ async function restaurar(tx: Prisma.TransactionClient, venueId: string, productI
  * inventario (BR-6, K14), la pareja se suspende (`NIVEL_INEXISTENTE`: conserva la barrera de lo que esté en camino) y
  * guarda el id nuevo; el cuadre la vuelve a comparar. R-M3: una pareja VIVA cuyo producto ya no se sincroniza
  * (`cambios.inelegible`, decidido con el Product bloqueado) se suspende `SIN_INVENTARIO` con su motivo real; sus filas y su
- * Inventory ya están bloqueados. `iniciada` = viva: iniciada y no suspendida.
+ * Inventory ya están bloqueados. `iniciada` = viva: iniciada y no suspendida. Bloque 5 (V2): de una talla agrupada sólo se
+ * escriben su SKU, su código y `shopifyCatalog`; el nombre y la foto son de su familia (de Avoqado). Una restauración que su
+ * familia rechaza (V7) detiene todo: `PROBLEMA`, sin tocar la pareja.
  */
 async function actualizarPareja(
   tx: Prisma.TransactionClient,
@@ -717,15 +831,20 @@ async function actualizarPareja(
   importado: Importado,
   sweepId: number,
   cambios: { articulo: boolean; inelegible: MotivoNoSincronizable | null },
+  familias: Familias,
   efectos: Efectos,
 ): Promise<UpsertOutcome> {
   const cambioArticulo = cambios.articulo
   // Archivado por el conector y ya no elegible (pasó a receta, a kilo…): se queda archivado y nadie lo compara.
   const noElegible = archivadoPorShopify(producto) ? inelegible(producto) : null
   if (noElegible) await anotar(tx, ctx.venueId, v, noElegible, null, producto.id)
-  else if (archivadoPorShopify(producto)) await restaurar(tx, ctx.venueId, producto.id, efectos)
+  else if (archivadoPorShopify(producto) && (await restaurar(tx, ctx.venueId, v, producto, familias, efectos)) === 'RECHAZADA')
+    return { kind: 'PROBLEMA', reason: 'PRODUCTO_ARCHIVADO' }
   if (cambioArticulo && !cambios.inelegible) await suspendPair(tx, pareja.id, 'NIVEL_INEXISTENTE')
-  const actual = await tx.product.findUniqueOrThrow({ where: { id: pareja.productId }, select: { id: true, sku: true, gtin: true } })
+  const actual = await tx.product.findUniqueOrThrow({
+    where: { id: pareja.productId },
+    select: { id: true, sku: true, gtin: true, name: true, imageUrl: true },
+  })
   const avisos: Array<{ reason: ShopifyIssueReason; detail: string }> = []
   let sku = actual.sku
   const skuNuevo = normalizeSku(v.sku)
@@ -745,10 +864,21 @@ async function actualizarPareja(
       avisos.push({ reason: 'CODIGO_REPETIDO', detail: `El código ${gtinNuevo} ya es de otro producto; se conservó el anterior` })
     else gtin = gtinNuevo
   }
-  await tx.product.update({ where: { id: actual.id }, data: { name: nombreDe(v), sku, gtin, imageUrl: imagenDe(v) } })
+  // V2: el nombre y la foto de una talla agrupada son de su familia; el conector sólo le escribe SKU y código.
+  const agrupada = producto.productGroupId !== null
+  const name = agrupada ? undefined : nombreDe(v)
+  const imageUrl = agrupada ? undefined : imagenDe(v)
+  // Sólo si algo cambió: reescribir lo mismo sube `updatedAt` y vuelve vieja la huella de «Desde Shopify» con cada aviso o cuadre.
+  const cambia =
+    sku !== actual.sku ||
+    gtin !== actual.gtin ||
+    (name !== undefined && name !== actual.name) ||
+    (imageUrl !== undefined && imageUrl !== actual.imageUrl)
+  if (cambia) await tx.product.update({ where: { id: actual.id }, data: { name, imageUrl, sku, gtin } })
   await tx.shopifyVariantLink.update({
     where: { id: pareja.id },
     data: {
+      shopifyCatalog: catalogoDe(v),
       originalSku: v.sku,
       shopifyProductId: v.product.id,
       inventoryItemId: v.inventoryItem.id,
@@ -1189,13 +1319,13 @@ export async function archiveShopifyProduct(
 export type ParejaParaArchivar = { id: string; productId: string; venueId: string; locationLinkId: string; shopifyVariantId: string }
 
 /**
- * Archiva el producto de una pareja que desapareció de Shopify (§10.4). Orden §10.3 y §12.5: Product (`FOR NO KEY
- * UPDATE`, K11) → sucursal → tienda → pareja (`bloquearPareja` de A, BR-6) → las filas del buzón y la revisión que se van
- * a modificar → evento, y sólo después el primer efecto. Con `cerco` (lo que vio quien decidió la baja, N05), la sucursal
- * debe seguir en esa generación, con esa tienda, ubicación, credencial y lease, la tienda ACTIVE y sin error terminal
- * (§12.2): si no, `OBSOLETO` y nada cambia. Lo que nunca salió se descarta; si queda un envío en camino, la pareja se
- * SUSPENDE y conserva la barrera (el cuadre la vuelve a intentar); si no, se borra, se descartan las atoradas y se cierran
- * sus revisiones.
+ * Archiva el producto de una pareja que desapareció de Shopify (§10.4). Orden §10.3 y §12.5: (de una talla agrupada, antes el
+ * negocio y su familia: bloque 5) → Product (`FOR NO KEY UPDATE`, K11) → sucursal → tienda → pareja (`bloquearPareja` de A,
+ * BR-6) → las filas del buzón y la revisión que se van a modificar → evento, y sólo después el primer efecto. Con `cerco`
+ * (lo que vio quien decidió la baja, N05), la sucursal debe seguir en esa generación, con esa tienda, ubicación, credencial y
+ * lease, la tienda ACTIVE y sin error terminal (§12.2): si no, `OBSOLETO` y nada cambia. Lo que nunca salió se descarta; si
+ * queda un envío en camino, la pareja se SUSPENDE y conserva la barrera (el cuadre la vuelve a intentar); si no, se borra, se
+ * descartan las atoradas y se cierran sus revisiones.
  */
 export async function archivarPareja(
   p: ParejaParaArchivar,
@@ -1203,9 +1333,16 @@ export async function archivarPareja(
 ): Promise<'ARCHIVADA' | 'SUSPENDIDA' | 'NADA' | 'OBSOLETO'> {
   try {
     const r = await prisma.$transaction(async tx => {
+      // Bloque 5: archivar una talla agrupada puede archivar su familia (la última viva). Orden del motor: el negocio y la familia
+      // (también archivada: la segunda baja) ANTES del producto; si no, borrar en Shopify mientras el dueño edita la familia se
+      // trababa (producto → negocio contra negocio → familia → tallas, 40P01). Se lee sin candado y se re-verifica bloqueado.
+      const vista = await tx.product.findUnique({ where: { id: p.productId }, select: { productGroupId: true } })
+      if (vista?.productGroupId) await bloquearFamilia(tx, p.venueId, vista.productGroupId)
       const [prod] = await tx.$queryRaw<
-        Array<{ deletedAt: Date | null }>
-      >`SELECT "deletedAt" FROM "Product" WHERE id = ${p.productId} FOR NO KEY UPDATE`
+        Array<{ deletedAt: Date | null; productGroupId: string | null }>
+      >`SELECT "deletedAt", "productGroupId" FROM "Product" WHERE id = ${p.productId} FOR NO KEY UPDATE`
+      if (prod && prod.productGroupId !== (vista?.productGroupId ?? null))
+        throw new Error('la talla cambió de familia mientras se archivaba; se reintenta')
       if (cerco) await exigirCerco(tx, p.locationLinkId, cerco) // sucursal → tienda, con lo que vio quien decidió la baja
       const pareja = await bloquearPareja(tx, p.id)
       if (!prod || !pareja || pareja.productId !== p.productId || pareja.locationLinkId !== p.locationLinkId)
@@ -1217,7 +1354,8 @@ export async function archivarPareja(
       await tx.$queryRaw`SELECT id FROM "ShopifyReviewItem" WHERE "productId" = ${p.productId} AND status = 'OPEN' ORDER BY id FOR UPDATE`
       await verificarEvento(tx, cerco?.evento) // el evento, último candado
       const archivado = !prod.deletedAt
-      // El producto ya está bloqueado (arriba): sin el negocio después, que invertiría el orden (§10.3).
+      // El producto ya está bloqueado (arriba): sin tomar el negocio después (§10.3). De una talla agrupada, el negocio y la familia
+      // ya se tomaron ANTES del producto: `archivarProductos` los vuelve a pedir y no espera (son de esta misma tx).
       if (archivado) await archivarProductos(tx, { venueId: p.venueId, id: p.productId }, ARCHIVADO_POR_SHOPIFY, undefined, false)
       if (await envioEnCamino(tx, filas)) {
         await suspendPair(tx, p.id, 'NIVEL_INEXISTENTE') // descarta sólo lo que nunca salió (A6)
@@ -1232,7 +1370,15 @@ export async function archivarPareja(
         where: { productId: p.productId, status: 'OPEN' },
         data: { status: 'RESOLVED', resolvedAt: ahora, offset: 0 },
       })
-      await tx.shopifyImportIssue.deleteMany({ where: { venueId: p.venueId, shopifyVariantId: p.shopifyVariantId } })
+      // V7: el rechazo de la familia (FAMILIA_NO_RECIBE) se queda; terminar un envío no lo resuelve. `detail` es nulable: un
+      // `not` solo excluiría en silencio los avisos sin detalle, que sí se borran.
+      await tx.shopifyImportIssue.deleteMany({
+        where: {
+          venueId: p.venueId,
+          shopifyVariantId: p.shopifyVariantId,
+          OR: [{ reason: { not: 'PRODUCTO_ARCHIVADO' } }, { detail: null }, { detail: { not: FAMILIA_NO_RECIBE } }],
+        },
+      })
       await tx.shopifyVariantLink.delete({ where: { id: p.id } })
       return { estado: 'ARCHIVADA' as const, archivado }
     })
