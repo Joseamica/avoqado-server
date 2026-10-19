@@ -6,7 +6,7 @@ import { Prisma, Shift, ShiftStatus, OriginSystem } from '@prisma/client'
 import logger from '../../config/logger'
 import { PosShiftPayload } from '../../types/pos.types'
 import { posSyncStaffService } from './posSyncStaff.service'
-import { aggregateShiftPayments, readShiftPaymentsForClose } from '../tpv/shift.tpv.service'
+import { aggregateShiftPayments, contarOrdenesCobradas, readShiftPaymentsForClose } from '../tpv/shift.tpv.service'
 
 const UNICO_TURNO_EXTERNO: UnicoParcial = {
   indice: 'Shift_venueId_externalId_key',
@@ -405,7 +405,7 @@ export async function processPosShiftEvent(
     logger.info(`[PosSyncService] El turno ${externalId} fue reclamado. Calculando totales canónicos de Payment...`)
     const payments = await readShiftPaymentsForClose(venueId, claimedShift.id, claimedShift.startTime, claimedAt)
     const totals = aggregateShiftPayments(payments)
-    const totalOrders = await prisma.order.count({ where: { shiftId: claimedShift.id } })
+    const totalOrders = contarOrdenesCobradas(payments)
 
     const signed = await finalizeClaimedPosShift(venueId, externalId, shiftData, mapped, claimedShift, claimedAt, totals, totalOrders)
     logger.info(`[PosSyncService] Turno ${signed.id} sincronizado exitosamente con estado: ${signed.status}.`)
