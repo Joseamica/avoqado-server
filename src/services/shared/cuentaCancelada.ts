@@ -126,23 +126,31 @@ export class MesaAjenaSoloRecuperacion extends AppError {
 }
 
 /**
- * Codex r13 #2: ANTES del rechazo de una cancelada, la identidad del cobro se resuelve otra vez BAJO EL CANDADO. Dos peticiones con
- * la misma llave pueden pasar las dos la consulta rápida; si la primera ya registró el pago y después cancelaron la cuenta por
- * fuera, la segunda no es un cobro nuevo: es la misma operación. Valida que la llave sea de ESTA orden (el mismo 409 del atajo de
- * hoy, `assertIdempotentPaymentOrder`) y sale por la recuperación de la carrera, que devuelve ese pago. Sin llave, o sin pago con
- * ella, no hace nada. CALLER_LOCKED.
+ * 🔴 R8: EL PUNTO ÚNICO DE LA LLAVE. Dos peticiones con la misma llave pueden pasar las dos la consulta rápida; la segunda espera el
+ * candado y, para entonces, la primera ya confirmó. Por eso, ya con los candados tomados y ANTES de cualquier regla de estado que pueda
+ * haber cambiado entre las dos (venta cerrada o cancelada, saldo, catálogo, sesión de vales, propiedad de mesa), se busca el pago de
+ * la llave: si existe es la misma operación y sale por la recuperación de la carrera (`CobroYaRegistrado`), que lo devuelve como la
+ * primera vez. Una llave de OTRA orden ⇒ 409 (`assertIdempotentPaymentOrder`). Sin llave, o sin pago con ella, no hace nada: es un
+ * cobro nuevo y siguen todas las reglas. Lo llaman `payCashOrder` y `recordOrderPayment` (TPV), cada uno una vez. CALLER_LOCKED.
  */
 export async function salirSiLaLlaveYaTienePago(
   tx: Pick<Prisma.TransactionClient, 'payment'>,
-  a: { venueId: string; orderId: string; idempotencyKey?: string | null },
+  a: {
+    venueId: string
+    orderId: string
+    idempotencyKey?: string | null
+    /** 🔴 R8: el cobro del POS (`payCashOrder`) aplica aquí mismo R5-2: sólo un cobro COMPLETADO de esta orden sale; lo demás ⇒ 409. */
+    soloCobroCompletado?: boolean
+  },
 ): Promise<void> {
   if (!a.idempotencyKey) return
   const ya = await tx.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId: a.venueId, idempotencyKey: a.idempotencyKey } },
-    select: { id: true, orderId: true },
+    select: { id: true, orderId: true, status: true, type: true },
   })
   if (!ya) return
-  assertIdempotentPaymentOrder(ya, a.orderId)
+  if (a.soloCobroCompletado) assertLlaveEsEsteCobro(ya, a.orderId)
+  else assertIdempotentPaymentOrder(ya, a.orderId)
   throw new CobroYaRegistrado(ya.id)
 }
 

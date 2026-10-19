@@ -54,7 +54,6 @@ import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { claseDeEstado, computeOrderBalance, esVentaCerrada, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
-import { salirSiLaLlaveYaTienePago } from '../shared/cuentaCancelada'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 
@@ -2428,11 +2427,8 @@ export async function lockAreaTicketCheckoutForPayment(
       !input.dineroCapturado &&
       (existing.status === AreaTicketPaymentAttemptStatus.UNKNOWN || session.status === AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED)
     ) {
-      // 🔴 R7-2 (Codex r6 #2): la conciliación puede ser de OTRO intento. Si el de ESTA llave ya terminó bien y su pago existe, es la
-      // misma operación: sale por la red de la carrera (`CobroYaRegistrado`) y responde como la primera vez. Un cobro nuevo sigue en 409.
-      if (existing.status === AreaTicketPaymentAttemptStatus.SUCCEEDED) {
-        await salirSiLaLlaveYaTienePago(tx, { venueId: input.venueId, orderId: input.orderId, idempotencyKey })
-      }
+      // R7-2/R8: si el pago de ESTA llave existe, quien llama ya lo devolvió antes de llegar aquí (el punto de la llave, bajo los mismos
+      // candados: `salirSiLaLlaveYaTienePago` en `payCashOrder` y en `recordOrderPayment`). Aquí sólo llega un cobro sin pago.
       throw domainError(
         409,
         'CHECKOUT_RECONCILIATION_REQUIRED',
