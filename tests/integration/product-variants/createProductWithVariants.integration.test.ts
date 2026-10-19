@@ -326,6 +326,15 @@ describe('createProductWithVariants', () => {
     })
   })
 
+  it('una familia SHOPIFY viva no aparta el nombre para una MANUAL (bloque 5)', async () => {
+    await prisma.productGroup.create({
+      data: { venueId: n.venueId, name: 'Camisa Importada', categoryId: n.categoryId, source: 'SHOPIFY', externalId: 'gid://shopify/Product/1' },
+    })
+    await expect(createProductWithVariants(n.venueId, simple('camisa importada'), n.actor)).resolves.toMatchObject({
+      groupId: expect.any(String),
+    })
+  })
+
   it('🔴 I-1: el mismo nombre en OTRO negocio no choca', async () => {
     const otro = await crearNegocio('nombre-otro')
     try {

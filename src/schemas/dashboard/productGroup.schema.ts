@@ -160,6 +160,52 @@ export const listGroupsSchema = z.object({
 })
 export const shopifyFileSchema = z.object({ params: venueParams, body: z.object({ csv: z.string().min(1, 'El archivo está vacío') }) })
 export const archivedSchema = groupParamsSchema.extend({ query: pageQuery(25, 100) })
+
+// «Desde Shopify» (bloque 5): el producto de Shopify va en la ruta (codificado) y es un gid; nombre y opciones NUNCA llegan del
+// cliente (los arma el servidor con lo que guardó cada pareja): Zod descarta cualquier otro campo del cuerpo.
+const shopifyProductId = z.string().regex(/^gid:\/\/shopify\/Product\/\d+$/, 'Producto de Shopify inválido')
+const shopifyChoices = {
+  categoryId: id('Categoría inválida').optional(),
+  ivaTratamiento: parentFields.ivaTratamiento,
+  printStationId: parentFields.printStationId,
+  modifierGroupIds: parentFields.modifierGroupIds,
+}
+export const shopifyProposalsSchema = z.object({
+  params: venueParams,
+  query: z.object({
+    cursor: shopifyProductId.optional(),
+    limit: z.coerce
+      .number({ invalid_type_error: 'El tamaño de página debe ser un número' })
+      .int('El tamaño de página debe ser un entero')
+      .min(1, 'El tamaño de página empieza en 1')
+      .default(20)
+      .transform(v => Math.min(v, 50)),
+  }),
+})
+const shopifyProposalParams = venueParams.extend({ shopifyProductId })
+export const shopifyProposalPreviewSchema = z.object({ params: shopifyProposalParams, body: z.object(shopifyChoices) })
+export const shopifyProposalApplySchema = z.object({
+  params: shopifyProposalParams,
+  body: z.object({ ...shopifyChoices, expectedFingerprint: z.string().min(1, 'Falta la vista previa').max(128, 'Huella inválida') }),
+})
+export const shopifyProposalsPreviewAllSchema = z.object({
+  params: venueParams,
+  body: z.object({ cursor: shopifyProductId.optional() }),
+})
+export const shopifyProposalsApplyBatchSchema = z.object({
+  params: venueParams,
+  body: z.object({
+    items: z
+      .array(
+        z.object({
+          shopifyProductId,
+          fingerprint: z.string().min(1, 'Falta la vista previa').max(128, 'Huella inválida'),
+        }),
+      )
+      .min(1, 'Elige al menos un producto')
+      .max(25, 'Hasta 25 productos por lote'),
+  }),
+})
 export const renameValueSchema = z.object({
   params: venueParams.extend({ groupId: id('Producto inválido'), optionValueId: id('Valor inválido') }),
   body: z.object({ value: z.string().trim().min(1, 'El valor no puede quedar vacío').max(40, 'Valor muy largo') }),

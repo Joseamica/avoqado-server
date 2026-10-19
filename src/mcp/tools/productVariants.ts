@@ -14,6 +14,13 @@ import {
 } from '@/services/product-variants/productGroup.service'
 import { applyGroupExisting, previewGroupExisting } from '@/services/product-variants/groupExisting.service'
 import {
+  applyShopifyProposalsBatch,
+  listShopifyFamilyProposals,
+  previewAllShopifyProposals,
+  previewShopifyProposal,
+  type ShopifyProposalPreview,
+} from '@/services/product-variants/shopifyFamilies.service'
+import {
   MAX_OPTIONS,
   MAX_VALUES_PER_OPTION,
   MAX_VARIANTS_PER_GROUP,
@@ -52,6 +59,9 @@ const round2 = (n: number): number => Math.round(n * 100) / 100
 const cents = (n: number): number => Math.round(n * 100)
 /** Backstop on the per-variant sales rows (a family has ≤ 250 live variants; archived ones accumulate slowly). */
 const SALES_ROWS_CAP = 1000
+const SHOPIFY_PRODUCT = z
+  .string()
+  .regex(/^gid:\/\/shopify\/Product\/\d+$/, 'Usa el id del producto de Shopify, por ejemplo gid://shopify/Product/123')
 const optionShape = z.object({
   name: z.string().min(1).max(40).describe('Option name, e.g. "Talla"'),
   values: z.array(z.string().min(1).max(40)).min(1).max(MAX_VALUES_PER_OPTION).describe('Its values in order, e.g. ["S","M","L"]'),
@@ -451,6 +461,123 @@ export function registerProductVariantTools(server: McpServer, scope: McpScope) 
         // Something changed between the preview and the confirmation: ask for a fresh preview instead of failing.
         if (err instanceof AppError && err.code === 'PRODUCT_GROUP_PREVIEW_STALE')
           return text({ ok: false, needsInput: true, code: err.code, question: `${err.message} Pide la vista previa otra vez.` })
+        // A product linked to Shopify is grouped with the proposal the server builds (all its sizes): point to that tool.
+        if (err instanceof AppError && err.code === 'PRODUCT_GROUP_SHOPIFY_LINKED')
+          return text({
+            ok: false,
+            code: err.code,
+            error: err.message,
+            useTool: 'group_shopify_family',
+            message:
+              'Ese producto está ligado a Shopify: busca su propuesta con shopify_family_proposals y agrúpalo con group_shopify_family (agrupa todas sus tallas juntas).',
+          })
+        return operatorError(err)
+      }
+    },
+  )
+
+  server.tool(
+    'shopify_family_proposals',
+    "Products of the venue's connected Shopify store whose sizes or colors are still separate products in Avoqado, so they can be grouped as the variants of ONE product (the product with variants belongs to Avoqado; Shopify keeps sending each size's stock, SKU and barcode). mode CREATE = there is no product with variants for it yet; ADD = it adds the new sizes to the one that exists (groupName). ready=false means it completes on the next sync with Shopify; blockedReason says why it cannot be grouped. Paginated by shopifyProductId: pass nextCursor as cursor. Group them with group_shopify_family. Requires menu:update and a plan that includes product variants.",
+    {
+      venueId: existingId().describe('Venue connected to Shopify (must be in your scope)'),
+      cursor: SHOPIFY_PRODUCT.optional().describe('nextCursor of the previous page'),
+      limit: z.number().int().min(1).max(50).optional().describe('Page size, up to 50 (default 20)'),
+    },
+    async ({ venueId, cursor, limit }) => {
+      try {
+        guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+        guard.requirePermission('menu:update', venueId) // same permission as the dashboard tab
+        const gate = await planGateMessage(venueId, 'PRODUCT_VARIANTS', CAPABILITY)
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+        return text(await listShopifyFamilyProposals(venueId, { cursor, limit }))
+      } catch (err) {
+        return operatorError(err)
+      }
+    },
+  )
+
+  /** What the operator sees of one proposal before confirming. */
+  const shopifyPreview = (shopifyProductId: string, pv: ShopifyProposalPreview) => ({
+    shopifyProductId,
+    mode: pv.mode,
+    product: pv.parent.name,
+    options: pv.options,
+    iva: ETIQUETA_DE_IVA[pv.parent.ivaTratamiento],
+    members: pv.members.map(m => ({ sku: m.sku, from: m.currentName, to: m.newName, changes: m.changes })),
+    skipped: pv.skipped.map(x => ({ name: x.name, reason: x.motivo })),
+    warnings: pv.warnings,
+  })
+
+  server.tool(
+    'group_shopify_family',
+    'Group the separate sizes of a product of the connected Shopify store as the variants of ONE product in a venue you can access, exactly as Shopify describes them (name, options and values come from Shopify, never from the request). Pass shopifyProductId (from shopify_family_proposals) for one, or all:true for the ready proposals of a page (cursor = nextCursor). Each size keeps its SKU, barcode, price, cost, stock and sales; a size whose combination already exists (even archived) is skipped with its reason. By DEFAULT it only PREVIEWS current → new for each size and returns expectedItems: show it to the user and, after their OK, call again with confirm:true and the confirmation arguments the preview returns (it applies exactly those items, each on its own; one that changed since the preview is skipped). This WRITES — requires menu:update and a plan that includes product variants.',
+    {
+      venueId: existingId().describe('Venue connected to Shopify (must be in your scope)'),
+      shopifyProductId: SHOPIFY_PRODUCT.optional().describe('One product of Shopify, e.g. gid://shopify/Product/123'),
+      all: z.boolean().optional().describe('true = every ready proposal of this page (up to 25)'),
+      cursor: SHOPIFY_PRODUCT.optional().describe('With all:true, the nextCursor of the previous page'),
+      expectedItems: z
+        .array(z.object({ shopifyProductId: SHOPIFY_PRODUCT, fingerprint: z.string().min(1).max(128) }))
+        .min(1)
+        .max(25)
+        .optional()
+        .describe('Exactly the expectedItems the preview returned'),
+      confirm: z.boolean().optional().describe('Must be true to actually group; without it you get a preview'),
+    },
+    async ({ venueId, shopifyProductId, all, cursor, expectedItems, confirm }) => {
+      try {
+        guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+        guard.requirePermission('menu:update', venueId) // same permission as the dashboard tab
+        const gate = await planGateMessage(venueId, 'PRODUCT_VARIANTS', CAPABILITY)
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+        if (confirm) {
+          if (!expectedItems?.length)
+            return text({ ok: false, needsInput: true, question: 'Falta la vista previa. Pídela, muéstrala y confirma.' })
+          const r = await applyShopifyProposalsBatch(venueId, actor, expectedItems)
+          for (const a of r.applied)
+            await auditMcpWrite(scope, {
+              action: 'PRODUCT_GROUP_FROM_SHOPIFY',
+              entity: 'ProductGroup',
+              entityId: a.groupId,
+              venueId,
+              data: { shopifyProductId: a.shopifyProductId, mode: a.mode },
+            })
+          return text({
+            ok: true,
+            applied: r.applied,
+            skipped: r.skipped,
+            message: `Listo: ${r.applied.length} agrupado(s)${r.skipped.length ? `; ${r.skipped.length} no (cada uno con su motivo)` : ''}.`,
+          })
+        }
+        if (!all && !shopifyProductId)
+          return text({
+            ok: false,
+            needsInput: true,
+            question: 'Di qué producto de Shopify (shopifyProductId, de shopify_family_proposals) o all:true para los de la página.',
+          })
+        const pagina = all ? await previewAllShopifyProposals(venueId, { cursor }) : null
+        const vistas = pagina
+          ? pagina.items.map(i => ({ shopifyProductId: i.shopifyProductId, preview: i.preview }))
+          : [{ shopifyProductId: shopifyProductId!, preview: await previewShopifyProposal(venueId, shopifyProductId!, {}) }]
+        const pageInfo = pagina ? { blocked: pagina.blocked, total: pagina.total, nextCursor: pagina.nextCursor } : {}
+        if (!vistas.length)
+          return text({
+            ok: false,
+            ...pageInfo,
+            error: pagina?.nextCursor
+              ? 'Ninguna propuesta de esta página está lista; pide la siguiente con cursor.'
+              : 'No hay propuestas listas para agrupar.',
+          })
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          expectedItems: vistas.map(v => ({ shopifyProductId: v.shopifyProductId, fingerprint: v.preview.fingerprint })),
+          preview: { items: vistas.map(v => shopifyPreview(v.shopifyProductId, v.preview)) },
+          ...pageInfo,
+          message: `Esto agrupará ${vistas.length} producto(s) de Shopify como productos con variantes; cada talla conserva SKU, precio, existencias y ventas. Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      } catch (err) {
         return operatorError(err)
       }
     },

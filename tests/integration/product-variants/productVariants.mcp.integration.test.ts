@@ -11,7 +11,9 @@ import { createProductWithVariants } from '@/services/product-variants/productGr
 import { registerProductVariantTools } from '@/mcp/tools/productVariants'
 import { registerProductTools } from '@/mcp/tools/products'
 import type { McpScope } from '@/mcp/scope'
+import { planGateMessage } from '@/mcp/planGate'
 import { crearNegocio, NegocioDePrueba } from './fixtures'
+import { agregarProductoShopify, crearEscenarioShopify, EscenarioShopify, limpiarEscenarioShopify } from '../shopify/fixtures'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: () => null } }))
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
@@ -162,5 +164,98 @@ describe('product_variants: ventas por variante y total de la familia', () => {
     expect(await prisma.productGroup.count({ where: { venueId: n.venueId, name: 'Gorra MCP' } })).toBe(1)
     // Y una vista previa nueva ya lo avisa, en vez de prometer algo que la confirmación rechazará.
     expect(await call('create_product_with_variants', args)).toMatchObject({ ok: false, code: 'PRODUCT_GROUP_NAME_TAKEN' })
+  })
+})
+
+describe('«Desde Shopify» por el MCP: shopify_family_proposals y group_shopify_family', () => {
+  let e: EscenarioShopify
+  const handlers = new Map<string, Handler>()
+  const call = async (name: string, args: Record<string, unknown>) => JSON.parse((await handlers.get(name)!(args, {})).content[0].text)
+  const spid = (k: number) => `gid://shopify/Product/${800000 + k}`
+  let k = 0
+  async function talla(id: string, valor: string) {
+    const t = await agregarProductoShopify(e, { sku: `MCPSF-${++k}-${Date.now()}` })
+    await prisma.product.update({ where: { id: t.productId }, data: { name: `Sudadera · ${valor}` } })
+    await prisma.shopifyVariantLink.update({
+      where: { id: t.variantLinkId! },
+      data: {
+        shopifyProductId: id,
+        shopifyCatalog: { title: 'Sudadera', options: [{ name: 'Talla', value: valor }], productImage: null, variantImage: null },
+      },
+    })
+    return t.productId
+  }
+
+  beforeEach(async () => {
+    e = await crearEscenarioShopify({ linkStatus: 'ACTIVE' })
+    // La pareja de base es un producto sin tallas en Shopify: no es propuesta.
+    await prisma.shopifyVariantLink.update({
+      where: { id: e.variantLinkId },
+      data: { shopifyCatalog: { title: 'Camisa', options: [], productImage: null, variantImage: null } },
+    })
+    const scope = {
+      staffId: e.staffId,
+      activeOrg: e.organizationId,
+      allowedVenueIds: [e.venueId],
+      scopes: ['mcp:read', 'mcp:write'],
+      perVenueAccess: new Map([[e.venueId, { role: 'OWNER', corePermissions: ['*:*'], isSuperAdmin: false }]]),
+    } as unknown as McpScope
+    const reg = { tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as Handler) } as never
+    registerProductVariantTools(reg, scope)
+  })
+  afterEach(async () => {
+    await limpiarEscenarioShopify(e)
+  })
+
+  it('lista las propuestas; vista previa de UNA y confirmación con sus pares', async () => {
+    await talla(spid(1), 'S')
+    await talla(spid(1), 'M')
+    const lista = await call('shopify_family_proposals', { venueId: e.venueId })
+    expect(lista).toMatchObject({ total: 1, items: [{ shopifyProductId: spid(1), mode: 'CREATE', ready: true, title: 'Sudadera' }] })
+
+    const pv = await call('group_shopify_family', { venueId: e.venueId, shopifyProductId: spid(1) })
+    expect(pv).toMatchObject({ ok: false, requiresConfirmation: true, expectedItems: [{ shopifyProductId: spid(1) }] })
+    expect(pv.preview.items[0]).toMatchObject({
+      mode: 'CREATE',
+      product: 'Sudadera',
+      members: [{ to: 'Sudadera · S' }, { to: 'Sudadera · M' }],
+    })
+    // Sin los pares de la vista previa no aplica nada.
+    expect(await call('group_shopify_family', { venueId: e.venueId, shopifyProductId: spid(1), confirm: true })).toMatchObject({
+      ok: false,
+      needsInput: true,
+    })
+    const ok = await call('group_shopify_family', { venueId: e.venueId, confirm: true, expectedItems: pv.expectedItems })
+    expect(ok).toMatchObject({ ok: true, applied: [{ shopifyProductId: spid(1), mode: 'CREATE' }], skipped: [] })
+    expect(await prisma.productGroup.count({ where: { venueId: e.venueId, externalId: spid(1), deletedAt: null } })).toBe(1)
+    // Repetir la confirmación no crea otra.
+    const otraVez = await call('group_shopify_family', { venueId: e.venueId, confirm: true, expectedItems: pv.expectedItems })
+    expect(otraVez).toMatchObject({ applied: [], skipped: [{ shopifyProductId: spid(1), motivo: 'Ya estaba agrupada' }] })
+  })
+
+  it('all:true da la vista previa de todas (con las bloqueadas aparte) y confirma exactamente esos pares', async () => {
+    await talla(spid(1), 'S')
+    await talla(spid(2), 'S')
+    const sinCatalogo = await agregarProductoShopify(e, { sku: `MCPSF-NULL-${Date.now()}` })
+    await prisma.shopifyVariantLink.update({ where: { id: sinCatalogo.variantLinkId! }, data: { shopifyProductId: spid(3) } })
+    const pv = await call('group_shopify_family', { venueId: e.venueId, all: true })
+    expect(pv).toMatchObject({ requiresConfirmation: true, total: 3, nextCursor: null })
+    expect(pv.expectedItems.map((i: { shopifyProductId: string }) => i.shopifyProductId)).toEqual([spid(1), spid(2)])
+    expect(pv.blocked).toEqual([
+      { shopifyProductId: spid(3), motivo: 'Este producto se completa en la próxima sincronización con Shopify.' },
+    ])
+    const ok = await call('group_shopify_family', { venueId: e.venueId, all: true, confirm: true, expectedItems: pv.expectedItems })
+    expect(ok.applied).toHaveLength(2)
+    expect(await prisma.productGroup.count({ where: { venueId: e.venueId, source: 'SHOPIFY' } })).toBe(2)
+  })
+
+  it('sin PRODUCT_VARIANTS ⇒ planRequired y nada se escribe', async () => {
+    await talla(spid(1), 'S')
+    ;(planGateMessage as jest.Mock).mockResolvedValueOnce('El uso de variantes de producto no está incluido en tu plan.')
+    expect(await call('group_shopify_family', { venueId: e.venueId, shopifyProductId: spid(1) })).toMatchObject({
+      ok: false,
+      planRequired: true,
+    })
+    expect(planGateMessage).toHaveBeenLastCalledWith(e.venueId, 'PRODUCT_VARIANTS', expect.any(String))
   })
 })

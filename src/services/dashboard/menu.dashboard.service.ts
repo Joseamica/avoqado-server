@@ -1,5 +1,16 @@
 import prisma from '../../utils/prismaClient'
-import { Menu, MenuCategory, Prisma, ModifierGroup, Modifier, ProductModifierGroup, Unit } from '@prisma/client'
+import {
+  IvaTratamiento,
+  Menu,
+  MenuCategory,
+  Prisma,
+  ModifierGroup,
+  Modifier,
+  ProductGroupSource,
+  ProductModifierGroup,
+  ProductType,
+  Unit,
+} from '@prisma/client'
 import { CreateMenuCategoryDto, UpdateMenuCategoryDto, ReorderMenuCategoriesDto } from '../../schemas/dashboard/menuCategory.schema'
 import {
   CreateMenuDto,
@@ -24,7 +35,29 @@ import { archivarProductos } from './product.dashboard.service'
 import { productGroupInclude, withVariantFields } from '../product-variants/variantPayload'
 import { assertLooseProductForModifiers, assertNoGroupedProducts } from '../product-variants/groupOwnedFields'
 import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
-import { MAX_VARIANTS_PER_GROUP } from '../product-variants/variantNaming'
+import { MAX_OPTIONS, MAX_VARIANTS_PER_GROUP, assertAllowedGroupType } from '../product-variants/variantNaming'
+import {
+  assertNoMasterCatalog,
+  createVariantRows,
+  lockGroup,
+  type GroupContext,
+  type VariantRowInput,
+} from '../product-variants/productGroup.service'
+import {
+  checkVariantRowsAgainstDb,
+  createGroupTx,
+  ensureOptionValuesTx,
+  familyIdentityConflict,
+  groupContextOf,
+  loadGroupContextTx,
+  loadGroupForWrite,
+  lockGroupForCleanup,
+  manualGroupByName,
+  optionValuesCapacity,
+} from '../product-variants/groupWriterTx'
+import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { ETIQUETA_DE_IVA, TRATAMIENTOS_OFRECIDOS_V1 } from '../fiscal/ivaTratamiento'
 import {
   ensureQuantityInventoryRow,
   inventoryMethodForNewProduct,
@@ -1329,6 +1362,14 @@ export interface ImportMenuData {
           price: number
         }[]
       }[]
+      // Variantes (bloque 5, V8): con PRODUCT_VARIANTS, la fila es una talla de esta familia (MANUAL). `key` = identidad entre
+      // archivos (el Handle del archivo de Shopify); sin `key`, se empareja por nombre. Todo opcional a propósito: una familia
+      // incompleta se rechaza por fila (nunca entra suelta) y se reporta en `filasDeFamiliaRechazadas`. Sin la función se ignora.
+      family?: {
+        key?: string
+        name?: string
+        options?: Array<{ name?: string; value?: string }>
+      }
     }[]
   }[]
 }
@@ -1337,6 +1378,386 @@ export interface ImportMenuData {
 function asksForQuantity(product: ImportMenuData['categories'][number]['products'][number]): boolean {
   return product.trackInventory === true || Boolean(product.inventoryByQuantity)
 }
+
+type FilaImport = ImportMenuData['categories'][number]['products'][number]
+
+/** Lo de la TALLA que escribe la fila, igual en un re-import que en una talla recién creada (bloque 5, Codex r4 H6): precio, costo,
+ *  etiquetas, alérgenos, duración, código y unidad. Nunca un campo del padre de una talla agrupada: ésos los agrega quien llama, y
+ *  sólo para un producto suelto. Pura: cada escritor hace su `update` detrás de su cerco del catálogo. */
+function camposDeTalla(productData: FilaImport, ctx: { porCantidad: boolean; displayOrder: number }): Prisma.ProductUncheckedUpdateInput {
+  // A blank gtin is absent: '' would collide on @@unique([venueId, gtin]) with the next blank one.
+  const gtin = productData.gtin?.trim()
+  return {
+    price: productData.price,
+    cost: productData.cost ?? null,
+    displayOrder: ctx.displayOrder,
+    tags: productData.tags || [],
+    allergens: productData.allergens || [],
+    // Ausente ≠ null: re-importar precios no puede borrar la duración
+    // ya configurada y desconfigurar la agenda del local.
+    ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
+    // Sin `trackInventory` (undefined) la columna no se toca: re-importar no apaga lo que ya se contaba.
+    trackInventory: ctx.porCantidad ? true : undefined,
+    inventoryMethod: ctx.porCantidad ? 'QUANTITY' : undefined,
+    ...(gtin ? { gtin } : {}),
+    // The unit only goes with «por cantidad» (same guards as the row's `porCantidad`).
+    ...(ctx.porCantidad && productData.inventoryByQuantity ? { unit: productData.inventoryByQuantity.unit } : {}),
+    // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
+    isDemo: false,
+  }
+}
+
+/**
+ * Las tallas recién creadas por el import quedan igual que si las hubiera actualizado un re-import: `camposDeTalla` + el inventario
+ * de su fila (mínimo, saldo de apertura con su movimiento, unidad). Detrás del cerco del catálogo (crear tallas = CREATE).
+ */
+async function aplicarCamposDeTalla(
+  tx: Prisma.TransactionClient,
+  tallas: Array<{ productId: string; fila: FilaImport; displayOrder: number }>,
+  ctx: { venueId: string; actor: CatalogActor },
+): Promise<void> {
+  await assertLegacyCatalogGovernanceForVenue(tx, { venueId: ctx.venueId, operation: 'CREATE', willBeVendable: true, actor: ctx.actor })
+  for (const t of tallas) {
+    const porCantidad = asksForQuantity(t.fila) // una talla nueva no tiene receta ni fila apagada
+    const product = await tx.product.update({
+      where: { id: t.productId },
+      data: camposDeTalla(t.fila, { porCantidad, displayOrder: t.displayOrder }),
+    })
+    await inventarioDeLaFila(tx, product, t.fila, porCantidad, ctx.venueId)
+  }
+}
+
+/** El inventario que pide la fila (`trackInventory` con su mínimo y saldo de apertura, o `inventoryByQuantity`). */
+async function inventarioDeLaFila(
+  tx: Prisma.TransactionClient,
+  product: Parameters<typeof ensureQuantityInventoryRow>[1],
+  productData: FilaImport,
+  porCantidad: boolean,
+  venueId: string,
+): Promise<void> {
+  // Handle inventory tracking if specified
+  if (productData.trackInventory) {
+    const existingInventory = await tx.inventory.findFirst({
+      where: { productId: product.id },
+    })
+    const saldoInicial = productData.currentStock || 0
+    // Fila que recibe el saldo de apertura (y su movimiento), si alguna.
+    let aperturaEn: string | null = null
+
+    if (existingInventory) {
+      // 🔴 El re-import NUNCA toca `currentStock` de un inventario existente
+      // (auditoría 2026-08-12): antes escribía `currentStock || 0`, así que un
+      // re-import de catálogo sin ese campo BORRABA el stock de todo el venue,
+      // sin InventoryMovement ni bitácora. El saldo solo se mueve por ventas,
+      // conteos, recepciones y ajustes — caminos que sí dejan rastro.
+      // `minimumStock` sí se actualiza: es configuración, no saldo.
+      await tx.inventory.update({
+        where: { id: existingInventory.id },
+        data: {
+          minimumStock: productData.minStock || 0,
+          ...(existingInventory.isDemo ? { isDemo: false } : {}), // Codex C5-2: adopted with its product
+        },
+      })
+      // Salvo la APERTURA PENDIENTE: la fila en 0 y sin kardex que deja
+      // `ensureQuantityInventoryRow` al activar «por cantidad» antes de importar.
+      // Ahí el saldo del archivo ES el inicial. La condición va en el propio UPDATE:
+      // una venta que llegue entre la lectura y aquí ya dejó historia y no se pisa.
+      if (saldoInicial !== 0) {
+        const { count } = await tx.inventory.updateMany({
+          where: { id: existingInventory.id, currentStock: 0, movements: { none: {} } },
+          data: { currentStock: saldoInicial },
+        })
+        if (count > 0) aperturaEn = existingInventory.id
+      }
+    } else {
+      // Create new inventory entry
+      const nuevoInventario = await tx.inventory.create({
+        data: {
+          productId: product.id,
+          venueId,
+          currentStock: saldoInicial,
+          minimumStock: productData.minStock || 0,
+        },
+      })
+      if (saldoInicial !== 0) aperturaEn = nuevoInventario.id
+    }
+
+    // 🔴 El saldo de apertura deja movimiento (audit Codex xhigh
+    // 2026-08-14): un inventario que nace con saldo pero sin kardex
+    // hace imposible la reconciliación `saldo == apertura + Σ deltas`
+    // desde el día uno. Sin saldo inicial no se inventa un movimiento
+    // de cero — sería ruido.
+    if (aperturaEn) {
+      await tx.inventoryMovement.create({
+        data: {
+          inventoryId: aperturaEn,
+          type: 'ADJUSTMENT',
+          quantity: saldoInicial,
+          previousStock: 0,
+          newStock: saldoInicial,
+          reason: 'Saldo inicial (importación de menú)',
+        },
+      })
+    }
+  }
+
+  // Shopify loader, counted by piece ⇒ it must have its Inventory row (born in 0, no kardex; an existing one is never
+  // touched). A product kept on its recipe or kept off gets nothing (`porCantidad` is false).
+  if (porCantidad && productData.inventoryByQuantity) await ensureQuantityInventoryRow(tx, product)
+}
+
+// ── Variantes, bloque 5 (spec §0 V8, B10): el import arma familias ──
+
+/** Una fila rechazada, con su motivo (el servicio las devuelve todas; el controlador HTTP recorta a 50). */
+export interface FilaDeFamiliaRechazada {
+  sku: string
+  name: string
+  motivo: string
+}
+interface FilaDeFamilia {
+  p: FilaImport
+  catIndex: number
+  prodIndex: number
+  optionNames: string[]
+  values: string[]
+}
+interface FamiliaDelArchivo {
+  key: string | null
+  name: string
+  filas: FilaDeFamilia[]
+}
+interface PlanDeFamilia {
+  /** La familia MANUAL viva a la que se suman las tallas; null = se crea. */
+  groupId: string | null
+  /** Su contexto real (sin los valores que faltan); null si se rechazó entera antes de leerla. */
+  ctx: GroupContext | null
+  buenas: FilaDeFamilia[]
+  malas: Array<{ fila: FilaDeFamilia; motivo: string }>
+}
+
+const claveFamilia = (s: string) => s.trim().toLocaleLowerCase('es-MX')
+const juegoDeOpciones = (nombres: string[]) => nombres.map(claveFamilia).join('\u0000')
+const EXTRAS_EN_FAMILIA = 'Los extras de una familia se ponen en el panel'
+const FAMILIA_CON_CATALOGO_MAESTRO = 'Este negocio usa el catálogo maestro; las variantes no están disponibles aquí.'
+const rechazoDe = (p: FilaImport, motivo: string): FilaDeFamiliaRechazada => ({ sku: p.sku, name: p.name, motivo })
+
+/** El motivo (texto del error de negocio) o null si la regla pasa. */
+async function motivoDe(regla: () => unknown): Promise<string | null> {
+  try {
+    await regla()
+    return null
+  } catch (e) {
+    if (e instanceof AppError) return e.message
+    throw e
+  }
+}
+
+/** La familia de la fila con los límites del motor y del panel (nombre 1..120, 1..3 opciones, opción y valor 1..40, los de
+ *  `productGroup.schema.ts`: nada importado queda sin poderse editar), o el motivo por el que la fila se rechaza ENTERA (exista o
+ *  no su SKU; Codex r4 H3). Una fila de familia con extras también. */
+function leerFamiliaDeFila(
+  p: FilaImport,
+): (Omit<FilaDeFamilia, 'p' | 'catIndex' | 'prodIndex'> & { key: string | null; name: string }) | string {
+  if (p.modifierGroups?.length) return EXTRAS_EN_FAMILIA
+  const name = p.family?.name?.trim() ?? ''
+  if (!name) return 'La familia necesita un nombre.'
+  if ([...name].length > 120) return 'El nombre de la familia puede tener hasta 120 caracteres.'
+  const opciones = p.family?.options ?? []
+  if (!opciones.length || opciones.length > MAX_OPTIONS) return 'La familia necesita de 1 a 3 opciones (por ejemplo Talla).'
+  const optionNames: string[] = []
+  const values: string[] = []
+  for (const o of opciones) {
+    const opcion = o.name?.trim() ?? ''
+    if (!opcion) return 'El nombre de una opción está vacío.'
+    if ([...opcion].length > 40) return `El nombre de la opción «${opcion}» puede tener hasta 40 caracteres.`
+    if (optionNames.some(x => claveFamilia(x) === claveFamilia(opcion))) return `La opción «${opcion}» está repetida.`
+    const valor = o.value?.trim() ?? ''
+    if (!valor) return `Falta el valor de «${opcion}».`
+    if ([...valor].length > 40) return `El valor «${valor}» de ${opcion} puede tener hasta 40 caracteres.`
+    optionNames.push(opcion)
+    values.push(valor)
+  }
+  return { key: p.family?.key?.trim() || null, name, optionNames, values }
+}
+
+const filaDeVariante = (f: FilaDeFamilia): VariantRowInput => ({
+  values: f.values,
+  price: f.p.price,
+  cost: f.p.cost ?? null,
+  sku: f.p.sku,
+  gtin: f.p.gtin?.trim() || null,
+  // Inventario POR FILA: S sin inventario y M con inventario en la misma familia (una talla nueva no tiene receta ni fila apagada).
+  trackInventory: asksForQuantity(f.p),
+})
+
+/**
+ * Lo que se haría con una familia del archivo contra la base de AHORA, sin escribir nada (salvo `lockGroup` de la que ya existe):
+ * qué filas entran y por qué se rechaza cada una de las otras. Se corre ANTES de la limpieza de «reemplazar» y otra vez justo antes
+ * de escribir (lo que el propio import escribió en medio, como un código o un SKU de una fila suelta, también cuenta).
+ */
+async function planearFamilia(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  fam: FamiliaDelArchivo,
+  createdById: string | null,
+): Promise<PlanDeFamilia> {
+  const malas: PlanDeFamilia['malas'] = []
+  const opciones = juegoDeOpciones(fam.filas[0].optionNames)
+  let buenas: FilaDeFamilia[] = []
+  for (const fila of fam.filas) {
+    const motivo =
+      juegoDeOpciones(fila.optionNames) !== opciones
+        ? 'Las filas de una familia llevan las mismas opciones, en el mismo orden.'
+        : await motivoDe(() => assertAllowedGroupType((fila.p.type ?? 'FOOD') as ProductType))
+    if (motivo) malas.push({ fila, motivo })
+    else buenas.push(fila)
+  }
+  const todas = (motivo: string, groupId: string | null = null, ctx: GroupContext | null = null): PlanDeFamilia => ({
+    groupId,
+    ctx,
+    buenas: [],
+    malas: [...malas, ...buenas.map(fila => ({ fila, motivo }))],
+  })
+  if (!buenas.length) return todas('')
+  if (await motivoDe(() => assertNoMasterCatalog(tx, venueId))) return todas(FAMILIA_CON_CATALOGO_MAESTRO)
+
+  // Identidad entre archivos (Codex r4 H5): con `key`, SÓLO la MANUAL viva con ese identificador; sin `key`, por nombre.
+  let existente: { id: string } | null
+  if (fam.key) {
+    existente = await tx.productGroup.findFirst({
+      where: { venueId, source: ProductGroupSource.MANUAL, externalId: fam.key, deletedAt: null },
+      select: { id: true },
+    })
+    const homonima = existente ? null : await manualGroupByName(tx, venueId, fam.name)
+    if (homonima) return todas(`Ya existe otra familia «${homonima.name}»: renómbrala o usa el mismo identificador`)
+  } else existente = await manualGroupByName(tx, venueId, fam.name)
+
+  let ctx: GroupContext
+  if (existente) {
+    await lockGroup(tx, venueId, existente.id)
+    const g = await loadGroupForWrite(tx, existente.id)
+    ctx = groupContextOf(g, { trackInventory: false, createdById })
+    if (juegoDeOpciones(ctx.options.map(o => o.name)) !== opciones) return todas('La familia ya existe con otras opciones', g.id, ctx)
+    // El mismo texto que addVariants: nadie nace con un IVA que ya no se ofrece.
+    if (!TRATAMIENTOS_OFRECIDOS_V1.includes(g.ivaTratamiento))
+      return todas(
+        `Esta familia tiene IVA «${ETIQUETA_DE_IVA[g.ivaTratamiento]}», que ya no se ofrece; cámbialo a 16 %, tasa 0 % o exento antes de agregar variantes.`,
+        g.id,
+        ctx,
+      )
+  } else {
+    const ocupada = await familyIdentityConflict(tx, venueId, { source: ProductGroupSource.MANUAL, name: fam.name, externalId: fam.key })
+    if (ocupada) return todas(ocupada)
+    ctx = {
+      venueId,
+      groupId: '', // todavía no existe: las revisiones contra la base no encuentran combinaciones suyas
+      parentName: fam.name,
+      description: null,
+      imageUrl: null,
+      categoryId: '',
+      type: ProductType.REGULAR,
+      printStationId: null,
+      satProductKey: null,
+      satUnitKey: null,
+      iva: {},
+      modifierGroupIds: [],
+      trackInventory: false,
+      createdById,
+      options: fam.filas[0].optionNames.map((name, position) => ({ id: `nueva-${position}`, name, position, values: [] })),
+    }
+  }
+
+  // Se valida contra un contexto EN MEMORIA que ya trae los valores por agregar (validateVariantRow exige que existan); nada se
+  // escribe antes. Una fila rechazada no le deja su valor a la familia.
+  const conValores: GroupContext = {
+    ...ctx,
+    options: ctx.options.map((o, k) => {
+      const values = [...o.values]
+      for (const f of buenas)
+        if (!values.some(v => claveFamilia(v.value) === claveFamilia(f.values[k])))
+          values.push({ id: `por-agregar-${k}-${values.length}`, value: f.values[k], position: values.length })
+      return { ...o, values }
+    }),
+  }
+  const motivos = await checkVariantRowsAgainstDb(tx, conValores, buenas.map(filaDeVariante))
+  buenas = buenas.filter((fila, i) => {
+    if (motivos[i]) malas.push({ fila, motivo: motivos[i]! })
+    return !motivos[i]
+  })
+  if (!buenas.length) return { groupId: existente?.id ?? null, ctx, buenas, malas }
+  const sinCupo = optionValuesCapacity(
+    ctx,
+    ctx.options.map((_, k) => buenas.map(f => f.values[k])),
+  )
+  if (sinCupo) return todas(sinCupo, existente?.id ?? null, ctx)
+  const vivas = existente ? await tx.product.count({ where: { productGroupId: existente.id, deletedAt: null } }) : 0
+  if (vivas + buenas.length > MAX_VARIANTS_PER_GROUP)
+    return todas(`Un producto puede tener hasta ${MAX_VARIANTS_PER_GROUP} variantes.`, existente?.id ?? null, ctx)
+  return { groupId: existente?.id ?? null, ctx, buenas, malas }
+}
+
+/**
+ * Escribe un plan ya revisado: crea la familia MANUAL (categoría, tipo, foto y descripción de su primera fila buena; IVA por
+ * defecto; `externalId = key`) o le agrega los valores que faltan, crea las tallas (`createVariantRows`) y a cada una le aplica lo
+ * demás de su fila (`aplicarCamposDeTalla`), así queda igual que si la hubiera actualizado un re-import.
+ */
+async function escribirFamilia(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  fam: FamiliaDelArchivo,
+  plan: PlanDeFamilia,
+  categoriaDe: string[],
+  actor: CatalogActor,
+): Promise<{ groupId: string; nueva: boolean; ids: string[] }> {
+  const createdById = actor.type === 'HUMAN' ? actor.staffId : null
+  const primera = plan.buenas[0]
+  let ctx: GroupContext
+  let groupId = plan.groupId
+  if (!groupId) {
+    ;({ groupId } = await createGroupTx(tx, venueId, {
+      name: fam.name,
+      categoryId: categoriaDe[primera.catIndex],
+      type: (primera.p.type ?? 'FOOD') as ProductType,
+      imageUrl: primera.p.imageUrl ?? null,
+      description: primera.p.description || null,
+      ivaTratamiento: IvaTratamiento.IVA_16,
+      source: ProductGroupSource.MANUAL,
+      externalId: fam.key,
+      options: plan.ctx!.options.map((o, k) => ({
+        name: o.name,
+        values: [...new Map(plan.buenas.map(f => [claveFamilia(f.values[k]), f.values[k]])).values()],
+      })),
+    }))
+    ctx = await loadGroupContextTx(tx, groupId, { trackInventory: false, createdById })
+  } else {
+    ctx = plan.ctx!
+    for (const f of plan.buenas) ctx = await ensureOptionValuesTx(tx, ctx, f.values)
+  }
+  // Foto propia sólo si es otra que la de la familia (la primera fila le dio la suya).
+  const filas = plan.buenas.map(f => ({
+    ...filaDeVariante(f),
+    variantImageUrl: f.p.imageUrl && f.p.imageUrl !== ctx.imageUrl ? f.p.imageUrl : null,
+  }))
+  const ids = await createVariantRows(tx, ctx, filas, 0, actor)
+  await aplicarCamposDeTalla(
+    tx,
+    plan.buenas.map((f, i) => ({ productId: ids[i], fila: f.p, displayOrder: f.prodIndex })),
+    { venueId, actor },
+  )
+  if (actor.type === 'SERVICE')
+    for (const productId of ids) await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId, actor })
+  return { groupId, nueva: !plan.groupId, ids }
+}
+
+/** «Reemplazar» borra: con alguna fila de familia mala no se reemplaza NADA (Codex r5 R5-2; la transacción entera se deshace). */
+const filasMalasEnReemplazo = (rechazadas: FilaDeFamiliaRechazada[]) =>
+  new AppError(
+    'Algunas filas de familia no se pueden importar; corrígelas y vuelve a intentar. El menú no se reemplazó.',
+    400,
+    true,
+    'MENU_IMPORT_FAMILY_ROWS_REJECTED',
+    { filasDeFamiliaRechazadas: { total: rechazadas.length, ejemplos: rechazadas } },
+  )
 
 const GOVERNANCE_DIAGNOSTIC_ROWS_MAX = 100
 const GOVERNANCE_DIAGNOSTIC_SKU_SCALARS_MAX = 128
@@ -1368,6 +1789,24 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   // Ronda 1 (N2): padres que esta importación archiva (3c, en «reemplazar») o revive; su bitácora va DESPUÉS del commit.
   const familiasArchivadas: string[] = []
   const familiasRestauradas: string[] = []
+  // Bloque 5 (V8): familias que el archivo crea o a las que les suma tallas (bitácora después del commit, como las de arriba).
+  const familiasCreadasIds: string[] = []
+  const familiasAmpliadas: string[] = []
+  let tallasEnFamilias = 0
+  // Tallas archivadas cuya familia (archivada) ya tiene otra viva con su identidad: no revive (Codex r5 R5-1, familia 2).
+  let variantesDeFamiliaReemplazada = 0
+  // Filas con `family` de un SKU que ya existía suelto: se actualiza como hoy; no se agrupa solo.
+  let sueltosQueYaExistian = 0
+  const rechazadas: FilaDeFamiliaRechazada[] = []
+  const createdById = actor.type === 'HUMAN' ? actor.staffId : null
+
+  // Variantes (V8): sólo con PRODUCT_VARIANTS el archivo arma familias. En Gratis, `family` se ignora sin validar y la fila entra suelta.
+  const filasConFamilia = data.categories.flatMap(c => c.products).filter(p => p.family)
+  const conFamilias = filasConFamilia.length > 0 && (await venueHasFeatureAccess(venueId, 'PRODUCT_VARIANTS'))
+  const filasConFamiliaSinPlan = conFamilias ? 0 : filasConFamilia.length
+  // El SKU de una fila de familia se guarda recortado (allocateSkus); si se buscara crudo, re-importar el mismo archivo no encontraría
+  // la talla y diría «ya lo usa otro producto». Se recorta aquí, antes de cualquier búsqueda (Task 5, revisión). Edita la fila en su lugar.
+  if (conFamilias) for (const p of filasConFamilia) p.sku = p.sku.trim()
 
   // Una clase, una cita, algo digital o un donativo no llevan existencias: se rechaza el archivo entero ANTES de escribir nada
   // (misma regla y mensaje que el alta y la edición de producto en el dashboard y en Artículos de Android/iOS).
@@ -1377,6 +1816,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
 
   const importacion = prisma.$transaction(
     async tx => {
+      // Orden de candados: organización (sumar tallas puede escribir el IVA de su familia) → cerco del negocio → familias → productos.
+      if (conFamilias) await bloquearParaCambiarIva(tx, { venueId })
       const incomingProducts = data.categories.flatMap((category, categoryIndex) =>
         category.products.map((product, productIndex) => ({ product, categoryIndex, productIndex })),
       )
@@ -1413,6 +1854,55 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           })
         }
         throw error
+      }
+
+      // Variantes (V8): las filas con familia se clasifican ANTES de escribir nada y antes de la limpieza de «reemplazar». La forma
+      // va antes de elegir actualizar o crear (Codex r4 H3): una familia inválida rechaza la fila entera aunque su SKU exista. Una
+      // fila nueva no se crea en la primera pasada: se junta por llave (`key` o el nombre normalizado) y va a la segunda.
+      const fueraDeLaPrimeraPasada = new Set<FilaImport>()
+      const familiasDelArchivo: FamiliaDelArchivo[] = []
+      if (conFamilias) {
+        const conFamilia = incomingProducts.filter(entry => entry.product.family)
+        const existentes = new Map(
+          (
+            await tx.product.findMany({
+              where: { venueId, sku: { in: conFamilia.map(entry => entry.product.sku) } },
+              select: { sku: true, productGroupId: true },
+              take: conFamilia.length, // único por (negocio, SKU)
+            })
+          ).map(p => [p.sku, p]),
+        )
+        const porLlave = new Map<string, FamiliaDelArchivo>()
+        for (const { product: p, categoryIndex, productIndex } of conFamilia) {
+          const forma = leerFamiliaDeFila(p)
+          if (typeof forma === 'string') {
+            rechazadas.push(rechazoDe(p, forma))
+            fueraDeLaPrimeraPasada.add(p)
+            continue
+          }
+          const ya = existentes.get(p.sku)
+          if (ya) {
+            if (!ya.productGroupId) sueltosQueYaExistian++
+            continue // la rama «actualizar» de hoy
+          }
+          fueraDeLaPrimeraPasada.add(p)
+          const llave = forma.key ? `key:${forma.key}` : `nombre:${claveFamilia(forma.name)}`
+          let fam = porLlave.get(llave)
+          if (!fam) porLlave.set(llave, (fam = { key: forma.key, name: forma.name, filas: [] }))
+          fam.filas.push({ p, catIndex: categoryIndex, prodIndex: productIndex, optionNames: forma.optionNames, values: forma.values })
+        }
+        const nombres = new Set<string>()
+        for (const fam of porLlave.values()) {
+          if (nombres.has(claveFamilia(fam.name))) {
+            rechazadas.push(...fam.filas.map(f => rechazoDe(f.p, 'Otra familia del archivo ya se llama así')))
+            continue
+          }
+          nombres.add(claveFamilia(fam.name))
+          const plan = await planearFamilia(tx, venueId, fam, createdById)
+          rechazadas.push(...plan.malas.map(m => rechazoDe(m.fila.p, m.motivo)))
+          if (plan.buenas.length) familiasDelArchivo.push({ ...fam, filas: plan.buenas })
+        }
+        if (data.mode === 'replace' && rechazadas.length) throw filasMalasEnReemplazo(rechazadas)
       }
       // WHY: Fence, current-SKU inspection and bounded diagnostics all finish
       // before replace archives or any menu write, so stale preflight cannot
@@ -1505,6 +1995,7 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       }
 
       // Process categories and products
+      const categoriaDe: string[] = [] // por índice de categoría del archivo: la de las familias que se crean en la segunda pasada
       for (const [catIndex, categoryData] of data.categories.entries()) {
         // Plan 5 (D4): by name and, when none, by slug — creating another one with the same slug would hit @@unique([venueId, slug]).
         let category =
@@ -1551,8 +2042,11 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
           }
         }
 
+        categoriaDe[catIndex] = category.id
+
         // Process products in this category
         for (const [prodIndex, productData] of categoryData.products.entries()) {
+          if (fueraDeLaPrimeraPasada.has(productData)) continue
           // Check if product exists by SKU (merge mode)
           const existingProduct = await tx.product.findFirst({
             where: { venueId, sku: productData.sku },
@@ -1594,12 +2088,22 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
             // ella: una variante viva no puede colgar de un padre archivado que nadie puede editar.
             let restaurar = archivado
             if (grupoId && archivado) {
-              const [padre] = await tx.$queryRaw<Array<{ deletedAt: Date | null }>>`
-                SELECT "deletedAt" FROM "ProductGroup" WHERE id = ${grupoId} FOR UPDATE`
+              const padre = await lockGroupForCleanup(tx, venueId, grupoId)
               const vivas = await tx.product.count({ where: { productGroupId: grupoId, deletedAt: null } })
-              restaurar = vivas < MAX_VARIANTS_PER_GROUP
-              if (!restaurar) variantesSinCupo++
-              else if (padre?.deletedAt) {
+              // Bloque 5 (Codex r5 R5-1, familia 2): una familia archivada cuya identidad (SHOPIFY o MANUAL por su llave; MANUAL
+              // también por su nombre) ya tiene otra viva no revive: la talla se queda archivada y la fila no aborta el import.
+              const reemplazada =
+                padre.deletedAt != null &&
+                (await familyIdentityConflict(
+                  tx,
+                  venueId,
+                  { source: padre.source, name: padre.name, externalId: padre.externalId },
+                  grupoId,
+                )) !== null
+              restaurar = !reemplazada && vivas < MAX_VARIANTS_PER_GROUP
+              if (reemplazada) variantesDeFamiliaReemplazada++
+              else if (!restaurar) variantesSinCupo++
+              else if (padre.deletedAt) {
                 await tx.productGroup.update({ where: { id: grupoId }, data: { deletedAt: null, deletedBy: null } })
                 familiasRestauradas.push(grupoId)
               }
@@ -1611,8 +2115,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               // here for merge's race.
               await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'ACTIVATE', willBeVendable: true, actor })
             }
-            // Update existing product
-            const { imageUrl: _fotoDelArchivo, ...shopifySinFoto } = shopifyImportFields
+            // Update existing product: lo de la talla (`camposDeTalla`, lo mismo que recibe una talla nueva) y, sólo si es suelto, lo
+            // que en una talla agrupada es del padre.
             product = await tx.product.update({
               where: { id: existingProduct.id },
               data: {
@@ -1623,24 +2127,13 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
                       description: productData.description || null,
                       type: productData.type || 'FOOD',
                       categoryId: category.id,
+                      ...(productData.imageUrl ? { imageUrl: productData.imageUrl } : {}),
                     }),
-                price: productData.price,
-                cost: productData.cost ?? null,
-                displayOrder: prodIndex,
-                tags: productData.tags || [],
-                allergens: productData.allergens || [],
-                // Ausente ≠ null: re-importar precios no puede borrar la duración
-                // ya configurada y desconfigurar la agenda del local.
-                ...(productData.duration !== undefined ? { duration: productData.duration } : {}),
-                // Sin `trackInventory` (undefined) la columna no se toca: re-importar no apaga lo que ya se contaba.
-                trackInventory: porCantidad ? true : undefined,
-                inventoryMethod: porCantidad ? 'QUANTITY' : undefined,
-                ...(deGrupo ? shopifySinFoto : shopifyImportFields),
+                ...camposDeTalla(productData, { porCantidad, displayOrder: prodIndex }),
                 ...(restaurar ? { deletedAt: null, deletedBy: null, active: true } : {}),
-                // Codex C5-2: the file adopts it (same id) ⇒ the owner's, no longer demo: converting the venue must not delete it.
-                isDemo: false,
               },
             })
+            await inventarioDeLaFila(tx, product, productData, porCantidad, venueId)
             productsUpdated++
             if (restaurar) productsRestored++
             if (deGrupo) variantesConservadas++
@@ -1671,77 +2164,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
               await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: product.id, actor })
             }
             productsCreated++
+            await inventarioDeLaFila(tx, product, productData, porCantidad, venueId)
           }
-
-          // Handle inventory tracking if specified
-          if (productData.trackInventory) {
-            const existingInventory = await tx.inventory.findFirst({
-              where: { productId: product.id },
-            })
-            const saldoInicial = productData.currentStock || 0
-            // Fila que recibe el saldo de apertura (y su movimiento), si alguna.
-            let aperturaEn: string | null = null
-
-            if (existingInventory) {
-              // 🔴 El re-import NUNCA toca `currentStock` de un inventario existente
-              // (auditoría 2026-08-12): antes escribía `currentStock || 0`, así que un
-              // re-import de catálogo sin ese campo BORRABA el stock de todo el venue,
-              // sin InventoryMovement ni bitácora. El saldo solo se mueve por ventas,
-              // conteos, recepciones y ajustes — caminos que sí dejan rastro.
-              // `minimumStock` sí se actualiza: es configuración, no saldo.
-              await tx.inventory.update({
-                where: { id: existingInventory.id },
-                data: {
-                  minimumStock: productData.minStock || 0,
-                  ...(existingInventory.isDemo ? { isDemo: false } : {}), // Codex C5-2: adopted with its product
-                },
-              })
-              // Salvo la APERTURA PENDIENTE: la fila en 0 y sin kardex que deja
-              // `ensureQuantityInventoryRow` al activar «por cantidad» antes de importar.
-              // Ahí el saldo del archivo ES el inicial. La condición va en el propio UPDATE:
-              // una venta que llegue entre la lectura y aquí ya dejó historia y no se pisa.
-              if (saldoInicial !== 0) {
-                const { count } = await tx.inventory.updateMany({
-                  where: { id: existingInventory.id, currentStock: 0, movements: { none: {} } },
-                  data: { currentStock: saldoInicial },
-                })
-                if (count > 0) aperturaEn = existingInventory.id
-              }
-            } else {
-              // Create new inventory entry
-              const nuevoInventario = await tx.inventory.create({
-                data: {
-                  productId: product.id,
-                  venueId,
-                  currentStock: saldoInicial,
-                  minimumStock: productData.minStock || 0,
-                },
-              })
-              if (saldoInicial !== 0) aperturaEn = nuevoInventario.id
-            }
-
-            // 🔴 El saldo de apertura deja movimiento (audit Codex xhigh
-            // 2026-08-14): un inventario que nace con saldo pero sin kardex
-            // hace imposible la reconciliación `saldo == apertura + Σ deltas`
-            // desde el día uno. Sin saldo inicial no se inventa un movimiento
-            // de cero — sería ruido.
-            if (aperturaEn) {
-              await tx.inventoryMovement.create({
-                data: {
-                  inventoryId: aperturaEn,
-                  type: 'ADJUSTMENT',
-                  quantity: saldoInicial,
-                  previousStock: 0,
-                  newStock: saldoInicial,
-                  reason: 'Saldo inicial (importación de menú)',
-                },
-              })
-            }
-          }
-
-          // Shopify loader, counted by piece ⇒ it must have its Inventory row (born in 0, no kardex; an existing one is never
-          // touched). A product kept on its recipe or kept off gets nothing (`porCantidad` is false).
-          if (porCantidad && productData.inventoryByQuantity) await ensureQuantityInventoryRow(tx, product)
 
           // Handle modifier groups — a variant's extras are its parent's: the file does not touch them (counted above)
           if (!deGrupo && productData.modifierGroups && productData.modifierGroups.length > 0) {
@@ -1839,6 +2263,21 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
         }
       }
 
+      // Variantes (V8), segunda pasada, por llave en el orden del archivo: se vuelve a revisar cada familia contra la base de ahora
+      // (las filas sueltas de este mismo archivo ya se escribieron) y se escribe lo que entra. En «reemplazar», cualquier rechazo
+      // nuevo deshace TODO (400); en «combinar», la fila se reporta y las buenas entran.
+      for (const fam of familiasDelArchivo) {
+        const plan = await planearFamilia(tx, venueId, fam, createdById)
+        const malas = plan.malas.map(m => rechazoDe(m.fila.p, m.motivo))
+        if (malas.length && data.mode === 'replace') throw filasMalasEnReemplazo(malas)
+        rechazadas.push(...malas)
+        if (!plan.buenas.length) continue
+        const escrito = await escribirFamilia(tx, venueId, fam, plan, categoriaDe, actor)
+        ;(escrito.nueva ? familiasCreadasIds : familiasAmpliadas).push(escrito.groupId)
+        tallasEnFamilias += escrito.ids.length
+        productsCreated += escrito.ids.length
+      }
+
       // Ronda 1 (N1): «reemplazar» borró todos los menús; la categoría de una familia viva sigue prendida, pero sin lugar en el
       // menú el POS no la ve. Vuelve al menú principal, después de las del archivo (las que el archivo trae ya están). Por
       // páginas de familias, sin tope que deje alguna fuera.
@@ -1877,6 +2316,8 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
   for (const [ids, action] of [
     [familiasArchivadas, 'PRODUCT_GROUP_ARCHIVED'],
     [familiasRestauradas, 'PRODUCT_GROUP_RESTORED'],
+    [familiasCreadasIds, 'PRODUCT_GROUP_CREATED'],
+    [familiasAmpliadas, 'PRODUCT_GROUP_VARIANTS_ADDED'],
   ] as const) {
     for (const groupId of ids) {
       void logAction({
@@ -1905,6 +2346,12 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       productsKeptUntracked,
       variantesConservadas,
       variantesSinCupo,
+      familiasCreadas: familiasCreadasIds.length,
+      tallasEnFamilias,
+      filasConFamiliaSinPlan,
+      sueltosQueYaExistian,
+      variantesDeFamiliaReemplazada,
+      filasDeFamiliaRechazadas: rechazadas.length,
     },
   })
 
@@ -1927,6 +2374,17 @@ export async function importMenu(venueId: string, data: ImportMenuData, actor: C
       variantesConservadas,
       // Variantes archivadas que no volvieron porque su padre ya tiene 250 vivas.
       variantesSinCupo,
+      // Bloque 5 (V8): familias MANUAL que creó el archivo y tallas nuevas que entraron a una familia (nueva o existente).
+      familiasCreadas: familiasCreadasIds.length,
+      tallasEnFamilias,
+      // Filas con familia en un negocio sin PRODUCT_VARIANTS: entraron sueltas.
+      filasConFamiliaSinPlan,
+      // Filas con familia de un SKU que ya existía suelto: se actualizó, no se agrupó.
+      sueltosQueYaExistian,
+      // Tallas archivadas que no volvieron porque su familia ya tiene otra viva con su identidad.
+      variantesDeFamiliaReemplazada,
+      // TODAS aquí; el controlador HTTP recorta `ejemplos` a 50.
+      filasDeFamiliaRechazadas: { total: rechazadas.length, ejemplos: rechazadas },
     },
   }
 }

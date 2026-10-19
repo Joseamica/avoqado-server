@@ -496,3 +496,142 @@ describe('chunkImportMenuData', () => {
     expect(() => chunkImportMenuData({ mode: 'replace', categories: [] }, 2)).toThrow(/merge/)
   })
 })
+
+describe('convertShopifyCsv — el archivo manda la familia (bloque 5)', () => {
+  const camisa = () => [
+    first('camisa-lino', 'Camisa Lino', { 'Option1 Name': 'Talla', 'Option1 Value': 'S', 'Variant SKU': 'CL-S' }),
+    variant('camisa-lino', { 'Option1 Value': 'M', 'Variant SKU': 'CL-M', 'Variant Price': '10.00' }),
+    variant('camisa-lino', { 'Option1 Value': 'L', 'Variant SKU': 'CL-L', 'Variant Price': '10.00' }),
+  ]
+
+  it('Handle con Talla S/M/L lleva family con key = Handle, el nombre de la cabeza y el valor de cada fila; el nombre sigue «Title · valor»', () => {
+    const result = convertShopifyCsv(csv(camisa()), FACTOR)
+    expect(products(result).map(p => [p.name, p.family])).toEqual(
+      ['S', 'M', 'L'].map(value => [
+        `Camisa Lino · ${value}`,
+        { key: 'camisa-lino', name: 'Camisa Lino', options: [{ name: 'Talla', value }] },
+      ]),
+    )
+  })
+
+  it('con dos ejes, los nombres salen de la primera fila y los valores de cada una, en el mismo orden', () => {
+    const result = convertShopifyCsv(
+      csv([
+        first('pantalon', 'Pantalón', {
+          'Option1 Name': 'Talla',
+          'Option1 Value': '32',
+          'Option2 Name': 'Color',
+          'Option2 Value': 'Negro',
+          'Variant SKU': 'PA-32-N',
+        }),
+        variant('pantalon', { 'Option1 Value': '34', 'Option2 Value': 'Azul', 'Variant SKU': 'PA-34-A', 'Variant Price': '10.00' }),
+      ]),
+      FACTOR,
+    )
+    expect(products(result).map(p => p.family!.options)).toEqual([
+      [
+        { name: 'Talla', value: '32' },
+        { name: 'Color', value: 'Negro' },
+      ],
+      [
+        { name: 'Talla', value: '34' },
+        { name: 'Color', value: 'Azul' },
+      ],
+    ])
+  })
+
+  it('«Default Title» no lleva family', () => {
+    const result = convertShopifyCsv(csv([first('gorra', 'Gorra')]), FACTOR)
+    expect(products(result)[0]).not.toHaveProperty('family')
+  })
+
+  it('una variante omitida no se manda, y las otras de su Handle siguen llevando family', () => {
+    const rows = camisa()
+    rows[1]['Variant SKU'] = ''
+    const result = convertShopifyCsv(csv(rows), FACTOR)
+    expect(products(result).map(p => [p.sku, p.family?.key])).toEqual([
+      ['CL-S', 'camisa-lino'],
+      ['CL-L', 'camisa-lino'],
+    ])
+  })
+
+  it('dos Handles con el mismo Title (sin importar mayúsculas ni espacios) entran SUELTOS y el reporte lo dice; los demás conservan su familia', () => {
+    const result = convertShopifyCsv(
+      csv([
+        ...camisa(),
+        first('camisa-lino-2', ' camisa  LINO ', { 'Option1 Name': 'Talla', 'Option1 Value': 'S', 'Variant SKU': 'C2-S' }),
+        first('pantalon', 'Pantalón', { 'Option1 Name': 'Talla', 'Option1 Value': '32', 'Variant SKU': 'PA-32' }),
+      ]),
+      FACTOR,
+    )
+    expect(products(result).map(p => [p.sku, p.family?.key ?? null])).toEqual([
+      ['CL-S', null],
+      ['CL-M', null],
+      ['CL-L', null],
+      ['C2-S', null],
+      ['PA-32', 'pantalon'],
+    ])
+    expect(codes(result, 'CL-S')).toEqual(['FAMILIA_HOMONIMA'])
+    expect(bySku(result, 'C2-S').problems[0].detail).toBe('familia homónima: entra suelta; agrúpala con tu archivo')
+    expect(codes(result, 'PA-32')).toEqual([])
+  })
+
+  it('dos Handles homónimos que caerían en lotes distintos entran sueltos igual: se decide sobre el archivo completo, antes de partir', () => {
+    const result = convertShopifyCsv(
+      csv([
+        ...camisa(),
+        first('pantalon', 'Pantalón', { 'Option1 Name': 'Talla', 'Option1 Value': '32', 'Variant SKU': 'PA-32' }),
+        first('camisa-lino-2', 'Camisa Lino', { 'Option1 Name': 'Talla', 'Option1 Value': 'S', 'Variant SKU': 'C2-S' }),
+      ]),
+      FACTOR,
+    )
+    const chunks = chunkImportMenuData(result.data, 1)
+    expect(chunks.length).toBeGreaterThan(1)
+    const sent = chunks.flatMap(c => c.categories.flatMap(cat => cat.products))
+    expect(sent.filter(p => p.name.startsWith('Camisa Lino')).every(p => !p.family)).toBe(true)
+    expect(sent.find(p => p.sku === 'PA-32')!.family!.key).toBe('pantalon')
+  })
+})
+
+describe('chunkImportMenuData — nunca parte una familia', () => {
+  const loose = (sku: string) => ({ name: sku, sku, price: 1 })
+  const member = (key: string, n: number) => ({
+    name: `${key} · ${n}`,
+    sku: `${key}-${n}`,
+    price: 1,
+    family: { key, name: key, options: [{ name: 'Talla', value: String(n) }] },
+  })
+
+  it('una familia de 60 tallas va entera en un lote (que pasa de 50) y lo que sigue abre otro', () => {
+    const data = {
+      mode: 'merge' as const,
+      categories: [
+        {
+          name: 'A',
+          slug: 'a',
+          products: [loose('1'), loose('2'), ...Array.from({ length: 60 }, (_, n) => member('grande', n)), loose('3')],
+        },
+      ],
+    }
+    const chunks = chunkImportMenuData(data, 50)
+    const skus = chunks.map(c => c.categories.flatMap(cat => cat.products.map(p => p.sku)))
+    expect(skus.flat()).toHaveLength(63)
+    expect(chunks.map(c => c.categories.flatMap(cat => cat.products).filter(p => p.family?.key === 'grande').length)).toEqual([60, 0])
+    expect(skus[1]).toEqual(['3'])
+  })
+
+  it('una familia que empieza cerca del tope se queda junta; otra distinta sí puede abrir lote', () => {
+    const products = [...Array.from({ length: 49 }, (_, n) => loose(`s${n}`)), member('f', 1), member('f', 2), member('g', 1)]
+    const chunks = chunkImportMenuData({ mode: 'merge', categories: [{ name: 'A', slug: 'a', products }] }, 50)
+    const keysPerChunk = chunks.map(
+      c =>
+        new Set(
+          c.categories
+            .flatMap(cat => cat.products)
+            .map(p => p.family?.key)
+            .filter(Boolean),
+        ),
+    )
+    expect(keysPerChunk.map(k => [...k])).toEqual([['f'], ['g']])
+  })
+})
