@@ -61,7 +61,9 @@ const guardar = (ruta: string, body: unknown, rol = 'OWNER') =>
 beforeEach(() => {
   upsert.mockClear()
   prismaMock.venue.findUnique.mockResolvedValue({ organizationId: ORG_ID } as any) // getOrgIdFromVenue (stores-analysis)
-  prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-owner' } as any) // requireOrgOwner (organizations)
+  // Desde develop (17-oct) las dos puertas piden al DUEÑO DE LA ORGANIZACIÓN (`soloElDuenoDeLaOrgCambia`): fila OWNER
+  // activa en StaffOrganization. Aquí u1 lo es; los casos de 403 de abajo lo quitan.
+  prismaMock.staffOrganization.findFirst.mockResolvedValue({ id: 'so-owner' } as any)
 })
 
 describe.each(PUERTAS)('PUT org-tpv-defaults por %s — el tope de 6 propinas del POS', (_puerta, ruta) => {
@@ -77,7 +79,8 @@ describe.each(PUERTAS)('PUT org-tpv-defaults por %s — el tope de 6 propinas de
     const r = await guardar(ruta, { settings: { tipSuggestions: [5, 10, 15, 18, 20, 25] } })
 
     expect(r.status).toBe(200)
-    expect(upsert).toHaveBeenCalledWith(ORG_ID, { tipSuggestions: [5, 10, 15, 18, 20, 25] })
+    // Lo que se revisa aquí son la org y los ajustes; detrás van quién lo hizo (y en la sucursal, desde dónde).
+    expect(upsert.mock.calls[0].slice(0, 2)).toEqual([ORG_ID, { tipSuggestions: [5, 10, 15, 18, 20, 25] }])
   })
 
   it('un cuerpo SIN propinas pasa intacto: el resto de llaves llega al servicio tal cual', async () => {
@@ -85,7 +88,7 @@ describe.each(PUERTAS)('PUT org-tpv-defaults por %s — el tope de 6 propinas de
     const r = await guardar(ruta, { settings })
 
     expect(r.status).toBe(200)
-    expect(upsert).toHaveBeenCalledWith(ORG_ID, settings)
+    expect(upsert.mock.calls[0].slice(0, 2)).toEqual([ORG_ID, settings])
   })
 })
 
@@ -98,8 +101,17 @@ describe('el permiso va ANTES que la forma (como la Task 12): sin acceso es 403,
   })
 
   it('organizations: quien no es dueño en la organización', async () => {
-    prismaMock.staffVenue.findFirst.mockResolvedValue(null)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
     const r = await guardar(PUERTAS[1][1], sieteTips, 'MANAGER')
     expect(r.status).toBe(403)
+    expect(upsert).not.toHaveBeenCalled()
+  })
+
+  it.each(PUERTAS)('%s: la dueña de UNA sucursal (no de la organización) recibe 403, no el 400 de las propinas', async (_puerta, ruta) => {
+    prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
+    const r = await guardar(ruta, sieteTips, 'OWNER')
+    expect(r.status).toBe(403)
+    expect(r.body.message).not.toContain('porcentajes de propina')
+    expect(upsert).not.toHaveBeenCalled()
   })
 })
