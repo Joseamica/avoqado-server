@@ -16,6 +16,7 @@
 
 import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
+import { sqlOrdenSinTarjetasTexto } from '@/services/giftCards/giftCardMarks'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { localInstantRaw, localWallClockRaw, utcTsParam } from '@/utils/sqlDates'
@@ -216,6 +217,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL
+      AND ${sqlOrdenSinTarjetasTexto('o.id')}
       ${hourFilterClause}
     GROUP BY ${groupByFields}
     ORDER BY ${orderByField} DESC
@@ -387,6 +389,7 @@ async function getPromotionAttribution(
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL
+      AND ${sqlOrdenSinTarjetasTexto('o.id')}
       ${hourFilterClause}
     GROUP BY oi."productId", COALESCE(oi."productName", p.name, 'Sin descripción'),
              COALESCE(NULLIF(op."snapshotJson"->>'name', ''), pr.name, 'Promoción')
@@ -509,6 +512,7 @@ async function calculateTimePeriodItemMetrics(
       AND o.status NOT IN ('CANCELLED')
       AND o."paymentStatus" NOT IN ('REFUNDED')
       AND oi."removedAt" IS NULL
+      AND ${sqlOrdenSinTarjetasTexto('o.id')}
       ${hourFilterClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
