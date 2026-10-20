@@ -3474,6 +3474,18 @@ export async function registrarAbonoEnTx(
     postingId = posting?.id ?? null
     // R8 (tarjetas de regalo): la cuenta de tarjetas que queda pagada activa sus sobres en ESTA transacción.
     await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: effectiveStaffId ?? null, items: txItems })
+  } else if (cobro.cerrada && !areaFinalization.areaTicketOrder) {
+    // S0.3: dinero ya capturado sobre una venta CERRADA (S1): sin efectos de saldar, pero una cuenta de tarjetas devuelta deja su
+    // anomalía en ESTA transacción (no reactiva sobres: la función es idempotente). Sin renglón de tarjeta, sale sin consultar sobres.
+    // `findFirst` y no un `findMany` con tope de 1: la ventana de `findManySinTopeGuard` vería ese tope y daría por acotado el
+    // `txItems` de arriba, que no lo está.
+    const renglonDeTarjeta = await tx.orderItem.findFirst({ where: { orderId, giftCardId: { not: null } }, select: { giftCardId: true } })
+    await activarSobresDeCuentaPagadaEnTx(tx, {
+      venueId,
+      orderId,
+      staffId: effectiveStaffId ?? null,
+      items: renglonDeTarjeta ? [renglonDeTarjeta] : [],
+    })
   }
 
   // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
