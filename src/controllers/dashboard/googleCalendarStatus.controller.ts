@@ -73,6 +73,12 @@ export async function listBusyBlocks(req: Request, res: Response, next: NextFunc
     }
 
     const staffId = typeof req.query.staffId === 'string' && req.query.staffId.length > 0 ? req.query.staffId : null
+    // El permiso se revisó en ESTA sucursal: los bloques personales de alguien que no trabaja aquí no se entregan (antes
+    // salían horarios, títulos y el correo de su conexión con sólo conocer su id; Codex r1, 19-oct).
+    if (staffId && staffId !== getAuthContext(req).userId) {
+      const trabajaAqui = await prisma.staffVenue.findFirst({ where: { staffId, venueId, active: true }, select: { id: true } })
+      if (!trabajaAqui) throw new NotFoundError('Persona no encontrada en esta sucursal')
+    }
 
     const where: any = {
       OR: [

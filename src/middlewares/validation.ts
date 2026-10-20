@@ -60,7 +60,9 @@ export const validateRequest = (schema: AnyZodObject) => async (req: Request, re
       req.query = parsedResult.data.query as any // Cast to allow assignment
     }
     if (parsedResult.data.params !== undefined) {
-      req.params = parsedResult.data.params as any // Cast to allow assignment
+      // Se MEZCLA, no se reemplaza: los parámetros vienen de la ruta (`/venues/:venueId/...` con `mergeParams`), y un esquema
+      // que sólo valida `packId` tiraba `venueId` — el controlador se quedaba sin la sucursal de la URL (Codex r1, 19-oct).
+      req.params = { ...req.params, ...(parsedResult.data.params as any) }
     }
 
     return next()

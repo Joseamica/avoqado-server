@@ -78,10 +78,10 @@ describe.each(['pending', 'pending-invitation', undefined])('token sin sucursal 
     expect(getUserAccess).not.toHaveBeenCalled()
   })
 
-  it('DELETE /google-calendar/connections/:id → 409', async () => {
+  it('DELETE /google-calendar/connections/:id de una conexión ajena → 404 (un 409 delataba que existe; Codex r1 sucursal-correcta)', async () => {
     prismaMock.googleCalendarConnection.findUnique.mockResolvedValue({ id: 'c1', scope: 'VENUE', venueId: 'v1', channels: [] })
     const { error } = await correr(disconnectConnection, req(venueId, { params: { id: 'c1' } }))
-    esSinSucursal(error)
+    expect(error?.statusCode).toBe(404)
     expect(getUserAccess).not.toHaveBeenCalled()
   })
 
