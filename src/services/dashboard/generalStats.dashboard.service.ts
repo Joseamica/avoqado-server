@@ -1315,6 +1315,7 @@ async function getDiscountAnalysisData(venueId: string, fromDate: Date, toDate: 
       venueId,
       status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: { gte: fromDate, lte: toDate },
+      ...WHERE_ORDEN_SIN_TARJETAS, // la cuenta de tarjetas no es una orden de mercancía: no baja la tasa de descuento
     },
   })
 
