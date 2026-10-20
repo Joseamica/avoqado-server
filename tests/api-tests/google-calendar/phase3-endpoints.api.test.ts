@@ -189,6 +189,8 @@ describe('GET /api/v1/dashboard/venues/:venueId/google-calendar/busy-blocks', ()
   })
 
   it('ORs in staff-personal blocks when staffId is provided', async () => {
+    // staff-42 trabaja en esta sucursal (sin eso, sus bloques personales no se entregan).
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv-42' })
     ;(prismaMock.externalBusyBlock.findMany as jest.Mock).mockResolvedValueOnce([])
     await authedGet(`/api/v1/dashboard/venues/${VENUE_ID}/google-calendar/busy-blocks?from=${FROM}&to=${TO}&staffId=staff-42`)
     const where = (prismaMock.externalBusyBlock.findMany as jest.Mock).mock.calls[0][0].where
@@ -196,6 +198,13 @@ describe('GET /api/v1/dashboard/venues/:venueId/google-calendar/busy-blocks', ()
     expect(where.OR).toEqual(
       expect.arrayContaining([expect.objectContaining({ venueId: VENUE_ID }), expect.objectContaining({ staffId: 'staff-42' })]),
     )
+  })
+
+  it('404 for the personal blocks of someone who does not work at this venue (19-oct)', async () => {
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+    const res = await authedGet(`/api/v1/dashboard/venues/${VENUE_ID}/google-calendar/busy-blocks?from=${FROM}&to=${TO}&staffId=de-otro-negocio`)
+    expect(res.status).toBe(404)
+    expect(prismaMock.externalBusyBlock.findMany).not.toHaveBeenCalled()
   })
 
   it('hides title when block is private', async () => {
@@ -487,6 +496,7 @@ describe('GET /api/v1/google-calendar/connections/:id', () => {
   })
 
   it('returns 403 when caller is not the owner and lacks calendar:view_status', async () => {
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv-someone-else' }) // trabaja en la sucursal
     accessService.getUserAccess.mockResolvedValueOnce({
       ...mockUserAccessFixture,
       corePermissions: [], // No view_status
@@ -511,7 +521,20 @@ describe('GET /api/v1/google-calendar/connections/:id', () => {
     expect(res.status).toBe(403)
   })
 
+  it('404 when the other staff member does not work at the caller venue, even with calendar:view_status (19-oct)', async () => {
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+    ;(prismaMock.googleCalendarConnection.findUnique as jest.Mock).mockResolvedValueOnce({
+      id: 'conn-foreign',
+      scope: 'STAFF_PERSONAL',
+      venueId: null,
+      staffId: 'de-otro-negocio',
+    })
+    const res = await authedGet('/api/v1/google-calendar/connections/conn-foreign')
+    expect(res.status).toBe(404)
+  })
+
   it('allows a venue admin (calendar:view_status) to view another staff personal connection', async () => {
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv-someone-else' }) // trabaja en la sucursal
     ;(prismaMock.googleCalendarConnection.findUnique as jest.Mock).mockResolvedValueOnce({
       id: 'conn-other',
       scope: 'STAFF_PERSONAL',
