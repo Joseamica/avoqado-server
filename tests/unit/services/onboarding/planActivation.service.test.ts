@@ -139,6 +139,19 @@ const BASE = {
   paymentMethodId: 'pm_1',
 }
 
+/**
+ * El `plan` que el cierre agregó al formulario. Desde el 20-oct se escribe SÓLO esa sección con `fusionarV2SetupData`
+ * (un `$executeRaw` sobre `"v2SetupData"`), no dentro del `updateMany` del candado: reescribir el formulario entero borraba
+ * lo que otra pestaña guardó en medio.
+ */
+function planDelCierre(): any {
+  const fusiones = (prismaMock.$executeRaw as jest.Mock).mock.calls.filter(
+    (c: any[]) => Array.isArray(c[0]) && c[0].join('').includes('"v2SetupData"'),
+  )
+  const ultima = fusiones.at(-1)
+  return ultima ? JSON.parse(ultima[1]).plan : undefined
+}
+
 /** Un `$transaction(cb)` que le pasa el mismo mock como `tx`, igual que el setup global. */
 function prepararTransaccion() {
   prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
@@ -306,14 +319,30 @@ describe('camino feliz con campaña', () => {
     expect(prismaMock.venue.update).toHaveBeenCalledWith({ where: { id: 'venue-1' }, data: { planTier: 'PRO' } })
   })
 
-  it('🔴 `plan` se guarda en la RAÍZ de v2SetupData (es lo que parseV2Plan busca primero)', async () => {
+  it('🔴 `plan` se guarda en la RAÍZ de v2SetupData (es lo que parseV2Plan busca primero), sin reescribir el formulario', async () => {
     await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
     const escritura = prismaMock.onboardingProgress.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE')
-    expect((escritura?.[0].data.v2SetupData as Record<string, unknown>).plan).toMatchObject({
+    // El candado ya no reescribe el formulario entero (borraba lo que otra pestaña guardó en medio; 20-oct).
+    expect(escritura?.[0].data.v2SetupData).toBeUndefined()
+    expect(planDelCierre()).toMatchObject({
       tier: 'PRO',
       interval: 'monthly',
       payNow: true,
     })
+  })
+
+  it('🔴 el correo de confirmación dice la fecha del siguiente cobro de Stripe, no «hoy + 30 días»', async () => {
+    const { resolvePlanNotificationTarget } = jest.requireMock('@/services/access/planNotification.service')
+    resolvePlanNotificationTarget.mockResolvedValueOnce({ email: 'dueno@x.com', locale: 'es', venueName: 'Bar' })
+    const { default: emailService } = jest.requireMock('@/services/email.service')
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)) // el correo sale sin bloquear la respuesta
+
+    expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledWith(
+      'dueno@x.com',
+      expect.objectContaining({ firstChargeDate: new Date('2026-10-17T00:00:00Z') }), // current_period_end de la suscripción
+    )
   })
 
   it('la redención queda APPLIED con la suscripción y la huella de tarjeta', async () => {
@@ -577,7 +606,8 @@ describe('recuperación de un intento desconocido', () => {
     expect(mockEntregar).toHaveBeenCalledWith({ venueId: 'venue-1', subscriptionId: 'sub_rec', detectedBy: 'onboarding.activatePlan' })
     // El alta queda ACTIVE con lo cobrado…
     const cierre = prismaMock.onboardingProgress.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE')
-    expect(cierre?.[0].data.v2SetupData.plan).toMatchObject({ tier: 'PREMIUM', offer: { kind: 'STANDARD' } })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ tier: 'PREMIUM', offer: { kind: 'STANDARD' } })
     expect(prismaMock.venue.update).toHaveBeenCalledWith(expect.objectContaining({ data: { planTier: 'PREMIUM' } }))
     // …el lugar de la oferta se libera, y la bitácora dice lo que pasó (nunca «campaña canjeada»).
     expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith(
@@ -1282,7 +1312,8 @@ describe('la recuperación honra lo que SE COBRÓ, no lo que pide el reintento',
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       c => c[0].data?.planActivationStatus === 'ACTIVE',
     )
-    expect(cierre?.[0].data.v2SetupData.plan).toMatchObject({ tier: 'PREMIUM', interval: 'annual' })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ tier: 'PREMIUM', interval: 'annual' })
   })
 
   it('🔴 una suscripción CANCELADA no se lee como cobro recuperado', async () => {
@@ -1612,7 +1643,8 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       (c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE',
     )
-    expect((cierre?.[0].data.v2SetupData as Record<string, any>).plan).toMatchObject({ tier: 'PRO' })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ tier: 'PRO' })
   })
 
   it('🔴 y si no se puede determinar qué plan vende (dos planes en la misma suscripción), no se cierra el alta', async () => {
@@ -1676,7 +1708,8 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       (c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE',
     )
-    expect((cierre?.[0].data.v2SetupData as Record<string, any>).plan).toMatchObject({ payNow: true })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ payNow: true })
   })
 })
 
@@ -3111,7 +3144,7 @@ describe('🔴 R1/R2: el alta a medio pago se resuelve sin el navegador', () => 
       await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
 
       expect(conEstado('ACTIVE')).toHaveLength(1)
-      expect(conEstado('ACTIVE')[0].data.v2SetupData.plan.paymentMethodId).toBe('pm_1')
+      expect(planDelCierre().paymentMethodId).toBe('pm_1')
       expect(redencionCon('APPLIED')).toHaveLength(1)
       nadaEnStripe()
     })

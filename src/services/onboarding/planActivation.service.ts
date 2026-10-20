@@ -43,7 +43,7 @@ import { autorizarObligacionNueva, TIMEOUT_DE_LA_TRANSACCION_MS } from '../acces
 import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
 import { primerCobroCubierto } from './primerCobroPagado'
-import { parseV2Plan } from './onboardingProgress.service'
+import { fusionarV2SetupData, parseV2Plan } from './onboardingProgress.service'
 import {
   isLegacyIntroEligible,
   LEGACY_INTRO_OFFER,
@@ -849,7 +849,7 @@ export async function activatePlan(
   await verificarPlanConfigurado(input.tier)
   const venueRecord = await prisma.venue.findUnique({
     where: { id: venue.id },
-    select: { id: true, name: true, slug: true, email: true, organization: { select: { email: true, name: true } } },
+    select: { id: true, name: true, slug: true, email: true, timezone: true, organization: { select: { email: true, name: true } } },
   })
   const customerId = await getOrCreateStripeCustomer(
     venue.id,
@@ -1312,7 +1312,6 @@ export async function activatePlan(
       // Lo guardado describe lo COBRADO: si la oferta no aplicó, no queda como alta con oferta.
       offer: ofertaNoAplicada ? ({ kind: 'STANDARD', expectedFirstChargeCents: primerCobroDe(sub, expected) } as const) : input.offer,
     }
-    const v2 = ((progress.v2SetupData as Record<string, unknown> | null) ?? {}) as Record<string, unknown>
     const cerrado = await tx.onboardingProgress.updateMany({
       where: {
         organizationId,
@@ -1325,14 +1324,16 @@ export async function activatePlan(
         planActivatedAt: now,
         planActivationLeaseUntil: null,
         planStripeSubscriptionId: subscriptionId,
-        // 🔴 `plan` va en la RAÍZ, que es lo primero que busca `parseV2Plan`.
-        v2SetupData: { ...v2, plan: planGuardado } as Prisma.InputJsonValue,
       },
     })
 
     // 🔴 Cada cierre tiene que TOCAR su fila (Codex C6): si el intento ya no es de esta petición o el lugar de la oferta
     // ya no estaba apartado, no se da por aplicada el alta — el cargo quedó registrado y el siguiente intento lo recupera.
     if (cerrado.count === 0) throw pendiente('el intento ya no era de esta petición al cerrarlo')
+    // 🔴 `plan` va en la RAÍZ, que es lo primero que busca `parseV2Plan`. Se agrega SÓLO esa sección, ya con el candado
+    // ganado y en la misma transacción: reescribir el formulario leído antes borraba un paso que otra pestaña guardó en
+    // medio (y al revés, esa pestaña borraba el plan cobrado; 20-oct).
+    await fusionarV2SetupData(tx, organizationId, { plan: planGuardado })
     if (redemption && campaign && ofertaNoAplicada) {
       // El cierre de arriba acreditó que el intento es nuestro: el lugar se libera en la MISMA transacción (Codex #14).
       await liberarLugarEn(tx, redemption.id, campaign.id, 'RECOVERED_WITHOUT_COUPON')
@@ -1384,12 +1385,19 @@ export async function activatePlan(
   })
 
   // El correo no bloquea la respuesta: el dinero ya se movió.
-  void enviarConfirmacion({ venueId: venue.id, venueSlug: venueRecord?.slug ?? venue.slug, campaign, input: cobrado, expected, now }).catch(
-    error =>
-      logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
-        organizationId,
-        error: error instanceof Error ? error.message : String(error),
-      }),
+  void enviarConfirmacion({
+    venueId: venue.id,
+    venueSlug: venueRecord?.slug ?? venue.slug,
+    campaign,
+    input: cobrado,
+    expected,
+    nextChargeAt,
+    timeZone: venueRecord?.timezone,
+  }).catch(error =>
+    logger.warn('activate-plan: no se pudo enviar el correo de confirmación', {
+      organizationId,
+      error: error instanceof Error ? error.message : String(error),
+    }),
   )
 
   return {
@@ -1519,13 +1527,15 @@ async function enviarConfirmacion(args: {
   campaign: LaunchCampaignRow | null
   input: ActivatePlanInput
   expected: number
-  now: Date
+  /** El siguiente cobro según Stripe (`siguienteCobro(sub)`), el mismo que guarda y responde el alta. */
+  nextChargeAt: string
+  /** Zona del negocio, para que el correo escriba el día del cobro en SU hora. */
+  timeZone?: string
 }): Promise<void> {
   const target = await resolvePlanNotificationTarget(args.venueId)
   if (!target.email) return
 
-  const { campaign, input, now } = args
-  const unMes = new Date(now.getTime() + 30 * 86400000)
+  const { campaign, input } = args
   const legacyIntro = !campaign && isLegacyIntroEligible(input.tier, input.interval, input.payNow)
 
   await emailService.sendPlanConfirmationEmail(target.email, {
@@ -1534,7 +1544,10 @@ async function enviarConfirmacion(args: {
     planName: input.tier === 'PREMIUM' ? 'Premium' : 'Pro',
     payNow: campaign ? true : input.payNow,
     interval: input.interval,
-    firstChargeDate: unMes,
+    // 🔴 La fecha de Stripe, no «hoy + 30 días»: un alta del 18-oct decía 17-nov y Stripe cobra el 18-nov (y en el anual
+    // decía un mes, no un año; deuda de la campaña 3DS, 20-oct).
+    firstChargeDate: new Date(args.nextChargeAt),
+    timeZone: args.timeZone,
     firstChargeAmountCents: campaign ? (campaign.listPriceCentsSnapshot as number) : STANDARD_PLAN_GROSS_CENTS[input.tier][input.interval],
     ...(campaign
       ? {

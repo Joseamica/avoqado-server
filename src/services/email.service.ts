@@ -3,6 +3,7 @@ import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
 import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
+import { isValidIANATimezone } from '../utils/sanitizeTimezone'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -173,6 +174,8 @@ export interface PlanConfirmationEmailData {
   payNow: boolean // true = paid today, false = trial
   interval: 'monthly' | 'annual'
   firstChargeDate: Date // trial end (trial) OR next renewal (pay-now)
+  /** Zona del negocio para escribir la fecha (IANA). Sin ella, Ciudad de México: nunca la del servidor (UTC en Render). */
+  timeZone?: string
   firstChargeAmountCents: number // gross IVA-inclusive (115884 monthly / 1158840 annual)
   introAmountCents?: number // pay-now first charge (69484 = $694.84) when applicable
   /**
@@ -4576,10 +4579,12 @@ Servicios Tecnologicos Avo S.A. de C.V.`
         style: 'currency',
         currency: 'MXN',
       }).format(cents / 100)
+    // 🔴 En la zona del NEGOCIO: con la del servidor (UTC), un cobro a las 20:00 de México se anunciaba para «mañana».
     const dateFormatted = data.firstChargeDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
+      timeZone: data.timeZone && isValidIANATimezone(data.timeZone) ? data.timeZone : 'America/Mexico_City',
     })
     const intervalLabel =
       data.locale === 'en' ? (data.interval === 'annual' ? 'year' : 'month') : data.interval === 'annual' ? 'año' : 'mes'

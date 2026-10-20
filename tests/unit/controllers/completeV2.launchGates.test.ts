@@ -40,6 +40,8 @@ jest.mock('../../../src/services/stripe.service', () => ({
   createOnboardingSetupIntent: jest.fn(),
   createPlanSetupIntent: jest.fn(),
   createPlanSubscription: jest.fn().mockResolvedValue({ subscriptionId: 'sub_123' }),
+  // La fecha del siguiente cobro la da Stripe (`current_period_end`), nunca «hoy + 30 días» (20-oct).
+  retrievePlanSubscription: jest.fn().mockResolvedValue({ currentPeriodEnd: new Date('2026-11-20T18:00:00Z') }),
   getOrCreateStripeCustomer: jest.fn().mockResolvedValue('cus_123'),
   entregarSuscripcionDePlan: jest.fn(),
 }))
@@ -179,6 +181,8 @@ describe('completeV2Onboarding — candados del lanzamiento (S7) y fugas del leg
   async function correr(body: Record<string, any> = {}) {
     const next = jest.fn() as unknown as NextFunction
     await completeV2Onboarding(buildReq(body) as Request, buildRes() as Response, next)
+    // El correo sale SIN bloquear la respuesta del alta (como en `activatePlan`): se le da tiempo antes de revisarlo.
+    for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r))
     return next as unknown as jest.Mock
   }
 
