@@ -37,6 +37,8 @@ jest.mock('../../../src/services/stripe.service', () => ({
   createOnboardingSetupIntent: jest.fn(),
   createPlanSetupIntent: jest.fn(),
   createPlanSubscription: jest.fn().mockResolvedValue({ subscriptionId: 'sub_123' }),
+  // La fecha del siguiente cobro la da Stripe (`current_period_end`), nunca «hoy + 30 días».
+  retrievePlanSubscription: jest.fn().mockResolvedValue({ currentPeriodEnd: new Date('2026-11-20T18:00:00Z') }),
   // Concede lo cobrado; con un código que no es de tier, el negocio conserva el tier pedido (lo que miden estas pruebas).
   entregarSuscripcionDePlan: jest.fn().mockResolvedValue({
     venueId: 'venue_1',
@@ -133,7 +135,7 @@ function primeHappyPath(planOverrides: Record<string, any> = {}, targetOverrides
     emailSent: false,
   })
   ;(prisma.venue.update as jest.Mock).mockResolvedValue(VENUE)
-  ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ ...VENUE, email: 'bar@test.com' })
+  ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ ...VENUE, email: 'bar@test.com', timezone: 'America/Tijuana' })
   ;(prisma.organization.update as jest.Mock).mockResolvedValue({})
   ;(resolvePlanNotificationTarget as jest.Mock).mockResolvedValue({
     email: 'bar@test.com',
@@ -142,6 +144,11 @@ function primeHappyPath(planOverrides: Record<string, any> = {}, targetOverrides
     ownerName: null,
     ...targetOverrides,
   })
+}
+
+/** El correo sale SIN bloquear la respuesta del alta (como en `activatePlan`): se le da tiempo antes de revisarlo. */
+const vaciarCorreo = async () => {
+  for (let i = 0; i < 10; i++) await new Promise(r => setImmediate(r))
 }
 
 describe('completeV2Onboarding — plan confirmation email + venue.language', () => {
@@ -201,6 +208,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
 
+    await vaciarCorreo()
+
     expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledTimes(1)
     const [recipient, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
     expect(recipient).toBe('bar@test.com')
@@ -218,12 +227,50 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     expect(next).not.toHaveBeenCalled()
   })
 
+  it('🔴 la fecha del primer cobro es la de Stripe y va con la zona del negocio (no «hoy + 30 días»; 20-oct)', async () => {
+    primeHappyPath({ payNow: true, interval: 'monthly' })
+
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, buildRes() as Response, jest.fn() as NextFunction)
+
+    await vaciarCorreo()
+
+    expect(stripeService.retrievePlanSubscription).toHaveBeenCalledWith('sub_123')
+    const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
+    expect(data.firstChargeDate).toEqual(new Date('2026-11-20T18:00:00Z'))
+    expect(data.timeZone).toBe('America/Tijuana')
+  })
+
+  it('🔴 el alta responde sin esperar a Stripe: leer la fecha para el correo nunca la retrasa (Codex r3)', async () => {
+    primeHappyPath({ payNow: true, interval: 'monthly' })
+    ;(stripeService.retrievePlanSubscription as jest.Mock).mockReturnValueOnce(new Promise(() => {})) // Stripe nunca contesta
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, jest.fn() as NextFunction)
+
+    expect(res.status).toHaveBeenCalledWith(201)
+  })
+
+  it('🔴 si Stripe no da la fecha del cobro, no se manda el correo con una fecha inventada (y el alta termina igual)', async () => {
+    primeHappyPath({ payNow: false, interval: 'monthly' })
+    ;(stripeService.retrievePlanSubscription as jest.Mock).mockResolvedValueOnce({ currentPeriodEnd: null })
+    const res = buildRes()
+
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, jest.fn() as NextFunction)
+
+    await vaciarCorreo()
+
+    expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
+    expect(res.status).toHaveBeenCalledWith(201)
+  })
+
   it('derives interval=annual + grossCents accordingly, no intro for annual', async () => {
     primeHappyPath({ payNow: true, interval: 'annual' })
     const next: NextFunction = jest.fn()
     const res = buildRes()
 
     await completeV2Onboarding(buildReq({ language: 'en' }) as Request, res as Response, next)
+
+    await vaciarCorreo()
 
     const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
     expect(data).toMatchObject({ payNow: true, interval: 'annual', firstChargeAmountCents: 1158840 })
@@ -236,6 +283,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     const res = buildRes()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    await vaciarCorreo()
 
     const [, data] = (emailService.sendPlanConfirmationEmail as jest.Mock).mock.calls[0]
     expect(data.introAmountCents).toBe(69484)
@@ -252,6 +301,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     const res = buildRes()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    await vaciarCorreo()
 
     expect(stripeService.createPlanSubscription).toHaveBeenCalledWith(
       expect.objectContaining({ tierCode: 'PLAN_PREMIUM', coupon: undefined }),
@@ -272,6 +323,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
 
+    await vaciarCorreo()
+
     expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
     expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
     const planTierUpdate = (prisma.venue.update as jest.Mock).mock.calls.map(c => c[0]).find(u => u?.data?.planTier !== undefined)
@@ -287,6 +340,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
 
+    await vaciarCorreo()
+
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: expect.stringContaining('método de pago') }))
     expect(stripeService.createPlanSubscription).not.toHaveBeenCalled()
   })
@@ -297,6 +352,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     const res = buildRes()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    await vaciarCorreo()
 
     expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
     // onboarding still completes
@@ -311,6 +368,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     const res = buildRes()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    await vaciarCorreo()
 
     // completion is unaffected by the email failure
     expect(res.status).toHaveBeenCalledWith(201)
@@ -328,6 +387,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
     await completeV2Onboarding(buildReq({ language: 'en' }) as Request, buildRes() as Response, next)
 
+    await vaciarCorreo()
+
     const updateCalls = (prisma.venue.update as jest.Mock).mock.calls.map(c => c[0])
     const languageUpdate = updateCalls.find(u => u?.data?.language !== undefined)
     expect(languageUpdate).toBeDefined()
@@ -341,6 +402,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
 
     await completeV2Onboarding(buildReq({}) as Request, buildRes() as Response, next)
 
+    await vaciarCorreo()
+
     const updateCalls = (prisma.venue.update as jest.Mock).mock.calls.map(c => c[0])
     const languageUpdate = updateCalls.find(u => u?.data?.language !== undefined)
     expect(languageUpdate?.data.language).toBe('es')
@@ -351,6 +414,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     const next: NextFunction = jest.fn()
 
     await completeV2Onboarding(buildReq({ language: 'fr' }) as Request, buildRes() as Response, next)
+
+    await vaciarCorreo()
 
     const updateCalls = (prisma.venue.update as jest.Mock).mock.calls.map(c => c[0])
     const languageUpdate = updateCalls.find(u => u?.data?.language !== undefined)
@@ -369,6 +434,8 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     const res = buildRes()
 
     await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, next)
+
+    await vaciarCorreo()
 
     expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
     // language is still persisted, completion still succeeds
