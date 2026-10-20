@@ -9,6 +9,7 @@ import {
   type ExportColumnDef,
 } from '../../services/dashboard/export.helpers'
 import logger from '../../config/logger'
+import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
 import {
   LIST_PAGE_SIZE_MAX,
@@ -94,10 +95,30 @@ export async function getOrder(req: Request<{ venueId: string; orderId: string }
 export async function updateOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
     const { venueId, orderId } = req.params
-    const updatedOrder = await orderDashboardService.updateOrder(venueId, orderId, req.body)
+    // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
+    // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae `customerId`.
+    const opciones =
+      req.body?.customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) } : {}
+    const updatedOrder = await orderDashboardService.updateOrder(venueId, orderId, req.body, opciones)
     res.status(200).json(updatedOrder)
   } catch (error) {
     next(error)
+  }
+}
+
+/**
+ * ¿Quien edita tiene `payments:create`? Con el resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`: el mismo de
+ * `checkPermission`, con las personalizaciones del negocio y los conjuntos de permisos). Falla CERRADO: si no se puede
+ * resolver, el servicio no cambia el cliente de una venta cobrada (403) y queda en el log.
+ */
+async function puedeCambiarClienteEnVentaCobrada(req: Request<any, any, any>): Promise<boolean> {
+  try {
+    return await tienePermisoEnVenue(req as unknown as Request, 'payments:create')
+  } catch (error) {
+    logger.warn('[ORDER.DASHBOARD] No se pudo resolver payments:create para cambiar el cliente: se trata como sin permiso', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
   }
 }
 

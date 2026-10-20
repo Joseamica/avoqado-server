@@ -8,6 +8,11 @@
 
 // FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
 // suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
@@ -16,7 +21,8 @@ jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     payment: { findUnique: jest.fn(), findMany: jest.fn(), count: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
     order: { findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn(), create: jest.fn() },
-    orderItem: { findMany: jest.fn().mockResolvedValue([]) },
+    // `findFirst`: el claim del turno pregunta si la orden es una cuenta de tarjetas de regalo (aquí, mercancía).
+    orderItem: { findMany: jest.fn().mockResolvedValue([]), findFirst: jest.fn().mockResolvedValue(null) },
     venue: { findUnique: jest.fn() },
     venueCryptoConfig: { findUnique: jest.fn() },
     venueSettings: { findUnique: jest.fn() },
@@ -65,7 +71,7 @@ import prisma from '@/utils/prismaClient'
 const mockPrisma = prisma as unknown as {
   payment: { findUnique: jest.Mock; findMany: jest.Mock; count: jest.Mock; update: jest.Mock; updateMany: jest.Mock }
   order: { findUnique: jest.Mock; updateMany: jest.Mock }
-  orderItem: { findMany: jest.Mock }
+  orderItem: { findMany: jest.Mock; findFirst: jest.Mock }
   shift: { findFirst: jest.Mock; updateMany: jest.Mock }
   venueSettings: { findUnique: jest.Mock }
   activityLog: { create: jest.Mock }

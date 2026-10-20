@@ -61,6 +61,19 @@ const VERDAD_EXTERNA_VIGILADA = ['lockExistingOrderForPayment', 'findLiveTermina
 
 const INVENTARIO: Record<string, Clase> = {
   'services/mobile/order.mobile.service.ts#cancelOrderInTransaction': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
+  // Tarjetas de regalo (spec § 5.4.4): regresar el saldo y cancelar. Candado de topología (comandas → Order → mesas) +
+  // cobro de terminal vivo; el guardia general no se relaja: este camino exige que TODOS los pagos sean de saldo.
+  'services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': {
+    clase: 'PROTEGIDA',
+    marcadores: ['lockTableOrderScope(', 'assertNoLiveTerminalCharge'],
+  },
+  // Tarjetas de regalo (B1 r1, clasificada en B2): el reembolso que deja en $0 una venta de tarjetas SIN pagar la cancela en la MISMA
+  // tx del reembolso, que ya tiene el candado de la Order (issueRefund / recordRefund → lockExistingOrderForPayment). Con un cobro de
+  // terminal vivo NO cancela (la cuenta sigue y su desenlace decide), igual que el guardia general; CAS sobre el estado + versión.
+  'services/giftCards/giftCardCancel.service.ts#cerrarVentaSinPagarSiYaNoQuedaDinero': {
+    clase: 'PROTEGIDA',
+    marcadores: ['findLiveTerminalCharge(tx', 'if (vivo)', "status: { notIn: ['CANCELLED', 'DELETED'] }", 'version: { increment: 1 }'],
+  },
   'services/dashboard/order.dashboard.service.ts#deleteOrder': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   'services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': { clase: 'PROTEGIDA', marcadores: PROTEGIDA_POR_EL_GUARD },
   // Fusión: candado de LAS DOS órdenes en una sentencia + cobro vivo del ORIGEN.
@@ -84,6 +97,10 @@ const INVENTARIO: Record<string, Clase> = {
 const ESCRITORES_CON_ESTADO_VARIABLE: Record<string, string[]> = {
   // El PUT del dashboard escribe `status` del cuerpo: a CANCELLED/DELETED va por la cancelación protegida.
   'services/dashboard/order.dashboard.service.ts#updateOrder': PROTEGIDA_POR_EL_GUARD,
+  // Pedidos en línea (plan 1a, R1/R2/R22): rechazar, vencer y cancelar el comensal escriben el estado de la regla de la
+  // transición bajo el candado de la orden, sin dinero y sin cobro de terminal vivo. Cancelar por personal usa
+  // `cancelOrderInTransaction` (PROTEGIDA arriba); las cancelaciones de otras vías se sincronizan al leer.
+  'services/online-ordering/transitions.service.ts#casTransition': ['lockExistingOrderForPayment', 'findLiveTerminalCharge'],
 }
 
 describe('Inventario de escritores que cancelan una orden (§C.6)', () => {

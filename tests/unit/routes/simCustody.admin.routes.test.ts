@@ -2,6 +2,7 @@
  * Route-level tests for the admin bulk SIM-custody endpoints (Task 6):
  *   POST /organizations/:orgId/sim-custody/reassign-promoter
  *   POST /organizations/:orgId/sim-custody/reassign-supervisor
+ *   POST /organizations/:orgId/sim-custody/collect-from-supervisor-bulk
  *   POST /organizations/:orgId/sim-custody/change-category
  *
  * Covers:
@@ -61,11 +62,13 @@ jest.mock('express-rate-limit', () => () => (_req: any, _res: any, next: any) =>
 const mockReassignPromoter = jest.fn()
 const mockReassignSupervisor = jest.fn()
 const mockChangeCategory = jest.fn()
+const mockCollectFromSupervisorBulk = jest.fn()
 jest.mock('@/services/serialized-inventory/custody.service', () => ({
   simCustodyService: {
     reassignPromoter: (...args: unknown[]) => mockReassignPromoter(...args),
     reassignSupervisor: (...args: unknown[]) => mockReassignSupervisor(...args),
     changeCategory: (...args: unknown[]) => mockChangeCategory(...args),
+    collectFromSupervisorBulk: (...args: unknown[]) => mockCollectFromSupervisorBulk(...args),
   },
 }))
 
@@ -76,6 +79,7 @@ jest.mock('@/services/serialized-inventory/custody.notifications', () => ({
 
 // ─── Import router AFTER mocks ─────────────────────────────────────────────────
 import simCustodyRouter from '@/routes/dashboard/simCustody.dashboard.routes'
+import { prismaMock } from '@tests/__helpers__/setup'
 
 // ─── App factory ──────────────────────────────────────────────────────────────
 
@@ -535,5 +539,201 @@ describe('Regression: existing sim-custody routes still mounted', () => {
 
     // No x-test-allow-permission → checkPermission returns 403
     expect(res.status).toBe(403)
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+describe('POST /sim-custody/collect-from-supervisor-bulk', () => {
+  let app: express.Express
+  const URL = `/dashboard/organizations/${ORG_ID}/sim-custody/collect-from-supervisor-bulk`
+  const PERM = 'sim-custody:collect-from-supervisor'
+
+  const COLLECT_BULK_RESULT = {
+    summary: { total: 2, succeeded: 1, failed: 1 },
+    results: [
+      { serialNumber: 'SIM-001', status: 'ok', event: 'COLLECTED_FROM_SUPERVISOR' },
+      { serialNumber: 'SIM-002', status: 'error', code: 'HAS_DOWNSTREAM_CUSTODY', message: 'Recolecta primero del Promotor.' },
+    ],
+  }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    app = createApp()
+    mockIsModuleEnabled.mockResolvedValue(true)
+    mockCollectFromSupervisorBulk.mockResolvedValue(COLLECT_BULK_RESULT)
+  })
+
+  describe('(a) Permission checks', () => {
+    it('returns 403 without sim-custody:collect-from-supervisor', async () => {
+      const res = await request(app)
+        .post(URL)
+        .set(authHeader(ownerCtx))
+        .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+      expect(res.status).toBe(403)
+      expect(mockCollectFromSupervisorBulk).not.toHaveBeenCalled()
+    })
+
+    it('reuses the single-SIM permission (no new permission to grant)', async () => {
+      await request(app)
+        .post(URL)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': PERM })
+        .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+      expect(mockCheckPermission).toHaveBeenCalledWith(PERM)
+    })
+  })
+
+  describe('(b) Body validation (Zod)', () => {
+    const allow = { ...authHeader(ownerCtx), 'x-test-allow-permission': PERM }
+
+    it('returns 400 when reason is missing', async () => {
+      const res = await request(app)
+        .post(URL)
+        .set(allow)
+        .send({ serialNumbers: ['SIM-001'] })
+      expect(res.status).toBe(400)
+      expect(res.body.error).toBe('VALIDATION_ERROR')
+      expect(mockCollectFromSupervisorBulk).not.toHaveBeenCalled()
+    })
+
+    it('returns 400 on an unknown reason', async () => {
+      const res = await request(app)
+        .post(URL)
+        .set(allow)
+        .send({ serialNumbers: ['SIM-001'], reason: 'LOST' })
+      expect(res.status).toBe(400)
+    })
+
+    it('returns 400 when serialNumbers is empty', async () => {
+      const res = await request(app).post(URL).set(allow).send({ serialNumbers: [], reason: 'SUPERVISOR_COLLECTION' })
+      expect(res.status).toBe(400)
+    })
+
+    it('returns 400 when serialNumbers exceeds 500', async () => {
+      const tooMany = Array.from({ length: 501 }, (_, i) => `SIM-${i}`)
+      const res = await request(app).post(URL).set(allow).send({ serialNumbers: tooMany, reason: 'SUPERVISOR_COLLECTION' })
+      expect(res.status).toBe(400)
+      expect(mockCollectFromSupervisorBulk).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('(c) Valid input → service call + BulkResult', () => {
+    it('calls collectFromSupervisorBulk with the actor, serials and reason', async () => {
+      const res = await request(app)
+        .post(URL)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': PERM })
+        .send({ serialNumbers: ['SIM-001', 'SIM-002'], reason: 'STAFF_TERMINATED' })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual(COLLECT_BULK_RESULT)
+      expect(mockCollectFromSupervisorBulk).toHaveBeenCalledWith(
+        expect.objectContaining({
+          actor: { staffId: USER_ID, organizationId: ORG_ID, role: 'OWNER' },
+          serialNumbers: ['SIM-001', 'SIM-002'],
+          reason: 'STAFF_TERMINATED',
+        }),
+      )
+    })
+
+    it('accepts 500 serials in ONE request', async () => {
+      const max = Array.from({ length: 500 }, (_, i) => `895214006369218${String(i).padStart(4, '0')}F`)
+      const res = await request(app)
+        .post(URL)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': PERM })
+        .send({ serialNumbers: max, reason: 'SUPERVISOR_COLLECTION' })
+      expect(res.status).toBe(200)
+      expect(mockCollectFromSupervisorBulk).toHaveBeenCalledWith(expect.objectContaining({ serialNumbers: max }))
+    })
+  })
+
+  describe('(d) Tenant isolation', () => {
+    it('returns TENANT_MISMATCH when authContext.orgId differs from the URL org', async () => {
+      const res = await request(app)
+        .post(URL)
+        .set({ ...authHeader({ ...ownerCtx, orgId: 'org-someone-else' }), 'x-test-allow-permission': '*' })
+        .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+      expect(res.body.error).toBe('TENANT_MISMATCH')
+      expect(mockCollectFromSupervisorBulk).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('(e) SERIALIZED_INVENTORY module off → 403 moduleRequired', () => {
+    it('returns 403 with moduleRequired:true when the module is disabled', async () => {
+      mockIsModuleEnabled.mockResolvedValue(false)
+      const res = await request(app)
+        .post(URL)
+        .set({ ...authHeader(ownerCtx), 'x-test-allow-permission': '*' })
+        .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+      expect(res.status).toBe(403)
+      expect(res.body.moduleRequired).toBe(true)
+      expect(mockCollectFromSupervisorBulk).not.toHaveBeenCalled()
+    })
+  })
+})
+
+// ─────────────────────────────────────────────────────────────────────────────
+
+// Codex r1 #1 (18-oct-2026): x-venue-id only picks the venue checkPermission evaluates the role IN.
+// Someone who is OWNER in org A and staff in org B could send B's URL with A's venue and get the
+// permission from A while writing on B. Every sim-custody org route must reject a header venue
+// that does not belong to the org in the URL.
+describe('x-venue-id must belong to the org in the URL (all sim-custody routes)', () => {
+  let app: express.Express
+  const allow = { ...authHeader(ownerCtx), 'x-test-allow-permission': '*' }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    app = createApp()
+    mockIsModuleEnabled.mockResolvedValue(true)
+    mockCollectFromSupervisorBulk.mockResolvedValue(BULK_RESULT)
+    mockReassignSupervisor.mockResolvedValue(BULK_RESULT)
+  })
+
+  it('venue from ANOTHER org → 403 TENANT_MISMATCH, permission never evaluated, nothing written', async () => {
+    prismaMock.venue.findFirst.mockResolvedValueOnce(null)
+    const res = await request(app)
+      .post(`/dashboard/organizations/${ORG_ID}/sim-custody/collect-from-supervisor-bulk`)
+      .set({ ...allow, 'x-venue-id': 'venue-of-another-org' })
+      .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+
+    expect(res.status).toBe(403)
+    expect(res.body.error).toBe('TENANT_MISMATCH')
+    expect(mockCheckPermission).not.toHaveBeenCalled()
+    expect(mockCollectFromSupervisorBulk).not.toHaveBeenCalled()
+    expect(prismaMock.venue.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'venue-of-another-org', organizationId: ORG_ID } }),
+    )
+  })
+
+  it('also guards the existing routes (reassign-supervisor)', async () => {
+    prismaMock.venue.findFirst.mockResolvedValueOnce(null)
+    const res = await request(app)
+      .post(`/dashboard/organizations/${ORG_ID}/sim-custody/reassign-supervisor`)
+      .set({ ...allow, 'x-venue-id': 'venue-of-another-org' })
+      .send({ toSupervisorStaffId: SUPERVISOR_B, serialNumbers: ['SIM-001'] })
+
+    expect(res.status).toBe(403)
+    expect(mockReassignSupervisor).not.toHaveBeenCalled()
+  })
+
+  it('venue inside the org → passes through', async () => {
+    prismaMock.venue.findFirst.mockResolvedValueOnce({ id: VENUE_ID })
+    const res = await request(app)
+      .post(`/dashboard/organizations/${ORG_ID}/sim-custody/collect-from-supervisor-bulk`)
+      .set({ ...allow, 'x-venue-id': VENUE_ID })
+      .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+
+    expect(res.status).toBe(200)
+    expect(mockCollectFromSupervisorBulk).toHaveBeenCalled()
+  })
+
+  it('no header (the org stock page) → no lookup, passes through', async () => {
+    const res = await request(app)
+      .post(`/dashboard/organizations/${ORG_ID}/sim-custody/collect-from-supervisor-bulk`)
+      .set(allow)
+      .send({ serialNumbers: ['SIM-001'], reason: 'SUPERVISOR_COLLECTION' })
+
+    expect(res.status).toBe(200)
+    expect(prismaMock.venue.findFirst).not.toHaveBeenCalled()
   })
 })

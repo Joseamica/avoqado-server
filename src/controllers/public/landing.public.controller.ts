@@ -7,10 +7,10 @@ import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../servi
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
 import prisma from '../../utils/prismaClient'
+import { descargarAppHtml, descargarAppTexto } from '../../services/emailDescargarApp'
 
-const CONTACT_NOTIFY_EMAIL = process.env.CONTACT_NOTIFY_EMAIL || 'hola@avoqado.io'
-// Onboarding recibe el mismo aviso que ventas: quien da de alta al cliente
-// necesita el lead sin esperar un reenvio manual (founder, 2026-08-17).
+// El aviso del prospecto va SÓLO a onboarding (founder, 18-oct-2026): hola@ y onboarding@ son alias del mismo buzón, y
+// mandar una copia a cada uno le llegaba doble. Antes iba a los dos (founder, 2026-08-17).
 const ONBOARDING_NOTIFY_EMAIL = process.env.ONBOARDING_NOTIFY_EMAIL || 'onboarding@avoqado.io'
 const LABS_NOTIFY_EMAIL = process.env.LABS_NOTIFY_EMAIL || 'hola@avoqado.io'
 
@@ -446,14 +446,21 @@ Campaña: ${utmTexto || '—'}
     ${
       magicLink
         ? `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:24px;margin:8px 0 24px 0;text-align:center;">
-      <p style="margin:0 0 4px 0;font-size:16px;font-weight:600;color:#000;">Tu cuenta ya está creada</p>
-      <p style="margin:0 0 20px 0;font-size:14px;color:#666;">Solo falta que elijas tu contraseña para entrar.</p>
+      <p style="margin:0 0 6px 0;font-size:12px;font-weight:600;color:#666;letter-spacing:0.5px;text-transform:uppercase;">Paso 1</p>
+      <p style="margin:0 0 4px 0;font-size:18px;font-weight:600;color:#000;">Elige tu contraseña</p>
+      <p style="margin:0 0 20px 0;font-size:14px;color:#666;">Tu cuenta ya está creada. Elige tu contraseña y deja listo tu negocio en unos minutos.</p>
       <a href="${ctaUrl}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${ctaTexto}</a>
       <p style="margin:20px 0 0 0;font-size:13px;color:#666;">Este enlace sirve por 24 horas y una sola vez. Si vence, escríbenos y te mandamos otro.</p>
     </div>`
         : `<div style="padding:32px 0 8px;text-align:center;">
       <a href="${ctaUrl}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${ctaTexto}</a>
     </div>`
+    }
+
+    ${
+      // Sin esto el lead no sabía que tenía que instalar algo (founder, 16-oct). Va DESPUÉS de la
+      // contraseña: sin ella no puede entrar a la app.
+      yaEsCliente ? '' : descargarAppHtml({ paso: magicLink ? 2 : undefined })
     }
 
     ${
@@ -516,15 +523,16 @@ ${
       : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
 }
 
-${magicLink ? `Tu cuenta ya está creada; solo falta que elijas tu contraseña.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
+${magicLink ? `Paso 1: elige tu contraseña. Tu cuenta ya está creada.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
+
+${descargarAppTexto({ paso: magicLink ? 2 : undefined })}
 
 Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
 Política de Privacidad: https://avoqado.io/privacy
 `
 
-    // El aviso interno va a ventas Y a onboarding, para que quien da de alta al
-    // cliente reciba el lead sin depender de un reenvio manual.
-    const internos = [...new Set([CONTACT_NOTIFY_EMAIL, ONBOARDING_NOTIFY_EMAIL].filter(Boolean))]
+    // El aviso interno va UNA vez, a onboarding (ver ONBOARDING_NOTIFY_EMAIL arriba).
+    const internos = [ONBOARDING_NOTIFY_EMAIL]
 
     const [internosOk, confirmSent, crmOk] = await Promise.all([
       Promise.all(

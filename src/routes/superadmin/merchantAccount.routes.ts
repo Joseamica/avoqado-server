@@ -1,6 +1,8 @@
 import { Router } from 'express'
 import * as merchantAccountController from '../../controllers/superadmin/merchantAccount.controller'
 
+import { saveMerchantEconomics } from '../../controllers/superadmin/merchantRevenueShare.controller'
+
 const router = Router()
 
 /**
@@ -103,6 +105,8 @@ router.get('/payment-setup/summary', merchantAccountController.getPaymentSetupSu
 router.post('/:id/batch-assign-terminals', merchantAccountController.batchAssignTerminals)
 
 // PUT /api/v1/superadmin/merchant-accounts/:id
+router.put('/:id/economics', saveMerchantEconomics)
+
 router.put('/:id', merchantAccountController.updateMerchantAccount)
 
 // PATCH /api/v1/superadmin/merchant-accounts/:id/toggle

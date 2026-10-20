@@ -56,6 +56,16 @@ import * as kdsMobileController from '../controllers/mobile/kds.mobile.controlle
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
+import * as giftCardMobileController from '../controllers/mobile/giftCard.mobile.controller'
+import * as giftCardSaleController from '../controllers/shared/giftCardSale.controller'
+import * as giftCardMobileSchemas from '../schemas/mobile/giftCard.mobile.schema'
+import {
+  liberarCancelacionSchema as giftCardLiberarCancelacionSchema,
+  operationKeyOnOrderSchema as giftCardOperationKeyOnOrderSchema,
+  soloVenueSchema as giftCardVenueSchema,
+} from '../schemas/common/giftCard.common.schema'
+import { exigirPlanDeTarjetas } from '../middlewares/giftCardsPlan.middleware'
+import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
@@ -64,12 +74,14 @@ import * as permissionOverrideMobileController from '../controllers/mobile/permi
 import * as switchUserMobileController from '../controllers/mobile/switch-user.mobile.controller'
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
+import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
 import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
+import onlineOrdersMobileRoutes from './mobile/onlineOrders.mobile.routes'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
@@ -798,6 +810,9 @@ router.delete(
   deliveryChannelMobileController.resumeChannel,
 )
 
+// Pedidos en línea: bandeja, acciones, impresión de la comanda y pausa desde el piso (auth y permiso por ruta, sin plan: R14).
+router.use('/venues/:venueId/online-orders', onlineOrdersMobileRoutes)
+
 /**
  * @openapi
  * /api/v1/mobile/venues/{venueId}/orders/{orderId}/pay:
@@ -893,11 +908,12 @@ router.delete(
 // editar, descontar, cortesiar, cancelar, mover y fusionar CUALQUIER mesa. Toast y
 // Square resuelven igual: hay dueño de mesa para EDITAR el cheque, y la caja lo liquida.
 // Las demás rutas de esta orden conservan el override default.
+// R2-6: y sólo ésta deja pasar el dinero YA capturado (la cola sin red) sobre una mesa que reasignaron, con rastro.
 router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
-  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES, { dineroCapturado: true }),
   orderMobileController.payCash,
 )
 
@@ -1479,10 +1495,19 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *         schema:
  *           type: string
  *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20, maximum: 100 }
+ *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 50
+ *         description: Alias de pageSize (clientes viejos). Tope 100. Si vienen los dos, gana pageSize.
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: search
+ *         description: Teléfono (se comparan dígitos; 52/521 sobrantes se ignoran) o palabras de nombre/apellido/correo, sin acentos ni mayúsculas. Con más de 5000 coincidencias se paginan las más nuevas, meta.totalCount = las alcanzables (5000), meta.totalMatches = el total exacto y meta.searchCapped = true.
+ *         schema: { type: string }
  *       - in: query
  *         name: sortBy
  *         schema:
@@ -1494,7 +1519,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *           enum: [asc, desc]
  *     responses:
  *       200:
- *         description: List of customers
+ *         description: "{ data, meta: { totalCount, pageSize, currentPage, totalPages, hasNextPage, hasPrevPage, totalMatches?, searchCapped? } } — totalMatches y searchCapped sólo vienen cuando la búsqueda se topó en 5000."
  */
 router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
 
@@ -1570,6 +1595,80 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('creditPacks:redeem'),
   creditPackMobileController.redeemCredit,
+)
+
+// ─── TARJETAS DE REGALO (fase 1a) ───
+// Contrato para las apps: docs/superpowers/plans/2026-10-14-tarjetas-de-regalo-contrato-api-1b.md (workspace).
+// Sólo con internet (spec §10): ninguna tiene intent de cola. Sólo VENDER pide el plan (R9): cobrar con saldo, consultar,
+// regresar el saldo y cancelar una venta siguen funcionando aunque el negocio baje de plan (spec §6).
+// Orden: autenticar → validar (español) → permiso exacto → [plan | límite de intentos | propiedad de mesa] → controller.
+router.get(
+  '/venues/:venueId/gift-cards/settings',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardVenueSchema),
+  checkPermission('giftCards:read'),
+  giftCardSaleController.getSettings,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.createGiftCardOrderSchema),
+  checkPermission('giftCards:sell'),
+  exigirPlanDeTarjetas,
+  giftCardMobileController.createOrder,
+)
+// A3 (cierre): POST con el código en el CUERPO. En la query lo escribían sin tapar la bitácora (`checkPermission`) y la base
+// (`PermissionOverride.consumedRoute`); `redactUrlSecrets` sólo cubría el log. Ninguna app la usaba todavía.
+router.post(
+  '/venues/:venueId/gift-cards/lookup',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.lookupSchema),
+  checkPermission('giftCards:read'),
+  ...giftCardLookupRateLimiters,
+  giftCardMobileController.lookup,
+)
+router.get(
+  '/venues/:venueId/gift-cards/payments/:idempotencyKey',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.paymentByKeySchema),
+  checkPermission('giftCards:redeem'),
+  giftCardMobileController.getPaymentByKey,
+)
+// Cobrar con saldo y regresarlo son de CAJA, como `/orders/:orderId/pay`: con la propiedad de mesa encendida, la caja
+// liquida (y deshace su propio cobro con saldo en) un cheque ajeno con `tables:pay-any`, sin ganar el derecho a editarlo.
+// Nota 1 del coordinador: un código que no existe responde 404, así que cobrar lleva su límite de intentos FALLIDOS (sólo
+// cuentan las respuestas ≥ 400; un cobro que sale bien nunca gasta el tope).
+router.post(
+  '/venues/:venueId/orders/:orderId/pay-gift-card',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.payGiftCardSchema),
+  checkPermission('giftCards:redeem'),
+  ...giftCardPayFailureRateLimiters,
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  giftCardMobileController.payWithBalance,
+)
+router.post(
+  '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:redeem'),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  giftCardMobileController.returnBalanceAndCancel,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/cancel-sale',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:manage'),
+  giftCardSaleController.cancelSale,
+)
+// F6: liberar exige `confirmacionNoDevuelto: true`; un timeout de la terminal no prueba que el dinero no salió.
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/release-cancel',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardLiberarCancelacionSchema),
+  checkPermission('giftCards:manage'),
+  giftCardSaleController.releaseCancel,
 )
 
 /**
@@ -1648,10 +1747,13 @@ router.post(
   paymentMobileController.recordFastPayment,
 )
 
+// BAJO-2 (full-testing, 15-oct-2026): el body se valida (un `customerId` numérico respondía 500). El schema nombra TODOS los
+// campos que lee cada controller: `validateRequest` quita los demás.
 router.post(
   '/venues/:venueId/payments/:paymentId/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToPaymentSchema),
   paymentMobileController.attachCustomerToPayment,
 )
 
@@ -1659,7 +1761,21 @@ router.post(
   '/venues/:venueId/payments/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToLatestPaymentSchema),
   paymentMobileController.attachCustomerToLatestPayment,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/payments/:paymentId/loyalty
+ * Sello de la venta de ese pago para su cliente principal (spec 2026-10-14 §3.1). Sólo lee.
+ * data: { stampsEnabled, stamped, reason, stampsEarned, stampsRequired, rewardReady } | null
+ * Sin checkFeatureAccess a propósito: un negocio sin el plan recibe `stampsEnabled: false` y la app no pinta nada.
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/loyalty',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  paymentMobileController.getPaymentLoyalty,
 )
 
 // ============================================================================

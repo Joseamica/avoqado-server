@@ -441,8 +441,11 @@ export type ConfigFiscal = { fiscalEmisorId: string; facturacionEnabled: boolean
  * Precondición: `pagos` son SÓLO los cobros elegibles (`COBRO` de `cfdiGlobal.service.ts`: completados, tipo `REGULAR`/`FAST`/nulo; nunca `TEST` ni reembolsos).
  */
 export function pertenenciaAlEmisor(
-  pagos: Array<{ method: string; conComercio: boolean; config: ConfigFiscal | null }>,
-  emisor: { id: string; invoiceCashSales: boolean; includeOffTerminalSalesInGlobal: boolean },
+  // Tarjetas de regalo (B3 r1): `saldoDeRegalo` = cobro con saldo (tender de sistema GIFT_CARD).
+  pagos: Array<{ method: string; conComercio: boolean; config: ConfigFiscal | null; saldoDeRegalo?: boolean }>,
+  // Tarjetas de regalo (B3 r1): `comercioEnLaGlobal` = algún comercio de este RFC entra a la global (`configQueEntraALaGlobal`; lo contrario de
+  // «apagada» de `estaApagadaLaGlobal` con un RFC y el interruptor apagado). Sin el dato, `false`: la clase de siempre.
+  emisor: { id: string; invoiceCashSales: boolean; includeOffTerminalSalesInGlobal: boolean; comercioEnLaGlobal?: boolean },
   unSoloEmisor: boolean,
 ): Pertenencia {
   const conComercio = pagos.filter(p => p.conComercio)
@@ -452,7 +455,10 @@ export function pertenenciaAlEmisor(
   // (`includeOffTerminalSalesInGlobal`, apagado de fábrica), y el efectivo además con «Facturar efectivo».
   if (!conComercio.length) {
     if (!unSoloEmisor) return 'SIN_EMISOR'
-    if (!emisor.includeOffTerminalSalesInGlobal) return 'SIN_TERMINAL'
+    // Tarjetas de regalo (B3 r1, opción A del coordinador): el canje con SALDO cuenta como de terminal, pero sólo con la global de Avoqado
+    // ENCENDIDA para este RFC. Apagada, la global la emite el contador: Avoqado nunca timbra un segundo CFDI del mismo ingreso.
+    const canje = emisor.comercioEnLaGlobal === true && pagos.some(p => p.saldoDeRegalo === true)
+    if (!emisor.includeOffTerminalSalesInGlobal && !canje) return 'SIN_TERMINAL'
     return efectivoFuera ? 'EFECTIVO' : 'CANDIDATA'
   }
   const nuestros = conComercio.filter(p => p.config?.fiscalEmisorId === emisor.id)
@@ -468,10 +474,13 @@ export function pertenenciaAlEmisor(
  * C1 (§4.3): por qué una venta del periodo NO entra a la factura global. Lista CERRADA: una venta, un motivo.
  * - De configuración (`dondePertenece`, antes de leer la venta): `EFECTIVO`, `COMERCIO_FUERA`, `SIN_EMISOR`, `SIN_TERMINAL`
  *   (`MOTIVOS_DE_CONFIGURACION`; los cuenta `contarExcluidasPorConfiguracion`).
- * - De contenido (`ticketParaGlobal`, `cfdiGlobal.service.ts`): `SIN_PAGAR`, `SIN_IMPORTE`, `FORMA_DE_PAGO_SIN_DEFINIR`,
+ * - De contenido (`ticketParaGlobal`, `cfdiGlobal.service.ts`): `TARJETA_DE_REGALO` (primero que todos: la venta de una tarjeta se factura
+ *   al usarla), `SIN_PAGAR`, `SIN_IMPORTE`, `FORMA_DE_PAGO_SIN_DEFINIR`,
  *   `PRODUCTO_POR_REVISAR`, `CARGO_POR_SERVICIO`, `OCHO_SIN_REGLA`, `IVA_APARTE_MIXTA`, `CONTRATO_DESCONOCIDO`, `DESCUENTO_SIN_REPARTO`,
  *   `NO_CUADRA` y `OTRO` (el detalle dice cuál).
  * - Del listado y la complementaria: `CORREGIDA_DESPUES` (Tareas 11 y 12) y `YA_EXTRAIDO` (C3).
+ * - `DEVUELTA` (regla de F6, decisión 1: devuelta completa ⇒ no se factura): de contenido, leída bajo el candado de la captura; gana sobre los
+ *   demás de contenido (`ticketsDeLaGlobal`, `cfdiGlobal.service.ts`).
  */
 export type MotivoExclusionGlobal =
   | 'EFECTIVO'
@@ -490,6 +499,8 @@ export type MotivoExclusionGlobal =
   | 'NO_CUADRA'
   | 'CORREGIDA_DESPUES'
   | 'YA_EXTRAIDO'
+  | 'DEVUELTA'
+  | 'TARJETA_DE_REGALO'
   | 'OTRO'
 
 /** Lo que ve quien factura (pantalla y MCP), en español llano: qué pasó y qué hacer. */
@@ -526,6 +537,10 @@ export const TEXTO_EXCLUSION_GLOBAL: Readonly<Record<MotivoExclusionGlobal, stri
   // v9 (Codex C1-47): menciona soporte; la prueba del listado (Tarea 12) y la de C3 (Tarea 5) lo comprueban en `texto`.
   YA_EXTRAIDO:
     'Ya está documentada por una nota de extracción de su factura nominativa (viva o cancelada) y no vuelve sola a ninguna factura global; pídelo a soporte.',
+  DEVUELTA: 'Se devolvió completa antes de emitir la factura global: no hay nada que facturar.',
+  // Tarjetas de regalo (1a, spec §7; LIVA y guía de CFDI: se factura una sola vez, al usarla, con forma 01).
+  TARJETA_DE_REGALO:
+    'Es la venta de una tarjeta de regalo: no es venta de mercancía y no se factura al venderla. Se factura cuando el cliente usa el saldo para pagar su compra.',
   OTRO: 'No se pudo armar su concepto para la factura global; el detalle dice por qué. Si no sabes cómo corregirla, repórtala a soporte.',
 })
 

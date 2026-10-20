@@ -15,6 +15,12 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
   },
 }))
 jest.mock('../../../../src/config/logger')
+// Plan 6b (PF-M4): la guardia del IVA por producto, de paso; aquí se prueba el escritor. La guardia la prueban
+// tests/unit/communication/rabbitmq/dispacher.ivaEncendido.test.ts y tests/integration/pos-sync/posSyncWriters.atomic.integration.test.ts.
+jest.mock('@/services/pos-sync/exclusionIva', () => ({
+  exigirIvaApagadoTx: jest.fn(),
+  conIvaApagado: (_venueId: string, escribir: (tx: unknown) => unknown) => escribir(jest.requireMock('@/utils/prismaClient').default),
+}))
 
 describe('POS Sync Staff Service (posSyncStaff.service.ts)', () => {
   // Cast mocks to the correct type for type-safe mocking
@@ -59,7 +65,7 @@ describe('POS Sync Staff Service (posSyncStaff.service.ts)', () => {
         `[PosSyncService] Procesando evento para Staff con externalId: ${staffPayload.externalId}`,
       )
       expect(mockedPrisma.venue.findUnique).toHaveBeenCalledWith({ where: { id: venueId }, select: { organizationId: true } })
-      expect(syncPosStaffSpy).toHaveBeenCalledWith(staffPayload, venueId, organizationId)
+      expect(syncPosStaffSpy).toHaveBeenCalledWith(staffPayload, venueId, organizationId, expect.anything())
     })
 
     it('should throw NotFoundError if venue is not found', async () => {
@@ -81,7 +87,7 @@ describe('POS Sync Staff Service (posSyncStaff.service.ts)', () => {
 
       // Act & Assert
       await expect(posSyncStaffService.processPosStaffEvent(eventPayload)).resolves.toBeUndefined()
-      expect(syncPosStaffSpy).toHaveBeenCalledWith(staffPayload, venueId, organizationId)
+      expect(syncPosStaffSpy).toHaveBeenCalledWith(staffPayload, venueId, organizationId, expect.anything())
     })
   })
 })

@@ -10,6 +10,7 @@
 import { processIntents, requiredPermissionForIntent } from '@/services/mobile/sync.mobile.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError } from '@/errors/AppError'
+import { MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 import * as tableService from '@/services/tpv/table.tpv.service'
 import * as orderTpvService from '@/services/tpv/order.tpv.service'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
@@ -508,16 +509,123 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-3' } })
   })
 
-  it('PAY_CASH con propiedad de mesa ajena → REJECTED TABLE_OWNED_BY_OTHER', async () => {
+  // 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde): el PAY_CASH es dinero que YA está en el cajón. Si un
+  // encargado pasó la mesa a otro mesero mientras el aparato estaba sin red, la propiedad de mesa no lo rechaza: se registra con su
+  // autor real y la marca de la mesa ajena (rastro en ActivityLog). Antes: REJECTED y el dinero fuera del sistema.
+  it('🔴 R2-6: PAY_CASH en una mesa que reasignaron ⇒ ACKED, payCashOrder con el autor real y la mesa ajena', async () => {
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
       tableId: 't1',
       servedById: 'staff-otro',
       servedBy: { firstName: 'Juan', lastName: 'Pérez' },
     })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-8', orderNumber: 'A-8', digitalReceipt: null })
     const acks = await processIntents(baseParams([{ id: 'i8', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 10000 } }]))
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-8' } })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-4',
+      expect.objectContaining({
+        staffId: STAFF,
+        idempotencyKey: 'i8',
+        isOfflineReplay: true,
+        mesaAjena: { ownerId: 'staff-otro', ownerName: 'Juan Pérez' },
+      }),
+    )
+  })
+
+  // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado. Con la cuenta de Beto en $0 (descuento del 100 %), Ana cerraba su mesa
+  // con un PAY_CASH de $0. El pase de R2-6 sólo vale con importe + propina > 0; el $0 en mesa ajena conserva el rechazo de antes.
+  it('🔴 R3-1: PAY_CASH de $0 + $0 en mesa ajena ⇒ REJECTED TABLE_OWNED_BY_OTHER, sin tocar payCashOrder', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+    const acks = await processIntents(baseParams([{ id: 'i8z', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('R3-1: PAY_CASH de $0 + $0 en la mesa PROPIA sigue cerrando la cuenta', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: STAFF, servedBy: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-0', orderNumber: 'A-0', digitalReceipt: null })
+    const acks = await processIntents(baseParams([{ id: 'i8p', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-0' } })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].mesaAjena).toBeUndefined()
+  })
+
+  it('R3-1: el reintento de $0 cuya llave YA tiene pago se contesta idempotente aunque hoy la mesa sea ajena (como antes)', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-4', status: 'COMPLETED', type: 'REGULAR' })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-0-viejo', orderNumber: 'A-0', digitalReceipt: null })
+    const acks = await processIntents(baseParams([{ id: 'i8r', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-0-viejo' } })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].mesaAjena).toBeUndefined()
+    // 🔴 R5-1 (Codex r4): pasa SÓLO a recuperar ese cobro; si lo borran antes de que payCashOrder lo relea, no se crea otro.
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].soloRecuperarPago).toEqual({
+      ownerId: 'staff-otro',
+      ownerName: 'otro mesero',
+    })
+  })
+
+  it('🔴 R5-1: el cobro de la llave desapareció antes de que payCashOrder lo releyera ⇒ REJECTED TABLE_OWNED_BY_OTHER (no se crea otro)', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-4', status: 'COMPLETED', type: 'REGULAR' })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(
+      new MesaAjenaSoloRecuperacion({ ownerId: 'staff-otro', ownerName: 'otro mesero' }),
+    )
+    const acks = await processIntents(baseParams([{ id: 'i8d', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+  })
+
+  it.each([
+    ['un intento FAILED', { orderId: 'order-4', status: 'FAILED', type: 'REGULAR' }],
+    ['una devolución', { orderId: 'order-4', status: 'COMPLETED', type: 'REFUND' }],
+    ['un cobro de OTRA orden', { orderId: 'order-otra', status: 'COMPLETED', type: 'REGULAR' }],
+  ])('🔴 R5-2: $0 en mesa ajena cuya llave es de %s ⇒ REJECTED TABLE_OWNED_BY_OTHER, sin tocar payCashOrder', async (_caso, pago) => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue(pago)
+    const acks = await processIntents(baseParams([{ id: 'i8f', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  // 🔴 R6-3 (Codex r5 #3): la revisión de mesa del reducer va antes del candado del cobro; con la regla encendida, el reducer le pasa a
+  // payCashOrder la MISMA regla (overrides de cobro) para repetirla bajo el candado.
+  it('🔴 R6-3: con la regla encendida, PAY_CASH le pasa a payCashOrder `propiedadDeMesa` con el autor y los overrides de COBRO', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: STAFF, servedBy: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-6', orderNumber: 'A-6', digitalReceipt: null })
+    await processIntents(baseParams([{ id: 'i6p', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0 } }]))
+    const marca = (orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].propiedadDeMesa
+    expect(marca.userId).toBe(STAFF)
+    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
+    await expect(marca.puedeCobrarAjena()).resolves.toBe(true)
+    expect(tableOwnership.staffCanManageAllTables).toHaveBeenLastCalledWith(STAFF, VENUE, undefined, undefined, [
+      'tables:manage-all',
+      'tables:pay-any',
+    ])
+  })
+
+  it('R6-3: con la regla apagada no hay marca (nada que revisar bajo el candado)', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-7', orderNumber: 'A-7', digitalReceipt: null })
+    await processIntents(baseParams([{ id: 'i6a', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 10000 } }]))
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].propiedadDeMesa).toBeUndefined()
+  })
+
+  it('PAY_CASH en mesa propia o con override ⇒ sin marca de mesa ajena', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(tableOwnership.staffCanManageAllTables as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-8b', orderNumber: 'A-8', digitalReceipt: null })
+    await processIntents(baseParams([{ id: 'i8b', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 10000 } }]))
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].mesaAjena).toBeUndefined()
   })
 
   it('PAY_CASH feliz delega en payCashOrder con centavos y staff', async () => {
@@ -563,6 +671,59 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
+  // D5 (mesas40, 14-oct): ni la nota larga ni el efectivo gigante son motivo de cuarentena. La cola reproduce algo que
+  // YA ocurrió: la nota pasa entera (el server no la recorta, D5 v5) y el importe se conserva exacto.
+  it('D5: ADD_ITEMS con una nota de 10,038 caracteres ⇒ ACKED (el reducer la pasa; nunca la rechaza)', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 3, status: 'PENDING' })
+    ;(orderTpvService.addItemsToOrder as jest.Mock).mockResolvedValue({ version: 4, total: 50 })
+    const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+    const acks = await processIntents(
+      baseParams([
+        {
+          id: 'nota-larga',
+          seq: 1,
+          type: 'ADD_ITEMS',
+          payload: { orderId: 'order-1', items: [{ productId: 'p1', quantity: 1, notes: notaLarga }] },
+        },
+      ]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { orderId: 'order-1' } })
+    expect(orderTpvService.addItemsToOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-1',
+      [expect.objectContaining({ productId: 'p1', notes: notaLarga })],
+      3,
+      true,
+      expect.any(Function),
+    )
+  })
+
+  it('D5: PAY_CASH gigante ⇒ ACKED con el importe EXACTO (ni se recorta ni se rechaza)', async () => {
+    const GIGANTE = 999_999_999_999
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-gigante',
+      orderNumber: 'A-9',
+      digitalReceipt: null,
+      amount: 9000,
+      tipAmount: 0,
+      changeCents: GIGANTE - 9000,
+      method: 'CASH',
+    })
+
+    const acks = await processIntents(
+      baseParams([{ id: 'cash-gigante', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: GIGANTE } }]),
+    )
+
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: GIGANTE, idempotencyKey: 'cash-gigante', isOfflineReplay: true }),
+    )
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-gigante', amount: 9000, changeCents: GIGANTE - 9000 } })
+  })
+
   it('PAY_CASH zero on an outstanding balance stays REJECTED with the payCashOrder reason', async () => {
     const message = 'Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.'
     ;(orderMobileService.payCashOrder as jest.Mock).mockRejectedValue(new BadRequestError(message))
@@ -578,13 +739,86 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
-  it('PAY_CASH zero with a tip stays INVALID_PAYLOAD without recording a payment', async () => {
+  // 🔴 R4-3 (Codex r3, P2 E): una propina sola ($0 + $50) es dinero real que YA está en el cajón; HTTP la registra y el reducer la
+  // rechazaba con INVALID_PAYLOAD (antes de este cambio, esta prueba fijaba ese rechazo). Ahora se registra como en HTTP.
+  it('🔴 R4-3: PAY_CASH de $0 con propina positiva ⇒ ACKED, payCashOrder con importe 0 y la propina', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-tip', orderNumber: 'A-0', digitalReceipt: null })
     const acks = await processIntents(
       baseParams([{ id: 'zero-with-tip', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents: 500 } }]),
     )
 
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-tip' } })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-5',
+      expect.objectContaining({ amount: 0, tip: 500, idempotencyKey: 'zero-with-tip', isOfflineReplay: true }),
+    )
+  })
+
+  it.each([
+    ['propina de texto', '500'],
+    ['fracción de centavo que se guarda en $0', 0.4],
+  ])('R4-3: PAY_CASH de $0 con %s sigue INVALID_PAYLOAD (la propina sola se valida como en HTTP)', async (_caso, tipCents) => {
+    const acks = await processIntents(
+      baseParams([{ id: 'zero-tip-invalid', type: 'PAY_CASH', payload: { orderId: 'order-5', amountCents: 0, tipCents } }]),
+    )
+
     expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'INVALID_PAYLOAD' })
     expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('R4-3: la propina sola en mesa ajena es dinero capturado ⇒ ACKED con la marca de la mesa ajena', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-tip-ajena',
+      orderNumber: 'A-0',
+      digitalReceipt: null,
+    })
+    const acks = await processIntents(
+      baseParams([{ id: 'tip-ajena', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0, tipCents: 5000 } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-tip-ajena' } })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2]).toMatchObject({
+      amount: 0,
+      tip: 5000,
+      mesaAjena: { ownerId: 'staff-otro', ownerName: 'Juan Pérez' },
+    })
+  })
+
+  // 🔴 R4-4 (Codex r3, P2 E): una fracción de centavo pasaba la guarda «dinero > 0» de la mesa ajena y se guarda $0.00. La positividad
+  // se mide en centavos enteros, como se guarda.
+  it('🔴 R4-4: PAY_CASH de 0.001 ¢ en mesa ajena cuenta como $0 ⇒ REJECTED TABLE_OWNED_BY_OTHER, sin tocar payCashOrder', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({
+      tableId: 't1',
+      servedById: 'staff-otro',
+      servedBy: { firstName: 'Juan', lastName: 'Pérez' },
+    })
+    const acks = await processIntents(
+      baseParams([{ id: 'fraccion', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 0.001, tipCents: 0.4 } }]),
+    )
+
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
+    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+  })
+
+  it('R4-4: PAY_CASH de 1 ¢ en mesa ajena sí es dinero ⇒ ACKED con la marca de la mesa ajena', async () => {
+    ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-otro', servedBy: null })
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({ paymentId: 'pay-1c', orderNumber: 'A-1', digitalReceipt: null })
+    const acks = await processIntents(baseParams([{ id: 'un-centavo', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 1 } }]))
+
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { paymentId: 'pay-1c' } })
+    expect((orderMobileService.payCashOrder as jest.Mock).mock.calls[0][2].mesaAjena).toEqual({
+      ownerId: 'staff-otro',
+      ownerName: 'otro mesero',
+    })
   })
 
   it.each([false, '', ' ', [], '0'])('PAY_CASH coercion-only zero amount=%j stays INVALID_PAYLOAD', async amountCents => {
@@ -939,6 +1173,37 @@ describe('sync.mobile.service processIntents', () => {
     },
   )
 
+  // 🔴 R14-1 (founder, 17-oct): una cuenta con vales de mostrador no se separa ni se junta. Sin red, el intent que choca con ese
+  // guarda es un rechazo de negocio PERMANENTE (cuarentena visible con el aviso), nunca RETRY: reintentarlo no lo arreglaría jamás
+  // y cortaría el FIFO del aparato.
+  it.each([
+    ['SPLIT_ORDER', () => orderMobileService.splitOrderItems, { orderId: 'order-12', itemRefs: [{ id: 'item-1' }] }],
+    ['SPLIT_BY_SEAT', () => orderMobileService.splitOrderBySeat, { orderId: 'order-12' }],
+    ['MERGE_ORDERS', () => orderMobileService.mergeOrders, { orderId: 'order-12', sourceOrderId: 'order-13' }],
+  ] as const)(
+    '🔴 R14-1: %s sobre una cuenta con vales → REJECTED AREA_TICKET_ORDER_NOT_SPLITTABLE con el aviso (no RETRY)',
+    async (type, escritor, payload) => {
+      ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, status: 'PENDING', tableId: 't1', servedById: STAFF })
+      ;(prisma.orderItem.findMany as jest.Mock).mockResolvedValue([{ id: 'item-1' }])
+      const { rechazarSiLaCuentaTieneVales, MENSAJE_CUENTA_CON_VALES } = jest.requireActual('@/services/shared/cuentaConVales')
+      let rechazo: unknown
+      try {
+        rechazarSiLaCuentaTieneVales({ areaTicketCheckoutSession: { id: 'sesion-vales' } })
+      } catch (e) {
+        rechazo = e
+      }
+      expect(rechazo).toBeDefined()
+      ;(escritor() as jest.Mock).mockRejectedValueOnce(rechazo)
+      const acks = await processIntents(baseParams([{ id: `i-r14-${type}`, type, payload }]))
+      expect(acks[0]).toEqual({
+        id: `i-r14-${type}`,
+        status: 'REJECTED',
+        errorCode: 'AREA_TICKET_ORDER_NOT_SPLITTABLE',
+        message: MENSAJE_CUENTA_CON_VALES,
+      })
+    },
+  )
+
   it('UPDATE_DETAILS y CANCEL_ORDER delegan en el mismo servicio que online', async () => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
     const acks = await processIntents(
@@ -950,6 +1215,40 @@ describe('sync.mobile.service processIntents', () => {
     expect(orderMobileService.updateOrderDetails).toHaveBeenCalled()
     expect(orderMobileService.cancelOrder).toHaveBeenCalledWith(VENUE, 'order-12', 'Cliente se fue', STAFF, expect.any(Function))
     expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED'])
+  })
+
+  // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): el intent offline usa el MISMO servicio que la ruta online, y
+  // le pasa si quien lo encoló tiene `payments:create` (el `authorizeIntent` del lote): en una venta COBRADA, cambiar el cliente
+  // sin él ⇒ el servicio lo rechaza (403 ⇒ REJECTED, cuarentena visible). Sincronizar no es puerta trasera.
+  it.each([
+    ['sin payments:create', false],
+    ['con payments:create', true],
+  ])('🔴 UPDATE_DETAILS con customerId pasa el permiso de cobrar de quien lo encoló (%s)', async (_n, puede) => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const params = baseParams([
+      { id: 'i-r42', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K' } },
+    ])
+    params.authorizeIntent.mockImplementation((_i: any, permiso: string) => (permiso === 'payments:create' ? puede : true))
+    await processIntents(params)
+    expect(orderMobileService.updateOrderDetails).toHaveBeenCalledWith(
+      VENUE,
+      'order-12',
+      expect.objectContaining({ customerId: 'cust-K' }),
+      { puedeCambiarClienteEnVentaCobrada: puede },
+    )
+  })
+
+  it('🔴 UPDATE_DETAILS: el 403 del servicio (venta cobrada, sin permiso) queda REJECTED con su mensaje, no se reintenta', async () => {
+    ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
+    const prohibido = Object.assign(new Error('Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.'), {
+      statusCode: 403,
+      code: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE',
+    })
+    ;(orderMobileService.updateOrderDetails as jest.Mock).mockRejectedValueOnce(prohibido)
+    const acks = await processIntents(
+      baseParams([{ id: 'i-r42b', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K' } }]),
+    )
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE' })
   })
 
   // ─── SPLIT_ORDER / MERGE_ORDERS (Fase 3, split offline) ───────────────────
@@ -1998,7 +2297,7 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     ;(prisma.posSyncIntent.findUnique as jest.Mock).mockResolvedValue(reserva('PAY_CASH', 'i-pay', 90_000, conHuella))
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-luis', servedBy: { firstName: 'Luis', lastName: 'M' } })
-    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ id: 'payment-1' })
+    ;(prisma.payment.findUnique as jest.Mock).mockResolvedValue({ orderId: 'order-9', status: 'COMPLETED', type: 'REGULAR' })
 
     const [ack] = await processIntents(baseParams([pago()]))
 
@@ -2006,18 +2305,22 @@ describe('Retoma con huella transaccional tras una caída del servidor (plan 202
     expect(orderMobileService.payCashOrder).toHaveBeenCalledTimes(1)
     expect(prisma.payment.findUnique).toHaveBeenCalledWith({
       where: { venueId_idempotencyKey: { venueId: VENUE, idempotencyKey: 'i-pay' } },
-      select: { id: true },
+      select: { orderId: true, status: true, type: true },
     })
   })
 
-  it('un cobro NUEVO en mesa ajena sigue rechazado aunque se pregunte por la llave', async () => {
+  it('🔴 R2-6: el PAY_CASH sin pago previo en mesa ajena ya no se rechaza (es dinero capturado): se registra con la marca de la mesa ajena', async () => {
     ;(tableOwnership.isTableOwnershipEnforced as jest.Mock).mockResolvedValue(true)
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ tableId: 't1', servedById: 'staff-luis', servedBy: { firstName: 'Luis', lastName: 'M' } })
 
     const [ack] = await processIntents(baseParams([pago()]))
 
-    expect(ack).toMatchObject({ status: 'REJECTED', errorCode: 'TABLE_OWNED_BY_OTHER' })
-    expect(orderMobileService.payCashOrder).not.toHaveBeenCalled()
+    expect(ack).toMatchObject({ status: 'ACKED' })
+    expect(orderMobileService.payCashOrder).toHaveBeenCalledWith(
+      VENUE,
+      'order-9',
+      expect.objectContaining({ mesaAjena: { ownerId: 'staff-luis', ownerName: 'Luis M' } }),
+    )
   })
 
   it('tras retomar, el resto del lote sigue en orden y usa la cuenta retomada', async () => {

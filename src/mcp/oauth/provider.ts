@@ -164,7 +164,8 @@ export const provider: OAuthServerProvider = {
       scopes: scp ?? ['mcp:read'],
       expiresAt: exp, // required by the SDK bearer middleware
       resource: profile === 'directory' ? MCP_DIRECTORY_RESOURCE_URL : MCP_RESOURCE_URL,
-      extra: { staffId: sub, activeOrg: org, scopes: scp ?? ['mcp:read'] },
+      // `clientId` propio: el del SDK cae en `sub` cuando no hay cid; aquí null = token sin app (servidor de desarrollo).
+      extra: { staffId: sub, activeOrg: org, scopes: scp ?? ['mcp:read'], clientId: cid ?? null },
     }
   },
 

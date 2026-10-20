@@ -212,6 +212,7 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
       amount: new Decimal(90),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     })
 
@@ -231,6 +232,7 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
       amount: new Decimal(90),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     })
 
@@ -247,6 +249,82 @@ describe('payCashOrder — un cobro mayor al saldo registra el saldo y devuelve 
     await payCashOrder('venue-1', 'order-1', { amount: 15000, tip: 0, staffId: 'staff-1' })
 
     expect(warn).toHaveBeenCalledWith(expect.stringContaining('cambio'), expect.objectContaining({ orderId: 'order-1', cambioCents: 6000 }))
+  })
+})
+
+/**
+ * D5 (mesas40, 14-oct): el efectivo RECIBIDO no tiene tope en el server, y NO se le pone uno que recorte ni rechace:
+ * - recortar el cambio altera el pago registrado (aplicado = recibido − cambio);
+ * - un 400 en línea perdería lo que `/pay` registra YA OCURRIDO (tarjeta de una terminal ajena, transferencia).
+ * El tope va en el teclado del aparato ANTES de confirmar. El server conserva los importes exactos y sólo deja
+ * `🚨 [Sobrepago]` en el log cuando lo recibido pasa de `MAX_TERMINAL_PAYMENT_CENTS` ($1,000,000.00).
+ */
+describe('D5: efectivo recibido gigante — importes exactos, un solo pago y 🚨 [Sobrepago] en el log', () => {
+  beforeEach(() => jest.clearAllMocks())
+  // El importe medido el 1-sep por API cruda: $9,999,999,999.99 «recibidos» sobre una cuenta de $90.
+  const GIGANTE = 999_999_999_999
+  const gritosDeSobrepago = (spy: jest.SpyInstance) => spy.mock.calls.filter(c => String(c[0]).includes('🚨 [Sobrepago]'))
+
+  it('🔴 primer envío y repetición dan el MISMO pago y el MISMO cambio; un solo Payment; recibido = aplicado + cambio; grita en el log', async () => {
+    seedOrder() // debe $90
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+    const pedido = { amount: GIGANTE, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-gigante' }
+
+    const primero = await payCashOrder('venue-1', 'order-1', pedido)
+    // La repetición (la cola o el reintento del POS) encuentra el pago que dejó el primer envío.
+    prismaMock.payment.findUnique.mockResolvedValue({
+      id: 'payment-1',
+      orderId: 'order-1',
+      amount: new Decimal(pagoRegistrado().amount),
+      tipAmount: new Decimal(0),
+      method: 'CASH',
+      status: 'COMPLETED',
+      receipts: [],
+    })
+    const repeticion = await payCashOrder('venue-1', 'order-1', pedido)
+
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(pagoRegistrado().amount).toBe(90)
+    expect([primero.paymentId, primero.amount, primero.changeCents]).toEqual(['payment-1', 9000, GIGANTE - 9000])
+    expect([repeticion.paymentId, repeticion.amount, repeticion.changeCents]).toEqual([
+      primero.paymentId,
+      primero.amount,
+      primero.changeCents,
+    ])
+    expect(primero.amount + primero.changeCents).toBe(GIGANTE)
+    expect(gritosDeSobrepago(error)).toHaveLength(2)
+    expect(gritosDeSobrepago(error)[0][1]).toMatchObject({ venueId: 'venue-1', orderId: 'order-1', amountCents: GIGANTE })
+  })
+
+  it.each(['CREDIT_CARD', 'BANK_TRANSFER'] as const)(
+    '%s registrado a mano por un importe gigante: se conserva COMPLETO (ya ocurrió), sin cambio ni rechazo, y grita en el log',
+    async method => {
+      seedOrder()
+      const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+
+      const r = await payCashOrder('venue-1', 'order-1', {
+        amount: GIGANTE,
+        tip: 0,
+        method,
+        externalSource: 'Terminal BBVA',
+        staffId: 'staff-1',
+        idempotencyKey: `k-${method}`,
+      })
+
+      expect(pagoRegistrado()).toMatchObject({ amount: GIGANTE / 100, method, fundsFlow: 'EXTERNAL_RECORDED' })
+      expect([r.amount, r.changeCents]).toEqual([GIGANTE, 0])
+      expect(gritosDeSobrepago(error)).toHaveLength(1)
+    },
+  )
+
+  it('control: justo en el tope ($1,000,000.00) no grita; el exceso sobre el saldo sigue siendo cambio como hoy', async () => {
+    seedOrder()
+    const error = jest.spyOn(logger, 'error').mockImplementation(() => logger)
+
+    const r = await payCashOrder('venue-1', 'order-1', { amount: 100_000_000, tip: 0, staffId: 'staff-1' })
+
+    expect([pagoRegistrado().amount, r.amount, r.changeCents]).toEqual([90, 9000, 100_000_000 - 9000])
+    expect(gritosDeSobrepago(error)).toHaveLength(0)
   })
 })
 
@@ -394,6 +472,7 @@ describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo
       amount: new Decimal(40),
       tipAmount: new Decimal(0),
       method: 'CASH',
+      status: 'COMPLETED',
       receipts: [],
     }
     // Codex r14 #2: las tres consultas, explícitas —la rápida (:2372), antes del commit del ganador ⇒ ausente; bajo el candado ⇒ el
@@ -424,7 +503,7 @@ describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo
     prismaMock.payment.findUnique.mockReset()
     prismaMock.payment.findUnique
       .mockResolvedValueOnce(null)
-      .mockResolvedValueOnce({ id: 'pay-ganador', orderId: 'order-1' } as any)
+      .mockResolvedValueOnce({ id: 'pay-ganador', orderId: 'order-1', status: 'COMPLETED', type: 'REGULAR' } as any)
       .mockResolvedValueOnce(null)
     await expect(
       payCashOrder('venue-1', 'order-1', { amount: 4000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-perdido' }),
@@ -472,33 +551,48 @@ describe('Founder 3-oct + Codex r10 #2: sobre una cancelada, el efectivo en vivo
     ])
     expect(bitacoras('ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toHaveLength(1)
   })
-  it('🔴 I-1: una orden de una sesión de vales v7 cancelada que recibe dinero de la COLA NO se reabre: su finalización la sigue rechazando con el 409 de hoy (`CHECKOUT_ORDER_NOT_PAYABLE`) y todo se revierte (con `!areaTicketCode` se reabría ANTES de la finalización y el cobro pasaba)', async () => {
+  // 🔴 R6-1 (efectivo sin red, Codex r5 #1) REEMPLAZA a la prueba de I-1 que fijaba aquí el 409 `CHECKOUT_ORDER_NOT_PAYABLE`: con la
+  // venta de vales cancelada por la ruta GENERAL (la sesión seguía MATERIALIZED) ese 409 revertía todo y el dinero de la cola se
+  // perdía. Ahora queda como cuando se cancela por la ruta de vales (R12-1): sesión CANCELLED y vales liberados, sin intento de vales,
+  // y el dinero se registra a nivel venta (la cuenta cancelada se reabre, con su bitácora). Lo que I-1 protegía sigue: no hay
+  // finalización de vales que corra sobre una venta reabierta.
+  it('🔴 R6-1: una orden de una sesión de vales v7 cancelada por la ruta GENERAL que recibe dinero de la COLA ⇒ la sesión se cancela como por la ruta de vales y el dinero se registra a nivel venta, reabierta y con bitácora (antes: 409 `CHECKOUT_ORDER_NOT_PAYABLE` y todo se revertía)', async () => {
     seedOrder({ ...ivaAparteCancelada, areaTicketCheckoutSession: { id: 'ses-1' } })
-    // La sesión v7 de verdad: `lockAreaTicketCheckoutForPayment` la toma y abre el intento de pago.
+    // La sesión v7 de verdad, MATERIALIZED (la ruta general no la toca); la orden, bajo el candado de la jerarquía, CANCELLED.
+    // R8: la jerarquía se toma dos veces en la misma transacción (antes del punto de la llave y en las guardas de la sesión; reentrante).
+    const sesion = { id: 'ses-1', status: 'MATERIALIZED', activePaymentAttemptId: null, tickets: [], paymentAttempts: [] }
     prismaMock.areaTicketCheckoutSession.findFirst
       .mockResolvedValueOnce({ id: 'ses-1' })
-      .mockResolvedValueOnce({ id: 'ses-1', status: 'MATERIALIZED', activePaymentAttemptId: null, tickets: [], paymentAttempts: [] })
-    prismaMock.areaTicketPaymentAttempt.findUnique.mockResolvedValueOnce(null)
-    prismaMock.areaTicketPaymentAttempt.create.mockResolvedValueOnce({ id: 'att-1' })
+      .mockResolvedValueOnce(sesion)
+      .mockResolvedValueOnce({ id: 'ses-1' })
+      .mockResolvedValueOnce(sesion)
+    prismaMock.order.findFirst.mockResolvedValueOnce({ status: 'CANCELLED' })
+    prismaMock.areaTicket.updateMany.mockResolvedValueOnce({ count: 1 })
     prismaMock.areaTicketCheckoutSession.update.mockResolvedValueOnce({})
-    prismaMock.areaTicket.findMany.mockResolvedValueOnce([])
-    // La finalización relee la orden bajo su candado: ve el estado que la transacción ya escribió (o el leído).
-    prismaMock.order.findFirst.mockImplementationOnce(async () => ({
-      paymentStatus: 'PARTIAL',
-      status: [...(prismaMock.order.update as jest.Mock).mock.calls].reverse().find(c => c[0].data?.status)?.[0].data.status ?? 'CANCELLED',
-      subtotal: new Decimal(100),
-      discountAmount: new Decimal(0),
-      serviceChargeAmount: new Decimal(0),
-      contratoDePrecio: 'IVA_APARTE',
-      taxAmount: new Decimal(16),
-      servedById: null,
-      createdById: null,
-      areaTicketCode: null,
-    }))
-    await expect(
-      payCashOrder('venue-1', 'order-1', { amount: 11600, tip: 0, staffId: 'staff-1', idempotencyKey: 'cola-v7', isOfflineReplay: true }),
-    ).rejects.toMatchObject({ statusCode: 409, code: 'CHECKOUT_ORDER_NOT_PAYABLE' })
-    expect((prismaMock.order.update as jest.Mock).mock.calls.some(c => c[0].data?.status === 'PENDING')).toBe(false)
-    expect(bitacoras('ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toHaveLength(0)
+
+    await payCashOrder('venue-1', 'order-1', {
+      amount: 11600,
+      tip: 0,
+      staffId: 'staff-1',
+      idempotencyKey: 'cola-v7',
+      isOfflineReplay: true,
+    })
+
+    expect(prismaMock.areaTicketPaymentAttempt.create).not.toHaveBeenCalled()
+    expect(prismaMock.areaTicket.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ checkoutSessionId: 'ses-1', status: 'CLAIMED' }) }),
+    )
+    expect(prismaMock.areaTicketCheckoutSession.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'ses-1' },
+        data: expect.objectContaining({ status: 'CANCELLED', activePaymentAttemptId: null }),
+      }),
+    )
+    expect(bitacoras('AREA_TICKET_CHECKOUT_CANCELLED')).toEqual([
+      expect.objectContaining({ entityId: 'ses-1', data: expect.objectContaining({ motivo: 'ORDEN_CANCELADA_POR_LA_RUTA_GENERAL' }) }),
+    ])
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'PENDING' } }))
+    expect(pagoRegistrado().amount).toBe(116)
+    expect(bitacoras('ORDER_REOPENED_BY_CAPTURED_PAYMENT')).toHaveLength(1)
   })
 })

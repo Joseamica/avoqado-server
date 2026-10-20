@@ -3,6 +3,11 @@
 // servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
 // FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
 // suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
@@ -70,9 +75,17 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
   postCashSaleToDrawer: (...args: any[]) => postCashSaleToDrawerMock(...args),
 }))
 
+// R8 (tarjetas de regalo): el pago manual que salda una cuenta activa sus sobres con la MISMA transacción.
+const activarSobresMock = jest.fn().mockResolvedValue({ activated: [] })
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: any[]) => activarSobresMock(...a),
+}))
+
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { createManualPaymentSchema } from '@/schemas/dashboard/manualPayment.schema'
 
 const prismaMock = prisma as jest.Mocked<typeof prisma>
 
@@ -333,6 +346,47 @@ describe('manualPayment.service', () => {
       expect(createSalePostingInTxMock.mock.calls[0][1]).toEqual(expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID }))
     })
 
+    // 🔴 R11-8: la venta de vales que este pago salda cierra también su sesión (deja de ofrecer «cobrar el resto»), con la sesión
+    // que la jerarquía tomó como PRIMERA sentencia de la transacción; un abono no la toca.
+    it('🔴 R11-8: venta con sesión de vales ⇒ la jerarquía va PRIMERO y la sesión cierra con el vale, sólo al saldar', async () => {
+      const vales = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+      const sesion = { id: 'sesion-1', status: 'PARTIALLY_PAID', activePaymentAttemptId: null, tickets: [] }
+      vales.lockAreaTicketCheckoutHierarchy.mockResolvedValueOnce({ session: sesion })
+      vales.cerrarSesionDeValesAlCerrarLaVenta.mockResolvedValueOnce(true)
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(vales.lockAreaTicketCheckoutHierarchy).toHaveBeenCalledWith(txClient, { venueId: VENUE_ID, orderId: ORDER_ID })
+      expect(vales.lockAreaTicketCheckoutHierarchy.mock.invocationCallOrder[0]).toBeLessThan(txClient.$queryRaw.mock.invocationCallOrder[0])
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta).toHaveBeenCalledWith(txClient, sesion, { venueId: VENUE_ID, orderId: ORDER_ID })
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta.mock.invocationCallOrder[0]).toBeGreaterThan(
+        createSalePostingInTxMock.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('regresión R11-8: un abono que no salda no cierra la sesión', async () => {
+      const vales = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+      vales.lockAreaTicketCheckoutHierarchy.mockResolvedValueOnce({ session: { id: 'sesion-1', status: 'PARTIALLY_PAID' } })
+      armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...pagoQueSalda, amount: '10' })
+
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta).not.toHaveBeenCalled()
+    })
+
+    it('R8: el pago manual que salda la cuenta activa los sobres con la MISMA tx y sus renglones', async () => {
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(activarSobresMock).toHaveBeenCalledTimes(1)
+      expect(activarSobresMock.mock.calls[0][0]).toBe(txClient)
+      expect(activarSobresMock.mock.calls[0][1]).toEqual(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, items: ordenConProductos().items }),
+      )
+    })
+
     it('aplicar el vale ocurre DESPUÉS del commit, no dentro de la transacción', async () => {
       const order = ordenConProductos()
       let aplicadoDentroDeLaTx = false
@@ -415,6 +469,38 @@ describe('manualPayment.service', () => {
       armarTx(ordenConProductos({ payments: [] })) // 30 de 100 → sigue PARTIAL
 
       await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('rechaza otro cobro de una orden ya saldada sin abrir ni aplicar otro vale', async () => {
+      armarTx(
+        ordenConProductos({
+          paymentStatus: 'PAID',
+          payments: [{ amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
+        }),
+      )
+
+      // «Como Square» (founder, 16-oct): una venta PAID está cerrada; lo extra se cobra como venta nueva.
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
+        statusCode: 400,
+        code: manualPaymentService.CODIGO_VENTA_YA_COBRADA,
+        message: manualPaymentService.MENSAJE_VENTA_YA_COBRADA,
+      })
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('la marca PAID impide otro vale aunque el historial de pagos no cubra todo el total', async () => {
+      armarTx(ordenConProductos({ paymentStatus: 'PAID' }))
+
+      // «Como Square»: la marca PAID cierra la venta aunque el historial no cubra el total ⇒ se rechaza, sin vale.
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
+        statusCode: 400,
+        code: manualPaymentService.CODIGO_VENTA_YA_COBRADA,
+      })
 
       expect(createSalePostingInTxMock).not.toHaveBeenCalled()
       expect(applySalePostingMock).not.toHaveBeenCalled()
@@ -1854,12 +1940,48 @@ describe('manualPayment.service', () => {
       expect(data.createdById).toBe('admin-id')
     })
 
-    it('AUDIT: source=TPV with externalSource is REJECTED by schema layer (defense in depth)', () => {
-      // Schema's superRefine forbids externalSource when source !== 'OTHER'.
-      // This is a schema-layer test (not service), but we document it here.
-      // Real assertion: schema validation runs in the controller via Zod parse.
-      // Service trusts the input shape — defense in depth = layered validation.
-      expect(true).toBe(true) // placeholder reminder
+    it('el esquema rechaza un proveedor externo cuando el origen del pago es TPV', () => {
+      const result = createManualPaymentSchema.safeParse({
+        body: { amount: '100', method: 'CASH', source: 'TPV', externalSource: 'Proveedor externo' },
+      })
+
+      expect(result.success).toBe(false)
+      if (result.success) throw new Error('El origen TPV no admite un proveedor externo')
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          path: ['body', 'externalSource'],
+          message: 'El proveedor externo solo aplica cuando el origen es OTHER',
+        }),
+      ])
+    })
+
+    it('el esquema acepta un proveedor externo cuando el origen del pago es OTHER', () => {
+      const result = createManualPaymentSchema.safeParse({
+        body: { amount: '100', method: 'CASH', source: 'OTHER', externalSource: 'Proveedor externo' },
+      })
+
+      expect(result.success).toBe(true)
+    })
+
+    it('una orden sombra sin productos no crea ni aplica un vale de inventario', async () => {
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-sin-inventario' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate } }),
+      )
+
+      await expect(
+        manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'Proveedor externo',
+        }),
+      ).resolves.toBeDefined()
+
+      expect(orderCreate).toHaveBeenCalledTimes(1)
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
     })
 
     it('AUDIT: VenueTransaction is also created in Mode 1 (existing order path)', async () => {
@@ -2344,22 +2466,7 @@ describe('manualPayment.service', () => {
       expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
 
-    it('KNOWN LIMITATION: socket.io broadcast NOT emitted (UX only — not financial descuadre)', () => {
-      // TPV broadcasts PAYMENT_COMPLETED via socketManager so dashboards refresh
-      // in real-time. Manual payments don't emit — admin sees their own action
-      // immediately, other open dashboards need refresh. Documented gap, no impact
-      // on financial data. Future enhancement.
-      expect(true).toBe(true)
-    })
-
-    it('KNOWN LIMITATION: inventory FIFO deduction NOT performed (per service docstring)', () => {
-      // TPV deducts inventory on final payment via SaleVerification flow.
-      // Manual payments are explicitly out-of-scope per the service docstring —
-      // there are no SKU items on shadow orders, so no inventory to deduct.
-      // For Mode 1 (existing order with items), inventory should already have
-      // been handled by the original order flow (e.g., POS sync or TPV).
-      expect(true).toBe(true)
-    })
+    it.todo('LIMITACIÓN DOCUMENTADA: emitir el pago manual por socket para las otras pantallas abiertas')
   })
 
   describe('getExternalSources', () => {

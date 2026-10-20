@@ -301,6 +301,18 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'GIFT_CARDS',
+        featureCode: 'GIFT_CARDS',
+        name: 'Tarjetas de regalo',
+        description: 'Vende tarjetas de regalo en tu POS y cóbralas con su saldo, solo o combinado con otro medio.',
+        category: 'customers',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        // `fr` lo exige el tipo `FeatureCatalogEntry`; la plataforma sólo da soporte en es/en.
+        names: { es: 'Tarjetas de regalo', en: 'Gift cards', fr: 'Cartes cadeaux' },
+      },
+      {
         id: 'BASE_INVENTORYBASIC',
         featureCode: null,
         name: 'Inventario básico',
@@ -637,6 +649,17 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
           en: 'Master catalog',
           fr: 'Catalogue central',
         },
+      },
+      {
+        id: 'PRODUCT_VARIANTS',
+        featureCode: 'PRODUCT_VARIANTS',
+        name: 'Variantes de producto',
+        description: 'Da de alta tallas, colores o presentaciones de un producto de un jalón y elígelas en el POS.',
+        category: 'inventory',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: { es: 'Variantes de producto', en: 'Product variants', fr: 'Variantes de produit' },
       },
     ] as FeatureCatalogEntry[]
   ).map(entry => Object.freeze({ ...entry, names: Object.freeze(entry.names) })),

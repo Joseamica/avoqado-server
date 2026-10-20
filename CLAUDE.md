@@ -169,7 +169,8 @@ any letter), UUIDs, or custom prefixes like `mindf_hh_001`: the `z.string().cuid
 shows as a generic error (IQ, 13-oct-2026: 273 of 281 products created on 6-may with random ids could not print labels). Use the `cuid`
 package: `npm install --no-save cuid && node -e "console.log(require('cuid')())"`. Before applying, check every generated id matches
 `^c[a-z0-9]{24}$`. FKs with `ON UPDATE CASCADE` (Product→MenuCategory, Inventory→Product) allow safe id rewrites in a transaction if you
-forget upfront.
+forget upfront. If the venue has product families (variants), run `SELECT set_config('avoqado.product_group_writer','on',true)` first in
+that transaction, or the single-writer trigger rejects the cascade.
 
 ## Cross-Repo (TPV Android)
 

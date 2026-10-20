@@ -13,8 +13,7 @@
  */
 import { StaffRole, OrgRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { getEffectiveRolePermissions, resolvePermissions } from '@/lib/permissions'
-import { getEffectivePermissions } from '@/lib/resolveEffectivePermissions'
+import { resolveStaffVenuePermissions } from '@/lib/resolveEffectivePermissions'
 import logger from '@/config/logger'
 import { getFeatureMetadataForVenue, FeatureMetadata } from '@/services/access/feature-metadata.service'
 
@@ -107,6 +106,10 @@ export const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   // Pases (TotalPass/Wellhub) — función AGGREGATOR_PASSES (Pro). Sin esto, en white-label el permiso pasaría el filtro.
   'reservations:manage-passes': 'AGGREGATOR_PASSES',
 
+  // Tarjetas de regalo — función GIFT_CARDS (Pro). SÓLO vender: cobrar con saldo, consultar y administrar lo ya vendido
+  // siguen aunque la función se apague (spec §6: el saldo es una deuda del negocio con su cliente).
+  'giftCards:sell': 'GIFT_CARDS',
+
   // Menu Management
   'menu:read': 'AVOQADO_MENU',
   'menu:write': 'AVOQADO_MENU',
@@ -119,6 +122,10 @@ export const PERMISSION_TO_FEATURE_MAP: Record<string, string> = {
   'orders:write': 'AVOQADO_ORDERS',
   'orders:create': 'AVOQADO_ORDERS',
   'orders:delete': 'AVOQADO_ORDERS',
+  // Pedidos en línea: siguen a la función de pedidos de la marca blanca (no hay un código propio en `enabledFeatures`; uno
+  // inventado dejaría sin permiso a todos). El plan (`ONLINE_ORDERING`) lo revisa aparte `checkFeatureAccess` en la ruta.
+  'online-orders:manage': 'AVOQADO_ORDERS',
+  'online-orders:pause': 'AVOQADO_ORDERS',
 
   // Payments
   'payments:read': 'AVOQADO_PAYMENTS',
@@ -401,25 +408,18 @@ export async function getUserAccess(
     throw new Error(`User ${userId} has no access to venue ${venueId}`)
   }
 
-  // Check if staff has a permission set assigned (overrides role-based permissions)
-  let basePermissions: string[]
-
-  if (staffVenueData?.permissionSetId && staffVenueData?.permissionSet) {
-    // Permission set assigned: use its permissions directly (bypass role-based resolution)
-    basePermissions = getEffectivePermissions(staffVenueData, [])
-  } else {
-    // 🔴 Aquí vivía una COPIA de la lógica de `getEffectiveRolePermissions` (merge vs
-    // override + resolución de dependencias). Dos implementaciones de la MISMA regla es
-    // exactamente cómo se separan el camino en línea y el offline: éste es el que usa el
-    // replay de intents, así que cualquier divergencia significa "la acción pasa con
-    // internet y se rechaza sin internet" — el bug que veníamos cerrando todo el día.
-    // Ahora llama a la función única, exclusiones incluidas.
-    const customPerms = rolePermissions.find(rp => rp.role === role)
-    basePermissions = getEffectiveRolePermissions(role, customPerms?.permissions ?? null, customPerms?.deniedPermissions ?? null)
-  }
-
-  // Resolve dependencies
-  const resolvedPermissions = Array.from(resolvePermissions(basePermissions))
+  // 🔴 Los permisos EFECTIVOS con la MISMA función que usa `checkPermission` para autorizar
+  // (`resolveStaffVenuePermissions`): el Conjunto de Permisos si hay uno; si no, el rol con lo que el
+  // venue le agregó y le quitó, ya resuelto. Antes aquí se le volvía a pasar `resolvePermissions` al
+  // resultado, y esa segunda vuelta de dependencias devolvía lo que el recorte de exclusiones había
+  // quitado (VIEWER + `orders:*` excluyendo `orders:print` recuperaba `inventory:read`; auditoría de
+  // Codex, 15-oct). Esta lista la leen el dashboard, las apps y el guard del MCP: no se vuelve a
+  // expandir. Fijado en tests/unit/services/access/getUserAccess.quitarNuncaConcede.test.ts.
+  const customPerms = rolePermissions.find(rp => rp.role === role)
+  const resolvedPermissions = resolveStaffVenuePermissions(
+    { role, permissionSetId: staffVenueData?.permissionSetId, permissionSet: staffVenueData?.permissionSet },
+    customPerms,
+  )
 
   // Resolve white-label module with organization-level inheritance
   // Priority: VenueModule (explicit override) → OrganizationModule (inherited) → disabled

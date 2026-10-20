@@ -211,7 +211,8 @@ export async function consumePermissionOverride(params: {
 
     const claimed = await prisma.permissionOverride.updateMany({
       where: { token, venueId, permission, consumedAt: null, expiresAt: { gt: now } },
-      data: { consumedAt: now, consumedRoute: route },
+      // A3 (cierre): sin query string, también si quien llama la mandara (un código de tarjeta viajaba en una).
+      data: { consumedAt: now, consumedRoute: route.split('?')[0] },
     })
 
     if (claimed.count !== 1) return null

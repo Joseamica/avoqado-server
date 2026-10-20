@@ -51,7 +51,7 @@ export async function resolvePassForDownload(serialNumber: string, authToken: st
 async function resolverPase(serialNumber: string, authToken: string) {
   const pass = await prisma.walletPass.findFirst({
     where: { serialNumber, active: true },
-    select: { id: true, authToken: true, venueId: true, customerId: true },
+    select: { id: true, authToken: true, venueId: true, customerId: true, serialNumber: true, qrToken: true },
   })
   if (!pass || !tokenValido(authToken, pass.authToken)) return null
   return pass

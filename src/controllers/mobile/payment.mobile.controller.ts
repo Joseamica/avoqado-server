@@ -1,6 +1,7 @@
 import { Request, Response, NextFunction } from 'express'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
+import { describeSaleStampForPayment } from '../../services/shared/loyaltyOnLateCustomer'
 
 /**
  * Record a fast payment (no order, just amount)
@@ -30,8 +31,9 @@ export async function attachCustomerToPayment(req: Request, res: Response, next:
   try {
     const { venueId, paymentId } = req.params
     const { customerId } = req.body
-
-    const order = await orderMobileService.attachCustomerToPayment(venueId, paymentId, customerId)
+    // El actor sale del TOKEN, nunca del body (regla authContext): es quien queda en el sello y en la bitácora.
+    // `data` lleva los campos de la orden de siempre más `loyalty` (sello tardío; campo nuevo y opcional para las apps).
+    const order = await orderMobileService.attachCustomerToPayment(venueId, paymentId, customerId, req.authContext?.userId)
 
     res.status(200).json({
       success: true,
@@ -52,7 +54,9 @@ export async function attachCustomerToLatestPayment(req: Request, res: Response,
       customerId,
       amountCents,
       tipCents,
+      // `staffId` del body = quién COBRÓ (filtra el pago, como siempre). El actor = quien liga, del token.
       staffId,
+      actorStaffId: req.authContext?.userId,
     })
 
     res.status(200).json({
@@ -60,6 +64,21 @@ export async function attachCustomerToLatestPayment(req: Request, res: Response,
       data: order,
       message: 'Customer attached to latest payment successfully',
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * GET /mobile/venues/:venueId/payments/:paymentId/loyalty — el renglón del sello en «Cobro exitoso» cuando el cliente venía
+ * desde el carrito. `data: null` si la venta no tiene cliente (o sigue abierta); `reason: 'PENDING'` si la lealtad aún corre
+ * (también la venta que una liga tardía reabrió y espera su sello). Sólo lee; el pago se busca dentro del negocio de la URL.
+ */
+export async function getPaymentLoyalty(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, paymentId } = req.params
+    const data = await describeSaleStampForPayment({ venueId, paymentId })
+    res.status(200).json({ success: true, data })
   } catch (error) {
     next(error)
   }

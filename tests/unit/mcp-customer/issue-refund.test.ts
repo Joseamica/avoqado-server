@@ -1,5 +1,7 @@
 import { registerPaymentTools } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
+import { GiftCardError } from '../../../src/services/giftCards/giftCardErrors'
+import { ConflictError } from '../../../src/errors/AppError'
 
 const mockPaymentFindFirst = jest.fn()
 const mockIssue = jest.fn()
@@ -58,6 +60,30 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('issue_refund (critical money write, confirm-gated)', () => {
+  it('🔴 tarjeta de regalo: con refundMethod se rechaza con GIFT_CARD_REFUND_TO_BALANCE_ONLY; sin él, la vista previa dice que regresa al saldo', async () => {
+    const conSaldo = {
+      ...completedPayment,
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderTypeId: 'tender-gc',
+      tenderCountsAsCash: false,
+      tenderSatFormaPago: '01',
+      externalSource: null,
+      source: 'POS',
+      tenderType: { systemKind: 'GIFT_CARD' },
+    }
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    const rechazo = parse(await call({ ...base, refundMethod: 'CASH', confirm: true }))
+    expect(rechazo).toMatchObject({ ok: false, code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    expect(mockIssue).not.toHaveBeenCalled()
+
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    const vista = parse(await call(base))
+    expect(vista.requiresConfirmation).toBe(true)
+    expect(vista.preview.regresaAlSaldoDeRegalo).toBe(true)
+    expect(mockPaymentFindFirst.mock.calls[1][0].select.tenderType).toEqual({ select: { systemKind: true } })
+  })
+
   it('rejects out-of-scope / no-perm — no reads, no refund', async () => {
     await expect(call({ ...base, venueId: 'foreign' })).rejects.toThrow('out of scope')
     await expect(call({ ...base, venueId: 'no-perm' })).rejects.toThrow('Forbidden')
@@ -243,6 +269,36 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     const out = parse(await call({ ...base, confirm: true }))
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/remaining/)
+    expect(out).not.toHaveProperty('code')
+  })
+
+  it('🔴 B1 r1 (fix 3): un rechazo de negocio del servicio conserva su `code` y sus `details` (el agente distingue cada caso)', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockRejectedValueOnce(
+      new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'La tarjeta de regalo terminación 4321 ya fue cancelada.', 409, {
+        motivo: 'SOBRE_DESACTIVADO',
+        giftCardIds: ['gc-1'],
+      }),
+    )
+    expect(parse(await call({ ...base, confirm: true }))).toEqual({
+      ok: false,
+      code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+      details: { motivo: 'SOBRE_DESACTIVADO', giftCardIds: ['gc-1'] },
+      error: 'La tarjeta de regalo terminación 4321 ya fue cancelada.',
+    })
+
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockRejectedValueOnce(new GiftCardError('GIFT_CARD_CANCEL_NOT_STARTED', 'Primero inicia «Cancelar venta».', 409))
+    expect(parse(await call({ ...base, confirm: true }))).toEqual({
+      ok: false,
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+      error: 'Primero inicia «Cancelar venta».',
+    })
+
+    // Cualquier AppError lleva su `code` (no sólo los de tarjetas).
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockRejectedValueOnce(new ConflictError('La llave ya pertenece a otra operación', 'IDEMPOTENCY_KEY_REUSED'))
+    expect(parse(await call({ ...base, confirm: true }))).toMatchObject({ ok: false, code: 'IDEMPOTENCY_KEY_REUSED' })
   })
 })
 

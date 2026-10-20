@@ -1,14 +1,21 @@
 import prisma from '@/utils/prismaClient'
 import { Referral } from '@prisma/client'
+import { leerSiEsCuentaDeTarjetas, WHERE_ORDEN_SIN_TARJETAS } from '@/services/giftCards/giftCardMarks'
 
 /**
- * Why these four reasons and not Zod-style messages: callers (controllers
+ * Why these six reasons and not Zod-style messages: callers (controllers
  * + TPV widget) need a stable machine-readable discriminator to drive
  * UX. The frontend maps each enum value to its own Spanish copy + CTA
  * (e.g., `EXISTING_CUSTOMER` triggers the "Forzar referido" manager
  * override flow). Free-form messages would be impossible to switch on.
  */
-export type ValidationReason = 'PROGRAM_INACTIVE' | 'CODE_NOT_FOUND' | 'SELF_REFERRAL' | 'EXISTING_CUSTOMER' | 'CUSTOMER_NOT_FOUND'
+export type ValidationReason =
+  | 'PROGRAM_INACTIVE'
+  | 'CODE_NOT_FOUND'
+  | 'SELF_REFERRAL'
+  | 'EXISTING_CUSTOMER'
+  | 'CUSTOMER_NOT_FOUND'
+  | 'GIFT_CARD_SALE'
 
 /**
  * Spanish copy for each machine reason. The enum stays the discriminator the
@@ -22,6 +29,7 @@ export const VALIDATION_REASON_MESSAGE_ES: Record<ValidationReason, string> = {
   SELF_REFERRAL: 'Un cliente no puede referirse a sí mismo.',
   EXISTING_CUSTOMER: 'Este cliente ya tiene una compra pagada aquí, así que no cuenta como referido nuevo.',
   CUSTOMER_NOT_FOUND: 'No encontramos al cliente referido en esta sucursal.',
+  GIFT_CARD_SALE: 'El referido se registra en la primera compra; la venta de una tarjeta de regalo no cuenta.',
 }
 
 export interface ValidationResult {
@@ -41,7 +49,7 @@ export interface ValidateInput {
   newCustomerId: string
   /**
    * The order this very checkout is creating, when the caller already knows
-   * it. Excluded from the "prior paid sale" count — see rule 4 below.
+   * it. Excluded from the "prior paid sale" count — see rule 5 below.
    */
   intendedOrderId?: string
 }
@@ -60,9 +68,12 @@ function reject(reason: ValidationReason): ValidationResult {
  *   2. Code must resolve to a Customer in the same venue.
  *   3. The presenter (newCustomerId) cannot be the same Customer as the
  *      code's owner.
- *   4. The presenter must have no PRIOR PAID sale in this venue.
+ *   4. `intendedOrderId`, when given, is not a gift-card account (R1: selling a gift card is not a purchase, so a referral
+ *      bound to it would never qualify — `GIFT_CARD_SALE`). The charge already happened, so this never blocks the sale.
+ *   5. The presenter must have no PRIOR PAID sale in this venue. A paid gift-card account does not count either: the referral
+ *      is captured at the first real purchase.
  *
- * 🔴 Rule 4 used to be "zero prior Orders in this venue, in any state", and
+ * 🔴 Rule 5 used to be "zero prior Orders in this venue, in any state", and
  * that was a defect in two directions at once (founder decision 2026-08-18,
  * after comparing Mindbody / Booksy / Square):
  *
@@ -107,12 +118,21 @@ export async function validateReferralCode(input: ValidateInput): Promise<Valida
     return reject('SELF_REFERRAL')
   }
 
+  // ⭐ (B6 menor 1): la marca se lee sobre el id YA resuelto en este venue. Con el id crudo, un cuid de otro negocio respondía si
+  // aquélla era una venta de tarjetas (oráculo de 1 bit) y /validate y /capture divergían. Otro negocio = como si no viniera.
+  const intendedOrderId = await resolveIntendedOrderId(input.venueId, input.intendedOrderId)
+  if (intendedOrderId && (await leerSiEsCuentaDeTarjetas(prisma, intendedOrderId))) {
+    return reject('GIFT_CARD_SALE')
+  }
+
   const priorPaidOrderCount = await prisma.order.count({
     where: {
       customerId: input.newCustomerId,
       venueId: input.venueId,
-      ...(input.intendedOrderId ? { id: { not: input.intendedOrderId } } : {}),
+      ...(intendedOrderId ? { id: { not: intendedOrderId } } : {}),
       OR: [{ paymentStatus: 'PAID' }, { payments: { some: { status: 'COMPLETED', type: 'REGULAR' } } }],
+      // `AND`, never a top-level key: it must not collide with the `OR` above.
+      AND: [WHERE_ORDEN_SIN_TARJETAS],
     },
   })
   if (priorPaidOrderCount > 0) {

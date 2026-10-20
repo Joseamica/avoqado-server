@@ -17,12 +17,15 @@ import { authenticateTokenMiddleware } from '../../middlewares/authenticateToken
 import { checkPermission } from '../../middlewares/checkPermission.middleware'
 import { simCustodyIdempotency } from '../../middlewares/simCustodyIdempotency.middleware'
 import { moduleService, MODULE_CODES } from '../../services/modules/module.service'
+import { SIM_CUSTODY_ERROR_CODES } from '../../lib/sim-custody-error-codes'
+import prisma from '../../utils/prismaClient'
 import {
   assignToPromoter,
   assignToPromoterDirect,
   assignToSupervisor,
   collectFromPromoter,
   collectFromSupervisor,
+  collectFromSupervisorBulk,
   listEvents,
   reassignPromoter,
   reassignSupervisor,
@@ -50,6 +53,32 @@ const singleLimiter = rateLimit({
   keyGenerator: actorKey,
   message: { error: 'RATE_LIMIT', message: 'Demasiadas solicitudes. Intenta de nuevo en un minuto.' },
 })
+
+/**
+ * `x-venue-id` only picks the venue checkPermission evaluates the caller's role IN. On these
+ * org-scoped routes that venue must belong to the org in the URL — otherwise a role held in
+ * ANOTHER org (OWNER there, plain staff here) authorizes writes on this org's SIMs (Codex, 18-oct-2026).
+ * Scoped to /sim-custody on purpose: this router is mounted on every /organizations/:orgId request.
+ */
+async function requireHeaderVenueInRouteOrg(req: Request, res: Response, next: NextFunction) {
+  try {
+    const headerVenueId = req.headers['x-venue-id']
+    if (typeof headerVenueId !== 'string' || headerVenueId.length === 0) return next()
+    const venue = await prisma.venue.findFirst({
+      where: { id: headerVenueId, organizationId: req.params.orgId },
+      select: { id: true },
+    })
+    if (!venue) {
+      const entry = SIM_CUSTODY_ERROR_CODES.TENANT_MISMATCH
+      return res.status(entry.httpStatus).json({ error: entry.code, message: entry.messages.es })
+    }
+    next()
+  } catch (err) {
+    next(err)
+  }
+}
+
+router.use('/sim-custody', requireHeaderVenueInRouteOrg)
 
 router.post(
   '/sim-custody/assign-to-supervisor',
@@ -150,6 +179,18 @@ router.post(
   simCustodyIdempotency({ required: true }),
   bulkLimiter,
   reassignSupervisor,
+)
+
+// Admin → Supervisor bulk collection (Asana 1219467533602693). Same permission
+// as the single-SIM collect; only SUPERVISOR_HELD SIMs move (Isaac, "opción A").
+router.post(
+  '/sim-custody/collect-from-supervisor-bulk',
+  authenticateTokenMiddleware,
+  requireSerializedInventoryModule,
+  checkPermission('sim-custody:collect-from-supervisor'),
+  simCustodyIdempotency({ required: true }),
+  bulkLimiter,
+  collectFromSupervisorBulk,
 )
 
 router.post(

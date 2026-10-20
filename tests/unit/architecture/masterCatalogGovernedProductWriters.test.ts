@@ -21,7 +21,8 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   // Conector Shopify (plan v2 B1): alta y restauración con el candado en su transacción; edición sin `active`.
   'src/services/commerce-channels/shopify/shopify.catalog.service.ts': { create: 1, update: 2 },
   // WHY (plan 5, D2): replace archives through archivarProductos; no product deleteMany left here.
-  'src/services/dashboard/menu.dashboard.service.ts': { create: 1, update: 1, updateMany: 3 },
+  // Bloque 5 (V8): el 2.º update deja a cada talla que crea el import igual que un re-import, detrás del cerco CREATE.
+  'src/services/dashboard/menu.dashboard.service.ts': { create: 1, update: 2, updateMany: 3 },
   'src/services/dashboard/pricing.service.ts': { update: 1 },
   'src/services/dashboard/printStation.dashboard.service.ts': { updateMany: 1 },
   // WHY (plan 5): deleteProduct archiva por archivarProductos (updateMany con active:false), ya no por un update propio.
@@ -40,7 +41,15 @@ const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> 
   'src/services/onboarding/demoCleanup.service.ts': { deleteMany: 1 },
   'src/services/onboarding/demoSeed.service.ts': { create: 1, update: 2 },
   'src/services/onboarding/venueCreation.service.ts': { create: 1 },
+  // Pedidos en línea (plan 1a): marcar/desmarcar platillos para la tienda. Sólo `availableOnline`, nunca `active`.
+  'src/services/online-ordering/menuAvailability.service.ts': { updateMany: 1 },
   'src/services/pos-sync/posSyncOrderItem.service.ts': { upsert: 1 },
+  // Variantes (spec 2026-10-14): el motor único escribe las copias del padre (alta, edición, agregar/renombrar/foto) tras el
+  // cerco del catálogo; archivar y separar sólo apagan o sacan de la familia (nunca activan).
+  'src/services/product-variants/productGroup.service.ts': { create: 1, update: 4, updateMany: 3 },
+  // Escritores con tx del bloque 5 (sumar productos que ya existen a una familia: agrupar, «Desde Shopify», import). Corren tras
+  // el cerco del catálogo que tomó su llamador; nunca tocan `active`. groupExisting.service ya escribe a través de éste.
+  'src/services/product-variants/groupWriterTx.ts': { update: 1 },
   'src/services/upsell/upsell.service.ts': { updateMany: 1 },
 }
 

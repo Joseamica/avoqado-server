@@ -75,7 +75,7 @@ import { Prisma } from '@prisma/client'
 import { endOfDay as finDelDiaLocal, startOfDay as inicioDelDiaLocal } from 'date-fns'
 import { formatInTimeZone, fromZonedTime, toZonedTime } from 'date-fns-tz'
 import { logAction } from '../src/services/dashboard/activity-log.service'
-import { aggregateShiftPayments, type ShiftPaymentForTotals } from '../src/services/tpv/shift.tpv.service'
+import { ORDEN_DE_TARJETAS_SELECT, aggregateShiftPayments, type ShiftPaymentForTotals } from '../src/services/tpv/shift.tpv.service'
 import prisma from '../src/utils/prismaClient'
 
 type Decimal = Prisma.Decimal
@@ -181,7 +181,8 @@ const SELECT_PAGO = {
   type: true,
   orderId: true,
   processedById: true,
-  order: { select: { orderNumber: true, shiftId: true } },
+  // Tarjetas de regalo (R3, B5 r1): la marca de cuenta de tarjetas, para que `totalesDe` no cuente su venta como venta del turno.
+  order: { select: { orderNumber: true, shiftId: true, ...ORDEN_DE_TARJETAS_SELECT } },
   processedBy: { select: { firstName: true, lastName: true } },
 } as const
 
@@ -831,6 +832,8 @@ async function aplicarPlan(ctx: { plan: PlanDia[]; venueId: string; zona: string
             tenderTypeId: true,
             tenderCountsAsCash: true,
             orderId: true,
+            // Tarjetas de regalo (R3, B5 r1): sin la marca, el `Shift.totalSales` guardado contaría la venta de tarjetas.
+            order: { select: ORDEN_DE_TARJETAS_SELECT },
           },
         })
         const t = totalesDe(

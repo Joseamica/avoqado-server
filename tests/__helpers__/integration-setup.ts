@@ -50,6 +50,9 @@ process.env.OTP_PEPPER = 'test-otp-pepper-secret'
 // APAGADA y la integración probaría el modo degradado en vez del real — un reintento del
 // refresco se leería como robo. Hex de 32 bytes, igual que en el setup de unit.
 process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY || 'b'.repeat(64)
+// Tarjetas de regalo: las mismas llaves de prueba que el setup de unit (hex de 32 bytes).
+process.env.GIFT_CARD_CODE_KEY = process.env.GIFT_CARD_CODE_KEY || 'c'.repeat(64)
+process.env.GIFT_CARD_HMAC_KEY = process.env.GIFT_CARD_HMAC_KEY || 'd'.repeat(64)
 // Some app-level integration suites import module-load singletons. A dummy key
 // lets those deterministic paths initialize without authorizing a real request.
 process.env.OPENAI_API_KEY = 'sk-test-dummy-for-jest'

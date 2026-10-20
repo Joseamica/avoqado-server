@@ -94,6 +94,13 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: jest.fn(),
 }))
 
+// R8 (tarjetas de regalo): el reconciliador que cierra una cuenta ya cubierta activa sus sobres aunque no nazca vale.
+const activarSobresMock = jest.fn()
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: unknown[]) => activarSobresMock(...a),
+}))
+
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import * as productInventoryService from '@/services/dashboard/productInventoryIntegration.service'
@@ -186,6 +193,20 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
     // Los cobros ya cubrían la cuenta ANTES de este cierre (`settledBeforeThisPayment`), así
     // que no nace un segundo vale: reconciliar no puede volver a descontar mercancía.
     expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+  })
+
+  it('R8: cerrar una cuenta ya cubierta activa sus sobres en la MISMA tx aunque no nazca vale (idempotente)', async () => {
+    activarSobresMock.mockResolvedValue({ activated: ['gc-1'] })
+    const renglones = [{ id: 'it-1', giftCardId: 'gc-1' }]
+    const fakeTx = lockedTx(
+      jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: renglones }),
+    )
+    p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
+
+    await reconcileOrderFromPayments('ord-1')
+
+    expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+    expect(activarSobresMock).toHaveBeenCalledWith(fakeTx, expect.objectContaining({ venueId: 'v1', orderId: 'ord-1', items: renglones }))
   })
 
   it('no toca una orden cuyos cobros NO la cubren', async () => {

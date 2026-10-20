@@ -278,4 +278,19 @@ describe('sellarRenglones / liberarSellosDe / renglonesSellados (integración)',
     expect(resultado).toEqual({ liberados: 0 })
     expect(await prisma.$transaction(tx => renglonesSellados(tx, `orden-inexistente-${randomUUID()}`))).toEqual([])
   })
+
+  it('🔴 8: el sello guarda createdAt en UTC aunque la sesión de Postgres esté en otra zona (full-testing integral 15-oct, D4)', async () => {
+    const orden = await nuevaOrdenConRenglones(1)
+    const cfdi = await nuevoCfdi(orden.id)
+    const antes = Date.now()
+    // La base local de la Mac corre en America/Mexico_City; Render en UTC. Se fuerza la zona para que la prueba
+    // falle igual en los dos lados: el DEFAULT del SQL crudo tomaba la hora de pared de la sesión (6 h atrás).
+    await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SET LOCAL TIME ZONE 'America/Mexico_City'`
+      await sellarRenglones(tx, { cfdiId: cfdi.id, intento: 1, renglones: [{ orderItemId: orden.itemIds[0], tratamiento: 'IVA_16' }] })
+    })
+    const [sello] = await sellosDe(orden.itemIds[0])
+    expect(sello.createdAt.getTime()).toBeGreaterThanOrEqual(antes - 5_000)
+    expect(sello.createdAt.getTime()).toBeLessThanOrEqual(Date.now() + 5_000)
+  })
 })

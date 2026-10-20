@@ -50,6 +50,9 @@ const SIN_TURNO_A_PROPOSITO: Record<string, string> = {
   'delivery-channels/core/deliveryOrderIngestion.service.ts':
     'Reparto (Uber/Rappi/DiDi): el pedido lo levanta el cliente en la app del marketplace y esto ' +
     'corre en su webhook, sin cajero; `scheduledFor` permite además pedidos para otro día.',
+  'online-ordering/order.service.ts':
+    'Pedidos en línea: el comensal pide desde su teléfono, sin cajero enfrente. El turno del dinero vive en `Payment.shiftId`, ' +
+    'que estampa el cobro al recoger (`payCashOrder`).',
 }
 
 /** Cada `await <cliente>.order.create(…)` de `src/services/`, con su archivo y su cuerpo. */

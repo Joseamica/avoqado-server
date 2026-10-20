@@ -93,6 +93,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
+import { soloElDuenoBorraDeFabrica } from '../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
 import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
@@ -353,6 +354,7 @@ import {
   financialProviderRoutes,
 } from './dashboard/financialConnection.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
+import onlineOrderingDashboardRoutes from './dashboard/onlineOrdering.dashboard.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import activityLogRoutes from './dashboard/activityLog.routes'
 import reportsRoutes from './dashboard/reports.routes'
@@ -363,6 +365,8 @@ import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
 import floorPlanRoutes from './dashboard/floorPlan.routes'
+import productGroupRoutes from './dashboard/productGroup.routes'
+import productOptionRoutes from './dashboard/productOption.routes'
 import receiptLayoutRoutes from './dashboard/receiptLayout.routes'
 import customerDisplayRoutes, { customerDisplayDevicesRoutes } from './dashboard/customerDisplay.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
@@ -403,6 +407,7 @@ import saleVerificationOrgDashboardRoutes from './dashboard/saleVerification.org
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
+import giftCardsRoutes from './dashboard/giftCards.routes'
 // Campañas de correo a clientes (Fase 1C-A, Task 6)
 import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
 import birthdayAutomationRoutes from './dashboard/birthdayAutomation.routes'
@@ -4537,6 +4542,7 @@ router.use('/', authenticateTokenMiddleware, financialProviderRoutes)
 
 // Payment Link Management routes (ADMIN+)
 router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)
+router.use('/venues/:venueId/online-ordering', authenticateTokenMiddleware, onlineOrderingDashboardRoutes)
 
 // Venue Crypto Config routes (OWNER+) - Per-venue B4Bit device management
 router.post(
@@ -4612,6 +4618,9 @@ router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFe
 router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
 // PLANO DE MESAS — editor del dashboard (2026-10-08). Permiso y Servicio de mesas dentro del sub-router.
 router.use('/venues/:venueId/floor-plan', authenticateTokenMiddleware, floorPlanRoutes)
+// VARIANTES DE PRODUCTO (spec 2026-10-14). Permisos y candado PRODUCT_VARIANTS dentro de cada sub-router.
+router.use('/venues/:venueId/product-groups', authenticateTokenMiddleware, productGroupRoutes)
+router.use('/venues/:venueId/product-options', authenticateTokenMiddleware, productOptionRoutes)
 router.use('/venues/:venueId/receipt-layout', authenticateTokenMiddleware, receiptLayoutRoutes)
 // CUSTOMER_DISPLAY — la pantalla que ve el cliente en la tablet. Marca, textos y pasos gratis; las promos en reposo
 // (PRO) se revisan por CAMPO en el servicio, no por ruta: sin plan el negocio tiene que poder seguir editando su marca y
@@ -4655,6 +4664,10 @@ router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, goog
 
 // Credit Packs / Bundles (multi-product packages with credits)
 router.use('/venues/:venueId/credit-packs', authenticateTokenMiddleware, creditPackRoutes)
+
+// Tarjetas de regalo (fase 1a): ajustes, lista, detalle con su libreta, acciones de gerente, cancelar una venta, reportes
+// para el contador y exportación de saldos vivos. Permisos `giftCards:*` dentro del sub-router; el plan sólo al prender (R9).
+router.use('/venues/:venueId/gift-cards', authenticateTokenMiddleware, giftCardsRoutes)
 
 // @temporary - Serialized Inventory Demo routes (delete after final implementation)
 // For PlayTelecom SIM sales visualization demo
@@ -5518,11 +5531,14 @@ router.get(
  *       404:
  *         description: Terminal not found or offline
  */
+// 🔴 `tpv:command` abre los comandos del piso (bloquear, reiniciar…); borrar de fábrica exige además
+// `tpv-factory-reset:execute` (dueño). Fijado en tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts.
 router.post(
   '/tpv/:terminalId/command',
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5625,6 +5641,7 @@ router.post(
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5696,6 +5713,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:write'),
   validateRequest(sendCommandSchema),
+  // El `confirmationPin` que exige el esquema para FACTORY_RESET no se valida contra nada: el candado es este permiso.
+  soloElDuenoBorraDeFabrica(req => req.body?.commandType),
   tpvCommandController.sendCommand,
 )
 
@@ -7574,6 +7593,32 @@ router.post(
   checkPermission('menu:create'),
   validateRequest(CreateProductSchema),
   productController.createProductHandler,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/iva-por-producto:
+ *   get:
+ *     tags: [Products]
+ *     summary: Estado del IVA por producto del negocio
+ *     description: "Informativo y sin revisión (`revisado: false`). Encendido o apagado, contabilidad y los avisos de aparatos viejos. Los bloqueos del encendido se toman del 409 al guardar el producto."
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: "{ data: { encendido, habilitadoAt, contabilidad, bloqueos, avisos, facturasSinSello, revisado } }"
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/iva-por-producto',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(VenueIdParamsSchema),
+  productController.getIvaPorProductoHandler,
 )
 
 /**

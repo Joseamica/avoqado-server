@@ -51,6 +51,15 @@ export function parseVersionName(v: string | null | undefined): [number, number,
   return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)]
 }
 
+/** ¿`actual` es igual o más nueva que `minimo`? Lo que no se lee (vacío, sin número) ⇒ false: versión desconocida = no soporta. */
+export function versionAlMenos(actual: string | null | undefined, minimo: string | null | undefined): boolean {
+  const a = parseVersionName(actual)
+  const m = parseVersionName(minimo)
+  if (!a || !m) return false
+  for (let i = 0; i < 3; i++) if (a[i] !== m[i]) return a[i] > m[i]
+  return true
+}
+
 /**
  * Las tablets mandan `x-app-version` como NOMBRE de versión y el registro lo guarda en
  * `Terminal.version` (deviceRegistry.service.ts). No escriben `TerminalHealth`, así que medirlas
@@ -62,11 +71,7 @@ export function posSoportaDiseno(
   version: string | null | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  const minimum = parseVersionName(env[`RECEIPT_LAYOUT_MIN_${type}_VERSION`])
-  const actual = parseVersionName(version)
-  if (!minimum || !actual) return false
-  for (let i = 0; i < 3; i++) if (actual[i] !== minimum[i]) return actual[i] > minimum[i]
-  return true
+  return versionAlMenos(version, env[`RECEIPT_LAYOUT_MIN_${type}_VERSION`])
 }
 
 export interface ReceiptReadiness {

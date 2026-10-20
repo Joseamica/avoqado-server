@@ -1,4 +1,5 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
+import { asegurarCambioDeClienteBajoCandado, bloquearVentaParaLiga } from '@/services/shared/ligaDeClienteEnVenta'
 // services/dashboard/order.dashboard.service.ts
 
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
@@ -10,6 +11,7 @@ import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -27,6 +29,7 @@ import { summarizeRefunds } from '../shared/orderBalance'
 import { ORDEN_RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
+import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -451,7 +454,18 @@ function mapOrderPromotions(
  * Actualizar una orden.
  * SUPERADMIN puede actualizar más campos que usuarios normales.
  */
-export async function updateOrder(venueId: string, orderId: string, data: Partial<Order>) {
+export async function updateOrder(
+  venueId: string,
+  orderId: string,
+  data: Partial<Order>,
+  opciones: {
+    /**
+     * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos): ¿quien edita tiene `payments:create`? Lo resuelve el controller con el
+     * resolvedor efectivo. Sin él, en una venta COBRADA no se cambia el cliente (403). Sin decirlo, falla CERRADO.
+     */
+    puedeCambiarClienteEnVentaCobrada?: boolean
+  } = {},
+) {
   // Extract allowed fields for SUPERADMIN editing.
   //
   // 🔴 DINERO — `total`, `tipAmount` y `subtotal` NO se editan a mano (rebanada 0 de
@@ -475,7 +489,13 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
   }
 
   const topologyWrite = tableId !== undefined || status !== undefined
+  // 🔴 R4-2: tocar el cliente se decide bajo el candado de la venta (como toda escritura de su atribución).
+  const tocaCliente = customerId !== undefined
   const update = async (client: Prisma.TransactionClient) => {
+    // Con topología, `lockTableOrderScope` ya toma ESTA venta `FOR UPDATE` (más fuerte que el candado de la liga). Sin ella,
+    // si la petición toca el cliente, la PRIMERA sentencia es el candado de la liga (`bloquearVentaParaLiga`).
+    if (!topologyWrite && tocaCliente && !(await bloquearVentaParaLiga(client, { venueId, orderId })))
+      throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
     if (topologyWrite)
       await lockTableOrderScope(client, { venueId, orderIds: [orderId], tableIds: tableId ? [tableId] : [] }).catch(error => {
         if (error instanceof NotFoundError) {
@@ -494,12 +514,24 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
         id: orderId,
         venueId,
       },
-      select: { status: true, venueId: true },
+      select: { status: true, venueId: true, paymentStatus: true, customerId: true },
     })
 
     if (!currentOrder) {
       throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
     }
+
+    // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): `Order.customerId` es el respaldo heredado de la lealtad. En
+    // una venta COBRADA, CAMBIAR el cliente sin `payments:create` (`orders:update` lo trae COCINA) ⇒ 403 y no se guarda nada
+    // de esta petición. Mismo cliente, venta abierta o con permiso ⇒ como hoy. R11-2: «cobrada» es el predicado compartido
+    // (también los cobros capturados que ya la cubren aunque el estado se atrasó), leído bajo este mismo candado.
+    if (tocaCliente)
+      await asegurarCambioDeClienteBajoCandado(client, {
+        venueId,
+        orderId,
+        clienteNuevo: customerId || null,
+        puedeCobrar: opciones.puedeCambiarClienteEnVentaCobrada === true,
+      })
 
     if (customerId) {
       const customer = await client.customer.findFirst({
@@ -588,11 +620,13 @@ export async function updateOrder(venueId: string, orderId: string, data: Partia
           notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
       )
-    return { updatedOrder: await escribir(client), cancelando }
+    const updatedOrder = await escribir(client)
+    // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.
+    if (cancelando) await desactivarSobresPendientesDeCuentaEnTx(client, { venueId, orderId, staffId: null })
+    return { updatedOrder, cancelando }
   }
-  const { updatedOrder, cancelando } = topologyWrite
-    ? await prisma.$transaction(update, { timeout: 15_000, maxWait: 5_000 })
-    : await update(prisma)
+  const { updatedOrder, cancelando } =
+    topologyWrite || tocaCliente ? await prisma.$transaction(update, { timeout: 15_000, maxWait: 5_000 }) : await update(prisma)
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
   // 🔴 La deducción por CAMBIO DE STATUS se retiró (audit Codex xhigh 2026-08-14).
@@ -651,11 +685,14 @@ export async function deleteOrder(venueId: string, orderId: string) {
           notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
       )
-      return tx.order.update({
+      const cancelada = await tx.order.update({
         where: { id: orderId },
         // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.
         data: { status: 'CANCELLED', version: { increment: 1 } },
       })
+      // Spec § 5.1.8: los sobres PENDING de una cuenta de tarjetas sin cobrar quedan DEACTIVATED.
+      await desactivarSobresPendientesDeCuentaEnTx(tx, { venueId, orderId, staffId: null })
+      return cancelada
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
@@ -751,7 +788,16 @@ export async function settleOrder(
   // que entregan los demás canales (`Math.max(0, total − propina)`).
   let baseParaLealtad = 0
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
+  const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
+    '@/services/mobile/areaTicketV7.mobile.service'
+  )
+  let sesionDeValesCerrada = false
   const settledAmount = await prisma.$transaction(async tx => {
+    // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), antes del candado de la venta:
+    // el orden de la finalización y del registrador de la terminal.
+    const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+    sesionDeValesCerrada = false
     await lockExistingOrderForPayment(tx, { venueId, orderId })
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
@@ -822,6 +868,7 @@ export async function settleOrder(
       amountPesos: shiftAmount,
       tipPesos: shiftTip,
       incrementTotalOrders: priorCompletedPaymentCount === 0,
+      orderId,
     })
 
     // Create a payment record to track the settlement
@@ -874,7 +921,11 @@ export async function settleOrder(
       staffId: null,
     })
     postingId = posting?.id ?? null
+    // R8 / Review Focus 3: liquidar desde el dashboard activa los sobres de una cuenta de tarjetas en esta transacción.
+    await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: actorStaffId, items: itemsParaPosting })
     settlementPaymentId = settlementPayment.id
+    // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+    if (vales) sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId })
     // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
     await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
 
@@ -975,7 +1026,7 @@ export async function settleOrder(
     action: 'ORDER_SETTLED',
     entity: 'Order',
     entityId: order.id,
-    data: { settledAmount, orderNumber: order.orderNumber },
+    data: { settledAmount, orderNumber: order.orderNumber, ...(sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}) },
   })
 
   return {

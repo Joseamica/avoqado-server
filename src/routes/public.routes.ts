@@ -1,3 +1,4 @@
+import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
 import express, { Router } from 'express'
 import { z } from 'zod'
@@ -89,8 +90,10 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.service'
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
+import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
 
 const router = Router()
+router.use('/document-requests', documentRequestsRoutes)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
@@ -126,6 +129,9 @@ const cfdiPerKeyLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 })
+
+// Pedidos en línea (tienda del restaurante): /venues/:venueSlug/ordering/*
+router.use('/venues/:venueSlug/ordering', onlineOrderingPublicRoutes)
 
 // Digital Receipt routes
 router.get('/receipt/:accessKey', getPublicReceipt)

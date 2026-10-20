@@ -14,6 +14,7 @@ import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
 import { totalesDelComprobante } from '../shared/ticketTotals'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -94,6 +95,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         order: {
           select: {
             orderNumber: true,
+            // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
+            type: true,
+            table: { select: { number: true } },
           },
         },
         processedBy: {
@@ -127,6 +131,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       createdAt: p.createdAt.toISOString(),
       orderNumber: p.order?.orderNumber ?? null,
       staffName: p.processedBy ? `${p.processedBy.firstName ?? ''} ${p.processedBy.lastName ?? ''}`.trim() : null,
+      // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
+      orderType: p.order?.type ?? null,
+      tableNumber: p.order?.table?.number ?? null,
     })),
     meta: {
       total,
@@ -161,6 +168,8 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       tenderTypeId: true,
       tenderCountsAsCash: true,
       tenderLabel: true,
+      // Tarjetas de regalo (B1): la marca del tender de sistema decide «Devolver con» y el aviso «regresa al saldo».
+      tenderType: { select: { systemKind: true } },
       status: true,
       cardBrand: true,
       maskedPan: true,
@@ -178,6 +187,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       order: {
         select: {
           orderNumber: true,
+          // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
+          type: true,
+          table: { select: { number: true } },
           items: {
             select: {
               id: true,
@@ -271,6 +283,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     createdAt: payment.createdAt.toISOString(),
     orderNumber: payment.order?.orderNumber ?? null,
     staffName: payment.processedBy ? `${payment.processedBy.firstName ?? ''} ${payment.processedBy.lastName ?? ''}`.trim() : null,
+    // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
+    orderType: payment.order?.type ?? null,
+    tableNumber: payment.order?.table?.number ?? null,
     remainingRefundable,
     remainingRefundableSale,
     remainingRefundableTip,
@@ -278,7 +293,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     // todo lo demás se reembolsa como el efectivo. Misma regla que acepta `refund-request` (`seDevuelveEnTerminal`).
     refundOnTerminal: seDevuelveEnTerminal(payment),
     // Aditivo (30-sep-2026): ¿el cajero puede escoger con qué devolver? Misma regla que valida el reembolso.
-    canChooseRefundMethod: sePuedeEscogerComoDevolver(payment),
+    canChooseRefundMethod: sePuedeEscogerComoDevolver({ ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }),
+    // Aditivo (tarjetas de regalo, 1a): la devolución de este cobro regresa al saldo de la tarjeta (las apps 1b lo dicen así).
+    refundToGiftCardBalance: isGiftCardTenderKind(payment.tenderType?.systemKind),
     tenderLabel: payment.tenderLabel ?? null,
     // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
     // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve

@@ -33,6 +33,8 @@ const esperado: Record<string, number> = {
   'mobile/areaTicketV7.mobile.service.ts': 1,
   'mobile/estimate.mobile.service.ts': 1,
   'reservation/createOrderFromReservation.ts': 1,
+  // Tarjetas de regalo (spec 2026-10-14): la cuenta de tarjetas nace en el turno de caja abierto del negocio.
+  'giftCards/giftCardOrder.service.ts': 1,
   // 🔴 El chokepoint vive AQUÍ desde 5i. Entra a la tabla para que «ningún shift.findFirst
   // filtra por staffId» lo vigile también. No llama a `turnoAbiertoDelNegocio`: hace su
   // propio lookup por venue, sin persona.

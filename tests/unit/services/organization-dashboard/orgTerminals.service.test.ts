@@ -351,6 +351,7 @@ describe('OrgTerminals Service', () => {
   describe('createTerminalForOrg', () => {
     it('should validate venue belongs to org and delegate to superadmin', async () => {
       prismaMock.venue.findFirst.mockResolvedValue({ id: venueId, name: 'Store A' })
+      prismaMock.venue.findMany.mockResolvedValue([{ id: venueId }]) // las sucursales de la org, para acotar lo que se anexa
       ;(superadminCreateTerminal as jest.Mock).mockResolvedValue({
         terminal: mockTerminal,
         activationCode: null,
@@ -366,6 +367,7 @@ describe('OrgTerminals Service', () => {
           type: 'TPV_ANDROID',
         },
         staffId,
+        { puedeAsignarComercios: false },
       )
 
       expect(superadminCreateTerminal).toHaveBeenCalledWith(
@@ -375,6 +377,9 @@ describe('OrgTerminals Service', () => {
           name: 'Terminal 1',
           type: 'TPV_ANDROID',
           staffId,
+          // Aun sin el candado de comercios, el alta anexa sola por serial, pero SÓLO comercios de esta org
+          // (decisión del founder, B, 16-oct; nunca `null` ni sin filtro).
+          comerciosAutoAdjuntables: expect.objectContaining({ OR: expect.arrayContaining([expect.anything()]) }),
         }),
       )
       expect(result.terminal).toBeDefined()
@@ -384,7 +389,9 @@ describe('OrgTerminals Service', () => {
       prismaMock.venue.findFirst.mockResolvedValue(null)
 
       await expect(
-        createTerminalForOrg(orgId, { venueId: 'foreign-venue', serialNumber: 'SN-1', name: 'T1', type: 'TPV_ANDROID' }, staffId),
+        createTerminalForOrg(orgId, { venueId: 'foreign-venue', serialNumber: 'SN-1', name: 'T1', type: 'TPV_ANDROID' }, staffId, {
+          puedeAsignarComercios: true,
+        }),
       ).rejects.toThrow(ForbiddenError)
     })
   })
@@ -607,7 +614,9 @@ describe('OrgTerminals Service', () => {
       prismaMock.venue.findFirst.mockResolvedValue(null) // Venue not in org
 
       await expect(
-        createTerminalForOrg(orgId, { venueId: 'v-hack', serialNumber: 'S', name: 'T', type: 'TPV_ANDROID' }, staffId),
+        createTerminalForOrg(orgId, { venueId: 'v-hack', serialNumber: 'S', name: 'T', type: 'TPV_ANDROID' }, staffId, {
+          puedeAsignarComercios: true,
+        }),
       ).rejects.toThrow(ForbiddenError)
 
       expect(superadminCreateTerminal).not.toHaveBeenCalled()

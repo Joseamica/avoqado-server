@@ -69,7 +69,7 @@ cada cliente lo traduce a su mismo texto de piloto por el código, nunca por el 
   (`callback OAuth: firma válida en la forma …`, nunca el hmac). CONFIRMADO en vivo (C10, 9-oct-2026): tres callbacks reales de la tienda de
   prueba, los tres en la forma codificada, con un `host` sin el relleno `=` de base64; no quites la forma codificada. `hmac` está en
   `PARAMS_SENSIBLES` del logger.
-- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:68`): los valores de `product_status:` van en minúsculas y se
+- **Búsqueda de Shopify en minúsculas** (`FILTRO_ESTADO`, `catalog.service.ts:71`): los valores de `product_status:` van en minúsculas y se
   unen con OR, `(product_status:active OR product_status:draft)`. En mayúsculas Shopify devuelve 0 variantes sin error: medido en vivo (C10,
   API 2026-10, 0 contra 25) y confirmado por personal de Shopify, con la doc de `productVariants` equivocada
   ([community.shopify.dev/t/21623](https://community.shopify.dev/t/bug-report-graphql-api-productvariants-product-status-query-not-working/21623)).
@@ -143,11 +143,12 @@ Por qué «usar Avoqado» pone el espejo en `S` y no espera al mensajero: con `A
 espejo dejaría la cuenta en 11 contra las 12 piezas de Avoqado. Si hay filas vivas, la resolución contesta 409 `SHOPIFY_CAMBIOS_EN_CAMINO`.
 
 **Orden de candados (índice §10.3, con el evento de §11.2), siempre éste:** Product (si se toca) → sucursal (`FOR SHARE`) → tienda
-(`FOR SHARE`) → pareja (`FOR UPDATE`) → `Inventory` → buzón/revisión → evento (`FOR SHARE`, al final)
+(`FOR SHARE`) → pareja (`FOR UPDATE`) → `Inventory` → buzón/revisión → evento (`FOR SHARE`, al final). Con una talla agrupada que se archiva
+o se restaura, el negocio y su familia van ANTES del Product (§4 quater).
 
 - **Product se bloquea `FOR NO KEY UPDATE`** (K11): serializa con otros escritores del catálogo sin frenar el `FOR KEY SHARE` de una venta
   que inserta un renglón con llave foránea al producto. Catálogo y archivo lo piden explícito (`bloquearProductos`,
-  `catalog.service.ts:418`; `archivarPareja(…)`, `:1197`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
+  `catalog.service.ts:434`; `archivarPareja(…)`, `:1330`); `switchInventoryMethod(…)` y `setProductInventoryMethod(…)` lo toman con el
   `product.update` que ya hacen (no toca llaves) y llaman a `suspenderParejaPorReceta(…)` DESPUÉS, nunca antes.
 - **El mensajero**, con o sin cerco, toma el orden general sin Product: sucursal y tienda `FOR SHARE`, pareja `FOR UPDATE`, la fila del
   buzón `FOR UPDATE` (releída: sigue `IN_PROGRESS` con su `claimToken`) y, con cerco de evento, el evento `FOR SHARE` al final
@@ -282,6 +283,53 @@ cuadre y conteo no cambian, y el piloto (`PILOTO`, OAuth) convive igual.
 - **Lo que se ve:** el resumen suma `metodo` (`PILOTO` | `APP_DEL_COMERCIO`) y `clientIdTerminacion` (los 4 últimos del Client ID; la
   tarjeta dice «Conectada con la app de tu tienda (…abcd)» y ofrece «Cambiar llaves»). `shopify_status` del MCP lleva `metodo` y nada de las
   llaves (ni la terminación): un secret nunca pasa por la IA, y conectar no tiene herramienta del MCP.
+
+## 4 quater. Tallas agrupadas: la familia es de Avoqado (variantes, bloque 5)
+
+Spec: `docs/superpowers/specs/2026-10-18-variantes-bloque-5-design.md` del workspace (manda su §0, V1-V8; founder, 18-oct, opción A).
+Shopify manda en cada talla su stock, su SKU y su código; la familia (nombre, fotos, opciones, IVA, categoría, extras) es de Avoqado.
+
+- **Se ligan tallas de cualquier familia:** una talla agrupada se liga como cualquier producto; `motivoParaNoLigar` ya no da
+  `PRODUCTO_CON_VARIANTES`. El conector nunca crea ni cambia una familia solo, salvo revivirla (V7, abajo).
+- **Qué escribe el conector en una talla agrupada:** `actualizarPareja` sólo le escribe `sku` y `gtin` (con sus avisos `SKU_CHOCA` y
+  `CODIGO_REPETIDO` de siempre) y la pareja; nunca el nombre ni la foto, que son de su familia (el trigger `Product_zz_grupo_escritor_unico`
+  lo rechazaría). Si Shopify renombra el producto o cambia una foto, la talla no cambia (V5). El stock no cambia en nada: una talla agrupada
+  se sincroniza (espejo, buzón, guardia) igual que una suelta, y agrupar nunca mueve `Inventory`, movimientos, buzón ni la pareja.
+- **`shopifyCatalog`:** cada pareja guarda lo que Shopify dice de su variante (`catalogoDe`: `title`, `options` sin «Default Title»
+  —`opcionesReales`—, `productImage` y `variantImage`) al ligar y en cada actualización (importación, aviso y cuadre). Sólo informa: «Desde
+  Shopify» arma con eso la propuesta de familia; nada la aplica solo.
+- **Sin reescribir lo mismo:** `actualizarPareja` escribe el `Product` sólo si cambia su `sku`, su `gtin` o (en una suelta) su nombre o
+  su foto. Reescribir lo mismo subía `updatedAt` con cada aviso o cuadre y volvía vieja la huella de «Desde Shopify».
+- **«Desde Shopify» (V3):** `shopifyFamilies.service.ts` arma una propuesta por producto de Shopify con lo que guardó cada pareja, y
+  el dueño la aplica una por una o con «Agrupar todas»; las dos llevan vista previa y huella, y con los productos bloqueados vuelven
+  a armar la propuesta y comparan la huella (una talla que Shopify ligó en medio ⇒ «Cambió desde que lo viste»). El destino de
+  «Agregar a X» es la familia SHOPIFY viva con su llave o, si no hay, la ÚNICA familia viva (de cualquier origen: hecha a mano o por
+  el import y ligada por SKU, B8) que ya tiene tallas ligadas a ese producto; con dos o más, bloqueada: «Las tallas de este producto
+  están en varias familias: agrúpalas a mano.».
+- **`source = SHOPIFY` y `externalId` sólo identifican (V4):** dicen de qué producto de Shopify salió la familia (para las propuestas
+  y la llave); no le dan a Shopify ningún mando sobre ella ni apartan el nombre.
+- **No lista o bloqueada (V6):** una pareja sin `shopifyCatalog`, o con uno mal formado, deja la propuesta «Este producto se completa
+  en la próxima sincronización con Shopify.»; más de 3 opciones, más de 100 valores o más de 250 tallas ⇒ «No se puede agrupar: …»;
+  una combinación que ya existe en la familia (viva o archivada) ⇒ esa talla se salta con su motivo.
+- **Orden de candados con familia** (el del motor: negocio → familia → producto, y después el de §4): `archivarPareja` de una talla agrupada
+  toma el negocio (`Venue FOR SHARE`) y la familia `FOR UPDATE` con `lockGroupForCleanup` (también si ya está archivada: la segunda baja)
+  ANTES del producto. La familia se lee sin candado y se re-verifica con el producto bloqueado; si cambió, error «… se reintenta». Antes era
+  producto → negocio contra negocio → familia → tallas de quien edita la familia: borrar en Shopify mientras el dueño la editaba se trababa
+  (40P01). El upsert por talla no bloquea familias (no las escribe), salvo para restaurar una talla agrupada: la familia de una talla que
+  archivó el conector se toma después del cerco de gobierno y antes de `bloquearProductos`, con la misma re-verificación.
+- **La variante que vuelve (V7):** una talla agrupada que archivó el conector vuelve sólo si su familia la recibe: viva y con menos de 250
+  tallas vivas ⇒ vuelve; archivada por el conector (`deletedBy = SHOPIFY_SYNC`) y sin otra familia viva con su llave
+  `(venueId, source, externalId)` ⇒ la familia revive con ella (`reviveGroupTx`, `SHOPIFY_PRODUCT_GROUP_RESTORED` en `ActivityLog`); si no
+  (archivada por el dueño, llena o con la llave ocupada), se queda archivada con `PRODUCTO_ARCHIVADO`: «Su familia está archivada o llena:
+  restáurala en Avoqado.». Con la restauración rechazada, ni la rama sin pareja ni `actualizarPareja` siguen: no ligan, no borran el aviso,
+  devuelven `PROBLEMA` y nadie inicia la pareja (Codex r5 R5-4). Si después la familia sí la recibe (se liberó lugar o la llave), la talla
+  vuelve por cualquiera de las dos ramas y ese aviso se borra. Ese aviso sobrevive a la limpieza de `archivarPareja`: cuando termina el
+  envío de una pareja retenida y la segunda baja la borra, se borran sus demás avisos pero no el `PRODUCTO_ARCHIVADO` del rechazo de la
+  familia (terminar un envío no resuelve una familia).
+- **Identidad al revivir (Tarea 4):** «llave libre» la decide `familyIdentityConflict` de `groupWriterTx.ts`, la misma política con la
+  que se crea y se renombra una familia: una SHOPIFY sólo por su llave; una MANUAL (B8) también por su nombre, así que una MANUAL
+  archivada por el conector no revive si otra MANUAL viva ya tiene su nombre (se queda archivada con el mismo aviso).
+- Pruebas: `tests/integration/shopify/familias.integration.test.ts`.
 
 ## 5. `Inventory` que desaparece o vuelve ⇒ suspender y reactivar la pareja, NUNCA borrarla
 
@@ -457,5 +505,6 @@ la guía. La página nunca ofrece comprar Premium para Shopify (§0).
   webhook y MCP `tests/unit/routes/shopify.*`, `tests/unit/controllers/dashboard/shopify.controller.test.ts` y
   `tests/unit/mcp-customer/shopify.tools.test.ts`.
 - **Verificar en GitHub:** sube TU commit a una rama `ci/<tema>` (carril del workspace); los deploys sólo corren en `main`. 🔴 NUNCA
-  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` publica en producción SIN importar la rama
-  (`ci-cd.yml:286`).
+  `gh workflow run` sobre esta rama: `workflow_dispatch` con `environment=production` es el botón de publicar. Desde el 14-oct sólo
+  despliega si corre en `main` (antes publicaba main desde CUALQUIER rama); en otra rama gasta una corrida completa y no verifica nada que
+  el carril no verifique.

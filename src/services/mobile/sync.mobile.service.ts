@@ -31,6 +31,8 @@ import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 import { CODIGOS_TRANSITORIOS } from '../shared/erroresTransitorios'
+import { hayDineroQueSeGuarda } from '../shared/orderBalance'
+import { esCobroCompletadoDeLaOrden } from '../shared/cuentaCancelada'
 import { hasFeatureAccess } from '../../middlewares/checkFeatureAccess.middleware'
 import {
   DEFAULT_OWNERSHIP_OVERRIDES,
@@ -658,7 +660,7 @@ export async function processIntents(params: {
         ack = await ackDesdeHuella(venueId, intent, huellaPrevia, localRefMap)
       } else {
         const dejarHuella = marca?.retomable ? dejarHuellaCon(venueId, intent.id, turno, marca) : undefined
-        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella })
+        ack = await applyIntent({ venueId, staffId, deviceId, intent, localRefMap, dejarHuella, authorizeIntent })
       }
     }
 
@@ -835,8 +837,10 @@ async function applyIntent(ctx: {
   intent: SyncIntentInput
   localRefMap: Map<string, string>
   dejarHuella?: DejarHuella
+  /** El del lote: lo pide UPDATE_DETAILS para saber si quien encoló puede cambiar el cliente de una venta cobrada (R4-2). */
+  authorizeIntent?: (intent: SyncIntentInput, requiredPermission: string) => boolean
 }): Promise<SyncIntentAck> {
-  const { venueId, staffId, intent, localRefMap, dejarHuella } = ctx
+  const { venueId, staffId, intent, localRefMap, dejarHuella, authorizeIntent } = ctx
 
   if (!KNOWN_TYPES.includes(intent.type)) {
     // Cliente más nuevo que el server: no perdemos el intent, lo rechazamos
@@ -859,7 +863,7 @@ async function applyIntent(ctx: {
       case 'CANCEL_ORDER':
       case 'MOVE_ORDER':
       case 'ASSIGN_ORDER':
-        return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella)
+        return await applyOrderMutation(venueId, staffId, intent, localRefMap, dejarHuella, authorizeIntent)
       case 'CLEAR_TABLE':
         return await applyClearTable(venueId, staffId, intent)
       case 'SPLIT_ORDER':
@@ -946,18 +950,33 @@ async function assertOwnership(
   orderId: string,
   overridePermissions: readonly string[] = DEFAULT_OWNERSHIP_OVERRIDES,
 ): Promise<void> {
-  if (!(await isTableOwnershipEnforced(venueId))) return
+  const ajena = await mesaAjenaDe(venueId, staffId, orderId, overridePermissions)
+  if (ajena) throw errorMesaAjena(ajena)
+}
+
+function errorMesaAjena(ajena: { ownerName: string }): Error {
+  const err: any = new Error(`Solo ${ajena.ownerName} puede modificar esta mesa`)
+  err.errorCode = 'TABLE_OWNED_BY_OTHER'
+  return err
+}
+
+/** El dueño de la mesa cuando la regla de propiedad le prohíbe a `staffId` tocarla; null si no aplica o puede. */
+async function mesaAjenaDe(
+  venueId: string,
+  staffId: string,
+  orderId: string,
+  overridePermissions: readonly string[],
+): Promise<{ ownerId: string; ownerName: string } | null> {
+  if (!(await isTableOwnershipEnforced(venueId))) return null
   const order = await prisma.order.findFirst({
     where: { id: orderId, venueId },
     select: { tableId: true, servedById: true, servedBy: { select: { firstName: true, lastName: true } } },
   })
-  if (!order || !order.tableId) return // mostrador — la regla no aplica
-  if (!order.servedById || order.servedById === staffId) return
-  if (await staffCanManageAllTables(staffId, venueId, undefined, undefined, overridePermissions)) return
+  if (!order || !order.tableId) return null // mostrador — la regla no aplica
+  if (!order.servedById || order.servedById === staffId) return null
+  if (await staffCanManageAllTables(staffId, venueId, undefined, undefined, overridePermissions)) return null
   const ownerName = order.servedBy ? `${order.servedBy.firstName} ${order.servedBy.lastName}`.trim() : 'otro mesero'
-  const err: any = new Error(`Solo ${ownerName} puede modificar esta mesa`)
-  err.errorCode = 'TABLE_OWNED_BY_OTHER'
-  throw err
+  return { ownerId: order.servedById, ownerName }
 }
 
 async function assertTableService(venueId: string): Promise<void> {
@@ -1360,21 +1379,48 @@ async function applyPayCash(
   }
   // Only numeric zero without a tip delegates the zero-balance decision to payCashOrder.
   const zeroWithoutTip = intent.payload.amountCents === 0 && (intent.payload.tipCents === undefined || intent.payload.tipCents === 0)
-  if (!orderId || !Number.isFinite(amountCents) || amountCents < 0 || (amountCents === 0 && !zeroWithoutTip)) {
+  // 🔴 R4-3 (Codex r3): la propina SOLA ($0 + $50) es dinero que ya está en el cajón; HTTP la registra y aquí se rechazaba. Mismas
+  // reglas que el controller: importe numérico 0 y propina numérica que se guarda (> 0 en centavos enteros, R4-4).
+  const soloPropina =
+    intent.payload.amountCents === 0 && typeof intent.payload.tipCents === 'number' && hayDineroQueSeGuarda(0, intent.payload.tipCents)
+  if (!orderId || !Number.isFinite(amountCents) || amountCents < 0 || (amountCents === 0 && !zeroWithoutTip && !soloPropina)) {
     return {
       id: intent.id,
       status: 'REJECTED',
       errorCode: 'INVALID_PAYLOAD',
-      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 sin propina para cerrar una cuenta en $0)',
+      message: 'PAY_CASH requiere orderId/localOrderId y amountCents > 0 (o $0 con propina, o $0 sin propina para cerrar una cuenta en $0)',
     }
   }
-  // Mismo override que la ruta online del cobro: la caja liquida cualquier cheque. Un cobro que YA existe (misma llave)
-  // no se vuelve a juzgar: la mesa pudo cambiar de mesero después; payCashOrder devuelve ese pago si es de esta cuenta.
-  const yaCobrado = await prisma.payment.findUnique({
+  // 🔴 R2-6 (founder 3-oct: el dinero capturado nunca se rechaza ni se pierde): el PAY_CASH es dinero que YA está en el cajón. La
+  // propiedad de mesa decide quién INICIA un cobro, no quién registra uno capturado: si un encargado pasó la mesa a otro mesero
+  // mientras el aparato estaba sin red, se registra con su autor real y deja rastro de la mesa ajena (payCashOrder). Mismo override
+  // que la ruta online del cobro. Un cobro que YA existe (misma llave) no deja otro rastro: payCashOrder devuelve ese pago.
+  const pagoDeLaLlave = await prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
-    select: { id: true },
+    select: { orderId: true, status: true, type: true },
   })
-  if (!yaCobrado) await assertOwnership(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  // R5-2: «ya cobrado» = un COBRO COMPLETADO de esta orden (no un intento fallido ni una devolución con esa llave).
+  const yaCobrado = !!pagoDeLaLlave && esCobroCompletadoDeLaOrden(pagoDeLaLlave, orderId)
+  const mesaAjena = await mesaAjenaDe(venueId, staffId, orderId, PAYMENT_OWNERSHIP_OVERRIDES)
+  const hayDinero = hayDineroQueSeGuarda(amountCents, tipCents)
+  // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado (cerraría la mesa de otro sin un peso): conserva el rechazo de antes.
+  // R4-4: medido como se guarda (centavos enteros): una fracción de centavo es $0.
+  if (mesaAjena && !hayDinero && !yaCobrado) throw errorMesaAjena(mesaAjena)
+  // 🔴 R5-1 (Codex r4): el $0 sobre mesa ajena pasó SÓLO porque su llave ya tiene ese cobro: payCashOrder lo devuelve, y si lo
+  // borraron entre esta lectura y la suya responde TABLE_OWNED_BY_OTHER en vez de crear un pago. Con dinero (> $0) es el registro
+  // de efectivo capturado de R2-6, con su rastro; si el pago existe, payCashOrder lo devuelve y el rastro no se usa.
+  const marcaDeMesaAjena = mesaAjena ? (hayDinero ? { mesaAjena } : { soloRecuperarPago: mesaAjena }) : {}
+  // 🔴 R6-3 (Codex r5 #3): la revisión de arriba va antes del candado del cobro. Con la regla encendida, payCashOrder la repite bajo
+  // el candado con la MISMA regla (overrides de cobro): un $0 sobre una cuenta que pasó a otro mesero en esa ventana ⇒
+  // TABLE_OWNED_BY_OTHER; el dinero capturado sigue y deja el rastro de mesa ajena.
+  const propiedadDeMesa = (await isTableOwnershipEnforced(venueId))
+    ? {
+        propiedadDeMesa: {
+          userId: staffId,
+          puedeCobrarAjena: () => staffCanManageAllTables(staffId, venueId, undefined, undefined, PAYMENT_OWNERSHIP_OVERRIDES),
+        },
+      }
+    : {}
 
   const payment = await orderMobileService.payCashOrder(venueId, orderId, {
     amount: amountCents,
@@ -1395,6 +1441,8 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    ...marcaDeMesaAjena,
+    ...propiedadDeMesa,
     ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
   })
   return {
@@ -1448,6 +1496,7 @@ async function applyOrderMutation(
   intent: SyncIntentInput,
   localRefMap: Map<string, string>,
   dejarHuella?: DejarHuella,
+  authorizeIntent?: (intent: SyncIntentInput, requiredPermission: string) => boolean,
 ): Promise<SyncIntentAck> {
   await assertTableService(venueId)
   const orderId = await resolveOrderId(venueId, intent.payload, localRefMap)
@@ -1479,13 +1528,24 @@ async function applyOrderMutation(
       break
     }
     case 'UPDATE_DETAILS': {
-      await orderMobileService.updateOrderDetails(venueId, orderId, {
-        name: typeof p.name === 'string' ? p.name : undefined,
-        notes: typeof p.notes === 'string' ? p.notes : undefined,
-        covers: typeof p.covers === 'number' ? p.covers : undefined,
-        customerId: typeof p.customerId === 'string' ? p.customerId : undefined,
-        orderType: typeof p.orderType === 'string' ? p.orderType : undefined,
-      } as any)
+      const customerId = typeof p.customerId === 'string' ? p.customerId : undefined
+      // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): el MISMO servicio que la ruta online decide, bajo el candado de
+      // la venta, si se puede cambiar el cliente de una venta COBRADA; aquí sólo se le dice si quien encoló tiene
+      // `payments:create` (sin `authorizeIntent`, falla cerrado). Sin red no es puerta trasera.
+      const opciones =
+        customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: authorizeIntent?.(intent, 'payments:create') === true } : {}
+      await orderMobileService.updateOrderDetails(
+        venueId,
+        orderId,
+        {
+          name: typeof p.name === 'string' ? p.name : undefined,
+          notes: typeof p.notes === 'string' ? p.notes : undefined,
+          covers: typeof p.covers === 'number' ? p.covers : undefined,
+          customerId,
+          orderType: typeof p.orderType === 'string' ? p.orderType : undefined,
+        } as any,
+        opciones,
+      )
       break
     }
     case 'CANCEL_ORDER': {

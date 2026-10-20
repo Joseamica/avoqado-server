@@ -1044,7 +1044,7 @@ export async function createSalesGoal(req: Request, res: Response, next: NextFun
   try {
     const { venueId } = req.params
 
-    const goal = await salesGoalService.createSalesGoal(venueId, req.body)
+    const goal = await salesGoalService.createSalesGoal(venueId, req.body, { staffId: (req as any).authContext?.userId ?? null })
 
     res.status(201).json(goal)
   } catch (error) {
@@ -1060,7 +1060,7 @@ export async function updateSalesGoal(req: Request, res: Response, next: NextFun
   try {
     const { venueId, goalId } = req.params
 
-    const goal = await salesGoalService.updateSalesGoal(venueId, goalId, req.body)
+    const goal = await salesGoalService.updateSalesGoal(venueId, goalId, req.body, { staffId: (req as any).authContext?.userId ?? null })
 
     res.json(goal)
   } catch (error) {
@@ -1076,7 +1076,7 @@ export async function deleteSalesGoal(req: Request, res: Response, next: NextFun
   try {
     const { venueId, goalId } = req.params
 
-    await salesGoalService.deleteSalesGoal(venueId, goalId)
+    await salesGoalService.deleteSalesGoal(venueId, goalId, { staffId: (req as any).authContext?.userId ?? null })
 
     res.json({ message: 'Sales goal deleted successfully' })
   } catch (error) {

@@ -39,6 +39,7 @@ describe('createRefund (móvil) — la orden testigo comparte turno con su cobro
     }))
     prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' } as any)
     prismaMock.staff = { findUnique: jest.fn().mockResolvedValue(null) } as any
+    prismaMock.giftCard.findFirst.mockResolvedValue(null) // pendientes 1a (T3): negocio sin tarjetas cobradas
     prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as any)
   })
 

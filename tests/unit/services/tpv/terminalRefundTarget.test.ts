@@ -243,3 +243,30 @@ describe('devolverConEfectivo — lo escogido, normalizado', () => {
     expect(devolverConEfectivo({ ...transf, method: 'CREDIT_CARD', fundsFlow: 'AVOQADO_PROCESSED' }, 'CASH')).toBe('CASH')
   })
 })
+
+describe('sePuedeEscogerComoDevolver — tarjeta de regalo (spec §5.5, Review Focus 2)', () => {
+  const conSaldo = {
+    method: 'OTHER',
+    source: 'POS',
+    externalSource: null,
+    tenderSatFormaPago: '01',
+    fundsFlow: 'EXTERNAL_RECORDED',
+    tenderTypeId: 'tender-gc',
+    tenderCountsAsCash: false,
+    tenderSystemKind: 'GIFT_CARD',
+  }
+
+  it('🔴 lo pagado con saldo nunca se escoge devolver en efectivo ni por transferencia', () => {
+    expect(sePuedeEscogerComoDevolver(conSaldo)).toBe(false)
+  })
+
+  it('regresión: el mismo cobro con un tender propio (vale) SÍ se puede escoger', () => {
+    expect(sePuedeEscogerComoDevolver({ ...conSaldo, tenderSystemKind: null })).toBe(true)
+  })
+
+  it('regresión: sin la marca (filas de antes, llamadores viejos) se comporta como siempre', () => {
+    // eslint-disable-next-line @typescript-eslint/no-unused-vars -- se separa a propósito para armar la fila SIN la marca
+    const { tenderSystemKind: _sinMarca, ...viejo } = conSaldo
+    expect(sePuedeEscogerComoDevolver(viejo)).toBe(true)
+  })
+})

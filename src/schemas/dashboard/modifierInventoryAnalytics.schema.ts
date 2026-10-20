@@ -5,6 +5,7 @@
  */
 
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 
 // Shared venue param validation
 const venueIdParam = z.object({
@@ -32,7 +33,7 @@ export const GetModifierUsageStatsSchema = z.object({
   query: z.object({
     startDate: isoDateString.optional(),
     endDate: isoDateString.optional(),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format').optional(),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido').optional(),
     limit: z
       .string()
       .optional()
@@ -73,7 +74,7 @@ export type GetModifierInventorySummaryDto = z.infer<typeof GetModifierInventory
 export const GetModifiersWithInventorySchema = z.object({
   params: venueIdParam,
   query: z.object({
-    groupId: z.string().cuid('Invalid modifier group ID format').optional(),
+    groupId: existingId('El ID del grupo de extras no es válido').optional(),
     includeInactive: z
       .string()
       .optional()

@@ -44,6 +44,7 @@ import {
 import { encryptToken } from '@/services/google-calendar/encryption.service'
 import { stopChannel } from '@/services/google-calendar/watch-channel.service'
 import prisma from '@/utils/prismaClient'
+import { esSucursalReal, exigirSucursalDelToken } from '@/utils/sucursalDelToken'
 import { emisionDelToken, motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 const DASHBOARD_BASE = process.env.DASHBOARD_URL ?? 'https://dashboard.avoqado.io'
@@ -73,7 +74,7 @@ export async function oauthInit(req: Request, res: Response, next: NextFunction)
     }
 
     const ctx = getAuthContext(req)
-    const access = await getUserAccess(ctx.userId, ctx.venueId)
+    const access = await getUserAccess(ctx.userId, exigirSucursalDelToken(ctx))
 
     if (intent === 'venue_master' && !hasPermission(access, 'calendar:manage_venue')) {
       throw new ForbiddenError('No tienes permiso para conectar el calendario del establecimiento')
@@ -327,6 +328,24 @@ export async function listConnections(req: Request, res: Response, next: NextFun
 }
 
 /**
+ * ¿La conexión es de la sucursal donde está parada la persona? La de negocio, por su `venueId`; la personal (sin `venueId`),
+ * porque su dueño trabaja en esa sucursal. Sin esto, ver o desconectar por id revisaba el permiso en la sucursal del token y
+ * nunca que la conexión fuera de ella: un ADMIN del negocio A veía y desconectaba la de B (Codex r1 de FriedBros, 19-oct).
+ */
+async function conexionDeMiSucursal(
+  conn: { scope: string; venueId: string | null; staffId: string | null },
+  venueId: string,
+): Promise<boolean> {
+  if (conn.scope === 'VENUE') return conn.venueId === venueId
+  if (!conn.staffId) return false
+  const trabajaAqui = await prisma.staffVenue.findFirst({
+    where: { staffId: conn.staffId, venueId, active: true },
+    select: { id: true },
+  })
+  return !!trabajaAqui
+}
+
+/**
  * GET /api/v1/google-calendar/connections/:id
  *
  * Detailed status of a single connection — used by the dashboard's per-connection
@@ -368,7 +387,10 @@ export async function getConnectionDetail(req: Request, res: Response, next: Nex
 
     const isOwnPersonal = conn.scope === 'STAFF_PERSONAL' && conn.staffId === ctx.userId
     if (!isOwnPersonal) {
-      const access = await getUserAccess(ctx.userId, ctx.venueId)
+      // 404 y no 403/409: a quien no es de esta sucursal (o no eligió ninguna) no se le confirma que la conexión existe.
+      const venueId = ctx.venueId
+      if (!esSucursalReal(venueId) || !(await conexionDeMiSucursal(conn, venueId))) throw new NotFoundError('Conexión no encontrada')
+      const access = await getUserAccess(ctx.userId, venueId)
       if (!hasPermission(access, 'calendar:view_status')) {
         throw new ForbiddenError('No tienes permiso para ver el estado de esta conexión')
       }
@@ -438,15 +460,16 @@ export async function disconnectConnection(req: Request, res: Response, next: Ne
     })
     if (!conn) throw new NotFoundError('Conexión no encontrada')
 
-    const access = await getUserAccess(ctx.userId, ctx.venueId)
-
+    // La personal propia no necesita sucursal (tampoco con la sesión del alta, 'pending').
     const isOwnPersonal = conn.scope === 'STAFF_PERSONAL' && conn.staffId === ctx.userId
-    const isVenueAdmin = conn.scope === 'VENUE' && conn.venueId === ctx.venueId && hasPermission(access, 'calendar:manage_venue')
-    const isStaffAdmin =
-      conn.scope === 'STAFF_PERSONAL' && conn.staffId !== ctx.userId && hasPermission(access, 'calendar:disconnect_staff')
-
-    if (!isOwnPersonal && !isVenueAdmin && !isStaffAdmin) {
-      throw new ForbiddenError('No tienes permiso para desconectar esta conexión')
+    if (!isOwnPersonal) {
+      const venueId = ctx.venueId
+      if (!esSucursalReal(venueId) || !(await conexionDeMiSucursal(conn, venueId))) throw new NotFoundError('Conexión no encontrada')
+      const access = await getUserAccess(ctx.userId, venueId)
+      const permiso = conn.scope === 'VENUE' ? 'calendar:manage_venue' : 'calendar:disconnect_staff'
+      if (!hasPermission(access, permiso)) {
+        throw new ForbiddenError('No tienes permiso para desconectar esta conexión')
+      }
     }
 
     // Best-effort: stop the channel at Google. If our tokens were revoked

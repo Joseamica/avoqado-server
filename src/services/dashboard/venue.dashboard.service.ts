@@ -431,6 +431,13 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
     // Pago al personal (fase 3, B9): con la fila ya bloqueada, en OTRA sentencia, ve el primer devengo que confirmó quien
     // esperábamos. Una sede con historia de pago al personal no se borra.
     if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('borrar')
+    // Tarjetas de regalo (nota 1 del coordinador, C6): el saldo vendido es dinero de los clientes del negocio y la libreta es
+    // de sólo inserción. Con la fila ya bloqueada, un sobre que se esté creando espera y luego choca con su llave foránea.
+    if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } }))
+      throw new ConflictError(
+        'Este negocio vendió tarjetas de regalo: su saldo es dinero de sus clientes y no se puede borrar. Ciérralo para conservar su historial.',
+        'VENUE_HAS_GIFT_CARDS',
+      )
 
     logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
 
@@ -532,6 +539,9 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       })
       logger.info(`  ✓ Deleted ${deletedProducts.count} Products`)
     }
+    // Variantes: el padre va después de sus productos (Product.productGroupId es RESTRICT). Fuera del `if`: un padre sin
+    // productos también bloquearía el borrado de su categoría (ProductGroup.categoryId es RESTRICT).
+    await tx.productGroup.deleteMany({ where: { venueId } })
 
     // 8. Delete Modifiers and ModifierGroups
     const modifierGroupIds = await tx.modifierGroup.findMany({
@@ -997,8 +1007,9 @@ export async function convertDemoVenue(
 
   // 🧹 Clean demo data before converting to real venue
   // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
+  // ⭐ Tarjetas de regalo: si el negocio vendió alguna, no borra nada (`skippedReason: 'GIFT_CARDS'`) y la conversión sigue.
   try {
-    const cleanupResult = await cleanDemoData(venueId)
+    const cleanupResult = await cleanDemoData(venueId, staffId)
     logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
   } catch (cleanupError) {
     logger.error(`⚠️ Demo cleanup failed for venue ${venueId}:`, cleanupError)

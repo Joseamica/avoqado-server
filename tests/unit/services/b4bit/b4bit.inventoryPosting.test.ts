@@ -31,6 +31,11 @@
 // ── Mocks ────────────────────────────────────────────────────────────────────
 // FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
 // suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   ...jest.requireActual('@/services/tpv/paymentEffects.service'),
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
@@ -85,6 +90,12 @@ const applySalePosting = jest.fn()
 jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   createSalePostingInTx: (...a: any[]) => createSalePostingInTx(...a),
   applySalePosting: (...a: any[]) => applySalePosting(...a),
+}))
+
+// R8 (tarjetas de regalo): la transición real a pagado por cripto activa los sobres de una cuenta de tarjetas.
+const activarSobres = jest.fn()
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  activarSobresDeCuentaPagadaEnTx: (...a: any[]) => activarSobres(...a),
 }))
 
 import { Prisma } from '@prisma/client'
@@ -181,6 +192,7 @@ beforeEach(() => {
   mockPrisma.orderItem.findMany.mockResolvedValue(ITEMS)
   createSalePostingInTx.mockResolvedValue({ id: POSTING_ID })
   applySalePosting.mockResolvedValue({ postingId: POSTING_ID, applied: true, issues: [] })
+  activarSobres.mockResolvedValue({ activated: [] })
 })
 
 describe('b4bit — el vale de inventario de la venta saldada', () => {
@@ -196,6 +208,40 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
       expect.anything(),
       expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, items: ITEMS, staffId: STAFF_ID }),
     )
+  })
+
+  it('R8: la transición real a pagado activa los sobres en la MISMA transacción, con los renglones leídos', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder({ paymentStatus: 'PARTIAL' }))
+    mockPrisma.payment.findMany.mockResolvedValue(pagosQueSaldan())
+    // A6 r1: la transacción recibe un cliente DISTINGUIBLE del global (mismo patrón que la prueba del vale de abajo): si la
+    // activación se llamara con `prisma`, la identidad no cuadraría.
+    const txClient = {
+      payment: mockPrisma.payment,
+      order: mockPrisma.order,
+      orderItem: mockPrisma.orderItem,
+      shift: mockPrisma.shift,
+      venueSettings: (prisma as any).venueSettings,
+      activityLog: (prisma as any).activityLog,
+      $queryRaw: mockPrisma.$queryRaw,
+    }
+    mockPrisma.$transaction.mockImplementation((cb: any) => cb(txClient))
+
+    await processWebhook(webhookCO())
+
+    expect(activarSobres).toHaveBeenCalledTimes(1)
+    expect(activarSobres.mock.calls[0][0]).toBe(txClient)
+    expect(activarSobres.mock.calls[0][1]).toEqual({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: STAFF_ID, items: ITEMS })
+  })
+
+  it('R8: un abono cripto que no salda la cuenta no activa nada', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder())
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('50.00'), tipAmount: d('0.00') }])
+
+    await processWebhook(webhookCO())
+
+    expect(activarSobres).not.toHaveBeenCalled()
   })
 
   it('el vale nace DENTRO de la transacción que cierra la orden (mismo commit)', async () => {
@@ -321,5 +367,94 @@ describe('b4bit — el vale de inventario de la venta saldada', () => {
     expect(createSalePostingInTx).not.toHaveBeenCalled()
     const rescate = mockPrisma.payment.updateMany.mock.calls.at(-1)?.[0]
     expect(rescate?.data?.status).toBe('COMPLETED')
+  })
+})
+
+/**
+ * 🔴 R8-1 (Codex recheck-12 P2): la confirmación de un cobro cripto (dinero que ENTRA) nunca reabre una venta cerrada. La iniciación
+ * rechaza una cuenta PAID, pero entre iniciar y confirmar pasan minutos: la venta pudo saldarse por otro camino (y luego el panel
+ * corregirle el cobro), o devolverse (REFUNDED).
+ */
+describe('🔴 R8-1: el `CO` sobre una venta CERRADA', () => {
+  const { onOrderPaid } = jest.requireMock('@/services/referrals/referralQualification.service')
+  const cerrada = (paymentStatus: 'PAID' | 'REFUNDED') =>
+    freshOrder({ status: 'COMPLETED', paymentStatus, completedAt: new Date('2026-09-01T10:00:00Z'), remainingBalance: d('0.00') })
+  const escrito = () => mockPrisma.order.updateMany.mock.calls.at(-1)?.[0]?.data
+
+  it.each(['PAID', 'REFUNDED'] as const)(
+    '🔴 %s con $120 + $50 cripto ($170 < $200) ⇒ conserva su estado y el saldo queda en 0 (antes: PARTIAL con $30 por cobrar)',
+    async estado => {
+      mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+      mockPrisma.order.findUnique.mockResolvedValue(cerrada(estado))
+      mockPrisma.payment.findMany.mockResolvedValue([
+        { amount: d('120.00'), tipAmount: d('0.00') },
+        { amount: d('50.00'), tipAmount: d('0.00') },
+      ])
+
+      await processWebhook(webhookCO())
+
+      const data = escrito()
+      expect([data.paymentStatus, Number(data.remainingBalance), Number(data.paidAmount)]).toEqual([estado, 0, 170])
+      expect([data.status, data.completedAt]).toEqual([undefined, undefined])
+      expect(createSalePostingInTx).not.toHaveBeenCalled()
+    },
+  )
+
+  it('🔴 REFUNDED + un `CO` que la cubre ⇒ sigue REFUNDED, sin vale, sin referido ni marca de cocina otra vez (antes: PAID y un segundo vale)', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(cerrada('REFUNDED'))
+    mockPrisma.payment.findMany.mockResolvedValue(pagosQueSaldan())
+
+    await processWebhook(webhookCO())
+
+    const data = escrito()
+    expect([data.paymentStatus, Number(data.remainingBalance), data.status, data.kitchenPendingAt]).toEqual([
+      'REFUNDED',
+      0,
+      undefined,
+      undefined,
+    ])
+    expect(createSalePostingInTx).not.toHaveBeenCalled()
+    expect(onOrderPaid).not.toHaveBeenCalled()
+  })
+
+  it('regresión: un abono cripto sobre una cuenta PENDING ⇒ PARTIAL con su saldo real', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder())
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('50.00'), tipAmount: d('0.00') }])
+
+    await processWebhook(webhookCO())
+
+    expect([escrito().paymentStatus, Number(escrito().remainingBalance)]).toEqual(['PARTIAL', 150])
+  })
+
+  // R9-2 (re-revisión de la ronda 8): el log de la liquidación decía «partially paid» con $30 por cobrar mientras la base guardaba
+  // PAID con saldo 0. Ahora registra lo que se escribió y dice si la venta se conservó cerrada.
+  const logDeLiquidacion = () =>
+    (jest.requireMock('@/config/logger').default.info as jest.Mock).mock.calls.find(
+      ([, m]: any[]) => m?.orderId === ORDER_ID && m && 'remainingBalance' in m,
+    )?.[1]
+
+  it('R9-2: PAID con $120 + $50 ⇒ el log dice PAID, saldo 0.00 y que la venta se conservó cerrada', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(cerrada('PAID'))
+    mockPrisma.payment.findMany.mockResolvedValue([
+      { amount: d('120.00'), tipAmount: d('0.00') },
+      { amount: d('50.00'), tipAmount: d('0.00') },
+    ])
+
+    await processWebhook(webhookCO())
+
+    expect(logDeLiquidacion()).toMatchObject({ paymentStatus: 'PAID', remainingBalance: '0.00', ventaCerrada: true, paidAmount: '170.00' })
+  })
+
+  it('R9-2 regresión: un abono sobre una cuenta PENDING ⇒ el log dice PARTIAL con su saldo real', async () => {
+    mockPrisma.payment.findUnique.mockResolvedValue(cryptoPayment())
+    mockPrisma.order.findUnique.mockResolvedValue(freshOrder())
+    mockPrisma.payment.findMany.mockResolvedValue([{ amount: d('50.00'), tipAmount: d('0.00') }])
+
+    await processWebhook(webhookCO())
+
+    expect(logDeLiquidacion()).toMatchObject({ paymentStatus: 'PARTIAL', remainingBalance: '150.00', ventaCerrada: false })
   })
 })

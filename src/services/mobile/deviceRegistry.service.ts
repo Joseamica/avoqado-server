@@ -310,11 +310,10 @@ export async function registerDeviceSeen(params: {
 export const POS_SIN_APARATO_MUESTREO_MS = 60 * 60 * 1000
 
 /**
- * Desde cuándo el observador cubre TODO el tráfico del POS (UTC). `null` hasta fijarlo tras el despliegue: fin del despliegue
- * + 10 min (vida del access del POS, para que ya no quede un token sin la marca `origen`), redondeado a la hora siguiente.
- * Con `null`, el encendido del 6b dice «verificación pendiente» y no enciende.
+ * Desde cuándo el observador cubre TODO el tráfico del POS (UTC): fin del despliegue del bloque A (1-oct, 21:43:39 UTC) + 10 min de
+ * vida del access del POS, redondeado a la hora siguiente. Los 30 días que exige el encendido del 6b se cumplen el 2026-10-31T22:00Z.
  */
-export const OBSERVADOR_POS_DESDE: Date | null = null
+export const OBSERVADOR_POS_DESDE = new Date('2026-10-01T22:00:00Z')
 
 /**
  * Anota que una sesión del POS de este negocio pidió algo SIN identidad de aparato (una app vieja) en el instante `cuando`:

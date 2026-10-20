@@ -142,4 +142,103 @@ describe('payCash — frontera de monto y propina', () => {
       expect(payCashOrderMock).not.toHaveBeenCalled()
     })
   })
+
+  /**
+   * D5 (mesas40, 14-oct): NO hay tope de monto que responda 400. `/pay` registra cobros que YA OCURRIERON fuera de
+   * Avoqado (tarjeta de una terminal ajena, transferencia): rechazarlos perdería ese dinero del registro. El tope vive
+   * en el teclado del aparato; el server sólo grita en el log (`payCashOrder.sobrepago.test.ts`). Éste es el cuerpo
+   * REAL que arma Android (`OrderRepository.recordCashPayment`).
+   */
+  describe('D5: el payload real de Android con un importe gigante sigue en 200', () => {
+    const GIGANTE = 999_999_999_999
+    const cuerpoAndroid = (extra: Record<string, unknown>) => ({
+      venueId,
+      amount: GIGANTE,
+      tip: 0,
+      status: 'COMPLETED',
+      splitType: 'FULLPAYMENT',
+      source: 'AVOQADO_ANDROID',
+      idempotencyKey: 'k-android',
+      ...extra,
+    })
+
+    it.each([
+      ['efectivo', { method: 'CASH' }],
+      ['tarjeta de una terminal externa', { method: 'CREDIT_CARD', externalSource: 'Terminal BBVA' }],
+      ['transferencia', { method: 'BANK_TRANSFER' }],
+    ])('%s ⇒ 200 y el servicio recibe el importe EXACTO', async (_label, extra) => {
+      const res = buildRes()
+      await payCash(buildReq(cuerpoAndroid(extra)), res, next)
+
+      expect(res.statusCode).toBe(200)
+      expect(payCashOrderMock).toHaveBeenCalledWith(
+        venueId,
+        orderId,
+        expect.objectContaining({ amount: GIGANTE, idempotencyKey: 'k-android', ...extra }),
+      )
+    })
+
+    it('el reintento idempotente (misma llave, mismo cuerpo) también ⇒ 200 las dos veces', async () => {
+      const primero = buildRes()
+      const reintento = buildRes()
+      await payCash(buildReq(cuerpoAndroid({ method: 'CASH' })), primero, next)
+      await payCash(buildReq(cuerpoAndroid({ method: 'CASH' })), reintento, next)
+
+      expect([primero.statusCode, reintento.statusCode]).toEqual([200, 200])
+      expect(payCashOrderMock).toHaveBeenCalledTimes(2)
+      expect(next).not.toHaveBeenCalled()
+    })
+  })
+})
+
+/**
+ * 🔴 Ronda 2 de S1/S2 (17/18-oct-2026): lo que el controller le dice al servicio sobre QUIÉN manda el reenvío.
+ *   · R2-1: Android ≤ 2.23 y su app de Windows (mismo código, `x-app-version` «2.23.0-escritorio») tienen el defecto H1: su cola manda
+ *     el TOTAL de la cuenta en vez de la parte del split. Para esa cola el servicio se porta como antes de S1/S2.
+ *   · R2-6: si la propiedad de mesa dejó pasar dinero ya capturado sobre una mesa ajena, el controller lo entrega al servicio.
+ */
+describe('payCash — la cola con H1 y la mesa ajena', () => {
+  const next = jest.fn() as NextFunction
+  const reqCon = (headers: Record<string, string>, body: Record<string, unknown> = { amount: 10000, isOfflineReplay: true }) =>
+    ({ params: { venueId, orderId }, body: { staffId, ...body }, headers, authContext: { userId: staffId } }) as unknown as Request
+  const marcaH1 = () => (payCashOrderMock.mock.calls[0][2] as any).colaConDefectoH1
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    payCashOrderMock.mockResolvedValue({ paymentId: 'pay-1' } as Awaited<ReturnType<typeof orderMobileService.payCashOrder>>)
+  })
+
+  it.each([
+    ['Android 2.23.0', true, 'ANDROID', '2.23.0'],
+    ['Android 2.22.2', true, 'android', '2.22.2'],
+    ['Windows 2.23.0-escritorio', true, 'ANDROID', '2.23.0-escritorio'],
+    ['Android sin versión legible', true, 'ANDROID', 'desconocida'],
+    ['Android 2.24.0 (ya trae el arreglo de H1)', false, 'ANDROID', '2.24.0'],
+    ['Windows 2.25.0-escritorio', false, 'ANDROID', '2.25.0-escritorio'],
+    ['iOS', false, 'IOS', '1.15.0'],
+  ])('%s ⇒ colaConDefectoH1 = %s', async (_caso, esperado, plataforma, version) => {
+    await payCash(reqCon({ 'x-device-platform': plataforma, 'x-app-version': version }), buildRes(), next)
+    expect(marcaH1()).toBe(esperado)
+  })
+
+  it('Android sin la cabecera de versión ⇒ se trata como ≤ 2.23', async () => {
+    await payCash(reqCon({ 'x-device-platform': 'ANDROID' }), buildRes(), next)
+    expect(marcaH1()).toBe(true)
+  })
+
+  it('un cobro EN VIVO de Android 2.23 no es la cola: sin la marca', async () => {
+    await payCash(reqCon({ 'x-device-platform': 'ANDROID', 'x-app-version': '2.23.0' }, { amount: 10000 }), buildRes(), next)
+    expect(marcaH1()).toBe(false)
+  })
+
+  it('R2-6: la mesa ajena que dejó pasar la propiedad de mesa llega al servicio', async () => {
+    const res = buildRes() as Response & { locals: Record<string, unknown> }
+    res.locals = { mesaAjena: { ownerId: 'staff-beto', ownerName: 'Beto Bravo' } }
+    await payCash(reqCon({ 'x-device-platform': 'IOS' }), res, next)
+    expect(payCashOrderMock).toHaveBeenCalledWith(
+      venueId,
+      orderId,
+      expect.objectContaining({ mesaAjena: { ownerId: 'staff-beto', ownerName: 'Beto Bravo' } }),
+    )
+  })
 })

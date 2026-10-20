@@ -16,6 +16,7 @@ datasource db {
 // ==========================================
 
 model Organization {
+  documentRequests DocumentRequest[]
   id    String       @id @default(cuid())
   name  String
   slug  String?      @unique // URL-friendly identifier for white-label routes (e.g., /wl/organizations/playtelecom)
@@ -183,6 +184,9 @@ model Zone {
 }
 
 model Venue {
+  onlineOrderingSettings OnlineOrderingSettings?
+  onlineOrders           OnlineOrder[]
+  documentRequestLinks DocumentRequestVenueLink[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
   hybridContracts HybridContract[]
@@ -432,6 +436,9 @@ model Venue {
   customerGroups   CustomerGroup[]
   loyaltyConfig    LoyaltyConfig?
   walletPasses     WalletPass[]
+  // Tarjetas de regalo (spec 2026-10-14): los sobres que este negocio emitió y sus ajustes.
+  giftCards        GiftCard[]
+  giftCardSettings GiftCardSettings?
   stampCards       StampCard[]
   walletCardDesign WalletCardDesign?
   stampEvents      StampEvent[]
@@ -601,6 +608,7 @@ model Venue {
   // PRODUCT OPTIONS (Variants)
   // ==========================================
   productOptions ProductOption[]
+  productGroups  ProductGroup[]
 
   // ==========================================
   // MEASUREMENT UNITS
@@ -725,6 +733,7 @@ model Venue {
   @@index([slug])
   @@index([active])
   @@index([status]) // For filtering by operational status
+  @@index([name, id]) // Stable platform venue selector pagination
 }
 
 enum VenueChatMode {
@@ -1035,6 +1044,7 @@ model PosConnectionStatus {
 // ==========================================
 
 model Staff {
+  documentRequestLinks DocumentRequestVenueLink[]
   id String @id @default(cuid())
   // organizationId removed: use StaffOrganization junction table for multi-org membership
 
@@ -1731,8 +1741,9 @@ model MenuCategory {
   availableDays  String[] // ["MON", "TUE", "WED"]
 
   // Relations
-  products Product[]
-  menus    MenuCategoryAssignment[]
+  products      Product[]
+  menus         MenuCategoryAssignment[]
+  productGroups ProductGroup[]
 
   // Commission System
   commissionMilestones CommissionMilestone[]
@@ -1820,6 +1831,8 @@ model MenuCategoryAssignment {
 // ==========================================
 
 model Product {
+  /// Pedidos en línea: el platillo sólo se muestra en la tienda pública si el restaurante lo marcó.
+  availableOnline Boolean @default(false)
   id      String @id @default(cuid())
   venueId String
   venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
@@ -1838,9 +1851,11 @@ model Product {
   type ProductType @default(FOOD)
 
   // Pricing
-  price   Decimal  @db.Decimal(10, 2)
-  cost    Decimal? @db.Decimal(10, 2)
-  taxRate Decimal  @default(0.16) @db.Decimal(5, 4)
+  price        Decimal               @db.Decimal(10, 2)
+  /// Cada precio que tuvo `price` y desde/hasta cuándo (lo escriben los disparadores de la base, ver el modelo).
+  priceHistory ProductPriceHistory[]
+  cost         Decimal?              @db.Decimal(10, 2)
+  taxRate      Decimal               @default(0.16) @db.Decimal(5, 4)
 
   // SAT keys for CFDI 4.0 (override category defaults when set)
   satProductKey String? // ClaveProdServ (8 digits)
@@ -1863,6 +1878,17 @@ model Product {
   imageUrl     String?
   displayOrder Int     @default(0)
   featured     Boolean @default(false)
+
+  /// Variantes (spec 2026-10-14): si no es null, este producto es una VARIANTE de `productGroup`. Los campos del padre
+  /// (name, categoryId, ivaTratamiento, satProductKey, satUnitKey, description, printStationId, type, imageUrl) son COPIAS
+  /// que sólo escribe `productGroup.service.ts`; el trigger "Product_zz_grupo_escritor_unico" lo impone.
+  productGroupId  String?
+  productGroup    ProductGroup?         @relation(fields: [productGroupId], references: [id], onDelete: Restrict)
+  /// Ids de sus valores en el orden de las opciones, unidos con «|». Impide dos «M · Azul» en el mismo padre.
+  variantKey      String?
+  /// Foto propia de la variante (la playera roja). `imageUrl` es la efectiva: esta foto, o la del padre si no hay.
+  variantImageUrl String?
+  variantValues   ProductVariantValue[]
 
   // Dietary info
   tags      String[] // ["vegetarian", "gluten-free", "spicy"]
@@ -2054,6 +2080,30 @@ model Product {
   @@index([type])
   @@index([syncStatus]) // ✅ NUEVO ÍNDICE
   @@index([venueId, upsellEnabled])
+  // Also serves lookups by productGroupId alone (leading column): no separate index.
+  @@unique([productGroupId, variantKey])
+}
+
+/// Historial de `Product.price`: cada precio con su intervalo `[validFrom, validTo)` en UTC; `validTo` nulo = vigente
+/// (a lo más UNA abierta por producto, índice parcial de la migración). Sirve para saber si el precio que vio el
+/// cliente fue real (spec 2026-10-17-precio-que-vio-el-cliente).
+/// 🔴 Lo escriben SÓLO los disparadores DIFERIDOS de `Product` (migración 20261017150000): fechan el cambio al
+/// CONFIRMARSE la transacción y cubren a todo escritor (Prisma, SQL directo, importaciones). Nunca escribas aquí.
+/// `id` autoincremental porque un disparador no genera cuid; nunca se expone.
+model ProductPriceHistory {
+  id         BigInt    @id @default(autoincrement())
+  venueId    String
+  productId  String
+  product    Product   @relation(fields: [productId, venueId], references: [id, venueId], onDelete: Cascade, onUpdate: Cascade)
+  price      Decimal   @db.Decimal(10, 2)
+  validFrom  DateTime
+  validTo    DateTime?
+  /// Transacción (xid8 de nivel superior, con época) que creó la fila. El disparador la usa para corregir en su lugar un
+  /// precio intermedio de la misma confirmación; la cascada de la FK no la toca. Nadie la escribe a mano.
+  /// Tras un restore LÓGICO (pg_dump/pg_restore a otro cluster) el xid8 no vale: `UPDATE "ProductPriceHistory" SET "creadoEnTx" = 0`.
+  creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+
+  @@index([productId, validFrom])
 }
 
 model Inventory {
@@ -3921,6 +3971,7 @@ enum PromoterLocationSource {
 }
 
 model Order {
+  onlineOrder    OnlineOrder?
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   venueId        String
@@ -4328,6 +4379,12 @@ model OrderItem {
   areaTicketLineId String?         @unique
   areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
 
+  /// Tarjetas de regalo (spec 2026-10-14 § 4.4): el sobre que esta línea VENDE. Una línea = un sobre (1:1, molde
+  /// `areaTicketLineId`). Una cuenta cuyas líneas TODAS tienen `giftCardId` es una «cuenta de tarjetas»: el servidor
+  /// rechaza agregarle productos, descuentos, cortesías, cargos y su envío a cocina. Restrict: un sobre no se borra.
+  giftCardId String?   @unique
+  giftCard   GiftCard? @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
+
   // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
   // An OrderItem has Product OR SerializedItem, never both.
@@ -4376,8 +4433,9 @@ model ModifierGroup {
   displayOrder Int     @default(0)
   active       Boolean @default(true)
 
-  modifiers Modifier[]
-  products  ProductModifierGroup[]
+  modifiers         Modifier[]
+  products          ProductModifierGroup[]
+  productGroupLinks ProductGroupModifierGroup[]
 
   // ✅ Variable ingredients that can be substituted by modifiers from this group
   linkedRecipeLines RecipeLine[]
@@ -4698,7 +4756,11 @@ model VenueTenderType {
   /// System rows: CASH / CREDIT_CARD / DEBIT_CARD / BANK_TRANSFER. Custom rows: ALWAYS OTHER.
   /// Immutable after creation (service-enforced).
   baseMethod PaymentMethod
-  isSystem   Boolean       @default(false)
+  isSystem   Boolean           @default(false)
+  /// Tender que Avoqado administra (spec tarjetas de regalo § 4.4). NULL para TODOS los demás, incluidos
+  /// Efectivo/Tarjetas/Transferencia. `GIFT_CARD` = «Tarjeta de regalo»: showOnPos=false, nadie lo edita ni lo apaga,
+  /// y `resolveTenderForCharge` lo rechaza; sólo lo usa el cobro con saldo.
+  systemKind TenderSystemKind?
 
   /// Does money received with this tender physically enter the cash drawer?
   /// (Vale de despensa: yes — it's counted at closeout. Uber Eats: no — informational only.)
@@ -4742,6 +4804,7 @@ model VenueTenderType {
 
   @@unique([venueId, normalizedName])
   @@unique([venueId, id]) // enables the composite FK from Payment (cross-venue-proof)
+  @@unique([venueId, systemKind]) // un tender de sistema de cada clase por negocio (NULL no choca en Postgres)
   @@index([venueId, active])
 }
 
@@ -7238,6 +7301,10 @@ model MerchantRevenueShare {
   /// El resto va al agregador. `null` cuando es venta directa.
   avoqadoShareOfAggregatorMargin Decimal? @db.Decimal(5, 4)
 
+  /// Cargo FINAL del banco/intermediario sobre lo recibido tras la tarifa del procesador.
+  /// No se suma IVA ni forma parte del margen del procesador. 0 conserva acuerdos anteriores.
+  intermediaryFeeRate Decimal @default(0) @db.Decimal(7, 6)
+
   taxRate   Decimal  @default(0.16) @db.Decimal(5, 4)
   active    Boolean  @default(true)
   notes     String?
@@ -7844,6 +7911,7 @@ model Customer {
   loyaltyTransactions  LoyaltyTransaction[]
   customerOrderMetrics CustomerOrderMetric[]
   walletPasses         WalletPass[]
+  giftCards            GiftCard[]
   stampCards           StampCard[]
   stampRewards         StampReward[]
 
@@ -8348,6 +8416,12 @@ model WalletPass {
   /// "que seriales cambiaron desde X".
   revision Int @default(1)
 
+  /// Tarjetas de regalo, fase 1c: sólo un pase VERIFICADO (emitido tras el código por WhatsApp) muestra y gasta saldo.
+  /// Se crea en 1a para no migrar dos veces; nadie lo escribe todavía.
+  verifiedAt           DateTime?
+  /// Última `revision` que Google ya recibió por PATCH; atrasada ⇒ la revisión nocturna reintenta (fase 1c).
+  googleSyncedRevision Int?
+
   active Boolean @default(true)
 
   createdAt DateTime @default(now())
@@ -8358,6 +8432,167 @@ model WalletPass {
 
   @@index([venueId, updatedAt])
   @@index([customerId])
+}
+
+// ==========================================
+// TARJETAS DE REGALO (spec docs/superpowers/specs/2026-10-14-tarjetas-de-regalo-design.md)
+// Un sobre = un regalo. El saldo SÓLO se mueve con renglones de la libreta (GiftCardActivity), que nunca se editan.
+// ==========================================
+
+enum GiftCardStatus {
+  PENDING // vendido, sin cobrar todavía
+  ACTIVE
+  BLOCKED
+  DEACTIVATED
+}
+
+enum GiftCardActivityType {
+  ACTIVATE
+  REDEEM
+  REDEEM_REVERSAL
+  ADJUST_INCREMENT
+  ADJUST_DECREMENT
+  BLOCK
+  UNBLOCK
+  DEACTIVATE
+  CLAIM
+  CODE_REPLACED
+}
+
+enum GiftCardReason {
+  SUSPICIOUS_ACTIVITY
+  CASHIER_ERROR
+  CUSTOMER_REQUEST
+  LOST_CARD
+  SALE_CANCELLED
+  ONLINE_REVOCATION
+  CHARGEBACK
+  CANCEL_IN_PROGRESS
+  OTHER // con nota obligatoria
+}
+
+enum GiftCardDeliveryChannel {
+  WHATSAPP
+  EMAIL
+  PRINTED
+  CUSTOMER_CARD // fase 1c
+  HANDED_TO_BUYER
+}
+
+enum GiftCardDeliveryStatus {
+  PENDING
+  SENT
+  FAILED
+}
+
+enum GiftCardSource {
+  POS
+  ONLINE
+}
+
+enum TenderSystemKind {
+  GIFT_CARD
+}
+
+/// El sobre (un regalo). El código nunca se guarda en claro: `codeHash` (HMAC) para buscar, `codeEnc` (AES-GCM) para
+/// volver a mostrarlo. La política (vigencia y términos) se congela al crear el PENDING y nunca se acorta.
+model GiftCard {
+  id             String @id @default(cuid())
+  venueId        String
+  venue          Venue  @relation(fields: [venueId], references: [id], onDelete: Restrict)
+  organizationId String
+
+  codeHash  String @unique
+  codeEnc   String
+  codeLast4 String
+  pageToken String @unique
+
+  initialAmount Decimal        @db.Decimal(12, 2)
+  /// Igual a la suma de la libreta (la revisión nocturna lo comprueba). La base lo restringe a >= 0.
+  balance       Decimal        @db.Decimal(12, 2)
+  status        GiftCardStatus @default(PENDING)
+
+  validityMonths Int?
+  termsVersion   String
+  expiresAt      DateTime?
+
+  customerId String?
+  customer   Customer? @relation(fields: [customerId], references: [id], onDelete: SetNull)
+
+  purchaserName    String?
+  purchaserContact String?
+  recipientName    String?
+  recipientPhone   String?
+  recipientEmail   String?
+  message          String?                 @db.VarChar(200)
+  deliveryChannel  GiftCardDeliveryChannel
+  deliveryStatus   GiftCardDeliveryStatus  @default(PENDING)
+  deliveredAt      DateTime?
+
+  source      GiftCardSource @default(POS)
+  cancelToken String?        @unique
+
+  activatedAt   DateTime?
+  deactivatedAt DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  orderItem  OrderItem?
+  activities GiftCardActivity[]
+
+  @@index([venueId, status, createdAt])
+  @@index([venueId, customerId])
+  @@index([venueId, expiresAt])
+}
+
+/// La libreta del sobre: SÓLO se insertan renglones (un trigger impide UPDATE y DELETE). `amount` siempre >= 0; el tipo
+/// dice si suma o resta. Idempotencia: el cobro por (paymentId, giftCardId, REDEEM); el reverso por (refundPaymentId,
+/// reversesActivityId); el gerente por (venueId, operationKey) con huella `operationHash`.
+model GiftCardActivity {
+  id         String   @id @default(cuid())
+  giftCardId String
+  giftCard   GiftCard @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
+  venueId    String
+
+  type         GiftCardActivityType
+  amount       Decimal              @db.Decimal(12, 2)
+  balanceAfter Decimal              @db.Decimal(12, 2)
+  reason       GiftCardReason?
+  note         String?
+
+  paymentId          String?
+  refundPaymentId    String?
+  reversesActivityId String?
+  orderId            String?
+  staffId            String?
+  deviceId           String?
+
+  operationKey  String?
+  operationHash String?
+
+  createdAt DateTime @default(now())
+
+  @@unique([paymentId, giftCardId, type])
+  @@unique([refundPaymentId, reversesActivityId])
+  @@unique([venueId, operationKey])
+  @@index([giftCardId, createdAt])
+  @@index([venueId, createdAt])
+  @@index([reversesActivityId]) // acumulado de reversos por REDEEM
+}
+
+/// Ajustes de la función por negocio. Sin fila = defaults (apagada).
+model GiftCardSettings {
+  id               String    @id @default(cuid())
+  venueId          String    @unique
+  venue            Venue     @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  enabled          Boolean   @default(false)
+  suggestedAmounts Decimal[] @db.Decimal(12, 2)
+  minAmount        Decimal   @default(100) @db.Decimal(12, 2)
+  maxAmount        Decimal   @default(10000) @db.Decimal(12, 2)
+  validityMonths   Int?
+  termsVersion     String    @default("2026-10-14")
+  updatedAt        DateTime  @updatedAt
+  updatedById      String?
 }
 
 enum StampEventType {
@@ -15820,6 +16055,98 @@ model ProductOptionValue {
   sortOrder Int           @default(0)
 }
 
+enum ProductGroupSource {
+  MANUAL
+  SHOPIFY
+}
+
+/// Producto con variantes («Playera básica»). Lo compartido vive aquí y se COPIA a sus variantes (spec 2026-10-14 §4-§6).
+model ProductGroup {
+  id             String             @id @default(cuid())
+  venueId        String
+  venue          Venue              @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  name           String
+  description    String?
+  imageUrl       String?
+  categoryId     String
+  category       MenuCategory       @relation(fields: [categoryId], references: [id])
+  type           ProductType        @default(REGULAR)
+  ivaTratamiento IvaTratamiento     @default(IVA_16)
+  satProductKey  String?
+  satUnitKey     String?
+  printStationId String?
+  printStation   PrintStation?      @relation(fields: [printStationId], references: [id], onDelete: SetNull)
+  source         ProductGroupSource @default(MANUAL)
+  /// Con source = SHOPIFY: el GID del producto de Shopify.
+  externalId     String?
+  deletedAt      DateTime?
+  deletedBy      String?
+  createdAt      DateTime           @default(now())
+  updatedAt      DateTime           @updatedAt
+
+  options        ProductGroupOption[]
+  modifierGroups ProductGroupModifierGroup[]
+  products       Product[]
+
+  /// (venueId, source, externalId) es único sólo entre vivas: índice parcial "ProductGroup_venueId_source_externalId_vivo_key"
+  /// de la migración 20261018120000. Prisma no expresa el WHERE, así que no se declara aquí (como StaffPayTipWindow_una_abierta).
+  @@index([venueId, deletedAt])
+}
+
+/// Un eje de la familia («Talla»). Máximo 3 por padre (lo impone el servicio).
+model ProductGroupOption {
+  id            String                    @id @default(cuid())
+  groupId       String
+  group         ProductGroup              @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  name          String
+  position      Int
+  values        ProductGroupOptionValue[]
+  variantValues ProductVariantValue[]
+
+  @@unique([groupId, name])
+  @@unique([groupId, position])
+}
+
+/// Un valor de un eje («M», «Azul»).
+model ProductGroupOptionValue {
+  id            String                @id @default(cuid())
+  optionId      String
+  option        ProductGroupOption    @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  value         String
+  position      Int
+  variantValues ProductVariantValue[]
+
+  @@unique([optionId, value])
+  @@index([optionId, position])
+}
+
+/// Extras (grupos de modificadores) del padre; el motor los copia a ProductModifierGroup de cada variante.
+model ProductGroupModifierGroup {
+  id              String        @id @default(cuid())
+  groupId         String
+  group           ProductGroup  @relation(fields: [groupId], references: [id], onDelete: Cascade)
+  modifierGroupId String
+  modifierGroup   ModifierGroup @relation(fields: [modifierGroupId], references: [id], onDelete: Cascade)
+  displayOrder    Int           @default(0)
+
+  @@unique([groupId, modifierGroupId])
+  @@index([modifierGroupId])
+}
+
+/// Qué valor tiene cada variante en cada eje.
+model ProductVariantValue {
+  productId     String
+  product       Product                 @relation(fields: [productId], references: [id], onDelete: Cascade)
+  optionId      String
+  option        ProductGroupOption      @relation(fields: [optionId], references: [id], onDelete: Cascade)
+  optionValueId String
+  optionValue   ProductGroupOptionValue @relation(fields: [optionValueId], references: [id], onDelete: Restrict)
+
+  @@id([productId, optionId])
+  @@index([optionValueId])
+  @@index([optionId])
+}
+
 // ==========================================
 // MEASUREMENT UNITS (Custom units per venue)
 // ==========================================
@@ -16220,9 +16547,10 @@ model PrintStation {
   displayOrder        Int       @default(0)
 
   // Routing back-relations (cascade resolves product override ?? category default ?? venue default)
-  categories MenuCategory[]
-  products   Product[]
-  orderItems OrderItem[]
+  categories    MenuCategory[]
+  products      Product[]
+  orderItems    OrderItem[]
+  productGroups ProductGroup[]
   printJobs  PrintJob[]
   kdsOrders  KdsOrder[]
 
@@ -17124,6 +17452,7 @@ model McpToolCall {
   venueId    String? // the ONLY tool argument kept (opaque id, already in logs)
   outcome    String // 'ok' | 'error' | 'threw'  (see McpCallOutcome literals in code)
   detail     String? // short reason when not ok (permission denied / out of scope / not found / ambiguous / thrown message)
+  clientId   String? // OAuth app that made the call (mcp_oauth_clients.clientId: ChatGPT, Claude…); null for dev tokens and older rows
   durationMs Int
   createdAt  DateTime @default(now())
 
@@ -17387,6 +17716,8 @@ model Cfdi {
   @@index([venueId, status])
   @@index([fiscalEmisorId, isGlobal, createdAt])
   @@index([replacesCfdiId])
+  // M-5 (IVA C3/F6): las facturas de una orden se buscan por `orderId` en emisión, extracción, notas y devoluciones.
+  @@index([orderId])
 }
 
 /// IVA por producto, plan 3: el sello de un renglón (`OrderItem`) al facturarlo — a
@@ -19443,6 +19774,7 @@ enum ShopifyIssueReason {
   NO_RASTREADO
   SIN_INVENTARIO
   ERROR_IMPORTACION
+  PRODUCTO_CON_VARIANTES
 }
 
 /// Una tienda de Shopify ligada a una organización. El token va cifrado (SHOPIFY_TOKEN_KEY).
@@ -19559,6 +19891,8 @@ model ShopifyVariantLink {
   connectChoiceById         String?
   /// Último barrido de catálogo que vio esta variante; las bajas se deciden sólo al terminar un barrido completo.
   lastSeenSweepId   Int?
+  /// Lo que Shopify dice del catálogo de esta variante: { title, options: [{ name, value }], productImage, variantImage }.
+  shopifyCatalog    Json?
   createdAt         DateTime              @default(now())
   updatedAt         DateTime              @updatedAt
 
@@ -19730,4 +20064,232 @@ model StaffPayVenueWindow {
   updatedAt      DateTime     @updatedAt
 
   @@index([organizationId, venueId, desde])
+}
+
+// ─────────────────────────────────────────────────────────────────────────────
+// Pedidos en línea (tienda web del restaurante) — spec 2026-10-15, ronda 1 aplicada
+// ─────────────────────────────────────────────────────────────────────────────
+
+/// Ciclo de vida en línea. La fase 2 (tarjeta) agregará sus valores después: agregar un valor de enum es aditivo.
+enum OnlineOrderStatus {
+  PENDING_ACCEPTANCE // «por aceptar»
+  ACCEPTED // en preparación
+  READY // listo para recoger
+  COMPLETED // entregado
+  REJECTED // el restaurante no lo aceptó
+  EXPIRED // sin respuesta en 10 minutos
+  CANCELLED_BY_CUSTOMER
+  CANCELLED_BY_STAFF
+}
+
+enum OnlineOrderPaymentMode {
+  PAY_AT_PICKUP
+}
+
+enum OnlineOrderRejectReason {
+  OUT_OF_ITEMS
+  CLOSED
+  TOO_BUSY
+  OTHER
+}
+
+/// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
+model OnlineOrderingSettings {
+  id      String @id @default(cuid())
+  venueId String @unique
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  enabled            Boolean   @default(false)
+  minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
+  defaultPrepMinutes Int       @default(15)
+  acceptsPayAtPickup Boolean   @default(true)
+  /// Pausa del gerente (ajustes, `online-orders:manage`).
+  manualPause        Boolean   @default(false)
+  /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
+  pausedUntil        DateTime?
+  /// Mismo formato `HorarioSemanal` de `delivery-channels/core/deliveryHours.service.ts`. NULL = sin restricción. Al crear la
+  /// fila se precarga el horario de reservas si existe y es válido.
+  hours              Json?
+  /// Último sondeo de la BANDEJA ABIERTA (cabecera `x-online-orders-tray: 1`): es el «latido» de presencia.
+  lastInboxPollAt    DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+}
+
+/// Ciclo de vida en línea de un pedido (1:1 con Order; aísla lo nuevo para no tocar `Order`).
+model OnlineOrder {
+  id      String @id @default(cuid())
+  orderId String @unique
+  order   Order  @relation(fields: [orderId], references: [id], onDelete: Cascade)
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  status      OnlineOrderStatus      @default(PENDING_ACCEPTANCE)
+  paymentMode OnlineOrderPaymentMode
+
+  /// Capacidad de seguimiento (192 bits). En claro, como `Reservation.cancelSecret`: la repetición idempotente de
+  /// «crear pedido» devuelve el MISMO token. Lee el estado de ESTE pedido y lo cancela mientras está «por aceptar».
+  /// Es un secreto: el logger lo redacta de la ruta (`SECRET_SEGMENT_AFTER`).
+  trackingToken String  @unique
+  /// Huella sha256 de la solicitud con que se creó (carrito, cantidades, opciones, notas, total, modo y cliente). La repetición
+  /// idempotente la compara en vez del total de la cuenta, que la caja puede cambiar. Nula = se trata como solicitud distinta.
+  requestHash   String?
+
+  acceptDeadlineAt DateTime
+  acceptedAt       DateTime?
+  estimatedReadyAt DateTime?
+  readyAt          DateTime?
+  completedAt      DateTime?
+  rejectedAt       DateTime?
+  rejectReason     OnlineOrderRejectReason?
+  rejectNote       String?
+  expiredAt        DateTime?
+  cancelledAt      DateTime?
+  /// `'CUSTOMER'`, el id del staff que canceló, `'STAFF'` si no se supo, u `'ORDER_CANCELLED_ELSEWHERE'` cuando la cuenta se
+  /// canceló por otra vía (POS, panel, anular) y el pedido se sincronizó al leer.
+  cancelledBy      String?
+
+  whatsappConsent Boolean @default(false)
+
+  /// Quién imprime la comanda (mismo mecanismo de reclamo con TTL que la pantalla de cocina).
+  printClaimedAt DateTime?
+  printClaimedBy String?
+  printedAt      DateTime?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([venueId, status, acceptDeadlineAt])
+  @@index([venueId, createdAt])
+  /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
+  @@index([status, acceptDeadlineAt])
+}
+
+/// Platform onboarding invitations; deliberately independent of a venue.
+model DocumentRequest {
+  organizationId String?
+  organization Organization? @relation(fields: [organizationId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissions DocumentRequestSubmission[]
+  venueLinks DocumentRequestVenueLink[]
+  @@unique([id, organizationId])
+  @@index([organizationId])
+  id String @id @default(cuid())
+  provider String
+  entityType String
+  businessName String
+  tokenHash String
+  tokenVersion Int @default(1)
+  status String @default("OPEN")
+  expiresAt DateTime
+  contactName String?
+  email String?
+  phone String?
+  identificationType String?
+  privacyAcceptedAt DateTime?
+  submittedAt DateTime?
+  submissionVersion Int @default(0)
+  notificationSnapshot Json?
+  onboardingNotification String @default("NONE")
+  danielNotification String @default("NONE")
+  notificationAttempts Int @default(0)
+  notificationNextAt DateTime?
+  notificationLease String?
+  notificationLeaseUntil DateTime?
+  uploadLease String?
+  uploadLeaseUntil DateTime?
+  uploadAttempts Int @default(0)
+  totalBytes Int @default(0)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  files DocumentRequestFile[]
+  deliveries DocumentRequestDelivery[]
+  @@index([status, createdAt])
+  @@index([notificationNextAt])
+  @@index([expiresAt])
+}
+
+model DocumentRequestFile {
+  submissionFiles DocumentRequestSubmissionFile[]
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict)
+  uploadId String
+  key String
+  fileName String
+  mimeType String
+  sizeBytes Int
+  contentHash String
+  storagePath String
+  status String @default("PENDING")
+  tokenVersion Int
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId, uploadId])
+  @@index([requestId, status])
+  @@index([status, updatedAt])
+}
+
+/// Immutable notification outbox per submission and recipient; invitation changes never cancel mail.
+model DocumentRequestDelivery {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields:[requestId],references:[id],onDelete:Restrict)
+  submissionVersion Int
+  recipient String
+  status String @default("PENDING")
+  snapshot Json
+  attempts Int @default(0)
+  firstAttemptAt DateTime?
+  nextAttemptAt DateTime? @default(now())
+  leaseToken String?
+  leaseUntil DateTime?
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+  @@unique([requestId,submissionVersion,recipient])
+  @@index([status,nextAttemptAt])
+}
+
+/// Immutable record of one completed delivery. Never reconstructed from a later draft.
+model DocumentRequestSubmission {
+  id String @id @default(cuid())
+  requestId String
+  request DocumentRequest @relation(fields: [requestId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  submissionVersion Int
+  snapshot Json
+  submittedAt DateTime
+  createdAt DateTime @default(now())
+  files DocumentRequestSubmissionFile[]
+  venueLinks DocumentRequestVenueLink[]
+  @@unique([requestId, submissionVersion])
+}
+
+model DocumentRequestSubmissionFile {
+  submissionId String
+  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  documentId String
+  document DocumentRequestFile @relation(fields: [documentId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  @@id([submissionId, documentId])
+  @@index([documentId])
+}
+
+model DocumentRequestVenueLink {
+  id String @id @default(cuid())
+  requestId String
+  organizationId String
+  request DocumentRequest @relation(fields: [requestId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  submissionId String
+  submission DocumentRequestSubmission @relation(fields: [submissionId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  venueId String
+  venue Venue @relation(fields: [venueId, organizationId], references: [id, organizationId], onDelete: Restrict, onUpdate: Restrict)
+  actorId String
+  actor Staff @relation(fields: [actorId], references: [id], onDelete: Restrict, onUpdate: Restrict)
+  linkedAt DateTime @default(now())
+  onboardingHash String? @unique
+  onboardingResult Json?
+  @@unique([venueId, submissionId])
+  @@index([venueId, linkedAt, id])
+  @@index([requestId, linkedAt, id])
+  @@index([submissionId])
+  @@index([actorId])
 }

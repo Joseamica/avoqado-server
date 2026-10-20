@@ -28,8 +28,17 @@ export function passWebServiceURL(): string | null {
   return `${base.replace(/\/$/, '')}/api/v1/public/passkit`
 }
 
-/** El archivo del pase, o null si el negocio no existe o falta el cliente. */
-export async function buildAndSignPassForCustomer(venueId: string, customerId: string): Promise<Buffer | null> {
+/** La identidad de UN pase ya emitido: lo que Apple compara al actualizarlo. */
+export type PaseEmitido = { serialNumber: string; authToken: string; qrToken: string }
+
+/**
+ * El archivo del pase, o null si el negocio no existe o falta el cliente.
+ *
+ * 🔴 `pase`: la actualización que pide Apple manda el serial que quiere y DEBE recibir ese mismo serial; si recibe otro,
+ * el iPhone la rechaza y la tarjeta se congela. Sin `pase` (descarga inicial) se usa «el pase del cliente». Con dos pases
+ * activos del mismo cliente —p. ej. tras juntar un duplicado (17-oct-2026)— «el del cliente» puede ser el otro.
+ */
+export async function buildAndSignPassForCustomer(venueId: string, customerId: string, pase?: PaseEmitido): Promise<Buffer | null> {
   const venue = await prisma.venue.findFirst({
     where: { id: venueId, active: true },
     select: { id: true, name: true, logo: true, primaryColor: true, secondaryColor: true },
@@ -40,7 +49,7 @@ export async function buildAndSignPassForCustomer(venueId: string, customerId: s
   if (!customer) return null
 
   const [pass, design, stamps] = await Promise.all([
-    issueApplePass(venue.id, customer.id),
+    pase ?? issueApplePass(venue.id, customer.id),
     getCardDesign(venue.id),
     // 🔴 El avance REAL. Es lo único que cambia entre la descarga original y esta.
     getStampCardStatus(venue.id, customer.id),

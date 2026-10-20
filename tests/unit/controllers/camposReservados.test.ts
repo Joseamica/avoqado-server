@@ -62,7 +62,8 @@ describe('PUT /organizations/:orgId no escribe Pago al personal ni la exención 
   it('los datos de siempre se siguen guardando igual (regresión)', async () => {
     const body = { name: 'Mindform', email: 'hola@mindform.mx', phone: '555', taxId: null, billingEmail: null, billingAddress: null }
     const { next, r } = await organizacion(body)
-    expect(organizationService.updateOrganization).toHaveBeenCalledWith('org-1', body)
+    // El tercero es el autor (ronda 3); este request no trae sesión.
+    expect(organizationService.updateOrganization).toHaveBeenCalledWith('org-1', body, undefined)
     expect(r.json).toHaveBeenCalledWith({ id: 'org-1' })
     expect(next).not.toHaveBeenCalled()
   })
@@ -86,5 +87,20 @@ describe('Hermano: PUT /dashboard/venues/:venueId tampoco', () => {
     expect(venueDashboardService.updateVenue).toHaveBeenCalledWith('org-1', 'venue-1', body, { skipOrgCheck: false })
     expect(r.status).toHaveBeenCalledWith(200)
     expect(next).not.toHaveBeenCalled()
+  })
+})
+
+describe('Tarjetas de regalo: su saldo sólo lo mueve la libreta, nunca una escritura anidada', () => {
+  it.each([
+    ['organización', 'org', { giftCards: { create: [{ balance: 10000, status: 'ACTIVE' }] } }, 'giftCards'],
+    ['organización', 'org', { name: 'IQ', giftCardActivities: { deleteMany: {} } }, 'giftCardActivities'],
+    ['sede', 'venue', { giftCardSettings: { upsert: { create: { enabled: true }, update: { enabled: true } } } }, 'giftCardSettings'],
+  ])('%s: rechaza con 400 y no escribe nada (%#)', async (_quien, donde, body, campo) => {
+    const { next, r } = donde === 'org' ? await organizacion(body) : await sede(body)
+    expect(organizationService.updateOrganization).not.toHaveBeenCalled()
+    expect(venueDashboardService.updateVenue).not.toHaveBeenCalled()
+    expect(r.json).not.toHaveBeenCalled()
+    expect(rechazo(next)).toMatchObject({ statusCode: 400, code: 'CAMPOS_RESERVADOS' })
+    expect(rechazo(next).message).toContain(campo)
   })
 })

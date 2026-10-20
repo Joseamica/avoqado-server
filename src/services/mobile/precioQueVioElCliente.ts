@@ -1,0 +1,139 @@
+import { Prisma } from '@prisma/client'
+import prisma from '../../utils/prismaClient'
+
+/**
+ * «Se cobra el precio que vio el cliente» (spec docs/superpowers/specs/2026-10-17-precio-que-vio-el-cliente-design.md).
+ * Si la tablet cobró con una lista vieja, el cliente paga el MÁS BAJO entre el precio que vio —si fue real en algún momento
+ * de [catalogAt − holgura, hora de la venta] y el catálogo no tiene más de 72 h— y el precio vigente (`Product.price`, que
+ * siempre pasa quien llama). Aquí vive la regla pura y la búsqueda en `ProductPriceHistory`; la orden la usa en
+ * `order.mobile.service.ts`.
+ *
+ * Relojes: `catalogAt` y la hora de la venta los sella Node; el historial, Postgres (máquinas distintas en producción).
+ * Por eso la ventana se abre `HOLGURA_DE_RELOJ_MS` hacia atrás y nunca hacia adelante: jamás se reconoce un precio
+ * posterior a la venta.
+ */
+
+export const VENTANA_DEL_CATALOGO_MS = 72 * 3_600_000
+export const HOLGURA_DE_RELOJ_MS = 60_000
+/** Tope del servidor: candidatas por consulta al historial. */
+export const TAMANO_DE_BLOQUE = 100
+export const CODIGO_PRECIO_CAMBIADO = 'ORDER_PRICE_CHANGED'
+/**
+ * Epoch ms. Un catálogo anterior no se busca: no hay historial antes de la migración (el veredicto es el mismo) y así a
+ * Postgres sólo llegan horas que sabe leer (el año 0 o el extremo de `Date` truenan el `::timestamptz`).
+ */
+export const CATALOGO_MAS_VIEJO_POSIBLE = Date.parse('2020-01-01T00:00:00.000Z')
+
+/** Precio que usó el servidor ≠ al que mostró la tablet, por línea. Centavos (el sufijo marca la excepción a los pesos). */
+export interface CambioDePrecio {
+  externalId: string | null
+  productId: string
+  productName: string
+  catalogAt: string | null
+  displayedUnitPriceCents: number
+  unitPriceCents: number
+}
+
+export type VeredictoDeLinea = 'COMO_HOY' | 'BAJO' | 'BUSCAR' | 'NO_RECONOCIDO'
+
+/** Lo más que representan las apps (Int de 32 bits). */
+const MAXIMO_CENTAVOS = 2_147_483_647
+
+/** Centavos enteros 0…2^31−1; cualquier otra cosa es basura ⇒ `null` («como hoy», nunca un 400). */
+export function precioMostradoValido(x: unknown): number | null {
+  return Number.isInteger(x) && (x as number) >= 0 && (x as number) <= MAXIMO_CENTAVOS ? (x as number) : null
+}
+
+/**
+ * En línea, la llegada al servidor. De la cola sin red, la hora en que el aparato capturó la venta (`createdAtLocal`,
+ * epoch ms, número o texto de sólo dígitos), acotada POR ARRIBA a la llegada (un reloj adelantado no la mueve al futuro).
+ * Sin piso. Ilegible ⇒ la llegada.
+ */
+export function horaDeLaVenta(input: { isOfflineReplay?: boolean; createdAtLocal?: number | string | null }, llegada: Date): Date {
+  if (input.isOfflineReplay !== true) return llegada
+  const v = input.createdAtLocal
+  const capturada = new Date(typeof v === 'number' ? v : typeof v === 'string' && /^\d+$/.test(v) ? Number(v) : Number.NaN)
+  if (Number.isNaN(capturada.getTime())) return llegada
+  return capturada < llegada ? capturada : llegada
+}
+
+export function clasificarLinea(a: {
+  actualCents: number
+  mostradoCents: number | null
+  catalogAt: Date | null
+  horaDeLaVenta: Date
+}): VeredictoDeLinea {
+  if (a.mostradoCents === null || a.mostradoCents === a.actualCents) return 'COMO_HOY'
+  if (a.mostradoCents > a.actualCents) return 'BAJO'
+  // Una fecha inválida compararía `false` contra todo y caería en BUSCAR: se descarta antes (`NaN < piso` es `false`).
+  if (a.catalogAt === null || Number.isNaN(a.catalogAt.getTime()) || a.catalogAt.getTime() < CATALOGO_MAS_VIEJO_POSIBLE)
+    return 'NO_RECONOCIDO'
+  const edad = a.horaDeLaVenta.getTime() - a.catalogAt.getTime()
+  if (edad < -HOLGURA_DE_RELOJ_MS || edad > VENTANA_DEL_CATALOGO_MS) return 'NO_RECONOCIDO'
+  return 'BUSCAR'
+}
+
+/** La holgura sólo amplía hacia atrás; la ventana termina en la venta. */
+export function ventanaDeLaLinea(catalogAt: Date, horaDeLaVenta: Date): { desde: Date; hasta: Date } {
+  return { desde: new Date(catalogAt.getTime() - HOLGURA_DE_RELOJ_MS), hasta: horaDeLaVenta }
+}
+
+/**
+ * ¿Cada candidata fue el precio vigente de su producto, en ESTE negocio, en algún momento de su ventana? Alineado con
+ * `candidatas`. Una consulta por bloque de `TAMANO_DE_BLOQUE`; `EXISTS` por candidata, así que un producto con mucha
+ * historia nunca tapa a otro (no hay `LIMIT` sobre el historial). Intervalos `[validFrom, validTo)`; las horas se pasan
+ * como texto ISO y se llevan a UTC sin zona, igual que las columnas, sin importar la zona de la sesión.
+ */
+export async function preciosQueFueronVigentes(
+  venueId: string,
+  candidatas: Array<{ productId: string; mostradoCents: number; desde: Date; hasta: Date }>,
+  db: Pick<Prisma.TransactionClient, '$queryRaw'> = prisma,
+): Promise<boolean[]> {
+  const vigentes = candidatas.map(() => false)
+  for (let inicio = 0; inicio < candidatas.length; inicio += TAMANO_DE_BLOQUE) {
+    const filas = candidatas.slice(inicio, inicio + TAMANO_DE_BLOQUE).map(
+      (c, j) =>
+        Prisma.sql`(${inicio + j}::int, ${c.productId}::text, ${new Prisma.Decimal(c.mostradoCents).div(100)}::numeric,
+          (${c.desde.toISOString()}::timestamptz AT TIME ZONE 'UTC'), (${c.hasta.toISOString()}::timestamptz AT TIME ZONE 'UTC'))`,
+    )
+    const encontradas = await db.$queryRaw<Array<{ i: number }>>(Prisma.sql`
+      SELECT c.i FROM (VALUES ${Prisma.join(filas)}) AS c(i, product_id, price, desde, hasta)
+      WHERE EXISTS (
+        SELECT 1 FROM "ProductPriceHistory" h
+        WHERE h."venueId" = ${venueId} AND h."productId" = c.product_id AND h."price" = c.price
+          AND h."validFrom" <= c.hasta AND (h."validTo" IS NULL OR h."validTo" > c.desde)
+      )`)
+    for (const { i } of encontradas) vigentes[i] = true
+  }
+  return vigentes
+}
+
+/**
+ * Reintento de una orden que ya existe (respuesta perdida): reconstruye `priceChanges` comparando cada línea que trae precio
+ * mostrado con la línea guardada del MISMO `externalId`. Sin `externalId` o sin guardada ⇒ nada; nunca adivina por
+ * `productId` (el mismo producto puede venir en dos líneas con precios distintos). `catalogAt` = el de ESTE reintento.
+ */
+export function cambiosDeOrdenExistente(
+  items: Array<{ externalId?: string | null; productId?: string | null; displayedUnitPrice?: unknown; catalogAt?: unknown }>,
+  guardados: Array<{ externalId: string | null; productId: string | null; productName: string | null; unitPrice: number /* pesos */ }>,
+): CambioDePrecio[] {
+  const porLinea = new Map(guardados.filter(g => g.externalId).map(g => [g.externalId as string, g]))
+  const cambios: CambioDePrecio[] = []
+  for (const item of items) {
+    const mostrado = precioMostradoValido(item.displayedUnitPrice)
+    const guardado = item.externalId ? porLinea.get(item.externalId) : undefined
+    // Sin producto guardado (importe libre) no es línea de catálogo; el productId del cliente no cuenta.
+    if (mostrado === null || !guardado?.productId) continue
+    const unitPriceCents = Math.round(guardado.unitPrice * 100)
+    if (unitPriceCents === mostrado) continue
+    cambios.push({
+      externalId: item.externalId as string,
+      productId: guardado.productId,
+      productName: guardado.productName ?? '',
+      catalogAt: typeof item.catalogAt === 'string' ? item.catalogAt : null,
+      displayedUnitPriceCents: mostrado,
+      unitPriceCents,
+    })
+  }
+  return cambios
+}

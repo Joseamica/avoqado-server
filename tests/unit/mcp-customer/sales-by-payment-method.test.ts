@@ -19,9 +19,13 @@ import type { McpScope } from '../../../src/mcp/scope'
 
 const mockPlanGate = jest.fn()
 const mockFetch = jest.fn()
+const mockLoads = jest.fn()
 
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
-jest.mock('@/services/legacy/mergedPayments.service', () => ({ aggregatePaymentsByMethod: (...a: unknown[]) => mockFetch(...(a as [])) }))
+jest.mock('@/services/legacy/mergedPayments.service', () => ({
+  aggregatePaymentsByMethod: (...a: unknown[]) => mockFetch(...(a as [])),
+  aggregateGiftCardLoads: (...a: unknown[]) => mockLoads(...(a as [])),
+}))
 jest.mock('@/mcp/chartData', () => ({ getVenueChartData: jest.fn() }))
 jest.mock('@/services/dashboard/sales-summary.dashboard.service', () => ({
   computeSettlementProjection: jest.fn(),
@@ -52,6 +56,7 @@ beforeAll(() => {
 beforeEach(() => {
   jest.clearAllMocks()
   mockPlanGate.mockResolvedValue(null) // ADVANCED_REPORTS entitled
+  mockLoads.mockResolvedValue({ amount: 0, count: 0 })
 })
 
 // ── Pure: one row per method from Postgres → same shape/order as summarizeByPaymentMethod ──
@@ -120,5 +125,42 @@ describe('sales_by_payment_method — gross vs net, venue-local window', () => {
     expect(out.grossCollected.total - out.netSales.total).toBeCloseTo(13, 2)
     expect(out.window).toMatchObject({ timezone: 'America/Mexico_City' })
     expect(out.note).toMatch(/propinas/)
+  })
+})
+
+describe('sales_by_payment_method · tarjetas de regalo', () => {
+  // r1 (Fix 1): grossCollected es la vista de DINERO (lo que entró: la carga de una tarjeta se queda en su método real y lo pagado
+  // con saldo NO es dinero nuevo); netSales es la vista de VENTAS (sin la carga; lo pagado con saldo como GIFT_CARD).
+  // Ejemplo del revisor: $300 en efectivo + $500 de una tarjeta vendida con tarjeta bancaria + $200 pagados con saldo.
+  it('🔴 r1 · grossCollected = dinero ($300 CASH + $500 CREDIT_CARD, sin GIFT_CARD); netSales = ventas ($300 CASH + $200 GIFT_CARD)', async () => {
+    mockFetch
+      .mockResolvedValueOnce([
+        { method: 'CASH', amount: 300, tips: 0, count: 1 },
+        { method: 'CREDIT_CARD', amount: 500, tips: 0, count: 1 },
+      ])
+      .mockResolvedValueOnce([
+        { method: 'CASH', amount: 300, tips: 0, count: 1 },
+        { method: 'GIFT_CARD', amount: 200, tips: 0, count: 1 },
+      ])
+    mockLoads.mockResolvedValueOnce({ amount: 500, count: 1 })
+    const out = parse(await call('sales_by_payment_method', { venueId: 'v1', fromDate: '2026-10-14', toDate: '2026-10-14' }))
+    // Cada cifra pide SU vista: el dinero (gross) y las ventas (net).
+    expect(mockFetch.mock.calls[0][2]).toBe('dinero')
+    expect(mockFetch.mock.calls[1][2]).toBe('ventas')
+    expect(out.grossCollected).toEqual({
+      total: 800,
+      byMethod: [
+        { method: 'CREDIT_CARD', total: 500, count: 1 },
+        { method: 'CASH', total: 300, count: 1 },
+      ],
+    })
+    expect(out.netSales).toEqual({
+      total: 500,
+      byMethod: [
+        { method: 'CASH', total: 300, count: 1 },
+        { method: 'GIFT_CARD', total: 200, count: 1 },
+      ],
+    })
+    expect(out.giftCardLoads).toEqual({ total: 500, count: 1 })
   })
 })

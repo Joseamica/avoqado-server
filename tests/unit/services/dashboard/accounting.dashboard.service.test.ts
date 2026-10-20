@@ -58,6 +58,7 @@ import { mezclaDeLaOrden, type CuentaDeMezcla, type RenglonDeMezcla } from '../.
 import { ServiceUnavailableError, ValidationError } from '../../../../src/errors/AppError'
 import { RequestCancelledError, isReadOperation } from '../../../../src/utils/requestCancellation'
 import logger from '../../../../src/config/logger'
+import { WHERE_COBRO_NO_ES_SALDO_DE_REGALO } from '../../../../src/services/giftCards/giftCardMarks'
 import { TIEMPO_MAXIMO_DEL_ISR_MS } from '../../../../src/services/fiscal/isr.service'
 
 const p = prisma as unknown as {
@@ -382,6 +383,14 @@ describe('getBankAndCashSummary (Bancos y cajas)', () => {
     expect(r.totals.electronicTipsCents).toBe(1500) // propina de tarjeta (10+5); la de efectivo/refund no
     expect(r.totals.feesCents).toBe(450)
     expect(r.totals.netToBankCents).toBe(13050) // 12000 + 1500 − 450 (la propina de tarjeta SÍ se deposita)
+  })
+
+  it('⭐ (B4 r1) la exclusión del saldo de regalo va dentro de un AND: nada de OR suelto que otro filtro pueda pisar', async () => {
+    await getBankAndCashSummary('venue-1', FILTERS)
+    const where = p.payment.groupBy.mock.calls[0][0].where
+    // Si alguien esparce otro `OR` en el nivel superior, chocaría en silencio con éste: el nivel superior no lleva ninguno.
+    expect(where).not.toHaveProperty('OR')
+    expect(where.AND).toContainEqual(WHERE_COBRO_NO_ES_SALDO_DE_REGALO)
   })
 
   it('matches getBusinessSummary collection (single source of truth)', async () => {

@@ -109,6 +109,11 @@ function shouldWrite(cacheKey: string, now: number, ttlMs = SEEN_TTL_MS): boolea
   return true
 }
 
+/** Sólo para tests: cuántas entradas tiene el caché. */
+export function __tamanoDelCacheDeAparatos(): number {
+  return seenCache.size
+}
+
 /** Sólo para tests: deja el caché limpio entre casos. */
 export function __resetDeviceSeenCache(): void {
   seenCache.clear()
@@ -171,6 +176,43 @@ export function readDeviceIdentityFromRequest(req: Request): DeviceIdentity | nu
     appVersion: readHeader(req, 'x-app-version'),
     appVersionCode: parseVersionCode(req.headers['x-app-version-code']),
     serialNumber: readHeader(req, 'x-device-serial'),
+  }
+}
+
+/** Tope del alta al entrar: una base lenta nunca frena el login más que esto; el registro pasivo lo completa después. */
+const ALTA_AL_ENTRAR_TOPE_MS = 2_000
+
+/**
+ * Al ENTRAR (login, passkey y cambio de local por refresh) el aparato se da de alta ANTES de contestar.
+ *
+ * 🔴 QA 16-oct-2026 (D3 nueva): el registro pasivo corre en `finish` de la PRIMERA petición autenticada, así que la
+ * ráfaga del arranque (pantalla del cliente, vales…) llegaba ~0.5 s antes de que el aparato existiera: 404
+ * DEVICE_NOT_FOUND y 409 DEVICE_NOT_REGISTERED en los ocho lugares que lo exigen. La raíz es el momento del alta, no
+ * cada uno de esos lugares. Nunca lanza y nunca frena más que [ALTA_AL_ENTRAR_TOPE_MS]; si no alcanza, todo sigue como
+ * antes (el pasivo lo da de alta en la primera petición).
+ */
+export async function asegurarAparatoAlEntrar(req: Request, venueId: string | undefined, staffId: string | undefined): Promise<void> {
+  try {
+    const identity = readDeviceIdentityFromRequest(req)
+    if (!identity || !venueId || !staffId) return
+
+    let tope: ReturnType<typeof setTimeout> | undefined
+    const dadoDeAlta = await Promise.race([
+      registerDeviceSeen({ venueId, staffId, identity }).then(r => r !== null),
+      new Promise<boolean>(resolve => {
+        tope = setTimeout(() => resolve(false), ALTA_AL_ENTRAR_TOPE_MS)
+      }),
+    ])
+    clearTimeout(tope)
+    // Ya quedó escrito: el registro pasivo no necesita repetirlo en este minuto.
+    if (dadoDeAlta) {
+      const ahora = Date.now()
+      seenCache.set(`${venueId}:${identity.deviceUid}`, ahora + SEEN_TTL_MS)
+      // Mismo tope que el registro pasivo (Codex): sin esto, miles de aparatos distintos inflaban la memoria.
+      if (seenCache.size > MAX_CACHE_ENTRIES) pruneCache(ahora)
+    }
+  } catch (error) {
+    logger.error('[DEVICE REGISTRY] Falló el alta del aparato al entrar (no bloqueante)', error)
   }
 }
 

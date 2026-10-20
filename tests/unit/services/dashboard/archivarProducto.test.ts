@@ -28,6 +28,37 @@ describe('archivarProductos — la única forma de «borrar» un producto', () =
   })
 })
 
+describe('Codex #2: archivar UN producto toma el negocio ANTES de leer si es variante', () => {
+  const sqlDe = (i: number) => ((prismaMock.$queryRaw.mock.calls[i] as unknown as [TemplateStringsArray])[0] ?? []).join('?')
+  beforeEach(() => {
+    prismaMock.$queryRaw.mockResolvedValue([] as never)
+    prismaMock.product.updateMany.mockResolvedValue({ count: 0 })
+  })
+
+  it('suelto: negocio FOR SHARE primero (quien lo agrupe toma su cerco y espera); sin padre que bloquear', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ productGroupId: null } as never)
+    await archivarProductos(prismaMock, { venueId: 'v1', id: 'p1' }, 'staff-1')
+    expect(sqlDe(0)).toMatch(/FROM "Venue" WHERE id = \? FOR SHARE/)
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.product.findFirst.mock.invocationCallOrder[0])
+    expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+  })
+
+  it('variante: negocio → padre FOR UPDATE → la variante (orden del motor)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ productGroupId: 'g1' } as never)
+    await archivarProductos(prismaMock, { venueId: 'v1', id: 'p1' }, 'staff-1')
+    expect(sqlDe(0)).toMatch(/FROM "Venue" WHERE id = \? FOR SHARE/)
+    expect(sqlDe(1)).toMatch(/FROM "ProductGroup" WHERE id = \? FOR UPDATE/)
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.product.findFirst.mock.invocationCallOrder[0])
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[1]).toBeLessThan(prismaMock.product.updateMany.mock.invocationCallOrder[0])
+  })
+
+  it('Shopify (ya bloqueó el producto, §10.3): no toma el negocio después — invertiría el orden', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({ productGroupId: null } as never)
+    await archivarProductos(prismaMock, { venueId: 'v1', id: 'p1' }, 'shopify', undefined, false)
+    expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+  })
+})
+
 describe('borrar desde el dashboard (y la acción del chatbot) ARCHIVA', () => {
   beforeEach(() => {
     prismaMock.product.findFirst.mockResolvedValue({
@@ -39,6 +70,9 @@ describe('borrar desde el dashboard (y la acción del chatbot) ARCHIVA', () => {
       imageUrl: 'https://img/masaje.png',
     } as never)
     prismaMock.product.updateMany.mockResolvedValue({ count: 1 })
+    // Variantes (tarea 11): antes de borrar la foto se mira que nadie más la use. Aquí nadie.
+    prismaMock.product.count.mockResolvedValue(0)
+    prismaMock.productGroup.count.mockResolvedValue(0)
   })
 
   it('pone active=false además de deletedAt y deletedBy (el widget y la app de clientes filtran active)', async () => {
@@ -65,6 +99,38 @@ describe('borrar desde el dashboard (y la acción del chatbot) ARCHIVA', () => {
 
     await expect(deleteProduct('v1', 'p1', 'staff-1')).rejects.toMatchObject({ statusCode: 404 })
     expect(prismaMock.product.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una foto que todavía usa otro producto o un padre no se borra del almacenamiento', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({
+      id: 'p1',
+      venueId: 'v1',
+      name: 'Playera · M',
+      imageUrl: 'https://img/padre.png',
+      variantImageUrl: null,
+      productGroupId: null,
+    } as never)
+    prismaMock.product.count.mockResolvedValue(0)
+    prismaMock.productGroup.count.mockResolvedValue(1) // el padre la sigue usando (la variante ya se separó: auditoría A6)
+    prismaMock.product.updateMany.mockResolvedValue({ count: 1 })
+    await deleteProduct('v1', 'p1', 'staff-1')
+    expect(deleteFileFromStorage).not.toHaveBeenCalled()
+  })
+
+  it('una foto que nadie más usa sí se borra (como hoy)', async () => {
+    prismaMock.product.findFirst.mockResolvedValue({
+      id: 'p2',
+      venueId: 'v1',
+      name: 'Gorra',
+      imageUrl: 'https://img/gorra.png',
+      variantImageUrl: null,
+      productGroupId: null,
+    } as never)
+    prismaMock.product.count.mockResolvedValue(0)
+    prismaMock.productGroup.count.mockResolvedValue(0)
+    prismaMock.product.updateMany.mockResolvedValue({ count: 1 })
+    await deleteProduct('v1', 'p2', 'staff-1')
+    expect(deleteFileFromStorage).toHaveBeenCalled()
   })
 })
 

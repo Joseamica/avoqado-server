@@ -46,9 +46,10 @@ import {
   MOTIVO_ANIO_FUERA,
 } from './globalPeriod'
 import { validateBeforeStamp } from './cfdiValidation'
-import { mapFormaPago } from './satCatalog'
+import { formaGanadoraDeCobros } from './formaDePagoGanadora'
+import { WHERE_COBRO_ES_SALDO_DE_REGALO } from '../giftCards/giftCardMarks'
 import type { CfdiItemInput, GlobalInvoiceParams } from './providers/fiscal-provider.interface'
-import { tomarAdmisionCompartida, bloquearOrdenesParaFacturar } from './admisionIva'
+import { bloquearOrdenesParaFacturar } from './admisionIva'
 import { liberarSellosDe, sellarRenglones } from './sellosIva'
 import { CFDI_VIVO, EXTRAIDO, esLlaveComplementaria, llavePrincipalDe } from './exclusionGlobal'
 import {
@@ -795,11 +796,10 @@ export async function contarCorregidasPendientes(
       orderBy: { id: 'asc' },
       take: POR_PAGINA,
     })
-    for (const o of page) {
-      if (revisadas === maxRevisar) return { n, completo: false }
-      revisadas++
-      if (ticketParaGlobal({ ...o, orderDiscounts: await filasDeDescuentoCompletas(prisma, o.id, o.orderDiscounts) }).ok) n++
-    }
+    const caben = page.slice(0, maxRevisar - revisadas)
+    revisadas += caben.length
+    for (const t of await ticketsDeLaGlobal(prisma, emisor.venueId, caben)) if (t.ok) n++
+    if (page.length > caben.length) return { n, completo: false }
     if (page.length < POR_PAGINA) return { n, completo: true }
     despues = page[page.length - 1].id
   }
@@ -1065,7 +1065,7 @@ export async function ordenesDelManifiesto(db: Pick<Prisma.TransactionClient, 'c
  * `enviadoAt: null` —el mismo campo que el motor marca con su CAS antes del POST (`enviarIntentoCapturado`)—, así que la anulación y el envío
  * se excluyen sin relojes: o gana la anulación y el envío ya no puede ocurrir, o ganó el envío y la anulación no toca nada (`'PERDIDA'`).
  * Antes, TODO el manifiesto (por páginas) bajo los candados de sus órdenes (por id, sin filtrar negocio: son las de ESTA factura, como en la
- * cancelación, Ruling 4b-R13) → productos → admisión compartida. Gana ⇒ sellos liberados, manifiesto vacío y el rastro en `ActivityLog`, en la
+ * cancelación, Ruling 4b-R13) → productos, con la admisión compartida primero (D10). Gana ⇒ sellos liberados, manifiesto vacío y el rastro en `ActivityLog`, en la
  * misma transacción: sus ventas vuelven a ser candidatas del periodo de su último cobro.
  */
 export async function anularFilaVieja(fila: any, now: Date = new Date()): Promise<'ANULADA' | 'PERDIDA'> {
@@ -1127,9 +1127,10 @@ async function anularFilaViejaConMotivo(fila: any, now: Date): Promise<{ resulta
   const r = await prisma.$transaction(
     async tx => {
       const ordenes = await ordenesDelManifiesto(tx, fila.id)
-      await bloquearOrdenesParaFacturar(tx, ordenes)
+      // Codex código r1 #1 (Ruling CX-1): la admisión del emisor entra en la MISMA pasada ascendente que las de las órdenes, antes de la
+      // primera fila (antes se pedía después de bloquear órdenes y productos).
       const { organizationId } = await tx.venue.findUniqueOrThrow({ where: { id: fila.venueId }, select: { organizationId: true } })
-      await tomarAdmisionCompartida(tx, organizationId)
+      await bloquearOrdenesParaFacturar(tx, ordenes, undefined, { organizacionesExtra: [organizationId] })
       const periodicidad =
         (await tx.fiscalEmisor.findUnique({ where: { id: fila.fiscalEmisorId }, select: { globalPeriodicity: true } }))
           ?.globalPeriodicity ??
@@ -1764,16 +1765,17 @@ interface ContextoDelListado {
 }
 
 /**
- * Lo de CONTENIDO de órdenes candidatas ya cargadas con `ORDER_SELECT` (el mismo `select` de la captura): `ticketParaGlobal` con sus filas
- * de descuento COMPLETAS. Una que entraría hoy es `CORREGIDA_DESPUES` sólo si su principal admite complementaria; si no, no tiene motivo
- * (entrará a la principal cuando se emita). La comparten las filas y el recorrido de los totales: una sola regla.
+ * Lo de CONTENIDO de órdenes candidatas ya cargadas con `ORDER_SELECT` (el mismo `select` de la captura): `ticketsDeLaGlobal` (sus filas
+ * de descuento COMPLETAS y la regla de devuelta completa de F6). Una que entraría hoy es `CORREGIDA_DESPUES` sólo si su principal admite
+ * complementaria; si no, no tiene motivo (entrará a la principal cuando se emita). La comparten las filas y el recorrido de los totales: una
+ * sola regla.
  */
-async function motivosDeContenido(ordenes: OrdenDelListado[], conCorregidas: boolean): Promise<Map<string, MotivoDeLaVenta>> {
+async function motivosDeContenido(ctx: ContextoDelListado, ordenes: OrdenDelListado[]): Promise<Map<string, MotivoDeLaVenta>> {
   const motivos = new Map<string, MotivoDeLaVenta>()
-  for (const o of ordenes) {
-    const t = ticketParaGlobal({ ...o, orderDiscounts: await filasDeDescuentoCompletas(prisma, o.id, o.orderDiscounts) })
-    if (!t.ok) motivos.set(o.id, { motivo: t.motivo, detalle: t.detalle })
-    else if (conCorregidas) motivos.set(o.id, { motivo: 'CORREGIDA_DESPUES', detalle: TEXTO_EXCLUSION_GLOBAL.CORREGIDA_DESPUES })
+  for (const [i, t] of (await ticketsDeLaGlobal(prisma, ctx.emisor.venueId, ordenes)).entries()) {
+    if (!t.ok) motivos.set(ordenes[i].id, { motivo: t.motivo, detalle: t.detalle })
+    else if (ctx.conCorregidas)
+      motivos.set(ordenes[i].id, { motivo: 'CORREGIDA_DESPUES', detalle: TEXTO_EXCLUSION_GLOBAL.CORREGIDA_DESPUES })
   }
   return motivos
 }
@@ -1802,7 +1804,7 @@ async function motivosDeUnaPagina(ctx: ContextoDelListado, ids: string[]): Promi
       orderBy: { id: 'asc' },
       take: porContenido.length,
     })
-    for (const [id, m] of await motivosDeContenido(ordenes, ctx.conCorregidas)) motivos.set(id, m)
+    for (const [id, m] of await motivosDeContenido(ctx, ordenes)) motivos.set(id, m)
   }
   return motivos
 }
@@ -1839,7 +1841,7 @@ async function totalesDelListado(
       take: pide,
     })
     const caben = pagina.slice(0, resta)
-    for (const [, m] of await motivosDeContenido(caben, ctx.conCorregidas)) sumarExcluida(porMotivo, m.motivo)
+    for (const [, m] of await motivosDeContenido(ctx, caben)) sumarExcluida(porMotivo, m.motivo)
     revisadas += caben.length
     if (pagina.length > resta) {
       completo = false
@@ -2164,14 +2166,12 @@ async function emitirGlobalDelPeriodo(
   const previous = cfdi
   const reserved = await deps
     .runInTransaction(async tx => {
-      const venue = await tx.venue.findUniqueOrThrow({ where: { id: emisor.venueId }, select: { organizationId: true } })
-      // Match admission order: all order/product locks precede the shared organization lock.
+      // D10 (plan 6b): el helper toma la admisión antes que las órdenes.
       const oldIds = previous ? await ordenesDelManifiesto(tx, previous.id) : []
       // C1-13: la UNIÓN de los tickets de la reserva anterior y de los candidatos: se bloquean todos y se recapturan todos (una reserva
       // sin enviar conserva sus tickets aunque la lista leída fuera de la transacción no los traiga).
       const ids = [...new Set([...oldIds, ...candidateIds])].sort()
       await bloquearOrdenesParaFacturar(tx, ids, emisor.venueId)
-      await tomarAdmisionCompartida(tx, venue.organizationId)
       const current = await tx.cfdi.findUnique({ where: { idempotencyKey: key } })
       if (!previous && current) return { cfdi: current, fresh: false, reasons: [] as string[], empty: false, excluded: 0, excluidas: {} }
       if (previous) {
@@ -2371,6 +2371,19 @@ export function dondePertenece(
   // Ajuste del founder (7-oct): lo cobrado SÓLO fuera de la terminal (ningún cobro con comercio), con un solo RFC, se revisa como efectivo o
   // candidata únicamente si el dueño pidió esas ventas en su global; si no, es SIN_TERMINAL. Con varios RFC sigue siendo SIN_EMISOR.
   const pedida = fueraDeTerminalPedida(emisor, unSoloEmisor)
+  // Tarjetas de regalo (B3 r1, opción A del coordinador): con un RFC y el interruptor apagado, una venta sin comercio CON un cobro con saldo
+  // se revisa como una de terminal (efectivo o candidata) sólo si la global de Avoqado está ENCENDIDA para este RFC: algún comercio suyo en
+  // ella (`configQueEntraALaGlobal`, la misma regla que `comercioEnLaGlobal`/`estaApagadaLaGlobal`). Apagada, sigue SIN_TERMINAL.
+  const canje: Prisma.OrderWhereInput | null =
+    unSoloEmisor && !emisor.includeOffTerminalSalesInGlobal
+      ? {
+          AND: [
+            ninguno(conComercio),
+            algun(WHERE_COBRO_ES_SALDO_DE_REGALO),
+            { venue: { fiscalEmisors: { some: { merchantConfigs: { some: configQueEntraALaGlobal(emisor.id) } } } } },
+          ],
+        }
+      : null
   switch (p) {
     case 'AJENA':
       return { AND: [ninguno(nuestro), algun(ajeno)] }
@@ -2383,6 +2396,7 @@ export function dondePertenece(
         OR: [
           { AND: [algun(compatible), ninguno(incompatible), conEfectivo] },
           pedida ? { AND: [ninguno(conComercio), conEfectivo] } : NUNCA,
+          ...(canje ? [{ AND: [canje, conEfectivo] }] : []),
         ],
       }
     case 'CANDIDATA':
@@ -2390,10 +2404,11 @@ export function dondePertenece(
         OR: [
           { AND: [algun(compatible), ninguno(incompatible), sinEfectivo] },
           pedida ? { AND: [ninguno(conComercio), sinEfectivo] } : NUNCA,
+          ...(canje ? [{ AND: [canje, sinEfectivo] }] : []),
         ],
       }
     case 'SIN_TERMINAL':
-      return unSoloEmisor && !emisor.includeOffTerminalSalesInGlobal ? ninguno(conComercio) : NUNCA
+      return canje ? { AND: [ninguno(conComercio), { NOT: canje }] } : NUNCA
   }
 }
 
@@ -2477,6 +2492,8 @@ export const ORDER_SELECT = {
       weightQuantity: true,
       orderPromotionId: true,
       isCortesia: true,
+      // Tarjetas de regalo (1a): una cuenta de VENTA de tarjetas sale entera con su motivo (`ticketParaGlobal`).
+      giftCardId: true,
       modifiers: { select: { name: true, price: true, quantity: true } },
       // Ronda 1 (I1): `name`, como la individual: un renglón sin `productName` toma el nombre del producto (`examinarRenglon`), no «Producto».
       product: {
@@ -2487,12 +2504,39 @@ export const ORDER_SELECT = {
 } satisfies Prisma.OrderSelect
 
 /**
+ * La foto de cada ticket de una página de órdenes (`ORDER_SELECT`): `ticketParaGlobal` con sus filas de descuento COMPLETAS y, encima, la
+ * decisión 1 de F6 (QA de la guía, 14-oct): lo devuelto cubre lo cobrado ⇒ fuera con `DEVUELTA`, ganando a los demás motivos de contenido (como
+ * `TOTAL` en «Facturar»). La usan la captura (con `tx`, bajo `bloquearOrdenesParaFacturar`: decide con lo leído bajo el candado), el listado de
+ * excluidas y el conteo de las que entrarían hoy: una sola regla. Alineada con `ordenes`.
+ */
+async function ticketsDeLaGlobal(
+  db: Pick<Prisma.TransactionClient, 'orderDiscount' | '$queryRaw'>,
+  venueId: string,
+  ordenes: OrdenDelListado[],
+): Promise<TicketGlobal[]> {
+  if (!ordenes.length) return []
+  const tickets: TicketGlobal[] = []
+  for (const o of ordenes)
+    tickets.push(ticketParaGlobal({ ...o, orderDiscounts: await filasDeDescuentoCompletas(db, o.id, o.orderDiscounts) }))
+  const cobrado = (o: OrdenDelListado) => o.payments.filter(p => esCobroElegible(p)).reduce((s, p) => s + aCentavos(p.amount), 0)
+  const { devueltasCompletas } = await import('./facturaConDevolucion') // perezoso: ese módulo importa éste (ciclo)
+  const devueltas = await devueltasCompletas(
+    db,
+    venueId,
+    ordenes.map(o => ({ orderId: o.id, paidCents: cobrado(o) })),
+  )
+  return tickets.map((t, i) =>
+    devueltas.has(ordenes[i].id) ? { ok: false, motivo: 'DEVUELTA', detalle: TEXTO_EXCLUSION_GLOBAL.DEVUELTA } : t,
+  )
+}
+
+/**
  * C1 (Codex C1-2): la foto v2 de la global. `ids` = la UNIÓN de los tickets de la reserva anterior y de los candidatos (Codex C1-13): cada uno
- * se vuelve a leer bajo los candados con la MISMA pertenencia (`candidateWhere`) y pasa por `ticketParaGlobal` con sus filas de descuento
- * COMPLETAS (B3a y las filas D16 las leen enteras): entra con su foto o sale con su motivo. Después, la regla del founder: la global da
- * exactamente lo cobrado —en total y en cada tasa— con la regla del PAC (`cuadrarLaGlobal`, la 6b detrás de la barrera N3), y el ajuste que
- * ponga la 6b se CONGELA (`ajustes`). Si no cuadra, la captura es DIAGNÓSTICA (C1-12): se guarda con su motivo y nunca se envía; sin tickets,
- * también (C1-23).
+ * se vuelve a leer bajo los candados con la MISMA pertenencia (`candidateWhere`) y pasa por `ticketsDeLaGlobal` con sus filas de descuento
+ * COMPLETAS (B3a y las filas D16 las leen enteras): entra con su foto o sale con su motivo (también `DEVUELTA`, leída bajo el candado).
+ * Después, la regla del founder: la global da exactamente lo cobrado —en total y en cada tasa— con la regla del PAC (`cuadrarLaGlobal`, la 6b
+ * detrás de la barrera N3), y el ajuste que ponga la 6b se CONGELA (`ajustes`). Si no cuadra, la captura es DIAGNÓSTICA (C1-12): se guarda
+ * con su motivo y nunca se envía; sin tickets, también (C1-23).
  */
 async function capturarGlobal(
   tx: Prisma.TransactionClient,
@@ -2515,8 +2559,9 @@ async function capturarGlobal(
       orderBy: { id: 'asc' },
       take: PAGE,
     })
-    for (const order of orders) {
-      const t = ticketParaGlobal({ ...order, orderDiscounts: await filasDeDescuentoCompletas(tx, order.id, order.orderDiscounts) })
+    const tickets = await ticketsDeLaGlobal(tx, emisor.venueId, orders)
+    for (const [i, order] of orders.entries()) {
+      const t = tickets[i]
       if (!t.ok) {
         sumarExcluida(excluidas, t.motivo)
         logger.info(`[cfdiGlobal] orden ${order.id} fuera de la global (${t.motivo}): ${t.detalle}`)
@@ -2668,8 +2713,6 @@ async function emitirGlobalLegacy(
   const porConfiguracion = await deps.contarExcluidasPorConfiguracion(emisor, period, unSoloEmisor, cfdi.id)
   const reserved = await deps.runInTransaction(async tx => {
     await bloquearOrdenesParaFacturar(tx, ids, emisor.venueId)
-    const venue = await tx.venue.findUniqueOrThrow({ where: { id: emisor.venueId }, select: { organizationId: true } })
-    await tomarAdmisionCompartida(tx, venue.organizationId)
     const captured = await capturarGlobal(tx, emisor, period, ids, unSoloEmisor, cfdi.id, porConfiguracion, {
       key: cfdi.idempotencyKey,
     })
@@ -2868,6 +2911,8 @@ export interface GlobalCandidateOrder {
     weightQuantity?: any
     orderPromotionId?: string | null
     isCortesia?: boolean | null
+    /** Tarjetas de regalo (1a): el sobre que vende este renglón. Ausente = renglón de mercancía. */
+    giftCardId?: string | null
     modifiers?: Array<{ name?: string | null; price: any; quantity?: number }> | null
     product: { name?: string | null; taxRate: any; objetoImp: string | null; ivaTratamiento?: IvaTratamiento | null } | null
   }>
@@ -2875,8 +2920,6 @@ export interface GlobalCandidateOrder {
 
 const aCentavos = (d: any): number => Math.round(Number(d ?? 0) * 100)
 const pesosTxt = (cents: number) => `$${(cents / 100).toFixed(2)}`
-/** Orden de ids estable en cualquier máquina (por código de carácter, no por idioma). */
-const porId = (a: string, b: string) => (a < b ? -1 : a > b ? 1 : 0)
 const tratamientoDelItem = (it: GlobalCandidateOrder['items'][number]): IvaTratamiento =>
   resolverTratamiento({ selladoIva: it.ivaTratamiento, productoIva: it.product?.ivaTratamiento, tieneProducto: !!it.product })
 
@@ -2983,15 +3026,7 @@ export function globalLinesFromOrder(o: GlobalCandidateOrder): GlobalInvoiceLine
  * `pagos` = los de la forma ganadora (para decir al dueño qué hacer).
  */
 function formaGanadoraDelTicket(pagos: GlobalCandidateOrder['payments']): { forma: string; pagos: GlobalCandidateOrder['payments'] } {
-  const grupos = new Map<string, { sumaCents: number; mayorCents: number; pagos: GlobalCandidateOrder['payments'] }>()
-  for (const p of pagos.filter(x => esCobroElegible(x))) {
-    const forma = mapFormaPago(p.method, p.tenderSatFormaPago)
-    const g = grupos.get(forma) ?? { sumaCents: 0, mayorCents: 0, pagos: [] }
-    const cents = aCentavos(p.amount)
-    grupos.set(forma, { sumaCents: g.sumaCents + cents, mayorCents: Math.max(g.mayorCents, cents), pagos: [...g.pagos, p] })
-  }
-  const [ganadora] = [...grupos].sort(([fa, a], [fb, b]) => b.sumaCents - a.sumaCents || b.mayorCents - a.mayorCents || porId(fa, fb))
-  return ganadora ? { forma: ganadora[0], pagos: ganadora[1].pagos } : { forma: '99', pagos: [] }
+  return formaGanadoraDeCobros(pagos.filter(x => esCobroElegible(x)))
 }
 
 /** La forma de pago del ticket: la de mayor suma de sus cobros elegibles (ver `formaGanadoraDelTicket`); '99' si no hay o si ésa no tiene forma. */
@@ -3081,6 +3116,12 @@ export function ticketParaGlobal(o: GlobalCandidateOrder): TicketGlobal {
     motivo,
     detalle,
   })
+  // Tarjetas de regalo (spec §7): la cuenta de VENTA de tarjetas no es mercancía; se factura al usar el saldo. Va PRIMERO para que el
+  // listado de excluidas, la captura y el conteo de corregidas lean siempre este motivo y no `SIN_PAGAR` ni `CONTRATO_DESCONOCIDO`:
+  // sus renglones son NO_OBJETO ⇒ la cuenta es MIXTA ⇒ con IVA incluido ENTRARÍA a la global como concepto objeto 01. (Encima sólo queda
+  // `DEVUELTA`, que pone `ticketsDeLaGlobal`: una venta de tarjetas cancelada con su dinero devuelto; fuera igual.)
+  // B3 r1 (fix 3): `some` (falla cerrada): una cuenta mezclada (A5 no la deja nacer) sale entera, sin un concepto objeto 01 de tarjeta.
+  if (o.items.some(it => !!it.giftCardId)) return fuera('TARJETA_DE_REGALO')
   const pagos = o.payments.filter(p => esCobroElegible(p))
   if (!pagos.length) return fuera('SIN_PAGAR')
   const paidCents = pagos.reduce((s, p) => s + aCentavos(p.amount), 0)

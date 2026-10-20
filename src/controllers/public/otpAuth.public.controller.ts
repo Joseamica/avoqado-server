@@ -40,12 +40,22 @@ export async function verifyOtp(req: Request, res: Response, next: NextFunction)
   try {
     const { venueSlug } = req.params
     const venue = await resolveVenueBySlug(venueSlug)
-    const { phone, email, code } = req.body
+    const { phone, email, code, purpose, firstName } = req.body
 
     const channel = phone ? 'whatsapp' : 'email'
     const destination = phone ?? email
 
-    const result = await otpService.verifyOtp({ venueId: venue.id, channel, destination, code })
+    const result = await otpService.verifyOtp({
+      venueId: venue.id,
+      channel,
+      destination,
+      code,
+      firstName,
+      ...(purpose === 'ORDERING' ? { purpose: 'ORDERING' as const } : {}),
+    })
+    // H1: el token de pedidos no sirve para reservar; su respuesta lleva sólo token y cliente. Ni `bookingAccess` ni
+    // `approvalStatus`: son de reservas, que verificar para pedir no toca (no promete lo que no puede).
+    if (purpose === 'ORDERING') return res.json({ token: result.token, customer: result.customer })
 
     // Fase 0.B: es un emisor de token → lleva bookingAccess como login/register/portal.
     const bookingAccess = await computeBookingAccess(venue.id, result.customer?.id)

@@ -46,6 +46,12 @@ import {
 } from '@/services/legacy/qrPayments.legacy.service'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
+import {
+  WHERE_COBRO_NO_ES_SALDO_DE_REGALO,
+  WHERE_ORDEN_SIN_TARJETAS,
+  sqlCobroNoEsSaldoDeRegalo,
+  sqlOrdenSinTarjetasTexto,
+} from '@/services/giftCards/giftCardMarks'
 
 // ============================================================
 // Types
@@ -73,6 +79,13 @@ export interface SalesSummaryMetrics {
   // True profit after all costs
   netProfit: number // netSales - platformFees - staffCommissions
   transactionCount: number
+  // Tarjetas de regalo (1a, spec §7) — aditivos; sólo en la vista sin filtro de método.
+  /** Tarjetas cargadas en el rango, menos sus cancelaciones. NO es venta: no está en grossSales. */
+  giftCardLoads?: number
+  /** Sobres de cuentas de tarjetas PAGADAS en el rango. */
+  giftCardLoadsCount?: number
+  /** Pagado con saldo (venta + propina), menos sus reversos. YA está dentro de las ventas: se muestra para leerlo aparte. */
+  paidWithGiftCardBalance?: number
 }
 
 export interface PaymentMethodBreakdown {
@@ -97,6 +110,24 @@ export interface PaymentMethodDetailedBreakdown {
     percentage: number
     platformFees: number
   }>
+}
+
+/** Lo pagado con saldo de tarjeta de regalo, fuera de los buckets (un bucket nuevo tumba al dashboard que no lo conoce). */
+export interface GiftCardBalanceBreakdown {
+  amount: number
+  count: number
+  tips: number
+  refunds: number
+}
+
+export interface GiftCardFigures {
+  loads: number
+  loadsCount: number
+  loadRefunds: number
+  balancePaid: number
+  balanceCount: number
+  balanceTips: number
+  balanceReversals: number
 }
 
 export interface TimePeriodMetrics {
@@ -160,10 +191,17 @@ export interface SalesSummaryResponse {
   reportType: ReportType
   summary: SalesSummaryMetrics
   byPaymentMethod?: PaymentMethodBreakdown[]
+  /**
+   * Aditivo (tarjetas de regalo, full-testing v2 #1): VENTAS por método para la barra bajo «Total de Ventas»: sin los cobros de
+   * cuentas de tarjetas y con lo pagado con saldo como `GIFT_CARD`. `byPaymentMethod` sigue siendo DINERO (B5). Sólo sin filtro y
+   * en negocios que tienen tarjetas; sin él, los dos son iguales.
+   */
+  salesByPaymentMethod?: PaymentMethodBreakdown[]
   byPaymentMethodDetailed?: PaymentMethodDetailedBreakdown[]
   byPeriod?: TimePeriodMetrics[] // Time-based breakdown
   byMerchantAccount?: MerchantAccountBreakdown[] // additive; present only when includeMerchantBreakdown=true
   settlementCalendar?: SettlementCalendarDay[] // additive; present only when includeSettlementProjection=true
+  giftCardBalanceBreakdown?: GiftCardBalanceBreakdown // aditivo (tarjetas de regalo); con groupBy=paymentMethod y sin filtro
   filtered: boolean
   /**
    * Additive; present ONLY when the MindForm legacy QR bridge could not answer (legacy DB down,
@@ -696,6 +734,75 @@ export async function computeSettlementProjection(
 }
 
 /**
+ * Las cifras de tarjetas de regalo del rango (spec §7), en SQL y en tres lecturas acotadas a agregados:
+ * - cargado: renglones con `giftCardId` de cuentas PAGADAS creadas en el rango (misma base de fecha que las ventas brutas);
+ * - cancelado: `REFUND` del rango cuya cuenta es de tarjetas y está PAGADA (la parte de venta, sin propina, como lo cargado). Sólo
+ *   las pagadas: el abono devuelto de una venta que nunca se pagó no restó nada de lo cargado y no puede dejar la cifra negativa;
+ * - pagado con saldo: cobros del tender de sistema del rango, venta + propina, y sus reversos.
+ */
+export async function computeGiftCardFigures(
+  venueId: string,
+  start: Date,
+  end: Date,
+  merchantAccountId?: string,
+): Promise<GiftCardFigures> {
+  const porComercioDeOrden = merchantAccountId
+    ? Prisma.sql`AND o.id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = ${merchantAccountId})`
+    : Prisma.empty
+  const porComercioDeCobro = merchantAccountId ? Prisma.sql`AND p."merchantAccountId" = ${merchantAccountId}` : Prisma.empty
+  const [cargas, cancelaciones, saldo] = await Promise.all([
+    prisma.$queryRaw<Array<{ amount: string; count: number }>>`
+      SELECT COALESCE(SUM(oi.total), 0)::text AS amount, COUNT(*)::int AS count
+      FROM "OrderItem" oi
+      JOIN "Order" o ON o.id = oi."orderId"
+      WHERE o."venueId" = ${venueId}
+        AND o."createdAt" >= ${utcTs(start)}
+        AND o."createdAt" <= ${utcTs(end)}
+        AND o."paymentStatus" = 'PAID'
+        AND oi."giftCardId" IS NOT NULL
+        ${porComercioDeOrden}
+    `,
+    prisma.$queryRaw<Array<{ amount: string }>>`
+      SELECT COALESCE(SUM(ABS(p.amount)), 0)::text AS amount
+      FROM "Payment" p
+      JOIN "Order" o ON o.id = p."orderId"
+      WHERE p."venueId" = ${venueId}
+        AND p."createdAt" >= ${utcTs(start)}
+        AND p."createdAt" <= ${utcTs(end)}
+        AND p.type = 'REFUND'
+        AND p.status = 'COMPLETED'
+        AND o."paymentStatus" = 'PAID'
+        AND EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = p."orderId" AND gc_oi."giftCardId" IS NOT NULL)
+        ${porComercioDeCobro}
+    `,
+    prisma.$queryRaw<Array<{ amount: string; count: number; tips: string; reversals: string }>>`
+      SELECT
+        COALESCE(SUM(p.amount + p."tipAmount") FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'), 0)::text AS amount,
+        (COUNT(*) FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'))::int AS count,
+        COALESCE(SUM(p."tipAmount") FILTER (WHERE p.type IS DISTINCT FROM 'REFUND'), 0)::text AS tips,
+        COALESCE(SUM(ABS(p.amount + p."tipAmount")) FILTER (WHERE p.type = 'REFUND'), 0)::text AS reversals
+      FROM "Payment" p
+      JOIN "VenueTenderType" t ON t."venueId" = p."venueId" AND t.id = p."tenderTypeId"
+      WHERE p."venueId" = ${venueId}
+        AND p."createdAt" >= ${utcTs(start)}
+        AND p."createdAt" <= ${utcTs(end)}
+        AND p.status = 'COMPLETED'
+        AND t."systemKind" = 'GIFT_CARD'
+        ${porComercioDeCobro}
+    `,
+  ])
+  return {
+    loads: round2(Number(cargas[0]?.amount ?? 0)),
+    loadsCount: Number(cargas[0]?.count ?? 0),
+    loadRefunds: round2(Number(cancelaciones[0]?.amount ?? 0)),
+    balancePaid: round2(Number(saldo[0]?.amount ?? 0)),
+    balanceCount: Number(saldo[0]?.count ?? 0),
+    balanceTips: round2(Number(saldo[0]?.tips ?? 0)),
+    balanceReversals: round2(Number(saldo[0]?.reversals ?? 0)),
+  }
+}
+
+/**
  * Get sales summary for a venue within a date range
  */
 export async function getSalesSummary(venueId: string, filters: SalesSummaryFilters): Promise<SalesSummaryResponse> {
@@ -873,6 +980,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         AND "createdAt" <= ${utcTsParam(3)}
         AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
         AND "paymentStatus" NOT IN ('REFUNDED')
+        AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
         ${merchantAccountId ? 'AND id IN (SELECT "orderId" FROM "Payment" WHERE "merchantAccountId" = $4)' : ''}
     `,
           ...orderTotalsParams,
@@ -901,6 +1009,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] as any },
     paymentStatus: { notIn: ['REFUNDED'] as any },
     ...merchantOrderFilter,
+    // Tarjetas de regalo (spec §7): la cuenta de tarjetas no es mercancía (además no admite promociones ni cortesías, A5).
+    ...WHERE_ORDEN_SIN_TARJETAS,
   }
   const [promoGiveawayResult, compGiveawayResult] = !isFiltered
     ? await Promise.all([
@@ -929,6 +1039,9 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       ...dateFilter,
       type: 'REFUND',
       ...paymentLevelFilter,
+      // Tarjetas de regalo: la cancelación de una venta de tarjetas no es devolución de mercancía (resta de «tarjetas cargadas»).
+      // El REFUND de un cobro con saldo SÍ se queda: devuelve mercancía.
+      order: WHERE_ORDEN_SIN_TARJETAS,
     },
     _sum: {
       amount: true,
@@ -947,6 +1060,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           status: { notIn: ['PENDING', 'CANCELLED', 'DELETED'] },
           paymentStatus: { in: ['PENDING', 'PARTIAL'] },
           ...merchantOrderFilter,
+          ...WHERE_ORDEN_SIN_TARJETAS,
         },
         _sum: {
           remainingBalance: true,
@@ -1008,12 +1122,15 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   })
 
   // 8. Transaction Count - Completed payments
+  // Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros se cuentan como las ventas brutas, sin los de cuentas de
+  // tarjetas (lo pagado con saldo SÍ cuenta). Con filtro es la vista de dinero y no se toca.
   const transactionCountResult = await prisma.payment.count({
     where: {
       venueId,
       ...dateFilter,
       status: 'COMPLETED',
       ...paymentLevelFilter,
+      ...(!isFiltered ? { AND: [{ order: WHERE_ORDEN_SIN_TARJETAS }] } : {}),
     },
   })
 
@@ -1132,10 +1249,21 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
   }
 
   // ============================================================
+  // Tarjetas de regalo (spec §7): «tarjetas cargadas» y «pagado con saldo», aparte de la mercancía. Sólo sin filtro de método.
+  // ============================================================
+  const tarjetas = !isFiltered ? await computeGiftCardFigures(venueId, parsedStartDate, parsedEndDate, merchantAccountId) : null
+  if (tarjetas) {
+    summary.giftCardLoads = round2(tarjetas.loads - tarjetas.loadRefunds)
+    summary.giftCardLoadsCount = tarjetas.loadsCount
+    summary.paidWithGiftCardBalance = round2(tarjetas.balancePaid - tarjetas.balanceReversals)
+  }
+
+  // ============================================================
   // Payment Method Breakdown (if requested)
   // ============================================================
 
   let byPaymentMethod: PaymentMethodBreakdown[] | undefined
+  let salesByPaymentMethod: PaymentMethodBreakdown[] | undefined
 
   // Skip breakdown under filter — the user already drilled in to one bucket,
   // a single-row breakdown adds no information.
@@ -1147,6 +1275,8 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
         ...dateFilter,
         status: 'COMPLETED',
         ...merchantPaymentFilter,
+        // Tarjetas de regalo: lo pagado con saldo no se mezcla con OTHER (va en `giftCardBalanceBreakdown`).
+        AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO],
       },
       _sum: {
         amount: true,
@@ -1178,6 +1308,38 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       byPaymentMethod = withPercentages([
         ...(byPaymentMethod ?? []),
         { method: 'QR_LEGACY', amount: legacyTotal, count: legacyAggregate.count, percentage: 0 },
+      ])
+    }
+
+    // Tarjetas de regalo (full-testing v2 #1): VENTAS por método para la barra bajo «Total de Ventas» (que es ventas): los mismos
+    // cobros SIN los de cuentas de tarjetas (sus cargas y sus cancelaciones) y CON lo pagado con saldo como `GIFT_CARD`, neto de
+    // reversos y con propina como las demás filas. Sólo en negocios con tarjetas (índice por venueId): sin ninguna, no hay cuentas de
+    // tarjetas ni saldo y las dos vistas son la misma, así que no se pregunta nada más.
+    if (tarjetas && (await prisma.giftCard.findFirst({ where: { venueId }, select: { id: true } }))) {
+      const ventas = await prisma.payment.groupBy({
+        by: ['method'],
+        where: {
+          venueId,
+          ...dateFilter,
+          status: 'COMPLETED',
+          ...merchantPaymentFilter,
+          AND: [WHERE_COBRO_NO_ES_SALDO_DE_REGALO, { order: WHERE_ORDEN_SIN_TARJETAS }],
+        },
+        _sum: { amount: true, tipAmount: true },
+        _count: true,
+      })
+      const saldo = summary.paidWithGiftCardBalance ?? 0
+      salesByPaymentMethod = withPercentages([
+        ...ventas.map(p => ({
+          method: String(p.method),
+          amount: Number(p._sum.amount || 0) + Number(p._sum.tipAmount || 0),
+          count: p._count,
+          percentage: 0,
+        })),
+        ...byPaymentMethod.filter(m => m.method === 'QR_LEGACY'),
+        ...(tarjetas.balanceCount > 0 || saldo !== 0
+          ? [{ method: 'GIFT_CARD', amount: saldo, count: tarjetas.balanceCount, percentage: 0 }]
+          : []),
       ])
     }
   }
@@ -1235,6 +1397,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND p."createdAt" <= ${utcTs(parsedEndDate)}
           AND p."status" = 'COMPLETED'
           ${merchantSql}
+          AND ${sqlCobroNoEsSaldoDeRegalo('p')}
         GROUP BY 1, 2, 3
       `,
       prisma.$queryRaw<Array<GroupRow & { refunds: string }>>`
@@ -1249,6 +1412,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND p."createdAt" <= ${utcTs(parsedEndDate)}
           AND p."type" = 'REFUND'
           ${merchantSql}
+          AND ${sqlCobroNoEsSaldoDeRegalo('p')}
         GROUP BY 1, 2, 3
       `,
     ])
@@ -1341,6 +1505,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
       })
   }
 
+  // Tarjetas de regalo: lo pagado con saldo, fuera de los buckets (un bucket nuevo tumba la página del dashboard que no lo conoce).
+  const giftCardBalanceBreakdown: GiftCardBalanceBreakdown | undefined =
+    groupBy === 'paymentMethod' && tarjetas
+      ? { amount: tarjetas.balancePaid, count: tarjetas.balanceCount, tips: tarjetas.balanceTips, refunds: tarjetas.balanceReversals }
+      : undefined
+
   // ============================================================
   // Time-Period Breakdown (if reportType is not 'summary')
   // ============================================================
@@ -1405,10 +1575,12 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
     reportType,
     summary,
     byPaymentMethod,
+    ...(salesByPaymentMethod ? { salesByPaymentMethod } : {}),
     byPaymentMethodDetailed,
     byPeriod,
     byMerchantAccount,
     settlementCalendar,
+    ...(giftCardBalanceBreakdown ? { giftCardBalanceBreakdown } : {}),
     filtered: isFiltered,
     ...(legacyUnavailable ? { legacyUnavailable: true as const } : {}),
   }
@@ -1474,6 +1646,13 @@ export function flattenSalesSummaryForExport(
     rows.push(t('Propinas', s.tips))
     rows.push(t('Comisiones de plataforma', -s.platformFees))
     rows.push(t('Total cobrado', s.totalCollected))
+    // Tarjetas de regalo (spec §7): fuera de las ventas, cada una con su leyenda.
+    if (s.giftCardLoads !== undefined) {
+      rows.push(t('Tarjetas de regalo cargadas (no es venta)', s.giftCardLoads, s.giftCardLoadsCount ?? null))
+    }
+    if (s.paidWithGiftCardBalance !== undefined) {
+      rows.push(t('Pagado con saldo de tarjeta de regalo (incluido en ventas y propinas)', s.paidWithGiftCardBalance))
+    }
   }
   if (want.has('paymentMethods') && report.byPaymentMethod) {
     for (const m of report.byPaymentMethod) {
@@ -1483,6 +1662,15 @@ export function flattenSalesSummaryForExport(
         count: m.count,
         amount: round2x(m.amount),
         percentage: round2x(m.percentage),
+      })
+    }
+    if (report.giftCardBalanceBreakdown) {
+      rows.push({
+        section: 'paymentMethods',
+        label: 'Saldo de tarjeta de regalo',
+        count: report.giftCardBalanceBreakdown.count,
+        amount: round2x(report.giftCardBalanceBreakdown.amount),
+        percentage: null,
       })
     }
   }
@@ -1681,6 +1869,7 @@ async function calculateTimePeriodMetrics(
       -- CANCELLED, double-counting PENDING/DELETED orders vs the summary card.
       AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND "paymentStatus" NOT IN ('REFUNDED')
+      AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
       ${merchantOrderClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}
@@ -1688,12 +1877,15 @@ async function calculateTimePeriodMetrics(
 
   // Query payment metrics grouped by period — payment-method clause appended
   // before GROUP BY so the filter narrows rows, not groups.
+  // ⭐ Tarjetas de regalo (B5 r1, M-2): sin filtro de método, los cobros de las barras se cuentan como la cabecera —sin los de
+  // cuentas de tarjetas—; con filtro es la vista de dinero y cuentan todos. El monto y la propina no cambian.
+  const cobrosQueCuentan = isFiltered ? '' : ` FILTER (WHERE ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')})`
   const paymentMetricsQuery = `
     SELECT
       ${groupByExpression} as period,
       COALESCE(SUM(amount), 0) as payment_amount,
       COALESCE(SUM("tipAmount"), 0) as tips,
-      COUNT(*) as transaction_count
+      COUNT(*)${cobrosQueCuentan} as transaction_count
     FROM "Payment"
     WHERE "venueId" = $1
       AND "createdAt" >= $2::timestamp
@@ -1717,6 +1909,7 @@ async function calculateTimePeriodMetrics(
       AND "createdAt" >= $2::timestamp
       AND "createdAt" <= $3::timestamp
       AND type = 'REFUND'
+      AND ${sqlOrdenSinTarjetasTexto('"Payment"."orderId"')}
       ${merchantPaymentClause}
       ${paymentSqlClause}
     GROUP BY ${groupByExpression}
@@ -1735,6 +1928,7 @@ async function calculateTimePeriodMetrics(
       -- Mirror the summary deferred filter (status notIn PENDING/CANCELLED/DELETED).
       AND status NOT IN ('PENDING', 'CANCELLED', 'DELETED')
       AND "paymentStatus" IN ('PENDING', 'PARTIAL')
+      AND ${sqlOrdenSinTarjetasTexto('"Order".id')}
       ${merchantOrderClause}
     GROUP BY ${groupByExpression}
     ORDER BY ${orderByExpression}

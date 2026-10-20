@@ -300,7 +300,10 @@ describe('C3 · emitirExtraccion', () => {
     let candadosAntes = 0
     await emitir(d, { comprobarNominativa: async () => ((candadosAntes = d.tx.$queryRaw.mock.calls.length), []) })
     const sql = d.tx.$queryRaw.mock.calls.map((c: any) => c[0].join('?'))
-    expect(sql[0]).toMatch(/FROM "Order" o[\s\S]*FOR UPDATE OF o/)
+    // Plan 6b (D10): `sql[0]` ya es la lectura de la organización (la admisión va primero); lo que G1 protege es «después del FOR UPDATE».
+    const forUpdateDeLaOrden = sql.findIndex((s: string) => /FROM "Order" o[\s\S]*FOR UPDATE OF o/.test(s))
+    expect(forUpdateDeLaOrden).toBeGreaterThanOrEqual(0)
+    expect(forUpdateDeLaOrden).toBeLessThan(candadosAntes)
     expect(candadosAntes).toBeGreaterThanOrEqual(3) // la orden, sus productos y la fila de la global
   })
   it('🔴 la fila reservada: llave de (global, ticket), causa EXTRACCION, Público en General, G02, PUE, la forma del ticket, remanentes y redondeo', async () => {

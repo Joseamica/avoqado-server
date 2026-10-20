@@ -5,9 +5,13 @@ type ShiftLifecycleLockClient = Pick<Prisma.TransactionClient, '$queryRaw'>
 /**
  * Autoridad DB compartida del lifecycle OPEN/CLOSING de un venue.
  *
- * Siempre se toma PRIMERO dentro de una transacción corta y luego se relee Shift. PostgreSQL lo
- * libera al commit/rollback, incluso si el proceso muere. Los writers de cobro conservan su lock
- * de fila OPEN y nunca intentan adquirir éste, por lo que no existe el ciclo fila → advisory.
+ * Se toma dentro de una transacción corta y luego se relee Shift. PostgreSQL lo libera al
+ * commit/rollback, incluso si el proceso muere. Los writers de cobro conservan su lock de fila OPEN
+ * y nunca intentan adquirir éste, por lo que no existe el ciclo fila → advisory.
+ *
+ * Orden D10 (IVA por producto, plan 6b): en las transacciones del POS externo (`posSyncShift.service.ts`)
+ * la guardia `exigirIvaApagadoTx` —admisión `iva-emision:<org>` → Organización `FOR SHARE`— va ANTES
+ * que este candado; nadie toma la admisión o la organización después de él.
  */
 export async function lockShiftLifecycleForVenue(tx: ShiftLifecycleLockClient, venueId: string): Promise<void> {
   const key = `avoqado:shift-lifecycle:v1:${venueId}`

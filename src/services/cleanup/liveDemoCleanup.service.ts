@@ -384,6 +384,14 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
   await borrar(tx.payment.deleteMany({ where: { order: { venueId } } }))
   await borrar(tx.order.deleteMany({ where: { venueId } }))
 
+  // 1b. Tarjetas de regalo (enmienda E2 del plan 1a): la libreta es SÓLO de inserción (trigger) y el sobre apunta al venue con
+  // RESTRICT, así que el cascade del venue no los alcanza. Borrar un negocio demo ENTERO es la única excepción: esta
+  // transacción lo declara con `SET LOCAL` (muere con ella) y el trigger deja pasar el DELETE (nunca un UPDATE). Primero la
+  // libreta, luego los sobres; sus renglones de venta ya se fueron en el paso 1.
+  await tx.$executeRaw`SET LOCAL avoqado.borrado_de_negocio = 'on'`
+  await borrar(tx.giftCardActivity.deleteMany({ where: { venueId } }))
+  await borrar(tx.giftCard.deleteMany({ where: { venueId } }))
+
   // 2. Reviews
   await borrar(tx.review.deleteMany({ where: { venueId } }))
 
@@ -448,6 +456,7 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
 
   // 5. Products
   await borrar(tx.product.deleteMany({ where: { venueId } }))
+  await borrar(tx.productGroup.deleteMany({ where: { venueId } }))
 
   // 6. Menu categories and menus
   await borrar(tx.menuCategoryAssignment.deleteMany({ where: { menu: { venueId } } }))

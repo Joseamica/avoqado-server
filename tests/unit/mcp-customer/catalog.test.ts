@@ -3,6 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
 import { z } from 'zod'
 import { configureToolCatalog, TOOL_EFFECTS } from '@/mcp/catalog'
+import { DIRECTORY_TIERS } from '@/mcp/directory/catalog'
 import { text } from '@/mcp/respond'
 import { instrumentTools } from '@/mcp/instrument'
 import type { McpScope } from '@/mcp/scope'
@@ -191,6 +192,13 @@ const NUNCA_EN_DIRECTORIO = [
   'staff_documents',
   'stamp_payroll_receipts',
   'supplier_invoices',
+  // saldo de tarjetas de regalo: en la fase 1a sólo en el MCP libre; el directorio pide su propia revisión
+  'gift_card_lookup',
+  'gift_cards_summary',
+  // operar tarjetas de regalo (bloquear, ajustar el saldo, cancelar su venta, reglas): mueve saldo; sólo en el MCP libre
+  'cancel_gift_card_sale',
+  'manage_gift_card',
+  'update_gift_card_settings',
   // mostrar o vender planes de Avoqado
   'get_venue_plan_status',
   'get_venue_seat_status',
@@ -352,4 +360,45 @@ it('control — C1 · Tarea 11: `emit_global_invoice` es una escritura (timbra a
 it('🔴 C1 · Tarea 12: `global_invoice_excluded_sales` es una LECTURA (no pide confirmación) y nunca se publica en el directorio', () => {
   expect(TOOL_EFFECTS.global_invoice_excluded_sales).toBe('read')
   expect(NUNCA_EN_DIRECTORIO).toContain('global_invoice_excluded_sales')
+})
+
+describe('catálogo en bloque (sólo MCP libre)', () => {
+  const NOMBRES = ['find_products_by_code', 'set_prices_by_code', 'create_products', 'set_stock_by_code']
+
+  it('buscar por código sólo lee', () => {
+    expect(TOOL_EFFECTS.find_products_by_code).toBe('read')
+  })
+
+  it('poner precios en bloque escribe', () => {
+    expect(TOOL_EFFECTS.set_prices_by_code).toBe('write')
+  })
+
+  it('dar de alta en bloque escribe', () => {
+    expect(TOOL_EFFECTS.create_products).toBe('write')
+  })
+
+  it('cargar existencias en bloque escribe', () => {
+    expect(TOOL_EFFECTS.set_stock_by_code).toBe('write')
+  })
+
+  it('ninguna de las cuatro está en una tanda del directorio certificado', () => {
+    for (const tanda of DIRECTORY_TIERS) for (const nombre of NOMBRES) expect(tanda.tools).not.toContain(nombre)
+  })
+})
+
+it('tarjetas de regalo (fase 1a): dos LECTURAS y tres de operación del gerente que sólo viven en el MCP libre, nunca en el directorio', () => {
+  expect(TOOL_EFFECTS.gift_cards_summary).toBe('read')
+  expect(TOOL_EFFECTS.gift_card_lookup).toBe('read')
+  expect(TOOL_EFFECTS.manage_gift_card).toBe('write')
+  expect(TOOL_EFFECTS.cancel_gift_card_sale).toBe('write')
+  expect(TOOL_EFFECTS.update_gift_card_settings).toBe('write')
+  expect(NUNCA_EN_DIRECTORIO).toEqual(
+    expect.arrayContaining([
+      'gift_card_lookup',
+      'gift_cards_summary',
+      'manage_gift_card',
+      'cancel_gift_card_sale',
+      'update_gift_card_settings',
+    ]),
+  )
 })

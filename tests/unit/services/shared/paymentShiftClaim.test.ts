@@ -25,6 +25,10 @@ function makeTx(
     activityLog: {
       create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
     },
+    // ¿La orden trae un renglón con tarjeta de regalo? `null` = mercancía (o sin lectura).
+    orderItem: {
+      findFirst: jest.fn().mockResolvedValue(null),
+    },
     venueSettings: {
       findUnique: jest.fn().mockResolvedValue(settings),
     },
@@ -42,6 +46,7 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
         amountPesos: new Prisma.Decimal('10.00'),
         tipPesos: new Prisma.Decimal('0.00'),
         incrementTotalOrders: true,
+        orderId: null,
       }),
     ).resolves.toBeNull()
 
@@ -59,6 +64,7 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
         amountPesos: new Prisma.Decimal('10.00'),
         tipPesos: new Prisma.Decimal('1.00'),
         incrementTotalOrders: true,
+        orderId: null,
       }),
     ).resolves.toMatchObject({ shiftId: 'shift-open', pendingReason: null })
 
@@ -84,6 +90,7 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
       amountPesos: new Prisma.Decimal('123.45'),
       tipPesos: new Prisma.Decimal('6.78'),
       incrementTotalOrders: true,
+      orderId: null,
     })
 
     // 🔴 El candidato es el turno VIVO (`turnoVivoWhere`): `endTime` nulo Y estado OPEN/CLOSING.
@@ -110,6 +117,74 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
     })
   })
 
+  // 🔴 Pendientes 1a (tarjetas de regalo, R3): la cuenta de tarjetas suma su dinero al turno pero no es una orden de venta.
+  it('🔴 una cuenta de tarjetas (un renglón con giftCardId) suma venta y propina pero NO una orden', async () => {
+    const tx = makeTx({ id: 'shift-open', status: 'OPEN' })
+    tx.orderItem.findFirst.mockResolvedValue({ id: 'renglon-tarjeta' })
+
+    const claim = await claimShiftForCapturedPayment(tx as never, {
+      venueId: VENUE_ID,
+      amountPesos: new Prisma.Decimal('300.00'),
+      tipPesos: new Prisma.Decimal('0.00'),
+      incrementTotalOrders: true,
+      orderId: 'order-tarjetas',
+    })
+
+    expect(tx.shift.updateMany).toHaveBeenCalledWith({
+      where: { id: 'shift-open', venueId: VENUE_ID, status: 'OPEN', endTime: null },
+      data: {
+        totalSales: { increment: new Prisma.Decimal('300.00') },
+        totalTips: { increment: new Prisma.Decimal('0.00') },
+      },
+    })
+    // Una sola lectura: A5 no deja mezclar tarjetas con mercancía, así que un renglón con tarjeta basta.
+    expect(tx.orderItem.findFirst).toHaveBeenCalledTimes(1)
+    expect(tx.orderItem.findFirst).toHaveBeenCalledWith({
+      where: { orderId: 'order-tarjetas', giftCardId: { not: null } },
+      select: { id: true },
+    })
+    expect(claim).toMatchObject({ shiftId: 'shift-open', pendingReason: null })
+  })
+
+  it('una orden de mercancía con orderId sí suma su orden', async () => {
+    const tx = makeTx({ id: 'shift-open', status: 'OPEN' })
+
+    await claimShiftForCapturedPayment(tx as never, {
+      venueId: VENUE_ID,
+      amountPesos: new Prisma.Decimal('150.00'),
+      tipPesos: new Prisma.Decimal('0.00'),
+      incrementTotalOrders: true,
+      orderId: 'order-mercancia',
+    })
+
+    expect(tx.shift.updateMany.mock.calls[0][0].data).toMatchObject({ totalOrders: { increment: 1 } })
+    expect(tx.orderItem.findFirst).toHaveBeenCalledTimes(1)
+  })
+
+  it('sin orden (venta rápida, sombra) o con un abono que no cuenta orden, no lee renglones', async () => {
+    const sinOrden = makeTx({ id: 'shift-open', status: 'OPEN' })
+    await claimShiftForCapturedPayment(sinOrden as never, {
+      venueId: VENUE_ID,
+      amountPesos: new Prisma.Decimal('50.00'),
+      tipPesos: new Prisma.Decimal('0.00'),
+      incrementTotalOrders: true,
+      orderId: null,
+    })
+    expect(sinOrden.orderItem.findFirst).not.toHaveBeenCalled()
+    expect(sinOrden.shift.updateMany.mock.calls[0][0].data).toMatchObject({ totalOrders: { increment: 1 } })
+
+    const segundoAbono = makeTx({ id: 'shift-open', status: 'OPEN' })
+    await claimShiftForCapturedPayment(segundoAbono as never, {
+      venueId: VENUE_ID,
+      amountPesos: new Prisma.Decimal('50.00'),
+      tipPesos: new Prisma.Decimal('0.00'),
+      incrementTotalOrders: false,
+      orderId: 'order-1',
+    })
+    expect(segundoAbono.orderItem.findFirst).not.toHaveBeenCalled()
+    expect(segundoAbono.shift.updateMany.mock.calls[0][0].data).not.toHaveProperty('totalOrders')
+  })
+
   it('si el cierre gana entre la lectura y el CAS no sella el turno y deja una anomalía atómica exacta', async () => {
     const tx = makeTx({ id: 'shift-closed-by-race', status: 'OPEN' }, 0)
     const amountPesos = new Prisma.Decimal('100.00')
@@ -120,6 +195,7 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
       amountPesos,
       tipPesos,
       incrementTotalOrders: true,
+      orderId: null,
     })
     await recordPendingPaymentShiftReconciliation(tx as never, {
       claim,
@@ -168,6 +244,7 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
       amountPesos,
       tipPesos,
       incrementTotalOrders: true,
+      orderId: null,
     })
     await recordPendingPaymentShiftReconciliation(tx as never, {
       claim,
@@ -201,6 +278,7 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
       amountPesos,
       tipPesos,
       incrementTotalOrders: true,
+      orderId: null,
     })
     await recordPendingPaymentShiftReconciliation(tx as never, {
       claim: missing,

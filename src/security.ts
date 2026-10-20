@@ -20,6 +20,8 @@ export interface AvoqadoJwtPayload extends jwt.JwtPayload {
   sid?: string
   /** `'POS'` en los tokens del POS móvil (ver `jwt.service`). */
   origen?: 'POS'
+  /** Emisión en ms (`jwt.service`); ausente en tokens anteriores al 25-sep, que sólo traen `iat`. */
+  emitidoMs?: number
   /** OAuth 2.0 RFC 8693 `act` claim — present only during impersonation sessions. */
   act?: ImpersonationActClaim
 }
@@ -56,6 +58,12 @@ export interface AuthContext {
   sid?: string
   /** `'POS'` si la petición viene con sesión del POS móvil (marca firmada en el token). Ausente en el dashboard. */
   origen?: 'POS'
+  /**
+   * Cuándo se emitió el token de esta petición, en ms (`emitidoMs` firmado o, si no, el `iat`). Lo necesita lo que EMITE
+   * tokens nuevos a partir de la sesión en curso: si hubo un corte de sesiones después, no puede reabrirla (terminar el
+   * alta, Codex r2).
+   */
+  emitidoMs?: number
 
   // Impersonation (optional for back-compat with existing AuthContext construction sites).
   // When absent / false, treat as non-impersonating; `realUserId`/`realRole` fall back to `userId`/`role`.
@@ -323,6 +331,13 @@ export function buildAuthContextFromPayload(jwtPayload: AvoqadoJwtPayload): Auth
   // For user-mode impersonation, sub is the impersonated user. For role-mode, sub stays as the actor.
   const impersonatedUserId = act?.mode === 'user' ? userId : null
 
+  const emitidoMs =
+    typeof jwtPayload.emitidoMs === 'number' && Number.isFinite(jwtPayload.emitidoMs)
+      ? jwtPayload.emitidoMs
+      : typeof jwtPayload.iat === 'number'
+        ? jwtPayload.iat * 1000
+        : undefined
+
   const impersonation: ImpersonationContext | null = act
     ? {
         mode: act.mode,
@@ -342,6 +357,7 @@ export function buildAuthContextFromPayload(jwtPayload: AvoqadoJwtPayload): Auth
     ...(jwtPayload.terminalSerialNumber && { terminalSerialNumber: jwtPayload.terminalSerialNumber }),
     ...(jwtPayload.sid && { sid: jwtPayload.sid }),
     ...(jwtPayload.origen === 'POS' && { origen: 'POS' as const }),
+    ...(emitidoMs !== undefined && { emitidoMs }),
     realUserId,
     realRole,
     isImpersonating,

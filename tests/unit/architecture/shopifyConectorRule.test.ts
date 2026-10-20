@@ -532,7 +532,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(leer('tests/unit/scripts/shopify-sandbox-arranque.test.ts')).toContain(
       "const itSi = process.env.SHOPIFY_SANDBOX === '1' ? it : it.skip",
     )
-    // workflow_dispatch con production publica sin importar la rama: la regla no puede dejar de avisarlo.
+    // workflow_dispatch con production es el botón de publicar (desde el 14-oct sólo en main): la regla no puede dejar de avisarlo.
     expect(leer('.github/workflows/ci-cd.yml')).toContain("github.event.inputs.environment == 'production'")
   })
 
@@ -1054,6 +1054,90 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     expect(huecos).toEqual([])
   })
 
+  it('🔴 bloque 5: una talla agrupada se liga; el conector sólo le escribe SKU, código y shopifyCatalog; la familia va antes del producto al archivar y al restaurar', () => {
+    contieneTodas([
+      'una talla agrupada se liga como cualquier producto; `motivoParaNoLigar` ya no da `PRODUCTO_CON_VARIANTES`',
+      'El conector nunca crea ni cambia una familia solo, salvo revivirla (V7, abajo).',
+      'Si después la familia sí la recibe (se liberó lugar o la llave), la talla vuelve por cualquiera de las dos ramas y ese aviso se borra.',
+      '`actualizarPareja` sólo le escribe `sku` y `gtin` (con sus avisos `SKU_CHOCA` y `CODIGO_REPETIDO` de siempre) y la pareja; nunca el nombre ni la foto',
+      'agrupar nunca mueve `Inventory`, movimientos, buzón ni la pareja',
+      'cada pareja guarda lo que Shopify dice de su variante (`catalogoDe`: `title`, `options` sin «Default Title» —`opcionesReales`—, `productImage` y `variantImage`) al ligar y en cada actualización',
+      '`archivarPareja` de una talla agrupada toma el negocio (`Venue FOR SHARE`) y la familia `FOR UPDATE` con `lockGroupForCleanup` (también si ya está archivada: la segunda baja) ANTES del producto',
+      'La familia se lee sin candado y se re-verifica con el producto bloqueado; si cambió, error «… se reintenta».',
+      'la familia de una talla que archivó el conector se toma después del cerco de gobierno y antes de `bloquearProductos`',
+      'viva y con menos de 250 tallas vivas ⇒ vuelve; archivada por el conector (`deletedBy = SHOPIFY_SYNC`) y sin otra familia viva con su llave `(venueId, source, externalId)` ⇒ la familia revive con ella',
+      '«Su familia está archivada o llena: restáurala en Avoqado.»',
+      'ni la rama sin pareja ni `actualizarPareja` siguen: no ligan, no borran el aviso, devuelven `PROBLEMA` y nadie inicia la pareja',
+      'Con una talla agrupada que se archiva o se restaura, el negocio y su familia van ANTES del Product (§4 quater).',
+      'Ese aviso sobrevive a la limpieza de `archivarPareja`: cuando termina el envío de una pareja retenida y la segunda baja la borra, se borran sus demás avisos pero no el `PRODUCTO_ARCHIVADO` del rechazo de la familia',
+      '«llave libre» la decide `familyIdentityConflict` de `groupWriterTx.ts`, la misma política con la que se crea y se renombra una familia',
+      'una MANUAL archivada por el conector no revive si otra MANUAL viva ya tiene su nombre',
+      // Ronda final: V3, V4, V6 y el conector que no reescribe lo mismo (D).
+      '`actualizarPareja` escribe el `Product` sólo si cambia su `sku`, su `gtin` o (en una suelta) su nombre o su foto',
+      'las dos llevan vista previa y huella, y con los productos bloqueados vuelven a armar la propuesta y comparan la huella',
+      'El destino de «Agregar a X» es la familia SHOPIFY viva con su llave o, si no hay, la ÚNICA familia viva (de cualquier origen',
+      '«Las tallas de este producto están en varias familias: agrúpalas a mano.»',
+      'no le dan a Shopify ningún mando sobre ella ni apartan el nombre',
+      'una pareja sin `shopifyCatalog`, o con uno mal formado, deja la propuesta «Este producto se completa en la próxima sincronización con Shopify.»',
+      'una combinación que ya existe en la familia (viva o archivada) ⇒ esa talla se salta con su motivo',
+    ])
+    // A (caso IQ): el destino de «Agregar» y el texto de «varias familias» salen del servicio que la regla nombra.
+    const familias = leer('src/services/product-variants/shopifyFamilies.service.ts')
+    expect(familias).toContain(
+      "export const SHOPIFY_VARIAS_FAMILIAS_TEXT = 'Las tallas de este producto están en varias familias: agrúpalas a mano.'",
+    )
+    expect(cuerpo(familias, 'async function destinosDe(')).toContain('source: ProductGroupSource.SHOPIFY')
+    const catalogo = leer(`${SHOPIFY}/shopify.catalog.service.ts`)
+    expect(cuerpo(catalogo, 'function motivoParaNoLigar(')).not.toContain('PRODUCTO_CON_VARIANTES')
+    const actualizar = cuerpo(catalogo, 'async function actualizarPareja(')
+    expect(actualizar).toContain('const agrupada = producto.productGroupId !== null')
+    expect(actualizar).toContain('const name = agrupada ? undefined : nombreDe(v)')
+    expect(actualizar).toContain('const imageUrl = agrupada ? undefined : imagenDe(v)')
+    // Ronda final (D): sin cambios no se reescribe el Product (la huella de «Desde Shopify» no se vuelve vieja con cada aviso).
+    expect(actualizar).toContain('if (cambia) await tx.product.update({ where: { id: actual.id }, data: { name, imageUrl, sku, gtin } })')
+    expect(actualizar).toContain('shopifyCatalog: catalogoDe(v)')
+    expect(actualizar).toContain("=== 'RECHAZADA')\n    return { kind: 'PROBLEMA', reason: 'PRODUCTO_ARCHIVADO' }")
+    expect(cuerpo(catalogo, 'async function ligar(')).toContain('shopifyCatalog: catalogoDe(v)')
+    expect(catalogo).toContain("export const FAMILIA_NO_RECIBE = 'Su familia está archivada o llena: restáurala en Avoqado.'")
+    const upsert = cuerpo(catalogo, 'export async function upsertShopifyVariant(')
+    enOrden(upsert, ['assertLegacyCatalogGovernanceForVenue(', 'bloquearFamiliasPorRestaurar(', 'bloquearProductos(', 'cercar('])
+    expect(upsert).toContain("=== 'RECHAZADA')\n        return { kind: 'PROBLEMA', reason: 'PRODUCTO_ARCHIVADO' }\n      return ligar(")
+    enOrden(cuerpo(catalogo, 'async function restaurar('), [
+      "throw new Error('la talla cambió de familia mientras se leía; se reintenta')",
+      'familiaRecibe(',
+      "return 'RECHAZADA'",
+      'reviveGroupTx(',
+      'tx.product.update(',
+    ])
+    const recibe = cuerpo(catalogo, 'async function familiaRecibe(')
+    expect(recibe).toContain('< MAX_VARIANTS_PER_GROUP')
+    expect(recibe).toContain('f.deletedBy !== ARCHIVADO_POR_SHOPIFY')
+    // Tarea 4: la política única de identidad (la de crear y renombrar), no una consulta propia.
+    expect(recibe).toContain('familyIdentityConflict(tx, venueId, { source: f.source, name: f.name, externalId: f.externalId }, groupId)')
+    // Ronda 2: el aviso de V7 se borra al restaurar; una familia que desaparece entre la lectura y el candado se reintenta.
+    enOrden(cuerpo(catalogo, 'async function restaurar('), [
+      'efectos.restaurado = producto.id',
+      "reason: 'PRODUCTO_ARCHIVADO', detail: FAMILIA_NO_RECIBE",
+    ])
+    const bloquearFamilia = cuerpo(catalogo, 'async function bloquearFamilia(')
+    expect(bloquearFamilia).toContain('return await lockGroupForCleanup(tx, venueId, groupId)')
+    expect(bloquearFamilia).toContain(
+      "if (e instanceof NotFoundError) throw new Error('la familia de la talla cambió mientras se leía; se reintenta')",
+    )
+    expect(cuerpo(catalogo, 'async function bloquearFamiliasPorRestaurar(')).toContain('bloquearFamilia(tx, venueId, g)')
+    enOrden(cuerpo(catalogo, 'export async function archivarPareja('), [
+      'bloquearFamilia(tx, p.venueId, vista.productGroupId)',
+      'FOR NO KEY UPDATE',
+      "throw new Error('la talla cambió de familia mientras se archivaba; se reintenta')",
+      'exigirCerco(',
+      'archivarProductos(',
+    ])
+    // Terminar un envío no resuelve un rechazo de la familia (fix r1): la limpieza de la baja respeta ese aviso, con `detail` nulo.
+    expect(cuerpo(catalogo, 'export async function archivarPareja(')).toContain(
+      "OR: [{ reason: { not: 'PRODUCTO_ARCHIVADO' } }, { detail: null }, { detail: { not: FAMILIA_NO_RECIBE } }]",
+    )
+  })
+
   it('no conserva versiones anteriores', () => {
     expect(regla).not.toMatch(/descarta lo viejo/)
     expect(regla).not.toMatch(/mirrorAvailable \+ Σ delta` de las filas vivas/)
@@ -1069,8 +1153,8 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
       'connect.service.ts:1732': [de('connect.service'), 'export async function disconnectShopify('],
       'connect.service.ts:861': [de('connect.service'), 'async function aCuarentenaPorReligar('],
       'shopify.crypto.ts:34': [de('crypto'), 'export function formaDeFirmaOAuth('],
-      'catalog.service.ts:68': [de('catalog.service'), 'export const FILTRO_ESTADO'],
-      'catalog.service.ts:418': [de('catalog.service'), 'async function bloquearProductos('],
+      'catalog.service.ts:71': [de('catalog.service'), 'export const FILTRO_ESTADO'],
+      'catalog.service.ts:434': [de('catalog.service'), 'async function bloquearProductos('],
       'reconcile.service.ts:1290': [de('reconcile.service'), 'tx.shopifyStockOutbox.create('],
       'reconcile.service.ts:735': [de('reconcile.service'), 'async function abrirRevision('],
       'mirror.service.ts:5': [de('mirror.service'), 'Invariante operativo'],
@@ -1084,7 +1168,7 @@ describe('regla del conector Shopify (índice v2 §9-§12, lo entregado)', () =>
     const cortas: Record<string, [string, string]> = {
       '`:72`': [de('connect.service'), 'const tiendasPiloto'],
       '`:49`': [de('crypto'), 'export function verifyOAuthQueryHmac('],
-      '`:1197`': [de('catalog.service'), 'export async function archivarPareja('],
+      '`:1330`': [de('catalog.service'), 'export async function archivarPareja('],
     }
     const enLaRegla = [
       ...regla.matchAll(/`((?:shopify\.)?(?:connect|catalog|reconcile|mirror|outbox|store|worker)\.service\.ts|shopify\.crypto\.ts):\d+`/g),

@@ -1,11 +1,6 @@
 /**
- * Tests that verify the ActivityLog capture added to:
- *  1. discountEngine.applyDiscountToOrder  → DISCOUNT_APPLIED (source: 'catalog')
- *  2. discountEngine.removeDiscountFromOrder → DISCOUNT_REMOVED
- *  3. refund.tpv.recordRefund              → REFUND_CREATED   (source: 'TPV')
- *
- * TPV refund drives too many DB calls to test cheaply end-to-end, so it is
- * verified by tsc + code-inspection only (noted below).
+ * ActivityLog de los descuentos del catálogo: DISCOUNT_APPLIED y DISCOUNT_REMOVED.
+ * El payload real de REFUND_CREATED se prueba en refund.turnoDelNegocio.test.ts.
  */
 
 import { applyDiscountToOrder, removeDiscountFromOrder } from '../../../../src/services/dashboard/discountEngine.service'
@@ -253,34 +248,5 @@ describe('discountEngine.removeDiscountFromOrder — audit capture', () => {
 
     expect(result.success).toBe(false)
     expect(mockLogAction).not.toHaveBeenCalled()
-  })
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// refund.tpv.recordRefund → REFUND_CREATED  (inspection-only)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// recordRefund is NOT driven here because it calls $queryRaw (FOR UPDATE lock),
-// createRefundTransactionCost (external service), createRefundCommission, and
-// generateDigitalReceipt — too many side-effect surfaces to mock cheaply.
-//
-// Coverage evidence instead:
-//   • `npx tsc --noEmit` passes (only the 4 pre-existing sales.ts errors remain).
-//   • The logAction call is at src/services/tpv/refund.tpv.service.ts:~393
-//     (after the $transaction block, before the referral hook), using:
-//       staffId: refundData.staffId ?? null
-//       venueId: (function param)
-//       action: 'REFUND_CREATED'
-//       entity: 'Payment'
-//       entityId: result.id  (the created refund Payment)
-//       data: { amount: Number(refundAmountInPesos), reason: refundData.reason,
-//               method: originalPayment.method, source: 'TPV' }
-//   • Mirror pattern verified against src/services/mobile/refund.mobile.service.ts:119
-//     which uses the same shape (source: 'MOBILE').
-//
-describe('recordRefund REFUND_CREATED audit — inspection-only coverage', () => {
-  it('is verified by tsc and code inspection (see comment above)', () => {
-    // This test intentionally passes to document the inspection-based coverage.
-    expect(true).toBe(true)
   })
 })

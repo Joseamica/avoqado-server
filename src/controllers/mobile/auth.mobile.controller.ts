@@ -12,6 +12,7 @@ import { NextFunction, Request, Response } from 'express'
 import { logControllerError } from '../../errors/logControllerError'
 import * as authMobileService from '../../services/mobile/auth.mobile.service'
 import { requestPasswordReset } from '../../services/dashboard/auth.service'
+import { asegurarAparatoAlEntrar } from '../../middlewares/registerDevice.middleware'
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION
@@ -42,6 +43,9 @@ export const login = async (req: Request, res: Response, next: NextFunction) => 
     const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
 
     const result = await authMobileService.loginWithEmail(email, password, rememberMe === true, deviceId)
+
+    // El aparato existe ANTES de que la app haga su primera ráfaga (ver asegurarAparatoAlEntrar).
+    await asegurarAparatoAlEntrar(req, result.selectedVenueId, result.staff?.id)
 
     // Return tokens in body for mobile apps
     res.status(200).json({
@@ -80,6 +84,10 @@ export const refresh = async (req: Request, res: Response, next: NextFunction) =
     }
 
     const result = await authMobileService.refreshAccessToken(refreshToken, venueId)
+
+    // Cambio de local: el aparato se da de alta en el NUEVO antes de contestar. El refresco de cada 10 min
+    // (sin `venueId`) no lo necesita: el aparato ya existe y lo mantiene el registro pasivo.
+    if (venueId) await asegurarAparatoAlEntrar(req, result.venueId, result.staffId)
 
     res.status(200).json({
       success: true,
@@ -165,6 +173,7 @@ export const passkeyVerify = async (req: Request, res: Response, next: NextFunct
     // `deviceId` y «sacar esta tablet» desde el dashboard no la alcanza nunca.
     const deviceId = typeof req.headers['x-device-id'] === 'string' ? req.headers['x-device-id'] : undefined
     const result = await authMobileService.verifyPasskeyAssertion(authCredential, challengeKey, rememberMe === true, deviceId)
+    await asegurarAparatoAlEntrar(req, result.selectedVenueId, result.staff?.id)
 
     // Set cookies (for web clients that might use these endpoints)
     const accessTokenMaxAge = rememberMe ? 30 * 24 * 60 * 60 * 1000 : 24 * 60 * 60 * 1000

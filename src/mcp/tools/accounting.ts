@@ -30,6 +30,10 @@ import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
 import { contabilidadPausada, MOTIVO_CONTABILIDAD_IVA_MIXTO } from '@/services/fiscal/exclusionContable'
+import { estadoIvaPorProducto } from '@/services/fiscal/encendidoIva.service'
+import { listarExcluidasDeLaGlobal } from '@/services/fiscal/cfdiGlobal.service'
+import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import { closePeriod, listPeriodLocks, reopenPeriod } from '@/services/fiscal/accountingPeriodLock.service'
 import type { McpScope } from '../scope'
@@ -37,6 +41,23 @@ import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
 import { planGateMessage } from '../planGate'
 import { text } from '../respond'
+
+/**
+ * Plan 6b (D20): cuántas ventas del último periodo cerrado quedaron fuera de la factura global. Sólo con UN emisor (con varios RFC, el
+ * asistente usa `global_invoice_excluded_sales` y elige); una falla del listado no tumba el diagnóstico.
+ */
+async function ventasFueraDeLaGlobal(venueId: string) {
+  try {
+    const emisores = await prisma.fiscalEmisor.findMany({ where: { venueId }, select: { id: true }, take: 2 })
+    if (emisores.length !== 1) return null
+    const fuera = await listarExcluidasDeLaGlobal({ venueId, emisorId: emisores[0].id, now: new Date(), limite: 1 })
+    return { periodo: fuera.periodo, totales: fuera.totales, globalApagada: fuera.globalApagada }
+  } catch (err) {
+    // T9-a: sin rastro, una falla de esquema se confundiría con «0 o varios emisores» (también `null`).
+    logger.warn('[MCP] fiscal_readiness: no se pudieron contar las ventas fuera de la global', { venueId, error: (err as Error).message })
+    return null
+  }
+}
 
 /** Centavos enteros → pesos con 2 decimales (para lectura humana/LLM). */
 const pesos = (cents: number): number => Math.round(cents) / 100
@@ -662,9 +683,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizasGeneradas: r.posted,
         yaEstaban: r.alreadyPosted,
         omitidos: r.skipped,
+        // Tarjetas de regalo (spec §7, fase 1): venta de tarjetas y cobros con saldo, sin póliza; el contador los registra a mano.
+        pendientesDeRevision: r.pendientesDeRevision,
         // Costo de ventas del periodo (inventario consumido → cuenta de costo de ventas), si hubo consumo.
         costoDeVentas: r.cogsCents != null ? pesos(r.cogsCents) : 0,
-        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes).',
+        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes). Las tarjetas de regalo (su venta y lo pagado con saldo) no generan póliza por ahora: quedan en pendientesDeRevision para que tu contador las registre a mano.',
       })
     },
   )
@@ -1011,6 +1034,16 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         retencionesIsrVentas: pesos(r.retencionesIsrCents), // capturada por el contador (set_sales_retention)
         isrAPagarEstimado: pesos(r.isrAPagarCents),
         sinVentas: r.zeroActivity,
+        // Tarjetas de regalo (B4 r1): la base no se recalcula en la fase 1; la diferencia va aparte y sólo cuando la hay.
+        ...(r.avisoTarjetasDeRegalo
+          ? {
+              tarjetasDeRegalo: {
+                cobradasNoIncluidas: pesos(r.tarjetasCobradasNoIncluidasCents),
+                pagadoConSaldoIncluido: pesos(r.pagadoConSaldoIncluidoCents),
+                aviso: r.avisoTarjetasDeRegalo,
+              },
+            }
+          : {}),
         nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo y, en régimen GENERAL, las pérdidas de ejercicios anteriores topadas a la utilidad; no resta PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
       })
     },
@@ -1575,7 +1608,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'fiscal_readiness',
-    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer), las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica) y si la contabilidad (pólizas y cierre de periodo) está PAUSADA porque la organización ya tuvo productos con IVA distinto de 16 %, con el motivo para el cliente. Sólo lectura. Pasa venueId.',
+    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer), las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica) y si la contabilidad (pólizas y cierre de periodo) está PAUSADA porque la organización ya tuvo productos con IVA distinto de 16 %, con el motivo para el cliente. Incluye el estado del IVA por producto (encendido, bloqueos, avisos de aparatos) y cuántas ventas quedaron fuera de la factura global (con varios RFC emisores, usa global_invoice_excluded_sales). Sólo lectura. Pasa venueId.',
     {
       venueId: z.string().describe('Local a diagnosticar (debe estar en tu alcance)'),
     },
@@ -1585,9 +1618,22 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
       const gate = await planGateMessage(venueId, 'CFDI', 'El diagnóstico de preparación fiscal')
       if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
 
+      // IVA por producto (plan 6b, D20): con Facturación, el estado se ve también sin emisor (Codex r1 P3-11). Diagnóstico bajo demanda
+      // (T5-a): pide la revisión completa. Si truena, el resto del diagnóstico sale igual (Minor T9-3): `null` y queda en el log.
+      const ivaPorProducto = await estadoIvaPorProducto(venueId, new Date(), { conRevision: true }).then(
+        iva => ({ encendido: iva.encendido, bloqueos: iva.bloqueos, avisos: iva.avisos, facturasSinSello: iva.facturasSinSello }),
+        (err: unknown) => {
+          logger.warn('[MCP] fiscal_readiness: no se pudo leer el estado del IVA por producto', {
+            venueId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          return null
+        },
+      )
+
       const r = await getFiscalReadiness(venueId)
       if (r.needsFiscalSetup) {
-        return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.' })
+        return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.', ivaPorProducto })
       }
       const pausada = r.organizationId ? await contabilidadPausada(r.organizationId) : false
       return text({
@@ -1602,6 +1648,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           contabilidadElectronicaLista: r.capabilities.contabilidadElectronicaLista,
         },
         contabilidad: { pausada, motivo: pausada ? MOTIVO_CONTABILIDAD_IVA_MIXTO : null },
+        ivaPorProducto,
+        ventasFueraDeLaGlobal: await ventasFueraDeLaGlobal(venueId),
         checklist: r.checks.map(c => ({ punto: c.label, estatus: c.status, detalle: c.detail })),
         nota: 'estatus: ok = listo · warn = revisa · missing = falta. Las capacidades resumen qué puedes hacer ya con la configuración actual.',
       })

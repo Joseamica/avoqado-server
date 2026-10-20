@@ -10,6 +10,7 @@
  */
 import { registerAllTools } from '../../../src/mcp/server'
 import type { McpScope } from '../../../src/mcp/scope'
+import { DIRECTORY_TOOLS } from '../../../src/mcp/directory/catalog'
 
 /** Terms that must never appear in a customer-visible tool description. */
 const FORBIDDEN: Array<[string, RegExp]> = [
@@ -52,6 +53,11 @@ describe('customer tool catalog', () => {
     expect(catalogFor({ isSuperAdmin: true }).some(t => t.name === 'avoqado_internal_docs')).toBe(true)
   })
 
+  it('attach_customer_to_sale está en el catálogo libre y NO en el certificado (directorio)', () => {
+    expect(customer.some(t => t.name === 'attach_customer_to_sale')).toBe(true)
+    expect(DIRECTORY_TOOLS.has('attach_customer_to_sale')).toBe(false)
+  })
+
   it.each(FORBIDDEN)('no customer-visible tool description exposes %s', (_label, pattern) => {
     const offenders = customer.filter(t => pattern.test(t.desc)).map(t => `${t.name}: ${t.desc.match(pattern)?.[0]}`)
     expect(offenders).toEqual([])
@@ -63,4 +69,23 @@ describe('customer tool catalog', () => {
     expect(help.desc).toMatch(/facturaci/i)
     expect(help.desc).toMatch(/plan/i)
   })
+})
+
+test('affiliation venue tools are registered only in the free superadmin catalog', () => {
+  const names = [
+    'list_venue_document_requests',
+    'list_document_request_venue_options',
+    'list_document_request_venue_links',
+    'get_venue_document_request',
+    'link_document_request_to_venue',
+    'preview_document_request_document',
+  ]
+  const admin = catalogFor({ isSuperAdmin: true })
+  const customer = catalogFor({ isSuperAdmin: false })
+  for (const name of names) {
+    expect(admin.some(t => t.name === name)).toBe(true)
+    expect(customer.some(t => t.name === name)).toBe(false)
+    expect(DIRECTORY_TOOLS.has(name)).toBe(false)
+    for (const [, pattern] of FORBIDDEN) expect(admin.find(t => t.name === name)!.desc).not.toMatch(pattern)
+  }
 })

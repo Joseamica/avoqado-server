@@ -71,6 +71,11 @@ jest.mock('@/middlewares/customerAuth.middleware', () => ({
     req.customerAuth = null
     next()
   },
+  // Pedidos en línea (montados en public.routes.ts): sin esta variante el router no carga. Passthrough como invitado.
+  authenticateOrderingCustomerOptional: (req: any, _res: any, next: any) => {
+    req.customerAuth = null
+    next()
+  },
 }))
 // Fase 0.B: resolveVenueBySlug va antes de la identidad. NO se mockea: el real consulta
 // `prisma.venue.findFirst` (ya mockeado abajo), así los casos "slug desconocido" y "DB

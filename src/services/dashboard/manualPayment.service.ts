@@ -10,6 +10,7 @@ import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.s
 import type { CreateManualPaymentInput } from '@/schemas/dashboard/manualPayment.schema'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 import {
   claimShiftForCapturedPayment,
@@ -22,6 +23,15 @@ import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
+import { esVentaYaCobrada } from '@/services/shared/ligaDeClienteEnVenta'
+
+/**
+ * 🔴 R7-1 (ronda 7 post-QA de sellos tardíos; decisión del founder del 16-oct, «como Square»): una venta cobrada queda CERRADA. El
+ * pago manual rechaza una venta existente PAID o REFUNDED para TODOS (con o sin permiso: es regla de producto); lo extra se registra
+ * como venta nueva. Precedente en `docs/decisiones-de-producto/precedentes.md` (el último del 16-oct).
+ */
+export const MENSAJE_VENTA_YA_COBRADA = 'Esta venta ya está cobrada. Para cobrar algo extra, registra una venta nueva.'
+export const CODIGO_VENTA_YA_COBRADA = 'ORDER_ALREADY_PAID'
 
 /**
  * Record a manual payment (admin-only). Two modes:
@@ -147,11 +157,21 @@ export async function createManualPayment(
   // asignación dentro del callback async de la transacción a `never`.
   const postingState: { id: string | null } = { id: null }
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  // R11-8: los vales v7 de la venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
+  const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
+    '@/services/mobile/areaTicketV7.mobile.service'
+  )
+  const sesionState: { cerrada: boolean } = { cerrada: false }
 
   // Keep the canonical transaction/budget visible to the financial architecture guards.
   const result = await prisma
     .$transaction(
       async tx => {
+        // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión), ANTES del candado de la
+        // venta: el mismo orden que la finalización y el registrador de la terminal. Cerrar aquí la sesión sin ella sería venta →
+        // sesión, al revés, y una terminal que registra a la vez se interbloquearía con este pago.
+        const vales = input.orderId ? await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId: input.orderId }) : null
+        sesionState.cerrada = false
         const previous = await existingAttempt(tx)
         if (previous) {
           replayed = true
@@ -176,6 +196,15 @@ export async function createManualPayment(
         // Order, así que conserva el camino seguro Shift → INSERT Order.
         if (input.orderId) {
           await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
+          // Bajo ese candado y antes de la primera escritura (el reclamo del turno), lo que la venta dice HOY. El reintento por
+          // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar la regla.
+          const venta = await tx.order.findFirst({ where: { id: input.orderId, venueId }, select: { paymentStatus: true } })
+          // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
+          // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
+          // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»). R8-1: ningún
+          // cobro que entra por otro canal la baja a PARTIAL, así que esta regla no se esquiva. (R8-3a: la regla R5-1 —cambiar el
+          // cliente de una venta cobrada pedía `payments:create`— quedó muerta detrás de ésta y se quitó.)
+          if (venta && esVentaYaCobrada(venta)) throw new BadRequestError(MENSAJE_VENTA_YA_COBRADA, CODIGO_VENTA_YA_COBRADA)
         }
         const priorCompletedPaymentCount = input.orderId ? await countPriorCompletedPayments(tx, { venueId, orderId: input.orderId }) : 0
 
@@ -210,6 +239,8 @@ export async function createManualPayment(
           // Una Order se cuenta al primer cobro durable; abonos posteriores no la
           // vuelven a contar. La sombra nace y se salda con este primer cobro.
           incrementTotalOrders: !input.orderId || priorCompletedPaymentCount === 0,
+          // Sin orden, la sombra nace después de este claim y SIN renglones: nunca es una cuenta de tarjetas.
+          orderId: input.orderId ?? null,
         })
         const shiftId = shiftClaim.shiftId
 
@@ -524,6 +555,16 @@ export async function createManualPayment(
               staffId,
             })
             postingState.id = posting?.id ?? null
+            // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+            if (vales)
+              sesionState.cerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, vales.session, { venueId, orderId: anchorOrderId })
+            // R8: el pago manual que salda una cuenta de tarjetas activa sus sobres en la MISMA transacción.
+            await activarSobresDeCuentaPagadaEnTx(tx, {
+              venueId,
+              orderId: anchorOrderId,
+              staffId,
+              items: orderItems as Array<{ giftCardId?: string | null }>,
+            })
           }
         }
         // Reference unused vars so TS doesn't complain — they're captured for
@@ -590,6 +631,8 @@ export async function createManualPayment(
       externalSource: input.externalSource ?? null,
       waiterId: input.waiterId ?? null,
       reason: input.reason ?? null,
+      // R11-8: este pago cerró la venta y con ella su sesión de vales (dejó de ofrecer «cobrar el resto»).
+      ...(sesionState.cerrada ? { sesionDeValesCerrada: true } : {}),
     },
   })
 

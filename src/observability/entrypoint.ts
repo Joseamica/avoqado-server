@@ -20,9 +20,13 @@ const looksLikeId = (segment: string): boolean => CUID.test(segment) || UUID.tes
 /**
  * 🔴 Rutas cuyo SEGMENTO es un secreto (no un id): el proveedor no firma y la URL misma autentica. Cada entrada es el
  * prefijo de segmentos (`*` = cualquiera) y el segmento que le sigue es el secreto. Hoy:
- * `/webhooks/aggregators/:provider/:token/:kind` (conector de pases: 32 bytes base64url por conexión).
+ * `/webhooks/aggregators/:provider/:token/:kind` (conector de pases: 32 bytes base64url por conexión) y
+ * `/venues/:slug/ordering/orders/:trackingToken[/cancel]` (pedidos en línea: el token lee y cancela ESE pedido).
  */
-const SECRET_SEGMENT_AFTER: ReadonlyArray<ReadonlyArray<string>> = [['webhooks', 'aggregators', '*']]
+const SECRET_SEGMENT_AFTER: ReadonlyArray<ReadonlyArray<string>> = [
+  ['webhooks', 'aggregators', '*'],
+  ['venues', '*', 'ordering', 'orders'],
+]
 
 /** Reemplaza por `placeholder` cada segmento-secreto de una RUTA (sin query string). Sin distinguir mayúsculas: Express tampoco. */
 export function redactPathSecrets(path: string, placeholder: string): string {

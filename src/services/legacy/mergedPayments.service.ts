@@ -44,6 +44,7 @@ import { Prisma, TransactionStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { MINDFORM_NEW_VENUE_ID, forEachLegacyPaymentPage } from './qrPayments.legacy.service'
+import { WHERE_COBRO_NO_ES_SALDO_DE_REGALO, WHERE_CUENTA_DE_TARJETAS_PAGADA, WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
 
 export interface AnalyticsPaymentFilters {
   fromDate: Date
@@ -218,24 +219,53 @@ export interface AnalyticsMethodTotal {
   count: number
 }
 
-export async function aggregatePaymentsByMethod(venueId: string, filters: AnalyticsPaymentFilters): Promise<AnalyticsMethodTotal[]> {
+/**
+ * Tarjetas de regalo (spec §7; B5 r1): qué mira la suma por método.
+ * - `ventas` (default): la venta de una tarjeta NO es venta (va en `aggregateGiftCardLoads`); lo pagado con saldo sí, como GIFT_CARD.
+ * - `dinero`: lo que de verdad entró por cada método (cuadra con la terminal, el banco y el panel «Métodos de Pago»): la venta de
+ *   una tarjeta se queda en su método real y lo pagado con saldo NO entra (no es dinero nuevo).
+ */
+export type VistaDeCobros = 'ventas' | 'dinero'
+
+export async function aggregatePaymentsByMethod(
+  venueId: string,
+  filters: AnalyticsPaymentFilters,
+  vista: VistaDeCobros = 'ventas',
+): Promise<AnalyticsMethodTotal[]> {
   const grupos = await prisma.payment.groupBy({
-    by: ['method'],
-    where: analyticsWhere(venueId, filters),
+    by: ['method', 'tenderTypeId'],
+    where: {
+      AND: [analyticsWhere(venueId, filters), vista === 'dinero' ? WHERE_COBRO_NO_ES_SALDO_DE_REGALO : { order: WHERE_ORDEN_SIN_TARJETAS }],
+    },
     _sum: { amount: true, tipAmount: true },
     _count: { _all: true },
   })
 
+  // Lo pagado con saldo se separa como GIFT_CARD (nunca mezclado con OTHER). Un tender de sistema por venue: consulta acotada.
+  // En la vista de dinero el saldo ya no viene: no hay nada que preguntar.
+  const tenders = vista === 'ventas' ? [...new Set(grupos.map(g => g.tenderTypeId).filter((id): id is string => !!id))] : []
+  const deSaldo =
+    tenders.length > 0
+      ? new Set(
+          (
+            await prisma.venueTenderType.findMany({
+              where: { venueId, id: { in: tenders }, systemKind: 'GIFT_CARD' },
+              select: { id: true },
+              take: tenders.length,
+            })
+          ).map(t => t.id),
+        )
+      : new Set<string>()
+
   const porMetodo = new Map<string, AnalyticsMethodTotal>()
   let nativeCount = 0
   for (const g of grupos) {
-    const method = String(g.method)
-    porMetodo.set(method, {
-      method,
-      amount: Number(g._sum.amount ?? 0),
-      tips: Number(g._sum.tipAmount ?? 0),
-      count: g._count._all,
-    })
+    const method = g.tenderTypeId && deSaldo.has(g.tenderTypeId) ? 'GIFT_CARD' : String(g.method)
+    const e = porMetodo.get(method) ?? { method, amount: 0, tips: 0, count: 0 }
+    e.amount += Number(g._sum.amount ?? 0)
+    e.tips += Number(g._sum.tipAmount ?? 0)
+    e.count += g._count._all
+    porMetodo.set(method, e)
     nativeCount += g._count._all
   }
 
@@ -248,6 +278,26 @@ export async function aggregatePaymentsByMethod(venueId: string, filters: Analyt
   })
 
   return [...porMetodo.values()]
+}
+
+/**
+ * Tarjetas de regalo cargadas (spec §7): los cobros de cuentas de tarjetas PAGADAS, con sus cancelaciones restando (filas negativas).
+ * `count` cuenta las cargas, no los reembolsos (B5 r1, M-1). Una fila por tipo de cobro: un puñado, sumado en la base.
+ */
+export async function aggregateGiftCardLoads(
+  venueId: string,
+  filters: AnalyticsPaymentFilters,
+): Promise<{ amount: number; count: number }> {
+  const porTipo = await prisma.payment.groupBy({
+    by: ['type'],
+    where: { AND: [analyticsWhere(venueId, filters), { order: WHERE_CUENTA_DE_TARJETAS_PAGADA }] },
+    _sum: { amount: true },
+    _count: { _all: true },
+  })
+  return {
+    amount: porTipo.reduce((suma, g) => suma + Number(g._sum.amount ?? 0), 0),
+    count: porTipo.reduce((cuenta, g) => (g.type === 'REFUND' ? cuenta : cuenta + g._count._all), 0),
+  }
 }
 
 /**

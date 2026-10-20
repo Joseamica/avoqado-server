@@ -246,6 +246,20 @@ describe('verifyAccess Middleware', () => {
       expect(mockNext).toHaveBeenCalledWith(expect.any(ForbiddenError))
     })
 
+    // Ronda 3 (Codex, 17-oct): el dashboard muestra en el toast el `message` de un 4xx; éste salía en inglés.
+    it('el aviso de white-label apagado está en español y conserva su código', async () => {
+      ;(accessService.getUserAccess as jest.Mock).mockResolvedValue({ ...mockUserAccess, whiteLabelEnabled: false })
+
+      await verifyAccess({ requireWhiteLabel: true })(mockReq as Request, mockRes as Response, mockNext)
+
+      expect(mockNext).toHaveBeenCalledWith(
+        expect.objectContaining({
+          message: 'Esta función necesita el módulo white-label activado en esta sucursal. Pídeselo a Avoqado.',
+          code: 'MODULE_DISABLED',
+        }),
+      )
+    })
+
     it('should allow access when requireWhiteLabel=true and venue has white-label', async () => {
       ;(accessService.getUserAccess as jest.Mock).mockResolvedValue({
         ...mockUserAccess,

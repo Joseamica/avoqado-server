@@ -14,6 +14,9 @@ import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
+import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 
 /**
  * List orders for a venue (paginated)
@@ -76,6 +79,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       stampRewardId,
       stampRewardAware,
       stampRewardExpectedDiscount,
+      isOfflineReplay,
+      createdAtLocal,
     } = req.body
 
     // Validate required fields
@@ -224,6 +229,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
         typeof stampRewardExpectedDiscount === 'number' && Number.isFinite(stampRewardExpectedDiscount)
           ? stampRewardExpectedDiscount
           : null,
+      // «Se cobra el precio que vio el cliente»: la cola sin red («la venta ya ocurrió») nunca recibe el 409 de precio
+      // cambiado. Sólo el `true` literal cuenta. La hora de captura la interpreta el servicio; los campos de línea, también.
+      isOfflineReplay: isOfflineReplay === true,
+      createdAtLocal: typeof createdAtLocal === 'number' || typeof createdAtLocal === 'string' ? createdAtLocal : null,
     })
 
     res.status(201).json({
@@ -256,6 +265,23 @@ export const getOrder = async (req: Request, res: Response, next: NextFunction) 
     logger.error('Error in getOrder controller:', error)
     next(error)
   }
+}
+
+/**
+ * 🔴 H1 — la cola de cobros de Android ≤ 2.23 (y de su app de Windows, el mismo código: `x-device-platform: ANDROID`,
+ * `x-app-version` «2.23.0-escritorio») reenvía el TOTAL de la cuenta aunque el aparato sólo cobró su parte del split
+ * (`queueCashPayment(orderRequest = buildOrderRequest(cart))` ⇒ `amountCents = total − propina`; arreglado en avoqado-android
+ * `8c21d450`, que entra en `v2.24.0-64` y `tienda-windows/v2.24.0`). Antes de S1/S2 el recorte al saldo lo tapaba por accidente;
+ * con S1/S2 se registrarían $100 por $50 cobrados y el cajero firmaría un faltante falso. Para ESA cola, `payCashOrder` se porta
+ * como antes (`colaConDefectoH1`). Una versión ilegible de Android cuenta como vieja. El intent `PAY_CASH` de esas versiones sí
+ * manda la parte correcta: no pasa por aquí.
+ *
+ * Se puede QUITAR cuando no quede flota ≤ 2.23 (POS_ANDROID con latido en los últimos 30 días; medido el 17-oct-2026: 10 aparatos
+ * en 7 negocios con 2.22.2–2.23.0).
+ */
+export function esColaConDefectoH1(plataforma: unknown, version: unknown): boolean {
+  if (typeof plataforma !== 'string' || plataforma.trim().toUpperCase() !== 'ANDROID') return false
+  return !versionAlMenos(typeof version === 'string' ? version : null, '2.24.0')
 }
 
 /**
@@ -353,6 +379,14 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // ventas del lunes que no habían sincronizado NO pueden quedar atoradas para
       // siempre. Un desenlace ya ocurrido es un hecho, no se re-litiga.
       isOfflineReplay: req.body.isOfflineReplay === true,
+      colaConDefectoH1:
+        req.body.isOfflineReplay === true && esColaConDefectoH1(req.headers?.['x-device-platform'], req.headers?.['x-app-version']),
+      // R2-6: la propiedad de mesa dejó pasar dinero ya capturado sobre una mesa ajena (`checkTableOwnership`, ruta de cobro).
+      mesaAjena: res.locals?.mesaAjena,
+      // R5-1: la propiedad de mesa sólo autorizó RECUPERAR el pago de esta llave (`checkTableOwnership`, ruta de cobro).
+      soloRecuperarPago: res.locals?.soloRecuperarPago,
+      // R6-3: la propiedad de mesa estaba encendida; el cobro la vuelve a revisar bajo el candado (`checkTableOwnership`, ruta de cobro).
+      propiedadDeMesa: res.locals?.propiedadDeMesa,
     })
 
     res.status(200).json({
@@ -360,6 +394,12 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       payment: result,
     })
   } catch (error) {
+    // R5-1: el MISMO 403 que responde `checkTableOwnership` a una mesa ajena (el pago que sólo podía recuperarse ya no está).
+    // R6-3: también cuando la cuenta resultó ajena hasta la relectura bajo el candado.
+    if (error instanceof MesaAjenaSoloRecuperacion) {
+      logger.info(`payCash: mesa ajena — el pago de la llave ya no existe; no se crea otro (${(error as Error).message})`)
+      return res.status(403).json(cuerpoMesaAjena(error.dueno))
+    }
     // Un rechazo de NEGOCIO (4xx: "ya está pagada", saldo, permisos) no es una falla del server:
     // logueado como `error:` ensuciaba el barrido de errores del log (/full-testing 2026-08-18).
     // El errorHandler ya lo registra con su nivel por status; aquí sólo se marca el 5xx real.
@@ -619,8 +659,14 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     const { name, notes, covers, customerId, orderType } = req.body || {}
 
     const operation = parseHttpOperation(req.body)
+    // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
+    // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae un `customerId` (null = sin cambio).
+    const opciones =
+      customerId !== undefined && customerId !== null
+        ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) }
+        : {}
     if (!operation) {
-      const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType })
+      const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType }, opciones)
       return res.json({ success: true, data: result })
     }
     const actorId = (req as any).authContext?.userId as string | undefined
@@ -634,7 +680,7 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
     const reply = await executeHttpOperation({ venueId, actorId, operation, manifest }, async tx => {
-      const r = await orderMobileService.updateOrderDetailsInTransaction(tx, venueId, orderId, manifest.payload)
+      const r = await orderMobileService.updateOrderDetailsInTransaction(tx, venueId, orderId, manifest.payload, opciones)
       return {
         response: { status: 200, body: { success: true, data: r.data } },
         affectedRefs: [
@@ -647,6 +693,22 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
+  }
+}
+
+/**
+ * ¿Quien edita el detalle de la cuenta tiene `payments:create`? Con el resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`:
+ * el de `checkPermission`, con personalizaciones del negocio y conjuntos de permisos). Falla CERRADO: si no se puede resolver,
+ * no se cambia el cliente de una venta cobrada (403) y queda en el log.
+ */
+async function puedeCambiarClienteEnVentaCobrada(req: Request): Promise<boolean> {
+  try {
+    return await tienePermisoEnVenue(req, 'payments:create')
+  } catch (error) {
+    logger.warn('[ORDER.MOBILE] No se pudo resolver payments:create para cambiar el cliente: se trata como sin permiso', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
   }
 }
 

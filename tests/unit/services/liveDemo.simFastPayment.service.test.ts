@@ -97,7 +97,9 @@ function mockHappyPathPrisma() {
   prismaMock.payment.findFirst.mockImplementation(async (a: any) =>
     a?.where?.status === 'COMPLETED' &&
     typeof a?.where?.id === 'string' &&
-    Object.keys(a?.select ?? {}).length === 1 &&
+    Object.keys(a?.select ?? {}).every(
+      (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+    ) &&
     a?.select?.orderId === true
       ? { orderId: a.where.orderId ?? null }
       : null,

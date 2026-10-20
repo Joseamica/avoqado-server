@@ -13,6 +13,18 @@ export type ObjetoImp = '01' | '02' | '03' | '04'
 
 export const TRATAMIENTOS_OFRECIDOS_V1: readonly IvaTratamiento[] = ['IVA_16', 'IVA_0', 'EXENTO'] as const
 
+/** Lo que lee una persona. TODO el enum (los mapas de notas de crédito, CFDI global y el MCP sólo cubren lo que timbran);
+ *  03/04 con el texto del catálogo c_ObjetoImp del SAT. */
+export const ETIQUETA_DE_IVA: Record<IvaTratamiento, string> = {
+  IVA_16: '16 %',
+  IVA_8: '8 %',
+  IVA_0: 'tasa 0 %',
+  EXENTO: 'exento',
+  NO_OBJETO: 'no objeto de impuesto',
+  BLOQUEADO_03: 'objeto de impuesto sin desglose (03)',
+  BLOQUEADO_04: 'objeto de impuesto que no lo causa (04)',
+}
+
 const aCentesimas = (tasa: number | string): number => Math.round(Number(tasa) * 10000) / 10000
 
 /** `null` = combinación que el SAT no admite (se rechaza, nunca se adivina). EXENTO nunca sale de aquí. */

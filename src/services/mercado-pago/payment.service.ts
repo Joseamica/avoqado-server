@@ -76,6 +76,8 @@ export interface PaymentResult {
   status_detail: string
   /** Present when 3DS challenge is required. */
   three_ds_redirect_url?: string
+  /** credit_card · debit_card · prepaid_card · ticket (OXXO) · atm · bank_transfer (SPEI) · account_money … */
+  payment_type_id?: string
 }
 
 /**
@@ -98,6 +100,8 @@ export interface MercadoPagoPayment {
   marketplace_fee?: number
   /** Merchant order this payment belongs to (preferences group payments). */
   order?: { id: number | null } | null
+  /** Same values as PaymentResult.payment_type_id. */
+  payment_type_id?: string
 }
 
 export interface RefundParams {

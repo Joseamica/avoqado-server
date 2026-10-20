@@ -548,7 +548,7 @@ describe('R12 · IVA por producto: la aplicación reintenta el choque y la barre
     expect(error).toMatchObject({
       statusCode: 409,
       code: 'IVA_POR_PRODUCTO_APAGADO',
-      message: expect.stringContaining('El IVA por producto no está activado'),
+      message: expect.stringContaining('dashboard → producto, junto al precio'),
     })
     expect(cierreConfirmado).toBe(true)
     expect(h.prisma.$transaction).toHaveBeenCalledTimes(3)
@@ -560,7 +560,7 @@ describe('R12 · IVA por producto: la aplicación reintenta el choque y la barre
       leaseExpiresAt: null,
       heartbeatAt: null,
       failureCode: 'IVA_POR_PRODUCTO_APAGADO',
-      failureMessage: expect.stringContaining('El IVA por producto no está activado'),
+      failureMessage: expect.stringContaining('dashboard → producto, junto al precio'),
       completedAt: NOW,
     })
     expect(cierre.catalogPublicationBatch.updateMany).toHaveBeenCalledWith({

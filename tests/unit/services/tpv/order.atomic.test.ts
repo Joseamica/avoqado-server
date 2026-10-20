@@ -12,6 +12,14 @@ jest.mock('@/services/modules/module.service', () => ({
 jest.mock('@/services/serialized-inventory/serializedInventory.service', () => ({
   serializedInventoryService: { scan: jest.fn(), register: jest.fn(), buildOrderItemData: jest.fn(), markAsSold: jest.fn() },
 }))
+// Tarjetas de regalo: este doble de transacción no modela sobres; la guardia de cuentas de tarjetas tiene su propia
+// suite (tests/unit/services/giftCards/cuentaDeTarjetas.test.ts y la integración de la cuenta).
+jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({
+  ...jest.requireActual('@/services/giftCards/cuentaDeTarjetas'),
+  rechazarSiEsCuentaDeTarjetas: jest.fn().mockResolvedValue(undefined),
+  esCuentaDeTarjetasEnTx: jest.fn().mockResolvedValue(false),
+  desactivarSobresPendientesDeCuentaEnTx: jest.fn().mockResolvedValue({ desactivados: [] }),
+}))
 import prisma from '@/utils/prismaClient'
 import {
   addItemsToOrder,
@@ -20,9 +28,12 @@ import {
   voidItems,
   applyDiscount,
   addSerializedItemToOrder,
+  sellSerializedItem,
 } from '@/services/tpv/order.tpv.service'
 import { serializedInventoryService } from '@/services/serialized-inventory/serializedInventory.service'
 import { getProductInventoryStatus } from '@/services/dashboard/productInventoryIntegration.service'
+import { buildOrderItemsData } from '@/services/mobile/order.mobile.service'
+import { createHash } from 'crypto'
 
 const globalDb = prisma as any
 let tx: any
@@ -526,5 +537,239 @@ describe('R11 (Codex r5): una importada de SoftRestaurant se rechaza bajo el can
     tx.order.findUniqueOrThrow.mockResolvedValue({ contratoDePrecio: 'IVA_APARTE', taxAmount: new Prisma.Decimal(16) })
     await expect(correr()).rejects.toMatchObject({ code: 'ORDEN_IMPORTADA_DEL_POS' })
     expect(nadaEscrito()).toEqual(cero)
+  })
+})
+
+/** D5 v5 (mesas40, 15-oct): la venta serializada guarda la nota COMPLETA, como en `a2e999c0f` (el server no recorta notas). */
+describe('D5 v5: la nota de la venta serializada se guarda completa', () => {
+  const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+  it('🔴 addSerializedItemToOrder guarda la nota de 10,038 completa', async () => {
+    expect(notaLarga).toHaveLength(10_038)
+    await addSerializedItemToOrder('venue', 'order', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 1, 'staff')
+
+    expect(tx.orderItem.create.mock.calls[0][0].data.notes).toBe(notaLarga)
+  })
+
+  it('🔴 sellSerializedItem (venta rápida) guarda la nota completa en el renglón que nace con la orden', async () => {
+    globalDb.venue.findUnique.mockResolvedValue({ id: 'venue', name: 'Venue', salesEnabled: true, organizationId: 'org' })
+    tx.shift = { findFirst: jest.fn(async () => null) }
+
+    await sellSerializedItem('venue', { serialNumber: 'SERIAL', price: 20, notes: notaLarga }, 'staff')
+
+    expect(tx.order.create.mock.calls[0][0].data.items.create.notes).toBe(notaLarga)
+  })
+})
+
+/**
+ * D5 en `addItemsToOrder`. En el carrito completo de la TPV (`asNewRound=false`) la nota es la IDENTIDAD de la línea:
+ * llave de la fusión en `normalizeAddItems`, match contra las filas existentes y `_count`. Cada recorte en el server
+ * chocó con eso:
+ * - v3 (Codex P1): un recorte pelón fusionaba `500a+A` con `500a+B` y el carrito reenviado SUMABA ($200 → $400).
+ * - v4 (Codex r2): con huella, una nota escrita LITERALMENTE igual que la forma recortada de otra se confundía con ella, y
+ *   una nota vieja de 501 espacios se volvía visible y duplicaba el renglón.
+ * - v5 (Codex r3): una fila guardada RECORTADA por otro escritor (alta mobile, vale) dejaba de reconocerse cuando llegaba
+ *   el carrito completo con la nota original ($100 → $200).
+ * Decisión v5: el server no recorta `OrderItem.notes` en ningún camino (exactamente `a2e999c0f`: sólo trim). Estas
+ * pruebas se quedan de guarda. Prisma simulado con las filas en memoria y la versión que avanza como en el server (CAS de
+ * `order.updateMany`).
+ */
+describe('D5: la nota en addItemsToOrder — sin tope en el carrito completo ni en las rondas', () => {
+  const base = 'a'.repeat(500)
+  const X = base + 'A'
+  // La forma que le daba el recorte v3 a X, escrita LITERALMENTE como la nota de otra línea (contraejemplo de Codex r2).
+  const Y = 'a'.repeat(491) + '…' + createHash('sha256').update(X).digest('hex').slice(0, 8)
+  const linea = (notes?: string) => ({ productId: 'product', quantity: 1, ...(notes === undefined ? {} : { notes }) })
+  const vieja = (id: string, notes: string) => ({
+    id,
+    orderId: 'order',
+    productId: 'product',
+    quantity: 1,
+    total: new Prisma.Decimal(100),
+    notes,
+    isCortesia: false,
+    course: null,
+    seat: null,
+  })
+
+  function cuentaEnMemoria(iniciales: any[] = []) {
+    const filas: any[] = iniciales.map(fila => ({ ...fila }))
+    let siguiente = 0
+    let version = 1
+    tx.order.findUnique.mockImplementation(async () => ({ ...order(), version }))
+    tx.order.updateMany.mockImplementation(async ({ where }: any) => {
+      if (where.version !== version) return { count: 0 }
+      version += 1
+      return { count: 1 }
+    })
+    tx.orderItem.findMany.mockImplementation(async ({ where }: any = {}) =>
+      filas
+        .filter(
+          fila =>
+            (!where?.orderId || fila.orderId === where.orderId) &&
+            (!where?.productId || fila.productId === where.productId) &&
+            !(where?.id?.notIn ?? []).includes(fila.id),
+        )
+        .map(fila => ({ ...fila, modifiers: [] })),
+    )
+    tx.orderItem.create.mockImplementation(async ({ data }: any) => {
+      // `modifiers` es el `create` anidado de Prisma, no una columna: la fila guardada no lo lleva.
+      const fila = { id: `fila-${++siguiente}`, isCortesia: false, course: null, seat: null, ...data, modifiers: undefined }
+      filas.push(fila)
+      return { ...fila, modifiers: [] }
+    })
+    tx.orderItem.update.mockImplementation(async ({ where, data }: any) => {
+      const fila = filas.find(f => f.id === where.id)
+      Object.assign(fila, data)
+      return { ...fila, modifiers: [] }
+    })
+    return { filas, version: () => version }
+  }
+  const totalGuardado = () => {
+    const llamadas = tx.order.updateMany.mock.calls
+    return llamadas[llamadas.length - 1][0].data.total
+  }
+  /** Guarda el carrito y lo reenvía con la versión que dejó el primer envío. Regresa el total de cada envío. */
+  async function guardarYReenviar(carrito: any[], cuenta: { version: () => number }) {
+    await addItemsToOrder('venue', 'order', carrito, cuenta.version())
+    const primero = totalGuardado()
+    await addItemsToOrder('venue', 'order', carrito, cuenta.version())
+    return [primero, totalGuardado()]
+  }
+
+  it('v3: `500a+A` y `500a+B` — guardar y reenviar el carrito deja $200 → $200', async () => {
+    const cuenta = cuentaEnMemoria()
+
+    expect(await guardarYReenviar([linea(base + 'A'), linea(base + 'B')], cuenta)).toEqual([200, 200])
+    expect(cuenta.filas.map(fila => fila.quantity)).toEqual([1, 1])
+  })
+
+  it('v3: esas notas sobre dos filas viejas guardadas completas — reenviar deja $200, sin filas nuevas', async () => {
+    const cuenta = cuentaEnMemoria([vieja('vieja-A', base + 'A'), vieja('vieja-B', base + 'B')])
+
+    await addItemsToOrder('venue', 'order', [linea(base + 'A'), linea(base + 'B')], 1)
+
+    expect(totalGuardado()).toBe(200)
+    expect(cuenta.filas.map(fila => [fila.id, fila.quantity])).toEqual([
+      ['vieja-A', 1],
+      ['vieja-B', 1],
+    ])
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 v4: X y su forma recortada escrita literalmente (Y) — guardar y reenviar deja $200 → $200', async () => {
+    const cuenta = cuentaEnMemoria()
+
+    expect(await guardarYReenviar([linea(X), linea(Y)], cuenta)).toEqual([200, 200])
+    expect(cuenta.filas.map(fila => [fila.quantity, fila.notes])).toEqual([
+      [1, X],
+      [1, Y],
+    ])
+  })
+
+  it('🔴 v4: X y Y sobre dos filas viejas — reenviar deja $200, sin filas nuevas', async () => {
+    const cuenta = cuentaEnMemoria([vieja('vieja-X', X), vieja('vieja-Y', Y)])
+
+    await addItemsToOrder('venue', 'order', [linea(X), linea(Y)], 1)
+
+    expect(totalGuardado()).toBe(200)
+    expect(cuenta.filas.map(fila => [fila.id, fila.quantity])).toEqual([
+      ['vieja-X', 1],
+      ['vieja-Y', 1],
+    ])
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 v4: fila vieja con 501 espacios — dos envíos sin nota dejan UN renglón y $100 (la nota vacía no se vuelve visible)', async () => {
+    const espacios = ' '.repeat(501)
+    const cuenta = cuentaEnMemoria([vieja('vieja', espacios)])
+
+    expect(await guardarYReenviar([linea()], cuenta)).toEqual([100, 100])
+    expect(cuenta.filas).toHaveLength(1)
+    expect(cuenta.filas[0].notes).toBe(espacios)
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 v4: en el carrito completo una nota de 10,038 se guarda COMPLETA (sólo trim), como en a2e999c0f, y el reenvío la reconoce', async () => {
+    const larga = 'n'.repeat(10_038)
+    const cuenta = cuentaEnMemoria()
+
+    expect(await guardarYReenviar([linea(`  ${larga} `)], cuenta)).toEqual([100, 100])
+    expect(cuenta.filas).toHaveLength(1)
+    expect(cuenta.filas[0].notes).toBe(larga)
+  })
+
+  it('🔴 rondas (asNewRound=true): X y Y en una ronda nueva sobre dos filas viejas — dos renglones nuevos con sus notas COMPLETAS', async () => {
+    const cuenta = cuentaEnMemoria([vieja('vieja-X', X), vieja('vieja-Y', Y)])
+
+    await addItemsToOrder('venue', 'order', [linea(X), linea(Y)], 1, true)
+
+    expect(totalGuardado()).toBe(400)
+    expect(tx.orderItem.update).not.toHaveBeenCalled()
+    expect(cuenta.filas.map(fila => [fila.quantity, fila.notes])).toEqual([
+      [1, X],
+      [1, Y],
+      [1, X],
+      [1, Y],
+    ])
+  })
+
+  it('🔴 v5: una ronda nueva guarda la nota de 10,038 COMPLETA (sólo trim), como en a2e999c0f', async () => {
+    const larga = 'n'.repeat(10_038)
+    const cuenta = cuentaEnMemoria()
+
+    await addItemsToOrder('venue', 'order', [linea(`  ${larga} `)], 1, true)
+
+    expect(totalGuardado()).toBe(100)
+    expect(cuenta.filas.map(fila => fila.notes)).toEqual([larga])
+  })
+
+  // Codex r3: la fila la escribió OTRO camino (aquí el alta mobile, `buildOrderItemsData`; el vale v7 usa el mismo dato) y
+  // después llega el carrito completo SIN `externalId` con la misma nota. Si el escritor la hubiera recortado, el match
+  // por nota fallaba y nacía un segundo renglón ($100 → $200).
+  it('🔴 v5 (Codex r3): fila del alta mobile con nota de 10,038 + carrito completo sin externalId con la misma nota ⇒ $100 → $100, una sola fila', async () => {
+    const larga = 'n'.repeat(10_038)
+    const { itemsData } = await buildOrderItemsData('venue', [{ productId: 'product', quantity: 1, notes: larga }])
+    const cuenta = cuentaEnMemoria([vieja('del-alta', itemsData[0].notes)])
+
+    expect(await guardarYReenviar([linea(larga)], cuenta)).toEqual([100, 100])
+    expect(cuenta.filas.map(fila => [fila.id, fila.quantity])).toEqual([['del-alta', 1]])
+    expect(tx.orderItem.create).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * Updates de una línea que CONSERVA su nota (`normalizedNotes ?? existing.notes`): la nota heredada queda tal cual, como
+ * en `a2e999c0f`, en el carrito completo y en las rondas. Recortarla la cambiaba de identidad: 501 espacios pasaban a
+ * «491 espacios…huella» y el siguiente envío creaba otro renglón (Codex r2).
+ */
+describe('D5: un update que hereda la nota de una fila vieja', () => {
+  const notaVieja = 'n'.repeat(10_038)
+  const filaVieja = { ...line, id: 'fila-vieja', orderId: 'order', notes: notaVieja, externalId: null as string | null }
+
+  it('🔴 v4: carrito completo por externalId — la nota heredada queda tal cual', async () => {
+    tx.orderItem.findFirst.mockImplementation(async ({ where }: any) =>
+      where.externalId === 'ext-1' ? { ...filaVieja, externalId: 'ext-1' } : null,
+    )
+
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'ext-1' }], 1)
+
+    expect(tx.orderItem.update.mock.calls[0][0].data.notes).toBe(notaVieja)
+  })
+
+  it('🔴 v4: carrito completo por el respaldo de id — la nota heredada queda tal cual', async () => {
+    tx.orderItem.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'fila-vieja' ? filaVieja : null))
+
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'fila-vieja' }], 1)
+
+    expect(tx.orderItem.update.mock.calls[0][0].data.notes).toBe(notaVieja)
+  })
+
+  it('🔴 v5: ronda (asNewRound=true) por el respaldo de id — la nota heredada también queda tal cual', async () => {
+    tx.orderItem.findFirst.mockImplementation(async ({ where }: any) => (where.id === 'fila-vieja' ? filaVieja : null))
+
+    await addItemsToOrder('venue', 'order', [{ productId: 'product', quantity: 2, externalId: 'fila-vieja' }], 1, true)
+
+    expect(tx.orderItem.update.mock.calls[0][0].data.notes).toBe(notaVieja)
   })
 })

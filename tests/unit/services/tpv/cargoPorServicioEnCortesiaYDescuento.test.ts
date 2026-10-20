@@ -37,7 +37,7 @@
  * resuelta aquí.
  *
  * Estas pruebas ejercitan las FUNCIONES REALES, no un espejo de su fórmula: un espejo sigue
- * en verde mientras el servicio se rompe debajo (`orderTotal.negative.test.ts` es eso).
+ * en verde mientras el servicio se rompe debajo; por eso se retiró la réplica `orderTotal.negative.test.ts`.
  */
 
 import { Decimal } from '@prisma/client/runtime/library'
@@ -109,6 +109,14 @@ jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
   getProductInventoryMethod: jest.fn(),
 }))
 
+// Tarjetas de regalo: este doble de transacción no modela sobres; la guardia de cuentas de tarjetas tiene su propia
+// suite (tests/unit/services/giftCards/cuentaDeTarjetas.test.ts y la integración de la cuenta).
+jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({
+  ...jest.requireActual('@/services/giftCards/cuentaDeTarjetas'),
+  rechazarSiEsCuentaDeTarjetas: jest.fn().mockResolvedValue(undefined),
+  esCuentaDeTarjetasEnTx: jest.fn().mockResolvedValue(false),
+  desactivarSobresPendientesDeCuentaEnTx: jest.fn().mockResolvedValue({ desactivados: [] }),
+}))
 import prisma from '@/utils/prismaClient'
 import { compItems, applyDiscount, voidItems } from '@/services/tpv/order.tpv.service'
 
@@ -299,6 +307,31 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
     const guardado = datosGuardados()
     expect(guardado.discountAmount).toBe(253) // 25.30 + 227.70, no 278.30
     expect(guardado.total).toBe(30) // 0 de mercancía + 30 de cargo
+  })
+
+  it('una cuenta totalmente descontada no crea otro descuento ni consume el cargo', async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(
+      ordenConCargo({ subtotal: new Decimal(253), discountAmount: new Decimal(253), serviceChargeAmount: new Decimal(30) }),
+    )
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
+
+    await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(50))
+
+    expect(datosGuardados().discountAmount).toBe(253)
+    expect(datosGuardados().total).toBe(30)
+    expect(mockPrisma.orderDiscount.create).not.toHaveBeenCalled()
+  })
+
+  it('un descuento fijo mayor que la mercancía se limita al subtotal cuando no había descuento previo', async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(
+      ordenConCargo({ subtotal: new Decimal(253), discountAmount: new Decimal(0), serviceChargeAmount: new Decimal(30) }),
+    )
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
+
+    await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(500))
+
+    expect(datosGuardados().discountAmount).toBe(253)
+    expect(datosGuardados().total).toBe(30)
   })
 })
 

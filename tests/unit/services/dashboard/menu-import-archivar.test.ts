@@ -59,8 +59,16 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
   it('D4 · borra las categorías sin NINGÚN producto y apaga las demás, DESPUÉS de archivar', async () => {
     await importMenu(V, archivo('replace', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
 
-    expect(prismaMock.menuCategory.deleteMany).toHaveBeenCalledWith({ where: { venueId: V, products: { none: {} } } })
-    expect(prismaMock.menuCategory.updateMany).toHaveBeenCalledWith({ where: { venueId: V }, data: { active: false } })
+    // Variantes (decisión 3b): una categoría que referencia una familia tampoco se borra (ProductGroup.categoryId es RESTRICT).
+    expect(prismaMock.menuCategory.deleteMany).toHaveBeenCalledWith({
+      where: { venueId: V, products: { none: {} }, productGroups: { none: {} } },
+    })
+    // Ronda 1 (N1): la categoría de una familia VIVA no se apaga (sus variantes no cambian de categoría con el archivo); Codex
+    // #8: la de una familia archivada que el archivo revive, tampoco (aquí ninguna: el mock no devuelve familias).
+    expect(prismaMock.menuCategory.updateMany).toHaveBeenCalledWith({
+      where: { venueId: V, NOT: { productGroups: { some: { OR: [{ deletedAt: null }, { id: { in: [] } }] } } } },
+      data: { active: false },
+    })
     expect(prismaMock.product.updateMany.mock.invocationCallOrder[0]).toBeLessThan(
       prismaMock.menuCategory.deleteMany.mock.invocationCallOrder[0],
     )
@@ -85,14 +93,25 @@ describe('D2 · «Reemplazar» nunca borra un producto: archiva los que el archi
   it('P5-R15 · conserva APAGADOS los grupos de extras que usa una liga viva o una receta variable; borra los demás y los vínculos como hoy', async () => {
     await importMenu(V, archivo('replace', [{ name: 'Bebidas', slug: 'bebidas', skus: ['A'] }]), HUMANO)
 
-    const extrasEnUso = {
-      OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }],
+    // Variantes (tarea 11, Codex #1 ronda 2): lo que usa CUALQUIER familia (viva o archivada, por el padre o por sus variantes)
+    // ni se borra ni se apaga; las uniones de las variantes se conservan (sólo se borran las de productos sueltos).
+    const usadoPorFamilia = {
+      OR: [{ productGroupLinks: { some: {} } }, { products: { some: { product: { productGroupId: { not: null } } } } }],
     }
-    expect(prismaMock.productModifierGroup.deleteMany).toHaveBeenCalledWith({ where: { product: { venueId: V } } })
+    const extrasEnUso = {
+      OR: [{ linkedRecipeLines: { some: {} } }, { modifiers: { some: { paymentLinkItems: { some: {} } } } }, usadoPorFamilia],
+    }
+    expect(prismaMock.productModifierGroup.deleteMany).toHaveBeenCalledWith({ where: { product: { venueId: V, productGroupId: null } } })
     expect(prismaMock.modifier.deleteMany).toHaveBeenCalledWith({ where: { group: { venueId: V, NOT: extrasEnUso } } })
     expect(prismaMock.modifierGroup.deleteMany).toHaveBeenCalledWith({ where: { venueId: V, NOT: extrasEnUso } })
-    expect(prismaMock.modifier.updateMany).toHaveBeenCalledWith({ where: { group: { venueId: V } }, data: { active: false } })
-    expect(prismaMock.modifierGroup.updateMany).toHaveBeenCalledWith({ where: { venueId: V }, data: { active: false } })
+    expect(prismaMock.modifier.updateMany).toHaveBeenCalledWith({
+      where: { group: { venueId: V, NOT: usadoPorFamilia } },
+      data: { active: false },
+    })
+    expect(prismaMock.modifierGroup.updateMany).toHaveBeenCalledWith({
+      where: { venueId: V, NOT: usadoPorFamilia },
+      data: { active: false },
+    })
     // Se apaga lo que queda DESPUÉS de borrar lo demás: sólo sobreviven los que algo usa.
     expect(prismaMock.modifierGroup.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
       prismaMock.modifierGroup.updateMany.mock.invocationCallOrder[0],

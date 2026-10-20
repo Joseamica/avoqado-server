@@ -259,7 +259,16 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     nota: 'P4 + P13: recorta lo dirigido a lo anulado y recalcula como borrar',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { origen: 'CERO', nota: 'la cuenta nace vacía, sin descuento' },
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+    origen: 'CERO',
+    nota: 'pedido en línea: la orden nace sin descuento (la tienda no aplica descuentos en la v1)',
+  },
   'src/services/tpv/table.tpv.service.ts#assignTable': { origen: 'CERO', nota: 'la cuenta de la mesa nace vacía, sin descuento' },
+  // Tarjetas de regalo (spec 2026-10-14 § 5.1, R11): la cuenta de tarjetas nace en 0 y sus guardias rechazan todo descuento.
+  'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
+    origen: 'CERO',
+    nota: 'la cuenta de tarjetas de regalo nace sin descuento y no admite descuentos (R11)',
+  },
   'src/services/dashboard/venueCheckout.service.ts#finalizeVenueCheckout': {
     origen: 'CERO',
     nota: 'cobro en línea sin descuento de cuenta',
@@ -532,6 +541,14 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
   'src/services/tpv/order.tpv.service.ts#sellSerializedItem': {
     clase: 'CREACION',
     nota: 'venta serializada: orden nueva de un solo renglón',
+  },
+  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+    clase: 'CREACION',
+    nota: 'pedido en línea: orden, renglones y extras nuevos en la misma transacción, sin filas de descuento',
+  },
+  'src/services/giftCards/giftCardOrder.service.ts#createGiftCardOrder': {
+    clase: 'CREACION',
+    nota: 'cuenta de tarjetas de regalo (R11): orden y un renglón por sobre en la misma transacción, sin filas de descuento',
   },
   // Órdenes que nunca llevan filas con reparto.
   'src/services/delivery-channels/core/lineRemoval.service.ts#applyLineRemoval': {

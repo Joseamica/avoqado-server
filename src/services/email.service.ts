@@ -1,6 +1,8 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { zonaValida } from '../utils/datetime'
+import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -194,9 +196,16 @@ export interface PlanRenewalReminderEmailData {
   locale: 'es' | 'en'
   venueName: string
   interval: 'monthly' | 'annual'
+  /** Fecha del cobro: la renovación, o con `isTrialEnd` el fin de la prueba (= primer cobro). */
   renewalDate: Date
   amountCents: number
   billingPortalUrl: string
+  /** Nombre del plan que dice el correo en las DOS variantes. Por defecto `'Pro'`. */
+  planName?: string
+  /** `true` = «tu prueba termina y ese día se cobra» (job de recordatorio y Stripe `trial_will_end`). Sin él, la renovación de siempre. */
+  isTrialEnd?: boolean
+  /** Zona en la que se escribe `renewalDate` (la del negocio). Por defecto `'America/Mexico_City'`. */
+  timeZone?: string
 }
 
 export interface PlanWinbackEmailData {
@@ -4585,6 +4594,10 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     const mesesEs = introMonths === 1 ? 'el primer mes' : `los primeros ${introMonths} meses`
     const monthsEn = introMonths === 1 ? 'the first month' : `the first ${introMonths} months`
     const planName = data.planName ?? 'Pro'
+    // Al terminar el onboarding éste es el único correo que llega: también dice dónde bajar la app
+    // (founder, 16-oct). Va antes de la facturación, que es lo menos urgente.
+    const idioma = data.locale === 'en' ? 'en' : 'es'
+    const descargaTexto = descargarAppTexto({ idioma })
 
     let subject: string
     let greeting: string
@@ -4619,6 +4632,8 @@ Your Avoqado ${planName} plan for ${data.venueName} is active. ${
 
 Next renewal: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
+${descargaTexto}
+
 View billing: ${data.billingPortalUrl}
 
 Avoqado Team`
@@ -4645,6 +4660,8 @@ Tu plan Avoqado ${planName} para ${data.venueName} está activo. ${
 
 Próxima renovación: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
+${descargaTexto}
+
 Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
@@ -4664,6 +4681,8 @@ Equipo de Avoqado`
 
 Your 30-day trial is active. Your first charge of ${firstAmount} is on ${dateFormatted}.
 
+${descargaTexto}
+
 View billing: ${data.billingPortalUrl}
 
 Avoqado Team`
@@ -4678,6 +4697,8 @@ Avoqado Team`
 
 Tu prueba de 30 días está activa. Tu primer cobro será de ${firstAmount} el ${dateFormatted}.
 
+${descargaTexto}
+
 Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
@@ -4688,7 +4709,7 @@ Equipo de Avoqado`
       locale: data.locale,
       title: subject,
       venueName: data.venueName,
-      bodyHtml,
+      bodyHtml: bodyHtml + descargarAppHtml({ idioma }),
       ctaLabel,
       ctaUrl: data.billingPortalUrl,
     })
@@ -4697,48 +4718,65 @@ Equipo de Avoqado`
   }
 
   /**
-   * Plan renewal reminder (Phase 1.5). Sent ~3 days before the next billing period by a daily cron.
+   * Plan reminder before the next charge (renewal, or with `isTrialEnd` the end of the trial). Sent by the daily
+   * `plan-renewal-reminder` job less than 9 days before the charge (first send normally 8-9 days out) and by the Stripe
+   * `trial_will_end` webhook (3 days before).
    */
   async sendPlanRenewalReminderEmail(email: string, data: PlanRenewalReminderEmailData): Promise<boolean> {
     const amount = new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
       style: 'currency',
       currency: 'MXN',
     }).format(data.amountCents / 100)
+    // Sin zona explícita la fecha salía en la del servidor (UTC en Render): un cobro a las 20:00 del 16 en CDMX decía «17».
     const dateFormatted = data.renewalDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
+      // Una zona inválida lanzaría RangeError y el aviso de cobro no saldría.
+      timeZone: zonaValida(data.timeZone),
     })
+    const planName = data.planName ?? 'Pro'
 
-    const subject = data.locale === 'en' ? 'Your plan renews soon' : 'Tu plan se renueva pronto'
-    const ctaLabel = data.locale === 'en' ? 'Manage plan' : 'Administrar plan'
-
+    let subject: string
+    let ctaLabel: string
     let bodyHtml: string
     let text: string
     if (data.locale === 'en') {
+      const greeting = 'Hi,'
+      const cuerpo = data.isTrialEnd
+        ? `Your Avoqado ${planName} trial ends on <strong>${dateFormatted}</strong>. On that day we'll charge <strong>${amount}</strong> to your card. If you don't want to continue, cancel before then from Billing.`
+        : `Your Avoqado ${planName} plan will renew on <strong>${dateFormatted}</strong> for <strong>${amount}</strong>. You don't need to do anything; it charges your card automatically.`
+      subject = data.isTrialEnd ? `Your Avoqado ${planName} trial ends on ${dateFormatted}` : 'Your plan renews soon'
+      ctaLabel = data.isTrialEnd ? 'View billing' : 'Manage plan'
       bodyHtml = `
-      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Your Avoqado Pro plan will renew on <strong>${dateFormatted}</strong> for <strong>${amount}</strong>. You don't need to do anything; it charges your card automatically.
+        ${cuerpo}
       </p>`
-      text = `Hi,
+      text = `${greeting}
 
-Your Avoqado Pro plan will renew on ${dateFormatted} for ${amount}. You don't need to do anything; it charges your card automatically.
+${cuerpo.replace(/<\/?strong>/g, '')}
 
-Manage plan: ${data.billingPortalUrl}
+${ctaLabel}: ${data.billingPortalUrl}
 
 Avoqado Team`
     } else {
+      const greeting = 'Hola,'
+      const cuerpo = data.isTrialEnd
+        ? `Tu prueba de Avoqado ${planName} termina el <strong>${dateFormatted}</strong>. Ese día cobraremos <strong>${amount}</strong> a tu tarjeta. Si no quieres continuar, cancela antes desde Facturación.`
+        : `Tu plan Avoqado ${planName} se renovará el <strong>${dateFormatted}</strong> por <strong>${amount}</strong>. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.`
+      subject = data.isTrialEnd ? `Tu prueba de Avoqado ${planName} termina el ${dateFormatted}` : 'Tu plan se renueva pronto'
+      ctaLabel = data.isTrialEnd ? 'Ver facturación' : 'Administrar plan'
       bodyHtml = `
-      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Tu plan Avoqado Pro se renovará el <strong>${dateFormatted}</strong> por <strong>${amount}</strong>. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.
+        ${cuerpo}
       </p>`
-      text = `Hola,
+      text = `${greeting}
 
-Tu plan Avoqado Pro se renovará el ${dateFormatted} por ${amount}. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.
+${cuerpo.replace(/<\/?strong>/g, '')}
 
-Administrar plan: ${data.billingPortalUrl}
+${ctaLabel}: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
     }

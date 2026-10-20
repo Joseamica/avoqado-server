@@ -142,6 +142,7 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
     methods: ['GET', 'POST', 'PUT', 'DELETE', 'PATCH', 'OPTIONS'],
     allowedHeaders: [
       'Content-Type',
+      'X-Document-Token',
       'Authorization',
       'x-api-key',
       'x-client-type',
@@ -155,6 +156,8 @@ export const getCorsConfig = (env: Environment): CorsOptions => {
       'X-App-Version-Code',
       // Correlation ID for request tracing (used across sim-custody logs + others).
       'X-Correlation-Id',
+      // Pedidos en línea (H2): sólo la página de bandeja en primer plano la manda con `1`; es el latido de presencia.
+      'x-online-orders-tray',
       'Origin',
       'X-Requested-With',
       'Accept',

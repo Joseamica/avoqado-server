@@ -1,3 +1,4 @@
+import { documentRequestsJob } from './jobs/documentRequests.job'
 // src/server.ts - Main entry point for the application
 
 // Ensure environment variables are loaded and checked first.
@@ -40,6 +41,7 @@ import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconc
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
+import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -83,8 +85,10 @@ import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
 import { shopifyWorkerJob } from './jobs/shopify-worker.job'
 import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
+import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
+import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
@@ -167,6 +171,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
+      onlineOrderAcceptanceExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
@@ -183,8 +188,11 @@ const gracefulShutdown = async (signal: string) => {
       aggregatorPassWorkerJob.stop()
       shopifyWorkerJob.stop()
       shopifyReconcileJob.stop()
+      giftCardReconciliationJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
+      documentRequestsJob.stop()
+      altasAMedioPagoJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
 
@@ -505,6 +513,7 @@ const startApplication = async (retries = 3) => {
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
+      onlineOrderAcceptanceExpiryJob.start()
       terminalPaymentWatchdogJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
@@ -532,8 +541,12 @@ const startApplication = async (retries = 3) => {
       // Conector Shopify: buzón, eventos y una unidad por sucursal con su lease (sin candado global).
       shopifyWorkerJob.start()
       shopifyReconcileJob.start()
+      // Tarjetas de regalo: revisión nocturna (saldo contra libreta; activa cuentas pagadas con sobres PENDING; avisa lo demás).
+      giftCardReconciliationJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
+      documentRequestsJob.start()
+      altasAMedioPagoJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.

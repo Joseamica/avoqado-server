@@ -78,3 +78,50 @@ export async function deletePrivateFile(path: string): Promise<void> {
   assertPrivatePath(path)
   await requireBucket().file(path).delete({ ignoreNotFound: true })
 }
+
+/** A caller can durably record this path before sending bytes to Storage. */
+export function buildPrivateFilePath(scope: string, name: string): string {
+  if (!/^[a-zA-Z0-9_/-]+$/.test(scope) || scope.includes('..') || !/^[a-zA-Z0-9_.-]+$/.test(name) || name.includes('..'))
+    throw new BadRequestError('Ámbito inválido')
+  return `${PRIVATE_PREFIX}/${getStorageEnvPrefix()}/${scope}/${name}`
+}
+
+/** Opt-in create-only writes: never overwrites evidence left by an earlier attempt. */
+export async function savePrivateFileAtPath(path: string, buffer: Buffer, contentType: string): Promise<void> {
+  assertPrivatePath(path)
+  await requireBucket()
+    .file(path)
+    .save(buffer, {
+      contentType,
+      resumable: false,
+      timeout: 60000,
+      preconditionOpts: { ifGenerationMatch: 0 },
+      metadata: { cacheControl: 'private, no-store', contentDisposition: 'attachment' },
+    })
+}
+
+export async function signPrivateAttachmentUrl(path: string): Promise<string> {
+  assertPrivatePath(path)
+  const [url] = await requireBucket()
+    .file(path)
+    .getSignedUrl({ action: 'read', version: 'v4', expires: Date.now() + 10 * 60000, responseDisposition: 'attachment' })
+  return url
+}
+
+/** Temporary inline view: only formats already accepted by the document upload policy. */
+export async function signPrivatePreviewUrl(path: string, mimeType: string): Promise<string> {
+  assertPrivatePath(path)
+  if (!['application/pdf', 'image/jpeg', 'image/png'].includes(mimeType)) {
+    throw new BadRequestError('Este formato no admite vista previa')
+  }
+  const [url] = await requireBucket()
+    .file(path)
+    .getSignedUrl({
+      action: 'read',
+      version: 'v4',
+      expires: Date.now() + 10 * 60000,
+      responseDisposition: 'inline',
+      responseType: mimeType,
+    })
+  return url
+}

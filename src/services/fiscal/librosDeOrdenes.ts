@@ -17,6 +17,7 @@ import { ValidationError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import { abrirLibro, type Libro, type MovimientoDelLibro, type ParteDelLibro } from './libroDeLaOrden'
 import { mezclaDeLaOrden, type CuentaDeMezcla, type RenglonDeMezcla } from './mezclaDeOrden'
+import { sqlOrdenSinTarjetas } from '../giftCards/giftCardMarks'
 
 export const PAGINA_DE_LIBROS = 1000
 /** Fallo del controlador (ronda 6): lo más que puede tener un periodo; con una de más, REPORT_TOO_LARGE («elige un rango más corto»). */
@@ -66,7 +67,11 @@ export type MovimientoLeido = MovimientoDelLibro & {
 /** Cuántas consultas hizo un lote y cuántas filas trajo a Node. */
 export type LecturaDelLote = { consultas: number; filas: number }
 
-/** La enumeración del estado de resultados: los ids de las órdenes con cobros del periodo, una vez cada una, en orden. */
+/**
+ * La enumeración del estado de resultados: los ids de las órdenes con cobros del periodo, una vez cada una, en orden.
+ * Tarjetas de regalo: sin las cuentas de tarjetas (su carga no es ingreso, es un pasivo); lo pagado con saldo sí entra, porque su
+ * cuenta es de mercancía. El fragmento no lleva parámetros: el PREPARE de `b4b-explain-enumeracion` conserva sus cinco tipos.
+ */
 export const sqlDeOrdenesDelPeriodo = (venueId: string, from: Date, to: Date, limite: number) => Prisma.sql`
   SELECT p."orderId" AS "orderId"
   FROM "Payment" p
@@ -77,6 +82,7 @@ export const sqlDeOrdenesDelPeriodo = (venueId: string, from: Date, to: Date, li
     AND p."createdAt" <= ${utcTs(to)}
     AND o."venueId" = ${venueId}
     AND o.status <> 'CANCELLED'
+    AND ${sqlOrdenSinTarjetas('o.id')}
   GROUP BY p."orderId"
   ORDER BY p."orderId"
   LIMIT ${limite}`

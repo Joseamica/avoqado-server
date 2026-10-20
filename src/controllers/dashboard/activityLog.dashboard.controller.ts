@@ -15,10 +15,22 @@ import {
   getRowCapForFormat,
   type ExportColumnDef,
 } from '../../services/dashboard/export.helpers'
+import { BadRequestError } from '../../errors/AppError'
+
+/**
+ * La sucursal de la URL (`/venues/:venueId/...`), no la del token: con dos pestañas en sucursales distintas la cookie es una
+ * sola, y la del token es la de la última pestaña que cambió de sucursal. `checkPermission` ya autorizó la de la URL
+ * (19-oct-2026). Mismo patrón que classSession/reservation/staffPay.
+ */
+function resolveVenueId(req: Request): string {
+  const venueId = req.params.venueId
+  if (!venueId) throw new BadRequestError('Venue ID requerido en la ruta')
+  return venueId
+}
 
 export async function getActivityLog(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = resolveVenueId(req)
     const result = await queryVenueActivityLogs({
       venueId,
       page: req.query.page ? Number(req.query.page) : undefined,
@@ -38,7 +50,7 @@ export async function getActivityLog(req: Request, res: Response, next: NextFunc
 
 export async function getActivityLogActions(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = resolveVenueId(req)
     res.json({ success: true, data: await getVenueDistinctActions(venueId) })
   } catch (err) {
     next(err)
@@ -47,7 +59,7 @@ export async function getActivityLogActions(req: Request, res: Response, next: N
 
 export async function getActivityLogEntities(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = resolveVenueId(req)
     res.json({ success: true, data: await getVenueDistinctEntities(venueId) })
   } catch (err) {
     next(err)
@@ -70,7 +82,7 @@ export async function getActivityLogEntities(req: Request, res: Response, next: 
  */
 export async function exportActivityLog(req: Request, res: Response, next: NextFunction) {
   try {
-    const { venueId } = (req as any).authContext
+    const venueId = resolveVenueId(req)
     const format = parseFormatParam(req.query.format)
     const requestedColumnIds = parseColumnsParam(req.query.columns)
     const cap = getRowCapForFormat(format)

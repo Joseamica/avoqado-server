@@ -151,7 +151,8 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     expect((prismaMock as any).payment.findFirst).toHaveBeenCalledWith({
       where: { id: 'pay-orig', venueId: VENUE },
       // r4 R4-A1 (plan 7a T3b): sólo el recibo canónico, nunca todos los del cobro.
-      include: { order: true, receipts: RECIBO_CANONICO },
+      // Tarjetas de regalo (B1): y la marca del tender de sistema, para rechazar lo pagado con saldo antes de tocar nada.
+      include: { order: true, receipts: RECIBO_CANONICO, tenderType: { select: { systemKind: true } } },
     })
   })
 
@@ -399,7 +400,14 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
       }),
     )
     expect(postCashRefundToDrawer).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'staff-autenticado' }))
-    expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'REFUND_CREATED', staffId: 'staff-autenticado' }))
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: 'staff-autenticado',
+      venueId: 'venue-1',
+      action: 'REFUND_CREATED',
+      entity: 'Payment',
+      entityId: 'pay-refund',
+      data: { amount: 200, reason: 'cliente', method: 'CASH', source: 'TPV' },
+    })
     expect(restockOrderItems).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'staff-autenticado' }))
   })
 

@@ -97,11 +97,13 @@ const INVENTORY: Record<string, InventoryDecision> = {
     lane: 'deliveryIngestion',
     reason: 'delivery platform settles the money',
   },
-  'src/services/mobile/order.mobile.service.ts#payCashOrder#create': {
+  // Tarea A7 (tarjetas de regalo): el núcleo del abono se extrajo de `payCashOrder` sin cambiar comportamiento. Lo abren
+  // `payCashOrder` y `payGiftCardBalanceOnOrder` con `prisma.$transaction` de ESTE archivo (molde `writeRefundInTx`).
+  'src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#create': {
     decision: 'include',
     lane: 'payCashOrder',
-    auditFunction: 'payCashOrder',
-    transactionPath: [],
+    auditFunction: 'registrarAbonoEnTx',
+    transactionPath: ['registrarAbonoEnTx'],
   },
   'src/services/mobile/refund.mobile.service.ts#createRefund#create': {
     decision: 'include',
@@ -2635,6 +2637,27 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
       Boolean(certifiedAuditor(parseCalls('src/services/helper-unproven-fixture.ts', helperWithUnprovenCaller), 'writeInHelper')),
     ).toBe(false)
 
+    // Tarea A8 (revisión de A7): `registrarAbonoEnTx` tiene DOS llamadores con `prisma.$transaction` real. El gate de la
+    // auditoría debe salir de `resolvePaymentShiftReconciliationEnabled` en CADA llamada del helper: un literal `true`
+    // dentro de una transacción canónica no lo certifica, ni como única llamada ni junto a una llamada buena.
+    const helperWithLiteralGate = `${imports}
+      async function writeInHelper(tx: any, reconciliationEnabled: boolean) { ${writer} }
+      async function lane() {
+        await prisma.$transaction(async tx => { await writeInHelper(tx, true) })
+      }
+    `
+    expect(
+      Boolean(certifiedAuditor(parseCalls('src/services/helper-literal-gate-fixture.ts', helperWithLiteralGate), 'writeInHelper')),
+    ).toBe(false)
+    const helperWithSecondLiteralCaller = `${helper}
+      async function secondLane() {
+        await prisma.$transaction(async tx => { await writeInHelper(tx, true) })
+      }
+    `
+    expect(
+      Boolean(certifiedAuditor(parseCalls('src/services/helper-mixed-gate-fixture.ts', helperWithSecondLiteralCaller), 'writeInHelper')),
+    ).toBe(false)
+
     const escapedClaimHelper = `${imports}
       async function writeEscapedClaim(tx: any, claimFromCaller: any, reconciliationEnabled: boolean) {
         const payment = await tx.payment.create({ data: { status: 'COMPLETED' } })
@@ -3110,7 +3133,7 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
 
   it('las rutas con Order existente bloquean Order antes de Payment/Shift', () => {
     const lanes = [
-      ['src/services/mobile/order.mobile.service.ts', 'payCashOrder', 'claimShiftForCapturedPayment'],
+      ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'claimShiftForCapturedPayment'],
       ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment', 'claimShiftForCompletedPayment'],
       ['src/services/dashboard/order.dashboard.service.ts', 'settleOrder', 'claimShiftForCapturedPayment'],
     ] as const
@@ -3215,7 +3238,10 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
 
   it('mobile/TPV preservan session → tickets → Order → Shift para vales por área', () => {
     for (const [file, functionName, areaLockCallee] of [
-      ['src/services/mobile/order.mobile.service.ts', 'payCashOrder', 'areaTicketPayment.lockAreaTicketCheckoutForPayment'],
+      // R8 (efectivo sin red): en el POS, como en la TPV, el CANDADO de vales es la jerarquía, tomada ANTES del punto de la llave; las
+      // guardas de la sesión (`lockAreaTicketCheckoutForPayment`) van después, con los candados ya tomados (reentrantes). Tarea A7: en
+      // el POS todo eso vive en el núcleo compartido `registrarAbonoEnTx` (efectivo y cobro con saldo).
+      ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy'],
       // S0 (13-sep): en la TPV el CANDADO de vales es la jerarquía (session → tickets → Order); la PREPARACIÓN del
       // intento (`lockAreaTicketCheckoutForPayment`) va después del arbitraje de la solicitud — ver la prueba siguiente.
       ['src/services/tpv/payment.tpv.service.ts', 'recordOrderPayment', 'areaTicketPayment.lockAreaTicketCheckoutHierarchy'],
@@ -3236,6 +3262,34 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
     }
   })
 
+  // 🔴 R11-8 (ronda 11 de sellos tardíos): los cuatro cierres por otro canal de una venta de vales toman la jerarquía de vales
+  // (sesión → vales → venta) ANTES del candado de la venta —el orden de la finalización y del registrador de la terminal— y cierran
+  // la sesión DESPUÉS de crear su vale SALE, con la sesión que esa jerarquía les devolvió (nunca la toman por primera vez ahí).
+  it('R11-8: pago manual, liquidar, saldo del cliente y cripto: jerarquía de vales → venta, y la sesión se cierra tras su vale', () => {
+    for (const [file, lockFn, closeFn, posting] of [
+      ['src/services/dashboard/manualPayment.service.ts', 'createManualPayment', 'createManualPayment', 'createSalePostingInTx'],
+      ['src/services/dashboard/order.dashboard.service.ts', 'settleOrder', 'settleOrder', 'createSalePostingInTx'],
+      ['src/services/dashboard/customer.dashboard.service.ts', 'settleCustomerBalance', 'settleCustomerBalance', 'createSalePostingInTx'],
+      [
+        'src/services/b4bit/b4bit.service.ts',
+        'completeAndAttributeB4BitPaymentInTx',
+        'settleOrderForConfirmedCryptoPayment',
+        'crearValeDeInventario',
+      ],
+    ] as const) {
+      const calls = parseCalls(file)
+      const jerarquia = callsForFunction(calls, lockFn, 'lockAreaTicketCheckoutHierarchy')[0]
+      const venta = callsForFunction(calls, lockFn, 'lockExistingOrderForPayment')[0]
+      const vale = callsForFunction(calls, closeFn, posting)[0]
+      const cierre = callsForFunction(calls, closeFn, 'cerrarSesionDeValesAlCerrarLaVenta')[0]
+      expect({
+        file,
+        jerarquiaAntesDeLaVenta: Boolean(jerarquia && venta && jerarquia.position < venta.position),
+        cierreDespuesDelVale: Boolean(vale && cierre && vale.position < cierre.position),
+      }).toEqual({ file, jerarquiaAntesDeLaVenta: true, cierreDespuesDelVale: true })
+    }
+  })
+
   // S0 (Codex P1-3, 13-sep): sólo el GANADOR prepara el intento de vales. `lockAreaTicketCheckoutForPayment` rechaza
   // una sesión ya pagada (409): si corriera antes del arbitraje, el segundo intento acreditado quedaría fuera sin
   // evidencia. Orden obligatorio en la TPV: jerarquía de vales → Order → arbitraje → preparación → turno.
@@ -3252,5 +3306,43 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
       preparacionDespuesDelArbitraje: Boolean(arbitraje && preparacion && arbitraje.position < preparacion.position),
       preparacionAntesDelTurno: Boolean(preparacion && turno && preparacion.position < turno.position),
     }).toEqual({ jerarquiaAntesDelArbitraje: true, preparacionDespuesDelArbitraje: true, preparacionAntesDelTurno: true })
+  })
+
+  // Tarea A8 (revisión de A7): esta guardia sigue el gate y la transacción SÓLO entre llamadas del MISMO archivo, y
+  // `registrarAbonoEnTx` se exporta (lo usan `payCashOrder` y `payGiftCardBalanceOnOrder`). Un llamador en otro archivo
+  // quedaría fuera de su vista; por eso ningún otro archivo de `src/` puede nombrarlo (identificador o texto; un
+  // comentario no cuenta).
+  it('ningún archivo de src/ fuera de order.mobile.service.ts referencia registrarAbonoEnTx', () => {
+    const DUENO = 'src/services/mobile/order.mobile.service.ts'
+    const referenciasFuera = (archivos: Array<{ file: string; source: string }>): string[] => {
+      const fuera: string[] = []
+      for (const { file, source } of archivos) {
+        if (file === DUENO) continue
+        const sourceFile = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true, ts.ScriptKind.TS)
+        const visitar = (node: ts.Node): void => {
+          if ((ts.isIdentifier(node) || ts.isStringLiteralLike(node)) && node.text === 'registrarAbonoEnTx') {
+            fuera.push(`${file}:${sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1}`)
+          }
+          ts.forEachChild(node, visitar)
+        }
+        visitar(sourceFile)
+      }
+      return fuera
+    }
+    // Autoprueba: el detector ve import, import() desestructurado, acceso por propiedad y por texto; no un comentario.
+    expect(
+      referenciasFuera([
+        { file: 'src/a.ts', source: `import { registrarAbonoEnTx } from './mobile/order.mobile.service'` },
+        { file: 'src/b.ts', source: `async function f() { const { registrarAbonoEnTx: abono } = await import('./x'); return abono }` },
+        { file: 'src/c.ts', source: `import * as m from './x'\nexport const g = (tx: any) => m.registrarAbonoEnTx(tx)` },
+        { file: 'src/d.ts', source: `import * as m from './x'\nexport const h = (tx: any) => m['registrarAbonoEnTx'](tx)` },
+        { file: 'src/e.ts', source: `// registrarAbonoEnTx en un comentario no es una referencia\nexport const i = 1` },
+        { file: DUENO, source: `export async function registrarAbonoEnTx() {}` },
+      ]),
+    ).toEqual(['src/a.ts:1', 'src/b.ts:1', 'src/c.ts:2', 'src/d.ts:2'])
+
+    const vivos = allSourceFiles.map(file => ({ file, source: fs.readFileSync(path.join(process.cwd(), file), 'utf8') }))
+    expect(vivos.some(({ file }) => file === DUENO)).toBe(true)
+    expect(referenciasFuera(vivos)).toEqual([])
   })
 })

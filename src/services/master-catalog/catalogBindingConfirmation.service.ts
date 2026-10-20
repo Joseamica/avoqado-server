@@ -314,6 +314,14 @@ export async function confirmCatalogBindingsWithDependencies(
       if (locked.previewExpiresAt.getTime() <= attemptStartedAt.getTime())
         throw new ConflictError('Preview expirado', 'CATALOG_BINDING_PREVIEW_EXPIRED')
       const authority = parseAuthority(locked, await readLinesTx(tx, context.organizationId, locked.id), context.organizationId)
+      // Variantes (Codex #5): los negocios que se van a LIGAR o CREAR, FOR SHARE, UNA vez y por id (el orden de la publicación),
+      // antes de re-evaluar: quien crea una familia toma el cerco del negocio (FOR NO KEY UPDATE) y revisa los enlaces, así que
+      // uno espera al otro. Las líneas «Omitir» no ligan nada: su negocio queda fuera (ronda 3: bloquearlo en SERIALIZABLE
+      // podía dar un 40001 sin necesidad).
+      const venueIds = [...new Set(authority.input.lines.filter(line => line.decision?.decision !== 'SKIP').map(line => line.venueId))]
+      if (venueIds.length)
+        await tx.$queryRaw`
+          SELECT id FROM "Venue" WHERE "organizationId" = ${context.organizationId} AND id IN (${Prisma.join(venueIds)}) ORDER BY id FOR SHARE`
       const evaluated = await evaluateCatalogBindingTargetTx(tx, context.organizationId, authority.input)
       if (evaluated.targetHash !== locked.targetHash || evaluated.lines.some(line => line.publicLine.status !== 'READY')) {
         throw new ConflictError('Las dependencias cambiaron después del preview', 'CATALOG_BINDING_STALE')

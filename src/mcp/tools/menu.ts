@@ -8,10 +8,25 @@ import { updateProduct, createProduct, getProduct } from '@/services/dashboard/p
 import { createMenuCategory, createModifierGroup } from '@/services/dashboard/menu.dashboard.service'
 import { MODIFIER_SKU_FORMAT_MESSAGE, MODIFIER_SKU_MAX, SKU_REGEX } from '@/schemas/dashboard/menu.schema'
 import { auditMcpWrite } from '../audit'
-import { ProductType } from '@prisma/client'
+import { ProductType, type IvaTratamiento } from '@prisma/client'
 import { operationHash } from '@/utils/operationHash'
+import AppError from '@/errors/AppError'
+import logger from '@/config/logger'
+import { estadoIvaPorProducto } from '@/services/fiscal/encendidoIva.service'
+import { DONDE_SE_CAMBIA_EL_IVA } from '@/services/fiscal/normalizarIvaDeProducto'
 
 const round2 = (n: number): number => Math.round(n * 100) / 100
+
+/** IVA por producto (plan 6b): el IVA como lo dice la ficha del dashboard. */
+const ETIQUETA_IVA: Record<IvaTratamiento, string> = {
+  IVA_16: '16 %',
+  IVA_8: '8 %',
+  IVA_0: '0 %',
+  EXENTO: 'Exento',
+  NO_OBJETO: 'No objeto de IVA',
+  BLOQUEADO_03: 'Por revisar',
+  BLOQUEADO_04: 'Por revisar',
+}
 
 /**
  * Item types the booking calendar schedules. These MUST carry a duration —
@@ -39,7 +54,7 @@ async function matchProductsByName(venueWhere: { venueId: { in: string[] } }, na
       deletedAt: null,
       ...(resolvedId ? { id: resolvedId } : { name: { contains: name, mode: 'insensitive' as const } }),
     },
-    select: { id: true, name: true, active: true, price: true },
+    select: { id: true, name: true, active: true, price: true, ivaTratamiento: true },
     take: 10,
   })
 }
@@ -49,7 +64,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_menu',
-    'List the menu items of a venue you can access: name, price, whether it is active ("86" = disabled), category and type. Optionally filter by name or only available items. Pass venueId. Handy to look up exact names/prices before changing them.',
+    'List the menu items of a venue you can access: name, price, its VAT (IVA: 16 %, 0 %, Exento), whether it is active ("86" = disabled), category and type. Optionally filter by name or only available items. Pass venueId. Handy to look up exact names/prices before changing them.',
     {
       venueId: z.string().describe('Venue whose menu to list (must be in your scope)'),
       search: z.string().optional().describe('Filter by item name (partial, case-insensitive)'),
@@ -69,7 +84,16 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
       const total = await prisma.product.count({ where: filter })
       const products = await prisma.product.findMany({
         where: filter,
-        select: { name: true, price: true, active: true, type: true, soldByWeight: true, unit: true, category: { select: { name: true } } },
+        select: {
+          name: true,
+          price: true,
+          ivaTratamiento: true,
+          active: true,
+          type: true,
+          soldByWeight: true,
+          unit: true,
+          category: { select: { name: true } },
+        },
         orderBy: [{ active: 'desc' }, { name: 'asc' }, { id: 'asc' }],
         skip: offset,
         take: limit ?? 100,
@@ -83,6 +107,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
         items: products.map(p => ({
           name: p.name,
           price: Number(p.price),
+          iva: ETIQUETA_IVA[p.ivaTratamiento],
           active: p.active,
           type: p.type,
           category: p.category?.name ?? null,
@@ -239,6 +264,112 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'set_product_iva',
+    'IVA por producto (16 %, 0 % o Exento) de un local a tu alcance; todos los planes. Con SÓLO venueId es el DIAGNÓSTICO: si el IVA por producto está encendido, qué impediría encenderlo hoy (bloqueos, cada uno con cómo arreglarlo), los avisos de aparatos que imprimen el IVA mal y las facturas viejas por revisar. Con name + iva cambia el IVA de ese producto: por defecto sólo PREVISUALIZA (actual → nuevo; si el local está apagado, que lo encenderá y lo que la revisión diría hoy); con confirm:true lo cambia. La primera vez que un producto pasa a 0 % o Exento, Avoqado revisa todo y enciende el local solo, o responde lo que falta. El precio NO cambia. Cambiar requiere products:update.',
+    {
+      venueId: z.string().describe('Local (debe estar en tu alcance)'),
+      name: z.string().min(1).optional().describe('Nombre del producto o parte de él. Sin name ni iva: diagnóstico'),
+      iva: z
+        .enum(['IVA_16', 'IVA_0', 'EXENTO'])
+        .optional()
+        .describe(
+          'IVA_16 = 16 % (normal); IVA_0 = 0 % (alimentos sin preparar como café en grano o fruta, medicinas); EXENTO = exento (p. ej. servicios médicos, colegiaturas)',
+        ),
+      resolvedProductId: z.string().optional().describe('ID exacto devuelto por la vista previa'),
+      expectedSourceFingerprint: z.string().optional().describe('Huella exacta devuelta por la vista previa'),
+      confirm: z.boolean().optional().describe('true para cambiarlo; sin él, vista previa'),
+    },
+    async ({ venueId, name, iva, confirm, resolvedProductId, expectedSourceFingerprint }) => {
+      const where = guard.venueFilter(venueId)
+      // T5-a: el MCP es diagnóstico bajo demanda, así que pide la revisión completa (por omisión el estado NO revisa).
+      if (!name || !iva) {
+        guard.requirePermission('menu:read', venueId)
+        return text({
+          ok: true,
+          diagnostico: true,
+          ...(await estadoIvaPorProducto(venueId, new Date(), { conRevision: true })),
+          dondeSeCambia: DONDE_SE_CAMBIA_EL_IVA,
+        })
+      }
+      guard.requirePermission('products:update', venueId)
+      const matches = await matchProductsByName(where, name, confirm ? resolvedProductId : undefined)
+      if (matches.length === 0) return text({ ok: false, error: `No hay un producto que coincida con "${name}" en ese local.` })
+      if (matches.length > 1)
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${name}" coincide con varios productos: sé más específico.`,
+          matches: matches.map(m => m.name),
+        })
+      const product = matches[0]
+      // Codex r1 P2-5: el IVA visto entra al UPDATE condicionado (`expectedState`, Tarea 6): un cambio de IVA entre la vista previa y la
+      // confirmación responde «El producto cambió…» en vez de pisarlo.
+      const expectedState = { name: product.name, price: product.price, active: product.active, ivaTratamiento: product.ivaTratamiento }
+      // Codex código r1 #5 (Ruling CX-5): la huella también lleva el IVA SOLICITADO: la confirmación vale sólo para el cambio que se mostró.
+      const fingerprint = operationHash({ id: product.id, ...expectedState, price: Number(product.price), ivaSolicitado: iva })
+      if (confirm && (!resolvedProductId || resolvedProductId !== product.id || expectedSourceFingerprint !== fingerprint))
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El producto cambió o falta la vista previa. Vuelve a consultar y confirma el cambio actualizado.',
+        })
+      if (!confirm) {
+        const estado = await estadoIvaPorProducto(venueId, new Date(), { conRevision: true })
+        const enciende = !estado.encendido && iva !== 'IVA_16' && iva !== product.ivaTratamiento
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          resolvedProductId: product.id,
+          expectedSourceFingerprint: fingerprint,
+          change: { item: product.name, label: 'IVA', from: ETIQUETA_IVA[product.ivaTratamiento], to: ETIQUETA_IVA[iva] },
+          ...(enciende ? { encenderaElNegocio: true, soloDuenoOAdministrador: true, bloqueos: estado.bloqueos } : {}),
+          message: `Esto cambiará el IVA de "${product.name}": ${ETIQUETA_IVA[product.ivaTratamiento]} → ${ETIQUETA_IVA[iva]}. El precio no cambia; las ventas ya facturadas se quedan como están.${enciende ? ' Es el primer producto con un IVA distinto de 16 %: Avoqado revisará el local y lo encenderá, y la contabilidad automática de TODA la organización quedará en pausa. Sólo lo puede confirmar el dueño o un administrador.' : ''} Confirma con el operador; luego vuelve a llamar con confirm:true.`,
+        })
+      }
+      try {
+        const updated = await updateProduct(
+          venueId,
+          product.id,
+          { ivaTratamiento: iva },
+          { type: 'HUMAN', staffId: scope.staffId, impersonating: false },
+          expectedState,
+          { origen: 'MCP' },
+        )
+        await auditMcpWrite(scope, {
+          action: 'PRODUCT_IVA_SET',
+          entity: 'Product',
+          entityId: product.id,
+          venueId,
+          data: { name: updated.name, iva },
+        })
+        return text({ ok: true, item: { name: updated.name, iva: ETIQUETA_IVA[updated.ivaTratamiento] } })
+      } catch (err) {
+        // 403 IVA_ENCENDIDO_SOLO_DUENO (decisión del founder, 12-oct) y los 409 llegan con su mensaje en español. Lo inesperado (un P2028
+        // de Prisma) queda en el log y al asistente le llega un texto genérico, nunca el de Prisma (revisión final, Minor nuevo 1).
+        const e = err instanceof AppError ? err : null
+        const esperado = !!e && e.statusCode >= 400 && e.statusCode < 500
+        logger[esperado ? 'warn' : 'error']('[MCP] set_product_iva: no se pudo cambiar el IVA', {
+          venueId,
+          productId: product.id,
+          code: e?.code,
+          error: err instanceof Error ? err.message : String(err),
+        })
+        if (!e)
+          return text({
+            ok: false,
+            error: 'No se pudo cambiar el IVA por un error inesperado. Vuelve a intentarlo en un momento; si sigue, avisa a soporte.',
+          })
+        return text({
+          ok: false,
+          error: e.message,
+          ...(e.code ? { code: e.code } : {}),
+          ...(e.code === 'IVA_ENCENDIDO_BLOQUEADO' ? { bloqueos: (e.details as { bloqueos?: unknown } | undefined)?.bloqueos } : {}),
+        })
+      }
+    },
+  )
+
+  server.tool(
     'menu_item_detail',
     'Full detail of ONE menu item in a venue you can access, found by name: description, category, type, price, cost & margin (ONLY if a real cost is set on the item — never estimated), prep time, calories, whether it is active ("86"), how its stock is tracked, and its modifier/option groups (each option with its extra price). The drill-down after list_menu — answers "¿qué lleva / qué opciones tiene / cuánto me deja la X?". If the name matches several items it returns them so you can be specific.',
     {
@@ -266,6 +397,7 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           description: true,
           type: true,
           price: true,
+          ivaTratamiento: true,
           cost: true,
           active: true,
           prepTime: true,
@@ -334,6 +466,8 @@ export function registerMenuTools(server: McpServer, scope: McpScope) {
           type: p.type,
           category: p.category?.name ?? null,
           price,
+          iva: ETIQUETA_IVA[p.ivaTratamiento],
+          ivaSeCambiaEn: DONDE_SE_CAMBIA_EL_IVA,
           cost, // legacy manual product cost, separate from Recipe.totalCost
           costSource: 'manual_product',
           recipeStatus: 'not_checked',

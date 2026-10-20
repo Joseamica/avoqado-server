@@ -39,9 +39,10 @@ import {
   getOrCreateStripeCustomer,
   planLookupKey,
 } from '../stripe.service'
-import { autorizarObligacionNueva } from '../access/autorizarObligacionNueva'
+import { autorizarObligacionNueva, TIMEOUT_DE_LA_TRANSACCION_MS } from '../access/autorizarObligacionNueva'
 import { inventarioDeObligaciones } from '../access/inventarioDeObligaciones'
 import { ensureVenueForOnboarding } from './ensureVenue.service'
+import { primerCobroCubierto } from './primerCobroPagado'
 import { parseV2Plan } from './onboardingProgress.service'
 import {
   isLegacyIntroEligible,
@@ -119,6 +120,21 @@ function pendiente(motivo: string): AppError {
 /** El 402 del banco. Lleva el mensaje de Stripe, que es el único que le sirve al cliente. */
 function rechazado(message: string, declineCode?: string): AppError {
   return new AppError(message, 402, true, 'PLAN_PAYMENT_DECLINED', { declineCode: declineCode ?? null, message })
+}
+
+/**
+ * 🔴 D2: el banco pide autorizar el primer cobro (3D Secure). Es un 409, no un 402 ni un 200: un tablero viejo lee
+ * cualquier 402 como «tu banco rechazó» y cualquier 200 como «plan activo»; con el 409 muestra este texto, que dice qué
+ * hacer. El secreto va SÓLO en `details` (el manejador de errores no los registra): nunca a un log.
+ */
+function requiereAutenticacion(clientSecret: string): AppError {
+  return new AppError(
+    'Tu banco pide autorizar este pago. Actualiza la página e inténtalo de nuevo para ver la autorización de tu banco. No se te cobró nada.',
+    409,
+    true,
+    'PLAN_PAYMENT_REQUIRES_ACTION',
+    { clientSecret },
+  )
 }
 
 export function esErrorDeTarjeta(error: unknown): error is Stripe.errors.StripeError {
@@ -512,7 +528,224 @@ async function soltarLease(organizationId: string, status: string, attempt: numb
   })
 }
 
-export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePlanResult> {
+/**
+ * 🔴 D2 (Codex r1 #2 y r2 #1, spec §6.4 b): el plan sólo se entrega si la PRIMERA factura quedó pagada por el monto
+ * consentido (`primerCobroPagado.ts`). Si no —o si no se pudo verificar—, 503 con el lease VIVO y el lugar RESERVED: lo
+ * revisa una persona, igual que «no se pudo determinar qué plan se cobró».
+ */
+async function exigirPrimerCobroPagado(venueId: string, subscriptionId: string, esperadoCents: number): Promise<void> {
+  let motivo: string | undefined
+  const cubierto = await primerCobroCubierto(venueId, subscriptionId, esperadoCents).catch((error: unknown) => {
+    motivo = error instanceof Error ? error.message : String(error)
+    return false
+  })
+  if (cubierto) return
+  logger.error('🚨 activate-plan: el primer cobro no está pagado por el monto consentido — no se entrega', {
+    venueId,
+    subscriptionId,
+    esperadoCents,
+    motivo,
+  })
+  throw pendiente('el primer cobro no está pagado por el monto consentido')
+}
+
+const esCobrada = (estado: string) => (SUSCRIPCION_COBRADA as readonly string[]).includes(estado)
+const idDe = (valor: string | { id: string } | null | undefined) => (typeof valor === 'string' ? valor : valor?.id)
+
+/** El lugar del cupo que apartó un intento, tal como lo dejó en la metadata de su suscripción. */
+type LugarDelIntento = { redemptionId: string; campaignId: string; offerVersion: string }
+
+/** Si falta cualquiera de los tres datos, `null`: no se libera nada que no se pueda nombrar completo. */
+function lugarDeLaMetadata(sub: Stripe.Subscription): LugarDelIntento | null {
+  const { launchRedemptionId, launchCampaignId, launchOfferVersion } = sub.metadata ?? {}
+  return launchRedemptionId && launchCampaignId && launchOfferVersion
+    ? { redemptionId: launchRedemptionId, campaignId: launchCampaignId, offerVersion: launchOfferVersion }
+    : null
+}
+
+/**
+ * La única línea que deja descartar la suscripción incompleta de un intento anterior (QA 18-oct: no dejaba ninguna). Sólo
+ * ids y el motivo: el secreto del cobro nunca va al log.
+ */
+function registrarDescarte(organizationId: string, subscriptionId: string, motivo: 'PAGO_NO_AUTORIZADO' | 'OTRO_INTENTO' | 'YA_EXPIRADA') {
+  logger.info('activate-plan: se descartó la suscripción incompleta del intento anterior (no se cobró)', {
+    organizationId,
+    subscriptionId,
+    motivo,
+  })
+}
+
+/**
+ * 🔴 D2 (spec §6.3 (2)): descartar un intento que no se pagó = ANULAR su factura, nunca `subscriptions.cancel`.
+ *
+ * Medido en Stripe de prueba (18-oct): anular es CONDICIONAL —sobre una factura ya pagada Stripe responde 400 «Invoices
+ * with `paid` payments cannot be voided.»— y, si pasa, deja la suscripción en `incomplete_expired` al instante.
+ * `cancel` NO es condicional: si el navegador pagó un instante antes, cancelaría una suscripción PAGADA y el intento nuevo
+ * cobraría otra vez.
+ *
+ * Si anular falla se relee la suscripción: ya cobrada ⇒ se pagó en ese instante y se recupera (sin cobrar otra vez);
+ * `incomplete_expired` ⇒ ya estaba descartada; cualquier otra cosa, o Stripe sin contestar ⇒ 'INCIERTO' («no pude ver»
+ * nunca es «no existe»).
+ */
+async function anularIntento(sub: Stripe.Subscription): Promise<'DESCARTADA' | { cobrada: Stripe.Subscription } | 'INCIERTO'> {
+  try {
+    const facturaId = idDe(sub.latest_invoice)
+    if (!facturaId) throw new Error('la suscripción no trae su factura')
+    await stripe.invoices.voidInvoice(facturaId)
+    return 'DESCARTADA'
+  } catch (error) {
+    logger.warn('activate-plan: no se pudo anular la factura del intento anterior — se relee la suscripción', {
+      subscriptionId: sub.id,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+  const fresca = await stripe.subscriptions.retrieve(sub.id).catch(() => null)
+  if (fresca && esCobrada(fresca.status)) return { cobrada: fresca }
+  if (fresca?.status === 'incomplete_expired') return 'DESCARTADA'
+  return 'INCIERTO'
+}
+
+/**
+ * 🔴 D2 (spec §6.3): la suscripción del intento anterior sigue `incomplete` —es la del 2.º create, que espera el reto del
+ * banco—. Antes esto era un 503 durante 23 h; ahora se decide con lo que dice Stripe AHORA (la sub con su secreto y el
+ * PaymentIntent de su primera factura):
+ *
+ * | Stripe                                    | ¿Mismo intento? | Qué pasa                                                 |
+ * |-------------------------------------------|-----------------|----------------------------------------------------------|
+ * | factura `paid` o PI `succeeded/processing` | da igual        | cobrada ⇒ se recupera; si Stripe aún no la activa ⇒ 503 y lease suelto |
+ * | PI `requires_action/requires_confirmation` | sí              | 409 con el MISMO secreto (reanudar), lease suelto         |
+ * | PI `requires_payment_method`               | sí              | se anula ⇒ DECLINED, lugar liberado, 402 del banco        |
+ * | cualquier PI no pagado                     | no              | se anula ⇒ «no existe» ⇒ intento nuevo (`lugarDescartado`) |
+ * | la relectura ya dice `incomplete_expired`  | da igual        | descartada sin anular ⇒ intento nuevo                     |
+ *
+ * «Mismo intento» = la misma tarjeta (cada tarjeta tecleada es un `pm_` nuevo), el mismo plan, la misma campaña y versión de
+ * la oferta (o ninguna) y pagar hoy: es el pedido que el propio navegador manda tras el reto. Cualquier lectura que falle
+ * ⇒ 503 con el lease VIVO (regla 4). Los 409/402/503 de aquí salen tal cual: el llamador NO lo envuelve en su `try/catch`
+ * de lecturas. Cada 503 de «no sé» deja un `logger.warn` con organización, suscripción y estado (nunca el secreto).
+ */
+async function resolverIntentoIncompleto(args: {
+  sub: Stripe.Subscription
+  input: ActivatePlanInput
+  campaign: LaunchCampaignRow | null
+  organizationId: string
+  attempt: number
+  lease: Date
+}): Promise<{ recuperada: Stripe.Subscription | null; lugarDescartado: LugarDelIntento | null }> {
+  const { input, campaign, organizationId, attempt, lease } = args
+  const leer = async <T>(lectura: () => Promise<T>): Promise<T> => {
+    try {
+      return await lectura()
+    } catch (error) {
+      logger.warn('activate-plan: no se pudo leer en Stripe el intento incompleto', {
+        organizationId,
+        subscriptionId: args.sub.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      throw pendiente('no se pudo consultar Stripe')
+    }
+  }
+
+  const sub = await leer(() => stripe.subscriptions.retrieve(args.sub.id, { expand: ['latest_invoice.confirmation_secret'] }))
+  // Expiró entre las dos lecturas (las 23 h, o la anuló otra petición): ya está descartada, sin anular nada (Codex r1 #3).
+  if (sub.status === 'incomplete_expired') {
+    registrarDescarte(organizationId, sub.id, 'YA_EXPIRADA')
+    return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
+  }
+  if (esCobrada(sub.status)) return { recuperada: sub, lugarDescartado: null }
+  if (sub.status !== 'incomplete') {
+    logger.warn('activate-plan: la relectura del intento incompleto dio un estado que no se sabe resolver', {
+      organizationId,
+      subscriptionId: sub.id,
+      status: sub.status,
+    })
+    throw pendiente(`la suscripción anterior quedó en estado ${sub.status}`)
+  }
+
+  const factura = typeof sub.latest_invoice === 'object' ? sub.latest_invoice : null
+  const pagos = await leer(() => {
+    if (!factura?.id) throw new Error('la suscripción no trae su factura')
+    return stripe.invoicePayments.list({ invoice: factura.id, expand: ['data.payment.payment_intent'] })
+  })
+  const delPi = pagos.data.filter(p => p.payment.type === 'payment_intent')
+  const pago = delPi.find(p => p.is_default) ?? delPi[0]
+  const pi = typeof pago?.payment.payment_intent === 'object' ? pago.payment.payment_intent : null
+
+  if (factura?.status === 'paid' || pi?.status === 'succeeded' || pi?.status === 'processing') {
+    const fresca = await leer(() => stripe.subscriptions.retrieve(sub.id))
+    if (esCobrada(fresca.status)) return { recuperada: fresca, lugarDescartado: null }
+    // Ya se autorizó, sólo falta que Stripe la active (medido: en el mismo instante). El lease se suelta para que el
+    // reintento de 10 s del tablero lo cierre sin chocar con «tu pago se está confirmando».
+    await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, lease)
+    throw pendiente('el pago ya se autorizó; Stripe todavía no activa la suscripción')
+  }
+
+  const mismoIntento =
+    idDe(sub.default_payment_method) === input.paymentMethodId &&
+    sub.metadata?.featureCode === (input.tier === 'PREMIUM' ? 'PLAN_PREMIUM' : 'PLAN_PRO') &&
+    (sub.metadata?.launchCampaignId ?? '') === (campaign?.id ?? '') &&
+    // 🔴 Ruling 8: también la VERSIÓN de la oferta. Si la campaña cambió a media autorización, reanudar cobraría lo de la
+    // versión vieja y el PASO 7 respondería OFFER_CHANGED (cobrado y sin acceso); así se anula y se estrena intento, y el
+    // avance libera el lugar de la versión vieja con la misma regla.
+    (sub.metadata?.launchOfferVersion ?? '') === (campaign ? String(campaign.offerVersion) : '') &&
+    input.payNow
+
+  if (mismoIntento && (pi?.status === 'requires_action' || pi?.status === 'requires_confirmation')) {
+    // REANUDAR: volver a confirmar un PI que espera al banco se acepta (medido), así sirve también tras una recarga.
+    const secreto = factura?.confirmation_secret?.client_secret
+    if (!secreto) {
+      logger.warn('activate-plan: el banco espera la autorización pero la factura no trae su secreto', {
+        organizationId,
+        subscriptionId: sub.id,
+        status: pi?.status,
+      })
+      throw pendiente('la factura del intento no trae su secreto de confirmación')
+    }
+    await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, lease)
+    logger.info('activate-plan: el banco sigue esperando que se autorice el primer cobro', { organizationId, subscriptionId: sub.id })
+    throw requiereAutenticacion(secreto)
+  }
+  // Mismo intento con un PI en otro estado (o sin PI): no se sabe qué pasó; no se anula ni se cobra a ciegas.
+  if (mismoIntento && pi?.status !== 'requires_payment_method') {
+    logger.warn('activate-plan: el pago del mismo intento quedó en un estado que no se sabe resolver', {
+      organizationId,
+      subscriptionId: sub.id,
+      status: pi?.status ?? null,
+    })
+    throw pendiente(`el pago del intento quedó en ${pi?.status ?? 'sin estado'}`)
+  }
+
+  const anulada = await anularIntento(sub)
+  if (anulada === 'INCIERTO') throw pendiente('no se pudo descartar el intento anterior')
+  if (anulada !== 'DESCARTADA') return { recuperada: anulada.cobrada, lugarDescartado: null }
+  registrarDescarte(organizationId, sub.id, mismoIntento ? 'PAGO_NO_AUTORIZADO' : 'OTRO_INTENTO')
+  if (!mismoIntento) return { recuperada: null, lugarDescartado: lugarDeLaMetadata(sub) }
+
+  // El reto falló o el banco rechazó después de autenticar: es un rechazo. Estado y lugar se cierran JUNTOS y sólo si el
+  // intento sigue siendo nuestro (Codex #14), igual que el PASO 10.
+  const { launchRedemptionId, launchCampaignId } = sub.metadata ?? {}
+  await cerrarIntentoYLiberarLugar({
+    organizationId,
+    attempt,
+    lease,
+    estadoFinal: PLAN_ACTIVATION_STATUS.DECLINED,
+    lugar:
+      launchRedemptionId && launchCampaignId
+        ? { redemptionId: launchRedemptionId, campaignId: launchCampaignId, motivo: 'PLAN_PAYMENT_DECLINED' }
+        : null,
+  })
+  const lpe = pi?.last_payment_error
+  throw rechazado(lpe?.message || 'Tu banco no autorizó el pago', lpe?.decline_code ?? lpe?.code)
+}
+
+export async function activatePlan(
+  input: ActivatePlanInput,
+  /**
+   * 🔴 R2: `soloRecuperar` = el id de la suscripción que el revisor de altas a medio pago viene a cerrar. Con él, esta
+   * función sólo puede RECUPERAR esa suscripción ya cobrada: si el alta no apunta a ella, o si Stripe no la da por cobrada,
+   * sale sin cobrar, sin anular y sin estrenar intento.
+   */
+  opciones: { soloRecuperar?: string } = {},
+): Promise<ActivatePlanResult> {
   const { organizationId, staffId } = input
   const now = new Date()
 
@@ -533,6 +766,12 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
   // con el dinero ya movido.
   if (!progress.termsAcceptedAt) {
     throw new ConflictError('Acepta los términos y el aviso de privacidad para continuar', 'TERMS_NOT_ACCEPTED')
+  }
+  if (
+    opciones.soloRecuperar &&
+    (progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || progress.planStripeSubscriptionId !== opciones.soloRecuperar)
+  ) {
+    throw new ConflictError('El alta ya no espera esa suscripción', 'PLAN_ACTIVATION_IN_PROGRESS')
   }
 
   const venue = await ensureVenueForOnboarding(organizationId, staffId)
@@ -619,7 +858,11 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     venueRecord?.name,
     venueRecord?.slug,
   )
-  const { fingerprint } = await assertPaymentMethodBelongsToCustomer(input.paymentMethodId, customerId)
+  // 🔴 R2 (Codex plan r1 #1): el revisor no cobra con esta tarjeta —sólo recupera lo ya pagado—, así que no se le exige.
+  // Si el cliente la retiró después de pagar, exigirla dejaba lo cobrado sin acceso en cada pasada.
+  const { fingerprint } = opciones.soloRecuperar
+    ? { fingerprint: null }
+    : await assertPaymentMethodBelongsToCustomer(input.paymentMethodId, customerId)
 
   // ---- PASO 5: lease con CAS ----
   const prev = {
@@ -646,11 +889,18 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       planActivationStatus: prev.status as never,
       planActivationAttempt: prev.attempt,
       planActivationLeaseUntil: prev.leaseUntil,
+      // R2: el revisor sólo toma el alta si sigue apuntando a la suscripción que vino a cerrar.
+      ...(opciones.soloRecuperar ? { planStripeSubscriptionId: opciones.soloRecuperar } : {}),
     },
     data: {
       planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
       planActivationAttempt: attempt,
       planActivationLeaseUntil: nuestroLease,
+      // 🔴 D2 (Codex r1 #1): un intento NUEVO nace sin el id del anterior, en este mismo CAS. Si heredara el de una
+      // suscripción ya descartada, la recuperación del PASO 6 la leería por id, la daría por muerta sin buscar por la llave
+      // de ESTE intento, y se cobraría encima de la que este intento sí creó. Desde NONE no se toca (el único que deja NONE
+      // con id es el carril viejo de `complete`, que usa ese rastro); al recuperar un IN_PROGRESS, el id es el suyo.
+      ...(prev.status === PLAN_ACTIVATION_STATUS.DECLINED ? { planStripeSubscriptionId: null } : {}),
     },
   })
   if (tomado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
@@ -706,13 +956,37 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     //   - viva (`active`/`trialing`/`past_due`/`unpaid`) ⇒ el dinero quedó: se reusa.
     //   - `incomplete_expired` ⇒ el primer cargo nunca se completó y Stripe la dio por muerta: no
     //     hay nada que reusar, se estrena intento.
-    //   - `canceled`/`incomplete` ⇒ AMBIGUO: pudo cobrar y pudo no cobrar. Ni conceder acceso ni
+    //   - `canceled` (u otro) ⇒ AMBIGUO: pudo cobrar y pudo no cobrar. Ni conceder acceso ni
     //     cobrar encima: 503 para que alguien lo mire.
-    // (Segunda auditoría de Codex, 18-sep.)
+    //   - `incomplete` ⇒ 🔴 D2: en el alta sólo la deja el 2.º create (el que espera el reto del banco), así que se resuelve
+    //     con el estado REAL en Stripe (`resolverIntentoIncompleto`), fuera de los try/catch de lectura de arriba para que
+    //     su 409, su 402 y sus 503 salgan tal cual.
+    // (Segunda auditoría de Codex, 18-sep; `incomplete`: D2, 18-oct.)
+    // 🔴 R2: el revisor sólo cierra lo que Stripe YA cobró. Cualquier otra cosa sale aquí, antes de clasificarla: nunca llega
+    // a anular (resolverIntentoIncompleto), a estrenar intento ni a cobrar. Lo que expiró lo atiende R1, sin esta función.
+    if (opciones.soloRecuperar && !(suscripcionRecuperada && esCobrada(suscripcionRecuperada.status))) {
+      await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, prev.attempt, nuestroLease)
+      throw pendiente('la suscripción todavía no está cobrada')
+    }
+    /** El lugar del cupo del intento descartado: se libera en el avance de abajo si este pedido no lo reusa. */
+    let lugarDescartado: LugarDelIntento | null = null
     if (suscripcionRecuperada) {
       const estado = suscripcionRecuperada.status
       if (estado === 'incomplete_expired') {
+        // 🔴 D2 (Codex r1 #3): expiró (las 23 h) o el proceso murió entre anularla y escribir aquí. Sin esto, su lugar quedaba
+        // RESERVED para siempre si el cliente volvía y terminaba con otra cosa (la prueba de 30 días).
+        lugarDescartado = lugarDeLaMetadata(suscripcionRecuperada)
+        registrarDescarte(organizationId, suscripcionRecuperada.id, 'YA_EXPIRADA')
         suscripcionRecuperada = null
+      } else if (estado === 'incomplete') {
+        ;({ recuperada: suscripcionRecuperada, lugarDescartado } = await resolverIntentoIncompleto({
+          sub: suscripcionRecuperada,
+          input,
+          campaign,
+          organizationId,
+          attempt,
+          lease: nuestroLease,
+        }))
       } else if (!SUSCRIPCION_COBRADA.includes(estado as (typeof SUSCRIPCION_COBRADA)[number])) {
         logger.warn('activate-plan: suscripción recuperada en estado no concluyente', {
           organizationId,
@@ -725,17 +999,33 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     if (!suscripcionRecuperada) {
       // No existe de verdad: intento nuevo, llave nueva.
       attempt = prev.attempt + 1
-      const avanzado = await prisma.onboardingProgress.updateMany({
-        where: {
-          organizationId,
-          planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
-          planActivationAttempt: prev.attempt,
-          planActivationLeaseUntil: nuestroLease,
-        },
-        data: { planActivationAttempt: attempt },
+      const lugar = lugarDescartado
+      const avanzado = await prisma.$transaction(async tx => {
+        const { count } = await tx.onboardingProgress.updateMany({
+          where: {
+            organizationId,
+            planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+            planActivationAttempt: prev.attempt,
+            planActivationLeaseUntil: nuestroLease,
+          },
+          // 🔴 D2 (Codex r1 #1): el intento nuevo nace SIN el id del anterior. Si heredara el de la suscripción descartada, el
+          // reintento la leería por id, la daría por muerta sin buscar por la llave de ESTE intento, y cobraría encima.
+          data: { planActivationAttempt: attempt, planStripeSubscriptionId: null },
+        })
+        // 🔴 D2 (Codex r1 #3): el lugar del intento descartado se libera en la MISMA transacción que acredita que el intento es
+        // nuestro, salvo que este pedido lo reuse (misma campaña y versión: `apartarLugar` lo toma de nuevo). `liberarLugarEn`
+        // es CAS sobre RESERVED: liberar de más es imposible.
+        if (
+          count === 1 &&
+          lugar &&
+          (!campaign || campaign.id !== lugar.campaignId || String(campaign.offerVersion) !== lugar.offerVersion)
+        ) {
+          await liberarLugarEn(tx, lugar.redemptionId, lugar.campaignId, 'PLAN_ATTEMPT_DISCARDED')
+        }
+        return count
       })
       // Ya no es nuestro (el lease venció y otra petición lo tomó): no se cobra nada.
-      if (avanzado.count === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+      if (avanzado === 0) throw new ConflictError('Tu pago se está confirmando. Espera unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
     }
   }
 
@@ -758,6 +1048,8 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
 
   let subscriptionId: string
   let reused = false
+  /** El cobro de esta pasada salió del 2.º create de D2 (`default_incomplete`): su primer cobro se exige pagado. */
+  let conAutenticacion = false
   if (suscripcionRecuperada) {
     subscriptionId = suscripcionRecuperada.id
     // 🔴 Recuperar el COBRO no basta: hay que reconstruir el ACCESO.
@@ -777,7 +1069,13 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     // Stripe —. Si el negocio ya tiene un plan cobrando (p. ej. lo pagó por el dashboard), no se cobra encima.
     // `intentoCobrar` distingue un rechazo de la regla (nada se cobró) de un fallo del cobro (pudo cobrarse).
     let intentoCobrar = false
+    /** 🔴 D2: el secreto del reto del banco. Se atiende DESPUÉS del try/catch (dentro, su catch lo haría un 503). */
+    let secretoDelReto: string | undefined
     try {
+      // 🔴 D2 (Codex r1 #4): el fin del candado de la regla común, medido JUSTO antes de pedirlo (la transacción arranca
+      // después, así que el plazo real es más largo, nunca más corto), con 10 s para confirmar la transacción. El 2.º
+      // create no sale si no cabe: «no quedó tiempo» cae abajo como resultado desconocido (503, lugar RESERVED).
+      const terminarAntesDe = Date.now() + TIMEOUT_DE_LA_TRANSACCION_MS - 10_000
       const r = await autorizarObligacionNueva(
         venue.id,
         customerId,
@@ -807,6 +1105,9 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
               })
             },
             paymentBehavior: 'error_if_incomplete',
+            // 🔴 D2: si el banco pide autenticar el primer cobro, se crea `default_incomplete` y vuelve el secreto del
+            // reto. `expected` es el de `cotizar` (lo que el cliente vio y consintió): contra él se exige la factura pagada.
+            autenticarEnElNavegador: { primerCobroEsperadoCents: expected, terminarAntesDe },
             extraMetadata: {
               organizationId,
               planActivationKey,
@@ -827,6 +1128,8 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       )
       subscriptionId = r.subscriptionId
       reused = r.reused
+      conAutenticacion = r.conAutenticacion === true
+      secretoDelReto = r.requiereAutenticacion?.clientSecret
 
       // Red de seguridad: el gancho `alCrearEnStripe` ya lo guardó en el instante del cargo.
       // Esto cubre el camino en que la suscripción se REUSÓ (no se creó ahora), donde el gancho
@@ -881,6 +1184,15 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
       })
       throw pendiente('Stripe no contestó')
     }
+
+    if (secretoDelReto) {
+      // 🔴 D2: el banco pide autorizar el primer cobro. Nada se cobró todavía: sin entrega ni cierre, y el lugar sigue
+      // RESERVED (el cliente sigue comprando). El id ya quedó guardado (gancho + red de seguridad de arriba). Se suelta el
+      // lease SIN salir de IN_PROGRESS y con la marca del dueño (R4): el pedido de después del reto entra por el PASO 6.
+      await soltarLease(organizationId, PLAN_ACTIVATION_STATUS.IN_PROGRESS, attempt, nuestroLease)
+      logger.info('activate-plan: el banco pide autorizar el primer cobro', { organizationId, subscriptionId })
+      throw requiereAutenticacion(secretoDelReto)
+    }
   }
 
   // 🔴 Una suscripción que NO creamos nosotros en esta pasada —da igual si vino del reuso o de la
@@ -927,6 +1239,14 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
     }
   }
 
+  // 🔴 D2 (Codex r1 #2 y r2 #1, spec §6.4 b): el estado no prueba el pago prometido (el #2 puede quedar `active` con una
+  // factura de $0). Si el cobro salió del camino de autenticación —el #2 de ESTA pasada, o una recuperada que trae su
+  // marca—, la PRIMERA factura tiene que estar pagada por lo consentido ANTES de entregar, y por tanto antes de APPLIED.
+  // El cobro clásico (a la primera o recuperado sin la marca) y la prueba de 30 días quedan como estaban (Ruling 1).
+  const marcaDelReto = suscripcionRecuperada?.metadata?.primerCobroEsperadoCents
+  const esperadoDelPrimerCobro = conAutenticacion ? expected : marcaDelReto != null ? Number(marcaDelReto) : null
+  if (esperadoDelPrimerCobro !== null) await exigirPrimerCobroPagado(venue.id, subscriptionId, esperadoDelPrimerCobro)
+
   // ---- El ACCESO: lo escribe la entrega (V5-A paso 6) ----
   // Ve las dos filas de plan bajo el candado del negocio y deriva el tier del PRECIO. Si falla, el cargo ya ocurrió: el
   // lease queda vivo y el siguiente intento recupera ESTA suscripción por su id y vuelve a entregar.
@@ -944,6 +1264,11 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
 
   // ---- PASO 9: éxito ----
   const sub = await stripe.subscriptions.retrieve(subscriptionId, { expand: ['latest_invoice'] })
+  // 🔴 D2 (spec §6.4 a): sólo se cierra lo que Stripe ya cobra. Una suscripción REUSADA en `incomplete` llegaba hasta aquí y
+  // se cerraba ACTIVE, con el lugar APPLIED y el tier puesto, con $0 cobrados. 503: lease vivo y lugar RESERVED.
+  if (!SUSCRIPCION_COBRADA.includes(sub.status as (typeof SUSCRIPCION_COBRADA)[number])) {
+    throw pendiente(`la suscripción está en ${sub.status}, todavía sin cobrar`)
+  }
   const nextChargeAt = siguienteCobro(sub)
 
   // 🔴 Vigente y SIN conceder = la entrega la dejó en conflicto (otro plan vivo la ocupa). Cerrar el alta como ACTIVE
@@ -1085,6 +1410,103 @@ export async function activatePlan(input: ActivatePlanInput): Promise<ActivatePl
         }
       : {}),
   }
+}
+
+/**
+ * 🔴 R1 y R2 (promesa docs/audit/2026-10-18-campana-3ds-r1r2/promesa.md): el alta que se quedó «esperando al banco» sin nadie
+ * en la pantalla (lease suelto o vencido). La llama el barrido `altas-a-medio-pago` y decide con lo que dice Stripe AHORA:
+ *
+ * - `incomplete_expired` (R1: nadie autorizó y Stripe la dio por muerta a las ~23 h) ⇒ el alta pasa a DECLINED y el lugar
+ *   que nombra la metadata de ESA suscripción vuelve a la campaña, en UNA transacción y sólo si el CAS toca la fila. Antes:
+ *   el lugar quedaba apartado para siempre y la campaña podía verse agotada.
+ * - cobrada y con la marca del reto (R2: autorizó y cerró la pestaña) ⇒ `activatePlan` con `soloRecuperar`: el mismo cierre
+ *   que si hubiera vuelto (evidencia del primer cobro, entrega, ACTIVE, APPLIED, correo). Antes: cobrado sin acceso hasta
+ *   que volviera, y el mes 2 se cobraba igual.
+ * - cualquier otra cosa (esperando al banco, cancelada, cobro clásico sin la marca, suscripción de otro intento) ⇒ nada.
+ *
+ * 🔴 Nunca cobra, nunca anula ni crea nada en Stripe. Cada escritura es un CAS: si el cliente vuelve a la vez, gana uno.
+ */
+export async function cerrarAltaSinNavegador(organizationId: string): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
+  const p = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
+  const leaseVivo = p?.planActivationLeaseUntil != null && p.planActivationLeaseUntil > new Date()
+  if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || !p.planStripeSubscriptionId || leaseVivo)
+    return 'NADA'
+
+  const sub = await stripe.subscriptions.retrieve(p.planStripeSubscriptionId)
+  // Sólo la suscripción de ESTE intento: la de uno anterior (o la del carril viejo, con otra llave) no es de este revisor.
+  if (sub.metadata?.planActivationKey !== `plan-activation:${organizationId}:${p.planActivationAttempt}`) return 'NADA'
+
+  if (sub.status === 'incomplete_expired') {
+    const lugar = lugarDeLaMetadata(sub)
+    const declinada = await prisma.$transaction(async tx => {
+      const { count } = await tx.onboardingProgress.updateMany({
+        where: {
+          organizationId,
+          completedAt: null,
+          planActivationStatus: PLAN_ACTIVATION_STATUS.IN_PROGRESS,
+          planActivationAttempt: p.planActivationAttempt,
+          planActivationLeaseUntil: p.planActivationLeaseUntil,
+          planStripeSubscriptionId: sub.id,
+        },
+        data: { planActivationStatus: PLAN_ACTIVATION_STATUS.DECLINED, planActivationLeaseUntil: null },
+      })
+      if (count === 0) return false
+      if (lugar) await liberarLugarEn(tx, lugar.redemptionId, lugar.campaignId, 'PLAN_ATTEMPT_ABANDONED')
+      return true
+    })
+    if (!declinada) return 'NADA'
+    logger.info('altas-a-medio-pago: el cobro expiró sin autorizarse — el alta queda DECLINED y su lugar vuelve a la campaña', {
+      organizationId,
+      subscriptionId: sub.id,
+      redemptionId: lugar?.redemptionId ?? null,
+    })
+    return 'LIBERADA'
+  }
+
+  const esperado = sub.metadata?.primerCobroEsperadoCents
+  if (!esCobrada(sub.status) || esperado == null) return 'NADA'
+
+  // 🔴 Codex r1 #1: sin tarjeta en la suscripción no se cierra aquí. El plan se guardaría sin tarjeta y «Terminar alta» lo
+  // rechaza (`completeV2Onboarding` la exige); queda el camino de hoy: el cliente vuelve con otra tarjeta y la recuperación
+  // del navegador entrega lo ya pagado sin cobrar otra vez. Una persona lo ve por el 🚨.
+  const paymentMethodId = idDe(sub.default_payment_method)
+  if (!paymentMethodId) {
+    logger.error('🚨 altas-a-medio-pago: pagado pero la suscripción ya no trae tarjeta — no se cierra sin el navegador', {
+      organizationId,
+      subscriptionId: sub.id,
+    })
+    return 'NADA'
+  }
+  const duena = await prisma.staffOrganization.findFirst({
+    where: { organizationId, role: 'OWNER' },
+    select: { staffId: true },
+    orderBy: { isPrimary: 'desc' },
+  })
+  if (!duena) throw new Error('la organización no tiene dueña')
+
+  const m = sub.metadata
+  const cents = Number(esperado)
+  await activatePlan(
+    {
+      organizationId,
+      staffId: duena.staffId,
+      tier: m.featureCode === 'PLAN_PREMIUM' ? 'PREMIUM' : 'PRO',
+      interval: sub.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly',
+      // La marca sólo la pone el 2.º create, que nunca lleva prueba gratis: se pagó hoy.
+      payNow: true,
+      // Sólo queda como dato (con `soloRecuperar` no se cobra ni se comprueba): la tarjeta pudo retirarse después de pagar.
+      paymentMethodId,
+      offer: m.launchCampaignId
+        ? { kind: 'LAUNCH', code: m.launchCampaignCode ?? '', offerVersion: Number(m.launchOfferVersion), expectedFirstChargeCents: cents }
+        : { kind: 'STANDARD', expectedFirstChargeCents: cents },
+    },
+    { soloRecuperar: sub.id },
+  )
+  logger.info('altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador', {
+    organizationId,
+    subscriptionId: sub.id,
+  })
+  return 'CERRADA'
 }
 
 /**

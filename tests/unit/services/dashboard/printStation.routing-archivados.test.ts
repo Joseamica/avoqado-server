@@ -117,6 +117,19 @@ describe('CFG02: archived products and bounded routing', () => {
       expect(model.findMany.mock.calls.every(([a]: any) => a.take === 100)).toBe(true)
     }
   })
+  it('una variante sale con productGroupId y productGroupName; un suelto con null', async () => {
+    products.push({ ...products[0], id: 'p_camisa_m', name: 'Camisa · M', productGroupId: 'g1', productGroup: { name: 'Camisa' } })
+    products[0] = { ...products[0], productGroupId: null, productGroup: null }
+    const res = await get({ section: 'products' })
+    expect(res.products).toEqual([
+      expect.objectContaining({ id: 'p_cafe', productGroupId: null, productGroupName: null }),
+      expect.objectContaining({ id: 'p_camisa_m', productGroupId: 'g1', productGroupName: 'Camisa' }),
+    ])
+    expect(res.products.every((p: any) => !('productGroup' in p))).toBe(true)
+    expect(mockPrisma.product.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({ select: expect.objectContaining({ productGroupId: true, productGroup: { select: { name: true } } }) }),
+    )
+  })
   it('service imposes maximum and empty pages retain metadata', async () => {
     const res = await get({ section: 'products', pageSize: 1000, page: 9 })
     expect(res.pagination).toEqual({ page: 9, pageSize: 100, total: 1, totalPages: 1 })

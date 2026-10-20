@@ -783,6 +783,20 @@ describe('recordFastPayment — venta rápida con un tipo de pago del catálogo'
     expect(pago.tenderLabel).toBe('Uber Eats')
   })
 
+  it('🔴 el tender de sistema «Tarjeta de regalo» no se cobra por la venta rápida (sólo por «Pagar con saldo»)', async () => {
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tender-uber',
+      baseMethod: 'OTHER',
+      active: true,
+      revision: 3,
+      name: 'Tarjeta de regalo',
+      systemKind: 'GIFT_CARD',
+    })
+
+    await expect(recordFastPayment('venue-1', cobroUber as any, 'user-1')).rejects.toThrow(/sólo se cobra con «Pagar con saldo»/)
+    expect(payments).toHaveLength(0)
+  })
+
   it('🔴 NO cuenta como efectivo del cajón — el arqueo no puede exigir un dinero que no entró', async () => {
     await recordFastPayment('venue-1', cobroUber as any, 'user-1')
 

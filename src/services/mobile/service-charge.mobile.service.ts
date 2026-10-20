@@ -20,6 +20,7 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { esOrdenImportada, rechazarSiEsImportada } from '../shared/ordenImportada'
+import { esCuentaDeTarjetasEnTx, rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 
 /** Resuelve StaffVenue.id: appliedById NO acepta un Staff.id (P2003). */
 async function resolveStaffVenueId(tx: Prisma.TransactionClient, venueId: string, staffId?: string): Promise<string | undefined> {
@@ -95,6 +96,7 @@ export async function applyServiceChargeInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cargos por servicio')
 
   const charge = await tx.serviceCharge.findFirst({ where: { id: serviceChargeId, venueId, active: true } })
   if (!charge) throw new NotFoundError('Cobro por servicio no encontrado')
@@ -156,6 +158,7 @@ export async function removeServiceChargeInTransaction(
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cambios de cargo por servicio')
 
   const row = await tx.orderServiceCharge.findFirst({ where: { id: orderServiceChargeId, orderId } })
   if (!row) throw new NotFoundError('Cobro no aplicado a esta orden')
@@ -237,6 +240,7 @@ export async function syncAutomaticServiceChargesInTransaction(
   // R11 (Codex r5): lo automático no truena sobre una importada de SoftRestaurant, pero tampoco la rearma (su cabecera manda y sus
   // renglones traen el IVA dentro): como cuando la regla no aplica.
   if (esOrdenImportada(order)) return null
+  if (await esCuentaDeTarjetasEnTx(tx, orderId)) return null
 
   const covers = order.covers ?? 0
   const rules = await tx.serviceCharge.findMany({

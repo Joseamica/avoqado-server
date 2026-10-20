@@ -40,6 +40,9 @@
  */
 import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
+// N1 (cierre): de un módulo SIN Prisma. El script de reasignación elige la base antes de cargar el cliente: un import que lo
+// arrastre lo construiría con la URL del .env (`tests/unit/architecture/grafoDeImports.guard.test.ts`).
+import { isGiftCardTenderKind, tieneRenglonDeTarjeta } from '@/services/giftCards/giftCardPredicados'
 import {
   cierreDelCobroSaldaLaCuenta,
   computeOrderBalance,
@@ -73,6 +76,11 @@ export interface CobroFoto {
   tipAmount: DecimalLike
   shiftId: string | null
   createdAt: Date
+  /**
+   * ⭐ B6 M4 (cierre): `tenderType.systemKind` del cobro. OBLIGATORIO a propósito: un cargador que no lo lea no compila, en vez de
+   * dejar pasar un cobro con saldo de tarjeta de regalo.
+   */
+  tenderSystemKind: string | null
 }
 
 export interface CobroDeOrdenFoto extends CompletedPaymentForBalance {
@@ -91,7 +99,8 @@ export interface OrdenFoto extends OrderAmountsForBalance {
   /** Quién salda la cuenta (`cierreDelCobroSaldaLaCuenta`): integrada (POS con `externalId`) o con vales por área. */
   source: string
   externalId: string | null
-  items: Array<{ areaTicketLineId: string | null }>
+  /** `giftCardId` OBLIGATORIO (⭐ B6 M4): una cuenta de tarjetas no da ni recibe cobros reasignados. */
+  items: Array<{ areaTicketLineId: string | null; giftCardId: string | null }>
   /** La mesa que se libera al saldar (Tarea 6d, M-1). */
   tableId: string | null
   /** Cobros COMPLETED de la orden (reembolsos incluidos: el saldo los distingue por `type`). */
@@ -136,6 +145,14 @@ export function validarReasignacion(caso: CasoReasignacion, cobro: CobroFoto, or
   if (cobro.venueId !== origen.venueId || cobro.venueId !== destino.venueId) {
     motivos.push('cobro, origen y destino no son del mismo negocio')
   }
+  // ⭐ B6 M4 / Codex #6 (cierre): mover un cobro con saldo a una cuenta de tarjetas compraría tarjetas con saldo (lo que el cobro normal
+  // rechaza) y su REDEEM seguiría apuntando a la orden vieja; meter o sacar un cobro de una cuenta de tarjetas deja sus tarjetas cargadas
+  // sin dinero o pagadas sin activar. Se corrige a mano, no con este script.
+  if (isGiftCardTenderKind(cobro.tenderSystemKind)) {
+    motivos.push(`el cobro ${cobro.id} es con saldo de tarjeta de regalo: no se reasigna`)
+  }
+  if (tieneRenglonDeTarjeta(origen.items)) motivos.push('el origen es una venta de tarjetas de regalo: su cobro no se reasigna')
+  if (tieneRenglonDeTarjeta(destino.items)) motivos.push('el destino es una venta de tarjetas de regalo: no recibe cobros reasignados')
 
   const cobrosDestino = destino.cobros.filter(esCobroQueCuenta)
   if (cobrosDestino.length > 0) motivos.push(`el destino ya tiene ${cobrosDestino.length} cobro(s) completado(s)`)
