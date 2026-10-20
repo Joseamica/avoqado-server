@@ -382,6 +382,54 @@ describe('API pública de pedidos en línea', () => {
     })
   })
 
+  /**
+   * Tienda rediseñada (spec §6): `/info` gana `brand.heroImageUrl`, que sale de `Venue.heroImageUrl` (el mismo campo de la página de
+   * reservas). ADITIVO: `brand` conserva sus cuatro campos de siempre; un negocio sin portada responde `null` y la tienda no pinta foto.
+   */
+  describe('GET /info y brand.heroImageUrl (aditivo)', () => {
+    const MARCA = {
+      logo: 'https://cdn.avoqado.io/flautas/logo.png',
+      logoFull: 'https://cdn.avoqado.io/flautas/logo-ancho.png',
+      primaryColor: '#c2410c',
+      secondaryColor: '#431407',
+    }
+    const PORTADA = 'https://cdn.avoqado.io/flautas/portada.jpg'
+    const info = async (heroImageUrl: string | null) => {
+      ;(getAcceptingStatus as jest.Mock).mockResolvedValue({
+        status: 'OPEN',
+        reason: null,
+        config: { hours: null, acceptsPayAtPickup: true, minOrderAmount: 0, defaultPrepMinutes: 20 },
+      })
+      prismaMock.venue.findUnique.mockResolvedValue({
+        name: 'Flautas',
+        timezone: 'America/Mexico_City',
+        currency: 'MXN',
+        ...MARCA,
+        heroImageUrl,
+      } as any)
+      return request(app).get('/venues/flautas/ordering/info')
+    }
+
+    it('trae la foto de portada del negocio y deja el resto de brand tal cual', async () => {
+      const r = await info(PORTADA)
+      expect(r.status).toBe(200)
+      expect(r.body.data.brand).toEqual({ ...MARCA, heroImageUrl: PORTADA })
+    })
+
+    it('un negocio sin portada responde null: el campo viaja, no desaparece', async () => {
+      const r = await info(null)
+      expect(r.status).toBe(200)
+      expect(r.body.data.brand).toEqual({ ...MARCA, heroImageUrl: null })
+    })
+
+    it('le pide la columna a la base (con un mock el select no se nota: sin él, producción respondería siempre null)', async () => {
+      await info(PORTADA)
+      expect(prismaMock.venue.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({ select: expect.objectContaining({ heroImageUrl: true }) }),
+      )
+    })
+  })
+
   it('1b: el seguimiento entrega la zona y el contacto del NEGOCIO tal cual (sin venueId)', async () => {
     ;(getTrackingByToken as jest.Mock).mockResolvedValue({
       venueId: 'v1',

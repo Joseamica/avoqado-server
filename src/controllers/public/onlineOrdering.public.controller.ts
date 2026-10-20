@@ -49,6 +49,7 @@ export async function getInfo(req: Request, res: Response) {
           logoFull: true,
           primaryColor: true,
           secondaryColor: true,
+          heroImageUrl: true,
           address: true,
           city: true,
           state: true,
@@ -66,6 +67,8 @@ export async function getInfo(req: Request, res: Response) {
           logoFull: row?.logoFull ?? null,
           primaryColor: row?.primaryColor ?? null,
           secondaryColor: row?.secondaryColor ?? null,
+          // Tienda rediseñada (aditivo): la misma `Venue.heroImageUrl` de la página de reservas; sin foto, null.
+          heroImageUrl: row?.heroImageUrl ?? null,
         },
         status: state.status,
         reason: state.reason,
