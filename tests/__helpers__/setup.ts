@@ -509,6 +509,10 @@ const prismaMock: any = {
   // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
   onlineOrderingSettings: createMockModel(),
   onlineOrder: createMockModel(),
+  // Product exchange (block A): this mock is a FIXED list. Without these two entries any test that touches the new models
+  // dies with «Cannot read properties of undefined» instead of failing on its assertion.
+  exchange: createMockModel(),
+  exchangeCreditLink: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),

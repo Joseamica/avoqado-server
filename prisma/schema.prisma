@@ -918,6 +918,11 @@ model VenueSettings {
   /// de plan. Switch canónico en el dashboard; el POS sólo lo lee.
   managerPinOverrideEnabled Boolean @default(false)
 
+  /// Cambio de talla o de producto en una venta ya cobrada (spec 2026-10-20). `null` = el default por giro, que resuelve el
+  /// SERVIDOR (prendido en tiendas y servicios; apagado en restaurantes, bares y entretenimiento); `true`/`false` = decisión
+  /// explícita del negocio. Core, sin candado de plan. Switch canónico en el dashboard; el POS sólo lo lee.
+  exchangesEnabled Boolean?
+
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
@@ -8437,6 +8442,7 @@ enum GiftCardSource {
 
 enum TenderSystemKind {
   GIFT_CARD
+  EXCHANGE_CREDIT
 }
 
 /// El sobre (un regalo). El código nunca se guarda en claro: `codeHash` (HMAC) para buscar, `codeEnc` (AES-GCM) para
@@ -19190,6 +19196,81 @@ model PaymentEffect {
   @@index([status, nextAttemptAt, id])
   @@index([status, leaseUntil, id])
   @@index([venueId, status, createdAt, id])
+}
+
+enum ExchangeStatus {
+  COMPLETED // return, new sale, credit and stock all written
+  PENDING_PAYMENT // set aside: the new sale exists, the card charge for the difference is still missing (spec §6.4)
+  COMPLETED_PENDING_CARD_REFUND // closed, with the refund of the difference still pending on the terminal (spec §6.5)
+  NEEDS_REVIEW // a person resolves it; why goes in `reviewReason` (e.g. a late charge after the hold was released, spec §6.4)
+}
+
+/// What the exchange has to settle: nothing (`EVEN`), collect the difference (`COLLECT`) or pay it out (`PAYOUT`).
+enum ExchangeSettlementKind {
+  EVEN
+  COLLECT
+  PAYOUT
+}
+
+enum ExchangeSettlementMethod {
+  CASH
+  CARD_TERMINAL
+  BANK_TRANSFER
+  GIFT_CARD_BALANCE
+  TENDER
+}
+
+/// Cambio de talla o de producto: liga la venta original, sus devoluciones y la venta nueva (spec 2026-10-20 §6.2).
+/// `venueId` escalar a propósito, como `InventoryPosting`: no agrega relaciones inversas a Venue, Order ni Payment.
+model Exchange {
+  id                      String                    @id @default(cuid())
+  venueId                 String
+  idempotencyKey          String                    @db.VarChar(64)
+  requestHash             String                    @db.VarChar(64)
+  status                  ExchangeStatus
+  originalOrderId         String
+  originalPaymentId       String
+  newOrderId              String                    @unique
+  returnedAmount          Decimal                   @db.Decimal(12, 2)
+  takenAmount             Decimal                   @db.Decimal(12, 2)
+  differenceAmount        Decimal                   @db.Decimal(12, 2) // con signo: + cobra, − devuelve
+  settlementKind          ExchangeSettlementKind
+  settlementMethod        ExchangeSettlementMethod?
+  pendingCardRefundAmount Decimal                   @default(0) @db.Decimal(12, 2)
+  lines                   Json // v1: lo que regresa y lo que se lleva, con valor por pieza, motivo y si vuelve al inventario
+  result                  Json? // v1: la respuesta del POST, para devolverla igual en una repetición (RF1)
+  staffId                 String
+  deviceId                String?                   @db.VarChar(128)
+  createdAtLocal          DateTime?
+  isOfflineReplay         Boolean                   @default(false)
+  cashDrawerSessionId     String?
+  reviewReason            String?                   @db.VarChar(64) // bloque C
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  creditLinks             ExchangeCreditLink[]
+
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, createdAt])
+  @@index([venueId, status, createdAt])
+  @@index([venueId, originalOrderId])
+}
+
+/// Una porción del crédito: el REFUND EXCHANGE_CREDIT de la venta original ↔ el cobro EXCHANGE_CREDIT de la nueva.
+/// `originPaymentId` es el cobro RAÍZ del dinero (si la porción salió de otro crédito, el origen de aquél): por él sale
+/// lo que después se devuelva (spec §6.7).
+model ExchangeCreditLink {
+  id                    String   @id @default(cuid())
+  venueId               String
+  exchangeId            String
+  exchange              Exchange @relation(fields: [exchangeId], references: [id], onDelete: Cascade)
+  originPaymentId       String
+  creditRefundPaymentId String   @unique
+  creditPaymentId       String   @unique
+  amount                Decimal  @db.Decimal(12, 2)
+  createdAt             DateTime @default(now())
+
+  @@index([venueId, originPaymentId])
+  @@index([exchangeId])
 }
 
 /// La receta del ticket en papel de un venue (diseñador de tickets, spec § 7.1).
