@@ -417,9 +417,11 @@ describe('B2 — el motor guarda a qué renglones aplicó (spec §4.1, D7)', () 
     }
     tx.customer = { ...tx.customer, update: jest.fn(async () => ({})) }
     tx.stampReward = {
-      findFirst: jest.fn(async () => ({ id: 'rw', customerId: 'c1', rewardLabel: 'Café' })),
+      findFirst: jest.fn(async () => ({ id: 'rw', customerId: 'c1', rewardLabel: 'Café', stampCardId: 'sc' })),
       update: jest.fn(async () => ({})),
     }
+    // D3 (21-oct): devolver un premio canjeado lee su cartilla; llena = el premio vuelve por cobrar.
+    tx.stampCard = { findUnique: jest.fn(async () => ({ id: 'sc', stampsEarned: 7, stampsRequired: 7 })), update: jest.fn() }
     await tpv.removeDiscount('venue', 'order', 'od', 'staff')
     expect(tx.loyaltyTransaction.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ type: 'ADJUST', points: 1000 }) }),
