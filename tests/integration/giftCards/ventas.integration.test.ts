@@ -753,7 +753,8 @@ describe('🔴 1b S1 · Q37/Q44: el reintento de una venta compara contra la hue
 
 /**
  * 1b S4 · Q110 y Q36: la venta es de la sesión (`iniciadoPor` sólo es nota) y repetirla ya no es otra salida del código: el
- * reintento lo trae sólo sin `CODE_REPLACED` y el mismo día del negocio, con su renglón REPLAY si el sobre ya está ACTIVE.
+ * reintento lo trae sólo sin `CODE_REPLACED` y el mismo día del negocio, y cada sobre cuyo código sale lleva su renglón REPLAY,
+ * esté como esté (M1 de la revisión de S4).
  */
 describe('🔴 1b S4 · Q110/Q36: repetir la venta', () => {
   let venueId: string
@@ -838,23 +839,39 @@ describe('🔴 1b S4 · Q110/Q36: repetir la venta', () => {
     expect(await reveladas(ids)).toHaveLength(0)
   })
 
-  it('repetir la venta el mismo día sin reponer ⇒ con código y, con el sobre ya ACTIVE, un renglón REVEALED (REPLAY) por sobre', async () => {
+  it('repetir la venta el mismo día sin reponer ⇒ con código y un renglón REVEALED (REPLAY) por sobre en cada reenvío', async () => {
     const k = llave('mismo')
     const v = await vender(cuerpo(k))
     const ids = v.sobres.map((s: { id: string }) => s.id)
-    // Aún PENDING: el código sale (nace con la venta) sin renglón.
+    const comoRenglon = (filas: Awaited<ReturnType<typeof reveladas>>) =>
+      filas.map(f => [f.entityId, (f.data as any).motivo, (f.data as any).idempotencyKey]).sort()
+    // La creación no escribe; el reenvío de la venta aún PENDING sí: el código vuelve a salir (M1).
+    expect(await reveladas(ids)).toHaveLength(0)
     const pendiente = await vender(cuerpo(k))
     expect(pendiente.sobres.map((s: any) => s.codigo)).toEqual(v.sobres.map((s: any) => s.codigo))
-    expect(await reveladas(ids)).toHaveLength(0)
+    expect(comoRenglon(await reveladas(ids))).toEqual(ids.map((id: string) => [id, 'REPLAY', k]).sort())
 
     await pagar(v.orderId)
     const activa = await vender(cuerpo(k))
     expect(activa.sobres.map((s: any) => s.codigo)).toEqual(v.sobres.map((s: any) => s.codigo))
     const filas = await reveladas(ids)
-    expect(filas.map(f => [f.entityId, (f.data as any).motivo, (f.data as any).idempotencyKey]).sort()).toEqual(
-      ids.map((id: string) => [id, 'REPLAY', k]).sort(),
-    )
+    expect(comoRenglon(filas)).toEqual([...ids, ...ids].map((id: string) => [id, 'REPLAY', k]).sort())
     expect(JSON.stringify(filas.map(f => f.data))).not.toContain(v.sobres[0].codigo)
+  })
+
+  it('🔴 M1: repetir la venta del día con un sobre BLOCKED ⇒ su código sale, y con su renglón REPLAY', async () => {
+    const k = llave('bloqueada')
+    const v = await vender(cuerpo(k))
+    await pagar(v.orderId)
+    await operarSobreDeGerente(venueId, v.sobres[0].id, gerenteId, {
+      operationKey: llave('bloquea'),
+      tipo: 'BLOQUEAR',
+      reason: 'SUSPICIOUS_ACTIVITY',
+    })
+    const otra = await vender(cuerpo(k))
+    expect(otra.sobres[0]).toMatchObject({ status: 'BLOCKED', codigo: v.sobres[0].codigo })
+    const filas = await reveladas([v.sobres[0].id])
+    expect(filas.map(f => [(f.data as any).motivo, (f.data as any).idempotencyKey])).toEqual([['REPLAY', k]])
   })
 
   it('Q37 con S4: change-destination y luego repetir la venta original ⇒ 200 replay (y sin código: hubo CODE_REPLACED)', async () => {

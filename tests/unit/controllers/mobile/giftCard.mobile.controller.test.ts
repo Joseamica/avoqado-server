@@ -668,10 +668,10 @@ describe('Q36: repetir la venta y el código', () => {
     sobres: CUENTA.sobres.map((sobre, i) => ({ ...sobre, status: estados[i], ...over })),
   })
 
-  it('🔴 un reenvío que trae el código de un sobre ACTIVE ⇒ un GIFT_CARD_CODE_REVEALED (REPLAY) por sobre, antes de responder', async () => {
+  it('🔴 un reenvío que trae el código ⇒ un GIFT_CARD_CODE_REVEALED (REPLAY) por sobre, antes de responder', async () => {
     const orden: string[] = []
     salida.mockImplementationOnce(async () => void orden.push('bitacora'))
-    m(createGiftCardOrder).mockResolvedValue(conEstado(['ACTIVE', 'PENDING']))
+    m(createGiftCardOrder).mockResolvedValue(conEstado(['ACTIVE', 'ACTIVE']))
     const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
     orden.push('respuesta')
     expect(r.status).toBe(200)
@@ -679,17 +679,43 @@ describe('Q36: repetir la venta y el código', () => {
     expect(salida).toHaveBeenCalledTimes(1)
     const [db, filas] = salida.mock.calls[0]
     expect(db).toBeDefined()
-    expect(filas).toEqual([
-      expect.objectContaining({
-        venueId: 'v1',
-        staffId: 'staff-1',
-        action: 'GIFT_CARD_CODE_REVEALED',
-        entity: 'GiftCard',
-        entityId: 'g1',
-        data: { motivo: 'REPLAY', idempotencyKey: 'venta-0001-abc' },
-      }),
-    ])
-    expect(JSON.stringify(filas)).not.toMatch(/K7QZ-ABCD|tok-1/)
+    expect(filas).toEqual(
+      ['g1', 'g2'].map(entityId =>
+        expect.objectContaining({
+          venueId: 'v1',
+          staffId: 'staff-1',
+          action: 'GIFT_CARD_CODE_REVEALED',
+          entity: 'GiftCard',
+          entityId,
+          data: { motivo: 'REPLAY', idempotencyKey: 'venta-0001-abc' },
+        }),
+      ),
+    )
+    expect(JSON.stringify(filas)).not.toMatch(/K7QZ-ABCD|M2PX|tok-1|tok-2/)
+  })
+
+  // M1 de la revisión de S4: el renglón lo decide lo que la respuesta TRAE, no el estado del sobre.
+  it.each([
+    ['BLOCKED (la venta del día que un gerente bloqueó)', ['BLOCKED', 'BLOCKED']],
+    ['PENDING (la venta aún sin cobrar)', ['PENDING', 'PENDING']],
+    ['ACTIVE y otro BLOCKED', ['ACTIVE', 'BLOCKED']],
+  ])('🔴 M1: el código de un sobre %s también sale con su renglón', async (_caso, estados) => {
+    m(createGiftCardOrder).mockResolvedValue(conEstado(estados))
+    const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
+    expect(r.status).toBe(200)
+    expect(salida.mock.calls.flatMap(c => c[1]).map(f => f.entityId)).toEqual(['g1', 'g2'])
+  })
+
+  it('🔴 M1: en la misma venta, un sobre PENDING con código y otro BLOCKED oculto ⇒ sólo el que trae el código lleva renglón', async () => {
+    const base = conEstado(['PENDING', 'BLOCKED'])
+    const cuenta = {
+      ...base,
+      sobres: [base.sobres[0], { ...base.sobres[1], codigo: null, pageToken: null, pageUrl: null, codigoOculto: true }],
+    }
+    m(createGiftCardOrder).mockResolvedValue(cuenta)
+    const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
+    expect(r.status).toBe(200)
+    expect(salida.mock.calls.flatMap(c => c[1]).map(f => f.entityId)).toEqual(['g1'])
   })
 
   it('🔴 si ese renglón no se guarda ⇒ 503 «No se pudo mostrar el código. Intenta otra vez.» y la venta no se responde', async () => {
@@ -702,9 +728,9 @@ describe('Q36: repetir la venta y el código', () => {
   })
 
   it.each([
-    ['con el código oculto', conEstado(['ACTIVE', 'ACTIVE'], { codigo: null, pageToken: null, pageUrl: null, codigoOculto: true })],
-    ['con los sobres PENDING', conEstado(['PENDING', 'PENDING'])],
-  ])('%s ⇒ ningún renglón', async (_caso, cuenta) => {
+    ['ACTIVE', conEstado(['ACTIVE', 'ACTIVE'], { codigo: null, pageToken: null, pageUrl: null, codigoOculto: true })],
+    ['PENDING', conEstado(['PENDING', 'PENDING'], { codigo: null, pageToken: null, pageUrl: null, codigoOculto: true })],
+  ])('con el código oculto (sobres %s) ⇒ ningún renglón', async (_caso, cuenta) => {
     m(createGiftCardOrder).mockResolvedValue(cuenta)
     const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
     expect(r.status).toBe(200)

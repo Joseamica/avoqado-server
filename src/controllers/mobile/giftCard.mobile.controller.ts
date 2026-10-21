@@ -55,10 +55,11 @@ export async function createOrder(req: Request, res: Response) {
       ...origenDe(req),
     })
   else {
-    // Q36 + Q102: el reenvío que entrega el código de un sobre ya ACTIVE es una salida del secreto. Su renglón se guarda ANTES de
-    // responder; si no, 503 y la venta no se responde (la app reintenta con la misma llave). La creación no escribe nada aquí.
+    // Q36 + Q102: el reenvío que entrega el código (o la liga) de un sobre es una salida del secreto, esté como esté el sobre
+    // (M1 de S4: un BLOCKED o un PENDING de hoy también lo trae). Lo decide lo que se devuelve, no el estado. Su renglón se guarda
+    // ANTES de responder; si no, 503 y la venta no se responde (la app reintenta con la misma llave). La creación no escribe aquí.
     const salidas = data.sobres
-      .filter(s => s.status === 'ACTIVE' && s.codigo !== null)
+      .filter(s => s.codigo !== null || s.pageToken !== null)
       .map(s => ({
         venueId,
         staffId,
