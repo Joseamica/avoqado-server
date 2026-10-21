@@ -33,6 +33,7 @@ import {
   PaymentType,
 } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, sqlPaymentIsNotExchangeCredit } from '../../exchanges/exchangeMarks'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { recalculateSummary } from './commission-aggregation.service'
@@ -430,17 +431,21 @@ const CAMPOS_DEL_REVERSO = ['baseAmount', 'tipAmount', 'discountAmount', 'taxAmo
 type CampoDelReverso = (typeof CAMPOS_DEL_REVERSO)[number]
 type CamposDelReverso = Record<CampoDelReverso, Prisma.Decimal>
 
-/** Las devoluciones COMPLETADAS de un cobro: la llave `processorData.originalPaymentId` que escriben los dos canales. */
+/**
+ * Las devoluciones COMPLETADAS de un cobro: la llave `processorData.originalPaymentId` que escriben los dos canales. Sin las de
+ * crédito de cambio (spec §7.6): lo que pasó a la venta nueva no regresó a la clienta, así que no revierte comisión.
+ */
 const devolucionesDe = (venueId: string, originalPaymentId: string): Prisma.PaymentWhereInput => ({
   venueId,
   type: PaymentType.REFUND,
   status: 'COMPLETED',
   processorData: { path: ['originalPaymentId'], equals: originalPaymentId },
+  AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
 })
 
 /**
- * Lo YA revertido de una fila original (persona + esquema) por las DEMÁS devoluciones del cobro, en positivo: lo
- * materializado (en cualquier estado: anular un reverso es decidir que esa parte no se revierte) más lo que sigue en cola.
+ * Lo YA revertido de una fila original (persona + esquema) por las DEMÁS devoluciones del cobro (las de `devolucionesDe`), en
+ * positivo: lo materializado (en cualquier estado: anular un reverso es decidir que esa parte no se revierte) más lo que sigue en cola.
  * Un efecto cuya fila ya existe —el enganche directo viejo de la terminal la creaba aparte— se cuenta una sola vez, por la
  * fila. Todo en SQL: sin tope de filas que trunque la suma (Codex plan r1-2).
  */
@@ -456,6 +461,7 @@ async function revertidoPorLasOtras(
         AND p.status = 'COMPLETED'
         AND p."processorData"->>'originalPaymentId' = ${w.originalPaymentId}
         AND p.id <> ${w.refundPaymentId}
+        AND ${sqlPaymentIsNotExchangeCredit('p')}
     ),
     revertido AS (
       SELECT cc."baseAmount" AS b, cc."tipAmount" AS t, cc."discountAmount" AS d, cc."taxAmount" AS x,

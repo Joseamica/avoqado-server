@@ -41,6 +41,15 @@ export function sqlPaymentIsNotExchangeCredit(alias: AliasDeCobro): Prisma.Sql {
   )
 }
 
+/**
+ * ¿La orden es la VENTA NUEVA de un cambio? No es una compra nueva (spec §7.6 y §7.7): no dispara referidos, ni con la diferencia
+ * cobrada, y no da sello. Una lectura por el índice único de `Exchange.newOrderId`.
+ */
+export async function esVentaNuevaDeCambio(db: Pick<Prisma.TransactionClient, 'exchange'>, orderId: string | null): Promise<boolean> {
+  if (!orderId) return false
+  return !!(await db.exchange.findUnique({ where: { newOrderId: orderId }, select: { id: true } }))
+}
+
 /** El cobro de donde SALIÓ el dinero de una devolución: la raíz de la cadena si la hay, si no el cobro devuelto. */
 export function origenEconomicoDeDevolucion(processorData: unknown): string | null {
   if (!processorData || typeof processorData !== 'object' || Array.isArray(processorData)) return null

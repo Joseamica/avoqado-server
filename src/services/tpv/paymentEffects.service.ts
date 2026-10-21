@@ -5,6 +5,8 @@ import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import logger from '@/config/logger'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
+import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
+import { esVentaNuevaDeCambio } from '@/services/exchanges/exchangeMarks'
 
 export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
@@ -65,8 +67,16 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   } satisfies Prisma.PaymentWhereInput
   // Tarjetas de regalo (R1): la marca COMPLETA de la cuenta (⭐ B6 M2: con tarjeta y sin renglones sin ella) viaja en esta MISMA
   // lectura, y sólo para comisión y referido: sin `relationJoins` son SQL de más dentro de la transacción del cobro (con el FOR UPDATE).
-  const source: { orderId: string; order?: { items?: Array<{ id: string }>; _count?: { items?: number } } } | null = premiaVenta
-    ? await tx.payment.findFirst({ where, select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS } } })
+  // El tender del cobro (crédito de cambio) viaja en la misma lectura, por la misma razón.
+  const source: {
+    orderId: string
+    order?: { items?: Array<{ id: string }>; _count?: { items?: number } }
+    tenderType?: { systemKind: string | null } | null
+  } | null = premiaVenta
+    ? await tx.payment.findFirst({
+        where,
+        select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS }, tenderType: { select: { systemKind: true } } },
+      })
     : await tx.payment.findFirst({ where, select: { orderId: true } })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
   // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
@@ -74,6 +84,11 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   // la cuenta de mercancía pagada con saldo no es de tarjetas.
   // r1 (lote ⭐): el `?.` de `items` NO sobra: el reembolso de la TPV llega con `order` sin `items`.
   if (premiaVenta && esCuentaDeTarjetasSeleccionada(source.order)) return
+  // Crédito de cambio (spec §7.6): ni el cobro de la venta nueva comisiona ni su devolución gemela revierte la comisión, y ninguno
+  // toca referidos. Así un cambio parejo deja la comisión igual con cualquier esquema; sólo la diferencia comisiona o revierte.
+  if (premiaVenta && isExchangeCreditTenderKind(source.tenderType?.systemKind)) return
+  // La venta nueva de un cambio no es una compra nueva: no dispara referidos, ni con la diferencia cobrada. Su comisión sí va.
+  if (input.kind === 'REFERRAL' && (await esVentaNuevaDeCambio(tx, input.orderId))) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
 }
 
