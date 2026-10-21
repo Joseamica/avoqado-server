@@ -8,6 +8,9 @@
  * S0.1b (segundo bloque, negocio propio): mezcla de productos, varianza de costo y tasa de descuento. Esos reportes sólo leen
  * órdenes COMPLETED, así que ahí la cuenta de mercancía de $100 está terminada y su renglón apunta a un producto real.
  *
+ * S0.1c (tercer bloque, negocio propio): Personal (lista y detalle). Tarjeta de $500 y mercancía de $500 COMPLETED del mismo
+ * empleado: sin el filtro salía con $1,000 y dos ventas.
+ *
  * Correr: source ~/.claude/worktrees/tarjetas-1b/urls-tarjetas-1b.sh && TZ=UTC npx jest --selectProjects=integration --runInBand \
  *   --runTestsByPath tests/integration/giftCards/ventasPorArticulo.integration.test.ts
  */
@@ -19,6 +22,7 @@ import { getSalesByItem } from '@/services/dashboard/sales-by-item.dashboard.ser
 import { getChartData } from '@/services/dashboard/generalStats.dashboard.service'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import { getCostVarianceReport, getPMIXReport } from '@/services/dashboard/report.service'
+import { getTeamMember, getTeamMembers } from '@/services/dashboard/team.dashboard.service'
 import { crearCuentaDeMercancia, crearNegocioDePrueba, limpiarNegocioDePrueba, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(60000)
@@ -134,5 +138,49 @@ describe('Mezcla de productos, varianza de costo y tasa de descuento sin la cuen
       totalOrders: number
     }
     expect(r.totalOrders).toBe(1)
+  })
+})
+
+describe('Personal sin la cuenta de tarjetas (S0.1c)', () => {
+  let venueId: string
+  let staffId: string
+  let staffVenueId: string
+
+  beforeAll(async () => {
+    const negocio = await crearNegocioDePrueba('per')
+    venueId = negocio.venueId
+    staffId = negocio.staffId
+    // La lista de Personal sólo muestra a quien sigue activo en la organización de la sucursal.
+    await prisma.staffOrganization.create({ data: { staffId, organizationId: negocio.organizationId } })
+    staffVenueId = (await prisma.staffVenue.findFirstOrThrow({ where: { staffId, venueId }, select: { id: true } })).id
+    await sembrarVentaDeTarjetas({ ...negocio, montos: [500], metodo: 'CASH' })
+    const { orderId } = await crearCuentaDeMercancia({ venueId, staffId, total: 500 })
+    await prisma.order.update({
+      where: { id: orderId },
+      data: {
+        status: 'COMPLETED',
+        completedAt: new Date(),
+        paymentStatus: 'PAID',
+        paidAmount: new Prisma.Decimal(500),
+        remainingBalance: new Prisma.Decimal(0),
+      },
+    })
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('la lista de Personal cuenta sólo la mercancía', async () => {
+    const r = await getTeamMembers(venueId, 1, 20)
+    const yo = r.data.find(m => m.staffId === staffId)!
+    expect(yo.totalSales).toBe(500)
+    expect(yo.totalOrders).toBe(1)
+  })
+
+  it('el detalle de Personal cuenta sólo la mercancía', async () => {
+    const yo = await getTeamMember(venueId, staffVenueId)
+    expect(yo.totalSales).toBe(500)
+    expect(yo.totalOrders).toBe(1)
   })
 })
