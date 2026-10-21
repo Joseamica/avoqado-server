@@ -31,6 +31,7 @@ const mockEnv: Record<string, string | undefined> = {
   RAPPI_WEBHOOK_BASE_URL: 'https://api.ejemplo.test',
   RAPPI_OAUTH_REDIRECT_BASE: 'https://api.ejemplo.test',
 }
+const envBase = { ...mockEnv }
 jest.mock('@/config/env', () => ({ env: mockEnv }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 
@@ -38,6 +39,7 @@ import {
   apiBaseSelfOnboarding,
   aprovisionarTiendasRappi,
   canjearCodigoRappi,
+  clientIdRappi,
   preflightSelfOnboardingRappi,
   redirectUriRappi,
   suscribirTiendaAEventos,
@@ -83,6 +85,41 @@ describe('rappi.client — self-onboarding', () => {
     mockEnv.RAPPI_WEBHOOK_BASE_URL = 'https://api.ejemplo.test'
     mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test'
     mockEnv.RAPPI_WEBHOOK_SECRETS = secretos()
+    mockEnv.RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX = 'so-cid'
+  })
+
+  // Ninguna prueba hereda llaves de otra (las de PRODUCTION de abajo no deben quedarse en el objeto compartido).
+  afterEach(() => {
+    for (const k of Object.keys(mockEnv)) delete mockEnv[k]
+    Object.assign(mockEnv, envBase)
+  })
+
+  // 14-oct: al activar Self Onboarding, Rappi crea OTRA aplicación (la del login del dueño) con su propio Client ID,
+  // distinto al de la integración. Con el de la integración, su login rechaza al dueño.
+  describe('client id del login del dueño', () => {
+    it('🔴 el canje del código usa el Client ID del Self Onboarding, no el de la integración', async () => {
+      const idToken = `${Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url')}.e30.firma`
+      const llamadas = simularRed(() => json(200, { id_token: idToken }))
+
+      expect(clientIdRappi()).toBe('so-cid')
+      await canjearCodigoRappi('code', 'verifier')
+
+      expect(new URLSearchParams(llamadas[0].init.body as string).get('client_id')).toBe('so-cid')
+    })
+
+    it('sin la variable ⇒ Error claro (nunca cae al Client ID de la integración)', () => {
+      mockEnv.RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX = undefined
+      expect(() => clientIdRappi()).toThrow(/RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX/)
+    })
+
+    it('en PRODUCTION el canje usa RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION', () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+      })
+      expect(clientIdRappi()).toBe('so-prod')
+    })
   })
 
   it('aprovisionar: host del self-onboarding, dos headers y el cuerpo con cancellation_events (R1, R2)', async () => {
@@ -235,12 +272,28 @@ describe('rappi.client — self-onboarding', () => {
       )
     })
 
+    // Sin esto el dueño autorizaba en Rappi y el fallo salía DESPUÉS, con el intent ya creado.
+    it('🔴 el preflight falla ANTES de mandar al dueño a autorizar si faltan las credenciales de la integración', () => {
+      mockEnv.RAPPI_CLIENT_ID_SANDBOX = undefined
+      expect(() => preflightSelfOnboardingRappi()).toThrow(/Faltan credenciales de Rappi/)
+    })
+
     it.each([
       ['sin RAPPI_WEBHOOK_BASE_URL', { RAPPI_WEBHOOK_BASE_URL: undefined }, /Falta RAPPI_WEBHOOK_BASE_URL/],
       ['RAPPI_WEBHOOK_BASE_URL inválida', { RAPPI_WEBHOOK_BASE_URL: 'api.ejemplo.test' }, /RAPPI_WEBHOOK_BASE_URL.*http\(s\)/],
       ['sin RAPPI_OAUTH_REDIRECT_BASE', { RAPPI_OAUTH_REDIRECT_BASE: undefined }, /Falta RAPPI_OAUTH_REDIRECT_BASE/],
       ['host del self-onboarding inválido', { RAPPI_SELF_ONBOARDING_API_BASE: 'host' }, /RAPPI_SELF_ONBOARDING_API_BASE/],
-      ['PRODUCTION sin host del self-onboarding', { RAPPI_ENVIRONMENT: 'PRODUCTION' }, /Falta RAPPI_SELF_ONBOARDING_API_BASE/],
+      [
+        'PRODUCTION sin host del self-onboarding',
+        // Con las tres llaves de PRODUCTION puestas: el preflight las pide primero y aquí se prueba el host.
+        {
+          RAPPI_ENVIRONMENT: 'PRODUCTION',
+          RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+          RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+          RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
+        },
+        /Falta RAPPI_SELF_ONBOARDING_API_BASE/,
+      ],
       // H7: Rappi acepta la suscripción aunque nos falte el secreto, y luego nuestro endpoint le contesta 401 a cada
       // pedido — la tienda queda «conectada» y sorda. Se niega ANTES de crear la intención.
       ['sin el secreto de NEW_ORDER', { RAPPI_WEBHOOK_SECRETS: secretos(['NEW_ORDER']) }, /RAPPI_WEBHOOK_SECRETS.*NEW_ORDER/],

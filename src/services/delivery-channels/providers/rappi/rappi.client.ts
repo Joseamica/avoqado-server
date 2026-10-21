@@ -265,8 +265,12 @@ const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev
  * Incluye el secreto de CADA webhook que la tienda va a recibir (la misma lista que `suscribirTiendaAEventos`,
  * más el aviso de aprovisionamiento): Rappi acepta la suscripción aunque nos falte, y luego nuestro endpoint le
  * contesta 401 a cada pedido.
+ * También las dos llaves de Rappi (la integración M2M y el Client ID del login del dueño): sin ellas el dueño ya
+ * habría autorizado en Rappi cuando el canje o el aprovisionamiento fallaran, con el intent creado.
  */
 export function preflightSelfOnboardingRappi(): string {
+  credenciales()
+  clientIdRappi()
   const callback = redirectUriRappi()
   apiBaseSelfOnboarding()
   baseDeWebhooksRappi()
@@ -278,8 +282,22 @@ export function preflightSelfOnboardingRappi(): string {
   return callback.slice(0, -RUTA_CALLBACK.length)
 }
 
+/**
+ * Client ID del login del DUEÑO (self-onboarding). 🔴 No es el de la integración: al activar Self Onboarding en el
+ * Integrations Manager, Rappi crea otra aplicación con su propio Client ID (verificado el 14-oct en DEV). Nunca cae
+ * al de la integración: el login de Rappi lo rechazaría y el dueño vería un error de Rappi, no el nuestro.
+ */
 export function clientIdRappi(): string {
-  const { clientId } = credenciales()
+  const sufijo = getRappiEnvironment() === 'SANDBOX' ? 'SANDBOX' : 'PRODUCTION'
+  const clientId = (
+    sufijo === 'SANDBOX' ? env.RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX : env.RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION
+  )?.trim()
+  if (!clientId) {
+    throw new Error(
+      `Falta RAPPI_SELF_ONBOARDING_CLIENT_ID_${sufijo}: es el Client ID de la página Self Onboarding del Integrations Manager ` +
+        '(distinto al de la integración).',
+    )
+  }
   return clientId
 }
 
