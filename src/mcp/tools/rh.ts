@@ -6,6 +6,7 @@ import prisma from '@/utils/prismaClient'
 import { asignarPuesto, terminarAsignacion, type AsignacionDto } from '@/services/dashboard/rh/asignaciones.service'
 import { asegurarSedeNoMarcaBlanca } from '@/services/dashboard/rh/marcaBlanca'
 import { hoyDeLaSede } from '@/services/dashboard/rh/vigencias'
+import { checaPorDefault } from '@/services/dashboard/rh/checaAsistencia'
 import { archivarPuesto, crearPuesto, listarPuestos, type PuestoDto } from '@/services/dashboard/rh/puestos.service'
 import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
@@ -104,7 +105,7 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
       tracksAttendanceDefault: z
         .boolean()
         .optional()
-        .describe('Si por defecto las personas con este puesto checan asistencia (por defecto sí)'),
+        .describe('Si por defecto las personas con este puesto checan asistencia (por defecto sí, salvo el rol de sólo lectura)'),
       confirm: confirmZ(),
     },
     async ({ venueId, name, suggestedRole, suggestedRelation, tracksAttendanceDefault, confirm }) => {
@@ -117,7 +118,7 @@ export function registerRhTools(server: McpServer, scope: McpScope) {
             nombre: name,
             rolSugerido: suggestedRole,
             relacionSugerida: suggestedRelation ?? SIN_DEFINIR,
-            checaAsistencia: tracksAttendanceDefault ?? true,
+            checaAsistencia: tracksAttendanceDefault ?? checaPorDefault(suggestedRole),
           },
           message: `Esto CREARÁ el puesto «${name}» en esta sucursal. No cambia el rol ni los permisos de nadie. Vuelve a llamar con confirm:true para crearlo.`,
         })
