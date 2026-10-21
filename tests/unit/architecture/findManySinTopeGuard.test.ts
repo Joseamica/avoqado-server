@@ -370,7 +370,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/mobile/menu.mobile.service.ts': 1,
   // 1 → 0 (2026-09-23, KDS Uber T16): la venta de cada comanda se carga por lote en
   // `kdsCapacidades.ts`, con `take` = número de ids pedidos.
-  'src/services/mobile/order.mobile.service.ts': 6,
+  // 6 → 5 (2026-10-21, tarjetas 1b S4): `listOrders` ya estaba paginada (`take,` abreviado, que la ventana no reconoce); ahora
+  // su include de la marca de tarjetas lleva `take: 1` dentro de la ventana y el barrido la ve acotada.
+  'src/services/mobile/order.mobile.service.ts': 5,
   'src/services/mobile/print.mobile.service.ts': 2,
   'src/services/mobile/product-option.mobile.service.ts': 1,
   'src/services/mobile/push.mobile.service.ts': 2,

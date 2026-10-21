@@ -92,6 +92,8 @@ import { rechazoSellado, sellarSiEsDefinitivo, tomarLlaveDeCobro } from '../gift
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, formatoPesos } from '../giftCards/giftCardLimits'
 import { ensureGiftCardTender, isGiftCardTenderKind, resolveGiftCardTenderForChargeInTx } from '../giftCards/giftCardTender'
+import { WHERE_RENGLON_DE_TARJETA } from '../giftCards/giftCardMarks'
+import { tieneRenglonDeTarjeta } from '../giftCards/giftCardPredicados'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { MAX_TERMINAL_PAYMENT_CENTS } from '../shared/inputCaps'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
@@ -329,6 +331,12 @@ export interface OrderSummaryResponse {
   refundState: RefundState
   /** Lo devuelto, en PESOS y POSITIVO. 0 cuando no hay reembolsos. */
   refundedAmount: number
+  /** 1b S-1 (aditivo): algún renglón es de tarjeta de regalo. Las apps deciden por esto, nunca por el texto del renglón. */
+  esCuentaDeTarjetas?: boolean
+  /** 1b Q27 (aditivo): cobros con saldo vivos (COMPLETED, no REFUND, del tender de regalo); 0 si la cuenta está CANCELLED. */
+  cobrosConSaldo?: number
+  /** 1b Q49 (aditivo): la cuenta tiene mesa (`tableId`). `Order.type` no sirve: su default es DINE_IN también en mostrador. */
+  esDeMesa?: boolean
 }
 
 export interface OrderDetailResponse {
@@ -408,6 +416,8 @@ export interface OrderDetailResponse {
     status: string
     createdAt: Date
     processedBy: string | null
+    /** 1b Q28 (aditivo): el cobro es saldo de tarjeta de regalo (las apps lo nombran «Tarjeta de regalo»). */
+    esSaldoDeTarjeta?: boolean
   }>
   /**
    * Promociones vendidas en esta cuenta — ADITIVO (2026-08-18).
@@ -447,6 +457,22 @@ export interface OrderDetailResponse {
   refundState: RefundState
   /** Lo devuelto, en PESOS y POSITIVO (como el resto de importes de esta respuesta). */
   refundedAmount: number
+  /** 1b S-1, Q27, Q49 (aditivos): los mismos de `OrderSummaryResponse`. */
+  esCuentaDeTarjetas?: boolean
+  cobrosConSaldo?: number
+  esDeMesa?: boolean
+}
+
+/**
+ * 1b Q27: cobros con saldo VIVOS sobre lo que la cuenta ya leyó (sin consulta nueva ni N+1): COMPLETED, no REFUND, del tender
+ * de regalo (`isGiftCardTenderKind`, el gemelo en memoria de `WHERE_COBRO_ES_SALDO_DE_REGALO`); 0 si la cuenta está CANCELLED.
+ */
+function cobrosConSaldoVivos(
+  orden: { status: string },
+  pagos: ReadonlyArray<{ status?: string; type?: string | null; tenderType?: { systemKind: string | null } | null }>,
+): number {
+  if (orden.status === 'CANCELLED') return 0
+  return pagos.filter(p => p.status === 'COMPLETED' && p.type !== 'REFUND' && isGiftCardTenderKind(p.tenderType?.systemKind)).length
 }
 
 // MARK: - Service Functions
@@ -502,8 +528,11 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
         // pagar por dato que nadie pinta. El array NO sale en la respuesta.
         payments: {
           where: { status: 'COMPLETED' },
-          select: { amount: true, tipAmount: true, type: true },
+          // 1b Q27: + la marca del tender, para contar los cobros con saldo de la página sin otra consulta por orden.
+          select: { amount: true, tipAmount: true, type: true, status: true, tenderType: { select: { systemKind: true } } },
         },
+        // 1b S-1: la marca de la lista (un renglón de tarjeta basta: no se mezclan, A5).
+        items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 },
       },
       orderBy: { createdAt: 'desc' },
       skip,
@@ -533,6 +562,9 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
       createdAt: order.createdAt,
       refundState: refunds.refundState,
       refundedAmount: Number(refunds.refundedAmount),
+      esCuentaDeTarjetas: (order.items?.length ?? 0) > 0,
+      cobrosConSaldo: cobrosConSaldoVivos(order, order.payments ?? []),
+      esDeMesa: order.tableId != null,
     }
   })
 
@@ -1621,6 +1653,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
           // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
           type: true,
+          // 1b Q27/Q28: qué cobro es saldo de tarjeta.
+          tenderType: { select: { systemKind: true } },
           processedBy: {
             select: { firstName: true, lastName: true },
           },
@@ -1750,6 +1784,7 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
       status: p.status,
       createdAt: p.createdAt,
       processedBy: p.processedBy ? `${p.processedBy.firstName} ${p.processedBy.lastName}`.trim() : null,
+      esSaldoDeTarjeta: isGiftCardTenderKind(p.tenderType?.systemKind),
     })),
     promotions: (flattenedOrder.promotions || []).map((p: any) => {
       const snapshot = (p.snapshotJson ?? {}) as { name?: string; type?: string; pricingMode?: string }
@@ -1768,6 +1803,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     }),
     refundState: balance.refundState,
     refundedAmount: Number(balance.refundedAmount),
+    esCuentaDeTarjetas: tieneRenglonDeTarjeta(flattenedOrder.items),
+    cobrosConSaldo: cobrosConSaldoVivos(flattenedOrder, flattenedOrder.payments || []),
+    esDeMesa: flattenedOrder.tableId != null,
   }
 }
 
@@ -3590,7 +3628,7 @@ export async function registrarAbonoEnTx(
     // anomalía en ESTA transacción (no reactiva sobres: la función es idempotente). Sin renglón de tarjeta, sale sin consultar sobres.
     // `findFirst` y no un `findMany` con tope de 1: la ventana de `findManySinTopeGuard` vería ese tope y daría por acotado el
     // `txItems` de arriba, que no lo está.
-    const renglonDeTarjeta = await tx.orderItem.findFirst({ where: { orderId, giftCardId: { not: null } }, select: { giftCardId: true } })
+    const renglonDeTarjeta = await tx.orderItem.findFirst({ where: { orderId, ...WHERE_RENGLON_DE_TARJETA }, select: { giftCardId: true } })
     await activarSobresDeCuentaPagadaEnTx(tx, {
       venueId,
       orderId,

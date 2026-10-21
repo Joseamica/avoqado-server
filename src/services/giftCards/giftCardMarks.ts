@@ -12,16 +12,16 @@
  */
 import { PaymentStatus, Prisma, PrismaClient, TenderSystemKind } from '@prisma/client'
 
+/** El renglón que hace de una orden una cuenta de tarjetas. La única definición: las marcas de abajo y el reclamo del turno la usan. */
+export const WHERE_RENGLON_DE_TARJETA = { giftCardId: { not: null } } satisfies Prisma.OrderItemWhereInput
+
 /** ¿La orden es una cuenta de tarjetas? Una consulta para toda venta normal; la segunda sólo si ya apareció una tarjeta. */
 export async function leerSiEsCuentaDeTarjetas(db: Prisma.TransactionClient | PrismaClient, orderId: string): Promise<boolean> {
-  const conTarjeta = await db.orderItem.findFirst({ where: { orderId, giftCardId: { not: null } }, select: { id: true } })
+  const conTarjeta = await db.orderItem.findFirst({ where: { orderId, ...WHERE_RENGLON_DE_TARJETA }, select: { id: true } })
   if (!conTarjeta) return false
   const sinTarjeta = await db.orderItem.findFirst({ where: { orderId, giftCardId: null }, select: { id: true } })
   return !sinTarjeta
 }
-
-/** El renglón que hace de una orden una cuenta de tarjetas. La única definición: las marcas de abajo y el reclamo del turno la usan. */
-export const WHERE_RENGLON_DE_TARJETA = { giftCardId: { not: null } } satisfies Prisma.OrderItemWhereInput
 
 export const WHERE_ORDEN_DE_TARJETAS = { items: { some: WHERE_RENGLON_DE_TARJETA } } satisfies Prisma.OrderWhereInput
 
