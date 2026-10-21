@@ -134,6 +134,17 @@ export function proveedorDelPedido(externalId: string | null | undefined) {
   return hasAdapter(provider) ? { provider, externalOrderId: externalId.slice(sep + 1) } : null
 }
 
+/**
+ * ¿De qué proveedor es ESTE pedido? `null` = no es de un proveedor con adaptador (o no existe en este negocio).
+ *
+ * Lo usa el controlador de la cocina para nombrar la app en sus mensajes («Rappi está desconectada…») sin cargar todo el
+ * contexto del pedido: lee sólo `externalId`, filtrado por negocio, y deja a `proveedorDelPedido` decidir qué prefijo cuenta.
+ */
+export async function proveedorDeLaOrden(venueId: string, orderId: string): Promise<DeliveryProvider | null> {
+  const orden = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { externalId: true } })
+  return proveedorDelPedido(orden?.externalId)?.provider ?? null
+}
+
 /** Respaldo para órdenes previas al cambio: la orden aún no guardaba su propio link. */
 async function linkPorEventoOriginador(
   venueId: string,

@@ -5,6 +5,7 @@
  * token de sandbox escribió el menú EN VIVO de un restaurante— y Rappi tiene la misma
  * exposición, peor, porque las tiendas se provisionan por lote.
  */
+import { DeliveryWriteNotSentError } from '../../../../src/services/delivery-channels/core/types'
 import {
   assertTiendaEscribible,
   crearEspaciadorDeSondeo,
@@ -87,6 +88,26 @@ describe('assertTiendaEscribible', () => {
 
   it('sin id de tienda tampoco pasa: no se escribe "a ciegas"', () => {
     expect(() => assertTiendaEscribible(undefined, ['900105814'])).toThrow(RappiEscrituraBloqueadaError)
+  })
+
+  // T6 (21-oct): sin esto el controlador del KDS no la reconoce como «no se envió» y la tienda bloqueada caía en un 500.
+  it('🔴 el candado ES un «no se envió» (STORE_NOT_AUTHORIZED): la cocina lo recibe como 409, no como 500', () => {
+    let error: unknown
+    try {
+      assertTiendaEscribible('900105814', [])
+    } catch (e) {
+      error = e
+    }
+    expect(error).toBeInstanceOf(RappiEscrituraBloqueadaError)
+    expect(error).toBeInstanceOf(DeliveryWriteNotSentError)
+    expect((error as DeliveryWriteNotSentError).reason).toBe('STORE_NOT_AUTHORIZED')
+  })
+
+  it('conserva su nombre y su `storeId` (los dos que ya se leen: provisioning y el cliente)', () => {
+    const e = new RappiEscrituraBloqueadaError('900105814')
+    expect(e.name).toBe('RappiEscrituraBloqueadaError')
+    expect(e.storeId).toBe('900105814')
+    expect(e).toBeInstanceOf(Error)
   })
 
   it('el mensaje dice QUÉ pasó y qué hacer, no sólo que falló', () => {

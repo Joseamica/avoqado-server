@@ -22,6 +22,7 @@
  * Módulo PURO: `fetchImpl`, el token y la lista de tiendas se inyectan. No lee `@/config/env`
  * (importarlo hace `process.exit` y mata workers de Jest — regla del repo).
  */
+import { DeliveryWriteNotSentError } from '../../core/types'
 import { cabeceraRappi, invalidarToken, type SuperficieRappi } from './rappi.token'
 
 export type AmbienteRappi = 'SANDBOX' | 'PRODUCTION'
@@ -72,9 +73,15 @@ export function hostDeLoginRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
   return HOST_LOGIN_PRODUCCION_MX
 }
 
-export class RappiEscrituraBloqueadaError extends Error {
+/**
+ * 🔴 Es un «no se envió»: el candado salta ANTES de la red, así que se SABE que Rappi no recibió nada. Por eso extiende
+ * `DeliveryWriteNotSentError` (`STORE_NOT_AUTHORIZED`, igual que `UberStoreWriteBlockedError`): la cocina lo recibe como un
+ * 409 «tienda desconectada» en vez de un 500 sin explicación. `instanceof RappiEscrituraBloqueadaError` sigue valiendo.
+ */
+export class RappiEscrituraBloqueadaError extends DeliveryWriteNotSentError {
   constructor(readonly storeId: string) {
     super(
+      'STORE_NOT_AUTHORIZED',
       `[Rappi] escritura BLOQUEADA para la tienda ${storeId}: no está en la lista de tiendas autorizadas. ` +
         'Es el candado que impide tocar el comercio de alguien más — agrégala explícitamente si de verdad es tuya.',
     )

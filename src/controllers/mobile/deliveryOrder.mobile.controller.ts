@@ -7,9 +7,11 @@
 import type { NextFunction, Request, Response } from 'express'
 import { DeliveryWriteNotSentError } from '../../services/delivery-channels/core/types'
 
+import logger from '@/config/logger'
 import {
   acceptDeliveryOrder,
   denyDeliveryOrder,
+  proveedorDeLaOrden,
   type MotivoRechazo,
   type RespuestaPedido,
 } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
@@ -24,17 +26,33 @@ export const OPERACION_EN_CURSO: Record<string, string> = {
 }
 
 /**
+ * 🔴 D1: las apps de la cocina muestran `message` cuando una llamada falla; con sólo `error` el mesero veía un texto
+ * genérico en vez de la razón. TODA respuesta de error de este archivo sale por aquí: `message` es igual a `error`.
+ * Aditivo — `error` se queda porque las apps viejas lo leen.
+ */
+function responderError(res: Response, status: number, cuerpo: { code?: string; error: string }) {
+  return res.status(status).json({ ok: false, ...cuerpo, message: cuerpo.error })
+}
+
+/**
+ * Nombre visible de la app de delivery en los textos al personal. Vive aquí y no en `core/` a propósito: el núcleo no
+ * ramifica por proveedor (lo vigila `adapterRegistry.test.ts`). Un proveedor sin nombre aquí, o un pedido del que no se
+ * pudo leer el proveedor, usa una palabra neutra — nunca el nombre de otra app.
+ */
+const NOMBRE_DE_LA_APP: Readonly<Record<string, string>> = { UBER_EATS: 'Uber Eats', RAPPI: 'Rappi' }
+const NOMBRE_NEUTRO_DE_LA_APP = 'La app de delivery'
+
+/**
  * Spec §3.2: otra salida a Uber tiene tomado el pedido. 409 con código propio — una app vieja
  * lo ve como error genérico y reintenta después, que es exactamente lo correcto.
  */
 function respuestaDeReserva(res: Response, r: RespuestaPedido) {
   if (r.outcome === 'OP_IN_PROGRESS') {
     const que = (r.ocupadaPor && OPERACION_EN_CURSO[r.ocupadaPor]) || 'hay otra operación en curso sobre este pedido'
-    return res.status(409).json({ ok: false, code: 'DELIVERY_OP_IN_PROGRESS', error: `Espera: ${que}. Intenta en un momento.` })
+    return responderError(res, 409, { code: 'DELIVERY_OP_IN_PROGRESS', error: `Espera: ${que}. Intenta en un momento.` })
   }
   if (r.outcome === 'LINE_ACTION_IN_PROGRESS') {
-    return res.status(409).json({
-      ok: false,
+    return responderError(res, 409, {
       code: 'LINE_ACTION_IN_PROGRESS',
       error: 'Espera: se está retirando un artículo de este pedido. Intenta cuando termine.',
     })
@@ -43,30 +61,47 @@ function respuestaDeReserva(res: Response, r: RespuestaPedido) {
 }
 
 /**
+ * La app de delivery DEL PEDIDO, para nombrarla en el texto. Si no se puede leer (la base falla, el pedido ya no está) se
+ * contesta igual con la palabra neutra: un fallo al buscar el nombre nunca debe convertir este 409 en un 500.
+ */
+async function nombreDeLaApp(venueId: string, orderId: string): Promise<string> {
+  try {
+    const proveedor = await proveedorDeLaOrden(venueId, orderId)
+    return (proveedor && NOMBRE_DE_LA_APP[proveedor]) || NOMBRE_NEUTRO_DE_LA_APP
+  } catch (e) {
+    logger.warn('[Delivery] no se pudo leer el proveedor del pedido para nombrarlo en el aviso de tienda desconectada', {
+      orderId,
+      error: String(e),
+    })
+    return NOMBRE_NEUTRO_DE_LA_APP
+  }
+}
+
+/**
  * Nada llegó a la app de delivery (candado, token o tienda sin consentimiento): se dice con esas
  * palabras en vez de un 500 genérico — la tienda desconectada no se arregla picándole otra vez.
  */
-function respuestaNoEnviado(res: Response, e: unknown) {
+async function respuestaNoEnviado(res: Response, e: unknown, venueId: string, orderId: string) {
   if (!(e instanceof DeliveryWriteNotSentError)) return null
   return e.reason === 'STORE_NOT_AUTHORIZED'
-    ? res
-        .status(409)
-        .json({ ok: false, code: 'STORE_NOT_CONNECTED', error: 'Uber está desconectada para esta tienda; reconéctala desde el panel.' })
-    : res.status(503).json({
-        ok: false,
+    ? responderError(res, 409, {
+        code: 'STORE_NOT_CONNECTED',
+        error: `${await nombreDeLaApp(venueId, orderId)} está desconectada para esta tienda; reconéctala desde el panel.`,
+      })
+    : responderError(res, 503, {
         code: 'PROVIDER_NOT_CONTACTED',
         error: 'No se pudo contactar a la app de delivery; no se envió nada, intenta de nuevo.',
       })
 }
 
 export const acceptOrder = async (req: Request, res: Response, next: NextFunction) => {
+  const { venueId, orderId } = req.params
   try {
-    const { venueId, orderId } = req.params
     const { userId } = (req as any).authContext
     const r = await acceptDeliveryOrder(venueId, orderId, userId)
 
     if (r.outcome === 'NOT_A_DELIVERY_ORDER') {
-      return res.status(404).json({ ok: false, error: 'Este pedido no viene de una app de delivery.' })
+      return responderError(res, 404, { error: 'Este pedido no viene de una app de delivery.' })
     }
     const ocupado = respuestaDeReserva(res, r)
     if (ocupado) return ocupado
@@ -75,8 +110,7 @@ export const acceptOrder = async (req: Request, res: Response, next: NextFunctio
       // canceló. Se distingue para que la app pueda decirlo con esas palabras en vez de
       // mostrar un error genérico que invita a picarle otra vez.
       const vencido = r.error === 'PEDIDO_YA_NO_ACTIVO'
-      return res.status(vencido ? 409 : 502).json({
-        ok: false,
+      return responderError(res, vencido ? 409 : 502, {
         code: r.error,
         error: vencido
           ? 'El pedido ya no está activo: la app de delivery lo canceló por tiempo. No hace falta reintentar.'
@@ -85,31 +119,31 @@ export const acceptOrder = async (req: Request, res: Response, next: NextFunctio
     }
     return res.json({ ok: true, outcome: r.outcome })
   } catch (e) {
-    return respuestaNoEnviado(res, e) ?? next(e)
+    return (await respuestaNoEnviado(res, e, venueId, orderId)) ?? next(e)
   }
 }
 
 export const denyOrder = async (req: Request, res: Response, next: NextFunction) => {
+  const { venueId, orderId } = req.params
   try {
-    const { venueId, orderId } = req.params
     const { userId } = (req as any).authContext
     const motivo = MOTIVOS.includes(req.body?.reason) ? (req.body.reason as MotivoRechazo) : 'OUT_OF_ITEMS'
 
     const r = await denyDeliveryOrder(venueId, orderId, motivo, userId)
 
     if (r.outcome === 'NOT_A_DELIVERY_ORDER') {
-      return res.status(404).json({ ok: false, error: 'Este pedido no viene de una app de delivery.' })
+      return responderError(res, 404, { error: 'Este pedido no viene de una app de delivery.' })
     }
     const ocupado = respuestaDeReserva(res, r)
     if (ocupado) return ocupado
     if (r.outcome === 'FAILED') {
-      return res.status(502).json({ ok: false, code: r.error, error: 'No se pudo avisarle a la app de delivery. Intenta de nuevo.' })
+      return responderError(res, 502, { code: r.error, error: 'No se pudo avisarle a la app de delivery. Intenta de nuevo.' })
     }
     // `CANCELLED` y `DENIED` son resultados distintos a propósito: el primero significa que
     // el pedido ya estaba aceptado y el cliente ya estaba esperando. La app puede usarlo para
     // decir algo distinto en pantalla.
     return res.json({ ok: true, outcome: r.outcome })
   } catch (e) {
-    return respuestaNoEnviado(res, e) ?? next(e)
+    return (await respuestaNoEnviado(res, e, venueId, orderId)) ?? next(e)
   }
 }
