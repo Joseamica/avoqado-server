@@ -83,10 +83,11 @@ async function nombreDeLaApp(venueId: string, orderId: string): Promise<string> 
  */
 async function respuestaNoEnviado(res: Response, e: unknown, venueId: string, orderId: string) {
   if (!(e instanceof DeliveryWriteNotSentError)) return null
+  // Si el proveedor ya trae el texto preciso (`paraLaCocina`) se usa tal cual y no se busca su nombre; si no, el genérico de siempre.
   return e.reason === 'STORE_NOT_AUTHORIZED'
     ? responderError(res, 409, {
         code: 'STORE_NOT_CONNECTED',
-        error: `${await nombreDeLaApp(venueId, orderId)} está desconectada para esta tienda; reconéctala desde el panel.`,
+        error: e.paraLaCocina || `${await nombreDeLaApp(venueId, orderId)} está desconectada para esta tienda; reconéctala desde el panel.`,
       })
     : responderError(res, 503, {
         code: 'PROVIDER_NOT_CONTACTED',

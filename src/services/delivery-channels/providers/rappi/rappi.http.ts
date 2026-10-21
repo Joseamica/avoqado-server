@@ -76,7 +76,10 @@ export function hostDeLoginRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
 /**
  * 🔴 Es un «no se envió»: el candado salta ANTES de la red, así que se SABE que Rappi no recibió nada. Por eso extiende
  * `DeliveryWriteNotSentError` (`STORE_NOT_AUTHORIZED`, igual que `UberStoreWriteBlockedError`): la cocina lo recibe como un
- * 409 «tienda desconectada» en vez de un 500 sin explicación. `instanceof RappiEscrituraBloqueadaError` sigue valiendo.
+ * 409 en vez de un 500 sin explicación. `instanceof RappiEscrituraBloqueadaError` sigue valiendo.
+ *
+ * 🔴 `paraLaCocina`: NO es «desconectada». El candado es la lista de tiendas del entorno (`RAPPI_WRITABLE_STORE_IDS_*`); reconectar desde el
+ * panel no la abre (el aprovisionamiento contesta `NOT_ENABLED_FOR_PILOT`), así que a la cocina no se le manda a «reconectar».
  */
 export class RappiEscrituraBloqueadaError extends DeliveryWriteNotSentError {
   constructor(readonly storeId: string) {
@@ -84,6 +87,7 @@ export class RappiEscrituraBloqueadaError extends DeliveryWriteNotSentError {
       'STORE_NOT_AUTHORIZED',
       `[Rappi] escritura BLOQUEADA para la tienda ${storeId}: no está en la lista de tiendas autorizadas. ` +
         'Es el candado que impide tocar el comercio de alguien más — agrégala explícitamente si de verdad es tuya.',
+      'Rappi todavía no está habilitada para esta tienda; avisa a soporte de Avoqado.',
     )
     this.name = 'RappiEscrituraBloqueadaError'
   }

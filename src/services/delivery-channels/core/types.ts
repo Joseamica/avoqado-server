@@ -162,13 +162,16 @@ export interface ActionResult {
  * la base, el token). Se SABE que el proveedor no recibió nada — a diferencia de un timeout/5xx, donde
  * no se sabe y por eso queda en duda. `STORE_NOT_AUTHORIZED`: la tienda no tiene permiso de escritura
  * (consentimiento revocado, app del proveedor cambiada); `UNAVAILABLE`: cualquier otro fallo previo.
+ * `paraLaCocina` (opcional): el texto que ve la cocina cuando el proveedor sabe algo más preciso que el genérico de «tienda desconectada».
  */
 export class DeliveryWriteNotSentError extends Error {
   readonly reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE'
-  constructor(reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE', message: string) {
+  readonly paraLaCocina?: string
+  constructor(reason: 'STORE_NOT_AUTHORIZED' | 'UNAVAILABLE', message: string, paraLaCocina?: string) {
     super(message)
     this.name = 'DeliveryWriteNotSentError'
     this.reason = reason
+    this.paraLaCocina = paraLaCocina
   }
 }
 

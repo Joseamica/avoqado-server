@@ -20,6 +20,7 @@ jest.mock('@/services/delivery-channels/core/respondToDeliveryOrder.service', ()
 import { acceptOrder, denyOrder } from '@/controllers/mobile/deliveryOrder.mobile.controller'
 import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 import { assertTiendaEscribible } from '@/services/delivery-channels/providers/rappi/rappi.http'
+import { assertStoreWritable, parseWritableStoreIds } from '@/services/delivery-channels/providers/uber-eats/uber.storeAllowlist'
 
 type Resp = { status: jest.Mock; json: jest.Mock }
 
@@ -108,7 +109,7 @@ describe.each(OPERACIONES)('$nombre — cada respuesta de error trae `message`',
 
 describe('STORE_NOT_CONNECTED nombra al proveedor DEL PEDIDO', () => {
   it.each(OPERACIONES)(
-    '🔴 $nombre: una escritura bloqueada de Rappi ⇒ 409 STORE_NOT_CONNECTED que dice «Rappi», no «Uber»',
+    '🔴 $nombre: una escritura bloqueada de Rappi ⇒ 409 STORE_NOT_CONNECTED que dice «Rappi» (habilitación, no «reconéctala»), no «Uber»',
     async ({ controlador, servicio }) => {
       // El error REAL del candado de Rappi: si no fuera un «no se envió», el controlador lo dejaría pasar como un 500.
       let bloqueo: unknown
@@ -128,11 +129,74 @@ describe('STORE_NOT_CONNECTED nombra al proveedor DEL PEDIDO', () => {
       expect(next).not.toHaveBeenCalled()
       expect(status).toBe(409)
       expect(cuerpo.code).toBe('STORE_NOT_CONNECTED')
-      expect(cuerpo.error).toBe('Rappi está desconectada para esta tienda; reconéctala desde el panel.')
+      // 🔴 Reconectar desde el panel NO destraba una tienda de Rappi (el candado es la lista del entorno): no se le pide.
+      expect(cuerpo.error).toBe('Rappi todavía no está habilitada para esta tienda; avisa a soporte de Avoqado.')
       expect(cuerpo.message).toBe(cuerpo.error)
-      expect(cuerpo.error).not.toMatch(/Uber/)
+      expect(cuerpo.error).not.toMatch(/Uber|reconéctala/)
+      // Con el texto ya dicho por el proveedor no hace falta ir a la base a buscar su nombre.
+      expect(mockProveedorDeLaOrden).not.toHaveBeenCalled()
     },
   )
+
+  it.each(OPERACIONES)(
+    '🔴 $nombre: el candado de Uber (UberStoreWriteBlockedError) sigue diciendo «Uber Eats está desconectada…; reconéctala desde el panel.»',
+    async ({ controlador, servicio }) => {
+      let bloqueo: unknown
+      try {
+        assertStoreWritable('tienda-x', parseWritableStoreIds(undefined), 'PRODUCTION')
+      } catch (e) {
+        bloqueo = e
+      }
+      servicio.mockRejectedValue(bloqueo)
+      mockProveedorDeLaOrden.mockResolvedValue('UBER_EATS')
+      const next = jest.fn()
+      const r = res()
+
+      await controlador(req(), r as any, next)
+
+      const { status, cuerpo } = salida(r)
+      expect(next).not.toHaveBeenCalled()
+      expect(status).toBe(409)
+      expect(cuerpo.code).toBe('STORE_NOT_CONNECTED')
+      expect(cuerpo.error).toBe('Uber Eats está desconectada para esta tienda; reconéctala desde el panel.')
+      expect(cuerpo.message).toBe(cuerpo.error)
+    },
+  )
+
+  it('🔴 un «no se envió» SIN `paraLaCocina` conserva el texto de siempre (nombre de la app + «reconéctala»)', async () => {
+    const e = new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'x')
+    expect(e.paraLaCocina).toBeUndefined()
+    mockAceptar.mockRejectedValue(e)
+    mockProveedorDeLaOrden.mockResolvedValue('UBER_EATS')
+    const r = res()
+
+    await acceptOrder(req(), r as any, jest.fn())
+
+    expect(salida(r).cuerpo.error).toBe('Uber Eats está desconectada para esta tienda; reconéctala desde el panel.')
+  })
+
+  it('si el error trae `paraLaCocina`, ese texto manda (409 STORE_NOT_CONNECTED, `message` igual a `error`) y no se busca el proveedor', async () => {
+    mockRechazar.mockRejectedValue(new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'interno', 'Texto preciso para la cocina.'))
+    const r = res()
+
+    await denyOrder(req(), r as any, jest.fn())
+
+    expect(salida(r)).toEqual({
+      status: 409,
+      cuerpo: { ok: false, code: 'STORE_NOT_CONNECTED', error: 'Texto preciso para la cocina.', message: 'Texto preciso para la cocina.' },
+    })
+    expect(mockProveedorDeLaOrden).not.toHaveBeenCalled()
+  })
+
+  it('`paraLaCocina` sólo afecta a STORE_NOT_AUTHORIZED: un UNAVAILABLE conserva su 503 de siempre', async () => {
+    mockAceptar.mockRejectedValue(new DeliveryWriteNotSentError('UNAVAILABLE', 'sin token', 'Texto que no debe salir.'))
+    const r = res()
+
+    await acceptOrder(req(), r as any, jest.fn())
+
+    expect(salida(r).status).toBe(503)
+    expect(salida(r).cuerpo.error).toBe(TEXTO_NO_ENVIADO)
+  })
 
   it.each([
     ['UBER_EATS', 'Uber Eats está desconectada para esta tienda; reconéctala desde el panel.'],

@@ -103,6 +103,12 @@ describe('assertTiendaEscribible', () => {
     expect((error as DeliveryWriteNotSentError).reason).toBe('STORE_NOT_AUTHORIZED')
   })
 
+  it('🔴 trae el texto para la cocina: dice «Rappi», que falta habilitarla, y NO manda a «reconectar»', () => {
+    const e = new RappiEscrituraBloqueadaError('900105814')
+    expect(e.paraLaCocina).toBe('Rappi todavía no está habilitada para esta tienda; avisa a soporte de Avoqado.')
+    expect(e.paraLaCocina).not.toMatch(/reconéctala/i)
+  })
+
   it('conserva su nombre y su `storeId` (los dos que ya se leen: provisioning y el cliente)', () => {
     const e = new RappiEscrituraBloqueadaError('900105814')
     expect(e.name).toBe('RappiEscrituraBloqueadaError')
