@@ -1,7 +1,7 @@
 import { Prisma, PaymentProcessor } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { assertMerchantsTerminalCompatible } from '@/lib/providerDeviceCompatibility'
+import { ANGELPAY_LOGIN_EN_OTRO_NEGOCIO, assertMerchantsTerminalCompatible } from '@/lib/providerDeviceCompatibility'
 import { assertDeviceActionSupported } from '@/services/device-capabilities.service'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
 import {
@@ -404,9 +404,15 @@ export async function migratePreflight(
       blockers.push({ code: 'INVALID_MERCHANT', message: 'Uno de los comercios seleccionados no existe o está desactivado.' })
     } else {
       try {
-        await assertMerchantsTerminalCompatible(terminalId, merchants)
-      } catch {
-        blockers.push({ code: 'INVALID_MERCHANT', message: 'El comercio seleccionado no es compatible con esta terminal.' })
+        await assertMerchantsTerminalCompatible(terminalId, merchants, undefined, toVenueId)
+      } catch (error) {
+        blockers.push({
+          code: 'INVALID_MERCHANT',
+          message:
+            error instanceof ConflictError && error.code === ANGELPAY_LOGIN_EN_OTRO_NEGOCIO
+              ? error.message
+              : 'El comercio seleccionado no es compatible con esta terminal.',
+        })
       }
     }
   } else if (!blockers.some(b => b.code === 'NO_PAYMENT_CONFIG' || b.code === 'ORIGIN_HAS_NO_MERCHANT')) {
@@ -500,7 +506,7 @@ export async function migrateExecute(
   if (!merchants.length) throw new BadRequestError('Configura un comercio de cobro antes de migrar.')
 
   // Resolve and validate everything before entering the shared atomic move.
-  await assertMerchantsTerminalCompatible(terminalId, merchants)
+  await assertMerchantsTerminalCompatible(terminalId, merchants, undefined, toVenueId)
   const copyable = origin?.copyable
   const paymentConfig = copyable
     ? {
