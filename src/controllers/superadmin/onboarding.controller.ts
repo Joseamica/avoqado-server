@@ -27,6 +27,7 @@ import { isProviderCompatibleWithBrand } from '@/lib/providerDeviceCompatibility
 import { normalizeTerminalSerialNumber } from '@/utils/terminalSerial'
 import { resolveInitialVenueState } from '@/utils/venueOnboarding'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
 import { addDays } from 'date-fns'
 import crypto from 'crypto'
 import { parseLinkedWizard } from '@/services/document-requests/wizardInput'
@@ -175,6 +176,10 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
       if (!payload.organization.email) throw new BadRequestError('organization.email is required for new org')
       if (!payload.organization.phone) throw new BadRequestError('organization.phone is required for new org')
     }
+
+    // Un negocio nuevo todavía no tiene llaves de AngelPay: un comercio con llave es de otro negocio y la terminal no
+    // podría cobrar (IQ, 20-oct-2026). `''` no es el negocio de ninguna llave.
+    if (payload.pricing?.merchantAccountId) await assertAngelPayLoginsInVenue('', [payload.pricing.merchantAccountId])
 
     const selection = payload.documentRequest === undefined ? undefined : parseSelection(payload.documentRequest)
     const onboardingHash = selection ? wizardHash({ ...payload, documentRequest: selection }) : undefined
