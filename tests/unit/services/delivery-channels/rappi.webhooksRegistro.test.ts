@@ -11,6 +11,7 @@ import {
   azpDelJwt,
   planDeWebhooks,
   registradosDeRespuesta,
+  secretoDeLaIntegracion,
   type AccionWebhook,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.webhooksRegistro'
 
@@ -135,6 +136,38 @@ describe('planDeWebhooks', () => {
     ])
   })
 
+  // 🔴 El secreto de la integración es NUESTRO y Rappi no lo vuelve a mostrar ni tiene `reset-secret` para ese aviso. Si el
+  // archivo no lo tiene (POST con timeout que Rappi sí guardó, o un --salida distinto), el único remedio es volver a mandarlo.
+  it('🔴 sin el secreto de la integración guardado ⇒ CREAR_DE_INTEGRACION aunque la URL ya coincida (el POST es un upsert)', () => {
+    const { registrados, deIntegracion } = todoAlDia()
+
+    const plan = planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS, false)
+
+    expect(plan.filter(a => a.tipo !== 'NADA')).toEqual([
+      { tipo: 'CREAR_DE_INTEGRACION', evento: 'STORE_PROVISIONING_STATUS', url: urlDe('store-provisioning') },
+    ])
+    // los 10 de tienda no se tocan: su secreto lo devolvió Rappi y no depende de esto
+    expect(plan.filter(a => a.tipo === 'NADA')).toHaveLength(10)
+  })
+
+  it('con el secreto guardado y la misma URL ⇒ NADA (explícito y por omisión)', () => {
+    const { registrados, deIntegracion } = todoAlDia()
+
+    for (const plan of [
+      planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS, true),
+      planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS),
+    ]) {
+      expect(plan.every(a => a.tipo === 'NADA')).toBe(true)
+    }
+  })
+
+  it('sin el secreto guardado y sin nada registrado: sigue siendo UN solo CREAR_DE_INTEGRACION', () => {
+    const plan = planDeWebhooks([], [], BASE, TIENDAS, false)
+
+    expect(plan.filter(a => a.tipo === 'CREAR_DE_INTEGRACION')).toHaveLength(1)
+    expect(plan.filter(a => a.tipo === 'CREAR')).toHaveLength(10)
+  })
+
   it('nunca incluye STORE_PROVISIONING_STATUS entre los de tienda', () => {
     const plan = planDeWebhooks([], [], BASE, TIENDAS)
 
@@ -162,6 +195,48 @@ describe('planDeWebhooks', () => {
       const segmento = a.url.split('/').pop()
       expect(eventoDeLaRuta(segmento)).toBe(a.evento)
     }
+  })
+})
+
+describe('secretoDeLaIntegracion', () => {
+  const nuncaGenerar = () => {
+    throw new Error('no debía generar un secreto nuevo')
+  }
+
+  it('🔴 reutiliza el CONFIRMADO del archivo (un túnel nuevo no rota un secreto que el env del servidor ya tiene)', () => {
+    expect(secretoDeLaIntegracion({ STORE_PROVISIONING_STATUS: 'el-de-siempre', NEW_ORDER: 'otro' }, undefined, nuncaGenerar)).toEqual({
+      secreto: 'el-de-siempre',
+      origen: 'ARCHIVO',
+    })
+    // el confirmado manda sobre un pendiente viejo
+    expect(secretoDeLaIntegracion({ STORE_PROVISIONING_STATUS: 'el-de-siempre' }, 'pendiente-viejo', nuncaGenerar)).toEqual({
+      secreto: 'el-de-siempre',
+      origen: 'ARCHIVO',
+    })
+  })
+
+  it('🔴 sin confirmado pero con uno PENDIENTE (un POST que no se confirmó) reintenta con ESE mismo, sin inventar otro', () => {
+    expect(secretoDeLaIntegracion({ NEW_ORDER: 'abc' }, ' el-pendiente \n', nuncaGenerar)).toEqual({
+      secreto: 'el-pendiente',
+      origen: 'PENDIENTE',
+    })
+  })
+
+  it('sin nada genera uno NUEVO (aunque haya secretos de otros eventos)', () => {
+    expect(secretoDeLaIntegracion({ NEW_ORDER: 'abc' }, undefined, () => 'recien-hecho')).toEqual({
+      secreto: 'recien-hecho',
+      origen: 'NUEVO',
+    })
+    expect(secretoDeLaIntegracion({}, '   ', () => 'recien-hecho')).toEqual({ secreto: 'recien-hecho', origen: 'NUEVO' })
+  })
+
+  it('un valor vacío o que no es texto en el archivo cuenta como «sin secreto»; una lista usa el primero', () => {
+    expect(secretoDeLaIntegracion({ STORE_PROVISIONING_STATUS: '  ' }, undefined, () => 'x')).toEqual({ secreto: 'x', origen: 'NUEVO' })
+    expect(secretoDeLaIntegracion({ STORE_PROVISIONING_STATUS: 123 }, undefined, () => 'x')).toEqual({ secreto: 'x', origen: 'NUEVO' })
+    expect(secretoDeLaIntegracion({ STORE_PROVISIONING_STATUS: ['uno', 'dos'] }, undefined, nuncaGenerar)).toEqual({
+      secreto: 'uno',
+      origen: 'ARCHIVO',
+    })
   })
 })
 

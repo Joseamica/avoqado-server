@@ -13,9 +13,16 @@
  *
  * 🔴 Un evento que YA tiene algún registro (aunque sea de otra tienda) se completa con `add-stores`, jamás con
  * `POST webhook`: lo que Rappi hace al crear un evento que ya existe no está documentado.
+ *
+ * 🔴 EL AVISO DE LA INTEGRACIÓN NO SE DA POR BUENO SI EL ARCHIVO NO TIENE SU SECRETO. Ese secreto es NUESTRO (lo inventa el
+ * script y Rappi sólo lo usa para firmar) y, a diferencia de los de tienda, no hay forma de pedirle uno nuevo: el
+ * `reset-secret` de la doc es sólo de los avisos por tienda. Si el aviso ya está en Rappi con nuestra URL pero el archivo
+ * lo perdió (el POST venció a los 10 s después de que Rappi lo guardó, o se corrió con otro `--salida`), cada aviso de
+ * aprovisionamiento llegaría firmado con un secreto que nadie conoce y el servidor lo rechazaría con 401 para siempre.
+ * Como el POST de integración «crea o actualiza», el remedio es volver a mandarlo con el secreto del archivo.
  */
 import { RAPPI_EVENTS } from './rappi.adapter'
-import { RUTA_POR_EVENTO } from './rappi.webhookIngress'
+import { RUTA_POR_EVENTO, secretosDelEvento } from './rappi.webhookIngress'
 
 export type AccionWebhook =
   | { tipo: 'CREAR'; evento: string; url: string; tiendas: string[] }
@@ -35,12 +42,16 @@ export interface WebhookRegistrado {
  * @param deIntegracion   lo que Rappi tiene a nivel de la integración (sólo `STORE_PROVISIONING_STATUS`).
  * @param base            la base pública de nuestro servidor (con o sin barra final).
  * @param tiendas         las tiendas donde SÍ se puede escribir (`tiendasEscribiblesRappi()`).
+ * @param secretoDeIntegracionGuardado  ¿el archivo de secretos ya tiene, CONFIRMADO, el de `STORE_PROVISIONING_STATUS`
+ *                        (`secretoDeLaIntegracion(...).origen === 'ARCHIVO'`)? Si no, el aviso de la integración se manda otra
+ *                        vez aunque Rappi ya lo tenga con la misma URL.
  */
 export function planDeWebhooks(
   registrados: WebhookRegistrado[],
   deIntegracion: Array<{ evento: string; url: string }>,
   base: string,
   tiendas: string[],
+  secretoDeIntegracionGuardado = true,
 ): AccionWebhook[] {
   if (tiendas.length === 0) {
     throw new Error(
@@ -75,9 +86,9 @@ export function planDeWebhooks(
 
   const eventoIntegracion = RAPPI_EVENTS.STORE_PROVISIONING_STATUS
   const urlIntegracion = urlDe(Object.entries(RUTA_POR_EVENTO).find(([, e]) => e === eventoIntegracion)![0])
-  // El POST de integración «crea o actualiza»: una URL distinta se arregla con la misma llamada.
+  // El POST de integración «crea o actualiza»: una URL distinta, o un secreto que el archivo perdió, se arreglan con la misma llamada.
   acciones.push(
-    deIntegracion.some(w => w.evento === eventoIntegracion && w.url === urlIntegracion)
+    secretoDeIntegracionGuardado && deIntegracion.some(w => w.evento === eventoIntegracion && w.url === urlIntegracion)
       ? { tipo: 'NADA', evento: eventoIntegracion }
       : { tipo: 'CREAR_DE_INTEGRACION', evento: eventoIntegracion, url: urlIntegracion },
   )
@@ -132,4 +143,26 @@ export function azpDelJwt(token: string): string {
     )
   }
   return azp.trim()
+}
+
+/**
+ * El secreto del aviso de la integración, y de dónde sale:
+ *  · `ARCHIVO`   — el CONFIRMADO que ya está en el archivo de secretos. Reutilizarlo evita que un túnel nuevo rote en silencio
+ *                  un secreto que el env del servidor (`RAPPI_WEBHOOK_SECRETS`) todavía tiene. Si trae una lista (ventana de
+ *                  rotación a mano), se usa el primero: el ingreso acepta todos los de la lista.
+ *  · `PENDIENTE` — uno que una corrida anterior guardó ANTES de su POST y que Rappi no llegó a confirmar (falló o venció).
+ *                  Se reintenta con ESE mismo: si Rappi sí lo había guardado, queda igual; si no, ahora sí.
+ *  · `NUEVO`     — no hay ninguno: se genera.
+ * 🔴 Sólo `ARCHIVO` cuenta como «guardado» para `planDeWebhooks`. Un pendiente NO: si el POST falló y Rappi todavía tiene el
+ * aviso viejo con la misma URL, darlo por bueno dejaría a Rappi firmando con un secreto que nadie conoce.
+ */
+export function secretoDeLaIntegracion(
+  secretos: Record<string, unknown>,
+  pendiente: string | undefined,
+  generar: () => string,
+): { secreto: string; origen: 'ARCHIVO' | 'PENDIENTE' | 'NUEVO' } {
+  const confirmado = secretosDelEvento(JSON.stringify(secretos), RAPPI_EVENTS.STORE_PROVISIONING_STATUS)[0]
+  if (confirmado) return { secreto: confirmado, origen: 'ARCHIVO' }
+  if (pendiente?.trim()) return { secreto: pendiente.trim(), origen: 'PENDIENTE' }
+  return { secreto: generar(), origen: 'NUEVO' }
 }
