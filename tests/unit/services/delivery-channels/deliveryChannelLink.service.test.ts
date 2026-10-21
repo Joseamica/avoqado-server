@@ -9,6 +9,7 @@ import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 import { getAdapter } from '../../../../src/services/delivery-channels/core/statusDispatcher.service'
 import { adapterFor, hasAdapter } from '../../../../src/services/delivery-channels/core/adapterRegistry'
+import { rappiAdapter } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
 import { ConflictError, NotFoundError, ValidationError } from '../../../../src/errors/AppError'
 import { DeliveryChannelStatus, DeliveryProvider, OrderAcceptanceMode, Prisma } from '@prisma/client'
 import {
@@ -395,33 +396,31 @@ describe('deliveryChannelLink.service', () => {
   // pauseChannelLink — tenant isolation + adapter best-effort + ActivityLog
   // ============================================================
   describe('pauseChannelLink', () => {
-    it.each([DeliveryProvider.RAPPI, DeliveryProvider.DIDI_FOOD])(
-      'sin adaptador %s rechaza pausa, reanudación y snooze ANTES de escribir',
-      async provider => {
-        ;(hasAdapter as jest.Mock).mockReturnValue(false)
-        ;(getAdapter as jest.Mock).mockImplementation(() => {
-          throw new Error('No adapter')
-        })
-        for (const paused of [true, false]) {
-          ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
-            provider,
-            status: paused ? DeliveryChannelStatus.ACTIVE : DeliveryChannelStatus.PAUSED,
-            snoozedUntil: null,
-          })
-          ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
-          ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, provider })
-          await expect(pauseChannelLink('venue1', 'link1', paused)).rejects.toMatchObject({ statusCode: 409 })
-        }
+    // RAPPI ya no está aquí: tiene adaptador desde la fase 2 y su pausa va al proveedor (ver el bloque «Rappi» al final).
+    it.each([DeliveryProvider.DIDI_FOOD])('sin adaptador %s rechaza pausa, reanudación y snooze ANTES de escribir', async provider => {
+      ;(hasAdapter as jest.Mock).mockReturnValue(false)
+      ;(getAdapter as jest.Mock).mockImplementation(() => {
+        throw new Error('No adapter')
+      })
+      for (const paused of [true, false]) {
         ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
           provider,
-          status: DeliveryChannelStatus.ACTIVE,
+          status: paused ? DeliveryChannelStatus.ACTIVE : DeliveryChannelStatus.PAUSED,
           snoozedUntil: null,
         })
-        await expect(snoozeChannelLink('venue1', 'link1', 20)).rejects.toMatchObject({ statusCode: 409 })
-        expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
-        expect(logAction).not.toHaveBeenCalled()
-      },
-    )
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, provider })
+        await expect(pauseChannelLink('venue1', 'link1', paused)).rejects.toMatchObject({ statusCode: 409 })
+      }
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider,
+        status: DeliveryChannelStatus.ACTIVE,
+        snoozedUntil: null,
+      })
+      await expect(snoozeChannelLink('venue1', 'link1', 20)).rejects.toMatchObject({ statusCode: 409 })
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    })
 
     // ── Un botón que MIENTE (hallado el 2026-08-21) ───────────────────────────────────
     it('🔴 PAUSAR de verdad le avisa al proveedor DIRECTO, no sólo a nuestra base', async () => {
@@ -861,6 +860,182 @@ describe('deliveryChannelLink.service', () => {
 
       const select = (prisma.deliveryChannelLink.findMany as jest.Mock).mock.calls[0][0].select
       expect(Object.keys(select).sort()).toEqual(['id', 'provider', 'snoozedUntil', 'status'])
+    })
+  })
+
+  // ============================================================
+  // Rappi: adaptador registrado y SÓLO aceptación automática (F4 del founder)
+  // Estos casos usan el registro REAL (no el mock de arriba): lo que se prueba es el cableado de
+  // verdad — que el núcleo lee `soloAceptacionAutomatica` del adaptador, sin un `if` por proveedor.
+  // ============================================================
+  describe('Rappi: adaptador registrado y sólo aceptación automática', () => {
+    const registroReal = jest.requireActual('../../../../src/services/delivery-channels/core/adapterRegistry') as {
+      hasAdapter: (p: DeliveryProvider) => boolean
+      adapterFor: (p: DeliveryProvider) => unknown
+    }
+    const RAZON = rappiAdapter.soloAceptacionAutomatica as string
+
+    beforeEach(() => {
+      ;(hasAdapter as jest.Mock).mockImplementation(registroReal.hasAdapter)
+      ;(adapterFor as jest.Mock).mockImplementation(registroReal.adapterFor)
+    })
+    // Sólo se restaura el espía propio: `restoreAllMocks` también tocaría los `jest.fn()` del registro simulado.
+    let espia: jest.SpyInstance | undefined
+    afterEach(() => {
+      espia?.mockRestore()
+      espia = undefined
+    })
+
+    it('el texto que se le muestra al usuario viene del adaptador y explica por qué y qué hacer', () => {
+      expect(RAZON).toBe(
+        'Los pedidos de Rappi se aceptan solos: Rappi los cancela si no se aceptan en 4 a 6 minutos. Para dejar de recibirlos, pausa la tienda.',
+      )
+    })
+
+    describe('createChannelLink', () => {
+      it('🔴 crear un canal RAPPI en MANUAL ⇒ ValidationError con el texto del adaptador, y no escribe nada', async () => {
+        await expect(
+          createChannelLink('venue1', {
+            provider: DeliveryProvider.RAPPI,
+            externalLocationId: 'loc1',
+            orderAcceptanceMode: OrderAcceptanceMode.MANUAL,
+          }),
+        ).rejects.toThrow(new ValidationError(RAZON))
+
+        expect(prisma.deliveryChannelLink.create).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalled()
+      })
+
+      it('un canal RAPPI sin modo, o en AUTO, se crea en AUTO', async () => {
+        ;(prisma.deliveryChannelLink.create as jest.Mock).mockResolvedValue({ id: 'newlink1' })
+
+        await createChannelLink('venue1', { provider: DeliveryProvider.RAPPI, externalLocationId: 'loc1' })
+        await createChannelLink('venue1', {
+          provider: DeliveryProvider.RAPPI,
+          externalLocationId: 'loc2',
+          orderAcceptanceMode: OrderAcceptanceMode.AUTO,
+        })
+
+        const modos = (prisma.deliveryChannelLink.create as jest.Mock).mock.calls.map(c => c[0].data.orderAcceptanceMode)
+        expect(modos).toEqual([OrderAcceptanceMode.AUTO, OrderAcceptanceMode.AUTO])
+      })
+
+      it('regresión: un canal de UBER_EATS en MANUAL SÍ se crea (el rechazo es del adaptador que lo declara, no de todos)', async () => {
+        ;(prisma.deliveryChannelLink.create as jest.Mock).mockResolvedValue({ id: 'newlink1' })
+
+        await createChannelLink('venue1', {
+          provider: DeliveryProvider.UBER_EATS,
+          externalLocationId: 'store1',
+          orderAcceptanceMode: OrderAcceptanceMode.MANUAL,
+        })
+
+        expect((prisma.deliveryChannelLink.create as jest.Mock).mock.calls[0][0].data.orderAcceptanceMode).toBe(OrderAcceptanceMode.MANUAL)
+      })
+    })
+
+    describe('updateChannelLink', () => {
+      beforeEach(() => {
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+      })
+
+      it('🔴 cambiar un canal RAPPI a MANUAL ⇒ ValidationError con el texto del adaptador; el proveedor se lee de la fila, en la transacción', async () => {
+        ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ provider: DeliveryProvider.RAPPI })
+
+        await expect(updateChannelLink('venue1', 'link1', { orderAcceptanceMode: OrderAcceptanceMode.MANUAL }, 'staff1')).rejects.toThrow(
+          new ValidationError(RAZON),
+        )
+
+        // Tenant-scoped, y ANTES de cualquier escritura.
+        expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: 'link1', venueId: 'venue1' } }),
+        )
+        expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalled()
+      })
+
+      it('un canal de UBER_EATS SÍ cambia a MANUAL', async () => {
+        ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ provider: DeliveryProvider.UBER_EATS })
+
+        await updateChannelLink('venue1', 'link1', { orderAcceptanceMode: OrderAcceptanceMode.MANUAL }, 'staff1')
+
+        expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({
+            where: { id: 'link1', venueId: 'venue1' },
+            data: expect.objectContaining({ orderAcceptanceMode: OrderAcceptanceMode.MANUAL }),
+          }),
+        )
+      })
+
+      it('un canal RAPPI: poner AUTO, o no tocar el modo, sigue funcionando igual', async () => {
+        ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({ provider: DeliveryProvider.RAPPI })
+
+        await updateChannelLink('venue1', 'link1', { orderAcceptanceMode: OrderAcceptanceMode.AUTO }, 'staff1')
+        await updateChannelLink('venue1', 'link1', { autoSyncMenu: false }, 'staff1')
+
+        const datos = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data)
+        expect(datos[0]).toMatchObject({ orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+        expect(datos[1]).toMatchObject({ autoSyncMenu: false })
+        expect(datos[1]).not.toHaveProperty('orderAcceptanceMode')
+      })
+
+      it('un canal de OTRO negocio a MANUAL ⇒ 404, nunca el texto del proveedor (no se filtra qué proveedor es)', async () => {
+        ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue(null)
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+        await expect(updateChannelLink('venue-otro', 'link1', { orderAcceptanceMode: OrderAcceptanceMode.MANUAL })).rejects.toThrow(
+          NotFoundError,
+        )
+      })
+    })
+
+    describe('pauseChannelLink', () => {
+      it('🔴 pausar un canal RAPPI llama a setStoreStatus del adaptador (ya no da 409)', async () => {
+        const setStoreStatus = (espia = jest.spyOn(rappiAdapter, 'setStoreStatus').mockResolvedValue({ ok: true, status: 200, raw: '' }))
+        ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+          provider: DeliveryProvider.RAPPI,
+          status: DeliveryChannelStatus.ACTIVE,
+          snoozedUntil: null,
+        })
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+          ...baseLink,
+          provider: DeliveryProvider.RAPPI,
+          externalLocationId: '900105814',
+        })
+
+        const r = await pauseChannelLink('venue1', 'link1', true, 'staff1')
+
+        expect(setStoreStatus).toHaveBeenCalledWith(true, '900105814', expect.any(String))
+        expect(getAdapter).not.toHaveBeenCalled()
+        expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({ data: { status: DeliveryChannelStatus.PAUSED, snoozedUntil: null } }),
+        )
+        expect(r).not.toHaveProperty('webhookSecret')
+      })
+
+      it('🔴 si Rappi RECHAZA la pausa, el canal no queda pausado en nuestra base', async () => {
+        espia = jest
+          .spyOn(rappiAdapter, 'setStoreStatus')
+          .mockResolvedValue({ ok: false, status: 200, raw: 'SUSPENDED: tienda suspendida' })
+        ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+          provider: DeliveryProvider.RAPPI,
+          status: DeliveryChannelStatus.ACTIVE,
+          snoozedUntil: null,
+        })
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+          ...baseLink,
+          provider: DeliveryProvider.RAPPI,
+          externalLocationId: '900105814',
+        })
+
+        await expect(pauseChannelLink('venue1', 'link1', true)).rejects.toThrow(/no se pudo pausar/i)
+
+        // Dos escrituras: pausar y la reversión al estado previo.
+        const escrituras = (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls.map(c => c[0].data.status)
+        expect(escrituras).toEqual([DeliveryChannelStatus.PAUSED, DeliveryChannelStatus.ACTIVE])
+      })
     })
   })
 

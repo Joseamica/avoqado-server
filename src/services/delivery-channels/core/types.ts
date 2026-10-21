@@ -323,4 +323,16 @@ export interface DirectDeliveryAdapter {
    */
   mapHours?(horario: HorarioSemanal): unknown
   setStoreStatus?(paused: boolean, storeId: string): Promise<ActionResult>
+
+  /**
+   * 🔴 Si el proveedor sólo admite la aceptación AUTOMÁTICA de pedidos, aquí va la RAZÓN, en español y
+   * lista para mostrársela a quien intente poner el modo manual. Sin esta propiedad, el proveedor
+   * admite los dos modos.
+   *
+   * Existe para que el núcleo rechace el modo manual SIN nombrar a un proveedor: lee esta propiedad
+   * del adaptador, nunca compara contra un nombre (lo vigila el guardrail de `adapterRegistry.test.ts`).
+   * El caso: un proveedor cancela solo el pedido que no se acepta en pocos minutos, y un modo manual
+   * (la cocina decide desde el POS) lo dejaría correr hasta que el reloj del proveedor lo cancele.
+   */
+  readonly soloAceptacionAutomatica?: string
 }

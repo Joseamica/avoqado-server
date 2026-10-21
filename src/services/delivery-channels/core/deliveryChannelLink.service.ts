@@ -83,6 +83,19 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
   ) as unknown as DeliveryChannelLinkSafe[]
 }
 
+/**
+ * 🔴 Un proveedor que declara `soloAceptacionAutomatica` en su adaptador NO admite el modo manual: un
+ * `ValidationError` con la RAZÓN que el propio adaptador trae. El núcleo no sabe qué proveedor es ni por
+ * qué: lee la propiedad del contrato (nunca compara contra un nombre; lo vigila el guardrail de
+ * `adapterRegistry.test.ts`). Sin modo pedido, o en AUTO, no hay nada que rechazar.
+ */
+function exigirAceptacionPermitida(provider: DeliveryProvider, modo: OrderAcceptanceMode | undefined): void {
+  if (modo === undefined || modo === OrderAcceptanceMode.AUTO) return
+  if (!hasAdapter(provider)) return
+  const razon = adapterFor(provider).soloAceptacionAutomatica
+  if (razon) throw new ValidationError(razon)
+}
+
 export interface CreateChannelLinkInput {
   provider: DeliveryProvider
   externalLocationId: string
@@ -102,6 +115,8 @@ export async function createChannelLink(
   data: CreateChannelLinkInput,
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
+  exigirAceptacionPermitida(data.provider, data.orderAcceptanceMode)
+
   const webhookSecret = crypto.randomBytes(32).toString('hex')
 
   let link: DeliveryChannelLinkSafe
@@ -281,6 +296,15 @@ export async function updateChannelLink(
   // disponibilidad guardara sus agotados los borraba al escribir: el producto se quedaba agotado en Uber.
   // Lo mismo con Rappi: un PATCH leído antes de que guardara su lote lo borraba al escribir.
   const link = await prisma.$transaction(async tx => {
+    // 🔴 El proveedor se lee de la FILA, en la misma transacción que el update (el cliente nunca lo manda en un
+    // PATCH): un modo manual sobre un canal cuyo proveedor sólo admite el automático se rechaza ANTES de escribir.
+    // Con el modo ausente o en AUTO no se lee nada. Un canal de otro negocio no da fila: no se rechaza aquí y el
+    // `updateMany` de abajo lo resuelve como 404, sin revelar qué proveedor es.
+    if (data.orderAcceptanceMode !== undefined && data.orderAcceptanceMode !== OrderAcceptanceMode.AUTO) {
+      const fila = await tx.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { provider: true } })
+      if (fila) exigirAceptacionPermitida(fila.provider, data.orderAcceptanceMode)
+    }
+
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
     if (data.config !== undefined) {
       // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el

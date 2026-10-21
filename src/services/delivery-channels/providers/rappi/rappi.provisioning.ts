@@ -17,7 +17,7 @@
  * El webhook y el re-chequeo llaman a la MISMA `confirmarTienda`: idempotente, porque llegan los dos.
  */
 import crypto from 'crypto'
-import { DeliveryChannelStatus, DeliveryConnectIntent, Prisma } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryConnectIntent, OrderAcceptanceMode, Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -128,7 +128,9 @@ async function reclamar(intent: DeliveryConnectIntent, t: TiendaRappi): Promise<
           externalLocationId: t.storeId,
           externalAccountId: t.name,
           webhookSecret: crypto.randomBytes(32).toString('hex'),
-          orderAcceptanceMode: intent.orderAcceptanceMode,
+          // 🔴 SIEMPRE AUTO, aunque el intent diga otra cosa: Rappi no admite modo manual (cancela solo el
+          // pedido que no se acepta en 4–6 min). El intent se comparte con otros proveedores y puede traer MANUAL.
+          orderAcceptanceMode: OrderAcceptanceMode.AUTO,
           status: DeliveryChannelStatus.PENDING,
           ownerAuthorizedAt: new Date(),
           activatingIntentId: null,

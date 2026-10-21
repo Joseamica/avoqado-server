@@ -126,6 +126,14 @@ describe('activarSeleccion', () => {
     expect(JSON.stringify(p.$executeRaw.mock.calls)).not.toContain('creoVinculo')
   })
 
+  it('🔴 el vínculo que nace del aprovisionamiento queda en AUTO, aunque el intent traiga otro modo', async () => {
+    // Rappi cancela solo el pedido que no se acepta en 4–6 min: no hay modo manual. El intent de este
+    // caso parte de MANUAL a propósito; si el reclamo copiara el modo del intent, nacería MANUAL.
+    await activarSeleccion(sembrar({ orderAcceptanceMode: 'MANUAL' }), 'idt', [tienda('10')], deps())
+
+    expect(L.createMany.mock.calls[0][0].data[0].orderAcceptanceMode).toBe('AUTO')
+  })
+
   it('su PRIMERA escritura alarga el intent 24 h (sin eso el re-chequeo lo vería EXPIRED y borraría el token)', async () => {
     await activarSeleccion(sembrar(), 'idt', [tienda('10')], deps())
     expect(I.updateMany.mock.invocationCallOrder[0]).toBeLessThan(L.createMany.mock.invocationCallOrder[0])

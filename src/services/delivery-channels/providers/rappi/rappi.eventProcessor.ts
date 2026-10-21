@@ -15,7 +15,7 @@
  *     el aviso y nada más; la venta nace cuando Rappi libera el `NEW_ORDER` real. (Uber sí
  *     ingiere sus programados porque SÍ manda los montos — la divergencia es de ellos.)
  */
-import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, OrderAcceptanceMode, Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -279,55 +279,55 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     return { outcome: 'FAILED', error: msg }
   }
 
-  // 🔴 ACEPTAR PRIMERO, con el reloj de 4–6 min corriendo — sólo en modo AUTO. En MANUAL la
-  // cocina decide desde el POS, y la venta entra PENDING (eso lo resuelve la ingesta según el
-  // modo del canal). El orden es el mismo que Uber y por la misma razón: lo que no se puede
-  // recuperar es el plazo. Si la ingesta falla después, el evento queda FAILED para
-  // reconciliar; al revés, un pedido perfectamente ingerido se cancela solo.
-  let accepted = false
-  if (evento.channelLink.orderAcceptanceMode === 'AUTO') {
-    const detail = (evento.payload as RappiOrderPayload).order_detail ?? {}
-    const storeId = identidad.storeId ?? evento.channelLink.externalLocationId
-    let r
-    try {
-      r = await aceptar(normalizado.externalId, storeId, tiempoDeCoccion(detail))
-    } catch (err) {
-      const msg = err instanceof Error ? err.message : String(err)
-      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT: ${msg.slice(0, 400)}`)
-      logger.error('🚨 [Rappi] aceptar el pedido lanzó — queda FAILED para reconciliar', {
-        eventRowId,
-        orderId: normalizado.externalId,
-        error: msg,
-      })
-      return { outcome: 'FAILED', accepted: false, error: msg }
-    }
-    if (!r.ok) {
-      await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT_${r.status}: ${r.raw.slice(0, 300)}`)
-      logger.error('🚨 [Rappi] no se pudo ACEPTAR el pedido — el reloj lo va a cancelar', {
-        eventRowId,
-        orderId: normalizado.externalId,
-        status: r.status,
-      })
-      return { outcome: 'FAILED', error: `ACCEPT_${r.status}` }
-    }
-    accepted = true
+  // 🔴 ACEPTAR PRIMERO, con el reloj de 4–6 min corriendo — SIEMPRE, sin mirar el modo del vínculo.
+  // Rappi no admite modo manual: cancela solo el pedido que no se acepta en ese plazo, así que una
+  // cocina que «decide desde el POS» lo dejaría vencer. Un vínculo que haya quedado en MANUAL de antes
+  // (la migración los pasa a AUTO, pero un despliegue a medias no debe costar pedidos) se trata como AUTO.
+  // El orden es el mismo que Uber y por la misma razón: lo que no se puede recuperar es el plazo. Si
+  // la ingesta falla después, el evento queda FAILED para reconciliar; al revés, un pedido
+  // perfectamente ingerido se cancela solo.
+  const detail = (evento.payload as RappiOrderPayload).order_detail ?? {}
+  const storeId = identidad.storeId ?? evento.channelLink.externalLocationId
+  let r
+  try {
+    r = await aceptar(normalizado.externalId, storeId, tiempoDeCoccion(detail))
+  } catch (err) {
+    const msg = err instanceof Error ? err.message : String(err)
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT: ${msg.slice(0, 400)}`)
+    logger.error('🚨 [Rappi] aceptar el pedido lanzó — queda FAILED para reconciliar', {
+      eventRowId,
+      orderId: normalizado.externalId,
+      error: msg,
+    })
+    return { outcome: 'FAILED', accepted: false, error: msg }
+  }
+  if (!r.ok) {
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT_${r.status}: ${r.raw.slice(0, 300)}`)
+    logger.error('🚨 [Rappi] no se pudo ACEPTAR el pedido — el reloj lo va a cancelar', {
+      eventRowId,
+      orderId: normalizado.externalId,
+      status: r.status,
+    })
+    return { outcome: 'FAILED', error: `ACCEPT_${r.status}` }
   }
 
   try {
-    const r = await ingestDeliveryOrder(normalizado, evento.channelLink)
+    // 🔴 La ingesta decide PENDING/CONFIRMED y el ticket de cocina según el modo del vínculo que recibe.
+    // Como el pedido YA se aceptó en Rappi, se le entrega el vínculo en AUTO aunque la fila diga otra cosa.
+    const r = await ingestDeliveryOrder(normalizado, { ...evento.channelLink, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
     await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, r.order.id)
-    return { outcome: 'PROCESSED', orderId: r.order.id, accepted }
+    return { outcome: 'PROCESSED', orderId: r.order.id, accepted: true }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
-    // Si ya se aceptó, el dinero del cliente está comprometido y la venta NO quedó
+    // El pedido ya se aceptó: el dinero del cliente está comprometido y la venta NO quedó
     // registrada: FAILED visible para reconciliar con el comercio, jamás silencio.
     await markEventResult(eventRowId, DeliveryOrderEventStatus.FAILED, undefined, `INGEST: ${msg.slice(0, 400)}`)
     logger.error('🚨 [Rappi] pedido ACEPTADO pero la ingesta falló — reconciliar a mano', {
       eventRowId,
       orderId: normalizado.externalId,
-      accepted,
+      accepted: true,
       error: msg,
     })
-    return { outcome: 'FAILED', error: msg, accepted }
+    return { outcome: 'FAILED', error: msg, accepted: true }
   }
 }

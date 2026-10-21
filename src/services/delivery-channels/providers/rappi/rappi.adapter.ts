@@ -1,21 +1,21 @@
 /**
  * Adaptador de Rappi — los CINCO métodos obligatorios del contrato directo.
  *
- * 🔴 ESTE ADAPTADOR NO ESTÁ REGISTRADO TODAVÍA, y es a propósito.
+ * 🔴 Este adaptador YA ESTÁ REGISTRADO en `adapterRegistry` (fase 2, Tarea 5).
  *
- * `adapterRegistry` es la única fuente de verdad de "¿ya hay a quién delegarle?", y el
- * dashboard pinta `integrationReady` a partir de él. Registrarlo hoy diría que Rappi funciona
- * cuando lo único que existe es lo que se puede escribir SIN sandbox: traducir lo que entra.
- * No hay forma de aceptar un pedido, publicar un menú ni prender la tienda, porque no hay
- * credenciales con las que probar una sola llamada de salida.
+ * `adapterRegistry` es la única fuente de verdad de "¿ya hay a quién delegarle?", y el dashboard
+ * pinta `integrationReady` a partir de él. Con el registro, un canal RAPPI deja de verse como "no
+ * lista": se puede pausar y reanudar la tienda desde Avoqado, y el menú, los agotados y el horario
+ * viajan con las mismas llamadas que Uber.
  *
- * Registrarlo es UNA línea en `adapterRegistry.ts` el día que Rappi conteste el alta. Hasta
- * entonces, un canal RAPPI se ve como "no lista" — que es la verdad.
+ * Rappi cancela solo el pedido que no se acepta en 4–6 minutos, por eso este adaptador declara
+ * `soloAceptacionAutomatica`: no hay modo manual (ver la propiedad, más abajo).
  *
  * Lo que sí está aquí es lo caro y lo verificable: la firma (algoritmo distinto al de Uber),
  * la traducción de los 11 eventos, el mapeo del pedido con su red de cuadre, y las llamadas
  * de salida escritas contra los endpoints publicados — TODAS pasan por el candado de tiendas
- * de `rappi.http`, así que con la lista vacía ninguna puede tocar un comercio real.
+ * de `rappi.http`, así que una tienda fuera de la lista de escritura del ambiente (o con la lista
+ * vacía) no la puede tocar ninguna.
  *
  * 🔴 Las capacidades usan `import()` PEREZOSO de `rappi.client` a propósito: ese módulo lee
  * `@/config/env`, que valida y hace `process.exit` al cargarse — un import normal mataría a
@@ -48,6 +48,14 @@ export const RAPPI_EVENTS = {
 
 export const rappiAdapter = {
   provider: 'RAPPI' as DeliveryProvider,
+
+  /**
+   * 🔴 Rappi no admite el modo MANUAL: cancela el pedido que no se acepta en 4 a 6 minutos, así que una
+   * cocina que "decide desde el POS" lo dejaría vencer. El núcleo lee este texto (nunca compara contra
+   * el nombre del proveedor) y rechaza el MANUAL al crear o editar un canal con él.
+   */
+  soloAceptacionAutomatica:
+    'Los pedidos de Rappi se aceptan solos: Rappi los cancela si no se aceptan en 4 a 6 minutos. Para dejar de recibirlos, pausa la tienda.',
 
   /**
    * HMAC-SHA256 sobre `timestamp.payload` — NO sobre el body crudo como Uber.

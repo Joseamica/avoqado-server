@@ -100,16 +100,19 @@ describe('processRappiEvent', () => {
     expect(aceptarOk).toHaveBeenCalledWith('392625', '900105814', 10)
   })
 
-  it('en MANUAL NO acepta: la cocina decide desde el POS y la venta entra igual', async () => {
+  it('🔴 un vínculo viejo en MANUAL: igual acepta en Rappi y la ingesta recibe el vínculo en AUTO', async () => {
+    // Rappi cancela solo el pedido que no se acepta en 4–6 min, así que no hay modo manual: un vínculo
+    // que haya quedado en MANUAL (de antes de la fase 2) se trata como AUTO — se acepta, y la venta entra
+    // confirmada (la ingesta decide PENDING/CONFIRMED y la cocina según el modo del vínculo que recibe).
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
       fila({ channelLink: { ...fila().channelLink, orderAcceptanceMode: 'MANUAL' } }),
     )
 
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
-    expect(aceptarOk).not.toHaveBeenCalled()
-    expect(mockIngest).toHaveBeenCalled()
-    expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: false })
+    expect(aceptarOk).toHaveBeenCalledWith('392625', '900105814', 10)
+    expect(mockIngest).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ id: 'link1', orderAcceptanceMode: 'AUTO' }))
+    expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
   })
 
   it('si aceptar FALLA no se ingiere: sin el sí de Rappi el pedido no es nuestro', async () => {
