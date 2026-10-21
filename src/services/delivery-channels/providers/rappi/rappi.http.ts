@@ -15,6 +15,10 @@
  * `services.mxgrability.rappi.com`. No hay forma de pedir el token de pruebas contra el host de
  * producción: se resuelven del mismo `ambiente` o no se resuelven.
  *
+ * 🔴 DOS DOMINIOS (medido el 20-oct-2026): la API (`/api/v2/restaurants-integrations-public-api`,
+ * `/api/rest-ops-utils`) sigue en el host clásico de `hostRappi`; el LOGIN se mudó al dominio nuevo de
+ * `hostDeLoginRappi` y su ruta lleva barra final (sin ella, 307).
+ *
  * Módulo PURO: `fetchImpl`, el token y la lista de tiendas se inyectan. No lee `@/config/env`
  * (importarlo hace `process.exit` y mata workers de Jest — regla del repo).
  */
@@ -48,6 +52,24 @@ export function hostRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
   if (!host)
     throw new Error(`[Rappi] no hay host de producción para el país "${pais}". Países válidos: ${Object.keys(HOSTS_PRODUCCION).join(', ')}`)
   return host
+}
+
+const HOST_LOGIN_SANDBOX = 'https://api.dev.rappi.com'
+const HOST_LOGIN_PRODUCCION_MX = 'https://api.rappi.com.mx'
+
+/**
+ * El dominio NUEVO de Rappi: el del login (`/restaurants/auth/v1/token/login/{superficie}/`) y el del self-onboarding.
+ * La API de pedidos, menú y Utils NO va aquí: sigue en `hostRappi`. Sólo México está publicado en producción; otro país
+ * LANZA en vez de caer al de México, por la misma razón que `hostRappi`. Sandbox lo ignora.
+ */
+export function hostDeLoginRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
+  if (ambiente === 'SANDBOX') return HOST_LOGIN_SANDBOX
+  if (pais.trim().toUpperCase() !== 'MX') {
+    throw new Error(
+      `[Rappi] el dominio nuevo (login y self-onboarding) sólo está publicado para México en producción; país "${pais}" no soportado`,
+    )
+  }
+  return HOST_LOGIN_PRODUCCION_MX
 }
 
 export class RappiEscrituraBloqueadaError extends Error {

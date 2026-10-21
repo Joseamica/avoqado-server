@@ -8,6 +8,7 @@
 import {
   assertTiendaEscribible,
   crearEspaciadorDeSondeo,
+  hostDeLoginRappi,
   hostRappi,
   INTERVALO_SONDEO_MS,
   llamarRappi,
@@ -44,6 +45,32 @@ describe('hostRappi', () => {
   // sería "no encuentra la tienda" sin ninguna pista.
   it('🔴 un país desconocido LANZA en vez de caer a México', () => {
     expect(() => hostRappi('PRODUCTION', 'XX')).toThrow(/país/i)
+  })
+})
+
+// T5 (20-oct): el login de Rappi se mudó al dominio nuevo; la API sigue en el clásico (`hostRappi`).
+describe('hostDeLoginRappi', () => {
+  it('🔴 sandbox: el dominio nuevo, sin importar el país', () => {
+    expect(hostDeLoginRappi('SANDBOX')).toBe('https://api.dev.rappi.com')
+    expect(hostDeLoginRappi('SANDBOX', 'MX')).toBe('https://api.dev.rappi.com')
+    expect(hostDeLoginRappi('SANDBOX', 'CO')).toBe('https://api.dev.rappi.com')
+  })
+
+  it('producción México: el publicado (api.rappi.com.mx), con o sin país explícito y sin importar mayúsculas', () => {
+    expect(hostDeLoginRappi('PRODUCTION')).toBe('https://api.rappi.com.mx')
+    expect(hostDeLoginRappi('PRODUCTION', 'MX')).toBe('https://api.rappi.com.mx')
+    expect(hostDeLoginRappi('PRODUCTION', ' mx ')).toBe('https://api.rappi.com.mx')
+  })
+
+  // Sólo México tiene el dominio nuevo verificado: caer a México mandaría el login de otro país al host equivocado.
+  it('🔴 producción con otro país LANZA (sólo México está soportado)', () => {
+    expect(() => hostDeLoginRappi('PRODUCTION', 'CO')).toThrow(/país.*"CO"/i)
+    expect(() => hostDeLoginRappi('PRODUCTION', 'XX')).toThrow(/país/i)
+  })
+
+  it('el dominio nuevo es sólo del login: la API sigue en el host clásico', () => {
+    expect(hostRappi('SANDBOX', 'MX')).toBe('https://microservices.dev.rappi.com')
+    expect(hostRappi('PRODUCTION', 'MX')).toBe('https://services.mxgrability.rappi.com')
   })
 })
 

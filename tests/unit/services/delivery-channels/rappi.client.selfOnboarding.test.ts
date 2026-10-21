@@ -41,6 +41,7 @@ import {
   canjearCodigoRappi,
   clientIdRappi,
   preflightSelfOnboardingRappi,
+  rappiApi,
   redirectUriRappi,
   suscribirTiendaAEventos,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
@@ -168,11 +169,79 @@ describe('rappi.client — self-onboarding', () => {
     expect(llamadas).toHaveLength(0)
   })
 
-  it('el host de México no se inventa: en PRODUCTION sin RAPPI_SELF_ONBOARDING_API_BASE se niega', () => {
+  // T5 (20-oct): Rappi ya publicó el host de México para el self-onboarding; la variable sólo lo sustituye.
+  it('el host del self-onboarding en PRODUCTION es el publicado (https://api.rappi.com.mx) si no hay variable', () => {
     mockEnv.RAPPI_ENVIRONMENT = 'PRODUCTION'
-    expect(() => apiBaseSelfOnboarding()).toThrow(/RAPPI_SELF_ONBOARDING_API_BASE/)
+    expect(apiBaseSelfOnboarding()).toBe('https://api.rappi.com.mx')
     mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = 'https://host.ejemplo.test'
     expect(apiBaseSelfOnboarding()).toBe('https://host.ejemplo.test')
+  })
+
+  it('el host del self-onboarding en SANDBOX sigue siendo api.dev.rappi.com', () => {
+    expect(apiBaseSelfOnboarding()).toBe('https://api.dev.rappi.com')
+  })
+
+  it('🔴 PRODUCTION con un país que no es México y sin variable: se niega (no cae al host de México)', () => {
+    mockEnv.RAPPI_ENVIRONMENT = 'PRODUCTION'
+    mockEnv.RAPPI_COUNTRY = 'CO'
+    expect(() => apiBaseSelfOnboarding()).toThrow(/país/i)
+  })
+
+  // T5 (20-oct): el login se mudó al dominio nuevo y exige la barra final (sin ella: 307 a la ruta con `/`, que un POST
+  // no sigue). La API NO se mudó: sigue en el host clásico.
+  describe('hosts de Rappi: login en el dominio nuevo, API en el clásico', () => {
+    /** TODAS las URLs que salen (login incluido), en orden. El login contesta el token; lo demás, 200. */
+    function capturarFetch(): string[] {
+      const urls: string[] = []
+      global.fetch = jest.fn(async (url: string | URL | Request) => {
+        urls.push(String(url))
+        return String(url).includes('/auth/v1/token/login/') ? json(200, { access_token: 'tok', expires_in: 3600 }) : json(200, {})
+      }) as unknown as typeof fetch
+      return urls
+    }
+
+    it('🔴 el login va al dominio nuevo y CON barra final', async () => {
+      const urls = capturarFetch()
+      await rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/stores-pa' })
+      expect(urls[0]).toBe('https://api.dev.rappi.com/restaurants/auth/v1/token/login/integrations/')
+      expect(urls[1]).toMatch(/^https:\/\/microservices\.dev\.rappi\.com\/api\/v2\//)
+      expect(urls).toHaveLength(2)
+    })
+
+    it('la API de Utils pide su propio login (…/token/login/utils/) y llama en el host clásico', async () => {
+      const urls = capturarFetch()
+      await rappiApi({ superficie: 'utils', metodo: 'GET', ruta: '/api/rest-ops-utils/schedules' })
+      expect(urls).toEqual([
+        'https://api.dev.rappi.com/restaurants/auth/v1/token/login/utils/',
+        'https://microservices.dev.rappi.com/api/rest-ops-utils/schedules',
+      ])
+    })
+
+    it('PRODUCTION México: login en api.rappi.com.mx (con barra) y la API en el host clásico de México', async () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+        RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+      })
+      const urls = capturarFetch()
+      await rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders' })
+      expect(urls).toEqual([
+        'https://api.rappi.com.mx/restaurants/auth/v1/token/login/integrations/',
+        'https://services.mxgrability.rappi.com/api/v2/restaurants-integrations-public-api/orders',
+      ])
+    })
+
+    it('🔴 PRODUCTION con otro país: el login se niega y NO sale ninguna petición', async () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_COUNTRY: 'CO',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+        RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+      })
+      const urls = capturarFetch()
+      await expect(rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders' })).rejects.toThrow(/país/i)
+      expect(urls).toHaveLength(0)
+    })
   })
 
   // H11: la lista esperada va escrita a MANO, no derivada del código: si alguien quita un webhook del filtro de
@@ -278,21 +347,33 @@ describe('rappi.client — self-onboarding', () => {
       expect(() => preflightSelfOnboardingRappi()).toThrow(/Faltan credenciales de Rappi/)
     })
 
+    it('PRODUCTION México sin RAPPI_SELF_ONBOARDING_API_BASE: el preflight pasa (el host ya está publicado)', () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+        RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+        RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
+      })
+      expect(preflightSelfOnboardingRappi()).toBe('https://api.ejemplo.test')
+    })
+
     it.each([
       ['sin RAPPI_WEBHOOK_BASE_URL', { RAPPI_WEBHOOK_BASE_URL: undefined }, /Falta RAPPI_WEBHOOK_BASE_URL/],
       ['RAPPI_WEBHOOK_BASE_URL inválida', { RAPPI_WEBHOOK_BASE_URL: 'api.ejemplo.test' }, /RAPPI_WEBHOOK_BASE_URL.*http\(s\)/],
       ['sin RAPPI_OAUTH_REDIRECT_BASE', { RAPPI_OAUTH_REDIRECT_BASE: undefined }, /Falta RAPPI_OAUTH_REDIRECT_BASE/],
       ['host del self-onboarding inválido', { RAPPI_SELF_ONBOARDING_API_BASE: 'host' }, /RAPPI_SELF_ONBOARDING_API_BASE/],
       [
-        'PRODUCTION sin host del self-onboarding',
+        // T5: ya no hay host que inventar en México, pero otro país sigue sin tener uno verificado.
+        'PRODUCTION de otro país sin host del self-onboarding',
         // Con las tres llaves de PRODUCTION puestas: el preflight las pide primero y aquí se prueba el host.
         {
           RAPPI_ENVIRONMENT: 'PRODUCTION',
+          RAPPI_COUNTRY: 'CO',
           RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
           RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
           RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
         },
-        /Falta RAPPI_SELF_ONBOARDING_API_BASE/,
+        /país/i,
       ],
       // H7: Rappi acepta la suscripción aunque nos falte el secreto, y luego nuestro endpoint le contesta 401 a cada
       // pedido — la tienda queda «conectada» y sorda. Se niega ANTES de crear la intención.

@@ -7,7 +7,8 @@
  * conectan las piezas. Un `if` de negocio en este archivo está en el lugar equivocado.
  *
  * ⚠️ RUTAS CON SUPUESTOS ABIERTOS (sin sandbox no se pueden confirmar):
- *   · El login se documenta como `/{host}/restaurants/auth/v1/token/login/{superficie}`.
+ *   · El login es `{hostDeLoginRappi}/restaurants/auth/v1/token/login/{superficie}/` (dominio nuevo, CON barra final:
+ *     medido en DEV el 20-oct). La API sigue en el host clásico (`hostRappi`).
  *   · La superficie `integrations` usa `/api/v2/restaurants-integrations-public-api/…` —
  *     ésa sí está publicada endpoint por endpoint.
  *   · Los prefijos de `utils` y `finance` NO están publicados completos: esas superficies
@@ -17,6 +18,7 @@ import { env } from '@/config/env'
 import logger from '@/config/logger'
 
 import {
+  hostDeLoginRappi,
   llamarRappi,
   RappiEscrituraBloqueadaError,
   TIMEOUT_RAPPI_MS,
@@ -74,8 +76,8 @@ export function tiendasEscribiblesRappi(): string[] {
  */
 async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_token: string; expires_in?: number }> {
   const { clientId, clientSecret } = credenciales()
-  const { hostRappi } = await import('./rappi.http')
-  const url = `${hostRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)}/restaurants/auth/v1/token/login/${superficie}`
+  // 🔴 Dominio nuevo y barra FINAL: sin ella Rappi contesta 307 y un POST no sigue la redirección (20-oct).
+  const url = `${hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)}/restaurants/auth/v1/token/login/${superficie}/`
 
   const r = await fetch(url, {
     method: 'POST',
@@ -238,8 +240,8 @@ function baseHttpValida(nombre: string, valor: string): string {
 
 export function apiBaseSelfOnboarding(): string {
   if (env.RAPPI_SELF_ONBOARDING_API_BASE) return baseHttpValida('RAPPI_SELF_ONBOARDING_API_BASE', env.RAPPI_SELF_ONBOARDING_API_BASE)
-  if (getRappiEnvironment() === 'SANDBOX') return 'https://api.dev.rappi.com'
-  throw new Error('Falta RAPPI_SELF_ONBOARDING_API_BASE: Rappi no publica el host de México para el self-onboarding (preguntar al TAM).')
+  // Ya publicado (docs de Rappi, «dominios nuevos»): DEV `api.dev.rappi.com`, México `api.rappi.com.mx`. La variable sólo lo sustituye.
+  return hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)
 }
 
 const RUTA_CALLBACK = '/api/v1/delivery/rappi/oauth/callback'
