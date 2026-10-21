@@ -1,0 +1,135 @@
+/**
+ * Registro de los avisos (webhooks) de Rappi — la parte PURA: qué hay que crear o cambiar.
+ *
+ * Lo ejecuta `scripts/rappi-registrar-webhooks.ts`; aquí sólo se decide. Sin red, sin `@/config/env`.
+ *
+ * 🔴 EL PLAN TIENE QUE SER IDEMPOTENTE: correr el script dos veces deja todo en NADA. Rappi no tiene un
+ * «upsert» para los avisos por tienda (`POST webhook` crea, `change-url` cambia, `add-stores` suma), así que
+ * elegir mal la llamada duplica o pisa lo registrado.
+ *
+ * 🔴 NUNCA UN `CREAR` SIN TIENDAS: un webhook sin `stores` aplica a TODAS las tiendas del cliente autenticado
+ * (doc de Rappi). Por eso `planDeWebhooks` LANZA si no recibe ninguna, en vez de devolver un plan que el candado
+ * de escritura tendría que atajar.
+ *
+ * 🔴 Un evento que YA tiene algún registro (aunque sea de otra tienda) se completa con `add-stores`, jamás con
+ * `POST webhook`: lo que Rappi hace al crear un evento que ya existe no está documentado.
+ */
+import { RAPPI_EVENTS } from './rappi.adapter'
+import { RUTA_POR_EVENTO } from './rappi.webhookIngress'
+
+export type AccionWebhook =
+  | { tipo: 'CREAR'; evento: string; url: string; tiendas: string[] }
+  | { tipo: 'CAMBIAR_URL'; evento: string; url: string; tiendas: string[] }
+  | { tipo: 'AGREGAR_TIENDAS'; evento: string; url: string; tiendas: string[] }
+  | { tipo: 'CREAR_DE_INTEGRACION'; evento: 'STORE_PROVISIONING_STATUS'; url: string }
+  | { tipo: 'NADA'; evento: string }
+
+export interface WebhookRegistrado {
+  evento: string
+  url: string
+  tiendas: string[]
+}
+
+/**
+ * @param registrados     lo que Rappi tiene hoy por tienda (una fila por evento y URL).
+ * @param deIntegracion   lo que Rappi tiene a nivel de la integración (sólo `STORE_PROVISIONING_STATUS`).
+ * @param base            la base pública de nuestro servidor (con o sin barra final).
+ * @param tiendas         las tiendas donde SÍ se puede escribir (`tiendasEscribiblesRappi()`).
+ */
+export function planDeWebhooks(
+  registrados: WebhookRegistrado[],
+  deIntegracion: Array<{ evento: string; url: string }>,
+  base: string,
+  tiendas: string[],
+): AccionWebhook[] {
+  if (tiendas.length === 0) {
+    throw new Error(
+      'No hay tiendas donde escribir (RAPPI_WRITABLE_STORE_IDS_* vacía): un aviso sin tiendas aplicaría a TODAS las de Rappi.',
+    )
+  }
+
+  const raiz = base.trim().replace(/\/+$/, '')
+  const urlDe = (segmento: string) => `${raiz}/api/v1/webhooks/delivery/rappi/${segmento}`
+  const acciones: AccionWebhook[] = []
+
+  for (const [segmento, evento] of Object.entries(RUTA_POR_EVENTO)) {
+    // El aviso de aprovisionamiento es por INTEGRACIÓN, no por tienda: va aparte, al final.
+    if (evento === RAPPI_EVENTS.STORE_PROVISIONING_STATUS) continue
+
+    const url = urlDe(segmento)
+    const delEvento = registrados.filter(r => r.evento === evento)
+    if (delEvento.length === 0) {
+      acciones.push({ tipo: 'CREAR', evento, url, tiendas: [...tiendas] })
+      continue
+    }
+
+    const urlDeCadaTienda = new Map<string, string>()
+    for (const r of delEvento) for (const t of r.tiendas) urlDeCadaTienda.set(t, r.url)
+
+    const cambiar = tiendas.filter(t => urlDeCadaTienda.has(t) && urlDeCadaTienda.get(t) !== url)
+    const agregar = tiendas.filter(t => !urlDeCadaTienda.has(t))
+    if (cambiar.length) acciones.push({ tipo: 'CAMBIAR_URL', evento, url, tiendas: cambiar })
+    if (agregar.length) acciones.push({ tipo: 'AGREGAR_TIENDAS', evento, url, tiendas: agregar })
+    if (!cambiar.length && !agregar.length) acciones.push({ tipo: 'NADA', evento })
+  }
+
+  const eventoIntegracion = RAPPI_EVENTS.STORE_PROVISIONING_STATUS
+  const urlIntegracion = urlDe(Object.entries(RUTA_POR_EVENTO).find(([, e]) => e === eventoIntegracion)![0])
+  // El POST de integración «crea o actualiza»: una URL distinta se arregla con la misma llamada.
+  acciones.push(
+    deIntegracion.some(w => w.evento === eventoIntegracion && w.url === urlIntegracion)
+      ? { tipo: 'NADA', evento: eventoIntegracion }
+      : { tipo: 'CREAR_DE_INTEGRACION', evento: eventoIntegracion, url: urlIntegracion },
+  )
+  return acciones
+}
+
+/**
+ * Lee la respuesta de `GET webhook/{evento}` y la deja en la forma del plan (una fila por URL).
+ *
+ * Tolerante a propósito: sin evento registrado Rappi puede contestar `[]` o `{event, stores: []}`, y con evento una
+ * lista o un objeto. Otros eventos dentro de la respuesta se ignoran. Una tienda en `DISABLE` SIGUE registrada
+ * (volver a agregarla no es lo que se quiere), pero se cuenta para que el script avise: es un aviso que no llega.
+ * 🔴 Nunca lanza con un cuerpo raro (un error de parseo copiaría un pedazo del cuerpo a los logs).
+ */
+export function registradosDeRespuesta(evento: string, cuerpo: unknown): { registrados: WebhookRegistrado[]; deshabilitadas: number } {
+  const filas = Array.isArray(cuerpo) ? cuerpo : [cuerpo]
+  const porUrl = new Map<string, string[]>()
+  let deshabilitadas = 0
+
+  for (const fila of filas) {
+    if (!fila || typeof fila !== 'object') continue
+    const { event, stores } = fila as { event?: unknown; stores?: unknown }
+    if (event !== undefined && event !== evento) continue
+    if (!Array.isArray(stores)) continue
+    for (const t of stores) {
+      if (!t || typeof t !== 'object') continue
+      const { store_id: id, url, state } = t as { store_id?: unknown; url?: unknown; state?: unknown }
+      if ((typeof id !== 'string' && typeof id !== 'number') || typeof url !== 'string') continue
+      if (state === 'DISABLE') deshabilitadas++
+      porUrl.set(url, [...(porUrl.get(url) ?? []), String(id)])
+    }
+  }
+  return { registrados: [...porUrl].map(([url, tiendas]) => ({ evento, url, tiendas })), deshabilitadas }
+}
+
+/**
+ * El `azp` del JWT del integrador = su `clientId` (la ruta `/clients/{clientId}/webhooks` lo pide). Se decodifica el
+ * payload SIN verificar la firma: sólo leemos un dato que Rappi mismo nos acaba de entregar. Los errores no copian el
+ * token ni su contenido.
+ */
+export function azpDelJwt(token: string): string {
+  let claims: unknown
+  try {
+    claims = JSON.parse(Buffer.from(token.split('.')[1] ?? '', 'base64url').toString('utf8'))
+  } catch {
+    throw new Error('El token de Rappi no es un JWT legible: no se pudo sacar el `azp` (el clientId de la integración).')
+  }
+  const azp = (claims as { azp?: unknown } | null)?.azp
+  if (typeof azp !== 'string' || !azp.trim()) {
+    throw new Error(
+      'El token de Rappi no trae el claim `azp` (el clientId de la integración): sin él no se puede registrar el aviso de la integración.',
+    )
+  }
+  return azp.trim()
+}
