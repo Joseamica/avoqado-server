@@ -75,6 +75,7 @@ export function whereDevolucionConOrigen(paymentId: string): Prisma.PaymentWhere
  * se moviera dinero real, y la raíz ya ligada sostiene los topes de la cadena. Son:
  * - el cobro con crédito de la venta nueva y su REFUND gemelo en la original (los dos llevan el tender del crédito);
  * - las filas de la diferencia: la devuelta (`processorData.exchange.role`) y la cobrada (cobro, no reembolso, de la venta nueva);
+ * - lo devuelto de algo pagado con crédito (la cadena, `role CHAIN`): sus importes sostienen los topes de la cadena (§6.7);
  * - la raíz que ya dio crédito (`ExchangeCreditLink.originPaymentId`).
  * Una consulta. Se llama con la transacción que YA bloqueó el cobro, para decidir sobre lo vigente.
  */
@@ -88,7 +89,7 @@ export async function exchangeProtectedPayments(
     WHERE p.id IN (${Prisma.join([...paymentIds])})
       AND (
         NOT (${sqlPaymentIsNotExchangeCredit('p')})
-        OR p."processorData"->'exchange'->>'role' IN ('CREDIT', 'DIFFERENCE')
+        OR p."processorData"->'exchange'->>'role' IN ('CREDIT', 'DIFFERENCE', 'CHAIN')
         OR (
           p."type" IS DISTINCT FROM 'REFUND'
           AND EXISTS (SELECT 1 FROM "Exchange" x WHERE x."venueId" = p."venueId" AND x."newOrderId" = p."orderId")

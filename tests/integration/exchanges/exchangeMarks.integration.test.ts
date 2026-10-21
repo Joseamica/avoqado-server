@@ -270,6 +270,7 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
   let devolucionDeDiferencia: Payment
   let conCredito: Payment
   let cobroDeDiferencia: Payment
+  let devolucionDeCadena: Payment
 
   const pago = (id: string) => prisma.payment.findUniqueOrThrow({ where: { id } })
   const rechazo = (promesa: Promise<unknown>, paymentId: string, fields: string[]) =>
@@ -317,6 +318,18 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
     })
     conCredito = await cobro(nueva, { ...conTender(ecTenderId), amount: D(60), netAmount: D(60) })
     cobroDeDiferencia = await cobro(nueva, { amount: D(30), netAmount: D(30) })
+    // La cadena (§6.7): lo que se devuelve de algo pagado con crédito apunta al cobro con crédito y sale por el medio de la raíz.
+    // Se siembra a mano con la marca que escribirá el reembolso de cadena.
+    devolucionDeCadena = await cobro(nueva, {
+      type: 'REFUND',
+      amount: D(-20),
+      netAmount: D(-20),
+      processorData: {
+        originalPaymentId: conCredito.id,
+        rootPaymentId: raiz.id,
+        exchange: { exchangeId: exchange.id, role: 'CHAIN', rootPaymentId: raiz.id },
+      },
+    })
     await prisma.exchangeCreditLink.create({
       data: {
         venueId,
@@ -380,6 +393,15 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
     await rechazo(updatePayment(venueId, id, { amount: 1 }), id, ['amount'])
     await rechazo(deletePayment(venueId, id), id, ['delete'])
     expect(Number((await pago(id)).amount)).toBe(Number(amount))
+  })
+
+  it('a CHAIN refund cannot change its amount by hand (409), and its metadata edit still works', async () => {
+    await rechazo(updatePayment(venueId, devolucionDeCadena.id, { amount: -50 }), devolucionDeCadena.id, ['amount'])
+    expect(Number((await pago(devolucionDeCadena.id)).amount)).toBe(-20)
+
+    await updatePayment(venueId, devolucionDeCadena.id, { referenceNumber: 'REF-CADENA' })
+    const tras = await pago(devolucionDeCadena.id)
+    expect({ referenceNumber: tras.referenceNumber, amount: Number(tras.amount) }).toEqual({ referenceNumber: 'REF-CADENA', amount: -20 })
   })
 
   it('tip, status and method of an exchange payment count as money too', async () => {
