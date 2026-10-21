@@ -1,4 +1,4 @@
-import { LoyaltyTransactionType, PaymentType, Prisma, StampEventType, TransactionStatus } from '@prisma/client'
+import { LoyaltyTransactionType, PaymentType, Prisma, StampEventType, StampRewardStatus, TransactionStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { NotFoundError } from '@/errors/AppError'
@@ -48,6 +48,25 @@ export interface SaleStampOutcome {
   stampsRequired: number
   /** Tiene al menos un premio PENDING por cobrar. */
   rewardReady: boolean
+  /**
+   * La cartilla donde cayó el sello de ESTA venta, para la tarjetita de «Cobro exitoso» (21-oct). Campo nuevo y opcional
+   * para las apps: las viejas lo ignoran. null si la venta no sumó (la app deja el renglón de texto). Los campos de arriba
+   * describen la cartilla ABIERTA hoy; éste, la de la venta (Codex r1 #1-#3).
+   */
+  saleCard: SaleStampCard | null
+}
+
+export interface SaleStampCard {
+  /** Sellos de esa cartilla (llena = `stampsRequired`). */
+  stampsEarned: number
+  /** La meta de ESA cartilla, aunque el negocio la haya cambiado después. */
+  stampsRequired: number
+  /** Esa cartilla ya está llena (por esta venta o por una posterior: no se atribuye). */
+  completed: boolean
+  /** Llena: el premio GANADO (como quedó guardado). Sin llenar: el que ofrece hoy la configuración. */
+  rewardLabel: string
+  /** Llena y su premio sigue sin cobrar. */
+  rewardPending: boolean
 }
 
 /**
@@ -470,14 +489,54 @@ async function motivo(
   }
 }
 
+/**
+ * La cartilla del sello EARN de esta venta para este cliente; null si no hay sello (o se revirtió). 🔴 NO dice qué venta la
+ * llenó (Codex r2 #2 y r3 #1): ordenar sellos por hora o por id falla con transacciones que esperan el candado o con un
+ * script en otra máquina con el reloj movido. Sólo describe ESA cartilla: su meta, si ya está llena y su premio.
+ */
+async function cartillaDeLaVenta(venueId: string, customerId: string, orderId: string, premioDeHoy: string): Promise<SaleStampCard | null> {
+  const earn = await prisma.stampEvent.findFirst({
+    where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId } },
+    select: {
+      stampCard: {
+        select: {
+          stampsEarned: true,
+          stampsRequired: true,
+          completedAt: true,
+          rewards: { select: { rewardLabel: true, status: true }, take: 1 },
+        },
+      },
+    },
+  })
+  if (!earn) return null
+  const card = earn.stampCard
+  if (!card.completedAt) {
+    return { stampsEarned: card.stampsEarned, stampsRequired: card.stampsRequired, completed: false, rewardLabel: premioDeHoy, rewardPending: false }
+  }
+  // Reabierta por una devolución después de cobrar el premio (Codex r4 #1): conserva `completedAt` con menos sellos. No se
+  // dibuja «7 de 7» con 6 ni se promete llenarla otra vez: sin tarjetita, la app deja el renglón de texto.
+  if (card.stampsEarned < card.stampsRequired) return null
+  const premio = card.rewards[0]
+  return {
+    stampsEarned: card.stampsRequired,
+    stampsRequired: card.stampsRequired,
+    completed: true,
+    rewardLabel: premio?.rewardLabel ?? premioDeHoy,
+    rewardPending: premio?.status === StampRewardStatus.PENDING,
+  }
+}
+
 async function armarResultado(
   venueId: string,
   customerId: string,
   programa: Programa,
   stamped: boolean,
   reason: SaleStampReason | null,
+  orderId?: string,
 ): Promise<SaleStampOutcome> {
   const tarjeta = await getStampCardStatus(venueId, customerId)
+  const saleCard =
+    programa.stampsEnabled && stamped && orderId ? await cartillaDeLaVenta(venueId, customerId, orderId, tarjeta.rewardLabel) : null
   return {
     stampsEnabled: programa.stampsEnabled,
     stamped,
@@ -485,6 +544,7 @@ async function armarResultado(
     stampsEarned: tarjeta.stampsEarned,
     stampsRequired: tarjeta.stampsRequired,
     rewardReady: tarjeta.pendingRewards > 0,
+    saleCard,
   }
 }
 
@@ -494,7 +554,7 @@ const minutosDesde = (settledAt: Date | null, nowMs: number): number | null =>
 async function describir(venueId: string, customerId: string, venta: Venta, programa: Programa, nowMs: number): Promise<SaleStampOutcome> {
   const decision = decideSaleStamp(fotoPara(venta, customerId), nowMs)
   const stamped = decision === 'STAMPED'
-  return armarResultado(venueId, customerId, programa, stamped, await motivo(decision, venueId, customerId, programa, nowMs))
+  return armarResultado(venueId, customerId, programa, stamped, await motivo(decision, venueId, customerId, programa, nowMs), venta.id)
 }
 
 /** Sólo LEE: describe el sello de una venta para un cliente. No otorga nada. */
@@ -628,6 +688,7 @@ export async function awardLoyaltyForLateCustomer(args: {
       programa,
       stamped,
       await motivo(decision, venueId, customerId, programa, nowMs),
+      orderId,
     )
 
     const auditar = args.ligaNueva === undefined ? antes !== 'STAMPED' : args.ligaNueva || otorgo()
