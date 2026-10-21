@@ -31,6 +31,23 @@ export function scopedTerminalWhere(terminalId: string, scope?: TerminalWriteSco
 }
 
 /**
+ * 🔴 EL CANDADO de la fila de una terminal. Lo toman guardar y restablecer el diseño de la pantalla del cliente, el gancho
+ * que borra ese diseño cuando la terminal cambia de negocio (`customerDisplayVenueChange.ts`) y la revalidación G4 de
+ * `migrateCancel`; copiar el diseño toma el MISMO candado de fila, el de varias terminales en una sola sentencia ordenada
+ * por id. Vive aquí, y no en el servicio del diseño, porque el gancho y `migrateCancel` también lo usan: si cada uno
+ * abriera el suyo, las operaciones creerían que se están serializando y no lo estarían.
+ *
+ * Devuelve el `venueId` LEÍDO BAJO EL CANDADO, que es lo único que sirve para revalidar: el que venía en la ruta pudo
+ * quedar viejo mientras esperábamos.
+ */
+export async function lockTerminalRow(tx: Prisma.TransactionClient, terminalId: string): Promise<{ id: string; venueId: string } | null> {
+  const filas = await tx.$queryRaw<{ id: string; venueId: string }[]>`
+    SELECT id, "venueId" FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE
+  `
+  return filas[0] ?? null
+}
+
+/**
  * Ejecuta una escritura acotada (`update` o `delete` con `scopedTerminalWhere`). Si la base no encuentra la terminal
  * en ese negocio (P2025), eso es «esta terminal ya no es tuya»: un 404, no un error del servidor.
  */

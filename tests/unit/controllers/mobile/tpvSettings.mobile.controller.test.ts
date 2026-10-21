@@ -30,6 +30,14 @@ jest.mock('@/services/dashboard/tpv.dashboard.service', () => ({
   getTpvSettings: jest.fn(),
 }))
 
+// El orquestador de las huellas del poll se simula: la prueba del controlador no toca la base por él (su sobre se fija en
+// pollEnvelope.mobile.controller.test.ts).
+const collectPollFingerprintsMock = jest.fn(async (..._a: unknown[]) => ({}))
+jest.mock('@/services/customer-display/posPollFingerprints', () => ({
+  ...jest.requireActual('@/services/customer-display/posPollFingerprints'),
+  collectPollFingerprints: (...a: unknown[]) => collectPollFingerprintsMock(...a),
+}))
+
 jest.mock('@/services/display-mode-request.service', () => {
   const actual = jest.requireActual('@/services/display-mode-request.service')
   return {
@@ -67,6 +75,7 @@ jest.mock('@/middlewares/validateVenueAccess.middleware', () => ({
 import { getVenueTpvSettings, getDisplayModeRequest, updateDisplayMode } from '@/controllers/mobile/tpvSettings.mobile.controller'
 import { DisplayModeRequestError } from '@/services/display-mode-request.service'
 import mobileRoutes from '@/routes/mobile.routes'
+import { POLL_TERMINAL_SELECT } from '@/services/customer-display/posPollFingerprints'
 
 const venueId = 'venue-123'
 const mockedGetTpvSettings = getTpvSettings as jest.MockedFunction<typeof getTpvSettings>
@@ -375,7 +384,7 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
     expect(Array.isArray(res.__json.data.receiptLayout.blocks)).toBe(true)
   })
 
-  it('queries the FIRST emisor by createdAt (the same rule nomina/accounting use) — shape of the query', async () => {
+  it('queries the emisores por (createdAt, id) — orden TOTAL: el primero es el principal — shape of the query', async () => {
     // El mock contesta lo que sea; esta prueba fija la FORMA de la consulta,
     // que es lo que un mock deja pasar gratis.
     mockVenueLookups({ name: 'X', fiscalEmisors: [] })
@@ -391,13 +400,14 @@ describe('getVenueTpvSettings (mobile) — receiptInfo (encabezado del ticket im
           // con sus cuentas de cobro y SIN `take: 1`. El `orderBy` se conserva porque es
           // justo lo que define cuál es el principal.
           fiscalEmisors: {
-            orderBy: { createdAt: 'asc' },
+            // 🔴 Orden TOTAL (E3/F3 de la 5ª ronda): a igual fecha decide el id; antes Postgres elegía el principal.
+            orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
             select: {
               id: true,
               legalName: true,
               rfc: true,
               lugarExpedicion: true,
-              merchantConfigs: { select: { merchantAccountId: true } },
+              merchantConfigs: { orderBy: [{ merchantAccountId: 'asc' }, { id: 'asc' }], select: { merchantAccountId: true } },
             },
           },
         }),
@@ -512,23 +522,16 @@ describe('mobile display-mode delivery and compatible ACK', () => {
     expect(response.status).toBe(200)
     expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith({
       where: { venueId, deviceUid, type: 'POS_ANDROID' },
-      select: {
-        id: true,
-        customerDisplayRequest: true,
-        customerDisplayRequestExpiresAt: true,
-      },
+      select: POLL_TERMINAL_SELECT,
     })
-    expect(response.body).toEqual({
-      data: {
-        terminalId,
-        request: {
-          requestId: pendingRequest.requestId,
-          desiredInverted: true,
-          requestedAt,
-          expiresAt,
-        },
-      },
+    expect(response.body.data.terminalId).toBe(terminalId)
+    expect(response.body.data.request).toEqual({
+      requestId: pendingRequest.requestId,
+      desiredInverted: true,
+      requestedAt,
+      expiresAt,
     })
+    expect(response.body.data.capabilities).toEqual({ customerDisplayDesign: 2 })
   })
 
   it.each([
@@ -547,7 +550,8 @@ describe('mobile display-mode delivery and compatible ACK', () => {
     const response = await request(makeRouteApp()).get(`/api/v1/mobile/venues/${venueId}/display-mode-request`).set(routeAuthHeaders())
 
     expect(response.status).toBe(200)
-    expect(response.body).toEqual({ data: { terminalId, request: null } })
+    expect(response.body.data).toMatchObject({ terminalId, request: null })
+    expect(response.body.data).toHaveProperty('capabilityReport')
     expect(prismaMock.terminal.update).not.toHaveBeenCalled()
     expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
   })

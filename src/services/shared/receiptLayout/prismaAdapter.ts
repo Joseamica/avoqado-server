@@ -172,8 +172,8 @@ export function buildVenueInfo(venue: VenueParaTicket): ReceiptVenueInfo {
       lugarExpedicion: e.lugarExpedicion,
       merchantAccountIds: e.merchantConfigs.map(m => m.merchantAccountId).filter((id): id is string => Boolean(id)),
     })),
-    // El principal = el primero de la lista; el llamador la pide con orderBy createdAt asc,
-    // que es el mismo criterio que nómina y contabilidad (spec § 5.6, caso 2).
+    // El principal = el primero de la lista; el llamador la pide con el orden TOTAL del aparato,
+    // (createdAt, id) — `RECEIPT_VENUE_SELECT.fiscalEmisors` (spec § 5.6, caso 2).
     principalEmisorId: venue.fiscalEmisors[0]?.id ?? null,
     legacy: { legalName: venue.legalName, rfc: venue.rfc },
   }

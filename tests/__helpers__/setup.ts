@@ -246,6 +246,10 @@ const prismaMock: any = {
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),
   receiptLayout: createMockModel(),
+  // Pantalla del cliente (F0-A). Sin estas entradas, cualquier prueba unitaria o HTTP que toque el diseño o sus
+  // activos muere con TypeError, y la ruta HTTP responde 500 en vez de su código real.
+  customerDisplayDesign: createMockModel(),
+  customerDisplayAsset: createMockModel(),
   walletCardDesign: createMockModel(),
   walletPassRegistration: createMockModel(),
   stampCard: createMockModel(),

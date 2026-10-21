@@ -320,8 +320,178 @@ describe('deviceRegistry.service', () => {
 
       expect(prismaMock.terminal.findFirst).toHaveBeenCalledWith({
         where: { venueId: 'venue_2', deviceUid: 'device-abc' },
-        select: { id: true, name: true },
+        select: { id: true, name: true, type: true, systemInfo: true },
       })
+    })
+  })
+
+  // ── F0-B (Task 11): el número de compilación del POS, donde el dashboard ya lo lee ─────────────────────
+  describe('registerDeviceSeen — número de compilación', () => {
+    const conCodigo = { ...iphoneIdentity, appVersionCode: 28 }
+
+    it('un POS conocido guarda su número en systemInfo.versionCode, sin pisar lo demás', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_IOS,
+        systemInfo: { otra: 1 },
+        version: '1.14.0',
+      })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: conCodigo })
+
+      expect(prismaMock.terminal.update.mock.calls[0][0].data.systemInfo).toEqual({ otra: 1, versionCode: 28 })
+    })
+
+    // Ronda final (Codex P2-2): antes «el mismo número ya guardado no se reescribe». Ese atajo decidía contra una lectura que
+    // pudo envejecer; ahora el número viaja SIEMPRE con su versión, en el MISMO update (que ya ocurría: es el de la conexión).
+    it('el número se escribe siempre junto con su versión, aunque sea el mismo ya guardado', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_IOS,
+        systemInfo: { versionCode: 28 },
+        version: '1.15.0',
+      })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: conCodigo })
+
+      expect(prismaMock.terminal.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.terminal.update.mock.calls[0][0].data).toMatchObject({ version: '1.4.0', systemInfo: { versionCode: 28 } })
+    })
+
+    it('🔴 Review Focus 4: una TPV que manda la cabecera NO toca su systemInfo (es de su latido)', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({
+        id: 'term_pax',
+        name: 'x',
+        type: TerminalType.TPV_ANDROID,
+        systemInfo: { versionCode: 70, uptime: 9 },
+        version: '9.0.0',
+      })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      await registerDeviceSeen({
+        venueId: VENUE,
+        staffId: STAFF,
+        identity: { ...conCodigo, platform: 'ANDROID' as const, appVersionCode: 76 },
+      })
+
+      expect(prismaMock.terminal.update.mock.calls[0][0].data.systemInfo).toBeUndefined()
+    })
+
+    // Ronda final (Codex P2-2): antes «sin la cabecera y con la MISMA versión no se toca systemInfo». Ese «misma versión» venía
+    // de la lectura, y es justo lo que una petición rezagada lee mal. Sin número, la versión se escribe SIN número.
+    it('sin la cabecera del número: la versión se escribe y el número guardado se quita, en la misma escritura', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_IOS,
+        systemInfo: { versionCode: 27 },
+        version: iphoneIdentity.appVersion,
+      })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })
+
+      expect(prismaMock.terminal.update.mock.calls[0][0].data).toMatchObject({ version: iphoneIdentity.appVersion, systemInfo: {} })
+    })
+
+    it('sin x-app-version no se toca ni la versión ni su número', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_IOS,
+        systemInfo: { versionCode: 27 },
+      })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: { ...iphoneIdentity, appVersion: undefined } })
+
+      expect(prismaMock.terminal.update.mock.calls[0][0].data).toMatchObject({ version: undefined, systemInfo: undefined })
+    })
+
+    // 🔴 Codex r1 #10: subir y después bajar a una app que no manda el número.
+    it('🔴 actualizar (con número) y volver a una app vieja SIN número: el número viejo se borra y lo demás se queda', async () => {
+      prismaMock.terminal.update.mockResolvedValue({})
+      prismaMock.terminal.findFirst.mockResolvedValueOnce({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_ANDROID,
+        systemInfo: { versionCode: 55, otra: 1 },
+        version: '2.24.0',
+      })
+      await registerDeviceSeen({
+        venueId: VENUE,
+        staffId: STAFF,
+        identity: { ...iphoneIdentity, platform: 'ANDROID' as const, appVersion: '2.25.0', appVersionCode: 56 },
+      })
+      expect(prismaMock.terminal.update.mock.calls[0][0].data.systemInfo).toEqual({ versionCode: 56, otra: 1 })
+
+      prismaMock.terminal.findFirst.mockResolvedValueOnce({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_ANDROID,
+        systemInfo: { versionCode: 56, otra: 1 },
+        version: '2.25.0',
+      })
+      await registerDeviceSeen({
+        venueId: VENUE,
+        staffId: STAFF,
+        identity: { ...iphoneIdentity, platform: 'ANDROID' as const, appVersion: '2.23.0' },
+      })
+      expect(prismaMock.terminal.update.mock.calls[1][0].data.systemInfo).toEqual({ otra: 1 }) // el panel vuelve a «Actualiza la app»
+    })
+
+    // 🔴 Codex P2-2 (ronda final de F0-B): dos reportes a la vez. El viejo (sin número) LEE 2.24.0; en medio, otro guarda
+    // 2.25.0 / 56; el viejo termina con lo que leyó. Antes quedaba «2.24.0 / 56» —y otro 2.24.0 sin número no lo limpiaba,
+    // porque «la versión no cambió»—: el panel creería que una app vieja ya obedece «Ofrecer recibo».
+    it('🔴 un reporte viejo que leyó ANTES de que otro escribiera no deja la versión de uno con el número del otro', async () => {
+      const fila: Record<string, any> = { id: 'term_1', name: 'x', type: TerminalType.POS_ANDROID, systemInfo: null, version: '2.24.0' }
+      const leer = () => JSON.parse(JSON.stringify(fila))
+      prismaMock.terminal.update.mockImplementation(async ({ data }: { data: Record<string, unknown> }) => {
+        for (const [llave, valor] of Object.entries(data)) if (valor !== undefined) fila[llave] = valor
+        return {}
+      })
+      const viejo = { ...iphoneIdentity, platform: 'ANDROID' as const, appVersion: '2.24.0' }
+      const nuevo = { ...viejo, appVersion: '2.25.0', appVersionCode: 56 }
+
+      const loQueLeyoElViejo = leer() // 1. el viejo lee…
+      prismaMock.terminal.findFirst.mockResolvedValueOnce(leer())
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: nuevo }) // 2. …el nuevo lee y escribe en medio…
+      expect([fila.version, fila.systemInfo?.versionCode]).toEqual(['2.25.0', 56])
+      prismaMock.terminal.findFirst.mockResolvedValueOnce(loQueLeyoElViejo)
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: viejo }) // 3. …y el viejo escribe con su lectura
+
+      expect([fila.version, fila.systemInfo?.versionCode]).toEqual(['2.24.0', undefined]) // nunca «2.24.0 / 56»
+    })
+
+    it('un systemInfo guardado que no es objeto se reemplaza por uno con el número', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue({
+        id: 'term_1',
+        name: 'x',
+        type: TerminalType.POS_ANDROID,
+        systemInfo: ['raro'],
+        version: null,
+      })
+      prismaMock.terminal.update.mockResolvedValue({})
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: { ...conCodigo, platform: 'ANDROID' as const } })
+
+      expect(prismaMock.terminal.update.mock.calls[0][0].data.systemInfo).toEqual({ versionCode: 28 })
+    })
+
+    it('un POS nuevo nace con su número; sin cabecera, sin systemInfo', async () => {
+      prismaMock.terminal.findFirst.mockResolvedValue(null)
+      prismaMock.terminal.count.mockResolvedValue(0)
+      prismaMock.terminal.create.mockResolvedValue({ id: 't', name: 'x' })
+
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: conCodigo })
+      await registerDeviceSeen({ venueId: VENUE, staffId: STAFF, identity: iphoneIdentity })
+
+      expect(prismaMock.terminal.create.mock.calls[0][0].data.systemInfo).toEqual({ versionCode: 28 })
+      expect(prismaMock.terminal.create.mock.calls[1][0].data.systemInfo).toBeUndefined()
     })
   })
 

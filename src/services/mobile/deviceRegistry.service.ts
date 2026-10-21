@@ -63,6 +63,11 @@ export interface DeviceIdentity {
   osVersion?: string | null
   appVersion?: string | null
   /**
+   * F0-B (Task 11): el número de compilación (`x-app-version-code`; Android `versionCode`, iOS `CFBundleVersion`). El
+   * dashboard lo compara contra `CHECKOUT_RECEIPT_TOGGLE_MIN_*` para saber si la app ya obedece «Ofrecer recibo».
+   */
+  appVersionCode?: number | null
+  /**
    * Serial de hardware, cuando el aparato lo expone (Sunmi y PAX sí; iPhone nunca —
    * por eso Square marca su `manufacturers_id` como "where available"). Si viene y
    * ya existe una Terminal provisionada con ese serial en el venue, el dispositivo se
@@ -97,6 +102,37 @@ export async function resolveDeviceName(client: Prisma.TransactionClient | typeo
   return existing === 0 ? model : `${model} (${existing + 1})`
 }
 
+/** Los tipos cuyo número de compilación viaja por el registro. La TPV NO: su `systemInfo` es de su latido (tpv-health). */
+const TIPOS_CON_VERSION_DE_APP: ReadonlySet<TerminalType> = new Set([TerminalType.POS_ANDROID, TerminalType.POS_IOS])
+
+/**
+ * F0-B (Task 11): el `systemInfo` a escribir para el número de compilación de un POS, mezclado con lo que ya hubiera, o
+ * `undefined` si no se toca (otro tipo de aparato, o una petición sin `x-app-version`). `undefined` en un `data` de Prisma no
+ * toca la columna. `guardado` null = la fila todavía no existe (alta): sin número, nace sin `systemInfo`.
+ *
+ * 🔴 La versión y su número van SIEMPRE juntos, en la MISMA escritura que `version` (ronda final, Codex P2-2): con
+ * `x-app-version` se escribe SU número, o se quita la llave si no lo mandó (Codex r1 #10: ese número ya no es de ella; el panel
+ * vuelve a «Actualiza la app»). Nada se decide contra lo leído: el atajo «mismo número / misma versión ⇒ no escribo» dejaba que
+ * una lectura vieja (otra petición escribió en medio) terminara en «2.24.0 / 56». Sin `x-app-version` no se toca ninguno.
+ *
+ * ponytail: el RESTO de `systemInfo` se mezcla de lo leído, sin CAS; vale porque este registro es el ÚNICO escritor de
+ * `systemInfo` en filas POS (el latido de `tpv-health` sólo escribe filas TPV) y nunca cambia otra llave. Si otro proceso
+ * empieza a escribir aquí, pasar a `jsonb_set` o a un CAS.
+ */
+export function systemInfoConVersionDeLaApp(
+  tipo: TerminalType,
+  guardado: { systemInfo: Prisma.JsonValue | null } | null,
+  reportado: { appVersion?: string | null; appVersionCode?: number | null },
+): Prisma.InputJsonValue | undefined {
+  if (!TIPOS_CON_VERSION_DE_APP.has(tipo) || reportado.appVersion == null) return undefined
+  const codigo = reportado.appVersionCode
+  if (guardado === null) return codigo != null ? { versionCode: codigo } : undefined
+  const si = guardado.systemInfo
+  const previo = si !== null && typeof si === 'object' && !Array.isArray(si) ? (si as Prisma.JsonObject) : {}
+  const { versionCode: _elGuardado, ...resto } = previo
+  return (codigo != null ? { ...resto, versionCode: codigo } : resto) as Prisma.InputJsonValue
+}
+
 /**
  * Asegura o refresca un dispositivo. Idempotente por `[venueId, deviceUid]`.
  *
@@ -120,7 +156,7 @@ export async function ensureDeviceTerminal(params: {
     // ── ¿Ya existe este dispositivo en este venue? ────────────────────────────────
     const existing = await prisma.terminal.findFirst({
       where: { venueId, deviceUid: identity.deviceUid },
-      select: { id: true, name: true },
+      select: { id: true, name: true, type: true, systemInfo: true },
     })
 
     if (existing) {
@@ -133,6 +169,8 @@ export async function ensureDeviceTerminal(params: {
           // `type`/`formFactor` tampoco: un dispositivo no cambia de clase.
           osVersion: identity.osVersion ?? undefined,
           version: identity.appVersion ?? undefined,
+          // F0-B (Task 11): el número de compilación del POS, donde el dashboard ya lo lee (y se borra si cambió la app sin él).
+          systemInfo: systemInfoConVersionDeLaApp(existing.type, existing, identity),
           modelIdentifier: identity.modelIdentifier ?? undefined,
         },
       })
@@ -175,11 +213,12 @@ export async function ensureDeviceTerminal(params: {
     // ── Alta nueva ───────────────────────────────────────────────────────────────
     const name = await resolveDeviceName(prisma, venueId, resolved.model)
 
+    const tipo = PLATFORM_TO_TERMINAL_TYPE[identity.platform] ?? TerminalType.POS_ANDROID
     const created = await prisma.terminal.create({
       data: {
         venueId,
         name,
-        type: PLATFORM_TO_TERMINAL_TYPE[identity.platform] ?? TerminalType.POS_ANDROID,
+        type: tipo,
         status: TerminalStatus.ACTIVE,
         brand: normalizeTerminalBrand(resolved.brand),
         model: resolved.model,
@@ -193,6 +232,8 @@ export async function ensureDeviceTerminal(params: {
         firstSeenAt: now,
         lastHeartbeat: now,
         lastStaffId: staffId,
+        // F0-B (Task 11): nace con su número de compilación, si lo mandó.
+        systemInfo: systemInfoConVersionDeLaApp(tipo, null, identity),
       },
       select: { id: true, name: true },
     })
