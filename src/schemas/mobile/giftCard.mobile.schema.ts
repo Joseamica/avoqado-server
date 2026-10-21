@@ -5,6 +5,7 @@
 import { z } from 'zod'
 import { MAX_SOBRES_POR_CUENTA } from '@/services/giftCards/giftCardLimits'
 import { PAGE_TOKEN_RE } from '@/services/giftCards/giftCardProof'
+import type { GiftCardErrorCode } from '@/services/giftCards/giftCardErrors'
 import { idempotencyKey, montoPositivo, ordenParams, pesos, pesosPositivos, venueParams } from '../common/giftCard.common.schema'
 
 /** El mismo que valida A5 (`createGiftCardOrder`): 10 a 15 dígitos, con `+` opcional, sin espacios. */
@@ -33,6 +34,8 @@ const liga = z
   .regex(PAGE_TOKEN_RE, 'La liga de la tarjeta no es válida')
 
 const SOLO_UNO = 'Manda el código o la liga de la tarjeta (sólo uno)'
+/** `validateRequest` lo vuelve el `code` del 400 (`params.code`). */
+const CAMPO_NO_ACEPTADO: GiftCardErrorCode = 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED'
 
 /**
  * UNA sola unión de pruebas de posesión (A17/D4): la usan `payGiftCardSchema` y, en S2b, `payNewOrderSchema`; S5 le agrega
@@ -127,6 +130,10 @@ export const payGiftCardSchema = z.object({
  * S2b (Q58): `pay-new-order` — el cuerpo de la venta de mostrador de `POST /orders` (lo valida y lo arma `leerVentaDeMostrador`, por
  * eso `.passthrough()`: los artículos y demás campos de la venta llegan al controller) más el cobro con saldo. `tip` es la propina
  * DEL COBRO en pesos, como en `pay-gift-card`; la propina de la orden en centavos no existe en esta ruta.
+ *
+ * Mesa, `externalId` e `isOfflineReplay: true` dan 400 `GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED` (revisión S2b): ignorarlos cobraba
+ * una venta de mostrador APARTE de la mesa. Ausentes, `null` o `false` pasan. `splitType` se sigue ignorando: el armado de Android
+ * manda siempre `"FULLPAYMENT"`, y la venta nunca lo lee.
  */
 export const payNewOrderSchema = z.object({
   params: venueParams,
@@ -138,7 +145,15 @@ export const payNewOrderSchema = z.object({
       tip: pesos('la propina').optional(),
       ...segunElAparato,
     })
-    .passthrough(),
+    .passthrough()
+    .superRefine((b, ctx) => {
+      const noSeAcepta = (campo: string, message: string) =>
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: [campo], message, params: { code: CAMPO_NO_ACEPTADO } })
+      if (b.tableId != null) noSeAcepta('tableId', 'Las cuentas de mesa se cobran con saldo desde la mesa, no como venta nueva.')
+      if (b.externalId != null) noSeAcepta('externalId', 'Esta venta nace con la llave del cobro: no mandes externalId.')
+      if (b.isOfflineReplay === true)
+        noSeAcepta('isOfflineReplay', 'Una venta guardada sin red no se cobra con saldo de tarjeta: el saldo necesita conexión.')
+    }),
   query: z.any().optional(),
 })
 

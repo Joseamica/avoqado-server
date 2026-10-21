@@ -262,6 +262,33 @@ describe('S2b: pay-new-order', () => {
     expect(h.indexOf(guardia)).toBeGreaterThan(redeem)
   })
 
+  it('🔴 en la ruta REAL, mesa/externalId/isOfflineReplay se rechazan en la validación, antes de permisos, límite y controller', async () => {
+    const h = capasDe('post', PAGAR_NUEVA)
+    const validacion = h[h.indexOf(authenticateTokenMiddleware) + 1]
+    const venta = {
+      items: [{ name: 'Blusa', quantity: 1, unitPrice: 80000 }],
+      idempotencyKey: 'cobro-0001-abc',
+      proof: { kind: 'CODE', code: 'K7QZ-ABCD-EFGH-JKMN-P' },
+      amount: 300,
+    }
+    for (const extra of [{ tableId: 'mesa-9' }, { externalId: 'venta-de-la-app' }, { isOfflineReplay: true }]) {
+      let error: any
+      await validacion({ body: { ...venta, ...extra }, params: { venueId: 'v1' }, query: {} }, {}, (e?: unknown) => (error = e))
+      expect({ extra, status: error?.statusCode, code: error?.code }).toEqual({
+        extra,
+        status: 400,
+        code: 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED',
+      })
+    }
+    let paso: unknown = 'sin llamar'
+    await validacion(
+      { body: { ...venta, splitType: 'FULLPAYMENT' }, params: { venueId: 'v1' }, query: {} },
+      {},
+      (e?: unknown) => (paso = e),
+    )
+    expect(paso).toBeUndefined()
+  })
+
   it('🔴 lleva la MISMA instancia del límite de fallos que pay-gift-card (un solo contador), y no el de consultas', () => {
     const nueva = capasDe('post', PAGAR_NUEVA)
     const cobro = capasDe('post', '/venues/:venueId/orders/:orderId/pay-gift-card')

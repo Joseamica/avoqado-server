@@ -35,6 +35,8 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_UNLINKED_REFUND_BLOCKED'
   // 1b S2b (Q60): en la venta nueva cobrada con saldo, un premio de sellos que ya no aplica rechaza TODO (nada se crea).
   | 'GIFT_CARD_STAMP_REWARD_NOT_APPLIED'
+  // 1b S2b (revisión): `pay-new-order` rechaza con 400 la mesa, `externalId` e `isOfflineReplay: true` (no los ignora).
+  | 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422, extra?: Record<string, unknown>) {

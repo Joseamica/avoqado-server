@@ -229,6 +229,17 @@ describe('payGiftCardOnNewOrder', () => {
   })
 
   it('la cuenta nace con la llave del cobro (`giftpay:` + llave), del tipo pedido y sin mesa', async () => {
+    const r = await payGiftCardOnNewOrder('venue-1', venta())
+    expect(prismaMock.order.create.mock.calls[0][0].data).toMatchObject({
+      externalId: `giftpay:${LLAVE}`,
+      tableId: null,
+      type: 'TAKEOUT',
+      source: 'AVOQADO_ANDROID',
+    })
+    expect(r).toMatchObject({ paymentId: 'payment-1', orderId: 'order-1', amount: 400, replay: false })
+  })
+
+  it('segunda red: si mesa, externalId o splitType llegaran al servicio (el esquema rechaza los dos primeros con 400), los pisa', async () => {
     const r = await payGiftCardOnNewOrder('venue-1', venta({ tableId: 'mesa-9', splitType: 'EQUAL', externalId: 'otra' } as any))
     expect(prismaMock.order.create.mock.calls[0][0].data).toMatchObject({
       externalId: `giftpay:${LLAVE}`,
@@ -333,6 +344,24 @@ describe('payGiftCardOnNewOrder', () => {
     })
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(rechazoSellado('venue-1', LLAVE)).toBe(error)
+  })
+
+  it('🔴 un error que no es del premio (la base) al canjearlo sube tal cual: ni se vuelve 409 ni se sella', async () => {
+    const deLaBase = new Error('la base no contesta')
+    canjearPremioMock.mockRejectedValue(deLaBase)
+    await expect(payGiftCardOnNewOrder('venue-1', venta({ stampRewardId: 'rw-1' }))).rejects.toBe(deLaBase)
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(rechazoSellado('venue-1', LLAVE)).toBeNull()
+  })
+
+  it('🔴 segunda red: la cuenta `giftpay:<llave>` ya existe sin su cobro ⇒ 409 IDEMPOTENCY_KEY_REUSED, sin crear nada y sin sellar', async () => {
+    prismaMock.order.findUnique.mockImplementation(async (a: any) =>
+      a?.where?.venueId_externalId?.externalId === `giftpay:${LLAVE}` ? { id: 'order-huerfana', items: [], promotions: [] } : null,
+    )
+    await expect(payGiftCardOnNewOrder('venue-1', venta())).rejects.toMatchObject({ code: 'IDEMPOTENCY_KEY_REUSED', statusCode: 409 })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(rechazoSellado('venue-1', LLAVE)).toBeNull()
   })
 
   it('un saldo que no alcanza (dentro de la transacción) también se sella', async () => {

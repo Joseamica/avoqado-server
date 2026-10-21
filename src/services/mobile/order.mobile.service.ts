@@ -4854,7 +4854,8 @@ export async function payGiftCardOnNewOrder(
   if (!sobreId) throw tarjetaNoEncontrada()
 
   // La venta como la crearía `POST /orders`, con lo que esta ruta NO acepta puesto por el server: la cuenta nace con la llave
-  // del cobro, en línea, sin mesa (las mesas usan `pay-gift-card`) y sin propina de orden (`tip` es la propina DEL COBRO).
+  // del cobro, en línea, sin mesa (las mesas usan `pay-gift-card`) y sin propina de orden (`tip` es la propina DEL COBRO). Mesa,
+  // `externalId` e `isOfflineReplay` ya los rechaza el esquema con 400 (`payNewOrderSchema`); pisarlos aquí es la segunda red.
   const { idempotencyKey: _llave, proof, amount: _monto, tip: _propina, deviceId, procesadoPor, ...datosDeLaVenta } = input
   const venta: CreateOrderInput = {
     ...datosDeLaVenta,

@@ -581,4 +581,37 @@ describe('cobrar con saldo una venta nueva (pay-new-order)', () => {
     expect(r.status).toBe(400)
     expect(payGiftCardOnNewOrder).not.toHaveBeenCalled()
   })
+
+  // Revisión S2b: ignorarlos en silencio cobraba una venta de MOSTRADOR aparte y dejaba la mesa abierta con lo mismo.
+  it.each([
+    ['tableId', { tableId: 'mesa-9' }, 'Las cuentas de mesa se cobran con saldo desde la mesa, no como venta nueva.'],
+    ['externalId', { externalId: 'venta-de-la-app' }, 'Esta venta nace con la llave del cobro: no mandes externalId.'],
+    [
+      'isOfflineReplay: true',
+      { isOfflineReplay: true },
+      'Una venta guardada sin red no se cobra con saldo de tarjeta: el saldo necesita conexión.',
+    ],
+  ])('🔴 con %s ⇒ 400 GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED, sin llegar al servicio', async (_campo, extra, mensaje) => {
+    const r = await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, ...extra })
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ code: 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED', message: mensaje })
+    expect(payGiftCardOnNewOrder).not.toHaveBeenCalled()
+    expect(audit).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['ausentes', {}],
+    ['en null (isOfflineReplay en false)', { tableId: null, externalId: null, isOfflineReplay: false }],
+    // El armado de Android que reúsa el T1 manda SIEMPRE `"splitType":"FULLPAYMENT"`: un 400 tumbaría sus cobros.
+    ["con splitType 'FULLPAYMENT'", { splitType: 'FULLPAYMENT' }],
+  ])('mesa, externalId e isOfflineReplay %s ⇒ llega al servicio', async (_caso, extra) => {
+    m(payGiftCardOnNewOrder).mockResolvedValue(RESULTADO)
+    const r = await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, ...extra })
+    expect(r.status).toBe(200)
+    expect(payGiftCardOnNewOrder).toHaveBeenCalledTimes(1)
+  })
 })
