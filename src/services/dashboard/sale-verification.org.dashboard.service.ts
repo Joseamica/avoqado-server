@@ -8,6 +8,7 @@ import {
   cobrosDelProtocolo,
   efectivoManualEditable,
 } from '../shared/cobroDelProtocolo'
+import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchanges/exchangeMarks'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
   PROMOTER_FEEDBACK_MIN_CHARS,
@@ -1404,6 +1405,7 @@ export async function editOrgSaleVerification(
       methodChanged = params.paymentForm != null && derivePaymentForm(vigente.method) !== params.paymentForm
       const amountChanged = params.amount != null && new Prisma.Decimal(params.amount).toDecimalPlaces(2).comparedTo(vigente.amount) !== 0
       if (amountChanged || methodChanged) {
+        const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
         const esDelProtocolo = (await cobrosDelProtocolo(tx, [existing.payment.id])).has(existing.payment.id)
         // Excepción de efectivo manual (ver `efectivoManualEditable`): el cobro CASH sin afiliación lleva la llave `pricing: null`
         // y por eso «pertenece», pero no hay tarifa ni obligación que proteger. Sólo mueve la forma entre efectivo y otro.
@@ -1411,7 +1413,6 @@ export async function editOrgSaleVerification(
           esDelProtocolo && (!methodChanged || params.paymentForm !== 'CARD') && (await efectivoManualEditable(tx, existing.payment.id))
         viaExcepcionEfectivoManual = efectivoManual
         if (esDelProtocolo && !efectivoManual) {
-          const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
           const err = createServiceError(
             'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe y su forma de pago sólo cambian por reembolso, anulación o corrección acreditada, no desde la verificación de venta.',
             409,
@@ -1419,6 +1420,11 @@ export async function editOrgSaleVerification(
           err.code = 'PAYMENT_PROTECTED_BY_COST_PROTOCOL'
           err.details = { paymentId: existing.payment.id, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO }
           throw err
+        }
+        // Cambio de producto (spec 2026-10-20 §6.2, §6.7): el dinero de un cambio tampoco cambia de importe ni de forma desde aquí,
+        // ni por la excepción de efectivo manual (409 PAYMENT_PROTECTED_BY_EXCHANGE, nada se escribe).
+        if ((await exchangeProtectedPayments(tx, [existing.payment.id])).has(existing.payment.id)) {
+          throw paymentProtectedByExchange(existing.payment.id, fields)
         }
         // La forma corregida arrastra su `fundsFlow`: la caja y el saldo disponible lo leen por encima de `method`
         // (`tenderSemantics`). Sin esto, un CASH → OTHER seguía contando como efectivo del cajón.

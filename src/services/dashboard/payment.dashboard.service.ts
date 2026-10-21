@@ -3,6 +3,7 @@
 import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
+import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchanges/exchangeMarks'
 import prisma from '../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
@@ -442,6 +443,9 @@ function camposQueCambian(
     return valor !== vigente[campo]
   })
 }
+// Cambio de producto (spec 2026-10-20 §6.2, §6.7): de un cobro que es dinero de un cambio sólo se rechaza lo ECONÓMICO; los datos
+// de referencia (tarjeta, autorización, folio, modo de lectura) se siguen corrigiendo.
+const CAMPOS_ECONOMICOS: ReadonlySet<string> = new Set(['amount', 'tipAmount', 'status', 'method'])
 // Codex R14-2: el REEMBOLSO de un cobro del protocolo se protege por su ORIGINAL; el 409 lo nombra (`originalPaymentId`) — mismo
 // código, detalle aditivo.
 const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPaymentId: string | null = null) =>
@@ -497,6 +501,11 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
         escrito: false as const,
         payment: await tx.payment.findUniqueOrThrow({ where: { id: paymentId }, include: PROYECCION_DEL_PAYMENT }),
       }
+    }
+    // Bajo el mismo mutex: el dinero de un cambio (`exchangeProtectedPayments`) no cambia de importe, propina, estado ni método.
+    const economicos = camposQueCambian(vigente, data).filter(campo => CAMPOS_ECONOMICOS.has(campo))
+    if (economicos.length > 0 && (await exchangeProtectedPayments(tx, [paymentId])).has(paymentId)) {
+      throw paymentProtectedByExchange(paymentId, economicos)
     }
 
     // This endpoint corrects bookkeeping fields; it is not a capture rail. Letting
@@ -582,6 +591,10 @@ export async function deletePayment(venueId: string, paymentId: string): Promise
     if (!candado.existe) throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
     if ((await cobrosDelProtocolo(tx, [paymentId])).has(paymentId)) {
       throw protegidoPorElProtocolo(paymentId, ['delete'], candado.originalPaymentId)
+    }
+    // Cambio de producto (spec 2026-10-20 §6.2, §6.7): el dinero de un cambio tampoco se borra.
+    if ((await exchangeProtectedPayments(tx, [paymentId])).has(paymentId)) {
+      throw paymentProtectedByExchange(paymentId, ['delete'])
     }
     // Delete transaction cost if exists
     if (payment.transactionCost) {

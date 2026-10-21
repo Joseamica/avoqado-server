@@ -183,6 +183,13 @@ describe('validarReasignacion — cuándo un cobro puede moverse', () => {
       )
     })
 
+    // Cambio de producto (spec 2026-10-20 §6.2): el cobro con crédito de cambio lo escribe sólo la operación de Cambio, ligado a su raíz.
+    it('rejects an EXCHANGE_CREDIT payment (system tender) like a gift card one', () => {
+      expect(motivosDe(validarReasignacion(caso, cobro({ tenderSystemKind: 'EXCHANGE_CREDIT' }), vecina(), cancelada()))).toEqual(
+        expect.arrayContaining([expect.stringContaining('crédito de cambio')]),
+      )
+    })
+
     it('🔴 rechaza si el DESTINO es una cuenta de tarjetas (cargaría tarjetas con un cobro ajeno)', () => {
       expect(motivosDe(validarReasignacion(caso, cobro(), vecina(), cancelada({ items: [renglonDeTarjeta] })))).toEqual(
         expect.arrayContaining([expect.stringContaining('el destino es una venta de tarjetas de regalo')]),

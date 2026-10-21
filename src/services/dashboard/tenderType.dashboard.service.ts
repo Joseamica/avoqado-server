@@ -29,6 +29,7 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import { logAction } from './activity-log.service'
 import { parseDbDateRange } from '../../utils/datetime'
 import { GiftCardError } from '../giftCards/giftCardErrors'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 
 /** SAT c_FormaPago codes accepted for a tender type. '99 Por definir' is excluded on purpose. */
 const VALID_SAT_FORMA_PAGO = new Set([
@@ -292,6 +293,13 @@ export async function updateTenderType(
 ) {
   const existing = await prisma.venueTenderType.findFirst({ where: { id: tenderTypeId, venueId } })
   if (!existing) throw new NotFoundError('Tipo de pago no encontrado.')
+  // Cambio de producto (spec 2026-10-20 §6.2): el «Crédito de cambio» tampoco; su rama va antes para dejar intacta la de regalo.
+  if (isExchangeCreditTenderKind(existing.systemKind)) {
+    throw new BadRequestError(
+      'El tipo de pago «Crédito de cambio» lo administra Avoqado: no se puede editar ni apagar.',
+      'EXCHANGE_CREDIT_TENDER_NOT_ALLOWED',
+    )
+  }
   // R4: un tender que administra Avoqado (systemKind) no se edita, no se apaga y no se muestra en el POS por decisión
   // del negocio: ni dinero, ni presentación, ni `active`.
   if (existing.systemKind != null) {
@@ -427,6 +435,11 @@ export async function resolveTenderForCharge(
     select: { id: true, baseMethod: true, active: true, revision: true, name: true, systemKind: true },
   })
   if (!tender) throw new NotFoundError('Tipo de pago no encontrado en este negocio.')
+  // Cambio de producto (spec 2026-10-20 §6.2): el crédito de cambio nunca es un medio de cobro; la operación de Cambio lo resuelve
+  // aparte (`resolveExchangeCreditTenderInTx`). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.
+  if (isExchangeCreditTenderKind(tender.systemKind)) {
+    throw new BadRequestError('El crédito de cambio sólo lo aplica la operación de Cambio.', 'EXCHANGE_CREDIT_TENDER_NOT_ALLOWED')
+  }
   // R4 / Review Focus 2: el saldo de una tarjeta de regalo sólo se cobra por «Pagar con saldo» (prueba de posesión,
   // descuento condicionado de la libreta). Ningún cobro manual —en vivo o reproducido de la cola— lo puede usar.
   if (tender.systemKind != null) {

@@ -4759,9 +4759,9 @@ model VenueTenderType {
   /// Immutable after creation (service-enforced).
   baseMethod PaymentMethod
   isSystem   Boolean           @default(false)
-  /// Tender que Avoqado administra (spec tarjetas de regalo § 4.4). NULL para TODOS los demás, incluidos
-  /// Efectivo/Tarjetas/Transferencia. `GIFT_CARD` = «Tarjeta de regalo»: showOnPos=false, nadie lo edita ni lo apaga,
-  /// y `resolveTenderForCharge` lo rechaza; sólo lo usa el cobro con saldo.
+  /// Tender que Avoqado administra; NULL para TODOS los demás, incluidos Efectivo/Tarjetas/Transferencia. showOnPos=false, nadie lo
+  /// edita ni lo apaga y `resolveTenderForCharge` lo rechaza. `GIFT_CARD` = «Tarjeta de regalo» (sólo el cobro con saldo, spec tarjetas
+  /// § 4.4). `EXCHANGE_CREDIT` = «Crédito de cambio» (sólo la operación de Cambio, forma SAT 17, fuera del cajón; spec cambio § 6.2).
   systemKind TenderSystemKind?
 
   /// Does money received with this tender physically enter the cash drawer?
