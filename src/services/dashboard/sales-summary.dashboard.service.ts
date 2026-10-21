@@ -1617,6 +1617,9 @@ export interface SalesSummaryExportFilters {
 
 const round2x = (n: number | null | undefined): number | null => (n == null ? null : Math.round(n * 100) / 100)
 
+/** Etiqueta de la fila `GIFT_CARD` de la exportación: lo pagado con saldo, neto de reversos. */
+export const ETIQUETA_SALDO_DE_REGALO_NETO = 'Saldo de tarjeta de regalo (neto)'
+
 /**
  * Flatten an already-computed SalesSummaryResponse into labeled rows, one per requested section.
  * Order-derived totals can be null under a payment-method filter — preserved as null (the
@@ -1654,23 +1657,18 @@ export function flattenSalesSummaryForExport(
       rows.push(t('Pagado con saldo de tarjeta de regalo (incluido en ventas y propinas)', s.paidWithGiftCardBalance))
     }
   }
-  if (want.has('paymentMethods') && report.byPaymentMethod) {
-    for (const m of report.byPaymentMethod) {
+  // Tarjetas de regalo (deuda P3 del 18-oct): con tarjetas, la sección son las VENTAS por método (lo que el panel pinta bajo
+  // «Total de Ventas»), con el saldo NETO de reversos como una fila más y su porcentaje sobre el mismo total. Sin tarjetas no hay
+  // `salesByPaymentMethod` ni saldo, y sale `byPaymentMethod` como siempre.
+  const metodos = report.salesByPaymentMethod ?? report.byPaymentMethod
+  if (want.has('paymentMethods') && metodos) {
+    for (const m of metodos) {
       rows.push({
         section: 'paymentMethods',
-        label: m.method,
+        label: m.method === 'GIFT_CARD' ? ETIQUETA_SALDO_DE_REGALO_NETO : m.method,
         count: m.count,
         amount: round2x(m.amount),
         percentage: round2x(m.percentage),
-      })
-    }
-    if (report.giftCardBalanceBreakdown) {
-      rows.push({
-        section: 'paymentMethods',
-        label: 'Saldo de tarjeta de regalo',
-        count: report.giftCardBalanceBreakdown.count,
-        amount: round2x(report.giftCardBalanceBreakdown.amount),
-        percentage: null,
       })
     }
   }

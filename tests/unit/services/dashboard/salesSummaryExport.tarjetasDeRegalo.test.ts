@@ -48,17 +48,35 @@ describe('exportación de Ventas · tarjetas de regalo', () => {
     expect(flattenSalesSummaryForExport(reporte(), ['totals']).rows).toHaveLength(8)
   })
 
-  it('el desglose por método agrega la fila del saldo', () => {
+  it('con tarjetas, la sección de métodos son las ventas por método con el saldo NETO y su porcentaje', () => {
     const { rows } = flattenSalesSummaryForExport(
       reporte({
-        byPaymentMethod: [{ method: 'CASH', amount: 300, count: 1, percentage: 100 }],
-        giftCardBalanceBreakdown: { amount: 200, count: 1, tips: 0, refunds: 0 },
+        // DINERO: incluye $150 de una carga de tarjeta cobrada en efectivo; no es lo que se exporta como ventas.
+        byPaymentMethod: [{ method: 'CASH', amount: 1050, count: 10, percentage: 100 }],
+        salesByPaymentMethod: [
+          { method: 'CASH', amount: 900, count: 9, percentage: 90 },
+          { method: 'GIFT_CARD', amount: 100, count: 2, percentage: 10 },
+        ],
+        giftCardBalanceBreakdown: { amount: 150, count: 2, tips: 0, refunds: 50 },
       }),
       ['paymentMethods'],
     )
     expect(rows).toEqual([
-      { section: 'paymentMethods', label: 'CASH', count: 1, amount: 300, percentage: 100 },
-      { section: 'paymentMethods', label: 'Saldo de tarjeta de regalo', count: 1, amount: 200, percentage: null },
+      { section: 'paymentMethods', label: 'CASH', count: 9, amount: 900, percentage: 90 },
+      { section: 'paymentMethods', label: 'Saldo de tarjeta de regalo (neto)', count: 2, amount: 100, percentage: 10 },
     ])
+    expect(rows.some(r => r.amount === 150)).toBe(false)
+  })
+
+  it('sin tarjetas no cambia', () => {
+    // Negocio sin ninguna tarjeta: el reporte no trae `salesByPaymentMethod` y el desglose del saldo viene en cero.
+    const { rows } = flattenSalesSummaryForExport(
+      reporte({
+        byPaymentMethod: [{ method: 'CASH', amount: 300, count: 1, percentage: 100 }],
+        giftCardBalanceBreakdown: { amount: 0, count: 0, tips: 0, refunds: 0 },
+      }),
+      ['paymentMethods'],
+    )
+    expect(rows).toEqual([{ section: 'paymentMethods', label: 'CASH', count: 1, amount: 300, percentage: 100 }])
   })
 })
