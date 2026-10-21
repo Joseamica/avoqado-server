@@ -4,10 +4,16 @@
  * propiedad de mesa de CAJA en cobrar y regresar. Introspección ESTÁTICA del router real
  * (molde: mobile.creditPacks.routes.permissions.test.ts), sin supertest ni base.
  */
+import express from 'express'
+import request from 'supertest'
 import { StaffRole } from '@prisma/client'
 import mobileRouter from '@/routes/mobile.routes'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
-import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
+import {
+  crearLimitadoresDeConsulta,
+  giftCardLookupRateLimiters,
+  giftCardPayFailureRateLimiters,
+} from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import { redactUrlSecrets } from '@/middlewares/requestLogger'
 import { hasPermission } from '@/lib/permissions'
 import { liberarCancelacionSchema } from '@/schemas/common/giftCard.common.schema'
@@ -224,4 +230,75 @@ describe('forma de consultar y cobrar con la liga (1b S2)', () => {
     const { error } = await validar(payGiftCardSchema, cobro(extra), enCuenta)
     expect(error?.statusCode).toBe(400)
   })
+})
+
+/**
+ * S2b (Q58, Q61): crear la cuenta de mostrador y cobrar con saldo en UNA transacción. Crear la cuenta es crear una venta
+ * (`orders:create`, con los candados de promociones de `POST /orders`) y cobrar con saldo es `giftCards:redeem`; los intentos
+ * fallidos gastan el MISMO contador que `pay-gift-card` (un código que no existe es un 404 en las dos rutas).
+ */
+describe('S2b: pay-new-order', () => {
+  const PAGAR_NUEVA = '/venues/:venueId/gift-cards/pay-new-order'
+  const capasDe = (metodo: string, ruta: string): any[] => {
+    const capa = (mobileRouter as any).stack.find((l: any) => l.route?.path === ruta && l.route.stack.some((c: any) => c.method === metodo))
+    return capa ? capa.route.stack.map((c: any) => c.handle) : []
+  }
+
+  it('existe, autentica y exige orders:create y DESPUÉS giftCards:redeem (Q61), sin pedir el plan', () => {
+    const h = capasDe('post', PAGAR_NUEVA)
+    expect(h.includes(authenticateTokenMiddleware)).toBe(true)
+    expect(h.filter(x => typeof x?.requiredPermission === 'string').map(x => x.requiredPermission)).toEqual([
+      'orders:create',
+      'giftCards:redeem',
+    ])
+    expect(h.some(x => typeof x?.featureCode === 'string')).toBe(false)
+  })
+
+  it('lleva los candados de promociones de POST /orders (la MISMA función), después de los permisos', () => {
+    const guardia = capasDe('post', '/venues/:venueId/orders').find(x => x?.name === 'checkPromotionGuardsIfPresent')
+    expect(guardia).toBeDefined()
+    const h = capasDe('post', PAGAR_NUEVA)
+    const redeem = h.findIndex(x => x?.requiredPermission === 'giftCards:redeem')
+    expect(h.indexOf(guardia)).toBeGreaterThan(redeem)
+  })
+
+  it('🔴 lleva la MISMA instancia del límite de fallos que pay-gift-card (un solo contador), y no el de consultas', () => {
+    const nueva = capasDe('post', PAGAR_NUEVA)
+    const cobro = capasDe('post', '/venues/:venueId/orders/:orderId/pay-gift-card')
+    for (const limitador of giftCardPayFailureRateLimiters) {
+      expect(nueva).toContain(limitador)
+      expect(cobro).toContain(limitador)
+    }
+    expect(giftCardLookupRateLimiters.some(l => nueva.includes(l))).toBe(false)
+  })
+
+  it.each([
+    ['pay-new-order', '/venues/v1/gift-cards/pay-new-order'],
+    ['pay-gift-card', '/venues/v1/orders/o1/pay-gift-card'],
+  ])(
+    '🔴 topes de 3: dos fallos en pay-new-order y uno en pay-gift-card desde el mismo aparato ⇒ el cuarto intento (%s) ⇒ 429',
+    async (_ruta, cuarto) => {
+      // Cada limitador de fallos que monta la ruta REAL se cambia por su gemelo con tope de 3 (misma posición: IP, aparato).
+      // Una ruta sin esos limitadores, o con instancias propias, queda sin límite aquí y la prueba truena.
+      const deTres = crearLimitadoresDeConsulta(3, 100, { soloFallos: true, prefijo: 'gift-card-pay' })
+      const gemelo = new Map(giftCardPayFailureRateLimiters.map((l, i) => [l, deTres[i]]))
+      const limitadoresDe = (ruta: string) =>
+        capasDe('post', ruta)
+          .filter(h => gemelo.has(h))
+          .map(h => gemelo.get(h)!)
+      const a = express()
+      const falla = (_req: express.Request, res: express.Response) => res.status(404).json({ ok: false })
+      a.post('/venues/:venueId/gift-cards/pay-new-order', ...limitadoresDe(PAGAR_NUEVA), falla)
+      a.post('/venues/:venueId/orders/:orderId/pay-gift-card', ...limitadoresDe('/venues/:venueId/orders/:orderId/pay-gift-card'), falla)
+      for (const ruta of [
+        '/venues/v1/gift-cards/pay-new-order',
+        '/venues/v1/gift-cards/pay-new-order',
+        '/venues/v1/orders/o1/pay-gift-card',
+      ])
+        expect((await request(a).post(ruta).set('X-Device-Id', 'caja-1')).status).toBe(404)
+      const r = await request(a).post(cuarto).set('X-Device-Id', 'caja-1')
+      expect(r.status).toBe(429)
+      expect(r.body.code).toBe('GIFT_CARD_LOOKUP_RATE_LIMITED')
+    },
+  )
 })

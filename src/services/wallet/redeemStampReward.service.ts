@@ -1,4 +1,4 @@
-import { Prisma, StampRewardStatus, StampRewardType } from '@prisma/client'
+import { Prisma, StampRewardStatus, StampRewardType, type StampReward } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
@@ -85,119 +85,136 @@ export interface RedeemStampRewardOptions {
   staffId?: string
 }
 
-export async function redeemStampReward(
+/** El premio tal como quedó quemado (la fila del canje). */
+export type StampRewardCanjeado = StampReward
+/** Lo que devuelve el recálculo de la cuenta tras el descuento del premio. */
+export type TotalesDeOrden = Awaited<ReturnType<typeof recalculateOrderTotals>>
+
+/**
+ * El canje de un premio con la transacción de quien llama (extraído de `redeemStampReward` SIN cambiarlo, S2b): candado de la
+ * orden, todo lo que decide el canje bajo ese candado, quemar el premio, su fila de descuento y el recálculo. No abre otra
+ * transacción ni escribe bitácora (eso va después del commit, `avisarPremioCanjeado`).
+ */
+export async function canjearPremioEnTx(
+  tx: Prisma.TransactionClient,
   venueId: string,
   orderId: string,
   rewardId: string,
-  options: RedeemStampRewardOptions = {},
-): Promise<RedeemStampRewardResult> {
-  // 🔴 La ORDEN se bloquea antes que el premio (Order → StampReward, el mismo orden que el cobro y la lealtad), todo
-  // lo que decide el canje —estado, cliente, base, tope y el artículo gratis— se lee bajo ese candado con la MISMA
-  // transacción, y quemar + descontar + recalcular van juntos: si algo falla después de quemar, el rollback devuelve
-  // el premio a PENDING y la cuenta queda como estaba.
-  const { reward, discountAmount, totals } = await prisma.$transaction(async tx => {
-    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
-    const order = await tx.order.findFirst({
-      where: { id: orderId, venueId },
-      select: {
-        id: true,
-        customerId: true,
-        subtotal: true,
-        discountAmount: true,
-        paymentStatus: true,
-        paidAmount: true,
-        originSystem: true,
-      },
-    })
+): Promise<{ reward: StampRewardCanjeado; discountAmount: number; totals: TotalesDeOrden }> {
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findFirst({
+    where: { id: orderId, venueId },
+    select: {
+      id: true,
+      customerId: true,
+      subtotal: true,
+      discountAmount: true,
+      paymentStatus: true,
+      paidAmount: true,
+      originSystem: true,
+    },
+  })
 
-    if (!order) throw new NotFoundError('Orden no encontrada')
-    // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
-    // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
-    rechazarSiEsImportada(order)
-    await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'premios de sellos')
-    // 🔴 El dinero ya entró: meter un descuento después deja el cobro y la cuenta
-    // discrepando, y el corte no cuadra al cerrar el turno.
-    if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
-      throw new BadRequestError('No se puede aplicar un premio a una cuenta ya pagada.')
-    }
-    if (!order.customerId) {
-      throw new BadRequestError('La cuenta debe estar vinculada al cliente dueño del premio.')
-    }
-    const customerId = order.customerId
+  if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'premios de sellos')
+  // 🔴 El dinero ya entró: meter un descuento después deja el cobro y la cuenta
+  // discrepando, y el corte no cuadra al cerrar el turno.
+  if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
+    throw new BadRequestError('No se puede aplicar un premio a una cuenta ya pagada.')
+  }
+  if (!order.customerId) {
+    throw new BadRequestError('La cuenta debe estar vinculada al cliente dueño del premio.')
+  }
+  const customerId = order.customerId
 
-    // 🔴 Filtrado por venue: sin eso, el premio de una sucursal bajaría la cuenta de
-    // otra. Un premio ajeno simplemente no existe para este negocio.
-    const reward = await tx.stampReward.findFirst({ where: { id: rewardId, venueId, customerId } })
-    if (!reward) throw new NotFoundError('Premio no encontrado')
+  // 🔴 Filtrado por venue: sin eso, el premio de una sucursal bajaría la cuenta de
+  // otra. Un premio ajeno simplemente no existe para este negocio.
+  const reward = await tx.stampReward.findFirst({ where: { id: rewardId, venueId, customerId } })
+  if (!reward) throw new NotFoundError('Premio no encontrado')
 
-    // Aviso claro para el caso normal; la garantía de verdad contra el doble canje es
-    // el UPDATE condicional de más abajo (el candado es de la ORDEN, no del premio).
-    if (reward.status !== StampRewardStatus.PENDING) {
-      throw new BadRequestError('Este premio ya fue canjeado.')
-    }
-    // Si caduca y aun así se canjea, la fecha de vencimiento es decorativa — y el
-    // negocio que puso un plazo descubre que nunca se respetó.
-    if (reward.expiresAt && reward.expiresAt.getTime() < Date.now()) {
-      throw new BadRequestError('Este premio ya venció.')
-    }
+  // Aviso claro para el caso normal; la garantía de verdad contra el doble canje es
+  // el UPDATE condicional de más abajo (el candado es de la ORDEN, no del premio).
+  if (reward.status !== StampRewardStatus.PENDING) {
+    throw new BadRequestError('Este premio ya fue canjeado.')
+  }
+  // Si caduca y aun así se canjea, la fecha de vencimiento es decorativa — y el
+  // negocio que puso un plazo descubre que nunca se respetó.
+  if (reward.expiresAt && reward.expiresAt.getTime() < Date.now()) {
+    throw new BadRequestError('Este premio ya venció.')
+  }
 
-    const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount ?? 0))
-    // 🔴 Tope contra la BASE. Sin él, un premio de $500 sobre una cuenta de $250 deja
-    // la orden en negativo: el negocio no sólo regala el consumo, queda debiendo.
-    const calculo = await calcularDescuento(tx, order, reward)
-    const discountAmount = Math.min(calculo.monto, base)
+  const base = Math.max(0, Number(order.subtotal) - Number(order.discountAmount ?? 0))
+  // 🔴 Tope contra la BASE. Sin él, un premio de $500 sobre una cuenta de $250 deja
+  // la orden en negativo: el negocio no sólo regala el consumo, queda debiendo.
+  const calculo = await calcularDescuento(tx, order, reward)
+  const discountAmount = Math.min(calculo.monto, base)
 
-    // 🔴 Y sobre una cuenta en cero NO se quema. Canjear ahí gastaría el premio sin
-    // darle nada al cliente: se pierde un café gratis ya ganado, y sin forma de
-    // devolverlo desde el mostrador.
-    if (discountAmount <= 0) {
-      throw new BadRequestError('Esta cuenta no tiene nada sobre lo que aplicar el premio.')
-    }
+  // 🔴 Y sobre una cuenta en cero NO se quema. Canjear ahí gastaría el premio sin
+  // darle nada al cliente: se pierde un café gratis ya ganado, y sin forma de
+  // devolverlo desde el mostrador.
+  if (discountAmount <= 0) {
+    throw new BadRequestError('Esta cuenta no tiene nada sobre lo que aplicar el premio.')
+  }
 
-    // 🔴 Quemar de forma CONDICIONAL. El mismo premio puede estar canjeándose sobre OTRA
-    // cuenta (otro candado de orden): lo único que separa un café regalado de dos es que
-    // este UPDATE exija el estado anterior. Si no encuentra la fila en PENDING, alguien
-    // más ganó la carrera y aquí no se crea ningún descuento.
-    const quemado = await tx.stampReward.updateMany({
-      where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING },
-      data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date() },
-    })
-    if (quemado.count === 0) {
-      throw new BadRequestError('Este premio ya fue canjeado.')
-    }
+  // 🔴 Quemar de forma CONDICIONAL. El mismo premio puede estar canjeándose sobre OTRA
+  // cuenta (otro candado de orden): lo único que separa un café regalado de dos es que
+  // este UPDATE exija el estado anterior. Si no encuentra la fila en PENDING, alguien
+  // más ganó la carrera y aquí no se crea ningún descuento.
+  const quemado = await tx.stampReward.updateMany({
+    where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING },
+    data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date() },
+  })
+  if (quemado.count === 0) {
+    throw new BadRequestError('Este premio ya fue canjeado.')
+  }
 
-    // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
-    await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
-    const descuento = await tx.orderDiscount.create({
-      data: {
-        orderId: order.id,
-        type: 'FIXED_AMOUNT',
-        name: reward.rewardLabel,
-        value: new Prisma.Decimal(discountAmount),
-        amount: new Prisma.Decimal(discountAmount),
-        isManual: true,
-        // B2: FREE_PRODUCT dirigido al renglón premiado (cabe por construcción: P11 ya lo topó a lo disponible); % y fijo,
-        // de CUENTA. Los centavos finales los pone el recálculo de abajo.
-        reparto: comoJson(
-          calculo.renglonPremiadoId
-            ? nuevoRepartoDirigido(discountAmount, { [calculo.renglonPremiadoId]: discountAmount }, { espejo: false })
-            : nuevoRepartoDeCuenta({ conPromociones: true }),
-        ),
-      },
-    })
+  // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+  await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
+  const descuento = await tx.orderDiscount.create({
+    data: {
+      orderId: order.id,
+      type: 'FIXED_AMOUNT',
+      name: reward.rewardLabel,
+      value: new Prisma.Decimal(discountAmount),
+      amount: new Prisma.Decimal(discountAmount),
+      isManual: true,
+      // B2: FREE_PRODUCT dirigido al renglón premiado (cabe por construcción: P11 ya lo topó a lo disponible); % y fijo,
+      // de CUENTA. Los centavos finales los pone el recálculo de abajo.
+      reparto: comoJson(
+        calculo.renglonPremiadoId
+          ? nuevoRepartoDirigido(discountAmount, { [calculo.renglonPremiadoId]: discountAmount }, { espejo: false })
+          : nuevoRepartoDeCuenta({ conPromociones: true }),
+      ),
+    },
+  })
 
-    // Deja el rastro de vuelta: es lo que permitirá devolver el premio si alguien
-    // quita ese descuento de la cuenta.
-    await tx.stampReward.update({ where: { id: rewardId }, data: { orderDiscountId: descuento.id } })
+  // Deja el rastro de vuelta: es lo que permitirá devolver el premio si alguien
+  // quita ese descuento de la cuenta.
+  await tx.stampReward.update({ where: { id: rewardId }, data: { orderDiscountId: descuento.id } })
 
-    // 🔴 Crear la fila del descuento NO baja la cuenta: `total` y `discountAmount` de
-    // la orden son campos calculados. Sin este recálculo el premio queda quemado y el
-    // cliente paga completo — que es la peor combinación posible. Va DENTRO de la
-    // transacción: quemar sin recalcular (o al revés) nunca puede quedar escrito.
-    const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount ?? 0), tx)
-    return { reward, discountAmount, totals }
-  }, ORDER_LOCK_WAIT_BUDGET)
+  // 🔴 Crear la fila del descuento NO baja la cuenta: `total` y `discountAmount` de
+  // la orden son campos calculados. Sin este recálculo el premio queda quemado y el
+  // cliente paga completo — que es la peor combinación posible. Va DENTRO de la
+  // transacción: quemar sin recalcular (o al revés) nunca puede quedar escrito.
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount ?? 0), tx)
+  return { reward, discountAmount, totals }
+}
 
+/**
+ * Lo de después del commit de un canje: su bitácora y el aviso a la tarjeta del cliente. Fire-and-forget: un fallo de auditoría
+ * no puede deshacer un canje que ya ocurrió.
+ */
+export function avisarPremioCanjeado(
+  venueId: string,
+  orderId: string,
+  rewardId: string,
+  reward: Pick<StampRewardCanjeado, 'customerId' | 'rewardType' | 'rewardLabel'>,
+  discountAmount: number,
+  staffId?: string,
+): void {
   // Un premio es producto que sale sin cobrarse. Sin registro no hay forma de
   // revisar por qué el inventario no cuadra al cierre. Fire-and-forget: un fallo de
   // auditoría no puede deshacer un canje que ya ocurrió.
@@ -205,7 +222,7 @@ export async function redeemStampReward(
     action: 'STAMP_REWARD_REDEEMED',
     entity: 'StampReward',
     entityId: rewardId,
-    staffId: options.staffId,
+    staffId,
     venueId,
     data: {
       orderId,
@@ -218,6 +235,24 @@ export async function redeemStampReward(
 
   // El premio se fue de su cartilla: su tarjeta tiene que dejar de ofrecerlo.
   void notifyCustomerPassUpdated(venueId, reward.customerId)
+}
+
+export async function redeemStampReward(
+  venueId: string,
+  orderId: string,
+  rewardId: string,
+  options: RedeemStampRewardOptions = {},
+): Promise<RedeemStampRewardResult> {
+  // 🔴 La ORDEN se bloquea antes que el premio (Order → StampReward, el mismo orden que el cobro y la lealtad), todo
+  // lo que decide el canje —estado, cliente, base, tope y el artículo gratis— se lee bajo ese candado con la MISMA
+  // transacción, y quemar + descontar + recalcular van juntos: si algo falla después de quemar, el rollback devuelve
+  // el premio a PENDING y la cuenta queda como estaba.
+  const { reward, discountAmount, totals } = await prisma.$transaction(
+    tx => canjearPremioEnTx(tx, venueId, orderId, rewardId),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
+
+  avisarPremioCanjeado(venueId, orderId, rewardId, reward, discountAmount, options.staffId)
 
   return { discountAmount, rewardLabel: reward.rewardLabel, order: totals }
 }

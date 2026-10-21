@@ -355,6 +355,8 @@ export async function canjearSobresEnTx(
     cards: LockedGiftCard[]
     staffId?: string | null
     deviceId?: string | null
+    /** S2b (Q58): sólo `pay-new-order` la pasa — la huella del cuerpo, con la que su reintento por la llave se reconoce. */
+    operationHash?: string
   },
 ): Promise<Array<{ giftCardId: string; amount: Prisma.Decimal; balanceAfter: Prisma.Decimal }>> {
   if (!p.amount.greaterThan(0) || p.amount.decimalPlaces() > 2) {
@@ -406,6 +408,7 @@ export async function canjearSobresEnTx(
         orderId: p.orderId,
         staffId: p.staffId ?? null,
         deviceId: p.deviceId ?? null,
+        ...(p.operationHash ? { operationHash: p.operationHash } : {}),
       },
     })
     resultado.push({ giftCardId: card.id, amount: toma, balanceAfter })

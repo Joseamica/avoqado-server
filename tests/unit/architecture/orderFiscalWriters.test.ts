@@ -316,7 +316,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
       'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
       'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
-      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
       'src/services/tpv/order.tpv.service.ts#applyDiscount',
@@ -359,7 +359,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/tpv/order.tpv.service.ts#compItems',
       'src/services/tpv/order.tpv.service.ts#removeOrderItem',
       'src/services/tpv/order.tpv.service.ts#voidItems',
-      'src/services/wallet/redeemStampReward.service.ts#redeemStampReward',
+      'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx',
     ],
     proof: proof(
       REPARTO,
@@ -482,7 +482,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceChargesInTransaction',
       'src/services/promotions/promotion.service.ts#applyPromotionInTransaction',
       'src/services/promotions/promotion.service.ts#removePromotionFromOrder',
-      'src/services/wallet/redeemStampReward.service.ts#redeemStampReward',
+      'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx',
     ],
     proof: T4('applyOrderDiscount'),
   },
@@ -521,8 +521,10 @@ const WRITERS: Record<string, Writer> = {
     lock: LOCK,
     proof: T4('redeemPointsToOrder'),
   },
-  'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
+  // Tarjetas 1b S2b: el cuerpo de la transacción de `createOrderWithItems` se extrajo SIN cambiarlo (lo abren `createOrderWithItems`
+  // y `payGiftCardOnNewOrder`, éste con el cobro con saldo en la MISMA transacción, Q58).
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     class: 'PRIVATE_CREATION',
     creates: ['.order.create('],
     note: 'T4-R1: promotions and the reaffirmed money run inside the transaction that creates the order (no reader sees it without its combo)',
@@ -733,7 +735,7 @@ const OPTIONAL_TX: Array<{ callee: string; txIndex: number; lockedCallers: strin
     callee: 'applyPromotionToOrder',
     txIndex: 1,
     lockedCallers: [
-      'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+      'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
     ],
   },
@@ -1127,6 +1129,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#payCashOrder': 1,
   // Tarjetas de regalo (A8): el cobro con saldo abre su tx y el núcleo toma la Order; regresar el saldo toma la topología.
   'src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder': 1,
+  // Tarjetas 1b S2b (Q58): crear la cuenta de mostrador y cobrarla con saldo abren UNA transacción (llave → cuenta → premio → cobro).
+  'src/services/mobile/order.mobile.service.ts#payGiftCardOnNewOrder': 1,
   'src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': 1,
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': 1,
@@ -1304,7 +1308,7 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
   // Nacen en Avoqado en la misma transacción (nunca son importadas), o son el ayudante mismo, cuyos llamadores ya pasan la red.
   const EXENTOS = new Set([
     'src/services/tpv/order.tpv.service.ts#createOrderWithItems',
-    'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
+    'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
     'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
     // B2c T5: el vale nace en Avoqado (`openAreaTicket`): nunca es importado.
     'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',

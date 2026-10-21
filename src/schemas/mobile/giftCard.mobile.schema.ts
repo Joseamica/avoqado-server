@@ -123,6 +123,25 @@ export const payGiftCardSchema = z.object({
   query: z.any().optional(),
 })
 
+/**
+ * S2b (Q58): `pay-new-order` — el cuerpo de la venta de mostrador de `POST /orders` (lo valida y lo arma `leerVentaDeMostrador`, por
+ * eso `.passthrough()`: los artículos y demás campos de la venta llegan al controller) más el cobro con saldo. `tip` es la propina
+ * DEL COBRO en pesos, como en `pay-gift-card`; la propina de la orden en centavos no existe en esta ruta.
+ */
+export const payNewOrderSchema = z.object({
+  params: venueParams,
+  body: z
+    .object({
+      idempotencyKey,
+      proof: proofSchema,
+      amount: pesosPositivos('el monto'),
+      tip: pesos('la propina').optional(),
+      ...segunElAparato,
+    })
+    .passthrough(),
+  query: z.any().optional(),
+})
+
 export const paymentByKeySchema = z.object({
   params: venueParams.extend({ idempotencyKey }),
   body: z.any().optional(),

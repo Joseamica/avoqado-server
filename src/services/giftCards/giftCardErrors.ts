@@ -33,6 +33,8 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_SALE_REFUND_MUST_BE_FULL'
   // Pendientes 1a (T3): la devolución SIN venta se rechaza en un negocio que ya cobró tarjetas (aditivo).
   | 'GIFT_CARD_UNLINKED_REFUND_BLOCKED'
+  // 1b S2b (Q60): en la venta nueva cobrada con saldo, un premio de sellos que ya no aplica rechaza TODO (nada se crea).
+  | 'GIFT_CARD_STAMP_REWARD_NOT_APPLIED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422, extra?: Record<string, unknown>) {

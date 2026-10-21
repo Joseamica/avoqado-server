@@ -12,7 +12,13 @@ import { Prisma } from '@prisma/client'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
 import { lookupGiftCards } from '@/services/giftCards/giftCardLookup.service'
 import type { PruebaDePosesion } from '@/services/giftCards/giftCardProof'
-import { getGiftCardPaymentByKey, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
+import {
+  getGiftCardPaymentByKey,
+  payGiftCardBalanceOnOrder,
+  payGiftCardOnNewOrder,
+  returnGiftBalanceAndCancelOrder,
+} from '@/services/mobile/order.mobile.service'
+import { leerVentaDeMostrador } from '@/controllers/mobile/order.mobile.controller'
 import { auditarTarjetas } from '@/services/giftCards/giftCardSurface.service'
 import { aparatoDe, origenDe, segunElAparato, staffDe } from '@/utils/giftCardRequest'
 
@@ -69,6 +75,56 @@ export async function payWithBalance(req: Request, res: Response) {
       entityId: data.paymentId,
       data: {
         orderId,
+        idempotencyKey,
+        amount: data.amount,
+        tipAmount: data.tipAmount,
+        cards: data.redeemed.map(r => ({ giftCardId: r.giftCardId, amount: r.amount })),
+        // Q110: el cobro es SIEMPRE de la sesión (`staffId`); si el aparato dice que lo empezó otra persona, va como nota.
+        ...segunElAparato(req),
+      },
+      ...origenDe(req),
+    })
+  res.json({ success: true, data })
+}
+
+/**
+ * S2b (Q58): `POST …/gift-cards/pay-new-order` — la venta de mostrador nace y se cobra con saldo en una sola transacción. La venta
+ * se lee como en `POST /orders` (`leerVentaDeMostrador`, sin la propina de orden): su vendedor es el `staffId` del cuerpo o la
+ * sesión (Q76). El cobro es SIEMPRE de la sesión (Q110); `iniciadoPor` sólo va como nota en la bitácora, nunca en un `replay`.
+ */
+export async function payNewOrder(req: Request, res: Response) {
+  const { venueId } = req.params
+  const staffId = staffDe(req)
+  const lectura = leerVentaDeMostrador(req.body, { conPropinaDeOrden: false, venueId, usuario: staffId })
+  if ('error' in lectura) {
+    res.status(400).json({ success: false, message: lectura.error })
+    return
+  }
+  const { idempotencyKey, proof, amount, tip } = req.body as {
+    idempotencyKey: string
+    proof: PruebaDePosesion
+    amount: Prisma.Decimal
+    tip?: Prisma.Decimal
+  }
+  const data = await payGiftCardOnNewOrder(venueId, {
+    ...lectura.input,
+    idempotencyKey,
+    proof,
+    amount,
+    tip: tip ?? new Prisma.Decimal(0),
+    deviceId: aparatoDe(req),
+    procesadoPor: staffId,
+  })
+  if (data.replay !== true)
+    auditarTarjetas({
+      venueId,
+      staffId,
+      action: 'GIFT_CARD_REDEEMED',
+      entity: 'Payment',
+      entityId: data.paymentId,
+      data: {
+        orderId: data.orderId,
+        cuentaNueva: true,
         idempotencyKey,
         amount: data.amount,
         tipAmount: data.tipAmount,

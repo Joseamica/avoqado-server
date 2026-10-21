@@ -1645,6 +1645,19 @@ router.post(
   checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
   giftCardMobileController.payWithBalance,
 )
+// S2b (Q58, Q61): una venta de mostrador nace y se cobra con saldo en UNA transacción. Crear la cuenta es crear una venta
+// (`orders:create`, con los candados de promociones de `POST /orders`); cobrar con saldo, `giftCards:redeem`. Los fallos gastan
+// el MISMO contador que `pay-gift-card` (la misma instancia): un código que no existe es un 404 en las dos.
+router.post(
+  '/venues/:venueId/gift-cards/pay-new-order',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.payNewOrderSchema),
+  checkPermission('orders:create'),
+  checkPermission('giftCards:redeem'),
+  checkPromotionGuardsIfPresent,
+  ...giftCardPayFailureRateLimiters,
+  giftCardMobileController.payNewOrder,
+)
 router.post(
   '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel',
   authenticateTokenMiddleware,

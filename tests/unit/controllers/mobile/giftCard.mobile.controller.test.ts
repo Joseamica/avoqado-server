@@ -33,6 +33,7 @@ jest.mock('@/services/giftCards/giftCardCancel.service', () => ({
 jest.mock('@/services/mobile/order.mobile.service', () => ({
   ...jest.requireActual('@/services/mobile/order.mobile.service'),
   payGiftCardBalanceOnOrder: jest.fn(),
+  payGiftCardOnNewOrder: jest.fn(),
   getGiftCardPaymentByKey: jest.fn(),
   returnGiftBalanceAndCancelOrder: jest.fn(),
 }))
@@ -49,7 +50,12 @@ import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
 import { lookupGiftCards } from '@/services/giftCards/giftCardLookup.service'
 import { segunElAparato } from '@/utils/giftCardRequest'
 import { iniciarCancelacionDeVenta, liberarCancelacionDeVenta } from '@/services/giftCards/giftCardCancel.service'
-import { getGiftCardPaymentByKey, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
+import {
+  getGiftCardPaymentByKey,
+  payGiftCardBalanceOnOrder,
+  payGiftCardOnNewOrder,
+  returnGiftBalanceAndCancelOrder,
+} from '@/services/mobile/order.mobile.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 
 const m = (f: unknown) => f as jest.Mock
@@ -63,6 +69,7 @@ app.get('/venues/:venueId/gift-cards/settings', validateRequest(soloVenueSchema)
 app.post('/venues/:venueId/gift-cards/orders', validateRequest(s.createGiftCardOrderSchema), ctrl.createOrder)
 app.post('/venues/:venueId/gift-cards/lookup', validateRequest(s.lookupSchema), ctrl.lookup)
 app.post('/venues/:venueId/orders/:orderId/pay-gift-card', validateRequest(s.payGiftCardSchema), ctrl.payWithBalance)
+app.post('/venues/:venueId/gift-cards/pay-new-order', validateRequest(s.payNewOrderSchema), ctrl.payNewOrder)
 app.get('/venues/:venueId/gift-cards/payments/:idempotencyKey', validateRequest(s.paymentByKeySchema), ctrl.getPaymentByKey)
 app.post(
   '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel',
@@ -495,5 +502,83 @@ describe('Q110: quién empezó un reenvío (sólo nota de bitácora)', () => {
     m(payGiftCardBalanceOnOrder).mockResolvedValue(RESULTADO)
     await request(app).post(`${B}/orders/o9/pay-gift-card`).send(COBRO)
     expect(audit.mock.calls[0][0].data).not.toHaveProperty('iniciadoPorSegunElAparato')
+  })
+})
+
+/** S2b (Q58): la venta de mostrador (el cuerpo de `POST /orders`) y el cobro con saldo en una sola petición. */
+describe('cobrar con saldo una venta nueva (pay-new-order)', () => {
+  const ANA = 'cl9ana0000000000000000000'
+  const VENTA = { items: [{ name: 'Blusa', quantity: 1, unitPrice: 80000 }], discount: 500, ...COBRO }
+  const entrada = () => m(payGiftCardOnNewOrder).mock.calls[0][1]
+
+  it('la venta llega como en POST /orders (vendedor = la sesión, TAKEOUT); el cobro, aparte; `tip` es la propina DEL COBRO', async () => {
+    m(payGiftCardOnNewOrder).mockResolvedValue(RESULTADO)
+    const r = await request(app).post(`${B}/gift-cards/pay-new-order`).set('X-Device-Id', 'caja-1').send(VENTA)
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual(RESULTADO)
+    expect(m(payGiftCardOnNewOrder).mock.calls[0][0]).toBe('v1')
+    expect(entrada()).toMatchObject({
+      items: VENTA.items,
+      staffId: 'staff-1',
+      orderType: 'TAKEOUT',
+      discount: 500,
+      idempotencyKey: 'cobro-0001-abc',
+      proof: { kind: 'CODE', code: 'K7QZ-ABCD-EFGH-JKMN-P' },
+      deviceId: 'caja-1',
+      procesadoPor: 'staff-1',
+    })
+    expect(entrada().amount.toString()).toBe('300')
+    expect(entrada().tip.toString()).toBe('20.5')
+    expect(audit).toHaveBeenCalledTimes(1)
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({ staffId: 'staff-1', action: 'GIFT_CARD_REDEEMED', entity: 'Payment', entityId: 'p1' }),
+    )
+    expect(JSON.stringify(audit.mock.calls)).not.toContain('K7QZ-ABCD')
+  })
+
+  it('🔴 Q76: con el vendedor B en el cuerpo la venta va a B; quien procesa el cobro sigue siendo la sesión', async () => {
+    m(payGiftCardOnNewOrder).mockResolvedValue(RESULTADO)
+    await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, staffId: 'staff-B' })
+    expect(entrada()).toMatchObject({ staffId: 'staff-B', procesadoPor: 'staff-1' })
+  })
+
+  it('🔴 Q110: iniciadoPor A con el token de B ⇒ el cobro es de la sesión y la bitácora lleva la nota; el servicio no recibe A', async () => {
+    m(payGiftCardOnNewOrder).mockResolvedValue(RESULTADO)
+    await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, iniciadoPor: ANA, iniciadoPorNombre: 'Ana' })
+    expect(JSON.stringify(entrada())).not.toContain(ANA)
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'staff-1',
+        data: expect.objectContaining({ iniciadoPorSegunElAparato: { iniciadoPor: ANA, iniciadoPorNombre: 'Ana' } }),
+      }),
+    )
+  })
+
+  it('el reintento (`replay: true`) responde lo mismo y NO duplica la bitácora', async () => {
+    m(payGiftCardOnNewOrder).mockResolvedValue({ ...RESULTADO, replay: true })
+    const r = await request(app).post(`${B}/gift-cards/pay-new-order`).send(VENTA)
+    expect(r.body.data).toEqual({ ...RESULTADO, replay: true })
+    expect(audit).not.toHaveBeenCalled()
+  })
+
+  it('sin artículos ⇒ el mismo 400 de POST /orders, sin llegar al servicio', async () => {
+    const r = await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, items: [] })
+    expect(r.status).toBe(400)
+    expect(r.body.message).toBe('Se requiere al menos un item')
+    expect(payGiftCardOnNewOrder).not.toHaveBeenCalled()
+  })
+
+  it('sin la prueba de posesión ⇒ 400 del esquema', async () => {
+    const r = await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, proof: undefined })
+    expect(r.status).toBe(400)
+    expect(payGiftCardOnNewOrder).not.toHaveBeenCalled()
   })
 })

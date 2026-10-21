@@ -130,7 +130,7 @@ const SYNC = 'sincronizarRepartos('
 const HISTORICO = 'conservarDescuentoHistorico('
 const RECORTA = 'recortarDescuentosDeRenglones('
 const ESCRITORES_DE_FILAS: Record<string, Fila> = {
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     clase: 'ESCRIBE',
     marcas: ['buildItemDiscountRow(', 'filaDeDescuentoDeCuenta(', SYNC],
   },
@@ -176,7 +176,7 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
-  'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': {
+  'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDirigido(', 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
@@ -214,7 +214,7 @@ const RECALCULADORES = [
 
 type Origen = { origen: 'FILAS' | 'RECALCULO' | 'CERO' | 'RENGLON' | 'D8'; nota: string }
 const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     origen: 'FILAS',
     nota: 'espejos de artículo + fila de cuenta del POS; con promociones, reafirmada',
   },
@@ -493,7 +493,7 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: '«Cobrar»: orden, renglones y filas con su reparto (B2)',
   },
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     clase: 'CREACION',
     nota: 'venta del móvil: espejos y fila de cuenta con su reparto (B2)',
   },
