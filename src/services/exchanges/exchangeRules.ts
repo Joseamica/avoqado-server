@@ -10,6 +10,7 @@ import { claseDeEstado, esVentaCerrada } from '../shared/orderBalance'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import {
+  assertCents,
   DELIVERY_PLATFORM_ORDER_SOURCES,
   isExchangeCreditTenderKind,
   NON_MERCHANDISE_PRODUCT_TYPES,
@@ -69,6 +70,10 @@ export function saleBlockReason(sale: {
 export type PayoutMethod = 'CASH' | 'BANK_TRANSFER' | 'GIFT_CARD_BALANCE'
 /** `SAME` = por el mismo medio del cobro; `CHOSEN` = «Devolver con» otro medio que el cobro admite. */
 export type PayoutMode = 'SAME' | 'CHOSEN'
+/** Por qué medios se devuelve lo de un cobro, y en qué modo. */
+export type PayoutModes = Partial<Record<PayoutMethod, PayoutMode>>
+
+const PAYOUT_METHODS: readonly PayoutMethod[] = ['CASH', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE']
 
 /** Lo que las reglas de devolución necesitan del cobro (incluye todo `CobroParaDevolver`). */
 export interface MoneyShape {
@@ -83,30 +88,48 @@ export interface MoneyShape {
 }
 
 /**
- * Por qué medios se puede devolver lo de un cobro (spec §6.1: «lo que sale de la tienda sale por donde entró»). Recibe el cobro
- * RAÍZ del dinero: lo pagado con «Crédito de cambio» sale por el método del cobro original del que salió ese crédito, nunca por
- * «otro» ni en efectivo libre (§6.3, §6.7), así que un crédito de cambio no escoge nada por sí mismo.
+ * Por qué medios se puede devolver lo de un cobro que NO es «Crédito de cambio» (spec §6.1: «lo que sale de la tienda sale por
+ * donde entró»; §6.3). Un crédito de cambio no escoge nada por sí mismo (por eso da `{}`): los modos de un cobro pagado con
+ * crédito salen de `modesForExchangeCreditRoot(raíz)`, nunca de `payoutModesFor(raíz)`.
  */
-export function payoutModesFor(root: MoneyShape): Partial<Record<PayoutMethod, PayoutMode>> {
-  if (isExchangeCreditTenderKind(root.tenderSystemKind)) return {}
-  if (isGiftCardTenderKind(root.tenderSystemKind)) return { GIFT_CARD_BALANCE: 'SAME' }
-  if (seDevuelveEnTerminal(root)) return {}
-  const choosable = sePuedeEscogerComoDevolver(root)
-  if (paymentCountsAsDrawerCash(root)) return choosable ? { CASH: 'SAME', BANK_TRANSFER: 'CHOSEN' } : { CASH: 'SAME' }
-  if (root.method === 'BANK_TRANSFER') return choosable ? { BANK_TRANSFER: 'SAME', CASH: 'CHOSEN' } : { BANK_TRANSFER: 'SAME' }
+export function payoutModesFor(payment: MoneyShape): PayoutModes {
+  if (isExchangeCreditTenderKind(payment.tenderSystemKind)) return {}
+  if (isGiftCardTenderKind(payment.tenderSystemKind)) return { GIFT_CARD_BALANCE: 'SAME' }
+  if (seDevuelveEnTerminal(payment)) return {}
+  const choosable = sePuedeEscogerComoDevolver(payment)
+  if (paymentCountsAsDrawerCash(payment)) return choosable ? { CASH: 'SAME', BANK_TRANSFER: 'CHOSEN' } : { CASH: 'SAME' }
+  if (payment.method === 'BANK_TRANSFER') return choosable ? { BANK_TRANSFER: 'SAME', CASH: 'CHOSEN' } : { BANK_TRANSFER: 'SAME' }
   return choosable ? { CASH: 'CHOSEN', BANK_TRANSFER: 'CHOSEN' } : {}
+}
+
+/**
+ * Los modos de un cobro pagado con «Crédito de cambio», a partir de su cobro RAÍZ (spec §6.7): lo pagado con crédito sale SÓLO
+ * por el método de la raíz, por Reembolso o por otro Cambio. Quedan sólo las entradas SAME de la raíz, nunca «Devolver con». Una
+ * raíz pagada con saldo de tarjeta de regalo da `{}`: esa cadena todavía no se abre.
+ */
+export function modesForExchangeCreditRoot(root: MoneyShape): PayoutModes {
+  if (isGiftCardTenderKind(root.tenderSystemKind)) return {}
+  const modes = payoutModesFor(root)
+  const same: PayoutModes = {}
+  for (const method of PAYOUT_METHODS) if (modes[method] === 'SAME') same[method] = 'SAME'
+  return same
 }
 
 /** Un cobro de la venta original: lo que le queda por devolver de la venta (sin propina) y sus medios de devolución. */
 export interface PaymentCapacity {
   paymentId: string
   saleRemainingCents: number
-  modes: Partial<Record<PayoutMethod, PayoutMode>>
+  modes: PayoutModes
 }
-/** Lo más que se puede devolver por un medio; `needsRefundToCash` si alguna parte del máximo sale de un cobro CHOSEN con CASH. */
+/**
+ * Lo más que se puede devolver por un medio. `maxSameCents` es la parte que sale por el MISMO medio, sin «Devolver con»: una
+ * diferencia en efectivo de hasta ese monto no pide `payments:refund-to-cash` y una mayor sí. `needsRefundToCash`: alguna parte
+ * del máximo sale de un cobro CHOSEN con CASH.
+ */
 export interface PayoutOption {
   method: PayoutMethod
   maxCents: number
+  maxSameCents: number
   needsRefundToCash: boolean
 }
 /** Un pedazo del cambio: `PAYOUT` es diferencia que sale de la tienda; `CREDIT` es crédito para la venta nueva (no mueve dinero). */
@@ -119,15 +142,6 @@ export interface AllocationSlice {
 export type AllocationResult =
   | { ok: true; slices: AllocationSlice[]; needsRefundToCash: boolean }
   | { ok: false; reason: 'INSUFFICIENT_FOR_METHOD' | 'NOTHING_LEFT_TO_REFUND'; payoutOptions: PayoutOption[] }
-
-const PAYOUT_METHODS: readonly PayoutMethod[] = ['CASH', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE']
-
-/** Un importe en centavos es un entero seguro y no negativo; otra cosa es un error de quien llama, no un caso de negocio. */
-function assertCents(what: string, cents: number): void {
-  if (!Number.isSafeInteger(cents) || cents < 0) {
-    throw new Error(`EXCHANGE_INVALID_CENTS: ${what} debe ser un entero de centavos ≥ 0 (llegó ${cents})`)
-  }
-}
 
 /** Lo que le queda a un cobro, nunca negativo: uno devuelto de más (dato viejo) no presta nada. */
 function remainingOf(capacity: PaymentCapacity): number {
@@ -142,12 +156,13 @@ export function payoutOptionsOf(capacities: PaymentCapacity[]): PayoutOption[] {
     const from = capacities.filter(c => c.modes[method] && remainingOf(c) > 0)
     const maxCents = from.reduce((sum, c) => sum + remainingOf(c), 0)
     if (maxCents === 0) return []
-    return [{ method, maxCents, needsRefundToCash: method === 'CASH' && from.some(c => c.modes.CASH === 'CHOSEN') }]
+    const maxSameCents = from.filter(c => c.modes[method] === 'SAME').reduce((sum, c) => sum + remainingOf(c), 0)
+    return [{ method, maxCents, maxSameCents, needsRefundToCash: method === 'CASH' && maxCents > maxSameCents }]
   })
 }
 
 /**
- * De qué cobro sale cada peso (RF2, spec §6.3). Ningún cobro da más de lo que le queda. La diferencia `payout` sale primero de
+ * De qué cobro sale cada peso (spec §6.3). Ningún cobro da más de lo que le queda. La diferencia `payout` sale primero de
  * los cobros que la devuelven por el MISMO medio y luego de los que admiten «Devolver con», cada grupo en el orden de entrada
  * (quien llama pone primero el cobro desde el que se abrió). Después el crédito, con lo que le quede a cada cobro, también en el
  * orden de entrada: tarjeta incluida, porque no mueve dinero. Si diferencia + crédito pasan de lo que le queda a la venta:

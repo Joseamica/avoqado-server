@@ -1,11 +1,12 @@
 /**
  * Reglas puras del cambio de producto (spec `docs/superpowers/specs/2026-10-20-cambio-de-producto-design.md` §4, §5.2 y §6.3):
- * el interruptor por giro, qué renglón se puede cambiar y de qué cobro sale el dinero cuando la venta tiene varios (RF2).
+ * el interruptor por giro, qué renglón se puede cambiar y de qué cobro sale el dinero cuando la venta tiene varios.
  */
 import {
   allocateAcrossPayments,
   effectiveExchangesEnabled,
   lineBlockReason,
+  modesForExchangeCreditRoot,
   payoutModesFor,
   payoutOptionsOf,
   saleBlockReason,
@@ -14,6 +15,7 @@ import {
   type PaymentCapacity,
   type PayoutMethod,
   type PayoutMode,
+  type PayoutModes,
 } from '../../../../src/services/exchanges/exchangeRules'
 
 /** Un cobro con lo que le queda por devolver y sus medios de devolución. */
@@ -174,6 +176,34 @@ describe('payoutModesFor', () => {
     ).toEqual({}))
 })
 
+describe('modesForExchangeCreditRoot', () => {
+  // Lo pagado con crédito de cambio sale SÓLO por el método de su cobro raíz, por Reembolso o por otro Cambio (spec §6.7):
+  // nunca «Devolver con» otro medio, aunque la raíz sí lo admita.
+  it.each<[string, MoneyShape, PayoutModes]>([
+    ['a cash root → { CASH: SAME }', money(), { CASH: 'SAME' }],
+    [
+      'a transfer root → { BANK_TRANSFER: SAME }, never CASH',
+      money({ method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' }),
+      { BANK_TRANSFER: 'SAME' },
+    ],
+    [
+      'a choosable «other» root → {}',
+      money({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderTypeId: 'tt-otro', tenderSatFormaPago: '99' }),
+      {},
+    ],
+    [
+      'a card root from our terminal keeps only its SAME entry, which today is none → {}',
+      money({ method: 'CREDIT_CARD', source: 'TPV', fundsFlow: 'AVOQADO_PROCESSED' }),
+      {},
+    ],
+    [
+      'a gift card balance root → {}: that chain is not open yet',
+      money({ method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED', tenderTypeId: 'tt-gc', tenderSystemKind: 'GIFT_CARD' }),
+      {},
+    ],
+  ])('%s', (_name, root, expected) => expect(modesForExchangeCreditRoot(root)).toEqual(expected))
+})
+
 describe('payoutOptionsOf', () => {
   it('adds up what each method can return and flags cash that comes from a payment of another method', () =>
     expect(
@@ -184,10 +214,22 @@ describe('payoutOptionsOf', () => {
         cap('card', 60000, {}),
       ]),
     ).toEqual([
-      { method: 'CASH', maxCents: 100000, needsRefundToCash: true },
-      { method: 'BANK_TRANSFER', maxCents: 100000, needsRefundToCash: false },
-      { method: 'GIFT_CARD_BALANCE', maxCents: 5000, needsRefundToCash: false },
+      { method: 'CASH', maxCents: 100000, maxSameCents: 20000, needsRefundToCash: true },
+      { method: 'BANK_TRANSFER', maxCents: 100000, maxSameCents: 80000, needsRefundToCash: false },
+      { method: 'GIFT_CARD_BALANCE', maxCents: 5000, maxSameCents: 5000, needsRefundToCash: false },
     ]))
+
+  it('maxSameCents tells the POS whether a cash difference needs refund-to-cash', () => {
+    // Efectivo 200 + transferencia 800: hasta 200 sale del cajón por el mismo medio; un centavo más ya es efectivo sobre la
+    // transferencia y necesita `payments:refund-to-cash`.
+    const caps = [
+      cap('cash', 20000, { CASH: 'SAME', BANK_TRANSFER: 'CHOSEN' }),
+      cap('transfer', 80000, { BANK_TRANSFER: 'SAME', CASH: 'CHOSEN' }),
+    ]
+    expect(payoutOptionsOf(caps)[0]).toEqual({ method: 'CASH', maxCents: 100000, maxSameCents: 20000, needsRefundToCash: true })
+    expect(allocateAcrossPayments(caps, 0, { method: 'CASH', cents: 20000 })).toMatchObject({ ok: true, needsRefundToCash: false })
+    expect(allocateAcrossPayments(caps, 0, { method: 'CASH', cents: 20001 })).toMatchObject({ ok: true, needsRefundToCash: true })
+  })
 
   it('a method whose payments have nothing left is not offered', () =>
     expect(payoutOptionsOf([cap('card', 60000, {}), cap('cash', 0, { CASH: 'SAME' })])).toEqual([]))
@@ -202,8 +244,8 @@ describe('allocateAcrossPayments (RF2)', () => {
       ok: false,
       reason: 'INSUFFICIENT_FOR_METHOD',
       payoutOptions: [
-        { method: 'CASH', maxCents: 40000, needsRefundToCash: false },
-        { method: 'BANK_TRANSFER', maxCents: 40000, needsRefundToCash: false },
+        { method: 'CASH', maxCents: 40000, maxSameCents: 40000, needsRefundToCash: false },
+        { method: 'BANK_TRANSFER', maxCents: 40000, maxSameCents: 0, needsRefundToCash: false },
       ],
     })
   })
@@ -246,7 +288,7 @@ describe('allocateAcrossPayments (RF2)', () => {
       const credit = rand(3) === 0 ? 0 : rand(120001)
       const payout = rand(3) === 0 ? null : { method: methods[rand(3)], cents: rand(80001) }
       const result = allocateAcrossPayments(caps, credit, payout)
-      const problem = rf2Violation(caps, credit, payout, result)
+      const problem = allocationViolation(caps, credit, payout, result)
       if (problem) failures.push(`${problem} ← ${JSON.stringify({ caps, credit, payout, result })}`)
     }
     expect(failures).toEqual([])
@@ -268,10 +310,53 @@ describe('allocateAcrossPayments (RF2)', () => {
     expect(allocateAcrossPayments([transfer, cash200], 0, { method: 'CASH', cents: 50000 })).toEqual(expected)
   })
 
+  it('a tie within SAME keeps the input order: [cash1 300, cash2 300], payout CASH 400 → cash1 300, cash2 100', () => {
+    const cash1 = cap('cash1', 30000, { CASH: 'SAME' })
+    const cash2 = cap('cash2', 30000, { CASH: 'SAME' })
+    expect(allocateAcrossPayments([cash1, cash2], 0, { method: 'CASH', cents: 40000 })).toEqual({
+      ok: true,
+      needsRefundToCash: false,
+      slices: [
+        { paymentId: 'cash1', cents: 30000, role: 'PAYOUT', mode: 'SAME' },
+        { paymentId: 'cash2', cents: 10000, role: 'PAYOUT', mode: 'SAME' },
+      ],
+    })
+    // Al revés en la lista, al revés en el reparto: manda el orden de entrada, no el id.
+    expect(allocateAcrossPayments([cash2, cash1], 0, { method: 'CASH', cents: 40000 })).toEqual({
+      ok: true,
+      needsRefundToCash: false,
+      slices: [
+        { paymentId: 'cash2', cents: 30000, role: 'PAYOUT', mode: 'SAME' },
+        { paymentId: 'cash1', cents: 10000, role: 'PAYOUT', mode: 'SAME' },
+      ],
+    })
+  })
+
+  it('a tie within CHOSEN keeps the input order: [transfer1 300, transfer2 300], payout CASH 400 → transfer1 300, transfer2 100', () => {
+    const transfer1 = cap('transfer1', 30000, { BANK_TRANSFER: 'SAME', CASH: 'CHOSEN' })
+    const transfer2 = cap('transfer2', 30000, { BANK_TRANSFER: 'SAME', CASH: 'CHOSEN' })
+    expect(allocateAcrossPayments([transfer1, transfer2], 0, { method: 'CASH', cents: 40000 })).toEqual({
+      ok: true,
+      needsRefundToCash: true,
+      slices: [
+        { paymentId: 'transfer1', cents: 30000, role: 'PAYOUT', mode: 'CHOSEN' },
+        { paymentId: 'transfer2', cents: 10000, role: 'PAYOUT', mode: 'CHOSEN' },
+      ],
+    })
+    expect(allocateAcrossPayments([transfer2, transfer1], 0, { method: 'CASH', cents: 40000 })).toEqual({
+      ok: true,
+      needsRefundToCash: true,
+      slices: [
+        { paymentId: 'transfer2', cents: 30000, role: 'PAYOUT', mode: 'CHOSEN' },
+        { paymentId: 'transfer1', cents: 10000, role: 'PAYOUT', mode: 'CHOSEN' },
+      ],
+    })
+  })
+
   it('credit larger than everything left → NOTHING_LEFT_TO_REFUND', () => {
     const options = [
-      { method: 'CASH', maxCents: 40000, needsRefundToCash: false },
-      { method: 'BANK_TRANSFER', maxCents: 40000, needsRefundToCash: false },
+      { method: 'CASH', maxCents: 40000, maxSameCents: 40000, needsRefundToCash: false },
+      { method: 'BANK_TRANSFER', maxCents: 40000, maxSameCents: 0, needsRefundToCash: false },
     ]
     expect(allocateAcrossPayments([cash, card], 100001, null)).toEqual({
       ok: false,
@@ -321,11 +406,12 @@ describe('allocateAcrossPayments (RF2)', () => {
 })
 
 /**
- * La primera regla de RF2 (spec §6.3) que rompe un reparto, o null: el oráculo de la prueba con datos al azar. Se acepta sólo lo
- * que cabe (diferencia ≤ lo de los cobros que admiten ese medio y diferencia + crédito ≤ lo que le queda a la venta); ningún
- * cobro da más de lo que le queda; el mismo medio se agota antes de escoger otro; y el aviso de efectivo sale de un pedazo CHOSEN.
+ * La primera regla del reparto entre cobros (spec §6.3) que rompe un resultado, o null: el oráculo de la prueba con datos al azar.
+ * Se acepta sólo lo que cabe (diferencia ≤ lo de los cobros que admiten ese medio y diferencia + crédito ≤ lo que le queda a la
+ * venta); ningún cobro da más de lo que le queda; el mismo medio se agota antes de escoger otro; el aviso de efectivo sale de un
+ * pedazo CHOSEN; y `maxSameCents` del detalle predice ese aviso, para que el POS sepa antes si pedirá el permiso.
  */
-function rf2Violation(
+function allocationViolation(
   caps: PaymentCapacity[],
   credit: number,
   payout: { method: PayoutMethod; cents: number } | null,
@@ -360,5 +446,9 @@ function rf2Violation(
   )
   if (choseOther && sameLeft) return 'chose another method before using up the same method'
   if (result.needsRefundToCash !== (payout?.method === 'CASH' && choseOther)) return 'needsRefundToCash is wrong'
+  const maxSameCash = payoutOptionsOf(caps).find(o => o.method === 'CASH')?.maxSameCents ?? 0
+  if (payout?.method === 'CASH' && result.needsRefundToCash !== payout.cents > maxSameCash) {
+    return 'maxSameCents does not predict needsRefundToCash'
+  }
   return null
 }

@@ -4,6 +4,7 @@
  * de su prueba son la tabla común.
  */
 import { parteDeUnidades } from '../shared/parteDeUnidades'
+import { assertCents } from './exchangePredicates'
 
 /** Una pieza que regresa: lo que realmente se cobró por ella y la lista de HOY de su variante (null si ya no tiene). */
 export interface ReturnedPiece {
@@ -43,13 +44,6 @@ export interface ExchangeCalculation {
 }
 
 type RefundRowItem = { orderItemId: string; quantity: number; amountCents: number }
-
-/** Un importe en centavos es un entero seguro y no negativo; otra cosa es un error de quien llama, no un caso de negocio. */
-function assertCents(what: string, cents: number): void {
-  if (!Number.isSafeInteger(cents) || cents < 0) {
-    throw new Error(`EXCHANGE_INVALID_CENTS: ${what} debe ser un entero de centavos ≥ 0 (llegó ${cents})`)
-  }
-}
 
 /** La familia de una pieza: su `productGroupId` o, si no tiene, su propio producto (spec §5.2). */
 function familyOf(x: { productGroupId: string | null; productId: string | null }): string | null {

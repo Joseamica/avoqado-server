@@ -4,6 +4,13 @@
  * que no deben cargar Prisma al cargarse (lo vigila `tests/unit/architecture/grafoDeImports.guard.test.ts`). No importes nada aquí.
  */
 
+/** Un importe en centavos es un entero seguro y no negativo; otra cosa es un error de quien llama, no un caso de negocio. */
+export function assertCents(what: string, cents: number): void {
+  if (!Number.isSafeInteger(cents) || cents < 0) {
+    throw new Error(`EXCHANGE_INVALID_CENTS: ${what} debe ser un entero de centavos ≥ 0 (llegó ${cents})`)
+  }
+}
+
 /** ¿El tender es el de sistema «Crédito de cambio» (`systemKind = EXCHANGE_CREDIT`)? Se pregunta por el kind EXACTO. */
 export function isExchangeCreditTenderKind(systemKind: string | null | undefined): boolean {
   return systemKind === 'EXCHANGE_CREDIT'
