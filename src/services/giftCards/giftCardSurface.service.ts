@@ -64,6 +64,16 @@ export async function negocioTieneTarjetas(venueId: string): Promise<boolean> {
   return fila?.existe === true
 }
 
+/** 1b S1: lo que este servidor sabe hacer y el POS lee en sus ajustes para prender sus pantallas nuevas. */
+export const CAPACIDADES_DEL_POS = ['ENTREGA', 'PAGE_TOKEN', 'TELEFONO'] as const
+
+/** 1b S1 (`tieneTarjetas` de los ajustes del POS): ¿el negocio ya ACTIVÓ alguna tarjeta? Una sólo PENDING no cuenta. */
+export async function negocioHaActivadoTarjetas(venueId: string): Promise<boolean> {
+  const [fila] = await prisma.$queryRaw<Array<{ existe: boolean }>>`
+    SELECT EXISTS (SELECT 1 FROM "GiftCard" WHERE "venueId" = ${venueId} AND "activatedAt" IS NOT NULL) AS existe`
+  return fila?.existe === true
+}
+
 export interface EstadoDeVenta {
   sellable: boolean
   code: GiftCardErrorCode | null

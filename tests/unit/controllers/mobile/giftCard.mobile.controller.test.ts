@@ -10,6 +10,8 @@ jest.mock('@/services/giftCards/giftCardSurface.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSurface.service'),
   auditarTarjetas: jest.fn(),
   estadoDeVentaDeTarjetas: jest.fn(),
+  // 1b S1: `tieneTarjetas` de los ajustes (su prueba propia vive en tests/unit/controllers/shared/giftCardSale.controller.test.ts).
+  negocioHaActivadoTarjetas: jest.fn().mockResolvedValue(false),
 }))
 jest.mock('@/services/giftCards/giftCardSettings.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSettings.service'),

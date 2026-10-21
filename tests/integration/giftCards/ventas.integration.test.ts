@@ -22,11 +22,18 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
 // `sales_by_payment_method` es de Pro: el negocio de prueba no tiene plan; el candado no es lo que se prueba aquí.
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 // Lo mismo para `sales_comparison` y `revenue_by_venue`: piden ADVANCED_REPORTS por lote (`venuesWithFeatureAccess`). El resto del servicio de
-// planes se queda real (lo usan los cobros con saldo).
-jest.mock('@/services/access/basePlan.service', () => ({
-  ...jest.requireActual('@/services/access/basePlan.service'),
-  venuesWithFeatureAccess: jest.fn(async (ids: string[]) => new Set(ids)),
-}))
+// planes se queda real (lo usan los cobros con saldo), salvo para los negocios de `mockConPlan` (1b S1: venden por `createGiftCardOrder`).
+const mockConPlan = new Set<string>()
+jest.mock('@/services/access/basePlan.service', () => {
+  const real = jest.requireActual('@/services/access/basePlan.service')
+  return {
+    ...real,
+    venuesWithFeatureAccess: jest.fn(async (ids: string[]) => new Set(ids)),
+    venueHasFeatureAccess: jest.fn((venueId: string, ...resto: unknown[]) =>
+      mockConPlan.has(venueId) ? Promise.resolve(true) : real.venueHasFeatureAccess(venueId, ...resto),
+    ),
+  }
+})
 
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -47,6 +54,7 @@ import { registerTrendTools } from '@/mcp/tools/trends'
 import { registerPaymentTools } from '@/mcp/tools/payments'
 import { registerShiftTools } from '@/mcp/tools/shifts'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
+import { createGiftCardOrder, type CreateGiftCardOrderInput } from '@/services/giftCards/giftCardOrder.service'
 import {
   getShiftById as detalleDelTurnoDelPanel,
   getShifts as turnosDelPanel,
@@ -619,5 +627,105 @@ describe('🔴 pendientes 1a · turnos: la cuenta de tarjetas no suma órdenes',
     expect([shift.totalOrders, shift.totalProductsSold]).toEqual([1, 1])
     const reporte = shift.reportData as { sales?: { totalOrders?: number; productsSold?: number } } | null
     expect([reporte?.sales?.totalOrders, reporte?.sales?.productsSold]).toEqual([1, 1])
+  })
+})
+
+describe('🔴 1b S1 · Q37/Q44: el reintento de una venta compara contra la huella con que se creó, no contra los datos de hoy', () => {
+  let venueId: string
+  let staffId: string
+  const llave = (nombre: string) => `s1-${nombre}-${process.pid}-${Date.now()}`.slice(0, 64)
+  const vender = (idempotencyKey: string, cuerpo: Omit<CreateGiftCardOrderInput, 'idempotencyKey'>) =>
+    createGiftCardOrder(venueId, staffId, { idempotencyKey, ...cuerpo })
+  const sobresDe = (ids: string[]) =>
+    prisma.giftCard.findMany({
+      where: { venueId, id: { in: ids } },
+      select: { ventaHuella: true, recipientPhone: true },
+      orderBy: { createdAt: 'asc' },
+      take: 20,
+    })
+  /** Deja los sobres de una venta como los guardaba la 1a: sin huella, y con los datos que se le pasan. */
+  const comoLaUnoA = (ids: string[], datos: Prisma.GiftCardUpdateManyMutationInput) =>
+    prisma.giftCard.updateMany({ where: { venueId, id: { in: ids } }, data: { ventaHuella: null, ...datos } })
+
+  beforeAll(async () => {
+    const negocio = await crearNegocioDePrueba('ventas-huella')
+    venueId = negocio.venueId
+    staffId = negocio.staffId
+    mockConPlan.add(venueId)
+    await prisma.giftCardSettings.create({ data: { venueId, enabled: true, suggestedAmounts: [500, 1000, 2000] } })
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('cambiar el destino no rompe el reintento de la venta; otro cuerpo con la misma llave sigue siendo 409', async () => {
+    const k = llave('destino')
+    const cuerpo = {
+      purchaserName: 'Ana',
+      sobres: [
+        { amount: 500, deliveryChannel: 'WHATSAPP' as const, recipientName: 'Luis', recipientPhone: '5512345678' },
+        { amount: 300, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '55 1234 5678' },
+      ],
+    }
+    const primera = await vender(k, cuerpo)
+    const ids = primera.sobres.map(s => s.id)
+    const guardados = await sobresDe(ids)
+    expect(guardados.map(s => s.recipientPhone)).toEqual(['+525512345678', '+525512345678'])
+    expect(guardados[0].ventaHuella).toEqual(expect.any(String))
+    expect(new Set(guardados.map(s => s.ventaHuella)).size).toBe(1)
+
+    // Lo que hará S4 (cambiar el destino): la tarjeta ya no va a ese WhatsApp, va a un correo.
+    await prisma.giftCard.update({
+      where: { id: ids[0] },
+      data: { recipientPhone: null, recipientEmail: 'luis@example.test', deliveryChannel: 'EMAIL' },
+    })
+
+    await expect(vender(k, cuerpo)).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+    await expect(vender(k, { ...cuerpo, sobres: [cuerpo.sobres[0]] })).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+      statusCode: 409,
+    })
+  })
+
+  it('Q44: una venta guardada con las reglas de la 1a (teléfono sin lada, sin huella) se repite', async () => {
+    const k = llave('unoa')
+    const cuerpo = { purchaserName: 'Ana', sobres: [{ amount: 500, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '5512345678' }] }
+    const primera = await vender(k, cuerpo)
+    await comoLaUnoA(
+      primera.sobres.map(s => s.id),
+      { recipientPhone: '5512345678' },
+    )
+    await expect(vender(k, cuerpo)).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+  })
+
+  it('Q44: una venta de la 1a por WhatsApp SIN «De parte de» se repite (nunca el 400 de E3)', async () => {
+    const k = llave('sinde')
+    const sobres = [{ amount: 400, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '5512345678' }]
+    const primera = await vender(k, { purchaserName: 'Ana', sobres })
+    await comoLaUnoA(
+      primera.sobres.map(s => s.id),
+      { recipientPhone: '5512345678', purchaserName: null },
+    )
+    await expect(vender(k, { sobres })).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+  })
+
+  it('Q44: una venta de la 1a con un teléfono que la regex aceptó y libphonenumber rechaza se repite (nunca GIFT_CARD_PHONE_INVALID)', async () => {
+    const k = llave('ceros')
+    const primera = await vender(k, {
+      purchaserName: 'Ana',
+      sobres: [{ amount: 600, deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' }],
+    })
+    await comoLaUnoA(
+      primera.sobres.map(s => s.id),
+      { recipientPhone: '0000000000' },
+    )
+    const reintento = {
+      purchaserName: 'Ana',
+      sobres: [{ amount: 600, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '0000000000' }],
+    }
+    await expect(vender(k, reintento)).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+    // Y una venta NUEVA con ese teléfono sí se rechaza.
+    await expect(vender(llave('ceros-nueva'), reintento)).rejects.toMatchObject({ code: 'GIFT_CARD_PHONE_INVALID', statusCode: 400 })
   })
 })

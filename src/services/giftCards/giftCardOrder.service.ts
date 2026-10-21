@@ -20,6 +20,7 @@ import {
   generateOpaqueToken,
   hashGiftCardCode,
 } from './giftCardCode'
+import { telefonoDeTarjeta, urlDeLaPagina } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, assertMontoDeSobre, assertTopeDeOperacion } from './giftCardLimits'
 import { assertGiftCardsSellable, getGiftCardSettings } from './giftCardSettings.service'
@@ -38,6 +39,8 @@ const FUENTE_POR_OMISION = 'AVOQADO_ANDROID'
 const TELEFONO = /^\+?\d{10,15}$/
 const CORREO = /^[^\s@]+@[^\s@]+\.[^\s@]+$/
 const LINEA = 'Tarjeta de regalo'
+/** S-6 y C5: WhatsApp y correo dicen de parte de quién va la tarjeta. Sólo se exige en una venta NUEVA (C3/Q44). */
+export const TEXTO_FALTA_DE_PARTE_DE = 'Para mandarla por WhatsApp o correo falta «De parte de».'
 
 export interface CreateGiftCardOrderInput {
   /** UUID que el POS genera UNA vez por venta y reenvía en cada reintento (8–64 caracteres). */
@@ -74,6 +77,8 @@ export interface CreateGiftCardOrderResult {
     ultimos4: string
     monto: number
     pageToken: string
+    /** 1b Q22 (aditivo): la liga pública de la tarjeta, armada por el servidor. */
+    pageUrl: string
     deliveryChannel: GiftCardDeliveryChannel
     venceEnMeses: number | null
     termsVersion: string
@@ -109,6 +114,7 @@ const SELECT_CUENTA = {
           message: true,
           purchaserName: true,
           purchaserContact: true,
+          ventaHuella: true,
         },
       },
     },
@@ -153,7 +159,9 @@ function normalizarPedido(input: CreateGiftCardOrderInput): {
     if (!CANALES_FASE_1A.has(s.deliveryChannel)) {
       throw new BadRequestError(`Elige cómo se entrega la tarjeta ${n}: WhatsApp, correo, impresa o en manos del comprador.`)
     }
-    const recipientPhone = texto(s.recipientPhone, 30, `El teléfono de la tarjeta ${n}`)?.replace(/[\s().-]/g, '') ?? null
+    const telefonoEscrito = texto(s.recipientPhone, 30, `El teléfono de la tarjeta ${n}`)?.replace(/[\s().-]/g, '') ?? null
+    // Q25: se guarda canónico (así se compara en phone/*). NUNCA lanza aquí: lo usa también el reintento de una venta de la 1a.
+    const recipientPhone = telefonoEscrito && (telefonoDeTarjeta(telefonoEscrito) ?? telefonoEscrito)
     const recipientEmail = texto(s.recipientEmail, 160, `El correo de la tarjeta ${n}`)?.toLowerCase() ?? null
     if (s.deliveryChannel === 'WHATSAPP' && (!recipientPhone || !TELEFONO.test(recipientPhone))) {
       throw new BadRequestError(`La tarjeta ${n} se entrega por WhatsApp: captura un teléfono de 10 dígitos.`)
@@ -191,6 +199,7 @@ function huellaDelPedido(p: ReturnType<typeof normalizarPedido>): string {
   return huella({ ...p, sobres: p.sobres.map(s => ({ ...s, monto: s.monto.toFixed(2) })) })
 }
 
+/** Sólo para ventas de la 1a (sin `ventaHuella`): el teléfono guardado pasa por la misma forma que el pedido (Q44). */
 function huellaDeLaCuenta(c: CuentaGuardada): string {
   const sobres = c.items.map(i => i.giftCard).filter((s): s is SobreGuardado => s != null)
   return huella({
@@ -200,7 +209,7 @@ function huellaDeLaCuenta(c: CuentaGuardada): string {
       monto: s.initialAmount.toFixed(2),
       deliveryChannel: s.deliveryChannel,
       recipientName: s.recipientName,
-      recipientPhone: s.recipientPhone,
+      recipientPhone: s.recipientPhone && (telefonoDeTarjeta(s.recipientPhone) ?? s.recipientPhone),
       recipientEmail: s.recipientEmail,
       message: s.message,
     })),
@@ -221,6 +230,7 @@ function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResul
       ultimos4: s.codeLast4,
       monto: Number(s.initialAmount),
       pageToken: s.pageToken,
+      pageUrl: urlDeLaPagina(s.pageToken),
       deliveryChannel: s.deliveryChannel,
       venceEnMeses: s.validityMonths,
       termsVersion: s.termsVersion,
@@ -229,8 +239,13 @@ function respuesta(c: CuentaGuardada, replay: boolean): CreateGiftCardOrderResul
   }
 }
 
+/**
+ * Q37: se compara contra la huella con que se CREÓ la venta (la de la primera tarjeta), no contra los datos de hoy, que
+ * cambiar el destino (S4) edita. Una venta de la 1a no la tiene: se recalcula de lo guardado.
+ */
 function reintentoOConflicto(cuenta: CuentaGuardada, huellaPedida: string): CreateGiftCardOrderResult {
-  if (huellaDeLaCuenta(cuenta) !== huellaPedida) {
+  const guardada = cuenta.items[0]?.giftCard?.ventaHuella ?? huellaDeLaCuenta(cuenta)
+  if (guardada !== huellaPedida) {
     throw new GiftCardError(
       'IDEMPOTENCY_KEY_REUSED',
       'Esta llave ya creó otra venta de tarjetas con datos distintos. Genera una llave nueva para esta venta.',
@@ -255,6 +270,16 @@ export async function createGiftCardOrder(
   // El reintento primero: si el plan venció entre el intento y el reintento, el POS recibe la cuenta que YA existe.
   const previa = await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } }, select: SELECT_CUENTA })
   if (previa) return reintentoOConflicto(previa, huellaPedida)
+
+  // Sólo la venta NUEVA (C3/Q44): un reintento de la 1a nunca recibe estos 400.
+  if (!pedido.purchaserName && pedido.sobres.some(s => s.deliveryChannel === 'WHATSAPP' || s.deliveryChannel === 'EMAIL')) {
+    throw new BadRequestError(TEXTO_FALTA_DE_PARTE_DE, 'GIFT_CARD_PURCHASER_REQUIRED')
+  }
+  pedido.sobres.forEach((s, i) => {
+    if (s.recipientPhone && telefonoDeTarjeta(s.recipientPhone) === null) {
+      throw new BadRequestError(`El teléfono de la tarjeta ${i + 1} no es válido.`, 'GIFT_CARD_PHONE_INVALID')
+    }
+  })
 
   await assertGiftCardsSellable(venueId)
   await assertVenueSalesEnabled(venueId)
@@ -303,6 +328,7 @@ export async function createGiftCardOrder(
               deliveryChannel: s.deliveryChannel,
               deliveryStatus: 'PENDING',
               source: 'POS',
+              ventaHuella: huellaPedida,
             },
             select: { id: true },
           })

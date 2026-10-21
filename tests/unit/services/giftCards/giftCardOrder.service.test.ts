@@ -17,7 +17,8 @@ jest.mock('@/utils/staff-venue.util', () => ({ validateStaffVenue: jest.fn(async
 
 import { Prisma } from '@prisma/client'
 import { assertGiftCardsSellable } from '@/services/giftCards/giftCardSettings.service'
-import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
+import { TEXTO_FALTA_DE_PARTE_DE, createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
+import { urlDeLaPagina } from '@/services/giftCards/giftCardEntrega'
 import { encryptGiftCardCode, generateGiftCardCode, normalizeGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { cierreDelCobroSaldaLaCuenta } from '@/services/shared/orderBalance'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -128,7 +129,7 @@ describe('createGiftCardOrder', () => {
     expect(dos).toMatchObject({
       initialAmount: D(1000),
       deliveryChannel: 'WHATSAPP',
-      recipientPhone: '5512345678',
+      recipientPhone: '+525512345678',
       message: '¡Feliz cumpleaños!',
     })
   })
@@ -260,5 +261,75 @@ describe('createGiftCardOrder', () => {
       code: 'GIFT_CARD_OPERATION_LIMIT',
     })
     expect(prismaMock.giftCard.create).not.toHaveBeenCalled()
+  })
+
+  describe('1b S1', () => {
+    /** La cuenta que acaba de crear la primera llamada, como la devolvería la base al reintento. */
+    async function laQueSeCreo() {
+      return prismaMock.order.create.mock.results[0].value
+    }
+
+    it.each(['WHATSAPP', 'EMAIL'] as const)('🔴 sin «De parte de», %s no se vende (400 GIFT_CARD_PURCHASER_REQUIRED)', async canal => {
+      const sobre =
+        canal === 'WHATSAPP'
+          ? { amount: 500, deliveryChannel: canal, recipientPhone: '5512345678' }
+          : { amount: 500, deliveryChannel: canal, recipientEmail: 'ana@example.test' }
+      for (const purchaserName of [undefined, null, '   ']) {
+        await expect(createGiftCardOrder(VENUE, 'staff-1', pedido({ purchaserName, sobres: [sobre] }))).rejects.toMatchObject({
+          message: TEXTO_FALTA_DE_PARTE_DE,
+          code: 'GIFT_CARD_PURCHASER_REQUIRED',
+          statusCode: 400,
+        })
+      }
+      expect(TEXTO_FALTA_DE_PARTE_DE).toBe('Para mandarla por WhatsApp o correo falta «De parte de».')
+      expect(prismaMock.giftCard.create).not.toHaveBeenCalled()
+    })
+
+    it('impresa o en manos del comprador, sin «De parte de», sí se vende', async () => {
+      const sobres = [
+        { amount: 500, deliveryChannel: 'PRINTED' as const },
+        { amount: 500, deliveryChannel: 'HANDED_TO_BUYER' as const },
+      ]
+      await expect(createGiftCardOrder(VENUE, 'staff-1', pedido({ purchaserName: undefined, sobres }))).resolves.toMatchObject({
+        replay: false,
+      })
+    })
+
+    it('🔴 un teléfono que no se entiende en una venta nueva: 400 GIFT_CARD_PHONE_INVALID', async () => {
+      const sobres = [{ amount: 500, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '0000000000' }]
+      await expect(createGiftCardOrder(VENUE, 'staff-1', pedido({ sobres }))).rejects.toMatchObject({
+        message: 'El teléfono de la tarjeta 1 no es válido.',
+        code: 'GIFT_CARD_PHONE_INVALID',
+        statusCode: 400,
+      })
+      expect(prismaMock.giftCard.create).not.toHaveBeenCalled()
+    })
+
+    it('🔴 el teléfono se guarda canónico, y el reintento con el MISMO cuerpo es replay (no IDEMPOTENCY_KEY_REUSED)', async () => {
+      const cuerpo = pedido({ sobres: [{ amount: 500, deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' }] })
+      await createGiftCardOrder(VENUE, 'staff-1', cuerpo)
+      expect(creados.get('gc-1')).toMatchObject({ recipientPhone: '+525512345678' })
+
+      prismaMock.order.findUnique.mockResolvedValue(await laQueSeCreo())
+      await expect(createGiftCardOrder(VENUE, 'staff-1', cuerpo)).resolves.toMatchObject({ replay: true, orderId: 'order-1' })
+      expect(prismaMock.giftCard.create).toHaveBeenCalledTimes(1)
+    })
+
+    it('Q37: cada sobre guarda la huella de la venta (la misma en todos)', async () => {
+      await createGiftCardOrder(VENUE, 'staff-1', pedido())
+      const huellas = [creados.get('gc-1').ventaHuella, creados.get('gc-2').ventaHuella]
+      expect(huellas[0]).toEqual(expect.any(String))
+      expect(huellas[1]).toBe(huellas[0])
+    })
+
+    it('cada sobre trae su pageUrl, también en el replay', async () => {
+      const r = await createGiftCardOrder(VENUE, 'staff-1', pedido())
+      expect(r.sobres.map(s => s.pageUrl)).toEqual(r.sobres.map(s => urlDeLaPagina(s.pageToken)))
+
+      prismaMock.order.findUnique.mockResolvedValue(await laQueSeCreo())
+      const otra = await createGiftCardOrder(VENUE, 'staff-1', pedido())
+      expect(otra.replay).toBe(true)
+      expect(otra.sobres[0].pageUrl).toBe(urlDeLaPagina(otra.sobres[0].pageToken))
+    })
   })
 })
