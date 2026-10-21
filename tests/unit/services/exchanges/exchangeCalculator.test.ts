@@ -1,6 +1,6 @@
 /**
- * Calculadora del cambio de talla o de producto (spec §5.2 y §6.2; índice §1.4 y §2). Pura: centavos enteros y redondeo half-up
- * al centavo.
+ * Calculadora del cambio de talla o de producto (spec `docs/superpowers/specs/2026-10-20-cambio-de-producto-design.md` §5.2 y
+ * §6.2). Pura: centavos enteros y redondeo half-up al centavo.
  */
 import {
   calculateExchange,
@@ -13,15 +13,21 @@ import {
 } from '../../../../src/services/exchanges/exchangeCalculator'
 import { parteDeUnidades } from '../../../../src/services/shared/parteDeUnidades'
 
-/** Una pieza que regresa, de la familia «falda». */
-const p = (orderItemId: string, paidCents: number, listCents: number | null): ReturnedPiece => ({
-  orderItemId,
-  productGroupId: 'falda',
-  paidCents,
-  listCents,
-})
+/** Una pieza que regresa; por default, de la familia «falda». */
+const p = (
+  orderItemId: string,
+  paidCents: number,
+  listCents: number | null,
+  productGroupId: string | null = 'falda',
+  productId: string | null = orderItemId,
+): ReturnedPiece => ({ orderItemId, productId, productGroupId, paidCents, listCents })
 /** Un renglón de cantidad 1 que se lleva. */
-const t = (productId: string, listCents: number, inheritsFromOrderItemId: string | null, productGroupId = 'falda'): TakenLine => ({
+const t = (
+  productId: string,
+  listCents: number,
+  inheritsFromOrderItemId: string | null,
+  productGroupId: string | null = 'falda',
+): TakenLine => ({
   productId,
   productGroupId,
   listCents,
@@ -30,7 +36,7 @@ const t = (productId: string, listCents: number, inheritsFromOrderItemId: string
 })
 
 describe('calculateExchange', () => {
-  // Vectores del índice §2: la MISMA tabla vive en ANDROID e iOS.
+  // Vectores V1–V9 de la regla del spec §5.2: la MISMA tabla vive en ANDROID e iOS.
   it.each<[string, ReturnedPiece[], TakenLine[], number, number, number, ExchangeCalculation['kind']]>([
     ['V1', [p('M', 50000, 50000)], [t('L', 50000, 'M')], 50000, 50000, 0, 'EVEN'],
     ['V2', [p('M', 35000, 50000)], [t('L', 50000, 'M')], 35000, 35000, 0, 'EVEN'],
@@ -85,6 +91,40 @@ describe('calculateExchange', () => {
     ])
   })
 
+  it('pairs a returned piece with a taken piece of its family even without a pointer', () => {
+    // §5.2: cada pieza que regresa se empareja 1:1 con una pieza nueva de su misma familia, en el orden en que se agregaron.
+    expect(calculateExchange([p('M', 35000, 50000)], [t('L', 50000, null)])).toMatchObject({
+      returnedCents: 35000,
+      takenCents: 35000,
+      differenceCents: 0,
+      kind: 'EVEN',
+    })
+  })
+
+  it('pairs the explicit pointers first and then the rest by family, in the order they were added', () => {
+    // La XL se agregó primero sin señalar a nadie y la L señala la M: la M es de la L, y la XL hereda la S que queda libre.
+    const calc = calculateExchange([p('M', 35000, 50000), p('S', 30000, 50000)], [t('XL', 55000, null), t('L', 50000, 'M')])
+    expect(calc.takenPieces).toEqual([
+      { lineIndex: 0, priceCents: 33000, listCents: 55000, inheritedFrom: { orderItemId: 'S', paidCents: 30000 } },
+      { lineIndex: 1, priceCents: 35000, listCents: 50000, inheritedFrom: { orderItemId: 'M', paidCents: 35000 } },
+    ])
+  })
+
+  it('a product without a family is its own family: the same product inherits, another one pays today', () => {
+    const shampoo = p('oi-shampoo', 8000, 10000, null, 'shampoo')
+    expect(calculateExchange([shampoo], [t('shampoo', 10000, null, null)])).toMatchObject({
+      takenCents: 8000,
+      differenceCents: 0,
+      kind: 'EVEN',
+    })
+    // Otro producto sin familia paga el precio de hoy, aunque señale al shampoo.
+    expect(calculateExchange([shampoo], [t('acondicionador', 10000, 'oi-shampoo', null)])).toMatchObject({
+      takenCents: 10000,
+      differenceCents: 2000,
+      kind: 'COLLECT',
+    })
+  })
+
   it('charges unitPriceCents for a non-inherited piece (the lower price the customer saw)', () => {
     // §5.2: otro producto va al precio de hoy con las reglas de una venta, incluida «el más bajo» del precio que vio la clienta.
     const calc = calculateExchange([p('M', 50000, 50000)], [{ ...t('Blusa', 50000, null, 'otra-familia'), unitPriceCents: 45000 }])
@@ -137,6 +177,12 @@ describe('inheritedPriceCents', () => {
     expect(inheritedPriceCents(42000, null, 50000)).toBe(42000)
     expect(inheritedPriceCents(42000, 0, 50000)).toBe(42000)
   })
+
+  it('refuses cents that are not safe non-negative integers', () => {
+    expect(() => inheritedPriceCents(35000.5, 50000, 50000)).toThrow('EXCHANGE_INVALID_CENTS')
+    expect(() => inheritedPriceCents(35000, Number.NaN, 50000)).toThrow('EXCHANGE_INVALID_CENTS')
+    expect(() => inheritedPriceCents(35000, 50000, -1)).toThrow('EXCHANGE_INVALID_CENTS')
+  })
 })
 
 describe('pieceValuesCents', () => {
@@ -155,7 +201,7 @@ describe('pieceValuesCents', () => {
   })
 
   it('a line of 1,000,000 pieces serializes in O(1) and the value of the next 2 pieces matches parteDeUnidades', () => {
-    // Índice §1.4: el renglón viaja como cuatro números, nunca un valor por pieza. Las siguientes k piezas valen
+    // Spec §5.2: el renglón viaja como cuatro números, nunca un valor por pieza. Las siguientes k piezas valen
     // parte(devueltas + k) − parte(devueltas). Aquí cruzan la frontera del residuo: 124 y luego 123.
     const line = { chargedTotalCents: 123_456_789, quantity: 1_000_000, returnedQtyOrder: 456_788, returnedCentsOrder: 0 }
     line.returnedCentsOrder = parteDeUnidades(line.chargedTotalCents, line.quantity, 0, line.returnedQtyOrder)
@@ -238,6 +284,76 @@ describe('splitItemsAcrossRefundRows', () => {
       [{ key: 'anchor', cents: 0 }],
     )
     expect(out.get('anchor')).toEqual([{ orderItemId: 'A', quantity: 2, amountCents: 0 }])
+  })
+
+  it('never merges the remainder of a split piece with the next piece of the same line in a row', () => {
+    // El libro de la orden topa por unidad cada entrada con cantidad (`libroDeLaOrden.ts`): el pedazo sin cantidad va aparte.
+    const out = splitItemsAcrossRefundRows(
+      [
+        { orderItemId: 'a', cents: 5000 },
+        { orderItemId: 'a', cents: 5000 },
+      ],
+      [
+        { key: 'payout', cents: 3000 },
+        { key: 'credit', cents: 7000 },
+      ],
+    )
+    expect(out.get('payout')).toEqual([{ orderItemId: 'a', quantity: 1, amountCents: 3000 }])
+    expect(out.get('credit')).toEqual([
+      { orderItemId: 'a', quantity: 0, amountCents: 2000 },
+      { orderItemId: 'a', quantity: 1, amountCents: 5000 },
+    ])
+  })
+
+  it('skips a $0 row placed before a row with money', () => {
+    const out = splitItemsAcrossRefundRows(
+      [{ orderItemId: 'a', cents: 500 }],
+      [
+        { key: 'zero', cents: 0 },
+        { key: 'credit', cents: 500 },
+      ],
+    )
+    expect(out.get('zero')).toEqual([])
+    expect(out.get('credit')).toEqual([{ orderItemId: 'a', quantity: 1, amountCents: 500 }])
+  })
+
+  it('a zero-value piece that comes after the pour left the first row still lands there with quantity 1', () => {
+    const out = splitItemsAcrossRefundRows(
+      [
+        { orderItemId: 'a', cents: 600 },
+        { orderItemId: 'b', cents: 0 },
+      ],
+      [
+        { key: 'payout', cents: 400 },
+        { key: 'credit', cents: 200 },
+      ],
+    )
+    expect(out.get('payout')).toEqual([
+      { orderItemId: 'a', quantity: 1, amountCents: 400 },
+      { orderItemId: 'b', quantity: 1, amountCents: 0 },
+    ])
+    expect(out.get('credit')).toEqual([{ orderItemId: 'a', quantity: 0, amountCents: 200 }])
+  })
+
+  it('refuses cents that are not safe non-negative integers', () => {
+    expect(() => splitItemsAcrossRefundRows([{ orderItemId: 'a', cents: 100.5 }], [{ key: 'k', cents: 100.5 }])).toThrow(
+      'EXCHANGE_INVALID_CENTS',
+    )
+    expect(() => splitItemsAcrossRefundRows([{ orderItemId: 'a', cents: -100 }], [{ key: 'k', cents: -100 }])).toThrow(
+      'EXCHANGE_INVALID_CENTS',
+    )
+  })
+
+  it('refuses a duplicated row key', () => {
+    expect(() =>
+      splitItemsAcrossRefundRows(
+        [{ orderItemId: 'a', cents: 500 }],
+        [
+          { key: 'k', cents: 200 },
+          { key: 'k', cents: 300 },
+        ],
+      ),
+    ).toThrow('EXCHANGE_DUPLICATE_ROW_KEY')
   })
 
   it('refuses pieces and rows that do not add up to the same cents', () => {
