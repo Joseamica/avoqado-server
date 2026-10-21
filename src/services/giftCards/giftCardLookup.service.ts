@@ -1,6 +1,7 @@
 // src/services/giftCards/giftCardLookup.service.ts
 /**
- * Consultar una tarjeta de regalo por su código (spec 2026-10-14 § 5.4.1 y § 6). Prueba de posesión: el código completo.
+ * Consultar una tarjeta de regalo por su código (spec 2026-10-14 § 5.4.1 y § 6). Prueba de posesión: el código completo o,
+ * desde la 1b (S2, Q7), la liga de la tarjeta (`pageToken`), con el MISMO contador de fallos.
  * Forma del índice («Adiciones al contrato» § 2): un código que no existe en este negocio —o mal tecleado— es el MISMO 404;
  * uno que existe devuelve su estado y por qué no sirve, si no sirve. El techo de volumen lo pone la ruta (C3); aquí se
  * cuentan los FALLOS por aparato y por IP (en memoria: el servidor corre en UNA instancia, sin Redis), para que nadie
@@ -9,8 +10,8 @@
 import type { GiftCardStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import AppError from '@/errors/AppError'
-import { hashGiftCardCode, normalizeGiftCardCode } from './giftCardCode'
 import { GiftCardError } from './giftCardErrors'
+import { filtroDeLaPrueba } from './giftCardProof'
 import { saldoUsable } from './giftCardLedger'
 
 export interface GiftCardLookupResult {
@@ -110,20 +111,29 @@ export function reiniciarLimiteDeConsultasParaPruebas(): void {
   ultimoBarrido = 0
 }
 
-export async function lookupGiftCardsByCode(
+export async function lookupGiftCardsByCode(venueId: string, rawCode: string, origen: Origen): Promise<GiftCardLookupResult> {
+  return lookupGiftCards(venueId, { code: rawCode }, origen)
+}
+
+/**
+ * Por código o por liga: los dos apartan y devuelven el MISMO lugar (`apartarFallo`/`devolverFallo`), así que el contador es
+ * uno. Una liga mal formada en HTTP la rechaza el esquema (400, antes del limitador); aquí, sin esquema, cuenta como fallo,
+ * igual que un código mal formado.
+ */
+export async function lookupGiftCards(
   venueId: string,
-  rawCode: string,
-  origen: { deviceId?: string; ip?: string },
+  prueba: { code: string } | { pageToken: string },
+  origen: Origen,
 ): Promise<GiftCardLookupResult> {
   const apartado = apartarFallo(venueId, origen)
-  const normalizado = normalizeGiftCardCode(rawCode)
+  const where = filtroDeLaPrueba(
+    venueId,
+    'pageToken' in prueba ? { kind: 'PAGE_TOKEN', pageToken: prueba.pageToken } : { kind: 'CODE', code: prueba.code },
+  )
   let sobre
   try {
-    sobre = normalizado
-      ? await prisma.giftCard.findFirst({
-          where: { venueId, codeHash: hashGiftCardCode(normalizado) },
-          select: { id: true, codeLast4: true, status: true, balance: true, expiresAt: true },
-        })
+    sobre = where
+      ? await prisma.giftCard.findFirst({ where, select: { id: true, codeLast4: true, status: true, balance: true, expiresAt: true } })
       : null
   } catch (error) {
     devolverFallo(apartado) // la base no contestó: no es un código inexistente

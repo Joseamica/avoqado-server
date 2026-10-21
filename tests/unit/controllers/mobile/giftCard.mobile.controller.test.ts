@@ -23,7 +23,7 @@ jest.mock('@/services/giftCards/giftCardOrder.service', () => ({
 }))
 jest.mock('@/services/giftCards/giftCardLookup.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardLookup.service'),
-  lookupGiftCardsByCode: jest.fn(),
+  lookupGiftCards: jest.fn(),
 }))
 jest.mock('@/services/giftCards/giftCardCancel.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardCancel.service'),
@@ -46,7 +46,8 @@ import * as venta from '@/controllers/shared/giftCardSale.controller'
 import * as superficie from '@/services/giftCards/giftCardSurface.service'
 import { getGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
-import { lookupGiftCardsByCode } from '@/services/giftCards/giftCardLookup.service'
+import { lookupGiftCards } from '@/services/giftCards/giftCardLookup.service'
+import { segunElAparato } from '@/utils/giftCardRequest'
 import { iniciarCancelacionDeVenta, liberarCancelacionDeVenta } from '@/services/giftCards/giftCardCancel.service'
 import { getGiftCardPaymentByKey, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
@@ -233,19 +234,19 @@ describe('vender (cuenta propia de tarjetas)', () => {
 
 describe('consultar por código', () => {
   it('pasa el código tal cual con el aparato y la IP (el servicio cuenta los fallos); no deja bitácora', async () => {
-    m(lookupGiftCardsByCode).mockResolvedValue({
+    m(lookupGiftCards).mockResolvedValue({
       usableBalance: 400.5,
       cards: [{ giftCardId: 'g1', last4: 'K7QZ', balance: 400.5, status: 'ACTIVE', expiresAt: null, usable: true, notUsableReason: null }],
     })
     const r = await request(app).post(`${B}/gift-cards/lookup`).send({ code: 'k7qz-abcd-efgh-jkmn-p' }).set('X-Device-Id', 'caja-1')
     expect(r.status).toBe(200)
     expect(r.body.data.usableBalance).toBe(400.5)
-    expect(lookupGiftCardsByCode).toHaveBeenCalledWith('v1', 'k7qz-abcd-efgh-jkmn-p', { deviceId: 'caja-1', ip: expect.any(String) })
+    expect(lookupGiftCards).toHaveBeenCalledWith('v1', { code: 'k7qz-abcd-efgh-jkmn-p' }, { deviceId: 'caja-1', ip: expect.any(String) })
     expect(audit).not.toHaveBeenCalled()
   })
 
   it('un código que no existe → 404 GIFT_CARD_NOT_FOUND', async () => {
-    m(lookupGiftCardsByCode).mockRejectedValue(
+    m(lookupGiftCards).mockRejectedValue(
       new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos una tarjeta con ese código. Revisa que esté completo.', 404),
     )
     const r = await request(app).post(`${B}/gift-cards/lookup`).send({ code: 'ZZZZ-ZZZZ-ZZZZ-ZZZZ-Z' })
@@ -254,11 +255,20 @@ describe('consultar por código', () => {
     expect(r.body).toEqual({ code: 'GIFT_CARD_NOT_FOUND', message: 'No encontramos una tarjeta con ese código. Revisa que esté completo.' })
   })
 
-  it('sin código → 400', async () => {
+  it('sin código ni liga → 400', async () => {
     const r = await request(app).post(`${B}/gift-cards/lookup`).send({})
     expect(r.status).toBe(400)
-    expect(r.body.message).toMatch(/Falta el código de la tarjeta/)
-    expect(lookupGiftCardsByCode).not.toHaveBeenCalled()
+    expect(r.body.message).toMatch(/Manda el código o la liga de la tarjeta/)
+    expect(lookupGiftCards).not.toHaveBeenCalled()
+  })
+
+  it('1b S2: por la liga (pageToken) pasa { pageToken } con el aparato y la IP; no deja bitácora', async () => {
+    const liga = 'Xk3pQ9vLmN2bR7tY4wZ8aC1dE5fG6hJ0kL9pQ3sT7uV'
+    m(lookupGiftCards).mockResolvedValue({ usableBalance: 0, cards: [] })
+    const r = await request(app).post(`${B}/gift-cards/lookup`).send({ pageToken: liga }).set('X-Device-Id', 'caja-1')
+    expect(r.status).toBe(200)
+    expect(lookupGiftCards).toHaveBeenCalledWith('v1', { pageToken: liga }, { deviceId: 'caja-1', ip: expect.any(String) })
+    expect(audit).not.toHaveBeenCalled()
   })
 })
 
@@ -444,5 +454,46 @@ describe('cancelar la venta de una tarjeta (en tienda, el mismo día)', () => {
     expect(r.status).toBe(400)
     expect(r.body.message).toMatch(/comprobaste que la devolución NO se hizo/)
     expect(liberarCancelacionDeVenta).not.toHaveBeenCalled()
+  })
+})
+
+/** Q110 (1b S2): el autor es SIEMPRE la sesión; `iniciadoPor` es sólo una nota de la bitácora («según el aparato…»). */
+describe('Q110: quién empezó un reenvío (sólo nota de bitácora)', () => {
+  const ANA = 'cl9ana0000000000000000000'
+  const reqDe = (userId: string, body: Record<string, unknown>) => ({ authContext: { userId }, body }) as any
+
+  it('segunElAparato: sin iniciadoPor, o igual a la sesión ⇒ {}', () => {
+    expect(segunElAparato(reqDe('staff-1', {}))).toEqual({})
+    expect(segunElAparato(reqDe('staff-1', { iniciadoPor: 'staff-1', iniciadoPorNombre: 'Yo' }))).toEqual({})
+  })
+
+  it('segunElAparato: distinto de la sesión ⇒ la nota con los dos campos', () => {
+    expect(segunElAparato(reqDe('staff-1', { iniciadoPor: ANA, iniciadoPorNombre: 'Ana' }))).toEqual({
+      iniciadoPorSegunElAparato: { iniciadoPor: ANA, iniciadoPorNombre: 'Ana' },
+    })
+  })
+
+  it('🔴 payWithBalance con iniciadoPor A y el token de B ⇒ el servicio recibe B y la bitácora es de B con la nota de A', async () => {
+    m(payGiftCardBalanceOnOrder).mockResolvedValue(RESULTADO)
+    const r = await request(app)
+      .post(`${B}/orders/o9/pay-gift-card`)
+      .send({ ...COBRO, iniciadoPor: ANA, iniciadoPorNombre: 'Ana' })
+    expect(r.status).toBe(200)
+    const input = m(payGiftCardBalanceOnOrder).mock.calls[0][2]
+    expect(input.staffId).toBe('staff-1')
+    expect(JSON.stringify(input)).not.toContain(ANA) // nunca autor: el servicio no lo recibe
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'staff-1',
+        action: 'GIFT_CARD_REDEEMED',
+        data: expect.objectContaining({ iniciadoPorSegunElAparato: { iniciadoPor: ANA, iniciadoPorNombre: 'Ana' } }),
+      }),
+    )
+  })
+
+  it('sin iniciadoPor la bitácora no lleva nota', async () => {
+    m(payGiftCardBalanceOnOrder).mockResolvedValue(RESULTADO)
+    await request(app).post(`${B}/orders/o9/pay-gift-card`).send(COBRO)
+    expect(audit.mock.calls[0][0].data).not.toHaveProperty('iniciadoPorSegunElAparato')
   })
 })

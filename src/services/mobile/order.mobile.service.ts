@@ -86,7 +86,8 @@ import {
   sobresDelCanje,
   type LockedGiftCard,
 } from '../giftCards/giftCardLedger'
-import { hashGiftCardCode, normalizeGiftCardCode } from '../giftCards/giftCardCode'
+import { resolverPrueba, sobreDeLaPrueba, type PruebaDePosesion } from '../giftCards/giftCardProof'
+import { rechazoSellado, sellarSiEsDefinitivo, tomarLlaveDeCobro } from '../giftCards/giftCardPayKey'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import { MAX_SOBRES_POR_CUENTA, formatoPesos } from '../giftCards/giftCardLimits'
 import { ensureGiftCardTender, isGiftCardTenderKind, resolveGiftCardTenderForChargeInTx } from '../giftCards/giftCardTender'
@@ -4113,8 +4114,8 @@ const CANAL_DEL_COBRO_CON_SALDO = { turno: 'payGiftCardBalanceOnOrder', reapertu
 export interface PayGiftCardBalanceInput {
   /** 8–64 [A-Za-z0-9_-]; la MISMA en cada reintento (Payment [venueId, idempotencyKey], R12). */
   idempotencyKey: string
-  /** Prueba de posesión: el código tecleado o escaneado. La 1c agrega `{ kind: 'WALLET_PASS'; qrToken }`. */
-  proof: { kind: 'CODE'; code: string }
+  /** Prueba de posesión: el código o la liga de la tarjeta (1b S2); S5 agrega PHONE_OTP y la 1c `WALLET_PASS`. */
+  proof: PruebaDePosesion
   /** Pesos, venta SIN propina, > 0, centavos exactos. Nunca más de lo que debe la cuenta (R5). */
   amount: Prisma.Decimal
   /** Pesos, ≥ 0 (el tender de regalo captura propina, D8). */
@@ -4214,7 +4215,7 @@ export async function getGiftCardPaymentByKey(venueId: string, idempotencyKey: s
 }
 
 /**
- * Cobrar con saldo de tarjeta de regalo en UNA transacción (R5): Order → sobre → turno; descuento condicionado; un REDEEM
+ * Cobrar con saldo de tarjeta de regalo en UNA transacción (R5): llave (Q91) → Order → sobre → turno; descuento condicionado; un REDEEM
  * por sobre y UN Payment del tender de sistema. Online-only. Nunca efectivo ni cambio: el monto no pasa de lo que debe la
  * cuenta y nunca hay vuelto. Cobrar no se gatea por plan (§ 6): una tarjeta vendida se honra aunque la función se apague.
  */
@@ -4226,13 +4227,21 @@ export async function payGiftCardBalanceOnOrder(
   if (!LLAVE_DE_COBRO_CON_SALDO.test(input?.idempotencyKey ?? '')) {
     throw new BadRequestError('idempotencyKey debe tener de 8 a 64 caracteres (letras, números, guion o guion bajo).')
   }
-  if (input?.proof?.kind !== 'CODE' || typeof input.proof.code !== 'string') {
-    throw new BadRequestError('Por ahora el saldo se cobra con el código de la tarjeta (proof.kind = CODE).')
+  // A19b: sin lista fija de kinds; uno desconocido lo rechaza la prueba (`giftCardProof`) con el mismo 400.
+  if (typeof input?.proof?.kind !== 'string') {
+    throw new BadRequestError('Falta cómo se identificó la tarjeta: código, liga o teléfono.')
   }
   const monto = pesosExactos(input.amount, 'amount')
   const propina = pesosExactos(input.tip ?? new Prisma.Decimal(0), 'tip')
   if (!monto.greaterThan(0))
     throw new GiftCardError('GIFT_CARD_AMOUNT_OUT_OF_RANGE', 'El monto a pagar con saldo debe ser mayor a cero.', 422)
+
+  // Q91 (0): una llave con un rechazo definitivo sellado responde ESE rechazo, sin leer la base.
+  const sellado = rechazoSellado(venueId, input.idempotencyKey)
+  if (sellado) throw sellado
+  // (1) El sobre que la prueba nombra, SIN validarla: la salida por llave compara contra él. Un kind desconocido es 400 aquí.
+  const sobreId = await sobreDeLaPrueba(venueId, input.proof)
+  if (!sobreId) throw tarjetaNoEncontrada()
 
   const order = await prisma.order.findUnique({
     where: { id: orderId, venueId },
@@ -4254,22 +4263,15 @@ export async function payGiftCardBalanceOnOrder(
     )
   }
 
-  const normalizado = normalizeGiftCardCode(input.proof.code)
-  // La huella de la prueba presentada: resuelve el sobre aquí y se vuelve a comparar BAJO el candado (r1, A-1).
-  const huellaPresentada = normalizado ? hashGiftCardCode(normalizado) : null
-  const sobre = huellaPresentada
-    ? await prisma.giftCard.findFirst({ where: { venueId, codeHash: huellaPresentada }, select: { id: true, codeLast4: true } })
-    : null
-  if (!sobre) throw tarjetaNoEncontrada()
-
   const conflicto = () =>
     new GiftCardError('IDEMPOTENCY_KEY_REUSED', 'Esta llave ya registró otro cobro. Genera una llave nueva para este cobro.', 409)
   const mismoCobro = (previo: PayGiftCardBalanceResult) =>
     previo.orderId === orderId &&
     new Prisma.Decimal(previo.amount).equals(monto) &&
     new Prisma.Decimal(previo.tipAmount).equals(propina) &&
-    previo.redeemed.every(s => s.giftCardId === sobre.id)
+    previo.redeemed.every(s => s.giftCardId === sobreId)
 
+  // (2) La salida por llave: un ATAJO (no decide nada que el candado de la llave no vuelva a decidir).
   const yaExiste = await prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey: input.idempotencyKey } },
     select: { id: true },
@@ -4281,6 +4283,9 @@ export async function payGiftCardBalanceOnOrder(
     await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
     return { ...previo, replay: true }
   }
+
+  // (3) La prueba se valida en lo que no cambia entre un envío y su reintento; lo que sí cambia se juzga bajo los candados.
+  const prueba = await resolverPrueba(venueId, input.proof, { deviceId: input.deviceId ?? null })
 
   await ensureGiftCardTender(prisma, venueId)
   const effectiveStaffId = await validateStaffVenue(input.staffId, venueId)
@@ -4294,102 +4299,113 @@ export async function payGiftCardBalanceOnOrder(
   let abono: AbonoEnTx
   try {
     abono = await prisma.$transaction(async tx => {
-      const tenderResuelto = await resolveGiftCardTenderForChargeInTx(tx, venueId)
-      return await registrarAbonoEnTx(
-        tx,
-        {
-          venueId,
-          orderId,
-          effectiveStaffId,
-          marcarCocina,
-          // Siempre `false`: arriba se rechazan las ventas con vales (GIFT_CARD_TENDER_NOT_ALLOWED).
-          conSesionDeVales: !!order.areaTicketCheckoutSession,
-          // El personal ya se validó arriba y su rechazo salió como siempre (el cobro con saldo no difiere ese 400).
-          rechazoDelPersonal: null,
-        },
-        {
-          amountCents: pesosToCents(monto.toNumber()),
-          tipCents: pesosToCents(propina.toNumber()),
-          method: 'OTHER',
-          idempotencyKey: input.idempotencyKey,
-          isOfflineReplay: false,
-          tender: { resuelto: tenderResuelto },
-          canal: CANAL_DEL_COBRO_CON_SALDO,
-          // Bajo el candado de la Order y ANTES de que el núcleo reclame el turno: aquí se rechaza todo lo que no puede
-          // pagar y se bloquea el sobre (E4: Order → sobre → turno; ruling 5). Después del turno no se toma ningún sobre.
-          trasCandadoDeOrden: async (txCandado, cuenta) => {
-            // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
-            rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
-            // Codex #1 (cierre): el candado de la Order serializa escrituras, no el desenlace del banco. Con un cobro de terminal
-            // cuyo resultado no está acreditado, el banco todavía puede aprobar ese dinero: descontar el saldo cobraría la venta
-            // dos veces. Las salidas de repetición (la llave que ya cobró, la ganadora de una carrera) siguen antes y en el catch.
-            await assertNoLiveTerminalCharge(
-              txCandado,
-              { venueId, orderId },
-              {
-                mensaje:
-                  'Hay un cobro en curso en la terminal para esta cuenta. Espera su resultado (o cancélalo) antes de cobrar con saldo.',
-              },
-            )
-            // D8 / ruling 8: una tarjeta no se paga con saldo de otra (spec: no se compran tarjetas con saldo).
-            if (await esCuentaDeTarjetasEnTx(txCandado, orderId)) {
-              throw new GiftCardError(
-                'GIFT_CARD_TENDER_NOT_ALLOWED',
-                'Una tarjeta de regalo no se paga con saldo de otra tarjeta de regalo.',
-                409,
-              )
-            }
-            const pendiente = computeOrderBalance(cuenta.fresh, cuenta.previousPayments).remainingBalance
-            if (monto.greaterThan(pendiente)) {
-              throw new GiftCardError(
-                'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
-                `Esta cuenta debe ${formatoPesos(pendiente)}: el saldo de la tarjeta no paga de más.`,
-                422,
-                { pendiente: pendiente.toNumber() },
-              )
-            }
-            // Una prueba de posesión = un sobre (ruling 6: un cobro nunca descuenta más de MAX_SOBRES_POR_CUENTA, así
-            // que las lecturas acotadas de la libreta —`sobresDelCanje`, `revertirCanjeEnTx`— lo ven completo).
-            bloqueados = await lockGiftCardsForUpdate(txCandado, [sobre.id])
-            const [card] = bloqueados
-            if (!card || card.venueId !== venueId || card.status === 'PENDING' || card.status === 'DEACTIVATED') throw tarjetaNoEncontrada()
-            // r1 (A-1): el código se resolvió a un sobre ANTES de la transacción; si el gerente lo reemplazó mientras
-            // esperábamos el candado, la huella vigente ya no es la de la prueba presentada: el código anterior no sirve.
-            if (card.codeHash !== huellaPresentada) throw tarjetaNoEncontrada()
-            if (card.status === 'BLOCKED') {
-              throw new GiftCardError('GIFT_CARD_BLOCKED', 'Esta tarjeta de regalo está bloqueada. Pide al gerente que la revise.', 409)
-            }
-            if (card.status !== 'ACTIVE') throw tarjetaNoEncontrada()
-            if (card.expiresAt && card.expiresAt.getTime() <= Date.now()) {
-              throw new GiftCardError('GIFT_CARD_EXPIRED', 'Esta tarjeta de regalo ya venció.', 409)
-            }
-            const disponible = saldoUsable(bloqueados, new Date())
-            if (disponible.lessThan(monto.plus(propina))) {
-              throw new GiftCardError(
-                'GIFT_CARD_INSUFFICIENT_BALANCE',
-                `Quedan ${formatoPesos(disponible)} en la tarjeta de regalo.`,
-                409,
+      // Q91: LO PRIMERO, el candado de la llave. Un reintento espera aquí al primer envío; si ése ya cobró, sale por su
+      // respuesta (el catch de abajo: `mismoCobro` ⇒ replay; si no, IDEMPOTENCY_KEY_REUSED).
+      const llave = await tomarLlaveDeCobro(tx, venueId, input.idempotencyKey)
+      if (llave.cobroPrevioId) throw new CobroYaRegistrado(llave.cobroPrevioId)
+      try {
+        const tenderResuelto = await resolveGiftCardTenderForChargeInTx(tx, venueId)
+        return await registrarAbonoEnTx(
+          tx,
+          {
+            venueId,
+            orderId,
+            effectiveStaffId,
+            marcarCocina,
+            // Siempre `false`: arriba se rechazan las ventas con vales (GIFT_CARD_TENDER_NOT_ALLOWED).
+            conSesionDeVales: !!order.areaTicketCheckoutSession,
+            // El personal ya se validó arriba y su rechazo salió como siempre (el cobro con saldo no difiere ese 400).
+            rechazoDelPersonal: null,
+          },
+          {
+            amountCents: pesosToCents(monto.toNumber()),
+            tipCents: pesosToCents(propina.toNumber()),
+            method: 'OTHER',
+            idempotencyKey: input.idempotencyKey,
+            isOfflineReplay: false,
+            tender: { resuelto: tenderResuelto },
+            canal: CANAL_DEL_COBRO_CON_SALDO,
+            // Bajo el candado de la Order y ANTES de que el núcleo reclame el turno: aquí se rechaza todo lo que no puede
+            // pagar y se bloquea el sobre (E4: Order → sobre → turno; ruling 5). Después del turno no se toma ningún sobre.
+            trasCandadoDeOrden: async (txCandado, cuenta) => {
+              // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
+              rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
+              // Codex #1 (cierre): el candado de la Order serializa escrituras, no el desenlace del banco. Con un cobro de terminal
+              // cuyo resultado no está acreditado, el banco todavía puede aprobar ese dinero: descontar el saldo cobraría la venta
+              // dos veces. Las salidas de repetición (la llave que ya cobró, la ganadora de una carrera) siguen antes y en el catch.
+              await assertNoLiveTerminalCharge(
+                txCandado,
+                { venueId, orderId },
                 {
-                  saldoDisponible: disponible.toNumber(),
+                  mensaje:
+                    'Hay un cobro en curso en la terminal para esta cuenta. Espera su resultado (o cancélalo) antes de cobrar con saldo.',
                 },
               )
-            }
+              // D8 / ruling 8: una tarjeta no se paga con saldo de otra (spec: no se compran tarjetas con saldo).
+              if (await esCuentaDeTarjetasEnTx(txCandado, orderId)) {
+                throw new GiftCardError(
+                  'GIFT_CARD_TENDER_NOT_ALLOWED',
+                  'Una tarjeta de regalo no se paga con saldo de otra tarjeta de regalo.',
+                  409,
+                )
+              }
+              const pendiente = computeOrderBalance(cuenta.fresh, cuenta.previousPayments).remainingBalance
+              if (monto.greaterThan(pendiente)) {
+                throw new GiftCardError(
+                  'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
+                  `Esta cuenta debe ${formatoPesos(pendiente)}: el saldo de la tarjeta no paga de más.`,
+                  422,
+                  { pendiente: pendiente.toNumber() },
+                )
+              }
+              // Una prueba de posesión = un sobre (ruling 6: un cobro nunca descuenta más de MAX_SOBRES_POR_CUENTA, así
+              // que las lecturas acotadas de la libreta —`sobresDelCanje`, `revertirCanjeEnTx`— lo ven completo).
+              bloqueados = await lockGiftCardsForUpdate(txCandado, [prueba.giftCardId])
+              const [card] = bloqueados
+              if (!card || card.venueId !== venueId || card.status === 'PENDING' || card.status === 'DEACTIVATED')
+                throw tarjetaNoEncontrada()
+              // r1 (A-1) y Q91: la prueba se resolvió a un sobre ANTES de la transacción; si el gerente repuso el código (y la
+              // liga) mientras esperábamos el candado, la prueba presentada ya no sirve. Se juzga con la hora leída bajo la llave.
+              if (!prueba.vigente(card, llave.ahora)) throw prueba.rechazo()
+              if (card.status === 'BLOCKED') {
+                throw new GiftCardError('GIFT_CARD_BLOCKED', 'Esta tarjeta de regalo está bloqueada. Pide al gerente que la revise.', 409)
+              }
+              if (card.status !== 'ACTIVE') throw tarjetaNoEncontrada()
+              if (card.expiresAt && card.expiresAt.getTime() <= Date.now()) {
+                throw new GiftCardError('GIFT_CARD_EXPIRED', 'Esta tarjeta de regalo ya venció.', 409)
+              }
+              const disponible = saldoUsable(bloqueados, new Date())
+              if (disponible.lessThan(monto.plus(propina))) {
+                throw new GiftCardError(
+                  'GIFT_CARD_INSUFFICIENT_BALANCE',
+                  `Quedan ${formatoPesos(disponible)} en la tarjeta de regalo.`,
+                  409,
+                  {
+                    saldoDisponible: disponible.toNumber(),
+                  },
+                )
+              }
+            },
+            // El descuento escribe en el sobre que el gancho YA bloqueó: no toma candado nuevo después del turno.
+            dentroDeLaTx: async (txCobro, cobro) => {
+              canje = await canjearSobresEnTx(txCobro, {
+                venueId,
+                orderId,
+                paymentId: cobro.paymentId,
+                amount: monto.plus(propina),
+                cards: bloqueados,
+                staffId: effectiveStaffId ?? null,
+                deviceId: input.deviceId ?? null,
+              })
+            },
           },
-          // El descuento escribe en el sobre que el gancho YA bloqueó: no toma candado nuevo después del turno.
-          dentroDeLaTx: async (txCobro, cobro) => {
-            canje = await canjearSobresEnTx(txCobro, {
-              venueId,
-              orderId,
-              paymentId: cobro.paymentId,
-              amount: monto.plus(propina),
-              cards: bloqueados,
-              staffId: effectiveStaffId ?? null,
-              deviceId: input.deviceId ?? null,
-            })
-          },
-        },
-        reconciliationEnabled,
-      )
+          reconciliationEnabled,
+        )
+      } catch (e) {
+        // Q91/Q94: se sella con el candado de la llave puesto (el siguiente envío no entra antes del sello); sólo lo definitivo.
+        sellarSiEsDefinitivo(venueId, input.idempotencyKey, e)
+        throw e
+      }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (err: any) {
     // r1 (A-2): carrera idempotente. Dos peticiones con la MISMA llave pasan la consulta de arriba; la segunda espera la
@@ -4535,7 +4551,7 @@ export async function payGiftCardBalanceOnOrder(
     tipAmount: propina.toNumber(),
     redeemed: canje.map(c => ({
       giftCardId: c.giftCardId,
-      last4: sobre.codeLast4,
+      last4: prueba.last4,
       amount: c.amount.toNumber(),
       balanceAfter: c.balanceAfter.toNumber(),
     })),

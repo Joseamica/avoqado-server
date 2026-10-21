@@ -4,6 +4,7 @@
  */
 import { z } from 'zod'
 import { MAX_SOBRES_POR_CUENTA } from '@/services/giftCards/giftCardLimits'
+import { PAGE_TOKEN_RE } from '@/services/giftCards/giftCardProof'
 import { idempotencyKey, montoPositivo, ordenParams, pesos, pesosPositivos, venueParams } from '../common/giftCard.common.schema'
 
 /** El mismo que valida A5 (`createGiftCardOrder`): 10 a 15 dígitos, con `+` opcional, sin espacios. */
@@ -24,6 +25,34 @@ const codigo = z
   .trim()
   .min(4, 'El código de la tarjeta está incompleto')
   .max(40, 'El código de la tarjeta es demasiado largo')
+
+/** 1b S2: la liga de la tarjeta (`pageToken`), como la reconoce el escáner (Q12). */
+const liga = z
+  .string({ invalid_type_error: 'La liga de la tarjeta no es válida' })
+  .trim()
+  .regex(PAGE_TOKEN_RE, 'La liga de la tarjeta no es válida')
+
+const SOLO_UNO = 'Manda el código o la liga de la tarjeta (sólo uno)'
+
+/**
+ * UNA sola unión de pruebas de posesión (A17/D4): la usan `payGiftCardSchema` y, en S2b, `payNewOrderSchema`; S5 le agrega
+ * PHONE_OTP una vez.
+ */
+export const proofSchema = z.discriminatedUnion(
+  'kind',
+  [z.object({ kind: z.literal('CODE'), code: codigo }), z.object({ kind: z.literal('PAGE_TOKEN'), pageToken: liga })],
+  { errorMap: () => ({ message: 'Falta cómo se identificó la tarjeta: código, liga o teléfono' }) },
+)
+
+/** Q110: quién EMPEZÓ un reenvío, según el aparato. Sólo nota de bitácora: nunca autor, ni comisión, ni huella. */
+const segunElAparato = {
+  iniciadoPor: z.string({ invalid_type_error: 'iniciadoPor debe ser texto' }).cuid('iniciadoPor no es un id válido').optional(),
+  iniciadoPorNombre: z
+    .string({ invalid_type_error: 'iniciadoPorNombre debe ser texto' })
+    .trim()
+    .max(120, 'iniciadoPorNombre no puede pasar de 120 caracteres')
+    .optional(),
+}
 
 const sobre = z
   .object({
@@ -72,10 +101,13 @@ export const createGiftCardOrderSchema = z.object({
   query: z.any().optional(),
 })
 
-/** A3 (cierre): el código va en el CUERPO (`POST …/gift-cards/lookup`), nunca en la URL. */
+/** A3 (cierre): el código va en el CUERPO (`POST …/gift-cards/lookup`), nunca en la URL. 1b S2: o la liga (exactamente uno). */
 export const lookupSchema = z.object({
   params: venueParams,
-  body: z.object({ code: codigo }, { required_error: 'Falta el código de la tarjeta' }).passthrough(),
+  body: z
+    .object({ code: codigo.optional(), pageToken: liga.optional() }, { required_error: SOLO_UNO })
+    .passthrough()
+    .refine(b => (b.code === undefined) !== (b.pageToken === undefined), SOLO_UNO),
   query: z.any().optional(),
 })
 
@@ -83,15 +115,10 @@ export const payGiftCardSchema = z.object({
   params: ordenParams,
   body: z.object({
     idempotencyKey,
-    proof: z.object(
-      {
-        kind: z.literal('CODE', { errorMap: () => ({ message: 'Por ahora el saldo se cobra con el código de la tarjeta' }) }),
-        code: codigo,
-      },
-      { required_error: 'Falta cómo se identificó la tarjeta', invalid_type_error: 'Falta cómo se identificó la tarjeta' },
-    ),
+    proof: proofSchema,
     amount: pesosPositivos('el monto'),
     tip: pesos('la propina').optional(),
+    ...segunElAparato,
   }),
   query: z.any().optional(),
 })

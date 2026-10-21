@@ -11,6 +11,9 @@ import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '@/mi
 import { redactUrlSecrets } from '@/middlewares/requestLogger'
 import { hasPermission } from '@/lib/permissions'
 import { liberarCancelacionSchema } from '@/schemas/common/giftCard.common.schema'
+import { validateRequest } from '@/middlewares/validation'
+import { lookupSchema, payGiftCardSchema } from '@/schemas/mobile/giftCard.mobile.schema'
+import { generateOpaqueToken } from '@/services/giftCards/giftCardCode'
 
 interface Ruta {
   autenticada: boolean
@@ -135,5 +138,90 @@ describe('rutas del POS de tarjetas de regalo', () => {
     expect(
       liberarCancelacionSchema.safeParse({ params, body: { operationKey: 'libera-0001-abc', confirmacionNoDevuelto: true } }).success,
     ).toBe(true)
+  })
+})
+
+/** 1b S2: la FORMA de consultar y cobrar con la liga (PAGE_TOKEN), con el 400 de `validateRequest` (el que ve la app). */
+describe('forma de consultar y cobrar con la liga (1b S2)', () => {
+  const LIGA = generateOpaqueToken()
+  const CODIGO = 'K7QZ-ABCD-EFGH-JKMN-P'
+  async function validar(schema: any, body: unknown, params: Record<string, string>) {
+    const req: any = { body, params, query: {} }
+    let error: any
+    let siguio = false
+    await validateRequest(schema)(req, {} as any, (e?: unknown) => {
+      siguio = true
+      error = e
+    })
+    return { error, siguio, body: req.body }
+  }
+  const enNegocio = { venueId: 'v1' }
+  const enCuenta = { venueId: 'v1', orderId: 'o1' }
+  const cobro = (over: Record<string, unknown> = {}) => ({
+    idempotencyKey: 'cobro-0001-abc',
+    proof: { kind: 'PAGE_TOKEN', pageToken: LIGA },
+    amount: 100,
+    ...over,
+  })
+
+  it('lookup acepta { code } o { pageToken }', async () => {
+    for (const body of [{ code: CODIGO }, { pageToken: LIGA }]) {
+      const r = await validar(lookupSchema, body, enNegocio)
+      expect({ body, error: r.error }).toEqual({ body, error: undefined })
+    }
+  })
+
+  it('lookup con { code, pageToken } ⇒ 400 «Manda el código o la liga de la tarjeta (sólo uno)»', async () => {
+    const { error } = await validar(lookupSchema, { code: CODIGO, pageToken: LIGA }, enNegocio)
+    expect(error?.statusCode).toBe(400)
+    expect(error?.message).toBe('Error de validación: Manda el código o la liga de la tarjeta (sólo uno)')
+  })
+
+  it('lookup sin ninguno de los dos ⇒ el mismo 400', async () => {
+    const { error } = await validar(lookupSchema, {}, enNegocio)
+    expect(error?.message).toBe('Error de validación: Manda el código o la liga de la tarjeta (sólo uno)')
+  })
+
+  it("lookup con { pageToken: 'corto' } ⇒ 400 «La liga de la tarjeta no es válida»", async () => {
+    const { error } = await validar(lookupSchema, { pageToken: 'corto' }, enNegocio)
+    expect(error?.statusCode).toBe(400)
+    expect(error?.message).toBe('Error de validación: pageToken: La liga de la tarjeta no es válida')
+  })
+
+  it('pay-gift-card acepta proof.kind CODE y PAGE_TOKEN', async () => {
+    for (const proof of [
+      { kind: 'CODE', code: CODIGO },
+      { kind: 'PAGE_TOKEN', pageToken: LIGA },
+    ]) {
+      const r = await validar(payGiftCardSchema, cobro({ proof }), enCuenta)
+      expect({ proof, error: r.error }).toEqual({ proof, error: undefined })
+      expect(r.body.proof).toEqual(proof)
+    }
+  })
+
+  it("pay-gift-card con proof.kind 'WALLET_PASS' ⇒ 400 «Falta cómo se identificó la tarjeta: código, liga o teléfono»", async () => {
+    const { error } = await validar(payGiftCardSchema, cobro({ proof: { kind: 'WALLET_PASS', qrToken: 'qr-1' } }), enCuenta)
+    expect(error?.statusCode).toBe(400)
+    expect(error?.message).toBe('Error de validación: proof.kind: Falta cómo se identificó la tarjeta: código, liga o teléfono')
+  })
+
+  it('pay-gift-card con una liga mal formada ⇒ 400 «La liga de la tarjeta no es válida»', async () => {
+    const { error } = await validar(payGiftCardSchema, cobro({ proof: { kind: 'PAGE_TOKEN', pageToken: 'corto' } }), enCuenta)
+    expect(error?.message).toBe('Error de validación: proof.pageToken: La liga de la tarjeta no es válida')
+  })
+
+  it('Q110: iniciadoPor (cuid) e iniciadoPorNombre (≤ 120, recortado) llegan al controller; son opcionales', async () => {
+    const r = await validar(payGiftCardSchema, cobro({ iniciadoPor: 'cl9ana0000000000000000000', iniciadoPorNombre: '  Ana  ' }), enCuenta)
+    expect(r.error).toBeUndefined()
+    expect([r.body.iniciadoPor, r.body.iniciadoPorNombre]).toEqual(['cl9ana0000000000000000000', 'Ana'])
+    expect((await validar(payGiftCardSchema, cobro(), enCuenta)).error).toBeUndefined()
+  })
+
+  it.each([
+    ['iniciadoPor que no es cuid', { iniciadoPor: 'no es un id' }],
+    ['iniciadoPorNombre de más de 120', { iniciadoPor: 'cl9ana0000000000000000000', iniciadoPorNombre: 'A'.repeat(121) }],
+  ])('Q110: %s ⇒ 400', async (_caso, extra) => {
+    const { error } = await validar(payGiftCardSchema, cobro(extra), enCuenta)
+    expect(error?.statusCode).toBe(400)
   })
 })

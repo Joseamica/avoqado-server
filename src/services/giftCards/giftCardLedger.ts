@@ -7,7 +7,7 @@
  *  - Jerarquía de candados: Order → Payment (si aplica) → GiftCard → Shift. Un reverso bloquea los sobres ANTES de
  *    `writeRefundInTx` (que reclama el turno): ver `sobresDelCanje`.
  */
-import { Prisma, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
+import { Prisma, type GiftCardDeliveryChannel, type GiftCardReason, type GiftCardStatus } from '@prisma/client'
 import { addDays, addMonths } from 'date-fns'
 import { BadRequestError, ConflictError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
@@ -33,6 +33,11 @@ export interface LockedGiftCard {
   venueId: string
   /** r1 (A-1): la huella VIGENTE del código, leída bajo el candado; el cobro la compara con la prueba presentada. */
   codeHash: string
+  /** 1b S2: la liga VIGENTE (reponer el código la cambia); el cobro con PAGE_TOKEN la compara bajo el candado. */
+  pageToken: string
+  /** 1b S5: el destino vigente; la prueba por teléfono lo compara bajo el candado. */
+  recipientPhone: string | null
+  deliveryChannel: GiftCardDeliveryChannel
   status: GiftCardStatus
   balance: Prisma.Decimal
   initialAmount: Prisma.Decimal
@@ -86,6 +91,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
       id: string
       venueId: string
       codeHash: string
+      pageToken: string
+      recipientPhone: string | null
+      deliveryChannel: string
       status: string
       balance: Prisma.Decimal
       initialAmount: Prisma.Decimal
@@ -95,7 +103,8 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
       customerId: string | null
     }>
   >`
-    SELECT id, "venueId", "codeHash", status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
+    SELECT id, "venueId", "codeHash", "pageToken", "recipientPhone", "deliveryChannel"::text AS "deliveryChannel",
+      status::text AS status, balance, "initialAmount", "expiresAt", "activatedAt", "validityMonths", "customerId"
     FROM "GiftCard"
     WHERE id IN (${Prisma.join(unicos)})
     ORDER BY id ASC
@@ -104,6 +113,9 @@ export async function lockGiftCardsForUpdate(tx: Tx, ids: string[]): Promise<Loc
     id: f.id,
     venueId: f.venueId,
     codeHash: f.codeHash,
+    pageToken: f.pageToken,
+    recipientPhone: f.recipientPhone,
+    deliveryChannel: f.deliveryChannel as GiftCardDeliveryChannel,
     status: f.status as GiftCardStatus,
     balance: new Prisma.Decimal(f.balance),
     initialAmount: new Prisma.Decimal(f.initialAmount),

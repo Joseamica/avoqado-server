@@ -10,10 +10,11 @@
 import type { Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
 import { createGiftCardOrder } from '@/services/giftCards/giftCardOrder.service'
-import { lookupGiftCardsByCode } from '@/services/giftCards/giftCardLookup.service'
+import { lookupGiftCards } from '@/services/giftCards/giftCardLookup.service'
+import type { PruebaDePosesion } from '@/services/giftCards/giftCardProof'
 import { getGiftCardPaymentByKey, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
 import { auditarTarjetas } from '@/services/giftCards/giftCardSurface.service'
-import { aparatoDe, origenDe, staffDe } from '@/utils/giftCardRequest'
+import { aparatoDe, origenDe, segunElAparato, staffDe } from '@/utils/giftCardRequest'
 
 export async function createOrder(req: Request, res: Response) {
   const { venueId } = req.params
@@ -34,7 +35,10 @@ export async function createOrder(req: Request, res: Response) {
 
 export async function lookup(req: Request, res: Response) {
   const { venueId } = req.params
-  const data = await lookupGiftCardsByCode(venueId, String(req.body.code), { deviceId: aparatoDe(req) ?? undefined, ip: req.ip })
+  // El esquema ya exige exactamente uno: el código o la liga (1b S2).
+  const { code, pageToken } = req.body as { code?: string; pageToken?: string }
+  const prueba = pageToken !== undefined ? { pageToken } : { code: String(code) }
+  const data = await lookupGiftCards(venueId, prueba, { deviceId: aparatoDe(req) ?? undefined, ip: req.ip })
   res.json({ success: true, data })
 }
 
@@ -43,7 +47,7 @@ export async function payWithBalance(req: Request, res: Response) {
   const staffId = staffDe(req)
   const { idempotencyKey, proof, amount, tip } = req.body as {
     idempotencyKey: string
-    proof: { kind: 'CODE'; code: string }
+    proof: PruebaDePosesion
     amount: Prisma.Decimal
     tip?: Prisma.Decimal
   }
@@ -69,6 +73,8 @@ export async function payWithBalance(req: Request, res: Response) {
         amount: data.amount,
         tipAmount: data.tipAmount,
         cards: data.redeemed.map(r => ({ giftCardId: r.giftCardId, amount: r.amount })),
+        // Q110: el cobro es SIEMPRE de la sesión (`staffId`); si el aparato dice que lo empezó otra persona, va como nota.
+        ...segunElAparato(req),
       },
       ...origenDe(req),
     })
