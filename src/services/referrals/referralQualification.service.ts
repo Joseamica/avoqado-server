@@ -2,6 +2,7 @@ import { isOrderFullyReversed } from './referralReversalPolicy.service'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { leerSiEsCuentaDeTarjetas } from '@/services/giftCards/giftCardMarks'
+import { esVentaNuevaDeCambio } from '@/services/exchanges/exchangeMarks'
 import {
   Prisma,
   ReferralTier,
@@ -451,6 +452,10 @@ export async function onOrderPaid(input: OnOrderPaidInput): Promise<void> {
       )
       return null
     }
+
+    // La venta nueva de un cambio no es una compra nueva (spec §7.6): no califica un referido, ni con la diferencia cobrada.
+    // Vive aquí, y no sólo en el efecto, porque la terminal, el cobro en efectivo del POS y la liga tardía llaman directo.
+    if (await esVentaNuevaDeCambio(tx, input.orderId)) return null
 
     // Step 1: CAS claim by order. `count === 0` → someone else already
     // claimed this order (concurrent execution or duplicate webhook), or
