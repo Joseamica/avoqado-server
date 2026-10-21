@@ -32,6 +32,7 @@ import { lockGiftCardsForUpdate, operarSobreDeGerenteEnTx, revertirCanjeEnTx } f
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { payCashOrder, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { rechazoSellado, reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
 import { payWithBalance } from '@/controllers/mobile/giftCard.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -121,6 +122,27 @@ async function esperarAQueAlguienEspereElSobre(): Promise<void> {
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   throw new Error('el cobro nunca llegó a esperar el candado del sobre')
+}
+
+/**
+ * Q91: espera a que OTRA sesión esté detenida en el candado de la LLAVE (`giftpay:<venue>:<llave>`, el advisory de
+ * `tomarLlaveDeCobro`) que sostiene `pidQueTiene`. Esperar la fila de la Order o del sobre NO cuenta: sin el candado de la
+ * llave, el segundo envío también esperaría al primero, pero en la Order. Lanza si nadie llega a esperar en ~5 s.
+ */
+async function esperarAQueAlguienEspereLaLlave(pidQueTiene: number, llave: string): Promise<void> {
+  const clave = `giftpay:${venueId}:${llave}`
+  for (let i = 0; i < 200; i++) {
+    // Un advisory de un bigint sale en pg_locks partido: la mitad alta en classid y la baja en objid, con objsubid = 1.
+    const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
+      SELECT count(*)::bigint AS n FROM pg_locks l
+      WHERE l.locktype = 'advisory' AND NOT l.granted AND l.objsubid = 1
+        AND l.classid::bigint = ((hashtext(${clave})::bigint >> 32) & 4294967295)
+        AND l.objid::bigint = (hashtext(${clave})::bigint & 4294967295)
+        AND ${pidQueTiene}::int = ANY(pg_blocking_pids(l.pid))`
+    if (Number(fila.n) > 0) return
+    await new Promise(resolve => setTimeout(resolve, 25))
+  }
+  throw new Error(`Nadie llegó a esperar el candado de la llave ${llave} que sostiene el proceso ${pidQueTiene}`)
 }
 
 describe('cobro con saldo · Postgres real', () => {
@@ -755,6 +777,117 @@ describe('cobro con saldo · 1b S2 · Postgres real', () => {
 
     await expect(payGiftCardBalanceOnOrder(venueId, orderId, pedido(`${SUF}-q91-nueva`))).resolves.toMatchObject({ replay: false })
     expect(await saldoDe(t.id)).toBe('400.00')
+  })
+
+  /**
+   * Q91 con el PRIMER envío real: T sostiene el sobre, así A (el servicio de verdad) queda detenido DENTRO de su transacción con
+   * la llave y la Order ya tomadas. B, con la misma llave, entra mientras A sigue ahí.
+   */
+  const retenerElSobre = (giftCardId: string) => {
+    let avisar!: (pid: number) => void
+    const pid = new Promise<number>(resolve => (avisar = resolve))
+    let soltar!: () => void
+    const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
+    const transaccion = prisma.$transaction(async tx => {
+      await lockGiftCardsForUpdate(tx, [giftCardId])
+      avisar(await pidDe(tx))
+      await puedeSoltar
+    }, PRESUPUESTO)
+    transaccion.catch(() => undefined) // se lee en el finally de cada prueba
+    return { pid, soltar, transaccion }
+  }
+
+  it('🔴 Q91: el primer envío, retenido con la llave tomada ⇒ el segundo con la misma llave espera ESA llave y devuelve el cobro del primero', async () => {
+    const t = await tarjeta(1000)
+    const orderId = await cuentaDeMercancia(500)
+    const llave = `${SUF}-q91-retenido`
+    const pedido = {
+      idempotencyKey: llave,
+      proof: { kind: 'CODE' as const, code: t.codigo },
+      amount: D(200),
+      tip: D(0),
+      staffId,
+      deviceId: null,
+    }
+    const T = retenerElSobre(t.id)
+    const enVuelo: Promise<unknown>[] = [T.transaccion]
+    try {
+      const pidT = await T.pid // T ya tiene el sobre ANTES de que A empiece
+      const A = payGiftCardBalanceOnOrder(venueId, orderId, pedido)
+      enVuelo.push(A.catch(() => undefined))
+      const pidA = await esperarAQueAlguienEspereA(pidT) // A espera el sobre: ya tiene la llave y la Order
+      const B = payGiftCardBalanceOnOrder(venueId, orderId, pedido)
+      enVuelo.push(B.catch(() => undefined))
+      await esperarAQueAlguienEspereLaLlave(pidA, llave) // B espera la LLAVE de A (no la Order)
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+
+      T.soltar()
+      const [a, b] = await Promise.all([A, B])
+      expect(a).toMatchObject({ replay: false, amount: 200, redeemed: [{ giftCardId: t.id, amount: 200, balanceAfter: 800 }] })
+      expect(b).toMatchObject({ replay: true, paymentId: a.paymentId, amount: 200, redeemed: [{ giftCardId: t.id, amount: 200 }] })
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(1)
+      expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(1)
+      expect(await saldoDe(t.id)).toBe('800.00')
+    } finally {
+      T.soltar()
+      await Promise.allSettled(enVuelo)
+    }
+  })
+
+  it('🔴 Q91: el primer envío, retenido con la llave tomada, RECHAZA por saldo ⇒ el segundo con la misma llave recibe EL MISMO error (sellado con el candado puesto)', async () => {
+    const t = await tarjeta(100)
+    const orderId = await cuentaDeMercancia(500)
+    const llave = `${SUF}-q91-sello-retenido`
+    const pedido = {
+      idempotencyKey: llave,
+      proof: { kind: 'CODE' as const, code: t.codigo },
+      amount: D(200),
+      tip: D(0),
+      staffId,
+      deviceId: null,
+    }
+    // Lo que A hace DESPUÉS de su transacción (el catch de afuera) no corre hasta que B termine. Si el sello se pusiera ahí y no
+    // con el candado de la llave puesto, B entraría a la llave sin sello y volvería a decidir (otro error). Sin esta pausa la
+    // carrera casi siempre la gana A y la prueba no distinguiría las dos formas.
+    let dejarSeguirA!: () => void
+    const aPuedeSeguir = new Promise<void>(resolve => (dejarSeguirA = resolve))
+    const transaccionReal = prisma.$transaction.bind(prisma) as (fn: unknown, opts?: unknown) => Promise<unknown>
+    let cobros = 0
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, opts?: unknown) => {
+      const p = transaccionReal(fn, opts)
+      if (opts !== ORDER_LOCK_WAIT_BUDGET || cobros++ > 0) return p
+      return p.catch(async (e: unknown) => {
+        await aPuedeSeguir
+        throw e
+      })
+    }) as never)
+    const T = retenerElSobre(t.id)
+    const enVuelo: Promise<unknown>[] = [T.transaccion]
+    try {
+      const pidT = await T.pid
+      const A = payGiftCardBalanceOnOrder(venueId, orderId, pedido)
+      enVuelo.push(A.catch(() => undefined))
+      const pidA = await esperarAQueAlguienEspereA(pidT)
+      const B = payGiftCardBalanceOnOrder(venueId, orderId, pedido)
+      enVuelo.push(B.catch(() => undefined))
+      await esperarAQueAlguienEspereLaLlave(pidA, llave)
+
+      T.soltar()
+      const errB = await B.catch(e => e)
+      dejarSeguirA()
+      const errA = await A.catch(e => e)
+      expect(errA).toMatchObject({ code: 'GIFT_CARD_INSUFFICIENT_BALANCE', message: 'Quedan $100.00 en la tarjeta de regalo.' })
+      expect(errB).toBe(errA) // el MISMO objeto sellado, no un rechazo que B volvió a decidir
+      expect(cobros).toBe(2) // A y B: la pausa fue para la transacción de A
+      expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+      expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(0)
+      expect(await saldoDe(t.id)).toBe('100.00')
+    } finally {
+      T.soltar()
+      dejarSeguirA()
+      espia.mockRestore()
+      await Promise.allSettled(enVuelo)
+    }
   })
 
   describe('Q110: el autor es SIEMPRE la sesión que manda', () => {

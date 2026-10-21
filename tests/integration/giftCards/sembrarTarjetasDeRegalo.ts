@@ -27,14 +27,14 @@ export async function pidDe(tx: Prisma.TransactionClient): Promise<number> {
 /**
  * Espera a que OTRA sesión esté detenida por un candado que sostiene `pidQueTiene` (la prueba de que la segunda transacción de verdad
  * esperó, no la suerte de un `setTimeout`). Se filtra por `pg_blocking_pids`, así la espera de otra prueba o de otro agente en la misma
- * base nunca la satisface. Lanza si nadie llega a esperar en ~5 s.
+ * base nunca la satisface. Devuelve el proceso que espera. Lanza si nadie llega a esperar en ~5 s.
  */
-export async function esperarAQueAlguienEspereA(pidQueTiene: number): Promise<void> {
+export async function esperarAQueAlguienEspereA(pidQueTiene: number): Promise<number> {
   for (let i = 0; i < 200; i++) {
-    const [fila] = await prisma.$queryRaw<Array<{ n: bigint }>>`
-      SELECT count(*)::bigint AS n FROM pg_stat_activity
-      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid))`
-    if (Number(fila.n) > 0) return
+    const [fila] = await prisma.$queryRaw<Array<{ pid: number }>>`
+      SELECT pid FROM pg_stat_activity
+      WHERE datname = current_database() AND ${pidQueTiene}::int = ANY(pg_blocking_pids(pid)) LIMIT 1`
+    if (fila) return fila.pid
     await new Promise(resolve => setTimeout(resolve, 25))
   }
   throw new Error(`Nadie llegó a esperar el candado que sostiene el proceso ${pidQueTiene}`)
