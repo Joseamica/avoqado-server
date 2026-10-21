@@ -39,6 +39,8 @@ import { updateDisplayModeSchema, updateTerminalSettingsSchema } from '../schema
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import { reportDeviceCapabilitiesSchema } from '../schemas/mobile/deviceCapabilities.mobile.schema'
 import * as deviceCapabilitiesMobileController from '../controllers/mobile/deviceCapabilities.mobile.controller'
+import * as customerDisplayMobileController from '../controllers/mobile/customerDisplay.mobile.controller'
+import { customerDisplayAckSchema } from '../schemas/mobile/customerDisplay.mobile.schema'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
@@ -2022,12 +2024,86 @@ router.get(
 )
 
 /**
- * GET /api/v1/mobile/venues/:venueId/promotions
- * Promociones vigentes y las que abren en las próximas 4 horas.
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/promotions:
+ *   get:
+ *     tags: [Mobile - Promotions]
+ *     summary: Promociones del POS (vigentes y próximas) y, para la tablet que lo entiende, el carrusel de la pantalla del cliente
+ *     description: |
+ *       `active` y `upcoming` son el catálogo de siempre (vigentes ahora y las que abren en las próximas 4 horas); no
+ *       cambian. `timezone` y `fetchedAt` son aditivos y van para todos.
  *
- * `requireVenueMembership` va ANTES del candado de plan por la misma razón
- * documentada arriba para upsell: un extraño no se entera del plan de un
- * negocio ajeno antes de que se le diga que no pertenece.
+ *       **Carrusel (sólo POS_ANDROID con binding exacto por `X-Device-Id` y versión de diseño ≥ 2):** `carousel`,
+ *       `carouselTruncated`, `carouselEvaluated`, `carouselStatus` y `fingerprints.promotions`. Si el carrusel falla,
+ *       la ruta NO falla: `active`/`upcoming` salen igual y `carouselStatus` es `failed`, sin `carousel` (ausente ≠
+ *       vacío). Con carrusel, `timezone` es la zona con que se calculó su huella.
+ *
+ *       `requireVenueMembership` va ANTES del candado de plan (`PROMOTIONS`) por la misma razón documentada arriba
+ *       para upsell: un extraño no se entera del plan de un negocio ajeno antes de que se le diga que no pertenece.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-Id
+ *         required: false
+ *         schema: { type: string, maxLength: 64 }
+ *         description: El `deviceUid` del aparato. Sólo con él (y binding POS_ANDROID versión ≥ 2) viaja el carrusel.
+ *     responses:
+ *       200:
+ *         description: Catálogo de promociones (y el carrusel, si aplica)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: object
+ *                   required: [active, upcoming, timezone, fetchedAt]
+ *                   properties:
+ *                     active: { type: array, items: { type: object }, description: Vigentes ahora (sin cambios) }
+ *                     upcoming: { type: array, items: { type: object }, description: Abren en ≤ 4 h, con `startsAt` (sin cambios) }
+ *                     timezone: { type: string, example: America/Mexico_City, description: La zona CRUDA del venue; con carrusel, la de su huella }
+ *                     fetchedAt: { type: string, format: date-time, description: Hora del servidor al responder }
+ *                     carousel:
+ *                       type: array
+ *                       description: Sólo POS_ANDROID con versión de diseño ≥ 2 y carouselStatus ok. ≤ 50 tarjetas, en orden de descarga
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           id: { type: string }
+ *                           name: { type: string }
+ *                           displayOrder: { type: integer }
+ *                           presentationRank: { type: integer, description: Orden de presentación 0..n-1 (la tablet no compara cadenas) }
+ *                           schedule:
+ *                             type: object
+ *                             properties:
+ *                               daysOfWeek: { type: array, items: { type: integer } }
+ *                               timeFrom: { type: string, nullable: true }
+ *                               timeUntil: { type: string, nullable: true }
+ *                               validFrom: { type: string, format: date-time, nullable: true }
+ *                               validUntil: { type: string, format: date-time, nullable: true }
+ *                           displayPriceCents: { type: integer, nullable: true, description: Sólo si el precio cobrado es demostrable }
+ *                           displayBadge: { type: string, nullable: true, example: 2x1 }
+ *                           photo:
+ *                             type: object
+ *                             nullable: true
+ *                             properties:
+ *                               url: { type: string }
+ *                               version: { type: string }
+ *                     carouselTruncated: { type: boolean, description: Sólo POS_ANDROID versión ≥ 2. Se topó un escaneo (1,000 vigentes o 200 futuras) }
+ *                     carouselEvaluated: { type: integer, description: Sólo POS_ANDROID versión ≥ 2. Candidatas evaluadas (no el total de elegibles) }
+ *                     carouselStatus: { type: string, enum: [ok, failed], description: Sólo POS_ANDROID versión ≥ 2 }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Sólo POS_ANDROID versión ≥ 2 con carouselStatus ok
+ *                       properties:
+ *                         promotions: { type: string, pattern: '^[0-9a-f]{32}$', description: 'Huella de { timezone, carousel }, sin fetchedAt' }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue, o el plan no incluye PROMOTIONS }
+ *       500: { description: Error interno (el catálogo no se pudo leer) }
  */
 router.get(
   '/venues/:venueId/promotions',
@@ -2057,6 +2133,83 @@ router.patch(
 // TPV SETTINGS (combined terminals + settings in one call)
 // ============================================================================
 
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/settings:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: Los ajustes del POS — terminales, ajustes de la terminal del aparato, plan, ticket y pantalla del cliente
+ *     description: |
+ *       Lo consumen las apps POS (Android, iOS, Windows). Los campos de siempre salen IDÉNTICOS; lo de la pantalla del
+ *       cliente es aditivo y opcional. Los ajustes salen de la terminal del propio aparato (`X-Device-ID`) si está ACTIVE o
+ *       INACTIVE; si no, de la primera ACTIVE del negocio por nombre e id (la misma fuente que firma la huella del poll).
+ *       - `fingerprints.settings`: sólo para un POS_ANDROID con binding exacto `{ venueId, X-Device-ID, POS_ANDROID }` y
+ *         versión de diseño ≥ 1. Se lee ANTES que el cuerpo: si alguien escribe en medio, el cuerpo sale más nuevo que la
+ *         huella y el siguiente poll pide un refresco de más (nunca se confirma algo que no se entregó). Omitida = desconocida.
+ *       - `componentsStatus`: SIEMPRE presente. Por componente: `ok`; `failed` = «no se pudo leer: conserva lo que
+ *         tenías» (el cuerpo trae lo de siempre: defaults o el campo omitido); `not_applicable` = «no esperes este bloque».
+ *         `receipt` es `ok` sólo con `receiptInfo` Y `receiptLayout`; `promotionsPanel` cubre la fila entera de
+ *         `VenueSettings` (`promotions` y `managerPinOverrideEnabled`); sin fila es `ok` (los defaults son la verdad).
+ *         `customerDisplay` es `not_applicable` sin cabecera, sin binding POS_ANDROID (p. ej. iPad) o sin versión; `failed`
+ *         si no se pudo leer el aparato o armar la ficha.
+ *       - `customerDisplay`: el MISMO bloque que `GET /customer-display`, sólo con `componentsStatus.customerDisplay = ok`.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: false
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: Los ajustes (los campos de siempre, sin cambios, más los aditivos de abajo)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   required: [terminals, settings, activeTerminalId, deviceTerminal, promotions, managerPinOverrideEnabled, componentsStatus]
+ *                   properties:
+ *                     terminals: { type: array, items: { type: object } }
+ *                     settings: { type: object, nullable: true }
+ *                     activeTerminalId: { type: string, nullable: true }
+ *                     deviceTerminal: { type: object, nullable: true }
+ *                     plan: { type: object, description: Omitido si no se pudo leer }
+ *                     promotions: { type: object }
+ *                     managerPinOverrideEnabled: { type: boolean }
+ *                     receiptInfo: { type: object, description: Omitido si no se pudo leer }
+ *                     receiptLayout: { type: object, description: Omitido si no se pudo leer }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Sólo POS_ANDROID con binding exacto y versión ≥ 1
+ *                       properties:
+ *                         settings: { type: string, pattern: '^[0-9a-f]{32}$', description: La misma huella que anuncia el poll para este estado }
+ *                     componentsStatus:
+ *                       type: object
+ *                       required: [receipt, plan, promotionsPanel, customerDisplay]
+ *                       properties:
+ *                         receipt: { type: string, enum: [ok, failed] }
+ *                         plan: { type: string, enum: [ok, failed] }
+ *                         promotionsPanel: { type: string, enum: [ok, failed], description: Cubre promotions y managerPinOverrideEnabled }
+ *                         customerDisplay: { type: string, enum: [ok, failed, not_applicable] }
+ *                     customerDisplay:
+ *                       type: object
+ *                       description: Sólo con componentsStatus.customerDisplay = ok
+ *                       required: [terminalId, ficha, imageOrigins]
+ *                       properties:
+ *                         terminalId: { type: string }
+ *                         ficha: { type: object, description: La ficha efectiva, con su `fingerprint` de 32 hex }
+ *                         imageOrigins: { type: array, items: { type: string } }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ */
 router.get(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,
@@ -2066,6 +2219,86 @@ router.get(
 
 // Hechos técnicos observados por el POS Android. El dispositivo se identifica por
 // X-Device-ID; no requiere activación y no acepta un terminalId elegido por el body.
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/device-capabilities:
+ *   put:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El reporte de capacidades del POS Android — pantalla del cliente, versión de diseño e instalación
+ *     description: |
+ *       El aparato se identifica por `X-Device-ID` + `X-Device-Platform: ANDROID` (registro explícito); la escritura va
+ *       condicionada al binding EXACTO `{ terminalId, venueId, deviceUid, POS_ANDROID }`. La respuesta no cambia.
+ *       `customerDisplayDesignVersion` e `installationId` son OPCIONALES y van JUNTOS o ninguno: la app los manda sólo
+ *       si el poll anunció `capabilities.customerDisplayDesign`. Cada uno puede omitirse o ser null (los dos en null =
+ *       ninguno; uno en null y el otro con valor = 400). Todas las horas son del servidor.
+ *       - Sin los campos nuevos (app vieja, o una que bajó de versión): versión `null`, el ack se limpia, la instalación
+ *         y su lista de cambios se conservan.
+ *       - Con la misma instalación: se guarda la versión; ack, instalación y lista igual.
+ *       - Con instalación sobre un aparato SIN instalación (primera vez o recién mudado): se adopta desde ahora, el ack
+ *         se limpia y NO cuenta como cambio.
+ *       - Con OTRA instalación: se guarda desde ahora, el ack se limpia y la hora entra a la lista de cambios (últimas
+ *         5); queda en la bitácora (`CUSTOMER_DISPLAY_INSTALLATION_CHANGED`).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *       - in: header
+ *         name: X-Device-Platform
+ *         required: true
+ *         schema: { type: string, enum: [ANDROID] }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [customerDisplay, displayModeProtocolVersion]
+ *             properties:
+ *               customerDisplay:
+ *                 type: object
+ *                 required: [present, invertible]
+ *                 properties:
+ *                   present: { type: boolean }
+ *                   invertible: { type: boolean, description: Sólo puede ser true si present es true }
+ *               displayModeProtocolVersion: { type: integer, enum: [1] }
+ *               customerDisplayDesignVersion:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 2
+ *                 nullable: true
+ *                 description: Puede omitirse o ser null; junto con installationId. min(la versión de la app, la que anuncia el poll)
+ *               installationId:
+ *                 type: string
+ *                 pattern: '^[A-Za-z0-9-]{1,64}$'
+ *                 nullable: true
+ *                 description: Puede omitirse o ser null; junto con customerDisplayDesignVersion. Identifica la instalación de la app
+ *     responses:
+ *       200:
+ *         description: Reporte guardado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     terminalId: { type: string }
+ *                     observedAt: { type: string, format: date-time }
+ *       400: { description: Cuerpo inválido o faltan X-Device-ID / X-Device-Platform ANDROID }
+ *       401: { description: Sin sesión }
+ *       403: { description: El aparato no pertenece a este venue o no es un POS Android }
+ *       409: { description: Otra instalación reportó al mismo tiempo dos veces seguidas (CUSTOMER_DISPLAY_INSTALLATION_RACE); reintentar }
+ *       503: { description: No se pudo registrar el aparato (DEVICE_REGISTRY_UNAVAILABLE); reintentar }
+ */
 router.put(
   '/venues/:venueId/device-capabilities',
   authenticateTokenMiddleware,
@@ -2076,11 +2309,210 @@ router.put(
 
 // Entrega v1 ligera: el terminalId viene del vínculo exacto del propio X-Device-ID.
 // No se mezcla con /settings y una lectura nunca expira ni muta la intención.
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/display-mode-request:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El poll del POS Android — la solicitud de inversión vigente y el sobre de la pantalla del cliente
+ *     description: |
+ *       El aparato se identifica por el binding EXACTO `{ venueId, X-Device-ID, POS_ANDROID }`, leído en la base antes de
+ *       consultar cualquier caché. `terminalId` y `request` no cambian (versiones viejas de la app los leen así).
+ *       Lo demás es aditivo:
+ *       - `fingerprints`: cada huella OMITIDA significa «desconocida» — la tablet conserva lo que tenga guardado; nunca
+ *         significa «vacío». Sin versión de diseño reportada sale `{}`. Con una solicitud entregable sólo trae lo que ya
+ *         estaba en caché (la entrega no espera); sin ella, lo que falte se calcula con un plazo conjunto de 150 ms.
+ *       - `capabilities.customerDisplayDesign`: la versión de diseño que entiende este servidor; la tablet reporta
+ *         `min(la suya, ésta)`.
+ *       - `capabilityReport.requested`: `true` mientras el servidor no sepa la versión o la instalación de ESTE aparato
+ *         en ESTE negocio (app vieja, primera vez o recién mudada); la tablet reporta en ese momento, sin esperar 24 h.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: La solicitud vigente (o null) y el sobre
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [terminalId, request, fingerprints, capabilities, capabilityReport]
+ *                   properties:
+ *                     terminalId: { type: string, description: El id que devolvió el binding (sin cambios) }
+ *                     request:
+ *                       type: object
+ *                       nullable: true
+ *                       description: Sólo una solicitud PENDING y vigente (sin cambios)
+ *                       properties:
+ *                         requestId: { type: string }
+ *                         desiredInverted: { type: boolean }
+ *                         requestedAt: { type: string, format: date-time }
+ *                         expiresAt: { type: string, format: date-time }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Omitida = desconocida (conserva lo guardado)
+ *                       properties:
+ *                         customerDisplay: { type: string, pattern: '^[0-9a-f]{32}$', description: Huella de la ficha de diseño de este aparato }
+ *                         settings: { type: string, pattern: '^[0-9a-f]{32}$', description: Huella de lo que entrega /settings a este aparato }
+ *                         promotions: { type: string, pattern: '^[0-9a-f]{32}$', description: Sólo versión ≥ 2. Ceros = el plan no incluye PROMOTIONS }
+ *                     capabilities:
+ *                       type: object
+ *                       properties:
+ *                         customerDisplayDesign: { type: integer, example: 2 }
+ *                     capabilityReport:
+ *                       type: object
+ *                       properties:
+ *                         requested: { type: boolean }
+ *       400: { description: Falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) }
+ */
 router.get(
   '/venues/:venueId/display-mode-request',
   authenticateTokenMiddleware,
   requireVenueMembership,
   tpvSettingsMobileController.getDisplayModeRequest,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-display:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: La ficha de diseño de la pantalla del cliente de ESTE aparato
+ *     description: |
+ *       El aparato se identifica por el binding EXACTO `{ venueId, X-Device-ID, POS_ANDROID }`, sin respaldo a otra
+ *       terminal. La ficha se calcula fresca (y renueva la caché del poll): su `fingerprint` es la que el poll anunciará.
+ *       `imageOrigins` es la lista blanca de orígenes desde los que la tablet puede descargar las imágenes de la ficha.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: La ficha vigente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [terminalId, ficha, imageOrigins]
+ *                   properties:
+ *                     terminalId: { type: string, description: El id que devolvió el binding }
+ *                     ficha:
+ *                       type: object
+ *                       description: La ficha efectiva (lo que ve el cliente), con su `fingerprint` de 32 hex
+ *                     imageOrigins:
+ *                       type: array
+ *                       items: { type: string, example: 'https://storage.googleapis.com' }
+ *       400: { description: Falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) — usa la fábrica }
+ */
+router.get(
+  '/venues/:venueId/customer-display',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  customerDisplayMobileController.getCustomerDisplay,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-display/ack:
+ *   put:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El acuse de la tablet — qué ficha dice tener guardada o mostrada
+ *     description: |
+ *       Es un REPORTE del cliente, no una prueba física. El aparato se identifica por el binding EXACTO
+ *       `{ venueId, X-Device-ID, POS_ANDROID }` y la instalación tiene que ser la registrada por el reporte de capacidades.
+ *       Se guarda con una escritura condicionada al acuse leído; un REENVÍO del mismo contenido se acepta sin escribir.
+ *       Las horas se guardan en ISO-8601 con `Z`; una hora de la tablet más de 5 min por delante se sustituye por la del
+ *       servidor y se marca `clientClockSkew`. `accepted` significa «guardado», no «es lo vigente»:
+ *       - `{ accepted: true, current: true }`: guardado y es la huella vigente.
+ *       - `{ accepted: true, current: false, currentFingerprint }`: guardado, pero ya hay otra vigente.
+ *       - `{ accepted: true }` (sin `current`): guardado, pero no se pudo recalcular la ficha vigente.
+ *       - `{ accepted: false, reason: STALE_SEQ }`: ya hay uno legible con `seq` mayor o igual (la app cierra ese ack).
+ *       - `{ accepted: false, reason: OTHER_INSTALLATION }`: la instalación no es la registrada (primero el reporte).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [installationId, fingerprint, seq, storedAt, imagesReady, imagesPending, imagesFailed, unsupportedSchema]
+ *             properties:
+ *               installationId: { type: string, pattern: '^[A-Za-z0-9-]{1,64}$' }
+ *               fingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+ *               seq: { type: integer, minimum: 0, maximum: 9007199254740991 }
+ *               storedAt: { type: string, format: date-time }
+ *               shownAt: { type: string, format: date-time, nullable: true, description: 'Puede omitirse o ser null (= aún no mostrado)' }
+ *               surface: { type: string, nullable: true, enum: [presentation, activity, kiosk, window], description: 'Puede omitirse o ser null' }
+ *               imagesReady: { type: integer, minimum: 0, maximum: 100 }
+ *               imagesPending: { type: integer, minimum: 0, maximum: 100 }
+ *               imagesFailed: { type: integer, minimum: 0, maximum: 100 }
+ *               unsupportedSchema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: El resultado del acuse (ver la lista de arriba)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [accepted]
+ *                   properties:
+ *                     accepted: { type: boolean }
+ *                     current: { type: boolean }
+ *                     currentFingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+ *                     reason: { type: string, enum: [STALE_SEQ, OTHER_INSTALLATION] }
+ *       400: { description: Cuerpo inválido o falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) }
+ *       503: { description: Otros acuses se guardaron en medio tres veces seguidas (CUSTOMER_DISPLAY_ACK_BUSY); reintentar con espera y conservar el ack }
+ */
+router.put(
+  '/venues/:venueId/customer-display/ack',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(customerDisplayAckSchema),
+  customerDisplayMobileController.acknowledgeCustomerDisplayRoute,
 )
 
 // Mostrador invertido (customer-display grande/chico) — por DISPOSITIVO. El POS

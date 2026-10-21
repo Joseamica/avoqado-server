@@ -172,7 +172,7 @@ import {
   bulkConfirmIncidentSchema,
 } from '../schemas/dashboard/settlementIncident.schema'
 import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
-import { updateTpvSchema } from '../schemas/dashboard/tpv.schema'
+import { updateTerminalTpvSettingsSchema, updateTpvSchema } from '../schemas/dashboard/tpv.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -368,6 +368,7 @@ import floorPlanRoutes from './dashboard/floorPlan.routes'
 import productGroupRoutes from './dashboard/productGroup.routes'
 import productOptionRoutes from './dashboard/productOption.routes'
 import receiptLayoutRoutes from './dashboard/receiptLayout.routes'
+import customerDisplayRoutes, { customerDisplayDevicesRoutes } from './dashboard/customerDisplay.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
 import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
@@ -4620,6 +4621,11 @@ router.use('/venues/:venueId/floor-plan', authenticateTokenMiddleware, floorPlan
 router.use('/venues/:venueId/product-groups', authenticateTokenMiddleware, productGroupRoutes)
 router.use('/venues/:venueId/product-options', authenticateTokenMiddleware, productOptionRoutes)
 router.use('/venues/:venueId/receipt-layout', authenticateTokenMiddleware, receiptLayoutRoutes)
+// CUSTOMER_DISPLAY — la pantalla que ve el cliente en la tablet. Marca, textos y pasos gratis; las promos en reposo
+// (PRO) se revisan por CAMPO en el servicio, no por ruta: sin plan el negocio tiene que poder seguir editando su marca y
+// apagar lo que ya no puede usar. Permission-gated dentro de los sub-routers (customer-display:read/update).
+router.use('/venues/:venueId/terminals/:terminalId/customer-display', authenticateTokenMiddleware, customerDisplayRoutes)
+router.use('/venues/:venueId/customer-display', authenticateTokenMiddleware, customerDisplayDevicesRoutes)
 // Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
 // (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).
 router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fiscalProfileRoutes)
@@ -5308,8 +5314,14 @@ router.get(
  *                 nullable: true
  *               tipSuggestions:
  *                 type: array
+ *                 description: Porcentajes de propina que ofrece el POS (1 a 100, enteros, sin repetir, de 1 a 6)
+ *                 minItems: 1
+ *                 maxItems: 6
+ *                 uniqueItems: true
  *                 items:
- *                   type: number
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 100
  *               requirePinLogin:
  *                 type: boolean
  *     responses:
@@ -5335,6 +5347,8 @@ router.get(
  *                     type: number
  *                 requirePinLogin:
  *                   type: boolean
+ *       400:
+ *         description: tipSuggestions con forma inválida (más de 6, vacía, repetidos, fuera de 1-100 o no enteros); no se escribe nada
  *       403:
  *         description: Forbidden (missing tpv-settings:update permission)
  *       404:
@@ -5345,6 +5359,8 @@ router.put(
   authenticateTokenMiddleware,
   bindTpvSettingsTarget,
   checkPermission('tpv-settings:update'),
+  // F0-B (Task 12): el tope de 6 propinas del POS, DESPUÉS del permiso.
+  validateRequest(updateTerminalTpvSettingsSchema),
   tpvController.updateTpvSettings,
 )
 

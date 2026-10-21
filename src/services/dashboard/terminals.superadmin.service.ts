@@ -12,6 +12,7 @@ import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from
 import { logAction } from './activity-log.service'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
 import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 /**
  * Audit actor — who triggered a terminal mutation. Threaded from the controller
@@ -654,6 +655,15 @@ export async function updateTerminal(
         prisma.$transaction(async tx => {
           // A deferred move can have empty update data; Prisma then only reads, so lock explicitly.
           if (deferMove) await tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE`
+          // Pantalla del cliente (§4.3): la terminal cambia de negocio AQUÍ (en el protocolo 2 la muda después el permiso de
+          // ejecución), así que su diseño y su acuse se borran en esta misma transacción, antes de escribir `venueId`.
+          if (!deferMove)
+            await borrarDisenoAlCambiarDeNegocio(tx, {
+              terminalId,
+              toVenueId: data.venueId!,
+              reason: 'terminal_moved',
+              staffId: actor?.staffId ?? null,
+            })
           // Conditional write rejects concurrent moves and retains the caller's tenant scope.
           const updated = await tx.terminal.update({
             where: { ...scopedTerminalWhere(terminalId, scope), venueId: fromVenueId },
@@ -721,6 +731,8 @@ export async function updateTerminal(
         }),
       'La terminal cambió de venue. Actualiza y vuelve a validar.',
     )
+    // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+    if (!deferMove) invalidateCustomerDisplayCache(terminalId)
     await logAction({
       staffId: actor?.staffId ?? null,
       venueId: moved.venueId,

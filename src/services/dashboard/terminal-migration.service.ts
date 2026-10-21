@@ -12,7 +12,9 @@ import {
 } from '@/services/dashboard/terminals.superadmin.service'
 import { tpvCommandQueueService } from '@/services/tpv/command-queue.service'
 import type { TerminalWriteScope } from '@/services/shared/terminalScopedWrites'
+import { lockTerminalRow } from '@/services/shared/terminalScopedWrites'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 /**
  * Snapshot del pago del venue ORIGEN, usado sólo por el flujo "migrar el merchant
@@ -249,12 +251,32 @@ function fechaCorta(d: Date, timezone = 'America/Mexico_City'): string {
 /** The migration payload of a pending wipe, when it was queued BY a migration. */
 interface WipeMigrationPayload {
   fromVenueId?: string
+  toVenueId?: string
   previousMerchantIds?: string[]
   createdVenuePaymentConfigId?: string
 }
 function migrationPayloadOf(row: PendingWipeRow): WipeMigrationPayload | null {
   const m = (row.payload as { migration?: WipeMigrationPayload } | null)?.migration
   return m && typeof m.fromVenueId === 'string' ? m : null
+}
+
+/**
+ * 🔴 G4 (auditoría de Codex del plan, 14-oct; spec §5.1 «la migración que se deshace tiene que seguir siendo la vigente»).
+ * Deshacer una migración sólo vale si la terminal sigue donde la dejó ESA migración: en su origen (protocolo 2: todavía no
+ * se mudaba) o en su destino (protocolo < 2: ya se mudó). En otro negocio, otra mudanza mandó después, y revertir se
+ * llevaría la terminal y sus comercios de un negocio que no la pidió. Se llama con el `venueId` leído BAJO el candado de
+ * la fila de la terminal, antes del gancho y de la escritura.
+ */
+export function asegurarQueLaReversionSigueVigente(
+  venueIdBajoCandado: string,
+  migracion: { fromVenueId: string; toVenueId?: string },
+): void {
+  const vigente = !!migracion.toVenueId && (venueIdBajoCandado === migracion.fromVenueId || venueIdBajoCandado === migracion.toVenueId)
+  if (!vigente)
+    throw new ConflictError(
+      'La terminal cambió de negocio después de esta migración; ya no se puede deshacer. Actualiza su estado y vuelve a revisarla.',
+      'MIGRATION_NOT_CURRENT',
+    )
 }
 
 export async function migratePreflight(
@@ -543,7 +565,7 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
       )
     const migration = (
       command.payload as {
-        migration?: { fromVenueId?: string; previousMerchantIds?: string[]; createdVenuePaymentConfigId?: string }
+        migration?: { fromVenueId?: string; toVenueId?: string; previousMerchantIds?: string[]; createdVenuePaymentConfigId?: string }
       } | null
     )?.migration
     if (scopedOrgId && migration?.fromVenueId) {
@@ -559,6 +581,27 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
       tx,
     )
     if (migration?.fromVenueId) {
+      // G4 (Codex r2): con los DOS candados tomados —la orden por el CAS de arriba y la terminal aquí; cola → terminal, el
+      // orden de siempre— la orden y la terminal ya no cambian. Un reloj NUEVO decide si la orden había vencido: si venció,
+      // otra migración pudo tomar la terminal (también B→A, que (a) no ve). `cancelCommand` hace `await findUnique` antes de
+      // su CAS: un reloj leído antes de entrar podría quedar viejo por un tiempo no acotado.
+      const fila = await lockTerminalRow(tx, terminalId)
+      if (!fila) throw new NotFoundError('Terminal no encontrada')
+      const orden = await tx.tpvCommandQueue.findUnique({ where: { id: command.id }, select: { expiresAt: true } })
+      const ahora = new Date()
+      if (!orden || (orden.expiresAt !== null && orden.expiresAt <= ahora))
+        throw new ConflictError(
+          'La orden de borrado venció mientras se cancelaba y otra migración pudo tomar la terminal. Actualiza su estado y vuelve a revisarla.',
+          'MIGRATION_NOT_CURRENT',
+        )
+      asegurarQueLaReversionSigueVigente(fila.venueId, { fromVenueId: migration.fromVenueId, toVenueId: migration.toVenueId })
+      // Pantalla del cliente (§4.3): la terminal regresa a su origen; su diseño y su acuse se borran en esta transacción.
+      await borrarDisenoAlCambiarDeNegocio(tx, {
+        terminalId,
+        toVenueId: migration.fromVenueId,
+        reason: 'migration_reverted',
+        staffId: actor.staffId ?? null,
+      })
       // Bypass updateTerminal: restoring must not enqueue another wipe.
       await tx.terminal.update({
         where: { id: terminalId },
@@ -576,6 +619,8 @@ export async function migrateCancel(terminalId: string, actor: TerminalActor, sc
     if (!terminal) throw new NotFoundError('Terminal not found')
     return { command, migration, restoredVenueId: terminal.venueId }
   })
+  // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+  invalidateCustomerDisplayCache(terminalId)
   if (migration?.createdVenuePaymentConfigId) {
     await logAction({
       staffId: actor.staffId ?? null,
@@ -663,16 +708,18 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
     .map(migrationPayloadOf)
     .find(Boolean)
 
-  const now = new Date()
-  const { discardedIds } = await prisma.$transaction(async tx => {
+  const { discardedIds, now } = await prisma.$transaction(async tx => {
     // Serialize against authenticated app-boot registration. A plain re-read still leaves a race
     // between the read and the writes; this row lock keeps the proof stable until commit.
-    const [fresh] = await tx.$queryRaw<Array<{ commandSessionId: string | null }>>`
-      SELECT "commandSessionId"
+    const [fresh] = await tx.$queryRaw<Array<{ commandSessionId: string | null; venueId: string }>>`
+      SELECT "commandSessionId", "venueId"
       FROM "Terminal"
       WHERE "id" = ${terminalId}
       FOR UPDATE
     `
+    // G4 (b): el reloj de la vigencia se lee DESPUÉS del candado, que se sostiene hasta el commit. Uno leído antes quedaría
+    // viejo por lo que tardara el candado, y dejaría descartar (y revertir) una orden que venció mientras se esperaba.
+    const now = new Date()
     if (!fresh) throw new NotFoundError('Terminal not found')
     if (deviceReboundAfter(newest, fresh.commandSessionId)) {
       throw new ConflictError('La terminal confirmó el borrado. Vuelve a verificar el destino.')
@@ -687,6 +734,9 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
         throw new ForbiddenError('No puedes descartar una migración cuyo origen pertenece a otra organización.')
       }
     }
+    // G4 (a): la terminal sigue donde la dejó la migración que se va a deshacer (el negocio leído bajo el candado).
+    if (revert?.fromVenueId)
+      asegurarQueLaReversionSigueVigente(fresh.venueId, { fromVenueId: revert.fromVenueId, toVenueId: revert.toVenueId })
 
     // One update per id so the audit trail names the rows that ACTUALLY moved: `updateMany`
     // reports a count, not which rows, and the sweep or the device may have moved one of
@@ -699,16 +749,32 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
       const id = row.id
       const protocol2 = (row.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2
       const r = await tx.tpvCommandQueue.updateMany({
-        where: { id, status: { in: protocol2 ? ['SENT', 'RECEIVED'] : [...IN_FLIGHT_STATUSES] } },
+        // G4 (b): la vigencia va DENTRO del CAS de cada orden; una que venció mientras se esperaba el candado no se toca.
+        where: {
+          id,
+          status: { in: protocol2 ? ['SENT', 'RECEIVED'] : [...IN_FLIGHT_STATUSES] },
+          OR: [{ expiresAt: null }, { expiresAt: { gt: now } }],
+        },
         data: { status: 'EXPIRED', expiresAt: now },
       })
       if (r.count !== 1) {
-        throw new ConflictError('El estado del borrado cambió mientras se descartaba. Actualiza la terminal e inténtalo de nuevo.')
+        throw new ConflictError(
+          'El estado del borrado cambió o venció mientras se descartaba. Actualiza la terminal e inténtalo de nuevo.',
+          'MIGRATION_NOT_CURRENT',
+        )
       }
       discardedIds.push(id)
     }
 
     if (revert?.fromVenueId) {
+      // Pantalla del cliente (§4.3): la terminal regresa a su origen; su diseño y su acuse se borran en esta transacción,
+      // antes de escribir `venueId` (después, el gancho leería el origen y no borraría nada).
+      await borrarDisenoAlCambiarDeNegocio(tx, {
+        terminalId,
+        toVenueId: revert.fromVenueId,
+        reason: 'migration_reverted',
+        staffId: actor.staffId ?? null,
+      })
       // Direct write, NOT updateTerminal: the "blindar" auto-wipe would queue a fresh
       // FACTORY_RESET on the revert and re-create the very blocker we are clearing.
       await tx.terminal.update({
@@ -720,8 +786,10 @@ export async function migrateDiscard(terminalId: string, actor: TerminalActor, s
       }
     }
 
-    return { discardedIds }
+    return { discardedIds, now }
   })
+  // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+  invalidateCustomerDisplayCache(terminalId)
 
   const restoredVenueId = revert?.fromVenueId ?? terminal.venueId
 

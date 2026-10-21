@@ -126,6 +126,17 @@ beforeEach(() => {
     return Promise.resolve({ count: 1 })
   }) as any)
   prismaMock.venue.findUnique.mockImplementation((({ where }: any) => Promise.resolve({ id: where?.id, organizationId: ORG })) as any)
+  // Pantalla del cliente (F0-A): el permiso de la migración borra el diseño de la terminal ANTES de mudarla
+  // (`borrarDisenoAlCambiarDeNegocio`): toma el candado de la fila con `SELECT … FOR UPDATE`, borra el diseño y limpia el
+  // acuse. Aquí la terminal no tiene diseño; lo demás de `$queryRaw` sigue sin respuesta, como antes.
+  prismaMock.$queryRaw.mockImplementation(((strings: TemplateStringsArray, ...values: unknown[]) => {
+    const sql = Array.isArray(strings) ? strings.join('?') : ''
+    if (/FROM "Terminal"/.test(sql) && /FOR UPDATE/.test(sql))
+      return Promise.resolve(values[0] === terminal.id ? [{ id: terminal.id, venueId: terminal.venueId }] : [])
+    return Promise.resolve(undefined)
+  }) as any)
+  prismaMock.customerDisplayDesign.deleteMany.mockResolvedValue({ count: 0 } as any)
+  prismaMock.terminal.update.mockImplementation((({ where }: any) => Promise.resolve({ id: where?.id })) as any)
   prismaMock.tpvCommandQueue.create.mockImplementation((({ data }: any) => {
     const fila = {
       id: `cmd-${++siguiente}`,

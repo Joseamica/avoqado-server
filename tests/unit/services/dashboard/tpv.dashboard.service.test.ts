@@ -334,6 +334,8 @@ describe('trackPromoterLocation ("cambaceo") — venue-level flag', () => {
   it('updateVenueTpvSettings writes the flag to VenueSettings (upsert) and NOT into terminal configs', async () => {
     // El upsert del negocio viaja en la misma transacción que las terminales (4ª auditoría de Codex, C2).
     transactionRunsBothForms()
+    // S1 de F1: la cascada toma primero los candados de las terminales del negocio (una sentencia `FOR UPDATE`).
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 't1' }])
     prismaMock.terminal.findMany.mockResolvedValue([{ id: 't1', config: {}, configOverrides: {} }] as any)
     prismaMock.venueSettings.upsert.mockResolvedValue({} as any)
     // return-path read (getVenueTpvSettings)
@@ -561,6 +563,8 @@ describe('updateVenueTpvSettings — el negocio y sus terminales se guardan junt
 
   beforeEach(() => {
     transactionRunsBothForms()
+    // S1 de F1: la cascada toma primero los candados de las terminales del negocio (una sentencia `FOR UPDATE`).
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 't1' }, { id: 't2' }])
     prismaMock.terminal.findMany.mockResolvedValue([
       { id: 't1', config: { settings: {} }, configOverrides: null },
       { id: 't2', config: { settings: {} }, configOverrides: null },
@@ -582,19 +586,31 @@ describe('updateVenueTpvSettings — el negocio y sus terminales se guardan junt
   })
 
   it('el horario del negocio y las terminales van en UNA sola transacción', async () => {
-    const upsertOp = Promise.resolve({ venueId })
-    prismaMock.venueSettings.upsert.mockReturnValue(upsertOp as any)
-    let batch: unknown[] = []
-    prismaMock.$transaction.mockImplementation(((ops: any) => {
-      batch = ops
-      return Promise.all(ops)
+    // S1 de F1: la transacción ahora es INTERACTIVA (toma los candados antes de leer), así que ya no hay un lote en arreglo
+    // que contar. Misma intención: el horario y las dos terminales se escriben DENTRO de la única transacción.
+    let dentro = false
+    const hecho: string[] = []
+    prismaMock.$transaction.mockImplementation((async (cb: any) => {
+      dentro = true
+      try {
+        return await cb(prismaMock)
+      } finally {
+        dentro = false
+      }
+    }) as any)
+    prismaMock.venueSettings.upsert.mockImplementation((async () => {
+      hecho.push(`horario:${dentro}`)
+      return {}
+    }) as any)
+    prismaMock.terminal.updateMany.mockImplementation((async () => {
+      hecho.push(`terminal:${dentro}`)
+      return { count: 1 }
     }) as any)
 
     await updateVenueTpvSettings(venueId, { showTipScreen: false, expectedCheckInTime: '09:30' } as any)
 
     expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
-    expect(batch).toHaveLength(3)
-    expect(batch).toContain(upsertOp)
+    expect(hecho).toEqual(['horario:true', 'terminal:true', 'terminal:true'])
     expect(prismaMock.venueSettings.upsert).toHaveBeenCalledWith(
       expect.objectContaining({ where: { venueId }, update: expect.objectContaining({ expectedCheckInTime: '09:30' }) }),
     )

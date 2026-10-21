@@ -2,6 +2,7 @@ import prisma from '@/utils/prismaClient'
 import { NotFoundError } from '@/errors/AppError'
 import { normalizeTerminalBrand } from '@/lib/providerDeviceCompatibility'
 import { buildVenueInfo, type ReceiptVenueInfo } from '@/services/shared/receiptLayout'
+import { RECEIPT_VENUE_SELECT } from './devicePayload.service'
 
 /**
  * Los tipos de terminal que INTERPRETAN la receta del ticket (spec § 7.5).
@@ -148,8 +149,10 @@ export async function getReceiptDevices(venueId: string, env: NodeJS.ProcessEnv 
  * El venue tal como lo necesita el ticket, cargado de Prisma.
  *
  * 🔴 Reusa `buildVenueInfo` del adaptador: si la vista previa mapeara por su cuenta, dejaría
- * de predecir el ticket real — que es lo único que la hace útil. El `select` pide los emisores
- * por fecha de alta, que es el criterio del «principal» (spec § 5.6, caso 2).
+ * de predecir el ticket real — que es lo único que la hace útil. Por lo mismo, los emisores se
+ * piden con LA selección del aparato (`RECEIPT_VENUE_SELECT.fiscalEmisors`): orden TOTAL por
+ * fecha de alta y, a igual fecha, por id. El primero es el «principal» (spec § 5.6, caso 2); con
+ * sólo la fecha, dos emisores del mismo instante podían salir en otro orden que en el aparato.
  */
 export async function cargarVenueInfo(venueId: string): Promise<ReceiptVenueInfo> {
   const venue = await prisma.venue.findUnique({
@@ -165,16 +168,7 @@ export async function cargarVenueInfo(venueId: string): Promise<ReceiptVenueInfo
       rfc: true,
       legalName: true,
       timezone: true,
-      fiscalEmisors: {
-        orderBy: { createdAt: 'asc' },
-        select: {
-          id: true,
-          legalName: true,
-          rfc: true,
-          lugarExpedicion: true,
-          merchantConfigs: { select: { merchantAccountId: true } },
-        },
-      },
+      fiscalEmisors: RECEIPT_VENUE_SELECT.fiscalEmisors,
     },
   })
   if (!venue) throw new NotFoundError('No se encontró el negocio', 'VENUE_NOT_FOUND')
