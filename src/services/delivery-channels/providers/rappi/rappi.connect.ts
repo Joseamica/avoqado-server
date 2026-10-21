@@ -129,7 +129,7 @@ export async function depsDesdeEnv(): Promise<ConnectDeps> {
   try {
     clientId = clientIdRappi()
   } catch {
-    clientId = undefined // sin credenciales de Rappi: mismo error que sin llave
+    clientId = undefined // sin el Client ID del Self Onboarding (`clientIdRappi()` lanza): mismo error que sin llave
   }
   if (!llave || llave.length < LLAVE_MIN_CARACTERES || !clientId) {
     throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')

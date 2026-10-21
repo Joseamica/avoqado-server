@@ -76,7 +76,7 @@ export function tiendasEscribiblesRappi(): string[] {
  */
 async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_token: string; expires_in?: number }> {
   const { clientId, clientSecret } = credenciales()
-  // 🔴 Dominio nuevo y barra FINAL: sin ella Rappi contesta 307 y un POST no sigue la redirección (20-oct).
+  // 🔴 Dominio nuevo y barra FINAL: sin ella Rappi contesta 307 (medido el 20-oct).
   const url = `${hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)}/restaurants/auth/v1/token/login/${superficie}/`
 
   const r = await fetch(url, {

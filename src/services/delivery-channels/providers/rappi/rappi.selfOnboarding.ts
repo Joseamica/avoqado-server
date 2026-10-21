@@ -12,6 +12,10 @@ import crypto from 'crypto'
 
 export type AmbienteLogin = 'SANDBOX' | 'PRODUCTION'
 
+/**
+ * Host del OAuth del DUEÑO (`/authorize` y `/oauth/token`: autorizar su tienda). No es `hostDeLoginRappi`
+ * (`rappi.http.ts`): ése es el token de la INTEGRACIÓN (pedidos, menú, Utils).
+ */
 export function hostDeLogin(ambiente: AmbienteLogin): string {
   return ambiente === 'PRODUCTION' ? 'https://login.partners.rappi.com' : 'https://login.partners.dev.rappi.com'
 }

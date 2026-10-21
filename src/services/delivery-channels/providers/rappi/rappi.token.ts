@@ -2,11 +2,12 @@
  * Token de Rappi — caché con single-flight, por superficie.
  *
  * 🔴 TRES SUPERFICIES, TRES TOKENS. Rappi no tiene un solo login: son endpoints distintos y
- * **el token de uno no sirve en otro**.
+ * **el token de uno no sirve en otro**. El login es
+ * `{hostDeLoginRappi}/restaurants/auth/v1/token/login/<superficie>/` (dominio nuevo, con barra final; ver `rappi.http.ts`):
  *
- *   `token/login/integrations` → pedidos, menú, disponibilidad, tiendas
- *   `token/login/utils`        → horarios (pasillo, producto, tienda)
- *   `token/login/finance`      → pagos, comisiones, compensaciones
+ *   `token/login/integrations/` → pedidos, menú, disponibilidad, tiendas
+ *   `token/login/utils/`        → horarios (pasillo, producto, tienda)
+ *   `token/login/finance/`      → pagos, comisiones, compensaciones
  *
  * Cachearlos juntos sería el bug clásico: pedir el horario con el token de pedidos, recibir
  * 401, y no entender por qué si "el token está fresco". La caché es por superficie.

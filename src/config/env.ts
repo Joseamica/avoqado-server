@@ -206,16 +206,18 @@ const envSchema = z.object({
   RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
   // Self-onboarding (spec 2026-09-29). La llave firma el enlace y cifra el id_token del comercio;
   // sin ella el FLUJO se niega a arrancar (igual que Uber con UBER_WEBHOOK_SIGNING_KEY), no el proceso.
-  // 🔴 Las cuatro son `z.string().optional()` a propósito: un fallo de este parseo hace `process.exit` de TODA la
-  // API, y una variable de una función opcional no puede tumbarla. La validación (URL http(s), barra final,
-  // largo de la llave) vive donde se USAN: `rappi.client.ts` y el flujo de conexión.
+  // 🔴 Las seis de este bloque (hasta `RAPPI_WEBHOOK_BASE_URL`) son `z.string().optional()` a propósito: un fallo de
+  // este parseo hace `process.exit` de TODA la API, y una variable de una función opcional no puede tumbarla. La
+  // validación (URL http(s), barra final, largo de la llave) vive donde se USAN: `rappi.client.ts` y el flujo de conexión.
   RAPPI_CONNECT_SIGNING_KEY: z.string().optional(),
   RAPPI_OAUTH_REDIRECT_BASE: z.string().optional(),
   // Client ID del login del dueño: lo crea Rappi al activar Self Onboarding y NO es el de la integración (14-oct).
   RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX: z.string().optional(),
   RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: z.string().optional(),
-  // ⚠️ Host de los endpoints de self-onboarding: la doc dice api.dev.rappi.com en desarrollo y NO
-  // publica el de México en producción. Se pregunta al TAM; en PRODUCTION es obligatorio (sin él, el flujo se niega).
+  // ⚠️ Host de los endpoints de self-onboarding. OPCIONAL: sin ella se usa `hostDeLoginRappi` (`rappi.http.ts`, el dominio
+  // nuevo): en DEV `api.dev.rappi.com` (el que usa la doc; el login ahí se midió el 20-oct) y, en PRODUCTION de México,
+  // `api.rappi.com.mx`, que sólo lo confirma la documentación de Rappi (no se ha medido). Otro país en PRODUCTION lanza. La variable
+  // sólo SUSTITUYE ese host.
   RAPPI_SELF_ONBOARDING_API_BASE: z.string().optional(),
   // Base pública de NUESTROS webhooks (la URL que se le registra a Rappi en add-stores).
   RAPPI_WEBHOOK_BASE_URL: z.string().optional(),

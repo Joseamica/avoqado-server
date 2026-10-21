@@ -314,9 +314,9 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   try {
     // 🔴 La ingesta decide PENDING/CONFIRMED y el ticket de cocina según el modo del vínculo que recibe.
     // Como el pedido YA se aceptó en Rappi, se le entrega el vínculo en AUTO aunque la fila diga otra cosa.
-    const r = await ingestDeliveryOrder(normalizado, { ...evento.channelLink, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
-    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, r.order.id)
-    return { outcome: 'PROCESSED', orderId: r.order.id, accepted: true }
+    const ingesta = await ingestDeliveryOrder(normalizado, { ...evento.channelLink, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await markEventResult(eventRowId, DeliveryOrderEventStatus.PROCESSED, ingesta.order.id)
+    return { outcome: 'PROCESSED', orderId: ingesta.order.id, accepted: true }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     // El pedido ya se aceptó: el dinero del cliente está comprometido y la venta NO quedó

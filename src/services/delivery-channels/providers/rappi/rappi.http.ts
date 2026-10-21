@@ -27,7 +27,10 @@ import { cabeceraRappi, invalidarToken, type SuperficieRappi } from './rappi.tok
 
 export type AmbienteRappi = 'SANDBOX' | 'PRODUCTION'
 
-/** País → host de producción. Sólo México por ahora; agregar uno es una línea. */
+/**
+ * País → host CLÁSICO de producción (la tabla «Dominios» de la doc de Rappi: 9 países); agregar uno es una línea.
+ * OJO: el login de producción (`hostDeLoginRappi`, dominio nuevo) sólo está cableado para México.
+ */
 export const HOSTS_PRODUCCION: Readonly<Record<string, string>> = {
   MX: 'https://services.mxgrability.rappi.com',
   CO: 'https://services.rappi.com',
@@ -60,8 +63,11 @@ const HOST_LOGIN_PRODUCCION_MX = 'https://api.rappi.com.mx'
 
 /**
  * El dominio NUEVO de Rappi: el del login (`/restaurants/auth/v1/token/login/{superficie}/`) y el del self-onboarding.
- * La API de pedidos, menú y Utils NO va aquí: sigue en `hostRappi`. Sólo México está publicado en producción; otro país
- * LANZA en vez de caer al de México, por la misma razón que `hostRappi`. Sandbox lo ignora.
+ * 🔴 No es `hostDeLogin` (`rappi.selfOnboarding.ts`): aquel es el OAuth del DUEÑO (autorizar su tienda); éste es el token de
+ * la INTEGRACIÓN (pedidos, menú, Utils).
+ * La API de pedidos, menú y Utils NO va aquí: sigue en `hostRappi`. En producción sólo está cableado México
+ * (`api.rappi.com.mx`: lo confirma la doc de Rappi, no se ha medido; la doc lista también el dominio nuevo de otros países, pero
+ * aquí no se agregaron); otro país LANZA en vez de caer al de México, por la misma razón que `hostRappi`. Sandbox lo ignora.
  */
 export function hostDeLoginRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
   if (ambiente === 'SANDBOX') return HOST_LOGIN_SANDBOX

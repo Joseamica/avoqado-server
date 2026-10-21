@@ -159,9 +159,10 @@ export const rappiAdapter = {
   /**
    * Aceptar, declarando los minutos de preparación que RAPPI mismo sugirió en el pedido.
    *
-   * Este camino lo usa el botón "Aceptar" del POS (modo MANUAL), que sólo trae los ids: el
-   * tiempo se recupera del evento persistido — el pedido completo viajó en el webhook y ahí
-   * quedó guardado. Sin dato se cae al recorte de `tiempoDeCoccion`, nunca a un número fuera
+   * Este camino lo usa el botón "Aceptar" del POS (`acceptDeliveryOrder`), que sólo trae los ids. Rappi ya no admite el
+   * modo MANUAL: el procesador de eventos acepta SIEMPRE solo (`rappi.eventProcessor.ts`), así que el botón sólo aplica a un
+   * pedido PENDING viejo, de antes de esa migración. El tiempo se recupera del evento persistido — el pedido completo
+   * viajó en el webhook y ahí quedó guardado. Sin dato se cae al recorte de `tiempoDeCoccion`, nunca a un número fuera
    * del rango (Rappi lo rechazaría y el pedido seguiría vivo con el reloj corriendo).
    */
   async acceptOrder(orderId: string, storeId: string): Promise<ActionResult> {

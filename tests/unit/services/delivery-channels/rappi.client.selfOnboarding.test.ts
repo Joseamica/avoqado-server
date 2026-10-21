@@ -187,8 +187,8 @@ describe('rappi.client — self-onboarding', () => {
     expect(() => apiBaseSelfOnboarding()).toThrow(/país/i)
   })
 
-  // T5 (20-oct): el login se mudó al dominio nuevo y exige la barra final (sin ella: 307 a la ruta con `/`, que un POST
-  // no sigue). La API NO se mudó: sigue en el host clásico.
+  // T5 (20-oct): el login se mudó al dominio nuevo y exige la barra final (sin ella: 307 a la ruta con `/`, medido el 20-oct).
+  // La API NO se mudó: sigue en el host clásico.
   describe('hosts de Rappi: login en el dominio nuevo, API en el clásico', () => {
     /** TODAS las URLs que salen (login incluido), en orden. El login contesta el token; lo demás, 200. */
     function capturarFetch(): string[] {
