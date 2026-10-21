@@ -21,6 +21,7 @@ import { WhatsappCloudApiError, sendGiftCardDeliveryWhatsApp, whatsappConfigurad
 import { anotarFalloTemprano, reiniciarFallosTempranosParaPruebas } from '@/services/giftCards/giftCardFallosTempranos'
 import {
   type EntregaReclamada,
+  PRESUPUESTO_DE_VUELTA_MS,
   entregarTarjetas,
   hayEntregasPendientes,
   marcarEntregaFallidaPorMensaje,
@@ -268,6 +269,8 @@ describe('entregarTarjetas — WhatsApp', () => {
       expect.objectContaining({ venueId: 'v1', venueName: 'IQ Collection', giftCardId: 'gc1', canal: 'WHATSAPP', deliveryErrorCode: null }),
     )
     expect(JSON.stringify(aviso)).not.toContain('tok')
+    // M1: tampoco el aviso de `retry` («Error not retryable», que lleva el mensaje del error).
+    expect(todoLoQueSeLogueo()).not.toContain('pageToken: \\"tok\\"')
   })
 
   it('nunca escribe pageToken ni código en el log', async () => {
@@ -286,6 +289,101 @@ describe('entregarTarjetas — WhatsApp', () => {
     await entregarTarjetas({ ahora: AHORA })
 
     expect(todoLoQueSeLogueo()).not.toContain(token)
+  })
+})
+
+describe('I1 — el presupuesto de la vuelta', () => {
+  /** Cada envío «tarda» `ms` en el reloj que mide la vuelta. */
+  function cadaEnvioTarda(ms: number) {
+    let t = 1_000_000
+    const reloj = jest.spyOn(Date, 'now').mockImplementation(() => t)
+    wa.mockImplementation(async () => {
+      t += ms
+      return { messageId: 'wamid.1' }
+    })
+    return reloj
+  }
+
+  it('pasado el presupuesto, las que faltan NO se mandan: se sueltan con CAS sobre su reclamo y sin gastar su intento', async () => {
+    armar({ reclamadas: [reclamada(), reclamada({ id: 'gc2', pageToken: 'tok2' }), reclamada({ id: 'gc3', pageToken: 'tok3' })] })
+    const reloj = cadaEnvioTarda(PRESUPUESTO_DE_VUELTA_MS + 1)
+
+    let r
+    try {
+      r = await entregarTarjetas({ ahora: AHORA })
+    } finally {
+      reloj.mockRestore()
+    }
+
+    expect(wa).toHaveBeenCalledTimes(1)
+    expect(escrituras()).toEqual([
+      expect.objectContaining({ where: { id: 'gc1', deliveryClaimedAt: RECLAMADO_EN, pageToken: 'tok' } }),
+      {
+        where: { id: { in: ['gc2', 'gc3'] }, deliveryClaimedAt: RECLAMADO_EN },
+        data: { deliveryClaimedAt: null, deliveryAttempts: { decrement: 1 } },
+      },
+    ])
+    expect(r).toEqual({ reclamadas: 3, enviadas: 1, reprogramadas: 0, fallidas: 0, atoradas: 0 })
+  })
+
+  it('dentro del presupuesto se mandan todas', async () => {
+    armar({ reclamadas: [reclamada(), reclamada({ id: 'gc2', pageToken: 'tok2' })] })
+    const reloj = cadaEnvioTarda(PRESUPUESTO_DE_VUELTA_MS - 1)
+
+    try {
+      await entregarTarjetas({ ahora: AHORA })
+    } finally {
+      reloj.mockRestore()
+    }
+
+    expect(wa).toHaveBeenCalledTimes(2)
+  })
+
+  it('el aborto del tope de 20 s de WhatsApp es transitorio: se reprograma a +1 min', async () => {
+    armar({ reclamadas: [reclamada()] })
+    // Lo que lanza `sendGiftCardDeliveryWhatsApp` cuando se cumple su tope (whatsapp.service.test.ts).
+    wa.mockRejectedValue(new Error('No se pudo enviar el mensaje de WhatsApp: The operation was aborted due to timeout'))
+
+    const r = await entregarTarjetas({ ahora: AHORA })
+
+    expect(escrituras()[0].data).toEqual({
+      deliveryNextAttemptAt: new Date(AHORA.getTime() + 60_000),
+      deliveryErrorCode: null,
+      deliveryClaimedAt: null,
+    })
+    expect(r.reprogramadas).toBe(1)
+  })
+})
+
+describe('M1 — un fallo de CONEXIÓN al guardar el resultado', () => {
+  it('se reintenta (el CAS del resultado y el reinicio de Q43) sin volver a mandar', async () => {
+    const sinConexion = (code: string) => Object.assign(new Error("Can't reach database server"), { code })
+    armar({ reclamadas: [reclamada()] })
+    wa.mockResolvedValue({ messageId: 'wamid.1' })
+    prismaMock.giftCard.updateMany
+      .mockReset()
+      .mockRejectedValueOnce(sinConexion('P1001'))
+      .mockResolvedValueOnce({ count: 0 })
+      .mockRejectedValueOnce(sinConexion('P1017'))
+      .mockResolvedValueOnce({ count: 1 })
+
+    jest.useFakeTimers()
+    try {
+      const vuelta = entregarTarjetas({ ahora: AHORA })
+      await jest.advanceTimersByTimeAsync(10_000)
+      await vuelta
+    } finally {
+      jest.useRealTimers()
+    }
+
+    expect(wa).toHaveBeenCalledTimes(1)
+    const [resultado, resultadoOtraVez, reinicio, reinicioOtraVez] = escrituras()
+    expect(escrituras()).toHaveLength(4)
+    expect(resultado.where).toEqual({ id: 'gc1', deliveryClaimedAt: RECLAMADO_EN, pageToken: 'tok' })
+    expect(resultadoOtraVez).toEqual(resultado)
+    expect(reinicio.where).toEqual({ id: 'gc1', deliveryClaimedAt: RECLAMADO_EN })
+    expect(reinicioOtraVez).toEqual(reinicio)
+    expect(logger.error).not.toHaveBeenCalled()
   })
 })
 

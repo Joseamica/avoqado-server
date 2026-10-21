@@ -103,6 +103,11 @@ async function sendTemplateMessage(
    * error #132001 ("does not exist in the translation").
    */
   languageCode: string = 'es_MX',
+  /**
+   * Tope propio de la petición (ms). Sólo lo pasa la entrega de tarjetas de regalo (1b S3, I1): su reclamo en la fila dura
+   * 5 min y sin tope undici espera hasta 300 s. Los demás llamadores no lo pasan y siguen exactamente igual.
+   */
+  timeoutMs?: number,
 ): Promise<{ messageId: string }> {
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
@@ -149,6 +154,8 @@ async function sendTemplateMessage(
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify(body),
+      // El aborto cae en el `catch` de abajo como cualquier fallo de red («No se pudo enviar…»).
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     })
 
     const result = (await response.json()) as Record<string, any>
@@ -264,6 +271,9 @@ export function whatsappConfigurado(): boolean {
  * y el botón «Ver mi tarjeta» a `https://pay.avoqado.io/tarjeta/{{1}}` con el `pageToken`. Nunca lleva el código: sólo la
  * página lo enseña (`docs/audit/2026-10-19-tarjetas-1b/plantilla-whatsapp.md`). Nombre configurable con
  * WHATSAPP_TEMPLATE_GIFT_CARD_DELIVERY (molde `payment_link_share`). Lanza `WhatsappCloudApiError` con el código de Meta.
+ *
+ * I1: tope de 20 s, holgado para una respuesta normal de Meta, para que un envío colgado no venza el reclamo de la entrega. El
+ * aborto llega como fallo de red y la entrega lo reprograma.
  */
 export async function sendGiftCardDeliveryWhatsApp(
   phone: string,
@@ -280,6 +290,8 @@ export async function sendGiftCardDeliveryWhatsApp(
       { type: 'text', text: d.folio },
     ],
     d.pageToken,
+    'es_MX',
+    20_000,
   )
 }
 

@@ -41,6 +41,7 @@ import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { reiniciarFallosTempranosParaPruebas } from '@/services/giftCards/giftCardFallosTempranos'
 import {
   type EntregaReclamada,
+  RECLAMO_VENCE_MS,
   entregarTarjetas,
   marcarEntregaFallidaPorMensaje,
   reclamarEntregas,
@@ -264,6 +265,84 @@ describe('el reclamo en la fila', () => {
     await prisma.giftCard.update({ where: { id: pendiente }, data: { status: 'PENDING' } })
 
     expect(await reclamarEntregas({ ahora: new Date(), ids: [impresa, enMano, bloqueada, vencida, pendiente] })).toEqual([])
+  })
+})
+
+describe('un lote lento no manda con el reclamo vencido (I1)', () => {
+  /** El reloj con que la vuelta mide su tiempo (`Date.now`), adelantado a mano: un envío «tarda» lo que la prueba diga. */
+  function relojAdelantable() {
+    const real = Date.now
+    let desfase = 0
+    const espia = jest.spyOn(Date, 'now').mockImplementation(() => real() + desfase)
+    return { adelantar: (ms: number) => (desfase += ms), restaurar: () => espia.mockRestore() }
+  }
+
+  /** Qué tarjeta es cada `pageToken` (el reclamo no promete el orden de las filas). */
+  async function porLiga(ids: string[]) {
+    const filas = await prisma.giftCard.findMany({ where: { id: { in: ids } }, select: { id: true, pageToken: true }, take: ids.length })
+    return new Map(filas.map(f => [f.pageToken, f.id]))
+  }
+
+  it('el primer envío tarda más que el reclamo ⇒ la siguiente no sale en esa vuelta: se suelta sin gastar intento y sale UNA vez después', async () => {
+    const ids = await tarjetas(2)
+    const tarjetaDe = await porLiga(ids)
+    const reloj = relojAdelantable()
+    const enviadas: string[] = []
+    mockEnviarWhatsApp.mockImplementation(async (_telefono: string, d: { pageToken: string }) => {
+      enviadas.push(tarjetaDe.get(d.pageToken)!)
+      if (enviadas.length === 1) reloj.adelantar(RECLAMO_VENCE_MS + 1_000)
+      return { messageId: unico('wamid.lento') }
+    })
+
+    try {
+      await entregarTarjetas({ ids })
+    } finally {
+      reloj.restaurar()
+    }
+
+    expect(enviadas).toHaveLength(1)
+    const [primera] = enviadas
+    const siguiente = ids.find(id => id !== primera)!
+    expect((await fila(primera)).deliveryStatus).toBe('SENT')
+    expect(await fila(siguiente)).toEqual(
+      expect.objectContaining({ deliveryStatus: 'PENDING', deliveryClaimedAt: null, deliveryAttempts: 0, deliveryMessageId: null }),
+    )
+
+    await entregarTarjetas({ ids })
+
+    expect(enviadas).toEqual([primera, siguiente])
+    expect(await fila(siguiente)).toEqual(expect.objectContaining({ deliveryStatus: 'SENT', deliveryAttempts: 1 }))
+  })
+
+  it('con el reclamo ya vencido, la patada que la toma la manda y la vuelta vieja ya no: un solo envío por tarjeta', async () => {
+    const ids = await tarjetas(2)
+    const tarjetaDe = await porLiga(ids)
+    const reloj = relojAdelantable()
+    const enviadas: string[] = []
+    let patada: Awaited<ReturnType<typeof entregarTarjetas>> | undefined
+    mockEnviarWhatsApp.mockImplementation(async (_telefono: string, d: { pageToken: string }) => {
+      const id = tarjetaDe.get(d.pageToken)!
+      enviadas.push(id)
+      if (enviadas.length === 1) {
+        // Mientras la vuelta vieja espera a Meta, pasa el reclamo y llega la patada de S4 (`getCuenta`) por la OTRA tarjeta.
+        reloj.adelantar(RECLAMO_VENCE_MS + 1_000)
+        patada = await entregarTarjetas({ ids: ids.filter(x => x !== id), ahora: new Date(Date.now()) })
+      }
+      return { messageId: unico('wamid.patada') }
+    })
+
+    try {
+      await entregarTarjetas({ ids })
+    } finally {
+      reloj.restaurar()
+    }
+
+    expect(patada?.enviadas).toBe(1)
+    expect([...enviadas].sort()).toEqual([...ids].sort())
+    const otra = enviadas[1]
+    // La reclamó la vuelta vieja (intento 1) y luego la patada (intento 2); soltarla ya no le toca: el CAS es sobre el reclamo viejo.
+    expect(await fila(otra)).toEqual(expect.objectContaining({ deliveryStatus: 'SENT', deliveryAttempts: 2, deliveryClaimedAt: null }))
+    expect((await fila(enviadas[0])).deliveryStatus).toBe('SENT')
   })
 })
 

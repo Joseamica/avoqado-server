@@ -21,6 +21,7 @@ import {
   whatsappConfigurado,
 } from '@/services/whatsapp.service'
 import prisma from '@/utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { utcTs } from '@/utils/sqlDates'
 import { urlDeLaPagina, type CodigoDeFalloDeEntrega } from './giftCardEntrega'
 import { anotarFalloTemprano, falloTemprano } from './giftCardFallosTempranos'
@@ -31,6 +32,12 @@ export const MAX_INTENTOS_DE_ENTREGA = 4
 export const ESPERA_ENTRE_INTENTOS_MIN = [1, 5, 30] as const
 export const RECLAMO_VENCE_MS = 5 * 60_000
 export const LOTE_DE_ENTREGA = 50
+/**
+ * I1: el reclamo dura 5 min para TODO el lote y los envíos van uno tras otro. Pasado este tiempo la vuelta ya no manda: suelta
+ * las que faltan sin gastar su intento y la siguiente vuelta las toma. Con el tope de 20 s de WhatsApp el último envío termina
+ * ~1 min después del reclamo, lejos de su vencimiento, y nadie manda con un teléfono o una liga leídos hace minutos.
+ */
+export const PRESUPUESTO_DE_VUELTA_MS = 45_000
 
 type CodigoDeAviso = 'WHATSAPP_UNDELIVERED' | 'EMAIL_INVALID_ADDRESS' | 'EMAIL_SEND_FAILED'
 
@@ -173,6 +180,25 @@ function sinSecretos(error: unknown, e: EntregaReclamada): string {
 }
 
 /**
+ * M1: un fallo de CONEXIÓN al guardar se reintenta (el CAS es idempotente: ya escrito, no vuelve a encontrar la fila); sin esto, un
+ * envío que sí salió quedaría reclamado y saldría otra vez a los 5 min. `retry` registra el mensaje del error, y uno de Prisma
+ * puede repetir la liga o el destino: se limpia antes. El envío nunca va aquí dentro.
+ */
+function guardar<T>(e: EntregaReclamada, op: () => Promise<T>): Promise<T> {
+  const limpio = () =>
+    op().catch((error: unknown) => {
+      if (error instanceof Error) error.message = sinSecretos(error, e)
+      throw error
+    })
+  return retry(limpio, {
+    retries: 2,
+    initialDelay: 1500,
+    shouldRetry: shouldRetryDbConnectionError,
+    context: 'gift-card-delivery.resultado',
+  })
+}
+
+/**
  * Q4 + Q46: `giftcard:<id>:<llave del reenvío | auto>:<huella de la liga>:<intento>`. Sin la llave del reenvío, un reenvío a
  * mano en 24 h repetiría la del intento 1; sin la huella, el reinicio de Q43 repetiría `…:auto:1` con OTRO contenido y Resend
  * respondería 409, que se toma como definitivo.
@@ -188,15 +214,16 @@ export function llaveDeCorreo(e: Pick<EntregaReclamada, 'id' | 'deliveryOperatio
  * del panel no toca la entrega), además se reinicia la entrega: la liga nueva es otra entrega, sin espera y con sus 4 intentos.
  */
 async function escribirResultado(e: EntregaReclamada, negocio: string, data: Prisma.GiftCardUpdateManyMutationInput): Promise<boolean> {
-  const r = await prisma.giftCard.updateMany({
-    where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt, pageToken: e.pageToken },
-    data,
-  })
+  const r = await guardar(e, () =>
+    prisma.giftCard.updateMany({ where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt, pageToken: e.pageToken }, data }),
+  )
   if (r.count === 1) return true
-  const reinicio = await prisma.giftCard.updateMany({
-    where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt },
-    data: { deliveryClaimedAt: null, deliveryAttempts: 0, deliveryNextAttemptAt: null },
-  })
+  const reinicio = await guardar(e, () =>
+    prisma.giftCard.updateMany({
+      where: { id: e.id, deliveryClaimedAt: e.deliveryClaimedAt },
+      data: { deliveryClaimedAt: null, deliveryAttempts: 0, deliveryNextAttemptAt: null },
+    }),
+  )
   logger.warn('🎁 [tarjetas de regalo] entrega: la tarjeta cambió mientras se enviaba; ese resultado no se escribe', {
     venueId: e.venueId,
     venueName: negocio,
@@ -272,6 +299,12 @@ function plantillaNoDisponible(error: unknown): boolean {
   )
 }
 
+/**
+ * Entrega AL MENOS UNA VEZ: Meta no tiene llave de idempotencia y la de Resend cambia con el intento, así que un desenlace
+ * desconocido (el tope de 20 s, una conexión cortada después de salir) se reintenta como transitorio y puede llegar dos veces.
+ * Es el mismo mensaje, con la misma liga y al mismo destino, sin código ni dinero: el diseño lo acepta (tomarlo por definitivo
+ * dejaría tarjetas sin entregar).
+ */
 async function entregarUna(e: EntregaReclamada, negocio: string, ahora: Date): Promise<Desenlace> {
   // Filas de la 1a sin `purchaserName`: «de parte de» el negocio.
   const deParteDe = (e.purchaserName?.trim() || negocio).slice(0, 60)
@@ -298,6 +331,9 @@ async function entregarUna(e: EntregaReclamada, negocio: string, ahora: Date): P
   }
 
   if (!e.recipientEmail) return fallar(e, negocio, 'EMAIL_INVALID_ADDRESS')
+  // ponytail: el SDK de Resend (6.3.0) no acepta `signal` ni pone tope, y no se envuelve en un `Promise.race` que lo dé por
+  // fallido mientras sigue en vuelo. Techo: un envío colgado más de lo que le queda al reclamo (~4 min tras el presupuesto) podría
+  // salir dos veces. Si los logs muestran envíos de Resend de minutos, mandar por `fetch` a su API con `AbortSignal.timeout`.
   const res = await emailService.sendGiftCardDeliveryEmail(
     e.recipientEmail,
     { negocio, monto, deParteDe, para: e.recipientName?.trim() || null, folio: e.codeLast4, url: urlDeLaPagina(e.pageToken) },
@@ -315,10 +351,29 @@ async function nombresDeNegocios(venueIds: string[]): Promise<Map<string, string
 }
 
 /**
- * Una vuelta: cierra las atoradas, reclama (todas las que tocan o sólo `ids`, a lo más 50) y entrega una por una. Cada tarjeta
- * está aislada: una excepción inesperada deja su `logger.error` (Q19) y su reclamo vence solo a los 5 minutos.
+ * I1: las que el presupuesto ya no alcanzó se sueltan sin gastar su intento, con CAS sobre ESTE reclamo (el lote lo selló con un
+ * solo `ahora`). Si otro ya la tomó (un reenvío, o una vuelta que la reclamó), no se toca.
+ */
+async function soltar(restantes: EntregaReclamada[]): Promise<void> {
+  const r = await prisma.giftCard.updateMany({
+    where: { id: { in: restantes.map(x => x.id) }, deliveryClaimedAt: restantes[0].deliveryClaimedAt },
+    data: { deliveryClaimedAt: null, deliveryAttempts: { decrement: 1 } },
+  })
+  logger.warn('🎁 [tarjetas de regalo] entrega: se acabó el tiempo de la vuelta; las que faltan quedan para la siguiente', {
+    giftCardIds: restantes.map(x => x.id),
+    soltadas: r.count,
+  })
+}
+
+/**
+ * Una vuelta: cierra las atoradas, reclama (todas las que tocan o sólo `ids`, a lo más 50) y entrega una por una mientras dure el
+ * presupuesto (I1). Cada tarjeta está aislada: una excepción inesperada deja su `logger.error` (Q19) y su reclamo vence solo a
+ * los 5 minutos.
  */
 export async function entregarTarjetas(p: { ids?: string[]; ahora?: Date } = {}): Promise<ResultadoDeEntrega> {
+  // Tiempo transcurrido, no contra `ahora` (las pruebas lo fijan). El reclamo se sella con `ahora`, que el trabajo toma un poco
+  // antes (su lectura de entrada con reintento): el margen del presupuesto contra los 5 min lo cubre de sobra.
+  const inicio = Date.now()
   const ahora = p.ahora ?? new Date()
   const atoradas = await cerrarAtoradas(ahora, p.ids)
   const reclamadas = await reclamarEntregas({ ahora, ids: p.ids })
@@ -335,7 +390,11 @@ export async function entregarTarjetas(p: { ids?: string[]; ahora?: Date } = {})
       deliveryErrorCode: 'UNCONFIRMED',
     })
   }
-  for (const e of reclamadas) {
+  for (const [i, e] of reclamadas.entries()) {
+    if (Date.now() - inicio > PRESUPUESTO_DE_VUELTA_MS) {
+      await soltar(reclamadas.slice(i))
+      break
+    }
     const negocio = nombres.get(e.venueId) ?? ''
     try {
       const desenlace = await entregarUna(e, negocio, ahora)

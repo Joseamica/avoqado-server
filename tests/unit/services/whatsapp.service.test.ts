@@ -335,6 +335,49 @@ describe('tarjetas de regalo (1b S3)', () => {
     expect(texto).not.toMatch(/\n/)
   })
 
+  it('I1: la entrega de la tarjeta corta a los 20 s y el aborto sale como fallo de red (transitorio), no como error de Meta', async () => {
+    const corte = new AbortController()
+    const tope = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(corte.signal)
+    // Un Meta colgado: la petición sólo termina cuando su `signal` la aborta.
+    global.fetch = jest.fn(
+      (_url, opts: any) => new Promise((_resolve, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+    ) as unknown as typeof global.fetch
+
+    let caught: unknown
+    let topes: unknown[][] = []
+    try {
+      const enVuelo = sendGiftCardDeliveryWhatsApp('5512345678', D).catch((e: unknown) => e)
+      corte.abort(new DOMException('The operation was aborted due to timeout', 'TimeoutError'))
+      caught = await enVuelo
+      topes = [...tope.mock.calls] // `mockRestore` borra las llamadas
+    } finally {
+      tope.mockRestore()
+    }
+
+    expect(topes).toEqual([[20_000]])
+    expect(caught).not.toBeInstanceOf(WhatsappCloudApiError)
+    expect((caught as Error).message).toBe('No se pudo enviar el mensaje de WhatsApp: The operation was aborted due to timeout')
+  })
+
+  it('I1: los demás envíos de plantilla siguen sin tope propio (sin signal)', async () => {
+    const tope = jest.spyOn(AbortSignal, 'timeout')
+    const fetchMock = jest.fn().mockResolvedValue({ ok: true, json: async () => ({ messages: [{ id: 'wamid.R' }] }) })
+    global.fetch = fetchMock as unknown as typeof global.fetch
+
+    let topes: unknown[][] = []
+    try {
+      await sendReceiptWhatsApp('5512345678', { venueName: 'T', totalAmount: '100', receiptUrl: 'https://x.io/r' })
+      await sendReservationReminderWhatsApp('5512345678', { customerName: 'Ana', venueName: 'T', date: 'hoy', time: '10:00' })
+      topes = [...tope.mock.calls] // `mockRestore` borra las llamadas
+    } finally {
+      tope.mockRestore()
+    }
+
+    expect(topes).toEqual([])
+    expect(fetchMock).toHaveBeenCalledTimes(2)
+    for (const [, opts] of fetchMock.mock.calls) expect(opts).not.toHaveProperty('signal')
+  })
+
   it('whatsappConfigurado refleja las dos variables', () => {
     expect(whatsappConfigurado()).toBe(true)
     delete process.env.WHATSAPP_ACCESS_TOKEN
