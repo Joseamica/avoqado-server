@@ -2738,6 +2738,11 @@ export interface CashPaymentResponse {
   tipAmount: number
   method: PaymentMethod
   status: 'COMPLETED'
+  /**
+   * Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. En CENTAVOS enteros (hoy `amount + tipAmount` de lo
+   * REGISTRADO). Las apps calculan el cambio como recibido − `cashRetainedCents`. ADITIVO y opcional: nunca se quita ni se renombra.
+   */
+  cashRetainedCents?: number
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
   changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
@@ -3599,6 +3604,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // 🔴 `pesosToCents`, no un `* 100` pelón: reconstruir desde el Decimal guardado dejaba ruido de float (`19.99 → 1998.99…`).
       amount: pesosToCents(Number(pago.amount)),
       tipAmount: pesosToCents(Number(pago.tipAmount)),
+      // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. Mismo valor que la primera vez.
+      cashRetainedCents: pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)),
       changeCents: cambioDeReintento(amount, pago.amount),
       // El método REAL del pago que ya existe: devolver 'CASH' fijo reportaría como efectivo el reintento de un cobro con tarjeta.
       method: pago.method as CashPaymentResponse['method'],
@@ -4083,6 +4090,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     orderNumber: order.orderNumber,
     amount: aplicadoCents,
     tipAmount: tip,
+    // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN.
+    cashRetainedCents: aplicadoCents + tip,
     changeCents: cambioCents,
     method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',
