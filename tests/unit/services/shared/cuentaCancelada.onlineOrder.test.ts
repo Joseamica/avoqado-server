@@ -53,6 +53,8 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 
 import { Decimal } from '@prisma/client/runtime/library'
 
+import logger from '@/config/logger'
+
 import { KitchenTicketsReconciliationJob } from '@/jobs/kitchen-tickets-reconciliation.job'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { createNotification, sendBulkNotification, sendVenueNotification } from '@/services/dashboard/notification.dashboard.service'
@@ -72,8 +74,8 @@ const CAJERA = 'cstaffcajera00000000001aa'
 
 const ACCION = 'ONLINE_ORDER_COLLECTED_AFTER_CANCEL'
 const TITULO = 'Se cobró un pedido en línea cancelado'
-const mensaje = (folio: string) =>
-  `El pedido #${folio} se había cancelado y después se registró su cobro en efectivo. Revisa con quien lo canceló.`
+// Fix r1, ruling 3: texto neutro. El dinero puede llegar por la terminal (tarjeta), no sólo en efectivo.
+const mensaje = (folio: string) => `El pedido #${folio} se había cancelado y después se registró su cobro. Revisa con quien lo canceló.`
 
 const PERSONAL = [
   { staffId: GERENTE, venueId: VENUE, role: 'MANAGER', active: true },
@@ -91,14 +93,22 @@ const PERSONAL = [
 
 interface Base {
   order: { id: string; venueId: string; status: string; orderNumber: string; contratoDePrecio: string; taxAmount: number }
-  online: { id: string; orderId: string; venueId: string; status: string; completedAt: Date | null } | null
+  online: {
+    id: string
+    orderId: string
+    venueId: string
+    status: string
+    completedAt: Date | null
+    cancelledAt?: Date | null
+    cancelledBy?: string | null
+  } | null
   personal: typeof PERSONAL
   bitacora: any[]
   avisos: any[]
   pagos: any[]
 }
 
-function nuevaBase(o: { online?: string | null; contrato?: string; taxAmount?: number } = {}): Base {
+function nuevaBase(o: { online?: string | null; contrato?: string; taxAmount?: number; personal?: Base['personal'] } = {}): Base {
   return {
     order: {
       id: ORDER,
@@ -112,7 +122,7 @@ function nuevaBase(o: { online?: string | null; contrato?: string; taxAmount?: n
       o.online === null
         ? null
         : { id: ONLINE, orderId: ORDER, venueId: VENUE, status: o.online ?? 'CANCELLED_BY_STAFF', completedAt: null },
-    personal: PERSONAL,
+    personal: o.personal ?? PERSONAL,
     bitacora: [],
     avisos: [],
     pagos: [],
@@ -285,6 +295,88 @@ describe('S1 — la regla dentro de `reabrirSiRecibeDinero` (transacción simula
 
     expect(b.online?.status).toBe('CANCELLED_BY_STAFF')
     expect([delPedido(b).length, b.avisos.length]).toEqual([1, 2])
+  })
+
+  // 🔴 Fix r1, ruling 4 (revisión r0 #1; Codex plan r2 #4): el panel canceló la cuenta y el pedido sigue ABIERTO porque nadie leyó la
+  // bandeja. Un pago PARCIAL la reabre: el pedido se cierra igual que si la bandeja hubiera leído antes (`cancelledOrderSync.ts`), con
+  // el mismo `tx`. Sin esto quedaba «En preparación», cobrable e IMPRIMIBLE en la cocina (`printClaim.service.ts`).
+  it.each(['PENDING_ACCEPTANCE', 'ACCEPTED', 'READY'])(
+    'dashboard cancel without an inbox read in between + partial captured cash ⇒ the OnlineOrder (%s) ends CANCELLED_BY_STAFF through the tx',
+    async abierto => {
+      const b = nuevaBase({ online: abierto })
+      const tx = txSobre(b)
+
+      expect(await reabrir(tx, { cobrado: 50, cubre: false })).toBe('PENDING')
+
+      expect(b.order.status).toBe('PENDING')
+      expect(b.online).toMatchObject({
+        status: 'CANCELLED_BY_STAFF',
+        cancelledAt: expect.any(Date),
+        cancelledBy: 'ORDER_CANCELLED_ELSEWHERE',
+        completedAt: null,
+      })
+      expect(tx.onlineOrder.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: ONLINE, status: abierto } }))
+      expect(delPedido(b)).toHaveLength(1)
+      expect(delPedido(b)[0].data).toMatchObject({ estadoAnterior: abierto, cobradoCents: 5000 })
+      expect(b.avisos).toHaveLength(2)
+      nadaPorElClienteGlobal()
+    },
+  )
+
+  it('🔴 fix r1: el resultado del pago parcial es el MISMO con o sin una lectura de la bandeja en medio', async () => {
+    // Sin lectura: el panel dejó el pedido ACCEPTED.
+    const sinLectura = nuevaBase({ online: 'ACCEPTED' })
+    await reabrir(txSobre(sinLectura), { cobrado: 50, cubre: false })
+    // Con lectura: la bandeja ya lo había cerrado como lo cierra `syncOnlineOrdersOfCancelledOrders`.
+    const conLectura = nuevaBase()
+    conLectura.online!.cancelledBy = 'ORDER_CANCELLED_ELSEWHERE'
+    conLectura.online!.cancelledAt = new Date('2026-10-21T12:00:00Z')
+    await reabrir(txSobre(conLectura), { cobrado: 50, cubre: false })
+
+    const final = (b: Base) => [b.order.status, b.online?.status, b.online?.cancelledBy, delPedido(b).length, b.avisos.length]
+    expect(final(sinLectura)).toEqual(final(conLectura))
+    expect(final(sinLectura)).toEqual(['PENDING', 'CANCELLED_BY_STAFF', 'ORDER_CANCELLED_ELSEWHERE', 1, 2])
+  })
+
+  it('🔴 fix r1: si la bandeja lo cierra entre la lectura y el CAS del pago parcial, no se pisa y el resultado es el mismo', async () => {
+    const b = nuevaBase({ online: 'ACCEPTED' })
+    const tx = txSobre(b)
+    tx.order.update.mockImplementationOnce(async ({ data }: any) => {
+      b.order.status = data.status
+      Object.assign(b.online!, { status: 'CANCELLED_BY_STAFF', cancelledBy: 'ORDER_CANCELLED_ELSEWHERE', cancelledAt: new Date() })
+      return {
+        orderNumber: 'WK7QX',
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: new Decimal(0),
+        onlineOrder: { id: ONLINE, status: 'ACCEPTED' },
+      }
+    })
+
+    await reabrir(tx, { cobrado: 50, cubre: false })
+
+    expect(b.online).toMatchObject({ status: 'CANCELLED_BY_STAFF', cancelledBy: 'ORDER_CANCELLED_ELSEWHERE' })
+    expect(tx.onlineOrder.updateMany).toHaveBeenCalledTimes(1)
+    expect(delPedido(b)[0].data.estadoAnterior).toBe('CANCELLED_BY_STAFF')
+  })
+
+  it('🔴 fix r1: con la página de gerentes llena (50) se avisa a esos 50 y queda un warn: nunca se recorta en silencio', async () => {
+    const cincuenta = Array.from({ length: 50 }, (_, i) => ({
+      staffId: `cstaffgerente${String(i).padStart(12, '0')}`,
+      venueId: VENUE,
+      role: 'MANAGER',
+      active: true,
+    }))
+    const b = nuevaBase({ personal: cincuenta })
+
+    await reabrir(txSobre(b))
+
+    expect(b.avisos).toHaveLength(50)
+    expect((logger.warn as jest.Mock).mock.calls.some(([m]) => String(m).includes('página llena de gerentes'))).toBe(true)
+  })
+
+  it('control — fix r1: con menos de 50 gerentes no hay warn de página llena', async () => {
+    await reabrir(txSobre(nuevaBase()))
+    expect((logger.warn as jest.Mock).mock.calls.some(([m]) => String(m).includes('página llena de gerentes'))).toBe(false)
   })
 
   it('idempotent replay does not log or notify twice', async () => {
@@ -519,6 +611,18 @@ describe('S1 — el camino del POS (`payCashOrder`)', () => {
     expect(pagos).toHaveLength(1)
     expect([bitacora.filter(d => d.action === ACCION).length, avisos.length]).toEqual([1, 2])
     expect(online?.status).toBe('COMPLETED')
+  })
+
+  it('🔴 fix r1 — dashboard cancel without an inbox read in between + partial cash replay ⇒ OnlineOrder CANCELLED_BY_STAFF (por `payCashOrder`)', async () => {
+    const { row, online, bitacora, avisos } = instalarPos({ online: 'ACCEPTED' })
+
+    await payCashOrder(VENUE, ORDER, cola(5000, 'cola-parcial-dash'))
+
+    expect([row.status, row.paymentStatus]).toEqual(['PENDING', 'PARTIAL'])
+    expect(online).toMatchObject({ status: 'CANCELLED_BY_STAFF', cancelledBy: 'ORDER_CANCELLED_ELSEWHERE', cancelledAt: expect.any(Date) })
+    expect(bitacora.filter(d => d.action === ACCION)).toHaveLength(1)
+    expect(avisos).toHaveLength(2)
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: ONLINE, status: 'ACCEPTED' } }))
   })
 
   it('a live drawer cash /pay on a cancelled WEB order is still rejected', async () => {

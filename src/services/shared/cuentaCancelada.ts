@@ -10,6 +10,7 @@ import {
 
 import logger from '@/config/logger'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
+import { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES } from '@/services/online-ordering/constants'
 import { claseDeEstado, estadoAlRecibirDinero, impuestoQueSeCobraAparte } from './orderBalance'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
@@ -253,37 +254,49 @@ async function conciliarPedidoEnLinea(
   if (!pedido || pedido.status === OnlineOrderStatus.COMPLETED) return
 
   const saldada = a.cubreComoCancelada && impuestoQueSeCobraAparte({ ...cuenta, status: estado }).isZero()
+  const ahora = new Date()
+  // Saldada ⇒ el pedido se ENTREGA (desde cualquier estado salvo COMPLETED). No saldada ⇒ hay dinero en una cuenta cancelada que
+  // quedó viva otra vez: si el pedido sigue ABIERTO (el panel canceló y nadie leyó la bandeja, Codex plan r2 #4) se cierra como lo
+  // cierra la bandeja al leer (`cancelledOrderSync.ts`, mismos valores). Así el resultado no depende de esa lectura, y el pedido no
+  // queda «En preparación», cobrable ni imprimible en la cocina (`printClaim.service.ts`). Si ya estaba cancelado, no se toca.
+  const destino = saldada
+    ? {
+        puedeSalirDe: (s: OnlineOrderStatus) => s !== OnlineOrderStatus.COMPLETED,
+        data: { status: OnlineOrderStatus.COMPLETED, completedAt: ahora },
+      }
+    : {
+        puedeSalirDe: (s: OnlineOrderStatus) => OPEN_ONLINE_STATUSES.includes(s),
+        data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: ahora, cancelledBy: CANCELLED_ELSEWHERE },
+      }
   let estadoAnterior: OnlineOrderStatus = pedido.status
-  let completado = false
-  if (saldada) {
+  let estadoFinal: OnlineOrderStatus = pedido.status
+  if (destino.puedeSalirDe(pedido.status)) {
     // CAS sobre el estado leído. Si la bandeja lo movió entre la lectura y la escritura (sincroniza la cancelación AL LEER, sin el
-    // candado de la orden), se relee UNA vez y se reintenta: el dinero ya está aquí y gana.
-    let cas = await tx.onlineOrder.updateMany({
-      where: { id: pedido.id, status: estadoAnterior },
-      data: { status: OnlineOrderStatus.COMPLETED, completedAt: new Date() },
-    })
-    completado = cas.count === 1
-    if (!completado) {
+    // candado de la orden), se relee UNA vez: si todavía puede moverse, se reintenta; si no, se respeta lo que quedó.
+    const cas = await tx.onlineOrder.updateMany({ where: { id: pedido.id, status: pedido.status }, data: destino.data })
+    if (cas.count === 1) {
+      estadoFinal = destino.data.status
+    } else {
       const releido = await tx.onlineOrder.findUnique({ where: { orderId: a.orderId }, select: { id: true, status: true } })
-      if (releido?.status === OnlineOrderStatus.COMPLETED) {
-        completado = true // otro camino ya lo entregó
-      } else if (releido) {
+      if (releido) {
         estadoAnterior = releido.status
-        cas = await tx.onlineOrder.updateMany({
-          where: { id: releido.id, status: estadoAnterior },
-          data: { status: OnlineOrderStatus.COMPLETED, completedAt: new Date() },
+        estadoFinal = releido.status
+        if (destino.puedeSalirDe(releido.status)) {
+          const otraVez = await tx.onlineOrder.updateMany({ where: { id: releido.id, status: releido.status }, data: destino.data })
+          if (otraVez.count === 1) estadoFinal = destino.data.status
+        }
+      }
+      if (estadoFinal !== destino.data.status && destino.puedeSalirDe(estadoFinal)) {
+        logger.warn('[OnlineOrdering] el pedido de una cuenta cobrada tras cancelarse cambió dos veces bajo el cobro; no se movió', {
+          venueId: a.venueId,
+          orderId: a.orderId,
+          onlineOrderId: pedido.id,
+          destino: destino.data.status,
         })
-        completado = cas.count === 1
       }
     }
-    if (!completado) {
-      logger.warn('[OnlineOrdering] el pedido de una cuenta cobrada tras cancelarse cambió dos veces bajo el cobro; no se completó', {
-        venueId: a.venueId,
-        orderId: a.orderId,
-        onlineOrderId: pedido.id,
-      })
-    }
   }
+  const completado = estadoFinal === OnlineOrderStatus.COMPLETED
 
   await tx.activityLog.create({
     data: {
@@ -310,6 +323,14 @@ async function conciliarPedidoEnLinea(
     orderBy: { staffId: 'asc' },
     take: MAX_GERENTES_AVISADOS,
   })
+  // Fix r1: la página llena NO se recorta en silencio. Se avisa a los que caben y queda el rastro para revisarlo.
+  if (gerentes.length === MAX_GERENTES_AVISADOS) {
+    logger.warn('⚠️ [OnlineOrdering] página llena de gerentes al avisar de un pedido cobrado tras cancelarse; puede haber más sin aviso', {
+      venueId: a.venueId,
+      orderId: a.orderId,
+      tope: MAX_GERENTES_AVISADOS,
+    })
+  }
   if (gerentes.length > 0) {
     await tx.notification.createMany({
       data: gerentes.map(g => ({
@@ -321,7 +342,7 @@ async function conciliarPedidoEnLinea(
         entityType: 'Order',
         entityId: a.orderId,
         title: 'Se cobró un pedido en línea cancelado',
-        message: `El pedido #${cuenta.orderNumber} se había cancelado y después se registró su cobro en efectivo. Revisa con quien lo canceló.`,
+        message: `El pedido #${cuenta.orderNumber} se había cancelado y después se registró su cobro. Revisa con quien lo canceló.`,
         metadata: { onlineOrderId: pedido.id, orderNumber: cuenta.orderNumber, completado, canal: a.canal },
       })),
     })
