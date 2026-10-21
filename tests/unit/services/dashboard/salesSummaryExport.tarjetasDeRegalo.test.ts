@@ -48,11 +48,13 @@ describe('exportación de Ventas · tarjetas de regalo', () => {
     expect(flattenSalesSummaryForExport(reporte(), ['totals']).rows).toHaveLength(8)
   })
 
-  it('con tarjetas, la sección de métodos son las ventas por método con el saldo NETO y su porcentaje', () => {
+  it('con tarjetas, los métodos son DINERO como el panel; el saldo va aparte, bruto y sin porcentaje, y dice lo que regresó', () => {
     const { rows } = flattenSalesSummaryForExport(
       reporte({
-        // DINERO: incluye $150 de una carga de tarjeta cobrada en efectivo; no es lo que se exporta como ventas.
+        summary: { paidWithGiftCardBalance: 100 },
+        // DINERO: incluye $150 de una carga de tarjeta cobrada en efectivo; el dueño cuadra el cajón con esto.
         byPaymentMethod: [{ method: 'CASH', amount: 1050, count: 10, percentage: 100 }],
+        // VENTAS (la barra de «Total de Ventas»): no es esta sección.
         salesByPaymentMethod: [
           { method: 'CASH', amount: 900, count: 9, percentage: 90 },
           { method: 'GIFT_CARD', amount: 100, count: 2, percentage: 10 },
@@ -62,10 +64,22 @@ describe('exportación de Ventas · tarjetas de regalo', () => {
       ['paymentMethods'],
     )
     expect(rows).toEqual([
-      { section: 'paymentMethods', label: 'CASH', count: 9, amount: 900, percentage: 90 },
-      { section: 'paymentMethods', label: 'Saldo de tarjeta de regalo (neto)', count: 2, amount: 100, percentage: 10 },
+      { section: 'paymentMethods', label: 'CASH', count: 10, amount: 1050, percentage: 100 },
+      { section: 'paymentMethods', label: 'Saldo de tarjeta de regalo', count: 2, amount: 150, percentage: null },
+      { section: 'paymentMethods', label: 'Regresó al saldo de tarjetas', count: null, amount: 50, percentage: null },
     ])
-    expect(rows.some(r => r.amount === 150)).toBe(false)
+  })
+
+  it('con saldo y sin reversos, no sale la fila de lo que regresó', () => {
+    const { rows } = flattenSalesSummaryForExport(
+      reporte({
+        summary: { paidWithGiftCardBalance: 150 },
+        byPaymentMethod: [{ method: 'CASH', amount: 300, count: 1, percentage: 100 }],
+        giftCardBalanceBreakdown: { amount: 150, count: 2, tips: 0, refunds: 0 },
+      }),
+      ['paymentMethods'],
+    )
+    expect(rows.map(r => r.label)).toEqual(['CASH', 'Saldo de tarjeta de regalo'])
   })
 
   it('sin tarjetas no cambia', () => {
