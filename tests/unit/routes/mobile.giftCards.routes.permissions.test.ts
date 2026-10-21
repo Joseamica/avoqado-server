@@ -13,6 +13,7 @@ import {
   crearLimitadoresDeConsulta,
   giftCardLookupRateLimiters,
   giftCardPayFailureRateLimiters,
+  giftCardRevealRateLimiters,
 } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import { redactUrlSecrets } from '@/middlewares/requestLogger'
 import { hasPermission } from '@/lib/permissions'
@@ -62,6 +63,13 @@ const RUTAS: Array<[string, string, string]> = [
   ['post', REGRESAR, 'giftCards:redeem'],
   ['post', '/venues/:venueId/gift-cards/orders/:orderId/cancel-sale', 'giftCards:manage'],
   ['post', '/venues/:venueId/gift-cards/orders/:orderId/release-cancel', 'giftCards:manage'],
+  // 1b S4 (Q16, Q42): el detalle, reenviar, y lo de gerente en sus propias rutas (las que honran el PIN).
+  ['get', '/venues/:venueId/gift-cards/orders/:orderId', 'giftCards:read'],
+  ['post', '/venues/:venueId/gift-cards/orders/:orderId/reveal', 'giftCards:sell'],
+  ['post', '/venues/:venueId/gift-cards/:giftCardId/resend', 'giftCards:sell'],
+  ['post', '/venues/:venueId/gift-cards/:giftCardId/change-destination', 'giftCards:manage'],
+  ['post', '/venues/:venueId/gift-cards/:giftCardId/reveal', 'giftCards:sell'],
+  ['post', '/venues/:venueId/gift-cards/:giftCardId/reveal-manager', 'giftCards:manage'],
 ]
 
 describe('rutas del POS de tarjetas de regalo', () => {
@@ -114,7 +122,7 @@ describe('rutas del POS de tarjetas de regalo', () => {
       })
   })
 
-  it.each([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER])('%s pasa las ocho', role => {
+  it.each([StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER])('%s pasa todas', role => {
     for (const [metodo, ruta] of RUTAS) expect(hasPermission(role, null, inspeccionar(metodo, ruta)!.permiso!)).toBe(true)
   })
 
@@ -328,4 +336,61 @@ describe('S2b: pay-new-order', () => {
       expect(r.body.code).toBe('GIFT_CARD_LOOKUP_RATE_LIMITED')
     },
   )
+})
+
+/** 1b S4 (S-5): las TRES rutas que muestran el código comparten UN contador (10/min por aparato, 30 por IP en producción). */
+describe('S4: el límite de mostrar códigos', () => {
+  const REVELAR = [
+    '/venues/:venueId/gift-cards/:giftCardId/reveal',
+    '/venues/:venueId/gift-cards/:giftCardId/reveal-manager',
+    '/venues/:venueId/gift-cards/orders/:orderId/reveal',
+  ]
+  const capasDe = (metodo: string, ruta: string): any[] => {
+    const capa = (mobileRouter as any).stack.find((l: any) => l.route?.path === ruta && l.route.stack.some((c: any) => c.method === metodo))
+    return capa ? capa.route.stack.map((c: any) => c.handle) : []
+  }
+
+  it('🔴 las tres llevan la MISMA instancia, justo después del permiso; ninguna otra ruta de tarjetas la lleva', () => {
+    for (const ruta of REVELAR) {
+      const h = capasDe('post', ruta)
+      const permiso = h.findIndex(x => typeof x?.requiredPermission === 'string')
+      expect({ ruta, limite: h.slice(permiso + 1, permiso + 1 + giftCardRevealRateLimiters.length) }).toEqual({
+        ruta,
+        limite: giftCardRevealRateLimiters,
+      })
+    }
+    for (const [metodo, ruta] of RUTAS.filter(([, r]) => !REVELAR.includes(r)))
+      expect({ ruta, lleva: giftCardRevealRateLimiters.some(l => capasDe(metodo, ruta).includes(l)) }).toEqual({ ruta, lleva: false })
+  })
+
+  it('🔴 Q42: mostrar la cuenta con tres tarjetas cuenta UNA vez (tope 3 de prueba: la cuarta petición seguida ⇒ 429)', async () => {
+    const deTres = crearLimitadoresDeConsulta(3, 100, { prefijo: 'gift-card-reveal' })
+    const gemelo = new Map(giftCardRevealRateLimiters.map((l, i) => [l, deTres[i]]))
+    const ruta = '/venues/:venueId/gift-cards/orders/:orderId/reveal'
+    const limitadores = capasDe('post', ruta)
+      .filter(h => gemelo.has(h))
+      .map(h => gemelo.get(h)!)
+    expect(limitadores).toHaveLength(2)
+    const a = express()
+    a.post(ruta, ...limitadores, (_req, res) => res.json({ success: true, data: { tarjetas: [{ id: 'g1' }, { id: 'g2' }, { id: 'g3' }] } }))
+    for (let i = 0; i < 3; i++) {
+      const r = await request(a).post('/venues/v1/gift-cards/orders/o1/reveal').set('X-Device-Id', 'caja-1')
+      expect(r.status).toBe(200)
+      expect(r.body.data.tarjetas).toHaveLength(3)
+    }
+    const cuarta = await request(a).post('/venues/v1/gift-cards/orders/o1/reveal').set('X-Device-Id', 'caja-1')
+    expect(cuarta.status).toBe(429)
+    expect(cuarta.body.code).toBe('GIFT_CARD_LOOKUP_RATE_LIMITED')
+  })
+
+  it('el detalle de la cuenta y el reenvío no piden plan (R9) ni llevan los límites de consultar o cobrar', () => {
+    for (const [metodo, ruta] of RUTAS.slice(-6)) {
+      const h = capasDe(metodo, ruta)
+      expect({ ruta, plan: h.some(x => typeof x?.featureCode === 'string') }).toEqual({ ruta, plan: false })
+      expect({ ruta, otros: [...giftCardLookupRateLimiters, ...giftCardPayFailureRateLimiters].some(l => h.includes(l)) }).toEqual({
+        ruta,
+        otros: false,
+      })
+    }
+  })
 })

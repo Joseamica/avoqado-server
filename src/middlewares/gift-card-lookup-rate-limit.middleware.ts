@@ -24,14 +24,16 @@ const negocioDe = (req: Request): string => req.params.venueId || 'sin-negocio'
 
 /**
  * Fábrica (las pruebas la usan con topes chicos); las rutas usan las instancias de abajo. Orden: IP, luego aparato.
- * `soloFallos`: sólo cuentan las respuestas ≥ 400. `prefijo` va al inicio de las dos llaves.
+ * `soloFallos`: sólo cuentan las respuestas ≥ 400. `prefijo` va al inicio de las dos llaves. 1b S4 (A28): `code`, `mensaje` y
+ * `ventanaMs` propios; el 429 dice `retryAfter` = la ventana en segundos (sin `ventanaMs`, 60 como siempre).
  */
 export function crearLimitadoresDeConsulta(
   maxPorAparato: number,
   maxPorIp: number,
-  opciones: { soloFallos?: boolean; prefijo?: string } = {},
+  opciones: { soloFallos?: boolean; prefijo?: string; code?: string; mensaje?: string; ventanaMs?: number } = {},
 ): RateLimitRequestHandler[] {
   const prefijo = opciones.prefijo ?? 'gift-card-lookup'
+  const ventanaMs = opciones.ventanaMs ?? VENTANA_MS
   // ⭐ (C3 menor 1): el texto y la línea del log son de ESTE limitador. Cobrar con saldo (`soloFallos`) habla de intentos de cobro
   // —lo ve la cajera—; el `code` es el mismo para los dos (la app ya decide por él).
   const cobro = opciones.soloFallos === true
@@ -46,15 +48,17 @@ export function crearLimitadoresDeConsulta(
     )
     res.status(429).json({
       success: false,
-      code: 'GIFT_CARD_LOOKUP_RATE_LIMITED',
-      message: cobro
-        ? 'Demasiados intentos de cobro con tarjeta de regalo seguidos. Espera un minuto y vuelve a intentar.'
-        : 'Demasiadas consultas de tarjetas de regalo seguidas. Espera un minuto y vuelve a intentar.',
-      retryAfter: 60,
+      code: opciones.code ?? 'GIFT_CARD_LOOKUP_RATE_LIMITED',
+      message:
+        opciones.mensaje ??
+        (cobro
+          ? 'Demasiados intentos de cobro con tarjeta de regalo seguidos. Espera un minuto y vuelve a intentar.'
+          : 'Demasiadas consultas de tarjetas de regalo seguidas. Espera un minuto y vuelve a intentar.'),
+      retryAfter: ventanaMs / 1000,
     })
   }
   const comun = {
-    windowMs: VENTANA_MS,
+    windowMs: ventanaMs,
     standardHeaders: true,
     legacyHeaders: false,
     skipSuccessfulRequests: opciones.soloFallos === true,
@@ -82,4 +86,13 @@ export const giftCardLookupRateLimiters = crearLimitadoresDeConsulta(isProd ? 30
 export const giftCardPayFailureRateLimiters = crearLimitadoresDeConsulta(isProd ? 30 : 1000, isProd ? 120 : 1000, {
   soloFallos: true,
   prefijo: 'gift-card-pay',
+})
+
+/**
+ * 1b S4 (S-5): mostrar el código. Las TRES rutas (`reveal`, `reveal-manager` y `orders/:orderId/reveal`) montan ESTA instancia:
+ * un solo contador, y una petición cuenta una vez aunque traiga varias tarjetas.
+ */
+export const giftCardRevealRateLimiters = crearLimitadoresDeConsulta(isProd ? 10 : 1000, isProd ? 30 : 1000, {
+  prefijo: 'gift-card-reveal',
+  mensaje: 'Demasiadas veces seguidas mostrando códigos. Espera un minuto.',
 })

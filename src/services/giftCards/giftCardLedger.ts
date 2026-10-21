@@ -50,7 +50,8 @@ export interface LockedGiftCard {
 export type OperacionDeGerente =
   | { tipo: 'AJUSTE'; direccion: 'INCREMENT' | 'DECREMENT'; amount: Prisma.Decimal; reason: GiftCardReason; note?: string }
   | { tipo: 'BLOQUEAR' | 'DESBLOQUEAR'; reason: GiftCardReason; note?: string }
-  | { tipo: 'REEMPLAZAR_CODIGO'; reason: 'LOST_CARD'; note?: string }
+  // 1b S4 (P-3): el cambio de destino repone con CUSTOMER_REQUEST y su nota fija.
+  | { tipo: 'REEMPLAZAR_CODIGO'; reason: 'LOST_CARD' | 'CUSTOMER_REQUEST'; note?: string }
 
 function esUsable(c: { status: GiftCardStatus; expiresAt: Date | null }, ahora: Date): boolean {
   return c.status === 'ACTIVE' && (c.expiresAt === null || c.expiresAt.getTime() > ahora.getTime())

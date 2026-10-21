@@ -12,6 +12,30 @@ jest.mock('@/services/giftCards/giftCardSurface.service', () => ({
   estadoDeVentaDeTarjetas: jest.fn(),
   // 1b S1: `tieneTarjetas` de los ajustes (su prueba propia vive en tests/unit/controllers/shared/giftCardSale.controller.test.ts).
   negocioHaActivadoTarjetas: jest.fn().mockResolvedValue(false),
+  // 1b S4 (Q102): la bitácora que SÍ espera y lanza; la del reenvío de la venta la escribe el controller.
+  registrarSalidaDelSecreto: jest.fn().mockResolvedValue(undefined),
+}))
+// 1b S4: el detalle de la cuenta y sus acciones (su lógica la prueba giftCardCuenta.service.test.ts y la integración).
+jest.mock('@/services/giftCards/giftCardCuenta.service', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardCuenta.service'),
+  getCuentaDeTarjetasPos: jest.fn(),
+  reenviarTarjeta: jest.fn(),
+  cambiarDestinoDeTarjeta: jest.fn(),
+  revelarCodigo: jest.fn(),
+  revelarCodigosDeLaCuenta: jest.fn(),
+}))
+// `auditarReenvio` (real) llama a `auditarTarjetas` dentro de su propio módulo: su renglón se ve en `logAction`.
+jest.mock('@/services/dashboard/activity-log.service', () => ({
+  ...jest.requireActual('@/services/dashboard/activity-log.service'),
+  logAction: jest.fn(),
+}))
+jest.mock('@/middlewares/permissionFlag.middleware', () => ({
+  ...jest.requireActual('@/middlewares/permissionFlag.middleware'),
+  tienePermisoEnVenue: jest.fn(),
+}))
+jest.mock('@/services/giftCards/giftCardDelivery.service', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardDelivery.service'),
+  entregarTarjetas: jest.fn().mockResolvedValue({ reclamadas: 0, enviadas: 0, reprogramadas: 0, fallidas: 0, atoradas: 0 }),
 }))
 jest.mock('@/services/giftCards/giftCardSettings.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSettings.service'),
@@ -57,12 +81,25 @@ import {
   returnGiftBalanceAndCancelOrder,
 } from '@/services/mobile/order.mobile.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
+import { BadRequestError, ServiceUnavailableError } from '@/errors/AppError'
+import {
+  cambiarDestinoDeTarjeta,
+  getCuentaDeTarjetasPos,
+  reenviarTarjeta,
+  revelarCodigo,
+  revelarCodigosDeLaCuenta,
+} from '@/services/giftCards/giftCardCuenta.service'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const m = (f: unknown) => f as jest.Mock
 const app = express()
 app.use(express.json())
 app.use((req, _res, next) => {
   ;(req as any).authContext = { userId: 'staff-1', venueId: 'v1', role: 'CASHIER' }
+  // El PIN de gerente: lo pone `checkPermission` al consumir el `x-permission-override` (aquí, el encabezado de la prueba).
+  if (req.headers['x-test-override']) (req as any).authContext.overrideAuthorizedBy = req.headers['x-test-override']
   next()
 })
 app.get('/venues/:venueId/gift-cards/settings', validateRequest(soloVenueSchema), venta.getSettings)
@@ -78,6 +115,12 @@ app.post(
 )
 app.post('/venues/:venueId/gift-cards/orders/:orderId/cancel-sale', validateRequest(operationKeyOnOrderSchema), venta.cancelSale)
 app.post('/venues/:venueId/gift-cards/orders/:orderId/release-cancel', validateRequest(liberarCancelacionSchema), venta.releaseCancel)
+app.get('/venues/:venueId/gift-cards/orders/:orderId', validateRequest(s.cuentaDeTarjetasSchema), ctrl.getCuenta)
+app.post('/venues/:venueId/gift-cards/orders/:orderId/reveal', validateRequest(operationKeyOnOrderSchema), ctrl.revealCuenta)
+app.post('/venues/:venueId/gift-cards/:giftCardId/resend', validateRequest(s.resendSchema), ctrl.resend)
+app.post('/venues/:venueId/gift-cards/:giftCardId/change-destination', validateRequest(s.changeDestinationSchema), ctrl.changeDestination)
+app.post('/venues/:venueId/gift-cards/:giftCardId/reveal', validateRequest(s.revealSchema), ctrl.reveal)
+app.post('/venues/:venueId/gift-cards/:giftCardId/reveal-manager', validateRequest(s.revealSchema), ctrl.revealManager)
 app.use(globalErrorHandler)
 
 const B = '/venues/v1'
@@ -613,5 +656,391 @@ describe('cobrar con saldo una venta nueva (pay-new-order)', () => {
       .send({ ...VENTA, ...extra })
     expect(r.status).toBe(200)
     expect(payGiftCardOnNewOrder).toHaveBeenCalledTimes(1)
+  })
+})
+
+/** 1b Q36 (Q102): repetir la venta ya no es otra salida del código sin su renglón confirmado. */
+describe('Q36: repetir la venta y el código', () => {
+  const salida = m(superficie.registrarSalidaDelSecreto)
+  const conEstado = (estados: string[], over: Record<string, unknown> = {}) => ({
+    ...CUENTA,
+    replay: true,
+    sobres: CUENTA.sobres.map((sobre, i) => ({ ...sobre, status: estados[i], ...over })),
+  })
+
+  it('🔴 un reenvío que trae el código de un sobre ACTIVE ⇒ un GIFT_CARD_CODE_REVEALED (REPLAY) por sobre, antes de responder', async () => {
+    const orden: string[] = []
+    salida.mockImplementationOnce(async () => void orden.push('bitacora'))
+    m(createGiftCardOrder).mockResolvedValue(conEstado(['ACTIVE', 'PENDING']))
+    const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
+    orden.push('respuesta')
+    expect(r.status).toBe(200)
+    expect(orden).toEqual(['bitacora', 'respuesta'])
+    expect(salida).toHaveBeenCalledTimes(1)
+    const [db, filas] = salida.mock.calls[0]
+    expect(db).toBeDefined()
+    expect(filas).toEqual([
+      expect.objectContaining({
+        venueId: 'v1',
+        staffId: 'staff-1',
+        action: 'GIFT_CARD_CODE_REVEALED',
+        entity: 'GiftCard',
+        entityId: 'g1',
+        data: { motivo: 'REPLAY', idempotencyKey: 'venta-0001-abc' },
+      }),
+    ])
+    expect(JSON.stringify(filas)).not.toMatch(/K7QZ-ABCD|tok-1/)
+  })
+
+  it('🔴 si ese renglón no se guarda ⇒ 503 «No se pudo mostrar el código. Intenta otra vez.» y la venta no se responde', async () => {
+    salida.mockRejectedValueOnce(new Error('la base no contestó'))
+    m(createGiftCardOrder).mockResolvedValue(conEstado(['ACTIVE', 'ACTIVE']))
+    const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
+    expect(r.status).toBe(503)
+    expect(r.body.message).toBe('No se pudo mostrar el código. Intenta otra vez.')
+    expect(JSON.stringify(r.body)).not.toMatch(/K7QZ-ABCD|M2PX|tok-1|tok-2/)
+  })
+
+  it.each([
+    ['con el código oculto', conEstado(['ACTIVE', 'ACTIVE'], { codigo: null, pageToken: null, pageUrl: null, codigoOculto: true })],
+    ['con los sobres PENDING', conEstado(['PENDING', 'PENDING'])],
+  ])('%s ⇒ ningún renglón', async (_caso, cuenta) => {
+    m(createGiftCardOrder).mockResolvedValue(cuenta)
+    const r = await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
+    expect(r.status).toBe(200)
+    expect(salida.mock.calls.flatMap(c => c[1])).toEqual([])
+  })
+
+  it('la creación (replay: false) nunca lo escribe', async () => {
+    m(createGiftCardOrder).mockResolvedValue({ ...conEstado(['ACTIVE', 'ACTIVE']), replay: false })
+    await request(app).post(`${B}/gift-cards/orders`).send(VENTA)
+    expect(salida.mock.calls.flatMap(c => c[1])).toEqual([])
+  })
+
+  it('🔴 Q110: la venta es de la sesión y la bitácora lleva «según el aparato» (no entra a la huella: el servicio recibe el cuerpo)', async () => {
+    const ANA = 'cl9ana0000000000000000000'
+    m(createGiftCardOrder).mockResolvedValue(CUENTA)
+    const r = await request(app)
+      .post(`${B}/gift-cards/orders`)
+      .send({ ...VENTA, iniciadoPor: ANA, iniciadoPorNombre: 'Ana' })
+    expect(r.status).toBe(201)
+    expect(m(createGiftCardOrder).mock.calls[0][1]).toBe('staff-1')
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: 'staff-1',
+        action: 'GIFT_CARD_SALE_CREATED',
+        data: expect.objectContaining({ iniciadoPorSegunElAparato: { iniciadoPor: ANA, iniciadoPorNombre: 'Ana' } }),
+      }),
+    )
+  })
+})
+
+/** 1b S4: el detalle de la cuenta, reenviar, cambiar el destino y mostrar el código (Q16, Q17, Q42, Q102, RF3). */
+describe('S4: la cuenta de tarjetas en el POS', () => {
+  const permisos = (vender: boolean, gestionar: boolean) =>
+    m(tienePermisoEnVenue).mockImplementation(async (_req: unknown, permiso: string) =>
+      permiso === 'giftCards:sell' ? vender : permiso === 'giftCards:manage' ? gestionar : false,
+    )
+  const sobre = (over: Record<string, unknown>) => ({
+    id: 'g1',
+    ultimos4: 'JKMN',
+    status: 'ACTIVE',
+    deliveryChannel: 'WHATSAPP',
+    deliveryStatus: 'PENDING',
+    ...over,
+  })
+  const RESULTADO_REENVIO = {
+    giftCardId: 'g1',
+    deliveryStatus: 'PENDING',
+    repuesta: false,
+    ultimos4: 'JKMN',
+    replay: false,
+    destinoAnterior: null,
+    destinoNuevo: null,
+  }
+  const CERT = {
+    codigo: 'K7QZ-ABCD-EFGH-JKMN-P',
+    pageToken: 'tok-1',
+    pageUrl: 'https://pay.avoqado.io/tarjeta/tok-1',
+    ultimos4: 'JKMN',
+    monto: 500,
+    saldo: 500,
+    venceEl: null,
+    termsVersion: '2026-10-14',
+    recipientName: 'Ana',
+    purchaserName: 'Luis',
+    message: null,
+  }
+  /** Toda bitácora de mejor esfuerzo: la del controller (`auditarTarjetas`) y la de `auditarReenvio` (llega a `logAction`). */
+  const bitacora = () => [...audit.mock.calls, ...m(logAction).mock.calls].map(c => c[0])
+  const sinSecretos = () => {
+    const todo = JSON.stringify(bitacora())
+    expect(todo).not.toMatch(/K7QZ-ABCD|tok-1|5512345678|5598765432|ana@gmail\.com/)
+  }
+
+  beforeEach(() => permisos(true, false))
+
+  it('getCuenta pregunta sell y manage de verdad, responde el detalle y patea SÓLO las ACTIVE de WhatsApp/correo en PENDING', async () => {
+    let soltarEntrega: () => void = () => undefined
+    m(entregarTarjetas).mockImplementationOnce(() => new Promise(r => (soltarEntrega = () => r({} as any))))
+    const data = {
+      orderId: 'o1',
+      sobres: [
+        sobre({ id: 'g1' }),
+        sobre({ id: 'g2', deliveryChannel: 'EMAIL' }),
+        sobre({ id: 'g3', deliveryStatus: 'SENT' }),
+        sobre({ id: 'g4', deliveryChannel: 'PRINTED' }),
+        sobre({ id: 'g5', status: 'PENDING' }),
+      ],
+    }
+    m(getCuentaDeTarjetasPos).mockResolvedValue(data)
+    const r = await request(app).get(`${B}/gift-cards/orders/o1`)
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual(data)
+    expect(
+      m(tienePermisoEnVenue)
+        .mock.calls.map(c => c[1])
+        .sort(),
+    ).toEqual(['giftCards:manage', 'giftCards:sell'])
+    expect(getCuentaDeTarjetasPos).toHaveBeenCalledWith('v1', 'o1', {
+      staffId: 'staff-1',
+      puedeVender: true,
+      puedeGestionar: false,
+      overrideAuthorizedBy: null,
+    })
+    // Respondió SIN esperar la entrega (que sigue colgada).
+    expect(entregarTarjetas).toHaveBeenCalledWith({ ids: ['g1', 'g2'] })
+    soltarEntrega()
+  })
+
+  it('getCuenta sin nada por entregar no patea', async () => {
+    m(getCuentaDeTarjetasPos).mockResolvedValue({ orderId: 'o1', sobres: [sobre({ deliveryStatus: 'SENT' })] })
+    await request(app).get(`${B}/gift-cards/orders/o1`)
+    expect(entregarTarjetas).not.toHaveBeenCalled()
+  })
+
+  it('resend nuevo: responde los cuatro campos, deja GIFT_CARD_RESENT y patea esa tarjeta', async () => {
+    m(reenviarTarjeta).mockResolvedValue(RESULTADO_REENVIO)
+    const r = await request(app).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0001' })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual({ giftCardId: 'g1', deliveryStatus: 'PENDING', repuesta: false, ultimos4: 'JKMN' })
+    expect(m(reenviarTarjeta).mock.calls[0][3]).toEqual({ operationKey: 'reenvia-0001', destino: undefined })
+    expect(bitacora()).toHaveLength(1)
+    expect(bitacora()).toContainEqual(
+      expect.objectContaining({
+        action: 'GIFT_CARD_RESENT',
+        entity: 'GiftCard',
+        entityId: 'g1',
+        staffId: 'staff-1',
+        data: expect.objectContaining({ operationKey: 'reenvia-0001' }),
+      }),
+    )
+    expect(entregarTarjetas).toHaveBeenCalledWith({ ids: ['g1'] })
+  })
+
+  it('resend con destino lo pasa leído (P-2)', async () => {
+    m(reenviarTarjeta).mockResolvedValue(RESULTADO_REENVIO)
+    await request(app)
+      .post(`${B}/gift-cards/g1/resend`)
+      .send({ operationKey: 'reenvia-0002', deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' })
+    expect(m(reenviarTarjeta).mock.calls[0][3].destino).toEqual({ deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' })
+  })
+
+  it('🔴 un replay del reenvío no repite la bitácora ni patea', async () => {
+    m(reenviarTarjeta).mockResolvedValue({ ...RESULTADO_REENVIO, replay: true, deliveryStatus: 'SENT' })
+    const r = await request(app).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0001' })
+    expect(r.body.data.deliveryStatus).toBe('SENT')
+    expect(bitacora()).toEqual([])
+    expect(entregarTarjetas).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['GIFT_CARD_NOT_DELIVERABLE', new GiftCardError('GIFT_CARD_NOT_DELIVERABLE', 'Esta tarjeta se entregó en papel o en mano.', 409), 409],
+    ['GIFT_CARD_ALREADY_USED', new GiftCardError('GIFT_CARD_ALREADY_USED', 'Esta tarjeta ya se usó: no se puede reponer.', 409), 409],
+    [
+      'GIFT_CARD_USE_CHANGE_DESTINATION',
+      new BadRequestError('Para mandarla a otro teléfono o correo usa «Cambiar destino».', 'GIFT_CARD_USE_CHANGE_DESTINATION'),
+      400,
+    ],
+  ])('🔴 RF3: el rechazo %s deja GIFT_CARD_RESEND_DENIED y se relanza', async (code, error, status) => {
+    m(reenviarTarjeta).mockRejectedValue(error)
+    const r = await request(app)
+      .post(`${B}/gift-cards/g1/resend`)
+      .send({ operationKey: 'reenvia-0003', deliveryChannel: 'WHATSAPP', recipientPhone: '5598765432' })
+    expect(r.status).toBe(status)
+    expect(r.body.code).toBe(code)
+    expect(bitacora()).toHaveLength(1)
+    expect(bitacora()).toContainEqual(
+      expect.objectContaining({
+        action: 'GIFT_CARD_RESEND_DENIED',
+        entityId: 'g1',
+        data: { code, operationKey: 'reenvia-0003', ruta: 'POST /mobile/venues/:venueId/gift-cards/:giftCardId/resend' },
+      }),
+    )
+    expect(entregarTarjetas).not.toHaveBeenCalled()
+    sinSecretos()
+  })
+
+  it('un rechazo que no es de reenvío (p. ej. bloqueada) no deja RESEND_DENIED', async () => {
+    m(reenviarTarjeta).mockRejectedValue(new GiftCardError('GIFT_CARD_BLOCKED', 'Esta tarjeta de regalo está bloqueada.', 409))
+    const r = await request(app).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0004' })
+    expect(r.status).toBe(409)
+    expect(bitacora()).toEqual([])
+  })
+
+  it('🔴 change-destination NO pregunta permisos (los dio la ruta o el PIN) y pasa quién autorizó; deja DESTINATION_CHANGED enmascarado', async () => {
+    m(cambiarDestinoDeTarjeta).mockResolvedValue({
+      ...RESULTADO_REENVIO,
+      repuesta: true,
+      ultimos4: 'WXYZ',
+      destinoAnterior: '55•••••678',
+      destinoNuevo: '55•••••432',
+    })
+    const r = await request(app)
+      .post(`${B}/gift-cards/g1/change-destination`)
+      .set('x-test-override', 'sv-gerente')
+      .send({ operationKey: 'cambia-0001', deliveryChannel: 'WHATSAPP', recipientPhone: '5598765432' })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual({ giftCardId: 'g1', deliveryStatus: 'PENDING', repuesta: true, ultimos4: 'WXYZ' })
+    expect(tienePermisoEnVenue).not.toHaveBeenCalled()
+    const [venueId, giftCardId, quien, p] = m(cambiarDestinoDeTarjeta).mock.calls[0]
+    expect([venueId, giftCardId]).toEqual(['v1', 'g1'])
+    expect(quien).toMatchObject({ staffId: 'staff-1', overrideAuthorizedBy: 'sv-gerente' })
+    expect(p).toEqual({ operationKey: 'cambia-0001', destino: { deliveryChannel: 'WHATSAPP', recipientPhone: '5598765432' } })
+    expect(p).not.toHaveProperty('comoGerente')
+    expect(bitacora()).toContainEqual(
+      expect.objectContaining({
+        action: 'GIFT_CARD_DESTINATION_CHANGED',
+        data: expect.objectContaining({
+          operationKey: 'cambia-0001',
+          destinoAnterior: '55•••••678',
+          destinoNuevo: '55•••••432',
+          overrideAuthorizedBy: 'sv-gerente',
+        }),
+      }),
+    )
+    expect(entregarTarjetas).toHaveBeenCalledWith({ ids: ['g1'] })
+    sinSecretos()
+  })
+
+  it.each(['PRINTED', 'HANDED_TO_BUYER'])(
+    'change-destination a %s ⇒ 400 GIFT_CARD_DESTINATION_CHANNEL_INVALID, sin llegar al servicio',
+    async canal => {
+      const r = await request(app)
+        .post(`${B}/gift-cards/g1/change-destination`)
+        .send({ operationKey: 'cambia-0002', deliveryChannel: canal })
+      expect(r.status).toBe(400)
+      expect(r.body).toMatchObject({
+        code: 'GIFT_CARD_DESTINATION_CHANNEL_INVALID',
+        message: 'Para cambiar el destino elige WhatsApp o correo',
+      })
+      expect(cambiarDestinoDeTarjeta).not.toHaveBeenCalled()
+    },
+  )
+
+  it('🔴 change-destination de una usada ⇒ el 409 y GIFT_CARD_RESEND_DENIED', async () => {
+    m(cambiarDestinoDeTarjeta).mockRejectedValue(
+      new GiftCardError('GIFT_CARD_ALREADY_USED', 'Esta tarjeta ya se usó: no se puede reponer.', 409),
+    )
+    const r = await request(app)
+      .post(`${B}/gift-cards/g1/change-destination`)
+      .send({ operationKey: 'cambia-0003', deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com' })
+    expect(r.status).toBe(409)
+    expect(bitacora()).toContainEqual(expect.objectContaining({ action: 'GIFT_CARD_RESEND_DENIED' }))
+    sinSecretos()
+  })
+
+  it('reveal pregunta sell y manage de verdad, pasa comoGerente: false y responde el certificado; la bitácora del secreto es del servicio', async () => {
+    permisos(true, true)
+    m(revelarCodigo).mockResolvedValue(CERT)
+    const r = await request(app).post(`${B}/gift-cards/g1/reveal`).send({ operationKey: 'revela-0001', motivo: 'REPRINT' })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual(CERT)
+    expect(
+      m(tienePermisoEnVenue)
+        .mock.calls.map(c => c[1])
+        .sort(),
+    ).toEqual(['giftCards:manage', 'giftCards:sell'])
+    const [, , quien, p] = m(revelarCodigo).mock.calls[0]
+    expect(quien).toEqual({ staffId: 'staff-1', puedeVender: true, puedeGestionar: true, overrideAuthorizedBy: null })
+    expect(p).toMatchObject({
+      operationKey: 'revela-0001',
+      motivo: 'REPRINT',
+      comoGerente: false,
+      auditoria: expect.objectContaining({ staffId: 'staff-1', ruta: 'POST /mobile/venues/:venueId/gift-cards/:giftCardId/reveal' }),
+    })
+    expect(audit).not.toHaveBeenCalled()
+  })
+
+  it('🔴 RF3: reveal otro día ⇒ 403 GIFT_CARD_REVEAL_NOT_ALLOWED con su GIFT_CARD_REVEAL_DENIED', async () => {
+    m(revelarCodigo).mockRejectedValue(
+      new GiftCardError('GIFT_CARD_REVEAL_NOT_ALLOWED', 'Volver a imprimir o enseñar el código otro día lo hace un gerente.', 403),
+    )
+    const r = await request(app).post(`${B}/gift-cards/g1/reveal`).send({ operationKey: 'revela-0002', motivo: 'SHOW_QR' })
+    expect(r.status).toBe(403)
+    expect(r.body.code).toBe('GIFT_CARD_REVEAL_NOT_ALLOWED')
+    expect(audit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        action: 'GIFT_CARD_REVEAL_DENIED',
+        entity: 'GiftCard',
+        entityId: 'g1',
+        data: {
+          code: 'GIFT_CARD_REVEAL_NOT_ALLOWED',
+          operationKey: 'revela-0002',
+          ruta: 'POST /mobile/venues/:venueId/gift-cards/:giftCardId/reveal',
+        },
+      }),
+    )
+  })
+
+  it('🔴 reveal-manager NO pregunta permisos, pasa comoGerente: true y quién autorizó el PIN', async () => {
+    m(revelarCodigo).mockResolvedValue(CERT)
+    const r = await request(app)
+      .post(`${B}/gift-cards/g1/reveal-manager`)
+      .set('x-test-override', 'sv-gerente')
+      .send({ operationKey: 'revela-0003', motivo: 'REPRINT' })
+    expect(r.status).toBe(200)
+    expect(tienePermisoEnVenue).not.toHaveBeenCalled()
+    const [, , quien, p] = m(revelarCodigo).mock.calls[0]
+    expect(quien).toMatchObject({ staffId: 'staff-1', overrideAuthorizedBy: 'sv-gerente' })
+    expect(p).toMatchObject({
+      comoGerente: true,
+      auditoria: expect.objectContaining({
+        overrideAuthorizedBy: 'sv-gerente',
+        ruta: 'POST /mobile/venues/:venueId/gift-cards/:giftCardId/reveal-manager',
+      }),
+    })
+  })
+
+  it('el 503 de Q102 llega tal cual, sin secreto', async () => {
+    m(revelarCodigo).mockRejectedValue(new ServiceUnavailableError('No se pudo mostrar el código. Intenta otra vez.'))
+    const r = await request(app).post(`${B}/gift-cards/g1/reveal-manager`).send({ operationKey: 'revela-0004', motivo: 'REPRINT' })
+    expect(r.status).toBe(503)
+    expect(r.body.message).toBe('No se pudo mostrar el código. Intenta otra vez.')
+    expect(audit).not.toHaveBeenCalled()
+  })
+
+  it('reveal sin motivo o con una llave corta ⇒ 400 del esquema', async () => {
+    for (const body of [{ operationKey: 'revela-0005' }, { operationKey: 'corta', motivo: 'REPRINT' }]) {
+      expect((await request(app).post(`${B}/gift-cards/g1/reveal`).send(body)).status).toBe(400)
+    }
+    expect(revelarCodigo).not.toHaveBeenCalled()
+  })
+
+  it('Q42: revealCuenta responde las tarjetas; otro día ⇒ 403 con su REVEAL_DENIED sobre la cuenta', async () => {
+    m(revelarCodigosDeLaCuenta).mockResolvedValue({ orderId: 'o1', tarjetas: [{ id: 'g1', ...CERT }] })
+    const ok = await request(app).post(`${B}/gift-cards/orders/o1/reveal`).send({ operationKey: 'imprime-0001' })
+    expect(ok.status).toBe(200)
+    expect(ok.body.data.tarjetas).toHaveLength(1)
+    expect(m(revelarCodigosDeLaCuenta).mock.calls[0][3]).toMatchObject({
+      operationKey: 'imprime-0001',
+      auditoria: expect.objectContaining({ ruta: 'POST /mobile/venues/:venueId/gift-cards/orders/:orderId/reveal' }),
+    })
+    m(revelarCodigosDeLaCuenta).mockRejectedValue(
+      new GiftCardError('GIFT_CARD_REVEAL_NOT_ALLOWED', 'Volver a imprimir o enseñar el código otro día lo hace un gerente.', 403),
+    )
+    const otroDia = await request(app).post(`${B}/gift-cards/orders/o1/reveal`).send({ operationKey: 'imprime-0002' })
+    expect(otroDia.status).toBe(403)
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'GIFT_CARD_REVEAL_DENIED', entity: 'Order', entityId: 'o1' }))
   })
 })

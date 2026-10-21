@@ -4,6 +4,7 @@
  */
 import {
   TEXTO_DE_FALLO_DE_ENTREGA,
+  enmascararDestino,
   telefonoDeTarjeta,
   textoDeFalloDeEntrega,
   urlDeLaPagina,
@@ -61,5 +62,28 @@ describe('textoDeFalloDeEntrega (S-7)', () => {
     const generico = textoDeFalloDeEntrega('OTRO')
     expect(typeof generico).toBe('string')
     expect(generico!.trim().length).toBeGreaterThan(0)
+  })
+})
+
+describe('enmascararDestino (S4: el destino que se enseña, nunca el completo)', () => {
+  const por = (deliveryChannel: any, destino: { recipientPhone?: string; recipientEmail?: string }) =>
+    enmascararDestino({ deliveryChannel, recipientPhone: destino.recipientPhone ?? null, recipientEmail: destino.recipientEmail ?? null })
+
+  it.each(['5512345678', '+525512345678'])('teléfono %s ⇒ 55•••••678 (2 primeros y 3 últimos de los últimos 10)', tel => {
+    expect(por('WHATSAPP', { recipientPhone: tel })).toBe('55•••••678')
+  })
+
+  it('correo ⇒ la primera letra y el dominio', () => {
+    expect(por('EMAIL', { recipientEmail: 'ana@gmail.com' })).toBe('a•••@gmail.com')
+  })
+
+  it.each(['PRINTED', 'HANDED_TO_BUYER'])('%s ⇒ null (no tiene destino)', canal => {
+    expect(por(canal, { recipientPhone: '5512345678', recipientEmail: 'ana@gmail.com' })).toBeNull()
+  })
+
+  it('sin teléfono o sin correo ⇒ null; uno tan corto que el patrón lo enseñaría entero sale tapado', () => {
+    expect(por('WHATSAPP', {})).toBeNull()
+    expect(por('EMAIL', {})).toBeNull()
+    expect(por('WHATSAPP', { recipientPhone: '1234' })).toBe('••••')
   })
 })

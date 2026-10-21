@@ -37,9 +37,15 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_STAMP_REWARD_NOT_APPLIED'
   // 1b S2b (revisión): `pay-new-order` rechaza con 400 la mesa, `externalId` e `isOfflineReplay: true` (no los ignora).
   | 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED'
+  // 1b S4/S5 (índice, «Códigos nuevos»). `GIFT_CARD_RESEND_NOT_ALLOWED` no existe (Q16: lo de gerente va en su ruta).
+  | 'GIFT_CARD_REVEAL_NOT_ALLOWED'
+  | 'GIFT_CARD_NOT_DELIVERABLE'
+  | 'GIFT_CARD_PHONE_RATE_LIMITED'
+  | 'GIFT_CARD_PHONE_CODE_INVALID'
+  | 'GIFT_CARD_PHONE_PROOF_INVALID'
 
 export class GiftCardError extends AppError {
-  constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422, extra?: Record<string, unknown>) {
+  constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {
     super(mensaje, status, true, code, extra)
     this.name = 'GiftCardError'
   }

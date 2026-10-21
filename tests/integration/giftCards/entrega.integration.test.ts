@@ -48,6 +48,7 @@ import {
 } from '@/services/giftCards/giftCardDelivery.service'
 import { processWhatsappWebhook } from '@/services/whatsappWebhook.service'
 import { handleResendWebhook } from '@/controllers/webhooks/resend.webhook.controller'
+import { cambiarDestinoDeTarjeta, reenviarTarjeta } from '@/services/giftCards/giftCardCuenta.service'
 import { crearNegocioDePrueba, limpiarNegocioDePrueba, pidDe, sembrarVentaDeTarjetas } from './sembrarTarjetasDeRegalo'
 
 jest.setTimeout(90000)
@@ -490,5 +491,73 @@ describe('la reposición del panel a media entrega (Q38, Q43, Q46)', () => {
     const huella = (t: string) => createHash('sha256').update(t).digest('hex').slice(0, 8)
     expect(llamadas[0].llave).toBe(`giftcard:${id}:auto:${huella(ligaVieja)}:${intento}`)
     expect(llamadas[1].llave).toBe(`giftcard:${id}:auto:${huella(ligaNueva)}:1`)
+  })
+})
+
+describe('el cambio de destino a media entrega (Q38 con S4)', () => {
+  it('reclamo → change-destination → fin del envío ⇒ no queda SENT con la liga vieja; el siguiente manda al teléfono nuevo', async () => {
+    const [id] = await tarjetas(1)
+    const ligaVieja = (await fila(id)).pageToken
+    mockEnviarWhatsApp.mockImplementationOnce(async () => {
+      await cambiarDestinoDeTarjeta(
+        negocio.venueId,
+        id,
+        { staffId: negocio.staffId, puedeVender: true, puedeGestionar: true },
+        { operationKey: unico('cambia'), destino: { deliveryChannel: 'WHATSAPP', recipientPhone: '5598765432' } },
+      )
+      return { messageId: unico('wamid.viejo') }
+    })
+
+    await entregarTarjetas({ ids: [id] })
+
+    const tras = await fila(id)
+    expect(tras.pageToken).not.toBe(ligaVieja)
+    expect(tras).toEqual(
+      expect.objectContaining({
+        deliveryStatus: 'PENDING',
+        recipientPhone: '+525598765432',
+        deliveryAttempts: 0,
+        deliveryClaimedAt: null,
+        deliveryMessageId: null,
+      }),
+    )
+
+    mockEnviarWhatsApp.mockResolvedValueOnce({ messageId: unico('wamid.nuevo') })
+    await entregarTarjetas({ ids: [id] })
+
+    expect(mockEnviarWhatsApp).toHaveBeenCalledTimes(2)
+    expect(mockEnviarWhatsApp.mock.calls[1][0]).toBe('+525598765432')
+    expect(mockEnviarWhatsApp.mock.calls[1][1].pageToken).toBe(tras.pageToken)
+    expect((await fila(id)).deliveryStatus).toBe('SENT')
+  })
+
+  it('reclamo → resend al mismo destino → fin del envío ⇒ el resultado viejo no pisa el reenvío: sigue PENDING y la siguiente vuelta manda otra vez', async () => {
+    const [id] = await tarjetas(1)
+    const llave = unico('reenvia')
+    mockEnviarWhatsApp.mockImplementationOnce(async () => {
+      await reenviarTarjeta(
+        negocio.venueId,
+        id,
+        { staffId: negocio.staffId, puedeVender: true, puedeGestionar: false },
+        { operationKey: llave },
+      )
+      return { messageId: unico('wamid.viejo') }
+    })
+
+    await entregarTarjetas({ ids: [id] })
+
+    expect(await fila(id)).toEqual(
+      expect.objectContaining({
+        deliveryStatus: 'PENDING',
+        deliveryAttempts: 0,
+        deliveryClaimedAt: null,
+        deliveryMessageId: null,
+        deliveryOperationKey: llave,
+      }),
+    )
+    mockEnviarWhatsApp.mockResolvedValueOnce({ messageId: unico('wamid.reenvio') })
+    await entregarTarjetas({ ids: [id] })
+    expect(mockEnviarWhatsApp).toHaveBeenCalledTimes(2)
+    expect((await fila(id)).deliveryStatus).toBe('SENT')
   })
 })

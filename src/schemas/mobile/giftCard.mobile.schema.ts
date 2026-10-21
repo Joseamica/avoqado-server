@@ -6,7 +6,15 @@ import { z } from 'zod'
 import { MAX_SOBRES_POR_CUENTA } from '@/services/giftCards/giftCardLimits'
 import { PAGE_TOKEN_RE } from '@/services/giftCards/giftCardProof'
 import type { GiftCardErrorCode } from '@/services/giftCards/giftCardErrors'
-import { idempotencyKey, montoPositivo, ordenParams, pesos, pesosPositivos, venueParams } from '../common/giftCard.common.schema'
+import {
+  idempotencyKey,
+  montoPositivo,
+  operationKey,
+  ordenParams,
+  pesos,
+  pesosPositivos,
+  venueParams,
+} from '../common/giftCard.common.schema'
 
 /** El mismo que valida A5 (`createGiftCardOrder`): 10 a 15 dígitos, con `+` opcional, sin espacios. */
 const TELEFONO = /^\+?\d{10,15}$/
@@ -93,6 +101,8 @@ export const createGiftCardOrderSchema = z.object({
   params: venueParams,
   body: z.object({
     idempotencyKey,
+    // 1b Q110: informativos; el controller los anota en la bitácora y nunca entran en la huella de la venta (Q37).
+    ...segunElAparato,
     source: z.enum(FUENTES, { errorMap: () => ({ message: 'Origen de la venta no reconocido' }) }).optional(),
     purchaserName: texto('El nombre de quien la compra', 80).optional(),
     purchaserContact: texto('El contacto de quien la compra', 120).optional(),
@@ -160,5 +170,56 @@ export const payNewOrderSchema = z.object({
 export const paymentByKeySchema = z.object({
   params: venueParams.extend({ idempotencyKey }),
   body: z.any().optional(),
+  query: z.any().optional(),
+})
+
+// ─── 1b S4: el detalle de la cuenta, reenviar, cambiar el destino y mostrar el código ───
+
+const tarjetaParams = venueParams.extend({
+  giftCardId: z.string().min(1, 'Falta la tarjeta').max(64, 'La tarjeta no es válida'),
+})
+
+/** `GET …/gift-cards/orders/:orderId`. */
+export const cuentaDeTarjetasSchema = z.object({ params: ordenParams, body: z.any().optional(), query: z.any().optional() })
+
+/**
+ * El destino de un reenvío o de un cambio de destino (P-2). Acepta los CUATRO canales para que el servicio responda con su
+ * `code` a impresa o en mano (C5); teléfono de 10 dígitos o E.164 (el servidor lo normaliza, Q25).
+ */
+const destino = {
+  deliveryChannel: z.enum(DESTINOS, {
+    errorMap: () => ({ message: 'Elige a dónde va la tarjeta: WhatsApp, correo, imprimir o entregar al comprador' }),
+  }),
+  recipientPhone: z.string().trim().regex(TELEFONO, 'El teléfono debe tener 10 dígitos, sin espacios (puedes anteponer +52)').optional(),
+  recipientEmail: z.string().trim().email('El correo no es válido').max(120, 'El correo es demasiado largo').optional(),
+}
+
+function conSuContacto(b: { deliveryChannel?: string; recipientPhone?: string; recipientEmail?: string }, ctx: z.RefinementCtx) {
+  if (b.deliveryChannel === 'WHATSAPP' && !b.recipientPhone)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recipientPhone'], message: 'Para mandarla por WhatsApp falta el teléfono' })
+  if (b.deliveryChannel === 'EMAIL' && !b.recipientEmail)
+    ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recipientEmail'], message: 'Para mandarla por correo falta el correo' })
+}
+
+/** `resend`: sin `deliveryChannel` = el mismo destino; con él, debe ser el actual (si no, 400 del servicio). */
+export const resendSchema = z.object({
+  params: tarjetaParams,
+  body: z.object({ operationKey, ...destino, deliveryChannel: destino.deliveryChannel.optional() }).superRefine(conSuContacto),
+  query: z.any().optional(),
+})
+
+export const changeDestinationSchema = z.object({
+  params: tarjetaParams,
+  body: z.object({ operationKey, ...destino }).superRefine(conSuContacto),
+  query: z.any().optional(),
+})
+
+/** `reveal` y `reveal-manager`: reimprimir el certificado o enseñar el QR. */
+export const revealSchema = z.object({
+  params: tarjetaParams,
+  body: z.object({
+    operationKey,
+    motivo: z.enum(['REPRINT', 'SHOW_QR'], { errorMap: () => ({ message: 'Di para qué se muestra el código: REPRINT o SHOW_QR' }) }),
+  }),
   query: z.any().optional(),
 })

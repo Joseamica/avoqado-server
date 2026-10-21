@@ -8,7 +8,7 @@
  *   · la envoltura con transacción de las operaciones de gerente sobre la libreta (A4).
  * No mueve saldo por su cuenta: la libreta (A4) es la única que lo hace.
  */
-import { Prisma, type GiftCardReason } from '@prisma/client'
+import { Prisma, type GiftCardReason, type PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
@@ -16,6 +16,7 @@ import { GiftCardError, type GiftCardErrorCode } from './giftCardErrors'
 import { operarSobreDeGerenteEnTx, type OperacionDeGerente } from './giftCardLedger'
 import { topePorOperacion } from './giftCardLimits'
 import { assertGiftCardsSellable } from './giftCardSettings.service'
+import type { ResultadoDeReenvio } from './giftCardCuenta.service'
 
 export type GiftCardAuditAction =
   | 'GIFT_CARD_SALE_CREATED'
@@ -25,6 +26,12 @@ export type GiftCardAuditAction =
   | 'GIFT_CARD_BLOCKED'
   | 'GIFT_CARD_UNBLOCKED'
   | 'GIFT_CARD_CODE_REPLACED'
+  // 1b S4 (S-9)
+  | 'GIFT_CARD_RESENT'
+  | 'GIFT_CARD_DESTINATION_CHANGED'
+  | 'GIFT_CARD_CODE_REVEALED'
+  | 'GIFT_CARD_RESEND_DENIED'
+  | 'GIFT_CARD_REVEAL_DENIED'
 
 export interface AuditoriaDeTarjetas {
   venueId: string
@@ -51,6 +58,83 @@ export function auditarTarjetas(a: AuditoriaDeTarjetas): void {
     ipAddress: a.ipAddress,
     userAgent: a.userAgent,
   })
+}
+
+/**
+ * 🔴 Q102: la bitácora de una SALIDA DEL SECRETO (código, `pageToken` o liga hacia quien llama). A diferencia de
+ * `auditarTarjetas`, espera y LANZA: si el renglón no se guarda, el secreto no sale (la ruta responde 503). Directo con
+ * `createMany` (una fila por tarjeta) y el `Staff.id` tal cual, sin la normalización ni el reintento sin actor de `logAction`.
+ * Con el `tx` de la transacción del secreto, o con `prisma` en el reenvío de la venta (una sola sentencia).
+ */
+export async function registrarSalidaDelSecreto(
+  db: Prisma.TransactionClient | PrismaClient,
+  filas: Array<AuditoriaDeTarjetas & { action: 'GIFT_CARD_CODE_REVEALED' }>,
+): Promise<void> {
+  if (filas.length === 0) return
+  await db.activityLog.createMany({
+    data: filas.map(a => ({
+      venueId: a.venueId,
+      staffId: a.staffId,
+      action: a.action,
+      entity: a.entity,
+      entityId: a.entityId,
+      data: a.data as Prisma.InputJsonValue,
+      ipAddress: a.ipAddress ?? null,
+      userAgent: a.userAgent ?? null,
+    })),
+  })
+}
+
+/** RF3: los rechazos de reenviar o cambiar el destino que dejan `GIFT_CARD_RESEND_DENIED` (la guardada sale como ALREADY_USED). */
+const RECHAZOS_DE_REENVIO = new Set(['GIFT_CARD_NOT_DELIVERABLE', 'GIFT_CARD_ALREADY_USED', 'GIFT_CARD_USE_CHANGE_DESTINATION'])
+
+/**
+ * UNA traducción de resultado o rechazo de un reenvío a bitácora, para el POS y el panel (S7): `GIFT_CARD_RESENT`,
+ * `GIFT_CARD_DESTINATION_CHANGED` (con los destinos ya enmascarados) o `GIFT_CARD_RESEND_DENIED`; nada en un replay. De mejor
+ * esfuerzo, como el resto: aquí no sale ningún secreto.
+ */
+export function auditarReenvio(a: {
+  venueId: string
+  staffId: string
+  giftCardId: string
+  operationKey: string
+  ruta: string
+  resultado?: ResultadoDeReenvio
+  rechazo?: { code?: string }
+  overrideAuthorizedBy?: string | null
+  ipAddress?: string
+  userAgent?: string
+}): void {
+  const comun = {
+    venueId: a.venueId,
+    staffId: a.staffId,
+    entity: 'GiftCard' as const,
+    entityId: a.giftCardId,
+    ipAddress: a.ipAddress,
+    userAgent: a.userAgent,
+  }
+  const data = {
+    operationKey: a.operationKey,
+    ruta: a.ruta,
+    ...(a.overrideAuthorizedBy ? { overrideAuthorizedBy: a.overrideAuthorizedBy } : {}),
+  }
+  if (a.rechazo) {
+    if (a.rechazo.code && RECHAZOS_DE_REENVIO.has(a.rechazo.code)) {
+      auditarTarjetas({ ...comun, action: 'GIFT_CARD_RESEND_DENIED', data: { code: a.rechazo.code, ...data } })
+    }
+    return
+  }
+  const r = a.resultado
+  if (!r || r.replay) return
+  if (r.repuesta) {
+    auditarTarjetas({
+      ...comun,
+      action: 'GIFT_CARD_DESTINATION_CHANGED',
+      data: { ...data, destinoAnterior: r.destinoAnterior, destinoNuevo: r.destinoNuevo },
+    })
+    return
+  }
+  auditarTarjetas({ ...comun, action: 'GIFT_CARD_RESENT', data })
 }
 
 /**

@@ -55,6 +55,9 @@ import { registerPaymentTools } from '@/mcp/tools/payments'
 import { registerShiftTools } from '@/mcp/tools/shifts'
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import { createGiftCardOrder, type CreateGiftCardOrderInput } from '@/services/giftCards/giftCardOrder.service'
+import { createOrder as venderPorElController } from '@/controllers/mobile/giftCard.mobile.controller'
+import { operarSobreDeGerente } from '@/services/giftCards/giftCardSurface.service'
+import { cambiarDestinoDeTarjeta } from '@/services/giftCards/giftCardCuenta.service'
 import {
   getShiftById as detalleDelTurnoDelPanel,
   getShifts as turnosDelPanel,
@@ -745,5 +748,131 @@ describe('🔴 1b S1 · Q37/Q44: el reintento de una venta compara contra la hue
       sobres: [{ amount: 700, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '00376312345' }],
     }
     await expect(vender(k, reintento)).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+  })
+})
+
+/**
+ * 1b S4 · Q110 y Q36: la venta es de la sesión (`iniciadoPor` sólo es nota) y repetirla ya no es otra salida del código: el
+ * reintento lo trae sólo sin `CODE_REPLACED` y el mismo día del negocio, con su renglón REPLAY si el sobre ya está ACTIVE.
+ */
+describe('🔴 1b S4 · Q110/Q36: repetir la venta', () => {
+  let venueId: string
+  let staffId: string
+  let gerenteId: string
+  const ANA = 'cl9ana0000000000000000000'
+  const llave = (nombre: string) => `s4-${nombre}-${process.pid}-${Date.now()}`.slice(0, 64)
+  const cuerpo = (idempotencyKey: string) => ({
+    idempotencyKey,
+    purchaserName: 'Luis',
+    sobres: [
+      { amount: 500, deliveryChannel: 'WHATSAPP' as const, recipientName: 'Ana', recipientPhone: '5512345678' },
+      { amount: 300, deliveryChannel: 'PRINTED' as const },
+    ],
+  })
+  /** La ruta de la venta por su controller REAL (bitácora REPLAY incluida). */
+  async function vender(body: Record<string, unknown>) {
+    const req: any = { params: { venueId }, body, headers: {}, ip: '127.0.0.1', get: () => 'jest', authContext: { userId: staffId } }
+    const res: any = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
+    await venderPorElController(req, res)
+    return res.json.mock.calls[0][0].data
+  }
+  const reveladas = (ids: string[]) =>
+    prisma.activityLog.findMany({ where: { venueId, action: 'GIFT_CARD_CODE_REVEALED', entityId: { in: ids } }, take: 20 })
+  async function pagar(orderId: string) {
+    await payCashOrder(venueId, orderId, { amount: 80000, tip: 0, staffId, idempotencyKey: llave(`pago-${orderId.slice(-6)}`) })
+  }
+
+  beforeAll(async () => {
+    const negocio = await crearNegocioDePrueba('ventas-s4')
+    venueId = negocio.venueId
+    staffId = negocio.staffId
+    mockConPlan.add(venueId)
+    await prisma.giftCardSettings.create({ data: { venueId, enabled: true, suggestedAmounts: [500, 1000, 2000] } })
+    gerenteId = (await prisma.staff.create({ data: { email: `${llave('g')}@gerente.test`, firstName: 'G', lastName: 'G', active: true } }))
+      .id
+    await prisma.staffVenue.create({ data: { staffId: gerenteId, venueId, role: 'MANAGER', active: true } })
+  })
+
+  afterAll(async () => {
+    await limpiarNegocioDePrueba(venueId)
+  })
+
+  it('Q110: B crea la venta con iniciadoPor A ⇒ es de B; el reenvío con o sin esos campos es replay (no IDEMPOTENCY_KEY_REUSED)', async () => {
+    const k = llave('q110')
+    const primera = await createGiftCardOrder(venueId, staffId, { ...cuerpo(k), iniciadoPor: ANA, iniciadoPorNombre: 'Ana' })
+    const orden = await prisma.order.findUniqueOrThrow({ where: { id: primera.orderId }, select: { createdById: true, servedById: true } })
+    expect(orden).toEqual({ createdById: staffId, servedById: staffId })
+    await expect(createGiftCardOrder(venueId, staffId, cuerpo(k))).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+    await expect(
+      createGiftCardOrder(venueId, staffId, { ...cuerpo(k), iniciadoPor: 'cl9otra000000000000000000', iniciadoPorNombre: 'Otra' }),
+    ).resolves.toMatchObject({ replay: true })
+  })
+
+  it('repetir la venta tras reponer desde el panel ⇒ sin código (y ningún renglón REVEALED)', async () => {
+    const k = llave('repuesta')
+    const v = await vender(cuerpo(k))
+    await pagar(v.orderId)
+    await operarSobreDeGerente(venueId, v.sobres[0].id, gerenteId, {
+      operationKey: llave('repone'),
+      tipo: 'REEMPLAZAR_CODIGO',
+      reason: 'LOST_CARD',
+      folio: v.orderNumber,
+    })
+    const otra = await vender(cuerpo(k))
+    expect(otra.replay).toBe(true)
+    expect(otra.sobres[0]).toMatchObject({ codigo: null, pageToken: null, pageUrl: null, codigoOculto: true })
+    expect(await reveladas([v.sobres[0].id])).toHaveLength(0)
+  })
+
+  it('repetir la venta otro día ⇒ sin código', async () => {
+    const k = llave('otrodia')
+    const v = await vender(cuerpo(k))
+    await pagar(v.orderId)
+    const ids = v.sobres.map((s: { id: string }) => s.id)
+    await prisma.giftCard.updateMany({ where: { id: { in: ids } }, data: { activatedAt: new Date(Date.now() - 48 * 3600_000) } })
+    const otra = await vender(cuerpo(k))
+    expect(otra.sobres.map((s: any) => [s.codigo, s.codigoOculto])).toEqual([
+      [null, true],
+      [null, true],
+    ])
+    expect(await reveladas(ids)).toHaveLength(0)
+  })
+
+  it('repetir la venta el mismo día sin reponer ⇒ con código y, con el sobre ya ACTIVE, un renglón REVEALED (REPLAY) por sobre', async () => {
+    const k = llave('mismo')
+    const v = await vender(cuerpo(k))
+    const ids = v.sobres.map((s: { id: string }) => s.id)
+    // Aún PENDING: el código sale (nace con la venta) sin renglón.
+    const pendiente = await vender(cuerpo(k))
+    expect(pendiente.sobres.map((s: any) => s.codigo)).toEqual(v.sobres.map((s: any) => s.codigo))
+    expect(await reveladas(ids)).toHaveLength(0)
+
+    await pagar(v.orderId)
+    const activa = await vender(cuerpo(k))
+    expect(activa.sobres.map((s: any) => s.codigo)).toEqual(v.sobres.map((s: any) => s.codigo))
+    const filas = await reveladas(ids)
+    expect(filas.map(f => [f.entityId, (f.data as any).motivo, (f.data as any).idempotencyKey]).sort()).toEqual(
+      ids.map((id: string) => [id, 'REPLAY', k]).sort(),
+    )
+    expect(JSON.stringify(filas.map(f => f.data))).not.toContain(v.sobres[0].codigo)
+  })
+
+  it('Q37 con S4: change-destination y luego repetir la venta original ⇒ 200 replay (y sin código: hubo CODE_REPLACED)', async () => {
+    const k = llave('q37')
+    const v = await vender(cuerpo(k))
+    await pagar(v.orderId)
+    await cambiarDestinoDeTarjeta(
+      venueId,
+      v.sobres[0].id,
+      { staffId, puedeVender: true, puedeGestionar: true },
+      {
+        operationKey: llave('cambia'),
+        destino: { deliveryChannel: 'EMAIL', recipientEmail: 'ana@example.test' },
+      },
+    )
+    const otra = await vender(cuerpo(k))
+    expect(otra).toMatchObject({ replay: true, orderId: v.orderId })
+    expect(otra.sobres[0]).toMatchObject({ codigo: null, codigoOculto: true })
+    expect(otra.sobres[1].codigo).toBe(v.sobres[1].codigo)
   })
 })

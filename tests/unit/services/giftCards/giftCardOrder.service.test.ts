@@ -43,7 +43,8 @@ function armar() {
     orderNumber: data.orderNumber,
     total: data.total,
     status: data.status,
-    items: data.items.create.map((it: any) => ({ giftCard: creados.get(it.giftCardId) })),
+    createdAt: new Date(),
+    items: data.items.create.map((it: any) => ({ giftCard: { activatedAt: null, activities: [], ...creados.get(it.giftCardId) } })),
   }))
 }
 
@@ -71,10 +72,13 @@ function cuentaGuardada(montos: number[], estado: { cuenta: string; sobres: stri
     orderNumber: 'ORD-1',
     total: D(montos.reduce((a, b) => a + b, 0)),
     status: estado.cuenta,
+    createdAt: new Date(),
     items: montos.map((m, i) => ({
       giftCard: {
         id: `gc-${i + 1}`,
         status: estado.sobres,
+        activatedAt: null as Date | null,
+        activities: [] as Array<{ id: string }>,
         codeEnc: encryptGiftCardCode(codigos[i].normalized),
         codeLast4: codigos[i].last4,
         initialAmount: D(m),
@@ -112,8 +116,8 @@ describe('createGiftCardOrder', () => {
       [uno, r.sobres[0]],
       [dos, r.sobres[1]],
     ] as const) {
-      expect(normalizeGiftCardCode(sobre.codigo)).not.toBeNull()
-      expect(s.codeEnc).not.toContain(normalizeGiftCardCode(sobre.codigo))
+      expect(normalizeGiftCardCode(sobre.codigo!)).not.toBeNull()
+      expect(s.codeEnc).not.toContain(normalizeGiftCardCode(sobre.codigo!))
       expect(s.codeHash).toMatch(/^[0-9a-f]{64}$/)
       expect(s.codeLast4).toBe(sobre.ultimos4)
       expect(s).toMatchObject({
@@ -199,7 +203,7 @@ describe('createGiftCardOrder', () => {
     expect(r.replay).toBe(true)
     expect(r.orderId).toBe('order-1')
     expect(r.sobres.map(s => s.monto)).toEqual([500, 1000])
-    expect(normalizeGiftCardCode(r.sobres[0].codigo)).not.toBeNull()
+    expect(normalizeGiftCardCode(r.sobres[0].codigo!)).not.toBeNull()
     expect(prismaMock.giftCard.create).not.toHaveBeenCalled()
     expect(prismaMock.order.findUnique).toHaveBeenCalledWith(
       expect.objectContaining({ where: { venueId_externalId: { venueId: VENUE, externalId: 'giftcard:venta-tarjeta-0001' } } }),
@@ -324,12 +328,82 @@ describe('createGiftCardOrder', () => {
 
     it('cada sobre trae su pageUrl, también en el replay', async () => {
       const r = await createGiftCardOrder(VENUE, 'staff-1', pedido())
-      expect(r.sobres.map(s => s.pageUrl)).toEqual(r.sobres.map(s => urlDeLaPagina(s.pageToken)))
+      expect(r.sobres.map(s => s.pageUrl)).toEqual(r.sobres.map(s => urlDeLaPagina(s.pageToken!)))
 
       prismaMock.order.findUnique.mockResolvedValue(await laQueSeCreo())
       const otra = await createGiftCardOrder(VENUE, 'staff-1', pedido())
       expect(otra.replay).toBe(true)
-      expect(otra.sobres[0].pageUrl).toBe(urlDeLaPagina(otra.sobres[0].pageToken))
+      expect(otra.sobres[0].pageUrl).toBe(urlDeLaPagina(otra.sobres[0].pageToken!))
     })
+  })
+})
+
+/**
+ * 1b Q36: repetir la venta ya no es otra salida del código. El reintento trae el código, la liga y su URL SÓLO si el sobre no tiene
+ * `CODE_REPLACED` y hoy es el mismo día del negocio de la venta (`activatedAt` o, sin activar, la creación de la cuenta).
+ */
+describe('Q36: el código en el reintento de la venta', () => {
+  const AHORA = new Date('2026-10-20T06:01:00Z')
+  const AYER = new Date('2026-10-20T05:59:00Z') // 23:59 del 19 en America/Mexico_City
+  const HOY = new Date('2026-10-20T06:00:30Z')
+  const reintento = (cuenta: ReturnType<typeof cuentaGuardada>) => {
+    prismaMock.order.findUnique.mockResolvedValue(cuenta)
+    prismaMock.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    return createGiftCardOrder(VENUE, 'staff-1', pedido(), AHORA)
+  }
+  const activa = (cuenta: ReturnType<typeof cuentaGuardada>, over: Record<string, unknown>) => {
+    for (const i of cuenta.items) Object.assign(i.giftCard, { status: 'ACTIVE', activatedAt: HOY, ...over })
+    return cuenta
+  }
+  const oculto = { codigo: null, pageToken: null, pageUrl: null, codigoOculto: true }
+
+  it('🔴 con un CODE_REPLACED en el sobre ⇒ sin código, sin liga, sin URL y codigoOculto', async () => {
+    const cuenta = activa(cuentaGuardada([500, 1000]), {})
+    cuenta.items[0].giftCard.activities = [{ id: 'act-1' }]
+    const r = await reintento(cuenta)
+    expect(r.replay).toBe(true)
+    expect(r.sobres[0]).toMatchObject(oculto)
+    expect(r.sobres[1]).not.toHaveProperty('codigoOculto')
+    expect(normalizeGiftCardCode(r.sobres[1].codigo!)).not.toBeNull()
+  })
+
+  it('🔴 activada AYER en la zona del negocio ⇒ oculto', async () => {
+    const r = await reintento(activa(cuentaGuardada([500, 1000]), { activatedAt: AYER }))
+    expect(r.sobres.map(s => s.codigoOculto)).toEqual([true, true])
+    expect(r.sobres.map(s => [s.codigo, s.pageToken, s.pageUrl])).toEqual([
+      [null, null, null],
+      [null, null, null],
+    ])
+  })
+
+  it('el mismo día y sin reponer ⇒ los tres llenos y sin codigoOculto', async () => {
+    const r = await reintento(activa(cuentaGuardada([500, 1000]), {}))
+    for (const s of r.sobres) {
+      expect(normalizeGiftCardCode(s.codigo!)).not.toBeNull()
+      expect(s.pageUrl).toBe(urlDeLaPagina(s.pageToken!))
+      expect(s).not.toHaveProperty('codigoOculto')
+    }
+  })
+
+  it('un sobre PENDING (sin activatedAt) se juzga con la creación de la cuenta', async () => {
+    const deAyer = Object.assign(cuentaGuardada([500, 1000]), { createdAt: AYER })
+    expect((await reintento(deAyer)).sobres.map(s => s.codigoOculto)).toEqual([true, true])
+    const deHoy = Object.assign(cuentaGuardada([500, 1000]), { createdAt: HOY })
+    expect((await reintento(deHoy)).sobres.map(s => s.codigoOculto)).toEqual([undefined, undefined])
+  })
+
+  it('el reintento lee la zona del negocio UNA vez', async () => {
+    await reintento(activa(cuentaGuardada([500, 1000]), {}))
+    expect(prismaMock.venue.findUnique).toHaveBeenCalledTimes(1)
+    expect(prismaMock.venue.findUnique).toHaveBeenCalledWith({ where: { id: VENUE }, select: { timezone: true } })
+  })
+
+  it('la creación (replay: false) nunca oculta', async () => {
+    const r = await createGiftCardOrder(VENUE, 'staff-1', pedido(), AHORA)
+    expect(r.replay).toBe(false)
+    for (const s of r.sobres) {
+      expect(normalizeGiftCardCode(s.codigo!)).not.toBeNull()
+      expect(s).not.toHaveProperty('codigoOculto')
+    }
   })
 })

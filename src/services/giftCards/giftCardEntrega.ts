@@ -3,6 +3,7 @@
  * Lo común de la entrega de tarjetas (1b): la liga de la página, LA forma del teléfono y los textos de fallo. Sin Prisma: lo
  * importan el servicio de entrega, la cuenta del POS, los reportes y el MCP.
  */
+import type { GiftCardDeliveryChannel } from '@prisma/client'
 import { canonicalPhoneE164 } from '@/utils/phone'
 
 /** Q22, S-12: la liga pública de la tarjeta. Las apps la imprimen y la comparten tal cual; nunca arman el host. */
@@ -41,4 +42,28 @@ export function textoDeFalloDeEntrega(code: string | null): string | null {
   return Object.prototype.hasOwnProperty.call(TEXTO_DE_FALLO_DE_ENTREGA, code)
     ? TEXTO_DE_FALLO_DE_ENTREGA[code as CodigoDeFalloDeEntrega]
     : TEXTO_DE_FALLO_GENERICO
+}
+
+/**
+ * S4: el destino que se ENSEÑA (POS, panel, bitácora), nunca el completo. Teléfono: sus últimos 10 dígitos con los 2 primeros y
+ * los 3 últimos ('+525512345678' ⇒ '55•••••678'); correo: la primera letra y el dominio ('ana@gmail.com' ⇒ 'a•••@gmail.com').
+ * Impresa o en mano no tiene destino. Un dato tan corto que el patrón lo enseñaría entero sale todo tapado.
+ */
+export function enmascararDestino(t: {
+  deliveryChannel: GiftCardDeliveryChannel
+  recipientPhone: string | null
+  recipientEmail: string | null
+}): string | null {
+  if (t.deliveryChannel === 'WHATSAPP') {
+    const d = (t.recipientPhone ?? '').replace(/\D/g, '').slice(-10)
+    if (!d) return null
+    return d.length < 6 ? '•'.repeat(d.length) : `${d.slice(0, 2)}${'•'.repeat(d.length - 5)}${d.slice(-3)}`
+  }
+  if (t.deliveryChannel === 'EMAIL') {
+    const correo = t.recipientEmail?.trim() ?? ''
+    const arroba = correo.lastIndexOf('@')
+    if (!correo) return null
+    return arroba < 1 ? '•••' : `${correo[0]}•••${correo.slice(arroba)}`
+  }
+  return null
 }

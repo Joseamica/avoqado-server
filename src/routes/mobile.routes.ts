@@ -63,7 +63,11 @@ import {
   soloVenueSchema as giftCardVenueSchema,
 } from '../schemas/common/giftCard.common.schema'
 import { exigirPlanDeTarjetas } from '../middlewares/giftCardsPlan.middleware'
-import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
+import {
+  giftCardLookupRateLimiters,
+  giftCardPayFailureRateLimiters,
+  giftCardRevealRateLimiters,
+} from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
@@ -1680,6 +1684,55 @@ router.post(
   validateRequest(giftCardLiberarCancelacionSchema),
   checkPermission('giftCards:manage'),
   giftCardSaleController.releaseCancel,
+)
+// 1b S4: el detalle de la cuenta (sin códigos; su GET es la patada de la entrega, Q17/Q36), reenviar al mismo destino y mostrar el
+// código el mismo día (cajero). Lo de GERENTE —cambiar el destino y mostrar el código cualquier día— va en rutas propias con
+// `giftCards:manage`, porque sólo `checkPermission` honra el PIN del gerente (Q16). Las tres que muestran el código comparten
+// el límite de S-5. Reenviar, revelar y teléfono + código NO van al MCP: el código no viaja por el chat.
+router.get(
+  '/venues/:venueId/gift-cards/orders/:orderId',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.cuentaDeTarjetasSchema),
+  checkPermission('giftCards:read'),
+  giftCardMobileController.getCuenta,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/reveal',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:sell'),
+  ...giftCardRevealRateLimiters,
+  giftCardMobileController.revealCuenta,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/resend',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.resendSchema),
+  checkPermission('giftCards:sell'),
+  giftCardMobileController.resend,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/change-destination',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.changeDestinationSchema),
+  checkPermission('giftCards:manage'),
+  giftCardMobileController.changeDestination,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/reveal',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.revealSchema),
+  checkPermission('giftCards:sell'),
+  ...giftCardRevealRateLimiters,
+  giftCardMobileController.reveal,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/reveal-manager',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.revealSchema),
+  checkPermission('giftCards:manage'),
+  ...giftCardRevealRateLimiters,
+  giftCardMobileController.revealManager,
 )
 
 /**
