@@ -1,0 +1,257 @@
+/**
+ * C2 · Tarea 10 (Codex C2-31): `cfdi_status` dice el estado de la cancelación derivado en CADA consulta. Una cancelación enviada y sin
+ * acuse es ENVIANDO mientras el envío puede seguir en vuelo, y CANCELACION_EN_DUDA en una consulta NUEVA pasado el umbral
+ * (`ENVIO_TERMINADO_MS`: consulta previa + POST + margen, 90 s; el plan decía 60 s, la ronda 1 de la T2 lo derivó de los tiempos límite).
+ * Con acuse, EN_TRAMITE. Las fechas internas no salen; `cancelacionEnTramite` se conserva.
+ */
+import { registerCfdiTools, TEXTO_CANCELACION_EN_DUDA } from '../../../src/mcp/tools/cfdi'
+import { ENVIO_TERMINADO_MS } from '../../../src/services/fiscal/cfdi.service'
+import type { McpScope } from '../../../src/mcp/scope'
+import { Prisma } from '@prisma/client'
+
+const mockCfdiFindMany = jest.fn()
+const mockCfdiCount = jest.fn().mockResolvedValue(0)
+/**
+ * C3 · T8 (M11): `extraccionesPendientes` hace dos consultas crudas —los conteos (`count(`) y la página—. Por omisión, ninguna extracción.
+ * `conExtracciones` cambia lo que devuelve cada una.
+ */
+/** La consulta tal como la armaría Prisma (los fragmentos anidados, aplanados). */
+const consulta = (a: unknown[]) => Prisma.sql(a[0] as TemplateStringsArray, ...(a.slice(1) as never[]))
+let extracciones: { total: number; enProceso: number; filas: unknown[] } = { total: 0, enProceso: 0, filas: [] }
+const mockQueryRaw = jest.fn(async (...a: unknown[]) =>
+  /count\(/.test(consulta(a).sql) ? [{ total: extracciones.total, enProceso: extracciones.enProceso }] : extracciones.filas,
+)
+/** F6 (R7, N7): las facturas por el total con notas automáticas que faltan. El tool importa el módulo perezoso (sólo en `cfdi_status`). */
+const mockNotasPendientes = jest.fn(async (_p: unknown) => [] as unknown[])
+const mockContarNotas = jest.fn(async (_p: unknown) => 0)
+jest.mock('@/services/fiscal/facturaConDevolucion', () => ({
+  facturasConNotasPendientes: (p: unknown) => mockNotasPendientes(p),
+  contarFacturasConNotasPendientes: (p: unknown) => mockContarNotas(p),
+}))
+jest.mock('@/services/fiscal/cfdiEmail.service', () => ({ sendCfdiByEmail: jest.fn() }))
+jest.mock('@/services/fiscal/cfdiCreditNote.service', () => ({ emitRefundCreditNote: jest.fn(), getRefundCreditNoteStatus: jest.fn() }))
+jest.mock('@/services/fiscal/confirmarContratoDePrecio.service', () => ({
+  vistaPreviaContrato: jest.fn(),
+  confirmarContratoIvaIncluido: jest.fn(),
+}))
+jest.mock('@/services/access/access.service', () => ({ hasPermission: jest.fn(() => true) }))
+jest.mock('@/services/access/basePlan.service', () => ({ venuesWithFeatureAccess: jest.fn(async () => new Set(['v1'])) }))
+jest.mock('@/mcp/audit', () => ({ auditMcpWrite: jest.fn() }))
+jest.mock('@/mcp/guard', () => ({ createGuard: () => ({ venueFilter: jest.fn(), requirePermission: jest.fn() }) }))
+jest.mock('@/utils/prismaClient', () => ({
+  __esModule: true,
+  default: {
+    cfdi: {
+      findMany: (...a: unknown[]) => mockCfdiFindMany(...(a as [])),
+      groupBy: jest.fn().mockResolvedValue([]),
+      aggregate: jest.fn().mockResolvedValue({ _sum: { totalCents: 0 }, _count: { _all: 0 } }),
+      count: (...a: unknown[]) => mockCfdiCount(...(a as [])),
+    },
+    fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
+    $queryRaw: (...a: unknown[]) => mockQueryRaw(...a),
+  },
+}))
+
+const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
+beforeAll(() => {
+  registerCfdiTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+})
+
+const T0 = new Date('2026-10-05T18:00:00.000Z')
+const base = {
+  venueId: 'v1',
+  serie: 'A',
+  uuid: 'U',
+  totalCents: 11600,
+  receptorNombre: 'X',
+  stampedAt: T0,
+  venue: { name: 'T' },
+  replacedBy: [],
+}
+const enviada = {
+  ...base,
+  id: 'enviada',
+  folio: '1',
+  cancelStatus: 'REQUESTED',
+  cancelIntento: 1,
+  cancelEnviadaAt: T0,
+  cancelAcusadaAt: null,
+}
+const acusada = { ...enviada, id: 'acusada', folio: '2', cancelAcusadaAt: new Date(T0.getTime() + 5_000) }
+
+/** Una consulta NUEVA del operador en `ahora`. */
+async function consultar(ahora: Date): Promise<any[]> {
+  jest.useFakeTimers({ now: ahora, doNotFake: ['nextTick', 'setImmediate', 'queueMicrotask'] })
+  mockCfdiFindMany.mockResolvedValueOnce([enviada, acusada])
+  const r = await handlers.get('cfdi_status')!({ venueId: 'v1', limit: 5 }, {})
+  jest.useRealTimers()
+  return JSON.parse(r.content[0].text).recentStamped
+}
+
+afterEach(() => jest.useRealTimers())
+
+describe('cfdi_status — C2 · T10 (C2-31): el estado de la cancelación en cada consulta', () => {
+  it('control — enviada hace 30 s y sin acuse ⇒ ENVIANDO (sin texto de duda); con acuse ⇒ EN_TRAMITE', async () => {
+    const [e, a] = await consultar(new Date(T0.getTime() + 30_000))
+    expect(e).toMatchObject({ id: 'enviada', estadoCancelacion: 'ENVIANDO', cancelacionEnTramite: true })
+    expect(e).not.toHaveProperty('cancelacion')
+    expect(a).toMatchObject({ id: 'acusada', estadoCancelacion: 'EN_TRAMITE', cancelacionEnTramite: true })
+  })
+  it('control — la MISMA fila, en una consulta NUEVA pasado el umbral ⇒ CANCELACION_EN_DUDA (sin que nadie escriba nada)', async () => {
+    await consultar(new Date(T0.getTime() + 30_000))
+    const [e, a] = await consultar(new Date(T0.getTime() + ENVIO_TERMINADO_MS + 1_000))
+    expect(e).toMatchObject({ estadoCancelacion: 'CANCELACION_EN_DUDA', cancelacion: TEXTO_CANCELACION_EN_DUDA })
+    expect(a).toMatchObject({ estadoCancelacion: 'EN_TRAMITE' })
+  })
+  it('control — ninguna lectura devuelve `cancelEnviadaAt` ni `cancelAcusadaAt`', async () => {
+    for (const c of await consultar(new Date(T0.getTime() + ENVIO_TERMINADO_MS + 1_000))) {
+      expect(c).not.toHaveProperty('cancelEnviadaAt')
+      expect(c).not.toHaveProperty('cancelAcusadaAt')
+    }
+  })
+  it('🔴 T2 R2 + I3: el texto «en duda» dice que puede tardar hasta 24 horas, nombra el botón «Consultar estado» y qué pasa si no se registra', () => {
+    expect(TEXTO_CANCELACION_EN_DUDA).toMatch(/^Cancelación en duda: la estamos confirmando con el SAT/)
+    expect(TEXTO_CANCELACION_EN_DUDA).toMatch(/hasta 24 horas/)
+    expect(TEXTO_CANCELACION_EN_DUDA).toMatch(/«Consultar estado»/)
+    expect(TEXTO_CANCELACION_EN_DUDA).toMatch(/podrás pedirla otra vez/)
+    expect(TEXTO_CANCELACION_EN_DUDA).not.toMatch(/pulsa «Cancelar»/)
+  })
+})
+
+// C2 · T10 ronda 1 (M5): `estadoCancelacion: 'RECHAZADA'` decía QUÉ pasó pero no POR QUÉ. El hermano de M9 (la lista del panel ya lo dice).
+describe('cfdi_status — C2 · T10 ronda 1 (M5): el porqué de una cancelación rechazada', () => {
+  const MOTIVO = 'El receptor rechazó la cancelación ante el SAT: la factura sigue vigente.'
+  async function con(filas: unknown[]): Promise<any[]> {
+    mockCfdiFindMany.mockResolvedValueOnce(filas)
+    const r = await handlers.get('cfdi_status')!({ venueId: 'v1', limit: 5 }, {})
+    return JSON.parse(r.content[0].text).recentStamped
+  }
+  it('🔴 rechazada ⇒ `motivoRechazoCancelacion` con el texto de la fila; la consulta lo pide', async () => {
+    const [r] = await con([{ ...base, id: 'rech', folio: '3', cancelStatus: 'REJECTED', cancelIntento: 1, lastError: MOTIVO }])
+    expect(r).toMatchObject({ estadoCancelacion: 'RECHAZADA', motivoRechazoCancelacion: MOTIVO })
+    expect(mockCfdiFindMany.mock.calls.at(-1)[0].select).toMatchObject({ lastError: true })
+  })
+  it('control — sin rechazo no viaja (ni el `lastError` crudo de la fila)', async () => {
+    const [r] = await con([{ ...acusada, lastError: 'un error técnico viejo' }])
+    expect(r).not.toHaveProperty('motivoRechazoCancelacion')
+    expect(r).not.toHaveProperty('lastError')
+  })
+})
+
+// Ronda QA (hermanos): `byStatus.STAMP_FAILED` mezcla rechazos y timbres EN DUDA; el agente no puede llamarlos «rechazados».
+describe('cfdi_status — ronda QA (hermanos): timbres en duda', () => {
+  it('🔴 cuenta aparte los timbres en duda (`timbresEnDuda`), con la MISMA regla que la conciliación', async () => {
+    mockCfdiFindMany.mockResolvedValueOnce([])
+    mockCfdiCount.mockResolvedValueOnce(3)
+    const out = JSON.parse((await handlers.get('cfdi_status')!({ venueId: 'v1', limit: 5 }, {})).content[0].text)
+    expect(out.timbresEnDuda).toBe(3)
+    expect(mockCfdiCount).toHaveBeenCalledWith({
+      where: { venueId: { in: ['v1'] }, status: 'STAMP_FAILED', protocoloIva: 1, enviadoAt: { not: null }, falloDefinitivo: false },
+    })
+  })
+})
+
+// C3 · T8 (Codex C3-6/C3-10): las ventas sacadas de la factura global (nota de extracción timbrada y viva) a las que les FALTA la factura del
+// cliente, y cuántas la tienen EN PROCESO (viva sin timbrar): éstas no se vuelven a pedir.
+describe('cfdi_status — C3 · T8: extracciones que esperan la factura del cliente', () => {
+  const T1 = new Date('2026-06-02T18:00:00.000Z')
+  const fila = (id: string, stampedAt: Date) => ({
+    id,
+    venueId: 'v1',
+    orderId: `o-${id}`,
+    serie: 'E',
+    folio: id.slice(1),
+    totalCents: 11600,
+    stampedAt,
+  })
+  async function consultar(args: Record<string, unknown> = {}) {
+    mockCfdiFindMany.mockResolvedValueOnce([])
+    const r = await handlers.get('cfdi_status')!({ venueId: 'v1', limit: 2, ...args }, {})
+    return JSON.parse(r.content[0].text)
+  }
+  afterEach(() => {
+    extracciones = { total: 0, enProceso: 0, filas: [] }
+    mockQueryRaw.mockClear()
+  })
+
+  it('🔴 devuelve { total, enProceso, items, siguiente } acotado por `limit`; con la página llena, `siguiente` sigue de la última', async () => {
+    extracciones = { total: 5, enProceso: 0, filas: [fila('e12', T0), fila('e11', T1)] }
+    const out = await consultar()
+    expect(out.extraccionesPendientes).toEqual({
+      total: 5,
+      enProceso: 0,
+      items: [
+        { id: 'e12', venueId: 'v1', orderId: 'o-e12', folio: 'E12', totalMxn: 116 },
+        { id: 'e11', venueId: 'v1', orderId: 'o-e11', folio: 'E11', totalMxn: 116 },
+      ],
+      siguiente: `${T1.toISOString()}|e11`,
+    })
+    expect(out.extraccionesPendientes).not.toHaveProperty('aviso')
+    // la página pide `limit` filas, en el venue en alcance
+    const pagina = consulta(mockQueryRaw.mock.calls.find(c => !/count\(/.test(consulta(c).sql))!)
+    expect(pagina.values).toEqual(expect.arrayContaining([['v1'], 2]))
+  })
+
+  it('🔴 con `enProceso > 0` dice que se están confirmando con el SAT y que no se vuelvan a pedir', async () => {
+    extracciones = { total: 0, enProceso: 3, filas: [] }
+    const out = await consultar()
+    expect(out.extraccionesPendientes).toMatchObject({ total: 0, enProceso: 3, items: [], siguiente: null })
+    expect(out.extraccionesPendientes.aviso).toBe('3 facturas del cliente se están confirmando con el SAT; no las vuelvas a pedir.')
+  })
+
+  it('🔴 acepta `extraccionesCursor` (el `siguiente` anterior) y lo manda a la consulta de la página', async () => {
+    extracciones = { total: 3, enProceso: 0, filas: [fila('e10', T1)] }
+    const out = await consultar({ extraccionesCursor: `${T1.toISOString()}|e11` })
+    expect(out.extraccionesPendientes).toMatchObject({ total: 3, siguiente: null })
+    const pagina = consulta(mockQueryRaw.mock.calls.find(c => !/count\(/.test(consulta(c).sql))!)
+    expect(pagina.values).toEqual(expect.arrayContaining(['e11', T1]))
+  })
+
+  it('control — un cursor que no salió de aquí se rechaza (nunca se lee como «sin cursor»)', async () => {
+    mockCfdiFindMany.mockResolvedValueOnce([])
+    await expect(handlers.get('cfdi_status')!({ venueId: 'v1', limit: 2, extraccionesCursor: 'basura' }, {})).rejects.toThrow(/cursor/i)
+  })
+
+  it('🔴 F6 (N7): `notasDeDevolucionPendientes` — total exacto, página de `limit` y `siguiente` para seguir (el contrato de extracciones)', async () => {
+    mockContarNotas.mockResolvedValueOnce(3)
+    mockNotasPendientes.mockResolvedValueOnce([{ cfdiId: 'c1', venueId: 'v1', orderId: 'o1', pendientes: ['art', 'imp'] }])
+    const out = await consultar({ venueId: 'v1', limit: 1, notasCursor: 'c0' })
+    expect(mockNotasPendientes).toHaveBeenCalledWith({ venueIds: ['v1'], despuesDe: 'c0', limite: 1 })
+    expect(mockContarNotas).toHaveBeenCalledWith({ venueIds: ['v1'] })
+    expect(out.notasDeDevolucionPendientes).toEqual({
+      total: 3,
+      items: [{ cfdiId: 'c1', venueId: 'v1', orderId: 'o1', refundPaymentIds: ['art', 'imp'] }],
+      siguiente: 'c1',
+    })
+  })
+  // Codex código r1 (P3-5): el alcance REAL de dos locales —sin elegir uno— y el filtro de locales que se manda (con un 3.º sin CFDI fuera).
+  it('🔴 F6 (H6): con dos locales y sin elegir uno, la consulta lleva esos dos y cada elemento trae SU local (emit_refund_credit_note necesita saber cuál)', async () => {
+    const { venuesWithFeatureAccess } = jest.requireMock('@/services/access/basePlan.service')
+    venuesWithFeatureAccess.mockResolvedValueOnce(new Set(['v1', 'v2'])) // v3 está en el alcance pero sin CFDI
+    const antes = scope.allowedVenueIds
+    scope.allowedVenueIds = ['v1', 'v2', 'v3']
+    for (const v of scope.allowedVenueIds) scope.perVenueAccess.set(v, {} as never)
+    try {
+      mockNotasPendientes.mockResolvedValueOnce([
+        { cfdiId: 'c1', venueId: 'v1', orderId: 'o1', pendientes: ['a'] },
+        { cfdiId: 'c2', venueId: 'v2', orderId: 'o2', pendientes: ['b'] },
+      ])
+      const out = await consultar({ venueId: undefined, limit: 5 })
+      expect(mockNotasPendientes).toHaveBeenCalledWith({ venueIds: ['v1', 'v2'], despuesDe: null, limite: 5 })
+      expect(mockContarNotas).toHaveBeenCalledWith({ venueIds: ['v1', 'v2'] })
+      expect(out.notasDeDevolucionPendientes.items.map((x: any) => [x.cfdiId, x.venueId])).toEqual([
+        ['c1', 'v1'],
+        ['c2', 'v2'],
+      ])
+    } finally {
+      scope.allowedVenueIds = antes
+      scope.perVenueAccess.clear()
+    }
+  })
+  it('F6 (N7): la última página ⇒ `siguiente: null`', async () => {
+    mockContarNotas.mockResolvedValueOnce(1)
+    mockNotasPendientes.mockResolvedValueOnce([{ cfdiId: 'c1', venueId: 'v1', orderId: 'o1', pendientes: ['imp'] }])
+    expect((await consultar({ venueId: 'v1', limit: 5 })).notasDeDevolucionPendientes.siguiente).toBeNull()
+  })
+})

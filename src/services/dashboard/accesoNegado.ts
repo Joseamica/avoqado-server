@@ -14,6 +14,10 @@ export function auditarAccesoNegado(entrada: {
   organizationId?: string | null
   entity: string
   reason: string
+  /** Opcional (Pago al personal, E6a-fix2): el permiso negado, como `entityId` del middleware. Sin él, la sede. */
+  entityId?: string
+  /** Opcional: lo que el dueño necesita para entender la negativa (el permiso, las sedes donde falta). */
+  datos?: Record<string, unknown>
 }): void {
   void Promise.resolve(
     logAction({
@@ -22,8 +26,8 @@ export function auditarAccesoNegado(entrada: {
       ...(entrada.organizationId ? { organizationId: entrada.organizationId } : {}),
       action: 'PERMISSION_DENIED',
       entity: entrada.entity,
-      entityId: entrada.venueId,
-      data: { reason: entrada.reason },
+      entityId: entrada.entityId ?? entrada.venueId,
+      data: { ...entrada.datos, reason: entrada.reason },
     }),
   ).catch(error => logger.warn('No se pudo registrar PERMISSION_DENIED', { entity: entrada.entity, error: String(error) }))
 }

@@ -295,7 +295,7 @@
     },
     {
       "kind": "text",
-      "text": "IVA incluido:              $0.00",
+      "text": "IVA incluido cuando aplica",
       "align": "left",
       "bold": false,
       "double": false

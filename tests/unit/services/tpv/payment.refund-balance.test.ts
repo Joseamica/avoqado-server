@@ -31,7 +31,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     order: { findUnique: jest.fn(), update: jest.fn() },
-    payment: { create: jest.fn(), findFirst: jest.fn() },
+    payment: { create: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn() },
     merchantAccount: { findUnique: jest.fn() },
     venueTransaction: { create: jest.fn() },
     shift: { findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
@@ -72,10 +72,12 @@ jest.mock('@/services/payments/transactionCost.service', () => ({
   createTransactionCost: jest.fn(),
 }))
 
+import { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import * as paymentService from '@/services/tpv/payment.tpv.service'
+import { computeOrderBalance } from '@/services/shared/orderBalance'
 
 const VENUE_ID = 'venue-123'
 const ORDER_ID = 'order-123'
@@ -103,6 +105,8 @@ function seedOrder(payments: SeedPayment[], over: Record<string, any> = {}) {
     items: [],
     customer: null,
     payments,
+    // Tarea 6a: la columna es `NOT NULL DEFAULT AVOQADO`; un doble sin ella se leería como cuenta externa.
+    originSystem: 'AVOQADO',
     ...over,
   }
 
@@ -143,6 +147,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
   beforeEach(() => {
     jest.clearAllMocks()
     capturedPaymentsInclude = undefined
+    // Codex r14 #2: restablecido en cada caso (`clearAllMocks` conserva las respuestas encoladas).
+    ;(prisma.payment.findUnique as jest.Mock).mockReset().mockResolvedValue(null)
     ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
     ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
     ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ staffId: 'staff-1', venueId: VENUE_ID })
@@ -156,15 +162,31 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         // COHERENTE con el `count: 0` de arriba —los dos contestan la misma pregunta— y así el
         // candado queda inerte en esta suite, que no es su objeto: se prueba en
         // `payment.cash-duplicado.test.ts` y en la integración `cobro-efectivo-duplicado`.
-        payment: { count: jest.fn().mockResolvedValue(0), create: prisma.payment.create, findMany: jest.fn().mockResolvedValue([]) },
+        // `findUnique`: la MISMA función de arriba, para que la secuencia de respuestas se consuma en orden (Codex r14 #2).
+        payment: {
+          count: jest.fn().mockResolvedValue(0),
+          create: prisma.payment.create,
+          findMany: jest.fn().mockResolvedValue([]),
+          findUnique: prisma.payment.findUnique,
+        },
         paymentAllocation: { create: prisma.paymentAllocation.create },
         venueTransaction: { create: prisma.venueTransaction.create },
-        order: { update: prisma.order.update },
+        order: {
+          update: prisma.order.update,
+          // La admisión del efectivo con `cobroNuevo` (Tarea 6a) relee el estado bajo el candado.
+          findUniqueOrThrow: prisma.order.findUnique,
+          // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed, so the latest pre-read row.
+          findFirst: jest.fn(() => (prisma.order.findUnique as jest.Mock).mock.results.slice(-1)[0]?.value),
+        },
         shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
         activityLog: { create: prisma.activityLog.create },
+        // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+        orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
         $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
+        // El candado del intento con llave (`candadoDeIntento.ts:64-65`) corre ANTES de la guarda nueva.
+        $executeRawUnsafe: jest.fn().mockResolvedValue(0),
       }),
     )
   })
@@ -299,5 +321,591 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
     const data = lastOrderUpdate()
     // max(0, 253 − 278.30) + 50 de propina = 50. Un total NEGATIVO restaría del corte.
     expect(Number(data.total)).toBe(50)
+  })
+
+  it.each([
+    ['descuento excedente sin propina (M13)', 278.3],
+    ['cortesía exacta sin propina', 253],
+  ])('%s deja total cero al cobrar por el servicio real', async (_caso, descuento) => {
+    seedOrder([], { subtotal: new Decimal(253), discountAmount: new Decimal(descuento) })
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(0), 'user-1')
+
+    expect(Number(lastOrderUpdate().total)).toBe(0)
+    expect(Number(lastOrderUpdate().remainingBalance)).toBe(0)
+  })
+
+  it('🔴 P12 antes/después: con IVA aparte, cobrar $100 de una cuenta de $100 + $16 la deja PARCIAL con $16 (hoy la cerraba PAGADA)', async () => {
+    seedOrder([], {
+      subtotal: new Decimal(100),
+      total: new Decimal(116),
+      taxAmount: new Decimal(16),
+      contratoDePrecio: 'IVA_APARTE',
+      paymentStatus: 'PENDING',
+    })
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(10000), 'user-1')
+    const data = lastOrderUpdate()
+    expect(Number(data.total)).toBe(116)
+    expect(Number(data.remainingBalance)).toBe(16)
+    expect(data.paymentStatus).toBe('PARTIAL')
+  })
+  it('control: con IVA incluido el impuesto escrito no se suma', async () => {
+    seedOrder([], { taxAmount: new Decimal(16), contratoDePrecio: 'IVA_INCLUIDO', paymentStatus: 'PENDING' })
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(20000), 'user-1')
+    expect(lastOrderUpdate().paymentStatus).toBe('PAID')
+  })
+
+  const reaperturas = () =>
+    (prisma.activityLog.create as jest.Mock).mock.calls
+      .map((c: any[]) => c[0].data)
+      .filter(d => d.action === 'ORDER_REOPENED_BY_CAPTURED_PAYMENT')
+  const cancelada = {
+    status: 'CANCELLED',
+    originSystem: 'AVOQADO',
+    subtotal: new Decimal(100),
+    total: new Decimal(116),
+    taxAmount: new Decimal(16),
+    contratoDePrecio: 'IVA_APARTE',
+    paymentStatus: 'PENDING',
+  }
+
+  it('🔴 Founder 3-oct (por la reconciliación posterior, :1821): la terminal cobra $100 de una CANCELADA IVA_APARTE de $100 + $16 ⇒ se reabre y guarda $116 de total con $16 por cobrar (la v9: CANCELADA con total $100 y saldo 0, fuera de los lectores)', async () => {
+    seedOrder([], cancelada)
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(10000), 'user-1')
+    const data = lastOrderUpdate()
+    expect([Number(data.total), Number(data.remainingBalance), data.paymentStatus, data.status]).toEqual([116, 16, 'PARTIAL', undefined])
+    expect((prisma.order.update as jest.Mock).mock.calls.some((c: any[]) => c[0].data.status === 'PENDING')).toBe(true)
+    expect(reaperturas()).toHaveLength(1)
+  })
+
+  it('🔴 Codex r10 #3 / r11 #2: el EFECTIVO de la terminal con `cobroNuevo` sobre una CANCELADA se rechaza ANTES de crear el Payment; el mismo efectivo sin el campo (lo que manda la TPV de hoy y su cola) se registra y la reabre', async () => {
+    const efectivo = { ...paymentData(11600), method: 'CASH', merchantAccountId: undefined }
+    seedOrder([], cancelada)
+    await expect(
+      (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...efectivo, cobroNuevo: true }, 'user-1'),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_CANCELLED_NO_NEW_CHARGE',
+      message: 'Esta cuenta está cancelada, abre una nueva.',
+    })
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+    jest.clearAllMocks()
+    seedOrder([], cancelada)
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, efectivo, 'user-1')
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(reaperturas()).toHaveLength(1)
+  })
+
+  it('control: la TARJETA de la terminal con `cobroNuevo` (no debería mandarlo, pero si lo manda) no se rechaza: la aprobó el banco', async () => {
+    seedOrder([], cancelada)
+    // Codex r14 #1: tarjeta de verdad —`paymentData` arma EFECTIVO (`method: 'CASH'`, :123), que con `cobroNuevo` se rechaza—, con
+    // su preparación de tarjeta (la de `payment.posting-atomicity.test.ts:223-234`, sin afiliación, más los datos de la tarjeta) y
+    // sin `referenceNumber` (no entra al arbitraje por referencia). El efectivo rechazado es el caso de arriba, aparte.
+    const tarjeta = {
+      ...paymentData(11600),
+      method: 'CREDIT_CARD' as const,
+      cardBrand: 'VISA',
+      maskedPan: '411111******1111',
+      entryMode: 'CHIP',
+      authorizationNumber: '123456',
+    }
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...tarjeta, cobroNuevo: true }, 'user-1')
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect((prisma.payment.create as jest.Mock).mock.calls[0][0].data.method).toBe('CREDIT_CARD')
+  })
+
+  it('🔴 Codex r13 #2: la misma carrera en la terminal — el efectivo con `cobroNuevo` cuya llave ya registró el intento ganador antes de que cancelaran la cuenta devuelve ESE pago: ni 400 ni segundo Payment (la v13: 400)', async () => {
+    seedOrder([], cancelada)
+    const ganador = {
+      id: 'pay-ganador',
+      orderId: ORDER_ID,
+      venueId: VENUE_ID,
+      status: 'COMPLETED',
+      amount: new Decimal(116),
+      tipAmount: new Decimal(0),
+      receipts: [],
+    }
+    // Codex r14 #2: las tres consultas, explícitas —la rápida (:3128) ⇒ ausente; bajo el candado del intento ⇒ el ganador; la
+    // recuperación de la carrera (:3926) ⇒ el ganador—.
+    ;(prisma.payment.findUnique as jest.Mock)
+      .mockReset()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(ganador)
+      .mockResolvedValueOnce(ganador)
+    ;(prisma.payment.create as jest.Mock).mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint', {
+        code: 'P2002',
+        clientVersion: 'test',
+        meta: { target: ['venueId', 'idempotencyKey'] },
+      }),
+    )
+    const r = await (paymentService as any).recordOrderPayment(
+      VENUE_ID,
+      ORDER_ID,
+      { ...paymentData(11600), method: 'CASH', merchantAccountId: undefined, cobroNuevo: true, idempotencyKey: 'k-carrera' },
+      'user-1',
+    )
+    expect(r.id).toBe('pay-ganador')
+    expect(prisma.payment.create).not.toHaveBeenCalled() // v14: sale ANTES de intentar crear
+  })
+  it('🔴 regla (iii) de la revisión de 6a-1: si el pago que se vio bajo el candado ya no se puede releer, la carrera responde 409 (reintentar), nunca un 500', async () => {
+    seedOrder([], cancelada)
+    ;(prisma.payment.findUnique as jest.Mock)
+      .mockReset()
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'pay-ganador', orderId: ORDER_ID })
+      .mockResolvedValueOnce(null)
+    await expect(
+      (paymentService as any).recordOrderPayment(
+        VENUE_ID,
+        ORDER_ID,
+        { ...paymentData(11600), method: 'CASH', merchantAccountId: undefined, cobroNuevo: true, idempotencyKey: 'k-perdido' },
+        'user-1',
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_PAYMENT_CONFLICT' })
+    expect(prisma.payment.create).not.toHaveBeenCalled()
+  })
+
+  // ── 🔴 R8-1 (Codex recheck-12 P2): el recálculo de `recordOrderPayment` (:1831, la escritura de las integradas y de las cuentas
+  // con vales por área) nunca reabre una venta cerrada. La venta de $100 está PAID con $80 (el panel corrigió su cobro: no recalcula).
+  describe('🔴 R8-1: un cobro tardío de la terminal sobre una venta CERRADA (recálculo :1831)', () => {
+    const cerradaCon80 = (
+      paymentStatus: 'PAID' | 'REFUNDED',
+      pagos: SeedPayment[] = [{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }],
+    ) =>
+      seedOrder(pagos, {
+        subtotal: new Decimal(100),
+        total: new Decimal(100),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: new Decimal(0),
+        status: 'COMPLETED',
+        completedAt: new Date('2026-10-01T18:00:00Z'),
+        paymentStatus,
+      })
+    const { createSalePostingInTx } = jest.requireMock('@/services/inventory/inventoryPosting.service')
+
+    it.each(['PAID', 'REFUNDED'] as const)(
+      '🔴 %s + $10 de la terminal ($90 < $100) ⇒ conserva su estado y el saldo queda en 0; el dinero sí se registra (antes: PARTIAL con $10 por cobrar)',
+      async estado => {
+        cerradaCon80(estado)
+        await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+        const data = lastOrderUpdate()
+        expect(prisma.payment.create).toHaveBeenCalled()
+        expect([data.paymentStatus, Number(data.remainingBalance), Number(data.paidAmount)]).toEqual([estado, 0, 90])
+        expect([data.status, data.completedAt, data.loyaltyEligibleAt]).toEqual([undefined, undefined, undefined])
+      },
+    )
+
+    it('🔴 PAID + $20 que vuelve a cubrir ($100) ⇒ sin efectos de saldar otra vez: ni vale de inventario, ni lealtad, ni cierre con fecha nueva', async () => {
+      cerradaCon80('PAID')
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(2000), 'user-1')
+      const data = lastOrderUpdate()
+      expect([data.paymentStatus, Number(data.remainingBalance), Number(data.paidAmount)]).toEqual(['PAID', 0, 100])
+      expect([data.status, data.completedAt, data.loyaltyEligibleAt]).toEqual([undefined, undefined, undefined])
+      expect(createSalePostingInTx).not.toHaveBeenCalled()
+    })
+
+    it('REFUNDED con su cobro devuelto + un cobro nuevo que la cubre ⇒ sigue REFUNDED (antes: PAID y COMPLETED con fecha de hoy)', async () => {
+      cerradaCon80('REFUNDED', [
+        { amount: new Decimal(100), tipAmount: new Decimal(0), type: 'REGULAR' },
+        { amount: new Decimal(-100), tipAmount: new Decimal(0), type: 'REFUND' },
+      ])
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(5000), 'user-1')
+      const data = lastOrderUpdate()
+      expect([data.paymentStatus, Number(data.remainingBalance), data.status, data.completedAt]).toEqual([
+        'REFUNDED',
+        0,
+        undefined,
+        undefined,
+      ])
+    })
+
+    /**
+     * 🔴 R4-5 (Codex r3, P2 E): este recálculo (integradas, cuentas con vales) también reabría una venta CANCELADA ya cobrada: bajo el
+     * candado llamaba a `reabrirSiRecibeDinero` sin mirar PAID/REFUNDED. Ahora, la MISMA decisión que el cierre transaccional
+     * (R3-2/R4-2): no se reabre, conserva su estado de cobro y su saldo 0, y el total es el de cuando se cobró (base + IVA) — el mismo
+     * con el que mide el aviso.
+     */
+    const canceladaCobrada = (paymentStatus: 'PAID' | 'REFUNDED') =>
+      seedOrder(
+        paymentStatus === 'REFUNDED'
+          ? [
+              { amount: new Decimal(116), tipAmount: new Decimal(0), type: 'REGULAR' },
+              { amount: new Decimal(-116), tipAmount: new Decimal(0), type: 'REFUND' },
+            ]
+          : [{ amount: new Decimal(116), tipAmount: new Decimal(0), type: 'REGULAR' }],
+        {
+          status: 'CANCELLED',
+          originSystem: 'AVOQADO',
+          subtotal: new Decimal(100),
+          total: new Decimal(116),
+          taxAmount: new Decimal(16),
+          contratoDePrecio: 'IVA_APARTE',
+          paymentStatus,
+        },
+      )
+    const reaperturasR4 = () =>
+      (prisma.activityLog.create as jest.Mock).mock.calls
+        .map((c: any[]) => c[0].data)
+        .filter(d => d.action === 'ORDER_REOPENED_BY_CAPTURED_PAYMENT')
+    const sobrepagos = () =>
+      (logger.error as jest.Mock).mock.calls.filter(([m]) => typeof m === 'string' && m.includes('🚨 [Sobrepago]')).map(([, d]) => d)
+
+    it.each(['REFUNDED', 'PAID'] as const)(
+      '🔴 R4-5: CANCELLED + %s + propina sola de $50 de la terminal ⇒ NO se reabre, conserva su estado de cobro, total $166, sin sobrepago',
+      async paymentStatus => {
+        canceladaCobrada(paymentStatus)
+        await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(0, 5000), 'user-1')
+        const escrituras = (prisma.order.update as jest.Mock).mock.calls.map((c: any[]) => c[0].data)
+        expect(escrituras.map((d: any) => d.status)).not.toContain('PENDING')
+        expect(reaperturasR4()).toHaveLength(0)
+        const data = lastOrderUpdate()
+        expect([data.paymentStatus, Number(data.remainingBalance), Number(data.total), data.status, data.completedAt]).toEqual([
+          paymentStatus,
+          0,
+          166,
+          undefined,
+          undefined,
+        ])
+        expect(sobrepagos()).toHaveLength(0)
+      },
+    )
+
+    it('🔴 R4-5: CANCELLED + REFUNDED + $10 de más ⇒ no se reabre; total $116 guardado y el MISMO en el aviso (sobrepago real de $10)', async () => {
+      canceladaCobrada('REFUNDED')
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      expect(reaperturasR4()).toHaveLength(0)
+      expect(Number(lastOrderUpdate().total)).toBe(116)
+      expect(sobrepagos()).toEqual([expect.objectContaining({ orderTotal: 116, totalPaid: 126, overpaidBy: 10 })])
+    })
+
+    it('regresión: la MISMA venta PENDING con $80 + $10 ⇒ PARTIAL con $10 por cobrar (como hoy)', async () => {
+      seedOrder([{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }], {
+        subtotal: new Decimal(100),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: new Decimal(0),
+        paymentStatus: 'PARTIAL',
+      })
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      expect([lastOrderUpdate().paymentStatus, Number(lastOrderUpdate().remainingBalance)]).toEqual(['PARTIAL', 10])
+    })
+
+    // R9-2 (re-revisión de la ronda 8): el log del recálculo decía PARTIAL con $10 mientras la base guardaba PAID con saldo 0.
+    const logDelRecalculo = () =>
+      (logger.info as jest.Mock).mock.calls.find(([, m]: any[]) => m && 'newPaymentStatus' in m && m.orderId === ORDER_ID)?.[1]
+
+    it('R9-2: PAID + $10 ⇒ el log del recálculo dice lo que se escribió (PAID, saldo 0) y que la venta se conservó cerrada', async () => {
+      cerradaCon80('PAID')
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      const log = logDelRecalculo()
+      expect([log.newPaymentStatus, Number(log.remainingBalance), log.ventaCerrada]).toEqual(['PAID', 0, true])
+    })
+
+    it('R9-2 regresión: PARTIAL + $10 ⇒ el log dice PARTIAL con $10 por cobrar', async () => {
+      seedOrder([{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }], {
+        subtotal: new Decimal(100),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: new Decimal(0),
+        paymentStatus: 'PARTIAL',
+      })
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(1000), 'user-1')
+      const log = logDelRecalculo()
+      expect([log.newPaymentStatus, Number(log.remainingBalance), log.ventaCerrada]).toEqual(['PARTIAL', 10, false])
+    })
+
+    it('regresión: PARTIAL con $80 + $20 que la salda ⇒ PAID, COMPLETED, vale y lealtad (como hoy)', async () => {
+      seedOrder([{ amount: new Decimal(80), tipAmount: new Decimal(0), type: 'REGULAR' }], {
+        subtotal: new Decimal(100),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: new Decimal(0),
+        paymentStatus: 'PARTIAL',
+      })
+      await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData(2000), 'user-1')
+      const data = lastOrderUpdate()
+      expect([data.paymentStatus, data.status, Number(data.remainingBalance)]).toEqual(['PAID', 'COMPLETED', 0])
+      expect(data.loyaltyEligibleAt).toEqual(expect.any(Date))
+      expect(createSalePostingInTx).toHaveBeenCalledTimes(1)
+    })
+  })
+})
+
+describe('Founder 3-oct (Codex r8 #2, r9 #1-#3, r12 #5): el cierre transaccional de la terminal (`settleStandalonePaymentInTx`, :1364) reabre la cancelada de Avoqado que recibe dinero ya capturado y guarda todo con ESE estado', () => {
+  const txCierre = (orden: Record<string, unknown>, cobrado: number) => ({
+    order: {
+      findFirstOrThrow: jest.fn().mockResolvedValue({
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        originSystem: 'AVOQADO',
+        items: [],
+        completedAt: null,
+        servedById: 'staff-1',
+        createdById: 'staff-1',
+        paymentStatus: 'PENDING',
+        discountAmount: new Decimal(0),
+        serviceChargeAmount: new Decimal(0),
+        tipAmount: new Decimal(0),
+        ...orden,
+      }),
+      update: jest.fn().mockResolvedValue({}),
+    },
+    payment: { aggregate: jest.fn().mockResolvedValue({ _sum: { amount: new Decimal(cobrado), tipAmount: new Decimal(0) }, _count: 1 }) },
+    activityLog: { create: jest.fn().mockResolvedValue({}) },
+  })
+  const cerrar = async (orden: Record<string, unknown>, cobrado: number) => {
+    const tx = txCierre(orden, cobrado)
+    await (paymentService as any).settleStandalonePaymentInTx(
+      tx,
+      VENUE_ID,
+      ORDER_ID,
+      { id: 'pay-1', amount: new Decimal(cobrado), tipAmount: new Decimal(0) },
+      'staff-1',
+    )
+    const escrituras = tx.order.update.mock.calls.map((c: any[]) => c[0].data)
+    const totales = escrituras[escrituras.length - 1]
+    // El estado PERSISTIDO al final (la última escritura que lo nombra) y el saldo reconstruido con él: lo que de verdad se cobra.
+    const estado = [...escrituras].reverse().find((d: any) => d.status)?.status ?? orden.status
+    const reconstruido = Number(
+      computeOrderBalance(
+        {
+          subtotal: orden.subtotal as Decimal,
+          discountAmount: 0,
+          serviceChargeAmount: 0,
+          contratoDePrecio: orden.contratoDePrecio as string,
+          taxAmount: orden.taxAmount as Decimal,
+          status: estado,
+        },
+        [{ amount: cobrado, tipAmount: 0 }],
+      ).remainingBalance,
+    )
+    const reaperturas = tx.activityLog.create.mock.calls.filter(
+      (c: any[]) => c[0].data.action === 'ORDER_REOPENED_BY_CAPTURED_PAYMENT',
+    ).length
+    return { escrituras, totales, estado, reconstruido, reaperturas }
+  }
+  const cancelada = (contratoDePrecio: string) => ({
+    status: 'CANCELLED',
+    contratoDePrecio,
+    subtotal: new Decimal(100),
+    taxAmount: new Decimal(16),
+  })
+
+  it('🔴 r9 #2: cancelada IVA_APARTE de $100 + $16 cobrada en $116 ⇒ se reabre y cierra COMPLETED con total $116, su IVA intacto, saldo 0 = reconstruido y una bitácora (la v9: COMPLETED con total $100)', async () => {
+    const r = await cerrar(cancelada('IVA_APARTE'), 116)
+    expect(r.escrituras.map((d: any) => d.status)).toEqual(['PENDING', 'COMPLETED'])
+    expect(r.totales).toMatchObject({ paymentStatus: 'PAID' })
+    expect(r.escrituras.every((d: any) => d.taxAmount === undefined)).toBe(true)
+    expect([Number(r.totales.total), Number(r.totales.remainingBalance), r.reconstruido, r.reaperturas]).toEqual([116, 0, 0, 1])
+  })
+  it('🔴 r9 #2: la misma cobrada en $115.99 (tolerancia de cierre) ⇒ COMPLETED con total $116 y $0.01 guardado = reconstruido (la v9: $0 guardado contra $0.01)', async () => {
+    const r = await cerrar(cancelada('IVA_APARTE'), 115.99)
+    expect(r.estado).toBe('COMPLETED')
+    expect([Number(r.totales.total), Number(r.totales.remainingBalance), r.reconstruido]).toEqual([116, 0.01, 0.01])
+  })
+  it('🔴 r9 #1: la misma cobrada en $100 ⇒ reabierta PENDING y PARCIAL, total $116 y $16 por cobrar guardados = reconstruidos (la v9: CANCELADA y PAGADA, fuera de los lectores)', async () => {
+    const r = await cerrar(cancelada('IVA_APARTE'), 100)
+    expect(r.escrituras.map((d: any) => d.status)).toEqual(['PENDING', undefined])
+    expect(r.totales).toMatchObject({ paymentStatus: 'PARTIAL' })
+    expect([Number(r.totales.total), Number(r.totales.remainingBalance), r.reconstruido]).toEqual([116, 16, 16])
+  })
+  it('🔴 r9 #3: cancelada DESCONOCIDO con IVA 16 cobrada en $116 ⇒ COMPLETED con total $116 y su IVA 16 (la v9 lo borraba: total $100, factura bloqueada contra $116 cobrados)', async () => {
+    const r = await cerrar(cancelada('DESCONOCIDO'), 116)
+    expect(r.estado).toBe('COMPLETED')
+    expect(r.escrituras.every((d: any) => d.taxAmount === undefined)).toBe(true)
+    expect([Number(r.totales.total), r.reconstruido]).toEqual([116, 0])
+  })
+  it('control (verde desde P12): una VIVA de $100 + $16 cobrada en $116 cierra COMPLETED en UNA escritura y sin bitácora', async () => {
+    const r = await cerrar({ ...cancelada('IVA_APARTE'), status: 'PENDING' }, 116)
+    expect(r.escrituras.map((d: any) => d.status)).toEqual(['COMPLETED'])
+    expect([Number(r.totales.total), r.reconstruido, r.reaperturas]).toEqual([116, 0, 0])
+  })
+  // 🔴 R3-2 (opus r2 Minor 3; la regla de R2-2 en el POS): recibir dinero nunca reabre una venta CERRADA, aunque esté cancelada. Venta
+  // de $100 devuelta y cancelada (CANCELLED + REFUNDED, o CANCELLED + PAID); la terminal registra un cobro capturado de $100 ⇒ antes
+  // quedaba PENDING + ORDER_REOPENED_BY_CAPTURED_PAYMENT. Ahora el dinero se registra y la venta sigue cancelada con su estado de
+  // cobro y saldo 0. La cancelada que todavía DEBE (PENDING) se reabre como siempre (las pruebas r9 de arriba).
+  it.each(['REFUNDED', 'PAID'])(
+    '🔴 R3-2: CANCELLED + %s que recibe $100 de la terminal ⇒ sigue CANCELLED, sin reapertura ni bitácora, conserva su estado de cobro y saldo 0',
+    async paymentStatus => {
+      const r = await cerrar({ ...cancelada('IVA_INCLUIDO'), taxAmount: new Decimal(0), paymentStatus }, 100)
+      expect(r.escrituras).toHaveLength(1)
+      expect([r.estado, r.reaperturas, r.totales.paymentStatus, Number(r.totales.remainingBalance), Number(r.totales.paidAmount)]).toEqual([
+        'CANCELLED',
+        0,
+        paymentStatus,
+        0,
+        100,
+      ])
+      expect([r.totales.status, r.totales.completedAt, r.totales.loyaltyEligibleAt]).toEqual([undefined, undefined, undefined])
+    },
+  )
+  it('R3-2 control: el ORIGEN de una reasignación (no entra dinero: pago $0, sin efectos) cancelado y PAID conserva lo de hoy', async () => {
+    const tx = txCierre({ ...cancelada('IVA_INCLUIDO'), taxAmount: new Decimal(0), paymentStatus: 'PAID' }, 100)
+    await (paymentService as any).settleStandalonePaymentInTx(
+      tx,
+      VENUE_ID,
+      ORDER_ID,
+      { amount: new Decimal(0), tipAmount: new Decimal(0) },
+      undefined,
+      false,
+      false,
+    )
+    const reaperturas = tx.activityLog.create.mock.calls.filter((c: any[]) => c[0].data.action === 'ORDER_REOPENED_BY_CAPTURED_PAYMENT')
+    expect(reaperturas).toHaveLength(1)
+  })
+  const plataforma = {
+    status: 'CANCELLED',
+    originSystem: 'DELIVERY_PLATFORM',
+    contratoDePrecio: 'IVA_INCLUIDO',
+    subtotal: new Decimal(100),
+    taxAmount: new Decimal(0),
+  }
+  it('🔴 Codex r12 #5 (contra la v12; lo de hoy): un pedido de la PLATAFORMA ya cancelado por ella que recibe $50 no cubre lo que debía: sigue CANCELADO, sin reapertura ni bitácora (la v12 lo reabría y volvía a contar el pago de la plataforma)', async () => {
+    const r = await cerrar(plataforma, 50)
+    expect(r.escrituras.every((d: any) => d.status === undefined)).toBe(true)
+    expect([r.estado, Number(r.totales.total), Number(r.totales.remainingBalance), r.reconstruido, r.reaperturas]).toEqual([
+      'CANCELLED',
+      100,
+      50,
+      50,
+      0,
+    ])
+  })
+  it('control — r13 #1: si la captura lo salda ($100), sale de CANCELADO como hoy (COMPLETED, total $100), ahora con su bitácora', async () => {
+    const r = await cerrar(plataforma, 100)
+    expect(r.escrituras.map((d: any) => d.status)).toEqual(['PENDING', 'COMPLETED'])
+    expect([Number(r.totales.total), r.reconstruido, r.reaperturas]).toEqual([100, 0, 1])
+  })
+
+  const importada = {
+    status: 'CANCELLED',
+    originSystem: 'POS_SOFTRESTAURANT',
+    contratoDePrecio: 'DESCONOCIDO',
+    subtotal: new Decimal(100),
+    taxAmount: new Decimal(16),
+  }
+  it.each([
+    [100, 'PENDING', 'PARTIAL', 116, 16, 1],
+    [115.99, 'COMPLETED', 'PAID', 116, 0.01, 1],
+    [116, 'COMPLETED', 'PAID', 116, 0, 1],
+    [50, 'CANCELLED', 'PARTIAL', 100, 50, 0], // control (lo de hoy)
+  ] as const)(
+    '🔴 Codex r13 #1: la terminal cobra $%s de una IMPORTADA que SoftRestaurant canceló ⇒ %s/%s, total %s, saldo %s guardado = reconstruido (la v13: COMPLETED y PAGADA con total $100; $16 reconstruidos con $100, $0.01 con $115.99)',
+    async (cobrado, estado, pago, total, saldo, reaperturas) => {
+      const r = await cerrar(importada, cobrado)
+      expect([
+        r.estado,
+        r.totales.paymentStatus,
+        Number(r.totales.total),
+        Number(r.totales.remainingBalance),
+        r.reconstruido,
+        r.reaperturas,
+      ]).toEqual([estado, pago, total, saldo, saldo, reaperturas])
+      expect(r.escrituras.every((d: any) => d.taxAmount === undefined)).toBe(true) // el IVA no se toca (r9 #3)
+    },
+  )
+})
+
+/**
+ * 🔴 R8-1 (Codex recheck-12 P2): el cierre transaccional de la terminal (`settleStandalonePaymentInTx`, :1408) — el camino de una
+ * venta nativa — nunca reabre una venta cerrada. La cadena de Codex: venta $100 PAID → el panel corrige su cobro a $80 (sigue PAID)
+ * → llega un cobro de la terminal de $10 → el recálculo escribía PARTIAL, y con eso el pago manual y el PUT del panel volvían a
+ * aceptar cliente y lealtad.
+ */
+describe('🔴 R8-1: el cierre transaccional de la terminal (:1408) no reabre una venta cerrada', () => {
+  const COMPLETADA_EN = new Date('2026-10-01T18:00:00Z')
+  const { createSalePostingInTx } = jest.requireMock('@/services/inventory/inventoryPosting.service')
+
+  /** `acumulado` = todos los cobros COMPLETED (sin reembolsos) DESPUÉS de este; `pago` = el que entra ahora. */
+  async function cerrar(paymentStatus: string, cobros: { acumulado: number; pago: number; cuantos: number }, efectosDeCierre = true) {
+    const tx = {
+      order: {
+        findFirstOrThrow: jest.fn().mockResolvedValue({
+          id: ORDER_ID,
+          venueId: VENUE_ID,
+          originSystem: 'AVOQADO',
+          items: [],
+          status: paymentStatus === 'PAID' || paymentStatus === 'REFUNDED' ? 'COMPLETED' : 'PENDING',
+          completedAt: paymentStatus === 'PAID' || paymentStatus === 'REFUNDED' ? COMPLETADA_EN : null,
+          servedById: 'staff-1',
+          createdById: 'staff-1',
+          paymentStatus,
+          subtotal: new Decimal(100),
+          discountAmount: new Decimal(0),
+          serviceChargeAmount: new Decimal(0),
+          taxAmount: new Decimal(0),
+          contratoDePrecio: 'IVA_INCLUIDO',
+          tipAmount: new Decimal(0),
+        }),
+        update: jest.fn().mockResolvedValue({}),
+      },
+      payment: {
+        aggregate: jest
+          .fn()
+          .mockResolvedValue({ _sum: { amount: new Decimal(cobros.acumulado), tipAmount: new Decimal(0) }, _count: cobros.cuantos }),
+      },
+      activityLog: { create: jest.fn().mockResolvedValue({}) },
+    }
+    const r = await (paymentService as any).settleStandalonePaymentInTx(
+      tx,
+      VENUE_ID,
+      ORDER_ID,
+      { id: 'pay-r8', amount: new Decimal(cobros.pago), tipAmount: new Decimal(0) },
+      'staff-1',
+      true, // el negocio tiene pantalla de cocina: la marca tampoco se repite
+      efectosDeCierre,
+    )
+    const escrituras = tx.order.update.mock.calls.map((c: any[]) => c[0].data)
+    return { r, escrituras, data: escrituras[escrituras.length - 1] }
+  }
+
+  beforeEach(() => jest.clearAllMocks())
+
+  it.each(['PAID', 'REFUNDED'])(
+    '🔴 %s con $80 + $10 de la terminal ⇒ conserva su estado, saldo 0 y no retrocede nada (antes: PARTIAL con $10 por cobrar)',
+    async estado => {
+      const { r, escrituras, data } = await cerrar(estado, { acumulado: 90, pago: 10, cuantos: 2 })
+      expect(escrituras).toHaveLength(1)
+      expect([data.paymentStatus, Number(data.remainingBalance), Number(data.paidAmount)]).toEqual([estado, 0, 90])
+      expect([data.status, data.completedAt, data.loyaltyEligibleAt, data.kitchenPendingAt]).toEqual([
+        undefined,
+        undefined,
+        undefined,
+        undefined,
+      ])
+      expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true })
+    },
+  )
+
+  it('🔴 PAID con $80 + $20 que vuelve a cubrir ⇒ sin efectos de saldar OTRA vez: ni lealtad, ni vale, ni marca de cocina (antes: firstSettlement)', async () => {
+    const { r, data } = await cerrar('PAID', { acumulado: 100, pago: 20, cuantos: 2 })
+    expect([data.paymentStatus, Number(data.remainingBalance)]).toEqual(['PAID', 0])
+    expect([data.status, data.completedAt, data.loyaltyEligibleAt, data.kitchenPendingAt]).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ])
+    expect(r).toEqual({ firstSettlement: false, postingId: null, ventaCerrada: true })
+    expect(createSalePostingInTx).not.toHaveBeenCalled()
+  })
+
+  it('regresión: una venta PENDING que recibe $10 ⇒ PARTIAL con $90 por cobrar', async () => {
+    const { r, data } = await cerrar('PENDING', { acumulado: 10, pago: 10, cuantos: 1 })
+    expect([data.paymentStatus, Number(data.remainingBalance), data.status]).toEqual(['PARTIAL', 90, undefined])
+    expect(r.firstSettlement).toBe(false)
+  })
+
+  it('regresión: un cobro completo ⇒ PAID, COMPLETED y sus efectos (lealtad, vale, marca de cocina)', async () => {
+    const { r, data } = await cerrar('PENDING', { acumulado: 100, pago: 100, cuantos: 1 })
+    expect([data.paymentStatus, Number(data.remainingBalance), data.status]).toEqual(['PAID', 0, 'COMPLETED'])
+    expect(data.completedAt).toEqual(expect.any(Date))
+    expect(data.loyaltyEligibleAt).toEqual(expect.any(Date))
+    expect(data.kitchenPendingAt).toEqual(expect.any(Date))
+    expect(r).toEqual({ firstSettlement: true, postingId: 'posting-1', ventaCerrada: false })
+  })
+
+  it('regresión: el ORIGEN de una reasignación (no entra dinero: `null`, sin efectos) sí vuelve a deber, como hoy', async () => {
+    const { r, data } = await cerrar('PAID', { acumulado: 90, pago: 0, cuantos: 1 }, false)
+    expect([data.paymentStatus, Number(data.remainingBalance)]).toEqual(['PARTIAL', 10])
+    expect(r.firstSettlement).toBe(false)
   })
 })

@@ -199,10 +199,14 @@ export function buildWatchdogSql(now: Date = new Date()): { counts: string; deta
         UNION ALL
 
         -- 2. Descuento MAYOR que el consumo — regalaría más de lo que vale la cuenta.
+        --    B2c F2: desde B2/B2c la cabecera es Σ filas SIN tope (una cortesía sobre un fijo deja 160 sobre 150, total 0 —
+        --    el total sí se topa—). Sólo es daño la cabecera que sus FILAS no explican: sin filas, o Σ filas ≠ cabecera.
         SELECT 'DESCUENTO EXCEDE EL CONSUMO', v.name, o.id,
-               'descuento=' || o."discountAmount" || ' > subtotal=' || o.subtotal
+               'descuento=' || o."discountAmount" || ' > subtotal=' || o.subtotal || ' filas=' || COALESCE(f.suma::text, 'ninguna')
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
+        LEFT JOIN LATERAL (SELECT SUM(od.amount) AS suma FROM "OrderDiscount" od WHERE od."orderId" = o.id) f ON true
         WHERE o."discountAmount" > o.subtotal AND o.subtotal > 0 AND ${REAL_VENUES}
+          AND f.suma IS DISTINCT FROM o."discountAmount"
 
         UNION ALL
 

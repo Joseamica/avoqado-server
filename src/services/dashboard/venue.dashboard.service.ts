@@ -32,6 +32,8 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
 import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
+import { historiaDeSede, sedeConPagoAlPersonalError } from './staffPay/participacion'
+import { PresupuestoDeEspera, tomarCandado } from '../../utils/esperaDeCandados'
 import {
   exigirSinObligacionViva,
   getOrCreateStripeCustomer,
@@ -351,6 +353,10 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
   return updatedVenue
 }
 
+/** El borrado declara su timeout (antes heredaba los 5 s de Prisma); su presupuesto de espera sale de él (B9: 6 s). */
+const TIMEOUT_BORRADO_MS = 10_000
+const OPCIONES_BORRADO = { timeout: TIMEOUT_BORRADO_MS }
+
 const negocioConCuentaDeCobro = () =>
   new ConflictError(
     'Este negocio ya tiene una cuenta de cobro en Stripe: no se borra, se cierra (conserva su historial de cobros).',
@@ -411,11 +417,27 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
 
   // Use a transaction to delete all related data in the correct order
   await prisma.$transaction(async tx => {
+    // B9: el presupuesto de espera de la transacción, creado al entrar.
+    const presupuesto = PresupuestoDeEspera.para(TIMEOUT_BORRADO_MS)
     // La fila del negocio queda BLOQUEADA hasta confirmar: quien quiera ligarle un cliente de Stripe
     // (`getOrCreateStripeCustomer` lo reclama con un UPDATE condicional) espera, y ya no encuentra el negocio.
-    const [bloqueada] = await tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
-      SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+    const [bloqueada] = await tomarCandado(
+      tx,
+      () => tx.$queryRaw<{ stripeCustomerId: string | null }[]>`
+      SELECT "stripeCustomerId" FROM "Venue" WHERE id = ${venueId} FOR UPDATE /* B9:sede:exclusivo */`,
+      { presupuesto },
+    )
     if (bloqueada?.stripeCustomerId) throw negocioConCuentaDeCobro()
+    // Pago al personal (fase 3, B9): con la fila ya bloqueada, en OTRA sentencia, ve el primer devengo que confirmó quien
+    // esperábamos. Una sede con historia de pago al personal no se borra.
+    if (await historiaDeSede(tx, venueId)) throw sedeConPagoAlPersonalError('borrar')
+    // Tarjetas de regalo (nota 1 del coordinador, C6): el saldo vendido es dinero de los clientes del negocio y la libreta es
+    // de sólo inserción. Con la fila ya bloqueada, un sobre que se esté creando espera y luego choca con su llave foránea.
+    if (await tx.giftCard.findFirst({ where: { venueId }, select: { id: true } }))
+      throw new ConflictError(
+        'Este negocio vendió tarjetas de regalo: su saldo es dinero de sus clientes y no se puede borrar. Ciérralo para conservar su historial.',
+        'VENUE_HAS_GIFT_CARDS',
+      )
 
     logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
 
@@ -517,6 +539,9 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
       })
       logger.info(`  ✓ Deleted ${deletedProducts.count} Products`)
     }
+    // Variantes: el padre va después de sus productos (Product.productGroupId es RESTRICT). Fuera del `if`: un padre sin
+    // productos también bloquearía el borrado de su categoría (ProductGroup.categoryId es RESTRICT).
+    await tx.productGroup.deleteMany({ where: { venueId } })
 
     // 8. Delete Modifiers and ModifierGroups
     const modifierGroupIds = await tx.modifierGroup.findMany({
@@ -655,12 +680,19 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
     })
     logger.info(`  ✓ Deleted ${deletedMonthlyVenueProfit.count} MonthlyVenueProfits`)
 
+    // Puestos de RH (fase 1a): la asignación referencia su puesto con RESTRICT y los dos caen con el cascade del venue.
+    // Se van primero, en UNA sentencia (la cadena `supersedesId` se revisa al final), igual que en liveDemoCleanup.
+    const deletedStaffAssignments = await tx.staffAssignment.deleteMany({
+      where: { venueId },
+    })
+    logger.info(`  ✓ Deleted ${deletedStaffAssignments.count} StaffAssignments`)
+
     // 18. Finally, delete the Venue itself
     await tx.venue.delete({
       where: { id: venueId },
     })
     logger.info(`  ✅ Venue ${venueId} deleted successfully`)
-  })
+  }, OPCIONES_BORRADO)
 
   logger.info(`🎉 Venue deletion complete for venueId: ${venueId}`)
 
@@ -975,8 +1007,9 @@ export async function convertDemoVenue(
 
   // 🧹 Clean demo data before converting to real venue
   // This removes demo orders, payments, reviews, etc. while keeping menu/products/tables
+  // ⭐ Tarjetas de regalo: si el negocio vendió alguna, no borra nada (`skippedReason: 'GIFT_CARDS'`) y la conversión sigue.
   try {
-    const cleanupResult = await cleanDemoData(venueId)
+    const cleanupResult = await cleanDemoData(venueId, staffId)
     logger.info(`🧹 Demo data cleaned for venue ${venueId}:`, cleanupResult)
   } catch (cleanupError) {
     logger.error(`⚠️ Demo cleanup failed for venue ${venueId}:`, cleanupError)

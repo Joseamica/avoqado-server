@@ -182,13 +182,16 @@ export class SerializedInventoryService {
   /**
    * Registers a new item (inventory registration).
    */
-  async register(data: {
-    venueId: string
-    categoryId: string
-    serialNumber: string
-    createdBy: string
-  }): Promise<SerializedItem & { category: ItemCategory }> {
-    return this.db.serializedItem.create({
+  async register(
+    data: {
+      venueId: string
+      categoryId: string
+      serialNumber: string
+      createdBy: string
+    },
+    tx?: Prisma.TransactionClient,
+  ): Promise<SerializedItem & { category: ItemCategory }> {
+    return (tx ?? this.db).serializedItem.create({
       data: {
         venueId: data.venueId,
         categoryId: data.categoryId,

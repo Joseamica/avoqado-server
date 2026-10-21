@@ -88,6 +88,25 @@ describe('POST /mobile/venues/:venueId/orders — candados de promoción', () =>
     mockState.denyFeature = false
   })
 
+  it('a combo with per-component service courses also requires TABLE_SERVICE', async () => {
+    const next = jest.fn()
+    const req = {
+      body: {
+        items: [
+          {
+            promotionRef: {
+              ...promotionRef,
+              selections: [{ groupId: 'g', optionId: 'o', serviceCourse: { id: 'immediate', label: 'Al momento', kind: 'IMMEDIATE' } }],
+            },
+          },
+        ],
+      },
+    }
+    await guard(req, buildRes(), next)
+    expect(mockState.calls).toEqual(['permission:discounts:apply', 'feature:PROMOTIONS', 'feature:TABLE_SERVICE'])
+    expect(next).toHaveBeenCalledTimes(1)
+  })
+
   // ── Cableado de la ruta ──
 
   it('la ruta termina en createOrder y sigue exigiendo orders:create al montarse', () => {

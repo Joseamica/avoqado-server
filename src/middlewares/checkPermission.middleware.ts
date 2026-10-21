@@ -12,6 +12,14 @@ import { consumePermissionOverride, isManagerPinOverrideEnabled } from '@/servic
 const METODOS_DE_LECTURA = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /**
+ * A3 (cierre): la ruta que se GUARDA (bitácora, `PermissionOverride.consumedRoute`) va sin query string. Una query puede traer un
+ * dato secreto —el código de una tarjeta de regalo viajaba así— y esos dos lugares lo escribían sin tapar. Defensa general.
+ */
+function rutaSinQuery(req: Request): string | undefined {
+  return req.originalUrl?.split('?')[0]
+}
+
+/**
  * ¿Esta denegación merece una fila en la bitácora que LEE EL DUEÑO?
  *
  * 🔴 Nació de un dato, no de una opinión: en el venue Testarudo Cafe los 122
@@ -156,25 +164,24 @@ export async function resolveUserRoleForVenue(params: {
   // en las rutas que ya caían al camino largo. La memoria muere con el request: no hay
   // caché entre peticiones, para que dar de baja a alguien surta efecto de inmediato.
   const memoKey = `${userId}:${targetVenueId}`
-  if (req) {
-    const cacheado = req.__avqRoleCache?.get(memoKey)
-    if (cacheado) return cacheado
-  }
-  const recordar = (r: ResolvedUserRole): ResolvedUserRole => {
-    if (req) {
-      req.__avqRoleCache ??= new Map()
-      req.__avqRoleCache.set(memoKey, r)
-    }
-    return r
-  }
+  // Se guarda la consulta EN CURSO, no sólo su resultado: dos llamadas simultáneas de la misma petición (la ruta y el
+  // observador de aparatos cuando el cliente aborta, Codex R4-1) comparten una sola ida a la base.
+  const enMemoria = req?.__avqRoleCache?.get(memoKey)
+  if (enMemoria) return enMemoria
+  const resolucion = resolverRolEnLaBase(userId, targetVenueId)
+  if (req) (req.__avqRoleCache ??= new Map()).set(memoKey, resolucion)
   void tokenVenueId
   void tokenRole
+  return resolucion
+}
 
+/** La consulta real de `resolveUserRoleForVenue`, sin memoria: la persona activa, su fila en la sucursal o dueño de la org. */
+async function resolverRolEnLaBase(userId: string, targetVenueId: string): Promise<ResolvedUserRole> {
   // 🔴 H2 (Codex, 2ª pasada): la PERSONA tiene que seguir activa. Antes sólo se miraba su fila en
   // la sucursal: dar de baja la cuenta (Staff.active=false) no le quitaba el rol, cobros incluidos.
   const persona = await prisma.staff.findUnique({ where: { id: userId }, select: { active: true } })
   if (!persona?.active) {
-    return recordar({ role: null, source: 'none' })
+    return { role: null, source: 'none' }
   }
 
   const staffVenue = await prisma.staffVenue.findUnique({
@@ -192,24 +199,39 @@ export async function resolveUserRoleForVenue(params: {
     },
   })
 
-  if (staffVenue?.active) {
-    return recordar({
-      role: staffVenue.role,
-      source: 'staffVenue',
-      permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null,
-    })
+  // Una fila OWNER (o superadmin) ya es lo más alto: no hace falta preguntar por la organización (ni pagar consultas).
+  if (staffVenue?.active && (staffVenue.role === StaffRole.OWNER || staffVenue.role === StaffRole.SUPERADMIN)) {
+    return { role: staffVenue.role, source: 'staffVenue', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
   }
 
+  // 🔴 El DUEÑO DE LA ORGANIZACIÓN manda sobre una fila MENOR en la sucursal (P2-6, Codex, 15-oct). Antes la
+  // fila ganaba: un dueño de la org que además era CAJERO en una tienda recibía 403 en `attendance:manage` y
+  // `teams:update`, mientras `getUserAccess` (dashboard, apps, MCP) ya lo trataba como OWNER. Misma precedencia
+  // que `getUserAccess`, con sus mismas piezas: el rol OWNER con lo que el venue le personalizó y le QUITÓ al
+  // OWNER (se cargan por rol más abajo) y, si su fila trae un Conjunto de Permisos, ese conjunto.
+  //
+  // Costo (Codex r2, 16-oct): sin `relationJoins`, cada relación en un `select` es otra consulta SQL. Por eso la
+  // fila no trae su venue, y para una fila menor la pregunta «¿es dueña de la org de ESTE venue?» es UNA sola
+  // consulta (la relación va en el `where`, que Prisma resuelve dentro del mismo SQL). Fijado en
+  // tests/unit/middlewares/resolveUserRole.costoPorRol.test.ts.
+  if (staffVenue?.active) {
+    const duena = await prisma.staffOrganization.findFirst({
+      where: { staffId: userId, role: OrgRole.OWNER, isActive: true, organization: { venues: { some: { id: targetVenueId } } } },
+      select: { id: true },
+    })
+    return duena
+      ? { role: StaffRole.OWNER, source: 'orgOwner', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
+      : { role: staffVenue.role, source: 'staffVenue', permissionSet: staffVenue.permissionSetId ? staffVenue.permissionSet : null }
+  }
+
+  // Sin fila activa: el respaldo de siempre (dueño de la org del venue).
   const targetVenue = await prisma.venue.findUnique({
     where: { id: targetVenueId },
     select: { organizationId: true },
   })
 
   if (!targetVenue) {
-    return recordar({
-      role: null,
-      source: 'none',
-    })
+    return { role: null, source: 'none' }
   }
 
   const orgMembership = await prisma.staffOrganization.findUnique({
@@ -226,16 +248,54 @@ export async function resolveUserRoleForVenue(params: {
   })
 
   if (orgMembership?.isActive && orgMembership.role === OrgRole.OWNER) {
-    return recordar({
+    return {
       role: StaffRole.OWNER,
       source: 'orgOwner',
-    })
+      // Igual que `getUserAccess`: el Conjunto de Permisos de su fila (aunque esté apagada) manda.
+      permissionSet: staffVenue?.permissionSetId ? staffVenue.permissionSet : null,
+    }
   }
 
-  return recordar({
-    role: null,
-    source: 'none',
+  return { role: null, source: 'none' }
+}
+
+/**
+ * ¿Este rol, en este negocio, tiene el permiso? La evaluación de `checkPermission`, exportada tal cual (pedidos en línea, H3: el
+ * latido de la bandeja exige `orders:update` efectivo). Con lista propia del empleado (`permissionSet`) se evalúa esa lista; si
+ * no, el rol con los permisos personalizados del negocio (`VenueRolePermission`, también los quitados).
+ */
+export async function evaluateRolePermission(p: {
+  venueId: string
+  role: StaffRole
+  permissionSet?: PermissionSet | null
+  permission: string
+}): Promise<boolean> {
+  // If a permission set is assigned, evaluate that effective list directly.
+  if (p.permissionSet) return evaluatePermissionList(p.permissionSet.permissions, p.permission)
+
+  // Load custom permissions from VenueRolePermission table
+  let customPermissions: string[] | null = null
+  const venueRolePermission = await prisma.venueRolePermission.findUnique({
+    where: {
+      venueId_role: {
+        venueId: p.venueId,
+        role: p.role,
+      },
+    },
+    select: {
+      permissions: true,
+      deniedPermissions: true,
+    },
   })
+
+  let deniedPermissions: string[] | null = null
+  if (venueRolePermission) {
+    customPermissions = venueRolePermission.permissions as string[]
+    deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
+  }
+
+  // Check if user has permission (uses override mode for wildcard roles)
+  return hasPermission(p.role, customPermissions, p.permission, deniedPermissions)
 }
 
 /**
@@ -348,7 +408,7 @@ export const checkPermission = (requiredPermission: string) => {
               permission: requiredPermission,
               reason: 'no_venue_access',
               method: req.method,
-              path: req.originalUrl,
+              path: rutaSinQuery(req),
             },
             ipAddress: req.ip,
             userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
@@ -368,36 +428,7 @@ export const checkPermission = (requiredPermission: string) => {
       // never their raw JWT role (which may belong to a different venue).
       ;(req as any).resolvedRole = userRole
 
-      // If a permission set is assigned, evaluate that effective list directly.
-      let authorized: boolean
-      if (permissionSet) {
-        authorized = evaluatePermissionList(permissionSet.permissions, requiredPermission)
-      } else {
-        // Load custom permissions from VenueRolePermission table
-        let customPermissions: string[] | null = null
-
-        const venueRolePermission = await prisma.venueRolePermission.findUnique({
-          where: {
-            venueId_role: {
-              venueId,
-              role: userRole,
-            },
-          },
-          select: {
-            permissions: true,
-            deniedPermissions: true,
-          },
-        })
-
-        let deniedPermissions: string[] | null = null
-        if (venueRolePermission) {
-          customPermissions = venueRolePermission.permissions as string[]
-          deniedPermissions = (venueRolePermission.deniedPermissions as string[]) ?? null
-        }
-
-        // Check if user has permission (uses override mode for wildcard roles)
-        authorized = hasPermission(userRole, customPermissions, requiredPermission, deniedPermissions)
-      }
+      const authorized = await evaluateRolePermission({ venueId, role: userRole, permissionSet, permission: requiredPermission })
 
       if (!authorized) {
         // 🔴 PIN de autorización de gerente. Este es el ÚNICO punto de integración
@@ -409,7 +440,7 @@ export const checkPermission = (requiredPermission: string) => {
             token: overrideToken,
             venueId,
             permission: requiredPermission,
-            route: `${req.method} ${req.originalUrl}`,
+            route: `${req.method} ${rutaSinQuery(req)}`,
           })
 
           if (consumed) {
@@ -429,7 +460,7 @@ export const checkPermission = (requiredPermission: string) => {
                   userRole,
                   authorizedByStaffVenueId: consumed.authorizedById,
                   method: req.method,
-                  path: req.originalUrl,
+                  path: rutaSinQuery(req),
                 },
                 ipAddress: req.ip,
                 userAgent: typeof req.get === 'function' ? req.get('user-agent') : undefined,
@@ -488,7 +519,7 @@ export const checkPermission = (requiredPermission: string) => {
                 userRole,
                 roleSource,
                 method: req.method,
-                path: req.originalUrl,
+                path: rutaSinQuery(req),
                 hasPermissionSet: !!permissionSet,
               },
               ipAddress: req.ip,

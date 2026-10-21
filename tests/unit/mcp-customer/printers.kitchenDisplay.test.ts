@@ -4,6 +4,7 @@
  */
 import { registerPrinterTools } from '../../../src/mcp/tools/printers'
 import type { McpScope } from '../../../src/mcp/scope'
+import { getRouting } from '../../../src/services/dashboard/printStation.dashboard.service'
 import { ForbiddenError } from '../../../src/errors/AppError'
 
 const mockList = jest.fn()
@@ -154,6 +155,25 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     )
   })
 
+  it('3.6: la comanda de una mesa dice la mesa y sus tiempos, en orden y sin repetir; sin mesa va en null', async () => {
+    mockListKds.mockResolvedValue([
+      {
+        id: 'k1',
+        orderNumber: 'A1',
+        status: 'NEW',
+        orderType: 'DINE_IN',
+        tableNumber: '8',
+        items: [{ course: 'Aperitivos' }, { course: null }, { course: 'Principales' }, { course: 'Aperitivos' }],
+        createdAt: '2026-09-27T12:00:00.000Z',
+      },
+      { id: 'k2', orderNumber: 'A2', status: 'NEW', orderType: 'DINE_IN', items: [{}], createdAt: '2026-09-27T12:01:00.000Z' },
+    ])
+    mockCountKds.mockResolvedValue(2)
+    const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1' }))
+    expect(r.comandas[0]).toEqual(expect.objectContaining({ mesa: '8', tiempos: ['Aperitivos', 'Principales'] }))
+    expect(r.comandas[1]).toEqual(expect.objectContaining({ mesa: null, tiempos: [] }))
+  })
+
   it('un venue fuera de alcance se rechaza', async () => {
     await expect(cliente('list_kitchen_tickets', { venueId: 'ajeno' })).rejects.toThrow('ScopeError')
   })
@@ -164,5 +184,15 @@ describe('list_kitchen_tickets (etapa 3)', () => {
     const r = parse(await cliente('list_kitchen_tickets', { venueId: 'v1', status: 'BOGUS' }))
     expect(r.ok).toBe(true)
     expect(mockListKds).toHaveBeenCalledWith('v1', 'BOGUS', undefined)
+  })
+})
+
+describe('list_print_stations routing summary', () => {
+  it('requests only aggregates and preserves the response', async () => {
+    const r = parse(await cliente('list_print_stations', { venueId: 'v1' }))
+    expect(getRouting).toHaveBeenCalledWith('v1', { section: 'summary' })
+    expect(r.hasDefault).toBe(true)
+    expect(r.unroutedCategories).toBe(0)
+    expect(r.stations[0].id).toBe('s1')
   })
 })

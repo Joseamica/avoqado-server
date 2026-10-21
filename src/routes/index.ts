@@ -3,7 +3,6 @@ import express from 'express'
 import dashboardRoutes from './dashboard.routes'
 import organizationRoutes from './organization.routes'
 import tpvRoutes from './tpv.routes'
-import posSyncRoutes from './pos-sync.routes'
 import invitationRoutes from './invitations.routes'
 import onboardingRoutes from './onboarding.routes'
 import superadminRoutes from './superadmin.routes'
@@ -30,7 +29,6 @@ router.use('/dashboard', dashboardRoutes) // All dashboard routes under /api/v1/
 // `generalStats.dashboard.service.ts:244,958`: donde no hay medición se devuelve 0, no se inventa.
 router.use('/organizations', organizationRoutes) // Organization-level routes for OWNER dashboard
 router.use('/tpv', tpvVersionGate, tpvRoutes) // All TPV routes under /api/v1/tpv (with version gate)
-router.use('/pos-sync', posSyncRoutes) // All posSync routes under /api/posSync
 router.use('/invitations', invitationRoutes) // All invitation routes under /api/v1/invitations
 router.use('/onboarding', onboardingRoutes) // All onboarding routes under /api/v1/onboarding
 router.use('/superadmin', superadminRoutes) // All superadmin routes under /api/v1/superadmin

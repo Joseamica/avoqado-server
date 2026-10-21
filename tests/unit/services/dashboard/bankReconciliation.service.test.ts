@@ -134,6 +134,28 @@ describe('bankReconciliation — loadDepositCandidates (pool + ventana)', () => 
     expect(gte).toBeLessThanOrEqual(dayStart - 86_400_000) // borde inferior corrido ≥1 día hacia atrás
     expect(lte).toBeLessThan(dayEnd + 86_400_000) // borde superior NO corrido al futuro (sigue ~fin del estado)
   })
+  it('🔴 un reembolso por TRANSFERENCIA (EXTERNAL_RECORDED o legacy null) NO se netea: es un débito del banco', async () => {
+    const at = new Date('2026-06-10T18:00:00Z')
+    p.payment.findMany.mockResolvedValue([
+      { netAmount: 250, createdAt: at, type: 'REGULAR', method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' },
+      { netAmount: -100, createdAt: at, type: 'REFUND', method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' }, // fuera
+      { netAmount: -40, createdAt: at, type: 'REFUND', method: 'BANK_TRANSFER', fundsFlow: null }, // legacy → fuera
+    ])
+    const cands = await loadDepositCandidates('v1', '2026-06-10', '2026-06-10', 'America/Mexico_City')
+    expect(cands.reduce((n, c) => n + c.netCents, 0)).toBe(25000)
+  })
+
+  it('los reembolsos de tarjeta (también registrada a mano), reparto y procesador SÍ se netean', async () => {
+    const at = new Date('2026-06-10T18:00:00Z')
+    p.payment.findMany.mockResolvedValue([
+      { netAmount: 250, createdAt: at, type: 'REGULAR', method: 'CREDIT_CARD', fundsFlow: 'AVOQADO_PROCESSED' },
+      { netAmount: -100, createdAt: at, type: 'REFUND', method: 'CREDIT_CARD', fundsFlow: 'EXTERNAL_RECORDED' }, // tarjeta a mano
+      { netAmount: -20, createdAt: at, type: 'REFUND', method: 'CREDIT_CARD', fundsFlow: 'AVOQADO_PROCESSED' },
+      { netAmount: -10, createdAt: at, type: 'REFUND', method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED' }, // reparto
+    ])
+    const cands = await loadDepositCandidates('v1', '2026-06-10', '2026-06-10', 'America/Mexico_City')
+    expect(cands.reduce((n, c) => n + c.netCents, 0)).toBe(12000)
+  })
 })
 
 describe('bankReconciliation — confirmMatches', () => {

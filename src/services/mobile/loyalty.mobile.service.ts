@@ -18,6 +18,11 @@ import { LoyaltyTransactionType, Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { getOrCreateLoyaltyConfig } from '../dashboard/loyalty.dashboard.service'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { comoJson, nuevoRepartoDeCuenta } from '../shared/repartoDescuento'
+import { conservarDescuentoHistorico } from '../shared/repartoDescuentoTx'
 
 /** Rounds to cents the way every other money path here does. */
 function money(value: number): number {
@@ -32,9 +37,13 @@ function money(value: number): number {
  * caller has no assignment to this venue we store null rather than fail: the
  * audit attribution is nice to have, the money movement is not optional.
  */
-async function resolveStaffVenueId(venueId: string, staffId?: string): Promise<string | undefined> {
+async function resolveStaffVenueId(
+  db: Pick<Prisma.TransactionClient, 'staffVenue'>,
+  venueId: string,
+  staffId?: string,
+): Promise<string | undefined> {
   if (!staffId) return undefined
-  const sv = await prisma.staffVenue.findUnique({
+  const sv = await db.staffVenue.findUnique({
     where: { staffId_venueId: { staffId, venueId } },
     select: { id: true },
   })
@@ -90,28 +99,46 @@ export async function getCustomerLoyalty(venueId: string, customerId: string, or
  * Redeem points onto an OPEN check: burns the points and applies the matching
  * discount atomically, then recalculates the order the same way cortesía and
  * catalog discounts do.
+ *
+ * 🔴 Order lock FIRST (before the Customer burn), cap/base from the locked read, and
+ * burn + discount + totals in ONE transaction: a failure after the burn gives the
+ * points back with the rollback, and a concurrent writer can never interleave
+ * between the discount and the totals.
  */
-export async function redeemPointsToOrder(venueId: string, orderId: string, customerId: string, points: number, staffId?: string) {
+export async function redeemPointsToOrderInTransaction(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  customerId: string,
+  points: number,
+  staffId?: string,
+  config?: Awaited<ReturnType<typeof getOrCreateLoyaltyConfig>>,
+) {
   if (!Number.isInteger(points) || points <= 0) {
     throw new BadRequestError('points debe ser un entero positivo')
   }
-
-  const order = await prisma.order.findFirst({
+  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findFirst({
     where: { id: orderId, venueId },
-    select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true },
+    select: { id: true, total: true, subtotal: true, discountAmount: true, paymentStatus: true, paidAmount: true, originSystem: true },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'canje de puntos')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede modificar una orden ya pagada')
   }
 
-  const config = await getOrCreateLoyaltyConfig(venueId)
-  if (!config.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
-  if (points < config.minPointsRedeem) {
-    throw new BadRequestError(`Se requieren al menos ${config.minPointsRedeem} puntos para canjear`)
+  const effectiveConfig = config ?? (await getOrCreateLoyaltyConfig(venueId, tx))
+  if (!effectiveConfig.active) throw new BadRequestError('El programa de lealtad no está activo en esta sucursal')
+  if (points < effectiveConfig.minPointsRedeem) {
+    throw new BadRequestError(`Se requieren al menos ${effectiveConfig.minPointsRedeem} puntos para canjear`)
   }
 
-  const customer = await prisma.customer.findFirst({
+  const customer = await tx.customer.findFirst({
     where: { id: customerId, venueId },
     select: { id: true, loyaltyPoints: true },
   })
@@ -120,7 +147,7 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
     throw new BadRequestError(`Puntos insuficientes: el cliente tiene ${customer.loyaltyPoints}`)
   }
 
-  const redemptionRate = Number(config.redemptionRate)
+  const redemptionRate = Number(effectiveConfig.redemptionRate)
   const rawValue = money(points * redemptionRate)
   // 🔴 Tope contra la BASE (subtotal − descuentos), NO contra total: el total
   // incluye cobros por servicio que el descuento no puede compensar — topar
@@ -133,47 +160,65 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
   // If the value was capped, only burn the points actually used.
   const pointsToBurn = discountAmount < rawValue && redemptionRate > 0 ? Math.ceil(discountAmount / redemptionRate) : points
 
-  const staffVenueId = await resolveStaffVenueId(venueId, staffId)
+  const staffVenueId = await resolveStaffVenueId(tx, venueId, staffId)
 
-  await prisma.$transaction(async tx => {
-    const transaction = await tx.loyaltyTransaction.create({
-      data: {
-        customerId,
-        type: LoyaltyTransactionType.REDEEM,
-        points: -pointsToBurn,
-        orderId,
-        reason: `Canje de ${pointsToBurn} puntos por $${discountAmount.toFixed(2)} de descuento`,
-        createdById: staffVenueId,
-      },
-    })
-
-    // 🔴 Carrera de doble canje: el guard de saldo corre antes de la tx, así
-    // que el decremento debe ser CONDICIONAL — dos canjes concurrentes no
-    // pueden quemar los mismos puntos (auditoría 2026-07-18).
-    const burned = await tx.customer.updateMany({
-      where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
-      data: { loyaltyPoints: { decrement: pointsToBurn } },
-    })
-    if (burned.count === 0) {
-      throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
-    }
-
-    await tx.orderDiscount.create({
-      data: {
-        orderId,
-        type: 'FIXED_AMOUNT',
-        name: `Recompensas — ${pointsToBurn} puntos`,
-        value: new Prisma.Decimal(discountAmount),
-        amount: new Prisma.Decimal(discountAmount),
-        isManual: true,
-        appliedById: staffVenueId,
-        loyaltyTransactionId: transaction.id,
-      },
-    })
+  const transaction = await tx.loyaltyTransaction.create({
+    data: {
+      customerId,
+      type: LoyaltyTransactionType.REDEEM,
+      points: -pointsToBurn,
+      orderId,
+      reason: `Canje de ${pointsToBurn} puntos por $${discountAmount.toFixed(2)} de descuento`,
+      createdById: staffVenueId,
+    },
   })
 
-  const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
-  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0))
+  // 🔴 Carrera de doble canje: el saldo leído arriba no reserva nada, así que el
+  // decremento debe ser CONDICIONAL — dos canjes concurrentes (sobre órdenes
+  // distintas) no pueden quemar los mismos puntos (auditoría 2026-07-18).
+  const burned = await tx.customer.updateMany({
+    where: { id: customerId, loyaltyPoints: { gte: pointsToBurn } },
+    data: { loyaltyPoints: { decrement: pointsToBurn } },
+  })
+  if (burned.count === 0) {
+    throw new BadRequestError('Puntos insuficientes (otro canje se procesó al mismo tiempo)')
+  }
+
+  const balance = await tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
+  const newBalance = balance.loyaltyPoints
+
+  // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const row = await tx.orderDiscount.create({
+    data: {
+      orderId,
+      type: 'FIXED_AMOUNT',
+      name: `Recompensas — ${pointsToBurn} puntos`,
+      value: new Prisma.Decimal(discountAmount),
+      amount: new Prisma.Decimal(discountAmount),
+      isManual: true,
+      appliedById: staffVenueId,
+      loyaltyTransactionId: transaction.id,
+      // B2: fijo topado a subtotal − descuentos (con promociones) ⇒ fila de CUENTA; el recálculo de abajo la reparte.
+      reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
+    },
+  })
+
+  const totals = await recalculateOrderTotals(orderId, 0, Number(order.paidAmount || 0), tx)
+  return { pointsToBurn, discountAmount, newBalance, transaction, row, totals }
+}
+
+export async function redeemPointsToOrder(venueId: string, orderId: string, customerId: string, points: number, staffId?: string) {
+  if (!Number.isInteger(points) || points <= 0) {
+    throw new BadRequestError('points debe ser un entero positivo')
+  }
+
+  // Venue configuration is not Order data: read before the lock; its checks keep their original order below.
+  const config = await getOrCreateLoyaltyConfig(venueId)
+  const { pointsToBurn, discountAmount, newBalance, totals } = await prisma.$transaction(
+    tx => redeemPointsToOrderInTransaction(tx, venueId, orderId, customerId, points, staffId, config),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void (await import('../dashboard/activity-log.service')).logAction({
     action: 'LOYALTY_POINTS_REDEEMED',
@@ -184,15 +229,10 @@ export async function redeemPointsToOrder(venueId: string, orderId: string, cust
     data: { customerId, points: pointsToBurn, discountAmount },
   })
 
-  const balance = await prisma.customer.findUnique({
-    where: { id: customerId },
-    select: { loyaltyPoints: true },
-  })
-
   return {
     pointsRedeemed: pointsToBurn,
     discountAmount,
-    newBalance: balance?.loyaltyPoints ?? 0,
+    newBalance,
     order: totals,
   }
 }
@@ -207,7 +247,7 @@ export async function refundLoyaltyForOrderDiscount(
   venueId: string,
   row: { id: string; loyaltyTransactionId: string | null },
   staffId?: string,
-): Promise<{ pointsRefunded: number; customerId: string } | null> {
+): Promise<{ pointsRefunded: number; customerId: string; transactionId: string } | null> {
   if (!row.loyaltyTransactionId) return null
 
   // Same FK caveat as the redeem path (see resolveStaffVenueId).
@@ -226,7 +266,7 @@ export async function refundLoyaltyForOrderDiscount(
 
   const pointsRefunded = Math.abs(original.points)
 
-  await tx.loyaltyTransaction.create({
+  const adjustment = await tx.loyaltyTransaction.create({
     data: {
       customerId: original.customerId,
       type: LoyaltyTransactionType.ADJUST,
@@ -242,5 +282,5 @@ export async function refundLoyaltyForOrderDiscount(
     data: { loyaltyPoints: { increment: pointsRefunded } },
   })
 
-  return { pointsRefunded, customerId: original.customerId }
+  return { pointsRefunded, customerId: original.customerId, transactionId: adjustment.id }
 }

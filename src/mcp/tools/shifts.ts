@@ -7,6 +7,7 @@ import { createGuard } from '../guard'
 import { text } from '../respond'
 import { getExpectedCashAmount, getCloseoutHistory } from '@/services/dashboard/cashCloseout.dashboard.service'
 import { getDrawerStatus, getDrawerSessions } from '@/services/dashboard/cashDrawer.dashboard.service'
+import { ventasSinTarjetasPorTurno } from '@/services/shared/ventasDelTurno'
 
 const money = (d: { toString(): string } | null): number | null => (d == null ? null : Number(d))
 const round2 = (n: number): number => Math.round(n * 100) / 100
@@ -34,6 +35,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
       const shifts = await prisma.shift.findMany({
         where: { ...where, ...statusFilter },
         select: {
+          id: true,
           startTime: true,
           endTime: true,
           status: true,
@@ -55,6 +57,13 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
         orderBy: { startTime: 'desc' },
         take: limit ?? 20,
       })
+      // R3 (Codex #5 del cierre): el `totalSales` de un turno SIN cerrar es el acumulado en vivo (cuenta las cargas de tarjetas de
+      // regalo); sus ventas salen de la agregación que las excluye, la misma que sondea la PAX. El cierre firma el total sin ellas.
+      // Cierre r1: UNA consulta agrupada para todos los turnos sin cerrar de la respuesta.
+      const ventasSinCerrar = await ventasSinTarjetasPorTurno(
+        venueId,
+        shifts.filter(s => s.status !== ShiftStatus.CLOSED).map(s => s.id),
+      )
       return text({
         venueId,
         count: shifts.length,
@@ -64,7 +73,7 @@ export function registerShiftTools(server: McpServer, scope: McpScope) {
           status: s.status,
           openedAt: s.startTime.toISOString(),
           closedAt: s.endTime?.toISOString() ?? null,
-          sales: money(s.totalSales),
+          sales: money(ventasSinCerrar.get(s.id) ?? s.totalSales),
           tips: money(s.totalTips),
           orders: s.totalOrders,
           cash: money(s.totalCashPayments),

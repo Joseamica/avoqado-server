@@ -2,8 +2,7 @@
  * Customer Portal Public Service
  *
  * Handles:
- * - Customer registration (email + password)
- * - Customer login
+ * - Customer login (email + password, sólo cuentas que ya la tienen; las nuevas entran con código)
  * - Portal data (credits + reservations)
  *
  * Uses existing Customer.password field — no new tables.
@@ -15,119 +14,20 @@ import prisma from '@/utils/prismaClient'
 import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
 import { generateCustomerToken } from '@/jwt.service'
-import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
-
-const SALT_ROUNDS = 10
+import { phonesMatch } from '@/utils/phone'
 
 /**
- * Register a new customer account (or set password on existing customer)
+ * 🔴 Toda cuenta nueva se crea con código (auditoría de seguridad 2026-09-30/10-01, decisión del founder del 1-oct): `verifyOtp`
+ * prueba que el correo o el teléfono son de quien entra. El registro con contraseña le entregaba a cualquiera la cuenta de un
+ * cliente que existía sin contraseña (y por teléfono le cambiaba el correo) y dejaba «apartar» el correo de alguien antes de
+ * que reservara. Responde SIEMPRE lo mismo y no consulta nada: tampoco dice si el contacto ya existe o está desactivado. La
+ * ruta sigue viva para que una página vieja en caché le muestre al cliente qué hacer.
  */
-export async function registerCustomer(
-  venueId: string,
-  data: { email: string; password: string; phone?: string; firstName?: string; lastName?: string },
-) {
-  const { email, password, phone, firstName, lastName } = data
-
-  // Check if customer with this email already exists
-  const existing = await prisma.customer.findUnique({
-    where: { venueId_email: { venueId, email } },
-  })
-
-  // Fase 0.B: un contacto desactivado no se "activa" poniéndole password desde el registro
-  // público. Reactivar es decisión del venue, no del cliente. Va ANTES del 400 "ya existe":
-  // si ya tenía password, el "inicia sesión" también le daría 401 — mejor decírselo aquí.
-  if (existing && existing.active === false) {
-    throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
-  }
-
-  if (existing?.password) {
-    throw new BadRequestError('Ya existe una cuenta con este correo. Inicia sesión.')
-  }
-
-  // El hash va FUERA de la transacción: son ~100 ms de CPU pura que no tocan la DB, y
-  // sostener una tx abierta mientras tanto desperdicia una conexión del pool.
-  const hashedPassword = await bcrypt.hash(password, SALT_ROUNDS)
-
-  // Fase 1: crear/actualizar el Customer y DECIDIR su estado de aprobación ocurren en la MISMA
-  // transacción. Si el registro se revierte, la solicitud de aprobación (y su correo encolado)
-  // se revierten con él; y nadie queda "en espera" de una cuenta que no existe.
-  const { customer, approvalStatus } = await prisma.$transaction(async tx => {
-    let customer
-    if (existing) {
-      // Customer exists (created from booking/credit purchase) — set password
-      customer = await tx.customer.update({
-        where: { id: existing.id },
-        data: {
-          password: hashedPassword,
-          provider: 'EMAIL',
-          ...(phone && !existing.phone ? { phone } : {}),
-          ...(firstName && !existing.firstName ? { firstName } : {}),
-          ...(lastName && !existing.lastName ? { lastName } : {}),
-        },
-      })
-    } else {
-      // Check if phone is already taken
-      if (phone) {
-        const phoneExists = await tx.customer.findUnique({
-          where: { venueId_phone: { venueId, phone } },
-        })
-        // Fase 0.B: misma regla que el contacto por email — un contacto desactivado no se
-        // "activa" fusionándole email+password desde el registro público. Antes del 400.
-        if (phoneExists && phoneExists.active === false) {
-          throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
-        }
-        if (phoneExists?.password) {
-          throw new BadRequestError('Ya existe una cuenta con este teléfono.')
-        }
-        if (phoneExists) {
-          // Phone customer exists without password — merge by setting email + password
-          customer = await tx.customer.update({
-            where: { id: phoneExists.id },
-            data: {
-              email,
-              password: hashedPassword,
-              provider: 'EMAIL',
-              ...(firstName ? { firstName } : {}),
-              ...(lastName ? { lastName } : {}),
-            },
-          })
-        }
-      }
-
-      if (!customer) {
-        customer = await tx.customer.create({
-          data: {
-            venueId,
-            email,
-            phone: phone || null,
-            password: hashedPassword,
-            provider: 'EMAIL',
-            firstName: firstName || null,
-            lastName: lastName || null,
-          },
-        })
-      }
-    }
-
-    const activation = await activateCustomerAccount(tx, { customerId: customer.id, venueId, origin: 'PASSWORD' })
-    return { customer, approvalStatus: activation.approvalStatus }
-  })
-
-  // El token se emite DESPUÉS del commit: si la transacción falló, nadie recibe sesión.
-  const token = generateCustomerToken(customer.id, venueId)
-
-  return {
-    token,
-    /** Fase 1: el controller lo compone en `bookingAccess` para que el widget pinte "en espera". */
-    approvalStatus,
-    customer: {
-      id: customer.id,
-      firstName: customer.firstName,
-      lastName: customer.lastName,
-      email: customer.email,
-      phone: customer.phone,
-    },
-  }
+export function registerCustomer(): never {
+  throw new BadRequestError(
+    'Para crear tu cuenta, entra con un código: te lo mandamos a tu WhatsApp o a tu correo.',
+    'CUSTOMER_REGISTER_USE_CODE',
+  )
 }
 
 /**
@@ -171,13 +71,17 @@ export async function loginCustomer(venueId: string, email: string, password: st
  * Update customer profile (authenticated)
  */
 export async function updateProfile(venueId: string, customerId: string, data: { firstName?: string; lastName?: string; phone?: string }) {
-  // If phone is being updated, check uniqueness
+  // 🔴 El teléfono ya no se cambia desde aquí (auditoría 2026-10-01): sin probar que era suyo, alguien ponía el de otra persona y
+  // el portal le mostraba sus reservas de invitado con su `cancelSecret`. Lo cambia el negocio desde su dashboard (`updateCustomer`):
+  // entrar con código desde otro número abre OTRA cuenta, no mueve ésta. Una página vieja que manda el MISMO teléfono (en cualquier
+  // formato) sigue guardando los nombres.
   if (data.phone) {
-    const phoneExists = await prisma.customer.findUnique({
-      where: { venueId_phone: { venueId, phone: data.phone } },
-    })
-    if (phoneExists && phoneExists.id !== customerId) {
-      throw new BadRequestError('Este teléfono ya está registrado con otra cuenta')
+    const actual = await prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { phone: true } })
+    if (data.phone !== actual?.phone && !phonesMatch(data.phone, actual?.phone)) {
+      throw new BadRequestError(
+        'El teléfono no se cambia desde aquí. Para actualizarlo sin perder tu historial, pide ayuda al negocio.',
+        'CUSTOMER_PHONE_CHANGE_NOT_ALLOWED',
+      )
     }
   }
 
@@ -186,7 +90,6 @@ export async function updateProfile(venueId: string, customerId: string, data: {
     data: {
       ...(data.firstName !== undefined ? { firstName: data.firstName } : {}),
       ...(data.lastName !== undefined ? { lastName: data.lastName } : {}),
-      ...(data.phone !== undefined ? { phone: data.phone } : {}),
     },
     select: {
       id: true,

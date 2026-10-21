@@ -26,6 +26,14 @@ describe('redactUrlSecrets', () => {
     expect(r).toContain('intent=%5Bredactado%5D')
   })
 
+  it('🔴 redacta el `hmac` del callback de Shopify; el resto de la consulta queda legible', () => {
+    const hmac = '700e2dadb827fcc8609e9d5ce208b2e9cdaab9df07390d2cbca10d7c328fc4bf'
+    const r = redactUrlSecrets(`/api/v1/shopify/oauth/callback?code=c1&hmac=${hmac}&shop=t.myshopify.com&state=s&timestamp=1`)
+    expect(r).not.toContain(hmac)
+    expect(r).toContain('hmac=%5Bredactado%5D')
+    expect(r).toContain('shop=t.myshopify.com')
+  })
+
   it('redacta tokens, secretos y contraseñas por cualquiera de sus nombres comunes', () => {
     const r = redactUrlSecrets('/x?access_token=A&refresh_token=B&client_secret=C&password=D&api_key=E&signature=F')
     for (const secreto of ['=A', '=B', '=C', '=D', '=E', '=F']) expect(r).not.toContain(secreto)
@@ -54,5 +62,17 @@ describe('redactUrlSecrets', () => {
   it('una query malformada no revienta: se redacta entera por prudencia', () => {
     expect(() => redactUrlSecrets('/x?%%%&code=Y')).not.toThrow()
     expect(redactUrlSecrets('/x?%%%&code=Y')).not.toContain('Y')
+  })
+
+  // nuevo — conector de pases: el secreto viaja como SEGMENTO de la ruta, no en el query
+  it('🔴 redacta el token del webhook de pases, con o sin query', () => {
+    const token = 'Zx9_aB-3kLmN0pQrStUvWxYz1234567890abcdEFGH'
+    expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking`)).toBe(
+      '/api/v1/webhooks/aggregators/totalpass/[redactado]/booking',
+    )
+    expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking?page=2`)).toBe(
+      '/api/v1/webhooks/aggregators/totalpass/[redactado]/booking?page=2',
+    )
+    expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking?token=x`)).not.toContain(token)
   })
 })

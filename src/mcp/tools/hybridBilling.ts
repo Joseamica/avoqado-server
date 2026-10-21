@@ -64,7 +64,7 @@ export function registerHybridBillingTools(server: McpServer, scope: McpScope) {
   )
   server.tool(
     'venue_feature_grid',
-    'Las 40 funciones de Avoqado para un negocio: de dónde viene cada una (gratis, su plan, un contrato o comprada aparte) y, si la venta está abierta, la oferta más barata que su organización puede comprar hoy, en pesos MXN con IVA incluido; también la oferta de plan Pro y Premium. Sólo lectura: la compra vuelve a validar todo al cotizar.',
+    'Las 40 funciones de Avoqado para un negocio: de dónde viene cada una (gratis, su plan, un contrato o comprada aparte) y, si la venta está abierta, la oferta más barata que su organización puede comprar hoy, en pesos MXN con IVA incluido; también la oferta de plan Pro y Premium. Cada función incluye precio de lista y la alternativa de lista cuando la oferta más barata es una promoción. Sólo lectura: la compra vuelve a validar todo al cotizar.',
     { venueId },
     async ({ venueId: id }) => {
       guard.venueFilter(id)
@@ -230,7 +230,7 @@ export function registerHybridCampaignTools(server: McpServer, scope: McpScope) 
   )
   server.tool(
     'get_hybrid_campaign',
-    'Consulta una campaña y su última versión publicada, incluyendo precio y condiciones de renovación en pesos. Sólo para Avoqado.',
+    'Consulta una campaña y la versión que está en venta (la publicación vigente, que puede no ser la última), incluyendo precio y condiciones de renovación en pesos. Sólo para Avoqado.',
     { campaignId: z.string() },
     async ({ campaignId }) => (scope.isSuperAdmin ? text(await getHybridCampaign(campaignId)) : forbidden()),
   )

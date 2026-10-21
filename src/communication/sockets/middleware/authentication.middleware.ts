@@ -129,10 +129,15 @@ export const socketAuthenticationMiddleware = async (socket: AuthenticatedSocket
     }
 
     if (!token) {
+      // 30-sep-2026: ráfagas de ~190/hora de un cliente sin sesión que reconecta; con sólo la ip (el proxy de Render) y el
+      // socketId no se puede saber QUÉ aparato o pantalla es. Se agregan origen, user-agent y namespace (nunca el token: no hay).
       logger.warn('Socket connection rejected: No authentication token provided', {
         correlationId,
         socketId: socket.id,
         ip: socket.handshake.address,
+        origin: socket.handshake.headers.origin,
+        userAgent: socket.handshake.headers['user-agent'],
+        nsp: socket.nsp?.name,
       })
 
       return next(new SocketAuthenticationError('No authentication token provided', socket.id, correlationId))

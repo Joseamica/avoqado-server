@@ -11,7 +11,8 @@ const mockPrisma: any = {
   },
   printGateway: { findUnique: jest.fn(), upsert: jest.fn() },
   menuCategory: { findMany: jest.fn(), updateMany: jest.fn() },
-  product: { findMany: jest.fn(), updateMany: jest.fn() },
+  // findFirst: assignRouting pregunta si algún producto es variante (tarea 11); sin valor = ninguno lo es.
+  product: { findMany: jest.fn(), findFirst: jest.fn(), updateMany: jest.fn() },
 }
 mockPrisma.$transaction = jest.fn((cb: any) => cb(mockPrisma))
 
@@ -23,7 +24,7 @@ jest.mock('../../../../src/services/printing/printConfig.service', () => ({
 }))
 
 import * as svc from '../../../../src/services/dashboard/printStation.dashboard.service'
-import { createPrinterSchema } from '../../../../src/schemas/dashboard/printStation.schema'
+import { createPrinterSchema, updatePrinterSchema } from '../../../../src/schemas/dashboard/printStation.schema'
 import { buildPrintConfig, routingConfigFrom } from '../../../../src/services/printing/printConfig.service'
 
 const VENUE = 'venue_1'
@@ -140,6 +141,29 @@ describe('printStation.dashboard.service', () => {
     // REGRESSION: abrir POS_INTERNAL no destapa los tipos que siguen sin ser servibles.
     it('still rejects TERMINAL_INTERNAL (exclusiva del PAX) after allowing POS_INTERNAL', async () => {
       await expect(svc.createPrinter(VENUE, { name: 'PAX', connectionType: 'TERMINAL_INTERNAL' } as any)).rejects.toThrow(/app del PAX/)
+    })
+  })
+
+  // La Galeterie (5-oct): sus Bixolon de cocina y bebidas son de 80 mm pero imprimen 42 columnas (512 puntos),
+  // no 48. Con «80» la comanda salía encimada; con «58» cabe pero angosta. El POS ya entiende 72 = «80mm (42 col.)».
+  describe('ancho de papel de 42 columnas (72)', () => {
+    const params = { venueId: VENUE }
+    const crear = (paperWidthMm: number) =>
+      createPrinterSchema.safeParse({ body: { name: 'Cocina', address: '192.168.100.124:9100', paperWidthMm }, params })
+    const editar = (paperWidthMm: number) =>
+      updatePrinterSchema.safeParse({ body: { paperWidthMm }, params: { venueId: VENUE, printerId: 'pr_1' } })
+
+    it('acepta 72 al crear y al editar', () => {
+      expect(crear(72).success).toBe(true)
+      expect(editar(72).success).toBe(true)
+    })
+
+    // REGRESSION: los anchos de siempre siguen igual y un valor raro se sigue rechazando.
+    it('58 y 80 siguen; 60 no', () => {
+      expect(crear(58).success).toBe(true)
+      expect(crear(80).success).toBe(true)
+      expect(crear(60).success).toBe(false)
+      expect(editar(60).success).toBe(false)
     })
   })
 

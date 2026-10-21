@@ -1,6 +1,12 @@
 // El guard de ventas por sucursal (venueSalesGuard) NO es el objeto de esta suite:
 // se prueba en tests/unit/services/venueSalesGuard.test.ts. Sin este mock, cada
 // servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
+// FT-GRAVES S-EF: payCashOrder encola la comisión del cobro en su transacción, igual que la terminal. No es objeto de esta
+// suite (su prueba es tests/integration/commission/efectivoPosMovil.integration.test.ts).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),
@@ -122,6 +128,7 @@ describe('order.mobile.service', () => {
           tipAmount: new Decimal(5),
           total: new Decimal(120),
           remainingBalance: new Decimal(120),
+          contratoDePrecio: 'IVA_INCLUIDO',
         }),
       }),
     )
@@ -198,6 +205,27 @@ describe('order.mobile.service', () => {
     expect(prismaMock.order.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ reservationId: null }) }),
     )
+  })
+
+  // D5 v5 (mesas40, 15-oct): el server NO recorta `OrderItem.notes`. La nota es identidad de la línea en el carrito
+  // completo de la TPV y una fila recortada por un escritor deja de reconocerse ahí ($100 → $200, Codex r3). El tope vive
+  // donde nace la nota: la captura del aparato. Producto y monto libre la guardan entera, como en `a2e999c0f`.
+  it('D5 v5: una nota de 10,038 caracteres se guarda COMPLETA (producto y monto libre)', async () => {
+    mockBaseOrderCreate()
+    const notaLarga = 'a'.repeat(499) + '🌮' + 'b'.repeat(9_537)
+
+    await createOrderWithItems('venue-1', {
+      staffId: 'staff-1',
+      items: [
+        { productId: 'prod-class', quantity: 1, notes: notaLarga },
+        { name: 'Otro importe', quantity: 1, unitPrice: 2500, notes: notaLarga },
+      ],
+      source: 'AVOQADO_ANDROID',
+    })
+
+    const creados = (prismaMock.order.create as jest.Mock).mock.calls[0][0].data.items.create
+    expect(notaLarga).toHaveLength(10_038)
+    expect(creados.map((item: { notes: string | null }) => item.notes)).toEqual([notaLarga, notaLarga])
   })
 
   // ── Per-item discountId (mirrors TPV's itemDiscountId — order.tpv.service.ts) ──
@@ -380,6 +408,7 @@ describe('order.mobile.service', () => {
         compReason: null,
         appliedById: 'sv-1',
         appliedToItemIds: ['oi-1'],
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones: { 'oi-1': 2000 } },
       },
     })
   })
@@ -1040,6 +1069,20 @@ describe('cancelOrder — guard against live terminal charges', () => {
     jest.clearAllMocks()
     prismaMock.order.findUnique.mockResolvedValue({ id: 'order-1', paymentStatus: 'PENDING', status: 'CONFIRMED' })
     prismaMock.order.update.mockResolvedValue({ id: 'order-1', status: 'CANCELLED' })
+    prismaMock.table.findMany.mockResolvedValue([])
+    prismaMock.order.findMany.mockImplementation(async () => {
+      const row = await prismaMock.order.findUnique.getMockImplementation()?.({ where: { id: 'order-1', venueId: 'venue-1' } })
+      return row ? [{ ...row, tableId: null, createdAt: new Date('2026-10-01T00:00:00Z') }] : []
+    })
+    prismaMock.kdsOrder.findMany.mockResolvedValue([])
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
+    prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = Array.isArray(query) ? query.join(' ') : ''
+      if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
+      if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      throw new Error('Unexpected cancel fixture SQL')
+    })
   })
 
   it('409s when the order has a terminal charge without an accredited outcome (incl. CANCEL_REQUESTED) — the order must stay open', async () => {
@@ -1253,5 +1296,139 @@ describe('cancelOrder — guard against live terminal charges', () => {
     })
     expect(ops.indexOf('shift.updateMany')).toBeLessThan(ops.indexOf('payment.create'))
     expect(ops.indexOf('payment.create')).toBeLessThan(ops.indexOf('activityLog.create'))
+  })
+})
+
+describe('cancelOrder — libera la mesa aunque la cuenta sea el último hijo de una división (R2-TABLE-01)', () => {
+  // Un hijo de SPLIT_ORDER nunca recibe `Table.currentOrderId`: tras pagar el padre, el puntero sigue en el padre PAID.
+  // Cancelar ese último hijo buscaba la mesa sólo por `currentOrderId = hijo` y la dejaba OCCUPIED apuntando al padre.
+  const CHILD = 'split-child-1'
+  const TABLE = 'table-9'
+  let tableId: string | null
+  let pointer: string
+  let sibling: string | null
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    tableId = TABLE
+    pointer = 'parent-paid'
+    sibling = null
+    const rows = () => [
+      { id: CHILD, tableId, status: 'CONFIRMED', paymentStatus: 'PENDING', createdAt: new Date('2026-10-01T00:00:00Z') },
+      { id: 'parent-paid', tableId: TABLE, status: 'COMPLETED', paymentStatus: 'PAID', createdAt: new Date('2026-09-30T00:00:00Z') },
+      ...(sibling
+        ? [{ id: sibling, tableId: TABLE, status: 'CONFIRMED', paymentStatus: 'PENDING', createdAt: new Date('2026-10-01T01:00:00Z') }]
+        : []),
+    ]
+    prismaMock.order.findMany.mockImplementation(async ({ where }: { where: { id?: { in: string[] }; tableId?: { in: string[] } } }) =>
+      rows().filter(row =>
+        where.id
+          ? where.id.in.includes(row.id)
+          : where.tableId && row.tableId && where.tableId.in.includes(row.tableId) && row.status !== 'COMPLETED',
+      ),
+    )
+    prismaMock.table.findMany.mockImplementation(
+      async ({ where }: { where: { id?: { in: string[] }; currentOrderId?: { in: string[] } } }) =>
+        tableId && (where.id?.in.includes(TABLE) || where.currentOrderId?.in.includes(pointer))
+          ? [{ id: TABLE, number: '9', status: 'OCCUPIED', currentOrderId: pointer }]
+          : [],
+    )
+    prismaMock.kdsOrder.findMany.mockResolvedValue([])
+    prismaMock.kdsOrderItem.findMany.mockResolvedValue([])
+    prismaMock.$queryRaw.mockImplementation(async (query: unknown, ...values: unknown[]) => {
+      const sql = Array.isArray(query)
+        ? query.join(' ')
+        : query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)
+          ? query.strings.join(' ')
+          : ''
+      if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
+      if (sql.includes('FROM "Order"'))
+        return rows()
+          .filter(row => values.some(value => (Array.isArray(value) ? value.includes(row.id) : value === row.id)))
+          .map(row => ({ id: row.id }))
+      if (sql.includes('FROM "Table"')) return [{ id: TABLE }]
+      if (sql.includes('pg_advisory_xact_lock')) return []
+      throw new Error('Unexpected split-child cancel fixture SQL')
+    })
+    prismaMock.order.findUnique.mockResolvedValue({ id: CHILD, paymentStatus: 'PENDING', status: 'CONFIRMED' })
+    prismaMock.order.update.mockResolvedValue({ id: CHILD, status: 'CANCELLED' })
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+    prismaMock.table.update.mockResolvedValue({})
+    prismaMock.order.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.id === CHILD) return Promise.resolve({ tableId: TABLE })
+      // Ninguna otra cuenta viva en la mesa: el padre ya está COMPLETED.
+      return Promise.resolve(null)
+    })
+  })
+
+  it('el puntero apunta al padre pagado → reconcilia por el tableId del hijo y libera la mesa', async () => {
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === CHILD) return Promise.resolve(null)
+      if (where.id === TABLE) return Promise.resolve({ id: TABLE, number: '9' })
+      return Promise.resolve(null)
+    })
+
+    await cancelOrder('venue-1', CHILD, 'cliente se fue', 'staff-1')
+
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+      select: { id: true, number: true, status: true, currentOrderId: true },
+    })
+  })
+
+  it('si aún queda otra cuenta viva en la mesa, re-apunta a ella en vez de liberar', async () => {
+    sibling = 'sibling-1'
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === CHILD) return Promise.resolve(null)
+      if (where.id === TABLE) return Promise.resolve({ id: TABLE, number: '9' })
+      return Promise.resolve(null)
+    })
+    prismaMock.order.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.id === CHILD) return Promise.resolve({ tableId: TABLE })
+      if (where.tableId === TABLE) return Promise.resolve({ id: 'sibling-1' })
+      return Promise.resolve(null)
+    })
+
+    await cancelOrder('venue-1', CHILD)
+
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE },
+      data: { status: 'OCCUPIED', currentOrderId: 'sibling-1' },
+      select: { id: true, number: true, status: true, currentOrderId: true },
+    })
+  })
+
+  it('regresión: una orden sin mesa no escribe ninguna mesa', async () => {
+    tableId = null
+    prismaMock.table.findFirst.mockResolvedValue(null)
+    prismaMock.order.findFirst.mockResolvedValue({ tableId: null })
+
+    await cancelOrder('venue-1', CHILD)
+
+    expect(prismaMock.order.update).toHaveBeenCalledWith(expect.objectContaining({ data: { status: 'CANCELLED' } }))
+    expect(prismaMock.table.update).not.toHaveBeenCalled()
+  })
+
+  it('regresión: cuando el puntero SÍ apunta a la cuenta, libera por el camino de siempre (una sola escritura)', async () => {
+    pointer = CHILD
+    prismaMock.table.findFirst.mockImplementation((args: any) => {
+      const where = args?.where ?? {}
+      if (where.currentOrderId === CHILD) return Promise.resolve({ id: TABLE, number: '9' })
+      return Promise.resolve(null)
+    })
+
+    await cancelOrder('venue-1', CHILD)
+
+    expect(prismaMock.table.update).toHaveBeenCalledTimes(1)
+    expect(prismaMock.table.update).toHaveBeenCalledWith({
+      where: { id: TABLE },
+      data: { status: 'AVAILABLE', currentOrderId: null },
+      select: { id: true, number: true, status: true, currentOrderId: true },
+    })
   })
 })

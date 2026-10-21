@@ -1,5 +1,13 @@
+import { Prisma } from '@prisma/client'
+
 import { ConflictError } from '@/errors/AppError'
-import { isRetryableDbError, withSerializableRetry } from '@/utils/serializableRetry'
+import {
+  isDeadlockError,
+  isModelLockTimeoutError,
+  isRetryableDbError,
+  isSerializationFailure,
+  withSerializableRetry,
+} from '@/utils/serializableRetry'
 import { prismaMock } from '../../__helpers__/setup'
 
 describe('serializableRetry', () => {
@@ -21,6 +29,80 @@ describe('serializableRetry', () => {
     })
   })
 
+  // Forma MEDIDA el 28-sep contra Postgres (Prisma 6.19.3): un lock_timeout vencido en una consulta de MODELO llega sin `code`
+  // ni `meta`; el SQLSTATE sólo viaja en el `QueryError(PostgresError { code: "55P03", … })` del mensaje.
+  describe('isSerializationFailure', () => {
+    it('reconoce P2034, el 40001 directo y el 40001 envuelto en P2010 (consulta cruda)', () => {
+      expect(isSerializationFailure({ code: 'P2034' })).toBe(true)
+      expect(isSerializationFailure({ code: '40001' })).toBe(true)
+      expect(isSerializationFailure({ code: 'P2010', meta: { code: '40001' } })).toBe(true)
+    })
+
+    it('no reconoce un candado vencido (55P03), un deadlock (40P01), otro P2010 ni un error vacío', () => {
+      expect(isSerializationFailure({ code: 'P2010', meta: { code: '55P03' } })).toBe(false)
+      expect(isSerializationFailure({ code: 'P2010', meta: { code: '40P01' } })).toBe(false)
+      expect(isSerializationFailure({ code: 'P2002' })).toBe(false)
+      expect(isSerializationFailure(null)).toBe(false)
+    })
+  })
+
+  describe('isModelLockTimeoutError', () => {
+    const conPostgres = (sqlState: string, mensaje: string) =>
+      '\nInvalid `prisma.journalEntry.create()` invocation:\n\n\nError occurred during query execution:\n' +
+      `ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${sqlState}", message: "${mensaje}", severity: "ERROR", detail: None, column: None, hint: None }), transient: false })`
+    const desconocido = (mensaje: string) => new Prisma.PrismaClientUnknownRequestError(mensaje, { clientVersion: '6.19.3' })
+
+    it('reconoce el 55P03 de una consulta de modelo (la forma medida)', () => {
+      expect(isModelLockTimeoutError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(true)
+    })
+
+    it('no reconoce otro SQLSTATE en la misma forma (57014, statement_timeout)', () => {
+      expect(isModelLockTimeoutError(desconocido(conPostgres('57014', 'canceling statement due to statement timeout')))).toBe(false)
+    })
+
+    it('no reconoce el mismo texto fuera de un error desconocido de Prisma, ni un error vacío', () => {
+      expect(isModelLockTimeoutError(new Error(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
+      expect(isModelLockTimeoutError(null)).toBe(false)
+    })
+
+    it('el crudo (P2010) sigue siendo cosa de isRetryableDbError, que no cambia', () => {
+      expect(isRetryableDbError({ code: 'P2010', meta: { code: '55P03' } })).toBe(true)
+      expect(isRetryableDbError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
+    })
+  })
+
+  // Ola 2 · A (Codex P1): Prisma 6.19.3 tampoco traduce 40P01 en una consulta de MODELO (sólo 40001 → P2034): llega como
+  // `PrismaClientUnknownRequestError` con el SQLSTATE sólo en el `QueryError(PostgresError { code: "40P01", … })` del mensaje
+  // (medido el 28-sep con el INSERT de JournalLine víctima de un bloqueo mutuo real: evidencia ola2-rojo-int).
+  describe('isDeadlockError', () => {
+    const conPostgres = (sqlState: string, mensaje: string) =>
+      '\nInvalid `prisma.journalEntry.create()` invocation:\n\n\nError occurred during query execution:\n' +
+      `ConnectorError(ConnectorError { user_facing_error: None, kind: QueryError(PostgresError { code: "${sqlState}", message: "${mensaje}", severity: "ERROR", detail: Some("Process 21717 waits for ShareLock on transaction 390514; blocked by process 21733.\\nProcess 21733 waits for ShareLock on transaction 390516; blocked by process 21717."), column: None, hint: Some("See server log for query details.") }), transient: false })`
+    const desconocido = (mensaje: string) => new Prisma.PrismaClientUnknownRequestError(mensaje, { clientVersion: '6.19.3' })
+
+    it('reconoce el 40P01 directo y el envuelto en P2010 (como hoy)', () => {
+      expect(isDeadlockError({ code: '40P01' })).toBe(true)
+      expect(isDeadlockError({ code: 'P2010', meta: { code: '40P01' } })).toBe(true)
+    })
+
+    it('reconoce el 40P01 de una consulta de modelo (la forma medida)', () => {
+      expect(isDeadlockError(desconocido(conPostgres('40P01', 'deadlock detected')))).toBe(true)
+    })
+
+    it('no reconoce otro SQLSTATE en la misma forma, el mismo texto fuera de Prisma ni un error vacío', () => {
+      expect(isDeadlockError(desconocido(conPostgres('55P03', 'canceling statement due to lock timeout')))).toBe(false)
+      expect(isDeadlockError(desconocido(conPostgres('57014', 'canceling statement due to statement timeout')))).toBe(false)
+      expect(isDeadlockError(new Error(conPostgres('40P01', 'deadlock detected')))).toBe(false)
+      expect(isDeadlockError(null)).toBe(false)
+    })
+
+    it('el clasificador del catálogo NO lo reintenta (R10, T4-R1): ni isRetryableDbError ni isModelLockTimeoutError lo ven', () => {
+      const bloqueoMutuo = desconocido(conPostgres('40P01', 'deadlock detected'))
+      expect(isRetryableDbError(bloqueoMutuo)).toBe(false)
+      expect(isModelLockTimeoutError(bloqueoMutuo)).toBe(false)
+    })
+  })
+
   it('treats maxRetries as the total attempt count and eventually resolves', async () => {
     prismaMock.$transaction.mockRejectedValueOnce({ code: 'P2034' }).mockRejectedValueOnce({ code: 'P2034' }).mockResolvedValueOnce('done')
 
@@ -31,6 +113,50 @@ describe('serializableRetry', () => {
       isolationLevel: 'Serializable',
       timeout: 10_000,
     })
+    expect(prismaMock.$transaction.mock.calls[2][1]).not.toHaveProperty('maxWait')
+  })
+
+  it('preserves the explicit Order lock budget on every native Serializable attempt', async () => {
+    prismaMock.$transaction.mockRejectedValueOnce({ code: 'P2034' }).mockResolvedValueOnce('done')
+    const options = { timeoutMs: 15_000, maxWaitMs: 5_000, maxRetries: 2, baseDelayMs: 0 }
+
+    await expect(withSerializableRetry(async () => 'ignored', options)).resolves.toBe('done')
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    for (const call of prismaMock.$transaction.mock.calls) {
+      expect(call[1]).toEqual({ isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 })
+    }
+  })
+
+  it.each([0, -1, Number.NaN, Number.POSITIVE_INFINITY])(
+    'rejects supplied invalid maxWaitMs %s before opening a transaction',
+    async maxWaitMs => {
+      const options = { maxWaitMs, baseDelayMs: 0 }
+      await expect(withSerializableRetry(async () => undefined, options)).rejects.toThrow('maxWaitMs')
+      expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    },
+  )
+
+  it('keeps five attempts by default and omits maxWait for existing callers', async () => {
+    prismaMock.$transaction.mockRejectedValue({ code: '40001' })
+
+    await expect(withSerializableRetry(async () => undefined, { baseDelayMs: 0 })).rejects.toBeInstanceOf(ConflictError)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(5)
+    for (const call of prismaMock.$transaction.mock.calls) {
+      expect(call[1]).toEqual({ isolationLevel: 'Serializable', timeout: 10_000 })
+      expect(call[1]).not.toHaveProperty('maxWait')
+    }
+  })
+
+  it('propagates reservation P2002 by identity without another attempt', async () => {
+    const original = Object.assign(new Error('Unique constraint'), { code: 'P2002', meta: { target: 'Order_reservationId_alive_key' } })
+    prismaMock.$transaction.mockRejectedValue(original)
+    const options = { timeoutMs: 15_000, maxWaitMs: 5_000, baseDelayMs: 0 }
+
+    await expect(withSerializableRetry(async () => undefined, options)).rejects.toBe(original)
+
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
   })
 
   it('surfaces exhaustion as an operational HTTP 409 without a Prisma code', async () => {

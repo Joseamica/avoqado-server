@@ -1,3 +1,5 @@
+import { StaffRole } from '@prisma/client'
+import { SocketEventType as FleetSocketEvent } from './types'
 /**
  * Socket.io Communication Module
  * Enterprise-grade real-time communication for Avoqado
@@ -270,7 +272,7 @@ export function broadcastTpvCommand(
     requestedBy: string
     commandId?: string // CUID from TpvCommandQueue.id - used for ACK matching
     correlationId?: string // UUID from TpvCommandQueue.correlationId
-    expiresAt?: Date // TpvCommandQueue.expiresAt — sin él, 5 min por default
+    expiresAt?: Date | null // TpvCommandQueue.expiresAt — sin él, 5 min por default
   },
   options?: BroadcastOptions,
 ): void {
@@ -422,6 +424,7 @@ export function broadcastTpvCommandStatusChanged(
 ): void {
   try {
     if (socketManager.getServer()) {
+      broadcastSuperadminTerminalUpdate(terminalId)
       socketManager.broadcastToVenue(
         venueId,
         'tpv_command_status_changed' as any,
@@ -605,3 +608,9 @@ export function getConnectionStats() {
 // Re-export types for convenience
 export type { Server } from 'socket.io'
 import { BroadcastOptions } from './types'
+
+/** Low-frequency fleet changes only: never emit from every heartbeat. */
+export function broadcastSuperadminTerminalUpdate(terminalId: string): void {
+  if (socketManager.getServer())
+    socketManager.broadcastToRole(StaffRole.SUPERADMIN, FleetSocketEvent.SUPERADMIN_TERMINAL_UPDATED, { id: terminalId })
+}

@@ -39,6 +39,7 @@ const cardPayment = {
   venueId: 'venue-1',
   status: 'COMPLETED',
   method: 'CREDIT_CARD',
+  source: 'TPV', // la cobró nuestra terminal (seDevuelveEnTerminal)
   amount: 100,
   tipAmount: 20,
   processorData: {},

@@ -119,10 +119,10 @@
         }
       ],
       "subtotalCents": 35000,
-      "taxCents": 4828,
+      "taxCents": 0,
       "discountCents": 500,
       "tipCents": 3500,
-      "totalCents": 38500,
+      "totalCents": 38000,
       "tender": {
         "kind": "CARD",
         "label": "Tarjeta",
@@ -336,7 +336,7 @@
     },
     {
       "kind": "text",
-      "text": "IVA incluido:             $48.28",
+      "text": "IVA incluido cuando aplica",
       "align": "left",
       "bold": false,
       "double": false
@@ -357,21 +357,21 @@
     },
     {
       "kind": "text",
-      "text": "TOTAL:   $385.00",
+      "text": "TOTAL:   $380.00",
       "align": "left",
       "bold": true,
       "double": true
     },
     {
       "kind": "text",
-      "text": "TRESCIENTOS OCHENTA Y CINCO",
+      "text": "TRESCIENTOS OCHENTA PESOS 00/100",
       "align": "center",
       "bold": false,
       "double": false
     },
     {
       "kind": "text",
-      "text": "PESOS 00/100 M.N.",
+      "text": "M.N.",
       "align": "center",
       "bold": false,
       "double": false

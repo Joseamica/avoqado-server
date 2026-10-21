@@ -7,6 +7,7 @@
  * @see CLAUDE.md - Layered Architecture section
  */
 
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import logger from '@/config/logger'
@@ -14,14 +15,26 @@ import { CustomerApprovalStatus, OrderStatus, PaymentStatus, Prisma } from '@pri
 import { logAction } from './activity-log.service'
 import { decideCustomerApproval } from '@/services/public/customerBookingAccess.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
+import {
+  CUSTOMER_PAGE_SIZE_DEFAULT,
+  CUSTOMER_PAGE_SIZE_MAX,
+  SEARCH_PREFILTER_CAP,
+  interpretarBusquedaDeClientes,
+  sqlDeConteoDeClientes,
+  sqlDeIdsDeClientes,
+  sqlDeSaldosPendientesDeClientes,
+  type FiltrosDeClientes,
+} from '@/services/shared/customerSearch'
 
 /**
  * 🔴 Forma del aviso cuando el consentimiento NO se pudo capturar/actualizar (Task 5).
@@ -75,6 +88,12 @@ interface PaginatedCustomersResponse {
     totalPages: number
     hasNextPage: boolean
     hasPrevPage: boolean
+    /** Auditoría A #7 + ruling B3: SÓLO cuando la búsqueda tuvo más de SEARCH_PREFILTER_CAP coincidencias. Entonces sólo se
+     * paginan las más nuevas, `totalCount` dice cuántas son ALCANZABLES (el dashboard pinta tantas páginas como
+     * `totalCount`: nunca ofrece páginas vacías) y el total exacto va en `totalMatches`. Opcionales y nuevos: ausentes
+     * = la búsqueda no se topó y `totalCount` ya es el total exacto (clientes viejos no cambian). */
+    totalMatches?: number
+    searchCapped?: boolean
   }
 }
 
@@ -128,9 +147,11 @@ interface CustomerStatsResponse {
  * Get all customers for a venue with pagination and search
  *
  * @param venueId - Venue ID (multi-tenant filter)
- * @param page - Page number (1-indexed)
- * @param pageSize - Items per page
- * @param search - Search term (firstName, lastName, email, phone)
+ * @param page - Page number (1-indexed; 0, negativo o no numérico ⇒ 1)
+ * @param pageSize - Items per page (default 20; el SERVIDOR lo topa en 100)
+ * @param search - teléfono (dígitos; 52/521 sobrantes se ignoran) o palabras (nombre/apellido/correo, sin acentos ni
+ *   mayúsculas); con más de 5000 coincidencias, las más nuevas: meta.totalCount = alcanzables, meta.totalMatches = exacto y
+ *   meta.searchCapped = true
  * @param customerGroupId - Filter by customer group
  * @param noGroup - Filter customers without a group
  * @param tags - Filter by tags (comma-separated)
@@ -146,8 +167,13 @@ export async function getCustomers(
   sortBy: 'createdAt' | 'totalSpent' | 'visitCount' | 'lastVisit' | 'name' = 'createdAt',
   sortOrder: 'asc' | 'desc' = 'desc',
   hasPendingBalance?: boolean,
+  /** SÓLO pruebas: el tope del prefiltro de la búsqueda (el real es SEARCH_PREFILTER_CAP). */
+  opciones: { topeDeBusqueda?: number } = {},
 ): Promise<PaginatedCustomersResponse> {
-  const skip = (page - 1) * pageSize
+  // 🔴 El SERVIDOR pone el tope (regla de consultas acotadas): la ruta móvil no valida y un `pageSize` hostil pedía todo.
+  const tamano = Math.min(Math.max(Math.trunc(Number(pageSize)) || CUSTOMER_PAGE_SIZE_DEFAULT, 1), CUSTOMER_PAGE_SIZE_MAX)
+  const pagina = Math.max(Math.trunc(Number(page)) || 1, 1)
+  const skip = (pagina - 1) * tamano
 
   // Map sortBy to Prisma field names (with fallback for undefined)
   const sortFieldMap: Record<string, string> = {
@@ -160,18 +186,6 @@ export async function getCustomers(
   const effectiveSortBy = sortBy || 'createdAt'
   const effectiveSortOrder = sortOrder || 'desc'
   const orderByField = sortFieldMap[effectiveSortBy] || 'createdAt'
-
-  // Build search conditions
-  const searchConditions = search
-    ? {
-        OR: [
-          { firstName: { contains: search, mode: 'insensitive' as const } },
-          { lastName: { contains: search, mode: 'insensitive' as const } },
-          { email: { contains: search, mode: 'insensitive' as const } },
-          { phone: { contains: search, mode: 'insensitive' as const } },
-        ],
-      }
-    : {}
 
   // Build tag filter
   const tagFilter = tags
@@ -200,6 +214,30 @@ export async function getCustomers(
       }
     : {}
 
+  // Búsqueda (spec 2026-10-14 §3.2; auditoría A #7): UNA regla —teléfono por dígitos, nombre sin acentos— en SQL acotado del
+  // negocio, con los filtros de arriba ANTES del tope. Prisma pagina, ordena y cuenta sobre esos ids, como siempre.
+  let searchConditions: Prisma.CustomerWhereInput = {}
+  let busquedaTopada = false
+  let totalExacto = 0
+  const tope = opciones.topeDeBusqueda ?? SEARCH_PREFILTER_CAP
+  const busqueda = interpretarBusquedaDeClientes(search)
+  if (busqueda) {
+    const filtros: FiltrosDeClientes = {
+      customerGroupId: customerGroupId || undefined,
+      noGroup: Boolean(noGroup),
+      tags: tags ? tags.split(',').map(t => t.trim()) : undefined,
+      hasPendingBalance: Boolean(hasPendingBalance),
+    }
+    const filas = (await prisma.$queryRaw<Array<{ id: string }>>(sqlDeIdsDeClientes(venueId, busqueda, { tope, filtros }))) ?? []
+    busquedaTopada = filas.length > tope
+    searchConditions = { id: { in: filas.slice(0, tope).map(f => f.id) } }
+    if (busquedaTopada) {
+      // Más coincidencias que el tope: se paginan las `tope` más nuevas, y el total EXACTO (misma regla y filtros) se dice aparte.
+      const [conteo] = (await prisma.$queryRaw<Array<{ total: number }>>(sqlDeConteoDeClientes(venueId, busqueda, filtros))) ?? []
+      totalExacto = Number(conteo?.total ?? filas.length)
+    }
+  }
+
   const whereCondition = {
     venueId, // ✅ CRITICAL: Multi-tenant filter
     ...groupFilter,
@@ -208,12 +246,13 @@ export async function getCustomers(
     ...pendingBalanceFilter,
   }
 
-  const [customers, totalCount] = await prisma.$transaction([
+  const [customers, conteoDePrisma] = await prisma.$transaction([
     prisma.customer.findMany({
       where: whereCondition,
       skip,
-      take: pageSize,
-      orderBy: { [orderByField]: effectiveSortOrder },
+      take: tamano,
+      // Desempate por `id`: con un orden no único (muchos `createdAt` iguales de una importación) las páginas pierden filas.
+      orderBy: [{ [orderByField]: effectiveSortOrder }, { id: effectiveSortOrder }],
       select: {
         id: true,
         email: true,
@@ -235,29 +274,30 @@ export async function getCustomers(
         tags: true,
         active: true,
         createdAt: true,
-        orderAssociations: {
-          where: {
-            order: {
-              paymentStatus: { in: ['PENDING', 'PARTIAL'] },
-              remainingBalance: { gt: 0 },
-              ...CUENTA_NO_CANCELADA,
-            },
-          },
-          include: {
-            order: {
-              select: {
-                id: true,
-                remainingBalance: true,
-              },
-            },
-          },
-        },
       },
     }),
     prisma.customer.count({ where: whereCondition }),
   ])
 
-  const totalPages = Math.ceil(totalCount / pageSize)
+  // 🔴 H6 (auditoría de Codex del código, 15-oct-2026): las cuentas por cobrar de los clientes de ESTA página, en UN agregado
+  // de la base (antes: todas las cuentas pendientes de cada cliente, sin tope, sumadas en JavaScript). Mismos campos.
+  const saldos = new Map<string, { pendientes: number; saldo: number }>()
+  if (customers.length > 0) {
+    const filas =
+      (await prisma.$queryRaw<Array<{ customerId: string; pendientes: number; saldo: Prisma.Decimal | number | string }>>(
+        sqlDeSaldosPendientesDeClientes(
+          venueId,
+          customers.map(c => c.id),
+        ),
+      )) ?? []
+    for (const f of filas) saldos.set(f.customerId, { pendientes: Number(f.pendientes), saldo: Number(f.saldo) })
+  }
+
+  // 🔴 Ruling B3: `totalCount` es SIEMPRE lo que Prisma puede paginar con este `where`. Sin tope ya es el total exacto; con la
+  // búsqueda topada son las `tope` más nuevas (lo ALCANZABLE), así el dashboard —que pinta tantas páginas como
+  // `totalCount`— nunca ofrece una página vacía. El exacto de la MISMA regla viaja en `totalMatches`.
+  const totalCount = conteoDePrisma
+  const totalPages = Math.ceil(totalCount / tamano)
 
   return {
     data: customers.map(customer => ({
@@ -267,17 +307,18 @@ export async function getCustomers(
       // Map backend field names to frontend expected names
       visitCount: customer.totalVisits,
       lastVisit: customer.lastVisitAt,
-      pendingOrderCount: customer.orderAssociations?.length || 0,
-      pendingBalance: customer.orderAssociations?.reduce((sum, oc) => sum + Number(oc.order.remainingBalance), 0) || 0,
-      orderAssociations: undefined, // Remove from response to keep it clean
+      pendingOrderCount: saldos.get(customer.id)?.pendientes ?? 0,
+      pendingBalance: saldos.get(customer.id)?.saldo ?? 0,
     })),
     meta: {
       totalCount,
-      pageSize,
-      currentPage: page,
+      ...(busquedaTopada ? { totalMatches: Math.max(totalExacto, totalCount) } : {}),
+      pageSize: tamano,
+      currentPage: pagina,
       totalPages,
-      hasNextPage: page < totalPages,
-      hasPrevPage: page > 1,
+      hasNextPage: pagina < totalPages,
+      hasPrevPage: pagina > 1,
+      ...(busquedaTopada ? { searchCapped: true } : {}),
     },
   }
 }
@@ -833,12 +874,23 @@ export async function settleCustomerBalance(
   const settled: Array<{ orderId: string; amount: number; paymentId?: string; baseParaLealtad: number }> = []
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
   const targetOrderIds = [...new Set(pendingOrders.map(oc => oc.order.id))].sort()
+  // R11-8: los vales v7 de cada venta; se importa ANTES de abrir la transacción (para no cargar módulos dentro de ella).
+  const { lockAreaTicketCheckoutHierarchy, cerrarSesionDeValesAlCerrarLaVenta } = await import(
+    '@/services/mobile/areaTicketV7.mobile.service'
+  )
+  let sesionesDeValesCerradas = 0
   await prisma.$transaction(async tx => {
+    sesionesDeValesCerradas = 0
     // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
     // toma el conjunto completo de Orders en orden estable; sólo después puede
     // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
     // esperando Order B frente a un writer unitario que ya posee B.
+    // 🔴 R11-8: por cada venta, en el MISMO orden estable, su jerarquía de vales (sesión → vales → venta; `null` sin sesión) ANTES
+    // de su candado: el orden de la finalización. Nadie toma una sesión después de una venta ajena.
+    const sesionesDeVales = new Map<string, NonNullable<Awaited<ReturnType<typeof lockAreaTicketCheckoutHierarchy>>>['session']>()
     for (const orderId of targetOrderIds) {
+      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+      if (vales) sesionesDeVales.set(orderId, vales.session)
       await lockExistingOrderForPayment(tx, { venueId, orderId })
     }
 
@@ -900,6 +952,7 @@ export async function settleCustomerBalance(
         amountPesos: shiftAmount,
         tipPesos: shiftTip,
         incrementTotalOrders: priorCompletedPaymentCount === 0,
+        orderId,
       })
 
       // Create a payment record to track the settlement
@@ -947,8 +1000,15 @@ export async function settleCustomerBalance(
         staffId: null,
       })
       if (posting?.id) postingIds.push(posting.id)
+      // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+      const sesion = sesionesDeVales.get(orderId)
+      if (sesion && (await cerrarSesionDeValesAlCerrarLaVenta(tx, sesion, { venueId, orderId }))) sesionesDeValesCerradas += 1
+      // R8: liquidar el saldo de un cliente también activa los sobres de una cuenta de tarjetas.
+      await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: null, items: itemsParaPosting })
+      // FT-GRAVES T2: el MISMO gancho de comisión que la terminal, con el dinero. El esquema decide a quién; sin persona, nada.
+      await enqueuePaymentCommissionInTx(tx, settlementPayment.id)
     }
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   // Fase 2 de la unificación de caja: cada liquidación en efectivo sube el cajón. Después del
   // commit y fail-open, igual que el vale de inventario de abajo.
@@ -1064,7 +1124,7 @@ export async function settleCustomerBalance(
     action: 'CUSTOMER_BALANCE_SETTLED',
     entity: 'Customer',
     entityId: customerId,
-    data: { settledOrderCount, settledAmount },
+    data: { settledOrderCount, settledAmount, ...(sesionesDeValesCerradas > 0 ? { sesionesDeValesCerradas } : {}) },
   })
 
   return {

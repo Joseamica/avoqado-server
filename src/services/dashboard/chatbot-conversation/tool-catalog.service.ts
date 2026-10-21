@@ -224,13 +224,13 @@ export class ToolCatalogService {
       },
       {
         name: 'commissions.summary',
-        description: 'Venue commission totals, pending/approved/paid amounts, and top earners.',
+        description: 'Venue commission totals: calculated, paid in staff pay statements (Pago al personal), and top earners.',
         tables: ['CommissionSummary', 'CommissionCalculation', 'Staff'],
         requiresDateRange: false,
       },
       {
         name: 'commissions.payouts',
-        description: 'Commission payout totals and recent payout states.',
+        description: 'Commissions paid in staff pay statements (Pago al personal), plus the paid history of the previous payout flow.',
         tables: ['CommissionPayout', 'CommissionSummary', 'Staff'],
         requiresDateRange: false,
       },

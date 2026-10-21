@@ -42,6 +42,9 @@ describe('table.tpv.controller.getTables — response shape', () => {
     jest.doMock('@/services/tpv/table.tpv.service', () => ({
       getTablesWithStatus: jest.fn().mockResolvedValue([{ id: 'table-1', number: '5', status: 'AVAILABLE' }]),
     }))
+    jest.doMock('@/services/mobile/tablesVersion.service', () => ({
+      computeTablesVersions: jest.fn().mockResolvedValue({ tablesVersion: 'mesas-v1', floorPlanVersion: 'plano-v1' }),
+    }))
     jest.doMock('@/middlewares/checkTableOwnership.middleware', () => ({
       isTableOwnershipEnforced: jest.fn().mockResolvedValue(true),
       staffCanManageAllTables: jest.fn().mockResolvedValue(false),
@@ -68,6 +71,8 @@ describe('table.tpv.controller.getTables — response shape', () => {
       data: [{ id: 'table-1', number: '5', status: 'AVAILABLE' }],
       settings: { enforceTableOwnership: true },
       viewer: { staffId: 'staff-1', canManageAllTables: false },
+      tablesVersion: 'mesas-v1',
+      floorPlanVersion: 'plano-v1',
     })
   })
 

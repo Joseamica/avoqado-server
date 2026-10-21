@@ -27,6 +27,7 @@ export function registerProductTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, name, fromDate, toDate }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('reports:read', venueId) // same as dashboard sales-by-item
       const gate = await planGateMessage(venueId, 'ADVANCED_REPORTS', 'Los reportes avanzados') // PRO tier
       if (gate) return text({ ok: false, planRequired: true, error: gate })
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })

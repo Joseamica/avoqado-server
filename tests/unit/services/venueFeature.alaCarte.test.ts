@@ -80,6 +80,19 @@ describe('addFeaturesToVenue — un PLAN no se contrata por la puerta de las fun
   })
 })
 
+describe('addFeaturesToVenue — lo Premium por regla sin catálogo (el conector Shopify) no se contrata suelto', () => {
+  it('🔴 rechaza SHOPIFY_INTEGRATION aunque venga mezclado con una suelta legítima, con 400 y código, ANTES de tocar la base o Stripe', async () => {
+    await expect(addFeaturesToVenue('venue-1', ['INVENTORY_TRACKING', 'SHOPIFY_INTEGRATION'])).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'FEATURE_NO_SE_VENDE_SUELTA',
+      message: expect.stringContaining('SHOPIFY_INTEGRATION'),
+    })
+    // todo-o-nada, igual que con los planes
+    expect(mockVenueFindUnique).not.toHaveBeenCalled()
+    expect(mockCreateTrialSubscriptions).not.toHaveBeenCalled()
+  })
+})
+
 describe('addFeaturesToVenue — los días de prueba los decide el SERVIDOR', () => {
   it('usa la política del servidor, no un número que mande quien compra', async () => {
     await addFeaturesToVenue('venue-1', ['INVENTORY_TRACKING'])

@@ -93,7 +93,13 @@ describe('defensa doble en los handlers', () => {
         selectedFeatureCodes: ['CFDI'],
       } as never),
     )
-    expect(result).toMatchObject({ mode: 'PREVIEW_ONLY', purchaseAvailable: false, selection: { valid: true }, terms: { price: 149.9 } })
+    expect(result).toMatchObject({
+      mode: 'PREVIEW_ONLY',
+      purchaseAvailable: false,
+      selection: { valid: true },
+      terms: { price: 149.9 },
+      overlaps: [],
+    })
     expect(JSON.stringify(result)).not.toContain('Cents')
     expect(prismaMock.launchCampaign.create).not.toHaveBeenCalled()
     expect(prismaMock.venueFeature.create).not.toHaveBeenCalled()

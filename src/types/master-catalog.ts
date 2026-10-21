@@ -352,6 +352,34 @@ export const CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1 = [
   'unit',
 ] as const satisfies readonly CatalogManagedFieldV1[]
 
+// D15 (IVA por producto, spec planes 6-7 §4.7): el catálogo maestro ya no administra el IVA. La V1 se queda porque
+// vinculaciones, instantáneas, hashes, líneas históricas y overrides guardados la llevan; se LEE como su V2. Toda escritura
+// nueva (alta por vinculación, publicación, reversión) usa la V2: la V1 sin los dos campos, en el mismo orden.
+export const CATALOG_IVA_FIELDS_V1 = ['objetoImp', 'taxRate'] as const satisfies readonly CatalogManagedFieldV1[]
+export type CatalogIvaFieldV1 = (typeof CATALOG_IVA_FIELDS_V1)[number]
+export type CatalogManagedFieldV2 = Exclude<CatalogManagedFieldV1, CatalogIvaFieldV1>
+
+export const CATALOG_RETAIL_MANAGED_FIELD_MASK_V2 = [
+  'cost',
+  'description',
+  'imageUrl',
+  'name',
+  'satProductKey',
+  'satUnitKey',
+  'type',
+  'unit',
+] as const satisfies readonly CatalogManagedFieldV2[]
+
+export const CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2 = [
+  'description',
+  'imageUrl',
+  'name',
+  'satProductKey',
+  'satUnitKey',
+  'type',
+  'unit',
+] as const satisfies readonly CatalogManagedFieldV2[]
+
 export type CatalogBindingDecisionInput =
   | { decision: 'LINK'; productId: string }
   | { decision: 'CREATE'; create: { categoryId: string; localSku: string; initialPrice: string } }
@@ -468,7 +496,13 @@ export interface CatalogVenueProvenanceResult {
   productId: string | null
   status: string
   revision: number
+  /**
+   * La máscara GUARDADA en la vinculación: la de `lastPublishedManagedSnapshot` y `lastPublishedManagedHash` (V1, con IVA, si es
+   * anterior a D15). Con ella se verifica el hash. No cambia de significado ni de valor para las vinculaciones existentes.
+   */
   managedFieldMask: CatalogManagedFieldV1[]
+  /** D15: los campos que el catálogo administra HOY (V2, sin IVA). */
+  currentManagedFieldMask: CatalogManagedFieldV1[]
   lastPublishedCatalogRevision: number | null
   lastPublishedManagedSnapshot: Prisma.JsonValue | null
   lastPublishedManagedHash: string | null

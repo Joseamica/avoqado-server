@@ -43,8 +43,12 @@ import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { PaymentMethod, Prisma, ReservationStatus } from '@prisma/client'
 import { lineRevenueSql } from './lineRevenue'
 import * as availableBalanceService from './availableBalance.dashboard.service'
-import * as commissionCalculationService from './commission/commission-calculation.service'
-import * as commissionPayoutService from './commission/commission-payout.service'
+import {
+  loadCommissionPayoutsSummary,
+  loadCommissionsSummary,
+  type CommissionPayoutsSummary,
+  type CommissionsSummary,
+} from './chatbot-conversation/commission-answers'
 import * as creditPackDashboardService from './creditPack.dashboard.service'
 import * as customerDashboardService from './customer.dashboard.service'
 import * as paymentDashboardService from './payment.dashboard.service'
@@ -532,35 +536,8 @@ export interface TeamMembersSummary {
   }>
 }
 
-export interface CommissionsSummary {
-  totalPaid: number
-  totalPending: number
-  totalApproved: number
-  staffWithCommissions: number
-  averageCommission: number
-  topEarners: Array<{
-    staffName: string
-    totalEarned: number
-    calculationCount: number
-  }>
-}
-
-export interface CommissionPayoutsSummary {
-  totalPaid: number
-  totalPending: number
-  payoutCount: number
-  averagePayout: number
-  recentPayouts: Array<{
-    amount: number
-    status: string
-    paymentMethod: string | null
-    staffName: string
-    createdAt: Date
-    paidAt: Date | null
-    periodStart: Date | null
-    periodEnd: Date | null
-  }>
-}
+/** Comisiones para el asistente: viven en `chatbot-conversation/commission-answers.ts` (I2, fase 3 «Pago al personal»). */
+export type { CommissionPayoutsSummary, CommissionsSummary }
 
 export interface PaymentsSummary {
   totalPayments: number
@@ -2328,56 +2305,19 @@ export class SharedQueryService {
   }
 
   /**
-   * Summarize commissions for the current venue.
-   *
-   * Used by:
-   * - Dashboard commission stats endpoint
-   * - AI Chatbot for "cómo van mis comisiones" queries
+   * Comisiones de la sede para el asistente («cómo van mis comisiones»): lo calculado y lo pagado en los recibos de Pago al
+   * personal, la misma fuente que los KPI de la pantalla Comisiones.
    */
   static async getCommissionsSummary(venueId: string): Promise<CommissionsSummary> {
-    const stats = await commissionCalculationService.getVenueCommissionStats(venueId)
-
-    return {
-      totalPaid: stats.totalPaid,
-      totalPending: stats.totalPending,
-      totalApproved: stats.totalApproved,
-      staffWithCommissions: stats.staffWithCommissions,
-      averageCommission: stats.averageCommission,
-      topEarners: stats.topEarners.map(earner => ({
-        staffName: earner.staffName,
-        totalEarned: earner.totalEarned,
-        calculationCount: earner.calculationCount,
-      })),
-    }
+    return loadCommissionsSummary(venueId)
   }
 
   /**
-   * Summarize commission payouts for the current venue with staff contact and
-   * payment reference fields removed.
+   * Pagos de comisiones para el asistente: lo pagado en recibos de Pago al personal y el historial del flujo anterior, sin
+   * datos de contacto del personal ni referencias de pago.
    */
   static async getCommissionPayoutsSummary(venueId: string, filters: { limit?: number } = {}): Promise<CommissionPayoutsSummary> {
-    const limit = Math.min(Math.max(Math.trunc(Number(filters.limit) || 10), 1), 25)
-    const [stats, payouts] = await Promise.all([
-      commissionPayoutService.getPayoutStats(venueId),
-      commissionPayoutService.getPayouts(venueId, {}),
-    ])
-
-    return {
-      totalPaid: stats.totalPaid,
-      totalPending: stats.totalPending,
-      payoutCount: stats.payoutCount,
-      averagePayout: stats.averagePayout,
-      recentPayouts: payouts.slice(0, limit).map(payout => ({
-        amount: this.numberValue(payout.amount),
-        status: payout.status,
-        paymentMethod: payout.paymentMethod || null,
-        staffName: payout.staff ? `${payout.staff.firstName || ''} ${payout.staff.lastName || ''}`.trim() || 'Sin nombre' : 'Sin nombre',
-        createdAt: payout.createdAt,
-        paidAt: payout.paidAt || null,
-        periodStart: payout.summary?.periodStart || null,
-        periodEnd: payout.summary?.periodEnd || null,
-      })),
-    }
+    return loadCommissionPayoutsSummary(venueId, filters)
   }
 
   /**

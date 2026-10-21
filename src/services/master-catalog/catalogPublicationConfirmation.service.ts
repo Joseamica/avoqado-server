@@ -2,6 +2,9 @@ import { Prisma } from '@prisma/client'
 import { createHash, randomUUID, timingSafeEqual } from 'node:crypto'
 import AppError, { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import logger from '../../config/logger'
+import { isModelLockTimeoutError, isRetryableDbError } from '../../utils/serializableRetry'
+import { codigoDeBarreraIva } from '../fiscal/normalizarIvaDeProducto'
 import type {
   CatalogCommandContext,
   CatalogPublicationConfirmInput,
@@ -13,6 +16,7 @@ import type {
 import { writeCatalogAudit } from './catalogAudit.service'
 import { canonicalJsonV1, hashCanonicalJsonV1 } from './catalogHash.service'
 import { enqueueCatalogPublicationOutboxTx } from './catalogPublicationOutbox.service'
+import { failCatalogPublicationAttemptTx } from './catalogPublicationFailure.service'
 import { persistCatalogPublicationTx } from './catalogPublicationPersistence.service'
 import type { CatalogPublicationApplyLine } from './catalogPublication.types'
 import {
@@ -63,6 +67,22 @@ interface ConfirmationDependencies {
 
 function stale(message: string): never {
   throw new ConflictError(message, 'STALE_PREVIEW')
+}
+
+/**
+ * R12 (IVA por producto, plan 4) y Ruling T4-R1: repite `run` ante un choque de concurrencia —40001, 55P03 o P2034, crudos o
+ * envueltos en P2010, o el 55P03 de una consulta de modelo—, hasta 3 intentos y mientras `vigente()`. Un 40P01 no se repite:
+ * sigue su camino de hoy (la reserva queda al watchdog, R10). Cualquier otro error sale tal cual.
+ */
+async function conReintentoDeChoque<T>(run: () => Promise<T>, vigente: () => boolean): Promise<T> {
+  for (let intento = 1; ; intento += 1) {
+    try {
+      return await run()
+    } catch (error) {
+      const choque = isRetryableDbError(error) || isModelLockTimeoutError(error)
+      if (!choque || intento >= 3 || !vigente()) throw error
+    }
+  }
 }
 
 const isPlainObject = (value: unknown): value is Record<string, unknown> =>
@@ -355,7 +375,7 @@ export function createCatalogPublicationConfirmationService(overrides: Partial<C
       const reservation = await retryCatalogPublicationReservationOnce(reserve)
       if (reservation.kind === 'done') return reservation.result
 
-      return dependencies.prisma.$transaction(async tx => {
+      const applyTx = async (tx: Prisma.TransactionClient) => {
         await dependencies.acquireAttemptLockTx(tx, context.organizationId, reservation.batch.id)
         await tx.$executeRaw(Prisma.sql`SET LOCAL lock_timeout = '5s'`)
         await tx.$executeRaw(Prisma.sql`SET LOCAL statement_timeout = '60s'`)
@@ -476,7 +496,51 @@ export function createCatalogPublicationConfirmationService(overrides: Partial<C
           throw new ConflictError('La confirmación perdió su CAS.', 'CATALOG_PUBLICATION_STATE_CONFLICT')
         }
         return result
-      }, CATALOG_PUBLICATION_TRANSACTION_OPTIONS)
+      }
+      const apply = () => dependencies.prisma.$transaction(applyTx, CATALOG_PUBLICATION_TRANSACTION_OPTIONS)
+
+      // R12 (IVA por producto, plan 4): una póliza confirmada en paralelo hace chocar la aplicación; se repite mientras la
+      // reserva siga vigente, desde una foto nueva que ya la ve.
+      const vigente = () => reservation.leaseExpiresAt.getTime() > dependencies.now().getTime()
+      try {
+        return await conReintentoDeChoque(apply, vigente)
+      } catch (error) {
+        const barrera = codigoDeBarreraIva(error)
+        if (!barrera) throw error
+        // El trigger de Product la rechazó por IVA: el intento termina AQUÍ, con su motivo, y se CONFIRMA antes de responder,
+        // para que la reserva no quede APPLYING hasta el watchdog. Si el watchdog ya lo terminó, cambian 0/0 filas: benigno.
+        // El reintento cubre el 40001 de ese caso: su FAILED confirmado después de la foto de esta transacción.
+        try {
+          await conReintentoDeChoque(
+            () =>
+              dependencies.prisma.$transaction(async tx => {
+                await dependencies.acquireAttemptLockTx(tx, context.organizationId, reservation.batch.id)
+                return failCatalogPublicationAttemptTx(tx, {
+                  organizationId: context.organizationId,
+                  batchId: reservation.batch.id,
+                  operation: reservation.batch.operation,
+                  attemptId: reservation.attemptId,
+                  leaseExpiresAt: reservation.leaseExpiresAt,
+                  failureCode: barrera.code,
+                  failureMessage: barrera.message,
+                  now: dependencies.now(),
+                })
+              }, CATALOG_PUBLICATION_TRANSACTION_OPTIONS),
+            () => true,
+          )
+        } catch (cierre) {
+          // Su error sustituye al 409 y el lote queda APPLYING al watchdog: que quede rastro de la barrera que lo causó.
+          logger.warn('[catálogo] La barrera de IVA rechazó la publicación y no se pudo cerrar el intento', {
+            organizationId: context.organizationId,
+            batchId: reservation.batch.id,
+            attemptId: reservation.attemptId,
+            barreraCode: barrera.code,
+            error: cierre instanceof Error ? cierre.message : String(cierre),
+          })
+          throw cierre
+        }
+        throw new ConflictError(barrera.message, barrera.code)
+      }
     },
   }
 }

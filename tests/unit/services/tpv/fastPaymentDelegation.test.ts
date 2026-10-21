@@ -456,6 +456,8 @@ describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () 
     // amount en CENTAVOS (totalAmount = amount/100): 3000 = $30, que calza con el
     // subtotal 30 de la 2ª orden y dispara isFullyPaid = true.
     getProductInventoryStatusMock.mockResolvedValueOnce({ inventoryMethod: 'QUANTITY', currentStock: 0 })
+    // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed meanwhile.
+    prismaMock.order.findFirst.mockResolvedValueOnce(ordenQueRechazaPorInventario)
 
     const result: any = await recordFastPayment(
       'venue-1',
@@ -779,6 +781,20 @@ describe('recordFastPayment — venta rápida con un tipo de pago del catálogo'
     expect(pago.tenderTypeId).toBe('tender-uber')
     expect(pago.tenderRevision).toBe(3)
     expect(pago.tenderLabel).toBe('Uber Eats')
+  })
+
+  it('🔴 el tender de sistema «Tarjeta de regalo» no se cobra por la venta rápida (sólo por «Pagar con saldo»)', async () => {
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tender-uber',
+      baseMethod: 'OTHER',
+      active: true,
+      revision: 3,
+      name: 'Tarjeta de regalo',
+      systemKind: 'GIFT_CARD',
+    })
+
+    await expect(recordFastPayment('venue-1', cobroUber as any, 'user-1')).rejects.toThrow(/sólo se cobra con «Pagar con saldo»/)
+    expect(payments).toHaveLength(0)
   })
 
   it('🔴 NO cuenta como efectivo del cajón — el arqueo no puede exigir un dinero que no entró', async () => {

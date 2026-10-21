@@ -11,6 +11,31 @@ import { logControllerError } from '../../errors/logControllerError'
 import * as kdsMobileService from '../../services/mobile/kds.mobile.service'
 import { reportOutOfStock, retryOutOfStock, type ResultadoRetiro } from '../../services/mobile/kdsOutOfStock.mobile.service'
 import { OPERACION_EN_CURSO } from './deliveryOrder.mobile.controller'
+import { listKitchenPreparation, preparationCapabilities } from '../../services/kds/kitchenPreparation.service'
+
+export const getPreparationCapabilities = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({ success: true, data: await preparationCapabilities(req.params.venueId) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+export const getKitchenPreparation = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json({
+      success: true,
+      data: await listKitchenPreparation(req.params.venueId, {
+        orderId: typeof req.query.orderId === 'string' ? req.query.orderId : undefined,
+        cursor: typeof req.query.cursor === 'string' ? req.query.cursor : undefined,
+        limit: typeof req.query.limit === 'string' ? Number(req.query.limit) : undefined,
+        history: req.query.history === 'true',
+      }),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
 
 /**
  * List active KDS orders for a venue
@@ -25,15 +50,25 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
     const { status, stationId } = req.query
     const estacion = typeof stationId === 'string' && stationId ? stationId : undefined
 
+    const page =
+      req.query.urgencyVersion === '1'
+        ? {
+            urgencyVersion: 1 as const,
+            offset: req.query.offset === undefined ? 0 : Number(req.query.offset),
+            limit: req.query.limit === undefined ? kdsMobileService.KDS_LIST_MAX : Number(req.query.limit),
+          }
+        : undefined
     const [orders, total] = await Promise.all([
-      kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion),
+      page
+        ? kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion, page)
+        : kdsMobileService.listKdsOrders(venueId, status as string | undefined, estacion),
       kdsMobileService.countKdsOrders(venueId, status as string | undefined, estacion),
     ])
 
     // El total va en un encabezado y no en el cuerpo: las apps de la calle leen `data` como
     // arreglo y no deben cambiar. Si el tope recortó, queda dicho en el log (por negocio).
     res.setHeader('X-Total-Count', String(total))
-    if (total > orders.length) {
+    if (!page && total > orders.length) {
       logger.warn('KDS: el tablero tiene más comandas activas que el tope; se devuelven las más recientes', {
         venueId,
         total,
@@ -44,6 +79,16 @@ export const listKdsOrders = async (req: Request, res: Response, next: NextFunct
     res.status(200).json({
       success: true,
       data: orders,
+      ...(page
+        ? {
+            page: {
+              total,
+              offset: page.offset,
+              limit: page.limit,
+              nextOffset: page.offset + orders.length < total ? page.offset + orders.length : null,
+            },
+          }
+        : {}),
     })
   } catch (error) {
     logger.error('Error in listKdsOrders controller:', error)

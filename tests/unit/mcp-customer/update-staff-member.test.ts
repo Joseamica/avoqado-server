@@ -1,3 +1,4 @@
+import { operationHash } from '@/utils/operationHash'
 import { registerStaffTools } from '../../../src/mcp/tools/staff'
 import type { McpScope } from '../../../src/mcp/scope'
 
@@ -30,7 +31,13 @@ const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Pro
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const call = (args: Record<string, unknown>) => handlers.get('update_staff_member')!(args, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
-const juan = { id: 'sv1', staffId: 'juan-staff', role: 'WAITER', staff: { firstName: 'Juan', lastName: 'Pérez', active: true } }
+const juan = {
+  id: 'sv1',
+  staffId: 'juan-staff',
+  role: 'WAITER',
+  active: true,
+  staff: { firstName: 'Juan', lastName: 'Pérez', active: true },
+}
 
 beforeAll(() => {
   registerStaffTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
@@ -69,9 +76,23 @@ describe('update_staff_member (critical write, confirm-gated)', () => {
   it('with confirm:true: applies with performedBy attribution and audits', async () => {
     mockStaffVenueFind.mockResolvedValueOnce([juan])
     mockUpdate.mockResolvedValueOnce({})
-    const out = parse(await call({ venueId: 'v1', name: 'juan', role: 'manager', confirm: true }))
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        name: 'juan',
+        role: 'manager',
+        confirm: true,
+        resolvedStaffVenueId: 'sv1',
+        expectedSourceFingerprint: operationHash({ id: 'sv1', staffId: 'juan-staff', role: 'WAITER', active: true }),
+      }),
+    )
 
-    expect(mockUpdate).toHaveBeenCalledWith('v1', 'sv1', { role: 'MANAGER', performedBy: 's1' })
+    expect(mockUpdate).toHaveBeenCalledWith('v1', 'sv1', {
+      role: 'MANAGER',
+      performedBy: 's1',
+      callerRole: 'OWNER',
+      expectedState: { role: 'WAITER', active: true },
+    })
     expect(out).toMatchObject({ ok: true, member: 'Juan Pérez' })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'STAFF_MEMBER_UPDATED', entityId: 'sv1', venueId: 'v1' })
   })
@@ -79,7 +100,16 @@ describe('update_staff_member (critical write, confirm-gated)', () => {
   it('surfaces the last-admin protection from the service as ok:false', async () => {
     mockStaffVenueFind.mockResolvedValueOnce([{ ...juan, role: 'ADMIN' }])
     mockUpdate.mockRejectedValueOnce(new Error('Cannot remove the last venue administrator'))
-    const out = parse(await call({ venueId: 'v1', name: 'juan', active: false, confirm: true }))
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        name: 'juan',
+        active: false,
+        confirm: true,
+        resolvedStaffVenueId: 'sv1',
+        expectedSourceFingerprint: operationHash({ id: 'sv1', staffId: 'juan-staff', role: 'ADMIN', active: true }),
+      }),
+    )
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/last venue administrator/)
   })
@@ -87,7 +117,16 @@ describe('update_staff_member (critical write, confirm-gated)', () => {
   it('ceiling: a MANAGER cannot manage a member who OUTRANKS them', async () => {
     scope.perVenueAccess.set('v1', { role: 'MANAGER' } as never) // caller MANAGER (6)
     mockStaffVenueFind.mockResolvedValueOnce([{ ...juan, role: 'OWNER' }]) // target OWNER (8) outranks
-    const out = parse(await call({ venueId: 'v1', name: 'juan', active: false, confirm: true }))
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        name: 'juan',
+        active: false,
+        confirm: true,
+        resolvedStaffVenueId: 'sv1',
+        expectedSourceFingerprint: operationHash({ id: 'sv1', staffId: 'juan-staff', role: 'ADMIN', active: true }),
+      }),
+    )
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/superior al tuyo/)
     expect(mockUpdate).not.toHaveBeenCalled()
@@ -104,7 +143,16 @@ describe('update_staff_member (critical write, confirm-gated)', () => {
 
   it('refuses self-management — cannot change your OWN role/status via the agent', async () => {
     mockStaffVenueFind.mockResolvedValueOnce([{ ...juan, staffId: 's1' }]) // the matched member IS the caller
-    const out = parse(await call({ venueId: 'v1', name: 'juan', active: false, confirm: true }))
+    const out = parse(
+      await call({
+        venueId: 'v1',
+        name: 'juan',
+        active: false,
+        confirm: true,
+        resolvedStaffVenueId: 'sv1',
+        expectedSourceFingerprint: operationHash({ id: 'sv1', staffId: 'juan-staff', role: 'ADMIN', active: true }),
+      }),
+    )
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/tu propio rol o estado/)
     expect(mockUpdate).not.toHaveBeenCalled()

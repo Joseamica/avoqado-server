@@ -7,10 +7,11 @@
  * must NEVER throw; any lookup error (or missing orderId) must degrade to `false`.
  */
 import { resolveAutofacturaAvailable } from '@/services/tpv/payment.tpv.service'
-import { loadOrderForCfdiFromDb } from '@/services/fiscal/cfdi.service'
+import { loadOrderForCfdiFromDb, ventaConDevolucion } from '@/services/fiscal/cfdi.service'
 
 jest.mock('@/services/fiscal/cfdi.service', () => ({
   loadOrderForCfdiFromDb: jest.fn(),
+  ventaConDevolucion: jest.fn(),
 }))
 
 jest.mock('@/config/logger', () => ({
@@ -101,5 +102,15 @@ describe('resolveAutofacturaAvailable', () => {
     const result = await resolveAutofacturaAvailable('order-123')
 
     expect(result).toBe(false)
+  })
+
+  // T-I2 · A7-R10: el espejo del GET público. Con una devolución completada el ticket (también el RECIBO DE LA DEVOLUCIÓN de la TPV,
+  // `refund.tpv.service.ts`) no promete «…y factura».
+  it('🔴 A7-R10: venta con devolución completada ⇒ false aunque el comercio la tenga prendida', async () => {
+    mockLoadOrderForCfdiFromDb.mockResolvedValue({ facturacionEnabled: true, autofacturaEnabled: true } as any)
+    ;(ventaConDevolucion as jest.Mock).mockResolvedValueOnce(true)
+
+    expect(await resolveAutofacturaAvailable('order-123')).toBe(false)
+    expect(ventaConDevolucion).toHaveBeenCalledWith('order-123')
   })
 })

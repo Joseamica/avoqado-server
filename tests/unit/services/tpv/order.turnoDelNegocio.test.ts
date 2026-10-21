@@ -52,6 +52,8 @@ describe('createOrder (orden de mostrador) — cae en el turno del NEGOCIO', () 
     expect(datosDeLaOrden().shiftId).toBe('turno-negocio')
     // Por NEGOCIO, no por quien la abre: el selector «Vendedor» cambia ese staffId en cada cobro.
     expect((prismaMock.shift.findFirst as jest.Mock).mock.calls[0][0].where).toEqual(TURNO)
+    // IVA por producto (plan 2): la orden de mostrador nace vacía con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto la orden SE CREA igual, sin turno', async () => {
@@ -106,6 +108,8 @@ describe('createOrderWithItems (TPV Cobrar) — la orden y su cobro comparten tu
     // medio, y entonces la orden y su cobro caerían en turnos distintos.
     expect(prismaMock.shift.findFirst).toHaveBeenCalledTimes(1)
     expect((prismaMock.shift.findFirst as jest.Mock).mock.calls[0][0].where).toEqual(TURNO)
+    // IVA por producto (plan 2): Cobrar V1 nace vacía con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto la venta SIGUE ocurriendo, con la orden sin turno', async () => {
@@ -162,7 +166,17 @@ describe('createOrderWithItems (TPV Cobrar) — la orden y su cobro comparten tu
 
 describe('assignTable (abrir mesa) — cae en el turno del NEGOCIO', () => {
   beforeEach(() => {
-    prismaMock.table.findFirst.mockResolvedValue({ id: 'mesa-1', number: 4, status: 'AVAILABLE', currentOrder: null } as any)
+    const table = { id: 'mesa-1', number: '4', status: 'AVAILABLE', currentOrderId: null, currentOrder: null }
+    prismaMock.table.findFirst.mockResolvedValue(table as any)
+    prismaMock.table.findMany.mockResolvedValue([table] as any)
+    prismaMock.order.findMany.mockResolvedValue([])
+    prismaMock.$queryRaw.mockImplementation(async (query: any, ...values: unknown[]) => {
+      const sql = Array.isArray(query) ? query.join('?') : query.sql
+      if (sql.includes('pg_advisory_xact_lock') && values[0] === 7_310_115) return []
+      if (sql.includes('FROM "Venue"') && sql.includes('FOR KEY SHARE')) return [{ id: VENUE }]
+      if (sql.includes('FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) return [{ id: table.id }]
+      throw new Error(`Unexpected raw statement: ${sql}`)
+    })
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staff: { id: 'staff-1' } } as any)
     prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
     prismaMock.table.update.mockResolvedValue({ id: 'mesa-1' } as any)
@@ -175,6 +189,8 @@ describe('assignTable (abrir mesa) — cae en el turno del NEGOCIO', () => {
 
     expect(datosDeLaOrden().shiftId).toBe('turno-negocio')
     expect((prismaMock.shift.findFirst as jest.Mock).mock.calls[0][0].where).toEqual(TURNO)
+    // IVA por producto (plan 2): abrir mesa nace vacía con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno abierto la mesa SE ABRE igual, sin turno', async () => {

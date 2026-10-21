@@ -8,6 +8,8 @@
 // customer actually paid. So before handing a gross price to the PAC we either tell it the
 // price is tax-included (preferred) or split it ourselves for our own stored breakdown.
 
+import { tratamientoDesdeTupla, tuplaDesdeTratamiento, type IvaTratamiento } from './ivaTratamiento'
+
 /**
  * Splits an IVA-included (gross) integer-cent amount into its net base + tax for a given rate.
  *
@@ -25,24 +27,32 @@ export function splitIvaIncluded(grossCents: number, rate: number): { netCents: 
 }
 
 /**
- * Distribute an integer-cent `totalCents` across `weightsCents` proportionally, with the
- * LARGEST-weight bucket absorbing the rounding remainder so the parts sum to `totalCents`
- * EXACTLY (no cent lost/created). Empty weights → `[]`; all-zero weights → the whole total
- * lands in the first bucket (there is no proportion to honor).
+ * D19 (spec planes 6-7): reparte `totalCents` entre `pesos` en proporción, al centavo EXACTO. Toma el piso exacto (BigInt) de
+ * total·peso/Σ y los centavos que sobran van a los mayores remanentes (empate: el de mayor peso; luego, el primero). Nunca da
+ * una parte negativa (H17: el viejo redondeaba hacia arriba y le restaba al más grande) ni pierde un centavo, y con total ≤ Σ
+ * ninguna parte rebasa su peso. Total negativo (ajuste de reparto): reparte la magnitud y le devuelve el signo. Pesos negativos
+ * cuentan como cero; sin pesos ⇒ `[]`; todos en cero ⇒ el primero se lleva todo (no hay proporción que respetar).
+ * Precondición: total y pesos en CENTAVOS ENTEROS (así llegan de sus cinco llamadores); un peso con fracción se redondea.
  */
-export function allocateByWeights(totalCents: number, weightsCents: number[]): number[] {
-  const n = weightsCents.length
-  if (n === 0) return []
-  const sum = weightsCents.reduce((a, b) => a + b, 0)
-  if (sum <= 0) return weightsCents.map((_, i) => (i === 0 ? totalCents : 0))
-  const parts = weightsCents.map(w => Math.round((totalCents * w) / sum))
-  const drift = totalCents - parts.reduce((a, b) => a + b, 0)
-  if (drift !== 0) {
-    let maxI = 0
-    for (let i = 1; i < n; i++) if (weightsCents[i] > weightsCents[maxI]) maxI = i
-    parts[maxI] += drift
+export function repartirProporcional(totalCents: number, pesos: number[]): number[] {
+  if (pesos.length === 0) return []
+  const ps = pesos.map(p => (p > 0 ? BigInt(Math.round(p)) : 0n))
+  const suma = ps.reduce((a, b) => a + b, 0n)
+  if (suma === 0n) return pesos.map((_, i) => (i === 0 ? totalCents : 0))
+  const magnitud = BigInt(Math.abs(totalCents))
+  const partes = ps.map(p => (magnitud * p) / suma)
+  const resto = ps.map((p, i) => magnitud * p - partes[i] * suma)
+  let sobran = magnitud - partes.reduce((a, b) => a + b, 0n)
+  const orden = ps
+    .map((_, i) => i)
+    .sort((a, b) => (resto[a] !== resto[b] ? (resto[b] > resto[a] ? 1 : -1) : ps[a] !== ps[b] ? (ps[b] > ps[a] ? 1 : -1) : a - b))
+  for (const i of orden) {
+    if (sobran === 0n) break
+    partes[i] += 1n
+    sobran -= 1n
   }
-  return parts
+  const signo = totalCents < 0 ? -1 : 1
+  return partes.map(p => signo * Number(p) || 0)
 }
 
 /**
@@ -90,7 +100,7 @@ export function splitPaymentIvaByOrderRates(
 ): { netCents: number; taxCents: number; taxByRate: Record<string, number> } {
   const meaningful = grossByRate.filter(r => r.grossCents !== 0)
   if (meaningful.length === 0) return splitIvaByRate([{ grossCents: paymentGrossCents, rate: fallbackRate }])
-  const alloc = allocateByWeights(
+  const alloc = repartirProporcional(
     paymentGrossCents,
     meaningful.map(r => r.grossCents),
   )
@@ -98,12 +108,11 @@ export function splitPaymentIvaByOrderRates(
 }
 
 /**
- * Group an order's line items into gross (IVA-included, integer cents) per REAL tax rate — the single
- * source of truth for "how do we read each product's rate". An item with no `taxRate` defaults to
- * `defaultRate` (16%, same as the CFDI); 0-gross lines are skipped. The result feeds
- * {@link splitPaymentIvaByOrderRates} so IVA is computed per rate (16% central / 8% frontera / 0% exempt
- * / mixed) instead of assuming a flat rate on the whole amount. Empty items → `[]` (custom-amount sale →
- * callers fall back to the flat rate). Pure: item money arrives as NUMBER pesos (callers convert Decimals).
+ * Agrupa importes YA NORMALIZADOS y tasas YA RESUELTAS (primitiva aritmética).
+ * Para una Order persistida usar `grossByRateFromOrder` en ivaDeOrden: total, cortesías, B2, cargos y
+ * tratamiento sellado no se pueden reconstruir sólo con unitPrice y taxRate. El resultado alimenta
+ * {@link splitPaymentIvaByOrderRates}. Sin importes devuelve []; el llamador conserva el 16 % de
+ * ventas de importe libre. Los valores de entrada son pesos numéricos, la salida es en centavos.
  */
 export function grossByRateFromItems(
   items: { unitPrice: number; quantity: number; discountAmount: number; taxRate: number | null }[],
@@ -117,4 +126,97 @@ export function grossByRateFromItems(
     byRate.set(rate, (byRate.get(rate) ?? 0) + grossCents)
   }
   return [...byRate.entries()].map(([rate, grossCents]) => ({ rate, grossCents }))
+}
+
+// ── Plan 4b: el desglose por TRATAMIENTO (spec 4b §4) ──────────────────────────────────────────────────────────────
+
+/** Base e IVA (centavos) por tratamiento. Un tratamiento ausente vale cero. */
+export type DesglosePorTratamiento = Partial<Record<IvaTratamiento, { baseCents: number; ivaCents: number }>>
+/**
+ * La venta de una orden por tratamiento y tasa (IVA incluido, centavos), en el orden en que aparece cada par. La tasa es la del
+ * tratamiento (0.16 · 0.08 · 0) y, en un BLOQUEADO, la de su producto TAL CUAL (Ruling 4b-R4).
+ */
+export type MezclaPorTratamiento = { tratamiento: IvaTratamiento; tasa: number; grossCents: number }[]
+/** Lo que se reparte de UN cobro: los totales y `taxByRate` de siempre, más la base e IVA por tratamiento. */
+export type DesgloseDeCobro = {
+  netCents: number
+  taxCents: number
+  taxByRate: Record<string, number>
+  porTratamiento: DesglosePorTratamiento
+}
+
+type Numero = number | { toString(): string }
+/** Un renglón tal como sale de Prisma (`OrderItem` con su producto; los Decimal se aceptan tal cual). */
+export type RenglonConIva = {
+  quantity: number
+  unitPrice: Numero
+  discountAmount: Numero
+  ivaTratamiento: IvaTratamiento | null
+  product: { taxRate: Numero | null; ivaTratamiento: IvaTratamiento } | null
+}
+
+type Entrada = [IvaTratamiento, { baseCents: number; ivaCents: number }]
+
+/**
+ * Una mezcla por tasa (la de la póliza, `grossByRateForOrder`) como mezcla por tratamiento, cada parte con SU tasa: 0.16 →
+ * IVA_16, 0.08 → IVA_8, 0 → IVA_0; una tasa fuera de ésas sólo la tiene un producto BLOQUEADO y así se etiqueta (la póliza sólo
+ * lee las cifras, y las cifras salen de la tasa).
+ */
+export function mezclaDesdeTasas(g: { rate: number; grossCents: number }[]): MezclaPorTratamiento {
+  return g.map(({ rate, grossCents }) => ({ tratamiento: tratamientoDesdeTupla(rate, '02') ?? 'BLOQUEADO_03', tasa: rate, grossCents }))
+}
+
+/**
+ * El desglose de UN cobro (IVA incluido) con la mezcla de su orden, por tratamiento: el mismo reparto que
+ * `splitPaymentIvaByOrderRates` (proporcional al centavo exacto, `repartirProporcional`), cada parte cortada con
+ * `splitIvaIncluded` a SU tasa y `taxByRate` con la llave de siempre (`String(tasa)`, sólo con IVA). Sin renglones ⇒ todo al
+ * 16 %, como siempre.
+ */
+export function desglosePorTratamiento(cobroCents: number, mezcla: MezclaPorTratamiento): DesgloseDeCobro {
+  const meaningful = mezcla.filter(m => m.grossCents !== 0)
+  const partes: MezclaPorTratamiento =
+    meaningful.length === 0
+      ? [{ tratamiento: 'IVA_16', tasa: 0.16, grossCents: cobroCents }]
+      : repartirProporcional(
+          cobroCents,
+          meaningful.map(m => m.grossCents),
+        ).map((grossCents, i) => ({ ...meaningful[i], grossCents }))
+  let netCents = 0
+  let taxCents = 0
+  const taxByRate: Record<string, number> = {}
+  const porTratamiento: DesglosePorTratamiento = {}
+  for (const p of partes) {
+    const s = splitIvaIncluded(p.grossCents, p.tasa)
+    netCents += s.netCents
+    taxCents += s.taxCents
+    if (s.taxCents !== 0) taxByRate[String(p.tasa)] = (taxByRate[String(p.tasa)] ?? 0) + s.taxCents
+    const acc = (porTratamiento[p.tratamiento] ??= { baseCents: 0, ivaCents: 0 })
+    acc.baseCents += s.netCents
+    acc.ivaCents += s.taxCents
+  }
+  return { netCents, taxCents, taxByRate, porTratamiento }
+}
+
+/**
+ * El IVA por tasa de un desglose de tratamientos DE CATÁLOGO (16, 8, 0, exento, no objeto), en la forma de `taxByRate` de
+ * siempre: llaves "0.16"/"0.08", sin ceros. Un BLOQUEADO no tiene tasa de catálogo y nunca llega aquí: el mapa v2 no lo admite y
+ * la conciliación no lo congela (Ruling 4b-R4).
+ */
+export function tasasDe(d: DesglosePorTratamiento): Record<string, number> {
+  const r: Record<string, number> = {}
+  for (const [t, v] of Object.entries(d) as Entrada[]) {
+    if (v.ivaCents === 0) continue
+    const llave = String(tuplaDesdeTratamiento(t, 0).taxRate)
+    r[llave] = (r[llave] ?? 0) + v.ivaCents
+  }
+  return r
+}
+
+/** `destino += signo × origen`, tratamiento por tratamiento. */
+export function sumarDesglose(destino: DesglosePorTratamiento, origen: DesglosePorTratamiento, signo: 1 | -1): void {
+  for (const [t, v] of Object.entries(origen) as Entrada[]) {
+    const acc = (destino[t] ??= { baseCents: 0, ivaCents: 0 })
+    acc.baseCents += signo * v.baseCents
+    acc.ivaCents += signo * v.ivaCents
+  }
 }

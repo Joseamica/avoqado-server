@@ -58,10 +58,8 @@ describe('requireWriteScopeAlways', () => {
     expect(() => requireWriteScopeAlways(scopeCon(['mcp:read', 'mcp:write']), 'attendance:manage')).not.toThrow()
   })
 
-  it('🔴 un token SIN scopes declarados conserva acceso (desarrollo y legacy) — igual que el guard general', () => {
-    // Si esto cambiara, el servidor de desarrollo y las conexiones viejas dejarían de funcionar
-    // de golpe. La excepción es la MISMA que hace `enforceWriteScope`, a propósito.
-    expect(() => requireWriteScopeAlways(scopeCon(undefined), 'attendance:manage')).not.toThrow()
+  it('sin un grant explícito no se permite escritura sensible', () => {
+    expect(() => requireWriteScopeAlways(scopeCon(undefined), 'attendance:manage')).toThrow(/mcp:write/)
   })
 
   it('una lista de scopes VACÍA sí se rechaza (declaró scopes y no trae write)', () => {

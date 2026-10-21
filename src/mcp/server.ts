@@ -9,8 +9,11 @@ import { describeMcpMessage, MCP_HANDSHAKE_METHODS, respondMcpCancelled } from '
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { beginWork, isRequestCancelledError, pendingCancellation } from '@/utils/requestCancellation'
 import { instrumentTools, recordCancelledToolCall } from './instrument'
+import { configureToolCatalog } from './catalog'
 import { registerVenueTools } from './tools/venues'
+import { registerVenueAdministrationTools } from './tools/venueAdministration'
 import { registerSalesTools } from './tools/sales'
+import { registerSettlementReportTools } from './tools/settlementReport'
 import { registerOrderTools } from './tools/orders'
 import { registerTerminalTools } from './tools/terminals'
 import { registerReservationTools } from './tools/reservations'
@@ -20,15 +23,21 @@ import { registerSerializedTools } from './tools/serialized'
 import { registerProcurementTools } from './tools/procurement'
 import { registerCfdiTools } from './tools/cfdi'
 import { registerCommissionTools } from './tools/commissions'
+import { registerStaffPayTools } from './tools/staffPay'
 import { registerSubscriptionTools } from './tools/subscriptions'
 import { registerMenuTools } from './tools/menu'
+import { registerCatalogInBulkTools } from './tools/catalogInBulk'
 import { registerStaffTools } from './tools/staff'
+import { registerRhTools } from './tools/rh'
 import { registerReviewTools } from './tools/reviews'
 import { registerCustomerTools } from './tools/customers'
 import { registerCustomerGroupTools } from './tools/customerGroups'
 import { registerCampaignTools } from './tools/campaigns'
 import { registerReceiptLayoutTools } from './tools/receiptLayout'
+import { registerCustomerDisplayTools } from './tools/customerDisplay'
+import { registerServiceCourseTools } from './tools/serviceCourses'
 import { registerCreditPackTools } from './tools/creditPacks'
+import { registerGiftCardTools } from './tools/giftCards'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
 import { registerUpsellTools } from './tools/upsell'
@@ -40,14 +49,17 @@ import { registerOverviewTools } from './tools/overview'
 import { registerTableTools } from './tools/tables'
 import { registerFeatureTools } from './tools/features'
 import { registerDeliveryChannelTools } from './tools/deliveryChannels'
+import { registerOnlineOrderingTools } from './tools/onlineOrdering'
 import { registerDeliveryActivationTools } from './tools/deliveryActivation'
 import { registerDeliveryCourierTools } from './tools/deliveryCourier'
 import { registerDeliveryLineActionTools } from './tools/deliveryLineActions'
 import { registerProductTools } from './tools/products'
+import { registerProductVariantTools } from './tools/productVariants'
 import { registerTrendTools } from './tools/trends'
 import { registerOrganizationTools } from './tools/organizations'
 import { registerPaymentLinkTools } from './tools/paymentLinks'
 import { registerLoyaltyTools } from './tools/loyalty'
+import { registerLateStampTools } from './tools/lateStamp'
 import { registerReferralTools } from './tools/referrals'
 import { registerSeatTools } from './tools/seats'
 import { registerPlanAdminTools } from './tools/planAdmin'
@@ -59,8 +71,11 @@ import { registerAccountingTools } from './tools/accounting'
 import { registerActivityLogTools } from './tools/activity-log'
 import { registerAnnouncementTools } from './tools/announcements'
 import { registerLandingLeadTools } from './tools/landingLeads'
+import { registerDocumentRequestTools } from './tools/documentRequests'
 import { registerLaunchCampaignTools } from './tools/launchCampaigns'
 import { registerMerchantRoutingTools } from './tools/merchantRouting'
+import { registerPassIntegrationTools } from './tools/passIntegrations'
+import { registerShopifyTools } from './tools/shopify'
 import { registerPrinterTools } from './tools/printers'
 import { registerTenderTypeTools } from './tools/tenderTypes'
 import { registerAreaTicketTools } from './tools/areaTickets'
@@ -72,6 +87,8 @@ import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCata
 import { buildMcpInstructions } from './instructions'
 import { registerHelpTools } from './tools/help'
 import { motivoDeSesionInvalidada } from '@/utils/passwordChangeGuard'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from './oauth/config'
+import type { McpProfile } from './directory/catalog'
 
 /** Flags gating PlayTelecom / white-label-only tool groups, computed once per connection. */
 export interface ToolRegistrationFlags {
@@ -92,7 +109,9 @@ export interface ToolRegistrationFlags {
 export function registerAllTools(server: McpServer, scope: McpScope, flags: ToolRegistrationFlags): void {
   registerHelpTools(server, scope) // product guide for everyone; internal docs only when scope.isSuperAdmin
   registerVenueTools(server, scope)
+  registerVenueAdministrationTools(server, scope)
   registerSalesTools(server, scope)
+  registerSettlementReportTools(server, scope)
   registerOrderTools(server, scope)
   registerTerminalTools(server, scope)
   registerReservationTools(server, scope)
@@ -102,15 +121,21 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerProcurementTools(server, scope)
   registerCfdiTools(server, scope)
   registerCommissionTools(server, scope)
+  registerStaffPayTools(server, scope)
   registerSubscriptionTools(server, scope)
   registerMenuTools(server, scope)
+  registerCatalogInBulkTools(server, scope) // catálogo en bloque (buscar por código, precios, altas, existencias): sólo el MCP libre
   registerStaffTools(server, scope)
+  registerRhTools(server, scope)
   registerReviewTools(server, scope)
   registerCustomerTools(server, scope)
   registerCustomerGroupTools(server, scope)
   registerCampaignTools(server, scope)
   registerReceiptLayoutTools(server, scope)
+  registerCustomerDisplayTools(server, scope)
+  registerServiceCourseTools(server, scope)
   registerCreditPackTools(server, scope)
+  registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
   registerUpsellTools(server, scope)
@@ -123,15 +148,18 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerFeatureTools(server, scope)
   registerHybridBillingTools(server, scope)
   registerDeliveryChannelTools(server, scope)
+  registerOnlineOrderingTools(server, scope)
   registerDeliveryActivationTools(server, scope)
   registerDeliveryCourierTools(server, scope)
   registerDeliveryLineActionTools(server, scope)
   registerProductTools(server, scope)
+  registerProductVariantTools(server, scope) // free mode only: not in the certified directory
   registerTrendTools(server, scope)
   registerOrganizationTools(server, scope)
   registerPaymentLinkTools(server, scope)
   registerSeatTools(server, scope)
   registerLoyaltyTools(server, scope)
+  registerLateStampTools(server, scope) // sello tardío: sólo /mcp libre (no está en src/mcp/directory/catalog.ts)
   registerReferralTools(server, scope)
   registerPlanAdminTools(server, scope)
   registerAccountingTools(server, scope)
@@ -142,7 +170,10 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   // vuelve a comprobarlo (defensa doble), y `catalog-no-internals.test.ts` recorre el catálogo
   // de clientes para fijar que aquí no aparecen.
   if (scope.isSuperAdmin) registerLaunchCampaignTools(server, scope)
+  if (scope.isSuperAdmin) registerDocumentRequestTools(server, scope)
   registerMerchantRoutingTools(server, scope)
+  registerPassIntegrationTools(server, scope)
+  registerShopifyTools(server, scope)
   registerPrinterTools(server, scope)
   registerTenderTypeTools(server, scope)
   registerAreaTicketTools(server, scope)
@@ -175,8 +206,11 @@ const SERVER_INFO = { name: 'avoqado-customer-mcp', version: '0.1.0' }
 const SERVER_CAPABILITIES = { tools: { listChanged: true } }
 
 /** A bare MCP server with the process-wide identity, capabilities and instructions. */
-export function createMcpServer(isSuperAdmin: boolean): McpServer {
-  return new McpServer(SERVER_INFO, { instructions: buildMcpInstructions({ isSuperAdmin }), capabilities: SERVER_CAPABILITIES })
+export function createMcpServer(isSuperAdmin: boolean, profile: McpProfile = 'manual'): McpServer {
+  return new McpServer(profile === 'directory' ? { ...SERVER_INFO, name: 'avoqado-directory-mcp' } : SERVER_INFO, {
+    instructions: buildMcpInstructions({ isSuperAdmin, directory: profile === 'directory' }),
+    capabilities: SERVER_CAPABILITIES,
+  })
 }
 
 /**
@@ -184,22 +218,30 @@ export function createMcpServer(isSuperAdmin: boolean): McpServer {
  * one thing that changes its answer) — one indexed query instead of the whole scope. That is what lets the MCP guard
  * give the handshake no slot, so a new conversation can always connect (Codex, round 3).
  */
-export async function buildHandshakeServer(staffId: string): Promise<McpServer> {
-  return createMcpServer(await isActiveSuperAdmin(staffId))
+export async function buildHandshakeServer(staffId: string, profile: McpProfile = 'manual'): Promise<McpServer> {
+  return createMcpServer(await isActiveSuperAdmin(staffId), profile)
 }
 
 /** Build a per-request MCP server bound to the caller's resolved scope. */
-async function buildServerForIdentity(staffId: string, activeOrg: string, scopes?: string[]): Promise<McpServer> {
+async function buildServerForIdentity(
+  staffId: string,
+  activeOrg: string,
+  scopes?: string[],
+  profile: McpProfile = 'manual',
+  clientId: string | null = null,
+): Promise<McpServer> {
   const scope = await resolveScope(staffId, activeOrg)
-  // Thread the connection's granted OAuth scopes onto the scope so the guard can enforce mcp:write
-  // on writes. Undefined (dev/legacy token) → the guard leaves access unrestricted.
-  if (scopes && scopes.length) scope.scopes = scopes
+  // Never discard an explicit empty grant or give legacy tokens implicit write access.
+  scope.scopes = scopes ?? ['mcp:read']
+  // Qué app hizo cada escritura (evidencia si un cliente dice «yo no fui»): auditMcpWrite la toma del alcance.
+  if (clientId) scope.clientId = clientId
 
   const isSuperAdmin = scope.isSuperAdmin === true
-  const server = createMcpServer(isSuperAdmin)
+  const server = createMcpServer(isSuperAdmin, profile)
   // Log every tool call (must run BEFORE registering tools). isSuperAdmin: raw errors for staff,
   // sanitized (generic message + ref) for customers — see sanitizeThrownError.
-  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin })
+  instrumentTools(server, { staffId, org: activeOrg, isSuperAdmin: isSuperAdmin && profile === 'manual', clientId })
+  configureToolCatalog(server, scope, profile)
 
   const [serializedEnabled, whiteLabelEnabled, catalogAccess] = await Promise.all([
     moduleService.anyVenueHasModule(scope.allowedVenueIds, MODULE_CODES.SERIALIZED_INVENTORY),
@@ -227,7 +269,7 @@ async function buildServerForIdentity(staffId: string, activeOrg: string, scopes
  * Phase 1: requireBearerAuth populated req.auth.extra ({ staffId, activeOrg }) via
  * provider.verifyAccessToken. Phase-0 dev server passes a raw bearer header instead.
  */
-export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+async function handleMcpProfileRequest(req: Request, res: Response, profile: McpProfile): Promise<void> {
   // Running work of this request: the MCP guard frees the caller's slot only when it (and every tool it
   // started) is over — a closed connection does not stop it.
   const endWork = beginWork()
@@ -236,25 +278,33 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
     let staffId: string
     let activeOrg: string
     let scopes: string[] | undefined
+    let clientId: string | null = null
     const extra = (req as { auth?: { extra?: Record<string, unknown> } }).auth?.extra
     if (extra && typeof extra.staffId === 'string' && typeof extra.activeOrg === 'string') {
+      const resource = (req as Request & { auth?: { resource?: URL } }).auth?.resource
+      if (resource?.href !== (profile === 'directory' ? MCP_DIRECTORY_RESOURCE_URL : MCP_RESOURCE_URL).href)
+        throw new Error('Invalid MCP token resource')
       staffId = extra.staffId
       activeOrg = extra.activeOrg
-      // provider.verifyAccessToken threads the token's real granted scopes here (undefined for legacy).
+      // provider.verifyAccessToken threads the token's real granted scopes here.
       if (Array.isArray(extra.scopes)) scopes = extra.scopes.filter((s): s is string => typeof s === 'string')
+      if (typeof extra.clientId === 'string') clientId = extra.clientId
     } else {
       const token = (req.headers.authorization ?? '').replace(/^Bearer\s+/i, '')
-      const payload = verifyMcpToken(token) // throws on bad / expired / wrong-audience → 401 below
+      const payload = verifyMcpToken(token, profile) // throws on bad / expired / wrong-audience → 401 below
       // Codex S4: el mismo corte de sesión que en `provider.verifyAccessToken` (este es el camino del
       // servidor de desarrollo, sin `requireBearerAuth`). El mensaje dice «token» → 401 abajo.
       if (await motivoDeSesionInvalidada(payload.sub, emisionDeCadena(payload))) throw new Error('MCP token revoked by session cutoff')
       staffId = payload.sub
       activeOrg = payload.org
       scopes = payload.scp
+      clientId = payload.cid ?? null
     }
     const message = describeMcpMessage(req.body)
     const isHandshake = message.kind === 'request' && MCP_HANDSHAKE_METHODS.has(message.method ?? '')
-    const server = isHandshake ? await buildHandshakeServer(staffId) : await buildServerForIdentity(staffId, activeOrg, scopes)
+    const server = isHandshake
+      ? await buildHandshakeServer(staffId, profile)
+      : await buildServerForIdentity(staffId, activeOrg, scopes, profile, clientId)
     const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined })
     res.on('close', () => {
       void transport.close()
@@ -275,6 +325,7 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
           toolName: message.tool,
           staffId: typeof extra?.staffId === 'string' ? extra.staffId : null,
           orgId: typeof extra?.activeOrg === 'string' ? extra.activeOrg : null,
+          clientId: typeof extra?.clientId === 'string' ? extra.clientId : null,
           venueId: message.venueId ?? null,
           reason: err.reason,
           durationMs: Date.now() - startedAt,
@@ -294,4 +345,12 @@ export async function handleMcpRequest(req: Request, res: Response): Promise<voi
   } finally {
     endWork()
   }
+}
+
+export async function handleMcpRequest(req: Request, res: Response): Promise<void> {
+  return handleMcpProfileRequest(req, res, 'manual')
+}
+
+export async function handleDirectoryMcpRequest(req: Request, res: Response): Promise<void> {
+  return handleMcpProfileRequest(req, res, 'directory')
 }

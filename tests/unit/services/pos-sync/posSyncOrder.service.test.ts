@@ -31,7 +31,18 @@ jest.mock('../../../../src/config/logger', () => ({
 jest.mock('../../../../src/services/pos-sync/posSyncStaff.service')
 jest.mock('../../../../src/services/pos-sync/posSyncTable.service')
 jest.mock('../../../../src/services/pos-sync/posSyncShift.service')
+// Plan 6b (PF-M4): la guardia del IVA por producto, de paso; aquí se prueba el escritor. La guardia la prueban
+// tests/unit/communication/rabbitmq/dispacher.ivaEncendido.test.ts y tests/integration/pos-sync/posSyncWriters.atomic.integration.test.ts.
+jest.mock('@/services/pos-sync/exclusionIva', () => ({
+  exigirIvaApagadoTx: jest.fn(),
+  conIvaApagado: (_venueId: string, escribir: (tx: unknown) => unknown) => escribir(jest.requireMock('@/utils/prismaClient').default),
+}))
 
+function topologySql(query: unknown): string {
+  if (Array.isArray(query)) return query.join(' ')
+  if (query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)) return query.strings.join(' ')
+  throw new Error('Unexpected SQL representation in topology fixture')
+}
 describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
   const mockPrismaVenueFindUnique = prisma.venue.findUnique as jest.Mock
   const mockPrismaOrderFindUnique = prisma.order.findUnique as jest.Mock
@@ -50,12 +61,20 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
     mockPrismaOrderFindUnique.mockResolvedValue(null) // No existing order by default
     mockPrismaTransaction.mockImplementation(async callback => {
       const mockTx = {
-        $queryRaw: jest.fn().mockResolvedValue([]),
+        $queryRaw: jest.fn(async (query: unknown) => {
+          const sql = topologySql(query)
+          if (sql.includes('FROM "Venue"')) return [{ id: venueId }]
+          if (sql.includes('FROM "Table"')) return [{ id: mockTableId }]
+          if (sql.includes('pg_advisory_xact_lock')) return []
+          throw new Error('Unexpected POS service fixture SQL')
+        }),
+        table: { findMany: jest.fn(async () => [{ id: mockTableId, number: '12', status: 'AVAILABLE', currentOrderId: null }]) },
         shift: {
           updateMany: mockShiftUpdateMany,
         },
         order: {
           findUnique: mockPrismaOrderFindUnique,
+          findMany: jest.fn(async () => []),
           upsert: mockPrismaOrderUpsert,
         },
       }
@@ -128,7 +147,7 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
       const result = await processPosOrderEvent(fullPayload)
 
       expect(mockPrismaVenueFindUnique).toHaveBeenCalledWith({ where: { id: venueId } })
-      expect(mockSyncPosStaff).toHaveBeenCalledWith(staffData, venueId, organizationId)
+      expect(mockSyncPosStaff).toHaveBeenCalledWith(staffData, venueId, organizationId, expect.anything())
       expect(mockGetOrCreatePosTable).toHaveBeenCalledWith(tableData, venueId)
       expect(mockGetOrCreatePosShift).toHaveBeenCalledWith(shiftData, venueId, mockStaffId)
       expect(mockPrismaOrderUpsert).toHaveBeenCalledTimes(1)
@@ -149,6 +168,10 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
             createdBy: { connect: { id: mockStaffId } },
             table: { connect: { id: mockTableId } },
             shift: { connect: { id: mockShiftId } },
+            // IVA por producto, plan 2: SoftRestaurant manda el impuesto APARTE del
+            // subtotal (PosOrderData.taxAmount es un campo separado). Sólo la rama
+            // `create:` declara el contrato — el `update:` de arriba NO debe llevarlo.
+            contratoDePrecio: 'IVA_APARTE',
           }),
         }),
       )
@@ -157,6 +180,10 @@ describe('POS Sync Order Service (posSyncOrder.service.ts)', () => {
         `[🥾 PosSyncOrder] Orden order-prisma-id (externalId: ${orderData.externalId}) guardada/actualizada.`,
       )
       expect(result).toEqual(mockUpsertedOrder)
+
+      // El `update:` NUNCA reescribe el contrato — sólo el `create:` lo declara.
+      const upsertArgs = mockPrismaOrderUpsert.mock.calls[0][0]
+      expect(upsertArgs.update.contratoDePrecio).toBeUndefined()
     })
 
     it('should throw NotFoundError if venue is not found', async () => {

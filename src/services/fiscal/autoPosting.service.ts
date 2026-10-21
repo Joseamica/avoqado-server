@@ -1,16 +1,20 @@
 import { JournalEntrySource, JournalEntryType, OrderStatus, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 
+import { BadRequestError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { parseDbDateRange } from '../../utils/datetime'
 import { getMappings } from './accountMapping.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
 import { postJournalEntry } from './journalEntry.service'
-import { splitPaymentIvaByOrderRates, grossByRateFromItems } from './ivaMath'
-import { paymentInFiscalScope } from './fiscalScope'
+import { splitPaymentIvaByOrderRates, mezclaDesdeTasas } from './ivaMath'
+import { grossByRateFromOrder, ordenParaIvaSelect, type OrdenParaIva, type RenglonParaIva } from './ivaDeOrden'
+import { paymentInFiscalScope, metodoParaAlcanceFiscal } from './fiscalScope'
 import { generateCogsPolicyForVenue } from './cogs.service'
 import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDelta'
+import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
 import logger from '../../config/logger'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -32,7 +36,6 @@ import logger from '../../config/logger'
  * Gated PREMIUM (CFDI) en la ruta/MCP. NO bloqueante: corre fuera del path del pago.
  */
 
-const IVA_RATE = 0.16
 const DEFAULT_TZ = 'America/Mexico_City'
 const PERIOD_RE = /^\d{4}-(0[1-9]|1[0-2])$/
 
@@ -63,16 +66,16 @@ export interface GenerateResult {
   alreadyPosted: number
   /** Pagos omitidos por reglas (cancelados/cero/cripto/ajuste). */
   skipped: number
+  /**
+   * Tarjetas de regalo (spec §7, fase 1): cobros que el motor NO postea —la venta de una tarjeta y lo pagado con saldo—, porque su
+   * póliza correcta (pasivo de tarjetas) es la fase 2. El listado del contador los enseña con `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`.
+   */
+  pendientesDeRevision: number
   /** Costo de ventas del periodo posteado, en centavos (solo cuando se pasa `period` y hubo consumo). */
   cogsCents?: number
 }
 
-export interface OrderItemRow {
-  quantity: number
-  unitPrice: Prisma.Decimal
-  discountAmount: Prisma.Decimal
-  product: { taxRate: Prisma.Decimal | null } | null
-}
+export type OrderItemRow = RenglonParaIva
 
 interface PaymentRow {
   id: string
@@ -84,29 +87,29 @@ interface PaymentRow {
   createdAt: Date
   merchantAccount: { fiscalConfig: { includeInAccounting: boolean } | null } | null
   ecommerceMerchant: { fiscalConfig: { includeInAccounting: boolean } | null } | null
-  order: { status: OrderStatus; orderNumber: string | null; items: OrderItemRow[] } | null
+  /** Tarjetas de regalo: la marca del tender de sistema (un REFUND la hereda del cobro). */
+  tenderType?: { systemKind: string | null } | null
+  order:
+    | (OrdenParaIva & {
+        status: OrderStatus
+        orderNumber: string | null
+        items?: Array<RenglonParaIva & { giftCardId?: string | null }>
+      })
+    | null
 }
 
 /**
- * Gross (IVA-included, cents) grouped by the item's REAL tax rate, from the order's line items.
- * Thin Decimal→number adapter over the shared {@link grossByRateFromItems} — the single source of
- * truth for reading each product's rate, so auto-posting, the income-statement read-model and the CFDI
- * all group identically. Empty (custom-amount sale) → [], and callers fall back to flat 16%.
+ * Adaptador de compatibilidad para llamadores con sólo renglones. Un cobro debe pasar la orden completa
+ * a `grossByRateFromOrder`: también necesita descuentos B2 y cargos por servicio. El CFDI comparte
+ * `resolverTratamiento`, pero valida y construye sus propios conceptos SAT (B3a); no usa este reparto.
+ * @deprecated Para cobros o comisiones usar grossByRateFromOrder con la orden completa.
  */
 export function grossByRateForOrder(items: OrderItemRow[] | undefined): { rate: number; grossCents: number }[] {
-  return grossByRateFromItems(
-    (items ?? []).map(it => ({
-      unitPrice: Number(it.unitPrice),
-      quantity: it.quantity,
-      discountAmount: Number(it.discountAmount),
-      taxRate: it.product?.taxRate != null ? Number(it.product.taxRate) : null,
-    })),
-    IVA_RATE,
-  )
+  return grossByRateFromOrder({ items })
 }
 
 /** Construye las líneas BALANCEADAS de una póliza de VENTA. null si es una anomalía no posteable. */
-function buildSaleLines(
+export function buildSaleLines(
   p: PaymentRow,
   acct: (m: string) => string,
 ): { lines: { ledgerAccountId: string; debitCents: number; creditCents: number }[] } | null {
@@ -115,7 +118,7 @@ function buildSaleLines(
   const F = Math.abs(toCents(p.feeAmount))
   // IVA por la tasa REAL de los productos de la orden (16%/8%/exento/mixto), no un 16% plano.
   // net + tax === G exacto, así la póliza sigue cuadrando al centavo.
-  const { netCents, taxCents } = splitPaymentIvaByOrderRates(G, grossByRateForOrder(p.order?.items))
+  const { netCents, taxCents } = splitPaymentIvaByOrderRates(G, grossByRateFromOrder(p.order))
   const isCash = p.method === PaymentMethod.CASH
   // Efectivo ignora comisión; tarjeta neta la comisión del depósito.
   const depositCents = isCash ? G + T : G + T - F
@@ -136,7 +139,7 @@ function buildSaleLines(
  * El IVA sale de `ivaDeDevolucion` — la MISMA regla que el estado de resultados: la mezcla de la orden,
  * salvo el ajuste del proveedor de reparto con su `fiscalByRateCents` (spec KDS Uber [N-13]).
  */
-function buildRefundLines(
+export function buildRefundLines(
   p: PaymentRow,
   acct: (m: string) => string,
   processorData?: unknown,
@@ -144,7 +147,9 @@ function buildRefundLines(
   const rG = Math.abs(toCents(p.amount))
   const rT = Math.abs(toCents(p.tipAmount))
   const rF = Math.abs(toCents(p.feeAmount)) // normalmente 0: el procesador conserva la comisión
-  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, grossByRateForOrder(p.order?.items))
+  // Plan 4b: la mezcla por tasa de la póliza, como tratamientos (cada parte con su tasa: la misma aritmética), para que
+  // `ivaDeDevolucion` lea las dos formas del mapa congelado. Su respaldo usa la misma mezcla corregida de la venta.
+  const { netCents, taxCents } = ivaDeDevolucion(p.id, rG, processorData, mezclaDesdeTasas(grossByRateFromOrder(p.order)))
   const isCash = p.method === PaymentMethod.CASH
   const refundCents = rG + rT - rF
   if (refundCents < 0) return null
@@ -160,13 +165,48 @@ function buildRefundLines(
 }
 
 /** ¿El pago es elegible para auto-postear? (espejo de las exclusiones del read-model de ingresos). */
-function isEligible(p: PaymentRow): boolean {
+export function isEligible(p: PaymentRow): boolean {
   if (p.type === PaymentType.TEST) return false // pagos de prueba no son contables
   if (p.type === PaymentType.ADJUSTMENT) return false // semántica ambigua → revisión manual
   if (p.method === PaymentMethod.CRYPTOCURRENCY) return false // no-MXN → manual (diferido)
   if (p.order && p.order.status === OrderStatus.CANCELLED) return false // orden cancelada → sin ingreso
   if (Math.abs(toCents(p.amount)) === 0 && Math.abs(toCents(p.tipAmount)) === 0) return false // nada que registrar
   return true
+}
+
+/**
+ * C4 (nota 1 del coordinador): todo lo de `WHERE_PAGO_CONTABILIZABLE` MENOS «orden no cancelada». Lo usa el listado del contador:
+ * una venta de tarjetas devuelta entera deja su `Order` en CANCELLED, y con esa cláusula la venta y su cancelación desaparecerían
+ * del listado (también de periodos que el contador ya registró a mano, que nunca vería el reverso).
+ */
+export const WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN = {
+  AND: [
+    { status: TransactionStatus.COMPLETED },
+    // NULL-safe: `type` es opcional y una fila vieja sin tipo cuenta como venta; `notIn` sola la descartaría (NOT IN con NULL).
+    { OR: [{ type: null }, { type: { notIn: [PaymentType.TEST, PaymentType.ADJUSTMENT] } }] },
+    { method: { not: PaymentMethod.CRYPTOCURRENCY } },
+    // «Nada que registrar»: monto y propina en cero. Las dos columnas son NOT NULL con 2 decimales: `= 0` ⇔ 0 centavos.
+    { NOT: { amount: 0, tipAmount: 0 } },
+  ],
+} satisfies Prisma.PaymentWhereInput
+
+/**
+ * B4 r1 (fix 3): en Prisma, lo mismo que el motor admite —su consulta (`COMPLETED`, orden no cancelada) más `isEligible`—. Va en `AND`
+ * para combinarse sin pisar el `OR` de otra marca: `{ venueId, createdAt, AND: [WHERE_PAGO_CONTABILIZABLE, WHERE_PAGO_PENDIENTE_…] }`.
+ * Una prueba de integración pasa las mismas filas por los dos y exige el mismo conjunto. El listado del contador (C4) usa la versión
+ * sin el estado de la orden (arriba).
+ */
+export const WHERE_PAGO_CONTABILIZABLE = {
+  AND: [WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN, { order: { status: { not: OrderStatus.CANCELLED } } }],
+} satisfies Prisma.PaymentWhereInput
+
+/** ¿Este cobro es de tarjetas de regalo (venta de tarjetas o cobro con saldo)? Mismo criterio que `WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE`. */
+export function esPendienteDeRevisionContable(p: {
+  tenderType?: { systemKind: string | null } | null
+  order?: { items?: Array<{ giftCardId?: string | null }> } | null
+}): boolean {
+  if (isGiftCardTenderKind(p.tenderType?.systemKind)) return true
+  return (p.order?.items ?? []).some(it => !!it.giftCardId)
 }
 
 /**
@@ -186,10 +226,16 @@ export async function generatePoliciesForVenue(
     posted: 0,
     alreadyPosted: 0,
     skipped: 0,
+    pendientesDeRevision: 0,
   }
 
   const scope = await resolveScopeOrNull(venueId)
   if (!scope) return { ...base, needsFiscalSetup: true }
+
+  // IVA por producto, plan 4: con IVA mixto la contabilidad está pausada. Aviso temprano (sin candado) antes de cargar
+  // mapeos y pagos; la verdad la decide cada póliza dentro de su transacción. La pausa es por organización: sale aunque
+  // todos los pagos sean de un comercio fuera de la contabilidad (Review Focus 4).
+  if (await contabilidadPausada(scope.organizationId)) throw contabilidadPausadaError()
 
   // Mapeos movimiento→cuenta del contribuyente. Falta alguno requerido → no postear.
   const mapResult = await getMappings(venueId)
@@ -206,7 +252,7 @@ export async function generatePoliciesForVenue(
   // postea salvo que el venue lo active; el gerencial lo sigue mostrando.
   const emisorScope = await prisma.fiscalEmisor.findFirst({
     where: { venueId },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     select: { includeCashInAccounting: true },
   })
   const includeCashInAccounting = emisorScope?.includeCashInAccounting ?? false
@@ -214,101 +260,123 @@ export async function generatePoliciesForVenue(
   // Rango por periodo (tz-safe) si se pidió.
   let createdAt: { gte: Date; lte: Date } | undefined
   if (period) {
-    if (!PERIOD_RE.test(period)) throw new Error('Periodo inválido')
+    if (!PERIOD_RE.test(period)) throw new BadRequestError('El periodo debe tener formato AAAA-MM (mes 01-12).')
     const [y, m] = period.split('-').map(Number)
     const lastDay = new Date(Date.UTC(y, m, 0)).getUTCDate()
     const { from, to } = parseDbDateRange(`${period}-01`, `${period}-${String(lastDay).padStart(2, '0')}`, tz)
     createdAt = { gte: from, lte: to }
   }
 
-  const payments = (await prisma.payment.findMany({
-    where: {
-      venueId,
-      status: TransactionStatus.COMPLETED,
-      ...(createdAt ? { createdAt } : {}),
-      order: { status: { not: OrderStatus.CANCELLED } },
-    },
-    select: {
-      id: true,
-      amount: true,
-      tipAmount: true,
-      feeAmount: true,
-      method: true,
-      type: true,
-      createdAt: true,
-      // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
-      merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
-      order: {
-        select: {
-          status: true,
-          orderNumber: true,
-          // Item-level tax rate → per-rate IVA (8% frontera / mixed / exempt) instead of flat 16%.
-          items: { select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } } },
+  const pageSize = 200
+  let cursor: string | undefined
+  while (true) {
+    const payments = (await prisma.payment.findMany({
+      take: pageSize,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      where: {
+        venueId,
+        status: TransactionStatus.COMPLETED,
+        ...(createdAt ? { createdAt } : {}),
+        order: { status: { not: OrderStatus.CANCELLED } },
+      },
+      select: {
+        id: true,
+        amount: true,
+        tipAmount: true,
+        feeAmount: true,
+        method: true,
+        type: true,
+        createdAt: true,
+        // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
+        merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+        ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
+        // Tarjetas de regalo: la marca del tender de sistema.
+        tenderType: { select: { systemKind: true } },
+        order: {
+          select: {
+            status: true,
+            orderNumber: true,
+            ...ordenParaIvaSelect,
+            // Tarjetas de regalo: la marca de cada renglón (mismos renglones, mismo tope, mismo orden que la póliza).
+            items: { ...ordenParaIvaSelect.items, select: { ...ordenParaIvaSelect.items.select, giftCardId: true } },
+          },
         },
       },
-    },
-    orderBy: { createdAt: 'asc' },
-  })) as PaymentRow[]
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+    })) as PaymentRow[]
 
-  const eligible = payments.filter(isEligible)
-  base.candidates = eligible.length
-  base.skipped = payments.length - eligible.length // TEST/ajuste/cripto/cero (cancelados ya filtrados por la query)
+    const eligible = payments.filter(isEligible)
+    base.candidates += eligible.length
+    base.skipped += payments.length - eligible.length // TEST/ajuste/cripto/cero (cancelados ya filtrados por la query)
 
-  // Idempotencia: precarga las claves ya posteadas para no re-postear ni recontar.
-  const keys = eligible.map(p => (p.type === PaymentType.REFUND ? `refund:${p.id}:v1` : `pay:${p.id}:v1`))
-  const existing = new Set(
-    (
-      await prisma.journalEntry.findMany({
-        where: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey: { in: keys } },
-        select: { idempotencyKey: true },
-      })
-    ).map(e => e.idempotencyKey),
-  )
-
-  const processorDataDeAjustes = await processorDataDeDevoluciones(
-    venueId,
-    eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
-  )
-
-  for (const p of eligible) {
-    // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
-    // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
-    const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting
-    if (!paymentInFiscalScope(p.method, merchantFlag, includeCashInAccounting)) {
-      base.skipped++
-      continue
-    }
-    // Una devolución es type=REFUND O cualquier pago con monto NEGATIVO (voids/ajustes legacy que el
-    // read-model de ingresos también resta). Enrutar por SIGNO evita contar un negativo como venta positiva.
-    const isRefund = toCents(p.amount) < 0 || p.type === PaymentType.REFUND
-    const key = isRefund ? `refund:${p.id}:v1` : `pay:${p.id}:v1`
-    if (existing.has(key)) {
-      base.alreadyPosted++
-      continue
-    }
-    const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)
-    if (!built) {
-      base.skipped++ // anomalía no balanceable (ej. comisión > cobro)
-      continue
-    }
-    const date = formatInTimeZone(p.createdAt, tz, 'yyyy-MM-dd')
-    const num = p.order?.orderNumber != null ? `#${p.order.orderNumber} ` : ''
-    await postJournalEntry(
-      venueId,
-      {
-        date,
-        type: isRefund ? JournalEntryType.EGRESO : JournalEntryType.INGRESO,
-        source: isRefund ? JournalEntrySource.REFUND : JournalEntrySource.PAYMENT,
-        sourceId: p.id,
-        idempotencyKey: key,
-        concept: `${isRefund ? 'Devolución' : 'Venta'} ${num}· ${p.method}`,
-        venueId,
-        lines: built.lines,
-      },
-      { staffId: opts.actorStaffId ?? null },
+    // Idempotencia: precarga las claves ya posteadas para no re-postear ni recontar.
+    const keys = eligible.map(p => (p.type === PaymentType.REFUND ? `refund:${p.id}:v1` : `pay:${p.id}:v1`))
+    const existing = new Set(
+      (
+        await prisma.journalEntry.findMany({
+          where: { organizationId: scope.organizationId, rfc: scope.rfc, idempotencyKey: { in: keys } },
+          select: { idempotencyKey: true },
+          take: keys.length,
+          orderBy: { id: 'asc' },
+        })
+      ).map(e => e.idempotencyKey),
     )
-    base.posted++
+
+    const processorDataDeAjustes = await processorDataDeDevoluciones(
+      venueId,
+      eligible.filter(p => (toCents(p.amount) < 0 || p.type === PaymentType.REFUND) && !existing.has(`refund:${p.id}:v1`)).map(p => p.id),
+    )
+
+    for (const p of eligible) {
+      // Tarjetas de regalo (spec §7, fase 1): ni la venta de una tarjeta ni lo pagado con saldo se postean; el motor los trataría como
+      // venta con entrada a banco. Se cuentan y el contador los ve en «pendientes de revisión contable».
+      if (esPendienteDeRevisionContable(p)) {
+        base.pendientesDeRevision++
+        continue
+      }
+      // Alcance fiscal configurable: merchant excluido o efectivo sin opt-in → no se postea a los libros
+      // (el gerencial lo sigue mostrando). Mismo predicado que el read-model de ingresos.
+      const merchantFlag = p.merchantAccount?.fiscalConfig?.includeInAccounting ?? p.ecommerceMerchant?.fiscalConfig?.includeInAccounting
+      // Una devolución es type=REFUND O cualquier pago con monto NEGATIVO (voids/ajustes legacy que el
+      // read-model de ingresos también resta). Enrutar por SIGNO evita contar un negativo como venta positiva.
+      const isRefund = toCents(p.amount) < 0 || p.type === PaymentType.REFUND
+      // Una devolución sigue el alcance de su VENTA (`originalMethod`), no el medio con que salió el dinero.
+      const metodoAlcance = isRefund ? metodoParaAlcanceFiscal(p.method, processorDataDeAjustes.get(p.id)) : p.method
+      if (!paymentInFiscalScope(metodoAlcance, merchantFlag, includeCashInAccounting)) {
+        base.skipped++
+        continue
+      }
+      const key = isRefund ? `refund:${p.id}:v1` : `pay:${p.id}:v1`
+      if (existing.has(key)) {
+        base.alreadyPosted++
+        continue
+      }
+      const built = isRefund ? buildRefundLines(p, acct, processorDataDeAjustes.get(p.id)) : buildSaleLines(p, acct)
+      if (!built) {
+        base.skipped++ // anomalía no balanceable (ej. comisión > cobro)
+        continue
+      }
+      const date = formatInTimeZone(p.createdAt, tz, 'yyyy-MM-dd')
+      const num = p.order?.orderNumber != null ? `#${p.order.orderNumber} ` : ''
+      await postJournalEntry(
+        venueId,
+        {
+          date,
+          type: isRefund ? JournalEntryType.EGRESO : JournalEntryType.INGRESO,
+          source: isRefund ? JournalEntrySource.REFUND : JournalEntrySource.PAYMENT,
+          sourceId: p.id,
+          idempotencyKey: key,
+          concept: `${isRefund ? 'Devolución' : 'Venta'} ${num}· ${p.method}`,
+          venueId,
+          lines: built.lines,
+        },
+        { staffId: opts.actorStaffId ?? null },
+      )
+      base.posted++
+    }
+
+    if (payments.length < pageSize) break
+    cursor = payments[payments.length - 1].id
   }
 
   // Costo de ventas del periodo (best-effort): traspasa el costo del inventario consumido a la cuenta de
@@ -319,6 +387,8 @@ export async function generatePoliciesForVenue(
       if (cogs.cogsCents > 0) base.cogsCents = cogs.cogsCents
       if (cogs.posted) base.posted++
     } catch (err) {
+      // La pausa por IVA mixto no es un tropiezo del COGS: se propaga para que la corrida lo diga.
+      if (esExclusionContable(err)) throw err
       logger.warn(`[autoPosting] COGS falló para venue ${venueId} periodo ${period}: ${err instanceof Error ? err.message : String(err)}`)
     }
   }

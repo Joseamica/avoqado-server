@@ -18,6 +18,7 @@ import { BadRequestError, OrderAlreadyPaidError, TerminalBusyError } from '@/err
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   // El índice `@/communication/sockets` reexporta el NOMBRADO `socketManager` (lo usa `cancelOrder`); el resto importa el
   // default. Es el mismo objeto. `getBroadcastingService`: `cancelOrder` avisa al venue al cancelar; aquí no hay a quién.
@@ -1816,25 +1817,52 @@ describe('cancelOrder y la admisión de un cobro comparten el lock de la orden',
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })).status).not.toBe('CANCELLED')
   })
 
-  it('cancelOrder waits for an in-progress payment registration and then refuses a paid order', async () => {
+  it('cancelOrder waits for payment registration, rolls back its topology race, then rejects the stable paid order', async () => {
     const orden = await nuevaOrden()
+    const auditCalls = (logAction as jest.Mock).mock.calls.length
+    const publicationCalls = (socketManager.getBroadcastingService as jest.Mock).mock.calls.length
     const registro = retenerOrden(orden.id, t => t.order.update({ where: { id: orden.id }, data: { paymentStatus: 'PAID' } }))
-    await registro.lockTomado
     let resuelta = false
-    const cancelacion = cancelOrder(venueId, orden.id)
-      .then(
-        () => 'cancelada' as const,
-        (e: unknown) => e,
-      )
-      .finally(() => (resuelta = true))
-    await esperarBloqueoEnOrder()
-    expect(resuelta).toBe(false)
-    registro.soltar()
-    await registro.tx
-    expect(await cancelacion).toMatchObject({ statusCode: 400 })
+    let cancelacion: Promise<unknown> | undefined
+    try {
+      await registro.lockTomado
+      cancelacion = cancelOrder(venueId, orden.id)
+        .then(
+          () => 'cancelada' as const,
+          (e: unknown) => e,
+        )
+        .finally(() => (resuelta = true))
+      await esperarBloqueoEnOrder()
+      expect(resuelta).toBe(false)
+      registro.soltar()
+      await registro.tx
+      const error = await cancelacion
+      expect(error).toBeInstanceOf(OrderTableTopologyChanged)
+      expect(error).toMatchObject({ message: 'ORDER_TABLE_TOPOLOGY_CHANGED' })
+    } finally {
+      registro.soltar()
+      await registro.tx.catch(() => undefined)
+      await cancelacion
+    }
     const final = await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })
-    expect(final.status).not.toBe('CANCELLED')
-    expect(final.paymentStatus).toBe('PAID')
+    expect(final).toEqual({ ...orden, paymentStatus: 'PAID', updatedAt: expect.any(Date) })
+    const assertNoCancellationEffects = async () => {
+      expect((logAction as jest.Mock).mock.calls).toHaveLength(auditCalls)
+      expect((socketManager.getBroadcastingService as jest.Mock).mock.calls).toHaveLength(publicationCalls)
+      expect(await prisma.orderAction.count({ where: { orderId: orden.id } })).toBe(0)
+      expect(await prisma.payment.count({ where: { orderId: orden.id } })).toBe(0)
+      expect(await prisma.terminalPaymentRequest.count({ where: { venueId, orderId: orden.id } })).toBe(0)
+    }
+    await assertNoCancellationEffects()
+    // A deliberate later request proves the original stable money guard, without retrying the raced mutation.
+    const estable = await cancelOrder(venueId, orden.id).then(
+      () => 'cancelada' as const,
+      (e: unknown) => e,
+    )
+    expect(estable).toBeInstanceOf(BadRequestError)
+    expect(estable).toMatchObject({ statusCode: 400, message: 'Cannot cancel a paid order' })
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: orden.id } })).toEqual(final)
+    await assertNoCancellationEffects()
   })
 
   it('an admission that arrives while a cancellation holds the order lock waits, then refuses: no charge row (only its tombstone), nothing emitted', async () => {

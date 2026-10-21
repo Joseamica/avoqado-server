@@ -9,6 +9,7 @@
  */
 
 import { z } from 'zod'
+import { LONGITUD_HUELLA_CONTRATO } from '@/services/fiscal/confirmarContratoDePrecio.service'
 
 // ==========================================
 // BODY SCHEMAS (raw, for type inference)
@@ -36,20 +37,78 @@ export const issueCfdiSchema = z.object({
   body: issueCfdiBodyShape,
 })
 
+/**
+ * Schema passed to validateRequest() for POST /venues/:venueId/orders/:orderId/price-contract/confirm (B3b).
+ * La versión y la huella son las que trajo la vista previa del 422 de «Facturar»; el servicio las compara.
+ */
+export const confirmPriceContractSchema = z.object({
+  params: z.object({
+    venueId: z.string().min(1, 'El negocio es requerido'),
+    orderId: z.string().min(1, 'La venta es requerida'),
+  }),
+  body: z.object({
+    version: z
+      .number({ required_error: 'La versión es requerida', invalid_type_error: 'La versión debe ser un número' })
+      .int('La versión debe ser un entero')
+      .nonnegative('La versión no puede ser negativa'),
+    huella: z
+      .string({
+        required_error: 'La huella de la vista previa es requerida',
+        invalid_type_error: 'La huella de la vista previa no es válida',
+      })
+      .min(1, 'La huella de la vista previa es requerida')
+      // La huella es un SHA-256 en hex (`huellaContrato`): ninguna huella del servidor pasa de ese largo.
+      // Codex B3b r1 P2 #4: con el folio en texto plano, un folio largo daba una huella que este tope rechazaba.
+      .max(LONGITUD_HUELLA_CONTRATO, 'La huella de la vista previa no es válida'),
+  }),
+})
+
 // ==========================================
 // CANCEL CFDI SCHEMA
 // ==========================================
 
 /** Schema passed to validateRequest() for POST /venues/:venueId/cfdi/:cfdiId/cancel */
 export const cancelCfdiSchema = z.object({
-  body: z.object({
-    motivo: z.enum(['01', '02', '03', '04'], {
-      required_error: 'El motivo de cancelación es requerido',
-      invalid_type_error: 'El motivo de cancelación no es válido',
+  body: z
+    .object({
+      motivo: z
+        .enum(['01', '02', '03', '04'], {
+          required_error: 'El motivo de cancelación es requerido',
+          invalid_type_error: 'El motivo de cancelación no es válido',
+        })
+        .optional(),
+      // Optional — the "motivo 01 requires substituteUuid" cross-field rule lives in the SERVICE (shape-only in Zod per rules)
+      substituteUuid: z.string().uuid('El UUID de sustitución no es válido').optional(),
+      // C2 · T10 ronda 1 (I-1): «Consultar estado». Nuevo y opcional: con él no se pide nada al SAT, sólo se consulta (sin motivo).
+      soloConsultar: z.literal(true, { errorMap: () => ({ message: 'La consulta no es válida' }) }).optional(),
+    })
+    // Cancelar de verdad (sin `soloConsultar`) sigue exigiendo el motivo, con el mismo texto de siempre.
+    .superRefine((b, ctx) => {
+      if (!b.soloConsultar && b.motivo === undefined)
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['motivo'], message: 'El motivo de cancelación es requerido' })
     }),
-    // Optional — the "motivo 01 requires substituteUuid" cross-field rule lives in the SERVICE (shape-only in Zod per rules)
-    substituteUuid: z.string().uuid('El UUID de sustitución no es válido').optional(),
+})
+
+/** Schema passed to validateRequest() for POST /venues/:venueId/cfdi/:cfdiId/email. Sin correo, va al registrado del receptor. */
+export const sendCfdiEmailSchema = z.object({
+  body: z.object({
+    email: z.string().trim().email('El correo no es válido').optional(),
   }),
+})
+
+/**
+ * Schema passed to validateRequest() for POST /venues/:venueId/refunds/:refundId/credit-note.
+ * C2 (Tarea 9, P10): sin body, la nota sale con su modalidad de siempre. `{ modalidad: 'POR_IMPORTE', huella }` = «acreditar por importe»
+ * confirmado por una persona viendo el reparto; la regla «sin huella no» y «sólo sin evidencia» viven en el SERVICIO (shape-only aquí).
+ * T10 ronda 1 (M9): `{ huella }` sin modalidad = la emisión de siempre, atada a la vista previa que se vio (`preview.huella`).
+ */
+export const emitRefundCreditNoteSchema = z.object({
+  body: z
+    .object({
+      modalidad: z.literal('POR_IMPORTE', { errorMap: () => ({ message: 'La modalidad de la nota no es válida' }) }).optional(),
+      huella: z.string().min(1, 'La huella del reparto no es válida').optional(),
+    })
+    .optional(),
 })
 
 // ==========================================
@@ -79,6 +138,8 @@ const upsertEmisorBodyShape = z.object({
     .optional(),
   // Opt-in: permitir facturar ventas en efectivo (QR + global). Default false en el servicio.
   invoiceCashSales: z.boolean().optional(),
+  // Opt-in (ajuste del founder, 7-oct): incluir en la factura global las ventas cobradas fuera de la terminal. Default false.
+  includeOffTerminalSalesInGlobal: z.boolean({ invalid_type_error: 'Incluir las ventas fuera de la terminal debe ser sí o no' }).optional(),
   // Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false.
   includeCashInAccounting: z.boolean().optional(),
   // Tasa de ISN (impuesto sobre nómina, estatal), fracción 0-0.10 (0.03 = 3%). Default 0.
@@ -134,6 +195,74 @@ export const uploadCsdSchema = z.object({
   }),
 })
 
+// ── Flow C: disparo manual de la factura global ───────────────────────────────
+
+/**
+ * Schema passed to validateRequest() for:
+ *   POST /venues/:venueId/fiscal/emisores/:emisorId/global
+ *
+ * C1 (Tarea 8, C1-P16 = B): `desde` opcional = el inicio (ISO) de uno de los periodos cerrados RECIENTES que revisa el job; sin él, el
+ * último periodo cerrado (como siempre). Un periodo más viejo lo rechaza el servicio («pídelo a soporte»). Sin cuerpo sigue valiendo.
+ */
+export const triggerGlobalCfdiSchema = z.object({
+  body: z
+    .object({
+      desde: z
+        .string({ invalid_type_error: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+        .datetime({ message: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+        .optional(),
+    })
+    .strict('Sólo se acepta `desde` (el inicio de un periodo reciente).')
+    .default({}),
+})
+
+export type TriggerGlobalCfdiBody = z.infer<typeof triggerGlobalCfdiSchema.shape.body>
+
+/**
+ * C1 (Tarea 11): `POST /venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria` — la complementaria de una global
+ * principal se pide por el id de la principal (ruta); sin cuerpo.
+ */
+export const emitGlobalComplementariaSchema = z.object({
+  params: z
+    .object({
+      venueId: z.string().min(1),
+      emisorId: z.string().min(1),
+      principalId: z.string().min(1, 'Falta el id de la factura global principal.'),
+    })
+    .passthrough(),
+  body: z
+    .object({})
+    .strict('La complementaria se pide por el id de su factura global principal; no lleva datos (su periodo es el de la principal).')
+    .default({}),
+})
+
+/**
+ * C1 (Tarea 12): `GET /venues/:venueId/fiscal/emisores/:emisorId/global/excluidas?principalId=&desde=&cursor=&limite=` — las ventas de un
+ * periodo que no entraron a la global.
+ */
+export const listGlobalExcluidasSchema = z.object({
+  query: z.object({
+    /** Una global que ya existe: su periodo GUARDADO (C1-32), en cualquier estado (C1-41). Si viene, manda sobre `desde`. */
+    principalId: z
+      .string({ invalid_type_error: 'El id de la factura global no es válido' })
+      .min(1, 'Falta el id de la factura global.')
+      .optional(),
+    /** El inicio (ISO) de un periodo reciente; uno viejo lo rechaza el servicio («pídelo a soporte»). */
+    desde: z
+      .string({ invalid_type_error: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+      .datetime({ message: '`desde` debe ser el inicio del periodo en formato ISO (2026-10-09T06:00:00.000Z)' })
+      .optional(),
+    /** El `siguiente` de la página anterior. */
+    cursor: z.string({ invalid_type_error: 'El cursor no es válido' }).min(1, 'El cursor no es válido.').optional(),
+    limite: z.coerce
+      .number({ invalid_type_error: '`limite` debe ser un número entre 1 y 50' })
+      .int('`limite` debe ser un número entero entre 1 y 50')
+      .min(1, '`limite` debe ser un número entre 1 y 50')
+      .max(50, '`limite` debe ser un número entre 1 y 50')
+      .optional(),
+  }),
+})
+
 // ==========================================
 // LIST CFDIS SCHEMA (paginated query)
 // ==========================================
@@ -173,7 +302,18 @@ const diaCalendario = z
 export const listCfdisSchema = z.object({
   query: z.object({
     status: unoOVariosQuery(
-      ['DRAFT', 'VALIDATING', 'VALIDATION_FAILED', 'STAMPING', 'STAMPED', 'STAMP_FAILED', 'CANCEL_REQUESTED', 'CANCELLED'],
+      // G7 (C2-pulido, nuevo y opcional): `STAMP_IN_DOUBT` = el timbre EN DUDA; `STAMP_FAILED` ya no lo incluye (es «Con error»).
+      [
+        'DRAFT',
+        'VALIDATING',
+        'VALIDATION_FAILED',
+        'STAMPING',
+        'STAMPED',
+        'STAMP_FAILED',
+        'STAMP_IN_DOUBT',
+        'CANCEL_REQUESTED',
+        'CANCELLED',
+      ],
       'El estado del CFDI no es válido',
     ),
     flow: unoOVariosQuery(['STAFF_B', 'AUTOFACTURA_A', 'GLOBAL_C'], 'El flujo del CFDI no es válido'),

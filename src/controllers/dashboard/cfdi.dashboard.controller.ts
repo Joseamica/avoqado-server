@@ -1,3 +1,4 @@
+import AppError, { BadRequestError, ConflictError, ProviderUnavailableError } from '../../errors/AppError'
 /**
  * CFDI Dashboard Controller
  *
@@ -14,15 +15,36 @@ import { Request, Response } from 'express'
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
-import { issueCfdiForOrder, cancelCfdi, getCfdiStatus, listCfdisForVenue } from '@/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  cancelCfdi,
+  extraccionesPendientes,
+  getCfdiStatus,
+  listCfdisForVenue,
+  MOTIVO_CONTRATO_DESCONOCIDO,
+  PROCESANDO,
+} from '@/services/fiscal/cfdi.service'
+import { vistaPreviaContrato, confirmarContratoIvaIncluido, VistaPreviaContrato } from '@/services/fiscal/confirmarContratoDePrecio.service'
 import { replaceCfdi } from '@/services/fiscal/cfdiReplacement.service'
 import { emitRefundCreditNote, getRefundCreditNoteStatus } from '@/services/fiscal/cfdiCreditNote.service'
+import { textoDeTimbreEnDuda, timbreEnDuda } from '@/services/fiscal/timbreEnDuda'
+import { emitRefundCreditNoteSchema } from '@/schemas/dashboard/cfdi.schema'
 import { searchSatCatalog } from '@/services/fiscal/satCatalogLookup.service'
 import { SatCatalogUnavailableError } from '@/errors/AppError'
-import { issueGlobalForEmisor } from '@/services/fiscal/cfdiGlobal.service'
+import {
+  emitirGlobalComplementaria,
+  issueGlobalForEmisor,
+  listarExcluidasDeLaGlobal,
+  periodosDeLaGlobal,
+  vistaPreviaComplementaria,
+  type IssueGlobalResult,
+} from '@/services/fiscal/cfdiGlobal.service'
+import { MOTIVO_ANIO_FUERA } from '@/services/fiscal/globalPeriod'
 import { upsertEmisor, upsertMerchantFiscalConfig, getFiscalConfig } from '@/services/fiscal/fiscalConfig.service'
 import { provisionEmisor, uploadEmisorCsd, syncEmisorLogo, getEmisorProviderStatus } from '@/services/fiscal/fiscalOnboarding.service'
+import { emisorSeguro } from '@/services/fiscal/emisorSeguro'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { sendCfdiByEmail } from '@/services/fiscal/cfdiEmail.service'
 import { fetchStorageObject } from '@/services/storage.service'
 import { resolveRequestVenueId } from '@/middlewares/checkPermission.middleware'
 
@@ -56,13 +78,34 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       sandbox,
       flow: 'STAFF_B',
       expectedVenueId: venueId,
+      staffId: authContext.userId ?? null, // C3-16: la extracción registra quién la pidió (el mismo actor que `CFDI_ISSUED`)
     })
 
     if (result.status === 'VALIDATION_FAILED') {
+      // B3b: si el único camino es confirmar el contrato de precio (venta MIXTA sin contrato), el 422 trae la
+      // vista previa para que el diálogo ofrezca confirmarlo sin otra ida y vuelta. Es un enriquecimiento
+      // OPCIONAL: si leerla falla, el 422 sale igual que siempre (nunca un 500 por esto). Sólo se AGREGA
+      // `priceContract`: `error`, `reasons` y `cfdiId` no cambian de nombre ni de forma.
+      let reasons = result.reasons
+      let priceContract: VistaPreviaContrato | null = null
+      if (reasons?.includes(MOTIVO_CONTRATO_DESCONOCIDO)) {
+        try {
+          priceContract = await vistaPreviaContrato(venueId, orderId)
+        } catch (error) {
+          logger.warn('[cfdi] no se pudo leer la vista previa del contrato de precio; el 422 sale sin ella', { venueId, orderId, error })
+        }
+        // Una venta vieja que no se puede confirmar (separó el impuesto, ajuste del motor de descuentos viejo,
+        // cotización, cancelada…) no debe decir «confírmalo»: su motivo toma ese lugar, los demás quedan igual.
+        if (priceContract && !priceContract.confirmable && priceContract.motivo) {
+          const motivo = priceContract.motivo
+          reasons = reasons.map(m => (m === MOTIVO_CONTRATO_DESCONOCIDO ? motivo : m))
+        }
+      }
       res.status(422).json({
         error: 'No se pudo facturar',
-        reasons: result.reasons,
+        reasons,
         cfdiId: result.cfdi?.id,
+        ...(priceContract ? { priceContract } : {}),
       })
       return
     }
@@ -72,6 +115,8 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
         error: 'El PAC rechazó el timbrado',
         message: result.cfdi?.lastError,
         cfdiId: result.cfdi?.id,
+        // C2 · ronda QA (D1, aditivo): el PAC no contestó claro y la factura quedó EN DUDA (no la rechazó); el dashboard lo dice así.
+        ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
       })
       return
     }
@@ -80,10 +125,27 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
     // decía «éxito» (Testarudo 24-sep: a otra razón social y tras cancelar). 409 para que ningún cliente
     // —tampoco el dashboard ya desplegado— pueda leerlo como una factura nueva.
     if (result.alreadyIssued) {
-      const folio = [result.cfdi?.serie, result.cfdi?.folio].filter(Boolean).join('-') || result.cfdi?.uuid || 'anterior'
+      const folioDe = (c: any) => [c?.serie, c?.folio].filter(Boolean).join('-') || c?.uuid || 'anterior'
+      const folio = folioDe(result.cfdi)
+      // C2 · OF-2 (T10 N-2): ya facturada con la SUSTITUTA y la original sigue vigente. La fila de la original no ofrece «Corregir
+      // importe»; ofrece «Terminar la sustitución» sólo sin una cancelación viva (`sePuedeTerminarLaSustitucion` del dashboard).
+      const original = result.originalVigente
+      const enTramite = (c: any) => c.cancelStatus === 'REQUESTED' || c.status === 'CANCEL_REQUESTED'
+      // Ronda de la ola (review-OF m2): ya facturada con la ORIGINAL y su sustituta se está cancelando. La fila de la original ya tiene
+      // sustituta (no ofrece «Corregir importe»); «Cancelar», sólo sin una cancelación viva.
+      const sustituta = result.sustitutaEnCancelacion
+      const error = sustituta
+        ? enTramite(result.cfdi)
+          ? `Esta venta ya está facturada con la factura ${folio}; su cancelación y la de la ${folioDe(sustituta)}, que la corregía, siguen en trámite ante el SAT.`
+          : `Esta venta ya está facturada con la factura ${folio}: la ${folioDe(sustituta)}, que la corregía, tiene su cancelación en trámite. Para facturarla a otra razón social, cancela también la ${folio} en Facturación.`
+        : !original
+          ? `Esta venta ya tiene la factura ${folio} vigente. Para facturarla a otra razón social, primero cancela la ${folio} en Facturación; si sólo el importe está mal, usa «Corregir importe».`
+          : enTramite(original)
+            ? `Esta venta ya está facturada con la factura ${folio}, que sustituye a la ${folioDe(original)}; la cancelación de la ${folioDe(original)} sigue pendiente ante el SAT.`
+            : `Esta venta ya está facturada con la factura ${folio}, que sustituye a la ${folioDe(original)}. La ${folioDe(original)} todavía no queda cancelada: en Facturación, usa «Terminar la sustitución» en la ${folioDe(original)}.`
       res.status(409).json({
         code: 'CFDI_ALREADY_ISSUED',
-        error: `Esta venta ya tiene la factura ${folio} vigente. Para facturarla a otra razón social, primero cancela la ${folio} en Facturación; si sólo el importe está mal, usa «Corregir importe».`,
+        error,
         cfdi: {
           id: result.cfdi.id,
           uuid: result.cfdi.uuid,
@@ -96,6 +158,8 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       return
     }
 
+    // F6: cómo se facturó una venta con devoluciones y, con nota, qué pasó con cada una. Aditivos: sin devoluciones, el 201 de siempre.
+    const devoluciones = result.cfdi.entrada?.devoluciones
     // STAMPED — audit + 201 with minimal public fields
     logAction({
       staffId: authContext.userId,
@@ -103,7 +167,15 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       action: 'CFDI_ISSUED',
       entity: 'Cfdi',
       entityId: result.cfdi.id,
-      data: { orderId, uuid: result.cfdi.uuid, serie: result.cfdi.serie, folio: result.cfdi.folio },
+      data: {
+        orderId,
+        uuid: result.cfdi.uuid,
+        serie: result.cfdi.serie,
+        folio: result.cfdi.folio,
+        // C3: la factura del cliente de un ticket que salió de su global dice de qué extracción sale.
+        ...(result.cfdi.entrada?.extraccion?.cfdiId ? { extraccionCfdiId: result.cfdi.entrada.extraccion.cfdiId } : {}),
+        ...(devoluciones ? { devoluciones } : {}),
+      },
     })
 
     res.status(201).json({
@@ -116,11 +188,22 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
         xmlUrl: result.cfdi.xmlUrl,
         pdfUrl: result.cfdi.pdfUrl,
       },
+      ...(devoluciones?.modo ? { devoluciones: devoluciones.modo } : {}),
+      ...(result.notasDeDevolucion ? { notasDeDevolucion: result.notasDeDevolucion } : {}),
+      // C3: el ticket iba en la factura global y salió de ella con su nota de extracción (aditivo: el aviso del dashboard lo dice).
+      ...(result.cfdi.entrada?.extraccion?.cfdiId ? { conExtraccion: true } : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] issue failed for order ${orderId}: ${message}`
+    // C2 · T10 ronda 1 (M3): el 409 tipado lleva su código si lo trae (p. ej. `CFDI_CANCEL_PENDING`: la cancelación de la factura anterior
+    // sigue pendiente). El código es el contrato; el texto cambia según el estado. Aditivo: sin código, la respuesta es la de antes.
+    if (err instanceof ConflictError) {
+      logger.warn(aviso)
+      res.status(409).json({ error: err.message, ...(err.code ? { code: err.code } : {}) })
+      return
+    }
 
     // La venta no es de este negocio (aislamiento) o no existe: no es un problema de configuración fiscal,
     // y el texto no debe mandar a revisar emisores.
@@ -149,13 +232,6 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
       return
     }
 
-    // La cancelación de la factura anterior sigue en trámite ante el SAT: todavía no se puede refacturar.
-    if (/en trámite/i.test(message)) {
-      logger.warn(aviso)
-      res.status(409).json({ code: 'CFDI_CANCEL_PENDING', error: message })
-      return
-    }
-
     // Concurrent in-flight reservation — surface as 409 so the client can retry after the first request resolves
     if (/en proceso/i.test(message)) {
       logger.warn(aviso)
@@ -165,6 +241,50 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
 
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al facturar' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/orders/:orderId/price-contract/confirm
+ *
+ * B3b: confirmar que una venta VIEJA (contrato desconocido) se cobró con el IVA incluido, desde el diálogo de
+ * «Facturar». Llama al MISMO servicio que el MCP `confirm_order_price_contract`, ligado a la versión y la huella
+ * que la persona vio en la vista previa del 422. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * El cuerpo ya lo validó validateRequest(confirmPriceContractSchema). La bitácora (ORDER_PRICE_CONTRACT_CONFIRMED) la
+ * escribe el servicio dentro de su transacción: aquí no se agrega otro registro.
+ */
+export async function confirmOrderPriceContractController(req: Request, res: Response): Promise<void> {
+  const { orderId } = req.params
+  const { version, huella } = req.body
+  // Mismo negocio que validó checkPermission (URL → x-venue-id → token).
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const result = await confirmarContratoIvaIncluido({
+      venueId,
+      orderId,
+      versionVista: version,
+      huellaVista: huella,
+      staffId: authContext.userId ?? null,
+      motivo: 'Confirmado desde el dashboard al facturar',
+    })
+    if (result.ok) {
+      res.status(200).json({ ok: true })
+      return
+    }
+    res.status(result.code === 'NO_ENCONTRADA' ? 404 : 409).json({ error: result.message, code: result.code })
+  } catch (err: unknown) {
+    logger.error(`[cfdi.controller] confirmar el contrato de precio falló para la venta ${orderId}`, {
+      venueId,
+      orderId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    res.status(500).json({ error: 'No se pudo confirmar el contrato de precio de esta venta. Intenta de nuevo.' })
   }
 }
 
@@ -253,15 +373,78 @@ export async function listCfdisController(req: Request, res: Response): Promise<
 }
 
 /**
+ * GET /api/v1/dashboard/venues/:venueId/cfdi/extracciones-pendientes
+ *
+ * C3 (ola final, I-1): cuántas ventas se sacaron de la factura global (nota de extracción timbrada) y NO tienen factura del cliente
+ * (`total`), y cuántas de ésas ya van en camino (`enProceso`). Alimenta el aviso de Facturación; el detalle de cada una sigue en la lista
+ * y en el MCP. Sólo lectura (sin ActivityLog), acotada: `extraccionesPendientes` impone su propio tope y devuelve el total exacto.
+ * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view'): el mismo permiso que protege la lista de facturas.
+ */
+export async function extraccionesPendientesController(req: Request, res: Response): Promise<void> {
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    // `limit: 1`: sólo importan los dos conteos; la página de `items` no se usa aquí.
+    const { total, enProceso } = await extraccionesPendientes([venueId], { limit: 1 })
+    res.status(200).json({ total, enProceso })
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    logger.error(`[cfdi.controller] extraccionesPendientes failed for venue ${venueId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al consultar las ventas sin factura del cliente' })
+  }
+}
+
+/**
  * POST /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId/cancel
  *
  * Cancels an issued CFDI (destructive — voids a fiscal document).
  * Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure') (OWNER/ADMIN).
  * Body is validated by validateRequest(cancelCfdiSchema) before this handler runs.
  */
+/**
+ * POST /api/v1/dashboard/venues/:venueId/cfdi/:cfdiId/email
+ *
+ * Reenvía por correo una factura timbrada (H24): sin `email`, al registrado del receptor; con uno, a ése.
+ * La bitácora (CFDI_EMAIL_SENT/FAILED) la escribe el servicio.
+ */
+export async function sendCfdiEmailController(req: Request, res: Response): Promise<void> {
+  const { cfdiId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+
+  try {
+    const result = await sendCfdiByEmail({
+      cfdiId,
+      venueId,
+      sandbox: env.NODE_ENV !== 'production',
+      origin: 'REENVIO',
+      staffId: authContext.userId ?? null,
+      email: req.body?.email,
+    })
+    res.status(200).json(result)
+  } catch (err: unknown) {
+    if (err instanceof AppError) {
+      res.status(err.statusCode).json({ error: err.message })
+      return
+    }
+    logger.error(`[cfdi.controller] sendCfdiEmail failed for cfdi ${cfdiId}`, { error: err instanceof Error ? err.message : String(err) })
+    res.status(500).json({ error: 'No se pudo enviar la factura por correo' })
+  }
+}
+
 export async function cancelCfdiController(req: Request, res: Response): Promise<void> {
   const { cfdiId } = req.params
   const { motivo, substituteUuid } = req.body
+  // C2 · T10 ronda 1 (I-1): «Consultar estado» sólo consulta (nunca anota ni envía un intento) y no se registra en la bitácora: no pidió nada.
+  const soloConsultar = req.body?.soloConsultar === true
   // Venue resolved via resolveRequestVenueId (URL → x-venue-id → token), consistent with checkPermission.
   const authContext = (req as any).authContext ?? {}
   const venueId = resolveRequestVenueId(req, authContext)
@@ -280,26 +463,61 @@ export async function cancelCfdiController(req: Request, res: Response): Promise
       substituteUuid,
       sandbox,
       expectedVenueId: venueId,
+      ...(soloConsultar ? { soloConsultar: true } : {}),
     })
 
-    logAction({
-      staffId: authContext.userId,
-      venueId,
-      action: 'CFDI_CANCELLED',
-      entity: 'Cfdi',
-      entityId: cfdiId,
-      data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus },
-    })
+    if (soloConsultar) {
+      // Sólo se consultó: nadie pidió nada (la confirmación o el cierre, si los hubo, los registra la consulta misma).
+    } else if (result.applied !== false)
+      await logAction({
+        staffId: authContext.userId,
+        venueId,
+        action: 'CFDI_CANCELLED',
+        entity: 'Cfdi',
+        entityId: cfdiId,
+        data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus, estado: result.estado ?? null },
+      })
+    // C2 ronda 1 (M6): esta persona anotó el intento pero otra escritura ganó (y la auditó como confirmación): queda registrado QUIÉN lo
+    // pidió, con una acción propia (no duplica CFDI_CANCELLED ni CFDI_CANCEL_CONFIRMED).
+    else if (result.intencionNueva)
+      await logAction({
+        staffId: authContext.userId,
+        venueId,
+        action: 'CFDI_CANCEL_REQUESTED',
+        entity: 'Cfdi',
+        entityId: cfdiId,
+        data: { motivo, substituteUuid: substituteUuid ?? null, cancelStatus: result.cancelStatus, estado: result.estado ?? null },
+      })
 
     res.status(200).json({
       cancelStatus: result.cancelStatus,
       cancelledAt: result.cancelledAt,
       cfdiId: result.cfdi?.id,
+      // C2: el estado derivado (ANOTADA · ENVIANDO · EN_TRAMITE · CANCELACION_EN_DUDA · RECHAZADA · CANCELADA). Nuevo y opcional.
+      estado: result.estado,
+      // C2 ronda 1 (I1): el envío terminó sin respuesta clara (el panel lo prefiere sobre el estado). Nuevo y opcional.
+      ...(result.enDuda ? { enDuda: true } : {}),
+      // C2 · T10 (M9): por qué NO quedó (el panel lo dice en vez de «Cancelación solicitada.»). Nuevo y opcional; sólo con el rechazo.
+      ...(result.cancelStatus === 'REJECTED' && result.cfdi?.lastError ? { motivoRechazoCancelacion: result.cfdi.lastError } : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] cancelCfdi failed for cfdi ${cfdiId}: ${message}`
+
+    // C2 (Codex C2-6): una regla impidió anotar la intención (documentos relacionados vivos, otra cancelación en trámite con otro
+    // motivo): 409 con SU texto, antes de las regex. No pasó nada: no se escribe bitácora.
+    if (err instanceof ConflictError) {
+      logger.warn(aviso)
+      res.status(409).json({ error: message })
+      return
+    }
+    // C2 ronda 1 (M1): no se pudo consultar al SAT antes de enviar: no salió nada y el intento ya se cerró. 502 con su texto.
+    if (err instanceof ProviderUnavailableError) {
+      logger.warn(aviso)
+      res.status(502).json({ error: message })
+      return
+    }
 
     if (/not found/i.test(message)) {
       logger.warn(aviso)
@@ -371,6 +589,8 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
         sustitutaUuid: result.sustituta?.uuid ?? null,
         cancelStatus: result.cancelStatus,
         cancelPendiente: result.cancelPendiente,
+        cancelConflicto: result.cancelConflicto ?? null,
+        cancelAviso: result.cancelAviso ?? null,
       },
     })
 
@@ -390,6 +610,18 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
       original: { id: cfdiId, uuid: result.original?.uuid ?? null },
       cancelStatus: result.cancelStatus,
       cancelPendiente: result.cancelPendiente,
+      // C2 (M6): por qué no se pudo pedir la cancelación de la original (p. ej. tiene una nota de crédito viva). Nuevo y opcional.
+      ...(result.cancelConflicto ? { cancelConflicto: result.cancelConflicto } : {}),
+      // C2 ronda 2 (N3): por qué no salió la cancelación de la original (p. ej. no se pudo consultar al SAT). Nuevo y opcional.
+      ...(result.cancelAviso ? { cancelAviso: result.cancelAviso } : {}),
+      // Ronda de la ola (3): la cancelación de la original quedó EN DUDA (como `enDuda` de cancelar: sólo cuando es verdad). Nuevo y opcional.
+      ...(result.enDuda ? { enDuda: true } : {}),
+      // Ronda de la ola (3): ESTA petición anotó un intento nuevo de cancelar la original; `false` ⇒ el `cancelStatus` no es de esta petición.
+      cancelIntentoNuevo: result.cancelIntentoNuevo ?? false,
+      // Micro-ronda final (aditivo): la factura CORREGIDA quedó EN DUDA (502 sin texto hasta hoy): no es un rechazo y no se re-emite.
+      ...(result.status === 'STAMP_FAILED' && timbreEnDuda(result.sustituta)
+        ? { timbreEnDuda: true, error: textoDeTimbreEnDuda('la factura corregida') }
+        : {}),
     })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
@@ -402,9 +634,15 @@ export async function replaceCfdiController(req: Request, res: Response): Promis
       return
     }
     // Reglas de negocio y carreras → 409 (mismo criterio que cancelar)
-    if (/en proceso|timbrada|global|emisor|folio fiscal/i.test(message)) {
+    if (err instanceof ConflictError || /en proceso|timbrada|global|emisor|folio fiscal/i.test(message)) {
       logger.warn(aviso)
       res.status(409).json({ error: message })
+      return
+    }
+    // C2-pulido · G3 (hermano): el comercio apagó la facturación (lo dice el motor al capturar) ⇒ 403 con su texto, como al facturar; no 500.
+    if (/no habilitada/i.test(message)) {
+      logger.warn(aviso)
+      res.status(403).json({ error: message })
       return
     }
     logger.error(aviso)
@@ -435,6 +673,14 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
 
   // Sandbox stamps in dev/staging (free, no SAT effect); live key in production.
   const sandbox = env.NODE_ENV !== 'production'
+  // C2 (Tarea 9, P10): sin body, la nota de siempre; `{ modalidad: 'POR_IMPORTE', huella }` = «acreditar por importe» confirmado por una
+  // persona (cfdi:issue) viendo el reparto. La ruta ya valida la forma; aquí se vuelve a leer con el mismo esquema (llamadas directas).
+  const cuerpo = emitRefundCreditNoteSchema.shape.body.safeParse(req.body ?? undefined)
+  if (!cuerpo.success) {
+    res.status(400).json({ error: cuerpo.error.errors[0]?.message ?? 'La solicitud de la nota de crédito no es válida' })
+    return
+  }
+  const { modalidad, huella } = cuerpo.data ?? {}
 
   try {
     const result = await emitRefundCreditNote({
@@ -442,6 +688,10 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
       refundPaymentId: refundId,
       sandbox,
       requestedByStaffId: authContext.userId ?? null,
+      ...(modalidad ? { modalidad, huellaDelReparto: huella } : {}),
+      // C2 · T10 ronda 1 (M9): la emisión normal también manda la huella de la vista previa (`preview.huella`); el servicio la compara bajo
+      // los candados (409 «La factura cambió…» sin timbrar). Sin huella (clientes viejos), como siempre.
+      ...(!modalidad && huella ? { huellaDelReparto: huella } : {}),
     })
 
     if (result.status === 'VALIDATION_FAILED') {
@@ -449,7 +699,13 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
       return
     }
     if (result.status === 'STAMP_FAILED') {
-      res.status(502).json({ error: 'El PAC rechazó el timbrado', message: result.cfdi?.lastError, cfdiId: result.cfdi?.id })
+      res.status(502).json({
+        error: 'El PAC rechazó el timbrado',
+        message: result.cfdi?.lastError,
+        cfdiId: result.cfdi?.id,
+        // C2 · ronda QA (D1, aditivo): la nota quedó EN DUDA (el PAC no contestó claro), no rechazada.
+        ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
+      })
       return
     }
 
@@ -475,7 +731,13 @@ export async function emitRefundCreditNoteController(req: Request, res: Response
       res.status(404).json({ error: message })
       return
     }
-    if (/en proceso/i.test(message)) {
+    // C2 (Tarea 9): «por importe» sin la huella del reparto ⇒ 400 con su texto.
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (err instanceof ConflictError || /en proceso/i.test(message)) {
       logger.warn(aviso)
       res.status(409).json({ error: message })
       return
@@ -573,6 +835,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
     defaultUsoCfdi,
     globalPeriodicity,
     invoiceCashSales,
+    includeOffTerminalSalesInGlobal,
     includeCashInAccounting,
     isnRate,
   } = req.body
@@ -596,6 +859,7 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       defaultUsoCfdi,
       globalPeriodicity,
       invoiceCashSales,
+      includeOffTerminalSalesInGlobal,
       includeCashInAccounting,
       isnRate,
     })
@@ -606,14 +870,32 @@ export async function upsertEmisorController(req: Request, res: Response): Promi
       action: 'FISCAL_EMISOR_UPSERTED',
       entity: 'FiscalEmisor',
       entityId: emisor.id,
-      data: { rfc, legalName, regimenFiscal, lugarExpedicion, invoiceCashSales, includeCashInAccounting, isnRate, isUpdate: !!emisorId },
+      data: {
+        rfc,
+        legalName,
+        regimenFiscal,
+        lugarExpedicion,
+        invoiceCashSales,
+        includeOffTerminalSalesInGlobal,
+        includeCashInAccounting,
+        isnRate,
+        isUpdate: !!emisorId,
+      },
     })
 
-    res.status(200).json({ emisor })
+    // I1 (ola final C1): nunca la fila entera — sin la llave del PAC ni el secreto del webhook.
+    res.status(200).json({ emisor: emisorSeguro(emisor) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] upsertEmisor failed for venue ${venueId}: ${message}`
+
+    // C1 · Tarea 9: una regla de negocio del servicio (p. ej. la bimestral sólo con el régimen 621) llega con su código y su texto.
+    if (err instanceof AppError && err.statusCode < 500) {
+      logger.warn(aviso)
+      res.status(err.statusCode).json({ error: err.message })
+      return
+    }
 
     if (/not found/i.test(message)) {
       logger.warn(aviso)
@@ -738,7 +1020,8 @@ export async function provisionEmisorController(req: Request, res: Response): Pr
       data: { providerOrgId: emisor.providerOrgId },
     })
 
-    res.status(200).json({ emisor })
+    // I1 (ola final C1): nunca la fila entera — sin la llave del PAC ni el secreto del webhook.
+    res.status(200).json({ emisor: emisorSeguro(emisor) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
@@ -796,7 +1079,8 @@ export async function uploadEmisorCsdController(req: Request, res: Response): Pr
       data: { csdStatus: emisor.csdStatus, csdExpiresAt: emisor.csdExpiresAt ?? null },
     })
 
-    res.status(200).json({ emisor })
+    // I1 (ola final C1): nunca la fila entera — sin la llave del PAC ni el secreto del webhook.
+    res.status(200).json({ emisor: emisorSeguro(emisor) })
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
@@ -918,13 +1202,19 @@ export async function searchSatCatalogController(req: Request, res: Response): P
  *
  * Admin manual trigger for Flow C: issues the most-recent closed-period factura global for the
  * given FiscalEmisor. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ * C1 (Tarea 8, C1-P16 = B): body `{ desde? }` = the ISO start of one of the RECENT closed periods the job reviews; an older period
+ * (or a date that is not a period start) → 400 «pídelo a soporte».
  *
- * Status mapping:
- *   STAMPED           → 201 { cfdi: { id, uuid, serie, folio, globalPeriod, pdfUrl } }
- *   NOTHING_TO_INVOICE → 200 { status, message }
- *   SKIPPED           → 409 (inactive CSD)
- *   VALIDATION_FAILED → 422 { error, reasons }
- *   STAMP_FAILED      → 502 { error, message }
+ * Status mapping (every body also carries `excluidasPorIvaMixto` and, C1 · T10, `excluidas` by motive):
+ *   STAMPED (emitted now)   → 201 { excluidasPorIvaMixto, excluidas, cfdi: { id, uuid, serie, folio, globalPeriod, pdfUrl } } + CFDI_GLOBAL_ISSUED
+ *   STAMPED (already was)   → 200 { status: 'YA_TIMBRADA', yaTimbrada: true, message, excluidasPorIvaMixto, excluidas, cfdi } (T11 r1 m4; no audit)
+ *   NOTHING_TO_INVOICE      → 200 { status, message, excluidasPorIvaMixto, excluidas }
+ *   SKIPPED (inactive CSD)  → 409 { error, reason }
+ *   SKIPPED (year, C1-33)   → 400 { error: MOTIVO_ANIO_FUERA }
+ *   VALIDATION_FAILED       → 422 { error, reasons, excluidasPorIvaMixto, excluidas } (also the C1 guards: bimestral/621, period covered by
+ *                             another pending global of another periodicity — MOTIVO_PERIODO_CUBIERTO)
+ *   STAMP_FAILED            → 502 { error, message, excluidasPorIvaMixto, excluidas }
+ *   `desde` not a recent period start → 400 { error: MOTIVO_PERIODO_VIEJO }; emisor of another venue → 404; in progress / other conflict → 409
  */
 export async function triggerGlobalCfdiController(req: Request, res: Response): Promise<void> {
   const { emisorId } = req.params
@@ -951,26 +1241,71 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
       return
     }
 
-    const result = await issueGlobalForEmisor({ emisorId, now: new Date(), sandbox })
+    // C1 (Tarea 8): `desde` (opcional, ya validado por triggerGlobalCfdiSchema) elige un periodo reciente; sin él, el último cerrado.
+    const desde: string | undefined = req.body?.desde
+    const result = await issueGlobalForEmisor({ emisorId, now: new Date(), sandbox, ...(desde !== undefined ? { desde } : {}) })
+    // C1 (Tarea 10): cada respuesta que lleva `excluidasPorIvaMixto` (se conserva) lleva además `excluidas` por motivo (nuevo; v1 ⇒ `{}`).
+    const excluidas = result.excluidas ?? {}
 
     switch (result.status) {
       case 'NOTHING_TO_INVOICE':
-        res.status(200).json({ status: 'NOTHING_TO_INVOICE', message: 'No hay tickets por facturar en el periodo.' })
+        res.status(200).json({
+          status: 'NOTHING_TO_INVOICE',
+          message: 'No hay tickets por facturar en el periodo.',
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+        })
         return
 
       case 'SKIPPED':
+        // C1 (Tarea 11): un periodo cuyo año ya no admite el SAT (C1-33) no es un CSD inactivo: 400 con su motivo («pídela a soporte»).
+        if (result.reason === MOTIVO_ANIO_FUERA) {
+          res.status(400).json({ error: result.reason })
+          return
+        }
         res.status(409).json({ error: 'El sello digital (CSD) del emisor no está activo.', reason: result.reason })
         return
 
       case 'VALIDATION_FAILED':
-        res.status(422).json({ error: 'No se pudo generar la factura global', reasons: result.reasons })
+        res.status(422).json({
+          error: 'No se pudo generar la factura global',
+          reasons: result.reasons,
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+        })
         return
 
       case 'STAMP_FAILED':
-        res.status(502).json({ error: 'El PAC rechazó el timbrado de la factura global', message: result.cfdi?.lastError })
+        res.status(502).json({
+          error: 'El PAC rechazó el timbrado de la factura global',
+          message: result.cfdi?.lastError,
+          // Ronda QA (hermanos, aditivo): EN DUDA (el PAC no contestó claro), no rechazada; como la factura y la nota (D1).
+          ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+        })
         return
 
       case 'STAMPED': {
+        // Ronda 1 de la T11 (m4): ya estaba timbrada; no se emitió nada ahora ⇒ 200 sin auditoría.
+        if (result.yaTimbrada) {
+          res.status(200).json({
+            status: 'YA_TIMBRADA',
+            yaTimbrada: true,
+            message: 'La factura global de este periodo ya estaba timbrada; no se emitió otra.',
+            excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+            excluidas,
+            cfdi: {
+              id: result.cfdi.id,
+              uuid: result.cfdi.uuid,
+              serie: result.cfdi.serie,
+              folio: result.cfdi.folio,
+              globalPeriod: result.cfdi.globalPeriod,
+              pdfUrl: result.cfdi.pdfUrl,
+            },
+          })
+          return
+        }
         // ActivityLog: CFDI_GLOBAL_ISSUED — audit mutation (critical-warnings rule)
         logAction({
           staffId: userId,
@@ -983,10 +1318,16 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
             period: result.period ? `${result.period.meses}/${result.period.anio}` : null,
             count: result.candidateCount ?? 0,
             uuid: result.cfdi.uuid,
+            // C1 (Tarea 10): lo que quedó fuera (por motivo), los centavos que puso la regla del PAC y, si aplica, su principal (Tarea 11).
+            excluidas,
+            ajustes: result.cfdi.entrada?.ajustes ?? [],
+            complementariaDe: result.cfdi.entrada?.complementariaDe ?? null,
           },
         })
 
         res.status(201).json({
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
           cfdi: {
             id: result.cfdi.id,
             uuid: result.cfdi.uuid,
@@ -1004,6 +1345,13 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
     // warn si la respuesta es un caso esperado (4xx); error sólo si termina en 5xx.
     const aviso = `[cfdi.controller] triggerGlobalCfdi failed for emisor ${emisorId}: ${message}`
 
+    // C1 (Tarea 8): un periodo fuera de la ventana reciente (MOTIVO_PERIODO_VIEJO, «pídelo a soporte»).
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+
     if (/not found/i.test(message)) {
       logger.warn(aviso)
       res.status(404).json({ error: 'Emisor fiscal no encontrado' })
@@ -1011,7 +1359,7 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
     }
 
     // Concurrent in-flight reservation — surface as 409 so the client can retry
-    if (/en proceso/i.test(message)) {
+    if (err instanceof ConflictError || /en proceso/i.test(message)) {
       logger.warn(aviso)
       res.status(409).json({ error: message })
       return
@@ -1019,6 +1367,288 @@ export async function triggerGlobalCfdiController(req: Request, res: Response): 
 
     logger.error(aviso)
     res.status(500).json({ error: 'Error interno al generar la factura global' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/periodos
+ *
+ * C1 (Tarea 8, C1-P16 = B): los periodos cerrados RECIENTES del emisor (los que revisa el job) con el estado de su global principal.
+ * Sin paginación hacia atrás: un periodo más viejo se pide a soporte. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function listGlobalPeriodosController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    // Tenant guard: el emisor tiene que ser del negocio de quien pregunta.
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    res.status(200).json(await periodosDeLaGlobal({ venueId, emisorId, now: new Date() }))
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    if (/not found/i.test(message)) {
+      logger.warn(`[cfdi.controller] listGlobalPeriodos: ${message}`)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    logger.error(`[cfdi.controller] listGlobalPeriodos failed for emisor ${emisorId}: ${message}`)
+    res.status(500).json({ error: 'Error interno al consultar los periodos de la factura global' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/excluidas?principalId=&desde=&cursor=&limite=
+ *
+ * C1 (Tarea 12): las ventas de un periodo que no entraron a la global, y por qué. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function listGlobalExcluidasController(req: Request, res: Response): Promise<void> {
+  const { emisorId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  // Ya validada por `listGlobalExcluidasSchema` (`limite` llega como número).
+  const { principalId, desde, cursor, limite } = req.query as { principalId?: string; desde?: string; cursor?: string; limite?: number }
+  try {
+    // Tenant guard: el emisor tiene que ser del negocio de quien pregunta.
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    const listado = await listarExcluidasDeLaGlobal({
+      venueId,
+      emisorId,
+      now: new Date(),
+      ...(principalId ? { principalId } : {}),
+      ...(desde ? { desde } : {}),
+      ...(cursor ? { cursor } : {}),
+      ...(limite !== undefined ? { limite } : {}),
+    })
+    res.status(200).json(listado)
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const aviso = `[cfdi.controller] listGlobalExcluidas failed for emisor ${emisorId}: ${message}`
+    // Un periodo viejo, una global que no es principal de este emisor, una heredada timbrada: 400 con su texto (dicen qué hacer).
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (/not found/i.test(message)) {
+      logger.warn(aviso)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    logger.error(aviso)
+    res.status(500).json({ error: 'Error interno al consultar las ventas que no entraron a la factura global' })
+  }
+}
+
+/**
+ * GET /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria
+ *
+ * C1 (Tarea 11): la vista previa de la complementaria de una global principal. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:view').
+ */
+export async function previewGlobalComplementariaController(req: Request, res: Response): Promise<void> {
+  const { emisorId, principalId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  try {
+    // Tenant guard: el emisor tiene que ser del negocio de quien pregunta.
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    res.status(200).json(await vistaPreviaComplementaria({ venueId, emisorId, principalId, now: new Date() }))
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const aviso = `[cfdi.controller] previewGlobalComplementaria failed for emisor ${emisorId}, principal ${principalId}: ${message}`
+    // No es una principal de este emisor, todavía no está timbrada, o su periodo no se puede demostrar: 400 con su texto.
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (/not found/i.test(message)) {
+      logger.warn(aviso)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    logger.error(aviso)
+    res.status(500).json({ error: 'Error interno al consultar la complementaria de la factura global' })
+  }
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria
+ *
+ * C1 (Tarea 11): emite (o retoma) la complementaria de una global principal. Gated by checkFeatureAccess('CFDI') + checkPermission('cfdi:configure').
+ *
+ * Status mapping (every body also carries `excluidasPorIvaMixto`, `excluidas` and `complementariaDe`):
+ *   STAMPED (emitted now)   → 201 { excluidasPorIvaMixto, excluidas, complementariaDe, cfdi } + CFDI_GLOBAL_ISSUED (data.complementariaDe)
+ *   STAMPED (already was)   → 200 { status: 'YA_TIMBRADA', yaTimbrada: true, message, …, cfdi } (no audit)
+ *   NOTHING_TO_INVOICE      → 200 { status, message, excluidasPorIvaMixto, excluidas, complementariaDe }
+ *   SKIPPED (inactive CSD)  → 409 { error, reason }; SKIPPED (year) → 400 { error: MOTIVO_ANIO_FUERA }
+ *   VALIDATION_FAILED       → 422 { error, reasons, … } (also the C1 guards, e.g. MOTIVO_PERIODO_CUBIERTO)
+ *   STAMP_FAILED            → 502 { error, message, … }
+ *   400 { error }: not a principal of this emisor, MOTIVO_SIN_PRINCIPAL, principal in cancellation, inherited principal, period not
+ *   demonstrable, the cap of 20 complementarias; 404 emisor; 409 «Se está emitiendo…» (in progress) or the conflict's own text.
+ */
+export async function emitGlobalComplementariaController(req: Request, res: Response): Promise<void> {
+  const { emisorId, principalId } = req.params
+  const authContext = (req as any).authContext ?? {}
+  const venueId = resolveRequestVenueId(req, authContext)
+  if (!venueId) {
+    res.status(400).json({ error: 'Venue ID requerido' })
+    return
+  }
+  const { userId } = authContext
+  // Sandbox in dev/staging; live key in production.
+  const sandbox = env.NODE_ENV !== 'production'
+  try {
+    const emisor = await prisma.fiscalEmisor.findFirst({ where: { id: emisorId, venueId }, select: { id: true } })
+    if (!emisor) {
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    const result: IssueGlobalResult = await emitirGlobalComplementaria({ venueId, emisorId, principalId, now: new Date(), sandbox })
+    const excluidas = result.excluidas ?? {}
+    const complementariaDe = result.complementariaDe ?? principalId
+    switch (result.status) {
+      case 'NOTHING_TO_INVOICE':
+        res.status(200).json({
+          status: 'NOTHING_TO_INVOICE',
+          message: 'No hay ventas de este periodo por facturar en una global complementaria.',
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+        })
+        return
+      case 'SKIPPED':
+        // El año del periodo ya no lo admite el SAT (C1-33): 400 con su motivo. Un CSD inactivo, como el disparo de la principal.
+        if (result.reason === 'CSD inactivo') {
+          res.status(409).json({ error: 'El sello digital (CSD) del emisor no está activo.', reason: result.reason })
+          return
+        }
+        res.status(400).json({ error: result.reason })
+        return
+      case 'VALIDATION_FAILED':
+        res.status(422).json({
+          error: 'No se pudo generar la factura global complementaria',
+          reasons: result.reasons,
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+        })
+        return
+      case 'STAMP_FAILED':
+        res.status(502).json({
+          error: 'El PAC rechazó el timbrado de la factura global complementaria',
+          message: result.cfdi?.lastError,
+          // Ronda QA (hermanos, aditivo): EN DUDA (el PAC no contestó claro), no rechazada; como la factura y la nota (D1).
+          ...(timbreEnDuda(result.cfdi) ? { timbreEnDuda: true } : {}),
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+        })
+        return
+      case 'STAMPED': {
+        // Ronda 1 (m4): ya estaba timbrada (otro clic llegó antes); no se emitió nada ahora ⇒ 200 sin auditoría.
+        if (result.yaTimbrada) {
+          res.status(200).json({
+            status: 'YA_TIMBRADA',
+            yaTimbrada: true,
+            message: 'Esta factura global complementaria ya estaba timbrada; no se emitió otra.',
+            excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+            excluidas,
+            complementariaDe,
+            cfdi: {
+              id: result.cfdi.id,
+              uuid: result.cfdi.uuid,
+              serie: result.cfdi.serie,
+              folio: result.cfdi.folio,
+              globalPeriod: result.cfdi.globalPeriod,
+              pdfUrl: result.cfdi.pdfUrl,
+            },
+          })
+          return
+        }
+        // ActivityLog: CFDI_GLOBAL_ISSUED — audit mutation (critical-warnings rule), con la principal que complementa.
+        logAction({
+          staffId: userId,
+          venueId,
+          action: 'CFDI_GLOBAL_ISSUED',
+          entity: 'Cfdi',
+          entityId: result.cfdi.id,
+          data: {
+            emisorId,
+            period: result.period ? `${result.period.meses}/${result.period.anio}` : null,
+            count: result.candidateCount ?? 0,
+            uuid: result.cfdi.uuid,
+            excluidas,
+            ajustes: result.cfdi.entrada?.ajustes ?? [],
+            complementariaDe: result.cfdi.entrada?.complementariaDe ?? complementariaDe,
+          },
+        })
+        res.status(201).json({
+          excluidasPorIvaMixto: result.excluidasPorIvaMixto,
+          excluidas,
+          complementariaDe,
+          cfdi: {
+            id: result.cfdi.id,
+            uuid: result.cfdi.uuid,
+            serie: result.cfdi.serie,
+            folio: result.cfdi.folio,
+            globalPeriod: result.cfdi.globalPeriod,
+            pdfUrl: result.cfdi.pdfUrl,
+          },
+        })
+        return
+      }
+      default:
+        logger.error(`[cfdi.controller] emitGlobalComplementaria: estado inesperado ${result.status}`)
+        res.status(500).json({ error: 'Error interno al emitir la factura global complementaria' })
+        return
+    }
+  } catch (err: unknown) {
+    const message = err instanceof Error ? err.message : String(err)
+    const aviso = `[cfdi.controller] emitGlobalComplementaria failed for emisor ${emisorId}, principal ${principalId}: ${message}`
+    // No es una principal timbrada/cancelada de este emisor, periodo sin demostrar o el tope de 20: 400 con su texto.
+    if (err instanceof BadRequestError) {
+      logger.warn(aviso)
+      res.status(400).json({ error: message })
+      return
+    }
+    if (/not found/i.test(message)) {
+      logger.warn(aviso)
+      res.status(404).json({ error: 'Emisor fiscal no encontrado' })
+      return
+    }
+    // M9 (revisión de la T13): sólo «en proceso» (el texto EXACTO del motor) es «se está emitiendo»; cualquier otro conflicto («revisión de
+    // soporte», «cancelada en el PAC») dice el suyo.
+    if (err instanceof ConflictError) {
+      logger.warn(aviso)
+      res.status(409).json({ error: message === PROCESANDO ? 'Se está emitiendo; intenta en un minuto' : message })
+      return
+    }
+    logger.error(aviso)
+    res.status(500).json({ error: 'Error interno al emitir la factura global complementaria' })
   }
 }
 

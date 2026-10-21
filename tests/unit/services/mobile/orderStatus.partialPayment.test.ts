@@ -17,6 +17,12 @@
  * COMPLETED con saldo pendiente.**
  */
 
+// FT-GRAVES S-EF: payCashOrder encola la comisión del cobro en su transacción, igual que la terminal. No es objeto de esta
+// suite (su prueba es tests/integration/commission/efectivoPosMovil.integration.test.ts).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),
@@ -262,6 +268,56 @@ describe('areaTicketV7 — la conciliación parcial no retrocede el status', () 
     expect(data.paymentStatus).toBe('PAID')
     expect(data.status).toBe('COMPLETED')
     expect(data.completedAt).toBeInstanceOf(Date)
+  })
+
+  // Etapa 3 del KDS (Codex 3.6, S3): el cobro por terminal de una cuenta con vale salda AQUÍ, así que la marca
+  // durable de cocina va en esta misma escritura (el efectivo móvil ya la pone en la suya). Sin ella, los productos
+  // sueltos de la cuenta nunca tenían comanda del servidor.
+  it('con pantalla: al saldar la cuenta la marca de cocina va en la misma escritura', async () => {
+    primeAreaTicket('CONFIRMED', 100)
+
+    await finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      paymentId: 'payment-1',
+      fullyPaid: true,
+      reconcileCapturedPayment: true,
+      marcarCocina: true,
+      locked: { sessionId: 'checkout-session', attemptId: 'attempt' } as any,
+    })
+
+    expect(areaWrite().kitchenPendingAt).toBeInstanceOf(Date)
+  })
+
+  it('con pantalla: un abono PARCIAL no marca la cocina', async () => {
+    primeAreaTicket('CONFIRMED', 40)
+
+    await finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      paymentId: 'payment-1',
+      fullyPaid: false,
+      reconcileCapturedPayment: true,
+      marcarCocina: true,
+      locked: { sessionId: 'checkout-session', attemptId: 'attempt' } as any,
+    })
+
+    expect(areaWrite().kitchenPendingAt).toBeUndefined()
+  })
+
+  it('sin pantalla: saldar no marca la cocina', async () => {
+    primeAreaTicket('CONFIRMED', 100)
+
+    await finalizeAreaTicketPaymentInTransaction(prismaMock, {
+      venueId: VENUE_ID,
+      orderId: ORDER_ID,
+      paymentId: 'payment-1',
+      fullyPaid: true,
+      reconcileCapturedPayment: true,
+      locked: { sessionId: 'checkout-session', attemptId: 'attempt' } as any,
+    })
+
+    expect(areaWrite().kitchenPendingAt).toBeUndefined()
   })
 
   it('🔴 NUNCA escribe status COMPLETED junto con paymentStatus PARTIAL', async () => {

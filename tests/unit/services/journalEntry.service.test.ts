@@ -42,7 +42,12 @@ const balanced = { date: '2026-06-15', concept: 'Venta', lines: [L('caja', 11600
 function txMock() {
   const create = jest.fn().mockResolvedValue({ id: 'je-1' })
   const aggregate = jest.fn().mockResolvedValue({ _max: { folio: 7 } })
-  return { tx: { journalEntry: { create, aggregate } }, create, aggregate }
+  // Plan 4: la tx fija lock_timeout y lee la marca (Organization) y el negocio (Venue) con FOR SHARE.
+  const $executeRaw = jest.fn().mockResolvedValue(0)
+  const $queryRaw = jest.fn((sql: TemplateStringsArray) =>
+    Promise.resolve(sql.join('?').includes('"Organization"') ? [{ ivaMixtoAlgunaVez: false }] : [{ organizationId: 'org1' }]),
+  )
+  return { tx: { journalEntry: { create, aggregate }, $executeRaw, $queryRaw }, create, aggregate }
 }
 const DTO = {
   id: 'je-1',
@@ -198,11 +203,15 @@ describe('postJournalEntry — concurrencia (fix del review adversario)', () => 
     expect(e.totalDebitCents).toBe(e.totalCreditCents)
   })
 
-  it('usa el nivel de aislamiento Serializable', async () => {
+  it('usa Serializable con los tiempos del Ruling R11 (15 s de transacción, 5 s para conseguir conexión)', async () => {
     const { tx } = txMock()
     p.$transaction.mockImplementation(async (cb: any) => cb(tx))
     await createManualEntry('v1', balanced, { staffId: 's' })
-    expect(p.$transaction.mock.calls[0][1]).toEqual({ isolationLevel: Prisma.TransactionIsolationLevel.Serializable })
+    expect(p.$transaction.mock.calls[0][1]).toEqual({
+      isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
+      timeout: 15_000,
+      maxWait: 5_000,
+    })
   })
 })
 

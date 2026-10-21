@@ -1,0 +1,5 @@
+{ "layout": { "blocks": [
+    { "type": "businessName" }, { "type": "orderInfo" }, { "type": "separator" }, { "type": "items" }, { "type": "separator" },
+    { "type": "totals", "showSubtotal": true, "showTax": false, "showDiscount": true, "showTip": true }, { "type": "payment" }
+  ] }, "sale": "reprint", "venue": "one-emisor",
+  "saleOverride": { "subtotalCents": 35000, "discountCents": null, "serviceChargeCents": 1500, "taxCents": 5600, "tipCents": null, "totalCents": 42100 } }

@@ -346,6 +346,10 @@ export async function convertToOrder(estimateId: string, venueId: string, staffI
       kitchenStatus: 'PENDING',
       type: 'TAKEOUT',
       source: 'AVOQADO_IOS',
+      // La orden cobra la suma de los precios con el IVA dentro (abajo: `taxAmount` 0, `total` = subtotal), aun si el
+      // presupuesto viejo guardó el 16 % sumado encima: es IVA incluido, como el mostrador
+      // (ver `services/fiscal/contratoDePrecio.ts`).
+      contratoDePrecio: 'IVA_INCLUIDO',
       subtotal: estimate.subtotal,
       discountAmount: new Prisma.Decimal(0),
       // IVA incluido: la orden debe la suma de sus renglones y guarda `taxAmount` 0, como toda venta nativa. Nunca el

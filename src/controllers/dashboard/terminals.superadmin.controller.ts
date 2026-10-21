@@ -1,3 +1,8 @@
+import { tpvHealthService } from '../../services/tpv/tpv-health.service'
+import { tpvCommandQueueService } from '../../services/tpv/command-queue.service'
+import * as tpvSettings from '../../services/dashboard/tpv.dashboard.service'
+import { logAction } from '../../services/dashboard/activity-log.service'
+import { getTpvFleet as getTpvFleetService } from '../../services/dashboard/terminal-fleet.service'
 import { Request, Response, NextFunction } from 'express'
 import {
   getAllTerminals as getAllTerminalsService,
@@ -106,7 +111,7 @@ export const createTerminal = async (req: Request, res: Response, next: NextFunc
     const { venueId, serialNumber, name, type, brand, model, assignedMerchantIds, generateActivationCode, configOverrides } = req.body
 
     // Audit actor — `authContext` is set by authenticateToken middleware.
-    const staffId = (req as any).authContext?.userId || (req as any).user?.userId || 'superadmin'
+    const staffId = req.authContext!.userId
 
     const result = await createTerminalService({
       venueId,
@@ -196,7 +201,7 @@ export const generateActivationCode = async (req: Request, res: Response, next: 
     const { terminalId } = req.params
 
     // Get staffId from authenticated user
-    const staffId = (req as any).user?.userId || 'superadmin'
+    const staffId = req.authContext!.userId
 
     const activationCodeData = await generateActivationCodeService(terminalId, staffId)
 
@@ -251,7 +256,7 @@ export const sendRemoteActivation = async (req: Request, res: Response, next: Ne
     const { terminalId } = req.params
 
     // Get staffId from authenticated user (must be SUPERADMIN)
-    const staffId = (req as any).user?.userId || 'superadmin'
+    const staffId = req.authContext!.userId
 
     const result = await sendRemoteActivationService(terminalId, staffId)
 
@@ -259,6 +264,78 @@ export const sendRemoteActivation = async (req: Request, res: Response, next: Ne
       data: result,
       message: 'Remote activation command sent successfully',
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** Canonical superadmin operations return the actual queue identity, never fake completion. */
+export const sendCommand = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const terminal = await getTerminalByIdService(req.params.terminalId)
+    const result = await tpvHealthService.sendCommand(terminal, {
+      type: req.body.command,
+      idempotencyKey: req.get('Idempotency-Key'),
+      payload: req.body.payload,
+      requestedBy: req.authContext!.userId,
+    })
+    await logAction({
+      staffId: req.authContext!.userId,
+      venueId: terminal.venueId,
+      action: 'TERMINAL_COMMAND_QUEUED',
+      entity: 'Terminal',
+      entityId: terminal.id,
+      data: { command: req.body.command, commandId: result.commandId },
+      ipAddress: req.ip,
+      userAgent: req.get('user-agent'),
+    })
+    res.json({ data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+export const commandHistory = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const terminal = await getTerminalByIdService(req.params.terminalId)
+    const page = Number(req.query.page) || 1
+    const result = await tpvCommandQueueService.getCommandHistory(terminal.id, terminal.venueId, { limit: 25, offset: (page - 1) * 25 })
+    res.json({
+      total: result.total,
+      page,
+      data: result.commands.map(command => ({
+        id: command.id,
+        commandType: command.commandType,
+        status: command.status,
+        createdAt: command.createdAt,
+        expiresAt: command.expiresAt,
+        resultMessage: command.resultMessage,
+      })),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+export const getSettings = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const terminal = await getTerminalByIdService(req.params.terminalId)
+    res.json({ data: await tpvSettings.getTpvSettings(terminal.id, { venueId: terminal.venueId }) })
+  } catch (error) {
+    next(error)
+  }
+}
+export const saveSettings = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const terminal = await getTerminalByIdService(req.params.terminalId)
+    res.json({
+      data: await tpvSettings.updateTpvSettings(terminal.id, req.body, { venueId: terminal.venueId, staffId: req.authContext!.userId }),
+    })
+  } catch (error) {
+    next(error)
+  }
+}
+export const getTpvFleet = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    res.json(await getTpvFleetService(req.query as unknown as Parameters<typeof getTpvFleetService>[0]))
   } catch (error) {
     next(error)
   }

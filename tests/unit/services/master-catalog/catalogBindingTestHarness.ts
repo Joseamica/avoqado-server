@@ -134,6 +134,9 @@ export function bindingTransaction() {
       findFirst: jest.fn(),
       updateMany: jest.fn().mockResolvedValue({ count: 1 }),
     },
+    // Codex #5: el negocio se lee FOR SHARE antes de contar sus familias (una con familias no se liga al catálogo maestro).
+    productGroup: { count: jest.fn().mockResolvedValue(0) },
+    $queryRaw: jest.fn().mockResolvedValue([]),
     $executeRaw: jest.fn().mockResolvedValue(0),
   }
 }

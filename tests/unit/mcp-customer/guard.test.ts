@@ -9,6 +9,7 @@ jest.mock('@/services/access/access.service', () => ({
 const scope = (ids: string[]): McpScope => ({
   staffId: 's',
   activeOrg: 'o',
+  scopes: ['mcp:read', 'mcp:write'],
   allowedVenueIds: ids,
   perVenueAccess: new Map(ids.map(id => [id, { corePermissions: ['venue:read'] } as any])),
 })
@@ -62,14 +63,11 @@ describe('guard — mcp:write scope enforcement', () => {
     else process.env.MCP_ENFORCE_WRITE_SCOPE = OLD_ENV
   })
 
-  it('OBSERVE-ONLY by default: a read-only write is NOT blocked, only logged (with granted scopes)', () => {
-    delete process.env.MCP_ENFORCE_WRITE_SCOPE // default = observe-only
+  it.each([undefined, 'false', 'true'])('siempre bloquea escritura sin grant, bandera=%s', flag => {
+    if (flag === undefined) delete process.env.MCP_ENFORCE_WRITE_SCOPE
+    else process.env.MCP_ENFORCE_WRITE_SCOPE = flag
     const g = createGuard(withScope(['mcp:read'], ['loyalty:adjust']))
-    expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow() // does NOT break writes on rollout
-    expect(logger.warn).toHaveBeenCalledWith(
-      '[MCP] write would be blocked (observe-only): token lacks mcp:write scope',
-      expect.objectContaining({ permission: 'loyalty:adjust', grantedScopes: ['mcp:read'], enforced: false }),
-    )
+    expect(() => g.requirePermission('loyalty:adjust', 'A')).toThrow(/mcp:write/)
   })
 
   it('ENFORCED (MCP_ENFORCE_WRITE_SCOPE=true): a read-only write throws', () => {
@@ -94,9 +92,9 @@ describe('guard — mcp:write scope enforcement', () => {
     expect(() => g.requirePermission('cfdi:view', 'A')).not.toThrow() // :view is a read, not a write
   })
 
-  it('does NOT enforce when scopes are absent (dev/legacy token → full access until it refreshes)', () => {
+  it('scopes ausentes no autorizan escritura', () => {
     const g = createGuard(withScope(undefined, ['loyalty:adjust']))
-    expect(() => g.requirePermission('loyalty:adjust', 'A')).not.toThrow()
+    expect(() => g.requirePermission('loyalty:adjust', 'A')).toThrow(/mcp:write/)
   })
 
   // Regression (2026-07-11 audit I1): ORG-level write gates (saleVerifications'
@@ -110,11 +108,21 @@ describe('guard — mcp:write scope enforcement', () => {
     expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'manual-sales:create')).toThrow(/solo lectura|mcp:write/)
   })
 
-  it('enforceWriteScope: observe-only default logs but does not throw; reads and mcp:write tokens always pass', () => {
+  it('enforceWriteScope exige grant en las puertas de organización también', () => {
     delete process.env.MCP_ENFORCE_WRITE_SCOPE
-    expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'sale-verifications:review')).not.toThrow()
+    expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'sale-verifications:review')).toThrow(/mcp:write/)
     process.env.MCP_ENFORCE_WRITE_SCOPE = 'true'
     expect(() => enforceWriteScope(withScope(['mcp:read'], []), 'sale-verifications:read')).not.toThrow() // read never gated
     expect(() => enforceWriteScope(withScope(['mcp:read', 'mcp:write'], []), 'sale-verifications:review')).not.toThrow()
+  })
+  it('una lectura protegida por manage usa el grant de lectura y el mismo permiso del venue', () => {
+    const g = createGuard(withScope(['mcp:read'], ['marketing:manage']))
+    expect(() => g.requirePermission('marketing:manage', 'A', 'read')).not.toThrow()
+    expect(() => g.requirePermission('marketing:manage', 'B', 'read')).toThrow(/Missing permission/)
+    expect(() => g.requirePermission('marketing:manage', 'A')).toThrow(/mcp:write/)
+  })
+
+  it('un grant vacío tampoco habilita permisos de lectura', () => {
+    expect(() => createGuard(withScope([], ['orders:read'])).requirePermission('orders:read', 'A')).toThrow(/mcp:read/)
   })
 })

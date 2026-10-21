@@ -3,11 +3,11 @@
  * sobrevivir a cualquier recálculo posterior de la orden.
  *
  * El POS manda ese descuento como un número suelto (`discount`, centavos) al crear la
- * orden. `createOrderWithItems` lo guarda SÓLO en la cabecera (`Order.discountAmount`),
- * pero `recalculateOrderTotals` reconstruye la cabecera desde las filas `OrderDiscount`
- * y sólo respeta el número suelto cuando NO hay ninguna fila. En cuanto alguien agrega
+ * orden. Antes `createOrderWithItems` lo guardaba SÓLO en la cabecera (`Order.discountAmount`),
+ * y `recalculateOrderTotals` reconstruye la cabecera desde las filas `OrderDiscount`
+ * (el número suelto sólo cuenta cuando NO hay ninguna fila). En cuanto alguien agregaba
  * una fila —el premio de la cartilla al crear la venta, otro descuento después— el
- * descuento de cuenta desaparece: la orden dice que el cliente debe MÁS de lo que el
+ * descuento de cuenta desaparecía: la orden decía que el cliente debía MÁS de lo que el
  * negocio quiso cobrarle.
  *
  * Estas pruebas NO miden `Order.total`, porque su relación con la propina es otra pregunta:
@@ -21,14 +21,10 @@
  * canje y el recálculo reales escriben y leen las mismas filas, que es donde vive el
  * defecto.
  *
- * 🔴 DEFECTO CONOCIDO, reproducido en rojo el 2026-09-27 (descuento guardado 30 en vez de
- * 50, y 10 en vez de 30). Arreglo aprobado por el founder: el descuento de cuenta se guarda
- * como su propio renglón `OrderDiscount`. Espera a que aterrice la rama `iva-por-producto`,
- * que reescribe estos mismos escritores. Mientras tanto las dos pruebas 🔴 van con
- * `it.failing`: PASAN mientras el defecto exista (así no ensucian la suite de las demás
- * sesiones) y TRUENAN el día que desaparezca. El cambio que lo arregle las voltea a `it`
- * en el mismo commit. Si el doble se rompiera, las pruebas de regresión —mismo doble, en
- * verde— lo delatan.
+ * Arreglado en el bloque B2 (1-oct): el descuento de cuenta es su propia fila `OrderDiscount`.
+ * El defecto se reprodujo en rojo el 2026-09-27 (descuento guardado 30 en vez de 50, y 10 en
+ * vez de 30); las dos pruebas 🔴 iban con `it.failing` y B2 las volteó a `it`. Si el doble se
+ * rompiera, las pruebas de regresión —mismo doble, en verde— lo delatan.
  */
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
@@ -159,7 +155,7 @@ function baseEnMemoria() {
     orderDiscountId: null,
   })
 
-  return { orden: (id: string) => ordenes.get(id)! }
+  return { orden: (id: string) => ordenes.get(id)!, descuentosDe: (orderId: string) => descuentos.filter(d => d.orderId === orderId) }
 }
 
 /** Una venta de $100 en una sola línea «Otro importe», con propina de $5. */
@@ -177,9 +173,9 @@ function cierraCon(orden: Fila, mercancia: number, propina: number) {
 }
 
 // Cada escenario va en DOS pruebas: una normal que exige que el escenario de verdad ocurrió
-// (si el doble o la venta se rompen, truena en rojo) y la `it.failing` que sólo lee su
-// resultado. Así `it.failing` no puede «pasar» porque algo AJENO tronó antes de llegar al
-// descuento — medido: una columna nueva de otra sesión lo hizo pasar en falso.
+// (si el doble o la venta se rompen, truena en rojo) y la 🔴 que sólo lee su resultado. Así
+// la 🔴 no se confunde con algo AJENO que tronó antes de llegar al descuento — medido, cuando
+// iba con `it.failing`: una columna nueva de otra sesión la hizo pasar en falso.
 describe('el descuento de CUENTA sobrevive a los recálculos de la orden', () => {
   describe('premio de la cartilla canjeado al crear la venta', () => {
     let db: ReturnType<typeof baseEnMemoria>
@@ -196,7 +192,7 @@ describe('el descuento de CUENTA sobrevive a los recálculos de la orden', () =>
       ordenId = creada.id
     })
 
-    it.failing('🔴 el premio NO borra el descuento de cuenta', () => {
+    it('🔴 el premio NO borra el descuento de cuenta', () => {
       // $100 − $20 de descuento de cuenta − $30 de premio = $50 de mercancía (+ $5 de propina aparte).
       const orden = db.orden(ordenId)
       expect(orden.discountAmount).toBe(50)
@@ -204,6 +200,9 @@ describe('el descuento de CUENTA sobrevive a los recálculos de la orden', () =>
       const saldo = cierraCon(orden, 50, 5)
       expect(saldo.remainingBalance.toNumber()).toBe(0)
       expect(saldo.isFullyPaid).toBe(true)
+      // B2: el premio FIJO es una fila de CUENTA con promociones, repartida por el recálculo de su canje.
+      const premio = db.descuentosDe(ordenId).find(d => d.name === '$30 de premio')
+      expect(premio?.reparto).toMatchObject({ alcance: 'CUENTA', conPromociones: true, renglones: { 'renglon-2': 3000 } })
     })
   })
 
@@ -223,7 +222,7 @@ describe('el descuento de CUENTA sobrevive a los recálculos de la orden', () =>
       ordenId = creada.id
     })
 
-    it.failing('🔴 el segundo descuento NO borra el descuento de cuenta', () => {
+    it('🔴 el segundo descuento NO borra el descuento de cuenta', () => {
       // $100 − $20 de cuenta − 10% ($10, sobre la mercancía) = $70 de mercancía.
       const orden = db.orden(ordenId)
       expect(orden.discountAmount).toBe(30)
@@ -250,5 +249,29 @@ describe('el descuento de CUENTA sobrevive a los recálculos de la orden', () =>
     const orden = db.orden(creada.id)
     expect(orden.discountAmount).toBe(20)
     expect(cierraCon(orden, 80, 5).isFullyPaid).toBe(true)
+  })
+})
+
+describe('el descuento de cuenta es su propia fila, con su reparto', () => {
+  it('nace como fila FIJA de CUENTA y queda repartida sobre la venta', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, venta({ discount: 2000 }))
+    const [fila] = db.descuentosDe(creada.id)
+    expect(fila).toMatchObject({ type: 'FIXED_AMOUNT', name: 'Descuento de la cuenta', amount: 20, isManual: true, appliedById: 'sv-1' })
+    expect(fila.reparto).toEqual({ v: 1, alcance: 'CUENTA', conPromociones: true, espejo: false, renglones: { 'renglon-2': 2000 } })
+    expect(db.orden(creada.id).discountAmount).toBe(20) // cabecera de hoy
+  })
+  it('un % aplicado después toma la regla del recálculo; la fila de cuenta conserva la suya, sin pasar la capacidad', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, venta({ discount: 2000 }))
+    await applyOrderDiscount(VENUE, creada.id, DESCUENTO_10, 'staff-1')
+    const [cuenta, diez] = db.descuentosDe(creada.id)
+    expect(cuenta.reparto).toMatchObject({ alcance: 'CUENTA', conPromociones: true, renglones: { 'renglon-2': 2000 } })
+    expect(diez).toMatchObject({ amount: 10, reparto: { alcance: 'CUENTA', conPromociones: false, renglones: { 'renglon-2': 1000 } } })
+  })
+  it('sin descuento de cuenta no se crea ninguna fila (regresión)', async () => {
+    const db = baseEnMemoria()
+    const creada = await createOrderWithItems(VENUE, venta())
+    expect(db.descuentosDe(creada.id)).toEqual([])
   })
 })

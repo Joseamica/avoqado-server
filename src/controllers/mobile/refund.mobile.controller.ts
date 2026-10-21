@@ -6,6 +6,7 @@
 
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import * as refundService from '../../services/mobile/refund.mobile.service'
 import * as refundDashboardService from '../../services/dashboard/refund.dashboard.service'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
@@ -59,12 +60,13 @@ export const createRefund = async (req: Request, res: Response, next: NextFuncti
  * @route POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  *
  * Body: { amount?: number (cents), items?: [{ orderItemId, quantity? }],
- *         restockItemIds?: string[], reason: RefundReason, note?: string }
+ *         restockItemIds?: string[], reason: RefundReason, note?: string,
+ *         tipRefundCents?: number (cents), refundMethod?: 'CASH' | 'BANK_TRANSFER' }
  */
 export const issueAssociatedRefund = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, paymentId } = req.params
-    const { amount, items, restockItemIds, reason, note, tipRefundCents } = req.body ?? {}
+    const { amount, items, restockItemIds, reason, note, tipRefundCents, refundMethod } = req.body ?? {}
 
     const hasItems = Array.isArray(items) && items.length > 0
     if (!vieneAusente(amount) && !esCantidadPositivaEnCentavos(amount)) {
@@ -82,6 +84,9 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
     if (!reason || typeof reason !== 'string') {
       return res.status(400).json({ success: false, message: 'reason es requerido' })
     }
+    if (!vieneAusente(refundMethod) && refundMethod !== 'CASH' && refundMethod !== 'BANK_TRANSFER') {
+      return res.status(400).json({ success: false, message: 'refundMethod debe ser CASH o BANK_TRANSFER' })
+    }
 
     const result = await refundDashboardService.issueRefund({
       venueId,
@@ -93,11 +98,14 @@ export const issueAssociatedRefund = async (req: Request, res: Response, next: N
       staffId: req.authContext?.userId,
       note: typeof note === 'string' ? note : null,
       tipRefundCents: typeof tipRefundCents === 'number' ? tipRefundCents : undefined,
+      refundMethod: vieneAusente(refundMethod) ? undefined : refundMethod,
     })
 
     return res.status(201).json({ success: true, data: result })
   } catch (error) {
-    logger.error('Error issuing associated refund (mobile):', error)
+    // Un rechazo de NEGOCIO (4xx) no es una falla del servidor: aviso, no error (mismo criterio que el dashboard).
+    if (error instanceof AppError && error.statusCode < 500) logger.warn(`Refund rejected (mobile): ${error.message}`)
+    else logger.error('Error issuing associated refund (mobile):', error)
     next(error)
   }
 }

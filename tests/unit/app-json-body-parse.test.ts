@@ -1,4 +1,14 @@
+import express from 'express'
+import { api, startApiServer } from '../__helpers__/apiServer'
+
+jest.mock('../../src/config/env', () => ({
+  ...jest.requireActual('../../src/config/env'),
+  NODE_ENV: 'production',
+}))
+
+import { globalErrorHandler } from '@/app'
 import { isJsonBodyParseError } from '@/utils/httpErrors'
+import logger from '@/config/logger'
 
 describe('isJsonBodyParseError', () => {
   it('detects malformed JSON errors emitted by express.json()', () => {
@@ -14,5 +24,71 @@ describe('isJsonBodyParseError', () => {
     const error = new SyntaxError('Unexpected token')
 
     expect(isJsonBodyParseError(error)).toBe(false)
+  })
+})
+
+describe('HTTP body limits', () => {
+  const app = express()
+  const consumer = jest.fn((_req: express.Request, res: express.Response) => {
+    res.json({ ok: true })
+  })
+
+  beforeAll(() => {
+    app.use(express.json({ limit: '1kb' }))
+    app.post('/FULLTEST/body-limit', consumer)
+    app.get('/FULLTEST/internal-error', () => {
+      throw Object.assign(new Error('FULLTEST internal error'), { status: 413 })
+    })
+    app.use(globalErrorHandler)
+  })
+  startApiServer(() => app)
+  beforeEach(() => consumer.mockClear())
+
+  it('rejects an oversized upload with 413 before the consumer runs', async () => {
+    const response = await api()
+      .post('/FULLTEST/body-limit')
+      .send({ xml: 'FULLTEST-'.repeat(256) })
+
+    expect(response.status).toBe(413)
+    expect(response.body).toEqual({ message: 'La solicitud excede el tamaño máximo permitido.', code: 'PAYLOAD_TOO_LARGE' })
+    expect(consumer).not.toHaveBeenCalled()
+  })
+
+  it('still accepts a small JSON body', async () => {
+    const response = await api().post('/FULLTEST/body-limit').send({ xml: 'FULLTEST' })
+
+    expect(response.status).toBe(200)
+    expect(consumer).toHaveBeenCalledTimes(1)
+  })
+
+  it('still rejects malformed JSON with 400 before the consumer runs', async () => {
+    const response = await api().post('/FULLTEST/body-limit').set('Content-Type', 'application/json').send('{"xml":')
+
+    expect(response.status).toBe(400)
+    expect(consumer).not.toHaveBeenCalled()
+  })
+
+  it('🔴 5a: a malformed JSON body never reaches the log, not even a piece of it (an unquoted secret stays out)', async () => {
+    const niveles = [logger.info, logger.warn, logger.error, logger.debug] as jest.Mock[]
+    niveles.forEach(f => f.mockClear())
+    const response = await api()
+      .post('/FULLTEST/body-limit')
+      .set('Content-Type', 'application/json')
+      .send('{"shopDomain":"mi-tienda.myshopify.com","clientId":"cid","clientSecret":shpss_sintetico_123}')
+
+    expect(response.status).toBe(400)
+    expect(response.body).toEqual({ message: 'JSON inválido en el cuerpo de la solicitud.' })
+    expect(consumer).not.toHaveBeenCalled()
+    const registrado = JSON.stringify(niveles.map(f => f.mock.calls))
+    expect(registrado).toContain('Invalid JSON body')
+    expect(registrado).toContain('SyntaxError') // el nombre del error sí se queda
+    expect(registrado).not.toMatch(/shpss|sintetico/)
+  })
+
+  it('does not classify an unrelated internal status field as a body size error', async () => {
+    const response = await api().get('/FULLTEST/internal-error')
+
+    expect(response.status).toBe(500)
+    expect(response.body).toEqual({ message: 'Ocurrió un error inesperado en el servidor.' })
   })
 })

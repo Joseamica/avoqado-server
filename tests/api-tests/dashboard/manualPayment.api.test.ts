@@ -27,6 +27,7 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
 
 let app: Express
+let enqueuePaymentCommissionInTxMock: jest.Mock
 const TEST_SECRET = 'test-secret'
 // Valid CUID-like IDs (the manual payment schema only requires orderId to be a
 // non-empty string, but we use CUID-style ids for realism/consistency).
@@ -53,8 +54,16 @@ beforeAll(async () => {
     default: (_req: any, _res: any, next: any) => next(),
   }))
 
+  // The commission snapshot engine is outside this route fixture's scope.
+  jest.mock('@/services/tpv/paymentEffects.service', () => ({
+    ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+    enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+  }))
   const mod = await import('@/app')
   app = mod.default
+  // Resolve the same mock instance as the app after resetModules.
+  const paymentEffects = await import('@/services/tpv/paymentEffects.service')
+  enqueuePaymentCommissionInTxMock = paymentEffects.enqueuePaymentCommissionInTx as jest.Mock
 })
 
 /**
@@ -146,6 +155,7 @@ describe('POST /api/v1/dashboard/venues/:venueId/payments/manual', () => {
     expect(res.body.success).toBe(true)
     expect(res.body.data.externalSource).toBe('BUQ')
     expect(res.body.data.id).toBe(PAYMENT_ID)
+    expect(enqueuePaymentCommissionInTxMock).toHaveBeenCalledWith(prismaMock, PAYMENT_ID)
 
     // Persistence assertions — the service wrote the payment with externalSource
     // and marked the order PAID.
@@ -195,6 +205,7 @@ describe('POST /api/v1/dashboard/venues/:venueId/payments/manual', () => {
 
     expect(res.status).toBe(403)
     expect(res.body).toHaveProperty('error', 'Forbidden')
+    expect(enqueuePaymentCommissionInTxMock).not.toHaveBeenCalled()
     // Service must never have been invoked if permissions blocked the request.
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
@@ -214,6 +225,7 @@ describe('POST /api/v1/dashboard/venues/:venueId/payments/manual', () => {
     expect(res.status).toBe(400)
     expect(res.body).toHaveProperty('message')
     expect(res.body.message).toMatch(/externalSource|proveedor externo/i)
+    expect(enqueuePaymentCommissionInTxMock).not.toHaveBeenCalled()
     // Validation fails before any DB work happens.
     expect(prismaMock.order.findFirst).not.toHaveBeenCalled()
   })

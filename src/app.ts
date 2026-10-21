@@ -20,22 +20,28 @@ import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
-import AppError, { BadRequestError } from './errors/AppError'
+import AppError, { BadRequestError, ConflictError } from './errors/AppError'
+import { GiftCardError } from './services/giftCards/giftCardErrors'
 import {
   AFILIACION_EN_VARIOS_SLOTS,
   MENSAJE_AFILIACION_EN_VARIOS_SLOTS,
   esViolacionDeSlotsDistintos,
 } from './services/shared/slotsDeAfiliacion'
+import {
+  MENSAJE_PRODUCTO_CON_VENTAS,
+  PRODUCTO_CON_VENTAS_NO_SE_BORRA,
+  esProductoConVentas,
+} from './services/dashboard/product.dashboard.service'
 import mainApiRouter from './routes' // Esto importa el 'router' exportado por defecto de 'src/routes/index.ts'
 import { getCorsConfig, Environment } from './config/corsOptions'
-import { handleMcpRequest } from './mcp/server'
+import { handleDirectoryMcpRequest, handleMcpRequest } from './mcp/server'
 import { mcpRateLimitMiddleware } from './middlewares/mcp-rate-limit.middleware'
 import { mcpRequestGuardMiddleware } from './middlewares/mcp-request-guard.middleware'
 import { mountCustomerMcpAuth } from './mcp/oauth/router'
-import { provider as mcpOAuthProvider } from './mcp/oauth/provider'
+import { verifierForMcpResource } from './mcp/oauth/provider'
 import { requireBearerAuth } from '@modelcontextprotocol/sdk/server/auth/middleware/bearerAuth.js'
 import { getOAuthProtectedResourceMetadataUrl } from '@modelcontextprotocol/sdk/server/auth/router.js'
-import { MCP_RESOURCE_URL } from './mcp/oauth/config'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from './mcp/oauth/config'
 
 // Import routes
 import publicMenuRoutes from './routes/publicMenu.routes'
@@ -44,6 +50,7 @@ import webhookRoutes from './routes/webhook.routes'
 import { handleGoogleCalendarWebhook } from './controllers/webhook/google-calendar.webhook.controller'
 import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webhook.controller'
 import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.controller'
+import { handlePassWebhook } from './controllers/aggregators/passWebhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import {
   activarRappiOAuth,
@@ -51,6 +58,13 @@ import {
   resultadoRappiOAuth,
   startRappiOAuth,
 } from './controllers/delivery-channels/rappi.oauth.controller'
+import {
+  handleShopifyWebhook,
+  SHOPIFY_WEBHOOK_MAX_BYTES,
+  SHOPIFY_WEBHOOK_ROUTE,
+} from './services/commerce-channels/shopify/shopify.inbound.service'
+import { SHOPIFY_OAUTH_CALLBACK_PATH } from './services/commerce-channels/shopify/shopify.connect.service'
+import { shopifyOAuthCallback } from './controllers/commerce-channels/shopify.oauth.controller'
 import publicRoutes from './routes/public.routes'
 import appUpdateRoutes from './routes/superadmin/appUpdate.routes'
 import settlementReportRoutes from './routes/settlement-report.routes'
@@ -146,6 +160,17 @@ app.post('/api/v1/webhooks/mercadopago', express.raw({ type: '*/*', limit: '64kb
 // genérico. El aviso trae la factura entera (conceptos incluidos), de ahí el límite de 1 MB.
 app.post('/api/v1/webhooks/facturapi/:emisorId', express.raw({ type: '*/*', limit: '1mb' }), handleFacturapiWebhook)
 
+// ⚠️ Conector de pases (TotalPass/Wellhub): su Content-Type no está documentado. Con el `application/json` estricto
+// del router genérico, cualquier otro tipo dejaba `req.body = {}` y se guardaba un evento vacío con 200. Raw propio,
+// antes del router genérico. El `:token` es el secreto de la conexión: el logger lo redacta (`redactPathSecrets`).
+app.post('/api/v1/webhooks/aggregators/:provider/:token/:kind', express.raw({ type: '*/*', limit: '1mb' }), handlePassWebhook)
+
+// ⚠️ Conector Shopify: la firma (HMAC base64) es del cuerpo CRUDO, y un products/update con muchas variantes pasa de los
+// 100 KB del router genérico. Raw propio de 1 MB, antes del genérico. Sólo guarda el aviso y contesta 200: el worker lo
+// procesa con reclamo y lease (spec 12 bis.10). `:appKey` (piloto | publica) no es secreto. El logger le llega
+// por el `app.use('/api/v1/webhooks', requestLoggerMiddleware)` de arriba.
+app.post(SHOPIFY_WEBHOOK_ROUTE, express.raw({ type: '*/*', limit: SHOPIFY_WEBHOOK_MAX_BYTES }), handleShopifyWebhook)
+
 app.use(
   '/api/v1/webhooks',
   express.raw({ type: 'application/json' }), // Raw body parser for Stripe signature verification
@@ -181,6 +206,9 @@ app.use('/api/v1/public', requestLoggerMiddleware, express.json(), cookieParser(
 // dueño autorice aquí; sin este flujo cada alta dependería de un ticket a soporte de Uber.
 app.get('/api/v1/delivery/uber/oauth/start', requestLoggerMiddleware, startUberOAuth)
 app.get('/api/v1/delivery/uber/oauth/callback', requestLoggerMiddleware, uberOAuthCallback)
+// Conector Shopify: callback OAuth PÚBLICO (Shopify redirige sin sesión de Avoqado; la prueba de origen es su `hmac` y el
+// `state` firmado). Es la ruta que B pone en `redirect_uri`. El logger redacta `code` y `state`.
+app.get(SHOPIFY_OAUTH_CALLBACK_PATH, requestLoggerMiddleware, shopifyOAuthCallback)
 // La página de selección de tiendas publica aquí (form HTML): `state2` firmado + las tiendas marcadas.
 app.post(
   '/api/v1/delivery/uber/oauth/activate',
@@ -207,37 +235,42 @@ mountCustomerMcpAuth(app)
 
 // Customer-facing MCP endpoint (Streamable HTTP). Guarded by the SDK bearer middleware, which
 // validates the access token via provider.verifyAccessToken and sets req.auth.extra {staffId, activeOrg}.
-app.post(
-  '/mcp',
-  requireBearerAuth({
-    verifier: mcpOAuthProvider,
-    resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(MCP_RESOURCE_URL),
-  }),
-  // Volume ceiling — AFTER auth so it can key on the caller's staffId/org. requireBearerAuth proves
-  // WHO calls; nothing limited HOW MUCH, leaving ~250 tools open to fuzzing at full speed.
-  mcpRateLimitMiddleware,
-  express.json(),
-  // The brake from the 2026-09-23 freeze: one tool call at a time per person, a deadline that cancels
-  // the work at its next read, and the tool logged when it STARTS (with an execution context).
-  mcpRequestGuardMiddleware,
-  handleMcpRequest,
-)
+for (const { path, resource, handler } of [
+  { path: '/mcp', resource: MCP_RESOURCE_URL, handler: handleMcpRequest },
+  { path: '/mcp/directory', resource: MCP_DIRECTORY_RESOURCE_URL, handler: handleDirectoryMcpRequest },
+]) {
+  app.post(
+    path,
+    requireBearerAuth({
+      verifier: verifierForMcpResource(resource),
+      resourceMetadataUrl: getOAuthProtectedResourceMetadataUrl(resource),
+    }),
+    // Volume ceiling — AFTER auth so it can key on the caller's staffId/org. requireBearerAuth proves
+    // WHO calls; nothing limited HOW MUCH, leaving ~250 tools open to fuzzing at full speed.
+    mcpRateLimitMiddleware,
+    express.json(),
+    // The brake from the 2026-09-23 freeze: one tool call at a time per person, a deadline that cancels
+    // the work at its next read, and the tool logged when it STARTS (with an execution context).
+    mcpRequestGuardMiddleware,
+    handler,
+  )
 
-// MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream,
-// and we never issue session ids, so there is no session for a client to DELETE).
-// Answer GET *and* DELETE with 405 + Allow:POST so it reads as a real MCP endpoint, not an
-// Express 404 — the Streamable HTTP spec prescribes exactly this for both verbs.
-app.all('/mcp', (req, res, next) => {
-  if (req.method !== 'GET' && req.method !== 'DELETE') return next()
-  return res
-    .set('Allow', 'POST')
-    .status(405)
-    .json({
-      jsonrpc: '2.0',
-      error: { code: -32000, message: 'Method Not Allowed. The Avoqado MCP endpoint accepts POST (JSON-RPC) only.' },
-      id: null,
-    })
-})
+  // MCP here is JSON-RPC over POST (stateless Streamable HTTP — no standalone GET/SSE stream,
+  // and we never issue session ids, so there is no session for a client to DELETE).
+  // Answer GET *and* DELETE with 405 + Allow:POST so it reads as a real MCP endpoint, not an
+  // Express 404 — the Streamable HTTP spec prescribes exactly this for both verbs.
+  app.all(path, (req, res, next) => {
+    if (req.method !== 'GET' && req.method !== 'DELETE') return next()
+    return res
+      .set('Allow', 'POST')
+      .status(405)
+      .json({
+        jsonrpc: '2.0',
+        error: { code: -32000, message: 'Method Not Allowed. The Avoqado MCP endpoint accepts POST (JSON-RPC) only.' },
+        id: null,
+      })
+  })
+}
 
 // ⚠️ Public settlement report route — token-validated, no auth middleware
 // Mounted before configureCoreMiddlewares to avoid auth checks
@@ -430,10 +463,23 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
     err = new BadRequestError(MENSAJE_AFILIACION_EN_VARIOS_SLOTS, AFILIACION_EN_VARIOS_SLOTS)
   }
 
+  // Plan 5 (D5): el trigger de "Product" rechaza borrar de verdad un producto con ventas. Hoy ninguna ruta llega (los borrados
+  // duros de demo quitan antes las órdenes); si una futura llega, responde 409 con su mensaje, nunca un 500 anónimo.
+  if (esProductoConVentas(err)) {
+    err = new ConflictError(MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  }
+
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }
 
+  if (bodyParseError.status === 413 && bodyParseError.type === 'entity.too.large') {
+    logger.warn(`Request body exceeds size limit, CorrelationID: ${correlationId}`, { statusCode: 413, correlationId })
+    return res.status(413).json({ message: 'La solicitud excede el tamaño máximo permitido.', code: 'PAYLOAD_TOO_LARGE' })
+  }
+
   if (isJsonBodyParseError(bodyParseError)) {
-    logger.warn(`Invalid JSON body: ${bodyParseError.message}, CorrelationID: ${correlationId}`, {
+    // 5a: nunca el mensaje del parser: V8 copia un pedazo del cuerpo (un secret sin comillas, una contraseña) y aquí terminaba en el
+    // log. El nombre del error, el status, el correlationId y la ruta (ya saneada) bastan para buscarlo.
+    logger.warn(`Invalid JSON body, CorrelationID: ${correlationId}`, {
       name: bodyParseError.name,
       statusCode: 400,
       correlationId,
@@ -448,6 +494,21 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
       message: 'JSON inválido en el cuerpo de la solicitud.',
       ...(NODE_ENV === 'development' && { errorName: bodyParseError.name }),
     })
+  }
+
+  // Tarjetas de regalo: el POS muestra `message` tal cual y decide por `code`. Los datos extra («quedan $X», el tope)
+  // van al MISMO nivel (contrato del índice) y TAMBIÉN en `details` (A2: `GiftCardError` extiende `AppError` con el extra
+  // en `details`). Va antes de la rama de `AppError`, que sólo los pondría en `details`; nunca pisan `message` ni `code`.
+  if (err instanceof GiftCardError) {
+    logger.warn(`GiftCardError ${err.code}: ${err.message}, StatusCode: ${err.statusCode}, CorrelationID: ${correlationId}`, {
+      code: err.code,
+      statusCode: err.statusCode,
+      correlationId,
+      request: { method: req.method, url: redactUrlSecrets(req.originalUrl), ip: req.ip },
+    })
+    const extra =
+      err.details && typeof err.details === 'object' && !Array.isArray(err.details) ? (err.details as Record<string, unknown>) : undefined
+    return res.status(err.statusCode).json({ ...(extra ?? {}), message: err.message, code: err.code, ...(extra ? { details: extra } : {}) })
   }
 
   if (err instanceof AppError) {

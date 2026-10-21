@@ -218,6 +218,25 @@ describe('processHeartbeat — unknown terminal', () => {
 })
 
 describe('processHeartbeat — known terminal (regression)', () => {
+  it.each(['2026-10-01T21:05:00.000Z', '2026-10-01T20:55:00.000Z', 'invalid'])(
+    'records server contact time despite device timestamp %s',
+    async timestamp => {
+      const now = new Date('2026-10-01T21:00:00.000Z')
+      jest.useFakeTimers().setSystemTime(now)
+      mockedFindUnique.mockResolvedValue({ id: 'term-1', venueId: 'venue-1', status: 'ACTIVE' })
+      ;(prisma.terminal.update as jest.Mock).mockResolvedValue({ id: 'term-1', venueId: 'venue-1' })
+
+      try {
+        await tpvHealthService.processHeartbeat({ ...heartbeat('term-1'), timestamp })
+        expect(prisma.terminal.update).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ lastHeartbeat: now }) }),
+        )
+      } finally {
+        jest.useRealTimers()
+      }
+    },
+  )
+
   it('does not emit the unknown-terminal warning when the serial resolves', async () => {
     mockedFindUnique.mockResolvedValue(null)
     mockedFindFirst.mockResolvedValueOnce({

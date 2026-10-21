@@ -7,6 +7,8 @@ import { BadRequestError, InternalServerError, NotFoundError } from '../../error
 import { ReceiptDataSnapshot } from '../../schemas/dashboard/receipt.schema'
 import logger from '@/config/logger'
 import emailService from '../email.service'
+import { contarCobrosDeVenta, ticketTotals, ticketTotalsDelSnapshot, ticketTotalsSinDesglose } from '../shared/ticketTotals'
+import { ORDEN_RECIBO_CANONICO, reciboCanonicoDelPago } from '../shared/reciboCanonico'
 
 // Main function to generate and store a digital receipt
 export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt>
@@ -46,9 +48,8 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
   }
 
   // Check if a digital receipt already exists for this payment
-  const existingReceipt = await prisma.digitalReceipt.findFirst({
-    where: { paymentId },
-  })
+  // r4 R4-A1: el recibo canónico (el más viejo por (createdAt, id)), el mismo que el TPV, el POS y el móvil.
+  const existingReceipt = await reciboCanonicoDelPago(prisma, paymentId)
 
   if (existingReceipt) {
     // Update recipient email if provided and different
@@ -214,6 +215,12 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
           email: (customer as any).email || undefined,
         }
       : undefined,
+    // IVA por producto, plan 7 (D3; r2 R2-10): congelado al crear el recibo, del MISMO cobro y la MISMA orden que el resto del snapshot.
+    ticketTotals: ticketTotals({
+      payment: { amount: payment.amount, tipAmount: payment.tipAmount, type: payment.type, status: payment.status },
+      order,
+      cobrosDeVenta: await contarCobrosDeVenta(prisma, payment.orderId),
+    }),
   }
 
   // Create digital receipt
@@ -262,12 +269,13 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
         })
       : undefined
 
-    // Calculate total with fallbacks for older receipts
-    const subtotal = order.subtotal || 0
-    const taxAmount = order.taxAmount || 0
-    const tipAmount = payment.tipAmount || 0
-    // Use payment.totalAmount if available, otherwise calculate from order.total + tip, or from components
-    const totalAmount = payment.totalAmount || order.total + tipAmount || subtotal + taxAmount + tipAmount || payment.amount + tipAmount
+    // IVA por producto, plan 7 (D3; r1 #4): los totales del comprobante de ESTE cobro, tal como se congelaron. Un recibo viejo
+    // (sin totales congelados) cae al total del cobro guardado, sin desglose: nunca al subtotal o al total de toda la orden, que en
+    // un cobro parcial mentían, ni al cobro vivo (`receipt.payment`), que pudo corregirse después de emitir el recibo.
+    const congelados = ticketTotalsDelSnapshot(dataSnapshot)
+    // Inalcanzable hoy (0 de 18,815 recibos sin el cobro en su snapshot), pero si pasa, que se vea (revisión T3 m2).
+    if (!congelados) logger.warn('Correo del recibo sin el cobro en su snapshot: los totales salen en $0', { receiptId: receipt.id })
+    const totales = congelados ?? ticketTotalsSinDesglose({ amount: 0, tipAmount: 0 })
 
     // Send actual email using the email service with full receipt data
     const emailSent = await emailService.sendReceiptEmail(receipt.recipientEmail, {
@@ -286,11 +294,15 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
       orderNumber: order.number?.toString() || undefined,
       // Order items
       items: order.items || [],
-      // Totals
-      subtotal,
-      taxAmount,
-      tipAmount,
-      totalAmount,
+      // Totals (IVA por producto, plan 7): misma regla de cuadre que el ticket (subtotal − descuento + cargo + IVA + propina = total)
+      subtotal: totales.subtotal,
+      discountAmount: totales.discount,
+      serviceChargeAmount: totales.serviceCharge,
+      taxAmount: totales.addedTax,
+      tipAmount: totales.tip,
+      totalAmount: totales.total,
+      leyendaIva: totales.addedTax === 0,
+      esDevolucion: totales.kind === 'DEVOLUCION',
       // Payment info
       paymentMethod: payment.method,
       paymentDate,
@@ -330,6 +342,7 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
 export async function getReceiptsByPaymentId(paymentId: string): Promise<DigitalReceipt[]> {
   const receipts = await prisma.digitalReceipt.findMany({
     where: { paymentId },
+    orderBy: ORDEN_RECIBO_CANONICO,
   })
 
   if (!receipts) {

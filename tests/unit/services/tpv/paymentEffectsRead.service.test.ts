@@ -50,3 +50,14 @@ it('un motivo interno desconocido sigue saliendo como PAYMENT_EFFECT_REQUIRES_RE
   const r = await listPaymentEffects({ venueId: 'v1' })
   expect(r.items[0].lastError).toBe('PAYMENT_EFFECT_REQUIRES_REVIEW')
 })
+
+it.each([
+  // Ronda 2 de A3: el reverso de una comisión que espera a su comisión original se resuelve solo; vencidas 24 h, hay que
+  // revisar el efecto de comisión del cobro original. Los dos se nombran tal cual.
+  'COMMISSION_AWAITS_ORIGINAL',
+  'COMMISSION_AWAITS_ORIGINAL_OVERDUE',
+])('%s (reverso de comisión esperando su original) se muestra tal cual', async motivo => {
+  ;(prismaMock as any).paymentEffect.findMany.mockResolvedValue([fila({ kind: 'COMMISSION', lastError: motivo })])
+  const r = await listPaymentEffects({ venueId: 'v1', kind: 'COMMISSION' })
+  expect(r.items[0].lastError).toBe(motivo)
+})

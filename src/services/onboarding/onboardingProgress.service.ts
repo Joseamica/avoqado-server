@@ -10,6 +10,7 @@ import prisma from '@/utils/prismaClient'
 import { uploadFileToStorage, buildStoragePath } from '@/services/storage.service'
 import { sendKycDocumentUploadedNotification } from '@/services/resend.service'
 import logger from '@/config/logger'
+import { utcTs } from '@/utils/sqlDates'
 
 // Types
 export interface OnboardingStepData {
@@ -280,21 +281,12 @@ export async function updateOnboardingStep(organizationId: string, stepNumber: n
   // Get current progress
   const progress = await getOrCreateOnboardingProgress(organizationId)
 
-  // Parse completed steps (stored as JSON array)
-  const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]) : []
-
-  // Add step to completed if not already there
-  if (!completedSteps.includes(stepNumber)) {
-    completedSteps.push(stepNumber)
-  }
-
   // Determine next step
   const nextStep = stepNumber + 1
 
   // Build update data
   const updateData: Prisma.OnboardingProgressUpdateInput = {
     currentStep: nextStep,
-    completedSteps: completedSteps as unknown as Prisma.InputJsonValue,
     updatedAt: new Date(),
   }
 
@@ -324,10 +316,11 @@ export async function updateOnboardingStep(organizationId: string, stepNumber: n
     updateData.step8_paymentInfo = stepData.step8_paymentInfo as unknown as Prisma.InputJsonValue
   }
 
-  // Update progress
-  const updatedProgress = await prisma.onboardingProgress.update({
-    where: { organizationId },
-    data: updateData,
+  // Update progress. El paso se marca hecho sobre la lista VIGENTE (`conPasoHecho`), no sobre la copia leída arriba.
+  const updatedProgress = await prisma.$transaction(async tx => {
+    await tx.onboardingProgress.update({ where: { organizationId }, data: updateData })
+    await tx.$executeRaw`UPDATE "OnboardingProgress" SET "completedSteps" = ${conPasoHecho(stepNumber)} WHERE "organizationId" = ${organizationId}`
+    return tx.onboardingProgress.findUniqueOrThrow({ where: { organizationId } })
   })
 
   return updatedProgress
@@ -525,35 +518,61 @@ export async function uploadKycDocument(
 // =============================================
 
 /**
- * Saves a V2 setup wizard step data
- * Stores all step data in the v2SetupData JSON field
+ * `completedSteps` con el paso `n` agregado si falta, calculado por Postgres sobre lo VIGENTE. Copiar la lista leída antes y
+ * escribirla de vuelta borraba un paso que otra pestaña marcó en medio (Codex r1, 20-oct).
+ */
+function conPasoHecho(n: number): Prisma.Sql {
+  return Prisma.sql`CASE
+    WHEN jsonb_typeof("completedSteps") = 'array' AND "completedSteps" @> to_jsonb(${n}::int) THEN "completedSteps"
+    WHEN jsonb_typeof("completedSteps") = 'array' THEN "completedSteps" || to_jsonb(${n}::int)
+    ELSE jsonb_build_array(${n}::int)
+  END`
+}
+
+/**
+ * Escribe en `v2SetupData` SÓLO las secciones que se le dan, en UNA sentencia: nadie lee el JSON entero para reescribirlo.
+ *
+ * Antes, guardar un paso, cerrar el plan y el checklist de cobros leían el formulario completo y lo pegaban encima: si dos
+ * se cruzaban (dos pestañas), la segunda borraba lo de la primera — el caso caro, el plan ya cobrado (20-oct-2026).
+ * - `reemplazar`: la sección queda tal cual (un paso del asistente, el `plan`).
+ * - `fusionarDentro`: se mezcla con lo que la sección ya tiene (el checklist de cobros cambia campos sueltos).
+ * Postgres ejecuta la sentencia con la fila tomada: dos escrituras se aplican una tras otra, cada una sobre lo vigente.
+ */
+export async function fusionarV2SetupData(
+  db: Pick<Prisma.TransactionClient, '$executeRaw'>,
+  organizationId: string,
+  reemplazar: Record<string, unknown>,
+  fusionarDentro: Record<string, Record<string, unknown>> = {},
+): Promise<number> {
+  return db.$executeRaw`
+    UPDATE "OnboardingProgress"
+    SET "v2SetupData" = COALESCE("v2SetupData", '{}'::jsonb) || ${JSON.stringify(reemplazar)}::jsonb || (
+          SELECT COALESCE(jsonb_object_agg(e.key, COALESCE("v2SetupData" -> e.key, '{}'::jsonb) || e.value), '{}'::jsonb)
+          FROM jsonb_each(${JSON.stringify(fusionarDentro)}::jsonb) AS e
+        ),
+        "updatedAt" = ${utcTs(new Date())}
+    WHERE "organizationId" = ${organizationId}`
+}
+
+/**
+ * Guarda un paso del asistente V2 en `v2SetupData.stepN` y lo marca como hecho.
+ *
+ * 🔴 Una sola sentencia (ver `fusionarV2SetupData`): leer el formulario y reescribirlo entero borraba lo que otra pestaña
+ * —o el cierre del plan— había guardado en medio. `completedSteps` se agrega en la misma sentencia por la misma razón.
  */
 export async function saveV2StepData(organizationId: string, stepNumber: number, stepData: Record<string, any>) {
-  const progress = await getOrCreateOnboardingProgress(organizationId)
+  await getOrCreateOnboardingProgress(organizationId)
 
-  // Merge new step data into existing v2SetupData
-  const currentData = (progress.v2SetupData as Record<string, any>) || {}
-  const updatedData = {
-    ...currentData,
-    [`step${stepNumber}`]: stepData,
-  }
-
-  // Parse completed steps
-  const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]) : []
-  if (!completedSteps.includes(stepNumber)) {
-    completedSteps.push(stepNumber)
-  }
-
-  const updated = await prisma.onboardingProgress.update({
-    where: { organizationId },
-    data: {
-      wizardVersion: 2,
-      v2SetupData: updatedData as any,
-      currentStep: stepNumber + 1,
-      completedSteps: completedSteps as any,
-      updatedAt: new Date(),
-    },
-  })
+  const paso = `step${stepNumber}`
+  await prisma.$executeRaw`
+    UPDATE "OnboardingProgress"
+    SET "v2SetupData" = COALESCE("v2SetupData", '{}'::jsonb) || jsonb_build_object(${paso}::text, ${JSON.stringify(stepData)}::jsonb),
+        "completedSteps" = ${conPasoHecho(stepNumber)},
+        "wizardVersion" = 2,
+        "currentStep" = ${stepNumber + 1},
+        "updatedAt" = ${utcTs(new Date())}
+    WHERE "organizationId" = ${organizationId}`
+  const updated = await prisma.onboardingProgress.findUniqueOrThrow({ where: { organizationId } })
 
   // Side effects: update org name from step 2 (business info)
   if (stepNumber === 2 && stepData.businessName) {
@@ -589,29 +608,26 @@ export async function saveV2StepData(organizationId: string, stepNumber: number,
 export async function acceptV2Terms(organizationId: string, termsVersion: string, ipAddress: string) {
   const now = new Date()
 
-  const progress = await getOrCreateOnboardingProgress(organizationId)
+  await getOrCreateOnboardingProgress(organizationId)
 
-  // Mark terms (step 6) as completed and advance pointer to bank account (step 7).
-  const completedSteps = Array.isArray(progress.completedSteps) ? (progress.completedSteps as number[]) : []
-  if (!completedSteps.includes(6)) {
-    completedSteps.push(6)
-  }
-
-  const updated = await prisma.onboardingProgress.update({
-    where: { organizationId },
-    data: {
-      wizardVersion: 2,
-      termsAcceptedAt: now,
-      privacyAcceptedAt: now,
-      termsVersion,
-      termsIpAddress: ipAddress,
-      currentStep: 7,
-      completedSteps: completedSteps as any,
-      updatedAt: new Date(),
-    },
+  // Mark terms (step 6) as completed and advance pointer to bank account (step 7). El paso 6 se agrega sobre la lista
+  // VIGENTE (`conPasoHecho`), en la misma transacción que el resto: copiar la lista leída borraba un paso de otra pestaña.
+  return prisma.$transaction(async tx => {
+    await tx.onboardingProgress.update({
+      where: { organizationId },
+      data: {
+        wizardVersion: 2,
+        termsAcceptedAt: now,
+        privacyAcceptedAt: now,
+        termsVersion,
+        termsIpAddress: ipAddress,
+        currentStep: 7,
+        updatedAt: new Date(),
+      },
+    })
+    await tx.$executeRaw`UPDATE "OnboardingProgress" SET "completedSteps" = ${conPasoHecho(6)} WHERE "organizationId" = ${organizationId}`
+    return tx.onboardingProgress.findUniqueOrThrow({ where: { organizationId } })
   })
-
-  return updated
 }
 
 /**

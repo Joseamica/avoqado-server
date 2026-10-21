@@ -15,25 +15,41 @@ type ProductMutation =
   | 'sqlDelete'
 
 const EXPECTED_WRITES: Record<string, Partial<Record<ProductMutation, number>>> = {
-  'src/controllers/mobile/product.mobile.controller.ts': { create: 1, update: 2 },
+  'src/controllers/mobile/product.mobile.controller.ts': { create: 1, update: 1 },
   'src/routes/tpv.routes.ts': { create: 1 },
   'src/services/cleanup/liveDemoCleanup.service.ts': { deleteMany: 1 },
-  'src/services/dashboard/menu.dashboard.service.ts': { create: 1, update: 1, updateMany: 3, deleteMany: 1 },
+  // Conector Shopify (plan v2 B1): alta y restauración con el candado en su transacción; edición sin `active`.
+  'src/services/commerce-channels/shopify/shopify.catalog.service.ts': { create: 1, update: 2 },
+  // WHY (plan 5, D2): replace archives through archivarProductos; no product deleteMany left here.
+  // Bloque 5 (V8): el 2.º update deja a cada talla que crea el import igual que un re-import, detrás del cerco CREATE.
+  'src/services/dashboard/menu.dashboard.service.ts': { create: 1, update: 2, updateMany: 3 },
   'src/services/dashboard/pricing.service.ts': { update: 1 },
   'src/services/dashboard/printStation.dashboard.service.ts': { updateMany: 1 },
-  'src/services/dashboard/product.dashboard.service.ts': { create: 2, update: 2, updateMany: 1 },
+  // WHY (plan 5): deleteProduct archiva por archivarProductos (updateMany con active:false), ya no por un update propio.
+  // create: 1 desde el 29-sep: se borró `createQuickAddProduct` (sin llamadores; el alta rápida real vive en tpv.routes.ts).
+  'src/services/dashboard/product.dashboard.service.ts': { create: 1, update: 1, updateMany: 2 },
   'src/services/dashboard/productInventory.service.ts': { update: 1 },
   'src/services/dashboard/productInventoryIntegration.service.ts': { update: 1 },
   'src/services/dashboard/productWizard.service.ts': { create: 1, update: 5, delete: 1 },
   'src/services/dashboard/venue.dashboard.service.ts': { deleteMany: 1 },
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': { create: 1 },
+  // WHY: flag-only write on rows already FOR NO KEY UPDATE-locked; never `active` nor a catalog-governed field.
+  'src/services/delivery-channels/core/deliveryReconciliation.service.ts': { sqlUpdate: 1 },
   'src/services/master-catalog/catalogBindingProductWriter.service.ts': { create: 1 },
   'src/services/master-catalog/catalogPublicationActivation.service.ts': { updateMany: 1 },
   'src/services/master-catalog/catalogPublicationPersistence.service.ts': { sqlUpdate: 1 },
   'src/services/onboarding/demoCleanup.service.ts': { deleteMany: 1 },
   'src/services/onboarding/demoSeed.service.ts': { create: 1, update: 2 },
   'src/services/onboarding/venueCreation.service.ts': { create: 1 },
+  // Pedidos en línea (plan 1a): marcar/desmarcar platillos para la tienda. Sólo `availableOnline`, nunca `active`.
+  'src/services/online-ordering/menuAvailability.service.ts': { updateMany: 1 },
   'src/services/pos-sync/posSyncOrderItem.service.ts': { upsert: 1 },
+  // Variantes (spec 2026-10-14): el motor único escribe las copias del padre (alta, edición, agregar/renombrar/foto) tras el
+  // cerco del catálogo; archivar y separar sólo apagan o sacan de la familia (nunca activan).
+  'src/services/product-variants/productGroup.service.ts': { create: 1, update: 4, updateMany: 3 },
+  // Escritores con tx del bloque 5 (sumar productos que ya existen a una familia: agrupar, «Desde Shopify», import). Corren tras
+  // el cerco del catálogo que tomó su llamador; nunca tocan `active`. groupExisting.service ya escribe a través de éste.
+  'src/services/product-variants/groupWriterTx.ts': { update: 1 },
   'src/services/upsell/upsell.service.ts': { updateMany: 1 },
 }
 
@@ -95,6 +111,15 @@ const GOVERNED_WRITERS: Array<{ path: string; markers: string[] }> = [
       'assertLegacyCatalogGovernanceForVenue',
       "servicePrincipalId: 'DELIVERY_INGESTION'",
       'active: false',
+      'createdById: null',
+      'writeLegacyServiceProductCreationAuditForVenue',
+    ],
+  },
+  {
+    path: 'src/services/commerce-channels/shopify/shopify.catalog.service.ts',
+    markers: [
+      'assertLegacyCatalogGovernanceForVenue',
+      'SHOPIFY_SERVICE_ACTOR',
       'createdById: null',
       'writeLegacyServiceProductCreationAuditForVenue',
     ],

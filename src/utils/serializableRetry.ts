@@ -7,6 +7,8 @@ const RETRY_SQLSTATES = new Set(['40001', '55P03'])
 
 export interface SerializableRetryOptions {
   timeoutMs?: number
+  /** Optional interactive-transaction admission wait; omitted preserves Prisma's default. */
+  maxWaitMs?: number
   /** Total transaction attempts, including the initial attempt. */
   maxRetries?: number
   baseDelayMs?: number
@@ -16,6 +18,16 @@ function nestedCode(error: Record<string, unknown>): string | undefined {
   const meta = error.meta && typeof error.meta === 'object' ? (error.meta as Record<string, unknown>) : undefined
   const cause = error.cause && typeof error.cause === 'object' ? (error.cause as Record<string, unknown>) : undefined
   return [meta?.code, meta?.sqlState, cause?.code].find(value => typeof value === 'string') as string | undefined
+}
+
+/**
+ * Fallo de serialización: P2034 de Prisma, o el 40001 de Postgres directo o envuelto en P2010 (consulta cruda: un `FOR SHARE`
+ * en SERIALIZABLE sobre una fila que otro cambió después de la foto). Sin 55P03 ni 40P01: ésos los ven las funciones de al lado.
+ */
+export function isSerializationFailure(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as Record<string, unknown>
+  return value.code === 'P2034' || value.code === '40001' || (value.code === 'P2010' && nestedCode(value) === '40001')
 }
 
 export function isRetryableDbError(error: unknown): boolean {
@@ -28,6 +40,29 @@ export function isRetryableDbError(error: unknown): boolean {
   return value.code === 'P2010' && RETRY_SQLSTATES.has(nestedCode(value) ?? '')
 }
 
+/**
+ * Bloqueo mutuo (40P01): directo, envuelto en P2010 o —en una consulta de MODELO— como `PrismaClientUnknownRequestError` con el
+ * SQLSTATE sólo en el mensaje (Prisma 6.19.3 sólo traduce 40001; la misma forma que el 55P03 de `isModelLockTimeoutError`).
+ * Quien lo reintente lo decide él; aquí no se reintenta. El catálogo NO lo reintenta (R10, T4-R1): no usa esta función.
+ */
+export function isDeadlockError(error: unknown): boolean {
+  if (!error || typeof error !== 'object') return false
+  const value = error as Record<string, unknown>
+  if (value.code === '40P01') return true
+  if (value.code === 'P2010' && nestedCode(value) === '40P01') return true
+  return error instanceof Prisma.PrismaClientUnknownRequestError && error.message.includes('PostgresError { code: "40P01"')
+}
+
+/**
+ * `lock_timeout` vencido (55P03) en una consulta de MODELO. Prisma 6.19 no le da código: llega como
+ * `PrismaClientUnknownRequestError` sin `code` ni `meta`, y el SQLSTATE sólo viaja en el `QueryError(PostgresError { code:
+ * "55P03", … })` del mensaje (medido el 2026-09-28 con el INSERT de JournalLine y el upsert de AccountingPeriodLock). En una
+ * consulta cruda (P2010) o como código directo ya lo reconoce `isRetryableDbError`. Quien lo reintente lo decide él.
+ */
+export function isModelLockTimeoutError(error: unknown): boolean {
+  return error instanceof Prisma.PrismaClientUnknownRequestError && error.message.includes('PostgresError { code: "55P03"')
+}
+
 function validateOptions(timeoutMs: number, maxRetries: number, baseDelayMs: number): void {
   if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) throw new RangeError('timeoutMs must be greater than zero')
   if (!Number.isInteger(maxRetries) || maxRetries < 1) throw new RangeError('maxRetries must be a positive integer')
@@ -38,14 +73,17 @@ export async function withSerializableRetry<T>(
   fn: (tx: Prisma.TransactionClient) => Promise<T>,
   options: SerializableRetryOptions = {},
 ): Promise<T> {
-  const { timeoutMs = 10_000, maxRetries = 5, baseDelayMs = 50 } = options
+  const { timeoutMs = 10_000, maxWaitMs, maxRetries = 5, baseDelayMs = 50 } = options
   validateOptions(timeoutMs, maxRetries, baseDelayMs)
+  if (maxWaitMs !== undefined && (!Number.isFinite(maxWaitMs) || maxWaitMs <= 0))
+    throw new RangeError('maxWaitMs must be greater than zero')
 
   for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
     try {
       return await prisma.$transaction(fn, {
         isolationLevel: Prisma.TransactionIsolationLevel.Serializable,
         timeout: timeoutMs,
+        ...(maxWaitMs === undefined ? {} : { maxWait: maxWaitMs }),
       })
     } catch (error) {
       if (!isRetryableDbError(error)) throw error

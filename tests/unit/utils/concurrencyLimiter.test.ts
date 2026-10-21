@@ -1,4 +1,4 @@
-import { ConcurrencyLimiter, analyticsLimiter } from '@/utils/concurrencyLimiter'
+import { ConcurrencyLimiter, ESTADOS_DE_RESULTADOS_A_LA_VEZ, analyticsLimiter, enParaleloAcotado } from '@/utils/concurrencyLimiter'
 
 const tick = () => new Promise<void>(resolve => setTimeout(resolve, 0))
 
@@ -142,5 +142,54 @@ describe('ConcurrencyLimiter', () => {
   it('exports a working shared analyticsLimiter', async () => {
     expect(analyticsLimiter).toBeInstanceOf(ConcurrencyLimiter)
     await expect(analyticsLimiter.run(async () => 'alive')).resolves.toBe('alive')
+  })
+})
+
+describe('enParaleloAcotado (B4b · Codex r5 R5-9: los estados de resultados de un RFC, de dos en dos)', () => {
+  it('🔴 conserva el orden y nunca corre más de `limite` a la vez', async () => {
+    const pendientes = Array.from({ length: 5 }, () => deferred<number>())
+    let enCurso = 0
+    let maximo = 0
+    const todo = enParaleloAcotado([0, 1, 2, 3, 4], ESTADOS_DE_RESULTADOS_A_LA_VEZ, async i => {
+      enCurso += 1
+      maximo = Math.max(maximo, enCurso)
+      const r = await pendientes[i].promise
+      enCurso -= 1
+      return r
+    })
+    for (const [i, d] of [...pendientes.entries()].reverse()) {
+      await tick()
+      d.resolve(i * 10)
+    }
+    await expect(todo).resolves.toEqual([0, 10, 20, 30, 40])
+    expect(maximo).toBe(2)
+    expect(ESTADOS_DE_RESULTADOS_A_LA_VEZ).toBe(2)
+  })
+
+  it('🔴 si uno falla, rechaza con su error y no arranca ninguno más', async () => {
+    const arrancados: number[] = []
+    const todo = enParaleloAcotado([0, 1, 2, 3, 4], 2, async i => {
+      arrancados.push(i)
+      if (i === 0) throw new Error('falló el local 0')
+      await tick()
+      return i
+    })
+    await expect(todo).rejects.toThrow('falló el local 0')
+    await tick()
+    await tick()
+    expect(arrancados).toEqual([0, 1]) // el 1 ya corría; del 2 en adelante, nadie
+  })
+
+  it.each([0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY])(
+    '🔴 T6 M2 (revisión final) · un límite que no es un entero ≥ 1 (%p) se rechaza sin correr nada: nunca un arreglo con huecos ($0 en silencio)',
+    async limite => {
+      const fn = jest.fn(async (i: number) => i)
+      await expect(enParaleloAcotado([1, 2, 3], limite, fn)).rejects.toThrow(RangeError)
+      expect(fn).not.toHaveBeenCalled()
+    },
+  )
+
+  it('control · con límite 1 corre uno tras otro y devuelve todo', async () => {
+    await expect(enParaleloAcotado([1, 2, 3], 1, async i => i * 2)).resolves.toEqual([2, 4, 6])
   })
 })

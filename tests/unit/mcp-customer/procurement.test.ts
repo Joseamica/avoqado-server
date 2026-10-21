@@ -17,7 +17,12 @@ const mockGetPurchaseOrders = jest.fn()
 const mockGetPurchaseOrder = jest.fn()
 const mockPlanGate = jest.fn()
 
-jest.mock('@/services/dashboard/supplier.service', () => ({ getSuppliers: (...a: unknown[]) => mockGetSuppliers(...(a as [])) }))
+jest.mock('@/services/dashboard/supplier.service', () => ({
+  getSuppliersPage: async (...a: unknown[]) => {
+    const rows = await mockGetSuppliers(...(a as []))
+    return { rows, total: rows.length }
+  },
+}))
 jest.mock('@/services/dashboard/purchaseOrder.service', () => ({
   getPurchaseOrders: (...a: unknown[]) => mockGetPurchaseOrders(...(a as [])),
   getPurchaseOrder: (...a: unknown[]) => mockGetPurchaseOrder(...(a as [])),
@@ -73,14 +78,14 @@ describe('list_suppliers (read, PREMIUM-gated)', () => {
       },
     ])
     const out = parse(await call('list_suppliers', { venueId: 'v1' }))
-    expect(mockGetSuppliers).toHaveBeenCalledWith('v1', { active: true })
+    expect(mockGetSuppliers).toHaveBeenCalledWith('v1', { active: true }, { limit: 50, offset: 0 })
     expect(out.suppliers[0]).toMatchObject({ id: 'sup1', name: 'Bimbo', rating: 4.5, leadTimeDays: 2, minimumOrder: 500, active: true })
   })
 
   it('includeInactive drops the active filter; search is forwarded', async () => {
     mockGetSuppliers.mockResolvedValueOnce([])
     await call('list_suppliers', { venueId: 'v1', includeInactive: true, search: 'bim' })
-    expect(mockGetSuppliers).toHaveBeenCalledWith('v1', { search: 'bim' })
+    expect(mockGetSuppliers).toHaveBeenCalledWith('v1', { search: 'bim' }, { limit: 50, offset: 0 })
   })
 })
 

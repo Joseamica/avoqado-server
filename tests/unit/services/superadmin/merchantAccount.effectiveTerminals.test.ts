@@ -81,6 +81,21 @@ describe('resolveEffectiveTerminals — explicit ∪ venue-slot inheritance', ()
     expect(result['M']).toHaveLength(1)
   })
 
+  // La Galeterie (30-sep): el comercio salía con «4 terminales» — la PAX más 3 celulares/tablets con la app POS
+  // (POS_ANDROID, auto-registrados), que no cobran con tarjeta. Sólo una terminal de COBRO hereda el comercio del venue.
+  it('inheritance only considers payment terminals (TPV_*), never POS devices', async () => {
+    mockedPrisma.terminal.findMany.mockResolvedValue([])
+
+    await resolveEffectiveTerminals(new Map([['M', ['V1']]]))
+
+    const { where } = mockedPrisma.terminal.findMany.mock.calls[0][0]
+    const inheritedBranch = where.OR.find((b: any) => b.assignedMerchantIds?.isEmpty === true)
+    expect(inheritedBranch.type).toEqual({ in: ['TPV_ANDROID', 'TPV_IOS'] })
+    // la asignación explícita no se filtra por tipo: refleja el dato tal cual
+    const explicitBranch = where.OR.find((b: any) => b.assignedMerchantIds?.hasSome)
+    expect(explicitBranch.type).toBeUndefined()
+  })
+
   it('returns {} and skips the DB entirely when no merchants are given', async () => {
     const result = await resolveEffectiveTerminals(new Map())
 

@@ -1,11 +1,16 @@
 import { Product, Prisma, ProductType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
-import AppError from '../../errors/AppError'
+import AppError, { ConflictError } from '../../errors/AppError'
 import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
-import { ensureQuantityInventoryRow } from './quantityInventoryRow'
+import {
+  ensureQuantityInventoryRow,
+  inventoryMethodForNewProduct,
+  isNonInventoriable,
+  NON_INVENTORIABLE_MESSAGE,
+} from './quantityInventoryRow'
 import { areUnitsCompatible, convertUnit } from '../../utils/unitConversion'
 import type { CatalogActor } from '../../types/master-catalog'
 import {
@@ -14,6 +19,15 @@ import {
   assertLegacyCatalogProductUpdateGovernance,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
+import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
+import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { encenderBajoCandados, prepararEncendido, registrarCambioDeIva, type OrigenIva } from '../fiscal/encendidoIva.service'
+import type { IvaTratamiento } from '../fiscal/ivaTratamiento'
+import { isRetryableDbError } from '../../utils/serializableRetry'
+import { ajustarParejaAlProducto } from '../commerce-channels/shopify/shopify.store.service'
+import { productGroupInclude, withVariantFields } from '../product-variants/variantPayload'
+import { assertLooseProductForModifiers, assertNoGroupOwnedChanges } from '../product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
 
 export interface CreateProductDto {
   name: string
@@ -64,9 +78,18 @@ export interface CreateProductDto {
   satProductKey?: string | null
   satUnitKey?: string | null
   objetoImp?: '01' | '02' | '03' | '04'
+  // IVA por producto: el único valor que se escribe (ver normalizarIvaDeProducto).
+  // `taxRate` sigue existiendo aquí sólo para que un cliente viejo (que aún manda la
+  // tasa cruda) pueda seguir siendo interpretado — nunca se escribe directo a la BD.
+  taxRate?: number
+  ivaTratamiento?: string
 
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
+
+  // Inventario (el esquema de alta ya los acepta; mismos tipos que UpdateProductDto)
+  trackInventory?: boolean
+  inventoryMethod?: 'QUANTITY' | 'RECIPE' | null
 }
 
 export interface UpdateProductDto {
@@ -123,6 +146,9 @@ export interface UpdateProductDto {
   satProductKey?: string | null
   satUnitKey?: string | null
   objetoImp?: '01' | '02' | '03' | '04'
+  // IVA por producto: ver el comentario homólogo en CreateProductDto.
+  taxRate?: number
+  ivaTratamiento?: string
 
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
@@ -131,14 +157,6 @@ export interface UpdateProductDto {
 export interface ReorderProductsDto {
   id: string
   displayOrder: number
-}
-
-export interface QuickAddProductDto {
-  barcode: string
-  name: string
-  price: number
-  categoryId?: string
-  trackInventory?: boolean
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -457,6 +475,7 @@ export async function getProducts(
     include: {
       category: true,
       inventory: true, // ✅ For QUANTITY tracking
+      ...productGroupInclude, // Variantes: 4 campos opcionales del contrato (nunca `variants`)
       ...(includeModifiers && {
         modifierGroups: {
           include: {
@@ -501,7 +520,8 @@ export async function getProducts(
 
   // availableQuantity needs the recipe tree — only compute it when recipe was loaded. Light callers
   // (includeRecipe:false) don't use availableQuantity, so we skip the per-product availability work.
-  return includeRecipe ? products.map(product => ({ ...product, ...computeInventoryAvailability(product) })) : products
+  const salida = includeRecipe ? products.map(product => ({ ...product, ...computeInventoryAvailability(product) })) : products
+  return salida.map(withVariantFields)
 }
 
 /**
@@ -520,6 +540,7 @@ export async function getProduct(venueId: string, productId: string): Promise<an
     include: {
       category: true,
       inventory: true, // ✅ For QUANTITY tracking
+      ...productGroupInclude,
       modifierGroups: {
         include: {
           group: {
@@ -559,10 +580,10 @@ export async function getProduct(venueId: string, productId: string): Promise<an
   }
 
   // ✅ Calculate availableQuantity + ingredient shortage (Toast POS pattern)
-  return {
+  return withVariantFields({
     ...product,
     ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
-  }
+  })
 }
 
 /**
@@ -585,9 +606,13 @@ export async function createProduct(venueId: string, productData: CreateProductD
     }
   }>
 
+  // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco del negocio.
+  const traeIva = [productFields.ivaTratamiento, productFields.taxRate, productFields.objetoImp].some(v => v !== undefined && v !== null)
+
   const createProductInTransaction = async (): Promise<CreatedProductWithRelations> =>
     prisma.$transaction(
       async tx => {
+        if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
         await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
         await assertLegacyProductReferencesForVenue(tx, {
           venueId,
@@ -602,83 +627,117 @@ export async function createProduct(venueId: string, productData: CreateProductD
 
         const displayOrder = (maxOrder?.displayOrder || 0) + 1
 
-        const product = await tx.product.create({
-          data: {
-            // Basic fields
-            name: productFields.name,
-            description: productFields.description,
-            price: productFields.price,
-            type: productFields.type,
-            imageUrl: productFields.imageUrl,
-            sku: productFields.sku,
-            gtin: productFields.gtin,
-            categoryId: productFields.categoryId,
-            printStationId: productFields.printStationId ?? null,
-            venueId,
-            createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-            displayOrder,
-            active: true,
+        // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
+        // directo) — el trigger de Product deriva la tupla. `actual = null` porque el
+        // producto todavía no existe.
+        const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
 
-            // ═══════════════════════════════════════════════════════════════
-            // Square-aligned contextual fields
-            // ═══════════════════════════════════════════════════════════════
-            isAlcoholic: productFields.isAlcoholic ?? false,
-            kitchenName: productFields.kitchenName,
-            abbreviation: productFields.abbreviation,
-            duration: productFields.duration,
-            bufferAfterMin: productFields.bufferAfterMin,
+        let product: CreatedProductWithRelations
+        try {
+          product = await tx.product.create({
+            data: {
+              // Basic fields
+              name: productFields.name,
+              description: productFields.description,
+              price: productFields.price,
+              type: productFields.type,
+              imageUrl: productFields.imageUrl,
+              sku: productFields.sku,
+              gtin: productFields.gtin,
+              categoryId: productFields.categoryId,
+              printStationId: productFields.printStationId ?? null,
+              venueId,
+              createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+              displayOrder,
+              active: true,
 
-            // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
-            soldByWeight: productFields.soldByWeight ?? false,
-            ...(productFields.soldByWeight ? { unit: 'KILOGRAM' as const } : {}),
+              // ═══════════════════════════════════════════════════════════════
+              // Square-aligned contextual fields
+              // ═══════════════════════════════════════════════════════════════
+              isAlcoholic: productFields.isAlcoholic ?? false,
+              kitchenName: productFields.kitchenName,
+              abbreviation: productFields.abbreviation,
+              duration: productFields.duration,
+              bufferAfterMin: productFields.bufferAfterMin,
 
-            // Event fields
-            eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
-            eventTime: productFields.eventTime,
-            eventEndTime: productFields.eventEndTime,
-            eventCapacity: productFields.eventCapacity,
-            eventLocation: productFields.eventLocation,
+              // Inventario: el esquema lo acepta y antes se tiraba (nacía sin inventario aunque se pidiera).
+              // Sólo viaja si se pidió: sin inventario, el alta queda idéntica (contrato H1A congelado).
+              ...(productFields.trackInventory === true && {
+                trackInventory: true,
+                inventoryMethod: inventoryMethodForNewProduct(true, productFields.inventoryMethod),
+              }),
 
-            // Digital fields
-            downloadUrl: productFields.downloadUrl,
-            downloadLimit: productFields.downloadLimit,
-            fileSize: productFields.fileSize,
+              // Venta por peso: price is the price PER KG; unit pinned to KILOGRAM.
+              soldByWeight: productFields.soldByWeight ?? false,
+              ...(productFields.soldByWeight ? { unit: 'KILOGRAM' as const } : {}),
 
-            // Donation fields
-            suggestedAmounts: productFields.suggestedAmounts,
-            allowCustomAmount: productFields.allowCustomAmount ?? true,
-            donationCause: productFields.donationCause,
+              // Event fields
+              eventDate: productFields.eventDate ? new Date(productFields.eventDate) : undefined,
+              eventTime: productFields.eventTime,
+              eventEndTime: productFields.eventEndTime,
+              eventCapacity: productFields.eventCapacity,
+              eventLocation: productFields.eventLocation,
 
-            // Credit Packs
-            allowCreditRedemption: productFields.allowCreditRedemption ?? true,
-            requireCreditForBooking: productFields.requireCreditForBooking ?? false,
+              // Digital fields
+              downloadUrl: productFields.downloadUrl,
+              downloadLimit: productFields.downloadLimit,
+              fileSize: productFields.fileSize,
 
-            // General-purpose duration
-            durationMinutes: productFields.durationMinutes,
+              // Donation fields
+              suggestedAmounts: productFields.suggestedAmounts,
+              allowCustomAmount: productFields.allowCustomAmount ?? true,
+              donationCause: productFields.donationCause,
 
-            // Campos fiscales SAT (CFDI 4.0)
-            ...(productFields.satProductKey !== undefined && { satProductKey: productFields.satProductKey }),
-            ...(productFields.satUnitKey !== undefined && { satUnitKey: productFields.satUnitKey }),
-            ...(productFields.objetoImp !== undefined && { objetoImp: productFields.objetoImp }),
+              // Credit Packs
+              allowCreditRedemption: productFields.allowCreditRedemption ?? true,
+              requireCreditForBooking: productFields.requireCreditForBooking ?? false,
 
-            // Modifier groups
-            modifierGroups: modifierGroupIds?.length
-              ? {
-                  create: modifierGroupIds.map((groupId, index) => ({
-                    groupId,
-                    displayOrder: index,
-                  })),
-                }
-              : undefined,
-          },
-          include: {
-            category: true,
-            modifierGroups: {
-              include: {
-                group: true,
+              // General-purpose duration
+              durationMinutes: productFields.durationMinutes,
+
+              // Campos fiscales SAT (CFDI 4.0)
+              ...(productFields.satProductKey !== undefined && { satProductKey: productFields.satProductKey }),
+              ...(productFields.satUnitKey !== undefined && { satUnitKey: productFields.satUnitKey }),
+              ...normalizarIvaDeProducto(
+                { ivaTratamiento: productFields.ivaTratamiento, taxRate: productFields.taxRate, objetoImp: productFields.objetoImp },
+                null,
+                encendido,
+              ),
+
+              // Modifier groups
+              modifierGroups: modifierGroupIds?.length
+                ? {
+                    create: modifierGroupIds.map((groupId, index) => ({
+                      groupId,
+                      displayOrder: index,
+                    })),
+                  }
+                : undefined,
+            },
+            include: {
+              category: true,
+              modifierGroups: {
+                include: {
+                  group: true,
+                },
               },
             },
-          },
+          })
+        } catch (e) {
+          traducirErrorDeIva(e)
+          throw e
+        }
+
+        await ensureQuantityInventoryRow(tx, product)
+        // Plan 6b (H14): un alta con IVA distinto de 16 % deja su rastro en la misma transacción (el alta nunca enciende).
+        await registrarCambioDeIva(tx, {
+          venueId,
+          productId: product.id,
+          producto: product.name,
+          antes: null,
+          despues: product.ivaTratamiento,
+          staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+          origen: 'DASHBOARD',
         })
 
         // WHY: SERVICE callers have no Staff FK, so their durable provenance must
@@ -706,7 +765,8 @@ export async function createProduct(venueId: string, productData: CreateProductD
       product = await createProductInTransaction()
       break
     } catch (error) {
-      const isSerializationConflict = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2034'
+      // Un 40001 del candado crudo de la organización llega como P2010 (no P2034): también es un conflicto de concurrencia.
+      const isSerializationConflict = isRetryableDbError(error)
 
       if (isSerializationConflict && attempt < maxRetries) {
         logger.warn('Retrying product creation after serialization conflict', {
@@ -718,6 +778,13 @@ export async function createProduct(venueId: string, productData: CreateProductD
         continue
       }
 
+      // Reintentos agotados: un 409 claro, nunca el P2010/P2034 crudo (que saldría 500).
+      if (isSerializationConflict) {
+        throw new ConflictError(
+          'El catálogo de este negocio está ocupado en este momento. Vuelve a intentarlo en unos segundos.',
+          'CATALOGO_OCUPADO',
+        )
+      }
       throw error
     }
   }
@@ -788,6 +855,9 @@ export async function updateProduct(
   productId: string,
   productData: UpdateProductDto,
   actor: CatalogActor,
+  // Codex 6b r1 P2-5: con `ivaTratamiento`, una vista previa vieja del IVA también responde «El producto cambió desde la vista previa».
+  expectedState?: Pick<Product, 'name' | 'price' | 'active'> & { ivaTratamiento?: IvaTratamiento },
+  opts: { origen?: OrigenIva } = {},
 ): Promise<Product> {
   // ✅ Validate product data based on type (Square-aligned)
   validateProductByType(productData, true)
@@ -805,6 +875,13 @@ export async function updateProduct(
 
   // If modifierGroupIds is provided, update the relationships
   const updateData: any = { ...productFields }
+
+  // IVA por producto: `taxRate`/`objetoImp`/`ivaTratamiento` NUNCA se escriben directo —
+  // el spread de arriba los habría copiado tal cual. Se borran aquí y se recalculan más
+  // abajo, YA vetados por normalizarIvaDeProducto, dentro de la transacción.
+  delete updateData.taxRate
+  delete updateData.objetoImp
+  delete updateData.ivaTratamiento
 
   // ✅ WORLD-CLASS: If trackInventory is set to false, clear inventoryMethod
   if (productData.trackInventory === false) {
@@ -857,7 +934,23 @@ export async function updateProduct(
     }
   }
 
+  // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco negocio → producto.
+  const traeIva = [productFields.ivaTratamiento, productFields.taxRate, productFields.objetoImp].some(v => v !== undefined && v !== null)
+  const staffId = actor.type === 'HUMAN' ? actor.staffId : null
+  const origen = opts.origen ?? 'DASHBOARD'
+  // Plan 6b (spec §5.2, D11): el XML de las facturas viejas se lee AQUÍ, fuera de la transacción; dentro se revalida. Un encendido
+  // condenado por lo que no depende del candado (fecha, contabilidad, POS, aparatos, ajuste de Uber) sale aquí con su 409 (I-1).
+  const plan = traeIva ? await prepararEncendido(venueId, productFields.ivaTratamiento, existingProduct, staffId) : null
+  // El encendido lee aparatos y documentos y sella las facturas viejas: 5 s no alcanzan con muchas.
+  const opcionesTx = plan ? { timeout: 30_000, maxWait: 5_000 } : undefined
+
+  // El precio vigente BAJO el candado del catálogo (Codex 15-oct): `existingProduct` se leyó antes y otra edición pudo
+  // cambiarlo en medio; la bitácora no debe atribuirle a esta persona un cambio de precio ajeno.
+  let precioBajoCandado: Prisma.Decimal | undefined
   const product = await prisma.$transaction(async tx => {
+    // Plan 6b (D10): encender toma la admisión exclusiva ANTES de la organización; sin encendido, el orden de siempre (plan 4).
+    if (plan) await encenderBajoCandados(tx, { venueId, productId, plan, staffId, origen })
+    else if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
     await assertLegacyCatalogProductUpdateGovernance(tx, {
       venueId,
       productId,
@@ -869,21 +962,87 @@ export async function updateProduct(
       categoryId: productData.categoryId,
       printStationId: productData.printStationId,
     })
-    const updated = await tx.product.update({
-      where: { id: productId },
-      data: updateData,
-      include: {
-        category: true,
-        modifierGroups: {
-          include: {
-            group: true,
-          },
-        },
+    // Variantes (spec §6): los datos del padre se editan en el padre; el trigger lo impone, aquí se dice en español.
+    // La guardia de gobierno ya tomó la fila (FOR NO KEY UPDATE): basta releer dentro de la transacción (ronda 2).
+    const fila = await tx.product.findFirst({
+      where: { id: productId, venueId },
+      select: {
+        id: true,
+        productGroupId: true,
+        name: true,
+        description: true,
+        type: true,
+        imageUrl: true,
+        categoryId: true,
+        printStationId: true,
+        satProductKey: true,
+        satUnitKey: true,
+        ivaTratamiento: true,
+        taxRate: true,
+        objetoImp: true,
       },
     })
+    if (fila) await assertNoGroupOwnedChanges(tx, fila, productData as unknown as Record<string, unknown>)
+    // Variante con el mismo conjunto de extras (ronda 1, N3): no se reescriben sus uniones ni su orden (son del padre).
+    if (fila?.productGroupId) delete updateData.modifierGroups
+
+    // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
+    // directo) — el trigger de Product deriva la tupla desde ese único valor.
+    const actual = await tx.product.findFirstOrThrow({
+      where: { id: productId, venueId },
+      select: { ivaTratamiento: true, taxRate: true, objetoImp: true, price: true },
+    })
+    precioBajoCandado = actual.price
+    const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+    Object.assign(
+      updateData,
+      normalizarIvaDeProducto(
+        { ivaTratamiento: productFields.ivaTratamiento, taxRate: productFields.taxRate, objetoImp: productFields.objetoImp },
+        { ivaTratamiento: actual.ivaTratamiento, taxRate: Number(actual.taxRate), objetoImp: actual.objetoImp },
+        encendido,
+      ),
+    )
+
+    let updated
+    try {
+      updated = await tx.product.update({
+        where: { id: productId, ...(expectedState ? { venueId, deletedAt: null, ...expectedState } : {}) },
+        data: updateData,
+        include: {
+          category: true,
+          modifierGroups: {
+            include: {
+              group: true,
+            },
+          },
+        },
+      })
+    } catch (e) {
+      if (expectedState && (e as { code?: string }).code === 'P2025')
+        throw new ConflictError('El producto cambió desde la vista previa. Revisa y confirma de nuevo.')
+      // El trigger del escritor único ganó una carrera (lo agruparon mientras se editaba): 409, nunca 500.
+      if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
+      traducirErrorDeIva(e)
+      throw e
+    }
+    // Con el estado FINAL (el PATCH parcial puede no traer `type`): una cita o un evento no se inventaría. Revierte todo.
+    if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+    // P1-2 (Shopify): pasar a kilo, a receta o sin control de existencias suspende la pareja; volver a pieza pide el
+    // cuadre. Después del Product y ANTES de Inventory (orden de candados del conector).
+    await ajustarParejaAlProducto(tx, updated)
     await ensureQuantityInventoryRow(tx, updated)
+    // Plan 6b (H14, §5.7): antes → después, autor y origen, en la MISMA transacción del cambio.
+    await registrarCambioDeIva(tx, {
+      venueId,
+      productId,
+      producto: updated.name,
+      antes: actual.ivaTratamiento,
+      despues: updated.ivaTratamiento,
+      staffId,
+      origen,
+    })
     return updated
-  })
+  }, opcionesTx)
 
   // 🔌 REAL-TIME: Broadcast product update via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
@@ -970,9 +1129,101 @@ export async function updateProduct(
     })
   }
 
-  logAction({ venueId, action: 'PRODUCT_UPDATED', entity: 'Product', entityId: product.id, data: { changes: Object.keys(productData) } })
+  // Quién lo cambió y de cuánto a cuánto quedó el precio (founder, 15-oct): antes no quedaba ni la persona.
+  logAction({
+    venueId,
+    staffId: actor.type === 'HUMAN' ? actor.staffId : undefined,
+    action: 'PRODUCT_UPDATED',
+    entity: 'Product',
+    entityId: product.id,
+    data: {
+      changes: Object.keys(productData),
+      // Sólo si ESTA petición cambió el precio, y desde el precio vigente bajo el candado.
+      ...(productData.price !== undefined && precioBajoCandado != null && Number(precioBajoCandado) !== Number(product.price)
+        ? { price: { from: Number(precioBajoCandado), to: Number(product.price) } }
+        : {}),
+      ...(actor.type === 'SERVICE' ? { servicePrincipalId: actor.servicePrincipalId } : actor.impersonating ? { impersonating: true } : {}),
+    },
+  })
 
   return product
+}
+
+/**
+ * IVA por producto, plan 5 (D1): ARCHIVAR = deja de venderse y de verse (`active=false`) y conserva su historia, receta,
+ * inventario, kárdex e IVA (`deletedAt` + `deletedBy`). Es la ÚNICA forma de «borrar» un producto: la usan el borrado del
+ * dashboard (y con él la acción del chatbot), el del móvil y «Reemplazar menú». Nunca toca uno ya archivado. Restaurar =
+ * limpiar `deletedAt`/`deletedBy` (lo hace la importación por SKU).
+ */
+export async function archivarProductos(
+  db: Pick<Prisma.TransactionClient, 'product' | 'productGroup' | '$queryRaw'>,
+  where: { venueId: string; id?: string; sku?: { notIn: string[] } },
+  deletedBy: string | null,
+  /** Salida opcional: los padres archivados por quedarse sin variantes vivas, para su ActivityLog DESPUÉS del commit. */
+  archivedGroupIds?: string[],
+  /**
+   * `false` SÓLO para quien ya bloqueó el producto antes (Shopify, §10.3: Product → sucursal → tienda): tomar el negocio
+   * después invertiría el orden contra la importación y las ediciones (negocio → producto). Si el producto es una variante, ese
+   * llamador ya tomó el negocio y la familia ANTES del producto (Shopify, bloque 5: `lockGroupForCleanup`).
+   */
+  venueFirst = true,
+): Promise<number> {
+  if (where.id) {
+    // Variantes: orden de candados del motor (negocio → padre → variantes). Sin esto, borrar una talla mientras otra persona
+    // edita su familia se trababa (deadlock) entre la fila de la talla y la del padre. Los masivos (reemplazar menú) ya
+    // corren detrás del cerco del negocio, que el motor también espera. Codex #2: el negocio va ANTES de leer si es variante
+    // (quien agrupa toma su cerco y espera); leída después, una agrupación en medio dejaba el padre fuera del orden.
+    if (venueFirst) await db.$queryRaw`SELECT id FROM "Venue" WHERE id = ${where.venueId} FOR SHARE`
+    const p = await db.product.findFirst({ where: { id: where.id, venueId: where.venueId }, select: { productGroupId: true } })
+    if (p?.productGroupId) {
+      if (!venueFirst) await db.$queryRaw`SELECT id FROM "Venue" WHERE id = ${where.venueId} FOR SHARE`
+      await db.$queryRaw`SELECT id FROM "ProductGroup" WHERE id = ${p.productGroupId} FOR UPDATE`
+    }
+  }
+  const deletedAt = new Date()
+  const { count } = await db.product.updateMany({
+    where: { ...where, deletedAt: null },
+    data: { deletedAt, deletedBy, active: false },
+  })
+  // Variantes (decisión 3c): una familia que con esto se quedó sin variantes vivas se archiva igual que en detachVariant. Sólo
+  // las que perdieron una variante en ESTA sentencia (mismo `deletedAt`). Por páginas y por id (ronda 1, N2: hay que saber
+  // cuáles, para su bitácora): cada vuelta archiva las que encontró, que salen del filtro, así que termina sola.
+  if (count) {
+    const vacias: Prisma.ProductGroupWhereInput = {
+      venueId: where.venueId,
+      deletedAt: null,
+      products: { some: { deletedAt }, none: { deletedAt: null } },
+    }
+    for (;;) {
+      const grupos = await db.productGroup.findMany({ where: vacias, select: { id: true }, orderBy: { id: 'asc' }, take: 500 })
+      if (!grupos.length) break
+      const ids = grupos.map(g => g.id)
+      await db.productGroup.updateMany({ where: { id: { in: ids }, deletedAt: null }, data: { deletedAt, deletedBy } })
+      archivedGroupIds?.push(...ids)
+      if (grupos.length < 500) break
+    }
+  }
+  return count
+}
+
+/** Plan 5 (D5): el código que lanza el trigger BEFORE DELETE de "Product" y lo que ve el usuario si alguna ruta lo alcanzara. */
+export const PRODUCTO_CON_VENTAS_NO_SE_BORRA = 'PRODUCTO_CON_VENTAS_NO_SE_BORRA'
+export const MENSAJE_PRODUCTO_CON_VENTAS =
+  'Este producto ya tiene ventas y no se puede borrar de verdad. Bórralo desde el menú: se archiva, deja de venderse y conserva su historia.'
+
+/**
+ * El trigger lanza P0001 con el código en el texto. Codex C5-3: sólo con la FORMA de ese error de Postgres — un error de
+ * modelo de Prisma lo trae en el mensaje (`PostgresError { code: "P0001", … }`), uno crudo (`$executeRaw`) como P2010 con el
+ * código de Postgres en `meta`. Un AppError u otro error que sólo MENCIONE el código (una categoría que se llama así) no lo es.
+ */
+export function esProductoConVentas(err: unknown): boolean {
+  if (!err || err instanceof AppError) return false
+  const e = err as { code?: unknown; message?: unknown; meta?: { code?: unknown; message?: unknown } }
+  if (e.code !== undefined) {
+    return e.code === 'P2010' && e.meta?.code === 'P0001' && String(e.meta?.message ?? '').includes(PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  }
+  const texto = String(e.message ?? '')
+  return /PostgresError \{ code: "P0001"/.test(texto) && texto.includes(PRODUCTO_CON_VENTAS_NO_SE_BORRA)
 }
 
 /**
@@ -993,23 +1244,25 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
     throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
   }
 
-  // Delete image from Firebase Storage if it exists
-  if (existingProduct.imageUrl) {
-    logger.info(`🗑️  Deleting product image from storage: ${existingProduct.imageUrl}`)
-    await deleteFileFromStorage(existingProduct.imageUrl).catch(error => {
+  // Delete image from Firebase Storage if nobody else uses it. Una variante (o una ya separada, auditoría A6) trae la foto del
+  // padre: borrarla dejaría sin foto a la familia entera.
+  const url = existingProduct.imageUrl
+  const otrosLaUsan = url
+    ? (await prisma.product.count({ where: { venueId, imageUrl: url, id: { not: existingProduct.id } } })) +
+      (await prisma.productGroup.count({ where: { venueId, imageUrl: url } }))
+    : 0
+  if (url && otrosLaUsan === 0) {
+    logger.info(`🗑️  Deleting product image from storage: ${url}`)
+    await deleteFileFromStorage(url).catch(error => {
       logger.error(`❌ Failed to delete product image from storage`, error)
       // Continue with soft delete even if storage cleanup fails
     })
   }
 
-  // Soft delete: set deletedAt and deletedBy instead of physically removing the record
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      deletedAt: new Date(),
-      deletedBy: userId,
-    },
-  })
+  // Plan 5 (D1): archivar = deletedAt + deletedBy + active=false (el widget y la app de clientes filtran sólo `active`).
+  // En transacción: si era la última variante viva, el padre se archiva junto con ella (decisión 3c).
+  const padresArchivados: string[] = []
+  await prisma.$transaction(tx => archivarProductos(tx, { venueId, id: productId }, userId, padresArchivados))
 
   // 🔌 REAL-TIME: Broadcast product deletion via Socket.IO
   const broadcastingService = socketManager.getBroadcastingService()
@@ -1046,6 +1299,17 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
     entityId: productId,
     data: { name: existingProduct.name },
   })
+  // Ronda 1 (N2): era la última variante viva y el padre se archivó con ella (3c).
+  for (const groupId of padresArchivados) {
+    logAction({
+      staffId: userId,
+      venueId,
+      action: 'PRODUCT_GROUP_ARCHIVED',
+      entity: 'ProductGroup',
+      entityId: groupId,
+      data: { reason: 'LAST_VARIANT_ARCHIVED', productId },
+    })
+  }
 }
 
 /**
@@ -1070,67 +1334,57 @@ export async function assignModifierGroupToProduct(
   productId: string,
   data: { modifierGroupId: string; displayOrder?: number },
 ): Promise<any> {
-  // Check if product exists and belongs to venue
-  const product = await prisma.product.findFirst({
-    where: { id: productId, venueId },
-  })
+  return prisma.$transaction(async tx => {
+    // Check if product exists, belongs to venue and is not a variant (its extras belong to the parent)
+    await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}`)
 
-  if (!product) {
-    throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
-  }
-
-  // Check if modifier group exists and belongs to venue
-  const modifierGroup = await prisma.modifierGroup.findFirst({
-    where: { id: data.modifierGroupId, venueId },
-  })
-
-  if (!modifierGroup) {
-    throw new AppError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}`, 404)
-  }
-
-  // Get next display order if not provided
-  let displayOrder = data.displayOrder
-  if (displayOrder === undefined) {
-    const maxOrder = await prisma.productModifierGroup.findFirst({
-      where: { productId },
-      orderBy: { displayOrder: 'desc' },
-      select: { displayOrder: true },
+    // Check if modifier group exists and belongs to venue
+    const modifierGroup = await tx.modifierGroup.findFirst({
+      where: { id: data.modifierGroupId, venueId },
     })
-    displayOrder = (maxOrder?.displayOrder || 0) + 1
-  }
 
-  const assignment = await prisma.productModifierGroup.create({
-    data: {
-      productId,
-      groupId: data.modifierGroupId,
-      displayOrder,
-    },
-    include: {
-      group: true,
-    },
+    if (!modifierGroup) {
+      throw new AppError(`Modifier group with ID ${data.modifierGroupId} not found in venue ${venueId}`, 404)
+    }
+
+    // Get next display order if not provided
+    let displayOrder = data.displayOrder
+    if (displayOrder === undefined) {
+      const maxOrder = await tx.productModifierGroup.findFirst({
+        where: { productId },
+        orderBy: { displayOrder: 'desc' },
+        select: { displayOrder: true },
+      })
+      displayOrder = (maxOrder?.displayOrder || 0) + 1
+    }
+
+    return tx.productModifierGroup.create({
+      data: {
+        productId,
+        groupId: data.modifierGroupId,
+        displayOrder,
+      },
+      include: {
+        group: true,
+      },
+    })
   })
-
-  return assignment
 }
 
 /**
  * Remove a modifier group from a product
  */
 export async function removeModifierGroupFromProduct(venueId: string, productId: string, modifierGroupId: string): Promise<void> {
-  // Check if product exists and belongs to venue
-  const product = await prisma.product.findFirst({
-    where: { id: productId, venueId },
-  })
+  await prisma.$transaction(async tx => {
+    // Check if product exists, belongs to venue and is not a variant (its extras belong to the parent)
+    await assertLooseProductForModifiers(tx, venueId, productId, `Product with ID ${productId} not found in venue ${venueId}`)
 
-  if (!product) {
-    throw new AppError(`Product with ID ${productId} not found in venue ${venueId}`, 404)
-  }
-
-  await prisma.productModifierGroup.deleteMany({
-    where: {
-      productId,
-      groupId: modifierGroupId,
-    },
+    await tx.productModifierGroup.deleteMany({
+      where: {
+        productId,
+        groupId: modifierGroupId,
+      },
+    })
   })
 }
 
@@ -1151,6 +1405,7 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
     include: {
       category: true,
       inventory: true,
+      ...productGroupInclude,
       modifierGroups: {
         include: {
           group: {
@@ -1189,121 +1444,10 @@ export async function getProductByBarcode(venueId: string, barcode: string): Pro
   }
 
   // ✅ Calculate availableQuantity + ingredient shortage (Toast POS pattern)
-  return {
+  return withVariantFields({
     ...product,
     ...computeInventoryAvailability(product), // availableQuantity + limitingIngredient + insufficientIngredients
-  }
-}
-
-/**
- * Create product quickly from barcode scan (Square POS pattern)
- *
- * ✅ BARCODE QUICK ADD: When scanning unknown barcode, create product on-the-fly
- * Creates minimal product with barcode as SKU
- */
-export async function createQuickAddProduct(venueId: string, quickAddData: QuickAddProductDto, actor: CatalogActor): Promise<Product> {
-  const { barcode, name, price, categoryId, trackInventory } = quickAddData
-
-  // ✅ CategoryId is required by the database schema
-  if (!categoryId) {
-    throw new AppError('categoryId is required for creating a product', 400)
-  }
-
-  // ✅ Check if product with this barcode already exists (check both SKU and GTIN)
-  const existing = await prisma.product.findFirst({
-    where: {
-      venueId,
-      OR: [{ sku: barcode }, { gtin: barcode }],
-    },
   })
-
-  if (existing) {
-    throw new AppError(`Product with barcode ${barcode} already exists in venue ${venueId}`, 409)
-  }
-
-  const product = await prisma.$transaction(async tx => {
-    await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
-    await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
-    const maxOrder = await tx.product.findFirst({
-      where: { venueId },
-      orderBy: { displayOrder: 'desc' },
-      select: { displayOrder: true },
-    })
-    const displayOrder = (maxOrder?.displayOrder || 0) + 1
-    return tx.product.create({
-      data: {
-        name,
-        sku: barcode, // ✅ Barcode becomes the SKU
-        price,
-        venueId,
-        createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-        categoryId, // Validated above, always present
-        type: ProductType.OTHER, // Default type for quick-add
-        trackInventory: trackInventory || false,
-        inventoryMethod: trackInventory ? 'QUANTITY' : null,
-        displayOrder,
-        active: true,
-      },
-      include: {
-        category: true,
-        inventory: true,
-        modifierGroups: {
-          include: {
-            group: {
-              include: {
-                modifiers: { where: { active: true } },
-              },
-            },
-          },
-        },
-      },
-    })
-  })
-
-  // 🔌 REAL-TIME: Broadcast product creation via Socket.IO
-  const broadcastingService = socketManager.getBroadcastingService()
-  if (broadcastingService) {
-    const productWithRelations = product as typeof product & {
-      category?: { name: string } | null
-      modifierGroups: Array<{ groupId: string }>
-    }
-    broadcastingService.broadcastMenuItemCreated(venueId, {
-      itemId: product.id,
-      itemName: product.name,
-      sku: product.sku,
-      categoryId: product.categoryId,
-      categoryName: productWithRelations.category?.name || '',
-      price: Number(product.price),
-      available: product.active,
-      imageUrl: product.imageUrl,
-      description: product.description,
-      modifierGroupIds: productWithRelations.modifierGroups.map(mg => mg.groupId),
-    })
-
-    broadcastingService.broadcastMenuUpdated(venueId, {
-      updateType: 'PARTIAL_UPDATE',
-      productIds: [product.id],
-      categoryIds: product.categoryId ? [product.categoryId] : [],
-      reason: 'ITEM_ADDED',
-    })
-
-    logger.info('🔌 Quick-add product created and broadcasted', {
-      venueId,
-      productId: product.id,
-      productName: product.name,
-      barcode,
-    })
-  }
-
-  logAction({
-    venueId,
-    action: 'PRODUCT_CREATED',
-    entity: 'Product',
-    entityId: product.id,
-    data: { name: product.name, source: 'quick-add' },
-  })
-
-  return product
 }
 
 // ═══════════════════════════════════════════════════════════════

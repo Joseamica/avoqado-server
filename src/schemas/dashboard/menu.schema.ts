@@ -1,10 +1,42 @@
 import { z } from 'zod'
+import { existingId } from '../common/existingId.schema'
 import { MenuType, ProductType } from '@prisma/client'
+import { isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from '../../services/dashboard/quantityInventoryRow'
 
 // Common patterns and constants
 const TIME_REGEX = /^([01]\d|2[0-3]):([0-5]\d)$/ // HH:mm format
 const DAYS_OF_WEEK = ['MON', 'TUE', 'WED', 'THU', 'FRI', 'SAT', 'SUN'] as const
-const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
+export const SKU_REGEX = /^[A-Za-z0-9_-]+$/ // Alphanumeric (both cases), underscores, hyphens
+/** Longest gtin (barcode) the product schemas accept: GTIN-14. The Shopify loader drops longer ones before importing. */
+export const GTIN_MAX_LENGTH = 14
+
+/** Claves SAT (CFDI 4.0): UNA regla para el producto suelto y para el producto con variantes (productGroup.schema). */
+export const satProductKeySchema = z
+  .string()
+  .trim()
+  .regex(/^\d{8}$/, 'La clave de producto SAT debe tener 8 dígitos')
+export const satUnitKeySchema = z
+  .string()
+  .trim()
+  .min(1, 'La clave de unidad SAT es requerida')
+  .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
+
+/** Máximo del SKU de un extra; el MCP (Task 5) usa el mismo. */
+export const MODIFIER_SKU_MAX = 64
+/** Formato del SKU de un extra: el MCP muestra el mismo texto que la API (el agente no ve un «Invalid» pelón). */
+export const MODIFIER_SKU_FORMAT_MESSAGE = 'El SKU sólo admite letras, números, guion y guion bajo'
+
+// SKU de un extra: el código con el que el OTRO POS (caja externa) lo tiene dado de alta.
+// Mismo formato que el del producto; vacío = sin SKU. Mensajes en español: los ve el usuario.
+const ModifierSkuSchema = z.preprocess(
+  value => (typeof value === 'string' ? value.trim() || null : value),
+  z
+    .string()
+    .max(MODIFIER_SKU_MAX, `El SKU del extra no puede pasar de ${MODIFIER_SKU_MAX} caracteres`)
+    .regex(SKU_REGEX, MODIFIER_SKU_FORMAT_MESSAGE)
+    .nullable()
+    .optional(),
+)
 
 // ==========================================
 // MENU SCHEMAS
@@ -41,7 +73,7 @@ export const CreateMenuSchema = z.object({
     availableFrom: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
     availableUntil: z.string().regex(TIME_REGEX, 'Invalid time format. Expected HH:mm').optional().nullable(),
     availableDays: z.array(z.enum(DAYS_OF_WEEK)).max(7).optional(),
-    categoryIds: z.array(z.string().cuid()).optional(), // Categories to assign to menu
+    categoryIds: z.array(existingId('El ID de la categoría no es válido')).optional(), // Categories to assign to menu
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
@@ -96,14 +128,20 @@ export const ProductSchema = z.object({
   id: z.string().cuid(),
   venueId: z.string().cuid(),
   sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
-  gtin: z.string().max(14).nullable().optional(),
+  gtin: z.string().max(GTIN_MAX_LENGTH).nullable().optional(),
   name: z.string().min(1, 'Name is required').max(255),
   description: z.string().nullable().optional(),
   categoryId: z.string().cuid(),
   type: z.nativeEnum(ProductType),
   price: z.number().positive('Price must be positive').multipleOf(0.01),
   cost: z.number().positive('Cost must be positive').multipleOf(0.01).nullable().optional(),
-  taxRate: z.number().min(0).max(1).default(0.16), // 16% default tax
+  // Sin `.default(0.16)`: un default de esquema haría que TODO create mande `taxRate`
+  // y dispare la comparación de normalizarIvaDeProducto. El default fiscal real vive en
+  // `Product.ivaTratamiento @default(IVA_16)` (ver src/services/fiscal/ivaTratamiento.ts).
+  taxRate: z.number().min(0).max(1).optional(),
+  ivaTratamiento: z
+    .enum(['IVA_16', 'IVA_0', 'EXENTO'], { errorMap: () => ({ message: 'IVA inválido: usa 16 %, 0 % o Exento.' }) })
+    .optional(),
   imageUrl: z.string().url().nullable().optional(),
   displayOrder: z.number().int().min(0).default(0),
   featured: z.boolean().default(false),
@@ -123,16 +161,19 @@ export const ProductSchema = z.object({
 })
 
 // Base object — shared between Create and Update (allows .partial())
-const ProductBodyBase = z.object({
+export const ProductBodyBase = z.object({
   sku: z.string().regex(SKU_REGEX, 'SKU must contain only letters, numbers, underscores, and hyphens'),
-  gtin: z.string().max(14).optional().nullable(),
+  gtin: z.string().max(GTIN_MAX_LENGTH).optional().nullable(),
   name: z.string().min(1, 'Name is required').max(255),
   description: z.string().optional().nullable(),
-  categoryId: z.string().cuid('Invalid category ID format'),
+  categoryId: existingId('El ID de la categoría no es válido'),
   type: z.nativeEnum(ProductType).default(ProductType.FOOD), // Keep FOOD default for backwards compatibility
   price: z.number().positive('Price must be positive').multipleOf(0.01),
   cost: z.number().positive('Cost must be positive').multipleOf(0.01).optional().nullable(),
   taxRate: z.number().min(0).max(1).optional(),
+  ivaTratamiento: z
+    .enum(['IVA_16', 'IVA_0', 'EXENTO'], { errorMap: () => ({ message: 'IVA inválido: usa 16 %, 0 % o Exento.' }) })
+    .optional(),
   imageUrl: z.string().url().nullable().optional(),
   displayOrder: z.number().int().min(0).optional(),
   featured: z.boolean().optional(),
@@ -147,7 +188,7 @@ const ProductBodyBase = z.object({
   active: z.boolean().optional(),
   availableFrom: z.string().datetime().optional().nullable(),
   availableUntil: z.string().datetime().optional().nullable(),
-  modifierGroupIds: z.array(z.string().cuid()).optional(),
+  modifierGroupIds: z.array(existingId('Grupo de extras inválido')).optional(),
 
   // ═══════════════════════════════════════════════════════════════
   // Square-aligned contextual fields
@@ -223,31 +264,18 @@ const ProductBodyBase = z.object({
   // ═══════════════════════════════════════════════════════════════
   // Campos fiscales SAT (CFDI 4.0)
   // ═══════════════════════════════════════════════════════════════
-  satProductKey: z
-    .string()
-    .trim()
-    .regex(/^\d{8}$/, 'La clave de producto SAT debe tener 8 dígitos')
-    .optional()
-    .nullable(),
-  satUnitKey: z
-    .string()
-    .trim()
-    .min(1, 'La clave de unidad SAT es requerida')
-    .max(20, 'La clave de unidad SAT no puede exceder 20 caracteres')
-    .optional()
-    .nullable(),
+  satProductKey: satProductKeySchema.optional().nullable(),
+  satUnitKey: satUnitKeySchema.optional().nullable(),
   objetoImp: z.enum(['01', '02', '03', '04'], { invalid_type_error: 'ObjetoImp inválido' }).optional(),
 
   // Estación de impresión (ruteo de comandas)
   printStationId: z.string().min(1, 'La estación es requerida').nullable().optional(),
 })
 
-const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) => {
-  const nonInventoriableTypes = ['CLASS', 'APPOINTMENTS_SERVICE', 'DIGITAL', 'DONATION']
-  return !(nonInventoriableTypes.includes(data.type ?? '') && data.trackInventory === true)
-}
+const nonInventoriableRefine = <T extends { type?: string; trackInventory?: boolean }>(data: T) =>
+  !isNonInventoriable(data.type, data.trackInventory)
 const nonInventoriableMessage = {
-  message: 'Este tipo de producto no puede tener seguimiento de inventario',
+  message: NON_INVENTORIABLE_MESSAGE,
   path: ['trackInventory'],
 }
 
@@ -275,7 +303,7 @@ export const UpdateProductSchema = z.object({
   body: ProductBodyBase.partial().refine(nonInventoriableRefine, nonInventoriableMessage),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
   }),
 })
 export type UpdateProductDto = z.infer<typeof UpdateProductSchema>['body']
@@ -283,7 +311,7 @@ export type UpdateProductDto = z.infer<typeof UpdateProductSchema>['body']
 export const GetProductParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
   }),
 })
 
@@ -323,6 +351,7 @@ export const CreateModifierGroupSchema = z.object({
             name: z.string().min(1, 'Modifier name is required').max(255),
             price: z.number().min(0).multipleOf(0.01).default(0),
             active: z.boolean().optional(),
+            sku: ModifierSkuSchema,
           }),
         )
         .optional(),
@@ -380,7 +409,7 @@ export const UpdateModifierGroupSchema = z.object({
     ),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 export type UpdateModifierGroupDto = z.infer<typeof UpdateModifierGroupSchema>['body']
@@ -398,26 +427,29 @@ export const CreateModifierSchema = z.object({
     name: z.string().min(1, 'Name is required').max(255),
     price: z.number().min(0).multipleOf(0.01).default(0),
     active: z.boolean().optional(),
+    sku: ModifierSkuSchema,
+    durationMin: z.number().int().min(0).max(480).nullable().optional(),
+    rawMaterialId: existingId('El ID de la materia prima no es válido').nullable().optional(),
+    quantityPerUnit: z.number().positive('Quantity must be positive').nullable().optional(),
+    unit: z
+      .enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON'])
+      .nullable()
+      .optional(),
+    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).nullable().optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 export type CreateModifierDto = z.infer<typeof CreateModifierSchema>['body']
 
 export const UpdateModifierSchema = z.object({
-  body: CreateModifierSchema.shape.body.partial().extend({
-    // ✅ WORLD-CLASS: Inventory configuration for modifiers (Toast/Square pattern)
-    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable().optional(),
-    quantityPerUnit: z.number().positive('Quantity must be positive').optional(),
-    unit: z.enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON']).optional(),
-    inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']).optional(),
-  }),
+  body: CreateModifierSchema.shape.body.partial(),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
-    modifierId: z.string().cuid('Invalid modifier ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
+    modifierId: existingId('El ID del extra no es válido'),
   }),
 })
 export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
@@ -432,15 +464,15 @@ export type UpdateModifierDto = z.infer<typeof UpdateModifierSchema>['body']
  */
 export const ConfigureModifierInventorySchema = z.object({
   body: z.object({
-    rawMaterialId: z.string().cuid('Invalid raw material ID format').nullable(),
+    rawMaterialId: existingId('El ID de la materia prima no es válido').nullable(),
     quantityPerUnit: z.number().positive('Quantity must be positive'),
     unit: z.enum(['UNIT', 'KILOGRAM', 'GRAM', 'LITER', 'MILLILITER', 'OUNCE', 'POUND', 'CUP', 'TABLESPOON', 'TEASPOON']),
     inventoryMode: z.enum(['ADDITION', 'SUBSTITUTION']),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
-    modifierId: z.string().cuid('Invalid modifier ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
+    modifierId: existingId('El ID del extra no es válido'),
   }),
 })
 export type ConfigureModifierInventoryDto = z.infer<typeof ConfigureModifierInventorySchema>['body']
@@ -458,7 +490,7 @@ export const MenuCategoryAssignmentSchema = z.object({
 
 export const AssignCategoryToMenuSchema = z.object({
   body: z.object({
-    categoryId: z.string().cuid('Invalid category ID format'),
+    categoryId: existingId('El ID de la categoría no es válido'),
     displayOrder: z.number().int().min(0).optional(),
   }),
   params: z.object({
@@ -477,12 +509,12 @@ export const ProductModifierGroupAssignmentSchema = z.object({
 
 export const AssignModifierGroupToProductSchema = z.object({
   body: z.object({
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
     displayOrder: z.number().int().min(0).optional(),
   }),
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
+    productId: existingId('El ID del producto no es válido'),
   }),
 })
 export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroupToProductSchema>['body']
@@ -491,8 +523,8 @@ export type AssignModifierGroupToProductDto = z.infer<typeof AssignModifierGroup
 export const RemoveModifierGroupFromProductParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    productId: z.string().cuid('Invalid product ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    productId: existingId('El ID del producto no es válido'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 
@@ -545,7 +577,7 @@ export const ProductQuerySchema = z.object({
       .transform(val => val === 'true')
       .pipe(z.boolean())
       .optional(),
-    categoryId: z.string().cuid().optional(),
+    categoryId: existingId('El ID de la categoría no es válido').optional(),
     type: z.nativeEnum(ProductType).optional(),
     featured: z
       .string()
@@ -609,7 +641,7 @@ export const ReorderProductsSchema = z.object({
   body: z
     .array(
       z.object({
-        id: z.string().cuid(),
+        id: existingId('El ID del producto no es válido'),
         displayOrder: z.number().int().min(0),
       }),
     )
@@ -622,11 +654,11 @@ export type ReorderProductsDto = z.infer<typeof ReorderProductsSchema>['body']
 
 export const BulkUpdateProductsSchema = z.object({
   body: z.object({
-    productIds: z.array(z.string().cuid()).min(1, 'At least one product ID is required'),
+    productIds: z.array(existingId('El ID del producto no es válido')).min(1, 'At least one product ID is required'),
     updates: z
       .object({
         active: z.boolean().optional(),
-        categoryId: z.string().cuid().optional(),
+        categoryId: existingId('El ID de la categoría no es válido').optional(),
         price: z.number().positive().multipleOf(0.01).optional(),
         featured: z.boolean().optional(),
       })
@@ -655,7 +687,7 @@ export const ImportMenuSchema = z.object({
           z.object({
             name: z.string().min(1),
             sku: z.string().min(1),
-            gtin: z.string().max(14).optional(),
+            gtin: z.string().max(GTIN_MAX_LENGTH).optional(),
             price: z.number().nonnegative(),
             cost: z.number().nonnegative().optional(),
             description: z.string().optional(),
@@ -707,6 +739,23 @@ export const ImportMenuSchema = z.object({
                 }),
               )
               .optional(),
+            // Variantes (bloque 5, V8): la familia de la fila. PERMISIVO a propósito (Codex r4 H4): sólo topes anti-abuso; los
+            // límites de verdad los aplica el servicio por fila y una fila mala se reporta sin tumbar el archivo.
+            family: z
+              .object({
+                key: z.string().max(1000, 'El identificador de la familia es demasiado largo.').optional(),
+                name: z.string().max(1000, 'El nombre de la familia es demasiado largo.').optional(),
+                options: z
+                  .array(
+                    z.object({
+                      name: z.string().max(1000, 'El nombre de la opción es demasiado largo.').optional(),
+                      value: z.string().max(1000, 'El valor de la opción es demasiado largo.').optional(),
+                    }),
+                  )
+                  .max(20, 'Una familia lleva a lo más 20 opciones por fila.')
+                  .optional(),
+              })
+              .optional(),
           }),
         ),
       }),
@@ -731,14 +780,14 @@ export const VenueIdParamsSchema = z.object({
 export const GetModifierGroupParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
   }),
 })
 
 export const GetModifierParamsSchema = z.object({
   params: z.object({
     venueId: z.string().cuid('Invalid venue ID format'),
-    modifierGroupId: z.string().cuid('Invalid modifier group ID format'),
-    modifierId: z.string().cuid('Invalid modifier ID format'),
+    modifierGroupId: existingId('El ID del grupo de extras no es válido'),
+    modifierId: existingId('El ID del extra no es válido'),
   }),
 })

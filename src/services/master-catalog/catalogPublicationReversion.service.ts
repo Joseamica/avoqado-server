@@ -14,6 +14,7 @@ import type {
 import prisma from '../../utils/prismaClient'
 import { writeCatalogAudit } from './catalogAudit.service'
 import { canonicalJsonV1, hashCanonicalJsonV1 } from './catalogHash.service'
+import { isCatalogIvaField, withoutCatalogIvaFields } from './catalogManagedMask.service'
 import { enqueueCatalogPublicationOutboxTx } from './catalogPublicationOutbox.service'
 import { persistCatalogPublicationTx } from './catalogPublicationPersistence.service'
 import { createCatalogPublicationStagingService } from './catalogPublicationStaging.service'
@@ -79,12 +80,23 @@ export function projectCatalogPublicationReversion(input: {
   ) {
     conflict()
   }
-  const current = Object.fromEntries(source.fieldMask.map(field => [field, input.currentValues[field]])) as Partial<
+  // D15: una línea histórica guardada con la máscara V1 trae el IVA. El IVA ya no lo administra el catálogo: no se compara (el
+  // negocio pudo cambiarlo después) ni se revierte. Sólo los campos vigentes (V2).
+  const fieldMask = withoutCatalogIvaFields(source.fieldMask)
+  const decisions = source.decisions.filter(decision => !isCatalogIvaField(decision.field))
+  // Si sin el IVA no queda ningún cambio, la reversión se guardaría NO_CHANGE y su recuperación (que exige APPLIED) fallaría.
+  if (fieldMask.length === 0 || decisions.every(decision => canonicalJsonV1(decision.before) === canonicalJsonV1(decision.after))) {
+    throw new ConflictError(
+      'No hay cambios del catálogo que revertir: la publicación original sólo cambió el IVA, que ahora se configura en cada negocio.',
+      'CATALOG_REVERSION_NOTHING_TO_REVERT',
+    )
+  }
+  const current = Object.fromEntries(fieldMask.map(field => [field, input.currentValues[field]])) as Partial<
     Record<CatalogManagedFieldV1, CatalogPublicationJson>
   >
-  const sourceAfter = Object.fromEntries(source.decisions.map(decision => [decision.field, decision.after]))
+  const sourceAfter = Object.fromEntries(decisions.map(decision => [decision.field, decision.after]))
   if (canonicalJsonV1(current) !== canonicalJsonV1(sourceAfter)) conflict()
-  const after = Object.fromEntries(source.decisions.map(decision => [decision.field, decision.before])) as Partial<
+  const after = Object.fromEntries(decisions.map(decision => [decision.field, decision.before])) as Partial<
     Record<CatalogManagedFieldV1, CatalogPublicationJson>
   >
   // WHY: Reversion is a new command over immutable history. Both tenant-safe
@@ -95,10 +107,10 @@ export function projectCatalogPublicationReversion(input: {
     catalogItemId: source.catalogItemId,
     venueId: source.venueId,
     productId: source.productId,
-    fieldMask: [...source.fieldMask],
+    fieldMask: [...fieldMask],
     before: current,
     after,
-    decisions: source.decisions,
+    decisions,
     supersedesLineId: input.currentLineId,
     reversesLineId: source.id,
     changeKind: 'REVERSION',
@@ -108,7 +120,7 @@ export function projectCatalogPublicationReversion(input: {
       bindingId: source.bindingId,
       sourceLineId: source.id,
       currentLineId: input.currentLineId,
-      fieldMask: source.fieldMask,
+      fieldMask,
       current,
     }),
   }

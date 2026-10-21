@@ -9,6 +9,9 @@ jest.mock('../../../src/utils/prismaClient', () => ({
   default: {
     accountingPeriodLock: { findUnique: jest.fn(), upsert: jest.fn(), update: jest.fn(), findMany: jest.fn() },
     $transaction: jest.fn(),
+    // Plan 4: el cierre fija lock_timeout y lee la marca (Organization) y el negocio (Venue) con FOR SHARE.
+    $executeRaw: jest.fn(),
+    $queryRaw: jest.fn(),
   },
 }))
 jest.mock('../../../src/services/fiscal/chartOfAccounts.service', () => ({ resolveScopeOrNull: jest.fn() }))
@@ -22,6 +25,8 @@ import { resolveScopeOrNull } from '../../../src/services/fiscal/chartOfAccounts
 const p = prisma as unknown as {
   accountingPeriodLock: { findUnique: jest.Mock; upsert: jest.Mock; update: jest.Mock; findMany: jest.Mock }
   $transaction: jest.Mock
+  $executeRaw: jest.Mock
+  $queryRaw: jest.Mock
 }
 const mScope = resolveScopeOrNull as jest.Mock
 const mLog = logAction as jest.Mock
@@ -30,6 +35,10 @@ beforeEach(() => {
   jest.clearAllMocks()
   mScope.mockResolvedValue({ organizationId: 'org1', rfc: 'EKU9003173C9' })
   p.$transaction.mockImplementation(async (cb: any) => cb(prisma)) // tx Serializable → ejecuta con el mock
+  p.$executeRaw.mockResolvedValue(0)
+  p.$queryRaw.mockImplementation((sql: TemplateStringsArray) =>
+    Promise.resolve(sql.join('?').includes('"Organization"') ? [{ ivaMixtoAlgunaVez: false }] : [{ organizationId: 'org1' }]),
+  )
   p.accountingPeriodLock.upsert.mockResolvedValue({})
   p.accountingPeriodLock.update.mockResolvedValue({})
   mLog.mockResolvedValue(undefined)

@@ -12,6 +12,7 @@ import {
 } from '@prisma/client'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
   lockExistingOrderForPayment,
   recordRefundAuthorityReconciliation,
@@ -31,12 +32,19 @@ import logger from '../../config/logger'
 import { BadRequestError, ConflictError, InternalServerError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
+import { RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { Decimal } from '@prisma/client/runtime/library'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
-import { createRefundCommission } from '../dashboard/commission/commission-calculation.service'
 import { restockOrderItems } from '../dashboard/inventoryRestock.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { resolveAutofacturaAvailable } from './payment.tpv.service'
+import { GiftCardError } from '../giftCards/giftCardErrors'
+import {
+  alRegistrarReembolsoEnTx,
+  avisarVentaDeTarjetasCanceladaPorReembolso,
+  bloquearSobresDelReembolsoEnTx,
+} from '../giftCards/giftCardCancel.service'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 /**
  * Refund request data from TPV Android app
@@ -239,7 +247,7 @@ function llaveDeIdempotencia(refundData: RefundRequestData, venueId: string): st
 async function buscarReembolsoPorLlave(venueId: string, idempotencyKey: string) {
   return prisma.payment.findUnique({
     where: { venueId_idempotencyKey: { venueId, idempotencyKey } },
-    include: { receipts: true },
+    include: { receipts: RECIBO_CANONICO },
   })
 }
 
@@ -313,7 +321,9 @@ export async function recordRefund(
     where: { id: refundData.originalPaymentId, venueId },
     include: {
       order: true,
-      receipts: true,
+      receipts: RECIBO_CANONICO,
+      // Tarjetas de regalo (B1): la marca del tender de sistema. El `tenderTypeId` de un cobro nunca cambia: se puede leer fuera del candado.
+      tenderType: { select: { systemKind: true } },
     },
   })
 
@@ -332,6 +342,16 @@ export async function recordRefund(
       status: originalPayment.status,
     })
     throw new BadRequestError(`Cannot refund payment with status: ${originalPayment.status}`)
+  }
+
+  // Tarjetas de regalo (spec §5.5, Review Focus 2): la terminal nunca devuelve lo pagado con saldo —ningún SDK movió ese dinero— y una
+  // devolución registrada aquí no regresaría al saldo. Se rechaza antes de tocar nada.
+  if (isGiftCardTenderKind(originalPayment.tenderType?.systemKind)) {
+    throw new GiftCardError(
+      'GIFT_CARD_REFUND_TO_BALANCE_ONLY',
+      'Lo pagado con tarjeta de regalo no se devuelve en la terminal: devuélvelo desde el POS o el panel y regresa al saldo de la tarjeta.',
+      400,
+    )
   }
 
   // ═══════════════════════════════════════════════════════════════════════════
@@ -615,6 +635,14 @@ export async function recordRefund(
           )
         }
       }
+
+      // Tarjetas de regalo (B1): sobres antes que el turno, como en `issueRefund` (Order → Payment → sobres → Shift).
+      if (locked.orderId)
+        await bloquearSobresDelReembolsoEnTx(tx, {
+          venueId,
+          originalPaymentId: locked.id,
+          original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+        })
 
       const lockedProcessorData = (locked.processorData as Record<string, unknown> | null) ?? {}
 
@@ -1004,6 +1032,21 @@ export async function recordRefund(
       // pago sólo si ganó. Mismo split proporcional, una sola escritura.
 
       await enqueueRefundPaymentEffectsInTx(tx, refundPayment.id, originalPayment.id)
+      // Tarjetas de regalo (B1/B2, R2): aquí el SDK YA devolvió el dinero. Una venta de tarjetas sin cancelación iniciada NO se rechaza
+      // —dejaría el dinero fuera sin asiento y el sobre vivo—: sus sobres se desactivan y queda una anomalía para revisarla.
+      const tarjetas = locked.orderId
+        ? await alRegistrarReembolsoEnTx(tx, {
+            venueId,
+            originalPaymentId: locked.id,
+            refundPaymentId: refundPayment.id,
+            amount: new Decimal(refundData.amount).div(100),
+            staffId: userId,
+            dineroYaDevuelto: true,
+            // A1 (cierre): la misma aritmética del tope de arriba, en centavos y bajo el candado del cobro.
+            devuelveTodoElCobro: esteReembolsoCents >= lockedRemainingCents,
+            original: { orderId: locked.orderId, tenderSystemKind: originalPayment.tenderType?.systemKind ?? null },
+          })
+        : { cuentaCancelada: false }
       // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
       await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
 
@@ -1015,6 +1058,8 @@ export async function recordRefund(
           fundsFlow: locked.fundsFlow,
           tenderTypeId: locked.tenderTypeId,
           tenderCountsAsCash: locked.tenderCountsAsCash,
+          // Tarjetas de regalo (B1 r1): este reembolso dejó en $0 una venta de tarjetas sin pagar y la canceló en la misma tx.
+          cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
           // 🔴 El reparto que NO se pudo honrar viaja fuera de la transacción para dejar rastro.
           // Va aquí, y no como una escritura dentro de `tx`, por la misma razón que este riel no
           // rechaza: cuando esto corre el procesador YA devolvió el dinero, así que un fallo de
@@ -1031,7 +1076,7 @@ export async function recordRefund(
               : null,
         }),
       }
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
 
   let transactionResult: Awaited<ReturnType<typeof ejecutarTransaccionDelReembolso>>
   try {
@@ -1177,16 +1222,18 @@ export async function recordRefund(
     },
   })
 
-  // REFERRAL HOOK: trigger referral void if the original order had a QUALIFIED referral
-  // (idempotent: no-ops if no QUALIFIED Referral matches this orderId)
-  if (postCommitAuthority.orderId) {
-    try {
-      const { onOrderRefunded } = await import('@/services/referrals/referralRefund.service')
-      await onOrderRefunded({ orderId: postCommitAuthority.orderId, venueId })
-    } catch (err) {
-      console.error('[referral hook] onOrderRefunded failed for order', postCommitAuthority.orderId, err)
-    }
+  // Tarjetas de regalo (B1 r1, fix 1): si este reembolso cerró una venta de tarjetas sin pagar, se avisa como `deleteOrder`.
+  if (postCommitAuthority.cuentaDeTarjetasCancelada && postCommitAuthority.orderId) {
+    await avisarVentaDeTarjetasCanceladaPorReembolso({
+      venueId,
+      orderId: postCommitAuthority.orderId,
+      refundPaymentId: result.id,
+      staffId: userId,
+    })
   }
+
+  // El referido NO se revierte aquí: su obligación ya quedó encolada en la transacción de la devolución
+  // (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker (A6 F4, Codex bloque A r1).
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 4.5: Restock inventory when this refund fully reverses the order (Bug B)
@@ -1253,18 +1300,6 @@ export async function recordRefund(
     // Don't fail the refund if TransactionCost creation fails
     logger.error('Failed to create refund TransactionCost', { error, refundPaymentId: result.id })
   }
-
-  // ═══════════════════════════════════════════════════════════════════════════
-  // STEP 5b: Create negative CommissionCalculation for refund (non-blocking)
-  // ═══════════════════════════════════════════════════════════════════════════
-  createRefundCommission(result.id, refundData.originalPaymentId).catch(error => {
-    // Don't fail the refund if commission reversal fails
-    logger.error('Failed to create refund commission', {
-      refundPaymentId: result.id,
-      originalPaymentId: refundData.originalPaymentId,
-      error: error instanceof Error ? error.message : String(error),
-    })
-  })
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 6: Revertir el sello que esta venta había otorgado

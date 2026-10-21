@@ -177,6 +177,15 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(details).not.toMatch(/LIMIT \d+/)
   })
 
+  it('🔴 B2c F2: «descuento excede el consumo» sólo nombra la cabecera que sus FILAS no explican (sin filas, o Σ filas ≠ cabecera)', () => {
+    // Desde B2/B2c la cabecera es Σ filas sin tope: una cortesía sobre un fijo deja 160 sobre un subtotal de 150 y el total
+    // en 0 — legítimo. El daño viejo (ORD-1779465117373: subtotal 0, descuento 300) no tiene filas que lo expliquen.
+    const r = regla('DESCUENTO EXCEDE EL CONSUMO')
+    expect(r).toMatch(/SUM\(od\.amount\)[^]*FROM "OrderDiscount" od WHERE od\."orderId" = o\.id/)
+    expect(r).toMatch(/IS DISTINCT FROM o\."discountAmount"/)
+    expect(r).toMatch(/o\."discountAmount" > o\.subtotal/)
+  })
+
   it('regresión: las 7 invariantes siguen ahí y con el filtro de venues reales', () => {
     for (const nombre of [
       'TOTAL NEGATIVO',

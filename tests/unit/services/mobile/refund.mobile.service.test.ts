@@ -51,6 +51,8 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
     prismaMock.cashDrawerSession.findFirst.mockResolvedValue(null)
     prismaMock.cashDrawerEvent.create.mockResolvedValue({ id: 'evt-1' })
     prismaMock.staff = { findUnique: jest.fn().mockResolvedValue(null) } as any
+    // Pendientes 1a (T3): sin tarjetas cobradas en el negocio la devolución sin venta sigue su camino de siempre.
+    prismaMock.giftCard.findFirst.mockResolvedValue(null)
   })
 
   const refundCash = () => createRefund({ venueId: VENUE, amount: 5000, reason: 'Producto defectuoso', method: 'CASH', staffId: STAFF })
@@ -67,6 +69,22 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
       expect(prismaMock.payment.create).not.toHaveBeenCalled()
     },
   )
+
+  it('en un negocio que ya cobró una tarjeta rechaza con 409 antes de abrir transacción y sin escribir nada', async () => {
+    prismaMock.giftCard.findFirst.mockResolvedValue({ id: 'sobre-1' } as any)
+
+    await expect(refundCash()).rejects.toMatchObject({ code: 'GIFT_CARD_UNLINKED_REFUND_BLOCKED', statusCode: 409 })
+
+    // «Cobró alguna tarjeta alguna vez» = activada, en SU negocio; un sobre PENDING nunca pagado no cuenta.
+    expect(prismaMock.giftCard.findFirst).toHaveBeenCalledWith({
+      where: { venueId: VENUE, activatedAt: { not: null } },
+      select: { id: true },
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.venueTransaction.create).not.toHaveBeenCalled()
+  })
 
   it('guarda el reembolso como COMPLETED + REFUND para que los cortes lo vean', async () => {
     await refundCash()
@@ -93,6 +111,15 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
 
     expect(prismaMock.order.create).toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ paymentStatus: 'REFUNDED' }) }),
+    )
+  })
+
+  // IVA por producto, plan 2: sin orden de origen no hay de dónde heredar el contrato.
+  it('la orden testigo nace DESCONOCIDO (no hay orden de origen de la cual heredar)', async () => {
+    await refundCash()
+
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ contratoDePrecio: 'DESCONOCIDO' }) }),
     )
   })
 

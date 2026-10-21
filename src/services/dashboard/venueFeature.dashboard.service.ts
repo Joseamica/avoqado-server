@@ -15,6 +15,7 @@ import {
   type BaseTier,
   PAID_PLAN_TIER_CODES,
   FREE_TIER_CODES,
+  PREMIUM_ONLY_SIN_CATALOGO,
 } from '@/services/access/basePlan.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from '@/services/access/grandfather'
 import { grantedCapabilityCodes } from '@/services/access/capabilityGrants.service'
@@ -182,6 +183,13 @@ export async function addFeaturesToVenue(venueId: string, featureCodes: string[]
   const planesPedidos = featureCodes.filter(code => (PAID_PLAN_TIER_CODES as readonly string[]).includes(code))
   if (planesPedidos.length > 0) {
     throw new BadRequestError(`Los planes (${planesPedidos.join(', ')}) se contratan desde el flujo de plan, no como función suelta.`)
+  }
+
+  // 🔴 Lo que es Premium por regla y NO está en el catálogo (hoy el conector Shopify, a $0 en la tabla) tampoco se contrata
+  // suelto: hoy sólo `ventaSueltaAbierta()` lo impide, y otro proyecto puede reabrir la venta suelta.
+  const sinCatalogo = featureCodes.filter(code => (PREMIUM_ONLY_SIN_CATALOGO as readonly string[]).includes(code))
+  if (sinCatalogo.length > 0) {
+    throw new BadRequestError(`Esta función no se contrata como función suelta (${sinCatalogo.join(', ')}).`, 'FEATURE_NO_SE_VENDE_SUELTA')
   }
 
   await assertNoIncluidaEnElPlan(venueId, featureCodes)

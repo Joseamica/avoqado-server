@@ -19,10 +19,13 @@ import { socketManager } from '../../communication/sockets/managers/socketManage
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, InternalServerError } from '../../errors/AppError'
+import { logAction } from '../dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
-import { computeOrderBalance } from '../shared/orderBalance'
+import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
@@ -31,6 +34,7 @@ import {
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { generateDigitalReceipt, generateReceiptUrl } from '../tpv/digitalReceipt.tpv.service'
+import { enqueuePaymentCommissionInTx } from '../tpv/paymentEffects.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
@@ -362,6 +366,7 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
           status: 'PENDING', // Will be updated to COMPLETED when payment confirms
           subtotal: amount / 100, // Convert centavos to decimal
           taxAmount: 0,
+          contratoDePrecio: 'IVA_INCLUIDO',
           total: totalAmount / 100,
           tipAmount: tip / 100,
           paidAmount: 0, // Will be updated when payment confirms
@@ -897,7 +902,11 @@ interface CryptoSettlementResult {
   /** `true` SÓLO si esta ejecución fue la que llevó la cuenta de abierta a pagada. */
   becamePaid: boolean
   paidAmount: string
+  /** R9-2: el saldo y el estado que quedaron ESCRITOS (una venta cerrada conserva PAID/REFUNDED con saldo 0, R8-1). */
   remainingBalance: string
+  paymentStatus: string
+  /** R9-2: la venta ya estaba cerrada y se conservó así (R8-1). */
+  ventaCerrada: boolean
   /**
    * Motivo por el que el saldo de la orden NO se recalculó. El `Payment` SÍ queda
    * COMPLETED: el dinero llegó de verdad y no se puede perder.
@@ -913,6 +922,8 @@ interface CryptoSettlementResult {
    * esta ejecución no fue la que saldó la cuenta.
    */
   postingId?: string | null
+  /** R11-8: esta liquidación cerró también la sesión de vales v7 de la venta (dejó de ofrecer «cobrar el resto»). */
+  sesionDeValesCerrada?: boolean
 }
 
 interface IgnoredCryptoSettlementResult {
@@ -977,6 +988,9 @@ async function crearValeDeInventario(
  * transaction: if later order settlement rolls back, neither the payment
  * transition nor the shift totals survive.
  */
+/** R11-8: la sesión de vales que tomó `lockAreaTicketCheckoutHierarchy` (o `null` si la venta no tiene). */
+type ValesBloqueados = Awaited<ReturnType<typeof import('../mobile/areaTicketV7.mobile.service').lockAreaTicketCheckoutHierarchy>>
+
 async function completeAndAttributeB4BitPaymentInTx(
   tx: Prisma.TransactionClient,
   payment: {
@@ -989,7 +1003,7 @@ async function completeAndAttributeB4BitPaymentInTx(
   },
   processorPatch: Prisma.InputJsonObject,
   reconciliationEnabled: boolean,
-): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean; preservedStatus?: string }> {
+): Promise<{ transitioned: boolean; ignoredAsOutOfOrder: boolean; preservedStatus?: string; vales?: ValesBloqueados }> {
   // Task 5t: the release guard reasons over immutable primitives, never over a
   // mutable Prisma result that crossed the helper boundary.
   const paymentId = payment.id
@@ -999,7 +1013,12 @@ async function completeAndAttributeB4BitPaymentInTx(
   const paymentTipAmount = payment.tipAmount
   const paymentProcessedById = payment.processedById
 
+  let vales: ValesBloqueados = null
   if (paymentOrderId) {
+    // 🔴 R11-8: PRIMERA sentencia, la jerarquía de vales (sesión → vales → venta; `null` sin sesión) ANTES del candado de la venta:
+    // el orden de la finalización y del registrador de la terminal. Quien liquida la usa para cerrar la sesión junto a su vale.
+    const { lockAreaTicketCheckoutHierarchy } = await import('../mobile/areaTicketV7.mobile.service')
+    vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId: paymentVenueId, orderId: paymentOrderId })
     await lockExistingOrderForPayment(tx, { venueId: paymentVenueId, orderId: paymentOrderId })
   }
   await lockB4BitPaymentRow(tx, paymentId, paymentVenueId)
@@ -1013,7 +1032,7 @@ async function completeAndAttributeB4BitPaymentInTx(
   }
 
   const merged = mergeB4BitProcessorData(freshPayment.processorData, processorPatch)
-  if (merged.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
+  if (merged.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true, vales }
 
   if (freshPayment.status === 'COMPLETED') {
     // A redelivery may refresh provider metadata, but it must not mention
@@ -1022,11 +1041,11 @@ async function completeAndAttributeB4BitPaymentInTx(
       where: { id: paymentId, venueId: paymentVenueId },
       data: { status: 'COMPLETED', processorData: merged.processorData },
     })
-    return { transitioned: false, ignoredAsOutOfOrder: false }
+    return { transitioned: false, ignoredAsOutOfOrder: false, vales }
   }
 
   if (freshPayment.status !== 'PENDING') {
-    return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: freshPayment.status }
+    return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: freshPayment.status, vales }
   }
 
   const priorCompletedPaymentCount = paymentOrderId
@@ -1053,11 +1072,11 @@ async function completeAndAttributeB4BitPaymentInTx(
     })
     if (!winner) throw new Error(`B4Bit payment ${paymentId} no longer exists for venue ${paymentVenueId}`)
     if (winner.status !== 'COMPLETED') {
-      return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: winner.status }
+      return { transitioned: false, ignoredAsOutOfOrder: false, preservedStatus: winner.status, vales }
     }
 
     const winnerMerge = mergeB4BitProcessorData(winner.processorData, processorPatch)
-    if (winnerMerge.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true }
+    if (winnerMerge.ignoredAsOutOfOrder) return { transitioned: false, ignoredAsOutOfOrder: true, vales }
 
     await tx.payment.update({
       where: { id: paymentId, venueId: paymentVenueId },
@@ -1066,7 +1085,7 @@ async function completeAndAttributeB4BitPaymentInTx(
         processorData: winnerMerge.processorData,
       },
     })
-    return { transitioned: false, ignoredAsOutOfOrder: false }
+    return { transitioned: false, ignoredAsOutOfOrder: false, vales }
   }
 
   // Resolve only after winning the payment transition: a redelivery/concurrent
@@ -1078,6 +1097,7 @@ async function completeAndAttributeB4BitPaymentInTx(
     amountPesos,
     tipPesos,
     incrementTotalOrders: Boolean(paymentOrderId) && priorCompletedPaymentCount === 0,
+    orderId: paymentOrderId,
   })
 
   if (shiftClaim.shiftId) {
@@ -1099,7 +1119,10 @@ async function completeAndAttributeB4BitPaymentInTx(
     })
   }
 
-  return { transitioned: true, ignoredAsOutOfOrder: false }
+  // FT-GRAVES T2: sólo quien GANÓ la transición a COMPLETED (una reentrega no llega aquí) comisiona, con el MISMO gancho que la
+  // terminal y en esta transacción. El esquema decide a quién (quien inició el cobro en la terminal); sin persona, nada.
+  await enqueuePaymentCommissionInTx(tx, paymentId)
+  return { transitioned: true, ignoredAsOutOfOrder: false, vales }
 }
 
 /**
@@ -1190,6 +1213,9 @@ async function settleOrderForConfirmedCryptoPayment(
             subtotal: true,
             discountAmount: true,
             serviceChargeAmount: true,
+            // P12: el IVA que va aparte entra al saldo con la regla compartida (contrato, impuesto y estado).
+            contratoDePrecio: true,
+            taxAmount: true,
             paidAmount: true,
             remainingBalance: true,
             completedAt: true,
@@ -1210,6 +1236,8 @@ async function settleOrderForConfirmedCryptoPayment(
           becamePaid: false,
           paidAmount: Number(fresh.paidAmount ?? 0).toFixed(2),
           remainingBalance: Number(fresh.remainingBalance ?? 0).toFixed(2),
+          paymentStatus: fresh.paymentStatus,
+          ventaCerrada: false,
           balanceSkipped: reason,
         })
 
@@ -1278,30 +1306,41 @@ async function settleOrderForConfirmedCryptoPayment(
           })
         }
 
-        const wasAlreadyPaid = fresh.paymentStatus === 'PAID'
+        // 🔴 R8-1 (Codex recheck-12 P2): el dinero cripto que ENTRA nunca reabre una venta cerrada (PAID/REFUNDED): conserva su
+        // estado, saldo 0, sin cierre nuevo ni efectos de saldar (un REFUNDED que la cubría daba un segundo vale). La iniciación
+        // rechaza una cuenta PAID, pero entre iniciar y confirmar la venta pudo saldarse por otro camino. `cerrada` es además el
+        // «ya estaba pagada» de siempre (un `CO` reentregado no re-marca ni crea otro vale).
+        const cobro = estadoDeCobroAlRecibirDinero(fresh.paymentStatus, true, {
+          paymentStatus: balance.isFullyPaid ? ('PAID' as const) : ('PARTIAL' as const),
+          remainingBalance: balance.remainingBalance,
+        })
 
         const transition = await tx.order.updateMany({
           // El filtro de `status` cierra la carrera: si cancelan la orden entre la
           // relectura y este write, la CAS no encuentra fila (count 0) y el
           // reintento la relee ya CANCELLED, donde el guard de arriba la ataja.
+          // R8-1: y el de `paymentStatus`, la del estado previo — si otro camino la saldó en medio, el reintento lo relee.
           where: {
             id: payment.orderId,
             venueId: payment.venueId,
             version: fresh.version,
+            paymentStatus: fresh.paymentStatus,
             status: { notIn: ['CANCELLED', 'DELETED'] },
           },
           data: {
             // Sólo el derivado del cobro. `total`/`tipAmount` NO se tocan — ver el
             // bloque de `Order.total` en el docstring (cuota de envío de agregador).
-            paymentStatus: balance.isFullyPaid ? 'PAID' : 'PARTIAL',
+            paymentStatus: cobro.paymentStatus,
             paidAmount: balance.paidAmount,
-            remainingBalance: balance.remainingBalance,
+            remainingBalance: cobro.remainingBalance,
             version: { increment: 1 },
             // `completedAt` se conserva si ya existía: la venta se cerró una vez,
             // no una por cada reentrega del webhook.
-            ...(balance.isFullyPaid ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() } : {}),
+            ...(balance.isFullyPaid && !cobro.cerrada
+              ? { status: 'COMPLETED' as const, completedAt: fresh.completedAt ?? new Date() }
+              : {}),
             // Sólo en la TRANSICIÓN real a pagado, igual que el vale de inventario: un CO reentregado no re-marca.
-            ...(balance.isFullyPaid && !wasAlreadyPaid && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+            ...(balance.isFullyPaid && !cobro.cerrada && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
           },
         })
 
@@ -1328,8 +1367,9 @@ async function settleOrderForConfirmedCryptoPayment(
         // 🔑 Sólo en la TRANSICIÓN REAL a pagado, igual que el hook de referidos: un
         // abono parcial no descuenta (regla de `payments.md`), y un `CO` reentregado
         // sobre una cuenta que ya estaba PAID descontaría la venta DOS veces.
-        const becamePaid = balance.isFullyPaid && !wasAlreadyPaid
+        const becamePaid = balance.isFullyPaid && !cobro.cerrada
         let postingId: string | null = null
+        let sesionDeValesCerrada = false
         if (becamePaid) {
           // Los renglones se leen con la MISMA tx, no con `prisma`: fuera de ella
           // no verían lo que esta transacción aún no ha commiteado.
@@ -1345,16 +1385,35 @@ async function settleOrderForConfirmedCryptoPayment(
             staffId: payment.processedById,
           })
           postingId = posting?.id ?? null
+          // 🔴 R11-8: este vale ya tomó todos los renglones (también los del vale v7): la sesión deja de presentarse cobrable.
+          if (completion.vales) {
+            const { cerrarSesionDeValesAlCerrarLaVenta } = await import('../mobile/areaTicketV7.mobile.service')
+            sesionDeValesCerrada = await cerrarSesionDeValesAlCerrarLaVenta(tx, completion.vales.session, {
+              venueId: payment.venueId,
+              orderId: payment.orderId,
+            })
+          }
+          // R8: una cuenta de tarjetas pagada con cripto activa sus sobres en la MISMA transacción.
+          await activarSobresDeCuentaPagadaEnTx(tx, {
+            venueId: payment.venueId,
+            orderId: payment.orderId,
+            staffId: payment.processedById ?? null,
+            items: txItems,
+          })
         }
 
+        // R9-2: lo que se ESCRIBIÓ (el estado y el saldo conservados de una venta cerrada), no la aritmética, para el log de abajo.
         return {
           isFullyPaid: balance.isFullyPaid,
           becamePaid,
           paidAmount: balance.paidAmount.toFixed(2),
-          remainingBalance: balance.remainingBalance.toFixed(2),
+          remainingBalance: new Prisma.Decimal(cobro.remainingBalance).toFixed(2),
+          paymentStatus: cobro.paymentStatus,
+          ventaCerrada: cobro.cerrada,
           postingId,
+          ...(sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}),
         }
-      })
+      }, ORDER_LOCK_WAIT_BUDGET)
     } catch (error: any) {
       // Se reintentan DOS cosas, y sólo dos: perder la CAS contra otro cobro, y
       // que el vale de inventario no se pudiera escribir (ver
@@ -1407,7 +1466,7 @@ async function settleOrderForConfirmedCryptoPayment(
         },
         reconciliationEnabled,
       )
-    })
+    }, ORDER_LOCK_WAIT_BUDGET)
   } catch (persistError: any) {
     logger.error('🚨 [B4Bit settlement] NO SE PUDO REGISTRAR EL COBRO CRIPTO — dinero cobrado sin Payment COMPLETED', {
       paymentId: payment.id,
@@ -1544,10 +1603,33 @@ async function handlePaymentConfirmed(
 
   if (payment.orderId && settlement) {
     if (!settlement.balanceSkipped) {
-      logger.info(settlement.isFullyPaid ? '📦 Order marked as PAID' : '📦 Order partially paid — balance still open', {
-        orderId: payment.orderId,
-        paidAmount: settlement.paidAmount,
-        remainingBalance: settlement.remainingBalance,
+      // R9-2: dice lo que quedó escrito. Una venta ya cerrada que recibe el cobro se conserva cerrada (R8-1): no es «partially paid».
+      logger.info(
+        settlement.ventaCerrada
+          ? '📦 Order already closed — crypto payment recorded, the sale stays closed'
+          : settlement.isFullyPaid
+            ? '📦 Order marked as PAID'
+            : '📦 Order partially paid — balance still open',
+        {
+          orderId: payment.orderId,
+          paymentStatus: settlement.paymentStatus,
+          paidAmount: settlement.paidAmount,
+          remainingBalance: settlement.remainingBalance,
+          ventaCerrada: settlement.ventaCerrada,
+          ...(settlement.sesionDeValesCerrada ? { sesionDeValesCerrada: true } : {}),
+        },
+      )
+    }
+    // R11-8: este canal no asienta su cierre en la bitácora; cerrar la sesión de vales sí es un cambio de estado (raro: sólo una
+    // venta de vales que se salda con cripto). Fuera de la transacción y sin poder tumbar nada (`logAction` nunca lanza).
+    if (settlement.sesionDeValesCerrada) {
+      void logAction({
+        staffId: payment.processedById ?? null,
+        venueId: payment.venueId,
+        action: 'AREA_TICKET_SESSION_CLOSED_BY_SALE',
+        entity: 'Order',
+        entityId: payment.orderId,
+        data: { channel: 'b4bit', paymentId: payment.id },
       })
     }
 

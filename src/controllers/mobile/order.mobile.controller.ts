@@ -10,6 +10,13 @@ import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
+import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
+import { sendHttpOperationReply } from './http-operation.mobile.controller'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
+import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
 
 /**
  * List orders for a venue (paginated)
@@ -72,6 +79,8 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       stampRewardId,
       stampRewardAware,
       stampRewardExpectedDiscount,
+      isOfflineReplay,
+      createdAtLocal,
     } = req.body
 
     // Validate required fields
@@ -220,6 +229,10 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
         typeof stampRewardExpectedDiscount === 'number' && Number.isFinite(stampRewardExpectedDiscount)
           ? stampRewardExpectedDiscount
           : null,
+      // «Se cobra el precio que vio el cliente»: la cola sin red («la venta ya ocurrió») nunca recibe el 409 de precio
+      // cambiado. Sólo el `true` literal cuenta. La hora de captura la interpreta el servicio; los campos de línea, también.
+      isOfflineReplay: isOfflineReplay === true,
+      createdAtLocal: typeof createdAtLocal === 'number' || typeof createdAtLocal === 'string' ? createdAtLocal : null,
     })
 
     res.status(201).json({
@@ -252,6 +265,23 @@ export const getOrder = async (req: Request, res: Response, next: NextFunction) 
     logger.error('Error in getOrder controller:', error)
     next(error)
   }
+}
+
+/**
+ * 🔴 H1 — la cola de cobros de Android ≤ 2.23 (y de su app de Windows, el mismo código: `x-device-platform: ANDROID`,
+ * `x-app-version` «2.23.0-escritorio») reenvía el TOTAL de la cuenta aunque el aparato sólo cobró su parte del split
+ * (`queueCashPayment(orderRequest = buildOrderRequest(cart))` ⇒ `amountCents = total − propina`; arreglado en avoqado-android
+ * `8c21d450`, que entra en `v2.24.0-64` y `tienda-windows/v2.24.0`). Antes de S1/S2 el recorte al saldo lo tapaba por accidente;
+ * con S1/S2 se registrarían $100 por $50 cobrados y el cajero firmaría un faltante falso. Para ESA cola, `payCashOrder` se porta
+ * como antes (`colaConDefectoH1`). Una versión ilegible de Android cuenta como vieja. El intent `PAY_CASH` de esas versiones sí
+ * manda la parte correcta: no pasa por aquí.
+ *
+ * Se puede QUITAR cuando no quede flota ≤ 2.23 (POS_ANDROID con latido en los últimos 30 días; medido el 17-oct-2026: 10 aparatos
+ * en 7 negocios con 2.22.2–2.23.0).
+ */
+export function esColaConDefectoH1(plataforma: unknown, version: unknown): boolean {
+  if (typeof plataforma !== 'string' || plataforma.trim().toUpperCase() !== 'ANDROID') return false
+  return !versionAlMenos(typeof version === 'string' ? version : null, '2.24.0')
 }
 
 /**
@@ -349,6 +379,14 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // ventas del lunes que no habían sincronizado NO pueden quedar atoradas para
       // siempre. Un desenlace ya ocurrido es un hecho, no se re-litiga.
       isOfflineReplay: req.body.isOfflineReplay === true,
+      colaConDefectoH1:
+        req.body.isOfflineReplay === true && esColaConDefectoH1(req.headers?.['x-device-platform'], req.headers?.['x-app-version']),
+      // R2-6: la propiedad de mesa dejó pasar dinero ya capturado sobre una mesa ajena (`checkTableOwnership`, ruta de cobro).
+      mesaAjena: res.locals?.mesaAjena,
+      // R5-1: la propiedad de mesa sólo autorizó RECUPERAR el pago de esta llave (`checkTableOwnership`, ruta de cobro).
+      soloRecuperarPago: res.locals?.soloRecuperarPago,
+      // R6-3: la propiedad de mesa estaba encendida; el cobro la vuelve a revisar bajo el candado (`checkTableOwnership`, ruta de cobro).
+      propiedadDeMesa: res.locals?.propiedadDeMesa,
     })
 
     res.status(200).json({
@@ -356,6 +394,12 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       payment: result,
     })
   } catch (error) {
+    // R5-1: el MISMO 403 que responde `checkTableOwnership` a una mesa ajena (el pago que sólo podía recuperarse ya no está).
+    // R6-3: también cuando la cuenta resultó ajena hasta la relectura bajo el candado.
+    if (error instanceof MesaAjenaSoloRecuperacion) {
+      logger.info(`payCash: mesa ajena — el pago de la llave ya no existe; no se crea otro (${(error as Error).message})`)
+      return res.status(403).json(cuerpoMesaAjena(error.dueno))
+    }
     // Un rechazo de NEGOCIO (4xx: "ya está pagada", saldo, permisos) no es una falla del server:
     // logueado como `error:` ensuciaba el barrido de errores del log (/full-testing 2026-08-18).
     // El errorHandler ya lo registra con su nivel por status; aquí sólo se marca el 5xx real.
@@ -381,12 +425,33 @@ export const cancelOrder = async (req: Request, res: Response, next: NextFunctio
     const { reason } = req.body
     const performedBy = (req as any).authContext?.userId as string | undefined
 
-    await orderMobileService.cancelOrder(venueId, orderId, reason, performedBy)
-
-    res.status(200).json({
-      success: true,
-      message: 'Orden cancelada exitosamente',
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      await orderMobileService.cancelOrder(venueId, orderId, reason, performedBy)
+      res.status(200).json({ success: true, message: 'Orden cancelada exitosamente' })
+      return
+    }
+    if (!performedBy) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'cancelOrder', refs: { orderId }, payload: { reason: reason ?? null } })
+    if (!parsed.success || parsed.data.action !== 'cancelOrder')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let result: Awaited<ReturnType<typeof orderMobileService.cancelOrderInTransaction>> | undefined
+    const reply = await executeHttpOperation({ venueId, actorId: performedBy, operation, manifest }, async tx => {
+      result = await orderMobileService.cancelOrderInTransaction(tx, venueId, orderId, manifest.payload.reason ?? undefined, performedBy)
+      return {
+        response: { status: 200, body: { success: true, message: 'Orden cancelada exitosamente' } },
+        affectedRefs: result.affectedRefs,
+      }
     })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
+      try {
+        await orderMobileService.publishCancelledOrder(venueId, result, performedBy, manifest.payload.reason ?? undefined)
+      } catch (error) {
+        logger.error('cancelOrder committed; notification failed', error)
+      }
+    }
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     logger.error('Error in cancelOrder controller:', error)
     next(error)
@@ -445,10 +510,65 @@ export const compOrderItem = async (req: Request, res: Response, next: NextFunct
     const { reason } = req.body
     const staffId = (req as any).authContext?.userId as string | undefined
 
-    const { compOrderItem: compItem } = await import('../../services/mobile/comp-item.mobile.service')
-    const result = await compItem({ venueId, orderId, itemId, reason, staffId })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const { compOrderItem: compItem } = await import('../../services/mobile/comp-item.mobile.service')
+      const result = await compItem({ venueId, orderId, itemId, reason, staffId })
 
-    return res.json({ success: true, data: result })
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'compItem', refs: { orderId, itemId }, payload: { reason } })
+    if (!parsed.success || parsed.data.action !== 'compItem')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let auditData: Parameters<typeof logAction>[0]['data']
+    const { compOrderItemInTransaction } = await import('../../services/mobile/comp-item.mobile.service')
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      const r = await compOrderItemInTransaction(tx, {
+        venueId,
+        orderId,
+        itemId,
+        reason: manifest.payload.reason,
+        staffId,
+        captureBenefits: true,
+      })
+      auditData = {
+        orderId,
+        reason: manifest.payload.reason,
+        productName: r.item.productName,
+        amount: Number(r.item.total),
+        ...(r.recorte.retiradas.length ? { descuentosRetirados: r.recorte.retiradas } : {}),
+      }
+      if (!r.recorte.benefits) throw new Error('Missing in-transaction benefit capture')
+      return {
+        response: { status: 200, body: { success: true, data: { itemId, reason: manifest.payload.reason, ...r.totals } } },
+        effects: { discountBenefits: r.recorte.benefits },
+        affectedRefs: [
+          { kind: 'Order', id: orderId },
+          { kind: 'OrderItem', id: itemId },
+          ...r.recorte.retiradas.map(d => ({ kind: 'OrderDiscount' as const, id: d.id })),
+          ...r.recorte.benefits.flatMap(b => [
+            ...(b.loyaltyRefund
+              ? [
+                  { kind: 'Customer' as const, id: b.loyaltyRefund.customerId },
+                  { kind: 'LoyaltyTransaction' as const, id: b.loyaltyRefund.transactionId },
+                ]
+              : []),
+            ...(b.stampRefund
+              ? [
+                  { kind: 'Customer' as const, id: b.stampRefund.customerId },
+                  { kind: 'StampReward' as const, id: b.stampRefund.rewardId },
+                ]
+              : []),
+          ]),
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
+      void logAction({ action: 'ORDER_ITEM_COMPED', entity: 'OrderItem', entityId: itemId, staffId, venueId, data: auditData })
+    }
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }
@@ -465,10 +585,64 @@ export const compWholeOrder = async (req: Request, res: Response, next: NextFunc
     const { reason } = req.body
     const staffId = (req as any).authContext?.userId as string | undefined
 
-    const { compWholeOrder: compAll } = await import('../../services/mobile/comp-item.mobile.service')
-    const result = await compAll({ venueId, orderId, reason, staffId })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const { compWholeOrder: compAll } = await import('../../services/mobile/comp-item.mobile.service')
+      const result = await compAll({ venueId, orderId, reason, staffId })
 
-    return res.json({ success: true, data: result })
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'compWholeOrder', refs: { orderId }, payload: { reason } })
+    if (!parsed.success || parsed.data.action !== 'compWholeOrder')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let auditData: Parameters<typeof logAction>[0]['data']
+    const { compWholeOrderInTransaction } = await import('../../services/mobile/comp-item.mobile.service')
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      const r = await compWholeOrderInTransaction(tx, { venueId, orderId, reason: manifest.payload.reason, staffId, captureBenefits: true })
+      auditData = {
+        reason: manifest.payload.reason,
+        items: r.items.length,
+        amount: r.compedAmount,
+        orderNumber: r.order.orderNumber,
+        ...(r.recorte.retiradas.length ? { descuentosRetirados: r.recorte.retiradas } : {}),
+      }
+      if (!r.recorte.benefits) throw new Error('Missing in-transaction benefit capture')
+      return {
+        response: {
+          status: 200,
+          body: {
+            success: true,
+            data: { itemsComped: r.items.length, compedAmount: r.compedAmount, reason: manifest.payload.reason, ...r.totals },
+          },
+        },
+        effects: { discountBenefits: r.recorte.benefits },
+        affectedRefs: [
+          { kind: 'Order', id: orderId },
+          ...r.items.map(x => ({ kind: 'OrderItem' as const, id: x.id })),
+          ...r.recorte.retiradas.map(d => ({ kind: 'OrderDiscount' as const, id: d.id })),
+          ...r.recorte.benefits.flatMap(b => [
+            ...(b.loyaltyRefund
+              ? [
+                  { kind: 'Customer' as const, id: b.loyaltyRefund.customerId },
+                  { kind: 'LoyaltyTransaction' as const, id: b.loyaltyRefund.transactionId },
+                ]
+              : []),
+            ...(b.stampRefund
+              ? [
+                  { kind: 'Customer' as const, id: b.stampRefund.customerId },
+                  { kind: 'StampReward' as const, id: b.stampRefund.rewardId },
+                ]
+              : []),
+          ]),
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
+      void logAction({ action: 'ORDER_COMPED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
+    }
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }
@@ -484,11 +658,57 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     const { venueId, orderId } = req.params
     const { name, notes, covers, customerId, orderType } = req.body || {}
 
-    const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType })
-
-    return res.json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
+    // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae un `customerId` (null = sin cambio).
+    const opciones =
+      customerId !== undefined && customerId !== null
+        ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) }
+        : {}
+    if (!operation) {
+      const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType }, opciones)
+      return res.json({ success: true, data: result })
+    }
+    const actorId = (req as any).authContext?.userId as string | undefined
+    if (!actorId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({
+      action: 'updateOrderDetails',
+      refs: { orderId },
+      payload: { name, notes, covers, customerId, orderType },
+    })
+    if (!parsed.success || parsed.data.action !== 'updateOrderDetails')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    const reply = await executeHttpOperation({ venueId, actorId, operation, manifest }, async tx => {
+      const r = await orderMobileService.updateOrderDetailsInTransaction(tx, venueId, orderId, manifest.payload, opciones)
+      return {
+        response: { status: 200, body: { success: true, data: r.data } },
+        affectedRefs: [
+          { kind: 'Order', id: orderId },
+          ...r.affectedServiceChargeIds.map(id => ({ kind: 'OrderServiceCharge' as const, id })),
+          ...(manifest.payload.customerId ? [{ kind: 'Customer' as const, id: manifest.payload.customerId }] : []),
+        ],
+      }
+    })
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
+  }
+}
+
+/**
+ * ¿Quien edita el detalle de la cuenta tiene `payments:create`? Con el resolvedor EFECTIVO de siempre (`tienePermisoEnVenue`:
+ * el de `checkPermission`, con personalizaciones del negocio y conjuntos de permisos). Falla CERRADO: si no se puede resolver,
+ * no se cambia el cliente de una venta cobrada (403) y queda en el log.
+ */
+async function puedeCambiarClienteEnVentaCobrada(req: Request): Promise<boolean> {
+  try {
+    return await tienePermisoEnVenue(req, 'payments:create')
+  } catch (error) {
+    logger.warn('[ORDER.MOBILE] No se pudo resolver payments:create para cambiar el cliente: se trata como sin permiso', {
+      error: error instanceof Error ? error.message : String(error),
+    })
+    return false
   }
 }
 
@@ -505,8 +725,35 @@ export const applyOrderDiscount = async (req: Request, res: Response, next: Next
     if (!discountId || typeof discountId !== 'string') {
       return res.status(400).json({ success: false, message: 'discountId is required' })
     }
-    const result = await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId)
-    return res.json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const result = await orderMobileService.applyOrderDiscount(venueId, orderId, discountId, staffId)
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'applyOrderDiscount', refs: { orderId, discountId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'applyOrderDiscount')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let auditData: Parameters<typeof logAction>[0]['data']
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      const r = await orderMobileService.applyOrderDiscountInTransaction(tx, venueId, orderId, manifest.refs.discountId, staffId)
+      auditData = { discountId: manifest.refs.discountId, name: r.row.name, amount: Number(r.row.amount) }
+      return {
+        response: {
+          status: 200,
+          body: { success: true, data: { orderDiscountId: r.row.id, name: r.row.name, amount: Number(r.row.amount), ...r.totals } },
+        },
+        affectedRefs: [
+          { kind: 'Order', id: orderId },
+          { kind: 'OrderDiscount', id: r.row.id },
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
+      void logAction({ action: 'ORDER_DISCOUNT_APPLIED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
+    }
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }
@@ -524,8 +771,29 @@ export const mergeOrders = async (req: Request, res: Response, next: NextFunctio
     if (!sourceOrderId || typeof sourceOrderId !== 'string') {
       return res.status(400).json({ success: false, message: 'sourceOrderId is required' })
     }
-    const result = await orderMobileService.mergeOrders(venueId, orderId, sourceOrderId, staffId)
-    return res.json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const result = await orderMobileService.mergeOrders(venueId, orderId, sourceOrderId, staffId)
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'mergeOrders', refs: { orderId, sourceOrderId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'mergeOrders')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let result: Awaited<ReturnType<typeof orderMobileService.mergeOrdersInTransaction>> | undefined
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      result = await orderMobileService.mergeOrdersInTransaction(tx, venueId, orderId, manifest.refs.sourceOrderId, staffId)
+      return { response: { status: 200, body: { success: true, data: result.data } }, affectedRefs: result.affectedRefs }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
+      try {
+        await orderMobileService.publishMergedOrders(venueId, result, staffId)
+      } catch (error) {
+        logger.error('mergeOrders committed; notification failed', error)
+      }
+    }
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }
@@ -539,8 +807,40 @@ export const splitOrderBySeat = async (req: Request, res: Response, next: NextFu
   try {
     const { venueId, orderId } = req.params
     const staffId = (req as any).authContext?.userId as string | undefined
-    const result = await orderMobileService.splitOrderBySeat(venueId, orderId, staffId)
-    return res.json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const result = await orderMobileService.splitOrderBySeat(venueId, orderId, staffId)
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'splitOrderBySeat', refs: { orderId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'splitOrderBySeat')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    let auditData: Parameters<typeof logAction>[0]['data']
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest: parsed.data }, async tx => {
+      const r = await orderMobileService.splitOrderBySeatInTransaction(tx, venueId, orderId, staffId)
+      auditData = { seats: r.seatsToMove, created: r.results.length }
+      return {
+        response: {
+          status: 200,
+          body: {
+            success: true,
+            data: {
+              source: { id: r.source.id, orderNumber: r.source.orderNumber, total: r.sourceTotals.total, seat: r.seats[0] },
+              created: r.results,
+            },
+          },
+        },
+        affectedRefs: [
+          { kind: 'Order', id: r.source.id },
+          ...r.results.map(x => ({ kind: 'Order' as const, id: x.id })),
+          ...r.movedItemIds.map(id => ({ kind: 'OrderItem' as const, id })),
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow)
+      void logAction({ action: 'ORDER_SPLIT_BY_SEAT', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }
@@ -554,8 +854,51 @@ export const removeOrderDiscount = async (req: Request, res: Response, next: Nex
   try {
     const { venueId, orderId, orderDiscountId } = req.params
     const staffId = (req as any).authContext?.userId as string | undefined
-    const result = await orderMobileService.removeOrderDiscount(venueId, orderId, orderDiscountId, staffId)
-    return res.json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const result = await orderMobileService.removeOrderDiscount(venueId, orderId, orderDiscountId, staffId)
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'removeOrderDiscount', refs: { orderId, orderDiscountId }, payload: {} })
+    if (!parsed.success || parsed.data.action !== 'removeOrderDiscount')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let auditData: Parameters<typeof logAction>[0]['data']
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      const r = await orderMobileService.removeOrderDiscountInTransaction(tx, venueId, orderId, manifest.refs.orderDiscountId, staffId)
+      auditData = {
+        orderDiscountId: manifest.refs.orderDiscountId,
+        name: r.row.name,
+        pointsRefunded: r.refund?.pointsRefunded ?? 0,
+        stampRewardReturned: r.stampRefund?.rewardId ?? null,
+        taxReturned: Number(r.row.taxReduction ?? 0),
+      }
+      return {
+        response: { status: 200, body: { success: true, data: r.totals } },
+        effects: { loyaltyRefund: r.refund, stampRefund: r.stampRefund },
+        affectedRefs: [
+          { kind: 'Order', id: orderId },
+          { kind: 'OrderDiscount', id: r.row.id },
+          ...(r.refund
+            ? [
+                { kind: 'Customer' as const, id: r.refund.customerId },
+                { kind: 'LoyaltyTransaction' as const, id: r.refund.transactionId },
+              ]
+            : []),
+          ...(r.stampRefund
+            ? [
+                { kind: 'StampReward' as const, id: r.stampRefund.rewardId },
+                { kind: 'Customer' as const, id: r.stampRefund.customerId },
+              ]
+            : []),
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow) {
+      void logAction({ action: 'ORDER_DISCOUNT_REMOVED', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
+    }
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }
@@ -571,8 +914,42 @@ export const splitOrder = async (req: Request, res: Response, next: NextFunction
     const { venueId, orderId } = req.params
     const { itemIds } = req.body || {}
     const staffId = (req as any).authContext?.userId as string | undefined
-    const result = await orderMobileService.splitOrderItems(venueId, orderId, itemIds, staffId)
-    return res.json({ success: true, data: result })
+    const operation = parseHttpOperation(req.body)
+    if (!operation) {
+      const result = await orderMobileService.splitOrderItems(venueId, orderId, itemIds, staffId)
+      return res.json({ success: true, data: result })
+    }
+    if (!staffId) throw new UnauthorizedError('Autenticación requerida')
+    const parsed = manifestSchema.safeParse({ action: 'splitOrder', refs: { orderId }, payload: { itemIds } })
+    if (!parsed.success || parsed.data.action !== 'splitOrder')
+      throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
+    const manifest = parsed.data
+    let auditData: Parameters<typeof logAction>[0]['data']
+    const reply = await executeHttpOperation({ venueId, actorId: staffId, operation, manifest }, async tx => {
+      const r = await orderMobileService.splitOrderItemsInTransaction(tx, venueId, orderId, manifest.payload.itemIds, staffId, true)
+      auditData = { newOrderId: r.newOrder.id, newOrderNumber: r.newOrder.orderNumber, items: r.movedCount }
+      return {
+        response: {
+          status: 200,
+          body: {
+            success: true,
+            data: {
+              source: { id: r.source.id, orderNumber: r.source.orderNumber, total: r.sourceTotals.total, version: r.sourceTotals.version },
+              created: { id: r.newOrder.id, orderNumber: r.newOrder.orderNumber, total: r.newTotals.total, version: r.newTotals.version },
+            },
+          },
+        },
+        affectedRefs: [
+          { kind: 'Order', id: r.source.id },
+          { kind: 'Order', id: r.newOrder.id },
+          ...r.movedItemIds.map(id => ({ kind: 'OrderItem' as const, id })),
+          ...r.movedPromotionIds.map(id => ({ kind: 'OrderPromotion' as const, id })),
+        ],
+      }
+    })
+    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow)
+      void logAction({ action: 'ORDER_SPLIT', entity: 'Order', entityId: orderId, staffId, venueId, data: auditData })
+    return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     next(error)
   }

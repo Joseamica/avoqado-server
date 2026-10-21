@@ -1,12 +1,15 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 /**
  * El cobro rápido (`POST /fast`) debe ACEPTAR y PERSISTIR el cliente de la venta.
@@ -524,6 +527,42 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
 
     expect(link.status).toBe('LINKED')
     expect(link.customerId).toBe('cust-1')
+  })
+
+  // ---------------------------------------------------------------------------
+  // 🔴 R3-2 (ronda 3 post-QA de sellos tardíos; Codex recheck-7 P2-2, cruce A): `/fast` escribía `OrderCustomer` ANTES que
+  // `Order` sin tomar el candado de la venta, al revés que la liga del POS y de la TPV (venta → vínculo): las dos se esperaban
+  // y Postgres mataba a una (40P01). Ahora toma PRIMERO el candado de la venta y relee la atribución DENTRO.
+  // ---------------------------------------------------------------------------
+  it('🔴 R3-2: la escritura toma PRIMERO el candado de la venta y RELEE la atribución dentro: si otro ganó, CONFLICT sin escribir', async () => {
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'orden-1', venueId: VENUE, customerId: null })
+    // Afuera: hueco. Dentro (bajo el candado): otro cliente ya quedó primario.
+    prismaMock.orderCustomer.findMany
+      .mockResolvedValueOnce([])
+      .mockResolvedValueOnce([{ id: 'oc-B', customerId: 'cust-B', isPrimary: true }])
+
+    const link = await linkCustomerToExistingOrder(VENUE, 'orden-1', 'cust-1')
+
+    expect(link).toMatchObject({ status: 'CONFLICT', customerId: 'cust-B' })
+    expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    const [sql] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray]
+    expect(sql.join('?')).toMatch(/FROM "Order"[\s\S]*FOR NO KEY UPDATE/)
+    expect(prismaMock.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.orderCustomer.findMany.mock.invocationCallOrder[1])
+    expect(prismaMock.$transaction).toHaveBeenCalledWith(expect.any(Function), { timeout: 15_000, maxWait: 5_000 })
+  })
+
+  it('R3-2: un bloqueo mutuo (40P01) en la escritura se reintenta (acotado) y la liga sale', async () => {
+    prismaMock.customer.findUnique.mockResolvedValue(CLIENTE)
+    prismaMock.order.findFirst.mockResolvedValue({ id: 'orden-1', venueId: VENUE, customerId: null })
+    prismaMock.orderCustomer.findMany.mockResolvedValue([])
+    prismaMock.$transaction.mockRejectedValueOnce(Object.assign(new Error('deadlock detected'), { code: 'P2010', meta: { code: '40P01' } }))
+
+    const link = await linkCustomerToExistingOrder(VENUE, 'orden-1', 'cust-1')
+
+    expect(link.status).toBe('LINKED')
+    expect(prismaMock.orderCustomer.create).toHaveBeenCalledTimes(1)
   })
 
   // ---------------------------------------------------------------------------

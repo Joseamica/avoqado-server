@@ -1,3 +1,4 @@
+import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
 import express, { Router } from 'express'
 import { z } from 'zod'
@@ -29,6 +30,7 @@ import * as customerEmailController from '../controllers/public/customerEmail.pu
 import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
+import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
@@ -58,7 +60,6 @@ import {
   publicPacksParamsSchema,
   publicBalanceQuerySchema,
   publicCheckoutSchema,
-  customerRegisterSchema,
   customerLoginSchema,
   customerUpdateProfileSchema,
   otpRequestSchema,
@@ -89,8 +90,10 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.service'
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
+import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
 
 const router = Router()
+router.use('/document-requests', documentRequestsRoutes)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))
@@ -126,6 +129,9 @@ const cfdiPerKeyLimit = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
 })
+
+// Pedidos en línea (tienda del restaurante): /venues/:venueSlug/ordering/*
+router.use('/venues/:venueSlug/ordering', onlineOrderingPublicRoutes)
 
 // Digital Receipt routes
 router.get('/receipt/:accessKey', getPublicReceipt)
@@ -306,7 +312,8 @@ router.post(
 
 // ---- Customer Portal (authenticated) ----
 
-router.post('/venues/:venueSlug/customer/register', authLimit, validateRequest(customerRegisterSchema), customerPortalController.register)
+// Toda cuenta nueva se crea con código (seguridad, 1-oct): esta ruta sólo responde, igual siempre, para páginas viejas en caché.
+router.post('/venues/:venueSlug/customer/register', authLimit, customerPortalController.register)
 
 router.post('/venues/:venueSlug/customer/login', authLimit, validateRequest(customerLoginSchema), customerPortalController.login)
 
@@ -369,7 +376,12 @@ router.post('/payment-links/:shortCode/mp-payment-intent', writeLimit, paymentLi
 
 // Brick onSubmit callback — receives the tokenized card from the Brick frontend
 // and creates the MP payment with application_fee on the seller's account.
-router.post('/payment-links/:shortCode/mp-pay', writeLimit, paymentLinkPublicController.executeMercadoPagoPayment)
+router.post(
+  '/payment-links/:shortCode/mp-pay',
+  writeLimit,
+  validateRequest(paymentLinkMpPaySchema),
+  paymentLinkPublicController.executeMercadoPagoPayment,
+)
 
 router.post('/payment-links/:shortCode/charge', writeLimit, validateRequest(publicChargeSchema), paymentLinkPublicController.completeCharge)
 

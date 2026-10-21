@@ -172,8 +172,8 @@ export function buildVenueInfo(venue: VenueParaTicket): ReceiptVenueInfo {
       lugarExpedicion: e.lugarExpedicion,
       merchantAccountIds: e.merchantConfigs.map(m => m.merchantAccountId).filter((id): id is string => Boolean(id)),
     })),
-    // El principal = el primero de la lista; el llamador la pide con orderBy createdAt asc,
-    // que es el mismo criterio que nómina y contabilidad (spec § 5.6, caso 2).
+    // El principal = el primero de la lista; el llamador la pide con el orden TOTAL del aparato,
+    // (createdAt, id) — `RECEIPT_VENUE_SELECT.fiscalEmisors` (spec § 5.6, caso 2).
     principalEmisorId: venue.fiscalEmisors[0]?.id ?? null,
     legacy: { legalName: venue.legalName, rfc: venue.rfc },
   }
@@ -202,7 +202,9 @@ export function buildReceiptInput(params: {
     items: order.items.map(aItem),
     subtotalCents: pesosACentavos(order.subtotal),
     taxCents: pesosACentavos(order.taxAmount),
-    discountCents: order.discountAmount ? pesosACentavos(order.discountAmount) || null : null,
+    // El descuento EFECTIVO de mercancía: desde B2/B2c la cabecera es la Σ de las filas SIN tope y puede pasar el subtotal
+    // (el total ya topa la mercancía en 0); imprimirla entera dejaría un ticket que no cuadra.
+    discountCents: Math.min(pesosACentavos(order.discountAmount), pesosACentavos(order.subtotal)) || null,
     tipCents: pesosACentavos(payment.tipAmount) || null,
     totalCents: pesosACentavos(order.total),
     tender: aTender(payment),

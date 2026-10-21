@@ -1,12 +1,15 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 /**
  * Regression tests — rollback compensatorio de deducción de inventario en
@@ -298,7 +301,7 @@ beforeEach(() => {
         // también capturaba la consulta de `closeRowFromPaymentTx` (`terminal-payment.service.ts:967`),
         // que pide importes, `source` y la terminal, y le devolvía sólo `{orderId}`. Un mock que
         // intercepta una consulta legítima le cambia el comportamiento al servicio: peor que el
-        // fallo que evita. `esConsultaDelOutbox` exige un `select` de ÚNICAMENTE `orderId`.
+        // fallo que evita. `esConsultaDelOutbox` exige un `select` de ÚNICAMENTE `orderId` (más la marca de tarjetas de B6).
         findFirst: jest
           .fn()
           .mockImplementation(async (a: any) =>
@@ -319,9 +322,16 @@ beforeEach(() => {
       },
       paymentAllocation: { create: prisma.paymentAllocation.create },
       venueTransaction: { create: prisma.venueTransaction.create },
-      order: { ...(prisma as any).order, update: prisma.order.update },
+      order: {
+        ...(prisma as any).order,
+        update: prisma.order.update,
+        // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed, so the latest pre-read row.
+        findFirst: jest.fn(() => (prisma.order.findUnique as jest.Mock).mock.results.slice(-1)[0]?.value),
+      },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
+      // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+      orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
       // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
       // tickets v7. Este `tx` se arma A MANO, así que un modelo que la ruta toque
       // y no esté aquí sale undefined y el test truena con un TypeError en lugar

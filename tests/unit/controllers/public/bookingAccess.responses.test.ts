@@ -4,7 +4,10 @@ jest.mock('@/utils/prismaClient', () => ({
 }))
 jest.mock('@/services/public/customerPortal.public.service', () => ({
   __esModule: true,
-  registerCustomer: jest.fn(async () => ({ token: 't', customer: { id: 'c1' } })),
+  // Desde el 1-oct toda cuenta nueva se crea con código: el registro con contraseña siempre rechaza.
+  registerCustomer: jest.fn(() => {
+    throw Object.assign(new Error('Para crear tu cuenta, entra con un código'), { statusCode: 400, code: 'CUSTOMER_REGISTER_USE_CODE' })
+  }),
   loginCustomer: jest.fn(async () => ({ token: 't', customer: { id: 'c1' } })),
   getCustomerPortal: jest.fn(async () => ({
     customer: { id: 'c1' },
@@ -27,10 +30,11 @@ jest.mock('@/services/public/bookingAccess.service', () => ({
 import * as portalController from '@/controllers/public/customerPortal.public.controller'
 import * as otpController from '@/controllers/public/otpAuth.public.controller'
 import { computeBookingAccess } from '@/services/public/bookingAccess.service'
+import prisma from '@/utils/prismaClient'
 
 /**
- * Fase 0.B — las CUATRO respuestas autenticadas llevan `bookingAccess` (login, register,
- * otp/verify, GET portal), calculado para el venue del slug. `getVenueInfo` (anónimo) no.
+ * Fase 0.B — las respuestas autenticadas llevan `bookingAccess` (login, otp/verify, GET portal), calculado para el venue
+ * del slug. `getVenueInfo` (anónimo) no. El registro con contraseña ya no emite sesión (1-oct: cuentas nuevas sólo con código).
  */
 function mkRes() {
   const res: any = { statusCode: 200 }
@@ -47,7 +51,7 @@ function mkRes() {
 
 const EXPECTED = { status: 'APPROVED', canCreateReservation: false, blockedBy: 'PLAN' }
 
-describe('bookingAccess en las 4 respuestas autenticadas', () => {
+describe('bookingAccess en las respuestas autenticadas (login, otp/verify, portal)', () => {
   beforeEach(() => jest.clearAllMocks())
 
   it('POST login → { token, customer, bookingAccess }', async () => {
@@ -58,15 +62,22 @@ describe('bookingAccess en las 4 respuestas autenticadas', () => {
     expect(computeBookingAccess).toHaveBeenCalledWith('venue-1', 'c1')
   })
 
-  it('POST register → 201 { token, customer, bookingAccess }', async () => {
+  it('POST register → pasa el 400 CUSTOMER_REGISTER_USE_CODE al manejador, sin sesión ni bookingAccess', async () => {
     const res = mkRes()
-    await portalController.register(
-      { params: { venueSlug: 'v' }, body: { email: 'a@b.com', password: 'Secreto123' } } as any,
-      res,
-      jest.fn(),
-    )
-    expect(res.statusCode).toBe(201)
-    expect(res.body).toEqual(expect.objectContaining({ token: 't', bookingAccess: EXPECTED }))
+    const next = jest.fn()
+    await portalController.register({ params: { venueSlug: 'v' }, body: { email: 'a@b.com', password: 'Secreto123' } } as any, res, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, code: 'CUSTOMER_REGISTER_USE_CODE' }))
+    expect(res.json).not.toHaveBeenCalled()
+    expect(computeBookingAccess).not.toHaveBeenCalled()
+  })
+
+  // Responde igual pase lo que pase: no consulta el negocio (un slug inactivo daría 404) ni mira el cuerpo.
+  it('POST register con negocio inexistente y cuerpo vacío → el mismo 400, sin consultar nada', async () => {
+    const res = mkRes()
+    const next = jest.fn()
+    await portalController.register({ params: { venueSlug: 'no-existe' }, body: {} } as any, res, next)
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, code: 'CUSTOMER_REGISTER_USE_CODE' }))
+    expect(prisma.venue.findFirst).not.toHaveBeenCalled()
   })
 
   it('POST otp/verify → { token, customer, bookingAccess }', async () => {

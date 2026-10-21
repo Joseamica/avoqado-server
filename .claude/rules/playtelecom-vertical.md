@@ -75,6 +75,27 @@ one.
 - **Moving a PT terminal between stores** (e.g. a "Cubre Descanso" relief promoter's PAX getting re-parented to the real store) is a
   money-safety issue, not just a config change — see `avoqado-tpv/.claude/rules/serialized-inventory-and-sim-custody.md`.
 
+## 🔴 Comisiones: PlayTelecom NO usa el motor genérico — sus promotores cobran por Cash Out (founder, 9-oct-2026)
+
+Hay DOS sistemas de comisiones y no se mezclan:
+
+| Sistema                                                                                                                    | Quién lo usa                                       | Dónde vive                                                                         |
+| -------------------------------------------------------------------------------------------------------------------------- | -------------------------------------------------- | ---------------------------------------------------------------------------------- |
+| **Motor genérico** (`CommissionConfig` → `PaymentEffect` → `CommissionCalculation`; gancho `enqueuePaymentCommissionInTx`) | los negocios normales (Mindform, Pago al personal) | `src/services/dashboard/commission/`, `src/services/tpv/paymentEffects.service.ts` |
+| **Cash Out** (`CashOutCommissionRate`, `PromoterCommissionEntry`, días activos; sobre ventas de SIM verificadas)           | los promotores de PlayTelecom                      | `src/services/dashboard/cash-out/`                                                 |
+
+Cash Out **no lee** el motor genérico.
+
+- 🔴 **No enganches el motor genérico a los flujos de PlayTelecom:** subida de ventas manuales de SIM (`manualSale.service.ts`),
+  verificación o rechazo de ventas (`sale-verification*`), inventario serializado, custodia de SIM, promotores ni Cash Out. Si PT llegara a
+  tener un `CommissionConfig`, sus promotores cobrarían DOS veces (Cash Out + genérico). Caso real: el 8-oct, un arreglo de la fase 3 de
+  Pago al personal (FT-GRAVES T2) le agregó `enqueuePaymentCommissionInTx` a `manualSale.service.ts`; se retiró antes de llegar a develop.
+- 🔴 **No crees un `CommissionConfig` para venues u organización de PlayTelecom** sin decidirlo con el founder. Hoy tienen 0. Sus ventas de
+  SIM por la TPV YA encolan el efecto genérico (`payment.tpv.service.ts`) y, sin esquemas, no pagan nada; con un esquema pagarían doble.
+- Un cambio genérico del motor de comisiones (reglas de cálculo, formas de cobro, solape de categorías, reversiones) **no aplica** a
+  PlayTelecom. Si tu cambio toca un archivo que PT también usa, no cambies su comportamiento para PT y dilo en el reporte.
+- Es un proyecto aparte: cómo cobran o cómo se les paga a los promotores se decide con el founder (e Isaac).
+
 ## 🔴 Cada petición manual de Isaac es un hueco de producto — detéctalo y propónlo
 
 **Instrucción directa del founder (2026-08-27):** _"Isaac me pide muchas cosas y cambios manuales, y la finalidad de todo es que no nos pida

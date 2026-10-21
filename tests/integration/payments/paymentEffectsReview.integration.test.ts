@@ -2,6 +2,7 @@
 import { randomUUID } from 'crypto'
 import { Prisma, PrismaClient } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import {
   enqueuePaymentEffect,
   enqueuePaymentCommissionInTx,
@@ -44,6 +45,8 @@ beforeEach(async () => {
     data: { id: organizationId, name: organizationId, email: organizationId + '@example.test', phone: '5500000000' },
   })
   venueId = (await prisma.venue.create({ data: { organizationId, name: organizationId, slug: organizationId } })).id
+  // Ruling R12: la categoría fixture usa un producto al 0 %; el venue representa un negocio con IVA por producto encendido.
+  await encenderIvaPorProducto(venueId)
   staffId = (await prisma.staff.create({ data: { email: organizationId + '@example.test', firstName: 'Review', lastName: 'Fixture' } })).id
   await prisma.staffVenue.create({ data: { staffId, venueId, role: 'CASHIER' } })
   orderId = (
@@ -64,6 +67,9 @@ beforeEach(async () => {
   paymentId = (await prisma.payment.create({ data: paymentData(100) })).id
 })
 afterEach(async () => {
+  // Sin fixture no hay nada que limpiar: con `venueId` undefined, Prisma ignora el filtro y cada
+  // deleteMany de abajo borra la TABLA ENTERA (8-oct-2026: pasó con la guarda de base del beforeAll en rojo).
+  if (!venueId) return
   await prisma.referralRewardGrant.deleteMany({ where: { venueId } })
   await prisma.referral.deleteMany({ where: { venueId } })
   await prisma.couponCode.deleteMany({ where: { discount: { venueId } } })
@@ -114,6 +120,7 @@ async function config(extra: Partial<Prisma.CommissionConfigUncheckedCreateInput
       recipient: 'PROCESSOR',
       defaultRate: 0.1,
       categoryIds: [],
+      includeTax: true, // ídem: efectos, escalones y metas, no el IVA
       effectiveFrom: new Date('2020-01-01T00:00:00Z'),
       ...extra,
     },
@@ -261,7 +268,11 @@ it('goal policy lookup does not run report sales aggregates for unrelated active
   statements = []
   await other.$transaction(tx => enqueuePaymentCommissionInTx(tx, paymentId))
   expect(await prisma.paymentEffect.count({ where: { venueId, paymentId, kind: 'COMMISSION' } })).toBe(1)
-  expect(statements.filter(sql => /SUM\(/i.test(sql) && sql.includes('"Payment"'))).toHaveLength(0)
+  // A6 F5: lo prohibido es un agregado de REPORTE sobre Payment (por sede y fechas). El reparto por cobro suma los otros
+  // cobros de UNA orden (`otros_de_la_orden`, acotada por `"orderId" = $n`) y eso sí debe pasar.
+  const agregadoDeReporte = (sql: string) => /SUM\(/i.test(sql) && sql.includes('"Payment"') && !/"orderId"\s*=\s*\$\d+/.test(sql)
+  expect(agregadoDeReporte('SELECT SUM(p.amount) FROM "Payment" p WHERE p."venueId" = $1 AND p."createdAt" >= $2')).toBe(true)
+  expect(statements.filter(agregadoDeReporte)).toHaveLength(0)
 })
 
 it('real PostgreSQL statement failure rolls back to savepoint and still commits the captured payment and recovery obligation', async () => {

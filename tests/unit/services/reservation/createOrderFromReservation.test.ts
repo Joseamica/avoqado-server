@@ -222,6 +222,8 @@ describe('🔴 el precio de catálogo es FINAL: el IVA no se suma encima', () =>
     expect(Number(order.taxAmount)).toBe(0)
     expect(Number(item.taxAmount)).toBe(0)
     expect(Number(item.total).toFixed(2)).toBe('1000.00')
+    // IVA por producto (plan 2): mismo hecho, ahora declarado explícitamente en el contrato.
+    expect(order.contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('con modificadores y varios asientos, el cliente paga la suma de los precios de lista', async () => {

@@ -130,11 +130,11 @@ export async function createProviderCostStructure(req: Request, res: Response, n
 
     logger.info('Provider cost structure created via API', {
       costStructureId: costStructure.id,
-      createdBy: (req as any).user?.uid,
+      createdBy: req.authContext?.userId,
     })
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: req.authContext?.userId ?? null,
       action: 'COST_STRUCTURE_CREATED',
       entity: 'ProviderCostStructure',
       entityId: costStructure.id,
@@ -190,7 +190,7 @@ export async function createFlatRateCostStructure(req: Request, res: Response, n
     logger.info('Flat-rate provider cost structure created via API', {
       costStructureId: costStructure.id,
       flatRate,
-      createdBy: (req as any).user?.uid,
+      createdBy: req.authContext?.userId,
     })
 
     res.status(201).json({
@@ -241,11 +241,11 @@ export async function updateProviderCostStructure(req: Request, res: Response, n
 
     logger.info('Provider cost structure updated via API', {
       costStructureId: id,
-      updatedBy: (req as any).user?.uid,
+      updatedBy: req.authContext?.userId,
     })
 
     await logAction({
-      staffId: (req as any).user?.uid ?? null,
+      staffId: req.authContext?.userId ?? null,
       action: 'COST_STRUCTURE_UPDATED',
       entity: 'ProviderCostStructure',
       entityId: id,
@@ -281,7 +281,7 @@ export async function deactivateCostStructure(req: Request, res: Response, next:
 
     logger.info('Provider cost structure deactivated via API', {
       costStructureId: id,
-      deactivatedBy: (req as any).user?.uid,
+      deactivatedBy: req.authContext?.userId,
     })
 
     res.json({
@@ -306,7 +306,7 @@ export async function deleteProviderCostStructure(req: Request, res: Response, n
 
     logger.warn('Provider cost structure deleted via API', {
       costStructureId: id,
-      deletedBy: (req as any).user?.uid,
+      deletedBy: req.authContext?.userId,
     })
 
     res.json({

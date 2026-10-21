@@ -27,7 +27,7 @@ import * as planStateService from '../../services/dashboard/planState.service'
 import { getVenuePlanInfo } from '../../services/access/basePlan.service'
 import * as seatReconciliationService from '../../services/dashboard/seatReconciliation.service'
 import type { CancellationInput } from '@/services/shared/cancellationReason'
-
+import { sinCamposReservados } from '../../services/access/camposReservados'
 import { CreateVenueDto, ListVenuesQueryDto, ConvertDemoVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import logger from '../../config/logger'
@@ -119,7 +119,7 @@ export async function updateVenue(req: Request<{ venueId: string }, any, any>, r
     }
 
     const venueId: string = req.params.venueId
-    const updateData = req.body
+    const updateData = sinCamposReservados(req.body) // 400 con la exención de plan o Pago al personal (I4, fase 3)
 
     // SUPERADMIN can update any venue across organizations
     const skipOrgCheck = await esSuperadminDeLaSesion(req.authContext)

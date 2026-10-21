@@ -19,8 +19,7 @@
 
 import prisma from '../src/utils/prismaClient'
 import logger from '../src/config/logger'
-import { issueCfdiForOrder, loadOrderForCfdiFromDb, type IssueCfdiDeps, type IssueReceptor } from '../src/services/fiscal/cfdi.service'
-import { resolveFiscalProvider } from '../src/services/fiscal/fiscalProvider.factory'
+import { issueCfdiForOrder, type IssueCfdiDeps, type IssueReceptor } from '../src/services/fiscal/cfdi.service'
 
 // The 3 demo venues (stable IDs).
 const VENUES = [
@@ -40,37 +39,7 @@ const RECEPTOR: IssueReceptor = {
 }
 
 // Deps = production defaults EXCEPT storeArtifact (no cloud creds in a script).
-const testDeps: IssueCfdiDeps = {
-  findExistingCfdi: idempotencyKey => prisma.cfdi.findUnique({ where: { idempotencyKey } }),
-  loadOrderForCfdi: loadOrderForCfdiFromDb,
-  resolveProvider: resolveFiscalProvider,
-  reserveCfdi: data => prisma.cfdi.create({ data: data as any }),
-  // Reclamo atómico de un intento previo — igual que los defaults de producción.
-  claimCfdi: async (cfdiId, desdeEstados, version) => {
-    const { count } = await prisma.cfdi.updateMany({
-      where: { id: cfdiId, status: { in: desdeEstados as any }, attempts: version },
-      data: { status: 'STAMPING', attempts: { increment: 1 }, updatedAt: new Date() },
-    })
-    return count === 1
-  },
-  // Sólo URLs, nunca el estado fiscal — igual que los defaults de producción.
-  persistArtifacts: async (idempotencyKey, urls) => {
-    await prisma.cfdi.updateMany({ where: { idempotencyKey, status: 'STAMPED' }, data: urls })
-    return prisma.cfdi.findUnique({ where: { idempotencyKey } })
-  },
-  persistCfdi: data =>
-    prisma.cfdi.upsert({
-      where: { idempotencyKey: data.idempotencyKey },
-      create: data as any,
-      update: {
-        status: data.status,
-        lastError: data.lastError ?? null,
-        attempts: { increment: 1 },
-        ...(data.uuid
-          ? { uuid: data.uuid, facturapiId: data.facturapiId, serie: data.serie, folio: data.folio, stampedAt: data.stampedAt }
-          : {}),
-      },
-    }),
+const testDeps: Partial<IssueCfdiDeps> = {
   // No-op storage: prove stamping without Firebase/GCS. Returns a placeholder URL.
   storeArtifact: async (_buffer, path) => `local://skipped/${path}`,
 }

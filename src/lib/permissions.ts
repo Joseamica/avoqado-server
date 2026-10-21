@@ -62,6 +62,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // un dueño parado frente al POS no podría tocar el botón que sí ve su cocinero.
   'delivery-channels:manage': ['delivery-channels:manage', 'delivery-channels:read', 'delivery-channels:snooze'],
   'delivery-channels:snooze': ['delivery-channels:snooze'],
+  // Pedidos en línea: ajustes y menú en línea. Aceptar y rechazar usan `orders:update` (cocina y caja ya lo tienen); cancelar,
+  // `orders:cancel-unpaid`. Quien administra la tienda también puede frenarla un rato (igual que `delivery-channels:manage`).
+  // M-6: NO arrastra `orders:update`: un rol al que sólo le dan la tienda en línea no modifica cualquier cuenta del POS.
+  // Contestar pedidos se le da aparte.
+  'online-orders:manage': ['online-orders:manage', 'orders:read', 'products:read', 'menu:read', 'online-orders:pause'],
+  // Pausar desde el piso 15/30/60 min o reanudar (founder, 16-oct: gerente para arriba; en el POS, con el PIN del gerente).
+  'online-orders:pause': ['online-orders:pause', 'orders:read'],
 
   'orders:read': [
     'orders:read',
@@ -165,6 +172,8 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'payments:refund',
     'orders:read', // Need to see original order
   ],
+  // Devolver en EFECTIVO un cobro que no fue en efectivo (founder, 1-oct-2026): sin reembolsar no se devuelve nada.
+  'payments:refund-to-cash': ['payments:refund-to-cash', 'payments:refund'],
 
   // Manual payment recording (ADMIN+) — captures payments received outside Avoqado
   // (cash, external terminal, bank transfer, etc.). Singular `payment:` namespace is
@@ -366,6 +375,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'printers:manage': ['printers:manage', 'printers:read'],
   'receipt-layout:read': ['receipt-layout:read'],
   'receipt-layout:manage': ['receipt-layout:manage', 'receipt-layout:read'],
+  // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, promos en reposo)
+  'customer-display:read': ['customer-display:read'],
+  'customer-display:update': ['customer-display:update', 'customer-display:read'],
 
   // ===========================
   // ACCOUNTING - Capa A (estado de resultados, incluido para todos los venues)
@@ -416,6 +428,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // cheque, y la caja lo liquida igual. NO implica `tables:update`: cobrar no es tocar
   // el piso.
   'tables:pay-any': ['tables:pay-any', 'tables:read'],
+  // Plano de mesas (dashboard, 2026-10-08): dibujar áreas, mesas, paredes, barra y cocina.
+  // Configurar el plano no es operar mesas: sólo arrastra la lectura.
+  'tables:configure': ['tables:configure', 'tables:read'],
 
   // ===========================
   // RESERVATIONS
@@ -424,6 +439,9 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'reservations:create': ['reservations:read', 'reservations:create'],
   'reservations:update': ['reservations:read', 'reservations:update'],
   'reservations:cancel': ['reservations:read', 'reservations:cancel'],
+  // Conector de pases (TotalPass/Wellhub): conectar la sucursal, ligar clases, modo de confirmación y lugares para pases.
+  // Ver y confirmar check-ins usa reservations:read / reservations:update.
+  'reservations:manage-passes': ['reservations:read', 'reservations:manage-passes'],
 
   // Fase 8 del kiosco — la vista de la instructora.
   //
@@ -494,6 +512,13 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'commissions:payout': ['commissions:read', 'commissions:approve', 'commissions:payout'],
 
   // ===========================
+  // STAFF PAY (pago por servicio: tablas por nivel y sede)
+  // ===========================
+  'staffpay:read': ['staffpay:read', 'teams:read', 'reservations:read'],
+  'staffpay:manage': ['staffpay:read', 'staffpay:manage', 'teams:read', 'reservations:read'],
+  'staffpay:close': ['staffpay:read', 'staffpay:manage', 'staffpay:close', 'teams:read', 'reservations:read'],
+
+  // ===========================
   // CASH OUT (PlayTelecom promoter same-day commission — module-gated, white-label)
   // ===========================
   'cash-out:read': ['cash-out:read', 'teams:read'],
@@ -560,6 +585,17 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   'creditPacks:sell': ['creditPacks:sell', 'creditPacks:read', 'customers:read'],
   // Canjear una sesión: mismo par de lecturas, cero autoridad sobre el catálogo.
   'creditPacks:redeem': ['creditPacks:redeem', 'creditPacks:read', 'customers:read'],
+
+  // ===========================
+  // TARJETAS DE REGALO (fase 1a, spec §9)
+  // ===========================
+  // Dos ejes, como creditPacks: OPERAR en el mostrador (vender una tarjeta en su cuenta propia, cobrar con saldo) y
+  // ADMINISTRAR (ajustar, bloquear, reponer el código, cancelar una venta). Administrar NO concede vender ni cobrar.
+  // Ninguno arrastra `payments:create`: cobrar la cuenta de tarjetas con dinero se gatea en su propia ruta.
+  'giftCards:read': ['giftCards:read'],
+  'giftCards:sell': ['giftCards:sell', 'giftCards:read'],
+  'giftCards:redeem': ['giftCards:redeem', 'giftCards:read'],
+  'giftCards:manage': ['giftCards:manage', 'giftCards:read'],
 
   // ===========================
   // ESTIMATES / PRESUPUESTOS
@@ -937,6 +973,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'creditPacks:read', // Ver el catálogo de paquetes y el saldo de créditos del cliente
     'creditPacks:sell', // Vender un paquete en persona (cobrado por el POS)
     'creditPacks:redeem', // Descontar una sesión/clase ya pagada
+    // Tarjetas de regalo (spec §9): el mostrador VENDE, COBRA con saldo y CONSULTA; ajustar, bloquear y cancelar quedan en
+    // MANAGER+ (`giftCards:manage`). El mesero NO: el spec sólo se las da al cajero.
+    'giftCards:read',
+    'giftCards:sell',
+    'giftCards:redeem',
     'referral:read', // Referral Program: read-only access
     'commissions:view_own', // Can view own commission earnings
     'teams:read',
@@ -984,6 +1025,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tender-types:read', // Tipos de pago personalizados: ver el catálogo (editar = ADMIN+)
     'printers:read', // PRINT_STATIONS: ver impresoras, estaciones y ruteo de comandas
     'printers:manage', // PRINT_STATIONS: configurar impresoras, estaciones y ruteo (operativo — MANAGER+)
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet — MANAGER SÍ (spec §5.8), al revés que receipt-layout
     'menu:read',
     'menu:create',
     'menu:update',
@@ -1012,6 +1054,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    // «Devolver con: Efectivo de la caja» de un cobro que no fue en efectivo: el dinero sale del cajón — gerencia.
+    // ADMIN/OWNER lo cubren con 'payments:*'; de CASHIER para abajo no (el POS pide el código de un encargado).
+    'payments:refund-to-cash',
     'payments:resolve-no-instrument', // Cobro remoto: declarar «no se presentó tarjeta» libera la venta — decisión de gerencia
     'payments:reconcile-uncharged', // el cajero también lo tiene; gerencia lo conserva para poder resolverlo desde el dashboard
     'payment-link:read', // Can view and share existing payment links
@@ -1030,6 +1075,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'tables:read',
     'tables:update',
     'tables:manage-all', // Propiedad de mesa: puede modificar/cerrar mesas de otros meseros
+    'tables:configure', // Plano de mesas en el dashboard (Configuración → Mesas y plano)
     'tpv:read',
     'tpv:create',
     'tpv:update',
@@ -1073,6 +1119,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
     'referral:read', // Referral Program: read-only access
     'referral:override-existing-customer', // Referral Program: can override existing-customer guard
     'referral:fulfill-courtesy', // Referral Program: can mark a FREE_PRODUCT courtesy as delivered
@@ -1126,6 +1173,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // NO: tpv-factory-reset (OWNER only)
     // NO: commissions:create/update/delete/approve/payout (ADMIN+ only)
     // NO: cfdi:configure (OWNER/ADMIN only)
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
+    'online-orders:pause', // Pedidos en línea: pausar desde el piso (founder, 16-oct)
     // Facturación CFDI 4.0 (Pro-tier) — MANAGER can issue and view invoices
     'cfdi:issue',
     'cfdi:view',
@@ -1160,6 +1209,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'estimates:create',
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, pasos)
     'payments:*',
     'payments:resolve-no-instrument', // ya cabe en 'payments:*'; explícito para que la lista se lea sin expandir el comodín
     'payments:reconcile-uncharged', // el cajero también lo tiene; explícito para que la lista se lea sin expandir el comodín
@@ -1178,6 +1228,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
     'marketing:*', // Fase 0: aviso de privacidad + (Fase 1) campañas de correo
     // Referral Program (full management except no SUPERADMIN-only powers)
     'referral:read',
@@ -1196,6 +1247,9 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'commissions:delete',
     'commissions:view_own',
     'commissions:approve',
+    // Pago por servicio (configurar y ver; cerrar y pagar es sólo del OWNER (staffpay:close))
+    'staffpay:read',
+    'staffpay:manage',
     // Cash Out (PlayTelecom back-office — config rate tables + calendar, generate report; module-gated)
     'cash-out:read',
     'cash-out:manage',
@@ -1218,6 +1272,12 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'settings:manage', // Can manage role permissions
     'role-config:*', // Can customize role display names
     // TPV-specific permissions (all except factory-reset)
+    // Ajustes de CADA aparato: pasos del cobro (propina, estrellas, recibo), pestaña de configuración de la terminal
+    // y lo que el POS cambia de su propia ficha. Decisión del founder (15-oct-2026): el ADMIN los ve y los edita —
+    // antes el GERENTE podía (vía `scale:configure`) y el ADMIN no, al revés de la jerarquía. Explícitos y no
+    // `tpv-settings:*`, para que una acción nueva de ese recurso se decida aparte.
+    'tpv-settings:read',
+    'tpv-settings:update',
     'tpv-terminal:settings', // Can modify terminal configuration
     'tpv-devices:manage', // Can link external devices (iPad, tablets) for BLE payments
     'tpv-kiosk:enable', // Can enable/disable kiosk mode
@@ -1257,10 +1317,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'calendar:connect_self',
     'calendar:disconnect_staff',
     'calendar:view_status',
-    // NO: tpv-settings:* (OWNER only - org-level TPV config)
     // NO: venue-crypto:manage (SUPERADMIN only)
     // NO: tpv-factory-reset:execute (OWNER only - destructive)
     // NO: commissions:payout (OWNER only - financial)
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
+    'online-orders:pause', // Pedidos en línea: pausar desde el piso (founder, 16-oct)
     // Facturación CFDI 4.0 (Pro-tier) — ADMIN has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1296,7 +1357,11 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'financialConnections:*', // Conectar/leer/desconectar cuentas bancarias del venue (self-connect)
     'printers:*', // PRINT_STATIONS: impresoras, estaciones y ruteo de comandas (feature gratis/core)
     'receipt-layout:*', // RECEIPT_LAYOUT: diseñar el ticket en papel — administrativo; MANAGER excluido a propósito
+    'customer-display:*', // CUSTOMER_DISPLAY: la pantalla que ve el cliente en la tablet (marca, textos, pasos)
     'commissions:*', // Commission system (full control including payout)
+    'staffpay:read',
+    'staffpay:manage',
+    'staffpay:close',
     'cash-out:*', // Cash Out (PlayTelecom same-day promoter commission) — full control
     'menu:*',
     'orders:*',
@@ -1321,6 +1386,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'upsells:*', // Upsell: alta, aprobación y desempeño
     'coupons:*', // Phase 2: Full coupon management
     'creditPacks:*', // Credit pack/bundle management
+    'giftCards:*', // Tarjetas de regalo: vender, cobrar con saldo, consultar y administrar (spec §9)
     'marketing:*', // Fase 0: aviso de privacidad + (Fase 1) campañas de correo
     // Referral Program (full management)
     'referral:read',
@@ -1413,6 +1479,8 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     // Situación Fiscal). OWNER-only, NO ADMIN/MANAGER: son los datos legales del negocio
     // (RFC, razón social, régimen fiscal) y el dueño es quien responde por ellos ante el SAT.
     'venue-fiscal-profile:manage',
+    'online-orders:manage', // Pedidos en línea: ajustes y menú
+    'online-orders:pause', // Pedidos en línea: pausar desde el piso (founder, 16-oct)
     // Facturación CFDI 4.0 (Pro-tier) — OWNER has full CFDI access
     'cfdi:configure',
     'cfdi:issue',
@@ -1617,7 +1685,42 @@ export function getEffectiveRolePermissions(
   })
 
   const sobreviven = abiertos.filter(p => !negados.has(p))
-  return Array.from(resolvePermissions(sobreviven))
+
+  // 🔴 QUITAR NUNCA CONCEDE (auditoría de Codex, 14-oct-2026). Al abrir un comodín, sus
+  // piezas sueltas arrastran dependencias que el comodín compacto nunca arrastró:
+  // VIEWER + `scale:*` no tiene `tpv-settings:update`, pero al excluir `scale:use` aparecía
+  // `scale:configure` suelto y con él `tpv-settings:update`. Y cualquier exclusión, aunque no
+  // tocara nada, disparaba una segunda vuelta de dependencias (las de las dependencias).
+  // Por eso lo que sobrevive se recorta a lo que la base SIN exclusiones ya concedía, medido
+  // con la misma regla de comodines con la que se autoriza. La decisión del 18-ago queda
+  // intacta: lo implicado por un permiso que el rol conserva vuelve — si la base lo concedía.
+  return Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+}
+
+/**
+ * ¿Una lista de permisos YA resuelta concede `requiredPermission`?
+ *
+ * Es la ÚNICA regla de comodines del backend: el permiso exacto, `recurso:*`, `*:acción`
+ * o `*:*`. La usan `hasPermission`, `evaluatePermissionList` y el recorte de exclusiones
+ * de `getEffectiveRolePermissions`, para que "lo que la base ya concedía" se mida con la
+ * misma vara con la que después se autoriza. Una segunda copia de esta regla sería otra
+ * forma de que dos candados contesten distinto.
+ */
+export function permissionListGrants(permissions: ReadonlySet<string> | readonly string[], requiredPermission: string): boolean {
+  const lista: ReadonlySet<string> = permissions instanceof Set ? permissions : new Set(permissions)
+
+  // Check for wildcard (all permissions)
+  if (lista.has('*:*')) return true
+
+  // Check exact permission
+  if (lista.has(requiredPermission)) return true
+
+  // Check wildcard permissions (e.g., 'tpv:*' matches 'tpv:create')
+  const [resource, action] = requiredPermission.split(':')
+  if (lista.has(`${resource}:*`)) return true
+  if (lista.has(`*:${action}`)) return true
+
+  return false
 }
 
 /**
@@ -1631,20 +1734,7 @@ export function hasPermission(
   /** Ver `getEffectiveRolePermissions`: lo que el venue QUITA, aparte de lo que agrega. */
   deniedPermissions?: string[] | null,
 ): boolean {
-  const allPermissions = getEffectiveRolePermissions(role, customPermissions, deniedPermissions)
-
-  // Check for wildcard (all permissions)
-  if (allPermissions.includes('*:*')) return true
-
-  // Check exact permission
-  if (allPermissions.includes(requiredPermission)) return true
-
-  // Check wildcard permissions (e.g., 'tpv:*' matches 'tpv:create')
-  const [resource, action] = requiredPermission.split(':')
-  if (allPermissions.includes(`${resource}:*`)) return true
-  if (allPermissions.includes(`*:${action}`)) return true
-
-  return false
+  return permissionListGrants(getEffectiveRolePermissions(role, customPermissions, deniedPermissions), requiredPermission)
 }
 
 /**
@@ -1654,17 +1744,7 @@ export function hasPermission(
  * instead of extending them.
  */
 export function evaluatePermissionList(effectivePermissions: string[], requiredPermission: string): boolean {
-  const resolvedSet = resolvePermissions(effectivePermissions)
-  const allPermissions = Array.from(resolvedSet)
-
-  if (allPermissions.includes('*:*')) return true
-  if (allPermissions.includes(requiredPermission)) return true
-
-  const [resource, action] = requiredPermission.split(':')
-  if (allPermissions.includes(`${resource}:*`)) return true
-  if (allPermissions.includes(`*:${action}`)) return true
-
-  return false
+  return permissionListGrants(resolvePermissions(effectivePermissions), requiredPermission)
 }
 
 /**
@@ -1895,6 +1975,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'payments:read',
     'payments:create',
     'payments:refund',
+    'payments:refund-to-cash', // Devolver en efectivo un cobro que no fue en efectivo (MANAGER+)
     'payments:routing-read',
     'payments:routing-manage',
     // Cobro remoto: confirmar en la terminal que NO se presentó tarjeta (cierra el intento como OPERATOR_RECONCILED_NO_CHARGE y
@@ -1909,6 +1990,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'tender-types': ['tender-types:read', 'tender-types:manage'],
   printers: ['printers:read', 'printers:manage'],
   'receipt-layout': ['receipt-layout:read', 'receipt-layout:manage'],
+  'customer-display': ['customer-display:read', 'customer-display:update'],
   // Singular `payment` namespace for admin-only, one-off payment actions.
   payment: ['payment:create-manual'],
   shifts: ['shifts:read', 'shifts:create', 'shifts:update', 'shifts:delete', 'shifts:close'],
@@ -1953,8 +2035,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   teams: ['teams:read', 'teams:create', 'teams:update', 'teams:delete', 'teams:invite'],
   'staff-documents': ['staff-documents:read', 'staff-documents:write'],
   attendance: ['attendance:read', 'attendance:manage'],
-  tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any'],
-  reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel'],
+  tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any', 'tables:configure'],
+  reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel', 'reservations:manage-passes'],
   'class-sessions': ['class-sessions:read-assigned'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
@@ -1987,6 +2069,9 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'creditPacks:sell',
     'creditPacks:redeem',
   ],
+  // Tarjetas de regalo (fase 1a). `sell` y `redeem` son de MOSTRADOR; `manage` (ajustar, bloquear, reponer, cancelar una
+  // venta) es de gerencia. Sin esta entrada `giftCards:*` no se expande y el editor de roles no puede asignarlos.
+  giftCards: ['giftCards:read', 'giftCards:sell', 'giftCards:redeem', 'giftCards:manage'],
   // Referral Program (was missing from the catalog entirely — pre-existing
   // CATALOG_GAP for the 5 perms below; adding this key fixes all of them
   // as a side effect of registering the new `referral:fulfill-courtesy`).
@@ -2063,6 +2148,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'commissions:payout',
     'commissions:org-manage',
   ],
+  // Pago por servicio (tabla de pagos por nivel y sede)
+  staffpay: ['staffpay:read', 'staffpay:manage', 'staffpay:close'],
   // Cash Out (PlayTelecom same-day promoter commission — module-gated, white-label)
   'cash-out': ['cash-out:read', 'cash-out:view_own', 'cash-out:withdraw', 'cash-out:manage', 'cash-out:report'],
   // Org-level goals management
@@ -2084,6 +2171,8 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   'venue-fiscal-profile': ['venue-fiscal-profile:manage'],
   // Delivery Channels (Uber Eats, Rappi, DiDi vía Deliverect — Premium tier, Task 10/11)
   'delivery-channels': ['delivery-channels:read', 'delivery-channels:manage', 'delivery-channels:request', 'delivery-channels:snooze'],
+  // Pedidos en línea (tienda del restaurante): ajustes y menú en línea (Pro, `ONLINE_ORDERING`).
+  'online-orders': ['online-orders:manage', 'online-orders:pause'],
 }
 
 /**

@@ -1,12 +1,14 @@
 import { FEATURE_CATALOG } from '@/config/featureCatalog'
-import { Prisma, StaffRole } from '@prisma/client'
+import { Prisma, StaffRole, type LaunchCampaignStatus } from '@prisma/client'
 import { SocketEventType } from '@/communication/sockets/types'
 import logger from '@/config/logger'
 import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
-import { compileHybridPublication } from './hybridOffer.service'
-import { hybridOfferDefinition } from './hybridOffer.schema'
+import { compileHybridPublication, previewHybridOffer } from './hybridOffer.service'
+import { hybridOfferDefinition, type HybridOfferDefinition } from './hybridOffer.schema'
+import { activePromotionOverlaps, assertPromotionBelowList } from './hybridPriceRule'
+import { lockProducts, priceTransaction, productKeyOf } from './hybridProduct'
 
 const errorMap: z.ZodErrorMap = () => ({ message: 'Valor requerido o formato no válido' })
 export const hybridCampaignBody = z
@@ -52,6 +54,19 @@ export const hybridCampaignListQuery = z
   )
   .strict('Filtro no admitido')
 
+// The window under review travels in the query string: the shared preview body stays strict and unchanged, and an older
+// server simply ignores it.
+const reviewWindowQuery = z
+  .object(
+    {
+      campaignId: z.string({ errorMap }).min(1).max(64).optional(),
+      startsAt: z.string({ errorMap }).datetime({ offset: true, message: 'Indica fecha, hora y zona' }).optional(),
+      endsAt: z.string({ errorMap }).datetime({ offset: true, message: 'Indica fecha, hora y zona' }).optional(),
+    },
+    { errorMap },
+  )
+  .strict('Filtro no admitido')
+
 function parse<T extends z.ZodTypeAny>(schema: T, input: unknown): z.output<T> {
   const result = schema.safeParse(input)
   if (!result.success)
@@ -77,15 +92,45 @@ function draftData(input: z.infer<typeof hybridCampaignBody>) {
   }
 }
 
-async function audit(tx: Prisma.TransactionClient, id: string, staffId: string, action: string, data: Prisma.InputJsonObject) {
+/**
+ * The editor's «Revisar oferta»: the shared offer preview plus, for a single-product offer reviewed with its window, the
+ * ACTIVE promotions of that product whose window meets it, without the campaign under review (spec §4.4: the promotions
+ * screen warns of the overlap; it never blocks it).
+ */
+export async function reviewHybridCampaignOffer(body: unknown, query: unknown) {
+  const preview = previewHybridOffer(body)
+  const { campaignId, startsAt, endsAt } = parse(reviewWindowQuery, query ?? {})
+  const key = startsAt && endsAt ? productKeyOf(hybridOfferDefinition.parse((body as { offer: unknown }).offer)) : null
+  const overlaps = key ? ((await activePromotionOverlaps([key], new Date(startsAt!), new Date(endsAt!), campaignId)).get(key) ?? []) : []
+  return { ...preview, overlaps }
+}
+
+export async function audit(tx: Prisma.TransactionClient, id: string, staffId: string, action: string, data: Prisma.InputJsonObject) {
   await tx.activityLog.create({ data: { staffId, action, entity: 'HybridCampaign', entityId: id, data } })
 }
 
-function changed(): never {
+export function changed(): never {
   throw new ConflictError('La ficha cambió. Actualiza la página y revisa la nueva versión.', 'HYBRID_CAMPAIGN_STALE')
 }
 
-async function notifyCampaign(id: string) {
+/** A «% de descuento» member is managed only through its group: editing one alone breaks the group (`loadGroup`). */
+function assertNotGrouped(campaign: { promotionGroupId: string | null }) {
+  if (campaign.promotionGroupId)
+    throw new ConflictError('Esta promoción pertenece a un descuento %: cámbiala desde su grupo.', 'HYBRID_CAMPAIGN_GROUPED')
+}
+
+/**
+ * A promotion price goes on sale only under its product lock and below its list (spec §4.4). Called before any campaign
+ * row write, so a concurrent list change and this promotion serialize on the product, never pass on a stale read.
+ */
+async function lockAndCheckListRule(tx: Prisma.TransactionClient, definition: HybridOfferDefinition) {
+  const key = productKeyOf(definition)
+  if (!key) return
+  await lockProducts(tx, [key])
+  await assertPromotionBelowList(tx, definition)
+}
+
+export async function notifyCampaign(id: string) {
   try {
     const { socketManager } = await import('@/communication/sockets/managers/socketManager')
     socketManager.broadcastToRole(StaffRole.SUPERADMIN, SocketEventType.HYBRID_CAMPAIGN_UPDATED, { id })
@@ -111,71 +156,101 @@ export async function createHybridCampaign(input: unknown, staffId: string) {
 export async function updateHybridCampaign(id: string, input: unknown, staffId: string) {
   const { expectedRevision, ...body } = parse(hybridCampaignUpdateBody, input)
   const data = draftData(body)
-  return prisma
-    .$transaction(async tx => {
-      const current = await tx.hybridCampaign.findUnique({ where: { id } })
-      if (!current) throw new NotFoundError('Oferta no encontrada.')
-      if (current.revision !== expectedRevision) changed()
-      if (current.status === 'ENDED') throw new ConflictError('Esta oferta terminó. Duplica la ficha para crear otra.')
-      if (current.code !== data.code || current.slug !== data.slug)
-        throw new BadRequestError('El código y la dirección no cambian. Duplica la oferta.')
-      if (data.capacity < current.reservedCount + current.redeemedCount)
-        throw new ConflictError('El cupo no puede ser menor a los lugares ya comprometidos.')
-      const result = await tx.hybridCampaign.updateMany({
-        where: { id, revision: expectedRevision, reservedCount: current.reservedCount, redeemedCount: current.redeemedCount },
-        data: { ...data, revision: { increment: 1 } },
-      })
-      if (result.count !== 1) changed()
-      await audit(tx, id, staffId, 'HYBRID_CAMPAIGN_UPDATED', { revision: expectedRevision + 1 })
-      return tx.hybridCampaign.findUniqueOrThrow({ where: { id } })
+  return priceTransaction(async tx => {
+    const current = await tx.hybridCampaign.findUnique({ where: { id } })
+    // A LIST is priced only from «Precios» (spec §4.2): to this editor it does not exist.
+    if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+    assertNotGrouped(current)
+    if (current.revision !== expectedRevision) changed()
+    if (current.status === 'ENDED') throw new ConflictError('Esta oferta terminó. Duplica la ficha para crear otra.')
+    if (current.code !== data.code || current.slug !== data.slug)
+      throw new BadRequestError('El código y la dirección no cambian. Duplica la oferta.')
+    if (data.capacity < current.reservedCount + current.redeemedCount)
+      throw new ConflictError('El cupo no puede ser menor a los lugares ya comprometidos.')
+    // An ACTIVE promotion keeps selling its publication: a window (or capacity) that reopens puts that price on sale again,
+    // and its list may have dropped while it was out of its window (the list rule skips promotions no longer in force).
+    if (current.status === 'ACTIVE' && data.endsAt > new Date()) {
+      const onSale = await loadCurrentPublication(tx, current)
+      if (onSale) await lockAndCheckListRule(tx, hybridOfferDefinition.parse(onSale.definition))
+    }
+    const result = await tx.hybridCampaign.updateMany({
+      where: { id, revision: expectedRevision, reservedCount: current.reservedCount, redeemedCount: current.redeemedCount },
+      data: { ...data, revision: { increment: 1 } },
     })
-    .then(async row => {
-      await notifyCampaign(id)
-      return row
-    })
+    if (result.count !== 1) changed()
+    await audit(tx, id, staffId, 'HYBRID_CAMPAIGN_UPDATED', { revision: expectedRevision + 1 })
+    return tx.hybridCampaign.findUniqueOrThrow({ where: { id } })
+  }).then(async row => {
+    await notifyCampaign(id)
+    return row
+  })
+}
+
+/**
+ * Publishing inside the caller's transaction (the «% de descuento» generator publishes many in one). The product lock and
+ * the list rule come before the first write to the campaign row.
+ */
+export async function publishWithin(
+  tx: Prisma.TransactionClient,
+  id: string,
+  expectedRevision: number,
+  staffId: string,
+  { allowGrouped = false }: { allowGrouped?: boolean } = {},
+) {
+  const campaign = await tx.hybridCampaign.findUnique({ where: { id } })
+  if (!campaign || campaign.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+  if (!allowGrouped) assertNotGrouped(campaign)
+  if (campaign.revision !== expectedRevision) changed()
+  // PROMOTION: CHECK guarantees non-null
+  if (campaign.status === 'ENDED' || campaign.endsAt! <= new Date())
+    throw new ConflictError('La oferta terminó; duplica la ficha para publicar otra.')
+  const publication = compileHybridPublication(campaign.draftDefinition)
+  await lockAndCheckListRule(tx, publication.definition)
+  // Claim the revision first: a concurrent publish of the same revision then fails as stale, not on the version index.
+  const claimed = await tx.hybridCampaign.updateMany({
+    where: { id, revision: expectedRevision },
+    data: { revision: { increment: 1 }, status: 'PAUSED' },
+  })
+  if (claimed.count !== 1) changed()
+  const row = await tx.hybridOfferPublication.create({
+    data: {
+      ...publication,
+      definition: publication.definition as Prisma.InputJsonValue,
+      campaignId: id,
+      version: expectedRevision,
+      name: campaign.name,
+      createdById: staffId,
+    },
+  })
+  // The new publication is the one on sale (once activated); the pointer only ever names this campaign's own row.
+  await tx.hybridCampaign.update({ where: { id }, data: { currentPublicationId: row.id } })
+  await audit(tx, id, staffId, 'HYBRID_OFFER_PUBLISHED', {
+    publicationId: row.id,
+    version: row.version,
+    definitionHash: row.definitionHash,
+  })
+  return row
 }
 
 export async function publishHybridCampaign(id: string, expectedRevision: number, staffId: string) {
-  return prisma
-    .$transaction(async tx => {
-      const campaign = await tx.hybridCampaign.findUnique({ where: { id } })
-      if (!campaign) throw new NotFoundError('Oferta no encontrada.')
-      if (campaign.revision !== expectedRevision) changed()
-      if (campaign.status === 'ENDED' || campaign.endsAt <= new Date())
-        throw new ConflictError('La oferta terminó; duplica la ficha para publicar otra.')
-      const publication = compileHybridPublication(campaign.draftDefinition)
-      const claimed = await tx.hybridCampaign.updateMany({
-        where: { id, revision: expectedRevision },
-        data: { revision: { increment: 1 }, status: 'PAUSED' },
-      })
-      if (claimed.count !== 1) changed()
-      const row = await tx.hybridOfferPublication.create({
-        data: {
-          ...publication,
-          definition: publication.definition as Prisma.InputJsonValue,
-          campaignId: id,
-          version: expectedRevision,
-          name: campaign.name,
-          createdById: staffId,
-        },
-      })
-      await audit(tx, id, staffId, 'HYBRID_OFFER_PUBLISHED', {
-        publicationId: row.id,
-        version: row.version,
-        definitionHash: row.definitionHash,
-      })
-      return row
-    })
-    .then(async row => {
-      await notifyCampaign(id)
-      return row
-    })
+  return priceTransaction(tx => publishWithin(tx, id, expectedRevision, staffId)).then(async row => {
+    await notifyCampaign(id)
+    return row
+  })
 }
 
+// Superadmin's «Campañas» list leaves out the campaigns a «% de descuento» group owns (they show once, as their group).
+// Only this list takes the filter: the public listing and the MCP tool keep the shared query unchanged.
+const hybridCampaignAdminListQuery = hybridCampaignListQuery
+  .extend({ excludeGrouped: z.enum(['true', 'false'], { errorMap }).optional() })
+  .strict('Filtro no admitido')
+
 export async function listHybridCampaigns(input: unknown) {
-  const { page, pageSize, q, status } = parse(hybridCampaignListQuery, input)
+  const { page, pageSize, q, status, excludeGrouped } = parse(hybridCampaignAdminListQuery, input)
   const where: Prisma.HybridCampaignWhereInput = {
+    purpose: 'PROMOTION',
     ...(status ? { status } : {}),
+    ...(excludeGrouped === 'true' ? { promotionGroupId: null } : {}),
     ...(q ? { OR: [{ name: { contains: q, mode: 'insensitive' } }, { code: { contains: q, mode: 'insensitive' } }] } : {}),
   }
   const [items, total] = await Promise.all([
@@ -200,17 +275,51 @@ function publicHybridFeatures(publication: { definition: unknown; includedFeatur
   }))
 }
 
-export async function getPublicHybridOffer(slug: string) {
-  const campaign = await prisma.hybridCampaign.findUnique({
-    where: { slug },
-    include: { publications: { orderBy: { version: 'desc' }, take: 1 } },
+/**
+ * The product keys, among these, whose LIST is on sale: a generated promotion sells only while its parent does (quote and
+ * accept refuse it otherwise, spec §4.2). One bounded read for a whole page; a LIST is unique per product key.
+ */
+async function parentListsOnSale(keys: string[]): Promise<Set<string>> {
+  const unique = [...new Set(keys)]
+  if (!unique.length) return new Set()
+  const lists = await prisma.hybridCampaign.findMany({
+    where: { purpose: 'LIST', status: 'ACTIVE', listProductKey: { in: unique } },
+    select: { listProductKey: true },
+    take: unique.length,
   })
-  if (!campaign || campaign.status !== 'ACTIVE' || campaign.startsAt > new Date() || campaign.endsAt <= new Date())
+  return new Set(lists.flatMap(list => list.listProductKey ?? []))
+}
+
+/** The parent product of a generated promotion (null for one that is not single-product, which never sells). */
+function parentKeyOf(campaign: { promotionGroupId: string | null }, publication: { definition: unknown }): string | null {
+  return campaign.promotionGroupId ? productKeyOf(hybridOfferDefinition.parse(publication.definition)) : null
+}
+
+/** The publication that is on sale: the explicit pointer, never "the highest version". */
+export async function loadCurrentPublication(
+  tx: Prisma.TransactionClient | typeof prisma,
+  campaign: { currentPublicationId: string | null },
+) {
+  return campaign.currentPublicationId ? tx.hybridOfferPublication.findUnique({ where: { id: campaign.currentPublicationId } }) : null
+}
+
+export async function getPublicHybridOffer(slug: string) {
+  const campaign = await prisma.hybridCampaign.findUnique({ where: { slug } })
+  // A LIST never has a public page; past that check, the CHECK guarantees a PROMOTION's non-null window.
+  if (
+    !campaign ||
+    campaign.purpose === 'LIST' ||
+    campaign.status !== 'ACTIVE' ||
+    campaign.startsAt > new Date() ||
+    campaign.endsAt! <= new Date()
+  )
     throw new NotFoundError('Esta oferta no está disponible.')
-  if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity)
+  if (campaign.reservedCount + campaign.redeemedCount >= campaign.capacity!)
     throw new ConflictError('Se agotaron los lugares de esta oferta.', 'HYBRID_OFFER_FULL')
-  const publication = campaign.publications[0]
+  const publication = await loadCurrentPublication(prisma, campaign)
   if (!publication) throw new NotFoundError('Esta oferta no está disponible.')
+  const parentKey = parentKeyOf(campaign, publication)
+  const parentOnSale = !campaign.promotionGroupId || (parentKey !== null && (await parentListsOnSale([parentKey])).has(parentKey))
   return {
     schemaVersion: 1,
     id: publication.id,
@@ -225,21 +334,21 @@ export async function getPublicHybridOffer(slug: string) {
     startsAt: campaign.startsAt,
     endsAt: campaign.endsAt,
     audience: campaign.audience,
-    placesRemaining: campaign.capacity - campaign.reservedCount - campaign.redeemedCount,
-    purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true',
+    // PROMOTION: CHECK guarantees non-null
+    placesRemaining: campaign.capacity! - campaign.reservedCount - campaign.redeemedCount,
+    purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale,
   }
 }
 
 import { assertHybridSalesOpen } from './hybridPurchase.service'
 import { ensureHybridPublicationPrices } from './hybridPrices'
 
+/** `publications` keeps its response shape (superadmin and MCP read `publications[0]`): the pointer's publication, or empty. */
 export async function getHybridCampaign(id: string) {
-  const row = await prisma.hybridCampaign.findUnique({
-    where: { id },
-    include: { publications: { orderBy: { version: 'desc' }, take: 1 } },
-  })
-  if (!row) throw new NotFoundError('Oferta no encontrada.')
-  return row
+  const row = await prisma.hybridCampaign.findUnique({ where: { id } })
+  if (!row || row.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+  const publication = await loadCurrentPublication(prisma, row)
+  return { ...row, publications: publication ? [publication] : [] }
 }
 
 export const hybridStatusBody = z
@@ -253,42 +362,59 @@ export const hybridStatusBody = z
   )
   .strict('Campo no admitido')
 
+/**
+ * The status write alone, inside the caller's transaction: no Stripe and no checks beyond the conditional write. Callers
+ * validate first and, when going ACTIVE, hold the product lock and checked the list rule (a «% de descuento» group changes
+ * all its campaigns in one transaction with this).
+ */
+export async function setCampaignStatusWithin(
+  tx: Prisma.TransactionClient,
+  campaign: { id: string; revision: number; status: LaunchCampaignStatus },
+  status: 'ACTIVE' | 'PAUSED' | 'ENDED',
+  staffId: string,
+  publicationId: string | null = null,
+) {
+  const changedRow = await tx.hybridCampaign.updateMany({
+    where: { id: campaign.id, revision: campaign.revision, status: campaign.status },
+    data: { status, revision: { increment: 1 } },
+  })
+  if (changedRow.count !== 1) changed()
+  await audit(tx, campaign.id, staffId, 'HYBRID_CAMPAIGN_STATUS_CHANGED', { previous: campaign.status, status, publicationId })
+  return tx.hybridCampaign.findUniqueOrThrow({ where: { id: campaign.id } })
+}
+
 export async function setHybridCampaignStatus(id: string, input: unknown, staffId: string) {
   const body = parse(hybridStatusBody, input)
-  const current = await getHybridCampaign(id)
+  const current = await prisma.hybridCampaign.findUnique({ where: { id } })
+  if (!current || current.purpose === 'LIST') throw new NotFoundError('Oferta no encontrada.')
+  // The group path writes statuses through `setCampaignStatusWithin` directly; this entry point is the editor's.
+  assertNotGrouped(current)
   if (current.revision !== body.expectedRevision) changed()
   if (current.status === 'ENDED') throw new ConflictError('Esta campaña terminó. Duplica la ficha para crear otra.')
+  let goingOnSale: HybridOfferDefinition | null = null
   if (body.status === 'ACTIVE') {
     assertHybridSalesOpen()
-    const publication = current.publications[0]
+    const publication = await loadCurrentPublication(prisma, current)
     if (
       !publication ||
       publication.id !== body.publicationId ||
       publication.definitionHash !== compileHybridPublication(current.draftDefinition).definitionHash
     )
       throw new ConflictError('Publica y revisa la versión vigente antes de activarla.', 'HYBRID_PUBLICATION_REQUIRED')
-    if (current.endsAt <= new Date() || current.reservedCount + current.redeemedCount >= current.capacity)
+    // PROMOTION: CHECK guarantees non-null
+    if (current.endsAt! <= new Date() || current.reservedCount + current.redeemedCount >= current.capacity!)
       throw new ConflictError('La campaña terminó o no tiene lugares disponibles.', 'HYBRID_OFFER_UNAVAILABLE')
     await ensureHybridPublicationPrices(publication.id)
+    goingOnSale = hybridOfferDefinition.parse(publication.definition)
   }
-  return prisma
-    .$transaction(async tx => {
-      const changedRow = await tx.hybridCampaign.updateMany({
-        where: { id, revision: body.expectedRevision, status: current.status },
-        data: { status: body.status, revision: { increment: 1 } },
-      })
-      if (changedRow.count !== 1) changed()
-      await audit(tx, id, staffId, 'HYBRID_CAMPAIGN_STATUS_CHANGED', {
-        previous: current.status,
-        status: body.status,
-        publicationId: body.publicationId ?? null,
-      })
-      return tx.hybridCampaign.findUniqueOrThrow({ where: { id } })
-    })
-    .then(async row => {
-      await notifyCampaign(id)
-      return row
-    })
+  return priceTransaction(async tx => {
+    // (Re)activating puts the price on sale again: its list may have dropped since it was published.
+    if (goingOnSale) await lockAndCheckListRule(tx, goingOnSale)
+    return setCampaignStatusWithin(tx, current, body.status, staffId, body.publicationId ?? null)
+  }).then(async row => {
+    await notifyCampaign(id)
+    return row
+  })
 }
 
 /** Public data only; private cohort identifiers and editable draft terms never leave the server. */
@@ -296,6 +422,7 @@ export async function listPublicHybridOffers(input: unknown) {
   const { page, pageSize, q } = parse(hybridCampaignListQuery.omit({ status: true }), input)
   const now = new Date()
   const where: Prisma.HybridCampaignWhereInput = {
+    purpose: 'PROMOTION',
     status: 'ACTIVE',
     listed: true,
     startsAt: { lte: now },
@@ -318,17 +445,31 @@ export async function listPublicHybridOffers(input: unknown) {
         capacity: true,
         reservedCount: true,
         redeemedCount: true,
-        publications: {
-          orderBy: { version: 'desc' },
-          take: 1,
-          select: { id: true, name: true, version: true, definition: true, definitionHash: true, includedFeatureCodes: true },
-        },
+        currentPublicationId: true,
+        promotionGroupId: true,
       },
     }),
     prisma.hybridCampaign.count({ where }),
   ])
-  const items = rows.flatMap(row =>
-    row.publications.map(publication => ({
+  // One query for the whole page's pointers (bounded by pageSize), joined in memory.
+  const ids = rows.flatMap(row => (row.currentPublicationId ? [row.currentPublicationId] : []))
+  const publications = ids.length
+    ? await prisma.hybridOfferPublication.findMany({
+        where: { id: { in: ids } },
+        take: ids.length,
+        select: { id: true, name: true, version: true, definition: true, definitionHash: true, includedFeatureCodes: true },
+      })
+    : []
+  const onSale = new Map(publications.map(publication => [publication.id, publication]))
+  const pointed = rows.flatMap(row => {
+    const publication = row.currentPublicationId ? onSale.get(row.currentPublicationId) : undefined
+    return publication ? [{ row, publication, parentKey: parentKeyOf(row, publication) }] : []
+  })
+  // A generated promotion of a paused (or missing) list stays listed (the total is exact) but says it cannot be bought.
+  const parents = await parentListsOnSale(pointed.flatMap(({ parentKey }) => parentKey ?? []))
+  const items = pointed.map(({ row, publication, parentKey }) => {
+    const parentOnSale = !row.promotionGroupId || (parentKey !== null && parents.has(parentKey))
+    return {
       schemaVersion: 1,
       id: publication.id,
       version: publication.version,
@@ -342,10 +483,12 @@ export async function listPublicHybridOffers(input: unknown) {
       startsAt: row.startsAt,
       endsAt: row.endsAt,
       audience: row.audience,
-      placesRemaining: row.capacity - row.reservedCount - row.redeemedCount,
-      purchaseAvailable: process.env.HYBRID_BILLING_ENABLED === 'true' && row.reservedCount + row.redeemedCount < row.capacity,
-    })),
-  )
+      // PROMOTION: CHECK guarantees non-null
+      placesRemaining: row.capacity! - row.reservedCount - row.redeemedCount,
+      purchaseAvailable:
+        process.env.HYBRID_BILLING_ENABLED === 'true' && parentOnSale && row.reservedCount + row.redeemedCount < row.capacity!,
+    }
+  })
   return { items, total, page, pageSize, totalPages: Math.ceil(total / pageSize) }
 }
 
@@ -355,8 +498,8 @@ export const hybridRedemptionsQuery = hybridCampaignListQuery
   .strict('Filtro no admitido')
 export async function listHybridRedemptions(campaignId: string, input: unknown) {
   const query = parse(hybridRedemptionsQuery, input)
-  if (!(await prisma.hybridCampaign.findUnique({ where: { id: campaignId }, select: { id: true } })))
-    throw new NotFoundError('Campaña no encontrada.')
+  const campaign = await prisma.hybridCampaign.findUnique({ where: { id: campaignId }, select: { purpose: true } })
+  if (!campaign || campaign.purpose === 'LIST') throw new NotFoundError('Campaña no encontrada.')
   const where: Prisma.HybridRedemptionWhereInput = {
     campaignId,
     ...(query.status ? { status: query.status } : {}),

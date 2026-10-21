@@ -8,11 +8,21 @@
 
 import { NextFunction, Request, Response } from 'express'
 import prisma from '../../utils/prismaClient'
-import { computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
+import { archivarProductos, computeInventoryAvailability } from '../../services/dashboard/product.dashboard.service'
 import { Unit } from '@prisma/client'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
-import { ensureQuantityInventoryRow } from '../../services/dashboard/quantityInventoryRow'
+import { productGroupInclude, withVariantFields } from '../../services/product-variants/variantPayload'
+import { assertNoGroupOwnedChanges } from '../../services/product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../../services/product-variants/variantErrors'
+import { logAction } from '../../services/dashboard/activity-log.service'
+import {
+  ensureQuantityInventoryRow,
+  inventoryMethodForNewProduct,
+  isNonInventoriable,
+  NON_INVENTORIABLE_MESSAGE,
+} from '../../services/dashboard/quantityInventoryRow'
+import AppError from '../../errors/AppError'
 import {
   assertLegacyCatalogGovernanceForVenue,
   assertLegacyProductReferencesForVenue,
@@ -20,6 +30,11 @@ import {
   resolveLegacyCatalogActor,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../../services/master-catalog/catalogGovernance.service'
+import { normalizarIvaDeProducto, traducirErrorDeIva } from '../../services/fiscal/normalizarIvaDeProducto'
+import { bloquearParaCambiarIva } from '../../services/fiscal/exclusionContable'
+import { registrarCambioDeIva } from '../../services/fiscal/encendidoIva.service'
+import { ajustarParejaAlProducto } from '../../services/commerce-channels/shopify/shopify.store.service'
+import { categoriaParaProductoSinCategoria } from '../../services/mobile/categoriaGeneral.service'
 
 // ---------------------------------------------------------------------------
 // Helpers
@@ -31,6 +46,8 @@ import {
 const productInclude = {
   category: true,
   inventory: true,
+  // Variantes: los 4 campos opcionales del contrato (productGroupId/Name/ImageUrl, variantOptions). Nunca `variants`.
+  ...productGroupInclude,
   modifierGroups: {
     include: {
       group: {
@@ -55,6 +72,9 @@ const productInclude = {
   },
 }
 
+/** The only product types avoqado-android knows (ArticlesModels.kt `productType`); anything else it reads as REGULAR. */
+const ANDROID_KNOWN_PRODUCT_TYPES: readonly string[] = ['REGULAR', 'FOOD_AND_BEV', 'APPOINTMENTS_SERVICE', 'OTHER']
+
 /**
  * Attach computed availability to a product — the SAME shape the TPV/dashboard
  * clients get (availableQuantity + limitingIngredient + insufficientIngredients),
@@ -62,7 +82,7 @@ const productInclude = {
  * old clients keep reading availableQuantity and ignore the rest.
  */
 function withAvailableQuantity(product: any) {
-  const legacyProduct = toLegacyProductPayload(product)
+  const legacyProduct = withVariantFields(toLegacyProductPayload(product))
   return { ...legacyProduct, ...computeInventoryAvailability(legacyProduct) }
 }
 
@@ -79,6 +99,11 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId } = req.params
 
+    // "Se cobra el precio que vio el cliente": la hora del catálogo la sella el SERVIDOR ANTES de leer, para que un
+    // cambio de precio ocurrido durante la lectura nunca quede "antes" del catálogo que la tablet ya trae. Formato
+    // fijo (ISO UTC con milisegundos, 24 caracteres): iOS lo parsea con fracciones y ambas apps lo comparan como fecha.
+    const catalogAt = new Date().toISOString()
+
     const products = await prisma.product.findMany({
       where: {
         venueId,
@@ -91,7 +116,8 @@ export async function listProducts(req: Request, res: Response, next: NextFuncti
 
     const data = products.map(withAvailableQuantity)
 
-    return res.json({ success: true, data })
+    // `catalogAt` es aditivo y sólo vive en la raíz: `data` no cambia para las apps viejas.
+    return res.json({ success: true, data, catalogAt })
   } catch (error) {
     next(error)
   }
@@ -118,7 +144,9 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       type,
       description,
       taxRate,
+      ivaTratamiento,
       trackInventory,
+      inventoryMethod,
       duration,
       durationMinutes,
       maxParticipants,
@@ -130,19 +158,9 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
     if (!name || !name.trim()) {
       return res.status(400).json({ success: false, message: 'name es requerido' })
     }
-
-    // If no categoryId provided, use first category for this venue
-    let finalCategoryId = categoryId
-    if (!finalCategoryId) {
-      const firstCategory = await prisma.menuCategory.findFirst({
-        where: { venueId },
-        orderBy: { displayOrder: 'asc' },
-        select: { id: true },
-      })
-      if (!firstCategory) {
-        return res.status(400).json({ success: false, message: 'No hay categorías. Crea una categoría primero.' })
-      }
-      finalCategoryId = firstCategory.id
+    // Misma regla que el dashboard: una clase o una cita no llevan existencias (la venta les descontaba).
+    if (isNonInventoriable(type ?? 'FOOD_AND_BEV', trackInventory)) {
+      return res.status(400).json({ success: false, message: NON_INVENTORIABLE_MESSAGE })
     }
 
     // Generate SKU if not provided
@@ -153,51 +171,100 @@ export async function createProduct(req: Request, res: Response, next: NextFunct
       typeof unit === 'string' && (Object.values(Unit) as string[]).includes(unit.trim()) ? (unit.trim() as Unit) : undefined
 
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
+    let categoriaCreada: string | null = null
     const product = await prisma.$transaction(async tx => {
+      // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco del negocio.
+      if ([ivaTratamiento, taxRate].some(v => v !== undefined && v !== null)) await bloquearParaCambiarIva(tx, { venueId })
       await assertLegacyCatalogGovernanceForVenue(tx, {
         venueId,
         operation: 'CREATE',
         willBeVendable: true,
         actor,
       })
+      // Sin categoría: la primera del negocio, o «General» si todavía no tiene ninguna (cuenta nueva).
+      const categoria = categoryId ? { id: categoryId as string, creada: false } : await categoriaParaProductoSinCategoria(tx, venueId)
+      const finalCategoryId = categoria.id
+      if (categoria.creada) categoriaCreada = categoria.id
       await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId: finalCategoryId })
-      const created = await tx.product.create({
-        data: {
-          name: name.trim(),
-          venueId,
-          createdById: actor.type === 'HUMAN' ? actor.staffId : null,
-          sku: finalSku,
-          gtin: gtin?.trim() || null,
-          description: description || null,
-          categoryId: finalCategoryId,
-          type: type || 'FOOD_AND_BEV',
-          price: price ? parseFloat(price) : 0,
-          taxRate: taxRate ?? 0.16,
-          trackInventory: trackInventory ?? false,
-          duration: duration ?? null,
-          durationMinutes: durationMinutes || null,
-          maxParticipants: maxParticipants ?? null,
-          layoutConfig: layoutConfig ?? undefined,
-          // Optional measurement unit (validated against the Prisma Unit enum;
-          // invalid values are ignored, not fatal — additive field, older
-          // clients that don't send it are unaffected).
-          unit: parsedUnit,
-          // Venta por peso: price becomes precio POR KG; the POS captures the
-          // weight at sale time. Forces KILOGRAM as unit when enabled.
-          soldByWeight: soldByWeight === true,
-          ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
-        },
-        include: productInclude,
+      // IVA por producto: sólo se escribe `ivaTratamiento` (el trigger deriva taxRate/objetoImp).
+      // `actual = null` porque el producto todavía no existe.
+      const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+      let created
+      try {
+        created = await tx.product.create({
+          data: {
+            name: name.trim(),
+            venueId,
+            createdById: actor.type === 'HUMAN' ? actor.staffId : null,
+            sku: finalSku,
+            gtin: gtin?.trim() || null,
+            description: description || null,
+            categoryId: finalCategoryId,
+            type: type || 'FOOD_AND_BEV',
+            price: price ? parseFloat(price) : 0,
+            trackInventory: trackInventory ?? false,
+            // Android e iOS mandan el método al crear; antes se tiraba y el producto nacía sin él.
+            inventoryMethod: inventoryMethodForNewProduct(trackInventory, inventoryMethod),
+            duration: duration ?? null,
+            durationMinutes: durationMinutes || null,
+            maxParticipants: maxParticipants ?? null,
+            layoutConfig: layoutConfig ?? undefined,
+            // Optional measurement unit (validated against the Prisma Unit enum;
+            // invalid values are ignored, not fatal — additive field, older
+            // clients that don't send it are unaffected).
+            unit: parsedUnit,
+            // Venta por peso: price becomes precio POR KG; the POS captures the
+            // weight at sale time. Forces KILOGRAM as unit when enabled.
+            soldByWeight: soldByWeight === true,
+            ...(soldByWeight === true ? { unit: 'KILOGRAM' as Unit } : {}),
+            ...normalizarIvaDeProducto({ ivaTratamiento, taxRate }, null, encendido),
+          },
+          include: productInclude,
+        })
+      } catch (e) {
+        traducirErrorDeIva(e)
+        throw e
+      }
+      await ensureQuantityInventoryRow(tx, created)
+      // Plan 6b (H14): el móvil nunca enciende (D2), pero su alta con otro IVA deja rastro en la misma transacción.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId: created.id,
+        producto: created.name,
+        antes: null,
+        despues: created.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'MOVIL',
       })
+      // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
+      if (!created.inventory && created.trackInventory && created.inventoryMethod === 'QUANTITY') {
+        created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
+      }
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
       }
       return created
     })
 
-    return res.status(201).json({ success: true, data: withAvailableQuantity(product) })
+    if (categoriaCreada) {
+      void logAction({
+        staffId: req.authContext?.userId,
+        venueId,
+        action: 'MENU_CATEGORY_CREATED',
+        entity: 'MenuCategory',
+        entityId: categoriaCreada,
+        data: { name: 'General', automatica: true, motivo: 'primer producto sin categoría', productId: product.id },
+      })
+    }
+
+    // Las apps de iPhone publicadas leen esta respuesta como producto plano (Artículos) o como `{ message, data }` (caja);
+    // con sólo `{ success, data }` pintaban «error» sobre un alta que SÍ se guardó y el cliente la repetía. Se mandan las
+    // tres formas (sólo se agregan campos: Android y las apps viejas siguen leyendo `data`).
+    const creado = withAvailableQuantity(product)
+    return res.status(201).json({ ...creado, success: true, message: 'Producto creado', data: creado })
   } catch (error) {
-    logger.error('Error creating product (mobile)', {
+    const esDelCliente = error instanceof AppError && error.statusCode < 500
+    logger[esDelCliente ? 'warn' : 'error']('Error creating product (mobile)', {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params.venueId,
     })
@@ -222,7 +289,19 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     // Verify the product belongs to this venue and is not deleted
     const existing = await prisma.product.findFirst({
       where: { id: productId, venueId, deletedAt: null },
-      select: { id: true, active: true },
+      select: {
+        id: true,
+        active: true,
+        productGroupId: true,
+        name: true,
+        description: true,
+        type: true,
+        imageUrl: true,
+        categoryId: true,
+        ivaTratamiento: true,
+        taxRate: true,
+        objetoImp: true,
+      },
     })
 
     if (!existing) {
@@ -231,6 +310,8 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
 
     // Whitelist: only these fields may be updated via the mobile endpoint.
     // Anything else in req.body (e.g. `priceType`, `id`, relations) is ignored.
+    // `taxRate` NO está en esta lista: el IVA se escribe SÓLO como `ivaTratamiento`
+    // (ver normalizarIvaDeProducto más abajo) — el trigger de Product deriva la tupla.
     const allowed = [
       'name',
       'description',
@@ -240,7 +321,6 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
       'imageUrl',
       'price',
       'cost',
-      'taxRate',
       'active',
       'featured',
       'trackInventory',
@@ -270,10 +350,21 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
     // Coerce numeric fields that may arrive as strings from older mobile builds.
     if (data.price !== undefined && data.price !== null) data.price = parseFloat(String(data.price))
     if (data.cost !== undefined && data.cost !== null) data.cost = parseFloat(String(data.cost))
-    if (data.taxRate !== undefined && data.taxRate !== null) data.taxRate = parseFloat(String(data.taxRate))
+
+    // Android maps every type it doesn't know to REGULAR and sends `type` on every save (ArticlesModels.kt `productType`,
+    // ArticlesViewModel.updateProduct). On a variant of an inherited type (RETAIL, FOOD…) that echo is not a change: drop it.
+    if (existing.productGroupId && data.type === 'REGULAR' && !ANDROID_KNOWN_PRODUCT_TYPES.includes(existing.type)) delete data.type
+
+    // Variantes (spec §6): nombre, categoría, foto, tipo e IVA son del padre; la app manda el formulario entero y sólo un
+    // cambio REAL responde 409. Una carrera con el agrupado la cierra el trigger (mapeado abajo).
+    await assertNoGroupOwnedChanges(prisma, existing, { ...data, ivaTratamiento: req.body?.ivaTratamiento, taxRate: req.body?.taxRate })
 
     const actor = resolveLegacyCatalogActor(req.authContext!.userId, Boolean(req.authContext?.isImpersonating))
     const product = await prisma.$transaction(async tx => {
+      // Plan 4: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo), antes del cerco negocio → producto.
+      if ([req.body?.ivaTratamiento, req.body?.taxRate].some(v => v !== undefined && v !== null)) {
+        await bloquearParaCambiarIva(tx, { venueId })
+      }
       await assertLegacyCatalogProductUpdateGovernance(tx, {
         venueId,
         productId,
@@ -284,7 +375,44 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
         venueId,
         categoryId: typeof data.categoryId === 'string' ? data.categoryId : undefined,
       })
-      const updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
+      // IVA por producto: sólo se escribe `ivaTratamiento` (nunca `taxRate`/`objetoImp`
+      // directo) — el trigger de Product deriva la tupla desde ese único valor.
+      const actual = await tx.product.findFirstOrThrow({
+        where: { id: productId, venueId },
+        select: { ivaTratamiento: true, taxRate: true, objetoImp: true },
+      })
+      const encendido = (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
+      Object.assign(
+        data,
+        normalizarIvaDeProducto(
+          { ivaTratamiento: req.body?.ivaTratamiento, taxRate: req.body?.taxRate },
+          { ivaTratamiento: actual.ivaTratamiento, taxRate: Number(actual.taxRate), objetoImp: actual.objetoImp },
+          encendido,
+        ),
+      )
+      let updated
+      try {
+        updated = await tx.product.update({ where: { id: productId }, data, include: productInclude })
+      } catch (e) {
+        if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
+        traducirErrorDeIva(e)
+        throw e
+      }
+      // Plan 6b (H14, §5.7): antes → después, autor y origen, en la MISMA transacción del cambio.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId,
+        producto: updated.name,
+        antes: actual.ivaTratamiento,
+        despues: updated.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'MOVIL',
+      })
+      // Con el estado FINAL (el tipo puede no venir en el cuerpo): revierte toda la escritura.
+      if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
+      // P1-2 (Shopify): pasar a kilo o «por peso», a receta o sin control de existencias suspende la pareja; volver a pieza
+      // pide el cuadre. Después del Product y ANTES de Inventory (orden de candados del conector).
+      await ajustarParejaAlProducto(tx, updated)
       // Artículos de Android e iOS activan «por cantidad» por aquí, no por el servicio del dashboard.
       await ensureQuantityInventoryRow(tx, updated)
       // El `include` se leyó ANTES de la fila: la haya creado el helper o, en carrera, el asistente,
@@ -298,11 +426,14 @@ export async function updateProduct(req: Request, res: Response, next: NextFunct
 
     return res.json({ success: true, data: withAvailableQuantity(product) })
   } catch (error) {
-    logger.error('Error updating product (mobile)', {
+    const meta = {
       error: error instanceof Error ? error.message : 'Unknown error',
       venueId: req.params.venueId,
       productId: req.params.productId,
-    })
+    }
+    // A 4xx is an expected rejection (e.g. renaming a variant → 409): a warn, not a false alert (/full-testing I-5).
+    if (error instanceof AppError && error.statusCode < 500) logger.warn('Product update rejected (mobile)', meta)
+    else logger.error('Error updating product (mobile)', meta)
     next(error)
   }
 }
@@ -328,16 +459,24 @@ export async function deleteProduct(req: Request, res: Response, next: NextFunct
       return res.status(404).json({ success: false, message: 'Producto no encontrado' })
     }
 
-    const product = await prisma.product.update({
-      where: { id: productId },
-      data: {
-        deletedAt: new Date(),
-        active: false,
-        deletedBy: req.authContext?.userId || null,
-      },
-    })
+    // Plan 5 (D1): la misma función de archivado que el dashboard y «Reemplazar menú». En transacción: si era la última
+    // variante viva, el padre se archiva con ella (decisión 3c).
+    const staffId = req.authContext?.userId || null
+    const padresArchivados: string[] = []
+    await prisma.$transaction(tx => archivarProductos(tx, { venueId, id: productId }, staffId, padresArchivados))
+    // Ronda 1 (N2): el padre archivado con su última variante deja su renglón (después del commit).
+    for (const groupId of padresArchivados) {
+      void logAction({
+        staffId,
+        venueId,
+        action: 'PRODUCT_GROUP_ARCHIVED',
+        entity: 'ProductGroup',
+        entityId: groupId,
+        data: { reason: 'LAST_VARIANT_ARCHIVED', productId },
+      })
+    }
 
-    return res.json({ success: true, data: { id: product.id } })
+    return res.json({ success: true, data: { id: productId } })
   } catch (error) {
     logger.error('Error deleting product (mobile)', {
       error: error instanceof Error ? error.message : 'Unknown error',

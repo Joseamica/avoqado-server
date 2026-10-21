@@ -23,7 +23,7 @@
  * suman FUERA, porque no son mercancía y un descuento no debe comérselos.
  *
  * Estas pruebas ejercitan las FUNCIONES REALES, no un espejo de su fórmula: un espejo sigue en
- * verde mientras el servicio se rompe debajo (`orderTotal.negative.test.ts` es justamente eso).
+ * verde mientras el servicio se rompe debajo; por eso se retiró la réplica `orderTotal.negative.test.ts`.
  */
 
 import { applyCouponCode } from '../../../../src/services/tpv/discount.tpv.service'
@@ -43,6 +43,10 @@ jest.mock('../../../../src/services/dashboard/coupon.dashboard.service', () => (
 }))
 const validateCouponCode = couponService.validateCouponCode as jest.Mock
 
+/** P12: las llaves que `computeStoredOrderTotal` exige; casos sin impuesto (IVA incluido, 0) y con IVA que va aparte. */
+const SIN_IVA = { contratoDePrecio: 'IVA_INCLUIDO', taxAmount: 0, status: 'PENDING' } as const
+const IVA_APARTE = { contratoDePrecio: 'IVA_APARTE', status: 'PENDING' } as const
+
 /** Una cuenta de $100 con $15 de cargo por servicio: el caso que destapa el defecto. */
 const ordenConCargo = (overrides: Record<string, any> = {}) => ({
   id: 'order-sc',
@@ -56,9 +60,59 @@ const ordenConCargo = (overrides: Record<string, any> = {}) => ({
   tipAmount: new Decimal(0),
   total: new Decimal(115),
   paidAmount: new Decimal(0),
+  items: [],
   orderDiscounts: [],
   ...overrides,
 })
+
+/**
+ * La regla de catálogo de la que salió cada cálculo: el camino de catálogo la re-evalúa bajo el
+ * candado de la orden, así que la prueba siembra la regla real en vez de confiar en el cálculo.
+ */
+const reglaDeCatalogo = (overrides: Record<string, any> = {}) => ({
+  id: 'd-1',
+  venueId: 'venue-1',
+  name: 'Promo',
+  type: 'FIXED_AMOUNT' as DiscountType,
+  value: new Decimal(20),
+  scope: 'ORDER',
+  targetItemIds: [],
+  targetCategoryIds: [],
+  targetModifierIds: [],
+  targetModifierGroupIds: [],
+  customerGroupId: null,
+  isAutomatic: false,
+  priority: 0,
+  minPurchaseAmount: null,
+  maxDiscountAmount: null,
+  minQuantity: null,
+  buyQuantity: null,
+  getQuantity: null,
+  getDiscountPercent: null,
+  buyItemIds: [],
+  getItemIds: [],
+  validFrom: null,
+  validUntil: null,
+  daysOfWeek: [],
+  timeFrom: null,
+  timeUntil: null,
+  maxTotalUses: null,
+  maxUsesPerCustomer: null,
+  currentUses: 0,
+  isStackable: false,
+  stackPriority: 0,
+  requiresApproval: false,
+  applyBeforeTax: false,
+  active: true,
+  ...overrides,
+})
+
+/**
+ * Cortesía de catálogo: 100% de la base, «antes de impuestos». Hasta D16 el motor le restaba un 0.16 fijo; desde D16, en
+ * una orden sin contrato `IVA_APARTE` (como éstas), su reducción es 0.
+ */
+const cortesiaDeCatalogo = () =>
+  reglaDeCatalogo({ id: 'd-comp', name: 'Cortesía', type: 'COMP' as DiscountType, value: new Decimal(100), applyBeforeTax: true })
 
 /** Lo último que se escribió en `Order` — donde vive el total guardado. */
 const totalGuardado = (): number => {
@@ -95,6 +149,9 @@ const filaPorcentual = (value: number, amount: number) => ({
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<any>) => cb(prismaMock))
+  // Todo escritor toma el candado canónico de la orden (SELECT … FOR UPDATE): la fila existe.
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-sc' }] as never)
+  prismaMock.discount.findMany.mockResolvedValue([reglaDeCatalogo()] as never)
   prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-1' } as never)
   prismaMock.order.update.mockResolvedValue({} as never)
   prismaMock.discount.update.mockResolvedValue({} as never)
@@ -197,7 +254,14 @@ describe('El siguiente cobro NO tiene que ARREGLAR el total', () => {
 
     const guardado = prismaMock.order.update.mock.calls.at(-1)![0].data
     const balanceAlCobrar = computeOrderBalance(
-      { subtotal: 100, discountAmount: guardado.discountAmount, serviceChargeAmount: 15 },
+      {
+        subtotal: 100,
+        discountAmount: guardado.discountAmount,
+        serviceChargeAmount: 15,
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: 0,
+        status: 'PENDING',
+      },
       [], // todavía nadie ha pagado
     )
 
@@ -208,7 +272,15 @@ describe('El siguiente cobro NO tiene que ARREGLAR el total', () => {
 describe('computeStoredOrderTotal — el clamp cubre SÓLO la mercancía', () => {
   it('suma los cuatro conceptos sobre la mercancía descontada', () => {
     expect(
-      computeStoredOrderTotal({ subtotal: 100, discountAmount: 20, taxAmount: 5, serviceChargeAmount: 15, tipAmount: 10 }).toNumber(),
+      computeStoredOrderTotal({
+        subtotal: 100,
+        discountAmount: 20,
+        contratoDePrecio: 'IVA_APARTE',
+        taxAmount: 5,
+        status: 'PENDING',
+        serviceChargeAmount: 15,
+        tipAmount: 10,
+      }).toNumber(),
     ).toBe(110)
   })
 
@@ -216,22 +288,27 @@ describe('computeStoredOrderTotal — el clamp cubre SÓLO la mercancía', () =>
     // Caso M13: subtotal 253 con 278.30 descontados. Mercancía a 0, no a −25.30.
     // Con el clamp mal puesto —envolviendo todo— daría 54.70, o sea $25.30 robados
     // al cargo por servicio y a la propina del mesero.
-    expect(computeStoredOrderTotal({ subtotal: 253, discountAmount: 278.3, serviceChargeAmount: 30, tipAmount: 50 }).toNumber()).toBe(80)
+    expect(
+      computeStoredOrderTotal({ ...SIN_IVA, subtotal: 253, discountAmount: 278.3, serviceChargeAmount: 30, tipAmount: 50 }).toNumber(),
+    ).toBe(80)
   })
 
   it('sin cargos, es la mercancía a secas', () => {
-    expect(computeStoredOrderTotal({ subtotal: 45 }).toNumber()).toBe(45)
-    expect(computeStoredOrderTotal({ subtotal: 100, discountAmount: 25.5 }).toNumber()).toBe(74.5)
+    expect(computeStoredOrderTotal({ ...SIN_IVA, subtotal: 45 }).toNumber()).toBe(45)
+    expect(computeStoredOrderTotal({ ...SIN_IVA, subtotal: 100, discountAmount: 25.5 }).toNumber()).toBe(74.5)
   })
 
   it('en decimales exactos: 0.1 + 0.2 no deja residuo', () => {
-    expect(computeStoredOrderTotal({ subtotal: 0.1, serviceChargeAmount: 0.2 }).toNumber()).toBe(0.3)
+    expect(computeStoredOrderTotal({ ...SIN_IVA, subtotal: 0.1, serviceChargeAmount: 0.2 }).toNumber()).toBe(0.3)
   })
 
-  it('la aritmética canónica del saldo NO suma el impuesto, aunque la orden lo traiga', () => {
-    // Guarda contra una fuga: si alguien reenviara `taxAmount` desde `computeOrderBalance`,
-    // el cobro empezaría a cobrar el IVA dos veces (en México el precio ya lo incluye).
-    const balance = computeOrderBalance({ subtotal: 100, discountAmount: 0, serviceChargeAmount: 15, taxAmount: 16 } as any, [])
+  it('la aritmética canónica del saldo NO suma el impuesto de una orden con IVA INCLUIDO, aunque la orden lo traiga', () => {
+    // Guarda contra una fuga: con IVA incluido (en México el precio ya lo trae) sumar el `taxAmount` lo cobraría dos veces.
+    // Desde P12 el saldo SÍ suma el IVA que va aparte (orderBalance.test.ts); con IVA incluido, nunca.
+    const balance = computeOrderBalance(
+      { subtotal: 100, discountAmount: 0, serviceChargeAmount: 15, contratoDePrecio: 'IVA_INCLUIDO', taxAmount: 16, status: 'PENDING' },
+      [],
+    )
     expect(balance.total.toNumber()).toBe(115)
   })
 })
@@ -239,17 +316,21 @@ describe('computeStoredOrderTotal — el clamp cubre SÓLO la mercancía', () =>
 describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta misma tarea)', () => {
   /**
    * Quitar el `Math.max(0, …)` que envolvía TODO arregló la mercancía y destapó el impuesto,
-   * que también puede quedar negativo — y ése SÍ ocurre en el camino vivo de la TPV:
+   * que también podía quedar negativo — y eso SÍ ocurría en el camino vivo de la TPV hasta D16:
    *
    *   `applyPredefinedDiscount` (tpv/discount.tpv.service.ts) → `evaluateAutomaticDiscounts`
    *   → `calculateDiscountAmount`, donde `applyBeforeTax` es `true` por default (schema :7577;
-   *   los 17 descuentos del sistema lo tienen así) y `estimateAverageTaxRate()` devuelve un
-   *   **0.16 fijo sin mirar la orden**. De ahí `taxReduction = monto × 0.16`.
+   *   los 17 descuentos del sistema lo tienen así) y `estimateAverageTaxRate()` devolvía un
+   *   **0.16 fijo sin mirar la orden**. De ahí `taxReduction = monto × 0.16`, y con
+   *   `order.taxAmount − taxReduction` bastaba que la reducción superara al impuesto de la orden
+   *   para que quedara negativo.
    *
-   * Con `newTaxAmount = order.taxAmount − taxReduction`, basta que la reducción supere al
-   * impuesto de la orden para que el impuesto quede negativo. Y en producción NO se puede
-   * suponer `taxAmount = 0`: 31,775 de 45,503 órdenes lo tienen distinto de cero (máx.
-   * $11,288.16), así que el caso se sostiene por los dos lados.
+   * Desde D16 (IVA por producto, B2b) el motor ya no resta un 16 % fijo: sin contrato
+   * `IVA_APARTE` la reducción es 0, y con él se topa al impuesto que la orden trae. Las dos
+   * primeras pruebas de abajo siguen verdes por eso (y pasan la reducción precalculada de antes,
+   * que el motor ya no usa). El clamp se queda por las órdenes VIEJAS que quedaron guardadas en
+   * negativo: en producción 31,775 de 45,503 órdenes tienen `taxAmount` distinto de cero (máx.
+   * $11,288.16); lo cubre «una orden con el impuesto YA guardado en negativo…» y las dos puras.
    *
    * Un `Order.total` negativo RESTA del corte del día: es la forma exacta del caso M13 que
    * este repo ya reprodujo en hardware.
@@ -267,6 +348,7 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
   })
 
   it('🔴 cortesía de $253 sobre una cuenta con impuesto 0: total 0, NUNCA −40.48', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([cortesiaDeCatalogo()] as never)
     prismaMock.order.findUnique.mockResolvedValue(
       ordenConCargo({ subtotal: new Decimal(253), serviceChargeAmount: new Decimal(0), total: new Decimal(253) }) as never,
     )
@@ -277,7 +359,7 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
       type: 'COMP' as DiscountType,
       value: 100,
       amount: 253,
-      taxReduction: 40.48, // 253 × 0.16, el 0.16 fijo de estimateAverageTaxRate()
+      taxReduction: 40.48, // 253 × 0.16, el 0.16 fijo de antes de D16; el motor re-evalúa bajo el candado y no la usa
       applicableItems: [],
       isAutomatic: false,
       requiresApproval: false,
@@ -289,6 +371,7 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
   })
 
   it('un impuesto negativo tampoco se come el cargo por servicio ni la propina', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([cortesiaDeCatalogo()] as never)
     prismaMock.order.findUnique.mockResolvedValue(
       ordenConCargo({
         subtotal: new Decimal(253),
@@ -338,12 +421,12 @@ describe('🔴 Un impuesto NEGATIVO nunca resta de la cuenta (regresión de esta
 
   it('el impuesto POSITIVO sigue sumando al total, igual que siempre', () => {
     // El clamp del impuesto no puede convertirse en «el impuesto ya no cuenta».
-    expect(computeStoredOrderTotal({ subtotal: 100, discountAmount: 0, taxAmount: 16 }).toNumber()).toBe(116)
+    expect(computeStoredOrderTotal({ ...IVA_APARTE, subtotal: 100, discountAmount: 0, taxAmount: 16 }).toNumber()).toBe(116)
   })
 
   it('la contribución del impuesto se clampa por separado, sin tocar la mercancía', () => {
     // 100 de mercancía + 0 (no −30) = 100. Combinar los dos clamps daría 70.
-    expect(computeStoredOrderTotal({ subtotal: 100, discountAmount: 0, taxAmount: -30 }).toNumber()).toBe(100)
+    expect(computeStoredOrderTotal({ ...IVA_APARTE, subtotal: 100, discountAmount: 0, taxAmount: -30 }).toNumber()).toBe(100)
   })
 })
 

@@ -22,7 +22,7 @@
  */
 import { createHash } from 'node:crypto'
 
-import { DeliveryChannelStatus, type DeliveryChannelLink } from '@prisma/client'
+import { DeliveryChannelStatus, Prisma, type DeliveryChannelLink } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -248,9 +248,19 @@ export async function syncChannelAvailability(link: DeliveryChannelLink): Promis
     if (r.ok) logrados.delete(sku)
   }
 
-  await prisma.deliveryChannelLink.update({
-    where: { id: link.id },
-    data: { config: { ...((link.config as object) ?? {}), soldOutSkus: [...logrados] } },
+  // 🔴 Se relee `config` BLOQUEANDO la fila y se cambia sólo `soldOutSkus`. `link.config` se leyó al
+  // empezar la pasada, antes de las llamadas al proveedor: escribirlo de vuelta pisaba lo que el dueño
+  // guardó mientras tanto (su recargo de precios, su horario) y la siguiente publicación del menú salía
+  // con el precio viejo. El candado se toma DESPUÉS del HTTP, nunca durante.
+  await prisma.$transaction(async tx => {
+    const [fila] = await tx.$queryRaw<{ config: Prisma.JsonValue }[]>`
+      SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${link.id} FOR UPDATE`
+    if (!fila) return // el canal se borró mientras tanto: no hay a quién escribirle
+    const actual = fila.config && typeof fila.config === 'object' && !Array.isArray(fila.config) ? fila.config : {}
+    await tx.deliveryChannelLink.update({
+      where: { id: link.id },
+      data: { config: { ...actual, soldOutSkus: [...logrados] } },
+    })
   })
 
   logger.info('🥡 [MenuSync] disponibilidad actualizada en el proveedor', {

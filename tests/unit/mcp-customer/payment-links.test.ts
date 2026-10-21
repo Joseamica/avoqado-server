@@ -14,7 +14,7 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { paymentLink: { findMany: (...a: unknown[]) => mockLinkFind(...(a as [])) } },
+  default: { paymentLink: { count: jest.fn().mockResolvedValue(2), findMany: (...a: unknown[]) => mockLinkFind(...(a as [])) } },
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()

@@ -95,7 +95,6 @@ const INVENTARIO: Record<string, number> = {
   'src/jobs/auto-clockout.job.ts': 4,
   'src/jobs/blumon-webhook-reconciliation.job.ts': 1,
   'src/jobs/cash-drawer-reconciler.job.ts': 1,
-  'src/jobs/cfdiGlobal.job.ts': 1,
   'src/jobs/delivery-webhook-reconciliation.job.ts': 1,
   'src/jobs/gcal-health-check.job.ts': 1,
   'src/jobs/gcal-horizon-refresh.job.ts': 1,
@@ -119,29 +118,24 @@ const INVENTARIO: Record<string, number> = {
   'src/mcp/scope.ts': 3,
   'src/mcp/tools/areaTickets.ts': 2,
   'src/mcp/tools/campaigns.ts': 1,
-  'src/mcp/tools/commissions.ts': 4,
+  'src/mcp/tools/commissions.ts': 3,
   'src/mcp/tools/creditPacks.ts': 1,
   'src/mcp/tools/customers.ts': 1,
   'src/mcp/tools/deliveryChannels.ts': 1,
   'src/mcp/tools/features.ts': 2,
   // 3 → 0 (2026-09-04): candidatos, hidratación y revalidación ya tienen topes;
   // la paginación keyset además agota las páginas sin acumular mapas globales.
-  'src/mcp/tools/inventory.ts': 6,
+  'src/mcp/tools/inventory.ts': 4,
   'src/mcp/tools/loyalty.ts': 1,
   'src/mcp/tools/menu.ts': 1,
   'src/mcp/tools/organizations.ts': 1,
-  'src/mcp/tools/overview.ts': 1,
   'src/mcp/tools/promotions.ts': 1,
   'src/mcp/tools/recipes.ts': 1,
   'src/mcp/tools/reservations.ts': 1,
-  'src/mcp/tools/sales.ts': 2,
   'src/mcp/tools/serialized.ts': 4,
   'src/mcp/tools/staff.ts': 3,
   'src/mcp/tools/tables.ts': 2,
-  'src/mcp/tools/terminals.ts': 2,
-  'src/mcp/tools/trends.ts': 1,
   'src/mcp/tools/upsell.ts': 1,
-  'src/mcp/tools/venues.ts': 1,
   'src/middlewares/checkTableOwnership.middleware.ts': 1,
   'src/observability/venueNames.ts': 1,
   'src/routes/dashboard/organizationConfig.routes.ts': 12,
@@ -162,7 +156,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/cleanup/liveDemoCleanup.service.ts': 2,
   'src/services/command-center/commandCenter.service.ts': 6,
   'src/services/consumer/reservation.consumer.service.ts': 3,
-  'src/services/dashboard/accounting.dashboard.service.ts': 2,
+  // accounting.dashboard.service.ts: 2 → 0 (B4b, 2026-10-05/06). El estado de resultados enumera con un SELECT con LIMIT
+  // (Tarea 4) y el Resumen y Bancos suman en Postgres con groupBy (Tarea 5): ya no traen una fila por cobro del periodo.
   'src/services/dashboard/activity-log.service.ts': 9,
   'src/services/dashboard/ai-learning.service.ts': 1,
   'src/services/dashboard/alert.service.ts': 4,
@@ -195,11 +190,14 @@ const INVENTARIO: Record<string, number> = {
   // (`aggregate` + `DRAWER_CASH_WHERE`); ya no hidrata el efectivo desde el último corte.
   'src/services/dashboard/commission/commission-attendance.ts': 1,
   'src/services/dashboard/commission/commission-calculation.service.ts': 5,
-  'src/services/dashboard/commission/commission-clawback.service.ts': 3,
+  // 2026-10-05 (pago por servicio, fase 3 A4): 3 → 2. Se borró `applyClawbacksToSummary`, sin llamadores.
+  'src/services/dashboard/commission/commission-clawback.service.ts': 2,
   'src/services/dashboard/commission/commission-config.service.ts': 1,
   'src/services/dashboard/commission/commission-milestone.service.ts': 1,
   'src/services/dashboard/commission/commission-override.service.ts': 2,
-  'src/services/dashboard/commission/commission-payout.service.ts': 2,
+  // commission-payout.service.ts: 2 → 0 (fase 3 de pago por servicio, E1a): se fueron los dos findMany de `createPayouts`.
+  // `getPayouts` sigue sin `take` propio (la ventana del barrido ve el `take: 50` de `getPayoutById`); lo acota que ya no
+  // nacen pagos: el historial es el que hay (0 filas en producción).
   'src/services/dashboard/commission/commission-resolution.service.ts': 3,
   'src/services/dashboard/commission/commission-tier.service.ts': 2,
   'src/services/dashboard/commission/commission-utils.ts': 4,
@@ -245,7 +243,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/paymentSummary.dashboard.service.ts': 2,
   'src/services/dashboard/permissionSet.service.ts': 1,
   'src/services/dashboard/pricing.service.ts': 2,
-  'src/services/dashboard/printStation.dashboard.service.ts': 7,
+  'src/services/dashboard/printStation.dashboard.service.ts': 4,
   'src/services/dashboard/product.dashboard.service.ts': 2,
   'src/services/dashboard/productInventoryIntegration.service.ts': 1,
   'src/services/dashboard/productLabel.service.ts': 1,
@@ -253,7 +251,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/productWizard.service.ts': 1,
   'src/services/dashboard/promotion.dashboard.service.ts': 3,
   'src/services/dashboard/purchaseOrder.service.ts': 6,
-  'src/services/dashboard/purchaseOrderInvoice.service.ts': 1,
+  // 2026-10-05: factura de proveedor 1 → 0; códigos observados llevan take y el inbox está paginado.
   'src/services/dashboard/rawMaterial.service.ts': 4,
   'src/services/dashboard/rawMaterialPresentation.service.ts': 2,
   // 2026-09-18: +1 al añadir orderItemModifier a la lista (no es código nuevo, es un
@@ -261,7 +259,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/receipt.dashboard.service.ts': 3,
   'src/services/dashboard/recipe.service.ts': 2,
   'src/services/dashboard/recipeRecalculation.service.ts': 3,
-  'src/services/dashboard/refund.dashboard.service.ts': 3,
+  // C2 A-1 (9-oct): 3 ⇒ 2; las líneas de la orden ya las lee el cargador de lo cobrado (`cobradoDeLaOrden.ts`), con tope.
+  // C2 OF-2 (M2): 2 ⇒ 1; `listRefundsForPayment` filtra en SQL por el cobro y lleva `take`.
+  'src/services/dashboard/refund.dashboard.service.ts': 1,
   'src/services/dashboard/refunds.dashboard.service.ts': 1,
   'src/services/dashboard/reports.dashboard.service.ts': 1,
   'src/services/dashboard/reservation.dashboard.service.ts': 3,
@@ -295,8 +295,8 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/supplier.service.ts': 3,
   'src/services/dashboard/team.dashboard.service.ts': 3,
   'src/services/dashboard/tenderType.dashboard.service.ts': 1,
-  'src/services/dashboard/terminal-migration.service.ts': 3,
-  'src/services/dashboard/terminals.superadmin.service.ts': 6,
+  'src/services/dashboard/terminal-migration.service.ts': 1,
+  'src/services/dashboard/terminals.superadmin.service.ts': 4,
   'src/services/dashboard/text-to-sql-assistant.service.ts': 3,
   'src/services/dashboard/token-budget.service.ts': 1,
   'src/services/dashboard/tpv.dashboard.service.ts': 3,
@@ -319,9 +319,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/fiscal/accountingPeriodLock.service.ts': 1,
   'src/services/fiscal/accountingReports.service.ts': 1,
   'src/services/fiscal/accountsPayable.service.ts': 1,
-  'src/services/fiscal/autoPosting.service.ts': 2,
   'src/services/fiscal/cfdi.service.ts': 1,
-  'src/services/fiscal/cfdiGlobal.service.ts': 1,
   'src/services/fiscal/chartOfAccounts.service.ts': 2,
   'src/services/fiscal/cogs.service.ts': 1,
   'src/services/fiscal/diot.service.ts': 1,
@@ -334,6 +332,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/fiscal/journalEntry.service.ts': 2,
   'src/services/fiscal/nomina.service.ts': 2,
   'src/services/fiscal/nominaCfdi.service.ts': 1,
+  // 0 → 1 (2026-10-14, IVA por producto 6b T4): los renglones de UNA orden (`where: { orderId }`); sellarlos TODOS es la regla (un
+  // renglón sin sello se leería con el IVA vivo del producto). Nunca un `take`: sellaría sólo una parte de la factura.
+  'src/services/fiscal/sellosHeredados.ts': 1,
   'src/services/fiscal/trialBalance.service.ts': 1,
   'src/services/google-calendar/own-event-edit.service.ts': 1,
   'src/services/inventory/inventoryPosting.service.ts': 1,
@@ -390,18 +391,18 @@ const INVENTARIO: Record<string, number> = {
   // reescribieron a SQL (golden al centavo + integración con base real). Los 5 que quedan
   // devuelven FILAS al dashboard o corren un motor por fila (GPS de hoy, personal en línea,
   // checadas del día, calendario, reporte de cierre) y llevan select quirúrgico.
-  'src/services/organization-dashboard/organizationDashboard.service.ts': 40,
+  'src/services/organization-dashboard/organizationDashboard.service.ts': 39,
   'src/services/organization-dashboard/storesAnalysisScope.service.ts': 1,
   'src/services/organization-payment-config.service.ts': 1,
   'src/services/organization/organization.service.ts': 7,
   'src/services/partner/partner.service.ts': 1,
   'src/services/payments/reservation-deposit-webhook.service.ts': 3,
-  'src/services/payments/revenueShareReport.service.ts': 1,
   'src/services/printing/printConfig.service.ts': 4,
   'src/services/promoters/promoterLocation.service.ts': 3,
   'src/services/promoters/promoters.service.ts': 4,
   'src/services/promoters/terminalLocation.service.ts': 4,
-  'src/services/promotions/promotion.service.ts': 1,
+  // 1 → 2: las líneas de UNA promoción de UNA orden, bajo su candado (B2c P4).
+  'src/services/promotions/promotion.service.ts': 2,
   'src/services/promotions/promotionCatalog.service.ts': 1,
   'src/services/referrals/referralQualification.service.ts': 1,
   'src/services/referrals/referralRefund.service.ts': 1,
@@ -424,6 +425,9 @@ const INVENTARIO: Record<string, number> = {
   'src/services/serialized-inventory/serializedInventory.service.ts': 8,
   'src/services/serialized-inventory/simRegistration.service.ts': 5,
   'src/services/shared/loyaltyOnPaidOrder.ts': 1,
+  // B2: renglones y filas de UNA orden, bajo su candado; B2c F2: los renglones de UNA orden VIEJA que `conservarDescuentoHistorico`
+  // normaliza (sólo con resto de cabecera > 0). Cortarlos con `take` dejaría un descuento de renglón sin su espejo.
+  'src/services/shared/repartoDescuentoTx.ts': 3,
   'src/services/shared/serviceCharges.ts': 1,
   'src/services/shared/turnoDeCaja.ts': 1,
   'src/services/staffOrganization.service.ts': 1,
@@ -462,7 +466,6 @@ const INVENTARIO: Record<string, number> = {
   // recorre por páginas con cursor; al llegar a cero sale del inventario.
   'src/services/tpv/blumon-webhook.service.ts': 2,
   'src/services/tpv/command-execution.service.ts': 3,
-  'src/services/tpv/command-queue.service.ts': 2,
   'src/services/tpv/fastPaymentCustomer.ts': 1,
   'src/services/tpv/floor-element.tpv.service.ts': 1,
   'src/services/tpv/merchantRouting.service.ts': 3,
@@ -474,7 +477,8 @@ const INVENTARIO: Record<string, number> = {
   // de `getShifts` (`orders → payments → allocations`) y los dos `findMany` de `getCurrentShift`,
   // que ahora agregan en la base. Los 4 que quedan son P3.2/P3.3 y siguen abiertos.
   'src/services/tpv/shift.tpv.service.ts': 4,
-  'src/services/tpv/table.tpv.service.ts': 3,
+  // Mesas Task6 replaces the third unbounded clear read with the paginated topology scope; two unrelated reads remain.
+  'src/services/tpv/table.tpv.service.ts': 2,
   'src/services/tpv/time-entry.tpv.service.ts': 4,
   'src/services/tpv/tpv-health.service.ts': 1,
   'src/services/tpv/tpv-message.service.ts': 4,

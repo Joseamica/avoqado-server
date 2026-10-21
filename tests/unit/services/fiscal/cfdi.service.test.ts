@@ -1,6 +1,14 @@
+import { withIssueTransaction } from '../../../__helpers__/issue-cfdi-transaction'
 // tests/unit/services/fiscal/cfdi.service.test.ts
 import { Prisma } from '@prisma/client'
-import { issueCfdiForOrder, IssueCfdiDeps } from '../../../../src/services/fiscal/cfdi.service'
+import {
+  issueCfdiForOrder,
+  IssueCfdiDeps,
+  getCfdiStatus,
+  MOTIVO_AUTOFACTURA_CON_DEVOLUCION,
+} from '../../../../src/services/fiscal/cfdi.service'
+import { ConflictError } from '../../../../src/errors/AppError'
+import prisma from '../../../../src/utils/prismaClient'
 
 /** Helper: build a realistic P2002 unique-violation error as Prisma would throw. */
 function makeP2002(): Prisma.PrismaClientKnownRequestError {
@@ -12,6 +20,7 @@ function makeP2002(): Prisma.PrismaClientKnownRequestError {
 }
 
 const D = (n: number) => new Prisma.Decimal(n)
+const PRODUCTO_16 = { satProductKey: '90101500', satUnitKey: 'E48', objetoImp: '02', taxRate: D(0.16), category: null }
 // Use a real individual RFC for the happy-path/default service tests.
 // XAXX010101000 ("Público en General") is only valid on the global CFDI; individual issuance blocks it.
 const receptor = {
@@ -32,14 +41,14 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     stampedAt: new Date(),
     status: 'valid' as const,
   }
-  return {
+  return withIssueTransaction({
     findExistingCfdi: jest.fn().mockResolvedValue(null),
     // By default, reservation succeeds (no conflict)
-    reserveCfdi: jest.fn().mockResolvedValue({}),
+    reserveCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
     // Por default este proceso gana el reclamo del intento (la carrera se prueba aparte)
     claimCfdi: jest.fn().mockResolvedValue(true),
     // Como el dep real: escribe sólo las URLs (jamás el estado) y devuelve la fila completa.
-    persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'cfdi1', uuid: 'UUID-1', status: 'STAMPED', ...urls })),
+    persistArtifacts: jest.fn().mockImplementation(async (_llave, urls) => ({ id: 'cfdi1', status: 'STAMPED', ...urls })),
     loadOrderForCfdi: jest.fn().mockResolvedValue({
       venueId: 'v1',
       venueSlug: 'demo',
@@ -52,7 +61,10 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
       subtotalCents: 10000,
       taxCents: 1600,
       totalCents: 11600,
+      paidCents: 11600,
       order: {
+        clasificacion: 'TODO_16',
+        renglonesOrigen: [],
         venueType: 'RESTAURANT',
         tipAmount: D(0),
         items: [
@@ -69,13 +81,14 @@ function makeDeps(over: Partial<IssueCfdiDeps> = {}): IssueCfdiDeps {
     resolveProvider: jest.fn().mockReturnValue({
       name: 'facturapi',
       createInvoice: jest.fn().mockResolvedValue(stamped),
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      // C2 · T5 ronda 1 (M3): un comprobante con sus totales; sin ellos no hay `xmlConceptos` (nunca se inventan).
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante SubTotal="100.00" Total="116.00"/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
     } as any),
     storeArtifact: jest.fn().mockImplementation(async (_b, path) => `https://cdn/${path}`),
     persistCfdi: jest.fn().mockImplementation(async data => ({ id: 'cfdi1', ...data })),
     ...over,
-  }
+  })
 }
 
 describe('issueCfdiForOrder', () => {
@@ -93,7 +106,8 @@ describe('issueCfdiForOrder', () => {
     expect(calls[0].xmlUrl ?? null).toBeNull()
     const [llave, urls] = (deps.persistArtifacts as jest.Mock).mock.calls[0]
     expect(llave).toBe('cfdi-order-o1')
-    expect(Object.keys(urls).sort()).toEqual(['pdfUrl', 'xmlUrl'])
+    // C2 · T5: los archivos llevan también los conceptos del XML (evidencia, no estado fiscal).
+    expect(Object.keys(urls).sort()).toEqual(['pdfUrl', 'taxBreakdown', 'xmlConceptos', 'xmlUrl'])
     expect(urls.xmlUrl).toMatch(/\.xml$/)
   })
 
@@ -111,7 +125,7 @@ describe('issueCfdiForOrder', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice,
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       } as any),
     })
@@ -119,7 +133,8 @@ describe('issueCfdiForOrder', () => {
     expect(createInvoice).toHaveBeenCalledTimes(1)
     const invoiceParams = createInvoice.mock.calls[0][0]
     // externalId must equal the idempotencyKey built from orderId
-    expect(invoiceParams.externalId).toBe('cfdi-order-o1')
+    expect(invoiceParams.externalId).toBe('cfdi-order-o1#1')
+    expect(invoiceParams.idempotencyKey).toBe('cfdi-order-o1#1')
   })
 
   it('REGRESSION: a GROSS (IVA-included) order stamps tax_included so the CFDI total == what was paid', async () => {
@@ -148,7 +163,10 @@ describe('issueCfdiForOrder', () => {
         subtotalCents: 10000,
         taxCents: 1600,
         totalCents: 11600,
+        paidCents: 11600,
         order: {
+          clasificacion: 'TODO_16',
+          renglonesOrigen: [],
           venueType: 'RESTAURANT',
           tipAmount: D(0),
           pricesIncludeIva: true, // ← gross convention
@@ -166,7 +184,7 @@ describe('issueCfdiForOrder', () => {
       resolveProvider: jest.fn().mockReturnValue({
         name: 'facturapi',
         createInvoice,
-        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+        downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
         downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       } as any),
     })
@@ -178,17 +196,36 @@ describe('issueCfdiForOrder', () => {
     expect(sentItem.taxIncluded).toBe(true) // PAC keeps the gross → stamped total stays 116, not 134.56
     expect(sentItem.unitPriceCents).toBe(11600) // sends the IVA-included price the customer actually paid
     // and the persisted row records the real split (taxCents ≠ 0), cuadra al centavo
-    const persisted = (deps.persistCfdi as jest.Mock).mock.calls.at(-1)[0]
+    const persisted = (deps.reserveCfdi as jest.Mock).mock.calls[0][0]
     expect(persisted.subtotalCents + persisted.taxCents).toBe(persisted.totalCents)
     expect(persisted.totalCents).toBe(11600)
   })
 
-  it('idempotent: returns the existing STAMPED Cfdi without calling the PAC', async () => {
+  it('idempotent: returns the existing STAMPED Cfdi without calling the PAC — y avisa que NO es nueva (Codex R3-2)', async () => {
     const existing = { id: 'c0', status: 'STAMPED', uuid: 'OLD' }
     const deps = makeDeps({ findExistingCfdi: jest.fn().mockResolvedValue(existing) })
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.status).toBe('STAMPED')
     expect(res.cfdi.uuid).toBe('OLD')
+    // Sin la marca, el dashboard y la autofactura responden 201/200 «facturada» y escriben un CFDI_ISSUED falso.
+    expect(res.alreadyIssued).toBe(true)
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  it('🔴 carrera: otra petición timbró la MISMA llave entre la consulta y la reserva ⇒ también avisa que NO es nueva', async () => {
+    const timbrada = {
+      id: 'c0',
+      status: 'STAMPED',
+      uuid: 'GANO-LA-OTRA',
+      protocoloIva: 1,
+      venueId: 'v1',
+      fiscalEmisor: {},
+      venue: { slug: 's' },
+    }
+    const deps = makeDeps({ findExistingCfdi: jest.fn().mockResolvedValueOnce(null).mockResolvedValue(timbrada) })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res).toMatchObject({ status: 'STAMPED', alreadyIssued: true })
+    expect(res.cfdi.uuid).toBe('GANO-LA-OTRA')
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
@@ -217,7 +254,7 @@ describe('issueCfdiForOrder', () => {
     expect(res.status).toBe('VALIDATION_FAILED')
     expect(res.reasons?.join(' ')).toMatch(/\$116\.00.*\$121\.80/)
     expect(deps.resolveProvider).not.toHaveBeenCalled()
-    expect((deps.persistCfdi as jest.Mock).mock.calls[0][0].status).toBe('VALIDATION_FAILED')
+    expect((deps.reserveCfdi as jest.Mock).mock.calls[0][0].status).toBe('VALIDATION_FAILED')
   })
 
   it('SOBRE SEGURO: una orden con unsupportedReasons NO llama al PAC y responde VALIDATION_FAILED con esa razón', async () => {
@@ -262,6 +299,92 @@ describe('issueCfdiForOrder', () => {
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
+  // B3a Tarea 6b: el motor compara el documento que SE MANDA sumado como el PAC (R5 del sandbox: $65 con 2.33 + $5 con 0.17 da
+  // $67.49), no la suma por concepto (que daba $67.50 y lo dejaba pasar). Aquí el bundle llega como si el cargador no lo cuadrara.
+  const r5 = (descuentoCafe: number) => ({
+    subtotalCents: 5819,
+    taxCents: 931,
+    totalCents: 6750,
+    paidCents: 6750,
+    order: {
+      clasificacion: 'TODO_16',
+      renglonesOrigen: [],
+      venueType: 'RESTAURANT',
+      tipAmount: D(0),
+      pricesIncludeIva: true,
+      items: [
+        { productName: 'CAPUCCINO', quantity: 1, unitPrice: D(65), discountAmount: D(descuentoCafe), product: PRODUCTO_16 },
+        { productName: 'Deslactosada (CAPUCCINO)', quantity: 1, unitPrice: D(5), discountAmount: D(0.17), product: PRODUCTO_16 },
+      ],
+    },
+  })
+  const MOTIVO_R5 =
+    'El total de la factura ($67.49) no coincide con lo cobrado ($67.50). No se timbró; revisa la cuenta o repórtala a soporte.'
+
+  it('6b, BARRERA de dinero con entrada: el documento del R5 sumado como el PAC da $67.49 contra $67.50 ⇒ no llama al PAC', async () => {
+    const createInvoice = jest.fn()
+    const deps = makeDeps({ resolveProvider: jest.fn().mockReturnValue({ name: 'facturapi', createInvoice } as any) })
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.33) })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('VALIDATION_FAILED')
+    expect(res.reasons).toEqual([MOTIVO_R5])
+    expect(createInvoice).not.toHaveBeenCalled()
+  })
+
+  it('6b, control con entrada: el R5 ya cuadrado (2.32) timbra', async () => {
+    const deps = makeDeps()
+    const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+    deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.32) })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res.status).toBe('STAMPED')
+  })
+
+  describe('6b, camino legado (fila sin protocolo)', () => {
+    const P2002 = Object.assign(new Error('unique'), { code: 'P2002', name: 'PrismaClientKnownRequestError' })
+    const legado = (
+      createInvoice = jest.fn().mockResolvedValue({
+        providerInvoiceId: 'fa1',
+        uuid: 'U',
+        serie: 'F',
+        folio: '2',
+        totalCents: 6750,
+        stampedAt: new Date(),
+        status: 'valid',
+      }),
+    ) =>
+      makeDeps({
+        reserveCfdi: jest.fn().mockRejectedValue(Object.setPrototypeOf(P2002, Prisma.PrismaClientKnownRequestError.prototype)),
+        findExistingCfdi: jest.fn().mockResolvedValue({ id: 'c1', status: 'STAMP_FAILED', updatedAt: new Date() }),
+        claimCfdi: jest.fn().mockResolvedValue(true),
+        resolveProvider: jest.fn().mockReturnValue({
+          name: 'facturapi',
+          createInvoice,
+          downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
+          downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
+        } as any),
+      })
+
+    it('6b, BARRERA de dinero legado: el R5 sumado como el PAC da $67.49 contra $67.50 ⇒ no llama al PAC', async () => {
+      const createInvoice = jest.fn()
+      const deps = legado(createInvoice)
+      const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+      deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.33) })
+      const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+      expect(res.status).toBe('VALIDATION_FAILED')
+      expect(res.reasons).toEqual([MOTIVO_R5])
+      expect(createInvoice).not.toHaveBeenCalled()
+    })
+
+    it('6b, control legado: el R5 ya cuadrado (2.32) timbra', async () => {
+      const deps = legado()
+      const base = await (makeDeps().loadOrderForCfdi as jest.Mock)('o1')
+      deps.loadOrderForCfdi = jest.fn().mockResolvedValue({ ...base, ...r5(2.32) })
+      const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+      expect(res.status).toBe('STAMPED')
+    })
+  })
+
   it('tenant isolation: un CFDI ya STAMPED de OTRO venue no se devuelve por idempotencia (404), y no se toca el PAC', async () => {
     const deps = makeDeps({
       findExistingCfdi: jest.fn().mockResolvedValue({ id: 'cfdiA', status: 'STAMPED', venueId: 'venueA', pdfUrl: 'https://x/a.pdf' }),
@@ -270,6 +393,41 @@ describe('issueCfdiForOrder', () => {
       /not found/,
     )
     expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
+  describe('PAC error y la fila ya estaba timbrada al querer marcar la falla (Codex r4)', () => {
+    const conPacCaido = (filaTimbrada: object) => {
+      let pacLlamado = false
+      return makeDeps({
+        resolveProvider: jest.fn().mockReturnValue({
+          name: 'facturapi',
+          createInvoice: jest.fn(async () => {
+            pacLlamado = true
+            throw new Error('SAT down')
+          }),
+          downloadXml: jest.fn(),
+          downloadPdf: jest.fn(),
+        } as any),
+        // La marca de falla pierde su CAS: otro proceso ya dejó la fila timbrada.
+        persistCfdi: jest.fn(async (data: any) => (data.status === 'STAMP_FAILED' ? null : { id: 'cfdi1', ...data })),
+        findExistingCfdi: jest.fn(async () => (pacLlamado ? filaTimbrada : null)),
+      })
+    }
+
+    it('timbrada por OTRO envío (otra versión) ⇒ avisa que NO es nueva (y queda el rastro del timbre duplicado)', async () => {
+      const deps = conPacCaido({ id: 'cfdi1', status: 'STAMPED', uuid: 'OTRO', attempts: 2 })
+      const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+      expect(res).toMatchObject({ status: 'STAMPED', alreadyIssued: true })
+    })
+
+    it('timbrada por ESTE mismo envío (misma versión, la completó la conciliación) ⇒ éxito propio, sin la marca', async () => {
+      const res = await issueCfdiForOrder(
+        { orderId: 'o1', receptor, sandbox: true },
+        conPacCaido({ id: 'cfdi1', status: 'STAMPED', uuid: 'MIO', attempts: 1 }),
+      )
+      expect(res.status).toBe('STAMPED')
+      expect(res.alreadyIssued).toBeUndefined()
+    })
   })
 
   it('PAC error: persists STAMP_FAILED with the error', async () => {
@@ -385,6 +543,19 @@ describe('issueCfdiForOrder', () => {
     expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 
+  it('ruta vieja: P2002 y la MISMA llave ya timbrada por otra petición ⇒ avisa que NO es nueva (Codex r4)', async () => {
+    const deps = makeDeps({
+      reserveCfdi: jest.fn().mockRejectedValue(makeP2002()),
+      findExistingCfdi: jest
+        .fn()
+        .mockResolvedValueOnce({ id: 'c0', status: 'STAMP_FAILED' }) // reserva heredada: va por la ruta vieja
+        .mockResolvedValue({ id: 'c0', status: 'STAMPED', uuid: 'GANO-LA-OTRA' }),
+    })
+    const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
+    expect(res).toMatchObject({ status: 'STAMPED', alreadyIssued: true })
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
+  })
+
   it('retry after terminal failure (STAMP_FAILED): P2002 + existing STAMP_FAILED → proceeds to stamp (PAC called)', async () => {
     const failedRow = { id: 'c0', status: 'STAMP_FAILED' }
     const deps = makeDeps({
@@ -435,7 +606,7 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
     const provider = {
       name: 'facturapi',
       createInvoice,
-      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<xml/>')),
+      downloadXml: jest.fn().mockResolvedValue(Buffer.from('<Comprobante/>')),
       downloadPdf: jest.fn().mockResolvedValue(Buffer.from('%PDF')),
       findByExternalId: jest
         .fn()
@@ -506,5 +677,107 @@ describe('issueCfdiForOrder — recuperación de intentos', () => {
     const res = await issueCfdiForOrder({ orderId: 'o1', receptor, sandbox: true }, deps)
     expect(res.cfdi.xmlUrl).toMatch(/\.xml$/)
     expect(res.cfdi.pdfUrl).toMatch(/\.pdf$/)
+  })
+})
+
+// C2 · T5 ronda 1 (M1): `xmlConceptos` de una global pesa ~1 MiB de JSON; `GET /dashboard/venues/:venueId/cfdi/:cfdiId` (que devuelve la
+// fila de `getCfdiStatus`) no lo trae. No se quita nada más: sigue siendo la fila completa con su `include`.
+describe('C2 · T5 ronda 1 (M1) · getCfdiStatus no devuelve `xmlConceptos`', () => {
+  it('🔴 la lectura por omisión omite `xmlConceptos` y conserva lo demás (sin `select`, con `include` de las sustitutas)', async () => {
+    ;(prisma.cfdi.findUnique as jest.Mock).mockResolvedValueOnce({ id: 'c1', venueId: 'v1' })
+    // C2 · T10 (C2-31), cambio A PROPÓSITO: la fila gana `estadoCancelacion` (null = nunca se pidió cancelarla).
+    expect(await getCfdiStatus({ cfdiId: 'c1', expectedVenueId: 'v1' })).toEqual({ id: 'c1', venueId: 'v1', estadoCancelacion: null })
+    const q = (prisma.cfdi.findUnique as jest.Mock).mock.calls.at(-1)[0]
+    expect(q.where).toEqual({ id: 'c1' })
+    expect(q.omit).toEqual({ xmlConceptos: true })
+    expect(q.select).toBeUndefined()
+    expect(q.include.replacedBy).toEqual(expect.objectContaining({ take: 5 }))
+  })
+})
+
+// T-I2 · A7-R10 (founder, 10-oct): una venta con CUALQUIER devolución completada (total o parcial) no se autofactura. La comprobación que
+// decide va DENTRO de la transacción de admisión, después del `FOR UPDATE` de la orden (el mismo candado que toman las devoluciones).
+describe('T-I2 · A7-R10 — la autofactura no se ofrece en una venta con devolución', () => {
+  /** Tabla `Payment` de mentira que SÍ aplica el `where` (igualdad): mide QUÉ cuenta como devolución, no la forma de la consulta. */
+  const tablaPagos = (filas: Record<string, any>[]) =>
+    jest.fn(async ({ where = {} }: any) => filas.find(f => Object.entries(where).every(([k, v]) => f[k] === v)) ?? null)
+  /** Mete la tabla en la transacción del motor y guarda esa transacción para mirar el orden candado → consulta. */
+  function conPagos(deps: IssueCfdiDeps, findFirst: jest.Mock) {
+    const vistas: any[] = []
+    const base = deps.runInTransaction!
+    deps.runInTransaction = work =>
+      base(tx => {
+        vistas.push(tx)
+        return work(Object.assign(tx, { payment: { findFirst } }))
+      })
+    return { deps, vistas }
+  }
+  const venta = { orderId: 'o1', type: 'REGULAR', status: 'COMPLETED', amount: 116 }
+  const devolucionTotal = { orderId: 'o1', type: 'REFUND', status: 'COMPLETED', amount: -116 }
+  const devolucionParcial = { orderId: 'o1', type: 'REFUND', status: 'COMPLETED', amount: -40 }
+  const autofactura = { orderId: 'o1', receptor, sandbox: true, flow: 'AUTOFACTURA_A' as const, expectedVenueId: 'v1' }
+
+  it.each([
+    ['total', devolucionTotal],
+    ['parcial', devolucionParcial],
+  ])(
+    '🔴 (1/2) devolución %s ⇒ ConflictError con el motivo (el controlador lo vuelve 409 neutro), sin reservar ni tocar el PAC',
+    async (_n, dev) => {
+      const { deps } = conPagos(makeDeps(), tablaPagos([venta, dev]))
+      const err = await issueCfdiForOrder(autofactura, deps).catch(e => e)
+      expect(err).toBeInstanceOf(ConflictError)
+      expect(err.message).toBe(MOTIVO_AUTOFACTURA_CON_DEVOLUCION)
+      expect(deps.reserveCfdi).not.toHaveBeenCalled()
+      expect(deps.resolveProvider).not.toHaveBeenCalled()
+    },
+  )
+
+  it('🔴 (5) la consulta que decide va en la MISMA transacción y DESPUÉS del `FOR UPDATE` de la orden', async () => {
+    const findFirst = tablaPagos([venta, devolucionTotal])
+    const { deps, vistas } = conPagos(makeDeps(), findFirst)
+    await issueCfdiForOrder(autofactura, deps).catch(() => undefined)
+    expect(findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { orderId: 'o1', type: 'REFUND', status: 'COMPLETED' } }))
+    const candado = vistas[0].$queryRaw.mock
+    const iCandado = candado.calls.findIndex((c: any[]) => /FOR UPDATE/.test(Array.from(c[0] as string[]).join('?')))
+    expect(iCandado).toBeGreaterThanOrEqual(0)
+    expect(findFirst.mock.invocationCallOrder[0]).toBeGreaterThan(candado.invocationCallOrder[iCandado])
+  })
+
+  it('🔴 (4) una devolución PENDING o FAILED no bloquea: sólo la COMPLETED', async () => {
+    const pendiente = { ...devolucionTotal, status: 'PENDING' }
+    const fallida = { ...devolucionTotal, status: 'FAILED' }
+    const findFirst = tablaPagos([venta, pendiente, fallida])
+    const { deps } = conPagos(makeDeps(), findFirst)
+    const res = await issueCfdiForOrder(autofactura, deps)
+    // La regla SÍ miró los pagos de la venta (y no encontró una devolución completada): no es que no se haya preguntado.
+    expect(findFirst).toHaveBeenCalled()
+    expect(res.status).toBe('STAMPED')
+  })
+
+  it('control — (3) venta sin devolución ⇒ se timbra como hoy', async () => {
+    const { deps } = conPagos(makeDeps(), tablaPagos([venta]))
+    const res = await issueCfdiForOrder(autofactura, deps)
+    expect(res.status).toBe('STAMPED')
+    expect(deps.resolveProvider).toHaveBeenCalled()
+  })
+
+  // B5 · F6 (cambio A PROPÓSITO, como su gemela de integración): la devolución TOTAL ya no se timbra desde Pedidos. La decisión lee las
+  // devoluciones con `$queryRaw` bajo el mismo candado; aquí esa consulta contesta la fila del REFUND (las demás, la fila del candado).
+  it('F6 — la factura del PERSONAL (STAFF_B) de una venta devuelta COMPLETA ya no se timbra: 409 CFDI_VENTA_DEVUELTA', async () => {
+    const { deps } = conPagos(makeDeps(), tablaPagos([venta, devolucionTotal]))
+    const base = deps.runInTransaction!
+    deps.runInTransaction = work =>
+      base(tx => {
+        const candado = tx.$queryRaw
+        tx.$queryRaw = jest.fn((sql: TemplateStringsArray, ...v: unknown[]) =>
+          /FROM "Payment"/.test(sql.join('?')) ? Promise.resolve([{ id: 'r1', amount: -116, processorData: null }]) : candado(sql, ...v),
+        ) as any
+        return work(tx)
+      })
+    const err = await issueCfdiForOrder({ ...autofactura, flow: 'STAFF_B' }, deps).catch(e => e)
+    expect(err).toBeInstanceOf(ConflictError)
+    expect(err).toMatchObject({ code: 'CFDI_VENTA_DEVUELTA', statusCode: 409 })
+    expect(deps.reserveCfdi).not.toHaveBeenCalled()
+    expect(deps.resolveProvider).not.toHaveBeenCalled()
   })
 })

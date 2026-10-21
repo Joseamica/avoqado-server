@@ -14,6 +14,12 @@ import * as pricingController from '../../controllers/dashboard/inventory/pricin
 import * as supplierController from '../../controllers/dashboard/inventory/supplier.controller'
 import * as purchaseOrderController from '../../controllers/dashboard/inventory/purchaseOrder.controller'
 import * as purchaseOrderInvoiceController from '../../controllers/dashboard/inventory/purchaseOrderInvoice.controller'
+import {
+  SupplierInvoiceInboxSchema,
+  SupplierInvoiceCatalogSchema,
+  SupplierInvoiceConfirmationSchema,
+  SupplierInvoiceIdentificationSchema,
+} from '../../schemas/dashboard/supplierInvoiceInventory.schema'
 import * as alertController from '../../controllers/dashboard/inventory/alert.controller'
 import * as reportController from '../../controllers/dashboard/inventory/report.controller'
 import * as productWizardController from '../../controllers/dashboard/inventory/productWizard.controller'
@@ -1055,6 +1061,34 @@ router.post(
 // Fase 2 — la factura que llegó SIN orden, y el aprendizaje de códigos del proveedor.
 // Mismo doble candado: INVENTORY_TRACKING (router entero) + CFDI (lee un comprobante fiscal).
 router.get('/supplier-invoices', checkFeatureAccess('CFDI'), checkPermission('inventory:read'), purchaseOrderInvoiceController.listAll)
+router.get(
+  '/supplier-invoices/inbox',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:read'),
+  validateRequest(SupplierInvoiceInboxSchema),
+  purchaseOrderInvoiceController.invoiceInbox,
+)
+router.get(
+  '/supplier-invoices/catalog',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:read'),
+  validateRequest(SupplierInvoiceCatalogSchema),
+  purchaseOrderInvoiceController.inventoryCatalog,
+)
+router.get(
+  '/supplier-invoices/:invoiceId/inventory',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:read'),
+  purchaseOrderInvoiceController.previewInventory,
+)
+router.post(
+  '/supplier-invoices/:invoiceId/inventory',
+  checkFeatureAccess('CFDI'),
+  checkPermission('inventory:create'),
+  checkPermission('inventory:update'),
+  validateRequest(SupplierInvoiceConfirmationSchema),
+  purchaseOrderInvoiceController.confirmInventory,
+)
 router.post(
   '/supplier-invoices',
   checkFeatureAccess('CFDI'),
@@ -1065,6 +1099,7 @@ router.post(
   '/purchase-invoices/:invoiceId/lines/:lineId/identify',
   checkFeatureAccess('CFDI'),
   checkPermission('inventory:update'),
+  validateRequest(SupplierInvoiceIdentificationSchema),
   purchaseOrderInvoiceController.identifyLine,
 )
 

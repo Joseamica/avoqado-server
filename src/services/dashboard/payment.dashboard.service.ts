@@ -4,8 +4,10 @@ import { TransactionStatus, PaymentMethod, CardBrand, CardEntryMode } from '@pri
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { MOTIVO_EXCLUSION_DEL_PROTOCOLO, bloquearConSuOriginal, cobrosDelProtocolo } from '../shared/cobroDelProtocolo'
 import prisma from '../../utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import { PaginatedPaymentsResponse } from '../../schemas/dashboard/payment.schema'
 import { logAction } from './activity-log.service'
+import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import {
   MINDFORM_NEW_VENUE_ID,
   getLegacyPayments,
@@ -80,7 +82,7 @@ export async function getPaymentsData(
     })
 
     const sharedInclude = {
-      processedBy: true,
+      processedBy: { select: STAFF_PUBLIC_SELECT },
       shift: true,
       order: { include: { table: true } },
       merchantAccount: {
@@ -169,7 +171,7 @@ export async function getPaymentsData(
     prisma.payment.findMany({
       where: whereClause,
       include: {
-        processedBy: true, // El staff que procesó el pago
+        processedBy: { select: STAFF_PUBLIC_SELECT }, // El staff que procesó el pago
         shift: true, // Información del turno
         order: {
           include: {
@@ -316,7 +318,7 @@ export async function getPaymentById(venueId: string, paymentId: string) {
       venueId,
     },
     include: {
-      processedBy: true, // Staff que procesó el pago
+      processedBy: { select: STAFF_PUBLIC_SELECT }, // Staff que procesó el pago
       shift: true, // Información del turno
       order: {
         include: {
@@ -365,7 +367,15 @@ export async function getPaymentById(venueId: string, paymentId: string) {
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado en este venue`)
   }
 
-  return payment
+  // C2 A-R4 (aditivo, opcional): lo que cobró cada renglón completo, con el MISMO cargador que usa el escritor de devoluciones. Se omite
+  // si la venta no es atribuible (A-R3). El dashboard usa `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor.
+  const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
+  if (!payment.order) return payment
+  const items = payment.order.items.map(it => {
+    const chargedTotal = chargedTotalDe(cobrado, it.id)
+    return chargedTotal === undefined ? it : { ...it, chargedTotal }
+  })
+  return { ...payment, order: { ...payment.order, items } }
 }
 
 /**
@@ -444,7 +454,7 @@ const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPa
   )
 
 const PROYECCION_DEL_PAYMENT = {
-  processedBy: true,
+  processedBy: { select: STAFF_PUBLIC_SELECT },
   shift: true,
   order: { include: { table: true } },
   merchantAccount: { include: { provider: { select: { id: true, code: true, name: true } } } },

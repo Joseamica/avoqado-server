@@ -28,7 +28,7 @@
   calls. This keeps the api-test track free of any real-DB dependency.
 */
 
-import request from 'supertest'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import jwt from 'jsonwebtoken'
 import type { Express } from 'express'
 import { prismaMock } from '@tests/__helpers__/setup'
@@ -97,6 +97,7 @@ beforeAll(async () => {
   bulkManualSalesMock = svc.bulkManualSales
   isModuleEnabledMock = modSvc.moduleService.isModuleEnabled
 })
+startApiServer(() => app)
 
 /**
  * JWT matching AvoqadoJwtPayload — authContext.userId = sub. The token venueId is
@@ -153,7 +154,7 @@ describe('POST /organizations/:orgId/manual-sales/preview', () => {
     bulkManualSalesMock.mockResolvedValue(previewResult)
 
     const token = makeToken('OWNER')
-    const res = await request(app)
+    const res = await api()
       .post(`${BASE}/preview`)
       .set('Authorization', `Bearer ${token}`)
       .send({ rows: [validRow] })
@@ -176,7 +177,7 @@ describe('POST /organizations/:orgId/manual-sales/preview', () => {
     prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
 
     const token = makeToken('MANAGER')
-    const res = await request(app)
+    const res = await api()
       .post(`${BASE}/preview`)
       .set('Authorization', `Bearer ${token}`)
       .send({ rows: [validRow] })
@@ -187,7 +188,7 @@ describe('POST /organizations/:orgId/manual-sales/preview', () => {
 
   it('400: an empty rows array fails validateRequest(bulkManualSalesSchema) with a Spanish message', async () => {
     const token = makeToken('OWNER')
-    const res = await request(app).post(`${BASE}/preview`).set('Authorization', `Bearer ${token}`).send({ rows: [] })
+    const res = await api().post(`${BASE}/preview`).set('Authorization', `Bearer ${token}`).send({ rows: [] })
 
     expect(res.status).toBe(400)
     // Zod message from the schema: 'Sube al menos una venta'
@@ -200,7 +201,7 @@ describe('POST /organizations/:orgId/manual-sales/preview', () => {
     isModuleEnabledMock.mockResolvedValue(false)
 
     const token = makeToken('OWNER')
-    const res = await request(app)
+    const res = await api()
       .post(`${BASE}/preview`)
       .set('Authorization', `Bearer ${token}`)
       .send({ rows: [validRow] })
@@ -222,7 +223,7 @@ describe('POST /organizations/:orgId/manual-sales', () => {
     bulkManualSalesMock.mockResolvedValue(applyResult)
 
     const token = makeToken('OWNER')
-    const res = await request(app)
+    const res = await api()
       .post(BASE)
       .set('Authorization', `Bearer ${token}`)
       .send({ rows: [validRow], confirm: true })
@@ -244,7 +245,7 @@ describe('POST /organizations/:orgId/manual-sales', () => {
     prismaMock.staffOrganization.findFirst.mockResolvedValue(null)
 
     const token = makeToken('CASHIER')
-    const res = await request(app)
+    const res = await api()
       .post(BASE)
       .set('Authorization', `Bearer ${token}`)
       .send({ rows: [validRow], confirm: true })
@@ -257,7 +258,7 @@ describe('POST /organizations/:orgId/manual-sales', () => {
     isModuleEnabledMock.mockResolvedValue(false)
 
     const token = makeToken('OWNER')
-    const res = await request(app)
+    const res = await api()
       .post(BASE)
       .set('Authorization', `Bearer ${token}`)
       .send({ rows: [validRow], confirm: true })

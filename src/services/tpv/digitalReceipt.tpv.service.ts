@@ -1,6 +1,8 @@
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { DigitalReceipt, ReceiptStatus } from '@prisma/client'
+import { contarCobrosDeVenta, ticketTotals, type TicketTotals } from '../shared/ticketTotals'
+import { reciboCanonicoDelPago } from '../shared/reciboCanonico'
 
 /**
  * Interface for digital receipt data snapshot
@@ -72,10 +74,16 @@ interface ReceiptDataSnapshot {
     firstName: string
     lastName: string
   }
+  /**
+   * IVA por producto, plan 7 (D3): lo que muestra el comprobante de ESTE cobro, congelado al crear el recibo (con `discount` si la
+   * venta lo tuvo). Ausente en recibos viejos.
+   */
+  ticketTotals?: TicketTotals | null
   // Receipt metadata
   receiptInfo: {
     generatedAt: string
     currency: string
+    /** @deprecated IVA por producto, plan 7 (D3): nadie lo lee; el ticket no calcula IVA. Se sigue escribiendo para no cambiar la forma del JSON. */
     taxRate: number
   }
 }
@@ -93,10 +101,7 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
       // Serialize every creation/replay for this payment. Historical duplicate
       // receipts remain valid; new callers consistently reuse the oldest one.
       await tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${paymentId} FOR UPDATE`
-      const existing = await tx.digitalReceipt.findFirst({
-        where: { paymentId },
-        orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      })
+      const existing = await reciboCanonicoDelPago(tx, paymentId)
       if (existing) return existing
 
       // Fetch complete payment data with all related information
@@ -222,7 +227,7 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
         },
         items: paymentData.order.items.map(item => ({
           id: item.id,
-          productName: item.product?.name || item.productName || 'Item',
+          productName: item.productName || item.product?.name || 'Item',
           quantity: item.quantity,
           unitPrice: Number(item.unitPrice),
           total: Number(item.total),
@@ -243,6 +248,14 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
               lastName: paymentData.processedBy.lastName,
             }
           : undefined,
+        // IVA por producto, plan 7 (D3; r1 #4, r2 R2-10): los totales del comprobante de ESTE cobro, con la regla única de
+        // `ticketTotals`, armados con el MISMO `paymentData` (y su orden) que el resto del snapshot y dentro de la transacción
+        // que ya bloqueó el cobro. El visor, el HTML legado, el correo y la reimpresión los leen de aquí.
+        ticketTotals: ticketTotals({
+          payment: { amount: paymentData.amount, tipAmount: paymentData.tipAmount, type: paymentData.type, status: paymentData.status },
+          order: paymentData.order,
+          cobrosDeVenta: await contarCobrosDeVenta(tx, paymentData.orderId),
+        }),
         receiptInfo: {
           generatedAt: new Date().toISOString(),
           currency: paymentData.venue.currency || 'MXN',

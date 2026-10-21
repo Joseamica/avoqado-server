@@ -15,8 +15,15 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionRecipient, CommissionTrigger, CommissionCalcType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { validateRate, RoleRates } from './commission-utils'
+import { RoleRates } from './commission-utils'
+import { validarTasasDelEsquema } from './tasasDelEsquema'
+import { personasElegidasAGuardar } from './personasElegidas'
+import { rechazarCambiosConComisiones, sinLoQueNoCambia } from './cambiosConComisiones'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
+import { nivelesAlCrear, nivelesAlPasarANiveles, nivelesParaGuardar } from './nivelesDelEsquema'
+import { conReemplazadoPor } from './reemplazadoPor'
 import { logAction } from '../activity-log.service'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 
 // ============================================
 // Type Definitions
@@ -26,7 +33,7 @@ import { logAction } from '../activity-log.service'
  * Asistencia → comisiones: el porcentaje de castigo vive en (0, 1] — 0.25 = pierde el 25% del
  * día con retardo. Prender la regla sin porcentaje sería un interruptor que no hace nada.
  */
-function validateAttendanceRule(data: { attendanceLinked?: boolean; attendanceLatePenaltyRate?: number | null }): void {
+export function validateAttendanceRule(data: { attendanceLinked?: boolean; attendanceLatePenaltyRate?: number | null }): void {
   const rate = data.attendanceLatePenaltyRate
   if (rate !== undefined && rate !== null && (!Number.isFinite(rate) || rate <= 0 || rate > 1)) {
     throw new BadRequestError('El castigo por retardo debe ser un porcentaje entre 1 y 100 (0.25 = 25%).')
@@ -52,6 +59,9 @@ export interface CreateCommissionConfigInput {
   roleRates?: RoleRates
   filterByCategories?: boolean
   categoryIds?: string[]
+  // D-ELEGIDOS: «sólo personas elegidas» (`personasElegidas.ts`).
+  filterByStaff?: boolean
+  staffIds?: string[] | null
   useGoalAsTier?: boolean
   goalBonusRate?: number | null
   effectiveFrom?: Date
@@ -59,6 +69,8 @@ export interface CreateCommissionConfigInput {
   orgId?: string
   attendanceLinked?: boolean
   attendanceLatePenaltyRate?: number | null
+  /** S-NIVELES-ATÓMICO: los niveles de un esquema TIERED, con el formato del cuerpo de `/tiers/batch` (`nivelesDelEsquema.ts`). */
+  tiers?: unknown
 }
 
 export interface UpdateCommissionConfigInput {
@@ -77,6 +89,9 @@ export interface UpdateCommissionConfigInput {
   roleRates?: RoleRates | null
   filterByCategories?: boolean
   categoryIds?: string[]
+  // D-ELEGIDOS: «sólo personas elegidas» (`personasElegidas.ts`).
+  filterByStaff?: boolean
+  staffIds?: string[] | null
   useGoalAsTier?: boolean
   goalBonusRate?: number | null
   effectiveFrom?: Date
@@ -156,7 +171,7 @@ export async function getCommissionConfigs(venueId: string, filters: CommissionC
     orderBy: [{ priority: 'desc' }, { createdAt: 'desc' }],
   })
 
-  return configs
+  return conReemplazadoPor(configs) // a quién reemplazó cada uno (S-NIVELES/S-SOLAPE, para el dashboard)
 }
 
 /**
@@ -220,15 +235,13 @@ export async function getCommissionConfigById(configId: string, venueId: string)
  * Create a new commission config
  */
 export async function createCommissionConfig(venueId: string, data: CreateCommissionConfigInput, createdById: string): Promise<any> {
-  // Validate rate
-  validateRate(data.defaultRate)
-
-  // Validate role rates if provided
-  if (data.roleRates) {
-    for (const [_role, rate] of Object.entries(data.roleRates)) {
-      validateRate(rate)
-    }
-  }
+  // La tasa según el tipo (en un FIJO, el monto en pesos), las tasas por rol y la de meta superada: 400 en español
+  // (final-fijo-niveles, fase 3; `tasasDelEsquema.ts`).
+  validarTasasDelEsquema(data)
+  const niveles = nivelesAlCrear(data.calcType, data.tiers, data.useGoalAsTier) // S-NIVELES-ATÓMICO: TIERED nace con sus niveles, o no nace
+  // D-ELEGIDOS: a quién aplica (todo el equipo, de fábrica, o sólo las personas elegidas de ESTA sede).
+  const elegidos = await personasElegidasAGuardar(data, { venueId })
+  await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
 
   // Validate date range
   if (data.effectiveTo && data.effectiveFrom) {
@@ -246,42 +259,45 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
 
   validateAttendanceRule(data)
 
-  const config = await prisma.commissionConfig.create({
-    data: {
-      venueId,
-      orgId: data.orgId,
-      name: data.name,
-      description: data.description,
-      priority: data.priority ?? 0,
-      recipient: data.recipient ?? CommissionRecipient.SERVER,
-      trigger: data.trigger ?? CommissionTrigger.PER_PAYMENT,
-      calcType: data.calcType ?? CommissionCalcType.PERCENTAGE,
-      defaultRate: data.defaultRate,
-      minAmount: data.minAmount,
-      maxAmount: data.maxAmount,
-      includeTips: data.includeTips ?? false, // Tips NOT included by default
-      includeDiscount: data.includeDiscount ?? false,
-      includeTax: data.includeTax ?? false,
-      roleRates: data.roleRates ?? Prisma.JsonNull,
-      filterByCategories: data.filterByCategories ?? false,
-      categoryIds: data.categoryIds ?? [],
-      useGoalAsTier: data.useGoalAsTier ?? false,
-      goalBonusRate: data.goalBonusRate ?? null,
-      attendanceLinked: data.attendanceLinked ?? false,
-      attendanceLatePenaltyRate: data.attendanceLatePenaltyRate ?? null,
-      effectiveFrom: data.effectiveFrom ?? new Date(),
-      effectiveTo: data.effectiveTo,
-      createdById,
-    },
-    include: {
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
+  // El esquema y sus niveles en UNA transacción: si un nivel falla, no queda un esquema plano que pague (D2 de la QA).
+  const config = await prisma.$transaction(async tx => {
+    const creado = await tx.commissionConfig.create({
+      data: {
+        venueId,
+        orgId: data.orgId,
+        name: data.name,
+        description: data.description,
+        priority: data.priority ?? 0,
+        recipient: data.recipient ?? CommissionRecipient.SERVER,
+        trigger: data.trigger ?? CommissionTrigger.PER_PAYMENT,
+        calcType: data.calcType ?? CommissionCalcType.PERCENTAGE,
+        defaultRate: data.defaultRate,
+        minAmount: data.minAmount,
+        maxAmount: data.maxAmount,
+        includeTips: data.includeTips ?? false, // Tips NOT included by default
+        includeDiscount: data.includeDiscount ?? false,
+        includeTax: data.includeTax ?? false, // D5 enmendada (fase 3): «sin IVA» de fábrica, igual que la base de datos
+        roleRates: data.roleRates ?? Prisma.JsonNull,
+        filterByCategories: data.filterByCategories ?? false,
+        categoryIds: data.categoryIds ?? [],
+        filterByStaff: elegidos.filterByStaff ?? false,
+        staffIds: elegidos.staffIds ?? [],
+        useGoalAsTier: data.useGoalAsTier ?? false,
+        goalBonusRate: data.goalBonusRate ?? null,
+        attendanceLinked: data.attendanceLinked ?? false,
+        attendanceLatePenaltyRate: data.attendanceLatePenaltyRate ?? null,
+        effectiveFrom: data.effectiveFrom ?? new Date(),
+        effectiveTo: data.effectiveTo,
+        createdById,
       },
-    },
+      include: { createdBy: { select: { id: true, firstName: true, lastName: true } } },
+    })
+    if (!niveles) return creado
+    await tx.commissionTier.createMany({ data: nivelesParaGuardar(creado.id, niveles) })
+    return {
+      ...creado,
+      tiers: await tx.commissionTier.findMany({ where: { configId: creado.id }, orderBy: { tierLevel: 'asc' }, take: niveles.length }),
+    }
   })
 
   logger.info('Commission config created', {
@@ -298,7 +314,7 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
     action: 'COMMISSION_CONFIG_CREATED',
     entity: 'CommissionConfig',
     entityId: config.id,
-    data: { name: config.name, defaultRate: config.defaultRate },
+    data: { name: config.name, defaultRate: config.defaultRate, ...(niveles ? { niveles: niveles.length } : {}) },
   })
 
   return config
@@ -313,8 +329,13 @@ export async function createCommissionConfig(venueId: string, data: CreateCommis
  *
  * Note: Some fields cannot be changed if calculations exist
  */
-export async function updateCommissionConfig(configId: string, venueId: string, data: UpdateCommissionConfigInput): Promise<any> {
-  validateAttendanceRule(data)
+export async function updateCommissionConfig(
+  configId: string,
+  venueId: string,
+  cuerpo: UpdateCommissionConfigInput,
+  actorId?: string,
+): Promise<any> {
+  validateAttendanceRule(cuerpo)
   // Verify config exists and belongs to venue
   const existing = await prisma.commissionConfig.findFirst({
     where: {
@@ -333,32 +354,23 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
     throw new NotFoundError(`Commission config ${configId} not found`)
   }
 
-  // If calculations exist, some fields are immutable
-  const hasCalculations = existing._count.calculations > 0
-  const immutableFields = ['defaultRate', 'calcType', 'recipient', 'trigger']
+  // FT-GRAVES B1 (`cambiosConComisiones.ts`): lo que llega igual a lo guardado no es un cambio; con comisiones calculadas sólo
+  // se rechaza CAMBIAR la tasa, el tipo, a quién se le paga o cuándo se calcula (antes bastaba con que vinieran).
+  const data = sinLoQueNoCambia(cuerpo, existing)
+  rechazarCambiosConComisiones(data, existing, existing._count.calculations)
 
-  if (hasCalculations) {
-    for (const field of immutableFields) {
-      if (data[field as keyof UpdateCommissionConfigInput] !== undefined) {
-        throw new BadRequestError(
-          `Cannot modify ${field} because this config has ${existing._count.calculations} existing calculations. ` +
-            'Create a new config instead.',
-        )
-      }
-    }
-  }
-
-  // Validate new rate if provided
-  if (data.defaultRate !== undefined) {
-    validateRate(data.defaultRate)
-  }
-
-  // Validate role rates if provided
-  if (data.roleRates) {
-    for (const [_role, rate] of Object.entries(data.roleRates)) {
-      validateRate(rate)
-    }
-  }
+  // Lo que QUEDA: un tipo nuevo con la tasa de antes (un fijo de $5 que pasa a niveles sería 500 %) o una tasa nueva con el
+  // tipo de antes; y las tasas por rol y de meta superada (final-fijo-niveles, fase 3).
+  validarTasasDelEsquema(data, existing)
+  const elegidos = await personasElegidasAGuardar(data, { venueId }, existing)
+  await asegurarIdsDelNegocio({ venueId }, { categoryIds: data.categoryIds }) // las categorías, de ESTA sede (T1-hermanos)
+  // Pasar a niveles editando: los niveles en la misma operación (FT-GRAVES, hermano de S-NIVELES-ATÓMICO).
+  const nivelesNuevos = nivelesAlPasarANiveles(
+    data.calcType,
+    existing.calcType,
+    (cuerpo as { tiers?: unknown } | null)?.tiers,
+    data.useGoalAsTier ?? existing.useGoalAsTier,
+  )
 
   // Validate date range
   const effectiveFrom = data.effectiveFrom ?? existing.effectiveFrom
@@ -388,6 +400,8 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   if (data.roleRates !== undefined) updateData.roleRates = data.roleRates ?? Prisma.JsonNull
   if (data.filterByCategories !== undefined) updateData.filterByCategories = data.filterByCategories
   if (data.categoryIds !== undefined) updateData.categoryIds = data.categoryIds
+  if (elegidos.filterByStaff !== undefined) updateData.filterByStaff = elegidos.filterByStaff
+  if (elegidos.staffIds !== undefined) updateData.staffIds = elegidos.staffIds
   if (data.useGoalAsTier !== undefined) updateData.useGoalAsTier = data.useGoalAsTier
   if (data.goalBonusRate !== undefined) updateData.goalBonusRate = data.goalBonusRate
   if (data.attendanceLinked !== undefined) updateData.attendanceLinked = data.attendanceLinked
@@ -396,33 +410,26 @@ export async function updateCommissionConfig(configId: string, venueId: string, 
   if (data.effectiveTo !== undefined) updateData.effectiveTo = data.effectiveTo
   if (data.active !== undefined) updateData.active = data.active
 
-  const config = await prisma.commissionConfig.update({
-    where: { id: configId },
-    data: updateData,
-    include: {
-      createdBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
+  // El cambio y su ActivityLog (con quién, y si se desactivó) en la MISMA transacción (FT-GRAVES B1).
+  const config = await prisma.$transaction(async tx => {
+    const actualizado = await tx.commissionConfig.update({
+      where: { id: configId },
+      data: updateData,
+      include: { createdBy: { select: { id: true, firstName: true, lastName: true } } },
+    })
+    if (nivelesNuevos?.length) await tx.commissionTier.createMany({ data: nivelesParaGuardar(configId, nivelesNuevos) })
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorId ?? null,
+      venueId,
+      action: 'COMMISSION_CONFIG_UPDATED',
+      entity: 'CommissionConfig',
+      entityId: configId,
+      data: { changes: Object.keys(data), ...(data.active !== undefined ? { active: data.active } : {}) },
+    })
+    return actualizado
   })
 
-  logger.info('Commission config updated', {
-    configId,
-    venueId,
-    changes: Object.keys(data),
-  })
-
-  logAction({
-    venueId,
-    action: 'COMMISSION_CONFIG_UPDATED',
-    entity: 'CommissionConfig',
-    entityId: configId,
-    data: { changes: Object.keys(data) },
-  })
+  logger.info('Commission config updated', { configId, venueId, changes: Object.keys(data) })
 
   return config
 }
@@ -506,8 +513,15 @@ export async function copyCommissionConfig(
   createdById: string,
   overrides?: Partial<CreateCommissionConfigInput>,
 ): Promise<any> {
-  const source = await prisma.commissionConfig.findUnique({
-    where: { id: sourceConfigId },
+  // El origen se busca CON el filtro del negocio de quien pide: uno de su sede, o uno del grupo (nivel organización) al que
+  // pertenece. Cualquier otro id —de otro negocio o ya borrado— es un 404, nunca una copia.
+  const venue = await prisma.venue.findUnique({ where: { id: targetVenueId }, select: { organizationId: true } })
+  const source = await prisma.commissionConfig.findFirst({
+    where: {
+      id: sourceConfigId,
+      deletedAt: null,
+      OR: [{ venueId: targetVenueId }, ...(venue?.organizationId ? [{ venueId: null, orgId: venue.organizationId }] : [])],
+    },
     include: {
       tiers: { where: { active: true } },
     },
@@ -540,6 +554,8 @@ export async function copyCommissionConfig(
         roleRates: source.roleRates ?? Prisma.JsonNull,
         filterByCategories: source.filterByCategories,
         categoryIds: source.categoryIds,
+        filterByStaff: source.filterByStaff,
+        staffIds: source.staffIds,
         useGoalAsTier: source.useGoalAsTier,
         goalBonusRate: source.goalBonusRate,
         effectiveFrom: overrides?.effectiveFrom ?? new Date(),

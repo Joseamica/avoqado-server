@@ -7,6 +7,7 @@ import {
   confirmReservation,
   completeReservation,
   markNoShow,
+  PASS_ARRIVAL_PENDING,
   cancelReservation,
   updateReservation,
   rescheduleReservation,
@@ -156,6 +157,8 @@ describe('Reservation Dashboard Service', () => {
     jest.restoreAllMocks()
     jest.resetAllMocks()
     jest.spyOn(reservationSettingsService, 'getReservationSettings').mockResolvedValue(makeReservationSettings())
+    // resetAllMocks borra el default del setup: sin conexiones de pases, el gancho de sincronización no escribe nada.
+    prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
     prismaMock.$transaction.mockImplementation(async (arg: any) => {
       if (typeof arg === 'function') return arg(prismaMock)
       return arg
@@ -1907,6 +1910,34 @@ describe('Reservation Dashboard Service', () => {
       })
     })
 
+    describe('markNoShow del sistema con una llegada de pase por confirmar', () => {
+      it('no cierra la reserva si su visita de pase sigue pendiente y vigente (bajo el candado de la fila)', async () => {
+        prismaMock.reservation.findFirst.mockResolvedValueOnce(createMockReservation({ status: 'CONFIRMED' }))
+        prismaMock.$queryRaw.mockResolvedValueOnce([{ id: 'res-1' }])
+        prismaMock.aggregatorVisit.count.mockResolvedValueOnce(1)
+
+        await expect(markNoShow(VENUE_ID, 'res-1', 'SYSTEM')).rejects.toMatchObject({ code: PASS_ARRIVAL_PENDING })
+        expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+        // El candado de la fila (FOR UPDATE) se toma ANTES de contar las visitas: sin eso la ingesta podría colarse entre medio.
+        const sqlDe = (call: unknown[]) => (Array.isArray(call[0]) ? (call[0] as string[]).join('?') : String(call[0]))
+        const candado = prismaMock.$queryRaw.mock.calls.findIndex((call: unknown[]) => sqlDe(call).includes('FOR UPDATE'))
+        expect(candado).toBeGreaterThanOrEqual(0)
+        expect(prismaMock.$queryRaw.mock.invocationCallOrder[candado]).toBeLessThan(
+          prismaMock.aggregatorVisit.count.mock.invocationCallOrder[0],
+        )
+      })
+
+      it('el no-show manual no consulta visitas', async () => {
+        prismaMock.reservation.findFirst.mockResolvedValueOnce(createMockReservation({ status: 'CONFIRMED' }))
+        prismaMock.reservation.updateMany.mockResolvedValueOnce({ count: 1 } as any)
+        prismaMock.reservation.findUniqueOrThrow.mockResolvedValueOnce(createMockReservation({ status: 'NO_SHOW' }))
+
+        await markNoShow(VENUE_ID, 'res-1', STAFF_ID).catch(() => undefined)
+
+        expect(prismaMock.aggregatorVisit.count).not.toHaveBeenCalled()
+      })
+    })
+
     describe('markNoShow', () => {
       it('should transition CONFIRMED -> NO_SHOW', async () => {
         prismaMock.reservation.findFirst.mockResolvedValue(createMockReservation({ status: 'CONFIRMED' }))
@@ -3042,6 +3073,53 @@ describe('Reservation Dashboard Service', () => {
             endsAt: newEnd,
           }),
         }),
+      )
+    })
+
+    // nuevo — Codex F6: mover aquí a un socio de pase deja su lugar del agregador en la clase vieja (dos horarios
+    // distintos). Como el resto del mercado, el socio cambia su reserva desde la app del agregador.
+    it.each([
+      ['TOTALPASS', 'Esta reserva llegó por TotalPass: el socio la cambia desde la app de TotalPass.'],
+      ['WELLHUB', 'Esta reserva llegó por Wellhub: el socio la cambia desde la app de Wellhub.'],
+    ])('reserva de un socio de pase (%s) ⇒ 409 sin moverla', async (provider, message) => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
+      prismaMock.aggregatorBooking.findFirst.mockResolvedValueOnce({ provider } as any)
+
+      const err = await reservationService
+        .rescheduleClassReservation({
+          venueId: VENUE_ID,
+          reservationId: 'res-class-1',
+          newClassSessionId: 'new-session',
+          rescheduledBy: 'CUSTOMER',
+        })
+        .catch(e => e)
+
+      expect(err).toBeInstanceOf(ConflictError)
+      expect(err).toMatchObject({ statusCode: 409, code: 'PASS_RESERVATION_NOT_RESCHEDULABLE', message })
+      expect(prismaMock.aggregatorBooking.findFirst.mock.calls[0][0].where).toEqual({ reservationId: 'res-class-1', venueId: VENUE_ID })
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
+      expect(prismaMock.reservation.updateMany).not.toHaveBeenCalled()
+    })
+
+    // regresión — una reserva normal (sin agregador) se sigue moviendo
+    it('una reserva que no es de un pase se sigue moviendo', async () => {
+      const reservationService = await import('@/services/dashboard/reservation.dashboard.service')
+      prismaMock.reservation.findFirst.mockResolvedValueOnce(makeClassReservation())
+      prismaMock.aggregatorBooking.findFirst.mockResolvedValueOnce(null)
+      prismaMock.$queryRaw.mockResolvedValueOnce(mockNewSession()).mockResolvedValueOnce([{ total: 0n }])
+      prismaMock.reservation.findMany.mockResolvedValue([])
+      prismaMock.reservation.findUniqueOrThrow.mockResolvedValue(makeClassReservation({ classSessionId: 'new-session' }))
+
+      await reservationService.rescheduleClassReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-class-1',
+        newClassSessionId: 'new-session',
+        rescheduledBy: 'CUSTOMER',
+      })
+
+      expect(prismaMock.reservation.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ classSessionId: 'new-session' }) }),
       )
     })
 

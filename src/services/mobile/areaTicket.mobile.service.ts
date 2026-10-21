@@ -45,6 +45,11 @@ import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { logAction } from '../dashboard/activity-log.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
+import { buildItemDiscountRow } from '../shared/discount.service'
+import { computeStoredOrderTotal } from '../shared/orderBalance'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { importesDeLasFilas, leerReparto } from '../shared/repartoDescuento'
+import { RENGLON_PARA_REPARTO_SELECT, filasDeLaOrden, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
 import { formatVenueTime } from '@/utils/datetime'
@@ -304,6 +309,24 @@ async function findTicketByCode(venueId: string, code: string) {
   })
 }
 
+/**
+ * Whether lines may be added (§5.3, §5.4), with the same precedence as `deriveAreaTicketState`. Lines and deliveries
+ * only tell ALREADY_PAID from DELIVERED, which get the same rejection here, so they are not needed.
+ */
+function assertTicketAcceptsItems(
+  order: { status: string; paymentStatus: string; claimedAt: Date | null; claimedByTerminalId: string | null },
+  terminalId: string,
+) {
+  const state = deriveAreaTicketState({ ...order, items: [], fulfillments: [] })
+  if (state === 'CANCELLED') throw new ConflictError('Esta cuenta fue cancelada.', 'AREA_TICKET_CANCELLED')
+  if (state === 'ALREADY_PAID' || state === 'DELIVERED') {
+    throw new ConflictError('Este vale ya está pagado; no se le pueden agregar renglones.', 'AREA_TICKET_ALREADY_PAID')
+  }
+  if (state === 'CHECKOUT_CLAIMED' && order.claimedByTerminalId !== terminalId) {
+    throw new ConflictError('La caja está cobrando esta cuenta. Espera a que termine.', 'AREA_TICKET_CLAIMED_BY_OTHER')
+  }
+}
+
 // MARK: - §6 · POST /mobile/devices/partition
 
 export interface AssignPartitionInput {
@@ -439,6 +462,41 @@ export interface OpenAreaTicketInput {
 }
 
 /**
+ * P5 (founder, 1-oct): cada descuento de artículo del vale tiene su fila ESPEJO, como en el mostrador: un recálculo posterior
+ * ya no lo pierde y la factura lo reconoce. La llaman abrir el vale (creación privada) y agregarle renglones (con el candado),
+ * con su transacción.
+ */
+async function crearEspejosDelVale(
+  tx: Prisma.TransactionClient,
+  p: {
+    venueId: string
+    orderId: string
+    staffId: string | null | undefined
+    renglones: Array<{ id: string; appliedDiscountId: string | null; discountAmount: Prisma.Decimal }>
+    discounts: Array<{ id: string; [key: string]: any }>
+  },
+): Promise<void> {
+  const conDescuento = p.renglones.filter(r => r.appliedDiscountId)
+  if (conDescuento.length === 0) return
+  const otorgadoPor = p.staffId
+    ? await tx.staffVenue.findFirst({ where: { staffId: p.staffId, venueId: p.venueId }, select: { id: true } })
+    : null
+  for (const r of conDescuento) {
+    const discount = p.discounts.find(d => d.id === r.appliedDiscountId)
+    if (!discount) continue
+    await tx.orderDiscount.create({
+      data: buildItemDiscountRow({
+        orderId: p.orderId,
+        itemId: r.id,
+        discount,
+        discountAmountPesos: Number(r.discountAmount),
+        appliedById: otorgadoPor?.id ?? null,
+      }),
+    })
+  }
+}
+
+/**
  * Abre la cuenta con el código que acuñó el área — §5.1, §5.2.
  *
  * Validaciones, en orden y por una razón:
@@ -486,7 +544,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
 
   // 🔴 El área la pone el SERVER desde el binding de la terminal, jamás el payload.
-  const { itemsData, subtotal, itemDiscountTotal } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
+  const { itemsData, subtotal, itemDiscountTotal, discounts } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
   const total = subtotal - itemDiscountTotal
 
   try {
@@ -514,6 +572,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
           subtotal: new Prisma.Decimal(subtotal),
           discountAmount: new Prisma.Decimal(itemDiscountTotal),
           taxAmount: new Prisma.Decimal(0),
+          contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: new Prisma.Decimal(0),
           total: new Prisma.Decimal(total),
           remainingBalance: new Prisma.Decimal(total),
@@ -522,6 +581,7 @@ export async function openAreaTicket(venueId: string, input: OpenAreaTicketInput
         },
         include: areaTicketInclude,
       })
+      await crearEspejosDelVale(tx, { venueId, orderId: order.id, staffId, renglones: order.items, discounts })
 
       // El máximo visto sube DENTRO de la misma transacción que crea la cuenta: si el
       // insert falla, el contador no avanza y el dispositivo puede reintentar el mismo
@@ -610,21 +670,35 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     throw new NotFoundError(messageForState('NOT_FOUND', null))
   }
 
-  const state = deriveAreaTicketState(order as any)
-  if (state === 'CANCELLED') throw new ConflictError('Esta cuenta fue cancelada.', 'AREA_TICKET_CANCELLED')
-  if (state === 'ALREADY_PAID' || state === 'DELIVERED') {
-    throw new ConflictError('Este vale ya está pagado; no se le pueden agregar renglones.', 'AREA_TICKET_ALREADY_PAID')
-  }
-  if (state === 'CHECKOUT_CLAIMED' && order.claimedByTerminalId !== terminal.id) {
-    throw new ConflictError('La caja está cobrando esta cuenta. Espera a que termine.', 'AREA_TICKET_CLAIMED_BY_OTHER')
-  }
+  // Fast rejection from the pre-read keeps the usual error order; whether to write is decided again under the lock.
+  assertTicketAcceptsItems(order, terminal.id)
 
   await validateStaffVenue(input.staffId ?? undefined, venueId)
 
   // Misma aritmética que abrir la cuenta y que el mostrador: una sola función.
-  const { itemsData } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
+  const { itemsData, discounts } = await buildOrderItemsData(venueId, input.items, terminal.fulfillmentAreaId)
 
   const updated = await prisma.$transaction(async tx => {
+    // Plan 3b: lock the Order (route venue) before reading what decides the write. A claim, a partial payment, a tip,
+    // a service charge or a cancellation does not bump `version`, so they are reread here with the row locked.
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: order.id }))) {
+      throw new NotFoundError(messageForState('NOT_FOUND', null))
+    }
+    const locked = await tx.order.findFirstOrThrow({
+      where: { id: order.id, venueId },
+      select: {
+        status: true,
+        paymentStatus: true,
+        claimedAt: true,
+        claimedByTerminalId: true,
+        tipAmount: true,
+        serviceChargeAmount: true,
+        paidAmount: true,
+        contratoDePrecio: true,
+        taxAmount: true,
+      },
+    })
+
     // CAS sobre `version`: si otro dispositivo agregó entre la lectura y este write,
     // count = 0 y el cliente reescanea, en vez de pisar los totales del otro.
     const bumped = await tx.order.updateMany({
@@ -634,27 +708,60 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     if (bumped.count === 0) {
       throw new ConflictError('La cuenta cambió en otro dispositivo. Vuelve a escanear el vale.', 'VERSION_CONFLICT')
     }
+    assertTicketAcceptsItems(locked, terminal.id)
 
     // Uno por uno (no `createMany`): sólo el create anidado escribe los modificadores
     // del renglón, y un renglón sin sus modificadores es un cobro incompleto.
+    const creados: Array<{ id: string; appliedDiscountId: string | null; discountAmount: Prisma.Decimal }> = []
     for (const item of itemsData) {
-      await tx.orderItem.create({ data: { ...item, orderId: order.id } })
+      creados.push(
+        await tx.orderItem.create({
+          data: { ...item, orderId: order.id },
+          select: { id: true, appliedDiscountId: true, discountAmount: true },
+        }),
+      )
     }
+    // P5: el renglón nuevo con descuento de artículo lleva su fila ESPEJO, como al abrir el vale.
+    await crearEspejosDelVale(tx, { venueId, orderId: order.id, staffId: input.staffId, renglones: creados, discounts })
 
-    // 🔴 Los totales se RECOMPUTAN desde TODOS los renglones, no se incrementan a
-    // ciegas. Un incremento asume que nada más tocó la cuenta; recomputar es correcto
-    // aunque otro flujo (cortesía, descuento de cuenta) haya pasado por en medio, y
-    // preserva propina y cobro por servicio, que no son renglones.
-    const allItems = await tx.orderItem.findMany({
-      where: { orderId: order.id },
-      select: { total: true, discountAmount: true },
-    })
+    // 🔴 Los totales se RECOMPUTAN desde TODOS los renglones, no se incrementan a ciegas: recomputar es correcto aunque otro
+    // flujo (cortesía, descuento de cuenta) haya pasado por en medio, y preserva propina y cargo por servicio. Desde B2c (P5)
+    // la cabecera = lo propio de cada renglón cobrable (total > 0: una cortesía del móvil ya salió del subtotal), sin las
+    // líneas de promoción, que traen su precio neto, SALVO la cortesía de la terminal, que conserva su total bruto aunque esté
+    // en una promoción (Codex r3 V7) — + las filas que no son espejo (cuenta, motor, premios). Antes era la suma de los
+    // renglones: borraba el descuento de cuenta, contaba dos veces una cortesía del móvil y volvía a restar el descuento de
+    // una promoción. El % de cuenta se re-deriva sobre la base nueva, como en los otros caminos de agregar. Sin
+    // `conservarDescuentoHistorico` (R7-1): la cabecera vieja de un vale ES la suma de renglones; conservarla la contaría dos
+    // veces.
+    const allItems = await tx.orderItem.findMany({ where: { orderId: order.id }, select: RENGLON_PARA_REPARTO_SELECT })
     const newSubtotal = allItems.reduce((sum, i) => sum + Number(i.total), 0)
-    const newItemDiscount = allItems.reduce((sum, i) => sum + Number(i.discountAmount || 0), 0)
-    const tipAmount = Number(order.tipAmount || 0)
-    const serviceCharge = Number(order.serviceChargeAmount || 0)
-    const newTotal = newSubtotal - newItemDiscount + serviceCharge + tipAmount
-    const paidAmount = Number(order.paidAmount || 0)
+    const filas = await filasDeLaOrden(tx, order.id)
+    // La regla única de los recalculadores (B2), sobre las filas que no son espejo: lo de las espejo ya vive en su renglón. Una
+    // espejo VIEJA sin reparto pasaría el filtro, pero los vales no tuvieron filas ESPEJO antes de B2c (preflight T-23); filas de
+    // cuenta sí podían recibir (cupón, motor, premio). Un descuento propio viejo sin espejo lo convierte en espejo
+    // `conservarDescuentoHistorico` antes de congelar el resto (B2c F2, Codex r1 #4), así que no se cuenta dos veces.
+    const { montosRederivados, descuento: descuentoDeFilas } = importesDeLasFilas(
+      allItems,
+      filas.filter(f => !leerReparto(f.reparto)?.espejo),
+    )
+    const descuentoPropio = allItems
+      .filter(i => Number(i.total) > 0 && (i.isCortesia || !i.orderPromotionId))
+      .reduce((sum, i) => sum + Number(i.discountAmount || 0), 0)
+    const sincronizado = await sincronizarRepartos(tx, order.id, { renglones: allItems, filas, montosRederivados })
+    const newItemDiscount = Math.round((descuentoPropio + descuentoDeFilas) * 100) / 100
+    // Codex r2 N4: el total sale de la regla común — la mercancía se clampa a 0 y DESPUÉS se suman cargo y propina (P12: y el
+    // IVA aparte; el vale nace IVA_INCLUIDO). Con la resta a mano, un descuento fijo mayor que lo que queda guardaba un total
+    // negativo.
+    const newTotal = computeStoredOrderTotal({
+      subtotal: newSubtotal,
+      discountAmount: newItemDiscount,
+      serviceChargeAmount: locked.serviceChargeAmount,
+      tipAmount: locked.tipAmount,
+      contratoDePrecio: locked.contratoDePrecio,
+      status: locked.status,
+      taxAmount: new Prisma.Decimal(locked.taxAmount ?? 0).plus(sincronizado.impuestoDevuelto),
+    }).toNumber()
+    const paidAmount = Number(locked.paidAmount || 0)
 
     await tx.order.update({
       where: { id: order.id },
@@ -667,7 +774,7 @@ export async function addAreaTicketItems(venueId: string, rawCode: string, input
     })
 
     return tx.order.findUniqueOrThrow({ where: { id: order.id }, include: areaTicketInclude })
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   logger.info(`🎟️ [AREA TICKETS] ${itemsData.length} renglón(es) agregados al vale ${parsed.code} | area=${terminal.fulfillmentAreaId}`)
   return toAreaTicketView(updated)

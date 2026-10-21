@@ -15,9 +15,10 @@ import prisma from '../../../utils/prismaClient'
 import logger from '../../../config/logger'
 import { Prisma, CommissionCalcStatus, CommissionSummaryStatus, TierPeriod } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
-import { decimalToNumber, getPeriodDateRange, getVenueTimezone } from './commission-utils'
-import { logAction } from '../activity-log.service'
+import { decimalToNumber, getPeriodDateRange, getVenueTimezone, reintentarSiHayBloqueoMutuo } from './commission-utils'
+import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { retry, shouldRetryDbConnectionError } from '../../../utils/retry'
+import { periodoDeAgregacion, resumenesCalculados, ventanaPorDefecto } from './resumenesCalculados'
 
 // ============================================
 // Type Definitions
@@ -30,13 +31,6 @@ export interface AggregationResult {
   calculationsAggregated: number
 }
 
-export interface SummaryFilters {
-  staffId?: string
-  status?: CommissionSummaryStatus
-  periodStart?: Date
-  periodEnd?: Date
-}
-
 // ============================================
 // Aggregation Operations
 // ============================================
@@ -45,8 +39,18 @@ export interface SummaryFilters {
  * Aggregate all pending calculations for a venue
  *
  * Creates or updates CommissionSummary records for each staff member.
+ *
+ * Fase 3 (A4, Codex plan r1-5): si Postgres la elige víctima de un bloqueo mutuo con una anulación (que toma las filas y luego
+ * el resumen), se repite la pasada COMPLETA: vuelve a sumar lo que siga CALCULATED y lo que ya marcó una transacción anterior
+ * no se suma dos veces. 🔴 No garantiza que lo recién anulado quede fuera: la pasada suma ANTES de marcar y fuera de la
+ * transacción (H3, aparcado; sólo la pantalla de Comisiones), así que si relee antes de que la anulación confirme, le suma
+ * al resumen una fila que ya no marcará. El sobre de Pago al personal lee filas, no resúmenes.
  */
 export async function aggregateVenueCommissions(venueId: string, period: TierPeriod = TierPeriod.WEEKLY): Promise<AggregationResult> {
+  return reintentarSiHayBloqueoMutuo('aggregateVenueCommissions', () => agregarUnaPasada(venueId, period))
+}
+
+async function agregarUnaPasada(venueId: string, period: TierPeriod): Promise<AggregationResult> {
   logger.info('Starting commission aggregation', { venueId, period })
 
   const timezone = await getVenueTimezone(venueId)
@@ -273,19 +277,8 @@ export async function aggregateAllPendingCommissions(): Promise<{
 
   for (const { venueId } of venuesWithPending) {
     try {
-      // Get the active commission config for this venue to read aggregationPeriod
-      const activeConfig = await prisma.commissionConfig.findFirst({
-        where: {
-          venueId,
-          active: true,
-          deletedAt: null,
-        },
-        orderBy: { priority: 'desc' },
-        select: { aggregationPeriod: true },
-      })
-
-      // Use config's aggregationPeriod, fallback to MONTHLY if no config exists
-      const period = activeConfig?.aggregationPeriod ?? TierPeriod.MONTHLY
+      // El periodo del esquema activo de mayor prioridad (mensual sin esquema): la MISMA regla con la que la tabla agrupa.
+      const period = await periodoDeAgregacion(venueId)
 
       const result = await aggregateVenueCommissions(venueId, period)
       totalSummarized += result.calculationsAggregated
@@ -308,68 +301,10 @@ export async function aggregateAllPendingCommissions(): Promise<{
 // ============================================
 
 /**
- * Get commission summaries for a venue
+ * «Resumen de Comisiones»: lo CALCULADO por persona y periodo, con la fuente del KPI «Calculado» (E6a-fix2 C6), y el total
+ * antes del tope (`GET /summaries` lo manda, aditivo, junto a `data`). Ver `resumenesCalculados.ts`.
  */
-export async function getCommissionSummaries(venueId: string, filters: SummaryFilters = {}): Promise<any[]> {
-  const where: Prisma.CommissionSummaryWhereInput = { venueId }
-
-  if (filters.staffId) where.staffId = filters.staffId
-  if (filters.status) where.status = filters.status
-
-  if (filters.periodStart || filters.periodEnd) {
-    if (filters.periodStart) {
-      where.periodStart = { gte: filters.periodStart }
-    }
-    if (filters.periodEnd) {
-      where.periodEnd = { lte: filters.periodEnd }
-    }
-  }
-
-  const summaries = await prisma.commissionSummary.findMany({
-    where,
-    include: {
-      staff: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-          email: true,
-          venues: {
-            where: { venueId },
-            select: { id: true },
-            take: 1,
-          },
-        },
-      },
-      approvedBy: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-      _count: {
-        select: {
-          calculations: true,
-          payouts: true,
-        },
-      },
-    },
-    orderBy: [{ periodStart: 'desc' }, { staff: { lastName: 'asc' } }],
-  })
-
-  // Transform to include staffVenueId at top level of staff object
-  return summaries.map(summary => ({
-    ...summary,
-    staff: {
-      id: summary.staff.id,
-      firstName: summary.staff.firstName,
-      lastName: summary.staff.lastName,
-      email: summary.staff.email,
-      staffVenueId: summary.staff.venues[0]?.id || null,
-    },
-  }))
-}
+export { resumenesCalculados, ventanaPorDefecto }
 
 /**
  * Get a single summary by ID
@@ -423,125 +358,21 @@ export async function getSummaryById(summaryId: string, venueId: string): Promis
 }
 
 // ============================================
-// Approval Operations
+// Summary Operations
 // ============================================
 
 /**
- * Approve a commission summary
- * Only ADMIN/OWNER can approve
+ * Recalculate a summary (for disputes/corrections). Con `db`, dentro de la transacción de quien llama (la anulación de una
+ * comisión ya sumada, fase 3 A4); sin ella, en su propia transacción, con su auditoría.
+ *
+ * 🔴 Ronda 1: escribe totales ABSOLUTOS, así que antes de leer bloquea el resumen. Sin el candado, una lectura que cae entre
+ * el `increment` del agregador y su COMMIT no ve las filas que éste acaba de marcar y las borra del resumen al escribir.
+ * El orden de candados no cambia: quien llama ya tiene las filas; el resumen va después.
  */
-export async function approveSummary(summaryId: string, venueId: string, approvedById: string): Promise<any> {
-  const summary = await prisma.commissionSummary.findFirst({
-    where: { id: summaryId, venueId },
-  })
-
-  if (!summary) {
-    throw new NotFoundError(`Commission summary ${summaryId} not found`)
-  }
-
-  if (
-    summary.status !== CommissionSummaryStatus.CALCULATED &&
-    summary.status !== CommissionSummaryStatus.PENDING_APPROVAL &&
-    summary.status !== CommissionSummaryStatus.DISPUTED
-  ) {
-    throw new BadRequestError(`Cannot approve summary with status ${summary.status}`)
-  }
-
-  const updated = await prisma.commissionSummary.update({
-    where: { id: summaryId },
-    data: {
-      status: CommissionSummaryStatus.APPROVED,
-      approvedById,
-      approvedAt: new Date(),
-      version: { increment: 1 },
-    },
-    include: {
-      staff: {
-        select: {
-          id: true,
-          firstName: true,
-          lastName: true,
-        },
-      },
-    },
-  })
-
-  logger.info('Commission summary approved', {
-    summaryId,
-    venueId,
-    staffId: summary.staffId,
-    netAmount: summary.netAmount,
-    approvedById,
-  })
-
-  logAction({
-    staffId: approvedById,
-    venueId,
-    action: 'COMMISSION_SUMMARY_APPROVED',
-    entity: 'CommissionSummary',
-    entityId: summaryId,
-    data: { staffId: summary.staffId, netAmount: Number(summary.netAmount) },
-  })
-
-  return updated
-}
-
-/**
- * Dispute a commission summary
- */
-export async function disputeSummary(summaryId: string, venueId: string, disputedById: string, reason: string): Promise<any> {
-  const summary = await prisma.commissionSummary.findFirst({
-    where: { id: summaryId, venueId },
-  })
-
-  if (!summary) {
-    throw new NotFoundError(`Commission summary ${summaryId} not found`)
-  }
-
-  if (summary.status === CommissionSummaryStatus.PAID) {
-    throw new BadRequestError('Cannot dispute a paid summary')
-  }
-
-  // Fetch the staff member's name for the dispute notes
-  const disputedByStaff = await prisma.staff.findUnique({
-    where: { id: disputedById },
-    select: { firstName: true, lastName: true },
-  })
-  const disputedByName = disputedByStaff ? `${disputedByStaff.firstName} ${disputedByStaff.lastName}`.trim() : disputedById // Fallback to ID if staff not found
-
-  const updated = await prisma.commissionSummary.update({
-    where: { id: summaryId },
-    data: {
-      status: CommissionSummaryStatus.DISPUTED,
-      notes: `DISPUTED by ${disputedByName}: ${reason}`,
-      version: { increment: 1 },
-    },
-  })
-
-  logger.info('Commission summary disputed', {
-    summaryId,
-    venueId,
-    disputedById,
-    reason,
-  })
-
-  logAction({
-    staffId: disputedById,
-    venueId,
-    action: 'COMMISSION_SUMMARY_DISPUTED',
-    entity: 'CommissionSummary',
-    entityId: summaryId,
-    data: { reason },
-  })
-
-  return updated
-}
-
-/**
- * Recalculate a summary (for disputes/corrections)
- */
-export async function recalculateSummary(summaryId: string, venueId: string): Promise<any> {
-  const summary = await prisma.commissionSummary.findFirst({
+export async function recalculateSummary(summaryId: string, venueId: string, db?: Prisma.TransactionClient): Promise<any> {
+  if (!db) return prisma.$transaction(tx => recalculateSummary(summaryId, venueId, tx))
+  await db.$queryRaw(Prisma.sql`SELECT id FROM "CommissionSummary" WHERE id = ${summaryId} AND "venueId" = ${venueId} FOR UPDATE`)
+  const summary = await db.commissionSummary.findFirst({
     where: { id: summaryId, venueId },
     include: {
       calculations: {
@@ -568,7 +399,7 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
   }
 
   // Get milestone bonuses
-  const bonuses = await prisma.milestoneAchievement.aggregate({
+  const bonuses = await db.milestoneAchievement.aggregate({
     where: { includedInSummaryId: summaryId },
     _sum: { bonusAmount: true },
   })
@@ -577,7 +408,7 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
   const grossAmount = totalCommissions + totalBonuses
   const netAmount = grossAmount - decimalToNumber(summary.deductionAmount)
 
-  const updated = await prisma.commissionSummary.update({
+  const updated = await db.commissionSummary.update({
     where: { id: summaryId },
     data: {
       totalSales,
@@ -600,7 +431,7 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
     netAmount,
   })
 
-  logAction({
+  await writeLegacyActivityAuditTx(db, {
     venueId,
     action: 'COMMISSION_SUMMARY_RECALCULATED',
     entity: 'CommissionSummary',
@@ -609,94 +440,4 @@ export async function recalculateSummary(summaryId: string, venueId: string): Pr
   })
 
   return updated
-}
-
-/**
- * Apply a deduction to a summary
- */
-export async function applyDeduction(summaryId: string, venueId: string, amount: number, reason: string): Promise<any> {
-  const summary = await prisma.commissionSummary.findFirst({
-    where: { id: summaryId, venueId },
-  })
-
-  if (!summary) {
-    throw new NotFoundError(`Commission summary ${summaryId} not found`)
-  }
-
-  if (summary.status === CommissionSummaryStatus.PAID) {
-    throw new BadRequestError('Cannot apply deduction to a paid summary')
-  }
-
-  const currentDeduction = decimalToNumber(summary.deductionAmount)
-  const newDeduction = currentDeduction + amount
-  const newNetAmount = decimalToNumber(summary.grossAmount) - newDeduction
-
-  const updated = await prisma.commissionSummary.update({
-    where: { id: summaryId },
-    data: {
-      deductionAmount: newDeduction,
-      netAmount: newNetAmount,
-      notes: summary.notes ? `${summary.notes}\nDeduction: ${amount} - ${reason}` : `Deduction: ${amount} - ${reason}`,
-      version: { increment: 1 },
-    },
-  })
-
-  logger.info('Deduction applied to summary', {
-    summaryId,
-    venueId,
-    amount,
-    reason,
-    newNetAmount,
-  })
-
-  logAction({
-    venueId,
-    action: 'COMMISSION_DEDUCTION_APPLIED',
-    entity: 'CommissionSummary',
-    entityId: summaryId,
-    data: { amount, reason, newNetAmount },
-  })
-
-  return updated
-}
-
-// ============================================
-// Bulk Operations
-// ============================================
-
-/**
- * Approve multiple summaries at once
- */
-export async function bulkApproveSummaries(summaryIds: string[], venueId: string, approvedById: string): Promise<number> {
-  const result = await prisma.commissionSummary.updateMany({
-    where: {
-      id: { in: summaryIds },
-      venueId,
-      status: {
-        in: [CommissionSummaryStatus.CALCULATED, CommissionSummaryStatus.PENDING_APPROVAL],
-      },
-    },
-    data: {
-      status: CommissionSummaryStatus.APPROVED,
-      approvedById,
-      approvedAt: new Date(),
-    },
-  })
-
-  logger.info('Bulk approval completed', {
-    venueId,
-    requested: summaryIds.length,
-    approved: result.count,
-    approvedById,
-  })
-
-  logAction({
-    staffId: approvedById,
-    venueId,
-    action: 'COMMISSION_BULK_APPROVED',
-    entity: 'CommissionSummary',
-    data: { requested: summaryIds.length, approved: result.count },
-  })
-
-  return result.count
 }

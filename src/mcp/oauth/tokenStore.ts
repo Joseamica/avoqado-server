@@ -83,6 +83,7 @@ export interface RefreshData {
   staffId: string
   activeOrg: string
   scopes: string[]
+  resource?: string
   /** Sólo al LEER (`createdAt` de la fila): el corte de sesión se compara contra esto. */
   issuedAt?: Date
   /**
@@ -104,6 +105,7 @@ export async function createRefreshToken(d: RefreshData): Promise<{ token: strin
       activeOrg: d.activeOrg,
       scopes: d.scopes,
       expiresAt: new Date(Date.now() + REFRESH_TTL_SECONDS * 1000),
+      resource: d.resource ?? null,
       ...(d.grantedAt ? { createdAt: d.grantedAt } : {}),
     },
   })
@@ -126,7 +128,14 @@ export async function consumeRefreshToken(token: string): Promise<RefreshData | 
   if (claimed.count !== 1) return null // missing, expired, or already consumed by a concurrent refresh
   const row = await prisma.mcpRefreshToken.findUnique({ where: { tokenHash } })
   if (!row) return null // defensive
-  return { clientId: row.clientId, staffId: row.staffId, activeOrg: row.activeOrg, scopes: row.scopes, issuedAt: row.createdAt }
+  return {
+    clientId: row.clientId,
+    staffId: row.staffId,
+    activeOrg: row.activeOrg,
+    scopes: row.scopes,
+    resource: row.resource ?? undefined,
+    issuedAt: row.createdAt,
+  }
 }
 
 export async function revokeRefreshToken(token: string): Promise<void> {

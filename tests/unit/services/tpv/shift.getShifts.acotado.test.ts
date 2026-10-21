@@ -24,7 +24,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     shift: { findMany: jest.fn(), count: jest.fn(), findFirst: jest.fn(), findUnique: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
-    payment: { findMany: jest.fn(), groupBy: jest.fn() },
+    payment: { findMany: jest.fn(), groupBy: jest.fn(), aggregate: jest.fn() },
     order: { count: jest.fn() },
     orderItem: { findMany: jest.fn(), aggregate: jest.fn() },
     rawMaterialMovement: { findMany: jest.fn() },
@@ -43,11 +43,13 @@ jest.mock('@/services/access/cashReconciliationAccess.service', () => ({ isCashR
 jest.mock('@/services/dashboard/shift.dashboard.service', () => ({ resolveShiftCashDrawer: jest.fn().mockResolvedValue(null) }))
 
 import prisma from '@/utils/prismaClient'
+import { STAFF_PUBLIC_SELECT } from '@/utils/staffPublicSelect'
 import { getCurrentShift, getShifts, TOPE_DE_TURNOS_POR_PAGINA } from '@/services/tpv/shift.tpv.service'
+import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
 
 const m = prisma as unknown as {
   shift: { findMany: jest.Mock; count: jest.Mock; findFirst: jest.Mock }
-  payment: { findMany: jest.Mock; groupBy: jest.Mock }
+  payment: { findMany: jest.Mock; groupBy: jest.Mock; aggregate: jest.Mock }
   order: { count: jest.Mock }
   orderItem: { aggregate: jest.Mock }
   venue: { findUnique: jest.Mock }
@@ -120,7 +122,8 @@ describe('getShifts — la FORMA de la consulta: nada sin tope', () => {
     await getShifts(VENUE, 10, 1)
 
     const include = m.shift.findMany.mock.calls[0][0].include
-    expect(include).toEqual({ staff: true })
+    // El empleado viaja sólo con sus campos públicos: la fila entera llevaba el hash de su contraseña (30-sep).
+    expect(include).toEqual({ staff: { select: STAFF_PUBLIC_SELECT } })
     expect(include).not.toHaveProperty('orders')
     expect(include).not.toHaveProperty('payments')
   })
@@ -156,7 +159,10 @@ describe('getShifts — la FORMA de la consulta: nada sin tope', () => {
     const select = m.payment.findMany.mock.calls[0][0].select
     expect(select.shiftId).toBe(true)
     expect(select.createdAt).toBe(true)
-    expect(select.order).toEqual({ select: { shiftId: true } })
+    // + la marca de cuenta de tarjetas (R3): un renglón con `giftCardId` basta para no sumarla a las ventas del turno.
+    expect(select.order).toEqual({
+      select: { shiftId: true, items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } },
+    })
   })
 
   it('sin turnos en la página NO se barren cobros: no se paga por una pantalla vacía', async () => {
@@ -219,6 +225,11 @@ describe('getCurrentShift — los totales se agregan en la BASE (P2.5)', () => {
   function sembrarTurnoAbierto(porMetodo: any[], productos: number | null = 7) {
     m.shift.findFirst.mockResolvedValue({ id: 'turno-abierto', venueId: VENUE, endTime: null, startTime: ABRE, status: 'OPEN' })
     m.payment.groupBy.mockResolvedValue(porMetodo)
+    // r2 #2: `totalSales` sale ahora del `aggregate` (sin cuentas de tarjetas). Sin tarjetas en el turno, vale lo mismo que la
+    // suma de los métodos: así las aserciones existentes de `totalSales` no cambian.
+    m.payment.aggregate.mockResolvedValue({
+      _sum: { amount: porMetodo.reduce((suma, fila) => suma + Number(fila._sum?.amount ?? 0), 0) },
+    })
     m.order.count.mockResolvedValue(3)
     m.orderItem.aggregate.mockResolvedValue({ _sum: { quantity: productos } })
   }
@@ -287,5 +298,21 @@ describe('getCurrentShift — los totales se agregan en la BASE (P2.5)', () => {
     const shift = await getCurrentShift(VENUE)
 
     expect(shift!.totalProductsSold).toBe(42)
+  })
+
+  it('r2 #2: totalSales sale de UNA consulta que excluye las cuentas de tarjetas y conserva los cobros sin marca', async () => {
+    sembrarTurnoAbierto([fila('CASH', 800)])
+    // $800 en efectivo en el turno, de los que $500 fueron una cuenta de tarjetas: las ventas son $300.
+    m.payment.aggregate.mockResolvedValue({ _sum: { amount: 300 } })
+
+    const turno = await getCurrentShift(VENUE)
+
+    expect(Number(turno!.totalSales)).toBe(300)
+    expect(Number(turno!.totalCashPayments)).toBe(800) // el dinero sí entró al cajón
+    expect(m.payment.aggregate).toHaveBeenCalledTimes(1)
+    expect(m.payment.findMany).not.toHaveBeenCalled() // sigue sin hidratar cobros
+    const where = m.payment.aggregate.mock.calls[0][0].where
+    // `NOT` de la marca (NULL-safe en el SQL de Prisma); sin rama `orderId: null`: la columna es obligatoria y Prisma la rechaza.
+    expect(where).toEqual({ venueId: VENUE, shiftId: 'turno-abierto', status: 'COMPLETED', NOT: { order: WHERE_ORDEN_DE_TARJETAS } })
   })
 })

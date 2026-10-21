@@ -11,6 +11,11 @@
 import { Decimal } from '@prisma/client/runtime/library'
 import { prismaMock } from '../../../__helpers__/setup'
 import * as productService from '../../../../src/services/dashboard/product.dashboard.service'
+import {
+  assertLegacyCatalogGovernanceForVenue,
+  assertLegacyCatalogProductUpdateGovernance,
+} from '../../../../src/services/master-catalog/catalogGovernance.service'
+import { bloquearParaCambiarIva } from '../../../../src/services/fiscal/exclusionContable'
 
 const humanActor = { type: 'HUMAN' as const, staffId: 'staff-1', impersonating: false }
 
@@ -19,6 +24,19 @@ jest.mock('../../../../src/services/master-catalog/catalogGovernance.service', (
   assertLegacyCatalogProductUpdateGovernance: jest.fn().mockResolvedValue({ id: 'product-abc', active: true }),
   assertLegacyProductReferencesForVenue: jest.fn().mockResolvedValue(undefined),
 }))
+
+// Plan 4: con un campo de IVA, el alta y la edición toman la organización ANTES del cerco (se prueba contra Postgres en
+// tests/integration/fiscal/exclusionContable.trigger.integration.test.ts); aquí sólo el orden de llamada.
+jest.mock('../../../../src/services/fiscal/exclusionContable', () => ({
+  ...jest.requireActual('../../../../src/services/fiscal/exclusionContable'),
+  bloquearParaCambiarIva: jest.fn().mockResolvedValue(undefined),
+}))
+
+/** La organización se bloquea primero, y el cerco de gobierno del catálogo después. */
+const primeroLaOrganizacion = (cerco: unknown) => {
+  expect(bloquearParaCambiarIva).toHaveBeenCalledWith(prismaMock, { venueId: 'venue-xyz' })
+  expect((bloquearParaCambiarIva as jest.Mock).mock.invocationCallOrder[0]).toBeLessThan((cerco as jest.Mock).mock.invocationCallOrder[0])
+}
 
 // Minimal mock product factory — typed as any to avoid Prisma payload shape strictness
 const makeMockProduct = (overrides: Record<string, any> = {}): any => ({
@@ -126,11 +144,20 @@ describe('Product SAT fiscal fields', () => {
         humanActor,
       )
 
+      primeroLaOrganizacion(assertLegacyCatalogGovernanceForVenue)
+
       // Assert Prisma create was called with the SAT fields
       const createCall = prismaMock.product.create.mock.calls[0][0]
       expect(createCall.data.satProductKey).toBe('81111500')
       expect(createCall.data.satUnitKey).toBe('E48')
-      expect(createCall.data.objetoImp).toBe('02')
+      // Tarea 5 (IVA por producto) + Ruling R9: `objetoImp` ya no se escribe directo — sólo
+      // `ivaTratamiento` (el trigger de Product deriva la tupla), y SÓLO cuando cambia algo
+      // respecto a la fila. Al crear, la "fila" es el default del esquema (IVA_16/0.16/'02');
+      // mandar '02' —el mismo objetoImp con el que nace todo producto— es un no-op fiscal: no
+      // se escribe ni `ivaTratamiento` ni `objetoImp`, y el default del esquema hace el trabajo.
+      // El `objetoImp` de la fila sigue siendo '02' (ver la aserción sobre `result` más abajo).
+      expect(createCall.data).not.toHaveProperty('ivaTratamiento')
+      expect(createCall.data).not.toHaveProperty('objetoImp')
 
       // Assert the returned product contains them
       expect(result.satProductKey).toBe('81111500')
@@ -168,16 +195,24 @@ describe('Product SAT fiscal fields', () => {
   // UPDATE
   // ──────────────────────────────────────────────────────────────
   describe('updateProduct — SAT fields', () => {
-    it('persists SAT fields when updating a product with them', async () => {
+    it('persists SAT fields when updating a product with them (reenviar el objetoImp PROPIO — heredado, no "02" — de la fila es un no-op)', async () => {
       const existing = makeMockProduct()
       const updated = makeMockProduct({
         name: 'Producto Test',
         satProductKey: '81111500',
         satUnitKey: 'H87',
-        objetoImp: '01',
+        objetoImp: '04',
       })
 
       prismaMock.product.findFirst.mockResolvedValue(existing)
+      // Ruling R9: el producto YA es heredado con objetoImp '04' (BLOQUEADO_04 — p.ej. una
+      // excepción fiscal que el negocio ya traía antes de esta feature; el trigger la permite
+      // tal cual, migración `iva_tratamiento_columnas`). El dashboard reenvía ESE MISMO objetoImp
+      // en cada guardado (ProductWizardDialog.tsx) — no es un cambio, y no debe escribir ni
+      // `objetoImp` ni `ivaTratamiento`. A propósito NO es '02' (el default): antes de R9, sólo
+      // el caso "coincide con el default" quedaba sin escribir; el caso heredado seguía
+      // reventando con un 409 en CADA guardado normal del dashboard.
+      prismaMock.product.findFirstOrThrow.mockResolvedValueOnce({ ivaTratamiento: 'BLOQUEADO_04', taxRate: 0.16, objetoImp: '04' })
       prismaMock.product.update.mockResolvedValue(updated)
 
       const result = await productService.updateProduct(
@@ -187,19 +222,21 @@ describe('Product SAT fiscal fields', () => {
           name: 'Producto Test',
           satProductKey: '81111500',
           satUnitKey: 'H87',
-          objetoImp: '01',
+          objetoImp: '04',
         },
         humanActor,
       )
 
+      primeroLaOrganizacion(assertLegacyCatalogProductUpdateGovernance)
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       expect(updateCall.data.satProductKey).toBe('81111500')
       expect(updateCall.data.satUnitKey).toBe('H87')
-      expect(updateCall.data.objetoImp).toBe('01')
+      expect(updateCall.data).not.toHaveProperty('objetoImp')
+      expect(updateCall.data).not.toHaveProperty('ivaTratamiento')
 
       expect(result.satProductKey).toBe('81111500')
       expect(result.satUnitKey).toBe('H87')
-      expect(result.objetoImp).toBe('01')
+      expect(result.objetoImp).toBe('04')
     })
 
     it('REGRESSION — updating without SAT fields does not overwrite existing SAT values', async () => {
@@ -220,6 +257,8 @@ describe('Product SAT fiscal fields', () => {
 
       // Update with only name — no SAT fields provided
       await productService.updateProduct('venue-xyz', 'product-abc', { name: 'Nombre Actualizado' }, humanActor)
+
+      expect(bloquearParaCambiarIva).not.toHaveBeenCalled() // sin campo de IVA no se toma la organización
 
       const updateCall = prismaMock.product.update.mock.calls[0][0]
       // SAT fields must NOT appear in updateData sent to Prisma

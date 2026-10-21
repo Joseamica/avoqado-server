@@ -1,4 +1,5 @@
 import hybridBillingRoutes from './dashboard/hybridBilling.routes'
+import serviceCourseRoutes from './dashboard/serviceCourse.routes'
 import express, { RequestHandler } from 'express'
 import { z } from 'zod'
 import {
@@ -44,6 +45,12 @@ import * as attendanceController from '../controllers/dashboard/attendance.dashb
 import * as staffDocumentController from '../controllers/dashboard/staffDocument.controller'
 import * as authDashboardController from '../controllers/dashboard/auth.dashboard.controller'
 import * as availableBalanceController from '../controllers/dashboard/availableBalance.dashboard.controller'
+import * as settlementReportController from '../controllers/dashboard/settlementReport.dashboard.controller'
+import {
+  settlementReportCountSchema,
+  settlementReportExportSchema,
+  settlementReportTerminalOptionsSchema,
+} from '../schemas/dashboard/settlementReport.schema'
 import * as settlementIncidentController from '../controllers/dashboard/settlementIncident.dashboard.controller'
 import * as cashCloseoutController from '../controllers/dashboard/cashCloseout.dashboard.controller'
 import * as creditOfferController from '../controllers/dashboard/creditOffer.dashboard.controller'
@@ -86,6 +93,7 @@ import * as textToSqlAssistantController from '../controllers/dashboard/text-to-
 import * as tokenBudgetController from '../controllers/dashboard/token-budget.dashboard.controller'
 import * as tpvController from '../controllers/dashboard/tpv.dashboard.controller'
 import { bindTpvCommandTarget } from '../middlewares/bindTpvCommandTarget.middleware'
+import { soloElDuenoBorraDeFabrica } from '../middlewares/soloElDuenoBorraDeFabrica.middleware'
 import { bindTpvSettingsTarget } from '../middlewares/bindTpvSettingsTarget.middleware'
 import * as displayModeRequestController from '../controllers/dashboard/displayModeRequest.dashboard.controller'
 import * as tpvCommandController from '../controllers/dashboard/tpv-command.dashboard.controller'
@@ -101,7 +109,9 @@ import * as tpvMessageController from '../controllers/dashboard/tpv-message.dash
 import { preserveContext } from '@/observability/preserveContext'
 import {
   issueCfdiForOrderController,
+  confirmOrderPriceContractController,
   listCfdisController,
+  extraccionesPendientesController,
   getCfdiStatusController,
   cancelCfdiController,
   replaceCfdiController,
@@ -114,8 +124,13 @@ import {
   uploadEmisorCsdController,
   syncEmisorLogoController,
   downloadCfdiFileController,
+  sendCfdiEmailController,
   getEmisorProviderStatusController,
   triggerGlobalCfdiController,
+  listGlobalPeriodosController,
+  listGlobalExcluidasController,
+  previewGlobalComplementariaController,
+  emitGlobalComplementariaController,
   searchSatCatalogController,
 } from '../controllers/dashboard/cfdi.dashboard.controller'
 import {
@@ -157,7 +172,7 @@ import {
   bulkConfirmIncidentSchema,
 } from '../schemas/dashboard/settlementIncident.schema'
 import { createCloseoutSchema, closeoutHistoryQuerySchema } from '../schemas/dashboard/cashCloseout.schema'
-import { updateTpvSchema } from '../schemas/dashboard/tpv.schema'
+import { updateTerminalTpvSettingsSchema, updateTpvSchema } from '../schemas/dashboard/tpv.schema'
 import {
   loginSchema,
   requestPasswordResetSchema,
@@ -316,12 +331,18 @@ import {
 import { createTerminalOrderSchema } from '../schemas/dashboard/terminalOrder.schema'
 import {
   issueCfdiSchema,
+  confirmPriceContractSchema,
   listCfdisSchema,
   cancelCfdiSchema,
+  sendCfdiEmailSchema,
+  emitRefundCreditNoteSchema,
   upsertEmisorSchema,
   upsertMerchantConfigSchema,
   uploadCsdSchema,
   satCatalogSchema,
+  triggerGlobalCfdiSchema,
+  emitGlobalComplementariaSchema,
+  listGlobalExcluidasSchema,
 } from '../schemas/dashboard/cfdi.schema'
 import inventoryRoutes from './dashboard/inventory.routes'
 import superadminRoutes from './dashboard/superadmin.routes'
@@ -333,6 +354,7 @@ import {
   financialProviderRoutes,
 } from './dashboard/financialConnection.routes'
 import paymentLinkRoutes from './dashboard/paymentLink.routes'
+import onlineOrderingDashboardRoutes from './dashboard/onlineOrdering.dashboard.routes'
 import manualPaymentRoutes from './dashboard/manualPayment.routes'
 import activityLogRoutes from './dashboard/activityLog.routes'
 import reportsRoutes from './dashboard/reports.routes'
@@ -342,12 +364,20 @@ import commissionRoutes from './dashboard/commission.routes'
 import cashOutRoutes from './dashboard/cash-out.routes'
 import reservationRoutes from './dashboard/reservation.routes'
 import printStationRoutes from './dashboard/printStation.routes'
+import floorPlanRoutes from './dashboard/floorPlan.routes'
+import productGroupRoutes from './dashboard/productGroup.routes'
+import productOptionRoutes from './dashboard/productOption.routes'
 import receiptLayoutRoutes from './dashboard/receiptLayout.routes'
+import customerDisplayRoutes, { customerDisplayDevicesRoutes } from './dashboard/customerDisplay.routes'
 import fiscalProfileRoutes from './dashboard/fiscalProfile.routes'
 import areaTicketRoutes from './dashboard/areaTicket.routes'
 import * as areaTicketController from '../controllers/dashboard/areaTicket.dashboard.controller'
 import { updateAreaSettlementRouteSchema } from '../schemas/dashboard/areaTicket.schema'
 import classSessionRoutes from './dashboard/classSession.routes'
+import staffPayRoutes from './dashboard/staffPay.routes'
+import rhRoutes from './dashboard/rh.routes'
+import passIntegrationsRoutes from './dashboard/passIntegrations.routes'
+import shopifyRoutes from './dashboard/shopify.routes'
 import googleCalendarStatusRoutes from './dashboard/googleCalendarStatus.routes'
 // @temporary - Serialized inventory demo routes (delete after final implementation)
 import serializedInventoryRoutes from './dashboard/serializedInventory.routes'
@@ -377,6 +407,7 @@ import saleVerificationOrgDashboardRoutes from './dashboard/saleVerification.org
 // Stores Analysis routes for PlayTelecom/White-Label dashboard (venue-level org data)
 import storesAnalysisRoutes from './dashboard/storesAnalysis.routes'
 import creditPackRoutes from './dashboard/creditPack.routes'
+import giftCardsRoutes from './dashboard/giftCards.routes'
 // Campañas de correo a clientes (Fase 1C-A, Task 6)
 import marketingCampaignRoutes from './dashboard/marketingCampaign.routes'
 import birthdayAutomationRoutes from './dashboard/birthdayAutomation.routes'
@@ -3647,6 +3678,19 @@ router.post(
   issueCfdiForOrderController,
 )
 
+// ---- IVA por producto (B3b): confirmar que una venta VIEJA se cobró con el IVA incluido ----
+// La pide el diálogo de «Facturar» cuando el 422 trae `priceContract`. Mismo permiso que el MCP
+// `confirm_order_price_contract` (`cfdi:configure`: OWNER/ADMIN de fábrica, o quien el dueño lo conceda).
+// Validar el cuerpo antes que el plan y el permiso, como la de facturar.
+router.post(
+  '/venues/:venueId/orders/:orderId/price-contract/confirm',
+  authenticateTokenMiddleware,
+  validateRequest(confirmPriceContractSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  confirmOrderPriceContractController,
+)
+
 // ---- CFDI list (paginated) — MUST be registered BEFORE /:cfdiId so bare /cfdi is matched first ----
 router.get(
   '/venues/:venueId/cfdi',
@@ -3655,6 +3699,15 @@ router.get(
   checkPermission('cfdi:view'),
   validateRequest(listCfdisSchema),
   listCfdisController,
+)
+// C3 (ola final, I-1): cuántas ventas se sacaron de la factura global y no tienen factura del cliente (aviso de Facturación). Sólo lectura,
+// mismo permiso que la lista. ANTES de /:cfdiId, o `extracciones-pendientes` se leería como un id.
+router.get(
+  '/venues/:venueId/cfdi/extracciones-pendientes',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  extraccionesPendientesController,
 )
 
 // ---- CFDI lifecycle: status read + cancel ----
@@ -3681,6 +3734,15 @@ router.post(
   checkPermission('cfdi:configure'), // destructive → OWNER/ADMIN only
   cancelCfdiController,
 )
+// Reenviar por correo una factura timbrada (H24). Mismo permiso que emitirla: quien puede facturar puede reenviarla.
+router.post(
+  '/venues/:venueId/cfdi/:cfdiId/email',
+  authenticateTokenMiddleware,
+  validateRequest(sendCfdiEmailSchema), // validate body BEFORE feature/perm checks (permissions-policy rule)
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:issue'),
+  sendCfdiEmailController,
+)
 // Sustituir una factura equivocada (TipoRelacion 04 + cancelación motivo 01). No lleva body:
 // el documento corregido se reconstruye de la orden, con las mismas barreras que una emisión nueva.
 router.post(
@@ -3705,6 +3767,7 @@ router.get(
 router.post(
   '/venues/:venueId/refunds/:refundId/credit-note',
   authenticateTokenMiddleware,
+  validateRequest(emitRefundCreditNoteSchema), // C2 T9: `{ modalidad?, huella? }` — validate body BEFORE feature/perm checks
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:issue'),
   emitRefundCreditNoteController,
@@ -3781,9 +3844,45 @@ router.get(
 router.post(
   '/venues/:venueId/fiscal/emisores/:emisorId/global',
   authenticateTokenMiddleware,
+  validateRequest(triggerGlobalCfdiSchema), // C1 (Tarea 8): `desde` opcional (un periodo reciente); sin cuerpo sigue valiendo
   checkFeatureAccess('CFDI'),
   checkPermission('cfdi:configure'),
   triggerGlobalCfdiController,
+)
+// C1 (Tarea 8, C1-P16 = B): los periodos recientes del emisor con el estado de su global principal (sólo lectura).
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/periodos',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  listGlobalPeriodosController,
+)
+// C1 (Tarea 12, Codex C1-9/C1-18/C1-32): las ventas de un periodo que no entraron a la global y por qué (sólo lectura). El periodo: el
+// GUARDADO de una global que ya existe (`principalId`), uno reciente (`desde`) o, sin nada, el último cerrado.
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/excluidas',
+  authenticateTokenMiddleware,
+  validateRequest(listGlobalExcluidasSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  listGlobalExcluidasController,
+)
+// C1 (Tarea 11, C1-P7/C1-P12): la complementaria de una global principal, por su id: vista previa (cfdi:view) y emisión (cfdi:configure, como
+// el disparo). La emite SÓLO una persona; el job nunca (la guarda vive en el motor).
+router.get(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:view'),
+  previewGlobalComplementariaController,
+)
+router.post(
+  '/venues/:venueId/fiscal/emisores/:emisorId/global/:principalId/complementaria',
+  authenticateTokenMiddleware,
+  validateRequest(emitGlobalComplementariaSchema),
+  checkFeatureAccess('CFDI'),
+  checkPermission('cfdi:configure'),
+  emitGlobalComplementariaController,
 )
 
 // ---- Facturación CFDI 4.0 — SAT catalog lookup (spec §20.3 add-on #2) ----
@@ -4021,6 +4120,32 @@ router.get(
   checkPermission('settlements:read'),
   checkFeatureAccess('ADVANCED_REPORTS'),
   availableBalanceController.getSettlementWeek,
+)
+
+// Reportes de Transacciones y Dispersiones (spec 2026-10-13): mismo candado que Saldo disponible.
+router.get(
+  '/venues/:venueId/settlement-reports/count',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  validateRequest(settlementReportCountSchema),
+  settlementReportController.countSettlementReport,
+)
+router.get(
+  '/venues/:venueId/settlement-reports/terminal-options',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  validateRequest(settlementReportTerminalOptionsSchema),
+  settlementReportController.settlementReportTerminalOptions,
+)
+router.get(
+  '/venues/:venueId/settlement-reports/export',
+  authenticateTokenMiddleware,
+  checkPermission('settlements:read'),
+  checkFeatureAccess('ADVANCED_REPORTS'),
+  validateRequest(settlementReportExportSchema),
+  settlementReportController.exportSettlementReport,
 )
 
 /**
@@ -4417,6 +4542,7 @@ router.use('/', authenticateTokenMiddleware, financialProviderRoutes)
 
 // Payment Link Management routes (ADMIN+)
 router.use('/venues/:venueId/payment-links', authenticateTokenMiddleware, checkPermission('payment-link:read'), paymentLinkRoutes)
+router.use('/venues/:venueId/online-ordering', authenticateTokenMiddleware, onlineOrderingDashboardRoutes)
 
 // Venue Crypto Config routes (OWNER+) - Per-venue B4Bit device management
 router.post(
@@ -4490,7 +4616,17 @@ router.use('/venues/:venueId/referrals', authenticateTokenMiddleware, checkFeatu
 router.use('/venues/:venueId/reservations', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), reservationRoutes)
 // PRINT_STATIONS — feature gratis/core (sin checkFeatureAccess); permission-gated dentro del sub-router.
 router.use('/venues/:venueId/print-stations', authenticateTokenMiddleware, printStationRoutes)
+// PLANO DE MESAS — editor del dashboard (2026-10-08). Permiso y Servicio de mesas dentro del sub-router.
+router.use('/venues/:venueId/floor-plan', authenticateTokenMiddleware, floorPlanRoutes)
+// VARIANTES DE PRODUCTO (spec 2026-10-14). Permisos y candado PRODUCT_VARIANTS dentro de cada sub-router.
+router.use('/venues/:venueId/product-groups', authenticateTokenMiddleware, productGroupRoutes)
+router.use('/venues/:venueId/product-options', authenticateTokenMiddleware, productOptionRoutes)
 router.use('/venues/:venueId/receipt-layout', authenticateTokenMiddleware, receiptLayoutRoutes)
+// CUSTOMER_DISPLAY — la pantalla que ve el cliente en la tablet. Marca, textos y pasos gratis; las promos en reposo
+// (PRO) se revisan por CAMPO en el servicio, no por ruta: sin plan el negocio tiene que poder seguir editando su marca y
+// apagar lo que ya no puede usar. Permission-gated dentro de los sub-routers (customer-display:read/update).
+router.use('/venues/:venueId/terminals/:terminalId/customer-display', authenticateTokenMiddleware, customerDisplayRoutes)
+router.use('/venues/:venueId/customer-display', authenticateTokenMiddleware, customerDisplayDevicesRoutes)
 // Datos fiscales del venue como RECEPTOR de las facturas de Avoqado — feature gratis/core
 // (sin checkFeatureAccess); permission-gated dentro del sub-router (venue-fiscal-profile:manage, OWNER-only).
 router.use('/venues/:venueId/fiscal-profile', authenticateTokenMiddleware, fiscalProfileRoutes)
@@ -4511,12 +4647,27 @@ router.patch(
 // Class Sessions (group classes / workshops) — part of the reservations/appointments product
 // (uses reservations:* permissions; attendees ARE reservations), so it shares the RESERVATIONS gate.
 router.use('/venues/:venueId/class-sessions', authenticateTokenMiddleware, checkFeatureAccess('RESERVATIONS'), classSessionRoutes)
+router.use('/venues/:venueId/staff-pay', authenticateTokenMiddleware, staffPayRoutes)
+// RH fase 1a: puestos, asignaciones y «cómo se le paga hoy» (permisos teams:*, gratis; marca blanca ⇒ 403 dentro).
+router.use('/venues/:venueId/rh', authenticateTokenMiddleware, rhRoutes)
+
+// Conector de pases (TotalPass/Wellhub): conectar, ligar clases, lugares, check-ins. Gate AGGREGATOR_PASSES (Pro) y
+// permisos dentro del sub-router (permiso antes que plan).
+router.use('/venues/:venueId/pass-integrations', authenticateTokenMiddleware, passIntegrationsRoutes)
+
+// Conector Shopify (spec 2026-10-07): permiso antes que plan dentro del sub-router; el resumen, las listas, la vista
+// previa y desconectar sólo piden permiso (apagado se ve y se explica).
+router.use('/venues/:venueId/shopify', authenticateTokenMiddleware, shopifyRoutes)
 
 // Google Calendar Sync — venue-scoped status / ops endpoints (Phase 3)
 router.use('/venues/:venueId/google-calendar', authenticateTokenMiddleware, googleCalendarStatusRoutes)
 
 // Credit Packs / Bundles (multi-product packages with credits)
 router.use('/venues/:venueId/credit-packs', authenticateTokenMiddleware, creditPackRoutes)
+
+// Tarjetas de regalo (fase 1a): ajustes, lista, detalle con su libreta, acciones de gerente, cancelar una venta, reportes
+// para el contador y exportación de saldos vivos. Permisos `giftCards:*` dentro del sub-router; el plan sólo al prender (R9).
+router.use('/venues/:venueId/gift-cards', authenticateTokenMiddleware, giftCardsRoutes)
 
 // @temporary - Serialized Inventory Demo routes (delete after final implementation)
 // For PlayTelecom SIM sales visualization demo
@@ -4553,6 +4704,7 @@ router.use('/venues/:venueId/org-item-categories', orgItemCategoryRoutes)
 router.use('/venues/:venueId/master-catalog', masterCatalogVenueRoutes)
 router.use('/organizations/:orgId/master-catalog', masterCatalogRoutes)
 router.use('/organizations', organizationDashboardRoutes)
+router.use(serviceCourseRoutes)
 
 // Organization Config routes — org-level goals, attendance, TPV defaults, categories
 // Receives orgId directly (no venue->org lookup hack)
@@ -5167,8 +5319,14 @@ router.get(
  *                 nullable: true
  *               tipSuggestions:
  *                 type: array
+ *                 description: Porcentajes de propina que ofrece el POS (1 a 100, enteros, sin repetir, de 1 a 6)
+ *                 minItems: 1
+ *                 maxItems: 6
+ *                 uniqueItems: true
  *                 items:
- *                   type: number
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 100
  *               requirePinLogin:
  *                 type: boolean
  *     responses:
@@ -5194,6 +5352,8 @@ router.get(
  *                     type: number
  *                 requirePinLogin:
  *                   type: boolean
+ *       400:
+ *         description: tipSuggestions con forma inválida (más de 6, vacía, repetidos, fuera de 1-100 o no enteros); no se escribe nada
  *       403:
  *         description: Forbidden (missing tpv-settings:update permission)
  *       404:
@@ -5204,6 +5364,8 @@ router.put(
   authenticateTokenMiddleware,
   bindTpvSettingsTarget,
   checkPermission('tpv-settings:update'),
+  // F0-B (Task 12): el tope de 6 propinas del POS, DESPUÉS del permiso.
+  validateRequest(updateTerminalTpvSettingsSchema),
   tpvController.updateTpvSettings,
 )
 
@@ -5369,11 +5531,14 @@ router.get(
  *       404:
  *         description: Terminal not found or offline
  */
+// 🔴 `tpv:command` abre los comandos del piso (bloquear, reiniciar…); borrar de fábrica exige además
+// `tpv-factory-reset:execute` (dueño). Fijado en tests/unit/routes/tpv-factory-reset.soloElDueno.routes.test.ts.
 router.post(
   '/tpv/:terminalId/command',
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5476,6 +5641,7 @@ router.post(
   authenticateTokenMiddleware,
   bindTpvCommandTarget,
   checkPermission('tpv:command'),
+  soloElDuenoBorraDeFabrica(req => req.body?.command),
   tpvController.sendTpvCommand,
 )
 
@@ -5547,6 +5713,8 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('tpv-commands:write'),
   validateRequest(sendCommandSchema),
+  // El `confirmationPin` que exige el esquema para FACTORY_RESET no se valida contra nada: el candado es este permiso.
+  soloElDuenoBorraDeFabrica(req => req.body?.commandType),
   tpvCommandController.sendCommand,
 )
 
@@ -5592,10 +5760,13 @@ router.post(
  *       200:
  *         description: Commands retrieved successfully
  */
+// 🔴 Las 3 lecturas del registro (esta, /history y /:commandId) piden `tpv:command`, lo que abre el panel «Comandos remotos»
+// en el dashboard (TpvId.tsx). `tpv-commands:read` sólo lo tiene SUPERADMIN: dejaba al OWNER con 403 y el historial girando.
+// Candado fijado en tests/unit/routes/tpvCommands.routes.permissions.test.ts.
 router.get(
   '/venues/:venueId/tpv-commands',
   authenticateTokenMiddleware,
-  checkPermission('tpv-commands:read'),
+  checkPermission('tpv:command'),
   validateRequest(commandsQuerySchema),
   tpvCommandController.getCommands as any,
 )
@@ -5764,7 +5935,7 @@ router.get(
 router.get(
   '/venues/:venueId/tpv-commands/history',
   authenticateTokenMiddleware,
-  checkPermission('tpv-commands:read'),
+  checkPermission('tpv:command'), // ídem la lectura de la lista: mismo permiso que el panel
   validateRequest(commandHistoryQuerySchema),
   tpvCommandController.getCommandHistory as any,
 )
@@ -5797,7 +5968,7 @@ router.get(
 router.get(
   '/venues/:venueId/tpv-commands/:commandId',
   authenticateTokenMiddleware,
-  checkPermission('tpv-commands:read'),
+  checkPermission('tpv:command'), // ídem la lectura de la lista: mismo permiso que el panel
   tpvCommandController.getCommandStatus,
 )
 
@@ -7426,6 +7597,32 @@ router.post(
 
 /**
  * @openapi
+ * /api/v1/dashboard/venues/{venueId}/iva-por-producto:
+ *   get:
+ *     tags: [Products]
+ *     summary: Estado del IVA por producto del negocio
+ *     description: "Informativo y sin revisión (`revisado: false`). Encendido o apagado, contabilidad y los avisos de aparatos viejos. Los bloqueos del encendido se toman del 409 al guardar el producto."
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - { name: venueId, in: path, required: true, schema: { type: string, format: cuid } }
+ *     responses:
+ *       200:
+ *         description: "{ data: { encendido, habilitadoAt, contabilidad, bloqueos, avisos, facturasSinSello, revisado } }"
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ */
+router.get(
+  '/venues/:venueId/iva-por-producto',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  validateRequest(VenueIdParamsSchema),
+  productController.getIvaPorProductoHandler,
+)
+
+/**
+ * @openapi
  * /api/v1/dashboard/venues/{venueId}/products/{productId}:
  *   get:
  *     tags: [Products]
@@ -7959,9 +8156,9 @@ router.put(
  *     tags: [Team]
  *     summary: Hard delete team member (OWNER and above)
  *     description: |
- *       **OWNER or SUPERADMIN**: Permanently deletes the member's venue access and commission data.
- *       This includes: commission calculations, commission payouts, milestone progress,
- *       tip distributions, commission overrides, and the staff venue record itself.
+ *       **OWNER or SUPERADMIN**: Permanently deletes the member's venue access (the staff venue record)
+ *       and their commission overrides. Commission money history (calculations, payouts, milestone
+ *       achievements), orders, payments and tips are kept.
  *
  *       WARNING: This action is IRREVERSIBLE. Use only for:
  *       - GDPR "right to be forgotten" requests

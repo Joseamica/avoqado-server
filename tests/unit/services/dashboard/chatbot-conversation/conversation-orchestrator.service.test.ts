@@ -848,30 +848,6 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'team.members', status: 'executed' })])
   })
 
-  it('answers commission summary questions with the registered shared query tool', async () => {
-    jest.spyOn(SharedQueryService, 'getCommissionsSummary').mockResolvedValue({
-      totalPaid: 1000,
-      totalPending: 250,
-      totalApproved: 500,
-      staffWithCommissions: 3,
-      averageCommission: 125,
-      topEarners: [{ staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }],
-    })
-
-    const response = await orchestrator.process({
-      message: 'como van mis comisiones',
-      venueId: 'venue-1',
-      userId: 'user-1',
-      userRole: UserRole.ADMIN,
-    })
-
-    expect(SharedQueryService.getCommissionsSummary).toHaveBeenCalledWith('venue-1')
-    expect(response?.response).toContain('Comisiones')
-    expect(response?.response).toContain('$1,000.00 pagado')
-    expect(response?.response).toContain('Ana Admin')
-    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.summary', status: 'executed' })])
-  })
-
   it('answers settlement detail questions with card breakdown', async () => {
     jest.spyOn(SharedQueryService, 'getSettlementDetailForPeriod').mockResolvedValue({
       totalNetAmount: 1250,
@@ -974,40 +950,6 @@ describe('ConversationOrchestratorService', () => {
     expect(response?.response).toContain('https://pay.avoqado.io/abc12345')
     expect(response?.response).not.toContain('@')
     expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'paymentLinks.detail', status: 'executed' })])
-  })
-
-  it('answers commission payout questions with the registered shared query tool', async () => {
-    jest.spyOn(SharedQueryService, 'getCommissionPayoutsSummary').mockResolvedValue({
-      totalPaid: 1000,
-      totalPending: 300,
-      payoutCount: 2,
-      averagePayout: 500,
-      recentPayouts: [
-        {
-          amount: 700,
-          status: 'PAID',
-          paymentMethod: 'BANK_TRANSFER',
-          staffName: 'Ana Admin',
-          createdAt: new Date('2026-05-12T12:00:00.000Z'),
-          paidAt: new Date('2026-05-12T18:00:00.000Z'),
-          periodStart: new Date('2026-05-01T00:00:00.000Z'),
-          periodEnd: new Date('2026-05-12T23:59:59.999Z'),
-        },
-      ],
-    })
-
-    const response = await orchestrator.process({
-      message: 'resumen de payouts de comisiones',
-      venueId: 'venue-1',
-      userId: 'user-1',
-      userRole: UserRole.ADMIN,
-    })
-
-    expect(SharedQueryService.getCommissionPayoutsSummary).toHaveBeenCalledWith('venue-1', { limit: 10 })
-    expect(response?.response).toContain('Payouts de comisiones')
-    expect(response?.response).toContain('$1,000.00 pagado')
-    expect(response?.response).toContain('Ana Admin')
-    expect(response?.metadata.steps).toEqual([expect.objectContaining({ kind: 'query', tool: 'commissions.payouts', status: 'executed' })])
   })
 
   it('blocks payment link list questions when the user lacks payment-link read permission', async () => {

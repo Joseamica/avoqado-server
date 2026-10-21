@@ -94,11 +94,29 @@ jest.mock('@/services/inventory/inventoryPosting.service', () => ({
   applySalePosting: jest.fn(),
 }))
 
+// R8 (tarjetas de regalo): el reconciliador que cierra una cuenta ya cubierta activa sus sobres aunque no nazca vale.
+const activarSobresMock = jest.fn()
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: unknown[]) => activarSobresMock(...a),
+}))
+
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import * as productInventoryService from '@/services/dashboard/productInventoryIntegration.service'
 import { reconcileOrderFromPayments } from '@/services/tpv/payment.tpv.service'
 
 const p = prisma as unknown as Record<string, Record<string, jest.Mock>> & { $transaction: jest.Mock }
+
+/**
+ * The write transaction double, distinct from the global client: Order lock (`$queryRaw`), reread of the inputs under
+ * it (by default the same row the pre-read returned, i.e. nothing changed meanwhile), then the write.
+ */
+const lockedTx = (update: jest.Mock, reread: jest.Mock = jest.fn(() => p.order.findUnique.mock.results.slice(-1)[0]?.value)) => ({
+  $queryRaw: jest.fn().mockResolvedValue([{ id: 'locked' }]),
+  order: { findFirst: reread, update },
+  inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
+})
 
 describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (ORD-1788276418170)', () => {
   beforeEach(() => {
@@ -148,18 +166,15 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
   })
 
   it('marca la orden PAID + COMPLETED con sus cobros existentes, sin crear ningún Payment nuevo', async () => {
-    const fakeTx = {
-      order: {
-        update: jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
-      },
-      inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
-    }
+    const fakeTx = lockedTx(
+      jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
+    )
     p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
 
     const resultado = await reconcileOrderFromPayments('ord-1')
 
-    // El contrato que consume el barrido: la orden que cerró y su aviso de inventario.
-    expect(resultado).toEqual({ orderId: 'ord-1', warning: null })
+    // El contrato que consume el barrido: la orden que cerró, su aviso de inventario y que SÍ escribió (T8-R3).
+    expect(resultado).toEqual({ orderId: 'ord-1', warning: null, written: true })
     expect(p.$transaction).toHaveBeenCalledTimes(1)
     expect(fakeTx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -180,6 +195,20 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
     expect(createSalePostingInTxMock).not.toHaveBeenCalled()
   })
 
+  it('R8: cerrar una cuenta ya cubierta activa sus sobres en la MISMA tx aunque no nazca vale (idempotente)', async () => {
+    activarSobresMock.mockResolvedValue({ activated: ['gc-1'] })
+    const renglones = [{ id: 'it-1', giftCardId: 'gc-1' }]
+    const fakeTx = lockedTx(
+      jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: renglones }),
+    )
+    p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
+
+    await reconcileOrderFromPayments('ord-1')
+
+    expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+    expect(activarSobresMock).toHaveBeenCalledWith(fakeTx, expect.objectContaining({ venueId: 'v1', orderId: 'ord-1', items: renglones }))
+  })
+
   it('no toca una orden cuyos cobros NO la cubren', async () => {
     p.order.findUnique.mockResolvedValue({
       id: 'ord-2',
@@ -197,12 +226,9 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
       payments: [{ amount: new Decimal(40), tipAmount: new Decimal(0), type: 'REGULAR' }],
       items: [],
     })
-    const fakeTx = {
-      order: {
-        update: jest.fn().mockResolvedValue({ id: 'ord-2', venueId: 'v1', status: 'CONFIRMED', paymentStatus: 'PARTIAL', items: [] }),
-      },
-      inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
-    }
+    const fakeTx = lockedTx(
+      jest.fn().mockResolvedValue({ id: 'ord-2', venueId: 'v1', status: 'CONFIRMED', paymentStatus: 'PARTIAL', items: [] }),
+    )
     p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
 
     await reconcileOrderFromPayments('ord-2')
@@ -233,12 +259,9 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
       payments: [{ amount: new Decimal(65), tipAmount: new Decimal(0), type: 'REGULAR' }],
       items: [],
     })
-    const fakeTx = {
-      order: {
-        update: jest.fn().mockResolvedValue({ id: 'ord-3', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
-      },
-      inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
-    }
+    const fakeTx = lockedTx(
+      jest.fn().mockResolvedValue({ id: 'ord-3', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
+    )
     p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
 
     await reconcileOrderFromPayments('ord-3')
@@ -284,12 +307,9 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
   })
 
   const txDeCierre = () => {
-    const fakeTx = {
-      order: {
-        update: jest.fn().mockResolvedValue({ id: 'ord-svc', venueId: 'v1', status: 'CONFIRMED', paymentStatus: 'PARTIAL', items: [] }),
-      },
-      inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
-    }
+    const fakeTx = lockedTx(
+      jest.fn().mockResolvedValue({ id: 'ord-svc', venueId: 'v1', status: 'CONFIRMED', paymentStatus: 'PARTIAL', items: [] }),
+    )
     p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
     return fakeTx
   }
@@ -362,5 +382,134 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
         remainingBalance: 0,
       })
     }
+  })
+  // ── Plan 3b T7-R1: a writer can commit between the pre-read and the write ─────────────────────
+  describe('the write transaction locks the Order and rereads its inputs before writing', () => {
+    const paidOpen = (subtotal: number) => ({
+      id: 'ord-1',
+      venueId: 'v1',
+      status: 'CONFIRMED',
+      paymentStatus: 'PENDING',
+      subtotal: new Decimal(subtotal),
+      discountAmount: new Decimal(0),
+      serviceChargeAmount: new Decimal(0),
+      tipAmount: new Decimal(0),
+      total: new Decimal(subtotal),
+      servedById: 'staff-1',
+      createdById: 'staff-1',
+      tableId: null,
+      customer: null,
+      payments: [{ amount: new Decimal(150), tipAmount: new Decimal(0), type: 'REGULAR' }],
+      items: [],
+    })
+    const txReading = (reread: unknown) =>
+      lockedTx(jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', tableId: null, items: [] }), jest.fn().mockResolvedValue(reread))
+    const skipWarning = [expect.stringContaining('[StandaloneTotals]'), expect.objectContaining({ orderId: 'ord-1', venueId: 'v1' })]
+    // `mockImplementationOnce` / `mockResolvedValueOnce` queues survive `jest.clearAllMocks()`: none may leak into the next test.
+    afterEach(() => {
+      p.$transaction.mockReset()
+      p.order.findUnique.mockReset()
+    })
+
+    it('takes the Order lock on the transaction, rereads under it, and only then writes', async () => {
+      const fakeTx = lockedTx(
+        jest.fn().mockResolvedValue({ id: 'ord-1', venueId: 'v1', status: 'COMPLETED', paymentStatus: 'PAID', items: [] }),
+      )
+      p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
+
+      await reconcileOrderFromPayments('ord-1')
+
+      const [lock] = fakeTx.$queryRaw.mock.invocationCallOrder
+      const [reread] = fakeTx.order.findFirst.mock.invocationCallOrder
+      const [write] = fakeTx.order.update.mock.invocationCallOrder
+      expect(lock).toBeLessThan(reread)
+      expect(reread).toBeLessThan(write)
+      expect(fakeTx.$queryRaw.mock.calls[0].slice(1)).toEqual(['ord-1', 'v1'])
+      expect(fakeTx.order.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'ord-1', venueId: 'v1' } }))
+      // Distinct doubles: the global client has no `$queryRaw` and did only the pre-read.
+      expect((prisma as unknown as { $queryRaw?: unknown }).$queryRaw).toBeUndefined()
+      expect(p.order.findUnique).toHaveBeenCalledTimes(1)
+    })
+
+    it('inputs changed under the lock: writes nothing, reruns once from a fresh read and writes that', async () => {
+      // Pre-read: $150 of goods covered by the $150 payment. Under the lock a $20 line is already there.
+      p.order.findUnique.mockResolvedValueOnce(paidOpen(150)).mockResolvedValueOnce(paidOpen(170))
+      const stale = txReading(paidOpen(170))
+      const fresh = txReading(paidOpen(170))
+      p.$transaction
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(stale))
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(fresh))
+
+      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null, written: true })
+
+      expect(stale.order.update).not.toHaveBeenCalled()
+      expect(p.order.findUnique).toHaveBeenCalledTimes(2)
+      expect(fresh.order.update).toHaveBeenCalledTimes(1)
+      const data = fresh.order.update.mock.calls[0][0].data
+      expect(data).toMatchObject({ paymentStatus: 'PARTIAL', total: 170, paidAmount: 150, remainingBalance: 20 })
+      expect(data).not.toHaveProperty('status')
+      expect(logger.warn).not.toHaveBeenCalledWith(...skipWarning)
+    })
+
+    it('inputs changed again during the rerun: writes nothing and warns — the sweep takes the order on its next tick', async () => {
+      p.order.findUnique.mockResolvedValueOnce(paidOpen(150)).mockResolvedValueOnce(paidOpen(170))
+      const first = txReading(paidOpen(170))
+      const second = txReading(paidOpen(190))
+      p.$transaction
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(first))
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(second))
+
+      // T8-R3: the sweep must be able to tell this skip from a write — it audits ORDER_RECONCILED_PAID only for writes.
+      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null, written: false })
+
+      expect(first.order.update).not.toHaveBeenCalled()
+      expect(second.order.update).not.toHaveBeenCalled()
+      expect(p.$transaction).toHaveBeenCalledTimes(2)
+      // Its payments already covered the order before this pass (settledBeforeThisPayment): no settlement effect is due,
+      // so it keeps the warn — and the text no longer promises that the sweep runs settlement effects.
+      expect(logger.warn).toHaveBeenCalledWith(...skipWarning)
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('never runs settlement effects'), expect.anything())
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('F1_EFECTOS_OMITIDOS'), expect.anything())
+    })
+
+    it('a pass that would SETTLE the order, skipped twice, logs F1_EFECTOS_OMITIDOS at error with the effects not applied', async () => {
+      // 100% courtesy with no payment yet: nothing left to pay, so this pass computes isFullyPaid && !settledBeforeThisPayment
+      // — it is the pass that would create the inventory posting and award loyalty. The sweep never replays those (T8-R3).
+      const courtesy = (subtotal: number) => ({ ...paidOpen(subtotal), discountAmount: new Decimal(subtotal), payments: [] })
+      p.order.findUnique.mockResolvedValueOnce(courtesy(150)).mockResolvedValueOnce(courtesy(170))
+      const first = txReading(courtesy(170))
+      const second = txReading(courtesy(190))
+      p.$transaction
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(first))
+        .mockImplementationOnce(async (fn: (tx: unknown) => unknown) => fn(second))
+
+      await expect(reconcileOrderFromPayments('ord-1')).resolves.toEqual({ orderId: 'ord-1', warning: null, written: false })
+
+      expect(second.order.update).not.toHaveBeenCalled()
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('F1_EFECTOS_OMITIDOS'), {
+        paymentId: null,
+        orderId: 'ord-1',
+        venueId: 'v1',
+        efectosNoAplicados: [
+          'vale de inventario (createSalePostingInTx)',
+          'descuento de inventario (deductInventoryForProduct, markAsSold)',
+          'lealtad (loyaltyEligibleAt, awardLoyaltyForPaidOrder)',
+          'cupones (finalizeCouponsForOrder)',
+          'referido (onOrderPaid)',
+        ],
+      })
+      expect(logger.warn).not.toHaveBeenCalledWith(...skipWarning)
+    })
+
+    it('a lock that finds no Order keeps the not-found behavior and writes nothing', async () => {
+      const fakeTx = lockedTx(jest.fn())
+      fakeTx.$queryRaw.mockResolvedValue([])
+      p.$transaction.mockImplementation(async (fn: (tx: unknown) => unknown) => fn(fakeTx))
+
+      await expect(reconcileOrderFromPayments('ord-1')).rejects.toThrow('Order ord-1 not found for total update')
+      expect(fakeTx.order.findFirst).not.toHaveBeenCalled()
+      expect(fakeTx.order.update).not.toHaveBeenCalled()
+    })
   })
 })

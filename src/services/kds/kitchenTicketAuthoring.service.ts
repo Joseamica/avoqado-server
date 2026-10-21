@@ -6,20 +6,23 @@
  * de una orden corre bajo un candado de Postgres por orden: dos armados a la vez (el gancho del cobro y el POST de
  * una app vieja) no duplican platillos.
  */
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
 import { toKdsModifierLabels } from './kdsModifierLabels'
 import { estacionesDelNegocio } from './kitchenDisplayStations'
+import { nombreEnCocina } from './nombreEnCocina'
 import { planKitchenTickets, type KitchenLine } from './kitchenTicketPlanning'
+import { initialPreparation, parsePreparation, PREPARATION_VERSION } from './kitchenPreparation'
+import { ConflictError } from '../../errors/AppError'
+import { parseServiceCourseSnapshot } from '../service-courses/serviceCourseContract'
 
 export type KitchenTrigger = 'PAID' | 'ROUND' | 'LEGACY_POST' | 'SWEEP'
 export type KitchenMarkAction = 'BUMP' | 'FALLBACK_PRINTED'
 
-/** Tope de renglones leídos por orden: una cuenta real no se acerca; si se llega, queda en el log. */
+/** Renglones por página: recorrer la cuenta completa sin una lectura sin tope. */
 const MAX_RENGLONES = 500
-/** Mismo presupuesto que el candado de los pedidos de reparto (`deliveryOrderLock.ts`). */
-const CANDADO_TX_TIMEOUT_MS = 15_000
 /** Los `OrderSource` que pone la ingesta de reparto (`deliveryOrderIngestion.service.ts`). */
 const ORIGENES_DE_AGREGADOR = new Set<string>(['UBER_EATS', 'RAPPI', 'DIDI_FOOD', 'DELIVERY_PLATFORM'])
 
@@ -32,7 +35,13 @@ export async function authorKitchenTickets(params: {
   const startedAt = new Date()
 
   const { routing, screens } = await estacionesDelNegocio(venueId)
-  if (screens.length === 0) {
+  const preparationLine = await prisma.orderItem.findFirst({
+    where: { order: { id: orderId, venueId }, serviceCourse: { path: ['preparationVersion'], equals: PREPARATION_VERSION } },
+    select: { id: true },
+  })
+  // New POS work persists its progress even when a station uses paper, without backfilling legacy sales.
+  const preparationScreens = preparationLine ? [...routing.activeStationIds].map(id => ({ id, since: new Date(0) })) : screens
+  if (preparationScreens.length === 0 && !preparationLine) {
     await limpiarMarca(venueId, orderId, startedAt)
     return { ticketIds: [] }
   }
@@ -66,11 +75,22 @@ export async function authorKitchenTickets(params: {
     return { ticketIds: [] }
   }
 
-  const ticketIds = await prisma.$transaction(
-    async tx => {
-      // Mismo candado que `withDeliveryOrderLock`, con otro prefijo: Postgres lo suelta al terminar la tx.
-      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kds-order:${orderId}`}, 0))::text`
+  const ticketIds = await prisma.$transaction(async tx => {
+    const venue = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
+    if (!venue.length) return [] as string[]
+    // Mismo candado que `withDeliveryOrderLock`, con otro prefijo: Postgres lo suelta al terminar la tx.
+    await tomarCandadoDeComandas(tx, orderId)
+    // Y el de la orden ANTES de tocar renglones: comandas → orden → renglones, el orden de todos los escritores. Sin él el
+    // armado bloqueaba renglones y luego esperaba la orden, al revés de quien ya la tiene y espera esos renglones.
+    if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) return [] as string[]
+    // Se relee DENTRO del candado: una anulación que ganó la carrera ya retiró sus comandas y no hay que revivirlas.
+    const vigente = await tx.order.findFirst({ where: { id: orderId, venueId }, select: { status: true } })
+    if (!vigente || vigente.status === 'CANCELLED' || vigente.status === 'DELETED') return [] as string[]
 
+    let cursor: string | undefined
+    let rondaSinComanda = false
+    const ids = new Set<string>()
+    while (true) {
       const renglones = await tx.orderItem.findMany({
         where: { orderId },
         select: {
@@ -82,28 +102,28 @@ export async function authorKitchenTickets(params: {
           externalId: true,
           sentToKitchenAt: true,
           createdAt: true,
+          serviceCourse: true,
+          orderPromotionId: true,
           areaTicketLineId: true,
+          giftCardId: true,
+          weightQuantity: true,
+          weightUnit: true,
           product: { select: { name: true, categoryId: true, printStationId: true, category: { select: { printStationId: true } } } },
           modifiers: { select: { name: true, quantity: true, modifier: { select: { name: true } } } },
         },
-        orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }],
+        orderBy: [{ sequence: 'asc' }, { createdAt: 'asc' }, { id: 'asc' }],
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
         take: MAX_RENGLONES,
       })
-      if (renglones.length === MAX_RENGLONES) {
-        logger.warn('[KDS] orden con demasiados renglones; la comanda se arma con los primeros', { venueId, orderId })
-      }
+      if (renglones.length === 0) break
+      cursor = renglones[renglones.length - 1].id
       // Vale por área (V7): sus renglones traen `areaTicketLineId` y tienen su propio flujo de entrega — se
       // excluyen UNO POR UNO, no toda la orden, porque una cuenta puede mezclar el vale con productos sueltos
       // (I1, revisión final fase 3.3). Si TODOS los renglones son de vale no queda nada que cocinar aquí: se
       // limpia la marca igual que antes, o el barrido dispara un 🚨 falso a los 15 min.
-      const normales = renglones.filter(r => !r.areaTicketLineId)
-      if (normales.length === 0) {
-        await tx.order.updateMany({
-          where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
-          data: { kitchenPendingAt: null },
-        })
-        return [] as string[]
-      }
+      // Tarjetas de regalo (spec § 4.4): una línea de tarjeta no se cocina. Si no queda nada, la marca se limpia igual.
+      const normales = renglones.filter(r => !r.areaTicketLineId && !r.giftCardId)
+      if (normales.length === 0) continue
 
       const cubiertos = await tx.kdsOrderItem.findMany({
         where: { orderItemId: { in: normales.map(r => r.id) }, kdsOrder: { venueId } },
@@ -117,27 +137,39 @@ export async function authorKitchenTickets(params: {
         categoryId: r.product?.categoryId ?? null,
         productStationId: r.product?.printStationId ?? null,
         categoryStationId: r.product?.category?.printStationId ?? null,
-        productName: r.productName ?? r.product?.name ?? 'Producto',
+        // Codex 3.6 (S6): la venta por peso lleva `quantity = 1`; sin el peso la cocina no sabe cuánto servir.
+        productName: nombreEnCocina(r.productName ?? r.product?.name ?? 'Producto', r.weightQuantity, r.weightUnit),
         quantity: r.quantity,
         modifiers: toKdsModifierLabels(r.modifiers.map(m => ({ name: m.name ?? m.modifier?.name ?? null, quantity: m.quantity }))),
         notes: r.notes,
         externalId: r.externalId,
         sentToKitchenAt: r.sentToKitchenAt,
         createdAt: r.createdAt,
+        serviceCourse: r.serviceCourse,
+        orderPromotionId: r.orderPromotionId,
       }))
 
-      const plans = planKitchenTickets({
+      const soloSinEnviar = trigger === 'PAID' || trigger === 'LEGACY_POST'
+      const entrada = {
         order: { id: order.id, externalId: order.externalId, tableId: order.tableId },
         lines,
         coveredLineIds: new Set(cubiertos.map(c => c.orderItemId).filter((id): id is string => Boolean(id))),
         routing,
-        screens,
+        screens: preparationScreens.length ? preparationScreens : [{ id: 'none', since: new Date(0) }],
         stampedAt: startedAt,
-        soloSinEnviar: trigger === 'PAID' || trigger === 'LEGACY_POST',
-      })
+      }
+      const plans = planKitchenTickets({ ...entrada, soloSinEnviar })
+      // El pago no arma rondas ya enviadas, pero si una se quedó sin comanda (su gancho falló) la marca se queda:
+      // sin ella el barrido ya no la ve nunca (Codex 3.6).
+      rondaSinComanda ||=
+        soloSinEnviar && planKitchenTickets({ ...entrada, soloSinEnviar: false }).some(p => p.lines.some(l => l.sentToKitchenAt))
 
-      const ids: string[] = []
       for (const plan of plans) {
+        const preparationVersion = plan.lines.some(
+          l => parseServiceCourseSnapshot(l.serviceCourse)?.preparationVersion === PREPARATION_VERSION,
+        )
+          ? PREPARATION_VERSION
+          : 0
         const kdsOrderId = await cabeceraPorFolio(tx, {
           venueId,
           sourceKey: plan.sourceKey,
@@ -145,6 +177,7 @@ export async function authorKitchenTickets(params: {
           orderId,
           orderNumber: order.orderNumber,
           orderType: order.type,
+          preparationVersion,
         })
         await tx.kdsOrderItem.createMany({
           data: plan.lines.map(l => ({
@@ -156,6 +189,12 @@ export async function authorKitchenTickets(params: {
             orderItemId: l.id,
             productId: l.productId,
             categoryId: l.categoryId,
+            externalLineId: l.externalId,
+            serviceCourse: l.serviceCourse == null ? Prisma.DbNull : (l.serviceCourse as Prisma.InputJsonValue),
+            orderPromotionId: l.orderPromotionId ?? null,
+            preparation: preparationVersion
+              ? (initialPreparation(l.quantity, parseServiceCourseSnapshot(l.serviceCourse)?.kind ?? 'IMMEDIATE') as Prisma.InputJsonValue)
+              : Prisma.DbNull,
           })),
         })
         if (plan.toStamp.length > 0) {
@@ -164,15 +203,19 @@ export async function authorKitchenTickets(params: {
             data: { sentToKitchenAt: startedAt },
           })
         }
-        ids.push(kdsOrderId)
+        ids.add(kdsOrderId)
       }
+    }
 
-      // Sólo si nadie la volvió a poner mientras se armaba (una ronda que entró en medio).
-      await tx.order.updateMany({ where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
-      return ids
-    },
-    { timeout: CANDADO_TX_TIMEOUT_MS, maxWait: 5_000 },
-  )
+    // Sólo si nadie la volvió a poner mientras se armaba (una ronda que entró en medio).
+    if (!rondaSinComanda) {
+      await tx.order.updateMany({
+        where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } },
+        data: { kitchenPendingAt: null },
+      })
+    }
+    return [...ids]
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   if (ticketIds.length > 0) {
     logger.info('[KDS] comandas de pantalla armadas', { venueId, orderId, trigger, comandas: ticketIds.length })
@@ -228,21 +271,30 @@ export async function markKitchenTicket(a: {
   })
   if (a.action === 'BUMP') {
     await prisma.kdsOrder.updateMany({
-      where: { venueId: a.venueId, sourceKey: a.sourceKey, status: { not: 'COMPLETED' } },
+      where: { venueId: a.venueId, sourceKey: a.sourceKey, preparationVersion: 0, status: { not: 'COMPLETED' } },
+      // A legacy whole-ticket BUMP cannot complete or deliver new product-level work.
       data: { status: 'COMPLETED', completedAt: a.at },
     })
     return
   }
   // «Salió en papel»: sólo si nadie la empezó en una pantalla. Lo que la cocina ya tomó no se esconde.
   await prisma.kdsOrder.updateMany({
-    where: { venueId: a.venueId, sourceKey: a.sourceKey, status: 'NEW', fallbackPrintedAt: null },
+    where: { venueId: a.venueId, sourceKey: a.sourceKey, preparationVersion: 0, status: 'NEW', fallbackPrintedAt: null },
     data: { fallbackPrintedAt: a.at },
   })
 }
 
 async function cabeceraPorFolio(
   tx: Prisma.TransactionClient,
-  a: { venueId: string; sourceKey: string; stationId: string | null; orderId: string; orderNumber: string; orderType: string },
+  a: {
+    venueId: string
+    sourceKey: string
+    stationId: string | null
+    orderId: string
+    orderNumber: string
+    orderType: string
+    preparationVersion: number
+  },
 ): Promise<string> {
   const [creada] = await tx.kdsOrder.createManyAndReturn({
     data: [
@@ -254,6 +306,7 @@ async function cabeceraPorFolio(
         orderNumber: a.orderNumber,
         orderType: a.orderType,
         status: 'NEW',
+        preparationVersion: a.preparationVersion,
       },
     ],
     skipDuplicates: true,
@@ -262,7 +315,7 @@ async function cabeceraPorFolio(
   if (creada) return creada.id
   const existente = await tx.kdsOrder.findUniqueOrThrow({
     where: { venueId_sourceKey: { venueId: a.venueId, sourceKey: a.sourceKey } },
-    select: { id: true, orderId: true },
+    select: { id: true, orderId: true, preparationVersion: true },
   })
   // Una MARCA llegó antes: se le pone la venta. Su estado y su «en papel» son pegajosos y no se tocan.
   if (!existente.orderId) {
@@ -271,10 +324,121 @@ async function cabeceraPorFolio(
       data: { orderId: a.orderId, orderNumber: a.orderNumber, orderType: a.orderType, printStationId: a.stationId },
     })
   }
+  if (a.preparationVersion && !existente.preparationVersion) {
+    // An old offline mark may have arrived BEFORE this round. It cannot swallow held products.
+    await tx.kdsOrder.update({
+      where: { id: existente.id },
+      data: {
+        preparationVersion: a.preparationVersion,
+        status: 'NEW',
+        completedAt: null,
+        fallbackPrintedAt: null,
+      },
+    })
+  }
   return existente.id
 }
 
 async function limpiarMarca(venueId: string, orderId: string, startedAt: Date): Promise<void> {
   // `orderId` puede venir de un request del cliente (el POST legado, Tarea 8): siempre acotado al venue.
   await prisma.order.updateMany({ where: { id: orderId, venueId, kitchenPendingAt: { lte: startedAt } }, data: { kitchenPendingAt: null } })
+}
+
+/**
+ * El candado del armado de comandas de UNA orden (Postgres lo suelta al terminar la tx). Quien lo tome junto con el de la
+ * orden lo toma PRIMERO: comandas → orden, el orden del armado.
+ */
+export async function tomarCandadoDeComandas(tx: Prisma.TransactionClient, orderId: string): Promise<void> {
+  await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`kds-order:${orderId}`}, 0))::text`
+}
+
+/**
+ * Anular la cuenta retira de la pantalla de cocina sus comandas NO terminadas: antes la cocina seguía viendo como
+ * pendiente una cuenta que ya no existe (Codex 3.6). Toma el candado del armado, así que va AL INICIO de la transacción
+ * de la anulación (mismo orden que el armado: candado de comandas → orden). NO va en la fusión de cuentas: ahí los
+ * renglones se MUEVEN a la otra cuenta y la comida sigue pedida.
+ */
+export async function retirarComandasDeVentaAnulada(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  actor: { staffId?: string; reason?: string } = {},
+): Promise<{ kdsOrderIds: string[]; kdsOrderItemIds: string[] }> {
+  await tomarCandadoDeComandas(tx, orderId)
+  const pendientes = { venueId, orderId, status: { not: 'COMPLETED' as const }, preparationVersion: 0 }
+  const kdsOrderIds: string[] = [],
+    kdsOrderItemIds: string[] = []
+  let cursor: string | undefined
+  for (;;) {
+    const page = await tx.kdsOrder.findMany({
+      where: pendientes,
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    kdsOrderIds.push(...page.map(row => row.id))
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
+  }
+  cursor = undefined
+  for (;;) {
+    const page: { id: string }[] = await tx.kdsOrderItem.findMany({
+      where: { kdsOrder: pendientes },
+      select: { id: true },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    kdsOrderItemIds.push(...page.map(row => row.id))
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
+  }
+  await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: pendientes } })
+  await tx.kdsOrder.deleteMany({ where: pendientes })
+  // New tickets remain a durable history. Cancelling the sale only cancels work still outstanding.
+  const tracked = { venueId, orderId, preparationVersion: PREPARATION_VERSION, status: { not: 'COMPLETED' as const } }
+  cursor = undefined
+  for (;;) {
+    const page: Pick<Prisma.KdsOrderItemGetPayload<{}>, 'id' | 'kdsOrderId' | 'quantity' | 'preparation' | 'preparationRevision'>[] =
+      await tx.kdsOrderItem.findMany({
+        where: { kdsOrder: tracked },
+        select: { id: true, kdsOrderId: true, quantity: true, preparation: true, preparationRevision: true },
+        orderBy: { id: 'asc' },
+        take: 100,
+        ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+      })
+    for (const row of page) {
+      const before = parsePreparation(row.preparation, row.quantity)
+      const after = {
+        ...before,
+        HELD: 0,
+        PENDING: 0,
+        PREPARING: 0,
+        READY: 0,
+        CANCELLED: before.CANCELLED + before.HELD + before.PENDING + before.PREPARING + before.READY,
+      }
+      const changed = await tx.kdsOrderItem.updateMany({
+        where: { id: row.id, preparationRevision: row.preparationRevision, kdsOrder: tracked },
+        data: { preparation: after, preparationRevision: { increment: 1 } },
+      })
+      if (changed.count !== 1) throw new ConflictError('La preparación cambió. Vuelve a revisar la cuenta.', 'PREPARATION_CONFLICT')
+      await tx.activityLog.create({
+        data: {
+          venueId,
+          staffId: actor.staffId,
+          action: 'KITCHEN_ORDER_CANCEL',
+          entity: 'KdsOrderItem',
+          entityId: row.id,
+          data: { orderId, reason: actor.reason ?? 'Cuenta anulada', before, after, revision: row.preparationRevision + 1 },
+        },
+      })
+      kdsOrderItemIds.push(row.id)
+      if (!kdsOrderIds.includes(row.kdsOrderId)) kdsOrderIds.push(row.kdsOrderId)
+    }
+    if (page.length < 100) break
+    cursor = page[page.length - 1].id
+  }
+  await tx.kdsOrder.updateMany({ where: tracked, data: { status: 'COMPLETED', completedAt: new Date() } })
+  return { kdsOrderIds, kdsOrderItemIds }
 }

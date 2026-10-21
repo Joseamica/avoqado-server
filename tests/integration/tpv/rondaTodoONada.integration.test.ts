@@ -278,6 +278,26 @@ describe('regresión: la ronda que sí se guarda', () => {
     expect(await leer(o.id)).toMatchObject({ version: v + 2, subtotal: 130, total: 130 })
   })
 
+  it('🔴 réplica de una ronda con CORTESÍA: el platillo regalado sigue en $0 (auditoría Codex 3.6)', async () => {
+    const o = await cuenta()
+    const ronda = [
+      { productId: taco, quantity: 1, externalId: 'sync:cort:0', isCortesia: true, cortesiaReason: 'Cliente frecuente' },
+      { productId: taco, quantity: 2, externalId: 'sync:cort:1' },
+    ]
+    const { version: v } = await leer(o.id)
+    await addItemsToOrder(venueId, o.id, ronda, v, true)
+    const antes = await leer(o.id)
+    // Se perdió la respuesta y la cola reenvía la MISMA ronda con la versión actual.
+    await addItemsToOrder(venueId, o.id, ronda, antes.version, true)
+
+    const filas = await renglones(o.id)
+    expect(filas.map(f => [f.externalId, f.quantity, Number(f.total), f.isCortesia]).sort()).toEqual([
+      ['sync:cort:0', 1, 0, true],
+      ['sync:cort:1', 2, 100, false],
+    ])
+    expect((await leer(o.id)).total).toBe(antes.total)
+  })
+
   it('carrito completo (asNewRound=false): la línea igual REEMPLAZA su cantidad, como siempre', async () => {
     const o = await cuenta()
     await addItemsToOrder(venueId, o.id, [{ productId: taco, quantity: 2 }], (await leer(o.id)).version, false)

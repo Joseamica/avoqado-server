@@ -175,16 +175,20 @@ function addCounts(target: ResponsibleCounts, source: ResponsibleCounts): void {
 /**
  * Acumula UN ítem sobre las 7 columnas.
  *
- * 🔴 `inHandToday` cuenta SOLO `PROMOTER_HELD`. Un SIM vendido cuya venta se
- * rechazó después NO regresa a "en mano": el SIM ya se le entregó al cliente y
- * la revisión de la venta nunca toca el registro del ítem (decisión de Isaac
- * Mayoral, 25-ago-2026, verificada contra `sale-verification.dashboard.service`).
+ * 🔴 `inHandToday` cuenta lo que el promotor trae y no ha vendido:
+ * `PROMOTER_HELD` (aceptado en la TPV) **y** `PROMOTER_PENDING` (asignado, sin
+ * aceptar). Aceptar sólo existe en la TPV, así que un promotor sin terminal
+ * nunca acepta y vende igual: Pilar Guzmán tenía 135 asignados, 0 aceptados,
+ * 69 vendidos y la tabla decía 0 en mano en vez de 66 (Isaac, 9-oct-2026).
+ * `PROMOTER_REJECTED` no cuenta: el promotor declaró que no lo recibió.
+ * Un SIM vendido cuya venta se rechazó después tampoco regresa a "en mano": ya
+ * se le entregó al cliente (decisión de Isaac Mayoral, 25-ago-2026).
  */
 function accumulateItem(counts: ResponsibleCounts, item: InventoryItemInput): void {
   const weight = item.weight ?? 1
   counts.assigned += weight
   if (item.promoterAcceptedAt !== null) counts.receptionApproved += weight
-  if (item.custodyState === 'PROMOTER_HELD') counts.inHandToday += weight
+  if (item.custodyState === 'PROMOTER_HELD' || item.custodyState === 'PROMOTER_PENDING') counts.inHandToday += weight
 
   switch (item.saleVerificationStatus) {
     case 'COMPLETED':

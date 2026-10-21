@@ -19,6 +19,14 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   propia terminal (sonda a quien declara `terminalPaymentProbeVersion`; `outcomeEvidence`
   acreditada; `cancelDisposition ACCEPTED` sólo si la terminal contesta), nunca por plazo — decisión
   del founder del 10-sep (no se autorizó liberar por 2/20 min + latido + ausencia de Payment).
+  **El webhook del procesador TAMBIÉN es evidencia** (founder, 21 y 23-sep; memorias root
+  `webhook-del-banco-antes-que-preguntarle-al-cajero` y `webhook-angelpay-llega-en-segundos-y-el-silencio-si-informa`):
+  (1) un RECHAZO del webhook correlacionado con la fila libera la ranura (AngelPay por `integratorReference` =
+  `attemptId`; Blumon por la ranura, porque una terminal sólo tiene un cobro en vuelo); (2) en un comercio con
+  webhook COMPROBADO (cada uno de sus últimos 10 cobros con tarjeta tiene su `ProviderEventLog`), si al reabrir
+  la terminal el webhook no llega en 10 s, se libera sola, y si llega tarde se avisa «ese cobro SÍ pasó».
+  Sin webhook comprobado (p. ej. ESTOCOLMO/Doña Simona) el silencio no prueba nada. Esto es evidencia, no
+  plazo: no contradice la regla de arriba ni la debilita en ningún otro caso.
   **Procedencia de cada entrega (11-sep, plan D de Codex):** `TerminalPaymentRequest.deliveryProvenance`
   (`{deliveries:[{protocol:'LEGACY'|'DURABLE', ackVersion, cancelDispositionVersion, probeVersion, socketId,
   at, replay}]}`, migración `20260911150000`) se escribe con `$executeRaw` ANTES de emitir, en los dos
@@ -37,11 +45,10 @@ Invariantes de este lado, ya construidos y con prueba — no los debilites:
   que Codex pidió bloquear. El ACK de un replay sólo confirma una fila PENDING: nunca renueva la vigencia de una SENT
   (la dejaría «en curso» para siempre) ni revive una cerrada o en cancelación. TDD del
   11-sep: unit 69/69, integración 57/57 contra Postgres, sabotajes A/B/C en copia aislada, typecheck 0 local
-  + Alienware; sin commitear.
-  ⚠️ El commit `d26bb746` («implement manual and automatic release…», 5-sep), contenido en `develop` y
-  `main` (HEAD `3000f3d0`), SÍ contiene `TIMED_OUT/AUTO_RELEASED` y el paso `CANCEL_REQUESTED → CANCELLED`
-  por gracia; el árbol de trabajo (sin commitear) los retira. No dar por hecho cuál de los dos corre en un
-  entorno sin mirar el código desplegado.
+  + Alienware. Commiteado el 12-sep (`9dcc216e`; la migración `20260911150000` ya está en `main`).
+  ⚠️ El commit `d26bb746` («implement manual and automatic release…», 5-sep) introdujo `TIMED_OUT/AUTO_RELEASED`
+  y el paso `CANCEL_REQUESTED → CANCELLED` por gracia. Antes de afirmar qué camino de liberación corre en un
+  entorno, mira el código desplegado ahí; no lo des por hecho desde esta regla.
 - **El cierre por REST exige procedencia acreditada.** La selección actual del serial es:
   `Payment.terminal.serialNumber`, después el serial autenticado aportado por el llamador
   (`capturedBySerial`, del JWT) y finalmente `processorData.deviceSerialNumber`. Si falta la identidad

@@ -14,6 +14,7 @@ import { CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '../../types/master-catalog
 import prisma from '../../utils/prismaClient'
 import { writeCatalogAudit } from './catalogAudit.service'
 import { canonicalJsonV1, hashCanonicalJsonV1 } from './catalogHash.service'
+import { catalogIvaNotManagedError, isCatalogIvaField } from './catalogManagedMask.service'
 import { canonicalCatalogDecimal } from './catalogMoney.service'
 import { assertCatalogManagedFieldMask, assertCatalogVenueAccess, catalogVenueProvenanceSelect } from './catalogOverrideRead.service'
 import {
@@ -98,6 +99,8 @@ function normalizeRequests(input: CatalogOverrideRequestInput): CatalogOverrideR
     if (!isRecord(request) || Object.keys(request).sort().join(',') !== 'field,reason') {
       throw new ValidationError('Cada override acepta únicamente field y reason')
     }
+    // D15: el IVA ya no lo administra el catálogo; se dice con su motivo, no como «field no es administrado por catálogo».
+    if (isCatalogIvaField(request.field)) throw catalogIvaNotManagedError()
     if (typeof request.field !== 'string' || !CATALOG_RETAIL_MANAGED_FIELD_MASK_V1.includes(request.field as CatalogManagedFieldV1)) {
       throw new ValidationError('field no es administrado por catálogo')
     }
@@ -173,6 +176,8 @@ async function captureRequests(
   const mask = assertCatalogManagedFieldMask(target.catalogItem.kind, target.managedFieldMask)
   const captured: CatalogOverrideCapturedRequestV1[] = []
   for (const request of [...requests].sort((left, right) => compareOrdinal(left.field, right.field))) {
+    // D15: una solicitud guardada antes del despliegue (vocabulario V1) tampoco se confirma.
+    if (isCatalogIvaField(request.field)) throw catalogIvaNotManagedError()
     if (!mask.includes(request.field)) throw new ValidationError('field no aplica al tipo de artículo')
     const localValue = fieldValue(target, 'local', request.field)
     let corporateValue = fieldValue(target, 'corporate', request.field)

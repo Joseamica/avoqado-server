@@ -169,13 +169,18 @@ export async function updateRolePermissions(
   // role and then reach the superadmin API. Only SUPERADMIN holds `*:*`, so only
   // they can grant these. NOTE: `modifierRole` MUST be the caller's role resolved
   // for THIS venue (controller passes req.resolvedRole), not their raw JWT role.
+  // 🔴 Con lo que el negocio le QUITÓ al rol del que edita (`deniedPermissions`), igual que `checkPermission`: un
+  // permiso retirado ya no es suyo y no lo puede otorgar (hermano del P1 #2 de Codex en B3b, el PIN que lo ignoraba).
   const modifierPermRow = await prisma.venueRolePermission.findUnique({
     where: { venueId_role: { venueId, role: modifierRole } },
-    select: { permissions: true },
+    select: { permissions: true, deniedPermissions: true },
   })
   const modifierCustomPerms = (modifierPermRow?.permissions as string[] | undefined) ?? null
+  const modifierDeniedPerms = (modifierPermRow?.deniedPermissions as string[] | undefined) ?? null
   const isEscalationSensitive = (p: string) => p === '*:*' || p.startsWith('system:')
-  const escalatedPermissions = permissions.filter(p => isEscalationSensitive(p) && !hasPermission(modifierRole, modifierCustomPerms, p))
+  const escalatedPermissions = permissions.filter(
+    p => isEscalationSensitive(p) && !hasPermission(modifierRole, modifierCustomPerms, p, modifierDeniedPerms),
+  )
   if (escalatedPermissions.length > 0) {
     throw new ForbiddenError(`No puedes otorgar permisos que tú no posees: ${escalatedPermissions.join(', ')}`)
   }

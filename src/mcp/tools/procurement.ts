@@ -4,8 +4,12 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
-import { getSuppliers } from '@/services/dashboard/supplier.service'
+import { createSupplier, getSuppliersPage } from '@/services/dashboard/supplier.service'
+import prisma from '@/utils/prismaClient'
+import { CreateSupplierSchema } from '@/schemas/dashboard/inventory.schema'
 import { getPurchaseOrders, getPurchaseOrder } from '@/services/dashboard/purchaseOrder.service'
+import { auditMcpWrite } from '../audit'
+import { invoiceLineIdentification } from '@/schemas/dashboard/supplierInvoiceInventory.schema'
 import { PurchaseOrderStatus } from '@prisma/client'
 
 // Procurement (suppliers + purchase orders) is part of inventory — gate it exactly like the
@@ -40,21 +44,31 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
       search: z.string().optional().describe('Filter by name / contact / email (partial, case-insensitive)'),
       includeInactive: z.boolean().optional().describe('Also include inactive suppliers (default: only active)'),
       limit: z.number().int().positive().max(100).optional().describe('Max suppliers to return (default 50)'),
+      offset: z.number().int().min(0).optional().describe('Continue using nextOffset from the previous page'),
     },
-    async ({ venueId, search, includeInactive, limit }) => {
+    async ({ venueId, search, includeInactive, limit = 50, offset = 0 }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('inventory:read', venueId) // WHY: mirror the dashboard's inventory:read gate — supplier PII + PO line prices aren't free-for-all
       const gate = await planGateMessage(venueId, ...INVENTORY_GATE) // PREMIUM tier — mirrors inventory reads
       if (gate) return text({ ok: false, planRequired: true, error: gate })
 
-      const suppliers = await getSuppliers(venueId, {
-        ...(includeInactive ? {} : { active: true }),
-        ...(search ? { search } : {}),
-      })
-      const rows = suppliers.slice(0, limit ?? 50)
+      const { rows, total } = await getSuppliersPage(
+        venueId,
+        {
+          ...(includeInactive ? {} : { active: true }),
+          ...(search ? { search } : {}),
+        },
+        { limit, offset },
+      )
+      const hasMore = offset + rows.length < total
       return text({
         venueId,
         count: rows.length,
+        total,
+        limit,
+        offset,
+        hasMore,
+        nextOffset: hasMore ? offset + rows.length : null,
         suppliers: rows.map(s => ({
           id: s.id,
           name: s.name,
@@ -66,6 +80,55 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           minimumOrder: num(s.minimumOrder), // pesos
           active: s.active,
         })),
+      })
+    },
+  )
+
+  server.tool(
+    'create_supplier',
+    'Create ONE supplier in the selected venue. First search list_suppliers to avoid duplicates. Require its actual name; ask for any contact or delivery details needed instead of inventing them. Preview by default, then use the returned confirmation arguments and token after approval. An existing name (including inactive suppliers) is refused with its id. After a timeout search by name before retrying. Requires inventory:create, mcp:write and PREMIUM (INVENTORY_TRACKING).',
+    {
+      venueId: z.string().min(1),
+      name: z.string().trim().min(1, 'El nombre es requerido').max(200),
+      contactName: z.string().max(200).optional(),
+      email: z.string().email('El correo no es válido').optional(),
+      phone: z.string().max(50).optional(),
+      leadTimeDays: z.number().int().positive().max(365).optional(),
+      notes: z.string().max(2000).optional(),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, confirm, ...fields }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:create', venueId)
+      const gate = await planGateMessage(venueId, ...INVENTORY_GATE)
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const existing = await prisma.supplier.findFirst({
+        where: { venueId, name: { equals: fields.name, mode: 'insensitive' } },
+        select: { id: true, name: true, active: true, deletedAt: true },
+      })
+      if (existing)
+        return text({
+          ok: false,
+          needsInput: true,
+          existingSupplier: { id: existing.id, name: existing.name, active: existing.active, archived: existing.deletedAt !== null },
+          error:
+            'Este proveedor ya existe. Verifica si corresponde a lo solicitado; no lo crees de nuevo ni cambies su nombre para duplicarlo.',
+        })
+      const data = CreateSupplierSchema.shape.body.parse(fields)
+      if (!confirm)
+        return text({
+          ok: true,
+          requiresConfirmation: true,
+          venueId,
+          supplier: data,
+          message: `Crear el proveedor "${data.name}" en esta sucursal. Plazo inicial ${data.leadTimeDays} días (valor predeterminado si no se indicó). Confirma los datos mostrados.`,
+        })
+      const created = await createSupplier(venueId, data, { staffId: scope.staffId, source: 'customer-mcp' })
+      return text({
+        ok: true,
+        venueId,
+        supplier: { id: created.id, name: created.name },
+        message: 'Proveedor creado. Conserva su id para verificarlo antes de reintentar.',
       })
     },
   )
@@ -96,6 +159,126 @@ export function registerProcurementTools(server: McpServer, scope: McpScope) {
           unidentifiedLines: inv.lines.filter(l => !l.rawMaterialId && !l.productId && !l.purchaseOrderItemId).length,
         })),
       )
+    },
+  )
+
+  server.tool(
+    'import_supplier_invoice_xml',
+    'Register a supplier purchase XML in ONE branch and identify known supplier codes. Uploading records evidence only; stock is received separately with supplier_invoice_inventory after human review and purchase authorization. Requires inventory:update, mcp:write and Premium inventory plus CFDI. Only use an XML provided by the operator.',
+    {
+      venueId: z.string().min(1),
+      xml: z
+        .string()
+        .min(1)
+        .max(2 * 1024 * 1024),
+    },
+    async ({ venueId, xml }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      guard.requirePermission('mcp:write', venueId)
+      for (const code of ['INVENTORY_TRACKING', 'CFDI']) {
+        const gate = await planGateMessage(venueId, code, 'Las compras desde XML')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+      const { registerSupplierInvoice } = await import('../../services/dashboard/purchaseOrderInvoice.service')
+      const invoice = await registerSupplierInvoice({ venueId, xml, uploadedById: scope.staffId })
+      await auditMcpWrite(scope, { venueId, action: 'SUPPLIER_INVOICE_IMPORTED', entity: 'PurchaseOrderInvoice', entityId: invoice.id })
+      return text({
+        ok: true,
+        invoiceId: invoice.id,
+        uuid: invoice.uuid,
+        total: invoice.totalCents / 100,
+        lines: invoice.lines.map(l => ({
+          id: l.id,
+          description: l.descripcion,
+          quantity: Number(l.cantidad),
+          satUnit: l.claveUnidad,
+          rawMaterialId: l.rawMaterialId,
+          productId: l.productId,
+          purchaseUnit: l.purchaseUnit,
+          presentationName: l.presentationName,
+          netAmount: (l.importeCents - l.descuentoCents) / 100,
+        })),
+        message: 'XML registrado. Revisa los artículos y unidades antes de preparar la compra. El inventario todavía no cambió.',
+      })
+    },
+  )
+
+  server.tool(
+    'identify_supplier_invoice_line',
+    'Identify ONE supplier invoice line using the exact raw material OR resale product id selected by the operator. Optionally confirm the purchase unit or an existing purchase presentation. A box needs its actual presentation; never assume one box equals one base unit. The supplier code remembers the chosen item and presentation for future XMLs. Requires inventory:update, mcp:write and Premium inventory plus CFDI.',
+    { venueId: z.string().min(1), invoiceId: z.string().min(1), lineId: z.string().min(1), ...invoiceLineIdentification.shape },
+    async ({ venueId, invoiceId, lineId, ...fields }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:update', venueId)
+      guard.requirePermission('mcp:write', venueId)
+      for (const code of ['INVENTORY_TRACKING', 'CFDI']) {
+        const gate = await planGateMessage(venueId, code, 'Las compras desde XML')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+      const { identifyInvoiceLine } = await import('../../services/dashboard/purchaseOrderInvoice.service')
+      const line = await identifyInvoiceLine({ venueId, invoiceId, lineId, ...fields, actorId: scope.staffId })
+      await auditMcpWrite(scope, {
+        venueId,
+        action: 'SUPPLIER_INVOICE_LINE_IDENTIFIED',
+        entity: 'PurchaseOrderInvoiceLine',
+        entityId: lineId,
+        data: fields,
+      })
+      return text({
+        ok: true,
+        lineId: line.id,
+        rawMaterialId: line.rawMaterialId,
+        productId: line.productId,
+        purchaseUnit: line.purchaseUnit,
+        presentationName: line.presentationName,
+      })
+    },
+  )
+
+  server.tool(
+    'supplier_invoice_inventory',
+    'Review a supplier XML purchase in ONE branch before changing inventory. No manual supplier registration is needed: preparation reuses the XML issuer by RFC or registers it automatically, as shown in the preview. An invoice without a purchase order prepares a purchase pending authorization; an authorized purchase can be received once. Shows actual base quantities, explicit presentations and net costs in pesos. IVA is excluded; explicitly choose whether IEPS belongs in cost. First call returns a Spanish preview and confirmationToken. After operator approval call with confirm:true and that exact token. Ordinary order-attached invoices and already received purchases cannot add stock again. Requires inventory:create, inventory:update, mcp:write and Premium inventory plus CFDI.',
+    {
+      venueId: z.string().min(1),
+      invoiceId: z.string().min(1),
+      includeIeps: z.boolean().optional(),
+      confirm: z.boolean().optional(),
+      confirmationToken: z.string().optional(),
+    },
+    async ({ venueId, invoiceId, includeIeps = false, confirm: confirmed, confirmationToken }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('inventory:create', venueId)
+      guard.requirePermission('inventory:update', venueId)
+      guard.requirePermission('mcp:write', venueId)
+      for (const code of ['INVENTORY_TRACKING', 'CFDI']) {
+        const gate = await planGateMessage(venueId, code, 'Las compras desde XML')
+        if (gate) return text({ ok: false, planRequired: true, error: gate })
+      }
+      const { previewSupplierInvoiceInventory, confirmSupplierInvoiceInventory } = await import(
+        '../../services/dashboard/supplierInvoiceInventory.service'
+      )
+      if (!confirmed || !confirmationToken) {
+        const review = await previewSupplierInvoiceInventory(venueId, invoiceId, includeIeps)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          review,
+          message:
+            review.action === 'PREPARE'
+              ? `Confirma los artículos, unidades y costos. ${review.supplierWillBeCreated ? `El proveedor se registrará automáticamente con el RFC ${review.supplierRfc} del XML. ` : ''}Se creará una compra pendiente de autorización; todavía no se sumará inventario.`
+              : 'Confirma las cantidades base y costos mostrados. La mercancía se sumará una sola vez al inventario.',
+        })
+      }
+      const result = await confirmSupplierInvoiceInventory(venueId, invoiceId, confirmationToken, scope.staffId, includeIeps)
+      await auditMcpWrite(scope, {
+        venueId,
+        action: 'SUPPLIER_INVOICE_INVENTORY_CONFIRMED',
+        entity: 'PurchaseOrderInvoice',
+        entityId: invoiceId,
+        data: result,
+      })
+      return text({ ok: true, ...result })
     },
   )
 

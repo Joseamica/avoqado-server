@@ -18,7 +18,7 @@
 
 import { Request, Response } from 'express'
 import logger from '@/config/logger'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { getBlumonEcommerceService } from '@/services/sdk/blumon-ecommerce.service'
 import { blumonAuthService } from '@/services/blumon/blumonAuth.service'
@@ -50,6 +50,38 @@ function sanitizeCardData(cardData: any) {
   }
 
   return sanitized
+}
+
+/**
+ * Error que la página del SDK NO debe reintentar (auditoría 2026-09-30): el pago ya se hizo, se está haciendo
+ * o la sesión ya no vive. Mismas llaves que el resto de las respuestas de error.
+ */
+function respondNoRetry(res: Response, httpStatus: number, title: string, message: string, sessionId?: string) {
+  return res.status(httpStatus).json({
+    success: false,
+    error: title,
+    message,
+    action: 'Verifica el estado del pago antes de volver a intentarlo.',
+    canRetry: false,
+    // Para soporte: con esto se ubica el cobro en conciliación.
+    ...(sessionId ? { sessionId } : {}),
+  })
+}
+
+/** Estados donde reintentar no sirve: ya se cobró, se está cobrando, o la sesión ya no vive. */
+const DEAD_OR_IN_FLIGHT: CheckoutStatus[] = [
+  CheckoutStatus.COMPLETED,
+  CheckoutStatus.CHARGING,
+  CheckoutStatus.CANCELLED,
+  CheckoutStatus.EXPIRED,
+]
+
+function respondForDeadOrInFlight(res: Response, status: CheckoutStatus, sessionId?: string) {
+  if (status === CheckoutStatus.COMPLETED) return respondNoRetry(res, 409, 'Pago completado', 'Este pago ya se completó.', sessionId)
+  if (status === CheckoutStatus.CHARGING) {
+    return respondNoRetry(res, 409, 'Pago en proceso', 'Tu pago se está confirmando. No lo intentes de nuevo.', sessionId)
+  }
+  return respondNoRetry(res, 409, 'Sesión no disponible', 'Esta sesión de pago ya no está disponible.', sessionId)
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -95,32 +127,23 @@ export async function tokenizeCard(req: Request, res: Response) {
       throw new NotFoundError('Checkout session not found')
     }
 
-    // ✅ STRIPE PATTERN: Block only COMPLETED or EXPIRED sessions
-    // Allow retries on FAILED sessions (user can try different card or retry)
-    if (session.status === CheckoutStatus.COMPLETED) {
-      throw new BadRequestError('This checkout session has already been completed')
+    // 🔴 Auditoría 2026-09-30: las sesiones de una liga de pago van por su propio flujo.
+    if (session.paymentLinkId) {
+      throw new BadRequestError('This checkout session belongs to a payment link')
+    }
+
+    // ✅ STRIPE PATTERN: se reintenta una FAILED. Ya cobrada, cobrándose, cancelada o vencida: no, y se dice.
+    if (DEAD_OR_IN_FLIGHT.includes(session.status)) {
+      return respondForDeadOrInFlight(res, session.status, sessionId)
     }
 
     // Check expiration FIRST (before allowing retries)
     if (session.expiresAt < new Date()) {
-      await prisma.checkoutSession.update({
-        where: { id: session.id },
+      await prisma.checkoutSession.updateMany({
+        where: { id: session.id, status: session.status },
         data: { status: CheckoutStatus.EXPIRED },
       })
-      throw new BadRequestError('Checkout session expired')
-    }
-
-    // If session is FAILED, reset to PENDING to allow retry (Stripe pattern)
-    if (session.status === CheckoutStatus.FAILED) {
-      logger.info('🔄 [TOKENIZE] Resetting FAILED session to PENDING for retry', {
-        sessionId,
-        previousStatus: session.status,
-      })
-
-      await prisma.checkoutSession.update({
-        where: { id: session.id },
-        data: { status: CheckoutStatus.PENDING },
-      })
+      return respondForDeadOrInFlight(res, CheckoutStatus.EXPIRED, sessionId)
     }
 
     // 3. Validate provider is Blumon
@@ -215,8 +238,11 @@ export async function tokenizeCard(req: Request, res: Response) {
     // 6. Store token in session (NOT card data!)
     const metadata = (session.metadata as any) || {}
 
-    await prisma.checkoutSession.update({
-      where: { id: session.id },
+    // 🔴 Auditoría 2026-09-30: un solo paso con candado sobre lo que se leyó. Si mientras se tokenizaba el cobro
+    // reclamó la sesión (CHARGING), regresarla a PROCESSING habilitaba un segundo cargo. Una FAILED pasa directo a
+    // PROCESSING (antes había un reinicio aparte a PENDING) y se limpian los restos del fallo anterior.
+    const stored = await prisma.checkoutSession.updateMany({
+      where: { id: session.id, status: session.status, updatedAt: session.updatedAt },
       data: {
         metadata: {
           ...metadata,
@@ -226,8 +252,15 @@ export async function tokenizeCard(req: Request, res: Response) {
           tokenizedAt: new Date().toISOString(),
         },
         status: CheckoutStatus.PROCESSING,
+        failedAt: null,
+        errorMessage: null,
       },
     })
+    if (stored.count === 0) {
+      const now = await prisma.checkoutSession.findUnique({ where: { id: session.id }, select: { status: true } })
+      if (now && DEAD_OR_IN_FLIGHT.includes(now.status)) return respondForDeadOrInFlight(res, now.status, sessionId)
+      throw new BadRequestError('The checkout session changed while the card was being tokenized. Reload it and try again.')
+    }
 
     logger.info('✅ [TOKENIZE] Card tokenized successfully', {
       sessionId,
@@ -270,12 +303,17 @@ export async function tokenizeCard(req: Request, res: Response) {
 // ═══════════════════════════════════════════════════════════════════════════
 
 export async function chargeWithToken(req: Request, res: Response) {
-  const { sessionId, cvv } = req.body
+  const { sessionId, cvv, cardToken: requestedToken } = req.body
 
   logger.info('💰 [CHARGE] Processing charge with token', {
     sessionId,
     hasCvv: !!cvv,
   })
+
+  // Sólo quien gana PROCESSING → CHARGING puede escribir FAILED, y sólo si el banco dijo que no.
+  let claimed = false
+  // El banco ya aprobó: pase lo que pase después, la sesión NO se marca FAILED (el cliente pagaría dos veces).
+  let authorized = false
 
   try {
     // 1. Fetch session with token
@@ -294,12 +332,35 @@ export async function chargeWithToken(req: Request, res: Response) {
       throw new NotFoundError('Checkout session not found')
     }
 
-    const metadata = session.metadata as any
-    const cardToken = metadata?.cardToken
+    // 🔴 Auditoría 2026-09-30: las sesiones de una liga de pago se cobran por su propio flujo (orden, pago, comisión).
+    if (session.paymentLinkId) {
+      throw new BadRequestError('This checkout session belongs to a payment link')
+    }
 
-    if (!cardToken) {
+    // 🔴 Ya cobrada, cobrándose, cancelada o vencida: no se cobra y se dice que no se reintente.
+    if (DEAD_OR_IN_FLIGHT.includes(session.status)) {
+      return respondForDeadOrInFlight(res, session.status, sessionId)
+    }
+    if (session.status !== CheckoutStatus.PROCESSING) {
       throw new BadRequestError('Card not tokenized. Call /tokenize first.')
     }
+
+    if (session.expiresAt < new Date()) {
+      await prisma.checkoutSession.updateMany({
+        where: { id: session.id, status: CheckoutStatus.PROCESSING },
+        data: { status: CheckoutStatus.EXPIRED },
+      })
+      return respondForDeadOrInFlight(res, CheckoutStatus.EXPIRED, sessionId)
+    }
+
+    const metadata = session.metadata as any
+    // 🔴 El reclamo se ata a la tarjeta de ESTA solicitud: la que la página tokenizó y manda en `cardToken`. Sin ella no
+    // se cobra (una página vieja sólo tiene que recargarse), y un valor que no es texto no llega al filtro.
+    if (typeof requestedToken !== 'string' || requestedToken.length === 0) {
+      // Directo, no `throw`: el catch lo pasaría por parseBlumonError y la página diría «Error desconocido».
+      return res.status(400).json({ success: false, error: 'Recarga la página e intenta de nuevo.' })
+    }
+    const cardToken = requestedToken
 
     // 2. Get OAuth token
     const credentials = session.ecommerceMerchant.providerCredentials as any
@@ -352,6 +413,37 @@ export async function chargeWithToken(req: Request, res: Response) {
       accessToken = authResult.accessToken
     }
 
+    // 🔴 Reclamo atómico ANTES de autorizar (auditoría 2026-09-30), como el cobro de ligas, y sobre ESTA tarjeta: si
+    // otra tokenización la cambió, este intento no toca la fila y no cobra.
+    const claim = await prisma.checkoutSession.updateMany({
+      where: {
+        id: session.id,
+        status: CheckoutStatus.PROCESSING,
+        // 🔴 El vencimiento va DENTRO del candado: un refresco de OAuth lento no deja cobrar una sesión ya vencida.
+        expiresAt: { gt: new Date() },
+        metadata: { path: ['cardToken'], equals: cardToken },
+      },
+      data: { status: CheckoutStatus.CHARGING },
+    })
+    if (claim.count === 0) {
+      const now = await prisma.checkoutSession.findUnique({
+        where: { id: session.id },
+        select: { status: true, expiresAt: true },
+      })
+      const status = now?.status ?? CheckoutStatus.CHARGING
+      if (DEAD_OR_IN_FLIGHT.includes(status)) return respondForDeadOrInFlight(res, status, sessionId)
+      if (now && now.expiresAt <= new Date()) {
+        await prisma.checkoutSession.updateMany({
+          where: { id: session.id, status: CheckoutStatus.PROCESSING },
+          data: { status: CheckoutStatus.EXPIRED },
+        })
+        return respondForDeadOrInFlight(res, CheckoutStatus.EXPIRED, sessionId)
+      }
+      // Sigue siendo reintentable (la tarjeta cambió, u otro intento terminó en FAILED): el cliente vuelve a intentar.
+      throw new ConflictError('The checkout session changed. Please try again.')
+    }
+    claimed = true
+
     // 3. Authorize payment with Blumon
     logger.info('💳 [CHARGE] Authorizing payment', {
       sessionId,
@@ -374,6 +466,7 @@ export async function chargeWithToken(req: Request, res: Response) {
       merchantId: blumonMerchantId, // Routes payment to merchant's account
       reference: `session_${sessionId}`, // Shows in Blumon dashboard & webhook
     })
+    authorized = true
 
     // 4. Update session
     await prisma.checkoutSession.update({
@@ -405,21 +498,35 @@ export async function chargeWithToken(req: Request, res: Response) {
       error: error.message,
     })
 
+    // 🔴 Resultado desconocido (corte tras mandar el cargo) o cargo aprobado que no se pudo guardar: la
+    // sesión se queda CHARGING para conciliación y la respuesta NO invita a reintentar.
+    if (authorized || error instanceof PaymentOutcomeUnknownError) {
+      logger.error('🚨 [CHARGE] Resultado del cobro DESCONOCIDO — sesión retenida en CHARGING para reconciliación', {
+        sessionId,
+        authorized,
+      })
+      return respondNoRetry(res, 502, 'No se pudo confirmar el pago', new PaymentOutcomeUnknownError().message, sessionId)
+    }
+
     // Parse Blumon error into user-friendly message
     const friendlyError = parseBlumonError(error)
 
-    // Update session as failed with friendly error message
-    try {
-      await prisma.checkoutSession.update({
-        where: { sessionId },
-        data: {
-          status: CheckoutStatus.FAILED,
-          errorMessage: friendlyError.message,
-          failedAt: new Date(),
-        },
-      })
-    } catch (updateError) {
-      logger.error('Failed to update session status', { error: updateError })
+    // Sólo un rechazo del banco, con el reclamo en la mano, deja FAILED. Un error de validación (liga, token)
+    // no toca la sesión. Si la liberación no queda escrita, la sesión sigue CHARGING: no se invita a reintentar.
+    if (claimed) {
+      const released = await prisma.checkoutSession
+        .updateMany({
+          where: { sessionId, status: CheckoutStatus.CHARGING },
+          data: { status: CheckoutStatus.FAILED, errorMessage: friendlyError.message, failedAt: new Date() },
+        })
+        .catch(updateError => {
+          logger.error('Failed to update session status', { error: updateError })
+          return { count: 0 }
+        })
+      if (released.count !== 1) {
+        logger.error('🚨 [CHARGE] El banco rechazó pero la sesión no se pudo liberar: queda CHARGING', { sessionId })
+        return respondNoRetry(res, 502, 'No se pudo confirmar el pago', new PaymentOutcomeUnknownError().message, sessionId)
+      }
     }
 
     // Return user-friendly error

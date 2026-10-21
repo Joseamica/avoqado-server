@@ -125,6 +125,12 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
         })
       }
       try {
+        // Discount.createdById apunta a la membresía (StaffVenue.id), no a la persona: la del dashboard resuelve lo mismo.
+        // Un dueño de la organización puede no tener membresía en esa sucursal; entonces el descuento queda sin autor.
+        const membership = await prisma.staffVenue.findUnique({
+          where: { staffId_venueId: { staffId: scope.staffId, venueId } },
+          select: { id: true },
+        })
         const d = await createDiscount(
           venueId,
           {
@@ -136,7 +142,7 @@ export function registerDiscountTools(server: McpServer, scope: McpScope) {
             ...(maxDiscount !== undefined ? { maxDiscountAmount: maxDiscount } : {}),
             ...(automatic !== undefined ? { isAutomatic: automatic } : {}),
           },
-          scope.staffId,
+          membership?.id,
         )
         await auditMcpWrite(scope, {
           action: 'DISCOUNT_CREATED',

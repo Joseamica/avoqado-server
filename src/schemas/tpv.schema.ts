@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { existingId } from './common/existingId.schema'
 import { PIN_REGEX, PIN_ERROR_MESSAGE } from './common/pin.schema'
 
 // Authentication schemas
@@ -179,6 +180,11 @@ export const recordPaymentBodySchema = z.object({
       // cajero no puede quitar. Un desenlace ya ocurrido es un hecho, no se re-litiga.
       // Lo que NO relaja: la revisión referenciada tiene que EXISTIR.
       isOfflineReplay: z.boolean().optional(),
+      // Founder 3-oct / Codex r10 #3: «este efectivo lo tiene el cajero en la mano y todavía lo puede devolver». Lo mandará el
+      // intento inmediato del flujo Cobrar de la TPV (plan de registro de cobros); su cola nunca. Booleano y opcional: un cobro
+      // jamás se rechaza por este campo. Codex r11 #2: sin declararlo aquí, `validateRequest` lo borra del cuerpo. `nullish()`, no
+      // `optional()` (revisión de 6a-1): un `null` explícito —como el `externalSource: null` de iOS— no puede tumbar un cobro.
+      cobroNuevo: z.boolean({ message: 'cobroNuevo debe ser verdadero o falso.' }).nullish(),
       // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
       // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
       // cobros normales, así que exigir string|undefined rechazaría cada cobro en
@@ -455,7 +461,7 @@ export const addOrderItemsSchema = z.object({
     items: z
       .array(
         z.object({
-          productId: z.string().cuid({ message: 'El ID del producto debe ser un CUID válido.' }),
+          productId: existingId('El ID del producto no es válido.'),
           quantity: z.number().int().positive({ message: 'La cantidad debe ser un entero positivo.' }),
           // Venta por peso: kilos pesados. Obligatorio si el producto es
           // soldByWeight (el servicio valida la combinación y calcula el total).
@@ -489,7 +495,7 @@ export const addOrderItemsSchema = z.object({
 // validates subtotal/discount/total with ±$0.01 tolerance for rounding.
 const createOrderWithItemsItemSchema = z
   .object({
-    productId: z.string().cuid({ message: 'El ID del producto debe ser un CUID válido.' }).optional().nullable(),
+    productId: existingId('El ID del producto no es válido.').optional().nullable(),
     name: z.string().min(1, { message: 'El nombre del ítem custom es requerido.' }).optional().nullable(),
     quantity: z.number().int().positive({ message: 'La cantidad debe ser un entero positivo.' }),
     unitPrice: z.number().nonnegative({ message: 'El precio unitario debe ser un número no negativo en pesos.' }).optional().nullable(),
@@ -806,7 +812,7 @@ const scannedProductSchema = z.object({
   barcode: z.string().min(1, { message: 'El código de barras es requerido.' }),
   format: z.string().default('UNKNOWN'),
   productName: z.string().optional().nullable(),
-  productId: z.string().cuid().optional().nullable(),
+  productId: existingId('El ID del producto no es válido.').optional().nullable(),
   hasInventory: z.boolean().default(false),
   quantity: z.number().int().positive().default(1),
 })

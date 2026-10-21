@@ -78,6 +78,13 @@ export interface CollectInput {
   reason: SerializedItemCollectionReason
 }
 
+export interface CollectFromSupervisorBulkInput {
+  actor: CustodyActor
+  serialNumbers: string[]
+  reason: SerializedItemCollectionReason
+  idempotencyRequestId?: string | null
+}
+
 export interface ReassignPromoterInput {
   actor: CustodyActor
   toPromoterStaffId: string
@@ -570,25 +577,74 @@ export class SimCustodyService {
       if (!item) throw new SimCustodyError('NOT_FOUND')
       if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
 
-      const newState = applyTransition(item.custodyState, 'COLLECT_FROM_SUPERVISOR')
-      const prevSupervisor = item.assignedSupervisorId
-      const updated = await this.updateWithVersion(tx, item, {
-        custodyState: newState,
-        assignedSupervisorId: null,
-        assignedSupervisorAt: null,
-      })
-      await this.writeEvent(tx, {
-        item: updated,
-        eventType: ACTION_TO_EVENT.COLLECT_FROM_SUPERVISOR,
-        fromState: item.custodyState,
-        toState: newState,
-        fromStaffId: prevSupervisor,
-        toStaffId: actor.staffId,
-        actorStaffId: actor.staffId,
-        reason,
-      })
-      return { custodyState: newState }
+      const updated = await this.collectItemFromSupervisor(tx, item, actor, reason)
+      return { custodyState: updated.custodyState }
     })
+  }
+
+  /**
+   * Admin bulk-collects SIMs from their Supervisors back to the admin warehouse
+   * (Asana 1219467533602693). Partial-success semantics, one short transaction
+   * per SIM — same contract as reassignSupervisor.
+   *
+   * Scope decision (Isaac, 16-oct-2026, "opción A"): ONLY SUPERVISOR_HELD SIMs
+   * move. A SIM a promoter carries is rejected with HAS_DOWNSTREAM_CUSTODY
+   * ("recolecta primero del Promotor") — it is physically in the street, and
+   * pulling it here would make it vanish from the promoter's TPV unnoticed.
+   *
+   * Per-SIM:
+   *   - NOT_FOUND / SIM_SOLD as in the single-SIM path
+   *   - Idempotent no-op if already ADMIN_HELD (status: ok, no write, no event),
+   *     so pasting the same list twice does not turn the second pass red
+   *   - PROMOTER_* → HAS_DOWNSTREAM_CUSTODY (via applyTransition)
+   *
+   * Authorization is gated at the route layer (`sim-custody:collect-from-supervisor`).
+   */
+  async collectFromSupervisorBulk(input: CollectFromSupervisorBulkInput): Promise<BulkResult> {
+    const { actor, serialNumbers, reason, idempotencyRequestId } = input
+    const results: BulkResultRow[] = []
+    for (const serialNumber of serialNumbers) {
+      results.push(
+        await this.processOneRow(serialNumber, async tx => {
+          const item = await this.findOrgItem(tx, actor.organizationId, serialNumber)
+          if (!item) throw new SimCustodyError('NOT_FOUND')
+          if (item.status === 'SOLD') throw new SimCustodyError('SIM_SOLD')
+          if (item.custodyState === 'ADMIN_HELD') return { event: ACTION_TO_EVENT.COLLECT_FROM_SUPERVISOR, item }
+
+          const updated = await this.collectItemFromSupervisor(tx, item, actor, reason, idempotencyRequestId)
+          return { event: ACTION_TO_EVENT.COLLECT_FROM_SUPERVISOR, item: updated }
+        }),
+      )
+    }
+    return buildSummary(results)
+  }
+
+  /** SUPERVISOR_HELD → ADMIN_HELD for an already-loaded item, plus its custody event. */
+  private async collectItemFromSupervisor(
+    tx: Prisma.TransactionClient,
+    item: SerializedItem,
+    actor: CustodyActor,
+    reason: SerializedItemCollectionReason,
+    idempotencyRequestId?: string | null,
+  ): Promise<SerializedItem> {
+    const newState = applyTransition(item.custodyState, 'COLLECT_FROM_SUPERVISOR')
+    const updated = await this.updateWithVersion(tx, item, {
+      custodyState: newState,
+      assignedSupervisorId: null,
+      assignedSupervisorAt: null,
+    })
+    await this.writeEvent(tx, {
+      item: updated,
+      eventType: ACTION_TO_EVENT.COLLECT_FROM_SUPERVISOR,
+      fromState: item.custodyState,
+      toState: newState,
+      fromStaffId: item.assignedSupervisorId,
+      toStaffId: actor.staffId,
+      actorStaffId: actor.staffId,
+      reason,
+      idempotencyRequestId,
+    })
+    return updated
   }
 
   /**
@@ -989,6 +1045,10 @@ export class SimCustodyService {
    * (100+ rows per request) was triggering Postgres `stack depth limit
    * exceeded` from accumulated prepared-statement plans.
    *
+   * The WHERE also pins `status` and `custodyState` to what the caller read: some writers change
+   * them WITHOUT bumping custodyVersion (markAsSold), and the version alone let a custody move
+   * overwrite a SIM sold in between (SOLD + ADMIN_HELD — Codex, 18-oct-2026).
+   *
    * Behavior: ALWAYS sets all 7 custody columns — caller passes null
    * explicitly when it wants to clear one. Drops dead-code COALESCE sentinel
    * paths. Also merges the post-update read by using `RETURNING *` via a
@@ -1031,6 +1091,8 @@ export class SimCustodyService {
              "custodyVersion"       = "custodyVersion" + 1
        WHERE "id" = ${item.id}
          AND "custodyVersion" = ${item.custodyVersion}
+         AND "status" = ${item.status}::"SerializedItemStatus"
+         AND "custodyState" = ${item.custodyState}::"SerializedItemCustodyState"
        RETURNING *
     `
     if (rows.length === 0) throw new SimCustodyError('VERSION_CONFLICT')
@@ -1073,6 +1135,8 @@ export class SimCustodyService {
     // venue to keep these events visible on a venue-scoped audit view.
     void logAction({
       staffId: e.actorStaffId ?? null,
+      // Without the org, a SIM with no store at all (venueId null) never shows in the org audit log.
+      organizationId: e.item.organizationId ?? null,
       venueId: e.item.sellingVenueId ?? e.item.registeredFromVenueId ?? e.item.venueId ?? null,
       action: `SIM_CUSTODY_${String(e.eventType)}`,
       entity: 'SerializedItem',

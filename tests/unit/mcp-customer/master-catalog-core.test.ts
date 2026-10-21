@@ -21,6 +21,8 @@ jest.mock('@/services/master-catalog/catalogOverride.service', () => ({
 
 import { authorizeCatalogRequest } from '@/services/master-catalog/catalogAuthorization.service'
 import { registerMasterCatalogTools } from '@/mcp/tools/masterCatalog'
+import { previewCatalogImport } from '@/services/master-catalog/catalogImport.service'
+import { CATALOG_IVA_HISTORIC_NOTE } from '@/services/master-catalog/catalogManagedMask.service'
 import { confirmCatalogOverrideRequest, previewCatalogOverrideRequest } from '@/services/master-catalog/catalogOverride.service'
 import { catalogPublicationService } from '@/services/master-catalog/catalogPublication.service'
 import { resolveCatalogVenueContext } from '@/services/master-catalog/masterCatalogRead.service'
@@ -285,5 +287,123 @@ describe('H1A exact MCP tool surface', () => {
       idempotencyKey: 'key-1',
       confirm: true,
     })
+  })
+})
+
+describe('D15 · el MCP del catálogo no administra el IVA (por el protocolo real)', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  async function conectar() {
+    const server = new McpServer({ name: 'catalog-iva-test', version: '1.0.0' })
+    const client = new Client({ name: 'catalog-iva-client-test', version: '1.0.0' })
+    const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair()
+    ;(authorizeCatalogRequest as jest.Mock).mockResolvedValue({
+      organizationId: 'org-pits',
+      actor: { type: 'HUMAN', staffId: 'staff-owner', impersonating: false },
+      orgRole: 'OWNER',
+    })
+    registerMasterCatalogTools(server, scope(['mcp:read', 'mcp:write']))
+    await Promise.all([server.connect(serverTransport), client.connect(clientTransport)])
+    return {
+      client,
+      cerrar: async () => {
+        await client.close()
+        await server.close()
+      },
+    }
+  }
+  const respuesta = (result: unknown) => JSON.parse((result as { content: Array<{ text: string }> }).content[0].text)
+  const RECHAZO = { ok: false, code: 'CATALOG_IVA_NOT_MANAGED', error: 'El IVA se configura en cada negocio' }
+
+  it.each(['taxRate', 'objetoImp'])(
+    'request_catalog_override con %s pasa el esquema, responde el motivo y no llama al servicio',
+    async field => {
+      const { client, cerrar } = await conectar()
+      try {
+        const result = await client.callTool({
+          name: 'request_catalog_override',
+          arguments: {
+            phase: 'PREVIEW',
+            venueId: 'venue-pits',
+            bindingId: 'binding-1',
+            idempotencyKey: `iva-${field}`,
+            requests: [{ field, reason: 'IVA local' }],
+          },
+        })
+        expect(result.isError).not.toBe(true)
+        expect(respuesta(result)).toEqual(RECHAZO)
+        expect(previewCatalogOverrideRequest).not.toHaveBeenCalled()
+      } finally {
+        await cerrar()
+      }
+    },
+  )
+
+  it.each(['taxRate', 'objetoImp'])(
+    'preview_catalog_publication con una decisión sobre %s responde el motivo y no llama al servicio',
+    async field => {
+      const { client, cerrar } = await conectar()
+      try {
+        const result = await client.callTool({
+          name: 'preview_catalog_publication',
+          arguments: {
+            operation: 'CATALOG_FIELDS_PUBLISH',
+            idempotencyKey: `iva-publicacion-${field}`,
+            targets: [
+              {
+                catalogItemId: 'item-1',
+                venueId: 'venue-pits',
+                productId: 'product-1',
+                decisions: [{ field, decision: 'PUBLISH_CORPORATE' }],
+              },
+            ],
+          },
+        })
+        expect(result.isError).not.toBe(true)
+        expect(respuesta(result)).toEqual(RECHAZO)
+        expect(catalogPublicationService.preview).not.toHaveBeenCalled()
+      } finally {
+        await cerrar()
+      }
+    },
+  )
+
+  it('preview_catalog_import agrega a la revisión la nota de que las columnas de IVA son históricas', async () => {
+    ;(previewCatalogImport as jest.Mock).mockResolvedValue({ importBatchId: 'import-1', canConfirm: true })
+    const { client, cerrar } = await conectar()
+    try {
+      const result = await client.callTool({
+        name: 'preview_catalog_import',
+        arguments: { fileBase64: Buffer.from('xlsx').toString('base64'), originalFilename: 'catalogo.xlsx' },
+      })
+      expect(respuesta(result)).toEqual({ importBatchId: 'import-1', canConfirm: true, ivaNote: CATALOG_IVA_HISTORIC_NOTE })
+    } finally {
+      await cerrar()
+    }
+  })
+
+  it('regresión: una decisión sin IVA sigue llegando al servicio', async () => {
+    ;(catalogPublicationService.preview as jest.Mock).mockResolvedValue({ publicationBatchId: 'publication-1' })
+    const { client, cerrar } = await conectar()
+    try {
+      await client.callTool({
+        name: 'preview_catalog_publication',
+        arguments: {
+          operation: 'CATALOG_FIELDS_PUBLISH',
+          idempotencyKey: 'sin-iva',
+          targets: [
+            {
+              catalogItemId: 'item-1',
+              venueId: 'venue-pits',
+              productId: 'product-1',
+              decisions: [{ field: 'name', decision: 'PUBLISH_CORPORATE' }],
+            },
+          ],
+        },
+      })
+      expect(catalogPublicationService.preview).toHaveBeenCalledTimes(1)
+    } finally {
+      await cerrar()
+    }
   })
 })

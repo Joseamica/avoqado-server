@@ -1,7 +1,7 @@
 import { CronJob } from 'cron'
 import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
-import { markNoShow } from '../services/dashboard/reservation.dashboard.service'
+import { markNoShow, PASS_ARRIVAL_PENDING } from '../services/dashboard/reservation.dashboard.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 
@@ -62,6 +62,9 @@ export class ReservationAutoNoShowJob {
               status: { in: ['PENDING', 'CONFIRMED'] },
               checkedInAt: null,
               startsAt: { lt: now },
+              // Conector de pases: el socio ya marcó su llegada en el agregador y el estudio todavía puede confirmarla
+              // (o vence sola). La transición lo vuelve a comprobar bajo candado (carrera con la ingesta).
+              aggregatorVisits: { none: { status: 'PENDING', deadlineAt: { gt: now } } },
               venue: {
                 reservationSettings: {
                   noShowGraceMin: { gt: 0 },
@@ -124,6 +127,10 @@ export class ReservationAutoNoShowJob {
 
           marked += 1
         } catch (err) {
+          if ((err as { code?: string })?.code === PASS_ARRIVAL_PENDING) {
+            logger.info(`🚫 [AUTO NO-SHOW] ${reservation.confirmationCode}: llegada de pase por confirmar, se revisa en el siguiente tick`)
+            continue
+          }
           // One bad reservation must not kill the tick.
           logger.error(`❌ [AUTO NO-SHOW] Failed to mark reservation=${reservation.id} (${reservation.confirmationCode})`, err)
         }

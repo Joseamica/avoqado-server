@@ -45,11 +45,25 @@ function normalizeBodyHash(body: unknown): string {
     .digest('hex')
 }
 
+export interface IdempotencyOptions {
+  required?: boolean
+  /**
+   * La clave vale para la ruta CONCRETA (con sus ids: sede, esquema…), no para la plantilla. Sin esto, la misma clave en otra
+   * sede u otro esquema devolvía la respuesta del primero (Comisiones, FT-GRAVES D1).
+   */
+  porRutaConcreta?: boolean
+  /**
+   * Responde hasta que la foto (o el borrado de la fila en curso, si falló) quedó guardada: el reintento que llega justo
+   * después encuentra la respuesta, nunca un «en curso». Es lo que este archivo ya prometía abajo y no hacía.
+   */
+  responderTrasGuardar?: boolean
+}
+
 /**
  * Factory: `simCustodyIdempotency({ required: true })` for bulk endpoints.
  * Pass `required: false` to make the header optional (e.g. single-item GETs).
  */
-export function simCustodyIdempotency(opts: { required?: boolean } = { required: true }) {
+export function simCustodyIdempotency(opts: IdempotencyOptions = { required: true }) {
   return async function simCustodyIdempotencyMiddleware(req: Request, res: Response, next: NextFunction): Promise<void> {
     const key = (req.headers[IDEMPOTENCY_KEY_HEADER] as string | undefined)?.trim()
     if (!key) {
@@ -71,7 +85,7 @@ export function simCustodyIdempotency(opts: { required?: boolean } = { required:
       return
     }
 
-    const endpoint = `${req.method} ${req.baseUrl}${req.route?.path ?? req.path}`
+    const endpoint = `${req.method} ${req.baseUrl}${opts.porRutaConcreta ? req.path : (req.route?.path ?? req.path)}`
     const requestHash = normalizeBodyHash(req.body)
 
     // Replay lookup
@@ -173,10 +187,11 @@ export function simCustodyIdempotency(opts: { required?: boolean } = { required:
       if (captured) return originalJson(body)
       captured = true
       const status = res.statusCode
+      let guardado: Promise<unknown>
       if (status >= 200 && status < 300) {
         // Fire-and-forget is fine: the in-flight sentinel above covers the
         // window; logger.error reports rare persistence failures.
-        prisma.idempotencyRequest
+        guardado = prisma.idempotencyRequest
           .update({
             where: { id: created.id },
             data: { responseStatus: status, responseBody: body as any },
@@ -184,13 +199,23 @@ export function simCustodyIdempotency(opts: { required?: boolean } = { required:
           .catch(err => logger.error('sim-custody idempotency snapshot save failed', { err, endpoint, key }))
       } else {
         // Non-2xx: drop the skeleton so the next retry can proceed cleanly.
-        prisma.idempotencyRequest
+        guardado = prisma.idempotencyRequest
           .delete({ where: { id: created.id } })
           .catch(err => logger.warn('sim-custody idempotency rollback cleanup failed', { err, endpoint, key }))
       }
-      return originalJson(body)
+      if (!opts.responderTrasGuardar) return originalJson(body)
+      void guardado
+        .then(() => originalJson(body))
+        .catch(err => logger.error('idempotency deferred response failed', { err, endpoint, key }))
+      return res
     }
 
     next()
   }
 }
+
+/**
+ * `Idempotency-Key` OPCIONAL, por ruta concreta y respondiendo tras guardar: el de los POST que crean algo en Comisiones
+ * (FT-GRAVES D1: el doble clic y el reintento de axios creaban dos esquemas que pagaban doble). Sin la clave, como siempre.
+ */
+export const conClave = simCustodyIdempotency({ required: false, porRutaConcreta: true, responderTrasGuardar: true })

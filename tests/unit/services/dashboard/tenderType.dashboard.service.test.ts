@@ -413,3 +413,84 @@ describe('tenderType.dashboard.service', () => {
     })
   })
 })
+
+/**
+ * Tarjetas de regalo (R4): el tender de sistema «Tarjeta de regalo» no es una semilla de las cuatro de siempre, nadie lo
+ * edita ni lo apaga, y ningún cobro manual lo puede usar (sólo «Pagar con saldo», que lo pasa ya resuelto).
+ */
+describe('tenderType.dashboard.service — tender de sistema «Tarjeta de regalo»', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    prismaMock.venueTenderType.create.mockImplementation(async (args: any) => ({ id: 'tt-1', revision: 1, ...args.data }))
+    prismaMock.venueTenderTypeRevision.create.mockResolvedValue({ id: 'rev-1' })
+    prismaMock.venueTenderType.findFirst.mockReset()
+    prismaMock.venueTenderTypeRevision.findFirst.mockReset()
+    prismaMock.venueTenderType.updateMany.mockResolvedValue({ count: 1 })
+  })
+
+  it('la siembra cuenta SÓLO los de sistema con systemKind nulo: el de regalo no tapa una semilla faltante', async () => {
+    prismaMock.venueTenderType.count.mockResolvedValue(3)
+    prismaMock.venueTenderType.findFirst.mockResolvedValue(null)
+
+    await ensureSystemTenderTypes(VENUE)
+
+    expect(prismaMock.venueTenderType.count).toHaveBeenCalledWith({ where: { venueId: VENUE, isSystem: true, systemKind: null } })
+    expect(prismaMock.venueTenderType.create).toHaveBeenCalledTimes(SYSTEM_TENDER_SEEDS.length)
+  })
+
+  it.each([{ showOnPos: true }, { active: false }, { name: 'Otro nombre' }, { displayOrder: 3 }, { linkedOrderSource: null }])(
+    'updateTenderType rechaza %o sobre el tender de regalo y no escribe nada',
+    async cambio => {
+      prismaMock.venueTenderType.findFirst.mockResolvedValue({
+        id: 'tt-gift',
+        venueId: VENUE,
+        isSystem: true,
+        systemKind: 'GIFT_CARD',
+        revision: 1,
+        name: 'Tarjeta de regalo',
+      })
+
+      await expect(updateTenderType(VENUE, 'tt-gift', 1, cambio as any, STAFF)).rejects.toMatchObject({
+        code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+        statusCode: 400,
+      })
+      expect(prismaMock.venueTenderType.updateMany).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each(['online', 'replay'] as const)('resolveTenderForCharge rechaza el tender de regalo en modo %s', async mode => {
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({
+      id: 'tt-gift',
+      baseMethod: 'OTHER',
+      active: true,
+      revision: 1,
+      name: 'Tarjeta de regalo',
+      systemKind: 'GIFT_CARD',
+    })
+
+    await expect(resolveTenderForCharge(VENUE, 'tt-gift', 1, prismaMock, mode)).rejects.toMatchObject({
+      code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+      statusCode: 400,
+    })
+    expect(prismaMock.venueTenderTypeRevision.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('resolveTenderForCharge pide systemKind al leer el tender (regresión: un tender normal sigue resolviendo)', async () => {
+    prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-1', baseMethod: 'OTHER', active: true, revision: 2, name: 'Uber Eats', systemKind: null })
+    prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue({
+      revision: 2,
+      name: 'Uber Eats',
+      countsAsPhysicalCash: false,
+      captureTip: false,
+      commissionPercent: null,
+      satFormaPago: null,
+    })
+
+    await expect(resolveTenderForCharge(VENUE, 'tt-1', 2)).resolves.toMatchObject({ tenderTypeId: 'tt-1', method: 'OTHER' })
+    expect(prismaMock.venueTenderType.findFirst).toHaveBeenCalledWith({
+      where: { id: 'tt-1', venueId: VENUE },
+      select: { id: true, baseMethod: true, active: true, revision: true, name: true, systemKind: true },
+    })
+  })
+})

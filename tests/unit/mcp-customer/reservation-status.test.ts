@@ -80,9 +80,10 @@ describe('set_reservation_status dispatch', () => {
     await call('completed')
     expect(mockComplete).toHaveBeenCalledWith('v1', 'r1')
   })
-  it("'no_show' → markNoShow", async () => {
+  it("'no_show' → markNoShow con el staff de la conexión (manual), no 'SYSTEM'", async () => {
     await call('no_show')
-    expect(mockNoShow).toHaveBeenCalledWith('v1', 'r1', 'SYSTEM')
+    expect(mockNoShow).toHaveBeenCalledWith('v1', 'r1', 's1')
+    expect(mockNoShow).not.toHaveBeenCalledWith('v1', 'r1', 'SYSTEM')
   })
   it('audits RESERVATION_<STATUS> with from/to + source=customer-mcp, attributed to the staff', async () => {
     await call('no_show')

@@ -38,7 +38,7 @@ async function main() {
     console.log(`\nAuto-selected OWNER: staff=${staffId}  org="${owner.organization?.name}" (${orgId})`)
   }
 
-  const token = issueMcpToken(staffId, orgId, 24 * 3600) // 24h dev token
+  const token = issueMcpToken(staffId, orgId, 24 * 3600, undefined, ['mcp:read', 'mcp:write']) // 24h dev token
 
   const app = express()
   app.post('/mcp', express.json(), handleMcpRequest)

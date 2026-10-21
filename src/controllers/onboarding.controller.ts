@@ -20,10 +20,17 @@ import {
   createPlanSubscription,
   entregarSuscripcionDePlan,
   getOrCreateStripeCustomer,
+  retrievePlanSubscription,
 } from '../services/stripe.service'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
-import { LEGACY_INTRO_OFFER, STANDARD_PLAN_GROSS_CENTS, TRIAL_DAYS, isLegacyIntroEligible } from '../services/access/planPricing.constants'
+import {
+  LEGACY_INTRO_OFFER,
+  STANDARD_PLAN_GROSS_CENTS,
+  STANDARD_PLAN_NET_CENTS,
+  TRIAL_DAYS,
+  isLegacyIntroEligible,
+} from '../services/access/planPricing.constants'
 import emailService from '../services/email.service'
 import { generateMenuCSVTemplate, parseMenuCSV } from '../utils/menuCsvParser'
 import { validateCLABE } from '../utils/clabeValidator'
@@ -40,6 +47,12 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
+import * as authService from '../services/dashboard/auth.service'
+import { ponerCookiesDeSesion } from '../utils/cookiesDeSesion'
+import { esSucursalReal } from '../utils/sucursalDelToken'
+import { motivoDeConcesionInvalidada } from '../utils/passwordChangeGuard'
+import { revokeSession } from '../services/auth/session.service'
+import { invalidateSession } from '../services/auth/sessionCache'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 /**
@@ -280,6 +293,8 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
             PRO: {
               monthlyCents: quote.grossCents.PRO.monthly,
               annualCents: quote.grossCents.PRO.annual,
+              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PRO.monthly,
+              annualNetCents: STANDARD_PLAN_NET_CENTS.PRO.annual,
               intro: {
                 monthlyCents: LEGACY_INTRO_OFFER.introMonthlyCents,
                 months: LEGACY_INTRO_OFFER.months,
@@ -287,7 +302,13 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
                 requiresPayNow: true as const,
               },
             },
-            PREMIUM: { monthlyCents: quote.grossCents.PREMIUM.monthly, annualCents: quote.grossCents.PREMIUM.annual, intro: null },
+            PREMIUM: {
+              monthlyCents: quote.grossCents.PREMIUM.monthly,
+              annualCents: quote.grossCents.PREMIUM.annual,
+              monthlyNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.monthly,
+              annualNetCents: STANDARD_PLAN_NET_CENTS.PREMIUM.annual,
+              intro: null,
+            },
           },
         },
         completedSteps: progress.completedSteps,
@@ -710,6 +731,41 @@ async function exigirAltaTerminada(organizationId: string): Promise<void> {
 }
 
 /**
+ * Terminar el alta reemite la sesión con la sucursal REAL (monitor de producción, 19-oct).
+ *
+ * El alta emite el token del panel con `venueId = 'pending'` (signup.service.ts) y la cookie dura 24 h: sin esto,
+ * todo lo que toma la sucursal sólo del token (`/dashboard/tokens/*`, `/google-calendar/oauth/init`) fallaba un día
+ * entero. Se hace EXACTAMENTE como el cambio de sucursal: `switchVenueForStaff` (misma verificación de acceso, misma
+ * Session y mismo grant de refresco) y las mismas cookies.
+ *
+ * Nunca bloquea el alta: la sucursal ya existe, y sin tokens nuevos la persona puede cambiar de sucursal o volver a
+ * entrar. No se reemite:
+ * - suplantando: sería darle al superadmin una sesión normal a nombre de la persona suplantada;
+ * - si la sesión YA tenía una sucursal real: un reintento desde otra pestaña no le cambia la sucursal en silencio;
+ * - si hubo un corte de sesiones («cerrar todas», cambio de contraseña, cuenta desactivada) después de emitirse el
+ *   token del alta (Codex r1/r2). Se revisa DESPUÉS de crear la sesión nueva, nunca antes: el corte escribe su fecha y
+ *   luego cierra las Session vivas (`cerrarSesionesDeStaff`), así que la nueva o ya existía y el corte la cierra, o el
+ *   corte ya se ve aquí y la cerramos nosotros. Revisar antes dejaba la ventana entre la revisión y `createSession`.
+ */
+async function renovarSesionConLaSucursal(req: Request, res: Response, venueId: string): Promise<void> {
+  const authContext = (req as any).authContext
+  if (!authContext?.userId || authContext.isImpersonating || esSucursalReal(authContext.venueId)) return
+  try {
+    const { accessToken, refreshToken, sessionId } = await authService.switchVenueForStaff(authContext.userId, authContext.orgId, venueId)
+    const emitido = typeof authContext.emitidoMs === 'number' ? new Date(authContext.emitidoMs) : undefined
+    if (await motivoDeConcesionInvalidada(authContext.userId, emitido)) {
+      await revokeSession(sessionId, 'sessions_revoked_during_onboarding')
+      await invalidateSession(sessionId)
+      return
+    }
+    ponerCookiesDeSesion(res, accessToken, refreshToken)
+  } catch (error) {
+    // error, no warn: sin esto la persona se queda 24 h en «sucursal pendiente» y el monitor debe verlo.
+    logger.error('No se pudo renovar la sesión con la sucursal al terminar el alta', { userId: authContext.userId, venueId, error })
+  }
+}
+
+/**
  * POST /api/v1/onboarding/organizations/:organizationId/complete
  *
  * Completes onboarding and creates the venue
@@ -788,6 +844,7 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
         logger.info(
           `⚠️ Onboarding already completed (race condition prevented) for organization ${organizationId}, returning existing venue ${existingVenue.id}`,
         )
+        await renovarSesionConLaSucursal(req, res, existingVenue.id)
         res.status(200).json({
           message: 'Onboarding already completed',
           venue: existingVenue,
@@ -848,6 +905,8 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
     })
 
     logger.info(`✅ Onboarding completed for organization: ${organizationId}, venue: ${result.venue.id}, user: ${authContext.userId}`)
+
+    await renovarSesionConLaSucursal(req, res, result.venue.id)
 
     res.status(201).json({
       message: 'Onboarding completed successfully',
@@ -1254,6 +1313,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         logger.info(
           `⚠️ V2 Onboarding already completed (race condition prevented) for organization ${organizationId}, returning existing venue ${existingVenue.id}`,
         )
+        await renovarSesionConLaSucursal(req, res, existingVenue.id)
         res.status(200).json({
           success: true,
           message: 'Setup already completed',
@@ -1377,7 +1437,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
       try {
         const venueRecord = await prisma.venue.findUnique({
           where: { id: result.venue.id },
-          select: { id: true, name: true, slug: true, email: true },
+          select: { id: true, name: true, slug: true, email: true, timezone: true },
         })
         const customerId = await getOrCreateStripeCustomer(
           result.venue.id,
@@ -1445,40 +1505,49 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // Send the plan confirmation email (non-blocking). The venue's `language`
         // was persisted above, so the resolver returns the right locale. A null
         // recipient or any email/Stripe hiccup must never break onboarding.
-        try {
-          const target = await resolvePlanNotificationTarget(result.venue.id)
-          if (target.email) {
-            // IVA-inclusive gross amounts: PRO $999/mo · $9,990/yr — PREMIUM $1,699/mo · $16,990/yr.
-            // Single source: planPricing.constants.ts (mirrors the seeded Stripe prices).
-            const grossCents = STANDARD_PLAN_GROSS_CENTS[paidTier][planData.interval]
-            const now = new Date()
-            // NOTE the two 30s below are NOT the same quantity and must not be merged: the first
-            // is the length of one MONTHLY billing period, the second is the free-trial length
-            // (TRIAL_DAYS). They happen to be equal today.
-            const firstChargeDate = planData.payNow
-              ? new Date(now.getTime() + (planData.interval === 'annual' ? 365 : 30) * 86400000)
-              : new Date(now.getTime() + TRIAL_DAYS * 86400000) // trial end
-            await emailService.sendPlanConfirmationEmail(target.email, {
-              locale: target.locale,
-              venueName: target.venueName,
-              planName: paidTier === 'PREMIUM' ? 'Premium' : 'Pro',
-              payNow: planData.payNow,
-              interval: planData.interval,
-              firstChargeDate,
-              firstChargeAmountCents: grossCents,
-              introAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : undefined,
-              // 🔴 El siguiente cobro de un `INTRO_PRO_3M` son $694.84, no $1,158.84. Sin esta
-              // línea el correo del camino viejo seguiría prometiendo el precio de lista en la
-              // renovación, aunque §3.8 arregle el campo en la plantilla.
-              nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
-              billingPortalUrl: billingPageUrl(result.venue.slug),
-            })
-          } else {
-            logger.warn(`No notification recipient for venue ${result.venue.id}; skipping plan confirmation email`)
+        // 🔴 Sin `await`, como el correo de `activatePlan`: leer la fecha de Stripe (con sus reintentos) o mandar el correo
+        // detenía la respuesta, la marca final y la sesión de un alta YA cobrada (Codex r3, 20-oct).
+        void (async () => {
+          try {
+            const target = await resolvePlanNotificationTarget(result.venue.id)
+            if (target.email) {
+              // IVA-inclusive gross amounts: PRO $999/mo · $9,990/yr — PREMIUM $1,699/mo · $16,990/yr.
+              // Single source: planPricing.constants.ts (mirrors the seeded Stripe prices).
+              const grossCents = STANDARD_PLAN_GROSS_CENTS[paidTier][planData.interval]
+              // 🔴 La fecha la da Stripe (`current_period_end`: fin de la prueba, o la siguiente renovación), no «hoy + 30
+              // días» ni «+ 365»: un mensual pagado el 20-oct renueva el 20-nov y el correo decía 19-nov (20-oct-2026).
+              // Sin la fecha de Stripe no se inventa una: el correo no sale (el alta ya terminó y el plan está cobrado).
+              const { currentPeriodEnd: firstChargeDate } = await retrievePlanSubscription(cobro.subscriptionId)
+              if (!firstChargeDate) {
+                logger.warn('[ONBOARDING] V2 complete: plan confirmation email skipped (Stripe did not return current_period_end)', {
+                  organizationId,
+                  subscriptionId: cobro.subscriptionId,
+                })
+              }
+              if (firstChargeDate)
+                await emailService.sendPlanConfirmationEmail(target.email, {
+                  locale: target.locale,
+                  venueName: target.venueName,
+                  planName: paidTier === 'PREMIUM' ? 'Premium' : 'Pro',
+                  payNow: planData.payNow,
+                  interval: planData.interval,
+                  firstChargeDate,
+                  timeZone: venueRecord?.timezone,
+                  firstChargeAmountCents: grossCents,
+                  introAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : undefined,
+                  // 🔴 El siguiente cobro de un `INTRO_PRO_3M` son $694.84, no $1,158.84. Sin esta
+                  // línea el correo del camino viejo seguiría prometiendo el precio de lista en la
+                  // renovación, aunque §3.8 arregle el campo en la plantilla.
+                  nextChargeAmountCents: introPromo ? LEGACY_INTRO_OFFER.introMonthlyCents : grossCents,
+                  billingPortalUrl: billingPageUrl(result.venue.slug),
+                })
+            } else {
+              logger.warn(`No notification recipient for venue ${result.venue.id}; skipping plan confirmation email`)
+            }
+          } catch (mailErr) {
+            logger.error(`⚠️ Plan confirmation email failed for venue ${result.venue.id}`, mailErr)
           }
-        } catch (mailErr) {
-          logger.error(`⚠️ Plan confirmation email failed for venue ${result.venue.id}`, mailErr)
-        }
+        })()
       } catch (planErr) {
         // R0 ronda 5 (Codex): el negocio se borró mientras se creaba su cliente de Stripe. Eso NO es un
         // tropiezo de Stripe: no hay negocio que dar por terminado. Se suelta la marca y se propaga.
@@ -1530,6 +1599,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     })
 
     logger.info(`✅ V2 Onboarding completed for organization ${organizationId}, venue: ${result.venue.id} (${result.venue.slug})`)
+
+    await renovarSesionConLaSucursal(req, res, result.venue.id)
 
     res.status(201).json({
       success: true,

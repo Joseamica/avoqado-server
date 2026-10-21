@@ -180,6 +180,8 @@ export async function updateVenueSettings(
     // rama: sin esta línea el switch se vería encendido en el dashboard y la
     // fila nacería en false — el POS nunca ofrecería el PIN.
     ...(typeof updates.managerPinOverrideEnabled === 'boolean' && { managerPinOverrideEnabled: updates.managerPinOverrideEnabled }),
+    // «Sólo el dueño de la mesa»: mismo caso. Sin esta línea el primer «prender» nacía en false y el POS no lo aplicaba.
+    ...(typeof updates.enforceTableOwnership === 'boolean' && { enforceTableOwnership: updates.enforceTableOwnership }),
     // Interruptor de asistencia. 53 de 68 venues locales NO tienen fila: sin estas dos
     // líneas el primer "apagar" de un negocio caía en esta rama, Postgres ponía true/10 y
     // el dashboard enseñaba el valor pedido, no el guardado (auditoría Codex fase 2, P2-1).

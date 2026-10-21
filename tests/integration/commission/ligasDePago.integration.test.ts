@@ -1,0 +1,217 @@
+// tests/integration/commission/ligasDePago.integration.test.ts
+/**
+ * Fase 3 de pago por servicio (A5; spec §9-7, Codex r3-12; caso 23 del §13): la comisión de una liga de pago nace como
+ * efecto durable EN la transacción del cobro. Si el proceso muere después del commit, el worker la crea; si la venta se
+ * devuelve antes de que aparezca, el reverso la encuentra y el neto queda en $0.
+ *
+ * Correr: TZ=UTC TEST_DATABASE_URL="$PAGO_F3_DB" npx jest --selectProjects integration \
+ *   --runTestsByPath tests/integration/commission/ligasDePago.integration.test.ts --ci
+ */
+import { Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
+import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
+import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
+import { enqueuePaymentCommissionInTx, enqueueRefundPaymentEffectsInTx } from '@/services/tpv/paymentEffects.service'
+import {
+  asegurarBaseDePrueba,
+  barreraDeFila,
+  borrarMundoComisiones,
+  cobro,
+  crearMundoComisiones,
+  MundoComisiones,
+  netoVivo,
+  orden,
+  planear,
+  procesarEfectos,
+} from './_mundoComisiones'
+
+jest.mock('@/services/shared/cashDrawerPosting', () => ({ postCashRefundToDrawer: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({ generateAndStoreReceipt: jest.fn().mockResolvedValue(undefined) }))
+
+const PROVEEDOR = 'PAGO_F3_PRUEBA'
+let m: MundoComisiones
+beforeAll(asegurarBaseDePrueba)
+beforeEach(async () => {
+  m = await crearMundoComisiones('liga')
+})
+afterEach(() => borrarMundoComisiones(m))
+afterAll(() => prisma.paymentProvider.deleteMany({ where: { code: PROVEEDOR } }))
+
+/** Una liga atribuida a estas personas, pagada por Stripe (webhook). Devuelve el cobro que creó. */
+async function ligaPagada(staffIds: string[], monto = 200) {
+  const proveedor = await prisma.paymentProvider.upsert({
+    where: { code: PROVEEDOR },
+    create: { code: PROVEEDOR, name: 'Pago F3 (prueba)', type: 'PAYMENT_PROCESSOR' },
+    update: {},
+  })
+  const canal = await prisma.ecommerceMerchant.create({
+    data: {
+      venueId: m.venueId,
+      businessName: 'Liga F3',
+      contactEmail: `${m.key}-canal@example.test`,
+      publicKey: `pk_test_${m.key}`,
+      secretKeyHash: `hash-${m.key}`,
+      providerId: proveedor.id,
+      providerCredentials: {},
+    },
+  })
+  const liga = await prisma.paymentLink.create({
+    data: {
+      shortCode: Math.random().toString(36).slice(2, 10),
+      venueId: m.venueId,
+      ecommerceMerchantId: canal.id,
+      createdById: m.owner,
+      title: 'Clase muestra',
+      amountType: 'FIXED',
+      purpose: 'PAYMENT',
+      attributions: { create: staffIds.map(staffId => ({ staffId })) },
+    },
+  })
+  const sessionId = `cs_test_${m.key}`
+  await prisma.checkoutSession.create({
+    data: {
+      sessionId,
+      ecommerceMerchantId: canal.id,
+      amount: new Prisma.Decimal(monto),
+      expiresAt: new Date(Date.now() + 86_400_000),
+      paymentLinkId: liga.id,
+      metadata: { tipAmount: 0 },
+    },
+  })
+  await finalizePaymentLinkCheckout({ stripeSessionId: sessionId, paymentIntentId: `pi_${m.key}` })
+  return prisma.payment.findFirstOrThrow({ where: { venueId: m.venueId, processor: 'stripe' } })
+}
+
+describe('A5 · la comisión de una liga de pago se congela con el cobro (spec §9-7)', () => {
+  it('🔴 dividida entre dos: al volver del cobro ya está en cola para las dos personas, y el worker la crea', async () => {
+    const pago = await ligaPagada([m.ana, m.bea])
+    const planes = await prisma.paymentEffect.findMany({ where: { venueId: m.venueId, paymentId: pago.id, kind: 'COMMISSION' }, take: 10 })
+    expect(planes.map(p => (p.payload as { staffId: string }).staffId).sort()).toEqual([m.ana, m.bea].sort())
+    await procesarEfectos(m)
+    const filas = await prisma.commissionCalculation.findMany({ where: { venueId: m.venueId, paymentId: pago.id }, take: 10 })
+    expect(filas.map(f => f.netCommission.toFixed(2))).toEqual(['10.00', '10.00'])
+    // A5 r1: congelada, cada fila lleva la fecha del COBRO (como la terminal), no la de cuando el worker la materializó.
+    expect(filas.map(f => f.calculatedAt.getTime())).toEqual([pago.createdAt.getTime(), pago.createdAt.getTime()])
+  })
+
+  it('🔴 dividida entre TRES: las filas suman exacto lo cobrado, con el centavo de más en orden estable (plan r1-4)', async () => {
+    const pago = await ligaPagada([m.owner, m.bea, m.ana], 100)
+    await procesarEfectos(m)
+    const filas = await prisma.commissionCalculation.findMany({
+      where: { venueId: m.venueId, paymentId: pago.id },
+      orderBy: { staffId: 'asc' },
+      take: 10,
+    })
+    expect(filas.map(f => [f.baseAmount.toFixed(2), f.netCommission.toFixed(2)])).toEqual([
+      ['33.34', '3.34'],
+      ['33.33', '3.33'],
+      ['33.33', '3.33'],
+    ])
+    const suma = (k: 'baseAmount' | 'netCommission') => filas.reduce((t, f) => t.add(f[k]), new Prisma.Decimal(0)).toFixed(2)
+    expect([suma('baseAmount'), suma('netCommission')]).toEqual(['100.00', '10.00'])
+  })
+
+  it('una sola persona: el esquema decide a quién (como la terminal) y se lleva la comisión completa', async () => {
+    const pago = await ligaPagada([m.bea])
+    await procesarEfectos(m)
+    const fila = await prisma.commissionCalculation.findFirstOrThrow({ where: { venueId: m.venueId, paymentId: pago.id } })
+    expect([fila.staffId, fila.netCommission.toFixed(2)]).toEqual([m.bea, '20.00'])
+    expect(fila.calculatedAt.getTime()).toBe(pago.createdAt.getTime())
+  })
+
+  it('🔴 F1: con la fila de la persona bloqueada, el cobro se registra y su comisión queda para revisión sin esperar el candado', async () => {
+    // Codex bloque A r1 [P1]: congelar la comisión esperaba el `FOR UPDATE` de StaffVenue SIN tope; pasados los 10 s de la
+    // transacción se perdían el cobro y la orden con la tarjeta ya cobrada. Aquí el candado se suelta solo a los 4 s: sin el
+    // tope, la congelación lo espera, termina después y no deja efecto de revisión.
+    const fila = await prisma.staffVenue.findFirstOrThrow({ where: { venueId: m.venueId, staffId: m.bea }, select: { id: true } })
+    const barrera = await barreraDeFila('StaffVenue', fila.id)
+    const soltarSola = setTimeout(() => void barrera.soltar(), 4_000)
+    try {
+      const inicio = Date.now()
+      const pago = await ligaPagada([m.bea])
+      expect(Date.now() - inicio).toBeLessThan(4_000)
+      const efectos = await prisma.paymentEffect.findMany({
+        where: { venueId: m.venueId, paymentId: pago.id, kind: 'COMMISSION' },
+        take: 10,
+      })
+      expect(efectos.map(e => [e.dedupeKey, e.lastError])).toEqual([
+        [`commission:${pago.id}:policy-error:v1`, 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'],
+      ])
+    } finally {
+      clearTimeout(soltarSola)
+      await barrera.soltar()
+    }
+  })
+
+  it('🔴 venta devuelta ANTES de que se materialice su comisión: el neto queda en $0', async () => {
+    const pago = await ligaPagada([m.ana, m.bea])
+    await issueRefund({ venueId: m.venueId, paymentId: pago.id, amount: 20_000, reason: 'RETURNED_GOODS', staffId: m.owner })
+    await procesarEfectos(m)
+    expect(await netoVivo({ venueId: m.venueId, orderId: pago.orderId! })).toBe('0.00')
+  })
+})
+
+describe('F1 · la espera acotada de la congelación no se queda en la transacción del cobro', () => {
+  /** El commit de la terminal con su propia espera de candados (la de `candadoDeIntento`); devuelve la que quedó al final. */
+  async function congelarConEspera(pagoId: string): Promise<string> {
+    return prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '7s'`)
+      await enqueuePaymentCommissionInTx(tx, pagoId)
+      const [{ espera }] = await tx.$queryRaw<Array<{ espera: string }>>`SELECT current_setting('lock_timeout') AS espera`
+      return espera
+    })
+  }
+
+  it('congelada bien: la transacción recupera su espera de candados', async () => {
+    const pago = await cobro(m, await orden(m, { subtotal: 100 }), 100)
+    expect(await congelarConEspera(pago)).toBe('7s')
+    const efectos = await prisma.paymentEffect.findMany({ where: { venueId: m.venueId, paymentId: pago, kind: 'COMMISSION' }, take: 10 })
+    expect(efectos.map(e => e.lastError)).toEqual([null])
+  })
+
+  it('🔴 candado vencido (camino de la terminal): efecto de revisión y la transacción recupera su espera', async () => {
+    const pago = await cobro(m, await orden(m, { subtotal: 100 }), 100)
+    const fila = await prisma.staffVenue.findFirstOrThrow({ where: { venueId: m.venueId, staffId: m.ana }, select: { id: true } })
+    const barrera = await barreraDeFila('StaffVenue', fila.id)
+    try {
+      expect(await congelarConEspera(pago)).toBe('7s')
+    } finally {
+      await barrera.soltar()
+    }
+    const efectos = await prisma.paymentEffect.findMany({ where: { venueId: m.venueId, paymentId: pago, kind: 'COMMISSION' }, take: 10 })
+    expect(efectos.map(e => [e.dedupeKey, e.lastError])).toEqual([
+      [`commission:${pago}:policy-error:v1`, 'COMMISSION_SNAPSHOT_REQUIRES_REVIEW'],
+    ])
+  })
+
+  it('el reverso de una devolución también restaura la espera de la transacción', async () => {
+    const orderId = await orden(m, { subtotal: 100 })
+    const pago = await cobro(m, orderId, 100)
+    await planear(pago)
+    const espera = await prisma.$transaction(async tx => {
+      await tx.$executeRawUnsafe(`SET LOCAL lock_timeout = '7s'`)
+      const refund = await tx.payment.create({
+        data: {
+          venueId: m.venueId,
+          orderId,
+          amount: new Prisma.Decimal(-100),
+          tipAmount: new Prisma.Decimal(0),
+          method: 'CASH',
+          status: 'COMPLETED',
+          type: 'REFUND',
+          processedById: m.owner,
+          feePercentage: 0,
+          feeAmount: new Prisma.Decimal(0),
+          netAmount: new Prisma.Decimal(-100),
+          processorData: { originalPaymentId: pago },
+        },
+      })
+      await enqueueRefundPaymentEffectsInTx(tx, refund.id, pago)
+      const [{ espera }] = await tx.$queryRaw<Array<{ espera: string }>>`SELECT current_setting('lock_timeout') AS espera`
+      return espera
+    })
+    expect(espera).toBe('7s')
+    await procesarEfectos(m)
+    expect(await netoVivo({ venueId: m.venueId, orderId })).toBe('0.00')
+  })
+})

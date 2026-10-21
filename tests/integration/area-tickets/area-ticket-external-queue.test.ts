@@ -18,6 +18,7 @@ import {
 } from '@/services/mobile/areaTicketExternal.mobile.service'
 import { encodePendingCursor, issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
  * Task 9 — la cola que el operador del área mira para saber qué le falta
@@ -71,6 +72,8 @@ describe('listPendingExternalConfirmation — cola de cobros por confirmar', () 
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {

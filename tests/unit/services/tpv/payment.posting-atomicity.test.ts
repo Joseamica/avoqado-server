@@ -1,12 +1,15 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 /**
  * Tests: en el camino TPV, el posting durable debe nacer en la MISMA transacción
@@ -306,7 +309,7 @@ beforeEach(() => {
         // también capturaba la consulta de `closeRowFromPaymentTx` (`terminal-payment.service.ts:967`),
         // que pide importes, `source` y la terminal, y le devolvía sólo `{orderId}`. Un mock que
         // intercepta una consulta legítima le cambia el comportamiento al servicio: peor que el
-        // fallo que evita. `esConsultaDelOutbox` exige un `select` de ÚNICAMENTE `orderId`.
+        // fallo que evita. `esConsultaDelOutbox` exige un `select` de ÚNICAMENTE `orderId` (más la marca de tarjetas de B6).
         findFirst: jest
           .fn()
           .mockImplementation(async (a: any) =>
@@ -335,6 +338,8 @@ beforeEach(() => {
       },
       shift: { findFirst: prisma.shift.findFirst, updateMany: prisma.shift.updateMany, update: prisma.shift.update },
       activityLog: { create: prisma.activityLog.create },
+      // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+      orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
       areaTicketCheckoutSession: {
         findFirst: prisma.areaTicketCheckoutSession.findFirst,
         updateMany: prisma.areaTicketCheckoutSession.updateMany,
@@ -400,6 +405,31 @@ describe('recordOrderPayment — el posting nace atómico con la transición a P
     await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, amount: 1000 }, 'user-1')
 
     expect(createSalePostingInTxMock).toHaveBeenCalled()
+  })
+
+  /**
+   * Tarea 6d (I-1): en una integrada (POS con `externalId`) el dueño del cierre es su POS. `recordOrderPayment` decide con
+   * `cierreDelCobroSaldaLaCuenta` —el mismo criterio que la reasignación de cobros— y no la salda en su transacción. Sin esta
+   * prueba, reemplazar ese criterio por `true` dejaba verdes todas las suites `payment.*`.
+   */
+  it('🔴 una integrada (POS con externalId) registra el cobro SIN saldarse en la transacción: ni PAID ni vale de inventario', async () => {
+    const orden = makeOrder({ source: 'POS', externalId: 'sr-123' })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(orden)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(prisma.payment.create).toHaveBeenCalledTimes(1)
+    expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+    const aPagada = (prisma.order.update as jest.Mock).mock.calls.filter(([a]: any[]) => a?.data?.paymentStatus === 'PAID')
+    expect(aPagada).toEqual([])
+  })
+
+  it('control — la MISMA cuenta nativa (sin externalId) sí se salda en la transacción del cobro: PAID y vale', async () => {
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, paymentData, 'user-1')
+
+    expect(createSalePostingInTxMock).toHaveBeenCalled()
+    const aPagada = (prisma.order.update as jest.Mock).mock.calls.filter(([a]: any[]) => a?.data?.paymentStatus === 'PAID')
+    expect(aPagada).toHaveLength(1)
   })
 
   it('si la transición a PAID falla, NO queda un posting huérfano', async () => {

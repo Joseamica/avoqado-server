@@ -16,8 +16,8 @@ const ORG_PICK_AUDIENCE = 'avoqado-mcp-orgpick'
  * no la de su emisión: con la de emisión, un cambio de contraseña entre verificar y emitir dejaba al
  * selector —y a la autorización que nace de él— «posterior» al corte (Codex ronda 9, P1).
  */
-export function issueOrgPickToken(staffId: string, verificadoEn?: Date): string {
-  return jwt.sign({ sub: staffId, emitidoMs: verificadoEn?.getTime() ?? Date.now() }, ACCESS_TOKEN_SECRET, {
+export function issueOrgPickToken(staffId: string, verificadoEn?: Date, requestHash?: string): string {
+  return jwt.sign({ sub: staffId, emitidoMs: verificadoEn?.getTime() ?? Date.now(), requestHash }, ACCESS_TOKEN_SECRET, {
     audience: ORG_PICK_AUDIENCE,
     expiresIn: '5m',
     algorithm: 'HS256',
@@ -31,23 +31,27 @@ export function issueOrgPickToken(staffId: string, verificadoEn?: Date): string 
  * contraseña o cerró sus sesiones DESPUÉS de emitirse el token, o la dieron de baja, ya no sirve —
  * el corte ESTRICTO de las concesiones diferidas (`motivoDeConcesionInvalidada`, sin margen).
  */
-export async function verifyOrgPickToken(token: string): Promise<string | null> {
-  return (await verificarTokenDelSelector(token))?.staffId ?? null
+export async function verifyOrgPickToken(token: string, requestHash?: string): Promise<string | null> {
+  return (await verificarTokenDelSelector(token, requestHash))?.staffId ?? null
 }
 
 /** Como `verifyOrgPickToken`, y además entrega la hora en que se verificó la identidad. */
-export async function verificarTokenDelSelector(token: string): Promise<{ staffId: string; verificadoEn: Date } | null> {
-  let decoded: { sub?: string; iat?: number; emitidoMs?: number }
+export async function verificarTokenDelSelector(
+  token: string,
+  requestHash?: string,
+): Promise<{ staffId: string; verificadoEn: Date } | null> {
+  let decoded: { sub?: string; iat?: number; emitidoMs?: number; requestHash?: string }
   try {
     decoded = jwt.verify(token, ACCESS_TOKEN_SECRET, { audience: ORG_PICK_AUDIENCE, algorithms: ['HS256'] }) as {
       sub?: string
       iat?: number
       emitidoMs?: number
+      requestHash?: string
     }
   } catch {
     return null // expired / tampered / wrong audience
   }
-  if (!decoded.sub) return null
+  if (!decoded.sub || (requestHash !== undefined && decoded.requestHash !== requestHash)) return null
   const staff = await prisma.staff.findUnique({ where: { id: decoded.sub }, select: { active: true } })
   if (!staff?.active) return null
   const emision = emisionDelToken(decoded)
@@ -61,8 +65,8 @@ export async function verificarTokenDelSelector(token: string): Promise<{ staffI
  * selección, se REUSA ése — reemitir uno nuevo en cada paso lo volvía renovable indefinidamente
  * sin volver a autenticarse. Sólo el paso 1 (contraseña o SSO recién validados) emite uno nuevo.
  */
-export function tokenParaElSelector(tokenPrevio: unknown, staffId: string, verificadoEn?: Date): string {
-  return typeof tokenPrevio === 'string' && tokenPrevio ? tokenPrevio : issueOrgPickToken(staffId, verificadoEn)
+export function tokenParaElSelector(tokenPrevio: unknown, staffId: string, verificadoEn?: Date, requestHash?: string): string {
+  return typeof tokenPrevio === 'string' && tokenPrevio ? tokenPrevio : issueOrgPickToken(staffId, verificadoEn, requestHash)
 }
 
 /** The staff's ACTIVE org memberships, primary first — the picker's option list. */

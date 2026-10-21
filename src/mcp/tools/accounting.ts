@@ -29,6 +29,11 @@ import { generateDepreciationForVenue } from '@/services/fiscal/fixedAssetDeprec
 import { computePayrollPreview, createEmployee, listEmployees, runPayroll } from '@/services/fiscal/nomina.service'
 import { stampPayrollReceipts } from '@/services/fiscal/nominaCfdi.service'
 import { getFiscalReadiness } from '@/services/fiscal/fiscalReadiness.service'
+import { contabilidadPausada, MOTIVO_CONTABILIDAD_IVA_MIXTO } from '@/services/fiscal/exclusionContable'
+import { estadoIvaPorProducto } from '@/services/fiscal/encendidoIva.service'
+import { listarExcluidasDeLaGlobal } from '@/services/fiscal/cfdiGlobal.service'
+import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { listStatements } from '@/services/dashboard/bankReconciliation.service'
 import { closePeriod, listPeriodLocks, reopenPeriod } from '@/services/fiscal/accountingPeriodLock.service'
 import type { McpScope } from '../scope'
@@ -36,6 +41,23 @@ import { auditMcpWrite } from '../audit'
 import { createGuard } from '../guard'
 import { planGateMessage } from '../planGate'
 import { text } from '../respond'
+
+/**
+ * Plan 6b (D20): cuántas ventas del último periodo cerrado quedaron fuera de la factura global. Sólo con UN emisor (con varios RFC, el
+ * asistente usa `global_invoice_excluded_sales` y elige); una falla del listado no tumba el diagnóstico.
+ */
+async function ventasFueraDeLaGlobal(venueId: string) {
+  try {
+    const emisores = await prisma.fiscalEmisor.findMany({ where: { venueId }, select: { id: true }, take: 2 })
+    if (emisores.length !== 1) return null
+    const fuera = await listarExcluidasDeLaGlobal({ venueId, emisorId: emisores[0].id, now: new Date(), limite: 1 })
+    return { periodo: fuera.periodo, totales: fuera.totales, globalApagada: fuera.globalApagada }
+  } catch (err) {
+    // T9-a: sin rastro, una falla de esquema se confundiría con «0 o varios emisores» (también `null`).
+    logger.warn('[MCP] fiscal_readiness: no se pudieron contar las ventas fuera de la global', { venueId, error: (err as Error).message })
+    return null
+  }
+}
 
 /** Centavos enteros → pesos con 2 decimales (para lectura humana/LLM). */
 const pesos = (cents: number): number => Math.round(cents) / 100
@@ -48,12 +70,26 @@ const pesos = (cents: number): number => Math.round(cents) / 100
 const porTasa = (map: Record<string, number>): Record<string, number> =>
   Object.fromEntries(Object.entries(map).map(([rate, cents]) => [`${Math.round(Number(rate) * 100)}%`, pesos(cents)]))
 
+/** Plan 4b · las bases fuera del 16/8 (en pesos): tasa 0, exenta, no objeto, y todo el ingreso sin IVA. */
+const basesAparte = (r: {
+  tasa0BaseCents?: number
+  exentoBaseCents?: number
+  noObjetoBaseCents?: number
+  ingresosSinIvaCents?: number
+  taxableBaseCents: number
+}) => ({
+  baseTasa0: pesos(r.tasa0BaseCents ?? 0),
+  baseExenta: pesos(r.exentoBaseCents ?? 0),
+  baseNoObjeto: pesos(r.noObjetoBaseCents ?? 0),
+  ingresoSinIva: pesos(r.ingresosSinIvaCents ?? r.taxableBaseCents),
+})
+
 export function registerAccountingTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'accounting_income_statement',
-    'Estado de resultados (ingresos) de un local en un periodo — Capa A, gerencial (no fiscal). Devuelve: ventas brutas, devoluciones, ingreso neto cobrado, base gravable e IVA trasladado (precios IVA-incluido), propinas (informativas, NO son ingreso) y conteo de ventas. Responde "¿cuánto gané este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    'Estado de resultados (ingresos) de un local en un periodo — Capa A, gerencial (no fiscal). Devuelve: ventas brutas, devoluciones, ingreso neto cobrado, base gravable e IVA trasladado (precios IVA-incluido). La base gravable es la de 16 %, 8 % y 0 %; lo exento y lo no objeto de IVA se reportan aparte (baseExenta, baseNoObjeto). Si una venta o devolución mezcla productos de distinto IVA y no se sabe a qué producto le tocó un descuento o una devolución, o viene de un sistema que no dice si su precio ya incluía el IVA, su IVA se calcula en proporción; movimientosConIvaAproximado dice cuántos fueron (0 = todo se pudo atribuir; null = no se sabe). El IVA se calcula por tasa sobre lo cobrado y puede diferir por centavos del desglose de las facturas. También: propinas (informativas, NO son ingreso) y conteo de ventas. Responde "¿cuánto gané este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
     {
       venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
       from: z
@@ -84,7 +120,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ingresoNeto: pesos(data.revenue.netRevenueCents),
           baseGravable: pesos(data.revenue.taxableBaseCents),
           ivaTrasladado: pesos(data.revenue.ivaCents),
-          ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
+          ivaPorTasa: porTasa(data.revenue.taxByRate), // IVA por tasa (16 %/8 %); tasa 0, exento y no objeto no llevan IVA
+          ...basesAparte(data.revenue),
+          movimientosConIvaAproximado: data.revenue.movimientosConIvaAproximado ?? null, // conteo (no dinero); null = no se sabe
         },
         // Subconjunto que SÍ entra a los libros fiscales (respeta los toggles: efectivo/merchant excluidos).
         // `ingresos` arriba es el TOTAL gerencial; esto es lo que realmente se declara.
@@ -93,6 +131,8 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           baseGravable: pesos(data.fiscalRevenue.taxableBaseCents),
           ivaTrasladado: pesos(data.fiscalRevenue.ivaCents),
           ivaPorTasa: porTasa(data.fiscalRevenue.taxByRate),
+          ...basesAparte(data.fiscalRevenue),
+          movimientosConIvaAproximado: data.fiscalRevenue.movimientosConIvaAproximado ?? null, // conteo; null = no se sabe
         },
         propinas: pesos(data.tips.totalCents),
         metricas: {
@@ -106,7 +146,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_business_summary',
-    'Resumen del negocio (Capa A, gerencial — portada de Contabilidad) de un local en un periodo. Reúne: ingreso neto cobrado (base + IVA), facturación del periodo (CFDIs timbrados, % del ingreso ya facturado y cuánto falta por facturar), cómo cobró (efectivo/caja vs banco/electrónico), comisiones de procesamiento, propinas y el estatus de la conciliación bancaria. Responde "¿cómo me fue este mes/periodo?". Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
+    'Resumen del negocio (Capa A, gerencial — portada de Contabilidad) de un local en un periodo. Reúne: ingreso neto cobrado (base + IVA), facturación del periodo (CFDIs timbrados, % del ingreso ya facturado y cuánto falta por facturar), cómo cobró (efectivo/caja vs banco/electrónico), comisiones de procesamiento, propinas y el estatus de la conciliación bancaria. Responde "¿cómo me fue este mes/periodo?". Si una venta o devolución mezcla productos de distinto IVA y no se sabe a qué producto le tocó un descuento o una devolución, o viene de un sistema que no dice si su precio ya incluía el IVA, su IVA se calcula en proporción; movimientosConIvaAproximado dice cuántos fueron (0 = todo se pudo atribuir; null = no se sabe). El IVA se calcula por tasa sobre lo cobrado y puede diferir por centavos del desglose de las facturas. Pasa venueId y el rango from/to en formato YYYY-MM-DD (zona horaria del local).',
     {
       venueId: z.string().describe('Local a reportar (debe estar en tu alcance)'),
       from: z
@@ -134,7 +174,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           ingresoNeto: pesos(d.revenue.netRevenueCents),
           baseGravable: pesos(d.revenue.taxableBaseCents),
           ivaTrasladado: pesos(d.revenue.ivaCents),
-          ivaPorTasa: porTasa(d.revenue.taxByRate), // IVA real desglosado por tasa (16%/8%/exento)
+          ivaPorTasa: porTasa(d.revenue.taxByRate), // IVA por tasa (16 %/8 %); tasa 0, exento y no objeto no llevan IVA
+          ...basesAparte(d.revenue),
+          movimientosConIvaAproximado: d.revenue.movimientosConIvaAproximado ?? null, // conteo (no dinero); null = no se sabe
         },
         facturacion: {
           cfdisTimbrados: d.invoicing.stampedCount,
@@ -563,7 +605,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'accounting_iva_cashflow',
-    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: asume tasa 16% (locales con 0%/8%/exento sobreestimados) y NO incluye retenciones de IVA que clientes te hayan hecho en ventas. Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
+    'IVA en flujo de efectivo de un contribuyente (Capa B, PREMIUM): el IVA del mes calculado sobre flujo (LIVA art 1-B), sumando TODOS los locales del mismo RFC. Da el IVA TRASLADADO COBRADO (ventas) MENOS el IVA ACREDITABLE PAGADO (gastos del Buzón de CFDIs) = IVA a pagar (o saldo a favor). Responde "¿cuánto IVA debo este mes?". Reporta APARTE el IVA que retuviste a proveedores (obligación a enterar). ⚠️ Sigue siendo preliminar: NO incluye retenciones de IVA que clientes te hayan hecho en ventas. El IVA sale de la tasa de cada venta (16 %, 8 %, 0 %); lo exento y lo no objeto no llevan IVA y se reportan aparte. Si una venta o devolución mezcla productos de distinto IVA y no se sabe a qué producto le tocó un descuento o una devolución, o viene de un sistema que no dice si su precio ya incluía el IVA, su IVA se calcula en proporción; movimientosConIvaAproximado dice cuántos fueron (0 = todo se pudo atribuir; null = no se sabe). El IVA se calcula por tasa sobre lo cobrado y puede diferir por centavos del desglose de las facturas. devoluciones dice cuántas devoluciones hubo en el periodo (un conteo, no pesos; null = no se sabe). Pasa venueId y opcionalmente period (YYYY-MM; default = mes actual).',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z
@@ -588,6 +630,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         ivaTrasladadoCobrado: pesos(r.ivaTrasladadoCobradoCents),
         ivaTrasladadoPorTasa: porTasa(r.ivaTrasladadoPorTasaCents), // desglose 16%/8% que pide la declaración
         baseGravable: pesos(r.baseGravableCents),
+        baseTasa0: pesos(r.tasa0BaseCents ?? 0),
+        baseExenta: pesos(r.exentoBaseCents ?? 0),
+        baseNoObjeto: pesos(r.noObjetoBaseCents ?? 0),
         ivaAmparadoPorCfdiContraste: pesos(r.ivaAmparadoPorCfdiCents),
         ivaAcreditablePagado: r.acreditablePagadoCents === null ? null : pesos(r.acreditablePagadoCents),
         ivaRetenidoAProveedores: r.ivaRetenidoTercerosCents === null ? null : pesos(r.ivaRetenidoTercerosCents),
@@ -595,10 +640,12 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         saldoAFavorDelPeriodo: pesos(r.saldoAFavorDelPeriodoCents),
         // Banderas de honestidad fiscal
         estimadoAl16Pct: r.computedAt16Percent, // false: IVA por tasa real (solo importe-libre/sin-taxRate cae al 16%)
+        movimientosConIvaAproximado: r.movimientosConIvaAproximado ?? null, // conteo (no dinero); null = no se sabe
+        devoluciones: r.refundCount ?? null, // conteo; null = no se sabe
         acreditableDisponible: r.acreditableDisponible,
         sinVentasRecuerdaDeclararEnCeros: r.zeroActivity,
         diotDisponible: r.diotDisponible,
-        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; el IVA se calcula por la tasa real de cada producto (16%/8%/exento) y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
+        nota: 'Ya descuenta tu IVA acreditable de gastos pagados (Buzón de CFDIs). El IVA retenido a proveedores se entera APARTE (no resta aquí). Sigue siendo flujo de efectivo (cobrado/pagado), no facturado; el IVA se calcula por la tasa real de cada producto (16 %, 8 % o 0 %; exento y no objeto aparte) y no incluye IVA que clientes te hayan retenido en ventas. No lo uses como pago final sin tu contador.',
       })
     },
   )
@@ -636,9 +683,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizasGeneradas: r.posted,
         yaEstaban: r.alreadyPosted,
         omitidos: r.skipped,
+        // Tarjetas de regalo (spec §7, fase 1): venta de tarjetas y cobros con saldo, sin póliza; el contador los registra a mano.
+        pendientesDeRevision: r.pendientesDeRevision,
         // Costo de ventas del periodo (inventario consumido → cuenta de costo de ventas), si hubo consumo.
         costoDeVentas: r.cogsCents != null ? pesos(r.cogsCents) : 0,
-        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes).',
+        nota: 'Idempotente: re-correr no duplica. Devoluciones y voids se postean como contracuenta (402.01). El costo de ventas se agrega una vez por periodo (conviene generar al cierre del mes). Las tarjetas de regalo (su venta y lo pagado con saldo) no generan póliza por ahora: quedan en pendientesDeRevision para que tu contador las registre a mano.',
       })
     },
   )
@@ -946,7 +995,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'isr_provisional',
-    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (asume 16% de IVA en el ingreso, no resta pérdidas ni retenciones de ventas; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
+    'Estimación del PAGO PROVISIONAL de ISR del periodo (persona física, Capa B, PREMIUM). regime="RESICO" (default): ingresos cobrados del mes × tasa fija por tramo (1%–2.5%), sin deducciones. regime="GENERAL": (ingresos − deducciones autorizadas) acumulado del ejercicio × tarifa art-96 acumulada − pagos provisionales previos. Responde "¿cuánto ISR debo este mes?". ⚠️ Es ESTIMACIÓN (el ingreso va sin IVA, con la tasa real de cada venta, e incluye lo exento; en GENERAL resta las pérdidas de ejercicios anteriores topadas a la utilidad y, en ambos regímenes, la retención de ISR en ventas que el contador capturó; no resta PTU; tarifa art-96 = 2024/2025 mientras el SAT no publique 2026). Lo valida el contador. Pasa venueId, opcionalmente period (YYYY-MM) y regime.',
     {
       venueId: z.string().describe('Local del contribuyente (debe estar en tu alcance)'),
       period: z
@@ -985,7 +1034,17 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         retencionesIsrVentas: pesos(r.retencionesIsrCents), // capturada por el contador (set_sales_retention)
         isrAPagarEstimado: pesos(r.isrAPagarCents),
         sinVentas: r.zeroActivity,
-        nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo; no resta pérdidas de ejercicios anteriores ni PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
+        // Tarjetas de regalo (B4 r1): la base no se recalcula en la fase 1; la diferencia va aparte y sólo cuando la hay.
+        ...(r.avisoTarjetasDeRegalo
+          ? {
+              tarjetasDeRegalo: {
+                cobradasNoIncluidas: pesos(r.tarjetasCobradasNoIncluidasCents),
+                pagadoConSaldoIncluido: pesos(r.pagadoConSaldoIncluidoCents),
+                aviso: r.avisoTarjetasDeRegalo,
+              },
+            }
+          : {}),
+        nota: 'ESTIMACIÓN — resta la retención de ISR en ventas que hayas capturado del periodo y, en régimen GENERAL, las pérdidas de ejercicios anteriores topadas a la utilidad; no resta PTU. La tarifa art-96 es la 2024/2025 (vigente en 2026 salvo publicación nueva). Confírmalo con tu contador.',
       })
     },
   )
@@ -1127,7 +1186,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         polizaAlta: a.ledgerPosted, // DEBE Activo fijo / HABER Bancos, ya en el libro diario
         nota: a.ledgerPosted
           ? 'Registrado y con póliza de alta en el libro. Corre la depreciación del periodo con generate_depreciation.'
-          : 'Registrado. Corre la depreciación del periodo con generate_depreciation. (La póliza de alta se saltó — re-siembra el catálogo de cuentas para habilitarla.)',
+          : a.ledgerReason === 'ivaMixto'
+            ? `Registrado, sin póliza de alta: ${a.ledgerMessage}`
+            : 'Registrado. Corre la depreciación del periodo con generate_depreciation. (La póliza de alta se saltó — re-siembra el catálogo de cuentas para habilitarla.)',
       })
     },
   )
@@ -1279,10 +1340,11 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
         precioVenta: pesos(r.proceedsCents),
         gananciaOPerdida: pesos(r.gainLossCents),
         polizaBaja: r.ledgerPosted, // cancela activo + deprec. acumulada y registra el resultado en el libro
-        nota:
+        nota: `${
           r.gainLossCents >= 0
             ? 'Baja registrada. Ganancia contable (precio de venta ≥ valor en libros).'
-            : 'Baja registrada. Pérdida contable (valor en libros > precio de venta) — deducible; confírmalo con tu contador.',
+            : 'Baja registrada. Pérdida contable (valor en libros > precio de venta) — deducible; confírmalo con tu contador.'
+        }${r.ledgerReason === 'ivaMixto' ? ` Sin póliza de baja: ${r.ledgerMessage}` : ''}`,
       })
     },
   )
@@ -1546,7 +1608,7 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'fiscal_readiness',
-    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer) y las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica). Sólo lectura. Pasa venueId.',
+    'Diagnóstico de PREPARACIÓN FISCAL (onboarding) de un local (Capa B, PREMIUM): "¿qué le falta para empezar a operar la contabilidad fiscal?". Revisa RFC, emisor (régimen + lugar de expedición), CSD (sello digital) activo/por vencer, código postal, catálogo de cuentas sembrado, configuración contable (movimientos con cuenta asignada) y empleados con sus datos para timbrar nómina. Devuelve un checklist con estatus (ok/warn/missing + qué hacer), las CAPACIDADES desbloqueadas (puede facturar / timbrar nómina / contabilidad electrónica) y si la contabilidad (pólizas y cierre de periodo) está PAUSADA porque la organización ya tuvo productos con IVA distinto de 16 %, con el motivo para el cliente. Incluye el estado del IVA por producto (encendido, bloqueos, avisos de aparatos) y cuántas ventas quedaron fuera de la factura global (con varios RFC emisores, usa global_invoice_excluded_sales). Sólo lectura. Pasa venueId.',
     {
       venueId: z.string().describe('Local a diagnosticar (debe estar en tu alcance)'),
     },
@@ -1556,10 +1618,24 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
       const gate = await planGateMessage(venueId, 'CFDI', 'El diagnóstico de preparación fiscal')
       if (gate) return text({ ok: false, planRequired: true, feature: 'CFDI', error: gate })
 
+      // IVA por producto (plan 6b, D20): con Facturación, el estado se ve también sin emisor (Codex r1 P3-11). Diagnóstico bajo demanda
+      // (T5-a): pide la revisión completa. Si truena, el resto del diagnóstico sale igual (Minor T9-3): `null` y queda en el log.
+      const ivaPorProducto = await estadoIvaPorProducto(venueId, new Date(), { conRevision: true }).then(
+        iva => ({ encendido: iva.encendido, bloqueos: iva.bloqueos, avisos: iva.avisos, facturasSinSello: iva.facturasSinSello }),
+        (err: unknown) => {
+          logger.warn('[MCP] fiscal_readiness: no se pudo leer el estado del IVA por producto', {
+            venueId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          return null
+        },
+      )
+
       const r = await getFiscalReadiness(venueId)
       if (r.needsFiscalSetup) {
-        return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.' })
+        return text({ ok: true, needsFiscalSetup: true, mensaje: 'Este local aún no tiene RFC/emisor fiscal configurado.', ivaPorProducto })
       }
+      const pausada = r.organizationId ? await contabilidadPausada(r.organizationId) : false
       return text({
         ok: true,
         rfc: r.rfc,
@@ -1571,6 +1647,9 @@ export function registerAccountingTools(server: McpServer, scope: McpScope) {
           puedeTimbrarNomina: r.capabilities.puedeTimbrarNomina,
           contabilidadElectronicaLista: r.capabilities.contabilidadElectronicaLista,
         },
+        contabilidad: { pausada, motivo: pausada ? MOTIVO_CONTABILIDAD_IVA_MIXTO : null },
+        ivaPorProducto,
+        ventasFueraDeLaGlobal: await ventasFueraDeLaGlobal(venueId),
         checklist: r.checks.map(c => ({ punto: c.label, estatus: c.status, detalle: c.detail })),
         nota: 'estatus: ok = listo · warn = revisa · missing = falta. Las capacidades resumen qué puedes hacer ya con la configuración actual.',
       })

@@ -11,6 +11,7 @@
  * 28-sep-2026 (sólo lectura, por SSH).
  */
 import { EventEmitter } from 'node:events'
+import vm from 'node:vm'
 
 import {
   instalarGanchos,
@@ -207,6 +208,23 @@ describe('caja negra — ganchos del proceso', () => {
     const salida = JSON.parse(lineas[0])
     expect(salida).toMatchObject({ level: 'warn', message: '[caja-negra] salida', codigo: 3, rssMb: 700, heapMb: 300 })
     expect(salida.llamador.join('\n')).toContain('cajaNegra.test')
+  })
+
+  it('🔴 con una ruta de más de 200 caracteres, el llamador conserva su archivo y su línea', () => {
+    // 11-oct-2026: desde un worktree, avq-verify corre en `snap-…-<huella de 64>` y el renglón de la pila
+    // medía 200 justos: recortarlo por el principio dejaba `…/cajaNegra.t` y se perdía QUIÉN llamó a exit.
+    const { proc } = procesoFalso()
+    const lineas: string[] = []
+    instalarGanchos(proc as never, linea => lineas.push(linea))
+    const rutaLarga = `/${'carpeta-de-un-worktree/'.repeat(10)}llamadorDeSalida.ts`
+    const llamar = vm.runInThisContext('(function llamarExit(p) { p.exit(4) })', { filename: rutaLarga })
+
+    llamar(proc)
+    proc.emit('exit', 4)
+
+    const { llamador } = JSON.parse(lineas[0])
+    expect(llamador[0]).toContain('llamadorDeSalida.ts:1:')
+    expect(llamador.every((renglon: string) => renglon.length <= 200)).toBe(true)
   })
 
   it('una salida sin process.exit (el bucle se vació) no inventa un llamador', () => {

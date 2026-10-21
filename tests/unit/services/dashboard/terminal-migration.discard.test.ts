@@ -13,6 +13,7 @@ import { migrateDiscard, DISCARD_AFTER_MS } from '@/services/dashboard/terminal-
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '@/errors/AppError'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
@@ -28,6 +29,10 @@ jest.mock('@/utils/prismaClient', () => {
   return { __esModule: true, default: client }
 })
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
+jest.mock('@/services/customer-display/customerDisplayVenueChange', () => ({
+  borrarDisenoAlCambiarDeNegocio: jest.fn().mockResolvedValue({ cambio: true, disenoBorrado: false, fromVenueId: 'v1' }),
+  invalidateCustomerDisplayCache: jest.fn(),
+}))
 
 const m = prisma as unknown as {
   terminal: { findUnique: jest.Mock; update: jest.Mock }
@@ -74,7 +79,9 @@ describe('migrateDiscard', () => {
     m.terminal.findUnique.mockResolvedValue(terminal())
     m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
     m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
-    m.$queryRaw.mockResolvedValue([{ lastActivationStatusCheckAt: null }])
+    // G4: el candado lee también el negocio de la terminal. `venue-a` es el destino de `migrationWipe`: en v1 la terminal
+    // ya se mudó, así que ahí la dejó esa migración.
+    m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }])
     m.$transaction.mockImplementation((fn: any) => fn(prisma))
   })
 
@@ -201,15 +208,13 @@ describe('migrateDiscard', () => {
   // P2 #2 de Codex: entre leer la elegibilidad y escribir, el aparato puede rebotar
   // (ejecutó el borrado). Expirar entonces marcaría como descartado algo que SÍ ocurrió,
   // y —peor— revertiría el venue de una migración que ya se completó.
-  it('aborta si el aparato rebotó entre la lectura y la escritura', async () => {
+  it('una consulta pública de estado no se usa como prueba de un borrado legacy', async () => {
     m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
     m.terminal.findUnique.mockResolvedValueOnce(terminal(null)) // lectura inicial: no rebotó
-    m.$queryRaw.mockResolvedValueOnce([{ lastActivationStatusCheckAt: new Date() }]) // bajo lock: YA rebotó
+    m.$queryRaw.mockResolvedValueOnce([{ lastActivationStatusCheckAt: new Date(), venueId: 'venue-a' }]) // bajo lock: YA rebotó
 
-    await expect(migrateDiscard('term-1', actor)).rejects.toBeInstanceOf(ConflictError)
-
-    expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
-    expect(m.terminal.update).not.toHaveBeenCalled()
+    await expect(migrateDiscard('term-1', actor)).resolves.toMatchObject({ discarded: 1 })
+    expect(m.terminal.update).toHaveBeenCalled()
   })
 
   it('locks the terminal row before the final rebound check and any writes', async () => {
@@ -229,11 +234,11 @@ describe('migrateDiscard', () => {
     expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
   })
 
-  it('a wipe the device already rebound after is NOT pending (same proof-of-wipe rule as preflight)', async () => {
+  it('a public activation check leaves a legacy wipe eligible for reviewed discard', async () => {
     m.terminal.findUnique.mockResolvedValue(terminal(new Date(Date.now() - 1 * HOUR)))
     m.tpvCommandQueue.findMany.mockResolvedValue([wipe({ createdAt: new Date(Date.now() - 48 * HOUR) })])
-    await expect(migrateDiscard('term-1', actor)).rejects.toThrow(BadRequestError)
-    expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
+    await expect(migrateDiscard('term-1', actor)).resolves.toMatchObject({ discarded: 1 })
+    expect(m.tpvCommandQueue.updateMany).toHaveBeenCalled()
   })
 
   it('refuses while a wipe is still cancellable (PENDING/QUEUED): cancelling is the safer path', async () => {
@@ -266,5 +271,167 @@ describe('migrateDiscard', () => {
   it('throws NotFoundError for an unknown terminal', async () => {
     m.terminal.findUnique.mockResolvedValue(null)
     await expect(migrateDiscard('nope', actor)).rejects.toThrow(NotFoundError)
+  })
+
+  // 🔴 G4 (auditoría de Codex del plan, 14-oct): deshacer una migración sólo vale si la terminal sigue donde la dejó ESA
+  // migración y si la orden seguía vigente frente a un reloj leído DESPUÉS del candado. Si no, otra mudanza mandó
+  // después, y revertir se llevaría la terminal (y sus comercios de cobro) de un negocio que no la pidió.
+  describe('G4: la reversión sigue vigente', () => {
+    const T0 = Date.parse('2026-10-14T18:00:00.000Z')
+
+    beforeEach(() => {
+      // Sólo se finge el reloj: las promesas y los temporizadores siguen siendo los reales.
+      jest.useFakeTimers({ doNotFake: ['nextTick', 'setImmediate', 'setTimeout', 'setInterval', 'queueMicrotask'] })
+      jest.setSystemTime(T0)
+    })
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    it('1. el reloj de la vigencia se lee DESPUÉS del candado', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      m.$queryRaw.mockImplementation(async () => {
+        jest.setSystemTime(T0 + 5_000) // el candado tardó: el reloj que vale es el de ahora
+        return [{ commandSessionId: null, venueId: 'venue-a' }]
+      })
+
+      await migrateDiscard('term-1', actor)
+
+      expect(m.tpvCommandQueue.updateMany).toHaveBeenCalledWith({
+        where: expect.objectContaining({
+          id: 'cmd-1',
+          OR: [{ expiresAt: null }, { expiresAt: { gt: new Date(T0 + 5_000) } }],
+        }),
+        data: expect.objectContaining({ status: 'EXPIRED', expiresAt: new Date(T0 + 5_000) }),
+      })
+      // La bitácora mide el silencio con ese mismo reloj, el que la transacción devuelve.
+      expect(mockedLogAction).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ silentForMs: 30 * HOUR + 5_000 }) }),
+      )
+    })
+
+    it('2. una orden que venció mientras se esperaba el candado no se descarta, y la terminal no se mueve', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      // La fila en la base: SENT y vencida 1 s después de T0. El CAS sólo la toca si se cumplen el estado y la vigencia
+      // de su `where` (un `where` sin `OR` no exige vigencia, como en Postgres).
+      const fila = { status: 'SENT', expiresAt: new Date(T0 + 1_000) }
+      m.tpvCommandQueue.updateMany.mockImplementation(async ({ where }: any) => {
+        const estado = where.status?.in ? where.status.in.includes(fila.status) : where.status === fila.status
+        const vigente =
+          !where.OR ||
+          where.OR.some((c: any) =>
+            c.expiresAt === null ? fila.expiresAt === null : !!fila.expiresAt && fila.expiresAt.getTime() > c.expiresAt.gt.getTime(),
+          )
+        return { count: estado && vigente ? 1 : 0 }
+      })
+      m.$queryRaw.mockImplementation(async () => {
+        jest.setSystemTime(T0 + 5_000)
+        return [{ commandSessionId: null, venueId: 'venue-a' }]
+      })
+
+      await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+
+      expect(m.terminal.update).not.toHaveBeenCalled()
+      expect(m.venuePaymentConfig.deleteMany).not.toHaveBeenCalled()
+    })
+
+    it('3. B→C mientras esperaba el candado: 409, y no se descarta ni se mueve nada', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+      m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-c' }])
+
+      await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+
+      expect(m.tpvCommandQueue.updateMany).not.toHaveBeenCalled()
+      expect(m.terminal.update).not.toHaveBeenCalled()
+    })
+
+    it('4. un payload de migración sin toVenueId no se deshace a ciegas: 409', async () => {
+      m.tpvCommandQueue.findMany.mockResolvedValue([
+        wipe({ payload: { migration: { fromVenueId: 'venue-origen', previousMerchantIds: ['ma-1'] } } }),
+      ])
+      // Bajo el candado la terminal está en el ORIGEN de esa migración: el negocio coincide, así que lo único que puede dar
+      // el 409 es que falta el destino.
+      m.$queryRaw.mockResolvedValue([{ commandSessionId: null, venueId: 'venue-origen' }])
+
+      await expect(migrateDiscard('term-1', actor)).rejects.toMatchObject({ statusCode: 409, code: 'MIGRATION_NOT_CURRENT' })
+
+      expect(m.terminal.update).not.toHaveBeenCalled()
+    })
+  })
+})
+
+// 🔴 §4.3 del plan de la pantalla del cliente: descartar el borrado de una migración la DESHACE (la terminal vuelve a su
+// origen), así que el diseño se borra en la misma transacción —después de G4 y del bucle, antes de escribir `venueId`— y
+// la caché se invalida sólo tras el commit.
+describe('migrateDiscard — el gancho de la pantalla del cliente', () => {
+  const mockGancho = borrarDisenoAlCambiarDeNegocio as jest.Mock
+  const mockInvalidar = invalidateCustomerDisplayCache as jest.Mock
+  let tx: any
+  let confirmar!: () => void
+  let fallarCommit!: (e: unknown) => void
+  const flush = () => new Promise(r => setImmediate(r))
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    m.terminal.findUnique.mockResolvedValue(terminal())
+    m.venue.findUnique.mockResolvedValue({ timezone: 'America/Mexico_City' })
+    m.tpvCommandQueue.updateMany.mockResolvedValue({ count: 1 })
+    // Un `tx` DISTINTO del cliente global, con su propio `$queryRaw` (el candado de la terminal).
+    tx = { ...m, $queryRaw: jest.fn().mockResolvedValue([{ commandSessionId: null, venueId: 'venue-a' }]) }
+    m.$transaction.mockImplementation(
+      (fn: any) =>
+        new Promise((resolve, reject) => {
+          Promise.resolve(fn(tx)).then(v => {
+            confirmar = () => resolve(v)
+            fallarCommit = reject
+          }, reject)
+        }),
+    )
+  })
+
+  it('(i) reversión: gancho con el origen, después de G4 y del bucle, antes de escribir venueId; invalida tras el commit', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    const descarte = migrateDiscard('term-1', actor)
+    await flush()
+
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+    expect(mockGancho).toHaveBeenCalledWith(tx, {
+      terminalId: 'term-1',
+      toVenueId: 'venue-origen',
+      reason: 'migration_reverted',
+      staffId: 'owner-1',
+    })
+    expect(mockGancho.mock.calls[0][0]).toBe(tx)
+    expect(mockGancho.mock.calls[0][0]).not.toBe(prisma)
+    expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0])
+    expect(m.tpvCommandQueue.updateMany.mock.invocationCallOrder[0]).toBeLessThan(mockGancho.mock.invocationCallOrder[0])
+    expect(mockGancho.mock.invocationCallOrder[0]).toBeLessThan(m.terminal.update.mock.invocationCallOrder[0])
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+
+    confirmar()
+    await descarte
+    expect(mockInvalidar).toHaveBeenCalledTimes(1)
+    expect(mockInvalidar).toHaveBeenCalledWith('term-1')
+  })
+
+  it('(i) si el commit falla, no se invalida nada', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([migrationWipe()])
+    const descarte = migrateDiscard('term-1', actor)
+    await flush()
+    expect(mockGancho).toHaveBeenCalledTimes(1)
+
+    fallarCommit(new Error('commit'))
+    await expect(descarte).rejects.toThrow('commit')
+    expect(mockInvalidar).toHaveBeenCalledTimes(0)
+  })
+
+  it('(j) sin reversión (borrado manual): sin gancho', async () => {
+    m.tpvCommandQueue.findMany.mockResolvedValue([wipe({})])
+    const descarte = migrateDiscard('term-1', actor)
+    await flush()
+    confirmar()
+    await descarte
+
+    expect(mockGancho).not.toHaveBeenCalled()
   })
 })

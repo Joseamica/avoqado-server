@@ -1,3 +1,4 @@
+import { operationHash } from '@/utils/operationHash'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { enlaceParaQuienInvita } from '@/services/dashboard/enlaceDeInvitacion'
 import { z } from 'zod'
@@ -5,12 +6,16 @@ import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { inviteTeamMember, updateTeamMember } from '@/services/dashboard/team.dashboard.service'
 import { ROLE_HIERARCHY } from '@/lib/permissions'
 import { StaffRole } from '@prisma/client'
 import { DateTime } from 'luxon'
+import { asignacionesVigentes } from '@/services/dashboard/rh/asignaciones.service'
+import { pagoGenericoPermitido } from '@/services/dashboard/rh/marcaBlanca'
+import { hoyDeLaSede } from '@/services/dashboard/rh/vigencias'
 
 // SUPERADMIN deliberately excluded — an agent must never be able to grant it.
 const INVITE_ROLE_MAP: Record<string, StaffRole> = {
@@ -22,6 +27,24 @@ const INVITE_ROLE_MAP: Record<string, StaffRole> = {
   kitchen: StaffRole.KITCHEN,
   host: StaffRole.HOST,
   viewer: StaffRole.VIEWER,
+}
+
+/**
+ * RH fase 1a: puestos vigentes HOY de una página de personas, con UNA consulta por lote (asignacionesVigentes), nunca una
+ * por persona. En una sucursal de marca blanca RH no se muestra: devuelve null y la respuesta no lleva `puestos`.
+ */
+async function puestosVigentes(venueId: string, staffIds: string[]) {
+  if (staffIds.length === 0 || !(await pagoGenericoPermitido(venueId))) return null
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const vigentes = await asignacionesVigentes(venueId, staffIds, hoyDeLaSede(venue?.timezone ?? 'America/Mexico_City'))
+  return (staffId: string) =>
+    (vigentes.get(staffId) ?? []).map(a => ({
+      assignmentId: a.id,
+      positionId: a.positionId,
+      nombre: a.positionName,
+      relacion: a.relation ?? 'Sin definir',
+      desde: a.effectiveFrom,
+    }))
 }
 
 export function registerStaffTools(server: McpServer, scope: McpScope) {
@@ -43,7 +66,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'work_shifts',
-    'Rotating WORK shifts (fase 1 "como Sesame"): the venue\'s shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).',
+    "Rotating WORK shifts: the venue's shift templates (e.g. Abre 08–16, Cierre 11–19) and the person×day assignments for a date range (max 31 days), with DRAFT/PUBLISHED status. Only PUBLISHED assignments count for attendance and commissions, and only when the venue enabled rotating shifts. Read-only. Pass venueId, from and to (YYYY-MM-DD).",
     {
       venueId: z.string().describe('Venue (must be in your scope)'),
       from: z.string().describe('Start date YYYY-MM-DD'),
@@ -61,48 +84,57 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'list_staff',
-    'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead.',
+    'List the team (roster) of a venue you can access: each member\'s membership id, staff id, name, role and whether their account is active. The IDs can be passed to reservation staff/schedule tools. Optionally filter by name or only active members. Pass venueId. Answers "who works here / who is on my team?". For sales performance use staff_ranking instead. Cada persona trae sus puestos vigentes hoy (nombre, relación —«Sin definir» si no se ha indicado— y desde cuándo; no se incluyen en sucursales de marca blanca) con los ids para terminar una asignación.',
     {
       venueId: z.string().describe('Venue whose team to list (must be in your scope)'),
       search: z.string().optional().describe('Filter by name (partial, case-insensitive)'),
       activeOnly: z.boolean().optional().describe('Only active accounts'),
       limit: z.number().int().positive().max(200).optional().describe('Max members to return (default 200)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, search, activeOnly, limit }) => {
+    async ({ venueId, search, activeOnly, limit, offset = 0 }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('teams:read', venueId) // read gate — mirror the dashboard's checkPermission
+      const filter = {
+        ...where,
+        ...(activeOnly || search
+          ? {
+              staff: {
+                ...(activeOnly ? { active: true } : {}),
+                ...(search
+                  ? {
+                      ...personSearchWhere(search),
+                    }
+                  : {}),
+              },
+            }
+          : {}),
+      }
+      const total = await prisma.staffVenue.count({ where: filter })
       const rows = await prisma.staffVenue.findMany({
-        where: {
-          ...where,
-          ...(activeOnly || search
-            ? {
-                staff: {
-                  ...(activeOnly ? { active: true } : {}),
-                  ...(search
-                    ? {
-                        OR: [
-                          { firstName: { contains: search, mode: 'insensitive' as const } },
-                          { lastName: { contains: search, mode: 'insensitive' as const } },
-                        ],
-                      }
-                    : {}),
-                },
-              }
-            : {}),
-        },
+        where: filter,
         select: { id: true, staffId: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
-        orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
+        orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }, { id: 'asc' }],
+        skip: offset,
         take: limit ?? 200,
       })
+      const puestosDe = await puestosVigentes(
+        venueId,
+        rows.map(r => r.staffId),
+      )
       return text({
         venueId,
         count: rows.length,
+        total,
+        hasMore: offset + rows.length < total,
+        nextOffset: offset + rows.length < total ? offset + rows.length : null,
         staff: rows.map(r => ({
           staffVenueId: r.id,
           staffId: r.staffId,
           name: `${r.staff.firstName} ${r.staff.lastName}`.trim(),
           role: r.role,
           active: r.staff.active,
+          ...(puestosDe ? { puestos: puestosDe(r.staffId) } : {}),
         })),
       })
     },
@@ -341,7 +373,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'staff_detail',
-    'Detail of ONE team member of a venue you can access, found by name: their account status and the role they hold at EACH of your venues where they work. The drill-down after list_staff — answers "¿qué rol tiene Juan? ¿en qué locales trabaja? ¿está activo?". Does NOT expose contact details (email/phone). If the name matches several people it returns them so you can be specific. Pass venueId + name.',
+    'Detail of ONE team member of a venue you can access, found by name: their account status and the role they hold at EACH of your venues where they work. The drill-down after list_staff — answers "¿qué rol tiene Juan? ¿en qué locales trabaja? ¿está activo?". Does NOT expose contact details (email/phone). If the name matches several people it returns them so you can be specific. Incluye sus puestos vigentes hoy en esta sucursal (nombre, relación —«Sin definir» si no se ha indicado— y desde cuándo). Pass venueId + name.',
     {
       venueId: z.string().describe('Venue to search within (must be in your scope)'),
       name: z.string().min(1).describe('Team member name or part of it'),
@@ -353,10 +385,7 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         where: {
           ...base,
           staff: {
-            OR: [
-              { firstName: { contains: name, mode: 'insensitive' as const } },
-              { lastName: { contains: name, mode: 'insensitive' as const } },
-            ],
+            ...personSearchWhere(name),
           },
         },
         select: { staffId: true, staff: { select: { firstName: true, lastName: true, active: true } } },
@@ -381,10 +410,12 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         select: { role: true, venue: { select: { name: true } } },
         orderBy: { venue: { name: 'asc' } },
       })
+      const puestosDe = await puestosVigentes(venueId, [m.staffId])
       return text({
         found: true,
         staff: { name: `${m.staff.firstName} ${m.staff.lastName}`.trim(), active: m.staff.active },
         venues: assignments.map(a => ({ venue: a.venue?.name ?? null, role: a.role })),
+        ...(puestosDe ? { puestos: puestosDe(m.staffId) } : {}),
       })
     },
   )
@@ -471,9 +502,11 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         .optional()
         .describe('New role (omit to keep; no superadmin)'),
       active: z.boolean().optional().describe('true = activate, false = deactivate (omit to keep)'),
+      resolvedStaffVenueId: z.string().optional().describe('StaffVenue exacto devuelto por la vista previa'),
+      expectedSourceFingerprint: z.string().optional().describe('Huella exacta devuelta por la vista previa'),
       confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
     },
-    async ({ venueId, name, role, active, confirm }) => {
+    async ({ venueId, name, role, active, confirm, resolvedStaffVenueId, expectedSourceFingerprint }) => {
       const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('teams:update', venueId) // write gate (per-venue role)
       if (role === undefined && active === undefined) return text({ ok: false, error: 'Pasa al menos role o active.' })
@@ -481,14 +514,15 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
       const matches = await prisma.staffVenue.findMany({
         where: {
           ...base,
-          staff: {
-            OR: [
-              { firstName: { contains: name, mode: 'insensitive' as const } },
-              { lastName: { contains: name, mode: 'insensitive' as const } },
-            ],
-          },
+          ...(confirm && resolvedStaffVenueId
+            ? { id: resolvedStaffVenueId }
+            : {
+                staff: {
+                  ...personSearchWhere(name),
+                },
+              }),
         },
-        select: { id: true, staffId: true, role: true, staff: { select: { firstName: true, lastName: true, active: true } } },
+        select: { id: true, staffId: true, role: true, active: true, staff: { select: { firstName: true, lastName: true, active: true } } },
         take: 5,
       })
       if (matches.length === 0) return text({ ok: false, error: `No encontré ningún miembro que coincida con "${name}" en este local.` })
@@ -521,9 +555,18 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         return text({ ok: false, error: `No puedes otorgar el rol ${newRole}: es superior a tu propio rol.` })
       }
 
+      const expectedState = { role: m.role, active: m.active }
+      const fingerprint = operationHash({ id: m.id, staffId: m.staffId, ...expectedState })
+      if (confirm && (!resolvedStaffVenueId || resolvedStaffVenueId !== m.id || expectedSourceFingerprint !== fingerprint)) {
+        return text({
+          ok: false,
+          needsInput: true,
+          question: 'El miembro o sus permisos cambiaron. Solicita y confirma una nueva vista previa.',
+        })
+      }
       const changes = {
         ...(newRole && newRole !== m.role ? { role: { from: m.role, to: newRole } } : {}),
-        ...(active !== undefined && active !== m.staff.active ? { active: { from: m.staff.active, to: active } } : {}),
+        ...(active !== undefined && active !== m.active ? { active: { from: m.active, to: active } } : {}),
       }
       if (Object.keys(changes).length === 0) return text({ ok: false, error: `${fullName} ya está exactamente así — nada que cambiar.` })
 
@@ -531,6 +574,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
         return text({
           ok: false,
           requiresConfirmation: true,
+          resolvedStaffVenueId: m.id,
+          expectedSourceFingerprint: fingerprint,
           preview: { member: fullName, changes },
           message: `Esto CAMBIARÁ a ${fullName}: ${JSON.stringify(changes)}. Vuelve a llamar con confirm:true para aplicar.`,
         })
@@ -541,6 +586,8 @@ export function registerStaffTools(server: McpServer, scope: McpScope) {
           ...(newRole ? { role: newRole } : {}),
           ...(active !== undefined ? { active } : {}),
           performedBy: scope.staffId,
+          callerRole: scope.perVenueAccess.get(venueId)?.role as StaffRole,
+          expectedState,
         })
         await auditMcpWrite(scope, {
           action: 'STAFF_MEMBER_UPDATED',

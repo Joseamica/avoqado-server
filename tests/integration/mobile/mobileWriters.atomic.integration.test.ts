@@ -1,0 +1,1530 @@
+/**
+ * Plan3b T4: mobile order-discount, split, split-by-seat, promotion, loyalty and stamp writers serialize with fiscal
+ * admission on the real Order row, decide from the locked read (no version bump needed), and roll back as one unit;
+ * `createOrderWithItems` writes the promotions and its reaffirmed money inside the transaction that creates the order.
+ * T5: `addAreaTicketItems` decides and totals from the Order read under the same lock.
+ */
+import { randomUUID } from 'crypto'
+import { Prisma } from '@prisma/client'
+import prisma from '@/utils/prismaClient'
+import * as orderLock from '@/services/shared/paymentShiftClaim'
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
+import { BadRequestError } from '@/errors/AppError'
+import socketManager from '@/communication/sockets'
+import { bloquearOrdenParaFacturar } from '@/services/fiscal/admisionIva'
+import {
+  applyOrderDiscount,
+  createOrderWithItems,
+  payCashOrder,
+  removeOrderDiscount,
+  splitOrderBySeat,
+  splitOrderItems,
+} from '@/services/mobile/order.mobile.service'
+import { applyPromotionToOrder, removePromotionFromOrder } from '@/services/promotions/promotion.service'
+import { redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
+import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
+import { processIntents } from '@/services/mobile/sync.mobile.service'
+import { addAreaTicketItems, openAreaTicket } from '@/services/mobile/areaTicket.mobile.service'
+import { buildAreaTicketCode } from '@/lib/areaTicketCode'
+import * as featureAccess from '@/middlewares/checkFeatureAccess.middleware'
+import * as tableOwnership from '@/middlewares/checkTableOwnership.middleware'
+import * as activityLog from '@/services/dashboard/activity-log.service'
+import * as receiptService from '@/services/dashboard/receipt.dashboard.service'
+
+jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
+jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({ notifyCustomerPassUpdated: jest.fn() }))
+
+const database = new URL(process.env.TEST_DATABASE_URL ?? '')
+if (
+  !['localhost', '127.0.0.1'].includes(database.hostname) ||
+  !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(database.pathname)
+) {
+  throw new Error('This suite requires an explicitly selected isolated local test database.')
+}
+const venueId = `mobile-writers-${randomUUID()}`
+// A second venue of the same organization: a route for it must never reach an Order of `venueId`.
+const otherVenueId = `mobile-writers-other-${randomUUID()}`
+let staffId: string, customerId: string, productA: string, productB: string
+let discountId: string, fixedDiscountId: string, promotionId: string, draftPromotionId: string
+let selections: Array<{ groupId: string; optionId: string }>, draftSelections: Array<{ groupId: string; optionId: string }>
+let cycle = 0
+// Area tickets (T5): the area terminal mints codes on partition 47; the cash register claims.
+const AREA_DEVICE = `area-${randomUUID()}`
+let cashTerminalId: string, modifierId: string
+let ticketCounter = 0
+
+const pause = (ms: number) => new Promise(resolve => setTimeout(resolve, ms))
+function barrier() {
+  let release!: () => void
+  const promise = new Promise<void>(resolve => {
+    release = resolve
+  })
+  return { promise, release }
+}
+// Writers return different shapes: the harness only inspects outcomes.
+const resultOf = (promise: Promise<unknown>) =>
+  promise.then(
+    value => ({ value: value as any, error: undefined as any }),
+    error => ({ value: undefined as any, error }),
+  )
+async function waitingOn(pattern = '%"Order"%', minimum = 1) {
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database()
+      AND wait_event_type = 'Lock' AND query ILIKE ${pattern}`
+    if (count >= minimum) return
+    await pause(20)
+  }
+  throw new Error(`No connection waited on ${pattern}`)
+}
+function holdFiscal(orderId: string, after: (tx: Prisma.TransactionClient) => Promise<unknown> = async () => {}, timeout = 15_000) {
+  const entered = barrier(),
+    finish = barrier()
+  const done = prisma.$transaction(
+    async tx => {
+      await bloquearOrdenParaFacturar(tx, orderId)
+      entered.release()
+      await finish.promise
+      await after(tx)
+    },
+    { timeout },
+  )
+  return { entered: entered.promise, release: finish.release, done }
+}
+/** The barrier belongs to the actual ordered scope claim of this fixture, never a Venue or unrelated Order. */
+function pauseAfterScopeOrderLock(orderId: string, entered: (pid: number) => void, finish: Promise<void>) {
+  const original = prisma.$transaction.bind(prisma)
+  let paused = false
+  jest.spyOn(prisma, '$transaction').mockImplementation(((callback: any, options: any) =>
+    Array.isArray(callback)
+      ? original(callback, options)
+      : original(
+          async tx =>
+            callback(
+              new Proxy(tx, {
+                get(target, key) {
+                  if (key !== '$queryRaw') return Reflect.get(target, key)
+                  return async (...args: unknown[]) => {
+                    const rows: unknown = await Reflect.apply(target.$queryRaw, target, args)
+                    const sql = Array.isArray(args[0]) ? args[0].join('?').replace(/\s+/g, ' ').trim() : ''
+                    const ids = args[2]
+                    if (
+                      !paused &&
+                      sql === 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE' &&
+                      args[1] === venueId &&
+                      Array.isArray(ids) &&
+                      ids.includes(orderId) &&
+                      Array.isArray(rows) &&
+                      rows.some(row => row.id === orderId)
+                    ) {
+                      paused = true
+                      const [{ pid }] = await target.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+                      entered(pid)
+                      await finish
+                    }
+                    return rows
+                  }
+                },
+              }),
+            ),
+          options,
+        )) as any)
+}
+async function waitingOnBackend(pid: number) {
+  for (let attempt = 0; attempt < 150; attempt++) {
+    const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
+      SELECT count(*)::int AS count FROM pg_stat_activity
+      WHERE ${pid}::int = ANY(pg_blocking_pids(pid)) AND query ILIKE '%"Order"%'`
+    if (count > 0) return
+    await pause(20)
+  }
+  throw new Error(`No fiscal connection waited on writer backend ${pid}`)
+}
+/** Runs `run` while fiscal admission holds the Order; returns its outcome after fiscal commits. */
+async function whileFiscalHolds(orderId: string, change: (tx: Prisma.TransactionClient) => Promise<unknown>, run: () => Promise<unknown>) {
+  const fiscal = holdFiscal(orderId, change)
+  let writer: ReturnType<typeof resultOf> | undefined
+  try {
+    await fiscal.entered
+    writer = resultOf(run())
+    await waitingOn()
+  } finally {
+    fiscal.release()
+    await Promise.allSettled([fiscal.done, ...(writer ? [writer] : [])])
+  }
+  await fiscal.done
+  return writer!
+}
+async function snapshot(orderId: string, db: Prisma.TransactionClient = prisma) {
+  const o = await db.order.findUniqueOrThrow({
+    where: { id: orderId },
+    include: {
+      items: { orderBy: { id: 'asc' } },
+      orderDiscounts: { orderBy: { id: 'asc' } },
+      promotions: { orderBy: { id: 'asc' } },
+    },
+  })
+  return {
+    status: o.status,
+    paymentStatus: o.paymentStatus,
+    version: o.version,
+    subtotal: Number(o.subtotal),
+    discount: Number(o.discountAmount),
+    total: Number(o.total),
+    // B2b (Codex r2: r1 #9): la foto ve también el impuesto de la cabecera y la reducción de cada fila — las escrituras fiscales
+    // de D16 retroceden con todo lo demás.
+    tax: Number(o.taxAmount),
+    paid: Number(o.paidAmount),
+    remaining: Number(o.remainingBalance),
+    // B2 (Codex r1 #8): la foto ve el descuento propio de cada renglón y el reparto de cada fila.
+    items: o.items.map(i => ({
+      id: i.id,
+      total: Number(i.total),
+      promo: i.orderPromotionId,
+      seat: i.seat,
+      discount: Number(i.discountAmount),
+      appliedDiscountId: i.appliedDiscountId,
+    })),
+    discounts: o.orderDiscounts.map(d => ({
+      id: d.id,
+      amount: Number(d.amount),
+      taxReduction: Number(d.taxReduction),
+      loyalty: d.loyaltyTransactionId,
+      reparto: d.reparto,
+    })),
+    promotions: o.promotions.map(p => p.instanceId),
+  }
+}
+type Fixture = Awaited<ReturnType<typeof newOrder>>
+async function state(o: Fixture, db: Prisma.TransactionClient = prisma) {
+  const rewards = await db.stampReward.findMany({ where: { id: { in: o.rewardIds } }, orderBy: { id: 'asc' }, take: 10 })
+  return {
+    order: await snapshot(o.id, db),
+    points: (await db.customer.findUniqueOrThrow({ where: { id: customerId } })).loyaltyPoints,
+    rewards: rewards.map(r => ({ status: r.status, orderDiscountId: r.orderDiscountId })),
+    loyaltyTransactions: await db.loyaltyTransaction.count({ where: { orderId: o.id } }),
+    venueOrders: await db.order.count({ where: { venueId } }),
+  }
+}
+async function newReward(data: Partial<Prisma.StampRewardUncheckedCreateInput> = {}) {
+  const card = await prisma.stampCard.create({
+    data: { customerId, venueId, cycle: ++cycle, stampsRequired: 1, stampsEarned: 1, completedAt: new Date() },
+  })
+  return prisma.stampReward.create({
+    data: { stampCardId: card.id, customerId, venueId, rewardType: 'FIXED_AMOUNT', rewardValue: 30, rewardLabel: 'Premio', ...data },
+  })
+}
+type Kind = 'plain' | 'discount' | 'stampDiscount' | 'promotion' | 'reward'
+async function newOrder(kind: Kind = 'plain') {
+  const order = await prisma.order.create({
+    data: {
+      venueId,
+      orderNumber: randomUUID(),
+      customerId,
+      subtotal: 150,
+      discountAmount: 0,
+      taxAmount: 0,
+      total: 150,
+      remainingBalance: 150,
+      items: {
+        create: [
+          { productId: productA, productName: 'Plato', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100, seat: 1 },
+          { productId: productB, productName: 'Bebida', quantity: 1, unitPrice: 50, taxAmount: 0, total: 50, seat: 2 },
+        ],
+      },
+    },
+    include: { items: { orderBy: { total: 'desc' } } },
+  })
+  const fixture = {
+    id: order.id,
+    items: order.items.map(i => i.id),
+    orderDiscountId: '',
+    orderPromotionId: '',
+    rewardIds: [] as string[],
+  }
+  if (kind === 'discount' || kind === 'stampDiscount') {
+    // A redemption already on the check: removing it must give the points (or the reward) back in the same tx.
+    const loyalty =
+      kind === 'discount'
+        ? await prisma.loyaltyTransaction.create({ data: { customerId, type: 'REDEEM', points: -1000, orderId: order.id } })
+        : null
+    if (loyalty) await prisma.customer.update({ where: { id: customerId }, data: { loyaltyPoints: { decrement: 1000 } } })
+    fixture.orderDiscountId = (
+      await prisma.orderDiscount.create({
+        data: {
+          orderId: order.id,
+          type: 'FIXED_AMOUNT',
+          name: 'Recompensa',
+          value: 10,
+          amount: 10,
+          isManual: true,
+          loyaltyTransactionId: loyalty?.id ?? null,
+        },
+      })
+    ).id
+    if (kind === 'stampDiscount') {
+      fixture.rewardIds.push((await newReward({ status: 'REDEEMED', redeemedAt: new Date(), orderDiscountId: fixture.orderDiscountId })).id)
+    }
+    await prisma.order.update({ where: { id: order.id }, data: { discountAmount: 10, total: 140, remainingBalance: 140 } })
+  }
+  if (kind === 'promotion') {
+    const op = await prisma.orderPromotion.create({
+      data: {
+        orderId: order.id,
+        promotionId,
+        instanceId: randomUUID(),
+        snapshotJson: { name: 'Combo' },
+        grossCents: 15000,
+        discountCents: 6000,
+        netCents: 9000,
+      },
+    })
+    await prisma.orderItem.createMany({
+      data: [
+        {
+          orderId: order.id,
+          orderPromotionId: op.id,
+          productId: productA,
+          productName: 'Plato',
+          quantity: 1,
+          unitPrice: 100,
+          discountAmount: 40,
+          taxAmount: 0,
+          total: 60,
+        },
+        {
+          orderId: order.id,
+          orderPromotionId: op.id,
+          productId: productB,
+          productName: 'Bebida',
+          quantity: 1,
+          unitPrice: 50,
+          discountAmount: 20,
+          taxAmount: 0,
+          total: 30,
+        },
+      ],
+    })
+    await prisma.order.update({ where: { id: order.id }, data: { subtotal: 240, total: 240, remainingBalance: 240 } })
+    fixture.orderPromotionId = op.id
+  }
+  if (kind === 'reward') fixture.rewardIds.push((await newReward()).id)
+  return fixture
+}
+
+const writers = [
+  ['applyDiscount', 'plain', (o: Fixture, v = venueId) => applyOrderDiscount(v, o.id, discountId, staffId)],
+  ['removeDiscount', 'discount', (o: Fixture, v = venueId) => removeOrderDiscount(v, o.id, o.orderDiscountId, staffId)],
+  ['split', 'plain', (o: Fixture, v = venueId) => splitOrderItems(v, o.id, [o.items[1]], staffId)],
+  ['splitBySeat', 'plain', (o: Fixture, v = venueId) => splitOrderBySeat(v, o.id, staffId)],
+  [
+    'applyPromotion',
+    'plain',
+    (o: Fixture, v = venueId) =>
+      applyPromotionToOrder({ venueId: v, orderId: o.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() }),
+  ],
+  [
+    'removePromotion',
+    'promotion',
+    (o: Fixture, v = venueId) => removePromotionFromOrder({ venueId: v, orderId: o.id, orderPromotionId: o.orderPromotionId }),
+  ],
+  ['redeemPoints', 'plain', (o: Fixture, v = venueId) => redeemPointsToOrder(v, o.id, customerId, 1000, staffId)],
+  ['redeemStamp', 'reward', (o: Fixture, v = venueId) => redeemStampReward(v, o.id, o.rewardIds[0], { staffId })],
+] as const
+type Name = (typeof writers)[number][0]
+const PAID_MESSAGE: Record<Name, string> = {
+  applyDiscount: 'No se puede descontar una orden ya pagada',
+  removeDiscount: 'No se puede modificar una orden ya pagada',
+  split: 'No se puede separar una cuenta ya pagada',
+  splitBySeat: 'No se puede dividir una cuenta ya pagada',
+  applyPromotion: 'A una cuenta ya pagada no se le pueden agregar promociones.',
+  removePromotion: 'Esta cuenta ya se pagó: retira la promoción con un reembolso, no borrándola.',
+  redeemPoints: 'No se puede modificar una orden ya pagada',
+  redeemStamp: 'No se puede aplicar un premio a una cuenta ya pagada.',
+}
+const NOT_FOUND_MESSAGE: Record<Name, string> = {
+  applyDiscount: 'Order not found',
+  removeDiscount: 'Order not found',
+  split: 'Order not found',
+  splitBySeat: 'Order not found',
+  applyPromotion: 'No encontramos esa cuenta en este establecimiento.',
+  removePromotion: 'No encontramos esa promoción en la cuenta.',
+  redeemPoints: 'Orden no encontrada',
+  redeemStamp: 'Orden no encontrada',
+}
+type State = Awaited<ReturnType<typeof state>>
+/** B2: el reparto de la fila nueva YA estaba escrito (con renglones) cuando falló la escritura de totales. */
+const repartida = (i: State) => Object.keys((i.order.discounts.at(-1)?.reparto as any)?.renglones ?? {}).length > 0
+/** Which Order-total write fails, and what must already be written in the SAME tx when it does. */
+const ROLLBACK: Record<Name, { nth: number; written: (inside: State, before: State) => boolean }> = {
+  applyDiscount: { nth: 1, written: (i, b) => i.order.discounts.length === b.order.discounts.length + 1 && repartida(i) },
+  removeDiscount: { nth: 1, written: (i, b) => i.points === b.points + 1000 && i.order.discounts.length === 0 },
+  // The SECOND total write (the new check's) fails after the new check, the moved line and the source totals exist.
+  split: { nth: 2, written: (i, b) => i.venueOrders === b.venueOrders + 1 && i.order.items.length === 1 && i.order.subtotal === 100 },
+  splitBySeat: {
+    nth: 2,
+    written: (i, b) => i.venueOrders === b.venueOrders + 1 && i.order.items.length === 1 && i.order.subtotal === 100,
+  },
+  applyPromotion: { nth: 1, written: i => i.order.promotions.length === 1 && i.order.items.length === 4 },
+  removePromotion: { nth: 1, written: i => i.order.promotions.length === 0 && i.order.items.length === 2 },
+  redeemPoints: {
+    nth: 1,
+    written: (i, b) => i.points === b.points - 1000 && i.order.discounts.length === 1 && i.loyaltyTransactions === 1 && repartida(i),
+  },
+  redeemStamp: { nth: 1, written: i => i.rewards[0]?.status === 'REDEEMED' && i.order.discounts.length === 1 && repartida(i) },
+}
+
+/** Proxies every interactive transaction; `onOrderUpdate` / `onCreate` intercept the named calls on that tx. */
+function interceptTransactions(hooks: {
+  orderUpdate?: (args: any, tx: Prisma.TransactionClient, next: () => Promise<unknown>) => Promise<unknown>
+  create?: { model: string; run: (args: any, tx: Prisma.TransactionClient, next: () => Promise<unknown>) => Promise<unknown> }
+}) {
+  const original = prisma.$transaction.bind(prisma)
+  jest.spyOn(prisma, '$transaction').mockImplementation(((callback: any, options: any) =>
+    Array.isArray(callback)
+      ? original(callback)
+      : original(
+          async tx =>
+            callback(
+              new Proxy(tx, {
+                get(target, key) {
+                  if (key === 'order' && hooks.orderUpdate) {
+                    return new Proxy(target.order, {
+                      get(model, method) {
+                        return method === 'update'
+                          ? (args: any) => hooks.orderUpdate!(args, tx, () => model.update(args))
+                          : Reflect.get(model, method)
+                      },
+                    })
+                  }
+                  if (hooks.create && key === hooks.create.model) {
+                    const delegate = (target as any)[key]
+                    return new Proxy(delegate, {
+                      get(model, method) {
+                        return method === 'create'
+                          ? (args: any) => hooks.create!.run(args, tx, () => model.create(args))
+                          : Reflect.get(model, method)
+                      },
+                    })
+                  }
+                  return Reflect.get(target, key)
+                },
+              }),
+            ),
+          options,
+        )) as any)
+}
+
+beforeAll(async () => {
+  await prisma.organization.create({ data: { id: venueId, name: venueId, email: `${venueId}@test.example`, phone: '5500000000' } })
+  await prisma.venue.create({ data: { id: venueId, organizationId: venueId, name: venueId, slug: venueId } })
+  await prisma.venue.create({ data: { id: otherVenueId, organizationId: venueId, name: otherVenueId, slug: otherVenueId } })
+  staffId = (await prisma.staff.create({ data: { email: `${venueId}@staff.test`, firstName: 'Mobile', lastName: 'Writers' } })).id
+  await prisma.staffVenue.create({ data: { venueId, staffId, role: 'MANAGER' } })
+  const category = await prisma.menuCategory.create({ data: { venueId, name: 'Catalog', slug: 'catalog' } })
+  productA = (await prisma.product.create({ data: { venueId, categoryId: category.id, name: 'Plato', sku: 'T4-A', price: 100 } })).id
+  productB = (await prisma.product.create({ data: { venueId, categoryId: category.id, name: 'Bebida', sku: 'T4-B', price: 50 } })).id
+  discountId = (await prisma.discount.create({ data: { venueId, name: 'Diez', type: 'PERCENTAGE', value: 10, scope: 'ORDER' } })).id
+  fixedDiscountId = (
+    await prisma.discount.create({ data: { venueId, name: 'Doscientos', type: 'FIXED_AMOUNT', value: 200, scope: 'ORDER' } })
+  ).id
+  customerId = (await prisma.customer.create({ data: { venueId, firstName: 'Cliente', loyaltyPoints: 1_000_000 } })).id
+  await prisma.loyaltyConfig.create({ data: { venueId, active: true, redemptionRate: 0.01, minPointsRedeem: 100 } })
+  const combo = (status: 'PUBLISHED' | 'DRAFT') =>
+    prisma.promotion.create({
+      data: {
+        venueId,
+        name: `Combo ${status}`,
+        type: 'BUNDLE',
+        pricingMode: 'FIXED_TOTAL',
+        priceCents: 9000,
+        status,
+        daysOfWeek: [],
+        groups: {
+          create: [
+            { name: 'Plato', displayOrder: 0, options: { create: [{ productId: productA }] } },
+            { name: 'Bebida', displayOrder: 1, options: { create: [{ productId: productB }] } },
+          ],
+        },
+      },
+      include: { groups: { include: { options: true }, orderBy: { displayOrder: 'asc' } } },
+    })
+  const published = await combo('PUBLISHED')
+  const draft = await combo('DRAFT')
+  promotionId = published.id
+  draftPromotionId = draft.id
+  selections = published.groups.map(g => ({ groupId: g.id, optionId: g.options[0].id }))
+  draftSelections = draft.groups.map(g => ({ groupId: g.id, optionId: g.options[0].id }))
+  const area = await prisma.fulfillmentArea.create({ data: { venueId, name: 'Cremería' } })
+  await prisma.terminal.create({
+    data: { venueId, name: 'Cremería', type: 'POS_ANDROID', deviceUid: AREA_DEVICE, partition: 47, fulfillmentAreaId: area.id },
+  })
+  cashTerminalId = (
+    await prisma.terminal.create({ data: { venueId, name: 'Caja', type: 'POS_ANDROID', deviceUid: `cash-${randomUUID()}`, partition: 48 } })
+  ).id
+  modifierId = (
+    await prisma.modifierGroup.create({
+      data: { venueId, name: 'Corte', modifiers: { create: [{ name: 'Rebanado fino', price: 5 }] } },
+      include: { modifiers: true },
+    })
+  ).modifiers[0].id
+})
+afterEach(() => jest.restoreAllMocks())
+afterAll(async () => {
+  if (!venueId) return
+  await prisma.posSyncIntent.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
+  await prisma.payment.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
+  await prisma.order.deleteMany({ where: { venueId: { in: [venueId, otherVenueId] } } })
+  await prisma.terminal.deleteMany({ where: { venueId } })
+  await prisma.fulfillmentArea.deleteMany({ where: { venueId } })
+  await prisma.modifier.deleteMany({ where: { group: { venueId } } })
+  await prisma.modifierGroup.deleteMany({ where: { venueId } })
+  await prisma.stampReward.deleteMany({ where: { venueId } })
+  await prisma.stampCard.deleteMany({ where: { venueId } })
+  await prisma.loyaltyTransaction.deleteMany({ where: { customerId } })
+  await prisma.customer.deleteMany({ where: { venueId } })
+  await prisma.loyaltyConfig.deleteMany({ where: { venueId } })
+  await prisma.promotion.deleteMany({ where: { venueId } })
+  await prisma.discount.deleteMany({ where: { venueId } })
+  await prisma.product.deleteMany({ where: { venueId } })
+  await prisma.menuCategory.deleteMany({ where: { venueId } })
+  await prisma.staffVenue.deleteMany({ where: { venueId } })
+  await prisma.staff.deleteMany({ where: { id: staffId } })
+  await prisma.venue.deleteMany({ where: { id: { in: [venueId, otherVenueId] } } })
+  await prisma.organization.deleteMany({ where: { id: venueId } })
+})
+
+describe('locked mobile writers against real fiscal admission', () => {
+  it.each(writers)('%s waits for the fiscal Order lock, then rereads PAID without a version bump', async (name, kind, run) => {
+    const o = await newOrder(kind)
+    const before = await state(o)
+    const topologyWriter = name === 'split' || name === 'splitBySeat'
+    const audit = topologyWriter ? jest.spyOn(activityLog, 'logAction') : undefined
+    const publication = topologyWriter ? jest.spyOn(socketManager, 'getBroadcastingService') : undefined
+    const auditCallsBefore = audit?.mock.calls.length
+    const publicationCallsBefore = publication?.mock.calls.length
+    const fiscal = holdFiscal(o.id, tx =>
+      tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: before.order.total } }),
+    )
+    let writer: ReturnType<typeof resultOf> | undefined
+    try {
+      await fiscal.entered
+      writer = resultOf(run(o))
+      await waitingOn()
+      // While fiscal admission holds the Order, nothing of the writer is visible.
+      expect(await state(o)).toEqual(before)
+    } finally {
+      fiscal.release()
+      await Promise.allSettled([fiscal.done, ...(writer ? [writer] : [])])
+    }
+    await fiscal.done
+    const paidState = { ...before, order: { ...before.order, paymentStatus: 'PAID' as const, paid: before.order.total } }
+    if (topologyWriter) {
+      expect((await writer!).error).toBeInstanceOf(OrderTableTopologyChanged)
+      expect((await writer!).error.constructor).toBe(OrderTableTopologyChanged)
+      expect((await writer!).error.message).toBe('ORDER_TABLE_TOPOLOGY_CHANGED')
+    } else {
+      expect((await writer!).error?.message).toBe(PAID_MESSAGE[name])
+    }
+    expect(await state(o)).toEqual(paidState)
+    if (topologyWriter) {
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+      const stable = await resultOf(run(o))
+      expect(stable.error).toBeInstanceOf(BadRequestError)
+      expect(stable.error).toMatchObject({ statusCode: 400, message: PAID_MESSAGE[name] })
+      expect(await state(o)).toEqual(paidState)
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+    }
+  })
+
+  it.each(writers)('%s holds the Order until fiscal admission can read the complete operation', async (name, kind, run) => {
+    const o = await newOrder(kind)
+    const entered = barrier(),
+      finish = barrier()
+    let writerPid: number | undefined
+    const acquired = (pid: number) => {
+      writerPid = pid
+      entered.release()
+    }
+    if (name === 'split' || name === 'splitBySeat') {
+      pauseAfterScopeOrderLock(o.id, acquired, finish.promise)
+    } else {
+      const lock = orderLock.lockExistingOrderForPayment
+      jest.spyOn(orderLock, 'lockExistingOrderForPayment').mockImplementationOnce(async (...args) => {
+        const value = await lock(...args)
+        expect(value).toBe(true)
+        expect(args[1]).toEqual({ venueId, orderId: o.id })
+        const [{ pid }] = await args[0].$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        acquired(pid)
+        await finish.promise
+        return value
+      })
+    }
+    const writer = resultOf(run(o))
+    let fiscal: Promise<Awaited<ReturnType<typeof snapshot>>> | undefined
+    try {
+      await Promise.race([
+        entered.promise,
+        writer.then(() => {
+          throw new Error('writer never acquired Order lock')
+        }),
+      ])
+      fiscal = prisma.$transaction(async tx => {
+        await bloquearOrdenParaFacturar(tx, o.id)
+        return snapshot(o.id, tx)
+      })
+      expect(writerPid).toEqual(expect.any(Number))
+      await waitingOnBackend(writerPid!)
+    } finally {
+      finish.release()
+      await Promise.allSettled([writer, ...(fiscal ? [fiscal] : [])])
+    }
+    expect((await writer).error).toBeUndefined()
+    expect(await fiscal!).toEqual(await snapshot(o.id))
+  })
+
+  it.each(writers)('%s rolls back every write when a later Order-total write fails', async (name, kind, run) => {
+    const o = await newOrder(kind)
+    const before = await state(o)
+    const { nth, written } = ROLLBACK[name]
+    let totals = 0,
+      observed = false
+    interceptTransactions({
+      orderUpdate: async (args, tx, next) => {
+        if (args?.data?.total === undefined || ++totals < nth) return next()
+        observed = written(await state(o, tx), before)
+        throw new Error('injected failure after successful writes')
+      },
+    })
+    await expect(run(o)).rejects.toThrow('injected failure after successful writes')
+    expect(observed).toBe(true)
+    expect(await state(o)).toEqual(before)
+  })
+
+  it.each(writers)('%s from another venue gets a 404 and writes nothing', async (name, kind, run) => {
+    const o = await newOrder(kind)
+    const before = await state(o)
+    await expect(run(o, otherVenueId)).rejects.toMatchObject({ statusCode: 404, message: NOT_FOUND_MESSAGE[name] })
+    expect(await state(o)).toEqual(before)
+  })
+})
+
+describe('split writers take the Venue before the source Order (deleteVenue order: Venue, then its Orders)', () => {
+  it.each([
+    ['split', (o: Fixture) => splitOrderItems(venueId, o.id, [o.items[1]], staffId)],
+    ['splitBySeat', (o: Fixture) => splitOrderBySeat(venueId, o.id, staffId)],
+  ] as const)('%s waits for a deletion holding the Venue without holding the source Order, then finishes', async (_name, run) => {
+    const o = await newOrder()
+    const entered = barrier(),
+      finish = barrier()
+    const lock = jest.spyOn(orderLock, 'lockExistingOrderForPayment')
+    const deleting = prisma.$transaction(
+      async tx => {
+        // Same ordering as deleteVenue / liveDemoCleanup: Venue FOR UPDATE, then its Orders.
+        await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
+        entered.release()
+        await finish.promise
+        await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${o.id} FOR UPDATE NOWAIT`
+      },
+      { timeout: 15_000 },
+    )
+    let writer: ReturnType<typeof resultOf> | undefined
+    try {
+      await entered.promise
+      writer = resultOf(run(o))
+      let waiting = false
+      for (let attempt = 0; attempt < 150 && !waiting; attempt++) {
+        const [{ count }] = await prisma.$queryRaw<Array<{ count: number }>>`
+          SELECT count(*)::int AS count FROM pg_stat_activity WHERE datname = current_database()
+          AND wait_event_type = 'Lock' AND (query ILIKE '%"Venue"%' OR query ILIKE '%"Order"%')`
+        waiting = count > 0
+        if (!waiting) await pause(20)
+      }
+      expect(waiting).toBe(true)
+      // It waits on the Venue and has not taken the source Order: another connection can still lock it without waiting.
+      expect(lock.mock.calls.length).toBe(0)
+      await prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${o.id} FOR UPDATE NOWAIT`)
+    } finally {
+      finish.release()
+      const deletion = await resultOf(deleting)
+      await writer
+      expect(deletion.error).toBeUndefined()
+    }
+    expect((await writer!).error).toBeUndefined()
+    expect((await snapshot(o.id)).items).toHaveLength(1)
+  })
+})
+
+describe('fresh decisions after waiting', () => {
+  it('applyDiscount caps a fixed discount against the subtotal and discount read after waiting', async () => {
+    const o = await newOrder()
+    const writer = await whileFiscalHolds(
+      o.id,
+      async tx => {
+        await tx.orderItem.create({
+          data: { orderId: o.id, productId: productA, productName: 'Plato', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+        })
+        await tx.order.update({ where: { id: o.id }, data: { subtotal: 250, discountAmount: 30, total: 220, remainingBalance: 220 } })
+      },
+      () => applyOrderDiscount(venueId, o.id, fixedDiscountId, staffId),
+    )
+    expect(writer.error).toBeUndefined()
+    // Fresh: min(200, 250) capped at 250 − 30 = 220 → 200. From the stale photo it would have been 150.
+    const after = await snapshot(o.id)
+    // Codex r1 P1 (revisión final de B2): the holder's $30 lives only in the header (no row). Before the new row it is frozen
+    // in its own row without reparto, so the recalculation keeps it (it used to drop it: discount 200, total 50).
+    expect(after.discounts.map(d => d.amount).sort((a, b) => a - b)).toEqual([30, 200])
+    expect(after.discounts.find(d => d.amount === 30)?.reparto).toBeNull()
+    expect(after).toMatchObject({ subtotal: 250, discount: 230, total: 20 })
+  })
+
+  it('split rereads the source lines: the line that was to stay was removed while it waited', async () => {
+    const o = await newOrder()
+    const before = await state(o)
+    const writer = await whileFiscalHolds(
+      o.id,
+      async tx => {
+        await tx.orderItem.delete({ where: { id: o.items[0] } })
+        await tx.order.update({ where: { id: o.id }, data: { subtotal: 50, total: 50, remainingBalance: 50 } })
+      },
+      () => splitOrderItems(venueId, o.id, [o.items[1]], staffId),
+    )
+    expect(writer.error?.message).toBe('Debe quedar al menos un artículo en la cuenta original')
+    const after = await state(o)
+    expect(after.venueOrders).toBe(before.venueOrders)
+    expect(after.order.items.map(i => i.id)).toEqual([o.items[1]])
+  })
+
+  it('split rereads a concurrent payment (PARTIAL without a version bump) and refuses', async () => {
+    const o = await newOrder()
+    const before = await state(o)
+    const audit = jest.spyOn(activityLog, 'logAction')
+    const publication = jest.spyOn(socketManager, 'getBroadcastingService')
+    const auditCallsBefore = audit?.mock.calls.length
+    const publicationCallsBefore = publication?.mock.calls.length
+    const writer = await whileFiscalHolds(
+      o.id,
+      tx => tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PARTIAL', paidAmount: 20, remainingBalance: 130 } }),
+      () => splitOrderItems(venueId, o.id, [o.items[1]], staffId),
+    )
+    expect(writer.error).toBeInstanceOf(OrderTableTopologyChanged)
+    expect(writer.error.constructor).toBe(OrderTableTopologyChanged)
+    expect(writer.error.message).toBe('ORDER_TABLE_TOPOLOGY_CHANGED')
+    const partialState = { ...before, order: { ...before.order, paymentStatus: 'PARTIAL' as const, paid: 20, remaining: 130 } }
+    expect(await state(o)).toEqual(partialState)
+    expect(audit.mock.calls).toHaveLength(auditCallsBefore!)
+    expect(publication.mock.calls).toHaveLength(publicationCallsBefore!)
+    const stable = await resultOf(splitOrderItems(venueId, o.id, [o.items[1]], staffId))
+    expect(stable.error).toBeInstanceOf(BadRequestError)
+    expect(stable.error).toMatchObject({ statusCode: 400, message: PAID_MESSAGE.split })
+    expect(await state(o)).toEqual(partialState)
+    expect(audit.mock.calls).toHaveLength(auditCallsBefore!)
+    expect(publication.mock.calls).toHaveLength(publicationCallsBefore!)
+  })
+
+  it('split keeps a line added while it waited on the source and recalculates both checks', async () => {
+    const o = await newOrder()
+    const writer = await whileFiscalHolds(
+      o.id,
+      async tx => {
+        await tx.orderItem.create({
+          data: { orderId: o.id, productId: productA, productName: 'Extra', quantity: 1, unitPrice: 70, taxAmount: 0, total: 70 },
+        })
+        await tx.order.update({ where: { id: o.id }, data: { subtotal: 220, total: 220, remainingBalance: 220 } })
+      },
+      () => splitOrderItems(venueId, o.id, [o.items[1]], staffId),
+    )
+    expect(writer.error).toBeUndefined()
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 170, total: 170, remaining: 170 })
+    expect(await snapshot(writer.value.created.id)).toMatchObject({ subtotal: 50, total: 50, items: [{ id: o.items[1] }] })
+  })
+
+  it('splitBySeat groups the seats read after waiting', async () => {
+    const o = await newOrder()
+    const before = await state(o)
+    const writer = await whileFiscalHolds(
+      o.id,
+      tx => tx.orderItem.update({ where: { id: o.items[1] }, data: { seat: 1 } }),
+      () => splitOrderBySeat(venueId, o.id, staffId),
+    )
+    expect(writer.error?.message).toBe('Se necesitan al menos dos asientos con artículos para dividir por puesto')
+    expect((await state(o)).venueOrders).toBe(before.venueOrders)
+  })
+
+  it('applyPromotion inherits the discount read after waiting', async () => {
+    const o = await newOrder()
+    const writer = await whileFiscalHolds(
+      o.id,
+      tx => tx.order.update({ where: { id: o.id }, data: { discountAmount: 20, total: 130, remainingBalance: 130 } }),
+      () => applyPromotionToOrder({ venueId, orderId: o.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() }),
+    )
+    expect(writer.error).toBeUndefined()
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 240, discount: 20, total: 220, remaining: 220 })
+  })
+
+  it('removePromotion inherits the discount read after waiting', async () => {
+    const o = await newOrder('promotion')
+    const writer = await whileFiscalHolds(
+      o.id,
+      tx => tx.order.update({ where: { id: o.id }, data: { discountAmount: 20, total: 220, remainingBalance: 220 } }),
+      () => removePromotionFromOrder({ venueId, orderId: o.id, orderPromotionId: o.orderPromotionId }),
+    )
+    expect(writer.error).toBeUndefined()
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 150, discount: 20, total: 130, promotions: [] })
+  })
+
+  it('two concurrent applications of the same instance create one promotion (created:false for the replay)', async () => {
+    const o = await newOrder()
+    const instanceId = randomUUID()
+    const apply = () => applyPromotionToOrder({ venueId, orderId: o.id, promotionId, instanceId, selections, soldAt: new Date() })
+    const fiscal = holdFiscal(o.id)
+    let jobs: Array<ReturnType<typeof resultOf>> = []
+    try {
+      await fiscal.entered
+      jobs = [resultOf(apply()), resultOf(apply())]
+      await waitingOn('%"Order"%', 2)
+    } finally {
+      fiscal.release()
+      await fiscal.done
+      await Promise.all(jobs)
+    }
+    const outcomes = await Promise.all(jobs)
+    expect(outcomes.map(r => r.error)).toEqual([undefined, undefined])
+    expect(outcomes.map(r => r.value.created).sort()).toEqual([false, true])
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 240, total: 240, promotions: [instanceId] })
+    expect((await snapshot(o.id)).items).toHaveLength(4)
+  })
+
+  it('a replayed instance on an order that was paid meanwhile still answers created:false and writes nothing', async () => {
+    const o = await newOrder()
+    const instanceId = randomUUID()
+    const apply = () => applyPromotionToOrder({ venueId, orderId: o.id, promotionId, instanceId, selections, soldAt: new Date() })
+    await apply()
+    await prisma.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: 240, remainingBalance: 0 } })
+    const before = await state(o)
+    await expect(apply()).resolves.toMatchObject({ created: false })
+    expect(await state(o)).toEqual(before)
+  })
+
+  it('redeemPoints caps against the base read after waiting and burns only what it gives', async () => {
+    const o = await newOrder()
+    const before = await state(o)
+    const writer = await whileFiscalHolds(
+      o.id,
+      async tx => {
+        await tx.orderItem.delete({ where: { id: o.items[0] } })
+        await tx.order.update({ where: { id: o.id }, data: { subtotal: 50, total: 50, remainingBalance: 50 } })
+      },
+      () => redeemPointsToOrder(venueId, o.id, customerId, 10_000, staffId),
+    )
+    expect(writer.error).toBeUndefined()
+    // 10 000 × 0.01 = 100, but the fresh base is 50: 50 given, 5 000 burned (from the stale photo: 100 and 10 000).
+    expect(writer.value).toMatchObject({ pointsRedeemed: 5000, discountAmount: 50 })
+    const after = await state(o)
+    expect(before.points - after.points).toBe(5000)
+    expect(after.order).toMatchObject({ discount: 50, total: 0, discounts: [{ amount: 50 }] })
+  })
+
+  it('redeemStamp FREE_PRODUCT gives the most expensive line read after waiting', async () => {
+    const o = await newOrder()
+    const reward = await newReward({ rewardType: 'FREE_PRODUCT', rewardValue: null })
+    const writer = await whileFiscalHolds(
+      o.id,
+      async tx => {
+        await tx.orderItem.create({
+          data: { orderId: o.id, productId: productA, productName: 'Especial', quantity: 1, unitPrice: 120, taxAmount: 0, total: 120 },
+        })
+        await tx.order.update({ where: { id: o.id }, data: { subtotal: 270, total: 270, remainingBalance: 270 } })
+      },
+      () => redeemStampReward(venueId, o.id, reward.id, { staffId }),
+    )
+    expect(writer.error).toBeUndefined()
+    expect(writer.value.discountAmount).toBe(120)
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 270, discount: 120, total: 150 })
+  })
+
+  it('two rewards on the same check serialize: the second one only takes what is left of the base', async () => {
+    const o = await newOrder()
+    const [r1, r2] = [await newReward({ rewardValue: 100 }), await newReward({ rewardValue: 100 })]
+    const fiscal = holdFiscal(o.id)
+    let jobs: Array<ReturnType<typeof resultOf>> = []
+    try {
+      await fiscal.entered
+      jobs = [
+        resultOf(redeemStampReward(venueId, o.id, r1.id, { staffId })),
+        resultOf(redeemStampReward(venueId, o.id, r2.id, { staffId })),
+      ]
+      await waitingOn('%"Order"%', 2)
+    } finally {
+      fiscal.release()
+      await fiscal.done
+      await Promise.all(jobs)
+    }
+    const outcomes = await Promise.all(jobs)
+    expect(outcomes.map(r => r.error)).toEqual([undefined, undefined])
+    expect(outcomes.map(r => r.value.discountAmount).sort((a, b) => a - b)).toEqual([50, 100])
+    expect(await snapshot(o.id)).toMatchObject({ subtotal: 150, discount: 150, total: 0 })
+  })
+
+  it('the same reward on two checks burns once: the second waits on the reward row and finds it redeemed', async () => {
+    const reward = await newReward()
+    const first = await newOrder(),
+      second = await newOrder()
+    const beforeSecond = await snapshot(second.id)
+    const burned = barrier(),
+      resume = barrier()
+    let paused = false
+    interceptTransactions({
+      create: {
+        model: 'orderDiscount',
+        run: async (_args, _tx, next) => {
+          if (!paused) {
+            paused = true
+            burned.release()
+            await resume.promise
+          }
+          return next()
+        },
+      },
+    })
+    const one = resultOf(redeemStampReward(venueId, first.id, reward.id, { staffId }))
+    let two: ReturnType<typeof resultOf> | undefined
+    try {
+      await Promise.race([
+        burned.promise,
+        one.then(() => {
+          throw new Error('first redemption never burned the reward')
+        }),
+      ])
+      two = resultOf(redeemStampReward(venueId, second.id, reward.id, { staffId }))
+      await waitingOn('%"StampReward"%')
+    } finally {
+      resume.release()
+      await one
+      await two
+    }
+    expect((await one).error).toBeUndefined()
+    expect((await two!).error?.message).toBe('Este premio ya fue canjeado.')
+    const firstAfter = await snapshot(first.id)
+    const redeemed = await prisma.stampReward.findUniqueOrThrow({ where: { id: reward.id } })
+    expect(redeemed).toMatchObject({ status: 'REDEEMED', orderDiscountId: firstAfter.discounts[0].id })
+    expect(await snapshot(second.id)).toEqual(beforeSecond)
+  })
+
+  it('removing a stamp-reward discount returns the reward and the money in one operation', async () => {
+    const o = await newOrder('stampDiscount')
+    await removeOrderDiscount(venueId, o.id, o.orderDiscountId, staffId)
+    const after = await state(o)
+    expect(after.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
+    expect(after.order).toMatchObject({ discount: 0, total: 150, discounts: [] })
+  })
+})
+
+describe('createOrderWithItems writes promotions and reaffirmed money in its creation transaction', () => {
+  const sale = (externalId: string, promotion = promotionId, chosen = selections) => ({
+    staffId,
+    externalId,
+    items: [
+      { productId: productA, quantity: 1 },
+      { promotionRef: { promotionId: promotion, promotionInstanceId: randomUUID(), selections: chosen } },
+    ],
+    discount: 2000,
+    tip: 500,
+  })
+
+  it('a promotion failure leaves no order, line or promotion behind and the externalId free for the retry', async () => {
+    const externalId = `t4-${randomUUID()}`
+    const before = {
+      orders: await prisma.order.count({ where: { venueId } }),
+      items: await prisma.orderItem.count({ where: { order: { venueId } } }),
+      promotions: await prisma.orderPromotion.count({ where: { order: { venueId } } }),
+    }
+    await expect(createOrderWithItems(venueId, sale(externalId, draftPromotionId, draftSelections) as any)).rejects.toThrow(
+      'Esa promoción no está publicada.',
+    )
+    expect({
+      orders: await prisma.order.count({ where: { venueId } }),
+      items: await prisma.orderItem.count({ where: { order: { venueId } } }),
+      promotions: await prisma.orderPromotion.count({ where: { order: { venueId } } }),
+    }).toEqual(before)
+    expect(await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } } })).toBeNull()
+
+    const retry = await createOrderWithItems(venueId, sale(externalId) as any)
+    // 100 + combo 90 − order discount 20 + tip 5 — the same arithmetic as the pre-existing reaffirmation.
+    expect(retry).toMatchObject({ total: 175, discountAmount: 20, subtotal: 190 })
+    expect(retry.promotions).toHaveLength(1)
+    expect(await prisma.order.count({ where: { venueId, externalId } })).toBe(1)
+  })
+
+  it('no concurrent reader sees the new order without its combo: plain read, fiscal admission and a retry', async () => {
+    const externalId = `t4-${randomUUID()}`
+    const input = sale(externalId)
+    const reached = barrier(),
+      resume = barrier()
+    let pendingOrderId: string | undefined
+    interceptTransactions({
+      create: {
+        model: 'orderPromotion',
+        run: async (args, _tx, next) => {
+          if (!pendingOrderId) {
+            pendingOrderId = args.data.orderId
+            reached.release()
+            await resume.promise
+          }
+          return next()
+        },
+      },
+    })
+    const creating = resultOf(createOrderWithItems(venueId, input as any))
+    let retry: ReturnType<typeof resultOf> | undefined
+    try {
+      await Promise.race([
+        reached.promise,
+        creating.then(() => {
+          throw new Error('the creation never reached its promotion')
+        }),
+      ])
+      expect(await prisma.order.findUnique({ where: { venueId_externalId: { venueId, externalId } } })).toBeNull()
+      expect(await prisma.$transaction(tx => bloquearOrdenParaFacturar(tx, pendingOrderId!))).toBeNull()
+      retry = resultOf(createOrderWithItems(venueId, input as any))
+      // Precio que vio el cliente, Task 4: el reintento ya no espera en el índice único de la orden sino ANTES, en el
+      // candado de su llave (`avoqado:order-mobile-external:v1:…`), detrás de la creación en vuelo.
+      await waitingOn('%pg_advisory_xact_lock%')
+    } finally {
+      resume.release()
+      await creating
+      await retry
+    }
+    const [one, two] = [await creating, await retry!]
+    expect(one.error).toBeUndefined()
+    expect(two.error).toBeUndefined()
+    expect(two.value.id).toBe(one.value.id)
+    expect(two.value).toMatchObject({ total: 175, discountAmount: 20 })
+    expect(two.value.promotions).toHaveLength(1)
+    expect(await prisma.order.count({ where: { venueId, externalId } })).toBe(1)
+  })
+
+  it('a stamp reward is still redeemed on the committed sale through the locked service', async () => {
+    const reward = await newReward()
+    const result = await createOrderWithItems(venueId, {
+      staffId,
+      customerId,
+      stampRewardId: reward.id,
+      items: [
+        { productId: productA, quantity: 1 },
+        { productId: productB, quantity: 1 },
+      ],
+    } as any)
+    expect(result.stampReward).toEqual({ applied: true, discountAmount: 30, rewardLabel: 'Premio' })
+    expect(result).toMatchObject({ subtotal: 150, discountAmount: 30, total: 120 })
+    expect(await prisma.stampReward.findUniqueOrThrow({ where: { id: reward.id } })).toMatchObject({ status: 'REDEEMED' })
+  })
+})
+
+describe('Plan7b zero payment admission uses the locked balance', () => {
+  it('payCashOrder rejects debt created after the zero preflight while waiting for the actual Order holder', async () => {
+    const o = await newOrder()
+    await prisma.orderItem.update({ where: { id: o.items[0] }, data: { isCortesia: true, discountAmount: 100, total: 0 } })
+    await prisma.orderItem.update({ where: { id: o.items[1] }, data: { isCortesia: true, discountAmount: 50, total: 0 } })
+    await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 150, total: 0, remainingBalance: 0 } })
+    const initial = await snapshot(o.id)
+    expect(initial).toMatchObject({ discount: 150, total: 0, remaining: 0, paymentStatus: 'PENDING' })
+    const entered = barrier(),
+      release = barrier(),
+      preflight = barrier()
+    let holderPid: number | undefined
+    const holder = prisma.$transaction(
+      async tx => {
+        expect(await orderLock.lockExistingOrderForPayment(tx, { venueId, orderId: o.id })).toBe(true)
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        holderPid = pid
+        entered.release()
+        await release.promise
+        await tx.orderItem.update({ where: { id: o.items[1] }, data: { isCortesia: false, discountAmount: 0, total: 50 } })
+        await tx.order.update({
+          where: { id: o.id },
+          data: { discountAmount: 100, total: 50, remainingBalance: 50, version: { increment: 1 } },
+        })
+        return snapshot(o.id, tx)
+      },
+      { timeout: 15_000 },
+    )
+    let payment: ReturnType<typeof resultOf> | undefined
+    let observedZeroPreflight = false
+    const receipt = jest
+      .spyOn(receiptService, 'generateAndStoreReceipt')
+      .mockRejectedValue(new Error('External receipt is outside admission test'))
+    try {
+      await entered.promise
+      const readOrder = prisma.order.findUnique.bind(prisma.order)
+      jest.spyOn(prisma.order, 'findUnique').mockImplementationOnce((async (args: any) => {
+        const row = await readOrder(args)
+        expect(row).toMatchObject({ id: o.id, total: new Prisma.Decimal(0), remainingBalance: new Prisma.Decimal(0) })
+        observedZeroPreflight = true
+        preflight.release()
+        return row
+      }) as any)
+      payment = resultOf(payCashOrder(venueId, o.id, { amount: 0, tip: 0, staffId, idempotencyKey: randomUUID(), isOfflineReplay: true }))
+      await Promise.race([
+        preflight.promise,
+        payment.then(() => {
+          throw new Error('payment never read the zero preflight')
+        }),
+      ])
+      expect(holderPid).toEqual(expect.any(Number))
+      await waitingOnBackend(holderPid!)
+    } finally {
+      release.release()
+      await Promise.allSettled([holder, ...(payment ? [payment] : [])])
+    }
+    const committed = await holder
+    const outcome = await payment!
+    expect(observedZeroPreflight).toBe(true)
+    expect(committed).toMatchObject({ discount: 100, total: 50, remaining: 50, version: initial.version + 1 })
+    expect(outcome.error).toBeInstanceOf(BadRequestError)
+    expect(outcome.error.message).toBe('Esta cuenta debe 50.00. Un cobro en $0 sólo cierra cuentas cortesiadas al 100%.')
+    expect(outcome.value).toBeUndefined()
+    expect(await snapshot(o.id)).toEqual(committed)
+    expect(await prisma.payment.count({ where: { venueId, orderId: o.id } })).toBe(0)
+    expect(await prisma.venueTransaction.count({ where: { venueId, payment: { orderId: o.id } } })).toBe(0)
+    expect(await prisma.paymentAllocation.count({ where: { orderId: o.id } })).toBe(0)
+    expect(await prisma.paymentEffect.count({ where: { orderId: o.id } })).toBe(0)
+    expect(receipt).not.toHaveBeenCalled()
+  })
+
+  it('payCashOrder rejects an already outstanding balance before financial effects', async () => {
+    const o = await newOrder()
+    const before = await snapshot(o.id)
+
+    await expect(
+      payCashOrder(venueId, o.id, { amount: 0, tip: 0, staffId, idempotencyKey: randomUUID(), isOfflineReplay: true }),
+    ).rejects.toThrow('Esta cuenta debe 150.00.')
+
+    expect(await snapshot(o.id)).toEqual(before)
+    expect(await prisma.payment.count({ where: { venueId, orderId: o.id } })).toBe(0)
+    expect(await prisma.paymentAllocation.count({ where: { orderId: o.id } })).toBe(0)
+  })
+})
+
+describe('the sync reducer classifies the locked writers as before', () => {
+  beforeEach(() => {
+    jest.spyOn(featureAccess, 'hasFeatureAccess').mockResolvedValue({ hasAccess: true } as any)
+    jest.spyOn(tableOwnership, 'isTableOwnershipEnforced').mockResolvedValue(false)
+  })
+  const replay = (intent: { id: string; seq?: number; type: any; payload: Record<string, unknown> }) =>
+    processIntents({ venueId, staffId, deviceId: 't4-device', intents: [intent], authorizeIntent: () => true })
+  const persisted = (id: string) => prisma.posSyncIntent.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: id } } })
+
+  it.each([
+    [
+      'ADD_ITEMS promotion',
+      (o: Fixture) => ({
+        type: 'ADD_ITEMS' as const,
+        payload: { orderId: o.id, items: [{ promotionRef: { promotionId, promotionInstanceId: randomUUID(), selections } }] },
+      }),
+      'A una cuenta ya pagada no se le pueden agregar promociones.',
+    ],
+    [
+      'APPLY_DISCOUNT',
+      (o: Fixture) => ({ type: 'APPLY_DISCOUNT' as const, payload: { orderId: o.id, discountId } }),
+      'No se puede descontar una orden ya pagada',
+    ],
+    [
+      'SPLIT_ORDER',
+      (o: Fixture) => ({ type: 'SPLIT_ORDER' as const, payload: { orderId: o.id, itemRefs: [o.items[1]] } }),
+      'No se puede separar una cuenta ya pagada',
+    ],
+  ] as const)('%s preserves transient FIFO and stable PAID quarantine under the lock', async (label, build, message) => {
+    const o = await newOrder()
+    const id = randomUUID()
+    const intent = { id, ...build(o), ...(label === 'SPLIT_ORDER' ? { seq: 1 } : {}) }
+    const followingOrder = label === 'SPLIT_ORDER' ? await newOrder() : undefined
+    const followingBefore = followingOrder ? await state(followingOrder) : undefined
+    const before = await state(o)
+    const followingId = randomUUID()
+    const followingIntent = followingOrder
+      ? { id: followingId, seq: 2, type: 'APPLY_DISCOUNT' as const, payload: { orderId: followingOrder.id, discountId } }
+      : undefined
+    const audit = label === 'SPLIT_ORDER' ? jest.spyOn(activityLog, 'logAction') : undefined
+    const publication = label === 'SPLIT_ORDER' ? jest.spyOn(socketManager, 'getBroadcastingService') : undefined
+    const auditCallsBefore = audit?.mock.calls.length
+    const publicationCallsBefore = publication?.mock.calls.length
+    const outcome = await whileFiscalHolds(
+      o.id,
+      tx => tx.order.update({ where: { id: o.id }, data: { paymentStatus: 'PAID', paidAmount: 150, remainingBalance: 0 } }),
+      () =>
+        followingOrder
+          ? processIntents({
+              venueId,
+              staffId,
+              deviceId: 't4-device',
+              authorizeIntent: () => true,
+              intents: [intent, followingIntent!],
+            })
+          : replay(intent),
+    )
+    expect(outcome.error).toBeUndefined()
+    if (followingOrder) {
+      expect(outcome.value).toEqual([
+        { id, status: 'RETRY', errorCode: 'ORDER_TABLE_TOPOLOGY_CHANGED', message: 'ORDER_TABLE_TOPOLOGY_CHANGED' },
+      ])
+      expect(await persisted(id)).toBeNull()
+      expect(await persisted(followingId)).toBeNull()
+      const paidState = { ...before, order: { ...before.order, paymentStatus: 'PAID' as const, paid: 150, remaining: 0 } }
+      expect(await state(o)).toEqual(paidState)
+      expect(await state(followingOrder)).toEqual(followingBefore)
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+      const stable = await replay(intent)
+      expect(stable).toEqual([{ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE', message }])
+      expect(await persisted(id)).toMatchObject({ status: 'REJECTED', errorCode: 'BUSINESS_RULE', resultJson: null })
+      expect(await state(o)).toEqual(paidState)
+      expect(await state(followingOrder)).toEqual(followingBefore)
+      expect(await persisted(followingId)).toBeNull()
+      expect(audit!.mock.calls).toHaveLength(auditCallsBefore!)
+      expect(publication!.mock.calls).toHaveLength(publicationCallsBefore!)
+      // Control proves that this follower was valid and would have an observable monetary effect if reached.
+      const followingAck = await replay(followingIntent!)
+      expect(followingAck).toEqual([expect.objectContaining({ id: followingId, status: 'ACKED' })])
+      expect(await persisted(followingId)).toMatchObject({ status: 'ACKED' })
+      expect((await state(followingOrder)).order.discounts).toHaveLength(1)
+      expect((await state(followingOrder)).order.total).toBeLessThan(followingBefore!.order.total)
+    } else {
+      expect(outcome.value).toEqual([expect.objectContaining({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE', message })])
+      expect(await persisted(id)).toMatchObject({ status: 'REJECTED' })
+    }
+    expect(await snapshot(o.id)).toMatchObject({ discounts: [], promotions: [], items: [{}, {}] })
+  })
+
+  it('a lock wait that outlives the writer transaction is RETRY: not persisted and nothing written', async () => {
+    const o = await newOrder()
+    const before = await state(o)
+    const id = randomUUID()
+    // The holder outlives the writer: it must hold longer than the writer's own 15 s budget.
+    const fiscal = holdFiscal(o.id, undefined, 40_000)
+    let acks: ReturnType<typeof resultOf> | undefined
+    try {
+      await fiscal.entered
+      acks = resultOf(replay({ id, type: 'APPLY_DISCOUNT', payload: { orderId: o.id, discountId } }))
+      await waitingOn()
+      // Longer than the writer's interactive-transaction timeout (ORDER_LOCK_WAIT_BUDGET, 15 s — Ruling T8-R2): a
+      // transient condition.
+      await pause(16_000)
+    } finally {
+      fiscal.release()
+      await fiscal.done
+      await acks
+    }
+    const outcome = await acks!
+    expect(outcome.error).toBeUndefined()
+    expect(outcome.value).toEqual([expect.objectContaining({ id, status: 'RETRY' })])
+    expect(await persisted(id)).toBeNull()
+    expect(await state(o)).toEqual(before)
+  }, 60_000)
+
+  it('🔴 Codex r3 N5: el P2028 llega DESPUÉS de retirar el premio de la línea del combo ⇒ todo retrocede y el intent queda RETRY; el reintento real la termina (REJECTED)', async () => {
+    // La cuenta: Plato $100 + Bebida $50 y el combo del fixture (sus líneas de $60 y $30); un premio de cartilla DIRIGIDO a la
+    // línea del Plato del combo, ya canjeado. La ronda offline repite la promoción (mismo instanceId: idempotente) y trae un
+    // artículo inexistente: el alta normal falla en DEFINITIVO y el reducer compensa retirando la promoción del intent.
+    const o = await newOrder('promotion')
+    const { instanceId } = await prisma.orderPromotion.findUniqueOrThrow({ where: { id: o.orderPromotionId } })
+    const lineaDelCombo = await prisma.orderItem.findFirstOrThrow({
+      where: { orderId: o.id, orderPromotionId: o.orderPromotionId, productId: productA },
+    })
+    const premio = await prisma.orderDiscount.create({
+      data: {
+        orderId: o.id,
+        type: 'FIXED_AMOUNT',
+        name: 'Premio',
+        value: 60,
+        amount: 60,
+        isManual: true,
+        reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { [lineaDelCombo.id]: 6000 } },
+      },
+    })
+    o.rewardIds.push((await newReward({ status: 'REDEEMED', redeemedAt: new Date(), orderDiscountId: premio.id })).id)
+    await prisma.order.update({ where: { id: o.id }, data: { discountAmount: 60, total: 180, remainingBalance: 180 } })
+    const antes = await state(o)
+    const ronda = (id: string) => ({
+      id,
+      type: 'ADD_ITEMS' as const,
+      payload: {
+        orderId: o.id,
+        items: [
+          { promotionRef: { promotionId, promotionInstanceId: instanceId, selections } },
+          { productId: `no-existe-${randomUUID()}`, quantity: 1 },
+        ],
+      },
+    })
+
+    // 1) La falla transitoria entra al BORRAR las líneas del combo: después de `recortarDescuentosDeRenglones`, que ya retiró la
+    //    fila del premio y lo devolvió a PENDING dentro de la misma transacción.
+    let visto: Awaited<ReturnType<typeof state>> | undefined
+    const original = prisma.$transaction.bind(prisma)
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((cb: any, opts: any) =>
+      typeof cb !== 'function'
+        ? original(cb, opts)
+        : original(
+            async tx =>
+              cb(
+                new Proxy(tx, {
+                  get(target, key) {
+                    if (key !== 'orderItem') return Reflect.get(target, key)
+                    return new Proxy(target.orderItem, {
+                      get(model, method) {
+                        if (method !== 'deleteMany') return Reflect.get(model, method)
+                        return async (args: any) => {
+                          if (!args?.where?.orderPromotionId) return model.deleteMany(args)
+                          visto = await state(o, tx)
+                          throw Object.assign(new Error('Transaction API error'), { code: 'P2028' })
+                        }
+                      },
+                    })
+                  },
+                }),
+              ),
+            opts,
+          )) as any)
+    const id = randomUUID()
+    let primero: Awaited<ReturnType<typeof replay>>
+    try {
+      primero = await replay(ronda(id))
+    } finally {
+      espia.mockRestore()
+    }
+    expect(primero![0]).toMatchObject({ id, status: 'RETRY', errorCode: 'P2028' })
+    // La devolución SÍ había ocurrido dentro de la transacción…
+    expect(visto!.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
+    expect(visto!.order.discounts).toEqual([])
+    // …y retrocedió entera: premio REDEEMED con su fila, promoción, líneas y cabecera como antes. RETRY no se persiste: el
+    // aparato la reintenta.
+    expect(await state(o)).toEqual(antes)
+    expect(await persisted(id)).toBeNull()
+
+    // 2) El reintento REAL (sin falla) termina la compensación y entonces sí va a cuarentena.
+    const [segundo] = await replay(ronda(id))
+    expect(segundo).toMatchObject({ id, status: 'REJECTED', errorCode: 'BUSINESS_RULE' })
+    expect(await persisted(id)).toMatchObject({ status: 'REJECTED' })
+    const despues = await state(o)
+    expect(despues.rewards).toEqual([{ status: 'PENDING', orderDiscountId: null }])
+    expect(despues.order).toMatchObject({ promotions: [], discounts: [], subtotal: 150, discount: 0, total: 150 })
+  })
+})
+
+describe('addAreaTicketItems decides and totals from the Order read under the lock (T5)', () => {
+  /** A ticket opened by the area terminal through the real service: one line of 100. */
+  async function openTicket() {
+    const code = buildAreaTicketCode(47, ++ticketCounter)
+    const ticket = await openAreaTicket(venueId, { code, deviceUid: AREA_DEVICE, staffId, items: [{ productId: productA, quantity: 1 }] })
+    return { id: ticket.orderId, code }
+  }
+  const addLine = (code: string, items: any[] = [{ productId: productB, quantity: 1 }]) =>
+    addAreaTicketItems(venueId, code, { deviceUid: AREA_DEVICE, staffId, items })
+  const modifiersOf = (orderId: string, db: Prisma.TransactionClient = prisma) =>
+    db.orderItemModifier.count({ where: { orderItem: { orderId } } })
+
+  it.each([
+    [
+      'a live claim by another terminal',
+      () => ({ claimedByTerminalId: cashTerminalId, claimedAt: new Date() }),
+      'AREA_TICKET_CLAIMED_BY_OTHER',
+    ],
+    ['a cancellation', () => ({ status: 'CANCELLED' as const }), 'AREA_TICKET_CANCELLED'],
+  ])('%s committed while it waited (no version bump) is seen under the lock: 409 and no line', async (_case, change, code) => {
+    const t = await openTicket()
+    const before = await snapshot(t.id)
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx => tx.order.update({ where: { id: t.id }, data: change() }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toMatchObject({ code, statusCode: 409 })
+    const after = await snapshot(t.id)
+    expect(after.items).toEqual(before.items)
+    expect(after.version).toBe(before.version)
+  })
+
+  it('a partial payment with its tip (no version bump) committed while it waited: totals use the tip and paid read under the lock', async () => {
+    const t = await openTicket()
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx =>
+        tx.order.update({
+          where: { id: t.id },
+          data: { paymentStatus: 'PARTIAL', paidAmount: 60, tipAmount: 10, total: 110, remainingBalance: 50 },
+        }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toBeUndefined()
+    // 100 + 50 of lines + 10 of tip = 160; remaining 160 − 60 = 100. From the stale photo: 150 and 150.
+    expect(await snapshot(t.id)).toMatchObject({ paymentStatus: 'PARTIAL', subtotal: 150, total: 160, paid: 60, remaining: 100 })
+  })
+
+  it('a service charge (no version bump) committed while it waited stays in the new total', async () => {
+    const t = await openTicket()
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx => tx.order.update({ where: { id: t.id }, data: { serviceChargeAmount: 20, total: 120, remainingBalance: 120 } }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toBeUndefined()
+    // 150 of lines + 20 of charge. From the stale photo: 150.
+    expect(await snapshot(t.id)).toMatchObject({ subtotal: 150, total: 170, remaining: 170 })
+  })
+
+  it('a line added from another device while it waited (version bump) is still VERSION_CONFLICT', async () => {
+    const t = await openTicket()
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      async tx => {
+        await tx.orderItem.create({
+          data: { orderId: t.id, productId: productA, productName: 'Plato', quantity: 1, unitPrice: 100, taxAmount: 0, total: 100 },
+        })
+        await tx.order.update({
+          where: { id: t.id },
+          data: { subtotal: 200, total: 200, remainingBalance: 200, version: { increment: 1 } },
+        })
+      },
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toMatchObject({ code: 'VERSION_CONFLICT', statusCode: 409 })
+    expect(await snapshot(t.id)).toMatchObject({ subtotal: 200, total: 200 })
+    expect((await snapshot(t.id)).items).toHaveLength(2)
+  })
+
+  it('a PAID without a version bump while it waited still answers VERSION_CONFLICT (the CAS runs first, as before)', async () => {
+    const t = await openTicket()
+    const before = await snapshot(t.id)
+
+    const writer = await whileFiscalHolds(
+      t.id,
+      tx => tx.order.update({ where: { id: t.id }, data: { paymentStatus: 'PAID', paidAmount: 100, remainingBalance: 0 } }),
+      () => addLine(t.code),
+    )
+
+    expect(writer.error).toMatchObject({ code: 'VERSION_CONFLICT' })
+    expect((await snapshot(t.id)).items).toEqual(before.items)
+  })
+
+  it('writer first: fiscal admission waits, then reads the new line, its modifier and the totals together', async () => {
+    const t = await openTicket()
+    const reached = barrier(),
+      resume = barrier()
+    let paused = false
+    interceptTransactions({
+      create: {
+        model: 'orderItem',
+        run: async (_args, _tx, next) => {
+          const created = await next()
+          if (!paused) {
+            paused = true
+            reached.release()
+            await resume.promise
+          }
+          return created
+        },
+      },
+    })
+    const writer = resultOf(addLine(t.code, [{ productId: productB, quantity: 1, modifierIds: [modifierId] }]))
+    let fiscal: Promise<unknown> | undefined
+    try {
+      await Promise.race([
+        reached.promise,
+        writer.then(() => {
+          throw new Error('the writer never wrote its line')
+        }),
+      ])
+      fiscal = prisma.$transaction(async tx => {
+        await bloquearOrdenParaFacturar(tx, t.id)
+        return { order: await snapshot(t.id, tx), modifiers: await modifiersOf(t.id, tx) }
+      })
+      await waitingOn()
+    } finally {
+      resume.release()
+      await writer
+    }
+
+    expect((await writer).error).toBeUndefined()
+    expect(await fiscal!).toEqual({ order: await snapshot(t.id), modifiers: await modifiersOf(t.id) })
+    // 100 + (50 + 5 of its modifier).
+    expect(await snapshot(t.id)).toMatchObject({ subtotal: 155, total: 155, remaining: 155 })
+    expect(await modifiersOf(t.id)).toBe(1)
+  })
+
+  it('rolls back the line and its modifier when the later totals write fails', async () => {
+    const t = await openTicket()
+    const before = await snapshot(t.id)
+    let observed = false
+    interceptTransactions({
+      orderUpdate: async (args, tx, next) => {
+        if (args?.data?.total === undefined) return next()
+        const inside = await snapshot(t.id, tx)
+        observed =
+          inside.items.length === before.items.length + 1 && inside.version === before.version + 1 && (await modifiersOf(t.id, tx)) === 1
+        throw new Error('injected failure after successful writes')
+      },
+    })
+
+    await expect(addLine(t.code, [{ productId: productB, quantity: 1, modifierIds: [modifierId] }])).rejects.toThrow(
+      'injected failure after successful writes',
+    )
+
+    expect(observed).toBe(true)
+    expect(await snapshot(t.id)).toEqual(before)
+    expect(await modifiersOf(t.id)).toBe(0)
+  })
+
+  // B2c F2 (Codex r1 #4; ruling «P2 R5/R15, transición»): un vale VIEJO (abierto antes de B2c) trae el descuento del plato sólo en
+  // su renglón y en la cabecera, sin espejo. La cortesía del móvil congelaba esos $10 como «Descuento anterior» (no espejo) y el
+  // vale los volvía a sumar con el descuento propio del plato; ahora el plato gana su espejo y el vale lo deja fuera.
+  it('🔴 F2 (Codex r1 #4): vale viejo con $10 propios sin espejo → cortesía del móvil de la bebida → agregar $50: $140 (antes de F2, $130)', async () => {
+    jest.spyOn(activityLog, 'logAction').mockResolvedValue(undefined) // la bitácora de la cortesía no interesa aquí
+    const code = buildAreaTicketCode(47, ++ticketCounter)
+    const ticket = await openAreaTicket(venueId, {
+      code,
+      deviceUid: AREA_DEVICE,
+      staffId,
+      items: [
+        { productId: productA, quantity: 1 },
+        { productId: productB, quantity: 1 },
+      ],
+    })
+    const plato = await prisma.orderItem.findFirstOrThrow({ where: { orderId: ticket.orderId, productId: productA } })
+    const bebida = await prisma.orderItem.findFirstOrThrow({ where: { orderId: ticket.orderId, productId: productB } })
+    await prisma.orderItem.update({ where: { id: plato.id }, data: { discountAmount: 10 } })
+    await prisma.order.update({ where: { id: ticket.orderId }, data: { discountAmount: 10, total: 140, remainingBalance: 140 } })
+    const { compOrderItem } = await import('@/services/mobile/comp-item.mobile.service')
+    await compOrderItem({ venueId, orderId: ticket.orderId, itemId: bebida.id, reason: 'Invitación', staffId })
+    const tras = await prisma.order.findUniqueOrThrow({ where: { id: ticket.orderId } })
+    expect([Number(tras.subtotal), Number(tras.discountAmount), Number(tras.total)]).toEqual([100, 10, 90])
+    await addLine(code) // Bebida $50
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: ticket.orderId } })
+    expect([Number(o.subtotal), Number(o.discountAmount), Number(o.total), Number(o.remainingBalance)]).toEqual([150, 10, 140, 140])
+  })
+
+  it('control — Codex r3 V7: vale → promoción → cortesía de la terminal → agregar: la promoción regalada sigue descontada ($150; la v3 de este plan, $240)', async () => {
+    const t = await openTicket() // Plato $100
+    // combo $90: líneas de $60 y $30
+    await applyPromotionToOrder({ venueId, orderId: t.id, promotionId, instanceId: randomUUID(), selections, soldAt: new Date() })
+    const lineas = await prisma.orderItem.findMany({
+      where: { orderId: t.id, orderPromotionId: { not: null } },
+      select: { id: true },
+      take: 10,
+    })
+    const { compItems } = await import('@/services/tpv/order.tpv.service')
+    await compItems(venueId, t.id, { itemIds: lineas.map(l => l.id), reason: 'Invitación', staffId })
+    await addLine(t.code) // Bebida $50
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: t.id } })
+    expect([Number(o.subtotal), Number(o.discountAmount), Number(o.total)]).toEqual([240, 90, 150])
+  })
+})

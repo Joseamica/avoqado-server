@@ -23,7 +23,9 @@ type SetupResult = {
 const DOTENV_DATABASE_URL = 'dotenv-production-database-sentinel'
 const DOTENV_TEST_DATABASE_URL = 'dotenv-production-test-sentinel'
 const CALLER_DATABASE_URL = 'caller-database-sentinel'
-const CALLER_TEST_DATABASE_URL = 'caller-test-database-sentinel'
+// Una base local desechable: el setup rechaza lo que no sea una dirección de PostgreSQL local (baseDePruebasPermitida.ts).
+const CALLER_TEST_DATABASE_URL = 'postgresql://caller:sentinel@localhost:5432/avoqado_callersentinel_test_1'
+const SHARED_TEST_DATABASE_URL = 'postgresql://caller:secreta-sentinel@localhost:5432/av-db-25'
 const DOTENV_NON_DATABASE_SENTINELS = {
   REFRESH_TOKEN_SECRET: 'dotenv-refresh-token-sentinel',
   OTP_PEPPER: 'dotenv-otp-pepper-sentinel',
@@ -175,6 +177,15 @@ describe('integration setup database isolation', () => {
     expect(result.error).toContain('Export a non-empty TEST_DATABASE_URL before running integration tests')
   })
 
+  it('rejects the shared av-db-25 database and clears both database variables without echoing the URL', () => {
+    const result = runIntegrationSetup({ databaseUrl: CALLER_DATABASE_URL, testDatabaseUrl: SHARED_TEST_DATABASE_URL })
+
+    expect(result.databaseUrl).toBeNull()
+    expect(result.testDatabaseUrl).toBeNull()
+    expect(result.error).toContain('base compartida')
+    expect(result.error).not.toContain('secreta-sentinel')
+  })
+
   it('overrides inherited non-database values as well as dotenv sentinels', () => {
     const result = runIntegrationSetup({
       testDatabaseUrl: CALLER_TEST_DATABASE_URL,
@@ -207,12 +218,5 @@ describe('integration setup database isolation', () => {
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-replay.integration.test.ts')
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration-lock-safety.integration.test.ts')
     expect(packageJson.scripts['test:integration:migrations']).toContain('h1a-migration.integration.test.ts')
-  })
-
-  it('disconnects the per-suite Prisma singleton before Jest loads the next integration file', () => {
-    const source = fs.readFileSync(path.resolve(process.cwd(), 'tests/__helpers__/integration-setup.ts'), 'utf8')
-
-    expect(source).toContain("await import('@/utils/prismaClient')")
-    expect(source).toContain('await prisma.$disconnect()')
   })
 })

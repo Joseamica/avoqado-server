@@ -17,6 +17,7 @@ import { getBankNameFromCLABE, validateCLABE } from '../../utils/clabeValidator'
 import { logAction } from './activity-log.service'
 import { esSuperadminDeLaSesion } from '../access/rolVigente'
 import { auditarAccesoNegado } from './accesoNegado'
+import { fusionarV2SetupData } from '../onboarding/onboardingProgress.service'
 
 /** RFC de persona física (13) o moral (12), en mayúsculas. */
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/
@@ -269,17 +270,17 @@ export async function updatePaymentActivationProfile(
 
   const progress = await prisma.onboardingProgress.findUnique({
     where: { organizationId },
-    select: { v2SetupData: true, step8_paymentInfo: true },
+    select: { step8_paymentInfo: true },
   })
-  const v2 = (progress?.v2SetupData ?? {}) as Record<string, unknown> as Record<string, Record<string, unknown>>
 
   // 🔴 Se FUSIONA por sección y NO se tocan `currentStep` ni `completedSteps`: este checklist
   // vive DESPUÉS del alta, y mover el puntero del asistente mandaría a alguien que ya terminó
-  // de vuelta a una pantalla del alta.
-  const v2Nuevo: Record<string, unknown> = { ...v2 }
-  if (input.entity) v2Nuevo.step4 = { ...(v2.step4 ?? {}), ...input.entity }
-  if (input.identity) v2Nuevo.step5 = { ...(v2.step5 ?? {}), ...input.identity }
-  if (input.bank) v2Nuevo.step7 = { ...(v2.step7 ?? {}), ...input.bank, bankName: nombreDelBanco(input.bank) }
+  // de vuelta a una pantalla del alta. La fusión la hace Postgres en una sentencia (`fusionarV2SetupData`):
+  // reescribir el formulario leído antes borraba lo que otra escritura guardó en medio (20-oct).
+  const secciones2: Record<string, Record<string, unknown>> = {}
+  if (input.entity) secciones2.step4 = { ...input.entity }
+  if (input.identity) secciones2.step5 = { ...input.identity }
+  if (input.bank) secciones2.step7 = { ...input.bank, bankName: nombreDelBanco(input.bank) }
 
   const bancoActual = (progress?.step8_paymentInfo ?? {}) as Record<string, unknown>
 
@@ -302,10 +303,10 @@ export async function updatePaymentActivationProfile(
       if (Object.keys(data).length > 0) await tx.venue.update({ where: { id: venueId }, data })
     }
 
+    await fusionarV2SetupData(tx, organizationId, {}, secciones2)
     await tx.onboardingProgress.update({
       where: { organizationId },
       data: {
-        v2SetupData: v2Nuevo as Prisma.InputJsonValue,
         // 🔴 EL ESPEJO. `step8_paymentInfo` es lo que lee la revisión de KYC; sin esta línea, la
         // CLABE capturada aquí no llega nunca a quien la necesita para dar de alta la cuenta.
         ...(input.bank

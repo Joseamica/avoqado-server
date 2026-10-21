@@ -1,0 +1,11 @@
+-- Tarjetas de regalo: índice único de `OrderItem.giftCardId` (un sobre cuelga de UNA sola línea). OrderItem recibe
+-- escrituras en cada venta: un CREATE INDEX normal las frenaría mientras se construye.
+--
+-- ONE statement per file, on purpose (precedents: 20261013090000_activity_log_extraccion_emitida_unica,
+-- 20261014180000_cfdi_order_id_index). Prisma sends a migration file as a single multi-statement batch inside an implicit
+-- transaction, where CREATE INDEX CONCURRENTLY is rejected (SQLSTATE 25001); a file with exactly one statement is not
+-- wrapped, so CONCURRENTLY works. IF NOT EXISTS: an environment that already built it by hand skips it. The name is
+-- Prisma's default for `giftCardId String? @unique`.
+-- Recovery: if a concurrent build left it invalid (pg_index.indisvalid = false), run a separate
+-- DROP INDEX CONCURRENTLY "OrderItem_giftCardId_key" and then retry this migration.
+CREATE UNIQUE INDEX CONCURRENTLY IF NOT EXISTS "OrderItem_giftCardId_key" ON "OrderItem"("giftCardId");

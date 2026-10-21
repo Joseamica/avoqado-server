@@ -5,15 +5,22 @@ import logger from '../../config/logger'
 import { generateOtpCode, hashOtpCode, normalizeEmail } from '../../lib/otp'
 import { sendOtpWhatsApp } from '../whatsapp.service'
 import emailService from '../email.service'
-import { generateCustomerToken } from '../../jwt.service'
-import { phonesMatch, phoneLast10 } from '@/utils/phone'
+import { generateCustomerToken, generateOrderingCustomerToken } from '../../jwt.service'
+import { canonicalPhoneE164, phonesMatch, phoneLast10, normalizarTelefonoMx, formaLegadaDeTelefonoMx } from '@/utils/phone'
+import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import { activateCustomerAccount } from '@/services/public/customerBookingAccess.service'
+import { ponerNombreSiFalta, splitName } from '@/services/customer/customerName'
 
 const TTL_MS = 10 * 60 * 1000
 
-function normalizePhone(phone: string): string {
-  const digits = phone.replace(/[^\d]/g, '')
-  return `+${digits}`
+// 🔴 Los dos pasos del reto usan ESTA función: si pedir y verificar normalizaran distinto, el reto no se encontraría.
+// Sin dígitos no hay teléfono: con '' `resolveIdentity` caería al camino del correo con `email: undefined`, y Prisma ignora un
+// filtro undefined — encontraría al PRIMER Consumer de la base. Se rechaza aquí, antes de tocar nada.
+function destinoDelReto(channel: 'whatsapp' | 'email', destination: string): string {
+  if (channel === 'email') return normalizeEmail(destination)
+  const telefono = normalizarTelefonoMx(destination)
+  if (!telefono) throw new BadRequestError('Teléfono inválido')
+  return telefono
 }
 
 export async function requestOtp(args: {
@@ -22,7 +29,7 @@ export async function requestOtp(args: {
   destination: string
   ip?: string | null
 }): Promise<{ ok: true }> {
-  const destination = args.channel === 'email' ? normalizeEmail(args.destination) : normalizePhone(args.destination)
+  const destination = destinoDelReto(args.channel, args.destination)
   const now = Date.now()
 
   // Fase 0.B: todo se acota al venue. Un mismo teléfono puede tener retos vivos en dos
@@ -59,13 +66,30 @@ export async function requestOtp(args: {
   return { ok: true }
 }
 
-export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | 'email'; destination: string; code: string }): Promise<{
+export async function verifyOtp(args: {
+  venueId: string
+  channel: 'whatsapp' | 'email'
+  destination: string
+  code: string
+  purpose?: 'ORDERING'
+  /** Spec 2026-10-14 §3.3: nombre del alta. Sólo se usa si el cliente no tiene uno. */
+  firstName?: string | null
+}): Promise<{
   token: string
-  /** Fase 1: estado de aprobación resultante de activar la cuenta; el controller lo compone en `bookingAccess`. */
+  /**
+   * Fase 1: estado de aprobación de la cuenta de reservas. Sin `purpose`, el que resulta de activarla, y el controller lo compone
+   * en `bookingAccess`. Con `purpose: 'ORDERING'` la cuenta no se activa: es el de la ficha sin tocar y el controller no lo responde.
+   */
   approvalStatus: CustomerApprovalStatus
   customer: { id: string; firstName: string | null; lastName: string | null; email: string | null; phone: string | null }
 }> {
-  const destination = args.channel === 'email' ? normalizeEmail(args.destination) : normalizePhone(args.destination)
+  const destination = destinoDelReto(args.channel, args.destination)
+
+  // H1 (pedidos en línea): verificar para PEDIR prueba un TELÉFONO; un código por correo no lo prueba. Se rechaza antes de tocar
+  // el reto: no se gasta un intento y el código sigue sirviendo.
+  if (args.purpose === 'ORDERING' && args.channel !== 'whatsapp') {
+    throw new BadRequestError('Para pedir, verifica tu teléfono por WhatsApp.', 'ORDERING_REQUIRES_PHONE')
+  }
 
   // Fase 0.B: sólo retos de ESTE venue y canal. Un reto legacy con venueId NULL no entra
   // aquí nunca (no puede probar de qué venue vino) — muere por TTL.
@@ -74,14 +98,20 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
     orderBy: { createdAt: 'desc' },
   })
   if (!challenge || challenge.expiresAt.getTime() <= Date.now()) throw new BadRequestError('El código expiró. Pide uno nuevo.')
-  if (challenge.attempts >= challenge.maxAttempts) {
-    await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { consumedAt: new Date() } })
-    throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
-  }
-  if (challenge.codeHash !== hashOtpCode(args.code)) {
-    await prisma.otpChallenge.update({ where: { id: challenge.id }, data: { attempts: challenge.attempts + 1 } })
-    throw new BadRequestError('Código incorrecto.')
-  }
+  // 🔴 El intento se aparta en la base ANTES de comparar (auditoría 2026-10-01): escribir `attempts + 1` sobre lo leído aquí
+  // dejaba que varias verificaciones simultáneas probaran más de `maxAttempts` códigos.
+  const apartado =
+    challenge.attempts < challenge.maxAttempts &&
+    (
+      await prisma.otpChallenge.updateMany({
+        where: { id: challenge.id, consumedAt: null, attempts: { lt: challenge.maxAttempts } },
+        data: { attempts: { increment: 1 } },
+      })
+    ).count === 1
+  // Sin intento que apartar sólo se rechaza: marcar el reto como usado le quemaría el último intento correcto a quien sí lo apartó
+  // y va a mitad de su verificación. Con `attempts = maxAttempts` el reto ya no admite más pruebas.
+  if (!apartado) throw new BadRequestError('Demasiados intentos. Pide un código nuevo.')
+  if (challenge.codeHash !== hashOtpCode(args.code)) throw new BadRequestError('Código incorrecto.')
 
   // Fase 1: consumir el reto, resolver la identidad (Consumer + Customer + vínculo) y decidir
   // la aprobación viven en UNA transacción. Antes eran escrituras sueltas: si algo tronaba a
@@ -108,27 +138,26 @@ export async function verifyOtp(args: { venueId: string; channel: 'whatsapp' | '
       throw new UnauthorizedError('Esta cuenta está desactivada', 'CUSTOMER_INACTIVE')
     }
 
-    const activation = await activateCustomerAccount(tx, { customerId: customer.id, venueId: args.venueId, origin: 'OTP' })
-    return { customer, approvalStatus: activation.approvalStatus }
+    // R7: verificar el teléfono para PEDIR no activa la cuenta de reservas (no pide aprobación ni manda sus avisos).
+    if (args.purpose === 'ORDERING') return { customer, approvalStatus: customer.approvalStatus }
+    const conNombre = await ponerNombreSiFalta(tx, customer, args.firstName)
+    const activation = await activateCustomerAccount(tx, { customerId: conNombre.id, venueId: args.venueId, origin: 'OTP' })
+    return { customer: conNombre, approvalStatus: activation.approvalStatus }
   })
 
   // Post-commit: si la transacción falló, nadie recibe sesión.
-  const token = generateCustomerToken(customer.id, args.venueId)
+  // H1: para PEDIR, el token de PEDIDOS (prueba el teléfono; reservas y portal lo rechazan). Sin `purpose`, el de siempre.
+  // El teléfono va en la forma canónica (`+521…` → `+52…`), la misma con la que el pedido lo guarda y cuenta su tope.
+  const token =
+    args.purpose === 'ORDERING'
+      ? generateOrderingCustomerToken(customer.id, args.venueId, canonicalPhoneE164(destination) ?? destination)
+      : generateCustomerToken(customer.id, args.venueId)
   return {
     token,
-    /** Fase 1: el controller lo compone en `bookingAccess`. */
+    /** Fase 1: sin `purpose`, el controller lo compone en `bookingAccess`. */
     approvalStatus,
     customer: { id: customer.id, firstName: customer.firstName, lastName: customer.lastName, email: customer.email, phone: customer.phone },
   }
-}
-
-// First word → firstName, remaining words → lastName. Mirrors the split used in
-// auth.consumer.service.ts (kept local to avoid a cross-bounded-context import).
-function splitName(name?: string | null): { firstName?: string; lastName?: string } {
-  if (!name) return {}
-  const parts = name.trim().split(/\s+/).filter(Boolean)
-  if (parts.length === 0) return {}
-  return { firstName: parts[0], lastName: parts.slice(1).join(' ') || undefined }
 }
 
 // Look up a name from this identity's most recent past guest reservation, so a
@@ -173,7 +202,14 @@ async function findGuestNameFromPastReservations(
 async function resolveIdentity(tx: Prisma.TransactionClient, venueId: string, key: { phone?: string; email?: string }) {
   let consumer
   if (key.phone) {
-    const matches = await tx.consumer.findMany({ where: { phone: key.phone }, orderBy: { createdAt: 'asc' }, take: 2 })
+    // Un cliente que entró con el OTP viejo tiene su Consumer SIN lada (`+5543453965`). Se busca también esa forma para no
+    // crearle un segundo Consumer; si existen las dos, gana la más antigua (lo mismo que ya pasaba con dos del mismo teléfono).
+    const legado = formaLegadaDeTelefonoMx(key.phone)
+    const matches = await tx.consumer.findMany({
+      where: { phone: legado ? { in: [key.phone, legado] } : key.phone },
+      orderBy: { createdAt: 'asc' },
+      take: 2,
+    })
     if (matches.length > 1) logger.warn(`[OTP] multiple Consumers share phone ${key.phone}; using oldest ${matches[0].id}`)
     consumer = matches[0] ?? (await tx.consumer.create({ data: { phone: key.phone } }))
   } else {
@@ -184,40 +220,12 @@ async function resolveIdentity(tx: Prisma.TransactionClient, venueId: string, ke
   let customer = await tx.customer.findUnique({ where: where as any })
   if (!customer) customer = await tx.customer.findFirst({ where: { venueId, consumerId: consumer.id } })
 
-  // 🔴 Tercer intento: por los ULTIMOS 10 DIGITOS del telefono.
-  //
-  // Los dos de arriba comparan el telefono normalizado a E.164 (`+525512345678`),
-  // pero los clientes que ya existen lo tienen guardado como lo escribio quien los dio
-  // de alta: `5512345678`, `55 1234 5678`, `(55) 1234-5678`. Sin este paso no se les
-  // reconoce y se les crea una ficha NUEVA: el cliente pierde sus sellos, sus puntos y
-  // su historial, y el negocio acaba con dos fichas de la misma persona.
-  //
-  // Medido en la base local el 2026-08-27: 681 de 682 clientes con telefono lo tienen
-  // SIN normalizar — o sea, practicamente todos. Salio al probar el cartel del
-  // mostrador, que es lo que va a mandar a TODOS los clientes por este camino.
-  //
-  // Es el MISMO patron que `findGuestNameFromPastReservations` ya usaba aqui abajo
-  // para las reservaciones: filtro barato en SQL por los ultimos 10 digitos, y
-  // `phonesMatch` como verificacion canonica — porque dos paises distintos pueden
-  // compartir esos 10 digitos y no son la misma persona.
+  // 🔴 Tercer intento: el mismo teléfono guardado con otro formato (`findCustomerIdByPhone`: 681 de 682 clientes lo tienen
+  // como lo escribió quien los dio de alta). Salió al probar el cartel del mostrador, que manda a TODOS por este camino.
+  // Se relee por Prisma: el resto de la función espera el modelo completo (`active`, `consumerId`).
   if (!customer && key.phone) {
-    const last10 = phoneLast10(key.phone)
-    if (last10) {
-      const candidatos = await tx.$queryRaw<{ id: string; phone: string | null }[]>`
-        SELECT "id", "phone"
-        FROM "Customer"
-        WHERE "venueId" = ${venueId}
-          AND "phone" IS NOT NULL
-          AND right(regexp_replace("phone", '[^0-9]', '', 'g'), 10) = ${last10}
-        ORDER BY "createdAt" ASC
-        LIMIT 20
-      `
-      const elegido = candidatos.find(c => phonesMatch(c.phone, key.phone))
-      // Se relee por Prisma en vez de usar la fila cruda: el resto de la funcion
-      // espera el modelo completo (`active`, `consumerId`), no las dos columnas
-      // que pidio el filtro.
-      if (elegido) customer = await tx.customer.findUnique({ where: { id: elegido.id } })
-    }
+    const elegido = await findCustomerIdByPhone(tx, venueId, key.phone)
+    if (elegido) customer = await tx.customer.findUnique({ where: { id: elegido } })
   }
 
   if (!customer) {

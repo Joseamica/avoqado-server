@@ -15,7 +15,9 @@ import { getContext, type ExecutionContext } from '@/observability/executionCont
 import { primeVenueNames } from '@/observability/venueNames'
 import * as angelpayService from '@/services/tpv/angelpay-webhook.service'
 import prisma from '@/utils/prismaClient'
+import { newWebhookToken } from '@/services/aggregators/core/credentials'
 
+jest.mock('@/services/aggregators/core/eventProcessor.service', () => ({ processInboundEvent: jest.fn().mockResolvedValue(undefined) }))
 jest.mock('@/services/tpv/angelpay-webhook.service', () => ({
   ...jest.requireActual('@/services/tpv/angelpay-webhook.service'),
   processAngelPayWebhook: jest.fn(),
@@ -119,6 +121,64 @@ describe('🔴 los webhooks llevan contexto de ejecución', () => {
     const cierres = cierresDe('/api/v1/webhooks/whatsapp')
     expect(cierres).toHaveLength(1)
     expect(JSON.stringify(cierres[0])).not.toContain('secreto-de-meta')
+  })
+})
+
+describe('🔴 conector de pases: el secreto de la URL nunca llega al log', () => {
+  const TOKEN = newWebhookToken()
+  const RUTA = `/api/v1/webhooks/aggregators/totalpass/${TOKEN}/booking`
+  const prismaAgg = prisma as unknown as {
+    aggregatorConnection: { findUnique: jest.Mock }
+    aggregatorInboundEvent: { create: jest.Mock }
+  }
+
+  it('token desconocido ⇒ 404; ni el mensaje, ni la meta, ni el entrypoint del contexto traen el token', async () => {
+    prismaAgg.aggregatorConnection.findUnique.mockResolvedValueOnce(null)
+    const contextos: Array<ExecutionContext | undefined> = []
+    const capturar = (..._args: unknown[]) => {
+      const ctx = getContext()
+      contextos.push(ctx && { ...ctx })
+    }
+    ;(logger.log as jest.Mock).mockImplementation(capturar)
+    ;(logger.info as jest.Mock).mockImplementation(capturar)
+    ;(logger.warn as jest.Mock).mockImplementation(capturar)
+
+    const res = await request(app).post(RUTA).set('Content-Type', 'application/json').send('{}')
+
+    expect(res.status).toBe(404)
+    const cierres = cierresDe('/api/v1/webhooks/aggregators/totalpass/')
+    expect(cierres).toHaveLength(1)
+    expect(cierres[0][1]).toMatch(/^Request End: POST \/api\/v1\/webhooks\/aggregators\/totalpass\/\[redactado\]\/booking - 404 /)
+    expect(cierres[0][2]).toMatchObject({ url: '/api/v1/webhooks/aggregators/totalpass/[redactado]/booking' })
+    for (const metodo of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      expect(JSON.stringify((logger[metodo] as jest.Mock).mock.calls)).not.toContain(TOKEN)
+    }
+    expect(contextos.length).toBeGreaterThan(0)
+    for (const ctx of contextos) {
+      expect(JSON.stringify(ctx)).not.toContain(TOKEN)
+      expect(ctx?.entrypoint).toBe('POST /api/v1/webhooks/aggregators/totalpass/:token/booking')
+    }
+  })
+
+  it('🔴 un Content-Type que no es JSON llega igual como bytes crudos y se guarda (raw propio antes del router genérico)', async () => {
+    prismaAgg.aggregatorConnection.findUnique.mockResolvedValueOnce({
+      id: 'cconnctx000000000000000001',
+      venueId: 'cvenuectx000000000000001',
+      provider: 'TOTALPASS',
+      webhookToken: TOKEN,
+      status: 'ACTIVE',
+    })
+    prismaAgg.aggregatorInboundEvent.create.mockResolvedValueOnce({ id: 'cevtctx0000000000000000001' })
+
+    const res = await request(app).post(RUTA).set('Content-Type', 'text/plain').send('{"slot":{"id":"s-1"}}')
+
+    expect(res.status).toBe(200)
+    expect(prismaAgg.aggregatorInboundEvent.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ kind: 'BOOKING', payload: { slot: { id: 's-1' } } }) }),
+    )
+    for (const metodo of ['log', 'info', 'warn', 'error', 'debug'] as const) {
+      expect(JSON.stringify((logger[metodo] as jest.Mock).mock.calls)).not.toContain(TOKEN)
+    }
   })
 })
 

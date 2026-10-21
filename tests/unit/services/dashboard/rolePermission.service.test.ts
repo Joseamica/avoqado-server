@@ -50,4 +50,34 @@ describe('updateRolePermissions — grant-subset guard', () => {
     )
     expect(result.isCustom).toBe(false)
   })
+
+  /**
+   * 🔴 Hermano del P1 #2 de Codex (B3b, código r1): la guarda leía los permisos PROPIOS del que edita sin
+   * `deniedPermissions`. Si el negocio le dio `system:manage` al rol ADMIN y después se lo QUITÓ, `checkPermission`
+   * ya no se lo reconoce — pero aquí seguía contando como suyo, y ese ADMIN podía otorgárselo a otro rol.
+   */
+  it('🔴 un permiso que el negocio le QUITÓ al rol del que edita ya no cuenta como suyo: no lo puede otorgar', async () => {
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({
+      permissions: ['system:manage'],
+      deniedPermissions: ['system:manage'],
+    } as any)
+    await expect(
+      updateRolePermissions(VENUE_ID, StaffRole.MANAGER, ['teams:read', 'system:manage'], 'modifier-staff', StaffRole.ADMIN),
+    ).rejects.toThrow(/No puedes otorgar permisos que tú no posees: system:manage/i)
+    expect(prismaMock.venueRolePermission.upsert).not.toHaveBeenCalled()
+  })
+
+  it('control: con el mismo permiso SIN quitar, la guarda lo reconoce como suyo y deja guardar', async () => {
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: ['system:manage'], deniedPermissions: [] } as any)
+    prismaMock.venueRolePermission.upsert.mockResolvedValue({
+      role: StaffRole.MANAGER,
+      permissions: ['teams:read', 'system:manage'],
+      deniedPermissions: [],
+      modifier: null,
+    } as any)
+    await expect(
+      updateRolePermissions(VENUE_ID, StaffRole.MANAGER, ['teams:read', 'system:manage'], 'modifier-staff', StaffRole.ADMIN),
+    ).resolves.toBeDefined()
+    expect(prismaMock.venueRolePermission.upsert).toHaveBeenCalledTimes(1)
+  })
 })

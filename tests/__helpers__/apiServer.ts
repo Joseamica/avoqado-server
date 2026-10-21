@@ -34,19 +34,23 @@ import request from 'supertest'
 
 let servidor: Server | null = null
 
-/** Registra el `beforeAll`/`afterAll` que abren y cierran el servidor del archivo. */
-export function startApiServer(obtenerApp: () => unknown): void {
+/** Registra el servidor y devuelve un cliente propio para archivos con varias apps. */
+export function startApiServer(obtenerApp: () => unknown) {
+  let propio: Server | null = null
   beforeAll(done => {
     const app = obtenerApp() as { listen?: Server['listen'] } | undefined
     if (!app || typeof app.listen !== 'function') {
       return done(new Error('startApiServer: la app aún no existe. ¿Va la llamada ANTES del beforeAll que la crea?'))
     }
-    servidor = app.listen(0, () => done())
+    // Bind the same IPv4 loopback address that supertest connects to.
+    propio = app.listen(0, '127.0.0.1', () => done())
+    servidor = propio
   })
 
   afterAll(done => {
-    const s = servidor
-    servidor = null
+    const s = propio
+    propio = null
+    if (servidor === s) servidor = null
     if (!s) {
       done()
       return
@@ -57,6 +61,11 @@ export function startApiServer(obtenerApp: () => unknown): void {
     conCierreForzado.closeAllConnections?.()
     s.close(() => done())
   })
+
+  return () => {
+    if (!propio) throw new Error('El servidor de esta app aún no está iniciado o ya se cerró.')
+    return request(propio)
+  }
 }
 
 /** El cliente de supertest apuntando al servidor de ESTE archivo. */

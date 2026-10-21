@@ -32,6 +32,7 @@
 import 'dotenv/config'
 import { Prisma } from '@prisma/client'
 import { PaidOrderReconcilerJob } from '../src/jobs/paid-order-reconciler.job'
+import type { SesionDeVentaCerradaPorOtroCanal } from '../src/services/mobile/areaTicketV7.mobile.service'
 import type { CandidataPagadaAbierta } from '../src/services/shared/pagadaPeroAbierta'
 import prisma from '../src/utils/prismaClient'
 
@@ -118,7 +119,7 @@ function hostDeLaBase(): string {
 const pesos = (monto: string): string => `$${new Prisma.Decimal(monto).toFixed(2)}`
 
 /** Una sola consulta para todos los negocios de la lista: el founder lee nombres, no ids. */
-async function nombresDeNegocios(candidatas: CandidataPagadaAbierta[]): Promise<Map<string, string>> {
+async function nombresDeNegocios(candidatas: Array<{ venueId: string }>): Promise<Map<string, string>> {
   const ids = [...new Set(candidatas.map(c => c.venueId))]
   if (ids.length === 0) return new Map()
   const negocios = await prisma.venue.findMany({ where: { id: { in: ids } }, select: { id: true, name: true } })
@@ -148,6 +149,24 @@ async function imprimirLista(candidatas: CandidataPagadaAbierta[]): Promise<void
   }
 }
 
+/**
+ * R13-4: las ventas de vales ya cerradas (cobradas o devueltas) cuya sesión sigue abierta con la reserva del vale apartada. La
+ * tercera pasada del barrido cierra la sesión y suelta esas reservas sin mover stock, sin pagos ni efectos.
+ */
+async function imprimirSesiones(sesiones: SesionDeVentaCerradaPorOtroCanal[]): Promise<void> {
+  if (sesiones.length === 0) return
+  const nombres = await nombresDeNegocios(sesiones)
+  console.table(
+    sesiones.map(s => ({
+      negocio: nombres.get(s.venueId) ?? s.venueId,
+      folio: s.orderNumber,
+      venta: s.paymentStatus,
+      sesión: s.sessionStatus,
+    })),
+  )
+  console.log(`${sesiones.length} ${sesiones.length === 1 ? 'sesión' : 'sesiones'} de vales por cerrar (sólo sueltan su reserva)\n`)
+}
+
 async function main(): Promise<void> {
   const aplicar = process.argv.includes('--apply')
   const desde = leerDesde()
@@ -169,10 +188,11 @@ async function main(): Promise<void> {
 
   const simulacion = await barrido.runNow({ dryRun: true, since: desde })
   await imprimirLista(simulacion.candidates)
+  await imprimirSesiones(simulacion.sessionsToClose)
 
   if (!aplicar) {
     console.log('Simulación: no se tocó nada.')
-    if (simulacion.candidates.length > 0) {
+    if (simulacion.candidates.length > 0 || simulacion.sessionsToClose.length > 0) {
       console.log(
         `Para repararlas:  npx tsx scripts/reconciliar-pagadas-pero-abiertas.ts${desde ? ` --desde ${desde.toISOString().slice(0, 10)}` : ''} --apply --confirm-host ${host}`,
       )
@@ -181,7 +201,9 @@ async function main(): Promise<void> {
   }
 
   const resultado = await barrido.runNow({ since: desde })
-  console.log(`Revisadas ${resultado.scanned} · reparadas ${resultado.reconciled} · fallidas ${resultado.failed}`)
+  console.log(
+    `Revisadas ${resultado.scanned} · reparadas ${resultado.reconciled} · sesiones de vales cerradas ${resultado.sessionsClosed} · fallidas ${resultado.failed}`,
+  )
   if (resultado.skipped > 0) {
     // El candado `running` es de ESTA instancia, recién creada, así que aquí no debería saltar nunca.
     // Y no promete lo que parece: NO protege contra el tic de 10 min del servidor desplegado — si
@@ -199,6 +221,7 @@ async function main(): Promise<void> {
     console.log('gracia de 5 minutos del criterio: reaparecerá en la siguiente corrida.')
   }
   await imprimirLista(despues.candidates)
+  await imprimirSesiones(despues.sessionsToClose)
 }
 
 /**

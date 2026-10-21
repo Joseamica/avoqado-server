@@ -12,6 +12,7 @@
 
 import { Request, Response, NextFunction } from 'express'
 import * as configService from '@/services/dashboard/commission/commission-config.service'
+import { reemplazarEsquema } from '@/services/dashboard/commission/reemplazarEsquema'
 import * as overrideService from '@/services/dashboard/commission/commission-override.service'
 import * as tierService from '@/services/dashboard/commission/commission-tier.service'
 import * as milestoneService from '@/services/dashboard/commission/commission-milestone.service'
@@ -87,7 +88,7 @@ export async function updateConfig(req: Request, res: Response, next: NextFuncti
   try {
     const { venueId, configId } = req.params
 
-    const config = await configService.updateCommissionConfig(configId, venueId, req.body)
+    const config = await configService.updateCommissionConfig(configId, venueId, req.body, (req as any).authContext?.userId)
 
     res.json(config)
   } catch (error) {
@@ -121,8 +122,16 @@ export async function copyConfig(req: Request, res: Response, next: NextFunction
     const { venueId, configId } = req.params
     const authContext = (req as any).authContext
     const { name } = req.body
+    // «Duplicar con cambios»: con `replace: true` el nuevo REEMPLAZA al original en una sola transacción (FT-GRAVES S-REPLACE).
+    if (req.body?.replace === true)
+      return void res.status(201).json(await reemplazarEsquema(venueId, configId, req.body, authContext?.userId))
 
-    const config = await configService.copyCommissionConfig(configId, venueId, authContext?.userId, name)
+    const config = await configService.copyCommissionConfig(
+      configId,
+      venueId,
+      authContext?.userId,
+      typeof name === 'string' && name.trim() ? { name: name.trim() } : undefined,
+    )
 
     res.status(201).json(config)
   } catch (error) {
@@ -677,20 +686,25 @@ export async function getCommissionByPayment(req: Request, res: Response, next: 
 /**
  * GET /api/v1/dashboard/venues/:venueId/commission-summaries
  * Get all commission summaries for venue
+ *
+ * Final-fix M6: sin `periodStart` ni `periodEnd` (así la pide la pantalla Comisiones) lee los últimos 12 meses
+ * (`ventanaPorDefecto`), no toda la historia de la sede.
  */
 export async function getSummaries(req: Request, res: Response, next: NextFunction) {
   try {
     const { venueId } = req.params
     const { staffId, status, periodStart, periodEnd } = req.query
 
-    const summaries = await aggregationService.getCommissionSummaries(venueId, {
+    const { filas, total } = await aggregationService.resumenesCalculados(venueId, {
       staffId: staffId as string,
       status: status as any,
-      periodStart: periodStart ? new Date(periodStart as string) : undefined,
-      periodEnd: periodEnd ? new Date(periodEnd as string) : undefined,
+      ...aggregationService.ventanaPorDefecto({
+        periodStart: periodStart ? new Date(periodStart as string) : undefined,
+        periodEnd: periodEnd ? new Date(periodEnd as string) : undefined,
+      }),
     })
 
-    res.json({ data: summaries })
+    res.json({ data: filas, total })
   } catch (error) {
     next(error)
   }
@@ -713,41 +727,6 @@ export async function getSummaryById(req: Request, res: Response, next: NextFunc
 }
 
 /**
- * POST /api/v1/dashboard/venues/:venueId/commission-summaries/:summaryId/approve
- * Approve a summary
- */
-export async function approveSummary(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, summaryId } = req.params
-    const authContext = (req as any).authContext
-
-    const summary = await aggregationService.approveSummary(summaryId, venueId, authContext?.userId)
-
-    res.json(summary)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-summaries/:summaryId/dispute
- * Dispute a summary
- */
-export async function disputeSummary(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, summaryId } = req.params
-    const authContext = (req as any).authContext
-    const { reason } = req.body
-
-    const summary = await aggregationService.disputeSummary(summaryId, venueId, authContext?.userId, reason)
-
-    res.json(summary)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
  * POST /api/v1/dashboard/venues/:venueId/commission-summaries/:summaryId/recalculate
  * Recalculate a summary
  */
@@ -758,41 +737,6 @@ export async function recalculateSummary(req: Request, res: Response, next: Next
     const summary = await aggregationService.recalculateSummary(summaryId, venueId)
 
     res.json(summary)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-summaries/:summaryId/deduction
- * Apply deduction to summary
- */
-export async function applyDeduction(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, summaryId } = req.params
-    const { amount, reason } = req.body
-
-    const summary = await aggregationService.applyDeduction(summaryId, venueId, amount, reason)
-
-    res.json(summary)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-summaries/bulk-approve
- * Bulk approve summaries
- */
-export async function bulkApproveSummaries(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId } = req.params
-    const authContext = (req as any).authContext
-    const { summaryIds } = req.body
-
-    const count = await aggregationService.bulkApproveSummaries(summaryIds, venueId, authContext?.userId)
-
-    res.json({ approved: count })
   } catch (error) {
     next(error)
   }
@@ -869,108 +813,6 @@ export async function getStaffPayouts(req: Request, res: Response, next: NextFun
     const payouts = await payoutService.getStaffPayouts(staffId, venueId, limit)
 
     res.json({ data: payouts })
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-payouts
- * Create payout
- */
-export async function createPayout(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId } = req.params
-    const authContext = (req as any).authContext
-
-    const payouts = await payoutService.createPayouts(venueId, req.body, authContext?.userId)
-
-    res.status(201).json({ data: payouts })
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-payouts/:payoutId/approve
- * Approve payout
- */
-export async function approvePayout(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, payoutId } = req.params
-    const authContext = (req as any).authContext
-
-    const payout = await payoutService.approvePayout(payoutId, venueId, authContext?.userId)
-
-    res.json(payout)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-payouts/:payoutId/process
- * Start processing payout
- */
-export async function startPayoutProcessing(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, payoutId } = req.params
-    const authContext = (req as any).authContext
-
-    const payout = await payoutService.processPayout(payoutId, venueId, authContext?.userId)
-
-    res.json(payout)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-payouts/:payoutId/complete
- * Complete payout
- */
-export async function completePayout(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, payoutId } = req.params
-    const { paymentReference } = req.body
-
-    const payout = await payoutService.completePayout(payoutId, venueId, paymentReference)
-
-    res.json(payout)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-payouts/:payoutId/fail
- * Mark payout as failed
- */
-export async function failPayout(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, payoutId } = req.params
-    const { reason } = req.body
-
-    const payout = await payoutService.failPayout(payoutId, venueId, reason)
-
-    res.json(payout)
-  } catch (error) {
-    next(error)
-  }
-}
-
-/**
- * POST /api/v1/dashboard/venues/:venueId/commission-payouts/:payoutId/cancel
- * Cancel payout
- */
-export async function cancelPayout(req: Request, res: Response, next: NextFunction) {
-  try {
-    const { venueId, payoutId } = req.params
-    const { reason } = req.body
-
-    const payout = await payoutService.cancelPayout(payoutId, venueId, reason)
-
-    res.json(payout)
   } catch (error) {
     next(error)
   }
@@ -1202,7 +1044,7 @@ export async function createSalesGoal(req: Request, res: Response, next: NextFun
   try {
     const { venueId } = req.params
 
-    const goal = await salesGoalService.createSalesGoal(venueId, req.body)
+    const goal = await salesGoalService.createSalesGoal(venueId, req.body, { staffId: (req as any).authContext?.userId ?? null })
 
     res.status(201).json(goal)
   } catch (error) {
@@ -1218,7 +1060,7 @@ export async function updateSalesGoal(req: Request, res: Response, next: NextFun
   try {
     const { venueId, goalId } = req.params
 
-    const goal = await salesGoalService.updateSalesGoal(venueId, goalId, req.body)
+    const goal = await salesGoalService.updateSalesGoal(venueId, goalId, req.body, { staffId: (req as any).authContext?.userId ?? null })
 
     res.json(goal)
   } catch (error) {
@@ -1234,7 +1076,7 @@ export async function deleteSalesGoal(req: Request, res: Response, next: NextFun
   try {
     const { venueId, goalId } = req.params
 
-    await salesGoalService.deleteSalesGoal(venueId, goalId)
+    await salesGoalService.deleteSalesGoal(venueId, goalId, { staffId: (req as any).authContext?.userId ?? null })
 
     res.json({ message: 'Sales goal deleted successfully' })
   } catch (error) {

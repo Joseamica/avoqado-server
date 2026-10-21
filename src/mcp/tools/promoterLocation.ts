@@ -4,6 +4,7 @@ import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { getPromoterTrackForVenue, getLatestPromoterLocationsForVenue } from '@/services/promoters/promoterLocation.service'
@@ -48,10 +49,7 @@ export function registerPromoterLocationTools(server: McpServer, scope: McpScope
             venueId,
             active: true,
             staff: {
-              OR: [
-                { firstName: { contains: promoterName, mode: 'insensitive' } },
-                { lastName: { contains: promoterName, mode: 'insensitive' } },
-              ],
+              ...personSearchWhere(promoterName),
             },
           },
           select: { staff: { select: { id: true, firstName: true, lastName: true } } },

@@ -7,6 +7,8 @@ import prisma from '@/utils/prismaClient'
 import { buildPrintConfig, routingConfigFrom } from '@/services/printing/printConfig.service'
 import { estacionesDelNegocio } from '@/services/kds/kitchenDisplayStations'
 import { authorKitchenTickets, markKitchenTicket } from '@/services/kds/kitchenTicketAuthoring.service'
+import { cancelOrder } from '@/services/mobile/order.mobile.service'
+import { deleteOrder } from '@/services/dashboard/order.dashboard.service'
 
 const SUF = `kdsarmado-${Date.now()}`
 const haceUnaHora = new Date(Date.now() - 60 * 60 * 1000)
@@ -98,6 +100,45 @@ const comandasDe = (orderId: string) =>
   prisma.kdsOrder.findMany({ where: { venueId, orderId }, include: { items: true }, orderBy: { sourceKey: 'asc' }, take: 20 })
 
 describe('authorKitchenTickets', () => {
+  it('F06: fallo en la segunda página revierte comandas y conserva la marca para reintentar', async () => {
+    const v = await nuevaVenta({ items: { create: Array.from({ length: 501 }, () => renglon(taco, 'Taco', 1)) } })
+    const originalTx = prisma.$transaction.bind(prisma) as any
+    const spy = jest.spyOn(prisma, '$transaction').mockImplementation(((callback: any, options: any) =>
+      originalTx(async (tx: any) => {
+        const create = tx.kdsOrderItem.createMany.bind(tx.kdsOrderItem)
+        let pages = 0
+        tx.kdsOrderItem.createMany = (args: any) => {
+          if (++pages === 2) throw new Error('F06 page fault')
+          return create(args)
+        }
+        return callback(tx)
+      }, options)) as any)
+    try {
+      await expect(authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).rejects.toThrow('F06 page fault')
+    } finally {
+      spy.mockRestore()
+    }
+    expect(await comandasDe(v.id)).toHaveLength(0)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).not.toBeNull()
+    expect(await prisma.orderItem.count({ where: { orderId: v.id, sentToKitchenAt: { not: null } } })).toBe(0)
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })
+    expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(501)
+  })
+
+  it.each([501, 1001])('F06: %i renglones empatados llegan completos, sin duplicarse al repetir', async total => {
+    const createdAt = new Date()
+    const v = await nuevaVenta({
+      items: { create: Array.from({ length: total }, (_, i) => renglon(taco, `Taco ${i}`, 1, { createdAt, sequence: 0 })) },
+    })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+    const ids = (await comandasDe(v.id)).flatMap(c => c.items.map(i => i.orderItemId))
+    expect(ids).toHaveLength(total)
+    expect(new Set(ids).size).toBe(total)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'SWEEP' })
+    expect((await comandasDe(v.id)).flatMap(c => c.items)).toHaveLength(total)
+  })
+
   it('arma una comanda por estación con pantalla, con los ids para rutear, sella el envío y limpia la marca', async () => {
     const v = await nuevaVenta()
     const { ticketIds } = await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
@@ -216,6 +257,49 @@ describe('authorKitchenTickets', () => {
     expect((await comandasDe(o.id))[0].sourceKey).toBe(`round:rk-pagada:${cocina}`)
   })
 
+  it('al PAGAR, una ronda que se quedó sin comanda (su gancho falló) conserva la marca y el barrido la arma (Codex 3.6)', async () => {
+    const tableId = (await prisma.table.create({ data: { venueId, number: `M2-${SUF}`, capacity: 4, qrCode: `qr2-${SUF}` } })).id
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `MESA2-${SUF}`,
+        tableId,
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        kitchenPendingAt: new Date(Date.now() - 60_000),
+        items: { create: [renglon(taco, 'Taco', 1, { sentToKitchenAt: new Date(), externalId: 'sync:rk-falla:0' })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'PAID' })).ticketIds).toEqual([])
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).kitchenPendingAt).not.toBeNull()
+
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'SWEEP' })).ticketIds).toHaveLength(1)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: o.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it.each([
+    ['anular desde la app', (orderId: string) => cancelOrder(venueId, orderId, 'Mesa equivocada')],
+    ['borrar desde el dashboard', (orderId: string) => deleteOrder(venueId, orderId)],
+  ])('%s retira de la pantalla de cocina sus comandas pendientes (Codex 3.6)', async (_como, anular) => {
+    const o = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `ANULA-${Math.random().toString(36).slice(2, 8)}-${SUF}`,
+        subtotal: 50,
+        taxAmount: 0,
+        total: 50,
+        items: { create: [renglon(taco, 'Taco', 1, { sentToKitchenAt: new Date(), externalId: `sync:rk-anula-${Math.random()}:0` })] },
+      },
+      select: { id: true },
+    })
+    expect((await authorKitchenTickets({ venueId, orderId: o.id, trigger: 'ROUND' })).ticketIds).toHaveLength(1)
+
+    await anular(o.id)
+    expect(await comandasDe(o.id)).toHaveLength(0)
+  })
+
   it('los modificadores salen con la MISMA forma que el resto de comandas («2x Extra queso»)', async () => {
     const v = await nuevaVenta()
     const renglonTaco = await prisma.orderItem.findFirstOrThrow({ where: { orderId: v.id, productId: taco } })
@@ -225,6 +309,27 @@ describe('authorKitchenTickets', () => {
     await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
     const item = await prisma.kdsOrderItem.findFirstOrThrow({ where: { orderItemId: renglonTaco.id } })
     expect(JSON.parse(item.modifiers!)).toEqual(['2x Extra queso'])
+  })
+
+  // Codex 3.6 (S6): la venta por peso guarda `quantity = 1` y el peso aparte; la cocina leía «Taco ×1» sin saber cuánto.
+  it('un renglón por peso lleva el peso en la comanda («0.750 kg»); los demás salen igual', async () => {
+    const v = await nuevaVenta({
+      items: {
+        create: [
+          renglon(taco, 'Arrachera', 1, { weightQuantity: new Prisma.Decimal('0.75'), weightUnit: 'KILOGRAM' }),
+          renglon(limonada, 'Limonada', 1),
+        ],
+      },
+    })
+    await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })
+
+    const nombres = (await comandasDe(v.id)).flatMap(c => c.items.map(i => [i.productName, i.quantity]))
+    expect(nombres).toEqual(
+      expect.arrayContaining([
+        ['Arrachera (0.750 kg)', 1],
+        ['Limonada', 1],
+      ]),
+    )
   })
 
   it('un renglón de vale de área (V7) no se arma por aquí, y la marca se limpia igual', async () => {
@@ -274,6 +379,58 @@ describe('authorKitchenTickets', () => {
     expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toEqual([])
     expect(await comandasDe(v.id)).toHaveLength(0)
     expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+  })
+
+  it('un renglón de tarjeta de regalo no se arma en cocina, y la marca se limpia igual', async () => {
+    const sobre = await prisma.giftCard.create({
+      data: {
+        venueId,
+        organizationId: orgId,
+        codeHash: `kds-${SUF}`,
+        codeEnc: 'cifrado-de-prueba',
+        codeLast4: 'ABCD',
+        pageToken: `kds-pt-${SUF}`,
+        initialAmount: new Prisma.Decimal(500),
+        balance: new Prisma.Decimal(0),
+        status: 'PENDING',
+        termsVersion: '2026-10-14',
+        deliveryChannel: 'PRINTED',
+      },
+      select: { id: true },
+    })
+    const v = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `TR-${SUF}`,
+        subtotal: 500,
+        taxAmount: 0,
+        total: 500,
+        kitchenPendingAt: new Date(),
+        items: {
+          create: [
+            {
+              productName: 'Tarjeta de regalo',
+              quantity: 1,
+              unitPrice: new Prisma.Decimal(500),
+              taxAmount: new Prisma.Decimal(0),
+              total: new Prisma.Decimal(500),
+              ivaTratamiento: 'NO_OBJETO',
+              giftCardId: sobre.id,
+            },
+          ],
+        },
+      },
+      select: { id: true },
+    })
+    try {
+      expect((await authorKitchenTickets({ venueId, orderId: v.id, trigger: 'PAID' })).ticketIds).toEqual([])
+      expect(await comandasDe(v.id)).toHaveLength(0)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: v.id } })).kitchenPendingAt).toBeNull()
+    } finally {
+      // El `afterAll` borra el negocio: el sobre (Restrict hacia Venue) se va antes, junto con su cuenta.
+      await prisma.order.delete({ where: { id: v.id } })
+      await prisma.giftCard.delete({ where: { id: sobre.id } })
+    }
   })
 
   /** Crea una `AreaTicketLine` real (misma cadena que exige el schema) para marcar un renglón como vale de área. */

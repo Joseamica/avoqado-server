@@ -69,3 +69,30 @@ describe('updateVenueSettings — managerPinOverrideEnabled on the CREATE branch
     expect(callArg.create.managerPinOverrideEnabled ?? false).toBe(false)
   })
 })
+
+describe('updateVenueSettings — enforceTableOwnership on the CREATE branch', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  // 🔴 Mismo defecto que el PIN de gerente: sin fila de settings el primer «prender» caía en la rama CREATE sin el campo,
+  // la fila nacía en false y el dashboard enseñaba encendido algo que el POS nunca aplicaba (auditoría Codex, plano POS).
+  it('lo incluye en el payload CREATE (un venue sin fila de settings también lo persiste)', async () => {
+    mockedPrisma.venue.findUnique.mockResolvedValue({ id: 'v1' })
+    mockedPrisma.venueSettings.upsert.mockResolvedValue({ id: 's1', venueId: 'v1', enforceTableOwnership: true })
+
+    await updateVenueSettings('v1', { enforceTableOwnership: true } as any)
+
+    const callArg = mockedPrisma.venueSettings.upsert.mock.calls[0][0]
+    expect(callArg.create.enforceTableOwnership).toBe(true)
+    expect(callArg.update.enforceTableOwnership).toBe(true)
+  })
+
+  it('nace con el default de la base cuando el update no lo menciona', async () => {
+    mockedPrisma.venue.findUnique.mockResolvedValue({ id: 'v1' })
+    mockedPrisma.venueSettings.upsert.mockResolvedValue({ id: 's1', venueId: 'v1' })
+
+    await updateVenueSettings('v1', { notifyBadReviews: false } as any)
+
+    const callArg = mockedPrisma.venueSettings.upsert.mock.calls[0][0]
+    expect(callArg.create).not.toHaveProperty('enforceTableOwnership')
+  })
+})

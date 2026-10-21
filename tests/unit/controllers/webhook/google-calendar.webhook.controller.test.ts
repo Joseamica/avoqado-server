@@ -15,6 +15,7 @@
 import { Request, Response } from 'express'
 
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 
 // ---- RabbitMQ mock ----
 const rabbitPublishMock = jest.fn()
@@ -64,10 +65,17 @@ const VALID_HEADERS = {
   'X-Goog-Message-Number': '42',
 }
 
+const originalEnv = process.env
+
 beforeEach(() => {
+  process.env = { ...originalEnv, DEMO_MODE: 'false', DISABLE_RABBITMQ: 'false' }
   rabbitPublishMock.mockReset().mockReturnValue(true)
   ;(prisma.googleCalendarChannel.findMany as jest.Mock).mockReset()
   ;(prisma.googleCalendarWebhookInbox.create as jest.Mock).mockReset().mockResolvedValue({})
+})
+
+afterEach(() => {
+  process.env = originalEnv
 })
 
 // ============================================================
@@ -262,6 +270,24 @@ describe('happy path', () => {
     expect(status).toHaveBeenCalledWith(200)
     // Inbox row still written → sweeper will retry.
     expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
+    expect(rabbitPublishMock).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('failed to enqueue pull'), {
+      err: 'rabbitmq_publish_buffer_full',
+      connectionId: 'conn-1',
+    })
+  })
+
+  it.each(['DISABLE_RABBITMQ', 'DEMO_MODE'])('con %s=true no intenta encolar ni avisa: el sweeper toma el pull', async flag => {
+    process.env[flag] = 'true'
+    ;(prisma.googleCalendarChannel.findMany as jest.Mock).mockResolvedValue([VALID_CHANNEL])
+    const { res, status } = mockRes()
+
+    await handleGoogleCalendarWebhook(mockReq(VALID_HEADERS), res)
+
+    expect(status).toHaveBeenCalledWith(200)
+    expect(prisma.googleCalendarWebhookInbox.create).toHaveBeenCalledTimes(1)
+    expect(rabbitPublishMock).not.toHaveBeenCalled()
+    expect(logger.warn).not.toHaveBeenCalledWith(expect.stringContaining('failed to enqueue pull'), expect.anything())
   })
 })
 

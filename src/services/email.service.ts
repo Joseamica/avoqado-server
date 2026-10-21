@@ -1,6 +1,9 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { zonaValida } from '../utils/datetime'
+import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
+import { isValidIANATimezone } from '../utils/sanitizeTimezone'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -100,9 +103,18 @@ interface ReceiptEmailData {
   }>
   // Totals
   subtotal?: number
+  /** Descuento en pesos (IVA por producto, plan 7, A7-R6). Sólo se pinta si es > 0, en negativo, entre Subtotal y Cargo. */
+  discountAmount?: number
+  /** IVA agregado (el que la venta cobró aparte). Con IVA incluido va 0 y se pinta la leyenda si `leyendaIva`. */
   taxAmount?: number
   tipAmount?: number
   totalAmount?: number
+  /** Cargo por servicio (IVA por producto, plan 7). Sólo se pinta si es > 0. */
+  serviceChargeAmount?: number
+  /** true ⇒ «IVA incluido cuando aplica» en lugar de un renglón de impuesto. Ausente ⇒ como antes (ligas de pago). */
+  leyendaIva?: boolean
+  /** Comprobante de una devolución: «Total reembolsado». */
+  esDevolucion?: boolean
   // Payment info
   paymentMethod?: string
   paymentDate?: string
@@ -162,6 +174,8 @@ export interface PlanConfirmationEmailData {
   payNow: boolean // true = paid today, false = trial
   interval: 'monthly' | 'annual'
   firstChargeDate: Date // trial end (trial) OR next renewal (pay-now)
+  /** Zona del negocio para escribir la fecha (IANA). Sin ella, Ciudad de México: nunca la del servidor (UTC en Render). */
+  timeZone?: string
   firstChargeAmountCents: number // gross IVA-inclusive (115884 monthly / 1158840 annual)
   introAmountCents?: number // pay-now first charge (69484 = $694.84) when applicable
   /**
@@ -185,9 +199,16 @@ export interface PlanRenewalReminderEmailData {
   locale: 'es' | 'en'
   venueName: string
   interval: 'monthly' | 'annual'
+  /** Fecha del cobro: la renovación, o con `isTrialEnd` el fin de la prueba (= primer cobro). */
   renewalDate: Date
   amountCents: number
   billingPortalUrl: string
+  /** Nombre del plan que dice el correo en las DOS variantes. Por defecto `'Pro'`. */
+  planName?: string
+  /** `true` = «tu prueba termina y ese día se cobra» (job de recordatorio y Stripe `trial_will_end`). Sin él, la renovación de siempre. */
+  isTrialEnd?: boolean
+  /** Zona en la que se escribe `renewalDate` (la del negocio). Por defecto `'America/Mexico_City'`. */
+  timeZone?: string
 }
 
 export interface PlanWinbackEmailData {
@@ -604,10 +625,12 @@ class EmailService {
     <div style="padding: 24px 0; border-bottom: 1px solid #e0e0e0;">
       <table cellpadding="0" cellspacing="0" style="width: 100%;">
         ${data.subtotal !== undefined ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Subtotal</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.subtotal)}</td></tr>` : ''}
-        ${data.taxAmount !== undefined && data.taxAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Impuestos</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.taxAmount)}</td></tr>` : ''}
+        ${data.discountAmount !== undefined && data.discountAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Descuento</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(-data.discountAmount)}</td></tr>` : ''}
+        ${data.serviceChargeAmount !== undefined && data.serviceChargeAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Cargo por servicio</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.serviceChargeAmount)}</td></tr>` : ''}
+        ${data.taxAmount !== undefined && data.taxAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">IVA agregado</td><td style="padding: 8px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(data.taxAmount)}</td></tr>` : data.leyendaIva ? `<tr><td colspan="2" style="padding: 8px 0; font-size: 13px; color: #666;">IVA incluido cuando aplica</td></tr>` : ''}
         ${data.tipAmount !== undefined && data.tipAmount > 0 ? `<tr><td style="padding: 8px 0; font-size: 15px; color: #000;">Propina</td><td style="padding: 8px 0; font-size: 15px; color: #1a73e8; text-align: right;">${formatCurrency(data.tipAmount)}</td></tr>` : ''}
         <tr style="border-top: 1px solid #e0e0e0;">
-          <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000;">Total</td>
+          <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000;">${data.esDevolucion ? 'Total reembolsado' : 'Total'}</td>
           <td style="padding: 16px 0 0 0; font-size: 18px; font-weight: 600; color: #000; text-align: right;">${formatCurrency(data.totalAmount)}</td>
         </tr>
       </table>
@@ -651,9 +674,11 @@ ${data.processedBy ? `Atendido por: ${data.processedBy}` : ''}
 
 ${itemsText ? `PRODUCTOS:\n${itemsText}\n` : ''}
 ${data.subtotal !== undefined ? `Subtotal: ${formatCurrency(data.subtotal)}` : ''}
-${data.taxAmount !== undefined && data.taxAmount > 0 ? `Impuestos: ${formatCurrency(data.taxAmount)}` : ''}
+${data.discountAmount !== undefined && data.discountAmount > 0 ? `Descuento: ${formatCurrency(-data.discountAmount)}` : ''}
+${data.serviceChargeAmount !== undefined && data.serviceChargeAmount > 0 ? `Cargo por servicio: ${formatCurrency(data.serviceChargeAmount)}` : ''}
+${data.taxAmount !== undefined && data.taxAmount > 0 ? `IVA agregado: ${formatCurrency(data.taxAmount)}` : data.leyendaIva ? 'IVA incluido cuando aplica' : ''}
 ${data.tipAmount !== undefined && data.tipAmount > 0 ? `Propina: ${formatCurrency(data.tipAmount)}` : ''}
-TOTAL: ${formatCurrency(data.totalAmount)}
+${data.esDevolucion ? 'Total reembolsado' : 'TOTAL'}: ${formatCurrency(data.totalAmount)}
 
 Metodo de pago: ${formatPaymentMethod(data.paymentMethod)}
 
@@ -3445,6 +3470,109 @@ Servicios Tecnologicos Avo S.A. de C.V.`
   }
 
   /**
+   * Conector Shopify (plan v2 B4): productos cuyo stock no cuadra entre Avoqado y Shopify y que el cuadre no supo
+   * explicar. Plantilla canónica de `sendLowStockDigestEmail`; nombres escapados; html y text; uno por persona y día
+   * (la llave de idempotencia lleva la fecha del negocio).
+   */
+  async sendShopifyPorRevisarEmail(
+    email: string,
+    data: {
+      venueName: string
+      total: number
+      items: Array<{ name: string; avoqado: string; shopify: number; motivo: string }>
+      dashboardUrl: string
+      idempotencyKey?: string
+    },
+  ): Promise<boolean> {
+    const esc = escapeHtmlForReferralEmail
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const subject = `Stock por revisar entre Avoqado y Shopify en ${data.venueName}`
+    const fecha = new Date().toLocaleDateString('es-MX', {
+      weekday: 'long',
+      day: 'numeric',
+      month: 'long',
+      year: 'numeric',
+      timeZone: 'America/Mexico_City',
+    })
+    const fechaBonita = fecha.charAt(0).toUpperCase() + fecha.slice(1)
+    const resto = Math.max(0, data.total - data.items.length)
+    const resumen = `${data.total} ${data.total === 1 ? 'producto no cuadra' : 'productos no cuadran'} entre Avoqado y Shopify y no encontramos qu&eacute; venta lo explica.`
+    const filas = data.items
+      .map(
+        i => `
+          <tr>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb;">
+              <div style="font-size: 14px; font-weight: 500; color: #000;">${esc(i.name)}</div>
+              <div style="font-size: 12px; color: #666;">${esc(i.motivo)}</div>
+            </td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: right; font-size: 14px; color: #000;">${esc(i.avoqado)}</td>
+            <td style="padding: 12px 16px; border-bottom: 1px solid #e5e7eb; text-align: right; font-size: 14px; color: #000;">${i.shopify}</td>
+          </tr>`,
+      )
+      .join('')
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Stock por revisar en ${esc(data.venueName)}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">${fechaBonita}</p>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #000;">${resumen} Elige con un clic qu&eacute; n&uacute;mero es el bueno.</p>
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden;">
+      <thead>
+        <tr style="background-color: #f9fafb;">
+          <th style="padding: 10px 16px; text-align: left; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Producto</th>
+          <th style="padding: 10px 16px; text-align: right; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Avoqado</th>
+          <th style="padding: 10px 16px; text-align: right; font-size: 12px; font-weight: 600; color: #666; text-transform: uppercase; border-bottom: 2px solid #e5e7eb;">Shopify</th>
+        </tr>
+      </thead>
+      <tbody>${filas}</tbody>
+    </table>
+    ${resto > 0 ? `<p style="margin: 12px 0 0 0; font-size: 13px; color: #666;">y ${resto} más en la página.</p>` : ''}
+    <div style="margin: 32px 0; text-align: left;">
+      <a href="${data.dashboardUrl}" style="display: inline-block; background-color: #000000; color: #ffffff; padding: 12px 24px; border-radius: 6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Revisar en Avoqado
+      </a>
+    </div>
+    <hr style="border: none; border-top: 1px solid #e5e7eb; margin: 32px 0;" />
+    <div style="padding-top: 8px;">
+      <div style="margin-bottom: 16px;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">Servicios Tecnologicos Avo S.A. de C.V.</p>
+      <p style="margin: 0; font-size: 12px; color: #999;">Este correo sale una vez al día mientras haya algo por revisar.</p>
+    </div>
+  </div>
+</body>
+</html>`
+    const text = `Stock por revisar en ${data.venueName}
+${fechaBonita}
+
+${data.total} producto(s) no cuadran entre Avoqado y Shopify y no encontramos que venta lo explica.
+
+${data.items.map(i => `- ${i.name}: Avoqado ${i.avoqado}, Shopify ${i.shopify} (${i.motivo})`).join('\n')}
+${resto > 0 ? `y ${resto} más en la página.\n` : ''}
+Revisar en Avoqado: ${data.dashboardUrl}
+
+---
+Servicios Tecnologicos Avo S.A. de C.V.
+Este correo sale una vez al día mientras haya algo por revisar.`
+    return this.sendEmail({ to: email, subject, html, text, idempotencyKey: data.idempotencyKey })
+  }
+
+  /**
    * Le manda al CLIENTE FINAL la liga de su tarjeta de sellos.
    *
    * 🔴 El lector NO es el negocio: aqui no se habla de planes, del dashboard ni de
@@ -4451,10 +4579,12 @@ Servicios Tecnologicos Avo S.A. de C.V.`
         style: 'currency',
         currency: 'MXN',
       }).format(cents / 100)
+    // 🔴 En la zona del NEGOCIO: con la del servidor (UTC), un cobro a las 20:00 de México se anunciaba para «mañana».
     const dateFormatted = data.firstChargeDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
+      timeZone: data.timeZone && isValidIANATimezone(data.timeZone) ? data.timeZone : 'America/Mexico_City',
     })
     const intervalLabel =
       data.locale === 'en' ? (data.interval === 'annual' ? 'year' : 'month') : data.interval === 'annual' ? 'año' : 'mes'
@@ -4469,6 +4599,10 @@ Servicios Tecnologicos Avo S.A. de C.V.`
     const mesesEs = introMonths === 1 ? 'el primer mes' : `los primeros ${introMonths} meses`
     const monthsEn = introMonths === 1 ? 'the first month' : `the first ${introMonths} months`
     const planName = data.planName ?? 'Pro'
+    // Al terminar el onboarding éste es el único correo que llega: también dice dónde bajar la app
+    // (founder, 16-oct). Va antes de la facturación, que es lo menos urgente.
+    const idioma = data.locale === 'en' ? 'en' : 'es'
+    const descargaTexto = descargarAppTexto({ idioma })
 
     let subject: string
     let greeting: string
@@ -4503,6 +4637,8 @@ Your Avoqado ${planName} plan for ${data.venueName} is active. ${
 
 Next renewal: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
+${descargaTexto}
+
 View billing: ${data.billingPortalUrl}
 
 Avoqado Team`
@@ -4529,6 +4665,8 @@ Tu plan Avoqado ${planName} para ${data.venueName} está activo. ${
 
 Próxima renovación: ${dateFormatted} · ${nextAmount}/${intervalLabel}.
 
+${descargaTexto}
+
 Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
@@ -4548,6 +4686,8 @@ Equipo de Avoqado`
 
 Your 30-day trial is active. Your first charge of ${firstAmount} is on ${dateFormatted}.
 
+${descargaTexto}
+
 View billing: ${data.billingPortalUrl}
 
 Avoqado Team`
@@ -4562,6 +4702,8 @@ Avoqado Team`
 
 Tu prueba de 30 días está activa. Tu primer cobro será de ${firstAmount} el ${dateFormatted}.
 
+${descargaTexto}
+
 Ver facturación: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
@@ -4572,7 +4714,7 @@ Equipo de Avoqado`
       locale: data.locale,
       title: subject,
       venueName: data.venueName,
-      bodyHtml,
+      bodyHtml: bodyHtml + descargarAppHtml({ idioma }),
       ctaLabel,
       ctaUrl: data.billingPortalUrl,
     })
@@ -4581,48 +4723,65 @@ Equipo de Avoqado`
   }
 
   /**
-   * Plan renewal reminder (Phase 1.5). Sent ~3 days before the next billing period by a daily cron.
+   * Plan reminder before the next charge (renewal, or with `isTrialEnd` the end of the trial). Sent by the daily
+   * `plan-renewal-reminder` job less than 9 days before the charge (first send normally 8-9 days out) and by the Stripe
+   * `trial_will_end` webhook (3 days before).
    */
   async sendPlanRenewalReminderEmail(email: string, data: PlanRenewalReminderEmailData): Promise<boolean> {
     const amount = new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
       style: 'currency',
       currency: 'MXN',
     }).format(data.amountCents / 100)
+    // Sin zona explícita la fecha salía en la del servidor (UTC en Render): un cobro a las 20:00 del 16 en CDMX decía «17».
     const dateFormatted = data.renewalDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
       month: 'long',
       day: 'numeric',
+      // Una zona inválida lanzaría RangeError y el aviso de cobro no saldría.
+      timeZone: zonaValida(data.timeZone),
     })
+    const planName = data.planName ?? 'Pro'
 
-    const subject = data.locale === 'en' ? 'Your plan renews soon' : 'Tu plan se renueva pronto'
-    const ctaLabel = data.locale === 'en' ? 'Manage plan' : 'Administrar plan'
-
+    let subject: string
+    let ctaLabel: string
     let bodyHtml: string
     let text: string
     if (data.locale === 'en') {
+      const greeting = 'Hi,'
+      const cuerpo = data.isTrialEnd
+        ? `Your Avoqado ${planName} trial ends on <strong>${dateFormatted}</strong>. On that day we'll charge <strong>${amount}</strong> to your card. If you don't want to continue, cancel before then from Billing.`
+        : `Your Avoqado ${planName} plan will renew on <strong>${dateFormatted}</strong> for <strong>${amount}</strong>. You don't need to do anything; it charges your card automatically.`
+      subject = data.isTrialEnd ? `Your Avoqado ${planName} trial ends on ${dateFormatted}` : 'Your plan renews soon'
+      ctaLabel = data.isTrialEnd ? 'View billing' : 'Manage plan'
       bodyHtml = `
-      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hi,</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Your Avoqado Pro plan will renew on <strong>${dateFormatted}</strong> for <strong>${amount}</strong>. You don't need to do anything; it charges your card automatically.
+        ${cuerpo}
       </p>`
-      text = `Hi,
+      text = `${greeting}
 
-Your Avoqado Pro plan will renew on ${dateFormatted} for ${amount}. You don't need to do anything; it charges your card automatically.
+${cuerpo.replace(/<\/?strong>/g, '')}
 
-Manage plan: ${data.billingPortalUrl}
+${ctaLabel}: ${data.billingPortalUrl}
 
 Avoqado Team`
     } else {
+      const greeting = 'Hola,'
+      const cuerpo = data.isTrialEnd
+        ? `Tu prueba de Avoqado ${planName} termina el <strong>${dateFormatted}</strong>. Ese día cobraremos <strong>${amount}</strong> a tu tarjeta. Si no quieres continuar, cancela antes desde Facturación.`
+        : `Tu plan Avoqado ${planName} se renovará el <strong>${dateFormatted}</strong> por <strong>${amount}</strong>. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.`
+      subject = data.isTrialEnd ? `Tu prueba de Avoqado ${planName} termina el ${dateFormatted}` : 'Tu plan se renueva pronto'
+      ctaLabel = data.isTrialEnd ? 'Ver facturación' : 'Administrar plan'
       bodyHtml = `
-      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">Hola,</p>
+      <p style="font-size: 16px; margin: 0 0 16px 0; color: #000;">${greeting}</p>
       <p style="font-size: 16px; margin: 0 0 24px 0; color: #000;">
-        Tu plan Avoqado Pro se renovará el <strong>${dateFormatted}</strong> por <strong>${amount}</strong>. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.
+        ${cuerpo}
       </p>`
-      text = `Hola,
+      text = `${greeting}
 
-Tu plan Avoqado Pro se renovará el ${dateFormatted} por ${amount}. No necesitas hacer nada; se cobra automáticamente a tu tarjeta.
+${cuerpo.replace(/<\/?strong>/g, '')}
 
-Administrar plan: ${data.billingPortalUrl}
+${ctaLabel}: ${data.billingPortalUrl}
 
 Equipo de Avoqado`
     }

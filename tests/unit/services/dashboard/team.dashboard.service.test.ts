@@ -109,6 +109,18 @@ describe('updateTeamMember — privilege-escalation guard', () => {
     prismaMock.staffVenue.findFirst.mockResolvedValue(existingManager as any)
   })
 
+  it('rechaza atómicamente un cambio de rol o estado posterior al preview MCP', async () => {
+    prismaMock.venue.findUnique.mockResolvedValue(null)
+    prismaMock.staffVenue.update.mockRejectedValueOnce({ code: 'P2025' })
+    const expectedState = { role: StaffRole.MANAGER, active: true }
+    await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.CASHIER, expectedState } as any)).rejects.toMatchObject({
+      statusCode: 409,
+    })
+    expect(prismaMock.staffVenue.update).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { id: 'sv-mgr', venueId: VENUE_ID, ...expectedState } }),
+    )
+  })
+
   it('blocks a MANAGER from promoting themselves to OWNER (self-promotion vector)', async () => {
     await expect(updateTeamMember(VENUE_ID, 'sv-mgr', { role: StaffRole.OWNER, callerRole: StaffRole.MANAGER })).rejects.toThrow(
       /No puedes asignar el rol/i,
@@ -307,17 +319,8 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
       isolationLevel: 'Serializable',
       timeout: 10_000,
     })
-    expect(events).toEqual([
-      'lock',
-      'reservation',
-      'classSession',
-      'slotHolds',
-      'commissionPayouts',
-      'commissionCalculations',
-      'milestoneAchievements',
-      'commissionOverrides',
-      'staffVenue',
-    ])
+    // Pagos, cálculos y metas alcanzadas de comisiones ya no se borran: son historial de dinero (Codex bloque B #2).
+    expect(events).toEqual(['lock', 'reservation', 'classSession', 'slotHolds', 'commissionOverrides', 'staffVenue'])
     const lockQuery = prismaMock.$queryRaw.mock.calls[0][0] as any
     expect(lockQuery.sql).toContain('SELECT id, "staffId"')
     expect(lockQuery.sql).toContain('FROM "StaffVenue"')
@@ -349,18 +352,10 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
         heldForReservation: { select: { status: true } },
       },
     })
-    expect(result).toEqual({
-      deletedRecords: {
-        commissionPayouts: 1,
-        commissionCalculations: 2,
-        milestoneAchievements: 3,
-        commissionOverrides: 4,
-        staffVenue: 1,
-      },
-    })
-    expect(prismaMock.commissionPayout.deleteMany).toHaveBeenCalledWith({ where: { staffId: STAFF_ID, venueId: VENUE_ID } })
-    expect(prismaMock.commissionCalculation.deleteMany).toHaveBeenCalledWith({ where: { staffId: STAFF_ID, venueId: VENUE_ID } })
-    expect(prismaMock.milestoneAchievement.deleteMany).toHaveBeenCalledWith({ where: { staffId: STAFF_ID, venueId: VENUE_ID } })
+    expect(result).toEqual({ deletedRecords: { commissionOverrides: 4, staffVenue: 1 } })
+    expect(prismaMock.commissionPayout.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.commissionCalculation.deleteMany).not.toHaveBeenCalled()
+    expect(prismaMock.milestoneAchievement.deleteMany).not.toHaveBeenCalled()
     expect(prismaMock.commissionOverride.deleteMany).toHaveBeenCalledWith({ where: { staffId: STAFF_ID, config: { venueId: VENUE_ID } } })
     expect(prismaMock.staffVenue.delete).toHaveBeenCalledWith({ where: { id: TEAM_MEMBER_ID } })
     expect(prismaMock.staff.delete).not.toHaveBeenCalled()
@@ -461,13 +456,7 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
     expect(prismaMock.reservation.findFirst.mock.calls.map(([args]: any[]) => args.where.assignedStaffId)).toEqual(staffIds)
     expect(prismaMock.classSession.findFirst.mock.calls.map(([args]: any[]) => args.where.assignedStaffId)).toEqual(staffIds)
     expect(prismaMock.slotHold.findMany.mock.calls.map(([args]: any[]) => args.where.staffId)).toEqual(staffIds)
-    expect(result.deletedRecords).toEqual({
-      commissionPayouts: 1,
-      commissionCalculations: 2,
-      milestoneAchievements: 3,
-      commissionOverrides: 4,
-      staffVenue: 1,
-    })
+    expect(result.deletedRecords).toEqual({ commissionOverrides: 4, staffVenue: 1 })
     expect(loggerInfoMock).toHaveBeenCalledTimes(1)
     // El mensaje perdio el sufijo "(SUPERADMIN)" cuando el borrado se abrio al OWNER:
     // decia quien PODIA ejecutarlo, y ya no era cierto.
@@ -495,7 +484,7 @@ describe('hardDeleteTeamMember — future commitment safety', () => {
 
     expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(2)
     expect(prismaMock.reservation.findFirst).toHaveBeenCalledTimes(2)
-    expect(prismaMock.commissionPayout.deleteMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.commissionOverride.deleteMany).toHaveBeenCalledTimes(1)
     expect(prismaMock.staffVenue.delete).toHaveBeenCalledTimes(1)
     expect(loggerInfoMock).not.toHaveBeenCalled()
     expect(prismaMock.staff.delete).not.toHaveBeenCalled()

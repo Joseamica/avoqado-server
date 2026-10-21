@@ -1,13 +1,16 @@
 /**
  * Config de esquemas — la regla de asistencia entra y sale completa, nunca a medias.
  */
-jest.mock('@/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+jest.mock('@/utils/prismaClient', () => {
+  const db: any = {
     commissionConfig: { create: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
     venue: { findUnique: jest.fn() },
-  },
-}))
+    activityLog: { create: jest.fn() },
+  }
+  // Actualizar escribe el cambio y su ActivityLog en una transacción (FT-GRAVES B1).
+  db.$transaction = jest.fn(async (fn: (tx: unknown) => unknown) => fn(db))
+  return { __esModule: true, default: db }
+})
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -68,5 +71,15 @@ describe('asistencia → comisiones en el config', () => {
   it('actualizar sólo el porcentaje (regla ya prendida) pasa', async () => {
     await updateCommissionConfig('cfg-1', 'venue-1', { attendanceLatePenaltyRate: 0.5 } as any)
     expect(db.commissionConfig.update.mock.calls[0][0].data).toEqual(expect.objectContaining({ attendanceLatePenaltyRate: 0.5 }))
+  })
+
+  it('🔴 D5: crear un esquema sin mencionar el IVA lo deja «sin IVA» (de fábrica)', async () => {
+    await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03 } as any, 'staff-1')
+    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: false }))
+  })
+
+  it('un «con IVA» EXPLÍCITO se respeta (el default no lo pisa)', async () => {
+    await createCommissionConfig('venue-1', { name: 'Meseros', defaultRate: 0.03, includeTax: true } as any, 'staff-1')
+    expect(db.commissionConfig.create.mock.calls[0][0].data).toEqual(expect.objectContaining({ includeTax: true }))
   })
 })

@@ -1,4 +1,4 @@
-import { OrderStatus, PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
+import { OrderStatus, PaymentFundsFlow, PaymentMethod, PaymentType, TransactionStatus } from '@prisma/client'
 import Papa from 'papaparse'
 
 import prisma from '../../utils/prismaClient'
@@ -189,7 +189,7 @@ export async function loadDepositCandidates(
       createdAt: { gte: from, lte: to },
       order: { status: { not: OrderStatus.CANCELLED } },
     },
-    select: { netAmount: true, createdAt: true, type: true },
+    select: { netAmount: true, createdAt: true, type: true, method: true, fundsFlow: true },
   })
 
   const byDay = new Map<string, { cents: number; count: number }>()
@@ -197,6 +197,11 @@ export async function loadDepositCandidates(
     // TEST = no es dinero real; ADJUSTMENT = no es un depósito (semántica ambigua → revisión manual).
     // Conservamos null (legacy = venta real), REGULAR, FAST y REFUND (neto de devoluciones).
     if (p.type === PaymentType.TEST || p.type === PaymentType.ADJUSTMENT) continue
+    // Sólo un reembolso que el negocio mandó por TRANSFERENCIA sale de su propia cuenta de banco: es un DÉBITO, no se
+    // netea contra los depósitos esperados (null = legacy). Los de tarjeta, terminal externa, vales y reparto los
+    // netea quien liquidó la venta (el procesador o la plataforma lo descuenta de su depósito; `applyDeliveryRefund.service.ts:111`).
+    if (p.type === PaymentType.REFUND && p.method === PaymentMethod.BANK_TRANSFER && p.fundsFlow !== PaymentFundsFlow.AVOQADO_PROCESSED)
+      continue
     const ymd = formatInVenueTimezone(p.createdAt, timezone, 'yyyy-MM-dd')
     const e = byDay.get(ymd) ?? { cents: 0, count: 0 }
     e.cents += toCents(p.netAmount)

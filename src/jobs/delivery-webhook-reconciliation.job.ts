@@ -142,10 +142,13 @@ export class DeliveryWebhookReconciliationJob {
     logger.info(`🛵 Delivery webhook reconciliation job started — every 2min, batch ${this.BATCH_SIZE}`)
   }
 
-  /** Un tick del cron: la pasada de pedidos y, APARTE y sin esperarse, el carril de aprovisionamiento. */
-  private tick(): void {
-    void this.runOnce()
-    void this.reprocesarAprovisionamientos()
+  /**
+   * Un tick del cron: la pasada de pedidos y, APARTE y sin esperarse entre sí, el carril de aprovisionamiento.
+   * Se devuelve la promesa de los dos para que el registro de jobs en vuelo (`scheduleJob`) los vea hasta que
+   * terminen; `cron` no espera el tick, así que no frena el siguiente (cada carril tiene su propio candado).
+   */
+  private async tick(): Promise<void> {
+    await Promise.allSettled([this.runOnce(), this.reprocesarAprovisionamientos()])
   }
 
   stop(): void {

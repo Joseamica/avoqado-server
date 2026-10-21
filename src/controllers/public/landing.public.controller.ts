@@ -3,13 +3,14 @@ import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
 import { signupFromLanding } from '../../services/onboarding/signup.service'
+import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../services/onboarding/campanaDelCorreo.service'
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
 import prisma from '../../utils/prismaClient'
+import { descargarAppHtml, descargarAppTexto } from '../../services/emailDescargarApp'
 
-const CONTACT_NOTIFY_EMAIL = process.env.CONTACT_NOTIFY_EMAIL || 'hola@avoqado.io'
-// Onboarding recibe el mismo aviso que ventas: quien da de alta al cliente
-// necesita el lead sin esperar un reenvio manual (founder, 2026-08-17).
+// El aviso del prospecto va SÓLO a onboarding (founder, 18-oct-2026): hola@ y onboarding@ son alias del mismo buzón, y
+// mandar una copia a cada uno le llegaba doble. Antes iba a los dos (founder, 2026-08-17).
 const ONBOARDING_NOTIFY_EMAIL = process.env.ONBOARDING_NOTIFY_EMAIL || 'onboarding@avoqado.io'
 const LABS_NOTIFY_EMAIL = process.env.LABS_NOTIFY_EMAIL || 'hola@avoqado.io'
 
@@ -194,6 +195,14 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // persisted account counts as a completed registration; renewing the magic
     // link for an unfinished account must not count the same person twice.
     let registrationCompleted = false
+    // `event_id` para el Pixel de ChatGPT: deriva de la cuenta, así que quien reenvía el formulario
+    // con el mismo correo (misma cuenta) manda el mismo id y ChatGPT descarta el repetido. Es un
+    // hash del id interno, que nunca sale en esta respuesta pública.
+    let eventId: string | undefined
+    // La oferta que la cuenta SÍ reclamó, para decirla en el correo («$10 al mes por 3 meses…»).
+    let ofertaTexto: string | null = null
+    // «No pude leerla» no es «no tiene oferta»: si la lectura falla, el correo no promete precio ni «sin tarjeta».
+    let ofertaIncierta = false
     try {
       const alta = await signupFromLanding({
         email: String(email),
@@ -212,6 +221,22 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
       yaEsCliente = alta.yaEsCliente
       altaEstado = alta.yaEsCliente ? 'existente' : 'creada'
       registrationCompleted = !alta.alreadyExisted && !alta.yaEsCliente
+      if (alta.organizationId) {
+        eventId = crypto.createHash('sha256').update(alta.organizationId).digest('hex').slice(0, 32)
+      }
+      // Sin mirar si este envío trae código: quien ya reclamó la oferta y reenvía desde otra página la conserva.
+      if (alta.organizationId && !alta.yaEsCliente) {
+        const organizationId = alta.organizationId
+        // Leer la oferta nunca tumba el alta ni el correo.
+        ofertaTexto = await ofertaReclamadaEnTexto(organizationId).catch(err => {
+          ofertaIncierta = true
+          logger.warn('[CONTACT_SUBMIT] No se pudo leer la oferta reclamada para el correo', {
+            organizationId,
+            error: err instanceof Error ? err.message : String(err),
+          })
+          return null
+        })
+      }
       if (alta.magicLinkToken) {
         // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
         const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
@@ -410,23 +435,32 @@ Campaña: ${utmTexto || '—'}
         // contradecir por escrito lo que va a ver en 3 minutos. (Auditoría de Codex, 18-sep.)
         yaEsCliente
           ? ''
-          : launchCampaignCode
-            ? `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">Tu oferta se activa con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.</p>`
-            : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`
+          : ofertaTexto || launchCampaignCode
+            ? `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">${ofertaTexto ? `Tu oferta: <strong>${escapeHtml(ofertaTexto)}</strong>. Se activa` : 'Tu oferta se activa'} con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.</p>`
+            : ofertaIncierta
+              ? ''
+              : `<p style="font-size:16px;margin:0 0 8px 0;color:#000;">El plan inicial es <strong>gratis para siempre</strong> y no pedimos tarjeta. Puedes ir creciendo cuando tu negocio crezca.</p>`
       }
     </div>
 
     ${
       magicLink
         ? `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:24px;margin:8px 0 24px 0;text-align:center;">
-      <p style="margin:0 0 4px 0;font-size:16px;font-weight:600;color:#000;">Tu cuenta ya está creada</p>
-      <p style="margin:0 0 20px 0;font-size:14px;color:#666;">Solo falta que elijas tu contraseña para entrar.</p>
+      <p style="margin:0 0 6px 0;font-size:12px;font-weight:600;color:#666;letter-spacing:0.5px;text-transform:uppercase;">Paso 1</p>
+      <p style="margin:0 0 4px 0;font-size:18px;font-weight:600;color:#000;">Elige tu contraseña</p>
+      <p style="margin:0 0 20px 0;font-size:14px;color:#666;">Tu cuenta ya está creada. Elige tu contraseña y deja listo tu negocio en unos minutos.</p>
       <a href="${ctaUrl}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${ctaTexto}</a>
       <p style="margin:20px 0 0 0;font-size:13px;color:#666;">Este enlace sirve por 24 horas y una sola vez. Si vence, escríbenos y te mandamos otro.</p>
     </div>`
         : `<div style="padding:32px 0 8px;text-align:center;">
       <a href="${ctaUrl}" style="background-color:#000000;color:#fff;padding:14px 32px;text-decoration:none;border-radius:6px;font-weight:600;font-size:14px;display:inline-block;">${ctaTexto}</a>
     </div>`
+    }
+
+    ${
+      // Sin esto el lead no sabía que tenía que instalar algo (founder, 16-oct). Va DESPUÉS de la
+      // contraseña: sin ella no puede entrar a la app.
+      yaEsCliente ? '' : descargarAppHtml({ paso: magicLink ? 2 : undefined })
     }
 
     ${
@@ -482,20 +516,23 @@ ${elegidos.map(m => `- ${m.label}${m.beneficio ? `: ${m.beneficio}` : ''}`).join
 }
 
 ${
-  launchCampaignCode
-    ? 'Tu oferta se activa con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.'
-    : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
+  ofertaTexto || launchCampaignCode
+    ? `${ofertaTexto ? `Tu oferta: ${ofertaTexto}. Se activa` : 'Tu oferta se activa'} con tarjeta al terminar de crear tu cuenta. Cancela cuando quieras desde tu panel.`
+    : ofertaIncierta
+      ? ''
+      : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
 }
 
-${magicLink ? `Tu cuenta ya está creada; solo falta que elijas tu contraseña.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
+${magicLink ? `Paso 1: elige tu contraseña. Tu cuenta ya está creada.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
+
+${descargarAppTexto({ paso: magicLink ? 2 : undefined })}
 
 Servicios Tecnológicos Avo S.A. de C.V. — Ciudad de México, México
 Política de Privacidad: https://avoqado.io/privacy
 `
 
-    // El aviso interno va a ventas Y a onboarding, para que quien da de alta al
-    // cliente reciba el lead sin depender de un reenvio manual.
-    const internos = [...new Set([CONTACT_NOTIFY_EMAIL, ONBOARDING_NOTIFY_EMAIL].filter(Boolean))]
+    // El aviso interno va UNA vez, a onboarding (ver ONBOARDING_NOTIFY_EMAIL arriba).
+    const internos = [ONBOARDING_NOTIFY_EMAIL]
 
     const [internosOk, confirmSent, crmOk] = await Promise.all([
       Promise.all(
@@ -541,7 +578,7 @@ Política de Privacidad: https://avoqado.io/privacy
 
     // Basta con que UNO de los internos llegue para no perder el lead.
     const leadCreated = internosOk.some(Boolean)
-    const conversion = { leadCreated, registrationCompleted }
+    const conversion = { leadCreated, registrationCompleted, ...(eventId ? { eventId } : {}) }
     if (!leadCreated) {
       logger.error('[CONTACT_SUBMIT] Internal notification failed', { email, companyName, internos })
       return res.status(502).json({
@@ -766,7 +803,7 @@ export async function continuarOnboarding(req: Request, res: Response, _next: Ne
   // correo en espanol. Sin esto el dashboard elige idioma por el navegador, y a
   // un mexicano con Chrome en ingles —que son muchos— la primera pantalla de
   // Avoqado le sale en ingles justo despues de leer todo en espanol.
-  const destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}?lang=es`
+  let destino = `${frontendUrl}/auth/reset-password/${encodeURIComponent(token)}?lang=es`
 
   try {
     // El token viaja en claro en el correo; en la DB vive su hash SHA-256.
@@ -778,6 +815,10 @@ export async function continuarOnboarding(req: Request, res: Response, _next: Ne
 
     if (staff) {
       const vencido = staff.resetTokenExpiry ? staff.resetTokenExpiry < new Date() : true
+      // La oferta y las UTM viajan en el enlace, para que la visita de regreso desde el correo
+      // siga contando para la campaña. Va ANTES de medir el clic: si medir falla, el destino la conserva.
+      const extra = await parametrosDeCampanaDelStaff(staff.id).catch(() => '')
+      if (extra) destino = `${destino}&${extra}`
       await prisma.activityLog.create({
         data: {
           staffId: staff.id,

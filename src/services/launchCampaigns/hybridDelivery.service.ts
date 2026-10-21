@@ -11,11 +11,23 @@ import { ensureHybridSchedule } from './hybridSchedule'
 import { hybridOfferDefinition } from './hybridOffer.schema'
 import { executeSeatReconciliation } from '@/services/dashboard/seatReconciliation.service'
 import { settleSeatsAfterHybridDelivery, unsettledCheckoutSeatChoice } from './hybridSeats'
+import { finDelSegundoDeLaFrontera } from './hybridPlanCatchUp'
 
 const idOf = (value: string | { id: string } | null | undefined) => (typeof value === 'string' ? value : value?.id)
 const mismatch = () =>
   new ConflictError('No pudimos verificar la cobertura pagada. Conservamos tu compra para revisarla.', 'HYBRID_DELIVERY_UNVERIFIED')
 type Composition = Array<{ contractId: string; itemId: string; featureCodes: string[]; priceId: string; amount: string }>
+
+/**
+ * The delivery's one «not paid» criterion for a period: open dispute, fully refunded, or funded below the sum of its lines
+ * (`expected`). The price-gap report repeats it in SQL (`periodFundedSql`); its integration test checks both agree.
+ */
+export function hybridPeriodInvalid(
+  funding: { funded: Prisma.Decimal.Value; refunded: Prisma.Decimal.Value; disputed: boolean },
+  expected: Prisma.Decimal,
+) {
+  return funding.disputed || new Prisma.Decimal(funding.refunded).gte(funding.funded) || new Prisma.Decimal(funding.funded).lt(expected)
+}
 
 /** Always reads live provider state; webhook order and browser success redirects are never payment authority. */
 export async function reconcileHybridInvoice(venueId: string, purchaseId: string, invoiceId: string) {
@@ -114,7 +126,14 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
         where: { purchaseId, venueId },
         select: {
           id: true,
-          selections: { where: { effectiveAt: { lte: new Date(start * 1000) } }, orderBy: { effectiveAt: 'desc' }, take: 1 },
+          // La última fila vigente al empezar el periodo, contando el SEGUNDO de la frontera: Stripe da segundos enteros y
+          // ahí viven las ampliaciones de la puesta al día de funciones de plan (+1 ms…; hybridPlanCatchUp.ts), porque el
+          // historial es inmutable por trigger. Ningún otro escritor usa fracciones de segundo.
+          selections: {
+            where: { effectiveAt: { lt: finDelSegundoDeLaFrontera(new Date(start * 1000)) } },
+            orderBy: { effectiveAt: 'desc' },
+            take: 1,
+          },
         },
         orderBy: { id: 'asc' },
         take: 9,
@@ -169,7 +188,7 @@ async function reconcileInvoice(venueId: string, purchaseId: string, invoiceId: 
   const expected = composition.reduce((sum, line) => sum.add(line.amount), new Prisma.Decimal(0))
   const underfunded = new Prisma.Decimal(funding.funded).lt(expected)
   if (underfunded && !funding.impaired) throw mismatch()
-  const invalid = disputed || new Prisma.Decimal(funding.refunded).gte(funding.funded) || underfunded
+  const invalid = hybridPeriodInvalid(funding, expected)
   // Configure the agreed future price before activating a paid purchase; recovery repeats the same recorded operation.
   if (!invalid && invoiceId === purchase.initialInvoiceId && purchase.status !== 'COMPLETED') {
     await assertLive()

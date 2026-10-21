@@ -29,6 +29,17 @@ import { resolveInitialVenueState } from '@/utils/venueOnboarding'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { addDays } from 'date-fns'
 import crypto from 'crypto'
+import { parseLinkedWizard } from '@/services/document-requests/wizardInput'
+import {
+  Selection,
+  parseSelection,
+  wizardHash,
+  lockWizardTx,
+  findWizardReplayTx,
+  lockOrganizationTx,
+  linkRequestToVenueTx,
+  storeWizardResult,
+} from '@/services/document-requests/venueLinks.service'
 
 // ─── Types ───────────────────────────────────────────────────────────
 
@@ -40,6 +51,7 @@ interface StepResult {
 }
 
 interface WizardPayload {
+  documentRequest?: Selection
   // Step 1: Organization & Venue
   organization: {
     mode: 'existing' | 'new'
@@ -146,7 +158,7 @@ async function generateUniqueSlug(base: string): Promise<string> {
  */
 export async function createVenueWizard(req: Request, res: Response, next: NextFunction) {
   try {
-    const payload = req.body as WizardPayload
+    const payload = (req.body?.documentRequest === undefined ? req.body : parseLinkedWizard(req.body)) as WizardPayload
     const { userId } = (req as any).authContext
     const steps: StepResult[] = []
 
@@ -164,6 +176,9 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
       if (!payload.organization.phone) throw new BadRequestError('organization.phone is required for new org')
     }
 
+    const selection = payload.documentRequest === undefined ? undefined : parseSelection(payload.documentRequest)
+    const onboardingHash = selection ? wizardHash({ ...payload, documentRequest: selection }) : undefined
+
     // ─── Step 1: Organization + Venue (transactional) ──────────
     let organizationId: string
     let venueId: string
@@ -171,6 +186,12 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
 
     try {
       const result = await prisma.$transaction(async tx => {
+        // Deduplicate before looking at the current request: it may have been renewed/revoked since this creation.
+        if (onboardingHash) {
+          await lockWizardTx(tx, onboardingHash)
+          const replay = await findWizardReplayTx(tx, onboardingHash)
+          if (replay) return { replay }
+        }
         // Organization
         let orgId: string
         if (payload.organization.mode === 'new') {
@@ -186,6 +207,7 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
           orgId = org.id
         } else {
           orgId = payload.organization.id!
+          if (selection) await lockOrganizationTx(tx, orgId)
           // Verify org exists
           const existing = await tx.organization.findUnique({ where: { id: orgId }, select: { id: true } })
           if (!existing) throw new BadRequestError(`Organization ${orgId} not found`)
@@ -242,12 +264,25 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
           data: { venueId: venue.id },
         })
 
-        return { orgId, venueId: venue.id, venueSlug: slug }
+        if (selection) {
+          await linkRequestToVenueTx(
+            tx,
+            selection.id,
+            { venueId: venue.id, submissionVersion: selection.submissionVersion, confirmed: true },
+            userId,
+            onboardingHash,
+          )
+        }
+        return { orgId, venueId: venue.id, venueSlug: slug, replay: undefined }
       })
 
-      organizationId = result.orgId
-      venueId = result.venueId
-      venueSlug = result.venueSlug
+      if (result.replay) {
+        res.status(200).json(result.replay)
+        return
+      }
+      organizationId = result.orgId!
+      venueId = result.venueId!
+      venueSlug = result.venueSlug!
 
       steps.push({
         step: 'organization',
@@ -673,13 +708,9 @@ export async function createVenueWizard(req: Request, res: Response, next: NextF
       steps: steps.map(s => `${s.step}:${s.status}`).join(', '),
     })
 
-    res.status(201).json({
-      success: true,
-      venueId,
-      venueSlug,
-      organizationId,
-      steps,
-    })
+    const response = { success: true, venueId, venueSlug, organizationId, steps }
+    if (onboardingHash) await storeWizardResult(onboardingHash, response as unknown as Prisma.InputJsonValue)
+    res.status(201).json(response)
   } catch (error) {
     next(error)
   }
@@ -771,7 +802,7 @@ export async function getMerchantAccountsForSelector(req: Request, res: Response
         displayName: true,
         alias: true,
         externalMerchantId: true,
-        provider: { select: { name: true } },
+        provider: { select: { name: true, code: true } },
       },
       orderBy: { createdAt: 'desc' },
     })

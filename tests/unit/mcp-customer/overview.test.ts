@@ -4,11 +4,12 @@ import type { McpScope } from '../../../src/mcp/scope'
 const mockVenueFind = jest.fn()
 const mockPaymentAgg = jest.fn()
 const mockOrderAgg = jest.fn()
-const mockInventoryFind = jest.fn()
+const mockInventoryCount = jest.fn()
 const mockShiftCount = jest.fn()
 const mockReservationCount = jest.fn()
 const mockReservationFirst = jest.fn()
 
+jest.mock('@/mcp/planGate', () => ({ planGateMessage: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
     venueFilter: (v: string) => {
@@ -16,6 +17,7 @@ jest.mock('@/mcp/guard', () => ({
       return { venueId: { in: [v] } }
     },
     requirePermission: jest.fn(),
+    tienePermiso: jest.fn().mockReturnValue(true),
   }),
 }))
 jest.mock('@/utils/prismaClient', () => ({
@@ -24,7 +26,7 @@ jest.mock('@/utils/prismaClient', () => ({
     venue: { findUnique: (...a: unknown[]) => mockVenueFind(...(a as [])) },
     payment: { aggregate: (...a: unknown[]) => mockPaymentAgg(...(a as [])) },
     order: { aggregate: (...a: unknown[]) => mockOrderAgg(...(a as [])) },
-    inventory: { findMany: (...a: unknown[]) => mockInventoryFind(...(a as [])) },
+    inventory: { count: (...a: unknown[]) => mockInventoryCount(...(a as [])), fields: { minimumStock: 'minimumStock' } },
     shift: { count: (...a: unknown[]) => mockShiftCount(...(a as [])) },
     reservation: {
       count: (...a: unknown[]) => mockReservationCount(...(a as [])),
@@ -49,15 +51,11 @@ describe('today_overview', () => {
     expect(mockPaymentAgg).not.toHaveBeenCalled()
   })
 
-  it('composes today sales, open tabs, low-stock (in-memory), shifts and reservations into one snapshot', async () => {
+  it('composes today sales, open tabs, low-stock (database count), shifts and reservations into one snapshot', async () => {
     mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City', name: 'Centro' })
     mockPaymentAgg.mockResolvedValueOnce({ _sum: { amount: 12500.5, tipAmount: 980 }, _count: { _all: 42 } })
     mockOrderAgg.mockResolvedValueOnce({ _sum: { remainingBalance: 1340 }, _count: { _all: 3 } })
-    mockInventoryFind.mockResolvedValueOnce([
-      { currentStock: 2, minimumStock: 5 }, // low
-      { currentStock: 5, minimumStock: 5 }, // low (at minimum)
-      { currentStock: 20, minimumStock: 5 }, // ok
-    ])
+    mockInventoryCount.mockResolvedValueOnce(2)
     mockShiftCount.mockResolvedValueOnce(1)
     mockReservationCount.mockResolvedValueOnce(4)
     mockReservationFirst.mockResolvedValueOnce({
@@ -72,6 +70,9 @@ describe('today_overview', () => {
     expect(out.venue).toBe('Centro')
     expect(out.salesToday).toEqual({ gross: 12500.5, tips: 980, payments: 42 })
     expect(out.openTabs).toEqual({ count: 3, owed: 1340 })
+    expect(mockInventoryCount).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { venueId: { in: ['v1'] }, minimumStock: { gt: 0 }, currentStock: { lte: 'minimumStock' } } }),
+    )
     expect(out.lowStockItems).toBe(2) // only the two at/below minimum
     expect(out.openShifts).toBe(1)
     expect(out.reservationsToday.count).toBe(4)
@@ -82,7 +83,7 @@ describe('today_overview', () => {
     mockVenueFind.mockResolvedValueOnce({ timezone: 'America/Mexico_City', name: 'Nuevo' })
     mockPaymentAgg.mockResolvedValueOnce({ _sum: { amount: null, tipAmount: null }, _count: { _all: 0 } })
     mockOrderAgg.mockResolvedValueOnce({ _sum: { remainingBalance: null }, _count: { _all: 0 } })
-    mockInventoryFind.mockResolvedValueOnce([])
+    mockInventoryCount.mockResolvedValueOnce(0)
     mockShiftCount.mockResolvedValueOnce(0)
     mockReservationCount.mockResolvedValueOnce(0)
     mockReservationFirst.mockResolvedValueOnce(null)

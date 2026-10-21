@@ -25,6 +25,7 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('teams:read', venueId)
       const status = await getVenueSeatStatus(venueId)
       return text({
         venueId,
@@ -46,6 +47,7 @@ export function registerSeatTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId }) => {
       guard.venueFilter(venueId) // throws ScopeError if out of scope
+      guard.requirePermission('billing:subscriptions:read', venueId)
       const preview = await getDowngradePreview(venueId)
       return text(preview)
     },

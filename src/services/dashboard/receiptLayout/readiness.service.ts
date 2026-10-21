@@ -2,6 +2,7 @@ import prisma from '@/utils/prismaClient'
 import { NotFoundError } from '@/errors/AppError'
 import { normalizeTerminalBrand } from '@/lib/providerDeviceCompatibility'
 import { buildVenueInfo, type ReceiptVenueInfo } from '@/services/shared/receiptLayout'
+import { RECEIPT_VENUE_SELECT } from './devicePayload.service'
 
 /**
  * Los tipos de terminal que INTERPRETAN la receta del ticket (spec § 7.5).
@@ -50,6 +51,15 @@ export function parseVersionName(v: string | null | undefined): [number, number,
   return [Number(m[1]), Number(m[2] ?? 0), Number(m[3] ?? 0)]
 }
 
+/** ¿`actual` es igual o más nueva que `minimo`? Lo que no se lee (vacío, sin número) ⇒ false: versión desconocida = no soporta. */
+export function versionAlMenos(actual: string | null | undefined, minimo: string | null | undefined): boolean {
+  const a = parseVersionName(actual)
+  const m = parseVersionName(minimo)
+  if (!a || !m) return false
+  for (let i = 0; i < 3; i++) if (a[i] !== m[i]) return a[i] > m[i]
+  return true
+}
+
 /**
  * Las tablets mandan `x-app-version` como NOMBRE de versión y el registro lo guarda en
  * `Terminal.version` (deviceRegistry.service.ts). No escriben `TerminalHealth`, así que medirlas
@@ -61,11 +71,7 @@ export function posSoportaDiseno(
   version: string | null | undefined,
   env: NodeJS.ProcessEnv = process.env,
 ): boolean {
-  const minimum = parseVersionName(env[`RECEIPT_LAYOUT_MIN_${type}_VERSION`])
-  const actual = parseVersionName(version)
-  if (!minimum || !actual) return false
-  for (let i = 0; i < 3; i++) if (actual[i] !== minimum[i]) return actual[i] > minimum[i]
-  return true
+  return versionAlMenos(version, env[`RECEIPT_LAYOUT_MIN_${type}_VERSION`])
 }
 
 export interface ReceiptReadiness {
@@ -139,8 +145,10 @@ export async function getReceiptDevices(venueId: string, env: NodeJS.ProcessEnv 
  * El venue tal como lo necesita el ticket, cargado de Prisma.
  *
  * 🔴 Reusa `buildVenueInfo` del adaptador: si la vista previa mapeara por su cuenta, dejaría
- * de predecir el ticket real — que es lo único que la hace útil. El `select` pide los emisores
- * por fecha de alta, que es el criterio del «principal» (spec § 5.6, caso 2).
+ * de predecir el ticket real — que es lo único que la hace útil. Por lo mismo, los emisores se
+ * piden con LA selección del aparato (`RECEIPT_VENUE_SELECT.fiscalEmisors`): orden TOTAL por
+ * fecha de alta y, a igual fecha, por id. El primero es el «principal» (spec § 5.6, caso 2); con
+ * sólo la fecha, dos emisores del mismo instante podían salir en otro orden que en el aparato.
  */
 export async function cargarVenueInfo(venueId: string): Promise<ReceiptVenueInfo> {
   const venue = await prisma.venue.findUnique({
@@ -156,16 +164,7 @@ export async function cargarVenueInfo(venueId: string): Promise<ReceiptVenueInfo
       rfc: true,
       legalName: true,
       timezone: true,
-      fiscalEmisors: {
-        orderBy: { createdAt: 'asc' },
-        select: {
-          id: true,
-          legalName: true,
-          rfc: true,
-          lugarExpedicion: true,
-          merchantConfigs: { select: { merchantAccountId: true } },
-        },
-      },
+      fiscalEmisors: RECEIPT_VENUE_SELECT.fiscalEmisors,
     },
   })
   if (!venue) throw new NotFoundError('No se encontró el negocio', 'VENUE_NOT_FOUND')

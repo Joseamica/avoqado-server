@@ -60,6 +60,9 @@ interface TimeSummaryParams {
  * Verify staff PIN for clock-in/out operations
  */
 async function verifyStaffPin(venueId: string, staffId: string, pin: string): Promise<boolean> {
+  // 🔴 Un objeto como `{ not: null }` en lugar del PIN pasaba por cualquier empleado con PIN (auditoría 2026-09-30).
+  if (typeof pin !== 'string' || pin.length === 0 || typeof staffId !== 'string') return false
+
   const staffVenue = await prisma.staffVenue.findFirst({
     where: {
       staffId,

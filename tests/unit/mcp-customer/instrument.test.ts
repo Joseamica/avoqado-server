@@ -1,3 +1,4 @@
+import crypto from 'crypto'
 import { instrumentTools, recordCancelledToolCall, sanitizeThrownError, sanitizeToolResult } from '../../../src/mcp/instrument'
 import { ScopeError } from '../../../src/mcp/errors'
 import logger from '@/config/logger'
@@ -181,6 +182,14 @@ describe('sanitizeThrownError / thrown errors reaching the client', () => {
 describe('sanitizeToolResult (errors a tool RETURNS as ok:false)', () => {
   const asText = (o: unknown) => ({ content: [{ type: 'text' as const, text: JSON.stringify(o, null, 2) }] })
   const read = (r: unknown) => JSON.parse((r as { content: Array<{ text: string }> }).content[0].text)
+  /**
+   * Nada interno sobrevive en la respuesta. El folio se quita antes de buscar: es azar hexadecimal y puede
+   * contener «5432» sin que se haya filtrado el puerto (el mensaje con folio ya se compara exacto aparte).
+   */
+  const expectSinInternos = (out: unknown) =>
+    expect(JSON.stringify(out).replace(/\(ref [0-9a-f]{8}\)/g, '(ref <folio>)')).not.toMatch(
+      /prisma|SELECT|ECONNREFUSED|5432|\/app\/src|P2003/i,
+    )
 
   // NEW — internal shapes get redacted
   it.each([
@@ -199,7 +208,20 @@ describe('sanitizeToolResult (errors a tool RETURNS as ok:false)', () => {
     )
     expect(out.ok).toBe(false)
     expect(out.venueId).toBe('v1') // the rest of the payload survives
-    expect(JSON.stringify(out)).not.toMatch(/prisma|SELECT|ECONNREFUSED|5432|\/app\/src|P2003/i)
+    expectSinInternos(out)
+  })
+
+  // 🔴 El folio es azar (`randomBytes(4)`): el 18-oct-2026 salió `3654326b`, que contiene «5432», y
+  // esta prueba tumbó el CI de main sin defecto real. Se fija un folio así para que no vuelva.
+  it('un folio que por azar contiene «5432» no se confunde con el puerto de la base', () => {
+    const spy = jest.spyOn(crypto, 'randomBytes').mockImplementation((() => Buffer.from('00543200', 'hex')) as never)
+    try {
+      const { result, ref } = sanitizeToolResult(asText({ ok: false, error: 'connect ECONNREFUSED 10.0.0.5:5432' }), 'staff_schedule', ctx)
+      expect(ref).toBe('00543200')
+      expectSinInternos(read(result))
+    } finally {
+      spy.mockRestore()
+    }
   })
 
   // NEW — operator-facing messages must survive untouched (this is the whole point of the denylist)
@@ -522,5 +544,84 @@ describe('recordCancelledToolCall — un intento cortado antes de que la herrami
       detail: 'cancelada:timeout',
       durationMs: 25_010,
     })
+  })
+})
+
+it('guarda las aclaraciones como needs_input sin confundirlas con fallas', async () => {
+  jest.clearAllMocks()
+  const { server, original } = makeServer()
+  instrumentTools(server, ctx)
+  callTool(server, 'find_order', {}, async () => ({ content: [{ type: 'text', text: JSON.stringify({ ok: false, ambiguous: true }) }] }))
+  await original.mock.calls[0][2]({ venueId: 'v1' }, {})
+  await new Promise(r => setImmediate(r))
+  expect(mockedPrisma.mcpToolCall.create).toHaveBeenCalledWith(
+    expect.objectContaining({ data: expect.objectContaining({ outcome: 'ok', detail: 'needs_input' }) }),
+  )
+})
+
+// Evidencia (founder, 15-oct): si un cliente dice «yo no fui», la bitácora debe decir QUÉ app hizo la llamada.
+describe('instrumentTools — qué app hizo cada llamada', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const runWith = async (c: Parameters<typeof instrumentTools>[1], tool: string) => {
+    const { server, original } = makeServer()
+    instrumentTools(server, c)
+    callTool(server, tool, {}, jest.fn().mockResolvedValue(okResult))
+    await (original.mock.calls[0][2] as (...a: unknown[]) => Promise<unknown>)({ venueId: 'v1' }, {})
+    await new Promise(r => setImmediate(r))
+    return mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data
+  }
+
+  it('la fila de la bitácora lleva el id de la app conectada', async () => {
+    expect(await runWith({ ...ctx, clientId: 'mcp_chatgpt' }, 'set_prices_by_code')).toMatchObject({
+      toolName: 'set_prices_by_code',
+      clientId: 'mcp_chatgpt',
+    })
+  })
+
+  it('sin app identificada la fila queda con clientId null', async () => {
+    expect((await runWith(ctx, 'list_menu'))?.clientId).toBeNull()
+  })
+
+  it('una llamada cortada antes de correr también guarda la app', async () => {
+    recordCancelledToolCall({
+      toolName: 'list_menu',
+      staffId: 'staff-1',
+      orgId: 'org-1',
+      venueId: null,
+      clientId: 'mcp_claude',
+      reason: 'timeout',
+      durationMs: 5,
+    })
+    await new Promise(r => setImmediate(r))
+    expect(mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data).toMatchObject({ clientId: 'mcp_claude', outcome: 'error' })
+  })
+})
+
+// «needs_input» sólo cuando de verdad falta algo: las herramientas en bloque SIEMPRE traen la lista `ambiguous`, y vacía
+// no es una duda. Antes una lista vacía contaba como verdadera y la vista previa no se distinguía de la confirmación.
+describe('instrumentTools — needs_input sólo cuando de verdad falta algo', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  const run = async (payload: Record<string, unknown>) => {
+    const { server, original } = makeServer()
+    instrumentTools(server, ctx)
+    const result = { content: [{ type: 'text', text: JSON.stringify(payload) }] }
+    callTool(server, 'find_products_by_code', {}, jest.fn().mockResolvedValue(result))
+    await (original.mock.calls[0][2] as (...a: unknown[]) => Promise<unknown>)({ venueId: 'v1' }, {})
+    await new Promise(r => setImmediate(r))
+    return mockedPrisma.mcpToolCall.create.mock.calls.at(-1)?.[0]?.data
+  }
+
+  it('una lista ambiguous vacía es una llamada ok, sin needs_input', async () => {
+    expect(await run({ ok: true, found: [{ code: 'A' }], ambiguous: [] })).toMatchObject({ outcome: 'ok', detail: null })
+  })
+
+  it('con códigos ambiguos sí es needs_input', async () => {
+    expect(await run({ ok: true, ambiguous: [{ code: 'A', candidates: [] }] })).toMatchObject({ outcome: 'ok', detail: 'needs_input' })
+  })
+
+  it('una vista previa que pide confirmación sigue siendo needs_input aunque traiga ambiguous vacío', async () => {
+    expect(await run({ ok: false, requiresConfirmation: true, ambiguous: [] })).toMatchObject({ outcome: 'ok', detail: 'needs_input' })
   })
 })

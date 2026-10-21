@@ -14,6 +14,7 @@ import {
 import { confirmExternalSettlement, markExternalNotCharged } from '@/services/mobile/areaTicketExternal.mobile.service'
 import { fulfillAreaTicket, issueAreaTicket, listPendingAreaTicketFulfillment } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
  * Task 10 — el predicado externo de entrega. `fulfillAreaTicket` (la MISMA
@@ -57,6 +58,8 @@ describe('Entrega de un vale externo', () => {
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {

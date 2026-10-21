@@ -18,6 +18,8 @@ import {
   resolveClassSessionPushTargets,
   resolveReservationPushTargets,
 } from '@/services/google-calendar/outbox.service'
+import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
+import { cancelPassBookingFromVenue } from '@/services/aggregators/core/venueCancellation'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import {
@@ -921,6 +923,8 @@ export async function getReservationStats(venueId: string, dateFrom: Date, dateT
 
 // ---- State Transition Methods ----
 
+export const PASS_ARRIVAL_PENDING = 'PASS_ARRIVAL_PENDING'
+
 async function transitionReservation(
   venueId: string,
   reservationId: string,
@@ -958,6 +962,18 @@ async function transitionReservation(
   // updateMany and enqueuePush would leave the reservation cancelled but
   // Google still showing the event.
   const { updated, pushRowIds } = await prisma.$transaction(async tx => {
+    // Conector de pases: el no-show AUTOMÁTICO no cierra una reserva cuyo socio ya marcó su llegada en el agregador y aún
+    // puede confirmarse (si no, el check-in posterior da 409 y la visita no se cobra). Bajo el MISMO candado de fila que toma
+    // la ingesta de visitas (`visit.service.ts` ingestCheckin): o la visita ya existe y se ve aquí, o la ingesta espera.
+    if (targetStatus === 'NO_SHOW' && by === 'SYSTEM') {
+      await tx.$queryRaw`SELECT id FROM "Reservation" WHERE id = ${reservationId} FOR UPDATE`
+      const llegadaPorConfirmar = await tx.aggregatorVisit.count({
+        where: { reservationId, status: 'PENDING', deadlineAt: { gt: new Date() } },
+      })
+      if (llegadaPorConfirmar > 0) {
+        throw new ConflictError('El socio del pase ya marcó su llegada; se espera la confirmación del estudio', PASS_ARRIVAL_PENDING)
+      }
+    }
     // RACE GUARD: only update if the row is still in the source status we just read.
     // Two concurrent cancel requests would both pass validateTransition above (since
     // they both saw `CONFIRMED`), then both run the unguarded `update`, both succeed,
@@ -1006,6 +1022,8 @@ async function transitionReservation(
             // Roster rows are intentionally debounced — sweeper picks them up.
           }
         }
+        await cancelPassBookingFromVenue(tx, reservationId)
+        await enqueuePassSessionSync(tx, venueId, updated.classSessionId)
       } else {
         const targets = await resolveReservationPushTargets(tx, {
           venueId,
@@ -2223,6 +2241,9 @@ export async function rescheduleAppointmentReservation(args: {
  * Spot collision: if the product has a layout and `newSpotIds` is provided, we validate
  * against the layout AND against currently active reservations on the new session.
  */
+/** Nombre del agregador de pases como lo ve el socio. */
+const PASS_PROVIDER_NAMES: Record<string, string> = { TOTALPASS: 'TotalPass', WELLHUB: 'Wellhub' }
+
 export async function rescheduleClassReservation(args: {
   venueId: string
   reservationId: string
@@ -2245,6 +2266,16 @@ export async function rescheduleClassReservation(args: {
     }
     if (reservation.status !== 'CONFIRMED' && reservation.status !== 'PENDING') {
       throw new BadRequestError(`No puedes cambiar el horario de una reserva ${reservation.status}`)
+    }
+    // Un socio de pase (TotalPass, Wellhub) tiene su lugar en la app del agregador: moverlo aquí dejaría allá la clase
+    // vieja (dos horarios distintos). Como en el resto del mercado, la cambia él desde esa app.
+    const passBooking = await tx.aggregatorBooking.findFirst({ where: { reservationId, venueId }, select: { provider: true } })
+    if (passBooking) {
+      const name = PASS_PROVIDER_NAMES[passBooking.provider] ?? passBooking.provider
+      throw new ConflictError(
+        `Esta reserva llegó por ${name}: el socio la cambia desde la app de ${name}.`,
+        'PASS_RESERVATION_NOT_RESCHEDULABLE',
+      )
     }
 
     // 2. No-op: same session — return as-is
@@ -2353,6 +2384,7 @@ export async function rescheduleClassReservation(args: {
     // need their roster events bumped. Debounce 30s so the worker coalesces.
     for (const classSessionId of [reservation.classSessionId, newClassSessionId]) {
       if (!classSessionId) continue
+      await enqueuePassSessionSync(tx, venueId, classSessionId)
       const cs = await tx.classSession.findUnique({
         where: { id: classSessionId },
         select: { assignedStaffId: true },

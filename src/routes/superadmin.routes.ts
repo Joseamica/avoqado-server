@@ -1,4 +1,6 @@
+import documentRequestsRoutes from './superadmin/documentRequests.routes'
 import hybridCampaignRoutes from './superadmin/hybridCampaign.routes'
+import hybridPricingRoutes from './superadmin/hybridPricing.routes'
 // src/routes/superadmin.routes.ts
 import express from 'express'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -16,6 +18,7 @@ import venuePricingRoutes from './superadmin/venuePricing.routes'
 import webhookRoutes from './superadmin/webhook.routes'
 import terminalRoutes from './superadmin/terminal.routes'
 import venueAccessRoutes from './superadmin/venue-access.routes'
+import venueAdministrationRoutes from './superadmin/venueAdministration.routes'
 import creditAssessmentRoutes from './superadmin/creditAssessment.routes'
 import moduleRoutes from './superadmin/module.routes'
 import onboardingRoutes from './superadmin/onboarding.routes'
@@ -55,13 +58,17 @@ router.use(authorizeRole([StaffRole.SUPERADMIN]))
 // Mount superadmin sub-routes
 router.use('/announcements', announcementRoutes)
 // Campañas ligeras de lanzamiento (spec 2026-09-17). Hereda el guardia de SUPERADMIN del padre.
+router.use('/document-requests', documentRequestsRoutes)
 router.use('/launch-campaigns', launchCampaignRoutes)
 router.use('/hybrid-campaigns', hybridCampaignRoutes)
+// Precios de lista y «% de descuento» (spec 2026-09-30). Hereda el guardia de SUPERADMIN del padre.
+router.use('/hybrid-pricing', hybridPricingRoutes)
 router.use('/kyc', kycReviewRoutes)
 router.use('/payment-providers', paymentProviderRoutes)
 router.use('/merchant-accounts', merchantAccountRoutes)
 router.use('/terminals', terminalRoutes)
 router.use('/venues', venueAccessRoutes)
+router.use('/venues', venueAdministrationRoutes)
 router.use('/tpv-orders', terminalOrderSuperadminRoutes)
 router.use('/payment-analytics', paymentAnalyticsRoutes)
 router.use('/earnings', earningsRoutes)

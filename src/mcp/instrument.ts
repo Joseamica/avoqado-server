@@ -18,6 +18,8 @@ interface ToolCallContext {
   org: string
   /** Platform SUPERADMIN connection → thrown errors are passed through RAW (useful for debugging). */
   isSuperAdmin?: boolean
+  /** OAuth app behind the connection (the token's `cid`: ChatGPT, Claude…); null/absent for dev-server tokens. */
+  clientId?: string | null
 }
 
 /**
@@ -55,7 +57,7 @@ export function sanitizeThrownError(err: unknown, toolName: string, ctx: ToolCal
  */
 export function sanitizeToolResult(result: unknown, toolName: string, ctx: ToolCallContext): { result: unknown; ref: string | null } {
   if (ctx.isSuperAdmin) return { result, ref: null }
-  const r = result as { content?: Array<{ type?: string; text?: string }> } | null
+  const r = result as { content?: Array<{ type?: string; text?: string }>; structuredContent?: Record<string, unknown> } | null
   const idx = r?.content?.findIndex(c => c?.type === 'text' || typeof c?.text === 'string') ?? -1
   if (!r?.content || idx < 0) return { result, ref: null }
   const raw = r.content[idx].text
@@ -69,8 +71,12 @@ export function sanitizeToolResult(result: unknown, toolName: string, ctx: ToolC
   if (parsed?.ok !== false || typeof parsed.error !== 'string' || !looksInternal(parsed.error)) return { result, ref: null }
   const ref = randomBytes(4).toString('hex')
   const content = [...r.content]
-  content[idx] = { ...content[idx], text: JSON.stringify({ ...parsed, error: genericErrorMessage(toolName, ref) }, null, 2) }
-  return { result: { ...r, content }, ref }
+  const safeData = { ...parsed, error: genericErrorMessage(toolName, ref) }
+  content[idx] = { ...content[idx], text: JSON.stringify(safeData, null, 2) }
+  return {
+    result: { ...r, content, ...(r.structuredContent ? { structuredContent: { ...r.structuredContent, data: safeData } } : {}) },
+    ref,
+  }
 }
 
 type ToolFn = (...args: unknown[]) => unknown
@@ -86,7 +92,16 @@ function resultOutcome(result: unknown): { ok: boolean; detail?: string } {
   const firstText = r?.content?.find(c => c?.type === 'text')?.text
   if (typeof firstText === 'string') {
     try {
-      const parsed = JSON.parse(firstText) as { ok?: boolean; error?: string }
+      const parsed = JSON.parse(firstText) as {
+        ok?: boolean
+        error?: string
+        requiresConfirmation?: boolean
+        needsInput?: boolean
+        ambiguous?: boolean | unknown[]
+      }
+      // Las herramientas en bloque SIEMPRE traen la lista `ambiguous`: vacía no es una duda (antes contaba como verdadera).
+      const ambiguous = Array.isArray(parsed?.ambiguous) ? parsed.ambiguous.length > 0 : Boolean(parsed?.ambiguous)
+      if (parsed?.requiresConfirmation || parsed?.needsInput || ambiguous) return { ok: true, detail: 'needs_input' }
       if (parsed && parsed.ok === false) return { ok: false, detail: parsed.error ?? 'ok:false' }
     } catch {
       // non-JSON prose content → treat as success
@@ -105,6 +120,7 @@ async function recordMcpCall(row: {
   toolName: string
   staffId: string | null
   orgId: string | null
+  clientId: string | null
   venueId: string | null
   outcome: 'ok' | 'error' | 'threw'
   detail: string | null
@@ -132,12 +148,13 @@ export function recordCancelledToolCall(row: {
   toolName: string
   staffId: string | null
   orgId: string | null
+  clientId?: string | null
   venueId: string | null
   reason: string
   durationMs: number
 }): void {
-  const { reason, ...rest } = row
-  void recordMcpCall({ ...rest, outcome: 'error', detail: `cancelada:${reason}` })
+  const { reason, clientId, ...rest } = row
+  void recordMcpCall({ ...rest, clientId: clientId ?? null, outcome: 'error', detail: `cancelada:${reason}` })
 }
 
 /**
@@ -190,14 +207,14 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
     const name = typeof toolArgs[0] === 'string' ? toolArgs[0] : 'unknown'
     const cbIndex = toolArgs.length - 1
     const cb = toolArgs[cbIndex] as ToolFn
-    const base = { mcp: true as const, tool: name, staffId: ctx.staffId, org: ctx.org }
+    const base = { mcp: true as const, tool: name, staffId: ctx.staffId, org: ctx.org, ...(ctx.clientId ? { clientId: ctx.clientId } : {}) }
     const wrapped: ToolFn = async (...cbArgs: unknown[]) => {
       const start = Date.now()
       // The handler is called (params, extra); pull venueId from params when present.
       const params = cbArgs[0] as { venueId?: unknown } | undefined
       const venueId = typeof params?.venueId === 'string' ? params.venueId : null
       const meta = venueId ? { ...base, venueId } : base
-      const audit = { toolName: name, staffId: ctx.staffId, orgId: ctx.org, venueId }
+      const audit = { toolName: name, staffId: ctx.staffId, orgId: ctx.org, clientId: ctx.clientId ?? null, venueId }
       // A running tool holds its caller's slot even if the client already hung up (see the MCP guard).
       const endWork = beginWork()
       try {
@@ -217,7 +234,7 @@ function makePatched(original: ToolFn, ctx: ToolCallContext): ToolFn {
         void recordMcpCall({
           ...audit,
           outcome: ok ? 'ok' : 'error',
-          detail: ok ? null : ref ? `[${ref}] ${detail ?? ''}` : (detail ?? null),
+          detail: ref ? `[${ref}] ${detail ?? ''}` : (detail ?? null),
           durationMs: ms,
         })
         return safe

@@ -1,8 +1,8 @@
 import { Request, Response, NextFunction } from 'express'
 import logger from '../config/logger' // Ajusta la ruta si es necesario
-import { runWithContext } from '../observability/executionContext'
+import { getContext, runWithContext } from '../observability/executionContext'
 import { CORRELATION_HEADER, resolveCorrelationId } from '../observability/correlationId'
-import { normalizeEntrypoint } from '../observability/entrypoint'
+import { normalizeEntrypoint, redactPathSecrets } from '../observability/entrypoint'
 
 /** Parámetros de query cuyo VALOR nunca puede llegar a un log. */
 const PARAMS_SENSIBLES = new Set([
@@ -19,6 +19,7 @@ const PARAMS_SENSIBLES = new Set([
   'api_key',
   'apikey',
   'signature',
+  'hmac', // la firma del callback OAuth de Shopify: no es la llave, pero no tiene por qué quedar en el log
   'hub.verify_token', // 🔴 el secreto del handshake de WhatsApp: Meta lo manda en el query (GET /api/v1/webhooks/whatsapp)
 ])
 
@@ -31,10 +32,11 @@ const PARAMS_SENSIBLES = new Set([
  * preferible a filtrar un secreto.
  */
 export function redactUrlSecrets(url: string): string {
+  // 🔴 Además del query: hay rutas cuyo SEGMENTO es el secreto (webhooks de pases, ver `redactPathSecrets`).
   const i = url.indexOf('?')
-  if (i === -1) return url
+  if (i === -1) return redactPathSecrets(url, '[redactado]')
 
-  const ruta = url.slice(0, i)
+  const ruta = redactPathSecrets(url.slice(0, i), '[redactado]')
   const query = url.slice(i + 1)
 
   try {
@@ -46,7 +48,7 @@ export function redactUrlSecrets(url: string): string {
         tocado = true
       }
     }
-    return tocado ? `${ruta}?${params.toString()}` : url
+    return tocado ? `${ruta}?${params.toString()}` : `${ruta}?${query}`
   } catch {
     return `${ruta}?[query-redactada]`
   }
@@ -110,7 +112,24 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
       const duration = (diff[0] * 1e3 + diff[1] * 1e-6).toFixed(3) // milliseconds
       const { statusCode } = res
 
-      const level = statusCode >= 500 ? 'error' : statusCode >= 400 ? 'warn' : 'info'
+      // Un 404 que NINGÚN router atendió (`req.route` vacío) es un escáner de internet o una URL vieja (`/.env`, `wp-admin`,
+      // `/graphql`: ~920 líneas en 3 días de producción, 30-sep-2026), no un aviso del sistema: info. Un 404 que sí atendió un
+      // handler («el recurso no existe») y cualquier otro 4xx siguen en warn. Límite conocido: un 404 que contestara un
+      // middleware montado con `use()` (sin ruta) también bajaría a info; hoy ninguno lo hace (los que contestan 404 —
+      // resolveVenueBySlug, bindTpv*Target— van dentro de la ruta, y `checkPublicVenueFeature` deja pasar al controlador).
+      const sinRuta = statusCode === 404 && !req.route
+      // Un handler puede declarar que su respuesta es un desenlace ESPERADO (`res.locals.requestEndLevel`): la espera de un cobro
+      // que el cajero canceló cierra con 504 a propósito y no es una falla (3-oct-2026: los 9 «Error 504» de un día eran eso).
+      // Sólo se aceptan info/warn; cualquier otro valor se ignora y decide el status.
+      const declarado = res.locals?.requestEndLevel
+      const level =
+        declarado === 'info' || declarado === 'warn'
+          ? declarado
+          : statusCode >= 500
+            ? 'error'
+            : statusCode >= 400 && !sinRuta
+              ? 'warn'
+              : 'info'
 
       if (!shouldSkipLogging) {
         // Enrich logs with auth context (available after auth middleware runs)
@@ -118,7 +137,11 @@ export const requestLoggerMiddleware = (req: Request, res: Response, next: NextF
         const authFields: Record<string, any> = {}
         if (authContext) {
           authFields.userId = authContext.userId
-          authFields.venueId = authContext.venueId
+          // 🔴 El venue de la OPERACIÓN (el que `checkPermission` publicó al contexto: URL → `x-venue-id` → token), no el del token:
+          // un campo explícito gana al ambiental (`logContext.ts`), y escribir aquí `authContext.venueId` pisaba esa corrección y la
+          // línea salía con el venueId del token junto al venueName del venue operado. El token queda de respaldo para una
+          // autenticación que no estampó el contexto.
+          authFields.venueId = getContext()?.venueId ?? authContext.venueId
           authFields.role = authContext.role
           if (authContext.terminalSerialNumber) {
             authFields.terminal = authContext.terminalSerialNumber

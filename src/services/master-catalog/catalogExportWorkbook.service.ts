@@ -38,6 +38,8 @@ export interface CatalogWorkbookMetadataV1 {
   timezone: string
   filters: string
   profileVersion: string
+  /** D15: nota fija de que las columnas de IVA son históricas. */
+  ivaNote?: string
 }
 
 export interface CatalogWorkbookInputV1 {
@@ -309,11 +311,12 @@ export function createCatalogWorkbookWriterV1(dependencies: CatalogWorkbookWrite
     if (Number.isNaN(generatedAt.getTime()) || generatedAt.toISOString() !== input.metadata.generatedAt) {
       throw exportError('generatedAt debe ser RFC3339 UTC.')
     }
-    const allowedMetadataKeys = new Set<string>([...metadataKeys, 'documentType'])
+    const allowedMetadataKeys = new Set<string>([...metadataKeys, 'documentType', 'ivaNote'])
     if (
       input.metadata.timezone !== 'America/Mexico_City' ||
       metadataKeys.some(key => typeof input.metadata[key] !== 'string') ||
       Object.keys(input.metadata).some(key => !allowedMetadataKeys.has(key)) ||
+      (input.metadata.ivaNote !== undefined && typeof input.metadata.ivaNote !== 'string') ||
       (input.metadata.documentType !== undefined && input.metadata.documentType !== 'catalog-master-import')
     ) {
       throw exportError('Los metadatos del libro no son válidos.')
@@ -325,6 +328,7 @@ export function createCatalogWorkbookWriterV1(dependencies: CatalogWorkbookWrite
     // a caller can never make an over-cap request expensive before its 413.
     const metadataRows: Array<Record<string, CatalogWorkbookValueV1>> = [
       ...(input.metadata.documentType ? [{ key: 'documentType', value: input.metadata.documentType }] : []),
+      ...(input.metadata.ivaNote ? [{ key: 'ivaNote', value: input.metadata.ivaNote }] : []),
       ...metadataKeys.map(key => ({ key, value: input.metadata[key] })),
     ]
     const metadata: CatalogWorkbookSheetV1 = {

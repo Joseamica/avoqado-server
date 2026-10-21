@@ -354,6 +354,22 @@ describe('Stripe Service - Comprehensive Tests', () => {
         )
       })
 
+      it('🔴 rechaza un código Premium-por-regla sin catálogo (SHOPIFY_INTEGRATION): 400 y ni la base ni Stripe se tocan', async () => {
+        ;(prisma.venue.findUnique as jest.Mock).mockClear()
+        ;(prisma.feature.findMany as jest.Mock).mockClear()
+        mockStripeInstance.subscriptions.create.mockClear()
+        await expect(
+          stripeService.createTrialSubscriptions('cus_123', 'venue_123', ['ANALYTICS', 'SHOPIFY_INTEGRATION']),
+        ).rejects.toMatchObject({
+          statusCode: 400,
+          code: 'FEATURE_NO_SE_VENDE_SUELTA',
+          message: expect.stringContaining('SHOPIFY_INTEGRATION'),
+        })
+        expect(prisma.venue.findUnique).not.toHaveBeenCalled()
+        expect(prisma.feature.findMany).not.toHaveBeenCalled()
+        expect(mockStripeInstance.subscriptions.create).not.toHaveBeenCalled()
+      })
+
       it('should throw error if any subscription fails', async () => {
         const mockCustomerId = 'cus_123'
         const mockVenueId = 'venue_123'

@@ -17,6 +17,7 @@ import { Prisma, MilestoneTargetType, BonusType, TierPeriod } from '@prisma/clie
 import { BadRequestError, NotFoundError } from '../../../errors/AppError'
 import { decimalToNumber, getPeriodDateRange, getVenueTimezone } from './commission-utils'
 import { logAction } from '../activity-log.service'
+import { asegurarIdsDelNegocio } from './idsDelNegocio'
 
 // ============================================
 // Type Definitions
@@ -161,6 +162,8 @@ export async function createMilestone(configId: string, venueId: string, data: C
   ) {
     throw new BadRequestError('Product or category ID required for product/category-based milestones')
   }
+  // FT-GRAVES T1-hermanos: el producto y la categoría del hito tienen que ser de ESTA sede (`idsDelNegocio.ts`).
+  await asegurarIdsDelNegocio({ venueId }, { productIds: [data.productId], categoryIds: [data.categoryId] })
 
   // Calculate period dates in venue timezone
   const timezone = await getVenueTimezone(venueId)
@@ -225,6 +228,8 @@ export async function updateMilestone(milestoneId: string, venueId: string, data
     throw new NotFoundError(`Milestone ${milestoneId} not found`)
   }
 
+  // FT-GRAVES T1-hermanos: el producto y la categoría nuevos tienen que ser de ESTA sede (`idsDelNegocio.ts`).
+  await asegurarIdsDelNegocio({ venueId }, { productIds: [data.productId], categoryIds: [data.categoryId] })
   const updateData: Prisma.CommissionMilestoneUpdateInput = {}
 
   if (data.name !== undefined) updateData.name = data.name

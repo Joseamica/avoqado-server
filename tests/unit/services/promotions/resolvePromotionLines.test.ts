@@ -124,6 +124,20 @@ describe('resolvePromotionLines — el dinero de una promoción, al centavo', ()
   })
 
   describe('bordes que protegen al local', () => {
+    it('🔴 H17: un descuento de 2 centavos entre 4 renglones iguales no le cobra de MÁS a ninguno', () => {
+      // El repartidor viejo redondeaba cada parte hacia arriba (0.5 → 1) y le restaba el exceso al primero: −1 centavo de
+      // descuento, o sea un renglón cobrado por encima de su precio de lista.
+      const r = resolvePromotionLines({
+        pricingMode: 'FIXED_TOTAL',
+        priceCents: 39998,
+        selections: ['a', 'b', 'c', 'd'].map(productId => opcion({ productId })),
+      })
+
+      expect(r.discountCents).toBe(2)
+      expect(r.lines.map(l => l.discountCents)).toEqual([1, 1, 0, 0])
+      expect(r.lines.every(l => l.totalCents <= l.unitPriceCents * l.quantity)).toBe(true)
+    })
+
     it('una promoción más cara que el catálogo no genera descuento negativo', () => {
       const r = resolvePromotionLines({
         pricingMode: 'FIXED_TOTAL',

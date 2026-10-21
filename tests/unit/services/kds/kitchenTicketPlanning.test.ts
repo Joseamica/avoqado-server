@@ -34,6 +34,20 @@ const mesa = { id: 'ord-2', externalId: null, tableId: 'mesa-7' }
 const base = { coveredLineIds: new Set<string>(), routing, screens, stampedAt: T0, soloSinEnviar: false }
 
 describe('planKitchenTickets', () => {
+  it('a combo component shares the round folio of its wrapper and normal items', () => {
+    const plans = planKitchenTickets({
+      ...base,
+      order: mesa,
+      lines: [
+        linea({ id: 'normal', externalId: 'sync:r-1:0' }),
+        linea({ id: 'combo-first', externalId: 'sync:r-1:1:g:g1' }),
+        linea({ id: 'combo-second', externalId: 'sync:r-1:1:g:g2' }),
+      ],
+    })
+    expect(plans.map(p => p.sourceKey)).toEqual(['round:r-1:cocina'])
+    expect(plans[0].lines.map(l => l.id)).toEqual(['normal', 'combo-first', 'combo-second'])
+  })
+
   it('mostrador: una comanda por estación con pantalla, con el folio de la venta', () => {
     const plans = planKitchenTickets({ ...base, order: venta, lines: [linea({ id: 'a' }), linea({ id: 'b', productStationId: 'barra' })] })
     expect(plans.map(p => [p.sourceKey, p.stationId, p.lines.map(l => l.id)])).toEqual([
@@ -63,6 +77,16 @@ describe('planKitchenTickets', () => {
     const tarde = linea({ id: 'tarde', createdAt: new Date(T0.getTime() - KITCHEN_STALENESS_MS - 1) })
     const desdeSiempre = [{ id: 'cocina', since: new Date(0) }]
     expect(planKitchenTickets({ ...base, screens: desdeSiempre, order: venta, lines: [tarde] })).toEqual([])
+  })
+
+  // 🔴 R13-3 (Codex r17 #5): la edad es la de CADA artículo, no la de la cuenta. Una cuenta de 13 h con un pedido reciente fusionado
+  // (el rescate tardío de su cobro de vales ya no la descarta entera): lo viejo no sale y lo reciente sí.
+  it('R13-3: cuenta de hace 13 h con un artículo reciente fusionado ⇒ sólo el reciente sale', () => {
+    const desdeSiempre = [{ id: 'cocina', since: new Date(0) }]
+    const viejo = linea({ id: 'vale-60', createdAt: new Date(T0.getTime() - 13 * 60 * 60 * 1000) })
+    const reciente = linea({ id: 'fusionado-40', createdAt: new Date(T0.getTime() - 5 * 60 * 1000) })
+    const plans = planKitchenTickets({ ...base, screens: desdeSiempre, order: venta, lines: [viejo, reciente] })
+    expect(plans.map(p => p.lines.map(l => l.id))).toEqual([['fusionado-40']])
   })
 
   it('sin estaciones con pantalla no se planea nada', () => {

@@ -75,12 +75,15 @@ const prismaMock = prisma as any
 const award = awardLoyaltyForPaidOrder as jest.Mock
 
 // Reflejo ESTRECHO de la consulta fuente del outbox (`status: 'COMPLETED'` + `id` + `venueId`, seleccionando SOLO
-// `orderId`): un reflejo laxo interceptaría búsquedas legítimas del servicio y le cambiaría el comportamiento.
+// `orderId`, más la marca de tarjetas de B6): un reflejo laxo interceptaría búsquedas legítimas del servicio
+// y le cambiaría el comportamiento.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 
 const VENUE = 'venue-1'

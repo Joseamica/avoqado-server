@@ -20,38 +20,55 @@
 import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
-import { buildStoragePath, uploadFileToStorage } from '../storage.service'
+import { ConflictError, ProviderUnavailableError } from '../../errors/AppError'
+import { uploadFileToStorage } from '../storage.service'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import { buildCreateInvoiceParams } from './cfdiPayloadBuilder'
 import { validateBeforeStamp } from './cfdiValidation'
 import { assembleSaleInput } from './assembleSaleInput'
+import { correoCapturado } from './cfdiEmail.service'
 import {
   cancelCfdi,
+  anotarIntencionDeCancelar,
+  tomarEnvio,
+  sigoSiendoDueno,
+  refreshPendingCancellation,
+  emitirConEntrada,
+  finalizarEmision,
+  type IssueCfdiDeps,
+  aplicarCancelacion,
+  type CancelCfdiDeps,
   claimWhere,
   loadOrderForCfdiFromDb,
-  totalDelDocumentoCents,
   STAMPING_TTL_MS,
   type LoadedOrderBundle,
-  type LoadOrderForCfdiOpts,
   type IssueReceptor,
 } from './cfdi.service'
+import { conceptoDesdeElPayload, totalSegunElPacCents } from './reglaDelPac'
+import type { ArchivosCfdi } from './finalizadorCfdi'
 
 export interface ReplaceCfdiDeps {
   /** La factura ORIGINAL, con su `fiscalEmisor` incluido (lo necesita el conector). */
   loadCfdi: (cfdiId: string) => Promise<any | null>
   /** La sustituta que ya exista para esta original — el intento durable de una corrida anterior. */
   findSustituta: (originalCfdiId: string) => Promise<any | null>
-  loadOrderForCfdi: (orderId: string, opts?: LoadOrderForCfdiOpts) => Promise<LoadedOrderBundle | null>
+  loadOrderForCfdi: IssueCfdiDeps['loadOrderForCfdi']
+  runInTransaction?: IssueCfdiDeps['runInTransaction']
   resolveProvider: typeof resolveFiscalProvider
   /** INSERT que reserva la llave de la sustituta. Un P2002 es la carrera con otra petición. */
-  reserveCfdi: (data: Record<string, any>) => Promise<any>
-  persistCfdi: (data: Record<string, any>) => Promise<any>
+  reserveCfdi: IssueCfdiDeps['reserveCfdi']
+  persistCfdi: IssueCfdiDeps['persistCfdi']
   /** Reclamo con la VERSIÓN leída (`attempts`) — ver `claimCfdi` en cfdi.service (Codex P1-1). */
   claimCfdi: (cfdiId: string, desdeEstados: string[], version: number) => Promise<boolean>
-  /** Guarda SÓLO las URLs de los archivos; nunca el estado fiscal (Codex P1-4). */
-  persistArtifacts: (idempotencyKey: string, urls: { xmlUrl: string; pdfUrl: string }) => Promise<any>
+  /** Guarda SÓLO los archivos (URLs y, C2 · T5, la evidencia del XML); nunca el estado fiscal (Codex P1-4). */
+  persistArtifacts: (idempotencyKey: string, urls: ArchivosCfdi, version?: number) => Promise<any>
   storeArtifact: (buffer: Buffer, path: string, contentType: string) => Promise<string>
-  updateCfdi: (cfdiId: string, data: Record<string, any>) => Promise<any>
+  updateCfdi: CancelCfdiDeps['updateCfdi']
+  /** C2: lo que `cancelCfdi` necesita para anotar la intención, tomar el único envío, releer el token y consultar. */
+  anotarIntencion: CancelCfdiDeps['anotarIntencion']
+  tomarEnvio: CancelCfdiDeps['tomarEnvio']
+  dueno: NonNullable<CancelCfdiDeps['dueno']>
+  refresh: CancelCfdiDeps['refresh']
 }
 
 export interface ReplaceCfdiResult {
@@ -64,6 +81,23 @@ export interface ReplaceCfdiResult {
   /** true mientras la original NO conste cancelada. La pantalla lo tiene que decir. */
   cancelPendiente: boolean
   reasons?: string[]
+  /**
+   * C2 (M6/G4): la cancelación de la original NO se pudo ni anotar, por una regla (documentos relacionados vivos, u otra cancelación en
+   * trámite con otro motivo): su texto, para que la pantalla diga qué hacer. Nuevo y opcional.
+   */
+  cancelConflicto?: string
+  /** C2 ronda 2 (N3): la cancelación de la original no salió por un aviso del PAC (p. ej. no se pudo consultar antes de enviarla). */
+  cancelAviso?: string
+  /**
+   * Ronda de la ola (3): la cancelación de la original quedó EN DUDA (el POST no tuvo respuesta clara; sólo se consulta). Sólo cuando es
+   * verdad, con la misma regla que `cancelCfdi`. Nuevo y opcional.
+   */
+  enDuda?: true
+  /**
+   * Ronda de la ola (3): ESTA petición anotó un intento NUEVO de cancelar la original. `false` ⇒ el `cancelStatus` que se devuelve no es de
+   * esta petición (p. ej. el REJECTED de un intento anterior, si falló antes de anotar). Nuevo y opcional.
+   */
+  cancelIntentoNuevo?: boolean
 }
 
 /**
@@ -80,8 +114,9 @@ export function siguienteLlaveDeSustitucion(llaveOriginal: string | null | undef
 
 export async function replaceCfdi(
   params: { cfdiId: string; sandbox: boolean; expectedVenueId?: string },
-  deps: ReplaceCfdiDeps = defaultReplaceDeps,
+  overrides: Partial<ReplaceCfdiDeps> = {},
 ): Promise<ReplaceCfdiResult> {
+  const deps = { ...defaultReplaceDeps, ...overrides }
   // 1. Cargar la original + aislamiento de inquilino (mismo patrón que cancelCfdi).
   const original = await deps.loadCfdi(params.cfdiId)
   if (!original) throw new Error(`CFDI ${params.cfdiId} not found`)
@@ -95,9 +130,9 @@ export async function replaceCfdi(
   }
   // 🔴 Una nota de crédito (EGRESO) también tiene `orderId` y puede estar STAMPED. Sustituirla por
   // este camino reconstruiría la factura de VENTA: un documento de otro tipo que no corresponde al
-  // que se relaciona (Codex P2-7).
+  // que se relaciona (Codex P2-7). C2-pulido · G3: rechazo de DOMINIO ⇒ ConflictError (409 con su texto); un Error plano era un 500.
   if (original.type && original.type !== 'INGRESO') {
-    throw new Error('Esta es una nota de crédito (egreso), no una factura de venta; no se sustituye por este camino.')
+    throw new ConflictError('Esta es una nota de crédito (egreso), no una factura de venta; no se sustituye por este camino.')
   }
   if (!original.uuid || !original.facturapiId) {
     throw new Error('La factura original no tiene folio fiscal; no se puede relacionar una sustituta.')
@@ -107,9 +142,6 @@ export async function replaceCfdi(
   //    🔴 Se mira ANTES del guardado por estado: si la sustitución ya terminó, la original está
   //    CANCELLED y contestar 409 sería castigar a quien sólo perdió la respuesta (Codex P2-5).
   const previa = await deps.findSustituta(original.id)
-  let sustituta: any | null = null
-  let llave: string
-  let filaReservada = false
 
   if (previa) {
     // Aislamiento: una sustituta SIEMPRE nace con el venue de su original. Una fila que diga otra cosa
@@ -123,7 +155,7 @@ export async function replaceCfdi(
     if (!previa.uuid) throw new Error('La factura sustituta quedó sin folio fiscal; espera la conciliación antes de reintentar.')
     return { status: 'REPLACED', sustituta: previa, original, cancelStatus: original.cancelStatus ?? 'CANCELLED', cancelPendiente: false }
   }
-  if (original.status !== 'STAMPED') {
+  if (original.status !== 'STAMPED' && !(previa?.protocoloIva === 1 && previa.enviadoAt)) {
     throw new Error('Solo se puede sustituir una factura timbrada y vigente.')
   }
   if (previa?.status === 'STAMPED') {
@@ -135,21 +167,63 @@ export async function replaceCfdi(
     // Ya se timbró: NO se vuelve a timbrar. Lo que falta es la cancelación — se reanuda ahí.
     return await cancelarOriginal(params, original, previa, deps, 'REPLACED')
   }
+  const emissionDeps = { ...deps, findExistingCfdi: () => deps.findSustituta(original.id) }
+  if (!previa || previa.protocoloIva === 1) {
+    const receptor: IssueReceptor = {
+      rfc: original.receptorRfc,
+      razonSocial: original.receptorNombre,
+      regimenFiscal: original.receptorRegimen,
+      codigoPostal: original.receptorCp,
+      usoCfdi: original.usoCfdi,
+      // H24: la corregida llega al mismo correo que la original.
+      email: correoCapturado(original.entrada),
+    }
+    const result = await emitirConEntrada(
+      { orderId: original.orderId, receptor, sandbox: params.sandbox, flow: original.flow ?? 'STAFF_B', expectedVenueId: original.venueId },
+      previa?.idempotencyKey ?? siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId),
+      emissionDeps,
+      { id: original.id, uuid: original.uuid, fiscalEmisorId: original.fiscalEmisorId },
+    ).catch((err: unknown) => {
+      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002')
+        throw new ConflictError('Sustitución en proceso para esta factura')
+      throw err
+    })
+    if (result.status === 'STAMPED') return cancelarOriginal(params, original, result.cfdi, deps, 'REPLACED')
+    return {
+      status: result.status,
+      sustituta: result.status === 'VALIDATION_FAILED' ? null : result.cfdi,
+      original,
+      cancelStatus: null,
+      cancelPendiente: true,
+      ...(result.reasons ? { reasons: result.reasons } : {}),
+    }
+  }
+  // Sólo las filas históricas persistidas sin protocolo conservan el ciclo anterior.
+  // C2 · Tarea 3: esta rama NO lleva las guardas de la sustitución (cancelación en trámite, G4). Es inalcanzable mientras exista la
+  // restricción `Cfdi_heredada_solo_terminada` (D21): una sustituta heredada sólo puede estar STAMPED/CANCEL_REQUESTED/CANCELLED y
+  // `claimCfdi` no reclama ninguno de esos estados (409 antes del PAC). Quitar esa restricción exige poner aquí las guardas.
+  // C2 · T10 (M4 de la T3): una sustituta HEREDADA ya terminada (cancelada, o con su cancelación pendiente) no se reclama nunca (D21):
+  // antes contestaba para siempre «Sustitución en proceso para esta factura», que es falso. Se dice qué pasó y a quién acudir; nada se
+  // timbra (volver a sustituir esa original no es automático: la fila heredada ocupa su lugar).
+  if (previa && (previa.status === 'CANCELLED' || previa.status === 'CANCEL_REQUESTED')) {
+    const folio = [previa.serie, previa.folio].filter(Boolean).join('-') || previa.uuid || 'sin folio'
+    throw new ConflictError(
+      previa.status === 'CANCELLED'
+        ? `La corrección anterior de esta factura (${folio}) se canceló antes de este sistema, así que no se puede volver a sustituir desde aquí. Escríbenos a soporte para resolverla.`
+        : `La corrección anterior de esta factura (${folio}) tiene una cancelación pendiente de antes de este sistema, así que no se puede volver a sustituir desde aquí. Escríbenos a soporte para resolverla.`,
+    )
+  }
   if (previa && previa.status === 'STAMPING') {
     const ageMs = Date.now() - new Date(previa.updatedAt ?? previa.createdAt ?? Date.now()).getTime()
     if (ageMs < STAMPING_TTL_MS) throw new Error('Sustitución en proceso para esta factura') // → 409
     logger.warn(`[cfdi] reclamando sustitución STAMPING vieja de ${original.id} (${Math.round(ageMs / 1000)}s)`)
   }
-  if (previa) {
-    // Reclamo atómico: quien pierde recibe 409 y nunca llama al PAC.
-    const mio = await deps.claimCfdi(previa.id, ['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'], previa.attempts ?? 0)
-    if (!mio) throw new Error('Sustitución en proceso para esta factura') // → 409
-    sustituta = previa
-    llave = previa.idempotencyKey ?? siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId)
-    filaReservada = true
-  } else {
-    llave = siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId)
-  }
+  // El reclamo legacy conserva su incremento y su identidad PAC sin sufijo de versión.
+  const mio = await deps.claimCfdi(previa.id, ['STAMPING', 'STAMP_FAILED', 'VALIDATION_FAILED'], previa.attempts ?? 0)
+  if (!mio) throw new ConflictError('Sustitución en proceso para esta factura')
+  const llave = previa.idempotencyKey ?? siguienteLlaveDeSustitucion(original.idempotencyKey, original.orderId)
+  let legacyReservation = { ...previa, idempotencyKey: llave, status: 'STAMPING', attempts: (previa.attempts ?? 0) + 1 }
+  const legacyWhere = { id: previa.id, attempts: legacyReservation.attempts, status: 'STAMPING' as const }
 
   // 4. Armar el documento CORREGIDO con los datos ACTUALES de la orden.
   // La sustitución la hace el personal a propósito: el interruptor de efectivo es de la autofactura.
@@ -197,7 +271,8 @@ export async function replaceCfdi(
     isGlobal: false,
   })
   const reasons = [...validation.reasons, ...(bundle.unsupportedReasons ?? [])]
-  const documentoCents = totalDelDocumentoCents(bundle.order)
+  // B3a Tarea 6b: el documento que SE MANDA, sumado como el PAC (tras el ajuste del cargador, la suma por concepto ya no es lo cobrado).
+  const documentoCents = totalSegunElPacCents(invoiceParams.items.map(conceptoDesdeElPayload))
   if (!bundle.unsupportedReasons?.length && bundle.paidCents !== undefined && bundle.paidCents !== documentoCents) {
     const pesos = (c: number) => `$${(c / 100).toFixed(2)}`
     reasons.push(
@@ -208,21 +283,8 @@ export async function replaceCfdi(
     return { status: 'VALIDATION_FAILED', sustituta: null, original, cancelStatus: null, cancelPendiente: true, reasons }
   }
 
-  // 6. Reservar la sustituta ANTES del PAC — éste es el intento durable.
+  // La fila histórica ya fue reclamada; sólo un envío nuevo refresca su dinero.
   const datosBase = baseSustitutaData(original, bundle, llave, receptor, invoiceParams)
-  if (!filaReservada) {
-    try {
-      sustituta = await deps.reserveCfdi({ ...datosBase, status: 'STAMPING' })
-    } catch (err: unknown) {
-      if (err instanceof Prisma.PrismaClientKnownRequestError && err.code === 'P2002') {
-        // Carrera: otra petición reservó la misma llave. Nunca se timbra un segundo documento.
-        const ahora = await deps.findSustituta(original.id)
-        if (ahora?.status === 'STAMPED') return await cancelarOriginal(params, original, ahora, deps, 'REPLACED')
-        throw new Error('Sustitución en proceso para esta factura') // → 409
-      }
-      throw err
-    }
-  }
 
   // 7. Timbrar.
   const provider = deps.resolveProvider(bundle.emisor as any, { sandbox: params.sandbox })
@@ -230,7 +292,7 @@ export async function replaceCfdi(
   // 🔴 Si esta fila viene de un intento anterior, ese intento PUDO haber timbrado y perder la
   // respuesta (un timeout después de que el PAC contestó). Re-timbrar sin preguntar produciría un
   // TERCER documento fiscal por la misma venta (Codex P1-2).
-  if (filaReservada && typeof provider.findByExternalId === 'function') {
+  if (typeof provider.findByExternalId === 'function') {
     let previo
     try {
       previo = await provider.findByExternalId(llave)
@@ -241,24 +303,24 @@ export async function replaceCfdi(
       throw new Error('Sustitución en proceso para esta factura') // → 409; nunca se timbra a ciegas
     }
     if (previo && previo.status !== 'canceled') {
+      if (previo.status !== 'valid' || !previo.uuid) {
+        throw new ConflictError('Sustitución en proceso para esta factura')
+      }
       logger.warn(`[cfdi] el PAC ya tenía ${previo.uuid} para ${llave}: se completa sin volver a timbrar`)
-      const recuperada = await deps.persistCfdi({
-        ...datosBase,
-        status: 'STAMPED',
-        facturapiId: previo.providerInvoiceId,
-        uuid: previo.uuid,
-        serie: previo.serie,
-        folio: previo.folio,
-        stampedAt: previo.stampedAt ?? new Date(),
-      })
-      return await cancelarOriginal(params, original, recuperada, deps, 'REPLACED')
+      const recuperada = await finalizarEmision(legacyReservation, previo, provider, bundle.venueSlug, emissionDeps)
+      return cancelarOriginal(params, original, recuperada.cfdi, deps, 'REPLACED')
     }
     if (previo?.status === 'canceled') {
-      throw new Error(
+      // C2-pulido · G3 (hermano): rechazo de dominio, no un 500.
+      throw new ConflictError(
         `La sustituta anterior (${previo.uuid ?? previo.providerInvoiceId}) quedó cancelada en el PAC; revísala antes de volver a sustituir.`,
       )
     }
   }
+
+  const refreshed = await deps.persistCfdi({ ...datosBase, status: 'STAMPING' }, legacyWhere)
+  if (!refreshed) throw new ConflictError('Sustitución en proceso para esta factura')
+  legacyReservation = { ...legacyReservation, ...datosBase }
 
   let timbrada
   try {
@@ -266,45 +328,18 @@ export async function replaceCfdi(
   } catch (err: unknown) {
     const message = err instanceof Error ? err.message : String(err)
     logger.error(`[cfdi] falló el timbrado de la sustituta de ${original.id}: ${message}`)
-    const fallida = await deps.persistCfdi({ ...datosBase, status: 'STAMP_FAILED', lastError: message })
+    const fallida = await deps.persistCfdi({ idempotencyKey: llave, status: 'STAMP_FAILED', lastError: message }, legacyWhere)
+    if (!fallida) throw new ConflictError('Sustitución en proceso para esta factura')
     // 🔴 La original NO se cancela: sin sustituta, cancelarla dejaría la venta sin ningún comprobante.
     return { status: 'STAMP_FAILED', sustituta: fallida, original, cancelStatus: null, cancelPendiente: true }
   }
 
-  // 8. La identidad del timbre se persiste ANTES de los archivos: el documento ya existe ante el SAT.
-  const identidad = {
-    facturapiId: timbrada.providerInvoiceId,
-    uuid: timbrada.uuid,
-    serie: timbrada.serie,
-    folio: timbrada.folio,
-    stampedAt: timbrada.stampedAt,
+  if (timbrada.status !== 'valid' || !timbrada.uuid) {
+    await deps.persistCfdi({ idempotencyKey: llave, facturapiId: timbrada.providerInvoiceId }, legacyWhere)
+    throw new ConflictError('Sustitución en proceso para esta factura')
   }
-  let fila = await deps.persistCfdi({ ...datosBase, status: 'STAMPED', ...identidad })
-
-  try {
-    const [xmlBuf, pdfBuf] = await Promise.all([
-      provider.downloadXml(timbrada.providerInvoiceId),
-      provider.downloadPdf(timbrada.providerInvoiceId),
-    ])
-    const base = `venues/${bundle.venueSlug}/cfdi/${timbrada.uuid}`
-    const [xmlUrl, pdfUrl] = await Promise.all([
-      deps.storeArtifact(xmlBuf, buildStoragePath(`${base}.xml`), 'application/xml'),
-      deps.storeArtifact(pdfBuf, buildStoragePath(`${base}.pdf`), 'application/pdf'),
-    ])
-    const guardada = await deps.persistArtifacts(llave, { xmlUrl, pdfUrl })
-    // Se FUNDE sobre la fila que ya traía el timbre: `persistArtifacts` sólo escribe URLs y
-    // podría devolver una vista parcial; perder aquí el uuid rompería la cancelación de abajo.
-    fila = { ...fila, ...(guardada ?? {}), xmlUrl, pdfUrl }
-  } catch (err: unknown) {
-    // El timbre YA vale; faltan los archivos y NADIE los repone solo (el job de conciliación sólo
-    // mira filas `STAMPING`). Hasta que alguien los baje, su descarga contestará 404 (Codex P2-8).
-    logger.error(
-      `[cfdi] sustituta ${timbrada.uuid} timbrada pero fallaron sus archivos: ${err instanceof Error ? err.message : String(err)}`,
-    )
-  }
-
-  // 9. Cancelar la original. Un fallo aquí NO pierde la sustituta: queda pendiente y se reanuda.
-  return await cancelarOriginal(params, original, fila, deps, 'REPLACED')
+  const result = await finalizarEmision(legacyReservation, timbrada, provider, bundle.venueSlug, emissionDeps)
+  return cancelarOriginal(params, original, result.cfdi, deps, 'REPLACED')
 }
 
 /**
@@ -319,14 +354,31 @@ async function cancelarOriginal(
   deps: ReplaceCfdiDeps,
   status: 'REPLACED',
 ): Promise<ReplaceCfdiResult> {
+  // C2 ronda 1 (M8): `vigente` vive fuera del `try` para que el caso del conflicto describa la original RELEÍDA, no la foto vieja.
+  let vigente = original
+  // Ronda de la ola (3): ¿ESTA petición anotó un intento nuevo? Se sabe aunque la cancelación truene después de anotar.
+  let cancelIntentoNuevo = false
+  const anotarIntencion: ReplaceCfdiDeps['anotarIntencion'] = async (...a) => {
+    const r = await deps.anotarIntencion(...a)
+    if ('estado' in r && r.estado === 'ANOTADA') cancelIntentoNuevo = true
+    return r
+  }
   try {
     // 🔴 Se RELEE: entre el timbre de la sustituta y este punto la original pudo cambiar de estado
     // (otra petición la canceló, o una cancelación anterior se resolvió). Usar la foto vieja podría
     // pisar un `cancelSubstituteUuid` bueno o revertir una cancelación aceptada (Codex P2-5).
-    const vigente = (await deps.loadCfdi(original.id)) ?? original
+    vigente = (await deps.loadCfdi(original.id)) ?? original
     if (vigente.status === 'CANCELLED') {
-      return { status, sustituta, original: vigente, cancelStatus: vigente.cancelStatus ?? 'CANCELLED', cancelPendiente: false }
+      return {
+        status,
+        sustituta,
+        original: vigente,
+        cancelStatus: vigente.cancelStatus ?? 'CANCELLED',
+        cancelPendiente: false,
+        cancelIntentoNuevo,
+      }
     }
+    let primeraLectura = true
     const res = await cancelCfdi(
       {
         cfdiId: vigente.id,
@@ -335,7 +387,20 @@ async function cancelarOriginal(
         sandbox: params.sandbox,
         expectedVenueId: params.expectedVenueId,
       },
-      { loadCfdi: async () => vigente, resolveProvider: deps.resolveProvider, updateCfdi: deps.updateCfdi },
+      {
+        // Reutiliza la lectura de arriba; si pierde el CAS, devuelve la fila actual.
+        loadCfdi: async id => {
+          if (!primeraLectura) return deps.loadCfdi(id)
+          primeraLectura = false
+          return vigente
+        },
+        resolveProvider: deps.resolveProvider,
+        updateCfdi: deps.updateCfdi,
+        anotarIntencion,
+        tomarEnvio: deps.tomarEnvio,
+        dueno: deps.dueno,
+        refresh: deps.refresh,
+      },
     )
     return {
       status,
@@ -343,14 +408,46 @@ async function cancelarOriginal(
       original: res.cfdi,
       cancelStatus: res.cancelStatus,
       cancelPendiente: !(res.cancelStatus === 'CANCELLED' || res.cancelStatus === 'ACCEPTED'),
+      cancelIntentoNuevo,
+      ...(res.enDuda ? { enDuda: true as const } : {}),
     }
   } catch (err: unknown) {
+    // 🔴 C2 (M6/G4): una REGLA impidió anotar la intención (la original tiene una nota de crédito viva, u otra cancelación en trámite con
+    // otro motivo). No es «el PAC no contestó»: no se le llamó. La sustituta ya está timbrada; se devuelve el texto para que se resuelva.
+    if (err instanceof ConflictError) {
+      logger.warn(`[cfdi] sustituta ${sustituta.uuid} timbrada; la cancelación de ${original.id} no se pidió: ${err.message}`)
+      return {
+        status,
+        sustituta,
+        original: vigente,
+        cancelStatus: vigente.cancelStatus ?? null,
+        cancelPendiente: true,
+        cancelConflicto: err.message,
+        cancelIntentoNuevo,
+      }
+    }
+    // C2 ronda 2 (N3): la cancelación pudo cambiar la fila antes de fallar (M1 la cierra «no se llegó a enviar»): el resultado describe
+    // la original RELEÍDA, no la foto de antes de timbrar.
+    const releida = (await deps.loadCfdi(original.id).catch(() => null)) ?? vigente
+    // C2 ronda 2 (N3): la consulta previa al PAC falló (M1): no salió nada y el intento ya quedó cerrado. Es un aviso con su texto.
+    if (err instanceof ProviderUnavailableError) {
+      logger.warn(`[cfdi] sustituta ${sustituta.uuid} timbrada; la cancelación de ${original.id} no salió: ${err.message}`)
+      return {
+        status,
+        sustituta,
+        original: releida,
+        cancelStatus: releida.cancelStatus ?? null,
+        cancelPendiente: true,
+        cancelAviso: err.message,
+        cancelIntentoNuevo,
+      }
+    }
     // El PAC no contestó. La sustituta YA está timbrada y su vínculo es durable: volver a pedir la
     // sustitución reanuda justo aquí.
     logger.error(
       `[cfdi] sustituta ${sustituta.uuid} timbrada pero falló la cancelación de ${original.id}: ${err instanceof Error ? err.message : String(err)}`,
     )
-    return { status, sustituta, original, cancelStatus: null, cancelPendiente: true }
+    return { status, sustituta, original: releida, cancelStatus: releida.cancelStatus ?? null, cancelPendiente: true, cancelIntentoNuevo }
   }
 }
 
@@ -401,9 +498,14 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
   findSustituta: originalCfdiId => prisma.cfdi.findFirst({ where: { replacesCfdiId: originalCfdiId }, orderBy: { createdAt: 'desc' } }),
   loadOrderForCfdi: loadOrderForCfdiFromDb,
   resolveProvider: resolveFiscalProvider,
-  reserveCfdi: data => prisma.cfdi.create({ data: data as any }),
-  persistCfdi: data =>
-    prisma.cfdi.upsert({
+  reserveCfdi: (data, tx = prisma) => tx.cfdi.create({ data: data as any }),
+  persistCfdi: async (data, where) => {
+    if (where) {
+      const { idempotencyKey, ...changes } = data
+      const { count } = await prisma.cfdi.updateMany({ where, data: changes })
+      return count === 1 ? prisma.cfdi.findUnique({ where: { idempotencyKey } }) : null
+    }
+    return prisma.cfdi.upsert({
       where: { idempotencyKey: data.idempotencyKey },
       create: data as any,
       // El dinero se REFRESCA: la fila describe el documento que de verdad se timbró (Codex P2-6).
@@ -414,7 +516,8 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
         ...moneyFields(data),
         ...stampedFields(data),
       },
-    }),
+    })
+  },
   claimCfdi: async (cfdiId, desdeEstados, version) => {
     const { count } = await prisma.cfdi.updateMany({
       where: claimWhere(cfdiId, desdeEstados, version) as any,
@@ -422,11 +525,18 @@ const defaultReplaceDeps: ReplaceCfdiDeps = {
     })
     return count === 1
   },
-  persistArtifacts: async (idempotencyKey, urls) => {
-    const { count } = await prisma.cfdi.updateMany({ where: { idempotencyKey, status: 'STAMPED' }, data: urls })
+  persistArtifacts: async (idempotencyKey, urls, version) => {
+    const { count } = await prisma.cfdi.updateMany({
+      where: { idempotencyKey, status: 'STAMPED', ...(version !== undefined ? { attempts: version } : {}) },
+      data: urls,
+    })
     if (count === 0) logger.warn(`[cfdi] no se guardaron los archivos de ${idempotencyKey}: la fila ya no está timbrada`)
     return prisma.cfdi.findUnique({ where: { idempotencyKey } })
   },
   storeArtifact: (buffer, path, contentType) => uploadFileToStorage(buffer, path, contentType),
-  updateCfdi: (id, data) => prisma.cfdi.update({ where: { id }, data }),
+  updateCfdi: aplicarCancelacion,
+  anotarIntencion: anotarIntencionDeCancelar,
+  tomarEnvio,
+  dueno: sigoSiendoDueno,
+  refresh: (cfdi, opts) => refreshPendingCancellation(cfdi, opts),
 }

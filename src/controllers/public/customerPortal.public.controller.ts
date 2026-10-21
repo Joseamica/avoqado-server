@@ -15,25 +15,12 @@ async function resolveVenueBySlug(venueSlug: string) {
 }
 
 /**
- * POST /public/venues/:venueSlug/customer/register
+ * POST /public/venues/:venueSlug/customer/register — toda cuenta nueva se crea con código (`auth/otp/*`); esto sólo le dice
+ * a una página vieja qué hacer (ver `registerCustomer`).
  */
-export async function register(req: Request, res: Response, next: NextFunction) {
+export function register(_req: Request, _res: Response, next: NextFunction) {
   try {
-    const { venueSlug } = req.params
-    const venue = await resolveVenueBySlug(venueSlug)
-    const { email, password, phone, firstName, lastName } = req.body
-
-    const result = await customerPortalService.registerCustomer(venue.id, {
-      email,
-      password,
-      phone,
-      firstName,
-      lastName,
-    })
-
-    // Fase 0.B: el widget pinta "¿puedo reservar?" desde la sesión, no desde un 403 tardío.
-    const bookingAccess = await computeBookingAccess(venue.id, result.customer?.id)
-    res.status(201).json({ ...result, ...withBookingAccess(bookingAccess) })
+    customerPortalService.registerCustomer()
   } catch (error) {
     next(error)
   }

@@ -1,4 +1,4 @@
-import { allocateByWeights } from '@/services/fiscal/ivaMath'
+import { repartirProporcional } from '@/services/fiscal/ivaMath'
 
 /** Una opción ya elegida, con el precio de catálogo del producto congelado. */
 export interface PromotionOptionSnapshot {
@@ -49,7 +49,7 @@ export interface ResolvedPromotion {
  *
  * 🔴 El descuento se reparte PROPORCIONAL al bruto, no en partes iguales.
  * Partes iguales le movería la base gravable a un producto 0% frente a uno
- * 16%. `allocateByWeights` garantiza que las partes sumen el total EXACTO.
+ * 16%. `repartirProporcional` garantiza que las partes sumen el total EXACTO y que ninguna sea negativa.
  */
 export function resolvePromotionLines(input: PromotionPricingInput): ResolvedPromotion {
   const { pricingMode, priceCents, selections } = input
@@ -70,7 +70,7 @@ export function resolvePromotionLines(input: PromotionPricingInput): ResolvedPro
   // Una promoción no puede cobrar MÁS que el catálogo: si alguien la configura
   // por encima, se cobra el catálogo y no se genera un descuento negativo.
   const discountCents = Math.max(0, grossCents - targetNet)
-  const shares = allocateByWeights(discountCents, grossPerLine)
+  const shares = repartirProporcional(discountCents, grossPerLine)
 
   const lines: ResolvedPromotionLine[] = selections.map((s, i) => ({
     productId: s.productId,

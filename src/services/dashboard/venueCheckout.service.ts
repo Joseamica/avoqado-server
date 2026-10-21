@@ -28,7 +28,9 @@ import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payme
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import {
   getPaymentLinkBranding,
-  mapStripeMethodToPaymentMethod,
+  metodoDeStripe,
+  debeReintentarSinTipo,
+  fundsFlowForStripePayment,
   mapStripeCardBrandToEnum,
   finalizeMercadoPagoCheckout,
 } from '@/services/dashboard/paymentLink.service'
@@ -331,7 +333,7 @@ export async function executeMercadoPagoPaymentForVenue(
   venueSlug: string,
   sessionId: string,
   input: {
-    token: string
+    token?: string
     paymentMethodId: string
     installments: number
     issuerId?: string
@@ -339,7 +341,7 @@ export async function executeMercadoPagoPaymentForVenue(
   },
 ) {
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
-  const { createPayment } = await import('@/services/mercado-pago/payment.service')
+  const { createPayment, mpToCheckoutStatus } = await import('@/services/mercado-pago/payment.service')
 
   const venue = await prisma.venue.findUnique({ where: { slug: venueSlug }, select: { id: true } })
   if (!venue) throw new NotFoundError('Venue no encontrado')
@@ -379,12 +381,7 @@ export async function executeMercadoPagoPaymentForVenue(
     idempotencyKey: session.sessionId,
   })
 
-  const optimisticStatus =
-    payment.status === 'approved' || payment.status === 'authorized'
-      ? 'COMPLETED'
-      : payment.status === 'rejected' || payment.status === 'cancelled'
-        ? 'CANCELLED'
-        : 'PENDING'
+  const optimisticStatus = mpToCheckoutStatus(payment.status)
 
   await prisma.checkoutSession.update({
     where: { id: session.id },
@@ -397,7 +394,7 @@ export async function executeMercadoPagoPaymentForVenue(
 
   // Record Order + Payment on approval (idempotent; IPN also calls this).
   if (optimisticStatus === 'COMPLETED') {
-    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id }).catch(err =>
+    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id, paymentTypeId: payment.payment_type_id }).catch(err =>
       logger.error('finalizeMercadoPagoCheckout failed (venue optimistic path)', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
@@ -501,10 +498,12 @@ export async function finalizeVenueCheckout(args: {
   const venueId = session.ecommerceMerchant.venueId
 
   // Best-effort charge details (card brand / last4 / receipt URL) from Stripe.
-  const chargeDetails: { cardBrand: string | null; last4: string | null; receiptUrl: string | null } = {
+  // `tipo`: el tipo real del cobro (`oxxo`, `card`…); el webhook casi nunca lo trae porque no expande objetos.
+  const chargeDetails: { cardBrand: string | null; last4: string | null; receiptUrl: string | null; tipo: string | null } = {
     cardBrand: null,
     last4: null,
     receiptUrl: null,
+    tipo: null,
   }
   const connectAccountId = (session.ecommerceMerchant.providerCredentials as { connectAccountId?: string } | null)?.connectAccountId
   if (connectAccountId && args.paymentIntentId && session.ecommerceMerchant.provider?.code === 'STRIPE_CONNECT') {
@@ -519,11 +518,13 @@ export async function finalizeVenueCheckout(args: {
       const charge = typeof pi.latest_charge === 'object' && pi.latest_charge ? pi.latest_charge : null
       if (charge) {
         chargeDetails.receiptUrl = charge.receipt_url ?? null
+        chargeDetails.tipo = charge.payment_method_details?.type ?? null
         const card = (charge.payment_method_details as { card?: { brand?: string; last4?: string } } | null)?.card
         chargeDetails.cardBrand = card?.brand ?? null
         chargeDetails.last4 = card?.last4 ?? null
       }
     } catch (err) {
+      if (debeReintentarSinTipo(args.stripePaymentMethodType, err)) throw err
       logger.warn('Failed to fetch Stripe charge details for venue checkout (non-fatal)', {
         paymentIntentId: args.paymentIntentId,
         error: err instanceof Error ? err.message : String(err),
@@ -537,7 +538,9 @@ export async function finalizeVenueCheckout(args: {
   const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
   const netAmount = gross.sub(feeAmount).gte(0) ? gross.sub(feeAmount) : new Prisma.Decimal(0)
   const feePercentage = gross.gt(0) ? feeAmount.div(gross).toDecimalPlaces(4) : new Prisma.Decimal(0)
-  const method = mapStripeMethodToPaymentMethod(args.stripePaymentMethodType)
+  // Codex r1 (19-oct): sin el tipo del cargo, un OXXO caía a CREDIT_CARD/SAT 04 (el webhook no expande `latest_charge`).
+  const tipoDeStripe = args.stripePaymentMethodType ?? chargeDetails.tipo
+  const { method, tenderSatFormaPago } = metodoDeStripe(tipoDeStripe)
 
   await prisma.$transaction(async tx => {
     await tx.checkoutSession.update({
@@ -567,6 +570,7 @@ export async function finalizeVenueCheckout(args: {
         subtotal: gross,
         discountAmount: 0,
         taxAmount: 0,
+        contratoDePrecio: 'IVA_INCLUIDO',
         tipAmount: 0,
         total: gross,
         paidAmount: gross,
@@ -585,6 +589,9 @@ export async function finalizeVenueCheckout(args: {
         amount: gross,
         tipAmount: 0,
         method,
+        tenderSatFormaPago,
+        // 🔴 Este camino no sellaba: un OXXO de Stripe caía al fallback `method === 'CASH'` y contaba como efectivo del cajón.
+        fundsFlow: fundsFlowForStripePayment(tipoDeStripe),
         source: 'WEB',
         status: 'COMPLETED',
         type: 'FAST',

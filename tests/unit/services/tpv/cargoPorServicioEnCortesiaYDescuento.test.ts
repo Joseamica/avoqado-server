@@ -37,7 +37,7 @@
  * resuelta aquí.
  *
  * Estas pruebas ejercitan las FUNCIONES REALES, no un espejo de su fórmula: un espejo sigue
- * en verde mientras el servicio se rompe debajo (`orderTotal.negative.test.ts` es eso).
+ * en verde mientras el servicio se rompe debajo; por eso se retiró la réplica `orderTotal.negative.test.ts`.
  */
 
 import { Decimal } from '@prisma/client/runtime/library'
@@ -50,17 +50,30 @@ import { computeStoredOrderTotal } from '@/services/shared/orderBalance'
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
     order: { findUnique: jest.fn(), update: jest.fn() },
-    orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn() },
+    // B2 (P2): `applyDiscount` crea su fila y sincroniza su reparto, que lee los renglones de la orden.
+    orderItem: { update: jest.fn(), delete: jest.fn(), deleteMany: jest.fn(), findMany: jest.fn(async () => []) },
     orderAction: { create: jest.fn() },
-    orderDiscount: { findMany: jest.fn() },
+    orderDiscount: {
+      findMany: jest.fn(async () => []),
+      create: jest.fn(async () => ({})),
+      update: jest.fn(),
+      // B2b T6 (Codex r5): anular TODO cierra las reducciones de impuesto de sus filas.
+      updateMany: jest.fn(async () => ({ count: 0 })),
+      delete: jest.fn(),
+    },
     orderServiceCharge: { findMany: jest.fn(), update: jest.fn() },
     orderCustomer: { deleteMany: jest.fn() },
     staff: { findUnique: jest.fn() },
+    // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
+    staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
     $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },
+    // Codex 3.6 (S5): anular TODOS los platos retira de la pantalla de cocina las comandas pendientes de la venta.
+    kdsOrderItem: { findMany: jest.fn(async () => []), deleteMany: jest.fn() },
+    kdsOrder: { findMany: jest.fn(async () => []), deleteMany: jest.fn(), updateMany: jest.fn(async () => ({ count: 0 })) },
   }
   // `__insideTx` deja MEDIBLE la atomicidad: cada escritura puede anotar si ocurrió
   // DENTRO del callback de `$transaction`. Sin esta bandera, con un mock que pasa el
@@ -96,6 +109,14 @@ jest.mock('@/services/dashboard/productInventoryIntegration.service', () => ({
   getProductInventoryMethod: jest.fn(),
 }))
 
+// Tarjetas de regalo: este doble de transacción no modela sobres; la guardia de cuentas de tarjetas tiene su propia
+// suite (tests/unit/services/giftCards/cuentaDeTarjetas.test.ts y la integración de la cuenta).
+jest.mock('@/services/giftCards/cuentaDeTarjetas', () => ({
+  ...jest.requireActual('@/services/giftCards/cuentaDeTarjetas'),
+  rechazarSiEsCuentaDeTarjetas: jest.fn().mockResolvedValue(undefined),
+  esCuentaDeTarjetasEnTx: jest.fn().mockResolvedValue(false),
+  desactivarSobresPendientesDeCuentaEnTx: jest.fn().mockResolvedValue({ desactivados: [] }),
+}))
 import prisma from '@/utils/prismaClient'
 import { compItems, applyDiscount, voidItems } from '@/services/tpv/order.tpv.service'
 
@@ -287,17 +308,44 @@ describe('applyDiscount — descontar conserva el cargo por servicio y la propin
     expect(guardado.discountAmount).toBe(253) // 25.30 + 227.70, no 278.30
     expect(guardado.total).toBe(30) // 0 de mercancía + 30 de cargo
   })
+
+  it('una cuenta totalmente descontada no crea otro descuento ni consume el cargo', async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(
+      ordenConCargo({ subtotal: new Decimal(253), discountAmount: new Decimal(253), serviceChargeAmount: new Decimal(30) }),
+    )
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
+
+    await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(50))
+
+    expect(datosGuardados().discountAmount).toBe(253)
+    expect(datosGuardados().total).toBe(30)
+    expect(mockPrisma.orderDiscount.create).not.toHaveBeenCalled()
+  })
+
+  it('un descuento fijo mayor que la mercancía se limita al subtotal cuando no había descuento previo', async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(
+      ordenConCargo({ subtotal: new Decimal(253), discountAmount: new Decimal(0), serviceChargeAmount: new Decimal(30) }),
+    )
+    mockPrisma.orderServiceCharge.findMany.mockResolvedValue([filaFija(30)])
+
+    await applyDiscount(VENUE_ID, ORDER_ID, descuentoFijo(500))
+
+    expect(datosGuardados().discountAmount).toBe(253)
+    expect(datosGuardados().total).toBe(30)
+  })
 })
 
 // ── La decisión del impuesto, fijada ──────────────────────────────────────────
-describe('🔴 `taxAmount` NO entra al total en estos dos caminos (decisión declarada)', () => {
+describe('🔴 con IVA INCLUIDO el `taxAmount` escrito NO entra al total en estos dos caminos (P12)', () => {
   /**
-   * Si alguien «unifica» esto con los tres caminos del dashboard pasándole
-   * `taxAmount: order.taxAmount`, estas dos pruebas fallan — que es el aviso de que el
-   * cambio mueve dinero y necesita su propia decisión, no un arreglo de consistencia.
+   * P12 (founder, 2-oct) tomó la decisión que esta prueba pedía: el IVA entra al total y al cobro SÓLO por la regla
+   * compartida (`impuestoQueSeCobraAparte`). Con IVA incluido el precio ya lo trae y un impuesto escrito no suma; el que va
+   * aparte sí, aquí y en el cobro, con la misma regla (integración «R4-2» y `orderBalance.test.ts`).
    */
-  it('una orden con impuesto guardado no lo suma al descontar', async () => {
-    mockPrisma.order.findUnique.mockResolvedValue(ordenConCargo({ taxAmount: new Decimal(16), total: new Decimal(131) }))
+  it('una orden con IVA incluido e impuesto guardado no lo suma al descontar', async () => {
+    mockPrisma.order.findUnique.mockResolvedValue(
+      ordenConCargo({ contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(16), total: new Decimal(131) }),
+    )
 
     await applyDiscount(VENUE_ID, ORDER_ID, { type: 'FIXED_AMOUNT', value: 20, reason: 'Promo', staffId: STAFF_ID, expectedVersion: 1 })
 
@@ -306,9 +354,9 @@ describe('🔴 `taxAmount` NO entra al total en estos dos caminos (decisión dec
   })
 
   it('lo guardado coincide con lo que el cobro calcularía — el cobro no tiene que ARREGLAR el total', async () => {
-    // Espejo de `recordOrderPayment`: max(0, subtotal − descuento) + cargo + propina, sin impuesto.
+    // Espejo de `recordOrderPayment`: max(0, subtotal − descuento) + IVA aparte (0 con IVA incluido) + cargo + propina.
     mockPrisma.order.findUnique.mockResolvedValue(
-      ordenConCargo({ taxAmount: new Decimal(16), tipAmount: new Decimal(20), total: new Decimal(151) }),
+      ordenConCargo({ contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(16), tipAmount: new Decimal(20), total: new Decimal(151) }),
     )
 
     await compItems(VENUE_ID, ORDER_ID, { itemIds: ['item-1'], reason: 'Comida fría', staffId: STAFF_ID })
@@ -317,6 +365,9 @@ describe('🔴 `taxAmount` NO entra al total en estos dos caminos (decisión dec
     const totalAlCobrar = computeStoredOrderTotal({
       subtotal: 100,
       discountAmount: guardado.discountAmount,
+      contratoDePrecio: 'IVA_INCLUIDO',
+      taxAmount: 16,
+      status: 'PENDING',
       serviceChargeAmount: 15,
       tipAmount: 20,
     }).toNumber()

@@ -5,6 +5,7 @@ import prisma from '@/utils/prismaClient'
 import { MASTER_CATALOG_IMPORT_HEADERS } from '@/workers/masterCatalogXlsx.worker'
 import { calculateRecipeCostV1, RecipeCostCalculationError } from '@/services/dashboard/recipe-cost-calculator'
 import { validateCatalogProductTypeV1 } from './catalogProductType.service'
+import { CATALOG_IVA_HISTORIC_NOTE } from './catalogManagedMask.service'
 import { CATALOG_EXPORT_WORKBOOK_LIMITS_V1, type CatalogWorkbookValueV1, writeCatalogWorkbookV1 } from './catalogExportWorkbook.service'
 import {
   CATALOG_EXPORT_HYDRATED_ROW_CAP_V1,
@@ -433,6 +434,7 @@ export function createCatalogExportService(dependencies: CatalogExportDependenci
           timezone: 'America/Mexico_City',
           filters: businessType ? JSON.stringify({ businessType }) : '{}',
           profileVersion: snapshot.profileVersion,
+          ivaNote: CATALOG_IVA_HISTORIC_NOTE,
         },
         sheets: snapshot.sheets,
       }),
@@ -471,6 +473,7 @@ export function createCatalogExportService(dependencies: CatalogExportDependenci
           timezone: 'America/Mexico_City',
           filters: '{}',
           profileVersion: profileVersions(profiles),
+          ivaNote: CATALOG_IVA_HISTORIC_NOTE,
         },
         sheets: templateSheets,
       }),

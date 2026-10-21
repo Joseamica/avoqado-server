@@ -29,8 +29,10 @@ Run through this checklist in order. Don't ship without it.
 4. **Backend gate** — use the _exact_ same string in `checkPermission('resource:action')`.
 5. **Frontend gate** — same string in `<PermissionGate permission="resource:action">` and `hasPermission('resource:action')` calls.
 6. **TPV gate** — same string in `permissionsRepository.hasPermission("resource:action")`.
-7. **Android** — `avoqado-android` does NOT read the permissions array (uses role strings via `RoleManager`). Add a method to `RoleManager`
-   and document the role set; verify the set matches what those roles get in `DEFAULT_PERMISSIONS` for the new perm.
+7. **Android + iOS** — for a new gate, use `RoleManager.hasVenuePermission("resource:action", fallbackRoles = …)`: it reads the EFFECTIVE
+   permission list the server sends for the venue (custom roles and Permission Sets included) and falls back to the role set only when
+   that list is empty. iOS mirrors it in `RoleManager.swift` (`hasVenuePermission(_:fallbackRoles:)`) — change both apps together. Make
+   the fallback role set match `DEFAULT_PERMISSIONS` for the new perm.
 8. **Audit** — run `npm run audit:permissions` from `avoqado-server`. Must exit 0.
 
 ## Renaming a permission
@@ -84,13 +86,15 @@ The wildcard expansion in `evaluatePermissionList` differs from `hasPermission`:
 Practical rule: any new permission you add to the catalog **must** be reachable via either an explicit literal or a wildcard in role
 defaults. The audit script catches this automatically (PHANTOM error).
 
-## avoqado-android architectural limitation
+## Android / iOS: two generations of gates (verified 9-oct-2026)
 
-`avoqado-android` uses role-string sets (`RoleManager.canCreateProducts = role in setOf("MANAGER", "ADMIN", ...)`) instead of consuming the
-permissions array. This means **custom VenueRolePermission overrides are ignored on Android**. If a venue denies a default permission via
-custom override, the Android UI still shows the option.
+- **New (use this):** `RoleManager.hasVenuePermission(...)` in Android (`core/domain/RoleManager.kt`) and iOS (`RoleManager.swift`) reads the
+  effective venue permission list from the server, so custom `VenueRolePermission` overrides ARE honored, with a role-set fallback when
+  the list arrives empty.
+- **Old (debt):** many getters still use role-string sets (`RoleManager.canCreateProducts = role in setOf("MANAGER", "ADMIN", ...)`), and
+  those ignore custom overrides: if a venue denies a default permission, that UI still shows the option.
 
-This is tracked architectural debt. For now:
+For the remaining role-set getters:
 
 - Document the role set in code comments (which `DEFAULT_PERMISSIONS` it mirrors).
 - The audit script does not cross-check Android string gates against the catalog; it only flags it as informational.

@@ -41,7 +41,7 @@ const baseCfg = {
   maxAmount: null,
   includeTips: false,
   includeDiscount: false,
-  includeTax: false,
+  includeTax: true, // A1e: estas pruebas miden categorías y sobrante, no el IVA: la base es lo cobrado
   roleRates: null,
   useGoalAsTier: false,
   goalBonusRate: null,
@@ -126,6 +126,11 @@ beforeEach(() => {
   prismaMock.commissionCalculation.create.mockImplementation(async (args: any) => ({ id: 'calc', ...args.data }))
   // Sin descuento de orden en estos escenarios (el prorrateo tiene su propia suite).
   prismaMock.order.findUnique.mockResolvedValue({ discountAmount: new Decimal(0) })
+  // Fase 3 (A1b): el reparto por cobro lee los OTROS cobros confirmados de la orden (`otrosCobros`, consulta cruda). Sin
+  // otros, cada escenario de aquí conserva su número de siempre (el cobro se lleva la orden entera). Las demás consultas
+  // crudas siguen recibiendo el `[{ base: 0 }]` de arriba.
+  prismaMock.$queryRaw.mockImplementation((async (q: { strings?: readonly string[] }) =>
+    q?.strings?.join('').includes('otros_de_la_orden') ? [] : [{ base: new Decimal(0) }]) as any)
 })
 
 describe('multi-scheme commission engine', () => {
@@ -424,5 +429,177 @@ describe('split commission: order-level base with per-payment trigger', () => {
 
     expect(results).toHaveLength(1)
     expect(results[0].netCommission).toBe(15) // 3% de $500 completo, sin dividir
+  })
+})
+
+/**
+ * 🔴 MONEY — la fila guarda como `tipAmount` la propina que ENTRÓ a su base (0 si la config la
+ * excluye), igual que las rutas por categoría y por sobrante. El reverso de un reembolso y
+ * `alreadyCommissionedItemBase` leen eso para separar venta de propina; las rutas de cobro
+ * completo y de comisión dividida guardaban la propina del cobro aunque NO entrara a la base.
+ */
+describe('la propina guardada es la que ENTRÓ a la base', () => {
+  const conPropina = (monto: number, propina: number) => ({ ...payment(monto), tipAmount: new Decimal(propina) })
+  const guardado = () => prismaMock.commissionCalculation.create.mock.calls.map((c: any) => c[0].data)
+
+  it('MONEY: cobro completo con config SIN propinas guarda tipAmount 0', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(conPropina(145, 14.5))
+    prismaMock.commissionConfig.findMany.mockResolvedValue([GENERAL])
+
+    await createCommissionForPayment('pay-1')
+
+    const [fila] = guardado()
+    expect(Number(fila.baseAmount)).toBe(145)
+    expect(Number(fila.tipAmount)).toBe(0)
+  })
+
+  it('cobro completo con config QUE incluye propinas la guarda dentro de la base', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(conPropina(145, 14.5))
+    prismaMock.commissionConfig.findMany.mockResolvedValue([{ ...GENERAL, includeTips: true }])
+
+    await createCommissionForPayment('pay-1')
+
+    const [fila] = guardado()
+    expect(Number(fila.baseAmount)).toBe(159.5)
+    expect(Number(fila.tipAmount)).toBe(14.5)
+  })
+
+  it('MONEY: comisión dividida con config SIN propinas guarda tipAmount 0 en cada fila', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(conPropina(100, 10))
+    prismaMock.commissionConfig.findFirst.mockResolvedValue(GENERAL)
+
+    await createSplitCommissionForPayment('pay-1', ['staff-1', 'staff-2'])
+
+    const filas = guardado()
+    expect(filas).toHaveLength(2)
+    expect(filas.map((f: any) => Number(f.baseAmount))).toEqual([50, 50])
+    expect(filas.map((f: any) => Number(f.tipAmount))).toEqual([0, 0])
+  })
+})
+
+/**
+ * 🔴 MONEY (Codex B2c r1, P1) — desde B2/B2c la cabecera `Order.discountAmount` es la Σ de las filas de descuento y PUEDE
+ * quedar mayor que `Order.subtotal` (una cortesía encima de un fijo de cuenta). El cobro está bien (`computeStoredOrderTotal`
+ * topa la mercancía en 0), pero «precio de lista» reconstruye el bruto como `cobro + descuento`: con la cabecera nominal
+ * comisiona una venta que nunca existió. La base usa el descuento EFECTIVO de mercancía = min(descuento, subtotal).
+ *
+ * Caso de Codex: café $100 + pan $50 (subtotal 150), fijo de cuenta $60, cortesía del café ($100) ⇒ cabecera 160; cargo fijo
+ * $20 ⇒ se cobran $20. Lista = 20 + min(160, 150) = 170 ⇒ 10 % = $17 (con la cabecera nominal: 20 + 160 = 180 ⇒ $18).
+ */
+describe('precio de lista con la cabecera de descuento mayor que el subtotal', () => {
+  const LISTA_10 = { ...GENERAL, defaultRate: new Decimal(0.1), includeDiscount: true }
+  const cuentaRegalada = () => {
+    const p = payment(20)
+    return {
+      ...p,
+      order: { ...p.order, subtotal: new Decimal(150), discountAmount: new Decimal(160), serviceChargeAmount: new Decimal(20) },
+    }
+  }
+
+  it('MONEY: cobro completo comisiona $17 sobre $170 de lista, no $18', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(cuentaRegalada())
+    prismaMock.commissionConfig.findMany.mockResolvedValue([LISTA_10])
+
+    const results = await createCommissionForPayment('pay-1')
+
+    expect(results).toHaveLength(1)
+    expect(results[0].baseAmount).toBe(170)
+    expect(results[0].netCommission).toBe(17)
+  })
+
+  it('MONEY: comisión dividida reparte $17 (8.50 c/u), no $18', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(cuentaRegalada())
+    prismaMock.commissionConfig.findFirst.mockResolvedValue(LISTA_10)
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-1', 'staff-2'])
+
+    expect(results).toHaveLength(2)
+    expect(results.map(r => r.netCommission)).toEqual([8.5, 8.5])
+  })
+
+  it('control — con la cabecera ≤ subtotal el precio de lista no cambia (cobro 90 + descuento 60 = 150)', async () => {
+    const p = payment(90)
+    prismaMock.payment.findUnique.mockResolvedValue({
+      ...p,
+      order: { ...p.order, subtotal: new Decimal(150), discountAmount: new Decimal(60) },
+    })
+    prismaMock.commissionConfig.findMany.mockResolvedValue([LISTA_10])
+
+    const results = await createCommissionForPayment('pay-1')
+
+    expect(results[0].baseAmount).toBe(150)
+    expect(results[0].netCommission).toBe(15)
+  })
+})
+
+describe('🔴 comisión dividida entre tres: los centavos no se pierden (Codex plan r1-4)', () => {
+  const TRES = ['staff-c', 'staff-a', 'staff-b'] // en desorden a propósito: el residuo sigue el orden por id
+  const filas = () =>
+    prismaMock.commissionCalculation.create.mock.calls.map((c: any) => [
+      c[0].data.staffId,
+      Number(c[0].data.baseAmount),
+      Number(c[0].data.netCommission),
+    ])
+
+  it('$100 al 10 %: bases 33.34/33.33/33.33 y comisiones 3.34/3.33/3.33 — suman $100 y $10, no $9.99', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(payment(100))
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, defaultRate: new Decimal(0.1) })
+
+    const results = await createSplitCommissionForPayment('pay-1', TRES)
+
+    expect(filas()).toEqual([
+      ['staff-a', 33.34, 3.34],
+      ['staff-b', 33.33, 3.33],
+      ['staff-c', 33.33, 3.33],
+    ])
+    expect(Math.round(results.reduce((s, r) => s + r.netCommission, 0) * 100) / 100).toBe(10)
+  })
+
+  it('un fijo de $1 entre tres: 0.34/0.33/0.33', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(payment(100))
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, calcType: 'FIXED', defaultRate: new Decimal(1) })
+
+    await createSplitCommissionForPayment('pay-1', TRES)
+
+    expect(filas().map((f: unknown[]) => f[2])).toEqual([0.34, 0.33, 0.33])
+  })
+
+  it('🔴 base + propina en binario (225.1 + 0.2 = 225.29999999999998) se reparte al centavo, sin reventar', async () => {
+    // `redondearRepartido` exige un total que sus partes de centavos puedan sumar exacto; la base llega como `number`.
+    prismaMock.payment.findUnique.mockResolvedValue({ ...payment(225.1), tipAmount: new Decimal(0.2) })
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, defaultRate: new Decimal(0.1), includeTips: true })
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-2', 'staff-1'])
+
+    const guardadas = prismaMock.commissionCalculation.create.mock.calls.map((c: any) => c[0].data)
+    expect(guardadas.map((d: any) => [d.staffId, Number(d.baseAmount), Number(d.tipAmount)])).toEqual([
+      ['staff-1', 112.65, 0.1],
+      ['staff-2', 112.65, 0.1],
+    ])
+    expect(Math.round(results.reduce((s, r) => s + r.netCommission, 0) * 100) / 100).toBe(22.53)
+  })
+
+  it('🔴 una persona repetida en la liga es UNA persona: [A, B, A] con $100 son dos filas de $50, no tres', async () => {
+    prismaMock.payment.findUnique.mockResolvedValue(payment(100))
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, defaultRate: new Decimal(0.1) })
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-a', 'staff-b', 'staff-a'])
+
+    expect(filas()).toEqual([
+      ['staff-a', 50, 5],
+      ['staff-b', 50, 5],
+    ])
+    expect(results).toHaveLength(2)
+  })
+
+  it('🔴 una base de basura binaria (~3e-14) no crea filas de $0.00: se decide sobre el total al centavo', async () => {
+    // La propina de 3e-14 hace las veces del residuo binario que llega a `totalBaseAmount` (0 + 3e-14 pasa un `<= 0`).
+    prismaMock.payment.findUnique.mockResolvedValue({ ...payment(0), tipAmount: new Decimal('3e-14') })
+    prismaMock.commissionConfig.findFirst.mockResolvedValue({ ...GENERAL, defaultRate: new Decimal(0.1), includeTips: true })
+
+    const results = await createSplitCommissionForPayment('pay-1', ['staff-a', 'staff-b'])
+
+    expect(results).toEqual([])
+    expect(prismaMock.commissionCalculation.create).not.toHaveBeenCalled()
   })
 })

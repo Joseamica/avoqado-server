@@ -196,7 +196,11 @@ export async function getRawMaterial(venueId: string, rawMaterialId: string): Pr
 /**
  * Create a new raw material
  */
-export async function createRawMaterial(venueId: string, data: CreateRawMaterialDto): Promise<RawMaterial> {
+export async function createRawMaterial(
+  venueId: string,
+  data: CreateRawMaterialDto,
+  actor?: { staffId?: string; source?: string },
+): Promise<RawMaterial> {
   // Check for duplicate SKU
   const existing = await prisma.rawMaterial.findFirst({
     where: {
@@ -243,7 +247,7 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
           expirationDate:
             data.perishable && data.shelfLifeDays ? new Date(Date.now() + data.shelfLifeDays * 24 * 60 * 60 * 1000) : undefined,
         },
-        undefined, // createRawMaterial has no staffId in its signature
+        actor?.staffId,
         tx,
         { skipAudit: true },
       )
@@ -259,6 +263,7 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
           previousStock: 0,
           newStock: data.currentStock,
           reason: 'Initial stock',
+          createdBy: actor?.staffId,
         },
       })
     }
@@ -272,6 +277,7 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
     void logAction({
       venueId,
       action: 'STOCK_BATCH_CREATED',
+      staffId: actor?.staffId,
       entity: 'StockBatch',
       entityId: batch.id,
       data: {
@@ -286,9 +292,10 @@ export async function createRawMaterial(venueId: string, data: CreateRawMaterial
   logAction({
     venueId,
     action: 'RAW_MATERIAL_CREATED',
+    staffId: actor?.staffId,
     entity: 'RawMaterial',
     entityId: rawMaterial.id,
-    data: { name: rawMaterial.name },
+    data: { name: rawMaterial.name, ...(actor?.source ? { source: actor.source } : {}) },
   })
 
   return rawMaterial
@@ -302,6 +309,7 @@ export async function updateRawMaterial(
   rawMaterialId: string,
   data: UpdateRawMaterialDto,
   staffId?: string,
+  expectedUpdatedAt?: string,
 ): Promise<RawMaterial> {
   // Strip currentStock from update — stock changes must go through adjustStock()
   // to maintain StockBatch consistency
@@ -337,12 +345,14 @@ export async function updateRawMaterial(
 
     // WHY: This live read follows the target RM UPDATE lock whenever either
     // graph input is supplied, so cost/unit decisions never use a stale snapshot.
-    const existing = await tx.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId } })
+    const existing = await tx.rawMaterial.findFirst({ where: { id: rawMaterialId, venueId, deletedAt: null } })
     if (!existing) throw new AppError(`Raw material with ID ${rawMaterialId} not found`, 404)
+    if (expectedUpdatedAt && existing.updatedAt.toISOString() !== expectedUpdatedAt)
+      throw new AppError('El insumo cambió. Solicita una nueva vista previa antes de editarlo.', 409)
     const costChanging = data.costPerUnit !== undefined && !new Decimal(data.costPerUnit).equals(existing.costPerUnit)
     const unitChanging = data.unit !== undefined && data.unit !== existing.unit
     const updated = await tx.rawMaterial.update({
-      where: { id: rawMaterialId },
+      where: { id: rawMaterialId, venueId, deletedAt: null, ...(expectedUpdatedAt ? { updatedAt: new Date(expectedUpdatedAt) } : {}) },
       data: updateData,
     })
 

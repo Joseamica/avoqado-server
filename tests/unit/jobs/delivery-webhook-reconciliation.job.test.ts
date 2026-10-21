@@ -818,7 +818,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // pedidos, su `enCurso` saltaba los ticks siguientes y un pedido que falló DESPUÉS vencía antes de recuperarse.
     it('🔴 con la suscripción de un aviso colgada, el SIGUIENTE tick procesa el pedido que falló después', async () => {
       const job = new DeliveryWebhookReconciliationJob()
-      const tick = () => (job as unknown as { tick(): void }).tick()
+      const tick = () => (job as unknown as { tick(): Promise<void> }).tick()
       const vaciar = async () => {
         for (let k = 0; k < 5; k++) await new Promise(r => setImmediate(r))
       }
@@ -842,19 +842,23 @@ describe('DeliveryWebhookReconciliationJob', () => {
         id === 'evt_aprov' ? new Promise(r => (soltar = r)) : Promise.resolve({ outcome: 'PROCESSED', orderId: 'ord_r' }),
       )
 
-      tick()
+      // El tick devuelve la promesa de sus carriles: el registro de jobs en vuelo lo ve mientras el aviso cuelga.
+      let primerTickTermino = false
+      void tick().then(() => (primerTickTermino = true))
       await vaciar()
       expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_aprov']) // la suscripción sigue colgada
 
       tabla.push(pedido) // el pedido falla DESPUÉS de esa pasada
-      tick()
+      void tick()
       await vaciar()
       // El pedido ya se procesó con el aviso todavía colgado, y el aviso no se volvió a tomar (su propio candado).
       expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_aprov', 'evt_pedido'])
       expect(mockedMarkEventResult).not.toHaveBeenCalled()
+      expect(primerTickTermino).toBe(false)
 
       soltar({ outcome: 'STORE_STATE' })
       await vaciar()
+      expect(primerTickTermino).toBe(true)
       mockedProcessRappi.mockResolvedValue({ outcome: 'STORE_STATE' })
       expect(await job.reprocesarAprovisionamientos()).toBe(1) // suelto el candado, el carril vuelve a correr
     })

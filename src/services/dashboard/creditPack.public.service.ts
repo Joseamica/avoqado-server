@@ -18,6 +18,7 @@ import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
+import { findCustomerIdByPhone } from '@/services/public/customerPhoneLookup'
 import emailService from '@/services/email.service'
 import { resolveChargeableStripeMerchant } from '@/services/payments/ecommerceCapability'
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
@@ -204,13 +205,9 @@ export async function createCheckoutSession(
   }
 
   // Check maxPerCustomer if applicable. Fase 0.B: con sesión, se cuenta por el customer del
-  // token; sin sesión, por email/teléfono como antes.
+  // token; sin sesión, por la misma ficha a la que irá la compra (`findGuestCustomer`).
   if (pack.maxPerCustomer) {
-    const limitCustomerId = sessionCustomerId
-      ? sessionCustomerId
-      : email || phone
-        ? ((await prisma.customer.findFirst({ where: { venueId, ...(email ? { email } : { phone }) }, select: { id: true } }))?.id ?? null)
-        : null
+    const limitCustomerId = sessionCustomerId ? sessionCustomerId : ((await findGuestCustomer(venueId, email, phone))?.id ?? null)
 
     if (limitCustomerId) {
       const purchaseCount = await prisma.creditPackPurchase.count({
@@ -777,67 +774,30 @@ export async function redeemForReservation(venueId: string, customerId: string, 
 // HELPERS
 // ==========================================
 
+// 🔴 Toma de cuentas (auditoría de seguridad 2026-10-01): un pago de invitado NO prueba que el correo y el teléfono sean de quien
+// paga. Antes se le rellenaba al cliente el contacto que le faltara: con el teléfono de la víctima y su propio correo, el
+// comprador le pegaba ese correo a la ficha y luego entraba con código a la cuenta de la víctima. Ahora la compra cae en la ficha
+// que ya tenga el teléfono o, si no hay, el correo (`findGuestCustomer`); una ficha nueva nace con UNA sola llave, y nunca se le
+// agrega la otra a nadie. El correo del pago sigue sirviendo para Stripe y el recibo.
 async function findOrCreateCustomer(venueId: string, email?: string, phone?: string) {
   if (!email && !phone) {
     throw new BadRequestError('Se requiere email o telefono del cliente')
   }
+  const existente = await findGuestCustomer(venueId, email, phone)
+  return existente ?? prisma.customer.create({ data: { venueId, ...(phone ? { phone } : { email: email! }) } })
+}
 
-  // Resolve by both unique keys up front to avoid collisions when one key
-  // belongs to a different customer record.
-  const [emailCustomer, phoneCustomer] = await Promise.all([
-    email ? prisma.customer.findUnique({ where: { venueId_email: { venueId, email } } }) : Promise.resolve(null),
-    phone ? prisma.customer.findUnique({ where: { venueId_phone: { venueId, phone } } }) : Promise.resolve(null),
-  ])
-
-  let customer = emailCustomer ?? phoneCustomer
-  const sameCustomer = emailCustomer && phoneCustomer && emailCustomer.id === phoneCustomer.id
-
-  // If both identifiers exist but point to different rows, use the phone row
-  // (phone is mandatory in checkout payload and tends to be more current).
-  if (emailCustomer && phoneCustomer && !sameCustomer) {
-    customer = phoneCustomer
+/**
+ * El cliente de una compra de invitado: el del teléfono (aunque esté guardado con otro formato) y, si nadie lo tiene, el del
+ * correo — un teléfono nuevo o con error no deja la compra pagada en una ficha que nadie puede abrir. Nunca se le pega el otro
+ * contacto a nadie.
+ */
+async function findGuestCustomer(venueId: string, email?: string, phone?: string) {
+  if (phone) {
+    const exacto = await prisma.customer.findUnique({ where: { venueId_phone: { venueId, phone } } })
+    if (exacto) return exacto
+    const id = await findCustomerIdByPhone(prisma, venueId, phone)
+    if (id) return prisma.customer.findUnique({ where: { id } })
   }
-
-  if (customer) {
-    const updateData: { email?: string; phone?: string } = {}
-
-    // Only fill missing fields when no conflicting owner exists.
-    if (email && !customer.email) {
-      const emailOwner = await prisma.customer.findUnique({
-        where: { venueId_email: { venueId, email } },
-        select: { id: true },
-      })
-      if (!emailOwner || emailOwner.id === customer.id) {
-        updateData.email = email
-      }
-    }
-
-    if (phone && !customer.phone) {
-      const phoneOwner = await prisma.customer.findUnique({
-        where: { venueId_phone: { venueId, phone } },
-        select: { id: true },
-      })
-      if (!phoneOwner || phoneOwner.id === customer.id) {
-        updateData.phone = phone
-      }
-    }
-
-    if (Object.keys(updateData).length > 0) {
-      customer = await prisma.customer.update({
-        where: { id: customer.id },
-        data: updateData,
-      })
-    }
-
-    return customer
-  }
-
-  // Create new customer
-  return prisma.customer.create({
-    data: {
-      venueId,
-      email: email || null,
-      phone: phone || null,
-    },
-  })
+  return email ? prisma.customer.findUnique({ where: { venueId_email: { venueId, email } } }) : null
 }

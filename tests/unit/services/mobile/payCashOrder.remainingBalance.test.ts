@@ -33,6 +33,12 @@
  * que se persistió**, no un número parecido calculado aparte.
  */
 
+// FT-GRAVES S-EF: payCashOrder encola la comisión del cobro en su transacción, igual que la terminal. No es objeto de esta
+// suite (su prueba es tests/integration/commission/efectivoPosMovil.integration.test.ts).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),
@@ -196,7 +202,17 @@ function installFakeStore(
   prismaMock.payment.findUnique.mockImplementation(async ({ where }: any) => {
     const key = where?.venueId_idempotencyKey?.idempotencyKey
     const found = payments.find(p => p.idempotencyKey === key)
-    return found ? { ...found, amount: new Decimal(found.amount), tipAmount: new Decimal(found.tipAmount), receipts: [] } : null
+    // R5-2: la fila real lleva su estado; el retorno idempotente sólo devuelve un cobro COMPLETED.
+    return found
+      ? {
+          ...found,
+          orderId: 'order-1',
+          status: 'COMPLETED',
+          amount: new Decimal(found.amount),
+          tipAmount: new Decimal(found.tipAmount),
+          receipts: [],
+        }
+      : null
   })
 
   prismaMock.venueTransaction.create.mockResolvedValue({ id: 'vtx-1' })
@@ -222,6 +238,42 @@ describe('payCashOrder — saldo autoritativo en la respuesta', () => {
   })
 
   // ── 1. LA RESPUESTA DICE CUÁNTO FALTA ────────────────────────────────────────
+
+  it('ORD-1779465117373: subtotal cero con descuento 300 se cobra sin persistir un total negativo', async () => {
+    const { row } = installFakeStore({
+      subtotal: new Decimal(0),
+      discountAmount: new Decimal(300),
+      total: new Decimal(-300),
+      remainingBalance: new Decimal(-300),
+    })
+
+    const res = await payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1' })
+
+    expect(Number(row.total)).toBe(0)
+    expect(Number(row.remainingBalance)).toBe(0)
+    expect(res.orderTotalCents).toBe(0)
+    expect(res.remainingBalanceCents).toBe(0)
+    expect(res.orderPaymentStatus).toBe('PAID')
+  })
+
+  it('un descuento excedente no consume el cargo ni la propina al cobrar en efectivo', async () => {
+    const { row } = installFakeStore({
+      subtotal: new Decimal(253),
+      discountAmount: new Decimal(278.3),
+      serviceChargeAmount: new Decimal(30),
+      total: new Decimal(30),
+      remainingBalance: new Decimal(30),
+    })
+
+    const res = await payCashOrder('venue-1', 'order-1', { amount: 3000, tip: 5000, staffId: 'staff-1' })
+
+    expect(Number(row.total)).toBe(80)
+    expect(Number(row.paidAmount)).toBe(80)
+    expect(Number(row.remainingBalance)).toBe(0)
+    expect(res.orderTotalCents).toBe(8000)
+    expect(res.totalPaidCents).toBe(8000)
+    expect(res.orderPaymentStatus).toBe('PAID')
+  })
 
   it('🔴 un pago PARCIAL devuelve orderPaymentStatus PARTIAL y el restante exacto', async () => {
     // Cuenta de $100, abona $40 → faltan $60 = 6000 centavos.

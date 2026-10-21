@@ -25,10 +25,10 @@ export interface CatalogImportItemScalarFieldsV1 {
   presentationLabel: string
   unit: Unit
   productTypeRaw: string
-  taxRate: string
+  taxRate: string | null
   satProductKey: string
   satUnitKey: string
-  objetoImp: string
+  objetoImp: string | null
   iepsMode: CatalogIepsMode
   iepsRate: string | null
   iepsQuota: string | null
@@ -113,10 +113,11 @@ export function parseCatalogImportItemRowV1(row: ParsedWorkbookRow, errors: Cata
     presentationLabel: readCatalogImportText(errors, 'Items', row, 'presentation') ?? '',
     unit: (readCatalogImportText(errors, 'Items', row, 'unit') ?? Unit.UNIT) as Unit,
     productTypeRaw: readCatalogImportText(errors, 'Items', row, 'product_type') ?? '@invalid',
-    taxRate: readCatalogImportDecimal(errors, 'Items', row, 'iva_rate') ?? '0',
+    // D15: las celdas de IVA son históricas y pueden ir vacías (null). Si traen valor, se valida como siempre.
+    taxRate: readCatalogImportDecimal(errors, 'Items', row, 'iva_rate', true),
     satProductKey: readCatalogImportText(errors, 'Items', row, 'sat_product_key') ?? '',
     satUnitKey: readCatalogImportText(errors, 'Items', row, 'sat_unit_key') ?? '',
-    objetoImp: readCatalogImportText(errors, 'Items', row, 'objeto_imp') ?? '',
+    objetoImp: readCatalogImportText(errors, 'Items', row, 'objeto_imp', true),
     iepsMode: (readCatalogImportText(errors, 'Items', row, 'ieps_mode') ?? CatalogIepsMode.NONE) as CatalogIepsMode,
     iepsRate: readCatalogImportDecimal(errors, 'Items', row, 'ieps_rate', true),
     iepsQuota: readCatalogImportDecimal(errors, 'Items', row, 'ieps_quota', true),

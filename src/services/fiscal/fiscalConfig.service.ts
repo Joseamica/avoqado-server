@@ -17,6 +17,9 @@
 
 import { GlobalPeriodicity } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
+import { BadRequestError } from '../../errors/AppError'
+import { motivoDePeriodicidad, satDePeriodicidad } from './globalPeriod'
+import { EMISOR_SEGURO_SELECT } from './emisorSeguro'
 
 // ─── Input shapes ─────────────────────────────────────────────────────────────
 
@@ -33,6 +36,11 @@ export interface EmisorInput {
   globalPeriodicity?: GlobalPeriodicity
   /** Opt-in: permitir facturar ventas en efectivo (QR + global). Default false. */
   invoiceCashSales?: boolean
+  /**
+   * Opt-in (ajuste del founder, 7-oct): incluir en la factura global las ventas cobradas fuera de la terminal (efectivo, transferencia,
+   * vales y tipos de pago propios). Default false.
+   */
+  includeOffTerminalSalesInGlobal?: boolean
   /** Opt-in: que el efectivo cuente en los libros fiscales (IVA/ISR/pólizas). Default false. */
   includeCashInAccounting?: boolean
   /** Tasa de ISN (impuesto sobre nómina, estatal), fracción 0-0.10. Default 0. */
@@ -89,6 +97,12 @@ export interface FiscalConfigDeps {
  * separate phase) is what advances it to ACTIVE.
  */
 export async function upsertEmisor(input: EmisorInput, deps: FiscalConfigDeps = defaultDeps): Promise<any> {
+  // C1 · Tarea 9 (Codex C1-4): regla del SAT entre dos campos (la bimestral sólo con el régimen 621), antes de leer o escribir nada, como el
+  // XOR de `upsertMerchantFiscalConfig`. Se mira la periodicidad que se va a GUARDAR (la que manda el cliente o el default de abajo).
+  const globalPeriodicity = input.globalPeriodicity ?? 'MENSUAL'
+  const motivo = motivoDePeriodicidad(satDePeriodicidad(globalPeriodicity), input.regimenFiscal)
+  if (motivo) throw new BadRequestError(motivo)
+
   if (input.emisorId) {
     const existing = await deps.findEmisor(input.emisorId)
     if (!existing || existing.venueId !== input.venueId) {
@@ -104,11 +118,12 @@ export async function upsertEmisor(input: EmisorInput, deps: FiscalConfigDeps = 
     lugarExpedicion: input.lugarExpedicion,
     serie: input.serie ?? null,
     defaultUsoCfdi: input.defaultUsoCfdi ?? 'G03',
-    globalPeriodicity: input.globalPeriodicity ?? 'MENSUAL',
+    globalPeriodicity,
   }
   // Solo se escribe cuando viene definido: en create aplica el default false de la DB; en update no
   // resetea el valor si el cliente no lo mandó (a diferencia de los campos de arriba).
   if (input.invoiceCashSales !== undefined) data.invoiceCashSales = input.invoiceCashSales
+  if (input.includeOffTerminalSalesInGlobal !== undefined) data.includeOffTerminalSalesInGlobal = input.includeOffTerminalSalesInGlobal
   if (input.includeCashInAccounting !== undefined) data.includeCashInAccounting = input.includeCashInAccounting
   if (input.isnRate !== undefined) data.isnRate = input.isnRate
 
@@ -234,33 +249,13 @@ const defaultDeps: FiscalConfigDeps = {
   },
 
   // Explicit safe select: surface CSD health (csdStatus/csdExpiresAt) for the dashboard badge,
-  // but NEVER ship providerKeyEnc (the encrypted per-emisor PAC key) to the client.
+  // but NEVER ship providerKeyEnc (the encrypted per-emisor PAC key) nor webhookSecretEnc to the client.
+  // La lista vive en `emisorSeguro.ts` (I1, ola final C1): la MISMA que recortan los controladores que responden un emisor.
   listEmisores: venueId =>
     prisma.fiscalEmisor.findMany({
       where: { venueId },
       orderBy: { createdAt: 'asc' },
-      select: {
-        id: true,
-        venueId: true,
-        rfc: true,
-        legalName: true,
-        regimenFiscal: true,
-        lugarExpedicion: true,
-        provider: true,
-        providerOrgId: true,
-        csdStatus: true,
-        csdExpiresAt: true,
-        csdLastCheckedAt: true,
-        serie: true,
-        defaultUsoCfdi: true,
-        globalPeriodicity: true,
-        invoiceCashSales: true,
-        includeCashInAccounting: true,
-        isnRate: true,
-        createdAt: true,
-        updatedAt: true,
-        // providerKeyEnc intentionally omitted (sensitive)
-      },
+      select: EMISOR_SEGURO_SELECT,
     }),
 
   listMerchantConfigs: venueId =>

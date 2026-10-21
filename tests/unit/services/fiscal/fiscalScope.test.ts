@@ -1,5 +1,5 @@
 // tests/unit/services/fiscal/fiscalScope.test.ts
-import { paymentInFiscalScope } from '../../../../src/services/fiscal/fiscalScope'
+import { paymentInFiscalScope, metodoParaAlcanceFiscal } from '../../../../src/services/fiscal/fiscalScope'
 
 describe('paymentInFiscalScope (¿el pago entra a los libros fiscales?)', () => {
   it('EFECTIVO: gobernado por el opt-in del emisor, no por merchant', () => {
@@ -19,5 +19,16 @@ describe('paymentInFiscalScope (¿el pago entra a los libros fiscales?)', () => 
   it('el opt-in del efectivo NO afecta a los pagos con tarjeta', () => {
     expect(paymentInFiscalScope('CREDIT_CARD', true, false)).toBe(true)
     expect(paymentInFiscalScope('CREDIT_CARD', true, true)).toBe(true)
+  })
+})
+
+describe('metodoParaAlcanceFiscal (una devolución sigue a su VENTA)', () => {
+  it('usa el método original guardado en el reembolso', () => {
+    expect(metodoParaAlcanceFiscal('BANK_TRANSFER', { originalMethod: 'CASH' })).toBe('CASH')
+  })
+  it('sin originalMethod (reembolsos viejos o ventas) usa su propio método', () => {
+    expect(metodoParaAlcanceFiscal('CASH', {})).toBe('CASH')
+    expect(metodoParaAlcanceFiscal('CREDIT_CARD', null)).toBe('CREDIT_CARD')
+    expect(metodoParaAlcanceFiscal('CASH', { originalMethod: 42 })).toBe('CASH')
   })
 })

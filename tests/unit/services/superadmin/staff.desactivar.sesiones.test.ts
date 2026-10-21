@@ -25,6 +25,16 @@ it('🔴 desactivar corta sus tokens y cierra sus sesiones', async () => {
   expect(cerrar).toHaveBeenCalledWith('s1', expect.any(String))
 })
 
+it('🔴 si el corte tropezó y la cuenta ya quedó inactiva, repetir la desactivación lo repara (Codex r1, 19-oct)', async () => {
+  // La 1.ª vez se guardó `active: false` y el corte truena después: la cuenta queda inactiva con sesiones vivas.
+  prismaMock.staff.findUnique.mockResolvedValue({ id: 's1', active: false, email: 'x@test.mx' } as any)
+
+  await updateStaff('s1', { active: false } as any, 'admin').catch(() => undefined)
+
+  expect(revocar).toHaveBeenCalledWith('s1')
+  expect(cerrar).toHaveBeenCalledWith('s1', 'STAFF_DEACTIVATED')
+})
+
 it('cambiar sólo el nombre no toca sus sesiones (regresión)', async () => {
   await updateStaff('s1', { firstName: 'Nuevo' } as any, 'admin').catch(() => undefined)
   expect(revocar).not.toHaveBeenCalled()

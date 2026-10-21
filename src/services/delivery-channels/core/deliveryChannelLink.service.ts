@@ -275,9 +275,11 @@ export async function updateChannelLink(
 ): Promise<DeliveryChannelLinkSafe> {
   if (data.config !== undefined && data.config !== null) validarConfig(data.config)
 
-  // Leer-mezclar-escribir con la fila BLOQUEADA: una transacción sola no basta (en READ COMMITTED
-  // las dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
-  // se pisaban, y un PATCH leído antes de que Rappi guardara su lote lo borraba al escribir.
+  // Leer-mezclar-escribir con la fila BLOQUEADA: una transacción sola no basta (en READ COMMITTED las
+  // dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
+  // guardando horario y precios a la vez se pisaban, y un PATCH leído antes de que el job de
+  // disponibilidad guardara sus agotados los borraba al escribir: el producto se quedaba agotado en Uber.
+  // Lo mismo con Rappi: un PATCH leído antes de que guardara su lote lo borraba al escribir.
   const link = await prisma.$transaction(async tx => {
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
     if (data.config !== undefined) {
@@ -368,7 +370,7 @@ export async function pauseChannelLink(
   // cómo el dueño vuelve indefinida una pausa del POS.
   const previo = await prisma.deliveryChannelLink.findFirst({
     where: { id: linkId, venueId },
-    select: { status: true, snoozedUntil: true },
+    select: { status: true, snoozedUntil: true, provider: true },
   })
   if (!previo) throw new NotFoundError('Canal de delivery no encontrado')
   const desde: DeliveryChannelStatus[] = paused
@@ -391,6 +393,25 @@ export async function pauseChannelLink(
     if (soloSnooze === 'VENCIDO' && previo.snoozedUntil > new Date()) {
       throw new ConflictError('La pausa de este canal se extendió; se reanudará cuando venza.')
     }
+  }
+
+  // Resolver capacidad ANTES del CAS: sin adaptador nunca se simula una pausa local.
+  let canPause = false
+  if (hasAdapter(previo.provider)) {
+    canPause = typeof adapterFor(previo.provider).setStoreStatus === 'function'
+  } else {
+    try {
+      canPause = typeof getAdapter(previo.provider).setChannelPaused === 'function'
+    } catch {
+      // Proveedor aún sin integrar: conservar status y reloj tal como estaban.
+    }
+  }
+  if (!canPause) {
+    throw new ConflictError(
+      paused
+        ? `Pausar ${previo.provider} desde Avoqado todavía no está disponible: páusalo en su portal; el canal sigue recibiendo pedidos.`
+        : `Reanudar ${previo.provider} desde Avoqado todavía no está disponible: reactívalo en su portal; Avoqado no cambió el canal.`,
+    )
   }
 
   // CAS sobre ese estado exacto. 🔴 `snoozedUntil: null` SIEMPRE, en las dos direcciones. Esta

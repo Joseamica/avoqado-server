@@ -6,6 +6,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import { getMobile as getServiceCourses } from '../controllers/dashboard/serviceCourse.controller'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as coachClassController from '../controllers/mobile/coachClass.mobile.controller'
 import * as kioskCheckInController from '../controllers/kiosk/kioskCheckIn.controller'
@@ -38,6 +39,8 @@ import { updateDisplayModeSchema, updateTerminalSettingsSchema } from '../schema
 import * as tpvSettingsMobileController from '../controllers/mobile/tpvSettings.mobile.controller'
 import { reportDeviceCapabilitiesSchema } from '../schemas/mobile/deviceCapabilities.mobile.schema'
 import * as deviceCapabilitiesMobileController from '../controllers/mobile/deviceCapabilities.mobile.controller'
+import * as customerDisplayMobileController from '../controllers/mobile/customerDisplay.mobile.controller'
+import { customerDisplayAckSchema } from '../schemas/mobile/customerDisplay.mobile.schema'
 import * as notificationMobileController from '../controllers/mobile/notification.mobile.controller'
 import * as supplierMobileController from '../controllers/mobile/supplier.mobile.controller'
 import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.mobile.controller'
@@ -53,6 +56,16 @@ import * as kdsMobileController from '../controllers/mobile/kds.mobile.controlle
 import * as tableMobileController from '../controllers/mobile/table.mobile.controller'
 import * as syncMobileController from '../controllers/mobile/sync.mobile.controller'
 import * as creditPackMobileController from '../controllers/mobile/creditPack.mobile.controller'
+import * as giftCardMobileController from '../controllers/mobile/giftCard.mobile.controller'
+import * as giftCardSaleController from '../controllers/shared/giftCardSale.controller'
+import * as giftCardMobileSchemas from '../schemas/mobile/giftCard.mobile.schema'
+import {
+  liberarCancelacionSchema as giftCardLiberarCancelacionSchema,
+  operationKeyOnOrderSchema as giftCardOperationKeyOnOrderSchema,
+  soloVenueSchema as giftCardVenueSchema,
+} from '../schemas/common/giftCard.common.schema'
+import { exigirPlanDeTarjetas } from '../middlewares/giftCardsPlan.middleware'
+import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
@@ -61,19 +74,28 @@ import * as permissionOverrideMobileController from '../controllers/mobile/permi
 import * as switchUserMobileController from '../controllers/mobile/switch-user.mobile.controller'
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
+import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
+import { httpOperationGuard } from '../middlewares/httpOperation.middleware'
+import * as httpOperationMobileController from '../controllers/mobile/http-operation.mobile.controller'
 import { checkFeatureAccess } from '../middlewares/checkFeatureAccess.middleware'
+import onlineOrdersMobileRoutes from './mobile/onlineOrders.mobile.routes'
 import { checkPermission } from '../middlewares/checkPermission.middleware'
 import { marcarPermiso, PERMISO_VER_ESPERADO } from '../middlewares/permissionFlag.middleware'
 import { PAYMENT_OWNERSHIP_OVERRIDES, checkTableOwnership } from '../middlewares/checkTableOwnership.middleware'
 import { validateVenueAccess, requireVenueMembership } from '../middlewares/validateVenueAccess.middleware'
 import { pinLoginRateLimiter, pinOverrideRateLimiter, pinSwitchUserRateLimiter } from '../middlewares/pin-login-rate-limit.middleware'
-import { registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
+import { capturarVenueDeLaRuta, registerDeviceMiddleware } from '../middlewares/registerDevice.middleware'
 import { validateRequest } from '../middlewares/validation'
 import { recordFastPaymentParamsSchema, recordPaymentBodySchema } from '../schemas/tpv.schema'
-import { gatewayHeartbeatSchema, printConfigParamSchema, syncPrintJobsSchema } from '../schemas/mobile/print.mobile.schema'
+import {
+  gatewayHeartbeatSchema,
+  impresoraObservadaSchema,
+  printConfigParamSchema,
+  syncPrintJobsSchema,
+} from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
@@ -85,8 +107,10 @@ const router = Router()
 // middleware no hace nada en línea, sólo engancha el trabajo a `res.on('finish')`, así
 // que corre cuando la respuesta ya salió y `authContext` ya lo pobló la ruta que
 // autenticó. Un solo punto de montaje en vez de tocar las 126 rutas, y cero latencia
-// añadida al camino del cobro. Un request sin `X-Device-Id` no hace absolutamente nada.
+// añadida al camino del cobro. Un request sin `X-Device-Id` sólo se observa si trae sesión del POS (IVA por
+// producto, §5.5: una app vieja); `router.param` le guarda el negocio de la ruta aunque la ruta termine en error.
 router.use(registerDeviceMiddleware)
+router.param('venueId', capturarVenueDeLaRuta)
 
 // ============================================================================
 // EMAIL/PASSWORD AUTHENTICATION
@@ -616,8 +640,15 @@ router.post('/auth/request-reset', authMobileController.requestReset)
  */
 const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFunction) => {
   const items = Array.isArray(req.body?.items) ? req.body.items : []
-  if (!items.some((item: any) => item?.promotionRef)) return next()
-  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, next))
+  const hasServiceCourse = items.some(
+    (item: any) =>
+      item?.serviceCourse != null ||
+      (Array.isArray(item?.promotionRef?.selections) &&
+        item.promotionRef.selections.some((selection: any) => selection?.serviceCourse != null)),
+  )
+  const afterPromotion = () => (hasServiceCourse ? checkFeatureAccess('TABLE_SERVICE')(req, res, next) : next())
+  if (!items.some((item: any) => item?.promotionRef)) return afterPromotion()
+  return checkPermission('discounts:apply')(req, res, () => checkFeatureAccess('PROMOTIONS')(req, res, afterPromotion))
 }
 
 router.post(
@@ -779,6 +810,9 @@ router.delete(
   deliveryChannelMobileController.resumeChannel,
 )
 
+// Pedidos en línea: bandeja, acciones, impresión de la comanda y pausa desde el piso (auth y permiso por ruta, sin plan: R14).
+router.use('/venues/:venueId/online-orders', onlineOrdersMobileRoutes)
+
 /**
  * @openapi
  * /api/v1/mobile/venues/{venueId}/orders/{orderId}/pay:
@@ -874,11 +908,12 @@ router.delete(
 // editar, descontar, cortesiar, cancelar, mover y fusionar CUALQUIER mesa. Toast y
 // Square resuelven igual: hay dueño de mesa para EDITAR el cheque, y la caja lo liquida.
 // Las demás rutas de esta orden conservan el override default.
+// R2-6: y sólo ésta deja pasar el dinero YA capturado (la cola sin red) sobre una mesa que reasignaron, con rastro.
 router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
-  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES, { dineroCapturado: true }),
   orderMobileController.payCash,
 )
 
@@ -929,6 +964,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkPermission('orders:cancel-unpaid'),
   checkTableOwnership('order'),
   orderMobileController.cancelOrder,
@@ -1459,10 +1495,19 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *         schema:
  *           type: string
  *       - in: query
+ *         name: page
+ *         schema: { type: integer, default: 1 }
+ *       - in: query
+ *         name: pageSize
+ *         schema: { type: integer, default: 20, maximum: 100 }
+ *       - in: query
  *         name: limit
- *         schema:
- *           type: integer
- *           default: 50
+ *         description: Alias de pageSize (clientes viejos). Tope 100. Si vienen los dos, gana pageSize.
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: search
+ *         description: Teléfono (se comparan dígitos; 52/521 sobrantes se ignoran) o palabras de nombre/apellido/correo, sin acentos ni mayúsculas. Con más de 5000 coincidencias se paginan las más nuevas, meta.totalCount = las alcanzables (5000), meta.totalMatches = el total exacto y meta.searchCapped = true.
+ *         schema: { type: string }
  *       - in: query
  *         name: sortBy
  *         schema:
@@ -1474,7 +1519,7 @@ router.post('/push/test', authenticateTokenMiddleware, pushMobileController.send
  *           enum: [asc, desc]
  *     responses:
  *       200:
- *         description: List of customers
+ *         description: "{ data, meta: { totalCount, pageSize, currentPage, totalPages, hasNextPage, hasPrevPage, totalMatches?, searchCapped? } } — totalMatches y searchCapped sólo vienen cuando la búsqueda se topó en 5000."
  */
 router.get('/venues/:venueId/customers', authenticateTokenMiddleware, checkPermission('customers:read'), customerController.getCustomers)
 
@@ -1550,6 +1595,80 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('creditPacks:redeem'),
   creditPackMobileController.redeemCredit,
+)
+
+// ─── TARJETAS DE REGALO (fase 1a) ───
+// Contrato para las apps: docs/superpowers/plans/2026-10-14-tarjetas-de-regalo-contrato-api-1b.md (workspace).
+// Sólo con internet (spec §10): ninguna tiene intent de cola. Sólo VENDER pide el plan (R9): cobrar con saldo, consultar,
+// regresar el saldo y cancelar una venta siguen funcionando aunque el negocio baje de plan (spec §6).
+// Orden: autenticar → validar (español) → permiso exacto → [plan | límite de intentos | propiedad de mesa] → controller.
+router.get(
+  '/venues/:venueId/gift-cards/settings',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardVenueSchema),
+  checkPermission('giftCards:read'),
+  giftCardSaleController.getSettings,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.createGiftCardOrderSchema),
+  checkPermission('giftCards:sell'),
+  exigirPlanDeTarjetas,
+  giftCardMobileController.createOrder,
+)
+// A3 (cierre): POST con el código en el CUERPO. En la query lo escribían sin tapar la bitácora (`checkPermission`) y la base
+// (`PermissionOverride.consumedRoute`); `redactUrlSecrets` sólo cubría el log. Ninguna app la usaba todavía.
+router.post(
+  '/venues/:venueId/gift-cards/lookup',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.lookupSchema),
+  checkPermission('giftCards:read'),
+  ...giftCardLookupRateLimiters,
+  giftCardMobileController.lookup,
+)
+router.get(
+  '/venues/:venueId/gift-cards/payments/:idempotencyKey',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.paymentByKeySchema),
+  checkPermission('giftCards:redeem'),
+  giftCardMobileController.getPaymentByKey,
+)
+// Cobrar con saldo y regresarlo son de CAJA, como `/orders/:orderId/pay`: con la propiedad de mesa encendida, la caja
+// liquida (y deshace su propio cobro con saldo en) un cheque ajeno con `tables:pay-any`, sin ganar el derecho a editarlo.
+// Nota 1 del coordinador: un código que no existe responde 404, así que cobrar lleva su límite de intentos FALLIDOS (sólo
+// cuentan las respuestas ≥ 400; un cobro que sale bien nunca gasta el tope).
+router.post(
+  '/venues/:venueId/orders/:orderId/pay-gift-card',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.payGiftCardSchema),
+  checkPermission('giftCards:redeem'),
+  ...giftCardPayFailureRateLimiters,
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  giftCardMobileController.payWithBalance,
+)
+router.post(
+  '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:redeem'),
+  checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
+  giftCardMobileController.returnBalanceAndCancel,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/cancel-sale',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:manage'),
+  giftCardSaleController.cancelSale,
+)
+// F6: liberar exige `confirmacionNoDevuelto: true`; un timeout de la terminal no prueba que el dinero no salió.
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/release-cancel',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardLiberarCancelacionSchema),
+  checkPermission('giftCards:manage'),
+  giftCardSaleController.releaseCancel,
 )
 
 /**
@@ -1628,10 +1747,13 @@ router.post(
   paymentMobileController.recordFastPayment,
 )
 
+// BAJO-2 (full-testing, 15-oct-2026): el body se valida (un `customerId` numérico respondía 500). El schema nombra TODOS los
+// campos que lee cada controller: `validateRequest` quita los demás.
 router.post(
   '/venues/:venueId/payments/:paymentId/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToPaymentSchema),
   paymentMobileController.attachCustomerToPayment,
 )
 
@@ -1639,7 +1761,21 @@ router.post(
   '/venues/:venueId/payments/customer',
   authenticateTokenMiddleware,
   checkPermission('payments:create'),
+  validateRequest(attachCustomerToLatestPaymentSchema),
   paymentMobileController.attachCustomerToLatestPayment,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/payments/:paymentId/loyalty
+ * Sello de la venta de ese pago para su cliente principal (spec 2026-10-14 §3.1). Sólo lee.
+ * data: { stampsEnabled, stamped, reason, stampsEarned, stampsRequired, rewardReady } | null
+ * Sin checkFeatureAccess a propósito: un negocio sin el plan recibe `stampsEnabled: false` y la app no pinta nada.
+ */
+router.get(
+  '/venues/:venueId/payments/:paymentId/loyalty',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:read'),
+  paymentMobileController.getPaymentLoyalty,
 )
 
 // ============================================================================
@@ -1972,12 +2108,86 @@ router.get(
 )
 
 /**
- * GET /api/v1/mobile/venues/:venueId/promotions
- * Promociones vigentes y las que abren en las próximas 4 horas.
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/promotions:
+ *   get:
+ *     tags: [Mobile - Promotions]
+ *     summary: Promociones del POS (vigentes y próximas) y, para la tablet que lo entiende, el carrusel de la pantalla del cliente
+ *     description: |
+ *       `active` y `upcoming` son el catálogo de siempre (vigentes ahora y las que abren en las próximas 4 horas); no
+ *       cambian. `timezone` y `fetchedAt` son aditivos y van para todos.
  *
- * `requireVenueMembership` va ANTES del candado de plan por la misma razón
- * documentada arriba para upsell: un extraño no se entera del plan de un
- * negocio ajeno antes de que se le diga que no pertenece.
+ *       **Carrusel (sólo POS_ANDROID con binding exacto por `X-Device-Id` y versión de diseño ≥ 2):** `carousel`,
+ *       `carouselTruncated`, `carouselEvaluated`, `carouselStatus` y `fingerprints.promotions`. Si el carrusel falla,
+ *       la ruta NO falla: `active`/`upcoming` salen igual y `carouselStatus` es `failed`, sin `carousel` (ausente ≠
+ *       vacío). Con carrusel, `timezone` es la zona con que se calculó su huella.
+ *
+ *       `requireVenueMembership` va ANTES del candado de plan (`PROMOTIONS`) por la misma razón documentada arriba
+ *       para upsell: un extraño no se entera del plan de un negocio ajeno antes de que se le diga que no pertenece.
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-Id
+ *         required: false
+ *         schema: { type: string, maxLength: 64 }
+ *         description: El `deviceUid` del aparato. Sólo con él (y binding POS_ANDROID versión ≥ 2) viaja el carrusel.
+ *     responses:
+ *       200:
+ *         description: Catálogo de promociones (y el carrusel, si aplica)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean, example: true }
+ *                 data:
+ *                   type: object
+ *                   required: [active, upcoming, timezone, fetchedAt]
+ *                   properties:
+ *                     active: { type: array, items: { type: object }, description: Vigentes ahora (sin cambios) }
+ *                     upcoming: { type: array, items: { type: object }, description: Abren en ≤ 4 h, con `startsAt` (sin cambios) }
+ *                     timezone: { type: string, example: America/Mexico_City, description: La zona CRUDA del venue; con carrusel, la de su huella }
+ *                     fetchedAt: { type: string, format: date-time, description: Hora del servidor al responder }
+ *                     carousel:
+ *                       type: array
+ *                       description: Sólo POS_ANDROID con versión de diseño ≥ 2 y carouselStatus ok. ≤ 50 tarjetas, en orden de descarga
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           id: { type: string }
+ *                           name: { type: string }
+ *                           displayOrder: { type: integer }
+ *                           presentationRank: { type: integer, description: Orden de presentación 0..n-1 (la tablet no compara cadenas) }
+ *                           schedule:
+ *                             type: object
+ *                             properties:
+ *                               daysOfWeek: { type: array, items: { type: integer } }
+ *                               timeFrom: { type: string, nullable: true }
+ *                               timeUntil: { type: string, nullable: true }
+ *                               validFrom: { type: string, format: date-time, nullable: true }
+ *                               validUntil: { type: string, format: date-time, nullable: true }
+ *                           displayPriceCents: { type: integer, nullable: true, description: Sólo si el precio cobrado es demostrable }
+ *                           displayBadge: { type: string, nullable: true, example: 2x1 }
+ *                           photo:
+ *                             type: object
+ *                             nullable: true
+ *                             properties:
+ *                               url: { type: string }
+ *                               version: { type: string }
+ *                     carouselTruncated: { type: boolean, description: Sólo POS_ANDROID versión ≥ 2. Se topó un escaneo (1,000 vigentes o 200 futuras) }
+ *                     carouselEvaluated: { type: integer, description: Sólo POS_ANDROID versión ≥ 2. Candidatas evaluadas (no el total de elegibles) }
+ *                     carouselStatus: { type: string, enum: [ok, failed], description: Sólo POS_ANDROID versión ≥ 2 }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Sólo POS_ANDROID versión ≥ 2 con carouselStatus ok
+ *                       properties:
+ *                         promotions: { type: string, pattern: '^[0-9a-f]{32}$', description: 'Huella de { timezone, carousel }, sin fetchedAt' }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue, o el plan no incluye PROMOTIONS }
+ *       500: { description: Error interno (el catálogo no se pudo leer) }
  */
 router.get(
   '/venues/:venueId/promotions',
@@ -2007,6 +2217,83 @@ router.patch(
 // TPV SETTINGS (combined terminals + settings in one call)
 // ============================================================================
 
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/settings:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: Los ajustes del POS — terminales, ajustes de la terminal del aparato, plan, ticket y pantalla del cliente
+ *     description: |
+ *       Lo consumen las apps POS (Android, iOS, Windows). Los campos de siempre salen IDÉNTICOS; lo de la pantalla del
+ *       cliente es aditivo y opcional. Los ajustes salen de la terminal del propio aparato (`X-Device-ID`) si está ACTIVE o
+ *       INACTIVE; si no, de la primera ACTIVE del negocio por nombre e id (la misma fuente que firma la huella del poll).
+ *       - `fingerprints.settings`: sólo para un POS_ANDROID con binding exacto `{ venueId, X-Device-ID, POS_ANDROID }` y
+ *         versión de diseño ≥ 1. Se lee ANTES que el cuerpo: si alguien escribe en medio, el cuerpo sale más nuevo que la
+ *         huella y el siguiente poll pide un refresco de más (nunca se confirma algo que no se entregó). Omitida = desconocida.
+ *       - `componentsStatus`: SIEMPRE presente. Por componente: `ok`; `failed` = «no se pudo leer: conserva lo que
+ *         tenías» (el cuerpo trae lo de siempre: defaults o el campo omitido); `not_applicable` = «no esperes este bloque».
+ *         `receipt` es `ok` sólo con `receiptInfo` Y `receiptLayout`; `promotionsPanel` cubre la fila entera de
+ *         `VenueSettings` (`promotions` y `managerPinOverrideEnabled`); sin fila es `ok` (los defaults son la verdad).
+ *         `customerDisplay` es `not_applicable` sin cabecera, sin binding POS_ANDROID (p. ej. iPad) o sin versión; `failed`
+ *         si no se pudo leer el aparato o armar la ficha.
+ *       - `customerDisplay`: el MISMO bloque que `GET /customer-display`, sólo con `componentsStatus.customerDisplay = ok`.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: false
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: Los ajustes (los campos de siempre, sin cambios, más los aditivos de abajo)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 success: { type: boolean }
+ *                 data:
+ *                   type: object
+ *                   required: [terminals, settings, activeTerminalId, deviceTerminal, promotions, managerPinOverrideEnabled, componentsStatus]
+ *                   properties:
+ *                     terminals: { type: array, items: { type: object } }
+ *                     settings: { type: object, nullable: true }
+ *                     activeTerminalId: { type: string, nullable: true }
+ *                     deviceTerminal: { type: object, nullable: true }
+ *                     plan: { type: object, description: Omitido si no se pudo leer }
+ *                     promotions: { type: object }
+ *                     managerPinOverrideEnabled: { type: boolean }
+ *                     receiptInfo: { type: object, description: Omitido si no se pudo leer }
+ *                     receiptLayout: { type: object, description: Omitido si no se pudo leer }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Sólo POS_ANDROID con binding exacto y versión ≥ 1
+ *                       properties:
+ *                         settings: { type: string, pattern: '^[0-9a-f]{32}$', description: La misma huella que anuncia el poll para este estado }
+ *                     componentsStatus:
+ *                       type: object
+ *                       required: [receipt, plan, promotionsPanel, customerDisplay]
+ *                       properties:
+ *                         receipt: { type: string, enum: [ok, failed] }
+ *                         plan: { type: string, enum: [ok, failed] }
+ *                         promotionsPanel: { type: string, enum: [ok, failed], description: Cubre promotions y managerPinOverrideEnabled }
+ *                         customerDisplay: { type: string, enum: [ok, failed, not_applicable] }
+ *                     customerDisplay:
+ *                       type: object
+ *                       description: Sólo con componentsStatus.customerDisplay = ok
+ *                       required: [terminalId, ficha, imageOrigins]
+ *                       properties:
+ *                         terminalId: { type: string }
+ *                         ficha: { type: object, description: La ficha efectiva, con su `fingerprint` de 32 hex }
+ *                         imageOrigins: { type: array, items: { type: string } }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ */
 router.get(
   '/venues/:venueId/settings',
   authenticateTokenMiddleware,
@@ -2016,6 +2303,86 @@ router.get(
 
 // Hechos técnicos observados por el POS Android. El dispositivo se identifica por
 // X-Device-ID; no requiere activación y no acepta un terminalId elegido por el body.
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/device-capabilities:
+ *   put:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El reporte de capacidades del POS Android — pantalla del cliente, versión de diseño e instalación
+ *     description: |
+ *       El aparato se identifica por `X-Device-ID` + `X-Device-Platform: ANDROID` (registro explícito); la escritura va
+ *       condicionada al binding EXACTO `{ terminalId, venueId, deviceUid, POS_ANDROID }`. La respuesta no cambia.
+ *       `customerDisplayDesignVersion` e `installationId` son OPCIONALES y van JUNTOS o ninguno: la app los manda sólo
+ *       si el poll anunció `capabilities.customerDisplayDesign`. Cada uno puede omitirse o ser null (los dos en null =
+ *       ninguno; uno en null y el otro con valor = 400). Todas las horas son del servidor.
+ *       - Sin los campos nuevos (app vieja, o una que bajó de versión): versión `null`, el ack se limpia, la instalación
+ *         y su lista de cambios se conservan.
+ *       - Con la misma instalación: se guarda la versión; ack, instalación y lista igual.
+ *       - Con instalación sobre un aparato SIN instalación (primera vez o recién mudado): se adopta desde ahora, el ack
+ *         se limpia y NO cuenta como cambio.
+ *       - Con OTRA instalación: se guarda desde ahora, el ack se limpia y la hora entra a la lista de cambios (últimas
+ *         5); queda en la bitácora (`CUSTOMER_DISPLAY_INSTALLATION_CHANGED`).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *       - in: header
+ *         name: X-Device-Platform
+ *         required: true
+ *         schema: { type: string, enum: [ANDROID] }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [customerDisplay, displayModeProtocolVersion]
+ *             properties:
+ *               customerDisplay:
+ *                 type: object
+ *                 required: [present, invertible]
+ *                 properties:
+ *                   present: { type: boolean }
+ *                   invertible: { type: boolean, description: Sólo puede ser true si present es true }
+ *               displayModeProtocolVersion: { type: integer, enum: [1] }
+ *               customerDisplayDesignVersion:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 2
+ *                 nullable: true
+ *                 description: Puede omitirse o ser null; junto con installationId. min(la versión de la app, la que anuncia el poll)
+ *               installationId:
+ *                 type: string
+ *                 pattern: '^[A-Za-z0-9-]{1,64}$'
+ *                 nullable: true
+ *                 description: Puede omitirse o ser null; junto con customerDisplayDesignVersion. Identifica la instalación de la app
+ *     responses:
+ *       200:
+ *         description: Reporte guardado
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   properties:
+ *                     terminalId: { type: string }
+ *                     observedAt: { type: string, format: date-time }
+ *       400: { description: Cuerpo inválido o faltan X-Device-ID / X-Device-Platform ANDROID }
+ *       401: { description: Sin sesión }
+ *       403: { description: El aparato no pertenece a este venue o no es un POS Android }
+ *       409: { description: Otra instalación reportó al mismo tiempo dos veces seguidas (CUSTOMER_DISPLAY_INSTALLATION_RACE); reintentar }
+ *       503: { description: No se pudo registrar el aparato (DEVICE_REGISTRY_UNAVAILABLE); reintentar }
+ */
 router.put(
   '/venues/:venueId/device-capabilities',
   authenticateTokenMiddleware,
@@ -2026,11 +2393,210 @@ router.put(
 
 // Entrega v1 ligera: el terminalId viene del vínculo exacto del propio X-Device-ID.
 // No se mezcla con /settings y una lectura nunca expira ni muta la intención.
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/display-mode-request:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El poll del POS Android — la solicitud de inversión vigente y el sobre de la pantalla del cliente
+ *     description: |
+ *       El aparato se identifica por el binding EXACTO `{ venueId, X-Device-ID, POS_ANDROID }`, leído en la base antes de
+ *       consultar cualquier caché. `terminalId` y `request` no cambian (versiones viejas de la app los leen así).
+ *       Lo demás es aditivo:
+ *       - `fingerprints`: cada huella OMITIDA significa «desconocida» — la tablet conserva lo que tenga guardado; nunca
+ *         significa «vacío». Sin versión de diseño reportada sale `{}`. Con una solicitud entregable sólo trae lo que ya
+ *         estaba en caché (la entrega no espera); sin ella, lo que falte se calcula con un plazo conjunto de 150 ms.
+ *       - `capabilities.customerDisplayDesign`: la versión de diseño que entiende este servidor; la tablet reporta
+ *         `min(la suya, ésta)`.
+ *       - `capabilityReport.requested`: `true` mientras el servidor no sepa la versión o la instalación de ESTE aparato
+ *         en ESTE negocio (app vieja, primera vez o recién mudada); la tablet reporta en ese momento, sin esperar 24 h.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: La solicitud vigente (o null) y el sobre
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [terminalId, request, fingerprints, capabilities, capabilityReport]
+ *                   properties:
+ *                     terminalId: { type: string, description: El id que devolvió el binding (sin cambios) }
+ *                     request:
+ *                       type: object
+ *                       nullable: true
+ *                       description: Sólo una solicitud PENDING y vigente (sin cambios)
+ *                       properties:
+ *                         requestId: { type: string }
+ *                         desiredInverted: { type: boolean }
+ *                         requestedAt: { type: string, format: date-time }
+ *                         expiresAt: { type: string, format: date-time }
+ *                     fingerprints:
+ *                       type: object
+ *                       description: Omitida = desconocida (conserva lo guardado)
+ *                       properties:
+ *                         customerDisplay: { type: string, pattern: '^[0-9a-f]{32}$', description: Huella de la ficha de diseño de este aparato }
+ *                         settings: { type: string, pattern: '^[0-9a-f]{32}$', description: Huella de lo que entrega /settings a este aparato }
+ *                         promotions: { type: string, pattern: '^[0-9a-f]{32}$', description: Sólo versión ≥ 2. Ceros = el plan no incluye PROMOTIONS }
+ *                     capabilities:
+ *                       type: object
+ *                       properties:
+ *                         customerDisplayDesign: { type: integer, example: 2 }
+ *                     capabilityReport:
+ *                       type: object
+ *                       properties:
+ *                         requested: { type: boolean }
+ *       400: { description: Falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) }
+ */
 router.get(
   '/venues/:venueId/display-mode-request',
   authenticateTokenMiddleware,
   requireVenueMembership,
   tpvSettingsMobileController.getDisplayModeRequest,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-display:
+ *   get:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: La ficha de diseño de la pantalla del cliente de ESTE aparato
+ *     description: |
+ *       El aparato se identifica por el binding EXACTO `{ venueId, X-Device-ID, POS_ANDROID }`, sin respaldo a otra
+ *       terminal. La ficha se calcula fresca (y renueva la caché del poll): su `fingerprint` es la que el poll anunciará.
+ *       `imageOrigins` es la lista blanca de orígenes desde los que la tablet puede descargar las imágenes de la ficha.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     responses:
+ *       200:
+ *         description: La ficha vigente
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [terminalId, ficha, imageOrigins]
+ *                   properties:
+ *                     terminalId: { type: string, description: El id que devolvió el binding }
+ *                     ficha:
+ *                       type: object
+ *                       description: La ficha efectiva (lo que ve el cliente), con su `fingerprint` de 32 hex
+ *                     imageOrigins:
+ *                       type: array
+ *                       items: { type: string, example: 'https://storage.googleapis.com' }
+ *       400: { description: Falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) — usa la fábrica }
+ */
+router.get(
+  '/venues/:venueId/customer-display',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  customerDisplayMobileController.getCustomerDisplay,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customer-display/ack:
+ *   put:
+ *     tags: [Mobile - TPV Settings]
+ *     summary: El acuse de la tablet — qué ficha dice tener guardada o mostrada
+ *     description: |
+ *       Es un REPORTE del cliente, no una prueba física. El aparato se identifica por el binding EXACTO
+ *       `{ venueId, X-Device-ID, POS_ANDROID }` y la instalación tiene que ser la registrada por el reporte de capacidades.
+ *       Se guarda con una escritura condicionada al acuse leído; un REENVÍO del mismo contenido se acepta sin escribir.
+ *       Las horas se guardan en ISO-8601 con `Z`; una hora de la tablet más de 5 min por delante se sustituye por la del
+ *       servidor y se marca `clientClockSkew`. `accepted` significa «guardado», no «es lo vigente»:
+ *       - `{ accepted: true, current: true }`: guardado y es la huella vigente.
+ *       - `{ accepted: true, current: false, currentFingerprint }`: guardado, pero ya hay otra vigente.
+ *       - `{ accepted: true }` (sin `current`): guardado, pero no se pudo recalcular la ficha vigente.
+ *       - `{ accepted: false, reason: STALE_SEQ }`: ya hay uno legible con `seq` mayor o igual (la app cierra ese ack).
+ *       - `{ accepted: false, reason: OTHER_INSTALLATION }`: la instalación no es la registrada (primero el reporte).
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: header
+ *         name: X-Device-ID
+ *         required: true
+ *         schema: { type: string, maxLength: 64 }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             additionalProperties: false
+ *             required: [installationId, fingerprint, seq, storedAt, imagesReady, imagesPending, imagesFailed, unsupportedSchema]
+ *             properties:
+ *               installationId: { type: string, pattern: '^[A-Za-z0-9-]{1,64}$' }
+ *               fingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+ *               seq: { type: integer, minimum: 0, maximum: 9007199254740991 }
+ *               storedAt: { type: string, format: date-time }
+ *               shownAt: { type: string, format: date-time, nullable: true, description: 'Puede omitirse o ser null (= aún no mostrado)' }
+ *               surface: { type: string, nullable: true, enum: [presentation, activity, kiosk, window], description: 'Puede omitirse o ser null' }
+ *               imagesReady: { type: integer, minimum: 0, maximum: 100 }
+ *               imagesPending: { type: integer, minimum: 0, maximum: 100 }
+ *               imagesFailed: { type: integer, minimum: 0, maximum: 100 }
+ *               unsupportedSchema: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: El resultado del acuse (ver la lista de arriba)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 data:
+ *                   type: object
+ *                   required: [accepted]
+ *                   properties:
+ *                     accepted: { type: boolean }
+ *                     current: { type: boolean }
+ *                     currentFingerprint: { type: string, pattern: '^[0-9a-f]{32}$' }
+ *                     reason: { type: string, enum: [STALE_SEQ, OTHER_INSTALLATION] }
+ *       400: { description: Cuerpo inválido o falta X-Device-ID (DEVICE_ID_REQUIRED) }
+ *       401: { description: Sin sesión }
+ *       403: { description: No pertenece al venue }
+ *       404: { description: El aparato no está ligado a este negocio como POS Android (DEVICE_NOT_FOUND) }
+ *       503: { description: Otros acuses se guardaron en medio tres veces seguidas (CUSTOMER_DISPLAY_ACK_BUSY); reintentar con espera y conservar el ack }
+ */
+router.put(
+  '/venues/:venueId/customer-display/ack',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  validateRequest(customerDisplayAckSchema),
+  customerDisplayMobileController.acknowledgeCustomerDisplayRoute,
 )
 
 // Mostrador invertido (customer-display grande/chico) — por DISPOSITIVO. El POS
@@ -2104,6 +2670,47 @@ router.get('/venues/:venueId/suppliers', authenticateTokenMiddleware, requireVen
  */
 router.get('/venues/:venueId/tables', authenticateTokenMiddleware, checkPermission('tables:read'), tableMobileController.getTables)
 
+/**
+ * @openapi
+ * /mobile/venues/{venueId}/tables/version:
+ *   get:
+ *     summary: Versión barata de mesas y plano (el POS la pregunta cada 10 s y sólo baja lo que cambió)
+ *     tags: [Mobile - Tables]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, data: { tablesVersion, floorPlanVersion } }"
+ */
+router.get(
+  '/venues/:venueId/tables/version',
+  authenticateTokenMiddleware,
+  checkPermission('tables:read'),
+  tableMobileController.getTablesVersion,
+)
+
+/**
+ * @openapi
+ * /mobile/venues/{venueId}/floor-plan:
+ *   get:
+ *     summary: Plano del salón para el POS (áreas + elementos activos; las mesas viajan en /tables)
+ *     tags: [Mobile - Tables]
+ *     parameters:
+ *       - in: path
+ *         name: venueId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: "{ success, data: { floorPlanVersion, areas, elements, overLimit } }"
+ */
+router.get('/venues/:venueId/floor-plan', authenticateTokenMiddleware, checkPermission('tables:read'), tableMobileController.getFloorPlan)
+
 // ─── TABLE_SERVICE (PRO) — restaurant table service from the mobile POS ─────
 // Open/clear tables and add rounds to an open order. Gated by the
 // TABLE_SERVICE feature code (paid-tier blanket grant → PRO+; FREE gets 403),
@@ -2140,6 +2747,7 @@ router.post(
 router.post(
   '/venues/:venueId/tables/:tableId/clear',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('tables:update'),
   checkTableOwnership('table'),
@@ -2157,6 +2765,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/move',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('tables:update'),
   checkTableOwnership('order'),
@@ -2171,6 +2780,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/assign',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2188,6 +2798,7 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
   checkTableOwnership('order'),
+  checkPromotionGuardsIfPresent,
   orderMobileController.addItemsToOrder,
 )
 
@@ -2201,6 +2812,23 @@ router.post(
  * sincronizar no es puerta trasera. Body: { deviceId, intents: [...] }
  */
 router.post('/venues/:venueId/sync/intents', authenticateTokenMiddleware, validateVenueAccess, syncMobileController.syncIntents)
+// Consulta resultados ya materializados; nunca ejecuta un intent ni crea una orden.
+router.post(
+  '/venues/:venueId/sync/recovery',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('orders:read'),
+  syncMobileController.syncRecovery,
+)
+
+router.get(
+  '/venues/:venueId/service-courses',
+  authenticateTokenMiddleware,
+  validateVenueAccess,
+  checkPermission('tables:read'),
+  checkFeatureAccess('TABLE_SERVICE'),
+  getServiceCourses,
+)
 
 // ============================================================================
 // INVENTORY
@@ -2528,6 +3156,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/split',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2543,6 +3172,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/merge',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:merge'),
   checkTableOwnership('order'),
@@ -2556,6 +3186,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/split-by-seat',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2565,6 +3196,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/discounts',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2578,6 +3210,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/discounts/:orderDiscountId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2594,6 +3227,7 @@ router.delete(
 router.post(
   '/venues/:venueId/orders/:orderId/comp',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2627,6 +3261,7 @@ router.get(
 router.post(
   '/venues/:venueId/orders/:orderId/service-charges',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2639,6 +3274,7 @@ router.post(
 router.delete(
   '/venues/:venueId/orders/:orderId/service-charges/:orderServiceChargeId',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2664,8 +3300,16 @@ router.get(
  * transaction (see loyalty.mobile.service — the dashboard path never did).
  */
 router.post(
+  '/venues/:venueId/order-operations/:operationId/resolve',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  httpOperationMobileController.resolveOperation,
+)
+
+router.post(
   '/venues/:venueId/orders/:orderId/loyalty/redeem',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('LOYALTY_PROGRAM'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2679,6 +3323,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/details',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2690,6 +3335,7 @@ router.post(
 router.post(
   '/venues/:venueId/orders/:orderId/items/:itemId/comp',
   authenticateTokenMiddleware,
+  httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:update'),
   checkTableOwnership('order'),
@@ -2870,6 +3516,25 @@ router.post(
 )
 
 /**
+ * «Devolver con: Efectivo de la caja» pide `payments:refund-to-cash` EN LUGAR de `payments:refund` (founder, 1-oct-2026):
+ * el dinero sale del cajón por un cobro que no entró ahí. La dependencia refund-to-cash → refund deja la autorización
+ * equivalente. Sin el permiso no se bloquea: es el 403 de siempre, que el POS convierte en el código del encargado.
+ *
+ * 🔴 UNA sola revisión por petición: el código del encargado es de un solo uso y de UN permiso. Dos revisiones
+ * encadenadas gastaban el código en la primera y la segunda lo rechazaba (mesero escogiendo efectivo: sin salida).
+ */
+const revisarReembolso = checkPermission('payments:refund')
+const revisarDevolverEnEfectivo = checkPermission('payments:refund-to-cash')
+export const permisoDeReembolso = Object.assign(
+  (req: Request, res: Response, next: NextFunction) =>
+    (req.body as { refundMethod?: unknown } | undefined)?.refundMethod === 'CASH'
+      ? revisarDevolverEnEfectivo(req, res, next)
+      : revisarReembolso(req, res, next),
+  // Para la inspección de rutas: el permiso base. El de efectivo lo ven el audit y los fixtures por el literal de arriba.
+  { requiredPermission: 'payments:refund' },
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  * Issue an associated refund (by amount OR by items, with optional restock).
  * Mobile wrapper that delegates to the shared dashboard refund service.
@@ -2877,7 +3542,7 @@ router.post(
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
-  checkPermission('payments:refund'),
+  permisoDeReembolso,
   refundMobileController.issueAssociatedRefund,
 )
 
@@ -3080,6 +3745,22 @@ router.delete(
  * Query: ?status=NEW,PREPARING,READY (default: active orders)
  */
 router.get(
+  '/venues/:venueId/kds/capabilities',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  kdsMobileController.getPreparationCapabilities,
+)
+router.get(
+  '/venues/:venueId/kds/preparation',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  checkFeatureAccess('KITCHEN_DISPLAY'),
+  kdsMobileController.getKitchenPreparation,
+)
+
+router.get(
   '/venues/:venueId/kds/orders',
   authenticateTokenMiddleware,
   requireVenueMembership,
@@ -3254,6 +3935,17 @@ router.put(
   checkPermission('printers:manage'),
   validateRequest(setKitchenDisplaySchema),
   printMobileController.setStationKitchenDisplay,
+)
+// «La impresora que se encuentra sola» (Testarudo, 2-oct): la tablet encontró una impresora de red en otra dirección
+// (DHCP) y lo avisa para que el panel y las demás tablets la tengan. Mismo permiso que leer la config: quien imprime
+// comandas la puede corregir; el service sólo acepta red local, nunca pisa una corrección más nueva (CAS) y audita.
+router.post(
+  '/venues/:venueId/printers/:printerId/observed',
+  authenticateTokenMiddleware,
+  requireVenueMembership,
+  checkPermission('orders:read'),
+  validateRequest(impresoraObservadaSchema),
+  printMobileController.reportarImpresoraObservada,
 )
 router.post(
   '/venues/:venueId/print-jobs/sync',

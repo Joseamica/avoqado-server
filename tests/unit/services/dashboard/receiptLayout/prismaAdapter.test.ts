@@ -95,6 +95,14 @@ describe('buildReceiptInput', () => {
     expect(Number.isInteger(input.sale.totalCents)).toBe(true)
   })
 
+  it('🔴 la línea «Descuento» es el descuento EFECTIVO: con la cabecera mayor que el subtotal no pasa del subtotal', () => {
+    // Desde B2/B2c la cabecera es la Σ de las filas SIN tope (cortesía encima de un fijo): 160 sobre 120 de mercancía. El
+    // total guardado ya topa la mercancía en 0; un ticket con «Subtotal 120 · Descuento −160 · Total 0» no cuadra.
+    const regalada = { ...order, discountAmount: D('160.00'), total: D('0') }
+    const input = buildReceiptInput({ order: regalada as never, payment: payment as never, venue: venue as never })
+    expect(input.sale.discountCents).toBe(12000)
+  })
+
   it('🔴 la FECHA es la del pago, y la zona la del venue — nunca la del servidor', () => {
     const input = buildReceiptInput({ order: order as never, payment: payment as never, venue: venue as never })
     expect(input.sale.occurredAt).toBe('2026-09-02T18:05:00.000Z')

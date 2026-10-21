@@ -58,14 +58,21 @@ describe('aggregatePaymentsByMethod', () => {
 
     expect(mockGroupBy).toHaveBeenCalledTimes(1)
     const args = mockGroupBy.mock.calls[0][0]
-    expect(args.by).toEqual(['method'])
+    // + `tenderTypeId`: lo pagado con saldo de tarjeta de regalo sale como GIFT_CARD (B5).
+    expect(args.by).toEqual(['method', 'tenderTypeId'])
     expect(args._sum).toEqual({ amount: true, tipAmount: true })
     expect(args.where).toEqual({
-      venueId: 'v1',
-      status: 'COMPLETED',
-      createdAt: { gte: filters.fromDate, lte: filters.toDate },
-      type: { not: 'REFUND' },
-      order: { status: { not: 'CANCELLED' } },
+      AND: [
+        {
+          venueId: 'v1',
+          status: 'COMPLETED',
+          createdAt: { gte: filters.fromDate, lte: filters.toDate },
+          type: { not: 'REFUND' },
+          order: { status: { not: 'CANCELLED' } },
+        },
+        // Tarjetas de regalo (B5): la venta de tarjetas no es venta; en un `AND` para no pisar el filtro de canceladas.
+        { order: { items: { none: { giftCardId: { not: null } } } } },
+      ],
     })
     expect(out).toEqual([
       { method: 'CASH', amount: 150.5, tips: 10, count: 2 },
@@ -77,7 +84,7 @@ describe('aggregatePaymentsByMethod', () => {
   it('includeRefunds + excludeCancelledOrders=false quitan esos dos filtros (el "gross" del panel)', async () => {
     mockGroupBy.mockResolvedValue([])
     await aggregatePaymentsByMethod('v1', { ...filters, includeRefunds: true, excludeCancelledOrders: false })
-    const where = mockGroupBy.mock.calls[0][0].where
+    const where = mockGroupBy.mock.calls[0][0].where.AND[0]
     expect(where.type).toBeUndefined()
     expect(where.order).toBeUndefined()
     expect(where.status).toBe('COMPLETED')

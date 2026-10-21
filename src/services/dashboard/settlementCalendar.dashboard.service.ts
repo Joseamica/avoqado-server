@@ -49,6 +49,24 @@ export interface ProjectedSettlement {
   settlementDays: number
 }
 
+/** La regla vigente para un cobro: comercio × tipo de tarjeta × vigencia a la fecha del cobro. Única fuente del predicado. */
+export function encontrarReglaActiva(
+  merchantAccountId: string,
+  cardType: TransactionCardType,
+  createdAt: Date,
+  configs: ActiveConfig[],
+): ActiveConfig | null {
+  return (
+    configs.find(
+      c =>
+        c.merchantAccountId === merchantAccountId &&
+        c.cardType === cardType &&
+        c.effectiveFrom <= createdAt &&
+        (c.effectiveTo === null || c.effectiveTo >= createdAt),
+    ) ?? null
+  )
+}
+
 /**
  * Projects one payment's settlement date + amounts.
  *
@@ -65,13 +83,7 @@ export function projectPaymentSettlement(
   const tc = p.transactionCost
   if (!tc) return null
 
-  const config = configs.find(
-    c =>
-      c.merchantAccountId === p.merchantAccountId &&
-      c.cardType === tc.transactionType &&
-      c.effectiveFrom <= p.createdAt &&
-      (c.effectiveTo === null || c.effectiveTo >= p.createdAt),
-  )
+  const config = encontrarReglaActiva(p.merchantAccountId, tc.transactionType, p.createdAt, configs)
   if (!config) return null
 
   const settlementDate = calculateSettlementDate(p.createdAt, {

@@ -431,8 +431,9 @@ describe('Phase 2 push hooks integration', () => {
 
       const session = buildClassSession({ status: 'SCHEDULED' })
       prismaMock.classSession.findFirst.mockResolvedValue(session)
-      // After cancel inside the tx — include SESSION_INCLUDE shape.
-      prismaMock.classSession.update.mockResolvedValue({
+      // El reclamo de la transición (fase 3 §7.2) toca la fila; después se relee con SESSION_INCLUDE.
+      ;(prismaMock as any).$executeRaw.mockResolvedValueOnce(1)
+      prismaMock.classSession.findUniqueOrThrow.mockResolvedValue({
         ...session,
         status: 'CANCELLED',
         product: null,
@@ -472,7 +473,8 @@ describe('Phase 2 push hooks integration', () => {
 
       const session = buildClassSession({ status: 'SCHEDULED' })
       prismaMock.classSession.findFirst.mockResolvedValue(session)
-      prismaMock.classSession.update.mockResolvedValue({
+      ;(prismaMock as any).$executeRaw.mockResolvedValueOnce(1)
+      prismaMock.classSession.findUniqueOrThrow.mockResolvedValue({
         ...session,
         status: 'CANCELLED',
         product: null,

@@ -20,7 +20,7 @@ import { TpvCommandType, TpvCommandResultStatus, BulkOperationStatus } from '@pr
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { NotFoundError, BadRequestError } from '../../errors/AppError'
-import socketManager from '../../communication/sockets'
+import socketManager, { broadcastTpvCommand } from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import { tpvCommandQueueService, QueueCommandInput, CommandQueueResult } from './command-queue.service'
 
@@ -79,7 +79,7 @@ export class TpvCommandExecutionService {
     const queueResult = await tpvCommandQueueService.queueCommand(input)
 
     // If terminal is online and command is ready, send immediately
-    if (queueResult.terminalOnline && queueResult.status === 'QUEUED') {
+    if (queueResult.terminalOnline && queueResult.status === 'QUEUED' && queueResult.deliveryProtocolVersion !== 2) {
       await this.sendCommandToTerminal(queueResult.commandId)
     }
 
@@ -220,6 +220,32 @@ export class TpvCommandExecutionService {
       throw new NotFoundError(`Command ${commandId} not found`)
     }
 
+    // 🔴 La entrega va a la terminal donde esté HOY; el comando se autorizó contra SU venue. Si la discrepancia es real,
+    // el comando queda retirado y no se emite nada (Codex r2); una lectura vieja nunca lo cancela (Codex r3).
+    const traslado = await tpvCommandQueueService.revisarTraslado(command, command.terminal.venueId, 'entrega')
+    if (traslado.retirado) return
+
+    // Protocolo 2: lo que se emite es sólo la SUGERENCIA «hay comandos» (sin el comando); la TPV hace su pull durable y
+    // ese pull decide con la ubicación de HOY (reclamo condicionado y permiso). Por eso va aunque lo leído no coincida:
+    // los latidos normales no entregan durables, y sin ella un comando legítimo con una lectura vieja quedaba PENDING
+    // sin nada que lo despertara (Codex r4). Va a la sala del venue DEL comando, nunca a la del leído.
+    if ((command.payload as { _deliveryProtocol?: number } | null)?._deliveryProtocol === 2) {
+      if (['PENDING', 'QUEUED', 'SENT'].includes(command.status) && (!command.scheduledFor || command.scheduledFor <= new Date())) {
+        broadcastTpvCommand(command.terminal.serialNumber || command.terminal.id, command.venueId, {
+          type: command.commandType,
+          requestedBy: command.requestedBy,
+          commandId: command.id,
+          correlationId: command.correlationId,
+          payload: { _deliveryProtocol: 2 },
+        })
+      }
+      return
+    }
+
+    // TPV vieja: aquí sí se emite el comando completo, y con lo leído no coincidiendo iría a la sala de un venue que quizá
+    // no es el suyo. No se emite: su latido normal lo entrega con la ubicación de hoy (Codex r3).
+    if (traslado.discrepanciaLeida) return
+
     // Check if terminal is online
     const cutoff = new Date(Date.now() - this.ONLINE_THRESHOLD_MS)
     const isOnline = command.terminal.lastHeartbeat && command.terminal.lastHeartbeat > cutoff
@@ -252,16 +278,17 @@ export class TpvCommandExecutionService {
       return
     }
 
-    // Emit to venue room (terminals subscribe to their venue room)
-    // The terminal will filter by its own ID
-    server.to(`venue_${command.terminal.venueId}`).emit(SocketEventType.TPV_COMMAND_SEND, {
-      terminalId: command.terminal.serialNumber || command.terminal.id,
-      ...commandPayload,
-      timestamp: new Date(),
-    })
-
-    // Update command status to SENT
-    await tpvCommandQueueService.updateCommandStatus(commandId, 'SENT')
+    if (!(await tpvCommandQueueService.updateCommandStatus(commandId, 'SENT'))) return
+    socketManager.broadcastToTerminal(
+      command.terminal.venueId,
+      command.terminal.serialNumber || command.terminal.id,
+      SocketEventType.TPV_COMMAND_SEND,
+      {
+        terminalId: command.terminal.serialNumber || command.terminal.id,
+        ...commandPayload,
+        timestamp: new Date(),
+      },
+    )
 
     logger.info(`Command sent to terminal ${command.terminalId}`, {
       commandId,

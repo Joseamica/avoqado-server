@@ -1,3 +1,4 @@
+import { operationHash } from '@/utils/operationHash'
 /**
  * Write-safety confirm-gating (2026-06-28). The MCP is LLM-driven over ~hundreds of
  * tools; a vague request must NOT silently mutate. High-impact/hard-to-reverse writes
@@ -61,7 +62,16 @@ describe('set_menu_item_price — confirm-gated (customer-visible price)', () =>
 
   it('confirm:true → writes the new price and audits', async () => {
     mockProductFindMany.mockResolvedValueOnce([{ id: 'p1', name: 'Carnitas', active: true, price: 129 }])
-    const out = parse(await call('set_menu_item_price', { venueId: 'v1', name: 'Carnitas', price: 99, confirm: true }))
+    const out = parse(
+      await call('set_menu_item_price', {
+        venueId: 'v1',
+        name: 'Carnitas',
+        price: 99,
+        confirm: true,
+        resolvedProductId: 'p1',
+        expectedSourceFingerprint: operationHash({ id: 'p1', name: 'Carnitas', active: true, price: 129 }),
+      }),
+    )
     expect(mockUpdateProduct).toHaveBeenCalledWith(
       'v1',
       'p1',
@@ -71,6 +81,7 @@ describe('set_menu_item_price — confirm-gated (customer-visible price)', () =>
         staffId: 's1',
         impersonating: false,
       },
+      { name: 'Carnitas', active: true, price: 129 },
     )
     expect(mockAudit).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ action: 'MENU_ITEM_PRICE_SET' }))
     expect(out.ok).toBe(true)

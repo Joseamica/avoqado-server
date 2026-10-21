@@ -295,6 +295,7 @@ export class SocketManager implements ISocketManager {
     onWithContext(socket, SocketEventType.TPV_COMMAND_ACK, async (payload, callback) => {
       try {
         const { commandId, terminalId, receivedAt } = payload
+        if (!sameTerminalSerial(socket.authContext?.terminalSerialNumber, terminalId)) throw new Error('Identidad de terminal inválida')
         logger.info('📡 TPV Command ACK received', { commandId, terminalId, socketId: socket.id })
 
         await tpvCommandExecutionService.handleCommandAck(commandId, terminalId, receivedAt ? new Date(receivedAt) : new Date())
@@ -314,6 +315,7 @@ export class SocketManager implements ISocketManager {
     onWithContext(socket, SocketEventType.TPV_COMMAND_STARTED, async (payload, callback) => {
       try {
         const { commandId, terminalId, startedAt } = payload
+        if (!sameTerminalSerial(socket.authContext?.terminalSerialNumber, terminalId)) throw new Error('Identidad de terminal inválida')
         logger.info('📡 TPV Command execution started', { commandId, terminalId, socketId: socket.id })
 
         await tpvCommandExecutionService.handleCommandStarted(commandId, terminalId, startedAt ? new Date(startedAt) : new Date())
@@ -333,6 +335,8 @@ export class SocketManager implements ISocketManager {
     onWithContext(socket, SocketEventType.TPV_COMMAND_RESULT, async (payload, callback) => {
       try {
         const { commandId, terminalId, success, resultStatus: directResultStatus, resultData, errorMessage, message } = payload
+
+        if (!sameTerminalSerial(socket.authContext?.terminalSerialNumber, terminalId)) throw new Error('Identidad de terminal inválida')
 
         // Support both formats:
         // 1. Android sends: { resultStatus: 'SUCCESS'|'REJECTED'|'FAILED', message: '...' }

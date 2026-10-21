@@ -11,6 +11,7 @@ import { ActionClassification, ActionContext, ActionResponse } from '../chatbot-
 import { ConversationPlannerService } from './conversation-planner.service'
 import { ToolCatalogService } from './tool-catalog.service'
 import { AssistantCapabilityRegistryService } from './assistant-capability-registry.service'
+import { commissionPayoutsText, commissionsSummaryText } from './commission-answers'
 import { ConversationPlan, OrchestratorRequest, PlanStepMetadata, PlannerQueryStep, PlannerStep } from './types'
 import { isCustomDateRangeSpec } from './date-range-parser'
 
@@ -864,26 +865,15 @@ export class ConversationOrchestratorService {
       }
       case 'commissions.summary': {
         const commissions = await SharedQueryService.getCommissionsSummary(venueId)
-        const topEarners = commissions.topEarners
-          .slice(0, this.limit(step, 5))
-          .map(earner => `- ${earner.staffName}: ${this.money(earner.totalEarned)} en ${earner.calculationCount} cálculos.`)
-          .join('\n')
-        return this.queryResult(
-          step.tool,
-          commissions,
-          `Comisiones: ${this.money(commissions.totalPaid)} pagado, ${this.money(commissions.totalApproved)} aprobado y ${this.money(commissions.totalPending)} pendiente. ${commissions.staffWithCommissions} miembros tienen comisiones; promedio ${this.money(commissions.averageCommission)}.${topEarners ? `\nTop comisiones:\n${topEarners}` : ''}`,
-          commissions.topEarners.length,
-        )
+        const response = commissionsSummaryText(commissions, this.limit(step, 5), value => this.money(value))
+        return this.queryResult(step.tool, commissions, response, commissions.topEarners.length)
       }
       case 'commissions.payouts': {
         const payouts = await SharedQueryService.getCommissionPayoutsSummary(venueId, { limit: this.limit(step, 10) })
-        const list = payouts.recentPayouts
-          .map(payout => `- ${payout.staffName}: ${this.money(payout.amount)}, ${payout.status}, ${payout.paymentMethod || 'sin método'}.`)
-          .join('\n')
         return this.queryResult(
           step.tool,
           payouts,
-          `Payouts de comisiones: ${this.money(payouts.totalPaid)} pagado, ${this.money(payouts.totalPending)} pendiente, ${payouts.payoutCount} payouts pagados, promedio ${this.money(payouts.averagePayout)}.${list ? `\nRecientes:\n${list}` : ''}`,
+          commissionPayoutsText(payouts, value => this.money(value)),
           payouts.recentPayouts.length,
         )
       }

@@ -88,3 +88,12 @@ describe('inventory.routes — permisos por endpoint', () => {
     expect(route!.permission).toBe(expectedPermission)
   })
 })
+
+it('receiving a supplier XML requires both purchase creation and inventory update permissions', () => {
+  const route = (inventoryRouter as any).stack.find(
+    (layer: any) => layer.route?.path === '/supplier-invoices/:invoiceId/inventory' && layer.route.methods.post,
+  )?.route
+  expect(route).toBeDefined()
+  const permissions = route.stack.map((layer: any) => layer.handle.requiredPermission).filter(Boolean)
+  expect(permissions).toEqual(['inventory:create', 'inventory:update'])
+})

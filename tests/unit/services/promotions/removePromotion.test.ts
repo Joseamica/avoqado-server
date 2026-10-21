@@ -8,6 +8,8 @@ const params = () => ({ venueId: 'venue-1', orderId: 'order-1', orderPromotionId
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction = jest.fn((cb: any) => cb(prismaMock))
+  // Candado canónico de la orden (Plan3b): la orden existe en este venue.
+  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
   prismaMock.orderPromotion.findFirst.mockResolvedValue({
     id: 'op-1',
     order: { paymentStatus: 'PENDING', discountAmount: 0, paidAmount: 0 },

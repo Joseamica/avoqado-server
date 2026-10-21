@@ -48,6 +48,11 @@ describe('immutable hybrid quote composition', () => {
       expect(() => buildHybridQuote(input(lines))).toThrow(/incluida|repetida/i)
     }
   })
+  it('names the repeated capability as the customer knows it, never by its internal code', () => {
+    const loyalty = publication('loyalty', { kind: 'FEATURES', featureCodes: ['LOYALTY_PROGRAM'] })
+    const lines = [{ publication: bundle, selectedFeatureCodes: ['CFDI', 'LOYALTY_PROGRAM'] }, { publication: loyalty }]
+    expect(() => buildHybridQuote(input(lines))).toThrow('Programa de lealtad ya está incluida; no se cobra otra vez.')
+  })
   it('does not charge for a capability retained from another paid origin', () => {
     expect(() =>
       buildHybridQuote({
@@ -68,6 +73,20 @@ describe('immutable hybrid quote composition', () => {
   it('rejects two base plans, duplicate products and an oversized cart', () => {
     expect(() => buildHybridQuote(input([{ publication: pro }, { publication: pro }]))).toThrow()
     expect(() => buildHybridQuote(input(Array.from({ length: 9 }, () => ({ publication: pro }))))).toThrow()
+  })
+  // Spec §4.2 rule 2: the dependency is checked once, with dates, over the whole purchase (retained + every line).
+  it('leaves a missing dependency to the whole-purchase check instead of rejecting the line alone', () => {
+    const inventory = publication('inventory', {
+      kind: 'CHOICE_BUNDLE',
+      choiceCount: 2,
+      eligibleFeatureCodes: ['AUTO_REORDER', 'INVENTORY_TRACKING', 'CFDI'],
+    })
+    expect(buildHybridQuote(input([{ publication: inventory, selectedFeatureCodes: ['AUTO_REORDER', 'CFDI'] }])).featureCodes).toEqual([
+      'AUTO_REORDER',
+      'CFDI',
+    ])
+    // Every other selection rule still applies to the line.
+    expect(() => buildHybridQuote(input([{ publication: inventory, selectedFeatureCodes: ['AUTO_REORDER'] }]))).toThrow(/exactamente/)
   })
   it('uses frozen plan inclusions, even if a future catalog changes', () => {
     expect(buildHybridQuote(input([{ publication: { ...pro, includedFeatureCodes: ['LOYALTY_PROGRAM'] } }])).featureCodes).toEqual([

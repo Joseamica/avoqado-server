@@ -33,6 +33,24 @@ export async function gatewayHeartbeat(req: Request, res: Response, next: NextFu
 }
 
 /**
+ * La tablet encontró una impresora de red en otra dirección (DHCP) o aprendió su identidad, y lo avisa.
+ * @route POST /api/v1/mobile/venues/:venueId/printers/:printerId/observed
+ */
+export async function reportarImpresoraObservada(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const data = await printMobileService.reportarImpresoraObservada(
+      req.params.venueId,
+      req.params.printerId,
+      req.body,
+      (req as any).authContext?.userId,
+    )
+    res.status(200).json({ success: true, data })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * La casilla «pantalla de cocina» desde la TABLET (etapa 3): el MISMO registro y las MISMAS reglas que el
  * dashboard — prender pasa por la puerta de lanzamiento y el plan; apagar siempre se puede.
  * @route PUT /api/v1/mobile/venues/:venueId/print-stations/:stationId/kitchen-display

@@ -87,6 +87,9 @@ async function main() {
       duration: 60,
       capacity: 8,
       assignedStaffId: staff?.assignedStaffId ?? null,
+      // Estampas de pago por servicio (spec fase 3 §7.2): la coach con la que nace es la original, asignada ahora.
+      originalStaffId: staff?.assignedStaffId ?? null,
+      staffAssignedAt: staff?.assignedStaffId ? now : null,
       status: 'SCHEDULED',
     },
   })

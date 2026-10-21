@@ -21,7 +21,14 @@
  */
 
 import { Prisma } from '@prisma/client'
-import { computeOrderBalance } from '@/services/shared/orderBalance'
+import {
+  cierreDelCobroSaldaLaCuenta,
+  claseDeEstado,
+  computeOrderBalance,
+  computeStoredOrderTotal,
+  estadoAlRecibirDinero,
+  impuestoQueSeCobraAparte,
+} from '@/services/shared/orderBalance'
 
 const d = (v: string | number) => new Prisma.Decimal(v)
 
@@ -30,6 +37,9 @@ const order = (over: Partial<{ subtotal: string; discountAmount: string; service
   subtotal: d(over.subtotal ?? '200.00'),
   discountAmount: d(over.discountAmount ?? '0.00'),
   serviceChargeAmount: d(over.serviceChargeAmount ?? '0.00'),
+  contratoDePrecio: 'IVA_INCLUIDO',
+  taxAmount: 0,
+  status: 'PENDING',
 })
 
 const pay = (amount: string, tip = '0.00') => ({ amount: d(amount), tipAmount: d(tip) })
@@ -144,9 +154,17 @@ describe('computeOrderBalance — aritmética canónica del saldo', () => {
   })
 
   it('tolera nulos en descuento, cargo por servicio y propina', () => {
-    const balance = computeOrderBalance({ subtotal: d('100.00'), discountAmount: null, serviceChargeAmount: null }, [
-      { amount: d('40.00'), tipAmount: null },
-    ])
+    const balance = computeOrderBalance(
+      {
+        subtotal: d('100.00'),
+        discountAmount: null,
+        serviceChargeAmount: null,
+        contratoDePrecio: 'IVA_INCLUIDO',
+        taxAmount: 0,
+        status: 'PENDING',
+      },
+      [{ amount: d('40.00'), tipAmount: null }],
+    )
 
     expect(balance.total.toString()).toBe('100')
     expect(balance.paidAmount.toString()).toBe('40')
@@ -257,5 +275,89 @@ describe('computeOrderBalance — aritmética canónica del saldo', () => {
       expect(balance.refundState).toBe('NONE')
       expect(balance.isFullyPaid).toBe(true)
     })
+  })
+})
+
+describe('P12 — el IVA que va aparte entra al total y al saldo (Codex r2; founder 2-oct)', () => {
+  const pagos = [{ amount: 100, tipAmount: 0 }]
+  const orden = (contratoDePrecio: string | null, taxAmount: number, status = 'PENDING') => ({
+    subtotal: 100,
+    discountAmount: 0,
+    serviceChargeAmount: 0,
+    contratoDePrecio,
+    taxAmount,
+    status,
+  })
+  it('🔴 IVA_APARTE: $100 + $16 de IVA no queda saldada con $100 (hoy sí)', () => {
+    const b = computeOrderBalance(orden('IVA_APARTE', 16), pagos)
+    expect(Number(b.total)).toBe(116)
+    expect(Number(b.remainingBalance)).toBe(16)
+    expect(b.isFullyPaid).toBe(false)
+  })
+  it('🔴 DESCONOCIDO con IVA > 0 (SoftRestaurant de antes del contrato): también suma', () => {
+    expect(Number(computeOrderBalance(orden('DESCONOCIDO', 16), pagos).total)).toBe(116)
+  })
+  it('control: IVA_INCLUIDO nunca suma el IVA aunque venga escrito; un IVA negativo nunca baja lo que se debe', () => {
+    expect(Number(computeOrderBalance(orden('IVA_INCLUIDO', 16), pagos).total)).toBe(100)
+    expect(Number(computeOrderBalance(orden('IVA_APARTE', -5), pagos).total)).toBe(100)
+    expect(computeOrderBalance(orden('DESCONOCIDO', 0), pagos).isFullyPaid).toBe(true)
+  })
+  it('🔴 computeStoredOrderTotal usa la misma regla (con IVA incluido ya no suma un IVA escrito)', () => {
+    const base = { subtotal: 100, discountAmount: 10, serviceChargeAmount: 5, tipAmount: 2, status: 'PENDING' }
+    expect(Number(computeStoredOrderTotal({ ...base, contratoDePrecio: 'IVA_APARTE', taxAmount: 16 }))).toBe(113)
+    expect(Number(computeStoredOrderTotal({ ...base, contratoDePrecio: 'IVA_INCLUIDO', taxAmount: 16 }))).toBe(97)
+  })
+  it('🔴 Codex r6 #3: lo GUARDADO sigue la misma regla — una CANCELADA con IVA 16 guarda total 0; abierta, 16', () => {
+    const origen = { subtotal: 0, discountAmount: 0, serviceChargeAmount: 0, tipAmount: 0, contratoDePrecio: 'IVA_APARTE', taxAmount: 16 }
+    expect(Number(computeStoredOrderTotal({ ...origen, status: 'CANCELLED' }))).toBe(0)
+    expect(Number(computeStoredOrderTotal({ ...origen, status: 'PENDING' }))).toBe(16)
+  })
+  it('control — Codex r5: una cuenta CANCELADA no debe IVA (el origen de una fusión vieja: subtotal y total 0, IVA 16) ⇒ saldo 0', () => {
+    const origenFusionado = {
+      subtotal: 0,
+      discountAmount: 0,
+      serviceChargeAmount: 0,
+      contratoDePrecio: 'IVA_APARTE',
+      taxAmount: 16,
+      status: 'CANCELLED',
+    }
+    expect(Number(computeOrderBalance(origenFusionado, []).remainingBalance)).toBe(0)
+    expect(Number(computeOrderBalance({ ...origenFusionado, status: 'DELETED' }, []).remainingBalance)).toBe(0)
+    expect(Number(impuestoQueSeCobraAparte({ contratoDePrecio: 'IVA_APARTE', taxAmount: 16, status: 'CANCELLED' }))).toBe(0)
+  })
+  it('🔴 la misma cuenta ABIERTA sí debe sus $16 (P12): el estado es lo único que las separa', () => {
+    expect(Number(computeOrderBalance(orden('IVA_APARTE', 16), []).remainingBalance)).toBe(116)
+  })
+  it('🔴 Codex r7 #2: claseDeEstado — los estados vivos son una sola clase para el dinero; cancelada y borrada, la otra', () => {
+    expect(['PENDING', 'CONFIRMED', 'PREPARING', 'READY', 'COMPLETED'].map(claseDeEstado)).toEqual(['VIVA', 'VIVA', 'VIVA', 'VIVA', 'VIVA'])
+    expect(['CANCELLED', 'DELETED'].map(claseDeEstado)).toEqual(['CANCELADA', 'CANCELADA'])
+  })
+})
+
+describe('Founder 3-oct: estadoAlRecibirDinero — el dinero YA capturado reabre una cancelada; sin dinero no la toca', () => {
+  it('🔴 cancelada o borrada que recibe dinero ⇒ PENDING (el estado al que también la reabre la reasignación)', () => {
+    expect(estadoAlRecibirDinero('CANCELLED', 116)).toBe('PENDING')
+    expect(estadoAlRecibirDinero('DELETED', new Prisma.Decimal('0.01'))).toBe('PENDING')
+  })
+  it('control: una viva se queda como está, y una cancelada SIN dinero también', () => {
+    expect(['PENDING', 'CONFIRMED', 'PREPARING', 'COMPLETED'].map(s => estadoAlRecibirDinero(s, 116))).toEqual([
+      'PENDING',
+      'CONFIRMED',
+      'PREPARING',
+      'COMPLETED',
+    ])
+    expect(estadoAlRecibirDinero('CANCELLED', 0)).toBe('CANCELLED')
+  })
+})
+
+describe('cierreDelCobroSaldaLaCuenta — quién salda la cuenta (revisión 6d I-1: lo comparten `recordOrderPayment` y la reasignación)', () => {
+  it('control — una cuenta normal la salda el cierre del cobro; una integrada (POS con `externalId`) o con vales por área, no', () => {
+    const normal = { source: 'TPV', externalId: null, items: [{ areaTicketLineId: null }] }
+    expect(cierreDelCobroSaldaLaCuenta(normal)).toBe(true)
+    expect(cierreDelCobroSaldaLaCuenta({ ...normal, source: 'POS', externalId: 'SR-1' })).toBe(false)
+    expect(cierreDelCobroSaldaLaCuenta({ ...normal, items: [{ areaTicketLineId: null }, { areaTicketLineId: 'atl-1' }] })).toBe(false)
+    // Un `externalId` en blanco no la vuelve integrada (el mismo `trim()` que tenía `recordOrderPayment`), ni uno fuera de POS.
+    expect(cierreDelCobroSaldaLaCuenta({ ...normal, source: 'POS', externalId: '   ' })).toBe(true)
+    expect(cierreDelCobroSaldaLaCuenta({ ...normal, source: 'TPV', externalId: 'X-1' })).toBe(true)
   })
 })

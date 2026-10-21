@@ -199,6 +199,8 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
         order: {
           ...(prisma as any).order,
           update: prisma.order.update,
+          // The standalone write rereads its inputs under the Order lock (Plan 3b T7-R1): nothing changed, so the latest pre-read row.
+          findFirst: jest.fn(() => (prisma.order.findUnique as jest.Mock).mock.results.slice(-1)[0]?.value),
         },
         shift: {
           findFirst: prisma.shift.findFirst,
@@ -206,6 +208,8 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
           update: prisma.shift.update,
         },
         activityLog: { create: prisma.activityLog.create },
+        // El claim del turno pregunta si la orden es una cuenta de tarjetas de regalo: aquí es mercancía.
+        orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
         // recordOrderPayment llama lockAreaTicketCheckoutForPayment(tx, …) — area
         // tickets v7. Este `tx` se arma A MANO: un modelo que la ruta toque y no
         // esté aquí sale undefined y el test truena con un TypeError en lugar de
@@ -570,6 +574,70 @@ describe('Payment TPV Service - Pre-Flight Validation', () => {
   })
 
   describe('REGRESSION TESTS - Existing payment functionality', () => {
+    // 30-sep-2026 · Inventario de warns de producción: «No merchantAccountId (legacy mode)» salía 327 veces en 3 días, todas de
+    // cobros en efectivo o $0 de PlayTelecom donde la terminal no manda afiliación porque no pasa por un comercio.
+    const cobroSinAfiliacion = (method: 'CASH' | 'CREDIT_CARD' | 'DIGITAL_WALLET' | 'OTHER', amount = 10000) => ({
+      venueId: mockVenueId,
+      amount,
+      tip: 0,
+      status: 'COMPLETED' as const,
+      method,
+      source: 'TPV',
+      splitType: 'FULLPAYMENT' as const,
+      tpvId: 'tpv-1',
+      staffId: 'staff-1',
+      paidProductsId: [],
+      currency: 'MXN',
+      isInternational: false,
+    })
+    const prepararOrden = () => {
+      const mockOrder = {
+        id: mockOrderId,
+        venueId: mockVenueId,
+        orderNumber: 'ORD-001',
+        total: new Decimal(100),
+        paymentStatus: 'PENDING',
+        source: 'TPV',
+        externalId: null,
+        items: [],
+        payments: [],
+      }
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(mockOrder)
+      ;(prisma.payment.create as jest.Mock).mockResolvedValue({ venueId: mockVenueId, orderId: mockOrderId, id: 'payment-1' })
+      ;(prisma.venueTransaction.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.paymentAllocation.create as jest.Mock).mockResolvedValue({})
+      ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...mockOrder, paymentStatus: 'PAID' })
+    }
+    const SIN_COMERCIO = expect.stringContaining('No merchantAccountId')
+
+    it('un cobro en EFECTIVO sin afiliación (la terminal no manda comercio porque no lo hay) se anota en info, no en warn', async () => {
+      prepararOrden()
+      await (paymentService as any).recordOrderPayment(mockVenueId, mockOrderId, cobroSinAfiliacion('CASH'), 'user-1')
+      expect(logger.warn).not.toHaveBeenCalledWith(SIN_COMERCIO)
+      expect(logger.warn).not.toHaveBeenCalledWith(SIN_COMERCIO, expect.anything())
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Sin afiliación'), expect.objectContaining({ venueId: mockVenueId }))
+    })
+
+    it('una venta de $0 sin afiliación (las de PlayTelecom, método OTHER) también se anota en info', async () => {
+      prepararOrden()
+      await (paymentService as any)
+        .recordOrderPayment(mockVenueId, mockOrderId, cobroSinAfiliacion('OTHER', 0), 'user-1')
+        .catch(() => undefined)
+      expect(logger.warn).not.toHaveBeenCalledWith(SIN_COMERCIO, expect.anything())
+      expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('Sin afiliación'), expect.objectContaining({ venueId: mockVenueId }))
+    })
+
+    it.each(['CREDIT_CARD', 'DIGITAL_WALLET'] as const)(
+      '🔴 un cobro con importe en %s sin afiliación sigue en warn: su costo y su liquidación quedan sin comercio',
+      async method => {
+        prepararOrden()
+        await (paymentService as any)
+          .recordOrderPayment(mockVenueId, mockOrderId, cobroSinAfiliacion(method), 'user-1')
+          .catch(() => undefined)
+        expect(logger.warn).toHaveBeenCalledWith(SIN_COMERCIO, expect.objectContaining({ venueId: mockVenueId }))
+      },
+    )
+
     it('stores shadow classification without replacing the legacy financial boolean', async () => {
       const mockOrder = {
         id: mockOrderId,

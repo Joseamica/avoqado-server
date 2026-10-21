@@ -1,6 +1,17 @@
 import { NextFunction, Request, Response } from 'express'
 import * as invoiceService from '../../../services/dashboard/purchaseOrderInvoice.service'
 import prisma from '../../../utils/prismaClient'
+import {
+  confirmSupplierInvoiceInventory,
+  previewSupplierInvoiceInventory,
+} from '../../../services/dashboard/supplierInvoiceInventory.service'
+import { getInvoiceInventoryCatalog, getSupplierInvoiceInbox } from '../../../services/dashboard/supplierInvoiceInbox.service'
+import {
+  invoiceInventoryConfirmation,
+  invoiceInventoryPage,
+  invoiceLineIdentification,
+} from '../../../schemas/dashboard/supplierInvoiceInventory.schema'
+import { z } from 'zod'
 
 /** POST /purchase-orders/:purchaseOrderId/invoices — sube el CFDI del proveedor y lo concilia. */
 export async function attachInvoice(
@@ -34,7 +45,7 @@ export async function listInvoices(
     const invoices = await prisma.purchaseOrderInvoice.findMany({
       // Acotado al negocio: un id de orden ajeno no devuelve nada.
       where: { purchaseOrderId, venueId },
-      include: { lines: true },
+      include: { lines: true, purchaseOrder: { select: { id: true, orderNumber: true, status: true } } },
       orderBy: { fechaEmision: 'desc' },
     })
     res.status(200).json(invoices)
@@ -91,11 +102,52 @@ export async function identifyLine(
       venueId: req.params.venueId,
       invoiceId: req.params.invoiceId,
       lineId: req.params.lineId,
-      rawMaterialId: req.body.rawMaterialId ?? null,
-      productId: req.body.productId ?? null,
+      ...(req.body as z.infer<typeof invoiceLineIdentification>),
       actorId: (req as any).authContext?.userId ?? null,
     })
     res.status(200).json(line)
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function invoiceInbox(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { page, limit, search } = req.query as unknown as z.infer<typeof invoiceInventoryPage>
+    res.json(await getSupplierInvoiceInbox(req.params.venueId, page, limit, search))
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function inventoryCatalog(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { page, limit, search, kind } = req.query as unknown as z.infer<typeof invoiceInventoryPage> & { kind: 'RAW' | 'PRODUCT' }
+    res.json(await getInvoiceInventoryCatalog(req.params.venueId, kind, page, limit, search))
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function previewInventory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    res.json(await previewSupplierInvoiceInventory(req.params.venueId, req.params.invoiceId, req.query.includeIeps === 'true'))
+  } catch (error) {
+    next(error)
+  }
+}
+
+export async function confirmInventory(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { confirmationToken, includeIeps } = req.body as z.infer<typeof invoiceInventoryConfirmation>
+    const result = await confirmSupplierInvoiceInventory(
+      req.params.venueId,
+      req.params.invoiceId,
+      confirmationToken,
+      (req as any).authContext.userId,
+      includeIeps,
+    )
+    res.status(200).json(result)
   } catch (error) {
     next(error)
   }

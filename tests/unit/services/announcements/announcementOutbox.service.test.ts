@@ -1,14 +1,18 @@
 import prisma from '../../../../src/utils/prismaClient'
 import { claimDeliveries, deliverClaimed } from '../../../../src/services/announcements/announcementOutbox.service'
 
-jest.mock('../../../../src/utils/prismaClient', () => ({
-  __esModule: true,
-  default: {
+jest.mock('../../../../src/utils/prismaClient', () => {
+  const client: Record<string, unknown> = {
     $queryRaw: jest.fn(),
     platformAnnouncementDelivery: { findMany: jest.fn(), updateMany: jest.fn() },
     notification: { create: jest.fn(), findFirst: jest.fn() },
-  },
-}))
+  }
+  // Cada entrega corre en una transacción interactiva (candado por persona): el doble le
+  // pasa el mismo cliente como `tx`. La concurrencia real se prueba contra Postgres en
+  // tests/integration/announcements/announcementOutbox.integration.test.ts.
+  client.$transaction = jest.fn((fn: (tx: unknown) => unknown) => fn(client))
+  return { __esModule: true, default: client }
+})
 
 const mockRaw = prisma.$queryRaw as unknown as jest.Mock
 const mockDelivFind = prisma.platformAnnouncementDelivery.findMany as unknown as jest.Mock
@@ -151,6 +155,16 @@ describe('announcementOutbox.service', () => {
       expect(data.status).toBe('FAILED')
       expect(data.nextAttemptAt.getTime()).toBeGreaterThan(AHORA.getTime())
       expect(data.lastError).toContain('boom')
+    })
+
+    // Otro worker se quedó con la fila mientras ésta entregaba: su resultado manda. Ésta no
+    // cuenta como enviada ni la marca FAILED encima de la del otro.
+    it('si el CAS no casa, no cuenta como enviada ni como falla', async () => {
+      mockDelivFind.mockResolvedValue([entrega()])
+      mockDelivUpdate.mockResolvedValue({ count: 0 })
+      const r = await deliverClaimed(['d1'], { now: AHORA })
+      expect(r).toEqual({ sent: 0, failed: 0 })
+      expect(mockDelivUpdate.mock.calls.every(([arg]) => arg.data.status !== 'FAILED')).toBe(true)
     })
 
     // ===== REGRESION =====

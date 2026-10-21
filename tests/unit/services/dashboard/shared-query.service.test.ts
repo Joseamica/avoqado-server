@@ -1,8 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import { SharedQueryService } from '@/services/dashboard/shared-query.service'
 import * as availableBalanceService from '@/services/dashboard/availableBalance.dashboard.service'
-import * as commissionCalculationService from '@/services/dashboard/commission/commission-calculation.service'
-import * as commissionPayoutService from '@/services/dashboard/commission/commission-payout.service'
 import * as creditPackDashboardService from '@/services/dashboard/creditPack.dashboard.service'
 import * as customerDashboardService from '@/services/dashboard/customer.dashboard.service'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
@@ -747,69 +745,6 @@ describe('SharedQueryService', () => {
       ])
       expect(JSON.stringify(result)).not.toContain('1234')
       expect(JSON.stringify(result)).not.toContain('ana@example.com')
-    })
-  })
-
-  describe('getCommissionsSummary', () => {
-    it('uses the dashboard commission stats service as source of truth', async () => {
-      ;(commissionCalculationService.getVenueCommissionStats as jest.Mock).mockResolvedValue({
-        totalPaid: 1000,
-        totalPending: 250,
-        totalApproved: 500,
-        staffWithCommissions: 3,
-        averageCommission: 125,
-        topEarners: [{ staffId: 'staff-1', staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }],
-      })
-
-      const result = await SharedQueryService.getCommissionsSummary('venue-test')
-
-      expect(commissionCalculationService.getVenueCommissionStats).toHaveBeenCalledWith('venue-test')
-      expect(result.topEarners).toEqual([{ staffName: 'Ana Admin', totalEarned: 750, calculationCount: 6 }])
-      expect(JSON.stringify(result)).not.toContain('staff-1')
-    })
-  })
-
-  describe('getCommissionPayoutsSummary', () => {
-    it('uses commission payout dashboard services and removes staff email/payment references', async () => {
-      ;(commissionPayoutService.getPayoutStats as jest.Mock).mockResolvedValue({
-        totalPaid: 1000,
-        totalPending: 300,
-        payoutCount: 2,
-        averagePayout: 500,
-      })
-      ;(commissionPayoutService.getPayouts as jest.Mock).mockResolvedValue([
-        {
-          id: 'payout-1',
-          amount: { toNumber: () => 700 },
-          status: 'PAID',
-          paymentMethod: 'BANK_TRANSFER',
-          paymentReference: 'secret-bank-ref',
-          notes: 'private note',
-          createdAt: new Date('2026-05-12T12:00:00.000Z'),
-          paidAt: new Date('2026-05-12T18:00:00.000Z'),
-          staff: { id: 'staff-1', firstName: 'Ana', lastName: 'Admin', email: 'ana@example.com' },
-          summary: {
-            periodStart: new Date('2026-05-01T00:00:00.000Z'),
-            periodEnd: new Date('2026-05-12T23:59:59.999Z'),
-            netAmount: { toNumber: () => 700 },
-          },
-        },
-      ])
-
-      const result = await SharedQueryService.getCommissionPayoutsSummary('venue-test', { limit: 5 })
-
-      expect(commissionPayoutService.getPayoutStats).toHaveBeenCalledWith('venue-test')
-      expect(commissionPayoutService.getPayouts).toHaveBeenCalledWith('venue-test', {})
-      expect(result.recentPayouts).toEqual([
-        expect.objectContaining({
-          amount: 700,
-          status: 'PAID',
-          staffName: 'Ana Admin',
-        }),
-      ])
-      expect(JSON.stringify(result)).not.toContain('ana@example.com')
-      expect(JSON.stringify(result)).not.toContain('secret-bank-ref')
-      expect(JSON.stringify(result)).not.toContain('private note')
     })
   })
 

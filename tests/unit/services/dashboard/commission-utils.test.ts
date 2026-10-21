@@ -25,6 +25,7 @@ import {
   calculateLeftoverAmount,
   findActiveCommissionConfigs,
   getPeriodDateRange,
+  reintentarSiHayBloqueoMutuo,
   CommissionConfigWithRelations,
   CommissionOverrideData,
 } from '../../../../src/services/dashboard/commission/commission-utils'
@@ -43,20 +44,20 @@ describe('validateRate', () => {
   })
 
   it('should reject negative rates', () => {
-    expect(() => validateRate(-0.01)).toThrow('Must be between 0 and 1')
+    expect(() => validateRate(-0.01)).toThrow('va de 0 % a 100 %')
   })
 
   it('should reject rates above 1', () => {
-    expect(() => validateRate(1.01)).toThrow('Must be between 0 and 1')
-    expect(() => validateRate(100)).toThrow('Must be between 0 and 1')
+    expect(() => validateRate(1.01)).toThrow('va de 0 % a 100 %')
+    expect(() => validateRate(100)).toThrow('va de 0 % a 100 %')
   })
 
   it('should reject NaN', () => {
-    expect(() => validateRate(NaN)).toThrow('must be a number')
+    expect(() => validateRate(NaN)).toThrow('debe ser un número')
   })
 
   it('should reject non-numbers', () => {
-    expect(() => validateRate('0.03' as any)).toThrow('must be a number')
+    expect(() => validateRate('0.03' as any)).toThrow('debe ser un número')
   })
 })
 
@@ -214,77 +215,50 @@ describe('applyCommissionBounds', () => {
 })
 
 // ============================================
-// calculateBaseAmount
+// calculateBaseAmount (D5 + reparto por cobro, fase 3)
 // ============================================
 
 describe('calculateBaseAmount', () => {
+  // Un cobro de $1,160 que trae $160 de IVA (su parte) y $50 de descuento (su parte); $100 de propina aparte.
   const payment = {
-    amount: new Decimal(1000),
+    amount: new Decimal(1160),
     tipAmount: new Decimal(100),
     taxAmount: new Decimal(160),
     discountAmount: new Decimal(50),
   }
+  const cfg = (o: Partial<{ includeTips: boolean; includeDiscount: boolean; includeTax: boolean }> = {}) => ({
+    includeTips: false,
+    includeDiscount: false,
+    includeTax: true,
+    ...o,
+  })
 
-  it('should return subtotal only by default (no tax, tips, or discount)', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: false,
-      includeDiscount: false,
-      includeTax: false,
-    })
-    expect(result.baseAmount).toBe(1000)
-    expect(result.tipAmount).toBe(100)
+  it('«con IVA» (default): lo que pagó el cliente, sin sumar el IVA otra vez', () => {
+    const result = calculateBaseAmount(payment, cfg())
+    expect(result.baseAmount).toBe(1160)
     expect(result.taxAmount).toBe(160)
+    expect(result.tipAmount).toBe(100)
   })
 
-  it('should include tax (IVA 16%) when includeTax is true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: false,
-      includeDiscount: false,
-      includeTax: true,
-    })
-    expect(result.baseAmount).toBe(1160) // 1000 + 160
+  it('🔴 «sin IVA»: lo pagado menos su IVA', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeTax: false })).baseAmount).toBe(1000)
   })
 
-  it('should include tips when includeTips is true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: true,
-      includeDiscount: false,
-      includeTax: false,
-    })
-    expect(result.baseAmount).toBe(1100) // 1000 + 100
+  it('«precio de lista»: lo pagado más su parte del descuento', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeDiscount: true })).baseAmount).toBe(1210)
   })
 
-  it('should include discount when includeDiscount is true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: false,
-      includeDiscount: true,
-      includeTax: false,
-    })
-    expect(result.baseAmount).toBe(1050) // 1000 + 50 (add back discount for pre-discount amount)
+  it('«precio de lista» sin IVA: más el descuento, menos el IVA', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeDiscount: true, includeTax: false })).baseAmount).toBe(1050)
   })
 
-  it('should include all when all flags are true', () => {
-    const result = calculateBaseAmount(payment, {
-      includeTips: true,
-      includeDiscount: true,
-      includeTax: true,
-    })
-    expect(result.baseAmount).toBe(1310) // 1000 + 100 + 160 + 50
+  it('la propina sólo entra con includeTips', () => {
+    expect(calculateBaseAmount(payment, cfg({ includeTips: true })).baseAmount).toBe(1260)
   })
 
-  it('should handle null optional amounts', () => {
-    const paymentMinimal = {
-      amount: new Decimal(500),
-      tipAmount: null,
-      taxAmount: null,
-      discountAmount: null,
-    }
-    const result = calculateBaseAmount(paymentMinimal, {
-      includeTips: true,
-      includeDiscount: true,
-      includeTax: true,
-    })
-    expect(result.baseAmount).toBe(500) // All nulls treated as 0
+  it('los nulos cuentan como 0', () => {
+    const minimo = { amount: new Decimal(500), tipAmount: null, taxAmount: null, discountAmount: null }
+    expect(calculateBaseAmount(minimo, cfg({ includeTips: true, includeDiscount: true })).baseAmount).toBe(500)
   })
 })
 
@@ -338,15 +312,20 @@ describe('calculateCategoryFilteredAmount', () => {
     // invisible mientras el POS mandaba `discountAmount = 0` siempre.
     expect(result).toBe(390)
 
-    // La consulta trae la orden entera + la categoría de cada línea.
+    // La consulta trae la orden entera, en orden de id: cada línea con sus kilos, sus extras, su categoría y su tasa (A1e), que es
+    // la de la póliza: el sello del renglón y el tratamiento de su producto (final-fix I1).
     expect(prismaMock.orderItem.findMany).toHaveBeenCalledWith({
       where: { orderId: 'order-1' },
+      orderBy: { id: 'asc' },
       select: {
         quantity: true,
         unitPrice: true,
+        weightQuantity: true,
         taxAmount: true,
         discountAmount: true,
-        product: { select: { categoryId: true } },
+        ivaTratamiento: true,
+        modifiers: { select: { price: true, quantity: true } },
+        product: { select: { categoryId: true, taxRate: true, ivaTratamiento: true } },
       },
     })
   })
@@ -518,5 +497,24 @@ describe('findActiveCommissionConfigs', () => {
     prismaMock.venue.findUnique.mockResolvedValue({ organizationId: 'org' })
     const configs = await findActiveCommissionConfigs('venue-1')
     expect(configs.map(c => c.id)).toEqual(['org-1'])
+  })
+})
+
+describe('reintentarSiHayBloqueoMutuo (Codex plan r1-5)', () => {
+  const bloqueo = Object.assign(new Error('deadlock detected'), { code: '40P01' })
+
+  it('repite la operación completa tras un bloqueo mutuo', async () => {
+    const operacion = jest.fn().mockRejectedValueOnce(bloqueo).mockResolvedValueOnce('listo')
+    await expect(reintentarSiHayBloqueoMutuo('prueba', operacion)).resolves.toBe('listo')
+    expect(operacion).toHaveBeenCalledTimes(2)
+  })
+
+  it('a lo más tres intentos; cualquier otro error sale a la primera', async () => {
+    const siempre = jest.fn().mockRejectedValue(bloqueo)
+    await expect(reintentarSiHayBloqueoMutuo('prueba', siempre)).rejects.toBe(bloqueo)
+    expect(siempre).toHaveBeenCalledTimes(3)
+    const otro = jest.fn().mockRejectedValue(new Error('otro'))
+    await expect(reintentarSiHayBloqueoMutuo('prueba', otro)).rejects.toThrow('otro')
+    expect(otro).toHaveBeenCalledTimes(1)
   })
 })

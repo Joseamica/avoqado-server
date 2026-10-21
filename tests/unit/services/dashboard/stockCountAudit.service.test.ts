@@ -174,6 +174,55 @@ describe('getStockCountForAudit', () => {
     expect(d?.summary.countedCount).toBe(0)
   })
 
+  it('L5: cuenta las líneas que el conteo NO aplicó por Shopify (noAplicadas) y cada una lleva su motivo', async () => {
+    const linea = (o: Record<string, unknown>) => ({
+      id: 'i1',
+      productId: 'p1',
+      rawMaterialId: null,
+      expected: '20.000',
+      counted: '18.000',
+      countedAt: new Date('2026-10-08T14:00:00.000Z'),
+      appliedAt: null,
+      shopifyHeldAt: null,
+      shopifyHeldReason: null,
+      product: { id: 'p1', name: 'Gorra', sku: '10025', gtin: null, imageUrl: null },
+      rawMaterial: null,
+      ...o,
+    })
+    prismaMock.stockCount.findFirst.mockResolvedValue(
+      cabecera({
+        status: 'COMPLETED',
+        items: [
+          linea({}),
+          linea({ id: 'i2', shopifyHeldAt: new Date('2026-10-08T15:00:00.000Z'), shopifyHeldReason: 'ENVIO_EN_CAMINO' }),
+          linea({ id: 'i3', shopifyHeldAt: new Date('2026-10-08T15:01:00.000Z'), shopifyHeldReason: 'DUDA_POR_REVISAR' }),
+        ],
+      }) as never,
+    )
+    const d = await getStockCountForAudit('v1', 'c1')
+    expect(d?.noAplicadas).toBe(2)
+    expect(d?.items.map(i => i.shopifyHeld)).toEqual([
+      null,
+      { at: '2026-10-08T15:00:00.000Z', motivo: 'ENVIO_EN_CAMINO' },
+      { at: '2026-10-08T15:01:00.000Z', motivo: 'DUDA_POR_REVISAR' },
+    ])
+    // Regresión: el resumen que leen los demás clientes NO cambia (las 3 líneas se contaron).
+    expect(d?.summary).toEqual({
+      itemCount: 3,
+      countedCount: 3,
+      matchedCount: 0,
+      mismatchedCount: 3,
+      differenceByUnit: [{ unit: 'PIECE', difference: -6 }],
+    })
+    expect(d?.totalDifference).toBe(-6)
+  })
+
+  it('L5: sin líneas retenidas, noAplicadas es 0', async () => {
+    prismaMock.stockCount.findFirst.mockResolvedValue(cabecera({ items: [] }) as never)
+    const d = await getStockCountForAudit('v1', 'c1')
+    expect(d?.noAplicadas).toBe(0)
+  })
+
   it('null cuando no existe en este negocio', async () => {
     prismaMock.stockCount.findFirst.mockResolvedValue(null)
     await expect(getStockCountForAudit('v1', 'ajeno')).resolves.toBeNull()

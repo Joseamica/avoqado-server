@@ -27,8 +27,9 @@ export async function syncVenueGoogleReviews(venueId: string): Promise<number> {
   try {
     const { reviews: googleReviews } = await googleBusinessProfileService.fetchReviews(venueId)
 
-    // Parse googleReviews and upsert to database
-    const syncPromises = googleReviews.map(async (googleReview: GoogleReview) => {
+    // Parse googleReviews and upsert to database — one at a time: a venue can bring up to 1,000
+    // reviews and firing them all in parallel would drain the connection pool.
+    for (const googleReview of googleReviews as GoogleReview[]) {
       // Check if review already exists
       const existingReview = await prisma.review.findFirst({
         where: {
@@ -65,10 +66,8 @@ export async function syncVenueGoogleReviews(venueId: string): Promise<number> {
           },
         })
       }
-    })
+    }
 
-    // Execute all upserts in parallel
-    await Promise.all(syncPromises)
     const syncedCount = googleReviews.length
 
     // Update last sync timestamp

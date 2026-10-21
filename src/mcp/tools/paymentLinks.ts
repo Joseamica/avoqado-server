@@ -25,13 +25,16 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
       venueId: z.string().describe('Venue whose payment links to list (must be in your scope)'),
       status: z.enum(['active', 'paused', 'expired', 'archived', 'all']).optional().describe("Filter by status (default 'active')"),
       limit: z.number().int().positive().max(100).optional().describe('Max links to return (default 50, newest first)'),
+      offset: z.number().int().min(0).optional().describe('Offset from the previous page'),
     },
-    async ({ venueId, status, limit }) => {
+    async ({ venueId, status, limit, offset = 0 }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       guard.requirePermission('payment-link:read', venueId) // read gate — mirror the dashboard's checkPermission
       const statusFilter = !status ? { status: PaymentLinkStatus.ACTIVE } : status === 'all' ? {} : { status: STATUS_MAP[status] }
+      const filter = { ...where, ...statusFilter }
+      const total = await prisma.paymentLink.count({ where: filter })
       const links = await prisma.paymentLink.findMany({
-        where: { ...where, ...statusFilter },
+        where: filter,
         select: {
           shortCode: true,
           title: true,
@@ -44,12 +47,16 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           expiresAt: true,
           createdAt: true,
         },
-        orderBy: { createdAt: 'desc' },
+        orderBy: [{ createdAt: 'desc' }, { id: 'asc' }],
+        skip: offset,
         take: limit ?? 50,
       })
       return text({
         venueId,
         count: links.length,
+        total,
+        hasMore: offset + links.length < total,
+        nextOffset: offset + links.length < total ? offset + links.length : null,
         links: links.map(l => ({
           shortCode: l.shortCode,
           title: l.title,

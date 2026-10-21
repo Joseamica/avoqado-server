@@ -220,7 +220,9 @@ async function escribirEventoComoDueno(
 ): Promise<boolean> {
   const { count } = await prisma.providerEventLog.updateMany({ where: { id: eventLogId, ...propietario }, data })
   if (count !== 1) {
-    logger.warn('🔒 [AngelPay webhook] La escritura final del evento no aplicó: otro dueño (worker) lo reclamó — lo cierra él', {
+    // Carrera prevista entre receptor y worker: el otro dueño ya lo tiene y lo cierra él. Pasa en la mayoría de los cobros
+    // normales (~100/día en Testarudo, 30-sep-2026): es información, no un aviso.
+    logger.info('🔒 [AngelPay webhook] La escritura final del evento no aplicó: otro dueño (worker) lo reclamó — lo cierra él', {
       eventLogId,
       ...contexto,
     })

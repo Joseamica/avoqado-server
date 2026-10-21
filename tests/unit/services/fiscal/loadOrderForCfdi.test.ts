@@ -10,6 +10,7 @@ jest.mock('../../../../src/utils/prismaClient', () => ({
     order: { findUnique: jest.fn() },
     merchantFiscalConfig: { findUnique: jest.fn() },
     fiscalEmisor: { findMany: jest.fn().mockResolvedValue([]) },
+    orderDiscount: { findMany: jest.fn() },
   },
 }))
 jest.mock('../../../../src/config/logger', () => ({
@@ -19,6 +20,9 @@ jest.mock('../../../../src/config/logger', () => ({
 
 import prisma from '../../../../src/utils/prismaClient'
 import { loadOrderForCfdiFromDb, importeConceptoCents } from '../../../../src/services/fiscal/cfdi.service'
+import { motivoNoCuadra } from '../../../../src/services/fiscal/reglaDelPac'
+import { DESCUENTOS_PARA_CONCEPTOS } from '../../../../src/services/fiscal/descuentoPorRenglon'
+import { MOTIVO_SIN_REPARTO_IVA_MEZCLADO } from '../../../../src/services/shared/repartoDescuento'
 
 const D = (n: number) => new Prisma.Decimal(n)
 const orderMock = prisma.order.findUnique as jest.Mock
@@ -462,7 +466,7 @@ describe('loadOrderForCfdiFromDb', () => {
     expect(Number(bundle!.order.items[0].unitPrice)).toBe(200)
   })
 
-  it('DESCUENTO GENERAL sobre VARIOS renglones: su alcance no se puede demostrar (dirigido vs general) → razón, no se reparte', async () => {
+  it('DESCUENTO GENERAL sin constancia sobre VARIOS renglones del mismo IVA (D8): se reparte en proporción y cuadra', async () => {
     orderMock.mockResolvedValue(
       anOrder({
         subtotal: D(100),
@@ -498,10 +502,13 @@ describe('loadOrderForCfdiFromDb', () => {
 
     const bundle = await loadOrderForCfdiFromDb('o1')
 
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/descuento general/i)
+    // B3a: control de la barrera — lo desbloquea D8, pasa por la regla del PAC y el PAC calcula lo cobrado (90.00).
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([6, 4])
+    expect(bundle!.totalCents).toBe(9000)
   })
 
-  it('DESCUENTO GENERAL sobre UN renglón CON extra: el motor de descuentos permite descontar SÓLO el extra sin dejar rastro → razón (se cuentan conceptos, no renglones)', async () => {
+  it('DESCUENTO GENERAL sin constancia sobre UN renglón con extra (D8): el PAC redondearía subtotal y descuento aparte y daría $67.49 ⇒ se mueve un centavo (6b)', async () => {
     // Codex pasada 8: «50 % sólo en Deslactosada» ($2.50) se repartía $2.33 al café y $0.17 al extra
     orderMock.mockResolvedValue(
       anOrder({
@@ -526,8 +533,11 @@ describe('loadOrderForCfdiFromDb', () => {
     )
     cfgMock.mockResolvedValue(aConfig())
     const bundle = await loadOrderForCfdiFromDb('o1')
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/descuento general/i)
-    expect(bundle!.unsupportedReasons?.join(' ')).not.toMatch(/no coincide con lo cobrado/) // no se apila el desajuste encima
+    // B3a: es la variante R5 del sandbox. 6b: el PAC daría $67.49 ⇒ el descuento del café baja un centavo (2.33 → 2.32) y se guarda
+    // lo que dirá el XML.
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([2.32, 0.17])
+    expect([bundle!.subtotalCents, bundle!.taxCents, bundle!.totalCents]).toEqual([5819, 931, 6750])
   })
 
   it('DESCUENTO GENERAL sobre UN solo concepto (una línea sin extras): alcance inequívoco → se aplica y cuadra', async () => {
@@ -557,6 +567,138 @@ describe('loadOrderForCfdiFromDb', () => {
     expect(bundle!.unsupportedReasons ?? []).toEqual([])
     expect(bundle!.totalCents).toBe(5850)
     expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([6.5])
+  })
+
+  it('B3a: el cargador lee las filas de descuento (una página y una de más), la liga a la promoción y la marca de cortesía', async () => {
+    orderMock.mockResolvedValue(anOrder())
+    cfgMock.mockResolvedValue(aConfig())
+    await loadOrderForCfdiFromDb('o1')
+    const select = orderMock.mock.calls[0][0].select
+    expect(select.orderDiscounts).toEqual(DESCUENTOS_PARA_CONCEPTOS)
+    expect(select.items.select.orderPromotionId).toBe(true)
+    expect(select.items.select.isCortesia).toBe(true)
+    expect(select.promotions).toBeUndefined()
+  })
+
+  it('🔴 B3a: 101 descuentos de un centavo sobre $100 se facturan por $98.99 (la lectura pagina; no hay tope de filas)', async () => {
+    const filas = Array.from({ length: 101 }, (_, i) => ({ id: `d${String(i).padStart(4, '0')}`, amount: D(0.01), reparto: null }))
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(100),
+        taxAmount: D(0),
+        total: D(98.99),
+        discountAmount: D(1.01),
+        payments: [pago(98.99)],
+        orderDiscounts: filas, // la consulta de la orden trae 101 = una página y una de más
+        items: [
+          {
+            productName: 'X',
+            quantity: 1,
+            unitPrice: D(100),
+            discountAmount: D(0),
+            total: D(100),
+            weightQuantity: null,
+            modifiers: [],
+            product: P,
+          },
+        ],
+      }),
+    )
+    ;(prisma.orderDiscount.findMany as jest.Mock).mockResolvedValueOnce(filas.slice(0, 100)).mockResolvedValueOnce(filas.slice(100))
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([1.01])
+    expect(bundle!.totalCents).toBe(9899)
+    expect(prisma.orderDiscount.findMany).toHaveBeenCalledTimes(2)
+  })
+
+  it('🔴 B3a: descuento de cuenta en 2 piezas SIN IVA incluido: por concepto da $2.38, el PAC $2.39 ⇒ un centavo más de descuento a «A» (6b)', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(4.06),
+        taxAmount: D(0.32),
+        total: D(2.38),
+        discountAmount: D(2),
+        payments: [pago(2.38)],
+        items: [
+          {
+            productName: 'A',
+            quantity: 1,
+            unitPrice: D(2.03),
+            discountAmount: D(0),
+            total: D(2.03),
+            weightQuantity: null,
+            modifiers: [],
+            product: P,
+          },
+          {
+            productName: 'B',
+            quantity: 1,
+            unitPrice: D(2.03),
+            discountAmount: D(0),
+            total: D(2.03),
+            weightQuantity: null,
+            modifiers: [],
+            product: P,
+          },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    // Grupo lineal (IVA aparte): sólo cuenta la suma; el centavo va al primero por la clave (el nombre «A» antes que «B»).
+    expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([1.01, 1])
+    // Los montos del PAC (antes, los del pedido): base neta 2.05, IVA 0.33, total 2.38.
+    expect([bundle!.subtotalCents, bundle!.taxCents, bundle!.totalCents]).toEqual([205, 33, 238])
+  })
+
+  // B3a ronda final F3 (Codex final #3): el motivo que el GET público de autofactura enseña sale de AQUÍ.
+  it('control — 🔴 F3: 2 × $1.04 con IVA aparte ($0.17 de IVA cada uno, cobro $2.42): el PAC da $2.41 y no hay ajuste ⇒ motivo con las dos cantidades', async () => {
+    const pieza = (productName: string) => ({
+      productName,
+      quantity: 1,
+      unitPrice: D(1.04),
+      discountAmount: D(0),
+      total: D(1.04),
+      weightQuantity: null,
+      modifiers: [],
+      product: P,
+    })
+    orderMock.mockResolvedValue(
+      anOrder({ subtotal: D(2.08), taxAmount: D(0.34), total: D(2.42), payments: [pago(2.42)], items: [pieza('A'), pieza('B')] }),
+    )
+    cfgMock.mockResolvedValue(aConfig({ autofacturaEnabled: true }))
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.facturacionEnabled && bundle!.autofacturaEnabled).toBe(true)
+    expect(bundle!.unsupportedReasons).toEqual([motivoNoCuadra(241, 242)])
+  })
+
+  it('🔴 6b, Codex r1 #6: dos capturas con los renglones en distinto orden dan el mismo ajuste', async () => {
+    const pieza = (productName: string) => ({
+      productName,
+      quantity: 1,
+      unitPrice: D(2.03),
+      discountAmount: D(0),
+      total: D(2.03),
+      weightQuantity: null,
+      modifiers: [],
+      product: P,
+    })
+    const venta = (items: any[]) =>
+      anOrder({ subtotal: D(4.06), taxAmount: D(0.32), total: D(2.38), discountAmount: D(2), payments: [pago(2.38)], items })
+    cfgMock.mockResolvedValue(aConfig())
+    for (const items of [
+      [pieza('Té'), pieza('Agua')],
+      [pieza('Agua'), pieza('Té')],
+    ]) {
+      orderMock.mockResolvedValue(venta(items))
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle!.unsupportedReasons ?? []).toEqual([])
+      const porNombre = Object.fromEntries(bundle!.order.items.map(i => [i.productName, Number(i.discountAmount)]))
+      expect(porNombre).toEqual({ Agua: 1.01, Té: 1 })
+    }
   })
 
   it('pagos ELEGIBLES: REGULAR/FAST (null = legado) suman; TEST y ADJUSTMENT no; REFUND no resta (la devolución tiene su nota de crédito)', async () => {
@@ -620,7 +762,7 @@ describe('loadOrderForCfdiFromDb', () => {
   // ── El SOBRE SEGURO (Codex pasada 4): la reconstrucción de conceptos sólo aplica cuando los datos la
   // sostienen; todo lo que sale del sobre se declara en `unsupportedReasons` y el motor lo BLOQUEA con la
   // razón escrita en vez de timbrar un documento con conceptos equivocados.
-  it('CORTESÍA (descuento = total del renglón, con extra): el descuento se reparte entre producto y extra, nada negativo, y el documento cuadra', async () => {
+  it('CORTESÍA de «Cobrar» con extra (D9): el renglón regalado no aparece y el documento cuadra', async () => {
     orderMock.mockResolvedValue(
       anOrder({
         subtotal: D(110),
@@ -658,22 +800,18 @@ describe('loadOrderForCfdiFromDb', () => {
     const bundle = await loadOrderForCfdiFromDb('o1')
 
     expect(bundle!.unsupportedReasons ?? []).toEqual([])
-    expect(bundle!.order.items.map(i => [i.productName, Number(i.unitPrice), Number(i.discountAmount)])).toEqual([
-      ['CAPUCCINO', 65, 65],
-      ['Deslactosada (CAPUCCINO)', 5, 5],
-      ['CONSUMO', 40, 0],
-    ])
+    expect(bundle!.order.items.map(i => [i.productName, Number(i.unitPrice), Number(i.discountAmount)])).toEqual([['CONSUMO', 40, 0]])
     expect(bundle!.totalCents).toBe(4000)
   })
 
-  it('PROMOCIÓN (total guardado ya NETO del descuento): fuera del sobre → razón, nunca un concepto de $60', async () => {
+  // 🔴 B3a (Tarea 5): cambia A PROPÓSITO con la forma REAL que deja una promoción (Codex r1 #7: la promoción no toca la cabecera).
+  it('PROMOCIÓN (total guardado ya NETO, ligado a su promoción, cabecera sin descuento): un concepto a precio de lista con su descuento', async () => {
     orderMock.mockResolvedValue(
       anOrder({
-        subtotal: D(100),
+        subtotal: D(80),
         taxAmount: D(0),
         total: D(80),
-        discountAmount: D(20),
-        promotions: [{ id: 'op1' }],
+        discountAmount: D(0),
         payments: [pago(80)],
         items: [
           {
@@ -682,6 +820,7 @@ describe('loadOrderForCfdiFromDb', () => {
             unitPrice: D(100),
             discountAmount: D(20),
             total: D(80),
+            orderPromotionId: 'op1',
             weightQuantity: null,
             modifiers: [],
             product: P,
@@ -693,7 +832,37 @@ describe('loadOrderForCfdiFromDb', () => {
 
     const bundle = await loadOrderForCfdiFromDb('o1')
 
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/promoci/i)
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => [i.productName, Number(i.unitPrice), Number(i.discountAmount)])).toEqual([['PROMO', 100, 20]])
+    expect(bundle!.totalCents).toBe(8000)
+  })
+
+  it('PROMOCIÓN con la cabecera inconsistente (también $20 de descuento de cabecera): no se acomoda, se detiene por «no coincide»', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(100),
+        taxAmount: D(0),
+        total: D(80),
+        discountAmount: D(20),
+        payments: [pago(80)],
+        items: [
+          {
+            productName: 'PROMO',
+            quantity: 1,
+            unitPrice: D(100),
+            discountAmount: D(20),
+            total: D(80),
+            orderPromotionId: 'op1',
+            weightQuantity: null,
+            modifiers: [],
+            product: P,
+          },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/no coincide con lo cobrado/)
   })
 
   it('RESERVA (total del renglón EXCLUYE los extras): extras con precio pero importe sin extras → razón', async () => {
@@ -755,7 +924,7 @@ describe('loadOrderForCfdiFromDb', () => {
     expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/cargo por servicio/i)
   })
 
-  it('DESCUENTO GENERAL con productos de IVA DISTINTO: no se reparte (movería bases entre tasas) → razón', async () => {
+  it('DESCUENTO GENERAL sin constancia con IVA DISTINTO (16 % y 8 %): D8 lo detiene con su motivo', async () => {
     orderMock.mockResolvedValue(
       anOrder({
         subtotal: D(200),
@@ -791,10 +960,10 @@ describe('loadOrderForCfdiFromDb', () => {
 
     const bundle = await loadOrderForCfdiFromDb('o1')
 
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/descuento general/i)
+    expect(bundle!.unsupportedReasons).toEqual([MOTIVO_SIN_REPARTO_IVA_MEZCLADO])
   })
 
-  it('renglón con total 0 y descuento (recálculo de cortesía mobile): 0 es dato, no ausencia → razón, sin reconstruir por lineGross', async () => {
+  it('cabecera que no cuadra con una cortesía recalculada (descuento de $140 sobre $40 cobrables) ⇒ motivo, sin reconstruir por lineGross', async () => {
     orderMock.mockResolvedValue(
       anOrder({
         subtotal: D(140),
@@ -830,8 +999,48 @@ describe('loadOrderForCfdiFromDb', () => {
 
     const bundle = await loadOrderForCfdiFromDb('o1')
 
-    expect(bundle!.unsupportedReasons?.length).toBeGreaterThan(0)
+    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/mayor que lo que suman los productos/)
     expect(bundle!.order.items.every(i => Number(i.unitPrice) >= 0)).toBe(true)
+  })
+
+  it('CORTESÍA del móvil (total 0, la cabecera no la incluye): sólo se factura lo cobrado (D9)', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(40),
+        taxAmount: D(0),
+        total: D(40),
+        discountAmount: D(0),
+        payments: [pago(40)],
+        items: [
+          {
+            productName: 'CAPUCCINO',
+            quantity: 2,
+            unitPrice: D(65),
+            discountAmount: D(140),
+            total: D(0),
+            isCortesia: true,
+            weightQuantity: null,
+            modifiers: [{ name: 'Deslactosada', price: D(5), quantity: 1 }],
+            product: P,
+          },
+          {
+            productName: 'CONSUMO',
+            quantity: 1,
+            unitPrice: D(40),
+            discountAmount: D(0),
+            total: D(40),
+            weightQuantity: null,
+            modifiers: [],
+            product: P,
+          },
+        ],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => i.productName)).toEqual(['CONSUMO'])
+    expect(bundle!.totalCents).toBe(4000)
   })
 
   it('PESO que no cuadra con total: razón, sin colapsar a cantidad 1', async () => {
@@ -893,7 +1102,7 @@ describe('loadOrderForCfdiFromDb', () => {
     expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/extras/i) // 160 − 130 = 30 ≠ 5 × 2
   })
 
-  it('PESO con fracciones de centavo (0.5 kg × $39.99 = 19.995): fuera del sobre, porque el PAC puede sumar distinto', async () => {
+  it('PESO con fracción de centavo (0.5 kg × $39.99 = 19.995 ⇒ $20.00): se factura con el precio por kilo que explica lo cobrado', async () => {
     orderMock.mockResolvedValue(
       anOrder({
         subtotal: D(40),
@@ -927,7 +1136,135 @@ describe('loadOrderForCfdiFromDb', () => {
     )
     cfgMock.mockResolvedValue(aConfig())
     const bundle = await loadOrderForCfdiFromDb('o1')
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/centavo/i)
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => [Number(i.quantity), Number(i.unitPrice)])).toEqual([
+      [0.5, 40],
+      [0.5, 40],
+    ])
+    expect(bundle!.totalCents).toBe(4000)
+  })
+
+  const jamon = (precio: number, kilos: number, cobrado: number) => ({
+    productName: 'JAMÓN',
+    quantity: 1,
+    unitPrice: D(precio),
+    discountAmount: D(0),
+    total: D(cobrado),
+    weightQuantity: D(kilos),
+    modifiers: [],
+    product: { ...P, satUnitKey: 'KGM' },
+  })
+  const ventaDePeso = (lineas: Array<[number, number, number]>) => {
+    const cobrado = lineas.reduce((s, [, , c]) => s + Math.round(c * 100), 0) / 100
+    return anOrder({
+      subtotal: D(cobrado),
+      taxAmount: D(0),
+      total: D(cobrado),
+      payments: [pago(cobrado)],
+      items: lineas.map(([p, k, c]) => jamon(p, k, c)),
+    })
+  }
+
+  it.each([
+    // [precio por kilo, kilos, lo que cobró el POS, precio que viaja] — el POS redondea con flotante: 69.165 ⇒ 69.16 y 30.015 ⇒ 30.01
+    [45, 1.537, 69.16, '44.996747'],
+    [100.05, 0.3, 30.01, '100.033333'],
+  ])(
+    'PESO %d $/kg × %d kg cobrado en $%d: se factura con los kilos reales y $%s por kilo (D9)',
+    async (precio, kilos, cobrado, precioQueViaja) => {
+      orderMock.mockResolvedValue(ventaDePeso([[precio, kilos, cobrado]]))
+      cfgMock.mockResolvedValue(aConfig())
+      const bundle = await loadOrderForCfdiFromDb('o1')
+      expect(bundle!.unsupportedReasons ?? []).toEqual([])
+      expect(Number(bundle!.order.items[0].quantity)).toBe(kilos)
+      expect(new Prisma.Decimal(String(bundle!.order.items[0].unitPrice)).toString()).toBe(precioQueViaja)
+      expect(bundle!.totalCents).toBe(Math.round(cobrado * 100))
+    },
+  )
+
+  it.each([
+    // [precio, kilos, cobrado, motivo] — ni el redondeo decimal ni el del POS dan esto (Codex r1 #5)
+    [44.99, 1.537, 69.14, /menor que precio × cantidad/], // 69.14963: los dos redondeos dan 69.15
+    [45, 1.537, 69.18, /no cuadra con precio × cantidad/], // los dos redondeos dan 69.17 o 69.16
+  ])('PESO %d $/kg × %d kg cobrado en $%d: no es un redondeo de lo cobrado ⇒ sigue detenido', async (precio, kilos, cobrado, motivo) => {
+    orderMock.mockResolvedValue(ventaDePeso([[precio, kilos, cobrado]]))
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(motivo)
+  })
+
+  it('🔴 PESO (Codex r2, variante L): 5 × $1.05 × 99.999 kg + una pieza de $0.01 cobrados en $525.01: el PAC calcularía $525.02 y no hay ajuste en centavos ⇒ se detiene con «no encontramos» (6b)', async () => {
+    const venta: any = ventaDePeso(Array.from({ length: 5 }, () => [1.05, 99.999, 105] as [number, number, number]))
+    venta.items.push({
+      productName: 'DULCE',
+      quantity: 1,
+      unitPrice: D(0.01),
+      discountAmount: D(0),
+      total: D(0.01),
+      weightQuantity: null,
+      modifiers: [],
+      product: P,
+    })
+    venta.subtotal = D(525.01)
+    venta.total = D(525.01)
+    venta.payments = [pago(525.01)]
+    orderMock.mockResolvedValue(venta)
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons).toEqual([motivoNoCuadra(52502, 52501)])
+  })
+
+  it('🔴 PESO (Codex r2, variante M): venta con IVA aparte, 2 × $1.00 × 1.031 kg: por concepto da $2.38, el PAC acumula $2.39 ⇒ un centavo de descuento (6b)', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(2.06),
+        taxAmount: D(0.32),
+        total: D(2.38),
+        payments: [pago(2.38)],
+        items: [jamon(1, 1.031, 1.03), jamon(1, 1.031, 1.03)],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([0.01, 0])
+    expect([bundle!.subtotalCents, bundle!.taxCents, bundle!.totalCents]).toEqual([205, 33, 238])
+  })
+
+  it('🔴 PESO (Codex r3, variante R2): venta con IVA aparte, 2 × $2.15 × 0.5 kg (cada una $1.08): el precio derivado es $2.16, con 2 decimales, y aun así pasa por la regla del PAC: $2.51 contra $2.50, sin ajuste posible ⇒ se detiene con «no encontramos» (6b)', async () => {
+    orderMock.mockResolvedValue(
+      anOrder({
+        subtotal: D(2.16),
+        taxAmount: D(0.34),
+        total: D(2.5),
+        payments: [pago(2.5)],
+        items: [jamon(2.15, 0.5, 1.08), jamon(2.15, 0.5, 1.08)],
+      }),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons).toEqual([motivoNoCuadra(251, 250)])
+  })
+
+  it('🔴 PESO: 125 líneas de $1.05 × 99.999 kg al 16 % (cada una cobrada en $105.00): el PAC calcularía $13,125.01, sin ajuste posible ⇒ se detiene con «no encontramos» (6b)', async () => {
+    orderMock.mockResolvedValue(ventaDePeso(Array.from({ length: 125 }, () => [1.05, 99.999, 105] as [number, number, number])))
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons).toEqual([motivoNoCuadra(1312501, 1312500)])
+  })
+
+  it('PESO: varias líneas reales (las de la variante H del sandbox): el PAC calcula lo cobrado y se facturan', async () => {
+    orderMock.mockResolvedValue(
+      ventaDePeso([
+        [45, 1.537, 69.16],
+        [100.05, 0.3, 30.01],
+        [40, 0.5, 20],
+      ]),
+    )
+    cfgMock.mockResolvedValue(aConfig())
+    const bundle = await loadOrderForCfdiFromDb('o1')
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.totalCents).toBe(11917)
   })
 
   it('PESO exige clave SAT de unidad de peso (KGM): un pesado con E48 queda fuera del sobre', async () => {
@@ -997,7 +1334,7 @@ describe('loadOrderForCfdiFromDb', () => {
     for (const it of bundle!.order.items) expect(Number(it.discountAmount) * 100).toBeLessThanOrEqual(importeConceptoCents(it))
   })
 
-  it('DESCUENTO DIRIGIDO a artículos (TPV lo guarda sólo en Order.discountAmount + OrderAction): fuera del sobre, no se reparte entre todos', async () => {
+  it('DESCUENTO sin fila (sólo en la cabecera, como el libre histórico de la terminal): con un solo IVA, D8 lo reparte en proporción', async () => {
     orderMock.mockResolvedValue(
       anOrder({
         subtotal: D(200),
@@ -1031,7 +1368,10 @@ describe('loadOrderForCfdiFromDb', () => {
     )
     cfgMock.mockResolvedValue(aConfig())
     const bundle = await loadOrderForCfdiFromDb('o1')
-    expect(bundle!.unsupportedReasons?.join(' ')).toMatch(/descuento general/i)
+    // B3a: control de la barrera — lo desbloquea D8 y el PAC calcula lo cobrado (150.00).
+    expect(bundle!.unsupportedReasons ?? []).toEqual([])
+    expect(bundle!.order.items.map(i => Number(i.discountAmount))).toEqual([25, 25])
+    expect(bundle!.totalCents).toBe(15000)
   })
 
   it('CATÁLOGO inconsistente (objetoImp 01 «no objeto» con tasa 16 %): fuera del sobre', async () => {

@@ -1,8 +1,10 @@
 import Facturapi from 'facturapi'
+import { fromZonedTime } from 'date-fns-tz'
 import logger from '../../../config/logger'
 import {
   CancelInvoiceParams,
   CancelInvoiceResult,
+  CfdiItemInput,
   CreateInvoiceParams,
   CreateOrgParams,
   CreateOrgResult,
@@ -27,12 +29,52 @@ import {
 const toPesos = (cents: number): number => Math.round(cents) / 100
 const toCents = (pesos: number): number => Math.round(pesos * 100)
 
+/** Sandbox probe 2026-09-26: duplicate POST returns 409, not the existing document. */
+export const FACTURAPI_DEDUPLICA = false
+export const RECHAZOS_CONFIRMADOS = ['invalid_request', 'product_key_not_found', 'invoice_stamping_validation_error'] as const
+
+/**
+ * C2 (ronda 1, I2): tiempos límite de las llamadas de CANCELACIÓN a Facturapi. El umbral de «envío terminado» de la cancelación
+ * (`ENVIO_TERMINADO_MS`, cfdi.service.ts) se DERIVA de estos dos: el dueño hace una consulta previa y luego el POST.
+ */
+export const TIEMPO_LIMITE_CONSULTA_MS = 30_000
+export const TIEMPO_LIMITE_ENVIO_MS = 30_000
+
+export class ProviderHttpError extends Error {
+  constructor(
+    public readonly status: number,
+    public readonly code: string | null,
+    message: string,
+  ) {
+    super(message)
+    this.name = 'ProviderHttpError'
+  }
+}
+
+export function esRechazoConfirmado(error: unknown, primerEnvio: boolean): boolean {
+  return (
+    primerEnvio &&
+    error instanceof ProviderHttpError &&
+    error.status >= 400 &&
+    error.status < 500 &&
+    RECHAZOS_CONFIRMADOS.some(code => code === error.code)
+  )
+}
+
 /** facturapi adapter. Instantiate per-emisor with that org's secret key (or the test key in sandbox). */
+/**
+ * H22 (auditoría 2026-09-30): Facturapi manda `stamp.date` en hora de México SIN zona. `new Date(...)` la leía en el huso del
+ * servidor y en producción (UTC) quedaba 6 h antes. Con zona (`Z` o desfase), tal cual.
+ */
+export function parseStampDate(raw: string): Date {
+  return /(?:[zZ]|[+-]\d{2}:?\d{2})$/.test(raw) ? new Date(raw) : fromZonedTime(raw, 'America/Mexico_City')
+}
+
 export class FacturapiProvider implements FiscalProvider {
   readonly name = 'facturapi'
   private client: Facturapi
 
-  constructor(apiKey: string) {
+  constructor(private readonly apiKey: string) {
     if (!apiKey) throw new Error('FacturapiProvider requires an API key')
     this.client = new Facturapi(apiKey)
   }
@@ -159,6 +201,61 @@ export class FacturapiProvider implements FiscalProvider {
     }
   }
 
+  /** El SDK descarta status/code; conservarlos permite distinguir rechazo de incertidumbre. */
+  private async postInvoice(payload: unknown): Promise<any> {
+    const response = await fetch('https://www.facturapi.io/v2/invoices', {
+      method: 'POST',
+      headers: { Authorization: `Bearer ${this.apiKey}`, 'Content-Type': 'application/json' },
+      body: JSON.stringify(payload),
+      signal: AbortSignal.timeout(30_000),
+    })
+    // The SDK discards HTTP status and PAC code; neither may be guessed from message text.
+    const inv = await response.json()
+    if (!response.ok)
+      throw new ProviderHttpError(
+        response.status,
+        typeof inv.code === 'string' ? inv.code : null,
+        inv.message ?? `Facturapi HTTP ${response.status}`,
+      )
+    if (!inv || typeof inv.id !== 'string' || !['valid', 'pending', 'canceled'].includes(inv.status))
+      throw new Error('Respuesta ilegible de Facturapi')
+    return inv
+  }
+
+  /**
+   * El concepto como lo recibe Facturapi. UNO solo para factura, nota y global (antes eran tres copias del mismo mapeo).
+   *
+   * 🔴 Sin `sku` ni `base` el JSON sale idéntico, llave por llave y en el mismo orden, al de antes de la Tarea 4 de C1:
+   * `sku` y `base` sólo se agregan cuando el concepto los trae (probado byte a byte en las tres pruebas del proveedor).
+   */
+  private itemFacturapi(it: CfdiItemInput) {
+    return {
+      quantity: it.quantity,
+      discount: toPesos(it.discountCents),
+      product: {
+        description: it.description,
+        product_key: it.satProductKey,
+        unit_key: it.satUnitKey,
+        // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the stamped Total equals what the
+        // customer paid; NET (+IVA on top) otherwise. Con hasta 6 decimales sólo cuando el precio no cae en centavos (B3a/C1).
+        price: it.unitPriceDecimal != null ? Number(it.unitPriceDecimal) : toPesos(it.unitPriceCents),
+        tax_included: it.taxIncluded === true,
+        // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
+        ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
+        // NoIdentificacion (H3: el folio del ticket en la global).
+        ...(it.sku ? { sku: it.sku } : {}),
+        taxes: it.taxes.map(t => ({
+          type: t.type,
+          rate: t.rate,
+          factor: t.factor,
+          withholding: t.withholding,
+          // Base en pesos que manda Avoqado (D4); sin ella el PAC la calcula del precio.
+          ...(t.base !== undefined ? { base: Number(t.base) } : {}),
+        })),
+      },
+    }
+  }
+
   async createInvoice(params: CreateInvoiceParams): Promise<StampedInvoice> {
     const payload = {
       customer: {
@@ -172,45 +269,17 @@ export class FacturapiProvider implements FiscalProvider {
       payment_form: params.formaPago,
       payment_method: params.metodoPago,
       series: params.serie,
-      // NOTE: facturapi rejects idempotency fields on invoices.create (neither query `idempotency_key`
-      // nor body `i_key` are accepted inputs — verified live in sandbox). Idempotency is enforced at
-      // our service layer via the unique `Cfdi.idempotencyKey` (pre-check before calling the PAC).
-      // `params.idempotencyKey` stays in the interface for that orchestration use; not forwarded here.
-      //
-      // external_id, however, IS accepted as a body field on invoices.create and is stored on the
-      // PAC document — confirmed via facturapi Invoice type (external_id?: string | null). We use it
-      // to stamp our idempotencyKey onto the document so the reconcile job can look it up
-      // deterministically via GET /v2/invoices?external_id= instead of relying on attribute search.
+      idempotency_key: params.idempotencyKey,
       ...(params.externalId ? { external_id: params.externalId } : {}),
       // CFDI relacionado — mismo campo que usa la nota de crédito (`related_documents`), con
       // relationship '04' (sustitución). Se omite cuando no hay relación: mandarlo vacío lo rechaza.
       ...(params.relation
         ? { related_documents: [{ relationship: params.relation.tipoRelacion, documents: params.relation.relatedUuids }] }
         : {}),
-      items: params.items.map(it => ({
-        quantity: it.quantity,
-        discount: toPesos(it.discountCents),
-        product: {
-          description: it.description,
-          product_key: it.satProductKey,
-          unit_key: it.satUnitKey,
-          // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
-          // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
-          price: toPesos(it.unitPriceCents),
-          tax_included: it.taxIncluded === true,
-          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
-          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
-          taxes: it.taxes.map(t => ({
-            type: t.type,
-            rate: t.rate,
-            factor: t.factor,
-            withholding: t.withholding,
-          })),
-        },
-      })),
+      items: params.items.map(it => this.itemFacturapi(it)),
     }
     try {
-      const inv = await this.client.invoices.create(payload)
+      const inv = await this.postInvoice(payload)
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -372,6 +441,7 @@ export class FacturapiProvider implements FiscalProvider {
   async createCreditNote(params: CreditNoteParams): Promise<StampedInvoice> {
     const payload: any = {
       type: 'E',
+      ...(params.protocoloIva === 1 ? { idempotency_key: params.idempotencyKey } : {}),
       customer: {
         legal_name: FacturapiProvider.normalizeReceptorName(params.receptor.razonSocial),
         tax_id: params.receptor.rfc,
@@ -385,28 +455,10 @@ export class FacturapiProvider implements FiscalProvider {
       ...(params.serie ? { series: params.serie } : {}),
       ...(params.externalId ? { external_id: params.externalId } : {}),
       related_documents: [{ relationship: params.relationship, documents: params.relatedUuids }],
-      items: params.items.map(it => ({
-        quantity: it.quantity,
-        discount: toPesos(it.discountCents),
-        product: {
-          description: it.description,
-          product_key: it.satProductKey,
-          unit_key: it.satUnitKey,
-          price: toPesos(it.unitPriceCents),
-          tax_included: it.taxIncluded === true,
-          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
-          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
-          taxes: it.taxes.map(t => ({
-            type: t.type,
-            rate: t.rate,
-            factor: t.factor,
-            withholding: t.withholding,
-          })),
-        },
-      })),
+      items: params.items.map(it => this.itemFacturapi(it)),
     }
     try {
-      const inv = await this.client.invoices.create(payload)
+      const inv = await this.postInvoice(payload)
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -434,8 +486,8 @@ export class FacturapiProvider implements FiscalProvider {
    *   - global.months: string — SAT c_Meses code (e.g. '05' = May, '13' = Jan+Feb bimestral)
    *   - global.year: number
    *
-   * NOTE: idempotency is NOT forwarded to facturapi (it rejects it). We own idempotency
-   * via the unique Cfdi.idempotencyKey pre-check before calling this method.
+   * Protocol 1 forwards its explicit versioned idempotency key. Historical callers
+   * omit that optional field and retain their unversioned external identity.
    */
   async createGlobalInvoice(params: GlobalInvoiceParams): Promise<StampedInvoice> {
     const payload = {
@@ -451,35 +503,16 @@ export class FacturapiProvider implements FiscalProvider {
       payment_method: 'PUE', // global invoices are always single-payment (PUE)
       ...(params.serie ? { series: params.serie } : {}),
       ...(params.externalId ? { external_id: params.externalId } : {}),
+      ...(params.idempotencyKey ? { idempotency_key: params.idempotencyKey } : {}),
       global: {
         periodicity: params.global.periodicity,
         months: params.global.months,
         year: params.global.year,
       },
-      items: params.items.map(it => ({
-        quantity: it.quantity,
-        discount: toPesos(it.discountCents),
-        product: {
-          description: it.description,
-          product_key: it.satProductKey,
-          unit_key: it.satUnitKey,
-          // IVA-included (gross) when taxIncluded → facturapi back-computes the base so the
-          // stamped Total equals what the customer paid; NET (+IVA on top) otherwise.
-          price: toPesos(it.unitPriceCents),
-          tax_included: it.taxIncluded === true,
-          // ObjetoImp del concepto: sin él facturapi asume 02 (sí objeto) y un exento/no objeto se timbraría mal.
-          ...(it.objetoImp ? { taxability: it.objetoImp } : {}),
-          taxes: it.taxes.map(t => ({
-            type: t.type,
-            rate: t.rate,
-            factor: t.factor,
-            withholding: t.withholding,
-          })),
-        },
-      })),
+      items: params.items.map(it => this.itemFacturapi(it)),
     }
     try {
-      const inv = await this.client.invoices.create(payload)
+      const inv = await this.postInvoice(payload)
       return this.toStamped(inv)
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err)
@@ -503,7 +536,7 @@ export class FacturapiProvider implements FiscalProvider {
    * Contract:
    *   - Returns the first 'valid' match if any exist.
    *   - Returns the first match (whatever status) when no 'valid' exists but results were returned.
-   *   - Returns null when the list is empty (no document with that external_id — definitive NONE).
+   *   - Returns null when the list is empty (no match observed).
    *   - Does NOT suppress errors: PAC network errors bubble to the caller (→ INCONCLUSIVE, not RESET).
    */
   async findByExternalId(externalId: string): Promise<ProviderInvoiceSummary | null> {
@@ -511,7 +544,7 @@ export class FacturapiProvider implements FiscalProvider {
     const data = res?.data ?? []
     if (data.length === 0) return null
     // Prefer the first valid document; fall back to the first result (e.g. canceled)
-    const valid = data.find((inv: any) => inv.status !== 'canceled')
+    const valid = data.find((inv: any) => inv.status === 'valid' && inv.uuid)
     return this.toSummary(valid ?? data[0])
   }
 
@@ -540,9 +573,25 @@ export class FacturapiProvider implements FiscalProvider {
     return { invoices, truncated }
   }
 
+  /**
+   * C2 T7, ronda 1 (M1): el XML se baja por `fetch` con tiempo límite y conserva el status HTTP en `ProviderHttpError` (el SDK lo descarta:
+   * tiraba un `Error` sin status y no se distinguía «el PAC ya no lo entrega» —404/401/403, permanente— de un PAC caído).
+   */
   async downloadXml(providerInvoiceId: string): Promise<Buffer> {
-    const stream = await this.client.invoices.downloadXml(providerInvoiceId)
-    return this.binaryDownloadToBuffer(stream)
+    const response = await fetch(`https://www.facturapi.io/v2/invoices/${encodeURIComponent(providerInvoiceId)}/xml`, {
+      method: 'GET',
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+      signal: AbortSignal.timeout(TIEMPO_LIMITE_CONSULTA_MS),
+    })
+    if (!response.ok) {
+      const body: any = await response.json().catch(() => null)
+      throw new ProviderHttpError(
+        response.status,
+        typeof body?.code === 'string' ? body.code : null,
+        typeof body?.message === 'string' && body.message ? body.message : `Facturapi HTTP ${response.status}`,
+      )
+    }
+    return Buffer.from(await response.arrayBuffer())
   }
 
   async downloadPdf(providerInvoiceId: string): Promise<Buffer> {
@@ -550,12 +599,36 @@ export class FacturapiProvider implements FiscalProvider {
     return this.binaryDownloadToBuffer(stream)
   }
 
+  /**
+   * C2 · Tarea 2: la cancelación y su consulta van por `fetch` con tiempo límite (antes, el SDK sin tiempo límite: un PAC colgado dejaba
+   * la petición abierta para siempre). Como `postInvoice`, conserva el status HTTP y el `code` del PAC en `ProviderHttpError`: sin ellos
+   * no se distingue «trámite existente» (409 `invoice_cancellation_in_progress`) de un rechazo concluyente ni de «no se sabe».
+   * Un cuerpo ilegible (p. ej. un 502 de la puerta de enlace) sale como `ProviderHttpError` sin código: quien llama lo trata EN DUDA.
+   */
+  private async facturapiJson(method: 'GET' | 'DELETE', path: string): Promise<any> {
+    const response = await fetch(`https://www.facturapi.io/v2${path}`, {
+      method,
+      headers: { Authorization: `Bearer ${this.apiKey}` },
+      // C2 ronda 1 (I2): los MISMOS tiempos límite de los que se deriva ENVIO_TERMINADO_MS.
+      signal: AbortSignal.timeout(method === 'GET' ? TIEMPO_LIMITE_CONSULTA_MS : TIEMPO_LIMITE_ENVIO_MS),
+    })
+    const body: any = await response.json().catch(() => null)
+    if (!response.ok)
+      throw new ProviderHttpError(
+        response.status,
+        typeof body?.code === 'string' ? body.code : null,
+        typeof body?.message === 'string' && body.message ? body.message : `Facturapi HTTP ${response.status}`,
+      )
+    if (!body || typeof body.status !== 'string') throw new Error('Respuesta ilegible de Facturapi')
+    return body
+  }
+
   async cancelInvoice(params: CancelInvoiceParams): Promise<CancelInvoiceResult> {
-    // invoices.cancel returns the full Invoice object (not a custom cancel result).
-    // cancellation_status is a CancellationStatus enum on the Invoice.
-    const opts: { motive: string; substitution?: string } = { motive: params.motivo }
-    if (params.substituteUuid) opts.substitution = params.substituteUuid
-    const inv = await this.client.invoices.cancel(params.providerInvoiceId, opts as Parameters<typeof this.client.invoices.cancel>[1])
+    // DELETE /v2/invoices/{id}?motive=..&substitution=.. (docs.facturapi.io «Cancelaciones»). Devuelve la factura completa;
+    // cancellation_status es el estado de la SOLICITUD.
+    const query = new URLSearchParams({ motive: params.motivo })
+    if (params.substituteUuid) query.set('substitution', params.substituteUuid)
+    const inv = await this.facturapiJson('DELETE', `/invoices/${encodeURIComponent(params.providerInvoiceId)}?${query.toString()}`)
     // 🔴 Hay que mirar LAS DOS cosas: el estado de la FACTURA y el de la SOLICITUD. Una cancelación
     // inmediata deja `status: 'canceled'` aunque `cancellation_status` siga en `none`; y un `none` con
     // la factura viva significa que NO se canceló nada. Tratar `none` (o un valor desconocido) como
@@ -568,13 +641,13 @@ export class FacturapiProvider implements FiscalProvider {
   }
 
   /**
-   * CONSULTA el estado de una cancelación ya pedida, sin volver a pedirla. Cuando el SAT contesta «en
+   * CONSULTA el estado de una cancelación ya pedida, sin volver a pedirla (GET, idempotente). Cuando el SAT contesta «en
    * trámite» al cancelar, ésta es la única forma de enterarse después de que sí quedó (Testarudo, A-14:
    * cancelada en el SAT y «Timbrada» en Avoqado durante tres días). La fecha sale de lo que registró el
    * PAC; si no la trae, se devuelve `null` en vez de inventar una.
    */
   async getCancellationStatus(providerInvoiceId: string): Promise<CancelInvoiceResult> {
-    const inv: any = await this.client.invoices.retrieve(providerInvoiceId)
+    const inv: any = await this.facturapiJson('GET', `/invoices/${encodeURIComponent(providerInvoiceId)}`)
     const status = this.mapCancellationStatus(inv.status as string, inv.cancellation_status as string)
     const registrada = inv.cancellation?.last_checked ? new Date(inv.cancellation.last_checked) : null
     return {
@@ -604,12 +677,12 @@ export class FacturapiProvider implements FiscalProvider {
   private toStamped(inv: Awaited<ReturnType<typeof this.client.invoices.retrieve>>): StampedInvoice {
     return {
       providerInvoiceId: inv.id,
-      uuid: inv.uuid,
+      uuid: inv.uuid ?? null,
       serie: inv.series ?? null,
       folio: inv.folio_number != null ? String(inv.folio_number) : null,
       totalCents: toCents(Number(inv.total ?? 0)),
-      stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : new Date(),
-      status: inv.status === 'canceled' ? 'canceled' : 'valid',
+      stampedAt: inv.stamp?.date ? parseStampDate(inv.stamp.date) : new Date(),
+      status: inv.status === 'valid' ? 'valid' : inv.status === 'canceled' ? 'canceled' : 'pending',
     }
   }
 
@@ -620,10 +693,10 @@ export class FacturapiProvider implements FiscalProvider {
       serie: inv.series ?? null,
       folio: inv.folio_number != null ? String(inv.folio_number) : null,
       totalCents: toCents(Number(inv.total ?? 0)),
-      status: inv.status === 'canceled' ? 'canceled' : 'valid',
+      status: inv.status === 'valid' ? 'valid' : inv.status === 'canceled' ? 'canceled' : 'pending',
       customerTaxId: inv.customer?.tax_id ?? null,
       isGlobal: inv.global != null,
-      stampedAt: inv.stamp?.date ? new Date(inv.stamp.date) : null,
+      stampedAt: inv.stamp?.date ? parseStampDate(inv.stamp.date) : null,
     }
   }
 

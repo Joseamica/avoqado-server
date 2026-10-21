@@ -5,6 +5,7 @@
 
 // Load .env file for integration tests
 import * as dotenv from 'dotenv'
+import { motivoParaRechazarBaseDePruebas } from './baseDePruebasPermitida'
 
 const testDatabaseUrlWasPresent = Object.prototype.hasOwnProperty.call(process.env, 'TEST_DATABASE_URL')
 const testDatabaseUrlFromCaller = process.env.TEST_DATABASE_URL
@@ -18,6 +19,18 @@ if (!testDatabaseUrlWasPresent || !testDatabaseUrlFromCaller?.trim()) {
   delete process.env.DATABASE_URL
   delete process.env.TEST_DATABASE_URL
   throw new Error('Export a non-empty TEST_DATABASE_URL before running integration tests.')
+}
+
+// Nunca la base compartida ni una remota: una limpieza con `venueId` undefined borra tablas enteras
+// (ver baseDePruebasPermitida.ts). Se decide aquí, antes de que exista ningún gancho de las suites.
+const motivoDeRechazo = motivoParaRechazarBaseDePruebas(testDatabaseUrlFromCaller)
+if (motivoDeRechazo) {
+  delete process.env.DATABASE_URL
+  delete process.env.TEST_DATABASE_URL
+  throw new Error(
+    `Las pruebas de integración no corren aquí: ${motivoDeRechazo}. ` +
+      'Crea una base desechable (createdb avoqado_<tarea>_test_<fecha>) y exporta TEST_DATABASE_URL hacia ella.',
+  )
 }
 
 process.env.TEST_DATABASE_URL = testDatabaseUrlFromCaller
@@ -37,6 +50,9 @@ process.env.OTP_PEPPER = 'test-otp-pepper-secret'
 // APAGADA y la integración probaría el modo degradado en vez del real — un reintento del
 // refresco se leería como robo. Hex de 32 bytes, igual que en el setup de unit.
 process.env.SESSION_SUCCESSOR_ENC_KEY = process.env.SESSION_SUCCESSOR_ENC_KEY || 'b'.repeat(64)
+// Tarjetas de regalo: las mismas llaves de prueba que el setup de unit (hex de 32 bytes).
+process.env.GIFT_CARD_CODE_KEY = process.env.GIFT_CARD_CODE_KEY || 'c'.repeat(64)
+process.env.GIFT_CARD_HMAC_KEY = process.env.GIFT_CARD_HMAC_KEY || 'd'.repeat(64)
 // Some app-level integration suites import module-load singletons. A dummy key
 // lets those deterministic paths initialize without authorizing a real request.
 process.env.OPENAI_API_KEY = 'sk-test-dummy-for-jest'
@@ -67,11 +83,16 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
 console.log('Integration test setup loaded (using REAL Prisma client)')
 
 if (typeof afterAll === 'function') {
-  afterAll(async () => {
-    // WHY: Jest creates a fresh module registry per integration file; without teardown, each imported singleton leaves its own pool alive.
+  // Fixture afterAll hooks may still use these clients. The environment closes
+  // them at run_finish, after every hook, while Jest's module runtime is alive.
+  ;(globalThis as typeof globalThis & { disposeIntegrationClients?: () => Promise<void> }).disposeIntegrationClients = async () => {
     const { default: prisma } = await import('@/utils/prismaClient')
-    if (typeof prisma.$disconnect === 'function') await prisma.$disconnect()
-  })
+    const { default: pgPool } = await import('@/config/database')
+    await Promise.all([
+      typeof prisma.$disconnect === 'function' ? prisma.$disconnect() : Promise.resolve(),
+      pgPool.ended ? Promise.resolve() : pgPool.end(),
+    ])
+  }
 }
 
 // Note: We do NOT mock Prisma for integration tests

@@ -20,8 +20,10 @@ import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    table: { findFirst: jest.fn(), update: jest.fn() },
-    order: { findMany: jest.fn() },
+    table: { findFirst: jest.fn(), findMany: jest.fn(), update: jest.fn() },
+    order: { findMany: jest.fn(), findFirst: jest.fn() },
+    $queryRaw: jest.fn(),
+    $transaction: jest.fn(),
   },
 }))
 jest.mock('../../../../src/communication/sockets', () => ({
@@ -34,21 +36,59 @@ import prisma from '../../../../src/utils/prismaClient'
 import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 
 const mockedPrisma = prisma as unknown as {
-  table: { findFirst: jest.Mock; update: jest.Mock }
-  order: { findMany: jest.Mock }
+  table: { findFirst: jest.Mock; findMany: jest.Mock; update: jest.Mock }
+  order: { findMany: jest.Mock; findFirst: jest.Mock }
+  $queryRaw: jest.Mock
+  $transaction: jest.Mock
 }
 const mockedLogAction = logAction as jest.Mock
 
 describe('table.tpv.service — clearTable ActivityLog', () => {
-  beforeEach(() => jest.clearAllMocks())
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedPrisma.table.findFirst.mockResolvedValue(null)
+    mockedPrisma.order.findMany.mockResolvedValue([])
+    mockedPrisma.$transaction.mockImplementation(async callback => callback(mockedPrisma))
+    mockedPrisma.table.findMany.mockImplementation(async () => {
+      const row = await mockedPrisma.table.findFirst.getMockImplementation()?.()
+      return row ? [{ status: 'OCCUPIED', ...row }] : []
+    })
+    mockedPrisma.order.findFirst.mockImplementation(async () => {
+      const rows = await mockedPrisma.order.findMany.getMockImplementation()?.()
+      return rows?.find((row: { paymentStatus: string }) => row.paymentStatus !== 'PAID') ?? null
+    })
+    mockedPrisma.$queryRaw.mockImplementation(async (query: unknown) => {
+      const sql = Array.isArray(query)
+        ? query.join(' ')
+        : query && typeof query === 'object' && 'strings' in query && Array.isArray(query.strings)
+          ? query.strings.join(' ')
+          : ''
+      if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
+      if (sql.includes('FROM "Order"')) {
+        const rows = await mockedPrisma.order.findMany.getMockImplementation()?.()
+        return rows.map((row: { id: string }) => ({ id: row.id }))
+      }
+      if (sql.includes('FROM "Table"')) return [{ id: 'table-1' }]
+      throw new Error('Unexpected clear-table topology SQL')
+    })
+  })
 
-  const table = { id: 'table-1', number: '12', currentOrderId: 'order-1' }
+  const table = { id: 'table-1', number: '12', status: 'OCCUPIED', currentOrderId: 'order-1' }
 
   // ── NEW: ActivityLog coverage ────────────────────────────────────────────
 
   it('writes a TABLE_CLEARED ActivityLog row attributed to performedBy when the caller has one (online /tpv path)', async () => {
     mockedPrisma.table.findFirst.mockResolvedValue(table)
-    mockedPrisma.order.findMany.mockResolvedValue([{ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PAID' }])
+    mockedPrisma.order.findMany.mockResolvedValue([
+      {
+        id: 'order-1',
+        tableId: 'table-1',
+        status: 'PENDING',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PAID',
+      },
+    ])
     mockedPrisma.table.update.mockResolvedValue({ ...table, status: 'AVAILABLE', currentOrderId: null })
 
     await clearTable('venue-1', 'table-1', 'staff-99')
@@ -66,7 +106,16 @@ describe('table.tpv.service — clearTable ActivityLog', () => {
 
   it('still writes the ActivityLog row (staffId: null) when no performedBy is available — the offline reducer and the frozen /mobile controller cannot pass one, but the mutation must not go unaudited', async () => {
     mockedPrisma.table.findFirst.mockResolvedValue(table)
-    mockedPrisma.order.findMany.mockResolvedValue([{ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PAID' }])
+    mockedPrisma.order.findMany.mockResolvedValue([
+      {
+        id: 'order-1',
+        tableId: 'table-1',
+        status: 'PENDING',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PAID',
+      },
+    ])
     mockedPrisma.table.update.mockResolvedValue({ ...table, status: 'AVAILABLE', currentOrderId: null })
 
     await clearTable('venue-1', 'table-1')
@@ -76,7 +125,16 @@ describe('table.tpv.service — clearTable ActivityLog', () => {
 
   it('does NOT write ActivityLog when the clear is rejected (unpaid order) — no mutation happened', async () => {
     mockedPrisma.table.findFirst.mockResolvedValue(table)
-    mockedPrisma.order.findMany.mockResolvedValue([{ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PENDING' }])
+    mockedPrisma.order.findMany.mockResolvedValue([
+      {
+        id: 'order-1',
+        tableId: 'table-1',
+        status: 'PENDING',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PENDING',
+      },
+    ])
 
     await expect(clearTable('venue-1', 'table-1', 'staff-99')).rejects.toThrow(BadRequestError)
     expect(mockedLogAction).not.toHaveBeenCalled()
@@ -94,8 +152,22 @@ describe('table.tpv.service — clearTable ActivityLog', () => {
   it('regression: still blocks clearing while ANY open order on the table is unpaid (multi-cheque)', async () => {
     mockedPrisma.table.findFirst.mockResolvedValue(table)
     mockedPrisma.order.findMany.mockResolvedValue([
-      { id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PAID' },
-      { id: 'order-2', orderNumber: 'ORD-2', paymentStatus: 'PARTIAL' },
+      {
+        id: 'order-1',
+        tableId: 'table-1',
+        status: 'PENDING',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PAID',
+      },
+      {
+        id: 'order-2',
+        tableId: 'table-1',
+        status: 'PENDING',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        orderNumber: 'ORD-2',
+        paymentStatus: 'PARTIAL',
+      },
     ])
 
     await expect(clearTable('venue-1', 'table-1', 'staff-99')).rejects.toThrow('Cannot clear table with unpaid order ORD-2')
@@ -103,7 +175,16 @@ describe('table.tpv.service — clearTable ActivityLog', () => {
 
   it('regression: still marks the table AVAILABLE and clears currentOrderId when every open order is paid', async () => {
     mockedPrisma.table.findFirst.mockResolvedValue(table)
-    mockedPrisma.order.findMany.mockResolvedValue([{ id: 'order-1', orderNumber: 'ORD-1', paymentStatus: 'PAID' }])
+    mockedPrisma.order.findMany.mockResolvedValue([
+      {
+        id: 'order-1',
+        tableId: 'table-1',
+        status: 'PENDING',
+        createdAt: new Date('2026-10-01T00:00:00Z'),
+        orderNumber: 'ORD-1',
+        paymentStatus: 'PAID',
+      },
+    ])
     mockedPrisma.table.update.mockResolvedValue({ ...table, status: 'AVAILABLE', currentOrderId: null })
 
     await clearTable('venue-1', 'table-1', 'staff-99')

@@ -126,3 +126,14 @@ describe('Codex ronda 9 — el selector lleva la hora de la verificación, no la
     expect((await verificarTokenDelSelector(token))?.verificadoEn).toEqual(verificada)
   })
 })
+
+describe('selector vinculado al consentimiento', () => {
+  it('no se puede usar la identidad con otra solicitud OAuth', async () => {
+    const token = issueOrgPickToken('staff-123', new Date(), 'request-1')
+    expect(await verificarTokenDelSelector(token, 'request-2')).toBeNull()
+    expect((await verificarTokenDelSelector(token, 'request-1'))?.staffId).toBe('staff-123')
+  })
+  it('un selector antiguo sin vínculo no sirve para un consentimiento nuevo', async () => {
+    expect(await verificarTokenDelSelector(issueOrgPickToken('staff-123'), 'request-1')).toBeNull()
+  })
+})

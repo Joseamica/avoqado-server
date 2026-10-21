@@ -4,6 +4,7 @@ import AppError from '../../errors/AppError'
 import logger from '../../config/logger'
 import { toLegacyProductPayload } from '../../utils/legacyProductPayload'
 import { resolveLegacyCatalogActor } from '../../services/master-catalog/catalogGovernance.service'
+import { estadoIvaPorProducto } from '../../services/fiscal/encendidoIva.service'
 
 /**
  * Get all products for a venue
@@ -99,6 +100,18 @@ export const createProductHandler = async (req: Request, res: Response, next: Ne
       data: toLegacyProductPayload(product),
       correlationId,
     })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * IVA por producto (plan 6b, spec §5.1): el estado del negocio — encendido o apagado, contabilidad y avisos. Informativo y SIN revisión: el
+ * dashboard lo pide en cada carga de Productos y los bloqueos reales los toma del 409 al guardar (`revisado: false`, T5-a).
+ */
+export const getIvaPorProductoHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+  try {
+    res.status(200).json({ data: await estadoIvaPorProducto(req.params.venueId, new Date(), { conRevision: false }) })
   } catch (error) {
     next(error)
   }

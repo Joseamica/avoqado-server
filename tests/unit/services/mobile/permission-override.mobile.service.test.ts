@@ -1,5 +1,6 @@
 import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import * as permisos from '@/lib/permissions'
 import {
   createPermissionOverride,
   consumePermissionOverride,
@@ -218,6 +219,114 @@ describe('createPermissionOverride', () => {
       expect.objectContaining({ where: { venueId_role: { venueId: VENUE, role: StaffRole.WAITER } } }),
     )
   })
+
+  /**
+   * 🔴 Codex (B3b, código r1, P1 #2): el negocio le puede QUITAR a un rol un permiso de fábrica
+   * (`VenueRolePermission.deniedPermissions`). `checkPermission` respeta esa exclusión, así que el ADMIN recibe 403
+   * sin PIN. Si aquí se ignorara, ese mismo ADMIN tecleaba SU PROPIO PIN, obtenía un token del permiso que le
+   * quitaron y pasaba el middleware con él: el PIN devolvía lo que el dueño retiró a propósito.
+   */
+  describe('respeta lo que el negocio le QUITÓ al rol (deniedPermissions)', () => {
+    const adminStaffVenue = {
+      ...managerStaffVenue,
+      id: 'sv_admin',
+      role: StaffRole.ADMIN,
+      staff: { firstName: 'Ana', lastName: 'Admin' },
+    }
+
+    it('🔴 un ADMIN al que le quitaron cfdi:configure NO emite un token de ese permiso con su propio PIN', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+      ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['cfdi:configure'] })
+
+      await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW })).rejects.toMatchObject(
+        { code: 'OVERRIDE_INSUFFICIENT', authorizer: { staffVenueId: 'sv_admin', role: StaffRole.ADMIN } },
+      )
+      expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+    })
+
+    it('la exclusión de UN permiso no le quita al ADMIN los demás: su PIN sigue autorizando lo que conserva', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+      ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['cfdi:configure'] })
+
+      const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:issue', now: NOW })
+      expect(result.authorizedBy.id).toBe('sv_admin')
+    })
+
+    it('un ADMIN SIN exclusiones sí emite el token de cfdi:configure (control: el rechazo de arriba es la exclusión)', async () => {
+      ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+      ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: [] })
+
+      const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW })
+      expect(result.authorizedBy.id).toBe('sv_admin')
+      expect(prisma.permissionOverride.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ permission: 'cfdi:configure', authorizedById: 'sv_admin' }),
+      })
+    })
+
+    /**
+     * 🔴 Codex (B3b, código r2, N1): aplicar exclusiones re-resuelve dependencias, así que la lectura CON exclusiones
+     * podía conceder algo que la lectura SIN ellas negaba. El caso real: excluir `scale:use` abría el comodín `scale:*`
+     * del ADMIN y la dependencia de `scale:configure` le AGREGABA `tpv-settings:*`, que entonces no tenía.
+     *
+     * Ese camino ya no existe en el catálogo: desde el 15-oct el ADMIN trae `tpv-settings` de fábrica (decisión del
+     * founder), y `tests/unit/lib/permissions.tpvSettingsAdmin.test.ts` cuida que ninguna exclusión vuelva a habilitar
+     * nada en ningún rol. Pero el PIN sigue exigiendo las DOS lecturas (sin y con exclusiones), y esa defensa se prueba
+     * aquí simulando que divergen: si un cambio futuro del catálogo reabre un camino así, el PIN no lo convierte en token.
+     */
+    describe('el PIN exige las dos lecturas (sin y con exclusiones)', () => {
+      afterEach(() => jest.restoreAllMocks())
+
+      it('🔴 si sólo la lectura CON exclusiones concede, NO se emite token', async () => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+        const leeConExclusiones = jest
+          .spyOn(permisos, 'hasPermission')
+          .mockImplementation((_rol, _custom, _permiso, excluidos) => Boolean(excluidos && excluidos.length > 0))
+
+        await expect(
+          createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW }),
+        ).rejects.toBeInstanceOf(OverrideInsufficientError)
+        expect(leeConExclusiones).toHaveBeenCalledWith(StaffRole.ADMIN, [], 'cfdi:configure')
+        expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+      })
+
+      it('🔴 si sólo la lectura SIN exclusiones concede, tampoco', async () => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+        jest.spyOn(permisos, 'hasPermission').mockImplementation((_rol, _custom, _permiso, excluidos) => !excluidos)
+
+        await expect(
+          createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW }),
+        ).rejects.toBeInstanceOf(OverrideInsufficientError)
+        expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+      })
+
+      it('control: si las dos conceden, se emite', async () => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+        jest.spyOn(permisos, 'hasPermission').mockReturnValue(true)
+
+        const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW })
+        expect(result.authorizedBy.id).toBe('sv_admin')
+      })
+    })
+
+    it.each(['tpv-settings:read', 'tpv-settings:update'])(
+      'el ADMIN ya trae %s de fábrica (15-oct): su PIN lo autoriza, con o sin la exclusión de scale:use',
+      async permiso => {
+        for (const deniedPermissions of [[], ['scale:use']]) {
+          jest.clearAllMocks()
+          ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+          ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions })
+          ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+          ;(prisma.permissionOverride.create as jest.Mock).mockImplementation(async ({ data }: any) => data)
+
+          const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: permiso, now: NOW })
+          expect(result.authorizedBy.id).toBe('sv_admin')
+        }
+      },
+    )
+  })
 })
 
 describe('consumePermissionOverride', () => {
@@ -244,6 +353,21 @@ describe('consumePermissionOverride', () => {
       },
       data: { consumedAt: NOW, consumedRoute: 'POST /api/v1/mobile/venues/:venueId/orders/:orderId/merge' },
     })
+  })
+
+  it('🔴 A3 (cierre): consumedRoute se guarda SIN query string (un código de tarjeta en la URL no llega a la base)', async () => {
+    ;(prisma.permissionOverride.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(prisma.permissionOverride.findUnique as jest.Mock).mockResolvedValue({ authorizedById: 'sv_manager' })
+    await consumePermissionOverride({
+      token: 'tok_q',
+      venueId: VENUE,
+      permission: 'giftCards:read',
+      route: 'GET /api/v1/mobile/venues/v1/gift-cards/lookup?code=K7QZ-ABCD-EFGH-JKMN-P',
+      now: NOW,
+    })
+    expect((prisma.permissionOverride.updateMany as jest.Mock).mock.calls[0][0].data.consumedRoute).toBe(
+      'GET /api/v1/mobile/venues/v1/gift-cards/lookup',
+    )
   })
 
   it('🔴 segundo consumo del MISMO token → null (count 0 = otro ganó la carrera)', async () => {

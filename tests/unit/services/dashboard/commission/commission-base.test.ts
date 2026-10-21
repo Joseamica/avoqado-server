@@ -26,9 +26,11 @@
  * aparte cuando `includeTips`.
  */
 import {
+  baseSinIvaPorTasa,
   COMMISSION_BASE,
   commissionableAmount,
   orderLevelDiscountOf,
+  precioTraeIva,
   resolveCommissionBase,
   selectCommissionableLines,
 } from '../../../../../src/services/dashboard/commission/commission-base'
@@ -193,5 +195,110 @@ describe('selectCommissionableLines', () => {
     const lines = selectCommissionableLines({ orderLines: cortesias, orderLevelDiscount: 10, include: () => true })
     expect(lines[0].orderDiscountShare).toBe(0)
     expect(commissionableAmount(lines, { base: COMMISSION_BASE.LO_COBRADO })).toBe(0)
+  })
+})
+
+describe('commissionableAmount — el IVA (D5, fase 3 de pago por servicio)', () => {
+  it('🔴 IVA incluido, la línea de un cobro: «con IVA» es lo cobrado; «sin IVA» le resta su IVA', () => {
+    const linea = [{ gross: 116, tax: 16 }]
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: true, ivaIncluidoEnPrecio: true })).toBe(116)
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: false, ivaIncluidoEnPrecio: true })).toBe(100)
+  })
+
+  it('IVA aparte: «con IVA» lo suma; «sin IVA», el neto (lo de siempre)', () => {
+    const linea = [{ gross: 100, tax: 16 }]
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: true })).toBe(116)
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: false })).toBe(100)
+  })
+
+  it('restar el IVA nunca deja una línea en negativo', () => {
+    const linea = [{ gross: 10, lineDiscount: 8, tax: 16 }]
+    expect(commissionableAmount(linea, { base: COMMISSION_BASE.LO_COBRADO, includeTax: false, ivaIncluidoEnPrecio: true })).toBe(0)
+  })
+})
+
+describe('A1e · baseSinIvaPorTasa — la parte gravable con la regla de la póliza contable (D5 enmendada)', () => {
+  const COBRADO = COMMISSION_BASE.LO_COBRADO
+
+  it.each([
+    [0.16, 116, 100],
+    [0.08, 108, 100],
+    [0, 100, 100],
+  ] as const)('🔴 a la tasa %s, $%s con el IVA incluido son $%s sin IVA', (taxRate, gross, base) => {
+    expect(baseSinIvaPorTasa([{ gross, taxRate }], COBRADO)).toBe(base)
+  })
+
+  it('una línea sin tasa (sin producto) cuenta al 16 %, como la póliza', () => {
+    expect(baseSinIvaPorTasa([{ gross: 116, taxRate: null }], COBRADO)).toBe(100)
+  })
+
+  it('cada tasa por su lado: $116 al 16 % + $100 al 0 % = $200', () => {
+    expect(
+      baseSinIvaPorTasa(
+        [
+          { gross: 116, taxRate: 0.16 },
+          { gross: 100, taxRate: 0 },
+        ],
+        COBRADO,
+      ),
+    ).toBe(200)
+  })
+
+  it('el descuento se resta antes de separar el IVA; «precio de lista» lo ignora', () => {
+    const linea = [{ gross: 116, lineDiscount: 16, taxRate: 0.16 }]
+    expect(baseSinIvaPorTasa(linea, COBRADO)).toBe(86.21) // 100 ÷ 1.16
+    expect(baseSinIvaPorTasa(linea, COMMISSION_BASE.PRECIO_DE_LISTA)).toBe(100)
+  })
+
+  it('🔴 con una tasa no inventa centavos (Codex r1-2)', () => {
+    const tercio = 1 / 3
+    const tresDeUnPeso = Array.from({ length: 3 }, () => ({ gross: 1, orderDiscountShare: tercio, taxRate: 0 }))
+    expect(baseSinIvaPorTasa(tresDeUnPeso, COBRADO)).toBe(2)
+    expect(
+      baseSinIvaPorTasa(
+        [
+          { gross: 100, taxRate: 0.16 },
+          { gross: 100, taxRate: 0.16 },
+        ],
+        COBRADO,
+      ),
+    ).toBe(172.41)
+  })
+
+  it('🔴 Codex r3-1: el neto se reparte en centavos conservando el total ANTES de separar por tasa', () => {
+    // Dos tasas: $0.01 al 16 % + $0.01 al 8 % con $0.01 de descuento: se cobró $0.01; la base no puede pasar de ahí (no $0.02).
+    const dosTasas = [0.16, 0.08].map(taxRate => ({ gross: 0.01, orderDiscountShare: 0.005, taxRate }))
+    expect(baseSinIvaPorTasa(dosTasas, COBRADO)).toBe(0.01)
+    // $0.24 al 16 % + $0.24 exento con $0.01 de descuento: $0.44, no $0.45.
+    const conExento = [0.16, 0].map(taxRate => ({ gross: 0.24, orderDiscountShare: 0.005, taxRate }))
+    expect(baseSinIvaPorTasa(conExento, COBRADO)).toBe(0.44)
+    // Tres tasas de $0.01 con $0.01 de descuento: se cobraron $0.02 y la base es $0.02, no $0.03.
+    const tresTasas = [0.16, 0.08, 0].map(taxRate => ({ gross: 0.01, orderDiscountShare: 0.01 / 3, taxRate }))
+    expect(baseSinIvaPorTasa(tresTasas, COBRADO)).toBe(0.02)
+  })
+
+  it('una línea nunca queda negativa ni le resta a las demás', () => {
+    expect(
+      baseSinIvaPorTasa(
+        [
+          { gross: 10, lineDiscount: 30, taxRate: 0 },
+          { gross: 100, taxRate: 0 },
+        ],
+        COBRADO,
+      ),
+    ).toBe(100)
+  })
+})
+
+describe('precioTraeIva — ¿los renglones de la orden ya traen el IVA? (A1e)', () => {
+  it.each([
+    ['IVA_INCLUIDO', 0, true],
+    ['IVA_INCLUIDO', 16, true],
+    ['IVA_APARTE', 16, false],
+    ['IVA_APARTE', 0, false],
+    ['DESCONOCIDO', 0, true],
+    ['DESCONOCIDO', 16, false],
+  ] as const)('%s con $%s de IVA registrado ⇒ %s', (contratoDePrecio, taxAmount, esperado) => {
+    expect(precioTraeIva({ contratoDePrecio, taxAmount })).toBe(esperado)
   })
 })

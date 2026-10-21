@@ -3,13 +3,17 @@ import { z } from 'zod'
 import prisma from '@/utils/prismaClient'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
+import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { TableStatus } from '@prisma/client'
 import AppError from '@/errors/AppError'
-import { moveOrderToTable, assignOrderWaiter } from '@/services/tpv/table.tpv.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
+import { moveOrderToTable, assignOrderWaiter, setTableStatusInTransaction } from '@/services/tpv/table.tpv.service'
 import { compWholeOrder } from '@/services/mobile/comp-item.mobile.service'
 import { updateOrderDetails, splitOrderItems, splitOrderBySeat, mergeOrders } from '@/services/mobile/order.mobile.service'
+// Módulo LIGERO (sólo Prisma): el `.service` arrastra sockets y candados que el MCP no necesita para leer.
+import { getFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.read'
 
 const STATUS_MAP: Record<string, TableStatus> = {
   available: TableStatus.AVAILABLE,
@@ -142,6 +146,82 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
   )
 
   server.tool(
+    'floor_plan',
+    'The floor plan (plano del salón) of a venue you can access, area by area: each area with its shape (wide, square or tall), its tables (number, seats, shape, size — «automático» or «A × B cuadros» of the area grid — and whether it is placed on the plan) and how many walls, bars, service areas (kitchen, bathroom…), doors and labels it has, plus the tables not placed yet. Answers "¿cómo está acomodado mi salón?" or "¿qué mesas no están en el plano?". Pass venueId. The plan is edited in the web dashboard (Configuración → Mesas y plano). For live occupancy use tables_status.',
+    { venueId: z.string().describe('Venue whose floor plan to read (must be in your scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('tables:read', venueId, 'read')
+      const plan = await getFloorPlan(venueId)
+      const SHAPE = { WIDE: 'ancha', SQUARE: 'cuadrada', TALL: 'larga' } as const
+      const TABLE_SHAPE = { SQUARE: 'cuadrada', ROUND: 'redonda', RECTANGLE: 'larga' } as const
+      // La cuadrícula de cada forma de área (la del editor, `gridOf` del dashboard): el tamaño propio se guarda 0–1 de ella.
+      const GRID = { WIDE: [40, 25], SQUARE: [40, 40], TALL: [25, 40] } as const
+      /**
+       * `customSizeCells`: LA conversión de 0–1 a cuadros, idéntica en el dashboard, Android e iOS (no hay librería
+       * compartida entre repos: se copia por valor). floor(x + 0.5), de 2 al lado de su eje; redonda y cuadrada, el menor.
+       */
+      const customSizeCells = (
+        shape: string,
+        width: number | null | undefined,
+        height: number | null | undefined,
+        cols: number,
+        rows: number,
+      ) => {
+        if (width == null || height == null) return null
+        const w = Math.min(Math.max(Math.floor(width * cols + 0.5), 2), cols)
+        const h = Math.min(Math.max(Math.floor(height * rows + 0.5), 2), rows)
+        const side = Math.min(w, h)
+        return shape === 'RECTANGLE' ? { w, h } : { w: side, h: side }
+      }
+      const sizeOf = (t: { shape: string; width: number | null; height: number | null }, floorShape: keyof typeof GRID) => {
+        const [cols, rows] = GRID[floorShape]
+        const c = customSizeCells(t.shape, t.width, t.height, cols, rows)
+        return c ? `${c.w} × ${c.h} cuadros` : 'automático'
+      }
+      const areaIds = new Set(plan.areas.map(a => a.id))
+      // Acomodada = tiene las DOS coordenadas. La misma regla decide «placed» y «unplacedTables».
+      const isPlaced = (t: { positionX: number | null; positionY: number | null }) => t.positionX !== null && t.positionY !== null
+      const areas = plan.areas.map(a => {
+        const tables = plan.tables.filter(t => t.areaId === a.id)
+        const els = plan.elements.filter(e => e.areaId === a.id)
+        const count = (type: string) => els.filter(e => e.type === type).length
+        return {
+          name: a.name,
+          shape: SHAPE[a.floorShape ?? 'WIDE'],
+          // capacity 0 = «sin dato»: no suma lugares.
+          seats: tables.reduce((sum, t) => sum + (t.capacity > 0 ? t.capacity : 0), 0),
+          tables: tables.map(t => ({
+            number: t.number,
+            seats: t.capacity > 0 ? t.capacity : null,
+            shape: TABLE_SHAPE[t.shape],
+            placed: isPlaced(t),
+            size: sizeOf(t, a.floorShape ?? 'WIDE'),
+          })),
+          walls: count('WALL'),
+          bars: count('BAR_COUNTER'),
+          // Textos sin espacios de más: la PAX vieja los guardaba tal cual (el editor ya los recorta al publicar).
+          serviceAreas: els.filter(e => e.type === 'SERVICE_AREA').map(e => e.label?.trim() || 'Área de servicio'),
+          doors: count('DOOR'),
+          labels: els.flatMap(e => {
+            const label = e.type === 'LABEL' ? e.label?.trim() : undefined
+            return label ? [label] : []
+          }),
+        }
+      })
+      const unplacedTables = plan.tables.filter(t => !t.areaId || !areaIds.has(t.areaId) || !isPlaced(t)).map(t => t.number)
+      return text({
+        venueId,
+        areaCount: areas.length,
+        tableCount: plan.tables.length,
+        areas,
+        unplacedTables,
+        ...(plan.overLimit ? { note: 'El plano pasa los límites del editor; se muestran los primeros elementos.' } : {}),
+      })
+    },
+  )
+
+  server.tool(
     'set_table_status',
     'Set the status of a table in a venue you can access, found by its number: available, occupied, reserved or cleaning. Safety: a table with a live (open) order CANNOT be marked available — close/pay that order first. This WRITES — it changes the floor; requires tables:update. Pass venueId + table number + the new status.',
     {
@@ -159,17 +239,8 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
 
       const target = STATUS_MAP[status]
-      // Don't strand an open tab: a table with a live order can't be freed to AVAILABLE here.
-      if (target === TableStatus.AVAILABLE && table.currentOrderId) {
-        return text({ ok: false, error: `La mesa ${number} tiene una cuenta abierta — ciérrala o cóbrala antes de marcarla disponible.` })
-      }
-
       try {
-        const updated = await prisma.table.update({
-          where: { id: table.id },
-          data: { status: target },
-          select: { number: true, status: true },
-        })
+        const updated = await prisma.$transaction(tx => setTableStatusInTransaction(tx, venueId, table.id, target), ORDER_LOCK_WAIT_BUDGET)
         await auditMcpWrite(scope, {
           action: 'TABLE_STATUS_SET',
           entity: 'Table',
@@ -186,7 +257,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'move_table_check',
-    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access — Square\'s "Mover". The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires tables:update. Pass venueId + source table number + target table number.',
+    'TABLE_SERVICE: move the OPEN check (cuenta) from one table to another in a venue you can access. The order keeps its items/courses; the source table is released and the target becomes occupied. Fails if the target is occupied/reserved or the order is already paid. This WRITES; requires tables:update. Pass venueId + source table number + target table number.',
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       fromNumber: z.string().min(1).describe('Table number the check is on now, e.g. "8"'),
@@ -228,7 +299,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'assign_table_check',
-    'TABLE_SERVICE: reassign the OPEN check (cuenta) of a table to another waiter/staff member — Square\'s "Asignar". Sales attribution (tips, corte) follows the new waiter. This WRITES; requires orders:update. Pass venueId + table number + the staff member (id, or a name to search).',
+    'TABLE_SERVICE: reassign the OPEN check (cuenta) of a table to another waiter/staff member. Sales attribution (tips, corte) follows the new waiter. This WRITES; requires orders:update. Pass venueId + table number + the staff member (id, or a name to search).',
     {
       venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
       number: z.string().min(1).describe('Table number whose check to reassign, e.g. "8"'),
@@ -252,7 +323,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           where: {
             venueId,
             staff: {
-              OR: [{ firstName: { contains: staff, mode: 'insensitive' } }, { lastName: { contains: staff, mode: 'insensitive' } }],
+              ...personSearchWhere(staff),
             },
           },
           select: { staffId: true, staff: { select: { firstName: true, lastName: true } } },
@@ -339,7 +410,11 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       if (!table) return text({ ok: false, error: `No encontré la mesa "${number}" activa en este local.` })
       if (!table.currentOrderId) return text({ ok: false, error: `La mesa ${number} no tiene cuenta abierta.` })
       try {
-        const result = await updateOrderDetails(venueId, table.currentOrderId, { name, notes, covers, customerId })
+        // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): en una venta COBRADA, cambiar el cliente exige
+        // `payments:create`; el servicio lo decide bajo el candado de la venta (sin el permiso ⇒ 403, `ok: false` abajo).
+        const opciones =
+          customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: guard.tienePermiso('payments:create', venueId) } : {}
+        const result = await updateOrderDetails(venueId, table.currentOrderId, { name, notes, covers, customerId }, opciones)
         await auditMcpWrite(scope, {
           action: 'TABLE_CHECK_DETAILS_SET',
           entity: 'Order',
@@ -356,7 +431,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'split_table_check',
-    "TABLE_SERVICE: split the open check of a table into a SECOND check on the SAME table (Square's separate checks) by moving specific items. Pass venueId + table number + the item ids to move (list them first via tables_status/find_order). At least one item must stay. This WRITES; requires orders:update.",
+    'TABLE_SERVICE: split the open check of a table into a SECOND check on the SAME table by moving specific items. Pass venueId + table number + the item ids to move (list them first via tables_status/find_order). At least one item must stay. This WRITES; requires orders:update.',
     {
       venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
       number: z.string().min(1).describe('Table number whose check to split, e.g. "8"'),
@@ -421,7 +496,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'merge_table_check',
-    "TABLE_SERVICE: merge two open checks into one (Square's \"Fusionar\") — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). Also blocked (code ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE, details.requestId + details.orderId) while the SOURCE check has a card-terminal charge whose outcome is not yet confirmed — merging would cancel an order a charge can still land on; wait for or cancel that charge first. A live charge on the TARGET does not block. This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
+    "TABLE_SERVICE: merge two open checks into one — every item from the SOURCE table's check moves onto the TARGET table's check, and the source check is cancelled and its table freed. Use when two tables' groups combine. Blocked if either check already has a payment, or if the source check has discounts/manual service charges (their amount was calculated over that check alone — remove them first, then merge). Also blocked (code ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE, details.requestId + details.orderId) while the SOURCE check has a card-terminal charge whose outcome is not yet confirmed — merging would cancel an order a charge can still land on; wait for or cancel that charge first. A live charge on the TARGET does not block. This WRITES; requires orders:merge (its OWN permission since 2026-08 — WAITER/CASHIER do not hold it, so the POS asks a manager for a PIN instead; there is no such prompt here). Pass venueId + the target table (whose check survives) + the source table (whose check disappears into it).",
     {
       venueId: z.string().describe('Venue that owns both tables (must be in your scope)'),
       targetNumber: z.string().min(1).describe('Table number whose check ABSORBS the other and survives, e.g. "12"'),

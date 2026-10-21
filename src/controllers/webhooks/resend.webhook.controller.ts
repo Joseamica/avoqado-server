@@ -47,33 +47,38 @@ export async function handleResendWebhook(req: Request, res: Response, _next: Ne
     const svixTimestamp = req.headers['svix-timestamp'] as string
     const svixSignature = req.headers['svix-signature'] as string
 
-    // Verify signature if secret is configured
     const secret = resendWebhookSecret()
-    if (secret) {
-      if (!svixId || !svixTimestamp || !svixSignature) {
-        logger.warn('📧 [Resend Webhook] Missing Svix headers')
-        return res.status(400).json({
-          success: false,
-          error: 'Missing webhook signature headers',
-        })
-      }
+    if (!secret) {
+      // 🔴 Sin secreto no hay cómo saber que el aviso viene de Resend: cualquiera podía marcar correos como
+      // rebotados y suprimirlos (auditoría 2026-09-30). 503 = Resend reintenta cuando el secreto vuelva.
+      logger.error('📧 [Resend Webhook] RESEND_WEBHOOK_SECRET no está configurado: aviso rechazado')
+      return res.status(503).json({
+        success: false,
+        error: 'Webhook signature secret not configured',
+      })
+    }
 
-      try {
-        const wh = new Webhook(secret)
-        wh.verify(payload, {
-          'svix-id': svixId,
-          'svix-timestamp': svixTimestamp,
-          'svix-signature': svixSignature,
-        })
-      } catch (err) {
-        logger.error('📧 [Resend Webhook] Signature verification failed:', err)
-        return res.status(400).json({
-          success: false,
-          error: 'Invalid webhook signature',
-        })
-      }
-    } else {
-      logger.warn('📧 [Resend Webhook] RESEND_WEBHOOK_SECRET not configured - skipping signature verification')
+    if (!svixId || !svixTimestamp || !svixSignature) {
+      logger.warn('📧 [Resend Webhook] Missing Svix headers')
+      return res.status(400).json({
+        success: false,
+        error: 'Missing webhook signature headers',
+      })
+    }
+
+    try {
+      const wh = new Webhook(secret)
+      wh.verify(payload, {
+        'svix-id': svixId,
+        'svix-timestamp': svixTimestamp,
+        'svix-signature': svixSignature,
+      })
+    } catch (err) {
+      logger.error('📧 [Resend Webhook] Signature verification failed:', err)
+      return res.status(400).json({
+        success: false,
+        error: 'Invalid webhook signature',
+      })
     }
 
     // Parse the payload

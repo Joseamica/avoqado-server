@@ -92,6 +92,10 @@ const SUPERADMIN_ONLY_ALLOWLIST = new Set<string>([
   // infers permission from `req.body.commandType`. Allowlisted here so this audit
   // doesn't block CI while that work is scoped. Remove from allowlist when the
   // granular middleware lands.
+  // (7-oct-2026) The three command-LOG reads — GET /tpv-commands, /history and /:commandId — moved to
+  // `tpv:command` (what opens the dashboard's «Comandos remotos» panel); they 403'd the OWNER. `:read` below
+  // still guards the bulk/scheduled/geofence reads, which have no UI. Pinned in
+  // tests/unit/routes/tpvCommands.routes.permissions.test.ts.
   'tpv-commands:read',
   'tpv-commands:write',
   'tpv-commands:bulk',

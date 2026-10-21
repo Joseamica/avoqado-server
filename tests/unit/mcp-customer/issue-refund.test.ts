@@ -1,5 +1,7 @@
 import { registerPaymentTools } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
+import { GiftCardError } from '../../../src/services/giftCards/giftCardErrors'
+import { ConflictError } from '../../../src/errors/AppError'
 
 const mockPaymentFindFirst = jest.fn()
 const mockIssue = jest.fn()
@@ -11,8 +13,10 @@ jest.mock('@/mcp/guard', () => ({
       if (v === 'foreign') throw new Error('ScopeError: venue out of scope')
       return { venueId: { in: [v] } }
     },
-    requirePermission: (_perm: string, v: string) => {
+    requirePermission: (perm: string, v: string) => {
       if (v === 'no-perm') throw new Error('Forbidden: missing payments:refund')
+      // Reembolsa, pero NO devuelve en efectivo lo que no fue efectivo (rol de piso, 1-oct-2026).
+      if (v === 'sin-efectivo' && perm === 'payments:refund-to-cash') throw new Error('Forbidden: missing payments:refund-to-cash')
     },
   }),
 }))
@@ -26,9 +30,10 @@ jest.mock('@/utils/prismaClient', () => ({
   },
 }))
 
+const schemas = new Map<string, Record<string, { safeParse: (v: unknown) => { success: boolean } }>>()
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
-const call = (args: Record<string, unknown>) => handlers.get('issue_refund')!(args, {})
+const call = (args: Record<string, unknown>) => handlers.get('issue_refund')!({ idempotencyKey: 'mcp-test-payment-001', ...args }, {})
 const parse = (r: { content: Array<{ text: string }> }) => JSON.parse(r.content[0].text)
 const completedPayment = {
   amount: 400,
@@ -42,16 +47,60 @@ const completedPayment = {
 const base = { venueId: 'v1', paymentId: 'pay-1', amount: 100, reason: 'accidental_charge' }
 
 beforeAll(() => {
-  registerPaymentTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerPaymentTools(
+    {
+      tool: (...a: unknown[]) => {
+        schemas.set(a[0] as string, a[a.length - 2] as never)
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => jest.clearAllMocks())
 
 describe('issue_refund (critical money write, confirm-gated)', () => {
+  it('🔴 tarjeta de regalo: con refundMethod se rechaza con GIFT_CARD_REFUND_TO_BALANCE_ONLY; sin él, la vista previa dice que regresa al saldo', async () => {
+    const conSaldo = {
+      ...completedPayment,
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderTypeId: 'tender-gc',
+      tenderCountsAsCash: false,
+      tenderSatFormaPago: '01',
+      externalSource: null,
+      source: 'POS',
+      tenderType: { systemKind: 'GIFT_CARD' },
+    }
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    const rechazo = parse(await call({ ...base, refundMethod: 'CASH', confirm: true }))
+    expect(rechazo).toMatchObject({ ok: false, code: 'GIFT_CARD_REFUND_TO_BALANCE_ONLY' })
+    expect(mockIssue).not.toHaveBeenCalled()
+
+    mockPaymentFindFirst.mockResolvedValueOnce(conSaldo)
+    const vista = parse(await call(base))
+    expect(vista.requiresConfirmation).toBe(true)
+    expect(vista.preview.regresaAlSaldoDeRegalo).toBe(true)
+    expect(mockPaymentFindFirst.mock.calls[1][0].select.tenderType).toEqual({ select: { systemKind: true } })
+  })
+
   it('rejects out-of-scope / no-perm — no reads, no refund', async () => {
     await expect(call({ ...base, venueId: 'foreign' })).rejects.toThrow('out of scope')
     await expect(call({ ...base, venueId: 'no-perm' })).rejects.toThrow('Forbidden')
     expect(mockPaymentFindFirst).not.toHaveBeenCalled()
     expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('🔴 refundMethod CASH sin payments:refund-to-cash ⇒ error de permiso, sin leer ni reembolsar', async () => {
+    await expect(call({ ...base, venueId: 'sin-efectivo', refundMethod: 'CASH', confirm: true })).rejects.toThrow('payments:refund-to-cash')
+    expect(mockPaymentFindFirst).not.toHaveBeenCalled()
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('sin payments:refund-to-cash, transferencia o el mismo medio siguen funcionando', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment).mockResolvedValueOnce(completedPayment)
+    expect(parse(await call({ ...base, venueId: 'sin-efectivo', refundMethod: 'BANK_TRANSFER' })).requiresConfirmation).toBe(true)
+    expect(parse(await call({ ...base, venueId: 'sin-efectivo' })).requiresConfirmation).toBe(true)
   })
 
   it('refuses a payment outside scope or not found', async () => {
@@ -99,7 +148,7 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
   })
 
   it('un cobro que NO estaba en el cajón (transferencia) no promete mover efectivo', async () => {
-    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'BANK_TRANSFER' })
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
     const out = parse(await call(base))
     expect(out.preview.saleDeCajonDeEfectivo).toBe(false)
     expect(out.message).not.toMatch(/cajón/i)
@@ -118,13 +167,37 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
 
   it('BLOCKS card payments — Blumon card refunds are done on the terminal, not via API', async () => {
     for (const method of ['CREDIT_CARD', 'DEBIT_CARD']) {
-      mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method })
+      mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method, source: 'TPV' })
       const out = parse(await call({ ...base, confirm: true })) // even with confirm, must not proceed
       expect(out.ok).toBe(false)
       expect(out.cardRefundNotSupported).toBe(true)
       expect(out.error).toMatch(/terminal/i)
+      expect(out.useInstead).toBe('refund_card_on_terminal')
       expect(mockIssue).not.toHaveBeenCalled() // never records a bookkeeping refund for a card
     }
+  })
+
+  it('una tarjeta registrada a mano (source APP) NO se manda a la terminal: vista previa por el mismo medio', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'CREDIT_CARD', source: 'APP' })
+    const out = parse(await call(base))
+    expect(out.cardRefundNotSupported).toBeUndefined()
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(false)
+  })
+
+  it('una tarjeta registrada a mano no admite escoger otro medio', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'CREDIT_CARD', source: 'APP' })
+    const out = parse(await call({ ...base, refundMethod: 'CASH' }))
+    expect(out.ok).toBe(false)
+    expect(out.error).toBe('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
+  })
+
+  it('refundMethod null: el esquema lo acepta y se comporta como ausente (mismo medio)', async () => {
+    expect(schemas.get('issue_refund')!.refundMethod.safeParse(null).success).toBe(true)
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    const out = parse(await call({ ...base, refundMethod: null }))
+    expect(out.requiresConfirmation).toBe(true)
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(true) // efectivo original, mismo medio
   })
 
   it('with confirm:true: converts pesos->cents, issues, and audits', async () => {
@@ -146,11 +219,48 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
         amount: 10000,
         reason: 'ACCIDENTAL_CHARGE',
         staffId: 's1',
+        idempotencyKey: 'mcp-test-payment-001',
         note: 'cliente insatisfecho',
       }),
     )
     expect(out).toMatchObject({ ok: true, refund: { refundId: 'ref-1', amount: 100, remainingRefundable: 350 } })
     expect(mockAudit.mock.calls[0][1]).toMatchObject({ action: 'REFUND_ISSUED', entity: 'Payment', entityId: 'ref-1', venueId: 'v1' })
+  })
+
+  it('vista previa de una transferencia con refundMethod CASH: sale del cajón', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
+    const out = parse(await call({ ...base, refundMethod: 'CASH' }))
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(true)
+    expect(out.preview.refundMethod).toBe('CASH')
+  })
+
+  it('vista previa de un efectivo con refundMethod BANK_TRANSFER: no promete cajón', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    const out = parse(await call({ ...base, refundMethod: 'BANK_TRANSFER' }))
+    expect(out.preview.saleDeCajonDeEfectivo).toBe(false)
+  })
+
+  it('una tarjeta de terminal externa NO se puede devolver en efectivo: rechaza sin ofrecer confirm', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'OTHER', externalSource: 'Tarjeta (terminal externa)' })
+    const out = parse(await call({ ...base, refundMethod: 'CASH' }))
+    expect(out.ok).toBe(false)
+    expect(out.requiresConfirmation).toBeUndefined()
+    expect(out.error).toBe('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('confirm:true con refundMethod CASH lo pasa al servicio y a la auditoría', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'BANK_TRANSFER', fundsFlow: 'EXTERNAL_RECORDED' })
+    mockIssue.mockResolvedValueOnce({
+      refundId: 'ref-2',
+      originalPaymentId: 'pay-1',
+      amount: 100,
+      remainingRefundable: 350,
+      status: 'COMPLETED',
+    })
+    await call({ ...base, refundMethod: 'CASH', confirm: true })
+    expect(mockIssue).toHaveBeenCalledWith(expect.objectContaining({ refundMethod: 'CASH' }))
+    expect(mockAudit.mock.calls[0][1].data).toMatchObject({ refundMethod: 'CASH' })
   })
 
   it('surfaces a service rejection (e.g. exceeds remaining) as ok:false', async () => {
@@ -159,5 +269,51 @@ describe('issue_refund (critical money write, confirm-gated)', () => {
     const out = parse(await call({ ...base, confirm: true }))
     expect(out.ok).toBe(false)
     expect(out.error).toMatch(/remaining/)
+    expect(out).not.toHaveProperty('code')
   })
+
+  it('🔴 B1 r1 (fix 3): un rechazo de negocio del servicio conserva su `code` y sus `details` (el agente distingue cada caso)', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockRejectedValueOnce(
+      new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'La tarjeta de regalo terminación 4321 ya fue cancelada.', 409, {
+        motivo: 'SOBRE_DESACTIVADO',
+        giftCardIds: ['gc-1'],
+      }),
+    )
+    expect(parse(await call({ ...base, confirm: true }))).toEqual({
+      ok: false,
+      code: 'GIFT_CARD_TENDER_NOT_ALLOWED',
+      details: { motivo: 'SOBRE_DESACTIVADO', giftCardIds: ['gc-1'] },
+      error: 'La tarjeta de regalo terminación 4321 ya fue cancelada.',
+    })
+
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockRejectedValueOnce(new GiftCardError('GIFT_CARD_CANCEL_NOT_STARTED', 'Primero inicia «Cancelar venta».', 409))
+    expect(parse(await call({ ...base, confirm: true }))).toEqual({
+      ok: false,
+      code: 'GIFT_CARD_CANCEL_NOT_STARTED',
+      error: 'Primero inicia «Cancelar venta».',
+    })
+
+    // Cualquier AppError lleva su `code` (no sólo los de tarjetas).
+    mockPaymentFindFirst.mockResolvedValueOnce(completedPayment)
+    mockIssue.mockRejectedValueOnce(new ConflictError('La llave ya pertenece a otra operación', 'IDEMPOTENCY_KEY_REUSED'))
+    expect(parse(await call({ ...base, confirm: true }))).toMatchObject({ ok: false, code: 'IDEMPOTENCY_KEY_REUSED' })
+  })
+})
+
+it('no ejecuta dinero sin una llave estable de reintento', async () => {
+  const out = parse(
+    await call({
+      venueId: 'v1',
+      paymentId: 'pay-1',
+      amount: 10,
+      method: 'cash',
+      reason: 'other',
+      confirm: true,
+      idempotencyKey: undefined,
+    }),
+  )
+  expect(out).toMatchObject({ needsInput: true, field: 'idempotencyKey' })
+  expect(mockIssue).not.toHaveBeenCalled()
 })

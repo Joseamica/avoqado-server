@@ -9,10 +9,11 @@
 jest.mock('@/utils/prismaClient', () => ({ __esModule: true, default: new Proxy({}, { get: () => () => undefined }) }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
 jest.mock('../../../src/mcp/scope', () => ({ resolveScope: jest.fn() }))
-jest.mock('../../../src/mcp/instrument', () => ({
-  ...jest.requireActual('../../../src/mcp/instrument'),
-  recordCancelledToolCall: jest.fn(),
-}))
+jest.mock('../../../src/mcp/instrument', () => {
+  const actual = jest.requireActual('../../../src/mcp/instrument')
+  // instrumentTools sigue siendo el real: sólo se observa con qué identidad se llama.
+  return { ...actual, recordCancelledToolCall: jest.fn(), instrumentTools: jest.fn(actual.instrumentTools) }
+})
 jest.mock('@/services/modules/module.service', () => ({
   ...jest.requireActual('@/services/modules/module.service'),
   moduleService: { anyVenueHasModule: jest.fn(async () => false) },
@@ -22,15 +23,21 @@ import type { Request, Response } from 'express'
 import logger from '@/config/logger'
 import { getContext, runWithContext, type RequestCancellation } from '@/observability/executionContext'
 import { RequestCancelledError } from '@/utils/requestCancellation'
+import { MCP_RESOURCE_URL } from '../../../src/mcp/oauth/config'
 import { handleMcpRequest } from '../../../src/mcp/server'
-import { recordCancelledToolCall } from '../../../src/mcp/instrument'
+import { instrumentTools, recordCancelledToolCall } from '../../../src/mcp/instrument'
+import { moduleService } from '@/services/modules/module.service'
 import { resolveScope } from '../../../src/mcp/scope'
 
 const mockedLogger = logger as unknown as { info: jest.Mock; warn: jest.Mock; error: jest.Mock }
 const mockResolveScope = resolveScope as jest.Mock
 
 function makeReq(body: unknown) {
-  return { auth: { extra: { staffId: 'staff-1', activeOrg: 'org-1' } }, body, headers: {} } as unknown as Request
+  return {
+    auth: { resource: MCP_RESOURCE_URL, extra: { staffId: 'staff-1', activeOrg: 'org-1' } },
+    body,
+    headers: {},
+  } as unknown as Request
 }
 
 function makeRes() {
@@ -155,4 +162,29 @@ it('un método que no es de herramienta cortado durante el armado NO inventa una
   mockResolveScope.mockRejectedValue(new RequestCancelledError('timeout', 25_000))
   await handleMcpRequest(makeReq({ jsonrpc: '2.0', id: 1, method: 'tools/list' }), makeRes() as unknown as Response)
   expect(recordCancelledToolCall).not.toHaveBeenCalled()
+})
+
+// Evidencia (founder, 15-oct): la app que se conectó (el `cid` de su token) llega al alcance — de donde la toma la
+// bitácora de cada escritura — y a la fila de cada llamada, también a la de una llamada cortada.
+it('la app conectada llega al alcance, a la bitácora de cada llamada y a la de una llamada cortada', async () => {
+  const scope: Record<string, unknown> = { staffId: 'staff-1', activeOrg: 'org-1', allowedVenueIds: [], perVenueAccess: new Map() }
+  mockResolveScope.mockResolvedValue(scope)
+  ;(moduleService.anyVenueHasModule as jest.Mock).mockRejectedValueOnce(new RequestCancelledError('timeout', 25_000))
+  const req = makeReq(toolCall) as unknown as { auth: { extra: Record<string, unknown> } }
+  req.auth.extra.clientId = 'mcp_chatgpt'
+  await handleMcpRequest(req as unknown as Request, makeRes() as unknown as Response)
+  expect(scope.clientId).toBe('mcp_chatgpt')
+  expect(instrumentTools).toHaveBeenCalledWith(expect.anything(), expect.objectContaining({ clientId: 'mcp_chatgpt' }))
+  expect(recordCancelledToolCall).toHaveBeenCalledWith(
+    expect.objectContaining({ toolName: 'org_confirmed_sales_report', clientId: 'mcp_chatgpt' }),
+  )
+})
+
+it('sin app en el token, el alcance no inventa una', async () => {
+  const scope: Record<string, unknown> = { staffId: 'staff-1', activeOrg: 'org-1', allowedVenueIds: [], perVenueAccess: new Map() }
+  mockResolveScope.mockResolvedValue(scope)
+  ;(moduleService.anyVenueHasModule as jest.Mock).mockRejectedValueOnce(new RequestCancelledError('timeout', 25_000))
+  await handleMcpRequest(makeReq(toolCall), makeRes() as unknown as Response)
+  expect(scope.clientId).toBeUndefined()
+  expect(recordCancelledToolCall).toHaveBeenCalledWith(expect.objectContaining({ clientId: null }))
 })

@@ -10,7 +10,11 @@ import { PaymentMethod, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
+import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
+import { totalesDelComprobante } from '../shared/ticketTotals'
+import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -91,6 +95,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         order: {
           select: {
             orderNumber: true,
+            // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
+            type: true,
+            table: { select: { number: true } },
           },
         },
         processedBy: {
@@ -124,6 +131,9 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       createdAt: p.createdAt.toISOString(),
       orderNumber: p.order?.orderNumber ?? null,
       staffName: p.processedBy ? `${p.processedBy.firstName ?? ''} ${p.processedBy.lastName ?? ''}`.trim() : null,
+      // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
+      orderType: p.order?.type ?? null,
+      tableNumber: p.order?.table?.number ?? null,
     })),
     meta: {
       total,
@@ -151,6 +161,15 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       amount: true,
       tipAmount: true,
       method: true,
+      source: true,
+      externalSource: true,
+      tenderSatFormaPago: true,
+      fundsFlow: true,
+      tenderTypeId: true,
+      tenderCountsAsCash: true,
+      tenderLabel: true,
+      // Tarjetas de regalo (B1): la marca del tender de sistema decide «Devolver con» y el aviso «regresa al saldo».
+      tenderType: { select: { systemKind: true } },
       status: true,
       cardBrand: true,
       maskedPan: true,
@@ -158,6 +177,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       authorizationNumber: true,
       createdAt: true,
       processorData: true,
+      orderId: true,
       processedBy: {
         select: {
           firstName: true,
@@ -167,6 +187,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       order: {
         select: {
           orderNumber: true,
+          // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
+          type: true,
+          table: { select: { number: true } },
           items: {
             select: {
               id: true,
@@ -199,6 +222,11 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
   }
 
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
+  // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).
+  const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
+  // IVA por producto, plan 7a: el MISMO comprobante que vio el cliente (r2 R2-9). Sólo aquí, con el cobro ya comprobado dentro del
+  // negocio de la ruta (sin IDOR): del recibo digital si existe; si no, de la orden y el pago.
+  const totalesDelTicket = await totalesDelComprobante(prisma, paymentId)
 
   // Los topes cuentan EXACTAMENTE como `issueRefund` (Codex, 29-sep): sólo los reembolsos COMPLETED movieron dinero, y lo ya
   // devuelto es el MÁXIMO entre esas filas y el acumulado histórico `processorData.refundedAmountCents`. Todo en centavos
@@ -255,9 +283,24 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     createdAt: payment.createdAt.toISOString(),
     orderNumber: payment.order?.orderNumber ?? null,
     staffName: payment.processedBy ? `${payment.processedBy.firstName ?? ''} ${payment.processedBy.lastName ?? ''}`.trim() : null,
+    // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
+    orderType: payment.order?.type ?? null,
+    tableNumber: payment.order?.table?.number ?? null,
     remainingRefundable,
     remainingRefundableSale,
     remainingRefundableTip,
+    // Aditivo (30-sep-2026): ¿la devolución se abre en la terminal? Sólo la tarjeta que cobró NUESTRA terminal;
+    // todo lo demás se reembolsa como el efectivo. Misma regla que acepta `refund-request` (`seDevuelveEnTerminal`).
+    refundOnTerminal: seDevuelveEnTerminal(payment),
+    // Aditivo (30-sep-2026): ¿el cajero puede escoger con qué devolver? Misma regla que valida el reembolso.
+    canChooseRefundMethod: sePuedeEscogerComoDevolver({ ...payment, tenderSystemKind: payment.tenderType?.systemKind ?? null }),
+    // Aditivo (tarjetas de regalo, 1a): la devolución de este cobro regresa al saldo de la tarjeta (las apps 1b lo dicen así).
+    refundToGiftCardBalance: isGiftCardTenderKind(payment.tenderType?.systemKind),
+    tenderLabel: payment.tenderLabel ?? null,
+    // Aditivo (IVA por producto, plan 7a, D3; r1 #1, #2, #9; r2 R2-6, R2-9; r3 R3-11): el comprobante COMPLETO —subtotal, cargo,
+    // IVA agregado, propina, total y si es devolución—, el mismo que el recibo digital. La reimpresión lo usa tal cual y no vuelve
+    // a leer `amount`/`tipAmount` (que siguen aquí arriba, vivos, como siempre).
+    ticketTotals: totalesDelTicket,
     refunds: refunds.map(refund => {
       const processorData = (refund.processorData as Record<string, unknown>) || {}
       return {
@@ -274,12 +317,16 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       const prior = refundedByOrderItemId.get(item.id) ?? { quantity: 0, amount: 0 }
       const refundedQty = Math.min(prior.quantity, item.quantity)
       const remainingQty = Math.max(0, item.quantity - refundedQty)
+      const chargedTotal = chargedTotalDe(cobrado, item.id)
       return {
         id: item.id,
         productName: item.productName ?? item.product?.name ?? 'Producto',
         quantity: item.quantity,
         unitPrice: Number(item.unitPrice),
         total: Number(item.total),
+        // C2 A-R4 (aditivo, opcional): lo que cobró el renglón completo; se omite si la venta no es atribuible (A-R3).
+        // Los POS usan `chargedTotal ?? total` en la misma cuenta por unidades que hace el servidor al devolver.
+        ...(chargedTotal === undefined ? {} : { chargedTotal }),
         productImageUrl: item.product?.imageUrl ?? null,
         trackInventory: item.product?.trackInventory ?? false,
         refundedQty,

@@ -1,3 +1,9 @@
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 import {
   settleCustomerBalance,
   getCustomers,
@@ -11,6 +17,7 @@ import {
 import { prismaMock } from '../../../__helpers__/setup'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 
 // ── marketingConsent (Task 5): customer.dashboard.service YA NO escribe el campo directo —
 // delega en consent.service (ledger+cache+ActivityLog atómicos, Task 3). Se mockea a nivel de
@@ -54,6 +61,8 @@ const createMockCustomer = (overrides: Record<string, any> = {}) => ({
 describe('Customer Dashboard Service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Sin colas «Once» sobrantes de `$queryRaw` entre pruebas (ids de la búsqueda, el agregado de saldos de H6, métricas).
+    prismaMock.$queryRaw.mockReset()
   })
 
   describe('getCustomers', () => {
@@ -122,14 +131,49 @@ describe('Customer Dashboard Service', () => {
     // ($2,871). Cancelar no pone el saldo en 0, así que el filtro «con saldo pendiente» y el saldo mostrado
     // le cobraban al cliente ventas que ya no existen.
     it('🔴 el filtro «con saldo pendiente» y el saldo mostrado no cuentan cuentas canceladas', async () => {
-      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      prismaMock.$transaction.mockResolvedValue([[createMockCustomer({ id: 'c1' })], 1] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([] as any)
 
       await getCustomers('venue-123', 1, 10, undefined, undefined, undefined, undefined, 'createdAt', 'desc', true)
 
       const args = prismaMock.customer.findMany.mock.calls[0][0] as any
       const noCancelada = { status: { notIn: ['CANCELLED', 'DELETED'] } }
       expect(args.where.orderAssociations.some.order).toMatchObject(noCancelada)
-      expect(args.select.orderAssociations.where.order).toMatchObject(noCancelada)
+      // H6: el saldo mostrado sale del agregado en SQL, con la misma exclusión.
+      const saldo = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(saldo.text).toContain(`o."status" NOT IN ('CANCELLED', 'DELETED')`)
+    })
+
+    // ── H6 (auditoría de Codex del código, 15-oct-2026) ───────────────────────────────────────────────────────────────
+    it('🔴 H6: la página NO hidrata las cuentas de cada cliente (antes: todas sus cuentas pendientes, sin tope)', async () => {
+      prismaMock.$transaction.mockResolvedValue([[createMockCustomer({ id: 'c1' })], 1] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([] as any)
+      await getCustomers('venue-123', 1, 10)
+      const args = prismaMock.customer.findMany.mock.calls[0][0] as any
+      expect(args.select.orderAssociations).toBeUndefined()
+    })
+
+    it('🔴 H6: pendingOrderCount y pendingBalance salen de UN agregado para los clientes de la página (mismos campos)', async () => {
+      prismaMock.$transaction.mockResolvedValue([
+        [createMockCustomer({ id: 'customer-1' }), createMockCustomer({ id: 'customer-2' })],
+        2,
+      ] as any)
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ customerId: 'customer-1', pendientes: 2, saldo: new Prisma.Decimal('120.75') }] as any)
+
+      const r = await getCustomers('venue-123', 1, 10)
+
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+      const saldo = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(saldo.values).toEqual(['venue-123', 'customer-1', 'customer-2'])
+      expect(r.data[0]).toMatchObject({ id: 'customer-1', pendingOrderCount: 2, pendingBalance: 120.75 })
+      expect(r.data[1]).toMatchObject({ id: 'customer-2', pendingOrderCount: 0, pendingBalance: 0 })
+      expect(r.data.every(c => !('orderAssociations' in c))).toBe(true)
+    })
+
+    it('H6: página vacía ⇒ sin agregado', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      await getCustomers('venue-123', 1, 10)
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     })
 
     it('should calculate pagination metadata correctly (last page)', async () => {
@@ -145,6 +189,135 @@ describe('Customer Dashboard Service', () => {
         hasNextPage: false,
         hasPrevPage: true,
       })
+    })
+
+    // ── Sellos tardíos y búsqueda de clientes (S7, 14-oct-2026) ──────────────────────────────────────────────────────
+    it('🔴 pageSize hostil (100000) se topa en 100 en el SERVIDOR', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 500] as any)
+      const result = await getCustomers('venue-123', 1, 100000)
+      expect(prismaMock.customer.findMany.mock.calls[0][0].take).toBe(100)
+      expect(result.meta.pageSize).toBe(100)
+      expect(result.meta.totalPages).toBe(5)
+    })
+
+    it('página 0 o negativa se trata como 1', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      await getCustomers('venue-123', -3, 10)
+      expect(prismaMock.customer.findMany.mock.calls[0][0].skip).toBe(0)
+    })
+
+    it('pageSize no numérico o 0 cae al default (20), nunca a 0 ni NaN', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      await getCustomers('venue-123', 1, Number('abc'))
+      await getCustomers('venue-123', 1, 0)
+      expect(prismaMock.customer.findMany.mock.calls[0][0].take).toBe(20)
+      expect(prismaMock.customer.findMany.mock.calls[1][0].take).toBe(20)
+    })
+
+    it('orden determinista: desempate por id', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      await getCustomers('venue-123', 1, 10)
+      expect(prismaMock.customer.findMany.mock.calls[0][0].orderBy).toEqual([{ createdAt: 'desc' }, { id: 'desc' }])
+    })
+
+    // `mockResolvedValueOnce` a propósito: `updateCustomerMetrics` (más abajo en este archivo) también usa `$queryRaw`.
+    it('🔴 con search: ids por SQL acotado del MISMO negocio, y Prisma pagina y cuenta sobre ellos', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ id: 'c1' }, { id: 'c2' }] as any)
+      prismaMock.$transaction.mockResolvedValue([[], 2] as any)
+      const result = await getCustomers('venue-123', 1, 50, '55 4345 3965')
+      const sql = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(sql.values[0]).toBe('venue-123')
+      expect(sql.values).toContain('%5543453965%')
+      const args = prismaMock.customer.findMany.mock.calls[0][0] as any
+      expect(args.where).toMatchObject({ venueId: 'venue-123', id: { in: ['c1', 'c2'] } })
+      expect(prismaMock.customer.count.mock.calls[0][0].where).toMatchObject({ venueId: 'venue-123', id: { in: ['c1', 'c2'] } })
+      expect(result.meta.totalCount).toBe(2)
+    })
+
+    it('dentro del tope: total de Prisma, sin searchCapped, sin totalMatches y sin el COUNT extra', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ id: 'c5' }, { id: 'c4' }] as any)
+      prismaMock.$transaction.mockResolvedValue([[], 2] as any)
+      const result = await getCustomers('venue-123', 1, 50, 'a')
+      const ids = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(ids.values[ids.values.length - 1]).toBe(5001)
+      expect(prismaMock.$queryRaw).toHaveBeenCalledTimes(1)
+      expect(result.meta.totalCount).toBe(2)
+      expect(result.meta).not.toHaveProperty('searchCapped')
+      expect(result.meta).not.toHaveProperty('totalMatches')
+    })
+
+    // 🔴 Auditoría A #7: más coincidencias que el tope ⇒ la MISMA regla (nada de respaldo Prisma que cambie el significado),
+    // las más nuevas, total EXACTO por SQL y `searchCapped`. El tope se inyecta (2) para no fabricar 5001 filas.
+    // 🔴 Ruling B3: `totalCount` = lo ALCANZABLE (el dashboard pinta tantas páginas como `totalCount`: nunca páginas vacías) y
+    // el exacto viaja en `totalMatches` (opcional nuevo; Android lee `totalMatches ?: totalCount`).
+    it('🔴 más coincidencias que el tope: las más nuevas, totalCount ALCANZABLE, totalMatches EXACTO por SQL y searchCapped', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([{ id: 'c5' }, { id: 'c4' }, { id: 'c3' }] as any) // tope 2 ⇒ LIMIT 3: se pasó
+        .mockResolvedValueOnce([{ total: 7 }] as any) // COUNT exacto de la misma regla y filtros
+      prismaMock.$transaction.mockResolvedValue([[], 2] as any)
+      const result = await getCustomers('venue-123', 1, 1, 'a', undefined, undefined, undefined, 'createdAt', 'desc', undefined, {
+        topeDeBusqueda: 2,
+      })
+      const ids = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      const conteo = prismaMock.$queryRaw.mock.calls[1][0] as Prisma.Sql
+      expect(ids.values[ids.values.length - 1]).toBe(3)
+      expect(conteo.text).toMatch(/^SELECT COUNT\(\*\)::int AS "total" FROM "Customer"/)
+      const args = prismaMock.customer.findMany.mock.calls[0][0] as any
+      expect(args.where).toMatchObject({ venueId: 'venue-123', id: { in: ['c5', 'c4'] } })
+      expect(args.where.AND).toBeUndefined() // sin la condición Prisma de antes
+      expect(args.where.OR).toBeUndefined()
+      expect(result.meta).toEqual({
+        totalCount: 2, // ALCANZABLES: los ids que de verdad se paginan (B3)
+        totalMatches: 7, // EXACTO (B3)
+        pageSize: 1,
+        currentPage: 1,
+        totalPages: 2, // sólo las páginas ALCANZABLES (2 ids / 1 por página)
+        hasNextPage: true,
+        hasPrevPage: false,
+        searchCapped: true,
+      })
+    })
+
+    it('🔴 página posterior de una búsqueda topada: salta sobre los MISMOS ids y la última no ofrece otra', async () => {
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([{ id: 'c5' }, { id: 'c4' }, { id: 'c3' }] as any)
+        .mockResolvedValueOnce([{ total: 7 }] as any)
+      prismaMock.$transaction.mockResolvedValue([[], 2] as any)
+      const result = await getCustomers('venue-123', 2, 1, 'a', undefined, undefined, undefined, 'createdAt', 'desc', undefined, {
+        topeDeBusqueda: 2,
+      })
+      const args = prismaMock.customer.findMany.mock.calls[0][0] as any
+      expect(args.skip).toBe(1)
+      expect(args.take).toBe(1)
+      expect(args.where.id).toEqual({ in: ['c5', 'c4'] })
+      expect(result.meta).toMatchObject({
+        currentPage: 2,
+        totalPages: 2,
+        hasNextPage: false,
+        hasPrevPage: true,
+        totalCount: 2,
+        totalMatches: 7,
+        searchCapped: true,
+      })
+    })
+
+    it('los filtros del dashboard viajan al prefiltro y al conteo (grupo y etiquetas)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ id: 'c1' }] as any)
+      prismaMock.$transaction.mockResolvedValue([[], 1] as any)
+      await getCustomers('venue-123', 1, 10, 'ana', 'group-9', undefined, 'vip,regular')
+      const ids = prismaMock.$queryRaw.mock.calls[0][0] as Prisma.Sql
+      expect(ids.values).toEqual(expect.arrayContaining(['group-9', ['vip', 'regular']]))
+      expect((prismaMock.customer.findMany.mock.calls[0][0] as any).where).toMatchObject({
+        customerGroupId: 'group-9',
+        tags: { hasSome: ['vip', 'regular'] },
+        id: { in: ['c1'] },
+      })
+    })
+
+    it('search vacío o de espacios: sin SQL extra', async () => {
+      prismaMock.$transaction.mockResolvedValue([[], 0] as any)
+      await getCustomers('venue-123', 1, 10, '   ')
+      expect(prismaMock.$queryRaw).not.toHaveBeenCalled()
     })
   })
 
@@ -872,6 +1045,13 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({
   logAction: (...a: unknown[]) => logActionMock(...a),
 }))
 
+// R8 (tarjetas de regalo): observar que liquidar el saldo de un cliente activa los sobres de una cuenta de tarjetas.
+const activarSobresMock = jest.fn().mockResolvedValue({ activated: [] })
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: unknown[]) => activarSobresMock(...a),
+}))
+
 describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
   const CLIENTE = 'cust-1'
   const ORDEN = { id: 'order-1', orderNumber: 'ORD-1', remainingBalance: new Decimal(100), total: new Decimal(100) }
@@ -952,6 +1132,29 @@ describe('settleCustomerBalance — CAS por orden + vale de deducción', () => {
       expect.anything(),
       expect.objectContaining({ venueId: 'venue-1', orderId: 'order-1' }),
     )
+  })
+
+  it('R8: la orden que gana el CAS activa los sobres de una cuenta de tarjetas en la MISMA transacción', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 1 } as any)
+    // A6 r1: una transacción DISTINGUIBLE del cliente global (delega en él por prototipo): si la activación se llamara con
+    // `prisma` en vez de con `tx`, la identidad no cuadraría.
+    const tx = Object.create(prismaMock)
+    prismaMock.$transaction.mockImplementation(async (cb: any) => cb(tx))
+    await settleCustomerBalance('venue-1', CLIENTE)
+    expect(activarSobresMock).toHaveBeenCalledTimes(1)
+    expect(activarSobresMock.mock.calls[0][0]).toBe(tx)
+    expect(activarSobresMock.mock.calls[0][1]).toEqual({
+      venueId: 'venue-1',
+      orderId: 'order-1',
+      staffId: null,
+      items: [{ id: 'oi-1', productId: 'p1', quantity: 1, weightQuantity: null, modifiers: [] }],
+    })
+  })
+
+  it('R8: la orden que pierde el CAS no activa nada', async () => {
+    prismaMock.order.updateMany.mockResolvedValue({ count: 0 } as any)
+    await settleCustomerBalance('venue-1', CLIENTE)
+    expect(activarSobresMock).not.toHaveBeenCalled()
   })
 
   // ── El hook de referidos sigue al CAS, no a la lista de candidatas ──────────

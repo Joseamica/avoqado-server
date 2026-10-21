@@ -1,3 +1,4 @@
+import { documentRequestsJob } from './jobs/documentRequests.job'
 // src/server.ts - Main entry point for the application
 
 // Ensure environment variables are loaded and checked first.
@@ -40,6 +41,7 @@ import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconc
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
+import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
@@ -53,6 +55,7 @@ import { nightlySalesSummaryJob } from './jobs/nightly-sales-summary.job'
 import { nightlyLowStockJob } from './jobs/nightly-low-stock.job'
 import { nightlyUpsellRulesJob } from './jobs/nightly-upsell-rules.job'
 import { mcpConversationAuditJob } from './jobs/mcp-conversation-audit.job'
+import { mcpRetentionJob } from './jobs/mcp-retention.job'
 import { marketingCampaignJob } from './jobs/marketing-campaign.job'
 import { venueCommissionSettlementJob } from './jobs/venue-commission-settlement.job'
 import { gcalInboxSweeperJob } from './jobs/gcal-inbox-sweeper.job'
@@ -79,8 +82,13 @@ import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
+import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
+import { shopifyWorkerJob } from './jobs/shopify-worker.job'
+import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
+import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
+import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
 import { paidOrderReconcilerJob } from './jobs/paid-order-reconciler.job'
 import { cashClosePairReconcilerJob } from './jobs/cash-close-pair-reconciler.job'
 // Import the new Socket.io system
@@ -163,6 +171,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop terminal-payment watchdog
       displayModeRequestExpiryJob.stop()
+      onlineOrderAcceptanceExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
@@ -176,8 +185,14 @@ const gracefulShutdown = async (signal: string) => {
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
       angelpayEventWorkerJob.stop()
+      aggregatorPassWorkerJob.stop()
+      shopifyWorkerJob.stop()
+      shopifyReconcileJob.stop()
+      giftCardReconciliationJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
+      documentRequestsJob.stop()
+      altasAMedioPagoJob.stop()
       paidOrderReconcilerJob.stop()
       cashClosePairReconcilerJob.stop()
 
@@ -261,6 +276,7 @@ const gracefulShutdown = async (signal: string) => {
 
       // Stop MCP bad-experience audit job
       mcpConversationAuditJob.stop()
+      mcpRetentionJob.stop()
 
       // Stop settlement jobs
       venueCommissionSettlementJob.stop()
@@ -497,6 +513,7 @@ const startApplication = async (retries = 3) => {
 
       // Start terminal-payment arbitration watchdog (reconciles stale charge rows)
       displayModeRequestExpiryJob.start()
+      onlineOrderAcceptanceExpiryJob.start()
       terminalPaymentWatchdogJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
@@ -519,8 +536,17 @@ const startApplication = async (retries = 3) => {
       // S4: los eventos PENDING de AngelPay (webhook antes que el registro, vínculo tardío, caídas) los retoma un
       // worker propio con claim atómico y lease — nunca el vigía de 30 s.
       angelpayEventWorkerJob.start()
+      // Conector de pases (TotalPass/Wellhub): reintentos de webhooks, visitas, horizonte y bandeja de salida.
+      aggregatorPassWorkerJob.start()
+      // Conector Shopify: buzón, eventos y una unidad por sucursal con su lease (sin candado global).
+      shopifyWorkerJob.start()
+      shopifyReconcileJob.start()
+      // Tarjetas de regalo: revisión nocturna (saldo contra libreta; activa cuentas pagadas con sobres PENDING; avisa lo demás).
+      giftCardReconciliationJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
+      documentRequestsJob.start()
+      altasAMedioPagoJob.start()
       paidOrderReconcilerJob.start()
       // Completa el cierre unificado que murió entre sus dos commits: sin él, un turno sin su
       // gaveta acaba firmando dos arqueos, y una gaveta sin su turno sigue tragando efectivo.
@@ -637,6 +663,7 @@ const startApplication = async (retries = 3) => {
 
       // MCP bad-experience audit — every 12h; flags MCP tool calls that failed / denied / retried (all envs, log-only)
       mcpConversationAuditJob.start()
+      mcpRetentionJob.start()
 
       // Start nightly email jobs only in production (avoid sending emails from dev/staging)
       if (NODE_ENV === 'production') {

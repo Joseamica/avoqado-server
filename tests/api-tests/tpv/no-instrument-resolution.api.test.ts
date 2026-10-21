@@ -27,7 +27,8 @@ jest.mock('../../../src/config/session', () => {
 jest.mock('../../../src/config/swagger', () => ({ __esModule: true, setupSwaggerUI: jest.fn() }))
 
 import jwt from 'jsonwebtoken'
-import request from 'supertest'
+import type { Response } from 'supertest'
+import { api, startApiServer } from '@tests/__helpers__/apiServer'
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { mirrorTokenRoleOnStaffVenue } from '@tests/__helpers__/venueRoleMock'
@@ -35,6 +36,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
 
 const app = require('../../../src/app').default
+startApiServer(() => app)
 
 const venueId = 'clvenuenoinstr00000000001'
 const otroVenue = 'clvenuenoinstr00000000002'
@@ -149,12 +151,12 @@ const nadaTocado = () => {
 
 describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-instrument-resolution', () => {
   it('401 sin token', async () => {
-    expect((await request(app).post(RUTA).send(cuerpo())).status).toBe(401)
+    expect((await api().post(RUTA).send(cuerpo())).status).toBe(401)
     nadaTocado()
   })
 
   it('(a) 200 con la sesión OWNER de la terminal: declara SIN PIN, by SESSION, y la respuesta conserva los campos de S6', async () => {
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
       .send(cuerpo())
@@ -205,7 +207,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   })
 
   it('(b) 403 REAL con la sesión CASHIER sin PIN: SUPERVISOR_AUTHORIZATION_REQUIRED, nada escrito, y el intento queda en la bitácora', async () => {
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo())
@@ -227,7 +229,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   })
 
   it('(c) 200 con la sesión CASHIER + supervisorPin del OWNER: by SUPERVISOR_PIN, y el PIN no se escribe en ningún lado', async () => {
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo({ supervisorPin: '1234' }))
@@ -256,7 +258,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   it('(d) 403 TERMINAL_IDENTITY_REQUIRED con un token de DASHBOARD y con uno MÓVIL/POS (sin terminalSerialNumber), sin tocar la base', async () => {
     // El de dashboard y el de POS móvil se distinguen por su origen, no por su forma: ninguno lleva `terminalSerialNumber`.
     for (const t of [token({ sub: 'staff-owner', role: 'OWNER' }), token({ sub: 'staff-cashier', role: 'CASHIER' })]) {
-      const res = await request(app).post(RUTA).set('Authorization', `Bearer ${t}`).send(cuerpo())
+      const res = await api().post(RUTA).set('Authorization', `Bearer ${t}`).send(cuerpo())
       expect(res.status).toBe(403)
       expect(res.body).toMatchObject({ success: false, code: 'TERMINAL_IDENTITY_REQUIRED' })
     }
@@ -264,7 +266,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   })
 
   it('(e) 403 de validateVenueAccess con un token de OTRO venue, sin tocar la base', async () => {
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${token({ terminalSerialNumber: serial }, otroVenue)}`)
       .send(cuerpo())
@@ -274,7 +276,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   })
 
   it('(f) 403 SESSION_NOT_IN_VENUE con un `sub` que ya no es miembro activo del venue, aunque mande el supervisorPin del OWNER', async () => {
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-dado-de-baja', 'CASHIER')}`)
       .send(cuerpo({ supervisorPin: '1234' }))
@@ -293,7 +295,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   })
 
   it('un cuerpo con identidad (`staffId`) se rechaza con 409 ATTEMPT_NOT_ELIGIBLE: la identidad nunca sale del cuerpo', async () => {
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo({ staffId: 'staff-owner' }))
@@ -306,7 +308,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
 
   it('404 ATTEMPT_NOT_FOUND para un intento de OTRA terminal, y 409 POSITIVE_EVIDENCE_EXISTS cuando ya hay dinero', async () => {
     link.terminalId = 'otra-terminal'
-    const r404 = await request(app)
+    const r404 = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
       .send(cuerpo())
@@ -314,7 +316,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(r404.body).toMatchObject({ success: false, code: 'ATTEMPT_NOT_FOUND' })
     link.terminalId = terminalId
     prismaMock.payment.findFirst.mockResolvedValue({ id: 'pay-1' })
-    const r409 = await request(app)
+    const r409 = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
       .send(cuerpo())
@@ -331,7 +333,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     const estados: number[] = []
     let sinCabecera = 0
     for (let i = 0; i < 105; i++) {
-      const res = await request(app)
+      const res = await api()
         .post(RUTA)
         .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
         .send(cuerpo())
@@ -342,7 +344,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     // La primera declara y el resto son replays idempotentes: todas 200, ninguna 429, ninguna con cabeceras de la cubeta.
     expect({ estados: [...new Set(estados)], sinCabecera }).toEqual({ estados: [200], sinCabecera: 105 })
     // Con PIN la cubeta SÍ se arma (cabeceras estándar presentes) — es lo que protege el PIN de la fuerza bruta.
-    const conPin = await request(app)
+    const conPin = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo({ supervisorPin: '1234' }))
@@ -353,7 +355,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
 
   it('503 RESOLUTION_UNAVAILABLE si la base revienta: nunca se serializa el error (podría llevar el PIN); el log lleva nombre y código, nunca el mensaje', async () => {
     prismaMock.$transaction.mockRejectedValueOnce(new Error('db caída con supervisorPin=1234 adentro'))
-    const res = await request(app)
+    const res = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo({ supervisorPin: '1234' }))
@@ -375,7 +377,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
         clientVersion: 'test',
       }),
     )
-    const res2 = await request(app)
+    const res2 = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
       .send(cuerpo({ supervisorPin: '1234' }))
@@ -392,12 +394,12 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
   it('con PIN la cubeta es LA MISMA que la del PIN de gerente: agotarla desde esta ruta deja en 429 a POST /mobile/venues/:venueId/permission-overrides desde la misma IP', async () => {
     // DEV: 100 por minuto por IP (prod: 10 cada 15 min). Las de esta ruta con PIN cuentan; las respuestas del servicio dan igual.
     const agotadas: number[] = []
-    let primer429: request.Response | null = null
+    let primer429: Response | null = null
     // Se pide HASTA el primer 429, no exactamente 100: la ventana es fija de 1 min, y si el minuto se
     // cumple a media corrida el contador vuelve a cero y 100 ya no alcanzan (salía rojo por el reloj).
     // 250 cubre una vuelta completa de ventana. En cuanto hay 429, dejar de pedir.
     for (let i = 0; i < 250 && !primer429; i++) {
-      const res = await request(app)
+      const res = await api()
         .post(RUTA)
         .set('Authorization', `Bearer ${tokenDeTerminal('staff-cashier', 'CASHIER')}`)
         .send(cuerpo({ supervisorPin: '1234' }))
@@ -415,7 +417,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     expect(Number(primer429?.headers['retry-after'])).toBeGreaterThan(0)
     // La ruta del PIN de gerente, desde la MISMA IP, con un token válido y membresía real: el limitador corta ANTES de validar el cuerpo.
     mirrorTokenRoleOnStaffVenue('CASHIER', venueId)
-    const override = await request(app)
+    const override = await api()
       .post(`/api/v1/mobile/venues/${venueId}/permission-overrides`)
       .set('Authorization', `Bearer ${token({ sub: 'staff-cashier', role: 'CASHIER' })}`)
       .send({ pin: '1234', permission: 'orders:cancel' })
@@ -425,7 +427,7 @@ describe('POST /tpv/venues/:venueId/terminal-payment/attempts/:attemptId/no-inst
     })
     expect(Number(override.headers['retry-after'])).toBeGreaterThan(0)
     // Y sin PIN esta ruta sigue pasando aunque la cubeta esté agotada: no la toca.
-    const sinPin = await request(app)
+    const sinPin = await api()
       .post(RUTA)
       .set('Authorization', `Bearer ${tokenDeTerminal('staff-owner', 'OWNER')}`)
       .send(cuerpo())

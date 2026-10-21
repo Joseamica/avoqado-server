@@ -17,6 +17,17 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { impuestoQueSeCobraAparte } from '../shared/orderBalance'
+import { rechazarSiEsImportada } from '../shared/ordenImportada'
+import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { importesDeLasFilas } from '../shared/repartoDescuento'
+import {
+  RENGLON_PARA_REPARTO_SELECT,
+  conservarDescuentoHistorico,
+  recortarDescuentosDeRenglones,
+  sincronizarRepartos,
+} from '../shared/repartoDescuentoTx'
 
 /** Square's comp reasons (`39_cortesia.png`). Kept as free text + validated here. */
 export const COMP_REASONS = [
@@ -28,43 +39,76 @@ export const COMP_REASONS = [
   'Especial del administrador',
 ] as const
 
-export async function compOrderItem(params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string }) {
+export async function compOrderItemInTransaction(
+  tx: Prisma.TransactionClient,
+  params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string; captureBenefits?: boolean },
+) {
   const { venueId, orderId, itemId, reason, staffId } = params
 
   if (!reason?.trim()) {
     throw new BadRequestError('reason es requerido para dar de cortesía')
   }
 
-  const order = await prisma.order.findUnique({
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findUnique({
     where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cortesías')
 
   // Never mutate the money of an order that was already paid (or partially).
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
   }
 
-  const item = await prisma.orderItem.findFirst({
+  const item = await tx.orderItem.findFirst({
     where: { id: itemId, orderId },
     select: { id: true, productName: true, isCortesia: true, total: true, quantity: true, unitPrice: true },
   })
   if (!item) throw new NotFoundError('Artículo no encontrado en la orden')
   if (item.isCortesia) throw new BadRequestError('El artículo ya está dado de cortesía')
 
+  // R7-1 (ruling de B2): el recálculo es Σ filas; el resto de cabecera sin fila se congela en la suya ANTES del recorte.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  // P5 (founder, 1-oct): el descuento propio del renglón que se regala (y lo dirigido a él) se retira con sus beneficios
+  // ANTES de regalarlo; si no, su fila espejo seguía restando sobre los demás renglones.
+  const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
+    renglones: [itemId],
+    venueId,
+    staffId,
+    captureBenefits: params.captureBenefits,
+  })
+
   // The line stays on the check (kitchen + audit) but costs 0.
-  await prisma.orderItem.update({
+  await tx.orderItem.update({
     where: { id: itemId },
     data: {
       isCortesia: true,
       cortesiaReason: reason.trim(),
       total: 0,
       discountAmount: item.total, // what the comp gave away
+      appliedDiscountId: null, // su espejo lo acaba de retirar el recorte
     },
   })
 
-  const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0))
+  const totals = await recalculateOrderTotals(
+    orderId,
+    Math.max(0, Number(order.discountAmount || 0) - recorte.recortadoPesos),
+    Number(order.paidAmount || 0),
+    tx,
+  )
+
+  return { item, totals, recorte }
+}
+
+export async function compOrderItem(params: { venueId: string; orderId: string; itemId: string; reason: string; staffId?: string }) {
+  const { venueId, orderId, itemId, reason, staffId } = params
+
+  const { item, totals, recorte } = await prisma.$transaction(tx => compOrderItemInTransaction(tx, params), ORDER_LOCK_WAIT_BUDGET)
 
   void logAction({
     action: 'ORDER_ITEM_COMPED',
@@ -72,7 +116,13 @@ export async function compOrderItem(params: { venueId: string; orderId: string; 
     entityId: itemId,
     staffId,
     venueId,
-    data: { orderId, reason: reason.trim(), productName: item.productName, amount: Number(item.total) },
+    data: {
+      orderId,
+      reason: reason.trim(),
+      productName: item.productName,
+      amount: Number(item.total),
+      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+    },
   })
 
   return { itemId, reason: reason.trim(), ...totals }
@@ -83,39 +133,70 @@ export async function compOrderItem(params: { venueId: string; orderId: string; 
  * open order with one reason, then recomputes totals once. Same money guards
  * as the per-item comp.
  */
-export async function compWholeOrder(params: { venueId: string; orderId: string; reason: string; staffId?: string }) {
+export async function compWholeOrderInTransaction(
+  tx: Prisma.TransactionClient,
+  params: { venueId: string; orderId: string; reason: string; staffId?: string; captureBenefits?: boolean },
+) {
   const { venueId, orderId, reason, staffId } = params
 
   if (!reason?.trim()) {
     throw new BadRequestError('reason es requerido para dar de cortesía')
   }
 
-  const order = await prisma.order.findUnique({
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  const order = await tx.order.findUnique({
     where: { id: orderId, venueId },
-    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true },
+    select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true, originSystem: true },
   })
   if (!order) throw new NotFoundError('Orden no encontrada')
+  // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
+  // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
+  rechazarSiEsImportada(order)
+  await rechazarSiEsCuentaDeTarjetas(tx, orderId, 'cortesías')
   if (order.paymentStatus === 'PAID' || order.paymentStatus === 'PARTIAL') {
     throw new BadRequestError('No se puede dar cortesía en una orden ya pagada')
   }
 
-  const items = await prisma.orderItem.findMany({
+  const items = await tx.orderItem.findMany({
     where: { orderId, isCortesia: false },
     select: { id: true, total: true },
   })
   if (items.length === 0) throw new BadRequestError('La cuenta no tiene artículos por dar de cortesía')
 
+  // R7-1 y P5, como en `compOrderItem`: conservar el resto de cabecera y retirar lo dirigido a los renglones ANTES de regalarlos.
+  await conservarDescuentoHistorico(tx, orderId, order.discountAmount)
+  const recorte = await recortarDescuentosDeRenglones(tx, orderId, {
+    renglones: items.map(i => i.id),
+    venueId,
+    staffId,
+    captureBenefits: params.captureBenefits,
+  })
+
   const compedAmount = items.reduce((sum, i) => sum + Number(i.total), 0)
-  await prisma.$transaction(
-    items.map(i =>
-      prisma.orderItem.update({
-        where: { id: i.id },
-        data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: i.total },
-      }),
-    ),
+  for (const item of items) {
+    await tx.orderItem.update({
+      where: { id: item.id },
+      data: { isCortesia: true, cortesiaReason: reason.trim(), total: 0, discountAmount: item.total, appliedDiscountId: null },
+    })
+  }
+
+  const totals = await recalculateOrderTotals(
+    orderId,
+    Math.max(0, Number(order.discountAmount || 0) - recorte.recortadoPesos),
+    Number(order.paidAmount || 0),
+    tx,
   )
 
-  const totals = await recalculateOrderTotals(orderId, Number(order.discountAmount || 0), Number(order.paidAmount || 0))
+  return { order, items, compedAmount, totals, recorte }
+}
+
+export async function compWholeOrder(params: { venueId: string; orderId: string; reason: string; staffId?: string }) {
+  const { venueId, orderId, reason, staffId } = params
+
+  const { order, items, compedAmount, totals, recorte } = await prisma.$transaction(
+    tx => compWholeOrderInTransaction(tx, params),
+    ORDER_LOCK_WAIT_BUDGET,
+  )
 
   void logAction({
     action: 'ORDER_COMPED',
@@ -123,7 +204,13 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
     entityId: orderId,
     staffId,
     venueId,
-    data: { reason: reason.trim(), items: items.length, amount: compedAmount, orderNumber: order.orderNumber },
+    data: {
+      reason: reason.trim(),
+      items: items.length,
+      amount: compedAmount,
+      orderNumber: order.orderNumber,
+      ...(recorte.retiradas.length > 0 ? { descuentosRetirados: recorte.retiradas } : {}),
+    },
   })
 
   return { itemsComped: items.length, compedAmount, reason: reason.trim(), ...totals }
@@ -133,42 +220,25 @@ export async function compWholeOrder(params: { venueId: string; orderId: string;
  * Recomputes subtotal/total from the CURRENT item rows (comped lines contribute
  * 0) and re-derives percentage discounts, mirroring addItemsToOrder's recalc so
  * both paths agree on the order's money.
+ *
+ * `db` is the caller's transaction and is REQUIRED: the caller already holds this
+ * Order's canonical lock in it (or created the Order privately in it) and passes
+ * `paidAmount`/`fallbackDiscount` from that locked read. A standalone recalculation
+ * could never make the caller's earlier child writes atomic with these totals.
+ * Zero fallback deliberately drops an inline discount; comp and promotions pass the
+ * inherited one.
  */
-export async function recalculateOrderTotals(
-  orderId: string,
-  fallbackDiscount: number,
-  paidAmount: number,
-  // Los mutadores atómicos (split/merge/quitar descuento) pasan su tx para que
-  // la mutación y el recálculo caigan o persistan JUNTOS (auditoría 2026-07-18).
-  db: Prisma.TransactionClient | typeof prisma = prisma,
-) {
-  const items = await db.orderItem.findMany({ where: { orderId }, select: { total: true, orderPromotionId: true } })
+export async function recalculateOrderTotals(orderId: string, fallbackDiscount: number, paidAmount: number, db: Prisma.TransactionClient) {
+  const items = await db.orderItem.findMany({ where: { orderId }, select: RENGLON_PARA_REPARTO_SELECT })
   const newSubtotal = items.reduce((sum, i) => sum + Number(i.total), 0)
-  // 🔴 Las líneas nacidas de una promoción quedan FUERA de la base de los
-  // descuentos % de orden: la promo ya trae su precio negociado — re-derivar
-  // el 20% sobre subtotal CON el combo subía $20 → $39.80 (doble descuento).
-  const discountBase = items.filter(i => !i.orderPromotionId).reduce((sum, i) => sum + Number(i.total), 0)
-
   const orderDiscounts = await db.orderDiscount.findMany({ where: { orderId } })
-
-  let newDiscountAmount = 0
-  for (const od of orderDiscounts) {
-    // 🔴 MONEY (auditoría): las filas con appliedToItemIds son descuentos POR
-    // ARTÍCULO — re-derivar su % sobre el subtotal COMPLETO multiplica el
-    // descuento (50% de un item de $100 en una cuenta de $1000 = $500). Su
-    // amount ya está calculado sobre sus items: se respeta tal cual.
-    // Y siempre el valor DENORMALIZADO de la fila: editar el catálogo no debe
-    // cambiar retroactivamente montos ya aplicados.
-    const isItemScoped = (od.appliedToItemIds?.length ?? 0) > 0
-    const value = Number(od.value || 0)
-    if (!isItemScoped && od.type === 'PERCENTAGE' && value > 0) {
-      const amount = Math.round(((discountBase * value) / 100) * 100) / 100
-      await db.orderDiscount.update({ where: { id: od.id }, data: { amount } })
-      newDiscountAmount += amount
-    } else {
-      newDiscountAmount += Number(od.amount)
-    }
-  }
+  // 🔴 MONEY (auditoría): las filas con appliedToItemIds son POR ARTÍCULO y se respetan; el valor es el DENORMALIZADO de la
+  // fila, y las líneas de promoción quedan FUERA de la base de un % de cuenta (el combo ya trae su precio: $20 → $39.80).
+  // B2: UNA regla para los recalculadores (`importesDeLasFilas`): % de cuenta sobre los renglones sin promoción, como
+  // hoy; % dirigido con ámbito dentro de su ámbito (P1, Codex r2 N1). Repartos sincronizados en esta misma tx.
+  const { montosRederivados, descuento } = importesDeLasFilas(items, orderDiscounts)
+  let newDiscountAmount = descuento
+  await sincronizarRepartos(db, orderId, { renglones: items, filas: orderDiscounts, montosRederivados })
   if (orderDiscounts.length === 0 && fallbackDiscount > 0) {
     newDiscountAmount = fallbackDiscount
   }
@@ -191,7 +261,16 @@ export async function recalculateOrderTotals(
   // A check can never owe a negative amount: a FIXED_AMOUNT discount bigger
   // than the subtotal (catalog discount or loyalty redemption on a shrinking
   // check) would otherwise store a negative total and corrupt the corte.
-  const newTotal = Math.round((base + newServiceChargeAmount) * 100) / 100
+  //
+  // P12: más el IVA que va aparte, con la regla compartida. Se lee DESPUÉS de sincronizar: la sincronización pudo mover el
+  // impuesto en esta misma transacción (y quitar un descuento desde el móvil lo devuelve antes de llamar aquí).
+  const orden = await db.order.findUnique({ where: { id: orderId }, select: { contratoDePrecio: true, taxAmount: true, status: true } })
+  const impuestoAparte = impuestoQueSeCobraAparte({
+    contratoDePrecio: orden?.contratoDePrecio,
+    taxAmount: orden?.taxAmount,
+    status: orden?.status,
+  }).toNumber()
+  const newTotal = Math.round((base + impuestoAparte + newServiceChargeAmount) * 100) / 100
   const updated = await db.order.update({
     where: { id: orderId },
     data: {

@@ -17,6 +17,7 @@ import prisma from '@/utils/prismaClient'
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    $transaction: jest.fn(),
     terminal: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
     tpvCommandQueue: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
   },
@@ -36,7 +37,7 @@ jest.mock('@/services/tpv/command-queue.service', () => ({
 }))
 
 const findUnique = prisma.tpvCommandQueue.findUnique as jest.Mock
-const update = prisma.tpvCommandQueue.update as jest.Mock
+const update = prisma.tpvCommandQueue.updateMany as jest.Mock
 
 const WHITE = 'AVQD-2841653112'
 const BLACK = 'AVQD-N860W173400'
@@ -44,14 +45,17 @@ const BLACK = 'AVQD-N860W173400'
 const comandoDeLaWhite = () => ({
   id: 'cmd-1',
   commandType: 'FACTORY_RESET',
+  status: 'SENT',
   correlationId: 'corr-1',
   terminal: { id: 't-white', name: 'Testarudo PAX - WHITE', venueId: 'testarudo', serialNumber: WHITE, status: 'ACTIVE' },
 })
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(prisma.$transaction as jest.Mock).mockImplementation(callback => callback(prisma))
   findUnique.mockResolvedValue(comandoDeLaWhite())
   update.mockResolvedValue({})
+  ;(prisma.tpvCommandQueue.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.terminal.update as jest.Mock).mockResolvedValue({})
 })
 
@@ -68,6 +72,23 @@ describe('acknowledgeCommand — propiedad del comando', () => {
     await tpvHealthService.acknowledgeCommand('cmd-1', serial, 'FAILED', 'no pudo')
 
     expect(update).toHaveBeenCalledTimes(1)
-    expect(update.mock.calls[0][0]).toMatchObject({ where: { id: 'cmd-1' }, data: { status: 'FAILED', resultStatus: 'FAILED' } })
+    expect(update.mock.calls[0][0]).toMatchObject({
+      where: { id: 'cmd-1', status: 'SENT' },
+      data: { status: 'FAILED', resultStatus: 'FAILED' },
+    })
+  })
+})
+
+describe('P1 terminal ACKs are immutable', () => {
+  it.each(['COMPLETED', 'FAILED', 'CANCELLED', 'EXPIRED'])('does not overwrite %s with a later ACK', async status => {
+    findUnique.mockResolvedValue({ ...comandoDeLaWhite(), status, resultStatus: 'SUCCESS' })
+    await tpvHealthService.acknowledgeCommand('cmd-1', WHITE, 'FAILED', 'late duplicate')
+    expect(update).not.toHaveBeenCalled()
+  })
+  it('does not apply terminal side effects when another ACK wins the race', async () => {
+    findUnique.mockResolvedValue({ ...comandoDeLaWhite(), commandType: 'LOCK' })
+    ;(prisma.tpvCommandQueue.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+    await tpvHealthService.acknowledgeCommand('cmd-1', WHITE, 'SUCCESS')
+    expect(prisma.terminal.update).not.toHaveBeenCalled()
   })
 })

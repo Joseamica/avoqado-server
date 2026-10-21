@@ -1,6 +1,7 @@
 import express, { type Request, type Response } from 'express'
 import jwt from 'jsonwebtoken'
-import request, { type Response as SupertestResponse } from 'supertest'
+import type { Response as SupertestResponse } from 'supertest'
+import { startApiServer } from '@tests/__helpers__/apiServer'
 import { ForbiddenError, NotFoundError } from '@/errors/AppError'
 
 const authorizeCatalogRequest = jest.fn()
@@ -113,6 +114,8 @@ function app() {
   return server
 }
 
+const api = startApiServer(app)
+
 describe('production master-catalog controller adapters', () => {
   beforeEach(() => {
     jest.clearAllMocks()
@@ -138,15 +141,12 @@ describe('production master-catalog controller adapters', () => {
   })
 
   it('coerces query strings before invoking the shared item service', async () => {
-    await request(app())
-      .get('/organizations/org-pits/master-catalog/items?pageSize=2')
-      .set('Authorization', `Bearer ${token()}`)
-      .expect(200)
+    await api().get('/organizations/org-pits/master-catalog/items?pageSize=2').set('Authorization', `Bearer ${token()}`).expect(200)
     expect(listCatalogItems).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org-pits' }), { pageSize: 2 })
   })
 
   it('rejects forged query scope without invoking the item service', async () => {
-    await request(app())
+    await api()
       .get('/organizations/org-pits/master-catalog/items?organizationId=org-foreign')
       .set('Authorization', `Bearer ${token()}`)
       .expect(422)
@@ -158,10 +158,7 @@ describe('production master-catalog controller adapters', () => {
     ['/catalogs/manufacturers', 'MANUFACTURER'],
     ['/catalogs/families', 'FAMILY'],
   ])('coerces the shared reference query for %s', async (path, referenceType) => {
-    await request(app())
-      .get(`/organizations/org-pits/master-catalog${path}?pageSize=2`)
-      .set('Authorization', `Bearer ${token()}`)
-      .expect(200)
+    await api().get(`/organizations/org-pits/master-catalog${path}?pageSize=2`).set('Authorization', `Bearer ${token()}`).expect(200)
     expect(listCatalogReferences).toHaveBeenCalledWith(expect.objectContaining({ organizationId: 'org-pits' }), {
       pageSize: 2,
       referenceType,
@@ -170,20 +167,17 @@ describe('production master-catalog controller adapters', () => {
 
   it('preserves gate/impersonation denial and cross-tenant not-found envelopes', async () => {
     authorizeCatalogRequest.mockRejectedValueOnce(new ForbiddenError('Acceso al catálogo denegado', 'GATE_DISABLED'))
-    await request(app()).get('/organizations/org-pits/master-catalog/items').set('Authorization', `Bearer ${token()}`).expect(403, {
+    await api().get('/organizations/org-pits/master-catalog/items').set('Authorization', `Bearer ${token()}`).expect(403, {
       message: 'Acceso al catálogo denegado',
       code: 'GATE_DISABLED',
     })
 
     getCatalogItem.mockRejectedValueOnce(new NotFoundError('Artículo de catálogo no encontrado.'))
-    await request(app())
-      .get('/organizations/org-pits/master-catalog/items/foreign-item')
-      .set('Authorization', `Bearer ${token()}`)
-      .expect(404)
+    await api().get('/organizations/org-pits/master-catalog/items/foreign-item').set('Authorization', `Bearer ${token()}`).expect(404)
   })
 
   it('runs a valid workbook through real Multer and the production import controller', async () => {
-    await request(app())
+    await api()
       .post('/organizations/org-pits/master-catalog/imports/preview')
       .set('Authorization', `Bearer ${token()}`)
       .attach('file', Buffer.from('workbook-bytes'), {
@@ -205,7 +199,7 @@ describe('production master-catalog controller adapters', () => {
     ['unexpected file field', (call: any) => call.attach('workbook', Buffer.from('x'), 'catalog.xlsx')],
     ['oversized file', (call: any) => call.attach('file', Buffer.alloc(10 * 1024 * 1024 + 1), 'catalog.xlsx')],
   ])('maps %s through real Multer to the stable import envelope', async (_label, attach) => {
-    const call = request(app()).post('/organizations/org-pits/master-catalog/imports/preview').set('Authorization', `Bearer ${token()}`)
+    const call = api().post('/organizations/org-pits/master-catalog/imports/preview').set('Authorization', `Bearer ${token()}`)
     await attach(call)
       .expect(422)
       .expect((response: SupertestResponse) => expect(response.body.code).toBe('CATALOG_IMPORT_REQUEST_INVALID'))
@@ -213,7 +207,7 @@ describe('production master-catalog controller adapters', () => {
   })
 
   it('rejects organization scope forged in multipart fields before the import service', async () => {
-    await request(app())
+    await api()
       .post('/organizations/org-pits/master-catalog/imports/preview')
       .set('Authorization', `Bearer ${token()}`)
       .field('organizationId', 'org-foreign')
@@ -223,7 +217,7 @@ describe('production master-catalog controller adapters', () => {
   })
 
   it('maps a truncated multipart stream to the stable import envelope', async () => {
-    await request(app())
+    await api()
       .post('/organizations/org-pits/master-catalog/imports/preview')
       .set('Authorization', `Bearer ${token()}`)
       .set('Content-Type', 'multipart/form-data; boundary=x')
@@ -300,12 +294,12 @@ describe('production master-catalog controller adapters', () => {
       previewCatalogOverrideRequest,
     ],
   ])('rejects unknown command fields before the shared service on %s', async (path, payload, service) => {
-    await request(app()).post(path).set('Authorization', `Bearer ${token()}`).send(payload()).expect(422)
+    await api().post(path).set('Authorization', `Bearer ${token()}`).send(payload()).expect(422)
     expect(service).not.toHaveBeenCalled()
   })
 
   it('binds reversal targets to the publication batch from the production route', async () => {
-    await request(app())
+    await api()
       .post('/organizations/org-pits/master-catalog/publications/batch-a/reversal/preview')
       .set('Authorization', `Bearer ${token()}`)
       .send({
@@ -329,7 +323,7 @@ describe('production master-catalog controller adapters', () => {
     ['/venues/venue-pits/master-catalog/access?venueId=venue-foreign', getCatalogVenueAccess],
     ['/venues/venue-pits/master-catalog/products/product-1/provenance?organizationId=org-foreign', getCatalogVenueProvenance],
   ])('rejects route-scope forgery before production controller services on %s', async (path, service) => {
-    await request(app()).get(path).set('Authorization', `Bearer ${token()}`).expect(422, {
+    await api().get(path).set('Authorization', `Bearer ${token()}`).expect(422, {
       message: 'El scope sólo puede venir de la ruta',
       code: 'CATALOG_SCOPE_FORGED',
     })
@@ -337,10 +331,7 @@ describe('production master-catalog controller adapters', () => {
   })
 
   it('rejects unknown query keys on an endpoint with no query contract', async () => {
-    await request(app())
-      .get('/organizations/org-pits/master-catalog/items/item-1?wat=1')
-      .set('Authorization', `Bearer ${token()}`)
-      .expect(422)
+    await api().get('/organizations/org-pits/master-catalog/items/item-1?wat=1').set('Authorization', `Bearer ${token()}`).expect(422)
     expect(getCatalogItem).not.toHaveBeenCalled()
   })
 
@@ -352,7 +343,7 @@ describe('production master-catalog controller adapters', () => {
     ['put', '/superadmin/master-catalog/organizations/org-pits/config?orgId=org-foreign', 'updateConfig'],
     ['put', '/superadmin/master-catalog/organizations/org-pits/venues/venue-pits/governance?venueId=venue-foreign', 'updateGovernance'],
   ])('rejects forged superadmin query scope for %s %s', async (method, path, serviceName) => {
-    await (request(app()) as any)[method](path).send({}).expect(422, {
+    await (api() as any)[method](path).send({}).expect(422, {
       message: 'El scope sólo puede venir de la ruta',
       code: 'CATALOG_SCOPE_FORGED',
     })

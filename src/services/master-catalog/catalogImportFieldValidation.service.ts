@@ -271,10 +271,10 @@ export function validateCatalogImportCurrencyCell(
 interface CatalogImportItemFiscalInput {
   imageUrl: string
   unit: Unit
-  taxRate: string
+  taxRate: string | null
   satProductKey: string
   satUnitKey: string
-  objetoImp: string
+  objetoImp: string | null
   iepsMode: CatalogIepsMode
   iepsRate: string | null
   iepsQuota: string | null
@@ -288,6 +288,7 @@ export function addCatalogImportItemFieldFindings(
 ): void {
   // WHY: Import preview reports independent field failures in one pass while
   // delegating every acceptance rule to Task 5's pure validators.
+  const { taxRate, objetoImp } = input
   const checks: Array<{ column: string; run: () => unknown; fallback: string }> = [
     { column: 'image_url', run: () => validateCatalogImageUrlV1(input.imageUrl), fallback: 'CATALOG_IMAGE_URL_INVALID' },
     {
@@ -297,18 +298,25 @@ export function addCatalogImportItemFieldFindings(
       },
       fallback: 'CATALOG_UNIT_INVALID',
     },
-    {
-      column: 'iva_rate',
-      run: () => parseCatalogUnsignedDecimal(input.taxRate, 4, '1.0000', 'taxRate'),
-      fallback: 'CATALOG_DECIMAL_INVALID',
-    },
+    // D15: sólo se validan si vienen; vacías las completa el armado del comando.
+    ...(taxRate === null
+      ? []
+      : [
+          {
+            column: 'iva_rate',
+            run: () => parseCatalogUnsignedDecimal(taxRate, 4, '1.0000', 'taxRate'),
+            fallback: 'CATALOG_DECIMAL_INVALID',
+          },
+        ]),
     {
       column: 'sat_product_key',
       run: () => validateCatalogSatProductKeyV1(input.satProductKey),
       fallback: 'CATALOG_SAT_PRODUCT_KEY_INVALID',
     },
     { column: 'sat_unit_key', run: () => validateCatalogSatUnitKeyV1(input.satUnitKey), fallback: 'CATALOG_SAT_UNIT_KEY_INVALID' },
-    { column: 'objeto_imp', run: () => validateCatalogObjetoImpV1(input.objetoImp), fallback: 'CATALOG_OBJETO_IMP_INVALID' },
+    ...(objetoImp === null
+      ? []
+      : [{ column: 'objeto_imp', run: () => validateCatalogObjetoImpV1(objetoImp), fallback: 'CATALOG_OBJETO_IMP_INVALID' }]),
   ]
   for (const check of checks) {
     try {

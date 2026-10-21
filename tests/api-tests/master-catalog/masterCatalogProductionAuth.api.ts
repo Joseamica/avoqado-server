@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express'
 import jwt from 'jsonwebtoken'
-import request from 'supertest'
+import { startApiServer } from '@tests/__helpers__/apiServer'
 import { OrgRole, StaffRole } from '@prisma/client'
 import { MASTER_CATALOG_DEFAULT_CONFIG } from '@/types/master-catalog'
 
@@ -146,11 +146,13 @@ beforeEach(() => {
   createCatalogBrand.mockResolvedValue({ id: 'brand-1' })
 })
 
+const api = startApiServer(app)
+
 describe('production master-catalog authorization matrix', () => {
   it.each([OrgRole.OWNER, OrgRole.ADMIN])('allows %s to execute a production command', async role => {
     staffFindUnique.mockResolvedValue(liveStaff(role))
 
-    await request(app())
+    await api()
       .post('/organizations/org-pits/master-catalog/catalogs/brands')
       .set('Authorization', `Bearer ${token()}`)
       .send({ name: 'Brand' })
@@ -162,8 +164,8 @@ describe('production master-catalog authorization matrix', () => {
   it('allows VIEWER reads but denies commands before the production service', async () => {
     staffFindUnique.mockResolvedValue(liveStaff(OrgRole.VIEWER))
 
-    await request(app()).get('/organizations/org-pits/master-catalog/catalogs/brands').set('Authorization', `Bearer ${token()}`).expect(200)
-    await request(app())
+    await api().get('/organizations/org-pits/master-catalog/catalogs/brands').set('Authorization', `Bearer ${token()}`).expect(200)
+    await api()
       .post('/organizations/org-pits/master-catalog/catalogs/brands')
       .set('Authorization', `Bearer ${token()}`)
       .send({ name: 'Brand' })
@@ -181,7 +183,7 @@ describe('production master-catalog authorization matrix', () => {
   ])('denies %s before a production read service', async (_label, staff) => {
     staffFindUnique.mockResolvedValue(staff)
 
-    const response = await request(app())
+    const response = await api()
       .get('/organizations/org-pits/master-catalog/catalogs/brands')
       .set('Authorization', `Bearer ${token()}`)
       .expect(403)
@@ -191,7 +193,7 @@ describe('production master-catalog authorization matrix', () => {
   })
 
   it('denies impersonated commands even for a live OWNER', async () => {
-    const response = await request(app())
+    const response = await api()
       .post('/organizations/org-pits/master-catalog/catalogs/brands')
       .set(
         'Authorization',
@@ -205,7 +207,7 @@ describe('production master-catalog authorization matrix', () => {
   })
 
   it('derives tenant from the route and denies a foreign organization membership', async () => {
-    const response = await request(app())
+    const response = await api()
       .get('/organizations/org-foreign/master-catalog/catalogs/brands')
       .set('Authorization', `Bearer ${token()}`)
       .expect(403)
@@ -228,7 +230,7 @@ describe('production master-catalog authorization matrix', () => {
   ])('fails closed for %s before a production read service', async (_label, arrange, code, status) => {
     arrange()
 
-    const response = await request(app())
+    const response = await api()
       .get('/organizations/org-pits/master-catalog/catalogs/brands')
       .set('Authorization', `Bearer ${token()}`)
       .expect(status)

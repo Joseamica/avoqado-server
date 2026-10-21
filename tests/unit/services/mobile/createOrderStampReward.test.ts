@@ -186,6 +186,20 @@ describe('el premio al REINTENTAR la creación (misma externalId)', () => {
     expect(fuente.slice(atajo, atajo + 900)).toMatch(/ensureStampRewardOnExistingOrder\(/)
     expect(fuente.slice(choque, choque + 900)).toMatch(/ensureStampRewardOnExistingOrder\(/)
   })
+
+  it('🔴 si el reintento canjea el premio AHORA, las dos salidas responden la orden RELEÍDA (Codex, fusión 30-sep)', () => {
+    // La orden se leyó ANTES de canjear: devolverla tal cual respondería $100 con `applied: true` sobre una base de $70,
+    // y la caja cobraría completo con el premio ya quemado. Mismo defecto que el camino normal ya cierra con `orderFinal`.
+    const fuente = require('fs').readFileSync(
+      require('path').join(__dirname, '../../../../src/services/mobile/order.mobile.service.ts'),
+      'utf8',
+    )
+    for (const marca of ['Duplicate createOrderWithItems detected', 'Concurrent duplicate blocked by unique index']) {
+      const tramo = fuente.slice(fuente.indexOf(marca), fuente.indexOf(marca) + 1400)
+      expect(tramo).toMatch(/ensureStampRewardOnExistingOrder\([\s\S]*stampReward\.applied[\s\S]*prisma\.order\.findUnique\(/)
+      expect(tramo).toMatch(/toCreatedOrderResponse\(ordenReleida\)/)
+    }
+  })
 })
 
 describe('el premio que NO salió como la caja lo cobró deja rastro', () => {

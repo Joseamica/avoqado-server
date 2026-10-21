@@ -2,7 +2,11 @@ import { CatalogItemKind, ProductType, Unit } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { hashCatalogManagedFieldsV1 } from '@/services/master-catalog/catalogHash.service'
 import { hashCanonicalJsonV1 } from '@/services/master-catalog/catalogHash.service'
-import { CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1, CATALOG_RETAIL_MANAGED_FIELD_MASK_V1 } from '@/types/master-catalog'
+import {
+  CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2,
+  CATALOG_RETAIL_MANAGED_FIELD_MASK_V2,
+  type CatalogBindingDecisionInput,
+} from '@/types/master-catalog'
 import {
   NOW,
   bindingHarness,
@@ -41,7 +45,7 @@ describe('catalogBinding.service — atomic confirm', () => {
         venueId: 'venue-1',
         productId: 'product-1',
         status: 'LINKED',
-        managedFieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V1,
+        managedFieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V2,
         managedHashVersion: null,
         lastPublishedCatalogRevision: null,
         lastPublishedManagedHash: null,
@@ -82,6 +86,7 @@ describe('catalogBinding.service — atomic confirm', () => {
       type: ProductType.REGULAR,
       price: new Decimal('25.00'),
       cost: new Decimal('12.50'),
+      ivaTratamiento: 'IVA_16',
       taxRate: new Decimal('0.1600'),
       satProductKey: '50192100',
       satUnitKey: 'H87',
@@ -104,18 +109,16 @@ describe('catalogBinding.service — atomic confirm', () => {
       description: 'Descripción maestra',
       imageUrl: 'https://example.test/item.png',
       name: 'Producto maestro',
-      objetoImp: '02',
       satProductKey: '50192100',
       satUnitKey: 'H87',
-      taxRate: '0.1600',
       type: ProductType.REGULAR,
       unit: Unit.PIECE,
     }
     const managed = hashCatalogManagedFieldsV1({
       hashVersion: 1,
-      fieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V1,
+      fieldMask: CATALOG_RETAIL_MANAGED_FIELD_MASK_V2,
       values: snapshot,
-      decimalScales: { cost: 2, taxRate: 4 },
+      decimalScales: { cost: 2 },
     })
     expect(h.tx.catalogVenueBinding.create).toHaveBeenCalledWith({
       data: expect.objectContaining({
@@ -171,7 +174,7 @@ describe('catalogBinding.service — atomic confirm', () => {
       active: false,
     })
     const bindingData = tx.catalogVenueBinding.create.mock.calls[0]?.[0].data
-    expect(bindingData.managedFieldMask).toEqual(CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V1)
+    expect(bindingData.managedFieldMask).toEqual(CATALOG_PREPARED_DISH_MANAGED_FIELD_MASK_V2)
     expect(bindingData.lastPublishedManagedSnapshot).not.toHaveProperty('cost')
     expect(h.dependencies.evaluatePreparedDishBinding).toHaveBeenCalledWith(tx, {
       organizationId: 'org-1',
@@ -183,6 +186,34 @@ describe('catalogBinding.service — atomic confirm', () => {
     )
     expect(tx.recipe.findFirst).not.toHaveBeenCalled()
     expect(result.lines[0].readiness).toEqual(readiness)
+  })
+
+  it('D15: CREATE nace al 16 % explícito aunque el artículo diga otra cosa, y la instantánea no lleva IVA', async () => {
+    const tx = bindingTransaction()
+    tx.product.findMany.mockResolvedValue([])
+    tx.catalogItem.findFirst.mockResolvedValue(catalogItem({ taxRate: new Decimal('0.0800'), objetoImp: '01' }))
+    const h = bindingHarness(tx)
+    const { preview } = await stageConfirmablePreview(h, {
+      decision: 'CREATE',
+      create: { categoryId: 'category-1', localSku: 'local-ocho', initialPrice: '25.00' },
+    })
+
+    await h.service.confirm(context, {
+      bindingBatchId: preview.bindingBatchId as string,
+      previewToken: preview.previewToken as string,
+      confirm: true,
+      idempotencyKey: 'binding-create-ocho',
+    })
+
+    expect(tx.product.create.mock.calls[0]?.[0].data).toMatchObject({
+      ivaTratamiento: 'IVA_16',
+      taxRate: new Decimal('0.1600'),
+      objetoImp: '02',
+    })
+    const bindingData = tx.catalogVenueBinding.create.mock.calls[0]?.[0].data
+    expect(bindingData.managedFieldMask).toEqual([...CATALOG_RETAIL_MANAGED_FIELD_MASK_V2])
+    expect(bindingData.lastPublishedManagedSnapshot).not.toHaveProperty('taxRate')
+    expect(bindingData.lastPublishedManagedSnapshot).not.toHaveProperty('objetoImp')
   })
 
   it('SKIP applies only its durable batch-line outcome and creates no Product or binding', async () => {
@@ -235,6 +266,86 @@ describe('catalogBinding.service — atomic confirm', () => {
     expect(h.tx.catalogIdempotencyRecord.updateMany).not.toHaveBeenCalledWith(
       expect.objectContaining({ data: expect.objectContaining({ state: 'APPLIED' }) }),
     )
+  })
+
+  it('🔴 Codex #5: confirmar una vista previa hecha ANTES de que el negocio tuviera una familia se rechaza sin ligar', async () => {
+    const h = bindingHarness()
+    const { preview } = await stageConfirmablePreview(h, { decision: 'LINK', productId: 'product-1' })
+    h.tx.productGroup.count.mockResolvedValue(1) // alguien creó una familia entre la vista previa y la confirmación
+
+    await expect(
+      h.service.confirm(context, {
+        bindingBatchId: preview.bindingBatchId as string,
+        previewToken: preview.previewToken as string,
+        confirm: true,
+        idempotencyKey: 'binding-venue-gained-variants',
+      }),
+    ).rejects.toMatchObject({ code: 'CATALOG_BINDING_STALE' })
+    expect(h.tx.catalogVenueBinding.create).not.toHaveBeenCalled()
+  })
+
+  /** Vista previa confirmable con estas líneas (cada una en su negocio) y su confirmación; devuelve los `FOR SHARE` de la confirmación. */
+  async function confirmarLote(lines: Array<{ venueId: string; decision: CatalogBindingDecisionInput }>) {
+    const tx = bindingTransaction()
+    tx.venue.findFirst.mockImplementation(async (args: { where: { id: string } }) => ({
+      id: args.where.id,
+      organizationId: 'org-1',
+      currency: 'MXN',
+      updatedAt: NOW,
+    }))
+    const h = bindingHarness(tx)
+    const preview = await h.service.preview(context, { lines: lines.map(l => ({ catalogItemId: 'item-1', ...l })) })
+    expect(tx.$queryRaw).not.toHaveBeenCalled() // la vista previa no bloquea
+    const batchData = tx.catalogBindingBatch.create.mock.calls[0]?.[0].data
+    tx.catalogBindingBatch.findFirst.mockResolvedValue({
+      id: preview.bindingBatchId,
+      ...batchData,
+      result: null,
+      attemptId: null,
+      leaseExpiresAt: null,
+      heartbeatAt: null,
+      appliedAt: null,
+      completedAt: null,
+      updatedAt: NOW,
+    })
+    tx.catalogBindingLine.findMany.mockResolvedValue(
+      tx.catalogBindingLine.create.mock.calls.map((call, index) => ({
+        id: `line-${index + 1}`,
+        ...call[0].data,
+        createdAt: NOW,
+        updatedAt: NOW,
+      })),
+    )
+    const conteosDeLaVista = tx.productGroup.count.mock.calls.length
+    await h.service.confirm(context, {
+      bindingBatchId: preview.bindingBatchId as string,
+      previewToken: preview.previewToken as string,
+      confirm: true,
+      idempotencyKey: `binding-venue-lock-${lines.length}`,
+    })
+    const candados = tx.$queryRaw.mock.calls.filter(c => /FOR SHARE/.test((c[0] as unknown as TemplateStringsArray).join('?')))
+    return { h, tx, candados, conteosDeLaVista }
+  }
+
+  it('🔴 Codex #5 ronda 3: la confirmación toma FOR SHARE, UNA vez y por id, sólo los negocios de LINK/CREATE, tras el candado del catálogo y antes de re-evaluar', async () => {
+    const { h, tx, candados, conteosDeLaVista } = await confirmarLote([
+      { venueId: 'venue-2', decision: { decision: 'SKIP' } },
+      { venueId: 'venue-1', decision: { decision: 'LINK', productId: 'product-1' } },
+    ])
+    expect(candados).toHaveLength(1)
+    const [strings, ...valores] = candados[0] as unknown as [TemplateStringsArray, ...unknown[]]
+    expect(strings.join('?')).toMatch(/FROM "Venue" WHERE "organizationId" = \? AND id IN \(.*\) ORDER BY id FOR SHARE/)
+    expect(valores[0]).toBe('org-1')
+    // El negocio de la línea «Omitir» queda fuera (como antes del arreglo): en SERIALIZABLE, bloquearlo podía dar 40001.
+    expect((valores[1] as { values: string[] }).values).toEqual(['venue-1'])
+    const orden = tx.$queryRaw.mock.invocationCallOrder[tx.$queryRaw.mock.calls.indexOf(candados[0])]
+    expect(h.dependencies.acquireMutationLockTx.mock.invocationCallOrder[0]).toBeLessThan(orden)
+    expect(orden).toBeLessThan(tx.productGroup.count.mock.invocationCallOrder[conteosDeLaVista]) // antes de re-evaluar
+  })
+
+  it('Codex #5 ronda 3: un lote sólo de «Omitir» no bloquea ningún negocio', async () => {
+    const { candados } = await confirmarLote([{ venueId: 'venue-2', decision: { decision: 'SKIP' } }])
+    expect(candados).toEqual([])
   })
 
   it('rejects PREPARED_DISH LINK when captured Recipe inputs change before the org-locked confirm', async () => {

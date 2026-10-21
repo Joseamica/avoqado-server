@@ -19,6 +19,24 @@ describe('Subscription lifecycle plan emails', () => {
 
   // --- Task 4: sendPlanConfirmationEmail ---
   describe('sendPlanConfirmationEmail', () => {
+    it('🔴 la fecha del cobro se escribe en la hora del NEGOCIO (Tijuana), no en la del servidor', async () => {
+      // 2027-10-21T06:30Z = 20 de octubre, 23:30 en Tijuana; ya es 21 en Ciudad de México (la Mac) y en UTC (Render).
+      // Sin la zona del negocio el correo decía «21 de octubre» en cualquiera de los dos servidores.
+      await emailService.sendPlanConfirmationEmail('a@x.com', {
+        locale: 'es',
+        venueName: 'Bar',
+        payNow: false,
+        interval: 'annual',
+        firstChargeDate: new Date('2027-10-21T06:30:00Z'),
+        firstChargeAmountCents: 1158840,
+        billingPortalUrl: 'u',
+        timeZone: 'America/Tijuana',
+      })
+      const html = JSON.stringify(spy.mock.calls.at(-1))
+      expect(html).toContain('20 de octubre de 2027')
+      expect(html).not.toContain('21 de octubre de 2027')
+    })
+
     it('confirmation: trial es subject, no emoji', async () => {
       await emailService.sendPlanConfirmationEmail('a@x.com', {
         locale: 'es',

@@ -1,6 +1,6 @@
 import express, { type Request, type Response } from 'express'
 import jwt from 'jsonwebtoken'
-import request from 'supertest'
+import { startApiServer } from '@tests/__helpers__/apiServer'
 
 const routeHits: string[] = []
 const handler = (name: string) => (_req: Request, res: Response) => {
@@ -117,22 +117,28 @@ function superadminApp(production = false) {
   return server
 }
 
+const organizationApi = startApiServer(app)
+const dashboardApi = startApiServer(dashboardApp)
+const venueApi = startApiServer(venueApp)
+const superadminApi = startApiServer(superadminApp)
+const productionSuperadminApi = startApiServer(() => superadminApp(true))
+
 describe('H1A organization master-catalog route surface', () => {
   beforeEach(() => routeHits.splice(0))
 
   it('requires authentication on the mounted organization surface', async () => {
-    await request(app()).get(`${base}/access`).expect(401)
+    await organizationApi().get(`${base}/access`).expect(401)
     expect(routeHits).toEqual([])
   })
 
   it('is mounted by the production dashboard router at the exact organization path', async () => {
-    const response = await request(dashboardApp()).get(`${base}/access`).set('Authorization', `Bearer ${token()}`).expect(200)
+    const response = await dashboardApi().get(`${base}/access`).set('Authorization', `Bearer ${token()}`).expect(200)
 
     expect(response.body.data.handler).toBe('getAccess')
   })
 
   it('routes the idempotency lookup before the dynamic publication batch route', async () => {
-    const response = await request(app())
+    const response = await organizationApi()
       .get(`${base}/publications/by-idempotency-key/CATALOG_FIELDS_PUBLISH/shared-key`)
       .set('Authorization', `Bearer ${token()}`)
       .expect(200)
@@ -142,7 +148,7 @@ describe('H1A organization master-catalog route surface', () => {
   })
 
   it('maps an unexpected multipart file field to the stable import input envelope', async () => {
-    const response = await request(app())
+    const response = await organizationApi()
       .post(`${base}/imports/preview`)
       .set('Authorization', `Bearer ${token()}`)
       .attach('unexpected', Buffer.from('not-an-xlsx'), 'input.xlsx')
@@ -190,7 +196,8 @@ describe('H1A organization master-catalog route surface', () => {
     ['get', '/audit', 'listAudit'],
     ['get', '/audit/actions', 'listAuditActions'],
   ] as const)('%s %s reaches %s', async (method, path, expectedHandler) => {
-    const response = await (request(app()) as any)[method](`${base}${path}`).set('Authorization', `Bearer ${token()}`).send({}).expect(200)
+    const client = organizationApi() as any
+    const response = await client[method](`${base}${path}`).set('Authorization', `Bearer ${token()}`).send({}).expect(200)
 
     expect(response.body.data.handler).toBe(expectedHandler)
   })
@@ -202,10 +209,10 @@ describe('H1A venue master-catalog route surface', () => {
   beforeEach(() => routeHits.splice(0))
 
   it('requires authentication and is mounted by the production dashboard router', async () => {
-    await request(venueApp()).get(`${venueBase}/access`).expect(401)
+    await venueApi().get(`${venueBase}/access`).expect(401)
     expect(routeHits).toEqual([])
 
-    const response = await request(dashboardApp()).get(`${venueBase}/access`).set('Authorization', `Bearer ${token()}`).expect(200)
+    const response = await dashboardApi().get(`${venueBase}/access`).set('Authorization', `Bearer ${token()}`).expect(200)
     expect(response.body.data.handler).toBe('getVenueAccess')
   })
 
@@ -216,7 +223,7 @@ describe('H1A venue master-catalog route surface', () => {
     ['post', '/override-requests/preview', 'previewVenueOverride'],
     ['post', '/override-requests/request-1/confirm', 'confirmVenueOverride'],
   ] as const)('%s %s reaches %s', async (method, path, expectedHandler) => {
-    const client = request(venueApp()) as any
+    const client = venueApi() as any
     const response = await client[method](`${venueBase}${path}`).set('Authorization', `Bearer ${token()}`).send({}).expect(200)
     expect(response.body.data.handler).toBe(expectedHandler)
   })
@@ -234,8 +241,8 @@ describe('H1A superadmin master-catalog route surface', () => {
   }
 
   it('is mounted only beneath the authenticated production superadmin router', async () => {
-    await request(superadminApp(true)).get(`${adminBase}/organizations`).expect(401)
-    const response = await request(superadminApp(true))
+    await productionSuperadminApi().get(`${adminBase}/organizations`).expect(401)
+    const response = await productionSuperadminApi()
       .get(`${adminBase}/organizations`)
       .set('Authorization', `Bearer ${adminToken()}`)
       .expect(200)
@@ -250,7 +257,7 @@ describe('H1A superadmin master-catalog route surface', () => {
     ['put', '/master-catalog/organizations/org-pits/config', 'updateConfig'],
     ['put', '/master-catalog/organizations/org-pits/venues/venue-pits/governance', 'updateGovernance'],
   ] as const)('%s %s reaches %s', async (method, path, expectedHandler) => {
-    const client = request(superadminApp()) as any
+    const client = superadminApi() as any
     const response = await client[method](`/api/v1/superadmin${path}`).set('Authorization', `Bearer ${adminToken()}`).send({}).expect(200)
     expect(response.body.data.handler).toBe(expectedHandler)
   })

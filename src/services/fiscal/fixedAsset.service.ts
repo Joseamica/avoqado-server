@@ -13,6 +13,7 @@ import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { postJournalEntry } from './journalEntry.service'
 import { resolveScopeOrNull } from './chartOfAccounts.service'
+import { contabilidadPausada, esExclusionContable, MOTIVO_CONTABILIDAD_IVA_MIXTO } from './exclusionContable'
 import { ASSET_TYPE_CATALOG, cappedMoiCents, getAssetType, type AssetTypeDef } from './assetTypeCatalog'
 
 export interface RegisterFixedAssetInput {
@@ -132,6 +133,8 @@ async function accountIdByCode(scope: { organizationId: string; rfc: string }, c
 export interface LedgerPostResult {
   posted: boolean
   reason?: string
+  /** Motivo para el operador cuando la póliza se pausó (hoy: `reason: 'ivaMixto'`). */
+  message?: string
   journalEntryId?: string
 }
 
@@ -163,7 +166,9 @@ async function postAcquisitionEntry(
       { staffId },
     )
     return { posted: true, journalEntryId: entry.id }
-  } catch {
+  } catch (e) {
+    // IVA por producto, plan 4: con IVA mixto la contabilidad está pausada y el motivo viaja al operador.
+    if (esExclusionContable(e)) return { posted: false, reason: 'ivaMixto', message: MOTIVO_CONTABILIDAD_IVA_MIXTO }
     return { posted: false, reason: 'error' }
   }
 }
@@ -190,7 +195,12 @@ async function postDisposalEntry(
       },
       select: { id: true },
     })
-    if (!alta) return { posted: false, reason: 'noAcquisitionEntry' }
+    if (!alta) {
+      // Sin alta porque se registró con la contabilidad ya pausada por IVA mixto: la baja dice por qué (ola 2 · D).
+      if (await contabilidadPausada(scope.organizationId))
+        return { posted: false, reason: 'ivaMixto', message: MOTIVO_CONTABILIDAD_IVA_MIXTO }
+      return { posted: false, reason: 'noAcquisitionEntry' }
+    }
 
     const plug = asset.moiCents - accumulatedCents - proceedsCents // >0 pérdida · <0 ganancia · 0 sin resultado
     const activo = await accountIdByCode(scope, assetLeafCode(asset.assetType))
@@ -219,7 +229,8 @@ async function postDisposalEntry(
       { staffId },
     )
     return { posted: true, journalEntryId: entry.id }
-  } catch {
+  } catch (e) {
+    if (esExclusionContable(e)) return { posted: false, reason: 'ivaMixto', message: MOTIVO_CONTABILIDAD_IVA_MIXTO }
     return { posted: false, reason: 'error' }
   }
 }
@@ -238,7 +249,7 @@ export async function registerFixedAsset(
   venueId: string,
   input: RegisterFixedAssetInput,
   actorStaffId: string | null = null,
-): Promise<FixedAssetView & { ledgerPosted: boolean; ledgerReason?: string }> {
+): Promise<FixedAssetView & { ledgerPosted: boolean; ledgerReason?: string; ledgerMessage?: string }> {
   const def = getAssetType(input.assetType)
   if (!def) throw new BadRequestError('Tipo de activo fijo no válido.')
   if (!input.description || !input.description.trim()) throw new BadRequestError('La descripción del activo es requerida.')
@@ -289,7 +300,12 @@ export async function registerFixedAsset(
     data: { assetType: asset.assetType, moiCents: asset.moiCents, annualRate: rate, ledgerPosted: alta.posted },
   })
 
-  return { ...toView(asset), ledgerPosted: alta.posted, ...(alta.reason ? { ledgerReason: alta.reason } : {}) }
+  return {
+    ...toView(asset),
+    ledgerPosted: alta.posted,
+    ...(alta.reason ? { ledgerReason: alta.reason } : {}),
+    ...(alta.message ? { ledgerMessage: alta.message } : {}),
+  }
 }
 
 /** Lista los activos fijos del contribuyente del local (o needsFiscalSetup si no hay RFC). */
@@ -372,6 +388,8 @@ export interface DisposeResult {
   /** Si la póliza de baja se llevó al libro (requiere que exista la póliza de alta y las cuentas). */
   ledgerPosted: boolean
   ledgerReason?: string
+  /** Motivo para el operador cuando la póliza de baja se pausó (`ledgerReason: 'ivaMixto'`). */
+  ledgerMessage?: string
 }
 
 /**
@@ -424,5 +442,6 @@ export async function disposeFixedAsset(
     gainLossCents: gainLoss,
     ledgerPosted: baja.posted,
     ...(baja.reason ? { ledgerReason: baja.reason } : {}),
+    ...(baja.message ? { ledgerMessage: baja.message } : {}),
   }
 }

@@ -1,11 +1,15 @@
 import { calculateExpectedAmount } from '../mobile/cash-drawer.mobile.service'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError } from '../../errors/AppError'
+import { Prisma } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
 import { lineRevenue } from './lineRevenue'
 import { calculateCashReconciliation, calculateCashReconciliationFromExpected } from '../shared/cashReconciliation.service'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
+import { ORDEN_DE_TARJETAS_SELECT } from '../giftCards/giftCardMarks'
+import { esCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
+import { ventasDelTurnoSinTarjetas, ventasSinTarjetasPorTurno } from '../shared/ventasDelTurno'
 
 interface ShiftFilters {
   staffId?: string
@@ -134,6 +138,7 @@ export async function getShifts(
     }),
   ])
 
+  const ventasSinCerrar = await ventasDeTurnosSinCerrar(venueId, shifts)
   const shiftsWithCalculations = shifts.map(shift => {
     // Determine effective status based on time logic
     const now = new Date()
@@ -147,7 +152,7 @@ export async function getShifts(
       endTime: shift.endTime,
       startingCash: Number(shift.startingCash),
       ...serializeShiftCashReconciliation(shift),
-      totalSales: Number(shift.totalSales),
+      totalSales: ventasSinCerrar.get(shift.id) ?? Number(shift.totalSales),
       totalTips: Number(shift.totalTips),
       totalOrders: shift.totalOrders,
       status: effectiveStatus,
@@ -306,6 +311,42 @@ export async function resolveShiftCashDrawer(
   }
 }
 
+/** Lo que el detalle del turno lee de cada orden: renglones para los productos, y sus cobros para la forma de pago y
+ *  para saber si se cobró dentro del turno. */
+const ORDEN_DEL_DETALLE = {
+  id: true,
+  orderNumber: true,
+  total: true,
+  subtotal: true,
+  status: true,
+  table: { select: { id: true, number: true } },
+  createdAt: true,
+  servedById: true,
+  servedBy: { select: { id: true, firstName: true, lastName: true } },
+  items: {
+    select: {
+      id: true,
+      // Name the line was SOLD under (sales snapshot): a renamed product must not rewrite past shifts.
+      productName: true,
+      quantity: true,
+      unitPrice: true,
+      discountAmount: true,
+      // Both are REQUIRED by lineRevenue: without `modifiers` the
+      // modifier revenue vanishes, without `weightQuantity` a weighing
+      // is charged as a whole kilo.
+      weightQuantity: true,
+      modifiers: { select: { price: true, quantity: true } },
+      // Cierre r1 (R3): la marca de cuenta de tarjetas; no es una orden de venta del turno.
+      giftCardId: true,
+      product: { select: { id: true, name: true } },
+    },
+  },
+  payments: {
+    where: { status: 'COMPLETED' },
+    select: { id: true, method: true, cardBrand: true, maskedPan: true, shiftId: true, type: true, createdAt: true },
+  },
+} satisfies Prisma.OrderSelect
+
 export async function getShiftById(venueId: string, shiftId: string, incluirEsperado = false): Promise<any | null> {
   const shift = await prisma.shift.findFirst({
     where: {
@@ -355,73 +396,18 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
           },
           orderId: true,
           createdAt: true,
+          // R3 (Codex #5 del cierre): la marca de cuenta de tarjetas; su cobro no es venta del turno ni del empleado.
+          order: { select: ORDEN_DE_TARJETAS_SELECT },
+          type: true,
         },
         orderBy: {
           createdAt: 'desc',
         },
       },
-      // Include orders with items for product breakdown
+      // Sólo las órdenes del turno con un cobro SIN turno (Testarudo sincroniza así sus turnos de SoftRestaurant).
       orders: {
-        where: {
-          status: {
-            in: ['COMPLETED', 'CONFIRMED'],
-          },
-        },
-        select: {
-          id: true,
-          orderNumber: true,
-          total: true,
-          subtotal: true,
-          status: true,
-          table: {
-            select: {
-              id: true,
-              number: true,
-            },
-          },
-          createdAt: true,
-          servedById: true,
-          servedBy: {
-            select: {
-              id: true,
-              firstName: true,
-              lastName: true,
-            },
-          },
-          items: {
-            select: {
-              id: true,
-              quantity: true,
-              unitPrice: true,
-              discountAmount: true,
-              // Both are REQUIRED by lineRevenue: without `modifiers` the
-              // modifier revenue vanishes, without `weightQuantity` a weighing
-              // is charged as a whole kilo.
-              weightQuantity: true,
-              modifiers: { select: { price: true, quantity: true } },
-              product: {
-                select: {
-                  id: true,
-                  name: true,
-                },
-              },
-            },
-          },
-          payments: {
-            where: {
-              status: 'COMPLETED',
-            },
-            select: {
-              id: true,
-              method: true,
-              cardBrand: true,
-              maskedPan: true,
-            },
-          },
-        },
-        orderBy: {
-          createdAt: 'desc',
-        },
+        where: { payments: { some: { status: 'COMPLETED', shiftId: null } } },
+        select: ORDEN_DEL_DETALLE,
       },
     },
   })
@@ -429,6 +415,41 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   if (!shift) {
     return null
   }
+
+  // Las órdenes del detalle son las cuentas COBRADAS en el turno, con la misma membresía que firma el cierre y que
+  // enseña la lista (`readShiftPaymentsForClose` + `contarOrdenesCobradas`; no se importan porque shift.tpv.service
+  // ya importa este archivo): (1) los cobros estampados con el turno y (2) los cobros sin turno de una orden del turno,
+  // dentro de su horario. Medido en producción el 19-oct: así 0 de 511 turnos cerrados descuadran contra la lista (30
+  // con `Order.shiftId`, que dejaba en 0 los turnos cuyas órdenes no traían turno y contaba CONFIRMED sin cobro). Una
+  // cuenta pagada en partes cuenta una vez; una devolución sola, ninguna. El horario corta como el cierre
+  // (`cobroSinTurnoPerteneceAlTurno`): cerrado, en su `endTime`; cerrándose, en su `updatedAt` (= claimedAt); abierto, ahora.
+  const hasta = shift.endTime ?? (shift.status === 'CLOSING' ? shift.updatedAt : new Date())
+  const ordersById = new Map<string, (typeof shift.orders)[number]>()
+  // Toda orden ya leída se reusa, califique o no por la vía sin turno (p. ej. su único cobro sin turno es una devolución).
+  const leidas = new Map(shift.orders.map(order => [order.id, order]))
+  for (const order of shift.orders) {
+    const cobradaSinTurno = order.payments.some(
+      p => p.shiftId === null && p.type !== 'REFUND' && p.createdAt >= shift.startTime && p.createdAt <= hasta,
+    )
+    if (cobradaSinTurno) ordersById.set(order.id, order)
+  }
+  // Las cuentas de los cobros estampados con el turno, UNA vez cada una: una cuenta pagada en abonos no se trae N veces.
+  const delTurno = [...new Set(shift.payments.filter(p => p.type !== 'REFUND').map(p => p.orderId))]
+  const faltantes = delTurno.filter(id => !leidas.has(id))
+  if (faltantes.length > 0) {
+    const cobradas = await prisma.order.findMany({
+      where: { venueId, id: { in: faltantes } },
+      select: ORDEN_DEL_DETALLE,
+      // ids únicos del turno: el tope es exacto y nunca recorta.
+      take: faltantes.length,
+    })
+    for (const order of cobradas) leidas.set(order.id, order)
+  }
+  for (const id of delTurno) {
+    const order = leidas.get(id)
+    if (order) ordersById.set(id, order)
+  }
+  const orders = [...ordersById.values()].sort((a, b) => b.createdAt.getTime() - a.createdAt.getTime())
 
   // Determine effective status based on time logic
   const now = new Date()
@@ -446,6 +467,10 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     totalSales: calculatedTotalSales,
     totalTips: calculatedTotalTips,
   } = buildPaymentBreakdown(shift.payments as any)
+
+  // R3 (full-testing v2 #2): la cuenta de tarjetas de regalo no es una orden de VENTA del turno: no entra a las órdenes por
+  // empleado, a la lista, a los productos vendidos, al conteo ni al ticket promedio. Su dinero sí (cobros, efectivo y caja).
+  const ordenesDeVenta = orders.filter(order => !esCuentaDeTarjetas(order.items))
 
   // ============================================================
   // Calculate Staff Breakdown (sales per employee)
@@ -468,7 +493,8 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     if (!staffId) continue
 
     const staffName = payment.processedBy ? `${payment.processedBy.firstName} ${payment.processedBy.lastName}` : 'Sin asignar'
-    const amount = Number(payment.amount || 0)
+    // R3: vender tarjetas de regalo no es venta del empleado (el desglose por método sí conserva ese dinero).
+    const amount = esCobroDeCuentaDeTarjetas(payment) ? 0 : Number(payment.amount || 0)
     const tipAmount = Number(payment.tipAmount || 0)
 
     if (staffMap.has(staffId)) {
@@ -489,7 +515,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   }
 
   // Process orders to get order count per staff
-  for (const order of shift.orders) {
+  for (const order of ordenesDeVenta) {
     const staffId = order.servedById
     if (!staffId) continue
 
@@ -524,9 +550,9 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // ============================================================
   const productMap = new Map<string, { name: string; quantity: number; revenue: number }>()
 
-  for (const order of shift.orders) {
+  for (const order of ordenesDeVenta) {
     for (const item of order.items) {
-      const productName = item.product?.name || 'Unknown Product'
+      const productName = item.productName || item.product?.name || 'Unknown Product'
       const quantity = item.quantity || 1
       // Revenue is net of the line's own discount — charging it at list price
       // overstated every shift that sold a combo or a discounted item.
@@ -557,7 +583,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
   // ============================================================
   // Format orders for response (with payment method info)
   // ============================================================
-  const formattedOrders = shift.orders.slice(0, 50).map(order => {
+  const formattedOrders = ordenesDeVenta.slice(0, 50).map(order => {
     const orderPayment = order.payments[0] // Get first payment for display
     return {
       id: order.id,
@@ -573,7 +599,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
       createdAt: order.createdAt,
       itemsCount: order.items.reduce((sum, item) => sum + item.quantity, 0),
       items: order.items.map(item => ({
-        name: item.product?.name || 'Unknown Product',
+        name: item.productName || item.product?.name || 'Unknown Product',
         quantity: item.quantity,
         price: Number(item.unitPrice || 0),
       })),
@@ -597,8 +623,14 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     createdAt: payment.createdAt,
   }))
 
-  // Use calculated totals if they're more accurate than stored values
-  const finalTotalSales = calculatedTotalSales > 0 ? calculatedTotalSales : Number(shift.totalSales)
+  // Use calculated totals if they're more accurate than stored values. R3 (Codex #5 del cierre): el guardado de un turno SIN cerrar es
+  // el acumulado en vivo, que cuenta las cargas de tarjetas; su respaldo es la agregación que ya las excluye.
+  const finalTotalSales =
+    calculatedTotalSales > 0
+      ? calculatedTotalSales
+      : shift.status === 'CLOSED'
+        ? Number(shift.totalSales)
+        : Number(await ventasDelTurnoSinTarjetas(venueId, shift.id))
   const finalTotalTips = calculatedTotalTips > 0 ? calculatedTotalTips : Number(shift.totalTips)
 
   // P2 (Codex 27-ago): el campo es ADITIVO — si su consulta truena, el endpoint viejo no puede volverse un 500.
@@ -631,7 +663,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     ...serializeShiftCashReconciliation(shift),
     totalSales: finalTotalSales,
     totalTips: finalTotalTips,
-    totalOrders: shift.orders.length,
+    totalOrders: ordenesDeVenta.length,
     status: effectiveStatus,
     staff: shift.staff,
     venue: shift.venue,
@@ -649,9 +681,9 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
     // Summary stats
     stats: {
       totalPayments: shift.payments.length,
-      totalOrders: shift.orders.length,
+      totalOrders: ordenesDeVenta.length,
       totalProducts: topProducts.reduce((sum, p) => sum + p.quantity, 0),
-      avgOrderValue: shift.orders.length > 0 ? Number((finalTotalSales / shift.orders.length).toFixed(2)) : 0,
+      avgOrderValue: ordenesDeVenta.length > 0 ? Number((finalTotalSales / ordenesDeVenta.length).toFixed(2)) : 0,
       avgTipPercentage: finalTotalSales > 0 ? Number(((finalTotalTips / finalTotalSales) * 100).toFixed(1)) : 0,
     },
   }
@@ -713,8 +745,9 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
 
   const staffTipsMap: Map<string, { name: string; amount: number; count: number }> = new Map()
 
+  const ventasSinCerrar = await ventasDeTurnosSinCerrar(venueId, shifts)
   for (const shift of shifts) {
-    totalSales += Number(shift.totalSales)
+    totalSales += ventasSinCerrar.get(shift.id) ?? Number(shift.totalSales)
     totalTips += Number(shift.totalTips)
     totalOrders += shift.totalOrders
 
@@ -999,6 +1032,24 @@ export interface PaymentMethodBreakdownRow {
   children?: Array<{ label: string; total: number; tips: number; count: number }>
 }
 
+/** R3: ¿el cobro es de una cuenta de tarjetas? La misma lectura que el cierre (`aggregateShiftPayments`). */
+function esCobroDeCuentaDeTarjetas(payment: { order?: { items?: ReadonlyArray<unknown> | null } | null }): boolean {
+  return (payment.order?.items?.length ?? 0) > 0
+}
+
+/**
+ * R3 (Codex #5 del cierre): las ventas de las filas de turnos SIN cerrar. Su `totalSales` guardado es el acumulado en vivo, que suma
+ * cualquier cobro (también las cargas de tarjetas); el cierre lo reemplaza por el total firmado. Cierre r1: UNA consulta agrupada
+ * para todos los turnos sin cerrar de la página o del rango, no una por fila.
+ */
+async function ventasDeTurnosSinCerrar(venueId: string, shifts: Array<{ id: string; status: string }>): Promise<Map<string, number>> {
+  const ventas = await ventasSinTarjetasPorTurno(
+    venueId,
+    shifts.filter(s => s.status !== 'CLOSED').map(s => s.id),
+  )
+  return new Map([...ventas].map(([id, v]) => [id, Number(v)]))
+}
+
 /**
  * Desglose del corte por método de pago REAL + marcas de tarjeta.
  *
@@ -1023,6 +1074,8 @@ export function buildPaymentBreakdown(
     processorData?: unknown
     tenderLabel?: string | null
     externalSource?: string | null
+    /** R3: la marca de cuenta de tarjetas (`ORDEN_DE_TARJETAS_SELECT`). Sin `order`, el cobro cuenta como venta, como siempre. */
+    order?: { items?: ReadonlyArray<unknown> | null } | null
   }>,
 ): {
   paymentMethodBreakdown: PaymentMethodBreakdownRow[]
@@ -1036,13 +1089,17 @@ export function buildPaymentBreakdown(
   const labelMap = new Map<string, Map<string, { total: number; tips: number; count: number }>>()
   const cardBrandMap = new Map<string, { total: number; count: number }>()
   let totalSales = 0
+  // Todo el dinero cobrado: el denominador de los % por método (una carga de tarjetas sí entró, aunque no sea venta).
+  let totalCobrado = 0
   let totalTips = 0
   let cardTotal = 0
 
   for (const payment of payments) {
     const amount = Number(payment.amount || 0)
     const tipAmount = Number(payment.tipAmount || 0)
-    totalSales += amount
+    // R3 (Codex #5 del cierre): la venta de tarjetas de regalo no es venta del turno; su dinero sí va al desglose por método.
+    if (!esCobroDeCuentaDeTarjetas(payment)) totalSales += amount
+    totalCobrado += amount
     totalTips += tipAmount
 
     const method = payment.method || 'OTHER'
@@ -1087,7 +1144,7 @@ export function buildPaymentBreakdown(
     }
   }
 
-  const salesDenominator = totalSales || 1
+  const salesDenominator = totalCobrado || 1
   const cardDenominator = cardTotal || 1
 
   return {

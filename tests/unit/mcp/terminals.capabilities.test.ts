@@ -3,12 +3,16 @@ import { DeviceFormFactor, StaffRole, TerminalType } from '@prisma/client'
 import { registerTerminalTools } from '@/mcp/tools/terminals'
 import { terminalPaymentService } from '@/services/terminal-payment.service'
 import { prismaMock } from '@tests/__helpers__/setup'
+import { exigirCancelacionParaDevolverEnTerminal } from '@/services/giftCards/giftCardCancel.service'
+import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 
 jest.mock('@/services/terminal-payment.service', () => ({
   terminalPaymentService: {
     requestRefundOnTerminal: jest.fn(),
   },
 }))
+// A2 del cierre (r1): la regla de la terminal para ventas de tarjetas de regalo; aquí se decide por prueba.
+jest.mock('@/services/giftCards/giftCardCancel.service', () => ({ exigirCancelacionParaDevolverEnTerminal: jest.fn() }))
 
 const NOW = new Date('2026-08-30T12:00:00.000Z')
 const OBSERVED_AT = new Date('2026-08-30T11:00:00.000Z')
@@ -21,7 +25,14 @@ function captureListDevicesHandler() {
     },
   }
 
-  registerTerminalTools(server as any, { allowedVenueIds: ['venue-1'], staffId: 'staff-1' } as any)
+  registerTerminalTools(
+    server as any,
+    {
+      allowedVenueIds: ['venue-1'],
+      staffId: 'staff-1',
+      perVenueAccess: new Map([['venue-1', { role: StaffRole.OWNER, corePermissions: ['tpv:read'] }]]),
+    } as any,
+  )
 
   if (!handler) throw new Error('list_devices handler was not registered')
   return handler
@@ -52,6 +63,7 @@ function captureRefundHandler() {
       staffId: 'staff-1',
       activeOrg: 'org-1',
       allowedVenueIds: ['venue-1'],
+      scopes: ['mcp:read', 'mcp:write'],
       perVenueAccess: new Map([['venue-1', access]]),
     } as any,
   )
@@ -70,6 +82,7 @@ function eligibleCardPayment() {
     venueId: 'venue-1',
     status: 'COMPLETED',
     method: 'CREDIT_CARD',
+    source: 'TPV', // la cobró nuestra terminal (seDevuelveEnTerminal)
     amount: 125,
     tipAmount: 10,
     processorData: {},
@@ -261,7 +274,7 @@ describe('MCP refund_card_on_terminal device action capability guard', () => {
     expect(parseBody(response)).toEqual({
       ok: false,
       reason: 'NOT_A_CARD_PAYMENT',
-      error: 'La terminal sólo puede devolver cobros con tarjeta.',
+      error: 'La terminal sólo puede devolver cobros con tarjeta hechos en la terminal.',
     })
     expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
     expect(requestRefundOnTerminal).not.toHaveBeenCalled()
@@ -362,7 +375,14 @@ describe('MCP terminal_checkout_screens', () => {
         if (name === 'terminal_checkout_screens') handler = candidate
       },
     }
-    registerTerminalTools(server as any, { allowedVenueIds: ['venue-1'], staffId: 'staff-1' } as any)
+    registerTerminalTools(
+      server as any,
+      {
+        allowedVenueIds: ['venue-1'],
+        staffId: 'staff-1',
+        perVenueAccess: new Map([['venue-1', { role: StaffRole.OWNER, corePermissions: ['tpv:read'] }]]),
+      } as any,
+    )
     if (!handler) throw new Error('terminal_checkout_screens handler was not registered')
     return handler
   }
@@ -423,5 +443,44 @@ describe('MCP terminal_checkout_screens', () => {
         where: expect.objectContaining({ status: { not: 'RETIRED' } }),
       }),
     )
+  })
+})
+
+describe('🔴 A2 del cierre (r1): refund_card_on_terminal y las ventas de tarjetas de regalo', () => {
+  const requestRefundOnTerminal = terminalPaymentService.requestRefundOnTerminal as jest.Mock
+  const regla = exigirCancelacionParaDevolverEnTerminal as jest.Mock
+  const SIN_INICIAR = new GiftCardError(
+    'GIFT_CARD_CANCEL_NOT_STARTED',
+    'Para devolver la venta de una tarjeta de regalo primero inicia su cancelación en Tarjetas de regalo › Cancelar venta.',
+    409,
+  )
+
+  beforeEach(() => {
+    regla.mockReset().mockResolvedValue(undefined)
+    prismaMock.payment.findFirst.mockResolvedValue({ ...eligibleCardPayment(), orderId: 'order-gc' })
+    prismaMock.terminal.findFirst.mockResolvedValue(targetDevice(TerminalType.TPV_ANDROID))
+    requestRefundOnTerminal.mockResolvedValue({ status: 'opened', requestId: 'refund-request-1' })
+  })
+
+  it('la VISTA PREVIA evalúa la misma regla: no promete «ABRIRÁ» y dice el code', async () => {
+    regla.mockRejectedValue(SIN_INICIAR)
+    const body = parseBody(await captureRefundHandler()({ venueId: 'venue-1', paymentId: 'payment-1', terminalId: 'device-row-1' }))
+    expect(regla).toHaveBeenCalledWith('venue-1', 'order-gc')
+    expect(body).toEqual({ ok: false, code: 'GIFT_CARD_CANCEL_NOT_STARTED', error: SIN_INICIAR.message })
+    expect(requestRefundOnTerminal).not.toHaveBeenCalled()
+  })
+
+  it('con la cancelación iniciada la vista previa sigue como siempre', async () => {
+    const body = parseBody(await captureRefundHandler()({ venueId: 'venue-1', paymentId: 'payment-1', terminalId: 'device-row-1' }))
+    expect(body).toMatchObject({ ok: false, requiresConfirmation: true })
+  })
+
+  it('si el rechazo llega al confirmar (cambió entre la vista previa y el confirm), también devuelve el code', async () => {
+    regla.mockResolvedValueOnce(undefined)
+    requestRefundOnTerminal.mockRejectedValue(SIN_INICIAR)
+    const body = parseBody(
+      await captureRefundHandler()({ venueId: 'venue-1', paymentId: 'payment-1', terminalId: 'device-row-1', confirm: true }),
+    )
+    expect(body).toEqual({ ok: false, code: 'GIFT_CARD_CANCEL_NOT_STARTED', error: SIN_INICIAR.message })
   })
 })

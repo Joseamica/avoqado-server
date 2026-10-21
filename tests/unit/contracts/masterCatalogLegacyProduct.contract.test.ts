@@ -142,11 +142,23 @@ const legacyMobileProductReturn = {
   recipe: null,
 }
 
+// Variantes (2026-10-14): los 4 campos opcionales del contrato salen de estas dos relaciones; nunca un campo `variants`.
+const variantInclude = {
+  productGroup: { select: { id: true, name: true, imageUrl: true } },
+  variantValues: {
+    select: {
+      option: { select: { name: true, position: true } },
+      optionValue: { select: { value: true, position: true } },
+    },
+  },
+}
+
 const dashboardProductQuery = {
   where: { venueId, deletedAt: null },
   include: {
     category: true,
     inventory: true,
+    ...variantInclude,
     modifierGroups: {
       include: { group: { include: { modifiers: { where: { active: true } } } } },
       orderBy: { displayOrder: 'asc' },
@@ -180,6 +192,7 @@ const mobileProductQuery = {
   include: {
     category: true,
     inventory: true,
+    ...variantInclude,
     modifierGroups: {
       include: { group: { include: { modifiers: { where: { active: true } } } } },
       orderBy: { displayOrder: 'asc' },
@@ -222,7 +235,12 @@ const expectNoH1Fields = (value: unknown): void => {
 }
 
 const expectNoUnexpectedPrismaAccess = () => {
-  const allowedModels = new Set(['product', 'activityLog'])
+  // `venueIvaPorProducto`: Tarea 5 del plan de IVA por producto — todo writer de Product
+  // consulta este modelo (¿el flag está encendido?) ANTES de escribir `ivaTratamiento` vía
+  // normalizarIvaDeProducto. Es acceso NUEVO e INTENCIONAL, no una fuga de H1.
+  // `shopifyVariantLink`: P1-2 del conector Shopify — el PATCH genérico lee la pareja del producto (una lectura por índice
+  // único; sólo escribe si el producto está ligado) para suspenderla o pedir el cuadre. Tampoco es una fuga de H1.
+  const allowedModels = new Set(['product', 'activityLog', 'venueIvaPorProducto', 'shopifyVariantLink'])
   for (const [modelName, model] of Object.entries(prismaMock)) {
     if (allowedModels.has(modelName) || !model || typeof model !== 'object') continue
     for (const operation of Object.values(model as Record<string, unknown>)) {
@@ -357,7 +375,11 @@ describe('H1A legacy Product contracts', () => {
     const validationError = await request(app).post(`/venues/${venueId}/products`).send({ name: '   ' })
 
     expect(list.status).toBe(mobileFixture.list.status)
-    expect(list.body).toEqual(mobileFixture.list.body)
+    // "Se cobra el precio que vio el cliente" (T5): `catalogAt` es un campo ADITIVO en la raíz del listado; el resto del
+    // sobre (success + data, byte por byte) sigue congelado como lo leen las apps viejas.
+    const { catalogAt, ...listWithoutCatalogAt } = list.body
+    expect(catalogAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    expect(listWithoutCatalogAt).toEqual(mobileFixture.list.body)
     expect(created.status).toBe(mobileFixture.create.status)
     expect(created.body).toEqual(mobileFixture.create.body)
     expect(updated.status).toBe(mobileFixture.update.status)

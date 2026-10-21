@@ -92,10 +92,10 @@ describe('catalogPublicationPersistence.service', () => {
     expect(tx.product.updateMany).not.toHaveBeenCalled()
   })
 
-  it('keeps exact corporate cost and taxRate decimals in the bulk Product patch', async () => {
+  it('D15: keeps exact corporate cost decimals and the Product SET never names taxRate or objetoImp', async () => {
     const tx = transaction()
     const monetaryLine = line(1, {
-      fieldMask: ['cost', 'taxRate'],
+      fieldMask: ['cost'],
       decisions: [
         {
           field: 'cost',
@@ -106,28 +106,17 @@ describe('catalogPublicationPersistence.service', () => {
           overrideId: null,
           reason: null,
         },
-        {
-          field: 'taxRate',
-          decision: 'PUBLISH_CORPORATE',
-          before: '0.0800',
-          proposed: '0.1600',
-          after: '0.1600',
-          overrideId: null,
-          reason: null,
-        },
       ],
     })
 
-    await persistCatalogPublicationTx(tx as never, {
-      organizationId: 'org-1',
-      staffId: 'staff-1',
-      lines: [monetaryLine],
-    })
+    await persistCatalogPublicationTx(tx as never, { organizationId: 'org-1', staffId: 'staff-1', lines: [monetaryLine] })
 
     const productQuery = tx.$executeRaw.mock.calls.find(call => call[0].strings.join('?').includes('UPDATE "Product"'))?.[0]
-    expect(productQuery?.values).toEqual(['product-1', 'venue-1', JSON.stringify({ cost: '12.00', taxRate: '0.1600' })])
-    expect(productQuery?.strings.join('?')).toContain("(changes.patch->>'cost')::numeric")
-    expect(productQuery?.strings.join('?')).toContain("(changes.patch->>'taxRate')::numeric")
+    const sql = productQuery?.strings.join('?') ?? ''
+    expect(productQuery?.values).toEqual(['product-1', 'venue-1', JSON.stringify({ cost: '12.00' })])
+    expect(sql).toContain("(changes.patch->>'cost')::numeric")
+    // Sin estas columnas en el SET, el trigger "Product_ivaTratamiento_2_tupla" (BEFORE UPDATE OF taxRate, objetoImp) ni corre.
+    expect(sql).not.toMatch(/"taxRate"|"objetoImp"/)
   })
 
   it('chunks a 501-target atomic apply into bounded bulk statements of at most 500 targets', async () => {

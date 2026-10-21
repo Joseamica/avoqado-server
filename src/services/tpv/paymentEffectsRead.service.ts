@@ -73,6 +73,10 @@ export async function listPaymentEffects(input: PaymentEffectListInput) {
     // la espera se ESCALA (OVERDUE) en vez de calcular con un método inventado.
     'AWAITING_ACCREDITED_CARD_DATA',
     'AWAITING_ACCREDITED_CARD_DATA_OVERDUE',
+    // Ronda 2 de A3: el reverso de la comisión de una devolución espera a que exista la comisión original (se resuelve solo);
+    // pasadas 24 h se escala para que alguien revise el efecto de comisión del cobro original.
+    'COMMISSION_AWAITS_ORIGINAL',
+    'COMMISSION_AWAITS_ORIGINAL_OVERDUE',
   ])
   const items = rows.slice(0, limit).map(row => ({
     ...row,

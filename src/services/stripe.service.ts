@@ -15,12 +15,14 @@ import logger from '@/config/logger'
 import { Feature, Prisma } from '@prisma/client'
 import { retry, shouldRetryStripeError } from '@/utils/retry'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
+import { pausaDe } from '@/services/billing/siguienteCobro'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 import { addDays } from 'date-fns'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
-import AppError, { ConflictError } from '@/errors/AppError'
+import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
 import { ventaSueltaAbierta } from './access/ventaSuelta'
+import { PREMIUM_ONLY_SIN_CATALOGO } from './access/basePlan.service'
 import {
   avisarConflictoCreado,
   cerrarConflictoEntregado,
@@ -297,6 +299,13 @@ export async function createTrialSubscriptions(
   venueSlug?: string,
   paymentMethodId?: string,
 ): Promise<string[]> {
+  // 🔴 Lo Premium por regla sin catálogo (hoy el conector Shopify) no se contrata suelto NUNCA, con la venta suelta abierta o
+  // cerrada: aquí pasan también la conversión de demos y el onboarding. Antes de cualquier llamada a Stripe.
+  const sinCatalogo = featureCodes.filter(code => (PREMIUM_ONLY_SIN_CATALOGO as readonly string[]).includes(code))
+  if (sinCatalogo.length > 0) {
+    throw new BadRequestError(`Esta función no se contrata como función suelta (${sinCatalogo.join(', ')}).`, 'FEATURE_NO_SE_VENDE_SUELTA')
+  }
+
   // 🔴 Venta suelta CERRADA (founder, 21-sep): el candado vive AQUÍ, en el único punto que crea
   // suscripciones sueltas, para que ningún camino —de hoy o futuro— se lo salte.
   if (!ventaSueltaAbierta()) {
@@ -712,6 +721,24 @@ export interface CreatePlanSubscriptionInput {
    * aquí es seguro: nada pudo cobrarse) y «pudo cobrarse». El llamador la usa para decidir qué suelta ante un error.
    */
   antesDeCobrar?: () => void
+  /**
+   * 🔴 D2 (18-oct): opt-in del alta corta. Si el banco pide autenticar el primer cobro (402 de `pideAutenticacion`), se
+   * crea otra vez con `default_incomplete` y se devuelve el secreto para que el navegador muestre el reto. Sólo actúa
+   * con `paymentBehavior: 'error_if_incomplete'` y `trialPeriodDays === 0`. `primerCobroEsperadoCents` viaja en la
+   * metadata (el monto contra el que `activatePlan` exige la factura pagada); `terminarAntesDe` es un INSTANTE (ms de
+   * `Date.now()`): el fin del candado de la regla común, no una duración.
+   */
+  autenticarEnElNavegador?: { primerCobroEsperadoCents: number; terminarAntesDe: number }
+}
+
+/** Los códigos con que Stripe dice «el banco pide autenticar el primer cobro». El primero es el que devuelve la API
+ * (medido el 18-oct con 3155 y 3184); el segundo, el de la tabla oficial de códigos. */
+export const CODIGOS_PIDE_AUTENTICACION = ['subscription_payment_intent_requires_action', 'invoice_payment_intent_requires_action'] as const
+
+/** ¿Es el 402 de «el banco pide autenticar» (y no un rechazo)? Sólo un error de tarjeta con uno de esos códigos. */
+export function pideAutenticacion(error: unknown): boolean {
+  const e = error as { type?: unknown; code?: unknown } | null | undefined
+  return (e?.type === 'StripeCardError' || e?.type === 'card_error') && (CODIGOS_PIDE_AUTENTICACION as readonly unknown[]).includes(e.code)
 }
 
 /**
@@ -727,6 +754,10 @@ export interface CreatePlanSubscriptionInput {
 export interface CreatePlanSubscriptionResult {
   subscriptionId: string
   reused: boolean
+  /** La suscripción salió del 2.º intento (`default_incomplete`, D2): quien la entrega tiene que exigir el pago. */
+  conAutenticacion?: true
+  /** Quedó `incomplete`: el navegador confirma el primer pago con este secreto. 🔴 Nunca a un log. */
+  requiereAutenticacion?: { clientSecret: string }
 }
 
 /**
@@ -948,41 +979,90 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   const price = prices.data[0]
   if (!price) throw new Error(`Stripe price not found for lookup_key ${lookupKey} — run scripts/seed-plan-pro.ts`)
 
+  const metadata: Record<string, string> = {
+    venueId: input.venueId,
+    featureId: feature.id,
+    featureCode: feature.code,
+    interval: input.interval,
+    ...(input.venueName ? { venueName: input.venueName } : {}),
+    ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
+    ...(input.extraMetadata ?? {}),
+  }
+  const params: Stripe.SubscriptionCreateParams = {
+    customer: input.customerId,
+    items: [{ price: price.id }],
+    trial_period_days: input.trialPeriodDays,
+    default_payment_method: input.paymentMethodId,
+    // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
+    // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
+    ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
+    description: input.venueName
+      ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
+      : `Plan Avoqado ${planLabel(input.tierCode)}`,
+    metadata,
+    // 🔴 Sólo se manda con trial 0: con prueba gratis no hay primer cobro que pueda fallar.
+    ...(input.paymentBehavior && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
+    collection_method: 'charge_automatically',
+    payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
+  }
+
   input.antesDeCobrar?.()
-  const subscription = await retry(
-    () =>
-      stripe.subscriptions.create(
-        {
-          customer: input.customerId,
-          items: [{ price: price.id }],
-          trial_period_days: input.trialPeriodDays,
-          default_payment_method: input.paymentMethodId,
-          // No Stripe Tax: IVA is baked into the price (tax_behavior 'inclusive'), so we charge the
-          // price as-is and the merchant remits/itemizes the IVA on their own CFDI factura.
-          ...(input.coupon ? { discounts: [{ coupon: input.coupon }] } : {}),
-          description: input.venueName
-            ? `Plan Avoqado ${planLabel(input.tierCode)} - ${input.venueName}`
-            : `Plan Avoqado ${planLabel(input.tierCode)}`,
-          metadata: {
-            venueId: input.venueId,
-            featureId: feature.id,
-            featureCode: feature.code,
-            interval: input.interval,
-            ...(input.venueName ? { venueName: input.venueName } : {}),
-            ...(input.venueSlug ? { venueSlug: input.venueSlug } : {}),
-            ...(input.extraMetadata ?? {}),
+  let subscription: Stripe.Subscription
+  let conAutenticacion = false
+  try {
+    subscription = await retry(
+      () =>
+        stripe.subscriptions.create(
+          params,
+          // La llave hace que el `retry(3)` de arriba sea seguro: sin ella, un intento perdido en
+          // la red y reintentado crea DOS suscripciones y DOS cobros.
+          input.idempotencyKey ? { idempotencyKey: input.idempotencyKey, ...STRIPE_DENTRO_DEL_CANDADO } : STRIPE_DENTRO_DEL_CANDADO,
+        ),
+      { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
+    )
+  } catch (error) {
+    const autenticar = input.autenticarEnElNavegador
+    // 🔴 Sin llave de idempotencia no hay #2 (Ruling 5): su `retry` podría mandar el mismo create dos veces sin nada que
+    // lo deduplique. El 402 sale intacto, como sin la opción.
+    if (
+      !autenticar ||
+      !input.idempotencyKey ||
+      input.paymentBehavior !== 'error_if_incomplete' ||
+      input.trialPeriodDays !== 0 ||
+      !pideAutenticacion(error)
+    ) {
+      throw error
+    }
+    const llaveDelReto = `${input.idempotencyKey}:autenticar`
+    // 🔴 D2: el banco pide autenticar el primer cobro. Crear OTRA VEZ es seguro: ese 402 no deja nada vivo (ni
+    // suscripción ni factura; sólo un PaymentIntent `canceled`, medido el 18-oct con 3155 y 3184), así que no hay
+    // segundo cobro. Mismo cuerpo que el #1 (misma `planActivationKey`) salvo `default_incomplete`, el secreto expandido
+    // y el monto prometido; llave propia, porque la del #1 ya quedó ligada a su 402.
+    // 🔴 Tiempo (Codex r1 #4 y r2 #2): esto corre dentro del candado de la regla común, que ya gastó la consulta de
+    // reuso, `prices.list` y el #1 con sus reintentos. Por eso no hay presupuesto fijo: CADA POST (el primero y su único
+    // reintento) se mide contra `terminarAntesDe` justo antes de salir, dentro del callback y después de la espera del
+    // `retry`. Medir en `shouldRetry` no basta: corre antes de esa espera. Este `Error` no es reintentable (sin `type`,
+    // `code` ni `statusCode`): sale tal cual y el llamador lo trata como resultado desconocido.
+    subscription = await retry(
+      () => {
+        // Escrito como «¿alcanza?» negado para que un plazo que no es número (NaN) falle cerrado (Ruling 5).
+        if (!(autenticar.terminarAntesDe - Date.now() >= STRIPE_DENTRO_DEL_CANDADO.timeout)) {
+          throw new Error('no quedó tiempo en el candado para el segundo intento')
+        }
+        return stripe.subscriptions.create(
+          {
+            ...params,
+            metadata: { ...metadata, primerCobroEsperadoCents: String(autenticar.primerCobroEsperadoCents) },
+            payment_behavior: 'default_incomplete',
+            expand: ['latest_invoice.confirmation_secret'],
           },
-          // 🔴 Sólo se manda con trial 0: con prueba gratis no hay primer cobro que pueda fallar.
-          ...(input.paymentBehavior && input.trialPeriodDays === 0 ? { payment_behavior: input.paymentBehavior } : {}),
-          collection_method: 'charge_automatically',
-          payment_settings: { save_default_payment_method: 'on_subscription', payment_method_types: ['card'] },
-        },
-        // La llave hace que el `retry(3)` de arriba sea seguro: sin ella, un intento perdido en
-        // la red y reintentado crea DOS suscripciones y DOS cobros.
-        input.idempotencyKey ? { idempotencyKey: input.idempotencyKey, ...STRIPE_DENTRO_DEL_CANDADO } : STRIPE_DENTRO_DEL_CANDADO,
-      ),
-    { retries: 3, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription' },
-  )
+          { idempotencyKey: llaveDelReto, ...STRIPE_DENTRO_DEL_CANDADO },
+        )
+      },
+      { retries: 1, shouldRetry: shouldRetryStripeError, context: 'stripe.createPlanSubscription.autenticar' },
+    )
+    conAutenticacion = true
+  }
 
   // 🔴 ANTES que cualquier otra escritura: el cargo ya ocurrió y el llamador necesita su rastro
   // aunque lo de abajo falle.
@@ -999,10 +1079,21 @@ export async function createPlanSubscription(input: CreatePlanSubscriptionInput)
   // 🔴 V5-A paso 6: aquí sólo se COBRA. El acceso lo escribe `entregarSuscripcionDePlan`, que el llamador corre después
   // (fuera del candado de la regla común, que la entrega también toma).
 
+  if (conAutenticacion && subscription.status === 'incomplete') {
+    const factura = subscription.latest_invoice
+    const clientSecret = typeof factura === 'object' ? factura?.confirmation_secret?.client_secret : undefined
+    if (!clientSecret) throw new Error('la suscripción quedó incompleta sin secreto de confirmación')
+    logger.info(`🔐 createPlanSubscription: ${subscription.id} espera que el banco autorice el primer cobro (venue ${input.venueId})`)
+    return { subscriptionId: subscription.id, reused: false, conAutenticacion: true, requiereAutenticacion: { clientSecret } }
+  }
+
   logger.info(
     `✅ createPlanSubscription: ${subscription.id} (${input.interval}, trial=${input.trialPeriodDays}d) for venue ${input.venueId}`,
   )
-  return { subscriptionId: subscription.id, reused: false }
+  // Del #2 sin reto (p. ej. factura de $0, `active`): aquí no se juzga el monto; lo exige `activatePlan` antes de entregar.
+  return conAutenticacion
+    ? { subscriptionId: subscription.id, reused: false, conAutenticacion: true }
+    : { subscriptionId: subscription.id, reused: false }
 }
 
 /**
@@ -1677,16 +1768,6 @@ export async function createWinbackPromotionCode(
  *
  * @param subscriptionId - Stripe subscription ID
  */
-/**
- * 🔴 Codex N3: la pausa de cobranza vigente de una suscripción. Una pausa SIN `resumes_at` (indefinida) cuenta como
- * vigente: es la más peligrosa de todas, no la más inocente.
- */
-function pausaDe(sub: Stripe.Subscription): Date | null {
-  const pausa = (sub as unknown as { pause_collection?: { resumes_at?: number | null } | null }).pause_collection
-  if (!pausa) return null
-  return pausa.resumes_at ? new Date(pausa.resumes_at * 1000) : new Date(8640000000000000)
-}
-
 export async function retrievePlanSubscription(subscriptionId: string): Promise<{
   status: string
   cancelAtPeriodEnd: boolean

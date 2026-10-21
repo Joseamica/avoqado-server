@@ -18,7 +18,7 @@ describe('rutas de zonas del dashboard de organización', () => {
   })
 
   it('DELETE /:orgId/zones/:zoneId le pasa el orgId al servicio', () => {
-    expect(routesSource).toMatch(/organizationDashboardService\.deleteZone\(orgId, zoneId\)/)
+    expect(routesSource).toMatch(/organizationDashboardService\.deleteZone\(orgId, zoneId[,)]/)
     expect(routesSource).not.toMatch(/organizationDashboardService\.deleteZone\(zoneId\)/)
   })
 })

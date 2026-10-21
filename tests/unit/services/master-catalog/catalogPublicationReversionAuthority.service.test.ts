@@ -1,3 +1,5 @@
+import { Decimal } from '@prisma/client/runtime/library'
+import { projectCatalogPublicationReversion } from '@/services/master-catalog/catalogPublicationReversion.service'
 import {
   loadCatalogPublicationReversionAuthoritiesTx,
   revalidateLockedCatalogPublicationReversionsTx,
@@ -122,6 +124,40 @@ describe('catalogPublicationReversionAuthority.service', () => {
         jest.fn() as never,
       ),
     ).rejects.toMatchObject({ code: 'CATALOG_REVERSION_CONFLICT' })
+  })
+
+  it('D15: carga una línea histórica V1 (con taxRate) y la proyecta sin IVA aunque el producto ya esté al 0 %', async () => {
+    const row = source(0, {
+      fieldMask: ['name', 'taxRate'],
+      before: { name: 'Old', taxRate: '0.0800' },
+      after: { name: 'Corporate', taxRate: '0.1600' },
+      decisions: [
+        { field: 'name', before: 'Old', proposed: 'Corporate', after: 'Corporate', decision: 'PUBLISH_CORPORATE' },
+        { field: 'taxRate', before: '0.0800', proposed: '0.1600', after: '0.1600', decision: 'PUBLISH_CORPORATE' },
+      ],
+      binding: {
+        revision: 4,
+        catalogItem: { revision: 7, invariantVersion: 12n },
+        product: { name: 'Corporate', taxRate: new Decimal('0.0000'), deletedAt: null },
+      },
+    })
+    const tx = {
+      catalogPublicationLine: {
+        findMany: jest
+          .fn()
+          .mockResolvedValueOnce([row])
+          .mockResolvedValueOnce([{ id: 'current-binding-000', bindingId: 'binding-000' }]),
+      },
+    }
+
+    const [authority] = await loadCatalogPublicationReversionAuthoritiesTx(
+      tx as never,
+      context,
+      [{ catalogItemId: 'item-000', venueId: 'venue-000', productId: 'product-000', sourceLineId: 'source-000' }],
+      projectCatalogPublicationReversion,
+    )
+
+    expect(authority.projection).toMatchObject({ fieldMask: ['name'], before: { name: 'Corporate' }, after: { name: 'Old' } })
   })
 
   it('rejects a new current successor after preview before any inverse persistence', async () => {

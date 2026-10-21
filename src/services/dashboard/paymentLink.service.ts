@@ -8,8 +8,8 @@
  */
 
 import prisma from '@/utils/prismaClient'
-import { Prisma } from '@prisma/client'
-import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
+import { PaymentMethod, Prisma } from '@prisma/client'
+import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
 import { logAction } from './activity-log.service'
@@ -21,7 +21,9 @@ import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import emailService from '@/services/email.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
-import { createCommissionForPayment, createSplitCommissionForPayment } from '@/services/dashboard/commission/commission-calculation.service'
+import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
+import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '@/services/tpv/candadoDeIntento'
 import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/whatsapp.service'
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
@@ -181,6 +183,24 @@ async function validateBundleItems(
       modifiers: [...entry.modifiers.entries()].map(([modifierId, quantity]) => ({ modifierId, quantity })),
     }
   })
+}
+
+/**
+ * validateBundleItems reads without locks: «Reemplazar menú» (importMenu replace) can delete a product or extra between that
+ * read and the insert. The foreign key then rejects the row (P2003) — the safe outcome (plan 5, C5-1) — and this turns it
+ * into a 409 the owner can act on instead of a 500 carrying Prisma's text. Any other error passes through unchanged.
+ */
+function rethrowMenuChangedWhileSaving(error: unknown): never {
+  if (
+    error instanceof Prisma.PrismaClientKnownRequestError &&
+    error.code === 'P2003' &&
+    /PaymentLinkItem(Modifier)?_(productId|modifierId)_fkey/.test(`${error.message} ${JSON.stringify(error.meta ?? {})}`)
+  ) {
+    throw new ConflictError(
+      'El menú cambió mientras guardabas la liga y uno de los productos o extras ya no existe. Vuelve a elegirlos y guarda otra vez.',
+    )
+  }
+  throw error
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -441,46 +461,48 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
   const shortCode = nanoid(8)
 
   // 5. Create payment link
-  const paymentLink = await prisma.paymentLink.create({
-    data: {
-      shortCode,
-      venueId,
-      ecommerceMerchantId: ecommerceMerchant.id,
-      createdById: staffId,
-      attributions: attributedStaffIds.length > 0 ? { create: attributedStaffIds.map(id => ({ staffId: id })) } : undefined,
-      purpose: data.purpose || 'PAYMENT',
-      items:
-        resolvedItems.length > 0
-          ? {
-              create: resolvedItems.map(it => ({
-                productId: it.productId,
-                quantity: it.quantity,
-                position: it.position,
-                modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
-              })),
-            }
-          : undefined,
-      title: data.title,
-      description: data.description,
-      imageUrl: data.imageUrl,
-      amountType: data.amountType,
-      amount: data.amount !== undefined && data.amount !== null ? new Prisma.Decimal(data.amount) : undefined,
-      currency: data.currency || 'MXN',
-      isReusable: data.isReusable ?? false,
-      expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
-      redirectUrl: data.redirectUrl,
-      customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
-      tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
-    },
-    include: {
-      createdBy: {
-        select: { id: true, firstName: true, lastName: true },
+  const paymentLink = await prisma.paymentLink
+    .create({
+      data: {
+        shortCode,
+        venueId,
+        ecommerceMerchantId: ecommerceMerchant.id,
+        createdById: staffId,
+        attributions: attributedStaffIds.length > 0 ? { create: attributedStaffIds.map(id => ({ staffId: id })) } : undefined,
+        purpose: data.purpose || 'PAYMENT',
+        items:
+          resolvedItems.length > 0
+            ? {
+                create: resolvedItems.map(it => ({
+                  productId: it.productId,
+                  quantity: it.quantity,
+                  position: it.position,
+                  modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
+                })),
+              }
+            : undefined,
+        title: data.title,
+        description: data.description,
+        imageUrl: data.imageUrl,
+        amountType: data.amountType,
+        amount: data.amount !== undefined && data.amount !== null ? new Prisma.Decimal(data.amount) : undefined,
+        currency: data.currency || 'MXN',
+        isReusable: data.isReusable ?? false,
+        expiresAt: data.expiresAt ? new Date(data.expiresAt) : undefined,
+        redirectUrl: data.redirectUrl,
+        customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
+        tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
       },
-      _count: {
-        select: { checkoutSessions: true },
+      include: {
+        createdBy: {
+          select: { id: true, firstName: true, lastName: true },
+        },
+        _count: {
+          select: { checkoutSessions: true },
+        },
       },
-    },
-  })
+    })
+    .catch(rethrowMenuChangedWhileSaving)
 
   logger.info('Payment link created', {
     paymentLinkId: paymentLink.id,
@@ -653,32 +675,34 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   // rows are atomic — partial state would confuse the customer checkout.
   // Nested modifier rows can't be inserted via createMany (Prisma limitation),
   // so we loop and use create() per item which accepts the nested write.
-  const updated = await prisma.$transaction(async tx => {
-    if (itemReplacement !== null) {
-      // Cascade deletes the modifier rows because PaymentLinkItemModifier
-      // has onDelete: Cascade on paymentLinkItemId.
-      await tx.paymentLinkItem.deleteMany({ where: { paymentLinkId: linkId } })
-      for (const it of itemReplacement) {
-        await tx.paymentLinkItem.create({
-          data: {
-            paymentLinkId: linkId,
-            productId: it.productId,
-            quantity: it.quantity,
-            position: it.position,
-            modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
-          },
-        })
+  const updated = await prisma
+    .$transaction(async tx => {
+      if (itemReplacement !== null) {
+        // Cascade deletes the modifier rows because PaymentLinkItemModifier
+        // has onDelete: Cascade on paymentLinkItemId.
+        await tx.paymentLinkItem.deleteMany({ where: { paymentLinkId: linkId } })
+        for (const it of itemReplacement) {
+          await tx.paymentLinkItem.create({
+            data: {
+              paymentLinkId: linkId,
+              productId: it.productId,
+              quantity: it.quantity,
+              position: it.position,
+              modifiers: it.modifiers.length > 0 ? { create: it.modifiers } : undefined,
+            },
+          })
+        }
       }
-    }
-    return tx.paymentLink.update({
-      where: { id: linkId },
-      data: updateData,
-      include: {
-        createdBy: { select: { id: true, firstName: true, lastName: true } },
-        _count: { select: { checkoutSessions: true } },
-      },
+      return tx.paymentLink.update({
+        where: { id: linkId },
+        data: updateData,
+        include: {
+          createdBy: { select: { id: true, firstName: true, lastName: true } },
+          _count: { select: { checkoutSessions: true } },
+        },
+      })
     })
-  })
+    .catch(rethrowMenuChangedWhileSaving)
 
   logger.info('Payment link updated', { paymentLinkId: linkId, venueId })
 
@@ -1220,22 +1244,43 @@ export async function createStripePaymentIntentForPaymentLink(
  */
 /**
  * Fase 2 de la unificación de caja: TODO pago que entra por Stripe lo liquida Stripe → Avoqado,
- * sin importar cómo lo pagó el cliente. OXXO se ledgea como CASH (`mapStripeMethodToPaymentMethod`)
- * porque así lo reporta el banco, pero ese efectivo lo cobró OXXO al cliente: NUNCA entró al cajón
- * del negocio. Sin este sello, el fallback legacy (`method === 'CASH'`) lo contaba como efectivo
+ * sin importar cómo lo pagó el cliente. El efectivo de OXXO lo cobró OXXO al cliente: NUNCA entró al
+ * cajón del negocio. Sin este sello, el fallback legacy (`method === 'CASH'`) lo contaba como efectivo
  * físico y el arqueo le exigía al cajero un dinero que jamás tuvo en la mano (auditoría 27-ago §2.2).
  */
 export function fundsFlowForStripePayment(_stripeType: string | null | undefined): 'AVOQADO_PROCESSED' {
   return 'AVOQADO_PROCESSED'
 }
 
+/**
+ * Método y forma SAT de un cobro de Stripe, para los DOS escritores (liga de pago y checkout del negocio). OXXO va como OTHER
+ * con forma SAT 01 sellada, igual que OXXO de Mercado Pago (`metodoDeMercadoPago`): como CASH, la conciliación, el saldo, la
+ * póliza y el corte —que deciden por `method === 'CASH'` e ignoran `fundsFlow`— lo trataban como efectivo del cajón.
+ *
+ * ponytail: sin tipo se asume tarjeta. Si la consulta del cargo falló por algo PASAJERO, el finalizador ya no llega aquí: lanza y
+ * Stripe reintenta (`debeReintentarSinTipo`). Queda el techo con un error permanente de Stripe (llave, permiso) o sin
+ * `connectAccountId`: el cajón queda bien, pero un OXXO así sale con SAT 04 (founder «A», 19-oct: no atorar el cobro por eso).
+ */
+export function metodoDeStripe(stripeType: string | null | undefined): { method: PaymentMethod; tenderSatFormaPago: string | null } {
+  if (stripeType === 'oxxo') return { method: 'OTHER', tenderSatFormaPago: '01' }
+  return { method: mapStripeMethodToPaymentMethod(stripeType), tenderSatFormaPago: null }
+}
+
+/**
+ * ¿El finalizador debe lanzar porque la consulta del cargo falló? Sólo si el aviso no trajo el tipo (el cargo es lo único que
+ * dice si fue OXXO) y el error es pasajero (red, 5xx, límite de peticiones): el webhook libera su reclamo (`withClaimedEvent`) y
+ * Stripe reintenta. Con un error permanente lanzar atoraría el cobro 3 días y luego se perdería (no hay barrido).
+ */
+export function debeReintentarSinTipo(stripeType: string | null | undefined, err: unknown): boolean {
+  const type = (err as { type?: string } | null)?.type
+  return !stripeType && (type === 'StripeConnectionError' || type === 'StripeAPIError' || type === 'StripeRateLimitError')
+}
+
 export function mapStripeMethodToPaymentMethod(
   stripeType: string | null | undefined,
-): 'CASH' | 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'CRYPTOCURRENCY' | 'OTHER' {
+): 'CREDIT_CARD' | 'DEBIT_CARD' | 'DIGITAL_WALLET' | 'BANK_TRANSFER' | 'CRYPTOCURRENCY' | 'OTHER' {
   if (!stripeType) return 'CREDIT_CARD'
-  // OXXO: customer pays cash at OXXO. We map to CASH because that's what
-  // hit the merchant's bank — even though the rail is "voucher".
-  if (stripeType === 'oxxo') return 'CASH'
+  // OXXO NO es CASH (ese efectivo nunca entró al cajón): cae a OTHER abajo; su forma SAT la sella `metodoDeStripe`.
   // Bank transfers: SPEI/CoDi (MX), ACH (US), SEPA (EU). All bank rails.
   if (stripeType === 'customer_balance' || stripeType === 'sepa_debit' || stripeType === 'us_bank_account') {
     return 'BANK_TRANSFER'
@@ -1489,7 +1534,8 @@ export async function finalizePaymentLinkCheckout(args: {
   }
 
   if (session.status === 'COMPLETED') {
-    // Already processed — webhook retry. No-op.
+    // Already processed — webhook retry. No-op: la comisión quedó encolada en la MISMA transacción que marcó la sesión
+    // (fase 3, A5), así que salir aquí ya no la pierde.
     return
   }
 
@@ -1502,7 +1548,9 @@ export async function finalizePaymentLinkCheckout(args: {
     cardBrand: string | null
     last4: string | null
     receiptUrl: string | null
-  } = { cardBrand: null, last4: null, receiptUrl: null }
+    /** Tipo real del cobro (`oxxo`, `card`, `customer_balance`…). El webhook casi nunca lo trae: no expande objetos. */
+    tipo: string | null
+  } = { cardBrand: null, last4: null, receiptUrl: null, tipo: null }
   const connectAccountId = (session.ecommerceMerchant?.providerCredentials as { connectAccountId?: string })?.connectAccountId
   if (connectAccountId && args.paymentIntentId && session.ecommerceMerchant?.provider?.code === 'STRIPE_CONNECT') {
     try {
@@ -1516,11 +1564,13 @@ export async function finalizePaymentLinkCheckout(args: {
       const charge = typeof pi.latest_charge === 'object' && pi.latest_charge ? pi.latest_charge : null
       if (charge) {
         chargeDetails.receiptUrl = charge.receipt_url ?? null
+        chargeDetails.tipo = charge.payment_method_details?.type ?? null
         const cardDetails = (charge.payment_method_details as { card?: { brand?: string; last4?: string } } | null)?.card
         chargeDetails.cardBrand = cardDetails?.brand ?? null
         chargeDetails.last4 = cardDetails?.last4 ?? null
       }
     } catch (err) {
+      if (debeReintentarSinTipo(args.stripePaymentMethodType, err)) throw err
       logger.warn('Failed to fetch Stripe charge details (non-fatal)', {
         paymentIntentId: args.paymentIntentId,
         error: err instanceof Error ? err.message : String(err),
@@ -1540,13 +1590,10 @@ export async function finalizePaymentLinkCheckout(args: {
   const subtotal = session.amount.sub(tipAmount) // session.amount already includes tip
   const stripePaymentIntentId = args.paymentIntentId ?? null
 
-  // Capture the Payment we create inside the transaction so we can fire the
-  // commission calculation AFTER the tx commits. Doing it inside the tx is
-  // risky — the commission service does its own DB writes and we'd nest
-  // transactions / hold locks longer than needed.
+  // Commission attribution: the first attributed staff is the "named seller" on Payment.processedById; the commission is
+  // frozen INSIDE the payment transaction (fase 3, A5).
   const attributedStaffIds = session.paymentLink.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null // for Payment.processedById
-  let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
@@ -1608,6 +1655,7 @@ export async function finalizePaymentLinkCheckout(args: {
         subtotal: subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
         discountAmount: 0,
         taxAmount: 0,
+        contratoDePrecio: 'IVA_INCLUIDO',
         tipAmount,
         total: session.amount,
         paidAmount: session.amount,
@@ -1678,11 +1726,13 @@ export async function finalizePaymentLinkCheckout(args: {
     // feePercentage = feeAmount / gross (when gross>0). Keep 4 decimal precision.
     const feePercentage = grossForPayment.gt(0) ? feeAmount.div(grossForPayment).toDecimalPlaces(4) : new Prisma.Decimal(0)
 
-    // Map Stripe's payment_method.type to our PaymentMethod enum — keeps
-    // OXXO ledgered as CASH, SPEI as BANK_TRANSFER, etc. instead of every-
-    // thing falling into CREDIT_CARD. Useful for revenue breakdowns later.
-    const method = mapStripeMethodToPaymentMethod(args.stripePaymentMethodType)
-    const fundsFlow = fundsFlowForStripePayment(args.stripePaymentMethodType)
+    // Stripe's payment_method.type → nuestro método y forma SAT (OXXO = OTHER + '01', SPEI = BANK_TRANSFER…), en vez de
+    // que todo caiga en CREDIT_CARD. Ver `metodoDeStripe`.
+    // Codex r1 (19-oct): el webhook casi nunca trae el tipo (no expande `latest_charge`) y un OXXO caía a CREDIT_CARD/SAT 04.
+    // El cargo que ya se consultó arriba sí lo dice.
+    const tipoDeStripe = args.stripePaymentMethodType ?? chargeDetails.tipo
+    const { method, tenderSatFormaPago } = metodoDeStripe(tipoDeStripe)
+    const fundsFlow = fundsFlowForStripePayment(tipoDeStripe)
 
     const createdPayment = await tx.payment.create({
       data: {
@@ -1693,8 +1743,8 @@ export async function finalizePaymentLinkCheckout(args: {
         // Commission attribution. Payment.processedById gets the FIRST
         // attributed staff (used by receipts/reports as the "named seller").
         // The full split — 1/N per staff when there are multiple — is
-        // applied later by createSplitCommissionForPayment, which reads
-        // the attributions join table directly. When the link has no
+        // frozen with this payment, right below (fase 3, A5), from the
+        // attributions join table. When the link has no
         // attributions we leave processedById NULL and skip commission.
         processedById: primaryStaffId ?? undefined,
         // Link to the EcommerceMerchant channel so the dashboard's "Cuenta
@@ -1704,6 +1754,7 @@ export async function finalizePaymentLinkCheckout(args: {
         amount: grossForPayment,
         tipAmount,
         method,
+        tenderSatFormaPago,
         source: 'WEB',
         status: 'COMPLETED',
         // FAST signals "no inventory / no operational fulfilment" so
@@ -1726,9 +1777,20 @@ export async function finalizePaymentLinkCheckout(args: {
       },
       select: { id: true },
     })
-    paymentIdForCommission = createdPayment.id
+    // Fase 3 (A5, Codex r3-12): la comisión se CONGELA con el cobro, en esta misma transacción, como en la terminal. Antes
+    // se calculaba después del commit sin esperarla: si el proceso moría ahí se perdía para siempre, y si la venta se
+    // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
+    if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+    // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+    await activarSobresDeCuentaPagadaEnTx(tx, {
+      venueId,
+      orderId: order.id,
+      staffId: primaryStaffId ?? session.paymentLink!.createdById,
+      items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+    })
     orderIdForReferral = order.id
-  })
+    // A5 r1: congelar la comisión le suma consultas a esta transacción; el mismo tope de 10 s que el cobro de la terminal.
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -1741,7 +1803,7 @@ export async function finalizePaymentLinkCheckout(args: {
   }
 
   // LEALTAD + MÉTRICAS DEL CLIENTE. Fuera de la transacción y a prueba de fallos,
-  // igual que comisión / referidos / vale de inventario: el cobro ya está hecho.
+  // igual que referidos / vale de inventario: el cobro ya está hecho.
   if (loyaltyCustomerId && orderIdForReferral) {
     await creditPaymentLinkCustomer({
       venueId,
@@ -1749,31 +1811,6 @@ export async function finalizePaymentLinkCheckout(args: {
       orderId: orderIdForReferral,
       amount: loyaltyBase,
       channel: 'stripe',
-    })
-  }
-
-  // Fire-and-forget commission calculation. Mirrors how the TPV flow does it
-  // (payment.tpv.service.ts:1813) — async so the webhook ack isn't blocked
-  // by commission logic, and errors are logged but never bubble up to fail
-  // the webhook. Branching:
-  //   • 0 attributions → skip entirely.
-  //   • 1 attribution  → regular createCommissionForPayment (reads
-  //     processedById, respects config.recipient enum). Keeps the single
-  //     -recipient code path identical to TPV.
-  //   • 2+ attributions → createSplitCommissionForPayment writes N rows
-  //     directly, bypassing the recipient enum + the paymentId idempotency
-  //     guard (which only allows 1 calc per payment).
-  if (paymentIdForCommission && attributedStaffIds.length > 0) {
-    const target = paymentIdForCommission
-    const promise =
-      attributedStaffIds.length === 1 ? createCommissionForPayment(target) : createSplitCommissionForPayment(target, attributedStaffIds)
-    promise.catch(err => {
-      logger.error('Failed to create commission for payment-link payment', {
-        paymentId: target,
-        staffCount: attributedStaffIds.length,
-        shortCode: session.paymentLink?.shortCode,
-        error: err instanceof Error ? err.message : String(err),
-      })
     })
   }
 
@@ -2160,6 +2197,27 @@ export async function createCheckoutSession(
     throw new BadRequestError('Esta liga de pago ya fue utilizada')
   }
 
+  // 🔴 Auditoría 2026-09-30: con un cobro EN VUELO (S1 en CHARGING, resultado desconocido) una liga de un solo uso no abre otra
+  // sesión: el reintento del cliente cobraría dos veces. Se destraba conciliando ese cobro.
+  if (!paymentLink.isReusable) {
+    const inFlight = await prisma.checkoutSession.findFirst({
+      where: { paymentLinkId: paymentLink.id, status: 'CHARGING' },
+      select: { id: true, sessionId: true },
+    })
+    if (inFlight) {
+      // El `sessionId` es de OTRO pagador (con él se consulta y hasta se podría cobrar su sesión): sólo al registro, para
+      // soporte; nunca en la respuesta pública.
+      logger.warn('[paymentLink] liga de un solo uso con un cobro en vuelo', {
+        paymentLinkId: paymentLink.id,
+        sessionId: inFlight.sessionId,
+      })
+      throw new ConflictError(
+        'Hay un pago en proceso para esta liga. Espera la confirmación antes de intentar de nuevo.',
+        'PAYMENT_IN_FLIGHT',
+      )
+    }
+  }
+
   // 2. Determine amount. Bundle ITEM links sum all line items; legacy single-
   // amount semantics remain for PAYMENT/DONATION links.
   let chargeAmount: number
@@ -2392,11 +2450,10 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   const venueId = session.paymentLink!.venueId
 
   // Commission attribution (parallels finalizePaymentLinkCheckout). The first
-  // attributed staff is the "named seller" on Payment.processedById; if 2+
-  // attributions the commission gets split equally after the tx commits.
+  // attributed staff is the "named seller" on Payment.processedById; the commission
+  // is frozen INSIDE the payment transaction (fase 3, A5).
   const attributedStaffIds = session.paymentLink!.attributions.map(a => a.staffId)
   const primaryStaffId = attributedStaffIds[0] ?? null
-  let paymentIdForCommission: string | null = null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
@@ -2478,6 +2535,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           subtotal,
           discountAmount: 0,
           taxAmount,
+          contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: orderTipAmount,
           total,
           paidAmount: total,
@@ -2569,10 +2627,19 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
         },
         select: { id: true },
       })
-      paymentIdForCommission = createdPayment.id
+      // Fase 3 (A5): la comisión se congela con el cobro, en esta transacción.
+      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+      await activarSobresDeCuentaPagadaEnTx(tx, {
+        venueId,
+        orderId: order.id,
+        staffId: primaryStaffId ?? session.paymentLink!.createdById,
+        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
+      })
       orderIdForReferral = order.id
     }
-  })
+    // A5 r1: el mismo tope de 10 s que el cobro de la terminal. Pasarse aquí deja la tarjeta YA cobrada sin registro (CHARGING).
+  }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
   // REFERRAL HOOK: trigger referral qualification if this paid order has a pending referral
   if (orderIdForReferral) {
@@ -2585,7 +2652,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   }
 
   // LEALTAD + MÉTRICAS DEL CLIENTE. Fuera de la transacción y a prueba de fallos,
-  // igual que comisión / referidos / vale de inventario: el cobro ya está hecho.
+  // igual que referidos / vale de inventario: el cobro ya está hecho.
   if (loyaltyCustomerId && orderIdForReferral && loyaltyBase) {
     await creditPaymentLinkCustomer({
       venueId,
@@ -2593,23 +2660,6 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       orderId: orderIdForReferral,
       amount: loyaltyBase,
       channel: 'blumon',
-    })
-  }
-
-  // Fire-and-forget commission calculation (matches the Stripe webhook flow).
-  // 0 attributions → skip · 1 → regular createCommissionForPayment · 2+ →
-  // createSplitCommissionForPayment.
-  if (paymentIdForCommission && attributedStaffIds.length > 0) {
-    const target = paymentIdForCommission
-    const promise =
-      attributedStaffIds.length === 1 ? createCommissionForPayment(target) : createSplitCommissionForPayment(target, attributedStaffIds)
-    promise.catch(err => {
-      logger.error('Failed to create commission for Blumon payment-link', {
-        paymentId: target,
-        staffCount: attributedStaffIds.length,
-        shortCode: session.paymentLink?.shortCode,
-        error: err instanceof Error ? err.message : String(err),
-      })
     })
   }
 
@@ -3163,7 +3213,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   shortCode: string,
   sessionId: string,
   input: {
-    token: string
+    token?: string
     paymentMethodId: string
     installments: number
     issuerId?: string
@@ -3176,7 +3226,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   },
 ) {
   const { loadCredentials } = await import('@/services/mercado-pago/connection.service')
-  const { createPayment } = await import('@/services/mercado-pago/payment.service')
+  const { createPayment, mpToCheckoutStatus } = await import('@/services/mercado-pago/payment.service')
 
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },
@@ -3225,12 +3275,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
 
   // Map MP status → our CheckoutStatus for the optimistic update. The
   // webhook will confirm the authoritative state later.
-  const optimisticStatus =
-    payment.status === 'approved' || payment.status === 'authorized'
-      ? 'COMPLETED'
-      : payment.status === 'rejected' || payment.status === 'cancelled'
-        ? 'CANCELLED'
-        : 'PENDING'
+  const optimisticStatus = mpToCheckoutStatus(payment.status)
 
   await prisma.checkoutSession.update({
     where: { id: session.id },
@@ -3247,7 +3292,7 @@ export async function executeMercadoPagoPaymentForPaymentLink(
   // lands first wins. Non-fatal: the payment already succeeded on MP, so a
   // finalize hiccup must not fail the response — the IPN will reconcile.
   if (optimisticStatus === 'COMPLETED') {
-    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id }).catch(err =>
+    await finalizeMercadoPagoCheckout({ sessionId, mpPaymentId: payment.id, paymentTypeId: payment.payment_type_id }).catch(err =>
       logger.error('finalizeMercadoPagoCheckout failed (optimistic path)', {
         sessionId,
         error: err instanceof Error ? err.message : String(err),
@@ -3285,14 +3330,52 @@ export async function executeMercadoPagoPaymentForPaymentLink(
  * unique `Payment(venueId, idempotencyKey=mpPaymentId)` index — a duplicate
  * call throws P2002 and no-ops. Safe to call twice concurrently.
  */
-export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpPaymentId: string | number }): Promise<void> {
+/**
+ * El método del cobro sale del `payment_type_id` de Mercado Pago (16-oct: un SPEI quedaba como tarjeta).
+ * OXXO (`ticket`/`atm`) NO es CASH: varios lectores (conciliación, saldo disponible, dispersión, póliza, corte del turno)
+ * deciden por `method === CASH` sin mirar `fundsFlow` y lo tratarían como efectivo del negocio (Codex r2). Va como OTHER con
+ * forma SAT 01 sellada en `tenderSatFormaPago`: se factura como efectivo y todo lo demás lo trata como antes. El saldo de
+ * Mercado Pago es dinero electrónico (SAT 06): sin el sello, DIGITAL_WALLET caería en '99' y bloquearía la factura.
+ * Sin tipo (llamada que no lo trae) queda CREDIT_CARD, como antes; un tipo desconocido queda OTHER ('99', por revisar).
+ */
+export function metodoDeMercadoPago(paymentTypeId?: string | null): { method: PaymentMethod; tenderSatFormaPago: string | null } {
+  if (!paymentTypeId) return { method: 'CREDIT_CARD', tenderSatFormaPago: null }
+  const sellados: Record<string, { method: PaymentMethod; tenderSatFormaPago: string }> = {
+    ticket: { method: 'OTHER', tenderSatFormaPago: '01' },
+    atm: { method: 'OTHER', tenderSatFormaPago: '01' },
+    account_money: { method: 'DIGITAL_WALLET', tenderSatFormaPago: '06' },
+  }
+  if (sellados[paymentTypeId]) return sellados[paymentTypeId]
+  const metodos: Record<string, PaymentMethod> = {
+    credit_card: 'CREDIT_CARD',
+    debit_card: 'DEBIT_CARD',
+    prepaid_card: 'DEBIT_CARD',
+    bank_transfer: 'BANK_TRANSFER',
+  }
+  return { method: metodos[paymentTypeId] ?? 'OTHER', tenderSatFormaPago: null }
+}
+
+export async function finalizeMercadoPagoCheckout(args: {
+  sessionId: string
+  mpPaymentId: string | number
+  paymentTypeId?: string | null
+}): Promise<void> {
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId: args.sessionId },
     include: {
       ecommerceMerchant: { select: { id: true, venueId: true } },
       // `purpose` decide si la venta trae productos: sin él, TODO cobro por
       // MercadoPago se guardaba como entrada manual sin renglones.
-      paymentLink: { select: { id: true, venueId: true, createdById: true, purpose: true } },
+      // La primera persona atribuida (por fecha, como las otras ligas) queda como quien cobró (FT-GRAVES T2).
+      paymentLink: {
+        select: {
+          id: true,
+          venueId: true,
+          createdById: true,
+          purpose: true,
+          attributions: { select: { staffId: true }, orderBy: { createdAt: 'asc' } },
+        },
+      },
     },
   })
   if (!session) {
@@ -3303,6 +3386,9 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
 
   const isLink = !!session.paymentLink
   const venueId = session.paymentLink?.venueId ?? session.ecommerceMerchant.venueId
+  // FT-GRAVES T2: igual que las ligas por Stripe y Blumon — la primera persona atribuida queda como quien cobró y la comisión se
+  // congela con el cobro, repartida entre todas. Sin atribución (o checkout sin liga) no hay comisión: no se inventa a quién.
+  const attributedStaffIds = (session.paymentLink?.attributions ?? []).map(a => a.staffId)
   // session.amount already includes the tip; split it out so the Order/Payment
   // report the tip separately, mirroring finalizePaymentLinkCheckout (Stripe).
   const metadata = (session.metadata ?? {}) as Record<string, any>
@@ -3354,6 +3440,7 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           subtotal,
           discountAmount: 0,
           taxAmount: 0,
+          contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount,
           total: gross,
           paidAmount: gross,
@@ -3412,7 +3499,10 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           ecommerceMerchantId: session.ecommerceMerchant.id,
           amount: subtotal,
           tipAmount,
-          method: 'CREDIT_CARD',
+          ...metodoDeMercadoPago(args.paymentTypeId),
+          // Lo liquida Mercado Pago, nunca el cajón (igual que Stripe): sin el sello, una devolución SPEI no se descontaba en
+          // la conciliación bancaria (la devolución hereda este valor).
+          fundsFlow: 'AVOQADO_PROCESSED',
           source: 'WEB',
           status: 'COMPLETED',
           // FAST significa "sin inventario ni cumplimiento operativo"; una
@@ -3420,12 +3510,21 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
           type: isItemLink ? 'REGULAR' : 'FAST',
           processor: 'mercadopago',
           processorId,
+          processedById: attributedStaffIds[0] ?? undefined,
           feePercentage,
           feeAmount,
           netAmount,
           idempotencyKey: processorId,
         },
         select: { id: true },
+      })
+      if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+      // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
+      await activarSobresDeCuentaPagadaEnTx(tx, {
+        venueId,
+        orderId: order.id,
+        staffId: session.paymentLink?.createdById ?? null,
+        items: (order.items ?? []) as Array<{ giftCardId?: string | null }>,
       })
 
       await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
@@ -3438,7 +3537,8 @@ export async function finalizeMercadoPagoCheckout(args: { sessionId: string; mpP
       }
 
       orderIdForReferral = order.id
-    })
+      // La comisión se congela en esta transacción: el mismo tope de 10 s que las otras ligas y la terminal.
+    }, OPCIONES_DE_TRANSACCION_DEL_INTENTO)
 
     // Aplicar el vale YA COMMITEADO el cobro. Nunca puede tumbar una venta
     // cobrada: si truena, el posting queda pendiente y el sweeper lo retoma.

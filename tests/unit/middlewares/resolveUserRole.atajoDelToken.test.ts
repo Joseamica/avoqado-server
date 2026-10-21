@@ -31,7 +31,7 @@ jest.mock('@/utils/prismaClient', () => ({
     staff: { findUnique: async () => ({ active: true }) },
     staffVenue: { findUnique: jest.fn(), findFirst: jest.fn() },
     venue: { findUnique: jest.fn() },
-    staffOrganization: { findUnique: jest.fn() },
+    staffOrganization: { findUnique: jest.fn(), findFirst: jest.fn() },
   },
 }))
 
@@ -46,6 +46,11 @@ const PERMISSION_SET = {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  // Desde la ronda 7 (P2-6), con una fila MENOR que OWNER el resolutor pregunta si la persona es dueña de la org.
+  // Por defecto nadie lo es: sin esto, el «dueño de la org» de una prueba se filtraba a las siguientes.
+  ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ organizationId: 'org-1' })
+  ;(prisma.staffOrganization.findUnique as jest.Mock).mockResolvedValue(null)
+  ;(prisma.staffOrganization.findFirst as jest.Mock).mockResolvedValue(null)
 })
 
 describe('el permiso propio del empleado (PermissionSet) NO se puede ignorar en línea', () => {
@@ -156,6 +161,21 @@ describe('el costo: una consulta por request, no una por middleware', () => {
     expect(a.role).toBe(StaffRole.WAITER)
     expect(b).toEqual(a)
     expect(c).toEqual(a)
+    expect(prisma.staffVenue.findUnique).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 dos llamadas SIMULTÁNEAS con el mismo req (una ruta y el observador de aparatos al abortar) consultan UNA vez', async () => {
+    let soltar!: (v: unknown) => void
+    ;(prisma.staffVenue.findUnique as jest.Mock).mockReturnValue(new Promise(r => (soltar = r)))
+
+    const req = {} as any
+    const args = { userId: STAFF, targetVenueId: VENUE, tokenVenueId: VENUE, tokenRole: StaffRole.WAITER, req }
+    const a = resolveUserRoleForVenue(args)
+    const b = resolveUserRoleForVenue(args) // llega mientras la primera sigue esperando a la base (Codex R4-1)
+    soltar({ role: StaffRole.WAITER, active: true, permissionSetId: null, permissionSet: null })
+
+    expect((await a).role).toBe(StaffRole.WAITER)
+    expect(await b).toEqual(await a)
     expect(prisma.staffVenue.findUnique).toHaveBeenCalledTimes(1)
   })
 

@@ -1,6 +1,17 @@
 // El guard de ventas por sucursal (venueSalesGuard) NO es el objeto de esta suite:
 // se prueba en tests/unit/services/venueSalesGuard.test.ts. Sin este mock, cada
 // servicio de venta consulta venue.salesEnabled contra un prismaMock que no lo define.
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/services/venueSalesGuard', () => ({
   __esModule: true,
   assertVenueSalesEnabled: jest.fn(),
@@ -64,9 +75,17 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
   postCashSaleToDrawer: (...args: any[]) => postCashSaleToDrawerMock(...args),
 }))
 
+// R8 (tarjetas de regalo): el pago manual que salda una cuenta activa sus sobres con la MISMA transacción.
+const activarSobresMock = jest.fn().mockResolvedValue({ activated: [] })
+jest.mock('@/services/giftCards/giftCardLedger', () => ({
+  __esModule: true,
+  activarSobresDeCuentaPagadaEnTx: (...a: any[]) => activarSobresMock(...a),
+}))
+
 import * as manualPaymentService from '@/services/dashboard/manualPayment.service'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { createManualPaymentSchema } from '@/schemas/dashboard/manualPayment.schema'
 
 const prismaMock = prisma as jest.Mocked<typeof prisma>
 
@@ -228,6 +247,48 @@ describe('manualPayment.service', () => {
         }),
       )
     })
+    // 🔴 MONEY (Codex B2c r1, barrido F1): desde B2/B2c la cabecera `discountAmount` es la Σ de las filas SIN tope y puede
+    // pasar el subtotal (cortesía encima de un fijo de cuenta). El cobro topa la mercancía en 0; con la cabecera nominal este
+    // camino restaba de más y se comía el IVA que va aparte: 150 + 16 − 160 = 6 ⇒ un pago de $6 SALDABA una cuenta que debe $16.
+    it('MONEY: cabecera mayor que el subtotal — la mercancía se topa en 0 y el IVA aparte sigue debiéndose', async () => {
+      const orderUpdate = jest.fn()
+      const mockOrder = {
+        id: ORDER_ID,
+        venueId: VENUE_ID,
+        subtotal: new Prisma.Decimal(150),
+        taxAmount: new Prisma.Decimal(16),
+        discountAmount: new Prisma.Decimal(160),
+        total: new Prisma.Decimal(16),
+        paymentStatus: 'PENDING',
+        payments: [],
+        orderCustomers: [],
+      }
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (cb: any) =>
+        cb({
+          $queryRaw: filaDeOrdenBloqueada(),
+          order: { findFirst: jest.fn().mockResolvedValue(mockOrder), update: orderUpdate },
+          payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-iva' }) },
+          shift: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+          orderCustomer: { create: jest.fn() },
+          venueTransaction: { create: jest.fn() },
+          paymentAllocation: { create: jest.fn() },
+        }),
+      )
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+        orderId: ORDER_ID,
+        amount: '6',
+        tipAmount: '0',
+        method: 'CASH',
+        source: 'OTHER',
+        externalSource: 'BUQ',
+      })
+
+      const data = orderUpdate.mock.calls[0][0].data
+      expect(data.paymentStatus).toBe('PARTIAL')
+      expect(Number(data.total)).toBe(16)
+      expect(Number(data.remainingBalance)).toBe(10)
+    })
   })
 
   // ─── INVENTARIO (fase 5.6) ───────────────────────────────────────────────
@@ -283,6 +344,47 @@ describe('manualPayment.service', () => {
       expect(createSalePostingInTxMock).toHaveBeenCalled()
       expect(createSalePostingInTxMock.mock.calls[0][0]).toBe(txClient)
       expect(createSalePostingInTxMock.mock.calls[0][1]).toEqual(expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID }))
+    })
+
+    // 🔴 R11-8: la venta de vales que este pago salda cierra también su sesión (deja de ofrecer «cobrar el resto»), con la sesión
+    // que la jerarquía tomó como PRIMERA sentencia de la transacción; un abono no la toca.
+    it('🔴 R11-8: venta con sesión de vales ⇒ la jerarquía va PRIMERO y la sesión cierra con el vale, sólo al saldar', async () => {
+      const vales = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+      const sesion = { id: 'sesion-1', status: 'PARTIALLY_PAID', activePaymentAttemptId: null, tickets: [] }
+      vales.lockAreaTicketCheckoutHierarchy.mockResolvedValueOnce({ session: sesion })
+      vales.cerrarSesionDeValesAlCerrarLaVenta.mockResolvedValueOnce(true)
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(vales.lockAreaTicketCheckoutHierarchy).toHaveBeenCalledWith(txClient, { venueId: VENUE_ID, orderId: ORDER_ID })
+      expect(vales.lockAreaTicketCheckoutHierarchy.mock.invocationCallOrder[0]).toBeLessThan(txClient.$queryRaw.mock.invocationCallOrder[0])
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta).toHaveBeenCalledWith(txClient, sesion, { venueId: VENUE_ID, orderId: ORDER_ID })
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta.mock.invocationCallOrder[0]).toBeGreaterThan(
+        createSalePostingInTxMock.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('regresión R11-8: un abono que no salda no cierra la sesión', async () => {
+      const vales = jest.requireMock('@/services/mobile/areaTicketV7.mobile.service')
+      vales.lockAreaTicketCheckoutHierarchy.mockResolvedValueOnce({ session: { id: 'sesion-1', status: 'PARTIALLY_PAID' } })
+      armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...pagoQueSalda, amount: '10' })
+
+      expect(vales.cerrarSesionDeValesAlCerrarLaVenta).not.toHaveBeenCalled()
+    })
+
+    it('R8: el pago manual que salda la cuenta activa los sobres con la MISMA tx y sus renglones', async () => {
+      const txClient = armarTx(ordenConProductos())
+
+      await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(activarSobresMock).toHaveBeenCalledTimes(1)
+      expect(activarSobresMock.mock.calls[0][0]).toBe(txClient)
+      expect(activarSobresMock.mock.calls[0][1]).toEqual(
+        expect.objectContaining({ venueId: VENUE_ID, orderId: ORDER_ID, staffId: USER_ID, items: ordenConProductos().items }),
+      )
     })
 
     it('aplicar el vale ocurre DESPUÉS del commit, no dentro de la transacción', async () => {
@@ -367,6 +469,38 @@ describe('manualPayment.service', () => {
       armarTx(ordenConProductos({ payments: [] })) // 30 de 100 → sigue PARTIAL
 
       await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('rechaza otro cobro de una orden ya saldada sin abrir ni aplicar otro vale', async () => {
+      armarTx(
+        ordenConProductos({
+          paymentStatus: 'PAID',
+          payments: [{ amount: new Prisma.Decimal(100), tipAmount: new Prisma.Decimal(0), status: 'COMPLETED' }],
+        }),
+      )
+
+      // «Como Square» (founder, 16-oct): una venta PAID está cerrada; lo extra se cobra como venta nueva.
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
+        statusCode: 400,
+        code: manualPaymentService.CODIGO_VENTA_YA_COBRADA,
+        message: manualPaymentService.MENSAJE_VENTA_YA_COBRADA,
+      })
+
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
+    })
+
+    it('la marca PAID impide otro vale aunque el historial de pagos no cubra todo el total', async () => {
+      armarTx(ordenConProductos({ paymentStatus: 'PAID' }))
+
+      // «Como Square»: la marca PAID cierra la venta aunque el historial no cubra el total ⇒ se rechaza, sin vale.
+      await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, pagoQueSalda)).rejects.toMatchObject({
+        statusCode: 400,
+        code: manualPaymentService.CODIGO_VENTA_YA_COBRADA,
+      })
 
       expect(createSalePostingInTxMock).not.toHaveBeenCalled()
       expect(applySalePostingMock).not.toHaveBeenCalled()
@@ -493,6 +627,68 @@ describe('manualPayment.service', () => {
       })
 
       expect(paymentCreate.mock.calls[0][0].data.shiftId).toBeNull()
+    })
+
+    // IVA por producto, plan 2, tarea 4: el pago manual sin `orderId` (modo 2, orden sombra)
+    // es la ÚNICA ruta donde un humano teclea el IVA a mano. Sólo un IVA > 0 demuestra
+    // "aparte" — 0 o ausente no se adivina como "incluido" (`contratoDePagoManual`).
+    describe('contratoDePrecio de la orden sombra (modo 2)', () => {
+      it('con taxAmount tecleado > 0, la orden sombra nace IVA_APARTE', async () => {
+        const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-iva-aparte' })
+        ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+          txMock({
+            order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+            payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+            shift: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              update: jest.fn(),
+              updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            },
+            orderCustomer: { create: jest.fn() },
+            venueTransaction: { create: jest.fn() },
+            paymentAllocation: { create: jest.fn() },
+          }),
+        )
+
+        await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100.00',
+          taxAmount: '16.00',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        })
+
+        expect(orderCreate.mock.calls[0][0].data.contratoDePrecio).toBe('IVA_APARTE')
+      })
+
+      it('sin taxAmount (default 0), la orden sombra nace DESCONOCIDO', async () => {
+        const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-desconocido' })
+        ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+          txMock({
+            order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate },
+            payment: { count: jest.fn().mockResolvedValue(0), create: jest.fn().mockResolvedValue({ id: 'pay-x' }) },
+            shift: {
+              findFirst: jest.fn().mockResolvedValue(null),
+              update: jest.fn(),
+              updateMany: jest.fn().mockResolvedValue({ count: 1 }),
+            },
+            orderCustomer: { create: jest.fn() },
+            venueTransaction: { create: jest.fn() },
+            paymentAllocation: { create: jest.fn() },
+          }),
+        )
+
+        await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100.00',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'BUQ',
+        })
+
+        expect(orderCreate.mock.calls[0][0].data.contratoDePrecio).toBe('DESCONOCIDO')
+      })
     })
 
     it('does NOT subtract REFUND payments when computing paidSoFar (over-pay risk)', async () => {
@@ -1744,12 +1940,48 @@ describe('manualPayment.service', () => {
       expect(data.createdById).toBe('admin-id')
     })
 
-    it('AUDIT: source=TPV with externalSource is REJECTED by schema layer (defense in depth)', () => {
-      // Schema's superRefine forbids externalSource when source !== 'OTHER'.
-      // This is a schema-layer test (not service), but we document it here.
-      // Real assertion: schema validation runs in the controller via Zod parse.
-      // Service trusts the input shape — defense in depth = layered validation.
-      expect(true).toBe(true) // placeholder reminder
+    it('el esquema rechaza un proveedor externo cuando el origen del pago es TPV', () => {
+      const result = createManualPaymentSchema.safeParse({
+        body: { amount: '100', method: 'CASH', source: 'TPV', externalSource: 'Proveedor externo' },
+      })
+
+      expect(result.success).toBe(false)
+      if (result.success) throw new Error('El origen TPV no admite un proveedor externo')
+      expect(result.error.issues).toEqual([
+        expect.objectContaining({
+          path: ['body', 'externalSource'],
+          message: 'El proveedor externo solo aplica cuando el origen es OTHER',
+        }),
+      ])
+    })
+
+    it('el esquema acepta un proveedor externo cuando el origen del pago es OTHER', () => {
+      const result = createManualPaymentSchema.safeParse({
+        body: { amount: '100', method: 'CASH', source: 'OTHER', externalSource: 'Proveedor externo' },
+      })
+
+      expect(result.success).toBe(true)
+    })
+
+    it('una orden sombra sin productos no crea ni aplica un vale de inventario', async () => {
+      const orderCreate = jest.fn().mockResolvedValue({ id: 'shadow-sin-inventario' })
+      ;(prismaMock.$transaction as jest.Mock).mockImplementation(
+        txMock({ order: { findFirst: jest.fn(), update: jest.fn(), create: orderCreate } }),
+      )
+
+      await expect(
+        manualPaymentService.createManualPayment(VENUE_ID, USER_ID, {
+          amount: '100',
+          tipAmount: '0',
+          method: 'CASH',
+          source: 'OTHER',
+          externalSource: 'Proveedor externo',
+        }),
+      ).resolves.toBeDefined()
+
+      expect(orderCreate).toHaveBeenCalledTimes(1)
+      expect(createSalePostingInTxMock).not.toHaveBeenCalled()
+      expect(applySalePostingMock).not.toHaveBeenCalled()
     })
 
     it('AUDIT: VenueTransaction is also created in Mode 1 (existing order path)', async () => {
@@ -2234,22 +2466,7 @@ describe('manualPayment.service', () => {
       expect(updateCustomerMetricsMock).not.toHaveBeenCalled()
     })
 
-    it('KNOWN LIMITATION: socket.io broadcast NOT emitted (UX only — not financial descuadre)', () => {
-      // TPV broadcasts PAYMENT_COMPLETED via socketManager so dashboards refresh
-      // in real-time. Manual payments don't emit — admin sees their own action
-      // immediately, other open dashboards need refresh. Documented gap, no impact
-      // on financial data. Future enhancement.
-      expect(true).toBe(true)
-    })
-
-    it('KNOWN LIMITATION: inventory FIFO deduction NOT performed (per service docstring)', () => {
-      // TPV deducts inventory on final payment via SaleVerification flow.
-      // Manual payments are explicitly out-of-scope per the service docstring —
-      // there are no SKU items on shadow orders, so no inventory to deduct.
-      // For Mode 1 (existing order with items), inventory should already have
-      // been handled by the original order flow (e.g., POS sync or TPV).
-      expect(true).toBe(true)
-    })
+    it.todo('LIMITACIÓN DOCUMENTADA: emitir el pago manual por socket para las otras pantallas abiertas')
   })
 
   describe('getExternalSources', () => {
@@ -2269,5 +2486,67 @@ describe('manualPayment.service', () => {
         }),
       )
     })
+  })
+})
+
+describe('manualPayment — reintentos MCP durables', () => {
+  const input = { amount: '100', tipAmount: '0', method: 'CASH' as const, source: 'POS' as const, idempotencyKey: 'mcp-manual-test-001' }
+  let stored: any
+  let create: jest.Mock
+  beforeEach(() => {
+    jest.clearAllMocks()
+    stored = null
+    ;(prismaMock.payment as any).findUnique = jest.fn(async () => stored)
+    create = jest.fn(async ({ data }) => (stored = { id: 'one-payment', ...data }))
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async cb =>
+      cb({
+        payment: { create, findUnique: jest.fn(async () => stored) },
+        order: { create: jest.fn().mockResolvedValue({ id: 'one-order' }) },
+        shift: { findFirst: jest.fn().mockResolvedValue(null), updateMany: jest.fn() },
+        venueTransaction: { create: jest.fn() },
+        paymentAllocation: { create: jest.fn() },
+      }),
+    )
+  })
+
+  it('el mismo intento devuelve el mismo pago sin crear otra orden, turno, comisión o métrica', async () => {
+    const first = await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)
+    const retry = await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...input, amount: '100.00' })
+    expect(retry.id).toBe(first.id)
+    expect(create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(first.idempotencyKey).toBe(input.idempotencyKey)
+  })
+
+  it('un perdedor Serializable recupera al ganador con la misma llave sin repetir efectos', async () => {
+    const first = await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)
+    ;(prismaMock.payment.findUnique as jest.Mock).mockResolvedValueOnce(null)
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce({ code: 'P2034' })
+    expect((await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)).id).toBe(first.id)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('si el ganador aún no existe reintenta con límite, sin duplicar el asiento', async () => {
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValueOnce({ code: 'P2034' })
+    expect((await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)).id).toBe('one-payment')
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(2)
+    expect(create).toHaveBeenCalledTimes(1)
+  })
+
+  it('detiene los conflictos persistentes tras tres intentos y pide conservar la misma llave', async () => {
+    ;(prismaMock.$transaction as jest.Mock).mockRejectedValue({ code: 'P2034' })
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PAYMENT_RETRY_REQUIRED',
+    })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+    expect(create).not.toHaveBeenCalled()
+  })
+
+  it('la misma llave con otro monto o principal se rechaza sin volver a escribir', async () => {
+    await manualPaymentService.createManualPayment(VENUE_ID, USER_ID, input)
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, USER_ID, { ...input, amount: '1' })).rejects.toThrow(/idempotencia/)
+    await expect(manualPaymentService.createManualPayment(VENUE_ID, 'otro-staff', input)).rejects.toThrow(/idempotencia/)
+    expect(create).toHaveBeenCalledTimes(1)
   })
 })

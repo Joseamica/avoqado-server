@@ -1,0 +1,98 @@
+import { BadRequestError, ConflictError } from '@/errors/AppError'
+import { IvaTratamiento, TRATAMIENTOS_OFRECIDOS_V1, tratamientoDesdeTupla, tuplaDesdeTratamiento } from './ivaTratamiento'
+
+export const DONDE_SE_CAMBIA_EL_IVA = 'dashboard → producto, junto al precio'
+
+export const MENSAJES = {
+  IVA_POR_PRODUCTO_APAGADO:
+    'Este producto se vende con IVA 16 %. El IVA de cada producto se cambia en el dashboard → producto, junto al precio.',
+  IVA_REQUIERE_APP_NUEVA: 'El IVA de los productos se cambia en el dashboard → producto, junto al precio.',
+  IVA_TRATAMIENTO_CONTRADICTORIO: 'El IVA elegido no es válido. Usa 16 %, 0 % o Exento.',
+  IVA_CONTABILIDAD_CON_HISTORIA:
+    'Este negocio ya lleva contabilidad en Avoqado (pólizas o periodos cerrados) y la contabilidad todavía no maneja IVA distinto de 16 %. Por eso este producto se queda en IVA 16 %. Escríbenos a hola@avoqado.io si lo necesitas.',
+  IVA_NEGOCIO_CAMBIO_DE_ORGANIZACION: 'Este negocio acaba de cambiar de organización. Vuelve a intentarlo.',
+  IVA_TRASLADO_INCOMPATIBLE:
+    'No se puede mover este negocio: la organización destino lleva contabilidad en Avoqado y el negocio tiene productos o facturas con IVA distinto de 16 %. La contabilidad todavía no maneja esa mezcla.',
+  IVA_TRASLADO_CON_CONTABILIDAD:
+    'No se puede mover este negocio: ya tiene pólizas en la contabilidad de su organización, y moverlo haría que sus ventas se registraran otra vez en la nueva. Pide ayuda a soporte.',
+  IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY:
+    'Este producto ya tuvo ajustes de delivery (Uber). Para venderlo con otro IVA, crea un producto nuevo con el IVA correcto.',
+} as const
+
+const esOfrecido = (v: unknown): v is IvaTratamiento =>
+  typeof v === 'string' && (TRATAMIENTOS_OFRECIDOS_V1 as readonly string[]).includes(v)
+const mismaTasa = (a: unknown, b: number) => Math.round(Number(a) * 10000) === Math.round(b * 10000)
+
+/**
+ * Traduce lo que manda un cliente (app nueva: `ivaTratamiento`; app vieja: sólo `taxRate`) al único valor que se
+ * escribe. La tupla la deriva el trigger de Product; el llamador NO debe escribir `taxRate`/`objetoImp` por su cuenta.
+ */
+export function normalizarIvaDeProducto(
+  entrada: { ivaTratamiento?: unknown; taxRate?: unknown; objetoImp?: unknown },
+  actual: { ivaTratamiento: IvaTratamiento; taxRate: number; objetoImp: string } | null,
+  encendido: boolean,
+): { ivaTratamiento?: IvaTratamiento } {
+  const pideTratamiento = entrada.ivaTratamiento !== undefined && entrada.ivaTratamiento !== null
+  const mandaTasa = entrada.taxRate !== undefined && entrada.taxRate !== null
+  const mandaObjeto = entrada.objetoImp !== undefined && entrada.objetoImp !== null
+
+  if (pideTratamiento) {
+    if (!esOfrecido(entrada.ivaTratamiento)) {
+      throw new BadRequestError(MENSAJES.IVA_TRATAMIENTO_CONTRADICTORIO, 'IVA_TRATAMIENTO_CONTRADICTORIO')
+    }
+    const pedido = entrada.ivaTratamiento
+    if (mandaTasa || mandaObjeto) {
+      const esperada = tuplaDesdeTratamiento(pedido, actual?.taxRate ?? 0.16)
+      if ((mandaTasa && !mismaTasa(entrada.taxRate, esperada.taxRate)) || (mandaObjeto && entrada.objetoImp !== esperada.objetoImp)) {
+        throw new BadRequestError(MENSAJES.IVA_TRATAMIENTO_CONTRADICTORIO, 'IVA_TRATAMIENTO_CONTRADICTORIO')
+      }
+    }
+    if (pedido !== 'IVA_16' && pedido !== actual?.ivaTratamiento && !encendido) {
+      throw new ConflictError(MENSAJES.IVA_POR_PRODUCTO_APAGADO, 'IVA_POR_PRODUCTO_APAGADO')
+    }
+    return { ivaTratamiento: pedido }
+  }
+
+  if (!mandaTasa && !mandaObjeto) return {}
+
+  // Cliente viejo: si la tupla ENTERA (tasa Y objetoImp) no cambia respecto a la fila, no se toca
+  // nada. Ruling R9: reenviar el `objetoImp` ACTUAL de la fila (lo que hace el dashboard de hoy en
+  // CADA guardado, prefiltrado del propio renglón) no es un cambio — ni para un EXENTO (no se
+  // degrada a IVA_0) ni para un heredado BLOQUEADO_04 (el trigger ya lo permite: migración
+  // `iva_tratamiento_columnas`). Comparar sólo la tasa dejaba pasar un objetoImp distinto sin
+  // vetarlo, y comparar "manda objetoImp ⇒ siempre cambio" disparaba un 409 en cada edición normal.
+  const tasaActual = actual?.taxRate ?? 0.16
+  const objetoActual = actual?.objetoImp ?? '02'
+  const sinCambio = (!mandaTasa || mismaTasa(entrada.taxRate, tasaActual)) && (!mandaObjeto || entrada.objetoImp === objetoActual)
+  if (sinCambio) return {}
+
+  // Deriva con la parte que SÍ cambió y el valor de la FILA para la que no se mandó — nunca '02' a
+  // ciegas: un producto heredado BLOQUEADO_03/04 que sólo cambia la tasa no debe brincar a otro objeto.
+  const derivado = tratamientoDesdeTupla(
+    mandaTasa ? Number(entrada.taxRate) : tasaActual,
+    mandaObjeto ? String(entrada.objetoImp) : objetoActual,
+  )
+  // D18 (spec planes 6-7, H16): encendido, una tupla vieja no toca el IVA en NINGUNA dirección: una app abierta antes del cambio a 0 %
+  // lo regresaría a 16 % al guardar el nombre. El reenvío sin cambio ya salió arriba (`sinCambio`).
+  if (encendido) throw new ConflictError(MENSAJES.IVA_REQUIERE_APP_NUEVA, 'IVA_REQUIERE_APP_NUEVA')
+  if (derivado === 'IVA_16') return { ivaTratamiento: 'IVA_16' }
+  throw new ConflictError(MENSAJES.IVA_POR_PRODUCTO_APAGADO, 'IVA_POR_PRODUCTO_APAGADO')
+}
+
+/**
+ * El trigger lanza P0001 con el código en el mensaje (un error de modelo lo trae sólo como texto); aquí se reconoce cuál.
+ * `null` si no es una barrera de IVA. Ninguna llave de MENSAJES es subcadena de otra, así que la búsqueda no se confunde.
+ */
+export function codigoDeBarreraIva(e: unknown): { code: keyof typeof MENSAJES; message: string } | null {
+  const texto = `${(e as any)?.meta?.message ?? ''} ${(e as any)?.message ?? ''}`
+  const code = (Object.keys(MENSAJES) as (keyof typeof MENSAJES)[]).find(c => texto.includes(c))
+  return code ? { code, message: MENSAJES[code] } : null
+}
+
+/** La barrera de IVA se vuelve el mismo error HTTP. Otros errores pasan. */
+export function traducirErrorDeIva(error: unknown): void {
+  const barrera = codigoDeBarreraIva(error)
+  if (!barrera) return
+  if (barrera.code === 'IVA_TRATAMIENTO_CONTRADICTORIO') throw new BadRequestError(barrera.message, barrera.code)
+  throw new ConflictError(barrera.message, barrera.code)
+}

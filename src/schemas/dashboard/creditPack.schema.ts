@@ -163,19 +163,6 @@ export const publicPacksParamsSchema = z.object({
   }),
 })
 
-export const customerRegisterSchema = z.object({
-  params: z.object({
-    venueSlug: z.string().min(1),
-  }),
-  body: z.object({
-    email: z.string().email('Correo inválido'),
-    password: z.string().min(6, 'La contraseña debe tener al menos 6 caracteres'),
-    phone: z.string().optional(),
-    firstName: z.string().optional(),
-    lastName: z.string().optional(),
-  }),
-})
-
 export const customerLoginSchema = z.object({
   params: z.object({
     venueSlug: z.string().min(1),
@@ -194,10 +181,8 @@ export const customerUpdateProfileSchema = z.object({
     .object({
       firstName: z.string().max(50, 'El nombre es muy largo').optional(),
       lastName: z.string().max(50, 'El apellido es muy largo').optional(),
-      phone: z
-        .string()
-        .regex(/^\+?[0-9]{10,15}$/, 'El teléfono debe tener entre 10 y 15 dígitos')
-        .optional(),
+      // El teléfono ya no se cambia desde aquí (seguridad, 1-oct): sólo se acota; el servicio decide si es el mismo y lo ignora.
+      phone: z.string().max(32, 'El teléfono es muy largo').optional(),
     })
     .refine(data => Object.keys(data).length > 0, {
       message: 'Se requiere al menos un campo para actualizar',
@@ -216,5 +201,10 @@ export const otpVerifySchema = z
     phone: z.string().min(8, 'Teléfono inválido').optional(),
     email: z.string().email('Correo inválido').optional(),
     code: z.string().regex(/^\d{6}$/, 'El código debe ser de 6 dígitos'),
+    /** R7/H1 (pedidos en línea): verificar para PEDIR no activa la cuenta de reservas y devuelve el token de pedidos. */
+    purpose: z.enum(['ORDERING'], { errorMap: () => ({ message: 'Propósito inválido' }) }).optional(),
+    // Nombre del alta en la página de la tarjeta (spec 2026-10-14 §3.3). Opcional para no romper clientes viejos; el widget
+    // lo hace obligatorio. Sólo forma aquí: la regla «nunca pisa un nombre existente» vive en el servicio.
+    firstName: z.string().trim().min(1, 'Escribe tu nombre').max(60, 'Tu nombre no puede pasar de 60 caracteres').optional(),
   })
   .refine(d => Boolean(d.phone) || Boolean(d.email), { message: 'Proporciona teléfono o correo', path: ['phone'] })

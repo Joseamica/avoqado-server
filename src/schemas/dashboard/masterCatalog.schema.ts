@@ -106,10 +106,11 @@ const catalogItemBaseBodySchema = z
     familyId: bodyId,
     presentationLabel: text,
     unit: z.nativeEnum(Unit),
-    taxRate: z.string().min(1).max(128),
+    // D15: el catálogo ya no administra el IVA. Se aceptan (clientes viejos) pero ya no se exigen; el servicio completa lo que falte.
+    taxRate: z.string().min(1).max(128).optional(),
     satProductKey: text,
     satUnitKey: text,
-    objetoImp: text,
+    objetoImp: text.optional(),
     productType: z.nativeEnum(ProductType),
     iepsMode: z.nativeEnum(CatalogIepsMode),
     iepsRate: z.string().max(128).nullable(),

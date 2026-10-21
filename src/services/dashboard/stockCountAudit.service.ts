@@ -49,7 +49,11 @@ export interface StockCountAuditRow {
   totalDifference: number
 }
 
-export type StockCountAuditDetail = StockCountAuditRow & { items: ReturnType<typeof mapCountItem>[] }
+export type StockCountAuditDetail = StockCountAuditRow & {
+  items: ReturnType<typeof mapCountItem>[]
+  /** Aditivo (L5): líneas contadas que el conteo NO aplicó por Shopify. `summary` no cambia: las sigue contando. */
+  noAplicadas: number
+}
 
 const LINEA_SELECT = {
   stockCountId: true,
@@ -186,5 +190,9 @@ export async function getStockCountForAudit(venueId: string, countId: string): P
   // El MISMO mapeo que la lista (`aLinea`): si se escribiera dos veces, el resumen
   // del detalle y el de la lista podrían divergir al editar sólo uno.
   const summary = resumirConteo(count.items.map(aLinea))
-  return { ...cabeceraAlWire(count, summary), items: count.items.map(mapCountItem) }
+  return {
+    ...cabeceraAlWire(count, summary),
+    items: count.items.map(mapCountItem),
+    noAplicadas: count.items.filter(i => i.shopifyHeldAt).length,
+  }
 }

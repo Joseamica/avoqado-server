@@ -8,11 +8,13 @@ const featureCode = z
   .trim()
   .regex(/^[A-Z][A-Z0-9_]{0,63}$/, 'Código de función no válido')
 const codes = z.array(featureCode, { errorMap }).max(100, 'Se permiten hasta 100 funciones')
+/** The price floor of an offer: a «% de descuento» that lands below it blocks the group, never rounds up to it. */
+export const MINIMUM_PRICE = 10
 // These new preview contracts use pesos, including MCP. No implicit rounding of an authored price.
 const price = z
   .number({ errorMap })
   .finite('El precio debe ser finito')
-  .min(10, 'El precio mínimo es $10.00 MXN')
+  .min(MINIMUM_PRICE, 'El precio mínimo es $10.00 MXN')
   .max(100_000, 'El precio máximo es $100,000.00 MXN')
   .refine(value => new Decimal(value).decimalPlaces() <= 2, 'El precio admite hasta dos decimales')
 

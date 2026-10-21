@@ -59,7 +59,8 @@ router.post('/tokenize', tokenizeLimiter, tokenizeCard)
  * Body:
  * {
  *   sessionId: string,
- *   cvv: string
+ *   cvv: string,
+ *   cardToken: string   // el `token` que devolvió /sdk/tokenize (obligatorio desde la auditoría 2026-09-30)
  * }
  *
  * Response:
@@ -90,6 +91,8 @@ router.post('/charge', tokenizeLimiter, chargeWithToken)
  * }
  */
 router.post('/test-session', async (req, res, next) => {
+  // 🔴 Herramienta de pruebas: en producción no existe (auditoría 2026-09-30), igual que el tablero de sesiones.
+  if (process.env.NODE_ENV === 'production') return next()
   try {
     const { default: prisma } = await import('@/utils/prismaClient')
     const { default: crypto } = await import('crypto')

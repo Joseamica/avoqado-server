@@ -39,16 +39,33 @@
  * 3. LOS HEADERS SON ENTRADA NO CONFIABLE. Cualquiera con un token válido puede mandar
  *    lo que quiera. Todo se recorta a un largo máximo y los valores de enum se validan
  *    contra el enum real — nunca se pasa un string crudo del cliente a Prisma.
+ *
+ * 4. IVA POR PRODUCTO (spec planes 6-7, §5.5): una petición con sesión del POS (marca firmada `origen: 'POS'`) que
+ *    llega SIN identidad de aparato es una app vieja. Se anota por negocio (`registerPosSinAparato`) para que el
+ *    encendido del 6b exija 30 días sin eso. El dashboard (sin `origen`) nunca cuenta. También cuenta una petición
+ *    abortada (`close` sin `finish`): con red mala, la última petición real puede ser justo la que se cortó. Límite
+ *    aceptado: un refresh del dashboard llevado a mano a `/mobile/auth/refresh` marcaría POS; el dashboard nunca llama
+ *    esa ruta y el error sólo retrasa el encendido, nunca lo permite.
  */
 
 import { NextFunction, Request, Response } from 'express'
 import { DeviceFormFactor } from '@prisma/client'
 
 import logger from '../config/logger'
-import { registerDeviceSeen, type DeviceIdentity, type DevicePlatformHeader } from '../services/mobile/deviceRegistry.service'
+import { resolveUserRoleForVenue } from './checkPermission.middleware'
+import {
+  POS_SIN_APARATO_MUESTREO_MS,
+  registerDeviceSeen,
+  registerPosSinAparato,
+  type DeviceIdentity,
+  type DevicePlatformHeader,
+} from '../services/mobile/deviceRegistry.service'
 
 /** Ventana del debounce. Un dispositivo se escribe a lo más una vez por ventana. */
 const SEEN_TTL_MS = 60_000
+
+/** Si anotar la sesión del POS sin aparato falla, se reintenta en esta ventana en vez de perder la hora del muestreo. */
+const POS_SIN_APARATO_REINTENTO_MS = 60_000
 
 /**
  * Tope de entradas del caché. Un venue grande con 50 aparatos usa 50 renglones; el tope
@@ -83,13 +100,18 @@ function pruneCache(now: number): void {
 /**
  * ¿Toca escribir? Marca la ventana y devuelve true sólo la primera vez dentro de ella.
  */
-function shouldWrite(cacheKey: string, now: number): boolean {
+function shouldWrite(cacheKey: string, now: number, ttlMs = SEEN_TTL_MS): boolean {
   const expiry = seenCache.get(cacheKey)
   if (expiry !== undefined && expiry > now) return false
 
-  seenCache.set(cacheKey, now + SEEN_TTL_MS)
+  seenCache.set(cacheKey, now + ttlMs)
   if (seenCache.size > MAX_CACHE_ENTRIES) pruneCache(now)
   return true
+}
+
+/** Sólo para tests: cuántas entradas tiene el caché. */
+export function __tamanoDelCacheDeAparatos(): number {
+  return seenCache.size
 }
 
 /** Sólo para tests: deja el caché limpio entre casos. */
@@ -121,6 +143,20 @@ function parsePlatform(value: string | undefined): DevicePlatformHeader | undefi
 }
 
 /**
+ * El número de compilación de la app (F0-B, Task 11): `x-app-version-code`, el MISMO nombre que ya manda la TPV
+ * (`tpv-version-gate.middleware.ts:137`). Sólo un entero positivo de 32 bits sin ceros a la izquierda; cualquier otra cosa
+ * se ignora, nunca truena (esto cuelga del camino del cobro). Una cabecera repetida (arreglo, o «55, 56» como la junta Node)
+ * es ambigua: se ignora, a diferencia de las de texto, que toman la primera.
+ */
+function parseVersionCode(raw: string | string[] | undefined): number | undefined {
+  if (typeof raw !== 'string') return undefined
+  const value = raw.trim()
+  if (!/^[1-9]\d{0,9}$/.test(value)) return undefined
+  const n = Number(value)
+  return n <= 2_147_483_647 ? n : undefined
+}
+
+/**
  * Fuente única para normalizar los headers de identidad. La usa tanto el hook
  * pasivo como el PUT explícito de capacidades, para que un mismo request nunca se
  * vincule a dos deviceUid distintos por diferencias de trim/case/límites.
@@ -138,8 +174,102 @@ export function readDeviceIdentityFromRequest(req: Request): DeviceIdentity | nu
     formFactor: parseFormFactor(readHeader(req, 'x-device-form-factor')),
     osVersion: readHeader(req, 'x-device-os-version'),
     appVersion: readHeader(req, 'x-app-version'),
+    appVersionCode: parseVersionCode(req.headers['x-app-version-code']),
     serialNumber: readHeader(req, 'x-device-serial'),
   }
+}
+
+/** Tope del alta al entrar: una base lenta nunca frena el login más que esto; el registro pasivo lo completa después. */
+const ALTA_AL_ENTRAR_TOPE_MS = 2_000
+
+/**
+ * Al ENTRAR (login, passkey y cambio de local por refresh) el aparato se da de alta ANTES de contestar.
+ *
+ * 🔴 QA 16-oct-2026 (D3 nueva): el registro pasivo corre en `finish` de la PRIMERA petición autenticada, así que la
+ * ráfaga del arranque (pantalla del cliente, vales…) llegaba ~0.5 s antes de que el aparato existiera: 404
+ * DEVICE_NOT_FOUND y 409 DEVICE_NOT_REGISTERED en los ocho lugares que lo exigen. La raíz es el momento del alta, no
+ * cada uno de esos lugares. Nunca lanza y nunca frena más que [ALTA_AL_ENTRAR_TOPE_MS]; si no alcanza, todo sigue como
+ * antes (el pasivo lo da de alta en la primera petición).
+ */
+export async function asegurarAparatoAlEntrar(req: Request, venueId: string | undefined, staffId: string | undefined): Promise<void> {
+  try {
+    const identity = readDeviceIdentityFromRequest(req)
+    if (!identity || !venueId || !staffId) return
+
+    let tope: ReturnType<typeof setTimeout> | undefined
+    const dadoDeAlta = await Promise.race([
+      registerDeviceSeen({ venueId, staffId, identity }).then(r => r !== null),
+      new Promise<boolean>(resolve => {
+        tope = setTimeout(() => resolve(false), ALTA_AL_ENTRAR_TOPE_MS)
+      }),
+    ])
+    clearTimeout(tope)
+    // Ya quedó escrito: el registro pasivo no necesita repetirlo en este minuto.
+    if (dadoDeAlta) {
+      const ahora = Date.now()
+      seenCache.set(`${venueId}:${identity.deviceUid}`, ahora + SEEN_TTL_MS)
+      // Mismo tope que el registro pasivo (Codex): sin esto, miles de aparatos distintos inflaban la memoria.
+      if (seenCache.size > MAX_CACHE_ENTRIES) pruneCache(ahora)
+    }
+  } catch (error) {
+    logger.error('[DEVICE REGISTRY] Falló el alta del aparato al entrar (no bloqueante)', error)
+  }
+}
+
+/** Dónde guarda `capturarVenueDeLaRuta` el negocio de la ruta. */
+const VENUE_DE_LA_RUTA = 'venueDeLaRuta'
+
+/**
+ * `router.param('venueId', …)` en `mobile.routes.ts`: guarda el negocio que resolvió Express. Al salir hacia el manejador de
+ * errores (`next(error)`) Express restaura `req.params` y el observador ya no lo vería (Codex #3).
+ */
+export function capturarVenueDeLaRuta(_req: Request, res: Response, next: NextFunction, venueId: string): void {
+  res.locals[VENUE_DE_LA_RUTA] = venueId
+  next()
+}
+
+/**
+ * Aparta un minuto y escribe. Sólo al guardar se confirma la hora del muestreo, contada desde el instante GUARDADO (no
+ * desde que terminó la escritura, Codex N2) y sólo si sigue viva la MISMA reserva: una expulsada o reemplazada mientras se
+ * escribía no se reinserta (Codex N3). Una falla de base deja sólo el minuto: no pierde la hora.
+ */
+function anotar(venueId: string, cacheKey: string): void {
+  const ahora = Date.now()
+  if (!shouldWrite(cacheKey, ahora, POS_SIN_APARATO_REINTENTO_MS)) return
+  const reserva = ahora + POS_SIN_APARATO_REINTENTO_MS
+  void registerPosSinAparato(venueId, new Date(ahora))
+    .then(guardado => {
+      if (guardado && seenCache.get(cacheKey) === reserva) seenCache.set(cacheKey, ahora + POS_SIN_APARATO_MUESTREO_MS)
+    })
+    .catch(error => {
+      logger.error('[DEVICE REGISTRY] Error no esperado al anotar la sesión del POS sin aparato (no bloqueante)', error)
+    })
+}
+
+/**
+ * IVA por producto (spec planes 6-7, §5.5): una sesión del POS SIN identidad de aparato es una app vieja; se anota por
+ * negocio. El negocio es el de la RUTA cuando lo hay (una sesión de A operando en B: la app vieja imprime en B) y si no,
+ * el del token. 🔴 Sólo cuenta si la persona PERTENECE hoy a ese negocio, también al del propio token (Codex N1 y R3-1:
+ * un ajeno, o alguien dado de baja con su sesión aún viva, no deja evidencia). La consulta es la de las rutas, con su memo
+ * por petición. Y la reserva del turno se hace DESPUÉS de esa consulta: un rechazado no le aparta el turno a un POS real.
+ */
+function anotarPosSinAparato(req: Request, res: Response): void {
+  const auth = req.authContext
+  if (auth?.origen !== 'POS' || !auth.userId) return
+  const capturado = res.locals?.[VENUE_DE_LA_RUTA]
+  const venueId = (typeof capturado === 'string' ? capturado : undefined) ?? req.params?.venueId ?? auth.venueId
+  if (!venueId) return
+
+  const cacheKey = `pos-sin-aparato:${venueId}`
+  if ((seenCache.get(cacheKey) ?? 0) > Date.now()) return // ya anotado (o en curso) en esta ventana
+
+  void resolveUserRoleForVenue({ userId: auth.userId, targetVenueId: venueId, req })
+    .then(({ role }) => {
+      if (role) anotar(venueId, cacheKey)
+    })
+    .catch(error => {
+      logger.error('[DEVICE REGISTRY] No se pudo comprobar la pertenencia para anotar la sesión del POS (no bloqueante)', error)
+    })
 }
 
 /**
@@ -148,12 +278,16 @@ export function readDeviceIdentityFromRequest(req: Request): DeviceIdentity | nu
  */
 function registerFromRequest(req: Request, res: Response): void {
   try {
+    const identity = readDeviceIdentityFromRequest(req)
+    if (!identity) {
+      // Apps viejas o identidad incompleta: ningún aparato que registrar, pero sí se observa la sesión del POS.
+      anotarPosSinAparato(req, res)
+      return
+    }
+
     // El PUT explícito ya aseguró la terminal y escribió el mismo heartbeat dentro
     // del request. Repetirlo en finish sería una segunda carrera/escritura sin valor.
     if (res.locals?.deviceRegistrationHandled === true) return
-
-    const identity = readDeviceIdentityFromRequest(req)
-    if (!identity) return // apps viejas o identidad incompleta: sin cambios
 
     // `authContext` lo pobló la ruta que autenticó. En endpoints públicos (login) no
     // existe todavía; el dispositivo se registra en el primer request autenticado, que
@@ -189,6 +323,14 @@ function registerFromRequest(req: Request, res: Response): void {
 export function registerDeviceMiddleware(req: Request, res: Response, next: NextFunction): void {
   try {
     res.on('finish', () => registerFromRequest(req, res))
+    // Abortada (sin `finish`): sólo la observación del POS sin aparato; el registro de aparatos sigue esperando `finish`.
+    res.on('close', () => {
+      try {
+        if (!res.writableFinished && !readDeviceIdentityFromRequest(req)) anotarPosSinAparato(req, res)
+      } catch (error) {
+        logger.error('[DEVICE REGISTRY] Falló la observación de una petición abortada (no bloqueante)', error)
+      }
+    })
   } catch (error) {
     logger.error('[DEVICE REGISTRY] No se pudo enganchar el registro de dispositivo (no bloqueante)', error)
   }

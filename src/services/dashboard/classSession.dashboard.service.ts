@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { fromZonedTime } from 'date-fns-tz'
 import { DateTime } from 'luxon'
 import { NotFoundError, BadRequestError, ConflictError } from '../../errors/AppError'
+import { lockClassSession, sumOccupiedSeats } from '@/services/reservation/classBooking.service'
 import type {
   CreateClassSessionDto,
   UpdateClassSessionDto,
@@ -10,14 +11,20 @@ import type {
   ListClassSessionsQuery,
   CreateClassSessionBulkDto,
 } from '../../schemas/dashboard/classSession.schema'
-import { Prisma, ReservationStatus } from '@prisma/client'
+import { Prisma, ReservationStatus, AggregatorConfirmMode, AggregatorVisitStatus } from '@prisma/client'
 import { withSerializableRetry } from '@/utils/serializableRetry'
+import { utcTs } from '@/utils/sqlDates'
 import { createOrderFromReservation } from '../reservation/createOrderFromReservation'
 import { logAction } from './activity-log.service'
+import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import { buildSyncKey, collapseSupersededOps, enqueuePush, resolveClassSessionPushTargets } from '@/services/google-calendar/outbox.service'
 import { publishPushNotification } from '@/communication/rabbitmq/gcal-push-consumer'
 import logger from '../../config/logger'
 import { assertOrganizationStaffAvailability } from './appointmentStaffAssignment.service'
+import { enqueuePassSessionSync } from '@/services/aggregators/core/sessionSync.service'
+import { cancelPassBookingFromVenue } from '@/services/aggregators/core/venueCancellation'
+import { passesForSessions } from '@/services/aggregators/passCapacity.service'
+import { PROVIDER_LABEL, type Provider } from '@/services/aggregators/core/types'
 
 // ==========================================
 // CLASS SESSION SERVICE
@@ -50,6 +57,7 @@ const SESSION_INCLUDE = {
       guestEmail: true,
       specialRequests: true,
       customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+      aggregatorBooking: { select: { id: true, provider: true } }, // pase: «Pases: X de Y» y la etiqueta del POS
     },
   },
 }
@@ -73,11 +81,67 @@ export async function getClassSessions(venueId: string, query: ListClassSessions
     orderBy: { startsAt: 'asc' },
   })
 
+  // Una sola llamada para todo el calendario (sin N+1). `null` = sin conexión; fuera del mapa = la sesión no se ofrece a pases.
+  const passes = await passesForSessions(venueId, sessions, tz)
   return sessions.map(s => ({
     ...s,
     enrolled: s.reservations.reduce((sum, r) => sum + r.partySize, 0),
     available: s.capacity - s.reservations.reduce((sum, r) => sum + r.partySize, 0),
+    passes: passes?.get(s.id) ?? null,
   }))
+}
+
+type PassVisitView = { id: string; status: AggregatorVisitStatus; deadlineAt: Date; awaitingVenue: boolean; lastError: string | null }
+
+/**
+ * La visita MÁS RECIENTE de cada reserva de pase de la sesión, en cualquier estado: el POS dice «por confirmar»,
+ * «confirmando», «confirmada», «vencida» o «rechazada». `awaitingVenue` = le toca al estudio confirmarla (modo
+ * ON_VENUE_CHECKIN, todavía PENDING y la reserva sin check-in). Con la conexión pausada o revocada el worker salta la
+ * validación sin escribir `lastError`: una visita PENDING lo recibe proyectado para que el POS no diga «Confirmando…» en
+ * vano (guardar la asistencia sigue permitido). SQL con DISTINCT ON: ≤ 1 fila por reserva de ESTA
+ * sesión (acotado por la capacidad; `reservationId` no es único en AggregatorVisit y un findMany traería todas).
+ */
+async function passVisitsFor(
+  venueId: string,
+  reservations: Array<{ id: string; status: string; aggregatorBooking?: { id: string } | null }>,
+): Promise<Map<string, PassVisitView>> {
+  const byReservation = new Map<string, PassVisitView>()
+  const conPase = reservations.filter(r => r.aggregatorBooking)
+  if (conPase.length === 0) return byReservation
+  const rows = await prisma.$queryRaw<
+    Array<{
+      id: string
+      reservationId: string
+      status: AggregatorVisitStatus
+      deadlineAt: Date
+      confirmMode: AggregatorConfirmMode
+      lastError: string | null
+      connectionStatus: string
+      provider: Provider
+    }>
+  >`
+    SELECT DISTINCT ON (v."reservationId") v."id", v."reservationId", v."status", v."deadlineAt", c."confirmMode", v."lastError",
+      c."status" AS "connectionStatus", v."provider"
+    FROM "AggregatorVisit" v
+    JOIN "AggregatorConnection" c ON c."id" = v."connectionId"
+    WHERE v."venueId" = ${venueId} AND v."reservationId" IN (${Prisma.join(conPase.map(r => r.id))})
+    ORDER BY v."reservationId", v."startedAt" DESC
+  `
+  const statusOf = new Map(conPase.map(r => [r.id, r.status]))
+  for (const v of rows) {
+    byReservation.set(v.reservationId, {
+      id: v.id,
+      status: v.status,
+      deadlineAt: v.deadlineAt,
+      awaitingVenue: v.status === 'PENDING' && v.confirmMode === 'ON_VENUE_CHECKIN' && statusOf.get(v.reservationId) !== 'CHECKED_IN',
+      lastError:
+        v.lastError ??
+        (v.status === 'PENDING' && v.connectionStatus !== 'ACTIVE'
+          ? `La conexión con ${PROVIDER_LABEL[v.provider]} no está activa: revísala en el panel, en Configuración › Integraciones › Pases.`
+          : null),
+    })
+  }
+  return byReservation
 }
 
 // ---- Get one ----
@@ -90,7 +154,11 @@ export async function getClassSession(venueId: string, sessionId: string) {
   if (!session) throw new NotFoundError('Sesión no encontrada')
 
   const enrolled = session.reservations.reduce((sum, r) => sum + r.partySize, 0)
-  return { ...session, enrolled, available: session.capacity - enrolled }
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const passes = await passesForSessions(venueId, [session], venue?.timezone || 'America/Mexico_City')
+  const visits = await passVisitsFor(venueId, session.reservations)
+  const reservations = session.reservations.map(r => ({ ...r, passVisit: visits.get(r.id) ?? null }))
+  return { ...session, reservations, enrolled, available: session.capacity - enrolled, passes: passes?.get(session.id) ?? null }
 }
 
 // ---- Create ----
@@ -148,6 +216,9 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
         duration,
         capacity: data.capacity,
         assignedStaffId: data.assignedStaffId ?? null,
+        // Pago por servicio (spec fase 3 §7.2): la coach con la que nace es la original y se le asignó ahora.
+        originalStaffId: data.assignedStaffId ?? null,
+        staffAssignedAt: data.assignedStaffId ? checkedAt : null,
         internalNotes: data.internalNotes ?? null,
         createdById,
       },
@@ -167,6 +238,7 @@ export async function createClassSession(venueId: string, data: CreateClassSessi
             targetConnectionIds: targets.map(t => t.id),
           })
         : []
+    await enqueuePassSessionSync(tx, venueId, session.id)
 
     return { session, pushRowIds }
   })
@@ -334,6 +406,8 @@ export async function createClassSessionsBulk(
           duration: i.duration,
           capacity: data.capacity,
           assignedStaffId: data.assignedStaffId ?? null,
+          originalStaffId: data.assignedStaffId ?? null,
+          staffAssignedAt: data.assignedStaffId ? checkedAt : null,
           internalNotes: data.internalNotes ?? null,
           createdById,
         },
@@ -359,6 +433,7 @@ export async function createClassSessionsBulk(
         pushRowIds.push(...ids)
       }
     }
+    for (const row of created) await enqueuePassSessionSync(tx, venueId, row.id)
 
     return { created, pushRowIds, skipped }
   })
@@ -393,12 +468,13 @@ interface LockedClassSessionRow {
   endsAt: Date
   status: string
   assignedStaffId: string | null
+  originalStaffId: string | null
 }
 
-export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto) {
+export async function updateClassSession(venueId: string, sessionId: string, data: UpdateClassSessionDto, actorStaffId?: string) {
   const { updated, pushRowIds } = await withSerializableRetry(async tx => {
     const sessions = await tx.$queryRaw<LockedClassSessionRow[]>(Prisma.sql`
-      SELECT id, "startsAt", "endsAt", status, "assignedStaffId"
+      SELECT id, "startsAt", "endsAt", status, "assignedStaffId", "originalStaffId"
       FROM "ClassSession"
       WHERE id = ${sessionId}
         AND "venueId" = ${venueId}
@@ -457,6 +533,8 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       duration?: number
       capacity?: number
       assignedStaffId?: string | null
+      originalStaffId?: string
+      staffAssignedAt?: Date
       internalNotes?: string | null
     } = {}
     if (data.startsAt !== undefined) updateData.startsAt = effectiveStartsAt
@@ -465,13 +543,37 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
       updateData.duration = Math.round((effectiveEndsAt.getTime() - effectiveStartsAt.getTime()) / 60000)
     }
     if (data.capacity !== undefined) updateData.capacity = data.capacity
-    if (hasStaffUpdate) updateData.assignedStaffId = effectiveStaffId
+    if (hasStaffUpdate) {
+      updateData.assignedStaffId = effectiveStaffId
+      // Spec fase 3 §7.2: cambiar a ALGUIEN (no a nadie) renueva la asignación; la original se fija una sola vez y es
+      // la PRIMERA coach que tuvo la clase (si faltara la estampa, la que tenía antes de este cambio), nunca la que llega.
+      if (effectiveStaffId && effectiveStaffId !== session.assignedStaffId) {
+        updateData.staffAssignedAt = checkedAt
+        if (!session.originalStaffId) updateData.originalStaffId = session.assignedStaffId ?? effectiveStaffId
+      }
+    }
     if ('internalNotes' in data) updateData.internalNotes = data.internalNotes ?? null
 
     const updated = await tx.classSession.update({
       where: { id: sessionId },
       data: updateData,
       include: SESSION_INCLUDE,
+    })
+
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorStaffId ?? null,
+      venueId,
+      action: 'CLASS_SESSION_UPDATED',
+      entity: 'ClassSession',
+      entityId: sessionId,
+      data: {
+        antes: { assignedStaffId: session.assignedStaffId, startsAt: session.startsAt.toISOString(), endsAt: session.endsAt.toISOString() },
+        despues: {
+          assignedStaffId: updated.assignedStaffId ?? null,
+          startsAt: updated.startsAt.toISOString(),
+          endsAt: updated.endsAt.toISOString(),
+        },
+      },
     })
 
     const targets = await resolveClassSessionPushTargets(tx, {
@@ -487,6 +589,7 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
             targetConnectionIds: targets.map(t => t.id),
           })
         : []
+    await enqueuePassSessionSync(tx, venueId, updated.id)
 
     return { updated, pushRowIds }
   })
@@ -501,24 +604,26 @@ export async function updateClassSession(venueId: string, sessionId: string, dat
     )
   }
 
-  logAction({
-    venueId,
-    action: 'CLASS_SESSION_UPDATED',
-    entity: 'ClassSession',
-    entityId: sessionId,
-  })
-
   return updated
 }
 
 // ---- Cancel ----
 
-export async function cancelClassSession(venueId: string, sessionId: string) {
+export async function cancelClassSession(venueId: string, sessionId: string, actorStaffId?: string) {
   const session = await prisma.classSession.findFirst({ where: { id: sessionId, venueId } })
   if (!session) throw new NotFoundError('Sesión no encontrada')
   if (session.status === 'CANCELLED') throw new ConflictError('La sesión ya está cancelada')
 
   const { cancelled, pushRowIds } = await prisma.$transaction(async tx => {
+    // Reclamar la transición (spec fase 3 §7.2): sólo UNA solicitud pasa la clase a CANCELLED y su instante es el que queda.
+    // Otra que llegó a la vez espera el candado de la fila, ya no cumple la condición y sale con 409 sin tocar nada.
+    const now = new Date()
+    const reclamadas = await tx.$executeRaw`
+      UPDATE "ClassSession"
+      SET status = 'CANCELLED', "cancelledAt" = ${utcTs(now)}, "updatedAt" = ${utcTs(now)}
+      WHERE id = ${sessionId} AND "venueId" = ${venueId} AND status <> 'CANCELLED'`
+    if (reclamadas === 0) throw new ConflictError('La sesión ya está cancelada')
+
     // Cancel all active reservations for this session
     await tx.reservation.updateMany({
       where: {
@@ -527,17 +632,13 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       },
       data: {
         status: 'CANCELLED',
-        cancelledAt: new Date(),
+        cancelledAt: now,
         cancelledBy: 'SYSTEM',
         cancellationReason: 'Sesión cancelada por el establecimiento',
       },
     })
 
-    const cancelled = await tx.classSession.update({
-      where: { id: sessionId },
-      data: { status: 'CANCELLED' },
-      include: SESSION_INCLUDE,
-    })
+    const cancelled = await tx.classSession.findUniqueOrThrow({ where: { id: sessionId }, include: SESSION_INCLUDE })
 
     // ---- Google Calendar push outbox (Phase 2 — spec §14.3) ----
     // ONE CANCEL row per target connection — NOT one per attendee reservation.
@@ -549,14 +650,14 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
     })
     let pushRowIds: string[] = []
     if (targets.length > 0) {
-      const now = new Date()
+      const ahora = new Date()
       for (const target of targets) {
         const syncKey = buildSyncKey({
           kind: 'class',
           classSessionId: cancelled.id,
           connectionId: target.id,
         })
-        await collapseSupersededOps(tx, syncKey, now)
+        await collapseSupersededOps(tx, syncKey, ahora)
       }
       pushRowIds = await enqueuePush(tx, {
         source: { kind: 'class', classSessionId: cancelled.id },
@@ -565,6 +666,16 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
         targetConnectionIds: targets.map(t => t.id),
       })
     }
+    await enqueuePassSessionSync(tx, venueId, cancelled.id)
+    // Con quién canceló y dentro de la transacción (spec fase 3 §7.2): una cancelación nunca queda sin su rastro.
+    await writeLegacyActivityAuditTx(tx, {
+      staffId: actorStaffId ?? null,
+      venueId,
+      action: 'CLASS_SESSION_CANCELLED',
+      entity: 'ClassSession',
+      entityId: sessionId,
+      data: { cancelledAt: now.toISOString() },
+    })
 
     return { cancelled, pushRowIds }
   })
@@ -578,13 +689,6 @@ export async function cancelClassSession(venueId: string, sessionId: string) {
       }),
     )
   }
-
-  logAction({
-    venueId,
-    action: 'CLASS_SESSION_CANCELLED',
-    entity: 'ClassSession',
-    entityId: sessionId,
-  })
 
   return cancelled
 }
@@ -610,32 +714,14 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
   // Use serializable transaction to prevent race conditions on capacity
   return withSerializableRetry(async tx => {
     // Lock the ClassSession row and verify it exists + belongs to venue
-    const sessions = await tx.$queryRaw<
-      { id: string; productId: string; startsAt: Date; endsAt: Date; duration: number; capacity: number; status: string }[]
-    >`
-      SELECT id, "productId", "startsAt", "endsAt", duration, capacity, status
-      FROM "ClassSession"
-      WHERE id = ${sessionId}
-        AND "venueId" = ${venueId}
-      FOR UPDATE
-    `
-    if (sessions.length === 0) throw new NotFoundError('Sesión no encontrada')
-    const session = sessions[0]
+    const session = await lockClassSession(tx, venueId, sessionId, 'Sesión no encontrada')
 
     if (session.status !== 'SCHEDULED') {
       throw new BadRequestError('Solo se pueden añadir asistentes a sesiones programadas')
     }
 
-    // Sum enrolled from active reservations
-    // Note: FOR UPDATE cannot be used with aggregate functions in PostgreSQL.
-    // The ClassSession row lock above + SERIALIZABLE isolation is sufficient.
-    const enrolledResult = await tx.$queryRaw<{ total: bigint }[]>`
-      SELECT COALESCE(SUM("partySize"), 0) as total
-      FROM "Reservation"
-      WHERE "classSessionId" = ${sessionId}
-        AND status IN ('PENDING', 'CONFIRMED', 'CHECKED_IN')
-    `
-    const enrolled = Number(enrolledResult[0].total)
+    // Sum enrolled from active reservations (under the ClassSession lock + SERIALIZABLE)
+    const enrolled = await sumOccupiedSeats(tx, sessionId)
 
     if (enrolled + partySize > session.capacity) {
       throw new ConflictError(`Sin capacidad suficiente — disponibles: ${session.capacity - enrolled}, solicitadas: ${partySize}`)
@@ -700,6 +786,7 @@ export async function addAttendee(venueId: string, sessionId: string, data: AddA
         })
       }
     }
+    await enqueuePassSessionSync(tx, venueId, sessionId)
 
     // Walk-in flow: build the cashier Order inline so the caller can deep-link
     // to PaymentFlowScreen with no extra navigation. Helper is idempotent and
@@ -771,6 +858,8 @@ export async function removeAttendee(venueId: string, sessionId: string, reserva
         })
       }
     }
+    await cancelPassBookingFromVenue(tx, reservationId)
+    await enqueuePassSessionSync(tx, venueId, sessionId)
 
     return updated
   })

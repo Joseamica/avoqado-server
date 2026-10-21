@@ -1,12 +1,15 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 /**
  * La orden de una VENTA RÁPIDA tiene que nacer atada al turno de caja del negocio.
@@ -330,6 +333,8 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(prismaMock.shift.update).not.toHaveBeenCalled()
     expect(tx.ops.indexOf('shift.updateMany')).toBeLessThan(tx.ops.indexOf('order.create'))
     expect(tx.ops.indexOf('order.create')).toBeLessThan(tx.ops.indexOf('payment.create'))
+    // IVA por producto (plan 2): la venta rápida nace con IVA incluido.
+    expect(datosDeLaOrden().contratoDePrecio).toBe('IVA_INCLUIDO')
   })
 
   it('sin turno la venta SIGUE ocurriendo, ambos ids quedan null y nace una anomalía atómica', async () => {
@@ -427,5 +432,60 @@ describe('recordFastPayment — la orden FAST cae en el turno de caja del NEGOCI
     expect(rollback.committed.loserPayments).toEqual([])
     expect(rollback.committed.activityLogs).toEqual([])
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+  })
+})
+
+/**
+ * 🔴 30-sep-2026 (prueba de avoqado-android en Windows): la respuesta del cobro rápido llevaba la fila
+ * ENTERA del empleado (`include: { processedBy: true }`) — hash de contraseña incluido — a cada POS.
+ * Y los cobros de las apps quedaban con `source = OTHER` porque nadie conocía `AVOQADO_ANDROID` ni
+ * `AVOQADO_IOS`. El efectivo contra una orden móvil ya queda `APP` (`order.mobile.service.ts`); el
+ * rápido tiene que decir lo mismo. Lo manual (terminal externa, transferencia) sigue `OTHER` porque el
+ * dashboard sólo enseña su etiqueta (`externalSource`) cuando la fuente es `OTHER`.
+ */
+describe('recordFastPayment — la respuesta no lleva secretos del empleado y el origen es el de la app', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    installFakes()
+    installDistinctTransaction(null)
+  })
+
+  const includeDelCobro = () => prismaMock.payment.create.mock.calls[0]?.[0]?.include
+
+  it('pide a Prisma sólo campos públicos del empleado que cobró', async () => {
+    await recordFastPayment(VENUE, cobroRapido(), 'user-1')
+
+    const empleado = includeDelCobro()?.processedBy
+    expect(empleado).toEqual({ select: expect.objectContaining({ id: true, firstName: true, lastName: true }) })
+    for (const secreto of ['password', 'resetToken', 'emailVerificationCode', 'googleId']) {
+      expect(empleado.select).not.toHaveProperty(secreto)
+    }
+  })
+
+  it.each(['AVOQADO_ANDROID', 'AVOQADO_IOS'])('efectivo rápido de %s queda APP', async source => {
+    await recordFastPayment(VENUE, cobroRapido({ source }), 'user-1')
+
+    expect(datosDelCobro()).toMatchObject({ source: 'APP', externalSource: null })
+  })
+
+  it('lo registrado a mano desde la app (otra terminal) sigue OTHER con su etiqueta', async () => {
+    await recordFastPayment(
+      VENUE,
+      cobroRapido({ source: 'AVOQADO_ANDROID', method: 'CARD', externalSource: 'Tarjeta (terminal externa)' }),
+      'user-1',
+    )
+
+    expect(datosDelCobro()).toMatchObject({ source: 'OTHER', externalSource: 'Tarjeta (terminal externa)' })
+  })
+
+  it('regresión: la TPV sigue siendo TPV y un origen desconocido sigue OTHER', async () => {
+    await recordFastPayment(VENUE, cobroRapido({ source: 'AVOQADO_TPV' }), 'user-1')
+    expect(datosDelCobro().source).toBe('TPV')
+
+    jest.clearAllMocks()
+    installFakes()
+    installDistinctTransaction(null)
+    await recordFastPayment(VENUE, cobroRapido({ source: 'ALGO_RARO' }), 'user-1')
+    expect(datosDelCobro().source).toBe('OTHER')
   })
 })

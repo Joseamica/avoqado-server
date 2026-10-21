@@ -1,11 +1,6 @@
 /**
- * Tests that verify the ActivityLog capture added to:
- *  1. discountEngine.applyDiscountToOrder  → DISCOUNT_APPLIED (source: 'catalog')
- *  2. discountEngine.removeDiscountFromOrder → DISCOUNT_REMOVED
- *  3. refund.tpv.recordRefund              → REFUND_CREATED   (source: 'TPV')
- *
- * TPV refund drives too many DB calls to test cheaply end-to-end, so it is
- * verified by tsc + code-inspection only (noted below).
+ * ActivityLog de los descuentos del catálogo: DISCOUNT_APPLIED y DISCOUNT_REMOVED.
+ * El payload real de REFUND_CREATED se prueba en refund.turnoDelNegocio.test.ts.
  */
 
 import { applyDiscountToOrder, removeDiscountFromOrder } from '../../../../src/services/dashboard/discountEngine.service'
@@ -40,13 +35,56 @@ function makeOrder(overrides: Record<string, unknown> = {}) {
   return {
     id: 'order-xyz',
     venueId: 'venue-42',
+    customerId: null,
     subtotal: new Decimal(150),
     taxAmount: new Decimal(24),
     discountAmount: new Decimal(0),
     tipAmount: new Decimal(0),
     total: new Decimal(174),
     paidAmount: new Decimal(0),
+    items: [],
     orderDiscounts: [],
+    ...overrides,
+  }
+}
+
+/** The catalog rule `makeDiscount()` was calculated from: the writer re-evaluates it under the Order lock. */
+function makeCatalogRule(overrides: Record<string, unknown> = {}) {
+  return {
+    id: 'discount-abc',
+    venueId: 'venue-42',
+    name: 'Happy Hour',
+    type: 'PERCENTAGE' as DiscountType,
+    value: new Decimal(10),
+    scope: 'ORDER',
+    targetItemIds: [],
+    targetCategoryIds: [],
+    targetModifierIds: [],
+    targetModifierGroupIds: [],
+    customerGroupId: null,
+    isAutomatic: true,
+    priority: 0,
+    minPurchaseAmount: null,
+    maxDiscountAmount: null,
+    minQuantity: null,
+    buyQuantity: null,
+    getQuantity: null,
+    getDiscountPercent: null,
+    buyItemIds: [],
+    getItemIds: [],
+    validFrom: null,
+    validUntil: null,
+    daysOfWeek: [],
+    timeFrom: null,
+    timeUntil: null,
+    maxTotalUses: null,
+    maxUsesPerCustomer: null,
+    currentUses: 0,
+    isStackable: false,
+    stackPriority: 0,
+    requiresApproval: false,
+    applyBeforeTax: true,
+    active: true,
     ...overrides,
   }
 }
@@ -59,6 +97,8 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
   beforeEach(() => {
     // Make $transaction synchronously call the callback (mirrors global setup)
     prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<unknown>) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-xyz' }]) // canonical Order lock row
+    prismaMock.discount.findMany.mockResolvedValue([makeCatalogRule()])
     prismaMock.order.findUnique.mockResolvedValue(makeOrder())
     prismaMock.orderDiscount.create.mockResolvedValue({ id: 'od-new' })
     prismaMock.order.update.mockResolvedValue(makeOrder())
@@ -128,6 +168,7 @@ describe('discountEngine.applyDiscountToOrder — audit capture', () => {
 
   it('does NOT fire logAction when approval is required but not provided', async () => {
     prismaMock.order.findUnique.mockResolvedValue(makeOrder())
+    prismaMock.discount.findMany.mockResolvedValue([makeCatalogRule({ requiresApproval: true })])
 
     const discount = makeDiscount({ requiresApproval: true })
     const result = await applyDiscountToOrder('order-xyz', discount, 'staff-11') // no authorizedById
@@ -163,6 +204,7 @@ describe('discountEngine.removeDiscountFromOrder — audit capture', () => {
 
   beforeEach(() => {
     prismaMock.$transaction.mockImplementation(async (cb: (tx: typeof prismaMock) => Promise<unknown>) => cb(prismaMock))
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-xyz' }]) // canonical Order lock row
     prismaMock.orderDiscount.findFirst.mockResolvedValue(mockOrderDiscount)
     prismaMock.order.findUnique.mockResolvedValue(makeOrder({ discountAmount: new Decimal(15), taxAmount: new Decimal(21.6) }))
     prismaMock.orderDiscount.delete.mockResolvedValue(mockOrderDiscount)
@@ -206,34 +248,5 @@ describe('discountEngine.removeDiscountFromOrder — audit capture', () => {
 
     expect(result.success).toBe(false)
     expect(mockLogAction).not.toHaveBeenCalled()
-  })
-})
-
-// ─────────────────────────────────────────────────────────────────────────────
-// refund.tpv.recordRefund → REFUND_CREATED  (inspection-only)
-// ─────────────────────────────────────────────────────────────────────────────
-//
-// recordRefund is NOT driven here because it calls $queryRaw (FOR UPDATE lock),
-// createRefundTransactionCost (external service), createRefundCommission, and
-// generateDigitalReceipt — too many side-effect surfaces to mock cheaply.
-//
-// Coverage evidence instead:
-//   • `npx tsc --noEmit` passes (only the 4 pre-existing sales.ts errors remain).
-//   • The logAction call is at src/services/tpv/refund.tpv.service.ts:~393
-//     (after the $transaction block, before the referral hook), using:
-//       staffId: refundData.staffId ?? null
-//       venueId: (function param)
-//       action: 'REFUND_CREATED'
-//       entity: 'Payment'
-//       entityId: result.id  (the created refund Payment)
-//       data: { amount: Number(refundAmountInPesos), reason: refundData.reason,
-//               method: originalPayment.method, source: 'TPV' }
-//   • Mirror pattern verified against src/services/mobile/refund.mobile.service.ts:119
-//     which uses the same shape (source: 'MOBILE').
-//
-describe('recordRefund REFUND_CREATED audit — inspection-only coverage', () => {
-  it('is verified by tsc and code inspection (see comment above)', () => {
-    // This test intentionally passes to document the inspection-based coverage.
-    expect(true).toBe(true)
   })
 })

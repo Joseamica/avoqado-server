@@ -427,3 +427,69 @@ describe('catalogItem.service bounded reads', () => {
     await expect(getCatalogItem(readContext, 'foreign-id')).rejects.toMatchObject({ statusCode: 404 })
   })
 })
+
+describe('D15 · el artículo sin IVA en el cuerpo', () => {
+  const sinIva = Object.fromEntries(Object.entries(input).filter(([key]) => key !== 'taxRate' && key !== 'objetoImp')) as Omit<
+    CreateCatalogItemInput,
+    'taxRate' | 'objetoImp'
+  >
+  const organizationValues = input.organizationValues.map(value => ({ ...value, expectedRuleRevision: 1 }))
+
+  it('el alta sin IVA nace al 16 % (ObjetoImp 02)', async () => {
+    await createCatalogItem(commandContext, sinIva)
+
+    expect(tx.catalogItem.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ taxRate: '0.1600', objetoImp: '02' }) }),
+    )
+  })
+
+  it('un cliente viejo que manda el IVA lo sigue guardando tal cual (contrato intacto)', async () => {
+    await createCatalogItem(commandContext, { ...input, taxRate: '0.0000', objetoImp: '02' })
+
+    expect(tx.catalogItem.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ taxRate: '0.0000', objetoImp: '02' }) }),
+    )
+  })
+
+  it('editar sin IVA conserva el guardado (un artículo importado al 0 % se queda al 0 %)', async () => {
+    tx.catalogItem.findFirst
+      .mockResolvedValueOnce({ taxRate: new Prisma.Decimal('0.0000'), objetoImp: '02' })
+      .mockResolvedValueOnce(itemRow())
+      .mockResolvedValueOnce(itemRow({ revision: 2 }))
+    tx.catalogItemPrice.findMany.mockResolvedValueOnce(persistedPrices())
+
+    await updateCatalogItem(commandContext, {
+      ...sinIva,
+      organizationValues,
+      organizationValueDeactivations: [],
+      catalogItemId: 'catalog-item-1',
+      expectedRevision: 1,
+    })
+
+    expect(tx.catalogItem.findFirst.mock.calls[0][0]).toEqual({
+      where: { id: 'catalog-item-1', organizationId },
+      select: { taxRate: true, objetoImp: true },
+    })
+    expect(tx.catalogItem.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ taxRate: '0.0000', objetoImp: '02' }) }),
+    )
+  })
+
+  it('editar CON IVA no hace la lectura extra (el camino de siempre)', async () => {
+    tx.catalogItem.findFirst.mockResolvedValueOnce(itemRow()).mockResolvedValueOnce(itemRow({ revision: 2 }))
+    tx.catalogItemPrice.findMany.mockResolvedValueOnce(persistedPrices())
+
+    await updateCatalogItem(commandContext, {
+      ...input,
+      organizationValues,
+      organizationValueDeactivations: [],
+      catalogItemId: 'catalog-item-1',
+      expectedRevision: 1,
+    })
+
+    // WHY: la lectura de detalle del agregado también trae taxRate; la extra es la que selecciona SÓLO taxRate y objetoImp.
+    expect(
+      tx.catalogItem.findFirst.mock.calls.some(([args]) => args?.select && Object.keys(args.select).sort().join() === 'objetoImp,taxRate'),
+    ).toBe(false)
+  })
+})

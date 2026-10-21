@@ -146,7 +146,7 @@ describe('guardar el perfil', () => {
 
     const data = prismaMock.onboardingProgress.update.mock.calls[0][0].data
     expect((data.step8_paymentInfo as Record<string, unknown>).clabe).toBe(CLABE_BUENA)
-    expect(((data.v2SetupData as Record<string, unknown>).step7 as Record<string, unknown>).clabe).toBe(CLABE_BUENA)
+    expect(seccionesGuardadas().step7.clabe).toBe(CLABE_BUENA)
   })
 
   it('🔴 NO mueve `currentStep` ni `completedSteps`: este checklist vive DESPUÉS del alta', async () => {
@@ -225,10 +225,22 @@ describe('guardar el perfil', () => {
 const CLABE_BBVA = '012180012345678909' //   012 → BBVA México
 const CLABE_SIN_CATALOGO = '999180012345678909' // 999 → no está en MEXICAN_BANK_CODES
 
+/**
+ * Lo que el checklist manda FUSIONAR dentro de cada sección de `v2SetupData`. Desde el 20-oct no reescribe el formulario
+ * entero (borraba lo que otra escritura guardó en medio): `fusionarV2SetupData` lo mezcla en Postgres con un `$executeRaw`
+ * cuyo 2.º valor son las secciones. Que lo de antes se conserve lo prueba la integración (`formularioDelAlta`).
+ */
+function seccionesGuardadas(): Record<string, Record<string, unknown>> {
+  const llamada = (prismaMock.$executeRaw as jest.Mock).mock.calls.find(
+    (c: any[]) => Array.isArray(c[0]) && c[0].join('').includes('"v2SetupData"'),
+  )
+  return llamada ? JSON.parse(llamada[2]) : {}
+}
+
 function mirrorDe(): { step7: Record<string, unknown>; step8: Record<string, unknown> } {
   const data = prismaMock.onboardingProgress.update.mock.calls[0][0].data
   return {
-    step7: (data.v2SetupData as Record<string, unknown>).step7 as Record<string, unknown>,
+    step7: seccionesGuardadas().step7,
     step8: data.step8_paymentInfo as Record<string, unknown>,
   }
 }
@@ -337,10 +349,7 @@ describe('el giro del negocio', () => {
       'staff-1',
     )
 
-    const guardado = (prismaMock.onboardingProgress.update as jest.Mock).mock.calls[0][0].data.v2SetupData as Record<
-      string,
-      Record<string, unknown>
-    >
+    const guardado = seccionesGuardadas()
     expect(guardado.step4.businessActivity).toBe('Estética canina y venta de accesorios')
   })
 
@@ -359,10 +368,7 @@ describe('el giro viaja SOLO (founder, 18-sep: el tipo de entidad viene en la co
   it('🔴 sin `entityType` el giro se guarda igual, y `Venue.entityType` NO se toca', async () => {
     await updatePaymentActivationProfile('venue-1', 'org-1', { entity: { businessActivity: 'Taller mecánico' } }, 'staff-1')
 
-    const guardado = (prismaMock.onboardingProgress.update as jest.Mock).mock.calls[0][0].data.v2SetupData as Record<
-      string,
-      Record<string, unknown>
-    >
+    const guardado = seccionesGuardadas()
     expect(guardado.step4.businessActivity).toBe('Taller mecánico')
     // 🔴 Lo que de verdad protege esta prueba: que no se escriba `entityType: undefined` sobre el
     // que el negocio ya tenía. El alta sigue siendo quien lo fija.

@@ -158,11 +158,20 @@ como "InnerPrinter". En una T3 Pro (sin cabezal) ambas mienten. Cerrar sólo la 
 impresora de recibos diciendo "Conectada". Detalle: `updatePrinterState()` devuelve **505** ("no printer detected") con modal/serial vacíos;
 `printerPaper` devuelve 1 igual, o sea que MIENTE.
 
-**No hay alta manual de impresora por IP.** Si una impresora no se anuncia por mDNS (VLAN, aislamiento de cliente, IP fija sin anuncio), hoy
-NO hay forma de configurarla. Es el hueco de instalación más grande que queda.
+**Alta manual de impresora por IP: YA EXISTE en las dos apps** (ios `62dc231`, android `c97ae22`; corregido aquí el 9-oct-2026,
+la copia de Android e iOS de esta regla ya lo decía). Es la salida cuando una impresora no se anuncia por mDNS (VLAN, aislamiento de
+cliente, IP fija sin anuncio), y prueba la conexión antes de guardar.
 
 **El permiso de "dispositivos cercanos"** (Android 13+) es obligatorio para descubrir impresoras: si alguien lo rechaza en la instalación,
 la lista sale vacía y —sin alta manual— el local se queda sin imprimir.
+
+### 4.2 La impresora que se encuentra sola (Testarudo, 2-oct-2026)
+
+Las tablets encuentran solas una impresora de red que cambió de IP (DHCP) y lo avisan con
+`POST /mobile/venues/:venueId/printers/:printerId/observed` (`reportarImpresoraObservada`): sólo red local, CAS sobre la
+dirección que la tablet vio (nunca pisa una corrección más nueva), `stableKey` (`mac:…`/`mdns:…`) se aprende una vez y no
+se reemplaza, `ActivityLog` `PRINTER_ADDRESS_AUTO_UPDATED`. `PrintGateway.address` NO se usa para imprimir. Detalle del
+lado de las apps: §4.2 de la misma regla en avoqado-android / avoqado-ios.
 
 ## 5. Qué es online-only A PROPÓSITO
 
@@ -210,7 +219,9 @@ visible para rechazos.
 
 **NO está hecho:**
 
-- **KDS offline** — es lo único grande que falta del hub.
+- **KDS por el WiFi del local (etapa 3.5, 29-sep): construido y con pruebas en Android e iOS; falta el QA en aparato apagando la
+  red** (detalle en la copia de esta regla en avoqado-android / avoqado-ios, §3.4). Corregido aquí el 9-oct-2026: antes decía «KDS
+  offline — es lo único grande que falta».
 - **Fencing del lado del server** (rechazar intents con época vieja): necesita persistir `lastLeaseEpoch` por mesa. Sin eso el sistema ya es
   seguro (ADD_ITEMS fusiona, PAY_CASH es idempotente, la propiedad de mesa rechaza cruces), pero es la capa que falta.
 - Indicador visual de árbitro/isla en el plano.

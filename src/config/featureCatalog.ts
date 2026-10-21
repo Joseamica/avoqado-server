@@ -80,6 +80,17 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'AGGREGATOR_PASSES',
+        featureCode: 'AGGREGATOR_PASSES',
+        name: 'Pases de TotalPass y Wellhub',
+        description: 'Recibe reservas y check-ins de socios de TotalPass sin capturar a mano. Wellhub, muy pronto.',
+        category: 'sell',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: 'Requiere Reservas con clases y una cuenta de TotalPass.',
+        names: { es: 'Pases de TotalPass y Wellhub', en: 'TotalPass and Wellhub passes', fr: 'Pass TotalPass et Wellhub' },
+      },
+      {
         id: 'CFDI',
         featureCode: 'CFDI',
         name: 'Facturación CFDI',
@@ -290,6 +301,18 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'GIFT_CARDS',
+        featureCode: 'GIFT_CARDS',
+        name: 'Tarjetas de regalo',
+        description: 'Vende tarjetas de regalo en tu POS y cóbralas con su saldo, solo o combinado con otro medio.',
+        category: 'customers',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        // `fr` lo exige el tipo `FeatureCatalogEntry`; la plataforma sólo da soporte en es/en.
+        names: { es: 'Tarjetas de regalo', en: 'Gift cards', fr: 'Cartes cadeaux' },
+      },
+      {
         id: 'BASE_INVENTORYBASIC',
         featureCode: null,
         name: 'Inventario básico',
@@ -466,6 +489,18 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
         },
       },
       {
+        id: 'SERVICE_PAY',
+        featureCode: 'SERVICE_PAY',
+        name: 'Pago al personal',
+        description: 'Un recibo por persona con sus clases, comisiones y propinas del periodo.',
+        category: 'team',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        // `fr` lo exige el tipo `FeatureCatalogEntry`; la plataforma sólo da soporte en es/en.
+        names: { es: 'Pago al personal', en: 'Staff pay', fr: 'Paie du personnel' },
+      },
+      {
         id: 'ATTENDANCE_TRACKING',
         featureCode: 'ATTENDANCE_TRACKING',
         name: 'Checador de asistencia',
@@ -614,6 +649,17 @@ export const FEATURE_CATALOG: readonly FeatureCatalogEntry[] = Object.freeze(
           en: 'Master catalog',
           fr: 'Catalogue central',
         },
+      },
+      {
+        id: 'PRODUCT_VARIANTS',
+        featureCode: 'PRODUCT_VARIANTS',
+        name: 'Variantes de producto',
+        description: 'Da de alta tallas, colores o presentaciones de un producto de un jalón y elígelas en el POS.',
+        category: 'inventory',
+        minimumTier: 'PRO',
+        offering: 'CONFIGURABLE',
+        requirement: null,
+        names: { es: 'Variantes de producto', en: 'Product variants', fr: 'Variantes de produit' },
       },
     ] as FeatureCatalogEntry[]
   ).map(entry => Object.freeze({ ...entry, names: Object.freeze(entry.names) })),

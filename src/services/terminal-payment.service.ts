@@ -53,6 +53,7 @@ import AppError, {
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
 import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
 import { sendOpsAlert } from './alerts/opsAlert.service'
@@ -108,6 +109,8 @@ export interface TerminalPaymentResult {
    * bancario y `findReconcilablePayment` protegen el dinero.
    */
   claimedSuccess?: Record<string, unknown>
+  /** La espera se cerró porque el cajero canceló desde el POS. Interna: el controlador baja el log a info y NO la expone. */
+  cancelRequested?: true
   paymentId?: string
   transactionId?: string
   cardDetails?: {
@@ -2430,7 +2433,7 @@ class TerminalPaymentService {
         terminalId: normalizeTerminalId(terminal.terminalId),
         venueId: terminal.venueId,
       },
-      select: { requestId: true },
+      select: { requestId: true, closedVia: true },
     })
     if (!row) {
       logger.warn('🛑 [TerminalPayment] Result rejected: request is not owned by authenticated terminal socket', {
@@ -2445,7 +2448,16 @@ class TerminalPaymentService {
     const pending = this.pendingPayments.get(result.requestId)
     const outcome = await this.closeRow(result.requestId, terminal.venueId, result)
     if (!pending) {
-      logger.warn(`⚠️ [TerminalPayment] Authenticated late result closed row without an HTTP waiter`, { requestId: result.requestId })
+      // Sin espera HTTP hay dos historias. La normal desde S8: el WEBHOOK ya cerró la fila (`closedVia = 'webhook'`) y contestó
+      // al POS antes de que la terminal mandara su propio resultado — no es tardío, es el orden de siempre (30-sep-2026: ~200
+      // líneas/día en Testarudo, dos por cobro). La que sí importa: nadie había cerrado la fila y el POS ya no esperaba
+      // (ventana vencida, servidor reiniciado) — la terminal cerró dinero sin nadie del otro lado, y eso sigue en warn.
+      const aviso = { requestId: result.requestId, status: result.status, closedVia: row.closedVia ?? null }
+      if (row.closedVia === 'webhook') {
+        logger.info('[TerminalPayment] Terminal result arrived after the webhook already closed the row (no HTTP waiter)', aviso)
+      } else {
+        logger.warn(`⚠️ [TerminalPayment] Authenticated late result closed row without an HTTP waiter`, aviso)
+      }
       return false
     }
     // Revisión final (17-sep, A): un `timeout` CON sobre de la terminal es la fila que ENTRÓ a la ventana de confirmación — todavía
@@ -5826,7 +5838,17 @@ class TerminalPaymentService {
 
     const payment = await prisma.payment.findUnique({
       where: { id: paymentId },
-      select: { id: true, venueId: true, status: true, method: true, amount: true, tipAmount: true, processorData: true },
+      select: {
+        id: true,
+        venueId: true,
+        orderId: true,
+        status: true,
+        method: true,
+        source: true,
+        amount: true,
+        tipAmount: true,
+        processorData: true,
+      },
     })
 
     const processorData = (payment?.processorData ?? {}) as { refundedAmount?: number | string }
@@ -5837,6 +5859,7 @@ class TerminalPaymentService {
             venueId: payment.venueId,
             status: payment.status,
             method: payment.method,
+            source: payment.source,
             amount: Number(payment.amount),
             tipAmount: Number(payment.tipAmount),
             refundedAmount: Number(processorData.refundedAmount ?? 0),
@@ -5854,6 +5877,8 @@ class TerminalPaymentService {
       })
       throw new BadRequestError(target.message)
     }
+    // A2 (cierre): una venta de tarjetas de regalo pagada sólo se devuelve con su cancelación iniciada (R2), igual que en el panel.
+    if (payment?.orderId) await exigirCancelacionParaDevolverEnTerminal(venueId, payment.orderId)
 
     const terminalEntry = terminalRegistry.getTerminal(terminalId)
     if (!terminalEntry) {
@@ -6012,6 +6037,7 @@ class TerminalPaymentService {
           requestId,
           status: 'timeout',
           errorMessage: 'Cancelación solicitada. Confirma el resultado en la terminal antes de volver a cobrar.',
+          cancelRequested: true,
         })
       }
     }
@@ -6384,13 +6410,34 @@ class TerminalPaymentService {
     const identidadesDelPago = [serialKey(datosCandidato?.deviceSerialNumber), serialKey(candidato?.terminal?.serialNumber)].filter(
       (s): s is string => s !== null,
     )
+    // Toda referencia del Payment a una solicitud (columna, huella o conciliación). Codex (14-oct, P2): con UNA sola presente
+    // —p. ej. sólo `reconciliation.requestId` de una solicitud ajena— la rama por serial lo acreditaba sin mirarla.
+    const solicitudesDelPago = [
+      candidato?.terminalPaymentRequestId,
+      datosCandidato?.terminalPaymentRequestId,
+      reconciliacionCandidato?.requestId,
+    ].filter(r => r != null)
     const atribuiblePorTerminal =
-      !!candidato &&
-      candidato.terminalPaymentRequestId == null &&
-      datosCandidato?.terminalPaymentRequestId == null &&
+      !!candidato && solicitudesDelPago.length === 0 && identidadesDelPago.length > 0 && identidadesDelPago.every(s => s === terminalKey)
+    // 🔴 QA PAX (14-oct): el camino de cobro de la PAX/Blumon no emite `terminal:payment_attempt_opened`, así que su cobro
+    // REMOTO nunca tiene vínculo (prod: 0 en 8 cobros remotos de PAX en 30 días) — y su Payment SÍ trae la solicitud. Ninguna
+    // rama de arriba lo acreditaba y, tras reiniciar la app, S6 le publicaba una contradicción FALSA («posible cobro doble»).
+    // Sin vínculo se acredita sólo si TODAS las referencias del Payment a una solicitud dicen la MISMA, esa solicitud es de
+    // este venue y está ASIGNADA a esta terminal, y todas las identidades de serial son ésta. Con vínculo no aplica.
+    const [primera] = solicitudesDelPago
+    const solicitudDelPago =
+      !link && typeof primera === 'string' && solicitudesDelPago.every(r => r === primera)
+        ? await prisma.terminalPaymentRequest.findFirst({ where: { requestId: primera, venueId: input.venueId } })
+        : null
+    const atribuiblePorSolicitudDeEstaTerminal =
+      !!solicitudDelPago &&
+      normalizeTerminalId(solicitudDelPago.terminalId) === terminalKey &&
       identidadesDelPago.length > 0 &&
       identidadesDelPago.every(s => s === terminalKey)
-    const atribuible = atribuiblePorSolicitud || atribuiblePorTerminal
+    const atribuible = atribuiblePorSolicitud || atribuiblePorTerminal || atribuiblePorSolicitudDeEstaTerminal
+    // Codex (14-oct, P1): la solicitud así acreditada se publica igual que la del vínculo —`requestId`, `request`, `isWinner`—:
+    // sin ella la TPV no puede rechazar una respuesta de OTRA solicitud ni cerrar su bandeja con el ganador.
+    const solicitud = row ?? (atribuiblePorSolicitudDeEstaTerminal ? solicitudDelPago : null)
     // 🔴 Codex r4-3 (22-sep): el candidato se busca por venue propio y llave EXACTA, mientras el veto del POST busca
     // GLOBAL y con la llave normalizada. La diferencia dejaba pasar por «declaración limpia» un pago que apareció
     // DESPUÉS, con la llave sucia o en otro negocio — y el cliente usa esta respuesta para soltar la venta. Aquí no se
@@ -6529,18 +6576,24 @@ class TerminalPaymentService {
     const centavos = (valor: Prisma.Decimal | number | string | null | undefined) =>
       valor === null || valor === undefined ? null : new Prisma.Decimal(valor).mul(100).round().toNumber()
 
+    // El ganador de una solicitud acreditada sin vínculo no se conocía al leer `ganador` (iba por `row`).
+    const ganadorDeLaSolicitud =
+      ganador ??
+      (!row && solicitud?.paymentId
+        ? await prisma.payment.findUnique({ where: { id: solicitud.paymentId }, select: { id: true, idempotencyKey: true } })
+        : null)
     let winnerAttemptId: string | null = null
-    if (ganador?.idempotencyKey) {
-      if (ganador.idempotencyKey === attemptId) winnerAttemptId = attemptId
+    if (ganadorDeLaSolicitud?.idempotencyKey) {
+      if (ganadorDeLaSolicitud.idempotencyKey === attemptId) winnerAttemptId = attemptId
       else {
-        const vinculoDelGanador = await this.findAttemptLink(ganador.idempotencyKey)
-        winnerAttemptId = !!row && vinculoDelGanador?.requestId === row.requestId ? ganador.idempotencyKey : null
+        const vinculoDelGanador = await this.findAttemptLink(ganadorDeLaSolicitud.idempotencyKey)
+        winnerAttemptId = !!solicitud && vinculoDelGanador?.requestId === solicitud.requestId ? ganadorDeLaSolicitud.idempotencyKey : null
       }
     }
 
     return {
       attemptId,
-      requestId: row?.requestId ?? null,
+      requestId: solicitud?.requestId ?? null,
       attempt: {
         attemptId,
         outcome,
@@ -6549,9 +6602,9 @@ class TerminalPaymentService {
         recordedVia: pago ? (datos?.registradoVia === 'webhook' ? 'webhook' : 'terminal') : null,
         amountCents: pago ? centavos(pago.amount) : null,
         tipCents: pago ? centavos(pago.tipAmount) : null,
-        isWinner: !!pago && row?.paymentId === pago.id,
+        isWinner: !!pago && solicitud?.paymentId === pago.id,
         winnerPaymentId: esSegundaCaptura
-          ? ((typeof reconciliacion?.winnerPaymentId === 'string' ? reconciliacion.winnerPaymentId : null) ?? row?.paymentId ?? null)
+          ? ((typeof reconciliacion?.winnerPaymentId === 'string' ? reconciliacion.winnerPaymentId : null) ?? solicitud?.paymentId ?? null)
           : null,
         processorEvidence,
         processorEvidenceAt: conVeredicto?.createdAt.toISOString() ?? null,
@@ -6561,7 +6614,7 @@ class TerminalPaymentService {
         linkedAt: link?.createdAt.toISOString() ?? null,
         resolution,
       },
-      request: row ? { ...proyectarEstado(row), closedVia: row.closedVia ?? null, winnerAttemptId } : null,
+      request: solicitud ? { ...proyectarEstado(solicitud), closedVia: solicitud.closedVia ?? null, winnerAttemptId } : null,
     }
   }
 
@@ -6958,14 +7011,22 @@ class TerminalPaymentService {
     if (noAcreditable) {
       this.marcarEsperaDeSonda(requestId)
       const yaAuditada = !(await this.debeAuditar('TERMINAL_PAYMENT_PROBE_UNACCREDITED', row.id))
-      logger.warn('🔎 [TerminalPayment] Probe NOT_FOUND cannot accredit non-receipt: reservation kept for an operator', {
+      const aviso = {
         requestId,
         terminalId: row.terminalId,
         status: row.status,
         evidence: noAcreditable,
         deliveries: procedencia?.length ?? null,
         audited: !yaAuditada,
-      })
+      }
+      // La terminal vuelve a sondear la MISMA fila en cada reconexión y la respuesta no cambia (30-sep-2026: 82 filas viejas de
+      // Testarudo × ~6 reconexiones = 448 líneas/día, el aviso que más crecía). La primera vez es un aviso para el operador y
+      // queda en ActivityLog; las repeticiones no traen evidencia nueva y salen en info. La fila sigue retenida igual.
+      if (yaAuditada) {
+        logger.info('🔎 [TerminalPayment] Probe NOT_FOUND repeated on a row already kept for an operator (no new evidence)', aviso)
+      } else {
+        logger.warn('🔎 [TerminalPayment] Probe NOT_FOUND cannot accredit non-receipt: reservation kept for an operator', aviso)
+      }
       if (!yaAuditada) {
         void logAction({
           venueId: terminal.venueId,

@@ -146,7 +146,7 @@ export async function createCommissionTier(configId: string, venueId: string, da
   }
 
   // Validate rate
-  validateRate(data.rate)
+  validateRate(data.rate, 'La tasa de un nivel')
 
   // Validate thresholds
   if (data.maxThreshold !== undefined && data.maxThreshold !== null) {
@@ -229,7 +229,7 @@ export async function createTiersBatch(configId: string, venueId: string, tiers:
   // Validate all tiers
   const tierLevels = new Set<number>()
   for (const tier of tiers) {
-    validateRate(tier.rate)
+    validateRate(tier.rate, 'La tasa de un nivel')
 
     if (tierLevels.has(tier.tierLevel)) {
       throw new BadRequestError(`Duplicate tier level: ${tier.tierLevel}`)
@@ -313,7 +313,7 @@ export async function updateCommissionTier(tierId: string, venueId: string, data
 
   // Validate rate if provided
   if (data.rate !== undefined) {
-    validateRate(data.rate)
+    validateRate(data.rate, 'La tasa de un nivel')
   }
 
   // Validate thresholds

@@ -104,6 +104,9 @@ import {
 } from '../schemas/tpv.schema'
 import * as goalResolutionService from '../services/dashboard/commission/goal-resolution.service'
 import * as productService from '../services/dashboard/product.dashboard.service'
+import { ensureQuantityInventoryRow, inventoryMethodForNewProduct } from '../services/dashboard/quantityInventoryRow'
+import { categoriaParaProductoSinCategoria } from '../services/mobile/categoriaGeneral.service'
+import { logAction } from '../services/dashboard/activity-log.service'
 import { toLegacyProductPayload } from '../utils/legacyProductPayload'
 import * as rolePermissionService from '../services/dashboard/rolePermission.service'
 import emailService from '../services/email.service'
@@ -456,7 +459,16 @@ router.get('/status-sync/:serialNumber', validateRequest(serialNumberParamSchema
  *       404:
  *         description: Terminal not found or not activated
  */
-router.post('/heartbeat', heartbeatController.processHeartbeat)
+// Anonymous health reports remain supported. Command delivery additionally needs a
+// device secret or a fully validated legacy staff token with a signed terminal serial.
+const commandIdentity = (req: Request, res: Response, next: NextFunction) => {
+  if (req.headers['x-tpv-command-token'] || !req.headers.authorization) return next()
+  return authenticateTokenMiddleware(req, res, next)
+}
+router.post('/heartbeat', commandIdentity, heartbeatController.processHeartbeat)
+router.post('/commands/permit', commandIdentity, heartbeatController.permitCommand)
+router.post('/commands/ready', commandIdentity, heartbeatController.commandsReady)
+router.post('/command-credential', authenticateTokenMiddleware, heartbeatController.provisionCommandCredential)
 
 /**
  * @openapi
@@ -504,7 +516,7 @@ router.post('/heartbeat', heartbeatController.processHeartbeat)
  *       404:
  *         description: Command not found
  */
-router.post('/command-ack', heartbeatController.acknowledgeCommand)
+router.post('/command-ack', commandIdentity, heartbeatController.acknowledgeCommand)
 
 /**
  * @openapi
@@ -6186,9 +6198,9 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
     const { venueId } = req.params
     const { barcode, name, price, categoryId, trackInventory } = req.body
 
-    // Validate required fields
-    if (!barcode || !name || price === undefined || !categoryId) {
-      return next(new AppError('Missing required fields: barcode, name, price, and categoryId are required', 400))
+    // Validate required fields. `categoryId` es opcional: sin él va la primera del negocio o «General» (cuenta nueva).
+    if (!barcode || !name || price === undefined) {
+      return next(new AppError('Missing required fields: barcode, name and price are required', 400))
     }
 
     logger.info(`📦 [TPV Quick Add] Creating product from barcode scan`, {
@@ -6216,6 +6228,7 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
     }
 
     // Create product using Prisma directly
+    let categoriaCreada: string | null = null
     const product = await prisma.$transaction(async tx => {
       const authContext = req.authContext!
       const actor = resolveLegacyCatalogActor(authContext.userId, Boolean(authContext.isImpersonating))
@@ -6225,7 +6238,9 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
         willBeVendable: true,
         actor,
       })
-      await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId })
+      const categoria = categoryId ? { id: categoryId as string, creada: false } : await categoriaParaProductoSinCategoria(tx, venueId)
+      if (categoria.creada) categoriaCreada = categoria.id
+      await assertLegacyProductReferencesForVenue(tx, { venueId, categoryId: categoria.id })
       const created = await tx.product.create({
         data: {
           venueId,
@@ -6233,8 +6248,10 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
           sku: barcode, // ✅ Store barcode as SKU
           name,
           price: new Decimal(price),
-          categoryId, // ✅ Required field
+          categoryId: categoria.id,
           trackInventory: trackInventory || false,
+          // Con inventario, el alta por código de barras es «por cantidad» (sin método no había merma ni descuento).
+          inventoryMethod: inventoryMethodForNewProduct(trackInventory === true, undefined),
           active: true,
           displayOrder: 0,
         },
@@ -6243,11 +6260,27 @@ export async function createTpvQuickAddProductHandler(req: Request, res: Respons
           inventory: true,
         },
       })
+      await ensureQuantityInventoryRow(tx, created)
+      // El `include` se leyó antes de la fila: la respuesta lleva la que quedó en la base.
+      if (!created.inventory && created.inventoryMethod === 'QUANTITY') {
+        created.inventory = await tx.inventory.findUnique({ where: { productId: created.id } })
+      }
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
       }
       return created
     })
+
+    if (categoriaCreada) {
+      void logAction({
+        staffId: req.authContext?.userId,
+        venueId,
+        action: 'MENU_CATEGORY_CREATED',
+        entity: 'MenuCategory',
+        entityId: categoriaCreada,
+        data: { name: 'General', automatica: true, motivo: 'primer producto sin categoría', productId: product.id },
+      })
+    }
 
     logger.info(`✅ [TPV Quick Add] Product created successfully: ${product.name} (${product.id})`, {
       correlationId: req.correlationId,

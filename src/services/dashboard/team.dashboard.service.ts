@@ -17,6 +17,9 @@ import { ROLE_HIERARCHY, canAssignRole, ungrantablePermissions } from '../../lib
 import { assertCanAddSeat } from '../access/seatCap.service'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { isLiveSlotHold } from './appointmentStaffAssignment.service'
+import { AsignacionDto, asignacionesVigentes } from './rh/asignaciones.service'
+import { hoyDeLaSede } from './rh/vigencias'
+import { fechaComoDbDate } from './staffPay/periodos'
 
 interface TeamMember {
   id: string
@@ -35,6 +38,8 @@ interface TeamMember {
   averageRating: number
   permissionSetId: string | null
   permissionSetName: string | null
+  /** RH fase 1a: puestos vigentes HOY en la sede (vacío = sin puesto). Lo trae la lista; updateTeamMember no. */
+  currentAssignments?: AsignacionDto[]
 }
 
 interface PaginatedTeamResponse {
@@ -70,6 +75,7 @@ interface InviteTeamMemberRequest {
 }
 
 interface UpdateTeamMemberRequest {
+  expectedState?: { role: StaffRole; active: boolean }
   role?: StaffRole
   active?: boolean
   pin?: string
@@ -88,6 +94,9 @@ export async function getTeamMembers(
   page: number = 1,
   pageSize: number = 10,
   search?: string,
+  positionId?: string,
+  /** Rol de quien pide EN ESTA SEDE (req.resolvedRole de checkPermission). Sólo un SUPERADMIN ve a otros SUPERADMIN. */
+  callerRole?: StaffRole,
 ): Promise<PaginatedTeamResponse> {
   const skip = (page - 1) * pageSize
 
@@ -98,48 +107,55 @@ export async function getTeamMembers(
   // (Asana 1215884464715725).
   const venueOrg = await prisma.venue.findUnique({
     where: { id: venueId },
-    select: { organizationId: true },
+    select: { organizationId: true, timezone: true },
   })
+  const hoy = hoyDeLaSede(venueOrg?.timezone ?? 'America/Mexico_City')
   const activeOrgMemberFilter = venueOrg?.organizationId
     ? { staff: { organizations: { some: { organizationId: venueOrg.organizationId, isActive: true } } } }
     : {}
 
-  // Build search conditions
-  const searchConditions = search
+  // Búsqueda por palabras, como la del panel («Ana López», «ana l»): cada palabra debe aparecer en el nombre, el apellido o
+  // el correo; las palabras se combinan con AND. Una sola palabra conserva la forma de siempre (un OR en la raíz).
+  const porPalabra = (search ?? '')
+    .trim()
+    .split(/\s+/)
+    .filter(Boolean)
+    .slice(0, 5) // ponytail: tope de 5 palabras; más no afina y sólo encarece la consulta
+    .map(t => ({
+      OR: [
+        { staff: { firstName: { contains: t, mode: 'insensitive' as const } } },
+        { staff: { lastName: { contains: t, mode: 'insensitive' as const } } },
+        { staff: { email: { contains: t, mode: 'insensitive' as const } } },
+      ],
+    }))
+
+  // RH: filtro por puesto vigente hoy (fin inclusivo, igual que asignacionesVigentes). Va en AND con la pertenencia a la
+  // organización: un segundo `staff` suelto la reemplazaría y volverían a salir personas retiradas.
+  const hoyDb = fechaComoDbDate(hoy)
+  const positionFilter = positionId
     ? {
-        OR: [
-          {
-            staff: {
-              firstName: {
-                contains: search,
-                mode: 'insensitive' as const,
-              },
+        staff: {
+          staffAssignments: {
+            some: {
+              venueId,
+              positionId,
+              effectiveFrom: { lte: hoyDb },
+              OR: [{ effectiveTo: null }, { effectiveTo: { gte: hoyDb } }],
             },
           },
-          {
-            staff: {
-              lastName: {
-                contains: search,
-                mode: 'insensitive' as const,
-              },
-            },
-          },
-          {
-            staff: {
-              email: {
-                contains: search,
-                mode: 'insensitive' as const,
-              },
-            },
-          },
-        ],
+        },
       }
-    : {}
+    : null
+  const and = [...(positionFilter ? [activeOrgMemberFilter, positionFilter] : []), ...(porPalabra.length > 1 ? porPalabra : [])]
 
   const whereCondition = {
     venueId,
-    ...activeOrgMemberFilter,
-    ...searchConditions,
+    ...(positionFilter ? {} : activeOrgMemberFilter),
+    ...(porPalabra.length === 1 ? porPalabra[0] : {}),
+    ...(and.length > 0 ? { AND: and } : {}),
+    // El panel oculta a los SUPERADMIN salvo a otro SUPERADMIN (Teams.tsx → filterSuperadminFromTeam). Se filtra AQUÍ para
+    // que el total y las páginas no los cuenten. Sin rol conocido (llamadas internas) se ocultan: es lo seguro.
+    ...(callerRole === StaffRole.SUPERADMIN ? {} : { role: { not: StaffRole.SUPERADMIN } }),
   }
 
   const [staffVenues, totalCount] = await prisma.$transaction([
@@ -167,7 +183,7 @@ export async function getTeamMembers(
           },
         },
       },
-      orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }],
+      orderBy: [{ role: 'asc' }, { staff: { firstName: 'asc' } }, { id: 'asc' }],
       skip,
       take: pageSize,
     }),
@@ -178,6 +194,8 @@ export async function getTeamMembers(
 
   // Get all staff IDs for calculating real-time stats
   const staffIds = staffVenues.map(sv => sv.staff.id)
+  // RH: puestos vigentes de toda la página en una sola consulta (sin N+1).
+  const vigentes = await asignacionesVigentes(venueId, staffIds, hoy)
 
   // Calculate real-time stats from orders grouped by staff (for sales and order count)
   const orderStats = await prisma.order.groupBy({
@@ -240,6 +258,7 @@ export async function getTeamMembers(
       averageRating: 0, // Rating requires more complex query, keeping as 0 for list view
       permissionSetId: sv.permissionSet?.id ?? null,
       permissionSetName: sv.permissionSet?.name ?? null,
+      currentAssignments: vigentes.get(sv.staff.id) ?? [],
     }
   })
 
@@ -277,6 +296,7 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
               name: true,
             },
           },
+          timezone: true,
         },
       },
     },
@@ -285,6 +305,12 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
   if (!staffVenue) {
     throw new NotFoundError('Team member not found')
   }
+
+  // RH: sus puestos vigentes hoy, con la MISMA definición que la lista de Personas (una consulta indexada).
+  // `timezone` sólo se lee para «hoy»: el objeto `venue` de la respuesta no cambia.
+  const { timezone, ...venue } = staffVenue.venue
+  const vigentes = await asignacionesVigentes(venueId, [staffVenue.staffId], hoyDeLaSede(timezone ?? 'America/Mexico_City'))
+  const currentAssignments = vigentes.get(staffVenue.staffId) ?? []
 
   // Calculate real-time stats from orders (for sales and order count)
   const orderStats = await prisma.order.aggregate({
@@ -348,7 +374,8 @@ export async function getTeamMember(venueId: string, teamMemberId: string) {
     totalTips,
     totalOrders,
     averageRating,
-    venue: staffVenue.venue,
+    venue,
+    currentAssignments,
   }
 }
 
@@ -899,18 +926,24 @@ export async function updateTeamMember(venueId: string, teamMemberId: string, up
   }
 
   // Update staff venue
-  const updatedStaffVenue = await prisma.staffVenue.update({
-    where: { id: teamMemberId },
-    data: {
-      ...(updates.role && { role: updates.role }),
-      ...(updates.active !== undefined && { active: updates.active }),
-      ...(pinToStore !== undefined && { pin: pinToStore }),
-    },
-    include: {
-      staff: true,
-      permissionSet: { select: { id: true, name: true } },
-    },
-  })
+  const updatedStaffVenue = await prisma.staffVenue
+    .update({
+      where: { id: teamMemberId, ...(updates.expectedState ? { venueId, ...updates.expectedState } : {}) },
+      data: {
+        ...(updates.role && { role: updates.role }),
+        ...(updates.active !== undefined && { active: updates.active }),
+        ...(pinToStore !== undefined && { pin: pinToStore }),
+      },
+      include: {
+        staff: true,
+        permissionSet: { select: { id: true, name: true } },
+      },
+    })
+    .catch(error => {
+      if (updates.expectedState && error?.code === 'P2025')
+        throw new ConflictError('El miembro cambió desde la vista previa. Revisa y confirma de nuevo.')
+      throw error
+    })
 
   logger.info('Team member updated', {
     teamMemberId,
@@ -1093,11 +1126,14 @@ export async function removeTeamMember(venueId: string, teamMemberId: string): P
 
 /**
  * Hard delete team member - OWNER and SUPERADMIN
- * Permanently removes the member's venue access plus their commission data
- * (payouts, calculations, overrides, milestones).
+ * Permanently removes the member's venue access and their commission overrides
+ * (configuration).
  *
- * The Staff row and their orders/payments are intentionally kept: those are
- * financial history that must survive the person leaving. For the everyday
+ * The Staff row, their orders/payments and their commission money history
+ * (calculations, payouts, milestone achievements) are intentionally kept: a
+ * voided commission already frozen into a pay receipt still needs its row to be
+ * reversed at the next close, and a queued refund reversal needs its original
+ * (Codex bloque B #2, pago por servicio fase 3). For the everyday
  * "this person no longer works here" case use removeTeamMember, which
  * deactivates and keeps everything — the same call Square makes, since it has
  * no permanent delete for team members at all.
@@ -1202,34 +1238,10 @@ export async function hardDeleteTeamMember(
     // Track deleted records per attempt so rolled-back counts cannot leak.
     const deletedRecords: Record<string, number> = {}
 
-    // 1. Delete Commission Payouts for this staff in this venue
-    const deletedPayouts = await tx.commissionPayout.deleteMany({
-      where: {
-        staffId,
-        venueId,
-      },
-    })
-    deletedRecords['commissionPayouts'] = deletedPayouts.count
+    // 🔴 Commission money history (calculations, payouts, milestone achievements) is NOT deleted: the pay receipt reverses
+    // a voided commission against its row, and a queued refund reversal waits for its original (Codex bloque B #2).
 
-    // 2. Delete Commission Calculations for this staff in this venue
-    const deletedCalculations = await tx.commissionCalculation.deleteMany({
-      where: {
-        staffId,
-        venueId,
-      },
-    })
-    deletedRecords['commissionCalculations'] = deletedCalculations.count
-
-    // 3. Delete Milestone Achievements for this staff in this venue
-    const deletedMilestones = await tx.milestoneAchievement.deleteMany({
-      where: {
-        staffId,
-        venueId,
-      },
-    })
-    deletedRecords['milestoneAchievements'] = deletedMilestones.count
-
-    // 4. Delete Commission Overrides for this staff in this venue
+    // 1. Delete Commission Overrides (configuration, not money) for this staff in this venue
     const deletedOverrides = await tx.commissionOverride.deleteMany({
       where: {
         staffId,
@@ -1240,7 +1252,7 @@ export async function hardDeleteTeamMember(
     })
     deletedRecords['commissionOverrides'] = deletedOverrides.count
 
-    // 5. Finally, delete the StaffVenue record itself
+    // 2. Finally, delete the StaffVenue record itself
     await tx.staffVenue.delete({
       where: { id: teamMemberId },
     })
@@ -1249,7 +1261,7 @@ export async function hardDeleteTeamMember(
     // Note: We intentionally do NOT delete the Staff record even if this is the last venue.
     // The Staff record has many foreign key references (Invitations, Orders, Shifts, etc.)
     // that would cause cascade failures. The user is effectively removed from this venue
-    // by deleting StaffVenue and all their commission/milestone data.
+    // by deleting StaffVenue; their commission money history stays (see above).
     return { staffId, deletedRecords }
   })
 

@@ -1,5 +1,6 @@
 import { NextFunction, Request, Response } from 'express'
 import logger from '../../config/logger'
+import AppError from '../../errors/AppError'
 import * as refundService from '../../services/dashboard/refund.dashboard.service'
 import { esCantidadNoNegativaEnCentavos, esCantidadPositivaEnCentavos, vieneAusente } from '../../services/shared/devueltoDeUnCobro'
 
@@ -45,7 +46,10 @@ export async function issueRefund(req: Request, res: Response, next: NextFunctio
 
     return res.status(201).json({ success: true, data: result })
   } catch (error) {
-    logger.error('Error issuing refund (dashboard):', error)
+    // Un rechazo de NEGOCIO (4xx: «ya no queda propina», cantidad agotada) no es una falla del
+    // servidor: se anota como aviso. Sólo lo inesperado va como error y dispara alertas.
+    if (error instanceof AppError && error.statusCode < 500) logger.warn(`Refund rejected (dashboard): ${error.message}`)
+    else logger.error('Error issuing refund (dashboard):', error)
     next(error)
   }
 }

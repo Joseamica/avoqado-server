@@ -172,7 +172,9 @@ export function instalarGanchos(proc: ProcesoMinimo, escribir: (linea: string) =
       llamador = (new Error().stack ?? '')
         .split('\n')
         .slice(2, 10)
-        .map(renglon => renglon.trim().slice(0, 200))
+        .map(renglon => renglon.trim())
+        // Si un renglón no cabe, sobra su principio: el final (`archivo:línea:columna`) es el que dice quién.
+        .map(renglon => (renglon.length <= 200 ? renglon : `…${renglon.slice(-199)}`))
     } catch {
       // Sin pila, la salida se registra igual.
     }

@@ -12,6 +12,11 @@ export interface PreStampInput {
   expectedTotalCents: number
   /** True only for the month-end global CFDI (Flow C). Individual issuance (Flow B/A) must pass false or omit. */
   isGlobal?: boolean
+  /**
+   * C2 · Tarea 8: true sólo para una nota de crédito (egreso) RELACIONADA con una factura global (relación 01 con el UUID de la global): su
+   * receptor es el mismo Público en General de la global (Guía de llenado, ejemplo del SAT; medido en el sandbox, T1 de C2).
+   */
+  relacionadaConGlobal?: boolean
 }
 
 const RFC_RE = /^[A-ZÑ&]{3,4}\d{6}[A-Z0-9]{3}$/i
@@ -28,7 +33,8 @@ export function validateBeforeStamp(input: PreStampInput): ReceptorValidationRes
   // Receptor
   if (!RFC_RE.test(input.receptor.rfc)) reasons.push('El RFC del receptor no tiene un formato válido.')
   // XAXX010101000 "Público en General" is ONLY valid on the global CFDI (Flow C), never on an individual invoice.
-  if (!input.isGlobal && input.receptor.rfc?.toUpperCase() === 'XAXX010101000') {
+  // C2 · Tarea 8: ni en una nota de crédito individual; SÓLO en la nota relacionada con una global (su receptor es el de la global).
+  if (!input.isGlobal && !input.relacionadaConGlobal && input.receptor.rfc?.toUpperCase() === 'XAXX010101000') {
     reasons.push('El RFC "Público en General" (XAXX010101000) solo es válido en la factura global, no en una factura individual.')
   }
   if (!/^\d{5}$/.test(input.receptor.codigoPostal)) reasons.push('El código postal del receptor debe tener 5 dígitos.')

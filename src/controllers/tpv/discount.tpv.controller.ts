@@ -10,6 +10,8 @@
 import { NextFunction, Request, Response } from 'express'
 import * as discountTpvService from '@/services/tpv/discount.tpv.service'
 import { DiscountType } from '@prisma/client'
+import AppError from '@/errors/AppError'
+import logger from '@/config/logger'
 
 // ==========================================
 // GET AVAILABLE DISCOUNTS
@@ -181,6 +183,19 @@ export async function applyCouponCode(req: Request, res: Response, next: NextFun
       })
     }
   } catch (error) {
+    // La TPV sólo lee `error` en el rechazo del cupón (`DiscountRepositoryImpl.kt:312`); sin ella pinta «Coupon already applied or
+    // invalid» y esconde la causa (R11 de una importada, IVA anterior…). Mismo sobre que el manejador global, más `success`/`error`.
+    if (error instanceof AppError && error.statusCode < 500) {
+      logger.warn(`Coupon rejected: ${error.message}`, { code: error.code, statusCode: error.statusCode })
+      res.status(error.statusCode).json({
+        success: false,
+        error: error.message,
+        message: error.message,
+        ...(error.code && { code: error.code }),
+        ...(error.details !== undefined && { details: error.details }),
+      })
+      return
+    }
     next(error)
   }
 }

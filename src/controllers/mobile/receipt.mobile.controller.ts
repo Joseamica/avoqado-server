@@ -9,6 +9,8 @@ import { Request, Response, NextFunction } from 'express'
 import prisma from '../../utils/prismaClient'
 import { ReceiptStatus } from '@prisma/client'
 import * as receiptService from '../../services/dashboard/receipt.dashboard.service'
+import { reciboCanonicoDelPago } from '../../services/shared/reciboCanonico'
+import { ticketTotalsDelSnapshot } from '../../services/shared/ticketTotals'
 import { sendReceiptWhatsApp } from '../../services/whatsapp.service'
 import logger from '@/config/logger'
 
@@ -35,15 +37,8 @@ async function findOrCreateReceipt(venueId: string, receiptAccessKey?: string, p
   }
 
   if (paymentId) {
-    // Look for existing receipt
-    const existing = await prisma.digitalReceipt.findFirst({
-      where: {
-        paymentId,
-        payment: {
-          venueId,
-        },
-      },
-    })
+    // Look for existing receipt: el canónico del cobro (r4 R4-A1), el mismo que el TPV y el dashboard.
+    const existing = await reciboCanonicoDelPago(prisma, paymentId, { where: { payment: { venueId } } })
     if (existing) return existing
 
     // Generate receipt on-the-fly
@@ -137,7 +132,10 @@ export async function sendReceiptWhatsapp(req: Request, res: Response, next: Nex
     // Extract data from snapshot for WhatsApp message
     const dataSnapshot = receipt.dataSnapshot as any
     const venueName = dataSnapshot?.venue?.name || 'Establecimiento'
-    const totalAmount = dataSnapshot?.payment?.totalAmount || dataSnapshot?.order?.total || 0
+    // m-1 (A7-R8): el MISMO total que el recibo, en magnitud (una cuenta dividida no dice el total de la orden; una devolución,
+    // sin «−»). Sin el cobro en el snapshot, el respaldo de siempre.
+    const totalAmount =
+      ticketTotalsDelSnapshot(dataSnapshot)?.total ?? (dataSnapshot?.payment?.totalAmount || dataSnapshot?.order?.total || 0)
     const currency = dataSnapshot?.venue?.currency || 'MXN'
     const formattedTotal = `$${Number(totalAmount).toFixed(2)} ${currency}`
 

@@ -9,7 +9,7 @@
  * They must not survive into a log field.
  */
 
-import { normalizeEntrypoint } from '@/observability/entrypoint'
+import { normalizeEntrypoint, redactPathSecrets } from '@/observability/entrypoint'
 
 describe('normalizeEntrypoint', () => {
   it('uppercases the method and keeps a plain path', () => {
@@ -58,5 +58,29 @@ describe('normalizeEntrypoint', () => {
     const first = normalizeEntrypoint('GET', '/api/v1/orders/cmrb9clsl0001c9126obyxp2q')
     const second = normalizeEntrypoint('GET', '/api/v1/orders/cmk8aaaaa0001c9126obyxp3z')
     expect(first).toBe(second)
+  })
+
+  // nuevo — conector de pases: el segmento `:token` ES el secreto (el proveedor no firma)
+  describe('🔴 secretos en la ruta', () => {
+    const TOKEN = 'Zx9_aB-3kLmN0pQrStUvWxYz1234567890abcdEFGH' // base64url de 32 bytes, como newWebhookToken()
+
+    it('colapsa el token del webhook de pases a :token', () => {
+      expect(normalizeEntrypoint('POST', `/api/v1/webhooks/aggregators/totalpass/${TOKEN}/booking`)).toBe(
+        'POST /api/v1/webhooks/aggregators/totalpass/:token/booking',
+      )
+    })
+
+    it('aunque el token tenga forma de id, o la ruta venga en otras mayúsculas', () => {
+      expect(normalizeEntrypoint('POST', '/api/v1/webhooks/aggregators/wellhub/4218/checkin')).toBe(
+        'POST /api/v1/webhooks/aggregators/wellhub/:token/checkin',
+      )
+      const r = normalizeEntrypoint('POST', `/api/v1/Webhooks/AGGREGATORS/totalpass/${TOKEN}/booking?x=1`)
+      expect(r).not.toContain(TOKEN)
+    })
+
+    it('redactPathSecrets no toca otras rutas', () => {
+      expect(redactPathSecrets('/api/v1/webhooks/delivery/rappi/new-order', ':token')).toBe('/api/v1/webhooks/delivery/rappi/new-order')
+      expect(redactPathSecrets('/api/v1/webhooks/aggregators', ':token')).toBe('/api/v1/webhooks/aggregators')
+    })
   })
 })

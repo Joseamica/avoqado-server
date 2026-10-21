@@ -58,7 +58,13 @@ const baseInput = {
 }
 
 function buildScope(perVenue: Array<[string, UserAccess]>): McpScope {
-  return { staffId: 's1', activeOrg: 'org-1', allowedVenueIds: perVenue.map(([id]) => id), perVenueAccess: new Map(perVenue) } as McpScope
+  return {
+    staffId: 's1',
+    activeOrg: 'org-1',
+    scopes: ['mcp:read', 'mcp:write'],
+    allowedVenueIds: perVenue.map(([id]) => id),
+    perVenueAccess: new Map(perVenue),
+  } as McpScope
 }
 
 beforeEach(() => {

@@ -130,7 +130,18 @@ export async function lockRecipeCostGraphsForRawMaterialUpdateV1(
   const lockedRecipeIds: string[] = []
   const rawMaterialIds = new Set<string>([rawMaterialId])
 
+  // Plan 6b (spec IVA D10, §5.3; Codex r2 N1): los productos de TODAS las recetas por id de PRODUCTO antes del bucle, el mismo orden que
+  // la emisión y el encendido del IVA. En orden de receta, dos recetas cruzadas se trababan con un encendido que los toma por id.
+  await tx.$queryRaw(Prisma.sql`
+    SELECT product.id
+    FROM "Product" AS product
+    INNER JOIN "Recipe" AS recipe ON recipe."productId" = product.id
+    WHERE recipe.id = ANY(${[...new Set(recipeIds)]}::text[]) AND product."venueId" = ${venueId}
+    ORDER BY product.id FOR UPDATE OF product
+  `)
+
   for (const recipeId of [...new Set(recipeIds)].sort()) {
+    // (El `FOR UPDATE OF recipe, product` vuelve a tomar un producto que ya es suyo: no espera.)
     const recipeRows = await tx.$queryRaw<Array<{ id: string }>>(Prisma.sql`
       SELECT recipe.id
       FROM "Recipe" AS recipe

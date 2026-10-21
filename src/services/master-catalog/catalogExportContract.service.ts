@@ -1,6 +1,7 @@
 import { BusinessType } from '@prisma/client'
 import AppError from '@/errors/AppError'
 import { CATALOG_VALIDATION_BASELINE_V1 } from './catalogValidation.service'
+import { isCatalogIvaField } from './catalogManagedMask.service'
 import {
   CATALOG_EXPORT_WORKBOOK_LIMITS_V1,
   type CatalogWorkbookCellTypeV1,
@@ -180,6 +181,8 @@ export function catalogExportRequiredFieldRowsV1(
 ): Array<Record<string, CatalogWorkbookValueV1>> {
   const rows = new Map<string, Record<string, CatalogWorkbookValueV1>>()
   const insert = (version: number, field: string, source: 'CONTRACT' | 'PROFILE') => {
+    // D15: el IVA no se presenta como requisito (el catálogo no lo administra); los perfiles históricos que lo pidan se aceptan.
+    if (isCatalogIvaField(field)) return
     const key = `${version}\u0000${businessType}\u0000${field}`
     const existing = rows.get(key)
     if (existing?.source === 'CONTRACT' || (existing && existing.source === source)) return

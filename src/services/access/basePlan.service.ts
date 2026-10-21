@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import { moduleService, MODULE_CODES } from '@/services/modules/module.service'
 import { GRANDFATHER_SELECT, resolveGrandfathered } from './grandfather'
 import { grantedCapabilityCodes, hasCapabilityGrant, venuesWithCapabilityGrant } from './capabilityGrants.service'
+import { esperarTodas } from '@/services/customer-display/pollWork' // PURO y sin imports: no arrastra nada
 
 // Re-exported so the grandfather resolver is discoverable from the access service everyone
 // already imports. Callers OUTSIDE this module should prefer importing from './grandfather'
@@ -79,6 +80,20 @@ export const PREMIUM_ONLY_CODES = [
 ] as const
 
 /**
+ * Diferenciadores Premium por REGLA que todavía NO viven en el catálogo de presentación (`FEATURE_CATALOG`): no se
+ * listan, no se venden y no entran en ninguna oferta comercial. Existe porque `featureCatalog.test.ts` exige que cada
+ * código de `PREMIUM_ONLY_CODES` tenga su entrada Premium en el catálogo, y agregar una entrada cambia la huella
+ * (`definitionHash`) de TODAS las publicaciones vigentes.
+ *
+ * SHOPIFY_INTEGRATION — conector Shopify, Fase 1 piloto (spec 2026-10-07 §12 bis.15). En la Fase 5 (App 2 pública) se
+ * mueve a PREMIUM_ONLY_CODES junto con su entrada en FEATURE_CATALOG; `shopifyTierMirror.test.ts` falla si queda en los
+ * dos. El dashboard NO la espeja en plan-catalog.ts ni en plan-comparison.ts (comprar Premium hoy no la ANUNCIA; el
+ * acceso lo concede la regla y el piloto lo cierra SHOPIFY_PILOTO_SHOPS): su pantalla decide con `grantedFeatureCodes`
+ * de /plan-tier y, sin acceso, enseña «Shopify está en piloto».
+ */
+export const PREMIUM_ONLY_SIN_CATALOGO = ['SHOPIFY_INTEGRATION'] as const
+
+/**
  * Free-tier codes (Feature.code): capabilities the FREE plan PROMISES (dashboard
  * catalog FREE `includes`), granted to EVERY venue regardless of plan — even with
  * no base plan at all. Without this, a brand-new Free venue gets 403 on routes the
@@ -114,7 +129,13 @@ const LEGACY_PLAN_CODES = new Set([
   'WHITE_LABEL_DASHBOARD',
   'MASTER_CATALOG',
   'KITCHEN_DISPLAY', // Pro (founder D-A, 27-sep): kitchen display by station, offline included.
+  'AGGREGATOR_PASSES', // Pro (founder D4, 2-oct): pases de TotalPass y Wellhub; suelta $199/mes.
+  'SERVICE_PAY', // Pro (founder D3, 5-oct): pago al personal (clases, comisiones y propinas); suelta $199/mes por sucursal.
+  'CUSTOMER_DISPLAY_PROMOS', // Pro (founder, spec §5.8, 21-sep): promos en reposo de la pantalla del cliente; sin venta suelta ni fila Feature hasta F3.
+  'GIFT_CARDS', // Pro (founder D1, 14-oct): tarjetas de regalo; suelta $249/mes con IVA. El candado sólo cubre VENDER y PRENDER.
+  'PRODUCT_VARIANTS', // Pro (founder, 12-oct): variantes de producto (talla, color, presentación). Square y Clip las dan gratis; aquí se cobran en el plan.
   ...PREMIUM_ONLY_CODES,
+  ...PREMIUM_ONLY_SIN_CATALOGO,
 ])
 
 /**
@@ -132,7 +153,7 @@ export function elPlanConcede(tier: BaseTier, code: string): boolean {
   // Explicit current catalog; a new unknown code cannot inherit a paid tier by omission.
   if (!LEGACY_PLAN_CODES.has(code)) return false
   if (tier === 'PREMIUM') return true
-  return !(PREMIUM_ONLY_CODES as readonly string[]).includes(code)
+  return !(PREMIUM_ONLY_CODES as readonly string[]).includes(code) && !(PREMIUM_ONLY_SIN_CATALOGO as readonly string[]).includes(code)
 }
 
 /**
@@ -163,7 +184,7 @@ export function cruzaPlanYSuelta(origen: string, destino: string): boolean {
 }
 
 /** Active-window predicate shared by every base-plan query: active, not suspended, trial null/future. */
-function isActiveWindow(vf: { active: boolean; suspendedAt: Date | null; endDate: Date | null }, now: Date = new Date()): boolean {
+export function isActiveWindow(vf: { active: boolean; suspendedAt: Date | null; endDate: Date | null }, now: Date = new Date()): boolean {
   if (!vf.active || vf.suspendedAt) return false
   if (vf.endDate && vf.endDate < now) return false // trial expired unpaid
   return true
@@ -313,9 +334,14 @@ export async function getVenueGrantedFeatureCodes(venueId: string): Promise<stri
   return [...new Set([...filas.map(f => f.feature.code), ...commercial])].sort()
 }
 
-export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> {
+/**
+ * `esperarTodasLasRamas` (sólo el snapshot del poll de la pantalla del cliente): las 5 ramas terminan antes de propagar un
+ * error, para que el lugar del poll no se suelte con consultas vivas (F0-B, Codex r2 #2). Sin la opción —el `/settings` del POS,
+ * la TPV, el dashboard y el MCP—, el `Promise.all` de siempre: misma latencia y el mismo primer rechazo (Codex r3 N2).
+ */
+export async function getVenuePlanInfo(venueId: string, o: { esperarTodasLasRamas?: boolean } = {}): Promise<VenuePlanInfo> {
   const accessObservedAt = new Date().toISOString()
-  const [commercialTier, venue, individualCodes, legacyTier, billingPlan] = await Promise.all([
+  const ramas = [
     getContractBaseTier(venueId),
     prisma.venue.findUnique({ where: { id: venueId }, select: { ...GRANDFATHER_SELECT, status: true } }),
     getVenueGrantedFeatureCodes(venueId),
@@ -331,7 +357,10 @@ export async function getVenuePlanInfo(venueId: string): Promise<VenuePlanInfo> 
       select: { planTier: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
     }),
-  ])
+  ] as const
+  const [commercialTier, venue, individualCodes, legacyTier, billingPlan] = await (o.esperarTodasLasRamas
+    ? esperarTodas(ramas)
+    : Promise.all(ramas))
   const grandfathered = resolveGrandfathered(venue)
   const exempt = grandfathered || (venue != null && (DEMO_VENUE_STATUSES as readonly string[]).includes(venue.status as string))
   const grantedFeatureCodes = [
@@ -382,6 +411,35 @@ export async function venueHasFeatureAccess(venueId: string, featureCode: string
   // 3-5. Otherwise the tier decides.
   const tier = await getVenueBaseTier(venueId, { legacyOnly: true })
   return tier != null && elPlanConcede(tier, featureCode)
+}
+
+/** Whether any branch can use the capability. One scoped EXISTS-style lookup,
+ * including the same legacy/hybrid/exemption rules as venueHasFeatureAccess.
+ * Organization configuration never depends on an arbitrary first venue.
+ */
+export async function organizationHasFeatureAccess(organizationId: string, featureCode: string): Promise<boolean> {
+  const now = new Date()
+  const codes = [featureCode]
+  if (elPlanConcede('PRO', featureCode)) codes.push('PLAN_PRO')
+  if (elPlanConcede('PREMIUM', featureCode)) codes.push('PLAN_PREMIUM')
+  const venue = await prisma.venue.findFirst({
+    where: {
+      organizationId,
+      ...((FREE_TIER_CODES as readonly string[]).includes(featureCode)
+        ? {}
+        : {
+            OR: [
+              { seatCapExempt: true },
+              { organization: { seatCapExempt: true } },
+              { status: { in: [...DEMO_VENUE_STATUSES] } },
+              { features: { some: { feature: { code: { in: codes } }, ...activeWindowWhere(now) } } },
+              { capabilityGrants: { some: { featureCode, revokedAt: null, startsAt: { lte: now }, endsAt: { gt: now } } } },
+            ],
+          }),
+    },
+    select: { id: true },
+  })
+  return venue !== null
 }
 
 /**

@@ -17,6 +17,7 @@ import { getOperations, listExternalSettlements } from '@/services/dashboard/are
 import { confirmExternalSettlement } from '@/services/mobile/areaTicketExternal.mobile.service'
 import { cancelAreaTicket, fulfillAreaTicket, issueAreaTicket } from '@/services/mobile/areaTicketV7.mobile.service'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 
 /**
  * Colas de oficina del dashboard para la ruta EXTERNAL, contra Postgres real.
@@ -59,6 +60,8 @@ describe('Colas de oficina (dashboard) de la ruta externa', () => {
       },
     })
     venueId = venue.id
+    // Ruling R12: el producto fixture es al 0 %; el venue representa un negocio con IVA por producto encendido.
+    await encenderIvaPorProducto(venueId)
 
     const staff = await prisma.staff.create({
       data: {

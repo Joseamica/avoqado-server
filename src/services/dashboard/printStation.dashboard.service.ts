@@ -19,6 +19,8 @@ import { Prisma, PrinterConnectionType } from '@prisma/client'
 import { BadRequestError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { logAction } from './activity-log.service'
+import { assertNoGroupedProducts } from '../product-variants/groupOwnedFields'
+import { groupOwnedFieldError, isGroupWriterViolation } from '../product-variants/variantErrors'
 import { isActiveSuperAdmin } from '../../mcp/scope'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import { PANTALLA_ABIERTA_A_CLIENTES } from '../kds/kitchenDisplayRelease'
@@ -36,6 +38,7 @@ import type {
   CreatePrinterInput,
   CreateStationInput,
   PreviewRoutingInput,
+  RoutingQuery,
   UpdatePrinterInput,
   UpdateStationInput,
   UpsertGatewayInput,
@@ -311,8 +314,13 @@ async function assertPuedePrenderPantalla(venueId: string, performedBy?: string)
 export async function deleteStation(venueId: string, stationId: string, performedBy?: string) {
   const station = await prisma.printStation.findFirst({ where: { id: stationId, venueId } })
   if (!station) throw new NotFoundError('Estación no encontrada')
-  // FK SetNull en MenuCategory/Product/OrderItem/PrintJob.printStationId.
-  await prisma.printStation.delete({ where: { id: stationId } })
+  // FK SetNull en MenuCategory/Product/ProductGroup/OrderItem/PrintJob.printStationId. Codex #4: el negocio primero, como el
+  // motor de variantes (cerco → padre → variantes): sin él, el SET NULL esperaba al padre bloqueado mientras la variante
+  // nueva, por su FK, esperaba a esta estación: deadlock.
+  await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR SHARE`
+    await tx.printStation.delete({ where: { id: stationId } })
+  })
   void logAction({
     staffId: performedBy ?? null,
     venueId,
@@ -353,27 +361,83 @@ export async function upsertGateway(venueId: string, input: UpsertGatewayInput, 
 }
 
 // ── Routing (category/product → station) ────────────────────────────
-export async function getRouting(venueId: string) {
+export async function getRouting(venueId: string, query: RoutingQuery = {}) {
   await assertVenue(venueId)
-  const [categories, products] = await Promise.all([
-    prisma.menuCategory.findMany({
-      where: { venueId },
-      select: { id: true, name: true, printStationId: true },
-      orderBy: { displayOrder: 'asc' },
-    }),
-    prisma.product.findMany({
-      where: { venueId },
-      select: { id: true, name: true, categoryId: true, printStationId: true },
-      orderBy: { name: 'asc' },
-    }),
-  ])
-  const stations = await prisma.printStation.findMany({ where: { venueId, active: true }, select: { id: true, isDefault: true } })
-  const hasDefault = stations.some(s => s.isDefault)
-  const activeStationIds = new Set(stations.map(s => s.id))
-  // "Sin ruta" = categorías sin estación ACTIVA propia Y sin default del venue (mismo criterio que el motor:
-  // una categoría apuntando a una estación desactivada/borrada también cuenta como sin ruta).
-  const unroutedCategories = hasDefault ? 0 : categories.filter(c => !c.printStationId || !activeStationIds.has(c.printStationId)).length
-  return { categories, products, unroutedCategories, hasDefault }
+  const hasDefault = (await prisma.printStation.count({ where: { venueId, active: true, isDefault: true } })) > 0
+  // Misma cascada del motor: sólo una estación activa del propio venue resuelve la categoría.
+  const unroutedCategories = hasDefault
+    ? 0
+    : await prisma.menuCategory.count({
+        where: { venueId, OR: [{ printStationId: null }, { printStation: { isNot: { venueId, active: true } } }] },
+      })
+  const summary = { unroutedCategories, hasDefault }
+  if (query.section === 'summary') return { categories: [], products: [], ...summary }
+
+  const categoryWhere: Prisma.MenuCategoryWhereInput = {
+    venueId,
+    ...(query.section && query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
+  }
+  const productWhere: Prisma.ProductWhereInput = {
+    venueId,
+    deletedAt: null,
+    ...(query.section && query.search ? { name: { contains: query.search, mode: 'insensitive' } } : {}),
+    ...(query.section && query.categoryId ? { categoryId: query.categoryId } : {}),
+  }
+  const categoryPage = (skip: number, take: number) =>
+    prisma.menuCategory
+      .findMany({
+        where: categoryWhere,
+        select: { id: true, name: true, printStationId: true, _count: { select: { products: { where: { venueId, deletedAt: null } } } } },
+        orderBy: [{ displayOrder: 'asc' }, { id: 'asc' }],
+        skip: skip,
+        take: take,
+      })
+      .then(rows => rows.map(({ _count, ...category }) => ({ ...category, productCount: _count.products })))
+  const productPage = (skip: number, take: number) =>
+    prisma.product
+      .findMany({
+        where: productWhere,
+        // Variantes: la impresora de una talla es de su padre; el dashboard necesita saber cuáles son variantes (campos planos, opcionales).
+        select: {
+          id: true,
+          name: true,
+          categoryId: true,
+          printStationId: true,
+          productGroupId: true,
+          productGroup: { select: { name: true } },
+        },
+        orderBy: [{ name: 'asc' }, { id: 'asc' }],
+        skip: skip,
+        take: take,
+      })
+      .then(rows => rows.map(({ productGroup, ...product }) => ({ ...product, productGroupName: productGroup?.name ?? null })))
+
+  if (query.section) {
+    const page = Math.max(1, Math.floor(query.page ?? 1))
+    const pageSize = Math.min(100, Math.max(1, Math.floor(query.pageSize ?? 50)))
+    const skip = (page - 1) * pageSize
+    if (query.section === 'categories') {
+      const [categories, total] = await Promise.all([categoryPage(skip, pageSize), prisma.menuCategory.count({ where: categoryWhere })])
+      return { categories, products: [], ...summary, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+    }
+    const [products, total] = await Promise.all([productPage(skip, pageSize), prisma.product.count({ where: productWhere })])
+    return { categories: [], products, ...summary, pagination: { page, pageSize, total, totalPages: Math.ceil(total / pageSize) } }
+  }
+
+  // ponytail: legacy O(catálogo), páginas internas de 100; retirar tras desplegar backend → dashboard y migrar clientes viejos.
+  const categories = [],
+    products = []
+  for (let skip = 0; ; skip += 100) {
+    const rows = await categoryPage(skip, 100)
+    categories.push(...rows)
+    if (rows.length < 100) break
+  }
+  for (let skip = 0; ; skip += 100) {
+    const rows = await productPage(skip, 100)
+    products.push(...rows)
+    if (rows.length < 100) break
+  }
+  return { categories, products, ...summary }
 }
 
 export async function assignRouting(venueId: string, input: AssignRoutingInput, performedBy?: string) {
@@ -396,17 +460,30 @@ export async function assignRouting(venueId: string, input: AssignRoutingInput, 
 
   let categoriesUpdated = 0
   let productsUpdated = 0
-  await prisma.$transaction(async tx => {
-    for (const entry of input.categories ?? []) {
-      // venueId en el where = aislamiento multi-tenant (ignora ids ajenos).
-      const r = await tx.menuCategory.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
-      categoriesUpdated += r.count
-    }
-    for (const entry of input.products ?? []) {
-      const r = await tx.product.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
-      productsUpdated += r.count
-    }
-  })
+  await prisma
+    .$transaction(async tx => {
+      // Variantes (A9): la impresora de una talla es la de su padre; se cambia desde ese producto, no en la matriz de ruteo.
+      await assertNoGroupedProducts(
+        tx,
+        venueId,
+        (input.products ?? []).map(p => p.id),
+        'la impresora',
+      )
+      for (const entry of input.categories ?? []) {
+        // venueId en el where = aislamiento multi-tenant (ignora ids ajenos).
+        const r = await tx.menuCategory.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
+        categoriesUpdated += r.count
+      }
+      for (const entry of input.products ?? []) {
+        const r = await tx.product.updateMany({ where: { id: entry.id, venueId }, data: { printStationId: entry.printStationId } })
+        productsUpdated += r.count
+      }
+    })
+    .catch(e => {
+      // Lo agruparon entre la revisión y la escritura: el trigger del escritor único lo frena; 409, nunca 500.
+      if (isGroupWriterViolation(e)) throw groupOwnedFieldError('con variantes')
+      throw e
+    })
 
   void logAction({
     staffId: performedBy ?? null,

@@ -629,7 +629,28 @@ describe('DELETE /api/v1/google-calendar/connections/:id', () => {
     expect(res.status).toBe(204)
   })
 
+  it('returns 404 for the personal connection of someone who does not work at the caller venue (19-oct)', async () => {
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce(null)
+    ;(prismaMock.googleCalendarConnection.findUnique as jest.Mock).mockResolvedValueOnce({
+      id: 'conn-foreign',
+      scope: 'STAFF_PERSONAL',
+      staffId: 'de-otro-negocio',
+      venueId: null,
+      accessTokenCiphertext: Buffer.from('ENC(at)'),
+      refreshTokenCiphertext: Buffer.from('ENC(rt)'),
+      channels: [],
+    })
+
+    const res = await api()
+      .delete('/api/v1/google-calendar/connections/conn-foreign')
+      .set('Cookie', [`accessToken=${makeToken()}`])
+
+    expect(res.status).toBe(404)
+    expect(prismaMock.googleCalendarConnection.update).not.toHaveBeenCalled()
+  })
+
   it('returns 403 when caller is not the owner and lacks calendar:disconnect_staff', async () => {
+    ;(prismaMock.staffVenue.findFirst as jest.Mock).mockResolvedValueOnce({ id: 'sv-someone-else' }) // trabaja en la sucursal
     accessService.getUserAccess.mockResolvedValueOnce({
       ...mockUserAccessFixture,
       corePermissions: ['calendar:connect_self'], // no disconnect_staff

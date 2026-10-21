@@ -11,6 +11,7 @@ import {
 } from '../../lib/providerDeviceCompatibility'
 import { createBlumonTpvService } from '../tpv/blumon-tpv.service'
 import { getBalanceForMerchant } from '../financial-connections/financialConnection.service'
+import { ACTIVATABLE_TERMINAL_TYPES } from '../device-capabilities.service'
 
 /**
  * MerchantAccount Service
@@ -253,8 +254,8 @@ interface UpdateMerchantAccountData {
  * the TPV routing model in `terminal.tpv.controller.ts`: a terminal serves a
  * merchant when it either
  *   (a) lists the merchant explicitly in `assignedMerchantIds`, OR
- *   (b) has an EMPTY `assignedMerchantIds` AND the merchant occupies one of that
- *       terminal's venue's VenuePaymentConfig slots (inheritance fallback).
+ *   (b) is a payment terminal (TPV_*) with an EMPTY `assignedMerchantIds` AND the merchant
+ *       occupies one of that terminal's venue's VenuePaymentConfig slots (inheritance fallback).
  *
  * Counting only (a) — the old behavior — reported "0 terminals" for merchants
  * routed the normal way (slotted into a venue whose terminals are unrestricted),
@@ -285,8 +286,11 @@ export async function resolveEffectiveTerminals(
       OR: [
         // (a) explicit — any terminal that lists one of these merchants
         { assignedMerchantIds: { hasSome: merchantIds } },
-        // (b) inherited — unrestricted terminals in a venue where a merchant is slotted
-        ...(allVenueIds.length > 0 ? [{ venueId: { in: allVenueIds }, assignedMerchantIds: { isEmpty: true } }] : []),
+        // (b) inherited — unrestricted PAYMENT terminals in a venue where a merchant is slotted. Los POS
+        // auto-registrados (celulares/tablets con la app POS) no cobran con tarjeta: no heredan el comercio.
+        ...(allVenueIds.length > 0
+          ? [{ venueId: { in: allVenueIds }, assignedMerchantIds: { isEmpty: true }, type: { in: [...ACTIVATABLE_TERMINAL_TYPES] } }]
+          : []),
       ],
     },
     select: { id: true, serialNumber: true, venueId: true, assignedMerchantIds: true },

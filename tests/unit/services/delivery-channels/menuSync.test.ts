@@ -159,11 +159,53 @@ describe('disponibilidad — agotar y revivir productos', () => {
     return { setItemSoldOut: jest.fn(async () => ({ ok, status: ok ? 200 : 400, raw: '' })) }
   }
 
+  const mockedQueryRaw = (prisma as any).$queryRaw as jest.Mock
+  const mockedTransaction = (prisma as any).$transaction as jest.Mock
+
   beforeEach(() => {
     jest.clearAllMocks()
     ;(hasAdapter as jest.Mock).mockReturnValue(true)
     mockedFeature.mockResolvedValue(true)
     mockedLinkUpdate.mockResolvedValue({})
+    mockedQueryRaw.mockResolvedValue([{ config: {} }])
+  })
+
+  it('🔴 no pisa un cambio de config que llegó mientras se hablaba con el proveedor', async () => {
+    // El canal se leyó al empezar la pasada (recargo 30 %). Mientras se agotaban productos en Uber,
+    // el dueño subió su recargo a 40 %. Escribir la copia vieja devolvía el 30 % y la siguiente
+    // publicación del menú cobraba el precio viejo. Sólo `soldOutSkus` es de esta función.
+    // Y el candado se toma DESPUÉS de hablar con el proveedor: con la fila bloqueada durante el HTTP, el
+    // dueño no podría guardar nada mientras Uber tarda en contestar.
+    const transaccionesDuranteHttp: number[] = []
+    const a = {
+      setItemSoldOut: jest.fn(async () => {
+        transaccionesDuranteHttp.push(mockedTransaction.mock.calls.length)
+        return { ok: true, status: 200, raw: '' }
+      }),
+    }
+    ;(adapterFor as jest.Mock).mockReturnValue(a)
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }]).mockResolvedValueOnce([])
+    mockedQueryRaw.mockResolvedValue([{ config: { precios: { recargoPct: 40 }, soldOutSkus: [] } }])
+
+    await syncChannelAvailability(link({ config: { precios: { recargoPct: 30 }, soldOutSkus: [] } }))
+
+    expect(mockedLinkUpdate).toHaveBeenCalledWith({
+      where: { id: 'link1' },
+      data: { config: { precios: { recargoPct: 40 }, soldOutSkus: ['A'] } },
+    })
+    // Se relee BLOQUEANDO la fila, dentro de la misma transacción que escribe.
+    expect(mockedTransaction).toHaveBeenCalledTimes(1)
+    expect(mockedQueryRaw.mock.calls[0][0].join(' ')).toMatch(/FOR UPDATE/)
+    expect(transaccionesDuranteHttp).toEqual([0])
+  })
+
+  it('si el canal ya no existe al escribir, no truena ni escribe', async () => {
+    ;(adapterFor as jest.Mock).mockReturnValue(adaptadorDisp())
+    mockedProducts.mockResolvedValueOnce([{ sku: 'A' }]).mockResolvedValueOnce([])
+    mockedQueryRaw.mockResolvedValue([])
+
+    await expect(syncChannelAvailability(link({ config: {} }))).resolves.toEqual({ agotados: 1, revividos: 0 })
+    expect(mockedLinkUpdate).not.toHaveBeenCalled()
   })
 
   it('🔴 agota lo que se acabó y revive lo que volvió — sólo la DIFERENCIA', () => {

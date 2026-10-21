@@ -9,6 +9,16 @@ const mockSubRetrieve = jest.fn()
 const mockSubList = jest.fn()
 const mockPriceList = jest.fn()
 const mockPmRetrieve = jest.fn()
+// D2: lo que lee la evidencia del primer cobro (`primerCobroPagado` y el lector REAL de cobertura).
+const mockInvList = jest.fn()
+/** `invoicePayments.list` SIN `status`: lo que lee el resolver del PASO 6 (S3), el PaymentIntent de la factura. */
+const mockIpList = jest.fn()
+/** `invoicePayments.list` con `status: 'paid'`: los pagos que suma el lector de cobertura. Lo arma `facturaInicial`. */
+const mockPagosCobrados = jest.fn()
+const mockCnList = jest.fn()
+const mockBalTx = jest.fn()
+/** S3: anular la factura de un intento que no se pagó (nunca `subscriptions.cancel`). */
+const mockVoid = jest.fn()
 
 jest.mock('stripe', () =>
   jest.fn().mockImplementation(() => ({
@@ -16,15 +26,24 @@ jest.mock('stripe', () =>
     prices: { list: mockPriceList },
     paymentMethods: { retrieve: mockPmRetrieve },
     coupons: { create: jest.fn(), retrieve: jest.fn(), del: jest.fn() },
-    customers: { create: jest.fn(), retrieve: jest.fn() },
+    customers: { create: jest.fn(), retrieve: jest.fn(), listBalanceTransactions: mockBalTx },
+    invoices: { list: mockInvList, voidInvoice: mockVoid },
+    invoicePayments: {
+      list: (p: { status?: string }, ...resto: unknown[]) =>
+        p?.status === 'paid' ? mockPagosCobrados(p, ...resto) : mockIpList(p, ...resto),
+    },
+    creditNotes: { list: mockCnList },
   })),
 )
 
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn().mockResolvedValue(undefined) }))
 // V5-A paso 6: el cobro nuevo pasa por la regla común (probada en su suite) y el acceso lo escribe la entrega (probada en la
-// suya). Aquí se simulan en su borde para probar lo que decide ESTE servicio.
+// suya). Aquí se simulan en su borde para probar lo que decide ESTE servicio. Lo demás del módulo (su plazo) es el real.
 const mockAutorizar = jest.fn()
-jest.mock('@/services/access/autorizarObligacionNueva', () => ({ autorizarObligacionNueva: (...a: unknown[]) => mockAutorizar(...a) }))
+jest.mock('@/services/access/autorizarObligacionNueva', () => ({
+  ...jest.requireActual('@/services/access/autorizarObligacionNueva'),
+  autorizarObligacionNueva: (...a: unknown[]) => mockAutorizar(...a),
+}))
 const mockEntregar = jest.fn()
 jest.mock('@/services/stripe.service', () => ({
   ...jest.requireActual('@/services/stripe.service'),
@@ -43,11 +62,19 @@ jest.mock('@/services/email.service', () => ({
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
 
-import { activatePlan, hayCobroDelAltaSinCerrar, liberarLugar, LEASE_MS } from '@/services/onboarding/planActivation.service'
+import {
+  activatePlan,
+  cerrarAltaSinNavegador,
+  hayCobroDelAltaSinCerrar,
+  liberarLugar,
+  LEASE_MS,
+} from '@/services/onboarding/planActivation.service'
 import { standardPlanQuote } from '@/services/access/planPricing.constants'
 import { standardFirstChargeCents } from '@/services/launchCampaigns/launchOfferMath'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import logger from '@/config/logger'
+import { inspect } from 'util'
 
 const LISTA = 115884
 const ANUNCIADO = 2200
@@ -112,12 +139,91 @@ const BASE = {
   paymentMethodId: 'pm_1',
 }
 
+/**
+ * El `plan` que el cierre agregó al formulario. Desde el 20-oct se escribe SÓLO esa sección con `fusionarV2SetupData`
+ * (un `$executeRaw` sobre `"v2SetupData"`), no dentro del `updateMany` del candado: reescribir el formulario entero borraba
+ * lo que otra pestaña guardó en medio.
+ */
+function planDelCierre(): any {
+  const fusiones = (prismaMock.$executeRaw as jest.Mock).mock.calls.filter(
+    (c: any[]) => Array.isArray(c[0]) && c[0].join('').includes('"v2SetupData"'),
+  )
+  const ultima = fusiones.at(-1)
+  return ultima ? JSON.parse(ultima[1]).plan : undefined
+}
+
 /** Un `$transaction(cb)` que le pasa el mismo mock como `tx`, igual que el setup global. */
 function prepararTransaccion() {
   prismaMock.$transaction.mockImplementation(async (cb: unknown) => (cb as (tx: unknown) => unknown)(prismaMock))
 }
 
 const CONCEDIDO_PRO = { venueId: 'venue-1', featureId: 'feat-pro', featureCode: 'PLAN_PRO', subscriptionId: 'sub_1', endDate: null }
+
+/**
+ * D2 (y S3): la PRIMERA factura de `sub_3ds` (`in_1`, `billing_reason: 'subscription_create'`), coherente para el lector
+ * REAL de cobertura (`hybridFundingGraph`, formas de su suite): `total` es después del cupón y antes del saldo,
+ * `tarjeta` lo cobrado a la tarjeta (`amount_paid`), `saldo` el saldo a favor aplicado (con su abono y su uso en
+ * `listBalanceTransactions`). Arma `mockInvList`, los pagos de la factura (`mockPagosCobrados`, la llamada con
+ * `status: 'paid'`) y el saldo; la llamada del resolver de S3 (sin `status`) sigue en `mockIpList`.
+ */
+function facturaInicial({ total, tarjeta, saldo, status }: { total: number; tarjeta: number; saldo: number; status: 'paid' | 'open' }) {
+  const factura = {
+    id: 'in_1',
+    customer: 'cus_1',
+    currency: 'mxn',
+    billing_reason: 'subscription_create',
+    status,
+    total,
+    amount_paid: tarjeta,
+    starting_balance: saldo ? -saldo : 0,
+    ending_balance: 0,
+    post_payment_credit_notes_amount: 0,
+  }
+  mockInvList.mockResolvedValue({ data: [factura], has_more: false })
+  mockPagosCobrados.mockResolvedValue({
+    has_more: false,
+    data: tarjeta
+      ? [
+          {
+            status: 'paid',
+            currency: 'mxn',
+            amount_paid: tarjeta,
+            payment: {
+              type: 'charge',
+              charge: { id: 'ch_1', paid: true, currency: 'mxn', amount: tarjeta, amount_refunded: 0, disputed: false },
+            },
+          },
+        ]
+      : [],
+  })
+  // De la más nueva a la más vieja, como las devuelve Stripe: el abono del saldo y su uso en `in_1`.
+  mockBalTx.mockResolvedValue({
+    has_more: false,
+    data: saldo
+      ? [
+          {
+            id: 'cbtxn_uso',
+            customer: 'cus_1',
+            currency: 'mxn',
+            type: 'applied_to_invoice',
+            amount: saldo,
+            ending_balance: 0,
+            invoice: 'in_1',
+          },
+          {
+            id: 'cbtxn_abono',
+            customer: 'cus_1',
+            currency: 'mxn',
+            type: 'adjustment',
+            amount: -saldo,
+            ending_balance: -saldo,
+            invoice: null,
+          },
+        ]
+      : [],
+  })
+  return factura
+}
 
 beforeEach(() => {
   jest.clearAllMocks()
@@ -126,13 +232,23 @@ beforeEach(() => {
   mockEntregar
     .mockReset()
     .mockImplementation(async ({ subscriptionId }: { subscriptionId: string }) => ({ ...CONCEDIDO_PRO, subscriptionId }))
-  mockPriceList.mockResolvedValue({
+  // `clearAllMocks` no tira las respuestas `…Once` sin usar: una prueba que falla a medias se las heredaba a la siguiente.
+  mockPriceList.mockReset().mockResolvedValue({
     data: [{ id: 'price_x', unit_amount: LISTA, currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive' }],
   })
   mockPmRetrieve.mockResolvedValue({ id: 'pm_1', customer: 'cus_1', card: { fingerprint: 'fp_1' } })
-  mockSubCreate.mockResolvedValue({ id: 'sub_1' })
-  mockSubRetrieve.mockResolvedValue({
+  mockSubCreate.mockReset().mockResolvedValue({ id: 'sub_1' })
+  mockInvList.mockReset()
+  mockIpList.mockReset()
+  mockPagosCobrados.mockReset()
+  mockBalTx.mockReset()
+  mockVoid.mockReset()
+  mockCnList.mockReset().mockResolvedValue({ data: [], has_more: false })
+  prismaMock.hybridPurchase.findUnique.mockResolvedValue(null as never)
+  // Stripe siempre trae `status`: el cierre lo exige (D2, candado del PASO 9).
+  mockSubRetrieve.mockReset().mockResolvedValue({
     id: 'sub_1',
+    status: 'active',
     current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
     latest_invoice: { amount_paid: ANUNCIADO },
     discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
@@ -185,6 +301,8 @@ describe('camino feliz con campaña', () => {
     expect(opciones).toEqual({ idempotencyKey: 'plan-activation:org-1:1', timeout: 15_000, maxNetworkRetries: 0 })
     expect(r).toMatchObject({ status: 'ACTIVE', alreadyActive: false, firstChargeCents: ANUNCIADO })
     expect(r.launchOffer).toMatchObject({ code: 'POS22', months: 3, renewalMonthlyCents: ANUNCIADO })
+    // D2: el cobro clásico que pasa a la primera no pide la evidencia nueva.
+    expect(mockInvList).not.toHaveBeenCalled()
   })
 
   it('🔴 aparta el lugar con UPDATE … WHERE conteo < cupo, nunca leyendo primero', async () => {
@@ -201,14 +319,30 @@ describe('camino feliz con campaña', () => {
     expect(prismaMock.venue.update).toHaveBeenCalledWith({ where: { id: 'venue-1' }, data: { planTier: 'PRO' } })
   })
 
-  it('🔴 `plan` se guarda en la RAÍZ de v2SetupData (es lo que parseV2Plan busca primero)', async () => {
+  it('🔴 `plan` se guarda en la RAÍZ de v2SetupData (es lo que parseV2Plan busca primero), sin reescribir el formulario', async () => {
     await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
     const escritura = prismaMock.onboardingProgress.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE')
-    expect((escritura?.[0].data.v2SetupData as Record<string, unknown>).plan).toMatchObject({
+    // El candado ya no reescribe el formulario entero (borraba lo que otra pestaña guardó en medio; 20-oct).
+    expect(escritura?.[0].data.v2SetupData).toBeUndefined()
+    expect(planDelCierre()).toMatchObject({
       tier: 'PRO',
       interval: 'monthly',
       payNow: true,
     })
+  })
+
+  it('🔴 el correo de confirmación dice la fecha del siguiente cobro de Stripe, no «hoy + 30 días»', async () => {
+    const { resolvePlanNotificationTarget } = jest.requireMock('@/services/access/planNotification.service')
+    resolvePlanNotificationTarget.mockResolvedValueOnce({ email: 'dueno@x.com', locale: 'es', venueName: 'Bar' })
+    const { default: emailService } = jest.requireMock('@/services/email.service')
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r)) // el correo sale sin bloquear la respuesta
+
+    expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledWith(
+      'dueno@x.com',
+      expect.objectContaining({ firstChargeDate: new Date('2026-10-17T00:00:00Z') }), // current_period_end de la suscripción
+    )
   })
 
   it('la redención queda APPLIED con la suscripción y la huella de tarjeta', async () => {
@@ -404,6 +538,7 @@ describe('recuperación de un intento desconocido', () => {
     })
     mockSubRetrieve.mockResolvedValue({
       id: 'sub_buena',
+      status: 'active',
       current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
       latest_invoice: { amount_paid: ANUNCIADO },
       discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
@@ -471,7 +606,8 @@ describe('recuperación de un intento desconocido', () => {
     expect(mockEntregar).toHaveBeenCalledWith({ venueId: 'venue-1', subscriptionId: 'sub_rec', detectedBy: 'onboarding.activatePlan' })
     // El alta queda ACTIVE con lo cobrado…
     const cierre = prismaMock.onboardingProgress.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE')
-    expect(cierre?.[0].data.v2SetupData.plan).toMatchObject({ tier: 'PREMIUM', offer: { kind: 'STANDARD' } })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ tier: 'PREMIUM', offer: { kind: 'STANDARD' } })
     expect(prismaMock.venue.update).toHaveBeenCalledWith(expect.objectContaining({ data: { planTier: 'PREMIUM' } }))
     // …el lugar de la oferta se libera, y la bitácora dice lo que pasó (nunca «campaña canjeada»).
     expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith(
@@ -651,6 +787,9 @@ describe('desenlaces del cobro', () => {
     // Y el progreso queda DECLINED, para que el siguiente intento estrene llave.
     const decl = prismaMock.onboardingProgress.updateMany.mock.calls.find((c: any[]) => c[0]?.data?.planActivationStatus === 'DECLINED')
     expect(decl).toBeDefined()
+    // D2: un rechazo de verdad no dispara el 2.º create ni la evidencia nueva.
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockInvList).not.toHaveBeenCalled()
   })
 
   it('🔴 un resultado DESCONOCIDO: 503 y el lugar sigue RESERVED', async () => {
@@ -690,6 +829,7 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
     prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso({ launchCampaignId: null }) as never)
     mockSubRetrieve.mockResolvedValue({
       id: 'sub_1',
+      status: 'active',
       current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
       latest_invoice: { amount_paid: 69484 },
       discounts: [{ coupon: { id: 'INTRO_PRO_3M' } }],
@@ -709,6 +849,7 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
   it('con prueba gratis: trial 30, sin cupón y sin cobro hoy', async () => {
     mockSubRetrieve.mockResolvedValue({
       id: 'sub_1',
+      status: 'trialing',
       current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
       latest_invoice: { amount_due: 0 },
     })
@@ -1078,6 +1219,7 @@ describe('la recuperación honra lo que SE COBRÓ, no lo que pide el reintento',
     } as never)
     mockSubRetrieve.mockResolvedValue({
       id: 'sub_buena',
+      status: 'active',
       current_period_end: Math.floor(new Date('2026-10-17T00:00:00Z').getTime() / 1000),
       latest_invoice: { amount_paid: ANUNCIADO },
       discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
@@ -1170,7 +1312,8 @@ describe('la recuperación honra lo que SE COBRÓ, no lo que pide el reintento',
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       c => c[0].data?.planActivationStatus === 'ACTIVE',
     )
-    expect(cierre?.[0].data.v2SetupData.plan).toMatchObject({ tier: 'PREMIUM', interval: 'annual' })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ tier: 'PREMIUM', interval: 'annual' })
   })
 
   it('🔴 una suscripción CANCELADA no se lee como cobro recuperado', async () => {
@@ -1500,7 +1643,8 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       (c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE',
     )
-    expect((cierre?.[0].data.v2SetupData as Record<string, any>).plan).toMatchObject({ tier: 'PRO' })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ tier: 'PRO' })
   })
 
   it('🔴 y si no se puede determinar qué plan vende (dos planes en la misma suscripción), no se cierra el alta', async () => {
@@ -1564,7 +1708,8 @@ describe('🔴 R13: lo que se guarda es lo COBRADO, no lo que pide el reintento'
     const cierre = (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.find(
       (c: any[]) => c[0]?.data?.planActivationStatus === 'ACTIVE',
     )
-    expect((cierre?.[0].data.v2SetupData as Record<string, any>).plan).toMatchObject({ payNow: true })
+    expect(cierre).toBeDefined()
+    expect(planDelCierre()).toMatchObject({ payNow: true })
   })
 })
 
@@ -1732,6 +1877,1462 @@ describe('🔴 Codex R12: hayCobroDelAltaSinCerrar — lo que consulta `complete
       select: { id: true, stripeCustomerId: true },
       orderBy: { id: 'asc' },
       take: 100,
+    })
+  })
+})
+
+/**
+ * 🔴 D2 (18-oct): con una tarjeta que pide 3D Secure en el primer cobro, `error_if_incomplete` responde 402
+ * `subscription_payment_intent_requires_action` y el alta lo trataba como RECHAZO (DECLINED, lugar liberado, «Tu banco
+ * rechazó el cargo»). Ahora se crea la suscripción `default_incomplete` (S1), se responde 409 con el secreto para el reto
+ * del banco, y el acceso sólo se entrega con la PRIMERA factura pagada por el monto consentido.
+ */
+describe('🔴 D2: el banco pide autenticar el primer cobro (primer pedido)', () => {
+  const errorDeAutenticacion = () =>
+    Object.assign(new Error('Payment for this subscription requires additional user action…'), {
+      type: 'StripeCardError',
+      code: 'subscription_payment_intent_requires_action',
+      statusCode: 402,
+    })
+  const errorDeConexion = () => Object.assign(new Error('socket hang up'), { type: 'StripeConnectionError' })
+  const porAutenticar = {
+    id: 'sub_3ds',
+    status: 'incomplete',
+    latest_invoice: { id: 'in_1', status: 'open', confirmation_secret: { type: 'payment_intent', client_secret: 'pi_1_secret_x' } },
+  }
+  /** #1 pide autenticar; #2 queda `incomplete` con el secreto. */
+  const pideAutenticar = () => mockSubCreate.mockRejectedValueOnce(errorDeAutenticacion()).mockResolvedValueOnce(porAutenticar)
+  /** #1 pide autenticar; #2 vuelve `active` sin reto (p. ej. factura de $0): el monto lo exige activatePlan. */
+  const segundoActivo = () =>
+    mockSubCreate
+      .mockRejectedValueOnce(errorDeAutenticacion())
+      .mockResolvedValueOnce({ id: 'sub_3ds', status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: 0 } })
+  const progresos = () => (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.map(c => c[0])
+  const redenciones = () => (prismaMock.launchCampaignRedemption.updateMany as jest.Mock).mock.calls.map(c => c[0])
+  const conEstado = (estado: string) => progresos().filter(a => a?.data?.planActivationStatus === estado)
+  const redencionCon = (estado: string) => redenciones().filter(a => a?.data?.status === estado)
+  const soltoElLease = () =>
+    progresos().some(a => a?.data && 'planActivationLeaseUntil' in a.data && a.data.planActivationLeaseUntil === null)
+
+  beforeEach(() => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+  })
+
+  it('responde 409 PLAN_PAYMENT_REQUIRES_ACTION con el secreto, y NO es un rechazo', async () => {
+    pideAutenticar()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+
+    expect(conEstado('DECLINED')).toEqual([])
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(redencionCon('APPLIED')).toEqual([])
+    const bajada = (prismaMock.launchCampaign.updateMany as jest.Mock).mock.calls.find((c: any[]) => c[0]?.data?.redemptionCount?.decrement)
+    expect(bajada).toBeUndefined()
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(prismaMock.venue.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el id de la suscripción incompleta queda guardado en cuanto existe', async () => {
+    pideAutenticar()
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: { planStripeSubscriptionId: 'sub_3ds' } }),
+    )
+  })
+
+  it('🔴 suelta el lease SIN salir de IN_PROGRESS y con la marca del dueño', async () => {
+    pideAutenticar()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_PAYMENT_REQUIRES_ACTION' })
+
+    const nuestro = progresos()[0].data.planActivationLeaseUntil
+    expect(nuestro).toBeInstanceOf(Date)
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1', planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: nuestro },
+      data: { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null },
+    })
+  })
+
+  it('el 2.º create lleva la llave «:autenticar» y la MISMA planActivationKey en la metadata', async () => {
+    pideAutenticar()
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(2)
+    expect(mockSubCreate.mock.calls[1][1].idempotencyKey).toBe('plan-activation:org-1:1:autenticar')
+    expect(mockSubCreate.mock.calls[1][0].metadata.planActivationKey).toBe('plan-activation:org-1:1')
+    // El monto contra el que se exigirá la factura pagada es el que cotizó el servidor.
+    expect(mockSubCreate.mock.calls[1][0].metadata.primerCobroEsperadoCents).toBe(String(ANUNCIADO))
+  })
+
+  it('🔴 el secreto nunca llega al log', async () => {
+    pideAutenticar()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_PAYMENT_REQUIRES_ACTION' })
+
+    expect(logger.info).toHaveBeenCalledWith('activate-plan: el banco pide autorizar el primer cobro', {
+      organizationId: 'org-1',
+      subscriptionId: 'sub_3ds',
+    })
+    const todo = (['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls)
+    expect(inspect(todo, { depth: 10 })).not.toContain('_secret_')
+  })
+
+  it('el 2.º create sin respuesta de Stripe ⇒ 503, lugar RESERVED, lease VIVO', async () => {
+    mockSubCreate
+      .mockRejectedValueOnce(errorDeAutenticacion())
+      .mockRejectedValueOnce(errorDeConexion())
+      .mockRejectedValueOnce(errorDeConexion())
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(3)
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(soltoElLease()).toBe(false)
+  })
+
+  it('🔴 sin tiempo en el candado para el 2.º create ⇒ 503, intento IN_PROGRESS y lugar RESERVED', async () => {
+    // Codex r1 #4: cada consulta de precio tarda 140 s en este reloj; la de DENTRO del candado deja sin tiempo al #2.
+    let reloj = Date.now()
+    const ahora = jest.spyOn(Date, 'now').mockImplementation(() => reloj)
+    mockPriceList.mockImplementation(async () => {
+      reloj += 140_000
+      return { data: [{ id: 'price_x', unit_amount: LISTA, currency: 'mxn', recurring: { interval: 'month' }, tax_behavior: 'inclusive' }] }
+    })
+    mockSubCreate.mockRejectedValueOnce(errorDeAutenticacion())
+
+    try {
+      await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'PLAN_ACTIVATION_PENDING',
+      })
+    } finally {
+      ahora.mockRestore()
+    }
+
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(conEstado('DECLINED')).toEqual([])
+    expect(soltoElLease()).toBe(false)
+  })
+
+  it('🔴 candado del cierre: una suscripción REUSADA en incomplete nunca cierra ACTIVE ni APPLIED', async () => {
+    prismaMock.venueFeature.findUnique.mockResolvedValue({ stripeSubscriptionId: 'sub_inc' } as never)
+    prismaMock.feature.findMany.mockResolvedValue([
+      { code: 'PLAN_PRO', stripeProductId: 'prod_pro' },
+      { code: 'PLAN_PREMIUM', stripeProductId: 'prod_premium' },
+    ] as never)
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_inc',
+      status: 'incomplete',
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+      latest_invoice: { amount_paid: 0 },
+      items: {
+        has_more: false,
+        data: [
+          {
+            current_period_end: Math.floor(new Date('2026-11-17T00:00:00Z').getTime() / 1000),
+            price: { id: 'price_x', product: 'prod_pro', lookup_key: 'plan_pro_monthly', recurring: { interval: 'month' } },
+          },
+        ],
+      },
+    })
+    mockEntregar.mockResolvedValue(null)
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ statusCode: 503 })
+
+    expect(conEstado('ACTIVE')).toEqual([])
+    expect(redencionCon('APPLIED')).toEqual([])
+    expect(prismaMock.venue.update).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un intento nuevo desde DECLINED nace sin el id del anterior, en el MISMO CAS de la toma', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({ planActivationStatus: 'DECLINED', planActivationAttempt: 1, planStripeSubscriptionId: 'sub_A' }) as never,
+    )
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    const toma = progresos()[0]
+    expect(toma.where).toMatchObject({ planActivationStatus: 'DECLINED', planActivationAttempt: 1 })
+    expect(toma.data).toEqual(
+      expect.objectContaining({ planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 2, planStripeSubscriptionId: null }),
+    )
+  })
+
+  it.each([
+    ['desde NONE', {}],
+    [
+      'al recuperar un IN_PROGRESS vencido (ese id es el suyo)',
+      {
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: new Date('2020-01-01'),
+        planStripeSubscriptionId: 'sub_A',
+      },
+    ],
+  ])('contraprueba: %s, la toma NO toca el id de la suscripción', async (_caso, estado) => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso(estado) as never)
+
+    await activatePlan({ ...BASE, offer: OFERTA_LAUNCH }).catch(() => undefined)
+
+    expect(progresos()[0].data).not.toHaveProperty('planStripeSubscriptionId')
+  })
+
+  it('🔴 el 2.º create vuelve active pero su PRIMERA factura es de $0 cuando se consintieron $22 ⇒ 503 🚨, sin entrega ni APPLIED', async () => {
+    segundoActivo()
+    facturaInicial({ total: 0, tarjeta: 0, saldo: 0, status: 'paid' })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([])
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(conEstado('ACTIVE')).toEqual([])
+    expect((logger.error as jest.Mock).mock.calls.some(c => String(c[0]).startsWith('🚨'))).toBe(true)
+  })
+
+  it('🔴 el 2.º create vuelve active con la primera factura ABIERTA ⇒ 503, sin entrega', async () => {
+    segundoActivo()
+    facturaInicial({ total: ANUNCIADO, tarjeta: 0, saldo: 0, status: 'open' })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([])
+  })
+
+  it('el 2.º create con la primera factura pagada con tarjeta por el monto consentido ⇒ entrega, ACTIVE y APPLIED', async () => {
+    segundoActivo()
+    facturaInicial({ total: ANUNCIADO, tarjeta: ANUNCIADO, saldo: 0, status: 'paid' })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+    expect(mockEntregar).toHaveBeenCalledWith({ venueId: 'venue-1', subscriptionId: 'sub_3ds', detectedBy: 'onboarding.activatePlan' })
+    expect(redencionCon('APPLIED')).toEqual([expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' } })])
+  })
+
+  it('separación: la prueba de 30 días no pide la evidencia', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso({ launchCampaignId: null }) as never)
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_1',
+      status: 'trialing',
+      current_period_end: Math.floor(new Date('2026-11-17T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: 0, amount_due: 0 },
+    })
+
+    const r = await activatePlan({ ...BASE, payNow: false, offer: { kind: 'STANDARD', expectedFirstChargeCents: 0 } })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockSubCreate.mock.calls[0][0].trial_period_days).toBe(30)
+    expect(mockInvList).not.toHaveBeenCalled()
+  })
+
+  it('🔴 saldo a favor + tarjeta ($8 de saldo + $14 de tarjeta sobre $22) ⇒ ACTIVE y APPLIED, no 503', async () => {
+    segundoActivo()
+    facturaInicial({ total: ANUNCIADO, tarjeta: 1400, saldo: 800, status: 'paid' })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockEntregar).toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' } })])
+  })
+
+  /**
+   * La otra mitad de la regla: una suscripción RECUPERADA en el PASO 6 que salió del #2 (trae `primerCobroEsperadoCents`)
+   * también exige su primera factura pagada por ese monto antes de entregar. Sin la metadata (cobro clásico), como hoy.
+   */
+  describe('recuperada del camino de autenticación (trae primerCobroEsperadoCents)', () => {
+    beforeEach(() => {
+      prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+        progreso({
+          planActivationStatus: 'IN_PROGRESS',
+          planActivationAttempt: 1,
+          planActivationLeaseUntil: null,
+          planStripeSubscriptionId: 'sub_3ds',
+        }) as never,
+      )
+      prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+        id: 'red-1',
+        status: 'RESERVED',
+        campaignId: 'lc-1',
+        offerVersion: 1,
+      } as never)
+      mockSubRetrieve.mockResolvedValue({
+        id: 'sub_3ds',
+        status: 'active',
+        metadata: { planActivationKey: 'plan-activation:org-1:1', featureCode: 'PLAN_PRO', primerCobroEsperadoCents: String(ANUNCIADO) },
+        discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+        latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO },
+        current_period_end: Math.floor(new Date('2026-11-17T00:00:00Z').getTime() / 1000),
+      })
+    })
+
+    it('🔴 con la primera factura ABIERTA ⇒ 503, sin entrega ni APPLIED', async () => {
+      facturaInicial({ total: ANUNCIADO, tarjeta: 0, saldo: 0, status: 'open' })
+
+      await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+        statusCode: 503,
+        code: 'PLAN_ACTIVATION_PENDING',
+      })
+
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+      expect(redencionCon('APPLIED')).toEqual([])
+    })
+
+    it('con la primera factura pagada por el monto de su metadata ⇒ ACTIVE y APPLIED, sin cobrar otra vez', async () => {
+      facturaInicial({ total: ANUNCIADO, tarjeta: ANUNCIADO, saldo: 0, status: 'paid' })
+
+      const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+      expect(r.status).toBe('ACTIVE')
+      expect(mockSubCreate).not.toHaveBeenCalled()
+      expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+      expect(redencionCon('APPLIED')).toEqual([expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' } })])
+    })
+  })
+})
+
+/**
+ * 🔴 D2 (S3, spec §6.3): el pedido que el navegador manda DESPUÉS del reto del banco —o al recargar, o con otra tarjeta—
+ * entra por el PASO 6 con la suscripción del intento todavía `incomplete`. Antes: 503 durante 23 h. Ahora se decide con el
+ * estado REAL en Stripe: pagada ⇒ se entrega; esperando ⇒ el MISMO secreto; reto fallido ⇒ se anula la factura y es un
+ * rechazo; otra tarjeta u otra oferta ⇒ se anula y se estrena intento. Anular es condicional; nunca `cancel`.
+ */
+describe('🔴 D2: el pedido de después del reto (PASO 6 con una suscripción incompleta)', () => {
+  const FIN_DEL_PERIODO = Math.floor(new Date('2026-11-18T00:00:00Z').getTime() / 1000)
+  const VENCIDO = new Date('2020-01-01T00:00:00Z')
+  const incompleta = (o: Record<string, unknown> = {}) => ({
+    id: 'sub_3ds',
+    status: 'incomplete',
+    default_payment_method: 'pm_1',
+    metadata: {
+      featureCode: 'PLAN_PRO',
+      launchCampaignId: 'lc-1',
+      launchOfferVersion: '1',
+      launchRedemptionId: 'red-1',
+      planActivationKey: 'plan-activation:org-1:1',
+      primerCobroEsperadoCents: String(ANUNCIADO),
+    },
+    latest_invoice: { id: 'in_1', status: 'open', confirmation_secret: { client_secret: 'pi_1_secret_x' } },
+    items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'month' } } }] },
+    discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    ...o,
+  })
+  /** La suscripción que crea el intento NUEVO (cualquier id que no sea el del intento), ya vigente. */
+  const vigente = (id: string, status = 'active') => ({
+    id,
+    status,
+    items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'month' } } }] },
+    latest_invoice: { amount_paid: status === 'trialing' ? 0 : ANUNCIADO },
+    discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+  })
+  /** `subscriptions.retrieve` por id: las del mapa; cualquier otra es la recién creada. */
+  const enStripe = (subs: Record<string, unknown>) =>
+    mockSubRetrieve.mockImplementation(async (id: string) => subs[id] ?? vigente(id, id === 'sub_1' ? 'trialing' : 'active'))
+  /** El PaymentIntent de la primera factura, como lo devuelve `invoicePayments.list` (sin `status`: lo lee el resolver). */
+  const elPagoEsta = (status: string, last_payment_error: Record<string, unknown> | null = null) =>
+    mockIpList.mockResolvedValue({
+      has_more: false,
+      data: [{ is_default: true, payment: { type: 'payment_intent', payment_intent: { id: 'pi_1', status, last_payment_error } } }],
+    })
+  const errorDeConexion = () => Object.assign(new Error('socket hang up'), { type: 'StripeConnectionError' })
+  const progresos = () => (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.map(c => c[0])
+  const redencionCon = (estado: string) =>
+    (prismaMock.launchCampaignRedemption.updateMany as jest.Mock).mock.calls.map(c => c[0]).filter(a => a?.data?.status === estado)
+  const conEstado = (estado: string) => progresos().filter(a => a?.data?.planActivationStatus === estado)
+  const bajadas = () =>
+    (prismaMock.launchCampaign.updateMany as jest.Mock).mock.calls.filter((c: any[]) => c[0]?.data?.redemptionCount?.decrement)
+  const soltoElLease = () =>
+    progresos().some(a => a?.data && 'planActivationLeaseUntil' in a.data && a.data.planActivationLeaseUntil === null)
+  /** El avance de intento (sube a 2): la toma de la recuperación escribe el MISMO número. */
+  const avance = () => progresos().find(a => a?.data?.planActivationAttempt === 2)
+  const ofertaEstandarDePrueba = { kind: 'STANDARD' as const, expectedFirstChargeCents: 0 }
+  /** QA 18-oct: descartar el intento incompleto no dejaba ninguna línea en el log. Ahora deja una, sin el secreto. */
+  const dejoRastroDelDescarte = (motivo: string) => {
+    expect(logger.info).toHaveBeenCalledWith('activate-plan: se descartó la suscripción incompleta del intento anterior (no se cobró)', {
+      organizationId: 'org-1',
+      subscriptionId: 'sub_3ds',
+      motivo,
+    })
+    const todo = (['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls)
+    expect(inspect(todo, { depth: 10 })).not.toContain('_secret_')
+  }
+
+  /**
+   * Qué transacción estaba abierta (1, 2, …; 0 = ninguna) en cada escritura de progreso, redención y cupo: prueba que dos
+   * escrituras van JUNTAS en el mismo `$transaction` (el mock le pasa el mismo cliente como `tx`).
+   */
+  function rastrearTransacciones() {
+    let abierta = 0
+    let n = 0
+    const escrituras: Array<{ modelo: string; args: any; tx: number }> = []
+    prismaMock.$transaction.mockImplementation(async (cb: unknown) => {
+      const previa = abierta
+      abierta = ++n
+      try {
+        return await (cb as (tx: unknown) => unknown)(prismaMock)
+      } finally {
+        abierta = previa
+      }
+    })
+    const modelos = [
+      ['progreso', prismaMock.onboardingProgress.updateMany],
+      ['redencion', prismaMock.launchCampaignRedemption.updateMany],
+      ['cupo', prismaMock.launchCampaign.updateMany],
+    ] as const
+    for (const [modelo, mock] of modelos) {
+      ;(mock as jest.Mock).mockImplementation(async (args: any) => {
+        escrituras.push({ modelo, args, tx: abierta })
+        return { count: 1 }
+      })
+    }
+    return escrituras
+  }
+
+  /** El avance (intento 2, sin el id anterior), la liberación de `red-1` y el decremento, en la MISMA transacción. */
+  function liberoElLugarEnElAvance(escrituras: ReturnType<typeof rastrearTransacciones>) {
+    const elAvance = escrituras.find(e => e.modelo === 'progreso' && e.args?.data?.planActivationAttempt === 2)
+    const liberada = escrituras.find(e => e.modelo === 'redencion' && e.args?.data?.status === 'RELEASED')
+    const bajada = escrituras.find(e => e.modelo === 'cupo' && e.args?.data?.redemptionCount?.decrement)
+    expect(elAvance?.args.data).toEqual({ planActivationAttempt: 2, planStripeSubscriptionId: null })
+    expect(liberada?.args).toEqual({
+      where: { id: 'red-1', status: 'RESERVED' },
+      data: expect.objectContaining({ status: 'RELEASED', lastError: 'PLAN_ATTEMPT_DISCARDED' }),
+    })
+    expect(bajada?.args).toEqual({ where: { id: 'lc-1', redemptionCount: { gt: 0 } }, data: { redemptionCount: { decrement: 1 } } })
+    expect(elAvance?.tx).toBeGreaterThan(0)
+    expect(liberada?.tx).toBe(elAvance?.tx)
+    expect(bajada?.tx).toBe(elAvance?.tx)
+  }
+
+  beforeEach(() => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: null,
+        planStripeSubscriptionId: 'sub_3ds',
+      }) as never,
+    )
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+      id: 'red-1',
+      status: 'RESERVED',
+      campaignId: 'lc-1',
+      offerVersion: 1,
+    } as never)
+    enStripe({ sub_3ds: incompleta() })
+    elPagoEsta('requires_action')
+    // Ruling 4: la primera factura por defecto, coherente para el lector REAL (pagada con tarjeta por lo anunciado).
+    facturaInicial({ total: ANUNCIADO, tarjeta: ANUNCIADO, saldo: 0, status: 'paid' })
+    mockVoid.mockResolvedValue({ id: 'in_1', status: 'void' })
+  })
+
+  it('1. el banco autorizó y la sub ya está active ⇒ evidencia del primer cobro, entrega, ACTIVE y APPLIED, sin crear ni anular nada', async () => {
+    enStripe({ sub_3ds: incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO } }) })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+      }),
+    ])
+  })
+
+  it('2. el PI sigue esperando (mismo pm) ⇒ 409 con el MISMO secreto, sin anular ni crear, y el lease se suelta en IN_PROGRESS', async () => {
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+
+    // Se decide con lo que dice Stripe AHORA: la sub con su secreto y el PI de la primera factura.
+    expect(mockSubRetrieve).toHaveBeenCalledWith('sub_3ds', { expand: ['latest_invoice.confirmation_secret'] })
+    expect(mockIpList).toHaveBeenCalledWith({ invoice: 'in_1', expand: ['data.payment.payment_intent'] })
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    const nuestro = progresos()[0].data.planActivationLeaseUntil
+    expect(nuestro).toBeInstanceOf(Date)
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1', planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: nuestro },
+      data: { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null },
+    })
+    expect(conEstado('DECLINED')).toEqual([])
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(mockEntregar).not.toHaveBeenCalled()
+  })
+
+  it('3. requires_confirmation (el navegador nunca confirmó) ⇒ igual que el anterior', async () => {
+    elPagoEsta('requires_confirmation')
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(soltoElLease()).toBe(true)
+    expect(conEstado('IN_PROGRESS').at(-1)?.data).toEqual({ planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null })
+  })
+
+  it('4. 🔴 el reto falló (mismo pm, requires_payment_method) ⇒ anula la factura, DECLINED, lugar liberado y 402 payment_intent_authentication_failure', async () => {
+    elPagoEsta('requires_payment_method', { code: 'payment_intent_authentication_failure', message: 'auth failed' })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 402,
+      code: 'PLAN_PAYMENT_DECLINED',
+      message: 'auth failed',
+      details: { declineCode: 'payment_intent_authentication_failure' },
+    })
+
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(conEstado('DECLINED')).toHaveLength(1)
+    expect(prismaMock.launchCampaignRedemption.updateMany).toHaveBeenCalledWith({
+      where: { id: 'red-1', status: 'RESERVED' },
+      data: expect.objectContaining({ status: 'RELEASED' }),
+    })
+    expect(prismaMock.launchCampaign.updateMany).toHaveBeenCalledWith({
+      where: { id: 'lc-1', redemptionCount: { gt: 0 } },
+      data: { redemptionCount: { decrement: 1 } },
+    })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockEntregar).not.toHaveBeenCalled()
+    dejoRastroDelDescarte('PAGO_NO_AUTORIZADO')
+  })
+
+  it('5. rechazo DESPUÉS de autenticar ⇒ 402 con su decline_code', async () => {
+    elPagoEsta('requires_payment_method', { code: 'card_declined', decline_code: 'generic_decline' })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 402,
+      code: 'PLAN_PAYMENT_DECLINED',
+      message: 'Tu banco no autorizó el pago',
+      details: { declineCode: 'generic_decline' },
+    })
+
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(conEstado('DECLINED')).toHaveLength(1)
+    expect(redencionCon('RELEASED')).toHaveLength(1)
+  })
+
+  it('6. 🔴 tarjeta nueva (otro pm) ⇒ anula la anterior, estrena intento 2 y reusa el MISMO lugar', async () => {
+    mockPmRetrieve.mockResolvedValue({ id: 'pm_2', customer: 'cus_1', card: { fingerprint: 'fp_2' } })
+    mockSubCreate.mockResolvedValue({ id: 'sub_2' })
+
+    const r = await activatePlan({ ...BASE, paymentMethodId: 'pm_2', offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    const nuestro = progresos()[0].data.planActivationLeaseUntil
+    expect(avance()).toEqual({
+      where: { organizationId: 'org-1', planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: nuestro },
+      data: { planActivationAttempt: 2, planStripeSubscriptionId: null },
+    })
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    expect(mockSubCreate.mock.calls[0][0].metadata).toMatchObject({
+      planActivationKey: 'plan-activation:org-1:2',
+      launchRedemptionId: 'red-1',
+    })
+    // El MISMO lugar: ni se libera, ni se crea otro, ni se consume cupo.
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(bajadas()).toEqual([])
+    expect(prismaMock.launchCampaignRedemption.create).not.toHaveBeenCalled()
+    const subida = (prismaMock.launchCampaign.updateMany as jest.Mock).mock.calls.find((c: any[]) => c[0]?.data?.redemptionCount?.increment)
+    expect(subida).toBeUndefined()
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_2' }),
+      }),
+    ])
+    dejoRastroDelDescarte('OTRO_INTENTO')
+  })
+
+  it('7. 🔴 anular falla porque ya se pagó ⇒ relee, la entrega como recuperada y NO cobra otra vez', async () => {
+    mockPmRetrieve.mockResolvedValue({ id: 'pm_2', customer: 'cus_1', card: { fingerprint: 'fp_2' } })
+    mockVoid.mockRejectedValue(
+      Object.assign(new Error('Invoices with `paid` payments cannot be voided.'), { type: 'StripeInvalidRequestError', statusCode: 400 }),
+    )
+    // Por id e incompleta, la relectura con el secreto también; la de DESPUÉS de anular ya la ve pagada.
+    mockSubRetrieve
+      .mockReset()
+      .mockResolvedValueOnce(incompleta())
+      .mockResolvedValueOnce(incompleta())
+      .mockResolvedValue(incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO } }))
+
+    const r = await activatePlan({ ...BASE, paymentMethodId: 'pm_2', offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(avance()).toBeUndefined()
+    // Trae la marca del reto: se exige su primera factura pagada antes de entregar.
+    expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+      }),
+    ])
+  })
+
+  it('8. anular falla y Stripe no contesta ⇒ 503 con el lease VIVO, nada se crea y el lugar sigue RESERVED', async () => {
+    mockPmRetrieve.mockResolvedValue({ id: 'pm_2', customer: 'cus_1', card: { fingerprint: 'fp_2' } })
+    mockVoid.mockRejectedValue(errorDeConexion())
+    mockSubRetrieve.mockReset().mockResolvedValueOnce(incompleta()).mockResolvedValueOnce(incompleta()).mockRejectedValue(errorDeConexion())
+
+    await expect(activatePlan({ ...BASE, paymentMethodId: 'pm_2', offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(soltoElLease()).toBe(false)
+    expect(avance()).toBeUndefined()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(conEstado('DECLINED')).toEqual([])
+  })
+
+  it('9. pagado pero Stripe aún dice incomplete ⇒ 503 con el lease SUELTO y sin anular', async () => {
+    elPagoEsta('succeeded')
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    const nuestro = progresos()[0].data.planActivationLeaseUntil
+    expect(prismaMock.onboardingProgress.updateMany).toHaveBeenCalledWith({
+      where: { organizationId: 'org-1', planActivationStatus: 'IN_PROGRESS', planActivationAttempt: 1, planActivationLeaseUntil: nuestro },
+      data: { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null },
+    })
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(mockEntregar).not.toHaveBeenCalled()
+  })
+
+  it('10. 🔴 descartar hacia un pedido SIN campaña (la prueba) libera el lugar del intento descartado en la MISMA transacción', async () => {
+    const escrituras = rastrearTransacciones()
+
+    const r = await activatePlan({ ...BASE, payNow: false, offer: ofertaEstandarDePrueba })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    liberoElLugarEnElAvance(escrituras)
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].trial_period_days).toBe(30)
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+  })
+
+  it('11. sin id guardado, la búsqueda por metadata que encuentra una incompleta sigue el mismo camino (409 con el secreto)', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: null,
+        planStripeSubscriptionId: null,
+      }) as never,
+    )
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        await cb(incompleta())
+      },
+    })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+
+    expect(mockSubList).toHaveBeenCalledWith(expect.objectContaining({ customer: 'cus_1', status: 'all' }))
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(soltoElLease()).toBe(true)
+  })
+
+  it('12. 🔴 el secreto nunca llega al log al reanudar', async () => {
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_PAYMENT_REQUIRES_ACTION' })
+
+    const todo = (['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls)
+    expect(todo.length).toBeGreaterThan(0)
+    expect(inspect(todo, { depth: 10 })).not.toContain('_secret_')
+  })
+
+  it('13. 🔴 varias peticiones: A anulada → B cobrada con la respuesta perdida → B se recupera por metadata y conserva su reserva', async () => {
+    const subA = incompleta({
+      id: 'sub_A',
+      latest_invoice: { id: 'in_A', status: 'open', confirmation_secret: { client_secret: 'pi_A_secret_x' } },
+    })
+    mockPmRetrieve.mockResolvedValue({ id: 'pm_2', customer: 'cus_1', card: { fingerprint: 'fp_2' } })
+
+    // ---- Petición 1: tarjeta nueva sobre la incompleta A; el create de B se manda y la respuesta se pierde ----
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: null,
+        planStripeSubscriptionId: 'sub_A',
+      }) as never,
+    )
+    enStripe({ sub_A: subA })
+    mockSubCreate.mockRejectedValue(errorDeConexion())
+
+    await expect(activatePlan({ ...BASE, paymentMethodId: 'pm_2', offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockVoid).toHaveBeenCalledWith('in_A')
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    const escriturasDeLa1 = progresos()
+    const creadosEnLa1 = mockSubCreate.mock.calls.length
+    // El estado que dejó la petición 1 en la base: el ÚLTIMO id de suscripción que escribió (o el que ya tenía).
+    const idQueQuedo = escriturasDeLa1.reduce<string | null>(
+      (id, a) => (a?.data && 'planStripeSubscriptionId' in a.data ? a.data.planStripeSubscriptionId : id),
+      'sub_A',
+    )
+
+    // ---- Petición 2: el lease venció; B existe en Stripe (cobrada a la primera, sin marca del reto) ----
+    const subB = {
+      id: 'sub_B',
+      status: 'active',
+      default_payment_method: 'pm_2',
+      metadata: {
+        featureCode: 'PLAN_PRO',
+        launchCampaignId: 'lc-1',
+        launchOfferVersion: '1',
+        launchRedemptionId: 'red-1',
+        planActivationKey: 'plan-activation:org-1:2',
+      },
+      latest_invoice: { id: 'in_B', status: 'paid', amount_paid: ANUNCIADO },
+      items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'month' } } }] },
+      discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    }
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 2,
+        planActivationLeaseUntil: VENCIDO,
+        planStripeSubscriptionId: idQueQuedo,
+      }) as never,
+    )
+    // A quedó anulada (incomplete_expired) y B vive: la regla común la ve y no deja cobrar otra encima.
+    enStripe({ sub_A: { ...subA, status: 'incomplete_expired' }, sub_B: subB })
+    mockSubList.mockReturnValue({
+      autoPagingEach: async (cb: (s: unknown) => boolean | Promise<boolean>) => {
+        for (const s of [{ ...subA, status: 'incomplete_expired' }, subB]) if ((await cb(s)) === false) return
+      },
+    })
+    mockAutorizar.mockRejectedValue(Object.assign(new Error('Ya hay un plan cobrando'), { statusCode: 409, code: 'PLAN_YA_CONTRATADO' }))
+
+    const r = await activatePlan({ ...BASE, paymentMethodId: 'pm_2', offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockSubCreate.mock.calls.length).toBe(creadosEnLa1) // la petición 2 no crea nada
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_B' }),
+      }),
+    ])
+    // En NINGUNA de las dos peticiones se liberó el lugar.
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(bajadas()).toEqual([])
+    // La petición 1 estrenó el intento 2 SIN el id de A.
+    expect(escriturasDeLa1.find(a => a?.data?.planActivationAttempt === 2)?.data).toEqual({
+      planActivationAttempt: 2,
+      planStripeSubscriptionId: null,
+    })
+  })
+
+  it('14. 🔴 la sub ya llega incomplete_expired (las 23 h) y el cliente elige la prueba ⇒ se libera su lugar en la MISMA transacción del avance', async () => {
+    enStripe({ sub_3ds: incompleta({ status: 'incomplete_expired' }) })
+    const escrituras = rastrearTransacciones()
+
+    const r = await activatePlan({ ...BASE, payNow: false, offer: ofertaEstandarDePrueba })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).not.toHaveBeenCalled()
+    liberoElLugarEnElAvance(escrituras)
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][0].trial_period_days).toBe(30)
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    dejoRastroDelDescarte('YA_EXPIRADA')
+  })
+
+  it('15. 🔴 caída entre anular y escribir: el reintento ve incomplete_expired ⇒ con la MISMA oferta conserva el lugar y estrena intento', async () => {
+    enStripe({ sub_3ds: incompleta({ status: 'incomplete_expired' }) })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(avance()?.data).toEqual({ planActivationAttempt: 2, planStripeSubscriptionId: null })
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(bajadas()).toEqual([])
+    // `apartarLugar` reusa red-1: ni redención nueva ni cupo consumido.
+    expect(prismaMock.launchCampaignRedemption.create).not.toHaveBeenCalled()
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    expect(redencionCon('APPLIED')).toEqual([expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' } })])
+  })
+
+  it('16. 🔴 la relectura dentro del resolver ya dice incomplete_expired ⇒ descartada sin anular, y su lugar se libera si no se reusa', async () => {
+    mockSubRetrieve
+      .mockReset()
+      .mockResolvedValueOnce(incompleta())
+      .mockResolvedValueOnce(incompleta({ status: 'incomplete_expired' }))
+      .mockResolvedValue(vigente('sub_1', 'trialing'))
+
+    const r = await activatePlan({ ...BASE, payNow: false, offer: ofertaEstandarDePrueba })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockSubRetrieve).toHaveBeenNthCalledWith(2, 'sub_3ds', { expand: ['latest_invoice.confirmation_secret'] })
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(redencionCon('RELEASED')).toEqual([expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' } })])
+    expect(bajadas()).toHaveLength(1)
+    expect(avance()?.data).toEqual({ planActivationAttempt: 2, planStripeSubscriptionId: null })
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    dejoRastroDelDescarte('YA_EXPIRADA')
+  })
+
+  it('17a. 🔴 recuperada active pero su PRIMERA factura no está pagada por el monto consentido ⇒ 503 sin entrega', async () => {
+    enStripe({ sub_3ds: incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'open', amount_paid: 0 } }) })
+    facturaInicial({ total: ANUNCIADO, tarjeta: 0, saldo: 0, status: 'open' })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([])
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('17b. 🔴 a los 40 días se mira la PRIMERA factura, no la última (la renovación)', async () => {
+    enStripe({
+      sub_3ds: incompleta({
+        status: 'active',
+        latest_invoice: { id: 'in_2', status: 'paid', billing_reason: 'subscription_cycle', amount_paid: LISTA },
+      }),
+    })
+    const primera = facturaInicial({ total: ANUNCIADO, tarjeta: ANUNCIADO, saldo: 0, status: 'paid' })
+    const renovacion = { ...primera, id: 'in_2', billing_reason: 'subscription_cycle', total: LISTA, amount_paid: LISTA }
+    mockInvList.mockResolvedValue({ data: [renovacion, primera], has_more: false })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([expect.objectContaining({ where: { id: 'red-1', status: 'RESERVED' } })])
+  })
+
+  it('18. 🔴 recuperada con saldo a favor + tarjeta ⇒ ACTIVE y APPLIED', async () => {
+    enStripe({ sub_3ds: incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: 1400 } }) })
+    facturaInicial({ total: ANUNCIADO, tarjeta: 1400, saldo: 800, status: 'paid' })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+      }),
+    ])
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockVoid).not.toHaveBeenCalled()
+  })
+
+  // Ruling 6b: si la evidencia NO se puede leer (Stripe o el lector), es «no sé» (503 + 🚨), nunca el 409 del lector.
+  it.each([
+    ['Stripe no contesta al listar las facturas', () => mockInvList.mockRejectedValue(errorDeConexion())],
+    ['el lector no puede verificar (pagos truncados)', () => mockPagosCobrados.mockResolvedValue({ has_more: true, data: [] })],
+  ])('🔴 Ruling 6b: la evidencia falla (%s) ⇒ 503 PLAN_ACTIVATION_PENDING con 🚨, sin entrega', async (_caso, falla) => {
+    enStripe({ sub_3ds: incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO } }) })
+    falla()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(mockEntregar).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([])
+    expect((logger.error as jest.Mock).mock.calls.some(c => String(c[0]).startsWith('🚨'))).toBe(true)
+  })
+
+  // ---- Ronda de arreglos 1 (revisión de S3, Ruling 8) ----
+
+  it('19. 🔴 Ruling 8: la campaña subió de versión a media autorización (v1 → v2, misma tarjeta) ⇒ NO se reanuda el PI de v1: se anula, se libera el lugar de v1 y se aparta uno de v2', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania({ offerVersion: 2, stripeCouponId: 'LC_POS22_V2' }) as never)
+    // Cuando `apartarLugar` busca, el lugar de v1 ya se liberó en el avance: no queda fila viva.
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(null as never)
+    prismaMock.launchCampaignRedemption.create.mockResolvedValue({ id: 'red-2' } as never)
+    mockSubCreate.mockResolvedValue({ id: 'sub_2' })
+    const escrituras = rastrearTransacciones()
+
+    const r = await activatePlan({ ...BASE, offer: { ...OFERTA_LAUNCH, offerVersion: 2 } })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    liberoElLugarEnElAvance(escrituras)
+    expect(prismaMock.launchCampaignRedemption.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ offerVersion: 2, stripeCouponId: 'LC_POS22_V2' }) }),
+    )
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+    expect(mockSubCreate.mock.calls[0][0].discounts).toEqual([{ coupon: 'LC_POS22_V2' }])
+    expect(mockSubCreate.mock.calls[0][0].metadata).toMatchObject({ launchOfferVersion: '2', launchRedemptionId: 'red-2' })
+    expect(redencionCon('APPLIED')).toEqual([expect.objectContaining({ where: { id: 'red-2', status: 'RESERVED' } })])
+  })
+
+  it('20. 🔴 el PI ya pagó y la relectura del resolver la ve active ⇒ se recupera: ACTIVE y APPLIED con sub_3ds, sin anular ni crear', async () => {
+    elPagoEsta('succeeded')
+    const pagada = incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO } })
+    // Por id: incompleta; con el secreto: incompleta; la relectura de «ya pagó»: active.
+    mockSubRetrieve.mockReset().mockResolvedValueOnce(incompleta()).mockResolvedValueOnce(incompleta()).mockResolvedValue(pagada)
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockSubRetrieve).toHaveBeenNthCalledWith(3, 'sub_3ds')
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(avance()).toBeUndefined()
+    expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+    expect(redencionCon('RELEASED')).toEqual([])
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+      }),
+    ])
+  })
+
+  it('21. la relectura con el secreto ya viene cobrada ⇒ se recupera sin leer el PI, sin anular ni crear', async () => {
+    const pagada = incompleta({ status: 'active', latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO } })
+    mockSubRetrieve.mockReset().mockResolvedValueOnce(incompleta()).mockResolvedValue(pagada)
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockSubRetrieve).toHaveBeenNthCalledWith(2, 'sub_3ds', { expand: ['latest_invoice.confirmation_secret'] })
+    expect(mockIpList).not.toHaveBeenCalled()
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(redencionCon('APPLIED')).toEqual([
+      expect.objectContaining({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+      }),
+    ])
+  })
+
+  it.each([
+    [
+      'la relectura con el secreto',
+      () => mockSubRetrieve.mockReset().mockResolvedValueOnce(incompleta()).mockRejectedValue(errorDeConexion()),
+    ],
+    ['el PaymentIntent de la factura', () => mockIpList.mockRejectedValue(errorDeConexion())],
+    [
+      'la relectura de una ya pagada',
+      () => {
+        elPagoEsta('succeeded')
+        mockSubRetrieve
+          .mockReset()
+          .mockResolvedValueOnce(incompleta())
+          .mockResolvedValueOnce(incompleta())
+          .mockRejectedValue(errorDeConexion())
+      },
+    ],
+  ])('22. 🔴 Stripe no contesta dentro del resolver (%s) ⇒ 503 con el lease VIVO, sin anular ni crear', async (_caso, falla) => {
+    falla()
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(soltoElLease()).toBe(false)
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(avance()).toBeUndefined()
+    expect(redencionCon('RELEASED')).toEqual([])
+  })
+
+  it('23. mismo intento esperando al banco pero la factura no trae su secreto ⇒ 503 con el lease VIVO y aviso en el log', async () => {
+    enStripe({ sub_3ds: incompleta({ latest_invoice: { id: 'in_1', status: 'open' } }) })
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(soltoElLease()).toBe(false)
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('activate-plan'), {
+      organizationId: 'org-1',
+      subscriptionId: 'sub_3ds',
+      status: 'requires_action',
+    })
+  })
+
+  /** La incompleta que deja STANDARD pagando hoy: sin datos de campaña, con la promo legacy. */
+  const incompletaEstandar = () =>
+    incompleta({
+      metadata: { featureCode: 'PLAN_PRO', planActivationKey: 'plan-activation:org-1:1', primerCobroEsperadoCents: '69484' },
+      discounts: [{ coupon: { id: 'INTRO_PRO_3M' } }],
+    })
+  const ESTANDAR_HOY = {
+    kind: 'STANDARD' as const,
+    expectedFirstChargeCents: standardFirstChargeCents(standardPlanQuote(), 'PRO', 'monthly', true),
+  }
+
+  it('24. control: STANDARD pagando hoy con la MISMA tarjeta sobre su incompleta ⇒ es el mismo intento (409 con el secreto)', async () => {
+    enStripe({ sub_3ds: incompletaEstandar() })
+
+    await expect(activatePlan({ ...BASE, offer: ESTANDAR_HOY })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PLAN_PAYMENT_REQUIRES_ACTION',
+      details: { clientSecret: 'pi_1_secret_x' },
+    })
+    expect(mockVoid).not.toHaveBeenCalled()
+  })
+
+  const meta = incompleta().metadata
+  it.each([
+    [
+      'featureCode (la incompleta es de Premium; el pedido, de Pro)',
+      incompleta({ metadata: { ...meta, featureCode: 'PLAN_PREMIUM' } }),
+      {},
+    ],
+    [
+      'la campaña (la incompleta es de otra)',
+      incompleta({ metadata: { ...meta, launchCampaignId: 'lc-OTRA', launchRedemptionId: 'red-viejo' } }),
+      {},
+    ],
+    [
+      'la versión de la oferta (la incompleta es de otra versión de la MISMA campaña)',
+      incompleta({ metadata: { ...meta, launchOfferVersion: '0', launchRedemptionId: 'red-viejo' } }),
+      {},
+    ],
+    [
+      'payNow (STANDARD: la prueba de 30 días sobre una incompleta de pagar hoy)',
+      incompletaEstandar(),
+      { payNow: false, offer: ofertaEstandarDePrueba },
+    ],
+  ])('25. 🔴 cambia SÓLO %s, con la misma tarjeta ⇒ no es el mismo intento: se anula y se estrena intento', async (_caso, sub, pedido) => {
+    enStripe({ sub_3ds: sub })
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH, ...pedido })
+
+    expect(r.status).toBe('ACTIVE')
+    expect(mockVoid).toHaveBeenCalledWith('in_1')
+    expect(avance()?.data).toEqual({ planActivationAttempt: 2, planStripeSubscriptionId: null })
+    expect(mockSubCreate).toHaveBeenCalledTimes(1)
+    expect(mockSubCreate.mock.calls[0][1].idempotencyKey).toBe('plan-activation:org-1:2')
+  })
+
+  it('26. 🔴 la relectura dice un estado que no se sabe resolver (canceled) ⇒ 503, lease VIVO y aviso con organización, suscripción y estado', async () => {
+    mockSubRetrieve
+      .mockReset()
+      .mockResolvedValueOnce(incompleta())
+      .mockResolvedValue(incompleta({ status: 'canceled' }))
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(soltoElLease()).toBe(false)
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('activate-plan'), {
+      organizationId: 'org-1',
+      subscriptionId: 'sub_3ds',
+      status: 'canceled',
+    })
+  })
+
+  it('27. 🔴 mismo intento con el PI en un estado que no está en la tabla ⇒ 503, lease VIVO, sin anular, y aviso con su estado (sin el secreto)', async () => {
+    elPagoEsta('canceled')
+
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 503,
+      code: 'PLAN_ACTIVATION_PENDING',
+    })
+
+    expect(soltoElLease()).toBe(false)
+    expect(mockVoid).not.toHaveBeenCalled()
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('activate-plan'), {
+      organizationId: 'org-1',
+      subscriptionId: 'sub_3ds',
+      status: 'canceled',
+    })
+    const todo = (['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls)
+    expect(inspect(todo, { depth: 10 })).not.toContain('_secret_')
+  })
+})
+
+/**
+ * 🔴 R1 y R2 (promesa docs/audit/2026-10-18-campana-3ds-r1r2/promesa.md): el alta que se quedó «esperando al banco» sin nadie
+ * en la pantalla se resuelve sola. R2: el cliente autorizó y cerró la pestaña ⇒ se cierra igual que si hubiera vuelto (con
+ * la evidencia del primer cobro). R1: Stripe dio el cobro por expirado ⇒ su lugar vuelve a la campaña. El revisor NUNCA
+ * cobra, anula ni crea nada en Stripe.
+ */
+describe('🔴 R1/R2: el alta a medio pago se resuelve sin el navegador', () => {
+  const FIN_DEL_PERIODO = Math.floor(new Date('2026-11-18T00:00:00Z').getTime() / 1000)
+  const VENCIDO = new Date('2020-01-01T00:00:00Z')
+  const METADATA = {
+    organizationId: 'org-1',
+    featureCode: 'PLAN_PRO',
+    launchCampaignId: 'lc-1',
+    launchCampaignCode: 'POS22',
+    launchOfferVersion: '1',
+    launchRedemptionId: 'red-1',
+    planActivationKey: 'plan-activation:org-1:1',
+    primerCobroEsperadoCents: String(ANUNCIADO),
+  }
+  const laSub = (o: Record<string, unknown> = {}) => ({
+    id: 'sub_3ds',
+    status: 'active',
+    default_payment_method: 'pm_1',
+    metadata: METADATA,
+    latest_invoice: { id: 'in_1', status: 'paid', amount_paid: ANUNCIADO },
+    current_period_end: FIN_DEL_PERIODO,
+    items: { data: [{ current_period_end: FIN_DEL_PERIODO, price: { recurring: { interval: 'month' } } }] },
+    discounts: [{ coupon: { id: 'LC_POS22_V1' } }],
+    ...o,
+  })
+  const enStripe = (sub: Record<string, unknown>) => mockSubRetrieve.mockResolvedValue(sub)
+  const elAlta = (o: Record<string, unknown> = {}) =>
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planActivationLeaseUntil: null,
+        planStripeSubscriptionId: 'sub_3ds',
+        ...o,
+      }) as never,
+    )
+  const progresos = () => (prismaMock.onboardingProgress.updateMany as jest.Mock).mock.calls.map(c => c[0])
+  const conEstado = (estado: string) => progresos().filter(a => a?.data?.planActivationStatus === estado)
+  const redencionCon = (estado: string) =>
+    (prismaMock.launchCampaignRedemption.updateMany as jest.Mock).mock.calls.map(c => c[0]).filter(a => a?.data?.status === estado)
+  const bajadas = () =>
+    (prismaMock.launchCampaign.updateMany as jest.Mock).mock.calls.filter((c: any[]) => c[0]?.data?.redemptionCount?.decrement)
+  /** Nada se escribió en Stripe: ni cobro, ni anulación. */
+  const nadaEnStripe = () => {
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockVoid).not.toHaveBeenCalled()
+  }
+
+  beforeEach(() => {
+    elAlta()
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue({
+      id: 'red-1',
+      status: 'RESERVED',
+      campaignId: 'lc-1',
+      offerVersion: 1,
+    } as never)
+    prismaMock.staffOrganization.findFirst.mockResolvedValue({ staffId: 'owner-1' } as never)
+    facturaInicial({ total: ANUNCIADO, tarjeta: ANUNCIADO, saldo: 0, status: 'paid' })
+    enStripe(laSub())
+  })
+
+  describe('R2: autorizó y cerró la pestaña', () => {
+    it('R2.1 ⇒ cierra el alta como si hubiera vuelto: evidencia del primer cobro, entrega, ACTIVE, APPLIED, a nombre de la dueña, sin cobrar ni anular', async () => {
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
+
+      expect(mockInvList).toHaveBeenCalledWith({ subscription: 'sub_3ds', limit: 100 })
+      expect(mockEntregar).toHaveBeenCalledWith(expect.objectContaining({ subscriptionId: 'sub_3ds' }))
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(redencionCon('APPLIED')).toEqual([
+        expect.objectContaining({
+          where: { id: 'red-1', status: 'RESERVED' },
+          data: expect.objectContaining({ stripeSubscriptionId: 'sub_3ds' }),
+        }),
+      ])
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'owner-1', action: 'LAUNCH_CAMPAIGN_REDEEMED' }))
+      nadaEnStripe()
+    })
+
+    it('R2.2 🔴 la primera factura NO está pagada por lo consentido ⇒ no cierra (503, sin entrega ni APPLIED)', async () => {
+      facturaInicial({ total: ANUNCIADO, tarjeta: 0, saldo: 0, status: 'open' })
+
+      await expect(cerrarAltaSinNavegador('org-1')).rejects.toMatchObject({ statusCode: 503, code: 'PLAN_ACTIVATION_PENDING' })
+
+      expect(mockEntregar).not.toHaveBeenCalled()
+      expect(conEstado('ACTIVE')).toEqual([])
+      expect(redencionCon('APPLIED')).toEqual([])
+      nadaEnStripe()
+    })
+
+    it('R2.3 sin campaña: reconstruye la oferta ESTÁNDAR con el monto de la marca y cierra', async () => {
+      const estandar = standardFirstChargeCents(standardPlanQuote(), 'PRO', 'monthly', true)
+      elAlta({ launchCampaignId: null })
+      const { launchCampaignId, launchCampaignCode, launchOfferVersion, launchRedemptionId, ...sinCampania } = METADATA
+      enStripe(laSub({ metadata: { ...sinCampania, primerCobroEsperadoCents: String(estandar) }, discounts: [] }))
+      facturaInicial({ total: estandar, tarjeta: estandar, saldo: 0, status: 'paid' })
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
+
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'owner-1', action: 'PLAN_ACTIVATED_ONBOARDING' }))
+      nadaEnStripe()
+    })
+
+    it('R2.4 🔴 un cobro CLÁSICO (sin la marca del reto) no es de este revisor ⇒ no toca nada', async () => {
+      const { primerCobroEsperadoCents, ...sinMarca } = METADATA
+      enStripe(laSub({ metadata: sinMarca }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+    })
+
+    it('R2.5 🔴 la suscripción es de OTRO intento (su llave no es la del intento actual) ⇒ no toca nada', async () => {
+      enStripe(laSub({ metadata: { ...METADATA, planActivationKey: 'plan-activation:org-1:7' } }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+    })
+
+    it('R2.6 🔴 (Codex plan r1 #1) la tarjeta se retiró del cliente después de pagar ⇒ igual cierra lo YA pagado y guarda su id', async () => {
+      mockPmRetrieve.mockResolvedValue({ id: 'pm_1', customer: null, card: { fingerprint: 'fp_1' } })
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('CERRADA')
+
+      expect(conEstado('ACTIVE')).toHaveLength(1)
+      expect(planDelCierre().paymentMethodId).toBe('pm_1')
+      expect(redencionCon('APPLIED')).toHaveLength(1)
+      nadaEnStripe()
+    })
+
+    it('R2.7 🔴 (Codex r1 #1) la suscripción ya NO trae tarjeta ⇒ no la cierra el revisor (sin tarjeta guardada «Terminar alta» se atora): 🚨 y queda el camino de hoy', async () => {
+      enStripe(laSub({ default_payment_method: null }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      expect(mockEntregar).not.toHaveBeenCalled()
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), { organizationId: 'org-1', subscriptionId: 'sub_3ds' })
+      nadaEnStripe()
+    })
+  })
+
+  describe('el candado `soloRecuperar` de activatePlan (el revisor nunca cobra, anula ni estrena intento)', () => {
+    const OFERTA = { ...BASE, staffId: 'owner-1', offer: OFERTA_LAUNCH }
+
+    it('S.1 🔴 la sub del intento sigue `incomplete` con el reto fallido ⇒ 503 y lease suelto en IN_PROGRESS, SIN anular, sin avance, sin crear', async () => {
+      enStripe(
+        laSub({
+          status: 'incomplete',
+          latest_invoice: { id: 'in_1', status: 'open', confirmation_secret: { client_secret: 'pi_1_secret_x' } },
+        }),
+      )
+      mockIpList.mockResolvedValue({
+        has_more: false,
+        data: [
+          { is_default: true, payment: { type: 'payment_intent', payment_intent: { id: 'pi_1', status: 'requires_payment_method' } } },
+        ],
+      })
+
+      await expect(activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })).rejects.toMatchObject({ statusCode: 503 })
+
+      nadaEnStripe()
+      expect(progresos().some(a => a?.data?.planActivationAttempt === 2)).toBe(false)
+      expect(conEstado('DECLINED')).toEqual([])
+      expect(progresos()).toContainEqual(
+        expect.objectContaining({ data: { planActivationStatus: 'IN_PROGRESS', planActivationLeaseUntil: null } }),
+      )
+    })
+
+    it('S.2 🔴 la sub ya expiró ⇒ 503 sin estrenar intento ni cobrar (eso es de R1, no de la recuperación)', async () => {
+      enStripe(laSub({ status: 'incomplete_expired' }))
+
+      await expect(activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })).rejects.toMatchObject({ statusCode: 503 })
+
+      nadaEnStripe()
+      expect(progresos().some(a => a?.data?.planActivationAttempt === 2)).toBe(false)
+      expect(bajadas()).toEqual([])
+    })
+
+    it.each([
+      ['el alta no está IN_PROGRESS', { planActivationStatus: 'DECLINED' }],
+      ['el alta apunta a OTRA suscripción', { planStripeSubscriptionId: 'sub_otra' }],
+    ])('S.3 🔴 %s ⇒ 409 sin escribir nada ni tocar Stripe', async (_caso, o) => {
+      elAlta(o)
+
+      await expect(activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })).rejects.toMatchObject({ statusCode: 409 })
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      nadaEnStripe()
+    })
+
+    it('S.4 la toma del lease exige que el alta siga apuntando a ESA suscripción (CAS)', async () => {
+      await activatePlan(OFERTA, { soloRecuperar: 'sub_3ds' })
+
+      expect(progresos()[0].where).toMatchObject({
+        planActivationStatus: 'IN_PROGRESS',
+        planActivationAttempt: 1,
+        planStripeSubscriptionId: 'sub_3ds',
+      })
+    })
+  })
+
+  describe('R1: el cobro murió sin autorizar (Stripe lo dio por expirado)', () => {
+    beforeEach(() => enStripe(laSub({ status: 'incomplete_expired', latest_invoice: { id: 'in_1', status: 'void' } })))
+
+    /** Qué transacción estaba abierta en cada escritura (0 = ninguna): prueba que el CAS del alta y la liberación van JUNTOS. */
+    function rastrearTransacciones() {
+      let abierta = 0
+      let n = 0
+      const escrituras: Array<{ modelo: string; args: any; tx: number }> = []
+      prismaMock.$transaction.mockImplementation(async (cb: unknown) => {
+        abierta = ++n
+        try {
+          return await (cb as (tx: unknown) => unknown)(prismaMock)
+        } finally {
+          abierta = 0
+        }
+      })
+      for (const [modelo, mock] of [
+        ['progreso', prismaMock.onboardingProgress.updateMany],
+        ['redencion', prismaMock.launchCampaignRedemption.updateMany],
+        ['cupo', prismaMock.launchCampaign.updateMany],
+      ] as const) {
+        ;(mock as jest.Mock).mockImplementation(async (args: any) => {
+          escrituras.push({ modelo, args, tx: abierta })
+          return { count: 1 }
+        })
+      }
+      return escrituras
+    }
+
+    it('R1.1 🔴 alta → DECLINED y el lugar de ESA suscripción se libera, en la MISMA transacción, sin tocar Stripe', async () => {
+      const escrituras = rastrearTransacciones()
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('LIBERADA')
+
+      const cas = escrituras.find(e => e.modelo === 'progreso')
+      const liberada = escrituras.find(e => e.modelo === 'redencion')
+      const bajada = escrituras.find(e => e.modelo === 'cupo')
+      expect(cas?.args).toEqual({
+        where: {
+          organizationId: 'org-1',
+          completedAt: null,
+          planActivationStatus: 'IN_PROGRESS',
+          planActivationAttempt: 1,
+          planActivationLeaseUntil: null,
+          planStripeSubscriptionId: 'sub_3ds',
+        },
+        data: { planActivationStatus: 'DECLINED', planActivationLeaseUntil: null },
+      })
+      expect(liberada?.args).toEqual({
+        where: { id: 'red-1', status: 'RESERVED' },
+        data: expect.objectContaining({ status: 'RELEASED', lastError: 'PLAN_ATTEMPT_ABANDONED' }),
+      })
+      expect(bajada?.args).toEqual({ where: { id: 'lc-1', redemptionCount: { gt: 0 } }, data: { redemptionCount: { decrement: 1 } } })
+      expect(cas?.tx).toBeGreaterThan(0)
+      expect(liberada?.tx).toBe(cas?.tx)
+      expect(bajada?.tx).toBe(cas?.tx)
+      nadaEnStripe()
+    })
+
+    it('R1.2 🔴 el CAS no tocó la fila (el cliente volvió y tomó el lease) ⇒ NO libera nada', async () => {
+      prismaMock.onboardingProgress.updateMany.mockResolvedValue({ count: 0 } as never)
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.launchCampaignRedemption.updateMany).not.toHaveBeenCalled()
+      expect(bajadas()).toEqual([])
+    })
+
+    it('R1.3 un lease VENCIDO (no nulo) entra al CAS tal como se leyó', async () => {
+      elAlta({ planActivationLeaseUntil: VENCIDO })
+
+      await cerrarAltaSinNavegador('org-1')
+
+      expect(progresos()[0].where.planActivationLeaseUntil).toEqual(VENCIDO)
+    })
+
+    it('R1.4 sin lugar en la metadata (pago de hoy sin campaña) ⇒ DECLINED sin tocar ningún lugar', async () => {
+      const { launchRedemptionId, launchCampaignId, ...sinLugar } = METADATA
+      enStripe(laSub({ status: 'incomplete_expired', metadata: sinLugar }))
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('LIBERADA')
+
+      expect(conEstado('DECLINED')).toHaveLength(1)
+      expect(prismaMock.launchCampaignRedemption.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('lo que el revisor no toca', () => {
+    it.each([
+      ['el cobro sigue esperando al banco (incomplete)', () => enStripe(laSub({ status: 'incomplete' }))],
+      ['la suscripción quedó cancelada (ambiguo)', () => enStripe(laSub({ status: 'canceled' }))],
+    ])('N.1 %s ⇒ NADA, sin escribir', async (_caso, preparar) => {
+      preparar()
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
+      nadaEnStripe()
+    })
+
+    it.each([
+      ['el lease está VIVO (alguien está cobrando)', { planActivationLeaseUntil: new Date(Date.now() + LEASE_MS) }],
+      ['el alta ya terminó', { completedAt: new Date() }],
+      ['el alta no está a medio pago', { planActivationStatus: 'ACTIVE' }],
+      ['el alta no tiene suscripción', { planStripeSubscriptionId: null }],
+    ])('N.2 %s ⇒ NADA, sin preguntarle a Stripe', async (_caso, o) => {
+      elAlta(o)
+
+      await expect(cerrarAltaSinNavegador('org-1')).resolves.toBe('NADA')
+
+      expect(mockSubRetrieve).not.toHaveBeenCalled()
+      expect(prismaMock.onboardingProgress.updateMany).not.toHaveBeenCalled()
     })
   })
 })

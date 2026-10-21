@@ -1,3 +1,5 @@
+import { terminalSettingsBody } from './terminal-settings.schema'
+import { TerminalStatus, TpvCommandType } from '@prisma/client'
 import { Router } from 'express'
 import * as terminalController from '../../controllers/dashboard/terminals.superadmin.controller'
 import * as migrationController from '../../controllers/dashboard/terminal-migration.controller'
@@ -113,6 +115,65 @@ router.post(
     }),
   ),
   terminalController.releaseTerminalPaymentRequest,
+)
+
+const fleetQuerySchema = z.object({
+  query: z.object({
+    page: z.coerce
+      .number({ invalid_type_error: 'Debe ser un número' })
+      .int('Debe ser entero')
+      .min(1, 'Debe ser al menos 1')
+      .max(100000, 'Página fuera de rango')
+      .optional(),
+    pageSize: z.coerce.number({ invalid_type_error: 'Debe ser un número' }).int('Debe ser entero').min(1, 'Debe ser al menos 1').optional(),
+    search: z.string().trim().max(200, 'Máximo 200 caracteres').optional(),
+    statuses: z
+      .string()
+      .transform(value => value.split(','))
+      .pipe(z.array(z.nativeEnum(TerminalStatus, { errorMap: () => ({ message: 'Estado no válido' }) })))
+      .optional(),
+    types: z
+      .string()
+      .transform(value => value.split(','))
+      .pipe(z.array(z.enum(['TPV_ANDROID', 'TPV_IOS'], { errorMap: () => ({ message: 'Selecciona un tipo de TPV válido' }) })))
+      .optional(),
+    connection: z.enum(['all', 'online', 'offline', 'pending'], { errorMap: () => ({ message: 'Conexión no válida' }) }).optional(),
+  }),
+})
+router.get('/fleet', validateRequest(fleetQuerySchema), terminalController.getTpvFleet)
+router.post(
+  '/:terminalId/command',
+  validateRequest(
+    terminalIdSchema.extend({
+      body: z.object({
+        command: z.nativeEnum(TpvCommandType, { errorMap: () => ({ message: 'Comando no válido' }) }),
+        payload: z.record(z.unknown()).optional(),
+      }),
+    }),
+  ),
+  terminalController.sendCommand,
+)
+router.get(
+  '/:terminalId/commands',
+  validateRequest(
+    terminalIdSchema.extend({
+      query: z.object({
+        page: z.coerce
+          .number({ invalid_type_error: 'Debe ser un número' })
+          .int('Debe ser entero')
+          .min(1, 'Debe ser al menos 1')
+          .max(100000, 'Página fuera de rango')
+          .optional(),
+      }),
+    }),
+  ),
+  terminalController.commandHistory,
+)
+router.get('/:terminalId/settings', validateRequest(terminalIdSchema), terminalController.getSettings)
+router.put(
+  '/:terminalId/settings',
+  validateRequest(terminalIdSchema.extend({ body: terminalSettingsBody })),
+  terminalController.saveSettings,
 )
 
 router.get('/', validateRequest(terminalQuerySchema), terminalController.getAllTerminals)

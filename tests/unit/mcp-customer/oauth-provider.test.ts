@@ -1,3 +1,4 @@
+import { InvalidScopeError } from '@modelcontextprotocol/sdk/server/auth/errors.js'
 jest.mock('../../../src/mcp/oauth/tokenStore', () => ({
   consumeAuthCode: jest.fn(),
   peekAuthCodeChallenge: jest.fn(),
@@ -7,7 +8,8 @@ jest.mock('../../../src/mcp/oauth/tokenStore', () => ({
 }))
 jest.mock('../../../src/mcp/oauth/clientsStore', () => ({ prismaClientsStore: {} }))
 
-import { provider } from '../../../src/mcp/oauth/provider'
+import { MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL } from '../../../src/mcp/oauth/config'
+import { verifierForMcpResource, provider } from '../../../src/mcp/oauth/provider'
 import { issueMcpToken } from '../../../src/mcp/mcpToken'
 import * as store from '../../../src/mcp/oauth/tokenStore'
 
@@ -32,8 +34,14 @@ it('verifyAccessToken returns AuthInfo with staffId/activeOrg in extra', async (
   const token = issueMcpToken('s1', 'o1', 3600, 'c1')
   const info = await provider.verifyAccessToken(token)
   expect(info.clientId).toBe('c1')
-  expect(info.extra).toEqual({ staffId: 's1', activeOrg: 'o1' })
+  expect(info.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], clientId: 'c1' })
   expect(info.scopes).toContain('mcp:read')
+})
+
+// Evidencia (15-oct): sin `cid` no se inventa una app con el id de la persona (el `clientId` del SDK sí cae en `sub`).
+it('un token sin app (cid) deja extra.clientId en null', async () => {
+  const info = await provider.verifyAccessToken(issueMcpToken('s1', 'o1', 3600))
+  expect(info.extra?.clientId).toBeNull()
 })
 
 it('verifyAccessToken throws on a non-MCP token', async () => {
@@ -56,7 +64,7 @@ it('exchangeAuthorizationCode consumes the code and returns access+refresh', asy
   expect(tokens.token_type).toBe('Bearer')
   const verified = await provider.verifyAccessToken(tokens.access_token)
   // The granted scope now round-trips through the token (was dropped at mint → hardcoded full set).
-  expect(verified.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'] })
+  expect(verified.extra).toEqual({ staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], clientId: 'c1' })
   expect(verified.scopes).toEqual(['mcp:read']) // NOT the full supported set — only what was granted
 })
 
@@ -185,4 +193,76 @@ describe('Codex ronda 8 — la cadena de renovación hereda la fecha original', 
     const iat = accesoSpy.mock.calls[0][1]
     expect(Math.abs(iat - Math.floor(Date.now() / 1000))).toBeLessThanOrEqual(2)
   })
+})
+
+describe('regresión: un refresh nunca amplía el consentimiento', () => {
+  beforeEach(() => {
+    ;(store.consumeRefreshToken as jest.Mock).mockResolvedValue({
+      clientId: 'c1',
+      staffId: 's1',
+      activeOrg: 'o1',
+      scopes: ['mcp:read'],
+      issuedAt: new Date(),
+    })
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'r2' })
+  })
+
+  it.each([['mcp:write'], ['mcp:read', 'mcp:write'], ['unknown']])('rechaza scopes fuera del grant: %j', async (...requested) => {
+    await expect(provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r1', requested)).rejects.toThrow(InvalidScopeError)
+    expect(store.createRefreshToken).not.toHaveBeenCalled()
+  })
+
+  it('conserva un grant explícitamente vacío, sin fallback a acceso completo', async () => {
+    const token = issueMcpToken('s1', 'o1', 3600, 'c1', [])
+    const info = await provider.verifyAccessToken(token)
+    expect(info.scopes).toEqual([])
+    expect(info.extra?.scopes).toEqual([])
+  })
+
+  it('un token legacy sin grant conserva sólo lectura, nunca escritura', async () => {
+    const info = await provider.verifyAccessToken(issueMcpToken('s1', 'o1', 3600, 'c1'))
+    expect(info.scopes).toEqual(['mcp:read'])
+    expect(info.extra?.scopes).toEqual(['mcp:read'])
+  })
+
+  it('un refresh sin scope conserva el grant original', async () => {
+    const result = await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'r1')
+    expect((await provider.verifyAccessToken(result.access_token)).scopes).toEqual(['mcp:read'])
+  })
+})
+
+describe.each([
+  ['manual', MCP_RESOURCE_URL, MCP_DIRECTORY_RESOURCE_URL],
+  ['directory', MCP_DIRECTORY_RESOURCE_URL, MCP_RESOURCE_URL],
+])('el consentimiento no cambia de catálogo al canjear o renovar (%s)', (_profile, resource, other) => {
+  beforeEach(() => {
+    const data = { clientId: 'c1', staffId: 's1', activeOrg: 'o1', scopes: ['mcp:read'], resource: resource.href }
+    ;(store.consumeAuthCode as jest.Mock).mockResolvedValue({ ...data, redirectUri: 'http://cb' })
+    ;(store.consumeRefreshToken as jest.Mock).mockResolvedValue(data)
+    ;(store.createRefreshToken as jest.Mock).mockResolvedValue({ token: 'rotated' })
+  })
+  it('conserva el recurso del código en acceso y refresh', async () => {
+    const result = await provider.exchangeAuthorizationCode({ client_id: 'c1' } as never, 'code', undefined, undefined, resource)
+    expect((await provider.verifyAccessToken(result.access_token)).resource?.href).toBe(resource.href)
+    expect(store.createRefreshToken).toHaveBeenCalledWith(expect.objectContaining({ resource: resource.href }))
+  })
+  it('renueva sólo para el recurso original incluso cuando el cliente lo omite', async () => {
+    const result = await provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'refresh', ['mcp:read'])
+    expect((await provider.verifyAccessToken(result.access_token)).resource?.href).toBe(resource.href)
+    expect(store.createRefreshToken).toHaveBeenCalledWith(expect.objectContaining({ resource: resource.href }))
+  })
+  it('rechaza cambiar el recurso en código o refresh', async () => {
+    await expect(provider.exchangeAuthorizationCode({ client_id: 'c1' } as never, 'code', undefined, undefined, other)).rejects.toThrow()
+    await expect(provider.exchangeRefreshToken({ client_id: 'c1' } as never, 'refresh', undefined, other)).rejects.toThrow()
+    expect(store.createRefreshToken).not.toHaveBeenCalled()
+  })
+})
+
+it('cada endpoint rechaza tokens del otro recurso aunque scopes y usuario coincidan', async () => {
+  const manual = issueMcpToken('s1', 'o1', 3600, 'c1', ['mcp:read', 'mcp:write'])
+  const directory = issueMcpToken('s1', 'o1', 3600, 'c1', ['mcp:read', 'mcp:write'], undefined, 'directory')
+  await expect(verifierForMcpResource(MCP_RESOURCE_URL).verifyAccessToken(directory)).rejects.toThrow()
+  await expect(verifierForMcpResource(MCP_DIRECTORY_RESOURCE_URL).verifyAccessToken(manual)).rejects.toThrow()
+  await expect(verifierForMcpResource(MCP_RESOURCE_URL).verifyAccessToken(manual)).resolves.toBeTruthy()
+  await expect(verifierForMcpResource(MCP_DIRECTORY_RESOURCE_URL).verifyAccessToken(directory)).resolves.toBeTruthy()
 })

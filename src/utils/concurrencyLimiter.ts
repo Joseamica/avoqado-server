@@ -54,3 +54,32 @@ export class ConcurrencyLimiter {
  * roughly pool/2 or it re-opens the exhaustion door.
  */
 export const analyticsLimiter = new ConcurrencyLimiter(Number(process.env.ANALYTICS_MAX_CONCURRENCY) || 4)
+
+/** B4b (Codex r5 R5-9): cuántos estados de resultados de un RFC corren a la vez; cada uno ocupa una conexión toda su foto. */
+export const ESTADOS_DE_RESULTADOS_A_LA_VEZ = 2
+
+/**
+ * `fn` sobre cada elemento, con a lo más `limite` a la vez y el resultado en el orden de `items`. Si una falla, rechaza con su error
+ * y no arranca ninguna más (las que ya corrían terminan solas; nadie usa su resultado). Para trabajo que ocupa una conexión larga.
+ * T6 M2 (revisión final): `limite` debe ser un entero ≥ 1; con 0, negativo o NaN no arrancaría ningún trabajador y el arreglo
+ * volvería con huecos (un $0 en silencio en el IVA en flujo), así que se rechaza antes de correr nada.
+ */
+export async function enParaleloAcotado<T, R>(items: T[], limite: number, fn: (x: T) => Promise<R>): Promise<R[]> {
+  if (!Number.isInteger(limite) || limite < 1) throw new RangeError(`enParaleloAcotado: el límite debe ser un entero ≥ 1 (llegó ${limite})`)
+  const resultados = new Array<R>(items.length)
+  let siguiente = 0
+  let fallo = false
+  const trabajador = async () => {
+    while (!fallo && siguiente < items.length) {
+      const i = siguiente++
+      try {
+        resultados[i] = await fn(items[i])
+      } catch (e) {
+        fallo = true
+        throw e
+      }
+    }
+  }
+  await Promise.all(Array.from({ length: Math.min(limite, items.length) }, trabajador))
+  return resultados
+}

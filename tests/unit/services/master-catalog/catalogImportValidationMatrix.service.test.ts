@@ -1,4 +1,4 @@
-import { BusinessType, CatalogReferenceStatus } from '@prisma/client'
+import { BusinessType, CatalogReferenceStatus, Prisma } from '@prisma/client'
 import { blank, context, makeHarness, number, row, text, upload, validWorkbook } from './catalogImportTestHarness'
 
 function makeUpdateWorkbook() {
@@ -490,5 +490,70 @@ describe('catalog import validation matrix', () => {
     const unrelated = makeHarness()
     unrelated.tx.catalogValidationProfile.findMany.mockResolvedValue([{ ...unsupportedProfile, businessType: BusinessType.RESTAURANT }])
     await expect(unrelated.service.preview(context, upload)).resolves.toMatchObject({ canConfirm: true, errors: [] })
+  })
+})
+
+describe('D15 · las celdas de IVA del Excel son históricas', () => {
+  const stagedInput = (h: ReturnType<typeof makeHarness>) =>
+    h.tx.catalogImportLine.createMany.mock.calls[0]?.[0].data.find((line: { sourceSheet: string }) => line.sourceSheet === 'Items').payload
+      .command.input
+  const hallazgosDeIva = (errors: Array<{ column: string }>) => errors.filter(error => ['iva_rate', 'objeto_imp'].includes(error.column))
+  const preciosActuales = [
+    {
+      id: 'price-sale',
+      catalogItemId: 'catalog-item-1',
+      kind: 'SALE_PRICE',
+      scope: 'ORGANIZATION',
+      currency: 'MXN',
+      revision: 2,
+      active: true,
+    },
+    {
+      id: 'price-cost',
+      catalogItemId: 'catalog-item-1',
+      kind: 'PURCHASE_COST',
+      scope: 'ORGANIZATION',
+      currency: 'MXN',
+      revision: 3,
+      active: true,
+    },
+  ]
+
+  it('un alta con iva_rate y objeto_imp vacíos nace al 16 % (02), sin hallazgos', async () => {
+    const workbook = validWorkbook()
+    workbook.sheets.Items.rows[0]!.values.iva_rate = blank()
+    workbook.sheets.Items.rows[0]!.values.objeto_imp = blank()
+    const h = makeHarness(workbook)
+
+    const result = await h.service.preview(context, upload)
+
+    expect(result).toMatchObject({ canConfirm: true, errors: [] })
+    expect(stagedInput(h)).toMatchObject({ taxRate: '0.1600', objetoImp: '02' })
+  })
+
+  it('una edición con las celdas vacías conserva el IVA guardado del artículo', async () => {
+    const workbook = makeUpdateWorkbook()
+    workbook.sheets.Items.rows[0]!.values.iva_rate = blank()
+    workbook.sheets.Items.rows[0]!.values.objeto_imp = blank()
+    const h = makeHarness(workbook)
+    h.tx.catalogItem.findMany.mockResolvedValue([
+      itemRow('catalog-item-1', 'SKU-001', 'SKU-001', { taxRate: new Prisma.Decimal('0.0000'), objetoImp: '02' }),
+    ])
+    h.tx.catalogItemPrice.findMany.mockResolvedValue(preciosActuales)
+
+    const result = await h.service.preview(context, upload)
+
+    expect(hallazgosDeIva(result.errors)).toEqual([])
+    expect(stagedInput(h)).toMatchObject({ taxRate: '0.0000', objetoImp: '02' })
+  })
+
+  it('regresión: un archivo viejo con valores los sigue guardando tal cual', async () => {
+    const workbook = validWorkbook()
+    workbook.sheets.Items.rows[0]!.values.iva_rate = number('0.0800')
+    const h = makeHarness(workbook)
+
+    await h.service.preview(context, upload)
+
+    expect(stagedInput(h)).toMatchObject({ taxRate: '0.0800', objetoImp: '02' })
   })
 })

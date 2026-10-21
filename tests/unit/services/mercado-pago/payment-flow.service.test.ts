@@ -4,7 +4,10 @@ import * as paymentService from '@/services/mercado-pago/payment.service'
 import * as connectionService from '@/services/mercado-pago/connection.service'
 import type { MercadoPagoWebhookPayload } from '@/services/mercado-pago/types'
 
-jest.mock('@/services/mercado-pago/payment.service')
+jest.mock('@/services/mercado-pago/payment.service', () => ({
+  ...jest.requireActual('@/services/mercado-pago/payment.service'),
+  getPayment: jest.fn(),
+}))
 jest.mock('@/services/mercado-pago/connection.service')
 
 const mockPrisma = prisma as unknown as {

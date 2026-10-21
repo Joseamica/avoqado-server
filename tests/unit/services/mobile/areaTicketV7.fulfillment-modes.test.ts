@@ -166,6 +166,10 @@ describe('AreaTicket v7 fulfillment decisions', () => {
     })
 
     expect(result.order.areaDeliveryCode).toBeNull()
+    // IVA por producto (plan 2): el checkout de vales v7 materializa precios con IVA incluido.
+    expect(prismaMock.order.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ contratoDePrecio: 'IVA_INCLUIDO' }) }),
+    )
   })
 
   it('conserva HOLD_UNTIL_PAID al materializar aunque el área cambie a IMMEDIATE', async () => {

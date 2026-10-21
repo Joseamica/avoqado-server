@@ -28,6 +28,17 @@
 // El servicio arrastra sockets, recibos y el guard de ventas al importarse.
 // Nada de eso está bajo prueba: lo que se verifica es la aritmética del saldo.
 
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+// R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
+  lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
+  cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),
+}))
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/utils/prismaClient', () => {
   const client: any = {
     payment: {
@@ -394,9 +405,10 @@ describe('b4bit — CAS: qué pasa si otro cobro gana la carrera', () => {
     await processWebhook(webhookCO())
 
     expect(onOrderPaid).not.toHaveBeenCalled()
-    // Y `completedAt` no se mueve: la venta se cerró una vez, no dos.
+    // Y `completedAt` no se mueve: la venta se cerró una vez, no dos. R8-1 (ronda 8): una venta cerrada que recibe dinero ya ni
+    // reescribe `status`/`completedAt` (antes los reescribía con el mismo valor); sigue PAID con saldo 0.
     const data = orderWrite()
-    expect(data.completedAt).toEqual(new Date('2026-08-17T10:00:00Z'))
+    expect([data.completedAt, data.status, data.paymentStatus, Number(data.remainingBalance)]).toEqual([undefined, undefined, 'PAID', 0])
   })
 })
 

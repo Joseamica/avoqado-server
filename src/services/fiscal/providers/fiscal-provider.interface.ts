@@ -78,6 +78,8 @@ export interface CfdiItemTax {
   factor: 'Tasa' | 'Cuota' | 'Exento'
   rate: number // e.g. 0.16
   withholding: boolean // true = retención, false = traslado
+  /** Base del traslado en pesos con 6 decimales (concepto de la global con varias tasas, D4). Sin ella, el PAC la calcula del precio. */
+  base?: string
 }
 
 export interface CfdiItemInput {
@@ -92,11 +94,19 @@ export interface CfdiItemInput {
    *   - taxIncluded=false → NET (sin IVA) — the PAC adds the IVA on top (separated-tax sources).
    */
   unitPriceCents: number
+  /**
+   * D9 (IVA por producto): precio unitario en PESOS con hasta 6 decimales, sólo cuando no cae en centavos (venta por peso cuyo
+   * cobro redondeó precio × kilos). Si viene, es el precio que se manda al PAC; `unitPriceCents` conserva el redondeo para los
+   * lectores de antes. Ausente en todo lo demás: las entradas viejas y su huella no cambian.
+   */
+  unitPriceDecimal?: string
   discountCents: number
   objetoImp: string // 01/02/03
   taxes: CfdiItemTax[]
   /** When true, `unitPriceCents` is IVA-included and the PAC must back-compute the base (tax_included). Default false. */
   taxIncluded?: boolean
+  /** NoIdentificacion (H3: el folio del ticket en la global; C2/C3: el ticket en la nota). */
+  sku?: string
 }
 
 export interface CreateInvoiceParams {
@@ -128,6 +138,8 @@ export interface CreateInvoiceParams {
  * `receptor.usoCfdi` debe ser 'G02' ("Devoluciones, descuentos o bonificaciones").
  */
 export interface CreditNoteParams {
+  /** Identidad versionada únicamente para reservas del protocolo IVA. */
+  protocoloIva?: 1
   receptor: ReceptorInput & { usoCfdi: string; email?: string }
   items: CfdiItemInput[]
   formaPago: string // c_FormaPago — cómo se devolvió el dinero
@@ -171,16 +183,18 @@ export interface GlobalInvoiceParams {
   }
   /** Stamped as `external_id` on the PAC document — enables deterministic orphan lookup in reconcile. */
   externalId?: string
+  /** Sólo envíos explícitos protocolo1: llave versionada del intento. */
+  idempotencyKey?: string
 }
 
 export interface StampedInvoice {
   providerInvoiceId: string
-  uuid: string // folio fiscal
+  uuid: string | null // null mientras el PAC sigue procesando
   serie: string | null
   folio: string | null
   totalCents: number
   stampedAt: Date
-  status: 'valid' | 'canceled'
+  status: 'valid' | 'canceled' | 'pending'
 }
 
 /**
@@ -195,7 +209,7 @@ export interface ProviderInvoiceSummary {
   serie: string | null
   folio: string | null
   totalCents: number
-  status: 'valid' | 'canceled'
+  status: 'valid' | 'canceled' | 'pending'
   /** receptor RFC (tax_id) — used to match individual CFDIs by RFC, globals by XAXX010101000 */
   customerTaxId: string | null
   /** true when the PAC document is a factura global (has a global period block) */

@@ -20,8 +20,8 @@ import {
 export const preflight = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { terminalId } = req.params
-    const { toVenueId, migrateMerchant } = req.body
-    const data = await migratePreflight(terminalId, toVenueId, migrateMerchant)
+    const { toVenueId, migrateMerchant, assignedMerchantIds } = req.body
+    const data = await migratePreflight(terminalId, toVenueId, migrateMerchant, assignedMerchantIds)
     return res.status(200).json({ data, message: 'Preflight complete' })
   } catch (error) {
     next(error)

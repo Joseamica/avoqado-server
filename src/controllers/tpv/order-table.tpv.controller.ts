@@ -1,29 +1,22 @@
 import { Request, Response } from 'express'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '../../services/mobile/service-charge.mobile.service'
-import * as tableTpvService from '../../services/tpv/table.tpv.service'
+import prisma from '../../utils/prismaClient'
+import { ORDER_LOCK_WAIT_BUDGET } from '../../services/shared/paymentShiftClaim'
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
 
 /**
  * Ciclo de orden de mesa bajo `/tpv` (Plan B Task 4, 2026-07-27).
  *
- * Los handlers de este archivo son wrappers delgados sobre los MISMOS servicios
- * puros que usa `/mobile` (`order.mobile.service.ts` / `service-charge.mobile.service.ts`):
- * reciben `(venueId, orderId, …, staffId?)` y no tocan `req`/`authContext`, así que
- * no hay lógica que extraer ni duplicar — solo leer el input y delegar. Reusarlos
- * desde acá deja `/mobile` byte-idéntico (iOS/Android se desarrollan en paralelo
- * contra ese contrato en otras sesiones).
+ * Los handlers delegan en los mismos servicios compartidos de `/mobile` y
+ * service-charge.mobile.service.ts. Reciben el input del request y obtienen
+ * staffId del contexto autenticado; los helpers conservan las reglas de dominio.
  *
- * Excepción: `mergeOrders` y `cancelOrder` SÍ agregan un paso propio de este
- * archivo después de delegar — `tableTpvService.reconcileTableAfterOrderRemoved`
- * (Fix 1, "mesa fantasma", 2026-08-07). El release de mesa del servicio
- * compartido vive en la zona FROZEN y tiene el MISMO hueco en ambos casos (no
- * libera mesas cuya última cuenta viene de un SPLIT_ORDER — `cancelOrder`'s
- * propio lookup usa `Table.currentOrderId === orderId`, idéntico al de
- * `mergeOrders`); no se puede tocar `/mobile` para arreglarlo, así que se
- * reconcilia acá. Ver el comentario en `reconcileTableAfterOrderRemoved` para
- * el detalle.
+ * Merge y cancel mantienen una sola transacción sobre los helpers compartidos.
+ * El valor TPV tableFreed se captura de la mesa propia final dentro de esa tx,
+ * conservando la semántica del antiguo segundo reconcile sin lecturas postcommit.
+ * Los publishers reciben sólo ese resultado capturado después del commit.
  *
  * `cancelOrder` (POST orders/:orderId/cancel, 2026-08-07) es la ÚNICA acción
  * de mesa que antes NO tenía ruta online bajo `/tpv` — viajaba siempre como
@@ -127,25 +120,16 @@ export async function mergeOrders(req: Request, res: Response): Promise<void> {
       return
     }
 
-    const result = await orderMobileService.mergeOrders(venueId, orderId, sourceOrderId, staffId)
-
-    // 🔴 Fix 1 (zombie table, 2026-08-07 — see
-    // .superpowers/sdd/2026-07-24-tpv-plan-b-superficie-tpv-server/zombie-table-and-staff-picker.md):
-    // the shared mergeOrders above (FROZEN /mobile) only frees the source table
-    // when Table.currentOrderId === sourceOrderId, which a SPLIT_ORDER/SPLIT_BY_SEAT
-    // child order never satisfies. Reconcile from THIS (/tpv) layer, unconditionally,
-    // by the order's own tableId — see table.tpv.service.ts::reconcileTableAfterOrderRemoved.
-    // Never let floor-plan bookkeeping fail an already-committed merge: on error, fall
-    // back to the shared service's own (possibly stale) tableFreed rather than 500ing.
-    let tableFreed = Boolean((result as any)?.tableFreed)
+    const result = await prisma.$transaction(
+      tx => orderMobileService.mergeOrdersInTransaction(tx, venueId, orderId, sourceOrderId, staffId),
+      ORDER_LOCK_WAIT_BUDGET,
+    )
     try {
-      const reconciled = await tableTpvService.reconcileTableAfterOrderRemoved(venueId, sourceOrderId)
-      tableFreed = reconciled.tableFreed
-    } catch (reconcileError: any) {
-      logger.error(`[ORDER-TABLE TPV] merge: table reconciliation failed for source ${sourceOrderId}: ${reconcileError.message}`)
+      await orderMobileService.publishMergedOrders(venueId, result, staffId)
+    } catch (error: any) {
+      logger.error(`[ORDER-TABLE TPV] merge: notification failed for source ${sourceOrderId}: ${error.message}`)
     }
-
-    res.status(200).json({ success: true, data: { ...result, tableFreed } })
+    res.status(200).json({ success: true, data: { ...result.data, tableFreed: result.tpvTableFreed } })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] merge: ${error.message}`)
     res.status(error.statusCode || 500).json(cuerpoDeError(error))
@@ -162,18 +146,8 @@ export async function mergeOrders(req: Request, res: Response): Promise<void> {
  * orden ya está pagada, o (409) si hay un cobro de terminal en curso que
  * todavía podría aterrizar sobre esta orden.
  *
- * 🔴 Fix 1 (zombie table, 2026-08-07 — mismo patrón que `mergeOrders` arriba):
- * el propio release de mesa de `cancelOrder` (FROZEN /mobile) busca la mesa
- * por `Table.currentOrderId === orderId`, el mismo lookup con el mismo hueco
- * que `mergeOrders` tenía — una orden nacida de SPLIT_ORDER/SPLIT_BY_SEAT
- * nunca tiene `currentOrderId` apuntándole, así que cancelar la ÚLTIMA cuenta
- * abierta de una mesa cuando esa cuenta es un hijo de split deja la mesa
- * OCCUPIED con openOrders: [] para siempre. Se reconcilia acá, unconditionally,
- * por el `tableId` propio de la orden — ver
- * `table.tpv.service.ts::reconcileTableAfterOrderRemoved`. Nunca se deja que
- * un fallo de reconciliación tumbe una cancelación ya aplicada: si
- * `reconcileTableAfterOrderRemoved` truena, se reporta `tableFreed: false`
- * (desconocido/posiblemente stale) en vez de 500ear una cancelación exitosa.
+ * La transacción compartida repara las mesas capturadas y devuelve el booleano
+ * propio de TPV; una falla de publicación después del commit no cambia su DTO.
  */
 export async function cancelOrder(req: Request, res: Response): Promise<void> {
   try {
@@ -181,17 +155,17 @@ export async function cancelOrder(req: Request, res: Response): Promise<void> {
     const { reason } = req.body || {}
     const staffId = (req as any).authContext?.userId as string | undefined
 
-    await orderMobileService.cancelOrder(venueId, orderId, typeof reason === 'string' ? reason : undefined, staffId)
-
-    let tableFreed = false
+    const cancellationReason = typeof reason === 'string' ? reason : undefined
+    const result = await prisma.$transaction(
+      tx => orderMobileService.cancelOrderInTransaction(tx, venueId, orderId, cancellationReason, staffId),
+      ORDER_LOCK_WAIT_BUDGET,
+    )
     try {
-      const reconciled = await tableTpvService.reconcileTableAfterOrderRemoved(venueId, orderId)
-      tableFreed = reconciled.tableFreed
-    } catch (reconcileError: any) {
-      logger.error(`[ORDER-TABLE TPV] cancel: table reconciliation failed for order ${orderId}: ${reconcileError.message}`)
+      await orderMobileService.publishCancelledOrder(venueId, result, staffId, cancellationReason)
+    } catch (error: any) {
+      logger.error(`[ORDER-TABLE TPV] cancel: notification failed for order ${orderId}: ${error.message}`)
     }
-
-    res.status(200).json({ success: true, data: { tableFreed } })
+    res.status(200).json({ success: true, data: { tableFreed: result.tpvTableFreed } })
   } catch (error: any) {
     logger.error(`[ORDER-TABLE TPV] cancel: ${error.message}`)
     res.status(error.statusCode || 500).json(cuerpoDeError(error))

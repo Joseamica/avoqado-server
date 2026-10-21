@@ -304,13 +304,14 @@ describe('procesarAvisoDeFacturapi', () => {
     expect(firmaValida('otro', Buffer.from(cuerpo), firma)).toBe(false)
   })
 
-  it('factura ya cancelada ⇒ 200 SIN_CAMBIO, sin llamar al PAC', async () => {
+  it.each(['CANCELLED', 'ACCEPTED'])('factura ya cancelada (%s) ⇒ 200 SIN_CAMBIO, sin llamar al PAC', async cancelStatus => {
     const deps = procesarDeps({
-      findCfdi: jest.fn().mockResolvedValue({ id: 'c1', status: 'CANCELLED', cancelStatus: 'CANCELLED', facturapiId: 'fa-inv-1' }),
+      findCfdi: jest.fn().mockResolvedValue({ id: 'c1', status: 'CANCELLED', cancelStatus, facturapiId: 'fa-inv-1' }),
     })
     const cuerpo = aviso()
     expect(await procesar(cuerpo, firmar(cuerpo), deps)).toEqual({ http: 200, resultado: 'SIN_CAMBIO' })
     expect(deps.refreshPending).not.toHaveBeenCalled()
+    expect(deps.sincronizarCancelacionExterna).not.toHaveBeenCalled()
   })
 
   it('JSON inválido con firma válida ⇒ 400', async () => {

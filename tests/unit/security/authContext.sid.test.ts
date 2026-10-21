@@ -40,3 +40,14 @@ describe('buildAuthContextFromPayload — sid', () => {
     expect(ctx.isImpersonating).toBe(true)
   })
 })
+
+// IVA por producto (spec planes 6-7, §5.5): el `origen` del token llega al contexto sólo si es exactamente `'POS'`.
+describe('buildAuthContextFromPayload — origen', () => {
+  it('propaga origen POS', () => {
+    expect(buildAuthContextFromPayload(base({ origen: 'POS' })).origen).toBe('POS')
+  })
+
+  it.each([['pos'], ['DASHBOARD'], [{ x: 1 }], [undefined]])('ignora un origen que no es exactamente POS (%p)', origen => {
+    expect(buildAuthContextFromPayload(base({ origen })).origen).toBeUndefined()
+  })
+})

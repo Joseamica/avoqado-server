@@ -83,8 +83,18 @@ describe('area ticket MCP tools', () => {
       }),
     )
 
-    expect(requirePermission).toHaveBeenCalledWith('area-tickets:deliver', 'venue-1')
+    expect(requirePermission).toHaveBeenCalledWith('area-tickets:deliver', 'venue-1', 'read')
     expect(result).toEqual({ count: 0, tickets: [] })
+  })
+
+  it('🔴 R12-4: reconciliation lists what the dashboard counter counts — RECONCILIATION_REQUIRED sessions AND sessions with an UNKNOWN attempt', async () => {
+    await call('area_ticket_reconciliation_queue', { venueId: 'venue-1', limit: 20 })
+
+    expect(prismaMock.areaTicketCheckoutSession.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { venueId: 'venue-1', OR: [{ status: 'RECONCILIATION_REQUIRED' }, { paymentAttempts: { some: { status: 'UNKNOWN' } } }] },
+      }),
+    )
   })
 
   it('gates reconciliation with configure and never mutates state', async () => {
@@ -95,7 +105,7 @@ describe('area ticket MCP tools', () => {
       }),
     )
 
-    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1')
+    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1', 'read')
     expect(result.count).toBe(0)
     expect(prismaMock.areaTicketCheckoutSession.update).not.toHaveBeenCalled()
     expect(prismaMock.areaTicket.update).not.toHaveBeenCalled()
@@ -187,7 +197,7 @@ describe('cobro externo (ruta EXTERNAL) en los tools de vales', () => {
 
     const result = parse(await call('area_ticket_reconciliation_queue', { venueId: 'venue-1', limit: 20 }))
 
-    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1')
+    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1', 'read')
     expect(result.externalIncidents.count).toBe(1)
     expect(result.externalIncidents.items[0]).toMatchObject({
       id: 'incident-1',
@@ -285,7 +295,7 @@ describe('pending_external_confirmations', () => {
 
     const result = parse(await call('pending_external_confirmations', { venueId: 'venue-1', limit: 20 }))
 
-    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1')
+    expect(requirePermission).toHaveBeenCalledWith('area-tickets:configure', 'venue-1', 'read')
     expect(result.count).toBe(1)
     expect(result.items[0]).toMatchObject({
       code: '9000000090',

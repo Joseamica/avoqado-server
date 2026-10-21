@@ -19,6 +19,7 @@ jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     product: {
+      count: jest.fn().mockResolvedValue(0),
       findMany: (...a: unknown[]) => mockProductFindMany(...(a as [])),
       findFirst: (...a: unknown[]) => mockProductFindFirst(...(a as [])),
     },
@@ -125,8 +126,71 @@ describe('menu_item_detail', () => {
       modifierGroups: [],
     })
     const out = parse(await call({ venueId: 'v1', name: 'agua' }))
+    expect(out.item.costSource).toBe('manual_product')
+    expect(out.item.recipeStatus).toBe('not_checked')
+    expect(out.item.recipeGuidance).toContain('get_recipe')
     expect(out.item.cost).toBeNull()
     expect(out.item.margin).toBeNull()
     expect(out.item.inventoryTracking).toBeNull()
+  })
+
+  it('muestra el SKU de cada extra (código en la caja externa) sólo cuando lo tiene', async () => {
+    mockProductFindMany.mockResolvedValueOnce([{ id: 'p3', name: 'Latte', active: true, price: 60 }])
+    mockProductFindFirst.mockResolvedValueOnce({
+      name: 'Latte',
+      sku: 'LATTE',
+      description: null,
+      type: 'BEVERAGE',
+      price: 60,
+      cost: null,
+      active: true,
+      prepTime: null,
+      calories: null,
+      imageUrl: null,
+      trackInventory: false,
+      inventoryMethod: null,
+      category: { name: 'Bebidas' },
+      modifierGroups: [
+        {
+          group: {
+            name: 'Extras',
+            required: false,
+            allowMultiple: true,
+            minSelections: 0,
+            maxSelections: 2,
+            modifiers: [
+              { name: 'Shot de espresso', price: 15, sku: 'P000672' },
+              { name: 'Sin azúcar', price: 0, sku: null }, // así lo devuelve la base cuando no tiene
+            ],
+          },
+        },
+      ],
+    })
+    const out = parse(await call({ venueId: 'v1', name: 'latte' }))
+    expect(out.item.modifierGroups[0].options).toEqual([
+      expect.objectContaining({ name: 'Shot de espresso', sku: 'P000672' }),
+      { name: 'Sin azúcar', extraPrice: 0 }, // sin SKU no lleva la llave, ni siquiera con null
+    ])
+  })
+})
+
+describe('plan 5 (D6) · el MCP no muestra ni «des-86» productos archivados', () => {
+  const tool = (nombre: string) => (args: Record<string, unknown>) => handlers.get(nombre)!(args, {})
+  const pideVigentes = expect.objectContaining({ where: expect.objectContaining({ deletedAt: null }) })
+
+  it('list_menu', async () => {
+    mockProductFindMany.mockResolvedValueOnce([])
+    await tool('list_menu')({ venueId: 'v1' })
+    expect(mockProductFindMany).toHaveBeenLastCalledWith(pideVigentes)
+  })
+
+  it('menu_item_detail y set_menu_item_active buscan el nombre sólo entre vigentes', async () => {
+    mockProductFindMany.mockResolvedValueOnce([])
+    await call({ venueId: 'v1', name: 'Café' })
+    expect(mockProductFindMany).toHaveBeenLastCalledWith(pideVigentes)
+
+    mockProductFindMany.mockResolvedValueOnce([])
+    await tool('set_menu_item_active')({ venueId: 'v1', name: 'Café', active: false })
+    expect(mockProductFindMany).toHaveBeenLastCalledWith(pideVigentes)
   })
 })

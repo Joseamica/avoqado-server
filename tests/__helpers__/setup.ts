@@ -1,12 +1,15 @@
 // Reconoce ÚNICAMENTE la consulta con que el outbox relee su pago fuente
 // (`paymentEffects.service.ts:22-26`): id + venueId + status COMPLETED, y un select que pide
-// SOLO orderId. Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
+// SOLO orderId (más la marca de tarjetas de regalo de B6, `order.items` con `giftCardId`).
+// Ser preciso importa: un reflejo laxo intercepta búsquedas legítimas del
 // servicio y le cambia el comportamiento, que sería peor que el fallo que viene a evitar.
 const esConsultaDelOutbox = (a: any) =>
   a?.where?.status === 'COMPLETED' &&
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
-  Object.keys(a?.select ?? {}).length === 1 &&
+  Object.keys(a?.select ?? {}).every(
+    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+  ) &&
   a?.select?.orderId === true
 // tests/__helpers__/setup.ts
 
@@ -69,6 +72,11 @@ process.env.MP_PUBLIC_KEY_TEST = process.env.MP_PUBLIC_KEY_TEST || 'TEST-pk-test
 process.env.MP_ACCESS_TOKEN_TEST = process.env.MP_ACCESS_TOKEN_TEST || 'TEST-at-test'
 process.env.MERCADO_PAGO_TOKEN_KEY =
   process.env.MERCADO_PAGO_TOKEN_KEY || '0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef'
+process.env.AGGREGATOR_TOKEN_KEY = process.env.AGGREGATOR_TOKEN_KEY || 'b'.repeat(64)
+// Tarjetas de regalo: llaves de prueba deterministas (hex de 32 bytes) ANTES de cualquier import.
+process.env.GIFT_CARD_CODE_KEY = process.env.GIFT_CARD_CODE_KEY || 'c'.repeat(64)
+process.env.GIFT_CARD_HMAC_KEY = process.env.GIFT_CARD_HMAC_KEY || 'd'.repeat(64)
+process.env.TOTALPASS_PARTNER_API_KEY = process.env.TOTALPASS_PARTNER_API_KEY || 'partner-test-key'
 process.env.MP_API_BASE_URL = process.env.MP_API_BASE_URL || 'https://api.mercadopago.com'
 process.env.MP_AUTH_BASE_URL = process.env.MP_AUTH_BASE_URL || 'https://auth.mercadopago.com.mx'
 
@@ -106,6 +114,12 @@ const prismaMock: any = {
   // necesitan; sin él, el TypeError sustituye a la aserción real.
   $executeRawUnsafe: jest.fn().mockResolvedValue(0),
   $executeRaw: jest.fn().mockResolvedValue(0),
+  documentRequest: createMockModel(),
+  documentRequestFile: createMockModel(),
+  documentRequestDelivery: createMockModel(),
+  documentRequestSubmission: createMockModel(),
+  documentRequestSubmissionFile: createMockModel(),
+  documentRequestVenueLink: createMockModel(),
   staff: createMockModel(),
   venue: createMockModel(),
   venueRolePermission: createMockModel(),
@@ -178,6 +192,19 @@ const prismaMock: any = {
   cashDrawerSession: createMockModel(),
   cashDrawerEvent: createMockModel(),
   product: createMockModel(),
+  productGroup: createMockModel(),
+  productGroupOption: createMockModel(),
+  productGroupOptionValue: createMockModel(),
+  productGroupModifierGroup: createMockModel(),
+  productVariantValue: createMockModel(),
+  // Biblioteca de opciones del POS (product-option.mobile.service).
+  productOption: createMockModel(),
+  productOptionValue: createMockModel(),
+  // IVA por producto (plan 1): `createProduct`/`updateProduct` consultan este modelo para
+  // saber si el flag está encendido ANTES de escribir `ivaTratamiento` (normalizarIvaDeProducto).
+  // Sin esta entrada, cualquier test que ejercite esos escritores revienta con "Cannot read
+  // properties of undefined (reading 'count')" — misma clase de bug que los demás de esta lista.
+  venueIvaPorProducto: createMockModel(),
   menu: createMockModel(),
   menuCategory: createMockModel(),
   menuCategoryAssignment: createMockModel(),
@@ -220,6 +247,10 @@ const prismaMock: any = {
   loyaltyTransaction: createMockModel(),
   walletPass: createMockModel(),
   receiptLayout: createMockModel(),
+  // Pantalla del cliente (F0-A). Sin estas entradas, cualquier prueba unitaria o HTTP que toque el diseño o sus
+  // activos muere con TypeError, y la ruta HTTP responde 500 en vez de su código real.
+  customerDisplayDesign: createMockModel(),
+  customerDisplayAsset: createMockModel(),
   walletCardDesign: createMockModel(),
   walletPassRegistration: createMockModel(),
   stampCard: createMockModel(),
@@ -297,6 +328,8 @@ const prismaMock: any = {
   purchaseOrderInvoiceLine: createMockModel(),
   supplierItemCode: createMockModel(),
   staffDocument: createMockModel(),
+  staffPosition: createMockModel(),
+  staffAssignment: createMockModel(),
   purchaseOrderItem: createMockModel(),
   // Payment config & analytics models
   merchantAccount: createMockModel(),
@@ -372,6 +405,16 @@ const prismaMock: any = {
   commissionOverride: createMockModel(),
   commissionCalculation: createMockModel(),
   commissionPayout: createMockModel(),
+  staffPayLevel: createMockModel(),
+  staffPayLevelAssignment: createMockModel(),
+  servicePayTable: createMockModel(),
+  servicePayTableVersion: createMockModel(),
+  servicePayTableCell: createMockModel(),
+  classSessionPayState: createMockModel(),
+  servicePayPeriod: createMockModel(),
+  serviceEarning: createMockModel(),
+  staffPayStatement: createMockModel(),
+  staffPayTipWindow: createMockModel(),
   commissionSummary: createMockModel(),
   milestoneAchievement: createMockModel(),
   // Credit Pack models
@@ -389,6 +432,10 @@ const prismaMock: any = {
   catalogPublicationFieldDecision: createMockModel(),
   // Money reconciliation (Fase 0.B: fulfillment fail-closed registra anomalías)
   moneyAnomaly: createMockModel(),
+  // Tarjetas de regalo (spec 2026-10-14): sobre, libreta y ajustes.
+  giftCard: createMockModel(),
+  giftCardActivity: createMockModel(),
+  giftCardSettings: createMockModel(),
   // Stripe webhook idempotency claims (Connect + platform)
   processedStripeEvent: createMockModel(),
   // Fase 1: outbox de avisos de aprobación de clientes (evento + entrega por destinatario)
@@ -409,6 +456,19 @@ const prismaMock: any = {
   googleOAuthSession: createMockModel(),
   // Google Calendar Sync (Phase 2 — push)
   calendarSyncOutbox: createMockModel(),
+  // Conector Shopify: el conteo (B6) pregunta si el negocio tiene sucursal ligada, y él y el paso a receta (B7) por la
+  // pareja del producto.
+  shopifyLocationLink: createMockModel(),
+  shopifyVariantLink: createMockModel(),
+  aggregatorConnection: createMockModel(),
+  aggregatorProductLink: createMockModel(),
+  aggregatorSessionLink: createMockModel(),
+  aggregatorCapacityRule: createMockModel(),
+  aggregatorBooking: createMockModel(),
+  aggregatorVisit: createMockModel(),
+  customerExternalIdentity: createMockModel(),
+  aggregatorInboundEvent: createMockModel(),
+  aggregatorOutbox: createMockModel(),
   reservationGoogleEventMapping: createMockModel(),
   reservationSettings: createMockModel(),
   // Slot holds (booking + reschedule countdown)
@@ -447,6 +507,13 @@ const prismaMock: any = {
   // Lo demás que BLOQUEA el borrado de un venue desechable (ver liveDemoCleanup.service).
   commissionClawback: createMockModel(),
   merchantFiscalConfig: createMockModel(),
+  cfdi: createMockModel(),
+  orderItemSelloIva: createMockModel(),
+  cfdiGlobalOrden: createMockModel(),
+  // Pedidos en línea (plan 1a): este mock es una LISTA FIJA. Sin estas dos entradas cualquier prueba que toque los modelos
+  // nuevos revienta con «Cannot read properties of undefined» en vez de fallar por su aserción.
+  onlineOrderingSettings: createMockModel(),
+  onlineOrder: createMockModel(),
   // Add $connect and $disconnect for connection management
   $connect: jest.fn(),
   $disconnect: jest.fn(),
@@ -460,15 +527,47 @@ prismaMock.$queryRaw = jest.fn()
 
 // Set safe default return values for mocks that are frequently queried
 prismaMock.productModifierGroup.findMany.mockResolvedValue([])
+// Variantes (tarea 11): `archivarProductos` (todo borrado de producto y «Reemplazar menú») busca los padres que se quedaron sin
+// variantes vivas, y «Reemplazar» las familias vivas cuya categoría vuelve al menú. Casi ningún negocio tiene familias: ninguna.
+prismaMock.productGroup.findMany.mockResolvedValue([])
 prismaMock.externalBusyBlock.findFirst.mockResolvedValue(null)
 // Terminal list endpoints (getOrgTerminals / getAllTerminals) run an incidental
 // migration-badge query (prisma.tpvCommandQueue.findMany) for the page's terminals.
 // Tests that don't exercise migration badges shouldn't have to mock it — default to
 // no in-flight migrations so the result is iterable and the "Migrando…" badge is off.
 prismaMock.tpvCommandQueue.findMany.mockResolvedValue([])
+// Conector de pases: `checkInReservation` (rama de transición) busca visitas de pase de la reserva. Casi ninguna reserva
+// las tiene: por default ninguna, para que los tests de check-in que no ejercitan pases no tengan que mockearlo.
+prismaMock.aggregatorVisit.findMany.mockResolvedValue([])
+// Conector de pases: crear/editar/cancelar sesiones y cambiar su lista llama `enqueuePassSessionSync`, que busca las
+// conexiones activas del venue. Casi ningún venue tiene: por default ninguna, para que esos tests no tengan que mockearlo.
+prismaMock.aggregatorConnection.findMany.mockResolvedValue([])
+// Conector Shopify: casi ningún producto tiene pareja. Sin estos defaults, los tests del conteo y del asistente que no
+// saben de Shopify reventarían con «parejas is not iterable» o leerían `undefined` como pareja.
+prismaMock.shopifyLocationLink.findUnique.mockResolvedValue(null)
+prismaMock.shopifyVariantLink.findMany.mockResolvedValue([])
+prismaMock.shopifyVariantLink.findUnique.mockResolvedValue(null)
 prismaMock.orderItem.findMany.mockResolvedValue([])
+// Tarjetas de regalo: la activación, la cancelación de una cuenta sin cobrar y la revisión de la libreta consultan
+// sobres en caminos que muchas pruebas recorren sin saberlo. Sin sobres por default, igual que antes de la función.
+prismaMock.giftCard.findMany.mockResolvedValue([])
+prismaMock.giftCardActivity.findMany.mockResolvedValue([])
+// IVA por producto B2: los escritores de descuentos sincronizan los repartos leyendo las filas de la orden
+// (`sincronizarRepartos`). Mismo patrón que `orderItem`: una orden sin filas, salvo que la prueba diga otra cosa.
+prismaMock.orderDiscount.findMany.mockResolvedValue([])
 prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', status: 'PENDING' })
+// Sellos tardíos R11-2: la decisión «A» de las ligas de cliente (`ventaYaCobradaBajoCandado`) suma los cobros capturados de
+// una venta abierta. Por default ninguno (la venta abierta sigue abierta), para que las pruebas de ligas que no ejercitan esa
+// ventana no tengan que mockearlo.
+prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null, tipAmount: null } })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
+// IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —
+// el estado real de casi todo negocio hoy. Tests que lo necesitan encendido lo sobrescriben.
+prismaMock.venueIvaPorProducto.count.mockResolvedValue(0)
+// `updateProduct` (dashboard) lee el tratamiento ACTUAL del producto dentro de la transacción
+// para normalizarIvaDeProducto. Default = el estado de fábrica de cualquier Product (IVA_16 /
+// 0.16), así que un test que no manda campos de IVA no ve ningún efecto de esto.
+prismaMock.product.findFirstOrThrow.mockResolvedValue({ ivaTratamiento: 'IVA_16', taxRate: 0.16, objetoImp: '02' })
 // Plan-tier gating (checkFeatureAccess middleware → getVenueBaseTier in
 // src/services/access/basePlan.service.ts) iterates the rows returned by
 // prisma.venueFeature.findMany. A bare jest.fn() resolves undefined and the

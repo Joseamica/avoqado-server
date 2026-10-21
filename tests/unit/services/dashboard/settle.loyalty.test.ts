@@ -11,6 +11,12 @@
  *   · la elegibilidad se marca DENTRO del CAS que liquida (queda commiteada con el dinero);
  *   · la acreditación va DESPUÉS del commit y nunca tumba la liquidación.
  */
+// FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
+// suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
+}))
 jest.mock('@/config/logger', () => ({
   __esModule: true,
   default: { info: jest.fn(), warn: jest.fn(), error: jest.fn(), debug: jest.fn() },
@@ -135,6 +141,21 @@ describe('settleOrder — la lealtad del cliente', () => {
     const creado = (prismaMock as any).payment.create.mock.calls[0][0].data
     expect(creado).toMatchObject({ method: 'CASH', fundsFlow: 'CASH_DRAWER', amount: 500 })
   })
+})
+
+describe('Founder 3-oct / Codex r13 #3: «liquidar» es un cobro nuevo', () => {
+  it.each(['CANCELLED', 'DELETED'])(
+    '🔴 una cuenta %s ⇒ 400 con el texto del founder; ni transición, ni Payment, ni lealtad (hoy: crea un efectivo y la deja PAGADA y cancelada, fuera de los lectores)',
+    async status => {
+      const { updates } = armarOrden({ status })
+      await expect(settleOrder(VENUE, 'order-1', undefined, 'staff-7')).rejects.toMatchObject({
+        statusCode: 400,
+        code: 'ORDER_CANCELLED_NO_NEW_CHARGE',
+        message: 'Esta cuenta está cancelada, abre una nueva.',
+      })
+      expect([updates.length, (prismaMock as any).payment.create.mock.calls.length, award.mock.calls.length]).toEqual([0, 0, 0])
+    },
+  )
 })
 
 describe('settleCustomerBalance — la lealtad del cliente', () => {

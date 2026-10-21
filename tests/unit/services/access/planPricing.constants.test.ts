@@ -11,6 +11,7 @@ import {
   LEGACY_INTRO_OFFER,
   PLAN_IVA_RATE,
   STANDARD_PLAN_GROSS_CENTS,
+  STANDARD_PLAN_NET_CENTS,
   TRIAL_DAYS,
   standardPlanQuote,
 } from '@/services/access/planPricing.constants'
@@ -48,6 +49,23 @@ describe('STANDARD_PLAN_GROSS_CENTS — el precio de lista CON IVA, en centavos'
 
   it('la tasa de IVA es la misma que la de los seeds', () => {
     expect(PLAN_IVA_RATE).toBe(0.16)
+  })
+})
+
+describe('STANDARD_PLAN_NET_CENTS — el precio de lista SIN IVA, en centavos', () => {
+  it('son las bases ex-IVA de los seeds, en centavos', () => {
+    expect(STANDARD_PLAN_NET_CENTS).toEqual({
+      PRO: { monthly: 99900, annual: 999000 },
+      PREMIUM: { monthly: 169900, annual: 1699000 },
+    })
+  })
+
+  it('el neto por 1.16 da exactamente el bruto en los 4 precios', () => {
+    for (const tier of ['PRO', 'PREMIUM'] as const) {
+      for (const interval of ['monthly', 'annual'] as const) {
+        expect(Math.round(STANDARD_PLAN_NET_CENTS[tier][interval] * (1 + PLAN_IVA_RATE))).toBe(STANDARD_PLAN_GROSS_CENTS[tier][interval])
+      }
+    }
   })
 })
 

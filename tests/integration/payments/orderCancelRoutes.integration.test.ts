@@ -5,7 +5,8 @@
  * Por ruta:
  *  (a) una ADMISIÓN retiene el candado → la ruta espera → 409 `ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE` y la orden no
  *      queda cancelada;
- *  (b) un REGISTRO pone PAID mientras retiene → la ruta espera → 400 y la orden sigue PAID;
+ *  (b) un REGISTRO pone PAID mientras retiene → la ruta espera y no cancela: las rutas con scope rechazan la
+ *      carrera exacta de topología; una petición posterior con PAID estable conserva el 400 original;
  *  (c) al revés: la RUTA retiene el candado → la admisión espera → 400 `ORDER_CANCELLED_NO_NEW_CHARGE`, sin fila;
  *  (d) control sin bloqueador.
  * Más: fusiones cruzadas A→B / B→A concurrentes, y anular todo mientras aterriza un pago con tarjeta que NO sube la
@@ -26,6 +27,9 @@ import { cancelAreaTicketCheckout } from '@/services/mobile/areaTicketV7.mobile.
 import { processPosOrderDeleteEvent } from '@/services/pos-sync/posSyncOrder.service'
 import { cancelDeliveryOrder } from '@/services/delivery-channels/core/cancelDeliveryOrder.service'
 import * as referralRefund from '@/services/referrals/referralRefund.service'
+import { BadRequestError } from '@/errors/AppError'
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
+import { SocketEventType } from '@/communication/sockets/types'
 
 jest.mock('@/communication/sockets/managers/socketManager', () => {
   const sm = { getServer: jest.fn(), getBroadcastingService: jest.fn(() => null), broadcastToVenue: jest.fn() }
@@ -234,26 +238,75 @@ async function escenarioAdmisionRetiene(orderId: string, ejecutar: () => Promise
   }
 }
 
-/** (b): la ruta espera al registro que pone PAID y después rechaza con 400; la orden sigue PAID. */
-async function escenarioRegistroRetiene(orderId: string, ejecutar: () => Promise<unknown>) {
+/** Complete fixture state, including timestamps after a raced transaction has settled. */
+async function estadoCompletoOrdenes(ids: string[]) {
+  const orders = await prisma.order.findMany({ where: { venueId, id: { in: ids } }, orderBy: { id: 'asc' }, take: ids.length })
+  return {
+    orders,
+    items: await prisma.orderItem.findMany({ where: { orderId: { in: ids } }, orderBy: { id: 'asc' }, take: 100 }),
+    payments: await prisma.payment.count({ where: { orderId: { in: ids } } }),
+    actions: await prisma.orderAction.count({ where: { orderId: { in: ids } } }),
+    terminalRequests: await prisma.terminalPaymentRequest.count({ where: { venueId, orderId: { in: ids } } }),
+  }
+}
+
+/** (b): preserve legacy 400 routes; scoped routes prove the race and the later stable business guard. */
+async function escenarioRegistroRetiene(
+  orderId: string,
+  ejecutar: () => Promise<unknown>,
+  topology?: { stableMessage: string; otherOrderIds?: string[] },
+) {
+  const ids = [orderId, ...(topology?.otherOrderIds ?? [])]
+  const before = topology ? await estadoCompletoOrdenes(ids) : undefined
+  const auditCalls = (logAction as jest.Mock).mock.calls.length
+  const publicationCalls = (socketManager.getBroadcastingService as jest.Mock).mock.calls.length
+  const referralCalls = jest.spyOn(referralRefund, 'onOrderCancelled')
   const registro = registroQueRetiene(orderId)
+  let r: ReturnType<typeof resultadoDe> | undefined
   try {
     await registro.lockTomado
     let resuelta = false
-    const r = resultadoDe(ejecutar()).finally(() => (resuelta = true))
+    r = resultadoDe(ejecutar()).finally(() => (resuelta = true))
     await esperarBloqueoEnOrder()
     expect(resuelta).toBe(false)
     registro.soltar()
     await registro.tx
     const res = await r
     expect(res.ok).toBe(false)
-    expect((res as { e: unknown }).e).toMatchObject({ statusCode: 400 })
+    const error = (res as { e: unknown }).e
+    if (topology && before) {
+      expect(error).toBeInstanceOf(OrderTableTopologyChanged)
+      expect(error).toMatchObject({ message: 'ORDER_TABLE_TOPOLOGY_CHANGED' })
+      const expected = {
+        ...before,
+        orders: before.orders.map(order =>
+          order.id === orderId ? { ...order, paymentStatus: 'PAID', updatedAt: expect.any(Date) } : order,
+        ),
+      }
+      const assertUnchanged = async () => {
+        expect(await estadoCompletoOrdenes(ids)).toEqual(expected)
+        expect((logAction as jest.Mock).mock.calls).toHaveLength(auditCalls)
+        expect((socketManager.getBroadcastingService as jest.Mock).mock.calls).toHaveLength(publicationCalls)
+        expect(referralCalls).not.toHaveBeenCalled()
+      }
+      await assertUnchanged()
+      const paidState = await estadoCompletoOrdenes(ids)
+      const stable = await resultadoDe(ejecutar())
+      expect(stable.ok).toBe(false)
+      expect((stable as { e: unknown }).e).toBeInstanceOf(BadRequestError)
+      expect((stable as { e: unknown }).e).toMatchObject({ statusCode: 400, message: topology.stableMessage })
+      expect(await estadoCompletoOrdenes(ids)).toEqual(paidState)
+      await assertUnchanged()
+    } else {
+      expect(error).toMatchObject({ statusCode: 400 })
+    }
     const final = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
     expect(['CANCELLED', 'DELETED']).not.toContain(final.status)
     expect(final.paymentStatus).toBe('PAID')
   } finally {
     registro.soltar()
     await registro.tx.catch(() => undefined)
+    await r
   }
 }
 
@@ -358,9 +411,11 @@ describe('PUT del dashboard con status CANCELLED / DELETED (updateOrder)', () =>
     expect((await estado(orden.id)).status).not.toBe('DELETED')
   })
 
-  it('(b) espera a un registro que pone PAID y rechaza con 400', async () => {
+  it('(b) rechaza la carrera PAID sin efectos y conserva el 400 con PAID estable', async () => {
     const orden = await nuevaOrden()
-    await escenarioRegistroRetiene(orden.id, () => updateOrder(venueId, orden.id, { status: 'CANCELLED' } as any))
+    await escenarioRegistroRetiene(orden.id, () => updateOrder(venueId, orden.id, { status: 'CANCELLED' } as any), {
+      stableMessage: 'Esta orden tiene pagos registrados. Reembolsa primero; una orden pagada no se puede eliminar.',
+    })
   })
 
   it('(c) una admisión que llega mientras el PUT tiene el candado espera y sale con 400 sin crear fila', async () => {
@@ -496,10 +551,13 @@ describe('Fusión de cuentas (mergeOrders)', () => {
     })
   })
 
-  it('(b) espera a un registro que pone PAID sobre el ORIGEN y rechaza con 400', async () => {
+  it('(b) rechaza la carrera PAID del ORIGEN sin mover artículos y conserva el 400 estable', async () => {
     const destino = await nuevaOrdenConArticulos(1)
     const origen = await nuevaOrdenConArticulos(1)
-    await escenarioRegistroRetiene(origen.id, () => mergeOrders(venueId, destino.id, origen.id))
+    await escenarioRegistroRetiene(origen.id, () => mergeOrders(venueId, destino.id, origen.id), {
+      stableMessage: 'La cuenta origen ya tiene pagos; no se puede fusionar',
+      otherOrderIds: [destino.id],
+    })
     expect(await prisma.orderItem.count({ where: { orderId: origen.id } })).toBe(1)
   })
 
@@ -540,21 +598,98 @@ describe('Fusión de cuentas (mergeOrders)', () => {
     expect((await estado(origen.id)).status).toBe('CANCELLED')
   })
 
-  it('(e) fusiones cruzadas A→B y B→A concurrentes: una gana, la otra sale con 400 y ninguna con interbloqueo', async () => {
+  it('(e) fusiones cruzadas: espera real, un ganador, rechazo de topología y posterior 400 estable sin interbloqueo', async () => {
     const a = await nuevaOrdenConArticulos(1)
     const b = await nuevaOrdenConArticulos(1)
-    const [r1, r2] = await Promise.allSettled([mergeOrders(venueId, b.id, a.id), mergeOrders(venueId, a.id, b.id)])
-    const ganadas = [r1, r2].filter(r => r.status === 'fulfilled')
-    const perdidas = [r1, r2].filter((r): r is PromiseRejectedResult => r.status === 'rejected')
-    expect(ganadas).toHaveLength(1)
-    expect(perdidas).toHaveLength(1)
-    const err = perdidas[0].reason as { statusCode?: number; code?: string; message?: string }
-    expect(err.statusCode).toBe(400)
-    expect(err.code).not.toBe('P2034')
-    expect(String(err.message)).not.toMatch(/40P01|deadlock|P2034/i)
-    // Nunca las dos canceladas con los renglones varados.
-    const estados = await Promise.all([estado(a.id), estado(b.id)])
-    expect(estados.filter(e => e.status === 'CANCELLED')).toHaveLength(1)
+    const before = await estadoCompletoOrdenes([a.id, b.id])
+    const broadcast = jest.fn()
+    const getBroadcastingService = socketManager.getBroadcastingService as jest.Mock
+    const originalPublication = getBroadcastingService.getMockImplementation()
+    const publicationBaseline = getBroadcastingService.mock.calls.length
+    getBroadcastingService.mockImplementation(() => ({ broadcastToVenue: broadcast }))
+    const original = terminalPaymentService.findChargeBlockingOrderCancel.bind(terminalPaymentService)
+    let release!: () => void
+    const resume = new Promise<void>(resolve => (release = resolve))
+    let acquired!: (pid: number) => void
+    const claimed = new Promise<number>(resolve => (acquired = resolve))
+    jest.spyOn(terminalPaymentService, 'findChargeBlockingOrderCancel').mockImplementationOnce(async (...args) => {
+      expect(args.slice(0, 2)).toEqual([venueId, a.id])
+      const tx = args[2]
+      if (!tx) throw new Error('The merge must query its terminal blocker on the real locked transaction')
+      const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int AS pid`
+      acquired(pid) // Scope has acquired both real ordered Order rows; no mutation yet.
+      await resume
+      return original(...args)
+    })
+    const referrals = jest.spyOn(referralRefund, 'onOrderCancelled')
+    const winner = resultadoDe(mergeOrders(venueId, b.id, a.id))
+    let loser: ReturnType<typeof resultadoDe> | undefined
+    try {
+      const holderPid = await conPlazo(claimed, 5_000, 'Winning merge never reached its real locked terminal check')
+      let settled = false
+      loser = resultadoDe(mergeOrders(venueId, a.id, b.id)).finally(() => (settled = true))
+      let waiter: { pid: number; blockers: number[]; query: string } | undefined
+      for (let i = 0; i < 200; i++) {
+        const rows = await prisma.$queryRaw<Array<{ pid: number; blockers: number[]; query: string }>>`
+          SELECT pid, pg_blocking_pids(pid) AS blockers, query FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock'
+            AND ${holderPid} = ANY(pg_blocking_pids(pid))
+            AND query ILIKE '%"Order"%' AND query ILIKE '%ORDER BY id FOR UPDATE%'`
+        if (rows.length) {
+          waiter = rows[0]
+          break
+        }
+        await esperar(25)
+      }
+      expect(waiter).toBeDefined()
+      expect(waiter?.blockers).toContain(holderPid)
+      expect(settled).toBe(false)
+      expect(await estadoCompletoOrdenes([a.id, b.id])).toEqual(before)
+      release()
+      const [won, lost] = await Promise.all([winner, loser])
+      expect(won.ok).toBe(true)
+      expect(lost.ok).toBe(false)
+      const error = (lost as { e: unknown }).e
+      expect(error).toBeInstanceOf(OrderTableTopologyChanged)
+      expect(error).toMatchObject({ message: 'ORDER_TABLE_TOPOLOGY_CHANGED' })
+      expect(String((error as Error).message)).not.toMatch(/40P01|deadlock|P2034/i)
+    } finally {
+      release()
+      await Promise.all([winner, loser])
+      getBroadcastingService.mockImplementation(originalPublication ?? (() => null))
+    }
+    const committed = await estadoCompletoOrdenes([a.id, b.id])
+    expect(committed.orders.filter(order => order.status === 'CANCELLED')).toHaveLength(1)
+    expect(committed.orders.find(order => order.id === a.id)).toMatchObject({ status: 'CANCELLED', version: a.version + 1 })
+    expect(Number(committed.orders.find(order => order.id === a.id)?.total)).toBe(0)
+    const surviving = committed.orders.find(order => order.id === b.id)!
+    expect(surviving.status).toBe(b.status)
+    expect(Number(surviving.subtotal)).toBe(100)
+    expect(Number(surviving.total)).toBe(100)
+    expect(Number(surviving.remainingBalance)).toBe(100)
+    expect(committed.items.map(item => item.id)).toEqual([...a.itemIds, ...b.itemIds].sort())
+    expect(committed.items.every(item => item.orderId === b.id)).toBe(true)
+    expect(committed.payments).toBe(0)
+    expect(committed.terminalRequests).toBe(0)
+    expect(referrals).toHaveBeenCalledTimes(1)
+    expect(referrals).toHaveBeenCalledWith({ orderId: a.id, venueId })
+    const mergeAudits = (logAction as jest.Mock).mock.calls.filter(([entry]) => entry.action === 'ORDERS_MERGED')
+    expect(mergeAudits).toHaveLength(1)
+    expect(mergeAudits[0][0]).toMatchObject({ entityId: b.id, data: { sourceOrderId: a.id, items: 1 } })
+    const auditCalls = (logAction as jest.Mock).mock.calls.length
+    const publicationCalls = (socketManager.getBroadcastingService as jest.Mock).mock.calls.length
+    // One ORDER_UPDATED from avisarOrdenCancelada; the second service acquisition checks the empty Table set.
+    expect(publicationCalls - publicationBaseline).toBe(2)
+    expect(broadcast.mock.calls).toEqual([[venueId, SocketEventType.ORDER_UPDATED, { orderId: a.id, status: 'CANCELLED' }]])
+    const stable = await resultadoDe(mergeOrders(venueId, a.id, b.id))
+    expect(stable.ok).toBe(false)
+    expect((stable as { e: unknown }).e).toBeInstanceOf(BadRequestError)
+    expect((stable as { e: unknown }).e).toMatchObject({ statusCode: 400, message: 'La cuenta destino ya está cerrada' })
+    expect(await estadoCompletoOrdenes([a.id, b.id])).toEqual(committed)
+    expect(referrals).toHaveBeenCalledTimes(1)
+    expect((logAction as jest.Mock).mock.calls).toHaveLength(auditCalls)
+    expect((socketManager.getBroadcastingService as jest.Mock).mock.calls).toHaveLength(publicationCalls)
+    expect(broadcast).toHaveBeenCalledTimes(1)
   })
 })
 

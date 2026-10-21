@@ -16,13 +16,15 @@ jest.mock('@/mcp/guard', () => ({
 
 const scope = { staffId: 'staff', activeOrg: 'org', allowedVenueIds: ['own'], perVenueAccess: new Map() } as McpScope
 let esquema: Record<string, { safeParse: (v: unknown) => { success: boolean } }> | undefined
+let descripcion = ''
 const handler = () => {
   let call: ((input: Record<string, unknown>) => Promise<any>) | undefined
   registerPaymentEffectTools(
     {
-      tool: (name: string, _description: string, schema: unknown, fn: typeof call) => {
+      tool: (name: string, description: string, schema: unknown, fn: typeof call) => {
         if (name === 'list_payment_effects') {
           call = fn
+          descripcion = description
           esquema = schema as typeof esquema
         }
       },
@@ -55,6 +57,11 @@ describe('payment effect operator tool', () => {
     expect(esquema!.kind.safeParse('OTRA').success).toBe(false)
     await call({ venueId: 'own', kind: 'TRANSACTION_COST' })
     expect(listPaymentEffects).toHaveBeenCalledWith({ venueId: 'own', kind: 'TRANSACTION_COST' })
+  })
+  it('Ronda 2 de A3: la descripción explica los dos motivos de espera del reverso de una comisión', () => {
+    handler()
+    expect(descripcion).toContain('COMMISSION_AWAITS_ORIGINAL (')
+    expect(descripcion).toContain('COMMISSION_AWAITS_ORIGINAL_OVERDUE (')
   })
   it('exposes page metadata and passes the exact status, payment and cursor filters to the bounded service', async () => {
     const input = { venueId: 'own', status: 'DEAD_LETTER', paymentId: 'payment', limit: 1000000, cursor: 'cursor' }

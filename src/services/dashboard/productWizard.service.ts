@@ -4,7 +4,7 @@ import { Prisma, Unit } from '@prisma/client'
 import AppError from '../../errors/AppError'
 import { createRecipe } from './recipe.service'
 import { setProductInventoryMethod, InventoryMethod } from './productInventoryIntegration.service'
-import { ensureQuantityInventoryRow } from './quantityInventoryRow'
+import { ensureQuantityInventoryRow, isNonInventoriable, NON_INVENTORIABLE_MESSAGE } from './quantityInventoryRow'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
 import type { CatalogActor } from '../../types/master-catalog'
@@ -13,6 +13,10 @@ import {
   assertLegacyProductReferencesForVenue,
   writeLegacyServiceProductCreationAuditForVenue,
 } from '../master-catalog/catalogGovernance.service'
+import { normalizarIvaDeProducto, traducirErrorDeIva } from '../fiscal/normalizarIvaDeProducto'
+import { bloquearParaCambiarIva } from '../fiscal/exclusionContable'
+import { registrarCambioDeIva } from '../fiscal/encendidoIva.service'
+import { pedirCuadreAlVolverACantidad, suspenderParejaPorReceta } from '../commerce-channels/shopify/shopify.store.service'
 
 /**
  * Product Creation Wizard Service
@@ -38,6 +42,12 @@ export interface WizardStep1Data {
   layoutConfig?: Record<string, unknown> | null
   // Estación de impresión (ruteo de comandas)
   printStationId?: string | null
+  // Lo mismo que guarda el alta normal (product.dashboard.service.createProduct)
+  modifierGroupIds?: string[]
+  soldByWeight?: boolean
+  satProductKey?: string | null
+  satUnitKey?: string | null
+  objetoImp?: '01' | '02' | '03' | '04'
 }
 
 export interface WizardStep2Data {
@@ -89,6 +99,9 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
   // GTIN: optional; pass through if provided, omit (NULL) otherwise.
   const providedSku = data.sku?.trim()
   const providedGtin = data.gtin?.trim()
+  const modifierGroupIds = [...new Set(data.modifierGroupIds ?? [])]
+  // Como el alta normal: con un campo de IVA, la organización se bloquea PRIMERO (orden del catálogo).
+  const traeIva = data.objetoImp !== undefined && data.objetoImp !== null
 
   // Create product. Handle unique-constraint collisions (P2002) with a
   // user-friendly Spanish message identifying WHICH column collided, so the
@@ -97,12 +110,18 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
   let product
   try {
     product = await prisma.$transaction(async tx => {
+      if (traeIva) await bloquearParaCambiarIva(tx, { venueId })
       await assertLegacyCatalogGovernanceForVenue(tx, { venueId, operation: 'CREATE', willBeVendable: true, actor })
       await assertLegacyProductReferencesForVenue(tx, {
         venueId,
         categoryId: data.categoryId,
         printStationId: data.printStationId,
       })
+      if (modifierGroupIds.length > 0) {
+        const propios = await tx.modifierGroup.count({ where: { id: { in: modifierGroupIds }, venueId } })
+        if (propios !== modifierGroupIds.length) throw new AppError('Grupo de modificadores no encontrado', 404)
+      }
+      const encendido = traeIva && (await tx.venueIvaPorProducto.count({ where: { venueId } })) > 0
       const created = await tx.product.create({
         data: {
           venueId,
@@ -122,11 +141,31 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
           ...(data.layoutConfig !== undefined && {
             layoutConfig: data.layoutConfig ? (data.layoutConfig as Prisma.InputJsonValue) : Prisma.JsonNull,
           }),
+          // Venta por peso: price es el precio POR KG; la unidad se fija en KILOGRAM.
+          soldByWeight: data.soldByWeight ?? false,
+          ...(data.soldByWeight ? { unit: Unit.KILOGRAM } : {}),
+          ...(data.satProductKey !== undefined && { satProductKey: data.satProductKey }),
+          ...(data.satUnitKey !== undefined && { satUnitKey: data.satUnitKey }),
+          // IVA: sólo `ivaTratamiento`; el trigger de Product deriva la tupla.
+          ...normalizarIvaDeProducto({ objetoImp: data.objetoImp }, null, encendido),
+          modifierGroups: modifierGroupIds.length
+            ? { create: modifierGroupIds.map((groupId, index) => ({ groupId, displayOrder: index })) }
+            : undefined,
           externalData: {
             wizardCompleted: false,
             inventoryConfigured: false,
           },
         },
+      })
+      // Plan 6b (H14): con la tupla vieja del asistente (D18 lo cubre el normalizador del alta), un alta con otro IVA deja rastro.
+      await registrarCambioDeIva(tx, {
+        venueId,
+        productId: created.id,
+        producto: created.name,
+        antes: null,
+        despues: created.ivaTratamiento,
+        staffId: actor.type === 'HUMAN' ? actor.staffId : null,
+        origen: 'DASHBOARD',
       })
       if (actor.type === 'SERVICE') {
         await writeLegacyServiceProductCreationAuditForVenue(tx, { venueId, productId: created.id, actor })
@@ -149,6 +188,7 @@ export async function createProductStep1(venueId: string, data: WizardStep1Data,
       }
       throw new AppError('Ya existe un producto con esos datos en esta sucursal.', 409)
     }
+    traducirErrorDeIva(error)
     throw error
   }
 
@@ -233,94 +273,83 @@ export async function configureInventoryStep2(venueId: string, productId: string
  * Creates/updates the product's raw material record
  */
 export async function setupSimpleStockStep3(venueId: string, productId: string, data: WizardStep3SimpleStockData) {
-  // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
-  const product = await prisma.product.findUnique({
-    where: { id: productId, venueId },
-    include: {
-      recipe: {
-        select: { id: true },
-      },
-    },
-  })
-
-  if (!product) {
-    throw new AppError('Product not found', 404)
-  }
-
-  // ✅ WORLD-CLASS: Auto-switch from RECIPE to QUANTITY if needed
-  // Instead of blocking with 409 error, intelligently clean up conflicting config
-  if (product.recipe) {
-    logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
-    await switchInventoryMethod(venueId, productId, 'QUANTITY')
-  }
-
-  // ✅ WORLD-CLASS: Create or update Inventory record (not RawMaterial!)
-  // QUANTITY tracking uses Inventory table for simple count-based tracking
-  const existingInventory = await prisma.inventory.findUnique({
-    where: {
-      productId,
-    },
-  })
-
   // 🔴 Todo cambio de saldo deja movimiento (audit Codex xhigh 2026-08-14). Antes
   // este paso escribía `currentStock` a secas —incluso PISANDO un inventario que
   // ya tenía saldo— sin `InventoryMovement`: el kardex nacía roto y la
   // reconciliación (`saldo == apertura + Σ deltas`) era imposible de cumplir.
   // Ése era el origen REAL del descuadre medido, no las ventas.
+  //
+  // 🔴 Y TODO el paso va en UNA transacción (auditorías de Codex, 29-sep): el cambio de receta a cantidad,
+  // el producto, el saldo leído BAJO CANDADO de la fila, el kardex y el costo. Leído afuera, una venta en
+  // medio dejaba saldo ≠ Σ movimientos; y un fallo al anotar el movimiento dejaba el saldo cambiado sin
+  // kardex, o la receta ya borrada. La venta (`deductSimpleStock`) toma el mismo candado de la fila.
   const nuevoSaldo = new Decimal(data.initialStock)
-  const saldoPrevio = existingInventory ? new Decimal(existingInventory.currentStock) : new Decimal(0)
-  const delta = nuevoSaldo.minus(saldoPrevio)
-  // El paso 2 ya deja la fila en 0 y sin kardex (`ensureQuantityInventoryRow`): ése sigue siendo
-  // el primer saldo, no un ajuste.
-  const esSaldoInicial =
-    saldoPrevio.isZero() &&
-    (!existingInventory ||
-      !(await prisma.inventoryMovement.findFirst({ where: { inventoryId: existingInventory.id }, select: { id: true } })))
+  await prisma.$transaction(async tx => {
+    // 🔴 Por negocio: sin esto se creaba un Inventory de ESTE negocio para el producto de otro.
+    const product = await tx.product.findUnique({
+      where: { id: productId, venueId },
+      select: { externalData: true, recipe: { select: { id: true } } },
+    })
+    if (!product) throw new AppError('Product not found', 404)
 
-  const inventory = existingInventory
-    ? await prisma.inventory.update({
-        where: { id: existingInventory.id },
-        data: {
-          currentStock: nuevoSaldo,
-          minimumStock: new Decimal(data.reorderPoint),
-        },
-      })
-    : await prisma.inventory.create({
-        data: {
-          productId,
-          venueId,
-          currentStock: nuevoSaldo,
-          minimumStock: new Decimal(data.reorderPoint),
-          reservedStock: new Decimal(0),
-        },
-      })
+    // ✅ Auto-switch de RECETA a CANTIDAD en vez de un 409.
+    if (product.recipe) {
+      logger.info('🔄 Auto-switching from RECIPE to QUANTITY - cleaning up existing recipe')
+      await switchInventoryMethod(venueId, productId, 'QUANTITY', tx)
+    }
 
-  // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
-  // kardex); re-correr el asistente con el mismo número no ensucia el historial.
-  if (!delta.isZero()) {
-    await prisma.inventoryMovement.create({
+    // La fila tiene que existir para poder tomar su candado; una existente no se toca.
+    await tx.inventory.createMany({ data: [{ productId, venueId, currentStock: 0, minimumStock: 0 }], skipDuplicates: true })
+    const [fila] = await tx.$queryRaw<Array<{ id: string; currentStock: Prisma.Decimal }>>`
+      SELECT id, "currentStock" FROM "Inventory" WHERE "productId" = ${productId} FOR UPDATE`
+    const saldoPrevio = new Decimal(fila.currentStock)
+    const delta = nuevoSaldo.minus(saldoPrevio)
+    // Una fila en 0 y sin kardex (la deja el paso 2 o nace aquí) recibe el PRIMER saldo, no un ajuste.
+    const esSaldoInicial =
+      saldoPrevio.isZero() && !(await tx.inventoryMovement.findFirst({ where: { inventoryId: fila.id }, select: { id: true } }))
+
+    await tx.inventory.update({
+      where: { id: fila.id },
       data: {
-        inventoryId: inventory.id,
-        type: 'ADJUSTMENT',
-        quantity: delta,
-        previousStock: saldoPrevio,
-        newStock: nuevoSaldo,
-        reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
+        currentStock: nuevoSaldo,
+        minimumStock: new Decimal(data.reorderPoint),
       },
     })
-  }
 
-  // Mark wizard as complete and save cost per unit
-  await prisma.product.update({
-    where: { id: productId },
-    data: {
-      cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
-      externalData: {
-        ...(product.externalData as any),
-        wizardCompleted: true,
-        inventoryConfigured: true,
+    // Sin cambio de saldo no se inventa un movimiento de cero (sería ruido en el
+    // kardex); re-correr el asistente con el mismo número no ensucia el historial.
+    if (!delta.isZero()) {
+      await tx.inventoryMovement.create({
+        data: {
+          inventoryId: fila.id,
+          type: 'ADJUSTMENT',
+          quantity: delta,
+          previousStock: saldoPrevio,
+          newStock: nuevoSaldo,
+          reason: esSaldoInicial ? 'Saldo inicial (asistente de producto)' : 'Ajuste de existencias (asistente de producto)',
+        },
+      })
+    }
+
+    // El producto AL FINAL, como la entrada de mercancía (inventario → costo): con el orden al revés, una
+    // entrada del mismo producto a la vez se trababa con este paso (Postgres abortaba una de las dos).
+    // Y queda «por cantidad» de verdad: antes sólo lo decía la respuesta, y un producto RECETA sin
+    // receta, o sin inventario, recibía un saldo que la venta ignoraba.
+    const updated = await tx.product.update({
+      where: { id: productId },
+      data: {
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+        cost: new Decimal(data.costPerUnit), // ✅ Save cost per unit
+        externalData: {
+          ...(product.externalData as any),
+          wizardCompleted: true,
+          inventoryConfigured: true,
+        },
       },
-    },
+    })
+    // Una clase o una cita no llevan existencias: se revierte todo el paso (misma regla que Artículos).
+    if (isNonInventoriable(updated.type, updated.trackInventory)) throw new AppError(NON_INVENTORIABLE_MESSAGE, 400)
   })
 
   return {
@@ -548,72 +577,53 @@ export async function getWizardProgress(venueId: string, productId: string) {
  * Handles conversion between QUANTITY ↔ RECIPE
  * Automatically removes old configuration and updates inventoryMethod
  */
-export async function switchInventoryMethod(venueId: string, productId: string, newMethod: InventoryMethod) {
-  return await prisma.$transaction(async tx => {
-    // Verify product exists and belongs to venue
-    const product = await tx.product.findUnique({
-      where: { id: productId },
-      include: {
-        recipe: {
-          select: { id: true },
-        },
-      },
-    })
+export async function switchInventoryMethod(
+  venueId: string,
+  productId: string,
+  newMethod: InventoryMethod,
+  db?: Prisma.TransactionClient,
+): Promise<{ success: true; newMethod: InventoryMethod; message: string }> {
+  // Con `db`, dentro de la transacción del llamador (el paso 3 del asistente): si algo falla después,
+  // la receta sigue ahí.
+  if (!db) return prisma.$transaction(tx => switchInventoryMethod(venueId, productId, newMethod, tx))
 
-    if (!product) {
-      throw new AppError('Product not found', 404)
-    }
+  const product = await db.product.findUnique({ where: { id: productId }, select: { venueId: true } })
+  if (!product) {
+    throw new AppError('Product not found', 404)
+  }
+  if (product.venueId !== venueId) {
+    throw new AppError('Product does not belong to this venue', 403)
+  }
 
-    logger.info('🔧 [DEBUG] switchInventoryMethod:', { venueId, productId, productVenueId: product.venueId, newMethod })
-
-    if (product.venueId !== venueId) {
-      logger.error('❌ [DEBUG] Venue mismatch!', { requestVenueId: venueId, productVenueId: product.venueId })
-      throw new AppError('Product does not belong to this venue', 403)
-    }
-
-    // Perform conversion based on newMethod
-    if (newMethod === 'RECIPE') {
-      // Switching TO RECIPE: Remove existing quantity tracking (Inventory table)
-      const existingInventory = await tx.inventory.findUnique({
-        where: {
-          productId,
-        },
-      })
-
-      if (existingInventory) {
-        // Delete the quantity tracking inventory record
-        await tx.inventory.delete({
-          where: { id: existingInventory.id },
-        })
-      }
-    } else if (newMethod === 'QUANTITY') {
-      // Switching TO QUANTITY: Remove existing recipe
-      if (product.recipe) {
-        // Delete recipe lines first (foreign key constraint)
-        await tx.recipeLine.deleteMany({
-          where: { recipeId: product.recipe.id },
-        })
-
-        // Then delete the recipe
-        await tx.recipe.delete({
-          where: { id: product.recipe.id },
-        })
-      }
-    }
-
-    // ✅ WORLD-CLASS: Update product's inventoryMethod column
-    const updated = await tx.product.update({
-      where: { id: productId },
-      data: {
-        inventoryMethod: newMethod,
-      },
-    })
-    await ensureQuantityInventoryRow(tx, updated)
-
-    return {
-      success: true,
-      newMethod,
-      message: `Inventory method switched to ${newMethod} successfully`,
-    }
+  // 🔴 El producto PRIMERO (toma su candado de fila) y DESPUÉS se borra la configuración vieja por
+  // `productId` (auditoría de Codex, 29-sep): otro cambio que escribe el mismo producto espera aquí o
+  // ya terminó, y el borrado ve lo que dejó. Borrar el id leído antes dejaba colgando la fila de
+  // inventario que otro cambio creó en medio, bajo un producto que ya la ignora. Y `deleteMany`: lo
+  // que otro ya borró no es error (con `delete` tronaba P2025).
+  const updated = await db.product.update({
+    where: { id: productId },
+    data: {
+      inventoryMethod: newMethod,
+    },
   })
+  if (newMethod === 'RECIPE') {
+    // Conector Shopify (12 bis.5, #9): la pareja se suspende ANTES de borrar el Inventory (el DELETE no viaja a Shopify).
+    // Orden de candados (§10.3, N24): el `product.update` de arriba ya tomó el Product; sigue la pareja y al final Inventory.
+    await suspenderParejaPorReceta(db, updated)
+    // Switching TO RECIPE: Remove existing quantity tracking (Inventory table)
+    await db.inventory.deleteMany({ where: { productId } })
+  } else if (newMethod === 'QUANTITY') {
+    // Conector Shopify: la pareja suspendida por la receta pide su cuadre (antes de Inventory, §10.3).
+    await pedirCuadreAlVolverACantidad(db, productId)
+    // Switching TO QUANTITY: Remove existing recipe (lines first: foreign key)
+    await db.recipeLine.deleteMany({ where: { recipe: { productId } } })
+    await db.recipe.deleteMany({ where: { productId } })
+  }
+  await ensureQuantityInventoryRow(db, updated)
+
+  return {
+    success: true,
+    newMethod,
+    message: `Inventory method switched to ${newMethod} successfully`,
+  }
 }

@@ -116,14 +116,20 @@ describe('catalogPublicationAuthorityLock.service', () => {
     expect(queries.filter(query => query.text.includes(' IN (')).every(query => query.values.length <= 501)).toBe(true)
   })
 
-  const contradictoryMutations: Array<[string, { authority?: Record<string, unknown>; stored?: Record<string, unknown> }]> = [
+  type Mutation = { authority?: Record<string, unknown>; stored?: Record<string, unknown> }
+
+  const contradictoryMutations: Array<[string, Mutation]> = [
     ['foreign staged binding', { authority: { bindingId: 'binding-foreign' } }],
     ['forged source revision', { authority: { sourceCatalogRevision: 999 } }],
     ['forged staged before', { stored: { before: { name: 'FORGED' } } }],
     ['future line versions', { stored: { hashVersion: 999, decisionSchemaVersion: 999 } }],
+    ['vista previa preparada antes de D15 (máscara con IVA)', { stored: { fieldMask: ['name', 'taxRate'] } }],
   ]
 
-  it.each(contradictoryMutations)('rejects contradictory relational staging before apply: %s', async (_label, mutation) => {
+  // WHY: sin línea vigente el cargador deja `currentPublicationLineId: null` en las dependencias del destino (y la vista previa
+  // las guarda tal cual). Sin ese campo la revalidación sale STALE para CUALQUIER fila y la tabla de abajo no probaría nada; el
+  // caso de control lo garantiza.
+  function revalidateWith(mutation: Mutation) {
     const projection = {
       fieldMask: ['name'],
       before: { name: 'local' },
@@ -150,7 +156,7 @@ describe('catalogPublicationAuthorityLock.service', () => {
       sourceCatalogRevision: 7,
       sourceCatalogInvariantVersion: '12',
       bindingRevision: 4,
-      dependencies: { projection: { profile: 'v1' }, decisions: [decision] },
+      dependencies: { projection: { profile: 'v1', currentPublicationLineId: null }, decisions: [decision] },
       ...(mutation.authority ?? {}),
     }
     const stored = {
@@ -186,13 +192,12 @@ describe('catalogPublicationAuthorityLock.service', () => {
         sourceCatalogRevision: 7,
         sourceCatalogInvariantVersion: '12',
         bindingRevision: 4,
-        dependencies: { profile: 'v1' },
+        dependencies: { profile: 'v1', currentPublicationLineId: null },
         projection,
       },
     ])
     const resolve = jest.fn().mockResolvedValue([decision])
-
-    await expect(
+    const run = () =>
       (revalidateLockedCatalogPublicationTx as any)(
         tx,
         {
@@ -209,8 +214,21 @@ describe('catalogPublicationAuthorityLock.service', () => {
           dependencies: { schemaVersion: 1, targets: [authority] },
         },
         { loadTargetsTx, createOverrideService: () => ({ resolve }) },
-      ),
-    ).rejects.toMatchObject({ code: 'STALE_PREVIEW' })
+      )
+    return { run, resolve }
+  }
+
+  it('control: the same staging without contradictions revalidates (the rows below are not STALE by accident)', async () => {
+    const { run, resolve } = revalidateWith({})
+
+    await expect(run()).resolves.toEqual([expect.objectContaining({ lineId: 'line-1', fieldMask: ['name'] })])
+    expect(resolve).toHaveBeenCalledTimes(1)
+  })
+
+  it.each(contradictoryMutations)('rejects contradictory relational staging before apply: %s', async (_label, mutation) => {
+    const { run, resolve } = revalidateWith(mutation)
+
+    await expect(run()).rejects.toMatchObject({ code: 'STALE_PREVIEW' })
     expect(resolve).not.toHaveBeenCalled()
   })
 })

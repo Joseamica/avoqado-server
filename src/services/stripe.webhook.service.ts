@@ -10,10 +10,11 @@ import prisma from '@/utils/prismaClient'
 import { subscriptionPeriod } from '@/utils/stripeSubscriptionPeriod'
 import logger from '@/config/logger'
 import { billingPageUrl } from '@/utils/dashboardLinks'
+import { zonaValida } from '@/utils/datetime'
 import emailService from './email.service'
 import { resolvePlanNotificationTarget } from './access/planNotification.service'
 import { createNotification } from './dashboard/notification.dashboard.service'
-import { NotificationType, NotificationChannel, NotificationPriority, StaffRole } from '@prisma/client'
+import { NotificationType, NotificationChannel, NotificationPriority, StaffRole, Prisma } from '@prisma/client'
 import {
   handlePaymentFailure,
   generateBillingPortalUrl,
@@ -22,8 +23,10 @@ import {
   suscripcionVigente,
   suscripcionVendeElPlan,
   entregarSuscripcionDePlan,
+  stripe,
   type FulfillPlanCheckoutResult,
 } from './stripe.service'
+import { montoDelSiguienteCobro, noHabraCobro } from './billing/siguienteCobro'
 import { PAID_PLAN_TIER_CODES } from './access/basePlan.service'
 import socketManager from '../communication/sockets'
 import { tokenBudgetService } from './dashboard/token-budget.service'
@@ -507,6 +510,20 @@ export async function handleSubscriptionDeleted(subscription: Stripe.Subscriptio
 }
 
 /**
+ * The subscription id of an invoice, in BOTH shapes Stripe sends.
+ *
+ * Since API 2025-03-31.basil the Invoice no longer carries `subscription`: it lives in
+ * `parent.subscription_details.subscription`. A webhook payload follows its ENDPOINT's version, and the
+ * plans endpoint has `api_version: null` (it follows the account default, 2020-03-02 on 19-oct-2026), so
+ * one «Upgrade API version» click in Stripe would drop the old field and both invoice handlers would skip
+ * every plan invoice in silence. The old field is read first, the new one second.
+ */
+function invoiceSubscriptionId(invoice: Stripe.Invoice): string | null {
+  const sub = (invoice as any).subscription ?? invoice.parent?.subscription_details?.subscription
+  return (typeof sub === 'string' ? sub : sub?.id) || null
+}
+
+/**
  * Handle invoice payment succeeded event
  * Triggered when subscription payment OR token purchase payment is successful
  *
@@ -565,9 +582,7 @@ export async function handleInvoicePaymentSucceeded(invoice: Stripe.Invoice) {
   }
 
   // Handle subscription invoices (original logic)
-  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
-  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
-  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+  const subscriptionIdStr = invoiceSubscriptionId(invoice)
 
   if (!subscriptionIdStr) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
@@ -864,9 +879,7 @@ export async function handleInvoicePaymentFailed(invoice: Stripe.Invoice) {
   }
 
   // Handle subscription invoices (original logic)
-  // Type assertion: subscription exists in Stripe API (can be string | Subscription | null)
-  const subscriptionId = (invoice as any).subscription as string | Stripe.Subscription | null
-  const subscriptionIdStr = typeof subscriptionId === 'string' ? subscriptionId : subscriptionId?.id || null
+  const subscriptionIdStr = invoiceSubscriptionId(invoice)
 
   if (!subscriptionIdStr) {
     logger.info('ℹ️ Webhook: Invoice has no subscription and is not a token purchase, skipping', { invoiceId: invoice.id })
@@ -1040,6 +1053,129 @@ async function sendTrialEndingNotifications(venueId: string, venueName: string, 
 }
 
 /**
+ * `trial_will_end` of a PLAN_PRO / PLAN_PREMIUM subscription (≈3 days before the first charge): the plan trial-end reminder
+ * with the amount Stripe will really charge, instead of the loose-feature "your feature will be deactivated" email.
+ *
+ * - 🔴 Decides with the CURRENT subscription, never the event's copy (Codex r1, 17-oct): that copy is the state when
+ *   Stripe emitted it, and events arrive late and out of order, so a first delivery after the customer cancelled still
+ *   said «se cobrará». It must still be `trialing`, and the date announced is its current `trial_end`.
+ * - No charge that day (canceled, `cancel_at` before it, collection paused through it): NO email and NO in-app notice
+ *   that speaks of a charge.
+ * - A delayed or replayed event (`trial_end` already ≤ now): the charge already happened, so NO email and NO notice.
+ * - Amount unknown (`null`): no email; the in-app notice goes without an amount (never the list price).
+ * - The in-app notice is IN_APP only: the EMAIL channel of `createNotification` would mail this same text to every
+ *   OWNER/ADMIN on top of the plan email (and would mail it when there is no amount).
+ * - One plan email per subscription, to the recipient `resolvePlanNotificationTarget` resolves (skipped only when it has
+ *   none), not one per OWNER/ADMIN: the staff list only decides who gets the in-app notice. Dates use the venue's zone.
+ */
+async function sendPlanTrialEndingNotifications(
+  venueFeature: Prisma.VenueFeatureGetPayload<{ include: { feature: true; venue: true } }>,
+  subscriptionId: string,
+): Promise<void> {
+  const { venueId, venue } = venueFeature
+  // A failed retrieve THROWS (outside the try below, which swallows): the event is marked FAILED and
+  // stripe-webhook-reconciliation replays it (the controller answers 200, so Stripe itself never redelivers). Nothing has
+  // been sent yet, so a replay cannot duplicate a notice, and we never announce a charge we could not confirm.
+  const subscription = await stripe.subscriptions.retrieve(subscriptionId)
+  try {
+    const trialEnd = subscription.trial_end ? new Date(subscription.trial_end * 1000) : null
+    if (subscription.status !== 'trialing' || !trialEnd) {
+      logger.info('ℹ️ Webhook: plan subscription no longer in trial; no notice sent', {
+        venueId,
+        subscriptionId,
+        status: subscription.status,
+      })
+      return
+    }
+
+    if (trialEnd.getTime() <= Date.now()) {
+      logger.info('ℹ️ Webhook: plan trial already ended; late event, no notice sent', { venueId, subscriptionId: subscription.id })
+      return
+    }
+
+    if (noHabraCobro(subscription, trialEnd.getTime())) {
+      logger.info('ℹ️ Webhook: trial ending with no charge to follow; no notice sent', { venueId, subscriptionId: subscription.id })
+      return
+    }
+
+    const amountCents = await montoDelSiguienteCobro(stripe, subscription.id)
+
+    // OWNER/ADMIN of a venue are a handful; `take` is the cap the bounded-queries rule asks for.
+    const staffMembers = await prisma.staffVenue.findMany({
+      // `active: true`, como `resolvePlanNotificationTarget`: a un OWNER/ADMIN dado de baja no se le avisa.
+      where: { venueId, active: true, role: { in: [StaffRole.OWNER, StaffRole.ADMIN] } },
+      select: { staff: { select: { id: true, email: true } } },
+      take: 25,
+    })
+    // Sin OWNER/ADMIN no hay a quién avisar en la app, pero el correo del plan no depende de esta lista.
+    if (staffMembers.length === 0) logger.warn('⚠️ No OWNER/ADMIN staff found for venue', { venueId })
+
+    const planName = venueFeature.feature.code === 'PLAN_PREMIUM' ? 'Premium' : 'Pro'
+    // An empty or non-IANA zone makes toLocaleDateString throw, and `fecha` is computed before BOTH notices.
+    const timeZone = zonaValida(venue.timezone)
+    const billingPortalUrl = billingPageUrl(venue.slug)
+    const fecha = trialEnd.toLocaleDateString('es-MX', { day: 'numeric', month: 'long', year: 'numeric', timeZone })
+    const cobro =
+      amountCents === null
+        ? 'se cobrará'
+        : `cobraremos ${new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(amountCents / 100)}`
+
+    for (const { staff } of staffMembers) {
+      try {
+        await createNotification({
+          recipientId: staff.id,
+          venueId,
+          type: NotificationType.SUBSCRIPTION_TRIAL_ENDING,
+          title: `⏰ Prueba gratuita terminando pronto`,
+          message: `Tu prueba de Avoqado ${planName} termina el ${fecha}. Ese día ${cobro} a tu tarjeta; cancela antes desde Facturación si no quieres continuar.`,
+          metadata: {
+            featureName: venueFeature.feature.name,
+            trialEndDate: trialEnd.toISOString(),
+            billingPortalUrl,
+          },
+          channels: [NotificationChannel.IN_APP],
+          priority: NotificationPriority.HIGH,
+        })
+      } catch (notificationError) {
+        logger.error('❌ Failed to create plan trial ending notification', {
+          staffId: staff.id,
+          error: notificationError instanceof Error ? notificationError.message : 'Unknown error',
+        })
+      }
+    }
+
+    if (amountCents === null) {
+      logger.warn('⚠️ Plan trial ending: charge amount unknown; email skipped', { venueId, subscriptionId: subscription.id })
+      return
+    }
+
+    const target = await resolvePlanNotificationTarget(venueId)
+    if (!target.email) {
+      logger.warn('⚠️ Plan trial ending: no email recipient resolved; email skipped', { venueId, subscriptionId: subscription.id })
+      return
+    }
+    const emailSent = await emailService.sendPlanRenewalReminderEmail(target.email, {
+      locale: target.locale,
+      venueName: venue.name,
+      interval: subscription.items?.data?.[0]?.price?.recurring?.interval === 'year' ? 'annual' : 'monthly',
+      renewalDate: trialEnd,
+      amountCents,
+      billingPortalUrl,
+      planName,
+      isTrialEnd: true,
+      timeZone,
+    })
+    if (!emailSent) logger.warn('⚠️ Plan trial ending email failed to send', { venueId, subscriptionId: subscription.id })
+  } catch (error) {
+    // Log but don't throw - notifications should not block webhook success
+    logger.error('❌ Failed to send plan trial ending notifications', {
+      venueId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+  }
+}
+
+/**
  * Handle subscription trial will end event
  * Triggered 3 days before trial ends (configurable in Stripe)
  *
@@ -1083,7 +1219,11 @@ export async function handleSubscriptionTrialWillEnd(subscription: Stripe.Subscr
 
   // Send notifications to venue owners and admins
   if (trialEnd) {
-    await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
+    if ((PAID_PLAN_TIER_CODES as readonly string[]).includes(venueFeature.feature.code)) {
+      await sendPlanTrialEndingNotifications(venueFeature, subscriptionId)
+    } else {
+      await sendTrialEndingNotifications(venueFeature.venueId, venueFeature.venue.name, venueFeature.feature.name, trialEnd)
+    }
   }
 }
 
@@ -1475,9 +1615,9 @@ export async function handleStripeWebhookEvent(event: Stripe.Event, opts?: { cla
     // Try to find venueId from subscription metadata
     if (eventData.metadata?.venueId) {
       venueId = eventData.metadata.venueId
-    } else if (eventData.subscription) {
-      // For invoice events, fetch subscription to get venueId
-      const subscriptionId = typeof eventData.subscription === 'string' ? eventData.subscription : eventData.subscription.id
+    } else if (invoiceSubscriptionId(eventData)) {
+      // For invoice events, fetch subscription to get venueId (both invoice shapes, see invoiceSubscriptionId)
+      const subscriptionId = invoiceSubscriptionId(eventData)
       const venueFeature = await prisma.venueFeature.findFirst({
         where: { stripeSubscriptionId: subscriptionId },
         select: { venueId: true },

@@ -70,9 +70,20 @@ afterAll(() => {
 })
 
 describe('webhook de Resend — los dos carriles', () => {
+  beforeEach(() => {
+    process.env.RESEND_WEBHOOK_SECRET = TEST_SECRET
+  })
+
+  /** Igual que `armar()`, pero con cabeceras firmadas con el secreto bueno. */
+  function armarFirmado() {
+    const armado = armar()
+    armado.req.headers = signedHeaders(armado.payload)
+    return armado
+  }
+
   it('si superadmin lo maneja, el nuestro NI SE LLAMA', async () => {
     superadminHandler.mockResolvedValue({ handled: true, reason: 'suyo' })
-    const { req, res, next } = armar()
+    const { req, res, next } = armarFirmado()
 
     await handler(req, res, next)
 
@@ -83,7 +94,7 @@ describe('webhook de Resend — los dos carriles', () => {
   it('si superadmin NO lo reconoce, se intenta el de campañas a clientes', async () => {
     superadminHandler.mockResolvedValue({ handled: false, reason: 'Not a marketing campaign delivery' })
     propio.mockResolvedValue({ manejado: true, motivo: 'Rebote permanente: suprimido.' })
-    const { req, res, next } = armar()
+    const { req, res, next } = armarFirmado()
 
     await handler(req, res, next)
 
@@ -95,7 +106,7 @@ describe('webhook de Resend — los dos carriles', () => {
   it('si no es de nadie, contesta 200 como siempre (Resend no debe reintentar)', async () => {
     superadminHandler.mockResolvedValue({ handled: false, reason: 'no es suyo' })
     propio.mockResolvedValue({ manejado: false, motivo: 'tampoco es nuestro' })
-    const { req, res, next } = armar()
+    const { req, res, next } = armarFirmado()
 
     await handler(req, res, next)
 
@@ -105,7 +116,7 @@ describe('webhook de Resend — los dos carriles', () => {
   it('🔴 si FALLA procesando un rebote nuestro, contesta 500 para que Resend reintente', async () => {
     superadminHandler.mockResolvedValue({ handled: false, reason: 'no es suyo' })
     propio.mockRejectedValue(new Error('se cayó la base'))
-    const { req, res, next } = armar()
+    const { req, res, next } = armarFirmado()
 
     await handler(req, res, next)
 
@@ -115,6 +126,19 @@ describe('webhook de Resend — los dos carriles', () => {
 })
 
 describe('webhook de Resend — verificación de firma (svix)', () => {
+  it('🔴 sin secreto configurado contesta 503 y no llega a ningún carril', async () => {
+    // Antes procesaba el aviso SIN verificar nada: cualquiera podía marcar correos como rebotados
+    // y suprimirlos (auditoría 2026-09-30). 503 = Resend reintenta cuando el secreto vuelva.
+    const { req, res, next, payload } = armar()
+    req.headers = signedHeaders(payload)
+
+    await handler(req, res, next)
+
+    expect(res.status).toHaveBeenCalledWith(503)
+    expect(superadminHandler).not.toHaveBeenCalled()
+    expect(propio).not.toHaveBeenCalled()
+  })
+
   it('con secreto configurado y sin cabeceras svix contesta 400 y no llega a ningún carril', async () => {
     // El secreto aparece DESPUÉS de importar el controlador. Si éste lo capturara en una
     // constante de módulo (como hacía), aquí lo vería vacío, se saltaría la verificación y

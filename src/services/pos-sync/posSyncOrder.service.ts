@@ -1,3 +1,4 @@
+import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { Order, OrderSource, OrderStatus, OriginSystem, Prisma, SplitType, SyncStatus } from '@prisma/client'
@@ -10,6 +11,7 @@ import { PaymentMethod } from '@prisma/client'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../communication/sockets/types'
 import {
+  ORDER_LOCK_WAIT_BUDGET,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
@@ -17,6 +19,7 @@ import {
 } from '../shared/paymentShiftClaim'
 import { findLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { logAction } from '../dashboard/activity-log.service'
+import { conIvaApagado, exigirIvaApagadoTx } from './exclusionIva'
 
 // Cache to track recent payment commands to prevent double deduction
 interface RecentPayment {
@@ -160,6 +163,14 @@ async function lockPosOrderNaturalKey(
   const canonicalExternalIdentity =
     parts.length === 3 && parts[0] && /^\d+$/.test(parts[1]) && parts[2] ? `${parts[0]}:*:${parts[2]}` : input.externalId
   const key = `pos-order:${input.venueId}:${canonicalExternalIdentity}`
+  // `pg_advisory_xact_lock` devuelve `void`, y Prisma NO sabe deserializar una columna `void`
+  // por `$queryRaw` («Failed to deserialize column of type 'void'») — el MISMO defecto que
+  // `shiftLifecycleLock.ts` ya documenta y arregla con este cast. Hallado el 25-sep escribiendo
+  // la integración de `contratoDePrecio` (IVA por producto, plan 2, tarea 4): sin el cast, TODO
+  // evento de pos-sync contra un Postgres real revienta ANTES de tocar la orden — no es un
+  // defecto de esta tarea, pero bloqueaba por completo poder probarla contra la base real.
+  // Se mantiene la forma de plantilla (no `Prisma.sql`) para no cambiar la forma de llamada
+  // que `posSyncOrder.shiftCloseRace.test.ts` inspecciona (strings + valores interpolados).
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${key}, 0))::text`
 }
 
@@ -181,7 +192,8 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
   }
 
   // 1. Sincronizar entidades relacionadas para obtener sus IDs de Prisma
-  const staffId = await posSyncStaffService.syncPosStaff(staffData, venue.id, venue.organizationId)
+  // Plan 6b (spec §5.4): cada escritura del POS (personal, mesa, turno, orden) pasa por la guardia del IVA por producto.
+  const staffId = await conIvaApagado(venue.id, tx => posSyncStaffService.syncPosStaff(staffData, venue.id, venue.organizationId, tx))
   const tableId = await getOrCreatePosTable(tableData, venue.id) // Pasamos areaData
 
   const shiftId = await getOrCreatePosShift(shiftData, venue.id, staffId)
@@ -194,15 +206,37 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
 
   // 3. Ejecutar el upsert final de la Orden
   const order = await prisma.$transaction(async tx => {
+    await exigirIvaApagadoTx(tx, venue.id) // Plan 6b: la PRIMERA sentencia (D10: admisión → organización → lo demás)
     await lockPosOrderNaturalKey(tx, { venueId: venue.id, externalId })
     // La clasificación exterior era TOCTOU: un request podía observar null,
     // otro crear la fila, y el primero tomar Shift antes de actualizar esa
     // Order ya existente. Esta relectura bajo advisory es la autoritativa.
-    const existingOrder = await findExistingOrderWithSmartResolution(tx, externalId, venue.id, orderData.orderNumber)
-    isNewOrder = !existingOrder
-    if (existingOrder) {
-      await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id })
+    let existingOrder = await findExistingOrderWithSmartResolution(tx, externalId, venue.id, orderData.orderNumber)
+    const scoped = Boolean(tableId || existingOrder)
+    if (scoped) {
+      const existingOrderId = existingOrder?.id
+      const scope = await lockTableOrderScope(tx, {
+        venueId: venue.id,
+        orderIds: existingOrder ? [existingOrder.id] : [],
+        tableIds: tableId ? [tableId] : [],
+        optionalOrderId: existingOrderId,
+      })
+      // A classified alias can leave this venue while Order locks are acquired. The helper permits only that
+      // candidate's absence and keeps all other orders/Tables strict, so the natural-key create still owns its Table.
+      if (existingOrderId && !scope.orders.some(order => order.id === existingOrderId)) existingOrder = null
     }
+    if (existingOrder) {
+      // El advisory sólo serializa eventos POS. Captura fiscal, cobros nativos, reatribución de turno o el borrado del
+      // negocio no lo toman: entre la lectura de arriba y el candado la fila pudo ligarse a un turno, irse de este
+      // negocio o desaparecer. Alias, liga de turno y existencia se deciden con la fila releída BAJO el candado; si ya
+      // no es de este negocio con la llave que la clasificó, se trata como ausente y sigue el upsert por llave natural,
+      // nunca una escritura por el id rancio.
+      const locked = scoped || (await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: existingOrder.id }))
+      existingOrder = locked
+        ? await tx.order.findFirst({ where: { id: existingOrder.id, venueId: venue.id, externalId: existingOrder.externalId } })
+        : null
+    }
+    isNewOrder = !existingOrder
     // El id resuelto arriba es sólo CANDIDATO. Este update condicionado es también el lock de
     // fila que serializa Order + Payments contra OPEN → CLOSING durante toda la transacción.
     // Perderlo NO falla la venta: lo nuevo queda sin turno y una Order existente conserva su liga.
@@ -346,6 +380,10 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
         orderNumber: orderData.orderNumber,
         source: OrderSource.POS,
         originSystem: OriginSystem.POS_SOFTRESTAURANT,
+        // SoftRestaurant manda el impuesto APARTE del subtotal (PosOrderData.taxAmount
+        // es un campo separado). Sólo esta rama de creación lo declara — la rama
+        // `update:` de arriba NUNCA reescribe el contrato de una orden ya nacida.
+        contratoDePrecio: 'IVA_APARTE',
         createdAt: new Date(orderData.createdAt),
         syncedAt: new Date(),
         status: orderData.status,
@@ -386,7 +424,7 @@ export async function processPosOrderEvent(payload: RichPosPayload): Promise<Ord
     }
 
     return order
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   // Emit socket event for real-time updates to POS devices (AFTER transaction commits)
   try {
@@ -555,13 +593,17 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
   // si quedaba un cobro de terminal sin desenlace acreditado: si lo había, ese dinero puede aterrizar sobre una orden
   // DELETED y alguien tiene que conciliarlo. No se oculta: 🚨 en el log y rastro en ActivityLog. (Con la orden ya
   // DELETED, la admisión rechaza cualquier cobro NUEVO con `ORDER_CANCELLED_NO_NEW_CHARGE`.)
-  const { updatedOrder, cobroVivo } = await prisma.$transaction(
+  const marked = await prisma.$transaction(
     async tx => {
-      await lockExistingOrderForPayment(tx, { venueId, orderId: order.id })
+      // El id de arriba es sólo candidato: el candado es por negocio. Si la orden se fue de este negocio (o se borró)
+      // mientras tanto, se trata igual que si no hubiera aparecido; nunca se marca por su id rancio.
+      await exigirIvaApagadoTx(tx, venueId) // Plan 6b: un borrado atrasado tras el encendido no marca nada (Review Focus 7)
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: order.id }))) return null
       const cobroVivo = await findLiveTerminalCharge(tx, { venueId, orderId: order.id })
       const updatedOrder = await tx.order.update({
         where: {
           id: order.id,
+          venueId,
         },
         data: {
           status: OrderStatus.DELETED,
@@ -573,6 +615,14 @@ export async function processPosOrderDeleteEvent(payload: RichPosPayload): Promi
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
+
+  if (!marked) {
+    logger.warn(
+      `[🥾 PosSyncOrder] Order ${order.id} (externalId ${externalId}) left Venue ${venueId} before the delete could lock it; nothing marked.`,
+    )
+    return null
+  }
+  const { updatedOrder, cobroVivo } = marked
 
   if (cobroVivo) {
     logger.error(

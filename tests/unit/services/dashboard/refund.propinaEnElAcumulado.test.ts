@@ -27,6 +27,13 @@ import { PaymentType, TransactionStatus } from '@prisma/client'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
+// Fase 3 (A2): la devolución del dashboard encola su reverso de comisión DENTRO de su transacción. Esta suite prueba otra
+// cosa y no siembra lo que el encolado lee; el resto del módulo (lo usa el costo diferido) queda real.
+jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  ...jest.requireActual('@/services/tpv/paymentEffects.service'),
+  enqueueRefundPaymentEffectsInTx: jest.fn().mockResolvedValue(undefined),
+}))
+
 const VENUE = 'venue-1'
 
 /** Cobro de $100 de venta + $20 de propina = $120 entregados por el cliente. */
@@ -115,7 +122,7 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
       .mockResolvedValueOnce([cobroConPropina({ processorData: { refundedAmount: 110, refundedAmountCents: 11000 } })])
       .mockResolvedValueOnce([REEMBOLSO_A, REEMBOLSO_B])
 
-    await expect(reembolsar(1000)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(reembolsar(1000)).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
@@ -134,7 +141,7 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
   it('🔴 un TERCER reembolso de $10 sobre esos mismos $120 ya no cabe', async () => {
     prismaMock.$queryRaw.mockResolvedValueOnce([cobroConPropina()]).mockResolvedValueOnce([REEMBOLSO_A, REEMBOLSO_B])
 
-    await expect(reembolsar(1000)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(reembolsar(1000)).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
@@ -187,7 +194,7 @@ describe('Task 5r — la propina ya devuelta cuenta en el acumulado del dashboar
       .mockResolvedValueOnce([cobroConPropina({ processorData: { refundedAmountCents: 12000, refundedAmount: 120 } })])
       .mockResolvedValueOnce([REEMBOLSO_A])
 
-    await expect(reembolsar(1000)).rejects.toThrow(/exceeds remaining refundable/i)
+    await expect(reembolsar(1000)).rejects.toThrow(/de este cobro sólo quedan \$[\d.]+ por devolver/)
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 })

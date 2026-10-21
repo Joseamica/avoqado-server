@@ -1,6 +1,7 @@
 // src/services/fiscal/assembleSaleInput.ts
 import { Prisma, PaymentMethod, VenueType } from '@prisma/client'
 import { AvoqadoSaleInput, AvoqadoSaleItemInput } from './cfdiPayloadBuilder'
+import type { IvaTratamiento } from './ivaTratamiento'
 
 const centsOf = (d: Prisma.Decimal): number => Math.round(Number(d) * 100)
 
@@ -16,6 +17,8 @@ export interface LoadedOrderItemForCfdi {
     taxRate: Prisma.Decimal
     category: { defaultSatProductKey: string | null; defaultSatUnitKey: string | null } | null
   } | null
+  /** IVA del renglón (plan 3). Con él, el concepto toma ObjetoImp y traslados de `impuestosSatDe`. */
+  tratamiento?: IvaTratamiento
 }
 
 export interface LoadedOrderForCfdi {
@@ -28,6 +31,29 @@ export interface LoadedOrderForCfdi {
    * the customer paid. Omitted/false → NET prices (separated-tax sources: reservations, pos-sync).
    */
   pricesIncludeIva?: boolean
+  /** Rama de la factura (plan 3): todos los renglones en IVA_16, o alguno distinto. Aditivo. */
+  clasificacion?: 'TODO_16' | 'MIXTA'
+  /**
+   * Renglones originales de la orden con su tratamiento resuelto (plan 3, Tarea 4): lo que SELLA la
+   * entrada documental (`entradaDocumental.ts`). `loadOrderForCfdiFromDb` SIEMPRE lo pone (venta sin
+   * renglones ⇒ `[]`); ausente sólo en bundles construidos a mano por pruebas anteriores a la Tarea 4.
+   */
+  renglonesOrigen?: Array<{ orderItemId: string; tratamiento: IvaTratamiento }>
+  /** Contrato de precio de la orden AL MOMENTO de cargar el bundle (plan 3, Tarea 4: foto congelada). */
+  contratoDePrecio?: string | null
+  /** Estado de pago de la orden AL MOMENTO de cargar el bundle (plan 3, Tarea 4: foto congelada). */
+  paymentStatus?: string | null
+}
+
+/**
+ * El bundle REAL que arma `loadOrderForCfdiFromDb` (Tarea 4): `clasificacion` y `renglonesOrigen`
+ * SIEMPRE vienen resueltos — la entrada documental nunca se sella a ciegas (`capturarEntrada` falla
+ * cerrado si le falta cualquiera). Los bundles construidos a mano en pruebas anteriores a la Tarea 4
+ * siguen usando `LoadedOrderForCfdi` con estos campos opcionales.
+ */
+export interface LoadedOrderForCfdiResuelto extends LoadedOrderForCfdi {
+  clasificacion: 'TODO_16' | 'MIXTA'
+  renglonesOrigen: Array<{ orderItemId: string; tratamiento: IvaTratamiento }>
 }
 
 export interface AssembleOptions {
@@ -47,10 +73,14 @@ export function assembleSaleInput(order: LoadedOrderForCfdi, opts: AssembleOptio
   const pricesIncludeIva = order.pricesIncludeIva === true
   const items: AvoqadoSaleItemInput[] = order.items.map(it => {
     const taxRate = it.product ? Number(it.product.taxRate) : DEFAULT_IVA
+    const precio = new Prisma.Decimal(String(it.unitPrice))
+    // D9: el precio por kilo derivado de lo cobrado (más de 2 decimales) viaja tal cual al PAC; todo lo demás va en centavos.
+    const conFraccion = !precio.equals(precio.toDecimalPlaces(2))
     return {
       description: it.productName ?? 'Producto',
       quantity: it.quantity,
       unitPriceCents: centsOf(it.unitPrice),
+      ...(conFraccion ? { unitPriceDecimal: precio.toDecimalPlaces(6, Prisma.Decimal.ROUND_HALF_UP).toFixed(6) } : {}),
       discountCents: centsOf(it.discountAmount),
       taxRate,
       taxExempt: taxRate === 0,
@@ -61,6 +91,7 @@ export function assembleSaleInput(order: LoadedOrderForCfdi, opts: AssembleOptio
       categoryDefaultProductKey: it.product?.category?.defaultSatProductKey ?? null,
       categoryDefaultUnitKey: it.product?.category?.defaultSatUnitKey ?? null,
       objetoImp: it.product?.objetoImp ?? null,
+      ...(it.tratamiento ? { tratamiento: it.tratamiento } : {}),
     }
   })
   return {

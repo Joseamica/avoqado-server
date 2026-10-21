@@ -206,6 +206,29 @@ describe('inventarioDeObligaciones', () => {
     expect(r.detalle.s_pausa).toMatchObject({ pausaDeCobranza: true, metodoDeCobro: 'send_invoice' })
   })
 
+  // Spec §4.2: a function retained from a subscription that ends cannot hold a dependent function past that day.
+  it('says when each subscription ends: cancel_at first, then the period end of a cancel_at_period_end, else never', async () => {
+    const periodEnd = Math.floor(Date.now() / 1000) + 10 * 86400
+    const cancelAt = periodEnd - 86400
+    const withPeriod = (s: ReturnType<typeof sub>) => ({
+      ...s,
+      // API 2025-09-30.clover: the period lives on the item, never on the subscription.
+      items: { data: s.items.data.map(item => ({ ...item, current_period_start: periodEnd - 30 * 86400, current_period_end: periodEnd })) },
+    })
+    mockList.mockReturnValue(
+      paginado([
+        { ...withPeriod(sub('s_fecha', 'active', 'cus_1', 'prod_pro')), cancel_at: cancelAt, cancel_at_period_end: false },
+        { ...withPeriod(sub('s_fin', 'active', 'cus_1', 'prod_inv')), cancel_at: null, cancel_at_period_end: true },
+        { ...withPeriod(sub('s_sigue', 'past_due', 'cus_1', 'prod_inv')), cancel_at: null, cancel_at_period_end: false },
+      ]),
+    )
+
+    const r = await inventarioDeObligaciones('cven1')
+    expect(r.detalle.s_fecha.terminaEn).toBe(new Date(cancelAt * 1000).toISOString())
+    expect(r.detalle.s_fin.terminaEn).toBe(new Date(periodEnd * 1000).toISOString())
+    expect(r.detalle.s_sigue.terminaEn).toBeNull()
+  })
+
   it('🔴 un negocio con más vínculos locales de los que se leen: 503 (la lectura no fue completa)', async () => {
     prismaMock.venueFeature.findMany.mockResolvedValue(Array.from({ length: 201 }, (_, i) => ({ stripeSubscriptionId: `s${i}` })) as never)
 

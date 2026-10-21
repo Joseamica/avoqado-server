@@ -131,7 +131,16 @@ jest.mock('@/services/access/basePlan.service', () => ({
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    commissionCalculation: { findMany: (...a: unknown[]) => mockFindMany(...(a as [])) },
+    commissionCalculation: {
+      groupBy: async (...a: unknown[]) =>
+        (await mockFindMany(...(a as []))).map((r: any) => ({
+          ...r,
+          _sum: { baseAmount: r.baseAmount, grossCommission: r.grossCommission, netCommission: r.netCommission },
+          _count: { _all: 1 },
+        })),
+    },
+    staff: { findMany: jest.fn().mockResolvedValue([{ id: 'ana', firstName: 'Ana Sofia', lastName: 'Gonzalez' }]) },
+    commissionConfig: { findMany: jest.fn().mockResolvedValue([{ id: 'cfg', name: 'Lagree + Merch', calcType: 'PERCENTAGE' }]) },
     venue: { findUnique: (...a: unknown[]) => mockVenueFindUnique(...(a as [])) },
   },
 }))
@@ -221,4 +230,25 @@ describe('staff_commission tool', () => {
     expect(range.gte.toISOString()).toBe('2026-06-01T06:00:00.000Z')
     expect(range.lte.toISOString()).toBe('2026-07-01T05:59:59.999Z')
   })
+})
+
+it('preserva cantidades al agregar 10000 cálculos en la base de datos', () => {
+  const result = aggregateStaffCommission([
+    {
+      staffId: 'a',
+      staff: { firstName: 'Ana', lastName: '' },
+      configId: 'c',
+      config: { name: 'Ventas', calcType: 'PERCENTAGE' },
+      baseAmount: '10000',
+      grossCommission: '300',
+      netCommission: '300',
+      effectiveRate: '0.03',
+      tier: null,
+      tierName: null,
+      status: 'CALCULATED',
+      calculationCount: 10000,
+    },
+  ] as never)
+  expect(result[0]).toMatchObject({ count: 10000, totalBase: 10000, totalCommission: 300, byStatus: { CALCULATED: 10000 } })
+  expect(result[0].byScheme[0].byRate[0].count).toBe(10000)
 })

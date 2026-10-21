@@ -7,6 +7,9 @@ const CLAIM_LEASE_MS = 5 * 60 * 1000
 const REINTENTO_MS = 2 * 60 * 1000
 const MAX_INTENTOS = 5
 
+/** El CAS no casó: se deshace la transacción de la entrega sin contarla como falla. */
+class ResultadoDescartado extends Error {}
+
 /**
  * Reclama entregas listas con `FOR UPDATE SKIP LOCKED`: dos workers nunca se llevan la
  * misma fila. `attempts` se incrementa AQUÍ, no al fallar — si el proceso muere a media
@@ -48,6 +51,32 @@ export async function claimDeliveries(input: { limit?: number; now: Date }): Pro
 }
 
 /**
+ * Retira las entregas que ya no tienen salida: el proceso murió a media entrega en sus
+ * `MAX_INTENTOS` reclamos, así que siguen PENDING con el contador lleno y el lease vencido.
+ * `claimDeliveries` ya no las toma y nada más las tocaba: se quedaban «pendientes» para
+ * siempre y el alcance del anuncio nunca las contaba. Las deja FAILED, con la razón.
+ *
+ * Con el lease aún vigente el quinto intento sigue vivo: no se toca. Si ese worker vuelve
+ * después, su CAS ya no casa (aquí se limpia `leaseUntil`) y su resultado se descarta.
+ * Lo encontró el experimento pg-boss vs colas caseras (16-oct-2026).
+ */
+export async function retireExhaustedDeliveries(input: { now: Date }): Promise<number> {
+  const r = await prisma.platformAnnouncementDelivery.updateMany({
+    where: {
+      status: PlatformAnnouncementDeliveryStatus.PENDING,
+      attempts: { gte: MAX_INTENTOS },
+      leaseUntil: { lte: input.now },
+    },
+    data: {
+      status: PlatformAnnouncementDeliveryStatus.FAILED,
+      leaseUntil: null,
+      lastError: `Agotó los ${MAX_INTENTOS} intentos: el proceso se detuvo a media entrega en cada uno`,
+    },
+  })
+  return r.count
+}
+
+/**
  * Entrega las filas reclamadas: crea el aviso en el buzón y marca la entrega.
  *
  * 🔴 El CAS (`where { id, attempts, leaseUntil }`) es lo que impide que dos workers
@@ -72,70 +101,84 @@ export async function deliverClaimed(ids: string[], opts: { now: Date }): Promis
   for (const d of claimed) {
     const casWhere = { id: d.id, attempts: d.attempts, leaseUntil: d.leaseUntil }
     try {
-      // 🔴 UN aviso por PERSONA, no uno por sucursal.
-      //
-      // La entrega SÍ es por (persona, venue) — eso es lo que mide el alcance por
-      // negocio. Pero el aviso del buzón es uno solo: un anuncio de plataforma no
-      // pertenece a una sucursal, y la campana del dashboard ni siquiera filtra por
-      // sucursal, así que repartir uno por venue le mostraba 12 copias idénticas a quien
-      // administra 12 negocios. Lo encontró el founder el 2026-08-27.
-      const existente = await prisma.notification.findFirst({
-        where: {
-          recipientId: d.staffId,
-          entityType: 'PlatformAnnouncement',
-          entityId: d.announcement.id,
-          type: NotificationType.ANNOUNCEMENT,
-        },
-        select: { id: true },
-      })
+      // 🔴 Candado por (persona, anuncio) alrededor de «¿ya tiene aviso? → créalo». Sin él,
+      // dos workers sobre la misma persona (lease vencido con el primero vivo, deploy
+      // solapado, o sus entregas de dos sucursales a la vez) pasan los dos el findFirst y
+      // crean DOS avisos: lo reprodujo el experimento pg-boss vs colas caseras (16-oct-2026).
+      // `Notification` no tiene llave única para esto, así que el candado es la garantía.
+      // El resultado (SENT) se escribe en la MISMA transacción: si el CAS no casa, otro
+      // worker ya se quedó con la fila y el aviso recién creado se deshace con ella.
+      const enviada = await prisma.$transaction(async tx => {
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${`announcement-notification:${d.staffId}:${d.announcement.id}`}, 0))::text`
 
-      if (existente) {
-        const r = await prisma.platformAnnouncementDelivery.updateMany({
+        // 🔴 UN aviso por PERSONA, no uno por sucursal.
+        //
+        // La entrega SÍ es por (persona, venue) — eso es lo que mide el alcance por
+        // negocio. Pero el aviso del buzón es uno solo: un anuncio de plataforma no
+        // pertenece a una sucursal, y la campana del dashboard ni siquiera filtra por
+        // sucursal, así que repartir uno por venue le mostraba 12 copias idénticas a quien
+        // administra 12 negocios. Lo encontró el founder el 2026-08-27.
+        const existente = await tx.notification.findFirst({
+          where: {
+            recipientId: d.staffId,
+            entityType: 'PlatformAnnouncement',
+            entityId: d.announcement.id,
+            type: NotificationType.ANNOUNCEMENT,
+          },
+          select: { id: true },
+        })
+
+        if (existente) {
+          const r = await tx.platformAnnouncementDelivery.updateMany({
+            where: casWhere,
+            data: {
+              status: PlatformAnnouncementDeliveryStatus.SENT,
+              notificationId: existente.id,
+              deliveredAt: opts.now,
+              leaseUntil: null,
+              lastError: null,
+            },
+          })
+          return r.count > 0
+        }
+
+        const notif = await tx.notification.create({
+          data: {
+            recipientId: d.staffId,
+            venueId: d.venueId,
+            type: NotificationType.ANNOUNCEMENT,
+            title: d.announcement.title,
+            message: d.announcement.body,
+            actionLabel: d.announcement.actionLabel ?? undefined,
+            // 🔴 NO se pone una ruta del detalle aquí. La versión anterior mandaba a
+            // `/announcements/<id>`, que sólo existe en el superadmin: en el dashboard del
+            // cliente daba 404 (lo encontró el founder el 27-ago). El detalle del anuncio
+            // se abre en un modal desde el propio buzón, reconociéndolo por `entityType`.
+            // Este campo queda para el botón que el anuncio traiga configurado, si trae.
+            actionUrl: d.announcement.actionUrl ?? undefined,
+            entityType: 'PlatformAnnouncement',
+            entityId: d.announcement.id,
+            priority: d.announcement.priority,
+          },
+        })
+
+        const r = await tx.platformAnnouncementDelivery.updateMany({
           where: casWhere,
           data: {
             status: PlatformAnnouncementDeliveryStatus.SENT,
-            notificationId: existente.id,
+            notificationId: notif.id,
             deliveredAt: opts.now,
             leaseUntil: null,
             lastError: null,
           },
         })
-        if (r.count > 0) sent++
-        continue
-      }
-
-      const notif = await prisma.notification.create({
-        data: {
-          recipientId: d.staffId,
-          venueId: d.venueId,
-          type: NotificationType.ANNOUNCEMENT,
-          title: d.announcement.title,
-          message: d.announcement.body,
-          actionLabel: d.announcement.actionLabel ?? undefined,
-          // 🔴 NO se pone una ruta del detalle aquí. La versión anterior mandaba a
-          // `/announcements/<id>`, que sólo existe en el superadmin: en el dashboard del
-          // cliente daba 404 (lo encontró el founder el 27-ago). El detalle del anuncio
-          // se abre en un modal desde el propio buzón, reconociéndolo por `entityType`.
-          // Este campo queda para el botón que el anuncio traiga configurado, si trae.
-          actionUrl: d.announcement.actionUrl ?? undefined,
-          entityType: 'PlatformAnnouncement',
-          entityId: d.announcement.id,
-          priority: d.announcement.priority,
-        },
+        if (r.count === 0) throw new ResultadoDescartado()
+        return true
       })
-
-      const r = await prisma.platformAnnouncementDelivery.updateMany({
-        where: casWhere,
-        data: {
-          status: PlatformAnnouncementDeliveryStatus.SENT,
-          notificationId: notif.id,
-          deliveredAt: opts.now,
-          leaseUntil: null,
-          lastError: null,
-        },
-      })
-      if (r.count > 0) sent++
+      if (enviada) sent++
     } catch (error) {
+      // Otro worker reclamó la fila mientras ésta entregaba: su resultado manda.
+      if (error instanceof ResultadoDescartado) continue
       const mensaje = error instanceof Error ? error.message : String(error)
       await prisma.platformAnnouncementDelivery.updateMany({
         where: casWhere,

@@ -131,13 +131,24 @@ regardless — never rely on the env.)
 
 ## Database Migrations
 
-```bash
-# NEVER
-npx prisma db push
+🔴 La base local `av-db-25` es UNA sola para todas las sesiones (ver `../CLAUDE.md`, sección de la base compartida). Corregido el
+9-oct-2026: antes aquí decía «ALWAYS `npx prisma migrate dev`», que contra esa base puede proponer un reset y vaciarla.
 
-# ALWAYS
-npx prisma migrate dev --name {description}
+```bash
+# NEVER contra av-db-25
+npx prisma db push
+npx prisma migrate dev / migrate reset     # pueden proponer reset con drift y vaciar la base compartida
+
+# SÍ: escribir la migración y aplicarla con deploy
+# 1. Carpeta nueva en prisma/migrations con timestamp MAYOR que la última (Prisma aplica por NOMBRE).
+#    Escríbela a mano, o genérala contra una base DESECHABLE (createdb av-db-25-<tu-tarea>; imprime y lee la URL antes).
+# 2. Confirma que SÓLO la tuya está pendiente (migrate deploy aplica TODO lo pendiente, también lo de otras sesiones).
+# 3. Aplica — el prefijo NO es opcional: con USE_RENDER_DB=true, prisma.config.ts apunta a PRODUCCIÓN.
+USE_RENDER_DB=false npx prisma migrate deploy
 ```
+
+Receta completa (consulta de pendientes, checksum, `CONCURRENTLY` de un statement por archivo, nombres de índice): memoria del server
+`migracion-a-mano-en-base-compartida`. Nunca edites un `.sql` ya aplicado.
 
 ## Schema Map — MANDATORY on EVERY `prisma/schema.prisma` edit
 

@@ -4,8 +4,9 @@
  * leída bajo el candado del pedido, ya no trae el renglón; y entonces se escribe un REEMBOLSO
  * PARCIAL compensatorio con los deltas EXACTOS del bloque `payment` y el reparto fiscal por tasa.
  */
-import { DeliveryChannelLink, DeliveryProvider, OrderSource, Prisma } from '@prisma/client'
+import { DeliveryChannelLink, DeliveryProvider, OrderSource, Prisma, PrismaClient, type IvaTratamiento } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
 import logger from '@/config/logger'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { applyDeliveryRefund } from '@/services/delivery-channels/core/applyDeliveryRefund.service'
@@ -15,10 +16,15 @@ import type { NormalizedDeliveryItem, NormalizedDeliveryOrder, NormalizedDeliver
 import { CANDADO_TX_TIMEOUT_MS } from '@/services/delivery-channels/core/deliveryOrderLock'
 import { grossByRateForOrder } from '@/services/fiscal/autoPosting.service'
 import { ivaDeDevolucion } from '@/services/fiscal/deliveryFiscalDelta'
-import { splitPaymentIvaByOrderRates } from '@/services/fiscal/ivaMath'
+import { mezclaDesdeTasas, splitPaymentIvaByOrderRates, tasasDe } from '@/services/fiscal/ivaMath'
+import { mezclaPorTratamiento } from '@/services/fiscal/mezclaDeOrden'
+import { liberarSellosDe, sellarRenglones } from '@/services/fiscal/sellosIva'
+import { updateProduct } from '@/services/dashboard/product.dashboard.service'
+import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { writeRefundInTx, type WriteRefundInput } from '@/services/shared/writeRefundInTx'
+import { desenlace, hastaQue, nuevoRfc, retener } from '../fiscal/exclusionContable.fixtures'
 
-type Renglon = { linea: string; nombre: string; precio: string; tasa?: number }
+type Renglon = { linea: string; nombre: string; precio: string; tasa?: number; trat?: IvaTratamiento }
 
 describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
   let venueId: string, orgId: string
@@ -72,6 +78,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     for (const f of filas) item[f.externalLineId!] = f
     for (const r of renglones) {
       if (r.tasa !== undefined) await prisma.product.update({ where: { id: item[r.linea].productId! }, data: { taxRate: r.tasa } })
+      if (r.trat !== undefined) await prisma.product.update({ where: { id: item[r.linea].productId! }, data: { ivaTratamiento: r.trat } })
     }
     const foto = (
       siguen: string[],
@@ -136,6 +143,9 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     orgId = org.id
     const v = await prisma.venue.create({ data: { organizationId: orgId, name: `V recon ${Date.now()}`, slug: `v-recon-${Date.now()}` } })
     venueId = v.id
+    // Ruling R12: hay renglones al 0 % para probar el reparto por tasa; el venue representa un negocio con IVA
+    // por producto encendido.
+    await encenderIvaPorProducto(venueId)
     link = await prisma.deliveryChannelLink.create({
       data: { venueId, provider: DeliveryProvider.UBER_EATS, externalLocationId: `store-recon-${Date.now()}`, webhookSecret: 'x' },
     })
@@ -254,19 +264,35 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     expect(await accionDe(order.id, 'b')).toMatchObject({ settlement: 'REFUNDED', refundPaymentId: refunds[1].id })
     // IVA de la venta al 16 %: $200 sobre {16 %: 150, 0 %: 50} = 20.69; superviviente (Torta $100) = 13.79.
     const fiscales = refunds.map(f => (f.processorData as any).fiscalByRateCents)
-    expect(fiscales).toEqual([{ '0.16': 690 }, {}])
+    expect(fiscales).toEqual([
+      { v: 2, porTratamiento: { IVA_16: { baseCents: 4310, ivaCents: 690 } } },
+      { v: 2, porTratamiento: { IVA_0: { baseCents: 5000, ivaCents: 0 } } },
+    ])
 
     // original − Σ compensaciones = composición superviviente, leído del sistema: los renglones
     // guardados (con su tasa y su marca de retiro) y el IVA que la póliza toma de cada REFUND.
     const renglones = await prisma.orderItem.findMany({
       where: { orderId: order.id },
-      select: { quantity: true, unitPrice: true, discountAmount: true, removedAt: true, product: { select: { taxRate: true } } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        quantity: true,
+        unitPrice: true,
+        total: true,
+        discountAmount: true,
+        removedAt: true,
+        isCortesia: true,
+        orderPromotionId: true,
+        ivaTratamiento: true,
+        product: { select: { taxRate: true, ivaTratamiento: true } },
+      },
     })
     const mezcla = grossByRateForOrder(renglones)
     const ivaOriginal = splitPaymentIvaByOrderRates(20000, mezcla).taxCents
     const ivaSuperviviente = splitPaymentIvaByOrderRates(10000, grossByRateForOrder(renglones.filter(r => !r.removedAt))).taxCents
     const ivaDevuelto = refunds.reduce(
-      (s, f) => s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+      (s, f) =>
+        s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezclaDesdeTasas(mezcla)).taxCents,
       0,
     )
     expect(ivaOriginal - ivaDevuelto).toBe(ivaSuperviviente)
@@ -313,17 +339,31 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
     // IVA en libros = el de la venta − el de cada devolución, cada uno como lo postea la póliza.
     const renglones = await prisma.orderItem.findMany({
       where: { orderId: order.id },
-      select: { quantity: true, unitPrice: true, discountAmount: true, removedAt: true, product: { select: { taxRate: true } } },
+      orderBy: { id: 'asc' },
+      select: {
+        id: true,
+        quantity: true,
+        unitPrice: true,
+        total: true,
+        discountAmount: true,
+        removedAt: true,
+        isCortesia: true,
+        orderPromotionId: true,
+        ivaTratamiento: true,
+        product: { select: { taxRate: true, ivaTratamiento: true } },
+      },
     })
     const mezcla = grossByRateForOrder(renglones)
     const ivaVenta = splitPaymentIvaByOrderRates(30000, mezcla).taxCents
     const ivaDevuelto = refunds.reduce(
-      (s, f) => s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+      (s, f) =>
+        s + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezclaDesdeTasas(mezcla)).taxCents,
       0,
     )
     expect(ivaVenta - ivaDevuelto).toBe(0)
-    const ivaManual = ivaDeDevolucion(refunds[1].id, 5000, refunds[1].processorData, mezcla).taxCents
-    expect((refunds[2].processorData as any).fiscalByRateCents).toEqual({ '0.16': ivaVenta - ivaManual })
+    const ivaManual = ivaDeDevolucion(refunds[1].id, 5000, refunds[1].processorData, mezclaDesdeTasas(mezcla)).taxCents
+    expect((refunds[2].processorData as any).fiscalByRateCents.v).toBe(2)
+    expect(tasasDe((refunds[2].processorData as any).fiscalByRateCents.porTratamiento)).toEqual({ '0.16': ivaVenta - ivaManual })
   })
 
   describe('deriva de redondeo (re-revisión, Minor): 1 centavo por tasa se absorbe; 2 siguen bloqueando', () => {
@@ -350,11 +390,24 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       // no sacó ya, no el de la foto entera.
       const renglones = await prisma.orderItem.findMany({
         where: { orderId: order.id },
-        select: { quantity: true, unitPrice: true, discountAmount: true, product: { select: { taxRate: true } } },
+        orderBy: { id: 'asc' },
+        select: {
+          id: true,
+          quantity: true,
+          unitPrice: true,
+          total: true,
+          discountAmount: true,
+          isCortesia: true,
+          orderPromotionId: true,
+          ivaTratamiento: true,
+          product: { select: { taxRate: true, ivaTratamiento: true } },
+        },
       })
       const mezcla = grossByRateForOrder(renglones)
       const ivaDevuelto = refunds.reduce(
-        (t, f) => t + ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezcla).taxCents,
+        (t, f) =>
+          t +
+          ivaDeDevolucion(f.id, new Prisma.Decimal(f.amount).times(-100).toNumber(), f.processorData, mezclaDesdeTasas(mezcla)).taxCents,
         0,
       )
       expect(splitPaymentIvaByOrderRates(15000, mezcla).taxCents - ivaDevuelto).toBe(0)
@@ -393,7 +446,7 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
       const ultimo = (await reembolsos(order.id)).pop()!
       expect(ultimo.amount.toString()).toBe('-0.01')
-      expect((ultimo.processorData as any).fiscalByRateCents).toEqual({})
+      expect((ultimo.processorData as any).fiscalByRateCents).toEqual({ v: 2, porTratamiento: { IVA_16: { baseCents: 1, ivaCents: 0 } } })
     })
 
     it('una reclasificación de 2 centavos NO es deriva: sigue FISCAL_PENDING', async () => {
@@ -894,5 +947,367 @@ describe('reconcileDeliveryOrderFromProvider (Tarea 13)', () => {
       provenance: 'PROVIDER_ADJUSTMENT',
     }
     expect(incompleto.provenance).toBe('PROVIDER_ADJUSTMENT')
+  })
+
+  describe('plan 4b — el ajuste sale del tratamiento resuelto, sólo congela lo que ya no se mueve, y no se cruza con un cambio de IVA', () => {
+    const AJUSTE = {
+      statusCode: 409,
+      code: 'IVA_PRODUCTO_CON_AJUSTE_DE_DELIVERY',
+      message: 'Este producto ya tuvo ajustes de delivery (Uber). Para venderlo con otro IVA, crea un producto nuevo con el IVA correcto.',
+    }
+    const PRODUCTOS_NKU = '%FROM "Product" p%FOR NO KEY UPDATE%'
+    let staffId = ''
+    let bloqueador: PrismaClient
+    let observador: PrismaClient
+    const actor = () => ({ type: 'HUMAN' as const, staffId, impersonating: false })
+    const mapa = async (orderId: string) => ((await reembolsos(orderId))[0].processorData as any).fiscalByRateCents
+    /** La marca de la regla C de cada producto, en orden de id. */
+    const marcas = async (...ids: string[]) =>
+      (
+        await prisma.product.findMany({ where: { id: { in: ids } }, orderBy: { id: 'asc' }, select: { ajusteDeliveryAlgunaVez: true } })
+      ).map(p => p.ajusteDeliveryAlgunaVez)
+    /** Los renglones de la orden con lo que decide su IVA (lo mismo que leen el reporte y la conciliación). */
+    const renglonesDe = (orderId: string) =>
+      prisma.orderItem.findMany({
+        where: { orderId },
+        orderBy: { id: 'asc' },
+        select: {
+          quantity: true,
+          unitPrice: true,
+          discountAmount: true,
+          ivaTratamiento: true,
+          product: { select: { taxRate: true, ivaTratamiento: true } },
+        },
+      })
+    /** Alguien espera un candado que retiene `pid`, con una consulta como `like`; devuelve su pid. */
+    const esperaDetrasDe = (pid: number, like: string, descripcion: string) =>
+      hastaQue(
+        observador,
+        descripcion,
+        4_000,
+        Prisma.sql`SELECT a.pid FROM pg_stat_activity a
+          WHERE a.datname = current_database() AND a.wait_event_type = 'Lock'
+            AND ${pid}::int = ANY(pg_blocking_pids(a.pid)) AND a.query LIKE ${like}
+          LIMIT 1`,
+      )
+
+    beforeAll(async () => {
+      staffId = (await prisma.staff.create({ data: { email: `4b-r-${Date.now()}@example.test`, firstName: 'IVA', lastName: 'Plan 4b' } }))
+        .id
+      bloqueador = new PrismaClient()
+      observador = new PrismaClient()
+    })
+    afterAll(async () => {
+      await bloqueador.$disconnect()
+      await observador.$disconnect()
+      await prisma.activityLog.deleteMany({ where: { OR: [{ staffId }, { actorStaffId: staffId }] } })
+      await prisma.staff.deleteMany({ where: { id: staffId } })
+    })
+
+    it('Review Focus 1 · un renglón SELLADO al 16 % con el producto ya en 0 %: FISCAL_PENDING, sin ajuste ni marca (Ruling 4b-R12)', async () => {
+      const { order, item, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Café', precio: '116.00' },
+          { linea: 'b', nombre: 'Torta', precio: '100.00' },
+        ],
+        pago('216.00', '0.00'),
+      )
+      await prisma.orderItem.update({ where: { id: item.a.id }, data: { ivaTratamiento: 'IVA_16' } }) // sellado por una factura
+      await prisma.product.update({ where: { id: item.a.productId! }, data: { ivaTratamiento: 'IVA_0' } }) // sin marca: pasa
+      proveedorDevuelve(foto(['a'], pago('116.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('FISCAL_PENDING')
+      expect(await reembolsos(order.id)).toHaveLength(0)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBe(
+        'FISCAL_RECLASS_UNSUPPORTED',
+      )
+      expect((await accionDe(order.id, 'b')).settlement).toBe('FISCAL_PENDING')
+      expect(await marcas(item.a.productId!, item.b.productId!)).toEqual([false, false])
+    })
+
+    it('Review Focus 1 · sellado == producto: el ajuste congela; al liberar la factura DE VERDAD la mezcla no cambia y el producto ya no puede cambiar de IVA', async () => {
+      const { order, item, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Café', precio: '116.00' },
+          { linea: 'b', nombre: 'Torta', precio: '100.00' },
+        ],
+        pago('216.00', '0.00'),
+      )
+      const emisor = await prisma.fiscalEmisor.create({
+        data: { venueId, rfc: nuevoRfc(), legalName: 'Plan 4b', regimenFiscal: '601', lugarExpedicion: '01000' },
+      })
+      const cfdi = await prisma.cfdi.create({
+        data: {
+          venueId,
+          fiscalEmisorId: emisor.id,
+          flow: 'STAFF_B',
+          orderId: order.id,
+          // D21: una heredada (sin protocoloIva) sólo puede existir terminada; este CFDI en DRAFT es de la ruta nueva.
+          protocoloIva: 1,
+          receptorRfc: 'XAXX010101000',
+          receptorNombre: 'PÚBLICO EN GENERAL',
+          receptorRegimen: '616',
+          receptorCp: '01000',
+          usoCfdi: 'S01',
+          formaPago: '01',
+          metodoPago: 'PUE',
+          subtotalCents: 10000,
+          taxCents: 1600,
+          totalCents: 11600,
+        } as Prisma.CfdiUncheckedCreateInput,
+      })
+      try {
+        await prisma.$transaction(tx =>
+          sellarRenglones(tx, { cfdiId: cfdi.id, intento: 1, renglones: [{ orderItemId: item.a.id, tratamiento: 'IVA_16' }] }),
+        )
+        proveedorDevuelve(foto(['a'], pago('116.00', '0.00')))
+        expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+        // 21600 al 16 %: en libros 18621 + 2979; sobrevive el café sellado, 11600 ⇒ 10000 + 1600; se devuelve 8621 + 1379.
+        expect(await mapa(order.id)).toEqual({ v: 2, porTratamiento: { IVA_16: { baseCents: 8621, ivaCents: 1379 } } })
+        expect(await marcas(item.a.productId!, item.b.productId!)).toEqual([true, true])
+        const congelada = mezclaPorTratamiento(await renglonesDe(order.id))
+        expect(await prisma.$transaction(tx => liberarSellosDe(tx, cfdi.id))).toEqual({ liberados: 1 }) // la factura deja de contar
+        expect((await prisma.orderItem.findUniqueOrThrow({ where: { id: item.a.id } })).ivaTratamiento).toBeNull()
+        expect(mezclaPorTratamiento(await renglonesDe(order.id))).toEqual(congelada) // el café sigue a su producto: el mismo IVA
+        expect(await desenlace(updateProduct(venueId, item.a.productId!, { ivaTratamiento: 'IVA_0' }, actor()))).toMatchObject(AJUSTE)
+      } finally {
+        await prisma.orderItemSelloIva.deleteMany({ where: { cfdiId: cfdi.id } })
+        await prisma.cfdi.delete({ where: { id: cfdi.id } })
+        await prisma.fiscalEmisor.delete({ where: { id: emisor.id } })
+      }
+    })
+
+    it('mezcla con tasa 0 y exento: retirar lo exento guarda su base en EXENTO, sin IVA', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Café', precio: '50.00', tasa: 0 },
+          { linea: 'b', nombre: 'Bolsa', precio: '30.00', trat: 'EXENTO' },
+          { linea: 'c', nombre: 'Torta', precio: '116.00' },
+        ],
+        pago('196.00', '0.00'),
+      )
+      proveedorDevuelve(foto(['a', 'c'], pago('166.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      expect(await mapa(order.id)).toEqual({ v: 2, porTratamiento: { EXENTO: { baseCents: 3000, ivaCents: 0 } } })
+    })
+
+    // Codex P1.3, su escenario exacto: hoy `fiscal` sale vacío y se declara NO_DELTA.
+    it('Review Focus 6 · sin dinero de por medio, la base pasa de 5000/5000 (0 % / exento) a 10000 al 0 %: FISCAL_PENDING, nunca NO_DELTA', async () => {
+      // $100 al 0 % + $100 exento con $100 de descuento (se cobran $100: mitad y mitad). Uber retira el exento y el descuento:
+      // se siguen cobrando $100, ahora todo al 0 %.
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Grano', precio: '100.00', tasa: 0 },
+          { linea: 'b', nombre: 'Libro', precio: '100.00', trat: 'EXENTO' },
+        ],
+        pago('200.00', '100.00'),
+      )
+      proveedorDevuelve(foto(['a'], pago('100.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('FISCAL_PENDING')
+      expect(await reembolsos(order.id)).toHaveLength(0)
+      expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBe(
+        'FISCAL_RECLASS_UNSUPPORTED',
+      )
+      expect((await accionDe(order.id, 'b')).settlement).toBe('FISCAL_PENDING')
+    })
+
+    // Ruling F-2 (Codex P2): tras el chargeback COMPLETO del reporte (N-6) los libros ya no tienen la venta, el Δ sale en cero y
+    // todo el retiro es faltante; iba a la base GRAVABLE (IVA_16) aunque Uber retirara un exento.
+    it('Ruling F-2 · chargeback completo y luego Uber retira un exento: el ajuste congela EXENTO y el estado de resultados baja la base exenta, no la gravable', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Libro', precio: '50.00', trat: 'EXENTO' },
+          { linea: 'b', nombre: 'Revista', precio: '50.00', trat: 'EXENTO' },
+        ],
+        pago('100.00', '0.00'),
+      )
+      const chargeback = await applyDeliveryRefund({
+        externalOrderId: order.externalId!.split(':')[1],
+        provider: 'UBER_EATS',
+        montoDevuelto: '100.00',
+        motivo: 'reporte',
+      })
+      expect(chargeback.outcome).toBe('APPLIED')
+      // El venue es de todo el archivo: se compara el reporte antes y después del ajuste.
+      const periodo = { from: '2020-01-01', to: '2099-12-31' }
+      const antes = (await getIncomeStatement(venueId, periodo)).revenue
+
+      proveedorDevuelve(foto(['a'], pago('50.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+
+      const ajuste = (await reembolsos(order.id)).find(f => (f.processorData as any)?.provenance === 'PROVIDER_ADJUSTMENT')!
+      expect(ajuste.amount.toString()).toBe('-50')
+      expect((ajuste.processorData as any).fiscalByRateCents).toEqual({
+        v: 2,
+        porTratamiento: { EXENTO: { baseCents: 5000, ivaCents: 0 } },
+      })
+      // El mapa v2 de vuelta por el lector del estado de resultados (Ruling F-4).
+      const despues = (await getIncomeStatement(venueId, periodo)).revenue
+      expect(despues.exentoBaseCents! - antes.exentoBaseCents!).toBe(-5000)
+      expect(despues.taxableBaseCents - antes.taxableBaseCents).toBe(0)
+      expect(despues.ivaCents - antes.ivaCents).toBe(0)
+    })
+
+    // Ruling F-3: el candado de la base (4b-R7) sólo vigilaba NO_DELTA. Con la venta igual y SÓLO la propina cambiada, el ajuste
+    // congelaba ± base sin dinero de venta (tasa 0 ↔ exento) y el reporte la movía de tratamiento. Con IVA_16 el IVA movido ya lo
+    // frenaba (Q1bis): ese caso queda de control.
+    it.each<[IvaTratamiento]>([['EXENTO'], ['IVA_16']])(
+      'Ruling F-3 · un reembolso independiente se llevó lo de b y Uber retira b pero sólo cambia la propina (b en %s): FISCAL_PENDING, sin REFUND nuevo',
+      async trat => {
+        // $100 al 0 % + $100 de b con $100 de descuento y $20 de propina: se cobran $100, mitad y mitad. El reporte devuelve la
+        // mitad de b ($50). Uber retira b y el descuento —la venta sigue en $100, ahora toda al 0 %— y baja la propina a $10.
+        const { order, foto } = await sembrar(
+          [
+            { linea: 'a', nombre: 'Grano', precio: '100.00', trat: 'IVA_0' },
+            { linea: 'b', nombre: 'Otro', precio: '100.00', trat },
+          ],
+          pago('200.00', '100.00', '20.00'),
+        )
+        const chargeback = await applyDeliveryRefund({
+          externalOrderId: order.externalId!.split(':')[1],
+          provider: 'UBER_EATS',
+          montoDevuelto: '50.00',
+          motivo: 'reporte',
+        })
+        expect(chargeback.outcome).toBe('APPLIED')
+        proveedorDevuelve(foto(['a'], pago('100.00', '0.00', '10.00')))
+
+        expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('FISCAL_PENDING')
+        expect((await reembolsos(order.id)).map(f => f.amount.toString())).toEqual(['-50'])
+        expect((await prisma.order.findUniqueOrThrow({ where: { id: order.id } })).deliveryReconcileBlocked).toBe(
+          'FISCAL_RECLASS_UNSUPPORTED',
+        )
+        expect((await accionDe(order.id, 'b')).settlement).toBe('FISCAL_PENDING')
+      },
+    )
+
+    it('Review Focus 3 · la siguiente vuelta lee un ajuste escrito en la forma VIEJA (llaves de tasa)', async () => {
+      const { order, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Taco', precio: '50.00' },
+          { linea: 'b', nombre: 'Agua', precio: '50.00', tasa: 0 },
+          { linea: 'c', nombre: 'Torta', precio: '100.00' },
+        ],
+        pago('200.00', '0.00'),
+      )
+      proveedorDevuelve(foto(['b', 'c'], pago('150.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      // El primer ajuste, como lo habría escrito el servidor ANTES del plan 4b.
+      const [primero] = await reembolsos(order.id)
+      await prisma.payment.update({
+        where: { id: primero.id },
+        data: { processorData: { ...(primero.processorData as object), fiscalByRateCents: { '0.16': 690 } } },
+      })
+      proveedorDevuelve(foto(['c'], pago('100.00', '0.00')))
+      expect((await reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' })).outcome).toBe('REFUNDED')
+      expect(((await reembolsos(order.id))[1].processorData as any).fiscalByRateCents).toEqual({
+        v: 2,
+        porTratamiento: { IVA_0: { baseCents: 5000, ivaCents: 0 } },
+      })
+    })
+
+    it('Review Focus 5 · carrera A — el ajuste va primero: el cambio de IVA espera el producto y, al confirmarse el ajuste con su marca, sale 409', async () => {
+      const { order, item, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Café', precio: '100.00' },
+          { linea: 'b', nombre: 'Torta', precio: '100.00' },
+        ],
+        pago('200.00', '0.00'),
+      )
+      proveedorDevuelve(foto(['a'], pago('100.00', '0.00')))
+      const original = await prisma.payment.findFirstOrThrow({ where: { orderId: order.id, type: { not: 'REFUND' } } })
+      // El bloqueador retiene el cobro original: la conciliación llega hasta él con los productos YA tomados.
+      const cobro = await retener(bloqueador, tx => tx.$queryRaw`SELECT id FROM "Payment" WHERE id = ${original.id} FOR UPDATE`)
+      let ajuste: Promise<unknown> = Promise.resolve()
+      let cambio: Promise<unknown> = Promise.resolve()
+      try {
+        ajuste = desenlace(reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' }))
+        const pidAjuste = await esperaDetrasDe(
+          cobro.pid,
+          '%FROM "Payment"%FOR UPDATE%',
+          'la conciliación esperando el cobro, con los productos tomados',
+        )
+        cambio = desenlace(updateProduct(venueId, item.a.productId!, { ivaTratamiento: 'IVA_0' }, actor()))
+        await esperaDetrasDe(pidAjuste, '%FROM "Product" AS product%', 'el cambio de IVA esperando el producto que retiene la conciliación')
+      } finally {
+        await cobro.soltar()
+      }
+      expect(await ajuste).toMatchObject({ ok: { outcome: 'REFUNDED' } })
+      expect(await cambio).toMatchObject(AJUSTE)
+      expect((await prisma.product.findUniqueOrThrow({ where: { id: item.a.productId! } })).ivaTratamiento).toBe('IVA_16')
+      expect(await marcas(item.a.productId!, item.b.productId!)).toEqual([true, true])
+      // 20000 al 16 %: en libros 17241 + 2759; sobrevive 10000 ⇒ 8621 + 1379.
+      expect(await mapa(order.id)).toEqual({ v: 2, porTratamiento: { IVA_16: { baseCents: 8620, ivaCents: 1380 } } })
+    })
+
+    it('Review Focus 5 · carrera B — el cambio va primero: la conciliación espera el producto y congela el tratamiento NUEVO', async () => {
+      const { order, item, foto } = await sembrar(
+        [
+          { linea: 'a', nombre: 'Café', precio: '100.00' },
+          { linea: 'b', nombre: 'Torta', precio: '100.00' },
+        ],
+        pago('200.00', '0.00'),
+      )
+      proveedorDevuelve(foto(['b'], pago('100.00', '0.00')))
+      const categoria = await prisma.menuCategory.create({ data: { venueId, name: 'Plan 4b', slug: `p4b-${order.id}`.toLowerCase() } })
+      // El bloqueador retiene la categoría nueva: el UPDATE del producto (ya con el producto tomado) espera en su llave foránea.
+      const fk = await retener(bloqueador, tx => tx.$queryRaw`SELECT id FROM "MenuCategory" WHERE id = ${categoria.id} FOR UPDATE`)
+      let cambio: Promise<unknown> = Promise.resolve()
+      let ajuste: Promise<unknown> = Promise.resolve()
+      try {
+        cambio = desenlace(updateProduct(venueId, item.a.productId!, { ivaTratamiento: 'IVA_0', categoryId: categoria.id }, actor()))
+        const pidCambio = await esperaDetrasDe(
+          fk.pid,
+          '%UPDATE%"Product"%',
+          'el cambio de IVA, con el producto ya tomado, esperando la categoría',
+        )
+        ajuste = desenlace(reconcileDeliveryOrderFromProvider(order.id, { trigger: 'ROUTE' }))
+        await esperaDetrasDe(pidCambio, PRODUCTOS_NKU, 'la conciliación esperando el producto que retiene el cambio')
+      } finally {
+        await fk.soltar()
+      }
+      expect(await cambio).toHaveProperty('ok')
+      expect(await ajuste).toMatchObject({ ok: { outcome: 'REFUNDED' } })
+      expect(await marcas(item.a.productId!, item.b.productId!)).toEqual([true, true])
+      // Café ya en IVA_0: en libros 10000 (0 %) + 8621 + 1379 (16 %); sobrevive la torta ⇒ se devuelve la base del 0 %.
+      expect(await mapa(order.id)).toEqual({ v: 2, porTratamiento: { IVA_0: { baseCents: 10000, ivaCents: 0 } } })
+    })
+
+    it('Review Focus 5 · carrera C — dos conciliaciones de órdenes distintas con los mismos productos: la segunda espera en el producto menor sin tomar el mayor; las dos REFUNDED, sin 40P01', async () => {
+      const renglones = [
+        { linea: 'a', nombre: 'Café', precio: '100.00' },
+        { linea: 'b', nombre: 'Torta', precio: '100.00' },
+      ]
+      const uno = await sembrar(renglones, pago('200.00', '0.00'))
+      const dos = await sembrar(renglones, pago('200.00', '0.00'))
+      // La segunda orden vende los MISMOS productos, con los renglones al revés.
+      await prisma.orderItem.update({ where: { id: dos.item.a.id }, data: { productId: uno.item.b.productId } })
+      await prisma.orderItem.update({ where: { id: dos.item.b.id }, data: { productId: uno.item.a.productId } })
+      const ids = [uno.item.a.productId!, uno.item.b.productId!]
+      const [{ id: menor }, { id: mayor }] = await prisma.$queryRaw<
+        Array<{ id: string }>
+      >`SELECT id FROM "Product" WHERE id = ANY(${ids}::text[]) ORDER BY id`
+      const fotos = [uno.foto(['a'], pago('100.00', '0.00')), dos.foto(['a'], pago('100.00', '0.00'))]
+      jest.spyOn(uberAdapter, 'normalizeOrder').mockImplementation(raw => raw as NormalizedDeliveryOrder)
+      jest
+        .spyOn(uberAdapter, 'fetchOrder')
+        .mockImplementation((async (externalId: string) => fotos.find(f => f.externalId === externalId)) as never)
+      // El bloqueador retiene el producto MENOR (su FOR SHARE choca con el NKU de las conciliaciones).
+      const producto = await retener(bloqueador, tx => tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${menor} FOR SHARE`)
+      let r1: Promise<unknown> = Promise.resolve()
+      let r2: Promise<unknown> = Promise.resolve()
+      try {
+        r1 = desenlace(reconcileDeliveryOrderFromProvider(uno.order.id, { trigger: 'ROUTE' }))
+        const pid1 = await esperaDetrasDe(producto.pid, PRODUCTOS_NKU, 'la primera conciliación esperando el producto menor')
+        r2 = desenlace(reconcileDeliveryOrderFromProvider(dos.order.id, { trigger: 'ROUTE' }))
+        await esperaDetrasDe(pid1, PRODUCTOS_NKU, 'la segunda conciliación formada detrás de la primera, en el MISMO producto menor')
+        // Nadie retiene el mayor: en orden de id, quien espera el menor no tiene ninguno mayor (sin ciclo posible).
+        await observador.$transaction(tx => tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${mayor} FOR NO KEY UPDATE NOWAIT`)
+      } finally {
+        await producto.soltar()
+      }
+      expect(await r1).toMatchObject({ ok: { outcome: 'REFUNDED' } })
+      expect(await r2).toMatchObject({ ok: { outcome: 'REFUNDED' } })
+      expect(await marcas(...ids)).toEqual([true, true])
+    })
   })
 })

@@ -3,6 +3,7 @@
  * offsets together makes accidental pool stampedes visible in code review.
  */
 export const DATABASE_JOB_SCHEDULES = {
+  documentRequests: '19 */2 * * * *',
   displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',
   blumonWebhookReconciliation: '11,41 * * * * *',
@@ -55,4 +56,24 @@ export const DATABASE_JOB_SCHEDULES = {
   // `Order.kitchenPendingAt`). Cada minuto en el segundo :22, libre entre el outbox de clientes (:20) y el
   // sweeper de gcal (:23); lejos del :04 de displayModeRequestExpiry. Máximo 50 órdenes por pasada.
   kitchenTicketsReconciliation: '22 * * * * *',
+  // Conector de pases (TotalPass/Wellhub): eventos, vencimiento de visitas, horizonte y bandeja de salida.
+  // Segundos :18/:48 y no :19/:49 como decía el plan: :49 ya es de cashClosePairReconciler. :18 queda entre el
+  // monitor de POS (:17, cada 5 min) y el outbox de clientes (:20); :48, entre los anuncios (:47, cada 5 min) y :49.
+  aggregatorPassWorker: '18,48 * * * * *',
+  // Conector Shopify (plan v2 B8): worker de 30 s en :21/:51 — :21 entre el outbox de clientes (:20) y el KDS (:22);
+  // :51 entre el outbox de clientes (:50) y el reconciliador de renglones (:52). Cuadre de la mañana a las 06:14:45
+  // (CDMX), hueco entre el sweeper de inventario (:44) y los efectos de pago (:46): sólo pide la vuelta; la corre el worker.
+  shopifyWorker: '21,51 * * * * *',
+  shopifyReconcile: '45 14 6 * * *',
+  // Pedidos en línea: vence lo que el restaurante no contestó en 10 min. Cada 30 s en :10/:40 — huecos libres
+  // (:08/:38 watchdog de pagos, :11/:41 conciliador de Blumon, :13/:43 AngelPay); lectura barata por índice
+  // (status, acceptDeadlineAt).
+  onlineOrderAcceptanceExpiry: '10,40 * * * * *',
+  // Tarjetas de regalo (B7): revisión nocturna — saldo contra libreta, cuentas pagadas con sobres sin activar (las activa), cobros con
+  // saldo sin canje, reversos faltantes, cancelaciones atoradas, dinero sin sobres vivos y cuentas en $0 abiertas. Diario a las
+  // 03:37:27 (CDMX): segundo :27 libre, lejos de deliveryConnectIntentCleanup (04:17:31) y shopifyReconcile (06:14:45).
+  giftCardReconciliation: '27 37 3 * * *',
+  // R1/R2 de la campaña 3DS: altas «esperando al banco» sin nadie en la pantalla. Cada 10 min en los minutos 3, 13, 23…
+  // (lejos del :00 y del reconciliador de planes, que corre en */10) y en el segundo :34, libre entre :32 y :35.
+  altasAMedioPago: '34 3-59/10 * * * *',
 } as const

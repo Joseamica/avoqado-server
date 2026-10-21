@@ -77,6 +77,12 @@ export interface ItemSalesMetrics {
    * está en `promotions`) o si el producto nunca se vendió en promoción.
    */
   promotionName?: string | null
+  /**
+   * Familia (padre) ACTUAL de la variante: los reportes usan el nombre de hoy (spec de variantes §9); el renglón sigue
+   * siendo por variante con el nombre de la venta. `null` en un producto suelto o con `groupBy` distinto de `'none'`.
+   */
+  productGroupId?: string | null
+  productGroupName?: string | null
 }
 
 export interface TimePeriodItemMetrics {
@@ -201,6 +207,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
     INNER JOIN "Order" o ON o.id = oi."orderId"
     LEFT JOIN "Product" p ON p.id = oi."productId"
     LEFT JOIN "MenuCategory" mc ON mc.id = p."categoryId"
+    LEFT JOIN "ProductGroup" pg ON pg.id = p."productGroupId" AND pg."venueId" = o."venueId"
     ${paymentJoin}
     ${terminalJoin}
     WHERE o."venueId" = $1
@@ -224,6 +231,8 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       payment_method: string | null
       source: string | null
       terminal_id: string | null
+      product_group_id: string | null
+      product_group_name: string | null
       items_sold: number
       units_sold: number
       gross_sales: number
@@ -267,6 +276,8 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       productName: displayName,
       productSku: groupBy === 'none' ? row.product_sku : null,
       categoryName: groupBy === 'none' ? row.category_name : null,
+      productGroupId: row.product_group_id ?? null,
+      productGroupName: row.product_group_name ?? null,
       unit: 'c/u',
       itemsSold: Number(row.items_sold),
       unitsSold: Number(row.units_sold),
@@ -674,6 +685,8 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as payment_method,
           NULL as source,
           NULL as terminal_id,
+          NULL as product_group_id,
+          NULL as product_group_name,
         `,
         groupByFields: 'COALESCE(oi."categoryName", mc.name, \'Sin categorizar\')',
         orderByField: 'gross_sales',
@@ -690,6 +703,8 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as payment_method,
           NULL as source,
           NULL as terminal_id,
+          NULL as product_group_id,
+          NULL as product_group_name,
         `,
         groupByFields: "COALESCE(o.channel, 'POS')",
         orderByField: 'gross_sales',
@@ -708,6 +723,8 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           COALESCE(pay.method::text, 'OTHER') as payment_method,
           NULL as source,
           NULL as terminal_id,
+          NULL as product_group_id,
+          NULL as product_group_name,
         `,
         groupByFields: "COALESCE(pay.method::text, 'OTHER')",
         orderByField: 'gross_sales',
@@ -726,6 +743,8 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as payment_method,
           COALESCE(o.source::text, 'TPV') as source,
           NULL as terminal_id,
+          NULL as product_group_id,
+          NULL as product_group_name,
         `,
         groupByFields: "COALESCE(o.source::text, 'TPV')",
         orderByField: 'gross_sales',
@@ -745,6 +764,8 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as payment_method,
           NULL as source,
           o."terminalId" as terminal_id,
+          NULL as product_group_id,
+          NULL as product_group_name,
         `,
         groupByFields: 'o."terminalId", t.name',
         orderByField: 'gross_sales',
@@ -763,8 +784,11 @@ function buildGroupByClause(groupBy: GroupByOption): GroupByClause {
           NULL as payment_method,
           NULL as source,
           NULL as terminal_id,
+          p."productGroupId" as product_group_id,
+          pg.name as product_group_name,
         `,
-        groupByFields: 'oi."productId", oi."productName", oi."productSku", oi."categoryName", p.name, mc.name',
+        // p."productGroupId" and pg.name follow from oi."productId" (one Product, one ProductGroup), so they never split a row.
+        groupByFields: 'oi."productId", oi."productName", oi."productSku", oi."categoryName", p.name, mc.name, p."productGroupId", pg.name',
         orderByField: 'gross_sales',
       }
   }

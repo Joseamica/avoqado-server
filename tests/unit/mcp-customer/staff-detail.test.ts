@@ -14,8 +14,14 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { staffVenue: { findMany: (...a: unknown[]) => mockStaffVenueFind(...(a as [])) } },
+  default: {
+    staffVenue: { findMany: (...a: unknown[]) => mockStaffVenueFind(...(a as [])) },
+    venue: { findUnique: jest.fn().mockResolvedValue({ timezone: 'America/Mexico_City' }) },
+  },
 }))
+// RH fase 1a: staff_detail agrega los puestos vigentes; aquí no hay ninguno (la prueba de los puestos vive en rh.tools.test.ts).
+jest.mock('@/services/dashboard/rh/marcaBlanca', () => ({ pagoGenericoPermitido: jest.fn().mockResolvedValue(true) }))
+jest.mock('@/services/dashboard/rh/asignaciones.service', () => ({ asignacionesVigentes: jest.fn().mockResolvedValue(new Map()) }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1', 'v2'], perVenueAccess: new Map() } as McpScope
@@ -53,6 +59,7 @@ describe('staff_detail', () => {
     const out = parse(await call({ venueId: 'v1', name: 'juan' }))
 
     expect(out).toMatchObject({ found: true, staff: { name: 'Juan Pérez', active: true } })
+    expect(out.puestos).toEqual([])
     expect(out.venues).toEqual([
       { venue: 'Centro', role: 'MANAGER' },
       { venue: 'Norte', role: 'WAITER' },

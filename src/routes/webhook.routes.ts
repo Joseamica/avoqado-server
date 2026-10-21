@@ -479,4 +479,7 @@ router.get('/delivery/rappi/health', rappiWebhookHealthCheck)
 router.post('/delivery/didi', handleDidiWebhook)
 router.get('/delivery/didi/health', didiWebhookHealthCheck)
 
+// Conector de pases (TotalPass/Wellhub): NO vive aquí. `POST /aggregators/:provider/:token/:kind` se monta en app.ts
+// con su propio `express.raw({ type: '*/*' })`, antes de este router (su Content-Type no está documentado).
+
 export default router

@@ -1,10 +1,11 @@
 /**
  * Fase 2 de la unificación de caja: OXXO NO es efectivo del cajón.
  *
- * `mapStripeMethodToPaymentMethod('oxxo')` devuelve CASH porque así lo reporta el banco
- * — pero ese dinero lo cobró OXXO al cliente y lo depositó Stripe: NUNCA entró al cajón
- * del negocio. Sin `fundsFlow`, el fallback legacy (`method === 'CASH'`) lo contaba como
- * efectivo físico y el arqueo le exigía al cajero un dinero que jamás tuvo en la mano.
+ * El dinero de OXXO lo cobró OXXO al cliente y lo depositó Stripe: NUNCA entró al cajón del
+ * negocio. Sin `fundsFlow`, el fallback legacy (`method === 'CASH'`) lo contaba como efectivo
+ * físico y el arqueo le exigía al cajero un dinero que jamás tuvo en la mano. Desde el 19-oct,
+ * además, OXXO ya no se guarda como CASH sino como OTHER + SAT 01 (`metodoDeStripe`): los
+ * lectores que deciden por `method === 'CASH'` ignoran `fundsFlow`.
  *
  * La regla: TODO pago creado por un payment link lleva `fundsFlow` explícito, y para
  * cualquier método que venga de Stripe es AVOQADO_PROCESSED (lo liquida Stripe → nosotros),
@@ -14,8 +15,8 @@ import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '@/services/s
 import { fundsFlowForStripePayment, mapStripeMethodToPaymentMethod } from '@/services/dashboard/paymentLink.service'
 
 describe('fase 2 · OXXO por payment link NO es efectivo del cajón', () => {
-  it('🔴 OXXO se ledgea como CASH pero su fundsFlow es AVOQADO_PROCESSED', () => {
-    expect(mapStripeMethodToPaymentMethod('oxxo')).toBe('CASH')
+  it('🔴 OXXO ya no se ledgea como CASH, y su fundsFlow es AVOQADO_PROCESSED', () => {
+    expect(mapStripeMethodToPaymentMethod('oxxo')).toBe('OTHER')
     expect(fundsFlowForStripePayment('oxxo')).toBe('AVOQADO_PROCESSED')
   })
 

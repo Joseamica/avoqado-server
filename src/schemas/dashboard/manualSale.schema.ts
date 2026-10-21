@@ -12,7 +12,7 @@ import { z } from 'zod'
 /** One row from the sheet ("ID SIM", "ID Promotor", "Nombre de la Tienda", ...). */
 export const manualSaleRowSchema = z.object({
   /** "ID SIM" — the ICCID printed/encoded on the SIM. */
-  iccid: z.string().min(5, 'El ICCID es requerido'),
+  iccid: z.string({ required_error: 'Falta el ID SIM' }).min(5, 'El ICCID es requerido'),
   /** "ID Promotor" (employeeCode). May arrive empty → resolver falls back to promoterName. */
   promoterCode: z.string().optional(),
   /** Promoter's full name, used as a fallback when promoterCode is empty. */
@@ -20,11 +20,11 @@ export const manualSaleRowSchema = z.object({
   /** "ID Tienda" — numeric id embedded in the store name, e.g. "(898)". */
   storeId: z.string().optional(),
   /** "Nombre de la Tienda" */
-  storeName: z.string().min(1, 'El nombre de la tienda es requerido'),
+  storeName: z.string({ required_error: 'Falta el nombre de la tienda' }).min(1, 'Falta el nombre de la tienda'),
   /** "Fecha" — venue-local calendar day, AAAA-MM-DD. */
-  saleDate: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (usa AAAA-MM-DD)'),
+  saleDate: z.string({ required_error: 'Falta la fecha' }).regex(/^\d{4}-\d{2}-\d{2}$/, 'Fecha inválida (usa AAAA-MM-DD)'),
   /** "Tipo de Venta" — e.g. "Línea nueva" | "Portabilidad". */
-  saleType: z.string().min(1, 'El tipo de venta es requerido'),
+  saleType: z.string({ required_error: 'Falta el tipo de venta' }).min(1, 'Falta el tipo de venta'),
   /**
    * "Forma de Pago" — e.g. "Efectivo" | "Tarjeta" | "No aplica". Optional: the sheet
    * routinely leaves this blank for free SIM swaps, and a single blank cell must not
@@ -33,7 +33,7 @@ export const manualSaleRowSchema = z.object({
    */
   paymentForm: z.string().optional(),
   /** "Monto de Venta" — a number, a numeric string, or the literal "No aplica". */
-  amount: z.union([z.number(), z.string()]),
+  amount: z.union([z.number(), z.string()], { errorMap: () => ({ message: 'Falta el monto de venta' }) }),
   /** "Tipo de SIM" / "Categoría" — optional; falls back to the item's existing category. */
   simType: z.string().optional(),
   /**
@@ -51,9 +51,18 @@ export const manualSaleRowSchema = z.object({
   rejectionNote: z.string().optional(),
 })
 
-/** Bulk payload: the parsed sheet rows, plus an optional two-step confirm flag. */
+/**
+ * Bulk payload: the parsed sheet rows, plus an optional two-step confirm flag.
+ *
+ * Sólo FORMA del lote: cada fila se valida con `manualSaleRowSchema` dentro de
+ * `bulkManualSales`, y una fila inválida cae en `error` con su motivo. Validarlas aquí
+ * hacía que UNA celda vacía devolviera 400 y tumbara el archivo entero (Isaac, 8-oct-2026:
+ * 237 ventas rechazadas por un «Nombre de la Tienda» vacío).
+ */
 export const bulkManualSalesSchema = z.object({
-  rows: z.array(manualSaleRowSchema).min(1, 'Sube al menos una venta'),
+  rows: z
+    .array(z.record(z.string(), z.unknown(), { invalid_type_error: 'Cada venta debe ser una fila' }))
+    .min(1, 'Sube al menos una venta'),
   confirm: z.boolean().optional(),
 })
 

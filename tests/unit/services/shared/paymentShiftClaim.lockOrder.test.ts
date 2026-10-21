@@ -53,6 +53,8 @@ function fakeMoneyTransaction(name: string, locks: DeterministicRowLocks, trace:
       }),
     },
     activityLog: { create: jest.fn() },
+    // Una lectura simple (sin candado): ¿la orden es una cuenta de tarjetas de regalo? Aquí, mercancía.
+    orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
   }
 }
 
@@ -70,6 +72,7 @@ describe('paymentShiftClaim — orden global Order antes de Shift', () => {
           amountPesos: new Prisma.Decimal(50),
           tipPesos: new Prisma.Decimal(0),
           incrementTotalOrders: name === 'settlement',
+          orderId: 'order-1',
         })
       } finally {
         locks.release(name)

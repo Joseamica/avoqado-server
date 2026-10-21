@@ -15,6 +15,12 @@ import { posSyncStaffService } from '@/services/pos-sync/posSyncStaff.service'
 jest.mock('@/services/pos-sync/posSyncStaff.service', () => ({
   posSyncStaffService: { syncPosStaff: jest.fn() },
 }))
+// Plan 6b (PF-M4): la guardia del IVA por producto, de paso; aquí se prueba el escritor. La guardia la prueban
+// tests/unit/communication/rabbitmq/dispacher.ivaEncendido.test.ts y tests/integration/pos-sync/posSyncWriters.atomic.integration.test.ts.
+jest.mock('@/services/pos-sync/exclusionIva', () => ({
+  exigirIvaApagadoTx: jest.fn(),
+  conIvaApagado: (_venueId: string, escribir: (tx: unknown) => unknown) => escribir(jest.requireMock('@/utils/prismaClient').default),
+}))
 
 const VENUE = 'venue-pos-lifecycle'
 const TURNO = 'turno-pos-lifecycle'
@@ -182,9 +188,10 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
     const closed = shift({ status: 'CLOSED', endTime: CLAIMED_AT, updatedAt: CLAIMED_AT })
     prismaMock.shift.findUnique.mockResolvedValueOnce(observed).mockResolvedValueOnce(observed).mockResolvedValueOnce(closed)
     prismaMock.payment.findMany.mockResolvedValue([
-      payment({ id: 'exacto', amount: new Decimal('100.10'), tipAmount: new Decimal('10.05') }),
+      payment({ id: 'exacto', orderId: 'orden-1', amount: new Decimal('100.10'), tipAmount: new Decimal('10.05') }),
       payment({
         id: 'huerfano-cutoff',
+        orderId: 'orden-2',
         amount: new Decimal('80.20'),
         tipAmount: new Decimal('0.05'),
         method: 'OTHER',
@@ -192,8 +199,16 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
         tenderTypeId: 'vale-cash',
         tenderCountsAsCash: true,
       }),
-      payment({ id: 'refund', amount: new Decimal('-20.00'), tipAmount: new Decimal('0.00'), method: 'OTHER' }),
+      payment({
+        id: 'refund',
+        orderId: 'orden-1',
+        type: 'REFUND',
+        amount: new Decimal('-20.00'),
+        tipAmount: new Decimal('0.00'),
+        method: 'OTHER',
+      }),
     ])
+    // Tres órdenes ligadas (una cancelada, por ejemplo) pero sólo DOS cobradas: manda lo cobrado.
     prismaMock.order.count.mockResolvedValue(3)
     prismaMock.shift.updateMany.mockResolvedValueOnce({ count: 1 }).mockResolvedValueOnce({ count: 1 })
 
@@ -205,7 +220,6 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
 
     expectCloseClaim(prismaMock.shift.updateMany.mock.calls[0][0])
     expect(prismaMock.shift.updateMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.payment.findMany.mock.invocationCallOrder[0])
-    expect(prismaMock.shift.updateMany.mock.invocationCallOrder[0]).toBeLessThan(prismaMock.order.count.mock.invocationCallOrder[0])
 
     const paymentRead = prismaMock.payment.findMany.mock.calls[0][0]
     expect(paymentRead).toEqual({
@@ -229,12 +243,17 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
         fundsFlow: true,
         tenderTypeId: true,
         tenderCountsAsCash: true,
+        // Tarjetas de regalo (R3, B5): la marca de cuenta de tarjetas, para no sumarla a `totalSales` ni a las órdenes del cierre.
+        order: { select: { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } },
+        orderId: true,
+        type: true,
       },
       orderBy: { id: 'asc' },
       take: 500,
     })
     expect(prismaMock.order.aggregate).not.toHaveBeenCalled()
-    expect(prismaMock.order.count).toHaveBeenCalledWith({ where: { shiftId: TURNO } })
+    // Las órdenes del turno son las COBRADAS (misma regla que el cierre de la TPV), no `Order.count`.
+    expect(prismaMock.order.count).not.toHaveBeenCalled()
 
     const finalize = prismaMock.shift.updateMany.mock.calls[1][0]
     expect(finalize.where).toEqual({ id: TURNO, venueId: VENUE, status: 'CLOSING', endTime: null, updatedAt: CLAIMED_AT })
@@ -245,7 +264,7 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
     expect((finalize.data.totalCashPayments as Decimal).toFixed(2)).toBe('100.10')
     expect((finalize.data.totalCashTips as Decimal).toFixed(2)).toBe('10.05')
     expect((finalize.data.totalOtherPayments as Decimal).toFixed(2)).toBe('60.20')
-    expect(finalize.data.totalOrders).toBe(3)
+    expect(finalize.data.totalOrders).toBe(2)
     expect(finalize.data).not.toHaveProperty('totalDrawerExtra')
   })
 

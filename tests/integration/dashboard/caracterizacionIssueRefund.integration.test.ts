@@ -6,8 +6,10 @@
  * por el núcleo compartido, cae aquí. No es un deseo: si algún valor parece raro, es lo que el
  * código hacía, y se cambia con su propia decisión, nunca "de paso".
  *
- * Única diferencia admitida: `processorData.provenance` (llave nueva, aditiva, del spec del KDS
- * de Uber §3.1). Por eso las comparaciones de `processorData` la omiten.
+ * Diferencias admitidas: `processorData.provenance` (llave nueva, aditiva, del spec del KDS
+ * de Uber §3.1; las comparaciones de `processorData` la omiten) y `processorData.originalMethod`
+ * (spec 2026-09-30: el alcance fiscal de un reembolso sigue a su venta; se escribe SIEMPRE y
+ * por eso va declarada en lo esperado, para que la prueba demuestre que se escribe).
  */
 import prisma from '@/utils/prismaClient'
 import { setupTestData, teardownTestData } from '@tests/helpers/test-data-setup'
@@ -76,6 +78,7 @@ describe('CARACTERIZACION issueRefund (dashboard) — la fila exacta de hoy', ()
     expect(fila.processor).toBe('dashboard')
     expect(sinProcedencia(fila.processorData)).toEqual({
       originalPaymentId: pago.id,
+      originalMethod: 'CASH',
       refundReason: 'RETURNED_GOODS',
       note: null,
       amountCents: 6000,
@@ -136,6 +139,7 @@ describe('CARACTERIZACION issueRefund (dashboard) — la fila exacta de hoy', ()
     expect(fila.idempotencyKey).toBeNull()
     expect(sinProcedencia(fila.processorData)).toEqual({
       originalPaymentId: pago.id,
+      originalMethod: 'OTHER',
       refundReason: 'OTHER',
       note: null,
       amountCents: 5000,

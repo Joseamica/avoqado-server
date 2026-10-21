@@ -531,8 +531,8 @@ describe('llave de semana ISO — la calcula Postgres, no JS', () => {
   /**
    * El bucketing por semana se hace ahora con `to_char(..., 'IYYY-"W"IW')`.
    * La equivalencia real contra Postgres se prueba en
-   * `tests/api-tests/sale-verification.org.week-parity.api.test.ts` (13 instantes de
-   * frontera, bajo las dos zonas de host). Aquí sólo se blinda el formato: `IYYY` es lo
+   * `tests/integration/dashboard/sale-verification.org.week-parity.integration.test.ts`
+   * (26 casos, bajo las dos zonas de sesión de Postgres). Aquí sólo se blinda el formato: `IYYY` es lo
    * que hace que el 3-ene-2027 caiga en `2026-W53` y no en `2027-W53`.
    */
   it('usa IYYY (año ISO), no YYYY (calendario)', async () => {

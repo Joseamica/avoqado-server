@@ -1,7 +1,9 @@
-import { Order, Payment, Staff, MerchantAccount, PaymentProvider } from '@prisma/client'
+import { Order, Payment, MerchantAccount, PaymentProvider } from '@prisma/client'
+import { StaffPublico } from '../../utils/staffPublicSelect'
 
 export type PaymentWithRelations = Payment & {
-  processedBy: Staff | null
+  // Nunca `Staff` entero: el tipo prometía que la respuesta llevaba el hash de la contraseña (30-sep).
+  processedBy: StaffPublico | null
   order: Order | null
   merchantAccount:
     | (MerchantAccount & {

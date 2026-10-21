@@ -19,24 +19,25 @@
 
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
-import { StampRewardType, LoyaltyTransactionType } from '@prisma/client'
+import { StampRewardType, LoyaltyTransactionType, Prisma, StampEventType } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from './activity-log.service'
-import { grantStamp } from '../wallet/stampLedger.service'
+import { grantStamp, type GrantStampResult } from '../wallet/stampLedger.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
+import { leerSiEsCuentaDeTarjetas } from '../giftCards/giftCardMarks'
 
 /**
  * Get or create loyalty configuration for a venue
  * Creates default config if none exists
  */
-export async function getOrCreateLoyaltyConfig(venueId: string) {
-  let config = await prisma.loyaltyConfig.findUnique({
+export async function getOrCreateLoyaltyConfig(venueId: string, db: Pick<Prisma.TransactionClient, 'loyaltyConfig'> = prisma) {
+  let config = await db.loyaltyConfig.findUnique({
     where: { venueId },
   })
 
   // Create default config if none exists
   if (!config) {
-    config = await prisma.loyaltyConfig.create({
+    config = await db.loyaltyConfig.create({
       data: {
         venueId,
         pointsPerDollar: 1, // 1 point per $1 spent
@@ -257,6 +258,28 @@ export async function canRedeemPoints(venueId: string, customerId: string, point
 }
 
 /**
+ * 🔴 Cuarta ola (recheck 3 de Codex + re-revisión, 15-oct-2026): presupuesto EXPLÍCITO de la transacción de los puntos.
+ *
+ * Antes la escritura era un `$transaction([...])` por lotes: sin tope propio, sólo esperaba una conexión del pool
+ * (`pool_timeout`, 10 s por defecto; ver `utils/prismaClient.ts`). Al volverse interactiva (H4, tercera ola: el candado de la
+ * venta) heredaba los tiempos por defecto de Prisma —2 s para conseguir conexión, 5 s para TODO, esperas de candado
+ * incluidas—, y un vencimiento (P2028) revertía el EARN y el saldo. Con un solo cliente basta una fila de saldo bloqueada por
+ * otra operación. Por eso:
+ *   · `maxWait` 10 s: lo mismo que el lote esperaba por una conexión (`pool_timeout`).
+ *   · `timeout` 15 s: el mismo presupuesto que el repo da a las transacciones que esperan un candado
+ *     (`ORDER_LOCK_WAIT_BUDGET.timeout`, `paymentShiftClaim.ts`). El trabajo de adentro son cuatro lecturas por índice y dos
+ *     escrituras; lo que puede tardar es la espera del candado de la venta (otro intento de la MISMA venta) o de la fila del
+ *     cliente (otro movimiento de su saldo), y ambas son cortas.
+ * Lo usa también la transacción de `grantStamp`, que espera el mismo candado de la venta.
+ */
+export const PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA = { maxWait: 10_000, timeout: 15_000 } as const
+
+/** Reintentos EXTRA de la escritura de puntos, sólo si la transacción se venció (P2028). Idempotente: ver `earnPoints`. */
+const REINTENTOS_POR_VENCIMIENTO = 2
+
+const seVencioLaTransaccion = (error: unknown): boolean => error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028'
+
+/**
  * Award loyalty points to customer for a purchase
  * Called automatically when order payment is completed
  *
@@ -270,7 +293,7 @@ export async function earnPoints(
   amount: number,
   orderId: string,
   staffId?: string,
-): Promise<{ pointsEarned: number; newBalance: number }> {
+): Promise<ResultadoDeEarnPoints> {
   // Paid entitlement and venue activation are BOTH required. Automatic award
   // paths must not create an active config merely because a payment happened.
   if (!(await venueHasFeatureAccess(venueId, 'LOYALTY_PROGRAM'))) {
@@ -291,6 +314,10 @@ export async function earnPoints(
     return { pointsEarned: 0, newBalance: 0 }
   }
 
+  // R1 (tarjetas de regalo): comprar una tarjeta no da puntos ni sello. Cubre a quien llama directo (pago manual, ligas). Va después de
+  // las salidas baratas: sólo los negocios con lealtad activa pagan esta lectura.
+  if (await leerSiEsCuentaDeTarjetas(prisma, orderId)) return { pointsEarned: 0, newBalance: 0 }
+
   // ── SELLOS (Plan B) ────────────────────────────────────────────────────────
   //
   // 🔴 Va AQUÍ, antes del chequeo de idempotencia de puntos y del `return` de
@@ -309,8 +336,9 @@ export async function earnPoints(
   // Se le pasa la config que ya tenemos: esta función corre en CADA cobro de CADA
   // negocio, y releerla serían miles de consultas diarias que no aportan nada.
   let deferredStampError: unknown
+  let sello: GrantStampResult | undefined
   try {
-    await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
+    sello = await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
   } catch (stampError: any) {
     deferredStampError = stampError
     logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
@@ -321,13 +349,81 @@ export async function earnPoints(
     })
   }
 
+  // 🔴 R4-1 (ronda 4 post-QA de sellos tardíos; Codex recheck-8, P2): lo que ESTA llamada ya otorgó se conserva durante TODA
+  // la ejecución y viaja colgado de CUALQUIER error posterior (`otorgadoAntesDelFallo`): las lecturas que siguen al sello (el
+  // movimiento de puntos, el saldo, el cálculo que relee la config), la escritura de los puntos y la recuperación de un P2002.
+  // Antes sólo dos caminos lo colgaban; si tronaba otra lectura después de sellar, el sello quedaba dado y la auditoría de la
+  // liga tardía no se enteraba (cero filas en una re-liga; `otorgo: false` en una liga nueva).
+  const otorgadoHastaAhora = { sello: sello?.granted === true, puntos: false }
+  try {
+    return await acreditarPuntosTrasElSello({
+      venueId,
+      customerId,
+      amount,
+      orderId,
+      staffId,
+      sello,
+      deferredStampError,
+      otorgadoHastaAhora,
+    })
+  } catch (error) {
+    throw conLoOtorgado(error, otorgadoHastaAhora)
+  }
+}
+
+export interface ResultadoDeEarnPoints {
+  pointsEarned: number
+  newBalance: number
+  /**
+   * 🔴 H4, tercera ola: OTRO cliente ya recibió los puntos o el sello de esta venta (dos intentos validaron a clientes
+   * distintos). No se acreditó nada a éste. Sólo aparece en ese caso; los cobros de siempre no lo ven nunca.
+   */
+  otroCliente?: true
+  /**
+   * F2 (ronda 1 post-QA de sellos tardíos, 15-oct-2026): lo que ESTA llamada creó — el sello (`grantStamp` lo otorgó) y/o el
+   * EARN de puntos. Sólo aparece si creó algo; un reintento idempotente no lo trae. Lo lee la auditoría de una re-liga
+   * (`awardLoyaltyForLateCustomer`): audita sólo la llamada que de verdad otorgó.
+   */
+  otorgado?: { sello: boolean; puntos: boolean }
+}
+
+/**
+ * La segunda mitad de `earnPoints`: todo lo que va DESPUÉS del sello (los puntos). Vive aparte sólo para que `earnPoints` la
+ * envuelva con lo otorgado (R4-1); no se llama desde ningún otro lado.
+ */
+async function acreditarPuntosTrasElSello(ctx: {
+  venueId: string
+  customerId: string
+  amount: number
+  orderId: string
+  staffId?: string
+  sello: GrantStampResult | undefined
+  deferredStampError: unknown
+  /** Se va llenando: el envoltorio de `earnPoints` lo cuelga de cualquier error que salga de aquí. */
+  otorgadoHastaAhora: { sello: boolean; puntos: boolean }
+}): Promise<ResultadoDeEarnPoints> {
+  const { venueId, customerId, amount, orderId, staffId, sello, deferredStampError, otorgadoHastaAhora } = ctx
+
   // The payment callers already isolate loyalty failures from the approved
   // charge. We therefore persist points first, then surface a stamp failure so
   // the durable paid-order reconciler can retry the missing stamp. Swallowing it
   // here would mark the order processed forever with a visibly missing reward.
-  const finish = <T>(result: T): T => {
+  const finish = <T extends object>(result: T, puntosCreados = false): T => {
+    // R3-1 (ronda 3) / R4-1: si ESTA llamada sí escribió los puntos, el error del sello lo dice (lo cuelga el envoltorio de
+    // `earnPoints` con `otorgadoHastaAhora`): es un hecho que la auditoría de una liga tardía necesita aunque termine en error.
     if (deferredStampError) throw deferredStampError
-    return result
+    const selloCreado = sello?.granted === true
+    // F2: sólo cuando ESTA llamada creó algo; los resultados de siempre no cambian de forma.
+    return selloCreado || puntosCreados ? { ...result, otorgado: { sello: selloCreado, puntos: puntosCreados } } : result
+  }
+  const saldoActual = async (): Promise<number> =>
+    (await prisma.customer.findUnique({ where: { id: customerId }, select: { loyaltyPoints: true } }))?.loyaltyPoints ?? 0
+
+  // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): el sellado ya vio, con el candado de la VENTA, que OTRO cliente
+  // recibió los puntos de esta venta. A éste no se le da nada.
+  if (sello?.reason === 'OTHER_CUSTOMER') {
+    logger.warn('⚠️ [LOYALTY] Another customer already earned this order: no points', { venueId, orderId, customerId })
+    return finish({ pointsEarned: 0, newBalance: await saldoActual(), otroCliente: true as const })
   }
 
   // 🔒 IDEMPOTENCY CHECK: Prevent double-earning on payment retries
@@ -358,15 +454,43 @@ export async function earnPoints(
   const pointsEarned = await calculatePointsForAmount(venueId, amount)
 
   if (pointsEarned === 0) {
+    // H4, tercera ola: negocio de sólo sellos. «Ya sellada» con el sello de OTRO cliente quiere decir que la venta es de él:
+    // quien llama no le cuenta la visita a éste. (Sólo se pregunta cuando el sellado dijo «ya sellada».)
+    if (sello?.reason === 'ALREADY_STAMPED') {
+      const selloDeLaVenta = await prisma.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN },
+        select: { stampCard: { select: { customerId: true } } },
+      })
+      if (selloDeLaVenta && selloDeLaVenta.stampCard.customerId !== customerId) {
+        return finish({ pointsEarned: 0, newBalance: 0, otroCliente: true as const })
+      }
+    }
     return finish({ pointsEarned: 0, newBalance: 0 })
   }
 
   // 🔒 RACE CONDITION FIX: Database has partial unique index to prevent duplicates
   // If concurrent calls occur, the DB will reject duplicates with P2002
   try {
-    // Create transaction and update customer balance in a transaction
-    const [_transaction, customer] = await prisma.$transaction([
-      prisma.loyaltyTransaction.create({
+    // 🔴 H4, tercera ola (recheck 2 de Codex, 15-oct-2026): la escritura de los puntos y su comprobación van en UNA transacción
+    // con el candado de la VENTA como PRIMERA sentencia (el mismo que toma `grantStamp` después del suyo). Dos intentos que
+    // validaron a clientes distintos se forman aquí: el segundo ve los puntos o el sello del primero y no acredita. La
+    // deduplicación de antes era por cliente + venta, así que no excluía a otro cliente.
+    const escribirPuntos = async (tx: Prisma.TransactionClient) => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+      const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
+        where: { orderId, type: LoyaltyTransactionType.EARN, customerId: { not: customerId }, customer: { venueId } },
+        select: { customerId: true },
+      })
+      if (puntosDeOtro) return { tipo: 'OTRO_CLIENTE' as const }
+      const selloDeOtro = await tx.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN, stampCard: { customerId: { not: customerId } } },
+        select: { id: true },
+      })
+      if (selloDeOtro) return { tipo: 'OTRO_CLIENTE' as const }
+      // La otra llamada del MISMO cliente pudo escribir mientras ésta esperaba el candado: idempotente.
+      const propio = await tx.loyaltyTransaction.findFirst({ where: { customerId, orderId, type: LoyaltyTransactionType.EARN } })
+      if (propio) return { tipo: 'YA_ESTABA' as const, puntos: propio.points }
+      await tx.loyaltyTransaction.create({
         data: {
           customerId,
           type: LoyaltyTransactionType.EARN,
@@ -375,8 +499,8 @@ export async function earnPoints(
           reason: `Earned ${pointsEarned} points for purchase of $${amount.toFixed(2)}`,
           createdById: staffId,
         },
-      }),
-      prisma.customer.update({
+      })
+      const customer = await tx.customer.update({
         where: { id: customerId },
         data: {
           loyaltyPoints: { increment: pointsEarned },
@@ -384,14 +508,45 @@ export async function earnPoints(
         select: {
           loyaltyPoints: true,
         },
-      }),
-    ])
+      })
+      return { tipo: 'ACREDITADO' as const, saldo: customer.loyaltyPoints }
+    }
 
-    return finish({
-      pointsEarned,
-      newBalance: customer.loyaltyPoints,
-    })
+    // 🔴 Cuarta ola: presupuesto explícito y, si aun así la transacción se vence (P2028), un reintento ACOTADO. Es
+    // idempotente: cada intento vuelve a tomar el candado de la venta y relee el EARN de este cliente antes de escribir (si
+    // el intento vencido alcanzó a escribir, el siguiente lo encuentra), y el índice único (cliente, venta) respalda.
+    const escribirConReintento = async () => {
+      for (let intento = 0; ; intento++) {
+        try {
+          return await prisma.$transaction(escribirPuntos, PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA)
+        } catch (error) {
+          if (!seVencioLaTransaccion(error) || intento >= REINTENTOS_POR_VENCIMIENTO) throw error
+          logger.warn('⚠️ [LOYALTY] Points transaction expired (P2028); retrying', { venueId, orderId, customerId, intento: intento + 1 })
+          await new Promise(resolve => setTimeout(resolve, 100 * 3 ** intento)) // 100 ms, 300 ms
+        }
+      }
+    }
+    const escrito = await escribirConReintento()
+    // R4-1: los puntos de ESTA llamada ya quedaron (commit hecho): es un hecho desde aquí, pase lo que pase después.
+    if (escrito.tipo === 'ACREDITADO') otorgadoHastaAhora.puntos = true
+
+    if (escrito.tipo === 'OTRO_CLIENTE') {
+      logger.warn('⚠️ [LOYALTY] Another customer already earned this order: no points', { venueId, orderId, customerId })
+      return finish({ pointsEarned: 0, newBalance: await saldoActual(), otroCliente: true as const })
+    }
+    if (escrito.tipo === 'YA_ESTABA') return finish({ pointsEarned: escrito.puntos, newBalance: await saldoActual() })
+    return finish(
+      {
+        pointsEarned,
+        newBalance: escrito.saldo,
+      },
+      true,
+    )
   } catch (error: any) {
+    // R4-1: el error DIFERIDO del sellado (lo relanza `finish` después de escribir los puntos) no es una carrera de los puntos,
+    // aunque sea un P2002: sube tal cual, con lo otorgado colgado por el envoltorio. Antes entraba a la recuperación de abajo,
+    // que releía para nada y, si esa relectura tronaba, perdía el hecho «otorgó puntos».
+    if (deferredStampError !== undefined && error === deferredStampError) throw error
     // Handle unique constraint violation from partial unique index
     // This happens when concurrent calls race past the idempotency check
     if (error.code === 'P2002') {
@@ -413,8 +568,29 @@ export async function earnPoints(
         newBalance: customer?.loyaltyPoints ?? 0,
       })
     }
+    // R3-1 / R4-1: el sello de esta llamada ya quedó (va antes que los puntos) aunque los puntos fallen: el envoltorio de
+    // `earnPoints` lo cuelga del error.
     throw error
   }
+}
+
+/**
+ * R3-1 (ronda 3 post-QA de sellos tardíos, 15-oct-2026) + R4-1 (ronda 4): cuelga del error el hecho «esta llamada otorgó X
+ * antes de fallar» (`otorgadoAntesDelFallo`), sin cambiar el error (mismo objeto, mismo mensaje). Si ya traía uno, los SUMA
+ * (un hecho verdadero nunca se borra). Sin nada otorgado, no toca nada. Un error que no es objeto (un `throw 'texto'`) se
+ * envuelve en un `Error` con su mismo texto para no perder el hecho.
+ */
+function conLoOtorgado(error: unknown, otorgado: { sello: boolean; puntos: boolean }): unknown {
+  if (!otorgado.sello && !otorgado.puntos) return error
+  if (!error || typeof error !== 'object') return Object.assign(new Error(String(error)), { otorgadoAntesDelFallo: { ...otorgado } })
+  const previo = (error as { otorgadoAntesDelFallo?: { sello?: unknown; puntos?: unknown } }).otorgadoAntesDelFallo
+  Object.assign(error, {
+    otorgadoAntesDelFallo: {
+      sello: otorgado.sello || previo?.sello === true,
+      puntos: otorgado.puntos || previo?.puntos === true,
+    },
+  })
+  return error
 }
 
 /**
