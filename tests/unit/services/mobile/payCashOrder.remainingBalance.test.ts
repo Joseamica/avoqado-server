@@ -584,6 +584,18 @@ describe('payCashOrder — saldo autoritativo en la respuesta', () => {
     expect(Number.isInteger(retry.cashRetainedCents)).toBe(true)
   })
 
+  it('overpayment: cashRetainedCents excludes the change (live call and idempotent retry)', async () => {
+    // Cuenta $100, el cliente da $150: se queda $100 en el cajón y $50 son cambio.
+    installFakeStore()
+
+    const first = await payCashOrder('venue-1', 'order-1', { amount: 15000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-sobrepago' })
+    expect(first.cashRetainedCents).toBe(10000)
+    expect(first.changeCents).toBe(5000)
+
+    const retry = await payCashOrder('venue-1', 'order-1', { amount: 15000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-sobrepago' })
+    expect(retry.cashRetainedCents).toBe(10000)
+  })
+
   // ── 8. Aislamiento de tenant ─────────────────────────────────────────────────
 
   it('🔴 TENANT: TODA lectura de la orden va filtrada por venueId', async () => {
