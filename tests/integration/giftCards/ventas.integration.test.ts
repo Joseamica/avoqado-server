@@ -728,4 +728,22 @@ describe('🔴 1b S1 · Q37/Q44: el reintento de una venta compara contra la hue
     // Y una venta NUEVA con ese teléfono sí se rechaza.
     await expect(vender(llave('ceros-nueva'), reintento)).rejects.toMatchObject({ code: 'GIFT_CARD_PHONE_INVALID', statusCode: 400 })
   })
+
+  it('Q44: una venta de la 1a con un teléfono «00…» que al convertirse queda con menos de 10 dígitos se repite (nunca 400)', async () => {
+    // «00376312345» (Andorra con salida internacional): la 1a lo aceptó (11 dígitos); convertido es «+376312345», 9 dígitos.
+    const k = llave('doble-cero')
+    const primera = await vender(k, {
+      purchaserName: 'Ana',
+      sobres: [{ amount: 700, deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' }],
+    })
+    await comoLaUnoA(
+      primera.sobres.map(s => s.id),
+      { recipientPhone: '00376312345' },
+    )
+    const reintento = {
+      purchaserName: 'Ana',
+      sobres: [{ amount: 700, deliveryChannel: 'WHATSAPP' as const, recipientPhone: '00376312345' }],
+    }
+    await expect(vender(k, reintento)).resolves.toMatchObject({ replay: true, orderId: primera.orderId })
+  })
 })

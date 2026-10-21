@@ -163,13 +163,14 @@ function normalizarPedido(input: CreateGiftCardOrderInput): {
     // Q25: se guarda canónico (así se compara en phone/*). NUNCA lanza aquí: lo usa también el reintento de una venta de la 1a.
     const recipientPhone = telefonoEscrito && (telefonoDeTarjeta(telefonoEscrito) ?? telefonoEscrito)
     const recipientEmail = texto(s.recipientEmail, 160, `El correo de la tarjeta ${n}`)?.toLowerCase() ?? null
-    if (s.deliveryChannel === 'WHATSAPP' && (!recipientPhone || !TELEFONO.test(recipientPhone))) {
+    // La regex de la 1a se aplica a lo ESCRITO, no al convertido: un «00…» de la 1a puede quedar con menos de 10 dígitos (Q44).
+    if (s.deliveryChannel === 'WHATSAPP' && (!telefonoEscrito || !TELEFONO.test(telefonoEscrito))) {
       throw new BadRequestError(`La tarjeta ${n} se entrega por WhatsApp: captura un teléfono de 10 dígitos.`)
     }
     if (s.deliveryChannel === 'EMAIL' && (!recipientEmail || !CORREO.test(recipientEmail))) {
       throw new BadRequestError(`La tarjeta ${n} se entrega por correo: captura un correo válido.`)
     }
-    if (recipientPhone && !TELEFONO.test(recipientPhone)) throw new BadRequestError(`El teléfono de la tarjeta ${n} no es válido.`)
+    if (telefonoEscrito && !TELEFONO.test(telefonoEscrito)) throw new BadRequestError(`El teléfono de la tarjeta ${n} no es válido.`)
     if (recipientEmail && !CORREO.test(recipientEmail)) throw new BadRequestError(`El correo de la tarjeta ${n} no es válido.`)
     return {
       monto: new Prisma.Decimal(s.amount),
