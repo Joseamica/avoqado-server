@@ -56,7 +56,12 @@ const D = (n: number) => new Prisma.Decimal(n)
 const EARN = (customerId: string) => ({ type: 'EARN', stampCard: { customerId } })
 const cron = () => ({ start: jest.fn(), stop: jest.fn() })
 /** El sello EARN de la venta con su cartilla (lo que lee `cartillaDeLaVenta`). */
-const earnDeLaVenta = (c: { stampsEarned: number; stampsRequired: number; completa?: boolean; premio?: { rewardLabel: string; status: string } }) => ({
+const earnDeLaVenta = (c: {
+  stampsEarned: number
+  stampsRequired: number
+  completa?: boolean
+  premio?: { rewardLabel: string; status: string }
+}) => ({
   stampCard: {
     stampsEarned: c.stampsEarned,
     stampsRequired: c.stampsRequired,
@@ -352,7 +357,12 @@ describe('awardLoyaltyForLateCustomer', () => {
   it('su cartilla de 7 está llena aunque el negocio ya pide 10 y ya renombró el premio: dice 7 de 7 y el premio GANADO', async () => {
     cardMock.mockResolvedValue({ stampsEarned: 0, stampsRequired: 10, rewardLabel: '10 % de descuento', pendingRewards: 1 })
     prismaMock.stampEvent.findFirst.mockResolvedValueOnce(
-      earnDeLaVenta({ stampsEarned: 7, stampsRequired: 7, completa: true, premio: { rewardLabel: 'Café gratis', status: 'PENDING' } }) as any,
+      earnDeLaVenta({
+        stampsEarned: 7,
+        stampsRequired: 7,
+        completa: true,
+        premio: { rewardLabel: 'Café gratis', status: 'PENDING' },
+      }) as any,
     )
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
     expect(r?.saleCard).toEqual({ stampsEarned: 7, stampsRequired: 7, completed: true, rewardLabel: 'Café gratis', rewardPending: true })

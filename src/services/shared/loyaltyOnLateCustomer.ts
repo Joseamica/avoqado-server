@@ -511,7 +511,13 @@ async function cartillaDeLaVenta(venueId: string, customerId: string, orderId: s
   if (!earn) return null
   const card = earn.stampCard
   if (!card.completedAt) {
-    return { stampsEarned: card.stampsEarned, stampsRequired: card.stampsRequired, completed: false, rewardLabel: premioDeHoy, rewardPending: false }
+    return {
+      stampsEarned: card.stampsEarned,
+      stampsRequired: card.stampsRequired,
+      completed: false,
+      rewardLabel: premioDeHoy,
+      rewardPending: false,
+    }
   }
   // Reabierta por una devolución después de cobrar el premio (Codex r4 #1): conserva `completedAt` con menos sellos. No se
   // dibuja «7 de 7» con 6 ni se promete llenarla otra vez: sin tarjetita, la app deja el renglón de texto.
