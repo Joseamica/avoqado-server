@@ -7,7 +7,7 @@
  * (`crearNegocioDePrueba`). 🔴 Nunca `setupTestData()`: su `teardownTestData()` borra por NOMBRE («Test Restaurant») en TODA la base,
  * y un sobre que se queda (FK `GiftCard_venueId_fkey`) le revienta la limpieza a cualquier otra suite que la use (medido en B1).
  */
-import { Prisma, type Payment } from '@prisma/client'
+import { Prisma, type GiftCardDeliveryChannel, type Payment } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
@@ -71,8 +71,23 @@ export async function limpiarNegocioDePrueba(venueId: string): Promise<void> {
   await prisma.order.deleteMany({ where: { venueId } })
 }
 
+/** 1b S3: a quién y por dónde se entrega cada sobre. Sin esto, «se entregó en mano» (HANDED_TO_BUYER), como en la 1a. */
+export interface EntregaSembrada {
+  deliveryChannel: GiftCardDeliveryChannel
+  recipientPhone?: string
+  recipientEmail?: string
+  recipientName?: string
+  purchaserName?: string
+}
+
 /** Un sobre PENDING por monto, cada uno con su renglón en la cuenta (R11: productId nulo, NO_OBJETO, cantidad 1). */
-async function crearSobresPendientes(p: { venueId: string; organizationId: string; orderId: string; montos: number[] }): Promise<string[]> {
+async function crearSobresPendientes(p: {
+  venueId: string
+  organizationId: string
+  orderId: string
+  montos: number[]
+  entrega?: EntregaSembrada
+}): Promise<string[]> {
   const giftCardIds: string[] = []
   for (const monto of p.montos) {
     const codigo = generateGiftCardCode()
@@ -89,6 +104,7 @@ async function crearSobresPendientes(p: { venueId: string; organizationId: strin
         status: 'PENDING',
         termsVersion: '2026-10-14',
         deliveryChannel: 'HANDED_TO_BUYER',
+        ...p.entrega,
       },
     })
     await prisma.orderItem.create({
@@ -127,6 +143,8 @@ export async function sembrarVentaDeTarjetas(p: {
   cobros?: number[]
   /** Fecha del cobro (regla del mismo día). Default: ahora. */
   cobradaEn?: Date
+  /** 1b S3: el canal y el destino de la entrega de cada sobre. */
+  entrega?: EntregaSembrada
 }): Promise<VentaDeTarjetasSembrada> {
   const total = p.montos.reduce((s, m) => s + m, 0)
   const cuando = p.cobradaEn ?? new Date()
@@ -155,6 +173,7 @@ export async function sembrarVentaDeTarjetas(p: {
     organizationId: p.organizationId,
     orderId: order.id,
     montos: p.montos,
+    entrega: p.entrega,
   })
   const pagos: Payment[] = []
   for (const monto of p.cobros ?? [total]) {

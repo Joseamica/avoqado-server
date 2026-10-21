@@ -73,6 +73,9 @@ export const DATABASE_JOB_SCHEDULES = {
   // saldo sin canje, reversos faltantes, cancelaciones atoradas, dinero sin sobres vivos y cuentas en $0 abiertas. Diario a las
   // 03:37:27 (CDMX): segundo :27 libre, lejos de deliveryConnectIntentCleanup (04:17:31) y shopifyReconcile (06:14:45).
   giftCardReconciliation: '27 37 3 * * *',
+  // Tarjetas de regalo 1b (S3): la entrega por WhatsApp y correo. Cada minuto en el segundo :24, libre entre el sweeper de gcal
+  // (:23) y el de salida de gcal (:26). Su entrada es un EXISTS barato por índice (deliveryStatus, deliveryNextAttemptAt).
+  giftCardDelivery: '24 * * * * *',
   // R1/R2 de la campaña 3DS: altas «esperando al banco» sin nadie en la pantalla. Cada 10 min en los minutos 3, 13, 23…
   // (lejos del :00 y del reconciliador de planes, que corre en */10) y en el segundo :34, libre entre :32 y :35.
   altasAMedioPago: '34 3-59/10 * * * *',

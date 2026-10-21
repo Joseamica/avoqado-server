@@ -62,6 +62,10 @@ calla.**
    puede vivir en la misma base cuya caída la produjo. Mientras sea memoria del proceso, además, un reinicio la pierde (residual
    declarado, gemelo del `evidenciaSinGuardar` de la terminal). El reingreso pendiente vive en el mismo sitio: con 2 pods cada
    uno reintenta lo que recibió (el `eventId` lo vuelve idempotente), y un reinicio con la base aún caída lo pierde.
+9. **Avisos tempranos de fallo de entrega de tarjetas → tabla** (`src/services/giftCards/giftCardFallosTempranos.ts`). El
+   `failed` de Meta o el rebote de Resend que llega antes de que la entrega guarde su id se anota 10 min en memoria; con 2
+   pods, el aviso cae en uno y la entrega guarda en otro, y la tarjeta se queda «Enviada» sin haber llegado. Se migra a una
+   tabla (messageId, codigo, recibidoEn) con la misma caducidad. El reclamo de la entrega ya vive en la fila y no cambia.
 
 Excepción deliberada que NO se migra: el dedupe de `registerDevice.middleware.ts:33` es en proceso **a propósito** — meter una dependencia
 dura de Redis en el camino del cobro es peor que un dedupe imperfecto. Lee el comentario antes de "arreglarlo".
