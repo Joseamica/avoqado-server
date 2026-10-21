@@ -8,6 +8,7 @@ import {
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '@/services/shared/paymentShiftClaim'
+import { WHERE_RENGLON_DE_TARJETA } from '@/services/giftCards/giftCardMarks'
 
 const VENUE_ID = 'venue-1'
 const PAYMENT_ID = 'payment-1'
@@ -144,6 +145,25 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
       select: { id: true },
     })
     expect(claim).toMatchObject({ shiftId: 'shift-open', pendingReason: null })
+  })
+
+  // S0.4 (tarjetas 1b): una sola definición del renglón de tarjeta; antes aquí vivía una copia local del filtro.
+  it('el reclamo del turno lee la marca compartida', async () => {
+    const tx = makeTx({ id: 'shift-open', status: 'OPEN' })
+    tx.orderItem.findFirst.mockResolvedValue({ id: 'renglon-tarjeta' })
+
+    await claimShiftForCapturedPayment(tx as never, {
+      venueId: VENUE_ID,
+      amountPesos: new Prisma.Decimal('300.00'),
+      tipPesos: new Prisma.Decimal('0.00'),
+      incrementTotalOrders: true,
+      orderId: 'order-tarjetas',
+    })
+
+    const { where } = tx.orderItem.findFirst.mock.calls[0][0]
+    expect(where).toEqual({ orderId: 'order-tarjetas', ...WHERE_RENGLON_DE_TARJETA })
+    expect(where.giftCardId).toBe(WHERE_RENGLON_DE_TARJETA.giftCardId)
+    expect(tx.shift.updateMany.mock.calls[0][0].data).not.toHaveProperty('totalOrders')
   })
 
   it('una orden de mercancía con orderId sí suma su orden', async () => {

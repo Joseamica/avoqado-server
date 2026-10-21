@@ -20,7 +20,10 @@ export async function leerSiEsCuentaDeTarjetas(db: Prisma.TransactionClient | Pr
   return !sinTarjeta
 }
 
-export const WHERE_ORDEN_DE_TARJETAS = { items: { some: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
+/** El renglón que hace de una orden una cuenta de tarjetas. La única definición: las marcas de abajo y el reclamo del turno la usan. */
+export const WHERE_RENGLON_DE_TARJETA = { giftCardId: { not: null } } satisfies Prisma.OrderItemWhereInput
+
+export const WHERE_ORDEN_DE_TARJETAS = { items: { some: WHERE_RENGLON_DE_TARJETA } } satisfies Prisma.OrderWhereInput
 
 /**
  * La marca R11 COMPLETA dentro de un `select` de `Order` (⭐ B6 M2 del cierre): un renglón con tarjeta (`take: 1`) y cuántos hay SIN
@@ -28,7 +31,7 @@ export const WHERE_ORDEN_DE_TARJETAS = { items: { some: { giftCardId: { not: nul
  * `esCuentaDeTarjetasSeleccionada`.
  */
 export const SELECT_MARCA_DE_CUENTA_DE_TARJETAS = {
-  items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 },
+  items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 },
   _count: { select: { items: { where: { giftCardId: null } } } },
 } satisfies Prisma.OrderSelect
 
@@ -39,14 +42,14 @@ export function esCuentaDeTarjetasSeleccionada(
   return (orden?.items?.length ?? 0) > 0 && (orden?._count?.items ?? 0) === 0
 }
 
-export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: { giftCardId: { not: null } } } } satisfies Prisma.OrderWhereInput
+export const WHERE_ORDEN_SIN_TARJETAS = { items: { none: WHERE_RENGLON_DE_TARJETA } } satisfies Prisma.OrderWhereInput
 
 /**
  * R3 (turnos): la marca para el `select` de la orden de un cobro. Un renglón con `giftCardId` basta para saber que la cuenta es de
  * tarjetas (no se mezclan, A5). Todo `select` que alimente `aggregateShiftPayments` (también el script de reatribución) y el detalle
  * del turno del panel traen la MISMA marca.
  */
-export const ORDEN_DE_TARJETAS_SELECT = { items: { where: { giftCardId: { not: null } }, select: { id: true }, take: 1 } } as const
+export const ORDEN_DE_TARJETAS_SELECT = { items: { where: WHERE_RENGLON_DE_TARJETA, select: { id: true }, take: 1 } } as const
 
 /**
  * Cuenta de tarjetas PAGADA: la única que «carga» tarjetas. Un abono a una venta que no se termina de pagar no carga nada (sus sobres

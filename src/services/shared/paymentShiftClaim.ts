@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
+import { WHERE_RENGLON_DE_TARJETA } from '../giftCards/giftCardMarks'
 import { turnoVivoWhere } from './turnoDeCaja'
 
 // `payGiftCardBalanceOnOrder` (tarjetas de regalo, A8): el cobro con saldo comparte el núcleo de `payCashOrder` pero su
@@ -251,7 +252,7 @@ export async function claimShiftForCapturedPayment(
   const esCuentaDeTarjetas =
     input.incrementTotalOrders &&
     input.orderId !== null &&
-    Boolean(await tx.orderItem.findFirst({ where: { orderId: input.orderId, giftCardId: { not: null } }, select: { id: true } }))
+    Boolean(await tx.orderItem.findFirst({ where: { orderId: input.orderId, ...WHERE_RENGLON_DE_TARJETA }, select: { id: true } }))
 
   const claimed = await tx.shift.updateMany({
     where: {
