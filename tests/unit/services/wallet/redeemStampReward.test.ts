@@ -37,6 +37,7 @@ const PREMIO_MONTO = {
   rewardProductId: null,
   rewardLabel: '$50 de descuento',
   expiresAt: null,
+  updatedAt: new Date('2026-10-21T18:00:00.000Z'),
 }
 
 describe('redeemStampReward', () => {
@@ -62,6 +63,19 @@ describe('redeemStampReward', () => {
         data: expect.objectContaining({ orderId: 'o1', type: 'FIXED_AMOUNT' }),
       }),
     )
+  })
+
+  // D1 (21-oct, Codex r1 #2): una devolución cancela el premio y una compra lo REACTIVA con las condiciones de hoy mientras
+  // este canje calculaba con las de antes. Quemar exige la misma versión que se leyó: si cambió, no se canjea nada.
+  it('🔴 el premio cambió desde que se leyó (se reactivó con otras condiciones): no se canjea con las viejas', async () => {
+    prismaMock.stampReward.updateMany.mockResolvedValue({ count: 0 } as any)
+
+    await expect(redeemStampReward('v1', 'o1', 'rw1')).rejects.toThrow()
+
+    expect(prismaMock.stampReward.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ id: 'rw1', status: 'PENDING', updatedAt: PREMIO_MONTO.updatedAt }) }),
+    )
+    expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
   })
 
   it('🔴 el MISMO premio no se puede canjear dos veces', async () => {

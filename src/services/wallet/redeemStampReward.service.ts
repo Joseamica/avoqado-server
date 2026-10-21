@@ -158,8 +158,10 @@ export async function redeemStampReward(
     // cuenta (otro candado de orden): lo único que separa un café regalado de dos es que
     // este UPDATE exija el estado anterior. Si no encuentra la fila en PENDING, alguien
     // más ganó la carrera y aquí no se crea ningún descuento.
+    // Y exige la MISMA versión que se leyó (D1, Codex r1 #2): una devolución puede cancelar este premio y una compra
+    // reactivarlo con las condiciones de hoy mientras este canje calculaba el descuento con las de antes.
     const quemado = await tx.stampReward.updateMany({
-      where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING },
+      where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING, updatedAt: reward.updatedAt },
       data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date() },
     })
     if (quemado.count === 0) {
@@ -244,9 +246,23 @@ export async function refundStampRewardForOrderDiscount(
 ): Promise<{ rewardId: string; customerId: string; rewardLabel: string } | null> {
   const reward = await tx.stampReward.findFirst({
     where: { orderDiscountId: row.id, venueId },
-    select: { id: true, customerId: true, rewardLabel: true },
+    select: { id: true, customerId: true, rewardLabel: true, stampCardId: true },
   })
   if (!reward) return null
+
+  // 🔴 D3 (21-oct, «A, como Square»): mientras estuvo canjeado, una devolución pudo quitarle un sello a su cartilla (lo
+  // cobrado no se quita). Si ya no está llena, el premio NO vuelve a estar por cobrar sin sus sellos: se cancela y la
+  // cartilla se reabre; al volver a llenarla, el mismo premio se reactiva (D1).
+  // Y se decide con la FILA del PREMIO bloqueada (Codex D3-r2 #1, r3 y r4): la devolución toma esa misma fila antes de
+  // restarle el sello a una cartilla llena y vuelve a mirar el premio, así que las dos van en fila. Sin esto, una devolución
+  // simultánea restaba el sello entre esta lectura y esta escritura y el premio quedaba por cobrar sin respaldo. Ni el
+  // candado del cliente ni la fila de la cartilla: con la fila de la cuenta en la mano, los dos cerraban un círculo.
+  await tx.$queryRaw`SELECT id FROM "StampReward" WHERE id = ${reward.id} FOR UPDATE`
+  const cartilla = await tx.stampCard.findUnique({
+    where: { id: reward.stampCardId },
+    select: { id: true, stampsEarned: true, stampsRequired: true },
+  })
+  const respaldado = !!cartilla && cartilla.stampsEarned >= cartilla.stampsRequired
 
   // 🔴 Los tres campos JUNTOS. Dejar `redeemedAt` o el vínculo al descuento haría que
   // el premio se vea disponible pero arrastrando el rastro de un canje que ya no
@@ -254,8 +270,11 @@ export async function refundStampRewardForOrderDiscount(
   // canjearlo otra vez sobre una cuenta distinta.
   await tx.stampReward.update({
     where: { id: reward.id },
-    data: { status: StampRewardStatus.PENDING, redeemedAt: null, orderDiscountId: null },
+    data: { status: respaldado ? StampRewardStatus.PENDING : StampRewardStatus.CANCELLED, redeemedAt: null, orderDiscountId: null },
   })
+  if (!respaldado && cartilla) {
+    await tx.stampCard.update({ where: { id: cartilla.id }, data: { completedAt: null } })
+  }
 
   return { rewardId: reward.id, customerId: reward.customerId, rewardLabel: reward.rewardLabel }
 }
