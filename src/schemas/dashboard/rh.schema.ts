@@ -61,7 +61,12 @@ export const asignarSchema = z.object({
 })
 export const cambiarSchema = z.object({
   params: venueParamsSchema.extend({ assignmentId: asignacionId }),
-  body: z.object({ positionId: puestoId.optional(), relation: relacion.optional(), fecha: fechaSchema.optional() }),
+  body: z.object({
+    positionId: puestoId.optional(),
+    relation: relacion.optional(),
+    fecha: fechaSchema.optional(),
+    tracksAttendance: sino.optional(),
+  }),
 })
 export const terminarSchema = z.object({
   params: venueParamsSchema.extend({ assignmentId: asignacionId }),

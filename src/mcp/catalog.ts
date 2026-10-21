@@ -377,6 +377,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   archive_position: 'write',
   assign_staff_position: 'write',
   end_staff_assignment: 'write',
+  change_staff_assignment: 'write',
   stamp_card_status: 'read',
   stamp_payroll_receipts: 'write',
   stock_batches: 'read',
