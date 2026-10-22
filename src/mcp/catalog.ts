@@ -93,6 +93,8 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_launch_campaign: 'write',
   create_modifier_group: 'write',
   create_payment_link: 'write',
+  create_customer_payment_link: 'write',
+  customer_payment_links: 'read',
   create_percent_promotion: 'write',
   create_product: 'write',
   create_product_with_variants: 'write',

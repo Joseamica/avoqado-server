@@ -6625,6 +6625,7 @@ model CheckoutSession {
   description String? // Description of the payment
 
   // Customer info (optional)
+  attributedCustomerId String? // Internal attribution snapshot; payer contacts stay separate
   customerEmail String?
   customerPhone String?
   customerName  String?
@@ -7832,6 +7833,7 @@ model ActivityLog {
 // ==========================================
 
 model Customer {
+  paymentLinks PaymentLink[]
   id    String  @id @default(cuid())
   email String? // Unique per venue, not globally (allows same email in different venues)
   phone String? // Unique per venue, not globally
@@ -15747,6 +15749,11 @@ model PaymentLink {
   createdById         String
   createdBy           Staff             @relation("PaymentLinkCreatedBy", fields: [createdById], references: [id])
 
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  creationKey  String?   @db.VarChar(128)
+  creationHash String?
+
   /// Staff explicitly chosen by the link creator to receive commission
   /// attribution when the link is paid. Separate from `createdById`:
   /// the link CREATOR may be an admin/manager who shouldn't earn the
@@ -15788,6 +15795,8 @@ model PaymentLink {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([venueId, customerId, createdAt, id])
+  @@unique([venueId, createdById, creationKey])
   @@index([venueId])
   @@index([shortCode])
   @@index([status])

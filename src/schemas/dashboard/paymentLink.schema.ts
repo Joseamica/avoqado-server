@@ -53,6 +53,7 @@ export type UpdateVenuePaymentLinkSettingsDto = z.infer<typeof updateVenuePaymen
 
 export const createPaymentLinkBodySchema = z
   .object({
+    customerId: z.string().cuid('ID de cliente inválido').nullable().optional(),
     title: z.string().min(1, 'El título es requerido').max(100, 'El título no puede exceder 100 caracteres'),
     description: z.string().max(400, 'La descripción no puede exceder 400 caracteres').optional(),
     imageUrl: z.string().url('URL de imagen inválida').optional(),
@@ -125,6 +126,7 @@ export const createPaymentLinkBodySchema = z
   )
 
 export const updatePaymentLinkBodySchema = z.object({
+  customerId: z.never({ invalid_type_error: 'El cliente de una liga no se puede cambiar' }).optional(),
   title: z.string().min(1, 'El título es requerido').max(100, 'El título no puede exceder 100 caracteres').optional(),
   description: z.string().max(400, 'La descripción no puede exceder 400 caracteres').optional().nullable(),
   imageUrl: z.string().url('URL de imagen inválida').optional().nullable(),

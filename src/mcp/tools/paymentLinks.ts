@@ -152,4 +152,124 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
       }
     },
   )
+  server.tool(
+    'create_customer_payment_link',
+    'Create a payment link attributed to an existing customer of this venue. Payer contacts stay separate. Preview first, then human confirmation. Reusable links attribute every payment to this customer. Requires payment-link:create and customers:read. Customer creation remains in create_customer. A creationKey makes retries return the same link.',
+    {
+      venueId: z.string(),
+      customerId: z.string().cuid('ID de cliente inválido'),
+      title: z.string().min(1).max(100),
+      amount: z.number().positive().optional().describe('Amount in PESOS; omit for open amount'),
+      purpose: z.enum(['payment', 'donation']).optional(),
+      description: z.string().max(400).optional(),
+      currency: z.string().optional(),
+      expiresAt: z.string().datetime().optional(),
+      isReusable: z.boolean().optional(),
+      creationKey: z.string().min(1).max(128).optional(),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, customerId, title, amount, purpose, description, currency, expiresAt, isReusable = false, creationKey, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('payment-link:create', venueId)
+      guard.requirePermission('customers:read', venueId)
+      if (!confirm) {
+        const customer = await prisma.customer.findFirst({
+          where: { ...where, id: customerId, active: true },
+          select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+        })
+        if (!customer) return text({ ok: false, error: 'El cliente no existe, está inactivo o no pertenece al negocio' })
+        return text({
+          requiresConfirmation: true,
+          preview: { venueId, customerId, customer, title, amount: amount ?? null, isReusable },
+          message: 'Confirma crear la liga. Todos sus pagos se atribuirán a este cliente.',
+        })
+      }
+      try {
+        const link = await createPaymentLink(
+          venueId,
+          {
+            customerId,
+            title,
+            amountType: amount === undefined ? 'OPEN' : 'FIXED',
+            ...(amount !== undefined ? { amount } : {}),
+            purpose: purpose === 'donation' ? 'DONATION' : 'PAYMENT',
+            ...(description !== undefined ? { description } : {}),
+            ...(currency !== undefined ? { currency } : {}),
+            ...(expiresAt !== undefined ? { expiresAt } : {}),
+            isReusable,
+          },
+          scope.staffId,
+          creationKey,
+          async created =>
+            auditMcpWrite(scope, {
+              action: 'PAYMENT_LINK_CREATED',
+              entity: 'PaymentLink',
+              entityId: created.id,
+              venueId,
+              data: { customerId, title, amount: amount ?? null, isReusable },
+            }),
+        )
+        return text({
+          ok: true,
+          paymentLink: {
+            id: link.id,
+            shortCode: link.shortCode,
+            title: link.title,
+            customer: link.customer,
+            amount: link.amount == null ? null : Number(link.amount),
+            status: link.status,
+          },
+        })
+      } catch (error) {
+        return text({ ok: false, error: (error as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'customer_payment_links',
+    'List payment links explicitly attributed to an existing customer, including pagination and total. Requires customers:read and payment-link:read. Only this venue; attribution is separate from payer identity.',
+    {
+      venueId: z.string(),
+      customerId: z.string().cuid('ID de cliente inválido'),
+      limit: z.number().int().positive().max(100).optional(),
+      offset: z.number().int().nonnegative().optional(),
+    },
+    async ({ venueId, customerId, limit = 50, offset = 0 }) => {
+      const where = { ...guard.venueFilter(venueId), customerId }
+      guard.requirePermission('customers:read', venueId)
+      guard.requirePermission('payment-link:read', venueId)
+      const take = Math.min(100, Math.max(1, limit))
+      const [links, total] = await Promise.all([
+        prisma.paymentLink.findMany({
+          where,
+          select: {
+            id: true,
+            shortCode: true,
+            title: true,
+            amountType: true,
+            amount: true,
+            status: true,
+            currency: true,
+            isReusable: true,
+            createdAt: true,
+          },
+          orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+          take: take,
+          skip: offset,
+        }),
+        prisma.paymentLink.count({ where }),
+      ])
+      return text({
+        venueId,
+        customerId,
+        total,
+        limit: take,
+        offset,
+        hasMore: offset + links.length < total,
+        nextOffset: offset + links.length < total ? offset + links.length : null,
+        links: links.map(link => ({ ...link, amount: link.amount == null ? null : Number(link.amount) })),
+      })
+    },
+  )
 }

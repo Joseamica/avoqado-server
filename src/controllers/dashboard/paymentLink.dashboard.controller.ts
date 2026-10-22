@@ -11,6 +11,31 @@ import { Request, Response } from 'express'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
 import * as paymentLinkSettingsService from '@/services/dashboard/paymentLinkSettings.service'
 import logger from '@/config/logger'
+import { getUserAccess, hasPermission } from '@/services/access/access.service'
+import { StaffRole } from '@prisma/client'
+
+async function canReadCustomers(req: Request): Promise<boolean> {
+  const auth = req.authContext
+  if (!auth?.userId) return false
+  const override =
+    auth.isImpersonating && auth.impersonation
+      ? {
+          isImpersonating: true as const,
+          mode: auth.impersonation.mode as 'user' | 'role',
+          ...(auth.impersonation.mode === 'role' ? { forcedRole: auth.role as StaffRole } : {}),
+        }
+      : undefined
+  const access = await getUserAccess(auth.userId, req.params.venueId, undefined, override)
+  return hasPermission(access, 'customers:read')
+}
+
+function privateLink<T extends { customerId?: unknown; customer?: unknown; creationKey?: unknown; creationHash?: unknown }>(
+  link: T,
+  canRead: boolean,
+) {
+  const { creationKey: _key, creationHash: _hash, customerId, customer, ...rest } = link
+  return canRead ? { ...rest, customerId, customer } : rest
+}
 
 // ═══════════════════════════════════════════════════════════════════════════
 // LIST & GET
@@ -24,6 +49,7 @@ export async function listPaymentLinks(req: Request, res: Response) {
     const { venueId } = req.params
     const { status, search, limit, offset } = req.query
 
+    const canRead = await canReadCustomers(req)
     const result = await paymentLinkService.getPaymentLinks(venueId, {
       status: status as string | undefined,
       search: search as string | undefined,
@@ -33,7 +59,7 @@ export async function listPaymentLinks(req: Request, res: Response) {
 
     res.json({
       success: true,
-      data: result,
+      data: { ...result, paymentLinks: result.paymentLinks.map(link => privateLink(link, canRead)) },
     })
   } catch (error: any) {
     logger.error('Error listing payment links:', error)
@@ -55,7 +81,7 @@ export async function getPaymentLink(req: Request, res: Response) {
 
     res.json({
       success: true,
-      data: paymentLink,
+      data: privateLink(paymentLink, await canReadCustomers(req)),
     })
   } catch (error: any) {
     logger.error('Error getting payment link:', error)
@@ -79,11 +105,11 @@ export async function createPaymentLink(req: Request, res: Response) {
     const authContext = (req as any).authContext
     const staffId = authContext.userId
 
-    const paymentLink = await paymentLinkService.createPaymentLink(venueId, req.body, staffId)
+    const paymentLink = await paymentLinkService.createPaymentLink(venueId, req.body, staffId, req.get('Idempotency-Key'))
 
     res.status(201).json({
       success: true,
-      data: paymentLink,
+      data: privateLink(paymentLink, await canReadCustomers(req)),
     })
   } catch (error: any) {
     logger.error('Error creating payment link:', error)
@@ -109,7 +135,7 @@ export async function updatePaymentLink(req: Request, res: Response) {
 
     res.json({
       success: true,
-      data: paymentLink,
+      data: privateLink(paymentLink, await canReadCustomers(req)),
     })
   } catch (error: any) {
     logger.error('Error updating payment link:', error)
