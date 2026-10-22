@@ -108,6 +108,8 @@ function db() {
       deleteMany: jest.fn(async () => ({ count: 0 })),
       updateMany: jest.fn(async () => ({ count: 0 })),
     },
+    // D2 (vales): anular TODOS los renglones pregunta si la venta tiene sesión de vales para dejarlos libres; aquí no la tiene.
+    areaTicketCheckoutSession: { findFirst: jest.fn(async () => null) },
   }
 }
 const serial = { id: 'serial', venueId: 'venue', serialNumber: 'SERIAL', status: 'AVAILABLE', category: { name: 'SIM' } }
