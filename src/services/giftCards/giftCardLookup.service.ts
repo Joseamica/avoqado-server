@@ -93,7 +93,8 @@ function devolverFallo(apartado: { llaves: string[]; marca: number }): void {
   }
 }
 
-function porQueNoSirve(
+/** Por qué un sobre no se puede usar hoy (`null` = sí se puede). También la usa la lista de `phone/verify` (S5). */
+export function porQueNoSirve(
   s: { status: GiftCardStatus; balance: { greaterThan(n: number): boolean }; expiresAt: Date | null },
   ahora: Date,
 ): GiftCardLookupResult['cards'][number]['notUsableReason'] {

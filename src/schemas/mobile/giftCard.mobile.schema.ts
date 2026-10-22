@@ -45,13 +45,28 @@ const SOLO_UNO = 'Manda el código o la liga de la tarjeta (sólo uno)'
 /** `validateRequest` lo vuelve el `code` del 400 (`params.code`). */
 const CAMPO_NO_ACEPTADO: GiftCardErrorCode = 'GIFT_CARD_NEW_ORDER_FIELD_NOT_ALLOWED'
 
+/** 1b S5: la prueba firmada de `phone/verify` (la valida el servidor al cobrar) y la tarjeta que la caja eligió de su lista. */
+const pruebaDeTelefono = z.object({
+  kind: z.literal('PHONE_OTP'),
+  proofToken: z
+    .string({ required_error: 'Falta la verificación por teléfono', invalid_type_error: 'La verificación por teléfono no es válida' })
+    .trim()
+    .min(1, 'Falta la verificación por teléfono')
+    .max(2048, 'La verificación por teléfono no es válida'),
+  giftCardId: z
+    .string({ required_error: 'Falta la tarjeta', invalid_type_error: 'La tarjeta no es válida' })
+    .trim()
+    .min(1, 'Falta la tarjeta')
+    .max(64, 'La tarjeta no es válida'),
+})
+
 /**
- * UNA sola unión de pruebas de posesión (A17/D4): la usan `payGiftCardSchema` y, en S2b, `payNewOrderSchema`; S5 le agrega
+ * UNA sola unión de pruebas de posesión (A17/D4): la usan `payGiftCardSchema` y, en S2b, `payNewOrderSchema`; S5 le agregó
  * PHONE_OTP una vez.
  */
 export const proofSchema = z.discriminatedUnion(
   'kind',
-  [z.object({ kind: z.literal('CODE'), code: codigo }), z.object({ kind: z.literal('PAGE_TOKEN'), pageToken: liga })],
+  [z.object({ kind: z.literal('CODE'), code: codigo }), z.object({ kind: z.literal('PAGE_TOKEN'), pageToken: liga }), pruebaDeTelefono],
   { errorMap: () => ({ message: 'Falta cómo se identificó la tarjeta: código, liga o teléfono' }) },
 )
 
@@ -220,6 +235,32 @@ export const revealSchema = z.object({
   body: z.object({
     operationKey,
     motivo: z.enum(['REPRINT', 'SHOW_QR'], { errorMap: () => ({ message: 'Di para qué se muestra el código: REPRINT o SHOW_QR' }) }),
+  }),
+  query: z.any().optional(),
+})
+
+// ─── 1b S5: teléfono + código (S-2) ───
+
+/** El teléfono como lo escriba la caja; LA forma (Q25) y su 400 de C5 («El teléfono no es válido.») son del servicio. */
+const telefonoDelCliente = z
+  .string({ required_error: 'Falta el teléfono', invalid_type_error: 'El teléfono debe ser texto' })
+  .trim()
+  .max(32, 'El teléfono es demasiado largo')
+
+export const phoneRequestSchema = z.object({
+  params: venueParams,
+  body: z.object({ phone: telefonoDelCliente }),
+  query: z.any().optional(),
+})
+
+export const phoneVerifySchema = z.object({
+  params: venueParams,
+  body: z.object({
+    phone: telefonoDelCliente,
+    code: z
+      .string({ required_error: 'El código son 6 números', invalid_type_error: 'El código son 6 números' })
+      .trim()
+      .regex(/^\d{6}$/, 'El código son 6 números'),
   }),
   query: z.any().optional(),
 })

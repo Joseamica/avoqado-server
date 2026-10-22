@@ -66,6 +66,8 @@ import { exigirPlanDeTarjetas } from '../middlewares/giftCardsPlan.middleware'
 import {
   giftCardLookupRateLimiters,
   giftCardPayFailureRateLimiters,
+  giftCardPhoneRequestRateLimiters,
+  giftCardPhoneVerifyRateLimiters,
   giftCardRevealRateLimiters,
 } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
@@ -1703,6 +1705,24 @@ router.post(
   checkPermission('giftCards:sell'),
   ...giftCardRevealRateLimiters,
   giftCardMobileController.revealCuenta,
+)
+// 1b S5 (S-2): teléfono + código, ANTES de las rutas de `/:giftCardId`. Sin `X-Device-Id` ⇒ 400 desde el controller. Tampoco van
+// al MCP: el código no viaja por el chat.
+router.post(
+  '/venues/:venueId/gift-cards/phone/request',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.phoneRequestSchema),
+  checkPermission('giftCards:read'),
+  ...giftCardPhoneRequestRateLimiters,
+  giftCardMobileController.phoneRequest,
+)
+router.post(
+  '/venues/:venueId/gift-cards/phone/verify',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.phoneVerifySchema),
+  checkPermission('giftCards:read'),
+  ...giftCardPhoneVerifyRateLimiters,
+  giftCardMobileController.phoneVerify,
 )
 router.post(
   '/venues/:venueId/gift-cards/:giftCardId/resend',

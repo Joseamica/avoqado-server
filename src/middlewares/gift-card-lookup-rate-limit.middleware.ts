@@ -96,3 +96,21 @@ export const giftCardRevealRateLimiters = crearLimitadoresDeConsulta(isProd ? 10
   prefijo: 'gift-card-reveal',
   mensaje: 'Demasiadas veces seguidas mostrando códigos. Espera un minuto.',
 })
+
+/**
+ * 1b S5 (S-2): teléfono + código. Pedir y verificar llevan contadores PROPIOS (por aparato y por IP, ventana de 10 min) con el mismo
+ * `code`; el límite por TELÉFONO (uno cada 30 s, 5 por hora) lo cuenta el servicio con los retos de la base.
+ */
+const DEL_TELEFONO = {
+  code: 'GIFT_CARD_PHONE_RATE_LIMITED',
+  mensaje: 'Ya pedimos varios códigos para ese teléfono. Espera unos minutos.',
+  ventanaMs: 10 * 60 * 1000,
+}
+export const giftCardPhoneRequestRateLimiters = crearLimitadoresDeConsulta(isProd ? 10 : 1000, isProd ? 30 : 1000, {
+  ...DEL_TELEFONO,
+  prefijo: 'gift-card-phone-request',
+})
+export const giftCardPhoneVerifyRateLimiters = crearLimitadoresDeConsulta(isProd ? 20 : 1000, isProd ? 60 : 1000, {
+  ...DEL_TELEFONO,
+  prefijo: 'gift-card-phone-verify',
+})

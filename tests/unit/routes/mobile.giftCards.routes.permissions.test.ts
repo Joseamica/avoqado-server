@@ -7,12 +7,16 @@
 import express from 'express'
 import request from 'supertest'
 import { StaffRole } from '@prisma/client'
+import { prismaMock } from '@tests/__helpers__/setup'
+import * as ctrl from '@/controllers/mobile/giftCard.mobile.controller'
 import mobileRouter from '@/routes/mobile.routes'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import {
   crearLimitadoresDeConsulta,
   giftCardLookupRateLimiters,
   giftCardPayFailureRateLimiters,
+  giftCardPhoneRequestRateLimiters,
+  giftCardPhoneVerifyRateLimiters,
   giftCardRevealRateLimiters,
 } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import { redactUrlSecrets } from '@/middlewares/requestLogger'
@@ -63,6 +67,9 @@ const RUTAS: Array<[string, string, string]> = [
   ['post', REGRESAR, 'giftCards:redeem'],
   ['post', '/venues/:venueId/gift-cards/orders/:orderId/cancel-sale', 'giftCards:manage'],
   ['post', '/venues/:venueId/gift-cards/orders/:orderId/release-cancel', 'giftCards:manage'],
+  // 1b S5 (S-2): teléfono + código.
+  ['post', '/venues/:venueId/gift-cards/phone/request', 'giftCards:read'],
+  ['post', '/venues/:venueId/gift-cards/phone/verify', 'giftCards:read'],
   // 1b S4 (Q16, Q42): el detalle, reenviar, y lo de gerente en sus propias rutas (las que honran el PIN).
   ['get', '/venues/:venueId/gift-cards/orders/:orderId', 'giftCards:read'],
   ['post', '/venues/:venueId/gift-cards/orders/:orderId/reveal', 'giftCards:sell'],
@@ -391,6 +398,172 @@ describe('S4: el límite de mostrar códigos', () => {
         ruta,
         otros: false,
       })
+    }
+  })
+})
+
+/**
+ * 1b S5 (S-2): teléfono + código. Las dos rutas con `giftCards:read` y sus limitadores propios (por aparato y por IP, en memoria,
+ * ventana de 10 min); sin `X-Device-Id` ⇒ 400 desde el controller; un teléfono que no se entiende ⇒ 400 de C5.
+ */
+describe('S5: teléfono + código', () => {
+  const PEDIR = '/venues/:venueId/gift-cards/phone/request'
+  const VERIFICAR = '/venues/:venueId/gift-cards/phone/verify'
+  const capasDe = (metodo: string, ruta: string): any[] => {
+    const capa = (mobileRouter as any).stack.find((l: any) => l.route?.path === ruta && l.route.stack.some((c: any) => c.method === metodo))
+    return capa ? capa.route.stack.map((c: any) => c.handle) : []
+  }
+  const posicionDe = (metodo: string, ruta: string) =>
+    (mobileRouter as any).stack.findIndex((l: any) => l.route?.path === ruta && l.route.stack.some((c: any) => c.method === metodo))
+
+  it.each([
+    [PEDIR, giftCardPhoneRequestRateLimiters],
+    [VERIFICAR, giftCardPhoneVerifyRateLimiters],
+  ])('POST %s autentica, exige giftCards:read y lleva SU limitador justo después, sin plan', (ruta, limitadores) => {
+    const h = capasDe('post', ruta)
+    expect(h.includes(authenticateTokenMiddleware)).toBe(true)
+    expect(h.filter(x => typeof x?.requiredPermission === 'string').map(x => x.requiredPermission)).toEqual(['giftCards:read'])
+    const permiso = h.findIndex(x => x?.requiredPermission === 'giftCards:read')
+    expect(h.slice(permiso + 1, permiso + 1 + limitadores.length)).toEqual(limitadores)
+    expect(h.some(x => typeof x?.featureCode === 'string')).toBe(false)
+    expect([...giftCardLookupRateLimiters, ...giftCardPayFailureRateLimiters, ...giftCardRevealRateLimiters].some(l => h.includes(l))).toBe(
+      false,
+    )
+  })
+
+  it('pedir y verificar tienen limitadores distintos (no comparten contador), dos cada uno (IP y aparato)', () => {
+    expect(giftCardPhoneRequestRateLimiters).toHaveLength(2)
+    expect(giftCardPhoneVerifyRateLimiters).toHaveLength(2)
+    expect(giftCardPhoneRequestRateLimiters.some(l => giftCardPhoneVerifyRateLimiters.includes(l))).toBe(false)
+  })
+
+  it('van ANTES de las rutas de `/:giftCardId` (nada las confunde con un id de tarjeta)', () => {
+    for (const ruta of [PEDIR, VERIFICAR]) {
+      expect(posicionDe('post', ruta)).toBeGreaterThanOrEqual(0)
+      expect(posicionDe('post', ruta)).toBeLessThan(posicionDe('post', '/venues/:venueId/gift-cards/:giftCardId/resend'))
+    }
+  })
+
+  it.each([
+    ['phone/request', 10, 'giftCardPhoneRequestRateLimiters', 'caja-pide'],
+    ['phone/verify', 20, 'giftCardPhoneVerifyRateLimiters', 'caja-verifica'],
+  ])(
+    'en producción, %s: %i cada 10 min por aparato; el siguiente ⇒ 429 GIFT_CARD_PHONE_RATE_LIMITED con retryAfter: 600',
+    async (_r, tope, nombre, aparato) => {
+      const antes = process.env.NODE_ENV
+      process.env.NODE_ENV = 'production'
+      let deProduccion: any[] = []
+      jest.isolateModules(() => {
+        deProduccion = require('@/middlewares/gift-card-lookup-rate-limit.middleware')[nombre]
+      })
+      process.env.NODE_ENV = antes
+      const a = express()
+      a.post('/venues/:venueId/gift-cards/phone/x', ...deProduccion, (_req, res) => res.json({ ok: true }))
+      for (let i = 0; i < tope; i++)
+        expect((await request(a).post('/venues/v1/gift-cards/phone/x').set('X-Device-Id', aparato)).status).toBe(200)
+      const r = await request(a).post('/venues/v1/gift-cards/phone/x').set('X-Device-Id', aparato)
+      expect(r.status).toBe(429)
+      expect(r.body).toEqual({
+        success: false,
+        code: 'GIFT_CARD_PHONE_RATE_LIMITED',
+        message: 'Ya pedimos varios códigos para ese teléfono. Espera unos minutos.',
+        retryAfter: 600,
+      })
+    },
+  )
+
+  it.each([
+    ['phone/request', 30],
+    ['phone/verify', 60],
+  ])('en producción, %s frena por IP a los %i aunque cambie el aparato', async (ruta, tope) => {
+    const nombre = ruta === 'phone/request' ? 'giftCardPhoneRequestRateLimiters' : 'giftCardPhoneVerifyRateLimiters'
+    const antes = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    let deProduccion: any[] = []
+    jest.isolateModules(() => {
+      deProduccion = require('@/middlewares/gift-card-lookup-rate-limit.middleware')[nombre]
+    })
+    process.env.NODE_ENV = antes
+    const a = express()
+    a.post('/venues/:venueId/gift-cards/phone/x', ...deProduccion, (_req, res) => res.json({ ok: true }))
+    for (let i = 0; i < tope; i++)
+      expect((await request(a).post('/venues/v1/gift-cards/phone/x').set('X-Device-Id', `caja-${i}`)).status).toBe(200)
+    const r = await request(a).post('/venues/v1/gift-cards/phone/x').set('X-Device-Id', 'caja-nueva')
+    expect(r.status).toBe(429)
+    expect(r.body.code).toBe('GIFT_CARD_PHONE_RATE_LIMITED')
+  })
+
+  /**
+   * La validación de la ruta REAL y luego el controller REAL (con el servicio real: los dos 400 salen antes de tocar la base). Sin
+   * `@/app`: su parche de errores asíncronos envuelve las capas y la introspección de arriba dejaría de reconocerlas.
+   */
+  async function correr(ruta: string, controlador: (req: any, res: any) => Promise<void>, body: unknown, deviceId?: string) {
+    const h = capasDe('post', ruta)
+    const validacion = h[h.indexOf(authenticateTokenMiddleware) + 1]
+    const req: any = {
+      body,
+      params: { venueId: 'v1' },
+      query: {},
+      headers: deviceId ? { 'x-device-id': deviceId } : {},
+      ip: '10.0.0.1',
+      authContext: { userId: 'cstaff00000000000000000a', venueId: 'v1' },
+    }
+    let error: any
+    await validacion(req, {}, (e?: unknown) => (error = e))
+    if (error) return error
+    const res: any = { json: jest.fn() }
+    return controlador(req, res).then(
+      () => ({ respondio: res.json.mock.calls[0]?.[0] }),
+      e => e,
+    )
+  }
+
+  it.each([
+    ['request', PEDIR, { phone: '+525512345678' }],
+    ['verify', VERIFICAR, { phone: '+525512345678', code: '123456' }],
+  ])('phone/%s sin X-Device-Id ⇒ 400 GIFT_CARD_DEVICE_ID_REQUIRED, antes de tocar el servicio', async (que, ruta, body) => {
+    const e = await correr(ruta, que === 'request' ? ctrl.phoneRequest : ctrl.phoneVerify, body)
+    expect({ status: e.statusCode, code: e.code, message: e.message }).toEqual({
+      status: 400,
+      code: 'GIFT_CARD_DEVICE_ID_REQUIRED',
+      message: 'Falta el identificador del aparato (X-Device-Id).',
+    })
+    expect(prismaMock.otpChallenge.findMany).not.toHaveBeenCalled()
+    expect(prismaMock.otpChallenge.findFirst).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    ['request', PEDIR, { phone: '123' }],
+    ['verify', VERIFICAR, { phone: '123', code: '123456' }],
+  ])("phone/%s con phone: '123' ⇒ 400 «El teléfono no es válido.» con GIFT_CARD_PHONE_INVALID", async (que, ruta, body) => {
+    const e = await correr(ruta, que === 'request' ? ctrl.phoneRequest : ctrl.phoneVerify, body, 'caja-1')
+    expect({ status: e.statusCode, code: e.code, message: e.message }).toEqual({
+      status: 400,
+      code: 'GIFT_CARD_PHONE_INVALID',
+      message: 'El teléfono no es válido.',
+    })
+  })
+
+  it('phone/verify con un código que no son 6 números ⇒ 400 «El código son 6 números»', async () => {
+    const e = await correr(VERIFICAR, ctrl.phoneVerify, { phone: '+525512345678', code: '12a456' }, 'caja-1')
+    expect(e.statusCode).toBe(400)
+    expect(e.message).toBe('Error de validación: code: El código son 6 números')
+  })
+
+  it('pay-gift-card y pay-new-order aceptan proof PHONE_OTP { proofToken, giftCardId }', async () => {
+    const proof = { kind: 'PHONE_OTP', proofToken: 'carga.firma', giftCardId: 'cgift0000000000000000000a' }
+    const base = { idempotencyKey: 'cobro-0001-abc', proof, amount: 100 }
+    for (const [ruta, params] of [
+      ['/venues/:venueId/orders/:orderId/pay-gift-card', { venueId: 'v1', orderId: 'o1' }],
+      ['/venues/:venueId/gift-cards/pay-new-order', { venueId: 'v1' }],
+    ] as const) {
+      const h = capasDe('post', ruta)
+      const validacion = h[h.indexOf(authenticateTokenMiddleware) + 1]
+      const req: any = { body: { ...base, items: [{ name: 'Blusa', quantity: 1, unitPrice: 10000 }] }, params, query: {} }
+      let error: unknown = 'sin llamar'
+      await validacion(req, {}, (e?: unknown) => (error = e))
+      expect({ ruta, error }).toEqual({ ruta, error: undefined })
+      expect(req.body.proof).toEqual(proof)
     }
   })
 })

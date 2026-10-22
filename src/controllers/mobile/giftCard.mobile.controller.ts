@@ -32,6 +32,7 @@ import {
   type ResultadoDeReenvio,
 } from '@/services/giftCards/giftCardCuenta.service'
 import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
+import { pedirCodigoDeTelefono, verificarCodigoDeTelefono } from '@/services/giftCards/giftCardPhone.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { BadRequestError, ServiceUnavailableError } from '@/errors/AppError'
@@ -365,5 +366,32 @@ export async function revealCuenta(req: Request, res: Response) {
   const data = await revelarConBitacora(req, RUTA.revealCuenta, 'Order', orderId, () =>
     revelarCodigosDeLaCuenta(venueId, orderId, segunLaRuta(req, false), { operationKey, auditoria: auditoriaDe(req, RUTA.revealCuenta) }),
   )
+  res.json({ success: true, data })
+}
+
+// ─── 1b S5: teléfono + código (S-2) ───
+
+/** S-2: `phone/*` exigen el aparato: la prueba queda atada a él (Q6) y los límites de la ruta lo cuentan. Antes del servicio. */
+function aparatoObligatorio(req: Request): string {
+  const deviceId = aparatoDe(req)
+  if (!deviceId) throw new BadRequestError('Falta el identificador del aparato (X-Device-Id).', 'GIFT_CARD_DEVICE_ID_REQUIRED')
+  return deviceId
+}
+
+/**
+ * `POST …/gift-cards/phone/request` → `{ enviado: true }`, tenga o no tarjetas ese teléfono. Sin bitácora: el reto (`OtpChallenge`,
+ * con su IP) es el registro, y la lista de acciones nuevas de la 1b (S-9) no tiene una de teléfono. El código nunca sale de aquí.
+ */
+export async function phoneRequest(req: Request, res: Response) {
+  const deviceId = aparatoObligatorio(req)
+  const data = await pedirCodigoDeTelefono(req.params.venueId, { phone: req.body.phone, deviceId, ip: req.ip })
+  res.json({ success: true, data })
+}
+
+/** `POST …/gift-cards/phone/verify` → la prueba firmada (15 min) y la lista de tarjetas del teléfono (forma de `lookup`). */
+export async function phoneVerify(req: Request, res: Response) {
+  const deviceId = aparatoObligatorio(req)
+  const { phone, code } = req.body as { phone: string; code: string }
+  const data = await verificarCodigoDeTelefono(req.params.venueId, { phone, code, deviceId })
   res.json({ success: true, data })
 }
