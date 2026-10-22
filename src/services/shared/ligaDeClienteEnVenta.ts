@@ -3,6 +3,7 @@ import { ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
 import { computeOrderBalance, esVentaCerrada, type OrderAmountsForBalance } from './orderBalance'
+import { WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO } from '../exchanges/exchangeMarks'
 
 /**
  * La liga de un cliente a una venta (`OrderCustomer`) ante choques de únicos, en UN solo lugar para el POS (móvil y MCP) y la
@@ -140,13 +141,23 @@ export async function ventaYaCobradaBajoCandado(
 /**
  * ¿Hay un reembolso COMPLETED de esta venta? Conteo EXACTO, sin lista con tope (auditoría A #2). Lo usa la lealtad tardía para decir
  * `NOT_PAID` (una venta con dinero devuelto no da sello). NO decide «cobrada» (R7-2).
+ *
+ * Cambio de producto (spec 2026-10-20 §7.7): las devoluciones que escribe un cambio —el gemelo del crédito y la diferencia
+ * devuelta— no cuentan: un cambio no le quita el sello a la venta original. La cadena y los reembolsos de siempre sí. Sigue
+ * siendo UN conteo: lo que cuenta se nombra en la misma sentencia (`WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO`, NULL-safe).
  */
 export async function ventaTieneReembolso(
   db: Pick<Prisma.TransactionClient, 'payment'>,
   venta: { venueId: string; orderId: string },
 ): Promise<boolean> {
   const reembolsos = await db.payment.count({
-    where: { orderId: venta.orderId, venueId: venta.venueId, type: 'REFUND', status: 'COMPLETED' },
+    where: {
+      orderId: venta.orderId,
+      venueId: venta.venueId,
+      type: 'REFUND',
+      status: 'COMPLETED',
+      AND: [WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO],
+    },
   })
   return reembolsos > 0
 }

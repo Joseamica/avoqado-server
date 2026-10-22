@@ -50,6 +50,21 @@ export async function esVentaNuevaDeCambio(db: Pick<Prisma.TransactionClient, 'e
   return !!(await db.exchange.findUnique({ where: { newOrderId: orderId }, select: { id: true } }))
 }
 
+/**
+ * Las devoluciones que NO son parte de un cambio (spec §7.7: un cambio no le quita el sello a la venta original): las de siempre
+ * (sin `processorData`, o sin papel de cambio en `processorData.exchange.role`) y las de la CADENA (`CHAIN`: devolver algo pagado
+ * con crédito sí es una devolución). Quedan fuera el gemelo del crédito (`CREDIT`) y la diferencia devuelta (`DIFFERENCE`).
+ * 🔴 Nombra lo que CUENTA, a propósito: un `NOT` sobre la ruta JSON da NULL cuando falta la llave y dejaría fuera, sin error, las
+ * devoluciones de siempre. Un papel nuevo no cuenta hasta que se agregue aquí. Lleva `OR`: va dentro de `AND: [...]`.
+ */
+export const WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO = {
+  OR: [
+    { processorData: { equals: Prisma.AnyNull } },
+    { processorData: { path: ['exchange', 'role'], equals: Prisma.AnyNull } },
+    { processorData: { path: ['exchange', 'role'], equals: 'CHAIN' } },
+  ],
+} satisfies Prisma.PaymentWhereInput
+
 /** El cobro de donde SALIÓ el dinero de una devolución: la raíz de la cadena si la hay, si no el cobro devuelto. */
 export function origenEconomicoDeDevolucion(processorData: unknown): string | null {
   if (!processorData || typeof processorData !== 'object' || Array.isArray(processorData)) return null

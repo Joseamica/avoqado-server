@@ -286,6 +286,9 @@ const seVencioLaTransaccion = (error: unknown): boolean => error instanceof Pris
  * 🔒 IDEMPOTENCY: If points were already awarded for this order+customer,
  * returns the existing values without creating duplicates.
  * This prevents double-earning on payment retries.
+ *
+ * `options.skipStamp`: sólo los puntos, sin pedir sello. Lo pasa la lealtad de la venta nueva de un cambio de producto
+ * (spec 2026-10-20 §7.7: no es una visita nueva). Sin la opción, todo como siempre.
  */
 export async function earnPoints(
   venueId: string,
@@ -293,6 +296,7 @@ export async function earnPoints(
   amount: number,
   orderId: string,
   staffId?: string,
+  options?: { skipStamp?: boolean },
 ): Promise<ResultadoDeEarnPoints> {
   // Paid entitlement and venue activation are BOTH required. Automatic award
   // paths must not create an active config merely because a payment happened.
@@ -337,16 +341,21 @@ export async function earnPoints(
   // negocio, y releerla serían miles de consultas diarias que no aportan nada.
   let deferredStampError: unknown
   let sello: GrantStampResult | undefined
-  try {
-    sello = await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
-  } catch (stampError: any) {
-    deferredStampError = stampError
-    logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
-      venueId,
-      customerId,
-      orderId,
-      error: stampError?.message,
-    })
+  if (options?.skipStamp) {
+    // La venta nueva de un cambio no es una visita nueva: no se pide sello y los puntos siguen su curso.
+    logger.info('⏭️ Sello omitido: la venta nueva de un cambio no es una visita nueva', { venueId, customerId, orderId })
+  } else {
+    try {
+      sello = await grantStamp(venueId, customerId, orderId, { staffVenueId: staffId, config })
+    } catch (stampError: any) {
+      deferredStampError = stampError
+      logger.error('⚠️ Falló el sellado — los puntos siguen su curso', {
+        venueId,
+        customerId,
+        orderId,
+        error: stampError?.message,
+      })
+    }
   }
 
   // 🔴 R4-1 (ronda 4 post-QA de sellos tardíos; Codex recheck-8, P2): lo que ESTA llamada ya otorgó se conserva durante TODA
