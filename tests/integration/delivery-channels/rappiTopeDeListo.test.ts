@@ -255,9 +255,74 @@ describe('el «listo» de Rappi contra Postgres: a lo más 3 llamadas, aunque el
     expect(await estadoDe(lista.id)).toEqual({ listo: { llamadas: 1 } })
   })
 
-  it('sin el aviso guardado del pedido: se permite (no hay dónde contar) y no escribe nada', async () => {
-    expect(await reservarLlamadaDeListo(`listo-it-${sufijo}-sin-aviso`, tienda)).toEqual({ permitido: true })
+  it('🔴 sin el aviso guardado del pedido: NO se permite (no hay dónde contar) y no escribe nada (Codex b1 #4)', async () => {
+    expect(await reservarLlamadaDeListo(`listo-it-${sufijo}-sin-aviso`, tienda)).toEqual({ permitido: false, sinAviso: true })
     await expect(cerrarListo(`listo-it-${sufijo}-sin-aviso`, tienda, 'TOPE')).resolves.toBeUndefined()
+  })
+
+  it('🔴 un vínculo manual que CAMBIA DE TIENDA: el «listo» sigue contando en el aviso ORIGINAL y la cuarta llamada no sale (Codex b1 #4)', async () => {
+    // Un vínculo manual (sin `ownerAuthorizedAt`) puede cambiar su `externalLocationId` desde SUPERADMIN. El aviso guardado
+    // conserva la llave con la tienda ORIGINAL; el «listo» llega con la de HOY. Antes no encontraba el contador y cada
+    // intento salía «sin tope» (Codex reprodujo cuatro llamadas). Vínculo propio: el de las demás pruebas no se mueve.
+    const tiendaA = `rappi-listo-it-a-${sufijo}`
+    const tiendaB = `rappi-listo-it-b-${sufijo}`
+    const manual = await prisma.deliveryChannelLink.create({
+      data: { venueId: venueId!, provider: DeliveryProvider.RAPPI, externalLocationId: tiendaA, webhookSecret: 'x' },
+    })
+    expect(manual.ownerAuthorizedAt).toBeNull()
+    const ext = `listo-it-${sufijo}-cambio-de-tienda`
+    const { order } = await ingestDeliveryOrder(
+      {
+        externalId: ext,
+        displayId: 'R-cambio',
+        source: OrderSource.RAPPI,
+        items: [{ externalId: 'sku-cambio', name: 'Tacos cambio', quantity: 1, unitPrice: '120.00', total: '120.00' }],
+        payment: {
+          currency: 'MXN',
+          saleAmount: '120.00',
+          merchantFees: '0.00',
+          discountAmount: '0.00',
+          tipAmount: '0.00',
+          externallyPaidSale: '120.00',
+          externallyPaidTip: '0.00',
+          cashDueSale: '0.00',
+          cashDueTip: '0.00',
+        },
+        raw: { fuente: 'test' },
+        placedAt: new Date(),
+      },
+      manual,
+    )
+    // El aviso, como lo guarda el ingreso: llave con la tienda A, el pedido en `externalOrderId` y el vínculo.
+    const dedupKey = llaveDeAvisoDePedido('NEW_ORDER', tiendaA, ext)
+    const original = await prisma.deliveryOrderEvent.create({
+      data: {
+        provider: DeliveryProvider.RAPPI,
+        externalEventId: dedupKey,
+        eventType: 'NEW_ORDER',
+        dedupKey,
+        externalOrderId: ext,
+        channelLinkId: manual.id,
+        venueId,
+        payload: { prueba: true },
+        status: DeliveryOrderEventStatus.PROCESSED,
+        resourcePayload: { aceptacion: ACEPTACION },
+      },
+    })
+    // SUPERADMIN mueve el vínculo a la tienda B.
+    await prisma.deliveryChannelLink.update({ where: { id: manual.id }, data: { externalLocationId: tiendaB } })
+
+    // Cinco intentos (el KDS y el barrido reintentan): con el 424 real, cada uno que sale cuenta.
+    const desenlaces: string[] = []
+    for (let i = 0; i < 5; i++) desenlaces.push((await markDeliveryOrderReady(venueId!, order.id)).outcome)
+
+    // Salen exactamente tres, con la tienda de HOY (es la que Rappi conoce ahora); la cuarta y la quinta ya no.
+    expect(llamadasA(ext)).toHaveLength(MAX_LLAMADAS_LISTO)
+    for (const c of llamadasA(ext)) expect(c).toEqual([ext, tiendaB, { reintentarEn401: false }])
+    expect(desenlaces).toEqual(['FAILED', 'FAILED', 'FAILED', 'NO_REINTENTAR', 'NO_REINTENTAR'])
+    // El contador vive en el aviso ORIGINAL, y la marca de aceptación sigue ahí.
+    expect(await estadoDe(original.id)).toEqual({ aceptacion: ACEPTACION, listo: { llamadas: 3, cerrado: 'TOPE' } })
+    expect(await listoDe(order.id)).toBeNull()
   })
 
   it('🔴 una reserva y la marca de aceptación A LA VEZ sobre la misma fila: ninguna pisa a la otra', async () => {

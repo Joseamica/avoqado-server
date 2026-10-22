@@ -1120,6 +1120,76 @@ describe('DeliveryWebhookReconciliationJob', () => {
       })
     })
 
+    // Codex b1 #2: el historial de Rappi no se pudo leer (timeout, 5xx, cuerpo ilegible) tras un 400 al aceptar. No es
+    // terminal: el pedido pudo quedar aceptado. Se reintenta con la espera normal; si el historial no vuelve nunca, el
+    // presupuesto del job se agota y queda POISON con su 🚨 (nunca se registra a ciegas ni se reintenta para siempre).
+    describe('HISTORIAL_NO_LEIDO (Codex b1 #2)', () => {
+      const sinHistorial = (over: Partial<any> = {}) =>
+        makeEvent({
+          id: 'evt_sin_historial',
+          provider: 'RAPPI',
+          eventType: 'NEW_ORDER',
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          error: 'HISTORIAL_NO_LEIDO',
+          ...over,
+        })
+
+      it('🔴 NO es terminal: la pasada la vuelve a tomar y, con el historial de vuelta, queda resuelta', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'PROCESSED', orderId: 'ord_rappi', accepted: true })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_sin_historial')
+        expect(result.reprocessed).toBe(1)
+      })
+
+      it('si el historial sigue caído se reintenta con la espera normal (2 min la primera vez), sin POISON', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+        const errores = jest.spyOn(logger, 'error')
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(result.reprocessed).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_sin_historial' },
+          data: { attemptCount: 1, nextAttemptAt: new Date(NOW + 2 * 60_000) },
+        })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(false)
+      })
+
+      it('🔴 con el historial caído para siempre, el décimo intento lo deja POISON con 🚨 y ya no se vuelve a tomar', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial({ attemptCount: 9 })].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+        const errores = jest.spyOn(logger, 'error')
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedUpdate).toHaveBeenCalledWith({ where: { id: 'evt_sin_historial' }, data: { attemptCount: 10, nextAttemptAt: null } })
+        expect(errores).toHaveBeenCalledWith(
+          expect.stringContaining('🚨 [Delivery recon] POISON'),
+          expect.objectContaining({ eventId: 'evt_sin_historial', attemptCount: 10 }),
+        )
+
+        // Con el tope alcanzado, ni la pasada general ni el carril de Rappi lo vuelven a tomar.
+        mockedProcessRappi.mockClear()
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial({ attemptCount: 10 })].filter(f => cumple(f, args.where)))
+        const job = new DeliveryWebhookReconciliationJob()
+        await job.runOnce()
+        await job.reprocesarCarrilRappi()
+        expect(mockedProcessRappi).not.toHaveBeenCalled()
+      })
+
+      it('el presupuesto: ~5 h de reintentos (2+4+8+16+32+60×4 min) antes de rendirse', () => {
+        const job = new DeliveryWebhookReconciliationJob() as unknown as { backoffMs(n: number): number; MAX_ATTEMPTS: number }
+        let esperaMs = 0
+        for (let n = 1; n < job.MAX_ATTEMPTS; n++) esperaMs += job.backoffMs(n)
+        expect(esperaMs).toBe(302 * 60_000)
+      })
+    })
+
     describe('carril propio de Rappi (cada 30 s)', () => {
       const evRappi = (id: string, over: Partial<any> = {}) =>
         makeEvent({

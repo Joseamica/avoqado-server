@@ -175,6 +175,18 @@ describe('rappiAdapter.markOrderReady — el «listo», a lo más 3 llamadas por
     expect(mockCerrar).toHaveBeenCalledWith('722609056', '900175625', 'TOPE')
   })
 
+  it('🔴 sin el aviso del pedido (no hay dónde contar): NO sale a la red, no cierra nada y devuelve terminal (Codex b1 #4)', async () => {
+    mockReservar.mockResolvedValue({ permitido: false, sinAviso: true })
+
+    const r = await rappiAdapter.markOrderReady('722609056', '900175625')
+
+    expect(mockMarcarListoRappi).not.toHaveBeenCalled()
+    // Terminal: el núcleo devuelve NO_REINTENTAR y el barrido espera su ventana completa, sin gastar llamadas.
+    expect(r).toEqual({ ok: false, status: 0, raw: 'LISTO_SIN_AVISO', terminal: true })
+    // No hay fila que cerrar: otra búsqueda sólo repetiría la que acaba de fallar.
+    expect(mockCerrar).not.toHaveBeenCalled()
+  })
+
   it('2xx ⇒ cierra con HTTP_2XX y devuelve la respuesta tal cual (no terminal)', async () => {
     const r = await rappiAdapter.markOrderReady('722609056', '900175625')
 

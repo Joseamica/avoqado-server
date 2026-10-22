@@ -742,10 +742,8 @@ describe('processRappiEvent', () => {
 
     it.each([
       ['vacío (Rappi no tiene eventos del pedido)', async () => HISTORIAL_VACIO],
-      ['caído (no se pudo leer: null)', async () => null],
-      ['que lanza (red)', async () => Promise.reject(new Error('ETIMEDOUT'))],
       ['sin aceptación ni cierre', async () => [{ event: 'courier_assigned' }]],
-    ])('400 y el historial %s ⇒ ACEPTACION_INCIERTA con 🚨, sin ingerir', async (_caso, leer) => {
+    ])('400 y el historial LEÍDO %s ⇒ ACEPTACION_INCIERTA con 🚨, sin ingerir', async (_caso, leer) => {
       const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial: jest.fn(leer) })
 
       expect(r).toMatchObject({ outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' })
@@ -753,6 +751,65 @@ describe('processRappiEvent', () => {
       expect(mockIngest).not.toHaveBeenCalled()
       expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'ACEPTACION_INCIERTA')
       expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ eventRowId: 'evt1' }))
+    })
+
+    // ── Codex b1 #2: «no pude leer el historial» NO es «lo leí y no hay evidencia» ──
+    // Antes las dos daban ACEPTACION_INCIERTA, que es terminal: un timeout o un 5xx del historial dejaba fuera para siempre un
+    // pedido que Rappi sí aceptó. Ahora la lectura fallida queda FAILED REINTENTABLE; sólo lo leído sin evidencia es terminal.
+    it.each([
+      ['caído (no se pudo leer: null)', async () => null],
+      ['que lanza (red, timeout)', async () => Promise.reject(new Error('ETIMEDOUT'))],
+    ])('🔴 400 y el historial %s ⇒ HISTORIAL_NO_LEIDO reintentable, con 🚨 y sus datos, sin ingerir', async (_caso, leer) => {
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial: jest.fn(leer) })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'HISTORIAL_NO_LEIDO')
+      // Reintentable: no está en la copia de TERMINAL_ERRORS (la prueba de abajo la compara con la del job).
+      expect(ERRORES_TERMINALES).not.toContain('HISTORIAL_NO_LEIDO')
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringMatching(/🚨.*historial/),
+        expect.objectContaining({
+          eventRowId: 'evt1',
+          orderId: '392625',
+          venueId: 'v1',
+          storeId: '900105814',
+          linkId: 'link1',
+          respuesta: 'Invalid transition from {TAKEN} to {TAKEN}',
+        }),
+      )
+    })
+
+    it('🔴 1.er intento con el historial caído ⇒ HISTORIAL_NO_LEIDO; el reintento recibe 400 otra vez, lee taken_visible_order y lo registra UNA vez', async () => {
+      // Rappi ya lo tiene TAKEN (el proceso murió entre su sí y la marca), y en el primer intento su historial no responde.
+      const aceptarDeNuevo = rechazo400()
+      const primero = await processRappiEvent('evt1', { aceptar: aceptarDeNuevo, historial: jest.fn(async () => null) })
+      expect(primero).toMatchObject({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+      expect(mockIngest).not.toHaveBeenCalled()
+
+      // El reintento del job: la fila quedó FAILED con ese código y SIN marca. No se registra a ciegas: vuelve a aceptar
+      // (400 otra vez) y vuelve a leer el historial, que ahora sí responde.
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila({ status: 'FAILED', error: 'HISTORIAL_NO_LEIDO' }))
+      const historial = jest.fn(async () => HISTORIAL_ACEPTADO)
+      const segundo = await processRappiEvent('evt1', { aceptar: aceptarDeNuevo, historial })
+
+      expect(aceptarDeNuevo).toHaveBeenCalledTimes(2) // una vez por intento, nunca un registro sin la respuesta de Rappi
+      expect(historial).toHaveBeenCalledWith('392625')
+      expect(mockAnotar).toHaveBeenCalledTimes(1)
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockIngest).toHaveBeenCalledTimes(1) // UNA venta
+      expect(segundo).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
+      expect(mockCerrar).toHaveBeenLastCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+    })
+
+    it('el reintento con el historial ya legible y SIN evidencia sí cierra ACEPTACION_INCIERTA (terminal), como siempre', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila({ status: 'FAILED', error: 'HISTORIAL_NO_LEIDO' }))
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial: jest.fn(async () => HISTORIAL_VACIO) })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' })
+      expect(mockIngest).not.toHaveBeenCalled()
     })
 
     it('🔴 si la marca no se puede escribir porque el reclamo ya no es suyo, se detiene sin ingerir ni cerrar', async () => {
@@ -786,8 +843,17 @@ describe('processRappiEvent', () => {
       expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
     })
 
-    it('el cableado por defecto: un status distinto de 2xx del historial es «no se pudo leer» ⇒ ACEPTACION_INCIERTA', async () => {
+    it('el cableado por defecto: un status distinto de 2xx del historial es «no se pudo leer» ⇒ HISTORIAL_NO_LEIDO (reintentable)', async () => {
       mockHistorialHttp.mockResolvedValue({ ok: false, status: 503, raw: '' })
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400() })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+      expect(mockIngest).not.toHaveBeenCalled()
+    })
+
+    it('el cableado por defecto: un historial que responde 2xx sin eventos sí es «leído sin evidencia» ⇒ ACEPTACION_INCIERTA', async () => {
+      mockHistorialHttp.mockResolvedValue({ ok: true, status: 200, raw: crudoDelSandbox('eventos-vacio.json') })
 
       const r = await processRappiEvent('evt1', { aceptar: rechazo400() })
 
@@ -828,9 +894,8 @@ describe('processRappiEvent', () => {
 
     it.each([
       ['vacío', async () => HISTORIAL_VACIO],
-      ['caído', async () => null],
       ['con cancelación', async () => [{ event: 'canceled_by_timeout' }, { event: 'taken_visible_order' }]],
-    ])('canal deshabilitado sin marca y sin taken vigente en el historial (%s) ⇒ CHANNEL_DISABLED', async (_caso, leer) => {
+    ])('canal deshabilitado sin marca y sin taken vigente en el historial LEÍDO (%s) ⇒ CHANNEL_DISABLED', async (_caso, leer) => {
       ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado())
       const historial = jest.fn(leer)
 
@@ -841,6 +906,61 @@ describe('processRappiEvent', () => {
       expect(aceptarOk).not.toHaveBeenCalled()
       expect(mockAnotar).not.toHaveBeenCalled()
       expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CHANNEL_DISABLED')
+    })
+
+    // Codex b1 #2, el otro lugar que lee el historial: con el canal deshabilitado, un historial que no se pudo leer tampoco
+    // es «no lo aceptó». Cerrar CHANNEL_DISABLED (terminal) perdía el pedido que Rappi aceptó antes de que alguien apagara el
+    // canal (el proceso murió entre su sí y la marca).
+    it.each([
+      ['caído (null)', async () => null],
+      ['que lanza (red, timeout)', async () => Promise.reject(new Error('ETIMEDOUT'))],
+    ])(
+      '🔴 canal deshabilitado sin marca y con el historial %s ⇒ HISTORIAL_NO_LEIDO reintentable, sin aceptar ni registrar',
+      async (_caso, leer) => {
+        ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado())
+        const historial = jest.fn(leer)
+
+        const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+        expect(historial).toHaveBeenCalledTimes(1)
+        expect(r).toMatchObject({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+        expect(aceptarOk).not.toHaveBeenCalled()
+        expect(mockAnotar).not.toHaveBeenCalled()
+        expect(mockIngest).not.toHaveBeenCalled()
+        expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'HISTORIAL_NO_LEIDO')
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringMatching(/🚨.*historial/),
+          expect.objectContaining({ eventRowId: 'evt1', orderId: '392625', venueId: 'v1', linkId: 'link1' }),
+        )
+      },
+    )
+
+    it('🔴 canal deshabilitado: el reintento de HISTORIAL_NO_LEIDO con taken en el historial se anota y se registra UNA vez, sin aceptar', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado())
+      const primero = await processRappiEvent('evt1', { aceptar: aceptarOk, historial: jest.fn(async () => null) })
+      expect(primero).toMatchObject({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+        deshabilitado({ status: 'FAILED', error: 'HISTORIAL_NO_LEIDO' }),
+      )
+      const segundo = await processRappiEvent('evt1', { aceptar: aceptarOk, historial: jest.fn(async () => HISTORIAL_ACEPTADO) })
+
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockAnotar).toHaveBeenCalledTimes(1)
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(segundo).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+    })
+
+    it('canal deshabilitado y un pedido SIN id: no hay historial que pedir ⇒ CHANNEL_DISABLED (reintentarlo no cambiaría nada)', async () => {
+      const sinId = payloadPedido({ order_id: undefined })
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado({ payload: sinId }))
+      const historial = jest.fn(async () => null)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+      expect(historial).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'CHANNEL_DISABLED' })
       expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CHANNEL_DISABLED')
     })
 
@@ -1054,6 +1174,8 @@ describe('processRappiEvent', () => {
       ['RECEIVED, en vuelo', { id: 'evt-pedido', status: 'RECEIVED', error: null }],
       ['FAILED reintentable (ACCEPT_500)', { id: 'evt-pedido', status: 'FAILED', error: 'ACCEPT_500: upstream error' }],
       ['FAILED reintentable (INGEST)', { id: 'evt-pedido', status: 'FAILED', error: 'INGEST: la base se cayó' }],
+      // Codex b1 #2: el pedido cuyo historial no se pudo leer todavía se puede registrar; su cancelación lo espera.
+      ['FAILED reintentable (HISTORIAL_NO_LEIDO)', { id: 'evt-pedido', status: 'FAILED', error: 'HISTORIAL_NO_LEIDO' }],
     ])('la cancelación llega antes de que exista la venta y el NEW_ORDER sigue (%s) ⇒ CANCELACION_EN_ESPERA', async (_caso, pedido) => {
       findUnique().mockResolvedValue(filaCancel())
       mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
@@ -1167,9 +1289,9 @@ describe('processRappiEvent', () => {
       expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('no está activo'))).toBe(false)
     })
 
+    // Codex b1 #2: el historial CAÍDO ya no llega aquí (queda HISTORIAL_NO_LEIDO, reintentable): sólo lo LEÍDO sin evidencia.
     it.each([
       ['vacío', async () => HISTORIAL_VACIO, [], true],
-      ['caído', async () => null, null, false],
       ['sólo del repartidor', async () => [{ event: 'courier_assigned' }], ['courier_assigned'], true],
     ])(
       '(b)(e) el 🚨 de ACEPTACION_INCIERTA (historial %s) lleva los nombres del historial, venueId, storeId y linkId',
@@ -1191,19 +1313,25 @@ describe('processRappiEvent', () => {
       },
     )
 
-    it.each([
-      ['caído', async () => null, false],
-      ['vacío', async () => HISTORIAL_VACIO, true],
-    ])('(d) el aviso de CHANNEL_DISABLED dice si el historial se pudo leer (%s)', async (_caso, leer, leido) => {
+    it('(d) el aviso de CHANNEL_DISABLED lleva los nombres del historial leído', async () => {
       findUnique().mockResolvedValue(fila({ channelLink: { ...fila().channelLink, status: 'DISABLED' } }))
 
-      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial: jest.fn(leer) })
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial: jest.fn(async () => HISTORIAL_VACIO) })
 
       expect(r).toMatchObject({ outcome: 'FAILED', error: 'CHANNEL_DISABLED' })
       expect(logger.error).toHaveBeenCalledWith(
         expect.stringContaining('DESHABILITADO'),
-        expect.objectContaining({ eventRowId: 'evt1', historialLeido: leido }),
+        expect.objectContaining({ eventRowId: 'evt1', historialLeido: true, eventosDelHistorial: [] }),
       )
+    })
+
+    it('(d) con el historial CAÍDO ya no es CHANNEL_DISABLED: queda HISTORIAL_NO_LEIDO y se reintenta (Codex b1 #2)', async () => {
+      findUnique().mockResolvedValue(fila({ channelLink: { ...fila().channelLink, status: 'DISABLED' } }))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial: jest.fn(async () => null) })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+      expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('no se aceptó ni se registró'))).toBe(false)
     })
 
     // 🔴 La lista de códigos terminales del procesador es una COPIA de `TERMINAL_ERRORS` del job (el job es la autoridad:

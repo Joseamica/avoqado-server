@@ -11,9 +11,10 @@
  *
  * 🔴 Nunca registrar un pedido a ciegas ni dos veces. Si el proceso muere entre el sí de Rappi y la marca, el reintento recibe
  * un 400 al aceptar; entonces el único que puede decir si el pedido es nuestro es su HISTORIAL del lado de Rappi
- * (`GET …/orders/{id}/events`, `leerHistorial`). Sin historial legible no se registra: queda `ACEPTACION_INCIERTA`, con 🚨.
+ * (`GET …/orders/{id}/events`, `leerHistorial`). Sin historial no se registra: si NO se pudo leer queda `HISTORIAL_NO_LEIDO`
+ * (reintentable: el job vuelve a preguntar), y si se leyó sin evidencia, `ACEPTACION_INCIERTA` (terminal), con 🚨.
  */
-import { Prisma } from '@prisma/client'
+import { DeliveryProvider, Prisma } from '@prisma/client'
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -158,17 +159,51 @@ export const MAX_LLAMADAS_LISTO = 3
 type FilaDelAviso = { id: string; resourcePayload: Prisma.JsonValue }
 
 /**
- * La fila del aviso `NEW_ORDER` del pedido, con `FOR UPDATE`, por la llave ÚNICA `dedupKey` que le puso el ingreso
- * (`llaveDeAvisoDePedido`): nunca recorriendo eventos por `externalOrderId`, que no tiene índice. `storeId` es la tienda del
- * vínculo del pedido, la misma con que el ingreso encontró el vínculo y armó la llave.
+ * La fila del aviso `NEW_ORDER` del pedido, con `FOR UPDATE`. `storeId` es la tienda del vínculo del pedido HOY.
+ *
+ *  1. Por la llave ÚNICA `dedupKey` que le puso el ingreso (`llaveDeAvisoDePedido`) con esa tienda. Es el camino de siempre:
+ *     una consulta por el índice único.
+ *  2. 🔴 Si no está, el vínculo cambió de tienda DESPUÉS de recibir el pedido (un vínculo manual, sin consentimiento del dueño,
+ *     lo permite desde SUPERADMIN), y la llave guardada lleva la tienda ORIGINAL. Se busca por lo que no cambia, el pedido: el
+ *     aviso `NEW_ORDER` de Rappi con ese `externalOrderId`, acotado al vínculo que hoy tiene esa tienda (es único por
+ *     proveedor y tienda), y la fila encontrada se bloquea igual. Sin esto el contador no se encontraba y cada intento salía
+ *     «sin tope» (Codex b1 #4). Es un camino raro y de UNA búsqueda: `externalOrderId` no tiene índice, pero el filtro por
+ *     vínculo usa el prefijo `(provider, channelLinkId)` del único compuesto del evento.
+ *
+ * `null` = no hay aviso por ningún camino.
  */
 async function avisoBloqueado(tx: Prisma.TransactionClient, externalOrderId: string, storeId: string): Promise<FilaDelAviso | null> {
   const dedupKey = llaveDeAvisoDePedido(RAPPI_EVENTS.NEW_ORDER, storeId, externalOrderId)
-  const filas = await tx.$queryRaw<FilaDelAviso[]>`
+  const porLlave = await tx.$queryRaw<FilaDelAviso[]>`
     SELECT "id", "resourcePayload" FROM "DeliveryOrderEvent"
      WHERE "dedupKey" = ${dedupKey}
        FOR UPDATE`
-  return filas[0] ?? null
+  if (porLlave[0]) return porLlave[0]
+
+  const original = await tx.deliveryOrderEvent.findFirst({
+    where: {
+      provider: DeliveryProvider.RAPPI,
+      eventType: RAPPI_EVENTS.NEW_ORDER,
+      externalOrderId,
+      channelLink: { is: { provider: DeliveryProvider.RAPPI, externalLocationId: storeId } },
+    },
+    // El más viejo es el aviso original; el id desempata para que la elección sea estable.
+    orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+    select: { id: true },
+  })
+  if (!original) return null
+  const porPedido = await tx.$queryRaw<FilaDelAviso[]>`
+    SELECT "id", "resourcePayload" FROM "DeliveryOrderEvent"
+     WHERE "id" = ${original.id}
+       FOR UPDATE`
+  if (porPedido[0]) {
+    logger.warn('🛵 [Rappi] «listo»: el aviso del pedido se encontró por el pedido y no por su llave (el vínculo cambió de tienda)', {
+      externalOrderId,
+      storeId,
+      eventRowId: original.id,
+    })
+  }
+  return porPedido[0] ?? null
 }
 
 /**
@@ -184,23 +219,31 @@ function guardarListo(tx: Prisma.TransactionClient, filaId: string, listo: NonNu
      WHERE "id" = ${filaId}`
 }
 
+/** `sinAviso`: no se permitió porque el pedido no tiene aviso `NEW_ORDER` por ningún camino (no hay dónde contar). */
+export interface ReservaDeListo {
+  permitido: boolean
+  sinAviso?: boolean
+}
+
 /**
  * ¿Se puede gastar una llamada de «listo» en este pedido? En UNA transacción: bloquea la fila del aviso, y si el «listo» ya
  * cerró o ya se usaron las 3, no; si no, SUMA 1 Y LO GUARDA ANTES de que salga la llamada. Así una llamada que muere a media
  * red ya contó, y un proceso que se reinicia no vuelve a empezar de cero.
  *
- * Sin la fila del aviso (no debería pasar: todo pedido de Rappi nace de uno) se permite con un warn: no hay dónde contar, y
- * negar el «listo» por eso sería peor. El barrido de «listos» espera entre intentos de todos modos.
+ * 🔴 Sin la fila del aviso por ningún camino (no debería pasar: todo pedido de Rappi nace de uno) NO se permite, con 🚨 (Codex
+ * b1 #4). Permitir «sin contar» dejaba salir una llamada en CADA intento —el KDS y el barrido reintentan—, y pasar de tres es
+ * el mal uso con que Rappi amenaza revocar el acceso. Un «listo» que no sale, en cambio, lo cierra Rappi solo en modo
+ * automático.
  */
-export async function reservarLlamadaDeListo(externalOrderId: string, storeId: string): Promise<{ permitido: boolean }> {
-  return prisma.$transaction(async tx => {
+export async function reservarLlamadaDeListo(externalOrderId: string, storeId: string): Promise<ReservaDeListo> {
+  return prisma.$transaction(async (tx): Promise<ReservaDeListo> => {
     const fila = await avisoBloqueado(tx, externalOrderId, storeId)
     if (!fila) {
-      logger.warn('🛵 [Rappi] «listo» sin el aviso NEW_ORDER guardado: no hay dónde contar sus llamadas, se permite', {
+      logger.error('🚨 [Rappi] «listo» sin el aviso NEW_ORDER del pedido: no hay dónde contar sus llamadas y NO sale — revisar el pedido', {
         externalOrderId,
         storeId,
       })
-      return { permitido: true }
+      return { permitido: false, sinAviso: true }
     }
     const listo = leerEstado(fila.resourcePayload).listo
     const llamadas = listo?.llamadas ?? 0
@@ -213,7 +256,8 @@ export async function reservarLlamadaDeListo(externalOrderId: string, storeId: s
 /**
  * El «listo» de este pedido ya no se intenta más, y por qué: `HTTP_2XX` (Rappi lo recibió), `TRANSICION_INVALIDA` (su estado
  * ya no lo admite) o `TOPE` (se usaron las 3). Conserva las llamadas. 🔴 El PRIMER cierre manda: un `TOPE` que llega después
- * no borra que Rappi ya había contestado 2xx. Sin la fila del aviso no hace nada.
+ * no borra que Rappi ya había contestado 2xx. Encuentra la fila igual que la reserva (también si el vínculo cambió de tienda);
+ * sin la fila del aviso no hace nada.
  */
 export async function cerrarListo(externalOrderId: string, storeId: string, como: CierreDeListo): Promise<void> {
   await prisma.$transaction(async tx => {

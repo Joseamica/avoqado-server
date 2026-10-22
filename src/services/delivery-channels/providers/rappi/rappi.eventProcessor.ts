@@ -67,6 +67,7 @@ export const RECLAMO_RAPPI_MS = 45_000
  * 🔴 Los códigos con que un evento queda FAILED para siempre: la reconciliación ya no lo vuelve a tomar. Es una COPIA de
  * `TERMINAL_ERRORS` del job, que es la autoridad (una prueba de este procesador compara las dos listas). La usa la
  * cancelación en espera: un NEW_ORDER con uno de estos ya no se va a registrar, así que no hay a quién esperar.
+ * OJO: `HISTORIAL_NO_LEIDO` NO va aquí: el historial no se pudo leer y el pedido todavía se puede registrar (se reintenta).
  */
 export const ERRORES_TERMINALES: readonly string[] = [
   'ORPHANED',
@@ -77,6 +78,12 @@ export const ERRORES_TERMINALES: readonly string[] = [
   'VARIANTE_BLOQUE_2B',
   'VARIANTE_SIN_CALIBRAR',
 ]
+
+/**
+ * 🔴 El historial del pedido en Rappi NO se pudo leer (timeout, 5xx, cuerpo ilegible). Es REINTENTABLE a propósito: no está en
+ * `ERRORES_TERMINALES` ni en `TERMINAL_ERRORS` del job (Codex b1 #2).
+ */
+const HISTORIAL_NO_LEIDO = 'HISTORIAL_NO_LEIDO'
 
 const esObjeto = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -230,6 +237,24 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
       })
       return null
     }
+  }
+  /**
+   * 🔴 «No pude leer el historial» NO es «lo leí y no hay evidencia» (Codex b1 #2). Cerrar terminal perdía para siempre un
+   * pedido que Rappi SÍ aceptó, aunque el historial volviera al minuto. Queda FAILED REINTENTABLE (`HISTORIAL_NO_LEIDO`): el
+   * job lo retoma con su espera normal, y el reintento vuelve a preguntar —aceptar (400 otra vez) y el historial— sin
+   * registrar nada a ciegas. Si el historial no vuelve nunca, el job agota sus intentos y lo deja POISON con su 🚨.
+   */
+  const cerrarSinHistorial = async (situacion: string, datos: Record<string, unknown>): Promise<RappiProcessResult> => {
+    await cerrar(DeliveryOrderEventStatus.FAILED, undefined, HISTORIAL_NO_LEIDO)
+    logger.error(
+      `🚨 [Rappi] ${situacion} y el historial del pedido NO se pudo leer — no se registra a ciegas; queda FAILED y se reintenta`,
+      {
+        eventRowId,
+        ...datos,
+        historialLeido: false,
+      },
+    )
+    return { outcome: 'FAILED', error: HISTORIAL_NO_LEIDO }
   }
   /**
    * La marca de aceptación, ANTES de registrar la venta. `null` = quedó escrita y se sigue. Si no, el resultado con que este
@@ -496,13 +521,23 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // 🔴 Un canal DESHABILITADO no toma pedidos nuevos: ni se acepta ni se registra (Rappi lo
   // cancela solo al vencer su reloj). Las cancelaciones sí pasan — van arriba, antes del guard.
   // SALVO que Rappi ya lo haya aceptado (la marca, o su historial, leído UNA vez): el cliente ya pagó y el pedido es nuestro,
-  // así que se registra igual y se grita, para que alguien lo prepare o lo resuelva con Rappi.
+  // así que se registra igual y se grita, para que alguien lo prepare o lo resuelva con Rappi. 🔴 Un historial que NO se pudo
+  // leer no decide nada (Codex b1 #2): el pedido pudo quedar aceptado antes de que apagaran el canal, y cerrarlo
+  // CHANNEL_DISABLED (terminal) lo perdía. Queda HISTORIAL_NO_LEIDO y se reintenta.
   if (evento.channelLink.status === DeliveryChannelStatus.DISABLED) {
     let lectura: LecturaDelHistorial | null = null
-    if (!estado.aceptacion) {
+    // Sin id del pedido no hay historial que pedir (y reintentarlo no cambiaría nada): CHANNEL_DISABLED como siempre.
+    if (!estado.aceptacion && identidad.orderId) {
       if (!(await sigueSiendoMio('leer el historial'))) return { outcome: 'IN_FLIGHT' }
       lectura = await lecturaDelHistorial(identidad.orderId)
-      aceptadoSegunHistorial = lectura?.veredicto === 'ACEPTADO'
+      if (!lectura) {
+        return cerrarSinHistorial('llegó un pedido a un canal DESHABILITADO', {
+          orderId: identidad.orderId,
+          venueId: evento.venueId,
+          linkId: evento.channelLink.id,
+        })
+      }
+      aceptadoSegunHistorial = lectura.veredicto === 'ACEPTADO'
     }
     if (!estado.aceptacion && !aceptadoSegunHistorial) {
       await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'CHANNEL_DISABLED')
@@ -511,7 +546,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
         linkId: evento.channelLink.id,
         venueId: evento.venueId,
         orderId: identidad.orderId,
-        // Con el historial caído no se sabe si Rappi lo aceptó: no es lo mismo que «se leyó y no lo aceptó».
+        // `false` sólo si el pedido no trae id (no hubo a quién preguntar): un historial caído ya no llega aquí.
         historialLeido: lectura !== null,
         eventosDelHistorial: lectura?.nombres ?? null,
       })
@@ -594,10 +629,20 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     } else if (r.status === 400) {
       // 🔴 Un 400 puede ser «ya lo aceptaste» (el proceso murió entre el sí de Rappi y la marca) o «ya no está activo» (venció
       // o se canceló). Sólo el historial de Rappi lo distingue, y sin un historial que lo diga NO se registra: sería a ciegas.
+      // Pero «no se pudo leer» (timeout, 5xx) no es «se leyó y no lo dice»: lo primero se reintenta, lo segundo es terminal.
       if (!(await sigueSiendoMio('leer el historial'))) return { outcome: 'IN_FLIGHT' }
       const lectura = await lecturaDelHistorial(normalizado.externalId)
+      if (!lectura) {
+        return cerrarSinHistorial('aceptar contestó 400', {
+          orderId: normalizado.externalId,
+          venueId: evento.venueId,
+          storeId,
+          linkId: evento.channelLink.id,
+          respuesta: r.raw.slice(0, 300),
+        })
+      }
       // Los NOMBRES del historial van en estos logs: así se ajusta la expresión con lo que Rappi de verdad manda (M5).
-      if (lectura?.veredicto === 'YA_NO_ACTIVO') {
+      if (lectura.veredicto === 'YA_NO_ACTIVO') {
         await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'PEDIDO_YA_NO_ACTIVO')
         const datos = { eventRowId, orderId: normalizado.externalId, venueId: evento.venueId, eventosDelHistorial: lectura.nombres }
         // Con `taken` Y un cierre, Rappi lo tuvo ACEPTADO a nuestro nombre y después lo cerró, y aquí nunca fue venta: lo
@@ -611,7 +656,8 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
           logger.warn('🛵 [Rappi] aceptar contestó 400 y el pedido ya no está activo en Rappi (cancelado o vencido): no se registra', datos)
         return { outcome: 'FAILED', accepted: false, error: 'PEDIDO_YA_NO_ACTIVO' }
       }
-      if (lectura?.veredicto !== 'ACEPTADO') {
+      if (lectura.veredicto !== 'ACEPTADO') {
+        // Se LEYÓ y no hay evidencia de aceptación (vacío, o sólo eventos del repartidor): reintentar no la va a inventar.
         await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'ACEPTACION_INCIERTA')
         logger.error('🚨 [Rappi] aceptar contestó 400 y el historial no dice si Rappi lo aceptó — NO se registra; revisar con Rappi', {
           eventRowId,
@@ -619,8 +665,8 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
           venueId: evento.venueId,
           storeId,
           linkId: evento.channelLink.id,
-          historialLeido: lectura !== null,
-          eventosDelHistorial: lectura?.nombres ?? null,
+          historialLeido: true,
+          eventosDelHistorial: lectura.nombres,
           respuesta: r.raw.slice(0, 300),
         })
         return { outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' }

@@ -243,11 +243,13 @@ describe('reservarLlamadaDeListo — la llamada se cuenta en la fila del NEW_ORD
   const ejecutar = (prisma as any).$executeRaw as jest.Mock
   const sqlDe = (m: jest.Mock, i = 0) => (m.mock.calls[i][0] as TemplateStringsArray).join('?')
   const valoresDe = (m: jest.Mock, i = 0) => m.mock.calls[i].slice(1)
+  const buscar = (prisma as any).deliveryOrderEvent.findFirst as jest.Mock
   const LLAVE = 'RAPPI:NEW_ORDER:900175625:722609056'
 
   beforeEach(() => {
     consultar.mockReset()
     ejecutar.mockReset().mockResolvedValue(1)
+    buscar.mockReset().mockResolvedValue(null)
   })
 
   it('el tope es 3: Rappi deja de hacer caso después de la TERCERA solicitud (doc «managing-user-orders»)', () => {
@@ -262,6 +264,46 @@ describe('reservarLlamadaDeListo — la llamada se cuenta en la fila del NEW_ORD
     expect((prisma as any).$transaction).toHaveBeenCalled()
     expect(sqlDe(consultar)).toMatch(/FROM "DeliveryOrderEvent"\s+WHERE "dedupKey" = \?\s+FOR UPDATE/)
     expect(valoresDe(consultar)).toEqual([LLAVE])
+    // Con la llave exacta no hace falta la búsqueda por el pedido (el camino raro).
+    expect(buscar).not.toHaveBeenCalled()
+  })
+
+  // ── Codex b1 #4: un vínculo manual cambió de tienda desde SUPERADMIN ──
+  // La llave guardada lleva la tienda ORIGINAL del pedido y el «listo» llega con la de HOY: por la llave no se encuentra, y
+  // permitir «sin contar» dejaba salir una cuarta llamada. El contador se resuelve con lo que no cambia: el pedido.
+  const BUSQUEDA_POR_EL_PEDIDO = {
+    where: {
+      provider: 'RAPPI',
+      eventType: 'NEW_ORDER',
+      externalOrderId: '722609056',
+      channelLink: { is: { provider: 'RAPPI', externalLocationId: '900175625' } },
+    },
+    orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+    select: { id: true },
+  }
+
+  it('🔴 sin fila por la llave de la tienda de HOY: la busca por el pedido (acotada al vínculo que hoy tiene esa tienda) y la bloquea igual', async () => {
+    consultar.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'evt-original', resourcePayload: { listo: { llamadas: 1 } } }])
+    buscar.mockResolvedValueOnce({ id: 'evt-original' })
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: true })
+
+    expect(buscar).toHaveBeenCalledTimes(1)
+    expect(buscar).toHaveBeenCalledWith(BUSQUEDA_POR_EL_PEDIDO)
+    // La fila encontrada se bloquea por su id ANTES de leer el contador: dos «listos» a la vez cuentan en fila.
+    expect(sqlDe(consultar, 1)).toMatch(/FROM "DeliveryOrderEvent"\s+WHERE "id" = \?\s+FOR UPDATE/)
+    expect(valoresDe(consultar, 1)).toEqual(['evt-original'])
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 2 })
+    expect(valoresDe(ejecutar)).toContain('evt-original')
+  })
+
+  it('🔴 con las 3 llamadas ya contadas en el aviso ORIGINAL, la cuarta no sale aunque llegue con la tienda nueva', async () => {
+    consultar.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'evt-original', resourcePayload: { listo: { llamadas: 3 } } }])
+    buscar.mockResolvedValueOnce({ id: 'evt-original' })
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: false })
+    expect(ejecutar).not.toHaveBeenCalled()
   })
 
   it('sin llamadas previas: permite, y guarda 1 MEZCLANDO en resourcePayload (no lo reemplaza)', async () => {
@@ -299,12 +341,18 @@ describe('reservarLlamadaDeListo — la llamada se cuenta en la fila del NEW_ORD
     expect(ejecutar).not.toHaveBeenCalled()
   })
 
-  it('sin la fila del aviso: permite, con warn (no hay dónde contar), y no escribe', async () => {
+  it('🔴 sin el aviso por ningún camino: NO se permite (🚨, no hay dónde contar) y no escribe', async () => {
+    // Permitir «sin contar» es lo que dejaba salir la cuarta llamada: el KDS y el barrido reintentan, y cada intento salía.
+    // Un «listo» que no sale lo cierra Rappi solo en modo automático; uno de más es el mal uso que amenaza con revocar el acceso.
     consultar.mockResolvedValueOnce([])
 
-    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: true })
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: false, sinAviso: true })
+    expect(buscar).toHaveBeenCalledWith(BUSQUEDA_POR_EL_PEDIDO)
     expect(ejecutar).not.toHaveBeenCalled()
-    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/listo/i), expect.objectContaining({ externalOrderId: '722609056' }))
+    expect(logger.error).toHaveBeenCalledWith(
+      expect.stringMatching(/🚨.*listo/i),
+      expect.objectContaining({ externalOrderId: '722609056', storeId: '900175625' }),
+    )
   })
 })
 
@@ -313,10 +361,25 @@ describe('cerrarListo — el «listo» ya no se intenta más (y por qué)', () =
   const ejecutar = (prisma as any).$executeRaw as jest.Mock
   const sqlDe = (m: jest.Mock, i = 0) => (m.mock.calls[i][0] as TemplateStringsArray).join('?')
   const valoresDe = (m: jest.Mock, i = 0) => m.mock.calls[i].slice(1)
+  const buscar = (prisma as any).deliveryOrderEvent.findFirst as jest.Mock
 
   beforeEach(() => {
     consultar.mockReset()
     ejecutar.mockReset().mockResolvedValue(1)
+    buscar.mockReset().mockResolvedValue(null)
+  })
+
+  it('🔴 usa la MISMA resolución que la reserva: con el vínculo cambiado de tienda, cierra el aviso ORIGINAL (Codex b1 #4)', async () => {
+    consultar.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'evt-original', resourcePayload: { listo: { llamadas: 3 } } }])
+    buscar.mockResolvedValueOnce({ id: 'evt-original' })
+
+    await cerrarListo('722609056', '900175625', 'TOPE')
+
+    expect(buscar).toHaveBeenCalledWith(expect.objectContaining({ where: expect.objectContaining({ externalOrderId: '722609056' }) }))
+    expect(valoresDe(consultar, 1)).toEqual(['evt-original'])
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 3, cerrado: 'TOPE' })
+    expect(valoresDe(ejecutar)).toContain('evt-original')
   })
 
   it('anota el cierre CONSERVANDO las llamadas, mezclando en resourcePayload', async () => {

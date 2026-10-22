@@ -237,6 +237,8 @@ export const rappiAdapter = {
    * llamada se reserva y se CUENTA en la base ANTES de salir (`reservarLlamadaDeListo`, en la fila del aviso `NEW_ORDER`): un
    * reinicio no las olvida. Y cada reserva es UNA petición HTTP (`reintentarEn401: false`).
    *  · sin permiso (ya se usaron las 3, o ya cerró) ⇒ no sale a la red: `terminal`, `TOPE_DE_LISTO`;
+   *  · sin el aviso del pedido, ni por su llave ni por el pedido (no hay dónde contar) ⇒ tampoco sale: `terminal`,
+   *    `LISTO_SIN_AVISO`, sin cierre (no hay fila; el 🚨 lo deja la reserva). Codex b1 #4;
    *  · 2xx ⇒ se cierra (`HTTP_2XX`);
    *  · 400 de transición inválida ⇒ se cierra y es `terminal` (repetirla daría lo mismo);
    *  · lo demás (el 424 «inténtelo más tarde» que dio el sandbox, un 5xx, un 401) se devuelve tal cual: ya contó.
@@ -259,7 +261,10 @@ export const rappiAdapter = {
         }),
       )
 
-    if (!(await estado.reservarLlamadaDeListo(orderId, storeId)).permitido) {
+    const reserva = await estado.reservarLlamadaDeListo(orderId, storeId)
+    if (!reserva.permitido) {
+      // Sin aviso no hay qué cerrar: otra búsqueda sólo repetiría la que acaba de fallar.
+      if (reserva.sinAviso) return { ok: false, status: 0, raw: 'LISTO_SIN_AVISO', terminal: true }
       logger.warn('🛵 [Rappi] «listo» sin llamada: ya se usaron las 3 que Rappi atiende (o ya cerró); no sale a la red', {
         orderId,
         storeId,
