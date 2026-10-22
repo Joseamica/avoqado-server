@@ -704,6 +704,12 @@ const WRITERS: Record<string, Writer> = {
     class: 'METADATA',
     reason: 'kitchen ticket authoring: sentToKitchenAt stamp on lines and the kitchenPendingAt marker on the order',
   },
+  // D1 (21-oct, tablero hz:11d84b54:D1): re-cobrar el vale de una venta CANCELADA. Bajo el candado de esa Order (sesión → vales →
+  // Order), sólo en una cuenta CANCELLED/DELETED, mueve el vínculo único del vale a la procedencia; no toca dinero ni el contenido.
+  'src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas': {
+    class: 'METADATA',
+    reason: 'vale provenance: areaTicketLineId → releasedAreaTicketLineId on a CANCELLED order line, under its Order lock; no money',
+  },
 }
 
 /** Functions that are not fiscal writers themselves but hold the Order lock for a CALLER_LOCKED helper. */

@@ -100,7 +100,7 @@ export interface OrdenFoto extends OrderAmountsForBalance {
   source: string
   externalId: string | null
   /** `giftCardId` OBLIGATORIO (⭐ B6 M4): una cuenta de tarjetas no da ni recibe cobros reasignados. */
-  items: Array<{ areaTicketLineId: string | null; giftCardId: string | null }>
+  items: Array<{ areaTicketLineId: string | null; releasedAreaTicketLineId?: string | null; giftCardId: string | null }>
   /** La mesa que se libera al saldar (Tarea 6d, M-1). */
   tableId: string | null
   /** Cobros COMPLETED de la orden (reembolsos incluidos: el saldo los distingue por `type`). */

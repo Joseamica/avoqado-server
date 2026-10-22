@@ -23,6 +23,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
+import { esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -839,6 +840,11 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
   const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items || [])
 
   for (const item of order.items || []) {
+    // D1: el vale de este renglón se volvió a cobrar en otra cuenta: su producto lo descuenta la otra.
+    if (esValeRevendido(item)) {
+      logger.info('⏭️ [WITH ITEMS] Skipping deduction for a vale line resold in another order', { orderId: order.id, orderItemId: item.id })
+      continue
+    }
     if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
       logger.info('⏭️ [WITH ITEMS] Skipping generic deduction for area-ticket line covered by reservation', {
         orderId: order.id,

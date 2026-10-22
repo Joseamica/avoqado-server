@@ -4378,6 +4378,11 @@ model OrderItem {
   /// Origen v7 inmutable. Único evita importar dos veces la misma línea de vale.
   areaTicketLineId String?         @unique
   areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
+  /// Procedencia de un renglón de vale cuya venta se CANCELÓ y cuyo vale se volvió a cobrar en otra cuenta (21-oct-2026, tablero
+  /// hz:11d84b54:D1). El renglón se queda en su cuenta cancelada (producto, IVA, peso, asignaciones), pero suelta `areaTicketLineId`
+  /// (único) para que la cuenta nueva lo tome. Sigue siendo un renglón DE VALE para clasificar la cuenta, y nunca se descuenta ni se
+  /// cocina aquí: el vale ya es de otra cuenta (si R12-1 reabre esta con dinero tardío). Ver `renglonDeVale.ts`.
+  releasedAreaTicketLineId String?
 
   /// Tarjetas de regalo (spec 2026-10-14 § 4.4): el sobre que esta línea VENDE. Una línea = un sobre (1:1, molde
   /// `areaTicketLineId`). Una cuenta cuyas líneas TODAS tienen `giftCardId` es una «cuenta de tarjetas»: el servidor
@@ -4410,6 +4415,7 @@ model OrderItem {
   @@index([syncStatus]) // ✅ NUEVO
   @@index([fulfillmentAreaId]) // pantalla "vales pendientes" por área
   @@index([orderPromotionId]) // retiro de promoción completa borra por aquí
+  @@index([releasedAreaTicketLineId]) // vale revendido: de qué cuenta cancelada salió
 }
 
 // ==========================================

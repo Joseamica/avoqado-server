@@ -2017,7 +2017,7 @@ export async function splitOrderItemsInTransaction(
       contratoDePrecio: true,
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
-      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true } },
+      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -2198,7 +2198,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
       contratoDePrecio: true,
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
-      items: { select: { id: true, seat: true, areaTicketLineId: true } },
+      items: { select: { id: true, seat: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -2356,7 +2356,12 @@ export async function mergeOrdersInTransaction(
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
-    items: { where: { areaTicketLineId: { not: null } }, select: { areaTicketLineId: true }, take: 1 },
+    items: {
+      // D1: el renglón de un vale revendido (procedencia) también hace a la cuenta «con vales».
+      where: { OR: [{ areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] as Prisma.OrderItemWhereInput[] },
+      select: { areaTicketLineId: true, releasedAreaTicketLineId: true },
+      take: 1,
+    },
   } as const
   const [target, source] = await Promise.all([
     tx.order.findFirst({
