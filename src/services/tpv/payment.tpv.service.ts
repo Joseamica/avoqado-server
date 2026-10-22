@@ -1353,8 +1353,16 @@ async function enqueueCommittedPaymentEffects(
   if (payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
 }
 
-/** `ventaCerrada` (R9-2): la venta ya estaba cerrada y se conservó (R8-1) — lo dice el log de después. */
-type CommittedStandaloneSettlement = { firstSettlement: boolean; postingId: string | null; ventaCerrada: boolean }
+/**
+ * `ventaCerrada` (R9-2): la venta ya estaba cerrada y se conservó (R8-1) — lo dice el log de después.
+ * `reabiertaDeCancelada` (pedidos en línea 1c, S1): estaba CANCELADA y este dinero capturado la reabrió ⇒ el post-commit no arma la comanda.
+ */
+type CommittedStandaloneSettlement = {
+  firstSettlement: boolean
+  postingId: string | null
+  ventaCerrada: boolean
+  reabiertaDeCancelada: boolean
+}
 
 /** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
 export async function settleStandalonePaymentInTx(
@@ -1408,6 +1416,9 @@ export async function settleStandalonePaymentInTx(
         })
   // 🔴 R4-2 (Codex r3): la cancelada CERRADA se guarda cancelada, pero se calcula como cuando se cobró (base + IVA aparte): el total
   // que se escribe aquí es el MISMO con el que mide el aviso de sobrepago de después del commit (`updateOrderTotalsForStandalonePayment`).
+  // 🔴 Pedidos en línea 1c, S1 (Codex plan r1 #7): la cancelada que este dinero reabre no vuelve a la cocina (ni marca ni armado):
+  // su cancelación ya retiró las comandas. Vale para toda cuenta cancelada, no sólo la web.
+  const reabiertaDeCancelada = status !== order.status
   const cuenta = { ...order, status: estadoParaCalcular(status, order.paymentStatus, entraDinero) }
   const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
@@ -1432,7 +1443,7 @@ export async function settleStandalonePaymentInTx(
       ...(saldada && !cobro.cerrada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-      ...(firstSettlement && marcarCocina && { kitchenPendingAt: new Date() }),
+      ...(firstSettlement && marcarCocina && !reabiertaDeCancelada && { kitchenPendingAt: new Date() }),
     },
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
@@ -1444,7 +1455,7 @@ export async function settleStandalonePaymentInTx(
   if (efectosDeCierre && saldada) {
     await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: staffId ?? null, items: order.items })
   }
-  return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada }
+  return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada, reabiertaDeCancelada }
 }
 
 /**
@@ -1892,6 +1903,8 @@ async function updateOrderTotalsForStandalonePayment(
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   let tpvPostingId: string | null = options?.committedSettlement?.postingId ?? null
   const debeRegistrarPosting = isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized
+  // Pedidos en línea 1c (S1): la escritura de abajo lo pone si reabre una CANCELADA con este dinero (no se marca ni arma la cocina).
+  let reabiertaEnEstaPasada = false
 
   const updatedOrder =
     options?.areaTicketAlreadyFinalized || options?.committedSettlement
@@ -1926,7 +1939,7 @@ async function updateOrderTotalsForStandalonePayment(
           // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
           // R4-5: la venta CERRADA que recibe dinero no se reabre (decidido con el estado de cobro releído bajo el candado).
           if (!(entraDinero && esVentaCerrada(current.paymentStatus))) {
-            await reabrirSiRecibeDinero(tx, {
+            const estadoTrasCobro = await reabrirSiRecibeDinero(tx, {
               venueId: order.venueId,
               orderId,
               status: current.status,
@@ -1937,6 +1950,8 @@ async function updateOrderTotalsForStandalonePayment(
               paymentId: currentPaymentId ?? null,
               staffId: staffId ?? null,
             })
+            // S1: la cancelada que este dinero reabre no vuelve a la cocina (ni la marca de abajo ni el armado de después).
+            reabiertaEnEstaPasada = estadoTrasCobro !== current.status
           }
 
           const updated = await tx.order.update({
@@ -1961,7 +1976,7 @@ async function updateOrderTotalsForStandalonePayment(
                   completedAt: new Date(),
                 }),
               ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-              ...(debeRegistrarPosting && options?.marcarCocina && { kitchenPendingAt: new Date() }),
+              ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
             },
             include: {
               items: {
@@ -2430,7 +2445,8 @@ async function updateOrderTotalsForStandalonePayment(
     }
 
     // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al saldar (después del commit; nunca tumba el cobro).
-    if (options?.marcarCocina) {
+    // S1: una cancelada reabierta por dinero capturado —en el cierre transaccional o en la escritura de esta pasada— no arma.
+    if (options?.marcarCocina && !options.committedSettlement?.reabiertaDeCancelada && !reabiertaEnEstaPasada) {
       await armarComandasTrasCommit(updatedOrder.venueId, orderId, 'PAID')
     }
   }

@@ -65,7 +65,8 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
         idempotencyKey: 'k-1',
       }),
     ).toBe('PENDING')
-    expect(tx.order.update).toHaveBeenCalledWith({ where: { id: 'o', venueId: 'v' }, data: { status: 'PENDING' } })
+    // Pedidos en línea 1c (S1): la misma escritura trae su pedido en línea (`select`); aquí no hay (`{}`), así que nada más se escribe.
+    expect(tx.order.update).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'o', venueId: 'v' }, data: { status: 'PENDING' } }))
     expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
     expect(tx.activityLog.create.mock.calls[0][0].data).toMatchObject({
       action: 'ORDER_REOPENED_BY_CAPTURED_PAYMENT',

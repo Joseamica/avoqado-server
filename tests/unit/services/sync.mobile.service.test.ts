@@ -534,6 +534,19 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
+  it('PAY_CASH ack includes cashRetainedCents', async () => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-r',
+      orderNumber: 'A-9',
+      digitalReceipt: null,
+      amount: 6000,
+      tipAmount: 1255,
+      cashRetainedCents: 7255,
+    })
+    const acks = await processIntents(baseParams([{ id: 'i-ret', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 6000 } }]))
+    expect(acks[0]).toMatchObject({ status: 'ACKED', result: { cashRetainedCents: 7255 } })
+  })
+
   // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado. Con la cuenta de Beto en $0 (descuento del 100 %), Ana cerraba su mesa
   // con un PAY_CASH de $0. El pase de R2-6 sólo vale con importe + propina > 0; el $0 en mesa ajena conserva el rechazo de antes.
   it('🔴 R3-1: PAY_CASH de $0 + $0 en mesa ajena ⇒ REJECTED TABLE_OWNED_BY_OTHER, sin tocar payCashOrder', async () => {

@@ -2744,6 +2744,11 @@ export interface CashPaymentResponse {
   tipAmount: number
   method: PaymentMethod
   status: 'COMPLETED'
+  /**
+   * Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. En CENTAVOS enteros (hoy `amount + tipAmount` de lo
+   * REGISTRADO). Las apps calculan el cambio como recibido − `cashRetainedCents`. ADITIVO y opcional: nunca se quita ni se renombra.
+   */
+  cashRetainedCents?: number
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
   changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
@@ -2989,6 +2994,8 @@ export interface AbonoEnTx {
   isFullyPaid: boolean
   /** S1: la venta ya estaba cerrada (PAID/REFUNDED) y recibió dinero ya capturado; se conservó cerrada (`estadoDeCobroAlRecibirDinero`). */
   ventaCerrada: boolean
+  /** Pedidos en línea 1c (S1): la cuenta estaba CANCELADA y este dinero capturado la reabrió ⇒ quien llama no arma la comanda. */
+  reabiertaDeCancelada: boolean
   areaTicketOrder: boolean
   areaTicketSessionId?: string
   tableId?: string | null
@@ -3243,6 +3250,11 @@ export async function registrarAbonoEnTx(
           staffId: effectiveStaffId ?? null,
         })
       : fresh.status
+  // 🔴 Pedidos en línea 1c, S1 (Codex plan r1 #7): una cuenta CANCELADA que se reabre por dinero ya capturado no vuelve a la
+  // cocina: ni la marca durable (`kitchenPendingAt`, que el barrido arma después) ni el armado de después del commit. Su cancelación
+  // ya retiró las comandas; cobrarla no es pedirla otra vez. Vale para toda cuenta cancelada, no sólo la web.
+  const reabiertaDeCancelada = estado !== fresh.status
+  const marcarCocinaAqui = marcarCocina && !reabiertaDeCancelada
   // La cuenta con el estado con el que RECIBE este dinero: los dos saldos se calculan con él (el cierre, con `estado`). La reapertura
   // no toca `version`, así que la CAS de abajo sigue amarrada a la versión leída.
   // 🔴 R4-2 (Codex r3; la misma raíz que la terminal): la cancelada CERRADA sigue cancelada (R2-2) pero se calcula como cuando se
@@ -3331,7 +3343,7 @@ export async function registrarAbonoEnTx(
       // cripto ya se comportaban así.)
       ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
       ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
-      ...(saldaAqui && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+      ...(saldaAqui && marcarCocinaAqui ? { kitchenPendingAt: new Date() } : {}),
       paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
       remainingBalance: cobro.remainingBalance,
       tipAmount: totalTip,
@@ -3452,7 +3464,7 @@ export async function registrarAbonoEnTx(
     // S1 (R9-1, como la terminal): sobre una venta ya cerrada, la finalización concilia el cobro capturado —sin volver a consumir
     // lo que ya tomó su vale de inventario— y decide bajo sus candados si es el primer saldado (`primerSaldado`).
     reconcileCapturedPayment: cobro.cerrada,
-    marcarCocina,
+    marcarCocina: marcarCocinaAqui,
     locked: lockedAreaCheckout,
   })
   // Quién corre los efectos de saldar: el cobro que la saldó, o el que recupera el saldado de un vale (venta cerrada por el barrido).
@@ -3511,6 +3523,7 @@ export async function registrarAbonoEnTx(
     paymentStatus: cobro.paymentStatus,
     isFullyPaid: efectosDeSaldar,
     ventaCerrada: cobro.cerrada,
+    reabiertaDeCancelada,
     aplicadoCents,
     cambioCents,
     areaTicketOrder: areaFinalization.areaTicketOrder,
@@ -3597,6 +3610,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // 🔴 `pesosToCents`, no un `* 100` pelón: reconstruir desde el Decimal guardado dejaba ruido de float (`19.99 → 1998.99…`).
       amount: pesosToCents(Number(pago.amount)),
       tipAmount: pesosToCents(Number(pago.tipAmount)),
+      // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. Mismo valor que la primera vez.
+      cashRetainedCents: pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)),
       changeCents: cambioDeReintento(amount, pago.amount),
       // El método REAL del pago que ya existe: devolver 'CASH' fijo reportaría como efectivo el reintento de un cobro con tarjeta.
       method: pago.method as CashPaymentResponse['method'],
@@ -4047,7 +4062,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al quedar la venta PAGADA. Después del commit; si falla, la marca
   // `kitchenPendingAt` queda y el barrido la arma. `armarComandasTrasCommit` nunca lanza.
-  if (orderFullyPaid && marcarCocina) {
+  // S1: una cancelada reabierta por dinero capturado no vuelve a la cocina (`reabiertaDeCancelada`).
+  if (orderFullyPaid && marcarCocina && !paymentResult.reabiertaDeCancelada) {
     await armarComandasTrasCommit(venueId, orderId, 'PAID')
   }
 
@@ -4080,6 +4096,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     orderNumber: order.orderNumber,
     amount: aplicadoCents,
     tipAmount: tip,
+    // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN.
+    cashRetainedCents: aplicadoCents + tip,
     changeCents: cambioCents,
     method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',
@@ -4501,7 +4519,7 @@ export async function payGiftCardBalanceOnOrder(
       })
     }
   }
-  if (isFullyPaid && marcarCocina) await armarComandasTrasCommit(venueId, orderId, 'PAID')
+  if (isFullyPaid && marcarCocina && !abono.reabiertaDeCancelada) await armarComandasTrasCommit(venueId, orderId, 'PAID')
 
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
