@@ -1,3 +1,4 @@
+import cuid from 'cuid'
 import { Prisma, StampRewardStatus, StampRewardType } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -160,9 +161,14 @@ export async function redeemStampReward(
     // más ganó la carrera y aquí no se crea ningún descuento.
     // Y exige la MISMA versión que se leyó (D1, Codex r1 #2): una devolución puede cancelar este premio y una compra
     // reactivarlo con las condiciones de hoy mientras este canje calculaba el descuento con las de antes.
+    // 🔴 D4 (21-oct): quemar y dejar el rastro al descuento en UNA sola escritura. Antes eran dos, y Postgres vuelve a comprobar
+    // las llaves foráneas de una fila que la misma transacción ya actualizó: la segunda pedía el cliente y cerraba un círculo
+    // con la liquidación de varias cuentas y las métricas del cobro (Codex D3-r5 #2). El id del descuento se genera aquí
+    // (cuid v1, como `@default(cuid())`) y el descuento nace abajo sólo si el premio sí se quemó.
+    const descuentoId = cuid()
     const quemado = await tx.stampReward.updateMany({
       where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING, updatedAt: reward.updatedAt },
-      data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date() },
+      data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date(), orderDiscountId: descuentoId },
     })
     if (quemado.count === 0) {
       throw new BadRequestError('Este premio ya fue canjeado.')
@@ -170,8 +176,9 @@ export async function redeemStampReward(
 
     // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
     await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
-    const descuento = await tx.orderDiscount.create({
+    await tx.orderDiscount.create({
       data: {
+        id: descuentoId,
         orderId: order.id,
         type: 'FIXED_AMOUNT',
         name: reward.rewardLabel,
@@ -187,10 +194,6 @@ export async function redeemStampReward(
         ),
       },
     })
-
-    // Deja el rastro de vuelta: es lo que permitirá devolver el premio si alguien
-    // quita ese descuento de la cuenta.
-    await tx.stampReward.update({ where: { id: rewardId }, data: { orderDiscountId: descuento.id } })
 
     // 🔴 Crear la fila del descuento NO baja la cuenta: `total` y `discountAmount` de
     // la orden son campos calculados. Sin este recálculo el premio queda quemado y el

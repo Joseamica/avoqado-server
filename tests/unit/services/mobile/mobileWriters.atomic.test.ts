@@ -709,7 +709,14 @@ describe('writer-specific fresh decisions', () => {
       },
     })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
-    expect(tx.stampReward.update).toHaveBeenCalledWith({ where: { id: 'rw' }, data: { orderDiscountId: 'od-new' } })
+    // D4 (21-oct): el rastro al descuento va en la MISMA escritura que quema el premio; ya no hay segunda escritura.
+    expect(tx.stampReward.update).not.toHaveBeenCalled()
+    // El descuento del premio es el que nace con id propio (el histórico que se conserva antes no lo trae).
+    const idDelDescuento = tx.orderDiscount.create.mock.calls.map(([args]: any[]) => args.data.id).find(Boolean)
+    expect(idDelDescuento).toMatch(/^c[a-z0-9]{24}$/)
+    expect(tx.stampReward.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REDEEMED', orderDiscountId: idDelDescuento }) }),
+    )
   })
 
   it('redeemStamp losing the reward CAS creates no discount and no totals', async () => {

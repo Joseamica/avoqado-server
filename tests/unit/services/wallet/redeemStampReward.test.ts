@@ -78,6 +78,19 @@ describe('redeemStampReward', () => {
     expect(prismaMock.orderDiscount.create).not.toHaveBeenCalled()
   })
 
+  // D4 (21-oct, Codex D3-r5 #2): el canje escribía el premio DOS veces (quemar y luego ligar el descuento). Postgres vuelve a
+  // comprobar las llaves foráneas de una fila que la misma transacción ya actualizó: la segunda escritura pedía el cliente y
+  // cerraba un círculo con la liquidación de varias cuentas y las métricas del cobro. Ahora es UNA sola escritura.
+  it('🔴 D4: el premio se quema y se liga a su descuento en UNA sola escritura (el id del descuento se genera antes)', async () => {
+    await redeemStampReward('v1', 'o1', 'rw1')
+
+    expect(prismaMock.stampReward.update).not.toHaveBeenCalled()
+    const quemar = (prismaMock.stampReward.updateMany as jest.Mock).mock.calls[0][0]
+    const crear = (prismaMock.orderDiscount.create as jest.Mock).mock.calls[0][0]
+    expect(quemar.data).toMatchObject({ status: 'REDEEMED', orderDiscountId: crear.data.id })
+    expect(crear.data.id).toMatch(/^c[a-z0-9]{24}$/) // cuid v1, como @default(cuid())
+  })
+
   it('🔴 el MISMO premio no se puede canjear dos veces', async () => {
     // Dos cajeros tocan "canjear" a la vez, cada uno en SU cuenta. El chequeo de estado
     // corre bajo el candado de cada orden, pero dos órdenes tienen dos candados: los dos
