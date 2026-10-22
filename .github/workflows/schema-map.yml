@@ -36,7 +36,7 @@ jobs:
 
     steps:
       - name: 📥 Checkout code
-        uses: actions/checkout@v4
+        uses: actions/checkout@v7
         with:
           # On pull_request events, check out the PR's HEAD branch (not the
           # detached merge ref) so the auto-commit step can push the regenerated
