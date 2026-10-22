@@ -31,6 +31,7 @@ import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGif
 import { lockGiftCardsForUpdate } from '@/services/giftCards/giftCardLedger'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 import { listOrders, payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
 import type { CreateOrderItemInput } from '@/services/mobile/order.mobile.service'
 import { getPaymentByKey, payNewOrder } from '@/controllers/mobile/giftCard.mobile.controller'
@@ -232,6 +233,77 @@ describe('pay-new-order · Postgres real', () => {
     expect(await usosDelDescuento()).toBe(usosAntes + 1)
     expect(await saldoDe(t.id)).toBe('500.00')
     expect(await prisma.payment.count({ where: { venueId, orderId: r.orderId } })).toBe(1)
+  })
+
+  /**
+   * Cierre B (al traer `develop`): D4 de `develop` quema el premio y lo liga a su descuento en UNA sola escritura, porque la segunda
+   * hacía a Postgres volver a comprobar las llaves foráneas del premio (pedía el cliente) y cerraba un círculo con la liquidación de
+   * cuentas y las métricas del cobro (Codex D3-r5 #2). Aquí el canje corre DENTRO de la transacción larga de `pay-new-order`, así que
+   * se mide en TODA esa transacción, no sólo en el canje, con `pg_stat_xact_user_tables` leído con su mismo `tx` al empezar y justo
+   * antes del commit. Se resta: esa vista trae lo que la conexión todavía no reportó, y ahí pueden ir transacciones anteriores de la
+   * misma conexión (Postgres reporta al quedar inactiva y a lo más cada 500 ms); dentro de una transacción no reporta nada.
+   */
+  it('🔴 D4 dentro de pay-new-order: en toda la transacción la fila del premio se escribe UNA sola vez, ya ligada al descuento que nace', async () => {
+    type Conteo = { relname: string; ins: bigint; upd: bigint }
+    const medir = async (tx: Prisma.TransactionClient) => {
+      const filas = await tx.$queryRaw<Conteo[]>`
+        SELECT relname::text AS relname, n_tup_ins AS ins, n_tup_upd AS upd
+        FROM pg_stat_xact_user_tables WHERE relname IN ('Order', 'StampReward')`
+      const de = (tabla: string) => filas.find(x => x.relname === tabla)
+      return { ordenesCreadas: Number(de('Order')?.ins ?? 0), escriturasDelPremio: Number(de('StampReward')?.upd ?? 0) }
+    }
+    /** Corre `fn` con el `tx` y devuelve lo que ESA transacción escribió (lo de antes, no reportado, se resta). */
+    const loQueEscribe = async (tx: Prisma.TransactionClient, fn: () => Promise<unknown>) => {
+      const antes = await medir(tx)
+      const resultado = await fn()
+      const despues = await medir(tx)
+      return {
+        resultado,
+        ordenesCreadas: despues.ordenesCreadas - antes.ordenesCreadas,
+        escriturasDelPremio: despues.escriturasDelPremio - antes.escriturasDelPremio,
+      }
+    }
+
+    // El medidor primero: dos escrituras a la fila de un premio en una transacción ⇒ 2 (así se vería el canje de antes de D4).
+    const control = await premio(clienteId)
+    const calibracion = await prisma.$transaction(tx =>
+      loQueEscribe(tx, async () => {
+        await tx.stampReward.update({ where: { id: control }, data: { rewardLabel: 'control 1' } })
+        await tx.stampReward.update({ where: { id: control }, data: { rewardLabel: 'control 2' } })
+      }),
+    )
+    expect(calibracion.escriturasDelPremio).toBe(2)
+
+    // La venta: cada transacción con el presupuesto del cobro se mide de principio a fin, con su mismo `tx`.
+    const medidas: Array<{ ordenesCreadas: number; escriturasDelPremio: number }> = []
+    const transaccionReal = prisma.$transaction.bind(prisma) as (fn: unknown, opts?: unknown) => Promise<unknown>
+    const espia = jest.spyOn(prisma, '$transaction').mockImplementation(((fn: unknown, opts?: unknown) => {
+      if (typeof fn !== 'function' || opts !== ORDER_LOCK_WAIT_BUDGET) return transaccionReal(fn, opts)
+      return transaccionReal(async (tx: Prisma.TransactionClient) => {
+        const m = await loQueEscribe(tx, () => (fn as (t: Prisma.TransactionClient) => Promise<unknown>)(tx))
+        medidas.push({ ordenesCreadas: m.ordenesCreadas, escriturasDelPremio: m.escriturasDelPremio })
+        return m.resultado
+      }, opts)
+    }) as never)
+    const t = await tarjeta(1000)
+    const premioId = await premio(clienteId)
+    const llave = llaveNueva('d4-una-escritura')
+    let r: Awaited<ReturnType<typeof payGiftCardOnNewOrder>>
+    try {
+      r = await payGiftCardOnNewOrder(venueId, venta(llave, t.codigo, { stampRewardId: premioId }))
+    } finally {
+      espia.mockRestore()
+    }
+
+    // La transacción de la venta (la que creó la cuenta): una sola, y en ella el premio se escribió UNA vez.
+    expect(medidas.filter(m => m.ordenesCreadas > 0)).toEqual([{ ordenesCreadas: 1, escriturasDelPremio: 1 }])
+    const quemado = await prisma.stampReward.findUniqueOrThrow({ where: { id: premioId } })
+    expect(quemado.status).toBe('REDEEMED')
+    // Esa única escritura ya trae el rastro: apunta al descuento del premio que nació en la cuenta (cuid v1).
+    expect(quemado.orderDiscountId).toMatch(/^c[a-z0-9]{24}$/)
+    const descuento = await prisma.orderDiscount.findUniqueOrThrow({ where: { id: quemado.orderDiscountId! } })
+    expect([descuento.orderId, descuento.name, descuento.amount.toFixed(2)]).toEqual([r.orderId, '$100 de premio', '100.00'])
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })).total.toFixed(2)).toBe('800.00')
   })
 
   it('con amount = total ⇒ PAID, con el vale de inventario de la venta y la comanda armada (como en pay-gift-card)', async () => {
