@@ -30,6 +30,8 @@ const PAID_ORDER: Prisma.OrderWhereInput = {
  * misma pasada y DESPUÉS de R2; nunca la máquina de estados.
  * - `paymentMode` explícito: en la fase 2 la tarjeta queda PAGADA al aceptar y sin este filtro se «entregaría» sola.
  * - ACEPTADO espera a su hora estimada: quien pagó al llegar con la comida aún en la cocina no desaparece de «En preparación».
+ *   Y si su comanda se empezó a imprimir (`printClaimedAt`) sin confirmarse (`printedAt`), espera a la confirmación, a «Listo»
+ *   o al botón «Entregado» (S4). `READY` no cambia.
  * - Nunca `PENDING_ACCEPTANCE` (un pedido pagado antes de aceptarse lo sigue aceptando una persona, R1); `PARTIAL`, `REFUNDED`
  *   o una cuenta con cualquier reembolso (A3) no cierran. El CAS repite el filtro de la cuenta: un reembolso que cae entre la
  *   lectura y la escritura tampoco se entrega.
@@ -49,7 +51,16 @@ export async function syncOnlineOrdersOfPaidPickups(
         ...(scope.venueId !== undefined ? { venueId: scope.venueId } : {}),
         paymentMode: OnlineOrderPaymentMode.PAY_AT_PICKUP,
         order: PAID_ORDER,
-        OR: [{ status: OnlineOrderStatus.READY }, { status: OnlineOrderStatus.ACCEPTED, estimatedReadyAt: { lte: now } }],
+        OR: [
+          { status: OnlineOrderStatus.READY },
+          // S4: una comanda empezada (reclamada) y nunca confirmada NO se entrega sola por hora: ya `COMPLETED` no admite
+          // reclamo y la comanda se perdería. Sin reclamo (p. ej. un negocio sin impresoras) o ya confirmada, entrega normal.
+          {
+            status: OnlineOrderStatus.ACCEPTED,
+            estimatedReadyAt: { lte: now },
+            OR: [{ printClaimedAt: null }, { printedAt: { not: null } }],
+          },
+        ],
       },
       select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
       orderBy: { id: 'asc' },
