@@ -15,7 +15,8 @@ import {
   sondearPedidosRappi,
   tiendasEscribiblesRappi,
 } from '../services/delivery-channels/providers/rappi/rappi.client'
-import { processRappiEvent } from '../services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import { DeliveryWriteNotSentError } from '../services/delivery-channels/core/types'
+import { processRappiEvent, type RappiProcessOutcome } from '../services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { INTERVALO_SONDEO_MS, type RappiRespuesta } from '../services/delivery-channels/providers/rappi/rappi.http'
 import { ESTADOS_VIVOS_RAPPI, guardarPedidoSondeadoRappi } from '../services/delivery-channels/providers/rappi/rappi.webhookIngress'
 
@@ -34,12 +35,16 @@ import { ESTADOS_VIVOS_RAPPI, guardarPedidoSondeadoRappi } from '../services/del
  *      ninguna otra llamada de red en medio. Si el proceso muere aquí, el pedido ya no vuelve por el GET: lo recupera el paso 3.
  *   3. `GET …/orders/status/sent` (lectura, global, ~10 min): los de NUESTRAS tiendas se guardan igual; los de otras se ignoran.
  *   4. Lo que se guardó se procesa (`processRappiEvent`, que reclama la fila: nadie lo trabaja dos veces).
+ * Si los GET por tienda fallan porque Rappi no nos dio token (login rechazado o caído), esa pasada NO pide `status/sent` y el
+ * sondeo se PAUSA 5 min, con un solo warn por racha: sin la pausa machacaba el login cada 45 s (2 intentos fallidos por pasada),
+ * contra el 98 % de éxito que Rappi exige. Al terminar la pausa se vuelve a intentar; si el login ya funciona, todo sigue normal.
  * Un pedido que llega por el sondeo Y por el webhook, en cualquier orden, choca en el índice único `dedupKey` y se registra UNA
  * vez (`guardarPedidoSondeadoRappi`).
  *
  * Ritmo: el cron toca cada 15 s (segundos 7, 22, 37 y 52: nunca :00, `.claude/rules/cron-jobs.md`) y una pasada sale sólo si
- * pasaron 45 s desde que empezó la anterior (`INTERVALO_SONDEO_MS`, lo que Rappi pide para descargar pedidos). Ningún patrón de
- * cron da 45 s parejos; éste no los acorta nunca, ni después de una pasada lenta.
+ * pasaron 45 s desde que empezó la anterior (`INTERVALO_SONDEO_MS`, lo que Rappi pide para descargar pedidos), con 1 s de holgura
+ * para el retraso de un tick. Ningún patrón de cron da 45 s parejos: con éste, dos pasadas quedan a 45 s (las del grid), o a ~44 s
+ * en el peor caso (si el tick anterior llegó hasta 1 s tarde), y nunca a 15 ni 30 s, ni después de una pasada lenta.
  *
  * 🔴 UNA SOLA INSTANCIA: el candado de «una pasada a la vez» es en memoria, y dos servidores con el interruptor prendido se
  * robarían los pedidos entre sí (`.claude/rules/una-sola-instancia.md`).
@@ -50,7 +55,10 @@ export class RappiOrderPollJob {
   /** Cada 15 s, en los segundos 7, 22, 37 y 52 — NUNCA :00 (regla anti-estampida). La pasada sale cada 45 s (ver `tick`). */
   private readonly CRON_PATTERN = '7,22,37,52 * * * * *'
 
-  /** El cron no es exacto al milisegundo: sin esta holgura, un tick que llega 2 ms antes de los 45 s se brincaría hasta los 60. */
+  /**
+   * El cron no es exacto al milisegundo: sin esta holgura, un tick que llega 2 ms antes de los 45 s se brincaría hasta los 60. El
+   * costo: si el tick anterior llegó hasta 1 s tarde, dos pasadas pueden quedar a ~44 s (nunca menos).
+   */
   private readonly HOLGURA_MS = 1_000
 
   /** Cuántas tiendas se sondean a la vez: cada GET trae su techo de 10 s y una tienda colgada no detiene a las demás. */
@@ -67,6 +75,15 @@ export class RappiOrderPollJob {
 
   /** Sin llaves de la integración no sale nada; se avisa UNA vez por proceso, no en cada pasada. */
   private avisoSinLlaves = false
+
+  /** Cuánto se pausa el sondeo cuando Rappi no nos da token: no se machaca un login que está fallando. */
+  private readonly PAUSA_SIN_LOGIN_MS = 5 * 60_000
+
+  /** Hasta cuándo dura la pausa por falta de token (`null` = sin pausa). En memoria: un reinicio la levanta, y eso está bien. */
+  private pausadoHastaMs: number | null = null
+
+  /** ¿Venimos de una racha sin token? Para avisar UNA vez al empezarla y decir cuándo volvió. */
+  private enRachaSinLogin = false
 
   start(): void {
     if (this.job) return
@@ -125,6 +142,10 @@ export class RappiOrderPollJob {
   }
 
   private async pasada(resumen: ResumenDelSondeo): Promise<void> {
+    if (this.pausadoHastaMs !== null && Date.now() < this.pausadoHastaMs) {
+      resumen.saltada = 'PAUSA_SIN_LOGIN' // ya se avisó al empezar la racha: ni login, ni GET, ni status/sent
+      return
+    }
     const autorizadas = tiendasEscribiblesRappi()
     if (autorizadas.length === 0) {
       resumen.saltada = 'SIN_TIENDAS'
@@ -166,42 +187,72 @@ export class RappiOrderPollJob {
     const porProcesar: string[] = []
 
     // 2. Por tienda: GET y, sin otra llamada de red en medio, guardar TODO lo que trajo.
+    let sinToken = false
     await enParalelo(tiendas, this.TIENDAS_EN_PARALELO, async storeId => {
-      const pedidos = await leerLista(() => sondearPedidosRappi(storeId), { storeId })
-      if (!pedidos) {
+      // Sin token para una, no lo hay para ninguna (es uno por superficie): no se pide otra vez por cada tienda.
+      if (sinToken) return
+      const leida = await leerLista(() => sondearPedidosRappi(storeId), { storeId })
+      if (!leida.ok) {
         resumen.fallidas++
+        if (leida.sinToken) sinToken = true
         return
       }
-      for (const p of pedidos) await this.guardar(p, 'TIENDA', storeId, resumen, porProcesar)
+      for (const p of leida.lista) await this.guardar(p, 'TIENDA', storeId, resumen, porProcesar)
     })
 
-    // 3. La recuperación: lo que está en SENT. Lectura global: sólo cuenta lo de nuestras tiendas.
-    const elegibles = new Set(tiendas)
-    const enviados = await leerLista(() => pedidosEnviadosRappi(), { lista: 'status/sent' })
-    if (!enviados) resumen.fallidas++
-    else {
-      for (const p of enviados) {
-        const storeId = rappiAdapter.extractIdentity(p).storeId
-        if (!storeId || !elegibles.has(storeId)) {
-          resumen.ignorados++ // de otra tienda de la integración: no es nuestro, y no se dice nada
-          continue
+    if (sinToken) {
+      // 🔴 Ni `status/sent` (sería OTRO login fallido) ni la siguiente pasada en 45 s: pausa de 5 min.
+      this.pausarPorFaltaDeToken()
+    } else {
+      if (this.enRachaSinLogin) logger.info('🛵 [Rappi sondeo] el login volvió: el sondeo sigue normal')
+      this.enRachaSinLogin = false
+      this.pausadoHastaMs = null
+
+      // 3. La recuperación: lo que está en SENT. Lectura global: sólo cuenta lo de nuestras tiendas.
+      const elegibles = new Set(tiendas)
+      const enviados = await leerLista(() => pedidosEnviadosRappi(), { lista: 'status/sent' })
+      if (!enviados.ok) resumen.fallidas++
+      else {
+        for (const p of enviados.lista) {
+          const identidad = identidadLegible(p)
+          if (!identidad) {
+            resumen.descartados++
+            logger.warn('🛵 [Rappi sondeo] un elemento de status/sent con una identidad ilegible: no se guarda', { lista: 'status/sent' })
+            continue
+          }
+          if (!identidad.storeId || !elegibles.has(identidad.storeId)) {
+            resumen.ignorados++ // de otra tienda de la integración: no es nuestro, y no se dice nada
+            continue
+          }
+          await this.guardar(p, 'ENVIADOS', identidad.storeId, resumen, porProcesar)
         }
-        await this.guardar(p, 'ENVIADOS', storeId, resumen, porProcesar)
       }
     }
 
     // 4. Procesar lo guardado. El procesador reclama la fila, así que el webhook o el carril de Rappi no lo repiten.
     await enParalelo(porProcesar, this.PROCESOS_EN_PARALELO, async eventRowId => {
       try {
-        await processRappiEvent(eventRowId)
-        resumen.procesados++
+        const r = await processRappiEvent(eventRowId)
+        resumen.desenlaces[r.outcome] = (resumen.desenlaces[r.outcome] ?? 0) + 1
+        if (r.outcome === 'PROCESSED') resumen.procesados++
       } catch (err) {
+        resumen.desenlaces.LANZO = (resumen.desenlaces.LANZO ?? 0) + 1
         logger.error('❌ [Rappi sondeo] el procesamiento lanzó; el evento quedó guardado y lo retoma el carril de Rappi', {
           eventRowId,
           error: nombreDelError(err),
         })
       }
     })
+  }
+
+  /** Pausa el sondeo 5 min porque Rappi no nos dio token. Un solo warn por racha; las pausas siguientes de la misma racha, info. */
+  private pausarPorFaltaDeToken(): void {
+    this.pausadoHastaMs = Date.now() + this.PAUSA_SIN_LOGIN_MS
+    const datos = { pausaMin: this.PAUSA_SIN_LOGIN_MS / 60_000 }
+    if (!this.enRachaSinLogin) {
+      logger.warn('🛵 [Rappi sondeo] Rappi no nos dio token: el sondeo se pausa para no machacar el login (lo tapa el webhook)', datos)
+    } else logger.info('🛵 [Rappi sondeo] sigue sin token: otra pausa', datos)
+    this.enRachaSinLogin = true
   }
 
   /**
@@ -215,7 +266,13 @@ export class RappiOrderPollJob {
     resumen: ResumenDelSondeo,
     porProcesar: string[],
   ): Promise<void> {
-    const orderId = rappiAdapter.extractIdentity(pedido).orderId
+    const identidad = identidadLegible(pedido)
+    if (!identidad) {
+      resumen.descartados++
+      logger.warn('🛵 [Rappi sondeo] un elemento con una identidad ilegible: no se guarda', { storeId, origen })
+      return
+    }
+    const orderId = identidad.orderId
     let r: Awaited<ReturnType<typeof guardarPedidoSondeadoRappi>>
     try {
       r = await guardarPedidoSondeadoRappi(pedido)
@@ -255,11 +312,11 @@ type OrigenDelSondeo = 'TIENDA' | 'ENVIADOS'
 
 export interface ResumenDelSondeo {
   /** Por qué no hubo pasada (o se cortó); sin valor = corrió. */
-  saltada?: 'APAGADO' | 'EN_CURSO' | 'SIN_TIENDAS' | 'SIN_CREDENCIALES' | 'FALLO'
+  saltada?: 'APAGADO' | 'EN_CURSO' | 'SIN_TIENDAS' | 'SIN_CREDENCIALES' | 'PAUSA_SIN_LOGIN' | 'FALLO'
   tiendas: number
   guardados: number
   duplicados: number
-  /** Elementos sin id de pedido o sin tienda. */
+  /** Elementos sin id de pedido o sin tienda, o con una identidad que no se puede leer. */
   descartados: number
   /** De `status/sent`, de tiendas que no son nuestras. */
   ignorados: number
@@ -267,37 +324,57 @@ export interface ResumenDelSondeo {
   fallidas: number
   /** Pedidos que la base no dejó guardar (los recupera `status/sent`). */
   noGuardados: number
+  /** Los que el procesador dejó PROCESSED (aceptados y registrados). El resto va en `desenlaces`. */
   procesados: number
+  /** Cuántos dio cada desenlace del procesador (`IN_FLIGHT`, `FAILED`…; `LANZO` = el procesador lanzó). */
+  desenlaces: Partial<Record<RappiProcessOutcome | 'LANZO', number>>
 }
 
 function resumenVacio(): ResumenDelSondeo {
-  return { tiendas: 0, guardados: 0, duplicados: 0, descartados: 0, ignorados: 0, fallidas: 0, noGuardados: 0, procesados: 0 }
+  return {
+    tiendas: 0,
+    guardados: 0,
+    duplicados: 0,
+    descartados: 0,
+    ignorados: 0,
+    fallidas: 0,
+    noGuardados: 0,
+    procesados: 0,
+    desenlaces: {},
+  }
 }
 
+type ListaLeida = { ok: true; lista: unknown[] } | { ok: false; sinToken: boolean }
+
 /**
- * Lee la lista de una respuesta. `null` = no se pudo (red, un no-2xx, un 2xx que no es lista), con un `warn` que lleva la tienda
- * y el status, NUNCA el cuerpo (trae datos del cliente) ni un 🚨: con una tienda caída serían ~1,900 avisos al día. Un cuerpo
- * vacío es una lista vacía (no hay pedidos que perder).
+ * Lee la lista de una respuesta. `ok: false` = no se pudo (red, un no-2xx, un 2xx que no es lista), con un `warn` que lleva la
+ * tienda y el status, NUNCA el cuerpo (trae datos del cliente) ni un 🚨: con una tienda caída serían ~1,900 avisos al día. Un
+ * cuerpo vacío es una lista vacía (no hay pedidos que perder).
+ *
+ * `sinToken`: la petición no salió porque no hubo token (el GET por tienda lleva el candado de escritura, así que `llamarRappi` lo
+ * dice con `DeliveryWriteNotSentError('UNAVAILABLE')`). Sin warn aquí: el login ya avisó (🚨 al empezar la racha) y la pausa
+ * avisa una vez.
  */
-async function leerLista(llamar: () => Promise<RappiRespuesta>, datos: Record<string, string>): Promise<unknown[] | null> {
+async function leerLista(llamar: () => Promise<RappiRespuesta>, datos: Record<string, string>): Promise<ListaLeida> {
   let r: RappiRespuesta
   try {
     r = await llamar()
   } catch (err) {
+    if (err instanceof DeliveryWriteNotSentError && err.reason === 'UNAVAILABLE') return { ok: false, sinToken: true }
     logger.warn('🛵 [Rappi sondeo] no se pudo leer la lista de pedidos', {
       ...datos,
       error: (err instanceof Error ? err.message : String(err)).slice(0, 300),
     })
-    return null
+    return { ok: false, sinToken: false }
   }
   if (!r.ok) {
     logger.warn('🛵 [Rappi sondeo] Rappi contestó un error a la lista de pedidos', { ...datos, status: r.status })
-    return null
+    return { ok: false, sinToken: false }
   }
-  if (!r.raw.trim()) return []
+  if (!r.raw.trim()) return { ok: true, lista: [] }
   try {
     const lista: unknown = JSON.parse(r.raw)
-    if (Array.isArray(lista)) return lista
+    if (Array.isArray(lista)) return { ok: true, lista }
   } catch {
     // cae abajo: el aviso es el mismo para «no es JSON» y «no es una lista»
   }
@@ -306,7 +383,21 @@ async function leerLista(llamar: () => Promise<RappiRespuesta>, datos: Record<st
     status: r.status,
     bytes: r.raw.length,
   })
-  return null
+  return { ok: false, sinToken: false }
+}
+
+/**
+ * La identidad de un elemento de la lista, o `null` si no se puede leer: `extractIdentity` hace `.trim()` sobre los ids, y uno que no
+ * es texto (`external_id: 123`) lanza TypeError. Sin esto, un elemento raro dejaba sin guardar a los que lo seguían en la lista (que
+ * el GET ya había pasado a SENT) y tumbaba la pasada en `status/sent`.
+ */
+function identidadLegible(p: unknown): { storeId: string | null; orderId: string | null } | null {
+  try {
+    const { storeId, orderId } = rappiAdapter.extractIdentity(p)
+    return { storeId, orderId }
+  } catch {
+    return null
+  }
 }
 
 /** Hasta `tope` trabajos a la vez; cada uno que termina toma el siguiente. Un trabajo que lanza no detiene a los demás. */

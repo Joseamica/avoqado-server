@@ -6,6 +6,8 @@
  */
 import {
   _resetRappiTokenCacheForTests,
+  anotarLoginExitoso,
+  anotarLoginFallido,
   cabeceraRappi,
   getRappiToken,
   invalidarToken,
@@ -135,5 +137,37 @@ describe('cabeceraRappi', () => {
     const h = cabeceraRappi('abc')
     expect(h['x-authorization']).toBe('Bearer abc')
     expect(h.Authorization).toBeUndefined()
+  })
+})
+
+// Tarea 20, ronda 1 (I-1): un login rechazado gritaba 🚨 en CADA intento (con el sondeo prendido, ~3,800 al día). Ahora el 🚨
+// sale sólo al EMPEZAR una racha de fallos por superficie; el primer login bueno la cierra y rearma el aviso.
+describe('racha de logins fallidos', () => {
+  beforeEach(() => _resetRappiTokenCacheForTests())
+
+  it('🔴 sólo el PRIMER fallo de la racha la empieza; los siguientes no', () => {
+    expect(anotarLoginFallido('integrations')).toBe(true)
+    expect(anotarLoginFallido('integrations')).toBe(false)
+    expect(anotarLoginFallido('integrations')).toBe(false)
+  })
+
+  it('el primer login bueno cierra la racha y rearma el aviso', () => {
+    anotarLoginFallido('integrations')
+    expect(anotarLoginExitoso('integrations')).toBe(true)
+    expect(anotarLoginExitoso('integrations')).toBe(false) // sin racha, un éxito no dice nada
+    expect(anotarLoginFallido('integrations')).toBe(true) // racha nueva: avisa otra vez
+  })
+
+  it('cada superficie lleva su racha', () => {
+    expect(anotarLoginFallido('integrations')).toBe(true)
+    expect(anotarLoginFallido('utils')).toBe(true)
+    expect(anotarLoginExitoso('utils')).toBe(true)
+    expect(anotarLoginFallido('integrations')).toBe(false)
+  })
+
+  it('el reset de pruebas también borra las rachas', () => {
+    anotarLoginFallido('integrations')
+    _resetRappiTokenCacheForTests()
+    expect(anotarLoginFallido('integrations')).toBe(true)
   })
 })

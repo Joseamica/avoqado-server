@@ -323,13 +323,20 @@ export type RappiSondeoOutcome = 'PERSISTED' | 'DUPLICATE' | 'MALFORMED'
  * perdería.
  *
  * Sin id de pedido o sin tienda NO se guarda (`MALFORMED`): su llave sería `sin-pedido`/`sin-tienda` y chocaría con cualquier
- * otro roto. Nunca lanza por el cuerpo; un fallo de la base sí se propaga (quien llama decide).
+ * otro roto. Tampoco con una identidad que no se puede leer (un id que no es texto). Nunca lanza por el cuerpo; un fallo de la
+ * base sí se propaga (quien llama decide).
  */
 export async function guardarPedidoSondeadoRappi(
   payload: unknown,
 ): Promise<{ outcome: RappiSondeoOutcome; eventRowId?: string; evento?: string }> {
   if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return { outcome: 'MALFORMED' }
-  const identidad = rappiAdapter.extractIdentity(payload)
+  let identidad: ReturnType<typeof rappiAdapter.extractIdentity>
+  try {
+    identidad = rappiAdapter.extractIdentity(payload)
+  } catch {
+    // Un id que no es texto (`external_id: 123`) hace lanzar el `.trim()` de la identidad: es un elemento roto, no una caída.
+    return { outcome: 'MALFORMED' }
+  }
   if (!identidad.orderId || !identidad.storeId) return { outcome: 'MALFORMED' }
 
   const evento = esPedidoProgramado(payload as RappiOrderPayload) ? RAPPI_EVENTS.NEW_ORDER_SCHEDULED : RAPPI_EVENTS.NEW_ORDER

@@ -226,10 +226,11 @@ describe('rappi.client — self-onboarding', () => {
         RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
       })
       const urls = capturarFetch()
-      await rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders' })
+      // Una LECTURA de ejemplo: el `GET …/orders` global ya no sirve aquí, lleva el candado de tiendas (Tarea 20, ronda 1).
+      await rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders/status/sent' })
       expect(urls).toEqual([
         'https://api.rappi.com.mx/restaurants/auth/v1/token/login/integrations/',
-        'https://services.mxgrability.rappi.com/api/v2/restaurants-integrations-public-api/orders',
+        'https://services.mxgrability.rappi.com/api/v2/restaurants-integrations-public-api/orders/status/sent',
       ])
     })
 
@@ -241,7 +242,9 @@ describe('rappi.client — self-onboarding', () => {
         RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
       })
       const urls = capturarFetch()
-      await expect(rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders' })).rejects.toThrow(/país/i)
+      await expect(rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders/status/sent' })).rejects.toThrow(
+        /país/i,
+      )
       expect(urls).toHaveLength(0)
     })
   })

@@ -8,7 +8,6 @@
 import { DeliveryWriteNotSentError } from '../../../../src/services/delivery-channels/core/types'
 import {
   assertTiendaEscribible,
-  crearEspaciadorDeSondeo,
   hostDeLoginRappi,
   hostRappi,
   INTERVALO_SONDEO_MS,
@@ -153,6 +152,31 @@ describe('llamarRappi', () => {
       llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/x/orders', cambiaEstado: true }),
     ).rejects.toThrow(RappiEscrituraBloqueadaError)
     expect(d.fetchImpl).not.toHaveBeenCalled()
+  })
+
+  // Tarea 20, ronda 1 (M-2): el candado no puede depender de que el llamador se acuerde de la bandera. La RUTA de la lista de
+  // pedidos basta: por tienda (host nuevo) y la global clásica. `status/sent` y el historial de un pedido siguen siendo lecturas.
+  it.each([
+    ['/restaurants/orders/v1/stores/901/orders', '901'],
+    ['/restaurants/orders/v1/stores/901/orders/', '901'],
+    ['/restaurants/orders/v1/stores/901/orders?limit=5', '901'],
+    ['/api/v2/restaurants-integrations-public-api/orders', undefined],
+    ['/api/v2/restaurants-integrations-public-api/orders/', undefined],
+  ])('🔴 un GET a la lista de pedidos (%s) lleva el candado SIN la bandera', async (ruta, storeId) => {
+    const d = deps({ tiendasEscribibles: ['900'] })
+    await expect(llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta, storeId })).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(d.fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    '/api/v2/restaurants-integrations-public-api/orders/status/sent',
+    '/api/v2/restaurants-integrations-public-api/orders/570494427/events',
+    '/restaurants/orders/v1/stores/901/orders/status/sent',
+    '/orders',
+  ])('%s sigue siendo una lectura: sale sin tienda autorizada', async ruta => {
+    const d = deps()
+    await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta })
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1)
   })
 
   it('un GET que cambia estado SÍ sale a una tienda autorizada, como GET', async () => {
@@ -325,63 +349,11 @@ describe('llamarRappi', () => {
   })
 })
 
-describe('crearEspaciadorDeSondeo', () => {
+// El espaciador viejo (`crearEspaciadorDeSondeo`) se borró en la Tarea 20: nunca tuvo llamador. El ritmo lo lleva el job del
+// sondeo (`rappi-order-poll.job.ts`) con esta misma constante.
+describe('INTERVALO_SONDEO_MS', () => {
   it('el intervalo es el que Rappi pide: 45 segundos', () => {
     expect(INTERVALO_SONDEO_MS).toBe(45_000)
-  })
-
-  it('la primera vuelta no espera', async () => {
-    const sleep = jest.fn(async () => {})
-    const e = crearEspaciadorDeSondeo({ now: () => 1000, sleep })
-    await e.esperarTurno('v1')
-    expect(sleep).not.toHaveBeenCalled()
-  })
-
-  it('la segunda vuelta espera lo que falte para los 45 s', async () => {
-    const sleep = jest.fn(async () => {})
-    let t = 1000
-    const e = crearEspaciadorDeSondeo({ now: () => t, sleep })
-
-    await e.esperarTurno('v1')
-    t += 10_000
-    await e.esperarTurno('v1')
-
-    expect(sleep).toHaveBeenCalledWith(35_000)
-  })
-
-  it('si ya pasaron los 45 s no espera nada', async () => {
-    const sleep = jest.fn(async () => {})
-    let t = 1000
-    const e = crearEspaciadorDeSondeo({ now: () => t, sleep })
-
-    await e.esperarTurno('v1')
-    t += 60_000
-    await e.esperarTurno('v1')
-
-    expect(sleep).not.toHaveBeenCalled()
-  })
-
-  // El límite es sobre cuánto sondeamos UNA tienda, no sobre cuántas atendemos: hacer fila
-  // entre venues distintos escalaría pésimo con 50 clientes.
-  it('🔴 dos venues NO se hacen fila entre ellos', async () => {
-    const sleep = jest.fn(async () => {})
-    const e = crearEspaciadorDeSondeo({ now: () => 1000, sleep })
-
-    await e.esperarTurno('v1')
-    await e.esperarTurno('v2')
-
-    expect(sleep).not.toHaveBeenCalled()
-  })
-
-  // 🔴 Espera, NO rechaza: perder una vuelta de sondeo es perder pedidos cuando el webhook
-  // falló — y Rappi no documenta reintentos de webhook, así que el sondeo ES la red.
-  it('🔴 espaciador, no limitador: nunca rechaza una vuelta', async () => {
-    const sleep = jest.fn(async () => {})
-    let t = 1000
-    const e = crearEspaciadorDeSondeo({ now: () => t, sleep })
-    await e.esperarTurno('v1')
-    t += 1
-    await expect(e.esperarTurno('v1')).resolves.toBeUndefined()
   })
 })
 

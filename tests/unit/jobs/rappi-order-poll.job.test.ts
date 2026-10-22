@@ -73,10 +73,17 @@ const json = (r: Respuesta) =>
 let respuestas: Record<string, Respuesta | (() => Promise<Respuesta>)>
 let llamadas: string[]
 let bitacora: string[]
+/** Lo que contesta el login (por default, el token) y cuántas veces se pidió. */
+let login: Respuesta
+let logins: number
+const LOGIN_BUENO: Respuesta = { status: 200, body: { access_token: 'tok-integ-secreto', expires_in: 3600 } }
 function simularRed() {
   global.fetch = jest.fn(async (url: string | URL | Request) => {
     const u = String(url)
-    if (u === URL_LOGIN) return json({ status: 200, body: { access_token: 'tok-integ-secreto', expires_in: 3600 } })
+    if (u === URL_LOGIN) {
+      logins++
+      return json(login)
+    }
     llamadas.push(u)
     bitacora.push(`GET ${u}`)
     const r = respuestas[u]
@@ -134,6 +141,10 @@ function todoLoLogueado(): string {
   return JSON.stringify((['info', 'warn', 'error', 'debug'] as const).flatMap(nivel => (logger[nivel] as jest.Mock).mock.calls))
 }
 
+/** Cuántos 🚨 se loguearon (en cualquier nivel). */
+const alarmas = () =>
+  (['info', 'warn', 'error'] as const).flatMap(n => (logger[n] as jest.Mock).mock.calls).filter(c => String(c[0]).includes('🚨')).length
+
 let job: RappiOrderPollJob
 beforeEach(() => {
   for (const k of Object.keys(mockEnv)) delete mockEnv[k]
@@ -141,6 +152,8 @@ beforeEach(() => {
   respuestas = {}
   llamadas = []
   bitacora = []
+  login = LOGIN_BUENO
+  logins = 0
   eventos = []
   vinculos = [{ id: 'link1', venueId: 'venue1', externalLocationId: TIENDA, status: 'ACTIVE' }]
   _resetRappiTokenCacheForTests()
@@ -513,5 +526,129 @@ describe('🔴 apagado por default', () => {
       reloj.mockRestore()
       job.stop()
     }
+  })
+})
+
+// ── Ronda de arreglo 1 ─────────────────────────────────────────────────────────────────────────────────────────────────
+
+describe('🔴 I-1: si Rappi rechaza el login, el sondeo se pausa y no grita en cada pasada', () => {
+  const T0 = 1_761_130_000_000
+  let reloj: jest.SpyInstance
+  beforeEach(() => {
+    reloj = jest.spyOn(Date, 'now').mockReturnValue(T0)
+  })
+  afterEach(() => reloj.mockRestore())
+  const a = (ms: number) => reloj.mockReturnValue(T0 + ms)
+
+  it('login 401 durante varias pasadas ⇒ un solo 🚨, ningún status/sent en la pausa, y vuelve solo cuando el login funciona', async () => {
+    login = { status: 401, texto: 'invalid_client' }
+
+    const r1 = await job.runOnce()
+    expect(logins).toBe(1)
+    expect(llamadas).toEqual([]) // ni el GET por tienda salió (sin token no sale nada) ni status/sent
+    expect(r1).toMatchObject({ fallidas: 1 })
+    expect(alarmas()).toBe(1) // el 🚨 del login, al EMPEZAR la racha
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('se pausa'), expect.anything())
+
+    // Durante la pausa (5 min): ni login ni GET ni status/sent, aunque el cron siga tocando.
+    for (const t of [45_000, 90_000, 180_000, 299_000]) {
+      a(t)
+      expect(await job.runOnce()).toMatchObject({ saltada: 'PAUSA_SIN_LOGIN' })
+    }
+    expect(logins).toBe(1)
+    expect(llamadas).toEqual([])
+
+    // Pasada la pausa, se vuelve a intentar: sigue rechazado ⇒ otra pausa, pero ya sin 🚨 (la racha sigue).
+    a(301_000)
+    await job.runOnce()
+    expect(logins).toBe(2)
+    expect(llamadas).toEqual([])
+    expect(alarmas()).toBe(1)
+    const avisosDePausa = (logger.warn as jest.Mock).mock.calls.filter(c => String(c[0]).includes('se pausa')).length
+    expect(avisosDePausa).toBe(1) // UN solo warn de pausa por racha
+
+    // El login vuelve: la siguiente pasada después de la pausa trabaja normal, con status/sent.
+    login = LOGIN_BUENO
+    respuestas[urlPorTienda(TIENDA)] = { status: 200, body: [pedido('R1')] }
+    a(602_000)
+    await job.runOnce()
+    expect(llamadas).toEqual([urlPorTienda(TIENDA), URL_ENVIADOS])
+    expect(eventos.map(e => e.externalOrderId)).toEqual(['R1'])
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('el login volvió'), expect.anything())
+
+    // Una racha NUEVA vuelve a avisar con 🚨 (el login bueno rearmó el aviso).
+    login = { status: 401, texto: 'invalid_client' }
+    a(650_000)
+    await job.runOnce()
+    expect(alarmas()).toBe(2)
+  })
+
+  it('con muchas tiendas, una pasada sin token pide el login UNA vez (no lo machaca por cada tienda)', async () => {
+    const ids = ['900175625', '900175626', '900175627', '900175628', '900175629', '900175630', '900175631']
+    mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = ids.join(',')
+    vinculos = ids.map((id, i) => ({ id: `link${i}`, venueId: `venue${i}`, externalLocationId: id, status: 'ACTIVE' }))
+    login = { status: 503, texto: 'login caído' }
+
+    await job.runOnce()
+
+    expect(logins).toBe(1)
+    expect(llamadas).toEqual([])
+    expect(alarmas()).toBe(1)
+  })
+
+  it('un 5xx de la lista (con token) NO pausa: la siguiente pasada vuelve a sondear', async () => {
+    respuestas[urlPorTienda(TIENDA)] = { status: 503, texto: 'x' }
+    await job.runOnce()
+    a(45_000)
+    const r = await job.runOnce()
+    expect(r.saltada).toBeUndefined()
+    expect(llamadas.filter(u => u === urlPorTienda(TIENDA))).toHaveLength(2)
+  })
+})
+
+describe('M-1: un elemento con una identidad que revienta no frena a los demás', () => {
+  const raro = () => {
+    const p = pedido('X2')
+    ;(p as any).store.external_id = 123 // `.trim()` de un número lanza TypeError
+    return p
+  }
+
+  it('en el GET por tienda: se descarta con un warn sin datos del cliente y los otros dos se guardan', async () => {
+    respuestas[urlPorTienda(TIENDA)] = { status: 200, body: [pedido('X1'), raro(), pedido('X3')] }
+
+    const r = await job.runOnce()
+
+    expect(eventos.map(e => e.externalOrderId)).toEqual(['X1', 'X3'])
+    expect(r).toMatchObject({ guardados: 2, descartados: 1 })
+    expect(logger.warn).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ storeId: TIENDA }))
+    expect(todoLoLogueado()).not.toContain('Clienta Secreta')
+    expect(mockProcess).toHaveBeenCalledTimes(2)
+  })
+
+  it('en status/sent: la pasada no se cae y los otros dos se guardan', async () => {
+    respuestas[URL_ENVIADOS] = { status: 200, body: [pedido('Y1'), raro(), pedido('Y3')] }
+
+    const r = await job.runOnce()
+
+    expect(r.saltada).toBeUndefined()
+    expect(eventos.map(e => e.externalOrderId)).toEqual(['Y1', 'Y3'])
+    expect(r).toMatchObject({ guardados: 2, descartados: 1 })
+    expect(todoLoLogueado()).not.toContain('Clienta Secreta')
+  })
+})
+
+describe('M-7: el resumen separa los desenlaces del procesamiento', () => {
+  it('«procesados» cuenta sólo PROCESSED; IN_FLIGHT, FAILED y un throw van aparte', async () => {
+    respuestas[urlPorTienda(TIENDA)] = { status: 200, body: [pedido('Z1'), pedido('Z2'), pedido('Z3'), pedido('Z4')] }
+    mockProcess
+      .mockResolvedValueOnce({ outcome: 'PROCESSED' })
+      .mockResolvedValueOnce({ outcome: 'IN_FLIGHT' })
+      .mockResolvedValueOnce({ outcome: 'FAILED', error: 'ACCEPT_500' })
+      .mockRejectedValueOnce(new Error('tronó'))
+
+    const r = await job.runOnce()
+
+    expect(r.procesados).toBe(1)
+    expect(r.desenlaces).toEqual({ PROCESSED: 1, IN_FLIGHT: 1, FAILED: 1, LANZO: 1 })
   })
 })

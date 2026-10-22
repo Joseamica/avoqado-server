@@ -48,12 +48,15 @@ interface Entrada {
 }
 
 const cache = new Map<SuperficieRappi, Entrada>()
+/** Superficies cuyo login viene fallando (ver `anotarLoginFallido`). En memoria, como la caché: se pierde al reiniciar. */
+const loginsEnRacha = new Set<SuperficieRappi>()
 const enVuelo = new Map<SuperficieRappi, Promise<string>>()
 let generacion = 0
 
 export function _resetRappiTokenCacheForTests(): void {
   cache.clear()
   enVuelo.clear()
+  loginsEnRacha.clear()
   generacion++
 }
 
@@ -108,4 +111,22 @@ export function cabeceraRappi(token: string): Record<string, string> {
  */
 export function invalidarToken(superficie: SuperficieRappi): void {
   cache.delete(superficie)
+}
+
+/**
+ * Lleva la cuenta de una RACHA de logins rechazados, por superficie, para que el aviso grite UNA vez (Tarea 20, ronda 1).
+ *
+ * 🔴 Sin esto, un login rechazado gritaba 🚨 en CADA intento, y con el sondeo de pedidos prendido son ~2 intentos cada 45 s:
+ * miles de 🚨 al día por UNA causa. Devuelve `true` sólo si este fallo EMPIEZA la racha (ése es el que va con 🚨); los
+ * siguientes devuelven `false` (van como warn). No cambia nada del token: quien llama sigue recibiendo el mismo error.
+ */
+export function anotarLoginFallido(superficie: SuperficieRappi): boolean {
+  if (loginsEnRacha.has(superficie)) return false
+  loginsEnRacha.add(superficie)
+  return true
+}
+
+/** El primer login bueno cierra la racha y REARMA el aviso. `true` si había una racha abierta (para decir que volvió). */
+export function anotarLoginExitoso(superficie: SuperficieRappi): boolean {
+  return loginsEnRacha.delete(superficie)
 }

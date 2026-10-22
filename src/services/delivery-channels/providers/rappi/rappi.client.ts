@@ -26,7 +26,7 @@ import {
   type RappiPeticion,
   type RappiRespuesta,
 } from './rappi.http'
-import { getRappiToken, type SuperficieRappi } from './rappi.token'
+import { anotarLoginExitoso, anotarLoginFallido, getRappiToken, type SuperficieRappi } from './rappi.token'
 import { aplanarHorarioDeTienda, type FranjaActualRappi, type FranjaTiendaRappi } from './rappi.hours'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
 import {
@@ -103,9 +103,13 @@ async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_tok
   })
   if (!r.ok) {
     const cuerpo = await r.text()
-    logger.error('🚨 [Rappi] el login falló', { superficie, status: r.status, cuerpo: cuerpo.slice(0, 300) })
+    const datos = { superficie, status: r.status, cuerpo: cuerpo.slice(0, 300) }
+    // 🔴 El 🚨 sale sólo al EMPEZAR la racha de fallos de esa superficie; mientras siga, warn (Tarea 20, ronda 1).
+    if (anotarLoginFallido(superficie)) logger.error('🚨 [Rappi] el login falló', datos)
+    else logger.warn('[Rappi] el login sigue fallando (ya se avisó al empezar la racha)', datos)
     throw new Error(`[Rappi] login de ${superficie} respondió ${r.status}`)
   }
+  if (anotarLoginExitoso(superficie)) logger.info('[Rappi] el login volvió a funcionar', { superficie })
   return (await r.json()) as { access_token: string; expires_in?: number }
 }
 

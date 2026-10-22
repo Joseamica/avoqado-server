@@ -102,6 +102,24 @@ export class RappiEscrituraBloqueadaError extends DeliveryWriteNotSentError {
 const LECTURAS = new Set(['GET', 'HEAD', 'OPTIONS'])
 
 /**
+ * 🔴 Las rutas de la LISTA DE PEDIDOS: un GET a cualquiera de ellas NO es una lectura (pasa los pedidos de READY a SENT y quien lee
+ * primero se los lleva; medido el 22-oct, M13), así que lleva el candado de tiendas aunque el llamador no ponga `cambiaEstado`. El
+ * candado vive aquí, en el punto más bajo, para que un caller nuevo no pueda olvidarlo:
+ *   · por tienda, host nuevo: `/restaurants/orders/v1/stores/{storeId}/orders` (con o sin barra final);
+ *   · la global del host clásico: `/api/v2/restaurants-integrations-public-api/orders` (sin `storeId` siempre queda bloqueada).
+ * NO entran `…/orders/status/sent` ni `…/orders/{id}/events`: ésas sí son lecturas. Se compara la ruta sin la query.
+ */
+const RUTAS_DE_LA_LISTA_DE_PEDIDOS = [
+  /^\/restaurants\/orders\/v1\/stores\/[^/]+\/orders\/?$/,
+  /^\/api\/v2\/restaurants-integrations-public-api\/orders\/?$/,
+]
+
+function esLaListaDePedidos(ruta: string): boolean {
+  const camino = ruta.split('?')[0]
+  return RUTAS_DE_LA_LISTA_DE_PEDIDOS.some(r => r.test(camino))
+}
+
+/**
  * ¿Se puede escribir en esta tienda?
  *
  * Lista VACÍA = nada se puede escribir. Es la falla segura y es deliberada: durante todo el
@@ -158,7 +176,8 @@ export interface RappiPeticion {
   /**
    * 🔴 Un GET que NO es lectura: cambia el estado del lado de Rappi, así que lleva el candado de tiendas como una escritura.
    * Lo usa el sondeo de pedidos por tienda (`GET …/stores/{storeId}/orders`), que pasa los pedidos de READY a SENT: quien lee
-   * primero se los lleva (medido el 22-oct, M13). Sin esto el candado lo dejaba salir a cualquier tienda por ser GET.
+   * primero se los lleva (medido el 22-oct, M13). Las rutas de la lista de pedidos ya llevan el candado solas
+   * (`RUTAS_DE_LA_LISTA_DE_PEDIDOS`); la bandera es para cualquier otro GET que se descubra que cambia estado.
    */
   cambiaEstado?: boolean
 }
@@ -172,7 +191,7 @@ export interface RappiPeticion {
  * tasa de éxito del 98% que Rappi exige. Con `reintentarEn401: false` no hay segundo intento (ver `RappiPeticion`).
  */
 export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion): Promise<RappiRespuesta> {
-  const escritura = !LECTURAS.has(peticion.metodo.toUpperCase()) || peticion.cambiaEstado === true
+  const escritura = !LECTURAS.has(peticion.metodo.toUpperCase()) || peticion.cambiaEstado === true || esLaListaDePedidos(peticion.ruta)
   if (escritura) {
     const autorizadas = deps.tiendasEscribibles ?? []
     const tiendas = peticion.storeIds ?? [peticion.storeId]
@@ -232,32 +251,6 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
  * 🔴 Rappi lo pide textual en sus estándares: *"realiza solicitudes a la API de Rappi para
  * descargar órdenes dejando un intervalo de 45 segundos"*. Es SÓLO para descargar pedidos — no
  * aplica al menú ni a la disponibilidad, y confundirlo volvería lentísima la sincronización sin
- * necesidad.
- *
- * Es un espaciador, no un limitador: no rechaza, espera. Rechazar dejaría un ciclo de sondeo
- * sin correr, y perder una vuelta de sondeo es perder pedidos cuando el webhook falló — que es
- * exactamente para lo que el sondeo existe, porque Rappi **no documenta reintentos** de webhook.
+ * necesidad. Lo usa el job del sondeo (`rappi-order-poll.job.ts`), que lleva el ritmo.
  */
 export const INTERVALO_SONDEO_MS = 45_000
-
-export function crearEspaciadorDeSondeo(opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
-  const now = opts.now ?? Date.now
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
-  // Por VENUE: dos negocios distintos no tienen por qué hacerse fila entre ellos — el límite
-  // es sobre cuánto sondeamos una tienda, no sobre cuántas tiendas atendemos.
-  const ultima = new Map<string, number>()
-
-  return {
-    async esperarTurno(venueId: string): Promise<void> {
-      const previa = ultima.get(venueId)
-      if (previa !== undefined) {
-        const falta = INTERVALO_SONDEO_MS - (now() - previa)
-        if (falta > 0) await sleep(falta)
-      }
-      ultima.set(venueId, now())
-    },
-    _reset(): void {
-      ultima.clear()
-    },
-  }
-}

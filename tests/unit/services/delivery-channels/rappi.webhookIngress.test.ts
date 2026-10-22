@@ -346,6 +346,14 @@ describe('guardarPedidoSondeadoRappi', () => {
     expect(prisma.deliveryOrderEvent.create).not.toHaveBeenCalled()
   })
 
+  // Ronda 1 (M-1): `extractIdentity` hace `.trim()` sobre el id de la tienda; uno que no es texto lanzaba TypeError.
+  it('una tienda con un id que no es texto NO revienta: MALFORMED, sin guardar', async () => {
+    await expect(guardarPedidoSondeadoRappi({ store: { external_id: 123 }, order_detail: { order_id: '1' } })).resolves.toEqual({
+      outcome: 'MALFORMED',
+    })
+    expect(prisma.deliveryOrderEvent.create).not.toHaveBeenCalled()
+  })
+
   // Un programado guardado como NEW_ORDER tomaría la llave del pedido real: cuando Rappi lo libere, su webhook sería DUPLICATE.
   it('🔴 un pedido PROGRAMADO se guarda con SU llave (NEW_ORDER_SCHEDULED), la misma que le pondría su webhook', async () => {
     const programado = { ...pedido, action: 'scheduled' }
