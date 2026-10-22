@@ -109,7 +109,9 @@ describe('listInbox', () => {
     const r = await listInbox({ venueId: 'v1', now: NOW })
     const wa = r.orders.find(o => o.orderNumber === 'WA')!
     expect(wa.items[0]).toMatchObject({ productId: 'prod-flautas', categoryId: 'cat-antojitos' })
-    const lista = prismaMock.onlineOrder.findMany.mock.calls.map(c => c[0] as any).find(a => a.select?.order?.select?.items)
+    const lista = prismaMock.onlineOrder.findMany.mock.calls
+      .map((c: unknown[]) => c[0] as any)
+      .find((a: any) => a.select?.order?.select?.items)
     const sel = lista.select.order.select.items.select
     expect(sel).toMatchObject({ productId: true, product: { select: { categoryId: true } } })
   })
