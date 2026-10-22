@@ -99,6 +99,26 @@ describe('getRappiToken', () => {
     await expect(getRappiToken('integrations', { fetchToken })).rejects.toThrow(/access_token/)
   })
 
+  it.each(['   ', 7, {}, true])('un access_token inválido (%j) no se guarda y permite pedir uno válido después', async access_token => {
+    const fetchToken = jest.fn().mockResolvedValueOnce({ access_token }).mockResolvedValueOnce({ access_token: 'valido' })
+    await expect(getRappiToken('integrations', { fetchToken })).rejects.toThrow(/access_token/)
+    expect(await getRappiToken('integrations', { fetchToken })).toBe('valido')
+    expect(fetchToken).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['LEAK42\nBAD', 'LEAK42\rBAD', 'LEAK42\0BAD', 'LEAK42\tBAD', 'LEAK42 BAD', 'LEAK42😀'])(
+    'un token no utilizable como Bearer no se cachea (%j)',
+    async access_token => {
+      const fetchToken = jest
+        .fn()
+        .mockResolvedValueOnce({ access_token, expires_in: 604800 })
+        .mockResolvedValueOnce({ access_token: 'recuperado' })
+      await expect(getRappiToken('integrations', { fetchToken })).rejects.toThrow(/access_token/)
+      expect(await getRappiToken('integrations', { fetchToken })).toBe('recuperado')
+      expect(fetchToken).toHaveBeenCalledTimes(2)
+    },
+  )
+
   it('un fallo no deja la petición atorada: el siguiente intento vuelve a pedir', async () => {
     const fetchToken = jest.fn().mockRejectedValueOnce(new Error('red caída')).mockResolvedValue({ access_token: 't1', expires_in: 604800 })
 

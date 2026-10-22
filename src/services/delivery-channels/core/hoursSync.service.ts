@@ -7,8 +7,8 @@
  *
  * 🔴 POR HUELLA, como el menú: se compara la huella del horario resuelto contra la última publicada (`config.horarioPublicado`).
  * Sin cambios no hay red. La huella se guarda SÓLO cuando el proveedor aceptó todo (`publishStoreHours` devolvió `ok`), con la
- * fila bloqueada (`escribirLlavesDelSistema`) y sin tocar las demás llaves. Si algo falla a medias NO se guarda: la siguiente
- * pasada vuelve a calcular y el adaptador vuelve a leer lo que el proveedor de verdad tiene.
+ * fila bloqueada (`escribirLlavesDelSistema`) y sin tocar las demás llaves. Antes de enviar se invalida la huella anterior:
+ * tras un cambio parcial o una caída, incluso volver al horario anterior obliga a reconciliar lo que el proveedor tiene.
  *
  * 🔴 NUNCA un horario ESTIMADO (ronda 1): si nadie configuró horario (`fuente: 'ESTIMADO'`), no se toca al proveedor ni la huella
  * (`SKIPPED_ESTIMATED`): lo que el dueño tenga en el portal del proveedor no se pisa con una suposición, y lo último publicado se
@@ -229,6 +229,11 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
     const deseada = huellaDelHorario(horario)
     huella = deseada
     if (deseada === publicado?.huella) return { outcome: 'UNCHANGED' }
+
+    // Una publicación parcial también invalida A: volver de B a A debe reparar el proveedor (Codex b2 #2).
+    if (!(await escribirLlavesDelSistema(link.id, () => ({ horarioPublicado: null })))) {
+      return { outcome: 'FAILED', error: 'El canal ya no existe: no se publicó el horario.' }
+    }
 
     let r: ActionResult
     try {

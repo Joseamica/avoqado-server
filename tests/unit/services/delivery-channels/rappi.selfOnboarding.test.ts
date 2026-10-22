@@ -48,6 +48,10 @@ describe('rappi.selfOnboarding', () => {
     expect(() => elegirIdToken({ id_token: jws('HS256') })).toThrow('RAPPI_ID_TOKEN_INVALIDO')
     expect(() => elegirIdToken('basura')).toThrow('RAPPI_ID_TOKEN_INVALIDO')
   })
+  it.each(['\n', '\r', '\0', '\t', ' ', 'á'])('un id_token RS256 con caracteres inválidos (%j) se rechaza sin copiarlo', caracter => {
+    const t = `${b64u({ alg: 'RS256' })}.LEAK42${caracter}payload.firma`
+    expect(() => elegirIdToken({ id_token: t })).toThrow('RAPPI_ID_TOKEN_INVALIDO')
+  })
 
   it('aplana padres e hijas conservando quién integra, de quién es hija y su integration_id (R7)', () => {
     const r = aplanarTiendas({

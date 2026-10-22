@@ -152,6 +152,23 @@ describe('processRappiEvent', () => {
   })
 
   // ── El reloj de 4–6 minutos: aceptar PRIMERO ─────────────────────────────────────
+  it.each(['HTTP_2XX', 'HISTORIAL_TAKEN', 'reintento'])('la ingesta recibe la hora durable de aceptación (%s)', async caso => {
+    if (caso === 'reintento') {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila({ resourcePayload: MARCA }))
+    }
+    const aceptar = jest.fn(async () => ({ ok: caso !== 'HISTORIAL_TAKEN', status: caso === 'HISTORIAL_TAKEN' ? 400 : 200, raw: '{}' }))
+    await processRappiEvent('evt1', { aceptar, historial: async () => HISTORIAL_ACEPTADO })
+    const normalizado = mockIngest.mock.calls[0][0]
+    expect(normalizado.providerAccepted).toBe(true)
+    expect(normalizado.providerAcceptedAt).toBeInstanceOf(Date)
+    if (caso === 'reintento') {
+      expect(normalizado.providerAcceptedAt.toISOString()).toBe(MARCA.aceptacion.en)
+      expect(aceptar).not.toHaveBeenCalled()
+    } else {
+      expect(mockAnotar.mock.calls[0][3]).toEqual(normalizado.providerAcceptedAt)
+    }
+  })
+
   it('🔴 en AUTO acepta ANTES de ingerir, con el cookingTime que el propio pedido sugiere', async () => {
     const orden: string[] = []
     aceptarOk.mockImplementationOnce(async () => {
@@ -861,7 +878,7 @@ describe('processRappiEvent', () => {
 
       expect(orden).toEqual(['accept', 'marca', 'ingest'])
       // Con SU token: si el reclamo ya no es suyo, la marca no se escribe.
-      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HTTP_2XX')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HTTP_2XX', expect.any(Date))
       expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
     })
 
@@ -911,7 +928,7 @@ describe('processRappiEvent', () => {
       const segundo = await processRappiEvent('evt1', { aceptar: aceptarDeNuevo, historial })
 
       expect(historial).toHaveBeenCalledWith('392625')
-      expect(mockAnotar).toHaveBeenLastCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockAnotar).toHaveBeenLastCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN', expect.any(Date))
       expect(mockIngest).toHaveBeenCalledTimes(1) // UNA venta, no dos
       expect(segundo).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
     })
@@ -985,7 +1002,7 @@ describe('processRappiEvent', () => {
       expect(aceptarDeNuevo).toHaveBeenCalledTimes(2) // una vez por intento, nunca un registro sin la respuesta de Rappi
       expect(historial).toHaveBeenCalledWith('392625')
       expect(mockAnotar).toHaveBeenCalledTimes(1)
-      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN', expect.any(Date))
       expect(mockIngest).toHaveBeenCalledTimes(1) // UNA venta
       expect(segundo).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
       expect(mockCerrar).toHaveBeenLastCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
@@ -1027,7 +1044,7 @@ describe('processRappiEvent', () => {
 
       expect(mockHistorialHttp).toHaveBeenCalledTimes(1)
       expect(mockHistorialHttp).toHaveBeenCalledWith('392625')
-      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN', expect.any(Date))
       expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
     })
 
@@ -1074,7 +1091,7 @@ describe('processRappiEvent', () => {
 
       expect(historial).toHaveBeenCalledTimes(1) // UNA lectura
       expect(aceptarOk).not.toHaveBeenCalled()
-      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN', expect.any(Date))
       expect(mockIngest).toHaveBeenCalledTimes(1)
       expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
       expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/🚨.*DESHABILITADO/), expect.anything())
@@ -1135,7 +1152,7 @@ describe('processRappiEvent', () => {
 
       expect(aceptarOk).not.toHaveBeenCalled()
       expect(mockAnotar).toHaveBeenCalledTimes(1)
-      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN', expect.any(Date))
       expect(mockIngest).toHaveBeenCalledTimes(1)
       expect(segundo).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
     })
@@ -1336,7 +1353,7 @@ describe('processRappiEvent', () => {
 
       const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial })
 
-      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN', expect.any(Date))
       expect(mockIngest).toHaveBeenCalledTimes(1)
       expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', 'cancelado por Rappi: order_voided_by_support')
       expect(mockCancel.mock.invocationCallOrder[0]).toBeGreaterThan(mockIngest.mock.invocationCallOrder[0])

@@ -9,6 +9,7 @@
  * Sin `@/config/env` ni red: todo se inyecta desde `rappi.client.ts`.
  */
 import crypto from 'crypto'
+import { tokenRappiValido } from './rappi.token'
 
 export type AmbienteLogin = 'SANDBOX' | 'PRODUCTION'
 
@@ -57,7 +58,7 @@ function algDe(jwt: string): string | null {
 
 export function elegirIdToken(respuesta: unknown): string {
   const t = (respuesta as { id_token?: unknown } | null)?.id_token
-  if (typeof t !== 'string' || t.split('.').length !== 3 || algDe(t) !== 'RS256') throw new Error('RAPPI_ID_TOKEN_INVALIDO')
+  if (!tokenRappiValido(t) || t.split('.').length !== 3 || algDe(t) !== 'RS256') throw new Error('RAPPI_ID_TOKEN_INVALIDO')
   return t
 }
 

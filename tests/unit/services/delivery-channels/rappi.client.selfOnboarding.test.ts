@@ -34,6 +34,11 @@ const mockEnv: Record<string, string | undefined> = {
 const envBase = { ...mockEnv }
 jest.mock('@/config/env', () => ({ env: mockEnv }))
 jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
+jest.mock('../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service', () => ({
+  reclamarEvento: jest.fn(async () => 'claim-login'),
+  renovarReclamo: jest.fn(async () => true),
+  cerrarEventoReclamado: jest.fn(async () => true),
+}))
 
 import {
   apiBaseSelfOnboarding,
@@ -46,10 +51,15 @@ import {
   rappiApi,
   redirectUriRappi,
   suscribirTiendaAEventos,
+  tiendasDelComercio,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { urlDeInicio } from '../../../../src/services/delivery-channels/providers/rappi/rappi.selfOnboarding'
 import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
 import { _resetRappiTokenCacheForTests } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
+import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
+import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import { cerrarEventoReclamado } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
 
 type Llamada = { url: string; init: RequestInit }
 
@@ -95,6 +105,129 @@ describe('rappi.client — self-onboarding', () => {
   afterEach(() => {
     for (const k of Object.keys(mockEnv)) delete mockEnv[k]
     Object.assign(mockEnv, envBase)
+  })
+
+  it('un login 200 sin token abre una racha, avisa una vez y sólo un token válido anuncia recuperación', async () => {
+    jest.clearAllMocks()
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(json(200, {}))
+      .mockResolvedValueOnce(json(200, {}))
+      .mockResolvedValueOnce(json(200, { access_token: 'tok', expires_in: 604800 }))
+      .mockResolvedValueOnce(json(200, {}))
+    const pedir = () => rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/stores-pa' })
+    await expect(pedir()).rejects.toThrow()
+    await expect(pedir()).rejects.toThrow()
+    expect((logger.error as jest.Mock).mock.calls.filter(([m]) => /login/.test(m))).toHaveLength(1)
+    expect((logger.warn as jest.Mock).mock.calls.filter(([m]) => /login/.test(m))).toHaveLength(1)
+    expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(0)
+    await pedir()
+    expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(1)
+  })
+
+  it.each(['JSON malformado', 'transporte'])('el fallo de login %s no llega crudo al log ni al evento', async caso => {
+    jest.clearAllMocks()
+    const marcador = 'LEAK42'
+    global.fetch = jest.fn(async () => {
+      if (caso === 'transporte') throw new Error(`falló ${marcador}`)
+      return new Response(marcador, { status: 200 })
+    }) as typeof fetch
+    const payload = {
+      order_detail: {
+        order_id: '392625',
+        created_at: '2026-04-10T11:12:57.000Z',
+        cooking_time: 10,
+        delivery_method: 'delivery',
+        payment_method: 'cc',
+        totals: { total_products: 100, total_order: 100, other_totals: { tip: 0 } },
+        items: [{ id: '1', sku: 'TACO', name: 'Taco', price: 25, quantity: 4 }],
+      },
+      store: { internal_id: '10', external_id: '10' },
+    }
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 'evt-login',
+      status: 'RECEIVED',
+      eventType: 'NEW_ORDER',
+      orderId: null,
+      venueId: 'v1',
+      payload,
+      channelLink: { id: 'link1', venueId: 'v1', externalLocationId: '10', status: 'ACTIVE', orderAcceptanceMode: 'AUTO', config: null },
+    })
+    ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'America/Mexico_City' })
+    const resultado = await processRappiEvent('evt-login')
+    expect(resultado).toMatchObject({ outcome: 'FAILED', accepted: false })
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(cerrarEventoReclamado).toHaveBeenCalledWith('evt-login', 'claim-login', 'FAILED', undefined, expect.stringContaining('ACCEPT:'))
+    const salidas = JSON.stringify({
+      resultado,
+      cierre: (cerrarEventoReclamado as jest.Mock).mock.calls,
+      logs: [(logger.error as jest.Mock).mock.calls, (logger.warn as jest.Mock).mock.calls, (logger.info as jest.Mock).mock.calls],
+    })
+    expect(salidas).not.toContain(marcador)
+    expect(resultado.error).toContain('no se envió nada')
+  })
+
+  it.each(['timeout', '204 vacío', '200 malformado', 'lectura de rechazo fallida'])(
+    '%s abre la misma alarma, la repite cada hora y se recupera una vez',
+    async caso => {
+      jest.clearAllMocks()
+      const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000)
+      const fallo = () => {
+        if (caso === 'timeout') return Promise.reject(new Error('timeout'))
+        const respuesta = json(caso === 'lectura de rechazo fallida' ? 401 : caso === '204 vacío' ? 204 : 200)
+        respuesta.json = async () => {
+          throw new SyntaxError('cuerpo ilegible')
+        }
+        respuesta.text = async () => {
+          throw new Error('lectura interrumpida')
+        }
+        return Promise.resolve(respuesta)
+      }
+      global.fetch = jest.fn(fallo) as typeof fetch
+      const pedir = () => rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/stores-pa' })
+      try {
+        await expect(pedir()).rejects.toThrow()
+        await expect(pedir()).rejects.toThrow()
+        expect(logger.error).toHaveBeenCalledTimes(1)
+        expect(logger.warn).toHaveBeenCalledTimes(1)
+        reloj.mockReturnValue(1_800_000_000_000 + 61 * 60_000)
+        await expect(pedir()).rejects.toThrow()
+        expect(logger.error).toHaveBeenCalledTimes(2)
+        expect(logger.info).not.toHaveBeenCalled()
+        simularRed(() => json(200))
+        await pedir()
+        await pedir()
+        expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(1)
+      } finally {
+        reloj.mockRestore()
+      }
+    },
+  )
+
+  it.each(
+    (['integrations', 'utils', 'finance'] as const).flatMap(superficie =>
+      ['\n', '\r', '\0', '\t', ' ', '😀'].map(control => ({ superficie, control })),
+    ),
+  )('$superficie rechaza un token con controles antes de cachear o anunciar recuperación ($control)', async ({ superficie, control }) => {
+    jest.clearAllMocks()
+    const marcador = 'LEAK42'
+    global.fetch = jest.fn(async (_url, init) => {
+      if (String(_url).includes('/token/login/')) return json(200, { access_token: `${marcador}${control}BAD`, expires_in: 604800 })
+      // La construcción nativa incluiría el token en su error si la validación lo deja pasar.
+      new Request(String(_url), init)
+      return json(200)
+    }) as typeof fetch
+    const pedir = () => rappiApi({ superficie, metodo: 'PUT', ruta: '/api/v2/restaurants-integrations-public-api/menu', storeId: '10' })
+    for (let i = 0; i < 2; i++) await expect(pedir()).rejects.toMatchObject({ name: 'DeliveryWriteNotSentError', reason: 'UNAVAILABLE' })
+    expect(global.fetch).toHaveBeenCalledTimes(2) // sólo los dos logins; no hubo una llamada de negocio
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.info).not.toHaveBeenCalled()
+    expect(JSON.stringify([(logger.error as jest.Mock).mock.calls, (logger.warn as jest.Mock).mock.calls])).not.toContain(marcador)
+    simularRed(() => json(200))
+    await pedir()
+    expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(1)
   })
 
   // 14-oct: al activar Self Onboarding, Rappi crea OTRA aplicación (la del login del dueño) con su propio Client ID,
@@ -249,8 +382,18 @@ describe('rappi.client — self-onboarding', () => {
     })
   })
 
-  // H11: la lista esperada va escrita a MANO, no derivada del código: si alguien quita un webhook del filtro de
-  // suscripción, esta prueba tiene que caer (derivándola de la implementación, seguía verde).
+  it.each(['\n', '\r', '\0', '\t', ' ', 'á'])('ningún lector ni escritor usa un token del comercio inválido (%j)', async caracter => {
+    const llamadas = simularRed(l => {
+      new Request(l.url, l.init)
+      return json(200)
+    })
+    const idToken = `header.LEAK42${caracter}payload.firma`
+    await expect(tiendasDelComercio(idToken)).rejects.toThrow('RAPPI_ID_TOKEN_INVALIDO')
+    await expect(aprovisionarTiendasRappi(idToken, tiendas)).rejects.toThrow('RAPPI_ID_TOKEN_INVALIDO')
+    expect(llamadas).toHaveLength(0)
+  })
+
+  // H11: escrita a mano para detectar un evento eliminado del filtro de suscripción.
   const SUSCRIPCIONES = [
     ['NEW_ORDER', 'new-order'],
     ['NEW_ORDER_SCHEDULED', 'new-order-scheduled'],
@@ -283,6 +426,94 @@ describe('rappi.client — self-onboarding', () => {
     const llamadas = simularRed()
     await expect(suscribirTiendaAEventos('99')).rejects.toThrow(RappiEscrituraBloqueadaError)
     expect(llamadas).toHaveLength(0)
+  })
+
+  it.each([false, true])('suscribir: un 406 ya configurado sólo vale tras leer los diez destinos ENABLE (lista=%s)', async lista => {
+    const llamadas = simularRed(l => {
+      if (l.init.method === 'PUT') return json(406, { message: 'The event has aready config in stores [10].' })
+      const esperada = SUSCRIPCIONES.find(s => s.url.replace('/add-stores', '') === l.url)!
+      const event = l.url.split('/').at(-1)
+      const fila = { event, stores: [{ store_id: lista ? 10 : '10', url: esperada.cuerpo[0].url, state: 'ENABLE' }] }
+      return json(200, lista ? [fila] : fila)
+    })
+
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: true, fallidos: [] })
+    expect(llamadas).toHaveLength(20)
+    expect(
+      llamadas
+        .filter(l => l.init.method === 'GET')
+        .map(l => l.url)
+        .sort(),
+    ).toEqual(SUSCRIPCIONES.map(s => s.url.replace('/add-stores', '')).sort())
+    expect(llamadas.filter(l => l.init.method !== 'GET').map(l => JSON.parse(l.init.body as string))).toEqual(
+      SUSCRIPCIONES.map(s => s.cuerpo),
+    )
+  })
+
+  it.each([
+    { caso: 'deshabilitado', cambio: { state: 'DISABLE' } },
+    { caso: 'sin estado', cambio: { state: undefined } },
+    { caso: 'URL ajena', cambio: { url: 'https://otro.test/avisos' } },
+    { caso: 'otra tienda', cambio: { store_id: '11' } },
+  ])('suscribir: un 406 con destino $caso sigue fallido', async ({ cambio }) => {
+    simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      return json(200, {
+        event: 'MENU_APPROVED',
+        stores: [
+          { store_id: '10', url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/menu-approved', state: 'ENABLE', ...cambio },
+        ],
+      })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+  })
+
+  it.each([null, {}, { event: 'PING', stores: [] }, { event: 'MENU_APPROVED', stores: [null, '10'] }])(
+    'suscribir: un 406 sin evidencia legible no conecta (%j)',
+    async cuerpo => {
+      simularRed(l => (!l.url.includes('/webhook/MENU_APPROVED') ? json(200) : json(l.init.method === 'PUT' ? 406 : 200, cuerpo)))
+      await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+    },
+  )
+
+  it('suscribir: JSON ilegible en la comprobación no se copia al log y no corta los demás avisos', async () => {
+    jest.clearAllMocks()
+    const llamadas = simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      return new Response('LEAK42 no es JSON', { status: 200 })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+    expect(llamadas.at(-1)!.url).toContain('/webhook/ORDER_RT_TRACKING/add-stores')
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('LEAK42')
+  })
+
+  it.each([401, 403, 500, 'red'])('suscribir: una comprobación que falla (%s) no acredita el 406', async status => {
+    const llamadas = simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      if (status === 'red') throw new Error('ECONNRESET')
+      return json(status as number, {
+        event: 'MENU_APPROVED',
+        stores: [{ store_id: '10', url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/menu-approved', state: 'ENABLE' }],
+      })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+    expect(llamadas.at(-1)!.url).toContain('/webhook/ORDER_RT_TRACKING/add-stores')
+  })
+
+  it.each(['otro evento', 'evento ausente', 'destinos contradictorios'])('suscribir: evidencia de %s no acredita la tienda', async caso => {
+    simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      const tienda = { store_id: '10', url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/menu-approved', state: 'ENABLE' }
+      return json(200, {
+        event: caso === 'otro evento' ? 'PING' : caso === 'evento ausente' ? undefined : 'MENU_APPROVED',
+        stores: caso === 'destinos contradictorios' ? [tienda, { ...tienda, state: 'DISABLE' }] : [tienda],
+      })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
   })
 
   // ── «Integrada sí/no» (Tarea 18): PUT stores-pa/{id}/status?integrated=<bool>, host CLÁSICO, con el candado ──────

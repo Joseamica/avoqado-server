@@ -482,11 +482,14 @@ describe('paid-order-reconciler', () => {
       expect(sql).toContain(`o."originSystem" = 'DELIVERY_PLATFORM'`)
       expect(sql).toContain(`o."paymentStatus" = 'PAID'`)
 
-      prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+      prismaMock.$executeRaw.mockResolvedValue(1)
       expect(await defaults.cerrarPedidoDePlataforma(pedido('p1'), AHORA)).toBe(true)
-      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ data: { status: 'COMPLETED', completedAt: AHORA } }),
-      )
+      const [trozos, ...binds] = prismaMock.$executeRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
+      const cierre = Prisma.sql(trozos, ...binds)
+      expect(cierre.sql).toContain(`SET status = 'COMPLETED',`)
+      expect(cierre.sql).toContain('"completedAt" =')
+      expect(cierre.sql.match(/SET[\s\S]*?WHERE/)?.[0]).not.toMatch(/(?:total|paidAmount|remainingBalance)"?\s*=/)
+      expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
     })
   })
 })

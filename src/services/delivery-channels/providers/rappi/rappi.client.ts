@@ -26,7 +26,7 @@ import {
   type RappiPeticion,
   type RappiRespuesta,
 } from './rappi.http'
-import { anotarLoginExitoso, anotarLoginFallido, getRappiToken, type SuperficieRappi } from './rappi.token'
+import { anotarLoginExitoso, anotarLoginFallido, getRappiToken, tokenRappiValido, type SuperficieRappi } from './rappi.token'
 import { aplanarHorarioDeTienda, type FranjaActualRappi, type FranjaTiendaRappi } from './rappi.hours'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
 import {
@@ -40,6 +40,7 @@ import {
 } from './rappi.selfOnboarding'
 import { RAPPI_EVENTS } from './rappi.adapter'
 import { RUTA_POR_EVENTO, secretosDelEvento } from './rappi.webhookIngress'
+import { tiendaConWebhookHabilitado } from './rappi.webhooksRegistro'
 import type { DenyReason } from '../../core/types'
 
 const API = '/api/v2/restaurants-integrations-public-api'
@@ -95,27 +96,30 @@ async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_tok
   // 🔴 Dominio nuevo y barra FINAL: sin ella Rappi contesta 307 (medido el 20-oct).
   const url = `${hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)}/restaurants/auth/v1/token/login/${superficie}/`
 
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
-    signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
-  })
-  if (!r.ok) {
-    const cuerpo = await r.text()
-    const datos = { superficie, status: r.status, cuerpo: cuerpo.slice(0, 300) }
-    // 🔴 El 🚨 sale al EMPEZAR la racha de fallos de esa superficie y, mientras siga, una vez por hora; el resto, warn (Tarea 20).
+  let status: number | undefined
+  let motivo = 'TRANSPORTE'
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+      signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
+    })
+    status = r.status
+    motivo = 'HTTP'
+    if (!r.ok) throw new Error(`[Rappi] login de ${superficie} respondió ${r.status}`)
+    motivo = 'RESPUESTA_INVALIDA'
+    const cuerpo = (await r.json()) as { access_token: string; expires_in?: number }
+    if (!tokenRappiValido(cuerpo?.access_token)) throw new Error(`[Rappi] la respuesta de ${superficie} no trae access_token válido`)
+    if (anotarLoginExitoso(superficie)) logger.info('[Rappi] el login volvió a funcionar', { superficie })
+    return cuerpo
+  } catch {
+    // Una sola racha cubre HTTP, transporte y cuerpo ilegible; el cuerpo del login puede contener secretos.
+    const datos = { superficie, status, motivo }
     if (anotarLoginFallido(superficie)) logger.error('🚨 [Rappi] el login falló', datos)
     else logger.warn('[Rappi] el login sigue fallando (ya se avisó; el aviso se repite cada hora mientras siga la racha)', datos)
-    throw new Error(`[Rappi] login de ${superficie} respondió ${r.status}`)
+    throw new Error(`[Rappi] login de ${superficie} falló (${status ?? 'SIN_RESPUESTA'}; ${motivo})`)
   }
-  const cuerpo = (await r.json()) as { access_token: string; expires_in?: number }
-  // 🔴 La racha de fallos se cierra SÓLO si la respuesta trae un `access_token` de texto no vacío: cualquier 2xx con un cuerpo que
-  // no sirve (lo rechaza `getRappiToken`) cerraba la racha y dejaba un «el login volvió» falso, y el siguiente rechazo gritaba
-  // 🚨 como si fuera una caída nueva.
-  const tokenSirve = typeof cuerpo?.access_token === 'string' && cuerpo.access_token.trim() !== ''
-  if (tokenSirve && anotarLoginExitoso(superficie)) logger.info('[Rappi] el login volvió a funcionar', { superficie })
-  return cuerpo
 }
 
 /** Petición autenticada, con token cacheado y el candado de escrituras ya armados. */
@@ -462,7 +466,10 @@ export async function canjearCodigoRappi(code: string, verifier: string): Promis
   return elegirIdToken(await r.json())
 }
 
-const deComercio = (idToken: string) => ({ 'Authorization-Partners': `Bearer ${idToken}` })
+const deComercio = (idToken: string) => {
+  if (!tokenRappiValido(idToken)) throw new Error('RAPPI_ID_TOKEN_INVALIDO')
+  return { 'Authorization-Partners': `Bearer ${idToken}` }
+}
 
 export async function tiendasDelComercio(idToken: string): Promise<TiendaRappi[]> {
   const r = await rappiApi({
@@ -504,12 +511,23 @@ export async function suscribirTiendaAEventos(storeId: string): Promise<{ ok: bo
   const fallidos: string[] = []
   for (const [segmento, evento] of EVENTOS_POR_TIENDA) {
     try {
+      const url = `${base}/api/v1/webhooks/delivery/rappi/${segmento}`
       const r = await rappiApi({
         metodo: 'PUT',
         ruta: `${API}/webhook/${evento}/add-stores`,
         storeId,
-        cuerpo: [{ url: `${base}/api/v1/webhooks/delivery/rappi/${segmento}`, stores: [storeId] }],
+        cuerpo: [{ url, stores: [storeId] }],
       })
+      if (r.status === 406) {
+        const actual = await rappiApi({ metodo: 'GET', ruta: `${API}/webhook/${evento}` })
+        let cuerpo: unknown
+        try {
+          cuerpo = actual.ok ? JSON.parse(actual.raw) : null
+        } catch {
+          cuerpo = null
+        }
+        if (tiendaConWebhookHabilitado(evento, cuerpo, storeId, url)) continue
+      }
       if (!r.ok) fallidos.push(evento)
     } catch (error) {
       if (error instanceof RappiEscrituraBloqueadaError) throw error

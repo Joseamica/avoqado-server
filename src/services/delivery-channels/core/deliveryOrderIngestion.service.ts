@@ -288,7 +288,7 @@ export async function ingestDeliveryOrder(
       if (normalized.providerAccepted && !order.providerAcceptedAt) {
         await tx.order.updateMany({
           where: { id: order.id, providerAcceptedAt: null },
-          data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
+          data: { providerAcceptedAt: normalized.providerAcceptedAt ?? new Date(), providerAcceptedEvidence: 'PROVIDER_STATE' },
         })
       }
 

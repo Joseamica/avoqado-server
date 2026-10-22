@@ -50,7 +50,13 @@ export function leerEstado(resourcePayload: Prisma.JsonValue | null): EstadoRapp
   const estado: EstadoRappiDelPedido = {}
 
   const a = resourcePayload.aceptacion
-  if (esObjeto(a) && typeof a.en === 'string' && a.en && typeof a.evidencia === 'string' && EVIDENCIAS.includes(a.evidencia)) {
+  if (
+    esObjeto(a) &&
+    typeof a.en === 'string' &&
+    Number.isFinite(Date.parse(a.en)) &&
+    typeof a.evidencia === 'string' &&
+    EVIDENCIAS.includes(a.evidencia)
+  ) {
     estado.aceptacion = { en: a.en, evidencia: a.evidencia as EvidenciaDeAceptacion }
   }
 
@@ -70,8 +76,13 @@ export function leerEstado(resourcePayload: Prisma.JsonValue | null): EstadoRapp
  * 🔴 MEZCLA dentro de `resourcePayload` en un solo UPDATE (`||` de JSONB sólo cambia la llave `aceptacion`): lo demás que haya
  * ahí —el contador de «listo»— sobrevive aunque lo escriba otro proceso al mismo tiempo. Un valor que no es objeto se sustituye.
  */
-export async function anotarAceptacion(eventRowId: string, claimToken: string, evidencia: EvidenciaDeAceptacion): Promise<boolean> {
-  const marca = JSON.stringify({ en: new Date().toISOString(), evidencia })
+export async function anotarAceptacion(
+  eventRowId: string,
+  claimToken: string,
+  evidencia: EvidenciaDeAceptacion,
+  en = new Date(),
+): Promise<boolean> {
+  const marca = JSON.stringify({ en: en.toISOString(), evidencia })
   const filas = await prisma.$executeRaw`
     UPDATE "DeliveryOrderEvent"
        SET "resourcePayload" = (CASE WHEN jsonb_typeof("resourcePayload") = 'object' THEN "resourcePayload" ELSE '{}'::jsonb END)

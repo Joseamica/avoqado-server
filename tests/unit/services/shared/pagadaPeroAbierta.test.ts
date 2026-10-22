@@ -168,15 +168,14 @@ describe('findPaidButOpenOrders — la consulta que arma', () => {
    * 🔴 Codex b1 #1 (Rappi fase 2): el total de un pedido de plataforma lleva cargos del comercio (el envío del repartidor propio,
    * los cargos de Uber) que el reparador no ve. Proponérselo era quitarle el envío a la venta y denunciar un sobrepago falso.
    */
-  it('🔴 NO propone reparar un pedido cuyo dinero liquida una plataforma, y deja intacto el criterio que lee el vigilante', async () => {
+  it('🔴 NO propone reparar un pedido cuyo dinero liquida una plataforma, sin excluirlo del criterio que lee el vigilante', async () => {
     const db = dobleDb()
     await findPaidButOpenOrders(comoDb(db), { graceMs: GRACIA_MS, limit: 50, now: AHORA })
 
     const q = consultaCapturada(db)
     expect(esDeUnaPlataformaSql('o')).toBe(`o."originSystem" = 'DELIVERY_PLATFORM'`)
     expect(q.sql).toContain(`AND NOT (o."originSystem" = 'DELIVERY_PLATFORM')`)
-    // El filtro vive fuera del criterio compartido, como el del IVA aparte: el vigilante ve el mismo conjunto que antes.
-    expect(criterioPagadaPeroAbiertaSql('o')).not.toContain('originSystem')
+    expect(q.sql).toContain(criterioPagadaPeroAbiertaSql('o'))
   })
 })
 
@@ -280,18 +279,23 @@ describe('cerrarPedidoDePlataformaSoloDeEstado', () => {
   const pedido = { id: 'ord-1', venueId: 'v1', status: 'CONFIRMED' }
 
   it('🔴 escribe SÓLO el estado: ni total, ni propina, ni lo pagado, ni lo por cobrar, ni el estado de cobro', async () => {
-    const db = { order: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) } }
+    const db = { $executeRaw: jest.fn().mockResolvedValue(1) }
     expect(await cerrarPedidoDePlataformaSoloDeEstado(db as never, pedido, AHORA)).toBe(true)
 
-    expect(db.order.updateMany).toHaveBeenCalledTimes(1)
-    const [{ where, data }] = db.order.updateMany.mock.calls[0]
-    expect(data).toEqual({ status: 'COMPLETED', completedAt: AHORA })
-    // CAS sobre lo leído: si otro lo canceló o lo cerró en medio, no escribe. Sólo pedidos de plataforma ya pagados.
-    expect(where).toEqual({ id: 'ord-1', venueId: 'v1', status: 'CONFIRMED', originSystem: 'DELIVERY_PLATFORM', paymentStatus: 'PAID' })
+    expect(db.$executeRaw).toHaveBeenCalledTimes(1)
+    const [strings, ...values] = db.$executeRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]
+    const q = Prisma.sql(strings, ...values)
+    expect(q.sql.match(/SET[\s\S]*?WHERE/)?.[0]).toBe(
+      `SET status = 'COMPLETED', "completedAt" = (? AT TIME ZONE 'UTC'), "updatedAt" = (? AT TIME ZONE 'UTC')\n    WHERE`,
+    )
+    expect(q.values).toEqual([AHORA, AHORA, pedido.id, pedido.venueId, pedido.status])
+    expect(q.sql).toContain(criterioPagadaPeroAbiertaSql('o'))
+    expect(q.sql).toContain(pedidoDePlataformaAceptadoSql('o'))
+    expect(q.sql).toContain(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(AHORA)))
   })
 
   it('si otro lo cambió en medio (CAS en 0) contesta false y no lanza', async () => {
-    const db = { order: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } }
+    const db = { $executeRaw: jest.fn().mockResolvedValue(0) }
     expect(await cerrarPedidoDePlataformaSoloDeEstado(db as never, pedido, AHORA)).toBe(false)
   })
 })

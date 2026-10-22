@@ -25,6 +25,9 @@ export type LlaveDelSistema = (typeof LLAVES_DEL_SISTEMA)[number]
 export interface MenuEnRevision {
   huella: string
   publicadaEn: string
+  /** El veredicto anticipado se conserva sin sellar hasta resolver el POST. */
+  envioEnCurso?: true
+  veredictoAnticipado?: { aprobado: boolean; firmadoEnMs: number }
   /** Cuándo se avisó que el veredicto no llegó en el plazo (se avisa UNA vez por publicación). */
   sinVeredictoAvisadoEn?: string
 }
@@ -53,6 +56,13 @@ export function leerMenuEnRevision(config: unknown): MenuEnRevision | null {
   return {
     huella: p.huella,
     publicadaEn: p.publicadaEn,
+    ...(p.envioEnCurso === true ? { envioEnCurso: true as const } : {}),
+    ...(esObjeto(p.veredictoAnticipado) &&
+    typeof p.veredictoAnticipado.aprobado === 'boolean' &&
+    typeof p.veredictoAnticipado.firmadoEnMs === 'number' &&
+    Number.isFinite(p.veredictoAnticipado.firmadoEnMs)
+      ? { veredictoAnticipado: { aprobado: p.veredictoAnticipado.aprobado, firmadoEnMs: p.veredictoAnticipado.firmadoEnMs } }
+      : {}),
     ...(typeof p.sinVeredictoAvisadoEn === 'string' ? { sinVeredictoAvisadoEn: p.sinVeredictoAvisadoEn } : {}),
   }
 }

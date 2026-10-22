@@ -140,6 +140,7 @@ describe('leerEstado', () => {
   it('una marca con evidencia desconocida o sin fecha NO cuenta como aceptación', () => {
     expect(leerEstado({ aceptacion: { en: '2026-10-21T22:26:18.000Z', evidencia: 'ADIVINANZA' } })).toEqual({})
     expect(leerEstado({ aceptacion: { evidencia: 'HISTORIAL_TAKEN' } })).toEqual({})
+    expect(leerEstado({ aceptacion: { en: 'ayer', evidencia: 'HTTP_2XX' } })).toEqual({})
     expect(leerEstado({ aceptacion: 'sí' })).toEqual({})
   })
 
@@ -170,12 +171,12 @@ describe('anotarAceptacion', () => {
 
   it('🔴 MEZCLA dentro de resourcePayload (el contador de «listo» vive ahí): no lo reemplaza', async () => {
     ejecutar.mockResolvedValueOnce(1)
-
-    await anotarAceptacion('evt1', 'tok-1', 'HISTORIAL_TAKEN')
+    const en = new Date('2026-10-22T10:01:00.000Z')
+    await anotarAceptacion('evt1', 'tok-1', 'HISTORIAL_TAKEN', en)
 
     expect(sql()).toMatch(/"resourcePayload" = .*\|\| jsonb_build_object\('aceptacion'/s)
     const marca = JSON.parse(valores().find((v: unknown) => typeof v === 'string' && v.startsWith('{')))
-    expect(marca).toEqual({ en: expect.any(String), evidencia: 'HISTORIAL_TAKEN' })
+    expect(marca).toEqual({ en: en.toISOString(), evidencia: 'HISTORIAL_TAKEN' })
     expect(new Date(marca.en).toISOString()).toBe(marca.en)
   })
 

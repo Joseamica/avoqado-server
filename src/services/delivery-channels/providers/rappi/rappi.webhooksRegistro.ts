@@ -189,6 +189,16 @@ export function registradosDeRespuesta(evento: string, cuerpo: unknown): { regis
   return { registrados: [...porUrl].map(([url, tiendas]) => ({ evento, url, tiendas })), deshabilitadas }
 }
 
+/** Un 406 de add-stores puede ser «ya existe»; sólo la lectura del destino ENABLE acredita el reintento. */
+export function tiendaConWebhookHabilitado(evento: string, cuerpo: unknown, storeId: string, url: string): boolean {
+  const filas = Array.isArray(cuerpo) ? cuerpo : [cuerpo]
+  const tiendas = filas
+    .filter(f => f && typeof f === 'object' && f.event === evento && Array.isArray(f.stores))
+    .flatMap(f => f.stores)
+    .filter(t => t && (typeof t.store_id === 'string' || typeof t.store_id === 'number') && String(t.store_id) === storeId)
+  return tiendas.length > 0 && tiendas.every(t => t.url === url && t.state === 'ENABLE')
+}
+
 /**
  * El `azp` del JWT del integrador = su `clientId` (la ruta `/clients/{clientId}/webhooks` lo pide). Se decodifica el
  * payload SIN verificar la firma: sólo leemos un dato que Rappi mismo nos acaba de entregar. Los errores no copian el

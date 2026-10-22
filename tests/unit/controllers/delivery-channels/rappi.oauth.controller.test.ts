@@ -18,6 +18,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.conn
 }))
 
 import prisma from '../../../../src/utils/prismaClient'
+import logger from '@/config/logger'
 import { crearDbFalsa, type DbFalsa, type Fila } from '../../../__helpers__/rappiDbFake'
 import * as ctrl from '../../../../src/controllers/delivery-channels/rappi.oauth.controller'
 import { getRappiConnectUrl } from '../../../../src/controllers/delivery-channels/deliveryChannels.controller'
@@ -244,6 +245,36 @@ describe('callback', () => {
     expect(intent()).toMatchObject({ state: 'FAILED', failureReason: motivo, merchantTokenEnvelope: null })
     expect(r.status).toHaveBeenCalledWith(502)
   })
+})
+
+describe('errores del OAuth sin credenciales en registros', () => {
+  const errores = [new Error('LEAK42'), new SyntaxError('LEAK42'), new TypeError('Bearer LEAK42\n inválido'), { message: 'LEAK42' }, null]
+  it.each(['canje', 'listado', 'rechequeo', 'general'].flatMap(paso => errores.map(error => ({ paso, error }))))(
+    '$paso conserva el estado correcto y nunca registra el error crudo ($error)',
+    async ({ paso, error }) => {
+      jest.clearAllMocks()
+      let r: ReturnType<typeof res>
+      if (paso === 'rechequeo') {
+        canjeado()
+        await activar({ tiendas: '10', confirmo_negocio: 'si' })
+        cliente.tiendasDelComercio.mockRejectedValue(error)
+        r = await resultado()
+        expect(intent().state).toBe('ACTIVATING')
+        expect(db.links.get('10')?.status).toBe('PENDING')
+        expect(r.status).toHaveBeenCalledWith(200)
+      } else {
+        sembrar()
+        if (paso === 'general') p.venue.findUnique.mockRejectedValue(error)
+        else (paso === 'canje' ? cliente.canjearCodigoRappi : cliente.tiendasDelComercio).mockRejectedValue(error)
+        r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+        expect(intent().state).toBe(paso === 'general' ? 'CREATED' : 'FAILED')
+        expect(intent().merchantTokenEnvelope).toBeNull()
+        expect(r.status).toHaveBeenCalledWith(paso === 'general' ? 500 : 502)
+      }
+      expect(html(r)).not.toContain('LEAK42')
+      expect(JSON.stringify([(logger.error as jest.Mock).mock.calls, (logger.warn as jest.Mock).mock.calls])).not.toContain('LEAK42')
+    },
+  )
 })
 
 describe('activate', () => {

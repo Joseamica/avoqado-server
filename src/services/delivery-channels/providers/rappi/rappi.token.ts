@@ -27,6 +27,11 @@
 
 export type SuperficieRappi = 'integrations' | 'utils' | 'finance'
 
+/** RFC6750 §2.1: un token inutilizable no debe anunciar recuperación ni entrar en caché. */
+export function tokenRappiValido(token: unknown): token is string {
+  return typeof token === 'string' && /^[A-Za-z0-9._~+/-]+=*$/.exec(token)?.[0] === token
+}
+
 export interface RappiTokenDeps {
   /** Pide el token a Rappi. Lo implementa quien sí puede leer env y hablar HTTP. */
   fetchToken: (superficie: SuperficieRappi) => Promise<{ access_token: string; expires_in?: number }>
@@ -80,7 +85,7 @@ export async function getRappiToken(superficie: SuperficieRappi, deps: RappiToke
   const gen = generacion
   const peticion = (async () => {
     const r = await deps.fetchToken(superficie)
-    if (!r?.access_token) throw new Error(`[Rappi] la respuesta de ${superficie} no trae access_token`)
+    if (!tokenRappiValido(r?.access_token)) throw new Error(`[Rappi] la respuesta de ${superficie} no trae access_token válido`)
 
     // Nunca cachear si hubo un reset mientras esta petición viajaba: guardaría un token de
     // credenciales que ya nadie está usando.

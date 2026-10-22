@@ -260,6 +260,10 @@ const PAYMENT_LANE = (mentions: string) =>
 
 /** Fiscal writers (detected by the scan). Keys are `file#owner`. */
 const WRITERS: Record<string, Writer> = {
+  'src/services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado': {
+    class: 'METADATA',
+    reason: 'platform order closed by status and dates only; the raw UPDATE rechecks decision B without writing money columns',
+  },
   // ── TPV line and inline-discount writers (T2) ─────────────────────────────────────────────────
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': {
     class: 'LOCKED',
@@ -852,13 +856,6 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     markers: ['claimedByTerminalId: null'],
   },
   'src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder': CANCEL('lockExistingOrderForPayment('),
-  // Codex b1 #1 (Rappi fase 2): el barrido cierra un pedido de PLATAFORMA sólo de estado (CAS sobre el estado leído); su dinero
-  // es del núcleo de reparto y el reparador del cobro se lo corrompía.
-  'src/services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado': {
-    class: 'METADATA',
-    why: 'platform order closed by status only (status + completedAt under a CAS); no money columns written',
-    markers: ['data: { status: OrderStatus.COMPLETED, completedAt: ahora }'],
-  },
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': CANCEL('lockExistingOrderForPayment('),
   'src/services/fiscal/confirmarContratoDePrecio.service.ts#confirmarContratoIvaIncluido': {
     class: 'EXCLUDED',

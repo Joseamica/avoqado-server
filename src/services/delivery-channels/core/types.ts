@@ -105,6 +105,8 @@ export interface NormalizedDeliveryOrder {
    * nunca pregunta quién es el proveedor.
    */
   providerAccepted?: boolean
+  /** Hora acreditada de esa aceptación; al reintentar se conserva la original. */
+  providerAcceptedAt?: Date
   /**
    * El proveedor ya CERRÓ el pedido (entregado, fallido): ya no admite cambios. Un retiro que siga
    * esperando con el renglón todavía presente no va a ocurrir (spec §3.4, ruling I-2 de la

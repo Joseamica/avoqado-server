@@ -84,7 +84,7 @@ const MOTIVOS: Record<string, string> = {
 const textoMotivo = (m: string) => MOTIVOS[m] ?? `No se pudo conectar (${m}). ${PIDE_OTRO}`
 const paginaFallo = (motivo: string) => page('No se pudo conectar', `<p class="bad">${esc(textoMotivo(motivo))}</p>`)
 
-/** Error público: texto fijo + el código de la petición para soporte. El mensaje interno sólo va al log. */
+/** Error público: texto fijo + el código de la petición para soporte; los registros tampoco reciben el error crudo. */
 function paginaError(res: Response, titulo: string): string {
   const codigo = res.getHeader('X-Correlation-ID')
   return page(
@@ -103,14 +103,14 @@ async function nombreDelNegocio(venueId: string): Promise<string> {
 
 type Ctx = { intentId?: string }
 
-/** Cada paso en su `try/catch`: una excepción es una página amable, nunca un stack. Al log, sólo el id y el mensaje. */
+/** Cada paso en su `try/catch`: una página amable; al log sólo el id y un motivo controlado. */
 function publica(titulo: string, paso: (req: Request, res: Response, ctx: Ctx) => Promise<void>) {
   return async (req: Request, res: Response): Promise<void> => {
     const ctx: Ctx = {}
     try {
       await paso(req, res, ctx)
     } catch (e) {
-      logger.error(`🚨 [RappiOAuth] ${titulo}`, { intentId: ctx.intentId, error: (e as Error).message })
+      logger.error(`🚨 [RappiOAuth] ${titulo}`, { intentId: ctx.intentId, error: motivoDeCanje(e) })
       res.status(500).send(paginaError(res, titulo))
     }
   }
@@ -173,7 +173,9 @@ export const startRappiOAuth = publica('No se pudo iniciar', async (req, res, ct
 /** Sólo motivos controlados en `failureReason`; cualquier otra cosa (red, JSON) es `RAPPI_ERROR`. */
 function motivoDeCanje(e: unknown): string {
   const m = (e as Error)?.message ?? ''
-  return /^RAPPI_(ID_TOKEN_INVALIDO|CANJE_\d+|INTEGRATION_STATUS_\d+)$/.test(m) ? m : 'RAPPI_ERROR'
+  return typeof m === 'string' && /^RAPPI_(ID_TOKEN_INVALIDO|CANJE_[1-5]\d{2}|INTEGRATION_STATUS_[1-5]\d{2})$/.exec(m)?.[0] === m
+    ? m
+    : 'RAPPI_ERROR'
 }
 
 /** La selección: A QUÉ negocio van (R11), una palomita obligatoria que lo confirma, y nada marcado de antemano. */
@@ -239,7 +241,7 @@ export const rappiOAuthCallback = publica('Falló la conexión', async (req, res
   } catch (e) {
     const motivo = motivoDeCanje(e)
     await fallar(intent.id, motivo)
-    logger.error('🚨 [RappiOAuth] falló el canje o el listado de tiendas', { intentId: intent.id, error: (e as Error).message })
+    logger.error('🚨 [RappiOAuth] falló el canje o el listado de tiendas', { intentId: intent.id, error: motivo })
     res.status(502).send(page('Rappi no devolvió tus tiendas', `<p class="bad">No se conectó nada. ${PIDE_OTRO}</p>`))
     return
   }
@@ -336,7 +338,7 @@ async function reChequear(deps: ConnectDeps, intent: DeliveryConnectIntent): Pro
   try {
     tiendas = await c.tiendasDelComercio(idToken)
   } catch (e) {
-    logger.warn('🛵 [RappiOAuth] no se pudo re-leer integration-status', { intentId: intent.id, error: (e as Error).message })
+    logger.warn('🛵 [RappiOAuth] no se pudo re-leer integration-status', { intentId: intent.id, error: motivoDeCanje(e) })
     return
   }
   const seleccion = new Set(ids(intent.selectionJson))

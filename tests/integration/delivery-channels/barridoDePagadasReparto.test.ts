@@ -32,7 +32,12 @@ import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 import { buildWatchdogSql } from '@/jobs/money-integrity-watchdog.job'
 import { PaidOrderReconcilerJob } from '@/jobs/paid-order-reconciler.job'
-import { findPaidButOpenOrders, findPedidosDePlataformaPorCerrar } from '@/services/shared/pagadaPeroAbierta'
+import {
+  cerrarPedidoDePlataformaSoloDeEstado,
+  findPaidButOpenOrders,
+  findPedidosDePlataformaPorCerrar,
+} from '@/services/shared/pagadaPeroAbierta'
+import { recallKdsOrder } from '@/services/mobile/kds.mobile.service'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { denyDeliveryOrder } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from '@/services/delivery-channels/core/types'
@@ -184,6 +189,7 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
   })
 
   afterAll(async () => {
+    if (!venueId) return
     try {
       const orders = await prisma.order.findMany({ where: { venueId }, select: { id: true } })
       const ids = orders.map(o => o.id)
@@ -205,6 +211,75 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     } catch {
       /* base desechable: se borra entera al terminar */
     }
+  })
+
+  it('conserva la aceptación original al reintentar y no cierra un pedido creado antes de las 4 pero aceptado después', async () => {
+    const aceptado = enTokio(4, 1, 1)
+    const pedido = Object.assign(pedidoRappi(), { placedAt: enTokio(3, 59, 1), providerAccepted: true, providerAcceptedAt: aceptado })
+    const { order } = await ingestDeliveryOrder(pedido, { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await fechar(order.id, pedido.placedAt)
+    await ingestDeliveryOrder({ ...pedido, providerAcceptedAt: enTokio(4, 5, 2) } as typeof pedido, linkRappi)
+    expect((await venta(order.id)).providerAcceptedAt).toEqual(aceptado)
+    await fechar(order.id, pedido.placedAt) // el reintento real toca updatedAt; se vuelve a fijar el reloj de esta prueba
+    await barrer(enTokio(4, 10, 1))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
+    await barrer(enTokio(4, 10, 2))
+    const despues = await venta(order.id)
+    expect(despues.status).toBe('COMPLETED')
+    expect(dinero(despues)).toEqual(dinero(order))
+  })
+
+  it.each(['0.00', '10.00'])(
+    'cierra una venta de plataforma cubierta totalmente por descuento, propina %s, sin cambiar dinero',
+    async propina => {
+      const pedido = pedidoRappi()
+      pedido.items = [{ ...pedido.items[0], unitPrice: '100.00', total: '100.00', quantity: 1, modifiers: [] }]
+      pedido.payment = {
+        ...pedido.payment,
+        saleAmount: '100.00',
+        merchantFees: '0.00',
+        discountAmount: '100.00',
+        tipAmount: propina,
+        externallyPaidSale: '0.00',
+        externallyPaidTip: propina,
+        cashDueSale: '0.00',
+        cashDueTip: '0.00',
+      }
+      const { order } = await ingestDeliveryOrder(pedido, { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+      expect(order.paymentStatus).toBe('PAID')
+      expect(order.total.toFixed(2)).toBe('0.00')
+      await fechar(order.id, enTokio(12))
+      const avisos = async () =>
+        (await prisma.$queryRawUnsafe<Array<{ check: string; order_id: string }>>(buildWatchdogSql(enTokio(12, 10)).details))
+          .filter(f => f.check === 'PAGADA PERO ABIERTA')
+          .map(f => f.order_id)
+      expect(await avisos()).not.toContain(order.id)
+      await terminarLaCocina(order.id)
+      expect(await avisos()).toContain(order.id)
+      await barrer(enTokio(12, 10))
+      const despues = await venta(order.id)
+      expect(despues.status).toBe('COMPLETED')
+      expect(dinero(despues)).toEqual(dinero(order))
+      expect(await avisos()).not.toContain(order.id)
+    },
+  )
+
+  it('una cortesía propia sin pago sigue a cargo del cajero', async () => {
+    const propia = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: `cortesia-${Date.now()}`,
+        subtotal: '100.00',
+        discountAmount: '100.00',
+        total: '0.00',
+        taxAmount: '0.00',
+        status: 'CONFIRMED',
+        paymentStatus: 'PAID',
+      },
+    })
+    await fechar(propia.id, enTokio(12))
+    await barrer(enTokio(4, 10, 1))
+    expect((await venta(propia.id)).status).toBe('CONFIRMED')
   })
 
   it('🔴 #1 Rappi con repartidor propio (pedido real 20 + 35 + 20): después del barrido la venta CONSERVA el envío y no hay sobrepago', async () => {
@@ -291,6 +366,30 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(r.outcome).toBe('CANCELLED')
     expect(cancelacion).toHaveBeenCalled() // ya aceptado ⇒ el protocolo de cancelar
     expect(rechazo).not.toHaveBeenCalled() // antes: el de rechazar, como si nunca se hubiera aceptado
+  })
+
+  it('🔴 Codex b2: Deshacer entre selección y cierre conserva abierta la venta y no cambia el dinero', async () => {
+    const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await fechar(order.id, enTokio(12))
+    await prisma.kdsOrder.updateMany({ where: { orderId: order.id }, data: { status: 'COMPLETED' } })
+    const ahora = enTokio(12, 16)
+    const candidata = (await findPedidosDePlataformaPorCerrar(prisma, { graceMs: 300_000, limit: 50, now: ahora })).find(
+      p => p.id === order.id,
+    )
+    expect(candidata).toBeDefined()
+    const comanda = await prisma.kdsOrder.findFirstOrThrow({ where: { orderId: order.id, venueId } })
+    await recallKdsOrder(venueId, comanda.id)
+
+    expect(await cerrarPedidoDePlataformaSoloDeEstado(prisma, candidata!, ahora)).toBe(false)
+    const abierta = await venta(order.id)
+    expect(abierta.status).toBe('CONFIRMED')
+    expect(dinero(abierta)).toEqual(dinero(order))
+
+    // El mismo escritor vuelve a funcionar cuando cocina realmente termina.
+    await terminarLaCocina(order.id)
+    expect(await cerrarPedidoDePlataformaSoloDeEstado(prisma, candidata!, ahora)).toBe(true)
+    expect((await venta(order.id)).status).toBe('COMPLETED')
+    expect(dinero(await venta(order.id))).toEqual(dinero(order))
   })
 
   it('decisión B: la cocina lo termina ⇒ la siguiente pasada del barrido lo cierra, SÓLO de estado', async () => {

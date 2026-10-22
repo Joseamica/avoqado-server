@@ -278,7 +278,11 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
    */
   const marcarAntesDeRegistrar = async (evidencia: EvidenciaDeAceptacion): Promise<RappiProcessResult | null> => {
     try {
-      if (await anotarAceptacion(eventRowId, token, evidencia)) return null
+      const en = new Date()
+      if (await anotarAceptacion(eventRowId, token, evidencia, en)) {
+        estado.aceptacion = { en: en.toISOString(), evidencia }
+        return null
+      }
     } catch (err) {
       const msg = err instanceof Error ? err.message : String(err)
       await cerrar(DeliveryOrderEventStatus.FAILED, undefined, `MARCA: ${msg.slice(0, 400)}`)
@@ -404,6 +408,13 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
         eventRowId,
         linkId,
         venueId: evento.venueId,
+        ...horas,
+      })
+    } else if (resultado.resultado === 'DIFERIDO') {
+      logger.info('📋 [Rappi] veredicto del menú guardado: espera a que termine el POST antes de aplicarse', {
+        eventRowId,
+        linkId,
+        aprobado,
         ...horas,
       })
     } else {
@@ -725,7 +736,10 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   try {
     // 🔴 La ingesta decide PENDING/CONFIRMED y el ticket de cocina según el modo del vínculo que recibe.
     // Como el pedido YA se aceptó en Rappi, se le entrega el vínculo en AUTO aunque la fila diga otra cosa.
-    ingesta = await ingestDeliveryOrder(normalizado, { ...evento.channelLink, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    ingesta = await ingestDeliveryOrder(
+      { ...normalizado, providerAccepted: true, providerAcceptedAt: new Date(estado.aceptacion!.en) },
+      { ...evento.channelLink, orderAcceptanceMode: OrderAcceptanceMode.AUTO },
+    )
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     // El pedido ya se aceptó: el dinero del cliente está comprometido y la venta NO quedó

@@ -111,7 +111,7 @@ describe('El veredicto del menú contra Postgres: la regla de la hora y el cierr
   })
 
   /** Un vínculo con un menú EN REVISIÓN publicado hace un minuto (lo que deja el sincronizador antes del POST). */
-  async function vinculoEnRevision(): Promise<{ link: DeliveryChannelLink; huella: string; publicadaMs: number }> {
+  async function vinculoEnRevision(envioEnCurso = false): Promise<{ link: DeliveryChannelLink; huella: string; publicadaMs: number }> {
     const publicadaMs = Date.now() - 60_000
     const huella = `H-${sufijo}-${++n}`
     const link = await prisma.deliveryChannelLink.create({
@@ -121,7 +121,14 @@ describe('El veredicto del menú contra Postgres: la regla de la hora y el cierr
         externalLocationId: `veredicto-it-${sufijo}-${n}`,
         webhookSecret: 'x',
         status: DeliveryChannelStatus.ACTIVE,
-        config: { note: 'del dueño', menuEnRevision: { huella, publicadaEn: new Date(publicadaMs).toISOString() } },
+        config: {
+          note: 'del dueño',
+          menuEnRevision: {
+            huella,
+            publicadaEn: new Date(publicadaMs).toISOString(),
+            ...(envioEnCurso ? { envioEnCurso: true } : {}),
+          },
+        },
       },
     })
     return { link, huella, publicadaMs }
@@ -200,5 +207,21 @@ describe('El veredicto del menú contra Postgres: la regla de la hora y el cierr
     expect((await processRappiEvent(evento.id)).outcome).toBe('MENU_VERDICT')
     expect((await enLaBase(link.id)).lastMenuHash).toBe(huella)
     expect(await eventoEnLaBase(evento.id)).toMatchObject({ status: 'PROCESSED', claimToken: null })
+  })
+
+  it('el veredicto anticipado y el cierre del evento también se deshacen juntos al perder el reclamo', async () => {
+    const { link, huella, publicadaMs } = await vinculoEnRevision(true)
+    const evento = await aviso(link, 'MENU_APPROVED', ahoraSeg())
+    mockRobo.eventoId = evento.id
+
+    expect((await processRappiEvent(evento.id)).outcome).toBe('IN_FLIGHT')
+    const final = await enLaBase(link.id)
+    expect(final.lastMenuHash).toBeNull()
+    expect((final.config as Record<string, any>).menuEnRevision).toEqual({
+      huella,
+      publicadaEn: new Date(publicadaMs).toISOString(),
+      envioEnCurso: true,
+    })
+    expect(await eventoEnLaBase(evento.id)).toMatchObject({ status: 'RECEIVED', claimToken: 'otro-dueño' })
   })
 })

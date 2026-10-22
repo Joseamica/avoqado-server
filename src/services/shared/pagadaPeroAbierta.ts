@@ -1,4 +1,4 @@
-import { OrderStatus, OriginSystem, PaymentStatus, Prisma, type PrismaClient } from '@prisma/client'
+import { Prisma, type PrismaClient } from '@prisma/client'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
 import { BUSINESS_DAY_START_HOUR } from './cashDrawerAutoClose'
 import { utcTs } from '../../utils/sqlDates'
@@ -74,7 +74,8 @@ export function baseQueDebeCubrirseSql(alias = 'o'): string {
  *  - la suma es CIEGA AL TIPO salvo REFUND: los TEST y los ADJUSTMENT cuentan, igual que
  *    en el camino de cierre. No se filtra por `type` más allá de excluir la devolución;
  *  - existe al menos un cobro REGULAR o FAST positivo — así una cuenta de $0 sin cobro
- *    (cortesía total) NO se marca pagada: ésa la cierra el cajero cobrando $0;
+ *    (cortesía total) NO se marca pagada: ésa la cierra el cajero cobrando $0. Excepción: plataforma aceptada y PAID con
+ *    venta y saldo exactamente cero; la ingesta puede liquidarla con descuento total sin crear Payment;
  *  - asimetría deliberada con `type` NULL: la puerta del EXISTS lo RECHAZA (un NULL no
  *    entra en un `IN (...)`) pero la suma sí lo CUENTA (`IS DISTINCT FROM` conserva los
  *    NULL). Es el lado conservador: un tipo desconocido no basta para declarar cobrada una
@@ -87,11 +88,12 @@ export function criterioPagadaPeroAbiertaSql(alias = 'o'): string {
   const o = alias
   return `
     ${o}.status NOT IN ('COMPLETED', 'CANCELLED', 'DELETED')
-    AND EXISTS (
+    AND (EXISTS (
       SELECT 1 FROM "Payment" p
       WHERE p."orderId" = ${o}.id AND p.status = 'COMPLETED'
         AND p.type IN ('REGULAR', 'FAST') AND p.amount > 0
-    )
+    ) OR (${pedidoDePlataformaPagadoYAceptadoSql(o)}
+      AND ${o}.total = 0 AND ${o}."remainingBalance" = 0 AND (${baseQueDebeCubrirseSql(o)}) = 0))
     AND (
       SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
       WHERE p."orderId" = ${o}.id AND ${COBRO_QUE_CUBRE}
@@ -342,23 +344,21 @@ export async function findPedidosDePlataformaPorCerrar(
  * `paidAmount`, ni `remainingBalance`, ni el estado de cobro: ese dinero es del núcleo de reparto (Codex b1 #1). No hay efectos
  * que se pierdan: el vale de inventario y los sobres nacieron en la ingesta, y no tiene mesa.
  *
- * CAS sobre el estado leído: si otro lo canceló o lo cerró en medio, no escribe (`false`) y no pasa nada. No repite la
- * aceptación: `providerAcceptedAt` nunca se borra y un pedido de reparto no regresa a PENDING.
+ * Repite la decisión B EN el UPDATE: «Deshacer» puede reabrir la cocina sin cambiar el estado de la venta entre selección y
+ * cierre. El CAS conserva también el negocio y el estado leído, y vuelve a exigir el cobro vigente.
  */
 export async function cerrarPedidoDePlataformaSoloDeEstado(
-  db: Pick<PrismaClient, 'order'>,
+  db: Pick<PrismaClient, '$executeRaw'>,
   p: Pick<PedidoDePlataformaPorCerrar, 'id' | 'venueId' | 'status'>,
   ahora: Date,
 ): Promise<boolean> {
-  const r = await db.order.updateMany({
-    where: {
-      id: p.id,
-      venueId: p.venueId,
-      status: p.status as OrderStatus,
-      originSystem: OriginSystem.DELIVERY_PLATFORM,
-      paymentStatus: PaymentStatus.PAID,
-    },
-    data: { status: OrderStatus.COMPLETED, completedAt: ahora },
-  })
-  return r.count === 1
+  const count = await db.$executeRaw`
+    UPDATE "Order" o
+    SET status = 'COMPLETED', "completedAt" = ${utcTs(ahora)}, "updatedAt" = ${utcTs(ahora)}
+    WHERE o.id = ${p.id} AND o."venueId" = ${p.venueId} AND o.status = ${p.status}::"OrderStatus"
+      AND ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
+      AND ${Prisma.raw(pedidoDePlataformaPagadoYAceptadoSql('o'))}
+      AND ${Prisma.raw(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(ahora)))}
+  `
+  return count === 1
 }

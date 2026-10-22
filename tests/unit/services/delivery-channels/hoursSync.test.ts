@@ -183,7 +183,7 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
     expect(fila.config.horarioPublicado).toEqual({ huella: expect.any(String), en: expect.any(String) })
   })
 
-  it('🔴 un fallo deja la huella vieja (se reintenta en la siguiente pasada)', async () => {
+  it('🔴 un fallo invalida la huella vieja: el proveedor pudo cambiar a medias', async () => {
     const publicar = conPublicador()
     await syncChannelHours(copia())
     const vieja = structuredClone(fila.config.horarioPublicado)
@@ -195,12 +195,12 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
     publicar.mockResolvedValueOnce({ ok: false, status: 400, raw: 'CREAR sat: overlapping' })
     const r = await syncChannelHours(copia())
     expect(r).toMatchObject({ outcome: 'FAILED', error: 'HTTP 400' })
-    expect(fila.config.horarioPublicado).toEqual(vieja)
+    expect(fila.config.horarioPublicado).toBeNull()
 
     publicar.mockRejectedValueOnce(new Error('The operation was aborted due to timeout'))
     const r2 = await syncChannelHours(copia())
     expect(r2).toMatchObject({ outcome: 'FAILED', error: expect.stringMatching(/timeout/) })
-    expect(fila.config.horarioPublicado).toEqual(vieja)
+    expect(fila.config.horarioPublicado).toBeNull()
 
     // La tercera pasada lo vuelve a intentar (no se quedó «publicado» por error) y ahora sí sale.
     const r3 = await syncChannelHours(copia())
@@ -209,13 +209,56 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
     expect(fila.config.horarioPublicado.huella).not.toBe(vieja.huella)
   })
 
+  it('🔴 Codex b2: A → B parcial → reinicio → A repara el horario remoto, aunque A ya se había publicado', async () => {
+    let remoto = semana()
+    const publicar = conPublicador(
+      jest.fn(async horario => {
+        remoto = structuredClone(horario)
+        return { ok: true, status: 200, raw: '' }
+      }),
+    )
+    await syncChannelHours(copia())
+    const a = structuredClone(fila.config.horarioPublicado)
+    const b = semana({ monday: { enabled: true, ranges: [{ open: '11:00', close: '22:00' }] } })
+    mockedResolve.mockResolvedValue({ horario: b, fuente: 'CANAL' })
+    publicar.mockImplementationOnce(async () => {
+      remoto.monday = structuredClone(b.monday)
+      return { ok: false, status: 500, raw: 'falló tras cambiar el lunes' }
+    })
+    expect((await syncChannelHours(copia())).outcome).toBe('FAILED')
+    expect(remoto.monday.ranges[0].open).toBe('11:00')
+
+    // Sólo quedan las marcas persistidas; el proceso nuevo no recuerda el fallo.
+    _olvidarAvisosDeFallas()
+    fila = structuredClone(fila)
+    mockedResolve.mockResolvedValue({ horario: semana(), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('PUBLISHED')
+    expect(remoto).toEqual(semana())
+    expect(fila.config.horarioPublicado.huella).toBe(a.huella)
+    expect(publicar).toHaveBeenCalledTimes(3)
+  })
+
+  it('🔴 borra la certeza ANTES de llamar al proveedor; si no logra guardarlo, no sale a la red', async () => {
+    const publicar = conPublicador(
+      jest.fn(async () => {
+        expect(fila.config.horarioPublicado).toBeNull()
+        return { ok: true, status: 200, raw: '' }
+      }),
+    )
+    await syncChannelHours(copia())
+    mockedResolve.mockResolvedValue({ horario: semana({ monday: CERRADO }), fuente: 'CANAL' })
+    mockedUpdate.mockRejectedValueOnce(new Error('DB no disponible antes del envío'))
+    expect((await syncChannelHours(copia())).outcome).toBe('FAILED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
   it('una escritura que NO salió (el candado) ⇒ FAILED con aviso de «no salió», sin 🚨', async () => {
     conPublicador(jest.fn().mockRejectedValue(new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'tienda fuera de la lista')))
 
     const r = await syncChannelHours(copia())
 
     expect(r.outcome).toBe('FAILED')
-    expect(fila.config.horarioPublicado).toBeUndefined()
+    expect(fila.config.horarioPublicado).toBeNull()
     expect(mockedWarn).toHaveBeenCalledWith(expect.stringMatching(/NO salió/), expect.objectContaining({ reason: 'STORE_NOT_AUTHORIZED' }))
     expect(mockedError).not.toHaveBeenCalled()
   })
@@ -352,8 +395,8 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
       fuente: 'CANAL',
     })
     expect((await syncChannelHours(copia())).outcome).toBe('FAILED')
-    // El aviso ya se rearmó (sin esperar a publicar), conservando la última huella publicada y las llaves del menú.
-    expect(fila.config.horarioPublicado).toEqual(h1)
+    // El aviso ya se rearmó y la publicación fallida invalida la huella anterior, sin tocar las llaves del menú.
+    expect(fila.config.horarioPublicado).toBeNull()
     expect(fila.config.menuEnRevision).toEqual({ huella: 'm1', publicadaEn: '2026-10-22T08:00:00.000Z' })
 
     // Vuelve a cerrar todo: la segunda semana cerrada SÍ grita.

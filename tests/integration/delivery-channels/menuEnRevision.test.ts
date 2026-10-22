@@ -19,6 +19,7 @@ import prisma from '@/utils/prismaClient'
 import { syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
 import { processRappiEvent } from '@/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { llaveDeDeduplicacion } from '@/services/delivery-channels/providers/rappi/rappi.webhookIngress'
+import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 
 const mockPublicar = jest.fn()
 const mockPayload = jest.fn()
@@ -107,8 +108,8 @@ describe('Menú en revisión — dos pasadas encimadas contra Postgres', () => {
     const llego = new Promise<void>(llegada => {
       mockPublicar.mockImplementationOnce(
         () =>
-          new Promise(ok => {
-            soltar = () => ok(respuesta)
+          new Promise((ok, rechazar) => {
+            soltar = () => (respuesta instanceof Error ? rechazar(respuesta) : ok(respuesta))
             llegada()
           }),
       )
@@ -198,7 +199,8 @@ describe('Menú en revisión — dos pasadas encimadas contra Postgres', () => {
     await post.llego
     const { huella } = (await configDe(copia.id)).menuEnRevision
     expect(await aprobarConElProcesador(copia)).toBe('MENU_VERDICT')
-    expect((await enLaBase(copia.id)).lastMenuHash).toBe(huella) // el aviso ajeno sí selló
+    expect((await enLaBase(copia.id)).lastMenuHash).toBeNull() // todavía no se conoce el desenlace del POST
+    expect((await configDe(copia.id)).menuEnRevision.veredictoAnticipado.aprobado).toBe(true)
     post.soltar()
 
     expect((await pasada).outcome).toBe('FAILED')
@@ -226,6 +228,38 @@ describe('Menú en revisión — dos pasadas encimadas contra Postgres', () => {
     mockPublicar.mockResolvedValueOnce(ok200)
     expect((await syncChannelMenu(final)).outcome).toBe('PUBLISHED')
     expect(mockPublicar).toHaveBeenCalledTimes(2)
+  })
+
+  it.each([
+    ['400', { ok: false, status: 400, raw: '{}', problemas: [] }],
+    ['401', { ok: false, status: 401, raw: 'unauthorized', problemas: [] }],
+    ['status 0', { ok: false, status: 0, raw: 'sin red', problemas: [] }],
+    ['NotSent', new DeliveryWriteNotSentError('UNAVAILABLE', 'sin token')],
+  ])('🔴 Codex b2: veredicto real anticipado + %s + limpieza caída conserva una revisión durable sin sello', async (_caso, respuesta) => {
+    const copia = await vinculoYCopiaVieja()
+    const post = postDetenido(respuesta)
+    const pasada = syncChannelMenu(copia)
+    await post.llego
+    const { huella } = (await configDe(copia.id)).menuEnRevision
+    expect(await aprobarConElProcesador(copia)).toBe('MENU_VERDICT')
+
+    const interrupcion = jest.spyOn(prisma, '$transaction').mockRejectedValueOnce(new Error('DB no disponible al limpiar'))
+    try {
+      post.soltar()
+      expect((await pasada).outcome).toBe('FAILED')
+    } finally {
+      interrupcion.mockRestore()
+    }
+
+    const final = await enLaBase(copia.id)
+    expect(final.lastMenuHash).toBeNull()
+    expect((final.config as Record<string, any>).menuEnRevision).toMatchObject({
+      huella,
+      envioEnCurso: true,
+      veredictoAnticipado: { aprobado: true },
+    })
+    expect((await syncChannelMenu(final)).outcome).toBe('IN_REVIEW')
+    expect(mockPublicar).toHaveBeenCalledTimes(1)
   })
 
   /**
