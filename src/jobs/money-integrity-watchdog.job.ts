@@ -307,7 +307,7 @@ export function buildWatchdogSql(now: Date = new Date()): { counts: string; deta
         --    todavía está a tiempo de sanarse solo.
         --    🔴 Y NO es «pagada pero abierta» un pedido de PLATAFORMA (Rappi, Uber…) pagado y aceptado que
         --    la decisión B del founder (22-oct-2026) deja abierto a propósito: la cocina lo prepara y su día
-        --    del negocio no ha terminado. Se resta con la MISMA función que decide el barrido, con el reloj de
+        --    del negocio (el de la caja, con corte a las 04:00 del venue) no ha terminado. Se resta con la MISMA función que decide el barrido, con el reloj de
         --    esta corrida: en cuanto la cocina lo termina o se acaba su día, si sigue abierto, grita.
         --    Sin tope de fecha a propósito, al revés que la invariante 5: el barrido sólo mira
         --    30 días hacia atrás, así que el rezago más viejo no lo vigila nadie más.

@@ -1,5 +1,6 @@
 import { OrderStatus, OriginSystem, PaymentStatus, Prisma, type PrismaClient } from '@prisma/client'
 import { DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { BUSINESS_DAY_START_HOUR } from './cashDrawerAutoClose'
 import { utcTs } from '../../utils/sqlDates'
 
 /**
@@ -160,13 +161,16 @@ export function laCocinaLoTerminoSql(alias = 'o'): string {
 }
 
 /**
- * 🔴 Decisión B, segunda señal: «se acabó su día del negocio». El día calendario de la venta y el de `ahora`, los DOS en la zona
- * del negocio (`Venue.timezone`), nunca en la del servidor ni en UTC a secas: un pedido de las 23:50 se cierra al acabar ESE día
- * (a las 00:00 del negocio), no 24 h después; y en Tijuana el día no termina a las 22:00.
+ * 🔴 Decisión B, segunda señal: «se acabó su día del negocio». El día del negocio de la venta y el de `ahora`, los DOS en la zona
+ * del negocio (`Venue.timezone`), nunca en la del servidor ni en UTC a secas.
  *
- * El «día» es el de los reportes de ventas: medianoche a medianoche en la zona del venue (`venueStartOfDay`, `utils/datetime.ts`),
- * el mismo de «Ventas de hoy» del Centro de mando y del Cierre del día de las apps (`end-of-day.mobile.service.ts`), que son los
- * que leen si un pedido está cerrado. (El corte de las 04:00 de `cashDrawerAutoClose.ts#businessDayStart` es el de la CAJA.)
+ * 🔴 El «día del negocio» es el de la CAJA (decisión del controlador, Ronda de arreglo 1 de la Tarea 22): empieza a las
+ * `BUSINESS_DAY_START_HOUR` (04:00) de la zona del venue, el MISMO corte de `businessDayStart` (`cashDrawerAutoClose.ts`) con el
+ * que el sistema ya cierra cosas solas (la caja olvidada). NO es la medianoche de los reportes: un bar que cierra a las 2 am no
+ * pierde «Cancelar» a las 00:00 con el pedido todavía en la cocina, y Toast también corta su día de madrugada. En SQL: el día de
+ * un instante es la FECHA de su hora local menos el corte (las 03:59 todavía son de la víspera). Así:
+ *  - uno aceptado a las 23:50 sigue abierto a las 00:30 y a las 03:59, y se cierra a las 04:00;
+ *  - uno aceptado a las 02:00 es del día de la víspera: se cierra a las 04:00 de ESE mismo día, no del siguiente.
  *
  * El día de la venta es el ÚLTIMO de: cuándo llegó, cuándo se aceptó (MANUAL) y para cuándo se programó (`scheduledFor`): un
  * programado para mañana no se cierra al acabar hoy.
@@ -179,13 +183,19 @@ export function laCocinaLoTerminoSql(alias = 'o'): string {
  */
 export function seAcaboSuDiaDelNegocioSql(alias: string, ahora: string): string {
   const o = alias
+  if (!Number.isInteger(BUSINESS_DAY_START_HOUR) || BUSINESS_DAY_START_HOUR < 0 || BUSINESS_DAY_START_HOUR > 23) {
+    throw new Error(`seAcaboSuDiaDelNegocioSql: hora de corte inválida (${BUSINESS_DAY_START_HOUR})`)
+  }
+  // El día del negocio de una hora local: su fecha, una vez descontado el corte de la caja.
+  const diaDelNegocio = (instanteUtc: string) =>
+    `(((${instanteUtc} AT TIME ZONE 'UTC') AT TIME ZONE z.tz) - INTERVAL '${BUSINESS_DAY_START_HOUR} hours')::date`
   return `EXISTS (
         SELECT 1 FROM "Venue" vz
         CROSS JOIN LATERAL (
           SELECT CASE WHEN vz.timezone IN (SELECT name FROM pg_timezone_names) THEN vz.timezone ELSE '${DEFAULT_TIMEZONE}' END AS tz
         ) z
         WHERE vz.id = ${o}."venueId"
-          AND ((GREATEST(${o}."createdAt", ${o}."providerAcceptedAt", ${o}."scheduledFor") AT TIME ZONE 'UTC') AT TIME ZONE z.tz)::date < ((${ahora} AT TIME ZONE 'UTC') AT TIME ZONE z.tz)::date
+          AND ${diaDelNegocio(`GREATEST(${o}."createdAt", ${o}."providerAcceptedAt", ${o}."scheduledFor")`)} < ${diaDelNegocio(ahora)}
       )`
 }
 

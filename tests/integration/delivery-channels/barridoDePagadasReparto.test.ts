@@ -13,7 +13,7 @@
  * Ronda 1 (ruling del controlador, 22-oct): el barrido NUNCA recalcula el dinero de un pedido que liquida una plataforma y
  * NUNCA cierra uno sin aceptar. Tarea 22, decisión «B» del founder (22-oct): uno aceptado y pagado se cierra, sólo de estado,
  * cuando la cocina lo termina (ninguna comanda sigue en NEW/PREPARING) o al acabar el día del negocio EN SU ZONA, lo que pase
- * primero. Mientras tanto sigue abierto y la cocina conserva «Cancelar».
+ * primero. El día del negocio es el de la CAJA (`businessDayStart`): empieza a las 04:00, no a medianoche (Ronda de arreglo 1). Mientras tanto sigue abierto y la cocina conserva «Cancelar».
  *
  * 🔴 El negocio de la prueba vive en Asia/Tokyo (UTC+9, sin horario de verano): lejos de la zona del servidor y de la sesión de
  * Postgres (America/Mexico_City en la Mac, UTC en Render). Los pedidos que dependen del reloj se FECHAN a una hora fija de
@@ -314,18 +314,35 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(dinero(despues)).toEqual(dinero(order))
   })
 
-  it('decisión B: sin comanda (negocio sin cocina) sigue abierto todo SU día y se cierra al acabarlo, no 24 h después (23:50 → 00:05)', async () => {
+  it('🔴 decisión B: sin comanda, uno aceptado a las 23:50 sigue abierto a las 00:30 y a las 03:59, y se cierra a las 04:00 (el día de la CAJA)', async () => {
     const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
-    await prisma.kdsOrder.deleteMany({ where: { orderId: order.id } })
+    await prisma.kdsOrder.deleteMany({ where: { orderId: order.id } }) // negocio sin cocina: sólo lo cierra el fin del día
     await fechar(order.id, enTokio(23, 50))
 
-    await barrer(enTokio(23, 58))
-    expect((await venta(order.id)).status).toBe('CONFIRMED') // sin señal de la cocina, y su día no ha terminado
+    // Pasada la medianoche el día del negocio sigue: un bar que cierra a las 2 am conserva «Cancelar».
+    await barrer(enTokio(0, 30, 1))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
+    await barrer(enTokio(3, 59, 1))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
 
-    await barrer(enTokio(0, 5, 1))
+    // A las 04:00 del negocio empieza otro día (el corte de la caja, `businessDayStart`): se cierra, sólo de estado.
+    await barrer(enTokio(4, 0, 1))
     const despues = await venta(order.id)
-    expect(despues.status).toBe('COMPLETED') // acabó ESE día del negocio: 15 minutos después, no 24 horas
+    expect(despues.status).toBe('COMPLETED')
     expect(dinero(despues)).toEqual(dinero(order))
+  })
+
+  it('🔴 decisión B: uno aceptado a las 02:00 es del día del negocio de la víspera: se cierra a las 04:00 de ESE día, no del siguiente', async () => {
+    const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await prisma.kdsOrder.deleteMany({ where: { orderId: order.id } })
+    await fechar(order.id, enTokio(2, 0, 1))
+
+    await barrer(enTokio(3, 59, 1))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
+
+    // Se cierra a las 04:00 de ese mismo día, no a las 04:00 del siguiente.
+    await barrer(enTokio(4, 0, 1))
+    expect((await venta(order.id)).status).toBe('COMPLETED')
   })
 
   it('🔴 decisión B: se acabó el día del negocio con la comanda aún abierta ⇒ se cierra; manda la zona del NEGOCIO, no la del servidor', async () => {
@@ -337,7 +354,11 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     await barrer(enTokio(23, 30))
     expect((await venta(order.id)).status).toBe('CONFIRMED')
 
+    // 00:10 de Tokio: todavía es el día del negocio que empezó a las 04:00 del día D.
     await barrer(enTokio(0, 10, 1))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
+
+    await barrer(enTokio(4, 10, 1))
     const despues = await venta(order.id)
     expect(despues.status).toBe('COMPLETED')
     expect(dinero(despues)).toEqual(dinero(order))
@@ -351,10 +372,10 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     await fechar(order.id, enTokio(20))
     await prisma.$executeRaw`UPDATE "Order" SET "scheduledFor" = ${utcTs(enTokio(13, 0, 1))} WHERE id = ${order.id}`
 
-    await barrer(enTokio(0, 10, 1)) // acabó el día en que llegó, no el suyo
+    await barrer(enTokio(4, 10, 1)) // acabó el día en que llegó, no el suyo
     expect((await venta(order.id)).status).toBe('CONFIRMED')
 
-    await barrer(enTokio(0, 10, 2))
+    await barrer(enTokio(4, 10, 2))
     expect((await venta(order.id)).status).toBe('COMPLETED')
   })
 
@@ -390,7 +411,7 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(deDia).toContain(propia.id)
 
     // Se acabó su día y sigue abierto (el barrido no pasó): eso SÍ es lo que el vigilante vigila.
-    const alOtroDia = await gritos(enTokio(0, 10, 1))
+    const alOtroDia = await gritos(enTokio(4, 10, 1))
     expect(alOtroDia).toContain(order.id)
     expect(alOtroDia).toContain(propia.id)
 

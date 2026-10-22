@@ -13,6 +13,7 @@ import {
   pedidoDePlataformaQueBDejaAbiertoSql,
   seAcaboSuDiaDelNegocioSql,
 } from '@/services/shared/pagadaPeroAbierta'
+import { BUSINESS_DAY_START_HOUR } from '@/services/shared/cashDrawerAutoClose'
 
 describe('criterio SQL «pagada pero abierta»', () => {
   const sql = criterioPagadaPeroAbiertaSql('o')
@@ -238,15 +239,20 @@ describe('decisión B: CUÁNDO se cierra un pedido de plataforma pagado y acepta
     expect(sql).not.toMatch(/\bo\./)
   })
 
-  it('🔴 «se acabó su día del negocio»: el día de la venta y el de AHORA, los dos en la zona del negocio (nunca la del servidor ni UTC)', () => {
+  it('🔴 «se acabó su día del negocio»: el día de la CAJA (corte de `businessDayStart`) de la venta y el de AHORA, en la zona del negocio', () => {
     const sql = seAcaboSuDiaDelNegocioSql('x', AHORA)
+    // Decisión del controlador (Ronda de arreglo 1): el día del negocio es el de la caja, que empieza a las
+    // BUSINESS_DAY_START_HOUR (04:00) en la zona del venue, no a medianoche. La hora sale de la MISMA constante.
+    const corte = `- INTERVAL '${BUSINESS_DAY_START_HOUR} hours')::date`
     // El día de la venta: el último de llegó, se aceptó o se programó (un programado no se cierra antes de su día).
     expect(sql).toContain(
-      `((GREATEST(x."createdAt", x."providerAcceptedAt", x."scheduledFor") AT TIME ZONE 'UTC') AT TIME ZONE z.tz)::date`,
+      `(((GREATEST(x."createdAt", x."providerAcceptedAt", x."scheduledFor") AT TIME ZONE 'UTC') AT TIME ZONE z.tz) ${corte}`,
     )
-    // El de AHORA, con el reloj que le pasen y la MISMA zona.
-    expect(sql).toContain(`((${AHORA} AT TIME ZONE 'UTC') AT TIME ZONE z.tz)::date`)
-    expect(sql).toMatch(/::date < \(\(TIMESTAMP/)
+    // El de AHORA, con el reloj que le pasen, la MISMA zona y el MISMO corte.
+    expect(sql).toContain(`(((${AHORA} AT TIME ZONE 'UTC') AT TIME ZONE z.tz) ${corte}`)
+    expect(sql).toMatch(/::date < \(\(\(TIMESTAMP/)
+    // Nunca la medianoche a secas.
+    expect(sql).not.toMatch(/AT TIME ZONE z\.tz\)::date/)
     // La zona es la del negocio de ESA venta; una zona que Postgres no conoce cae en la de default y no tumba la pasada.
     expect(sql).toContain(`FROM "Venue" vz`)
     expect(sql).toContain(`vz.id = x."venueId"`)

@@ -75,7 +75,7 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * del cobro no ve: se los quitaba y denunciaba un sobrepago falso. Una cuarta pasada lo cierra SÓLO DE ESTADO, sin tocar su
  * dinero, y nunca uno que todavía espera a que la cocina lo acepte (Uber MANUAL). CUÁNDO se cierra uno aceptado lo dice la
  * decisión «B» del founder (22-oct-2026, `momentoDeCerrarUnPedidoDePlataformaSql`): cuando la cocina lo termina o al acabar su
- * día del negocio (en la zona del venue), lo que pase primero; mientras tanto la cocina conserva «Cancelar». Asiento:
+ * día del negocio (el de la caja: corte de las 04:00 en la zona del venue, `businessDayStart`), lo que pase primero; mientras tanto la cocina conserva «Cancelar». Asiento:
  * `ORDER_RECONCILED_PAID` con `effects: 'PLATFORM_ORDER_STATUS_ONLY'`.
  *
  * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
