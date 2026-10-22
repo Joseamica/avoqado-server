@@ -12,7 +12,7 @@ const tables = {
     status text, "paymentStatus" text, subtotal numeric, "discountAmount" numeric,
     "serviceChargeAmount" numeric, "taxAmount" numeric, "tipAmount" numeric,
     total numeric, "paidAmount" numeric, "createdAt" timestamp, "updatedAt" timestamp, "completedAt" timestamp,
-    "providerAcceptedAt" timestamp, "scheduledFor" timestamp`,
+    "providerAcceptedAt" timestamp, "scheduledFor" timestamp, "remainingBalance" numeric DEFAULT 0`,
   // Decisión B (22-oct): la invariante 6 resta el pedido de plataforma que la cocina todavía prepara.
   KdsOrder: 'id text, "orderId" text, "venueId" text, status text',
   // `createdAt`: la ventana de alerta (7bffb295) fecha la orden por su último cobro. NULL = la fecha de la orden.
