@@ -9,6 +9,7 @@ import { eventoDeLaRuta, RUTA_POR_EVENTO } from '../../../../src/services/delive
 import { RAPPI_EVENTS } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
 import {
   azpDelJwt,
+  eventosARotar,
   planDeWebhooks,
   registradosDeRespuesta,
   secretoDeLaIntegracion,
@@ -237,6 +238,84 @@ describe('secretoDeLaIntegracion', () => {
       secreto: 'uno',
       origen: 'ARCHIVO',
     })
+  })
+})
+
+// 🔴 Hallazgo #1 de Codex (bloque 0): Rappi crea el aviso pero la respuesta (con su secreto) se pierde. Al repetir, el plan ve la
+// tienda y la URL bien ⇒ NADA, y el archivo se queda sin ese secreto para siempre (el servidor rechaza esos avisos con 401).
+describe('eventosARotar', () => {
+  const INTEGRACION = RAPPI_EVENTS.STORE_PROVISIONING_STATUS
+  /** El archivo de secretos completo (los 10 de tienda + el de la integración), menos los eventos que se pidan. */
+  const archivoSin = (...faltan: string[]): Record<string, unknown> =>
+    Object.fromEntries([...EVENTOS_DE_TIENDA, INTEGRACION].filter(e => !faltan.includes(e)).map(e => [e, `secreto-${e}`]))
+  /** Cada acción del plan con su desenlace: `aceptada` = Rappi contestó 2xx. */
+  const resultados = (plan: AccionWebhook[], rechazadas: string[] = []) =>
+    plan.map(accion => ({ accion, aceptada: !rechazadas.includes(accion.evento) }))
+
+  // ── 1 · FUNCIÓN NUEVA ───────────────────────────────────────────────────────────────
+  it('🔴 un aviso que Rappi YA tiene y el archivo no (la respuesta del CREAR se perdió) ⇒ se rota', () => {
+    const { registrados, deIntegracion } = todoAlDia()
+    const plan = planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS) // todo NADA: la URL y la tienda están bien
+
+    expect(eventosARotar(registrados, resultados(plan), archivoSin(RAPPI_EVENTS.NEW_ORDER))).toEqual([RAPPI_EVENTS.NEW_ORDER])
+  })
+
+  it('los que tienen secreto en el archivo NO se rotan (tampoco con una lista de rotación)', () => {
+    const { registrados, deIntegracion } = todoAlDia()
+    const plan = planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS)
+
+    expect(eventosARotar(registrados, resultados(plan), archivoSin())).toEqual([])
+    expect(eventosARotar(registrados, resultados(plan), { ...archivoSin(), PING: ['nuevo', 'viejo'] })).toEqual([])
+  })
+
+  it('🔴 el de la INTEGRACIÓN nunca se rota así (no tiene reset-secret), aunque falte y aunque Rappi lo muestre', () => {
+    const { registrados, deIntegracion } = todoAlDia()
+    const plan = planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS, false) // ⇒ CREAR_DE_INTEGRACION aceptado
+    const conIntegracionLeida = [...registrados, { evento: INTEGRACION, url: urlDe('store-provisioning'), tiendas: TIENDAS }]
+
+    expect(eventosARotar(conIntegracionLeida, resultados(plan), archivoSin(INTEGRACION))).toEqual([])
+  })
+
+  it('🔴 un CREAR que FALLÓ en esta corrida, si el aviso no existía, NO se rota (no hay nada que rotar en Rappi)', () => {
+    const plan = planDeWebhooks([], [], BASE, TIENDAS) // nada existía: 10 CREAR
+
+    expect(eventosARotar([], resultados(plan, [RAPPI_EVENTS.NEW_ORDER]), archivoSin(RAPPI_EVENTS.NEW_ORDER))).toEqual([])
+  })
+
+  it('un CREAR que Rappi ACEPTÓ pero cuya respuesta no trajo el secreto ⇒ se rota (ya existe allá)', () => {
+    const plan = planDeWebhooks([], [], BASE, TIENDAS)
+
+    expect(eventosARotar([], resultados(plan), archivoSin(RAPPI_EVENTS.PING))).toEqual([RAPPI_EVENTS.PING])
+  })
+
+  it('un CAMBIAR_URL o AGREGAR_TIENDAS que falló sobre un aviso ya leído ⇒ se rota igual: existía en Rappi', () => {
+    const { deIntegracion } = todoAlDia()
+    const registrados = [
+      { evento: RAPPI_EVENTS.MENU_APPROVED, url: urlDe('menu-approved', 'https://viejo.ngrok.app'), tiendas: [TIENDAS[0]] },
+    ]
+    const plan = planDeWebhooks(registrados, deIntegracion, BASE, TIENDAS)
+
+    const rotar = eventosARotar(
+      registrados,
+      resultados(plan, [RAPPI_EVENTS.MENU_APPROVED]),
+      archivoSin(RAPPI_EVENTS.MENU_APPROVED, RAPPI_EVENTS.NEW_ORDER),
+    )
+
+    // MENU_APPROVED existía (leído); NEW_ORDER lo creó esta corrida (CREAR aceptado). Los dos, sin secreto ⇒ se rotan.
+    expect(rotar.sort()).toEqual([RAPPI_EVENTS.MENU_APPROVED, RAPPI_EVENTS.NEW_ORDER].sort())
+  })
+
+  it('cada evento sale UNA vez y en el orden de los avisos, aunque tenga varias acciones o varias URLs leídas', () => {
+    const registrados = [
+      { evento: RAPPI_EVENTS.PING, url: urlDe('ping', 'https://viejo.ngrok.app'), tiendas: [TIENDAS[0]] },
+      { evento: RAPPI_EVENTS.PING, url: urlDe('ping', 'https://otro.ngrok.app'), tiendas: ['999'] },
+      { evento: RAPPI_EVENTS.NEW_ORDER, url: urlDe('new-order'), tiendas: TIENDAS },
+    ]
+    const plan = planDeWebhooks(registrados, [], BASE, TIENDAS)
+
+    const rotar = eventosARotar(registrados, resultados(plan), archivoSin(RAPPI_EVENTS.PING, RAPPI_EVENTS.NEW_ORDER))
+
+    expect(rotar).toEqual(EVENTOS_DE_TIENDA.filter(e => e === RAPPI_EVENTS.PING || e === RAPPI_EVENTS.NEW_ORDER))
   })
 })
 

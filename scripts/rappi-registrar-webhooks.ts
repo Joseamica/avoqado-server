@@ -14,6 +14,13 @@
  * (`{"NEW_ORDER":"…","PING":"…"}`). Si el archivo ya existe se CONSERVAN sus secretos y se suman los nuevos; se guarda tras
  * cada aviso creado, para que un fallo más adelante no pierda el que Rappi ya entregó. A la pantalla sólo van nombres de
  * eventos y la acción: nunca un secreto, un token ni el cuerpo de una respuesta de Rappi. El archivo va FUERA del repo.
+ *  · Toda escritura es ATÓMICA (temporal 600 en la misma carpeta + rename, `_archivo-de-secretos.ts`): un disco lleno deja el
+ *    archivo anterior intacto, nunca vacío. Y una corrida que no cambia nada no lo reescribe.
+ *  · 🔴 Un aviso de tienda que Rappi YA tiene y el archivo no (la respuesta del CREAR se perdió, aquí o en otra corrida) se
+ *    ROTA con `reset-secret` al terminar el plan: Rappi no vuelve a mostrar un secreto, sólo da uno nuevo. Mientras falte el
+ *    secreto de algún aviso, el script sale con 1 y dice cuál falta.
+ *  · 🔴 Una sola corrida a la vez por archivo: `<salida>.lock` se toma ANTES de leer nada y se suelta al terminar. Si ya existe,
+ *    no se toca nada; un candado de una corrida que murió lo borra una persona, a mano.
  *
  * 🔴 EL SECRETO DE LA INTEGRACIÓN ES NUESTRO Y NO TIENE `reset-secret` (el de la doc es sólo de los avisos por tienda): si se
  * pierde, sólo se recupera volviendo a mandarlo. Por eso (1) se guarda en `<salida>.pendiente` (modo 600) ANTES del POST y sólo
@@ -22,7 +29,8 @@
  * volver a correr el script. Nunca se da por bueno un secreto que Rappi no confirmó: el aviso viejo seguiría firmando con otro.
  *
  * Las escrituras pasan por el candado de tiendas de `rappi.http.ts` (lista vacía = no sale ninguna). Se niega a correr con
- * `RAPPI_ENVIRONMENT=PRODUCTION` sin `--produccion`. No se ejecuta en pruebas: se corre a mano (Tarea 7 del plan de Rappi).
+ * `RAPPI_ENVIRONMENT=PRODUCTION` sin `--produccion`. Contra Rappi se corre a mano (Tarea 7 del plan de Rappi); las pruebas
+ * (`tests/unit/scripts/rappiRegistrarWebhooks.test.ts`) llaman a `main` contra un Rappi simulado en memoria, sin red.
  */
 import crypto from 'crypto'
 import fs from 'fs'
@@ -39,12 +47,14 @@ import { getRappiToken } from '../src/services/delivery-channels/providers/rappi
 import { RUTA_POR_EVENTO, secretosDelEvento } from '../src/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 import {
   azpDelJwt,
+  eventosARotar,
   planDeWebhooks,
   registradosDeRespuesta,
   secretoDeLaIntegracion,
   type AccionWebhook,
   type WebhookRegistrado,
 } from '../src/services/delivery-channels/providers/rappi/rappi.webhooksRegistro'
+import { conCandado, escribirAtomico600 } from './_archivo-de-secretos'
 
 const API = '/api/v2/restaurants-integrations-public-api'
 
@@ -85,17 +95,24 @@ function leerSecretos(salida: string): Record<string, unknown> {
   return json as Record<string, unknown>
 }
 
-function escribir600(ruta: string, texto: string): void {
+/** Cierra a 600 un archivo de secretos que ya existía, SIN tocar su contenido (no existe todavía = nada que cerrar). */
+function cerrarPermisos600(ruta: string): void {
   try {
-    fs.chmodSync(ruta, 0o600) // si ya existía con otros permisos, se cierra ANTES de escribir
+    fs.chmodSync(ruta, 0o600)
   } catch (e) {
     if ((e as NodeJS.ErrnoException).code !== 'ENOENT') throw e
   }
-  fs.writeFileSync(ruta, texto, { mode: 0o600 })
 }
 
+/** 🔴 Atómico: o queda el archivo anterior o el nuevo, nunca uno vacío ni a medias (ver `_archivo-de-secretos.ts`). */
 function escribirSecretos(salida: string, secretos: Record<string, unknown>): void {
-  escribir600(salida, `${JSON.stringify(secretos, null, 2)}\n`)
+  escribirAtomico600(salida, `${JSON.stringify(secretos, null, 2)}\n`)
+}
+
+/** El `secret` de una respuesta de Rappi (CREAR o reset-secret), o `undefined`. Nunca lanza ni copia el cuerpo. */
+function secretoDeLaRespuesta(raw: string): string | undefined {
+  const secreto = (leerJson(raw) as { secret?: unknown } | null | undefined)?.secret
+  return typeof secreto === 'string' && secreto.trim() ? secreto.trim() : undefined
 }
 
 /** El secreto de la integración que una corrida anterior guardó ANTES de su POST (ver la cabecera). */
@@ -143,7 +160,8 @@ async function leerDeIntegracion(azp: string): Promise<Array<{ evento: string; u
 
 /**
  * Ejecuta UNA acción. Devuelve el secreto que Rappi dejó confirmado (`CREAR` lo recibe de Rappi; `CREAR_DE_INTEGRACION` es el
- * nuestro, ya guardado como pendiente por quien llama), `null` si salió bien sin secreto, y lanza si Rappi la rechazó.
+ * nuestro, ya guardado como pendiente por quien llama), `null` si salió bien sin secreto (un CREAR cuya respuesta no lo trae
+ * también: el aviso ya existe y `eventosARotar` lo rota al terminar el plan), y lanza si Rappi la rechazó o no contestó.
  * `storeIds: tiendas` en TODAS: es lo que el candado de `rappi.http.ts` revisa (la de integración no es de una tienda, pero
  * sin ninguna tienda autorizada tampoco debe salir).
  */
@@ -159,12 +177,8 @@ async function ejecutar(accion: AccionWebhook, tiendas: string[], azp: string, s
     })
     if (!r.ok) throw new Error(`Rappi respondió ${r.status}`)
     // 🔴 por medir en la Tarea 7: que el secreto venga en `secret` de esta respuesta (la doc lo ejemplifica así) y que sea
-    // por evento (la doc no lo aclara; el ingreso lo asume así).
-    const secreto = (leerJson(r.raw) as { secret?: unknown } | undefined)?.secret
-    if (typeof secreto !== 'string' || !secreto.trim()) {
-      throw new Error('el aviso quedó creado pero la respuesta de Rappi no trae el secreto (hay que rotarlo con reset-secret)')
-    }
-    return secreto.trim()
+    // por evento (la doc no lo aclara; el ingreso lo asume así). Si no viene, el aviso YA quedó creado: se rota después.
+    return secretoDeLaRespuesta(r.raw) ?? null
   }
 
   if (accion.tipo === 'CAMBIAR_URL') {
@@ -203,10 +217,27 @@ async function ejecutar(accion: AccionWebhook, tiendas: string[], azp: string, s
   return secretoDeIntegracion
 }
 
+/**
+ * Pide a Rappi un secreto NUEVO para un aviso de tienda que ya existe allá: `PUT webhook/{evento}/reset-secret`, sin cuerpo.
+ * 🔴 por medir en la Tarea 7: (1) la forma de la respuesta (la doc la ejemplifica con `secret`, igual que el CREAR); (2) si el
+ * secreto es POR EVENTO (la ruta lo es, pero el texto de la doc dice «genera uno nuevo al cliente autenticado»). Si fuera uno
+ * solo por cliente, rotar un evento dejaría viejos los secretos guardados de los demás.
+ * `storeIds: tiendas`, como toda escritura, para que el candado de `rappi.http.ts` la revise.
+ */
+async function rotarSecreto(evento: string, tiendas: string[]): Promise<string> {
+  const r = await rappiApi({ metodo: 'PUT', ruta: `${API}/webhook/${evento}/reset-secret`, storeIds: tiendas })
+  if (!r.ok) throw new Error(`Rappi respondió ${r.status}`)
+  const secreto = secretoDeLaRespuesta(r.raw)
+  // Rappi pudo haberlo rotado igual: el archivo sigue sin él y la corrida siguiente rota otra vez.
+  if (!secreto) throw new Error('la respuesta de reset-secret no trae el secreto')
+  return secreto
+}
+
 // ── Principal ───────────────────────────────────────────────────────────────────────────
 
-async function main(): Promise<number> {
+export async function main(args: string[]): Promise<number> {
   const { values } = parseArgs({
+    args,
     options: { base: { type: 'string' }, salida: { type: 'string' }, produccion: { type: 'boolean', default: false } },
     strict: true,
     allowPositionals: false,
@@ -215,15 +246,16 @@ async function main(): Promise<number> {
     'Uso: npx tsx scripts/rappi-registrar-webhooks.ts --base <https://dominio-publico> --salida <ruta del archivo de secretos> [--produccion]'
   if (!values.base || !values.salida) throw new Error(`Faltan --base y/o --salida.\n${uso}`)
   const salida = values.salida
+  const base = values.base
 
   let url: URL | undefined
   try {
-    url = new URL(values.base)
+    url = new URL(base)
   } catch {
     // cae abajo: el mensaje es el mismo para «no es una URL» y «no es http(s)»
   }
   if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) {
-    throw new Error(`--base no es una URL http(s) válida (se pasó ${JSON.stringify(values.base)}); ej. https://abc.ngrok.app`)
+    throw new Error(`--base no es una URL http(s) válida (se pasó ${JSON.stringify(base)}); ej. https://abc.ngrok.app`)
   }
 
   const ambiente = getRappiEnvironment()
@@ -237,9 +269,23 @@ async function main(): Promise<number> {
     )
   }
 
-  // El archivo se prepara ANTES de tocar Rappi: una ruta mala o un archivo ilegible deben fallar sin haber escrito nada allá.
-  const secretos = leerSecretos(salida)
-  escribirSecretos(salida, secretos)
+  // 🔴 Una sola corrida a la vez por archivo (hallazgo #3 de Codex): el candado va ANTES de leer el archivo o Rappi.
+  return conCandado(`${salida}.lock`, () => registrar(salida, base, ambiente, tiendas))
+}
+
+async function registrar(salida: string, base: string, ambiente: string, tiendas: string[]): Promise<number> {
+  // 🔴 El archivo bueno NO se reescribe al empezar (hallazgo #2 de Codex: con el disco lleno, esa reescritura lo dejaba vacío).
+  // Lo que comprobaba ya está comprobado sin tocarlo: el candado acaba de crear un archivo junto a `--salida` (la carpeta existe
+  // y se puede escribir, que es lo que piden el temporal y el rename) y `leerSecretos` falla si no se puede leer o no es un
+  // objeto JSON. Una ruta mala falla aquí, sin haber escrito nada en Rappi. Sólo se le cierran los permisos si ya existía.
+  let secretos = leerSecretos(salida)
+  cerrarPermisos600(salida)
+  /** Guarda un secreto AL INSTANTE (Rappi no vuelve a mostrarlo). En memoria cuenta sólo lo que ya llegó a disco. */
+  const guardar = (evento: string, secreto: string) => {
+    const nuevos = { ...secretos, [evento]: secreto }
+    escribirSecretos(salida, nuevos)
+    secretos = nuevos
+  }
   const rutaPendiente = `${salida}.pendiente`
   // Qué secreto lleva el aviso de la integración y de dónde sale (reutiliza el confirmado; si no, el pendiente; si no, uno nuevo).
   const integracion = secretoDeLaIntegracion(secretos, leerPendiente(rutaPendiente), () => crypto.randomBytes(32).toString('hex'))
@@ -259,63 +305,89 @@ async function main(): Promise<number> {
 
   // 2) El plan y su ejecución.
   // 🔴 Sin el secreto CONFIRMADO en el archivo, el aviso de la integración se vuelve a mandar aunque Rappi ya lo tenga con la misma URL.
-  const plan = planDeWebhooks(registrados, deIntegracion, values.base, tiendas, integracion.origen === 'ARCHIVO')
+  const plan = planDeWebhooks(registrados, deIntegracion, base, tiendas, integracion.origen === 'ARCHIVO')
+  const resultados: Array<{ accion: AccionWebhook; aceptada: boolean }> = []
   let fallos = 0
   for (const accion of plan) {
+    let aceptada = false
     try {
       // 🔴 Antes del POST, a disco: si venciera después de que Rappi lo guardó, la siguiente corrida manda el MISMO.
       if (accion.tipo === 'CREAR_DE_INTEGRACION' && integracion.origen !== 'PENDIENTE')
-        escribir600(rutaPendiente, `${integracion.secreto}\n`)
+        escribirAtomico600(rutaPendiente, `${integracion.secreto}\n`)
       const secreto = await ejecutar(accion, tiendas, azp, integracion.secreto)
-      if (secreto) {
-        secretos[accion.evento] = secreto
-        escribirSecretos(salida, secretos) // al instante: Rappi no vuelve a mostrar el de un aviso ya creado
-      }
+      aceptada = true // Rappi contestó 2xx: el aviso existe allá, aunque guardar su secreto falle abajo
+      if (secreto) guardar(accion.evento, secreto)
       if (accion.tipo === 'CREAR_DE_INTEGRACION') fs.rmSync(rutaPendiente, { force: true }) // ya está confirmado en el principal
-      decir(
-        accion.evento,
-        accion.tipo === 'NADA' ? 'NADA (ya estaba bien)' : `${accion.tipo} · listo${notaDeSecreto(accion, integracion.origen)}`,
-      )
+      const nota =
+        accion.tipo === 'CREAR' && !secreto
+          ? ' (la respuesta no trajo el secreto: se rota abajo)'
+          : notaDeSecreto(accion, integracion.origen)
+      decir(accion.evento, accion.tipo === 'NADA' ? 'NADA (ya estaba bien)' : `${accion.tipo} · listo${nota}`)
     } catch (e) {
       fallos++
-      // Los mensajes que llegan aquí son nuestros (estado HTTP, candado, red): nunca el cuerpo de Rappi.
+      // Los mensajes que llegan aquí son nuestros (estado HTTP, candado, red, disco): nunca el cuerpo de Rappi.
       const remedio =
         accion.tipo === 'CREAR_DE_INTEGRACION'
           ? ` · el secreto quedó guardado en ${rutaPendiente}: vuelve a correr el script y reintenta con el MISMO`
           : ''
       decir(accion.evento, `${accion.tipo} · FALLÓ: ${e instanceof Error ? e.message : 'error desconocido'}${remedio}`)
     }
+    resultados.push({ accion, aceptada })
   }
 
-  // 3) Avisos para el que corre el script.
+  // 3) 🔴 Los avisos de tienda que Rappi tiene y el archivo no (una respuesta perdida, en ésta o en otra corrida) se rotan: Rappi
+  // no vuelve a mostrar un secreto, sólo da uno nuevo. Nunca el de la integración (no tiene reset-secret; ver la cabecera).
+  for (const evento of eventosARotar(registrados, resultados, secretos)) {
+    try {
+      guardar(evento, await rotarSecreto(evento, tiendas))
+      decir(evento, 'ROTAR_SECRETO · listo (secreto NUEVO: copia el del archivo a RAPPI_WEBHOOK_SECRETS)')
+    } catch (e) {
+      fallos++
+      decir(evento, `ROTAR_SECRETO · FALLÓ: ${e instanceof Error ? e.message : 'error desconocido'}`)
+    }
+  }
+
+  // 4) Avisos para el que corre el script.
   for (const [evento, n] of Object.entries(deshabilitadas)) {
     decir(evento, `AVISO: ${n} tienda(s) en DISABLE en Rappi (siguen registradas, pero no reciben avisos)`)
   }
-  const sinSecreto = EVENTOS_DE_TIENDA.filter(ev => secretosDelEvento(JSON.stringify(secretos), ev).length === 0)
-  if (sinSecreto.length) {
+  // 🔴 Mientras falte un secreto, la corrida NO terminó: el servidor rechazaría (401) cada aviso de ese evento.
+  const mapa = JSON.stringify(secretos)
+  const faltanDeTienda = EVENTOS_DE_TIENDA.filter(ev => secretosDelEvento(mapa, ev).length === 0)
+  const faltaIntegracion = secretosDelEvento(mapa, RAPPI_EVENTS.STORE_PROVISIONING_STATUS).length === 0
+  if (faltanDeTienda.length) {
     console.log(
-      `AVISO: ${salida} no tiene el secreto de: ${sinSecreto.join(', ')}. Ya existían en Rappi antes de este script; ` +
-        'hay que rotarlos con PUT webhook/{evento}/reset-secret (no está automatizado).',
+      `FALTA en ${salida} el secreto de: ${faltanDeTienda.join(', ')}. Sin él, el servidor rechaza (401) esos avisos. ` +
+        'Vuelve a correr este script: crea en Rappi los que no existen y rota (reset-secret) los que ya existen.',
     )
   }
   // El de la integración NO se rota con reset-secret (no existe para ese aviso): se recupera volviendo a correr este script.
-  if (secretosDelEvento(JSON.stringify(secretos), RAPPI_EVENTS.STORE_PROVISIONING_STATUS).length === 0) {
+  if (faltaIntegracion) {
     console.log(
-      `AVISO: el aviso de la INTEGRACIÓN (${RAPPI_EVENTS.STORE_PROVISIONING_STATUS}) NO quedó confirmado en ${salida}. ` +
+      `FALTA: el aviso de la INTEGRACIÓN (${RAPPI_EVENTS.STORE_PROVISIONING_STATUS}) NO quedó confirmado en ${salida}. ` +
         `No hay reset-secret para ese aviso: vuelve a correr este script (reintenta con el secreto de ${rutaPendiente}).`,
     )
   }
+  const faltan = faltanDeTienda.length + (faltaIntegracion ? 1 : 0)
+  const incompleto = fallos > 0 || faltan > 0
   console.log(
-    `Secretos en ${salida} (permisos 600). ${fallos ? `FALLARON ${fallos} acción(es): revisa arriba y vuelve a correr (es idempotente).` : 'Sin fallos.'}`,
+    `Secretos en ${salida} (permisos 600). ${
+      incompleto
+        ? `NO TERMINÓ: ${fallos} acción(es) fallaron y faltan ${faltan} secreto(s); revisa arriba y vuelve a correr (es idempotente).`
+        : 'Sin fallos.'
+    }`,
   )
-  return fallos ? 1 : 0
+  return incompleto ? 1 : 0
 }
 
-main()
-  .then(codigo => {
-    process.exitCode = codigo
-  })
-  .catch(e => {
-    console.error('💥', e instanceof Error ? e.message : 'error desconocido')
-    process.exitCode = 1
-  })
+// Sólo corre como programa: las pruebas importan `main` y la llaman con sus propios argumentos.
+if (require.main === module) {
+  main(process.argv.slice(2))
+    .then(codigo => {
+      process.exitCode = codigo
+    })
+    .catch(e => {
+      console.error('💥', e instanceof Error ? e.message : 'error desconocido')
+      process.exitCode = 1
+    })
+}

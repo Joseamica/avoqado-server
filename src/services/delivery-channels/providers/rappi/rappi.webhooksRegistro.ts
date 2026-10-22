@@ -20,9 +20,15 @@
  * lo perdió (el POST venció a los 10 s después de que Rappi lo guardó, o se corrió con otro `--salida`), cada aviso de
  * aprovisionamiento llegaría firmado con un secreto que nadie conoce y el servidor lo rechazaría con 401 para siempre.
  * Como el POST de integración «crea o actualiza», el remedio es volver a mandarlo con el secreto del archivo.
+ *
+ * 🔴 UN AVISO DE TIENDA QUE RAPPI TIENE Y EL ARCHIVO NO, SE ROTA (`eventosARotar`). Su secreto lo pone Rappi y sólo lo entrega
+ * en la respuesta del CREAR; si esa respuesta se pierde, el plan ve todo bien (NADA) y el archivo se quedaba sin él para siempre.
  */
 import { RAPPI_EVENTS } from './rappi.adapter'
 import { RUTA_POR_EVENTO, secretosDelEvento } from './rappi.webhookIngress'
+
+/** Los 10 avisos POR TIENDA, en el orden de `RUTA_POR_EVENTO` (el de la integración va aparte). */
+const EVENTOS_DE_TIENDA = Object.values(RUTA_POR_EVENTO).filter(e => e !== RAPPI_EVENTS.STORE_PROVISIONING_STATUS)
 
 export type AccionWebhook =
   | { tipo: 'CREAR'; evento: string; url: string; tiendas: string[] }
@@ -93,6 +99,38 @@ export function planDeWebhooks(
       : { tipo: 'CREAR_DE_INTEGRACION', evento: eventoIntegracion, url: urlIntegracion },
   )
   return acciones
+}
+
+/**
+ * Qué avisos POR TIENDA hay que rotar con `PUT webhook/{evento}/reset-secret` después de ejecutar el plan: los que EXISTEN en
+ * Rappi y cuyo secreto no está en el archivo.
+ *
+ * 🔴 Por qué (hallazgo #1 de Codex, bloque 0): Rappi crea el aviso, pero la respuesta que trae su secreto se pierde (vence a los
+ * 10 s). Al repetir, el plan ve la tienda y la URL bien ⇒ NADA, y el servidor rechazaría (401) cada aviso de ese evento para
+ * siempre. Rappi no vuelve a mostrar un secreto: sólo da uno nuevo.
+ *
+ * «Existe en Rappi» = estaba en lo leído (`registrados`), o esta corrida lo creó, le cambió la URL o le agregó tiendas y Rappi lo
+ * ACEPTÓ (2xx; un CREAR aceptado cuya respuesta no traía el secreto también cuenta). Un CREAR que FALLÓ no cuenta: no se sabe si
+ * existe, y si Rappi sí lo guardó, la corrida siguiente lo lee y entonces se rota.
+ * 🔴 El de la INTEGRACIÓN nunca sale de aquí: no tiene reset-secret (su secreto es nuestro; ver `secretoDeLaIntegracion`).
+ *
+ * @param registrados  lo leído de Rappi al empezar la corrida.
+ * @param resultados   cada acción del plan con su desenlace: `aceptada` = Rappi contestó 2xx.
+ * @param secretos     el archivo de secretos TAL COMO QUEDÓ en disco después del plan.
+ */
+export function eventosARotar(
+  registrados: WebhookRegistrado[],
+  resultados: Array<{ accion: AccionWebhook; aceptada: boolean }>,
+  secretos: Record<string, unknown>,
+): string[] {
+  const enRappi = new Set(registrados.map(r => r.evento))
+  for (const { accion, aceptada } of resultados) {
+    if (aceptada && (accion.tipo === 'CREAR' || accion.tipo === 'CAMBIAR_URL' || accion.tipo === 'AGREGAR_TIENDAS')) {
+      enRappi.add(accion.evento)
+    }
+  }
+  const mapa = JSON.stringify(secretos)
+  return EVENTOS_DE_TIENDA.filter(evento => enRappi.has(evento) && secretosDelEvento(mapa, evento).length === 0)
 }
 
 /**
