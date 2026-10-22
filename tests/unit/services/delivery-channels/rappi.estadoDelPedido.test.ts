@@ -9,6 +9,7 @@ import * as path from 'path'
 
 import prisma from '../../../../src/utils/prismaClient'
 import {
+  analizarHistorial,
   anotarAceptacion,
   leerEstado,
   leerHistorial,
@@ -40,6 +41,49 @@ describe('leerHistorial', () => {
     expect(leerHistorial([{ event: 'taken_visible_order' }, { event: 'Order_Timeout' }])).toBe('YA_NO_ACTIVO')
     expect(leerHistorial([{ event: 'rejected_by_store' }])).toBe('YA_NO_ACTIVO')
     expect(leerHistorial([{ event_time: '2026-10-21T22:26:18' }])).toBe('INCIERTO')
+  })
+})
+
+// Tarea 10 (decisión del controlador sobre la revisión de la Tarea 9): los logs llevan los NOMBRES del historial, y
+// «aceptado y después cerrado» se distingue de «nunca aceptado y vencido» (el primero pide a una persona).
+describe('analizarHistorial — el veredicto, los nombres y si traía la aceptación', () => {
+  it('aceptado y después cancelado: YA_NO_ACTIVO, pero con la aceptación a la vista', () => {
+    expect(analizarHistorial([{ event: 'canceled_with_charge' }, { event: ' taken_visible_order ' }])).toEqual({
+      veredicto: 'YA_NO_ACTIVO',
+      nombres: ['canceled_with_charge', 'taken_visible_order'],
+      traeAceptacion: true,
+    })
+  })
+
+  it('nunca aceptado y vencido: YA_NO_ACTIVO sin aceptación', () => {
+    expect(analizarHistorial([{ event: 'canceled_by_timeout' }])).toEqual({
+      veredicto: 'YA_NO_ACTIVO',
+      nombres: ['canceled_by_timeout'],
+      traeAceptacion: false,
+    })
+  })
+
+  it('el historial REAL vacío: INCIERTO, sin nombres; un evento sin nombre no aparece', () => {
+    expect(analizarHistorial(JSON.parse(crudo('eventos-vacio.json')))).toEqual({
+      veredicto: 'INCIERTO',
+      nombres: [],
+      traeAceptacion: false,
+    })
+    expect(analizarHistorial([{}, { event: 'courier_assigned' }])).toEqual({
+      veredicto: 'INCIERTO',
+      nombres: ['courier_assigned'],
+      traeAceptacion: false,
+    })
+  })
+
+  it('leerHistorial sigue diciendo lo mismo que el veredicto del análisis', () => {
+    const casos = [[], [{ event: 'taken_visible_order' }], [{ event: 'taken_visible_order' }, { event: 'Order_Timeout' }]]
+    for (const eventos of casos) expect(leerHistorial(eventos)).toBe(analizarHistorial(eventos).veredicto)
+  })
+
+  it('los nombres se acotan a 30 (un historial largo de repartidor no llena el log)', () => {
+    const largo = Array.from({ length: 40 }, (_, i) => ({ event: `courier_${i}` }))
+    expect(analizarHistorial(largo).nombres).toHaveLength(30)
   })
 })
 

@@ -8,7 +8,11 @@ import * as path from 'path'
 
 import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
-import { processRappiEvent, RECLAMO_RAPPI_MS } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import {
+  ERRORES_TERMINALES,
+  processRappiEvent,
+  RECLAMO_RAPPI_MS,
+} from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { cancelDeliveryOrder } from '../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../../../src/services/delivery-channels/core/deliveryOrderIngestion.service'
 import {
@@ -119,6 +123,8 @@ describe('processRappiEvent', () => {
     mockAnotar.mockResolvedValue(true)
     // El cableado por defecto del historial: un pedido sin eventos del lado de Rappi.
     mockHistorialHttp.mockResolvedValue({ ok: true, status: 200, raw: '[]' })
+    // Tarea 10: la búsqueda del aviso hermano (la cancelación del pedido, o el pedido de la cancelación) no encuentra nada.
+    ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue(null)
   })
 
   // 🔴 Desde la Tarea 8 TODO cierre va por `cerrarEventoReclamado` con su token: `markEventResult` escribe sin
@@ -229,6 +235,8 @@ describe('processRappiEvent', () => {
 
     expect(r.outcome).toBe('CANCELLED')
     expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', undefined)
+    // Tarea 10: el programado cancelado nunca espera a un NEW_ORDER (su venta nunca nació): ni lo busca.
+    expect(prisma.deliveryOrderEvent.findFirst).not.toHaveBeenCalled()
   })
 
   it('ORDER_EVENT_CANCEL cancela la venta y saca el pedido de cocina', async () => {
@@ -837,6 +845,361 @@ describe('processRappiEvent', () => {
       expect(historial).not.toHaveBeenCalled()
       expect(r.outcome).toBe('IN_FLIGHT')
       expect(mockCerrar).not.toHaveBeenCalled()
+    })
+  })
+
+  // ── La cancelación gana aunque llegue antes o durante el registro (Tarea 10) ──────
+  // 🔴 Rappi no ordena sus webhooks: el ORDER_EVENT_CANCEL puede llegar ANTES del NEW_ORDER, o mientras se acepta y se
+  // registra. Antes de esta tarea, la cancelación sin venta quedaba PROCESSED («todavía no existe») y el NEW_ORDER se
+  // aceptaba y se registraba después: una venta viva —y una comanda en cocina— de un pedido que Rappi ya canceló.
+  describe('la cancelación gana aunque llegue antes o durante el registro (Tarea 10)', () => {
+    const findFirst = () => prisma.deliveryOrderEvent.findFirst as jest.Mock
+    const findUnique = () => prisma.deliveryOrderEvent.findUnique as jest.Mock
+    /** El aviso de cancelación guardado: forma plana, como el ORDER_OTHER_EVENT medido en el sandbox el 21-oct. */
+    const avisoCancel = (event?: string) => ({
+      id: 'evt-cancel',
+      payload: { ...(event === undefined ? {} : { event }), order_id: '392625', store_id: '900105814' },
+    })
+    /** La fila de la cancelación que se procesa (su NEW_ORDER se busca aparte). */
+    const filaCancel = (over: Record<string, unknown> = {}) =>
+      fila({
+        eventType: 'ORDER_EVENT_CANCEL',
+        payload: { event: 'canceled_with_charge', order_id: '392625', store_id: '900105814' },
+        ...over,
+      })
+    /** La búsqueda contesta según el tipo de aviso que se pide. */
+    const sembrar = ({ cancel = null, pedido = null }: { cancel?: unknown; pedido?: unknown }) =>
+      findFirst().mockImplementation(async ({ where }: any) =>
+        where.eventType === 'ORDER_EVENT_CANCEL' ? cancel : where.eventType === 'NEW_ORDER' ? pedido : null,
+      )
+    const BUSQUEDA_DE_CANCELACION = {
+      where: { provider: 'RAPPI', eventType: 'ORDER_EVENT_CANCEL', externalOrderId: '392625', channelLinkId: 'link1' },
+      select: { id: true, payload: true },
+    }
+    const rechazo400 = () => jest.fn(async () => ({ ok: false, status: 400, raw: 'Invalid transition from {TAKEN} to {TAKEN}' }))
+
+    // ── Antes de aceptar ──
+    it.each(['ACTIVE', 'DISABLED'])(
+      '🔴 el NEW_ORDER llega cuando ya hay aviso de cancelación (canal %s): ni se acepta ni se registra',
+      async status => {
+        findUnique().mockResolvedValue(fila({ channelLink: { ...fila().channelLink, status } }))
+        sembrar({ cancel: avisoCancel('canceled_with_charge') })
+        const historial = jest.fn()
+
+        const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+        expect(r).toMatchObject({ outcome: 'CANCELLED', error: 'CANCELADO_ANTES_DE_REGISTRAR' })
+        expect(aceptarOk).not.toHaveBeenCalled()
+        expect(historial).not.toHaveBeenCalled()
+        expect(mockAnotar).not.toHaveBeenCalled()
+        expect(mockIngest).not.toHaveBeenCalled()
+        // No hay venta (nadie llegó a aceptar): no hay nada que cancelar.
+        expect(mockCancel).not.toHaveBeenCalled()
+        // El código EXACTO: la reconciliación lo reconoce como terminal y no lo vuelve a tomar.
+        expect(mockCerrar).toHaveBeenCalledTimes(1)
+        expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CANCELADO_ANTES_DE_REGISTRAR')
+        // Acotada: UNA fila del mismo pedido y el mismo vínculo, con el reclamo en la mano y DESPUÉS de releer la fila.
+        expect(findFirst()).toHaveBeenCalledTimes(1)
+        expect(findFirst()).toHaveBeenCalledWith(BUSQUEDA_DE_CANCELACION)
+        expect(findFirst().mock.invocationCallOrder[0]).toBeGreaterThan(mockReclamar.mock.invocationCallOrder[0])
+        expect(findFirst().mock.invocationCallOrder[0]).toBeGreaterThan(findUnique().mock.invocationCallOrder[1])
+      },
+    )
+
+    it.each([
+      ['retira la venta que dejó el intento anterior', { outcome: 'CANCELLED', orderId: 'ord1' }, 'PROCESSED', 'ord1'],
+      ['y si no llegó a registrarse, queda CANCELADO_ANTES_DE_REGISTRAR', { outcome: 'ORDER_NOT_FOUND' }, 'FAILED', undefined],
+    ])(
+      'con la marca de un intento anterior (Rappi ya lo aceptó) y el aviso de cancelación: no se ingiere, %s',
+      async (_caso, cancelacion, cierre, orderId) => {
+        findUnique().mockResolvedValue(fila({ resourcePayload: MARCA, status: 'FAILED', error: 'INGEST: la base se cayó' }))
+        sembrar({ cancel: avisoCancel('canceled_with_charge') })
+        mockCancel.mockResolvedValueOnce(cancelacion)
+
+        const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+        expect(aceptarOk).not.toHaveBeenCalled()
+        expect(mockIngest).not.toHaveBeenCalled()
+        expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', 'cancelado por Rappi: canceled_with_charge')
+        if (cierre === 'PROCESSED') {
+          expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+          expect(r).toMatchObject({ outcome: 'CANCELLED', orderId, accepted: true })
+        } else {
+          expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CANCELADO_ANTES_DE_REGISTRAR')
+          expect(r).toMatchObject({ outcome: 'CANCELLED', error: 'CANCELADO_ANTES_DE_REGISTRAR', accepted: true })
+          // Rappi lo aceptó y nunca se registró: una persona revisa con Rappi (como «taken y después cancelado»).
+          expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ eventRowId: 'evt1' }))
+        }
+      },
+    )
+
+    // ── Durante el registro ──
+    it('🔴 cancelación que llega mientras se registra: tras ingerir se encuentra y se cancela en ese momento (sin comanda viva)', async () => {
+      // El aviso se guarda mientras se acepta y se registra: la búsqueda de antes de aceptar no lo ve, la de después sí.
+      let guardada = false
+      findFirst().mockImplementation(async ({ where }: any) =>
+        where.eventType === 'ORDER_EVENT_CANCEL' && guardada ? avisoCancel('canceled_with_charge') : null,
+      )
+      const orden: string[] = []
+      aceptarOk.mockImplementationOnce(async () => {
+        orden.push('accept')
+        guardada = true
+        return { ok: true, status: 200, raw: '{}' }
+      })
+      mockIngest.mockImplementationOnce(async () => {
+        orden.push('ingest')
+        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true, hayComanda: true }
+      })
+      mockCancel.mockImplementationOnce(async () => {
+        orden.push('cancel')
+        return { outcome: 'CANCELLED', orderId: 'ord1' }
+      })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      // La comanda que la ingesta acaba de crear la retira `cancelDeliveryOrder` (marca CANCELLED y borra KdsOrder bajo el
+      // candado de la orden; contra Postgres: tests/integration/delivery-channels/uberEventProcessor.test.ts). Por eso va
+      // DESPUÉS de ingerir y con el pedido de esta venta.
+      expect(orden).toEqual(['accept', 'ingest', 'cancel'])
+      expect(mockCancel).toHaveBeenCalledTimes(1)
+      expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', 'cancelado por Rappi: canceled_with_charge')
+      expect(findFirst()).toHaveBeenCalledTimes(2)
+      expect(findFirst()).toHaveBeenLastCalledWith(BUSQUEDA_DE_CANCELACION)
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(r).toMatchObject({ outcome: 'CANCELLED', orderId: 'ord1', accepted: true })
+    })
+
+    it('sin aviso de cancelación, la venta queda como siempre: se busca antes de aceptar y después de ingerir, y no se cancela nada', async () => {
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(findFirst()).toHaveBeenCalledTimes(2)
+      expect(findFirst().mock.invocationCallOrder[0]).toBeLessThan(aceptarOk.mock.invocationCallOrder[0])
+      expect(findFirst().mock.invocationCallOrder[1]).toBeGreaterThan(mockIngest.mock.invocationCallOrder[0])
+      expect(mockCancel).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+    })
+
+    it('si la búsqueda o la cancelación de después de ingerir truena, queda FAILED reintentable y con 🚨 (el reintento vuelve a buscar)', async () => {
+      findFirst().mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('la base se cayó'))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith(
+        'evt1',
+        TOKEN,
+        'FAILED',
+        'ord1',
+        expect.stringMatching(/^CANCELAR_TRAS_REGISTRAR: .*la base se cayó/),
+      )
+      expect(r).toMatchObject({ outcome: 'FAILED', accepted: true, orderId: 'ord1' })
+      expect(ERRORES_TERMINALES).not.toContain(r.error)
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ eventRowId: 'evt1' }))
+    })
+
+    // ── La decisión del controlador sobre la revisión de la Tarea 9 ──
+    it('🔴 recuperado por el historial (ACEPTADO, con una cancelación cuyo nombre la expresión no conoce) y con el ORDER_EVENT_CANCEL ya guardado al registrar: se cancela tras ingerir', async () => {
+      // El nombre no lo cubre `EVENTO_TERMINAL`, así que el historial dice ACEPTADO. Lo que gana es el AVISO, no el nombre.
+      let guardada = false
+      findFirst().mockImplementation(async ({ where }: any) =>
+        where.eventType === 'ORDER_EVENT_CANCEL' && guardada ? avisoCancel('order_voided_by_support') : null,
+      )
+      const historial = jest.fn(async () => {
+        guardada = true // el aviso de Rappi entra mientras se lee el historial
+        return [{ event: 'taken_visible_order' }, { event: 'order_voided_by_support' }]
+      })
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial })
+
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', 'cancelado por Rappi: order_voided_by_support')
+      expect(mockCancel.mock.invocationCallOrder[0]).toBeGreaterThan(mockIngest.mock.invocationCallOrder[0])
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(r).toMatchObject({ outcome: 'CANCELLED', orderId: 'ord1', accepted: true })
+    })
+
+    it('si ese ORDER_EVENT_CANCEL ya estaba guardado desde antes del reintento, ni se lee el historial ni se registra', async () => {
+      sembrar({ cancel: avisoCancel('order_voided_by_support') })
+      const historial = jest.fn(async () => [{ event: 'taken_visible_order' }, { event: 'order_voided_by_support' }])
+      const aceptar = rechazo400()
+
+      const r = await processRappiEvent('evt1', { aceptar, historial })
+
+      expect(aceptar).not.toHaveBeenCalled()
+      expect(historial).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ outcome: 'CANCELLED', error: 'CANCELADO_ANTES_DE_REGISTRAR' })
+    })
+
+    // ── La cancelación que llega antes de que exista la venta ──
+    it.each([
+      ['RECEIVED, en vuelo', { id: 'evt-pedido', status: 'RECEIVED', error: null }],
+      ['FAILED reintentable (ACCEPT_500)', { id: 'evt-pedido', status: 'FAILED', error: 'ACCEPT_500: upstream error' }],
+      ['FAILED reintentable (INGEST)', { id: 'evt-pedido', status: 'FAILED', error: 'INGEST: la base se cayó' }],
+    ])('la cancelación llega antes de que exista la venta y el NEW_ORDER sigue (%s) ⇒ CANCELACION_EN_ESPERA', async (_caso, pedido) => {
+      findUnique().mockResolvedValue(filaCancel())
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+      sembrar({ pedido })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'FAILED', error: 'CANCELACION_EN_ESPERA' })
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CANCELACION_EN_ESPERA')
+      // Reintentable: el job lo vuelve a tomar con su espera normal.
+      expect(ERRORES_TERMINALES).not.toContain('CANCELACION_EN_ESPERA')
+      expect(findFirst()).toHaveBeenCalledWith({
+        where: { provider: 'RAPPI', eventType: 'NEW_ORDER', externalOrderId: '392625', channelLinkId: 'link1' },
+        select: { id: true, status: true, error: true },
+      })
+      // Primero se intenta cancelar la venta; sólo si no existe se busca el pedido.
+      expect(findFirst().mock.invocationCallOrder[0]).toBeGreaterThan(mockCancel.mock.invocationCallOrder[0])
+    })
+
+    it.each([
+      ['nunca llegó', null],
+      ['ya quedó PROCESSED', { id: 'evt-pedido', status: 'PROCESSED', error: null }],
+      ...['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA', 'CANCELADO_ANTES_DE_REGISTRAR'].map(
+        e => [`quedó FAILED terminal (${e})`, { id: 'evt-pedido', status: 'FAILED', error: e }] as [string, unknown],
+      ),
+    ])('la cancelación sin venta, con un NEW_ORDER que %s, queda PROCESSED como hoy', async (_caso, pedido) => {
+      findUnique().mockResolvedValue(filaCancel())
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+      sembrar({ pedido })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'CANCELLED', orderId: undefined })
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', undefined)
+    })
+
+    it('una cancelación sin vínculo busca su NEW_ORDER por el pedido (sin filtrar por un vínculo que no tiene)', async () => {
+      findUnique().mockResolvedValue(filaCancel({ channelLink: null, channelLinkId: null }))
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(findFirst()).toHaveBeenCalledWith({
+        where: { provider: 'RAPPI', eventType: 'NEW_ORDER', externalOrderId: '392625' },
+        select: { id: true, status: true, error: true },
+      })
+    })
+
+    it('el reintento de esa cancelación, con la venta ya creada, la cancela', async () => {
+      // 1.ª vuelta: no hay venta y el NEW_ORDER sigue en vuelo ⇒ espera.
+      findUnique().mockResolvedValue(filaCancel())
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+      sembrar({ pedido: { id: 'evt-pedido', status: 'RECEIVED', error: null } })
+      expect(await processRappiEvent('evt1', { aceptar: aceptarOk })).toMatchObject({ error: 'CANCELACION_EN_ESPERA' })
+
+      // El reintento del job: la venta ya existe (el NEW_ORDER se registró) ⇒ se cancela y queda PROCESSED.
+      findUnique().mockResolvedValue(filaCancel({ status: 'FAILED', error: 'CANCELACION_EN_ESPERA' }))
+      findFirst().mockClear()
+      mockCancel.mockResolvedValueOnce({ outcome: 'CANCELLED', orderId: 'ord1' })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(mockCancel).toHaveBeenLastCalledWith('392625', 'RAPPI', 'cancelado por Rappi: canceled_with_charge')
+      expect(findFirst()).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenLastCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(r).toEqual({ outcome: 'CANCELLED', orderId: 'ord1' })
+    })
+
+    // ── F6: el tipo de cancelación ──
+    it.each([
+      ['ORDER_EVENT_CANCEL', { event: 'canceled_with_charge' }, 'cancelado por Rappi: canceled_with_charge'],
+      ['ORDER_EVENT_CANCEL', { event: '  canceled_by_user  ' }, 'cancelado por Rappi: canceled_by_user'],
+      ['ORDER_EVENT_CANCEL', {}, 'cancelado por Rappi: sin tipo'],
+      ['ORDER_EVENT_CANCEL', { event: '   ' }, 'cancelado por Rappi: sin tipo'],
+      ['ORDER_EVENT_CANCEL', { event: 42 }, 'cancelado por Rappi: sin tipo'],
+      ['NEW_ORDER_SCHEDULED_CANCELLED', {}, 'cancelado por Rappi: sin tipo'],
+    ])('el tipo de cancelación de Rappi queda en el motivo (%s %j)', async (eventType, extra, motivo) => {
+      findUnique().mockResolvedValue(fila({ eventType, payload: { ...extra, order_id: '392625', store_id: '900105814' } }))
+
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      // El motivo viaja al log y al `DELIVERY_ORDER_CANCELLED` de ActivityLog (lo escribe `cancelDeliveryOrder`).
+      expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', motivo)
+    })
+
+    // ── Mitigación de la revisión de la Tarea 9: lo que dicen los logs del historial ──
+    it('(a) 400 y el historial trae taken Y un cierre ⇒ PEDIDO_YA_NO_ACTIVO con 🚨 (logger.error), no warn — con (b) sus nombres', async () => {
+      const historial = jest.fn(async () => [{ event: 'canceled_with_charge' }, { event: 'taken_visible_order' }])
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'PEDIDO_YA_NO_ACTIVO' })
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringMatching(/🚨.*no está activo/),
+        expect.objectContaining({ eventRowId: 'evt1', eventosDelHistorial: ['canceled_with_charge', 'taken_visible_order'] }),
+      )
+      expect((logger.warn as jest.Mock).mock.calls.some(([m]) => String(m).includes('no está activo'))).toBe(false)
+    })
+
+    it('(a) 400 y un cierre SIN taken (nunca se aceptó: venció) ⇒ PEDIDO_YA_NO_ACTIVO con warn, con (b) sus nombres', async () => {
+      const historial = jest.fn(async () => [{ event: 'canceled_by_timeout' }])
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'PEDIDO_YA_NO_ACTIVO' })
+      expect(logger.warn).toHaveBeenCalledWith(
+        expect.stringContaining('no está activo'),
+        expect.objectContaining({ eventRowId: 'evt1', eventosDelHistorial: ['canceled_by_timeout'] }),
+      )
+      expect((logger.error as jest.Mock).mock.calls.some(([m]) => String(m).includes('no está activo'))).toBe(false)
+    })
+
+    it.each([
+      ['vacío', async () => HISTORIAL_VACIO, [], true],
+      ['caído', async () => null, null, false],
+      ['sólo del repartidor', async () => [{ event: 'courier_assigned' }], ['courier_assigned'], true],
+    ])(
+      '(b)(e) el 🚨 de ACEPTACION_INCIERTA (historial %s) lleva los nombres del historial, venueId, storeId y linkId',
+      async (_caso, leer, nombres, leido) => {
+        const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial: jest.fn(leer) })
+
+        expect(r).toMatchObject({ outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' })
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining('🚨'),
+          expect.objectContaining({
+            eventRowId: 'evt1',
+            venueId: 'v1',
+            storeId: '900105814',
+            linkId: 'link1',
+            historialLeido: leido,
+            eventosDelHistorial: nombres,
+          }),
+        )
+      },
+    )
+
+    it.each([
+      ['caído', async () => null, false],
+      ['vacío', async () => HISTORIAL_VACIO, true],
+    ])('(d) el aviso de CHANNEL_DISABLED dice si el historial se pudo leer (%s)', async (_caso, leer, leido) => {
+      findUnique().mockResolvedValue(fila({ channelLink: { ...fila().channelLink, status: 'DISABLED' } }))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial: jest.fn(leer) })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'CHANNEL_DISABLED' })
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('DESHABILITADO'),
+        expect.objectContaining({ eventRowId: 'evt1', historialLeido: leido }),
+      )
+    })
+
+    // 🔴 La lista de códigos terminales del procesador es una COPIA de `TERMINAL_ERRORS` del job (el job es la autoridad:
+    // decide qué no se vuelve a tomar). Si se separan, una cancelación esperaría para siempre a un pedido que ya no se
+    // reintenta, o dejaría de esperar a uno que sí. El job no se importa aquí (carga cron y otros procesadores): se lee.
+    it('🔴 ERRORES_TERMINALES es exactamente TERMINAL_ERRORS del job', () => {
+      const fuente = fs.readFileSync(path.join(process.cwd(), 'src/jobs/delivery-webhook-reconciliation.job.ts'), 'utf8')
+      const lista = /TERMINAL_ERRORS\s*=\s*\[([^\]]*)\]/.exec(fuente)?.[1] ?? ''
+      const delJob = Array.from(lista.matchAll(/'([A-Z_]+)'/g), m => m[1])
+      expect(delJob.length).toBeGreaterThan(0)
+      expect([...ERRORES_TERMINALES].sort()).toEqual([...delJob].sort())
     })
   })
 })

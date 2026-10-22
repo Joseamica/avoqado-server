@@ -77,20 +77,44 @@ export async function anotarAceptacion(eventRowId: string, claimToken: string, e
 /**
  * 🔴 Ajustar con M5 (recorrido-real.md): los nombres del vencimiento y de la cancelación TODAVÍA no se midieron en el sandbox.
  * Es la expresión inicial del plan (decisión P2); la documentación de Rappi da `canceled_with_charge` como ejemplo.
+ *
+ * 🔴 Su falla segura cubre SÓLO lo que nunca se aceptó: un nombre de cierre que no conoce deja el historial sin `taken` en
+ * `INCIERTO`, y eso no se registra. Pero un pedido que Rappi aceptó y después canceló con un nombre que esta expresión no
+ * cubre se lee `ACEPTADO` y se registraría. Eso NO lo cuida el nombre: lo cuida el aviso `ORDER_EVENT_CANCEL` guardado, que
+ * el procesador busca antes de aceptar y otra vez después de registrar (Tarea 10), más la cancelación en espera.
  */
 const EVENTO_TERMINAL = /^cancel|^canceled|^rejected|timeout/i
 /** Medido el 21-oct en DEV: un pedido aceptado trae exactamente `taken_visible_order` (no hay un evento llamado «TAKEN»). */
 const EVENTO_ACEPTADO = /^taken/i
+/** Cuántos nombres del historial van a un log: el veredicto los mira todos, el log sólo los primeros. */
+const NOMBRES_EN_EL_LOG = 30
+
+export interface LecturaDelHistorial {
+  veredicto: VeredictoHistorial
+  /** Los nombres de sus eventos, en orden (hasta 30): van a los logs, para ajustar la expresión con lo que Rappi de verdad manda. */
+  nombres: string[]
+  /** Trae un `taken…` aunque también traiga un cierre: «aceptado y después cancelado o vencido» pide a una persona. */
+  traeAceptacion: boolean
+}
 
 /**
  * ¿Qué dice el historial de Rappi del pedido? Un evento terminal manda sobre todo (aceptado y después cancelado o vencido:
  * ya no es venta) ⇒ `YA_NO_ACTIVO`; si no, un `taken…` ⇒ `ACEPTADO`; si no (vacío, o sólo eventos del repartidor) ⇒ `INCIERTO`.
  */
-export function leerHistorial(eventos: EventoDelHistorial[]): VeredictoHistorial {
+export function analizarHistorial(eventos: EventoDelHistorial[]): LecturaDelHistorial {
   const nombres = eventos.map(e => (typeof e?.event === 'string' ? e.event.trim() : '')).filter(Boolean)
-  if (nombres.some(n => EVENTO_TERMINAL.test(n))) return 'YA_NO_ACTIVO'
-  if (nombres.some(n => EVENTO_ACEPTADO.test(n))) return 'ACEPTADO'
-  return 'INCIERTO'
+  const traeAceptacion = nombres.some(n => EVENTO_ACEPTADO.test(n))
+  const veredicto: VeredictoHistorial = nombres.some(n => EVENTO_TERMINAL.test(n))
+    ? 'YA_NO_ACTIVO'
+    : traeAceptacion
+      ? 'ACEPTADO'
+      : 'INCIERTO'
+  return { veredicto, nombres: nombres.slice(0, NOMBRES_EN_EL_LOG), traeAceptacion }
+}
+
+/** Sólo el veredicto de `analizarHistorial`. */
+export function leerHistorial(eventos: EventoDelHistorial[]): VeredictoHistorial {
+  return analizarHistorial(eventos).veredicto
 }
 
 /**

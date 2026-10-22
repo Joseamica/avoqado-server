@@ -90,8 +90,21 @@ export class DeliveryWebhookReconciliationJob {
    *
    * `ACEPTACION_INCIERTA` — Rappi contestó 400 al aceptar y su historial no dijo si el pedido quedó aceptado (vacío o
    * ilegible). 🚨 Lo resuelve una persona con Rappi: reintentarlo solo terminaría registrando la venta a ciegas.
+   *
+   * `CANCELADO_ANTES_DE_REGISTRAR` — el NEW_ORDER de Rappi encontró su aviso de cancelación ya guardado: ni se aceptó ni se
+   * registró. Reintentarlo no cambia nada (la cancelación sigue ahí). OJO: `CANCELACION_EN_ESPERA` NO va aquí — es la
+   * cancelación esperando a que su NEW_ORDER termine, y se reintenta con la espera normal.
+   *
+   * 🔴 `ERRORES_TERMINALES` de `rappi.eventProcessor.ts` es una copia de esta lista (una prueba las compara): si se agrega
+   * un código aquí, va también allá.
    */
-  private static readonly TERMINAL_ERRORS = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA']
+  private static readonly TERMINAL_ERRORS = [
+    'ORPHANED',
+    'PEDIDO_YA_NO_ACTIVO',
+    'CHANNEL_DISABLED',
+    'ACEPTACION_INCIERTA',
+    'CANCELADO_ANTES_DE_REGISTRAR',
+  ]
 
   /**
    * Fix B2 (audit §10.2): without an attempt cap, a handful of permanently-broken
@@ -661,6 +674,15 @@ export class DeliveryWebhookReconciliationJob {
       // Espera acotada, no falla: el procesador lo cierra cuando el pedido cierra en Uber o al
       // agotarse su vida, con incidencia (P1-2).
       logger.warn('[Delivery recon] cambio de pedido aún sin reflejar en el proveedor: se relee con backoff', {
+        motivo: err.message,
+        eventId: event.id,
+        attemptCount,
+        nextAttemptAt,
+      })
+    } else if (err instanceof Error && err.message === 'CANCELACION_EN_ESPERA') {
+      // Tampoco es una falla: la cancelación de Rappi espera a que su NEW_ORDER termine de registrarse (Tarea 10). Se
+      // reintenta con la misma espera; si el presupuesto se agota, termina POISON como cualquier otro (arriba).
+      logger.warn('[Delivery recon] la cancelación espera a que su pedido termine de registrarse: se reintenta con backoff', {
         motivo: err.message,
         eventId: event.id,
         attemptCount,

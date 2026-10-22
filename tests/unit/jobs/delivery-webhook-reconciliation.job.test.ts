@@ -313,14 +313,17 @@ describe('DeliveryWebhookReconciliationJob', () => {
     })
   })
 
-  it('ACEPTACION_INCIERTA es terminal: un pedido de Rappi que quedó así no se vuelve a tomar (registrarlo sería a ciegas)', async () => {
+  it.each([
+    ['ACEPTACION_INCIERTA', 'un pedido de Rappi que quedó así no se vuelve a tomar (registrarlo sería a ciegas)'],
+    ['CANCELADO_ANTES_DE_REGISTRAR', 'Rappi ya canceló el pedido antes de registrarlo: reintentarlo lo aceptaría (Tarea 10)'],
+  ])('%s es terminal: %s', async error => {
     const incierto = makeEvent({
       id: 'evt_incierto',
       provider: 'RAPPI',
       eventType: 'NEW_ORDER',
       channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
       channelLinkId: 'link_rappi',
-      error: 'ACEPTACION_INCIERTA',
+      error,
     })
     mockedFindMany.mockImplementation(async (args: any) => [incierto].filter(f => cumple(f, args.where)))
 
@@ -448,7 +451,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
     const orphanFetchWhere = mockedFindMany.mock.calls[2][0].where
     expect(orphanFetchWhere.OR).toEqual([
       { error: null },
-      { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA'] } },
+      { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA', 'CANCELADO_ANTES_DE_REGISTRAR'] } },
     ])
     expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
     expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
@@ -495,7 +498,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const nullSafeErrorGuard = scanWhere.AND.find((c: any) => Array.isArray(c.OR) && 'error' in (c.OR[0] ?? {}))
-    const terminales = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA']
+    const terminales = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA', 'CANCELADO_ANTES_DE_REGISTRAR']
     expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
     // markOrphaned's own lookup query is the third findMany call in the pass (after the two lanes, N-5).
     const orphanLookupWhere = mockedFindMany.mock.calls[2][0].where
@@ -990,6 +993,62 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(mockedUpdate).not.toHaveBeenCalled() // ni attemptCount ni nextAttemptAt
       expect(mockedMarkEventResult).not.toHaveBeenCalled()
       expect(errores.mock.calls.some(([m]) => String(m).includes('Failed to reprocess'))).toBe(false)
+    })
+
+    // Tarea 10: la cancelación que llegó antes de que existiera la venta, con su NEW_ORDER todavía por registrarse.
+    describe('CANCELACION_EN_ESPERA (Tarea 10)', () => {
+      const enEspera = (over: Partial<any> = {}) =>
+        makeEvent({
+          id: 'evt_cancel',
+          provider: 'RAPPI',
+          eventType: 'ORDER_EVENT_CANCEL',
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          error: 'CANCELACION_EN_ESPERA',
+          ...over,
+        })
+
+      it('🔴 NO es terminal: la pasada la vuelve a tomar', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [enEspera()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'CANCELLED', orderId: 'ord_rappi' })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_cancel')
+        expect(result.reprocessed).toBe(1)
+      })
+
+      it('🔴 se reintenta con la espera normal (2 min la primera vez), sin POISON, y es una espera (warn), no una falla', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [enEspera()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'CANCELACION_EN_ESPERA' })
+        const errores = jest.spyOn(logger, 'error')
+        const avisos = jest.spyOn(logger, 'warn')
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(result.reprocessed).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_cancel' },
+          data: { attemptCount: 1, nextAttemptAt: new Date(NOW + 2 * 60_000) },
+        })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(false)
+        expect(errores.mock.calls.some(([m]) => String(m).includes('Failed to reprocess event'))).toBe(false)
+        expect(avisos).toHaveBeenCalledWith(
+          expect.stringContaining('cancelación espera'),
+          expect.objectContaining({ eventId: 'evt_cancel', attemptCount: 1 }),
+        )
+      })
+
+      it('con su presupuesto agotado sí se vuelve POISON, como cualquier otro (no espera para siempre)', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [enEspera({ attemptCount: 9 })].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'CANCELACION_EN_ESPERA' })
+        const errores = jest.spyOn(logger, 'error')
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedUpdate).toHaveBeenCalledWith({ where: { id: 'evt_cancel' }, data: { attemptCount: 10, nextAttemptAt: null } })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(true)
+      })
     })
 
     describe('carril propio de Rappi (cada 30 s)', () => {
