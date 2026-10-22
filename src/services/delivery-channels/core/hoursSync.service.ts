@@ -19,8 +19,8 @@
  *
  * 🔴 NUNCA una semana toda cerrada: publicarla dejaría la tienda sin horario, que es justo lo que el proveedor puede tomar como
  * 24 h. Se devuelve `SKIPPED_EMPTY`, se conserva lo último que se publicó y se avisa con 🚨 UNA vez (la marca vive en
- * `horarioPublicado.vacioAvisadoEn` y se borra al volver a abrir: al publicar, o en `UNCHANGED` si reabrió con el MISMO horario;
- * si no, las siguientes vacaciones pasarían en silencio con la tienda abierta en el proveedor).
+ * `horarioPublicado.vacioAvisadoEn` y se borra en cuanto algún día vuelve a abrir, publique o no (mismo horario, otro horario o
+ * uno que el proveedor rechaza); si no, las siguientes vacaciones pasarían en silencio con la tienda abierta en el proveedor).
  *
  * Una falla que se repite (el mismo paso rechazado, un login que no está habilitado) grita 🚨 la primera vez por (vínculo, huella
  * deseada) y después va como `warn` durante 6 h (`primeraFalla`, en memoria): no 288 🚨 al día por vínculo.
@@ -213,21 +213,22 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
       return { outcome: 'SKIPPED_EMPTY' }
     }
 
+    // 🔴 Algún día abre: la marca de «ya se avisó de la semana cerrada» se quita SIEMPRE, antes de saber si hay algo que publicar
+    // (mismo horario, otro que se publica o otro que el proveedor rechaza). Si sólo se quitara al terminar bien, reabrir con
+    // OTRO horario que falla de forma persistente y volver a cerrar todo dejaría la segunda semana cerrada sin 🚨, con la
+    // tienda abierta en el proveedor.
+    if (publicado?.vacioAvisadoEn) {
+      await rearmarAvisoDeSemanaCerrada(link.id).catch(error =>
+        logger.warn('📋 [HoursSync] no se pudo rearmar el aviso de la semana cerrada (se intenta en la siguiente pasada)', {
+          ...contexto,
+          error: mensaje(error),
+        }),
+      )
+    }
+
     const deseada = huellaDelHorario(horario)
     huella = deseada
-    if (deseada === publicado?.huella) {
-      // 🔴 Reabrió con el MISMO horario tras una semana cerrada: no hay nada que publicar, pero la marca del aviso se quita. Si
-      // no, al volver a cerrar (otras vacaciones) la semana cerrada pasaría en silencio con la tienda abierta en el proveedor.
-      if (publicado?.vacioAvisadoEn) {
-        await rearmarAvisoDeSemanaCerrada(link.id).catch(error =>
-          logger.warn('📋 [HoursSync] no se pudo rearmar el aviso de la semana cerrada (se intenta en la siguiente pasada)', {
-            ...contexto,
-            error: mensaje(error),
-          }),
-        )
-      }
-      return { outcome: 'UNCHANGED' }
-    }
+    if (deseada === publicado?.huella) return { outcome: 'UNCHANGED' }
 
     let r: ActionResult
     try {

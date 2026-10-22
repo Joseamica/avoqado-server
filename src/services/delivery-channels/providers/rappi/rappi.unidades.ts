@@ -20,8 +20,11 @@ export const FACTOR_MONEDA_RAPPI: 1 | 100 = 1
 
 /**
  * Un monto de Rappi → pesos, en decimal exacto. Ausente o ilegible es 0. El cuadre sólo vigila los renglones contra
- * `total_products`: un descuento, un envío o una propina ilegibles se leen como 0 sin que el cuadre lo note (a lo más, en un
- * pedido pagado en línea, `vigilarTotalDelPedido` grita 🚨 si lo liquidado no es `total_order`).
+ * `total_products`: un descuento, un envío o una propina ilegibles se leen como 0 sin que el cuadre lo note. Lo que sí los
+ * avisa, y sólo en parte: `descuentoDelNegocio` (`rappi.mapper.ts`) loguea un `warn` cuando Rappi declara
+ * `total_discount_by_partner` y no coincide con la suma de los `amount_by_partner` leídos (un descuento ilegible deja la
+ * suma en 0), pero sigue con la suma; y, en un pedido pagado en línea, `vigilarTotalDelPedido` grita 🚨 si lo liquidado no es
+ * `total_order`.
  */
 export function deRappiAPesos(n: number | string | null | undefined): Prisma.Decimal {
   if (typeof n === 'number' && Number.isFinite(n)) return new Prisma.Decimal(n).div(FACTOR_MONEDA_RAPPI)

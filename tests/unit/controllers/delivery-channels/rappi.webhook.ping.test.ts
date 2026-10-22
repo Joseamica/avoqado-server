@@ -30,7 +30,14 @@ jest.mock('@/config/logger', () => ({
 }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
-  default: { deliveryChannelLink: { findUnique: jest.fn() } },
+  default: {
+    deliveryChannelLink: { findUnique: jest.fn() },
+    // Para probar que el PING no escribe nada: cualquier escritura a la base pasaría por alguno de estos.
+    deliveryOrderEvent: { create: jest.fn(), createMany: jest.fn(), upsert: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
+    $transaction: jest.fn(),
+    $executeRaw: jest.fn(),
+    $queryRaw: jest.fn(),
+  },
 }))
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.client', () => ({
   tiendasEscribiblesRappi: jest.fn(),
@@ -39,15 +46,24 @@ jest.mock('@/services/delivery-channels/providers/rappi/rappi.client', () => ({
 jest.mock('@/services/delivery-channels/providers/rappi/rappi.eventProcessor', () => ({
   processRappiEvent: jest.fn(),
 }))
+// Lo demás de la ingesta es real (la lista de estados vivos, los secretos); sólo el guardado se vigila.
+jest.mock('@/services/delivery-channels/providers/rappi/rappi.webhookIngress', () => ({
+  ...jest.requireActual('@/services/delivery-channels/providers/rappi/rappi.webhookIngress'),
+  persistRappiWebhookEvent: jest.fn(),
+}))
 
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { credencialesPresentes, tiendasEscribiblesRappi } from '@/services/delivery-channels/providers/rappi/rappi.client'
+import { persistRappiWebhookEvent } from '@/services/delivery-channels/providers/rappi/rappi.webhookIngress'
+import { processRappiEvent } from '@/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { handleRappiWebhook } from '@/controllers/delivery-channels/rappi.webhook.controller'
 
 const buscarVinculo = (prisma as any).deliveryChannelLink.findUnique as jest.Mock
 const escribibles = tiendasEscribiblesRappi as jest.Mock
 const credenciales = credencialesPresentes as jest.Mock
+const guardarEvento = persistRappiWebhookEvent as jest.Mock
+const procesarEvento = processRappiEvent as jest.Mock
 const log = logger as unknown as Record<'info' | 'warn' | 'error', jest.Mock>
 
 function firmar(cuerpo: Buffer, secreto: string): string {
@@ -312,6 +328,31 @@ describe('PING — el veredicto por tienda', () => {
       expect(buscarVinculo).not.toHaveBeenCalled()
       expect(escribibles).not.toHaveBeenCalled()
       expect(credenciales).not.toHaveBeenCalled()
+    })
+
+    it('🔴 el PING NO se guarda: no llama a `persistRappiWebhookEvent`, no procesa nada y no escribe en la base (es un latido cada 3 min por tienda)', async () => {
+      // Un PING de cada veredicto: OK, sin vínculo y con la consulta caída. Ninguno deja rastro en la base.
+      await lanzar({})
+      buscarVinculo.mockResolvedValue(null)
+      await lanzar({})
+      buscarVinculo.mockRejectedValue(new Error('P1001'))
+      await lanzar({})
+
+      expect(guardarEvento).not.toHaveBeenCalled()
+      expect(procesarEvento).not.toHaveBeenCalled()
+      const base = prisma as any
+      for (const escritura of [
+        base.deliveryOrderEvent.create,
+        base.deliveryOrderEvent.createMany,
+        base.deliveryOrderEvent.upsert,
+        base.deliveryOrderEvent.update,
+        base.deliveryOrderEvent.updateMany,
+        base.$transaction,
+        base.$executeRaw,
+        base.$queryRaw,
+      ]) {
+        expect(escritura).not.toHaveBeenCalled()
+      }
     })
 
     it('el PING se valida con el secreto del PING, no con el de otro evento', async () => {

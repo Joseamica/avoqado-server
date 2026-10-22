@@ -66,7 +66,7 @@ describe('DeliveryMenuSyncJob — el horario va junto al menú, aislado por cana
     expect(mockedAvailability).toHaveBeenCalledWith(L2)
     expect(mockedHours).toHaveBeenCalledWith(L2)
     // Y la cuenta del menú no se enteró del horario.
-    expect(r).toEqual({ publicados: 2, sinCambio: 0, fallidos: 0 })
+    expect(r).toEqual({ publicados: 2, sinCambio: 0, fallidos: 0, enRevision: 0 })
   })
 
   // ── Ronda de arreglo 1: una pasada a la vez ─────────────────────────────────────────────
@@ -78,7 +78,7 @@ describe('DeliveryMenuSyncJob — el horario va junto al menú, aislado por cana
     const primera = job.runOnce()
     const segunda = await job.runOnce()
 
-    expect(segunda).toEqual({ publicados: 0, sinCambio: 0, fallidos: 0 })
+    expect(segunda).toEqual({ publicados: 0, sinCambio: 0, fallidos: 0, enRevision: 0 })
     expect(mockedFindMany).toHaveBeenCalledTimes(1)
     expect(mockedMenu).not.toHaveBeenCalled()
     expect(mockedHours).not.toHaveBeenCalled()
@@ -95,14 +95,29 @@ describe('DeliveryMenuSyncJob — el horario va junto al menú, aislado por cana
   it('🔴 el candado se SUELTA aunque la pasada LANCE (si no, el job quedaría muerto para siempre)', async () => {
     // `pasada()` atrapa casi todo, así que se fuerza a que lance: sin el `finally`, la siguiente pasada se saltaría.
     const espia = jest.spyOn(DeliveryMenuSyncJob.prototype as any, 'pasada').mockRejectedValueOnce(new Error('x'))
-    const job = new DeliveryMenuSyncJob()
+    try {
+      const job = new DeliveryMenuSyncJob()
 
-    await expect(job.runOnce()).rejects.toThrow('x')
-    await job.runOnce()
+      await expect(job.runOnce()).rejects.toThrow('x')
+      await job.runOnce()
 
-    expect(espia).toHaveBeenCalledTimes(2)
-    expect(mockedFindMany).toHaveBeenCalledTimes(1) // la segunda sí corrió (la primera no llegó a leer)
-    expect(mockedMenu).toHaveBeenCalledTimes(2)
-    espia.mockRestore()
+      expect(espia).toHaveBeenCalledTimes(2)
+      expect(mockedFindMany).toHaveBeenCalledTimes(1) // la segunda sí corrió (la primera no llegó a leer)
+      expect(mockedMenu).toHaveBeenCalledTimes(2)
+    } finally {
+      // En `finally`: una aserción fallida no deja el espía puesto para las pruebas que siguen.
+      espia.mockRestore()
+    }
+  })
+
+  // ── Menores del bloque 2: el contador de menús en revisión ──────────────────────────────
+  it('una pasada con un vínculo EN REVISIÓN lo cuenta (`enRevision`) aparte de `sinCambio`, en el resultado y en el log', async () => {
+    mockedMenu.mockImplementation(async (link: any) => ({ outcome: link.id === 'link1' ? 'IN_REVIEW' : 'PUBLISHED', linkId: link.id }))
+
+    const r = await new DeliveryMenuSyncJob().runOnce()
+
+    expect(r).toEqual({ publicados: 1, sinCambio: 1, fallidos: 0, enRevision: 1 })
+    const log = (logger.info as jest.Mock).mock.calls.find(([m]) => String(m).includes('pasada terminada'))
+    expect(log?.[1]).toMatchObject({ publicados: 1, sinCambio: 1, fallidos: 0, enRevision: 1, revisados: 2 })
   })
 })

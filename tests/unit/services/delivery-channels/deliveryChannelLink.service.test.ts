@@ -236,6 +236,24 @@ describe('deliveryChannelLink.service', () => {
           expect(revisionDeMenuOf(config)).toEqual(VACIA)
         })
 
+        it.each([
+          ['`en` ausente', { huella: 'h' }],
+          ['`en` numérico', { huella: 'h', en: 1760000000000 }],
+          ['`en` nulo', { huella: 'h', en: null }],
+          ['`en` que es un objeto', { huella: 'h', en: { dia: 1 } }],
+        ])(
+          "🔴 un rechazo con huella y %s ⇒ ultimoRechazoEn: '' (hay rechazo vigente, sin hora legible; nunca null ni la hora rota)",
+          (_nombre, menuRechazado) => {
+            const r = revisionDeMenuOf({ menuRechazado })
+            expect(r.ultimoRechazoEn).toBe('')
+            expect(r).toEqual({ ...VACIA, ultimoRechazoEn: '' })
+          },
+        )
+
+        it("un rechazo con `en: 'xyz'` sale tal cual: ultimoRechazoEn: 'xyz' (no se valida que sea una fecha)", () => {
+          expect(revisionDeMenuOf({ menuRechazado: { huella: 'h', en: 'xyz' } }).ultimoRechazoEn).toBe('xyz')
+        })
+
         it('una entrada sana entre basura se queda; y sólo salen `sku` y `problema` (nada más de lo guardado)', () => {
           const r = revisionDeMenuOf({
             menuProblemas: {
@@ -712,6 +730,31 @@ describe('deliveryChannelLink.service', () => {
 
       // Sin motivo al reanudar: el motivo describe POR QUÉ se pausó y no aplica al revés.
       expect(setStoreStatus).toHaveBeenCalledWith(false, 'store-x', undefined)
+    })
+
+    it('🔴 guardia: reanudar (PAUSED → ACTIVE) NO llama a `notifyIntegrationStatus`, aunque el adaptador lo tenga (reanudar no es «integrada sí»)', async () => {
+      // «Integrada sí/no» le dice al proveedor por dónde llegan los pedidos; sólo lo mueve el aprovisionamiento y el botón de
+      // desconectar. Una pausa o una reanudación solo habla de si la tienda recibe pedidos (`setStoreStatus`).
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider: DeliveryProvider.DELIVERECT,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: null,
+      })
+      const setStoreStatus = jest.fn().mockResolvedValue({ ok: true, status: 200, raw: '' })
+      const notifyIntegrationStatus = jest.fn().mockResolvedValue({ ok: true, status: 200, raw: '' })
+      ;(hasAdapter as jest.Mock).mockReturnValue(true)
+      ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus, notifyIntegrationStatus })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+        ...baseLink,
+        provider: 'UBER_EATS',
+        externalLocationId: 'store-x',
+      })
+
+      await pauseChannelLink('venue1', 'link1', false)
+
+      expect(setStoreStatus).toHaveBeenCalledWith(false, 'store-x', undefined) // sí reanudó la tienda
+      expect(notifyIntegrationStatus).not.toHaveBeenCalled()
     })
 
     it('🔴 si el proveedor RECHAZA la pausa, NO decimos que está pausado', async () => {

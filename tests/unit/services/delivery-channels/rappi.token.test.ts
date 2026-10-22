@@ -165,6 +165,48 @@ describe('racha de logins fallidos', () => {
     expect(anotarLoginFallido('integrations')).toBe(false)
   })
 
+  // Menores del bloque 2 (T20 re-revisión): un 🚨 por racha SIN límite de tiempo callaba una caída de login de días.
+  describe('🔴 una racha que sigue vuelve a gritar cada hora (en memoria)', () => {
+    const HORA = 60 * 60 * 1000
+    const T0 = 1_761_130_000_000
+    let reloj: jest.SpyInstance
+    beforeEach(() => {
+      reloj = jest.spyOn(Date, 'now').mockReturnValue(T0)
+    })
+    afterEach(() => reloj.mockRestore())
+    const a = (ms: number) => reloj.mockReturnValue(T0 + ms)
+
+    it('dentro de la hora no repite; al cumplirse la hora desde el último 🚨, sí; y la hora se cuenta desde ese 🚨', () => {
+      expect(anotarLoginFallido('integrations')).toBe(true) // empieza la racha
+      a(HORA - 1)
+      expect(anotarLoginFallido('integrations')).toBe(false)
+      a(HORA)
+      expect(anotarLoginFallido('integrations')).toBe(true) // la caída sigue: otro 🚨
+      a(HORA + 5 * 60_000)
+      expect(anotarLoginFallido('integrations')).toBe(false) // la hora cuenta desde el 🚨 repetido, no desde el inicio
+      a(2 * HORA - 1)
+      expect(anotarLoginFallido('integrations')).toBe(false)
+      a(2 * HORA)
+      expect(anotarLoginFallido('integrations')).toBe(true)
+    })
+
+    it('cada superficie lleva su propio reloj', () => {
+      anotarLoginFallido('integrations')
+      a(HORA / 2)
+      expect(anotarLoginFallido('utils')).toBe(true) // su racha empieza ahora
+      a(HORA)
+      expect(anotarLoginFallido('integrations')).toBe(true)
+      expect(anotarLoginFallido('utils')).toBe(false)
+    })
+
+    it('un login bueno cierra la racha: el siguiente fallo vuelve a ser inicio de racha, sin esperar la hora', () => {
+      anotarLoginFallido('integrations')
+      a(60_000)
+      expect(anotarLoginExitoso('integrations')).toBe(true)
+      expect(anotarLoginFallido('integrations')).toBe(true)
+    })
+  })
+
   it('el reset de pruebas también borra las rachas', () => {
     anotarLoginFallido('integrations')
     _resetRappiTokenCacheForTests()

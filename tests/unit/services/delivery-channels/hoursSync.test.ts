@@ -335,6 +335,35 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
     expect(publicar).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 cerrar → reabrir con OTRO horario que no se logra publicar → cerrar ⇒ 🚨 dos veces (el aviso se rearma en cuanto algún día abre)', async () => {
+    const publicar = conPublicador()
+    await syncChannelHours(copia()) // publica H1
+    const h1 = structuredClone(fila.config.horarioPublicado)
+
+    mockedResolve.mockResolvedValue({ horario: todoCerrado(), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('SKIPPED_EMPTY')
+    expect(avisosDeSemanaCerrada()).toHaveLength(1)
+    expect(fila.config.horarioPublicado).toEqual({ ...h1, vacioAvisadoEn: expect.any(String) })
+
+    // Reabre con OTRO horario y el proveedor lo rechaza de forma persistente: ni UNCHANGED ni PUBLISHED.
+    publicar.mockResolvedValue({ ok: false, status: 400, raw: 'rechazado' })
+    mockedResolve.mockResolvedValue({
+      horario: semana({ monday: { enabled: true, ranges: [{ open: '10:00', close: '20:00' }] } }),
+      fuente: 'CANAL',
+    })
+    expect((await syncChannelHours(copia())).outcome).toBe('FAILED')
+    // El aviso ya se rearmó (sin esperar a publicar), conservando la última huella publicada y las llaves del menú.
+    expect(fila.config.horarioPublicado).toEqual(h1)
+    expect(fila.config.menuEnRevision).toEqual({ huella: 'm1', publicadaEn: '2026-10-22T08:00:00.000Z' })
+
+    // Vuelve a cerrar todo: la segunda semana cerrada SÍ grita.
+    mockedResolve.mockResolvedValue({ horario: todoCerrado(), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('SKIPPED_EMPTY')
+
+    expect(avisosDeSemanaCerrada()).toHaveLength(2)
+    expect(fila.config.menuEnRevision).toEqual({ huella: 'm1', publicadaEn: '2026-10-22T08:00:00.000Z' })
+  })
+
   it('UNCHANGED sin aviso pendiente no toca la base (el rearme sólo escribe cuando hay marca)', async () => {
     conPublicador()
     await syncChannelHours(copia())
@@ -372,21 +401,24 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
       conPublicador(jest.fn(async () => ({ ok: false, status: 400, raw: 'no' })))
       const ahora = Date.now()
       const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora)
+      try {
+        await syncChannelHours(copia())
+        mockedResolve.mockResolvedValue({
+          horario: semana({ monday: { enabled: true, ranges: [{ open: '10:00', close: '20:00' }] } }),
+          fuente: 'CANAL',
+        })
+        await syncChannelHours(copia())
+        expect(gritos()).toHaveLength(2)
 
-      await syncChannelHours(copia())
-      mockedResolve.mockResolvedValue({
-        horario: semana({ monday: { enabled: true, ranges: [{ open: '10:00', close: '20:00' }] } }),
-        fuente: 'CANAL',
-      })
-      await syncChannelHours(copia())
-      expect(gritos()).toHaveLength(2)
+        await syncChannelHours(copia()) // misma huella, dentro de las 6 h
+        expect(gritos()).toHaveLength(2)
 
-      await syncChannelHours(copia()) // misma huella, dentro de las 6 h
-      expect(gritos()).toHaveLength(2)
-
-      reloj.mockReturnValue(ahora + 6 * 60 * 60 * 1000 + 1)
-      await syncChannelHours(copia())
-      reloj.mockRestore()
+        reloj.mockReturnValue(ahora + 6 * 60 * 60 * 1000 + 1)
+        await syncChannelHours(copia())
+      } finally {
+        // En `finally`: una aserción fallida no deja el reloj puesto para las pruebas que siguen.
+        reloj.mockRestore()
+      }
       expect(gritos()).toHaveLength(3)
     })
 

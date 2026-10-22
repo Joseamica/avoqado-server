@@ -10,6 +10,9 @@
  * 🔴 Este módulo no adivina el dinero: comprueba que los renglones CUADREN contra `total_products` y revienta si no, y una
  * variante cuyo dinero no está calibrado (o que la caja tendría que cobrar: el bloque 2b) no se registra. Prefiero que un
  * pedido falle ruidosamente a que registre una venta de $1,250 como $12.50 —o al revés— y nadie se entere hasta el corte.
+ * Ojo: ese cuadre atrapa un renglón mal leído, NO un factor de unidades equivocado (renglones y `total_products` pasan por el
+ * mismo factor y cuadrarían parejo). La red contra el error de unidades es la medición M2 (factor 1, en pesos) más la
+ * prueba que fija `FACTOR_MONEDA_RAPPI` en 1 (`rappi.unidades.ts`).
  */
 import { Prisma } from '@prisma/client'
 import { fromZonedTime } from 'date-fns-tz'
@@ -367,11 +370,15 @@ function mapearPago(
 }
 
 /**
- * 🔴 LA RED CONTRA EL ERROR DE UNIDADES: los renglones (precio completo, con toppings) contra `total_products` («Total
- * products without discounts»). Si no cuadran, LANZA. Sin `total_products` también lanza: no se adivina con otro campo.
+ * 🔴 EL CUADRE DE LOS RENGLONES: los renglones (precio completo, con toppings) contra `total_products` («Total products
+ * without discounts»). Si no cuadran, LANZA. Sin `total_products` también lanza: no se adivina con otro campo.
+ *
+ * ⚠️ NO es la red contra un error de unidades: ambos lados pasan por el MISMO factor (`deRappiAPesos`), así que un factor
+ * mal puesto y parejo cuadra. Esa red es la medición M2 (factor 1, en pesos) más la prueba que fija `FACTOR_MONEDA_RAPPI` en
+ * 1 (`rappi.unidades.ts`). Lo que este cuadre atrapa es un renglón, un topping o una cantidad mal leídos.
  *
  * No se cuadra contra `total_products_with_discount` (obsoleto) ni contra `total_order`, que según la variante trae envío
- * y propina o resta los descuentos del negocio. Un factor de 100 en dinero no puede descubrirse en el corte.
+ * y propina o resta los descuentos del negocio.
  */
 function verificarCuadre(renglones: Prisma.Decimal, detail: RappiOrderDetail, orderId: string): void {
   const total = detail.totals?.total_products

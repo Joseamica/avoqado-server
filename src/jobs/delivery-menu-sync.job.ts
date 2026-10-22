@@ -10,6 +10,15 @@ import { syncChannelAvailability, syncChannelMenu, syncableLinksWhere } from '..
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 
+/** Los contadores de una pasada. `enRevision` ya cuenta también dentro de `sinCambio` (no se publicó nada en esa pasada). */
+interface ResultadoDeLaPasada {
+  publicados: number
+  sinCambio: number
+  fallidos: number
+  /** Cuántos canales quedaron con su menú EN REVISIÓN (esperando el veredicto del proveedor) en esta pasada. */
+  enRevision: number
+}
+
 /**
  * Mantiene el menú de cada canal de delivery igual al de Avoqado.
  *
@@ -61,10 +70,10 @@ export class DeliveryMenuSyncJob {
     this.job = null
   }
 
-  async runOnce(): Promise<{ publicados: number; sinCambio: number; fallidos: number }> {
+  async runOnce(): Promise<ResultadoDeLaPasada> {
     if (this.enCurso) {
       logger.warn('📋 [MenuSync] la pasada anterior sigue corriendo — se salta este tick')
-      return { publicados: 0, sinCambio: 0, fallidos: 0 }
+      return { publicados: 0, sinCambio: 0, fallidos: 0, enRevision: 0 }
     }
     this.enCurso = true
     try {
@@ -75,10 +84,11 @@ export class DeliveryMenuSyncJob {
     }
   }
 
-  private async pasada(): Promise<{ publicados: number; sinCambio: number; fallidos: number }> {
+  private async pasada(): Promise<ResultadoDeLaPasada> {
     let publicados = 0
     let sinCambio = 0
     let fallidos = 0
+    let enRevision = 0
 
     try {
       // Regla del repo: la PRIMERA lectura del job va envuelta en retry — es la que muere
@@ -102,8 +112,10 @@ export class DeliveryMenuSyncJob {
         if (r.outcome === 'PUBLISHED') publicados++
         // Un menú en revisión (esperando el veredicto del proveedor) o uno igual al que el proveedor ya rechazó tampoco se
         // publica en esta pasada: es «sin cambio» para el conteo. Lo que necesita a una persona ya lo avisó el sincronizador.
-        else if (r.outcome === 'UNCHANGED' || r.outcome === 'IN_REVIEW' || r.outcome === 'REJECTED_UNCHANGED') sinCambio++
-        else if (r.outcome === 'FAILED') fallidos++
+        else if (r.outcome === 'UNCHANGED' || r.outcome === 'IN_REVIEW' || r.outcome === 'REJECTED_UNCHANGED') {
+          sinCambio++
+          if (r.outcome === 'IN_REVIEW') enRevision++
+        } else if (r.outcome === 'FAILED') fallidos++
 
         // La disponibilidad va SIEMPRE, aunque el menú no haya cambiado — de hecho es el
         // caso normal: el menú cambia una vez al mes y los productos se acaban a diario.
@@ -134,7 +146,7 @@ export class DeliveryMenuSyncJob {
       }
 
       if (publicados > 0 || fallidos > 0) {
-        logger.info('📋 [MenuSync] pasada terminada', { publicados, sinCambio, fallidos, revisados: links.length })
+        logger.info('📋 [MenuSync] pasada terminada', { publicados, sinCambio, fallidos, enRevision, revisados: links.length })
       }
 
       // 🔴 La tasa de inyección: el número con el que Uber decide REVOCAR el acceso (exige
@@ -174,7 +186,7 @@ export class DeliveryMenuSyncJob {
       logger.error('🚨 [MenuSync] la pasada falló completa', { error: error instanceof Error ? error.message : error })
     }
 
-    return { publicados, sinCambio, fallidos }
+    return { publicados, sinCambio, fallidos, enRevision }
   }
 }
 

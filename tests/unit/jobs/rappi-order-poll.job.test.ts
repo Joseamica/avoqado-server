@@ -583,6 +583,66 @@ describe('🔴 I-1: si Rappi rechaza el login, el sondeo se pausa y no grita en 
     expect(alarmas()).toBe(2)
   })
 
+  it.each([
+    ['sin `access_token`', {}],
+    ['con `access_token` vacío', { access_token: '' }],
+    ['con `access_token` de puros espacios', { access_token: '   ' }],
+    ['con `access_token` que no es texto', { access_token: 12345 }],
+  ])('🔴 un 200 del login %s NO cierra la racha: no dice «el login volvió»', async (_caso, cuerpo) => {
+    login = { status: 401, texto: 'invalid_client' }
+    await job.runOnce()
+    expect(alarmas()).toBe(1) // empieza la racha
+
+    login = { status: 200, body: cuerpo } // Rappi contesta 200 pero el cuerpo no sirve
+    a(301_000)
+    await job.runOnce()
+
+    expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('el login volvió'), expect.anything())
+  })
+
+  it('🔴 con un 200 sin token la racha SIGUE abierta: el siguiente rechazo no es un inicio de racha (no grita) y sólo un token de verdad la cierra', async () => {
+    login = { status: 401, texto: 'invalid_client' }
+    await job.runOnce()
+    expect(alarmas()).toBe(1)
+
+    login = { status: 200, body: {} }
+    a(301_000)
+    await job.runOnce()
+    expect(llamadas).toEqual([]) // sin token no salió ni el GET por tienda
+
+    login = { status: 401, texto: 'invalid_client' }
+    a(602_000)
+    await job.runOnce()
+    expect(alarmas()).toBe(1) // dentro de la hora y con la racha abierta: ni un 🚨 más
+
+    login = LOGIN_BUENO
+    a(903_000)
+    await job.runOnce()
+    expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('el login volvió'), expect.anything())
+  })
+
+  it('🔴 una caída de login que dura más de una hora vuelve a gritar 🚨 (una por hora), no una sola vez', async () => {
+    login = { status: 401, texto: 'invalid_client' }
+    await job.runOnce()
+    expect(alarmas()).toBe(1)
+
+    a(30 * 60_000)
+    await job.runOnce()
+    expect(alarmas()).toBe(1) // media hora después: sigue sin repetirse
+
+    a(60 * 60_000 + 1_000)
+    await job.runOnce()
+    expect(alarmas()).toBe(2) // pasó la hora y la caída sigue
+
+    a(90 * 60_000)
+    await job.runOnce()
+    expect(alarmas()).toBe(2)
+
+    a(2 * 60 * 60_000 + 5_000)
+    await job.runOnce()
+    expect(alarmas()).toBe(3)
+  })
+
   it('con muchas tiendas, una pasada sin token pide el login UNA vez (no lo machaca por cada tienda)', async () => {
     const ids = ['900175625', '900175626', '900175627', '900175628', '900175629', '900175630', '900175631']
     mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = ids.join(',')

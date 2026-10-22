@@ -104,13 +104,18 @@ async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_tok
   if (!r.ok) {
     const cuerpo = await r.text()
     const datos = { superficie, status: r.status, cuerpo: cuerpo.slice(0, 300) }
-    // 🔴 El 🚨 sale sólo al EMPEZAR la racha de fallos de esa superficie; mientras siga, warn (Tarea 20, ronda 1).
+    // 🔴 El 🚨 sale al EMPEZAR la racha de fallos de esa superficie y, mientras siga, una vez por hora; el resto, warn (Tarea 20).
     if (anotarLoginFallido(superficie)) logger.error('🚨 [Rappi] el login falló', datos)
-    else logger.warn('[Rappi] el login sigue fallando (ya se avisó al empezar la racha)', datos)
+    else logger.warn('[Rappi] el login sigue fallando (ya se avisó; el aviso se repite cada hora mientras siga la racha)', datos)
     throw new Error(`[Rappi] login de ${superficie} respondió ${r.status}`)
   }
-  if (anotarLoginExitoso(superficie)) logger.info('[Rappi] el login volvió a funcionar', { superficie })
-  return (await r.json()) as { access_token: string; expires_in?: number }
+  const cuerpo = (await r.json()) as { access_token: string; expires_in?: number }
+  // 🔴 La racha de fallos se cierra SÓLO si la respuesta trae un `access_token` de texto no vacío: cualquier 2xx con un cuerpo que
+  // no sirve (lo rechaza `getRappiToken`) cerraba la racha y dejaba un «el login volvió» falso, y el siguiente rechazo gritaba
+  // 🚨 como si fuera una caída nueva.
+  const tokenSirve = typeof cuerpo?.access_token === 'string' && cuerpo.access_token.trim() !== ''
+  if (tokenSirve && anotarLoginExitoso(superficie)) logger.info('[Rappi] el login volvió a funcionar', { superficie })
+  return cuerpo
 }
 
 /** Petición autenticada, con token cacheado y el candado de escrituras ya armados. */

@@ -172,6 +172,16 @@ export type ProblemaDeMenu = { sku: string; problema: string }
 /**
  * El resultado de publicar el menú. `problemas` presente (aunque vacío) = el adaptador los informa y el sincronizador los
  * guarda a la vista; ausente = el adaptador no los informa y no se toca lo guardado.
+ *
+ * 🔴 CON REVISIÓN (`menuConRevision`), el `status` se lee así y el sincronizador decide con él:
+ *  · 2xx = «lo recibí, lo voy a revisar» (NO publicado: lo dirá un veredicto aparte);
+ *  · 4xx = el proveedor dijo que no (con 400/422 la huella queda rechazada);
+ *  · `status: 0` = el adaptador NO salió a la red (p. ej. el menú quedó vacío tras filtrar): se SABE que no se mandó nada y la
+ *    pendiente se suelta, sin esperar un veredicto que nunca va a llegar;
+ *  · 5xx = no se sabe si lo procesó: la pendiente se queda.
+ * Un timeout o un error de red NO vuelven como `status: 0`: se LANZAN (y quien llama no puede saber si el proveedor lo recibió,
+ * así que la pendiente también se queda). Lo que sí se SABE que no salió (token, candado de escrituras) se lanza como
+ * `DeliveryWriteNotSentError`.
  */
 export interface PublicacionDeMenu extends ActionResult {
   problemas?: ProblemaDeMenu[]
