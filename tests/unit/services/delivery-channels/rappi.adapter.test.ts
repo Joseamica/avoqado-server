@@ -380,13 +380,25 @@ describe('rappiAdapter.publishMenu — en revisión, con los problemas a la vist
 })
 
 describe('respuestaPing', () => {
-  // 🔴 Dos pings negativos seguidos y Rappi marca la tienda como caída.
-  it('contesta el cuerpo EXACTO que Rappi espera', () => {
-    expect(respuestaPing('Taquería El Sol')).toEqual({ status: 'OK', description: 'Taquería El Sol' })
+  // 🔴 Dos pings negativos seguidos y Rappi marca la tienda como caída. Desde la Tarea 17 el veredicto lo da el controlador
+  // (vínculo vivo + tienda permitida + credenciales); aquí sólo se prueba el CUERPO que se le contesta.
+  it('OK con el nombre: el cuerpo EXACTO que Rappi espera', () => {
+    expect(respuestaPing({ ok: true, nombre: 'Taquería El Sol' })).toEqual({ status: 'OK', description: 'Taquería El Sol' })
   })
 
-  it('sin nombre de tienda sigue contestando OK — la pregunta es "¿estás ahí?", no "¿cómo te llamas?"', () => {
-    expect(respuestaPing(null).status).toBe('OK')
-    expect(respuestaPing(undefined).description).toBeTruthy()
+  it('OK sin nombre de tienda sigue siendo OK, con una descripción de respaldo', () => {
+    expect(respuestaPing({ ok: true, nombre: null }).status).toBe('OK')
+    expect(respuestaPing({ ok: true, nombre: null }).description).toBeTruthy()
+    expect(respuestaPing({ ok: true, nombre: '   ' }).description).toBe(respuestaPing({ ok: true, nombre: null }).description)
+  })
+
+  it('🔴 no-OK ⇒ status "ERROR" (Rappi toma cualquier valor distinto de OK como tienda caída), sin repetir el motivo', () => {
+    const r = respuestaPing({ ok: false, motivo: 'la tienda 900175499 no está en la lista de escritura' })
+
+    expect(r.status).toBe('ERROR')
+    expect(r.description).toBeTruthy()
+    expect(r.description).not.toContain('900175499')
+    // el motivo va al log, no a Rappi: todos los no-OK son idénticos para quien los lee
+    expect(respuestaPing({ ok: false, motivo: 'otro motivo' })).toEqual(r)
   })
 })

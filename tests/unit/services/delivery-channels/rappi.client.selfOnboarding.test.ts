@@ -40,6 +40,7 @@ import {
   aprovisionarTiendasRappi,
   canjearCodigoRappi,
   clientIdRappi,
+  credencialesPresentes,
   preflightSelfOnboardingRappi,
   rappiApi,
   redirectUriRappi,
@@ -389,6 +390,47 @@ describe('rappi.client — self-onboarding', () => {
     ])('%s ⇒ se niega', (_n, cambio, error) => {
       Object.assign(mockEnv, cambio)
       expect(() => preflightSelfOnboardingRappi()).toThrow(error)
+    })
+  })
+
+  // Tarea 17: el PING pregunta «¿tengo llaves?» sin poder permitirse un Error (el PING nunca revienta) ni un log con la llave.
+  describe('credencialesPresentes (la pregunta del PING)', () => {
+    it('con el id y el secreto del ambiente ⇒ true', () => {
+      expect(credencialesPresentes()).toBe(true)
+    })
+
+    it('🔴 sin el id, o sin el secreto ⇒ false, sin lanzar', () => {
+      mockEnv.RAPPI_CLIENT_ID_SANDBOX = undefined
+      expect(credencialesPresentes()).toBe(false)
+
+      mockEnv.RAPPI_CLIENT_ID_SANDBOX = 'cid'
+      mockEnv.RAPPI_CLIENT_SECRET_SANDBOX = ''
+      expect(credencialesPresentes()).toBe(false)
+    })
+
+    it('mira las llaves del AMBIENTE en uso: en PRODUCTION las de SANDBOX no cuentan', () => {
+      mockEnv.RAPPI_ENVIRONMENT = 'PRODUCTION'
+      expect(credencialesPresentes()).toBe(false)
+
+      mockEnv.RAPPI_CLIENT_ID_PRODUCTION = 'cid-prod'
+      mockEnv.RAPPI_CLIENT_SECRET_PRODUCTION = 'csecret-prod'
+      expect(credencialesPresentes()).toBe(true)
+    })
+
+    it('🔴 sólo devuelve un booleano y no imprime ni loguea nada (jamás una llave)', () => {
+      const consola = [jest.spyOn(console, 'log'), jest.spyOn(console, 'error'), jest.spyOn(console, 'warn')].map(s =>
+        s.mockImplementation(() => undefined),
+      )
+      const logger = jest.requireMock('@/config/logger').default as Record<'info' | 'warn' | 'error', jest.Mock>
+      Object.values(logger).forEach(f => f.mockClear())
+
+      expect(credencialesPresentes()).toBe(true)
+      mockEnv.RAPPI_CLIENT_SECRET_SANDBOX = undefined
+      expect(credencialesPresentes()).toBe(false)
+
+      for (const s of consola) expect(s).not.toHaveBeenCalled()
+      for (const f of Object.values(logger)) expect(f).not.toHaveBeenCalled()
+      consola.forEach(s => s.mockRestore())
     })
   })
 

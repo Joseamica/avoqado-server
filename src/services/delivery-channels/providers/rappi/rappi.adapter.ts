@@ -411,10 +411,21 @@ export function motivosDelRechazo(raw: string): ProblemaDeMenu[] {
  * del contrato es cosas que nosotros llamamos— y por eso vive aquí, junto al adaptador, en vez
  * de escondida en una ruta.
  *
- * Se contesta OK siempre que el proceso esté vivo, que es literalmente lo que la pregunta
- * significa: "¿estás ahí para recibir pedidos?". Encadenar la respuesta al estado de la base o
- * del proveedor haría que un hipo de 30 segundos apague la tienda de un comercio.
+ * La pregunta es "¿ESTA tienda está ahí para recibir pedidos?", así que el veredicto es POR TIENDA y lo da el controlador
+ * (`rappi.webhook.controller`): OK sólo si hay un vínculo RAPPI vivo (ACTIVE, PAUSED o PENDING), la tienda está en la lista
+ * de escritura del ambiente y hay llaves de la integración. Cualquier otra cosa —también una consulta que falla— es ERROR:
+ * un OK mentiroso deja que Rappi siga mandando pedidos que no vamos a poder aceptar, y los cancela solo a los 4–6 minutos.
+ * Un hipo de la base no apaga la tienda por sí solo: Rappi necesita DOS negativos seguidos, con 3 minutos de por medio.
+ *
+ * Rappi toma cualquier `status` distinto de "OK" como tienda caída; la `description` es opcional. 🔴 El ERROR NO dice cuál de
+ * las condiciones faltó (vínculo, lista o llaves): eso es configuración nuestra y no se le filtra a Rappi. El motivo lo
+ * escribe el controlador en el log (sin secretos); viaja en el tipo para que el contrato quede a la vista, pero NUNCA
+ * se copia al cuerpo.
  */
-export function respuestaPing(nombreTienda?: string | null): { status: 'OK'; description: string } {
-  return { status: 'OK', description: nombreTienda?.trim() || 'Avoqado' }
+export function respuestaPing(r: { ok: true; nombre: string | null } | { ok: false; motivo: string }): {
+  status: 'OK' | 'ERROR'
+  description: string
+} {
+  if (!r.ok) return { status: 'ERROR', description: 'Avoqado: la tienda no está disponible para recibir pedidos' }
+  return { status: 'OK', description: r.nombre?.trim() || 'Avoqado' }
 }

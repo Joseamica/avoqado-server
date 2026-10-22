@@ -61,6 +61,21 @@ function credenciales(): { clientId: string; clientSecret: string } {
   return { clientId, clientSecret }
 }
 
+/**
+ * ¿Hay llaves de la integración para el ambiente en uso? La pregunta del PING (`rappi.webhook.controller`): sin ellas no
+ * podemos contestarle a Rappi nada de lo que nos pida, así que la tienda no está "ahí para recibir".
+ * Envuelve `credenciales()` y NUNCA lanza ni imprime nada: el PING no puede revolver un Error (llega cada 3 minutos por
+ * tienda) y mucho menos soltar el texto de una llave. Devuelve sólo el booleano.
+ */
+export function credencialesPresentes(): boolean {
+  try {
+    credenciales()
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Tiendas donde SÍ se puede escribir. Vacía = ninguna — el candado del incidente 2026-08-17. */
 export function tiendasEscribiblesRappi(): string[] {
   const crudo = getRappiEnvironment() === 'SANDBOX' ? env.RAPPI_WRITABLE_STORE_IDS_SANDBOX : env.RAPPI_WRITABLE_STORE_IDS_PRODUCTION
