@@ -321,6 +321,86 @@ async function guardarProblemas(link: DeliveryChannelLink, problemas: ProblemaDe
   }
 }
 
+export type ResultadoDelVeredicto = 'SELLADO' | 'RECHAZO_ANOTADO' | 'NO_APLICA'
+
+/**
+ * Aplica el veredicto del proveedor (aprobado o rechazado) a la pendiente VIGENTE, con la fila bloqueada y dentro de la
+ * transacción `tx` del llamador: el procesador cierra el evento del aviso en esa MISMA transacción (Codex r3 #1), así que si
+ * el proceso cae entre los dos, el reintento encuentra el evento cerrado y no aplica un veredicto viejo a la pendiente nueva.
+ *
+ * 🔴 LA REGLA DE LA HORA (diseño §4.5.1): el aviso del veredicto no dice DE QUÉ menú es. Sólo se aplica a una pendiente
+ * publicada ANTES de que el proveedor lo firmara (`firmadoEnMs`, la hora de su firma). Un aviso duplicado o reprocesado,
+ * firmado antes de la publicación siguiente, no la toca. SIN TOLERANCIA (Codex plan r1 #2): cualquier margen deja que un aviso
+ * firmado antes de la publicación selle el menú siguiente. Sin hora de firma (o con la de la pendiente ilegible) no hay cómo
+ * saberlo, y no se aplica: el menú sigue en revisión y el aviso del plazo lo hace visible.
+ *  · Sin pendiente: una aprobación sólo deja la fecha (`lastMenuSyncAt`); un rechazo no anota nada. `NO_APLICA`.
+ *  · Aprobación ⇒ `lastMenuHash` = la huella pendiente y la fecha; limpia la pendiente y el rechazo anterior. `SELLADO`.
+ *  · Rechazo ⇒ limpia la pendiente y guarda la huella rechazada (no se republica hasta que el menú cambie). `RECHAZO_ANOTADO`.
+ * Residual aceptado por el founder: un aviso viejo reenviado con una firma NUEVA justo después de publicar se tomaría como de la
+ * publicación nueva (la pregunta va al proveedor).
+ */
+export async function aplicarVeredictoDeMenu(
+  tx: Prisma.TransactionClient,
+  linkId: string,
+  v: { aprobado: boolean; firmadoEnMs: number | null },
+): Promise<ResultadoDelVeredicto> {
+  // Lo que decide `cambio` con la fila bloqueada (un objeto y no `let`s: TypeScript no ve las asignaciones del callback).
+  const decision: { resultado: ResultadoDelVeredicto; huella?: string; soloLaFecha?: boolean } = { resultado: 'NO_APLICA' }
+  const ahora = new Date()
+
+  await escribirLlavesDelSistema(
+    linkId,
+    fila => {
+      const pendiente = leerMenuEnRevision(fila.config)
+      if (!pendiente) {
+        decision.soloLaFecha = v.aprobado // una aprobación sin pendiente (publicación a mano, o anterior al mecanismo): sólo la fecha
+        logger.info('📋 [MenuSync] veredicto del menú sin pendiente: no hay qué sellar ni rechazar', {
+          linkId,
+          aprobado: v.aprobado,
+        })
+        return null
+      }
+      const publicadaMs = Date.parse(pendiente.publicadaEn)
+      if (v.firmadoEnMs === null || Number.isNaN(publicadaMs)) {
+        logger.warn('📋 [MenuSync] veredicto del menú sin hora de firma (o pendiente sin hora legible): no se aplica', {
+          linkId,
+          aprobado: v.aprobado,
+          firmadoEnMs: v.firmadoEnMs,
+          publicadaEn: pendiente.publicadaEn,
+        })
+        return null
+      }
+      if (v.firmadoEnMs < publicadaMs) {
+        // 🔴 El aviso es de una publicación ANTERIOR (duplicado o reprocesado): sellaría (o tiraría) un menú que el proveedor
+        // todavía no revisa.
+        logger.warn('📋 [MenuSync] veredicto del menú firmado ANTES de publicar la pendiente: es de otra publicación, no se aplica', {
+          linkId,
+          aprobado: v.aprobado,
+          firmadoEn: new Date(v.firmadoEnMs).toISOString(),
+          publicadaEn: pendiente.publicadaEn,
+        })
+        return null
+      }
+      decision.huella = pendiente.huella
+      if (v.aprobado) {
+        decision.resultado = 'SELLADO'
+        return { menuEnRevision: null, menuRechazado: null }
+      }
+      decision.resultado = 'RECHAZO_ANOTADO'
+      return { menuEnRevision: null, menuRechazado: { huella: pendiente.huella, en: ahora.toISOString() } }
+    },
+    tx,
+  )
+
+  // Las columnas, con la fila TODAVÍA bloqueada (misma transacción): sólo lo que el veredicto decidió arriba.
+  if (decision.resultado === 'SELLADO' && decision.huella) {
+    await tx.deliveryChannelLink.update({ where: { id: linkId }, data: { lastMenuHash: decision.huella, lastMenuSyncAt: ahora } })
+  } else if (decision.soloLaFecha) {
+    await tx.deliveryChannelLink.update({ where: { id: linkId }, data: { lastMenuSyncAt: ahora } })
+  }
+  return decision.resultado
+}
+
 /**
  * ¿Está el menú de este canal al día en el proveedor?
  *

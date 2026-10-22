@@ -264,101 +264,217 @@ describe('processRappiEvent', () => {
   })
 
   // ── El veredicto del menú ────────────────────────────────────────────────────────
-  // Tarea 15: la pendiente es `menuEnRevision` (la escribe el sincronizador ANTES del POST). La regla de la hora de firma y el
-  // cierre en la misma transacción son de la Tarea 16.
-  const PENDIENTE = { huella: 'abc123', publicadaEn: '2026-10-22T10:00:00.000Z' }
+  // Tarea 16 (diseño §4.5.1): el veredicto sólo aplica a la pendiente publicada ANTES de que Rappi firmara el aviso (el `t` de
+  // la firma vive al final de la llave guardada), y el veredicto y el cierre del evento van en la MISMA transacción (Codex r3
+  // #1): si el proceso cae entre los dos, el reintento no puede aplicar el veredicto del menú A a la pendiente del menú B.
+  describe('el veredicto del menú', () => {
+    const PUBLICADA_EN = '2026-10-22T10:00:00.000Z'
+    const publicadaSeg = Date.parse(PUBLICADA_EN) / 1000
+    const PENDIENTE = { huella: 'abc123', publicadaEn: PUBLICADA_EN }
+    const mockQueryRaw = prisma.$queryRaw as jest.Mock
+    const mockLinkUpdate = prisma.deliveryChannelLink.update as jest.Mock
+    const mockCierre = prisma.deliveryOrderEvent.updateMany as jest.Mock
 
-  it('🔴 MENU_APPROVED sella la huella pendiente — AHÍ es cuando el menú está publicado', async () => {
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814', message: 'Menu Approved' } }),
-    )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
-      { config: { menuEnRevision: PENDIENTE, menuRechazado: { huella: 'vieja', en: 'x' } }, lastMenuHash: null },
-    ])
+    /** La fila del vínculo en la base: el `SELECT … FOR UPDATE` la copia y el `update` la escribe. */
+    let vinculo: { config: Record<string, any>; lastMenuHash: string | null; lastMenuSyncAt?: Date }
 
-    const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+    /** El aviso tal como lo guardó el ingreso: su llave REAL, con el `t` de la firma (segundos). */
+    function aviso(eventType: 'MENU_APPROVED' | 'MENU_REJECTED', firmadoEnSeg: number | null, over: Record<string, unknown> = {}) {
+      const payload = { store_id: '900105814', ...(eventType === 'MENU_APPROVED' ? { message: 'Menu Approved' } : {}) }
+      const header = firmadoEnSeg === null ? undefined : `t=${firmadoEnSeg},sign=x`
+      return fila({ eventType, payload, dedupKey: llaveDeDeduplicacion(eventType, payload, header), ...over })
+    }
 
-    expect(r.outcome).toBe('MENU_VERDICT')
-    const data = (prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data
-    expect(data.lastMenuHash).toBe('abc123')
-    expect(data.lastMenuSyncAt).toEqual(expect.any(Date))
-    // Aprobado: ya no hay pendiente, y un rechazo anterior deja de ser lo vigente.
-    expect(data.config.menuEnRevision).toBeNull()
-    expect(data.config.menuRechazado).toBeNull()
-  })
-
-  it('MENU_REJECTED limpia la huella pendiente, la anota como rechazada y NO sella nada — el menú NO está arriba', async () => {
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({ eventType: 'MENU_REJECTED', payload: { store_id: '900105814' } }),
-    )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { menuEnRevision: PENDIENTE }, lastMenuHash: null }])
-
-    await processRappiEvent('evt1', { aceptar: aceptarOk })
-
-    const data = (prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data
-    expect(data.lastMenuHash).toBeUndefined()
-    expect(data.config.menuEnRevision).toBeNull()
-    // Sin esto el sincronizador republicaba el mismo menú cada 5 min.
-    expect(data.config.menuRechazado).toEqual({ huella: 'abc123', en: expect.any(String) })
-  })
-
-  it('MENU_APPROVED sin pendiente: sólo la fecha, no sella nada', async () => {
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814' } }),
-    )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: {}, lastMenuHash: 'h-anterior' }])
-
-    await processRappiEvent('evt1', { aceptar: aceptarOk })
-
-    expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data).toEqual({ lastMenuSyncAt: expect.any(Date) })
-  })
-
-  it('MENU_REJECTED sin pendiente: no hay qué anotar', async () => {
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({ eventType: 'MENU_REJECTED', payload: { store_id: '900105814' } }),
-    )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: {}, lastMenuHash: null }])
-
-    expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
-    expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
-  })
-
-  // H2: la copia de `config` que trajo el evento es VIEJA. Escribirla borraba lo que otro escritor guardó
-  // mientras tanto — la reclamación del aprovisionamiento con su lote, y la tienda ya no se confirmaba.
-  it.each(['MENU_APPROVED', 'MENU_REJECTED'])('%s relee config con la fila BLOQUEADA y no borra rappiProvisioning', async tipo => {
-    const reclamacion = { intentId: 'i1', since: 'x', batchId: 'b1' }
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({
-        eventType: tipo,
-        payload: { store_id: '900105814' },
-        channelLink: { ...fila().channelLink, config: { menuEnRevision: PENDIENTE } },
-      }),
-    )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
-      { config: { menuEnRevision: PENDIENTE, rappiProvisioning: reclamacion }, lastMenuHash: null },
-    ])
-
-    await processRappiEvent('evt1', { aceptar: aceptarOk })
-
-    const [strings, ...valores] = (prisma.$queryRaw as jest.Mock).mock.calls[0]
-    expect(strings.join('?')).toMatch(/FOR UPDATE/)
-    expect(valores).toEqual(['link1'])
-    expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data.config).toEqual({
-      menuEnRevision: null,
-      menuRechazado: tipo === 'MENU_APPROVED' ? null : { huella: 'abc123', en: expect.any(String) },
-      rappiProvisioning: reclamacion,
+    beforeEach(() => {
+      vinculo = { config: { menuEnRevision: PENDIENTE }, lastMenuHash: null }
+      mockQueryRaw
+        .mockReset()
+        .mockImplementation(async () => [structuredClone({ config: vinculo.config, lastMenuHash: vinculo.lastMenuHash })])
+      mockLinkUpdate.mockReset().mockImplementation(async ({ data }: any) => {
+        if (data.config !== undefined) vinculo.config = structuredClone(data.config)
+        if ('lastMenuHash' in data) vinculo.lastMenuHash = data.lastMenuHash
+        if ('lastMenuSyncAt' in data) vinculo.lastMenuSyncAt = data.lastMenuSyncAt
+        return {}
+      })
+      mockCierre.mockReset().mockResolvedValue({ count: 1 })
     })
-  })
 
-  it('🔴 la llave vieja `rappiPendingMenuHash` ya no sella nada: la pendiente es `menuEnRevision`', async () => {
-    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
-      fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814' } }),
+    /** El cierre del evento, dentro de la transacción y condicionado al token (el patrón de `cerrarEventoReclamado`). */
+    const CIERRE = {
+      where: { id: 'evt1', claimToken: TOKEN },
+      data: { status: 'PROCESSED', error: null, processedAt: expect.any(Date), claimToken: null, lockedUntil: null },
+    }
+
+    it('🔴 aprobación firmada DESPUÉS de publicar la pendiente: la sella — AHÍ es cuando el menú está publicado', async () => {
+      vinculo.config.menuRechazado = { huella: 'vieja', en: 'x' }
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg + 120))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r.outcome).toBe('MENU_VERDICT')
+      expect(vinculo.lastMenuHash).toBe('abc123')
+      expect(vinculo.lastMenuSyncAt).toEqual(expect.any(Date))
+      // Aprobado: ya no hay pendiente, y un rechazo anterior deja de ser lo vigente.
+      expect(vinculo.config).toEqual({ menuEnRevision: null, menuRechazado: null })
+      expect(mockCierre).toHaveBeenCalledWith(CIERRE)
+      // El cierre NO va por `cerrarEventoReclamado` (fuera de la transacción).
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('🔴 aprobación firmada ANTES de publicar la pendiente (aviso viejo reprocesado): no la toca, y el evento se cierra', async () => {
+      // El aviso del menú anterior, firmado un segundo antes de publicar el nuevo, reprocesado ahora (o reenviado igual).
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg - 1))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r.outcome).toBe('MENU_VERDICT')
+      expect(vinculo).toEqual({ config: { menuEnRevision: PENDIENTE }, lastMenuHash: null })
+      expect(mockLinkUpdate).not.toHaveBeenCalled()
+      // Ya no tiene nada que hacer: queda PROCESSED (su reintento no vuelve a pensarlo).
+      expect(mockCierre).toHaveBeenCalledWith(CIERRE)
+    })
+
+    it('rechazo firmado después: limpia la pendiente, guarda la huella rechazada y NO sella nada — el menú NO está arriba', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_REJECTED', publicadaSeg + 5))
+
+      expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
+
+      expect(vinculo.lastMenuHash).toBeNull()
+      // Sin esto el sincronizador republicaba el mismo menú cada 5 min.
+      expect(vinculo.config).toEqual({ menuEnRevision: null, menuRechazado: { huella: 'abc123', en: expect.any(String) } })
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('menú RECHAZADO'), expect.anything())
+      expect(mockCierre).toHaveBeenCalledWith(CIERRE)
+    })
+
+    it.each([
+      ['un aviso sin firma legible en la llave', (t: 'MENU_APPROVED' | 'MENU_REJECTED') => aviso(t, null)],
+      ['una fila sin llave', (t: 'MENU_APPROVED' | 'MENU_REJECTED') => aviso(t, publicadaSeg + 5, { dedupKey: null })],
+    ])('sin hora de firma legible no se aplica: %s', async (_caso, armar) => {
+      for (const tipo of ['MENU_APPROVED', 'MENU_REJECTED'] as const) {
+        ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(armar(tipo))
+        expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
+      }
+      expect(vinculo).toEqual({ config: { menuEnRevision: PENDIENTE }, lastMenuHash: null })
+      expect(mockLinkUpdate).not.toHaveBeenCalled()
+    })
+
+    it('aprobación sin pendiente: sólo la fecha, no sella nada', async () => {
+      vinculo = { config: {}, lastMenuHash: 'h-anterior' }
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg + 5))
+
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(mockLinkUpdate).toHaveBeenCalledTimes(1)
+      expect(mockLinkUpdate.mock.calls[0][0].data).toEqual({ lastMenuSyncAt: expect.any(Date) })
+      expect(vinculo.lastMenuHash).toBe('h-anterior')
+    })
+
+    it('rechazo sin pendiente: no hay qué anotar', async () => {
+      vinculo = { config: {}, lastMenuHash: null }
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_REJECTED', publicadaSeg + 5))
+
+      expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
+      expect(mockLinkUpdate).not.toHaveBeenCalled()
+      expect(mockCierre).toHaveBeenCalledWith(CIERRE)
+    })
+
+    // H2: la copia de `config` que trajo el evento es VIEJA. Escribirla borraba lo que otro escritor guardó
+    // mientras tanto — la reclamación del aprovisionamiento con su lote, y la tienda ya no se confirmaba.
+    it.each(['MENU_APPROVED', 'MENU_REJECTED'] as const)(
+      '%s relee config con la fila BLOQUEADA y no borra rappiProvisioning',
+      async tipo => {
+        const reclamacion = { intentId: 'i1', since: 'x', batchId: 'b1' }
+        ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+          aviso(tipo, publicadaSeg + 5, { channelLink: { ...fila().channelLink, config: { menuEnRevision: PENDIENTE } } }),
+        )
+        vinculo.config = { menuEnRevision: PENDIENTE, rappiProvisioning: reclamacion }
+
+        await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+        const [strings, ...valores] = mockQueryRaw.mock.calls[0]
+        expect(strings.join('?')).toMatch(/FOR UPDATE/)
+        expect(valores).toEqual(['link1'])
+        expect(vinculo.config).toEqual({
+          menuEnRevision: null,
+          menuRechazado: tipo === 'MENU_APPROVED' ? null : { huella: 'abc123', en: expect.any(String) },
+          rappiProvisioning: reclamacion,
+        })
+      },
     )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'legado' }, lastMenuHash: null }])
 
-    await processRappiEvent('evt1', { aceptar: aceptarOk })
+    it('🔴 la llave vieja `rappiPendingMenuHash` ya no sella nada: la pendiente es `menuEnRevision`', async () => {
+      vinculo = { config: { rappiPendingMenuHash: 'legado' }, lastMenuHash: null }
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg + 5))
 
-    expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data.lastMenuHash).toBeUndefined()
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(vinculo.lastMenuHash).toBeNull()
+    })
+
+    describe('🔴 el veredicto y el cierre del evento van en la MISMA transacción', () => {
+      /**
+       * Una transacción de prueba con su propio cliente: lo que se escribe dentro sólo queda si el callback termina sin lanzar
+       * (como el COMMIT); si lanza, nada (como el ROLLBACK). `cierres` es lo que devuelve el `updateMany` del cierre.
+       */
+      function transaccion(cierres: { count: number }) {
+        const confirmado: string[] = []
+        const tx = {
+          $queryRaw: jest.fn(async () => [structuredClone({ config: vinculo.config, lastMenuHash: vinculo.lastMenuHash })]),
+          deliveryChannelLink: { update: jest.fn() },
+          deliveryOrderEvent: { updateMany: jest.fn(async () => cierres) },
+        }
+        ;(prisma.$transaction as jest.Mock).mockImplementationOnce(async (cb: (t: typeof tx) => Promise<unknown>) => {
+          const r = await cb(tx) // si lanza, `confirmado` se queda vacío: nada se escribió
+          confirmado.push(...tx.deliveryChannelLink.update.mock.calls.map(() => 'veredicto'))
+          confirmado.push(...tx.deliveryOrderEvent.updateMany.mock.calls.map(() => 'cierre'))
+          return r
+        })
+        return { tx, confirmado }
+      }
+
+      it('el veredicto y el cierre los escribe el MISMO cliente de transacción, y quedan los dos', async () => {
+        ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg + 5))
+        const { tx, confirmado } = transaccion({ count: 1 })
+
+        expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
+
+        expect(prisma.$transaction).toHaveBeenCalledTimes(1)
+        expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+        expect(tx.deliveryChannelLink.update).toHaveBeenCalledWith(
+          expect.objectContaining({ data: expect.objectContaining({ lastMenuHash: 'abc123' }) }),
+        )
+        expect(tx.deliveryOrderEvent.updateMany).toHaveBeenCalledWith(CIERRE)
+        expect(confirmado).toEqual(expect.arrayContaining(['veredicto', 'cierre']))
+        // Nada fuera de la transacción.
+        expect(mockQueryRaw).not.toHaveBeenCalled()
+        expect(mockLinkUpdate).not.toHaveBeenCalled()
+        expect(mockCierre).not.toHaveBeenCalled()
+        expect(mockCerrar).not.toHaveBeenCalled()
+      })
+
+      it('si el cierre no actualiza nada (otro tomó el evento), lanza dentro: el veredicto se deshace y lo aplica su nuevo dueño', async () => {
+        ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg + 5))
+        const { tx, confirmado } = transaccion({ count: 0 })
+
+        const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+        expect(r.outcome).toBe('IN_FLIGHT')
+        // Se intentó escribir el veredicto, pero la transacción no terminó: no quedó nada.
+        expect(tx.deliveryChannelLink.update).toHaveBeenCalled()
+        expect(confirmado).toEqual([])
+        expect(mockCerrar).not.toHaveBeenCalled()
+      })
+
+      it('otro fallo dentro de la transacción no se disfraza de IN_FLIGHT: sale, y el job lo reintenta', async () => {
+        ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(aviso('MENU_APPROVED', publicadaSeg + 5))
+        ;(prisma.$transaction as jest.Mock).mockImplementationOnce(async () => {
+          throw new Error('la base se cayó')
+        })
+
+        await expect(processRappiEvent('evt1', { aceptar: aceptarOk })).rejects.toThrow('la base se cayó')
+        expect(mockCerrar).not.toHaveBeenCalled()
+      })
+    })
   })
 
   // ── El estado de la tienda ───────────────────────────────────────────────────────

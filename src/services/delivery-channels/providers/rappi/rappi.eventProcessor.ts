@@ -23,7 +23,7 @@ import prisma from '@/utils/prismaClient'
 import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { cerrarEventoReclamado, reclamarEvento, renovarReclamo } from '../../core/deliveryWebhookEvent.service'
-import { configComoObjeto, leerMenuEnRevision } from '../../core/llavesDelSistema'
+import { aplicarVeredictoDeMenu } from '../../core/menuSync.service'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
 import {
   analizarHistorial,
@@ -36,7 +36,7 @@ import {
 } from './rappi.estadoDelPedido'
 import { tiempoDeCoccion, VariantePendienteError, type RappiOrderPayload } from './rappi.mapper'
 import { leerEstadoAprovisionamiento, type ResultadoRappiTienda } from './rappi.selfOnboarding'
-import { llaveDeAvisoDePedido } from './rappi.webhookIngress'
+import { firmadoEnMsDeLaLlave, llaveDeAvisoDePedido } from './rappi.webhookIngress'
 
 export type RappiProcessOutcome =
   | 'PROCESSED' // pedido aceptado en Rappi y convertido en venta
@@ -87,6 +87,14 @@ export const ERRORES_TERMINALES: readonly string[] = [
  * `ERRORES_TERMINALES` ni en `TERMINAL_ERRORS` del job (Codex b1 #2).
  */
 const HISTORIAL_NO_LEIDO = 'HISTORIAL_NO_LEIDO'
+
+/** El cierre del evento del veredicto del menú no aplicó (el reclamo ya era de otro): se lanza DENTRO de la transacción para deshacerla. */
+class CierreSinReclamoError extends Error {
+  constructor() {
+    super('el cierre del evento no aplicó: el reclamo ya es de otro proceso')
+    this.name = 'CierreSinReclamoError'
+  }
+}
 
 const esObjeto = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
 
@@ -351,53 +359,54 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
 
     const aprobado = evento.eventType === RAPPI_EVENTS.MENU_APPROVED
     const linkId = evento.channelLink.id
-    // 🔴 `config` se relee con la fila BLOQUEADA, no de la copia que trajo el evento: escribir esa copia
-    // vieja borraba lo que otro escritor guardó mientras tanto (la reclamación del aprovisionamiento).
-    // La pendiente es `menuEnRevision`: la escribe el sincronizador ANTES del POST (Tarea 15). La regla de la hora de firma
-    // y el cierre del evento en la misma transacción llegan con la Tarea 16.
-    const huellaPendiente = await prisma.$transaction(async tx => {
-      const [fila] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
-        SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} FOR UPDATE`
-      const config = configComoObjeto(fila?.config) as Prisma.JsonObject
-      const huella = leerMenuEnRevision(config)?.huella ?? null
-      if (aprobado) {
-        await tx.deliveryChannelLink.update({
-          where: { id: linkId },
-          // La huella se sella AQUÍ — no al publicar. Si no había pendiente (publicación manual, o de antes de
-          // este mecanismo), al menos queda la fecha. Aprobado, un rechazo anterior deja de ser lo vigente.
-          data: {
-            lastMenuSyncAt: new Date(),
-            ...(huella ? { lastMenuHash: huella, config: { ...config, menuEnRevision: null, menuRechazado: null } } : {}),
-          },
+    // 🔴 El aviso no dice DE QUÉ menú es: se aplica sólo a la pendiente publicada ANTES de que Rappi lo firmara (diseño §4.5.1).
+    // La hora de la firma es el `t` de `Rappi-Signature`, que el ingreso dejó al final de la llave.
+    const firmadoEnMs = firmadoEnMsDeLaLlave(evento.dedupKey)
+    // 🔴 El veredicto y el cierre del evento, en la MISMA transacción (Codex r3 #1). Cerrado después, una caída entre los dos
+    // dejaba el evento sin cerrar y su reintento aplicaba el veredicto del menú A a la pendiente del menú B (o un rechazo viejo
+    // borraba la pendiente nueva). Así el reintento encuentra el evento PROCESSED y no hace nada. `config` se relee con la fila
+    // BLOQUEADA dentro de `aplicarVeredictoDeMenu`: escribir la copia que trajo el evento borraba lo que otro escritor guardó.
+    let resultado: Awaited<ReturnType<typeof aplicarVeredictoDeMenu>>
+    try {
+      resultado = await prisma.$transaction(async tx => {
+        const r = await aplicarVeredictoDeMenu(tx, linkId, { aprobado, firmadoEnMs })
+        // El cierre, como `cerrarEventoReclamado` (con el token; PROCESSED limpia `error`), pero dentro de la transacción.
+        const { count } = await tx.deliveryOrderEvent.updateMany({
+          where: { id: eventRowId, claimToken: token },
+          data: { status: DeliveryOrderEventStatus.PROCESSED, error: null, processedAt: new Date(), claimToken: null, lockedUntil: null },
         })
-      } else if (huella) {
-        // El rechazo la limpia y la anota como rechazada: sin esto el sincronizador republicaba el mismo menú cada 5 min.
-        await tx.deliveryChannelLink.update({
-          where: { id: linkId },
-          data: { config: { ...config, menuEnRevision: null, menuRechazado: { huella, en: new Date().toISOString() } } },
-        })
-      }
-      return huella
-    })
-
-    if (aprobado) {
-      logger.info('📋 [Rappi] menú APROBADO — ahora sí está publicado', {
-        eventRowId,
-        linkId: evento.channelLink.id,
-        venueId: evento.venueId,
-        selladoConHuella: Boolean(huellaPendiente),
+        // Otro tomó el evento (se venció el reclamo): se lanza para DESHACER el veredicto. Lo aplica su nuevo dueño.
+        if (count !== 1) throw new CierreSinReclamoError()
+        return r
       })
-    } else {
+    } catch (err) {
+      if (!(err instanceof CierreSinReclamoError)) throw err
+      logger.warn('🛵 [Rappi] el veredicto del menú perdió su reclamo antes de cerrar: se deshizo y lo aplica su nuevo dueño', {
+        eventRowId,
+        linkId,
+        aprobado,
+      })
+      return { outcome: 'IN_FLIGHT' }
+    }
+
+    if (resultado === 'SELLADO') {
+      logger.info('📋 [Rappi] menú APROBADO — ahora sí está publicado', { eventRowId, linkId, venueId: evento.venueId })
+    } else if (resultado === 'RECHAZO_ANOTADO') {
       // Sin huella sellada, `menuSyncStatusOf` seguirá diciendo NUNCA_PUBLICADO/desfasado —
       // que es la verdad, y es lo que hace visible el problema en el dashboard y el MCP.
       logger.error('🚨 [Rappi] menú RECHAZADO — y Rappi NO dice por qué. Revisar contra las reglas de rappi.menuMapper', {
         eventRowId,
-        linkId: evento.channelLink.id,
+        linkId,
         venueId: evento.venueId,
       })
+    } else {
+      logger.info('📋 [Rappi] veredicto del menú que no aplica a la pendiente vigente: el evento se cierra sin cambios', {
+        eventRowId,
+        linkId,
+        aprobado,
+        firmadoEn: firmadoEnMs === null ? null : new Date(firmadoEnMs).toISOString(),
+      })
     }
-
-    await cerrar(DeliveryOrderEventStatus.PROCESSED)
     return { outcome: 'MENU_VERDICT' }
   }
 

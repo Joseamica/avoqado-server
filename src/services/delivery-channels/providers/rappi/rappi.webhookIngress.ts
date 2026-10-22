@@ -182,6 +182,28 @@ export function llaveDeDeduplicacion(evento: string, payload: unknown, signature
   return `${base}:t${t}`
 }
 
+/** El `:t<dígitos>` con que TERMINA la llave de un aviso sin identidad natural (ver `llaveDeDeduplicacion`). */
+const T_FINAL_DE_LA_LLAVE = /:t(\d+)$/
+
+/**
+ * Cuándo firmó Rappi un aviso sin identidad natural (`MENU_APPROVED`, `MENU_REJECTED`…), en milisegundos, leído de su llave
+ * guardada: el `t` de `Rappi-Signature` (`rappi.signature.ts`) que `llaveDeDeduplicacion` pone al final. `null` si la llave no
+ * lo trae (sin firma legible queda `:tsin-t`; los avisos con pedido no lo llevan).
+ *
+ * Rappi no documenta la unidad del `t` (su ejemplo es `t=123456`) y el sandbox no ha mandado ningún veredicto del menú para
+ * medirlo (M7/M8): un valor menor que 1e12 se lee como SEGUNDOS (estilo Stripe) y se multiplica por 1000; uno mayor ya son
+ * milisegundos (1e12 ms es 2001: ningún aviso real cae del lado equivocado).
+ *
+ * 🔴 Lo usa la regla de la hora del veredicto del menú (diseño §4.5.1): si la forma de la llave cambia, cambia aquí también.
+ */
+export function firmadoEnMsDeLaLlave(dedupKey: string | null): number | null {
+  const m = dedupKey ? T_FINAL_DE_LA_LLAVE.exec(dedupKey) : null
+  if (!m) return null
+  const t = Number(m[1])
+  if (!Number.isSafeInteger(t)) return null
+  return t < 1e12 ? t * 1000 : t
+}
+
 /**
  * Verifica, deduplica y guarda. Espejo del contrato de Uber: ACK persist-first — la firma se
  * comprueba ANTES de mirar el payload, y la carrera del duplicado la resuelve el `@unique`

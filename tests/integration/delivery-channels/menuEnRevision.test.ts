@@ -17,6 +17,7 @@ import { DeliveryChannelStatus, type DeliveryChannelLink } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
 import { processRappiEvent } from '@/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import { llaveDeDeduplicacion } from '@/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 
 const mockPublicar = jest.fn()
 const mockPayload = jest.fn()
@@ -185,16 +186,23 @@ describe('Menú en revisión — dos pasadas encimadas contra Postgres', () => {
     expect((final.config as Record<string, any>).menuEnRevision).toBeNull()
   })
 
-  /** Un `MENU_APPROVED` de la tienda del vínculo, procesado por el procesador REAL (reclamo, candado de fila y cierre). */
+  /**
+   * Un `MENU_APPROVED` de la tienda del vínculo, procesado por el procesador REAL (reclamo, candado de fila y cierre). Con la
+   * llave que le pone el ingreso y firmado AHORA (después de la publicación): la Tarea 16 sólo aplica un veredicto a la pendiente
+   * publicada antes de su firma.
+   */
   async function aprobarConElProcesador(link: DeliveryChannelLink) {
+    const payload = { store_id: link.externalLocationId, message: 'Menu Approved' }
+    const llave = llaveDeDeduplicacion('MENU_APPROVED', payload, `t=${Math.ceil(Date.now() / 1000)},sign=x`)
     const evento = await prisma.deliveryOrderEvent.create({
       data: {
         provider: 'RAPPI',
-        externalEventId: `MENU_APPROVED:${link.externalLocationId}:${++n}`,
+        externalEventId: llave,
+        dedupKey: llave,
         eventType: 'MENU_APPROVED',
         channelLinkId: link.id,
         venueId,
-        payload: { store_id: link.externalLocationId, message: 'Menu Approved' },
+        payload,
       },
     })
     const r = await processRappiEvent(evento.id)

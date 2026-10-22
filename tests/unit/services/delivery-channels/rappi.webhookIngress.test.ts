@@ -9,6 +9,7 @@ import prisma from '../../../../src/utils/prismaClient'
 import {
   eventoDeLaRuta,
   esPing,
+  firmadoEnMsDeLaLlave,
   llaveDeDeduplicacion,
   persistRappiWebhookEvent,
   RUTA_POR_EVENTO,
@@ -149,6 +150,38 @@ describe('llaveDeDeduplicacion', () => {
     const a = llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', fragmento('10'), 't=1000,sign=x')
     expect(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', fragmento('11'), 't=1000,sign=x')).not.toBe(a)
     expect(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', fragmento('10'), 't=1000,sign=z')).toBe(a)
+  })
+})
+
+// Tarea 16 (diseño §4.5.1): el veredicto del menú sólo aplica a la pendiente publicada ANTES de que Rappi firmara el aviso. La
+// hora de la firma sale de la llave guardada (el `:t<dígitos>` final). 🔴 Las llaves se arman con `llaveDeDeduplicacion` real:
+// si su forma cambia, estas pruebas truenan en vez de que el veredicto deje de aplicarse en silencio.
+describe('firmadoEnMsDeLaLlave', () => {
+  const cuerpo = { store_id: '900175625' }
+
+  it.each(['MENU_APPROVED', 'MENU_REJECTED'])('🔴 %s: lee el `t` de la firma en segundos y lo da en milisegundos', evento => {
+    const llave = llaveDeDeduplicacion(evento, cuerpo, 't=1761130000,sign=abc')
+    expect(llave).toBe(`RAPPI:${evento}:900175625:sin-pedido:t1761130000`)
+    expect(firmadoEnMsDeLaLlave(llave)).toBe(1_761_130_000_000)
+  })
+
+  it('un `t` que ya viene en milisegundos (≥ 1e12) se deja igual', () => {
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('MENU_APPROVED', cuerpo, 't=1761130000123,sign=abc'))).toBe(1_761_130_000_123)
+  })
+
+  it('sin `t` legible no hay hora de firma: null', () => {
+    // Sin header de firma la llave termina en `:tsin-t`.
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('MENU_APPROVED', cuerpo, undefined))).toBeNull()
+    expect(firmadoEnMsDeLaLlave(null)).toBeNull()
+    expect(firmadoEnMsDeLaLlave('')).toBeNull()
+    // Un aviso CON pedido no lleva la firma en la llave.
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('NEW_ORDER', { order_detail: { order_id: '1' } }, 't=1761130000,sign=a'))).toBeNull()
+  })
+
+  it('sólo cuenta el `:t` del FINAL de la llave', () => {
+    // El aprovisionamiento pone su `t` en medio (y una huella al final): no es una hora de veredicto.
+    const lote = { batchId: 'b-1', operation: 'PROVISION', results: [] }
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('STORE_PROVISIONING_STATUS', lote, 't=1761130000,sign=a'))).toBeNull()
   })
 })
 

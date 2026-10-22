@@ -34,7 +34,12 @@ import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/typ
 import { Prisma } from '@prisma/client'
 
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { PLAZO_SIN_VEREDICTO_MS, syncChannelAvailability, syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
+import {
+  aplicarVeredictoDeMenu,
+  PLAZO_SIN_VEREDICTO_MS,
+  syncChannelAvailability,
+  syncChannelMenu,
+} from '@/services/delivery-channels/core/menuSync.service'
 
 const mockedSnapshot = buildMenuSnapshot as jest.Mock
 const mockedAdapterFor = adapterFor as jest.Mock
@@ -200,16 +205,11 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
   /** La copia del vínculo que trae una pasada del job (leída ANTES de publicar). */
   const copia = () => link({ provider: 'RAPPI', config: structuredClone(fila.config), lastMenuHash: fila.lastMenuHash })
 
-  /** Lo que hace el veredicto (el procesador, Tarea 16): sella o rechaza la pendiente VIGENTE. */
-  function veredicto(aprobado: boolean) {
-    const p = fila.config.menuEnRevision
-    if (!p) throw new Error('no hay pendiente: el veredicto no tendría qué resolver')
-    if (aprobado) fila.lastMenuHash = p.huella
-    fila.config = {
-      ...fila.config,
-      menuEnRevision: null,
-      menuRechazado: aprobado ? null : { huella: p.huella, en: new Date().toISOString() },
-    }
+  /** El veredicto REAL (Tarea 16), firmado ahora (después de la publicación): sella o rechaza la pendiente VIGENTE. */
+  async function veredicto(aprobado: boolean) {
+    if (!fila.config.menuEnRevision) throw new Error('no hay pendiente: el veredicto no tendría qué resolver')
+    const r = await aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado, firmadoEnMs: Date.now() })
+    expect(r).toBe(aprobado ? 'SELLADO' : 'RECHAZO_ANOTADO')
   }
 
   function conRevision(publicar: jest.Mock, payload: unknown = PAYLOAD) {
@@ -262,7 +262,7 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
     // Codex plan r1 #3: con la pendiente escrita DESPUÉS del 2xx, un veredicto rápido no encontraba qué sellar.
     const publicar = jest.fn(async () => {
       expect(fila.config.menuEnRevision?.huella).toBe(H)
-      veredicto(true)
+      await veredicto(true)
       return ok200()
     })
     conRevision(publicar)
@@ -321,7 +321,7 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
     // Mientras no haya veredicto, no se republica…
     expect((await syncChannelMenu(copia())).outcome).toBe('IN_REVIEW')
     // …y el veredicto que llega después encuentra la pendiente y la sella.
-    veredicto(true)
+    await veredicto(true)
     expect(fila.lastMenuHash).toBe(H)
     expect((await syncChannelMenu(copia())).outcome).toBe('UNCHANGED')
     expect(publicar).toHaveBeenCalledTimes(1)
@@ -362,7 +362,7 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
     const otraVieja = copia()
     publicar.mockReset().mockResolvedValue(ok200())
     expect((await syncChannelMenu(otraVieja)).outcome).toBe('PUBLISHED')
-    veredicto(true)
+    await veredicto(true)
     expect((await syncChannelMenu(otraVieja)).outcome).toBe('UNCHANGED')
     expect(publicar).toHaveBeenCalledTimes(1)
 
@@ -463,12 +463,146 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
     expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: redondeo })
 
     // Otro menú, y Rappi lo rechaza con sus motivos: se guardan junto a los del mapeo.
-    veredicto(true)
+    await veredicto(true)
     a.buildMenuPayload.mockReturnValue(OTRO_PAYLOAD)
     const conMotivos = [...redondeo, { sku: 'product1', problema: 'Rappi rechazó: Invalid urls were found' }]
     publicar.mockResolvedValue({ ok: false, status: 400, raw: '{}', problemas: conMotivos } as any)
     await syncChannelMenu(copia())
     expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: conMotivos })
+  })
+})
+
+// Tarea 16 (diseño §4.5.1): el aviso del veredicto no dice DE QUÉ menú es. Sólo se aplica a la pendiente publicada ANTES de que
+// el proveedor lo firmara: un aviso duplicado o reprocesado, firmado antes de la publicación siguiente, no la toca. Sin
+// tolerancia (Codex plan r1 #2): cualquier margen deja que un aviso viejo selle el menú siguiente.
+describe('aplicarVeredictoDeMenu — el veredicto sólo aplica a la pendiente publicada antes de su firma', () => {
+  const mockedQueryRaw = (prisma as any).$queryRaw as jest.Mock
+  const mockedWarn = logger.warn as jest.Mock
+  const PUBLICADA_EN = '2026-10-22T10:00:00.000Z'
+  const publicadaMs = Date.parse(PUBLICADA_EN)
+  const PENDIENTE = { huella: 'H-pendiente', publicadaEn: PUBLICADA_EN }
+
+  /** La FILA vigente en la base; `SELECT … FOR UPDATE` devuelve una copia y el `update` la escribe. */
+  let fila: { config: Record<string, any>; lastMenuHash: string | null; lastMenuSyncAt: Date | null }
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    fila = { config: { menuEnRevision: PENDIENTE, note: 'del dueño' }, lastMenuHash: 'h-anterior', lastMenuSyncAt: null }
+    mockedQueryRaw.mockReset().mockImplementation(async () => [structuredClone({ config: fila.config, lastMenuHash: fila.lastMenuHash })])
+    mockedUpdate.mockReset().mockImplementation(async ({ data }: any) => {
+      if (data.config !== undefined) fila.config = structuredClone(data.config)
+      if ('lastMenuHash' in data) fila.lastMenuHash = data.lastMenuHash
+      if ('lastMenuSyncAt' in data) fila.lastMenuSyncAt = data.lastMenuSyncAt
+      return {}
+    })
+  })
+
+  const aplicar = (aprobado: boolean, firmadoEnMs: number | null) =>
+    aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado, firmadoEnMs })
+
+  it('🔴 aprobación firmada DESPUÉS de publicar la pendiente: la sella', async () => {
+    fila.config.menuRechazado = { huella: 'H-vieja', en: 'x' }
+
+    expect(await aplicar(true, publicadaMs + 90_000)).toBe('SELLADO')
+
+    expect(fila.lastMenuHash).toBe('H-pendiente')
+    expect(fila.lastMenuSyncAt).toEqual(expect.any(Date))
+    // Aprobado: ya no hay pendiente, y un rechazo anterior deja de ser lo vigente. Lo del dueño no se toca.
+    expect(fila.config).toEqual({ menuEnRevision: null, menuRechazado: null, note: 'del dueño' })
+    expect((mockedQueryRaw.mock.calls[0][0] as string[]).join('?')).toMatch(/FOR UPDATE/)
+  })
+
+  it('firmada en el mismo milisegundo que la publicación: aplica (sólo lo firmado ANTES se descarta)', async () => {
+    expect(await aplicar(true, publicadaMs)).toBe('SELLADO')
+    expect(fila.lastMenuHash).toBe('H-pendiente')
+  })
+
+  it('🔴 aprobación firmada ANTES de publicar la pendiente (aviso viejo reprocesado): no la toca', async () => {
+    // El aviso del menú ANTERIOR, reprocesado (o duplicado) después de que se publicó el siguiente: sellaría un menú que el
+    // proveedor todavía no revisa. Un milisegundo antes basta: no hay tolerancia.
+    const antes = structuredClone(fila)
+
+    expect(await aplicar(true, publicadaMs - 1)).toBe('NO_APLICA')
+
+    expect(fila).toEqual(antes)
+    expect(mockedUpdate).not.toHaveBeenCalled()
+    expect(mockedWarn).toHaveBeenCalledWith(expect.stringContaining('firmado ANTES'), expect.objectContaining({ linkId: 'link1' }))
+  })
+
+  it('rechazo: limpia la pendiente y guarda la huella rechazada', async () => {
+    expect(await aplicar(false, publicadaMs + 1_000)).toBe('RECHAZO_ANOTADO')
+
+    expect(fila.config).toEqual({
+      menuEnRevision: null,
+      menuRechazado: { huella: 'H-pendiente', en: expect.any(String) },
+      note: 'del dueño',
+    })
+    expect(Number.isNaN(Date.parse(fila.config.menuRechazado.en))).toBe(false)
+    // Rechazado no es publicado: lo que estaba arriba sigue siendo lo último aprobado.
+    expect(fila.lastMenuHash).toBe('h-anterior')
+    expect(fila.lastMenuSyncAt).toBeNull()
+  })
+
+  it('🔴 rechazo firmado ANTES de publicar la pendiente: no la toca', async () => {
+    // Un rechazo viejo reprocesado borraría la revisión del menú nuevo y lo marcaría rechazado sin que nadie lo haya visto.
+    expect(await aplicar(false, publicadaMs - 60_000)).toBe('NO_APLICA')
+    expect(fila.config.menuEnRevision).toEqual(PENDIENTE)
+    expect(fila.config.menuRechazado).toBeUndefined()
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it.each([true, false])('sin hora de firma legible no se aplica (aprobado: %p)', async aprobado => {
+    expect(await aplicar(aprobado, null)).toBe('NO_APLICA')
+    expect(fila.config.menuEnRevision).toEqual(PENDIENTE)
+    expect(fila.lastMenuHash).toBe('h-anterior')
+    expect(mockedUpdate).not.toHaveBeenCalled()
+    expect(mockedWarn).toHaveBeenCalledWith(expect.stringContaining('sin hora de firma'), expect.objectContaining({ linkId: 'link1' }))
+  })
+
+  it('una pendiente con la hora ilegible no se puede comparar: no se aplica', async () => {
+    fila.config.menuEnRevision = { huella: 'H-pendiente', publicadaEn: 'no-es-fecha' }
+    expect(await aplicar(true, publicadaMs + 1_000)).toBe('NO_APLICA')
+    expect(fila.lastMenuHash).toBe('h-anterior')
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it('aprobación sin pendiente: sólo la fecha', async () => {
+    fila.config = { note: 'del dueño' }
+
+    expect(await aplicar(true, publicadaMs + 1_000)).toBe('NO_APLICA')
+
+    expect(mockedUpdate).toHaveBeenCalledTimes(1)
+    expect(mockedUpdate.mock.calls[0][0]).toEqual({ where: { id: 'link1' }, data: { lastMenuSyncAt: expect.any(Date) } })
+    expect(fila.lastMenuHash).toBe('h-anterior')
+    expect(fila.config).toEqual({ note: 'del dueño' })
+  })
+
+  it('rechazo sin pendiente: no hay qué anotar', async () => {
+    fila.config = {}
+    expect(await aplicar(false, publicadaMs + 1_000)).toBe('NO_APLICA')
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it('el vínculo ya no existe: no escribe nada', async () => {
+    mockedQueryRaw.mockReset().mockResolvedValue([])
+    expect(await aplicar(true, publicadaMs + 1_000)).toBe('NO_APLICA')
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 lee y escribe con la transacción que RECIBE (la del procesador), no con una propia', async () => {
+    // Así el cierre del evento entra en la MISMA transacción que el veredicto (Codex r3 #1).
+    const tx = {
+      $queryRaw: jest.fn(async () => [{ config: { menuEnRevision: PENDIENTE }, lastMenuHash: null }]),
+      deliveryChannelLink: { update: jest.fn() },
+    }
+
+    expect(await aplicarVeredictoDeMenu(tx as any, 'link1', { aprobado: true, firmadoEnMs: publicadaMs + 1_000 })).toBe('SELLADO')
+
+    expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
+    expect(tx.deliveryChannelLink.update).toHaveBeenCalled()
+    expect(mockedQueryRaw).not.toHaveBeenCalled()
+    expect(mockedUpdate).not.toHaveBeenCalled()
+    expect(prisma.$transaction).not.toHaveBeenCalled()
   })
 })
 
