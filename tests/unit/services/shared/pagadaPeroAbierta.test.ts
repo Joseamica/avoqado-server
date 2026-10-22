@@ -1,5 +1,14 @@
 import { Prisma } from '@prisma/client'
-import { baseQueDebeCubrirseSql, criterioPagadaPeroAbiertaSql, findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
+import {
+  baseQueDebeCubrirseSql,
+  cerrarPedidoDePlataformaSoloDeEstado,
+  criterioPagadaPeroAbiertaSql,
+  esDeUnaPlataformaSql,
+  findPaidButOpenOrders,
+  findPedidosDePlataformaPorCerrar,
+  momentoDeCerrarUnPedidoDePlataformaSql,
+  pedidoDePlataformaAceptadoSql,
+} from '@/services/shared/pagadaPeroAbierta'
 
 describe('criterio SQL «pagada pero abierta»', () => {
   const sql = criterioPagadaPeroAbiertaSql('o')
@@ -149,5 +158,79 @@ describe('findPaidButOpenOrders — la consulta que arma', () => {
     const q = consultaCapturada(db)
     expect(q.sql).not.toContain('o."createdAt" >=')
     expect(q.values).toEqual([new Date('2026-09-02T19:55:00.000Z'), 50])
+  })
+  /**
+   * 🔴 Codex b1 #1 (Rappi fase 2): el total de un pedido de plataforma lleva cargos del comercio (el envío del repartidor propio,
+   * los cargos de Uber) que el reparador no ve. Proponérselo era quitarle el envío a la venta y denunciar un sobrepago falso.
+   */
+  it('🔴 NO propone reparar un pedido cuyo dinero liquida una plataforma, y deja intacto el criterio que lee el vigilante', async () => {
+    const db = dobleDb()
+    await findPaidButOpenOrders(comoDb(db), { graceMs: GRACIA_MS, limit: 50, now: AHORA })
+
+    const q = consultaCapturada(db)
+    expect(esDeUnaPlataformaSql('o')).toBe(`o."originSystem" = 'DELIVERY_PLATFORM'`)
+    expect(q.sql).toContain(`AND NOT (o."originSystem" = 'DELIVERY_PLATFORM')`)
+    // El filtro vive fuera del criterio compartido, como el del IVA aparte: el vigilante ve el mismo conjunto que antes.
+    expect(criterioPagadaPeroAbiertaSql('o')).not.toContain('originSystem')
+  })
+})
+
+/**
+ * La cuarta pasada del barrido: los pedidos de plataforma se cierran SÓLO de estado, nunca uno sin aceptar, y el CUÁNDO vive en
+ * un solo sitio (`momentoDeCerrarUnPedidoDePlataformaSql`) a la espera de la decisión del founder (Codex b1 #5, A/B/C).
+ */
+describe('findPedidosDePlataformaPorCerrar — la consulta que arma', () => {
+  const AHORA = new Date('2026-10-22T20:00:00Z')
+  const DESDE = new Date('2026-09-22T20:00:00Z')
+  const dobleDb = () => ({ $queryRaw: jest.fn().mockResolvedValue([]) })
+  const consultaCapturada = (db: ReturnType<typeof dobleDb>) => {
+    const [strings, ...values] = db.$queryRaw.mock.calls[0] as [TemplateStringsArray, ...unknown[]]
+    return Prisma.sql(strings, ...values)
+  }
+
+  it('sólo pedidos de plataforma que el núcleo dio por PAGADOS, aceptados y que cumplen el criterio compartido; gracia, ventana, orden y tope', async () => {
+    const db = dobleDb()
+    await findPedidosDePlataformaPorCerrar(db as never, { graceMs: 300_000, limit: 50, now: AHORA, since: DESDE })
+
+    const q = consultaCapturada(db)
+    expect(q.sql).toContain(criterioPagadaPeroAbiertaSql('o'))
+    expect(q.sql).toContain(esDeUnaPlataformaSql('o'))
+    // El barrido no decide si un pedido de plataforma está pagado: lo dice el núcleo de reparto (uno con efectivo por cobrar no).
+    expect(q.sql).toContain(`o."paymentStatus" = 'PAID'`)
+    expect(q.sql).toContain(pedidoDePlataformaAceptadoSql('o'))
+    expect(q.sql).toContain(momentoDeCerrarUnPedidoDePlataformaSql('o'))
+    expect(q.sql).toContain('o."updatedAt" <')
+    expect(q.sql).toContain('o."createdAt" >=')
+    expect(q.sql).toContain('ORDER BY o."createdAt" ASC')
+    expect(q.values).toEqual([new Date('2026-10-22T19:55:00.000Z'), DESDE, 50])
+  })
+
+  it('🔴 «aceptado» = CONFIRMED o más adelante, o PENDING con la aceptación acreditada: uno que espera a la cocina nunca se cierra', () => {
+    expect(pedidoDePlataformaAceptadoSql('o')).toBe(`(o.status <> 'PENDING' OR o."providerAcceptedAt" IS NOT NULL)`)
+  })
+
+  it('⏸ el CUÁNDO espera la decisión del founder (A/B/C): hoy no agrega condición —se cierra al pasar la gracia, como desde el 2-sep—', () => {
+    expect(momentoDeCerrarUnPedidoDePlataformaSql('o')).toBe('TRUE')
+  })
+})
+
+describe('cerrarPedidoDePlataformaSoloDeEstado', () => {
+  const AHORA = new Date('2026-10-22T20:00:00Z')
+  const pedido = { id: 'ord-1', venueId: 'v1', status: 'CONFIRMED' }
+
+  it('🔴 escribe SÓLO el estado: ni total, ni propina, ni lo pagado, ni lo por cobrar, ni el estado de cobro', async () => {
+    const db = { order: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) } }
+    expect(await cerrarPedidoDePlataformaSoloDeEstado(db as never, pedido, AHORA)).toBe(true)
+
+    expect(db.order.updateMany).toHaveBeenCalledTimes(1)
+    const [{ where, data }] = db.order.updateMany.mock.calls[0]
+    expect(data).toEqual({ status: 'COMPLETED', completedAt: AHORA })
+    // CAS sobre lo leído: si otro lo canceló o lo cerró en medio, no escribe. Sólo pedidos de plataforma ya pagados.
+    expect(where).toEqual({ id: 'ord-1', venueId: 'v1', status: 'CONFIRMED', originSystem: 'DELIVERY_PLATFORM', paymentStatus: 'PAID' })
+  })
+
+  it('si otro lo cambió en medio (CAS en 0) contesta false y no lanza', async () => {
+    const db = { order: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) } }
+    expect(await cerrarPedidoDePlataformaSoloDeEstado(db as never, pedido, AHORA)).toBe(false)
   })
 })

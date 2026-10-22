@@ -26,6 +26,7 @@ jest.mock('@/config/logger', () => ({
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn() }))
 jest.mock('@/observability/jobContext', () => ({ scheduleJob: jest.fn(() => ({ start: jest.fn(), stop: jest.fn() })) }))
 
+import { Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { PaidOrderReconcilerJob, defaults } from '@/jobs/paid-order-reconciler.job'
@@ -63,6 +64,9 @@ function job(over: Overrides = {}) {
     // R12-3: sin ventas cerradas por otro canal con su sesión abierta (lo normal).
     findSesionesDeVentasCerradas: jest.fn().mockResolvedValue([]),
     cerrarSesionDeVentaCerrada: jest.fn().mockResolvedValue(false),
+    // Codex b1 #1: sin pedidos de plataforma por cerrar (lo normal en estas pruebas).
+    findPedidosDePlataforma: jest.fn().mockResolvedValue([]),
+    cerrarPedidoDePlataforma: jest.fn().mockResolvedValue(false),
     ...over,
   })
 }
@@ -396,6 +400,93 @@ describe('paid-order-reconciler', () => {
       expect(sql).toMatch(/EXISTS \(\s*SELECT 1 FROM "InventoryPosting" ip/)
       expect(sql).toContain('ORDER BY s."createdAt" ASC, s.id ASC')
       expect(sql).toContain('LIMIT ?')
+    })
+  })
+
+  /**
+   * 🔴 Codex b1 #1 (Rappi fase 2): un pedido cuyo dinero liquida una plataforma (Uber, Rappi) ya no pasa por el reparador del
+   * cobro, que le quitaba el envío. La cuarta pasada lo cierra SÓLO de estado. CUÁNDO (#5) espera la decisión del founder.
+   */
+  describe('🔴 Codex b1 #1: la cuarta pasada, pedidos de plataforma sólo de estado', () => {
+    const pedido = (id: string) => ({ id, venueId: 'v1', orderNumber: `RAPPI-${id}`, status: 'CONFIRMED' })
+
+    it('cada pedido elegido se cierra sólo de estado (nunca por el reparador) y se asienta con PLATFORM_ORDER_STATUS_ONLY', async () => {
+      const reconcile = jest.fn()
+      const cerrar = jest.fn().mockResolvedValue(true)
+      const r = await job({
+        findCandidates: jest.fn().mockResolvedValue([]),
+        reconcile,
+        findPedidosDePlataforma: jest.fn().mockResolvedValue([pedido('p1'), pedido('p2')]),
+        cerrarPedidoDePlataforma: cerrar,
+      }).runNow()
+
+      expect(reconcile).not.toHaveBeenCalled()
+      expect(cerrar).toHaveBeenNthCalledWith(1, pedido('p1'), AHORA)
+      expect(cerrar).toHaveBeenNthCalledWith(2, pedido('p2'), AHORA)
+      expect(r).toMatchObject({ platformClosed: 2, platformToClose: [], reconciled: 0, failed: 0 })
+      expect(logAction).toHaveBeenCalledWith({
+        staffId: null,
+        venueId: 'v1',
+        action: 'ORDER_RECONCILED_PAID',
+        entity: 'Order',
+        entityId: 'p1',
+        data: {
+          orderNumber: 'RAPPI-p1',
+          before: { status: 'CONFIRMED' },
+          sweep: 'paid-order-reconciler',
+          effects: 'PLATFORM_ORDER_STATUS_ONLY',
+        },
+      })
+      expect(logAction).toHaveBeenCalledTimes(2)
+    })
+
+    it('el que otro cambió en medio (CAS en 0) no se asienta; un fallo no detiene a los demás y se cuenta', async () => {
+      const cerrar = jest.fn().mockResolvedValueOnce(false).mockRejectedValueOnce(new Error('conexión')).mockResolvedValueOnce(true)
+      const r = await job({
+        findCandidates: jest.fn().mockResolvedValue([]),
+        findPedidosDePlataforma: jest.fn().mockResolvedValue([pedido('p1'), pedido('p2'), pedido('p3')]),
+        cerrarPedidoDePlataforma: cerrar,
+      }).runNow()
+
+      expect(cerrar).toHaveBeenCalledTimes(3)
+      expect(r).toMatchObject({ platformClosed: 1, failed: 1 })
+      expect(logAction).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ entityId: 'p3' }))
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('pedido de plataforma'), expect.objectContaining({ orderId: 'p2' }))
+    })
+
+    it('🔴 el modo simulación los LISTA (la misma selección) y no cierra nada ni asienta', async () => {
+      const cerrar = jest.fn()
+      const r = await job({
+        findPedidosDePlataforma: jest.fn().mockResolvedValue([pedido('p1')]),
+        cerrarPedidoDePlataforma: cerrar,
+      }).runNow({ dryRun: true })
+
+      expect(cerrar).not.toHaveBeenCalled()
+      expect(logAction).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ dryRun: true, platformClosed: 0, platformToClose: [pedido('p1')] })
+    })
+
+    it('elige con la misma gracia, el mismo tope y la misma ventana que las candidatas a reparar', async () => {
+      const elegir = jest.fn().mockResolvedValue([])
+      await job({ findPedidosDePlataforma: elegir }).runNow()
+      expect(elegir).toHaveBeenCalledWith({ graceMs: 5 * 60 * 1000, limit: 50, now: AHORA, since: new Date('2026-08-03T20:00:00.000Z') })
+    })
+
+    it('🔴 por default elige y cierra con el módulo compartido: el cierre escribe SÓLO el estado', async () => {
+      prismaMock.$queryRaw.mockResolvedValue([])
+      await defaults.findPedidosDePlataforma({ graceMs: 1, limit: 50, now: AHORA, since: AHORA })
+      // Prisma aplana los fragmentos anidados (`Prisma.raw`) igual que lo hace por dentro: así se ve la consulta completa.
+      const [strings, ...values] = prismaMock.$queryRaw.mock.calls[0] as unknown as [TemplateStringsArray, ...unknown[]]
+      const { sql } = Prisma.sql(strings, ...values)
+      expect(sql).toContain(`o."originSystem" = 'DELIVERY_PLATFORM'`)
+      expect(sql).toContain(`o."paymentStatus" = 'PAID'`)
+
+      prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+      expect(await defaults.cerrarPedidoDePlataforma(pedido('p1'), AHORA)).toBe(true)
+      expect(prismaMock.order.updateMany).toHaveBeenCalledWith(
+        expect.objectContaining({ data: { status: 'COMPLETED', completedAt: AHORA } }),
+      )
     })
   })
 })

@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from '@prisma/client'
+import { OrderStatus, OriginSystem, PaymentStatus, Prisma, type PrismaClient } from '@prisma/client'
 import { utcTs } from '../../utils/sqlDates'
 
 /**
@@ -96,6 +96,46 @@ export function criterioPagadaPeroAbiertaSql(alias = 'o'): string {
     ) >= ${baseQueDebeCubrirseSql(o)} - 0.01`
 }
 
+/**
+ * 🔴 ¿El dinero de esta orden lo liquida una PLATAFORMA de reparto (Uber, Rappi, DiDi, Deliverect)? Sólo la ingesta de reparto
+ * escribe `originSystem = DELIVERY_PLATFORM` (`deliveryOrderIngestion.service.ts`; la ingesta vieja de Uber hacía lo mismo).
+ *
+ * Su `Order.total` es el BLOQUE del proveedor —venta + cargos del comercio (el envío del repartidor propio, los cargos de Uber)
+ * − descuento, sin la propina (`deliveryReconciliation.service.ts#reprecio`)— y esos cargos no viven en ninguna columna que lea
+ * `baseQueDebeCubrirseSql`. El reparador del cobro (`reconcileOrderFromPayments`) reescribe el total con
+ * `subtotal − descuento + cargo por servicio + propina`: a un Rappi de 20 + 35 de envío + 20 de propina le dejaba 40 en vez de
+ * 55 y denunciaba un sobrepago de $35 que no existe (Codex b1 #1, Rappi fase 2; a Uber le pasaba igual con sus cargos). El
+ * dinero de estas órdenes lo cuida el núcleo de reparto: el barrido NUNCA lo recalcula.
+ *
+ * `originSystem` es NOT NULL (default AVOQADO), así que su negación (`NOT (…)`) no deja fuera órdenes por un NULL.
+ */
+export function esDeUnaPlataformaSql(alias = 'o'): string {
+  return `${alias}."originSystem" = 'DELIVERY_PLATFORM'`
+}
+
+/**
+ * 🔴 Un pedido de plataforma ACEPTADO: CONFIRMED o más adelante (la ingesta lo deja así cuando ya le dijimos que sí al
+ * proveedor: modo AUTO, y Rappi siempre) o PENDING con la aceptación acreditada (`providerAcceptedAt`, modo MANUAL). Un PENDING
+ * sin esa marca todavía espera a la cocina: el barrido lo cerraba a los 5-15 min, el tablero dejaba de pedir «aceptar» (sólo lo
+ * pide con la venta PENDING) y Uber lo cancelaba solo a los ~11.5 min. El barrido nunca cierra uno así.
+ */
+export function pedidoDePlataformaAceptadoSql(alias = 'o'): string {
+  return `(${alias}.status <> 'PENDING' OR ${alias}."providerAcceptedAt" IS NOT NULL)`
+}
+
+/**
+ * 🔴 PENDIENTE DE DECISIÓN DEL FOUNDER (Codex b1 #5, Rappi fase 2): ¿CUÁNDO se da por cerrado un pedido de plataforma aceptado y
+ * pagado? Las opciones A/B/C están en `.superpowers/sdd/2026-10-20-rappi-fase-2/codex-b1-fix-B-report.md` (A: cuando la cocina
+ * lo termina; B: eso o al acabar el día del negocio; C: como hoy, y la cocina deja de mirar el estado de la venta).
+ *
+ * HOY se conserva lo que el barrido hacía de rebote desde el 2-sep: en cuanto pasa la gracia de 5 min. Eso le quita a la cocina
+ * «Cancelar» (y, con Rappi, las instrucciones de F2) con la comanda todavía abierta. La decisión se escribe AQUÍ y en ningún otro
+ * sitio: es la única condición de CUÁNDO que lee `findPedidosDePlataformaPorCerrar`.
+ */
+export function momentoDeCerrarUnPedidoDePlataformaSql(_alias = 'o'): string {
+  return 'TRUE'
+}
+
 export interface CandidataPagadaAbierta {
   id: string
   venueId: string
@@ -134,6 +174,10 @@ type Db = Pick<PrismaClient, '$queryRaw'> | Pick<Prisma.TransactionClient, '$que
  * por la FORMA de los importes y no por el origen: lo que decide si el reparador la corrompería
  * es que guarde el IVA aparte. Vive aquí y NO en el criterio compartido: el vigilante (check #6)
  * la sigue reportando como pagada pero abierta, y la decide una persona.
+ *
+ * 🔴 Y por la misma razón —la FORMA de los importes— nunca propone una orden cuyo dinero liquida una plataforma de reparto
+ * (`esDeUnaPlataformaSql`): su total lleva cargos que el reparador no ve y se los quitaba (Codex b1 #1). Ésas las cierra, sólo de
+ * estado y sin tocar su dinero, `findPedidosDePlataformaPorCerrar` + `cerrarPedidoDePlataformaSoloDeEstado`.
  */
 export async function findPaidButOpenOrders(
   db: Db,
@@ -151,10 +195,73 @@ export async function findPaidButOpenOrders(
     FROM "Order" o
     WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
       AND COALESCE(o."taxAmount", 0) <= 0
+      AND NOT (${Prisma.raw(esDeUnaPlataformaSql('o'))})
       AND o."updatedAt" < ${utcTs(antesDe)}
       ${opts.since ? Prisma.sql`AND o."createdAt" >= ${utcTs(opts.since)}` : Prisma.empty}
     ORDER BY o."createdAt" ASC
     LIMIT ${opts.limit}
   `
   return rows
+}
+
+export interface PedidoDePlataformaPorCerrar {
+  id: string
+  venueId: string
+  orderNumber: string
+  status: string
+}
+
+/**
+ * Los pedidos de PLATAFORMA que el barrido cierra sólo de estado, del más viejo al más nuevo, con la misma gracia y la misma
+ * ventana que las candidatas a reparar. Cumplen el criterio compartido (el vigilante ve el mismo conjunto) y además:
+ *  - el núcleo de reparto ya los dio por pagados (`paymentStatus = PAID`). El barrido no decide si están pagados: uno con
+ *    efectivo por cobrar no se cierra aquí (lo cobra la caja, que lo cierra);
+ *  - están aceptados (`pedidoDePlataformaAceptadoSql`): uno que espera a la cocina nunca se cierra;
+ *  - y ya es momento de cerrarlos (`momentoDeCerrarUnPedidoDePlataformaSql`, la decisión pendiente del founder).
+ */
+export async function findPedidosDePlataformaPorCerrar(
+  db: Db,
+  opts: { graceMs: number; limit: number; now?: Date; since?: Date },
+): Promise<PedidoDePlataformaPorCerrar[]> {
+  const now = opts.now ?? new Date()
+  const antesDe = new Date(now.getTime() - opts.graceMs)
+  return db.$queryRaw<PedidoDePlataformaPorCerrar[]>`
+    SELECT o.id, o."venueId", o."orderNumber", o.status::text AS status
+    FROM "Order" o
+    WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
+      AND ${Prisma.raw(esDeUnaPlataformaSql('o'))}
+      AND o."paymentStatus" = 'PAID'
+      AND ${Prisma.raw(pedidoDePlataformaAceptadoSql('o'))}
+      AND ${Prisma.raw(momentoDeCerrarUnPedidoDePlataformaSql('o'))}
+      AND o."updatedAt" < ${utcTs(antesDe)}
+      ${opts.since ? Prisma.sql`AND o."createdAt" >= ${utcTs(opts.since)}` : Prisma.empty}
+    ORDER BY o."createdAt" ASC
+    LIMIT ${opts.limit}
+  `
+}
+
+/**
+ * Cierra UN pedido de plataforma sólo de estado: `COMPLETED` + `completedAt`, y nada más. Ni `total`, ni `tipAmount`, ni
+ * `paidAmount`, ni `remainingBalance`, ni el estado de cobro: ese dinero es del núcleo de reparto (Codex b1 #1). No hay efectos
+ * que se pierdan: el vale de inventario y los sobres nacieron en la ingesta, y no tiene mesa.
+ *
+ * CAS sobre el estado leído: si otro lo canceló o lo cerró en medio, no escribe (`false`) y no pasa nada. No repite la
+ * aceptación: `providerAcceptedAt` nunca se borra y un pedido de reparto no regresa a PENDING.
+ */
+export async function cerrarPedidoDePlataformaSoloDeEstado(
+  db: Pick<PrismaClient, 'order'>,
+  p: Pick<PedidoDePlataformaPorCerrar, 'id' | 'venueId' | 'status'>,
+  ahora: Date,
+): Promise<boolean> {
+  const r = await db.order.updateMany({
+    where: {
+      id: p.id,
+      venueId: p.venueId,
+      status: p.status as OrderStatus,
+      originSystem: OriginSystem.DELIVERY_PLATFORM,
+      paymentStatus: PaymentStatus.PAID,
+    },
+    data: { status: OrderStatus.COMPLETED, completedAt: ahora },
+  })
+  return r.count === 1
 }
