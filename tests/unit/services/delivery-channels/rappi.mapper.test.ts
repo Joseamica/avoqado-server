@@ -41,6 +41,11 @@ const NUESTRO_MENU = 'new-order-full-delivery-nuestro-menu.json'
 const MARKETPLACE = 'new-order-marketplace-propina.json'
 /** M10: para recoger (Jugo 40, envío 35, servicio 10, propina 10, `total_order` 40). */
 const PICKUP = 'new-order-pickup-propina.json'
+/**
+ * M12: repartidor de Rappi, descuento COMPARTIDO de 40 sobre la orden completa (28 del negocio + 12 de Rappi) y dos
+ * modificadores (Hamburguesa 129 + Chipotle Mayo 15 + Grande 30 = 174; `total_order` 146).
+ */
+const DESCUENTO_COMPARTIDO = 'new-order-delivery-descuento-compartido-y-modificadores.json'
 
 /**
  * «prod-doc»: el ejemplo de `GET orders` de la documentación de Rappi, con su dinero tal cual (sin los datos del cliente).
@@ -250,6 +255,41 @@ describe('normalizeRappiOrder', () => {
       expect.stringContaining('Rappi'),
       expect.objectContaining({ orderId: '392625', asumidoPorRappi: '7600.00', descuentoDeSoporte: '0.00' }),
     )
+  })
+
+  it('🔴 «sandbox» M12: descuento COMPARTIDO con dos modificadores ⇒ venta 174, descuento del negocio 28, liquidado 146 = total_order', () => {
+    // El aviso REAL: 40 de descuento sobre la orden completa que se reparte 28 el negocio y 12 Rappi (70/30). La venta no baja
+    // por lo de Rappi; el negocio sólo asume 28; y lo que liquida la plataforma (174 − 28) es exactamente `total_order`.
+    const crudo = sandbox(DESCUENTO_COMPARTIDO)
+    const o = normalizeRappiOrder(crudo)
+
+    // Un renglón con sus dos modificadores como EXTRAS (no como renglones aparte): 129 + 15 + 30 = 174.
+    expect(o.items).toHaveLength(1)
+    expect(o.items[0]).toMatchObject({ name: 'Hamburguesa Clásica', quantity: 1, unitPrice: '129.00', total: '174.00' })
+    expect(o.items[0].modifiers).toEqual([
+      { externalId: 'MOD-cmtwfpbym00yfc996ut9y22wu', name: 'Chipotle Mayo', quantity: 1, price: '15.00' },
+      { externalId: 'MOD-cmtwfpbyf00y7c996pzgq6mp0', name: 'Grande', quantity: 1, price: '30.00' },
+    ])
+    expect(o.payment).toEqual({
+      currency: 'MXN',
+      saleAmount: '174.00',
+      merchantFees: '0.00',
+      discountAmount: '28.00',
+      tipAmount: '0.00',
+      externallyPaidSale: '146.00',
+      externallyPaidTip: '0.00',
+      cashDueSale: '0.00',
+      cashDueTip: '0.00',
+    })
+    expect(o.payment.externallyPaidSale).toBe(deRappiAPesos(crudo.order_detail.totals.total_order).toFixed(2))
+    expect(() => assertDeliveryMoneyInvariants(o.payment, o.items)).not.toThrow()
+    // Lo de Rappi (12) queda en el log del pedido, no en la venta; y el reparto cuadra, así que nadie grita 🚨.
+    expect(mockLogger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Rappi'),
+      expect.objectContaining({ orderId: '61280002', asumidoPorRappi: '12.00', descuentoDeSoporte: '0.00' }),
+    )
+    expect(mockLogger.warn).not.toHaveBeenCalled()
+    expect(mockLogger.error).not.toHaveBeenCalled()
   })
 
   it('descuento compartido en UNA entrada (sandbox) o en DOS (producción): lo del negocio sale igual', () => {
@@ -528,7 +568,10 @@ describe('placedAt', () => {
   })
 
   it('una zona inválida cae a la de México y el pedido entra igual', () => {
-    expect(normalizeRappiOrder(sandbox(MENU_MUESTRA), { zonaHoraria: 'GMT-6' }).placedAt.toISOString()).toBe('2026-10-22T04:15:46.000Z')
+    // 🔴 Con la errata: «GMT-6» ES la hora de México, así que daba lo mismo se usara el respaldo o no y no distinguía el caso.
+    expect(normalizeRappiOrder(sandbox(MENU_MUESTRA), { zonaHoraria: 'America/Mexic_City' }).placedAt.toISOString()).toBe(
+      '2026-10-22T04:15:46.000Z',
+    )
   })
 
   it.each([

@@ -13,6 +13,7 @@ import {
   analizarHistorial,
   anotarAceptacion,
   cerrarListo,
+  devolverLlamadaDeListo,
   esTransicionInvalida,
   leerEstado,
   leerHistorial,
@@ -228,6 +229,12 @@ describe('esTransicionInvalida', () => {
     expect(esTransicionInvalida(escapado)).toBe(true)
   })
 
+  it('🔴 también en masculino: «Estado de transición inválido» (así lo dice la documentación de Rappi)', () => {
+    expect(esTransicionInvalida('Estado de transición inválido')).toBe(true)
+    expect(esTransicionInvalida('estado de transicion invalido')).toBe(true)
+    expect(esTransicionInvalida(JSON.stringify({ message: '400 {"message":"Estado de transición inválido"}' }))).toBe(true)
+  })
+
   it.each([
     ['vacío', ''],
     ['un 400 de otra cosa', '{"message":"Bad request: cookingTime out of range"}'],
@@ -405,6 +412,74 @@ describe('cerrarListo — el «listo» ya no se intenta más (y por qué)', () =
     consultar.mockResolvedValueOnce([])
 
     await expect(cerrarListo('722609056', '900175625', 'TOPE')).resolves.toBeUndefined()
+    expect(ejecutar).not.toHaveBeenCalled()
+  })
+})
+
+describe('devolverLlamadaDeListo — la llamada que NO salió (candado de tiendas) no gasta una de las 3', () => {
+  const consultar = (prisma as any).$queryRaw as jest.Mock
+  const ejecutar = (prisma as any).$executeRaw as jest.Mock
+  const sqlDe = (m: jest.Mock, i = 0) => (m.mock.calls[i][0] as TemplateStringsArray).join('?')
+  const valoresDe = (m: jest.Mock, i = 0) => m.mock.calls[i].slice(1)
+  const buscar = (prisma as any).deliveryOrderEvent.findFirst as jest.Mock
+
+  beforeEach(() => {
+    consultar.mockReset()
+    ejecutar.mockReset().mockResolvedValue(1)
+    buscar.mockReset().mockResolvedValue(null)
+  })
+
+  it('🔴 resta 1 con la fila bloqueada (la misma resolución que la reserva), mezclando en resourcePayload', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 2 } } }])
+
+    await devolverLlamadaDeListo('722609056', '900175625')
+
+    expect(sqlDe(consultar)).toMatch(/WHERE "dedupKey" = \?\s+FOR UPDATE/)
+    expect(sqlDe(ejecutar)).toMatch(/\|\| jsonb_build_object\('listo'/)
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 1 })
+    expect(valoresDe(ejecutar)).toContain('evt1')
+  })
+
+  it('con el vínculo cambiado de tienda, devuelve sobre el aviso ORIGINAL (igual que la reserva)', async () => {
+    consultar.mockResolvedValueOnce([]).mockResolvedValueOnce([{ id: 'evt-original', resourcePayload: { listo: { llamadas: 1 } } }])
+    buscar.mockResolvedValueOnce({ id: 'evt-original' })
+
+    await devolverLlamadaDeListo('722609056', '900175625')
+
+    expect(valoresDe(consultar, 1)).toEqual(['evt-original'])
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 0 })
+    expect(valoresDe(ejecutar)).toContain('evt-original')
+  })
+
+  it.each(['HTTP_2XX', 'TRANSICION_INVALIDA', 'TOPE'])(
+    '🔴 si el «listo» ya cerró (%s) NO resta nada: lo cerrado no se reabre',
+    async cerrado => {
+      consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 2, cerrado } } }])
+
+      await devolverLlamadaDeListo('722609056', '900175625')
+
+      expect(ejecutar).not.toHaveBeenCalled()
+    },
+  )
+
+  it.each([
+    ['contador en 0', { listo: { llamadas: 0 } }],
+    ['sin contador', { aceptacion: { en: 'x', evidencia: 'HTTP_2XX' } }],
+    ['sin payload', null],
+  ])('🔴 con %s NO resta: nunca queda negativo', async (_caso, resourcePayload) => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload }])
+
+    await devolverLlamadaDeListo('722609056', '900175625')
+
+    expect(ejecutar).not.toHaveBeenCalled()
+  })
+
+  it('sin la fila del aviso no hace nada y no lanza', async () => {
+    consultar.mockResolvedValueOnce([])
+
+    await expect(devolverLlamadaDeListo('722609056', '900175625')).resolves.toBeUndefined()
     expect(ejecutar).not.toHaveBeenCalled()
   })
 })

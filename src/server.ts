@@ -608,7 +608,9 @@ const startApplication = async (retries = 3) => {
       blumonPaymentAuditJob.start()
 
       // Start delivery webhook reconciliation job (every 2min at :45s — retries
-      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
+      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED).
+      // It also starts its own Rappi lane (every 30s at :15/:45) with an in-memory lock (`rappiEnCurso`):
+      // single instance only — see .claude/rules/una-sola-instancia.md, #5.
       deliveryWebhookReconciliationJob.start()
       deliveryMenuSyncJob.start()
       deliverySnoozeResumeJob.start()

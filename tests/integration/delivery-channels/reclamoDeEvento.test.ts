@@ -169,4 +169,16 @@ describe('reclamo de DeliveryOrderEvent contra Postgres', () => {
 
     expect(await reclamarEvento(id, RECLAMO_MS)).toBeNull()
   })
+
+  it('🔴 cerrar PROCESSED una fila que traía el error de un intento anterior la deja con error null', async () => {
+    const id = await evento('error-viejo')
+    const a = await reclamarEvento(id, RECLAMO_MS)
+    await cerrarEventoReclamado(id, a!, DeliveryOrderEventStatus.FAILED, undefined, 'INGEST: intento 1')
+    expect((await leer(id)).error).toBe('INGEST: intento 1')
+
+    const b = await reclamarEvento(id, RECLAMO_MS)
+    expect(await cerrarEventoReclamado(id, b!, DeliveryOrderEventStatus.PROCESSED, undefined)).toBe(true)
+
+    expect(await leer(id)).toMatchObject({ status: DeliveryOrderEventStatus.PROCESSED, error: null, claimToken: null, lockedUntil: null })
+  })
 })

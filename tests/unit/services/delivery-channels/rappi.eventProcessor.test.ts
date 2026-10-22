@@ -1,7 +1,10 @@
 /**
  * Procesador de eventos de Rappi — las decisiones que separan una venta de un bug.
  *
- * ⚠️ Sin sandbox: los payloads son los de la documentación, la red va inyectada.
+ * La red va inyectada: ningún Rappi real. Las entradas son de tres clases, marcadas donde se usan:
+ *  · «sandbox»: los historiales y los avisos REALES del sandbox DEV de Rappi (21-oct-2026, `recorrido-real.md`);
+ *  · los payloads de la documentación (`payloadPedido()`: el ejemplo del portal con los montos rellenos);
+ *  · avisos armados a mano para un caso borde.
  */
 import * as fs from 'fs'
 import * as path from 'path'

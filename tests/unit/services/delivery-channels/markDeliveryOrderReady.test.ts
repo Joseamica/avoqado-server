@@ -65,6 +65,14 @@ describe('markDeliveryOrderReady', () => {
     expect(markOrderReady).toHaveBeenCalledWith('uuid-uber-1', 'store-uuid')
   })
 
+  it('🔴 NO lee posRawData (el crudo del proveedor): el KDS lo llama en CADA comanda lista, también de mesas', async () => {
+    await markDeliveryOrderReady('venue1', 'order1')
+
+    const lecturas = (prisma.order.findFirst as jest.Mock).mock.calls
+    expect(lecturas.length).toBeGreaterThan(0)
+    for (const [args] of lecturas) expect(args.select).not.toHaveProperty('posRawData')
+  })
+
   it('🔴 una venta que NO es de delivery es un NO-OP silencioso — el KDS lo llama en CADA bump', async () => {
     // El enganche vive en el flujo del KDS, que también maneja comandas de mesa y mostrador.
     // Si esto lanzara para las no-delivery, marcar lista una hamburguesa de mesa fallaría.

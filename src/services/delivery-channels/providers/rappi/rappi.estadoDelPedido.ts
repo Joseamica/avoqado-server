@@ -89,7 +89,7 @@ export async function anotarAceptacion(eventRowId: string, claimToken: string, e
  * cubre se lee `ACEPTADO` y se registraría. Eso NO lo cuida el nombre: lo cuida el aviso `ORDER_EVENT_CANCEL` guardado, que
  * el procesador busca antes de aceptar y otra vez después de registrar (Tarea 10), más la cancelación en espera.
  */
-const EVENTO_TERMINAL = /^cancel|^canceled|^rejected|timeout/i
+const EVENTO_TERMINAL = /^cancel|^rejected|timeout/i // `^cancel` ya cubre `canceled…`
 /** Medido el 21-oct en DEV: un pedido aceptado trae exactamente `taken_visible_order` (no hay un evento llamado «TAKEN»). */
 const EVENTO_ACEPTADO = /^taken/i
 /** Cuántos nombres del historial van a un log: el veredicto los mira todos, el log sólo los primeros. */
@@ -254,6 +254,26 @@ export async function reservarLlamadaDeListo(externalOrderId: string, storeId: s
 }
 
 /**
+ * Devuelve la reserva de una llamada de «listo» que NUNCA salió: el candado de tiendas (`RappiEscrituraBloqueadaError`, un
+ * `DeliveryWriteNotSentError`) saltó ANTES de la red, así que Rappi no recibió nada y no cuenta como una de sus 3 solicitudes.
+ * Sin esto, cada intento bloqueado del KDS o del barrido gastaba una de las 3 y, al agotarlas, el «listo» quedaba cerrado
+ * por `TOPE` sin haberle llegado nunca a Rappi.
+ *
+ * Resta 1 con la fila bloqueada (la misma resolución que la reserva), y SÓLO si el «listo» no cerró y el contador es mayor
+ * que 0: lo cerrado no se reabre y el contador nunca queda negativo. Sin la fila del aviso no hace nada. 🔴 Quien la llama
+ * SÓLO la usa cuando se SABE que la llamada no salió: ante la duda (un timeout, un 5xx) la reserva se queda — ya contó.
+ */
+export async function devolverLlamadaDeListo(externalOrderId: string, storeId: string): Promise<void> {
+  await prisma.$transaction(async tx => {
+    const fila = await avisoBloqueado(tx, externalOrderId, storeId)
+    if (!fila) return
+    const listo = leerEstado(fila.resourcePayload).listo
+    if (!listo || listo.cerrado || listo.llamadas <= 0) return
+    await guardarListo(tx, fila.id, { llamadas: listo.llamadas - 1 })
+  })
+}
+
+/**
  * El «listo» de este pedido ya no se intenta más, y por qué: `HTTP_2XX` (Rappi lo recibió), `TRANSICION_INVALIDA` (su estado
  * ya no lo admite) o `TOPE` (se usaron las 3). Conserva las llamadas. 🔴 El PRIMER cierre manda: un `TOPE` que llega después
  * no borra que Rappi ya había contestado 2xx. Encuentra la fila igual que la reserva (también si el vínculo cambió de tienda);
@@ -279,8 +299,10 @@ export async function cerrarListo(externalOrderId: string, storeId: string, como
  * Rappi envuelve el cuerpo de su servicio interno en otro `message`, con el código HTTP adelante: el 424 real llegó como
  * `{"message":"424 {\"code\":…,\"message\":\"No se pudo…\"}"}`. Por eso se busca en el texto crudo y también en cada
  * `message` y `code` de adentro, desenvolviendo hasta tres capas (así un acento escapado, `\u00f3`, también se lee).
+ *
+ * En español acepta el femenino y el masculino: la documentación de Rappi dice «Estado de transición inválido».
  */
-const TRANSICION_INVALIDA = /transici[oó]n inv[aá]lida|invalid transition/i
+const TRANSICION_INVALIDA = /transici[oó]n inv[aá]lid[ao]|invalid transition/i
 const CAPAS_DEL_CUERPO = 3
 
 export function esTransicionInvalida(raw: string): boolean {

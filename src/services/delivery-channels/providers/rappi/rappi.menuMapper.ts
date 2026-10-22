@@ -18,7 +18,8 @@
  * ⚠️ Lo que su documentación NO dice: **si el precio va en pesos o en centavos**. Lo midió el
  * recorrido real (M2, 21-oct-2026): un pedido de nuestro menú llegó con los mismos números que
  * publicamos, o sea PESOS. El factor vive en `rappi.unidades.ts`, el mismo que usa el mapeo de
- * pedidos, y su red de cuadre grita si algún día deja de ser cierto.
+ * pedidos. Lo que lo protege es esa medición más la prueba que fija `FACTOR_MONEDA_RAPPI` en 1; el cuadre de los pedidos NO
+ * lo descubriría (usa el mismo factor en los dos lados), así que si Rappi cambiara a centavos nada lo gritaría solo.
  */
 import type { MenuSnapshot, MenuSnapshotProduct } from '../../core/menuSnapshot.service'
 import { dePesosARappi } from './rappi.unidades'

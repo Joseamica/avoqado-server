@@ -6,7 +6,7 @@
  */
 import crypto from 'crypto'
 import { rappiAdapter, RAPPI_EVENTS, respuestaPing } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
-import type { DirectDeliveryAdapter } from '../../../../src/services/delivery-channels/core/types'
+import { DeliveryWriteNotSentError, type DirectDeliveryAdapter } from '../../../../src/services/delivery-channels/core/types'
 
 // Tarea 13: el «listo» sale por `rappi.client` (que lee el env: aquí, de mentira) y cuenta sus llamadas en la base con
 // `rappi.estadoDelPedido` (aquí se simulan la reserva y el cierre; `esTransicionInvalida` es la real). La base de verdad se
@@ -17,10 +17,12 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.clie
 }))
 const mockReservar = jest.fn()
 const mockCerrar = jest.fn()
+const mockDevolver = jest.fn()
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido', () => ({
   ...jest.requireActual('../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'),
   reservarLlamadaDeListo: (...a: unknown[]) => mockReservar(...a),
   cerrarListo: (...a: unknown[]) => mockCerrar(...a),
+  devolverLlamadaDeListo: (...a: unknown[]) => mockDevolver(...a),
 }))
 
 /** El cuerpo REAL del 424 del sandbox DEV (M4, recorrido-real.md, 21-oct): Rappi dice «inténtelo más tarde». */
@@ -137,6 +139,7 @@ describe('rappiAdapter.markOrderReady — el «listo», a lo más 3 llamadas por
   beforeEach(() => {
     mockReservar.mockReset().mockResolvedValue({ permitido: true })
     mockCerrar.mockReset().mockResolvedValue(undefined)
+    mockDevolver.mockReset().mockResolvedValue(undefined)
     mockMarcarListoRappi.mockReset().mockResolvedValue({ ok: true, status: 200, raw: '{}' })
   })
 
@@ -232,6 +235,54 @@ describe('rappiAdapter.markOrderReady — el «listo», a lo más 3 llamadas por
 
     await expect(rappiAdapter.markOrderReady('722609056', '900175625')).rejects.toThrow('P1001')
     expect(mockMarcarListoRappi).not.toHaveBeenCalled()
+  })
+
+  describe('la llamada NO salió (candado de tiendas): no gasta una de las 3', () => {
+    const bloqueo = () =>
+      new DeliveryWriteNotSentError(
+        'STORE_NOT_AUTHORIZED',
+        '[Rappi] escritura BLOQUEADA para la tienda 900175625',
+        'Rappi todavía no está habilitada',
+      )
+
+    it('🔴 devuelve la reserva (con el pedido y la tienda) y relanza el MISMO error; no cierra el «listo»', async () => {
+      const error = bloqueo()
+      mockMarcarListoRappi.mockRejectedValue(error)
+
+      await expect(rappiAdapter.markOrderReady('722609056', '900175625')).rejects.toBe(error)
+
+      expect(mockReservar).toHaveBeenCalledTimes(1) // sumó 1 antes de llamar…
+      expect(mockDevolver).toHaveBeenCalledTimes(1) // …y se devuelve: la llamada nunca salió
+      expect(mockDevolver).toHaveBeenCalledWith('722609056', '900175625')
+      expect(mockReservar.mock.invocationCallOrder[0]).toBeLessThan(mockDevolver.mock.invocationCallOrder[0])
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('🔴 si devolver la reserva falla, el error ORIGINAL se relanza igual (la reserva se queda: el tope sigue protegiendo)', async () => {
+      const error = bloqueo()
+      mockMarcarListoRappi.mockRejectedValue(error)
+      mockDevolver.mockRejectedValue(new Error('P1001'))
+
+      await expect(rappiAdapter.markOrderReady('722609056', '900175625')).rejects.toBe(error)
+    })
+
+    it('🔴 un error que NO es «no se envió» (red a medias: la llamada pudo salir) NO devuelve nada: sigue contando', async () => {
+      const error = new Error('socket hang up')
+      mockMarcarListoRappi.mockRejectedValue(error)
+
+      await expect(rappiAdapter.markOrderReady('722609056', '900175625')).rejects.toBe(error)
+
+      expect(mockDevolver).not.toHaveBeenCalled()
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('una respuesta de Rappi (aunque sea un 5xx) no devuelve nada: la llamada salió', async () => {
+      mockMarcarListoRappi.mockResolvedValue({ ok: false, status: 503, raw: 'boom' })
+
+      await rappiAdapter.markOrderReady('722609056', '900175625')
+
+      expect(mockDevolver).not.toHaveBeenCalled()
+    })
   })
 
   it('si el cierre falla tras un 2xx, el 2xx NO se pierde: se devuelve igual (el núcleo lo acredita)', async () => {

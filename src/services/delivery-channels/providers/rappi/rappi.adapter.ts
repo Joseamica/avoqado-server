@@ -23,7 +23,14 @@
  */
 import type { DeliveryProvider } from '@prisma/client'
 
-import type { ActionResult, CanonicalDeliveryEvent, DenyReason, EventIdentity, NormalizedDeliveryOrder } from '../../core/types'
+import {
+  DeliveryWriteNotSentError,
+  type ActionResult,
+  type CanonicalDeliveryEvent,
+  type DenyReason,
+  type EventIdentity,
+  type NormalizedDeliveryOrder,
+} from '../../core/types'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { HorarioSemanal } from '../../core/deliveryHours.service'
 // Sólo el TIPO (se borra al compilar): `rappi.estadoDelPedido` importa este archivo, así que su código se carga perezoso.
@@ -241,6 +248,8 @@ export const rappiAdapter = {
    *    `LISTO_SIN_AVISO`, sin cierre (no hay fila; el 🚨 lo deja la reserva). Codex b1 #4;
    *  · 2xx ⇒ se cierra (`HTTP_2XX`);
    *  · 400 de transición inválida ⇒ se cierra y es `terminal` (repetirla daría lo mismo);
+   *  · el candado de tiendas (`DeliveryWriteNotSentError`: la llamada NO salió, Rappi no recibió nada) ⇒ se DEVUELVE la reserva
+   *    (`devolverLlamadaDeListo`) y el error se relanza igual: un bloqueo no gasta una de las 3;
    *  · lo demás (el 424 «inténtelo más tarde» que dio el sandbox, un 5xx, un 401) se devuelve tal cual: ya contó.
    * Si la reserva no se puede escribir, la llamada NO sale (sin contar no se llama). Si falla el CIERRE, la respuesta se
    * devuelve igual: el 2xx no se pierde (el núcleo lo acredita) y, sin cierre, el tope sigue protegiendo.
@@ -273,7 +282,22 @@ export const rappiAdapter = {
       return { ok: false, status: 0, raw: 'TOPE_DE_LISTO', terminal: true }
     }
 
-    const r = await marcarListoRappi(orderId, storeId, { reintentarEn401: false })
+    let r: Awaited<ReturnType<typeof marcarListoRappi>>
+    try {
+      r = await marcarListoRappi(orderId, storeId, { reintentarEn401: false })
+    } catch (error) {
+      // 🔴 SÓLO cuando se SABE que no salió. Cualquier otra falla (red a medias, un timeout) pudo haber llegado a Rappi: ya contó.
+      if (error instanceof DeliveryWriteNotSentError) {
+        await estado.devolverLlamadaDeListo(orderId, storeId).catch(e =>
+          logger.warn('🛵 [Rappi] no se pudo devolver la reserva del «listo» que no salió (queda contada: el tope sigue protegiendo)', {
+            orderId,
+            storeId,
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        )
+      }
+      throw error
+    }
     if (r.status >= 200 && r.status < 300) {
       await cerrar('HTTP_2XX')
       return r

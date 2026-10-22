@@ -65,8 +65,9 @@ const TEXTO_GENERICO = 'Esta app de delivery no deja cancelar por sistema un ped
 const api = uberApi as jest.MockedFunction<typeof uberApi>
 
 /**
- * La venta tal como la ve `contexto`. 🔴 El simulacro de `findFirst` respeta el `select`: si `contexto` no pidiera
- * `posRawData`, el adaptador no recibiría el aviso y las pruebas de la variante de entrega fallarían (como en la base real).
+ * La venta tal como la ve `contexto` y, en el camino PROVEEDOR_NO_CANCELA, la lectura mínima de `posRawData`. 🔴 El simulacro
+ * de `findFirst` respeta el `select`: si esa lectura no pidiera `posRawData`, el adaptador no recibiría el aviso y las pruebas
+ * de la variante de entrega fallarían (como en la base real).
  */
 function venta(campos: Record<string, unknown>) {
   const fila: Record<string, unknown> = {
@@ -111,6 +112,15 @@ describe('denyDeliveryOrder — un pedido YA ACEPTADO (F2)', () => {
     expect(tomarReserva).not.toHaveBeenCalled()
     expect(mockRechazarPedidoRappi).not.toHaveBeenCalled()
     expect((prisma as any).deliveryLineAction.count).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el crudo (posRawData) se lee con un findFirst MÍNIMO, filtrado por negocio, y sólo en este camino', async () => {
+    await denyDeliveryOrder('venue1', 'order1', 'OUT_OF_ITEMS')
+
+    const lecturas = (prisma.order.findFirst as jest.Mock).mock.calls.map(c => c[0])
+    expect(lecturas).toContainEqual({ where: { id: 'order1', venueId: 'venue1' }, select: { posRawData: true } })
+    // El contexto (que lo usan el «listo» del KDS y el resto del reparto) ya no lo trae.
+    expect(lecturas.filter(a => 'posRawData' in a.select)).toHaveLength(1)
   })
 
   describe('con repartidor de Rappi el texto manda al soporte; con repartidor propio, a la app de aliados', () => {
@@ -171,6 +181,8 @@ describe('denyDeliveryOrder — un pedido YA ACEPTADO (F2)', () => {
     const r = await denyDeliveryOrder('venue1', 'order1', 'OUT_OF_ITEMS', 'staff1')
 
     expect(r).toEqual({ outcome: 'CANCELLED' })
+    // Uber cancela por API: no necesita el crudo, así que no se lee.
+    for (const [args] of (prisma.order.findFirst as jest.Mock).mock.calls) expect(args.select).not.toHaveProperty('posRawData')
     expect(tomarReserva).toHaveBeenCalledWith('order1', 'DENY')
     expect(api).toHaveBeenCalledTimes(1)
     expect(api.mock.calls[0][0]).toMatchObject({ method: 'POST', path: '/v1/delivery/order/uuid-uber-1/cancel', storeId: 'store-uber' })
@@ -197,6 +209,8 @@ describe('REGRESIÓN — lo que no cambia', () => {
     const r = await denyDeliveryOrder('venue1', 'order1', 'OUT_OF_ITEMS', 'staff1')
 
     expect(r).toEqual({ outcome: 'DENIED' })
+    // Un rechazo antes de aceptar no necesita el crudo: no se lee.
+    for (const [args] of (prisma.order.findFirst as jest.Mock).mock.calls) expect(args.select).not.toHaveProperty('posRawData')
     expect(mockRechazarPedidoRappi).toHaveBeenCalledWith('722609056', '900175625', 'OUT_OF_ITEMS')
     expect(cancelDeliveryOrder).toHaveBeenCalledWith('722609056', 'RAPPI', 'rechazado por el negocio: OUT_OF_ITEMS')
   })

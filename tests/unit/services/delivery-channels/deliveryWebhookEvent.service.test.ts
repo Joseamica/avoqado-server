@@ -236,13 +236,23 @@ describe('deliveryWebhookEvent.service', () => {
           data: {
             status: DeliveryOrderEventStatus.PROCESSED,
             orderId: 'order1',
-            error: undefined,
+            error: null,
             processedAt: new Date(NOW),
             claimToken: null,
             lockedUntil: null,
           },
         })
         expect(prisma.deliveryOrderEvent.update).not.toHaveBeenCalled()
+      })
+
+      it('🔴 PROCESSED escribe error: null (con undefined Prisma deja el texto de un intento anterior: PROCESSED con un error viejo)', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        await cerrarEventoReclamado('evt1', 'tok-A', DeliveryOrderEventStatus.PROCESSED)
+
+        const data = (prisma.deliveryOrderEvent.updateMany as jest.Mock).mock.calls[0][0].data
+        expect(data.error).toBeNull()
+        expect('error' in data).toBe(true)
       })
 
       it('FAILED con su error, sin orderId', async () => {

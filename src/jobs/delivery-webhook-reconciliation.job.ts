@@ -88,8 +88,10 @@ export class DeliveryWebhookReconciliationJob {
    * lo cancela al vencer su reloj (4–6 min). Si el canal se reactiva, reintentarlo registraría un
    * pedido que ya no existe.
    *
-   * `ACEPTACION_INCIERTA` — Rappi contestó 400 al aceptar y su historial no dijo si el pedido quedó aceptado (vacío o
-   * ilegible). 🚨 Lo resuelve una persona con Rappi: reintentarlo solo terminaría registrando la venta a ciegas.
+   * `ACEPTACION_INCIERTA` — Rappi contestó 400 al aceptar y su historial SE LEYÓ pero no dijo si el pedido quedó aceptado
+   * (vacío, o sólo eventos del repartidor). 🚨 Lo resuelve una persona con Rappi: reintentarlo solo terminaría registrando la
+   * venta a ciegas. Un historial que NO se pudo leer (red, un no-2xx, un cuerpo ilegible) ya no es esto: es `HISTORIAL_NO_LEIDO`,
+   * que NO es terminal y se reintenta.
    *
    * `CANCELADO_ANTES_DE_REGISTRAR` — el NEW_ORDER de Rappi encontró su aviso de cancelación ya guardado: ni se aceptó ni se
    * registró. Reintentarlo no cambia nada (la cancelación sigue ahí). OJO: `CANCELACION_EN_ESPERA` NO va aquí — es la
@@ -223,7 +225,7 @@ export class DeliveryWebhookReconciliationJob {
 
   /**
    * Corre los carriles a la vez y espera a todos. Cada carril atrapa lo suyo y no debería lanzar; si alguno lo hace,
-   * se registra con su nombre: `allSettled` se tragaba el rechazo en silencio (antes salía como unhandledRejection).
+   * se registra con su nombre: `allSettled` sólo se tragaba el rechazo, sin dejar rastro.
    */
   private async correrCarriles(carriles: Array<[nombre: string, correr: () => Promise<unknown>]>): Promise<void> {
     const resultados = await Promise.allSettled(carriles.map(async ([, correr]) => correr()))

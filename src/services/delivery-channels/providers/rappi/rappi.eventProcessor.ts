@@ -57,9 +57,11 @@ export interface RappiProcessResult {
 }
 
 /**
- * Cuánto dura el reclamo del evento. Se renueva antes de aceptar, antes de leer el historial y antes de ingerir, así que
- * sólo vence si el proceso murió o si un paso se colgó más de 45 s (cada llamada a Rappi ya trae su timeout de 10 s). El
- * carril de Rappi del job (cada 30 s) retoma lo que quedó a medias: ≤ 45 s de vencimiento + ≤ 30 s del siguiente tick.
+ * Cuánto dura el reclamo del evento. Se renueva (`sigueSiendoMio`) antes de CADA paso que no se puede repetir: antes de leer
+ * el historial de un canal deshabilitado, antes de aceptar, antes de leer el historial tras un 400 de «aceptar» y antes de
+ * ingerir. Así sólo vence si el proceso murió o si un paso se colgó más de 45 s (cada llamada a Rappi ya trae su timeout de
+ * 10 s). Escribir la marca de aceptación y cerrar NO renuevan: van condicionados al token, y con otro dueño no escriben nada.
+ * El carril de Rappi del job (cada 30 s) retoma lo que quedó a medias: ≤ 45 s de vencimiento + ≤ 30 s del siguiente tick.
  */
 export const RECLAMO_RAPPI_MS = 45_000
 

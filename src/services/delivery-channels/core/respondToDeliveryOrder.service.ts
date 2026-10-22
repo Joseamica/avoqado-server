@@ -191,8 +191,8 @@ export async function contexto(venueId: string, orderId: string, db: Prisma.Tran
       deliveryChannelLinkId: true,
       providerAcceptedAt: true,
       readyReportedAt: true,
-      // El crudo del proveedor: de él lee el adaptador cómo se cancela un pedido aceptado (`instruccionesParaCancelar`).
-      posRawData: true,
+      // 🔴 NO se trae `posRawData` (el crudo del proveedor, pesado): `contexto` lo usan el «listo» del KDS —en CADA comanda, también
+      // de mesas— y el resto del reparto. Lo lee `denyDeliveryOrder`, sólo en el camino que lo necesita.
     },
   })
   const origen = proveedorDelPedido(order?.externalId)
@@ -335,7 +335,13 @@ export async function denyDeliveryOrder(
     // camino, cliente esperando). Ahora se devuelve qué hacer (lo dice el adaptador), sin reserva y sin red: no hay nada que
     // mandarle. La venta se cancela cuando llega el aviso de cancelación del proveedor.
     if (typeof ctx.adapter.cancelOrder !== 'function') {
-      const mensaje = ctx.adapter.instruccionesParaCancelar?.(ctx.order.posRawData) ?? TEXTO_PROVEEDOR_NO_CANCELA
+      // El crudo del proveedor, con una lectura mínima y SÓLO aquí: de él lee el adaptador cómo se cancela un pedido aceptado
+      // (`instruccionesParaCancelar`). Un adaptador sin esas instrucciones no lo necesita.
+      const mensaje = ctx.adapter.instruccionesParaCancelar
+        ? ctx.adapter.instruccionesParaCancelar(
+            (await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { posRawData: true } }))?.posRawData,
+          )
+        : TEXTO_PROVEEDOR_NO_CANCELA
       logger.warn('[Delivery] la cocina quiso cancelar un pedido ya aceptado que el proveedor no cancela por API: NO se cancela', {
         orderId,
         provider: ctx.provider,

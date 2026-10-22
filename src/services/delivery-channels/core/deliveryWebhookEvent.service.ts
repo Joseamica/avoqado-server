@@ -105,6 +105,10 @@ export async function renovarReclamo(eventId: string, token: string, duracionMs:
 /**
  * Como `markEventResult`, y además suelta el reclamo, pero SÓLO si `token` sigue siendo el dueño. Con `false` (el
  * reclamo ya era de otro) no se escribe nada: el resultado lo escribe el dueño vigente.
+ *
+ * 🔴 PROCESSED escribe `error: null` (no `undefined`): con `undefined` Prisma no toca la columna y el texto de un intento
+ * anterior —un FAILED que el siguiente intento sí logró— se quedaba en un evento PROCESSED (pedido 61280002 del
+ * recorrido real). FAILED escribe el `error` que reciba, como siempre. `markEventResult` (Uber) NO cambia.
  */
 export async function cerrarEventoReclamado(
   eventId: string,
@@ -115,7 +119,14 @@ export async function cerrarEventoReclamado(
 ): Promise<boolean> {
   const { count } = await prisma.deliveryOrderEvent.updateMany({
     where: { id: eventId, claimToken: token },
-    data: { status, orderId, error, processedAt: new Date(), claimToken: null, lockedUntil: null },
+    data: {
+      status,
+      orderId,
+      error: status === DeliveryOrderEventStatus.PROCESSED ? null : error,
+      processedAt: new Date(),
+      claimToken: null,
+      lockedUntil: null,
+    },
   })
   if (count === 1) return true
   logger.error('🚨 [Delivery] el cierre del evento llegó sin su reclamo (se venció y lo tomó otro): no se sobrescribe nada', {

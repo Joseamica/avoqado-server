@@ -9,17 +9,23 @@
  *      cada llamada ya estaba contada en la base cuando salió;
  *  (b) 🔴 la reserva MEZCLA: la marca de aceptación (`aceptacion`, Tarea 9) sobrevive, también si se escribe a la vez;
  *  (c) 🔴 seis reservas a la vez sobre el mismo pedido dan exactamente tres permisos;
- *  (d) un 2xx o un 400 de transición inválida cierran el «listo»; el 424 real del sandbox («inténtelo más tarde») no.
+ *  (d) un 2xx o un 400 de transición inválida cierran el «listo»; el 424 real del sandbox («inténtelo más tarde») no;
+ *  (e) 🔴 el aviso que guarda el INGRESO REAL (`persistRappiWebhookEvent`) es la fila donde el «listo» cuenta (la llave del
+ *      ingreso y la del contador coinciden);
+ *  (f) 🔴 una llamada que el candado de tiendas bloquea (nunca salió) devuelve su reserva: no gasta ninguna de las 3.
  *
  * La red de Rappi va simulada (`marcarListoRappi`); todo lo demás —núcleo, adaptador, contador, barrido— es el real. Sólo crea
  * filas propias (sufijo único) y las borra en `afterAll`, falle o no.
  */
+import crypto from 'crypto'
+
 import { DeliveryOrderEventStatus, DeliveryProvider, KdsOrderStatus, OrderSource, Prisma, type DeliveryChannelLink } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { DeliveryLineActionReconcilerJob } from '@/jobs/delivery-line-action-reconciler.job'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { reclamarEvento } from '@/services/delivery-channels/core/deliveryWebhookEvent.service'
 import { markDeliveryOrderReady } from '@/services/delivery-channels/core/respondToDeliveryOrder.service'
+import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 import {
   anotarAceptacion,
   cerrarListo,
@@ -27,7 +33,7 @@ import {
   MAX_LLAMADAS_LISTO,
   reservarLlamadaDeListo,
 } from '@/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
-import { llaveDeAvisoDePedido } from '@/services/delivery-channels/providers/rappi/rappi.webhookIngress'
+import { llaveDeAvisoDePedido, persistRappiWebhookEvent } from '@/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/uber.adapter'
 
 // 🔴 Nada sale a Rappi: la llamada HTTP del «listo» es lo único simulado.
@@ -139,15 +145,14 @@ describe('el «listo» de Rappi contra Postgres: a lo más 3 llamadas, aunque el
     })
   }
 
-  /** Una venta de Rappi como la deja la ingesta real, con su aviso guardado y la comanda ya marcada lista. */
-  async function sembrar() {
-    const ext = `listo-it-${sufijo}-${++n}`
+  /** Una venta de Rappi como la deja la ingesta real, con la comanda ya marcada lista (SIN aviso: cada prueba pone el suyo). */
+  async function ventaListaParaElListo(ext: string, displayId: string) {
     const { order } = await ingestDeliveryOrder(
       {
         externalId: ext,
-        displayId: `R-${n}`,
+        displayId,
         source: OrderSource.RAPPI,
-        items: [{ externalId: `sku-${n}`, name: `Tacos ${n}`, quantity: 1, unitPrice: '120.00', total: '120.00' }],
+        items: [{ externalId: `sku-${displayId}`, name: `Tacos ${displayId}`, quantity: 1, unitPrice: '120.00', total: '120.00' }],
         payment: {
           currency: 'MXN',
           saleAmount: '120.00',
@@ -164,8 +169,15 @@ describe('el «listo» de Rappi contra Postgres: a lo más 3 llamadas, aunque el
       },
       link,
     )
-    const fila = await aviso(ext)
     await prisma.kdsOrder.updateMany({ where: { orderId: order.id }, data: { status: KdsOrderStatus.READY } })
+    return order
+  }
+
+  /** Una venta de Rappi como la deja la ingesta real, con su aviso guardado y la comanda ya marcada lista. */
+  async function sembrar() {
+    const ext = `listo-it-${sufijo}-${++n}`
+    const order = await ventaListaParaElListo(ext, `R-${n}`)
+    const fila = await aviso(ext)
     return { order, ext, fila }
   }
 
@@ -356,6 +368,71 @@ describe('el «listo» de Rappi contra Postgres: a lo más 3 llamadas, aunque el
       aceptacion: { en: expect.any(String), evidencia: 'HTTP_2XX' },
       listo: { llamadas: 1 },
     })
+  })
+
+  it('🔴 el aviso NEW_ORDER que guarda el INGRESO REAL es la fila donde el «listo» cuenta: la llave del ingreso y la del contador coinciden', async () => {
+    // El resto de las pruebas siembran el aviso a mano con `llaveDeAvisoDePedido`; si el ingreso real (`persistRappiWebhookEvent`)
+    // guardara otra llave, el contador no encontraría la fila y ningún «listo» saldría (o saldría sin contar).
+    const ext = `listo-it-${sufijo}-ingreso`
+    const cuerpo = Buffer.from(JSON.stringify({ order_detail: { order_id: ext }, store: { external_id: tienda } }), 'utf8')
+    const secreto = `secreto-ingreso-${sufijo}`
+    const t = '1760000000'
+    const firma = crypto
+      .createHmac('sha256', secreto)
+      .update(Buffer.concat([Buffer.from(`${t}.`, 'utf8'), cuerpo]))
+      .digest('hex')
+
+    const ingreso = await persistRappiWebhookEvent({
+      rawBody: cuerpo,
+      signatureHeader: `t=${t},sign=${firma}`,
+      evento: 'NEW_ORDER',
+      secrets: [secreto],
+    })
+    expect(ingreso.outcome).toBe('PERSISTED')
+    const fila = await prisma.deliveryOrderEvent.findUniqueOrThrow({ where: { id: ingreso.eventRowId! } })
+    expect(fila).toMatchObject({
+      dedupKey: llaveDeAvisoDePedido('NEW_ORDER', tienda, ext),
+      externalOrderId: ext,
+      channelLinkId: link.id,
+      venueId,
+    })
+
+    const order = await ventaListaParaElListo(ext, 'R-ingreso')
+    mockMarcarListoRappi.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
+
+    // Con la llave desalineada esto sería NO_REINTENTAR (`LISTO_SIN_AVISO`) y no saldría ninguna llamada.
+    expect((await markDeliveryOrderReady(venueId!, order.id)).outcome).toBe('READY')
+    expect(llamadasA(ext)).toEqual([[ext, tienda, { reintentarEn401: false }]])
+    expect(leerEstado(await estadoDe(fila.id)).listo).toEqual({ llamadas: 1, cerrado: 'HTTP_2XX' })
+    // Cuenta en LA fila del ingreso: no apareció una segunda para el pedido.
+    expect(await prisma.deliveryOrderEvent.count({ where: { venueId, externalOrderId: ext } })).toBe(1)
+  })
+
+  it('🔴 el candado de tiendas bloquea la llamada (nunca salió): NO gasta ninguna de las 3 — tras cinco bloqueos siguen disponibles las tres', async () => {
+    const s = await sembrar()
+    // `RappiEscrituraBloqueadaError` extiende esta clase: el candado salta ANTES de la red.
+    const bloqueo = new DeliveryWriteNotSentError(
+      'STORE_NOT_AUTHORIZED',
+      '[Rappi] escritura BLOQUEADA para la tienda',
+      'Rappi todavía no está habilitada',
+    )
+    mockMarcarListoRappi.mockRejectedValue(bloqueo)
+
+    for (let i = 0; i < 5; i++) await expect(markDeliveryOrderReady(venueId!, s.order.id)).rejects.toBe(bloqueo)
+
+    // Cada intento reservó (+1) y devolvió (-1): el contador quedó donde empezó y el «listo» NO se cerró por TOPE.
+    expect(llamadasA(s.ext)).toHaveLength(5)
+    expect(await estadoDe(s.fila.id)).toEqual({ aceptacion: ACEPTACION, listo: { llamadas: 0 } })
+    expect(await listoDe(s.order.id)).toBeNull()
+
+    // Se abre el candado: salen exactamente las tres que Rappi atiende, y la cuarta ya no.
+    mockMarcarListoRappi.mockReset().mockResolvedValue({ ok: false, status: 424, raw: CUERPO_424_REAL })
+    const desenlaces: string[] = []
+    for (let i = 0; i < 4; i++) desenlaces.push((await markDeliveryOrderReady(venueId!, s.order.id)).outcome)
+
+    expect(desenlaces).toEqual(['FAILED', 'FAILED', 'FAILED', 'NO_REINTENTAR'])
+    expect(llamadasA(s.ext)).toHaveLength(MAX_LLAMADAS_LISTO)
+    expect(await estadoDe(s.fila.id)).toEqual({ aceptacion: ACEPTACION, listo: { llamadas: 3, cerrado: 'TOPE' } })
   })
 
   it('🔴 seis reservas a la vez sobre el mismo pedido: exactamente tres con permiso (FOR UPDATE)', async () => {
