@@ -84,8 +84,8 @@ Before reading further, confirm you need **Blumon E-commerce Integration**:
 
 ```typescript
 {
-  username: 'jose@avoqado.io',
-  password: 'U!Sr{9DHN4-wKH|' // SHA-256 hashed before sending
+  username: process.env.BLUMON_MASTER_USERNAME,
+  password: process.env.BLUMON_MASTER_PASSWORD, // SHA-256 hashed before sending (never write the values here: the repo is public)
 }
 ```
 
@@ -358,7 +358,7 @@ Add to `.env`:
 ```bash
 # Blumon OAuth 2.0 (already configured)
 BLUMON_MASTER_USERNAME=jose@avoqado.io
-BLUMON_MASTER_PASSWORD=U!Sr{9DHN4-wKH|
+BLUMON_MASTER_PASSWORD=<sandbox password: ask the team, never write it here>
 
 # Checkout URLs
 FRONTEND_URL=https://app.avoqado.io
