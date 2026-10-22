@@ -70,6 +70,7 @@ import { PaidOrderReconcilerJob } from '@/jobs/paid-order-reconciler.job'
 import { findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
+import { ordenDescuentaInventarioSql } from '@/services/inventory/inventoryPosting.service'
 
 const sello = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 let n = 0
@@ -1126,11 +1127,13 @@ describe('🔴 Ronda 12: dinero capturado sobre una sesión cancelada, reservas 
   // 🔴 R6-1 (efectivo sin red, Codex r5 #1): la MISMA venta cancelada por la ruta GENERAL (`cancelOrder`, el DELETE móvil) dejaba la
   // sesión MATERIALIZED y el registro de la terminal recibía 409 `CHECKOUT_ORDER_NOT_PAYABLE` (todo se revertía). Ahora queda igual que
   // por la ruta de vales: el Payment, la cuenta reabierta, la sesión CANCELLED y el vale liberado; sólo el suelto se descuenta.
+  // D2 (21-oct): la ruta general ya libera los vales y cancela la sesión AL CANCELAR (antes quedaba MATERIALIZED hasta que llegara dinero).
   it('🔴 R6-1: venta cancelada por la ruta GENERAL y la terminal registra $100 capturados ⇒ igual que R12-1 (antes: 409, el dinero se perdía)', async () => {
     await reiniciarInventario(10)
     const venta = await ventaDeVales()
     await cancelOrder(venueId!, venta.orderId, 'cancelada por el encargado', staffId)
-    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.MATERIALIZED)
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.CANCELLED)
+    expect(await valesLiberados(venta)).toEqual(LIBERADOS)
 
     const cobro: any = await cobroDeLaTerminal(venta.orderId, 100)
 
@@ -1415,6 +1418,106 @@ describe('🔴 Ronda 12: dinero capturado sobre una sesión cancelada, reservas 
  * para pagar entre varios se registran abonos en la misma cuenta. La venta de $100: el vale del queso ($60, con su reserva) + el pan
  * suelto ($40). Mover la cuenta entera a otra mesa no mueve renglones entre cuentas: sigue permitido.
  */
+/**
+ * 🔴 D1 (21-oct-2026, tablero hz:11d84b54:D1; QA N86): el vale de una venta CANCELADA se vuelve a escanear y se cobra en otra cuenta. La
+ * cuenta cancelada conserva su renglón con la procedencia (`releasedAreaTicketLineId`) y suelta el vínculo único. Lo delicado es R12-1:
+ * si a la cuenta cancelada le llega dinero ya capturado, se reabre, y su renglón de vale NO debe descontarse otra vez (Codex r1 #1, r2 #1),
+ * en los dos órdenes de llegada. Venta de $100 = vale $60 (con reserva) + suelto $40.
+ */
+describe('🔴 D1: el vale de una venta cancelada se vuelve a cobrar en otra cuenta, y el dinero tardío de la vieja', () => {
+  const cancelarSesion = (sessionId: string) =>
+    cancelAreaTicketCheckout(venueId!, sessionId, { idempotencyKey: `d1-cancel-${sello}-${++n}`, deviceUid: checkoutDeviceUid, staffId })
+  /** Volver a escanear el vale en una caja y armar su cuenta nueva (sólo el vale, $60). */
+  async function rearmarVale(ticketId: string) {
+    const k = `d1-${sello}-${++n}`
+    const { code } = await prisma.areaTicket.findUniqueOrThrow({ where: { id: ticketId }, select: { code: true } })
+    const checkout = await createAreaTicketCheckout(venueId!, { idempotencyKey: `checkout-${k}`, deviceUid: checkoutDeviceUid, staffId })
+    await addTicketToCheckout(venueId!, checkout.id, code, { idempotencyKey: `claim-${k}`, deviceUid: checkoutDeviceUid, staffId })
+    const armada = await materializeAreaTicketCheckout(venueId!, checkout.id, {
+      idempotencyKey: `materialize-${k}`,
+      deviceUid: checkoutDeviceUid,
+      staffId,
+      source: 'AVOQADO_ANDROID',
+    })
+    return { orderId: armada.order!.id, total: armada.order!.total }
+  }
+  const renglonDelValeEn = (orderId: string) =>
+    prisma.orderItem.findFirstOrThrow({
+      where: { orderId, productId: valeProductId },
+      select: { id: true, areaTicketLineId: true, releasedAreaTicketLineId: true },
+    })
+
+  it('re-armar en B, cobrar B y DESPUÉS llega el dinero de A: el vale se descuenta UNA vez (en B) y el suelto una vez (en A)', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    const lineaDelVale = (await renglonDelValeEn(a.orderId)).areaTicketLineId
+    await cancelarSesion(a.sessionId)
+
+    const b = await rearmarVale(a.ticketId)
+    expect(b.total).toBe('60.00')
+    expect(await renglonDelValeEn(a.orderId)).toMatchObject({ areaTicketLineId: null, releasedAreaTicketLineId: lineaDelVale })
+    expect((await renglonDelValeEn(b.orderId)).areaTicketLineId).toBe(lineaDelVale)
+
+    await cobroDeLaTerminal(b.orderId, 60)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 10 })
+
+    await cobroDeLaTerminal(a.orderId, 100)
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: a.orderId }, select: { paymentStatus: true } })).toEqual({
+      paymentStatus: 'PAID',
+    })
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+  })
+
+  it('re-armar en B, llega el dinero de A ANTES de que B cobre: A no toca el vale ni su reserva; B lo descuenta al cobrarse', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    await cancelarSesion(a.sessionId)
+    const b = await rearmarVale(a.ticketId)
+
+    await cobroDeLaTerminal(a.orderId, 100)
+    expect(await stockDe()).toEqual({ vale: 10, suelto: 9 })
+    expect(
+      (await prisma.areaTicketInventoryReservation.findFirstOrThrow({ where: { areaTicketId: a.ticketId }, select: { status: true } }))
+        .status,
+    ).toBe('ACTIVE')
+
+    await cobroDeLaTerminal(b.orderId, 60)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    expect((await prisma.areaTicket.findUniqueOrThrow({ where: { id: a.ticketId }, select: { orderId: true } })).orderId).toBe(b.orderId)
+  })
+
+  it('el vigilante de dinero (copia SQL del posting) no espera descuento de un renglón de vale revendido', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    await cancelarSesion(a.sessionId)
+    const b = await rearmarVale(a.ticketId)
+    const sesionB = await prisma.areaTicketCheckoutSession.findFirstOrThrow({ where: { orderId: b.orderId }, select: { id: true } })
+    await cancelarSesion(sesionB.id)
+    await rearmarVale(a.ticketId)
+
+    const descuenta = async (orderId: string) =>
+      (
+        await prisma.$queryRawUnsafe<Array<{ descuenta: boolean }>>(
+          `SELECT ${ordenDescuentaInventarioSql('o')} AS descuenta FROM "Order" o WHERE o.id = $1`,
+          orderId,
+        )
+      )[0].descuenta
+    // B sólo tiene el renglón del vale, ya revendido: nada que descontar. A conserva el suelto: ése sí.
+    expect(await descuenta(b.orderId)).toBe(false)
+    expect(await descuenta(a.orderId)).toBe(true)
+  })
+
+  it('si el dinero de A llegó ANTES de re-armar, A es una cuenta viva con el vale: re-armar contesta 409 con la cuenta, nunca 503', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    await cancelarSesion(a.sessionId)
+    await cobroDeLaTerminal(a.orderId, 100)
+
+    await expect(rearmarVale(a.ticketId)).rejects.toMatchObject({ statusCode: 409, code: 'AREA_TICKET_LINE_IN_OTHER_ORDER' })
+    expect((await renglonDelValeEn(a.orderId)).releasedAreaTicketLineId).toBeNull()
+  })
+})
+
 describe('🔴 Ronda 14: una cuenta con vales no se separa ni se junta; se paga con abonos', () => {
   const RECHAZO = {
     statusCode: 400,

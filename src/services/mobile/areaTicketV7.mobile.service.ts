@@ -1497,6 +1497,53 @@ function orderItemFromSnapshot(line: any, fulfillmentAreaId: string) {
   }
 }
 
+/**
+ * 🔴 D1 (21-oct-2026, tablero hz:11d84b54:D1; QA N86): un vale cuya venta se canceló DESPUÉS de armar su cuenta vuelve a ISSUED
+ * (`liberarValesYCancelarSesion`), pero el renglón de esa cuenta cancelada conservaba `OrderItem.areaTicketLineId` (único) y el vale
+ * quedaba incobrable con un 503 de «código de entrega». Al volver a cobrarlo, el renglón viejo SE QUEDA en su cuenta (producto, IVA,
+ * peso, asignaciones) con la procedencia en `releasedAreaTicketLineId` y suelta el vínculo, que toma el renglón nuevo armado desde el
+ * vale. Por qué así y no mudarlo ni borrarlo: R12-1 puede reabrir la cuenta cancelada con dinero ya capturado (Codex r1/r2/r3,
+ * `docs/audit/2026-10-21-vale-cancelado-recobrable/`); `renglonDeVale.ts` dice cómo se lee esa procedencia.
+ *
+ * Jerarquía de vales: sesión → vales (ya bloqueados por quien llama) → Order, una a una como `lockAreaTicketCheckoutHierarchy`: el registro
+ * del dinero tardío de esa cuenta toma su Order igual, así que no se cruzan. Sólo se suelta de una cuenta CANCELLED/DELETED; una cuenta viva
+ * que tiene el vale se respeta y se dice con un 409. Devuelve las cuentas de las que se soltó (bitácora).
+ */
+async function soltarValesDeCuentasCanceladas(tx: Prisma.TransactionClient, venueId: string, lineIds: string[]): Promise<string[]> {
+  if (lineIds.length === 0) return []
+  const ocupados = await tx.orderItem.findMany({
+    where: { areaTicketLineId: { in: lineIds } },
+    select: { orderId: true },
+    take: lineIds.length,
+  })
+  if (ocupados.length === 0) return []
+  const ordenIds = [...new Set(ocupados.map(item => item.orderId))].sort()
+  for (const ordenId of ordenIds) {
+    await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${ordenId} AND "venueId" = ${venueId} FOR UPDATE`
+  }
+  const renglones = await tx.orderItem.findMany({
+    where: { areaTicketLineId: { in: lineIds } },
+    select: { id: true, orderId: true, areaTicketLineId: true, order: { select: { venueId: true, status: true, orderNumber: true } } },
+    take: lineIds.length,
+  })
+  for (const renglon of renglones) {
+    if (renglon.order.venueId !== venueId || (renglon.order.status !== 'CANCELLED' && renglon.order.status !== 'DELETED')) {
+      throw domainError(
+        409,
+        'AREA_TICKET_LINE_IN_OTHER_ORDER',
+        `Este vale ya está en la cuenta ${renglon.order.orderNumber}. Revísala en Órdenes.`,
+      )
+    }
+  }
+  for (const renglon of renglones) {
+    await tx.orderItem.update({
+      where: { id: renglon.id },
+      data: { areaTicketLineId: null, releasedAreaTicketLineId: renglon.areaTicketLineId },
+    })
+  }
+  return [...new Set(renglones.map(renglon => renglon.orderId))].sort()
+}
+
 export async function materializeAreaTicketCheckout(venueId: string, sessionId: string, input: MaterializeCheckoutInput) {
   const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
   const session = await loadCheckout(venueId, sessionId)
@@ -1534,10 +1581,14 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   const sortedTicketIds = session.tickets.map(ticket => ticket.id).sort()
 
   let materialized: any
+  // Las cuentas canceladas de las que se soltó un vale de esta venta (va a la bitácora).
+  let soltadosDe: string[] = []
   for (let collisionAttempt = 0; collisionAttempt < 5; collisionAttempt++) {
     const deliveryCode = generateOpaqueCode(8)
     try {
-      materialized = await prisma.$transaction(
+      // Codex r4 #1 (D1): un cobro tardío puede reabrir la cuenta vieja de un vale mientras esta caja lo re-arma; su candado choca con la
+      // foto Serializable (40001). Se reintenta con la MISMA regla de la casa, y el reintento ve la cuenta viva y contesta el 409 con ella.
+      materialized = await withSerializableRetry(
         async tx => {
           await tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${sessionId} AND "venueId" = ${venueId} FOR UPDATE`
           if (sortedTicketIds.length > 0) {
@@ -1576,6 +1627,11 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
             }
             assertSnapshotIntegrity(ticket)
           }
+          soltadosDe = await soltarValesDeCuentasCanceladas(
+            tx,
+            venueId,
+            fresh.tickets.flatMap(ticket => ticket.lines.map(line => line.id)),
+          )
           const requiresDeliveryCode = fresh.tickets.some(ticket => ticket.fulfillmentModeSnapshot !== FulfillmentMode.IMMEDIATE)
 
           // 🔴 Cobro de vales en la caja: la orden nace en el turno abierto ahora
@@ -1655,11 +1711,15 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
           }
           return tx.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: fresh.id }, include: checkoutInclude })
         },
-        { isolationLevel: Prisma.TransactionIsolationLevel.Serializable },
+        { timeoutMs: 5_000 },
       )
       break
     } catch (error: any) {
       if (error?.code === 'P2002') {
+        // Otra cuenta tomó el renglón del vale entre la revisión y el alta: no es un código de entrega repetido.
+        if (String(error?.meta?.target ?? '').includes('areaTicketLineId')) {
+          throw domainError(409, 'AREA_TICKET_LINE_IN_OTHER_ORDER', 'Este vale ya está en otra cuenta. Revísala en Órdenes.')
+        }
         const winner = await loadCheckout(venueId, sessionId)
         if (winner.orderId) return mapCheckout(winner)
         continue
@@ -1681,6 +1741,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
       orderId: materialized.orderId,
       ticketIds: sortedTicketIds,
       total: materialized.order ? money(materialized.order.total) : money(total),
+      ...(soltadosDe.length > 0 ? { valesSoltadosDeCuentasCanceladas: soltadosDe } : {}),
     },
   })
   return mapCheckout(materialized)
@@ -1863,6 +1924,105 @@ async function liberarValesYCancelarSesion(
       activePaymentAttemptId: null,
       version: { increment: 1 },
     },
+  })
+}
+
+/** `FOR UPDATE NOWAIT` sobre una fila que tiene otra transacción ⇒ `lock_not_available` (55P03), como `esFilaTomadaSinEsperar`. */
+function esFilaTomadaPorOtraCaja(error: unknown): boolean {
+  const texto = error instanceof Error ? error.message : String(error)
+  const codigo = (error as { meta?: { code?: unknown } } | null)?.meta?.code
+  return codigo === '55P03' || /55P03|could not obtain lock/i.test(texto)
+}
+
+/** Lo que soltó una cancelación general de una venta de vales (D2): su sesión y sus vales. */
+export type ValesSoltados = { sessionId: string; ticketIds: string[] }
+
+/**
+ * 🔴 D2 (21-oct-2026, tablero hz:11d84b54:D2): la venta de vales también se cancela por la ruta GENERAL —el DELETE del POS, la terminal,
+ * la cola sin red (`cancelOrderInTransaction`), el panel (`deleteOrder`, `updateOrder`) y «Anular» todo en la TPV (`voidItems`)—, que no
+ * tocaba su sesión: quedaba MATERIALIZED con sus vales CLAIMED y nada los soltaba (`releaseExpiredClaims` sólo vence sesiones OPEN; el
+ * barrido de R12-3 excluye ventas canceladas). Al re-escanear: «Este vale está siendo cobrado en otra caja», para siempre.
+ *
+ * Va DESPUÉS de `assertOrderCancellableUnderLock` (la orden ya bloqueada; el 400 de «tiene dinero» y el 409 del cobro de terminal
+ * conservan su prioridad) y antes de escribir la cancelación. La venta queda como la deja la ruta de vales (`cancelAreaTicketCheckout`):
+ * OPEN/MATERIALIZED ⇒ vales ISSUED y sesión CANCELLED; un cobro de vales que puede estar en camino ⇒ el MISMO 409; PAID (venta devuelta
+ * y luego cancelada), CANCELLED o EXPIRED ⇒ nada.
+ *
+ * 🔴 La sesión y sus vales se toman SIN ESPERAR (Codex r1 #1 y r2 #1). La jerarquía de vales es sesión → vales → orden, y aquí la orden
+ * (y las hermanas de su mesa) ya están tomadas: esperar la sesión podía cruzarse con un cobro, un armado, una liquidación de varias
+ * cuentas o la cancelación de una hermana (40P01). Sin espera no hay ciclo: D2 no le agrega a la cancelación ninguna espera que no
+ * tuviera. Si otra caja tiene la sesión o un vale, 409 `VERSION_CONFLICT` (la cola sin red lo reintenta) y la transacción entera se
+ * revierte: la cancelación no se escribe.
+ *
+ * Devuelve lo que soltó (o `null`) para que quien llama lo anote con `auditarValesSoltados` DESPUÉS del commit (Codex r3 #1): una
+ * bitácora dentro de la transacción revisa la liga al empleado con un candado implícito que sí espera.
+ */
+export async function soltarValesAlCancelarLaVenta(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; orderId: string },
+): Promise<ValesSoltados | null> {
+  const candidata = await tx.areaTicketCheckoutSession.findFirst({
+    where: { venueId: input.venueId, orderId: input.orderId },
+    select: { id: true },
+  })
+  if (!candidata) return null
+  const sinEsperar = async (tomar: () => Promise<unknown>) => {
+    try {
+      await tomar()
+    } catch (error) {
+      if (esFilaTomadaPorOtraCaja(error)) {
+        throw domainError(409, 'VERSION_CONFLICT', 'Esta venta de vales se está cobrando o cambiando en otra caja; vuelve a intentarlo.')
+      }
+      throw error
+    }
+  }
+  await sinEsperar(
+    () =>
+      tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${candidata.id} AND "venueId" = ${input.venueId} FOR UPDATE NOWAIT`,
+  )
+  const sesion = await tx.areaTicketCheckoutSession.findFirst({
+    where: { id: candidata.id, venueId: input.venueId, orderId: input.orderId },
+    select: { id: true, status: true, tickets: { select: { id: true }, orderBy: { id: 'asc' } } },
+  })
+  if (!sesion) return null
+  if (
+    checkoutStatusIn(sesion.status, [
+      AreaTicketCheckoutStatus.PAYMENT_PENDING,
+      AreaTicketCheckoutStatus.PARTIALLY_PAID,
+      AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED,
+    ])
+  ) {
+    throw domainError(409, 'CHECKOUT_HAS_PAYMENT', 'Esta venta ya tiene o podría tener un pago; usa conciliación o reembolso.')
+  }
+  if (!checkoutStatusIn(sesion.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) return null
+  if (sesion.tickets.length > 0) {
+    await sinEsperar(() =>
+      tx.$queryRaw(
+        Prisma.sql`SELECT id FROM "AreaTicket" WHERE "venueId" = ${input.venueId} AND id IN (${Prisma.join(
+          sesion.tickets.map(ticket => ticket.id),
+        )}) ORDER BY id FOR UPDATE NOWAIT`,
+      ),
+    )
+  }
+  await liberarValesYCancelarSesion(tx, { venueId: input.venueId, sessionId: sesion.id, cancelIdempotencyKey: null })
+  return { sessionId: sesion.id, ticketIds: sesion.tickets.map(ticket => ticket.id) }
+}
+
+/** D2: la bitácora de los vales que soltó una cancelación general, después del commit (nunca lanza; Codex r3 #1). */
+export function auditarValesSoltados(input: {
+  venueId: string
+  orderId: string
+  staffId?: string | null
+  soltados: ValesSoltados | null | undefined
+}): void {
+  if (!input.soltados) return
+  void logAction({
+    staffId: input.staffId ?? undefined,
+    venueId: input.venueId,
+    action: 'AREA_TICKET_CHECKOUT_CANCELLED',
+    entity: 'AreaTicketCheckoutSession',
+    entityId: input.soltados.sessionId,
+    data: { orderId: input.orderId, motivo: 'ORDEN_CANCELADA_POR_LA_RUTA_GENERAL', ticketIds: input.soltados.ticketIds },
   })
 }
 

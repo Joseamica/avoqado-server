@@ -564,6 +564,10 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'METADATA',
     nota: 'marca las comandas del renglón; no mueve total ni descuento',
   },
+  'src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas': {
+    clase: 'METADATA',
+    nota: 'D1: pasa el vínculo del vale a la procedencia en el renglón de una cuenta CANCELADA; no mueve total ni descuento',
+  },
   'src/services/fiscal/sellosIva.ts#sellarRenglones': {
     clase: 'SELLO_FISCAL',
     nota: 'escribe sólo el IVA sellado del renglón (ivaTratamiento)',

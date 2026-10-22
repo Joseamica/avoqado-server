@@ -14,6 +14,7 @@ import {
   getProductInventoryStatus,
 } from '../dashboard/productInventoryIntegration.service'
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
+import type { ValesSoltados } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import {
   buildItemDiscountRow,
@@ -23,6 +24,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
+import { esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -839,6 +841,11 @@ export async function deductTrackedInventoryForFreeCart(order: any, staffId: str
   const coveredAreaTicketLines = await getAreaTicketLineIdsCoveredByInventoryReservations(order.venueId, order.items || [])
 
   for (const item of order.items || []) {
+    // D1: el vale de este renglón se volvió a cobrar en otra cuenta: su producto lo descuenta la otra.
+    if (esValeRevendido(item)) {
+      logger.info('⏭️ [WITH ITEMS] Skipping deduction for a vale line resold in another order', { orderId: order.id, orderItemId: item.id })
+      continue
+    }
     if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
       logger.info('⏭️ [WITH ITEMS] Skipping generic deduction for area-ticket line covered by reservation', {
         orderId: order.id,
@@ -3038,6 +3045,8 @@ interface VoidItemsInput {
   reason: string // Required: "Wrong item entered", "Customer changed mind", etc.
   staffId: string // Staff member performing the action
   expectedVersion: number // Optimistic locking
+  /** Quien está autenticado (`authContext.userId`): firma la bitácora si anular todo suelta los vales de la venta (D2). */
+  actorId?: string
 }
 
 /**
@@ -3051,6 +3060,7 @@ interface VoidItemsInput {
 export async function voidItems(venueId: string, orderId: string, input: VoidItemsInput): Promise<Order & { tableName: string | null }> {
   logger.info(`❌ [ORDER SERVICE] Voiding ${input.itemIds.length} items from order ${orderId} | reason: ${input.reason}`)
 
+  let valesSoltados: ValesSoltados | null = null
   const { updatedOrder, isVoidingAllItems, voidAmount, itemsToVoid, newTotal, recorte } = await prisma.$transaction(
     async tx => {
       // El candado de comandas va PRIMERO (mismo orden que el armado: comandas → orden). Si esta anulación deja la cuenta
@@ -3164,6 +3174,12 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
               'Hay un cobro en curso en la terminal para esta orden. Cancela o espera el resultado del cobro antes de anular artículos.',
           },
         )
+      }
+      // 🔴 D2 (Codex r1 #2): anular TODO cancela la venta; si es de vales, sus vales quedan libres como en la ruta de vales (sin esperar
+      // por ellos). La bitácora la firma quien está autenticado (`actorId`), no el `staffId` del cuerpo (Codex r2 #2).
+      if (isVoidingAllItems) {
+        const { soltarValesAlCancelarLaVenta } = await import('../mobile/areaTicketV7.mobile.service')
+        valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
       }
 
       // R9 (Codex r4 R4-1): lo anulado se lleva su IVA de la cabecera ANTES de borrar los platos (y, desde B2c, antes del recorte
@@ -3335,6 +3351,11 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
     },
     { timeout: 15_000, maxWait: 5_000 },
   )
+  // D2: los vales que anular todo dejó libres, firmados por quien está autenticado (después del commit, Codex r3 #1).
+  if (valesSoltados) {
+    const { auditarValesSoltados } = await import('../mobile/areaTicketV7.mobile.service')
+    auditarValesSoltados({ venueId, orderId, staffId: input.actorId ?? null, soltados: valesSoltados })
+  }
 
   // ⭐ If voided all items, remove customer linkages (pay-later orders)
   // No point keeping "cuenta por cobrar" for $0.00 order with 0 items (Toast/Square pattern)

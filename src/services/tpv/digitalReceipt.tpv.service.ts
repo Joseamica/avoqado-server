@@ -181,6 +181,24 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
         throw new Error(`Payment ${paymentId} not found`)
       }
 
+      // D1: un renglón cuyo vale se volvió a cobrar en otra cuenta conserva su procedencia (`releasedAreaTicketLineId`) y ya no el
+      // vínculo; el recibo de ESTA cuenta sigue diciendo de qué vale era. Una consulta, sólo si hay alguno.
+      const lineasRevendidas =
+        paymentData.order?.items
+          .filter(item => !item.areaTicketLine && item.releasedAreaTicketLineId)
+          .map(item => item.releasedAreaTicketLineId!) ?? []
+      const codigoDeValeRevendido = new Map(
+        lineasRevendidas.length === 0
+          ? []
+          : (
+              await tx.areaTicketLine.findMany({
+                where: { id: { in: lineasRevendidas } },
+                select: { id: true, areaTicket: { select: { code: true } } },
+                take: lineasRevendidas.length,
+              })
+            ).map(linea => [linea.id, linea.areaTicket.code] as const),
+      )
+
       // Create comprehensive data snapshot
       const dataSnapshot: ReceiptDataSnapshot = {
         payment: {
@@ -232,10 +250,12 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
           unitPrice: Number(item.unitPrice),
           total: Number(item.total),
           weightKg: item.weightQuantity != null ? Number(item.weightQuantity) : null,
-          areaSourceLabel:
-            item.fulfillmentArea && item.areaTicketLine
-              ? `${item.fulfillmentArea.name} · Vale ${item.areaTicketLine.areaTicket.code}`
-              : undefined,
+          areaSourceLabel: (() => {
+            const codigo =
+              item.areaTicketLine?.areaTicket.code ??
+              (item.releasedAreaTicketLineId ? codigoDeValeRevendido.get(item.releasedAreaTicketLineId) : undefined)
+            return item.fulfillmentArea && codigo ? `${item.fulfillmentArea.name} · Vale ${codigo}` : undefined
+          })(),
           modifiers: item.modifiers.map(modifier => ({
             name: modifier.modifier?.name || modifier.name || 'Modifier',
             quantity: modifier.quantity,

@@ -5,6 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError 
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
+import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
@@ -1588,7 +1589,7 @@ async function updateOrderTotalsForStandalonePayment(
   if (!order) {
     throw new Error(`Order ${orderId} not found for total update`)
   }
-  const isAreaTicketOrder = order.items.some(item => item.areaTicketLineId != null)
+  const isAreaTicketOrder = order.items.some(esRenglonDeVale)
 
   // 🔴 UN REEMBOLSO NO REABRE SALDO (founder, 2026-08-18).
   //
@@ -1797,6 +1798,8 @@ async function updateOrderTotalsForStandalonePayment(
       (item: any) =>
         item.productId &&
         (!item.paymentAllocations || item.paymentAllocations.length === 0) &&
+        // D1: el vale de este renglón se volvió a cobrar en otra cuenta; aquí no se valida ni se descuenta.
+        !esValeRevendido(item) &&
         (!item.areaTicketLineId || !coveredAreaTicketLines.has(item.areaTicketLineId)),
     )
 
@@ -2124,6 +2127,11 @@ async function updateOrderTotalsForStandalonePayment(
 
     // Deduct stock for each product in the order
     for (const item of updatedOrder.items) {
+      // D1: el vale de este renglón se volvió a cobrar en otra cuenta (R12-1 reabrió ésta): su producto lo descuenta la otra.
+      if (esValeRevendido(item)) {
+        logger.info('⏭️ Skipping deduction for a vale line resold in another order', { orderId, orderItemId: item.id })
+        continue
+      }
       if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
         logger.info('⏭️ Skipping generic deduction for area-ticket line covered by reservation', {
           orderId,
@@ -3656,7 +3664,7 @@ export async function recordOrderPayment(
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
-  const hasAreaTicketLines = activeOrder.items.some(item => item.areaTicketLineId != null)
+  const hasAreaTicketLines = activeOrder.items.some(esRenglonDeVale)
   if (hasAreaTicketLines && !paymentData.idempotencyKey) {
     throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
@@ -3907,12 +3915,12 @@ export async function recordOrderPayment(
                 contratoDePrecio: true,
                 taxAmount: true,
                 status: true,
-                items: { select: { areaTicketLineId: true } },
+                items: { select: { areaTicketLineId: true, releasedAreaTicketLineId: true } },
               },
             })
             if (ordenBloqueada) {
               const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
-                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(i => i.areaTicketLineId != null) },
+                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(esRenglonDeVale) },
                 {
                   subtotal: ordenBloqueada.subtotal,
                   discountAmount: ordenBloqueada.discountAmount,

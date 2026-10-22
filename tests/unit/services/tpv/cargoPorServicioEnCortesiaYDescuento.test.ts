@@ -74,6 +74,8 @@ jest.mock('@/utils/prismaClient', () => {
     // Codex 3.6 (S5): anular TODOS los platos retira de la pantalla de cocina las comandas pendientes de la venta.
     kdsOrderItem: { findMany: jest.fn(async () => []), deleteMany: jest.fn() },
     kdsOrder: { findMany: jest.fn(async () => []), deleteMany: jest.fn(), updateMany: jest.fn(async () => ({ count: 0 })) },
+    // D2 (vales): anular TODOS los platos pregunta si la venta tiene sesión de vales para dejarlos libres; aquí no la tiene.
+    areaTicketCheckoutSession: { findFirst: jest.fn(async () => null) },
   }
   // `__insideTx` deja MEDIBLE la atomicidad: cada escritura puede anotar si ocurrió
   // DENTRO del callback de `$transaction`. Sin esta bandera, con un mock que pasa el

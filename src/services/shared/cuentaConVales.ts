@@ -1,4 +1,5 @@
 import { BadRequestError } from '../../errors/AppError'
+import { esRenglonDeVale } from './renglonDeVale'
 
 /** R14-1 (founder, 17-oct): lo que ve el operador al intentar separar o juntar una cuenta con vales de mostrador. */
 export const MENSAJE_CUENTA_CON_VALES =
@@ -7,7 +8,7 @@ export const MENSAJE_CUENTA_CON_VALES =
 /** Lo que se lee de la cuenta, bajo su candado: su sesión de vales y sus renglones con `areaTicketLineId`. */
 type Cuenta = {
   areaTicketCheckoutSession?: { id: string } | null
-  items?: ReadonlyArray<{ areaTicketLineId?: string | null }>
+  items?: ReadonlyArray<{ areaTicketLineId?: string | null; releasedAreaTicketLineId?: string | null }>
 }
 
 /**
@@ -22,6 +23,6 @@ type Cuenta = {
  * separar/juntar): la cola sin red lo deja REJECTED, nunca RETRY. Sin bitácora: no muta nada.
  */
 export function rechazarSiLaCuentaTieneVales(...cuentas: Cuenta[]): void {
-  if (cuentas.some(c => c.areaTicketCheckoutSession != null || c.items?.some(i => i.areaTicketLineId != null)))
+  if (cuentas.some(c => c.areaTicketCheckoutSession != null || c.items?.some(esRenglonDeVale)))
     throw new BadRequestError(MENSAJE_CUENTA_CON_VALES, 'AREA_TICKET_ORDER_NOT_SPLITTABLE')
 }
