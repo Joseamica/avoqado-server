@@ -30,13 +30,23 @@ const SECRET_SEGMENT_AFTER: ReadonlyArray<ReadonlyArray<string>> = [
   ['public', 'gift-cards'],
 ]
 
-/** Reemplaza por `placeholder` cada segmento-secreto de una RUTA (sin query string). Sin distinguir mayúsculas: Express tampoco. */
+/**
+ * Reemplaza por `placeholder` cada segmento-secreto de una RUTA (sin query string). Sin distinguir mayúsculas: Express tampoco.
+ * 🔴 Se busca dos veces: con los segmentos tal cual (un vacío cuenta: `aggregators//<token>` ya se tapaba así) y saltando los
+ * vacíos, porque el montaje de Express se come la barra de más y SÍ sirve `/public//gift-cards/<token>` (1b S6 m1). No se
+ * colapsan las barras: la ruta sale igual y sólo cambia el secreto (una ruta sin secreto no cambia de forma).
+ */
 export function redactPathSecrets(path: string, placeholder: string): string {
   const segments = path.split('/')
-  for (const prefix of SECRET_SEGMENT_AFTER) {
-    for (let i = 0; i + prefix.length < segments.length; i++) {
-      const matches = prefix.every((p, j) => p === '*' || segments[i + j].toLowerCase() === p)
-      if (matches && segments[i + prefix.length] !== '') segments[i + prefix.length] = placeholder
+  const todos = segments.map((_, i) => i)
+  const sinVacios = todos.filter(i => segments[i] !== '')
+  for (const vista of [todos, sinVacios]) {
+    for (const prefix of SECRET_SEGMENT_AFTER) {
+      for (let k = 0; k + prefix.length < vista.length; k++) {
+        const matches = prefix.every((p, j) => p === '*' || segments[vista[k + j]].toLowerCase() === p)
+        const secreto = vista[k + prefix.length]
+        if (matches && segments[secreto] !== '') segments[secreto] = placeholder
+      }
     }
   }
   return segments.join('/')

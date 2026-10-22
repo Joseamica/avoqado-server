@@ -1,6 +1,6 @@
 import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
-import express, { Router } from 'express'
+import express, { ErrorRequestHandler, Router } from 'express'
 import { z } from 'zod'
 import cors from 'cors'
 import crypto from 'crypto'
@@ -126,6 +126,19 @@ const regaloLimit = rateLimit({
 })
 router.options('/gift-cards/:pageToken', corsDeLaPaginaDelRegalo)
 router.get('/gift-cards/:pageToken', corsDeLaPaginaDelRegalo, regaloLimit, giftCardPublicController.getPaginaDelRegalo)
+// 🔴 S6 m2: un token con un `%` suelto (`…/<token>%`) no se puede decodificar. Express 4 lanza `URIError` («Failed to decode
+// param '<token>%'», `status` 400) al CASAR estas dos rutas, antes de su CORS, su límite y su controller, y el manejador global
+// lo escribiría —con el token en el mensaje— a nivel `error` y contestaría 500. Aquí se contesta como cualquier token mal
+// formado (S-11), con sus encabezados y su CORS propio, y sin log: el mensaje no se escribe en ningún lado y la URL ya sale
+// tapada en el log de peticiones. Sólo ESE error: cualquier otro (el del controller, p. ej.) sigue al manejador global.
+const tokenQueNoSeDecodifica: ErrorRequestHandler = (err, req, res, next) => {
+  if (!(err instanceof URIError) || (err as { status?: number }).status !== 400) return next(err)
+  res.set({ 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' })
+  corsDeLaPaginaDelRegalo(req, res, errDelCors =>
+    errDelCors ? next(errDelCors) : res.json({ success: true, data: { disponible: false } }),
+  )
+}
+router.use('/gift-cards', tokenQueNoSeDecodifica)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))

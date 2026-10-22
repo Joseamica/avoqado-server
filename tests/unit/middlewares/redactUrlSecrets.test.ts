@@ -84,6 +84,29 @@ describe('redactUrlSecrets', () => {
     expect(redactUrlSecrets(`/api/v1/Public/Gift-Cards/${pageToken}`)).not.toContain(pageToken)
   })
 
+  // 1b S6 m1 — con una barra de más Express IGUAL sirve la página (el montaje se come la barra) y el log llevaba el token
+  // entero. Es de toda la familia de secretos en la ruta. El log conserva sus barras: sólo cambia el secreto.
+  it('🔴 tapa el secreto aunque la ruta traiga barras repetidas, en toda la familia', () => {
+    const pageToken = 'Xk3pQ9vLmN2rT8wYz5aB7cD1eF4gH6jK0sU'
+    const tracking = 'Tr4ck1ngT0k3nDelPedido_EnLinea-abcdefgh'
+    const conector = 'Zx9_aB-3kLmN0pQrStUvWxYz1234567890abcdEFGH'
+    expect(redactUrlSecrets(`/api/v1/public//gift-cards/${pageToken}`)).toBe('/api/v1/public//gift-cards/[redactado]')
+    expect(redactUrlSecrets(`/api/v1/public/gift-cards//${pageToken}?x=1`)).toBe('/api/v1/public/gift-cards//[redactado]?x=1')
+    expect(redactUrlSecrets(`/api/v1/public///gift-cards///${pageToken}/`)).toBe('/api/v1/public///gift-cards///[redactado]/')
+    expect(redactUrlSecrets(`/api/v1/public/venues/x/ordering//orders/${tracking}/cancel`)).toBe(
+      '/api/v1/public/venues/x/ordering//orders/[redactado]/cancel',
+    )
+    expect(redactUrlSecrets(`/api/v1/webhooks//aggregators/totalpass/${conector}/booking`)).toBe(
+      '/api/v1/webhooks//aggregators/totalpass/[redactado]/booking',
+    )
+  })
+
+  it('una ruta SIN secreto con barras repetidas sale igual (no se colapsa ni se reescribe)', () => {
+    expect(redactUrlSecrets('/api/v1//orders/cm2k9x0ab0001c912abcdefgh?page=2')).toBe('/api/v1//orders/cm2k9x0ab0001c912abcdefgh?page=2')
+    expect(redactUrlSecrets('/api/v1/public//gift-cards')).toBe('/api/v1/public//gift-cards')
+    expect(redactUrlSecrets('/api/v1/public/gift-cards//')).toBe('/api/v1/public/gift-cards//')
+  })
+
   it('las rutas de tarjetas con sesión (id de la tarjeta, no secreto) no se tapan', () => {
     const ruta = '/api/v1/mobile/venues/v1/gift-cards/cm2k9x0ab0001c912abcdefgh/resend'
     expect(redactUrlSecrets(ruta)).toBe(ruta)
