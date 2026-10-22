@@ -75,4 +75,18 @@ describe('redactUrlSecrets', () => {
     )
     expect(redactUrlSecrets(`/api/v1/webhooks/aggregators/totalpass/${token}/booking?token=x`)).not.toContain(token)
   })
+
+  // 1b S6 — la página pública del regalo: el `pageToken` de la ruta ES la llave de la tarjeta (enseña el código)
+  it('🔴 tapa el pageToken de la página pública del regalo, con o sin query', () => {
+    const pageToken = 'Xk3pQ9vLmN2rT8wYz5aB7cD1eF4gH6jK0sU'
+    expect(redactUrlSecrets(`/api/v1/public/gift-cards/${pageToken}`)).toBe('/api/v1/public/gift-cards/[redactado]')
+    expect(redactUrlSecrets(`/api/v1/public/gift-cards/${pageToken}?x=1`)).toBe('/api/v1/public/gift-cards/[redactado]?x=1')
+    expect(redactUrlSecrets(`/api/v1/Public/Gift-Cards/${pageToken}`)).not.toContain(pageToken)
+  })
+
+  it('las rutas de tarjetas con sesión (id de la tarjeta, no secreto) no se tapan', () => {
+    const ruta = '/api/v1/mobile/venues/v1/gift-cards/cm2k9x0ab0001c912abcdefgh/resend'
+    expect(redactUrlSecrets(ruta)).toBe(ruta)
+    expect(redactUrlSecrets('/api/v1/public/gift-cards')).toBe('/api/v1/public/gift-cards')
+  })
 })

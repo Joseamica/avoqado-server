@@ -78,6 +78,19 @@ describe('normalizeEntrypoint', () => {
       expect(r).not.toContain(TOKEN)
     })
 
+    // 1b S6 — la página pública del regalo: el `pageToken` es la llave de la tarjeta
+    it('colapsa el pageToken de la página pública del regalo a :token, con o sin query', () => {
+      const pageToken = 'Xk3pQ9vLmN2rT8wYz5aB7cD1eF4gH6jK0sU'
+      expect(normalizeEntrypoint('GET', `/api/v1/public/gift-cards/${pageToken}`)).toBe('GET /api/v1/public/gift-cards/:token')
+      expect(normalizeEntrypoint('GET', `/api/v1/public/gift-cards/${pageToken}?x=1`)).toBe('GET /api/v1/public/gift-cards/:token')
+    })
+
+    it('la ruta de tarjetas del POS conserva su :id (no es un secreto)', () => {
+      expect(normalizeEntrypoint('POST', '/api/v1/mobile/venues/v1/gift-cards/cm2k9x0ab0001c912abcdefgh/resend')).toBe(
+        'POST /api/v1/mobile/venues/v1/gift-cards/:id/resend',
+      )
+    })
+
     it('redactPathSecrets no toca otras rutas', () => {
       expect(redactPathSecrets('/api/v1/webhooks/delivery/rappi/new-order', ':token')).toBe('/api/v1/webhooks/delivery/rappi/new-order')
       expect(redactPathSecrets('/api/v1/webhooks/aggregators', ':token')).toBe('/api/v1/webhooks/aggregators')
