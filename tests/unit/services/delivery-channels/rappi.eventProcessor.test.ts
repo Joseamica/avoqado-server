@@ -5,10 +5,15 @@
  */
 import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
-import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import { processRappiEvent, RECLAMO_RAPPI_MS } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import { cancelDeliveryOrder } from '../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../../../src/services/delivery-channels/core/deliveryOrderIngestion.service'
-import { markEventResult } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
+import {
+  cerrarEventoReclamado,
+  markEventResult,
+  reclamarEvento,
+  renovarReclamo,
+} from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
 import { confirmarTienda } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
 import { suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 
@@ -20,6 +25,9 @@ jest.mock('../../../../src/services/delivery-channels/core/deliveryOrderIngestio
 }))
 jest.mock('../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service', () => ({
   markEventResult: jest.fn(),
+  reclamarEvento: jest.fn(),
+  renovarReclamo: jest.fn(),
+  cerrarEventoReclamado: jest.fn(),
 }))
 // El cableado por defecto de `confirmar` importa perezosamente estos dos: `rappi.client` lee `env`
 // al cargarse (y eso hace `process.exit` dentro de Jest).
@@ -33,6 +41,12 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.clie
 const mockCancel = cancelDeliveryOrder as jest.Mock
 const mockIngest = ingestDeliveryOrder as jest.Mock
 const mockMark = markEventResult as jest.Mock
+const mockReclamar = reclamarEvento as jest.Mock
+const mockRenovar = renovarReclamo as jest.Mock
+const mockCerrar = cerrarEventoReclamado as jest.Mock
+
+/** El token del reclamo que este proceso obtiene en cada prueba (salvo las que simulan a otro dueño). */
+const TOKEN = 'tok-1'
 
 /** Un pedido completo, con los montos que el ejemplo del portal deja en cero ya rellenos. */
 function payloadPedido(over: Record<string, unknown> = {}) {
@@ -78,6 +92,15 @@ describe('processRappiEvent', () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila())
     mockIngest.mockResolvedValue({ order: { id: 'ord1' }, created: true, kitchenTicketCreated: true })
     mockCancel.mockResolvedValue({ outcome: 'CANCELLED', orderId: 'ord1' })
+    mockReclamar.mockResolvedValue(TOKEN)
+    mockRenovar.mockResolvedValue(true)
+    mockCerrar.mockResolvedValue(true)
+  })
+
+  // 🔴 Desde la Tarea 8 TODO cierre va por `cerrarEventoReclamado` con su token: `markEventResult` escribe sin
+  // mirar el reclamo y podría pisar el resultado de otro dueño. Vale para cada prueba de este archivo.
+  afterEach(() => {
+    expect(mockMark).not.toHaveBeenCalled()
   })
 
   // ── El reloj de 4–6 minutos: aceptar PRIMERO ─────────────────────────────────────
@@ -122,7 +145,7 @@ describe('processRappiEvent', () => {
 
     expect(r.outcome).toBe('FAILED')
     expect(mockIngest).not.toHaveBeenCalled()
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('ACCEPT_400'))
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('ACCEPT_400'))
   })
 
   it('si aceptar LANZA, persiste FAILED en vez de dejar el evento en RECEIVED', async () => {
@@ -134,7 +157,7 @@ describe('processRappiEvent', () => {
 
     expect(r).toMatchObject({ outcome: 'FAILED', accepted: false, error: expect.stringContaining('allowlist') })
     expect(mockIngest).not.toHaveBeenCalled()
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('ACCEPT:'))
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('ACCEPT:'))
   })
 
   // ── La red de dinero manda sobre el reloj ────────────────────────────────────────
@@ -155,7 +178,7 @@ describe('processRappiEvent', () => {
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
     expect(r).toMatchObject({ outcome: 'FAILED', accepted: true })
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('INGEST'))
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('INGEST'))
   })
 
   // ── El programado NO es una venta ────────────────────────────────────────────────
@@ -178,7 +201,7 @@ describe('processRappiEvent', () => {
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
     expect(r.outcome).toBe('CANCELLED')
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'PROCESSED', undefined)
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', undefined)
   })
 
   it('ORDER_EVENT_CANCEL cancela la venta y saca el pedido de cocina', async () => {
@@ -307,7 +330,7 @@ describe('processRappiEvent', () => {
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
     expect(r.outcome).toBe('ORPHANED')
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'TIENDA_SIN_VINCULO')
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'TIENDA_SIN_VINCULO')
   })
 
   it('un evento ya procesado NO se reprocesa (el despacho es at-least-once)', async () => {
@@ -317,6 +340,9 @@ describe('processRappiEvent', () => {
 
     expect(r).toMatchObject({ outcome: 'ALREADY_DONE', orderId: 'ord1' })
     expect(mockIngest).not.toHaveBeenCalled()
+    // El corte de PROCESSED va ANTES del reclamo: lo terminado ni se reclama ni se vuelve a cerrar.
+    expect(mockReclamar).not.toHaveBeenCalled()
+    expect(mockCerrar).not.toHaveBeenCalled()
   })
 
   it('los eventos del REPARTIDOR (ORDER_OTHER_EVENT) son informativos: cero mutación', async () => {
@@ -358,7 +384,7 @@ describe('processRappiEvent', () => {
       { storeId: '11', status: 'FAILED', errorMessage: 'no', batchId: 'lote-7', operation: 'PROVISION' },
     ])
     expect(r.outcome).toBe('STORE_STATE')
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'PROCESSED')
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED')
   })
 
   // H4: Rappi ya dijo ACTIVE pero una suscripción falló. PROCESSED dejaba el reintento en manos de que el dueño
@@ -371,8 +397,8 @@ describe('processRappiEvent', () => {
 
     expect(confirmar).toHaveBeenCalledTimes(2)
     expect(r).toEqual({ outcome: 'FAILED', error: 'PROVISIONING_SUBSCRIBE_FAILED' })
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'PROVISIONING_SUBSCRIBE_FAILED')
-    expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'PROVISIONING_SUBSCRIBE_FAILED')
+    expect(mockCerrar).not.toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED')
   })
 
   it('si confirmar LANZA, el evento queda FAILED para reprocesarse (confirmarTienda es idempotente)', async () => {
@@ -382,8 +408,8 @@ describe('processRappiEvent', () => {
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk, confirmar })
 
     expect(r).toMatchObject({ outcome: 'FAILED', error: expect.stringContaining('la base se cayó') })
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, expect.stringContaining('PROVISIONING'))
-    expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('PROVISIONING'))
+    expect(mockCerrar).not.toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED')
   })
 
   it('🔴 si una tienda sale DEFERRED el evento queda FAILED (Rappi no lo reenvía), pero las demás se confirman igual', async () => {
@@ -394,8 +420,8 @@ describe('processRappiEvent', () => {
 
     expect(confirmar).toHaveBeenCalledTimes(2)
     expect(r).toEqual({ outcome: 'FAILED', error: 'PROVISIONING_DEFERRED' })
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'PROVISIONING_DEFERRED')
-    expect(mockMark).not.toHaveBeenCalledWith('evt1', 'PROCESSED')
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'PROVISIONING_DEFERRED')
+    expect(mockCerrar).not.toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED')
   })
 
   it('el cableado por defecto llama a confirmarTienda con el lote y con la suscripción del cliente', async () => {
@@ -421,7 +447,7 @@ describe('processRappiEvent', () => {
     expect(r).toMatchObject({ outcome: 'FAILED', error: 'CHANNEL_DISABLED' })
     expect(aceptarOk).not.toHaveBeenCalled()
     expect(mockIngest).not.toHaveBeenCalled()
-    expect(mockMark).toHaveBeenCalledWith('evt1', 'FAILED', undefined, 'CHANNEL_DISABLED')
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CHANNEL_DISABLED')
   })
 
   it('con el canal DISABLED las cancelaciones SÍ siguen: una venta que ya existía se cancela igual', async () => {
@@ -437,5 +463,108 @@ describe('processRappiEvent', () => {
 
     expect(mockCancel).toHaveBeenCalledWith('392625', 'RAPPI', expect.any(String))
     expect(r.outcome).toBe('CANCELLED')
+  })
+
+  // ── El reclamo: dos procesos nunca aceptan ni registran el MISMO pedido a la vez (Tarea 8) ──
+  describe('el reclamo del evento', () => {
+    it('reclama por 45 s justo después del corte de PROCESSED, y cierra con SU token', async () => {
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(RECLAMO_RAPPI_MS).toBe(45_000)
+      expect(mockReclamar).toHaveBeenCalledWith('evt1', 45_000)
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+    })
+
+    it('🔴 con el evento reclamado por otro (la petición viva), no acepta ni ingiere y devuelve IN_FLIGHT', async () => {
+      mockReclamar.mockResolvedValueOnce(null)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'IN_FLIGHT' })
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      // Sin reclamo no hay nada que cerrar: el resultado lo escribe el dueño.
+      expect(mockCerrar).not.toHaveBeenCalled()
+      expect(mockRenovar).not.toHaveBeenCalled()
+    })
+
+    it('IN_FLIGHT vale para cualquier tipo de evento: una cancelación reclamada por otro no se cancela dos veces', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+        fila({ eventType: 'ORDER_EVENT_CANCEL', payload: { event: 'canceled_with_charge', order_id: '392625', store_id: '900105814' } }),
+      )
+      mockReclamar.mockResolvedValueOnce(null)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r.outcome).toBe('IN_FLIGHT')
+      expect(mockCancel).not.toHaveBeenCalled()
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('renueva con su token antes de aceptar y antes de ingerir', async () => {
+      const orden: string[] = []
+      mockRenovar.mockImplementation(async (...args: unknown[]) => {
+        orden.push(`renovar:${JSON.stringify(args)}`)
+        return true
+      })
+      aceptarOk.mockImplementationOnce(async () => {
+        orden.push('accept')
+        return { ok: true, status: 200, raw: '{}' }
+      })
+      mockIngest.mockImplementationOnce(async () => {
+        orden.push('ingest')
+        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+      })
+
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      const renovar = `renovar:${JSON.stringify(['evt1', TOKEN, 45_000])}`
+      expect(orden).toEqual([renovar, 'accept', renovar, 'ingest'])
+    })
+
+    it('🔴 si al renovar antes de ACEPTAR ve que perdió el reclamo, se detiene sin aceptar ni ingerir', async () => {
+      mockRenovar.mockResolvedValue(false)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r.outcome).toBe('IN_FLIGHT')
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      // Ya no es suyo: no escribe nada encima del dueño nuevo.
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('🔴 si al renovar antes de INGERIR (ya aceptado) ve que perdió el reclamo, no ingiere ni cierra', async () => {
+      // Pierde el reclamo DESPUÉS de aceptar: la renovación sólo falla cuando `aceptar` ya corrió.
+      mockRenovar.mockImplementation(async () => aceptarOk.mock.calls.length === 0)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(aceptarOk).toHaveBeenCalledTimes(1)
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ outcome: 'IN_FLIGHT', accepted: true })
+    })
+
+    it('un aceptar rechazado (400) cierra FAILED con su token: la renovación del historial (Tarea 9) no existe todavía', async () => {
+      const aceptarMal = jest.fn(async () => ({ ok: false, status: 400, raw: 'invalid transition' }))
+
+      await processRappiEvent('evt1', { aceptar: aceptarMal })
+
+      expect(mockRenovar).toHaveBeenCalledTimes(1) // sólo la de antes de aceptar
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('ACCEPT_400'))
+    })
+
+    it('si el cierre encuentra el reclamo de otro (false), no hay reintento ni escritura de respaldo', async () => {
+      mockCerrar.mockResolvedValueOnce(false)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      // Lo que ESTE proceso hizo sigue siendo verdad (aceptó e ingirió); el 🚨 lo da el cierre.
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+    })
   })
 })

@@ -1,4 +1,7 @@
+import { randomUUID } from 'crypto'
+
 import prisma from '../../../utils/prismaClient'
+import logger from '../../../config/logger'
 import { DeliveryOrderEvent, DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 
 /**
@@ -62,4 +65,64 @@ export async function markEventResult(eventId: string, status: DeliveryOrderEven
     where: { id: eventId },
     data: { status, orderId, error, processedAt: new Date() },
   })
+}
+
+// ── El reclamo del evento ───────────────────────────────────────────────────────────────
+// 🔴 Dos procesos (la petición viva, un carril del job, otro carril) pueden tomar el MISMO evento a la vez y
+// aceptar o registrar dos veces el mismo pedido. El reclamo es un lease en la propia fila, sin Redis: un
+// `updateMany` condicional sobre `claimToken`/`lockedUntil` que la base decide en UN solo UPDATE. Quien lo
+// obtiene trabaja con su token; renovar y cerrar exigen ese token, así que el cierre de un dueño viejo (al que
+// se le venció el reclamo) nunca borra ni pisa el del nuevo. `markEventResult` queda igual para quien no reclama.
+
+/**
+ * Reclama el evento por `duracionMs`. Excluye lo ya PROCESSED y un reclamo vigente de otro (uno vencido sí se
+ * retoma: su dueño murió o se colgó). Devuelve el token si la fila quedó suya, o `null` si no (otro lo tiene,
+ * ya terminó o no existe).
+ */
+export async function reclamarEvento(eventId: string, duracionMs: number): Promise<string | null> {
+  const ahora = new Date()
+  const token = randomUUID()
+  const { count } = await prisma.deliveryOrderEvent.updateMany({
+    where: {
+      id: eventId,
+      status: { not: DeliveryOrderEventStatus.PROCESSED },
+      OR: [{ lockedUntil: null }, { lockedUntil: { lt: ahora } }],
+    },
+    data: { claimToken: token, lockedUntil: new Date(ahora.getTime() + duracionMs) },
+  })
+  return count === 1 ? token : null
+}
+
+/** Extiende el reclamo `duracionMs` desde ahora, sólo si `token` sigue siendo el dueño. `false` = otro lo tomó. */
+export async function renovarReclamo(eventId: string, token: string, duracionMs: number): Promise<boolean> {
+  const { count } = await prisma.deliveryOrderEvent.updateMany({
+    where: { id: eventId, claimToken: token },
+    data: { lockedUntil: new Date(Date.now() + duracionMs) },
+  })
+  return count === 1
+}
+
+/**
+ * Como `markEventResult`, y además suelta el reclamo, pero SÓLO si `token` sigue siendo el dueño. Con `false` (el
+ * reclamo ya era de otro) no se escribe nada: el resultado lo escribe el dueño vigente.
+ */
+export async function cerrarEventoReclamado(
+  eventId: string,
+  token: string,
+  status: DeliveryOrderEventStatus,
+  orderId?: string,
+  error?: string,
+): Promise<boolean> {
+  const { count } = await prisma.deliveryOrderEvent.updateMany({
+    where: { id: eventId, claimToken: token },
+    data: { status, orderId, error, processedAt: new Date(), claimToken: null, lockedUntil: null },
+  })
+  if (count === 1) return true
+  logger.error('🚨 [Delivery] el cierre del evento llegó sin su reclamo (se venció y lo tomó otro): no se sobrescribe nada', {
+    eventId,
+    status,
+    orderId,
+    error: error?.slice(0, 300),
+  })
+  return false
 }

@@ -574,12 +574,16 @@ describe('orden webhook ↔ 202 (R14)', () => {
       channelLink: null,
       payload: { batchId, operation: 'PROVISION', results: [{ storeId, status: 'ACTIVE', integrationId: `int${storeId}` }] },
     })
-    const marcas = () => p.deliveryOrderEvent.update.mock.calls.map((c: Fila[]) => c[0].data.status)
+    // Desde la Tarea 8 el procesador reclama el evento y lo cierra con su token: las dos escrituras son `updateMany`
+    // condicionados. La marca es la de los cierres (los que escriben `status`); el reclamo (token y vencimiento) no cuenta.
+    const marcas = () =>
+      p.deliveryOrderEvent.updateMany.mock.calls.map((c: Fila[]) => c[0].data).flatMap((d: Fila) => ('status' in d ? [d.status] : []))
     const procesar = (d: ProvisioningDeps) => processRappiEvent('evt1', { confirmar: r => confirmarTienda(r, d) })
 
     beforeEach(() => {
       p.deliveryOrderEvent.findUnique.mockReset()
       p.deliveryOrderEvent.update.mockReset().mockResolvedValue({})
+      p.deliveryOrderEvent.updateMany.mockReset().mockResolvedValue({ count: 1 })
     })
 
     it('queda FAILED (no PROCESSED), y al reintentarlo tras guardar el lote se promueve', async () => {

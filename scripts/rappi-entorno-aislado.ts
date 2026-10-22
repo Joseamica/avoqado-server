@@ -13,10 +13,12 @@
  *     deja en null lo que era del venue anterior (`CAMPOS_AL_REAPUNTAR`: huella y fecha del último menú publicado, `config` y la
  *     activación en curso); sin eso, el menú del venue nuevo podría darse por «ya publicado» y la `config` seguiría hablando del viejo.
  *   · `jobs`: corre, cada `INTERVALO_JOBS_MS`, la pasada única (`runOnce()`) de los tres jobs de reparto que `DEMO_MODE` apaga en el
- *     servidor. Se queda corriendo hasta Ctrl+C (SIGINT) o SIGTERM.
+ *     servidor y, aparte, cada `INTERVALO_CARRIL_RAPPI_MS`, el carril propio de Rappi (`reprocesarCarrilRappi()`, Tarea 8): el que
+ *     retoma en ≤ 90 s un pedido que quedó a medias. Se queda corriendo hasta Ctrl+C (SIGINT) o SIGTERM.
  *     🔴 Esos jobs NO filtran por proveedor (`syncableLinksWhere()` y `RECONCILABLE_PROVIDERS` incluyen Uber y Deliverect, y el sandbox
- *     de Uber escribe en producción). Por eso, al inicio de CADA pasada (la primera incluida) cuenta los vínculos ACTIVE por proveedor,
- *     imprime sólo esos conteos y, si hay alguno que no sea RAPPI, NO corre: lo dice con un 🚨 y sale con código 1. No arregla la copia.
+ *     de Uber escribe en producción). Por eso, al inicio de CADA pasada y de CADA vuelta del carril (las primeras incluidas) cuenta los
+ *     vínculos ACTIVE por proveedor, imprime sólo esos conteos y, si hay alguno que no sea RAPPI, NO corre: lo dice con un 🚨 y sale con
+ *     código 1. No arregla la copia.
  *
  * 🔴 SE NIEGA A CORRER si la base no es la copia de este recorrido. Tres candados, los tres tienen que pasar y NINGUNO imprime la URL
  * (trae la contraseña): (1) el NOMBRE de la base de `DATABASE_URL` tiene que contener `rappi-f2`, porque `exigirBaseLocal()` deja pasar
@@ -44,10 +46,13 @@ import { exigirBaseLocalDeVerdad } from './_solo-base-local'
 export const MARCA_BASE_AISLADA = 'rappi-f2'
 
 /**
- * Cada cuánto corre una pasada de `jobs`. Constante con nombre a propósito: la Tarea 8 suma `reprocesarCarrilRappi()` cada 30 s, y
- * ese cambio es tocar esto (o sumar un segundo temporizador junto a éste), no buscar un número suelto.
+ * Cada cuánto corre una pasada de `jobs`. Constante con nombre a propósito: el carril de Rappi de la Tarea 8 va en su propio
+ * temporizador (`INTERVALO_CARRIL_RAPPI_MS`), no cambiando éste.
  */
 export const INTERVALO_JOBS_MS = 2 * 60_000
+
+/** Cada cuánto corre el carril propio de Rappi (`reprocesarCarrilRappi()`), como su cron en el servidor (`15,45 * * * * *`). */
+export const INTERVALO_CARRIL_RAPPI_MS = 30_000
 
 export const USO = [
   'Uso:',
@@ -299,6 +304,9 @@ async function jobs(prisma: ClientePrisma): Promise<void> {
   let enPasada = false
   let numero = 0
   let cerrando = false
+  // El carril de Rappi lleva su propia bandera: una vuelta lenta no se encima con la siguiente, ni frena la pasada (ni al revés).
+  let enVueltaRappi = false
+  let numeroRappi = 0
 
   /** Vínculos ACTIVE por proveedor: una consulta agrupada, de a lo más un renglón por proveedor. */
   async function activosPorProveedor(): Promise<ConteoPorProveedor[]> {
@@ -308,6 +316,32 @@ async function jobs(prisma: ClientePrisma): Promise<void> {
       _count: { _all: true },
     })
     return filas.map(f => ({ provider: f.provider, cantidad: f._count._all }))
+  }
+
+  /**
+   * 🔴 La guarda de proveedores, ANTES de cualquier job (de la pasada o del carril): estos jobs no filtran por proveedor, y un vínculo
+   * ACTIVE de Uber o Deliverect en la copia los haría hablar con un proveedor real. Devuelve los conteos si es seguro correr; `null` si
+   * no: con un ajeno, avisa y termina el proceso; si no se pudo contar, se salta ESTA vuelta (una caída pasajera no mata el proceso).
+   */
+  async function seguroCorrer(que: string): Promise<ConteoPorProveedor[] | null> {
+    let conteos: ConteoPorProveedor[]
+    try {
+      conteos = await activosPorProveedor()
+    } catch (e) {
+      console.error(`${ahora()} 🚨 no pude contar los vínculos ACTIVE por proveedor (${primeraLinea(e)}): se salta ${que}`)
+      return null
+    }
+    const ajenos = proveedoresAjenos(conteos)
+    if (ajenos.length > 0) {
+      console.error(
+        `${ahora()} 🚨 hay vínculos ACTIVE de otros proveedores (${textoConteos(ajenos)}); activos: ${textoConteos(conteos)}. ` +
+          'NO se corre ninguna pasada: estos jobs no filtran por proveedor y llamarían al proveedor real. ' +
+          'Este script no arregla la copia: déjala solo con vínculos RAPPI y vuelve a arrancar.',
+      )
+      await cerrar('vínculos de otros proveedores', 1)
+      return null
+    }
+    return conteos
   }
 
   async function pasada(): Promise<void> {
@@ -320,26 +354,9 @@ async function jobs(prisma: ClientePrisma): Promise<void> {
     const id = ++numero
     const inicio = Date.now()
     try {
-      // 🔴 ANTES de cualquier job, en CADA pasada (la primera incluida): estos jobs no filtran por proveedor, y un vínculo ACTIVE de
-      // Uber o Deliverect en la copia los haría hablar con un proveedor real. Con uno solo, no corre nada y el proceso termina.
-      let conteos: ConteoPorProveedor[]
-      try {
-        conteos = await activosPorProveedor()
-      } catch (e) {
-        // Sin el conteo no se puede afirmar que sea seguro: se salta ESTA pasada (una caída pasajera de la base no mata el proceso).
-        console.error(`${ahora()} 🚨 no pude contar los vínculos ACTIVE por proveedor (${primeraLinea(e)}): se salta la pasada #${id}`)
-        return
-      }
-      const ajenos = proveedoresAjenos(conteos)
-      if (ajenos.length > 0) {
-        console.error(
-          `${ahora()} 🚨 hay vínculos ACTIVE de otros proveedores (${textoConteos(ajenos)}); activos: ${textoConteos(conteos)}. ` +
-            'NO se corre ninguna pasada: estos jobs no filtran por proveedor y llamarían al proveedor real. ' +
-            'Este script no arregla la copia: déjala solo con vínculos RAPPI y vuelve a arrancar.',
-        )
-        await cerrar('vínculos de otros proveedores', 1)
-        return
-      }
+      // En CADA pasada (la primera incluida). Con un vínculo ajeno no corre nada y el proceso termina.
+      const conteos = await seguroCorrer(`la pasada #${id}`)
+      if (!conteos) return
       // Pasos en paralelo, como corren sus crons en el servidor: uno lento no retrasa a los demás.
       const partes = await Promise.all(pasos.map(ejecutar))
       console.log(`${ahora()} pasada #${id} (${Date.now() - inicio} ms) · activos: ${textoConteos(conteos)} · ${partes.join(' · ')}`)
@@ -348,12 +365,32 @@ async function jobs(prisma: ClientePrisma): Promise<void> {
     }
   }
 
+  /** Una vuelta del carril de Rappi. Una a la vez (su bandera), con la misma guarda de proveedores, y NUNCA lanza. */
+  async function vueltaRappi(): Promise<void> {
+    if (enVueltaRappi || cerrando) return // la anterior sigue: ésta se salta en silencio (cada 30 s haría ruido)
+    enVueltaRappi = true
+    const id = ++numeroRappi
+    const inicio = Date.now()
+    try {
+      if (!(await seguroCorrer(`la vuelta #${id} del carril de Rappi`))) return
+      const resueltos = await runInJobContext('delivery-webhook-reconciliation-rappi', () => reconciliacion.reprocesarCarrilRappi())
+      // Sólo cuando hizo algo: la pasada de cada 2 min ya dice que el proceso sigue vivo.
+      if (resueltos > 0) console.log(`${ahora()} carril de Rappi #${id} (${Date.now() - inicio} ms) · resueltos=${resueltos}`)
+    } catch (e) {
+      console.error(`${ahora()} 🚨 la vuelta #${id} del carril de Rappi falló: ${primeraLinea(e)}`)
+    } finally {
+      enVueltaRappi = false
+    }
+  }
+
   const temporizador = setInterval(() => void pasada(), INTERVALO_JOBS_MS)
+  const temporizadorRappi = setInterval(() => void vueltaRappi(), INTERVALO_CARRIL_RAPPI_MS)
 
   async function cerrar(motivo: string, codigo: number): Promise<void> {
     if (cerrando) return
     cerrando = true
     clearInterval(temporizador)
+    clearInterval(temporizadorRappi)
     console.log(`${ahora()} ${motivo}: se detiene y se desconecta la base (código ${codigo})`)
     try {
       await prisma.$disconnect()
@@ -364,8 +401,12 @@ async function jobs(prisma: ClientePrisma): Promise<void> {
   process.on('SIGINT', () => void cerrar('SIGINT', 0))
   process.on('SIGTERM', () => void cerrar('SIGTERM', 0))
 
-  console.log(`${ahora()} jobs de reparto cada ${INTERVALO_JOBS_MS / 1000} s (Ctrl+C para detener)`)
+  console.log(
+    `${ahora()} jobs de reparto cada ${INTERVALO_JOBS_MS / 1000} s y carril de Rappi cada ${INTERVALO_CARRIL_RAPPI_MS / 1000} s ` +
+      '(Ctrl+C para detener)',
+  )
   void pasada() // la primera, ya; las siguientes las dispara el temporizador
+  void vueltaRappi() // ídem el carril de Rappi
 }
 
 // ── Principal ───────────────────────────────────────────────────────────────────────────

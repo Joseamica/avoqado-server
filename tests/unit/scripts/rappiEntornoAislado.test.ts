@@ -14,6 +14,7 @@ import {
   CAMPOS_AL_REAPUNTAR,
   decidirVinculo,
   interpretarArgumentos,
+  INTERVALO_CARRIL_RAPPI_MS,
   INTERVALO_JOBS_MS,
   MARCA_BASE_AISLADA,
   nombreDeBase,
@@ -144,6 +145,10 @@ describe('interpretarArgumentos', () => {
 describe('INTERVALO_JOBS_MS', () => {
   it('son 2 minutos (el plan); la Tarea 8 suma su carril de 30 s aparte, sin cambiar éste', () => {
     expect(INTERVALO_JOBS_MS).toBe(120_000)
+  })
+
+  it('el carril de Rappi corre aparte cada 30 s (Tarea 8): un pedido a medias se retoma en ≤ 90 s', () => {
+    expect(INTERVALO_CARRIL_RAPPI_MS).toBe(30_000)
   })
 })
 
