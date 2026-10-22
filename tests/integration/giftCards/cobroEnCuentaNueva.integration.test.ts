@@ -2,7 +2,8 @@
  * S2b (Q58) contra Postgres REAL: una venta de mostrador nace y se cobra con saldo en UNA transacción (`pay-new-order`).
  * Pasan las dos o ninguna: si el cobro falla, ni cuenta, ni premio quemado, ni descuento usado. La llave repetida (igual o con
  * otro cuerpo, una tras otra o a la vez), lo que ve otra caja mientras el cobro espera, el premio que ya no aplica (Q60) y quién
- * queda en la cuenta y quién en el cobro (Q76, Q110).
+ * queda en la cuenta y quién en el cobro (Q76, Q110), y el precio que vio el cliente (arreglo tras S8: un precio que BAJÓ cobra lo
+ * que la venta debe; uno que SUBIÓ rechaza con 409).
  *
  * Correr: source ~/.claude/worktrees/tarjetas-1b/urls-tarjetas-1b.sh && TZ=UTC npx jest --selectProjects integration \
  *   --runTestsByPath tests/integration/giftCards/cobroEnCuentaNueva.integration.test.ts --ci --runInBand
@@ -31,6 +32,7 @@ import { lockGiftCardsForUpdate } from '@/services/giftCards/giftCardLedger'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
 import { reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
 import { listOrders, payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
+import type { CreateOrderItemInput } from '@/services/mobile/order.mobile.service'
 import { getPaymentByKey, payNewOrder } from '@/controllers/mobile/giftCard.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { crearNegocioDePrueba, esperarAQueAlguienEspereA, limpiarNegocioDePrueba, pidDe } from './sembrarTarjetasDeRegalo'
@@ -453,6 +455,179 @@ describe('pay-new-order · Postgres real', () => {
       expect(await prisma.giftCardActivity.count({ where: { giftCardId: t.id, type: 'REDEEM' } })).toBe(1)
       // Una sola bitácora, la del cobro de A: el reintento (replay) no escribe otra.
       expect(bitacorasDe(a.paymentId).map(x => [x.staffId, x.data.iniciadoPorSegunElAparato])).toEqual([[staffA, undefined]])
+    })
+  })
+
+  /**
+   * Arreglo tras S8 (ruling del coordinador sobre la regla del founder del 17-oct: «se cobra el precio que vio el cliente: siempre
+   * el más bajo»). La tablet con la lista vieja suma `amount` con el precio de antes; si el precio BAJÓ, la venta nace al precio
+   * nuevo y `amount` pasa de lo que debe. Sólo en `pay-new-order` y sólo con una bajada, se cobra lo que la venta debe.
+   *
+   * 🔴 Unidades, como el contrato (§ 2.4b, C4): el precio de línea que vio la tablet (`displayedUnitPrice`) va en CENTAVOS enteros
+   * (`CENTAVOS(100)` = 10000); `amount` y `tip` van en PESOS (`Prisma.Decimal`, como los deja el esquema); `priceChanges` responde
+   * en CENTAVOS; `amount`, `tipAmount`, `orderRemaining` y `redeemed[].amount` de la respuesta, en PESOS.
+   */
+  describe('precio que vio el cliente: si un precio BAJÓ, la venta nueva cobra lo que debe (arreglo tras S8)', () => {
+    const CENTAVOS = (pesos: number) => pesos * 100
+    /** Vigente $80; la tablet todavía lo muestra en $100 (BAJÓ). */
+    let bajoId: string
+    /** Vigente $100; la tablet lo muestra en $80, y nunca valió $80 (SUBIÓ, no se reconoce). */
+    let subioId: string
+
+    beforeAll(async () => {
+      const categoryId = (await prisma.menuCategory.create({ data: { venueId, name: 'Precios', slug: `precios-${SUF}` } })).id
+      bajoId = (await prisma.product.create({ data: { venueId, sku: `BAJO-${SUF}`, name: 'Bolsa', categoryId, price: D(80) } })).id
+      subioId = (await prisma.product.create({ data: { venueId, sku: `SUBIO-${SUF}`, name: 'Cinturón', categoryId, price: D(100) } })).id
+    })
+
+    /** Una línea como la manda la app: el precio que mostró la tablet en CENTAVOS y el `catalogAt` reciente de su lista. */
+    const linea = (productId: string, mostradoEnPesos: number) => ({
+      productId,
+      quantity: 1,
+      displayedUnitPrice: CENTAVOS(mostradoEnPesos),
+      catalogAt: new Date(Date.now() - 60_000).toISOString(),
+      externalId: 'linea-1',
+    })
+    /** La venta cobrada con saldo: `amount` y `tip` en PESOS. Se arma UNA vez por prueba (el replay manda el mismo cuerpo). */
+    const ventaConLinea = (llave: string, codigo: string, item: CreateOrderItemInput, amountEnPesos: number, tipEnPesos = 0) => ({
+      items: [item],
+      staffId: staffA,
+      orderType: 'TAKEOUT' as const,
+      source: 'AVOQADO_ANDROID' as const,
+      idempotencyKey: llave,
+      proof: { kind: 'CODE' as const, code: codigo },
+      amount: D(amountEnPesos),
+      tip: D(tipEnPesos),
+      deviceId: null,
+      procesadoPor: staffA,
+    })
+    const pagosDe = (llave: string) => prisma.payment.count({ where: { venueId, idempotencyKey: llave } })
+    const canjesDe = (giftCardId: string) => prisma.giftCardActivity.count({ where: { giftCardId, type: 'REDEEM' } })
+
+    it('🔴 1 · BAJÓ de $100 a $80 y la app manda amount = 100 ⇒ cobra $80: la venta PAGADA, el saldo baja $80, priceChanges y lo cobrado; el replay devuelve lo mismo y no cobra otra vez', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('bajo-de-mas')
+      const cuerpo = ventaConLinea(llave, t.codigo, linea(bajoId, 100), 100)
+
+      const r = await payGiftCardOnNewOrder(venueId, cuerpo)
+
+      expect(r).toMatchObject({
+        replay: false,
+        amount: 80, // PESOS: lo REALMENTE cobrado de la tarjeta = lo que la venta debe, no los 100 que mandó la app
+        tipAmount: 0,
+        orderRemaining: 0,
+        orderPaymentStatus: 'PAID',
+        redeemed: [{ giftCardId: t.id, amount: 80, balanceAfter: 920 }],
+        // CENTAVOS: la tablet mostró $100, se cobró a $80
+        priceChanges: [
+          { externalId: 'linea-1', productId: bajoId, productName: 'Bolsa', displayedUnitPriceCents: 10000, unitPriceCents: 8000 },
+        ],
+      })
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.externalId, cuenta.total.toFixed(2), cuenta.paymentStatus, cuenta.remainingBalance.toFixed(2)]).toEqual([
+        `giftpay:${llave}`,
+        '80.00',
+        'PAID',
+        '0.00',
+      ])
+      const pago = await prisma.payment.findUniqueOrThrow({ where: { id: r.paymentId } })
+      expect([pago.amount.toFixed(2), pago.tipAmount.toFixed(2)]).toEqual(['80.00', '0.00'])
+      expect(
+        (await prisma.giftCardActivity.findFirstOrThrow({ where: { paymentId: r.paymentId, type: 'REDEEM' } })).amount.toFixed(2),
+      ).toBe('80.00')
+      expect(await saldoDe(t.id)).toBe('920.00')
+
+      // Misma llave y MISMO cuerpo (la huella es la del cuerpo enviado, con amount = 100) ⇒ el mismo cobro, sin tocar el saldo.
+      const otraVez = await payGiftCardOnNewOrder(venueId, cuerpo)
+      expect(otraVez).toMatchObject({
+        replay: true,
+        paymentId: r.paymentId,
+        orderId: r.orderId,
+        amount: 80,
+        tipAmount: 0,
+        orderRemaining: 0,
+        orderPaymentStatus: 'PAID',
+        redeemed: [{ giftCardId: t.id, amount: 80, balanceAfter: 920 }],
+      })
+      expect(await saldoDe(t.id)).toBe('920.00')
+      expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([1, 1, 1])
+    })
+
+    it('🔴 1b · BAJÓ y con propina: amount = 100 y tip = 10 (pesos) ⇒ cobra $80 de venta y los $10 de propina intactos; el saldo baja $90', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('bajo-con-propina')
+      const r = await payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(bajoId, 100), 100, 10))
+      expect(r).toMatchObject({
+        amount: 80,
+        tipAmount: 10,
+        orderRemaining: 0,
+        orderPaymentStatus: 'PAID',
+        redeemed: [{ giftCardId: t.id, amount: 90, balanceAfter: 910 }],
+      })
+      const pago = await prisma.payment.findUniqueOrThrow({ where: { id: r.paymentId } })
+      expect([pago.amount.toFixed(2), pago.tipAmount.toFixed(2)]).toEqual(['80.00', '10.00'])
+      expect(await saldoDe(t.id)).toBe('910.00')
+    })
+
+    it('2 · BAJÓ y la app paga sólo una parte (amount = 50 < 80) ⇒ cobra $50 y la venta queda con $30 pendientes (como hoy)', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('bajo-parcial')
+      const r = await payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(bajoId, 100), 50))
+      expect(r).toMatchObject({
+        replay: false,
+        amount: 50,
+        orderRemaining: 30,
+        orderPaymentStatus: 'PARTIAL',
+        redeemed: [{ giftCardId: t.id, amount: 50, balanceAfter: 950 }],
+        priceChanges: [{ productId: bajoId, displayedUnitPriceCents: 10000, unitPriceCents: 8000 }],
+      })
+      const cuenta = await prisma.order.findUniqueOrThrow({ where: { id: r.orderId } })
+      expect([cuenta.total.toFixed(2), cuenta.paymentStatus, cuenta.remainingBalance.toFixed(2)]).toEqual(['80.00', 'PARTIAL', '30.00'])
+      expect(await saldoDe(t.id)).toBe('950.00')
+    })
+
+    it('3 · SUBIÓ de $80 a $100 ⇒ 409 ORDER_PRICE_CHANGED con details.priceChanges (en centavos); nada creado ni cobrado', async () => {
+      const t = await tarjeta(1000)
+      const llave = llaveNueva('subio')
+      await expect(payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(subioId, 80), 80))).rejects.toMatchObject({
+        code: 'ORDER_PRICE_CHANGED',
+        statusCode: 409,
+        details: { priceChanges: [{ productId: subioId, displayedUnitPriceCents: 8000, unitPriceCents: 10000 }] },
+      })
+      expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([0, 0, 0])
+      expect(await saldoDe(t.id)).toBe('1000.00')
+    })
+
+    it.each([
+      ['la tablet mostró el precio vigente ($80)', 'igual', () => linea(bajoId, 80)],
+      ['una app sin precio mostrado', 'sin-precio', () => ({ productId: bajoId, quantity: 1 })],
+    ])(
+      '🔴 4 · SIN cambio de precio y amount de más (100 sobre $80) ⇒ 422 GIFT_CARD_AMOUNT_OUT_OF_RANGE con pendiente (pesos), como hoy (%s)',
+      async (_caso, etiqueta, item) => {
+        const t = await tarjeta(1000)
+        const llave = llaveNueva(`sin-cambio-${etiqueta}`)
+        await expect(payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, item(), 100))).rejects.toMatchObject({
+          code: 'GIFT_CARD_AMOUNT_OUT_OF_RANGE',
+          statusCode: 422,
+          message: 'Esta cuenta debe $80.00: el saldo de la tarjeta no paga de más.',
+          details: { pendiente: 80 },
+        })
+        expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([0, 0, 0])
+        expect(await saldoDe(t.id)).toBe('1000.00')
+      },
+    )
+
+    it('🔴 5 · BAJÓ y el saldo ($70) no alcanza para lo que debe ($80): como hoy cuando el saldo no alcanza ⇒ 409 GIFT_CARD_INSUFFICIENT_BALANCE «Quedan $70.00»; nada creado ni cobrado', async () => {
+      const t = await tarjeta(70)
+      const llave = llaveNueva('bajo-sin-saldo')
+      await expect(payGiftCardOnNewOrder(venueId, ventaConLinea(llave, t.codigo, linea(bajoId, 100), 100))).rejects.toMatchObject({
+        code: 'GIFT_CARD_INSUFFICIENT_BALANCE',
+        statusCode: 409,
+        message: 'Quedan $70.00 en la tarjeta de regalo.',
+        details: { saldoDisponible: 70 },
+      })
+      expect([await cuentasDe(llave), await pagosDe(llave), await canjesDe(t.id)]).toEqual([0, 0, 0])
+      expect(await saldoDe(t.id)).toBe('70.00')
     })
   })
 })

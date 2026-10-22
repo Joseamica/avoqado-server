@@ -4800,7 +4800,7 @@ export interface PayGiftCardOnNewOrderInput
   /** 8–64 [A-Za-z0-9_-]: la del `Payment` y, con `giftpay:`, la de la cuenta. */
   idempotencyKey: string
   proof: PruebaDePosesion
-  /** Pesos, venta SIN propina, > 0. */
+  /** Pesos, venta SIN propina, > 0. Si un precio BAJÓ y pasa de lo que debe la venta, se cobra lo que debe (arreglo tras S8). */
   amount: Prisma.Decimal
   /** Pesos: la propina DEL COBRO (la de la orden en centavos no existe en esta ruta). */
   tip: Prisma.Decimal
@@ -4860,12 +4860,44 @@ async function canjearPremioDeLaVentaEnTx(tx: Prisma.TransactionClient, venueId:
 }
 
 /**
+ * Arreglo tras S8 (ruling del coordinador sobre la regla del founder del 17-oct, «se cobra el precio que vio el cliente: siempre el
+ * más bajo»). La app manda `amount` con lo que ELLA sumó (Q39); si su lista era vieja y un precio BAJÓ, la venta nace al precio
+ * nuevo y ese `amount` pasa de lo que debe. Sólo entonces se cobra lo que la venta debe: el cliente nunca paga de más, la venta
+ * queda pagada completa y la respuesta trae `priceChanges` y lo cobrado (`amount`). Sin una bajada, un `amount` de más sigue siendo
+ * el 422 `GIFT_CARD_AMOUNT_OUT_OF_RANGE` del gancho (un error de la app que no se tapa). Sólo `pay-new-order`: `pay-gift-card` no
+ * pasa por aquí. Un `amount` menor que lo que debe no se toca (pago parcial, como hoy).
+ *
+ * Lo que debe se calcula en la MISMA transacción, bajo el candado de la Order (el núcleo lo vuelve a tomar; es reentrante) y con la
+ * MISMA aritmética que el tope del gancho (`computeOrderBalance`). Sin pagos: la cuenta nació unas líneas antes en esta misma
+ * transacción y nada en medio registra un cobro. Si no debe nada (un premio la cubre), no hay nada que cobrar con saldo: se deja el
+ * `amount` y el gancho responde el 422 de siempre.
+ */
+async function montoDeLaVentaNuevaEnTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  orderId: string,
+  monto: Prisma.Decimal,
+  cambiosDePrecio: CambioDePrecio[],
+): Promise<Prisma.Decimal> {
+  if (!cambiosDePrecio.some(c => c.unitPriceCents < c.displayedUnitPriceCents)) return monto
+  if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+  const cuenta = await tx.order.findUnique({
+    where: { id: orderId, venueId },
+    select: { subtotal: true, discountAmount: true, serviceChargeAmount: true, contratoDePrecio: true, taxAmount: true, status: true },
+  })
+  if (!cuenta) throw new NotFoundError('Order not found')
+  const pendiente = computeOrderBalance(cuenta, []).remainingBalance
+  return monto.greaterThan(pendiente) && pendiente.greaterThan(0) ? pendiente : monto
+}
+
+/**
  * S2b (Q58): crear la cuenta de mostrador y cobrar con saldo en UNA transacción: pasan las dos o ninguna. El premio y los
  * descuentos se consumen sólo si el cobro pasa; otra caja nunca ve la cuenta sin su cobro (nace dentro de la transacción).
  *
  * Orden (A22a, como S2): (0) el rechazo sellado de la llave; (1) el sobre de la prueba SIN validarla; (2) la salida por llave
  * (atajo); (3) fuera de la transacción, todo lo que sólo lee; y dentro, LO PRIMERO el candado de la llave (Q91), después la
- * cuenta, el premio, la bandera de cocina y el cobro. Un rechazo de dentro se sella (Q94).
+ * cuenta, el premio, la bandera de cocina y el cobro (si un precio BAJÓ, por lo que la venta debe: `montoDeLaVentaNuevaEnTx`). Un
+ * rechazo de dentro se sella (Q94).
  */
 export async function payGiftCardOnNewOrder(
   venueId: string,
@@ -4956,13 +4988,16 @@ export async function payGiftCardOnNewOrder(
           where: { orderId, order: { venueId }, serviceCourse: { path: ['preparationVersion'], equals: 1 } },
           select: { id: true },
         })
+        // Arreglo tras S8: si un precio BAJÓ, la app sumó `amount` con la lista vieja; se cobra lo que la venta debe. La huella
+        // sigue siendo la del cuerpo enviado (con su `amount`), así el reintento con la misma llave reconoce este cobro.
+        const montoACobrar = await montoDeLaVentaNuevaEnTx(tx, venueId, orderId, monto, creada.venta.cambiosDePrecio)
         const ctx: ContextoDeCobroConSaldo = {
           venueId,
           orderId,
           orderNumber: creada.order.orderNumber,
           tableId: null,
           prueba,
-          monto,
+          monto: montoACobrar,
           propina,
           idempotencyKey: llave,
           effectiveStaffId,
