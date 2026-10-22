@@ -14,7 +14,7 @@ import { PaymentFundsFlow, PaymentMethod, PaymentSource, PaymentType, Prisma, Tr
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { restockItem } from './inventoryRestock.service'
+import { restockOrderItems } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
@@ -1264,23 +1264,19 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   if (input.restockItemIds && input.restockItemIds.length > 0) {
     const restockSet = new Set(input.restockItemIds)
     const toRestock = result.refundedItems.filter(r => r.productId && restockSet.has(r.orderItemId))
-    for (const item of toRestock) {
-      try {
-        await restockItem({
-          venueId: input.venueId,
-          productId: item.productId!,
-          quantity: item.quantity,
-          refundPaymentId: result.refundPaymentId,
-          staffId: input.staffId ?? undefined,
-        })
-      } catch (err: any) {
-        logger.warn('[REFUND.DASHBOARD] Failed to restock item', {
-          refundPaymentId: result.refundPaymentId,
-          orderItemId: item.orderItemId,
-          productId: item.productId,
-          error: err?.message ?? err,
-        })
-      }
+    try {
+      await restockOrderItems({
+        venueId: input.venueId,
+        orderId: result.originalOrderId,
+        items: toRestock.map(item => ({ orderItemId: item.orderItemId, quantity: item.quantity })),
+        refundPaymentId: result.refundPaymentId,
+        staffId: input.staffId ?? undefined,
+      })
+    } catch (err: any) {
+      logger.warn('[REFUND.DASHBOARD] Failed to restock refunded items', {
+        refundPaymentId: result.refundPaymentId,
+        error: err?.message ?? err,
+      })
     }
   }
 

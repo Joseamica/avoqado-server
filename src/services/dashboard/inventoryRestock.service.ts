@@ -11,6 +11,7 @@
 import { MovementType, Prisma, RawMaterialMovementType } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
+import { esValeRevendido } from '../shared/renglonDeVale'
 import { adjustStock } from './rawMaterial.service'
 
 /**
@@ -135,30 +136,69 @@ export async function restockItem(args: {
  * thrown, so the caller's refund is never rolled back. Serialized-inventory
  * items and products without inventory tracking are skipped by `restockItem`.
  */
-export async function restockOrderItems(args: { venueId: string; orderId: string; refundPaymentId: string; staffId?: string }) {
+export async function restockOrderItems(args: {
+  venueId: string
+  orderId: string
+  refundPaymentId: string
+  staffId?: string
+  items?: Array<{ orderItemId: string; quantity: number }>
+}) {
   const { venueId, orderId, refundPaymentId, staffId } = args
-
-  const items = await prisma.orderItem.findMany({
-    where: { orderId, productId: { not: null } },
-    select: { id: true, productId: true, quantity: true },
-  })
-
+  const selected = args.items ? new Map(args.items.map(item => [item.orderItemId, item.quantity])) : null
+  let cursor: string | undefined
+  let totalItems = 0
   let restocked = 0
-  for (const item of items) {
-    if (!item.productId || item.quantity <= 0) continue
-    try {
-      await restockItem({ venueId, productId: item.productId, quantity: item.quantity, refundPaymentId, staffId })
-      restocked++
-    } catch (err: any) {
-      logger.warn('[INVENTORY RESTOCK] Failed to restock order item', {
-        orderId,
-        orderItemId: item.id,
-        productId: item.productId,
-        error: err?.message ?? err,
-      })
+  do {
+    const items = await prisma.orderItem.findMany({
+      where: { orderId, order: { venueId }, productId: { not: null }, ...(selected ? { id: { in: [...selected.keys()] } } : {}) },
+      select: {
+        id: true,
+        productId: true,
+        quantity: true,
+        areaTicketLineId: true,
+        releasedAreaTicketLineId: true,
+        areaTicketLine: { select: { areaTicket: { select: { orderId: true } } } },
+      },
+      orderBy: { id: 'asc' },
+      take: 100,
+      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
+    })
+    totalItems += items.length
+    const releasedIds = items.filter(item => item.areaTicketLineId && !item.areaTicketLine?.areaTicket.orderId).map(item => item.id)
+    const ownPosting = releasedIds.length
+      ? await prisma.inventoryPosting.findUnique({
+          where: { venueId_sourceKind_sourceId_effectKind: { venueId, sourceKind: 'ORDER', sourceId: orderId, effectKind: 'SALE' } },
+          select: {
+            lines: {
+              where: { effectKey: { in: releasedIds } },
+              select: { effectKey: true },
+              take: 100,
+            },
+          },
+        })
+      : null
+    const deductionIds = new Set(ownPosting?.lines.map(line => line.effectKey))
+    for (const item of items) {
+      const quantity = selected ? (selected.get(item.id) ?? 0) : item.quantity
+      if (!item.productId || quantity <= 0) continue
+      // El posting propio también acredita una deducción PENDIENTE: su reposición la compensa cuando se recupere.
+      if (esValeRevendido(item) || (item.areaTicketLineId && !item.areaTicketLine?.areaTicket.orderId && !deductionIds.has(item.id)))
+        continue
+      try {
+        await restockItem({ venueId, productId: item.productId, quantity, refundPaymentId, staffId })
+        restocked++
+      } catch (err: any) {
+        logger.warn('[INVENTORY RESTOCK] Failed to restock order item', {
+          orderId,
+          orderItemId: item.id,
+          productId: item.productId,
+          error: err?.message ?? err,
+        })
+      }
     }
-  }
+    cursor = items.length === 100 ? items[items.length - 1].id : undefined
+  } while (cursor)
 
-  logger.info('[INVENTORY RESTOCK] Restocked order items', { venueId, orderId, refundPaymentId, items: items.length, restocked })
-  return { items: items.length, restocked }
+  logger.info('[INVENTORY RESTOCK] Restocked order items', { venueId, orderId, refundPaymentId, items: totalItems, restocked })
+  return { items: totalItems, restocked }
 }

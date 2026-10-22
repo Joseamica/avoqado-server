@@ -245,6 +245,7 @@ const paymentData = {
 
 beforeEach(() => {
   jest.clearAllMocks()
+  ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValue([])
   ;(prisma.shift.findFirst as jest.Mock).mockResolvedValue({ id: 'shift-1', status: 'OPEN' })
   ;(prisma.shift.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
   ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: VENUE_ID })
@@ -359,6 +360,25 @@ beforeEach(() => {
 })
 
 describe('recordOrderPayment — rollback compensatorio de inventario', () => {
+  it.each([false, true])('D4: sin línea canónica (error de lectura=%s) el vale no descuenta por su cuenta', async lecturaFalla => {
+    const order = makeOrder([
+      { ...makeItem('vale', 'prod-vale', 1), areaTicketLineId: 'linea-liberada' },
+      makeItem('normal', 'prod-normal', 1),
+    ])
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
+    ;(prisma.areaTicketInventoryReservation.findMany as jest.Mock).mockResolvedValue([])
+    if (lecturaFalla) (prisma.inventoryPostingLine.findMany as jest.Mock).mockRejectedValueOnce(new Error('lectura temporalmente caída'))
+    ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
+    await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'd4' } as any, 'user-1')
+    expect((productInventoryService.deductInventoryForProduct as jest.Mock).mock.calls.map(call => call[1])).toEqual(['prod-normal'])
+    if (lecturaFalla) {
+      expect(prisma.inventoryPosting.updateMany).not.toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ status: 'APPLIED' }) }),
+      )
+    }
+  })
+
   it('en una orden mixta descuenta sólo líneas sin reserva, incluyendo vales NONE y peso efectivo', async () => {
     const order = makeOrder([
       { ...makeItem('item-held', 'prod-held', 1), areaTicketLineId: 'line-held', weightQuantity: new Decimal('0.125') },
@@ -372,6 +392,7 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
     ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
     ;(prisma.order.update as jest.Mock).mockResolvedValue(order)
     ;(prisma.areaTicketInventoryReservation.findMany as jest.Mock).mockResolvedValue([{ areaTicketLineId: 'line-held' }])
+    ;(prisma.inventoryPostingLine.findMany as jest.Mock).mockResolvedValue([{ effectKey: 'item-ticket-none', id: 'posting-line-none' }])
     ;(productInventoryService.deductInventoryForProduct as jest.Mock).mockResolvedValue({ inventoryMethod: 'QUANTITY' })
 
     await paymentService.recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'mixed-area-payment' } as any, 'user-1')
@@ -395,7 +416,7 @@ describe('recordOrderPayment — rollback compensatorio de inventario', () => {
       ORDER_ID,
       'staff-1',
       [],
-      undefined,
+      { postingLineId: 'posting-line-none' },
     )
     expect(productInventoryService.deductInventoryForProduct).not.toHaveBeenCalledWith(
       VENUE_ID,

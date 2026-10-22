@@ -18754,6 +18754,8 @@ model PosSyncIntent {
   errorCode      String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
   /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
   resultJson     Json?
+  /// Obligación interna post-commit de CANCEL HTTP; SQL NULL = sin efectos pendientes. No viaja al cliente.
+  cancelEffectsJson Json?
   createdAt      DateTime @default(now())
 
   @@unique([venueId, idempotencyKey])
