@@ -72,7 +72,14 @@ export async function syncOnlineOrdersOfPaidPickups(
   for (const r of rows) {
     try {
       const cas = await db.onlineOrder.updateMany({
-        where: { id: r.id, status: r.status, order: PAID_ORDER },
+        where: {
+          id: r.id,
+          status: r.status,
+          order: PAID_ORDER,
+          // S4: la regla de la lectura se repite en el CAS (sólo la entrega por hora): un reclamo de impresión que cae entre las dos
+          // no se entrega. `READY` no lleva guarda.
+          ...(r.status === OnlineOrderStatus.ACCEPTED ? { OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] } : {}),
+        },
         data: { status: OnlineOrderStatus.COMPLETED, completedAt: now },
       })
       if (cas.count === 1) won.push({ id: r.id, orderId: r.orderId, venueId: r.venueId, orderNumber: r.order.orderNumber })
