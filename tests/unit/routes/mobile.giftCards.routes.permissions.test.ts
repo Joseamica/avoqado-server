@@ -6,6 +6,7 @@
  */
 import express from 'express'
 import request from 'supertest'
+import type { RateLimitRequestHandler } from 'express-rate-limit'
 import { StaffRole } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import * as ctrl from '@/controllers/mobile/giftCard.mobile.controller'
@@ -17,8 +18,10 @@ import {
   giftCardPayFailureRateLimiters,
   giftCardPhoneRequestRateLimiters,
   giftCardPhoneVerifyRateLimiters,
+  giftCardResendRateLimiter,
   giftCardRevealRateLimiters,
 } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
+import dashboardGiftCardsRouter from '@/routes/dashboard/giftCards.routes'
 import { redactUrlSecrets } from '@/middlewares/requestLogger'
 import { hasPermission } from '@/lib/permissions'
 import { liberarCancelacionSchema } from '@/schemas/common/giftCard.common.schema'
@@ -596,5 +599,110 @@ describe('S5: teléfono + código', () => {
       expect({ ruta, error }).toEqual({ ruta, error: undefined })
       expect(req.body.proof).toEqual(proof)
     }
+  })
+})
+
+/**
+ * Cierre A (C4, M3 de la revisión final): reenviar cuesta un WhatsApp o un correo. UN contador por (negocio, tarjeta) que comparten
+ * `resend` y `change-destination` del POS y el `resend` del panel: 5 por hora en producción ⇒ 429 `GIFT_CARD_RESEND_RATE_LIMITED`.
+ * Sólo gasta el tope lo que manda algo nuevo: la repetición de una llave (`marcarRepeticionDeReenvio`) y los rechazos no.
+ */
+describe('Cierre A (C4): el límite de reenvíos por tarjeta', () => {
+  const REENVIAR = '/venues/:venueId/gift-cards/:giftCardId/resend'
+  const CAMBIAR = '/venues/:venueId/gift-cards/:giftCardId/change-destination'
+  const capasDe = (router: any, metodo: string, ruta: string): any[] => {
+    const capa = router.stack.find((l: any) => l.route?.path === ruta && l.route.stack.some((c: any) => c.method === metodo))
+    return capa ? capa.route.stack.map((c: any) => c.handle) : []
+  }
+  const RECHAZO_DE_REENVIO = {
+    success: false,
+    code: 'GIFT_CARD_RESEND_RATE_LIMITED',
+    message: 'Ya reenviamos esta tarjeta varias veces. Espera un rato y vuelve a intentar.',
+    retryAfter: 3600,
+  }
+
+  /** El límite de PRODUCCIÓN (5 por hora), cargado aparte con NODE_ENV=production, y su marca de repetición. */
+  function deProduccion() {
+    const antes = process.env.NODE_ENV
+    process.env.NODE_ENV = 'production'
+    let modulo: any
+    jest.isolateModules(() => {
+      modulo = require('@/middlewares/gift-card-lookup-rate-limit.middleware')
+    })
+    process.env.NODE_ENV = antes
+    return modulo as { giftCardResendRateLimiter: RateLimitRequestHandler; marcarRepeticionDeReenvio: (res: express.Response) => void }
+  }
+
+  /**
+   * Las tres rutas con UNA instancia del límite, como en el server. El manejador responde lo que pida el cuerpo: `status` (200 por
+   * omisión) y `repeticion: true` = la repetición de una llave (lo marca como los controllers reales).
+   */
+  function appDeReenvios(limite: express.RequestHandler, marcar: (res: express.Response) => void) {
+    const a = express()
+    a.use(express.json())
+    const responde = (req: express.Request, res: express.Response) => {
+      if (req.body.repeticion) marcar(res)
+      res.status(req.body.status ?? 200).json({ success: true })
+    }
+    a.post('/mobile/venues/:venueId/gift-cards/:giftCardId/resend', limite, responde)
+    a.post('/mobile/venues/:venueId/gift-cards/:giftCardId/change-destination', limite, responde)
+    a.post('/dashboard/venues/:venueId/gift-cards/:giftCardId/resend', limite, responde)
+    return a
+  }
+  const POS = (venue: string, tarjeta: string) => `/mobile/venues/${venue}/gift-cards/${tarjeta}/resend`
+  const CAMBIO = (venue: string, tarjeta: string) => `/mobile/venues/${venue}/gift-cards/${tarjeta}/change-destination`
+  const PANEL = (venue: string, tarjeta: string) => `/dashboard/venues/${venue}/gift-cards/${tarjeta}/resend`
+
+  it('🔴 resend y change-destination del POS y el resend del panel llevan la MISMA instancia, justo después del permiso', () => {
+    for (const ruta of [REENVIAR, CAMBIAR]) {
+      const h = capasDe(mobileRouter, 'post', ruta)
+      const permiso = h.findIndex(x => typeof x?.requiredPermission === 'string')
+      expect({ ruta, despuesDelPermiso: h[permiso + 1] === giftCardResendRateLimiter }).toEqual({ ruta, despuesDelPermiso: true })
+    }
+    const panel = capasDe(dashboardGiftCardsRouter, 'post', '/:giftCardId/resend')
+    const permiso = panel.findIndex(x => x?.requiredPermission === 'giftCards:manage')
+    expect(permiso).toBeGreaterThanOrEqual(0)
+    expect(panel[permiso + 1]).toBe(giftCardResendRateLimiter)
+  })
+
+  it('ninguna otra ruta de tarjetas del POS lo lleva', () => {
+    for (const [metodo, ruta] of RUTAS.filter(([, r]) => r !== REENVIAR && r !== CAMBIAR))
+      expect({ ruta, lleva: capasDe(mobileRouter, metodo, ruta).includes(giftCardResendRateLimiter) }).toEqual({ ruta, lleva: false })
+  })
+
+  it('🔴 en producción: 5 por hora por tarjeta entre las tres rutas; el 6.º ⇒ 429 GIFT_CARD_RESEND_RATE_LIMITED con retryAfter', async () => {
+    const { giftCardResendRateLimiter: limite, marcarRepeticionDeReenvio: marcar } = deProduccion()
+    const a = appDeReenvios(limite, marcar)
+    for (const url of [POS('v1', 'g1'), CAMBIO('v1', 'g1'), PANEL('v1', 'g1'), POS('v1', 'g1'), PANEL('v1', 'g1')])
+      expect({ url, status: (await request(a).post(url).send({})).status }).toEqual({ url, status: 200 })
+    for (const url of [POS('v1', 'g1'), CAMBIO('v1', 'g1'), PANEL('v1', 'g1')]) {
+      const r = await request(a).post(url).send({})
+      expect({ url, status: r.status, body: r.body }).toEqual({ url, status: 429, body: RECHAZO_DE_REENVIO })
+    }
+    // Es por tarjeta y por negocio: otra tarjeta, o la misma en otro negocio, sigue.
+    expect((await request(a).post(POS('v1', 'g2')).send({})).status).toBe(200)
+    expect((await request(a).post(PANEL('v2', 'g1')).send({})).status).toBe(200)
+  })
+
+  it('🔴 la repetición de una llave no gasta el tope (no manda nada nuevo), y los rechazos tampoco', async () => {
+    const { giftCardResendRateLimiter: limite, marcarRepeticionDeReenvio: marcar } = deProduccion()
+    const a = appDeReenvios(limite, marcar)
+    /** Lo que lleva gastado la tarjeta g1 del negocio v1 (el descuento corre al terminar cada respuesta). */
+    const gastado = async () => {
+      await new Promise(resolve => setImmediate(resolve))
+      return (await limite.getKey('gift-card-resend:card:v1:g1'))?.totalHits ?? 0
+    }
+    for (let i = 0; i < 8; i++) expect((await request(a).post(POS('v1', 'g1')).send({ repeticion: true })).status).toBe(200)
+    expect(await gastado()).toBe(0)
+    for (const status of [409, 400, 404, 503]) expect((await request(a).post(CAMBIO('v1', 'g1')).send({ status })).status).toBe(status)
+    expect(await gastado()).toBe(0)
+    for (let i = 0; i < 5; i++) expect((await request(a).post(PANEL('v1', 'g1')).send({})).status).toBe(200)
+    expect(await gastado()).toBe(5)
+    expect((await request(a).post(POS('v1', 'g1')).send({})).status).toBe(429)
+    // El 429 tampoco cuenta: sigue en 5.
+    expect(await gastado()).toBe(5)
+    // Con el tope lleno, una repetición también espera (residuo declarado: el contador corre antes del servicio).
+    expect((await request(a).post(POS('v1', 'g1')).send({ repeticion: true })).status).toBe(429)
+    expect(await gastado()).toBe(5)
   })
 })

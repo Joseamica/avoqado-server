@@ -68,6 +68,7 @@ import {
   giftCardPayFailureRateLimiters,
   giftCardPhoneRequestRateLimiters,
   giftCardPhoneVerifyRateLimiters,
+  giftCardResendRateLimiter,
   giftCardRevealRateLimiters,
 } from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
@@ -1724,11 +1725,13 @@ router.post(
   ...giftCardPhoneVerifyRateLimiters,
   giftCardMobileController.phoneVerify,
 )
+// Cierre A (C4): reenviar y cambiar el destino comparten con el `resend` del panel UN límite por tarjeta (5 por hora).
 router.post(
   '/venues/:venueId/gift-cards/:giftCardId/resend',
   authenticateTokenMiddleware,
   validateRequest(giftCardMobileSchemas.resendSchema),
   checkPermission('giftCards:sell'),
+  giftCardResendRateLimiter,
   giftCardMobileController.resend,
 )
 router.post(
@@ -1736,6 +1739,7 @@ router.post(
   authenticateTokenMiddleware,
   validateRequest(giftCardMobileSchemas.changeDestinationSchema),
   checkPermission('giftCards:manage'),
+  giftCardResendRateLimiter,
   giftCardMobileController.changeDestination,
 )
 router.post(

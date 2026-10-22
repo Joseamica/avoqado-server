@@ -57,7 +57,10 @@ import { getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCard
 import * as reportes from '@/services/giftCards/giftCardReports.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { BadRequestError } from '@/errors/AppError'
-import { exportCsv, operate } from '@/controllers/dashboard/giftCard.dashboard.controller'
+import { exportCsv, operate, resend } from '@/controllers/dashboard/giftCard.dashboard.controller'
+import { crearLimiteDeReenvio } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
+import { validateRequest } from '@/middlewares/validation'
+import { resendSchema } from '@/schemas/dashboard/giftCard.schema'
 import { cambiarDestinoDeTarjeta, reenviarTarjeta } from '@/services/giftCards/giftCardCuenta.service'
 import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
 
@@ -487,5 +490,44 @@ describe('exportar CSV con el cliente ya ido (nota 7 del coordinador, C4 r1)', (
     const next = jest.fn()
     await exportCsv(req, res, next)
     expect(next).toHaveBeenCalledWith(error)
+  })
+})
+
+/** Cierre A (C4): en el panel también, la repetición de una llave no gasta el límite de reenvíos (controller REAL, límite de 1). */
+describe('Cierre A (C4): la repetición de un reenvío del panel no gasta el límite', () => {
+  const RESULTADO = {
+    giftCardId: 'gc1',
+    deliveryStatus: 'PENDING',
+    repuesta: false,
+    ultimos4: 'JKMN',
+    replay: false,
+    destinoAnterior: null,
+    destinoNuevo: null,
+  }
+
+  it('dos repeticiones y un reenvío nuevo pasan; el siguiente ⇒ 429 GIFT_CARD_RESEND_RATE_LIMITED', async () => {
+    const a = express()
+    a.use(express.json())
+    a.use((req, _res, next) => {
+      ;(req as any).authContext = { userId: 'gerente-1', venueId: 'v1', role: 'MANAGER' }
+      next()
+    })
+    a.post('/venues/:venueId/gift-cards/:giftCardId/resend', validateRequest(resendSchema), crearLimiteDeReenvio(1), resend)
+    a.use(globalErrorHandler)
+
+    m(reenviarTarjeta).mockResolvedValue({ ...RESULTADO, replay: true, deliveryStatus: 'SENT' })
+    for (let i = 0; i < 2; i++)
+      expect((await request(a).post(`${B}/gc1/resend`).send({ operationKey: 'reenvia-0001-abc' })).status).toBe(200)
+    m(reenviarTarjeta).mockResolvedValue(RESULTADO)
+    expect((await request(a).post(`${B}/gc1/resend`).send({ operationKey: 'reenvia-0002-abc' })).status).toBe(200)
+    const r = await request(a).post(`${B}/gc1/resend`).send({ operationKey: 'reenvia-0003-abc' })
+    expect(r.status).toBe(429)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'GIFT_CARD_RESEND_RATE_LIMITED',
+      message: 'Ya reenviamos esta tarjeta varias veces. Espera un rato y vuelve a intentar.',
+      retryAfter: 3600,
+    })
+    expect(reenviarTarjeta).toHaveBeenCalledTimes(3)
   })
 })

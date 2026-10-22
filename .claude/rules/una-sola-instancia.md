@@ -66,6 +66,15 @@ calla.**
    `failed` de Meta o el rebote de Resend que llega antes de que la entrega guarde su id se anota 10 min en memoria; con 2
    pods, el aviso cae en uno y la entrega guarda en otro, y la tarjeta se queda «Enviada» sin haber llegado. Se migra a una
    tabla (messageId, codigo, recibidoEn) con la misma caducidad. El reclamo de la entrega ya vive en la fila y no cambia.
+10. 🔴 **Sellos de rechazo del cobro con saldo → tabla** (`src/services/giftCards/giftCardPayKey.ts:27`, Q91; mueve DINERO). Un
+    rechazo definitivo de una llave queda sellado 10 min en la memoria del pod que rechazó. Con 2 pods, el mismo envío de esa llave
+    cae en el otro, se vuelve a evaluar y puede cobrar con saldo después de que la caja ya cobró con otro medio: justo lo que Q91
+    evita. Se migra a una tabla (venueId, llave, error, venceEn) leída y escrita bajo el candado de la llave.
+11. **Límite de reenvíos de una tarjeta de regalo** (`giftCardResendRateLimiter`,
+    `src/middlewares/gift-card-lookup-rate-limit.middleware.ts`): 5 por hora por tarjeta, en memoria. Con 2 pods cada uno cuenta
+    los suyos y la misma tarjeta puede recibir el doble de WhatsApps o correos (costo y calificación del número de WhatsApp). Va con
+    los limitadores del punto 2, cuidando que el descuento de las repeticiones y los rechazos (`skipFailedRequests`) también llegue
+    al almacén compartido.
 
 Excepción deliberada que NO se migra: el dedupe de `registerDevice.middleware.ts:33` es en proceso **a propósito** — meter una dependencia
 dura de Redis en el camino del cobro es peor que un dedupe imperfecto. Lee el comentario antes de "arreglarlo".

@@ -37,6 +37,7 @@ import {
 } from '@/services/giftCards/giftCardCuenta.service'
 import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
+import { marcarRepeticionDeReenvio } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import { origenDe, staffDe } from '@/utils/giftCardRequest'
 
 const ACCION_DE_GERENTE: Record<OperacionDeGerenteHttp['tipo'], GiftCardAuditAction> = {
@@ -170,6 +171,8 @@ export async function resend(req: Request, res: Response) {
     throw error
   }
   auditarReenvio({ ...comun, resultado: r })
+  // Cierre A (C4): una repetición no manda nada nuevo, así que no gasta el límite de reenvíos (se marca ANTES de responder).
+  if (r.replay) marcarRepeticionDeReenvio(res)
   res.json({
     success: true,
     data: { giftCardId: r.giftCardId, deliveryStatus: r.deliveryStatus, repuesta: r.repuesta, ultimos4: r.ultimos4 },

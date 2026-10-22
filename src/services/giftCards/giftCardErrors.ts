@@ -43,6 +43,9 @@ export type GiftCardErrorCode =
   | 'GIFT_CARD_PHONE_RATE_LIMITED'
   | 'GIFT_CARD_PHONE_CODE_INVALID'
   | 'GIFT_CARD_PHONE_PROOF_INVALID'
+  // Cierre A (C4): el 429 del límite de reenvíos por tarjeta (`resend` y `change-destination`, POS y panel). Lo responde el
+  // limitador de ruta (`gift-card-lookup-rate-limit.middleware.ts`), no un `GiftCardError`.
+  | 'GIFT_CARD_RESEND_RATE_LIMITED'
 
 export class GiftCardError extends AppError {
   constructor(code: GiftCardErrorCode, mensaje: string, status: 400 | 403 | 404 | 409 | 422 | 429, extra?: Record<string, unknown>) {

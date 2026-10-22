@@ -9,7 +9,7 @@
  *    el saldo haya cambiado.
  *  - Q94: lo que NO se sella (se reintenta con la misma llave) es la tabla del contrato del índice, tal cual.
  *
- * ponytail: el sello es un Map en memoria de UNA instancia (sin Redis, `.claude/rules/una-sola-instancia.md`); con varias
+ * ponytail: el sello es un Map en memoria de UNA instancia (sin Redis, `.claude/rules/una-sola-instancia.md`, punto 10); con varias
  * instancias, una tabla (venueId, llave, respuesta, venceEn) leída y escrita bajo el mismo candado.
  */
 import type { Prisma } from '@prisma/client'

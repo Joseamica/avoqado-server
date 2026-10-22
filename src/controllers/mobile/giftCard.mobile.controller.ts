@@ -35,6 +35,7 @@ import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
 import { pedirCodigoDeTelefono, verificarCodigoDeTelefono } from '@/services/giftCards/giftCardPhone.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { marcarRepeticionDeReenvio } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import { BadRequestError, ServiceUnavailableError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
@@ -282,6 +283,8 @@ async function responderReenvio(req: Request, res: Response, ruta: string, opera
     throw error
   }
   auditarReenvio({ ...comun, resultado: r })
+  // Cierre A (C4): una repetición no manda nada nuevo, así que no gasta el límite de reenvíos (se marca ANTES de responder).
+  if (r.replay) marcarRepeticionDeReenvio(res)
   res.json({
     success: true,
     data: { giftCardId: r.giftCardId, deliveryStatus: r.deliveryStatus, repuesta: r.repuesta, ultimos4: r.ultimos4 },

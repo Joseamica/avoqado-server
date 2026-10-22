@@ -82,6 +82,7 @@ import {
 } from '@/services/mobile/order.mobile.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { BadRequestError, ServiceUnavailableError } from '@/errors/AppError'
+import { crearLimiteDeReenvio } from '@/middlewares/gift-card-lookup-rate-limit.middleware'
 import {
   cambiarDestinoDeTarjeta,
   getCuentaDeTarjetasPos,
@@ -1068,5 +1069,69 @@ describe('S4: la cuenta de tarjetas en el POS', () => {
     const otroDia = await request(app).post(`${B}/gift-cards/orders/o1/reveal`).send({ operationKey: 'imprime-0002' })
     expect(otroDia.status).toBe(403)
     expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'GIFT_CARD_REVEAL_DENIED', entity: 'Order', entityId: 'o1' }))
+  })
+})
+
+/**
+ * Cierre A (C4): el límite de reenvíos (un contador por tarjeta) sólo cuenta lo que manda algo nuevo. Aquí con el controller REAL
+ * y un límite de 1: la repetición de una llave (`replay: true` del servicio) no lo gasta; un reenvío nuevo sí, y el siguiente
+ * —por cualquiera de las dos rutas— ya es 429.
+ */
+describe('Cierre A (C4): la repetición de un reenvío no gasta el límite', () => {
+  const NUEVO = {
+    giftCardId: 'g1',
+    deliveryStatus: 'PENDING',
+    repuesta: false,
+    ultimos4: 'JKMN',
+    replay: false,
+    destinoAnterior: null,
+    destinoNuevo: null,
+  }
+  function conLimiteDeUno() {
+    const limite = crearLimiteDeReenvio(1)
+    const a = express()
+    a.use(express.json())
+    a.use((req, _res, next) => {
+      ;(req as any).authContext = { userId: 'staff-1', venueId: 'v1', role: 'MANAGER' }
+      next()
+    })
+    a.post('/venues/:venueId/gift-cards/:giftCardId/resend', validateRequest(s.resendSchema), limite, ctrl.resend)
+    a.post(
+      '/venues/:venueId/gift-cards/:giftCardId/change-destination',
+      validateRequest(s.changeDestinationSchema),
+      limite,
+      ctrl.changeDestination,
+    )
+    a.use(globalErrorHandler)
+    return a
+  }
+
+  it('dos repeticiones y luego un reenvío nuevo pasan; el siguiente reenvío o cambio de destino ⇒ 429', async () => {
+    const a = conLimiteDeUno()
+    m(reenviarTarjeta).mockResolvedValue({ ...NUEVO, replay: true, deliveryStatus: 'SENT' })
+    for (let i = 0; i < 2; i++)
+      expect((await request(a).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0001' })).status).toBe(200)
+    m(reenviarTarjeta).mockResolvedValue(NUEVO)
+    expect((await request(a).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0002' })).status).toBe(200)
+
+    const otro = await request(a).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0003' })
+    expect(otro.status).toBe(429)
+    expect(otro.body.code).toBe('GIFT_CARD_RESEND_RATE_LIMITED')
+    m(cambiarDestinoDeTarjeta).mockResolvedValue({ ...NUEVO, repuesta: true })
+    const cambio = await request(a)
+      .post(`${B}/gift-cards/g1/change-destination`)
+      .send({ operationKey: 'cambia-0001', deliveryChannel: 'WHATSAPP', recipientPhone: '5598765432' })
+    expect(cambio.status).toBe(429)
+    expect(reenviarTarjeta).toHaveBeenCalledTimes(3)
+    expect(cambiarDestinoDeTarjeta).not.toHaveBeenCalled()
+  })
+
+  it('la repetición de un cambio de destino tampoco lo gasta', async () => {
+    const a = conLimiteDeUno()
+    m(cambiarDestinoDeTarjeta).mockResolvedValue({ ...NUEVO, repuesta: true, replay: true })
+    const cuerpo = { operationKey: 'cambia-0002', deliveryChannel: 'WHATSAPP', recipientPhone: '5598765432' }
+    for (let i = 0; i < 3; i++) expect((await request(a).post(`${B}/gift-cards/g1/change-destination`).send(cuerpo)).status).toBe(200)
+    m(reenviarTarjeta).mockResolvedValue(NUEVO)
+    expect((await request(a).post(`${B}/gift-cards/g1/resend`).send({ operationKey: 'reenvia-0004' })).status).toBe(200)
   })
 })

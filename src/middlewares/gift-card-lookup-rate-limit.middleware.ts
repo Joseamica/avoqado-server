@@ -14,6 +14,7 @@
 import rateLimit, { type RateLimitRequestHandler } from 'express-rate-limit'
 import type { Request, Response } from 'express'
 import logger from '@/config/logger'
+import type { GiftCardErrorCode } from '@/services/giftCards/giftCardErrors'
 import { aparatoDe } from '@/utils/giftCardRequest'
 
 const isProd = process.env.NODE_ENV === 'production'
@@ -21,6 +22,24 @@ const VENTANA_MS = 60 * 1000
 
 const ipDe = (req: Request): string => req.ip || req.socket.remoteAddress || 'desconocida'
 const negocioDe = (req: Request): string => req.params.venueId || 'sin-negocio'
+
+/**
+ * El 429 de TODOS los limitadores de tarjetas, el que lee la app: `{ success: false, code, message, retryAfter }` (`retryAfter` = la
+ * ventana en segundos), con su línea de log (`limiter` dice cuál frenó; sin código, teléfono ni correo).
+ */
+function rechazoDelLimite(o: {
+  prefijo: string
+  aviso: string
+  code: string
+  mensaje: string
+  ventanaMs: number
+  datos?: (req: Request) => Record<string, unknown>
+}) {
+  return (req: Request, res: Response): void => {
+    logger.warn(o.aviso, { limiter: o.prefijo, venueId: req.params.venueId, ipAddress: req.ip, ...o.datos?.(req) })
+    res.status(429).json({ success: false, code: o.code, message: o.mensaje, retryAfter: o.ventanaMs / 1000 })
+  }
+}
 
 /**
  * Fábrica (las pruebas la usan con topes chicos); las rutas usan las instancias de abajo. Orden: IP, luego aparato.
@@ -37,26 +56,19 @@ export function crearLimitadoresDeConsulta(
   // ⭐ (C3 menor 1): el texto y la línea del log son de ESTE limitador. Cobrar con saldo (`soloFallos`) habla de intentos de cobro
   // —lo ve la cajera—; el `code` es el mismo para los dos (la app ya decide por él).
   const cobro = opciones.soloFallos === true
-  const rechazo = (req: Request, res: Response): void => {
-    logger.warn(
-      cobro ? '🚨 Límite de intentos de cobro con tarjeta de regalo excedido' : '🚨 Límite de consultas de tarjetas de regalo excedido',
-      {
-        limiter: prefijo,
-        venueId: req.params.venueId,
-        ipAddress: req.ip,
-      },
-    )
-    res.status(429).json({
-      success: false,
-      code: opciones.code ?? 'GIFT_CARD_LOOKUP_RATE_LIMITED',
-      message:
-        opciones.mensaje ??
-        (cobro
-          ? 'Demasiados intentos de cobro con tarjeta de regalo seguidos. Espera un minuto y vuelve a intentar.'
-          : 'Demasiadas consultas de tarjetas de regalo seguidas. Espera un minuto y vuelve a intentar.'),
-      retryAfter: ventanaMs / 1000,
-    })
-  }
+  const rechazo = rechazoDelLimite({
+    prefijo,
+    aviso: cobro
+      ? '🚨 Límite de intentos de cobro con tarjeta de regalo excedido'
+      : '🚨 Límite de consultas de tarjetas de regalo excedido',
+    code: opciones.code ?? 'GIFT_CARD_LOOKUP_RATE_LIMITED',
+    mensaje:
+      opciones.mensaje ??
+      (cobro
+        ? 'Demasiados intentos de cobro con tarjeta de regalo seguidos. Espera un minuto y vuelve a intentar.'
+        : 'Demasiadas consultas de tarjetas de regalo seguidas. Espera un minuto y vuelve a intentar.'),
+    ventanaMs,
+  })
   const comun = {
     windowMs: ventanaMs,
     standardHeaders: true,
@@ -114,3 +126,54 @@ export const giftCardPhoneVerifyRateLimiters = crearLimitadoresDeConsulta(isProd
   ...DEL_TELEFONO,
   prefijo: 'gift-card-phone-verify',
 })
+
+/**
+ * Cierre A (C4, M3 de la revisión final): reenviar una tarjeta. Cada reenvío nuevo es un WhatsApp o un correo que cuesta, y los
+ * reportes de spam bajan la calificación del número de WhatsApp de Avoqado (el mismo de los códigos de inicio de sesión). UN
+ * contador por (negocio, tarjeta) que comparten `resend` y `change-destination` del POS y el `resend` del panel: 5 por hora.
+ *  - Sólo gasta el tope lo que SÍ manda algo nuevo: una respuesta < 400 que no sea la repetición de una llave. El controller marca
+ *    la repetición con `marcarRepeticionDeReenvio` ANTES de responder; al terminar la respuesta, la repetición, los rechazos
+ *    (4xx/5xx) y el propio 429 se descuentan (`skipFailedRequests`).
+ *  - ponytail: una repetición que llega con el tope ya lleno recibe el 429 (no cuenta, pero espera como las demás): el contador
+ *    corre antes del servicio y sólo el servicio sabe, bajo el candado de la tarjeta, que es una repetición.
+ *  - `retryAfter` es la ventana entera (3600), como en los demás limitadores de ruta; el contador real puede liberarse antes.
+ * Mismo molde y mismo 429 que `crearLimitadoresDeConsulta` (`rechazoDelLimite`); memoria de UNA instancia
+ * (`.claude/rules/una-sola-instancia.md`, punto 11). La llave es por tarjeta, no por IP ni aparato: el límite cuida al
+ * destinatario y al número, no a la caja.
+ */
+const REPETICION_DE_REENVIO = 'giftCardResendReplay'
+const CODIGO_DE_REENVIO: GiftCardErrorCode = 'GIFT_CARD_RESEND_RATE_LIMITED'
+export const MENSAJE_DE_REENVIO = 'Ya reenviamos esta tarjeta varias veces. Espera un rato y vuelve a intentar.'
+
+/**
+ * La respuesta es la repetición de una llave de reenvío (no mandó nada nuevo): no gasta el tope de reenvíos. En Express `res.locals`
+ * siempre existe; un `res` armado a mano (una prueba que llama al controller directo) puede no traerlo, y marcar nunca debe tumbar
+ * la respuesta de una repetición.
+ */
+export function marcarRepeticionDeReenvio(res: Response): void {
+  if (res.locals) res.locals[REPETICION_DE_REENVIO] = true
+}
+
+export function crearLimiteDeReenvio(max: number, ventanaMs: number = 60 * 60 * 1000): RateLimitRequestHandler {
+  const prefijo = 'gift-card-resend'
+  return rateLimit({
+    windowMs: ventanaMs,
+    max,
+    standardHeaders: true,
+    legacyHeaders: false,
+    skipFailedRequests: true,
+    requestWasSuccessful: (_req: Request, res: Response) => res.statusCode < 400 && res.locals?.[REPETICION_DE_REENVIO] !== true,
+    keyGenerator: (req: Request) => `${prefijo}:card:${negocioDe(req)}:${req.params.giftCardId ?? 'sin-tarjeta'}`,
+    handler: rechazoDelLimite({
+      prefijo,
+      aviso: '🚨 Límite de reenvíos de una tarjeta de regalo excedido',
+      code: CODIGO_DE_REENVIO,
+      mensaje: MENSAJE_DE_REENVIO,
+      ventanaMs,
+      datos: req => ({ giftCardId: req.params.giftCardId }),
+    }),
+  })
+}
+
+/** Las TRES rutas (`resend` y `change-destination` del POS, `resend` del panel) montan ESTA instancia: un solo contador. */
+export const giftCardResendRateLimiter = crearLimiteDeReenvio(isProd ? 5 : 1000)
