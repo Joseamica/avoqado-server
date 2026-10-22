@@ -29,6 +29,7 @@ import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 import { awardLoyaltyForPaidOrder } from '@/services/shared/loyaltyOnPaidOrder'
 import { WHERE_PAYMENT_IS_EXCHANGE_CREDIT } from '@/services/exchanges/exchangeMarks'
+import logger from '@/config/logger'
 
 const p = prisma as unknown as {
   staffVenue: { findFirst: jest.Mock }
@@ -73,6 +74,8 @@ describe('awardLoyaltyForPaidOrder · new sale of a product exchange', () => {
     const r = await awardLoyaltyForPaidOrder({ venueId, orderId, orderTotal: 500, staffId: 'staff-1' })
 
     expect(earnPointsMock).not.toHaveBeenCalled()
+    // Ni visita (no es una visita nueva) ni gasto (no se cobró nada de más).
+    expect(metricsMock).not.toHaveBeenCalled()
     // Nada que dar no es un fallo: la venta queda procesada y el reconciliador no la repite.
     expect(r).toEqual({ complete: true, errors: [] })
     expect(p.order.updateMany).toHaveBeenCalledWith(
@@ -101,6 +104,46 @@ describe('awardLoyaltyForPaidOrder · new sale of a product exchange', () => {
     expect(earnPointsMock).toHaveBeenCalledWith(venueId, customerId, 100, orderId, undefined, { skipStamp: true })
   })
 
+  it('the new sale of an exchange adds only the charged base to the spend and no visit, for every customer of the sale', async () => {
+    p.orderCustomer.findMany.mockResolvedValue([
+      { customerId, isPrimary: true, customer: { id: customerId, firstName: 'Ana', lastName: null } },
+      { customerId: 'cust-2', isPrimary: false, customer: { id: 'cust-2', firstName: 'Beto', lastName: null } },
+    ])
+    esVentaNueva(true)
+    conCredito(400)
+
+    await awardLoyaltyForPaidOrder({ venueId, orderId, orderTotal: 500 })
+
+    expect(metricsMock.mock.calls).toEqual([
+      [customerId, 100, orderId, venueId, { skipVisit: true }],
+      ['cust-2', 100, orderId, venueId, { skipVisit: true }],
+    ])
+  })
+
+  it('the points log keeps the real total and names the reduced base apart', async () => {
+    esVentaNueva(true)
+    conCredito(400)
+    earnPointsMock.mockResolvedValue({ pointsEarned: 100, newBalance: 100 })
+
+    await awardLoyaltyForPaidOrder({ venueId, orderId, orderTotal: 500 })
+
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Loyalty points earned'),
+      expect.objectContaining({ orderTotal: 500, base: 100 }),
+    )
+  })
+
+  it('a credit greater than the order total is clamped: base 0, no earnPoints call, no stamp and no metrics', async () => {
+    esVentaNueva(true)
+    conCredito(600)
+
+    const r = await awardLoyaltyForPaidOrder({ venueId, orderId, orderTotal: 500, staffId: 'staff-1' })
+
+    expect(earnPointsMock).not.toHaveBeenCalled()
+    expect(metricsMock).not.toHaveBeenCalled()
+    expect(r).toEqual({ complete: true, errors: [] })
+  })
+
   it('R=0, N=10000: the new sale earns points on 10000 but no new stamp', async () => {
     // N = 10000 centavos ($100) y nada regresado: no hay cobro con crédito, pero sigue siendo la venta nueva de un cambio.
     esVentaNueva(true)
@@ -116,7 +159,8 @@ describe('awardLoyaltyForPaidOrder · new sale of a product exchange', () => {
 
     // Exactamente los cinco argumentos de siempre: sin opciones, `earnPoints` sella como hoy.
     expect(earnPointsMock.mock.calls).toEqual([[venueId, customerId, 500, orderId, 'sv-1']])
-    expect(metricsMock).toHaveBeenCalledWith(customerId, 500, orderId, venueId)
+    // Y las métricas con los cuatro argumentos de siempre: la visita y el total, como hoy.
+    expect(metricsMock.mock.calls).toEqual([[customerId, 500, orderId, venueId]])
   })
 
   it('keeps today behavior for a $0 order that is not an exchange (earnPoints still decides the stamp)', async () => {
@@ -149,6 +193,7 @@ describe('awardLoyaltyForPaidOrder · new sale of a product exchange', () => {
     await awardLoyaltyForPaidOrder({ venueId, orderId, orderTotal: 500, staffId: 'staff-1' })
 
     expect(earnPointsMock.mock.calls).toEqual([[venueId, customerId, 100, orderId, 'sv-1']])
+    expect(metricsMock.mock.calls).toEqual([[customerId, 500, orderId, venueId]])
   })
 
   it('if reading the exchange credit fails, no points are given on the full total and the order stays pending', async () => {

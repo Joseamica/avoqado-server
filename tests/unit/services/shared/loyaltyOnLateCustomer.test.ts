@@ -179,6 +179,7 @@ describe('decideSaleStamp (pura)', () => {
     pointsOwnerCustomerIds: [],
     settledAt: new Date(AHORA - 30 * MIN),
     esVentaDeTarjetas: false,
+    esVentaNuevaDeCambio: false,
   }
   it.each<[string, Partial<SaleStampSnapshot>, string]>([
     ['elegible', {}, 'ELIGIBLE'],
@@ -269,6 +270,7 @@ describe('esElegibleParaLealtad (¿se corre —o se COMPLETA— la lealtad? audi
     pointsOwnerCustomerIds: [],
     settledAt: new Date(AHORA - 30 * MIN),
     esVentaDeTarjetas: false,
+    esVentaNuevaDeCambio: false,
   }
   const vieja = new Date(AHORA - 3 * LATE_STAMP_WINDOW_MS)
   it.each<[string, Partial<SaleStampSnapshot>, boolean, boolean]>([

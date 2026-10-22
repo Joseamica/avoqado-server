@@ -11,6 +11,7 @@ import { cerrarLealtadDeLaVenta, registrarErrorDeLealtad } from './cierreDeLealt
 import { MARCA_LEALTAD_REABIERTA } from './lealtadReabierta'
 import { esVentaYaCobrada, ventaTieneReembolso } from './ligaDeClienteEnVenta'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
+import { esVentaNuevaDeCambio } from '@/services/exchanges/exchangeMarks'
 
 /** La marca de fila que deja la reapertura (ver `lealtadReabierta.ts`). */
 export { MARCA_LEALTAD_REABIERTA }
@@ -81,6 +82,11 @@ export interface SaleStampSnapshot {
   settledAt: Date | null
   /** La cuenta es de tarjetas de regalo (marca completa R11): el otorgamiento ya no da sello (B6); la regla tampoco lo promete. */
   esVentaDeTarjetas: boolean
+  /**
+   * La venta nueva de un cambio de producto (spec 2026-10-20 §7.7): no es una visita nueva, así que el otorgamiento no da sello y la
+   * regla tampoco lo promete; la diferencia cobrada sí da puntos (`esElegibleParaLealtad`).
+   */
+  esVentaNuevaDeCambio: boolean
 }
 
 const SIN_VENTA = new Set(['CANCELLED', 'DELETED'])
@@ -93,6 +99,9 @@ const SIN_VENTA = new Set(['CANCELLED', 'DELETED'])
 export function decideSaleStamp(s: SaleStampSnapshot, nowMs: number, opciones: { ignorarPlazo?: boolean } = {}): SaleStampDecision {
   // Cierre (punto 15): primero que todo. Abierta o pagada, una venta de tarjetas nunca va a sumar sello: no se promete uno.
   if (s.esVentaDeTarjetas) return 'NOT_APPLICABLE'
+  // Cambio de producto: la venta nueva no es una visita nueva y nunca suma sello. No se promete ni se reporta uno (sin motivo:
+  // las apps no pintan nada); sus puntos van por `esElegibleParaLealtad`.
+  if (s.esVentaNuevaDeCambio) return 'NOT_APPLICABLE'
   // 🔴 Un reembolso de la TPV deja la orden en PAID: se mira el dinero devuelto y la reversa del sello, no sólo el estado.
   if (SIN_VENTA.has(s.status) || s.paymentStatus === 'REFUNDED' || s.reembolsada || s.hasReversal) return 'NOT_PAID'
   if (s.paymentStatus !== 'PAID') return 'OPEN'
@@ -114,10 +123,17 @@ export function decideSaleStamp(s: SaleStampSnapshot, nowMs: number, opciones: {
  * 🔴 Auditoría A #1: `awardLoyaltyForPaidOrder` sella ANTES de acreditar (`earnPoints` → `grantStamp`). Si el proceso se cae
  * entre uno y otro, la venta queda con su sello y sin puntos. Saltarse la llamada «porque ya está sellada» dejaba esos puntos
  * perdidos para siempre; llamarla otra vez es seguro (idempotente por orden) y completa lo que falte.
+ *
+ * La venta nueva de un cambio se evalúa como una venta más: no da sello (lo omite el otorgamiento), pero la diferencia cobrada
+ * sí da puntos por la liga tardía y por el reconciliador.
  */
 export function esElegibleParaLealtad(s: SaleStampSnapshot, nowMs: number, opciones: { ignorarPlazo?: boolean } = {}): boolean {
-  const sinSelloPropio = s.stampOwnerCustomerId === s.customerId ? { ...s, stampOwnerCustomerId: null } : s
-  return decideSaleStamp(sinSelloPropio, nowMs, opciones) === 'ELIGIBLE'
+  const comoVenta = {
+    ...s,
+    esVentaNuevaDeCambio: false,
+    ...(s.stampOwnerCustomerId === s.customerId ? { stampOwnerCustomerId: null } : {}),
+  }
+  return decideSaleStamp(comoVenta, nowMs, opciones) === 'ELIGIBLE'
 }
 
 const VENTA_SELECT = {
@@ -152,10 +168,10 @@ const VENTA_SELECT = {
   ...SELECT_MARCA_DE_CUENTA_DE_TARJETAS,
 } satisfies Prisma.OrderSelect
 
-type Venta = Prisma.OrderGetPayload<{ select: typeof VENTA_SELECT }> & { reembolsada: boolean }
+type Venta = Prisma.OrderGetPayload<{ select: typeof VENTA_SELECT }> & { reembolsada: boolean; esVentaNuevaDeCambio: boolean }
 
 /** El cliente global o el de una transacción (la reapertura lee DENTRO de la transacción de la liga). */
-type LectorDeVenta = Pick<Prisma.TransactionClient, 'order' | 'payment'>
+type LectorDeVenta = Pick<Prisma.TransactionClient, 'order' | 'payment' | 'exchange'>
 
 interface Programa {
   stampsEnabled: boolean
@@ -167,7 +183,12 @@ async function leerVenta(db: LectorDeVenta, venueId: string, orderId: string): P
   if (!venta) return null
   // 🔴 Reembolso EXACTO (auditoría A #2): un `count` por la orden, sin tope de lista que esconda nada. Decide `NOT_PAID`, no
   // «ya cobrada» (R7-2: eso es `esVentaYaCobrada`, sólo el estado).
-  return { ...venta, reembolsada: await ventaTieneReembolso(db, { venueId, orderId }) }
+  return {
+    ...venta,
+    reembolsada: await ventaTieneReembolso(db, { venueId, orderId }),
+    // Cambio de producto: una lectura por el índice único de `Exchange.newOrderId` (no hay relación con la orden).
+    esVentaNuevaDeCambio: await esVentaNuevaDeCambio(db, orderId),
+  }
 }
 
 function fotoPara(venta: Venta, customerId: string): SaleStampSnapshot {
@@ -183,6 +204,7 @@ function fotoPara(venta: Venta, customerId: string): SaleStampSnapshot {
     pointsOwnerCustomerIds: venta.loyaltyTransactions.map(t => t.customerId),
     settledAt: venta.loyaltyEligibleAt ?? venta.payments[0]?.createdAt ?? null,
     esVentaDeTarjetas: esCuentaDeTarjetasSeleccionada(venta),
+    esVentaNuevaDeCambio: venta.esVentaNuevaDeCambio,
   }
 }
 
@@ -649,7 +671,8 @@ export async function awardLoyaltyForLateCustomer(args: {
         },
       })
     }
-    // Cierre (punto 15): la liga a una venta de tarjetas queda auditada (arriba), pero la app no pinta nada: no aplica.
+    // Cierre (punto 15): la liga a una venta de tarjetas —o a la venta nueva de un cambio— queda auditada (arriba), pero la app no
+    // pinta nada: no aplica.
     return antes === 'NOT_APPLICABLE' ? null : outcome
   } catch (error) {
     const mensaje = error instanceof Error ? error.message : String(error)
@@ -753,6 +776,8 @@ export async function describeSaleStampForPayment(args: { venueId: string; payme
 export interface SaleStampPreview {
   orderNumber: string
   decision: SaleStampDecision
+  /** Con `NOT_APPLICABLE`: la venta nueva de un cambio (si no, la cuenta de tarjetas de regalo). Lo explica el MCP. */
+  esVentaNuevaDeCambio: boolean
   stampsEnabled: boolean
   dailyLimitReached: boolean
   minutosDesdeElCobro: number | null
@@ -768,6 +793,7 @@ export async function previewSaleStamp(args: { venueId: string; orderId: string;
   return {
     orderNumber: venta.orderNumber,
     decision,
+    esVentaNuevaDeCambio: foto.esVentaNuevaDeCambio,
     stampsEnabled: programa.stampsEnabled,
     dailyLimitReached: decision === 'ELIGIBLE' ? await topeDelDiaAlcanzado(args.venueId, args.customerId, programa, nowMs) : false,
     minutosDesdeElCobro: minutosDesde(foto.settledAt, nowMs),

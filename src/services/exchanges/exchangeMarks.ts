@@ -42,6 +42,21 @@ export function sqlPaymentIsNotExchangeCredit(alias: AliasDeCobro): Prisma.Sql {
 }
 
 /**
+ * Los papeles que un cambio escribe en `processorData.exchange.role` de sus devoluciones. Lista CERRADA y única: la usan el
+ * escritor del cambio, `WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO` y `exchangeProtectedPayments`; un papel nuevo se decide aquí.
+ *   · `CREDIT`: el gemelo del crédito en la venta original.
+ *   · `DIFFERENCE`: la diferencia devuelta.
+ *   · `CHAIN`: lo devuelto de algo pagado con crédito (§6.7); ése sí es una devolución.
+ */
+export const EXCHANGE_REFUND_ROLE = { CREDIT: 'CREDIT', DIFFERENCE: 'DIFFERENCE', CHAIN: 'CHAIN' } as const
+export type ExchangeRefundRole = (typeof EXCHANGE_REFUND_ROLE)[keyof typeof EXCHANGE_REFUND_ROLE]
+export const EXCHANGE_REFUND_ROLES: readonly ExchangeRefundRole[] = [
+  EXCHANGE_REFUND_ROLE.CREDIT,
+  EXCHANGE_REFUND_ROLE.DIFFERENCE,
+  EXCHANGE_REFUND_ROLE.CHAIN,
+]
+
+/**
  * ¿La orden es la VENTA NUEVA de un cambio? No es una compra nueva (spec §7.6 y §7.7): no dispara referidos, ni con la diferencia
  * cobrada, y no da sello. Una lectura por el índice único de `Exchange.newOrderId`.
  */
@@ -55,13 +70,14 @@ export async function esVentaNuevaDeCambio(db: Pick<Prisma.TransactionClient, 'e
  * (sin `processorData`, o sin papel de cambio en `processorData.exchange.role`) y las de la CADENA (`CHAIN`: devolver algo pagado
  * con crédito sí es una devolución). Quedan fuera el gemelo del crédito (`CREDIT`) y la diferencia devuelta (`DIFFERENCE`).
  * 🔴 Nombra lo que CUENTA, a propósito: un `NOT` sobre la ruta JSON da NULL cuando falta la llave y dejaría fuera, sin error, las
- * devoluciones de siempre. Un papel nuevo no cuenta hasta que se agregue aquí. Lleva `OR`: va dentro de `AND: [...]`.
+ * devoluciones de siempre. Un papel nuevo de `EXCHANGE_REFUND_ROLE` no cuenta hasta agregarlo aquí. Lleva `OR`: va dentro de
+ * `AND: [...]`.
  */
 export const WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO = {
   OR: [
     { processorData: { equals: Prisma.AnyNull } },
     { processorData: { path: ['exchange', 'role'], equals: Prisma.AnyNull } },
-    { processorData: { path: ['exchange', 'role'], equals: 'CHAIN' } },
+    { processorData: { path: ['exchange', 'role'], equals: EXCHANGE_REFUND_ROLE.CHAIN } },
   ],
 } satisfies Prisma.PaymentWhereInput
 
@@ -113,7 +129,7 @@ export async function exchangeProtectedPayments(
     WHERE p.id IN (${Prisma.join([...paymentIds])})
       AND (
         NOT (${sqlPaymentIsNotExchangeCredit('p')})
-        OR p."processorData"->'exchange'->>'role' IN ('CREDIT', 'DIFFERENCE', 'CHAIN')
+        OR p."processorData"->'exchange'->>'role' IN (${Prisma.join([...EXCHANGE_REFUND_ROLES])})
         OR (
           p."type" IS DISTINCT FROM 'REFUND'
           AND EXISTS (SELECT 1 FROM "Exchange" x WHERE x."venueId" = p."venueId" AND x."newOrderId" = p."orderId")

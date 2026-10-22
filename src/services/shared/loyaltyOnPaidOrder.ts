@@ -112,6 +112,8 @@ function nombre(c: { firstName: string | null; lastName: string | null } | null 
 
 /** Lo que la venta premia con puntos y sello. */
 interface PremioDeLaVenta {
+  /** El total de la venta sin propina, el de siempre. */
+  orderTotal: number
   /** Sobre cuánto se calculan los puntos. */
   base: number
   /** La venta nueva de un cambio: puntos sí, sello no. */
@@ -139,9 +141,19 @@ async function premioDeLaVenta(venueId: string, orderId: string, orderTotal: num
     esVentaNuevaDeCambio(prisma, orderId),
   ])
   const pagadoConCredito = credito._sum.amount ?? new Prisma.Decimal(0)
-  if (pagadoConCredito.lte(0)) return { base: orderTotal, sinSello }
+  if (pagadoConCredito.lte(0)) return { orderTotal, base: orderTotal, sinSello }
   // En Decimal: los pesos con centavos no se redondean de más ni de menos al restar.
-  return { base: Prisma.Decimal.max(0, new Prisma.Decimal(orderTotal).minus(pagadoConCredito)).toNumber(), sinSello }
+  return { orderTotal, base: Prisma.Decimal.max(0, new Prisma.Decimal(orderTotal).minus(pagadoConCredito)).toNumber(), sinSello }
+}
+
+/**
+ * La visita y el gasto de un cliente por esta venta. Una venta de siempre, igual que hoy. La venta nueva de un cambio no es una
+ * visita nueva: sólo suma al gasto lo cobrado de más, y nada si no cobró nada.
+ */
+async function actualizarMetricas(customerId: string, premio: PremioDeLaVenta, orderId: string, venueId: string): Promise<void> {
+  if (!premio.sinSello) return updateCustomerMetrics(customerId, premio.orderTotal, orderId, venueId)
+  if (premio.base <= 0) return
+  return updateCustomerMetrics(customerId, premio.base, orderId, venueId, { skipVisit: true })
 }
 
 export async function awardLoyaltyForPaidOrder(
@@ -203,7 +215,7 @@ export async function awardLoyaltyForPaidOrder(
       // La visita (métricas) de UN cliente de la venta; un fallo no le quita el sello a nadie.
       const medirVisita = async (oc: (typeof orderCustomers)[number]) => {
         try {
-          await updateCustomerMetrics(oc.customerId, orderTotal, orderId, venueId)
+          await actualizarMetricas(oc.customerId, premio, orderId, venueId)
           logger.info('📊 Customer metrics updated', {
             orderId,
             customerId: oc.customerId,
@@ -245,7 +257,7 @@ export async function awardLoyaltyForPaidOrder(
       const premio = await premioDeLaVenta(venueId, orderId, orderTotal)
       const medirVisitaHeredada = async () => {
         try {
-          await updateCustomerMetrics(legacy.id, orderTotal, orderId, venueId)
+          await actualizarMetricas(legacy.id, premio, orderId, venueId)
         } catch (metricsError: any) {
           errors.push(`metrics:${legacy.id}:${metricsError?.message ?? String(metricsError)}`)
           logger.error('⚠️ Failed to update customer metrics (continuing)', {
@@ -345,7 +357,8 @@ async function acreditar(
       orderId,
       customerId,
       customerName,
-      orderTotal: premio.base,
+      orderTotal: premio.orderTotal,
+      base: premio.base,
       pointsEarned: loyaltyResult.pointsEarned,
       newBalance: loyaltyResult.newBalance,
     })

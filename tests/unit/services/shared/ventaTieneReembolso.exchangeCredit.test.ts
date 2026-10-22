@@ -7,7 +7,7 @@
 import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { ventaTieneReembolso } from '@/services/shared/ligaDeClienteEnVenta'
-import { WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO } from '@/services/exchanges/exchangeMarks'
+import { EXCHANGE_REFUND_ROLE, EXCHANGE_REFUND_ROLES, WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO } from '@/services/exchanges/exchangeMarks'
 
 const venta = { venueId: 'venue-1', orderId: 'order-1' }
 
@@ -33,8 +33,8 @@ describe('ventaTieneReembolso · product exchange refunds', () => {
     })
   })
 
-  it('ventaTieneReembolso is false when the only refunds are CREDIT or DIFFERENCE rows; true with an ordinary or CHAIN refund', async () => {
-    // El conteo ya viene sin las filas del cambio: 0 = sólo había CREDIT/DIFFERENCE (o nada); 1 = un reembolso que sí cuenta.
+  it('maps the exact count to a boolean', async () => {
+    // El conteo ya viene sin las filas del cambio (lo que dice cada fila se prueba contra Postgres): 0 ⇒ false; 1 ⇒ true.
     prismaMock.payment.count.mockResolvedValueOnce(0).mockResolvedValueOnce(1)
 
     await expect(ventaTieneReembolso(prismaMock, venta)).resolves.toBe(false)
@@ -52,5 +52,10 @@ describe('ventaTieneReembolso · product exchange refunds', () => {
       { path: ['exchange', 'role'], equals: 'CHAIN' },
     ])
     expect(JSON.stringify(WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO)).not.toMatch(/CREDIT|DIFFERENCE/)
+  })
+
+  it('the closed set of exchange refund roles is CREDIT, DIFFERENCE and CHAIN, and only CHAIN counts as a refund', () => {
+    expect(EXCHANGE_REFUND_ROLES).toEqual(['CREDIT', 'DIFFERENCE', 'CHAIN'])
+    expect(WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO.OR[2].processorData.equals).toBe(EXCHANGE_REFUND_ROLE.CHAIN)
   })
 })

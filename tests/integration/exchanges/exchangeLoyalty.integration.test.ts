@@ -2,7 +2,8 @@
  * Lealtad de un cambio de producto contra un Postgres real (spec 2026-10-20 §7.7):
  * - el cambio no le quita el sello a la venta original: sus devoluciones (el gemelo del crédito, `CREDIT`, y la diferencia
  *   devuelta, `DIFFERENCE`) no cuentan como «la venta tiene un reembolso»; la cadena (`CHAIN`) y los reembolsos de siempre sí;
- * - la venta nueva da puntos sólo sobre lo cobrado de más y nunca un sello, también cuando la recupera el reconciliador.
+ * - la venta nueva da puntos sólo sobre lo cobrado de más y nunca un sello, también cuando la recupera el reconciliador o se le
+ *   liga un cliente después (la TPV no recibe un «no sumó por error»).
  *
  * Todo real: el reconciliador (con su envoltorio por defecto), `awardLoyaltyForPaidOrder`, `earnPoints` y `grantStamp`.
  *
@@ -12,6 +13,7 @@
  * Cada corrida usa su propio negocio con nombres únicos y sólo limpia lo de ese negocio.
  */
 import { Prisma, type Payment } from '@prisma/client'
+import cuid from 'cuid'
 import prisma from '@/utils/prismaClient'
 
 jest.mock('@/communication/sockets', () => ({
@@ -33,6 +35,9 @@ jest.mock('@/services/access/basePlan.service', () => ({
 }))
 
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
+import { awardLoyaltyForLateCustomer } from '@/services/shared/loyaltyOnLateCustomer'
 import { ensureExchangeCreditTender } from '@/services/exchanges/exchangeCreditTender'
 import { ventaTieneReembolso } from '@/services/shared/ligaDeClienteEnVenta'
 import { LoyaltyReconciliationJob } from '@/jobs/loyalty-reconciliation.job'
@@ -193,7 +198,7 @@ describe('ventaTieneReembolso against a real database: the refunds of an exchang
     const { id: exchangeId } = await registrarCambio({
       originalOrderId: orderId,
       originalPaymentId: cobro.id,
-      newOrderId: `${SUF}-nueva-${++n}`,
+      newOrderId: cuid(),
       returned: 100,
       taken: 60,
     })
@@ -209,7 +214,7 @@ describe('ventaTieneReembolso against a real database: the refunds of an exchang
       if (fila === 'DIFFERENCE') await devolucion({ processorData: marca(exchangeId, 'DIFFERENCE', cobro.id) })
       if (fila === 'CHAIN')
         await devolucion({
-          processorData: { ...marca(exchangeId, 'CHAIN', cobro.id), rootPaymentId: cobro.id, originalPaymentId: `${SUF}-ec` },
+          processorData: { ...marca(exchangeId, 'CHAIN', cobro.id), rootPaymentId: cobro.id, originalPaymentId: cuid() },
         })
     }
     return orderId
@@ -329,5 +334,46 @@ describe('loyalty reconciliation around a product exchange (real reconciler)', (
       1,
     )
     expect(await sellos(nueva.orderId, 'EARN')).toBe(0)
+  })
+
+  it('late-linking a customer to the new sale of an exchange reports no stamp reason (not ERROR) and credits the difference once', async () => {
+    const eva = await cliente('Eva')
+    const original = await ventaPendiente(60)
+    // La venta nueva se cobró SIN cliente ($90 = $60 de crédito + $30 en efectivo) y su lealtad ya se cerró sin nadie a quien dar.
+    const nueva = await ventaPendiente(90)
+    await prisma.payment.update({
+      where: { id: nueva.cobro.id },
+      data: { ...conCredito, tenderTypeId: ecTenderId, amount: D(60), netAmount: D(60) },
+    })
+    await movimiento(nueva.orderId, 30)
+    await registrarCambio({
+      originalOrderId: original.orderId,
+      originalPaymentId: original.cobro.id,
+      newOrderId: nueva.orderId,
+      returned: 60,
+      taken: 90,
+    })
+    await prisma.order.update({ where: { id: nueva.orderId }, data: { loyaltyProcessedAt: new Date() } })
+    ;(logAction as jest.Mock).mockClear()
+
+    // La TPV liga a Eva después del cobro (con permiso de cobrar): no hay sello que prometer ni un «no sumó por error».
+    const ligada = await addCustomerToOrder(venueId, nueva.orderId, eva, staffId, { otorgarLealtad: true })
+    expect(ligada.loyalty).toBeNull()
+    // La app reintenta (re-liga): igual, y los puntos no se repiten.
+    expect(await awardLoyaltyForLateCustomer({ venueId, orderId: nueva.orderId, customerId: eva, staffId, ligaNueva: false })).toBeNull()
+
+    const puntos = await prisma.loyaltyTransaction.findMany({
+      where: { orderId: nueva.orderId, customerId: eva, type: 'EARN' },
+      select: { points: true },
+      take: 5,
+    })
+    expect(puntos).toEqual([{ points: 30 }])
+    expect(await sellos(nueva.orderId, 'EARN')).toBe(0)
+    // La bitácora de la liga dice «no aplica», sin motivo: nada de «ERROR».
+    const filas = (logAction as jest.Mock).mock.calls
+      .map(([a]) => a)
+      .filter(a => a.action === 'CUSTOMER_ATTACHED_TO_PAID_ORDER' && a.entityId === nueva.orderId)
+    expect(filas.length).toBeGreaterThan(0)
+    for (const fila of filas) expect(fila.data).toMatchObject({ decision: 'NOT_APPLICABLE', reason: null, stamped: false })
   })
 })

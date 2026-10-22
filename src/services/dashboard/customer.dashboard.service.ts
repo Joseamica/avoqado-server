@@ -1137,8 +1137,17 @@ export async function settleCustomerBalance(
 /**
  * Update customer metrics when an order is completed
  * (Called from order/payment service)
+ *
+ * `options.skipVisit`: la venta nueva de un cambio de producto (spec 2026-10-20 §7.7) no es una visita nueva. Sólo suma al gasto
+ * lo cobrado de más (`orderTotal` = esa base): ni visita ni fechas de visita. Sin la opción, todo como siempre.
  */
-export async function updateCustomerMetrics(customerId: string, orderTotal: number, orderId?: string, venueId?: string) {
+export async function updateCustomerMetrics(
+  customerId: string,
+  orderTotal: number,
+  orderId?: string,
+  venueId?: string,
+  options?: { skipVisit?: boolean },
+) {
   if (orderId) {
     const applied = await prisma.$transaction(async tx => {
       // Metrics for different orders of the same customer must serialize. Without
@@ -1175,6 +1184,17 @@ export async function updateCustomerMetrics(customerId: string, orderTotal: numb
       await tx.customerOrderMetric.create({
         data: { customerId, orderId, venueId: customer.venueId, amount: orderTotal },
       })
+      if (options?.skipVisit) {
+        // No es una visita nueva: el gasto sí sube; el promedio se reparte entre las visitas que ya había (sin visitas, no se toca).
+        await tx.customer.update({
+          where: { id: customerId },
+          data: {
+            totalSpent: newTotalSpent,
+            ...(customer.totalVisits > 0 ? { averageOrderValue: newTotalSpent / customer.totalVisits } : {}),
+          },
+        })
+        return true
+      }
       await tx.customer.update({
         where: { id: customerId },
         data: {
