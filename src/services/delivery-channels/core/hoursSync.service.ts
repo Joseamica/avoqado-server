@@ -19,7 +19,11 @@
  *
  * 🔴 NUNCA una semana toda cerrada: publicarla dejaría la tienda sin horario, que es justo lo que el proveedor puede tomar como
  * 24 h. Se devuelve `SKIPPED_EMPTY`, se conserva lo último que se publicó y se avisa con 🚨 UNA vez (la marca vive en
- * `horarioPublicado.vacioAvisadoEn` y se borra sola al volver a publicar).
+ * `horarioPublicado.vacioAvisadoEn` y se borra al volver a abrir: al publicar, o en `UNCHANGED` si reabrió con el MISMO horario;
+ * si no, las siguientes vacaciones pasarían en silencio con la tienda abierta en el proveedor).
+ *
+ * Una falla que se repite (el mismo paso rechazado, un login que no está habilitado) grita 🚨 la primera vez por (vínculo, huella
+ * deseada) y después va como `warn` durante 6 h (`primeraFalla`, en memoria): no 288 🚨 al día por vínculo.
  *
  * Las horas son las del negocio (hora local de pared, «HH:MM»): no hay conversión de zona; el proveedor las lee en la hora de
  * la tienda.
@@ -120,6 +124,48 @@ async function anotarAvisoDeSemanaCerrada(linkId: string): Promise<boolean> {
   })
 }
 
+/** Quita la marca de «ya se avisó de la semana cerrada» (fila releída con candado), dejando `{ huella, en }`. */
+async function rearmarAvisoDeSemanaCerrada(linkId: string): Promise<boolean> {
+  return escribirLlavesDelSistema(linkId, ({ config }) => {
+    const actual = leerHorarioPublicado(config)
+    if (!actual?.vacioAvisadoEn) return null
+    return {
+      horarioPublicado: {
+        ...(actual.huella !== undefined ? { huella: actual.huella } : {}),
+        ...(actual.en !== undefined ? { en: actual.en } : {}),
+      },
+    }
+  })
+}
+
+/**
+ * Una falla que se repite (el proveedor rechaza siempre el mismo paso, un login que no está habilitado, una lectura rara) no
+ * grita 🚨 en cada pasada: serían ~288 al día por vínculo. El 🚨 sale la PRIMERA vez por (vínculo, huella deseada); las
+ * siguientes, dentro de 6 h, van como `warn`. Al publicar con éxito se olvida lo del vínculo. En memoria a propósito (sin base):
+ * un reinicio sólo hace que se vuelva a gritar una vez. Una sola instancia (`.claude/rules/una-sola-instancia.md`).
+ */
+const VIGENCIA_DEL_AVISO_MS = 6 * 60 * 60 * 1000
+const avisosDeFallas = new Map<string, number>()
+
+/** `true` = toca el 🚨 (primera vez, o ya pasaron 6 h); lo anota. */
+function primeraFalla(linkId: string, huella: string): boolean {
+  const ahora = Date.now()
+  for (const [clave, vence] of avisosDeFallas) if (vence <= ahora) avisosDeFallas.delete(clave)
+  const clave = `${linkId}|${huella}`
+  if (avisosDeFallas.has(clave)) return false
+  avisosDeFallas.set(clave, ahora + VIGENCIA_DEL_AVISO_MS)
+  return true
+}
+
+function olvidarFallasDelVinculo(linkId: string): void {
+  for (const clave of avisosDeFallas.keys()) if (clave.startsWith(`${linkId}|`)) avisosDeFallas.delete(clave)
+}
+
+/** Sólo para pruebas: vacía la memoria de avisos de fallas. */
+export function _olvidarAvisosDeFallas(): void {
+  avisosDeFallas.clear()
+}
+
 const mensaje = (error: unknown) => (error instanceof Error ? error.message : String(error))
 
 /** Publica el horario de la tienda de un canal SÓLO si cambió (ver el encabezado). Nunca lanza. */
@@ -129,6 +175,12 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
   if (typeof adapter.publishStoreHours !== 'function') return { outcome: 'NO_PUBLISHER' }
 
   const contexto = { linkId: link.id, venueId: link.venueId, provider: link.provider }
+  /** 🚨 la primera vez por (vínculo, huella); después, el mismo texto como `warn` sin 🚨. */
+  const fallo = (deQueHorario: string, texto: string, datos: Record<string, unknown>) => {
+    if (primeraFalla(link.id, deQueHorario)) logger.error(`🚨 [HoursSync] ${texto}`, { ...contexto, ...datos })
+    else logger.warn(`📋 [HoursSync] ${texto} (ya se avisó; se repite sin gritar hasta 6 h)`, { ...contexto, ...datos })
+  }
+  let huella: string | undefined
   try {
     // Sin avisar: el 🚨 del estimado lo da el menú en la misma pasada (uno solo por pasada).
     const resuelto = await resolveDeliveryHours(link, { avisar: false })
@@ -161,8 +213,21 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
       return { outcome: 'SKIPPED_EMPTY' }
     }
 
-    const huella = huellaDelHorario(horario)
-    if (huella === publicado?.huella) return { outcome: 'UNCHANGED' }
+    const deseada = huellaDelHorario(horario)
+    huella = deseada
+    if (deseada === publicado?.huella) {
+      // 🔴 Reabrió con el MISMO horario tras una semana cerrada: no hay nada que publicar, pero la marca del aviso se quita. Si
+      // no, al volver a cerrar (otras vacaciones) la semana cerrada pasaría en silencio con la tienda abierta en el proveedor.
+      if (publicado?.vacioAvisadoEn) {
+        await rearmarAvisoDeSemanaCerrada(link.id).catch(error =>
+          logger.warn('📋 [HoursSync] no se pudo rearmar el aviso de la semana cerrada (se intenta en la siguiente pasada)', {
+            ...contexto,
+            error: mensaje(error),
+          }),
+        )
+      }
+      return { outcome: 'UNCHANGED' }
+    }
 
     let r: ActionResult
     try {
@@ -175,20 +240,15 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
           error: error.message,
         })
       } else {
-        logger.error(
-          '🚨 [HoursSync] falló la publicación del horario: la huella no se guarda y la siguiente pasada vuelve a leer al proveedor',
-          {
-            ...contexto,
-            error: mensaje(error),
-          },
-        )
+        fallo(deseada, 'falló la publicación del horario: la huella no se guarda y la siguiente pasada vuelve a leer al proveedor', {
+          error: mensaje(error),
+        })
       }
       return { outcome: 'FAILED', error: mensaje(error) }
     }
 
     if (!r.ok) {
-      logger.error('🚨 [HoursSync] el proveedor no aceptó el horario: la huella no se guarda y se reintenta en la siguiente pasada', {
-        ...contexto,
+      fallo(deseada, 'el proveedor no aceptó el horario: la huella no se guarda y se reintenta en la siguiente pasada', {
         status: r.status,
         cuerpo: r.raw.slice(0, 300),
       })
@@ -197,11 +257,12 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
 
     // 🔴 Sólo aquí: el proveedor ya tiene TODO el horario. El parche lleva sólo `horarioPublicado` (y quita el aviso de vacío).
     const en = new Date().toISOString()
-    await escribirLlavesDelSistema(link.id, () => ({ horarioPublicado: { huella, en } }))
+    await escribirLlavesDelSistema(link.id, () => ({ horarioPublicado: { huella: deseada, en } }))
+    olvidarFallasDelVinculo(link.id)
     logger.info('📋 [HoursSync] horario de la tienda publicado en el proveedor', { ...contexto, fuente, detalle: r.raw.slice(0, 200) })
     return { outcome: 'PUBLISHED' }
   } catch (error) {
-    logger.error('🚨 [HoursSync] falló la sincronización del horario', { ...contexto, error: mensaje(error) })
+    fallo(huella ?? '(sin huella)', 'falló la sincronización del horario', { error: mensaje(error) })
     return { outcome: 'FAILED', error: mensaje(error) }
   }
 }

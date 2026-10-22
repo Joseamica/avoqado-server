@@ -19,7 +19,7 @@ import prisma from '@/utils/prismaClient'
 import { adapterFor, hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
 import { resolveDeliveryHours, type HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
-import { syncChannelHours } from '@/services/delivery-channels/core/hoursSync.service'
+import { _olvidarAvisosDeFallas, syncChannelHours } from '@/services/delivery-channels/core/hoursSync.service'
 
 const mockedResolve = resolveDeliveryHours as jest.Mock
 const mockedAdapterFor = adapterFor as jest.Mock
@@ -65,6 +65,7 @@ function conPublicador(publicar: jest.Mock = jest.fn(async () => ({ ok: true, st
 describe('syncChannelHours — el horario de la tienda en el proveedor sigue al de Avoqado', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    _olvidarAvisosDeFallas()
     mockedHasAdapter.mockReturnValue(true)
     mockedResolve.mockResolvedValue({ horario: semana(), fuente: 'CANAL' })
     fila = { config: { menuEnRevision: { huella: 'm1', publicadaEn: '2026-10-22T08:00:00.000Z' } }, lastMenuHash: 'menu-viejo' }
@@ -308,6 +309,102 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
     expect(r.outcome).toBe('PUBLISHED')
     expect(fila.config.horarioPublicado.huella).toBe(unaSola)
     expect(publicar).toHaveBeenLastCalledWith(semana({ monday: { enabled: true, ranges: [{ open: '09:00', close: '18:00' }] } }), 'store1')
+  })
+
+  // ── Ronda de arreglo 2 ───────────────────────────────────────────────────────────────────
+  const avisosDeSemanaCerrada = () =>
+    mockedError.mock.calls.filter(([m]) => /🚨/.test(String(m)) && /TODOS los días cerrados/.test(String(m)))
+
+  it('🔴 cerrar → reabrir IGUAL → cerrar ⇒ 🚨 dos veces (las vacaciones de nuevo no pasan en silencio)', async () => {
+    const publicar = conPublicador()
+    await syncChannelHours(copia()) // publica H1
+    const h1 = fila.config.horarioPublicado.huella
+
+    mockedResolve.mockResolvedValue({ horario: todoCerrado(), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('SKIPPED_EMPTY')
+
+    // Reabre con el MISMO horario: no hay nada que publicar, pero el aviso se rearma (la fila queda con { huella, en }).
+    mockedResolve.mockResolvedValue({ horario: semana(), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('UNCHANGED')
+    expect(fila.config.horarioPublicado).toEqual({ huella: h1, en: expect.any(String) })
+
+    mockedResolve.mockResolvedValue({ horario: todoCerrado(), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('SKIPPED_EMPTY')
+
+    expect(avisosDeSemanaCerrada()).toHaveLength(2)
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
+  it('UNCHANGED sin aviso pendiente no toca la base (el rearme sólo escribe cuando hay marca)', async () => {
+    conPublicador()
+    await syncChannelHours(copia())
+    mockedQueryRaw.mockClear()
+
+    expect((await syncChannelHours(copia())).outcome).toBe('UNCHANGED')
+    expect(mockedQueryRaw).not.toHaveBeenCalled()
+  })
+
+  describe('una falla que se repite no grita en cada pasada (🚨 la primera vez por vínculo y horario; 6 h)', () => {
+    const gritos = () => mockedError.mock.calls.filter(([m]) => /🚨/.test(String(m)) && /HoursSync/.test(String(m)))
+    const repetidos = () => mockedWarn.mock.calls.filter(([m]) => /HoursSync/.test(String(m)) && /ya se avisó/.test(String(m)))
+
+    it.each([
+      [
+        'el proveedor rechaza el mismo paso',
+        () => jest.fn(async () => ({ ok: false, status: 400, raw: 'paso 1 de 1 (CREAR mon) rechazado' })),
+      ],
+      [
+        'el login de Utils no está habilitado (lanza)',
+        () => jest.fn().mockRejectedValue(new Error('[Rappi] login de utils respondió 401')),
+      ],
+    ])('🔴 %s: dos pasadas seguidas con la misma huella ⇒ un 🚨 y un warn', async (_caso, publicador) => {
+      conPublicador(publicador())
+
+      expect((await syncChannelHours(copia())).outcome).toBe('FAILED')
+      expect((await syncChannelHours(copia())).outcome).toBe('FAILED')
+
+      expect(gritos()).toHaveLength(1)
+      expect(repetidos()).toHaveLength(1)
+      expect(String(repetidos()[0][0])).not.toMatch(/🚨/)
+    })
+
+    it('otra huella (el dueño cambió el horario) sí vuelve a gritar, y pasadas 6 h también', async () => {
+      conPublicador(jest.fn(async () => ({ ok: false, status: 400, raw: 'no' })))
+      const ahora = Date.now()
+      const reloj = jest.spyOn(Date, 'now').mockReturnValue(ahora)
+
+      await syncChannelHours(copia())
+      mockedResolve.mockResolvedValue({
+        horario: semana({ monday: { enabled: true, ranges: [{ open: '10:00', close: '20:00' }] } }),
+        fuente: 'CANAL',
+      })
+      await syncChannelHours(copia())
+      expect(gritos()).toHaveLength(2)
+
+      await syncChannelHours(copia()) // misma huella, dentro de las 6 h
+      expect(gritos()).toHaveLength(2)
+
+      reloj.mockReturnValue(ahora + 6 * 60 * 60 * 1000 + 1)
+      await syncChannelHours(copia())
+      reloj.mockRestore()
+      expect(gritos()).toHaveLength(3)
+    })
+
+    it('al publicar con éxito se olvida: si después vuelve a fallar ese horario, grita de nuevo', async () => {
+      const publicar = conPublicador(jest.fn(async () => ({ ok: false, status: 400, raw: 'no' })))
+      await syncChannelHours(copia())
+      publicar.mockResolvedValueOnce({ ok: true, status: 200, raw: '' })
+      expect((await syncChannelHours(copia())).outcome).toBe('PUBLISHED')
+
+      // Otro horario que falla, y luego el mismo de antes otra vez (el dueño lo regresó): grita las dos.
+      mockedResolve.mockResolvedValue({ horario: semana({ friday: CERRADO }), fuente: 'CANAL' })
+      await syncChannelHours(copia())
+      fila.config = {}
+      mockedResolve.mockResolvedValue({ horario: semana(), fuente: 'CANAL' })
+      await syncChannelHours(copia())
+
+      expect(gritos()).toHaveLength(3)
+    })
   })
 
   it('un proveedor sin `publishStoreHours` ⇒ NO_PUBLISHER, en silencio (ni aviso por pasada)', async () => {

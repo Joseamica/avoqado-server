@@ -153,7 +153,7 @@ const campo = (o: Record<string, unknown>, camel: string, snake: string): unknow
  *
  * 🔴 Un cuerpo que no se entiende LANZA. NUNCA se lee como «no hay franjas»: con eso el plan crearía encima de lo que Rappi sí
  * tiene (y lo rechazaría a media publicación) o dejaría franjas viejas mezcladas con las nuevas. Cada campo se acepta en las
- * dos grafías; un día fuera de `mon…sun`, una franja sin id o una hora ilegible también lanzan.
+ * dos grafías; un día fuera de `mon…sun`, una franja sin id, un id repetido o una hora ilegible también lanzan.
  */
 export function aplanarHorarioDeTienda(raw: string): FranjaActualRappi[] {
   const ilegible = (porque: string): never => {
@@ -170,6 +170,7 @@ export function aplanarHorarioDeTienda(raw: string): FranjaActualRappi[] {
   if (!Array.isArray(dias)) return ilegible('falta storeScheduleDays')
 
   const salida: FranjaActualRappi[] = []
+  const vistos = new Set<string>()
   for (const d of dias) {
     if (!esObjeto(d)) return ilegible('un día no es un objeto')
     const day = typeof d.day === 'string' ? d.day.trim().toLowerCase() : ''
@@ -182,6 +183,10 @@ export function aplanarHorarioDeTienda(raw: string): FranjaActualRappi[] {
       if ((typeof id !== 'number' || !Number.isFinite(id)) && (typeof id !== 'string' || id.trim() === '')) {
         return ilegible(`una franja del ${day} no trae id`)
       }
+      // 🔴 Un id repetido no es un horario que se entienda: con `[lunes id 1, lunes id 1]` y lunes 09–18 deseado, el plan
+      // borraría la «sobrante» id 1, que es la única franja real.
+      if (vistos.has(String(id))) return ilegible(`el id ${id} viene repetido`)
+      vistos.add(String(id))
       const starts_time = horaRappi(campo(f, 'startsTime', 'starts_time'))
       const ends_time = horaRappi(campo(f, 'endsTime', 'ends_time'))
       if (!starts_time || !ends_time) return ilegible(`hora ilegible en la franja ${id}`)
@@ -236,6 +241,9 @@ export function planDeHorario(actuales: FranjaActualRappi[], deseadas: FranjaTie
     ends_time: horaRappi(f.ends_time) ?? f.ends_time,
   })
   const ya = actuales.map(normalizar)
+  // Defensa: lo que Rappi tiene viene de `aplanarHorarioDeTienda`, que ya rechaza ids repetidos; si otro llamador los trae, borrar
+  // «la sobrante» podría borrar la única franja real.
+  if (new Set(ya.map(f => String(f.id))).size !== ya.length) throw new Error('[Rappi] el horario de la tienda trae ids repetidos')
   const quiero = fusionarPorDia(deseadas.map(normalizar))
 
   const abiertos: OperacionDeHorario[] = []

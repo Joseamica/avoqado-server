@@ -114,12 +114,15 @@ export async function resolveDeliveryHours(link: DeliveryChannelLink, opts: { av
   // 3. Nadie lo configuró. Se estima, y se GRITA — un horario adivinado que se presenta como
   //    certeza es peor que no tenerlo, porque nadie lo revisa.
   if (avisar) {
-    logger.warn('🚨 [DeliveryHours] el venue NO tiene horario configurado — se publica un ESTIMADO (L-S 09:00-22:00)', {
-      linkId: link.id,
-      venueId: link.venueId,
-      provider: link.provider,
-      accion: 'configura config.deliveryHours en el canal, o el horario del módulo de reservas',
-    })
+    logger.warn(
+      '🚨 [DeliveryHours] el venue NO tiene horario configurado — el menú lleva un ESTIMADO (L-S 09:00-22:00) y el horario de la tienda no se publica hasta que se configure',
+      {
+        linkId: link.id,
+        venueId: link.venueId,
+        provider: link.provider,
+        accion: 'configura config.deliveryHours en el canal, o el horario del módulo de reservas',
+      },
+    )
   }
   return { horario: ESTIMADO, fuente: 'ESTIMADO' }
 }

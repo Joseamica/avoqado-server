@@ -82,6 +82,9 @@ describe('resolveDeliveryHours — de dónde salen las horas que publicamos', ()
 
       expect(avisosDeHorario()).toHaveLength(1)
       expect(avisosDeHorario()[0][0]).toMatch(/🚨/)
+      // Ronda 2: el texto dice la verdad desde la ronda 1 — el estimado sólo va en el MENÚ; el horario de la tienda espera.
+      expect(avisosDeHorario()[0][0]).toMatch(/menú lleva un ESTIMADO/)
+      expect(avisosDeHorario()[0][0]).toMatch(/horario de la tienda no se publica hasta que se configure/)
     })
 
     it('con `avisar: false` no avisa nada (ni el estimado ni la forma inválida), y resuelve igual', async () => {

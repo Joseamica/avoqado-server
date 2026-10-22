@@ -356,7 +356,8 @@ export const rappiAdapter = {
    *  · la lectura no se entiende ⇒ LANZA (nunca se toma como «no hay franjas»); turnos encimados o que se tocan se fusionan;
    *  · un paso no-2xx ⇒ se DETIENE y devuelve `ok:false` con el paso: lo que falta lo rehace la siguiente pasada, que vuelve a
    *    leer. Como los días que cierran van al final, un plan a medias nunca le quitó a la tienda franjas que no fueran a quedar;
-   *  · el candado de tiendas (`DeliveryWriteNotSentError`) se relanza tal cual; otro error se relanza con el paso en el mensaje.
+   *  · un `DeliveryWriteNotSentError` (candado, token) en el PRIMER paso se relanza tal cual: no salió nada. En un paso posterior,
+   *    y cualquier otro error, se relanza con el paso en el mensaje (los anteriores sí salieron).
    * ⚠️ Qué hace Rappi con un día sin franjas (¿cerrado o 24 h?) no está medido: se deja a la vista en el log al publicar.
    */
   async publishStoreHours(horario: HorarioSemanal, storeId: string): Promise<ActionResult> {
@@ -380,7 +381,9 @@ export const rappiAdapter = {
               ? await cliente.actualizarFranjaTiendaRappi(storeId, paso.id, paso.franja)
               : await cliente.crearFranjaTiendaRappi(storeId, paso.franja)
       } catch (error) {
-        if (error instanceof DeliveryWriteNotSentError) throw error
+        // «No se envió» sólo es cierto en el PRIMER paso: en el paso k > 0 los anteriores sí salieron, y el log no debe decir
+        // que no salió nada. Ahí es el fallo normal del paso k.
+        if (error instanceof DeliveryWriteNotSentError && i === 0) throw error
         const msg = error instanceof Error ? error.message : String(error)
         throw new Error(`[Rappi] el horario de la tienda se quedó a medias en el ${cual}: ${msg}`)
       }

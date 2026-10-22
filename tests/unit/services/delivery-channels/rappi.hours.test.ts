@@ -208,6 +208,12 @@ describe('planDeHorario — de lo que Rappi tiene a lo que queremos, sin encimar
     expect(plan).toEqual([])
   })
 
+  it('🔴 ids repetidos en lo que Rappi tiene ⇒ lanza (si no, `[lunes id 1, lunes id 1]` con lunes 09–18 borraría la única franja real)', () => {
+    expect(() =>
+      planDeHorario([ya(1, 'mon', '09:00:00', '18:00:00'), ya(1, 'mon', '09:00:00', '18:00:00')], [quiero('mon', '09:00:00', '18:00:00')]),
+    ).toThrow(/repetid/)
+  })
+
   it('la franja que ya coincide se queda: sólo se toca la otra', () => {
     const plan = planDeHorario(
       [ya(1, 'mon', '09:00:00', '14:00:00'), ya(2, 'mon', '16:00:00', '22:00:00')],
@@ -345,6 +351,14 @@ describe('aplanarHorarioDeTienda — la lectura de Rappi a la forma del plan', (
     ['un día que no es de la semana', '{"storeScheduleDays":[{"day":"monday","storeSchedules":[]}]}'],
     ['una franja sin id', '{"storeScheduleDays":[{"day":"mon","storeSchedules":[{"startsTime":"09:00:00","endsTime":"18:00:00"}]}]}'],
     ['una hora ilegible', '{"storeScheduleDays":[{"day":"mon","storeSchedules":[{"id":1,"startsTime":"9 am","endsTime":"18:00:00"}]}]}'],
+    [
+      'un id repetido (ronda 2)',
+      '{"storeScheduleDays":[{"day":"mon","storeSchedules":[{"id":1,"startsTime":"09:00:00","endsTime":"18:00:00"},{"id":1,"startsTime":"09:00:00","endsTime":"18:00:00"}]}]}',
+    ],
+    [
+      'un id repetido en dos días',
+      '{"storeScheduleDays":[{"day":"mon","storeSchedules":[{"id":7,"startsTime":"09:00:00","endsTime":"18:00:00"}]},{"day":"tue","storeSchedules":[{"id":"7","startsTime":"09:00:00","endsTime":"18:00:00"}]}]}',
+    ],
     [
       'una hora fuera de rango',
       '{"storeScheduleDays":[{"day":"mon","storeSchedules":[{"id":1,"startsTime":"25:00:00","endsTime":"26:00:00"}]}]}',

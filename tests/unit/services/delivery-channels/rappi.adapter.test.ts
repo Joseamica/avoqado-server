@@ -478,7 +478,21 @@ describe('rappiAdapter.publishStoreHours — el horario de la tienda por la API 
     ])
   })
 
-  it('🔴 el candado de escritura se relanza TAL CUAL (es un «no se envió»): el adaptador no lo traga ni lo disfraza', async () => {
+  it('🔴 un «no se envió» en un paso POSTERIOR al primero ya no es «no salió nada»: es el fallo normal del paso k', async () => {
+    // Plan de HORARIO: 1) ACTUALIZAR 11 (sale), 2) CREAR tue (el token falla antes de la red), 3) BORRAR 77.
+    mockCrearFranja.mockRejectedValue(new DeliveryWriteNotSentError('UNAVAILABLE', 'no se pudo obtener el token de utils'))
+
+    const error = await rappiAdapter.publishStoreHours(HORARIO, '900175625').catch(e => e)
+
+    expect(error).toBeInstanceOf(Error)
+    expect(error).not.toBeInstanceOf(DeliveryWriteNotSentError)
+    expect(error.message).toMatch(/paso 2 de 3/)
+    expect(error.message).toContain('no se pudo obtener el token de utils')
+    expect(mockActualizarFranja).toHaveBeenCalledTimes(1)
+    expect(mockBorrarFranja).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el candado de escritura en el PRIMER paso se relanza TAL CUAL (es un «no se envió»): no lo traga ni lo disfraza', async () => {
     const bloqueo = new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'tienda fuera de la lista', 'sin permiso')
     mockActualizarFranja.mockRejectedValue(bloqueo)
 

@@ -92,14 +92,17 @@ describe('DeliveryMenuSyncJob — el horario va junto al menú, aislado por cana
     expect(mockedHours).toHaveBeenCalledTimes(2)
   })
 
-  it('el candado se SUELTA al terminar, aunque la pasada truene (si no, el job quedaría muerto para siempre)', async () => {
-    mockedFindMany.mockRejectedValueOnce(new Error('P1001'))
+  it('🔴 el candado se SUELTA aunque la pasada LANCE (si no, el job quedaría muerto para siempre)', async () => {
+    // `pasada()` atrapa casi todo, así que se fuerza a que lance: sin el `finally`, la siguiente pasada se saltaría.
+    const espia = jest.spyOn(DeliveryMenuSyncJob.prototype as any, 'pasada').mockRejectedValueOnce(new Error('x'))
     const job = new DeliveryMenuSyncJob()
 
-    await job.runOnce()
+    await expect(job.runOnce()).rejects.toThrow('x')
     await job.runOnce()
 
-    expect(mockedFindMany).toHaveBeenCalledTimes(2)
-    expect(mockedMenu).toHaveBeenCalledTimes(2) // la segunda sí corrió
+    expect(espia).toHaveBeenCalledTimes(2)
+    expect(mockedFindMany).toHaveBeenCalledTimes(1) // la segunda sí corrió (la primera no llegó a leer)
+    expect(mockedMenu).toHaveBeenCalledTimes(2)
+    espia.mockRestore()
   })
 })
