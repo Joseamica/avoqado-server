@@ -127,6 +127,9 @@ export async function handleBlumonTPVWebhook(req: Request, res: Response, _next:
       success: result.success,
       paymentId: result.paymentId,
       reference: payload.reference,
+      // D1, paso 1: qué IP dijo quien llamó y cuál puso el portero, en la MISMA línea que el pago emparejado
+      // (ver `observarIpDelPortero` en blumon-ip-whitelist.middleware.ts).
+      observacionIp: res.locals?.blumonIpObservada,
     })
 
     // ACK contract: 200 ONLY when the event row is durably persisted
