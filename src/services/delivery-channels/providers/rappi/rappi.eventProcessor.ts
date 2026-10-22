@@ -24,6 +24,15 @@ import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { cerrarEventoReclamado, reclamarEvento, renovarReclamo } from '../../core/deliveryWebhookEvent.service'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
+import {
+  anotarAceptacion,
+  leerEstado,
+  leerHistorial,
+  leerRespuestaDelHistorial,
+  type EventoDelHistorial,
+  type EvidenciaDeAceptacion,
+  type VeredictoHistorial,
+} from './rappi.estadoDelPedido'
 import { tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
 import { leerEstadoAprovisionamiento, type ResultadoRappiTienda } from './rappi.selfOnboarding'
 
@@ -58,6 +67,8 @@ export interface RappiProcessDeps {
   aceptar?: (orderId: string, storeId: string, cookingTime: number) => Promise<{ ok: boolean; status: number; raw: string }>
   /** `confirmarTienda` de UNA tienda del lote. Fallan el evento un throw, un `DEFERRED` y un `SUBSCRIBE_FAILED`. */
   confirmar?: (r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' }) => Promise<string>
+  /** El historial del pedido del lado de Rappi. `null` = no se pudo leer; `[]` = se leyó y no hay eventos. */
+  historial?: (orderId: string) => Promise<EventoDelHistorial[] | null>
 }
 
 export async function processRappiEvent(eventRowId: string, deps: RappiProcessDeps = {}): Promise<RappiProcessResult> {
@@ -77,16 +88,22 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
       ])
       return confirmarTienda(r, { suscribir: suscribirTiendaAEventos })
     })
+  const historial =
+    deps.historial ??
+    (async (orderId: string) => {
+      const { historialDelPedidoRappi } = await import('./rappi.client')
+      return leerRespuestaDelHistorial(await historialDelPedidoRappi(orderId))
+    })
 
-  const evento = await prisma.deliveryOrderEvent.findUnique({
+  const previa = await prisma.deliveryOrderEvent.findUnique({
     where: { id: eventRowId },
-    include: { channelLink: true },
+    select: { status: true, orderId: true, eventType: true },
   })
-  if (!evento) return { outcome: 'FAILED', error: `El evento ${eventRowId} no existe` }
+  if (!previa) return { outcome: 'FAILED', error: `El evento ${eventRowId} no existe` }
 
   // Idempotente: el despacho es at-least-once, y el sondeo puede volver a topar el mismo pedido.
-  if (evento.status === DeliveryOrderEventStatus.PROCESSED) {
-    return { outcome: 'ALREADY_DONE', orderId: evento.orderId ?? undefined }
+  if (previa.status === DeliveryOrderEventStatus.PROCESSED) {
+    return { outcome: 'ALREADY_DONE', orderId: previa.orderId ?? undefined }
   }
 
   // 🔴 El reclamo, justo después del corte de PROCESSED: la petición viva y los carriles del job pueden tomar el MISMO
@@ -94,9 +111,19 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // reclamo no se toca nada — ni se cierra: el resultado lo escribe su dueño. Desde aquí, TODO cierre va con el token.
   const token = await reclamarEvento(eventRowId, RECLAMO_RAPPI_MS)
   if (!token) {
-    logger.info('🛵 [Rappi] el evento lo tiene reclamado otro proceso: se deja', { eventRowId, eventType: evento.eventType })
+    logger.info('🛵 [Rappi] el evento lo tiene reclamado otro proceso: se deja', { eventRowId, eventType: previa.eventType })
     return { outcome: 'IN_FLIGHT' }
   }
+
+  // 🔴 La fila se RELEE con el reclamo en la mano, y se decide con ESTA lectura: la marca de aceptación que dejó un dueño
+  // anterior (aceptó, anotó y se le venció el reclamo antes de registrar) no está en la lectura de arriba, y decidir con
+  // ella volvería a aceptar. Si la fila ya no existe no hay nada que cerrar.
+  const evento = await prisma.deliveryOrderEvent.findUnique({
+    where: { id: eventRowId },
+    include: { channelLink: true },
+  })
+  if (!evento) return { outcome: 'FAILED', error: `El evento ${eventRowId} no existe` }
+
   const cerrar = (status: DeliveryOrderEventStatus, ...resto: [orderId?: string, error?: string]) =>
     cerrarEventoReclamado(eventRowId, token, status, ...resto)
   /** Renueva el reclamo antes de un paso que no se puede repetir; `false` = otro lo tomó y este proceso se detiene. */
@@ -107,6 +134,46 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     if (yaAceptado) logger.error('🚨 [Rappi] pedido ACEPTADO y se perdió el reclamo antes de ingerir: lo registra su nuevo dueño', datos)
     else logger.warn('🛵 [Rappi] se perdió el reclamo del evento: lo sigue su nuevo dueño, este proceso se detiene', datos)
     return false
+  }
+  /** Lee el historial del pedido en Rappi. `null` = no se pudo leer (red, no-2xx, cuerpo ilegible): nunca lanza. */
+  const veredictoDelHistorial = async (orderId: string | null): Promise<VeredictoHistorial | null> => {
+    if (!orderId) return null
+    try {
+      const eventos = await historial(orderId)
+      return eventos ? leerHistorial(eventos) : null
+    } catch (err) {
+      logger.warn('🛵 [Rappi] no se pudo leer el historial del pedido', {
+        eventRowId,
+        orderId,
+        error: err instanceof Error ? err.message : String(err),
+      })
+      return null
+    }
+  }
+  /**
+   * La marca de aceptación, ANTES de registrar la venta. `null` = quedó escrita y se sigue. Si no, el resultado con que este
+   * proceso se detiene: `IN_FLIGHT` si el reclamo ya es de otro (lo registra su dueño), o `FAILED` si la escritura lanzó — el
+   * reintento recibe 400 al aceptar y lo recupera por el historial. Nunca se registra sin la marca.
+   */
+  const marcarAntesDeRegistrar = async (evidencia: EvidenciaDeAceptacion): Promise<RappiProcessResult | null> => {
+    try {
+      if (await anotarAceptacion(eventRowId, token, evidencia)) return null
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await cerrar(DeliveryOrderEventStatus.FAILED, undefined, `MARCA: ${msg.slice(0, 400)}`)
+      logger.error('🚨 [Rappi] pedido ACEPTADO y la marca no se pudo escribir — queda FAILED; el reintento lo recupera por el historial', {
+        eventRowId,
+        evidencia,
+        accepted: true,
+        error: msg,
+      })
+      return { outcome: 'FAILED', accepted: true, error: msg }
+    }
+    logger.error('🚨 [Rappi] pedido ACEPTADO y la marca no se escribió (el reclamo ya es de otro): lo registra su nuevo dueño', {
+      eventRowId,
+      evidencia,
+    })
+    return { outcome: 'IN_FLIGHT', accepted: true }
   }
 
   // 🔴 El tipo viene de la FILA (que lo estampó la RUTA), no del payload: varios cuerpos de
@@ -282,18 +349,40 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     return { outcome: 'ORPHANED' }
   }
 
+  // 🔴 Lo que Rappi YA hizo con el pedido, de la fila releída tras el reclamo. Con la marca, Rappi ya lo aceptó (un intento
+  // anterior vio su sí) y NO se vuelve a aceptar: contestaría 400.
+  const estado = leerEstado(evento.resourcePayload)
+  /** Rappi lo aceptó según su historial y la marca todavía no está (se escribe antes de registrar). */
+  let aceptadoSegunHistorial = false
+
   // 🔴 Un canal DESHABILITADO no toma pedidos nuevos: ni se acepta ni se registra (Rappi lo
   // cancela solo al vencer su reloj). Las cancelaciones sí pasan — van arriba, antes del guard.
+  // SALVO que Rappi ya lo haya aceptado (la marca, o su historial, leído UNA vez): el cliente ya pagó y el pedido es nuestro,
+  // así que se registra igual y se grita, para que alguien lo prepare o lo resuelva con Rappi.
   if (evento.channelLink.status === DeliveryChannelStatus.DISABLED) {
-    await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'CHANNEL_DISABLED')
-    logger.error('🚨 [Rappi] llegó un pedido a un canal DESHABILITADO — no se aceptó ni se registró', {
+    if (!estado.aceptacion) {
+      if (!(await sigueSiendoMio('leer el historial'))) return { outcome: 'IN_FLIGHT' }
+      aceptadoSegunHistorial = (await veredictoDelHistorial(identidad.orderId)) === 'ACEPTADO'
+    }
+    if (!estado.aceptacion && !aceptadoSegunHistorial) {
+      await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'CHANNEL_DISABLED')
+      logger.error('🚨 [Rappi] llegó un pedido a un canal DESHABILITADO — no se aceptó ni se registró', {
+        eventRowId,
+        linkId: evento.channelLink.id,
+        venueId: evento.venueId,
+        orderId: identidad.orderId,
+      })
+      return { outcome: 'FAILED', error: 'CHANNEL_DISABLED' }
+    }
+    logger.error('🚨 [Rappi] pedido a un canal DESHABILITADO que Rappi YA aceptó — se registra igual (el cliente ya pagó)', {
       eventRowId,
       linkId: evento.channelLink.id,
       venueId: evento.venueId,
       orderId: identidad.orderId,
+      evidencia: estado.aceptacion?.evidencia ?? 'HISTORIAL_TAKEN',
     })
-    return { outcome: 'FAILED', error: 'CHANNEL_DISABLED' }
   }
+  const yaAceptado = Boolean(estado.aceptacion) || aceptadoSegunHistorial
 
   // Traducir ANTES de aceptar: si el dinero no cuadra (la red contra el error de unidades),
   // NO se acepta un pedido que no podemos registrar — lanza, queda FAILED, y se revisa.
@@ -303,8 +392,10 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
     await cerrar(DeliveryOrderEventStatus.FAILED, undefined, msg.slice(0, 500))
-    logger.error('🚨 [Rappi] el pedido NO se pudo traducir — no se aceptó', { eventRowId, error: msg })
-    return { outcome: 'FAILED', error: msg }
+    if (yaAceptado)
+      logger.error('🚨 [Rappi] pedido YA ACEPTADO en Rappi que NO se pudo traducir — reconciliar a mano', { eventRowId, error: msg })
+    else logger.error('🚨 [Rappi] el pedido NO se pudo traducir — no se aceptó', { eventRowId, error: msg })
+    return { outcome: 'FAILED', error: msg, ...(yaAceptado ? { accepted: true } : {}) }
   }
 
   // 🔴 ACEPTAR PRIMERO, con el reloj de 4–6 min corriendo — SIEMPRE, sin mirar el modo del vínculo.
@@ -314,31 +405,71 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // El orden es el mismo que Uber y por la misma razón: lo que no se puede recuperar es el plazo. Si
   // la ingesta falla después, el evento queda FAILED para reconciliar; al revés, un pedido
   // perfectamente ingerido se cancela solo.
-  const detail = (evento.payload as RappiOrderPayload).order_detail ?? {}
-  const storeId = identidad.storeId ?? evento.channelLink.externalLocationId
-  if (!(await sigueSiendoMio('aceptar'))) return { outcome: 'IN_FLIGHT' }
-  let r
-  try {
-    r = await aceptar(normalizado.externalId, storeId, tiempoDeCoccion(detail))
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err)
-    await cerrar(DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT: ${msg.slice(0, 400)}`)
-    logger.error('🚨 [Rappi] aceptar el pedido lanzó — queda FAILED para reconciliar', {
-      eventRowId,
-      orderId: normalizado.externalId,
-      error: msg,
-    })
-    return { outcome: 'FAILED', accepted: false, error: msg }
-  }
-  if (!r.ok) {
-    // Tarea 9: aquí, ante un 400, se leerá el historial del pedido — antes, `sigueSiendoMio('leer el historial')`.
-    await cerrar(DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT_${r.status}: ${r.raw.slice(0, 300)}`)
-    logger.error('🚨 [Rappi] no se pudo ACEPTAR el pedido — el reloj lo va a cancelar', {
-      eventRowId,
-      orderId: normalizado.externalId,
-      status: r.status,
-    })
-    return { outcome: 'FAILED', error: `ACCEPT_${r.status}` }
+  // 🔴 Y la marca de aceptación va ANTES de registrar: si el proceso muere después del sí de Rappi, el reintento sabe que
+  // el pedido ya es nuestro (con la marca, o con el historial si murió antes de escribirla) y lo registra UNA vez.
+  if (estado.aceptacion) {
+    // Rappi ya dijo que sí en un intento anterior: se registra sin volver a aceptar.
+  } else if (aceptadoSegunHistorial) {
+    const detenido = await marcarAntesDeRegistrar('HISTORIAL_TAKEN')
+    if (detenido) return detenido
+  } else {
+    const detail = (evento.payload as RappiOrderPayload).order_detail ?? {}
+    const storeId = identidad.storeId ?? evento.channelLink.externalLocationId
+    if (!(await sigueSiendoMio('aceptar'))) return { outcome: 'IN_FLIGHT' }
+    let r
+    try {
+      r = await aceptar(normalizado.externalId, storeId, tiempoDeCoccion(detail))
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err)
+      await cerrar(DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT: ${msg.slice(0, 400)}`)
+      logger.error('🚨 [Rappi] aceptar el pedido lanzó — queda FAILED para reconciliar', {
+        eventRowId,
+        orderId: normalizado.externalId,
+        error: msg,
+      })
+      return { outcome: 'FAILED', accepted: false, error: msg }
+    }
+    if (r.ok) {
+      const detenido = await marcarAntesDeRegistrar('HTTP_2XX')
+      if (detenido) return detenido
+    } else if (r.status === 400) {
+      // 🔴 Un 400 puede ser «ya lo aceptaste» (el proceso murió entre el sí de Rappi y la marca) o «ya no está activo» (venció
+      // o se canceló). Sólo el historial de Rappi lo distingue, y sin un historial que lo diga NO se registra: sería a ciegas.
+      if (!(await sigueSiendoMio('leer el historial'))) return { outcome: 'IN_FLIGHT' }
+      const veredicto = await veredictoDelHistorial(normalizado.externalId)
+      if (veredicto === 'YA_NO_ACTIVO') {
+        await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'PEDIDO_YA_NO_ACTIVO')
+        logger.warn('🛵 [Rappi] aceptar contestó 400 y el pedido ya no está activo en Rappi (cancelado o vencido): no se registra', {
+          eventRowId,
+          orderId: normalizado.externalId,
+        })
+        return { outcome: 'FAILED', accepted: false, error: 'PEDIDO_YA_NO_ACTIVO' }
+      }
+      if (veredicto !== 'ACEPTADO') {
+        await cerrar(DeliveryOrderEventStatus.FAILED, undefined, 'ACEPTACION_INCIERTA')
+        logger.error('🚨 [Rappi] aceptar contestó 400 y el historial no dice si Rappi lo aceptó — NO se registra; revisar con Rappi', {
+          eventRowId,
+          orderId: normalizado.externalId,
+          historialLeido: veredicto !== null,
+          respuesta: r.raw.slice(0, 300),
+        })
+        return { outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' }
+      }
+      logger.warn('🛵 [Rappi] aceptar contestó 400 pero el historial dice que Rappi YA lo aceptó: se registra una vez', {
+        eventRowId,
+        orderId: normalizado.externalId,
+      })
+      const detenido = await marcarAntesDeRegistrar('HISTORIAL_TAKEN')
+      if (detenido) return detenido
+    } else {
+      await cerrar(DeliveryOrderEventStatus.FAILED, undefined, `ACCEPT_${r.status}: ${r.raw.slice(0, 300)}`)
+      logger.error('🚨 [Rappi] no se pudo ACEPTAR el pedido — el reloj lo va a cancelar', {
+        eventRowId,
+        orderId: normalizado.externalId,
+        status: r.status,
+      })
+      return { outcome: 'FAILED', error: `ACCEPT_${r.status}` }
+    }
   }
 
   if (!(await sigueSiendoMio('ingerir', true))) return { outcome: 'IN_FLIGHT', accepted: true }

@@ -215,13 +215,19 @@ describe('DeliveryWebhookReconciliationJob', () => {
       receivedAt: new Date(NOW - 5 * 60_000), // fresh — immediate orphan doesn't wait for the 24h TTL
     })
     mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
+    mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
     ;(logger.error as jest.Mock).mockClear()
 
     const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
     expect(mockedParse).not.toHaveBeenCalled()
     expect(mockedIngest).not.toHaveBeenCalled()
-    expect(mockedMarkEventResult).toHaveBeenCalledWith('evt_orphan_immediate', DeliveryOrderEventStatus.FAILED, undefined, 'ORPHANED')
+    // Tarea 9: un UPDATE condicionado (sigue FAILED/RECEIVED y sin reclamo vigente), no un `update` por id a ciegas.
+    expect(mockedMarkEventResult).not.toHaveBeenCalled()
+    expect(mockedUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: 'evt_orphan_immediate', status: { in: ['FAILED', 'RECEIVED'] } }),
+      data: { status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED', processedAt: expect.any(Date) },
+    })
     // BetterStack alerts on the '🚨 [Delivery recon] ORPHANED' pattern — the immediate
     // orphan (deleted channel link) must fire the SAME per-event alert as the 24h sweep,
     // otherwise a venue disabling its integration orphans events with zero ops visibility.
@@ -236,6 +242,93 @@ describe('DeliveryWebhookReconciliationJob', () => {
       }),
     )
     expect(result).toEqual({ reprocessed: 0, orphaned: 1 })
+  })
+
+  // Pendiente de la revisión de la Tarea 8, cerrado en la Tarea 9: el ORPHANED inmediato era un `update` por id SIN condición.
+  // Podía regresar a FAILED/ORPHANED un evento que otro proceso acababa de dejar PROCESSED, o dejarlo PROCESSED con
+  // `error = 'ORPHANED'` y un 🚨 falso. Ahora protege lo mismo que el barrido de 24 h, más el reclamo vigente.
+  describe('🔴 el ORPHANED inmediato (sin vínculo) no pisa lo que otro terminó o tiene reclamado', () => {
+    const sinVinculo = (over: Partial<any> = {}) =>
+      makeEvent({
+        id: 'evt_sin_vinculo',
+        provider: 'RAPPI',
+        eventType: 'NEW_ORDER',
+        channelLink: null,
+        channelLinkId: null,
+        receivedAt: new Date(NOW - 5 * 60_000),
+        ...over,
+      })
+    /** La base en memoria: las lecturas Y el UPDATE respetan su `where`. `trasLeer` corre después de leer los carriles. */
+    const tabla = (filas: any[], trasLeer: () => void = () => {}) => {
+      mockedFindMany.mockImplementation(async (args: any) => {
+        const res = filas.filter(f => cumple(f, args.where)).map(f => ({ ...f }))
+        if (!args.select) trasLeer() // los carriles leen con `include`; el barrido de 24 h, con `select`
+        return res.slice(0, args.take ?? res.length)
+      })
+      mockedUpdateMany.mockImplementation(async ({ where, data }: any) => {
+        const tocadas = filas.filter(f => cumple(f, where))
+        tocadas.forEach(f => Object.assign(f, data))
+        return { count: tocadas.length }
+      })
+    }
+    const huerfanos = () =>
+      (logger.error as jest.Mock).mock.calls.filter(([m]) => String(m).includes('🚨 [Delivery recon] ORPHANED delivery event'))
+
+    beforeEach(() => (logger.error as jest.Mock).mockClear())
+
+    it.each([
+      ['PROCESSED (lo terminó la petición viva)', { status: DeliveryOrderEventStatus.PROCESSED, error: null, orderId: 'ord_1' }],
+      ['con un error terminal', { status: DeliveryOrderEventStatus.FAILED, error: 'PEDIDO_YA_NO_ACTIVO' }],
+    ])('si otro lo deja %s entre la lectura y la escritura, se queda así y sin 🚨', async (_caso, despues) => {
+      const fila = sinVinculo()
+      tabla([fila], () => Object.assign(fila, despues))
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(fila).toMatchObject(despues)
+      expect(result.orphaned).toBe(0)
+      expect(huerfanos()).toHaveLength(0)
+    })
+
+    it('con un reclamo VIGENTE no se toca: lo termina su dueño', async () => {
+      const fila = sinVinculo({ claimToken: 'tok-de-otro', lockedUntil: new Date(NOW + 30_000) })
+      tabla([fila])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(fila).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'some previous ingestion error' })
+      expect(result.orphaned).toBe(0)
+      expect(huerfanos()).toHaveLength(0)
+    })
+
+    it('con un reclamo VENCIDO (su dueño murió) sí queda ORPHANED, con su 🚨', async () => {
+      const fila = sinVinculo({ claimToken: 'tok-muerto', lockedUntil: new Date(NOW - 1_000) })
+      tabla([fila])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(fila).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED' })
+      expect(result.orphaned).toBe(1)
+      expect(huerfanos()).toHaveLength(1)
+    })
+  })
+
+  it('ACEPTACION_INCIERTA es terminal: un pedido de Rappi que quedó así no se vuelve a tomar (registrarlo sería a ciegas)', async () => {
+    const incierto = makeEvent({
+      id: 'evt_incierto',
+      provider: 'RAPPI',
+      eventType: 'NEW_ORDER',
+      channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+      channelLinkId: 'link_rappi',
+      error: 'ACEPTACION_INCIERTA',
+    })
+    mockedFindMany.mockImplementation(async (args: any) => [incierto].filter(f => cumple(f, args.where)))
+
+    const job = new DeliveryWebhookReconciliationJob()
+    await job.runOnce()
+    await job.reprocesarCarrilRappi()
+
+    expect(mockedProcessRappi).not.toHaveBeenCalled()
   })
 
   it('an event that fails again during reprocessing is left FAILED (no markEventResult write) but its attemptCount/backoff bookkeeping IS updated, so the next pass retries it later', async () => {
@@ -353,7 +446,10 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // own findMany, the 3rd findMany call in the pass: after the two lanes, N-5) — the bulk update is scoped to
     // exactly the fetched batch's ids (see below), not this broader where.
     const orphanFetchWhere = mockedFindMany.mock.calls[2][0].where
-    expect(orphanFetchWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED'] } }])
+    expect(orphanFetchWhere.OR).toEqual([
+      { error: null },
+      { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA'] } },
+    ])
     expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
     expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
     // The bulk flip is scoped to EXACTLY the fetched (and logged) batch — never the broader
@@ -399,7 +495,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const nullSafeErrorGuard = scanWhere.AND.find((c: any) => Array.isArray(c.OR) && 'error' in (c.OR[0] ?? {}))
-    const terminales = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED']
+    const terminales = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA']
     expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
     // markOrphaned's own lookup query is the third findMany call in the pass (after the two lanes, N-5).
     const orphanLookupWhere = mockedFindMany.mock.calls[2][0].where
@@ -587,6 +683,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     it('P1-3: cualquier OTRO evento sin vínculo sigue siendo ORPHANED de inmediato', async () => {
       mockedFindMany.mockResolvedValueOnce([eventoUber({ channelLinkId: null, channelLink: null })]).mockResolvedValueOnce([])
+      mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
 
       const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
@@ -866,6 +963,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     it('cualquier OTRO evento de Rappi sin vínculo sigue siendo ORPHANED de inmediato', async () => {
       mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('NEW_ORDER')]).mockResolvedValueOnce([])
+      mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
 
       const result = await new DeliveryWebhookReconciliationJob().runOnce()
 

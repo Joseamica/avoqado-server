@@ -87,8 +87,11 @@ export class DeliveryWebhookReconciliationJob {
    * `CHANNEL_DISABLED` — un pedido de Rappi que llegó a un canal deshabilitado: no se aceptó y Rappi
    * lo cancela al vencer su reloj (4–6 min). Si el canal se reactiva, reintentarlo registraría un
    * pedido que ya no existe.
+   *
+   * `ACEPTACION_INCIERTA` — Rappi contestó 400 al aceptar y su historial no dijo si el pedido quedó aceptado (vacío o
+   * ilegible). 🚨 Lo resuelve una persona con Rappi: reintentarlo solo terminaría registrando la venta a ciegas.
    */
-  private static readonly TERMINAL_ERRORS = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED']
+  private static readonly TERMINAL_ERRORS = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA']
 
   /**
    * Fix B2 (audit §10.2): without an attempt cap, a handful of permanently-broken
@@ -416,6 +419,32 @@ export class DeliveryWebhookReconciliationJob {
           !channelLink && event.provider === DeliveryProvider.RAPPI && event.eventType === 'STORE_PROVISIONING_STATUS'
         try {
           if (!channelLink && !revocacionSinVinculo && !aprovisionamientoRappi) {
+            // 🔴 Condicionado, como el barrido de 24 h (R1): sólo si sigue FAILED/RECEIVED, sin un error terminal y SIN un
+            // reclamo vigente. Un `update` por id a ciegas regresaba a FAILED/ORPHANED un evento que otro proceso acababa de
+            // dejar PROCESSED, o lo dejaba PROCESSED con `error = 'ORPHANED'` y un 🚨 falso (pendiente de la Tarea 8).
+            const ahora = new Date(Date.now())
+            const { count } = await prisma.deliveryOrderEvent.updateMany({
+              where: {
+                id: event.id,
+                status: { in: [DeliveryOrderEventStatus.FAILED, DeliveryOrderEventStatus.RECEIVED] },
+                AND: [
+                  { OR: [{ lockedUntil: null }, { lockedUntil: { lt: ahora } }] },
+                  { OR: [{ error: null }, { error: { notIn: DeliveryWebhookReconciliationJob.TERMINAL_ERRORS } }] },
+                ],
+              },
+              data: {
+                status: DeliveryOrderEventStatus.FAILED,
+                error: DeliveryWebhookReconciliationJob.ORPHANED_MARKER,
+                processedAt: ahora,
+              },
+            })
+            if (count === 0) {
+              logger.info('🛵 [Delivery recon] evento sin vínculo que otro proceso ya cerró o tiene reclamado: no se toca', {
+                eventId: event.id,
+                provider: event.provider,
+              })
+              continue
+            }
             // Same per-event alert shape/prefix as the 24h sweep below — BetterStack
             // alerts on the '🚨 [Delivery recon] ORPHANED' pattern. Without this, a
             // deleted DeliveryChannelLink (venue turning off its integration) would
@@ -428,7 +457,6 @@ export class DeliveryWebhookReconciliationJob {
               reason: 'CHANNEL_LINK_DELETED',
               ageHours: Math.round((Date.now() - new Date(event.receivedAt).getTime()) / 3_600_000),
             })
-            await markEventResult(event.id, DeliveryOrderEventStatus.FAILED, undefined, DeliveryWebhookReconciliationJob.ORPHANED_MARKER)
             orphanedImmediate++
             continue
           }

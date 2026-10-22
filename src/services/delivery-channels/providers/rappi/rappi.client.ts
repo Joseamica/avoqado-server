@@ -206,6 +206,16 @@ export async function habilitarTiendaRappi(
 }
 
 /**
+ * El historial de eventos de UN pedido del lado de Rappi (Tarea 9): lo único que dice si un pedido que contestó 400 al
+ * aceptar sí quedó aceptado (`taken_visible_order`). Medido el 21-oct en DEV: 200 con una lista; `[]` si nunca se aceptó.
+ * Es una LECTURA: va sin `storeId`, como las demás. 🔴 No confundir con `GET /orders` (`sondearPedidosRappi`), que NO es una
+ * lectura: pasa los pedidos de READY a SENT. El cuerpo lo interpreta `leerRespuestaDelHistorial` (`rappi.estadoDelPedido`).
+ */
+export async function historialDelPedidoRappi(orderId: string): Promise<RappiRespuesta> {
+  return rappiApi({ metodo: 'GET', ruta: `${API}/orders/${encodeURIComponent(orderId)}/events` })
+}
+
+/**
  * El sondeo de pedidos: la RED por si un webhook se perdió (Rappi no documenta reintentos).
  * Devuelve sólo los pedidos pendientes de contestar, y el propio GET los pasa de READY a
  * SENT del lado de Rappi. El ritmo de 45 s lo pone el caller con `crearEspaciadorDeSondeo`.

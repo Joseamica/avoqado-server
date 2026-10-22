@@ -3,6 +3,9 @@
  *
  * ⚠️ Sin sandbox: los payloads son los de la documentación, la red va inyectada.
  */
+import * as fs from 'fs'
+import * as path from 'path'
+
 import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
 import { processRappiEvent, RECLAMO_RAPPI_MS } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
@@ -15,7 +18,8 @@ import {
   renovarReclamo,
 } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
 import { confirmarTienda } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
-import { suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
+import { historialDelPedidoRappi, suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
+import { anotarAceptacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
 
 jest.mock('../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service', () => ({
   cancelDeliveryOrder: jest.fn(),
@@ -36,6 +40,13 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.prov
 }))
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
   suscribirTiendaAEventos: jest.fn(),
+  historialDelPedidoRappi: jest.fn(),
+}))
+// La marca de aceptación es un UPDATE condicionado al token (se prueba en `rappi.estadoDelPedido.test.ts` y contra Postgres);
+// aquí se observa cuándo se escribe. `leerEstado` y `leerHistorial` son los reales.
+jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido', () => ({
+  ...jest.requireActual('../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'),
+  anotarAceptacion: jest.fn(),
 }))
 
 const mockCancel = cancelDeliveryOrder as jest.Mock
@@ -44,6 +55,16 @@ const mockMark = markEventResult as jest.Mock
 const mockReclamar = reclamarEvento as jest.Mock
 const mockRenovar = renovarReclamo as jest.Mock
 const mockCerrar = cerrarEventoReclamado as jest.Mock
+const mockAnotar = anotarAceptacion as jest.Mock
+const mockHistorialHttp = historialDelPedidoRappi as jest.Mock
+
+/** Los historiales REALES del sandbox DEV de Rappi (21-oct-2026, recorrido-real.md). */
+const SANDBOX = path.join(__dirname, 'fixtures/rappi/sandbox')
+const crudoDelSandbox = (archivo: string) => fs.readFileSync(path.join(SANDBOX, archivo), 'utf8')
+const HISTORIAL_ACEPTADO = JSON.parse(crudoDelSandbox('eventos-aceptado.json')) // [taken_visible_order]
+const HISTORIAL_VACIO = JSON.parse(crudoDelSandbox('eventos-vacio.json')) // []
+/** La marca que deja un intento que ya vio el sí de Rappi. */
+const MARCA = { aceptacion: { en: '2026-10-21T22:26:20.000Z', evidencia: 'HTTP_2XX' } }
 
 /** El token del reclamo que este proceso obtiene en cada prueba (salvo las que simulan a otro dueño). */
 const TOKEN = 'tok-1'
@@ -95,6 +116,9 @@ describe('processRappiEvent', () => {
     mockReclamar.mockResolvedValue(TOKEN)
     mockRenovar.mockResolvedValue(true)
     mockCerrar.mockResolvedValue(true)
+    mockAnotar.mockResolvedValue(true)
+    // El cableado por defecto del historial: un pedido sin eventos del lado de Rappi.
+    mockHistorialHttp.mockResolvedValue({ ok: true, status: 200, raw: '[]' })
   })
 
   // 🔴 Desde la Tarea 8 TODO cierre va por `cerrarEventoReclamado` con su token: `markEventResult` escribe sin
@@ -138,14 +162,17 @@ describe('processRappiEvent', () => {
     expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
   })
 
-  it('si aceptar FALLA no se ingiere: sin el sí de Rappi el pedido no es nuestro', async () => {
-    const aceptarMal = jest.fn(async () => ({ ok: false, status: 400, raw: 'invalid transition' }))
+  it('si aceptar FALLA (un no-2xx que no es 400) no se ingiere: queda FAILED reintentable, sin leer el historial', async () => {
+    const aceptarMal = jest.fn(async () => ({ ok: false, status: 500, raw: 'upstream error' }))
+    const historial = jest.fn()
 
-    const r = await processRappiEvent('evt1', { aceptar: aceptarMal })
+    const r = await processRappiEvent('evt1', { aceptar: aceptarMal, historial })
 
-    expect(r.outcome).toBe('FAILED')
+    expect(r).toMatchObject({ outcome: 'FAILED', error: 'ACCEPT_500' })
     expect(mockIngest).not.toHaveBeenCalled()
-    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('ACCEPT_400'))
+    expect(historial).not.toHaveBeenCalled()
+    expect(mockAnotar).not.toHaveBeenCalled()
+    expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('ACCEPT_500'))
   })
 
   it('si aceptar LANZA, persiste FAILED en vez de dejar el evento en RECEIVED', async () => {
@@ -548,13 +575,47 @@ describe('processRappiEvent', () => {
       expect(r).toMatchObject({ outcome: 'IN_FLIGHT', accepted: true })
     })
 
-    it('un aceptar rechazado (400) cierra FAILED con su token: la renovación del historial (Tarea 9) no existe todavía', async () => {
-      const aceptarMal = jest.fn(async () => ({ ok: false, status: 400, raw: 'invalid transition' }))
+    it('un aceptar rechazado (400) renueva con su token ANTES de leer el historial (Tarea 9)', async () => {
+      const orden: string[] = []
+      mockRenovar.mockImplementation(async () => {
+        orden.push('renovar')
+        return true
+      })
+      const aceptarMal = jest.fn(async () => {
+        orden.push('accept')
+        return { ok: false, status: 400, raw: 'Invalid transition' }
+      })
+      const historial = jest.fn(async () => {
+        orden.push('historial')
+        return HISTORIAL_ACEPTADO
+      })
+      mockAnotar.mockImplementationOnce(async () => {
+        orden.push('marca')
+        return true
+      })
+      mockIngest.mockImplementationOnce(async () => {
+        orden.push('ingest')
+        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+      })
 
-      await processRappiEvent('evt1', { aceptar: aceptarMal })
+      await processRappiEvent('evt1', { aceptar: aceptarMal, historial })
 
-      expect(mockRenovar).toHaveBeenCalledTimes(1) // sólo la de antes de aceptar
-      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, expect.stringContaining('ACCEPT_400'))
+      expect(orden).toEqual(['renovar', 'accept', 'renovar', 'historial', 'marca', 'renovar', 'ingest'])
+    })
+
+    it('🔴 si al renovar antes de leer el historial ve que perdió el reclamo, se detiene: ni lee, ni anota, ni ingiere, ni cierra', async () => {
+      // Pierde el reclamo DESPUÉS del 400: la renovación sólo falla cuando `aceptar` ya corrió.
+      const aceptarMal = jest.fn(async () => ({ ok: false, status: 400, raw: 'Invalid transition' }))
+      mockRenovar.mockImplementation(async () => aceptarMal.mock.calls.length === 0)
+      const historial = jest.fn(async () => HISTORIAL_ACEPTADO)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarMal, historial })
+
+      expect(r.outcome).toBe('IN_FLIGHT')
+      expect(historial).not.toHaveBeenCalled()
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).not.toHaveBeenCalled()
     })
 
     it('si el cierre encuentra el reclamo de otro (false), no hay reintento ni escritura de respaldo', async () => {
@@ -565,6 +626,217 @@ describe('processRappiEvent', () => {
       // Lo que ESTE proceso hizo sigue siendo verdad (aceptó e ingirió); el 🚨 lo da el cierre.
       expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
       expect(mockCerrar).toHaveBeenCalledTimes(1)
+    })
+  })
+
+  // ── Aceptado pero no guardado: la marca y la recuperación por el historial (Tarea 9) ──
+  // 🔴 Nunca registrar a ciegas ni dos veces: con la marca no se vuelve a aceptar (Rappi contestaría 400); sin ella, un 400
+  // sólo se registra si el historial de Rappi dice que el pedido SÍ quedó aceptado.
+  describe('aceptado pero no guardado (Tarea 9)', () => {
+    const filaConMarca = (over: Record<string, unknown> = {}) => fila({ resourcePayload: MARCA, ...over })
+    const rechazo400 = () => jest.fn(async () => ({ ok: false, status: 400, raw: 'Invalid transition from {TAKEN} to {TAKEN}' }))
+
+    it('🔴 tras el 2xx de aceptar, la marca queda ANTES de ingerir', async () => {
+      const orden: string[] = []
+      aceptarOk.mockImplementationOnce(async () => {
+        orden.push('accept')
+        return { ok: true, status: 200, raw: '{}' }
+      })
+      mockAnotar.mockImplementationOnce(async () => {
+        orden.push('marca')
+        return true
+      })
+      mockIngest.mockImplementationOnce(async () => {
+        orden.push('ingest')
+        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+      })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(orden).toEqual(['accept', 'marca', 'ingest'])
+      // Con SU token: si el reclamo ya no es suyo, la marca no se escribe.
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HTTP_2XX')
+      expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
+    })
+
+    it('🔴 reintento con marca: NO vuelve a aceptar e ingiere', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+        filaConMarca({ status: 'FAILED', error: 'INGEST: la base se cayó' }),
+      )
+      const historial = jest.fn()
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(historial).not.toHaveBeenCalled()
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+    })
+
+    it('🔴 la fila se relee DESPUÉS del reclamo: la marca que acaba de dejar el dueño anterior se ve y no se vuelve a aceptar', async () => {
+      // La primera lectura (antes de reclamar) es vieja: no trae la marca. El dueño anterior aceptó, escribió la marca y se le
+      // venció el reclamo antes de ingerir; este proceso lo reclamó después. Decidir con la lectura vieja volvería a aceptar.
+      const findUnique = prisma.deliveryOrderEvent.findUnique as jest.Mock
+      findUnique.mockReset().mockResolvedValueOnce(fila()).mockResolvedValueOnce(filaConMarca())
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(findUnique).toHaveBeenCalledTimes(2)
+      // La lectura con la que se decide va DESPUÉS del reclamo.
+      expect(findUnique.mock.invocationCallOrder[1]).toBeGreaterThan(mockReclamar.mock.invocationCallOrder[0])
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
+    })
+
+    it('🔴 muere entre el 2xx y la marca: el reintento recibe 400 y el historial con taken_visible_order lo registra una vez', async () => {
+      // 1.er intento: Rappi dice que sí y el proceso muere antes de escribir la marca (aquí, la escritura revienta).
+      mockAnotar.mockRejectedValueOnce(new Error('el proceso murió'))
+      const primero = await processRappiEvent('evt1', { aceptar: aceptarOk })
+      expect(primero).toMatchObject({ outcome: 'FAILED', accepted: true })
+      expect(mockIngest).not.toHaveBeenCalled()
+
+      // El reintento: la fila sigue SIN marca. Rappi ya lo tiene TAKEN y contesta 400; su historial dice que sí se aceptó.
+      const aceptarDeNuevo = rechazo400()
+      const historial = jest.fn(async () => HISTORIAL_ACEPTADO)
+      const segundo = await processRappiEvent('evt1', { aceptar: aceptarDeNuevo, historial })
+
+      expect(historial).toHaveBeenCalledWith('392625')
+      expect(mockAnotar).toHaveBeenLastCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockIngest).toHaveBeenCalledTimes(1) // UNA venta, no dos
+      expect(segundo).toMatchObject({ outcome: 'PROCESSED', accepted: true, orderId: 'ord1' })
+    })
+
+    it('400 y el historial con cancelación ⇒ PEDIDO_YA_NO_ACTIVO, sin ingerir', async () => {
+      const historial = jest.fn(async () => [{ event: 'canceled_with_charge' }, { event: 'taken_visible_order' }])
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'PEDIDO_YA_NO_ACTIVO' })
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      // El código EXACTO en `error`: es lo que la reconciliación reconoce como terminal.
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'PEDIDO_YA_NO_ACTIVO')
+    })
+
+    it.each([
+      ['vacío (Rappi no tiene eventos del pedido)', async () => HISTORIAL_VACIO],
+      ['caído (no se pudo leer: null)', async () => null],
+      ['que lanza (red)', async () => Promise.reject(new Error('ETIMEDOUT'))],
+      ['sin aceptación ni cierre', async () => [{ event: 'courier_assigned' }]],
+    ])('400 y el historial %s ⇒ ACEPTACION_INCIERTA con 🚨, sin ingerir', async (_caso, leer) => {
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial: jest.fn(leer) })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' })
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'ACEPTACION_INCIERTA')
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ eventRowId: 'evt1' }))
+    })
+
+    it('🔴 si la marca no se puede escribir porque el reclamo ya no es suyo, se detiene sin ingerir ni cerrar', async () => {
+      mockAnotar.mockResolvedValueOnce(false)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toMatchObject({ outcome: 'IN_FLIGHT', accepted: true })
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('lo mismo tras el historial: si la marca HISTORIAL_TAKEN no aplica, IN_FLIGHT sin ingerir', async () => {
+      mockAnotar.mockResolvedValueOnce(false)
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400(), historial: jest.fn(async () => HISTORIAL_ACEPTADO) })
+
+      expect(r).toMatchObject({ outcome: 'IN_FLIGHT', accepted: true })
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
+    it('el cableado por defecto lee el historial con historialDelPedidoRappi (una lectura, el id del pedido) y lo entiende', async () => {
+      mockHistorialHttp.mockResolvedValue({ ok: true, status: 200, raw: crudoDelSandbox('eventos-aceptado.json') })
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400() })
+
+      expect(mockHistorialHttp).toHaveBeenCalledTimes(1)
+      expect(mockHistorialHttp).toHaveBeenCalledWith('392625')
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1' })
+    })
+
+    it('el cableado por defecto: un status distinto de 2xx del historial es «no se pudo leer» ⇒ ACEPTACION_INCIERTA', async () => {
+      mockHistorialHttp.mockResolvedValue({ ok: false, status: 503, raw: '' })
+
+      const r = await processRappiEvent('evt1', { aceptar: rechazo400() })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'ACEPTACION_INCIERTA' })
+      expect(mockIngest).not.toHaveBeenCalled()
+    })
+
+    // ── El canal DESHABILITADO ─────────────────────────────────────────────────────────
+    const deshabilitado = (over: Record<string, unknown> = {}) =>
+      fila({ channelLink: { ...fila().channelLink, status: 'DISABLED' }, ...over })
+
+    it('🔴 canal deshabilitado con la marca puesta: se registra igual (Rappi ya lo aceptó) y grita', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado({ resourcePayload: MARCA }))
+      const historial = jest.fn()
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(historial).not.toHaveBeenCalled()
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+      expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/🚨.*DESHABILITADO/), expect.objectContaining({ eventRowId: 'evt1' }))
+    })
+
+    it('🔴 canal deshabilitado sin marca pero con taken en el historial: se anota, se registra (sin aceptar otra vez) y grita', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado())
+      const historial = jest.fn(async () => HISTORIAL_ACEPTADO)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+      expect(historial).toHaveBeenCalledTimes(1) // UNA lectura
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockAnotar).toHaveBeenCalledWith('evt1', TOKEN, 'HISTORIAL_TAKEN')
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+      expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/🚨.*DESHABILITADO/), expect.anything())
+    })
+
+    it.each([
+      ['vacío', async () => HISTORIAL_VACIO],
+      ['caído', async () => null],
+      ['con cancelación', async () => [{ event: 'canceled_by_timeout' }, { event: 'taken_visible_order' }]],
+    ])('canal deshabilitado sin marca y sin taken vigente en el historial (%s) ⇒ CHANNEL_DISABLED', async (_caso, leer) => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado())
+      const historial = jest.fn(leer)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+      expect(historial).toHaveBeenCalledTimes(1)
+      expect(r).toMatchObject({ outcome: 'FAILED', error: 'CHANNEL_DISABLED' })
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'CHANNEL_DISABLED')
+    })
+
+    it('canal deshabilitado: renueva el reclamo antes de leer el historial, y si lo perdió no lee ni cierra', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(deshabilitado())
+      mockRenovar.mockResolvedValue(false)
+      const historial = jest.fn(async () => HISTORIAL_ACEPTADO)
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk, historial })
+
+      expect(mockRenovar).toHaveBeenCalledWith('evt1', TOKEN, 45_000)
+      expect(historial).not.toHaveBeenCalled()
+      expect(r.outcome).toBe('IN_FLIGHT')
+      expect(mockCerrar).not.toHaveBeenCalled()
     })
   })
 })
