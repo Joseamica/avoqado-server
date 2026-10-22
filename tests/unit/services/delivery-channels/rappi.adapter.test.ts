@@ -449,6 +449,35 @@ describe('rappiAdapter.publishStoreHours — el horario de la tienda por la API 
     expect(mockBorrarFranja).not.toHaveBeenCalled()
   })
 
+  it('🔴 turnos encimados o que se tocan se publican FUSIONADOS (nunca un FAILED por el horario del dueño)', async () => {
+    mockListarHorario.mockResolvedValue({ ...ok(), franjas: [] })
+    const encimados = {
+      ...HORARIO,
+      monday: {
+        enabled: true,
+        ranges: [
+          { open: '09:00', close: '14:00' },
+          { open: '13:00', close: '19:00' },
+        ],
+      },
+      tuesday: {
+        enabled: true,
+        ranges: [
+          { open: '09:00', close: '14:00' },
+          { open: '14:00', close: '22:00' },
+        ],
+      },
+    }
+
+    const r = await rappiAdapter.publishStoreHours(encimados, '900175625')
+
+    expect(r.ok).toBe(true)
+    expect(mockCrearFranja.mock.calls).toEqual([
+      ['900175625', { day: 'mon', starts_time: '09:00:00', ends_time: '19:00:00' }],
+      ['900175625', { day: 'tue', starts_time: '09:00:00', ends_time: '22:00:00' }],
+    ])
+  })
+
   it('🔴 el candado de escritura se relanza TAL CUAL (es un «no se envió»): el adaptador no lo traga ni lo disfraza', async () => {
     const bloqueo = new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'tienda fuera de la lista', 'sin permiso')
     mockActualizarFranja.mockRejectedValue(bloqueo)

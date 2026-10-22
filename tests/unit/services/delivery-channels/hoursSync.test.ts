@@ -226,6 +226,90 @@ describe('syncChannelHours — el horario de la tienda en el proveedor sigue al 
     await expect(syncChannelHours(copia())).resolves.toMatchObject({ outcome: 'FAILED', error: 'P1001' })
   })
 
+  // ── Ronda de arreglo 1 ───────────────────────────────────────────────────────────────────
+  it('🔴 resuelve el horario SIN avisar: el 🚨 del estimado ya lo da el menú en la misma pasada (uno solo por pasada)', async () => {
+    conPublicador()
+
+    await syncChannelHours(copia())
+
+    expect(mockedResolve).toHaveBeenCalledWith(expect.objectContaining({ id: 'link1' }), { avisar: false })
+  })
+
+  it('🔴 sin horario configurado ⇒ SKIPPED_ESTIMATED y ninguna llamada al proveedor (nunca se pisa su portal con una suposición)', async () => {
+    const publicar = conPublicador()
+    mockedResolve.mockResolvedValue({ horario: semana(), fuente: 'ESTIMADO' })
+
+    const r = await syncChannelHours(copia())
+
+    expect(r.outcome).toBe('SKIPPED_ESTIMATED')
+    expect(publicar).not.toHaveBeenCalled()
+    expect(mockedQueryRaw).not.toHaveBeenCalled()
+    expect(mockedUpdate).not.toHaveBeenCalled()
+    expect(fila.config.horarioPublicado).toBeUndefined()
+    expect(mockedError).not.toHaveBeenCalled()
+    expect(mockedWarn).not.toHaveBeenCalled()
+  })
+
+  it('🔴 tenía un horario publicado y el dueño borró su configuración ⇒ no se toca al proveedor ni la huella', async () => {
+    const publicar = conPublicador()
+    await syncChannelHours(copia())
+    const publicado = structuredClone(fila.config.horarioPublicado)
+    mockedQueryRaw.mockClear()
+    mockedUpdate.mockClear()
+    mockedResolve.mockResolvedValue({ horario: semana(), fuente: 'ESTIMADO' })
+
+    const r = await syncChannelHours(copia())
+
+    expect(r.outcome).toBe('SKIPPED_ESTIMATED')
+    expect(publicar).toHaveBeenCalledTimes(1) // sólo la de antes
+    expect(fila.config.horarioPublicado).toEqual(publicado)
+    expect(mockedQueryRaw).not.toHaveBeenCalled()
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it.each([
+    [
+      'se enciman',
+      [
+        { open: '09:00', close: '14:00' },
+        { open: '13:00', close: '18:00' },
+      ],
+    ],
+    [
+      'sólo se tocan',
+      [
+        { open: '09:00', close: '14:00' },
+        { open: '14:00', close: '18:00' },
+      ],
+    ],
+    [
+      'una adentro de otra',
+      [
+        { open: '09:00', close: '18:00' },
+        { open: '10:00', close: '12:00' },
+      ],
+    ],
+  ])('🔴 turnos del dueño que %s se FUSIONAN: misma huella que una sola franja 09–18, y se publica ya fusionado', async (_caso, ranges) => {
+    const publicar = conPublicador()
+    mockedResolve.mockResolvedValue({
+      horario: semana({ monday: { enabled: true, ranges: [{ open: '09:00', close: '18:00' }] } }),
+      fuente: 'CANAL',
+    })
+    await syncChannelHours(copia())
+    const unaSola = fila.config.horarioPublicado.huella
+
+    // La misma semana capturada con los dos turnos: misma huella ⇒ nada que publicar.
+    mockedResolve.mockResolvedValue({ horario: semana({ monday: { enabled: true, ranges } }), fuente: 'CANAL' })
+    expect((await syncChannelHours(copia())).outcome).toBe('UNCHANGED')
+
+    // Y si es la primera vez, lo que llega al adaptador ya viene fusionado (nunca un FAILED por turnos encimados).
+    fila.config = {}
+    const r = await syncChannelHours(copia())
+    expect(r.outcome).toBe('PUBLISHED')
+    expect(fila.config.horarioPublicado.huella).toBe(unaSola)
+    expect(publicar).toHaveBeenLastCalledWith(semana({ monday: { enabled: true, ranges: [{ open: '09:00', close: '18:00' }] } }), 'store1')
+  })
+
   it('un proveedor sin `publishStoreHours` ⇒ NO_PUBLISHER, en silencio (ni aviso por pasada)', async () => {
     mockedAdapterFor.mockReturnValue({ publishMenu: jest.fn() })
 

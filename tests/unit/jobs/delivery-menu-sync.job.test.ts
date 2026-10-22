@@ -23,6 +23,7 @@ jest.mock('@/services/delivery-channels/core/injectionRate.service', () => ({
   UMBRAL_OBJETIVO: 99.9,
 }))
 
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { syncChannelAvailability, syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
 import { syncChannelHours } from '@/services/delivery-channels/core/hoursSync.service'
@@ -66,5 +67,39 @@ describe('DeliveryMenuSyncJob — el horario va junto al menú, aislado por cana
     expect(mockedHours).toHaveBeenCalledWith(L2)
     // Y la cuenta del menú no se enteró del horario.
     expect(r).toEqual({ publicados: 2, sinCambio: 0, fallidos: 0 })
+  })
+
+  // ── Ronda de arreglo 1: una pasada a la vez ─────────────────────────────────────────────
+  it('🔴 dos pasadas a la vez ⇒ la segunda se SALTA (aviso sin 🚨) y no llama al menú ni al horario', async () => {
+    let soltar!: (links: unknown[]) => void
+    mockedFindMany.mockReturnValueOnce(new Promise(r => (soltar = r)))
+    const job = new DeliveryMenuSyncJob()
+
+    const primera = job.runOnce()
+    const segunda = await job.runOnce()
+
+    expect(segunda).toEqual({ publicados: 0, sinCambio: 0, fallidos: 0 })
+    expect(mockedFindMany).toHaveBeenCalledTimes(1)
+    expect(mockedMenu).not.toHaveBeenCalled()
+    expect(mockedHours).not.toHaveBeenCalled()
+    const salto = (logger.warn as jest.Mock).mock.calls.find(([m]) => String(m).includes('sigue corriendo'))
+    expect(salto).toBeDefined()
+    expect(String(salto![0])).not.toMatch(/🚨/)
+
+    soltar([L1, L2])
+    await primera
+    expect(mockedMenu).toHaveBeenCalledTimes(2)
+    expect(mockedHours).toHaveBeenCalledTimes(2)
+  })
+
+  it('el candado se SUELTA al terminar, aunque la pasada truene (si no, el job quedaría muerto para siempre)', async () => {
+    mockedFindMany.mockRejectedValueOnce(new Error('P1001'))
+    const job = new DeliveryMenuSyncJob()
+
+    await job.runOnce()
+    await job.runOnce()
+
+    expect(mockedFindMany).toHaveBeenCalledTimes(2)
+    expect(mockedMenu).toHaveBeenCalledTimes(2) // la segunda sí corrió
   })
 })

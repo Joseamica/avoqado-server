@@ -89,12 +89,18 @@ export function esHorarioValido(v: unknown): v is HorarioSemanal {
   })
 }
 
-export async function resolveDeliveryHours(link: DeliveryChannelLink): Promise<HorarioResuelto> {
+/**
+ * @param opts.avisar Por default `true`. Con `false` no se escribe ningún aviso (ni el 🚨 del estimado ni el de la forma
+ *   inválida): es para quien resuelve las MISMAS horas en la misma pasada que otro que ya avisa (el horario de la tienda
+ *   junto al menú), así queda un solo 🚨 por pasada. La resolución es idéntica.
+ */
+export async function resolveDeliveryHours(link: DeliveryChannelLink, opts: { avisar?: boolean } = {}): Promise<HorarioResuelto> {
+  const avisar = opts.avisar !== false
   // 1. Lo configurado para ESTE canal. Es el mejor dato porque el horario de delivery a
   //    menudo NO es el del local: muchos restaurantes dejan de repartir antes de cerrar.
   const delCanal = (link.config as { deliveryHours?: unknown } | null)?.deliveryHours
   if (esHorarioValido(delCanal)) return { horario: delCanal, fuente: 'CANAL' }
-  if (delCanal !== undefined && delCanal !== null) {
+  if (avisar && delCanal !== undefined && delCanal !== null) {
     logger.warn('⚠️ [DeliveryHours] el canal tiene un horario con forma inválida — se ignora', { linkId: link.id, venueId: link.venueId })
   }
 
@@ -107,11 +113,13 @@ export async function resolveDeliveryHours(link: DeliveryChannelLink): Promise<H
 
   // 3. Nadie lo configuró. Se estima, y se GRITA — un horario adivinado que se presenta como
   //    certeza es peor que no tenerlo, porque nadie lo revisa.
-  logger.warn('🚨 [DeliveryHours] el venue NO tiene horario configurado — se publica un ESTIMADO (L-S 09:00-22:00)', {
-    linkId: link.id,
-    venueId: link.venueId,
-    provider: link.provider,
-    accion: 'configura config.deliveryHours en el canal, o el horario del módulo de reservas',
-  })
+  if (avisar) {
+    logger.warn('🚨 [DeliveryHours] el venue NO tiene horario configurado — se publica un ESTIMADO (L-S 09:00-22:00)', {
+      linkId: link.id,
+      venueId: link.venueId,
+      provider: link.provider,
+      accion: 'configura config.deliveryHours en el canal, o el horario del módulo de reservas',
+    })
+  }
   return { horario: ESTIMADO, fuente: 'ESTIMADO' }
 }

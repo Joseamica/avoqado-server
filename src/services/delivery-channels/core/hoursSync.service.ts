@@ -10,6 +10,13 @@
  * fila bloqueada (`escribirLlavesDelSistema`) y sin tocar las demás llaves. Si algo falla a medias NO se guarda: la siguiente
  * pasada vuelve a calcular y el adaptador vuelve a leer lo que el proveedor de verdad tiene.
  *
+ * 🔴 NUNCA un horario ESTIMADO (ronda 1): si nadie configuró horario (`fuente: 'ESTIMADO'`), no se toca al proveedor ni la huella
+ * (`SKIPPED_ESTIMATED`): lo que el dueño tenga en el portal del proveedor no se pisa con una suposición, y lo último publicado se
+ * queda. Sin 🚨 propio: el horario se resuelve con `avisar: false` porque el menú, en la misma pasada, ya avisa (uno por pasada).
+ *
+ * Los turnos del mismo día que se enciman o se tocan se FUSIONAN antes de todo (09–14 + 13–18 ⇒ 09–18): la huella es la de una
+ * sola franja y al proveedor nunca le llegan turnos encimados (que rechazaría a media publicación).
+ *
  * 🔴 NUNCA una semana toda cerrada: publicarla dejaría la tienda sin horario, que es justo lo que el proveedor puede tomar como
  * 24 h. Se devuelve `SKIPPED_EMPTY`, se conserva lo último que se publicó y se avisa con 🚨 UNA vez (la marca vive en
  * `horarioPublicado.vacioAvisadoEn` y se borra sola al volver a publicar).
@@ -24,15 +31,16 @@ import type { DeliveryChannelLink } from '@prisma/client'
 import logger from '@/config/logger'
 
 import { adapterFor, hasAdapter } from './adapterRegistry'
-import { resolveDeliveryHours, type HorarioSemanal } from './deliveryHours.service'
+import { resolveDeliveryHours, type HorarioSemanal, type RangoHorario } from './deliveryHours.service'
 import { configComoObjeto, escribirLlavesDelSistema } from './llavesDelSistema'
 import { DeliveryWriteNotSentError, type ActionResult } from './types'
 
 /**
  * `NO_PUBLISHER`: el proveedor no recibe el horario de la tienda (o no hay adaptador). Es normal y no se avisa.
  * `SKIPPED_EMPTY`: todos los días cerrados; no se publica nada y se conserva lo último.
+ * `SKIPPED_ESTIMATED`: nadie configuró horario (es un estimado); no se publica nada y se conserva lo último.
  */
-export type HoursSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'SKIPPED_EMPTY' | 'FAILED'
+export type HoursSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'SKIPPED_EMPTY' | 'SKIPPED_ESTIMATED' | 'FAILED'
 
 export interface HoursSyncResult {
   outcome: HoursSyncOutcome
@@ -59,6 +67,28 @@ export function leerHorarioPublicado(config: unknown): HorarioPublicado | null {
 }
 
 const DIAS = ['monday', 'tuesday', 'wednesday', 'thursday', 'friday', 'saturday', 'sunday'] as const
+
+/**
+ * Los turnos de cada día, ordenados y FUSIONADOS cuando se enciman o se tocan (09–14 + 13–18 ⇒ 09–18; 09–14 + 14–18 ⇒ 09–18;
+ * uno adentro de otro ⇒ el de afuera). Las horas son «HH:MM» validadas, así que compararlas como texto es compararlas como hora.
+ */
+function fusionarTurnos(horario: HorarioSemanal): HorarioSemanal {
+  const salida = {} as HorarioSemanal
+  for (const d of DIAS) {
+    const dia = horario[d] ?? { enabled: false, ranges: [] }
+    const ranges: RangoHorario[] = []
+    for (const r of [...dia.ranges].sort((a, b) => (a.open < b.open ? -1 : a.open > b.open ? 1 : 0))) {
+      const ultimo = ranges[ranges.length - 1]
+      if (ultimo && r.open <= ultimo.close) {
+        if (r.close > ultimo.close) ultimo.close = r.close
+      } else {
+        ranges.push({ open: r.open, close: r.close })
+      }
+    }
+    salida[d] = { enabled: dia.enabled, ranges }
+  }
+  return salida
+}
 
 /** ¿Abre algún día con franjas? Sin ninguno, la semana está toda cerrada. */
 function abreAlgunDia(horario: HorarioSemanal): boolean {
@@ -100,7 +130,13 @@ export async function syncChannelHours(link: DeliveryChannelLink): Promise<Hours
 
   const contexto = { linkId: link.id, venueId: link.venueId, provider: link.provider }
   try {
-    const { horario, fuente } = await resolveDeliveryHours(link)
+    // Sin avisar: el 🚨 del estimado lo da el menú en la misma pasada (uno solo por pasada).
+    const resuelto = await resolveDeliveryHours(link, { avisar: false })
+    const { fuente } = resuelto
+    // 🔴 Un estimado NUNCA se publica: no se pisa lo que el dueño tenga en el portal del proveedor con una suposición.
+    if (fuente === 'ESTIMADO') return { outcome: 'SKIPPED_ESTIMATED' }
+
+    const horario = fusionarTurnos(resuelto.horario)
     const publicado = leerHorarioPublicado(link.config)
 
     if (!abreAlgunDia(horario)) {

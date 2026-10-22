@@ -353,7 +353,7 @@ export const rappiAdapter = {
    * (`planDeHorario`: actualizar antes que crear, para no encimar; los días que cierran al final) y la ejecuta EN ORDEN, un
    * paso por llamada.
    *  · la lectura no es 2xx ⇒ `ok:false` sin escribir nada: sin saber qué hay, cualquier escritura podría encimar;
-   *  · la lectura no se entiende ⇒ LANZA (nunca se toma como «no hay franjas»), igual que unas deseadas encimadas;
+   *  · la lectura no se entiende ⇒ LANZA (nunca se toma como «no hay franjas»); turnos encimados o que se tocan se fusionan;
    *  · un paso no-2xx ⇒ se DETIENE y devuelve `ok:false` con el paso: lo que falta lo rehace la siguiente pasada, que vuelve a
    *    leer. Como los días que cierran van al final, un plan a medias nunca le quitó a la tienda franjas que no fueran a quedar;
    *  · el candado de tiendas (`DeliveryWriteNotSentError`) se relanza tal cual; otro error se relanza con el paso en el mensaje.

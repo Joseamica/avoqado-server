@@ -40,6 +40,14 @@ export class DeliveryMenuSyncJob {
   /** Tope por pasada: publicar un menú es una llamada pesada; una tanda grande se reparte. */
   private readonly BATCH_SIZE = 20
 
+  /**
+   * 🔴 UNA pasada a la vez (Tarea 19, ronda 1). `cron` no espera a que la pasada anterior termine: una lenta (el proveedor
+   * contestando despacio, hasta 10 s por llamada) se encimaba con la siguiente, y las dos podían escribir el mismo horario de
+   * la tienda desde dos lecturas viejas distintas (borrar franjas distintas del mismo día y dejarlo vacío). En memoria, como
+   * `enCurso` del job de reconciliación: una sola instancia (`.claude/rules/una-sola-instancia.md`).
+   */
+  private enCurso = false
+
   start(): void {
     if (this.job) return
     this.job = scheduleJob('deliveryMenuSync', this.CRON_PATTERN, async () => {
@@ -54,6 +62,20 @@ export class DeliveryMenuSyncJob {
   }
 
   async runOnce(): Promise<{ publicados: number; sinCambio: number; fallidos: number }> {
+    if (this.enCurso) {
+      logger.warn('📋 [MenuSync] la pasada anterior sigue corriendo — se salta este tick')
+      return { publicados: 0, sinCambio: 0, fallidos: 0 }
+    }
+    this.enCurso = true
+    try {
+      return await this.pasada()
+    } finally {
+      // En `finally`: si la pasada revienta, el candado DEBE soltarse o el job queda muerto para siempre.
+      this.enCurso = false
+    }
+  }
+
+  private async pasada(): Promise<{ publicados: number; sinCambio: number; fallidos: number }> {
     let publicados = 0
     let sinCambio = 0
     let fallidos = 0

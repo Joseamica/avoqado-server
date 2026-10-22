@@ -196,6 +196,22 @@ const llaveDeFranja = (f: { starts_time: string; ends_time: string }) => `${f.st
 const porInicio = <T extends { starts_time: string }>(a: T, b: T) =>
   a.starts_time < b.starts_time ? -1 : a.starts_time > b.starts_time ? 1 : 0
 
+/** Por día y en orden, las franjas que se enciman o se tocan quedan en una sola (las horas ya vienen normalizadas). */
+function fusionarPorDia(franjas: FranjaTiendaRappi[]): FranjaTiendaRappi[] {
+  const salida: FranjaTiendaRappi[] = []
+  for (const dia of DIAS_RAPPI) {
+    for (const f of franjas.filter(x => x.day === dia).sort(porInicio)) {
+      const ultima = salida[salida.length - 1]
+      if (ultima && ultima.day === dia && f.starts_time <= ultima.ends_time) {
+        if (f.ends_time > ultima.ends_time) ultima.ends_time = f.ends_time
+      } else {
+        salida.push({ day: f.day, starts_time: f.starts_time, ends_time: f.ends_time })
+      }
+    }
+  }
+  return salida
+}
+
 /**
  * Qué hay que hacer en Rappi para pasar de `actuales` (lo que tiene) a `deseadas` (lo nuestro), en el ORDEN en que se debe
  * ejecutar. Rappi no deja encimar franjas del mismo día (`fuentes/es__utils.md:969`; Codex plan r1 #6) y una tienda sin
@@ -208,8 +224,9 @@ const porInicio = <T extends { starts_time: string }>(a: T, b: T) =>
  *   · los días que siguen abiertos van primero y al final los que cierran (sólo borrados). Así, si algo falla a la mitad y el
  *     plan se detiene, a la tienda nunca se le quitaron franjas que no fueran a quedar cubiertas.
  *
- * 🔴 Deseadas encimadas en un mismo día LANZAN antes de planear: Rappi las rechazaría a media publicación. (Dos franjas que
- * sólo se tocan, 14:00 y 14:00, no se consideran encimadas; el sandbox no lo ha confirmado.)
+ * 🔴 Antes de planear, las deseadas del mismo día que se enciman o se TOCAN se FUSIONAN (09–14 + 13–18 ⇒ 09–18; 09–14 + 14–18 ⇒
+ * 09–18): Rappi rechazaría las encimadas a media publicación, y fusionar también las que sólo se tocan hace que no importe si
+ * Rappi las cuenta como encimadas (no está medido). El núcleo ya las manda fusionadas; esto es por si otro llamador no.
  */
 export function planDeHorario(actuales: FranjaActualRappi[], deseadas: FranjaTiendaRappi[]): OperacionDeHorario[] {
   const normalizar = <T extends { day: string; starts_time: string; ends_time: string }>(f: T): T => ({
@@ -219,18 +236,7 @@ export function planDeHorario(actuales: FranjaActualRappi[], deseadas: FranjaTie
     ends_time: horaRappi(f.ends_time) ?? f.ends_time,
   })
   const ya = actuales.map(normalizar)
-  const quiero = deseadas.map(normalizar)
-
-  for (const dia of DIAS_RAPPI) {
-    const delDia = quiero.filter(f => f.day === dia).sort(porInicio)
-    for (let i = 1; i < delDia.length; i++) {
-      if (delDia[i].starts_time < delDia[i - 1].ends_time) {
-        throw new Error(
-          `[Rappi] el horario del ${dia} trae franjas encimadas (${llaveDeFranja(delDia[i - 1])} y ${llaveDeFranja(delDia[i])}): Rappi las rechazaría`,
-        )
-      }
-    }
-  }
+  const quiero = fusionarPorDia(deseadas.map(normalizar))
 
   const abiertos: OperacionDeHorario[] = []
   const cierran: OperacionDeHorario[] = []

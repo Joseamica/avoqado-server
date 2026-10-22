@@ -217,8 +217,33 @@ describe('planDeHorario — de lo que Rappi tiene a lo que queremos, sin encimar
     expect(plan).toEqual([{ tipo: 'ACTUALIZAR', id: 2, franja: { day: 'mon', starts_time: '16:00:00', ends_time: '23:00:00' } }])
   })
 
-  it('🔴 franjas deseadas encimadas en el mismo día ⇒ lanza ANTES de planear nada (Rappi las rechazaría a media publicación)', () => {
-    expect(() => planDeHorario([], [quiero('mon', '09:00:00', '14:00:00'), quiero('mon', '13:00:00', '18:00:00')])).toThrow(/encimad/)
+  // 🔴 Ronda 1: turnos del dueño que se enciman o se tocan NO son un FAILED: se fusionan antes de planear. Así tampoco
+  // importa si Rappi cuenta como encimadas dos franjas que sólo se tocan (no está medido).
+  it.each([
+    ['se enciman (09–14 + 13–18)', [quiero('mon', '09:00:00', '14:00:00'), quiero('mon', '13:00:00', '18:00:00')]],
+    ['sólo se tocan (09–14 + 14–18)', [quiero('mon', '14:00:00', '18:00:00'), quiero('mon', '09:00:00', '14:00:00')]],
+  ])('🔴 franjas deseadas del mismo día que %s se FUSIONAN en 09–18 antes de planear', (_caso, deseadas) => {
+    expect(planDeHorario([], deseadas)).toEqual([{ tipo: 'CREAR', franja: { day: 'mon', starts_time: '09:00:00', ends_time: '18:00:00' } }])
+    // Y si Rappi ya tiene 09–18, no hay nada que hacer.
+    expect(planDeHorario([ya(5, 'mon', '09:00:00', '18:00:00')], deseadas)).toEqual([])
+  })
+
+  it('la fusión es por día y deja aparte lo que no se toca (09–12 + 11–14 + 16–20 ⇒ 09–14 y 16–20)', () => {
+    const plan = planDeHorario(
+      [],
+      [
+        quiero('tue', '16:00:00', '20:00:00'),
+        quiero('tue', '11:00:00', '14:00:00'),
+        quiero('tue', '09:00:00', '12:00:00'),
+        quiero('wed', '12:00:00', '13:00:00'),
+      ],
+    )
+
+    expect(plan).toEqual([
+      { tipo: 'CREAR', franja: { day: 'tue', starts_time: '09:00:00', ends_time: '14:00:00' } },
+      { tipo: 'CREAR', franja: { day: 'tue', starts_time: '16:00:00', ends_time: '20:00:00' } },
+      { tipo: 'CREAR', franja: { day: 'wed', starts_time: '12:00:00', ends_time: '13:00:00' } },
+    ])
   })
 
   // El plan, aplicado por un Rappi que hace cumplir sus reglas: nunca encima, nunca deja la tienda (ni un día abierto) sin
