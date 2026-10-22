@@ -752,3 +752,100 @@ describe('S7: el panel', () => {
     }
   })
 })
+
+/**
+ * m2 (revisión de S7): una llave = UNA operación. El reenvío deja su llave en la entrega y el cambio de destino en la libreta;
+ * cada uno tiene que reconocer la llave del otro. En el POS son dos rutas; en el panel es UNA (con o sin destino), así que basta
+ * un formulario que conserve su llave para caer aquí.
+ */
+describe('m2: una llave sirve para una sola operación de entrega (reenviar o cambiar el destino)', () => {
+  type Cuerpo = Record<string, unknown>
+  const VIAS = [
+    [
+      'POS (dos rutas)',
+      {
+        reenviar: (giftCardId: string, body: Cuerpo) => llamar(ctrl.resend, { params: { giftCardId }, body }),
+        cambiar: (giftCardId: string, body: Cuerpo) => llamar(ctrl.changeDestination, { params: { giftCardId }, body }),
+      },
+    ],
+    [
+      'panel (una sola ruta)',
+      {
+        reenviar: (giftCardId: string, body: Cuerpo) => llamarAlPanel(panel.resend, { params: { giftCardId }, body }),
+        cambiar: (giftCardId: string, body: Cuerpo) => llamarAlPanel(panel.resend, { params: { giftCardId }, body }),
+      },
+    ],
+  ] as const
+  const A_CORREO = { deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com' }
+  const AL_MISMO_TELEFONO = { deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' }
+  const LLAVE_REUSADA = {
+    code: 'IDEMPOTENCY_KEY_REUSED',
+    message: 'Esta operación ya se registró con otros datos. Cierra el diálogo y vuelve a intentarlo.',
+  }
+
+  /** Lo que un 409 no puede mover: la fila entera (destino, código, intentos, llave), la libreta, la bitácora y la patada. */
+  async function foto(id: string) {
+    return {
+      fila: await fila(id),
+      libreta: await prisma.giftCardActivity.findMany({ where: { giftCardId: id }, orderBy: { createdAt: 'asc' }, take: 20 }),
+      bitacora: (logAction as jest.Mock).mock.calls.map(([a]) => a).filter(a => a.entityId === id),
+      renglones: await prisma.activityLog.count({ where: { venueId: negocio.venueId, entityId: id } }),
+      patadas: mockEntregar.mock.calls.length,
+    }
+  }
+
+  it.each(VIAS)(
+    '%s: reenviar con K y luego cambiar el destino con K ⇒ 409 IDEMPOTENCY_KEY_REUSED y nada cambia; el replay del reenvío sigue igual',
+    async (_via, via) => {
+      const [id] = (await venta()).giftCardIds
+      const K = unico('m2-reenvia')
+      const primero = await via.reenviar(id, { operationKey: K })
+      expect(primero.status).toBe(200)
+      expect(primero.data).toMatchObject({ repuesta: false })
+      const antes = await foto(id)
+
+      const cambio = await via.cambiar(id, { operationKey: K, ...A_CORREO })
+
+      expect(cambio.status).toBe(409)
+      expect(cambio.error).toMatchObject(LLAVE_REUSADA)
+      expect(await foto(id)).toEqual(antes)
+      expect(antes.libreta.filter(l => l.type === 'CODE_REPLACED')).toHaveLength(0)
+
+      // La repetición legítima (misma llave, misma operación, mismo destino) ⇒ la MISMA respuesta y nada se mueve; también
+      // cuando el «cambio» pide el destino que ya tiene (se porta como reenvío, S4).
+      for (const repetir of [
+        () => via.reenviar(id, { operationKey: K }),
+        () => via.cambiar(id, { operationKey: K, ...AL_MISMO_TELEFONO }),
+      ]) {
+        const otraVez = await repetir()
+        expect({ status: otraVez.status, data: otraVez.data }).toEqual({ status: 200, data: primero.data })
+        expect(await foto(id)).toEqual(antes)
+      }
+    },
+  )
+
+  it.each(VIAS)(
+    '%s: cambiar el destino con K y luego reenviar con K ⇒ 409 IDEMPOTENCY_KEY_REUSED y nada cambia; el replay del cambio sigue igual',
+    async (_via, via) => {
+      const [id] = (await venta()).giftCardIds
+      const K = unico('m2-cambia')
+      const primero = await via.cambiar(id, { operationKey: K, ...A_CORREO })
+      expect(primero.status).toBe(200)
+      expect(primero.data).toMatchObject({ repuesta: true })
+      const antes = await foto(id)
+      expect(antes.fila).toMatchObject({ deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com', deliveryOperationKey: K })
+      expect(antes.libreta.filter(l => l.type === 'CODE_REPLACED').map(l => l.operationKey)).toEqual([K])
+
+      const reenvio = await via.reenviar(id, { operationKey: K })
+
+      expect(reenvio.status).toBe(409)
+      expect(reenvio.error).toMatchObject(LLAVE_REUSADA)
+      expect(await foto(id)).toEqual(antes)
+
+      // La repetición legítima del cambio (misma llave, mismo destino) ⇒ la MISMA respuesta y nada se mueve.
+      const otraVez = await via.cambiar(id, { operationKey: K, ...A_CORREO })
+      expect({ status: otraVez.status, data: otraVez.data }).toEqual({ status: 200, data: primero.data })
+      expect(await foto(id)).toEqual(antes)
+    },
+  )
+})

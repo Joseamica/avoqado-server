@@ -214,6 +214,11 @@ describe('gift_card_lookup', () => {
   it('la descripción dice que trae la entrega, sin nombrar tablas ni campos internos', () => {
     const d = descripciones.get('gift_card_lookup')!
     expect(d).toContain('and how it was delivered (WhatsApp, email, printed or handed to the buyer; sent or failed, with the reason)')
+    // m1 (revisión de S7): la IA sólo conocía el PENDING de la TARJETA («sold but not paid yet»); una impresa o en mano tiene la
+    // ENTREGA en PENDING para siempre (S-8) y eso no dice nada de si está pagada.
+    expect(d).toContain(
+      'The delivery status is independent of the card status: delivery PENDING only means nothing has been sent yet, and a printed or handed-to-the-buyer card is never sent, so its delivery stays PENDING for good (there is nothing to send) — that does NOT mean the card is unpaid; only the card status says that.',
+    )
     expect(d).not.toMatch(/deliveryErrorCode|deliveredAt|deliveryStatus|GiftCard\b|recipientPhone/)
   })
 

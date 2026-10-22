@@ -293,6 +293,14 @@ function esElDestinoActual(actual: Destino, d: NuevoDestino): boolean {
   return actual.recipientEmail !== null && normalizeEmail(actual.recipientEmail) === normalizeEmail(d.recipientEmail)
 }
 
+/** La llave ya sirvió para OTRA operación (o para el mismo cambio con otro destino): el mismo 409 que la libreta. */
+const llaveReusada = () =>
+  new GiftCardError(
+    'IDEMPOTENCY_KEY_REUSED',
+    'Esta operación ya se registró con otros datos. Cierra el diálogo y vuelve a intentarlo.',
+    409,
+  )
+
 /** Reenviar = la entrega vuelve a empezar con su llave (S3 la toma: intentos en 0, sin espera y sin reclamo). */
 const reinicioDeEntrega = (operationKey: string) => ({
   deliveryStatus: 'PENDING' as const,
@@ -334,6 +342,13 @@ export async function reenviarTarjeta(
   return prisma.$transaction(async tx => {
     const card = await bloquearVigente(tx, venueId, giftCardId, new Date())
     const f = await releerEntrega(tx, giftCardId)
+    // m2 (revisión de S7): una llave = una operación. La de un cambio de destino (o de cualquier operación de la libreta) no
+    // sirve para reenviar. Bajo el candado del sobre: el cambio escribe su renglón con ese mismo candado tomado.
+    const deLaLibreta = await tx.giftCardActivity.findUnique({
+      where: { venueId_operationKey: { venueId, operationKey: p.operationKey } },
+      select: { id: true },
+    })
+    if (deLaLibreta) throw llaveReusada()
     if (p.destino && !esElDestinoActual({ ...card, recipientEmail: f.recipientEmail }, p.destino)) {
       throw new BadRequestError('Para mandarla a otro teléfono o correo usa «Cambiar destino».', 'GIFT_CARD_USE_CHANGE_DESTINATION')
     }
@@ -368,11 +383,7 @@ export async function cambiarDestinoDeTarjeta(
     })
     if (previa) {
       if (previa.giftCardId !== giftCardId || previa.type !== 'CODE_REPLACED' || !esElDestinoActual(actual, p.destino)) {
-        throw new GiftCardError(
-          'IDEMPOTENCY_KEY_REUSED',
-          'Esta operación ya se registró con otros datos. Cierra el diálogo y vuelve a intentarlo.',
-          409,
-        )
+        throw llaveReusada()
       }
       return {
         giftCardId,
@@ -384,7 +395,11 @@ export async function cambiarDestinoDeTarjeta(
         destinoNuevo: null,
       }
     }
-    if (esElDestinoActual(actual, p.destino)) return reenviarEnTx(tx, card, f, p.operationKey)
+    // m2 (revisión de S7): la llave de un reenvío queda en la entrega, no en la libreta. Hacia el MISMO destino es su repetición
+    // (abajo, como reenvío); hacia otro, la llave ya se usó. Leída bajo el mismo candado que la escribe (`reinicioDeEntrega`).
+    const esElMismo = esElDestinoActual(actual, p.destino)
+    if (f.deliveryOperationKey === p.operationKey && !esElMismo) throw llaveReusada()
+    if (esElMismo) return reenviarEnTx(tx, card, f, p.operationKey)
 
     // La libreta rechaza con los textos de la 1a una tarjeta usada o guardada en la cartera de un cliente.
     const { nuevoCodigo } = await operarSobreDeGerenteEnTx(tx, {
