@@ -65,7 +65,14 @@ function busquedaDe(
   }
 }
 
-/** El filtro del sobre de la prueba (la consulta de saldo lo usa con su propio `select`); `null` si no nombra ninguno. */
+/**
+ * El filtro del sobre de la prueba (la consulta de saldo lo usa con su propio `select`); `null` si no nombra ninguno.
+ * 🔴 Con PHONE_OTP este filtro sólo NOMBRA el sobre (`giftCardId`): NO valida la prueba. La prueba de teléfono se valida aparte:
+ * `resolverPrueba` lee su firma, venue y aparato, y `vigente` juzga su vigencia y su teléfono bajo el candado del sobre (Q91). Hoy
+ * sólo lo usa así `sobreDeLaPrueba`, para la salida de repetición por llave: lee sólo el `id` del sobre para compararlo con el cobro
+ * ya hecho con esa llave (ni saldo ni datos); por eso esta rama no lanza. Nunca lo uses con PHONE_OTP para leer o mostrar un sobre: sería
+ * leerlo sin prueba. Para eso está `resolverPrueba`.
+ */
 export function filtroDeLaPrueba(venueId: string, prueba: PruebaDePosesion): Prisma.GiftCardWhereInput | null {
   return busquedaDe(venueId, prueba)?.where ?? null
 }

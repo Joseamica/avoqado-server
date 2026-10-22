@@ -678,6 +678,101 @@ describe('teléfono + código (1b S5) · Postgres real', () => {
       }
     },
   )
+
+  it('🔴 m1: dos «pedir código» a la vez al mismo teléfono ⇒ uno responde y el otro 429; un solo reto vivo y un solo WhatsApp', async () => {
+    const diez = telefonoNuevo()
+    await tarjeta(300, { phone: diez })
+    // Un reto viejo de la caja, SIN consumir y de hace 2 h (no cuenta para los límites), que T sostiene: cada pedido se detiene al
+    // invalidarlo. Sin candado, los dos ya contaron cero retos recientes y, al soltar, cada uno crea el suyo y manda su WhatsApp
+    // (y el primero que llega puede no servir). Con el candado por (venue, teléfono), el segundo espera al primero ANTES de
+    // contar y ve su reto.
+    await sembrarRetos(diez, [2 * 3600], PROPOSITO_TELEFONO_DE_TARJETA)
+    const [viejo] = await retosDe(e164(diez))
+
+    let avisar!: (pid: number) => void
+    const pid = new Promise<number>(resolve => (avisar = resolve))
+    let soltar!: () => void
+    const puedeSoltar = new Promise<void>(resolve => (soltar = resolve))
+    const T = prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT "id" FROM "OtpChallenge" WHERE "id" = ${viejo.id} FOR UPDATE`
+      avisar(await pidDe(tx))
+      await puedeSoltar
+    }, PRESUPUESTO)
+    T.catch(() => undefined)
+    const enVuelo: Promise<unknown>[] = [T]
+    try {
+      const pidT = await pid
+      const uno = pedirCodigoDeTelefono(venueId, { phone: diez, deviceId: APARATO })
+      enVuelo.push(uno.catch(() => undefined))
+      const dos = pedirCodigoDeTelefono(venueId, { phone: diez, deviceId: 'otra-caja' })
+      enVuelo.push(dos.catch(() => undefined))
+      await esperarAQueEsperen(pidT, 2)
+      soltar()
+      const r = await Promise.allSettled([uno, dos])
+
+      expect(r.filter((x): x is PromiseFulfilledResult<{ enviado: true }> => x.status === 'fulfilled').map(x => x.value)).toEqual([
+        { enviado: true },
+      ])
+      const frenados = r.filter((x): x is PromiseRejectedResult => x.status === 'rejected').map(x => x.reason)
+      expect(frenados).toHaveLength(1)
+      expect(frenados[0]).toMatchObject({
+        code: 'GIFT_CARD_PHONE_RATE_LIMITED',
+        statusCode: 429,
+        message: 'Ya pedimos varios códigos para ese teléfono. Espera unos minutos.',
+      })
+      expect(frenados[0].details.retryAfter).toBeGreaterThan(0)
+      expect(frenados[0].details.retryAfter).toBeLessThanOrEqual(30)
+
+      // Un solo reto vivo, un solo WhatsApp, y el código que llegó es el que sirve.
+      const vivos = (await retosDe(e164(diez))).filter(x => x.consumedAt === null)
+      expect(vivos).toHaveLength(1)
+      expect(mockEnviarCodigo).toHaveBeenCalledTimes(1)
+      const codigo = codigoEnviadoA(e164(diez))
+      expect(vivos[0].codeHash).toBe(hashOtpCode(codigo))
+      await expect(verificarCodigoDeTelefono(venueId, { phone: diez, code: codigo, deviceId: APARATO })).resolves.toMatchObject({
+        proofToken: expect.any(String),
+      })
+    } finally {
+      soltar()
+      await Promise.allSettled(enVuelo)
+    }
+  })
+
+  it.each(['faltan las llaves', 'la lista de tarjetas no contesta'] as const)(
+    '🔴 m2: si falla lo que va antes de entregar la prueba (%s), el código bueno NO se quema: el mismo sirve al reintentar',
+    async caso => {
+      const diez = telefonoNuevo()
+      await tarjeta(300, { phone: diez })
+      await pedirCodigoDeTelefono(venueId, { phone: diez, deviceId: APARATO })
+      const codigo = codigoEnviadoA(e164(diez))
+      const verificar = () => verificarCodigoDeTelefono(venueId, { phone: diez, code: codigo, deviceId: APARATO })
+
+      if (caso === 'faltan las llaves') {
+        const llave = process.env.GIFT_CARD_HMAC_KEY
+        delete process.env.GIFT_CARD_HMAC_KEY
+        try {
+          await expect(verificar()).rejects.toMatchObject({ code: 'GIFT_CARD_KEYS_MISSING' })
+        } finally {
+          process.env.GIFT_CARD_HMAC_KEY = llave
+        }
+      } else {
+        // La única consulta en crudo de `verify` es la lista de tarjetas del teléfono.
+        const espia = jest.spyOn(prisma, '$queryRaw').mockRejectedValueOnce(new Error('la base no contestó'))
+        try {
+          await expect(verificar()).rejects.toThrow('la base no contestó')
+        } finally {
+          espia.mockRestore()
+        }
+      }
+      expect((await retosDe(e164(diez)))[0].consumedAt).toBeNull()
+
+      // Ya con todo bien, el MISMO código entrega la prueba y la lista (y ahora sí consume el reto).
+      const r = await verificar()
+      expect(r.proofToken).toEqual(expect.any(String))
+      expect(r.cards).toHaveLength(1)
+      expect((await retosDe(e164(diez)))[0].consumedAt).not.toBeNull()
+    },
+  )
 })
 
 /**

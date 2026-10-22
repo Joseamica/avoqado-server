@@ -20,6 +20,7 @@ import { BadRequestError } from '@/errors/AppError'
 import { generateOtpCode, hashOtpCode } from '@/lib/otp'
 import { phoneLast10 } from '@/utils/phone'
 import { sendOtpWhatsApp } from '@/services/whatsapp.service'
+import { assertGiftCardKeys } from './giftCardCode'
 import { enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
 import { porQueNoSirve, type GiftCardLookupResult } from './giftCardLookup.service'
@@ -108,32 +109,39 @@ export async function pedirCodigoDeTelefono(
   p: { phone: string; deviceId: string; ip?: string | null },
 ): Promise<{ enviado: true }> {
   const destination = telefonoOError(p.phone)
-  const ahora = Date.now()
   const delReto = { venueId, destination, channel: CANAL, purpose: PROPOSITO_TELEFONO_DE_TARJETA }
 
-  // ponytail: contar y crear no van bajo candado (igual que el inicio de sesión): dos pedidos simultáneos pasan los dos; los topes
-  // por aparato e IP de la ruta acotan la ráfaga. Si hiciera falta, `pg_advisory_xact_lock` por (venue, teléfono, propósito).
-  const recientes = await prisma.otpChallenge.findMany({
-    where: { ...delReto, createdAt: { gt: new Date(ahora - HORA_MS) } },
-    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-    select: { createdAt: true },
-    take: CODIGOS_POR_HORA,
-  })
-  const esperaMs = Math.max(
-    recientes.length > 0 ? recientes[0].createdAt.getTime() + ENTRE_CODIGOS_MS - ahora : 0,
-    recientes.length >= CODIGOS_POR_HORA ? recientes[CODIGOS_POR_HORA - 1].createdAt.getTime() + HORA_MS - ahora : 0,
-  )
-  if (esperaMs > 0) {
-    throw new GiftCardError('GIFT_CARD_PHONE_RATE_LIMITED', 'Ya pedimos varios códigos para ese teléfono. Espera unos minutos.', 429, {
-      retryAfter: Math.ceil(esperaMs / 1000),
+  // m1 (revisión de S5): contar, invalidar y crear van juntos bajo un candado por (venue, teléfono). De dos pedidos simultáneos
+  // (doble toque o reintento de red), el segundo espera al primero, ve su reto y cae en el 429 de 30 s, en vez de mandar otro
+  // WhatsApp cuyo código deja sin efecto el primero. Lo que depende de si el teléfono tiene tarjetas (la lista y el envío) va
+  // FUERA y después: la transacción hace lo mismo con o sin tarjetas, y el WhatsApp sólo sale con el reto ya guardado.
+  const { code, ahora } = await prisma.$transaction(async tx => {
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext('gift-card-phone:' || ${venueId} || ':' || ${destination}))::text`
+    // La hora, con el candado puesto: esperar detrás de otro pedido no alarga el `retryAfter`.
+    const ahora = Date.now()
+    const recientes = await tx.otpChallenge.findMany({
+      where: { ...delReto, createdAt: { gt: new Date(ahora - HORA_MS) } },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      select: { createdAt: true },
+      take: CODIGOS_POR_HORA,
     })
-  }
+    const esperaMs = Math.max(
+      recientes.length > 0 ? recientes[0].createdAt.getTime() + ENTRE_CODIGOS_MS - ahora : 0,
+      recientes.length >= CODIGOS_POR_HORA ? recientes[CODIGOS_POR_HORA - 1].createdAt.getTime() + HORA_MS - ahora : 0,
+    )
+    if (esperaMs > 0) {
+      throw new GiftCardError('GIFT_CARD_PHONE_RATE_LIMITED', 'Ya pedimos varios códigos para ese teléfono. Espera unos minutos.', 429, {
+        retryAfter: Math.ceil(esperaMs / 1000),
+      })
+    }
 
-  // Q5: un código nuevo deja sin efecto el anterior DE ESTE PROPÓSITO (el del inicio de sesión del cliente sigue vivo).
-  await prisma.otpChallenge.updateMany({ where: { ...delReto, consumedAt: null }, data: { consumedAt: new Date() } })
-  const code = generateOtpCode()
-  await prisma.otpChallenge.create({
-    data: { ...delReto, codeHash: hashOtpCode(code), expiresAt: new Date(ahora + VIDA_DEL_CODIGO_MS), ip: p.ip ?? null },
+    // Q5: un código nuevo deja sin efecto el anterior DE ESTE PROPÓSITO (el del inicio de sesión del cliente sigue vivo).
+    await tx.otpChallenge.updateMany({ where: { ...delReto, consumedAt: null }, data: { consumedAt: new Date() } })
+    const code = generateOtpCode()
+    await tx.otpChallenge.create({
+      data: { ...delReto, codeHash: hashOtpCode(code), expiresAt: new Date(ahora + VIDA_DEL_CODIGO_MS), ip: p.ip ?? null },
+    })
+    return { code, ahora }
   })
 
   const { cards } = await tarjetasDelTelefono(venueId, destination, new Date(ahora))
@@ -163,6 +171,8 @@ export async function verificarCodigoDeTelefono(
   cards: GiftCardLookupResult['cards']
   hayMas?: boolean
 }> {
+  // m2 (revisión de S5): sin llaves no se toca el reto (ni intento ni consumo); el mismo código sirve cuando vuelvan.
+  assertGiftCardKeys()
   const destination = telefonoOError(p.phone)
   const reto = await prisma.otpChallenge.findFirst({
     where: { venueId, destination, channel: CANAL, purpose: PROPOSITO_TELEFONO_DE_TARJETA, consumedAt: null },
@@ -180,13 +190,17 @@ export async function verificarCodigoDeTelefono(
       })
     ).count === 1
   if (!apartado || reto.codeHash !== hashOtpCode(String(p.code ?? ''))) throw codigoInvalido()
-  // Copia del CAS de consumo de `verifyOtp`: de dos verificaciones simultáneas con el código bueno, pasa exactamente una.
-  const consumido = await prisma.otpChallenge.updateMany({ where: { id: reto.id, consumedAt: null }, data: { consumedAt: new Date() } })
-  if (consumido.count !== 1) throw codigoInvalido()
 
+  // m2 (revisión de S5): la lista y la prueba se arman ANTES de consumir el reto. Si algo de eso falla (la base, la firma), el reto
+  // sigue sin consumir y el mismo código sirve al reintentar (en `verifyOtp` el consumo va dentro de la transacción de lo que
+  // sigue, con el mismo efecto).
   const ahora = new Date()
   const { cards, hayMas } = await tarjetasDelTelefono(venueId, destination, ahora)
   const prueba = firmarPruebaDeTelefono({ venueId, phone: destination, deviceId: p.deviceId, ahora })
+  // Copia del CAS de consumo de `verifyOtp`: de dos verificaciones simultáneas con el código bueno, pasa exactamente una. La que
+  // pierde descarta lo firmado sin dejarlo en ningún lado (ni log ni error) y responde el 409 de siempre.
+  const consumido = await prisma.otpChallenge.updateMany({ where: { id: reto.id, consumedAt: null }, data: { consumedAt: new Date() } })
+  if (consumido.count !== 1) throw codigoInvalido()
   return {
     proofToken: prueba.proofToken,
     expiresAt: prueba.expiresAt.toISOString(),

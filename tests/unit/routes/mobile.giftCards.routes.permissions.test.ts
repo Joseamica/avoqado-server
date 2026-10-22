@@ -544,6 +544,37 @@ describe('S5: teléfono + código', () => {
     })
   })
 
+  /** 33 caracteres que el servicio SÍ entendería (`+525512345678` con espacios en medio): el tope de la orilla es del esquema. */
+  const TREINTA_Y_TRES = `+52${' '.repeat(18)}55 1234 5678`
+  it.each([
+    ['request', 'ausente', PEDIR, {}],
+    ['request', 'null', PEDIR, { phone: null }],
+    ['request', 'de 33 caracteres', PEDIR, { phone: TREINTA_Y_TRES }],
+    ['verify', 'ausente', VERIFICAR, { code: '123456' }],
+    ['verify', 'null', VERIFICAR, { phone: null, code: '123456' }],
+    ['verify', 'de 33 caracteres', VERIFICAR, { phone: TREINTA_Y_TRES, code: '123456' }],
+  ])(
+    'm3: phone/%s con el teléfono %s ⇒ el MISMO 400 «El teléfono no es válido.» con GIFT_CARD_PHONE_INVALID',
+    async (que, _caso, ruta, body) => {
+      expect(TREINTA_Y_TRES).toHaveLength(33)
+      const e = await correr(ruta, que === 'request' ? ctrl.phoneRequest : ctrl.phoneVerify, body, 'caja-1')
+      expect({ status: e.statusCode, code: e.code, message: e.message }).toEqual({
+        status: 400,
+        code: 'GIFT_CARD_PHONE_INVALID',
+        message: 'El teléfono no es válido.',
+      })
+      expect(prismaMock.otpChallenge.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.otpChallenge.findFirst).not.toHaveBeenCalled()
+    },
+  )
+
+  it('m3: con 32 caracteres el teléfono pasa el esquema (el tope sigue siendo 32): sin X-Device-Id responde el 400 del aparato', async () => {
+    const treintaYDos = `+52${' '.repeat(17)}55 1234 5678`
+    expect(treintaYDos).toHaveLength(32)
+    const e = await correr(PEDIR, ctrl.phoneRequest, { phone: treintaYDos })
+    expect({ status: e.statusCode, code: e.code }).toEqual({ status: 400, code: 'GIFT_CARD_DEVICE_ID_REQUIRED' })
+  })
+
   it('phone/verify con un código que no son 6 números ⇒ 400 «El código son 6 números»', async () => {
     const e = await correr(VERIFICAR, ctrl.phoneVerify, { phone: '+525512345678', code: '12a456' }, 'caja-1')
     expect(e.statusCode).toBe(400)

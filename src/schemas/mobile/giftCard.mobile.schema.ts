@@ -241,11 +241,15 @@ export const revealSchema = z.object({
 
 // ─── 1b S5: teléfono + código (S-2) ───
 
-/** El teléfono como lo escriba la caja; LA forma (Q25) y su 400 de C5 («El teléfono no es válido.») son del servicio. */
-const telefonoDelCliente = z
-  .string({ required_error: 'Falta el teléfono', invalid_type_error: 'El teléfono debe ser texto' })
-  .trim()
-  .max(32, 'El teléfono es demasiado largo')
+/**
+ * El teléfono como lo escriba la caja; LA forma (Q25) es del servicio. Ausente, `null`, que no sea texto o de más de 32 caracteres
+ * (sin los espacios de las orillas) ⇒ el MISMO 400 de C5 que da el servicio (m3 de S5): las apps deciden por `code`, y
+ * `validateRequest` sólo toma el `code` de un issue `custom` (como `CAMPO_NO_ACEPTADO`).
+ */
+const telefonoDelCliente = z.custom<string>(v => typeof v === 'string' && v.trim().length <= 32, {
+  message: 'El teléfono no es válido.',
+  params: { code: 'GIFT_CARD_PHONE_INVALID' },
+})
 
 export const phoneRequestSchema = z.object({
   params: venueParams,
