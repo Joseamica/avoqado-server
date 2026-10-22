@@ -333,6 +333,55 @@ describe('deliveryChannelLink.service', () => {
       })
     })
 
+    // ── Tarea 15: el estado del menú en revisión lo escriben SÓLO el sincronizador y el veredicto ─────────
+    // Borrado desde el panel, el sincronizador republicaba un menú que el proveedor todavía revisaba (o uno que ya
+    // rechazó, cada 5 min); sembrado, un administrador bloqueaba la publicación de su menú para siempre.
+    describe('🔴 las llaves del sistema (menú en revisión, rechazo, problemas, horario) no se tocan desde el panel', () => {
+      const sistema = {
+        rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1' },
+        menuEnRevision: { huella: 'h1', publicadaEn: '2026-10-22T10:00:00.000Z' },
+        menuRechazado: { huella: 'h0', en: '2026-10-22T09:00:00.000Z' },
+        menuProblemas: { en: '2026-10-22T10:00:00.000Z', problemas: [{ sku: 'A', problema: 'p' }] },
+        horarioPublicado: { huella: 'hh', en: '2026-10-22T08:00:00.000Z' },
+      }
+      beforeEach(() => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'vieja', ...sistema } }])
+        ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+        ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue(baseLink)
+      })
+      const escrito = () => (prisma.deliveryChannelLink.updateMany as jest.Mock).mock.calls[0][0].data.config
+
+      it('🔴 config: null del panel no borra el menú en revisión ni el rechazado', async () => {
+        await updateChannelLink('venue1', 'link1', { config: null })
+        expect(escrito()).toEqual(sistema)
+      })
+
+      it('mandarlas (en null o con otro valor) se ignora: quedan las de la base, y el resto se mezcla', async () => {
+        await updateChannelLink('venue1', 'link1', {
+          config: { note: 'nueva', menuEnRevision: null, menuRechazado: { huella: 'x' }, menuProblemas: null, horarioPublicado: null },
+        })
+        expect(escrito()).toEqual({ note: 'nueva', ...sistema })
+      })
+
+      it('sin ellas en la base, un PATCH tampoco puede sembrarlas', async () => {
+        ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { note: 'vieja' } }])
+        await updateChannelLink('venue1', 'link1', {
+          config: { menuEnRevision: { huella: 'inventada', publicadaEn: '2099-01-01T00:00:00.000Z' }, menuRechazado: { huella: 'h' } },
+        })
+        expect(escrito()).toEqual({ note: 'vieja' })
+      })
+
+      it('un POST tampoco las siembra', async () => {
+        ;(prisma.deliveryChannelLink.create as jest.Mock).mockResolvedValue({ id: 'newlink1' })
+        await createChannelLink('venue1', {
+          provider: DeliveryProvider.RAPPI,
+          externalLocationId: 'loc1',
+          config: { note: 'alta', menuEnRevision: { huella: 'inventada' }, horarioPublicado: { huella: 'x' } },
+        })
+        expect((prisma.deliveryChannelLink.create as jest.Mock).mock.calls[0][0].data.config).toEqual({ note: 'alta' })
+      })
+    })
+
     // ── Un horario inválido guardado en silencio es PEOR que rechazarlo ────────────────
     // `esHorarioValido` ya rechaza la basura al PUBLICAR, pero cae al horario estimado sin
     // decir nada. El comercio ve su horario guardado en la pantalla y Uber recibe otro.

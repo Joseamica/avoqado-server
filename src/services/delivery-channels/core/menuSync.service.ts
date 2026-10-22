@@ -18,6 +18,9 @@
  *     en silencio.
  *   · La huella se AUTO-CORRIGE: si una publicación falló, o el proceso murió a media
  *     publicación, o alguien cambió algo por fuera, la siguiente pasada lo detecta sola.
+ *     ⚠️ Salvo con un proveedor que REVISA el menú (`menuConRevision`): ahí un menú que se mandó
+ *     y no recibe veredicto (o un proceso que murió entre reservar la pendiente y el POST) se
+ *     queda «en revisión» y avisa al pasar el plazo, sin republicarse solo (ver `syncChannelMenu`).
  *   · Es idempotente por construcción: sin cambios, no publica nada.
  */
 import { createHash } from 'node:crypto'
@@ -31,9 +34,22 @@ import { adapterFor, hasAdapter } from './adapterRegistry'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
 import { resolveDeliveryHours } from './deliveryHours.service'
+import { escribirLlavesDelSistema, leerMenuEnRevision, leerMenuRechazado, mismaPublicacion, type MenuEnRevision } from './llavesDelSistema'
 import { buildMenuSnapshot } from './menuSnapshot.service'
+import { DeliveryWriteNotSentError, type ProblemaDeMenu, type PublicacionDeMenu } from './types'
 
-export type MenuSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'FAILED'
+/**
+ * `IN_REVIEW`: hay un menú en revisión (esperando veredicto del proveedor) y no se publica nada encima.
+ * `REJECTED_UNCHANGED`: el menú es el mismo que el proveedor ya rechazó; se vuelve a mandar cuando cambie.
+ */
+export type MenuSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'FAILED' | 'IN_REVIEW' | 'REJECTED_UNCHANGED'
+
+/**
+ * Cuánto se espera el veredicto de un menú en revisión antes de avisar con 🚨. Pasado el plazo NO se sella ni se republica
+ * (diseño §4.5.1: la recuperación sin aviso nunca sella): sólo se avisa, UNA vez, y el menú sigue «en revisión».
+ * 6 h: el sandbox no mandó ningún veredicto en ~5 h (M8, 22-oct), así que el plazo real no está medido.
+ */
+export const PLAZO_SIN_VEREDICTO_MS = 6 * 60 * 60 * 1000
 
 export interface MenuSyncResult {
   outcome: MenuSyncOutcome
@@ -58,14 +74,31 @@ function huella(payload: unknown): string {
  *   cuando Uber PIDE el menú, se lo damos aunque creamos que ya lo tiene — si lo pide es
  *   porque algo se le perdió, y discutirle sería confiar en nuestro registro por encima del
  *   suyo justo en el caso donde el nuestro está mal.
+ *
+ * 🔴 MENÚ EN REVISIÓN (`adapter.menuConRevision`): el 2xx del POST sólo dice «lo recibí, lo voy a revisar»; lo publicado lo
+ * dice un veredicto aparte. Entonces:
+ *   1. con un menú en revisión no se publica NADA encima, ni con `force`; pasado el plazo se avisa UNA vez y se sigue igual;
+ *   2. ANTES del POST la huella queda reservada como pendiente (con su hora), decidido con la fila BLOQUEADA: así un veredicto
+ *      que llega mientras el POST viaja la encuentra, y dos pasadas encimadas no mandan dos veces (ni lo ya rechazado o aprobado);
+ *   3. si se SABE que no salió o que el proveedor dijo que no (4xx, `status: 0` sin red, `DeliveryWriteNotSentError`), la
+ *      pendiente se suelta (si sigue siendo ésa); con 400/422 la huella queda como rechazada y no se vuelve a mandar igual;
+ *   4. si NO se sabe (timeout, red, 5xx), la pendiente se queda: la resuelve el veredicto, o avisa al pasar el plazo;
+ *   5. el 2xx no escribe nada más que los problemas: lo sella (o lo limpia) el veredicto.
+ * Sin `menuConRevision` todo es como siempre: el 2xx sella la huella.
  */
 export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?: boolean } = {}): Promise<MenuSyncResult> {
   if (!hasAdapter(link.provider)) return { outcome: 'NO_PUBLISHER', linkId: link.id }
 
   const adapter = adapterFor(link.provider)
   if (typeof adapter.publishMenu !== 'function') return { outcome: 'NO_PUBLISHER', linkId: link.id }
+  const conRevision = adapter.menuConRevision === true
 
   try {
+    // 1. 🔴 Con un menú en revisión no se publica NADA encima, ni con `force`: el veredicto que llegue sería del menú
+    // anterior y sellaría el nuevo (o lo tiraría). Es la salida barata: ni snapshot ni red.
+    const enRevision = leerMenuEnRevision(link.config)
+    if (enRevision) return await seguirEnRevision(link, enRevision)
+
     const snapshot = await buildMenuSnapshot(link.venueId)
 
     // 🔴 El horario va SIEMPRE, y entra en la huella: si el dueño cambia sus horas, el menú
@@ -84,35 +117,105 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
     const payload = adapter.buildMenuPayload ? adapter.buildMenuPayload(snapshot, { availability, precios }) : snapshot
     const actual = huella(payload)
 
+    // 2. Igual a lo publicado: nada que hacer (salvo `force`, que es justo para republicar lo que creemos que ya tienen).
     if (!opts.force && actual === link.lastMenuHash) return { outcome: 'UNCHANGED', linkId: link.id }
+    // 3. Igual a lo que el proveedor ya rechazó: mandarlo otra vez daría el mismo rechazo (y cada uno cuenta contra su tasa
+    // de éxito). Sale en cuanto el menú cambie.
+    if (!opts.force && actual === leerMenuRechazado(link.config)?.huella) return { outcome: 'REJECTED_UNCHANGED', linkId: link.id }
 
-    const r = await adapter.publishMenu(snapshot, link.externalLocationId, { availability, precios })
-    if (!r.ok) {
-      // 🔴 NO se guarda la huella si falló: guardarla haría que la siguiente pasada creyera
-      // que Uber ya lo tiene, y el menú se quedaría viejo PARA SIEMPRE sin volver a intentar.
-      logger.error('🚨 [MenuSync] el proveedor rechazó el menú — queda desactualizado', {
+    // 4. Con revisión, la pendiente se reserva ANTES del POST, decidiendo con la fila bloqueada (la copia puede ser vieja).
+    let reserva: MenuEnRevision | null = null
+    if (conRevision) {
+      const reservada = await reservarRevision(link.id, actual, opts.force === true)
+      if (!('huella' in reservada)) return { outcome: reservada.outcome, linkId: link.id }
+      reserva = reservada
+    }
+
+    let r: PublicacionDeMenu
+    try {
+      r = await adapter.publishMenu(snapshot, link.externalLocationId, { availability, precios })
+    } catch (error) {
+      if (!reserva) throw error
+      const msg = error instanceof Error ? error.message : String(error)
+      if (error instanceof DeliveryWriteNotSentError) {
+        // Se SABE que no salió (candado, token): ningún veredicto va a llegar. Se suelta y la siguiente pasada reintenta.
+        await soltarRevision(link.id, reserva, { rechazada: false })
+        logger.warn('📋 [MenuSync] el menú NO salió hacia el proveedor (falló antes de la red): se reintenta en la siguiente pasada', {
+          linkId: link.id,
+          venueId: link.venueId,
+          provider: link.provider,
+          reason: error.reason,
+          error: msg,
+        })
+      } else {
+        // 🔴 No se sabe si llegó (timeout, red a medias): la pendiente se QUEDA. Limpiarla tiraba un veredicto genuino que
+        // llegaba después (Codex plan r2 #1). Si el veredicto no llega, se avisa al pasar el plazo.
+        logger.error('🚨 [MenuSync] el POST del menú no contestó: queda EN REVISIÓN hasta el veredicto (o el aviso del plazo)', {
+          linkId: link.id,
+          venueId: link.venueId,
+          provider: link.provider,
+          error: msg,
+        })
+      }
+      return { outcome: 'FAILED', linkId: link.id, error: msg }
+    }
+
+    const items = (payload as { items?: unknown[] })?.items?.length
+
+    if (r.ok) {
+      if (reserva) {
+        // 5. 🔴 El 2xx NO sella y no toca la pendiente: «en revisión» no es «publicado», y si el veredicto llegó mientras el
+        // POST viajaba, ya la selló o la limpió. Sólo se guardan los problemas.
+        await guardarProblemas(link, r.problemas)
+        logger.info('📋 [MenuSync] menú enviado al proveedor: queda EN REVISIÓN hasta su veredicto', {
+          linkId: link.id,
+          venueId: link.venueId,
+          provider: link.provider,
+          items,
+        })
+        return { outcome: 'PUBLISHED', linkId: link.id, items }
+      }
+
+      // 6. Sin revisión, el 2xx ES «publicado»: se sella en el acto, como siempre.
+      await prisma.deliveryChannelLink.update({
+        where: { id: link.id },
+        data: { lastMenuHash: actual, lastMenuSyncAt: new Date() },
+      })
+      await guardarProblemas(link, r.problemas)
+      logger.info('📋 [MenuSync] menú actualizado en el proveedor', {
+        linkId: link.id,
+        venueId: link.venueId,
+        provider: link.provider,
+        items,
+      })
+      return { outcome: 'PUBLISHED', linkId: link.id, items }
+    }
+
+    // 🔴 NO se guarda la huella si falló: guardarla haría que la siguiente pasada creyera que el proveedor ya lo tiene, y
+    // el menú se quedaría viejo PARA SIEMPRE sin volver a intentar.
+    const sabemosQueNo = r.status === 0 || (r.status >= 400 && r.status < 500)
+    if (reserva && sabemosQueNo) {
+      // Un 4xx (el proveedor dijo que no) o `status: 0` (el adaptador no salió a la red, p. ej. el menú quedó vacío tras
+      // filtrar; Codex plan r3 #1): ningún veredicto va a llegar. Con 400/422 (validación), la huella queda rechazada.
+      await soltarRevision(link.id, reserva, { rechazada: r.status === 400 || r.status === 422, problemas: r.problemas })
+    } else {
+      // Sin revisión, o con un 5xx en revisión (no se sabe si lo procesó: la pendiente se queda).
+      await guardarProblemas(link, r.problemas)
+    }
+    logger.error(
+      reserva && !sabemosQueNo
+        ? '🚨 [MenuSync] el proveedor contestó con error al menú: queda EN REVISIÓN hasta el veredicto (o el aviso del plazo)'
+        : '🚨 [MenuSync] el proveedor rechazó el menú — queda desactualizado',
+      {
         linkId: link.id,
         venueId: link.venueId,
         provider: link.provider,
         status: r.status,
         cuerpo: r.raw.slice(0, 300),
-      })
-      return { outcome: 'FAILED', linkId: link.id, error: `HTTP ${r.status}` }
-    }
-
-    await prisma.deliveryChannelLink.update({
-      where: { id: link.id },
-      data: { lastMenuHash: actual, lastMenuSyncAt: new Date() },
-    })
-
-    const items = (payload as { items?: unknown[] })?.items?.length
-    logger.info('📋 [MenuSync] menú actualizado en el proveedor', {
-      linkId: link.id,
-      venueId: link.venueId,
-      provider: link.provider,
-      items,
-    })
-    return { outcome: 'PUBLISHED', linkId: link.id, items }
+        problemas: r.problemas?.slice(0, 10),
+      },
+    )
+    return { outcome: 'FAILED', linkId: link.id, error: `HTTP ${r.status}` }
   } catch (error) {
     logger.error('🚨 [MenuSync] falló la sincronización del menú', {
       linkId: link.id,
@@ -120,6 +223,101 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
       error: error instanceof Error ? error.message : String(error),
     })
     return { outcome: 'FAILED', linkId: link.id, error: error instanceof Error ? error.message : String(error) }
+  }
+}
+
+/**
+ * Un menú en revisión: no se publica nada encima. Pasado el plazo sin veredicto, avisa con 🚨 UNA vez (lo anota en la
+ * pendiente con la fila bloqueada: dos pasadas encimadas no avisan dos veces) y sigue igual. 🔴 Nunca sella ni republica: un
+ * menú que no recibe veredicto se queda «en revisión» hasta que llegue o alguien lo destrabe (diseño §4.5.1).
+ */
+async function seguirEnRevision(link: DeliveryChannelLink, enRevision: MenuEnRevision): Promise<MenuSyncResult> {
+  const edadMs = Date.now() - Date.parse(enRevision.publicadaEn)
+  // Una hora ilegible cuenta como vencida: se avisa en vez de esperar para siempre.
+  const vencida = Number.isNaN(edadMs) || edadMs > PLAZO_SIN_VEREDICTO_MS
+  if (enRevision.sinVeredictoAvisadoEn || !vencida) return { outcome: 'IN_REVIEW', linkId: link.id }
+
+  const avisadoEn = new Date().toISOString()
+  const avise = await escribirLlavesDelSistema(link.id, fila => {
+    const vigente = leerMenuEnRevision(fila.config)
+    if (!vigente || !mismaPublicacion(vigente, enRevision) || vigente.sinVeredictoAvisadoEn) return null
+    return { menuEnRevision: { ...vigente, sinVeredictoAvisadoEn: avisadoEn } }
+  })
+  if (avise) {
+    logger.error('🚨 [MenuSync] el proveedor no ha dado veredicto del menú en el plazo: sigue EN REVISIÓN, sin sellar ni republicar', {
+      linkId: link.id,
+      venueId: link.venueId,
+      provider: link.provider,
+      publicadaEn: enRevision.publicadaEn,
+      horasEsperando: Number.isNaN(edadMs) ? null : Math.floor(edadMs / 3_600_000),
+      queHacer: 'Revisar en el portal del proveedor si el menú quedó aprobado o rechazado, y destrabarlo a mano.',
+    })
+  }
+  return { outcome: 'IN_REVIEW', linkId: link.id }
+}
+
+/**
+ * Reserva la pendiente ANTES del POST. 🔴 Decide con lo leído BAJO CANDADO, no con la copia del vínculo, que puede ser vieja
+ * si dos pasadas se enciman (Codex plan r3 #2): sólo reserva si no hay otra pendiente y, salvo `force`, si la huella no es la
+ * `lastMenuHash` vigente ni la rechazada vigente. La hora se toma dentro, justo antes de escribir: lo más cerca posible del POST.
+ */
+async function reservarRevision(
+  linkId: string,
+  huella: string,
+  force: boolean,
+): Promise<MenuEnRevision | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' }> {
+  let resultado: MenuEnRevision | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' } = { outcome: 'FAILED' }
+  await escribirLlavesDelSistema(linkId, fila => {
+    if (leerMenuEnRevision(fila.config)) resultado = { outcome: 'IN_REVIEW' }
+    else if (!force && fila.lastMenuHash === huella) resultado = { outcome: 'UNCHANGED' }
+    else if (!force && leerMenuRechazado(fila.config)?.huella === huella) resultado = { outcome: 'REJECTED_UNCHANGED' }
+    else {
+      const pendiente: MenuEnRevision = { huella, publicadaEn: new Date().toISOString() }
+      resultado = pendiente
+      return { menuEnRevision: { ...pendiente } }
+    }
+    return null
+  })
+  // Sin fila (el vínculo se borró a media pasada) queda `FAILED`: no hay a quién publicarle.
+  return resultado
+}
+
+/**
+ * Se SABE que no salió, o el proveedor dijo que no: ningún veredicto va a llegar. Suelta la pendiente SÓLO si sigue siendo la
+ * misma publicación (misma huella y hora: otra ya pudo reservar la suya, y limpiarla tiraría esa revisión). Con `rechazada`, la
+ * huella queda como rechazada aunque la pendiente ya no sea la suya: es un hecho sobre ESA huella. Guarda los problemas.
+ */
+async function soltarRevision(
+  linkId: string,
+  reserva: MenuEnRevision,
+  { rechazada, problemas }: { rechazada: boolean; problemas?: ProblemaDeMenu[] },
+): Promise<void> {
+  const en = new Date().toISOString()
+  await escribirLlavesDelSistema(linkId, fila => {
+    const parche = {
+      ...(mismaPublicacion(leerMenuEnRevision(fila.config), reserva) ? { menuEnRevision: null } : {}),
+      ...(rechazada ? { menuRechazado: { huella: reserva.huella, en } } : {}),
+      ...(problemas ? { menuProblemas: { en, problemas } } : {}),
+    }
+    return Object.keys(parche).length > 0 ? parche : null
+  })
+}
+
+/**
+ * Los problemas de la última publicación, a la vista. Sólo si el adaptador los informa (`undefined` = no los informa: no se
+ * toca lo guardado). Nunca lanza: perderlos no cambia lo que el proveedor recibió.
+ */
+async function guardarProblemas(link: DeliveryChannelLink, problemas: ProblemaDeMenu[] | undefined): Promise<void> {
+  if (!problemas) return
+  const en = new Date().toISOString()
+  try {
+    await escribirLlavesDelSistema(link.id, () => ({ menuProblemas: { en, problemas } }))
+  } catch (error) {
+    logger.warn('📋 [MenuSync] no se pudieron guardar los problemas del menú (la publicación no cambia)', {
+      linkId: link.id,
+      venueId: link.venueId,
+      error: error instanceof Error ? error.message : String(error),
+    })
   }
 }
 

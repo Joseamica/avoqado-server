@@ -49,6 +49,43 @@ describe('construirMenuRappi', () => {
     expect(payload.items[0].price).toBe(33) // 25 × 1.30 = 32.5 → entero
   })
 
+  // Tarea 15: Rappi sólo acepta enteros. El redondeo cambia lo que cobra el cliente, así que se dice A LA VISTA en vez de
+  // publicarlo en silencio: el dueño ve $25.50 en su POS y $26 en Rappi.
+  it('un precio con centavos se redondea A LA VISTA: queda como problema', () => {
+    const conExtra = producto({
+      price: 25.5,
+      modifierGroups: [
+        {
+          id: 'g1',
+          name: 'Extras',
+          required: false,
+          allowMultiple: false,
+          minSelections: 0,
+          maxSelections: 1,
+          modifiers: [{ plu: 'QUESO', name: 'Queso', price: 7.25 }],
+        },
+      ],
+    })
+
+    const { payload, problemas } = construirMenuRappi(menu([conExtra]), 's1')
+
+    expect(payload.items[0].price).toBe(26)
+    expect(payload.items[0].children![0].price).toBe(7)
+    expect(problemas).toEqual([
+      { sku: 'QUESO', problema: 'precio 7.25 redondeado a 7: Rappi sólo acepta enteros' },
+      { sku: 'TACO-1', problema: 'precio 25.5 redondeado a 26: Rappi sólo acepta enteros' },
+    ])
+  })
+
+  it('el redondeo del margen también se dice; un precio entero no deja problema', () => {
+    expect(construirMenuRappi(menu(), 's1', { precios: { markupPercent: 30 } }).problemas).toEqual([
+      { sku: 'TACO-1', problema: 'precio 32.5 redondeado a 33: Rappi sólo acepta enteros' },
+    ])
+    expect(construirMenuRappi(menu(), 's1', { precios: { markupPercent: 20 } }).problemas).toEqual([]) // 25 × 1.20 = 30
+    // 🔴 Sin ruido del punto flotante: 10 × 1.1 en `number` da 11.000000000000002, y eso NO es un redondeo.
+    expect(construirMenuRappi(menu([producto({ price: 10 })]), 's1', { precios: { markupPercent: 10 } }).problemas).toEqual([])
+  })
+
   it('un precio fijo por producto gana sobre el margen', () => {
     const { payload } = construirMenuRappi(menu(), 's1', { precios: { markupPercent: 30, overrides: { 'TACO-1': 40 } } })
     expect(payload.items[0].price).toBe(40)

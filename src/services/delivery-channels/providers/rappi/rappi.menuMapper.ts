@@ -21,7 +21,10 @@
  * pedidos. Lo que lo protege es esa medición más la prueba que fija `FACTOR_MONEDA_RAPPI` en 1; el cuadre de los pedidos NO
  * lo descubriría (usa el mismo factor en los dos lados), así que si Rappi cambiara a centavos nada lo gritaría solo.
  */
+import { Prisma } from '@prisma/client'
+
 import type { MenuSnapshot, MenuSnapshotProduct } from '../../core/menuSnapshot.service'
+import type { ProblemaDeMenu } from '../../core/types'
 import { dePesosARappi } from './rappi.unidades'
 
 /** Topes documentados por Rappi. Superarlos es un rechazo garantizado. */
@@ -80,21 +83,35 @@ export interface PreciosDeCanal {
  * Idéntico en criterio al de Uber, y por la misma razón: sin markup se publica el precio de
  * mostrador y el comercio PIERDE en cada pedido, porque el marketplace se queda su comisión.
  * Rappi además pide el precio COMPLETO —sin descuentos—: los descuentos son campañas suyas.
+ *
+ * El margen se aplica en DECIMAL exacto (regla del repo: dinero nunca en `number`): `10 × 1.1` en punto flotante da
+ * `11.000000000000002`, y eso se reportaría como un redondeo que no existe.
  */
-function precioPublicado(sku: string, precioMostrador: number, p?: PreciosDeCanal): number {
+function precioPublicado(sku: string, precioMostrador: number, p: PreciosDeCanal | undefined, problemas: ProblemaMenu[]): number {
   const fijo = p?.overrides?.[sku]
-  if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return enUnidadesDeRappi(fijo)
+  if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return enUnidadesDeRappi(sku, new Prisma.Decimal(fijo), problemas)
   const pct = p?.markupPercent
-  if (typeof pct === 'number' && Number.isFinite(pct) && pct !== 0) return enUnidadesDeRappi(precioMostrador * (1 + pct / 100))
-  return enUnidadesDeRappi(precioMostrador)
+  if (typeof pct === 'number' && Number.isFinite(pct) && pct !== 0) {
+    const factor = new Prisma.Decimal(pct).div(100).add(1)
+    return enUnidadesDeRappi(sku, new Prisma.Decimal(precioMostrador).mul(factor), problemas)
+  }
+  return enUnidadesDeRappi(sku, new Prisma.Decimal(precioMostrador), problemas)
 }
 
 /**
  * Pesos → unidades de Rappi (el factor vive en `rappi.unidades.ts`, el mismo del mapeo de pedidos), y Rappi acepta ENTEROS
  * en `price`: se redondea una sola vez, al final, ya en SUS unidades.
+ *
+ * 🔴 El redondeo se dice A LA VISTA (Tarea 15): cambia lo que paga el cliente en Rappi respecto del POS, y publicarlo en
+ * silencio dejaba al dueño sin entender por qué su producto de $25.50 aparece en $26.
  */
-function enUnidadesDeRappi(pesos: number): number {
-  return Math.round(dePesosARappi(pesos))
+function enUnidadesDeRappi(sku: string, pesos: Prisma.Decimal, problemas: ProblemaMenu[]): number {
+  const exacto = new Prisma.Decimal(dePesosARappi(pesos.toNumber()))
+  const entero = exacto.toDecimalPlaces(0, Prisma.Decimal.ROUND_HALF_UP)
+  if (!exacto.equals(entero)) {
+    problemas.push({ sku, problema: `precio ${exacto.toString()} redondeado a ${entero.toString()}: Rappi sólo acepta enteros` })
+  }
+  return entero.toNumber()
 }
 
 function recortar(v: string | null | undefined, max: number): string {
@@ -112,7 +129,7 @@ function idCategoria(nombre: string, idx: number): string {
   return slug || `pasillo-${idx}`
 }
 
-function mapearHijos(producto: MenuSnapshotProduct, precios?: PreciosDeCanal): RappiMenuHijo[] {
+function mapearHijos(producto: MenuSnapshotProduct, precios: PreciosDeCanal | undefined, problemas: ProblemaMenu[]): RappiMenuHijo[] {
   const hijos: RappiMenuHijo[] = []
   let posicion = 0
 
@@ -136,7 +153,8 @@ function mapearHijos(producto: MenuSnapshotProduct, precios?: PreciosDeCanal): R
       hijos.push({
         category: categoria,
         name: recortar(m.name, LIMITES.nombre.max),
-        price: precioPublicado(m.plu, m.price, precios),
+        // El redondeo sólo se reporta de los que SÍ se publican: los de más del tope ya tienen su propio aviso.
+        price: precioPublicado(m.plu, m.price, precios, posicion < LIMITES.hijosPorProducto ? problemas : []),
         sku: recortar(m.plu, LIMITES.sku.max),
         // Cuántas veces se puede repetir ESTE topping. Sin dato propio se usa el del grupo.
         maxLimit: grupo.allowMultiple ? (grupo.maxSelections ?? 1) : 1,
@@ -150,13 +168,11 @@ function mapearHijos(producto: MenuSnapshotProduct, precios?: PreciosDeCanal): R
   return hijos
 }
 
-export interface ProblemaMenu {
-  sku: string
-  problema: string
-}
+/** Es el `ProblemaDeMenu` del contrato: el sincronizador lo guarda a la vista tal cual. */
+export type ProblemaMenu = ProblemaDeMenu
 
 /**
- * Arma el menú y devuelve TAMBIÉN lo que Rappi va a rechazar.
+ * Arma el menú y devuelve TAMBIÉN lo que Rappi va a rechazar (y cada precio que se redondeó: también se publica distinto).
  *
  * 🔴 Se devuelven los problemas en vez de lanzar. Un solo producto mal formado no puede dejar
  * al comercio sin carta: se publica lo que sí sirve y se reporta lo que no, para que alguien
@@ -198,7 +214,7 @@ export function construirMenuRappi(
         continue
       }
 
-      const hijos = mapearHijos(p, opts.precios)
+      const hijos = mapearHijos(p, opts.precios, problemas)
       if (hijos.length > LIMITES.hijosPorProducto) {
         problemas.push({
           sku,
@@ -206,7 +222,7 @@ export function construirMenuRappi(
         })
       }
 
-      const precio = precioPublicado(p.plu, p.price, opts.precios)
+      const precio = precioPublicado(p.plu, p.price, opts.precios, problemas)
       // 🔴 Regla documentada: un producto SIN toppings tiene que costar más que cero. Con
       // toppings sí puede ser 0 (el clásico "arma tu ensalada"), y por eso la regla mira
       // los dos datos y no sólo el precio.

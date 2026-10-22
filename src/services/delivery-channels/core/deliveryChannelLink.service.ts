@@ -25,6 +25,7 @@ import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
 import { calcularTasaInyeccion } from './injectionRate.service'
+import { configComoObjeto, LLAVES_DEL_SISTEMA } from './llavesDelSistema'
 import { menuSyncStatusOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
@@ -131,7 +132,7 @@ export async function createChannelLink(
         orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
         status: DeliveryChannelStatus.PENDING,
         autoSyncMenu: data.autoSyncMenu ?? true,
-        // Mismo filtro que el PATCH: `rappiProvisioning` no se siembra desde fuera (ver `mezclarConfig`).
+        // Mismo filtro que el PATCH: las llaves del sistema no se siembran desde fuera (ver `mezclarConfig`).
         config: data.config != null ? mezclarConfig({}, data.config) : undefined,
       },
       select: SAFE_SELECT,
@@ -248,17 +249,26 @@ function validarPrecios(v: unknown): void {
  * `config: null` sigue limpiando todo — es la forma explícita de borrar, y se distingue de
  * `undefined` (no lo tocaste).
  *
- * 🔴 Salvo `rappiProvisioning`: es la reclamación del self-onboarding de Rappi (a qué intención y a
- * qué lote pertenece el vínculo) y la escriben SÓLO el aprovisionamiento y su confirmación. Desde
- * aquí nunca se toca — ni con `config: null` —: editable, un administrador de un negocio la apuntaba
- * a la intención de otro y el webhook escribía en ella; borrable, la tienda ya no se podía confirmar.
+ * 🔴 Salvo las LLAVES DEL SISTEMA (`llavesDelSistema.ts`): la reclamación del aprovisionamiento de la
+ * tienda, el menú en revisión, el rechazado, sus problemas y el horario publicado. Las escriben SÓLO
+ * el sistema (el aprovisionamiento, el sincronizador, los avisos del proveedor). Desde aquí nunca se
+ * tocan — ni con `config: null` — y lo que llegue con esos nombres se ignora: editable, la reclamación
+ * se apuntaba a la intención de otro negocio; borrado, el menú en revisión se republicaba encima de la
+ * revisión (o el rechazado, cada 5 minutos); sembrado, bloqueaba la publicación del menú para siempre.
  */
 function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null): Prisma.InputJsonValue | typeof Prisma.JsonNull {
-  const base = actual && typeof actual === 'object' && !Array.isArray(actual) ? (actual as Record<string, unknown>) : {}
-  const reservada = base.rappiProvisioning !== undefined ? ({ rappiProvisioning: base.rappiProvisioning } as Prisma.InputJsonObject) : null
-  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return reservada ?? entrante ?? Prisma.JsonNull
-  const { rappiProvisioning: _ignorada, ...pedido } = entrante as Record<string, unknown>
-  return { ...base, ...pedido, ...reservada } as Prisma.InputJsonValue
+  const base = configComoObjeto(actual)
+  const reservadas = Object.fromEntries(
+    LLAVES_DEL_SISTEMA.filter(llave => base[llave] !== undefined).map(llave => [llave, base[llave]]),
+  ) as Prisma.InputJsonObject
+  const hayReservadas = Object.keys(reservadas).length > 0
+  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) {
+    return hayReservadas ? reservadas : (entrante ?? Prisma.JsonNull)
+  }
+  const pedido = Object.fromEntries(
+    Object.entries(entrante as Record<string, unknown>).filter(([llave]) => !(LLAVES_DEL_SISTEMA as readonly string[]).includes(llave)),
+  )
+  return { ...base, ...pedido, ...reservadas } as Prisma.InputJsonValue
 }
 
 /**

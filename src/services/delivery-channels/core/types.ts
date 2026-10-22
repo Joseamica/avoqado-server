@@ -164,6 +164,20 @@ export interface ActionResult {
 }
 
 /**
+ * Algo del menú que el dueño tiene que ver: un producto que no se publicó, un precio que se ajustó, o un motivo con que el
+ * proveedor rechazó el menú. `sku` es el del producto (o un marcador como `pasillo:…` o `(menú)` si no es de uno solo).
+ */
+export type ProblemaDeMenu = { sku: string; problema: string }
+
+/**
+ * El resultado de publicar el menú. `problemas` presente (aunque vacío) = el adaptador los informa y el sincronizador los
+ * guarda a la vista; ausente = el adaptador no los informa y no se toca lo guardado.
+ */
+export interface PublicacionDeMenu extends ActionResult {
+  problemas?: ProblemaDeMenu[]
+}
+
+/**
  * La escritura al proveedor NO salió: falló ANTES de la red (el candado de escrituras, su lectura a
  * la base, el token). Se SABE que el proveedor no recibió nada — a diferencia de un timeout/5xx, donde
  * no se sabe y por eso queda en duda. `STORE_NOT_AUTHORIZED`: la tienda no tiene permiso de escritura
@@ -323,7 +337,16 @@ export interface DirectDeliveryAdapter {
    */
   fetchCourier?(externalOrderId: string, storeId: string): Promise<CourierInfo | null>
 
-  publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<ActionResult>
+  publishMenu?(snapshot: MenuSnapshot, storeId: string, opts?: { availability?: unknown; precios?: unknown }): Promise<PublicacionDeMenu>
+
+  /**
+   * 🔴 `true` = el 2xx del POST del menú significa «en revisión», NO «publicado»: lo publicado lo dice un veredicto aparte
+   * (un aviso de aprobado o rechazado). El sincronizador entonces NO sella la huella con el 2xx: deja el menú en revisión
+   * hasta el veredicto, y mientras tanto no lo republica. Ausente = el 2xx ya es «publicado» y se sella en el acto.
+   *
+   * Existe para que el núcleo decida por la CAPACIDAD, nunca por el nombre del proveedor (lo vigila `adapterRegistry.test.ts`).
+   */
+  readonly menuConRevision?: boolean
 
   /** Agota o revive UN producto sin republicar el menú. La operación del día a día. */
   setItemSoldOut?(itemId: string, storeId: string, agotado: boolean): Promise<ActionResult>

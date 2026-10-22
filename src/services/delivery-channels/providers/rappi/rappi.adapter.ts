@@ -30,6 +30,8 @@ import {
   type DenyReason,
   type EventIdentity,
   type NormalizedDeliveryOrder,
+  type ProblemaDeMenu,
+  type PublicacionDeMenu,
 } from '../../core/types'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { HorarioSemanal } from '../../core/deliveryHours.service'
@@ -248,8 +250,8 @@ export const rappiAdapter = {
    *    `LISTO_SIN_AVISO`, sin cierre (no hay fila; el 🚨 lo deja la reserva). Codex b1 #4;
    *  · 2xx ⇒ se cierra (`HTTP_2XX`);
    *  · 400 de transición inválida ⇒ se cierra y es `terminal` (repetirla daría lo mismo);
-   *  · el candado de tiendas (`DeliveryWriteNotSentError`: la llamada NO salió, Rappi no recibió nada) ⇒ se DEVUELVE la reserva
-   *    (`devolverLlamadaDeListo`) y el error se relanza igual: un bloqueo no gasta una de las 3;
+   *  · el candado de tiendas o un token que no se pudo pedir (`DeliveryWriteNotSentError`: la llamada NO salió, Rappi no recibió
+   *    nada) ⇒ se DEVUELVE la reserva (`devolverLlamadaDeListo`) y el error se relanza igual: no gasta una de las 3;
    *  · lo demás (el 424 «inténtelo más tarde» que dio el sandbox, un 5xx, un 401) se devuelve tal cual: ya contó.
    * Si la reserva no se puede escribir, la llamada NO sale (sin contar no se llama). Si falla el CIERRE, la respuesta se
    * devuelve igual: el 2xx no se pierde (el núcleo lo acredita) y, sin cierre, el tope sigue protegiendo.
@@ -336,22 +338,36 @@ export const rappiAdapter = {
   },
 
   /**
+   * 🔴 El 2xx del `POST /menu` significa «en revisión» (*"Menu updated and ready to be validated"*), NO publicado: lo
+   * publicado lo dice `MENU_APPROVED`. Con esto el sincronizador no sella la huella con el 2xx y no republica encima de la
+   * revisión.
+   */
+  menuConRevision: true,
+
+  /**
    * Publicar el menú. 🔴 Un `ok` aquí significa "en revisión", NO publicado — lo publicado
    * llega por `MENU_APPROVED`. Los productos que Rappi rechazaría se filtran y REPORTAN
-   * antes de mandar: el rechazo de Rappi viene sin motivo, así que cada regla atrapada aquí
-   * es un rechazo que no habrá que adivinar.
+   * antes de mandar: el rechazo asíncrono (`MENU_REJECTED`) viene sin motivo, así que cada
+   * regla atrapada aquí es un rechazo que no habrá que adivinar.
+   *
+   * `problemas` junta, a la vista del dueño: lo que el mapeo filtró, cada precio redondeado y, con un 400 (o 422) del POST,
+   * los `errors[]` del cuerpo (la validación inmediata de Rappi SÍ trae motivos: `{ reason, relatedItems[] }`).
    */
-  async publishMenu(snapshot: MenuSnapshot, storeId: string, opts?: { precios?: unknown }): Promise<ActionResult> {
+  async publishMenu(snapshot: MenuSnapshot, storeId: string, opts?: { precios?: unknown }): Promise<PublicacionDeMenu> {
     const [{ publicarMenuRappi }, { default: logger }] = await Promise.all([import('./rappi.client'), import('@/config/logger')])
 
     const { payload, problemas } = construirMenuRappi(snapshot, storeId, { precios: opts?.precios as PreciosDeCanal | undefined })
     if (problemas.length) {
-      logger.warn('📋 [Rappi] productos que NO se publican (Rappi los rechazaría, y sin decir por qué)', { storeId, problemas })
+      logger.warn('📋 [Rappi] lo que no se publica tal cual (filtrado porque Rappi lo rechazaría, o precio redondeado)', {
+        storeId,
+        problemas,
+      })
     }
     if (payload.items.length === 0) {
-      return { ok: false, status: 0, raw: 'El menú quedó vacío tras filtrar lo que Rappi rechazaría — no se mandó nada.' }
+      return { ok: false, status: 0, raw: 'El menú quedó vacío tras filtrar lo que Rappi rechazaría — no se mandó nada.', problemas }
     }
-    return publicarMenuRappi(payload)
+    const r = await publicarMenuRappi(payload)
+    return { ...r, problemas: r.status === 400 || r.status === 422 ? [...problemas, ...motivosDelRechazo(r.raw)] : problemas }
   },
 
   buildMenuPayload(snapshot: MenuSnapshot, opts?: { precios?: unknown }): unknown {
@@ -361,6 +377,30 @@ export const rappiAdapter = {
   mapHours(horario: HorarioSemanal): unknown {
     return aHorarioRappi(horario)
   },
+}
+
+/**
+ * Los motivos de un 400 del `POST /menu`, uno por producto señalado. Forma documentada (referencia de menús, «400 La estructura
+ * del menú es invalida»): `{ message, errors: [{ reason, relatedItems: [{ sku, … }] }] }`. Un error sin productos queda como
+ * `(menú)`. Un cuerpo que no tiene esa forma no truena: queda su texto (recortado) como único motivo.
+ */
+export function motivosDelRechazo(raw: string): ProblemaDeMenu[] {
+  let errores: unknown
+  try {
+    errores = (JSON.parse(raw) as { errors?: unknown } | null)?.errors
+  } catch {
+    errores = undefined
+  }
+  if (!Array.isArray(errores) || errores.length === 0) {
+    return [{ sku: '(menú)', problema: `Rappi rechazó el menú sin motivos legibles: ${raw.slice(0, 300)}` }]
+  }
+  return errores.flatMap((e): ProblemaDeMenu[] => {
+    const err = (e ?? {}) as { reason?: unknown; relatedItems?: unknown }
+    const problema = `Rappi rechazó: ${String(err.reason ?? 'sin motivo').slice(0, 500)}`
+    const items = Array.isArray(err.relatedItems) ? err.relatedItems : []
+    if (items.length === 0) return [{ sku: '(menú)', problema }]
+    return items.map(i => ({ sku: String((i as { sku?: unknown } | null)?.sku ?? '(sin sku)').slice(0, 500), problema }))
+  })
 }
 
 /**

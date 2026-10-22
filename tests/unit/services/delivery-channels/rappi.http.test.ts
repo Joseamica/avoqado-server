@@ -241,6 +241,61 @@ describe('llamarRappi', () => {
     }
   })
 
+  // Tarea 15: si el token no se pudo pedir, la escritura NO salió y se SABE. Como Error común, el menú se quedaba «en revisión»
+  // esperando un veredicto que nunca iba a llegar, y el «listo» gastaba una de sus 3 llamadas.
+  describe('un fallo al pedir el token cuenta como "no salió"', () => {
+    const loginCaido = () => jest.fn(async () => Promise.reject(new Error('[Rappi] login de integrations respondió 503')))
+
+    it('🔴 en una ESCRITURA lanza DeliveryWriteNotSentError(UNAVAILABLE) y no llama a la red', async () => {
+      const d = deps({ getToken: loginCaido(), tiendasEscribibles: ['900'] })
+
+      const e = await llamarRappi(d, { superficie: 'integrations', metodo: 'POST', ruta: '/menu', storeId: '900', cuerpo: {} }).catch(
+        (x: unknown) => x,
+      )
+
+      expect(e).toBeInstanceOf(DeliveryWriteNotSentError)
+      expect((e as DeliveryWriteNotSentError).reason).toBe('UNAVAILABLE')
+      expect((e as Error).message).toMatch(/no se envió nada/i)
+      expect((e as Error).message).toMatch(/503/) // la causa viaja (sin secretos: el login nunca imprime la credencial)
+      expect(e).not.toBeInstanceOf(RappiEscrituraBloqueadaError) // no es el candado: la cocina no lee «no habilitada»
+      expect(d.fetchImpl).not.toHaveBeenCalled()
+    })
+
+    it('tras un 401, si renovar el token falla, tampoco salió (Rappi contestó 401: no la procesó)', async () => {
+      const getToken = jest.fn().mockResolvedValueOnce('tok').mockRejectedValueOnce(new Error('login caído'))
+      const fetchImpl = jest.fn().mockResolvedValue(respuesta(401))
+
+      await expect(
+        llamarRappi(deps({ getToken, fetchImpl, tiendasEscribibles: ['900'] }), {
+          superficie: 'integrations',
+          metodo: 'PUT',
+          ruta: '/x',
+          storeId: '900',
+        }),
+      ).rejects.toBeInstanceOf(DeliveryWriteNotSentError)
+      expect(fetchImpl).toHaveBeenCalledTimes(1)
+    })
+
+    it('en una LECTURA lanza el error de siempre (no es una escritura: nada que dar por no enviado)', async () => {
+      const e = await llamarRappi(deps({ getToken: loginCaido() }), {
+        superficie: 'integrations',
+        metodo: 'GET',
+        ruta: '/orders/1/events',
+      }).catch((x: unknown) => x)
+
+      expect(e).not.toBeInstanceOf(DeliveryWriteNotSentError)
+      expect((e as Error).message).toMatch(/503/)
+    })
+
+    it('el candado sigue saltando ANTES del token: una tienda no autorizada nunca pide token', async () => {
+      const d = deps({ getToken: loginCaido() })
+      await expect(llamarRappi(d, { superficie: 'integrations', metodo: 'POST', ruta: '/menu', storeId: '1' })).rejects.toBeInstanceOf(
+        RappiEscrituraBloqueadaError,
+      )
+      expect(d.getToken).not.toHaveBeenCalled()
+    })
+  })
+
   it('una escritura AUTORIZADA sí sale, con cuerpo JSON', async () => {
     const d = deps({ tiendasEscribibles: ['900'] })
     await llamarRappi(d, { superficie: 'integrations', metodo: 'PUT', ruta: '/x', storeId: '900', cuerpo: { a: 1 } })

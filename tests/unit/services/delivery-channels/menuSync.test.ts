@@ -24,13 +24,17 @@ jest.mock('@/services/delivery-channels/core/adapterRegistry', () => ({
   adapterFor: jest.fn(),
 }))
 
+import { createHash } from 'node:crypto'
+
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { buildMenuSnapshot } from '@/services/delivery-channels/core/menuSnapshot.service'
 import { adapterFor, hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
+import { DeliveryWriteNotSentError } from '@/services/delivery-channels/core/types'
 import { Prisma } from '@prisma/client'
 
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
-import { syncChannelAvailability, syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
+import { PLAZO_SIN_VEREDICTO_MS, syncChannelAvailability, syncChannelMenu } from '@/services/delivery-channels/core/menuSync.service'
 
 const mockedSnapshot = buildMenuSnapshot as jest.Mock
 const mockedAdapterFor = adapterFor as jest.Mock
@@ -145,6 +149,326 @@ describe('menuSync — el menú del proveedor sigue al de Avoqado', () => {
     const r = await syncChannelMenu(link({ lastMenuHash: hash1 }))
 
     expect(r.outcome).toBe('PUBLISHED') // detectó el cambio del TRADUCTOR
+  })
+
+  it('🔴 el force del pedido de menú de Uber republica aunque la huella sea igual', async () => {
+    // Codex plan r1 #1: la regla nueva («una huella ya publicada no se vuelve a mandar») no puede comerse el `force`. Si Uber
+    // PIDE el menú es porque de su lado se perdió.
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+    const igual = createHash('sha256').update(JSON.stringify(PAYLOAD)).digest('hex')
+
+    const r = await syncChannelMenu(link({ lastMenuHash: igual }), { force: true })
+
+    expect(r.outcome).toBe('PUBLISHED')
+    expect(a.publishMenu).toHaveBeenCalledTimes(1)
+    expect(mockedUpdate).toHaveBeenCalledWith({
+      where: { id: 'link1' },
+      data: { lastMenuHash: igual, lastMenuSyncAt: expect.any(Date) },
+    })
+  })
+
+  it('Uber (sin revisión) sigue sellando con el 200 como hoy', async () => {
+    // Su 2xx SÍ significa «publicado»: sella la huella en el acto, sin pendiente, sin candado de fila y sin tocar `config`.
+    const a = adapter()
+    mockedAdapterFor.mockReturnValue(a)
+
+    const r = await syncChannelMenu(link())
+
+    expect(r.outcome).toBe('PUBLISHED')
+    expect(mockedUpdate).toHaveBeenCalledTimes(1)
+    expect(mockedUpdate).toHaveBeenCalledWith({
+      where: { id: 'link1' },
+      data: { lastMenuHash: expect.any(String), lastMenuSyncAt: expect.any(Date) },
+    })
+    expect((prisma as any).$queryRaw).not.toHaveBeenCalled()
+  })
+})
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
+//  Menú en revisión: el proveedor contesta 2xx al POST y lo publicado lo dice un veredicto aparte
+// ═════════════════════════════════════════════════════════════════════════════════════════
+describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta el veredicto', () => {
+  const mockedQueryRaw = (prisma as any).$queryRaw as jest.Mock
+  const mockedError = logger.error as jest.Mock
+
+  /** La FILA vigente en la base. `SELECT … FOR UPDATE` devuelve una COPIA, como Prisma: quien la leyó no ve lo posterior. */
+  let fila: { config: Record<string, any>; lastMenuHash: string | null }
+  const huellaDe = (p: unknown) => createHash('sha256').update(JSON.stringify(p)).digest('hex')
+  const H = huellaDe(PAYLOAD)
+  const OTRO_PAYLOAD = { items: [{ id: 'SKU-1', price_info: { price: 9950 } }] }
+  /** La copia del vínculo que trae una pasada del job (leída ANTES de publicar). */
+  const copia = () => link({ provider: 'RAPPI', config: structuredClone(fila.config), lastMenuHash: fila.lastMenuHash })
+
+  /** Lo que hace el veredicto (el procesador, Tarea 16): sella o rechaza la pendiente VIGENTE. */
+  function veredicto(aprobado: boolean) {
+    const p = fila.config.menuEnRevision
+    if (!p) throw new Error('no hay pendiente: el veredicto no tendría qué resolver')
+    if (aprobado) fila.lastMenuHash = p.huella
+    fila.config = {
+      ...fila.config,
+      menuEnRevision: null,
+      menuRechazado: aprobado ? null : { huella: p.huella, en: new Date().toISOString() },
+    }
+  }
+
+  function conRevision(publicar: jest.Mock, payload: unknown = PAYLOAD) {
+    const a = { menuConRevision: true, buildMenuPayload: jest.fn(() => payload), publishMenu: publicar }
+    mockedAdapterFor.mockReturnValue(a)
+    return a
+  }
+  // `any`: cada prueba arma su mock con otra forma de `problemas`; el tipo lo fija el contrato, no esta ayuda.
+  const ok200 = (problemas: unknown[] = []): any => ({ ok: true, status: 200, raw: 'Menu updated and ready to be validated', problemas })
+
+  beforeEach(() => {
+    jest.clearAllMocks()
+    mockedHasAdapter.mockReturnValue(true)
+    mockedSnapshot.mockResolvedValue({ venueId: 'venue1', generatedAt: 'x', categories: [] })
+    fila = { config: {}, lastMenuHash: null }
+    mockedQueryRaw.mockReset().mockImplementation(async () => [structuredClone(fila)])
+    mockedUpdate.mockReset().mockImplementation(async ({ data }: any) => {
+      if (data.config !== undefined) fila.config = structuredClone(data.config)
+      if ('lastMenuHash' in data) fila.lastMenuHash = data.lastMenuHash
+      return {}
+    })
+  })
+
+  it('🔴 con menuConRevision la pendiente se guarda ANTES del POST, con esa hora, y el 2xx no sella', async () => {
+    let enElPost: any
+    let horaDelPost = 0
+    const publicar = jest.fn(async () => {
+      enElPost = structuredClone(fila.config.menuEnRevision)
+      horaDelPost = Date.now()
+      return ok200()
+    })
+    conRevision(publicar)
+    const antes = Date.now()
+
+    const r = await syncChannelMenu(copia())
+
+    expect(r.outcome).toBe('PUBLISHED')
+    // La pendiente ya estaba en la base cuando salió el POST, con la hora tomada ANTES de mandarlo.
+    expect(enElPost).toEqual({ huella: H, publicadaEn: expect.any(String) })
+    expect(Date.parse(enElPost.publicadaEn)).toBeGreaterThanOrEqual(antes)
+    expect(Date.parse(enElPost.publicadaEn)).toBeLessThanOrEqual(horaDelPost)
+    expect((mockedQueryRaw.mock.calls[0][0] as string[]).join('?')).toMatch(/FOR UPDATE/)
+    // El 2xx NO sella: «en revisión» no es «publicado».
+    expect(fila.lastMenuHash).toBeNull()
+    expect(fila.config.menuEnRevision).toEqual(enElPost)
+    expect(mockedUpdate.mock.calls.some(([a]: any[]) => 'lastMenuHash' in a.data)).toBe(false)
+  })
+
+  it('🔴 el veredicto que llega mientras el POST sigue en vuelo encuentra la pendiente y no se pierde', async () => {
+    // Codex plan r1 #3: con la pendiente escrita DESPUÉS del 2xx, un veredicto rápido no encontraba qué sellar.
+    const publicar = jest.fn(async () => {
+      expect(fila.config.menuEnRevision?.huella).toBe(H)
+      veredicto(true)
+      return ok200()
+    })
+    conRevision(publicar)
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('PUBLISHED')
+
+    // El 2xx no revive la pendiente que el veredicto ya resolvió.
+    expect(fila.lastMenuHash).toBe(H)
+    expect(fila.config.menuEnRevision).toBeNull()
+    expect((await syncChannelMenu(copia())).outcome).toBe('UNCHANGED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([400, 422])('%s de validación: limpia la pendiente (si sigue siendo la suya) y guarda la huella como rechazada', async status => {
+    const motivos = [{ sku: 'TACO-1', problema: 'Rappi rechazó: All items must have a valid name' }]
+    conRevision(jest.fn(async () => ({ ok: false, status, raw: '{"errors":[]}', problemas: motivos })))
+
+    const r = await syncChannelMenu(copia())
+
+    expect(r.outcome).toBe('FAILED')
+    expect(fila.config.menuEnRevision).toBeNull()
+    expect(fila.config.menuRechazado).toEqual({ huella: H, en: expect.any(String) })
+    expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: motivos })
+    expect(fila.lastMenuHash).toBeNull()
+  })
+
+  it('400 cuando la pendiente ya NO es la suya: no la toca, y la huella rechazada sí queda anotada', async () => {
+    // Mientras el POST viajaba, la pendiente cambió de dueño (otra publicación ya reservó la suya): limpiarla tiraría la
+    // revisión de OTRO menú. El 400 sigue siendo un hecho sobre ESTA huella.
+    const ajena = { huella: 'OTRA', publicadaEn: new Date(Date.now() + 1000).toISOString() }
+    conRevision(
+      jest.fn(async () => {
+        fila.config = { ...fila.config, menuEnRevision: ajena }
+        return { ok: false, status: 400, raw: '{}', problemas: [] }
+      }),
+    )
+
+    await syncChannelMenu(copia())
+
+    expect(fila.config.menuEnRevision).toEqual(ajena)
+    expect(fila.config.menuRechazado).toEqual({ huella: H, en: expect.any(String) })
+  })
+
+  it.each([
+    ['timeout', () => Promise.reject(new Error('The operation was aborted due to timeout'))],
+    ['5xx', () => Promise.resolve({ ok: false, status: 503, raw: 'upstream', problemas: [] })],
+  ])('🔴 %s del POST: la pendiente se queda y el veredicto que llega después la resuelve', async (_caso, respuesta) => {
+    // Codex plan r2 #1: no se sabe si llegó. Limpiar aquí tiraba un veredicto genuino que llegaba después.
+    const publicar = jest.fn(respuesta as () => Promise<any>)
+    conRevision(publicar)
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('FAILED')
+    expect(fila.config.menuEnRevision).toEqual({ huella: H, publicadaEn: expect.any(String) })
+    expect(fila.config.menuRechazado).toBeUndefined()
+
+    // Mientras no haya veredicto, no se republica…
+    expect((await syncChannelMenu(copia())).outcome).toBe('IN_REVIEW')
+    // …y el veredicto que llega después encuentra la pendiente y la sella.
+    veredicto(true)
+    expect(fila.lastMenuHash).toBe(H)
+    expect((await syncChannelMenu(copia())).outcome).toBe('UNCHANGED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 rechazo local (status 0, sin red: menú vacío tras filtrar) limpia la pendiente; ya corregido, el menú se publica', async () => {
+    // Codex plan r3 #1: el adaptador no salió a la red; ningún veredicto va a llegar. Conservar la pendiente dejaba el
+    // menú bloqueado «en revisión» para siempre, aun corregido.
+    const vacio = [{ sku: 'TACO-1', problema: 'Cuesta $0 y no tiene modificadores: Rappi lo rechaza.' }]
+    const publicar = jest.fn(async () => ({ ok: false, status: 0, raw: 'El menú quedó vacío', problemas: vacio }))
+    const a = conRevision(publicar)
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('FAILED')
+    expect(fila.config.menuEnRevision).toBeNull()
+    expect(fila.config.menuRechazado).toBeUndefined() // no fue Rappi: no es una huella rechazada
+    expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: vacio })
+
+    // El dueño corrige el producto: el menú nuevo sale.
+    a.buildMenuPayload.mockReturnValue(OTRO_PAYLOAD)
+    publicar.mockResolvedValue(ok200())
+    expect((await syncChannelMenu(copia())).outcome).toBe('PUBLISHED')
+    expect(fila.config.menuEnRevision).toEqual({ huella: huellaDe(OTRO_PAYLOAD), publicadaEn: expect.any(String) })
+    expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: [] })
+  })
+
+  it('🔴 dos pasadas encimadas con copias viejas: la segunda no republica una huella ya rechazada ni una ya aprobada', async () => {
+    // Codex plan r3 #2: la reserva decide con lo leído BAJO CANDADO, no con la copia de la pasada.
+    const vieja = copia() // sin pendiente, sin rechazo, sin huella
+    const publicar = jest.fn(async () => ({ ok: false, status: 400, raw: '{}', problemas: [] }))
+    conRevision(publicar)
+
+    expect((await syncChannelMenu(vieja)).outcome).toBe('FAILED') // la primera recibe el 400
+    expect((await syncChannelMenu(vieja)).outcome).toBe('REJECTED_UNCHANGED') // la segunda, con la copia de ANTES
+    expect(publicar).toHaveBeenCalledTimes(1)
+
+    // Lo mismo con una aprobada.
+    fila = { config: {}, lastMenuHash: null }
+    const otraVieja = copia()
+    publicar.mockReset().mockResolvedValue(ok200())
+    expect((await syncChannelMenu(otraVieja)).outcome).toBe('PUBLISHED')
+    veredicto(true)
+    expect((await syncChannelMenu(otraVieja)).outcome).toBe('UNCHANGED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+
+    // Y con la otra pendiente todavía en vuelo: la segunda ve la reserva de la primera y no publica.
+    fila = { config: {}, lastMenuHash: null }
+    const terceraVieja = copia()
+    let soltar!: () => void
+    publicar.mockReset().mockImplementation(() => new Promise(ok => (soltar = () => ok(ok200()))))
+    const primera = syncChannelMenu(terceraVieja)
+    await new Promise(r => setImmediate(r))
+    await new Promise(r => setImmediate(r))
+    expect((await syncChannelMenu(terceraVieja)).outcome).toBe('IN_REVIEW')
+    soltar()
+    expect((await primera).outcome).toBe('PUBLISHED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
+  it('un fallo al pedir el token cuenta como "no salió" y limpia la pendiente', async () => {
+    // `rappi.http` lo lanza como DeliveryWriteNotSentError('UNAVAILABLE'): se SABE que el proveedor no recibió nada.
+    const publicar = jest.fn(async () => {
+      throw new DeliveryWriteNotSentError('UNAVAILABLE', 'no se pudo obtener el token')
+    })
+    conRevision(publicar)
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('FAILED')
+    expect(fila.config.menuEnRevision).toBeNull()
+    expect(fila.config.menuRechazado).toBeUndefined()
+
+    // La siguiente pasada lo vuelve a intentar.
+    publicar.mockReset().mockResolvedValue(ok200())
+    expect((await syncChannelMenu(copia())).outcome).toBe('PUBLISHED')
+  })
+
+  it('🔴 con un menú en revisión nunca se republica, ni con cambios ni con force', async () => {
+    fila.config = { menuEnRevision: { huella: 'VIEJA', publicadaEn: new Date(Date.now() - 60_000).toISOString() } }
+    const publicar = jest.fn(async () => ok200())
+    conRevision(publicar, OTRO_PAYLOAD) // el menú CAMBIÓ
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('IN_REVIEW')
+    expect((await syncChannelMenu(copia(), { force: true })).outcome).toBe('IN_REVIEW')
+    expect(publicar).not.toHaveBeenCalled()
+    expect(fila.config.menuEnRevision.huella).toBe('VIEJA')
+
+    // Y con una copia que NO ve la pendiente (la leyó antes de que otra pasada reservara): decide la fila bloqueada.
+    const sinPendiente = link({ provider: 'RAPPI', config: {}, lastMenuHash: null })
+    expect((await syncChannelMenu(sinPendiente, { force: true })).outcome).toBe('IN_REVIEW')
+    expect(publicar).not.toHaveBeenCalled()
+  })
+
+  it('pasado el plazo sin veredicto avisa UNA vez con 🚨 y sigue sin sellar ni republicar', async () => {
+    const publicadaEn = new Date(Date.now() - PLAZO_SIN_VEREDICTO_MS - 60_000).toISOString()
+    fila.config = { menuEnRevision: { huella: H, publicadaEn } }
+    const vieja = copia()
+    const publicar = jest.fn(async () => ok200())
+    conRevision(publicar)
+    const avisos = () => mockedError.mock.calls.filter(([m]: string[]) => String(m).includes('🚨')).length
+
+    expect((await syncChannelMenu(vieja)).outcome).toBe('IN_REVIEW')
+    expect(avisos()).toBe(1)
+    expect(fila.config.menuEnRevision).toEqual({ huella: H, publicadaEn, sinVeredictoAvisadoEn: expect.any(String) })
+
+    // Ni con la copia nueva ni con la vieja (dos pasadas encimadas) se vuelve a avisar.
+    expect((await syncChannelMenu(copia())).outcome).toBe('IN_REVIEW')
+    expect((await syncChannelMenu(vieja)).outcome).toBe('IN_REVIEW')
+    expect(avisos()).toBe(1)
+    expect(fila.lastMenuHash).toBeNull()
+    expect(publicar).not.toHaveBeenCalled()
+  })
+
+  it('dentro del plazo no avisa', async () => {
+    fila.config = { menuEnRevision: { huella: H, publicadaEn: new Date(Date.now() - 60_000).toISOString() } }
+    conRevision(jest.fn())
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('IN_REVIEW')
+    expect(mockedError).not.toHaveBeenCalled()
+    expect(mockedUpdate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 una huella rechazada no se republica; un menú distinto sí', async () => {
+    fila.config = { menuRechazado: { huella: H, en: new Date().toISOString() } }
+    const publicar = jest.fn(async () => ok200())
+    const a = conRevision(publicar)
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('REJECTED_UNCHANGED')
+    expect(publicar).not.toHaveBeenCalled()
+
+    a.buildMenuPayload.mockReturnValue(OTRO_PAYLOAD)
+    expect((await syncChannelMenu(copia())).outcome).toBe('PUBLISHED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
+  it('los problemas (incluido el 400 con errors[]) quedan guardados', async () => {
+    const redondeo = [{ sku: 'TACO-1', problema: 'precio 32.5 redondeado a 33: Rappi sólo acepta enteros' }]
+    const publicar = jest.fn(async () => ok200(redondeo))
+    const a = conRevision(publicar)
+
+    await syncChannelMenu(copia())
+    expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: redondeo })
+
+    // Otro menú, y Rappi lo rechaza con sus motivos: se guardan junto a los del mapeo.
+    veredicto(true)
+    a.buildMenuPayload.mockReturnValue(OTRO_PAYLOAD)
+    const conMotivos = [...redondeo, { sku: 'product1', problema: 'Rappi rechazó: Invalid urls were found' }]
+    publicar.mockResolvedValue({ ok: false, status: 400, raw: '{}', problemas: conMotivos } as any)
+    await syncChannelMenu(copia())
+    expect(fila.config.menuProblemas).toEqual({ en: expect.any(String), problemas: conMotivos })
   })
 })
 

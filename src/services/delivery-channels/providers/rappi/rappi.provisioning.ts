@@ -7,7 +7,7 @@
  *  2. La reclamación vive en `config.rappiProvisioning` (R3), NUNCA en `activatingIntentId`: el job de
  *     limpieza compartido con Uber sólo toca vínculos con `activatingIntentId`, y aquí la confirmación
  *     es ASÍNCRONA — un vínculo esperando a Rappi no puede desaparecer. Se MEZCLA en `config` (ahí
- *     también vive `rappiPendingMenuHash`), jamás lo reemplaza.
+ *     también viven el menú en revisión y las demás llaves del sistema), jamás lo reemplaza.
  *  3. Una confirmación sólo PROMUEVE un vínculo que nosotros reclamamos, y tiene que PROBARLO (R7): el
  *     mismo lote, o la misma intención + el mismo `integrationId`. Jamás crea uno.
  *  4. Un resultado final no se degrada (R5): la escritura lo exige en su propio `WHERE`, porque el

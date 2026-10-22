@@ -12,8 +12,10 @@ import { DeliveryWriteNotSentError, type DirectDeliveryAdapter } from '../../../
 // `rappi.estadoDelPedido` (aquí se simulan la reserva y el cierre; `esTransicionInvalida` es la real). La base de verdad se
 // prueba en tests/integration/delivery-channels/rappiTopeDeListo.test.ts.
 const mockMarcarListoRappi = jest.fn()
+const mockPublicarMenuRappi = jest.fn()
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
   marcarListoRappi: (...a: unknown[]) => mockMarcarListoRappi(...a),
+  publicarMenuRappi: (...a: unknown[]) => mockPublicarMenuRappi(...a),
 }))
 const mockReservar = jest.fn()
 const mockCerrar = jest.fn()
@@ -276,6 +278,17 @@ describe('rappiAdapter.markOrderReady — el «listo», a lo más 3 llamadas por
       expect(mockCerrar).not.toHaveBeenCalled()
     })
 
+    it('🔴 un login caído (UNAVAILABLE: el token no se pudo pedir) tampoco gasta una de las 3', async () => {
+      // Tarea 15: `rappi.http` lanza la falla del token como «no se envió». Antes era un Error común y la reserva quedaba contada.
+      const error = new DeliveryWriteNotSentError('UNAVAILABLE', '[Rappi] no se envió nada: no se pudo obtener el token de integrations')
+      mockMarcarListoRappi.mockRejectedValue(error)
+
+      await expect(rappiAdapter.markOrderReady('722609056', '900175625')).rejects.toBe(error)
+
+      expect(mockDevolver).toHaveBeenCalledWith('722609056', '900175625')
+      expect(mockCerrar).not.toHaveBeenCalled()
+    })
+
     it('una respuesta de Rappi (aunque sea un 5xx) no devuelve nada: la llamada salió', async () => {
       mockMarcarListoRappi.mockResolvedValue({ ok: false, status: 503, raw: 'boom' })
 
@@ -289,6 +302,80 @@ describe('rappiAdapter.markOrderReady — el «listo», a lo más 3 llamadas por
     mockCerrar.mockRejectedValue(new Error('P1001'))
 
     await expect(rappiAdapter.markOrderReady('722609056', '900175625')).resolves.toEqual({ ok: true, status: 200, raw: '{}' })
+  })
+})
+
+describe('rappiAdapter.publishMenu — en revisión, con los problemas a la vista', () => {
+  const snapshot = (productos: unknown[]) =>
+    ({ venueId: 'v1', generatedAt: 'x', categories: [{ name: 'Tacos', products: productos }] }) as never
+  const taco = (over: Record<string, unknown> = {}) => ({
+    plu: 'TACO-1',
+    name: 'Taco',
+    description: 'Con piña',
+    price: 25,
+    imageUrl: null,
+    modifierGroups: [],
+    ...over,
+  })
+  /** El ejemplo de 400 de la referencia de Rappi (`fuentes/es__api-reference_menus.md`, «400 La estructura del menú es invalida»), recortado. */
+  const CUERPO_400_DOC = JSON.stringify({
+    message: 'The submitted menu has errors.',
+    errors: [
+      {
+        reason: 'All items must have a valid name, category or product description.',
+        relatedItems: [{ sku: 'product1', type: 'PRODUCT' }],
+      },
+      { reason: 'Invalid urls were found', relatedItems: [{ sku: 'product2' }, { sku: 'topping1', type: 'TOPPING' }] },
+      { reason: 'Sin renglones', relatedItems: [] },
+    ],
+  })
+
+  beforeEach(() =>
+    mockPublicarMenuRappi.mockReset().mockResolvedValue({ ok: true, status: 200, raw: 'Menu updated and ready to be validated' }),
+  )
+
+  it('🔴 declara menuConRevision: su 2xx es «en revisión», lo publicado lo dice el veredicto', () => {
+    expect(rappiAdapter.menuConRevision).toBe(true)
+  })
+
+  it('publishMenu: el 400 trae los motivos de errors[] en problemas', async () => {
+    mockPublicarMenuRappi.mockResolvedValue({ ok: false, status: 400, raw: CUERPO_400_DOC })
+
+    const r = await rappiAdapter.publishMenu(snapshot([taco({ price: 25.5 })]), '900175625')
+
+    expect(r).toMatchObject({ ok: false, status: 400, raw: CUERPO_400_DOC })
+    expect(r.problemas).toEqual([
+      // Lo del mapeo va primero (es lo que Avoqado ya sabía antes de mandar)…
+      { sku: 'TACO-1', problema: 'precio 25.5 redondeado a 26: Rappi sólo acepta enteros' },
+      // …y luego lo que Rappi dijo, un renglón por producto señalado.
+      { sku: 'product1', problema: 'Rappi rechazó: All items must have a valid name, category or product description.' },
+      { sku: 'product2', problema: 'Rappi rechazó: Invalid urls were found' },
+      { sku: 'topping1', problema: 'Rappi rechazó: Invalid urls were found' },
+      { sku: '(menú)', problema: 'Rappi rechazó: Sin renglones' },
+    ])
+  })
+
+  it('un 400 con un cuerpo que no se puede leer no truena: queda el texto crudo como motivo', async () => {
+    mockPublicarMenuRappi.mockResolvedValue({ ok: false, status: 400, raw: '<html>Bad Request</html>' })
+
+    const r = await rappiAdapter.publishMenu(snapshot([taco()]), '900175625')
+
+    expect(r.problemas).toEqual([{ sku: '(menú)', problema: 'Rappi rechazó el menú sin motivos legibles: <html>Bad Request</html>' }])
+  })
+
+  it('un 2xx trae los problemas del mapeo (y nada más)', async () => {
+    const r = await rappiAdapter.publishMenu(snapshot([taco({ price: 25.5 })]), '900175625')
+
+    expect(r).toMatchObject({ ok: true, status: 200 })
+    expect(r.problemas).toEqual([{ sku: 'TACO-1', problema: 'precio 25.5 redondeado a 26: Rappi sólo acepta enteros' }])
+  })
+
+  it('🔴 menú vacío tras filtrar: no sale a la red (status 0) y dice por qué', async () => {
+    const r = await rappiAdapter.publishMenu(snapshot([taco({ price: 0 })]), '900175625')
+
+    expect(mockPublicarMenuRappi).not.toHaveBeenCalled()
+    expect(r).toMatchObject({ ok: false, status: 0 })
+    expect(r.problemas).toEqual([{ sku: 'TACO-1', problema: 'Cuesta $0 y no tiene modificadores: Rappi lo rechaza.' }])
   })
 })
 

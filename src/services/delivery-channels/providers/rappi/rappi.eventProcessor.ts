@@ -23,6 +23,7 @@ import prisma from '@/utils/prismaClient'
 import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { cerrarEventoReclamado, reclamarEvento, renovarReclamo } from '../../core/deliveryWebhookEvent.service'
+import { configComoObjeto, leerMenuEnRevision } from '../../core/llavesDelSistema'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
 import {
   analizarHistorial,
@@ -352,20 +353,30 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     const linkId = evento.channelLink.id
     // 🔴 `config` se relee con la fila BLOQUEADA, no de la copia que trajo el evento: escribir esa copia
     // vieja borraba lo que otro escritor guardó mientras tanto (la reclamación del aprovisionamiento).
+    // La pendiente es `menuEnRevision`: la escribe el sincronizador ANTES del POST (Tarea 15). La regla de la hora de firma
+    // y el cierre del evento en la misma transacción llegan con la Tarea 16.
     const huellaPendiente = await prisma.$transaction(async tx => {
       const [fila] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`
         SELECT "config" FROM "DeliveryChannelLink" WHERE "id" = ${linkId} FOR UPDATE`
-      const config = (
-        fila?.config && typeof fila.config === 'object' && !Array.isArray(fila.config) ? fila.config : {}
-      ) as Prisma.JsonObject
-      const huella = typeof config.rappiPendingMenuHash === 'string' ? config.rappiPendingMenuHash : null
-      const sinHuella = { config: { ...config, rappiPendingMenuHash: null } }
-      await tx.deliveryChannelLink.update({
-        where: { id: linkId },
-        // La huella se sella AQUÍ — no al publicar. Si no había pendiente (publicación manual, o de antes de
-        // este mecanismo), al menos queda la fecha. El rechazo sólo la limpia.
-        data: aprobado ? { lastMenuSyncAt: new Date(), ...(huella ? { lastMenuHash: huella, ...sinHuella } : {}) } : sinHuella,
-      })
+      const config = configComoObjeto(fila?.config) as Prisma.JsonObject
+      const huella = leerMenuEnRevision(config)?.huella ?? null
+      if (aprobado) {
+        await tx.deliveryChannelLink.update({
+          where: { id: linkId },
+          // La huella se sella AQUÍ — no al publicar. Si no había pendiente (publicación manual, o de antes de
+          // este mecanismo), al menos queda la fecha. Aprobado, un rechazo anterior deja de ser lo vigente.
+          data: {
+            lastMenuSyncAt: new Date(),
+            ...(huella ? { lastMenuHash: huella, config: { ...config, menuEnRevision: null, menuRechazado: null } } : {}),
+          },
+        })
+      } else if (huella) {
+        // El rechazo la limpia y la anota como rechazada: sin esto el sincronizador republicaba el mismo menú cada 5 min.
+        await tx.deliveryChannelLink.update({
+          where: { id: linkId },
+          data: { config: { ...config, menuEnRevision: null, menuRechazado: { huella, en: new Date().toISOString() } } },
+        })
+      }
       return huella
     })
 

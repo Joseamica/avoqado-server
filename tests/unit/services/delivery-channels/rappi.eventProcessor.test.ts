@@ -264,31 +264,63 @@ describe('processRappiEvent', () => {
   })
 
   // ── El veredicto del menú ────────────────────────────────────────────────────────
+  // Tarea 15: la pendiente es `menuEnRevision` (la escribe el sincronizador ANTES del POST). La regla de la hora de firma y el
+  // cierre en la misma transacción son de la Tarea 16.
+  const PENDIENTE = { huella: 'abc123', publicadaEn: '2026-10-22T10:00:00.000Z' }
+
   it('🔴 MENU_APPROVED sella la huella pendiente — AHÍ es cuando el menú está publicado', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
       fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814', message: 'Menu Approved' } }),
     )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'abc123' } }])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+      { config: { menuEnRevision: PENDIENTE, menuRechazado: { huella: 'vieja', en: 'x' } }, lastMenuHash: null },
+    ])
 
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
     expect(r.outcome).toBe('MENU_VERDICT')
     const data = (prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data
     expect(data.lastMenuHash).toBe('abc123')
-    expect(data.config.rappiPendingMenuHash).toBeNull()
+    expect(data.lastMenuSyncAt).toEqual(expect.any(Date))
+    // Aprobado: ya no hay pendiente, y un rechazo anterior deja de ser lo vigente.
+    expect(data.config.menuEnRevision).toBeNull()
+    expect(data.config.menuRechazado).toBeNull()
   })
 
-  it('MENU_REJECTED limpia la huella pendiente y NO sella nada — el menú NO está arriba', async () => {
+  it('MENU_REJECTED limpia la huella pendiente, la anota como rechazada y NO sella nada — el menú NO está arriba', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
       fila({ eventType: 'MENU_REJECTED', payload: { store_id: '900105814' } }),
     )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'abc123' } }])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { menuEnRevision: PENDIENTE }, lastMenuHash: null }])
 
     await processRappiEvent('evt1', { aceptar: aceptarOk })
 
     const data = (prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data
     expect(data.lastMenuHash).toBeUndefined()
-    expect(data.config.rappiPendingMenuHash).toBeNull()
+    expect(data.config.menuEnRevision).toBeNull()
+    // Sin esto el sincronizador republicaba el mismo menú cada 5 min.
+    expect(data.config.menuRechazado).toEqual({ huella: 'abc123', en: expect.any(String) })
+  })
+
+  it('MENU_APPROVED sin pendiente: sólo la fecha, no sella nada', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814' } }),
+    )
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: {}, lastMenuHash: 'h-anterior' }])
+
+    await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data).toEqual({ lastMenuSyncAt: expect.any(Date) })
+  })
+
+  it('MENU_REJECTED sin pendiente: no hay qué anotar', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({ eventType: 'MENU_REJECTED', payload: { store_id: '900105814' } }),
+    )
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: {}, lastMenuHash: null }])
+
+    expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
+    expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
   })
 
   // H2: la copia de `config` que trajo el evento es VIEJA. Escribirla borraba lo que otro escritor guardó
@@ -299,10 +331,12 @@ describe('processRappiEvent', () => {
       fila({
         eventType: tipo,
         payload: { store_id: '900105814' },
-        channelLink: { ...fila().channelLink, config: { rappiPendingMenuHash: 'abc123' } },
+        channelLink: { ...fila().channelLink, config: { menuEnRevision: PENDIENTE } },
       }),
     )
-    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'abc123', rappiProvisioning: reclamacion } }])
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+      { config: { menuEnRevision: PENDIENTE, rappiProvisioning: reclamacion }, lastMenuHash: null },
+    ])
 
     await processRappiEvent('evt1', { aceptar: aceptarOk })
 
@@ -310,9 +344,21 @@ describe('processRappiEvent', () => {
     expect(strings.join('?')).toMatch(/FOR UPDATE/)
     expect(valores).toEqual(['link1'])
     expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data.config).toEqual({
-      rappiPendingMenuHash: null,
+      menuEnRevision: null,
+      menuRechazado: tipo === 'MENU_APPROVED' ? null : { huella: 'abc123', en: expect.any(String) },
       rappiProvisioning: reclamacion,
     })
+  })
+
+  it('🔴 la llave vieja `rappiPendingMenuHash` ya no sella nada: la pendiente es `menuEnRevision`', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({ eventType: 'MENU_APPROVED', payload: { store_id: '900105814' } }),
+    )
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ config: { rappiPendingMenuHash: 'legado' }, lastMenuHash: null }])
+
+    await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    expect((prisma.deliveryChannelLink.update as jest.Mock).mock.calls[0][0].data.lastMenuHash).toBeUndefined()
   })
 
   // ── El estado de la tienda ───────────────────────────────────────────────────────

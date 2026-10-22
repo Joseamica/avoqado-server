@@ -166,7 +166,8 @@ export interface RappiPeticion {
  * tasa de éxito del 98% que Rappi exige. Con `reintentarEn401: false` no hay segundo intento (ver `RappiPeticion`).
  */
 export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion): Promise<RappiRespuesta> {
-  if (!LECTURAS.has(peticion.metodo.toUpperCase())) {
+  const escritura = !LECTURAS.has(peticion.metodo.toUpperCase())
+  if (escritura) {
     const autorizadas = deps.tiendasEscribibles ?? []
     const tiendas = peticion.storeIds ?? [peticion.storeId]
     // Un lote vacío no es un pase libre: sin ninguna tienda que revisar, el candado se niega igual.
@@ -176,12 +177,31 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
 
   const url = `${peticion.host ?? hostRappi(deps.ambiente, deps.pais)}${peticion.ruta}`
 
+  /**
+   * 🔴 Una ESCRITURA cuyo token no se pudo pedir NO salió, y se SABE: se lanza como `DeliveryWriteNotSentError('UNAVAILABLE')`
+   * (igual que Uber). Como Error común, quien llamaba no podía distinguirlo de un timeout: el menú se quedaba «en revisión»
+   * esperando un veredicto que nunca iba a llegar, y el «listo» gastaba una de sus 3 llamadas. También vale tras un 401: Rappi
+   * contestó «token inválido», así que tampoco procesó la escritura. Las LECTURAS lanzan el error de siempre.
+   */
+  const token = async (): Promise<string> => {
+    try {
+      return await deps.getToken(peticion.superficie)
+    } catch (error) {
+      if (!escritura) throw error
+      const causa = error instanceof Error ? error.message : String(error)
+      throw new DeliveryWriteNotSentError(
+        'UNAVAILABLE',
+        `[Rappi] no se envió nada: no se pudo obtener el token de ${peticion.superficie} (${causa})`,
+      )
+    }
+  }
+
   const intentar = async (): Promise<RappiRespuesta> => {
-    const token = await deps.getToken(peticion.superficie)
+    const vigente = await token()
     const r = await deps.fetchImpl(url, {
       method: peticion.metodo,
       headers: {
-        ...cabeceraRappi(token),
+        ...cabeceraRappi(vigente),
         ...(peticion.cabecerasExtra ?? {}),
         ...(peticion.cuerpo !== undefined ? { 'content-type': 'application/json' } : {}),
       },

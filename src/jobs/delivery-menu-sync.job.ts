@@ -76,7 +76,9 @@ export class DeliveryMenuSyncJob {
         // otro reventó.
         const r = await syncChannelMenu(link)
         if (r.outcome === 'PUBLISHED') publicados++
-        else if (r.outcome === 'UNCHANGED') sinCambio++
+        // Un menú en revisión (esperando el veredicto del proveedor) o uno igual al que el proveedor ya rechazó tampoco se
+        // publica en esta pasada: es «sin cambio» para el conteo. Lo que necesita a una persona ya lo avisó el sincronizador.
+        else if (r.outcome === 'UNCHANGED' || r.outcome === 'IN_REVIEW' || r.outcome === 'REJECTED_UNCHANGED') sinCambio++
         else if (r.outcome === 'FAILED') fallidos++
 
         // La disponibilidad va SIEMPRE, aunque el menú no haya cambiado — de hecho es el
