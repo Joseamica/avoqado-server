@@ -26,7 +26,14 @@ export interface InboxOrder {
   remaining: number
   paymentStatus: string
   needsPrint: boolean
-  items: Array<{ name: string; quantity: number; note: string | null; modifiers: Array<{ name: string; quantity: number }> }>
+  items: Array<{
+    productId: string | null
+    categoryId: string | null
+    name: string
+    quantity: number
+    note: string | null
+    modifiers: Array<{ name: string; quantity: number }>
+  }>
 }
 
 const PENDING = [OnlineOrderStatus.PENDING_ACCEPTANCE]
@@ -65,7 +72,15 @@ const SELECT = {
       items: {
         take: 2 * MAX_CART_LINES,
         orderBy: [{ sequence: 'asc' as const }, { id: 'asc' as const }],
-        select: { productName: true, quantity: true, notes: true, modifiers: { take: 50, select: { name: true, quantity: true } } },
+        select: {
+          productName: true,
+          productId: true,
+          // La categoría sale del producto vivo (misma consulta, sin N+1); un renglón libre o de producto borrado da null.
+          product: { select: { categoryId: true } },
+          quantity: true,
+          notes: true,
+          modifiers: { take: 50, select: { name: true, quantity: true } },
+        },
       },
     },
   },
@@ -93,6 +108,8 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
     paymentStatus: r.order.paymentStatus,
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
+      productId: i.productId ?? null,
+      categoryId: i.product?.categoryId ?? null,
       name: i.productName ?? '',
       quantity: i.quantity,
       note: i.notes ?? null,

@@ -35,7 +35,16 @@ const row = (id: string, status: string, o: Record<string, unknown> = {}) => ({
     customerName: 'María G.',
     customerPhone: '+525543453965',
     specialRequests: null,
-    items: [{ productName: 'Flautas', quantity: 2, notes: null, modifiers: [{ name: 'Salsa verde', quantity: 1 }] }],
+    items: [
+      {
+        productName: 'Flautas',
+        productId: 'prod-flautas',
+        product: { categoryId: 'cat-antojitos' },
+        quantity: 2,
+        notes: null,
+        modifiers: [{ name: 'Salsa verde', quantity: 1 }],
+      },
+    ],
   },
   ...o,
 })
@@ -94,6 +103,23 @@ describe('listInbox', () => {
     expect(byNumber.WB.needsPrint).toBe(true)
     expect(byNumber.WA).toMatchObject({ total: 186, remaining: 186, customerPhone: '+525543453965' })
     expect(byNumber.WA.items[0]).toMatchObject({ name: 'Flautas', quantity: 2, modifiers: [{ name: 'Salsa verde', quantity: 1 }] })
+  })
+
+  it('inbox items carry productId and categoryId', async () => {
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    const wa = r.orders.find(o => o.orderNumber === 'WA')!
+    expect(wa.items[0]).toMatchObject({ productId: 'prod-flautas', categoryId: 'cat-antojitos' })
+    const lista = prismaMock.onlineOrder.findMany.mock.calls.map(c => c[0] as any).find(a => a.select?.order?.select?.items)
+    const sel = lista.select.order.select.items.select
+    expect(sel).toMatchObject({ productId: true, product: { select: { categoryId: true } } })
+  })
+
+  it('inbox items: un renglón sin producto (borrado o libre) da productId y categoryId null', async () => {
+    const z: any = row('Z', 'ACCEPTED')
+    z.order.items = [{ productName: 'Libre', productId: null, product: null, quantity: 1, notes: null, modifiers: [] }]
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) => (esSincronizacion(a) ? [] : [z])) as any)
+    const r = await listInbox({ venueId: 'v1', now: NOW })
+    expect(r.orders[0].items[0]).toMatchObject({ productId: null, categoryId: null })
   })
 
   it('1b: una etapa sin pedidos cuenta 0 (no desaparece del objeto)', async () => {
