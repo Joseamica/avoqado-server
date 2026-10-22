@@ -1927,6 +1927,105 @@ async function liberarValesYCancelarSesion(
   })
 }
 
+/** `FOR UPDATE NOWAIT` sobre una fila que tiene otra transacción ⇒ `lock_not_available` (55P03), como `esFilaTomadaSinEsperar`. */
+function esFilaTomadaPorOtraCaja(error: unknown): boolean {
+  const texto = error instanceof Error ? error.message : String(error)
+  const codigo = (error as { meta?: { code?: unknown } } | null)?.meta?.code
+  return codigo === '55P03' || /55P03|could not obtain lock/i.test(texto)
+}
+
+/** Lo que soltó una cancelación general de una venta de vales (D2): su sesión y sus vales. */
+export type ValesSoltados = { sessionId: string; ticketIds: string[] }
+
+/**
+ * 🔴 D2 (21-oct-2026, tablero hz:11d84b54:D2): la venta de vales también se cancela por la ruta GENERAL —el DELETE del POS, la terminal,
+ * la cola sin red (`cancelOrderInTransaction`), el panel (`deleteOrder`, `updateOrder`) y «Anular» todo en la TPV (`voidItems`)—, que no
+ * tocaba su sesión: quedaba MATERIALIZED con sus vales CLAIMED y nada los soltaba (`releaseExpiredClaims` sólo vence sesiones OPEN; el
+ * barrido de R12-3 excluye ventas canceladas). Al re-escanear: «Este vale está siendo cobrado en otra caja», para siempre.
+ *
+ * Va DESPUÉS de `assertOrderCancellableUnderLock` (la orden ya bloqueada; el 400 de «tiene dinero» y el 409 del cobro de terminal
+ * conservan su prioridad) y antes de escribir la cancelación. La venta queda como la deja la ruta de vales (`cancelAreaTicketCheckout`):
+ * OPEN/MATERIALIZED ⇒ vales ISSUED y sesión CANCELLED; un cobro de vales que puede estar en camino ⇒ el MISMO 409; PAID (venta devuelta
+ * y luego cancelada), CANCELLED o EXPIRED ⇒ nada.
+ *
+ * 🔴 La sesión y sus vales se toman SIN ESPERAR (Codex r1 #1 y r2 #1). La jerarquía de vales es sesión → vales → orden, y aquí la orden
+ * (y las hermanas de su mesa) ya están tomadas: esperar la sesión podía cruzarse con un cobro, un armado, una liquidación de varias
+ * cuentas o la cancelación de una hermana (40P01). Sin espera no hay ciclo: D2 no le agrega a la cancelación ninguna espera que no
+ * tuviera. Si otra caja tiene la sesión o un vale, 409 `VERSION_CONFLICT` (la cola sin red lo reintenta) y la transacción entera se
+ * revierte: la cancelación no se escribe.
+ *
+ * Devuelve lo que soltó (o `null`) para que quien llama lo anote con `auditarValesSoltados` DESPUÉS del commit (Codex r3 #1): una
+ * bitácora dentro de la transacción revisa la liga al empleado con un candado implícito que sí espera.
+ */
+export async function soltarValesAlCancelarLaVenta(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; orderId: string },
+): Promise<ValesSoltados | null> {
+  const candidata = await tx.areaTicketCheckoutSession.findFirst({
+    where: { venueId: input.venueId, orderId: input.orderId },
+    select: { id: true },
+  })
+  if (!candidata) return null
+  const sinEsperar = async (tomar: () => Promise<unknown>) => {
+    try {
+      await tomar()
+    } catch (error) {
+      if (esFilaTomadaPorOtraCaja(error)) {
+        throw domainError(409, 'VERSION_CONFLICT', 'Esta venta de vales se está cobrando o cambiando en otra caja; vuelve a intentarlo.')
+      }
+      throw error
+    }
+  }
+  await sinEsperar(
+    () =>
+      tx.$queryRaw`SELECT id FROM "AreaTicketCheckoutSession" WHERE id = ${candidata.id} AND "venueId" = ${input.venueId} FOR UPDATE NOWAIT`,
+  )
+  const sesion = await tx.areaTicketCheckoutSession.findFirst({
+    where: { id: candidata.id, venueId: input.venueId, orderId: input.orderId },
+    select: { id: true, status: true, tickets: { select: { id: true }, orderBy: { id: 'asc' } } },
+  })
+  if (!sesion) return null
+  if (
+    checkoutStatusIn(sesion.status, [
+      AreaTicketCheckoutStatus.PAYMENT_PENDING,
+      AreaTicketCheckoutStatus.PARTIALLY_PAID,
+      AreaTicketCheckoutStatus.RECONCILIATION_REQUIRED,
+    ])
+  ) {
+    throw domainError(409, 'CHECKOUT_HAS_PAYMENT', 'Esta venta ya tiene o podría tener un pago; usa conciliación o reembolso.')
+  }
+  if (!checkoutStatusIn(sesion.status, [AreaTicketCheckoutStatus.OPEN, AreaTicketCheckoutStatus.MATERIALIZED])) return null
+  if (sesion.tickets.length > 0) {
+    await sinEsperar(() =>
+      tx.$queryRaw(
+        Prisma.sql`SELECT id FROM "AreaTicket" WHERE "venueId" = ${input.venueId} AND id IN (${Prisma.join(
+          sesion.tickets.map(ticket => ticket.id),
+        )}) ORDER BY id FOR UPDATE NOWAIT`,
+      ),
+    )
+  }
+  await liberarValesYCancelarSesion(tx, { venueId: input.venueId, sessionId: sesion.id, cancelIdempotencyKey: null })
+  return { sessionId: sesion.id, ticketIds: sesion.tickets.map(ticket => ticket.id) }
+}
+
+/** D2: la bitácora de los vales que soltó una cancelación general, después del commit (nunca lanza; Codex r3 #1). */
+export function auditarValesSoltados(input: {
+  venueId: string
+  orderId: string
+  staffId?: string | null
+  soltados: ValesSoltados | null | undefined
+}): void {
+  if (!input.soltados) return
+  void logAction({
+    staffId: input.staffId ?? undefined,
+    venueId: input.venueId,
+    action: 'AREA_TICKET_CHECKOUT_CANCELLED',
+    entity: 'AreaTicketCheckoutSession',
+    entityId: input.soltados.sessionId,
+    data: { orderId: input.orderId, motivo: 'ORDEN_CANCELADA_POR_LA_RUTA_GENERAL', ticketIds: input.soltados.ticketIds },
+  })
+}
+
 export async function recordAreaTicketPrintAttempt(venueId: string, ticketId: string, input: RecordPrintAttemptInput) {
   const idempotencyKey = requireIdempotencyKey(input.idempotencyKey)
   const terminal = await resolveTerminal(venueId, input.deviceUid)

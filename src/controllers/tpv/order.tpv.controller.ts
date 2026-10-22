@@ -239,6 +239,7 @@ export async function voidItems(
       reason,
       staffId,
       expectedVersion,
+      actorId: (req as any).authContext?.userId,
     })
 
     res.status(200).json({

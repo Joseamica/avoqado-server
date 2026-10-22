@@ -1127,11 +1127,13 @@ describe('🔴 Ronda 12: dinero capturado sobre una sesión cancelada, reservas 
   // 🔴 R6-1 (efectivo sin red, Codex r5 #1): la MISMA venta cancelada por la ruta GENERAL (`cancelOrder`, el DELETE móvil) dejaba la
   // sesión MATERIALIZED y el registro de la terminal recibía 409 `CHECKOUT_ORDER_NOT_PAYABLE` (todo se revertía). Ahora queda igual que
   // por la ruta de vales: el Payment, la cuenta reabierta, la sesión CANCELLED y el vale liberado; sólo el suelto se descuenta.
+  // D2 (21-oct): la ruta general ya libera los vales y cancela la sesión AL CANCELAR (antes quedaba MATERIALIZED hasta que llegara dinero).
   it('🔴 R6-1: venta cancelada por la ruta GENERAL y la terminal registra $100 capturados ⇒ igual que R12-1 (antes: 409, el dinero se perdía)', async () => {
     await reiniciarInventario(10)
     const venta = await ventaDeVales()
     await cancelOrder(venueId!, venta.orderId, 'cancelada por el encargado', staffId)
-    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.MATERIALIZED)
+    expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.CANCELLED)
+    expect(await valesLiberados(venta)).toEqual(LIBERADOS)
 
     const cobro: any = await cobroDeLaTerminal(venta.orderId, 100)
 

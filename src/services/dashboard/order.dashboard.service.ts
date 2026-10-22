@@ -9,6 +9,7 @@ import prisma from '../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
 import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
+import type { ValesSoltados } from '@/services/mobile/areaTicketV7.mobile.service'
 import { logAction } from './activity-log.service'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
@@ -464,6 +465,8 @@ export async function updateOrder(
      * resolvedor efectivo. Sin él, en una venta COBRADA no se cambia el cliente (403). Sin decirlo, falla CERRADO.
      */
     puedeCambiarClienteEnVentaCobrada?: boolean
+    /** Quien edita (`authContext.userId`): firma la bitácora si cancelar suelta los vales de la venta (D2). */
+    staffId?: string
   } = {},
 ) {
   // Extract allowed fields for SUPERADMIN editing.
@@ -580,6 +583,7 @@ export async function updateOrder(
     // cualquier `status` sin revisar nada, y `orders:update` lo traen roles de piso. Si el status NO cambia (el diálogo lo
     // reenvía siempre) la guarda no se activa: editar el nombre de una orden ya cancelada no es cancelarla otra vez.
     const cancelando = (status === 'CANCELLED' || status === 'DELETED') && status !== currentOrder.status
+    let valesSoltados: ValesSoltados | null = null
     const escribir = (client: Prisma.TransactionClient) =>
       client.order.update({
         where: { id: orderId },
@@ -610,7 +614,7 @@ export async function updateOrder(
           },
         },
       })
-    if (cancelando)
+    if (cancelando) {
       await assertOrderCancellableUnderLock(
         client,
         { venueId, orderId },
@@ -620,12 +624,17 @@ export async function updateOrder(
           notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
       )
+      // 🔴 D2: la venta de vales queda como por la ruta de vales (vales libres, sin esperar por ellos), o se niega si su cobro puede
+      // estar en camino.
+      const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
+      valesSoltados = await soltarValesAlCancelarLaVenta(client, { venueId, orderId })
+    }
     const updatedOrder = await escribir(client)
     // Spec § 5.1.8: cancelar una cuenta de tarjetas sin cobrar desactiva sus sobres PENDING en la misma transacción.
     if (cancelando) await desactivarSobresPendientesDeCuentaEnTx(client, { venueId, orderId, staffId: null })
-    return { updatedOrder, cancelando }
+    return { updatedOrder, cancelando, valesSoltados }
   }
-  const { updatedOrder, cancelando } =
+  const { updatedOrder, cancelando, valesSoltados } =
     topologyWrite || tocaCliente ? await prisma.$transaction(update, { timeout: 15_000, maxWait: 5_000 }) : await update(prisma)
 
   // 🔥 INVENTORY DEDUCTION: Automatically deduct stock when order is completed
@@ -649,6 +658,9 @@ export async function updateOrder(
   // Cancelada por aquí, igual que por el DELETE: los referidos PENDING se anulan. Después del commit (abre su propia
   // transacción con `Order FOR UPDATE`). Nunca lanza.
   if (cancelando) {
+    // D2: los vales que la cancelación dejó libres, con quien editó (después del commit, Codex r3 #1).
+    const { auditarValesSoltados } = await import('@/services/mobile/areaTicketV7.mobile.service')
+    auditarValesSoltados({ venueId, orderId, staffId: opciones.staffId, soltados: valesSoltados })
     const { onOrderCancelled } = await import('@/services/referrals/referralRefund.service')
     await onOrderCancelled({ orderId: updatedOrder.id, venueId: updatedOrder.venueId })
     // Las pantallas abiertas se enteran como con `cancelOrder` (auditoría Fable 11-sep, P3-7).
@@ -663,7 +675,7 @@ const MENSAJE_ORDEN_CON_DINERO = 'Esta orden tiene pagos registrados. Reembolsa 
 /**
  * Eliminar una orden.
  */
-export async function deleteOrder(venueId: string, orderId: string) {
+export async function deleteOrder(venueId: string, orderId: string, performedBy?: string) {
   // 🔴 Diseño §C.6: todo dentro de UNA transacción, bajo el MISMO candado de la orden que toman la admisión de un cobro
   // y el registro del dinero. Antes la revisión de pagos corría fuera de toda transacción y no miraba la terminal: un
   // pago o una admisión podía colarse entre la lectura y el UPDATE.
@@ -672,6 +684,7 @@ export async function deleteOrder(venueId: string, orderId: string) {
   // reportes con el cobro registrado y el stock ya deducido — sin reembolso ni reposición. El camino correcto es
   // reembolsar primero. Se revisan paymentStatus Y los Payments reales porque hay estados inconsistentes históricos
   // (PENDING con pagos COMPLETED); un `Payment.type` nulo (legacy) cuenta como dinero.
+  let valesSoltados: ValesSoltados | null = null
   const cancelledOrder = await prisma.$transaction(
     async tx => {
       // Primero el candado de comandas (mismo orden que el armado): la cocina deja de ver la cuenta anulada.
@@ -685,6 +698,9 @@ export async function deleteOrder(venueId: string, orderId: string) {
           notFoundMessage: `Order with ID ${orderId} not found in this venue`,
         },
       )
+      // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
+      const { soltarValesAlCancelarLaVenta } = await import('@/services/mobile/areaTicketV7.mobile.service')
+      valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
       const cancelada = await tx.order.update({
         where: { id: orderId },
         // La versión sube para que los escritores con CAS (anular, descontar) se enteren de la cancelación.
@@ -704,6 +720,11 @@ export async function deleteOrder(venueId: string, orderId: string) {
     entityId: cancelledOrder.id,
     data: { status: cancelledOrder.status },
   })
+  // D2: los vales que la cancelación dejó libres, con quien canceló (después del commit, Codex r3 #1).
+  {
+    const { auditarValesSoltados } = await import('@/services/mobile/areaTicketV7.mobile.service')
+    auditarValesSoltados({ venueId, orderId, staffId: performedBy, soltados: valesSoltados })
+  }
 
   // Referidos: anula los PENDING de esta orden y revierte premios (defensa en
   // profundidad). Nunca lanza.

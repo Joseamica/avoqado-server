@@ -1,3 +1,4 @@
+import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import type { HttpEnvelope } from './http-operation.mobile.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -5046,6 +5047,9 @@ export async function cancelOrderInTransaction(
   }
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId })
+  // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
+  const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
+  const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
@@ -5067,12 +5071,13 @@ export async function cancelOrderInTransaction(
     ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
     ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
   ]
-  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs, valesSoltados }
 }
 
 export async function publishCancelledOrder(
   venueId: string,
-  result: Awaited<ReturnType<typeof cancelOrderInTransaction>>,
+  // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
+  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
   staffId?: string,
   reason?: string,
 ): Promise<void> {
@@ -5104,6 +5109,9 @@ export async function publishCancelledOrder(
   }
   const { logAction } = await import('../dashboard/activity-log.service')
   void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
+  // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
+  const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
+  auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.
