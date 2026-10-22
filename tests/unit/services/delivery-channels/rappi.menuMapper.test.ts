@@ -1,8 +1,9 @@
 /**
  * El menú de Avoqado → el de Rappi.
  *
- * Las reglas salen de la documentación de Rappi, no de suposiciones. Lo que estos tests NO
- * pueden probar es si el precio va en pesos o en centavos: su portal nunca lo dice.
+ * Las reglas salen de la documentación de Rappi, no de suposiciones. Si el precio va en pesos
+ * o en centavos su portal nunca lo dice: lo midió el recorrido real (M2, 21-oct: pesos), y el
+ * factor vive en `rappi.unidades.ts`.
  */
 import { construirMenuRappi, LIMITES } from '../../../../src/services/delivery-channels/providers/rappi/rappi.menuMapper'
 import type { MenuSnapshot } from '../../../../src/services/delivery-channels/core/menuSnapshot.service'
@@ -188,5 +189,48 @@ describe('construirMenuRappi', () => {
   it('un menú vacío produce un payload vacío, no una excepción', () => {
     const vacio: MenuSnapshot = { venueId: 'v1', generatedAt: '', categories: [] }
     expect(construirMenuRappi(vacio, 's1').payload.items).toEqual([])
+  })
+})
+
+// ── Las unidades (M2, recorrido real del 21-oct): el factor vive en UN lugar ──────────
+describe('el factor de moneda de Rappi', () => {
+  const RUTA_UNIDADES = '../../../../src/services/delivery-channels/providers/rappi/rappi.unidades'
+  const RUTA_MENU = '../../../../src/services/delivery-channels/providers/rappi/rappi.menuMapper'
+  const conExtra = producto({
+    modifierGroups: [
+      {
+        id: 'g1',
+        name: 'Extras',
+        required: false,
+        allowMultiple: false,
+        minSelections: 0,
+        maxSelections: 1,
+        modifiers: [{ plu: 'QUESO', name: 'Queso', price: 20 }],
+      },
+    ],
+  })
+
+  it('🔴 el precio publicado pasa por el factor (producto y topping)', () => {
+    // Con el factor medido (1: pesos) se publica el mismo número que el POS…
+    const { dePesosARappi } = jest.requireActual(RUTA_UNIDADES)
+    const real = construirMenuRappi(menu([conExtra]), 's1')
+    expect(real.payload.items[0].price).toBe(dePesosARappi(25))
+    expect(real.payload.items[0].children![0].price).toBe(dePesosARappi(20))
+
+    // …y si Rappi pidiera centavos, cambia en UN lugar: el producto Y el topping salen ×100, con el margen ya aplicado.
+    jest.isolateModules(() => {
+      jest.doMock(RUTA_UNIDADES, () => {
+        const { Prisma } = jest.requireActual('@prisma/client')
+        return {
+          ...jest.requireActual(RUTA_UNIDADES),
+          FACTOR_MONEDA_RAPPI: 100,
+          dePesosARappi: (pesos: number) => new Prisma.Decimal(pesos).mul(100).toNumber(),
+        }
+      })
+      const { construirMenuRappi: conCentavos } = require(RUTA_MENU)
+      const r = conCentavos(menu([conExtra]), 's1', { precios: { markupPercent: 30 } })
+      expect(r.payload.items[0].price).toBe(3250) // 25 × 1.30 = 32.50 pesos
+      expect(r.payload.items[0].children[0].price).toBe(2600) // 20 × 1.30 = 26.00 pesos
+    })
   })
 })

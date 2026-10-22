@@ -25,6 +25,7 @@ import { confirmarTienda } from '../../../../src/services/delivery-channels/prov
 import { historialDelPedidoRappi, suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { anotarAceptacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
 import { rappiAdapter } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
+import { VariantePendienteError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.mapper'
 import { llaveDeDeduplicacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 
 jest.mock('../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service', () => ({
@@ -87,7 +88,9 @@ function payloadPedido(over: Record<string, unknown> = {}) {
       cooking_time: 10,
       min_cooking_time: 5,
       max_cooking_time: 20,
-      totals: { total_products_with_discount: 100, other_totals: { tip: 0 } },
+      delivery_method: 'delivery',
+      payment_method: 'cc',
+      totals: { total_products: 100, total_order: 100, other_totals: { tip: 0 } },
       items: [{ id: '1', sku: 'TACO', name: 'Taco', price: 25, quantity: 4 }],
       ...over,
     },
@@ -130,6 +133,8 @@ describe('processRappiEvent', () => {
     mockHistorialHttp.mockResolvedValue({ ok: true, status: 200, raw: '[]' })
     // Tarea 10: la búsqueda del aviso hermano (la cancelación del pedido, o el pedido de la cancelación) no encuentra nada.
     ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockReset().mockResolvedValue(null)
+    // Tarea 12: la zona del negocio (para la hora del pedido); por default el negocio no la trae.
+    ;(prisma.venue.findUnique as jest.Mock).mockReset().mockResolvedValue(null)
   })
 
   // 🔴 Desde la Tarea 8 TODO cierre va por `cerrarEventoReclamado` con su token: `markEventResult` escribe sin
@@ -200,7 +205,7 @@ describe('processRappiEvent', () => {
 
   // ── La red de dinero manda sobre el reloj ────────────────────────────────────────
   it('🔴 si el dinero NO CUADRA no se acepta NADA — un pedido que no podemos registrar no se toma', async () => {
-    const descuadrado = payloadPedido({ totals: { total_products_with_discount: 99999, other_totals: { tip: 0 } } })
+    const descuadrado = payloadPedido({ totals: { total_products: 99999, total_order: 99999, other_totals: { tip: 0 } } })
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila({ payload: descuadrado }))
 
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
@@ -1207,7 +1212,8 @@ describe('processRappiEvent', () => {
     it('🔴 ERRORES_TERMINALES es exactamente TERMINAL_ERRORS del job', () => {
       const fuente = fs.readFileSync(path.join(process.cwd(), 'src/jobs/delivery-webhook-reconciliation.job.ts'), 'utf8')
       const lista = /TERMINAL_ERRORS\s*=\s*\[([^\]]*)\]/.exec(fuente)?.[1] ?? ''
-      const delJob = Array.from(lista.matchAll(/'([A-Z_]+)'/g), m => m[1])
+      // Con dígitos: `VARIANTE_BLOQUE_2B` (Tarea 12) lleva uno, y sin ellos la copia se leía incompleta.
+      const delJob = Array.from(lista.matchAll(/'([A-Z0-9_]+)'/g), m => m[1])
       expect(delJob.length).toBeGreaterThan(0)
       expect([...ERRORES_TERMINALES].sort()).toEqual([...delJob].sort())
     })
@@ -1286,7 +1292,7 @@ describe('processRappiEvent', () => {
       )
     })
 
-    it('cancelada sin comanda ⇒ PROCESSED (la canceló otro proceso mientras se registraba: no hay comanda que reponer)', async () => {
+    it('cancelada sin comanda ⇒ el evento cierra PROCESSED y el desenlace es CANCELLED (la canceló otro proceso mientras se registraba: no hay comanda que reponer)', async () => {
       mockIngest.mockResolvedValueOnce({ ...INGESTA_OK, kitchenTicketCreated: false, hayComanda: false, cancelada: true })
 
       const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
@@ -1332,6 +1338,160 @@ describe('processRappiEvent', () => {
       expect(mockIngest).toHaveBeenCalledTimes(1)
       expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
       expect(r).toEqual({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+    })
+  })
+
+  // ── Tarea 12: el dinero exacto por variante, la hora del pedido y la tienda que cambió ──
+  describe('el dinero exacto (Tarea 12)', () => {
+    const findUnique = () => prisma.deliveryOrderEvent.findUnique as jest.Mock
+    const findFirst = () => prisma.deliveryOrderEvent.findFirst as jest.Mock
+    const zonaDelNegocio = () => prisma.venue.findUnique as jest.Mock
+    /** El aviso NEW_ORDER REAL de repartidor propio del sandbox (M10): Agua 20, envío 35, propina 20, `total_order` 75. */
+    const MARKETPLACE_REAL = JSON.parse(crudoDelSandbox('new-order-marketplace-propina.json'))
+    /** La normalización que recibió la ingesta. */
+    const normalizadoIngerido = () => mockIngest.mock.calls[0][0]
+
+    it('🔴 una variante pendiente (efectivo con repartidor propio) queda FAILED con su código y sin aceptar', async () => {
+      findUnique().mockResolvedValue(fila({ payload: payloadPedido({ delivery_method: 'marketplace', payment_method: 'cash' }) }))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'FAILED', error: 'VARIANTE_BLOQUE_2B' })
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockAnotar).not.toHaveBeenCalled()
+      expect(mockIngest).not.toHaveBeenCalled()
+      // El código EXACTO: la reconciliación lo reconoce como terminal y no lo vuelve a tomar.
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'VARIANTE_BLOQUE_2B')
+      // Visible para una persona: un cliente pidió y Rappi lo va a cancelar al vencer el reloj.
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('🚨'),
+        expect.objectContaining({ eventRowId: 'evt1', codigo: 'VARIANTE_BLOQUE_2B', venueId: 'v1' }),
+      )
+    })
+
+    it('una variante SIN CALIBRAR queda FAILED con su código (el que trae el error), sin aceptar', async () => {
+      const espia = jest.spyOn(rappiAdapter, 'normalizeOrder').mockImplementationOnce(() => {
+        throw new VariantePendienteError('VARIANTE_SIN_CALIBRAR', 'variante sin calibrar: pickup')
+      })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'FAILED', error: 'VARIANTE_SIN_CALIBRAR' })
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'VARIANTE_SIN_CALIBRAR')
+      espia.mockRestore()
+    })
+
+    it('con la marca (Rappi ya lo aceptó) una variante pendiente queda FAILED con su código y 🚨 para reconciliar a mano', async () => {
+      findUnique().mockResolvedValue(
+        fila({ resourcePayload: MARCA, payload: payloadPedido({ delivery_method: 'pickup', payment_method: 'pos_terminal' }) }),
+      )
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'FAILED', error: 'VARIANTE_BLOQUE_2B', accepted: true })
+      expect(mockIngest).not.toHaveBeenCalled()
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', undefined, 'VARIANTE_BLOQUE_2B')
+      expect(logger.error).toHaveBeenCalledWith(expect.stringMatching(/🚨.*ACEPTADO/), expect.objectContaining({ accepted: true }))
+    })
+
+    it('los dos códigos de variante pendiente son terminales (la copia de TERMINAL_ERRORS)', () => {
+      expect(ERRORES_TERMINALES).toEqual(expect.arrayContaining(['VARIANTE_BLOQUE_2B', 'VARIANTE_SIN_CALIBRAR']))
+    })
+
+    it('un error de traducción que no es de variante sigue como hoy: FAILED con su mensaje (reintentable)', async () => {
+      findUnique().mockResolvedValue(fila({ payload: payloadPedido({ delivery_method: 'express' }) }))
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r.outcome).toBe('FAILED')
+      expect(r.error).toMatch(/delivery_method/)
+      expect(ERRORES_TERMINALES).not.toContain(r.error)
+      expect(aceptarOk).not.toHaveBeenCalled()
+    })
+
+    it('«sandbox»: el pedido real de repartidor propio llega a la ingesta con el envío y la propina del negocio', async () => {
+      findUnique().mockResolvedValue(
+        fila({ payload: MARKETPLACE_REAL, channelLink: { ...fila().channelLink, externalLocationId: '900175625' } }),
+      )
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true })
+      expect(aceptarOk).toHaveBeenCalledWith('1444309268', '900175625', expect.any(Number))
+      expect(normalizadoIngerido().payment).toMatchObject({
+        saleAmount: '20.00',
+        merchantFees: '35.00',
+        tipAmount: '20.00',
+        externallyPaidSale: '55.00',
+        externallyPaidTip: '20.00',
+        cashDueSale: '0.00',
+        cashDueTip: '0.00',
+      })
+    })
+
+    // ── La hora: `created_at` llega SIN zona y en la de la tienda ──
+    it('🔴 la hora del pedido se lee en la zona del negocio, con UNA lectura acotada', async () => {
+      findUnique().mockResolvedValue(fila({ payload: payloadPedido({ created_at: '2026-10-21 22:15:46' }) }))
+      zonaDelNegocio().mockResolvedValue({ timezone: 'America/Bogota' })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toMatchObject({ outcome: 'PROCESSED' })
+      expect(zonaDelNegocio()).toHaveBeenCalledTimes(1)
+      expect(zonaDelNegocio()).toHaveBeenCalledWith({ where: { id: 'v1' }, select: { timezone: true } })
+      expect(normalizadoIngerido().placedAt.toISOString()).toBe('2026-10-22T03:15:46.000Z')
+    })
+
+    it.each([
+      ['el negocio no la trae', () => zonaDelNegocio().mockResolvedValue(null)],
+      ['su lectura falla', () => zonaDelNegocio().mockRejectedValue(new Error('la base se cayó'))],
+    ])('si %s, se lee en la de México y el pedido entra igual', async (_caso, preparar) => {
+      findUnique().mockResolvedValue(fila({ payload: payloadPedido({ created_at: '2026-10-21 22:15:46' }) }))
+      preparar()
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true })
+      expect(normalizadoIngerido().placedAt.toISOString()).toBe('2026-10-22T04:15:46.000Z')
+    })
+
+    // ── Pendiente 1 de la revisión de la Tarea 11: la llave del aviso hermano lleva la tienda DEL EVENTO ──
+    it('🔴 un vínculo que cambió de tienda sigue encontrando el aviso guardado (la llave lleva la tienda del evento)', async () => {
+      // El NEW_ORDER y su cancelación se guardaron con la tienda 900105814; después el vínculo pasó a otra tienda. El
+      // ingreso armó sus llaves con la tienda de cada aviso: buscar con la del vínculo de HOY no los encontraría.
+      const vinculoCambiado = { ...fila().channelLink, externalLocationId: 'tienda-nueva' }
+      findUnique().mockResolvedValue(fila({ channelLink: vinculoCambiado }))
+      findFirst().mockResolvedValue({ id: 'evt-cancel', payload: { event: 'canceled_with_charge', order_id: '392625' } })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(findFirst()).toHaveBeenCalledWith({
+        where: { dedupKey: 'RAPPI:ORDER_EVENT_CANCEL:900105814:392625', channelLinkId: 'link1' },
+        select: { id: true, payload: true },
+      })
+      expect(r).toMatchObject({ outcome: 'CANCELLED', error: 'CANCELADO_ANTES_DE_REGISTRAR' })
+      expect(aceptarOk).not.toHaveBeenCalled()
+
+      // Y la cancelación de ese vínculo encuentra su NEW_ORDER con la tienda del aviso de cancelación.
+      findFirst().mockReset().mockResolvedValue({ id: 'evt-pedido', status: 'RECEIVED', error: null })
+      findUnique().mockResolvedValue(
+        fila({
+          eventType: 'ORDER_EVENT_CANCEL',
+          payload: { event: 'canceled_with_charge', order_id: '392625', store_id: '900105814' },
+          channelLink: vinculoCambiado,
+        }),
+      )
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+
+      const c = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(findFirst()).toHaveBeenCalledWith({
+        where: { dedupKey: 'RAPPI:NEW_ORDER:900105814:392625', channelLinkId: 'link1' },
+        select: { id: true, status: true, error: true },
+      })
+      expect(c).toMatchObject({ outcome: 'FAILED', error: 'CANCELACION_EN_ESPERA' })
     })
   })
 })

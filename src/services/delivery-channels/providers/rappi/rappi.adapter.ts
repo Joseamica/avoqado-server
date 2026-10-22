@@ -28,7 +28,7 @@ import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { HorarioSemanal } from '../../core/deliveryHours.service'
 import { aHorarioRappi } from './rappi.hours'
 import { construirMenuRappi, type PreciosDeCanal } from './rappi.menuMapper'
-import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
+import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type OpcionesDeTraduccion, type RappiOrderPayload } from './rappi.mapper'
 import { verifyRappiSignature } from './rappi.signature'
 
 /** Los 11 eventos que Rappi documenta, tal cual los nombra. */
@@ -152,8 +152,9 @@ export const rappiAdapter = {
     return [RAPPI_EVENTS.NEW_ORDER, RAPPI_EVENTS.NEW_ORDER_SCHEDULED]
   },
 
-  normalizeOrder(raw: unknown): NormalizedDeliveryOrder {
-    return normalizeRappiOrder(raw)
+  /** `opts` es de Rappi (la zona del negocio para la hora del pedido); el núcleo llama con el crudo solo. */
+  normalizeOrder(raw: unknown, opts?: OpcionesDeTraduccion): NormalizedDeliveryOrder {
+    return normalizeRappiOrder(raw, opts)
   },
 
   /**

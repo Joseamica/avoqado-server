@@ -15,12 +15,13 @@
  *     full en lugar de precios con descuento aplicado"). El descuento lo pone Rappi.
  *   · Un producto SIN toppings debe costar más que cero.
  *
- * ⚠️ Lo que su documentación NO dice, y por eso no se asume: **si el precio va en pesos o en
- * centavos**. Aquí se manda el mismo número que el POS tiene, y el primer menú aprobado —o el
- * primer pedido— resuelve la duda. Es la misma incógnita que el mapeo de pedidos ya cubre con
- * su red de cuadre.
+ * ⚠️ Lo que su documentación NO dice: **si el precio va en pesos o en centavos**. Lo midió el
+ * recorrido real (M2, 21-oct-2026): un pedido de nuestro menú llegó con los mismos números que
+ * publicamos, o sea PESOS. El factor vive en `rappi.unidades.ts`, el mismo que usa el mapeo de
+ * pedidos, y su red de cuadre grita si algún día deja de ser cierto.
  */
 import type { MenuSnapshot, MenuSnapshotProduct } from '../../core/menuSnapshot.service'
+import { dePesosARappi } from './rappi.unidades'
 
 /** Topes documentados por Rappi. Superarlos es un rechazo garantizado. */
 export const LIMITES = {
@@ -81,15 +82,18 @@ export interface PreciosDeCanal {
  */
 function precioPublicado(sku: string, precioMostrador: number, p?: PreciosDeCanal): number {
   const fijo = p?.overrides?.[sku]
-  if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return redondear(fijo)
+  if (typeof fijo === 'number' && Number.isFinite(fijo) && fijo >= 0) return enUnidadesDeRappi(fijo)
   const pct = p?.markupPercent
-  if (typeof pct === 'number' && Number.isFinite(pct) && pct !== 0) return redondear(precioMostrador * (1 + pct / 100))
-  return redondear(precioMostrador)
+  if (typeof pct === 'number' && Number.isFinite(pct) && pct !== 0) return enUnidadesDeRappi(precioMostrador * (1 + pct / 100))
+  return enUnidadesDeRappi(precioMostrador)
 }
 
-/** Rappi acepta ENTEROS en `price`. Redondear una sola vez, al final. */
-function redondear(v: number): number {
-  return Math.round(v)
+/**
+ * Pesos → unidades de Rappi (el factor vive en `rappi.unidades.ts`, el mismo del mapeo de pedidos), y Rappi acepta ENTEROS
+ * en `price`: se redondea una sola vez, al final, ya en SUS unidades.
+ */
+function enUnidadesDeRappi(pesos: number): number {
+  return Math.round(dePesosARappi(pesos))
 }
 
 function recortar(v: string | null | undefined, max: number): string {

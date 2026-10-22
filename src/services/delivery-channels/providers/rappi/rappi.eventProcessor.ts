@@ -33,7 +33,7 @@ import {
   type EvidenciaDeAceptacion,
   type LecturaDelHistorial,
 } from './rappi.estadoDelPedido'
-import { tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
+import { tiempoDeCoccion, VariantePendienteError, type RappiOrderPayload } from './rappi.mapper'
 import { leerEstadoAprovisionamiento, type ResultadoRappiTienda } from './rappi.selfOnboarding'
 import { llaveDeAvisoDePedido } from './rappi.webhookIngress'
 
@@ -74,6 +74,8 @@ export const ERRORES_TERMINALES: readonly string[] = [
   'CHANNEL_DISABLED',
   'ACEPTACION_INCIERTA',
   'CANCELADO_ANTES_DE_REGISTRAR',
+  'VARIANTE_BLOQUE_2B',
+  'VARIANTE_SIN_CALIBRAR',
 ]
 
 const esObjeto = (v: unknown): v is Record<string, unknown> => typeof v === 'object' && v !== null && !Array.isArray(v)
@@ -87,23 +89,21 @@ function motivoDeCancelacion(payload: Prisma.JsonValue): string {
   return `cancelado por Rappi: ${tipo || 'sin tipo'}`
 }
 
-/** El vínculo de un evento, con lo que hace falta para armar la llave de su aviso hermano. */
-type VinculoDelAviso = { id: string; externalLocationId: string }
-
 /**
  * El aviso de cancelación (`ORDER_EVENT_CANCEL`) ya guardado de un pedido, de su vínculo. Acotada: UNA fila y el `select`
  * mínimo (su `payload` trae el tipo para el motivo).
  *
- * 🔴 Por la llave ÚNICA `dedupKey`, la misma que el ingreso le pone a ese aviso (`llaveDeAvisoDePedido`): la tienda es el
- * `externalLocationId` del vínculo porque el ingreso liga el aviso al vínculo por ESE valor. Antes recorría los eventos del
- * vínculo por el prefijo `(provider, channelLinkId)` del índice compuesto, dos veces por pedido: crecía con la tienda.
+ * 🔴 Por la llave ÚNICA `dedupKey`, la misma que el ingreso le pone a ese aviso (`llaveDeAvisoDePedido`), con la tienda DEL
+ * EVENTO (`storeId`): es el valor que el ingreso usó al guardarlo. El `externalLocationId` del vínculo es el de HOY, y si el
+ * vínculo cambió de tienda ya no es el de los avisos guardados: la búsqueda no los encontraría. Antes recorría los eventos
+ * del vínculo por el prefijo `(provider, channelLinkId)` del índice compuesto, dos veces por pedido: crecía con la tienda.
  * El `channelLinkId` se conserva para encontrar exactamente lo mismo que antes (nunca el aviso de otro vínculo).
  */
-function avisoDeCancelacion(externalOrderId: string, vinculo: VinculoDelAviso) {
+function avisoDeCancelacion(externalOrderId: string, storeId: string | null, vinculoId: string) {
   return prisma.deliveryOrderEvent.findFirst({
     where: {
-      dedupKey: llaveDeAvisoDePedido(RAPPI_EVENTS.ORDER_EVENT_CANCEL, vinculo.externalLocationId, externalOrderId),
-      channelLinkId: vinculo.id,
+      dedupKey: llaveDeAvisoDePedido(RAPPI_EVENTS.ORDER_EVENT_CANCEL, storeId, externalOrderId),
+      channelLinkId: vinculoId,
     },
     select: { id: true, payload: true },
   })
@@ -111,17 +111,36 @@ function avisoDeCancelacion(externalOrderId: string, vinculo: VinculoDelAviso) {
 
 /**
  * El `NEW_ORDER` guardado de un pedido (del vínculo de la cancelación, si lo tiene). Acotada: UNA fila, el `select` mínimo.
- * Con vínculo, por la llave única (como `avisoDeCancelacion`). Sin vínculo no hay tienda confiable para armarla —el
- * `store_id` de la cancelación no ligó con ningún vínculo— y se conserva la búsqueda por el pedido: es rara (una
- * cancelación de una tienda sin vincular) y la reconciliación no la vuelve a tomar (la deja ORPHANED).
+ * Con vínculo, por la llave única con la tienda del evento (como `avisoDeCancelacion`). Sin vínculo se conserva la búsqueda
+ * por el pedido: es rara (una cancelación de una tienda sin vincular) y la reconciliación no la vuelve a tomar (la deja
+ * ORPHANED).
  */
-function avisoDelPedido(externalOrderId: string, vinculo: VinculoDelAviso | null) {
+function avisoDelPedido(externalOrderId: string, storeId: string | null, vinculoId: string | null) {
   return prisma.deliveryOrderEvent.findFirst({
-    where: vinculo
-      ? { dedupKey: llaveDeAvisoDePedido(RAPPI_EVENTS.NEW_ORDER, vinculo.externalLocationId, externalOrderId), channelLinkId: vinculo.id }
+    where: vinculoId
+      ? { dedupKey: llaveDeAvisoDePedido(RAPPI_EVENTS.NEW_ORDER, storeId, externalOrderId), channelLinkId: vinculoId }
       : { provider: DeliveryProvider.RAPPI, eventType: RAPPI_EVENTS.NEW_ORDER, externalOrderId },
     select: { id: true, status: true, error: true },
   })
+}
+
+/**
+ * La zona IANA del negocio, para leer la hora del pedido (`created_at` llega SIN zona y en la de la tienda). UNA lectura
+ * acotada por la llave primaria, con el `select` mínimo: el vínculo no la trae. Si falla, el pedido entra igual con la de
+ * México (`undefined` ⇒ default del mapeo): una hora corrida se corrige, un pedido perdido no.
+ */
+async function zonaDelNegocio(venueId: string, eventRowId: string): Promise<string | undefined> {
+  try {
+    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+    return venue?.timezone ?? undefined
+  } catch (err) {
+    logger.warn('🛵 [Rappi] no se pudo leer la zona del negocio: la hora del pedido se lee en la de México', {
+      eventRowId,
+      venueId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return undefined
+  }
 }
 
 /** Dependencias inyectables: sin esto no se puede probar sin red. */
@@ -259,7 +278,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     // el job la reintente con su espera normal; para entonces el NEW_ORDER ya la vio (la busca antes de aceptar y después
     // de registrar) o la venta ya existe y se cancela aquí. Con un NEW_ORDER terminado o que nunca llegó, nada que esperar.
     if (r.outcome === 'ORDER_NOT_FOUND' && evento.eventType === RAPPI_EVENTS.ORDER_EVENT_CANCEL) {
-      const pedido = await avisoDelPedido(identidad.orderId, evento.channelLink ?? null)
+      const pedido = await avisoDelPedido(identidad.orderId, identidad.storeId, evento.channelLink?.id ?? null)
       const seRegistraTodavia =
         pedido && pedido.status !== DeliveryOrderEventStatus.PROCESSED && !(pedido.error && ERRORES_TERMINALES.includes(pedido.error))
       if (seRegistraTodavia) {
@@ -442,7 +461,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // entre dos intentos. Se mira con el reclamo en la mano y la fila releída, ANTES de aceptar y de cualquier otra decisión
   // (también la del canal deshabilitado): un pedido cancelado ni se acepta ni se registra.
   if (identidad.orderId) {
-    const aviso = await avisoDeCancelacion(identidad.orderId, evento.channelLink)
+    const aviso = await avisoDeCancelacion(identidad.orderId, identidad.storeId, evento.channelLink.id)
     if (aviso) {
       const motivo = motivoDeCancelacion(aviso.payload)
       const datos = {
@@ -510,11 +529,27 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
 
   // Traducir ANTES de aceptar: si el dinero no cuadra (la red contra el error de unidades),
   // NO se acepta un pedido que no podemos registrar — lanza, queda FAILED, y se revisa.
+  // La hora del pedido llega sin zona y en la de la tienda: se lee en la del negocio.
+  const zonaHoraria = await zonaDelNegocio(evento.channelLink.venueId, eventRowId)
   let normalizado
   try {
-    normalizado = rappiAdapter.normalizeOrder(evento.payload)
+    normalizado = rappiAdapter.normalizeOrder(evento.payload, { zonaHoraria })
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
+    // 🔴 Una variante que esta fase no registra (efectivo con repartidor propio o para recoger: el bloque 2b; o una sin
+    // calibrar) queda FAILED con su código EXACTO: el job lo reconoce como terminal y no la vuelve a tomar —reintentarla no
+    // cambia nada—. No se acepta: Rappi la cancela sola al vencer su reloj. Una persona tiene que enterarse.
+    if (err instanceof VariantePendienteError) {
+      await cerrar(DeliveryOrderEventStatus.FAILED, undefined, err.codigo)
+      const datos = { eventRowId, orderId: identidad.orderId, venueId: evento.venueId, codigo: err.codigo, motivo: msg }
+      if (yaAceptado)
+        logger.error('🚨 [Rappi] pedido YA ACEPTADO en Rappi con una variante pendiente — no se registra; reconciliar a mano', {
+          ...datos,
+          accepted: true,
+        })
+      else logger.error('🚨 [Rappi] pedido con una variante pendiente — no se aceptó ni se registra (Rappi lo cancela solo)', datos)
+      return { outcome: 'FAILED', error: err.codigo, ...(yaAceptado ? { accepted: true } : {}) }
+    }
     await cerrar(DeliveryOrderEventStatus.FAILED, undefined, msg.slice(0, 500))
     if (yaAceptado)
       logger.error('🚨 [Rappi] pedido YA ACEPTADO en Rappi que NO se pudo traducir — reconciliar a mano', { eventRowId, error: msg })
@@ -634,7 +669,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // evento en el historial: un pedido aceptado y cancelado con un nombre que `leerHistorial` no conoce también cae aquí.
   let canceladaTrasRegistrar = false
   try {
-    const aviso = await avisoDeCancelacion(normalizado.externalId, evento.channelLink)
+    const aviso = await avisoDeCancelacion(normalizado.externalId, identidad.storeId, evento.channelLink.id)
     if (aviso) {
       const motivo = motivoDeCancelacion(aviso.payload)
       const r = await cancelDeliveryOrder(normalizado.externalId, DeliveryProvider.RAPPI, motivo)

@@ -1,21 +1,25 @@
 /**
  * El pedido de Rappi → el contrato interno.
  *
- * 🔴 ESCRITO CONTRA LA DOCUMENTACIÓN, SIN UN PEDIDO REAL TODAVÍA. Los nombres de campo salen
- * del JSON que el portal imprime para `NEW_ORDER_SCHEDULED`, y la propia documentación dice
- * que `NEW_ORDER` manda "la misma información". Pero hay una cosa que ese ejemplo NO puede
- * decirnos, porque viene en ceros: **si los montos son pesos o centavos**.
+ * Escrito contra la documentación y calibrado con el recorrido real en el sandbox DEV (21-oct-2026, `recorrido-real.md`):
+ * M2 midió las UNIDADES (pesos: `rappi.unidades.ts`) y M10 qué es del negocio en cada variante de entrega.
  *
- * Por eso este módulo no adivina: comprueba que los renglones CUADREN contra el total y
- * revienta si no. Un error de unidades es un factor de 100, y prefiero que el primer pedido
- * real falle ruidosamente a que registre una venta de $1,250 como $12.50 —o al revés— y nadie
- * se entere hasta el corte. Es la misma red que ya atrapó el pedido de $0 en Uber.
+ * 🔴 F1 (founder, 20-oct): la venta (`saleAmount`) es el precio COMPLETO de los renglones y `discountAmount` es SÓLO lo
+ * que asume el negocio. Lo que asume Rappi no baja la venta: queda en el crudo y en el log del pedido.
+ *
+ * 🔴 Este módulo no adivina el dinero: comprueba que los renglones CUADREN contra `total_products` y revienta si no, y una
+ * variante cuyo dinero no está calibrado (o que la caja tendría que cobrar: el bloque 2b) no se registra. Prefiero que un
+ * pedido falle ruidosamente a que registre una venta de $1,250 como $12.50 —o al revés— y nadie se entere hasta el corte.
  */
 import { Prisma } from '@prisma/client'
+import { fromZonedTime } from 'date-fns-tz'
 
+import logger from '@/config/logger'
+import { zonaValida } from '@/utils/datetime'
+
+import { assertDeliveryMoneyInvariants } from '../../core/money'
 import type { NormalizedDeliveryItem, NormalizedDeliveryOrder, NormalizedDeliveryPayment } from '../../core/types'
-
-const D = (v: unknown): Prisma.Decimal => new Prisma.Decimal(typeof v === 'number' || typeof v === 'string' ? v : 0)
+import { deRappiAPesos } from './rappi.unidades'
 
 /** Tolerancia al cuadrar: un centavo por renglón, por el redondeo del proveedor. */
 const TOLERANCIA_POR_RENGLON = 0.01
@@ -34,7 +38,9 @@ interface RappiItem {
   name?: string
   quantity?: number
   sku?: string
+  /** «Precio unitario sin descuento»: es el que manda (F1). */
   price?: number
+  /** 🔴 OBSOLETO desde el 1-nov-2022 y, en producción, rebajado por la parte del aliado (diferencia 4): NUNCA se lee. */
   unit_price_with_discount?: number
   unit_price_without_discount?: number
   /** Lo que el cliente escribió para ESTE renglón ("sin cebolla"). */
@@ -58,18 +64,39 @@ interface RappiOrderDetail {
   min_cooking_time?: number
   max_cooking_time?: number
   totals?: {
+    /** «Total products without discounts»: contra éste cuadran los renglones. */
     total_products?: number
-    /** El total DESPUÉS de descuentos. Es contra éste que cuadran los renglones. */
+    /** 🔴 OBSOLETO desde el 1-nov-2022: no se lee. */
     total_products_with_discount?: number
     total_discounts?: number
+    /** «Lo que recibe el restaurante»: en el recorrido real (M10) dijo exactamente qué es del negocio en cada variante. */
     total_order?: number
-    /** La parte de los descuentos que ABSORBE EL COMERCIO, no Rappi. */
+    /** La parte de los descuentos que asume el aliado. En producción incluye cupones; en el sandbox no (diferencia 6). */
     total_discount_by_partner?: number
+    /** El mismo campo con el nombre de la API nueva. */
+    totals_discount_by_partner?: number
+    /** Lo que el cliente paga EN EFECTIVO al repartidor (repartidor propio o para recoger, en efectivo). */
     total_to_pay?: number
+    /** Descuento que el soporte de Rappi le dio al cliente: lo asume Rappi. */
+    discount_by_support?: number
     charges?: { shipping?: number; service_fee?: number } & Record<string, unknown>
     other_totals?: { tip?: number; total_rappi_pay?: number; total_rappi_credits?: number }
   }
   items?: RappiItem[]
+  /**
+   * Cada descuento con su reparto. Un descuento compartido llega en UNA entrada con las dos partes (sandbox) o en DOS, una
+   * por quien lo paga (producción): la suma de `amount_by_partner` sale igual en los dos casos (diferencia 3).
+   */
+  discounts?: RappiDescuento[] | null
+}
+
+interface RappiDescuento {
+  value?: number
+  type?: string
+  /** Lo que asume Rappi, en dinero. */
+  amount_by_rappi?: number
+  /** Lo que asume el aliado (el negocio), en dinero. */
+  amount_by_partner?: number
 }
 
 export interface RappiOrderPayload {
@@ -111,9 +138,10 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
   return items.map((it, idx) => {
     const cantidad = Number.isFinite(it.quantity) && (it.quantity as number) > 0 ? (it.quantity as number) : 1
 
-    // `unit_price_with_discount` manda sobre `price`: es lo que el cliente REALMENTE pagó por
-    // unidad. Usar el precio sin descuento inflaría la venta y descuadraría contra el total.
-    const unitario = D(it.unit_price_with_discount ?? it.price ?? 0)
+    // 🔴 F1: `price` es el precio unitario SIN descuento, y es el que manda: la venta es el precio completo y el descuento
+    // del negocio va aparte (`discountAmount`). `unit_price_with_discount` está obsoleto y en producción llega rebajado por
+    // la parte del aliado: leerlo restaría ese descuento DOS veces. Todo monto pasa por el factor de `rappi.unidades.ts`.
+    const unitario = deRappiAPesos(it.price)
 
     // 🔴 Los modificadores cuestan dinero y van EN el total del renglón. La glosario de
     // Rappi confirma que el `sku` es "el identificador que el ALIADO otorga" — el nuestro.
@@ -123,7 +151,7 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
       j,
       /** Cuántos de ESTE extra pidió por cada unidad del producto. */
       cantidadPropia: Number.isFinite(sub.quantity) && (sub.quantity as number) > 0 ? (sub.quantity as number) : 1,
-      unitario: D(sub.price ?? 0),
+      unitario: deRappiAPesos(sub.price),
     }))
 
     // Lo que cuestan los extras en UNA unidad del producto. Es lo que multiplica `total`.
@@ -168,80 +196,242 @@ function mapearItems(items: RappiItem[]): NormalizedDeliveryItem[] {
   })
 }
 
-/**
- * Reparte el dinero entre "lo que liquida la plataforma" y "lo que el comercio cobra en mano".
- *
- * 🔴 `payment_method: "cash"` existe en Rappi y es común en México: el cliente le paga en
- * efectivo al repartidor. Ese efectivo **NO entra al cajón del comercio** —lo recibe el
- * repartidor y Rappi liquida después—, así que sigue siendo dinero liquidado por la
- * plataforma, no `cashDueSale`. Confundirlo haría que el arqueo de caja pida un efectivo que
- * nunca estuvo ahí, y el turno cerraría con faltante todos los días.
- *
- * ⚠️ SUPUESTO ABIERTO hasta tener un pedido real: que `total_to_pay` sea lo que se cobra por
- * la venta y `other_totals.tip` la propina. El bloque `charges` viene vacío en el único
- * ejemplo publicado y no sabemos qué trae — por eso `merchantFees` queda en 0 y el cuadre de
- * abajo se encarga de gritar si eso resulta falso.
- */
-function mapearPago(detail: RappiOrderDetail, ventaRenglones: Prisma.Decimal): NormalizedDeliveryPayment {
-  const propina = D(detail.totals?.other_totals?.tip ?? 0)
-  const cero = new Prisma.Decimal(0).toFixed(2)
+/** Cómo se entrega el pedido: quién lo lleva decide de quién son el envío y la propina. */
+export type MetodoDeEntrega = 'delivery' | 'marketplace' | 'pickup'
 
-  return {
-    currency: 'MXN',
-    saleAmount: ventaRenglones.toFixed(2),
-    merchantFees: cero,
-    tipAmount: propina.toFixed(2),
-    externallyPaidSale: ventaRenglones.toFixed(2),
-    externallyPaidTip: propina.toFixed(2),
-    cashDueSale: cero,
-    cashDueTip: cero,
+const METODOS_DE_ENTREGA: ReadonlySet<string> = new Set<MetodoDeEntrega>(['delivery', 'marketplace', 'pickup'])
+
+/**
+ * Las variantes cuyo dinero ya se midió con un pedido real (M10, 21-oct): `total_order` dijo qué es del negocio en cada
+ * una. «A calibrar» = con un pedido del simulador de esa variante ANTES de habilitarla: una variante fuera de esta lista no
+ * se registra con dinero adivinado.
+ */
+export const VARIANTES_CALIBRADAS: ReadonlySet<MetodoDeEntrega> = new Set<MetodoDeEntrega>(['delivery', 'marketplace', 'pickup'])
+
+/**
+ * Los métodos con que el CLIENTE le paga al repartidor del negocio (o en el mostrador, si recoge): la caja tendría que
+ * cobrarlo, y eso es el bloque 2b. `pos_terminal` es inferencia (el repartidor lleva una terminal): se confirma con Rappi.
+ * Cualquier otro método —Rappi agrega nuevos seguido y pide no validarlos— cuenta como pagado en línea.
+ */
+const COBRA_EL_NEGOCIO: ReadonlySet<string> = new Set(['cash', 'pos_terminal'])
+
+/**
+ * Un pedido real cuyo dinero esta fase todavía no registra. Queda FAILED visible con `codigo` exacto (el job lo trata como
+ * terminal): nunca PROCESSED con dinero inventado.
+ *  · `VARIANTE_BLOQUE_2B`: repartidor propio o para recoger, cobrado por el negocio (efectivo o terminal).
+ *  · `VARIANTE_SIN_CALIBRAR`: una variante sin un pedido real que diga qué es del negocio.
+ */
+export class VariantePendienteError extends Error {
+  constructor(
+    readonly codigo: 'VARIANTE_BLOQUE_2B' | 'VARIANTE_SIN_CALIBRAR',
+    mensaje: string,
+  ) {
+    super(mensaje)
+    this.name = 'VariantePendienteError'
   }
 }
 
-/**
- * 🔴 LA RED QUE HACE SEGURO PUBLICAR ESTO SIN SANDBOX.
- *
- * Suma los renglones y los compara contra el total que manda Rappi. Si no cuadran, LANZA.
- *
- * Es lo que convierte los dos supuestos que no pude verificar —las unidades (¿pesos o
- * centavos?) y qué campo es el total bueno— de "bug silencioso que aparece en el corte" a
- * "el primer pedido real falla y dice exactamente por qué". Un factor de 100 en dinero no
- * puede descubrirse leyendo un reporte tres semanas después.
- */
-function verificarCuadre(renglones: Prisma.Decimal, detail: RappiOrderDetail, orderId: string): void {
-  const t = detail.totals
+export interface OpcionesDeTraduccion {
+  /** Las variantes con dinero calibrado. Default: `VARIANTES_CALIBRADAS`. */
+  calibradas?: ReadonlySet<MetodoDeEntrega>
+  /** La zona IANA del negocio: `created_at` llega SIN zona y en la de la tienda. Sin ella (o inválida), la de México. */
+  zonaHoraria?: string
+}
 
-  // 🔴 `total_products_with_discount` PRIMERO. Su propio FAQ lo dice: "el total del pedido con
-  // descuentos aplicados" está en ese campo — y es contra ése que suman los renglones, porque
-  // los renglones ya vienen con el precio con descuento. Cuadrar contra `total_order` metería
-  // el envío y la cuota de servicio, y contra `total_products` (sin descuento) inflaría todo.
-  //
-  // Ojo: ese campo NO aparece en el ejemplo JSON del portal, sólo en el FAQ. La referencia y
-  // el FAQ no coinciden, así que se intenta en cascada y se acepta el primero que exista.
-  const totalCrudo = t?.total_products_with_discount ?? t?.total_products ?? t?.total_to_pay ?? t?.total_order
-  // Sin total no hay nada contra qué cuadrar. No se inventa: se deja pasar el de los
-  // renglones, que es el único dato firme, y el pedido igual entra a cocina.
-  if (totalCrudo === undefined || totalCrudo === null) return
+const cero = () => new Prisma.Decimal(0)
+const sumar = (montos: Prisma.Decimal[]) => montos.reduce((acc, m) => acc.plus(m), cero())
+const centavos = (d: Prisma.Decimal) => d.toDecimalPlaces(2)
 
-  // Si el total que encontramos incluye la propina (los que son del PEDIDO, no de los
-  // productos), se resta antes de comparar.
-  const incluyePropina = t?.total_products_with_discount === undefined && t?.total_products === undefined
-  const esperado = incluyePropina ? D(totalCrudo).minus(D(t?.other_totals?.tip ?? 0)) : D(totalCrudo)
-  const tolerancia = new Prisma.Decimal(TOLERANCIA_POR_RENGLON).mul(Math.max(1, detail.items?.length ?? 1))
-
-  if (renglones.minus(esperado).abs().gt(tolerancia)) {
+/** La variante de entrega del pedido. Desconocida o ausente LANZA: sin ella no se sabe de quién es el envío ni la propina. */
+function metodoDeEntrega(detail: RappiOrderDetail, orderId: string): MetodoDeEntrega {
+  const metodo = String(detail.delivery_method ?? '')
+    .trim()
+    .toLowerCase()
+  if (!METODOS_DE_ENTREGA.has(metodo)) {
     throw new Error(
-      `[Rappi] la venta no cuadra en el pedido ${orderId}: los renglones suman ${renglones.toFixed(2)} pero el total ` +
-        `de referencia da ${esperado.toFixed(2)}. Revisa las UNIDADES (la documentación NO dice si los montos son ` +
-        `pesos o centavos) y qué campo de \`totals\` es la venta antes de dar por buena esta integración.`,
+      `[Rappi] el pedido ${orderId} trae un \`delivery_method\` desconocido (${JSON.stringify(detail.delivery_method ?? null)}): ` +
+        'sin saber quién lo entrega no se sabe de quién son el envío y la propina, y no se registra.',
+    )
+  }
+  return metodo as MetodoDeEntrega
+}
+
+/**
+ * ¿Esta variante se puede registrar en la fase 2? Si no, lanza `VariantePendienteError` con su código.
+ *
+ * 🔴 Con repartidor propio o para recoger, el efectivo (o la terminal) lo cobra el NEGOCIO: registrarlo como pagado por la
+ * plataforma dejaría ese dinero fuera de la caja. Lo mismo si `total_to_pay` (lo que el cliente paga en efectivo al
+ * repartidor) viene con algo, aunque el método sea uno que no conocemos. Con repartidor de Rappi, el efectivo lo cobra SU
+ * repartidor y Rappi liquida: no es 2b.
+ */
+function verificarVariante(
+  metodo: MetodoDeEntrega,
+  detail: RappiOrderDetail,
+  orderId: string,
+  calibradas: ReadonlySet<MetodoDeEntrega>,
+): void {
+  const pago = String(detail.payment_method ?? '')
+    .trim()
+    .toLowerCase()
+  if (metodo !== 'delivery' && (COBRA_EL_NEGOCIO.has(pago) || deRappiAPesos(detail.totals?.total_to_pay).gt(0))) {
+    throw new VariantePendienteError(
+      'VARIANTE_BLOQUE_2B',
+      `[Rappi] variante pendiente: bloque 2b. El pedido ${orderId} es «${metodo}» y lo cobra el negocio ` +
+        `(payment_method ${JSON.stringify(detail.payment_method ?? null)}, total_to_pay ${deRappiAPesos(detail.totals?.total_to_pay).toFixed(2)}): ` +
+        'cobrarlo en la caja es el bloque 2b, y no se registra como pagado.',
+    )
+  }
+  if (!calibradas.has(metodo)) {
+    throw new VariantePendienteError(
+      'VARIANTE_SIN_CALIBRAR',
+      `[Rappi] variante pendiente: «${metodo}» no está calibrada con un pedido real (pedido ${orderId}). ` +
+        'No se registra con dinero adivinado.',
     )
   }
 }
 
-/** ISO 8601 de Rappi → Date. Una fecha ilegible NUNCA tumba el pedido. */
-function fechaPedido(iso?: string): Date {
-  if (!iso) return new Date()
-  const d = new Date(iso)
+/**
+ * El descuento del NEGOCIO: Σ `discounts[].amount_by_partner` (F1). Lo que asume Rappi no baja la venta.
+ *
+ * `total_discount_by_partner` no manda: en el sandbox suma sólo los descuentos por producto y de monto fijo, y en
+ * producción la parte del aliado de TODOS, cupones incluidos (diferencia 6). Si existe y no coincide, se loguea la
+ * diferencia y se sigue. Lo que asumió Rappi (Σ `amount_by_rappi` y `discount_by_support`) va al log del pedido: en el
+ * crudo ya queda, y mostrarlo en el panel es de la fase 3.
+ */
+function descuentoDelNegocio(detail: RappiOrderDetail, orderId: string): Prisma.Decimal {
+  const descuentos = Array.isArray(detail.discounts) ? detail.discounts : []
+  const delNegocio = sumar(descuentos.map(d => deRappiAPesos(d?.amount_by_partner)))
+  const deRappi = sumar(descuentos.map(d => deRappiAPesos(d?.amount_by_rappi)))
+  const deSoporte = deRappiAPesos(detail.totals?.discount_by_support)
+
+  const declarado = detail.totals?.total_discount_by_partner ?? detail.totals?.totals_discount_by_partner
+  if (declarado !== undefined && declarado !== null) {
+    const declaradoEnPesos = deRappiAPesos(declarado)
+    if (!centavos(declaradoEnPesos).equals(centavos(delNegocio))) {
+      logger.warn('🛵 [Rappi] total_discount_by_partner no coincide con la suma de amount_by_partner: manda la suma', {
+        orderId,
+        sumaDeAmountByPartner: centavos(delNegocio).toFixed(2),
+        totalDiscountByPartner: centavos(declaradoEnPesos).toFixed(2),
+        diferencia: centavos(declaradoEnPesos.minus(delNegocio)).toFixed(2),
+      })
+    }
+  }
+
+  if (deRappi.gt(0) || deSoporte.gt(0)) {
+    logger.info('🛵 [Rappi] descuentos que asumió Rappi: no bajan la venta del negocio', {
+      orderId,
+      asumidoPorRappi: centavos(deRappi).toFixed(2),
+      descuentoDeSoporte: centavos(deSoporte).toFixed(2),
+    })
+  }
+  return delNegocio
+}
+
+/**
+ * Reparte el dinero según quién entrega (tabla del diseño §4.1.4, calibrada con M10):
+ *
+ *  · `delivery` (repartidor de Rappi): envío y tarifa de servicio son de Rappi, y la propina («Tip for the courier») de su
+ *    repartidor ⇒ `merchantFees` 0 y propina 0.
+ *  · `marketplace` pagado en línea (repartidor del negocio): el envío (`charges.shipping`) y la propina son del negocio. Rappi
+ *    no le traspasa la tarifa de servicio.
+ *  · `pickup` pagado en línea: `total_order` trajo SÓLO los productos aunque el aviso traiga envío, servicio y propina ⇒
+ *    `merchantFees` 0 y propina 0.
+ *
+ * Lo liquida la plataforma: venta + `merchantFees` − descuento del negocio, y la propina. 🔴 Efectivo por cobrar en la caja:
+ * SIEMPRE 0 en esta fase — lo que el negocio cobraría es el bloque 2b y no llega hasta aquí (`verificarVariante`). Con
+ * repartidor de Rappi, el efectivo lo recibe SU repartidor: contarlo como efectivo del cajón dejaría el turno con faltante.
+ */
+function mapearPago(
+  detail: RappiOrderDetail,
+  metodo: MetodoDeEntrega,
+  venta: Prisma.Decimal,
+  descuentoCrudo: Prisma.Decimal,
+): NormalizedDeliveryPayment {
+  const esDelNegocio = metodo === 'marketplace'
+  // Cada parte se lleva a centavos ANTES de sumar: así el reparto cuadra al centavo con lo que se guarda.
+  const cargos = esDelNegocio ? centavos(deRappiAPesos(detail.totals?.charges?.shipping)) : cero()
+  const propina = esDelNegocio ? centavos(deRappiAPesos(detail.totals?.other_totals?.tip)) : cero()
+  const descuento = centavos(descuentoCrudo)
+
+  return {
+    currency: 'MXN',
+    saleAmount: venta.toFixed(2),
+    merchantFees: cargos.toFixed(2),
+    discountAmount: descuento.toFixed(2),
+    tipAmount: propina.toFixed(2),
+    externallyPaidSale: venta.plus(cargos).minus(descuento).toFixed(2),
+    externallyPaidTip: propina.toFixed(2),
+    cashDueSale: cero().toFixed(2),
+    cashDueTip: cero().toFixed(2),
+  }
+}
+
+/**
+ * 🔴 LA RED CONTRA EL ERROR DE UNIDADES: los renglones (precio completo, con toppings) contra `total_products` («Total
+ * products without discounts»). Si no cuadran, LANZA. Sin `total_products` también lanza: no se adivina con otro campo.
+ *
+ * No se cuadra contra `total_products_with_discount` (obsoleto) ni contra `total_order`, que según la variante trae envío
+ * y propina o resta los descuentos del negocio. Un factor de 100 en dinero no puede descubrirse en el corte.
+ */
+function verificarCuadre(renglones: Prisma.Decimal, detail: RappiOrderDetail, orderId: string): void {
+  const total = detail.totals?.total_products
+  if (total === undefined || total === null) {
+    throw new Error(
+      `[Rappi] el pedido ${orderId} no trae \`totals.total_products\`: sin él no se pueden comprobar las unidades y no se registra.`,
+    )
+  }
+  const esperado = deRappiAPesos(total)
+  const tolerancia = new Prisma.Decimal(TOLERANCIA_POR_RENGLON).mul(Math.max(1, detail.items?.length ?? 1))
+
+  if (renglones.minus(esperado).abs().gt(tolerancia)) {
+    throw new Error(
+      `[Rappi] la venta no cuadra en el pedido ${orderId}: los renglones suman ${renglones.toFixed(2)} pero ` +
+        `\`total_products\` da ${esperado.toFixed(2)}. Revisa las UNIDADES (\`FACTOR_MONEDA_RAPPI\`, medido en pesos) ` +
+        'antes de registrar este pedido.',
+    )
+  }
+}
+
+/**
+ * 🔴 Invariante del recorrido real (M10): pagado en línea, lo que liquida la plataforma (venta y propina) es exactamente
+ * `total_order` («lo que recibe el restaurante»). Si difiere, se GRITA con los dos números y el pedido se registra igual: la
+ * venta ya cuadró contra los renglones, y el que no cuadra es el reparto, que una persona revisa con Rappi.
+ */
+function vigilarTotalDelPedido(detail: RappiOrderDetail, metodo: MetodoDeEntrega, pago: NormalizedDeliveryPayment, orderId: string): void {
+  const enLinea = !COBRA_EL_NEGOCIO.has(
+    String(detail.payment_method ?? '')
+      .trim()
+      .toLowerCase(),
+  )
+  const totalOrder = detail.totals?.total_order
+  if (!enLinea || totalOrder === undefined || totalOrder === null) return
+
+  const liquidado = new Prisma.Decimal(pago.externallyPaidSale).plus(pago.externallyPaidTip)
+  const declarado = deRappiAPesos(totalOrder)
+  if (!centavos(liquidado).equals(centavos(declarado))) {
+    logger.error('🚨 [Rappi] lo que liquida la plataforma no es total_order — el pedido se registra igual; revisar el reparto con Rappi', {
+      orderId,
+      metodoDeEntrega: metodo,
+      totalOrder: centavos(declarado).toFixed(2),
+      liquidaLaPlataforma: centavos(liquidado).toFixed(2),
+    })
+  }
+}
+
+/** ¿La fecha trae su zona (`Z` o `±hh:mm`)? */
+const CON_OFFSET = /(?:Z|[+-]\d{2}:?\d{2})$/i
+
+/**
+ * La fecha de Rappi → Date.
+ *
+ * 🔴 `created_at` llega SIN zona y en la hora de la TIENDA (recorrido real: `2026-10-21 22:15:46` en Bogotá cuando aquí eran
+ * las 21:15:46 CST). `new Date()` la leería en la zona del SERVIDOR (UTC en producción): 5 h corrida. Sin offset se lee en
+ * la zona del negocio; con offset, tal cual. Una fecha ilegible NUNCA tumba el pedido: cae a «ahora».
+ */
+function fechaPedido(texto: string | undefined, zonaHoraria: string | undefined): Date {
+  if (!texto || !texto.trim()) return new Date()
+  const limpio = texto.trim()
+  const d = CON_OFFSET.test(limpio) ? new Date(limpio) : fromZonedTime(limpio, zonaValida(zonaHoraria))
   return Number.isNaN(d.getTime()) ? new Date() : d
 }
 
@@ -264,7 +454,7 @@ export function tiempoDeCoccion(
   return Math.min(Math.max(elegido, min), max)
 }
 
-export function normalizeRappiOrder(raw: unknown): NormalizedDeliveryOrder {
+export function normalizeRappiOrder(raw: unknown, opts: OpcionesDeTraduccion = {}): NormalizedDeliveryOrder {
   const payload = (raw ?? {}) as RappiOrderPayload
   const detail = payload.order_detail ?? {}
   const orderId = String(detail.order_id ?? '').trim()
@@ -281,26 +471,36 @@ export function normalizeRappiOrder(raw: unknown): NormalizedDeliveryOrder {
     )
   }
 
+  // De quién es cada peso depende de quién entrega: primero la variante, y si esta fase no la registra, ni se mira el dinero.
+  const metodo = metodoDeEntrega(detail, orderId)
+  verificarVariante(metodo, detail, orderId, opts.calibradas ?? VARIANTES_CALIBRADAS)
+
   const items = mapearItems(detail.items ?? [])
   if (items.length === 0) throw new Error(`[Rappi] el pedido ${orderId} no trae renglones`)
 
-  const ventaRenglones = items.reduce((acc, it) => acc.plus(new Prisma.Decimal(it.total)), new Prisma.Decimal(0))
-  verificarCuadre(ventaRenglones, detail, orderId)
+  const venta = sumar(items.map(it => new Prisma.Decimal(it.total)))
+  verificarCuadre(venta, detail, orderId)
+
+  const payment = mapearPago(detail, metodo, venta, descuentoDelNegocio(detail, orderId))
+  // 🔴 Las mismas invariantes que revisa la ingesta, aquí ANTES de aceptar: un reparto que la ingesta rechazaría (un
+  // descuento del negocio mayor que la venta, un monto negativo) no se acepta en Rappi para luego no poder registrarlo.
+  assertDeliveryMoneyInvariants(payment, items)
+  vigilarTotalDelPedido(detail, metodo, payment, orderId)
 
   return {
     externalId: orderId,
     displayId: orderId,
     source: 'RAPPI' as NormalizedDeliveryOrder['source'],
     items,
-    payment: mapearPago(detail, ventaRenglones),
+    payment,
     customer: {
       name: nombreCliente(payload),
       phone: payload.customer?.phone_number?.trim() || undefined,
     },
     raw,
-    // `created_at` viene en la respuesta de `getOrders` (ISO 8601). Si faltara se usa el
-    // momento de recepción: es honesto —cuándo nos enteramos— y no inventa precisión.
-    placedAt: fechaPedido(detail.created_at),
+    // `created_at` es la hora REAL del pedido. Si faltara (o fuera ilegible) se usa el momento de recepción: es honesto
+    // —cuándo nos enteramos— y no inventa precisión.
+    placedAt: fechaPedido(detail.created_at, opts.zonaHoraria),
     scheduledFor: null,
   }
 }

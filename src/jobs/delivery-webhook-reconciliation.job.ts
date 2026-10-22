@@ -96,6 +96,10 @@ export class DeliveryWebhookReconciliationJob {
    * cancelación esperando a que su NEW_ORDER termine, y se reintenta con la espera normal. Tampoco `COMANDA_NO_CREADA`
    * (Tarea 11): el pedido de Rappi se aceptó y se registró pero su comanda no nació; el reintento la repone sin aceptar otra vez.
    *
+   * `VARIANTE_BLOQUE_2B` / `VARIANTE_SIN_CALIBRAR` (Tarea 12) — un pedido de Rappi cuyo dinero esta fase no registra: con
+   * repartidor propio o para recoger y cobrado por el negocio (el bloque 2b), o de una variante sin calibrar con un pedido
+   * real. No se acepta ni se registra; reintentarlo no cambia nada. 🚨 Queda FAILED visible para una persona.
+   *
    * 🔴 `ERRORES_TERMINALES` de `rappi.eventProcessor.ts` es una copia de esta lista (una prueba las compara): si se agrega
    * un código aquí, va también allá.
    */
@@ -105,6 +109,8 @@ export class DeliveryWebhookReconciliationJob {
     'CHANNEL_DISABLED',
     'ACEPTACION_INCIERTA',
     'CANCELADO_ANTES_DE_REGISTRAR',
+    'VARIANTE_BLOQUE_2B',
+    'VARIANTE_SIN_CALIBRAR',
   ]
 
   /**

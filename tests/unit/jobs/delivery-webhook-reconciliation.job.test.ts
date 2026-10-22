@@ -316,6 +316,11 @@ describe('DeliveryWebhookReconciliationJob', () => {
   it.each([
     ['ACEPTACION_INCIERTA', 'un pedido de Rappi que quedó así no se vuelve a tomar (registrarlo sería a ciegas)'],
     ['CANCELADO_ANTES_DE_REGISTRAR', 'Rappi ya canceló el pedido antes de registrarlo: reintentarlo lo aceptaría (Tarea 10)'],
+    [
+      'VARIANTE_BLOQUE_2B',
+      'efectivo con repartidor propio o para recoger: lo resuelve el bloque 2b, reintentarlo no cambia nada (Tarea 12)',
+    ],
+    ['VARIANTE_SIN_CALIBRAR', 'una variante sin calibrar no se registra con dinero adivinado (Tarea 12)'],
   ])('%s es terminal: %s', async error => {
     const incierto = makeEvent({
       id: 'evt_incierto',
@@ -451,7 +456,19 @@ describe('DeliveryWebhookReconciliationJob', () => {
     const orphanFetchWhere = mockedFindMany.mock.calls[2][0].where
     expect(orphanFetchWhere.OR).toEqual([
       { error: null },
-      { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA', 'CANCELADO_ANTES_DE_REGISTRAR'] } },
+      {
+        error: {
+          notIn: [
+            'ORPHANED',
+            'PEDIDO_YA_NO_ACTIVO',
+            'CHANNEL_DISABLED',
+            'ACEPTACION_INCIERTA',
+            'CANCELADO_ANTES_DE_REGISTRAR',
+            'VARIANTE_BLOQUE_2B',
+            'VARIANTE_SIN_CALIBRAR',
+          ],
+        },
+      },
     ])
     expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
     expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
@@ -498,7 +515,15 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const nullSafeErrorGuard = scanWhere.AND.find((c: any) => Array.isArray(c.OR) && 'error' in (c.OR[0] ?? {}))
-    const terminales = ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO', 'CHANNEL_DISABLED', 'ACEPTACION_INCIERTA', 'CANCELADO_ANTES_DE_REGISTRAR']
+    const terminales = [
+      'ORPHANED',
+      'PEDIDO_YA_NO_ACTIVO',
+      'CHANNEL_DISABLED',
+      'ACEPTACION_INCIERTA',
+      'CANCELADO_ANTES_DE_REGISTRAR',
+      'VARIANTE_BLOQUE_2B',
+      'VARIANTE_SIN_CALIBRAR',
+    ]
     expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
     // markOrphaned's own lookup query is the third findMany call in the pass (after the two lanes, N-5).
     const orphanLookupWhere = mockedFindMany.mock.calls[2][0].where
