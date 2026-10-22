@@ -16,6 +16,8 @@
  *     de inmediato y Uber le devuelve su dinero sin fricción.
  *   · DESPUÉS de aceptar → cancelar (`cancelDeliveryOrder`). Ya dijimos que sí, así que
  *     cuesta más caro: el cliente ya está esperando. Sigue siendo mejor que no entregar.
+ *     🔴 Sólo si el proveedor cancela por API (F2): si no, aquí no se cancela nada y la cocina
+ *     recibe qué hacer (`PROVEEDOR_NO_CANCELA`).
  */
 import { DeliveryProvider, OrderStatus, Prisma } from '@prisma/client'
 
@@ -26,7 +28,7 @@ import prisma from '@/utils/prismaClient'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { cancelDeliveryOrder } from './cancelDeliveryOrder.service'
 import { soltarReserva, tomarReserva, withDeliveryOrderLock, type OperacionDeReparto } from './deliveryOrderLock'
-import type { ActionResult } from './types'
+import { TEXTO_PROVEEDOR_NO_CANCELA, type ActionResult } from './types'
 
 export type MotivoRechazo = 'OUT_OF_ITEMS' | 'STORE_CLOSED' | 'TOO_BUSY' | 'OTHER'
 
@@ -45,9 +47,13 @@ export interface RespuestaPedido {
     | 'LINE_ACTION_IN_PROGRESS'
     // 🔴 El proveedor ya no admite la acción (`ActionResult.terminal`): se dejó de intentar. NUNCA significa «hecho».
     | 'NO_REINTENTAR'
+    // 🔴 F2: pedido YA ACEPTADO de un proveedor sin cancelación por API. NO se canceló en ningún lado: `mensaje` dice qué hacer.
+    | 'PROVEEDOR_NO_CANCELA'
   error?: string
   /** Con `OP_IN_PROGRESS`: qué operación tiene el pedido. */
   ocupadaPor?: OperacionDeReparto
+  /** Con `PROVEEDOR_NO_CANCELA`: qué debe hacer la cocina, en español y listo para mostrarse. */
+  mensaje?: string
 }
 
 /**
@@ -185,6 +191,8 @@ export async function contexto(venueId: string, orderId: string, db: Prisma.Tran
       deliveryChannelLinkId: true,
       providerAcceptedAt: true,
       readyReportedAt: true,
+      // El crudo del proveedor: de él lee el adaptador cómo se cancela un pedido aceptado (`instruccionesParaCancelar`).
+      posRawData: true,
     },
   })
   const origen = proveedorDelPedido(order?.externalId)
@@ -304,6 +312,9 @@ export async function acceptDeliveryOrder(venueId: string, orderId: string, staf
  * Elige solo el camino correcto según dónde esté el pedido: rechazo limpio si todavía no se
  * había aceptado, cancelación si ya. Que el mesero tenga que saber la diferencia sería
  * pedirle que entienda el protocolo de Uber para poder decir que se acabó la carne.
+ *
+ * 🔴 Ya aceptado y con un proveedor que NO cancela por API: `PROVEEDOR_NO_CANCELA` con el texto
+ * de qué hacer. Nada se cancela en Avoqado ni se le habla al proveedor (F2).
  */
 export async function denyDeliveryOrder(
   venueId: string,
@@ -319,11 +330,21 @@ export async function denyDeliveryOrder(
   const yaAceptado = ctx.order.status === OrderStatus.CONFIRMED
 
   if (yaAceptado) {
-    const s = await conReserva(venueId, orderId, 'DENY', async () =>
-      typeof ctx.adapter.cancelOrder === 'function'
-        ? ctx.adapter.cancelOrder(ctx.externalOrderId, ctx.storeId, motivo)
-        : { ok: true, status: 0, raw: 'el proveedor no cancela por API' },
-    )
+    // 🔴 F2: si el proveedor no cancela por API, NO se cancela en Avoqado. Antes se fingía un `{ ok: true, status: 0 }` y la
+    // venta se cancelaba sólo aquí: salía de la cocina mientras, para el proveedor, el pedido seguía vivo (repartidor en
+    // camino, cliente esperando). Ahora se devuelve qué hacer (lo dice el adaptador), sin reserva y sin red: no hay nada que
+    // mandarle. La venta se cancela cuando llega el aviso de cancelación del proveedor.
+    if (typeof ctx.adapter.cancelOrder !== 'function') {
+      const mensaje = ctx.adapter.instruccionesParaCancelar?.(ctx.order.posRawData) ?? TEXTO_PROVEEDOR_NO_CANCELA
+      logger.warn('[Delivery] la cocina quiso cancelar un pedido ya aceptado que el proveedor no cancela por API: NO se cancela', {
+        orderId,
+        provider: ctx.provider,
+        motivo,
+        staffId,
+      })
+      return { outcome: 'PROVEEDOR_NO_CANCELA', mensaje }
+    }
+    const s = await conReserva(venueId, orderId, 'DENY', () => ctx.adapter.cancelOrder!(ctx.externalOrderId, ctx.storeId, motivo))
     if (s.tipo === 'BLOQUEADA') return s.respuesta
     if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
     if (!s.r.ok) return { outcome: 'FAILED', error: `HTTP ${s.r.status}` }

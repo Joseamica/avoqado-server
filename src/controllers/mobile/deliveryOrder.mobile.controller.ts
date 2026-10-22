@@ -5,7 +5,7 @@
  * tablet o en la terminal, no en la computadora de la oficina.
  */
 import type { NextFunction, Request, Response } from 'express'
-import { DeliveryWriteNotSentError } from '../../services/delivery-channels/core/types'
+import { DeliveryWriteNotSentError, TEXTO_PROVEEDOR_NO_CANCELA } from '../../services/delivery-channels/core/types'
 
 import logger from '@/config/logger'
 import {
@@ -139,6 +139,11 @@ export const denyOrder = async (req: Request, res: Response, next: NextFunction)
     if (ocupado) return ocupado
     if (r.outcome === 'FAILED') {
       return responderError(res, 502, { code: r.error, error: 'No se pudo avisarle a la app de delivery. Intenta de nuevo.' })
+    }
+    // 🔴 F2: el pedido ya aceptado NO se canceló (el proveedor no cancela por API). Un `{ ok: true }` le diría a la app que sí;
+    // es un 409 con el texto de qué hacer. Una app vieja lo muestra como error, que es lo correcto: el pedido sigue vivo.
+    if (r.outcome === 'PROVEEDOR_NO_CANCELA') {
+      return responderError(res, 409, { code: r.outcome, error: r.mensaje || TEXTO_PROVEEDOR_NO_CANCELA })
     }
     // `CANCELLED` y `DENIED` son resultados distintos a propósito: el primero significa que
     // el pedido ya estaba aceptado y el cliente ya estaba esperando. La app puede usarlo para

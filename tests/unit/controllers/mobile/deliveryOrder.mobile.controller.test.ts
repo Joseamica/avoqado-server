@@ -231,6 +231,37 @@ describe('STORE_NOT_CONNECTED nombra al proveedor DEL PEDIDO', () => {
   })
 })
 
+describe('PROVEEDOR_NO_CANCELA (Tarea 14, F2): el pedido ya aceptado NO se canceló', () => {
+  const TEXTO_ALIADOS = 'Cancélalo en la app de Rappi para aliados; aquí se cancela solo cuando Rappi lo confirme.'
+
+  it('🔴 PROVEEDOR_NO_CANCELA ⇒ 409 con message: el texto del proveedor, y nunca `ok: true`', async () => {
+    // Un `{ ok: true }` aquí le diría a la app que el pedido se canceló, y no se canceló en ningún lado.
+    mockRechazar.mockResolvedValue({ outcome: 'PROVEEDOR_NO_CANCELA', mensaje: TEXTO_ALIADOS })
+    const next = jest.fn()
+    const r = res()
+
+    await denyOrder(req({ reason: 'OUT_OF_ITEMS' }), r as any, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(salida(r)).toEqual({
+      status: 409,
+      cuerpo: { ok: false, code: 'PROVEEDOR_NO_CANCELA', error: TEXTO_ALIADOS, message: TEXTO_ALIADOS },
+    })
+    // Es un «no se pudo» del proveedor, no una tienda desconectada: no hace falta ir a buscar su nombre.
+    expect(mockProveedorDeLaOrden).not.toHaveBeenCalled()
+  })
+
+  it('sin `mensaje` (no debería pasar) ⇒ el texto genérico, nunca un 409 vacío', async () => {
+    mockRechazar.mockResolvedValue({ outcome: 'PROVEEDOR_NO_CANCELA' })
+    const r = res()
+
+    await denyOrder(req(), r as any, jest.fn())
+
+    const texto = 'Esta app de delivery no deja cancelar por sistema un pedido ya aceptado: pídeselo a su soporte.'
+    expect(salida(r)).toEqual({ status: 409, cuerpo: { ok: false, code: 'PROVEEDOR_NO_CANCELA', error: texto, message: texto } })
+  })
+})
+
 describe('REGRESIÓN — lo que no cambia', () => {
   it('el éxito de acceptOrder sigue siendo `{ ok: true, outcome }`, sin `message`', async () => {
     mockAceptar.mockResolvedValue({ outcome: 'ACCEPTED' })

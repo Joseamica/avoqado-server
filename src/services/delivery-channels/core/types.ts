@@ -182,6 +182,12 @@ export class DeliveryWriteNotSentError extends Error {
 }
 
 /**
+ * Lo que lee la cocina al intentar cancelar un pedido YA ACEPTADO cuyo proveedor no cancela por API y cuyo adaptador no
+ * trae `instruccionesParaCancelar`. Vive aquí, junto al contrato, para que el núcleo y el controlador lean el mismo texto.
+ */
+export const TEXTO_PROVEEDOR_NO_CANCELA = 'Esta app de delivery no deja cancelar por sistema un pedido ya aceptado: pídeselo a su soporte.'
+
+/**
  * Contrato LEGADO de Deliverect. Congelado: Deliverect es el fallback, no el camino nuevo.
  *
  * No se le agregan métodos. Un proveedor DIRECTO (Uber, y mañana Rappi/DiDi) implementa
@@ -281,6 +287,17 @@ export interface DirectDeliveryAdapter {
    *  · cancelar = deshacerlo DESPUÉS. Cuesta más caro: el cliente ya está esperando su comida.
    */
   cancelOrder?(orderId: string, storeId: string, reason?: DenyReason): Promise<ActionResult>
+
+  /**
+   * Para un proveedor SIN `cancelOrder`: qué debe hacer la cocina para cancelar un pedido YA ACEPTADO, en español y listo
+   * para mostrarse. `raw` es el crudo del pedido guardado en la venta (`Order.posRawData`), por si el camino depende del
+   * pedido (p. ej. de quién lo entrega).
+   *
+   * 🔴 Existe porque, sin cancelación por API, el núcleo NO cancela en Avoqado (F2): cancelar sólo de nuestro lado sacaba
+   * el pedido de la cocina mientras el proveedor seguía mandando al repartidor. La venta se cancela cuando llega el aviso
+   * de cancelación del proveedor. Sin esta capacidad, el núcleo usa un texto genérico que manda al soporte del proveedor.
+   */
+  instruccionesParaCancelar?(raw: unknown): string
 
   /**
    * "La comida ya está lista": avisa al proveedor que puede mandar (o apurar) al repartidor.
