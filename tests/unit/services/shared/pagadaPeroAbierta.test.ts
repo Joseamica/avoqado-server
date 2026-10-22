@@ -6,8 +6,12 @@ import {
   esDeUnaPlataformaSql,
   findPaidButOpenOrders,
   findPedidosDePlataformaPorCerrar,
+  instanteUtcSql,
+  laCocinaLoTerminoSql,
   momentoDeCerrarUnPedidoDePlataformaSql,
   pedidoDePlataformaAceptadoSql,
+  pedidoDePlataformaQueBDejaAbiertoSql,
+  seAcaboSuDiaDelNegocioSql,
 } from '@/services/shared/pagadaPeroAbierta'
 
 describe('criterio SQL «pagada pero abierta»', () => {
@@ -177,7 +181,9 @@ describe('findPaidButOpenOrders — la consulta que arma', () => {
 
 /**
  * La cuarta pasada del barrido: los pedidos de plataforma se cierran SÓLO de estado, nunca uno sin aceptar, y el CUÁNDO vive en
- * un solo sitio (`momentoDeCerrarUnPedidoDePlataformaSql`) a la espera de la decisión del founder (Codex b1 #5, A/B/C).
+ * un solo sitio (`momentoDeCerrarUnPedidoDePlataformaSql`): la decisión «B» del founder (22-oct-2026) —cuando la cocina lo
+ * termina, o al acabar el día del negocio, lo que pase primero—. Lo que el SQL ELIGE de verdad lo prueba la integración
+ * (`barridoDePagadasReparto.test.ts`, contra Postgres); aquí se fija la FORMA.
  */
 describe('findPedidosDePlataformaPorCerrar — la consulta que arma', () => {
   const AHORA = new Date('2026-10-22T20:00:00Z')
@@ -198,19 +204,68 @@ describe('findPedidosDePlataformaPorCerrar — la consulta que arma', () => {
     // El barrido no decide si un pedido de plataforma está pagado: lo dice el núcleo de reparto (uno con efectivo por cobrar no).
     expect(q.sql).toContain(`o."paymentStatus" = 'PAID'`)
     expect(q.sql).toContain(pedidoDePlataformaAceptadoSql('o'))
-    expect(q.sql).toContain(momentoDeCerrarUnPedidoDePlataformaSql('o'))
+    // 🔴 El CUÁNDO, con el AHORA del barrido (el mismo reloj que su gracia), no el de la sesión de Postgres.
+    expect(q.sql).toContain(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(AHORA)))
     expect(q.sql).toContain('o."updatedAt" <')
     expect(q.sql).toContain('o."createdAt" >=')
     expect(q.sql).toContain('ORDER BY o."createdAt" ASC')
+    // Sin binds de fecha nuevos: el ahora del CUÁNDO va como literal UTC.
     expect(q.values).toEqual([new Date('2026-10-22T19:55:00.000Z'), DESDE, 50])
   })
 
   it('🔴 «aceptado» = CONFIRMED o más adelante, o PENDING con la aceptación acreditada: uno que espera a la cocina nunca se cierra', () => {
     expect(pedidoDePlataformaAceptadoSql('o')).toBe(`(o.status <> 'PENDING' OR o."providerAcceptedAt" IS NOT NULL)`)
   })
+})
 
-  it('⏸ el CUÁNDO espera la decisión del founder (A/B/C): hoy no agrega condición —se cierra al pasar la gracia, como desde el 2-sep—', () => {
-    expect(momentoDeCerrarUnPedidoDePlataformaSql('o')).toBe('TRUE')
+describe('decisión B: CUÁNDO se cierra un pedido de plataforma pagado y aceptado', () => {
+  const AHORA = instanteUtcSql(new Date('2026-10-22T20:00:00Z'))
+
+  it('el ahora va como literal del reloj de pared UTC (como el corte del vigilante), nunca como bind de fecha', () => {
+    expect(AHORA).toBe(`TIMESTAMP '2026-10-22 20:00:00.000'`)
+    // Un Date inválido no se convierte en SQL.
+    expect(() => instanteUtcSql(new Date('no es fecha'))).toThrow()
+  })
+
+  it('🔴 «la cocina lo terminó»: el pedido tiene comanda y NINGUNA sigue en la cocina (NEW o PREPARING), del mismo negocio', () => {
+    const sql = laCocinaLoTerminoSql('x')
+    // Es el mismo «comanda abierta» del tablero (`kdsCapacidades.ts`, COMANDA_ABIERTA) y del reintento del «listo».
+    expect(sql).toMatch(/^\(EXISTS \(SELECT 1 FROM "KdsOrder" k WHERE k\."orderId" = x\.id AND k\."venueId" = x\."venueId"\)/)
+    expect(sql).toMatch(
+      /AND NOT EXISTS \(\s*SELECT 1 FROM "KdsOrder" k WHERE k\."orderId" = x\.id AND k\."venueId" = x\."venueId" AND k\.status IN \('NEW', 'PREPARING'\)/,
+    )
+    // El alias manda: no habla de otra tabla.
+    expect(sql).not.toMatch(/\bo\./)
+  })
+
+  it('🔴 «se acabó su día del negocio»: el día de la venta y el de AHORA, los dos en la zona del negocio (nunca la del servidor ni UTC)', () => {
+    const sql = seAcaboSuDiaDelNegocioSql('x', AHORA)
+    // El día de la venta: el último de llegó, se aceptó o se programó (un programado no se cierra antes de su día).
+    expect(sql).toContain(
+      `((GREATEST(x."createdAt", x."providerAcceptedAt", x."scheduledFor") AT TIME ZONE 'UTC') AT TIME ZONE z.tz)::date`,
+    )
+    // El de AHORA, con el reloj que le pasen y la MISMA zona.
+    expect(sql).toContain(`((${AHORA} AT TIME ZONE 'UTC') AT TIME ZONE z.tz)::date`)
+    expect(sql).toMatch(/::date < \(\(TIMESTAMP/)
+    // La zona es la del negocio de ESA venta; una zona que Postgres no conoce cae en la de default y no tumba la pasada.
+    expect(sql).toContain(`FROM "Venue" vz`)
+    expect(sql).toContain(`vz.id = x."venueId"`)
+    expect(sql).toContain(`vz.timezone IN (SELECT name FROM pg_timezone_names)`)
+    expect(sql).toContain(`ELSE 'America/Mexico_City'`)
+    expect(sql).not.toMatch(/\bo\./)
+  })
+
+  it('el momento = la cocina lo terminó O se acabó su día, lo que pase primero; nunca NULL', () => {
+    const sql = momentoDeCerrarUnPedidoDePlataformaSql('o', AHORA)
+    expect(sql).toBe(`COALESCE((${laCocinaLoTerminoSql('o')} OR ${seAcaboSuDiaDelNegocioSql('o', AHORA)}), FALSE)`)
+  })
+
+  it('🔴 lo que B deja abierto es el complemento EXACTO de lo que el barrido cierra (el vigilante no puede divergir del barrido)', () => {
+    const sql = pedidoDePlataformaQueBDejaAbiertoSql('o', AHORA)
+    expect(sql).toContain(esDeUnaPlataformaSql('o'))
+    expect(sql).toContain(`o."paymentStatus" = 'PAID'`)
+    expect(sql).toContain(pedidoDePlataformaAceptadoSql('o'))
+    expect(sql).toContain(`NOT ${momentoDeCerrarUnPedidoDePlataformaSql('o', AHORA)}`)
   })
 })
 

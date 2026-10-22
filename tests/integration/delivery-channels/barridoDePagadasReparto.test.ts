@@ -10,9 +10,14 @@
  *    `denyDeliveryOrder` dejaba de verlo como aceptado (con Rappi: rechazo → 400 → error genérico, sin las instrucciones
  *    de F2; con Uber: el protocolo de RECHAZO sobre un pedido ya aceptado).
  *
- * Ronda 1, sin decisión de producto (ruling del controlador, 22-oct): el barrido NUNCA recalcula el dinero de un pedido que
- * liquida una plataforma y NUNCA cierra uno sin aceptar. CUÁNDO cierra uno aceptado (#5) lo decide el founder (A/B/C): mientras
- * tanto se conserva lo de hoy —lo cierra al pasar la gracia, sólo de estado— y los casos del #5 esperan con `it.skip`.
+ * Ronda 1 (ruling del controlador, 22-oct): el barrido NUNCA recalcula el dinero de un pedido que liquida una plataforma y
+ * NUNCA cierra uno sin aceptar. Tarea 22, decisión «B» del founder (22-oct): uno aceptado y pagado se cierra, sólo de estado,
+ * cuando la cocina lo termina (ninguna comanda sigue en NEW/PREPARING) o al acabar el día del negocio EN SU ZONA, lo que pase
+ * primero. Mientras tanto sigue abierto y la cocina conserva «Cancelar».
+ *
+ * 🔴 El negocio de la prueba vive en Asia/Tokyo (UTC+9, sin horario de verano): lejos de la zona del servidor y de la sesión de
+ * Postgres (America/Mexico_City en la Mac, UTC en Render). Los pedidos que dependen del reloj se FECHAN a una hora fija de
+ * Tokio (`fechar`) y el barrido corre con un ahora fijo: ninguna prueba depende de la hora a la que se corre.
  *
  * Contra Postgres real: lo que elige al pedido es la consulta SQL del barrido, no un doble.
  */
@@ -22,7 +27,10 @@ import path from 'path'
 import { DeliveryChannelLink, DeliveryProvider, OrderAcceptanceMode, OrderSource } from '@prisma/client'
 
 import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
+import { utcTs } from '@/utils/sqlDates'
+import { buildWatchdogSql } from '@/jobs/money-integrity-watchdog.job'
 import { PaidOrderReconcilerJob } from '@/jobs/paid-order-reconciler.job'
 import { findPaidButOpenOrders, findPedidosDePlataformaPorCerrar } from '@/services/shared/pagadaPeroAbierta'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
@@ -77,19 +85,31 @@ function pedidoUber(sku: string, { cargosEnEfectivo = false } = {}): NormalizedD
   }
 }
 
-describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Codex b1 #1 y #5)', () => {
+/** La zona del negocio de la prueba: ni la del servidor ni la de la sesión de Postgres. UTC+9 todo el año. */
+const ZONA = 'Asia/Tokyo'
+const HORA_MS = 3_600_000
+const DIA_MS = 24 * HORA_MS
+/** El día D (medianoche UTC de hace dos días): dentro de la ventana de 30 días del barrido, y fijo durante toda la suite. */
+const D = (() => {
+  const d = new Date(Date.now() - 2 * DIA_MS)
+  return Date.UTC(d.getUTCFullYear(), d.getUTCMonth(), d.getUTCDate())
+})()
+/** El instante real de las hh:mm EN TOKIO del día D (+ `dias`). Tokio = UTC+9: las 08:00 de Tokio son las 23:00 UTC de la víspera. */
+const enTokio = (hh: number, mm = 0, dias = 0) => new Date(D + dias * DIA_MS + (hh - 9) * HORA_MS + mm * 60_000)
+
+describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Codex b1 #1 y #5, decisión B)', () => {
   let orgId: string, venueId: string, skuUber: string
   let linkRappi: DeliveryChannelLink, linkUber: DeliveryChannelLink
 
   /**
-   * Una pasada REAL del barrido, como si hubieran pasado 6 minutos (la gracia es de 5). Sólo se acota a este negocio y se
-   * apagan las pasadas de vales (no hay vales aquí): las consultas que eligen, el reparador y el cierre de estado son los de
+   * Una pasada REAL del barrido, por default como si hubieran pasado 6 minutos (la gracia es de 5). Sólo se acota a este negocio
+   * y se apagan las pasadas de vales (no hay vales aquí): las consultas que eligen, el reparador y el cierre de estado son los de
    * producción.
    */
-  const barrer = () =>
+  const barrer = (ahora?: Date) =>
     new PaidOrderReconcilerJob({
       cron: { start: () => undefined, stop: () => undefined },
-      now: () => new Date(Date.now() + 6 * 60_000),
+      now: () => ahora ?? new Date(Date.now() + 6 * 60_000),
       findCandidates: async opts => (await findPaidButOpenOrders(prisma, opts)).filter(c => c.venueId === venueId),
       findPedidosDePlataforma: async opts => (await findPedidosDePlataformaPorCerrar(prisma, opts)).filter(c => c.venueId === venueId),
       findSesionesAtoradas: async () => [],
@@ -100,6 +120,34 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     (jest.mocked(logger.error).mock.calls as unknown[][]).filter(
       ([msg, meta]) => String(msg).includes('[Sobrepago]') && (meta as { orderId?: string } | undefined)?.orderId === orderId,
     )
+
+  /** El pedido llegó (y se tocó por última vez) a esta hora: así el barrido corre con un ahora fijo sin depender del reloj. */
+  const fechar = (orderId: string, instante: Date) =>
+    prisma.$executeRaw`UPDATE "Order" SET "createdAt" = ${utcTs(instante)}, "updatedAt" = ${utcTs(instante)} WHERE id = ${orderId}`
+
+  /** La cocina marca «listo» todas las comandas del pedido (la señal que el KDS de las apps escribe al terminar). */
+  const terminarLaCocina = (orderId: string) => prisma.kdsOrder.updateMany({ where: { orderId }, data: { status: 'READY' } })
+
+  const venta = (orderId: string) => prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+  const dinero = (o: Awaited<ReturnType<typeof venta>>) => ({
+    total: o.total.toFixed(2),
+    subtotal: o.subtotal.toFixed(2),
+    descuento: o.discountAmount.toFixed(2),
+    propina: o.tipAmount.toFixed(2),
+    pagado: o.paidAmount.toFixed(2),
+    porCobrar: o.remainingBalance.toFixed(2),
+    cobro: o.paymentStatus,
+  })
+
+  /**
+   * El asiento que deja la cuarta pasada al cerrar ESTE pedido: prueba que el barrido lo alcanzó por su id (no un falso verde).
+   * `logAction` es un doble en la integración (`integration-setup.ts`): se leen sus llamadas.
+   */
+  const cierreAsentado = (orderId: string) =>
+    jest
+      .mocked(logAction)
+      .mock.calls.map(([p]) => p)
+      .filter(p => p.action === 'ORDER_RECONCILED_PAID' && p.entityId === orderId && p.venueId === venueId)
 
   /** Lo que el tablero de cocina le pinta a la comanda del pedido (la misma carga por lote del KDS). */
   async function capacidadesEnCocina(orderId: string) {
@@ -113,7 +161,9 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
       data: { name: `Org barrido ${Date.now()}`, email: `b${Date.now()}@t.mx`, phone: '5555555555' },
     })
     orgId = org.id
-    const v = await prisma.venue.create({ data: { organizationId: orgId, name: `V barrido ${Date.now()}`, slug: `vb-${Date.now()}` } })
+    const v = await prisma.venue.create({
+      data: { organizationId: orgId, name: `V barrido ${Date.now()}`, slug: `vb-${Date.now()}`, timezone: ZONA },
+    })
     venueId = v.id
     const cat = await prisma.menuCategory.create({ data: { venueId, name: 'Cat', slug: `cb-${Date.now()}` } })
     // Los SKU que traen los pedidos: así la ingesta encuentra el producto y no crea uno «sin mapear».
@@ -161,10 +211,17 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
     // Lo que deja la ingesta (el dinero exacto de la Tarea 12): venta 20 + envío 35 = 55, propina 20 aparte.
     expect(order.total.toFixed(2)).toBe('55.00')
+    // La cocina ya lo terminó: el barrido TIENE que alcanzarlo y cerrarlo. Si no lo alcanzara (p. ej. con más de 50 pagadas
+    // abiertas más viejas delante), el dinero saldría intacto por no haberlo tocado: el estado y el asiento lo delatan.
+    await fechar(order.id, enTokio(12))
+    await terminarLaCocina(order.id)
 
-    await barrer()
+    await barrer(enTokio(12, 6))
 
     const despues = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+    expect(despues.id).toBe(order.id)
+    expect(despues.status).toBe('COMPLETED')
+    expect(cierreAsentado(order.id)).toHaveLength(1)
     expect(despues.subtotal.toFixed(2)).toBe('20.00')
     expect(despues.total.toFixed(2)).toBe('55.00') // antes del arreglo: 40.00 (se fue el envío y entró la propina)
     expect(despues.tipAmount.toFixed(2)).toBe('20.00')
@@ -174,13 +231,14 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(avisoDeSobrepago(order.id)).toHaveLength(0) // antes: «🚨 [Sobrepago]» de $35 que no existe
   })
 
-  // ⏸ Espera la decisión del founder (A/B/C, Codex b1 #5): CUÁNDO se cierra un pedido de plataforma aceptado. Con A o B este caso
-  // pasa sin tocarlo; con C cambian el tablero y `denyDeliveryOrder`. Hoy el barrido lo sigue cerrando al pasar la gracia.
-  it.skip('🔴 #5 Rappi aceptado con la comanda en la cocina: después del barrido la cocina sigue viendo «Cancelar» y recibe cómo pedirlo a Rappi', async () => {
+  // Decisión B: con la comanda en la cocina y el día del negocio en curso, el barrido NO lo cierra.
+  it('🔴 #5 Rappi aceptado con la comanda en la cocina: después del barrido la cocina sigue viendo «Cancelar» y recibe cómo pedirlo a Rappi', async () => {
     const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await fechar(order.id, enTokio(12))
 
-    await barrer()
+    await barrer(enTokio(12, 6))
 
+    expect((await venta(order.id)).status).toBe('CONFIRMED') // antes: COMPLETED a los 5-15 min
     const { comanda, capacidades } = await capacidadesEnCocina(order.id)
     expect(comanda.status).toBe('NEW') // la comanda sigue en la cocina
     expect(capacidades.comanda.canCancelDelivery).toBe(true) // antes: false (VENTA_CERRADA)
@@ -199,10 +257,16 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
   it('🔴 #1 en el núcleo compartido: un pedido de Uber con cargos del comercio (608 + 30, propina 20) tampoco pierde los cargos', async () => {
     const { order } = await ingestDeliveryOrder(pedidoUber(skuUber), { ...linkUber, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
     expect(order.total.toFixed(2)).toBe('638.00')
+    // Igual que el de Rappi: terminado en la cocina, el barrido tiene que alcanzarlo (estado y asiento) sin tocar su dinero.
+    await fechar(order.id, enTokio(12))
+    await terminarLaCocina(order.id)
 
-    await barrer()
+    await barrer(enTokio(12, 6))
 
     const despues = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
+    expect(despues.id).toBe(order.id)
+    expect(despues.status).toBe('COMPLETED')
+    expect(cierreAsentado(order.id)).toHaveLength(1)
     expect(despues.total.toFixed(2)).toBe('638.00') // antes: 628.00
     expect(despues.tipAmount.toFixed(2)).toBe('20.00')
     expect(despues.paidAmount.toFixed(2)).toBe('658.00')
@@ -210,12 +274,14 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(avisoDeSobrepago(order.id)).toHaveLength(0) // antes: sobrepago falso de $30
   })
 
-  // ⏸ Espera la decisión del founder (A/B/C, Codex b1 #5): ver el caso de Rappi de arriba.
-  it.skip('🔴 #5 en el núcleo compartido: un Uber aceptado y en la cocina conserva «Cancelar» y se CANCELA (no se rechaza) después del barrido', async () => {
+  // Decisión B: ver el caso de Rappi de arriba.
+  it('🔴 #5 en el núcleo compartido: un Uber aceptado y en la cocina conserva «Cancelar» y se CANCELA (no se rechaza) después del barrido', async () => {
     const { order } = await ingestDeliveryOrder(pedidoUber(skuUber), { ...linkUber, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await fechar(order.id, enTokio(12))
 
-    await barrer()
+    await barrer(enTokio(12, 6))
 
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
     expect((await capacidadesEnCocina(order.id)).capacidades.comanda.canCancelDelivery).toBe(true)
     const rechazo = jest.spyOn(uberAdapter, 'denyOrder').mockResolvedValue({ ok: true, status: 200, raw: '' })
     const cancelacion = jest.spyOn(uberAdapter, 'cancelOrder').mockResolvedValue({ ok: true, status: 200, raw: '' })
@@ -227,53 +293,130 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(rechazo).not.toHaveBeenCalled() // antes: el de rechazar, como si nunca se hubiera aceptado
   })
 
-  it('HOY, hasta la decisión A/B/C: un pedido de plataforma aceptado y pagado se cierra al pasar la gracia, SÓLO de estado', async () => {
+  it('decisión B: la cocina lo termina ⇒ la siguiente pasada del barrido lo cierra, SÓLO de estado', async () => {
     const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
     expect(order.status).toBe('CONFIRMED')
+    await fechar(order.id, enTokio(12))
 
-    await barrer()
+    // Mientras la cocina lo prepara, sigue abierto.
+    await barrer(enTokio(12, 6))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
 
-    const despues = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
-    // Lo que cambia: el estado (lo mismo que hacía el barrido desde el 2-sep; el CUÁNDO lo decide el founder).
+    await terminarLaCocina(order.id)
+    await barrer(enTokio(12, 16))
+
+    const despues = await venta(order.id)
+    // Lo que cambia: el estado.
     expect(despues.status).toBe('COMPLETED')
     expect(despues.completedAt).not.toBeNull()
+    expect(cierreAsentado(order.id)).toHaveLength(1)
     // Lo que no: ni un centavo, ni el estado de cobro.
-    expect({
-      total: despues.total.toFixed(2),
-      subtotal: despues.subtotal.toFixed(2),
-      descuento: despues.discountAmount.toFixed(2),
-      propina: despues.tipAmount.toFixed(2),
-      pagado: despues.paidAmount.toFixed(2),
-      porCobrar: despues.remainingBalance.toFixed(2),
-      cobro: despues.paymentStatus,
-    }).toEqual({
-      total: order.total.toFixed(2),
-      subtotal: order.subtotal.toFixed(2),
-      descuento: order.discountAmount.toFixed(2),
-      propina: order.tipAmount.toFixed(2),
-      pagado: order.paidAmount.toFixed(2),
-      porCobrar: order.remainingBalance.toFixed(2),
-      cobro: order.paymentStatus,
+    expect(dinero(despues)).toEqual(dinero(order))
+  })
+
+  it('decisión B: sin comanda (negocio sin cocina) sigue abierto todo SU día y se cierra al acabarlo, no 24 h después (23:50 → 00:05)', async () => {
+    const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await prisma.kdsOrder.deleteMany({ where: { orderId: order.id } })
+    await fechar(order.id, enTokio(23, 50))
+
+    await barrer(enTokio(23, 58))
+    expect((await venta(order.id)).status).toBe('CONFIRMED') // sin señal de la cocina, y su día no ha terminado
+
+    await barrer(enTokio(0, 5, 1))
+    const despues = await venta(order.id)
+    expect(despues.status).toBe('COMPLETED') // acabó ESE día del negocio: 15 minutos después, no 24 horas
+    expect(dinero(despues)).toEqual(dinero(order))
+  })
+
+  it('🔴 decisión B: se acabó el día del negocio con la comanda aún abierta ⇒ se cierra; manda la zona del NEGOCIO, no la del servidor', async () => {
+    const { order } = await ingestDeliveryOrder(pedidoUber(skuUber), { ...linkUber, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    // 08:00 de Tokio del día D = 23:00 UTC y 17:00 de CDMX de la VÍSPERA.
+    await fechar(order.id, enTokio(8))
+
+    // 23:30 de Tokio del día D = 14:30 UTC y 08:30 de CDMX del día D: en UTC y en CDMX ya cambió el día, en Tokio no.
+    await barrer(enTokio(23, 30))
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
+
+    await barrer(enTokio(0, 10, 1))
+    const despues = await venta(order.id)
+    expect(despues.status).toBe('COMPLETED')
+    expect(dinero(despues)).toEqual(dinero(order))
+    // El barrido cierra la VENTA; la comanda es de la cocina y no se toca.
+    expect((await prisma.kdsOrder.findFirstOrThrow({ where: { orderId: order.id } })).status).toBe('NEW')
+  })
+
+  it('decisión B: un pedido programado no se cierra por el fin de un día anterior al suyo', async () => {
+    const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await prisma.kdsOrder.deleteMany({ where: { orderId: order.id } }) // un programado no tiene comanda hasta su hora
+    await fechar(order.id, enTokio(20))
+    await prisma.$executeRaw`UPDATE "Order" SET "scheduledFor" = ${utcTs(enTokio(13, 0, 1))} WHERE id = ${order.id}`
+
+    await barrer(enTokio(0, 10, 1)) // acabó el día en que llegó, no el suyo
+    expect((await venta(order.id)).status).toBe('CONFIRMED')
+
+    await barrer(enTokio(0, 10, 2))
+    expect((await venta(order.id)).status).toBe('COMPLETED')
+  })
+
+  it('🔴 la invariante 6 del vigilante NO grita por un pedido que B todavía deja abierto, y SÍ por lo que siempre gritó', async () => {
+    const { order } = await ingestDeliveryOrder(pedidoRappi(), { ...linkRappi, orderAcceptanceMode: OrderAcceptanceMode.AUTO })
+    await fechar(order.id, enTokio(12))
+    // Una cuenta propia cobrada que se quedó abierta: lo de siempre.
+    const propia = await prisma.order.create({
+      data: {
+        venueId,
+        orderNumber: randomUUID(),
+        status: 'CONFIRMED',
+        subtotal: 90,
+        taxAmount: 0,
+        total: 90,
+        remainingBalance: 90,
+        items: { create: { productName: 'Plato', quantity: 1, unitPrice: 90, taxAmount: 0, total: 90 } },
+        payments: {
+          create: { venueId, amount: 90, feePercentage: 0, feeAmount: 0, netAmount: 90, method: 'CASH', status: 'COMPLETED' },
+        },
+      },
     })
+    await fechar(propia.id, enTokio(12))
+
+    const gritos = async (ahora: Date) => {
+      const filas = await prisma.$queryRawUnsafe<Array<{ check: string; order_id: string }>>(buildWatchdogSql(ahora).details)
+      return filas.filter(f => f.check === 'PAGADA PERO ABIERTA').map(f => f.order_id)
+    }
+
+    // Mismo día y la comanda en la cocina: B lo deja abierto a propósito.
+    const deDia = await gritos(enTokio(12, 30))
+    expect(deDia).not.toContain(order.id)
+    expect(deDia).toContain(propia.id)
+
+    // Se acabó su día y sigue abierto (el barrido no pasó): eso SÍ es lo que el vigilante vigila.
+    const alOtroDia = await gritos(enTokio(0, 10, 1))
+    expect(alOtroDia).toContain(order.id)
+    expect(alOtroDia).toContain(propia.id)
+
+    // Y si la cocina ya lo terminó, también: ya tocaba cerrarlo.
+    await terminarLaCocina(order.id)
+    expect(await gritos(enTokio(12, 30))).toContain(order.id)
   })
 
   it('🔴 un pedido que todavía espera a la cocina (Uber MANUAL, sin aceptar) NO se cierra; en cuanto se acepta, sí, sólo de estado', async () => {
     const { order } = await ingestDeliveryOrder(pedidoUber(skuUber), { ...linkUber, orderAcceptanceMode: OrderAcceptanceMode.MANUAL })
     expect(order.status).toBe('PENDING')
+    await fechar(order.id, enTokio(12))
+    // Aun con la cocina terminada: sin aceptar no se cierra nunca.
+    await terminarLaCocina(order.id)
 
-    await barrer()
+    await barrer(enTokio(12, 6))
 
     // Antes del arreglo: COMPLETED a los 5-15 min, el tablero dejaba de pedir «aceptar» y Uber lo cancelaba solo (~11.5 min).
     const sinAceptar = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
     expect(sinAceptar.status).toBe('PENDING')
     expect(sinAceptar.total.toFixed(2)).toBe('638.00')
 
-    // La cocina lo acepta (la marca que deja `acceptDeliveryOrder` con el 2xx de Uber).
-    await prisma.order.update({
-      where: { id: order.id },
-      data: { providerAcceptedAt: new Date(), providerAcceptedEvidence: 'HTTP_2XX' },
-    })
-    await barrer()
+    // La cocina lo acepta (la marca que deja `acceptDeliveryOrder` con el 2xx de Uber), a las 12:02 de Tokio.
+    await prisma.$executeRaw`UPDATE "Order" SET "providerAcceptedAt" = ${utcTs(enTokio(12, 2))}, "providerAcceptedEvidence" = 'HTTP_2XX',
+      "updatedAt" = ${utcTs(enTokio(12, 2))} WHERE id = ${order.id}`
+    await barrer(enTokio(12, 10))
 
     const aceptado = await prisma.order.findUniqueOrThrow({ where: { id: order.id } })
     expect(aceptado.status).toBe('COMPLETED')

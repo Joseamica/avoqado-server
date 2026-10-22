@@ -73,8 +73,9 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * 🔴 Y Codex b1 #1/#5 (Rappi fase 2, 22-oct-2026): un pedido cuyo dinero liquida una PLATAFORMA de reparto (Uber, Rappi…) nunca
  * pasa por el reparador. Su total lleva cargos del comercio (el envío del repartidor propio, los cargos de Uber) que la aritmética
  * del cobro no ve: se los quitaba y denunciaba un sobrepago falso. Una cuarta pasada lo cierra SÓLO DE ESTADO, sin tocar su
- * dinero, y nunca uno que todavía espera a que la cocina lo acepte (Uber MANUAL). CUÁNDO se cierra uno aceptado está pendiente de
- * decisión del founder (`momentoDeCerrarUnPedidoDePlataformaSql`); hoy, como antes, al pasar la gracia. Asiento:
+ * dinero, y nunca uno que todavía espera a que la cocina lo acepte (Uber MANUAL). CUÁNDO se cierra uno aceptado lo dice la
+ * decisión «B» del founder (22-oct-2026, `momentoDeCerrarUnPedidoDePlataformaSql`): cuando la cocina lo termina o al acabar su
+ * día del negocio (en la zona del venue), lo que pase primero; mientras tanto la cocina conserva «Cancelar». Asiento:
  * `ORDER_RECONCILED_PAID` con `effects: 'PLATFORM_ORDER_STATUS_ONLY'`.
  *
  * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
