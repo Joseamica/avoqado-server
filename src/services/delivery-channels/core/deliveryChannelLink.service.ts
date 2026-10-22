@@ -26,7 +26,7 @@ import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
 import { calcularTasaInyeccion } from './injectionRate.service'
 import { configComoObjeto, LLAVES_DEL_SISTEMA } from './llavesDelSistema'
-import { menuSyncStatusOf } from './menuSync.service'
+import { menuSyncStatusOf, revisionDeMenuOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
 /** Select explícito — NUNCA incluye `webhookSecret`. Usado por list/create/update. */
@@ -61,10 +61,12 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
     orderBy: { createdAt: 'desc' },
   })) as unknown as Array<DeliveryChannelLinkSafe & { autoSyncMenu: boolean; lastMenuHash: string | null; provider: DeliveryProvider }>
 
-  // 🔴 Dos cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
+  // 🔴 Tres cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
   // base:
   //   · `menuSyncStatus` — un menú que nunca se logró publicar deja al proveedor vendiendo
   //     otra carta, o ninguna, y nadie se entera hasta que un cliente se queja.
+  //   · `menuRevision` — si el menú está en revisión del proveedor, desde cuándo, si ya pasó el
+  //     plazo sin veredicto, cuándo lo rechazó y por qué. Antes sólo se leía en el log.
   //   · `injectionRate` — es el número con el que el proveedor decide REVOCAR el acceso
   //     (Uber: exige 99.9%, revoca bajo 99%). Era invisible: se podía estar cayendo semanas.
   //
@@ -76,6 +78,9 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
       return {
         ...resto,
         menuSyncStatus: menuSyncStatusOf(l),
+        // La revisión del menú (pendiente, último rechazo, problemas), sacada de `config`, que este mismo select ya trae: ni una
+        // consulta más por canal. Aditivo: el `config` crudo sigue saliendo como siempre, y esto sin huellas.
+        menuRevision: revisionDeMenuOf(l.config),
         // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
         // invita a que alguien la use como si significara algo.
         injectionRate: await calcularTasaInyeccion({ venueId, provider: l.provider }).catch(() => null),

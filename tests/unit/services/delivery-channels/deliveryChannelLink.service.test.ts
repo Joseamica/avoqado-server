@@ -23,6 +23,7 @@ import {
   reanudarSnoozesVencidos,
   SNOOZE_MINUTOS_VALIDOS,
 } from '../../../../src/services/delivery-channels/core/deliveryChannelLink.service'
+import { PLAZO_SIN_VEREDICTO_MS, revisionDeMenuOf } from '../../../../src/services/delivery-channels/core/menuSync.service'
 
 jest.mock('../../../../src/services/delivery-channels/core/adapterRegistry', () => ({
   hasAdapter: jest.fn(() => false),
@@ -96,6 +97,201 @@ describe('deliveryChannelLink.service', () => {
       // Aserción positiva: campos esperados sí están seleccionados
       expect(callArg.select.provider).toBe(true)
       expect(callArg.select.status).toBe(true)
+    })
+
+    // ── Tarea 21 (Rappi fase 2): el estado de la revisión del menú, a la vista en el listado ──────────────────────
+    // El dueño tiene que poder ver «mi menú está en revisión desde…», «Rappi lo rechazó el…» y los motivos, sin abrir el
+    // log ni la base. Sale de `config`, que el listado YA trae: ni una consulta más por canal.
+    describe('menuRevision (Tarea 21)', () => {
+      const AHORA_MS = Date.parse('2026-10-22T12:00:00.000Z')
+      const hace = (ms: number) => new Date(AHORA_MS - ms).toISOString()
+      let relojSpy: jest.SpyInstance
+
+      beforeEach(() => {
+        relojSpy = jest.spyOn(Date, 'now').mockReturnValue(AHORA_MS)
+      })
+      afterEach(() => {
+        relojSpy.mockRestore()
+      })
+
+      const vinculo = (config: unknown, id = 'link1') => ({
+        id,
+        venueId: 'venue1',
+        provider: DeliveryProvider.DELIVERECT,
+        status: DeliveryChannelStatus.ACTIVE,
+        autoSyncMenu: true,
+        lastMenuHash: null,
+        config,
+      })
+      const forma = (canal: unknown) => (canal as { menuRevision: unknown }).menuRevision
+
+      it('🔴 el listado trae menuRevision con la pendiente, el último rechazo y los problemas', async () => {
+        const publicadaEn = hace(60 * 60 * 1000)
+        ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+          vinculo({
+            menuEnRevision: { huella: 'huella-pendiente-secreta', publicadaEn },
+            menuRechazado: { huella: 'huella-rechazada-secreta', en: '2026-10-21T09:30:00.000Z' },
+            menuProblemas: {
+              en: '2026-10-22T10:55:00.000Z',
+              problemas: [
+                { sku: 'SKU-1', problema: 'Cuesta $0 y no tiene modificadores: Rappi lo rechaza.' },
+                { sku: '(menú)', problema: 'Rappi rechazó: precio inválido' },
+              ],
+            },
+          }),
+        ])
+
+        const [canal] = await listChannelLinks('venue1')
+
+        expect(forma(canal)).toEqual({
+          enRevisionDesde: publicadaEn,
+          sinVeredicto: false,
+          ultimoRechazoEn: '2026-10-21T09:30:00.000Z',
+          problemas: [
+            { sku: 'SKU-1', problema: 'Cuesta $0 y no tiene modificadores: Rappi lo rechaza.' },
+            { sku: '(menú)', problema: 'Rappi rechazó: precio inválido' },
+          ],
+        })
+        // Las huellas son del sincronizador: ni en `menuRevision` ni por el camino de la pendiente.
+        expect(JSON.stringify(forma(canal))).not.toContain('secreta')
+      })
+
+      it('🔴 sin datos ⇒ menuRevision con nulos y lista vacía (config nulo, vacío o sin esas llaves)', async () => {
+        ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+          vinculo(null, 'a'),
+          vinculo({}, 'b'),
+          vinculo({ precios: { markupPercent: 30 } }, 'c'),
+        ])
+
+        const canales = await listChannelLinks('venue1')
+
+        expect(canales).toHaveLength(3)
+        for (const canal of canales) {
+          expect(forma(canal)).toEqual({ enRevisionDesde: null, sinVeredicto: false, ultimoRechazoEn: null, problemas: [] })
+        }
+      })
+
+      it('un canal sin la columna `config` en la fila (un select viejo) también sale con la forma vacía', async () => {
+        ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+          { id: 'link1', venueId: 'venue1', provider: DeliveryProvider.DELIVERECT, status: DeliveryChannelStatus.ACTIVE },
+        ])
+
+        const [canal] = await listChannelLinks('venue1')
+
+        expect(forma(canal)).toEqual({ enRevisionDesde: null, sinVeredicto: false, ultimoRechazoEn: null, problemas: [] })
+      })
+
+      it('🔴 NO añade consultas por canal: una sola lectura, y `config` ya viaja en el select', async () => {
+        ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+          vinculo({ menuEnRevision: { huella: 'h', publicadaEn: hace(1000) } }, 'a'),
+          vinculo({ menuRechazado: { huella: 'h', en: hace(1000) } }, 'b'),
+          vinculo(null, 'c'),
+        ])
+
+        await listChannelLinks('venue1')
+
+        expect(prisma.deliveryChannelLink.findMany).toHaveBeenCalledTimes(1)
+        expect((prisma.deliveryChannelLink.findMany as jest.Mock).mock.calls[0][0].select.config).toBe(true)
+        expect(prisma.deliveryChannelLink.findFirst).not.toHaveBeenCalled()
+        expect(prisma.deliveryChannelLink.findUnique).not.toHaveBeenCalled()
+      })
+
+      it('lo que ya devolvía el listado sigue igual: menuSyncStatus, la huella oculta y el config tal cual', async () => {
+        ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([
+          { ...vinculo({ precios: { markupPercent: 30 } }), lastMenuHash: 'abc' },
+        ])
+
+        const [canal] = await listChannelLinks('venue1')
+
+        expect(canal).toMatchObject({ menuSyncStatus: 'AL_DIA', config: { precios: { markupPercent: 30 } } })
+        expect((canal as unknown as { lastMenuHash?: string }).lastMenuHash).toBeUndefined()
+      })
+
+      describe('revisionDeMenuOf es TOTAL: cualquier config (basura o heredado) devuelve la forma vacía y nunca lanza', () => {
+        const VACIA = { enRevisionDesde: null, sinVeredicto: false, ultimoRechazoEn: null, problemas: [] }
+        const BASURA: Array<[string, unknown]> = [
+          ['null', null],
+          ['undefined', undefined],
+          ['un texto', 'menuEnRevision'],
+          ['un número', 42],
+          ['un booleano', true],
+          ['una lista vacía', []],
+          ['una lista de objetos', [{ menuEnRevision: { huella: 'h', publicadaEn: 'x' } }]],
+          ['un objeto vacío', {}],
+          ['pendiente que es un texto', { menuEnRevision: 'x' }],
+          ['pendiente sin huella', { menuEnRevision: { publicadaEn: '2026-10-22T10:00:00.000Z' } }],
+          ['pendiente con la hora numérica', { menuEnRevision: { huella: 'h', publicadaEn: 1760000000000 } }],
+          ['rechazo que es una lista', { menuRechazado: [] }],
+          ['rechazo sin huella', { menuRechazado: { en: '2026-10-22T10:00:00.000Z' } }],
+          ['problemas que son un texto', { menuProblemas: 'mal' }],
+          ['problemas sin lista', { menuProblemas: { en: 'x', problemas: 'mal' } }],
+          [
+            'problemas con puras entradas rotas',
+            { menuProblemas: { en: 'x', problemas: [null, 7, 'x', [], { sku: 1 }, { problema: 'sin sku' }] } },
+          ],
+        ]
+
+        it.each(BASURA)('config = %s', (_nombre, config) => {
+          expect(() => revisionDeMenuOf(config)).not.toThrow()
+          expect(revisionDeMenuOf(config)).toEqual(VACIA)
+        })
+
+        it('una entrada sana entre basura se queda; y sólo salen `sku` y `problema` (nada más de lo guardado)', () => {
+          const r = revisionDeMenuOf({
+            menuProblemas: {
+              en: 'x',
+              problemas: [
+                null,
+                { sku: 'A', problema: 'p', interno: 'no-sale', huella: 'no-sale' },
+                { sku: 2 },
+                { sku: 'B', problema: 'q' },
+              ],
+            },
+          })
+          expect(r.problemas).toEqual([
+            { sku: 'A', problema: 'p' },
+            { sku: 'B', problema: 'q' },
+          ])
+        })
+      })
+
+      describe('sinVeredicto: la pendiente pasó el plazo (se calcula con la hora, no con el sello del job)', () => {
+        const conPendiente = (publicadaEn: unknown, extra: Record<string, unknown> = {}) => ({
+          menuEnRevision: { huella: 'h', publicadaEn, ...extra },
+        })
+
+        it('🔴 una pendiente más vieja que el plazo ⇒ sinVeredicto: true, aunque el job todavía no la haya sellado', () => {
+          const publicadaEn = hace(PLAZO_SIN_VEREDICTO_MS + 60_000)
+          expect(revisionDeMenuOf(conPendiente(publicadaEn))).toMatchObject({ enRevisionDesde: publicadaEn, sinVeredicto: true })
+        })
+
+        it('una pendiente dentro del plazo ⇒ sinVeredicto: false', () => {
+          const publicadaEn = hace(PLAZO_SIN_VEREDICTO_MS - 60_000)
+          expect(revisionDeMenuOf(conPendiente(publicadaEn))).toMatchObject({ enRevisionDesde: publicadaEn, sinVeredicto: false })
+        })
+
+        it('justo en el límite del plazo todavía NO es vencida (la misma regla de menuSync: sólo si lo EXCEDE)', () => {
+          expect(revisionDeMenuOf(conPendiente(hace(PLAZO_SIN_VEREDICTO_MS))).sinVeredicto).toBe(false)
+          expect(revisionDeMenuOf(conPendiente(hace(PLAZO_SIN_VEREDICTO_MS + 1))).sinVeredicto).toBe(true)
+        })
+
+        it('🔴 una hora ilegible cuenta como sin veredicto (igual que menuSync), y la pendiente SIGUE a la vista', () => {
+          const r = revisionDeMenuOf(conPendiente('no-es-una-fecha'))
+          expect(r.sinVeredicto).toBe(true)
+          expect(r.enRevisionDesde).toBe('no-es-una-fecha') // null querría decir «no hay pendiente»
+        })
+
+        it('con el aviso del job ya sellado sigue siendo sinVeredicto, y el sello no cambia lo que sale', () => {
+          const publicadaEn = hace(PLAZO_SIN_VEREDICTO_MS + 3_600_000)
+          const r = revisionDeMenuOf(conPendiente(publicadaEn, { sinVeredictoAvisadoEn: hace(60_000) }))
+          expect(r).toEqual({ enRevisionDesde: publicadaEn, sinVeredicto: true, ultimoRechazoEn: null, problemas: [] })
+        })
+
+        it('sin pendiente nunca hay «sin veredicto», aunque haya un rechazo viejo', () => {
+          const r = revisionDeMenuOf({ menuRechazado: { huella: 'h', en: hace(10 * PLAZO_SIN_VEREDICTO_MS) } })
+          expect(r).toMatchObject({ enRevisionDesde: null, sinVeredicto: false, ultimoRechazoEn: hace(10 * PLAZO_SIN_VEREDICTO_MS) })
+        })
+      })
     })
   })
 

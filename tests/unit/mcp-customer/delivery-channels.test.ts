@@ -5,6 +5,7 @@
  * feature-gating.md). The basePlan.service mock below intercepts planGateMessage's resolver.
  */
 import { registerDeliveryChannelTools } from '../../../src/mcp/tools/deliveryChannels'
+import { PLAZO_SIN_VEREDICTO_MS } from '../../../src/services/delivery-channels/core/menuSync.service'
 import type { McpScope } from '../../../src/mcp/scope'
 
 const mockHasFeatureAccess = jest.fn()
@@ -442,5 +443,118 @@ describe('delivery_channels', () => {
     expect(canal.webhookSecret).toBeUndefined()
     expect(canal.config).toBeUndefined()
     expect(canal.margenPorcentaje).toBe(30) // el dato SÍ sale, desglosado
+  })
+
+  // ── Tarea 21 (Rappi fase 2): el estado de la revisión del menú ────────────────────────────────────────────────────
+  // «¿Rappi ya aprobó mi menú? ¿por qué lo rechazó?» se contestaba sólo con el log o la base. `menuRevision` es un campo
+  // NUEVO y OPCIONAL de lectura: la descripción de la tool (certificada) no cambia y ningún campo anterior se quita.
+  describe('menuRevision (Tarea 21)', () => {
+    const AHORA_MS = Date.parse('2026-10-22T12:00:00.000Z')
+    const hace = (ms: number) => new Date(AHORA_MS - ms).toISOString()
+    let relojSpy: jest.SpyInstance
+
+    beforeEach(() => {
+      relojSpy = jest.spyOn(Date, 'now').mockReturnValue(AHORA_MS)
+      mockHasFeatureAccess.mockResolvedValueOnce(true)
+      mockVenueFindUnique.mockResolvedValueOnce({ timezone: 'America/Mexico_City' })
+      mockOrderGroupBy.mockResolvedValueOnce([])
+    })
+    afterEach(() => {
+      relojSpy.mockRestore()
+    })
+
+    it('🔴 cada canal trae menuRevision con la pendiente, el último rechazo y los problemas (sin huellas ni el blob de config)', async () => {
+      const publicadaEn = hace(2 * 60 * 60 * 1000)
+      mockLinkFindMany.mockResolvedValueOnce([
+        {
+          ...LINK_BASE,
+          id: 'l1',
+          provider: 'RAPPI',
+          lastMenuHash: null,
+          config: {
+            menuEnRevision: { huella: 'huella-pendiente-secreta', publicadaEn },
+            menuRechazado: { huella: 'huella-rechazada-secreta', en: '2026-10-21T09:30:00.000Z' },
+            menuProblemas: {
+              en: '2026-10-22T09:55:00.000Z',
+              problemas: [
+                { sku: 'SKU-1', problema: 'Cuesta $0 y no tiene modificadores: Rappi lo rechaza.' },
+                { sku: '(menú)', problema: 'Rappi rechazó: precio inválido' },
+              ],
+            },
+          },
+        },
+      ])
+
+      const crudo = (await call({ venueId: 'v1' })).content[0].text
+      const canal = parse({ content: [{ text: crudo }] }).channels[0]
+
+      expect(canal.menuRevision).toEqual({
+        enRevisionDesde: publicadaEn,
+        sinVeredicto: false,
+        ultimoRechazoEn: '2026-10-21T09:30:00.000Z',
+        problemas: [
+          { sku: 'SKU-1', problema: 'Cuesta $0 y no tiene modificadores: Rappi lo rechaza.' },
+          { sku: '(menú)', problema: 'Rappi rechazó: precio inválido' },
+        ],
+      })
+      expect(crudo).not.toContain('secreta') // las huellas son del sincronizador
+      expect(canal.config).toBeUndefined() // el blob crudo sigue sin salir
+    })
+
+    it('🔴 sin datos ⇒ menuRevision con nulos y lista vacía (config nulo, ausente o sin esas llaves)', async () => {
+      mockLinkFindMany.mockResolvedValueOnce([
+        { ...LINK_BASE, id: 'l1', config: null },
+        { ...LINK_BASE, id: 'l2' }, // sin la llave `config`
+        { ...LINK_BASE, id: 'l3', config: { precios: { markupPercent: 30 } } },
+      ])
+
+      const out = parse(await call({ venueId: 'v1' }))
+
+      expect(out.channels).toHaveLength(3)
+      for (const canal of out.channels) {
+        expect(canal.menuRevision).toEqual({ enRevisionDesde: null, sinVeredicto: false, ultimoRechazoEn: null, problemas: [] })
+      }
+    })
+
+    it('🔴 una pendiente más vieja que el plazo sale con sinVeredicto: true; una config ilegible no tumba la tool', async () => {
+      const vieja = hace(PLAZO_SIN_VEREDICTO_MS + 60_000)
+      mockLinkFindMany.mockResolvedValueOnce([
+        { ...LINK_BASE, id: 'l1', config: { menuEnRevision: { huella: 'h', publicadaEn: vieja } } },
+        { ...LINK_BASE, id: 'l2', config: 'basura heredada' },
+        { ...LINK_BASE, id: 'l3', config: [1, 2, 3] },
+      ])
+
+      const out = parse(await call({ venueId: 'v1' }))
+
+      expect(out.channels[0].menuRevision).toMatchObject({ enRevisionDesde: vieja, sinVeredicto: true })
+      for (const canal of [out.channels[1], out.channels[2]]) {
+        expect(canal.menuRevision).toEqual({ enRevisionDesde: null, sinVeredicto: false, ultimoRechazoEn: null, problemas: [] })
+      }
+    })
+
+    it('el campo es ADITIVO: lo que la tool ya devolvía sigue ahí, y no se hace una lectura de más', async () => {
+      mockHasAdapter.mockReturnValue(true)
+      mockLinkFindMany.mockResolvedValueOnce([
+        {
+          ...LINK_BASE,
+          id: 'l1',
+          lastMenuHash: 'abc',
+          config: { precios: { markupPercent: 30 }, menuRechazado: { huella: 'h', en: hace(1000) } },
+        },
+      ])
+
+      const out = parse(await call({ venueId: 'v1' }))
+
+      expect(out.channels[0]).toMatchObject({
+        id: 'l1',
+        integrationReady: true,
+        menuPublicado: true,
+        menuSyncStatus: 'AL_DIA',
+        margenPorcentaje: 30,
+        menuRevision: { ultimoRechazoEn: hace(1000) },
+      })
+      expect(out.channels[0].lastMenuHash).toBeUndefined()
+      expect(mockLinkFindMany).toHaveBeenCalledTimes(1)
+    })
   })
 })

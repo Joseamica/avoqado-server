@@ -34,7 +34,14 @@ import { adapterFor, hasAdapter } from './adapterRegistry'
 import { venueHasFeatureAccess } from '@/services/access/basePlan.service'
 
 import { resolveDeliveryHours } from './deliveryHours.service'
-import { escribirLlavesDelSistema, leerMenuEnRevision, leerMenuRechazado, mismaPublicacion, type MenuEnRevision } from './llavesDelSistema'
+import {
+  escribirLlavesDelSistema,
+  leerMenuEnRevision,
+  leerMenuProblemas,
+  leerMenuRechazado,
+  mismaPublicacion,
+  type MenuEnRevision,
+} from './llavesDelSistema'
 import { buildMenuSnapshot } from './menuSnapshot.service'
 import { DeliveryWriteNotSentError, type ProblemaDeMenu, type PublicacionDeMenu } from './types'
 
@@ -50,6 +57,16 @@ export type MenuSyncOutcome = 'PUBLISHED' | 'UNCHANGED' | 'NO_PUBLISHER' | 'FAIL
  * 6 h: el sandbox no mandó ningún veredicto en ~5 h (M8, 22-oct), así que el plazo real no está medido.
  */
 export const PLAZO_SIN_VEREDICTO_MS = 6 * 60 * 60 * 1000
+
+/**
+ * ¿Una pendiente publicada en `publicadaEn` ya pasó el plazo sin veredicto? UNA sola regla para el job que avisa
+ * (`seguirEnRevision`) y para lo que se muestra (`revisionDeMenuOf`): si se separaran, la pantalla diría «en revisión» mientras el
+ * 🚨 ya salió, o al revés. Una hora ilegible cuenta como vencida: se avisa en vez de esperar para siempre.
+ */
+function plazoSinVeredictoVencido(publicadaEn: string): boolean {
+  const edadMs = Date.now() - Date.parse(publicadaEn)
+  return Number.isNaN(edadMs) || edadMs > PLAZO_SIN_VEREDICTO_MS
+}
 
 export interface MenuSyncResult {
   outcome: MenuSyncOutcome
@@ -234,9 +251,9 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
  */
 async function seguirEnRevision(link: DeliveryChannelLink, enRevision: MenuEnRevision): Promise<MenuSyncResult> {
   const edadMs = Date.now() - Date.parse(enRevision.publicadaEn)
-  // Una hora ilegible cuenta como vencida: se avisa en vez de esperar para siempre.
-  const vencida = Number.isNaN(edadMs) || edadMs > PLAZO_SIN_VEREDICTO_MS
-  if (enRevision.sinVeredictoAvisadoEn || !vencida) return { outcome: 'IN_REVIEW', linkId: link.id }
+  if (enRevision.sinVeredictoAvisadoEn || !plazoSinVeredictoVencido(enRevision.publicadaEn)) {
+    return { outcome: 'IN_REVIEW', linkId: link.id }
+  }
 
   const avisadoEn = new Date().toISOString()
   const avise = await escribirLlavesDelSistema(link.id, fila => {
@@ -458,6 +475,37 @@ export type MenuSyncStatus = 'MANUAL' | 'NUNCA_PUBLICADO' | 'AL_DIA'
 export function menuSyncStatusOf(link: { autoSyncMenu: boolean; lastMenuHash: string | null }): MenuSyncStatus {
   if (!link.autoSyncMenu) return 'MANUAL' // el dueño lo apagó: mantiene su menú a mano
   return link.lastMenuHash === null ? 'NUNCA_PUBLICADO' : 'AL_DIA'
+}
+
+/**
+ * Lo que se ve de la revisión del menú de un canal: el MCP y el listado del panel la leen de aquí (como `menuSyncStatusOf`, en
+ * UN solo lugar). Todo sale de `config`, que el listado ya trae: ni una consulta más.
+ *  · `enRevisionDesde`: cuándo se mandó el menú que espera veredicto; `null` = no hay menú en revisión. Si la hora guardada es
+ *    ilegible sale tal cual: el menú SIGUE pendiente y `null` diría lo contrario.
+ *  · `sinVeredicto`: hay pendiente y pasó el plazo (`PLAZO_SIN_VEREDICTO_MS`). Se calcula con la hora, no con el sello del job
+ *    (`sinVeredictoAvisadoEn`, que se escribe en la siguiente pasada): la pantalla no espera al job.
+ *  · `ultimoRechazoEn`: cuándo rechazó el proveedor el último menú (`null` = no hay rechazo vigente; sin hora legible, `''`).
+ *  · `problemas`: lo de la última publicación (productos que no salieron, precios ajustados, motivos del rechazo).
+ *
+ * 🔴 TOTAL: cualquier `config` (null, texto, lista, llaves ausentes o heredadas) devuelve la forma vacía y nunca lanza.
+ * Sin huellas: son del sincronizador y fuera de él no significan nada.
+ */
+export interface RevisionDeMenu {
+  enRevisionDesde: string | null
+  sinVeredicto: boolean
+  ultimoRechazoEn: string | null
+  problemas: ProblemaDeMenu[]
+}
+
+export function revisionDeMenuOf(config: unknown): RevisionDeMenu {
+  const pendiente = leerMenuEnRevision(config)
+  const rechazo = leerMenuRechazado(config)
+  return {
+    enRevisionDesde: pendiente ? pendiente.publicadaEn : null,
+    sinVeredicto: pendiente ? plazoSinVeredictoVencido(pendiente.publicadaEn) : false,
+    ultimoRechazoEn: rechazo ? rechazo.en : null,
+    problemas: leerMenuProblemas(config),
+  }
 }
 
 /** Los canales que deben mantenerse sincronizados: activos y con el auto-sync prendido. */

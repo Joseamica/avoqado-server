@@ -64,6 +64,21 @@ export function leerMenuRechazado(config: unknown): MenuRechazado | null {
   return { huella: r.huella, en: typeof r.en === 'string' ? r.en : '' }
 }
 
+/**
+ * Los problemas de la última publicación, a la vista del dueño. Siempre una lista (vacía si no hay o si la columna no tiene la
+ * forma). Sólo pasan las entradas con `sku` y `problema` de texto, y de cada una sólo esos dos campos: una basura heredada en la
+ * columna no tumba a quien pregunta, y nada más de lo guardado sale por aquí.
+ */
+export function leerMenuProblemas(config: unknown): ProblemaDeMenu[] {
+  const m = configComoObjeto(config).menuProblemas
+  if (!esObjeto(m) || !Array.isArray(m.problemas)) return []
+  const problemas: ProblemaDeMenu[] = []
+  for (const p of m.problemas as unknown[]) {
+    if (esObjeto(p) && typeof p.sku === 'string' && typeof p.problema === 'string') problemas.push({ sku: p.sku, problema: p.problema })
+  }
+  return problemas
+}
+
 /** ¿Es la MISMA publicación? (misma huella y misma hora: otra publicación de la misma huella es otra revisión). */
 export function mismaPublicacion(a: MenuEnRevision | null, b: Pick<MenuEnRevision, 'huella' | 'publicadaEn'>): boolean {
   return !!a && a.huella === b.huella && a.publicadaEn === b.publicadaEn

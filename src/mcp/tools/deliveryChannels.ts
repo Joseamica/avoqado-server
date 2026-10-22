@@ -4,7 +4,7 @@ import prisma from '@/utils/prismaClient'
 import { getDeliveryDailySummary } from '@/services/delivery-channels/core/deliverySummary.service'
 import { resolveDeliveryHours } from '@/services/delivery-channels/core/deliveryHours.service'
 import { calcularTasaInyeccion } from '@/services/delivery-channels/core/injectionRate.service'
-import { menuSyncStatusOf } from '@/services/delivery-channels/core/menuSync.service'
+import { menuSyncStatusOf, revisionDeMenuOf } from '@/services/delivery-channels/core/menuSync.service'
 import { hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
@@ -90,6 +90,10 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           // Una sola derivación compartida con el REST del dashboard: dos copias acabarían
           // contestando distinto y nadie sabría a cuál creerle.
           menuSyncStatus: menuSyncStatusOf(l),
+          // La revisión del menú: pendiente, plazo vencido sin veredicto, último rechazo y problemas. Campo NUEVO y OPCIONAL de
+          // lectura (la tool está en el catálogo certificado: su descripción no cambia ni se quita nada). Sin huellas, y
+          // `revisionDeMenuOf` es total: una `config` ilegible sale con la forma vacía, nunca tumba la lectura.
+          menuRevision: revisionDeMenuOf(l.config),
           lastMenuHash: undefined, // la huella misma no le sirve a nadie fuera del sincronizador
           webhookSecret: undefined, // NUNCA sale del server
           config: undefined, // se expone desglosado abajo, no como blob crudo
