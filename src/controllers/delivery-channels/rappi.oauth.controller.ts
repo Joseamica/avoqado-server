@@ -21,6 +21,7 @@ import { Request, Response } from 'express'
 
 import logger from '@/config/logger'
 import { casEstado, fallar } from '@/services/delivery-channels/core/deliveryConnectIntent.service'
+import { rappiAdapter } from '@/services/delivery-channels/providers/rappi/rappi.adapter'
 import {
   cifrarIdToken,
   depsDesdeEnv,
@@ -347,7 +348,11 @@ async function reChequear(deps: ConnectDeps, intent: DeliveryConnectIntent): Pro
     if (!seleccion.has(t.storeId) || !t.integrated || !t.integrationId || outcome === undefined || esFinal(outcome)) continue
     await confirmarTienda(
       { storeId: t.storeId, status: 'ACTIVE', integrationId: t.integrationId },
-      { suscribir: c.suscribirTiendaAEventos },
+      {
+        suscribir: c.suscribirTiendaAEventos,
+        // Tarea 18: «integrada» por el adaptador, sin esperarlo (esta es la petición de la página de resultado).
+        avisarIntegrada: (storeId, integrada) => rappiAdapter.notifyIntegrationStatus(storeId, integrada),
+      },
       { intentId: intent.id },
     )
   }

@@ -231,6 +231,23 @@ export async function habilitarTiendaRappi(
 }
 
 /**
+ * «Integrada sí/no» (Tarea 18): `PUT stores-pa/{storeId}/status?integrated=<bool>`. NO prende ni apaga la tienda: dice si sus pedidos
+ * llegan por la integración o se atienden a mano en el portal de aliados (por eso es aparte de `habilitarTiendaRappi`).
+ *
+ * 🔴 Host CLÁSICO (el de siempre, sin `host` alterno): la medición M9 (21-oct) contestó HTTP 500 «contact support» en los DOS
+ * hosts, así que el sandbox no decidió cuál es el bueno; hasta que Rappi lo aclare se queda en el de toda la API. Es una
+ * ESCRITURA: lleva `storeId`, así que el candado de tiendas aplica (fuera de la lista lanza `RappiEscrituraBloqueadaError` y no
+ * sale nada). Un 500 se DEVUELVE tal cual, no se lanza: quien llama (best-effort) lo registra.
+ */
+export async function marcarTiendaIntegradaRappi(storeId: string, integrada: boolean): Promise<RappiRespuesta> {
+  return rappiApi({
+    metodo: 'PUT',
+    ruta: `${API}/stores-pa/${encodeURIComponent(storeId)}/status?integrated=${integrada}`,
+    storeId,
+  })
+}
+
+/**
  * El historial de eventos de UN pedido del lado de Rappi (Tarea 9): lo único que dice si un pedido que contestó 400 al
  * aceptar sí quedó aceptado (`taken_visible_order`). Medido el 21-oct en DEV: 200 con una lista; `[]` si nunca se aceptó.
  * Es una LECTURA: va sin `storeId`, como las demás. 🔴 No confundir con `GET /orders` (`sondearPedidosRappi`), que NO es una

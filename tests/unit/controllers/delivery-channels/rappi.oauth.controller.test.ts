@@ -5,6 +5,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.clie
   tiendasDelComercio: jest.fn(),
   aprovisionarTiendasRappi: jest.fn(),
   suscribirTiendaAEventos: jest.fn(),
+  marcarTiendaIntegradaRappi: jest.fn(),
   tiendasEscribiblesRappi: () => ['10', '11'],
   getRappiEnvironment: () => 'SANDBOX',
   clientIdRappi: () => 'cid',
@@ -33,6 +34,7 @@ const cliente = rappiClient as unknown as Record<
   | 'tiendasDelComercio'
   | 'aprovisionarTiendasRappi'
   | 'suscribirTiendaAEventos'
+  | 'marcarTiendaIntegradaRappi'
   | 'redirectUriRappi'
   | 'preflightSelfOnboardingRappi',
   jest.Mock
@@ -64,6 +66,7 @@ beforeEach(() => {
     inciertas: [],
   }))
   cliente.suscribirTiendaAEventos.mockReset().mockResolvedValue({ ok: true, fallidos: [] })
+  cliente.marcarTiendaIntegradaRappi.mockReset().mockResolvedValue({ ok: true, status: 200, raw: '' })
 })
 
 const IDENT = { id: 'i1', environment: 'SANDBOX', venueId: 'v1', clientId: 'cid' }
@@ -321,10 +324,31 @@ describe('result', () => {
     expect(cliente.suscribirTiendaAEventos).toHaveBeenCalledWith('10')
     expect(html(r)).toContain('Conectada')
 
+    // Tarea 18: la promoción por el re-chequeo también le dice a Rappi «integrada» (sin esperar su respuesta).
+    await new Promise<void>(resolver => setImmediate(resolver))
+    expect(cliente.marcarTiendaIntegradaRappi).toHaveBeenCalledTimes(1)
+    expect(cliente.marcarTiendaIntegradaRappi).toHaveBeenCalledWith('10', true)
+
     // Recargar no vuelve a suscribir ni a tocar nada.
     const r2 = await resultado()
     expect(cliente.suscribirTiendaAEventos).toHaveBeenCalledTimes(1)
+    expect(cliente.marcarTiendaIntegradaRappi).toHaveBeenCalledTimes(1)
     expect(html(r2)).toContain('Conectada')
+  })
+
+  it('🔴 si Rappi rechaza el «integrada» (el sandbox contesta 500), la página igual dice Conectada y no se revierte nada', async () => {
+    canjeado()
+    await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    integrada('int10')
+    cliente.marcarTiendaIntegradaRappi.mockResolvedValue({ ok: false, status: 500, raw: 'Please contact support team' })
+
+    const r = await resultado()
+    await new Promise<void>(resolver => setImmediate(resolver))
+
+    expect(cliente.marcarTiendaIntegradaRappi).toHaveBeenCalledWith('10', true)
+    expect(db.links.get('10')?.status).toBe('ACTIVE')
+    expect(intent()).toMatchObject({ state: 'CONSUMED', resultsJson: { '10': { outcome: 'ACTIVATED' } } })
+    expect(html(r)).toContain('Conectada')
   })
 
   // R7

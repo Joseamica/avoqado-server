@@ -338,6 +338,17 @@ export const rappiAdapter = {
   },
 
   /**
+   * «Integrada sí/no» (Tarea 18). Devuelve la respuesta de Rappi tal cual (un 500 es `ok:false`, no una excepción) y relanza lo
+   * que lance el cliente (el candado de escritura, un fallo de red): quien llama es best-effort y lo registra, nunca lo traga
+   * este adaptador. 🔴 Hoy sólo se llama con `true` (al promover una tienda a ACTIVE, `rappi.provisioning`); el `false` queda
+   * listo para el botón «desconectar» de la fase 3 (ver `DirectDeliveryAdapter.notifyIntegrationStatus`).
+   */
+  async notifyIntegrationStatus(storeId: string, integrada: boolean): Promise<ActionResult> {
+    const { marcarTiendaIntegradaRappi } = await import('./rappi.client')
+    return marcarTiendaIntegradaRappi(storeId, integrada)
+  },
+
+  /**
    * 🔴 El 2xx del `POST /menu` significa «en revisión» (*"Menu updated and ready to be validated"*), NO publicado: lo
    * publicado lo dice `MENU_APPROVED`. Con esto el sincronizador no sella la huella con el 2xx y no republica encima de la
    * revisión.

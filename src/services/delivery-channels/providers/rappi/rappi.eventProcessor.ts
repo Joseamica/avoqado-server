@@ -185,7 +185,11 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
         import('./rappi.provisioning'),
         import('./rappi.client'),
       ])
-      return confirmarTienda(r, { suscribir: suscribirTiendaAEventos })
+      // Tarea 18: el «integrada» sale por el ADAPTADOR (el mismo camino que usará el botón de desconectar), sin esperarlo.
+      return confirmarTienda(r, {
+        suscribir: suscribirTiendaAEventos,
+        avisarIntegrada: (storeId, integrada) => rappiAdapter.notifyIntegrationStatus(storeId, integrada),
+      })
     })
   const historial =
     deps.historial ??

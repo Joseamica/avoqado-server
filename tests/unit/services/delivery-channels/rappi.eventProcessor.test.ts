@@ -25,7 +25,11 @@ import {
   renovarReclamo,
 } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
 import { confirmarTienda } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
-import { historialDelPedidoRappi, suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
+import {
+  historialDelPedidoRappi,
+  marcarTiendaIntegradaRappi,
+  suscribirTiendaAEventos,
+} from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { anotarAceptacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
 import { rappiAdapter } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
 import { VariantePendienteError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.mapper'
@@ -51,6 +55,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.prov
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
   suscribirTiendaAEventos: jest.fn(),
   historialDelPedidoRappi: jest.fn(),
+  marcarTiendaIntegradaRappi: jest.fn(),
 }))
 // La marca de aceptación es un UPDATE condicionado al token (se prueba en `rappi.estadoDelPedido.test.ts` y contra Postgres);
 // aquí se observa cuándo se escribe. `leerEstado` y `leerHistorial` son los reales.
@@ -654,7 +659,14 @@ describe('processRappiEvent', () => {
     expect(confirmarTienda).toHaveBeenCalledTimes(2)
     expect(confirmarTienda).toHaveBeenCalledWith(expect.objectContaining({ storeId: '10', batchId: 'lote-7' }), {
       suscribir: suscribirTiendaAEventos,
+      avisarIntegrada: expect.any(Function),
     })
+
+    // 🔴 Tarea 18: el aviso «integrada sí/no» sale por el ADAPTADOR (y de ahí al cliente), con el valor tal cual.
+    const { avisarIntegrada } = (confirmarTienda as jest.Mock).mock.calls[0][1]
+    ;(marcarTiendaIntegradaRappi as jest.Mock).mockResolvedValue({ ok: true, status: 200, raw: '' })
+    await expect(avisarIntegrada('10', true)).resolves.toEqual({ ok: true, status: 200, raw: '' })
+    expect(marcarTiendaIntegradaRappi).toHaveBeenCalledWith('10', true)
   })
 
   // ── Un canal DESHABILITADO no toma pedidos nuevos (R10) ─────────────────────────

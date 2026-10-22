@@ -13,9 +13,11 @@ import { DeliveryWriteNotSentError, type DirectDeliveryAdapter } from '../../../
 // prueba en tests/integration/delivery-channels/rappiTopeDeListo.test.ts.
 const mockMarcarListoRappi = jest.fn()
 const mockPublicarMenuRappi = jest.fn()
+const mockMarcarIntegrada = jest.fn()
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
   marcarListoRappi: (...a: unknown[]) => mockMarcarListoRappi(...a),
   publicarMenuRappi: (...a: unknown[]) => mockPublicarMenuRappi(...a),
+  marcarTiendaIntegradaRappi: (...a: unknown[]) => mockMarcarIntegrada(...a),
 }))
 const mockReservar = jest.fn()
 const mockCerrar = jest.fn()
@@ -302,6 +304,43 @@ describe('rappiAdapter.markOrderReady — el «listo», a lo más 3 llamadas por
     mockCerrar.mockRejectedValue(new Error('P1001'))
 
     await expect(rappiAdapter.markOrderReady('722609056', '900175625')).resolves.toEqual({ ok: true, status: 200, raw: '{}' })
+  })
+})
+
+describe('rappiAdapter.notifyIntegrationStatus — «integrada sí/no» (Tarea 18)', () => {
+  beforeEach(() => mockMarcarIntegrada.mockReset().mockResolvedValue({ ok: true, status: 200, raw: '' }))
+
+  it('es una capacidad OPCIONAL del contrato directo (el núcleo la busca por nombre, nunca por proveedor)', () => {
+    const _check = rappiAdapter satisfies DirectDeliveryAdapter
+    expect(typeof _check.notifyIntegrationStatus).toBe('function')
+  })
+
+  it.each([true, false])(
+    'integrada=%s: delega en el cliente con la tienda y el valor, y devuelve su respuesta tal cual',
+    async integrada => {
+      const r = await rappiAdapter.notifyIntegrationStatus('900175625', integrada)
+
+      expect(mockMarcarIntegrada).toHaveBeenCalledTimes(1)
+      expect(mockMarcarIntegrada).toHaveBeenCalledWith('900175625', integrada)
+      expect(r).toEqual({ ok: true, status: 200, raw: '' })
+    },
+  )
+
+  it('un 500 de Rappi (M9) NO lanza: se devuelve ok:false para que quien llama lo registre', async () => {
+    mockMarcarIntegrada.mockResolvedValue({ ok: false, status: 500, raw: 'Please contact support team' })
+
+    await expect(rappiAdapter.notifyIntegrationStatus('900175625', true)).resolves.toEqual({
+      ok: false,
+      status: 500,
+      raw: 'Please contact support team',
+    })
+  })
+
+  it('🔴 el candado de escritura se relanza TAL CUAL (es un «no se envió»): el adaptador no lo traga ni lo disfraza', async () => {
+    const bloqueo = new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'tienda fuera de la lista', 'sin permiso')
+    mockMarcarIntegrada.mockRejectedValue(bloqueo)
+
+    await expect(rappiAdapter.notifyIntegrationStatus('99', true)).rejects.toBe(bloqueo)
   })
 })
 

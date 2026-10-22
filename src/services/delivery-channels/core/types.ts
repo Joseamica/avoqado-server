@@ -355,6 +355,17 @@ export interface DirectDeliveryAdapter {
   setStoreStatus?(paused: boolean, storeId: string, motivo?: string): Promise<ActionResult>
 
   /**
+   * «Integrada sí/no»: le dice al proveedor si los pedidos de esta tienda llegan por la integración (`true`) o se atienden a
+   * mano en su portal de aliados (`false`). NO pausa ni reanuda la tienda (eso es `setStoreStatus`).
+   *
+   * 🔴 Quien construya «desconectar» desde NUESTRO lado (el botón del dashboard, fase 3) debe llamarla con `false` DESPUÉS del
+   * commit que deshabilita el vínculo. Hoy sólo se avisa `true`, al promover un vínculo a ACTIVE por el aprovisionamiento; una
+   * baja que manda el proveedor NUNCA la llama. Es best-effort: devuelve `ok:false` (o lanza, p. ej. el candado de escritura) y
+   * quien llama lo registra en el log y en la bitácora sin revertir ni lanzar nada.
+   */
+  notifyIntegrationStatus?(storeId: string, integrada: boolean): Promise<ActionResult>
+
+  /**
    * El menú YA TRADUCIDO al formato del proveedor, SIN publicarlo.
    *
    * Existe para que el sincronizador pueda sacarle huella y decidir si hace falta publicar,

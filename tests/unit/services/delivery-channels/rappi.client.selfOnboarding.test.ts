@@ -41,6 +41,7 @@ import {
   canjearCodigoRappi,
   clientIdRappi,
   credencialesPresentes,
+  marcarTiendaIntegradaRappi,
   preflightSelfOnboardingRappi,
   rappiApi,
   redirectUriRappi,
@@ -279,6 +280,58 @@ describe('rappi.client — self-onboarding', () => {
     const llamadas = simularRed()
     await expect(suscribirTiendaAEventos('99')).rejects.toThrow(RappiEscrituraBloqueadaError)
     expect(llamadas).toHaveLength(0)
+  })
+
+  // ── «Integrada sí/no» (Tarea 18): PUT stores-pa/{id}/status?integrated=<bool>, host CLÁSICO, con el candado ──────
+  describe('marcarTiendaIntegradaRappi', () => {
+    const RUTA = 'https://microservices.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores-pa'
+
+    it.each([true, false])('integrada=%s: PUT al host clásico, el valor en la query y sin cuerpo', async integrada => {
+      const llamadas = simularRed(() => json(200))
+
+      const r = await marcarTiendaIntegradaRappi('10', integrada)
+
+      expect(llamadas).toHaveLength(1)
+      expect(llamadas[0].init.method).toBe('PUT')
+      expect(llamadas[0].url).toBe(`${RUTA}/10/status?integrated=${integrada}`)
+      expect(llamadas[0].init.body).toBeUndefined()
+      expect(llamadas[0].init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ' })
+      expect(r).toMatchObject({ ok: true, status: 200 })
+    })
+
+    it('🔴 va al host CLÁSICO de la API, nunca al dominio nuevo del self-onboarding (M9 no decidió el host)', async () => {
+      const llamadas = simularRed(() => json(200))
+      await marcarTiendaIntegradaRappi('10', true)
+      expect(llamadas[0].url).toContain('https://microservices.dev.rappi.com/')
+      expect(llamadas[0].url).not.toContain('api.dev.rappi.com')
+    })
+
+    it('un 500 de Rappi (lo que contesta el sandbox, M9) se DEVUELVE tal cual: no lanza', async () => {
+      simularRed(() => json(500, { message: 'There was an error trying to change the store {10} to integrated: {true}' }))
+
+      const r = await marcarTiendaIntegradaRappi('10', true)
+
+      expect(r.ok).toBe(false)
+      expect(r.status).toBe(500)
+      expect(r.raw).toContain('integrated')
+    })
+
+    it('🔴 pasa por el candado: una tienda fuera de la lista ⇒ RappiEscrituraBloqueadaError y NO sale ninguna petición', async () => {
+      const llamadas = simularRed()
+
+      await expect(marcarTiendaIntegradaRappi('99', true)).rejects.toThrow(RappiEscrituraBloqueadaError)
+      await expect(marcarTiendaIntegradaRappi('99', false)).rejects.toThrow(RappiEscrituraBloqueadaError)
+      expect(llamadas).toHaveLength(0)
+    })
+
+    it('el id de la tienda se codifica en la ruta (nunca rompe la URL)', async () => {
+      mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = 'a/b?c'
+      const llamadas = simularRed(() => json(200))
+
+      await marcarTiendaIntegradaRappi('a/b?c', true)
+
+      expect(llamadas[0].url).toBe(`${RUTA}/a%2Fb%3Fc/status?integrated=true`)
+    })
   })
 
   // ── Las variables de una función OPCIONAL no tumban el proceso: se validan al usarse ─────────────────

@@ -25,6 +25,7 @@ import prisma from '@/utils/prismaClient'
 import { utcTs } from '@/utils/sqlDates'
 
 import { casEstado, ESTADOS_VIVOS, mezclaResultadoSql } from '../../core/deliveryConnectIntent.service'
+import { DeliveryWriteNotSentError, type ActionResult } from '../../core/types'
 import { TTL_ACTIVANDO_MS } from './rappi.connect'
 import { assertTiendaEscribible, RappiEscrituraBloqueadaError } from './rappi.http'
 import { enLotes, type RespuestaAprovisionamiento, type ResultadoRappiTienda, type TiendaRappi } from './rappi.selfOnboarding'
@@ -33,6 +34,12 @@ export interface ProvisioningDeps {
   aprovisionar(idToken: string, tiendas: Array<{ storeId: string; name: string }>): Promise<RespuestaAprovisionamiento>
   suscribir(storeId: string): Promise<{ ok: boolean; fallidos: string[] }>
   tiendasEscribibles: readonly string[]
+  /**
+   * «Integrada sí/no» (Tarea 18). 🔴 Quien llama a `confirmarTienda` DEBE cablearla (el webhook y el re-chequeo lo hacen, con
+   * `rappiAdapter.notifyIntegrationStatus`): sin ella la tienda se promueve igual pero Rappi nunca se entera de que ya está
+   * integrada, y `confirmarTienda` lo deja a la vista en el log. Sólo la usa `confirmarTienda`, no `activarSeleccion`.
+   */
+  avisarIntegrada?(storeId: string, integrada: boolean): Promise<ActionResult>
 }
 /** Lo que ya no cambia. Los otros tres (PROVISIONING, UNCERTAIN, SUBSCRIBE_FAILED) todavía esperan a Rappi. */
 const FINALES = [
@@ -389,7 +396,7 @@ async function bajaDeRappi(r: ResultadoRappiTienda & { batchId?: string }): Prom
  */
 export async function confirmarTienda(
   r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' },
-  deps: Pick<ProvisioningDeps, 'suscribir'>,
+  deps: Pick<ProvisioningDeps, 'suscribir' | 'avisarIntegrada'>,
   esperado?: { intentId: string },
 ): Promise<Confirmacion> {
   if (r.operation === 'DEPROVISION' && r.status === 'INACTIVE') {
@@ -469,9 +476,65 @@ export async function confirmarTienda(
       entityId: hecho.fila.id,
       data: { provider: 'RAPPI', externalLocationId: r.storeId, intentId: hecho.intentId as string, environment: hecho.intent.environment },
     })
+    // Tarea 18: promovimos NOSOTROS (la baja de Rappi, `bajaDeRappi`, nunca llega aquí). Sin esperarlo: ver `avisarIntegrada`.
+    void avisarIntegrada(deps, hecho.fila, r.storeId, hecho.intentId as string)
   }
   await cerrarSiTodoFinal(hecho.intentId as string)
   return hecho.confirmacion
+}
+
+/**
+ * «Integrada sí/no» (Tarea 18): con el vínculo ya ACTIVE y la transacción CERRADA, le dice a Rappi `integrated=true` para que los
+ * pedidos de la tienda lleguen por la integración y no por su portal de aliados.
+ *
+ * 🔴 Best-effort, y SIN esperar (quien llama lo invoca con `void`): el re-chequeo corre dentro de la petición de la página de
+ * resultado y el webhook dentro del procesador de eventos, y la llamada puede tardar hasta el techo de `TIMEOUT_RAPPI_MS`. En el
+ * sandbox siempre falla (500, medición M9), así que NUNCA puede frenar ni romper la confirmación. Un fallo —respuesta no 2xx, un
+ * throw o el candado de escritura, que es un «no salió»— queda en el log y en ActivityLog (`DELIVERY_INTEGRATION_STATUS_FAILED`),
+ * jamás revierte la promoción ni lanza: todo el cuerpo está dentro de un `try`, para no dejar un rechazo sin atender.
+ */
+async function avisarIntegrada(
+  deps: Pick<ProvisioningDeps, 'avisarIntegrada'>,
+  fila: Fila,
+  storeId: string,
+  intentId: string,
+): Promise<void> {
+  const ctx = { storeId, linkId: fila.id, venueId: fila.venueId, intentId }
+  try {
+    if (!deps.avisarIntegrada) {
+      logger.warn(
+        '🛵 [Rappi] tienda promovida sin avisarIntegrada cableado: Rappi no se enteró de que ya está integrada (quien llamó a confirmarTienda debe pasarlo)',
+        ctx,
+      )
+      return
+    }
+    let falla: Record<string, string | number | true> | null = null
+    try {
+      const r = await deps.avisarIntegrada(storeId, true)
+      if (!r.ok) falla = { status: r.status, error: `HTTP_${r.status}`, cuerpo: String(r.raw ?? '').slice(0, 300) }
+    } catch (e) {
+      falla = {
+        error: (e instanceof Error ? e.message : String(e)).slice(0, 300),
+        // El candado de escritura o un token que no se pudo pedir: se SABE que Rappi no recibió nada.
+        ...(e instanceof DeliveryWriteNotSentError ? { noSalio: true as const } : {}),
+      }
+    }
+    if (!falla) return
+    logger.error('🚨 [Rappi] no se pudo avisar «integrada» de una tienda ya ACTIVE: queda conectada y se sigue (revisar en la bitácora)', {
+      ...ctx,
+      ...falla,
+    })
+    void logAction({
+      staffId: null, // nadie de Avoqado lo pidió: es el efecto automático de la conexión
+      venueId: fila.venueId,
+      action: 'DELIVERY_INTEGRATION_STATUS_FAILED',
+      entity: 'DeliveryChannelLink',
+      entityId: fila.id,
+      data: { provider: 'RAPPI', externalLocationId: storeId, integrada: true, intentId, ...falla },
+    })
+  } catch (e) {
+    logger.error('🚨 [Rappi] el aviso «integrada» falló al registrarse', { ...ctx, error: e instanceof Error ? e.message : String(e) })
+  }
 }
 
 /**

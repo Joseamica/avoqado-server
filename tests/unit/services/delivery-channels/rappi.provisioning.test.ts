@@ -73,9 +73,11 @@ function deps(over: Partial<ProvisioningDeps> = {}) {
       inciertas: [],
     })),
     suscribir: jest.fn(async () => ({ ok: true, fallidos: [] as string[] })),
+    // Tarea 18: «integrada sí/no». Por default sale bien; el aviso va SIN esperar y nunca decide el resultado.
+    avisarIntegrada: jest.fn(async () => ({ ok: true, status: 200, raw: '' })),
     tiendasEscribibles: ['10', '11', '12'],
     ...over,
-  } as ProvisioningDeps & { aprovisionar: jest.Mock; suscribir: jest.Mock }
+  } as ProvisioningDeps & { aprovisionar: jest.Mock; suscribir: jest.Mock; avisarIntegrada: jest.Mock }
 }
 
 describe('activarSeleccion', () => {
@@ -525,6 +527,196 @@ describe('confirmarTienda', () => {
     expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
     expect(d.suscribir).not.toHaveBeenCalled()
     expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  // Tarea 18: «integrada sí/no». `true` SÓLO cuando NOSOTROS promovemos un vínculo a ACTIVE; la baja de Rappi jamás avisa.
+  describe('integrada sí/no (Tarea 18)', () => {
+    /** El aviso sale SIN esperar (no frena el webhook ni la página de resultado): se deja correr antes de mirarlo. */
+    const asentar = () => new Promise<void>(r => setImmediate(r))
+    const promover = (d: ProvisioningDeps, esperado?: { intentId: string }) =>
+      confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1', integrationId: 'int10' }, d, esperado)
+    const FALLIDA = (args: unknown) => expect.objectContaining({ action: 'DELIVERY_INTEGRATION_STATUS_FAILED', ...(args as object) })
+    const avisosFallidos = () => (logAction as jest.Mock).mock.calls.filter(([a]) => a.action === 'DELIVERY_INTEGRATION_STATUS_FAILED')
+
+    it('al quedar ACTIVE por el aprovisionamiento ⇒ integrada=true, UNA vez y DESPUÉS del commit', async () => {
+      sembrar()
+      reclamada()
+      let abiertas = 0
+      p.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        abiertas++
+        try {
+          return await txOriginal(cb)
+        } finally {
+          abiertas--
+        }
+      })
+      const vistas: number[] = []
+      const d = deps({ avisarIntegrada: jest.fn(async () => (vistas.push(abiertas), { ok: true, status: 200, raw: '' })) })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+
+      expect(d.avisarIntegrada).toHaveBeenCalledTimes(1)
+      expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+      expect(vistas).toEqual([0]) // ninguna transacción abierta: el HTTP nunca sostiene un candado
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(avisosFallidos()).toHaveLength(0)
+    })
+
+    it('el re-chequeo de la pantalla de resultado (misma intención + integrationId) que promueve también avisa', async () => {
+      sembrar()
+      reclamada()
+      const d = deps()
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, d, { intentId: 'i1' })).toBe('PROMOTED')
+      await asentar()
+      expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+    })
+
+    it('la confirmación repetida (webhook + re-chequeo llegan los dos) avisa UNA sola vez', async () => {
+      sembrar()
+      reclamada()
+      const d = deps()
+      expect(await promover(d)).toBe('PROMOTED')
+      expect(await promover(d)).toBe('IGNORED')
+      await asentar()
+      expect(d.avisarIntegrada).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([
+      ['FAILED (se borra el vínculo)', { status: 'FAILED' as const }, 'REMOVED'],
+      ['INACTIVE de un PENDING (queda DISABLED)', { status: 'INACTIVE' as const }, 'DISABLED'],
+    ])('%s: no es una promoción ⇒ no avisa', async (_n, r, esperado) => {
+      sembrar()
+      reclamada()
+      const d = deps()
+      expect(await confirmarTienda({ storeId: '10', batchId: 'b1', ...r }, d)).toBe(esperado)
+      await asentar()
+      expect(d.avisarIntegrada).not.toHaveBeenCalled()
+    })
+
+    it('ACTIVE sin vínculo nuestro (IGNORED) y SUBSCRIBE_FAILED (no se promueve) ⇒ no avisan', async () => {
+      const ajeno = deps()
+      expect(await promover(ajeno)).toBe('IGNORED')
+
+      sembrar()
+      reclamada()
+      const sinSuscribir = deps({ suscribir: jest.fn(async () => ({ ok: false, fallidos: ['NEW_ORDER'] })) })
+      expect(await promover(sinSuscribir)).toBe('SUBSCRIBE_FAILED')
+      await asentar()
+
+      expect(ajeno.avisarIntegrada).not.toHaveBeenCalled()
+      expect(sinSuscribir.avisarIntegrada).not.toHaveBeenCalled()
+    })
+
+    // 🔴 La baja la manda RAPPI: avisarle «no integrada» a quien acaba de darla de baja no tiene sentido y podría pisar su estado.
+    it.each(['ACTIVE', 'PAUSED'])('la baja que manda Rappi (DEPROVISION de una tienda %s) NO avisa, ni true ni false', async status => {
+      vinculo('10', { status, config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10', confirmedAt: 'y' } } })
+      const d = deps()
+
+      expect(
+        await confirmarTienda(
+          { storeId: '10', status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'lote-de-baja', integrationId: 'int10' },
+          d,
+        ),
+      ).toBe('DISABLED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+      expect(d.avisarIntegrada).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      [
+        'responde 500 (lo que contesta el sandbox, M9)',
+        async () => ({ ok: false, status: 500, raw: 'Please contact support team' }),
+        { status: 500, error: 'HTTP_500', cuerpo: 'Please contact support team' },
+      ],
+      [
+        'lanza (red, timeout)',
+        async () => {
+          throw new Error('ETIMEDOUT')
+        },
+        { error: 'ETIMEDOUT' },
+      ],
+    ])('🔴 un fallo (%s) NO revierte la promoción y queda en el log y en ActivityLog', async (_n, falla, detalle) => {
+      sembrar()
+      reclamada()
+      const d = deps({ avisarIntegrada: jest.fn(falla) })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(resultado('10').outcome).toBe('ACTIVATED')
+      expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('integrada'), expect.objectContaining({ storeId: '10' }))
+      expect(avisosFallidos()).toHaveLength(1)
+      expect(logAction).toHaveBeenCalledWith(
+        FALLIDA({
+          staffId: null,
+          venueId: 'v1',
+          entity: 'DeliveryChannelLink',
+          entityId: 'x10',
+          data: expect.objectContaining({ provider: 'RAPPI', externalLocationId: '10', integrada: true, intentId: 'i1', ...detalle }),
+        }),
+      )
+      expect(avisosFallidos()[0][0].data.noSalio).toBeUndefined() // pudo haber llegado a Rappi: no se afirma que no salió
+    })
+
+    it('🔴 el candado de escritura bloquea una tienda fuera de la lista: queda como fallo (y se dice que NO salió)', async () => {
+      sembrar()
+      reclamada()
+      const d = deps({
+        avisarIntegrada: jest.fn(async () => {
+          throw new RappiEscrituraBloqueadaError('10')
+        }),
+      })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(avisosFallidos()).toHaveLength(1)
+      expect(avisosFallidos()[0][0].data).toMatchObject({ provider: 'RAPPI', integrada: true, noSalio: true })
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('integrada'), expect.objectContaining({ storeId: '10' }))
+    })
+
+    it('🔴 no frena la confirmación: aunque Rappi no conteste nunca, la promoción termina y se cierra el intent', async () => {
+      sembrar()
+      reclamada()
+      const d = deps({ avisarIntegrada: jest.fn(() => new Promise<never>(() => {})) })
+
+      expect(await promover(d)).toBe('PROMOTED') // si esperara el aviso, esta línea nunca regresaría
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+      expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+    })
+
+    it('un aviso que lanza SÍNCRONO (no una promesa rechazada) tampoco rompe la promoción', async () => {
+      sembrar()
+      reclamada()
+      const d = deps({
+        avisarIntegrada: jest.fn(() => {
+          throw new Error('boom síncrono')
+        }),
+      })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+      expect(avisosFallidos()).toHaveLength(1)
+    })
+
+    it('si quien llama no cableó `avisarIntegrada`: promueve igual y lo deja a la vista en el log (no es un silencio)', async () => {
+      sembrar()
+      reclamada()
+      const sinAviso: ProvisioningDeps = { ...deps(), avisarIntegrada: undefined }
+
+      expect(await promover(sinAviso)).toBe('PROMOTED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('avisarIntegrada'), expect.anything())
+    })
   })
 })
 
