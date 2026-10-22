@@ -108,7 +108,7 @@ export async function renovarReclamo(eventId: string, token: string, duracionMs:
  *
  * 🔴 PROCESSED escribe `error: null` (no `undefined`): con `undefined` Prisma no toca la columna y el texto de un intento
  * anterior —un FAILED que el siguiente intento sí logró— se quedaba en un evento PROCESSED (pedido 61280002 del
- * recorrido real). FAILED escribe el `error` que reciba, como siempre. `markEventResult` (Uber) NO cambia.
+ * recorrido real). FAILED escribe el `error` que reciba, como siempre. `markEventResult` NO cambia.
  */
 export async function cerrarEventoReclamado(
   eventId: string,

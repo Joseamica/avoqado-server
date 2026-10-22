@@ -45,10 +45,8 @@ calla.**
    (`src/services/google-calendar/pull.service.ts:357` explica por qué se eligió eso sobre un `SETNX`). Un job de dinero corriendo dos veces
    es peor que el server lento.
 4. **Challenge store de auth móvil → Redis** (o a una tabla).
-5. **Lease en la base para el job de delivery.** Sus candados `enCurso`, `aprovisionandoEnCurso` y `rappiEnCurso` (el carril de Rappi, cada 30 s) son en memoria: con 2 pods no
-   sirven. Los eventos de Rappi ya se reclaman en la base (`claimToken`/`lockedUntil`, `reclamarEvento`), así que dos procesos no aceptan ni registran el mismo pedido a la vez; lo
-   que se pierde con 2 pods es el tope de «una vuelta a la vez» por carril. Para los eventos que no son de Rappi, el candado se
-   sustituye por un _claim_ atómico sobre `DeliveryOrderEvent` — `updateMany` empujando `nextAttemptAt` al futuro EN la selección, que es el patrón del outbox de
+5. **Lease en la base para el job de delivery.** Sus candados `enCurso`, `aprovisionandoEnCurso` y `rappiEnCurso` (el carril de Rappi, cada 30 s) son en memoria: con 2 pods
+   no sirven. Se sustituye por un _claim_ atómico sobre `DeliveryOrderEvent` — `updateMany` empujando `nextAttemptAt` al futuro EN la selección, que es el patrón del outbox de
    anuncios. Sin eso, dos pods reprocesan el mismo evento y la cocina prepara el pedido dos veces (nada lo atrapa: `KdsOrder.orderId` no
    tiene índice único y no puede tenerlo).
 

@@ -371,8 +371,9 @@ describe('el «listo» de Rappi contra Postgres: a lo más 3 llamadas, aunque el
   })
 
   it('🔴 el aviso NEW_ORDER que guarda el INGRESO REAL es la fila donde el «listo» cuenta: la llave del ingreso y la del contador coinciden', async () => {
-    // El resto de las pruebas siembran el aviso a mano con `llaveDeAvisoDePedido`; si el ingreso real (`persistRappiWebhookEvent`)
-    // guardara otra llave, el contador no encontraría la fila y ningún «listo» saldría (o saldría sin contar).
+    // El resto de las pruebas siembran el aviso a mano con `llaveDeAvisoDePedido`. Esta fija que el ingreso real
+    // (`persistRappiWebhookEvent`) guarda ESA misma llave. 🔴 Con otra llave el contador igual encontraría la fila, por el camino 2
+    // de `avisoBloqueado` (por `externalOrderId` y tienda): lo que detecta el desalineo es la aserción del `dedupKey` de abajo.
     const ext = `listo-it-${sufijo}-ingreso`
     const cuerpo = Buffer.from(JSON.stringify({ order_detail: { order_id: ext }, store: { external_id: tienda } }), 'utf8')
     const secreto = `secreto-ingreso-${sufijo}`
@@ -400,7 +401,7 @@ describe('el «listo» de Rappi contra Postgres: a lo más 3 llamadas, aunque el
     const order = await ventaListaParaElListo(ext, 'R-ingreso')
     mockMarcarListoRappi.mockResolvedValue({ ok: true, status: 200, raw: '{}' })
 
-    // Con la llave desalineada esto sería NO_REINTENTAR (`LISTO_SIN_AVISO`) y no saldría ninguna llamada.
+    // La llave ya quedó fijada arriba (`dedupKey`); aquí se comprueba que el «listo» sale (READY) y cuenta en la fila del ingreso.
     expect((await markDeliveryOrderReady(venueId!, order.id)).outcome).toBe('READY')
     expect(llamadasA(ext)).toEqual([[ext, tienda, { reintentarEn401: false }]])
     expect(leerEstado(await estadoDe(fila.id)).listo).toEqual({ llamadas: 1, cerrado: 'HTTP_2XX' })
