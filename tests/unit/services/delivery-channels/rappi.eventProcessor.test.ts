@@ -319,6 +319,11 @@ describe('processRappiEvent', () => {
       expect(mockCierre).toHaveBeenCalledWith(CIERRE)
       // El cierre NO va por `cerrarEventoReclamado` (fuera de la transacción).
       expect(mockCerrar).not.toHaveBeenCalled()
+      // T16b: el log lleva las dos horas, para medir el desfase del reloj de Rappi (M7) con el primer veredicto real.
+      expect(logger.info).toHaveBeenCalledWith(
+        expect.stringContaining('menú APROBADO'),
+        expect.objectContaining({ publicadaEn: PUBLICADA_EN, firmadoEn: new Date((publicadaSeg + 120) * 1000).toISOString() }),
+      )
     })
 
     it('🔴 aprobación firmada ANTES de publicar la pendiente (aviso viejo reprocesado): no la toca, y el evento se cierra', async () => {
@@ -342,7 +347,10 @@ describe('processRappiEvent', () => {
       expect(vinculo.lastMenuHash).toBeNull()
       // Sin esto el sincronizador republicaba el mismo menú cada 5 min.
       expect(vinculo.config).toEqual({ menuEnRevision: null, menuRechazado: { huella: 'abc123', en: expect.any(String) } })
-      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('menú RECHAZADO'), expect.anything())
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('menú RECHAZADO'),
+        expect.objectContaining({ publicadaEn: PUBLICADA_EN, firmadoEn: new Date((publicadaSeg + 5) * 1000).toISOString() }),
+      )
       expect(mockCierre).toHaveBeenCalledWith(CIERRE)
     })
 
@@ -376,6 +384,9 @@ describe('processRappiEvent', () => {
       expect((await processRappiEvent('evt1', { aceptar: aceptarOk })).outcome).toBe('MENU_VERDICT')
       expect(mockLinkUpdate).not.toHaveBeenCalled()
       expect(mockCierre).toHaveBeenCalledWith(CIERRE)
+      // T16b: Rappi rechazó algo y no hay pendiente que lo explique: a la vista (warn), no un `info` que nadie lee.
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('no aplica'), expect.objectContaining({ aprobado: false }))
+      expect(logger.info).not.toHaveBeenCalledWith(expect.stringContaining('no aplica'), expect.anything())
     })
 
     // H2: la copia de `config` que trajo el evento es VIEJA. Escribirla borraba lo que otro escritor guardó

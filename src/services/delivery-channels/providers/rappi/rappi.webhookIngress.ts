@@ -26,6 +26,7 @@
 import crypto from 'crypto'
 import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 
+import logger from '../../../../config/logger'
 import prisma from '../../../../utils/prismaClient'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
 import { leerEstadoAprovisionamiento } from './rappi.selfOnboarding'
@@ -184,6 +185,8 @@ export function llaveDeDeduplicacion(evento: string, payload: unknown, signature
 
 /** El `:t<dígitos>` con que TERMINA la llave de un aviso sin identidad natural (ver `llaveDeDeduplicacion`). */
 const T_FINAL_DE_LA_LLAVE = /:t(\d+)$/
+/** Más allá de esto, «la hora de la firma» no es una hora: es otra unidad (un desfase de reloj normal es de segundos). */
+const FUTURO_MAXIMO_MS = 24 * 60 * 60 * 1000
 
 /**
  * Cuándo firmó Rappi un aviso sin identidad natural (`MENU_APPROVED`, `MENU_REJECTED`…), en milisegundos, leído de su llave
@@ -192,7 +195,8 @@ const T_FINAL_DE_LA_LLAVE = /:t(\d+)$/
  *
  * Rappi no documenta la unidad del `t` (su ejemplo es `t=123456`) y el sandbox no ha mandado ningún veredicto del menú para
  * medirlo (M7/M8): un valor menor que 1e12 se lee como SEGUNDOS (estilo Stripe) y se multiplica por 1000; uno mayor ya son
- * milisegundos (1e12 ms es 2001: ningún aviso real cae del lado equivocado).
+ * milisegundos (1e12 ms es 2001: ningún aviso real cae del lado equivocado). Una hora más de un día en el futuro, o que no cabe en
+ * un entero seguro, es otra unidad y también da `null` (con warn).
  *
  * 🔴 Lo usa la regla de la hora del veredicto del menú (diseño §4.5.1): si la forma de la llave cambia, cambia aquí también.
  */
@@ -200,8 +204,17 @@ export function firmadoEnMsDeLaLlave(dedupKey: string | null): number | null {
   const m = dedupKey ? T_FINAL_DE_LA_LLAVE.exec(dedupKey) : null
   if (!m) return null
   const t = Number(m[1])
-  if (!Number.isSafeInteger(t)) return null
-  return t < 1e12 ? t * 1000 : t
+  // 🔴 T16b: una hora en el futuro lejano (p. ej. microsegundos, que pasan el umbral y se leerían como ms del año 57 000) haría
+  // que TODO veredicto «se firmó después» de cualquier publicación: apagaba la regla de la hora sin aviso. Se descarta y se dice.
+  const ms = !Number.isSafeInteger(t) ? null : t < 1e12 ? t * 1000 : t
+  if (ms === null || ms > Date.now() + FUTURO_MAXIMO_MS) {
+    logger.warn('🛵 [Rappi] la hora de la firma del aviso cae en el futuro lejano (¿otra unidad?): no se usa como hora', {
+      dedupKey,
+      t: m[1],
+    })
+    return null
+  }
+  return ms
 }
 
 /**

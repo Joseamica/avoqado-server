@@ -7,7 +7,8 @@
  *  (a) dos pasadas A LA VEZ con la misma copia vieja ⇒ un solo POST; la otra ve la pendiente y no publica;
  *  (b) la primera recibe un 400 ⇒ la segunda, con la copia de ANTES del rechazo, no republica la huella rechazada;
  *  (c) la primera recibe 2xx y el veredicto (el procesador real) la aprueba ⇒ la segunda, con la copia vieja, no republica;
- *  (d) un veredicto que llega MIENTRAS el POST viaja encuentra la pendiente en la base y la sella; el 2xx no la revive.
+ *  (d) un veredicto que llega MIENTRAS el POST viaja encuentra la pendiente en la base y la sella; el 2xx no la revive;
+ *  (e)/(f) T16b: un aviso ajeno que sella mientras viaja un POST que da 400 (o 401) no deja «al día» lo que Rappi no tiene.
  *
  * El proveedor va de mentira (un adaptador con `menuConRevision` cuyo POST controla la prueba); el snapshot y el horario
  * también (no es lo que se prueba). Todo lo demás es SQL real por el `prisma` real. Sólo crea filas propias (sufijo único) y
@@ -184,6 +185,47 @@ describe('Menú en revisión — dos pasadas encimadas contra Postgres', () => {
     const final = await enLaBase(copia.id)
     expect(final.lastMenuHash).toBe(huella)
     expect((final.config as Record<string, any>).menuEnRevision).toBeNull()
+  })
+
+  // T16b: tras reservar H sólo un veredicto escribe `lastMenuHash`. Un aviso AJENO (firmado después de reservar: el tardío de una
+  // pendiente soltada a mano, o el residual §4.5.1) que sella mientras viaja un POST que Rappi rechaza o que no sale dejaba «al
+  // día» un menú que Rappi no tiene. Al soltar, el sello ajeno se quita bajo el mismo candado.
+  it('🔴 (e) un aviso ajeno sella mientras el POST viaja y el POST da 400: queda sin sellar y rechazada; la segunda no republica', async () => {
+    const copia = await vinculoYCopiaVieja()
+    const post = postDetenido({ ok: false, status: 400, raw: '{}', problemas: [] })
+
+    const pasada = syncChannelMenu(copia)
+    await post.llego
+    const { huella } = (await configDe(copia.id)).menuEnRevision
+    expect(await aprobarConElProcesador(copia)).toBe('MENU_VERDICT')
+    expect((await enLaBase(copia.id)).lastMenuHash).toBe(huella) // el aviso ajeno sí selló
+    post.soltar()
+
+    expect((await pasada).outcome).toBe('FAILED')
+    const final = await enLaBase(copia.id)
+    expect(final.lastMenuHash).toBeNull()
+    expect((final.config as Record<string, any>).menuRechazado).toEqual({ huella, en: expect.any(String) })
+    expect((final.config as Record<string, any>).menuEnRevision).toBeNull()
+    expect((await syncChannelMenu(final)).outcome).toBe('REJECTED_UNCHANGED')
+    expect(mockPublicar).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 (f) un aviso ajeno sella mientras el POST viaja y el POST da 401: queda sin sellar ni rechazo; la segunda republica', async () => {
+    const copia = await vinculoYCopiaVieja()
+    const post = postDetenido({ ok: false, status: 401, raw: 'unauthorized', problemas: [] })
+
+    const pasada = syncChannelMenu(copia)
+    await post.llego
+    expect(await aprobarConElProcesador(copia)).toBe('MENU_VERDICT')
+    post.soltar()
+
+    expect((await pasada).outcome).toBe('FAILED')
+    const final = await enLaBase(copia.id)
+    expect(final.lastMenuHash).toBeNull()
+    expect((final.config as Record<string, any>).menuRechazado ?? null).toBeNull() // el aviso ajeno lo dejó en null
+    mockPublicar.mockResolvedValueOnce(ok200)
+    expect((await syncChannelMenu(final)).outcome).toBe('PUBLISHED')
+    expect(mockPublicar).toHaveBeenCalledTimes(2)
   })
 
   /**

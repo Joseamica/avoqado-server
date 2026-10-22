@@ -5,6 +5,7 @@
  * payloads de Rappi son literalmente indistinguibles entre sí.
  */
 import crypto from 'crypto'
+import logger from '../../../../src/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
 import {
   eventoDeLaRuta,
@@ -176,6 +177,31 @@ describe('firmadoEnMsDeLaLlave', () => {
     expect(firmadoEnMsDeLaLlave('')).toBeNull()
     // Un aviso CON pedido no lleva la firma en la llave.
     expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('NEW_ORDER', { order_detail: { order_id: '1' } }, 't=1761130000,sign=a'))).toBeNull()
+  })
+
+  // T16b: con una unidad rara (microsegundos pasan el umbral de 1e12 y se leerían como ms del año 57 000) la hora queda en el
+  // futuro lejano y TODO veredicto «se firmó después» de cualquier publicación: la regla de la hora se apagaba sin aviso.
+  it('🔴 una hora de firma más de un día en el futuro no es una hora: null, con warn', () => {
+    const warn = logger.warn as jest.Mock
+    warn.mockClear()
+    const microsegundos = Date.now() * 1000
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('MENU_APPROVED', cuerpo, `t=${microsegundos},sign=a`))).toBeNull()
+    const enDosDias = Math.floor((Date.now() + 2 * 86_400_000) / 1000)
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('MENU_APPROVED', cuerpo, `t=${enDosDias},sign=a`))).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(2)
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('futuro'), expect.objectContaining({ dedupKey: expect.any(String) }))
+  })
+
+  it('un desfase de reloj de menos de un día sí se acepta', () => {
+    const enUnaHora = Math.floor((Date.now() + 3_600_000) / 1000)
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('MENU_APPROVED', cuerpo, `t=${enUnaHora},sign=a`))).toBe(enUnaHora * 1000)
+  })
+
+  it('un `t` que no cabe en un entero seguro (nanosegundos) tampoco es una hora: null, con warn', () => {
+    const warn = logger.warn as jest.Mock
+    warn.mockClear()
+    expect(firmadoEnMsDeLaLlave(llaveDeDeduplicacion('MENU_APPROVED', cuerpo, `t=${Date.now()}000000,sign=a`))).toBeNull()
+    expect(warn).toHaveBeenCalledTimes(1)
   })
 
   it('sólo cuenta el `:t` del FINAL de la llave', () => {

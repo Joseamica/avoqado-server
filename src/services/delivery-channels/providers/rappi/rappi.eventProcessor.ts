@@ -389,23 +389,29 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
       return { outcome: 'IN_FLIGHT' }
     }
 
-    if (resultado === 'SELLADO') {
-      logger.info('📋 [Rappi] menú APROBADO — ahora sí está publicado', { eventRowId, linkId, venueId: evento.venueId })
-    } else if (resultado === 'RECHAZO_ANOTADO') {
+    // Las dos horas van en el log: con el primer veredicto real se mide el desfase del reloj de Rappi contra el nuestro (M7).
+    const horas = { publicadaEn: resultado.publicadaEn, firmadoEn: firmadoEnMs === null ? null : new Date(firmadoEnMs).toISOString() }
+    if (resultado.resultado === 'SELLADO') {
+      logger.info('📋 [Rappi] menú APROBADO — ahora sí está publicado', { eventRowId, linkId, venueId: evento.venueId, ...horas })
+    } else if (resultado.resultado === 'RECHAZO_ANOTADO') {
       // Sin huella sellada, `menuSyncStatusOf` seguirá diciendo NUNCA_PUBLICADO/desfasado —
       // que es la verdad, y es lo que hace visible el problema en el dashboard y el MCP.
       logger.error('🚨 [Rappi] menú RECHAZADO — y Rappi NO dice por qué. Revisar contra las reglas de rappi.menuMapper', {
         eventRowId,
         linkId,
         venueId: evento.venueId,
+        ...horas,
       })
     } else {
-      logger.info('📋 [Rappi] veredicto del menú que no aplica a la pendiente vigente: el evento se cierra sin cambios', {
-        eventRowId,
-        linkId,
-        aprobado,
-        firmadoEn: firmadoEnMs === null ? null : new Date(firmadoEnMs).toISOString(),
-      })
+      const datos = { eventRowId, linkId, aprobado, ...horas }
+      // Un RECHAZO que no aplica (sin pendiente, o de otra publicación) va a la vista: Rappi rechazó algo y nadie se enteraba.
+      if (aprobado)
+        logger.info('📋 [Rappi] veredicto del menú que no aplica a la pendiente vigente: el evento se cierra sin cambios', datos)
+      else
+        logger.warn(
+          '📋 [Rappi] RECHAZO del menú que no aplica a la pendiente vigente: el evento se cierra sin cambios; revisar en el portal de Rappi',
+          datos,
+        )
     }
     return { outcome: 'MENU_VERDICT' }
   }

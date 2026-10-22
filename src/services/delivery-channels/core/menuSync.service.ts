@@ -81,7 +81,8 @@ function huella(payload: unknown): string {
  *   2. ANTES del POST la huella queda reservada como pendiente (con su hora), decidido con la fila BLOQUEADA: así un veredicto
  *      que llega mientras el POST viaja la encuentra, y dos pasadas encimadas no mandan dos veces (ni lo ya rechazado o aprobado);
  *   3. si se SABE que no salió o que el proveedor dijo que no (4xx, `status: 0` sin red, `DeliveryWriteNotSentError`), la
- *      pendiente se suelta (si sigue siendo ésa); con 400/422 la huella queda como rechazada y no se vuelve a mandar igual;
+ *      pendiente se suelta (si sigue siendo ésa); con 400/422 la huella queda como rechazada y no se vuelve a mandar igual; si
+ *      mientras tanto un veredicto de OTRA publicación selló esa huella, el sello se quita (ver `soltarRevision`);
  *   4. si NO se sabe (timeout, red, 5xx), la pendiente se queda: la resuelve el veredicto, o avisa al pasar el plazo;
  *   5. el 2xx no escribe nada más que los problemas: lo sella (o lo limpia) el veredicto.
  * Sin `menuConRevision` todo es como siempre: el 2xx sella la huella.
@@ -124,7 +125,7 @@ export async function syncChannelMenu(link: DeliveryChannelLink, opts: { force?:
     if (!opts.force && actual === leerMenuRechazado(link.config)?.huella) return { outcome: 'REJECTED_UNCHANGED', linkId: link.id }
 
     // 4. Con revisión, la pendiente se reserva ANTES del POST, decidiendo con la fila bloqueada (la copia puede ser vieja).
-    let reserva: MenuEnRevision | null = null
+    let reserva: Reserva | null = null
     if (conRevision) {
       const reservada = await reservarRevision(link.id, actual, opts.force === true)
       if (!('huella' in reservada)) return { outcome: reservada.outcome, linkId: link.id }
@@ -265,15 +266,16 @@ async function reservarRevision(
   linkId: string,
   huella: string,
   force: boolean,
-): Promise<MenuEnRevision | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' }> {
-  let resultado: MenuEnRevision | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' } = { outcome: 'FAILED' }
+): Promise<Reserva | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' }> {
+  let resultado: Reserva | { outcome: 'IN_REVIEW' | 'UNCHANGED' | 'REJECTED_UNCHANGED' | 'FAILED' } = { outcome: 'FAILED' }
   await escribirLlavesDelSistema(linkId, fila => {
     if (leerMenuEnRevision(fila.config)) resultado = { outcome: 'IN_REVIEW' }
     else if (!force && fila.lastMenuHash === huella) resultado = { outcome: 'UNCHANGED' }
     else if (!force && leerMenuRechazado(fila.config)?.huella === huella) resultado = { outcome: 'REJECTED_UNCHANGED' }
     else {
       const pendiente: MenuEnRevision = { huella, publicadaEn: new Date().toISOString() }
-      resultado = pendiente
+      // Sólo con `force` la huella puede estar sellada YA al reservar: ese sello es de antes, no de un aviso ajeno.
+      resultado = { ...pendiente, yaSellada: fila.lastMenuHash === huella }
       return { menuEnRevision: { ...pendiente } }
     }
     return null
@@ -282,25 +284,52 @@ async function reservarRevision(
   return resultado
 }
 
+/** La pendiente que reservó esta pasada, y si su huella YA estaba sellada al reservar (sólo pasa con `force`). No se guarda. */
+type Reserva = MenuEnRevision & { yaSellada: boolean }
+
 /**
  * Se SABE que no salió, o el proveedor dijo que no: ningún veredicto va a llegar. Suelta la pendiente SÓLO si sigue siendo la
  * misma publicación (misma huella y hora: otra ya pudo reservar la suya, y limpiarla tiraría esa revisión). Con `rechazada`, la
  * huella queda como rechazada aunque la pendiente ya no sea la suya: es un hecho sobre ESA huella. Guarda los problemas.
+ *
+ * 🔴 EL SELLO AJENO (T16b): tras reservar la huella, sólo un veredicto escribe `lastMenuHash`. Si al soltar vale esa huella (y no
+ * estaba sellada ya al reservar), la selló un aviso de OTRA publicación mientras viajaba este POST, que el proveedor rechazó o
+ * que nunca salió: el proveedor NO tiene ese menú. Se quita el sello, bajo el mismo candado y en la misma transacción que la
+ * pendiente: quedaba «al día» un menú que el proveedor nunca recibió (o rechazado Y publicado a la vez).
  */
 async function soltarRevision(
   linkId: string,
-  reserva: MenuEnRevision,
+  reserva: Reserva,
   { rechazada, problemas }: { rechazada: boolean; problemas?: ProblemaDeMenu[] },
 ): Promise<void> {
   const en = new Date().toISOString()
-  await escribirLlavesDelSistema(linkId, fila => {
-    const parche = {
-      ...(mismaPublicacion(leerMenuEnRevision(fila.config), reserva) ? { menuEnRevision: null } : {}),
-      ...(rechazada ? { menuRechazado: { huella: reserva.huella, en } } : {}),
-      ...(problemas ? { menuProblemas: { en, problemas } } : {}),
-    }
-    return Object.keys(parche).length > 0 ? parche : null
+  const sello = { ajeno: false }
+  await prisma.$transaction(async tx => {
+    await escribirLlavesDelSistema(
+      linkId,
+      fila => {
+        sello.ajeno = !reserva.yaSellada && fila.lastMenuHash === reserva.huella
+        const parche = {
+          ...(mismaPublicacion(leerMenuEnRevision(fila.config), reserva) ? { menuEnRevision: null } : {}),
+          ...(rechazada ? { menuRechazado: { huella: reserva.huella, en } } : {}),
+          ...(problemas ? { menuProblemas: { en, problemas } } : {}),
+        }
+        return Object.keys(parche).length > 0 ? parche : null
+      },
+      tx,
+    )
+    if (sello.ajeno) await tx.deliveryChannelLink.update({ where: { id: linkId }, data: { lastMenuHash: null } })
   })
+  if (sello.ajeno) {
+    logger.warn(
+      '📋 [MenuSync] un veredicto de OTRA publicación selló el menú mientras su POST no salió o fue rechazado: se quita el sello',
+      {
+        linkId,
+        huella: reserva.huella,
+        rechazada,
+      },
+    )
+  }
 }
 
 /**
@@ -322,6 +351,11 @@ async function guardarProblemas(link: DeliveryChannelLink, problemas: ProblemaDe
 }
 
 export type ResultadoDelVeredicto = 'SELLADO' | 'RECHAZO_ANOTADO' | 'NO_APLICA'
+/** El resultado y la hora de la publicación que se juzgó (`null` sin pendiente): con la de la firma se mide el desfase del reloj. */
+export interface VeredictoDelMenu {
+  resultado: ResultadoDelVeredicto
+  publicadaEn: string | null
+}
 
 /**
  * Aplica el veredicto del proveedor (aprobado o rechazado) a la pendiente VIGENTE, con la fila bloqueada y dentro de la
@@ -343,9 +377,12 @@ export async function aplicarVeredictoDeMenu(
   tx: Prisma.TransactionClient,
   linkId: string,
   v: { aprobado: boolean; firmadoEnMs: number | null },
-): Promise<ResultadoDelVeredicto> {
+): Promise<VeredictoDelMenu> {
   // Lo que decide `cambio` con la fila bloqueada (un objeto y no `let`s: TypeScript no ve las asignaciones del callback).
-  const decision: { resultado: ResultadoDelVeredicto; huella?: string; soloLaFecha?: boolean } = { resultado: 'NO_APLICA' }
+  const decision: { resultado: ResultadoDelVeredicto; publicadaEn: string | null; huella?: string; soloLaFecha?: boolean } = {
+    resultado: 'NO_APLICA',
+    publicadaEn: null,
+  }
   const ahora = new Date()
 
   await escribirLlavesDelSistema(
@@ -354,12 +391,16 @@ export async function aplicarVeredictoDeMenu(
       const pendiente = leerMenuEnRevision(fila.config)
       if (!pendiente) {
         decision.soloLaFecha = v.aprobado // una aprobación sin pendiente (publicación a mano, o anterior al mecanismo): sólo la fecha
-        logger.info('📋 [MenuSync] veredicto del menú sin pendiente: no hay qué sellar ni rechazar', {
-          linkId,
-          aprobado: v.aprobado,
-        })
+        if (v.aprobado) logger.info('📋 [MenuSync] aprobación del menú sin pendiente: sólo queda la fecha', { linkId, aprobado: true })
+        // El proveedor rechazó ALGO y no hay pendiente que lo explique: a la vista, no en un `info` que nadie lee.
+        else
+          logger.warn('📋 [MenuSync] rechazo del menú sin pendiente: no hay qué anotar; revisar en el portal del proveedor qué rechazó', {
+            linkId,
+            aprobado: false,
+          })
         return null
       }
+      decision.publicadaEn = pendiente.publicadaEn
       const publicadaMs = Date.parse(pendiente.publicadaEn)
       if (v.firmadoEnMs === null || Number.isNaN(publicadaMs)) {
         logger.warn('📋 [MenuSync] veredicto del menú sin hora de firma (o pendiente sin hora legible): no se aplica', {
@@ -398,7 +439,7 @@ export async function aplicarVeredictoDeMenu(
   } else if (decision.soloLaFecha) {
     await tx.deliveryChannelLink.update({ where: { id: linkId }, data: { lastMenuSyncAt: ahora } })
   }
-  return decision.resultado
+  return { resultado: decision.resultado, publicadaEn: decision.publicadaEn }
 }
 
 /**

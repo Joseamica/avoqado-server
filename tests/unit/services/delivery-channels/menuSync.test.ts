@@ -208,8 +208,8 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
   /** El veredicto REAL (Tarea 16), firmado ahora (después de la publicación): sella o rechaza la pendiente VIGENTE. */
   async function veredicto(aprobado: boolean) {
     if (!fila.config.menuEnRevision) throw new Error('no hay pendiente: el veredicto no tendría qué resolver')
-    const r = await aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado, firmadoEnMs: Date.now() })
-    expect(r).toBe(aprobado ? 'SELLADO' : 'RECHAZO_ANOTADO')
+    const { resultado } = await aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado, firmadoEnMs: Date.now() })
+    expect(resultado).toBe(aprobado ? 'SELLADO' : 'RECHAZO_ANOTADO')
   }
 
   function conRevision(publicar: jest.Mock, payload: unknown = PAYLOAD) {
@@ -396,6 +396,96 @@ describe('menú en revisión (menuConRevision): sin sellar ni republicar hasta e
     expect((await syncChannelMenu(copia())).outcome).toBe('PUBLISHED')
   })
 
+  // T16b: tras reservar H, sólo un veredicto escribe `lastMenuHash`. Si al SOLTAR vale H, lo selló un aviso AJENO (de otra
+  // publicación: el tardío de una pendiente soltada a mano, o el residual §4.5.1) mientras viajaba un POST que el proveedor
+  // rechazó o que nunca salió. Quedaba «al día» un menú que el proveedor no tiene.
+  it('🔴 un aviso ajeno sella la huella mientras su POST da 400: queda sin sellar y rechazada, y no se republica (sin bucle)', async () => {
+    const publicar = jest.fn(async () => {
+      await veredicto(true) // firmado DESPUÉS de reservar: la regla de la hora lo deja pasar
+      expect(fila.lastMenuHash).toBe(H)
+      return { ok: false, status: 400, raw: '{}', problemas: [] }
+    })
+    conRevision(publicar)
+
+    expect((await syncChannelMenu(copia())).outcome).toBe('FAILED')
+
+    expect(fila.lastMenuHash).toBeNull()
+    expect(fila.config.menuRechazado).toEqual({ huella: H, en: expect.any(String) })
+    expect(fila.config.menuEnRevision).toBeNull()
+    expect((await syncChannelMenu(copia())).outcome).toBe('REJECTED_UNCHANGED')
+    expect(publicar).toHaveBeenCalledTimes(1)
+  })
+
+  it.each([
+    ['401', () => Promise.resolve({ ok: false, status: 401, raw: 'unauthorized', problemas: [] })],
+    ['DeliveryWriteNotSentError', () => Promise.reject(new DeliveryWriteNotSentError('UNAVAILABLE', 'no se pudo obtener el token'))],
+  ])(
+    '🔴 un aviso ajeno sella la huella y el POST da %s: queda sin sellar y sin rechazo, y la siguiente pasada la republica',
+    async (_c, respuesta) => {
+      const publicar = jest.fn(async () => {
+        await veredicto(true)
+        return (respuesta as () => Promise<any>)()
+      })
+      conRevision(publicar)
+
+      expect((await syncChannelMenu(copia())).outcome).toBe('FAILED')
+
+      expect(fila.lastMenuHash).toBeNull()
+      expect(fila.config.menuRechazado ?? null).toBeNull() // el veredicto ajeno lo dejó en null; nadie anotó un rechazo
+      expect(fila.config.menuEnRevision).toBeNull()
+      publicar.mockReset().mockResolvedValue(ok200())
+      expect((await syncChannelMenu(copia())).outcome).toBe('PUBLISHED')
+      expect(publicar).toHaveBeenCalledTimes(1)
+    },
+  )
+
+  it('soltar no borra un sello que YA estaba antes de reservar (republicar con force lo que el proveedor ya aprobó)', async () => {
+    // Con `force` la reserva acepta la huella ya sellada: ese sello no es de un aviso ajeno, es lo que el proveedor tiene.
+    fila.lastMenuHash = H
+    conRevision(jest.fn(async () => ({ ok: false, status: 401, raw: 'unauthorized', problemas: [] })))
+
+    expect((await syncChannelMenu(copia(), { force: true })).outcome).toBe('FAILED')
+
+    expect(fila.lastMenuHash).toBe(H)
+    expect(fila.config.menuEnRevision).toBeNull()
+  })
+
+  it('soltar escribe la pendiente y el sello en UNA transacción, con la fila bloqueada', async () => {
+    // Las dos escrituras (config y `lastMenuHash`) bajo el MISMO candado: separadas, una caída entre las dos dejaba otra vez
+    // la huella sellada Y rechazada.
+    let dentro = false
+    const escrituras: Array<{ dentro: boolean; columnas: string[] }> = []
+    const publicar = jest.fn(async () => {
+      await veredicto(true)
+      mockedQueryRaw.mockClear()
+      ;(prisma.$transaction as jest.Mock).mockClear().mockImplementationOnce(async (cb: any) => {
+        dentro = true
+        try {
+          return await cb(prisma)
+        } finally {
+          dentro = false
+        }
+      })
+      const escribir = mockedUpdate.getMockImplementation()!
+      mockedUpdate.mockImplementation(async (a: any) => {
+        escrituras.push({ dentro, columnas: Object.keys(a.data) })
+        return escribir(a)
+      })
+      return { ok: false, status: 400, raw: '{}', problemas: [] }
+    })
+    conRevision(publicar)
+
+    await syncChannelMenu(copia())
+
+    expect(prisma.$transaction).toHaveBeenCalledTimes(1)
+    expect(mockedQueryRaw).toHaveBeenCalledTimes(1)
+    expect((mockedQueryRaw.mock.calls[0][0] as string[]).join('?')).toMatch(/FOR UPDATE/)
+    expect(escrituras).toEqual([
+      { dentro: true, columnas: ['config'] },
+      { dentro: true, columnas: ['lastMenuHash'] },
+    ])
+  })
+
   it('🔴 con un menú en revisión nunca se republica, ni con cambios ni con force', async () => {
     fila.config = { menuEnRevision: { huella: 'VIEJA', publicadaEn: new Date(Date.now() - 60_000).toISOString() } }
     const publicar = jest.fn(async () => ok200())
@@ -497,8 +587,20 @@ describe('aplicarVeredictoDeMenu — el veredicto sólo aplica a la pendiente pu
     })
   })
 
-  const aplicar = (aprobado: boolean, firmadoEnMs: number | null) =>
-    aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado, firmadoEnMs })
+  const aplicar = async (aprobado: boolean, firmadoEnMs: number | null) =>
+    (await aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado, firmadoEnMs })).resultado
+
+  it('T16b: devuelve también la hora de la publicación que juzgó (para medir el desfase del reloj, M7)', async () => {
+    expect(await aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado: true, firmadoEnMs: publicadaMs + 1 })).toEqual({
+      resultado: 'SELLADO',
+      publicadaEn: PUBLICADA_EN,
+    })
+    fila.config = {}
+    expect(await aplicarVeredictoDeMenu(prisma as any, 'link1', { aprobado: true, firmadoEnMs: publicadaMs + 1 })).toEqual({
+      resultado: 'NO_APLICA',
+      publicadaEn: null,
+    })
+  })
 
   it('🔴 aprobación firmada DESPUÉS de publicar la pendiente: la sella', async () => {
     fila.config.menuRechazado = { huella: 'H-vieja', en: 'x' }
@@ -577,10 +679,18 @@ describe('aplicarVeredictoDeMenu — el veredicto sólo aplica a la pendiente pu
     expect(fila.config).toEqual({ note: 'del dueño' })
   })
 
-  it('rechazo sin pendiente: no hay qué anotar', async () => {
+  it('rechazo sin pendiente: no hay qué anotar, pero queda a la vista (warn)', async () => {
+    // T16b: el proveedor rechazó ALGO y no hay pendiente que lo explique: con `info` nadie se enteraba.
     fila.config = {}
     expect(await aplicar(false, publicadaMs + 1_000)).toBe('NO_APLICA')
     expect(mockedUpdate).not.toHaveBeenCalled()
+    expect(mockedWarn).toHaveBeenCalledWith(expect.stringContaining('sin pendiente'), expect.objectContaining({ aprobado: false }))
+  })
+
+  it('aprobación sin pendiente: sin warn (una publicación a mano lo explica)', async () => {
+    fila.config = {}
+    await aplicar(true, publicadaMs + 1_000)
+    expect(mockedWarn).not.toHaveBeenCalled()
   })
 
   it('el vínculo ya no existe: no escribe nada', async () => {
@@ -596,7 +706,9 @@ describe('aplicarVeredictoDeMenu — el veredicto sólo aplica a la pendiente pu
       deliveryChannelLink: { update: jest.fn() },
     }
 
-    expect(await aplicarVeredictoDeMenu(tx as any, 'link1', { aprobado: true, firmadoEnMs: publicadaMs + 1_000 })).toBe('SELLADO')
+    expect((await aplicarVeredictoDeMenu(tx as any, 'link1', { aprobado: true, firmadoEnMs: publicadaMs + 1_000 })).resultado).toBe(
+      'SELLADO',
+    )
 
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
     expect(tx.deliveryChannelLink.update).toHaveBeenCalled()
