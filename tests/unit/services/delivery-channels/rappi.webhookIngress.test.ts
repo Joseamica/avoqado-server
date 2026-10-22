@@ -11,6 +11,7 @@ import {
   eventoDeLaRuta,
   esPing,
   firmadoEnMsDeLaLlave,
+  guardarPedidoSondeadoRappi,
   llaveDeDeduplicacion,
   persistRappiWebhookEvent,
   RUTA_POR_EVENTO,
@@ -297,5 +298,77 @@ describe('persistRappiWebhookEvent', () => {
     const data = (prisma.deliveryOrderEvent.create as jest.Mock).mock.calls[0][0].data
     expect(data.venueId).toBeNull()
     expect(data.channelLinkId).toBeNull()
+  })
+})
+
+// Tarea 20: el sondeo por tienda guarda por la MISMA pieza que el webhook, debajo de la firma (el sondeo no trae firma).
+describe('guardarPedidoSondeadoRappi', () => {
+  const pedido = { store: { external_id: '900175625', internal_id: '900175625' }, order_detail: { order_id: '570494427' } }
+
+  beforeEach(() => {
+    // `mockReset`: un `mockRejectedValueOnce` que una prueba no consumió no debe colarse a la siguiente.
+    ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockReset().mockResolvedValue({ id: 'link1', venueId: 'v1' })
+    ;(prisma.deliveryOrderEvent.create as jest.Mock).mockReset().mockResolvedValue({ id: 'evt9' })
+  })
+
+  it('🔴 guarda con la MISMA llave que el webhook del NEW_ORDER (con firma o sin ella da lo mismo)', async () => {
+    const r = await guardarPedidoSondeadoRappi(pedido)
+
+    expect(r).toMatchObject({ outcome: 'PERSISTED', eventRowId: 'evt9', evento: 'NEW_ORDER' })
+    const data = (prisma.deliveryOrderEvent.create as jest.Mock).mock.calls[0][0].data
+    expect(data.dedupKey).toBe(llaveDeDeduplicacion('NEW_ORDER', pedido, 't=1730000000,sign=abc'))
+    expect(data.dedupKey).toBe('RAPPI:NEW_ORDER:900175625:570494427')
+    expect(data.externalEventId).toBe(data.dedupKey)
+    expect(data).toMatchObject({
+      eventType: 'NEW_ORDER',
+      provider: 'RAPPI',
+      channelLinkId: 'link1',
+      venueId: 'v1',
+      externalOrderId: '570494427',
+    })
+  })
+
+  it('el duplicado lo resuelve la base (P2002): DUPLICATE, sin lanzar', async () => {
+    const { Prisma } = jest.requireActual('@prisma/client')
+    ;(prisma.deliveryOrderEvent.create as jest.Mock).mockRejectedValueOnce(
+      new Prisma.PrismaClientKnownRequestError('dup', { code: 'P2002', clientVersion: 'x' }),
+    )
+    await expect(guardarPedidoSondeadoRappi(pedido)).resolves.toMatchObject({ outcome: 'DUPLICATE' })
+  })
+
+  it('sin id de pedido o sin tienda NO se guarda (MALFORMED): una llave «sin-pedido» chocaría con cualquier otro', async () => {
+    await expect(guardarPedidoSondeadoRappi({ store: { external_id: '900175625' }, order_detail: {} })).resolves.toEqual({
+      outcome: 'MALFORMED',
+    })
+    await expect(guardarPedidoSondeadoRappi({ order_detail: { order_id: '1' } })).resolves.toEqual({ outcome: 'MALFORMED' })
+    await expect(guardarPedidoSondeadoRappi('no es un objeto')).resolves.toEqual({ outcome: 'MALFORMED' })
+    await expect(guardarPedidoSondeadoRappi([pedido])).resolves.toEqual({ outcome: 'MALFORMED' })
+    expect(prisma.deliveryOrderEvent.create).not.toHaveBeenCalled()
+  })
+
+  // Un programado guardado como NEW_ORDER tomaría la llave del pedido real: cuando Rappi lo libere, su webhook sería DUPLICATE.
+  it('🔴 un pedido PROGRAMADO se guarda con SU llave (NEW_ORDER_SCHEDULED), la misma que le pondría su webhook', async () => {
+    const programado = { ...pedido, action: 'scheduled' }
+    const r = await guardarPedidoSondeadoRappi(programado)
+
+    expect(r).toMatchObject({ outcome: 'PERSISTED', evento: 'NEW_ORDER_SCHEDULED' })
+    const data = (prisma.deliveryOrderEvent.create as jest.Mock).mock.calls[0][0].data
+    expect(data.eventType).toBe('NEW_ORDER_SCHEDULED')
+    expect(data.dedupKey).toBe(llaveDeDeduplicacion('NEW_ORDER_SCHEDULED', programado, undefined))
+    expect(data.dedupKey).not.toBe(llaveDeDeduplicacion('NEW_ORDER', pedido, undefined))
+  })
+
+  it('regresión: el webhook firmado sigue guardando igual que antes', async () => {
+    const body = Buffer.from(JSON.stringify(pedido), 'utf8')
+    const r = await persistRappiWebhookEvent({
+      rawBody: body,
+      signatureHeader: firmar('100', body, 's1'),
+      evento: 'NEW_ORDER',
+      secrets: ['s1'],
+    })
+
+    expect(r).toEqual({ outcome: 'PERSISTED', eventRowId: 'evt9' })
+    const data = (prisma.deliveryOrderEvent.create as jest.Mock).mock.calls[0][0].data
+    expect(data.dedupKey).toBe('RAPPI:NEW_ORDER:900175625:570494427')
   })
 })

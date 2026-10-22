@@ -142,6 +142,26 @@ describe('llamarRappi', () => {
     expect(d.fetchImpl).toHaveBeenCalled()
   })
 
+  // Tarea 20 (M13): el GET de pedidos por tienda NO es una lectura — pasa los pedidos de READY a SENT del lado de Rappi, y
+  // quien lee primero se los lleva. Sin `cambiaEstado`, el candado lo dejaba salir a cualquier tienda por ser GET.
+  it('🔴 un GET que CAMBIA ESTADO (`cambiaEstado`) lleva el candado: tienda no autorizada ⇒ no sale a la red', async () => {
+    const d = deps({ tiendasEscribibles: ['900'] })
+    await expect(
+      llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/901/orders', storeId: '901', cambiaEstado: true }),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    await expect(
+      llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/x/orders', cambiaEstado: true }),
+    ).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(d.fetchImpl).not.toHaveBeenCalled()
+  })
+
+  it('un GET que cambia estado SÍ sale a una tienda autorizada, como GET', async () => {
+    const d = deps({ tiendasEscribibles: ['900'] })
+    await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/stores/900/orders', storeId: '900', cambiaEstado: true })
+    expect(d.fetchImpl).toHaveBeenCalledTimes(1)
+    expect((d.fetchImpl as jest.Mock).mock.calls[0][1].method).toBe('GET')
+  })
+
   it('manda el header `x-authorization`, no el estándar', async () => {
     const d = deps()
     await llamarRappi(d, { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })

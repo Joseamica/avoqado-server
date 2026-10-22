@@ -17,7 +17,6 @@
  *    procesamiento corre después de contestar. Rappi NO documenta reintentos, así que cada
  *    milisegundo antes del 200 es riesgo de perder el evento para siempre.
  */
-import { DeliveryChannelStatus } from '@prisma/client'
 import { Request, Response } from 'express'
 
 import { env } from '../../config/env'
@@ -27,6 +26,7 @@ import { rappiAdapter, respuestaPing, RAPPI_EVENTS } from '../../services/delive
 import { credencialesPresentes, tiendasEscribiblesRappi } from '../../services/delivery-channels/providers/rappi/rappi.client'
 import { processRappiEvent } from '../../services/delivery-channels/providers/rappi/rappi.eventProcessor'
 import {
+  ESTADOS_VIVOS_RAPPI,
   eventoDeLaRuta,
   persistRappiWebhookEvent,
   secretosDelEvento,
@@ -39,16 +39,10 @@ function headerFirma(req: Request): string | undefined {
 }
 
 /**
- * Los estados de un vínculo que siguen "ahí para recibir". DISABLED (y cualquier estado que no conozcamos) NO: la lista
- * de vivos es CERRADA a propósito, para que un estado nuevo nunca se cuele como OK. PAUSED sí cuenta: pausar ya apaga la
- * tienda en Rappi (`habilitarTiendaRappi(false)`), y contestarle ERROR al PING reportaría como caída de conectividad lo que
- * el negocio apagó a propósito. PENDING es una tienda recién vinculada que ya debe poder recibir su primer aviso.
+ * Los estados de un vínculo que siguen "ahí para recibir": `ESTADOS_VIVOS_RAPPI` (`rappi.webhookIngress.ts`, con su porqué).
+ * Es la MISMA lista que usa el sondeo por tienda: el PING y el sondeo nunca dicen cosas distintas de la misma tienda.
  */
-const ESTADOS_VIVOS: ReadonlySet<string> = new Set([
-  DeliveryChannelStatus.ACTIVE,
-  DeliveryChannelStatus.PAUSED,
-  DeliveryChannelStatus.PENDING,
-])
+const ESTADOS_VIVOS: ReadonlySet<string> = ESTADOS_VIVOS_RAPPI
 
 type VeredictoPing = { storeId: string | null } & (
   | { ok: true; nombre: string | null }

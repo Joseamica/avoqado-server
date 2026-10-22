@@ -302,20 +302,45 @@ export async function borrarFranjaTiendaRappi(storeId: string, storeScheduleId: 
 /**
  * El historial de eventos de UN pedido del lado de Rappi (Tarea 9): lo único que dice si un pedido que contestó 400 al
  * aceptar sí quedó aceptado (`taken_visible_order`). Medido el 21-oct en DEV: 200 con una lista; `[]` si nunca se aceptó.
- * Es una LECTURA: va sin `storeId`, como las demás. 🔴 No confundir con `GET /orders` (`sondearPedidosRappi`), que NO es una
- * lectura: pasa los pedidos de READY a SENT. El cuerpo lo interpreta `leerRespuestaDelHistorial` (`rappi.estadoDelPedido`).
+ * Es una LECTURA: va sin `storeId`, como las demás. 🔴 No confundir con el GET de pedidos por tienda (`sondearPedidosRappi`),
+ * que NO es una lectura: pasa los pedidos de READY a SENT. El cuerpo lo interpreta `leerRespuestaDelHistorial` (`rappi.estadoDelPedido`).
  */
 export async function historialDelPedidoRappi(orderId: string): Promise<RappiRespuesta> {
   return rappiApi({ metodo: 'GET', ruta: `${API}/orders/${encodeURIComponent(orderId)}/events` })
 }
 
 /**
- * El sondeo de pedidos: la RED por si un webhook se perdió (Rappi no documenta reintentos).
- * Devuelve sólo los pedidos pendientes de contestar, y el propio GET los pasa de READY a
- * SENT del lado de Rappi. El ritmo de 45 s lo pone el caller con `crearEspaciadorDeSondeo`.
+ * El sondeo de pedidos de UNA tienda: la RED por si su aviso NEW_ORDER se perdió (Tarea 20; Rappi no documenta reintentos).
+ *
+ * 🔴 NO es una lectura: el propio GET pasa los pedidos de READY a SENT del lado de Rappi, y quien lee primero se los lleva
+ * (medido el 22-oct, M13: el segundo GET, 26 s después, vino vacío). Por eso:
+ *   · es POR TIENDA y en el host NUEVO (`hostDeLoginRappi`; M13: 200 con la lista). El `GET {API}/orders` clásico es GLOBAL:
+ *     pasaría a SENT los pedidos de tiendas que no son nuestras o no están en la lista, y ya no se usa;
+ *   · lleva el candado de tiendas como una escritura (`cambiaEstado`): una tienda fuera de `RAPPI_WRITABLE_STORE_IDS_*` lanza
+ *     `RappiEscrituraBloqueadaError` y no sale nada;
+ *   · su único llamador es `rappi-order-poll.job.ts`, que guarda cada pedido ANTES de cualquier otra llamada de red. Nunca se
+ *     llama fuera del sondeo.
+ * Cada elemento de la lista tiene la forma del cuerpo del aviso NEW_ORDER (`{ store, customer, order_detail }`). El cuerpo lo
+ * interpreta el job; aquí sólo sale la llamada.
  */
-export async function sondearPedidosRappi(): Promise<RappiRespuesta> {
-  return rappiApi({ metodo: 'GET', ruta: `${API}/orders` })
+export async function sondearPedidosRappi(storeId: string): Promise<RappiRespuesta> {
+  return rappiApi({
+    metodo: 'GET',
+    ruta: `/restaurants/orders/v1/stores/${encodeURIComponent(storeId)}/orders`,
+    host: hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY),
+    storeId,
+    cambiaEstado: true,
+  })
+}
+
+/**
+ * Los pedidos en SENT (entregados a la integración y todavía sin contestar) de TODAS las tiendas de la integración: la
+ * recuperación del sondeo (Tarea 20). Si el proceso muere entre el GET por tienda y el guardado, el pedido ya no vuelve por ese
+ * GET; vuelve por aquí (~10 min). Es una LECTURA (M13: 200 con la lista, mismo formato), host CLÁSICO y sin `storeId`: la
+ * variante por tienda del host nuevo da 404. Quien llama descarta los pedidos de tiendas que no son suyas.
+ */
+export async function pedidosEnviadosRappi(): Promise<RappiRespuesta> {
+  return rappiApi({ metodo: 'GET', ruta: `${API}/orders/status/sent` })
 }
 
 // ────────────────────────────────────────────────────────────────────────────────────

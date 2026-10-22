@@ -204,6 +204,16 @@ const envSchema = z.object({
   /** Tiendas donde SÍ se puede escribir. Vacía = ninguna (el candado del incidente 2026-08-17). */
   RAPPI_WRITABLE_STORE_IDS_SANDBOX: z.string().optional(),
   RAPPI_WRITABLE_STORE_IDS_PRODUCTION: z.string().optional(),
+  /**
+   * Sondeo de pedidos por tienda cada 45 s (`jobs/rappi-order-poll.job.ts`): la red por si se pierde un aviso NEW_ORDER.
+   * APAGADO por default; sólo `"true"` lo prende. 🔴 Prendido en EXACTAMENTE un servidor por integración —el que recibe sus
+   * webhooks, con su base—: el GET pasa los pedidos de READY a SENT, y dos servidores sondeando se roban los pedidos
+   * (`.claude/rules/una-sola-instancia.md`).
+   */
+  RAPPI_ORDER_POLL_ENABLED: z
+    .string()
+    .transform(val => val === 'true')
+    .default('false'),
   // Self-onboarding (spec 2026-09-29). La llave firma el enlace y cifra el id_token del comercio;
   // sin ella el FLUJO se niega a arrancar (igual que Uber con UBER_WEBHOOK_SIGNING_KEY), no el proceso.
   // 🔴 Las seis de este bloque (hasta `RAPPI_WEBHOOK_BASE_URL`) son `z.string().optional()` a propósito: un fallo de

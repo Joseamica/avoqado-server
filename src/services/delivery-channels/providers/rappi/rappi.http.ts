@@ -155,6 +155,12 @@ export interface RappiPeticion {
    * solicitud: cada llamada se cuenta ANTES de salir, y un reintento por dentro serían dos peticiones por una cuenta.
    */
   reintentarEn401?: boolean
+  /**
+   * 🔴 Un GET que NO es lectura: cambia el estado del lado de Rappi, así que lleva el candado de tiendas como una escritura.
+   * Lo usa el sondeo de pedidos por tienda (`GET …/stores/{storeId}/orders`), que pasa los pedidos de READY a SENT: quien lee
+   * primero se los lleva (medido el 22-oct, M13). Sin esto el candado lo dejaba salir a cualquier tienda por ser GET.
+   */
+  cambiaEstado?: boolean
 }
 
 /**
@@ -166,7 +172,7 @@ export interface RappiPeticion {
  * tasa de éxito del 98% que Rappi exige. Con `reintentarEn401: false` no hay segundo intento (ver `RappiPeticion`).
  */
 export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion): Promise<RappiRespuesta> {
-  const escritura = !LECTURAS.has(peticion.metodo.toUpperCase())
+  const escritura = !LECTURAS.has(peticion.metodo.toUpperCase()) || peticion.cambiaEstado === true
   if (escritura) {
     const autorizadas = deps.tiendasEscribibles ?? []
     const tiendas = peticion.storeIds ?? [peticion.storeId]

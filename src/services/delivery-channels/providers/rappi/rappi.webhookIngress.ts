@@ -24,11 +24,12 @@
  * tener que rotarlo N veces.
  */
 import crypto from 'crypto'
-import { DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
+import { DeliveryChannelStatus, DeliveryOrderEventStatus, DeliveryProvider, Prisma } from '@prisma/client'
 
 import logger from '../../../../config/logger'
 import prisma from '../../../../utils/prismaClient'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
+import { esPedidoProgramado, type RappiOrderPayload } from './rappi.mapper'
 import { leerEstadoAprovisionamiento } from './rappi.selfOnboarding'
 import { parseRappiSignatureHeader, verifyRappiSignature } from './rappi.signature'
 
@@ -97,11 +98,27 @@ export function secretosDelEvento(mapaJson: string | undefined, evento: string):
  * consecuencia inmediata.
  *
  * Rappi **no documenta reintentos**. Eso significa que un 5xx nuestro probablemente pierde el
- * evento para siempre — por eso el sondeo de pedidos (`GET /orders`) no es un lujo, es la red.
+ * evento para siempre — por eso el sondeo de pedidos por tienda (`rappi-order-poll.job.ts`) no es un lujo, es la red.
  */
 export function esPing(evento: string): boolean {
   return evento === RAPPI_EVENTS.PING
 }
+
+/**
+ * Los estados de un vínculo RAPPI que siguen "ahí para recibir" pedidos. La usan el PING (`rappi.webhook.controller`: contesta
+ * OK sólo con vínculo vivo) y el sondeo por tienda (`rappi-order-poll.job.ts`: sólo sondea tiendas vivas): 🔴 una sola lista,
+ * para que nunca digan cosas distintas de la misma tienda.
+ *
+ * DISABLED (y cualquier estado que no conozcamos) NO: la lista de vivos es CERRADA a propósito, para que un estado nuevo nunca se
+ * cuele como OK. PAUSED sí cuenta: pausar ya apaga la tienda en Rappi (`habilitarTiendaRappi(false)`), y contestarle ERROR al
+ * PING reportaría como caída de conectividad lo que el negocio apagó a propósito. PENDING es una tienda recién vinculada que ya
+ * debe poder recibir su primer aviso.
+ */
+export const ESTADOS_VIVOS_RAPPI: ReadonlySet<DeliveryChannelStatus> = new Set<DeliveryChannelStatus>([
+  DeliveryChannelStatus.ACTIVE,
+  DeliveryChannelStatus.PAUSED,
+  DeliveryChannelStatus.PENDING,
+])
 
 // ────────────────────────────────────────────────────────────────────────────────────
 //  Persistencia — el 200 sólo sale con el evento ya guardado
@@ -237,8 +254,21 @@ export async function persistRappiWebhookEvent(input: RappiIngressInput): Promis
     return { outcome: 'MALFORMED' }
   }
 
+  return guardarEventoRappi(input.evento, payload, input.signatureHeader)
+}
+
+/**
+ * Lo que guarda, DEBAJO de la firma: la llave, el vínculo y el INSERT. Es la pieza común del webhook (ya verificado) y del
+ * sondeo (`guardarPedidoSondeadoRappi`, que no trae firma). 🔴 Una sola pieza: si la llave o la fila cambian, cambian para
+ * los dos caminos, y un pedido que llega por los dos sigue chocando en el mismo índice único.
+ */
+async function guardarEventoRappi(
+  evento: string,
+  payload: unknown,
+  signatureHeader: string | undefined,
+): Promise<{ outcome: 'PERSISTED' | 'DUPLICATE'; eventRowId?: string }> {
   const identidad = rappiAdapter.extractIdentity(payload)
-  const dedupKey = llaveDeDeduplicacion(input.evento, payload, input.signatureHeader)
+  const dedupKey = llaveDeDeduplicacion(evento, payload, signatureHeader)
 
   const link = identidad.storeId
     ? await prisma.deliveryChannelLink.findUnique({
@@ -254,7 +284,7 @@ export async function persistRappiWebhookEvent(input: RappiIngressInput): Promis
         externalEventId: dedupKey,
         // 🔴 El tipo es el de la RUTA — el payload puede no traer ninguno (PING y
         // MENU_REJECTED son literalmente indistinguibles por contenido).
-        eventType: input.evento,
+        eventType: evento,
         dedupKey,
         externalOrderId: identidad.orderId,
         channelLinkId: link?.id ?? null,
@@ -269,4 +299,39 @@ export async function persistRappiWebhookEvent(input: RappiIngressInput): Promis
     if (e instanceof Prisma.PrismaClientKnownRequestError && e.code === 'P2002') return { outcome: 'DUPLICATE' }
     throw e
   }
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  El sondeo por tienda (Tarea 20): la red por si el aviso NEW_ORDER se perdió
+// ────────────────────────────────────────────────────────────────────────────────────
+
+export type RappiSondeoOutcome = 'PERSISTED' | 'DUPLICATE' | 'MALFORMED'
+
+/**
+ * Guarda UN pedido que llegó por el sondeo (`GET …/stores/{storeId}/orders` o `…/orders/status/sent`), por la MISMA pieza que
+ * el webhook y con la MISMA llave: `llaveDeDeduplicacion('NEW_ORDER', …)`, que para un aviso con pedido no usa la firma
+ * (`RAPPI:NEW_ORDER:tienda:pedido`). 🔴 Por eso un pedido que llega por los dos caminos, en cualquier orden, choca en el índice
+ * único `dedupKey` (P2002 = DUPLICATE) y se registra UNA vez. Medido (M13): cada elemento del GET tiene la forma del cuerpo del
+ * aviso (`{ store, customer, order_detail }`).
+ *
+ * El sondeo no trae firma: entra aquí, debajo de la verificación del webhook, sin debilitarla. La confianza es otra: el pedido
+ * lo leímos NOSOTROS de la API de Rappi con nuestro token.
+ *
+ * 🔴 Un pedido PROGRAMADO (`action: 'scheduled'`, montos en cero) se guarda como `NEW_ORDER_SCHEDULED`, la llave que le pondría
+ * SU webhook: guardado como NEW_ORDER no se podría vender (el traductor lo rechaza) y además tomaría la llave del pedido real:
+ * si Rappi lo libera con el mismo id (lo esperable; el sandbox no mandó ningún programado), ese NEW_ORDER sería DUPLICATE y se
+ * perdería.
+ *
+ * Sin id de pedido o sin tienda NO se guarda (`MALFORMED`): su llave sería `sin-pedido`/`sin-tienda` y chocaría con cualquier
+ * otro roto. Nunca lanza por el cuerpo; un fallo de la base sí se propaga (quien llama decide).
+ */
+export async function guardarPedidoSondeadoRappi(
+  payload: unknown,
+): Promise<{ outcome: RappiSondeoOutcome; eventRowId?: string; evento?: string }> {
+  if (typeof payload !== 'object' || payload === null || Array.isArray(payload)) return { outcome: 'MALFORMED' }
+  const identidad = rappiAdapter.extractIdentity(payload)
+  if (!identidad.orderId || !identidad.storeId) return { outcome: 'MALFORMED' }
+
+  const evento = esPedidoProgramado(payload as RappiOrderPayload) ? RAPPI_EVENTS.NEW_ORDER_SCHEDULED : RAPPI_EVENTS.NEW_ORDER
+  return { ...(await guardarEventoRappi(evento, payload, undefined)), evento }
 }
