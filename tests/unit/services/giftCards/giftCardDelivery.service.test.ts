@@ -481,6 +481,33 @@ describe('reclamo atorado en el 4.º intento', () => {
   })
 })
 
+/**
+ * Cierre A (C3): la vuelta de cada minuto (sin `ids`) toma de TODA la base. Su reclamo, su cierre de atoradas y su «¿hay
+ * pendientes?» exigen que la tarjeta sea de una venta de la 1b (`ventaHuella`) o que alguien la haya reenviado
+ * (`deliveryOperationKey`). Con Postgres de verdad lo prueba `entrega.integration.test.ts` («C3»).
+ */
+describe('C3 — la vuelta global sólo toma tarjetas de la 1b o reenviadas', () => {
+  const GUARDIA = /\(\w\."ventaHuella" IS NOT NULL OR \w\."deliveryOperationKey" IS NOT NULL\)/g
+  const veces = (sql: string) => (sql.match(GUARDIA) ?? []).length
+
+  it('el reclamo y el cierre de atoradas de la vuelta global llevan la guardia en la subconsulta Y en la condición repetida', async () => {
+    armar({})
+    await entregarTarjetas({ ahora: AHORA })
+    const sqls = prismaMock.$queryRaw.mock.calls.map(textoDe)
+    const reclamo = sqls.find((t: string) => t.includes('"deliveryAttempts" + 1'))!
+    const atoradas = sqls.find((t: string) => t.includes("'UNCONFIRMED'"))!
+    expect(reclamo).not.toContain('ANY(')
+    expect(veces(reclamo)).toBe(2)
+    expect(veces(atoradas)).toBe(2)
+  })
+
+  it('«¿hay pendientes?» la lleva en las dos ramas (reclamables O atoradas)', async () => {
+    prismaMock.$queryRaw.mockReset().mockResolvedValue([{ hay: false }])
+    expect(await hayEntregasPendientes(AHORA)).toBe(false)
+    expect(veces(textoDe(prismaMock.$queryRaw.mock.calls[0]))).toBe(2)
+  })
+})
+
 describe('Q103/Q105 — el aviso de fallo que llega antes de guardar', () => {
   it('marcarEntregaFallidaPorMensaje anota ANTES del updateMany y el CAS lleva deliveryMessageId y deliveryStatus SENT', async () => {
     prismaMock.giftCard.updateMany.mockReset().mockResolvedValue({ count: 0 })

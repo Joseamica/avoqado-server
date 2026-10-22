@@ -269,6 +269,67 @@ describe('el reclamo en la fila', () => {
   })
 })
 
+/**
+ * Cierre A (C3, M1 de la revisión final): en una base con tarjetas de la 1a (vendidas antes de que existiera la entrega: ACTIVE,
+ * entrega PENDING para siempre, sin huella de venta), el envío automático no les manda nada. La vuelta de cada minuto y la patada
+ * son la MISMA `entregarTarjetas` (la vuelta, sin `ids`): aquí, acotada a las tarjetas de la prueba. Un «Reenviar» de una persona
+ * sí manda.
+ */
+describe('🔴 C3: el envío automático sólo toma tarjetas de la 1b; «Reenviar» sí manda una de la 1a', () => {
+  /** Como la guardó la venta de la 1a: sin `ventaHuella` y sin llave de reenvío. */
+  const comoLaUnoA = (id: string) => prisma.giftCard.update({ where: { id }, data: { ventaHuella: null, deliveryOperationKey: null } })
+  const quien = () => ({ staffId: negocio.staffId, puedeVender: true, puedeGestionar: false })
+
+  it('una de la 1a (ACTIVE, PENDING, WhatsApp) no la toma la vuelta; una de la 1b sí sale', async () => {
+    const [deLaUnoA, deLaUnoB] = await tarjetas(2)
+    await comoLaUnoA(deLaUnoA)
+    expect((await fila(deLaUnoA)).deliveryStatus).toBe('PENDING')
+    mockEnviarWhatsApp.mockImplementation(async () => ({ messageId: unico('wamid.c3') }))
+
+    const r = await entregarTarjetas({ ids: [deLaUnoA, deLaUnoB] })
+
+    expect(r).toEqual(expect.objectContaining({ reclamadas: 1, enviadas: 1, atoradas: 0 }))
+    expect(mockEnviarWhatsApp).toHaveBeenCalledTimes(1)
+    expect(mockEnviarWhatsApp.mock.calls[0][1].pageToken).toBe((await fila(deLaUnoB)).pageToken)
+    expect((await fila(deLaUnoB)).deliveryStatus).toBe('SENT')
+    expect(await fila(deLaUnoA)).toEqual(
+      expect.objectContaining({ deliveryStatus: 'PENDING', deliveryAttempts: 0, deliveryClaimedAt: null, deliveryMessageId: null }),
+    )
+  })
+
+  it('tampoco la cierra como atorada (4.º intento con el reclamo vencido): sigue PENDING, sin aviso de fallo', async () => {
+    const [deLaUnoA] = await tarjetas(1)
+    await comoLaUnoA(deLaUnoA)
+    await prisma.giftCard.update({
+      where: { id: deLaUnoA },
+      data: { deliveryAttempts: 4, deliveryClaimedAt: new Date(Date.now() - 6 * 60_000) },
+    })
+
+    const r = await entregarTarjetas({ ids: [deLaUnoA] })
+
+    expect(r).toEqual(expect.objectContaining({ reclamadas: 0, atoradas: 0 }))
+    expect(await fila(deLaUnoA)).toEqual(expect.objectContaining({ deliveryStatus: 'PENDING', deliveryErrorCode: null }))
+    expect(mockEnviarWhatsApp).not.toHaveBeenCalled()
+  })
+
+  it('«Reenviar» de una persona sobre una de la 1a SÍ manda, y la vuelta de cada minuto toma su reintento', async () => {
+    const [deLaUnoA] = await tarjetas(1)
+    await comoLaUnoA(deLaUnoA)
+    await reenviarTarjeta(negocio.venueId, deLaUnoA, quien(), { operationKey: unico('reenvia-1a') })
+
+    // El primer envío no sale (Meta no contesta): se reprograma a +1 min.
+    mockEnviarWhatsApp.mockRejectedValueOnce(new Error('Meta no contestó'))
+    expect(await entregarTarjetas({ ids: [deLaUnoA] })).toEqual(expect.objectContaining({ reclamadas: 1, reprogramadas: 1 }))
+    // La vuelta de un minuto después la toma y sale.
+    mockEnviarWhatsApp.mockResolvedValueOnce({ messageId: unico('wamid.reenvio-1a') })
+    const r = await entregarTarjetas({ ids: [deLaUnoA], ahora: new Date(Date.now() + 61_000) })
+
+    expect(r).toEqual(expect.objectContaining({ reclamadas: 1, enviadas: 1 }))
+    expect(mockEnviarWhatsApp).toHaveBeenCalledTimes(2)
+    expect(await fila(deLaUnoA)).toEqual(expect.objectContaining({ deliveryStatus: 'SENT', deliveryAttempts: 2 }))
+  })
+})
+
 describe('un lote lento no manda con el reclamo vencido (I1)', () => {
   /** El reloj con que la vuelta mide su tiempo (`Date.now`), adelantado a mano: un envío «tarda» lo que la prueba diga. */
   function relojAdelantable() {

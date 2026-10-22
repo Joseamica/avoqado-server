@@ -105,6 +105,9 @@ async function crearSobresPendientes(p: {
         termsVersion: '2026-10-14',
         deliveryChannel: 'HANDED_TO_BUYER',
         ...p.entrega,
+        // Cierre A (C3): con entrega, la sembrada es una venta de la 1b, y sólo ésas se entregan solas (la 1b siempre deja su
+        // huella; el valor da igual). Para una como las de la 1a, la prueba la pone en null.
+        ...(p.entrega ? { ventaHuella: `siembra-1b-${p.orderId}` } : {}),
       },
     })
     await prisma.orderItem.create({

@@ -92,18 +92,35 @@ const G = Prisma.raw('g')
 
 const reclamoVencidoAntesDe = (ahora: Date) => new Date(ahora.getTime() - RECLAMO_VENCE_MS)
 
-/** Lo que el reclamo toma (Q1, Q2): sin reclamo vivo, con turno, sin vencer y con intentos. */
+/**
+ * Cierre A (C3, M1 de la revisión final): el envío AUTOMÁTICO —el trabajo de cada minuto y las patadas— sólo toma tarjetas
+ * vendidas con la 1b o que una persona reenvió. Sin esto, al llegar a una base con tarjetas de la 1a (vendidas cuando la entrega
+ * no existía: `ACTIVE` con entrega `PENDING` para siempre), el trabajo les mandaría un WhatsApp o un correo de verdad.
+ *  - `ventaHuella` sólo la escribe la venta de la 1b (`giftCardOrder.service.ts`, el único lugar que crea tarjetas); la migración
+ *    `20261020090000_tarjetas_de_regalo_1b` la agregó nula, así que las de la 1a (y cualquiera que un servidor de la 1a cree
+ *    después de esa migración) la tienen nula. Por eso no se usa la hora de la migración.
+ *  - `deliveryOperationKey` sólo lo escriben «Reenviar» y «Cambiar destino» (`reinicioDeEntrega`, `giftCardCuenta.service.ts`):
+ *    una acción humana sobre ESA tarjeta, que sí debe salir aunque sea de la 1a, con sus reintentos.
+ * 🔴 Una forma nueva de crear tarjetas que no llene `ventaHuella` (p. ej. una venta en línea) no se entregaría sola.
+ */
+function deEntregaAutomatica(t: Prisma.Sql): Prisma.Sql {
+  return Prisma.sql`(${t}."ventaHuella" IS NOT NULL OR ${t}."deliveryOperationKey" IS NOT NULL)`
+}
+
+/** Lo que el reclamo toma (Q1, Q2): sin reclamo vivo, con turno, sin vencer y con intentos; de la 1b o reenviada (C3). */
 function reclamable(t: Prisma.Sql, ahora: Date): Prisma.Sql {
   return Prisma.sql`${t}."deliveryStatus" = 'PENDING' AND ${t}."status" = 'ACTIVE' AND ${t}."deliveryChannel" IN ('WHATSAPP', 'EMAIL')
+    AND ${deEntregaAutomatica(t)}
     AND (${t}."expiresAt" IS NULL OR ${t}."expiresAt" > ${utcTs(ahora)})
     AND ${t}."deliveryAttempts" < ${MAX_INTENTOS_DE_ENTREGA}
     AND (${t}."deliveryNextAttemptAt" IS NULL OR ${t}."deliveryNextAttemptAt" <= ${utcTs(ahora)})
     AND (${t}."deliveryClaimedAt" IS NULL OR ${t}."deliveryClaimedAt" < ${utcTs(reclamoVencidoAntesDe(ahora))})`
 }
 
-/** El 4.º intento cuyo reclamo venció: el proceso murió a media entrega y nadie sabe si el mensaje salió. */
+/** El 4.º intento cuyo reclamo venció: el proceso murió a media entrega y nadie sabe si el mensaje salió. Igual que el reclamo, C3. */
 function atorada(t: Prisma.Sql, ahora: Date): Prisma.Sql {
   return Prisma.sql`${t}."deliveryStatus" = 'PENDING' AND ${t}."status" = 'ACTIVE' AND ${t}."deliveryChannel" IN ('WHATSAPP', 'EMAIL')
+    AND ${deEntregaAutomatica(t)}
     AND ${t}."deliveryAttempts" >= ${MAX_INTENTOS_DE_ENTREGA}
     AND (${t}."deliveryClaimedAt" IS NULL OR ${t}."deliveryClaimedAt" < ${utcTs(reclamoVencidoAntesDe(ahora))})`
 }
