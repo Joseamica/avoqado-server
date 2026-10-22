@@ -19,6 +19,7 @@ import logger from '@/config/logger'
 import { BadRequestError } from '@/errors/AppError'
 import { generateOtpCode, hashOtpCode } from '@/lib/otp'
 import { phoneLast10 } from '@/utils/phone'
+import { utcTs } from '@/utils/sqlDates'
 import { sendOtpWhatsApp } from '@/services/whatsapp.service'
 import { assertGiftCardKeys } from './giftCardCode'
 import { enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
@@ -48,7 +49,12 @@ const codigoInvalido = () => new GiftCardError('GIFT_CARD_PHONE_CODE_INVALID', '
 /**
  * S-3: las tarjetas del venue mandadas por WhatsApp a ese teléfono, `ACTIVE` o `BLOCKED` (una entrega `FAILED` no cambia nada,
  * E16). Filtro en SQL por los últimos 10 dígitos (molde `customerPhoneLookup.ts`) y, en memoria, la forma canónica (también lee
- * filas de la 1a guardadas como se escribieron). A lo más 50, las más nuevas primero; `hayMas` con la 51.ª.
+ * filas de la 1a guardadas como se escribieron). A lo más 50: primero las que se pueden usar hoy y, dentro de cada grupo, las más
+ * nuevas; `hayMas` con la 51.ª.
+ *
+ * C1 (Codex r1-1): las usables van PRIMERO en el SQL, antes del corte. Con «las más nuevas» a secas, 51 agotadas posteriores
+ * dejaban fuera a una vieja con saldo y `phone/request` no mandaba el código. «Usable» en SQL es lo mismo que `porQueNoSirve`
+ * devuelve `null`: `ACTIVE`, sin vencer (`expiresAt` > ahora, la fecha con `utcTs`) y con saldo > 0.
  */
 export async function tarjetasDelTelefono(
   venueId: string,
@@ -77,7 +83,8 @@ export async function tarjetasDelTelefono(
       AND "status" IN ('ACTIVE', 'BLOCKED')
       AND "recipientPhone" IS NOT NULL
       AND right(regexp_replace("recipientPhone", '[^0-9]', '', 'g'), 10) = ${last10}
-    ORDER BY "createdAt" DESC, "id" DESC
+    ORDER BY ("status" = 'ACTIVE' AND ("expiresAt" IS NULL OR "expiresAt" > ${utcTs(ahora)}) AND "balance" > 0) DESC,
+      "createdAt" DESC, "id" DESC
     LIMIT ${Prisma.raw(String(MAX_TARJETAS + 1))}
   `
   const hayMas = filas.length > MAX_TARJETAS
@@ -158,6 +165,28 @@ export async function pedirCodigoDeTelefono(
 }
 
 /**
+ * C2 (Codex r1-2): devuelve el intento que apartó un código BUENO cuando lo que sigue falla. CAS: sólo si el reto sigue sin
+ * consumir y con intentos (si otro `verify` ya lo consumió, no hay nada que devolver). Si la devolución también falla, el intento
+ * queda gastado, como antes de este arreglo: queda un aviso en el log (sin el código ni el teléfono) y sale el error ORIGINAL.
+ * ponytail: un solo intento, sin reintento de conexión: restar no es idempotente y un reintento tras una escritura que sí llegó
+ * devolvería dos.
+ */
+async function devolverIntento(venueId: string, retoId: string): Promise<void> {
+  try {
+    await prisma.otpChallenge.updateMany({
+      where: { id: retoId, consumedAt: null, attempts: { gt: 0 } },
+      data: { attempts: { decrement: 1 } },
+    })
+  } catch (error) {
+    logger.warn('🎁 [tarjetas de regalo] no se pudo devolver el intento de un código bueno; ese intento queda gastado', {
+      venueId,
+      retoId,
+      error: error instanceof Error ? error.message : String(error),
+    })
+  }
+}
+
+/**
  * `phone/verify`: sin reto, vencido, ya usado, sin intentos o código distinto ⇒ todos el MISMO 409 `GIFT_CARD_PHONE_CODE_INVALID`.
  * Con el código bueno, el reto se consume UNA vez (CAS) y sale la prueba firmada con la lista de tarjetas del teléfono.
  */
@@ -194,13 +223,26 @@ export async function verificarCodigoDeTelefono(
   // m2 (revisión de S5): la lista y la prueba se arman ANTES de consumir el reto. Si algo de eso falla (la base, la firma), el reto
   // sigue sin consumir y el mismo código sirve al reintentar (en `verifyOtp` el consumo va dentro de la transacción de lo que
   // sigue, con el mismo efecto).
-  const ahora = new Date()
-  const { cards, hayMas } = await tarjetasDelTelefono(venueId, destination, ahora)
-  const prueba = firmarPruebaDeTelefono({ venueId, phone: destination, deviceId: p.deviceId, ahora })
-  // Copia del CAS de consumo de `verifyOtp`: de dos verificaciones simultáneas con el código bueno, pasa exactamente una. La que
-  // pierde descarta lo firmado sin dejarlo en ningún lado (ni log ni error) y responde el 409 de siempre.
-  const consumido = await prisma.otpChallenge.updateMany({ where: { id: reto.id, consumedAt: null }, data: { consumedAt: new Date() } })
-  if (consumido.count !== 1) throw codigoInvalido()
+  // C2 (Codex r1-2): y el intento que este código BUENO apartó arriba se devuelve. Sin eso, con el 5.º intento el reto quedaba vivo
+  // pero sin intentos y el MISMO código ya no entraba (409). Un código incorrecto nunca llega aquí: sigue gastando su intento.
+  const armarYConsumir = async () => {
+    const ahora = new Date()
+    const { cards, hayMas } = await tarjetasDelTelefono(venueId, destination, ahora)
+    const prueba = firmarPruebaDeTelefono({ venueId, phone: destination, deviceId: p.deviceId, ahora })
+    // Copia del CAS de consumo de `verifyOtp`: de dos verificaciones simultáneas con el código bueno, pasa exactamente una. La que
+    // pierde descarta lo firmado sin dejarlo en ningún lado (ni log ni error) y responde el 409 de siempre.
+    const consumido = await prisma.otpChallenge.updateMany({ where: { id: reto.id, consumedAt: null }, data: { consumedAt: new Date() } })
+    return { cards, hayMas, prueba, consumido: consumido.count === 1 }
+  }
+  let armado: Awaited<ReturnType<typeof armarYConsumir>>
+  try {
+    armado = await armarYConsumir()
+  } catch (error) {
+    await devolverIntento(venueId, reto.id)
+    throw error
+  }
+  const { cards, hayMas, prueba } = armado
+  if (!armado.consumido) throw codigoInvalido()
   return {
     proofToken: prueba.proofToken,
     expiresAt: prueba.expiresAt.toISOString(),

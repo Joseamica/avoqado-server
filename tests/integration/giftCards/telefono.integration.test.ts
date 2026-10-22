@@ -44,7 +44,13 @@ import { reiniciarSellosParaPruebas } from '@/services/giftCards/giftCardPayKey'
 import { PRUEBA_DE_TELEFONO_MS, firmarPruebaDeTelefono } from '@/services/giftCards/giftCardProof'
 import { lookupGiftCards } from '@/services/giftCards/giftCardLookup.service'
 import { cambiarDestinoDeTarjeta } from '@/services/giftCards/giftCardCuenta.service'
-import { PROPOSITO_TELEFONO_DE_TARJETA, pedirCodigoDeTelefono, verificarCodigoDeTelefono } from '@/services/giftCards/giftCardPhone.service'
+import * as pruebaDelTelefono from '@/services/giftCards/giftCardProof'
+import {
+  PROPOSITO_TELEFONO_DE_TARJETA,
+  pedirCodigoDeTelefono,
+  tarjetasDelTelefono,
+  verificarCodigoDeTelefono,
+} from '@/services/giftCards/giftCardPhone.service'
 import { requestOtp, verifyOtp } from '@/services/public/otpAuth.public.service'
 import { payGiftCardBalanceOnOrder, payGiftCardOnNewOrder } from '@/services/mobile/order.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
@@ -101,10 +107,20 @@ function telefonoNuevo(): string {
 }
 const e164 = (diez: string) => `+52${diez}`
 
-/** Un sobre ACTIVE con su ACTIVATE, mandado por WhatsApp a `phone` (como se escribió, igual que una fila de la 1a). */
+/**
+ * Un sobre ACTIVE con su ACTIVATE, mandado por WhatsApp a `phone` (como se escribió, igual que una fila de la 1a). Cierre A (C1):
+ * `saldo` (lo que le queda; 0 = agotada, que sigue ACTIVE como la deja la libreta), `creadaEn` y `venceEn`.
+ */
 async function tarjeta(
   monto: number,
-  p: { phone?: string; canal?: 'WHATSAPP' | 'PRINTED'; status?: 'ACTIVE' | 'BLOCKED' | 'DEACTIVATED' } = {},
+  p: {
+    phone?: string
+    canal?: 'WHATSAPP' | 'PRINTED'
+    status?: 'ACTIVE' | 'BLOCKED' | 'DEACTIVATED'
+    saldo?: number
+    creadaEn?: Date
+    venceEn?: Date
+  } = {},
 ) {
   const c = generateGiftCardCode()
   const s = await prisma.giftCard.create({
@@ -116,7 +132,9 @@ async function tarjeta(
       codeLast4: c.last4,
       pageToken: generateOpaqueToken(),
       initialAmount: D(monto),
-      balance: D(monto),
+      balance: D(p.saldo ?? monto),
+      ...(p.creadaEn ? { createdAt: p.creadaEn } : {}),
+      ...(p.venceEn ? { expiresAt: p.venceEn } : {}),
       status: p.status ?? 'ACTIVE',
       activatedAt: new Date(),
       termsVersion: '2026-10-14',
@@ -773,6 +791,119 @@ describe('teléfono + código (1b S5) · Postgres real', () => {
       expect((await retosDe(e164(diez)))[0].consumedAt).not.toBeNull()
     },
   )
+
+  it('🔴 C1 (Codex r1-1): 51 agotadas más nuevas y una vieja con saldo, del mismo teléfono ⇒ sale el código y verify la trae usable', async () => {
+    const diez = telefonoNuevo()
+    const base = Date.now()
+    const vieja = await tarjeta(500, { phone: diez, creadaEn: new Date(base - 30 * 86_400_000) })
+    // Agotarlas sólo descuenta el saldo: siguen ACTIVE (giftCardLedger). Todas posteriores a la vieja.
+    for (let i = 0; i < 51; i++) await tarjeta(100, { phone: diez, saldo: 0, creadaEn: new Date(base - (51 - i) * 60_000) })
+
+    await pedirCodigoDeTelefono(venueId, { phone: diez, deviceId: APARATO })
+    expect(mockEnviarCodigo).toHaveBeenCalledTimes(1)
+    expect(mockEnviarCodigo.mock.calls[0][0]).toBe(e164(diez))
+
+    const v = await verificarCodigoDeTelefono(venueId, { phone: diez, code: codigoEnviadoA(e164(diez)), deviceId: APARATO })
+    expect(v.cards).toHaveLength(50)
+    expect(v.hayMas).toBe(true)
+    expect(v.cards[0]).toEqual({
+      giftCardId: vieja.id,
+      last4: expect.any(String),
+      balance: 500,
+      status: 'ACTIVE',
+      expiresAt: null,
+      usable: true,
+      notUsableReason: null,
+    })
+    expect(v.cards.slice(1).every(c => c.usable === false && c.notUsableReason === 'EMPTY')).toBe(true)
+    expect(v.usableBalance).toBe(500)
+
+    // Y la prueba cobra con la vieja.
+    const orderId = await cuentaDeMercancia(200)
+    const r = await cobrar(orderId, llaveNueva('c1'), v.proofToken, vieja.id, 200)
+    expect(r).toMatchObject({ replay: false, redeemed: [{ giftCardId: vieja.id, amount: 200, balanceAfter: 300 }] })
+  })
+
+  it('🔴 C1: «usable» del SQL es el mismo que el de porQueNoSirve (vence justo ahora, 1 ms después, agotada, bloqueada con saldo)', async () => {
+    const diez = telefonoNuevo()
+    const ahora = new Date()
+    const t = ahora.getTime()
+    const dia = 86_400_000
+    // Las usables son las más VIEJAS; las no usables, las más NUEVAS. Si el SQL y `porQueNoSirve` no dijeran lo mismo de alguna,
+    // una no usable quedaría entre las usables (o al revés) y el orden de abajo no saldría.
+    const sinVencer = await tarjeta(300, { phone: diez, creadaEn: new Date(t - 10 * dia) })
+    const venceUnMsDespues = await tarjeta(200, { phone: diez, creadaEn: new Date(t - 9 * dia), venceEn: new Date(t + 1) })
+    const venceJustoAhora = await tarjeta(400, { phone: diez, creadaEn: new Date(t - 4000), venceEn: new Date(t) })
+    const vencidaAyer = await tarjeta(400, { phone: diez, creadaEn: new Date(t - 3000), venceEn: new Date(t - dia) })
+    const agotada = await tarjeta(400, { phone: diez, creadaEn: new Date(t - 2000), saldo: 0 })
+    const bloqueada = await tarjeta(400, { phone: diez, creadaEn: new Date(t - 1000), status: 'BLOCKED' })
+
+    const { cards, hayMas } = await tarjetasDelTelefono(venueId, e164(diez), ahora)
+
+    expect(hayMas).toBe(false)
+    expect(cards.map(c => [c.giftCardId, c.usable, c.notUsableReason])).toEqual([
+      [venceUnMsDespues.id, true, null],
+      [sinVencer.id, true, null],
+      [bloqueada.id, false, 'BLOCKED'],
+      [agotada.id, false, 'EMPTY'],
+      [vencidaAyer.id, false, 'EXPIRED'],
+      [venceJustoAhora.id, false, 'EXPIRED'],
+    ])
+  })
+
+  it.each(['la lista de tarjetas no contesta', 'la firma falla'] as const)(
+    '🔴 C2 (Codex r1-2): 4 códigos malos y el 5.º bueno con %s ⇒ error y el intento vuelve; el MISMO código entrega la prueba',
+    async caso => {
+      const diez = telefonoNuevo()
+      await tarjeta(300, { phone: diez })
+      await pedirCodigoDeTelefono(venueId, { phone: diez, deviceId: APARATO })
+      const codigo = codigoEnviadoA(e164(diez))
+      const verificar = (code: string) => verificarCodigoDeTelefono(venueId, { phone: diez, code, deviceId: APARATO })
+      for (let i = 0; i < 4; i++) await expect(verificar(otroCodigo(codigo))).rejects.toMatchObject(INVALIDO)
+      expect((await retosDe(e164(diez)))[0]).toMatchObject({ attempts: 4, consumedAt: null })
+
+      // El 5.º, con el código bueno, falla DESPUÉS de apartar su intento.
+      const espia =
+        caso === 'la lista de tarjetas no contesta'
+          ? // La única consulta en crudo de `verify` es la lista de tarjetas del teléfono.
+            jest.spyOn(prisma, '$queryRaw').mockRejectedValueOnce(new Error('la base no contestó'))
+          : jest.spyOn(pruebaDelTelefono, 'firmarPruebaDeTelefono').mockImplementationOnce(() => {
+              throw new Error('la firma falló')
+            })
+      try {
+        await expect(verificar(codigo)).rejects.toThrow(caso === 'la firma falla' ? 'la firma falló' : 'la base no contestó')
+      } finally {
+        espia.mockRestore()
+      }
+      // El intento del código bueno volvió: el reto sigue vivo, con 4.
+      expect((await retosDe(e164(diez)))[0]).toMatchObject({ attempts: 4, consumedAt: null })
+
+      const r = await verificar(codigo)
+      expect(r.proofToken).toEqual(expect.any(String))
+      expect(r.cards).toHaveLength(1)
+      expect((await retosDe(e164(diez)))[0]).toMatchObject({ attempts: 5, consumedAt: expect.any(Date) })
+    },
+  )
+
+  it('🔴 C2: la devolución es SÓLO del intento del código bueno: un código malo después sigue gastando el suyo', async () => {
+    const diez = telefonoNuevo()
+    await tarjeta(300, { phone: diez })
+    await pedirCodigoDeTelefono(venueId, { phone: diez, deviceId: APARATO })
+    const codigo = codigoEnviadoA(e164(diez))
+    const verificar = (code: string) => verificarCodigoDeTelefono(venueId, { phone: diez, code, deviceId: APARATO })
+    for (let i = 0; i < 4; i++) await expect(verificar(otroCodigo(codigo))).rejects.toMatchObject(INVALIDO)
+    const espia = jest.spyOn(prisma, '$queryRaw').mockRejectedValueOnce(new Error('la base no contestó'))
+    try {
+      await expect(verificar(codigo)).rejects.toThrow('la base no contestó')
+    } finally {
+      espia.mockRestore()
+    }
+    // El 5.º código MALO gasta el último intento: ya son 5 comparados mal, y ni el bueno entra.
+    await expect(verificar(otroCodigo(codigo))).rejects.toMatchObject(INVALIDO)
+    expect((await retosDe(e164(diez)))[0]).toMatchObject({ attempts: 5, consumedAt: null })
+    await expect(verificar(codigo)).rejects.toMatchObject(INVALIDO)
+    expect((await retosDe(e164(diez)))[0]).toMatchObject({ attempts: 5, consumedAt: null })
+  })
 })
 
 /**
