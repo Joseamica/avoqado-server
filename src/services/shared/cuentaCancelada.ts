@@ -167,6 +167,17 @@ export async function salirSiLaLlaveYaTienePago(
 const ROLES_QUE_RECIBEN_EL_AVISO: StaffRole[] = [StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]
 /** Tope del reparto del aviso (regla de consultas acotadas): un negocio real tiene unos cuantos gerentes, no cientos. */
 const MAX_GERENTES_AVISADOS = 50
+/**
+ * Lo que `conciliarPedidoEnLinea` LEE de la cuenta al reabrirla. Va fuera de la llamada a propósito: la guarda de escritores del
+ * contrato de precio (`orderContratoDePrecioWriters.test.ts`) busca `contratoDePrecio:` dentro de cada `order.update`, y aquí sólo
+ * se lee; el `data` de esa escritura nunca lo toca.
+ */
+const LO_QUE_LEE_LA_CONCILIACION = {
+  orderNumber: true,
+  contratoDePrecio: true,
+  taxAmount: true,
+  onlineOrder: { select: { id: true, status: true } },
+} satisfies Prisma.OrderSelect
 
 /**
  * Dinero YA capturado sobre una cancelada ⇒ la saca de CANCELADA según `estadoParaCobrar`, bajo el candado de la orden de quien
@@ -196,7 +207,7 @@ export async function reabrirSiRecibeDinero(
   const reabierta = await tx.order.update({
     where: { id: a.orderId, venueId: a.venueId },
     data: { status: estado },
-    select: { orderNumber: true, contratoDePrecio: true, taxAmount: true, onlineOrder: { select: { id: true, status: true } } },
+    select: LO_QUE_LEE_LA_CONCILIACION,
   })
   const datos = {
     estadoAnterior: a.status,
