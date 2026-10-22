@@ -47,7 +47,12 @@ jest.mock('../../../../src/config/logger', () => ({
 }))
 
 // Import after mocks
+// El freno de «llave de AngelPay en otro negocio» tiene sus propias pruebas; aquí sólo se comprueba que se llame.
+jest.mock('@/lib/providerDeviceCompatibility', () => ({ assertAngelPayLoginsInVenue: jest.fn() }))
+
 import { bulkCreateVenues } from '../../../../src/services/superadmin/bulkVenueCreation.service'
+import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
+import { ConflictError } from '../../../../src/errors/AppError'
 
 // ── Helpers ──────────────────────────────────────────────────────────
 
@@ -352,6 +357,20 @@ describe('bulkCreateVenues', () => {
       expect(result.venues[0].paymentConfigured).toBe(true)
       expect(result.venues[1].paymentConfigured).toBe(true)
       expect(mockPrisma.venuePaymentConfig.create).toHaveBeenCalledTimes(2)
+    })
+
+    it('no crea la cuenta del negocio si la llave de AngelPay del comercio es de otro negocio', async () => {
+      setupDefaults()
+      mockPrisma.merchantAccount.findMany.mockResolvedValue([{ id: 'merchant-1', active: true }])
+      ;(assertAngelPayLoginsInVenue as jest.Mock).mockRejectedValueOnce(
+        new ConflictError('La llave de AngelPay de «IQ T» es de otro negocio'),
+      )
+
+      await expect(
+        bulkCreateVenues({ organizationId: 'org-1', defaultMerchantAccountId: 'merchant-1', venues: [{ name: 'Venue A' }] }),
+      ).rejects.toThrow(/llave de AngelPay/)
+      expect(assertAngelPayLoginsInVenue).toHaveBeenCalledWith(expect.any(String), ['merchant-1'], mockPrisma)
+      expect(mockPrisma.venuePaymentConfig.create).not.toHaveBeenCalled()
     })
 
     it('should use per-venue merchantAccountId over default', async () => {

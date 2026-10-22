@@ -16,6 +16,8 @@ import { logAction } from '../../services/dashboard/activity-log.service'
 import prisma from '../../utils/prismaClient'
 import { StaffRole } from '@prisma/client'
 import { canAssignRole, ROLE_HIERARCHY } from '../../lib/permissions'
+import { validateRequest } from '../../middlewares/validation'
+import { updateOrgTpvDefaultsSchema } from '../../schemas/dashboard/tpv.schema'
 import { revisarCambioDeSucursales } from '../../services/organization-dashboard/reglasDeSucursalesDeUnaPersona'
 
 const router = Router({ mergeParams: true })
@@ -239,16 +241,22 @@ router.get('/org-tpv-defaults', orgOwnerAccess, async (req: Request, res: Respon
  * de la org sin fila de dueño en alguna tienda); sólo en este PUT.
  */
 const orgTpvDefaultsWriteAccess = [authenticateTokenMiddleware, soloElDuenoDeLaOrgCambia('ORG_TPV_DEFAULTS')]
-router.put('/org-tpv-defaults', orgTpvDefaultsWriteAccess, async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { orgId } = req.params
-    const { settings } = req.body
-    const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings, (req as any).authContext?.userId)
-    res.json({ success: true, data: result })
-  } catch (error) {
-    next(error)
-  }
-})
+// F0-B (ronda final, I1): el tope de 6 propinas del POS, DESPUÉS del acceso — esto se reparte a todas las terminales.
+router.put(
+  '/org-tpv-defaults',
+  orgTpvDefaultsWriteAccess,
+  validateRequest(updateOrgTpvDefaultsSchema),
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      const { orgId } = req.params
+      const { settings } = req.body
+      const result = await organizationDashboardService.upsertOrgTpvDefaults(orgId, settings, (req as any).authContext?.userId)
+      res.json({ success: true, data: result })
+    } catch (error) {
+      next(error)
+    }
+  },
+)
 
 /**
  * GET /dashboard/organizations/:orgId/org-tpv-defaults/stats

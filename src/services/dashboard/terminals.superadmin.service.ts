@@ -8,10 +8,15 @@ import { generateActivationCode as generateActivationCodeUtil } from './terminal
 import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
-import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
+import {
+  assertAngelPayLoginsInVenue,
+  assertMerchantsTerminalCompatible,
+  isProviderCompatibleWithBrand,
+} from '../../lib/providerDeviceCompatibility'
 import { logAction } from './activity-log.service'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
 import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
+import { borrarDisenoAlCambiarDeNegocio, invalidateCustomerDisplayCache } from '@/services/customer-display/customerDisplayVenueChange'
 
 /**
  * Audit actor — who triggered a terminal mutation. Threaded from the controller
@@ -290,6 +295,7 @@ export async function createTerminal(data: {
     if (merchantCount !== data.assignedMerchantIds.length) {
       throw new BadRequestError('One or more merchant accounts not found')
     }
+    await assertAngelPayLoginsInVenue(data.venueId, data.assignedMerchantIds)
 
     // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2).
     // For a fresh terminal we don't have an id yet, so we inline the check
@@ -636,7 +642,7 @@ export async function updateTerminal(
     // Rejects e.g. ANGELPAY merchants → PAX terminals, BLUMON merchants → NEXGO.
     // Permissive on unconstrained providers (STRIPE/MENTA) and null brand
     // (PENDING_ACTIVATION terminals).
-    await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds)
+    await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, undefined, data.venueId)
   }
 
   if (venueChanged) {
@@ -654,6 +660,15 @@ export async function updateTerminal(
         prisma.$transaction(async tx => {
           // A deferred move can have empty update data; Prisma then only reads, so lock explicitly.
           if (deferMove) await tx.$queryRaw`SELECT id FROM "Terminal" WHERE id = ${terminalId} FOR UPDATE`
+          // Pantalla del cliente (§4.3): la terminal cambia de negocio AQUÍ (en el protocolo 2 la muda después el permiso de
+          // ejecución), así que su diseño y su acuse se borran en esta misma transacción, antes de escribir `venueId`.
+          if (!deferMove)
+            await borrarDisenoAlCambiarDeNegocio(tx, {
+              terminalId,
+              toVenueId: data.venueId!,
+              reason: 'terminal_moved',
+              staffId: actor?.staffId ?? null,
+            })
           // Conditional write rejects concurrent moves and retains the caller's tenant scope.
           const updated = await tx.terminal.update({
             where: { ...scopedTerminalWhere(terminalId, scope), venueId: fromVenueId },
@@ -675,7 +690,7 @@ export async function updateTerminal(
               select: { id: true },
             })
             if (active.length !== data.assignedMerchantIds.length) throw new BadRequestError('Los merchants deben existir y estar activos.')
-            await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, tx)
+            await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, tx, data.venueId!)
           }
           const pending = await tx.tpvCommandQueue.findFirst({
             where: {
@@ -721,6 +736,8 @@ export async function updateTerminal(
         }),
       'La terminal cambió de venue. Actualiza y vuelve a validar.',
     )
+    // Después del commit: antes, un cálculo concurrente de la ficha podría leer el diseño todavía sin borrar.
+    if (!deferMove) invalidateCustomerDisplayCache(terminalId)
     await logAction({
       staffId: actor?.staffId ?? null,
       venueId: moved.venueId,

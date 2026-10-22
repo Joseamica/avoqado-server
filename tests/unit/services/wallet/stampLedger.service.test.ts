@@ -162,7 +162,10 @@ describe('grantStamp', () => {
 
   it('🔴 al completarse nace el premio Y arranca la cartilla siguiente', async () => {
     mockConfig({ stampsRequired: 7, stampRewardLabel: 'Un café gratis', stampRewardType: 'FREE_PRODUCT' })
-    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc7', cycle: 1, stampsRequired: 7, stampsEarned: 6 } as any)
+    prismaMock.stampCard.findFirst
+      .mockResolvedValueOnce({ id: 'sc7', cycle: 1, stampsRequired: 7, stampsEarned: 6 } as any) // la abierta
+      .mockResolvedValueOnce(null) // no hay otra abierta
+      .mockResolvedValueOnce({ cycle: 1 } as any) // la última que existe
     prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 7, stampsRequired: 7 } as any)
     prismaMock.stampReward.create.mockResolvedValue({ id: 'rw1' } as any)
 
@@ -192,10 +195,98 @@ describe('grantStamp', () => {
     )
   })
 
+  // D1 (21-oct, Codex r2 de la tarjeta de sellos): una devolución reabre la cartilla llena y CANCELA su premio, pero la fila del
+  // premio se queda (`StampReward.stampCardId @unique`). Crear otro al volver a llenarla chocaba: la compra perdía su sello y
+  // todos sus reintentos también. Se reactiva el MISMO premio, como `refundStampRewardForOrderDiscount` al devolver un canje.
+  it('🔴 cartilla reabierta por una devolución: al volver a llenarse REACTIVA su premio cancelado (no crea otro que choque)', async () => {
+    mockConfig({ stampRewardLabel: '10 % de descuento', stampRewardType: 'PERCENTAGE' })
+    prismaMock.stampCard.findFirst
+      .mockResolvedValueOnce({ id: 'sc7', cycle: 1, stampsRequired: 7, stampsEarned: 6 } as any) // la abierta (reabierta)
+      .mockResolvedValueOnce(null) // no hay otra abierta
+      .mockResolvedValueOnce({ cycle: 1 } as any) // la última que existe
+    prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 7, stampsRequired: 7 } as any)
+    prismaMock.stampReward.findUnique.mockResolvedValue({ id: 'rw-viejo', status: 'CANCELLED' } as any)
+    prismaMock.stampReward.create.mockRejectedValue(
+      new Prisma.PrismaClientKnownRequestError('Unique constraint failed on the fields: (`stampCardId`)', {
+        code: 'P2002',
+        clientVersion: 'x',
+        meta: { target: ['stampCardId'] },
+      }),
+    )
+    prismaMock.stampReward.update.mockResolvedValue({ id: 'rw-viejo' } as any)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r).toMatchObject({ granted: true, completed: true, rewardId: 'rw-viejo' })
+    expect(prismaMock.stampReward.create).not.toHaveBeenCalled()
+    // Vuelve a estar por cobrar, con las condiciones de HOY (se ganó hoy) y sin rastro de un canje.
+    expect(prismaMock.stampReward.update).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { id: 'rw-viejo' },
+        data: expect.objectContaining({
+          status: 'PENDING',
+          rewardType: 'PERCENTAGE',
+          rewardLabel: '10 % de descuento',
+          redeemedAt: null,
+          orderDiscountId: null,
+        }),
+      }),
+    )
+    // Y la cartilla siguiente arranca igual que siempre.
+    expect(prismaMock.stampCard.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cycle: 2 }) }))
+  })
+
+  it('🔴 D1 (Codex r1 #1): una cartilla VIEJA reabierta se llena otra vez cuando ya hay otras después: la siguiente se numera desde la última', async () => {
+    mockConfig()
+    prismaMock.stampCard.findFirst
+      .mockResolvedValueOnce({ id: 'sc1', cycle: 1, stampsRequired: 7, stampsEarned: 6 } as any) // la cartilla abierta (la 1, reabierta)
+      .mockResolvedValueOnce(null) // no hay otra abierta
+      .mockResolvedValueOnce({ cycle: 2 } as any) // la última que existe: la 2, llena con su premio pendiente
+    prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 7, stampsRequired: 7 } as any)
+    prismaMock.stampReward.findUnique.mockResolvedValue({ id: 'rw1', status: 'CANCELLED' } as any)
+    prismaMock.stampReward.update.mockResolvedValue({ id: 'rw1' } as any)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r).toMatchObject({ granted: true, completed: true })
+    expect(prismaMock.stampCard.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ cycle: 3 }) }))
+  })
+
+  it('🔴 D2: con dos cartillas abiertas (una reabierta por devolución) el sello va a la MÁS VIEJA', async () => {
+    mockConfig()
+    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc1', cycle: 1, stampsRequired: 7, stampsEarned: 3 } as any)
+    prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 4, stampsRequired: 7 } as any)
+
+    await grantStamp('v1', 'c1', 'o1')
+
+    expect((prismaMock.stampCard.findFirst as jest.Mock).mock.calls[0][0]).toMatchObject({
+      where: { venueId: 'v1', customerId: 'c1', completedAt: null },
+      orderBy: { cycle: 'asc' },
+    })
+  })
+
+  it('🔴 D2: al llenar una cartilla reabierta, si YA hay otra abierta no se crea una tercera', async () => {
+    mockConfig()
+    prismaMock.stampCard.findFirst
+      .mockResolvedValueOnce({ id: 'sc1', cycle: 1, stampsRequired: 7, stampsEarned: 6 } as any) // la reabierta
+      .mockResolvedValueOnce({ id: 'sc2' } as any) // ya hay otra abierta: la que quedó cuando se reabrió la 1
+    prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 7, stampsRequired: 7 } as any)
+    prismaMock.stampReward.findUnique.mockResolvedValue({ id: 'rw1', status: 'CANCELLED' } as any)
+    prismaMock.stampReward.update.mockResolvedValue({ id: 'rw1' } as any)
+
+    const r = await grantStamp('v1', 'c1', 'o1')
+
+    expect(r).toMatchObject({ granted: true, completed: true })
+    expect(prismaMock.stampCard.create).not.toHaveBeenCalled()
+  })
+
   it('la cartilla siguiente nace con la regla NUEVA, no con la vieja', async () => {
     // Al revés que la congelada: el ciclo que empieza usa la config de hoy.
     mockConfig({ stampsRequired: 10 })
-    prismaMock.stampCard.findFirst.mockResolvedValue({ id: 'sc7', cycle: 4, stampsRequired: 7, stampsEarned: 6 } as any)
+    prismaMock.stampCard.findFirst
+      .mockResolvedValueOnce({ id: 'sc7', cycle: 4, stampsRequired: 7, stampsEarned: 6 } as any)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ cycle: 4 } as any)
     prismaMock.stampCard.update.mockResolvedValue({ stampsEarned: 7, stampsRequired: 7 } as any)
     prismaMock.stampReward.create.mockResolvedValue({ id: 'rw1' } as any)
 

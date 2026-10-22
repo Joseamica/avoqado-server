@@ -1,5 +1,6 @@
 import { StaffRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import * as permisos from '@/lib/permissions'
 import {
   createPermissionOverride,
   consumePermissionOverride,
@@ -263,33 +264,66 @@ describe('createPermissionOverride', () => {
     })
 
     /**
-     * 🔴 Codex (B3b, código r2, N1): aplicar exclusiones re-resuelve dependencias. Excluir `scale:use` abre el comodín
-     * `scale:*` del ADMIN, `scale:configure` sobrevive y su dependencia AGREGA `tpv-settings:read`/`update`, que ese
-     * ADMIN no tenía. Sin exclusiones el PIN se rechazaba; con la exclusión a secas se emitía el token. Quitar un
-     * permiso nunca puede habilitar otro: el PIN exige las DOS lecturas (sin y con exclusiones).
+     * 🔴 Codex (B3b, código r2, N1): aplicar exclusiones re-resuelve dependencias, así que la lectura CON exclusiones
+     * podía conceder algo que la lectura SIN ellas negaba. El caso real: excluir `scale:use` abría el comodín `scale:*`
+     * del ADMIN y la dependencia de `scale:configure` le AGREGABA `tpv-settings:*`, que entonces no tenía.
+     *
+     * Ese camino ya no existe en el catálogo: desde el 15-oct el ADMIN trae `tpv-settings` de fábrica (decisión del
+     * founder), y `tests/unit/lib/permissions.tpvSettingsAdmin.test.ts` cuida que ninguna exclusión vuelva a habilitar
+     * nada en ningún rol. Pero el PIN sigue exigiendo las DOS lecturas (sin y con exclusiones), y esa defensa se prueba
+     * aquí simulando que divergen: si un cambio futuro del catálogo reabre un camino así, el PIN no lo convierte en token.
      */
-    it.each(['tpv-settings:read', 'tpv-settings:update'])(
-      '🔴 excluir scale:use NO le habilita al ADMIN un token de %s que sin exclusiones no tenía',
-      async permiso => {
+    describe('el PIN exige las dos lecturas (sin y con exclusiones)', () => {
+      afterEach(() => jest.restoreAllMocks())
+
+      it('🔴 si sólo la lectura CON exclusiones concede, NO se emite token', async () => {
         ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
         ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+        const leeConExclusiones = jest
+          .spyOn(permisos, 'hasPermission')
+          .mockImplementation((_rol, _custom, _permiso, excluidos) => Boolean(excluidos && excluidos.length > 0))
 
-        await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: permiso, now: NOW })).rejects.toBeInstanceOf(
-          OverrideInsufficientError,
-        )
+        await expect(
+          createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW }),
+        ).rejects.toBeInstanceOf(OverrideInsufficientError)
+        expect(leeConExclusiones).toHaveBeenCalledWith(StaffRole.ADMIN, [], 'cfdi:configure')
         expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
-      },
-    )
+      })
+
+      it('🔴 si sólo la lectura SIN exclusiones concede, tampoco', async () => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+        jest.spyOn(permisos, 'hasPermission').mockImplementation((_rol, _custom, _permiso, excluidos) => !excluidos)
+
+        await expect(
+          createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW }),
+        ).rejects.toBeInstanceOf(OverrideInsufficientError)
+        expect(prisma.permissionOverride.create).not.toHaveBeenCalled()
+      })
+
+      it('control: si las dos conceden, se emite', async () => {
+        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: ['scale:use'] })
+        jest.spyOn(permisos, 'hasPermission').mockReturnValue(true)
+
+        const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: 'cfdi:configure', now: NOW })
+        expect(result.authorizedBy.id).toBe('sv_admin')
+      })
+    })
 
     it.each(['tpv-settings:read', 'tpv-settings:update'])(
-      'control: el mismo ADMIN SIN exclusiones tampoco emite %s (el rechazo de arriba es el de siempre)',
+      'el ADMIN ya trae %s de fábrica (15-oct): su PIN lo autoriza, con o sin la exclusión de scale:use',
       async permiso => {
-        ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
-        ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions: [] })
+        for (const deniedPermissions of [[], ['scale:use']]) {
+          jest.clearAllMocks()
+          ;(prisma.staffVenue.findFirst as jest.Mock).mockResolvedValue(adminStaffVenue)
+          ;(prisma.venueRolePermission.findUnique as jest.Mock).mockResolvedValue({ permissions: [], deniedPermissions })
+          ;(prisma.venueSettings.findUnique as jest.Mock).mockResolvedValue({ managerPinOverrideEnabled: true })
+          ;(prisma.permissionOverride.create as jest.Mock).mockImplementation(async ({ data }: any) => data)
 
-        await expect(createPermissionOverride({ venueId: VENUE, pin: '4321', permission: permiso, now: NOW })).rejects.toBeInstanceOf(
-          OverrideInsufficientError,
-        )
+          const result = await createPermissionOverride({ venueId: VENUE, pin: '4321', permission: permiso, now: NOW })
+          expect(result.authorizedBy.id).toBe('sv_admin')
+        }
       },
     )
   })

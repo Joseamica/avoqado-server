@@ -1,3 +1,4 @@
+import cuid from 'cuid'
 import { Prisma, StampRewardStatus, StampRewardType, type StampReward } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -163,9 +164,18 @@ export async function canjearPremioEnTx(
   // cuenta (otro candado de orden): lo único que separa un café regalado de dos es que
   // este UPDATE exija el estado anterior. Si no encuentra la fila en PENDING, alguien
   // más ganó la carrera y aquí no se crea ningún descuento.
+  // Y exige la MISMA versión que se leyó (D1, Codex r1 #2): una devolución puede cancelar este premio y una compra
+  // reactivarlo con las condiciones de hoy mientras este canje calculaba el descuento con las de antes.
+  // 🔴 D4 (21-oct): quemar y dejar el rastro al descuento en UNA sola escritura. Antes eran dos, y Postgres vuelve a comprobar
+  // las llaves foráneas de una fila que la misma transacción ya actualizó: la segunda pedía el cliente y cerraba un círculo
+  // con la liquidación de varias cuentas y las métricas del cobro (Codex D3-r5 #2). El id del descuento se genera aquí
+  // (cuid v1, como `@default(cuid())`) y el descuento nace abajo sólo si el premio sí se quemó.
+  // Tarjetas 1b (Cierre B): esta función también corre DENTRO de la transacción de `pay-new-order`; la fila del premio se sigue
+  // escribiendo UNA sola vez en toda esa transacción (nada más la toca después).
+  const descuentoId = cuid()
   const quemado = await tx.stampReward.updateMany({
-    where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING },
-    data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date() },
+    where: { id: rewardId, venueId, customerId, status: StampRewardStatus.PENDING, updatedAt: reward.updatedAt },
+    data: { status: StampRewardStatus.REDEEMED, redeemedAt: new Date(), orderDiscountId: descuentoId },
   })
   if (quemado.count === 0) {
     throw new BadRequestError('Este premio ya fue canjeado.')
@@ -173,8 +183,9 @@ export async function canjearPremioEnTx(
 
   // Codex r1 P1: lo que la cabecera trae fuera de toda fila (orden anterior a B2…) queda en su fila antes de crear ésta.
   await conservarDescuentoHistorico(tx, order.id, order.discountAmount)
-  const descuento = await tx.orderDiscount.create({
+  await tx.orderDiscount.create({
     data: {
+      id: descuentoId,
       orderId: order.id,
       type: 'FIXED_AMOUNT',
       name: reward.rewardLabel,
@@ -190,10 +201,6 @@ export async function canjearPremioEnTx(
       ),
     },
   })
-
-  // Deja el rastro de vuelta: es lo que permitirá devolver el premio si alguien
-  // quita ese descuento de la cuenta.
-  await tx.stampReward.update({ where: { id: rewardId }, data: { orderDiscountId: descuento.id } })
 
   // 🔴 Crear la fila del descuento NO baja la cuenta: `total` y `discountAmount` de
   // la orden son campos calculados. Sin este recálculo el premio queda quemado y el
@@ -279,9 +286,23 @@ export async function refundStampRewardForOrderDiscount(
 ): Promise<{ rewardId: string; customerId: string; rewardLabel: string } | null> {
   const reward = await tx.stampReward.findFirst({
     where: { orderDiscountId: row.id, venueId },
-    select: { id: true, customerId: true, rewardLabel: true },
+    select: { id: true, customerId: true, rewardLabel: true, stampCardId: true },
   })
   if (!reward) return null
+
+  // 🔴 D3 (21-oct, «A, como Square»): mientras estuvo canjeado, una devolución pudo quitarle un sello a su cartilla (lo
+  // cobrado no se quita). Si ya no está llena, el premio NO vuelve a estar por cobrar sin sus sellos: se cancela y la
+  // cartilla se reabre; al volver a llenarla, el mismo premio se reactiva (D1).
+  // Y se decide con la FILA del PREMIO bloqueada (Codex D3-r2 #1, r3 y r4): la devolución toma esa misma fila antes de
+  // restarle el sello a una cartilla llena y vuelve a mirar el premio, así que las dos van en fila. Sin esto, una devolución
+  // simultánea restaba el sello entre esta lectura y esta escritura y el premio quedaba por cobrar sin respaldo. Ni el
+  // candado del cliente ni la fila de la cartilla: con la fila de la cuenta en la mano, los dos cerraban un círculo.
+  await tx.$queryRaw`SELECT id FROM "StampReward" WHERE id = ${reward.id} FOR UPDATE`
+  const cartilla = await tx.stampCard.findUnique({
+    where: { id: reward.stampCardId },
+    select: { id: true, stampsEarned: true, stampsRequired: true },
+  })
+  const respaldado = !!cartilla && cartilla.stampsEarned >= cartilla.stampsRequired
 
   // 🔴 Los tres campos JUNTOS. Dejar `redeemedAt` o el vínculo al descuento haría que
   // el premio se vea disponible pero arrastrando el rastro de un canje que ya no
@@ -289,8 +310,11 @@ export async function refundStampRewardForOrderDiscount(
   // canjearlo otra vez sobre una cuenta distinta.
   await tx.stampReward.update({
     where: { id: reward.id },
-    data: { status: StampRewardStatus.PENDING, redeemedAt: null, orderDiscountId: null },
+    data: { status: respaldado ? StampRewardStatus.PENDING : StampRewardStatus.CANCELLED, redeemedAt: null, orderDiscountId: null },
   })
+  if (!respaldado && cartilla) {
+    await tx.stampCard.update({ where: { id: cartilla.id }, data: { completedAt: null } })
+  }
 
   return { rewardId: reward.id, customerId: reward.customerId, rewardLabel: reward.rewardLabel }
 }

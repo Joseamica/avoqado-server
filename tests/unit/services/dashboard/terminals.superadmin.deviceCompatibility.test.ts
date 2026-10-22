@@ -67,7 +67,7 @@ describe('updateTerminal — device compatibility guard (Task 11)', () => {
 
     await expect(updateTerminal('term-pax', { assignedMerchantIds: ['ma-angelpay'] })).rejects.toThrow(IncompatibleDeviceError)
 
-    expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-angelpay'])
+    expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-angelpay'], undefined, undefined)
     expect(mockedPrisma.terminal.update).not.toHaveBeenCalled()
   })
 
@@ -76,7 +76,7 @@ describe('updateTerminal — device compatibility guard (Task 11)', () => {
 
     await updateTerminal('term-nexgo', { assignedMerchantIds: ['ma-angelpay'] })
 
-    expect(mockedAssert).toHaveBeenCalledWith('term-nexgo', ['ma-angelpay'])
+    expect(mockedAssert).toHaveBeenCalledWith('term-nexgo', ['ma-angelpay'], undefined, undefined)
     expect(mockedPrisma.terminal.update).toHaveBeenCalledTimes(1)
     expect(mockedPrisma.terminal.update.mock.calls[0][0].data.assignedMerchantIds).toEqual(['ma-angelpay'])
   })
@@ -86,7 +86,7 @@ describe('updateTerminal — device compatibility guard (Task 11)', () => {
 
     await updateTerminal('term-pax', { assignedMerchantIds: ['ma-blumon'] })
 
-    expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-blumon'])
+    expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-blumon'], undefined, undefined)
     expect(mockedPrisma.terminal.update).toHaveBeenCalledTimes(1)
   })
 
@@ -96,7 +96,7 @@ describe('updateTerminal — device compatibility guard (Task 11)', () => {
 
     await updateTerminal('term-pax', { assignedMerchantIds: ['ma-stripe'] })
 
-    expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-stripe'])
+    expect(mockedAssert).toHaveBeenCalledWith('term-pax', ['ma-stripe'], undefined, undefined)
     expect(mockedPrisma.terminal.update).toHaveBeenCalledTimes(1)
   })
 
@@ -105,7 +105,7 @@ describe('updateTerminal — device compatibility guard (Task 11)', () => {
 
     await updateTerminal('term-pending', { assignedMerchantIds: ['ma-angelpay', 'ma-blumon'] })
 
-    expect(mockedAssert).toHaveBeenCalledWith('term-pending', ['ma-angelpay', 'ma-blumon'])
+    expect(mockedAssert).toHaveBeenCalledWith('term-pending', ['ma-angelpay', 'ma-blumon'], undefined, undefined)
     expect(mockedPrisma.terminal.update).toHaveBeenCalledTimes(1)
   })
 })

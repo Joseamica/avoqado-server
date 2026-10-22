@@ -149,13 +149,16 @@ beforeEach(() => {
     Promise.resolve(where?.organizationId === ORG ? [{ id: VENUE_A }] : [])) as any)
   prismaMock.venue.findUnique.mockImplementation((({ where }: any) =>
     Promise.resolve({ id: where?.id, organizationId: where?.id === VENUE_DE_B ? 'org-b' : ORG })) as any)
+  // Estos comercios son Blumon: nunca salen en la consulta de «llave de AngelPay en otro negocio».
   prismaMock.merchantAccount.findMany.mockImplementation((({ where }: any) =>
     Promise.resolve(
-      COMERCIOS.filter(c => cumple(c, where) && (where?.active === undefined || where.active === true)).map(c => ({
-        id: c.id,
-        displayName: c.displayName,
-        provider: { code: 'BLUMON' },
-      })),
+      where?.angelpayUserAccount
+        ? []
+        : COMERCIOS.filter(c => cumple(c, where) && (where?.active === undefined || where.active === true)).map(c => ({
+            id: c.id,
+            displayName: c.displayName,
+            provider: { code: 'BLUMON' },
+          })),
     )) as any)
   prismaMock.merchantAccount.count.mockImplementation((({ where }: any) =>
     Promise.resolve(COMERCIOS.filter(c => cumple(c, where)).length)) as any)

@@ -106,3 +106,90 @@ describe('isWithinVenueSchedule — vigencia en la zona del negocio', () => {
     })
   })
 })
+
+/**
+ * 🔴 F3 de la Task 13 (pantalla del cliente F0-B): `/promotions` con 500 promociones gastaba ~0.5 s de CPU por llamada
+ * porque cada evaluación construía un `Intl.DateTimeFormat` nuevo (8,500 construcciones = 467 ms; reusándolo, 22 ms).
+ * Se cuentan construcciones, no milisegundos: la cuenta no depende de la carga de la máquina.
+ */
+describe('un solo formateador por zona (el horario se evalúa miles de veces por llamada)', () => {
+  // Módulo fresco en cada prueba: el caché vive en el módulo y otra prueba de este archivo ya pudo llenarlo.
+  const moduloFresco = (): typeof import('@/utils/datetime') => {
+    let modulo!: typeof import('@/utils/datetime')
+    jest.isolateModules(() => {
+      modulo = require('@/utils/datetime')
+    })
+    return modulo
+  }
+  const construccionesPara = (espia: jest.SpyInstance, zona: string) =>
+    espia.mock.calls.filter(([, opciones]) => opciones?.timeZone === zona).length
+  const aLas = (hhmm: string, daysOfWeek: number[] = []) => ({ daysOfWeek, timeFrom: hhmm, timeUntil: hhmm })
+
+  afterEach(() => jest.restoreAllMocks())
+
+  it('🔴 1,000 evaluaciones en la misma zona construyen UN formateador, no 1,000', () => {
+    const { isWithinVenueSchedule: evaluar } = moduloFresco()
+    const espia = jest.spyOn(Intl, 'DateTimeFormat')
+    const ventana = { daysOfWeek: [], timeFrom: '18:00', timeUntil: '22:00' }
+    for (let i = 0; i < 1_000; i++) evaluar(ventana, new Date(Date.UTC(2026, 7, 13) + i * 5 * 60_000), MX)
+    expect(espia).toHaveBeenCalledTimes(1)
+  })
+
+  it('cada zona tiene el suyo: alternarlas no mezcla horas (un instante UTC, cuatro horas locales)', () => {
+    const { isWithinVenueSchedule: evaluar } = moduloFresco()
+    const espia = jest.spyOn(Intl, 'DateTimeFormat')
+    const instante = utc('2026-08-13T01:00:00Z') // 19:00 CST · 18:00 PDT · 21:00 CDT de Cuba · 01:00 UTC
+    for (let ronda = 0; ronda < 3; ronda++) {
+      expect(evaluar(aLas('19:00'), instante, MX)).toBe(true)
+      expect(evaluar(aLas('18:00'), instante, 'America/Tijuana')).toBe(true)
+      expect(evaluar(aLas('21:00'), instante, 'America/Havana')).toBe(true)
+      expect(evaluar(aLas('01:00'), instante, 'UTC')).toBe(true)
+    }
+    expect(espia).toHaveBeenCalledTimes(4)
+  })
+
+  it.each([
+    // [zona, instante UTC, hora local, día local (0 = domingo)]
+    ['America/Tijuana', '2026-03-08T09:59:00Z', '01:59', 0], // último minuto en PST
+    ['America/Tijuana', '2026-03-08T10:00:00Z', '03:00', 0], // entra el horario de verano: las 02:xx no existen
+    ['America/Tijuana', '2026-11-01T08:59:00Z', '01:59', 0], // último minuto en PDT
+    ['America/Tijuana', '2026-11-01T09:00:00Z', '01:00', 0], // sale el horario de verano: la 01:xx se repite
+    ['America/Havana', '2026-03-08T04:59:00Z', '23:59', 6], // todavía sábado, en CST
+    ['America/Havana', '2026-03-08T05:00:00Z', '01:00', 0], // CDT: las 00:xx del domingo no existen
+    ['America/Havana', '2026-11-01T04:59:00Z', '00:59', 0],
+    ['America/Havana', '2026-11-01T05:00:00Z', '00:00', 0], // las 00:xx se repiten
+    ['America/Mexico_City', '2026-03-08T10:00:00Z', '04:00', 0], // sin horario de verano desde 2022
+    ['America/Mexico_City', '2026-08-13T06:00:00Z', '00:00', 4], // medianoche: nunca «24:00»
+    ['UTC', '2026-03-08T23:59:00Z', '23:59', 0],
+  ])('%s en %s son las %s del día %i, llamada tras llamada', (zona, iso, hora, dia) => {
+    const { isWithinVenueSchedule: evaluar } = moduloFresco()
+    for (let llamada = 0; llamada < 3; llamada++) {
+      expect(evaluar(aLas(hora, [dia]), utc(iso), zona)).toBe(true)
+      expect(evaluar(aLas(hora, [(dia + 1) % 7]), utc(iso), zona)).toBe(false)
+    }
+  })
+
+  it('una zona inválida NO se guarda: cada llamada la vuelve a intentar y cae a México, igual que antes', () => {
+    const { isWithinVenueSchedule: evaluar } = moduloFresco()
+    const espia = jest.spyOn(Intl, 'DateTimeFormat')
+    for (let llamada = 0; llamada < 5; llamada++) {
+      expect(evaluar(aLas('19:00'), utc('2026-08-13T01:00:00Z'), 'Marte/Olympus')).toBe(true) // 19:00 en México
+    }
+    expect(construccionesPara(espia, 'Marte/Olympus')).toBe(5) // un fallo memorizado daría 1
+    expect(construccionesPara(espia, MX)).toBe(1)
+  })
+
+  it('el caché tiene techo: Intl acepta cualquier combinación de mayúsculas, así que 5,000 variantes no se acumulan', () => {
+    const { isWithinVenueSchedule: evaluar } = moduloFresco()
+    // El bit k de n pone en mayúscula la k-ésima letra: 16 letras ⇒ 65,536 variantes distintas, todas válidas.
+    const variante = (n: number) => {
+      let k = 0
+      return [...'america/mexico_city'].map(c => (/[a-z]/.test(c) && n & (1 << k++) ? c.toUpperCase() : c)).join('')
+    }
+    const instante = utc('2026-08-13T01:00:00Z')
+    for (let n = 0; n < 5_000; n++) evaluar(aLas('19:00'), instante, variante(n))
+    const espia = jest.spyOn(Intl, 'DateTimeFormat')
+    expect(evaluar(aLas('19:00'), instante, variante(0))).toBe(true)
+    expect(espia).toHaveBeenCalledTimes(1) // la primera variante ya salió del caché
+  })
+})

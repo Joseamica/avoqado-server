@@ -248,9 +248,11 @@ export async function grantStamp(
 
       // La cartilla en curso, o una nueva — también DENTRO del candado. `stampsRequired` se COPIA aquí y queda congelado: si
       // el negocio cambia la regla mañana, quien ya empezó conserva la suya.
+      // 🔴 La abierta MÁS VIEJA (D2): una devolución puede reabrir una cartilla llena cuando ya existe la siguiente; se termina
+      // primero la reabierta. Con una sola abierta (lo normal) es la misma de siempre.
       let card = await tx.stampCard.findFirst({
         where: { venueId, customerId, completedAt: null },
-        orderBy: { cycle: 'desc' },
+        orderBy: { cycle: 'asc' },
       })
       if (!card) {
         const ultima = await tx.stampCard.findFirst({
@@ -296,30 +298,53 @@ export async function grantStamp(
       await tx.stampCard.update({ where: { id: card.id }, data: { completedAt: new Date() } })
 
       // 🔴 El premio CONGELA sus condiciones (quien ya lo ganó recibe lo que se le prometió).
-      const premio = await tx.stampReward.create({
-        data: {
-          stampCardId: card.id,
-          customerId,
-          venueId,
-          status: StampRewardStatus.PENDING,
-          rewardType: config.stampRewardType,
-          rewardValue: config.stampRewardValue as Prisma.Decimal | null,
-          rewardProductId: config.stampRewardProductId,
-          rewardLabel: config.stampRewardLabel,
-        },
+      const condiciones = {
+        status: StampRewardStatus.PENDING,
+        rewardType: config.stampRewardType,
+        rewardValue: config.stampRewardValue as Prisma.Decimal | null,
+        rewardProductId: config.stampRewardProductId,
+        rewardLabel: config.stampRewardLabel,
+      }
+      // 🔴 D1 (21-oct): una devolución reabre la cartilla llena y CANCELA su premio, pero la fila se queda (un premio por
+      // cartilla: `stampCardId @unique`). Crear otro chocaba y la compra perdía su sello en cada reintento. Se REACTIVA el
+      // mismo, se ganó hoy: condiciones y fecha de hoy, sin rastro de canje (como `refundStampRewardForOrderDiscount`).
+      const anterior = await tx.stampReward.findUnique({ where: { stampCardId: card.id }, select: { id: true, status: true } })
+      const premio =
+        anterior?.status === StampRewardStatus.CANCELLED
+          ? await tx.stampReward.update({
+              where: { id: anterior.id },
+              data: { ...condiciones, redeemedAt: null, orderDiscountId: null, expiresAt: null, createdAt: new Date() },
+              select: { id: true },
+            })
+          : await tx.stampReward.create({
+              data: { stampCardId: card.id, customerId, venueId, ...condiciones },
+              select: { id: true },
+            })
+
+      // 🔴 Y la siguiente cartilla arranca AQUÍ, no al canjear el premio (hallazgo C7), con la regla de HOY. Su número sale de la
+      // ÚLTIMA cartilla, no de ésta (D1, Codex r1 #1): una devolución puede reabrir una cartilla vieja cuando ya existen otras
+      // llenas después de ella, y «ésta + 1» chocaría con `[customerId, venueId, cycle]`.
+      // Y si ya hay otra abierta (la que quedó cuando una devolución reabrió ésta, D2), ésa es la siguiente: no se crea otra.
+      const otraAbierta = await tx.stampCard.findFirst({
+        where: { venueId, customerId, completedAt: null, id: { not: card.id } },
         select: { id: true },
       })
-
-      // 🔴 Y la siguiente cartilla arranca AQUÍ, no al canjear el premio (hallazgo C7), con la regla de HOY.
-      await tx.stampCard.create({
-        data: {
-          venueId,
-          customerId,
-          cycle: card.cycle + 1,
-          stampsRequired: config.stampsRequired,
-          stampsEarned: 0,
-        },
-      })
+      if (!otraAbierta) {
+        const ultimaCartilla = await tx.stampCard.findFirst({
+          where: { venueId, customerId },
+          orderBy: { cycle: 'desc' },
+          select: { cycle: true },
+        })
+        await tx.stampCard.create({
+          data: {
+            venueId,
+            customerId,
+            cycle: Math.max(card.cycle, ultimaCartilla?.cycle ?? 0) + 1,
+            stampsRequired: config.stampsRequired,
+            stampsEarned: 0,
+          },
+        })
+      }
 
       return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId: premio.id }
     }, PRESUPUESTO_DEL_SELLO)
@@ -376,9 +401,10 @@ export interface StampCardStatus {
 export async function getStampCardStatus(venueId: string, customerId: string): Promise<StampCardStatus> {
   const [config, card, pendingRewards] = await Promise.all([
     prisma.loyaltyConfig.findUnique({ where: { venueId } }),
+    // La abierta MÁS VIEJA: la misma que llena `grantStamp` (D2). Con una sola abierta es la de siempre.
     prisma.stampCard.findFirst({
       where: { venueId, customerId, completedAt: null },
-      orderBy: { cycle: 'desc' },
+      orderBy: { cycle: 'asc' },
       select: { stampsEarned: true, stampsRequired: true },
     }),
     prisma.stampReward.count({ where: { venueId, customerId, status: StampRewardStatus.PENDING } }),
@@ -477,36 +503,41 @@ export async function reverseStampForOrder(
     })
     if (!card) return
 
-    let targetCardId = card.id
-    let reopenCompletedCard = false
-
-    if (card.completedAt) {
-      const current = await tx.stampCard.findFirst({
-        where: { venueId, customerId: card.customerId, completedAt: null, id: { not: card.id } },
-        orderBy: { cycle: 'desc' },
-        select: { id: true, stampsEarned: true, completedAt: true },
-      })
-
-      // Purchases made after completing the old card already replace the refunded
-      // stamp. Consume that newer progress first, preserving the legitimately earned
-      // reward and avoiding two simultaneously-open cards.
-      if (current && current.stampsEarned >= cantidad) {
-        targetCardId = current.id
-      } else {
-        const cancelled = await tx.stampReward.updateMany({
-          where: { stampCardId: card.id, status: StampRewardStatus.PENDING },
-          data: { status: StampRewardStatus.CANCELLED },
-        })
-        reopenCompletedCard = cancelled.count > 0
-        if (reopenCompletedCard && current?.stampsEarned === 0) {
-          await tx.stampCard.delete({ where: { id: current.id } })
-        }
-      }
+    // 🔴 ¿De qué cartilla sale el sello? (D3, 21-oct, founder: «A, como Square»). UNA sola regla para todos los estados
+    // (varias llenas, varias abiertas por D2, canjes de por medio): de una cartilla que TENGA el sello, en este orden:
+    //   1. abierta (la de la venta, luego la más nueva): no toca ningún premio — «consume primero el avance nuevo»;
+    //   2. llena con premio SIN cobrar (la de la venta, luego la más nueva): el premio se cancela y la cartilla se reabre;
+    //   3. llena con premio ya cobrado: sólo pierde el sello; lo cobrado no se quita.
+    // Como siempre se elige una que tiene el sello, nunca hay negativos, y ningún premio pendiente queda sin sus sellos.
+    // Antes eran reglas sueltas por caso y cada combinación nueva dejaba una cartilla en −1 (Codex D2-r1, D3-r1).
+    // Un nivel a la vez y en el orden de la regla, sin traer listas (un tope podía dejar fuera la cartilla correcta, Codex
+    // D3-r2 #2): primero la de la venta si está en ese nivel, luego la más nueva del nivel.
+    const delCliente = { venueId, customerId: card.customerId, stampsEarned: { gte: cantidad } }
+    const niveles: Prisma.StampCardWhereInput[] = [
+      { ...delCliente, completedAt: null },
+      { ...delCliente, completedAt: { not: null }, rewards: { some: { status: StampRewardStatus.PENDING } } },
+      { ...delCliente, completedAt: { not: null }, rewards: { none: { status: StampRewardStatus.PENDING } } },
+      // Red de seguridad (Codex D3-r5 #1): entre una consulta y otra, quitar un canje puede pasar un premio de cobrado a por
+      // cobrar y la cartilla «cambia de nivel» sin aparecer en ninguno. Cualquiera con el sello; la relectura bajo la fila
+      // del premio decide qué hacer con él.
+      delCliente,
+    ]
+    let elegida: { id: string } | null = null
+    for (const donde of niveles) {
+      elegida =
+        (await tx.stampCard.findFirst({ where: { ...donde, id: card.id }, select: { id: true } })) ??
+        (await tx.stampCard.findFirst({ where: donde, orderBy: { cycle: 'desc' }, select: { id: true } }))
+      if (elegida) break
+    }
+    if (!elegida) {
+      // Ninguna cartilla tiene el sello: datos de antes de esta regla. Queda el asiento (la venta no se revierte dos
+      // veces) pero no se resta nada: nunca negativos.
+      logger.warn('Reversa de sello sin cartilla con saldo: no se resta', { venueId, orderId, stampCardId: card.id })
     }
 
     await tx.stampEvent.create({
       data: {
-        stampCardId: targetCardId,
+        stampCardId: elegida?.id ?? card.id,
         venueId,
         orderId,
         type: StampEventType.REVERSAL,
@@ -518,13 +549,29 @@ export async function reverseStampForOrder(
 
     // El contador vive en la MISMA transacción que su asiento. Si se separan, un
     // fallo a medias deja al cliente viendo un avance que el libro no respalda.
-    await tx.stampCard.update({
-      where: { id: targetCardId },
-      data: {
-        stampsEarned: { decrement: cantidad },
-        ...(reopenCompletedCard ? { completedAt: null } : {}),
-      },
-    })
+    if (elegida) {
+      // 🔴 Candado de FILA del PREMIO de esa cartilla (si tiene), DESPUÉS del asiento, y se vuelve a mirar (Codex D3-r2 #1,
+      // r3 y r4): quitar un premio canjeado de una cuenta toma esa misma fila para decidir si vuelve por cobrar, así que las
+      // dos van en fila. No es la fila de la CARTILLA (el asiento ya la toca por su llave foránea y cerraba un círculo con la
+      // liquidación de cuentas) ni el candado del cliente (r3). La cartilla se resta DESPUÉS, con el premio ya decidido.
+      await tx.$queryRaw`SELECT id FROM "StampReward" WHERE "stampCardId" = ${elegida.id} FOR UPDATE`
+      const ahora = await tx.stampCard.findUnique({
+        where: { id: elegida.id },
+        select: { completedAt: true, rewards: { select: { status: true }, take: 1 } },
+      })
+      let reabrir = false
+      if (ahora?.completedAt && ahora.rewards?.[0]?.status === StampRewardStatus.PENDING) {
+        const cancelled = await tx.stampReward.updateMany({
+          where: { stampCardId: elegida.id, status: StampRewardStatus.PENDING },
+          data: { status: StampRewardStatus.CANCELLED },
+        })
+        reabrir = cancelled.count > 0
+      }
+      await tx.stampCard.update({
+        where: { id: elegida.id },
+        data: { stampsEarned: { decrement: cantidad }, ...(reabrir ? { completedAt: null } : {}) },
+      })
+    }
     revertida = true
   }
   try {

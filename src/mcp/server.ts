@@ -34,6 +34,7 @@ import { registerCustomerTools } from './tools/customers'
 import { registerCustomerGroupTools } from './tools/customerGroups'
 import { registerCampaignTools } from './tools/campaigns'
 import { registerReceiptLayoutTools } from './tools/receiptLayout'
+import { registerCustomerDisplayTools } from './tools/customerDisplay'
 import { registerServiceCourseTools } from './tools/serviceCourses'
 import { registerCreditPackTools } from './tools/creditPacks'
 import { registerGiftCardTools } from './tools/giftCards'
@@ -131,6 +132,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerCustomerGroupTools(server, scope)
   registerCampaignTools(server, scope)
   registerReceiptLayoutTools(server, scope)
+  registerCustomerDisplayTools(server, scope)
   registerServiceCourseTools(server, scope)
   registerCreditPackTools(server, scope)
   registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)

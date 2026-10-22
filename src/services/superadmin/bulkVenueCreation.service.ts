@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { generateValidatedSlug } from '../../utils/slugify'
 import { Prisma, VenueType, FeeType, TerminalType, EntityType, AccountType, TransactionCardType, SettlementDayType } from '@prisma/client'
+import { assertAngelPayLoginsInVenue } from '@/lib/providerDeviceCompatibility'
 
 // ── Types ────────────────────────────────────────────────────────────
 
@@ -321,6 +322,7 @@ export async function bulkCreateVenues(data: BulkCreateVenuesInput): Promise<Bul
       let paymentConfigured = false
 
       if (merchantAccountId) {
+        await assertAngelPayLoginsInVenue(venue.id, [merchantAccountId], tx)
         await tx.venuePaymentConfig.create({
           data: {
             venueId: venue.id,

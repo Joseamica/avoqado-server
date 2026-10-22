@@ -1,6 +1,8 @@
 import { Terminal, TerminalStatus, TerminalType } from '@prisma/client'
 import { z } from 'zod'
 
+import { tipSuggestionsRule } from '../mobile/tpvSettings.mobile.schema'
+
 // Define la estructura de la respuesta paginada para las terminales
 export type PaginatedTerminalsResponse = {
   data: Terminal[] // El array de terminales obtenidas
@@ -115,3 +117,28 @@ export type CreateTpvBody = {
   status?: TerminalStatus // Optional: defaults to PENDING_ACTIVATION if no serialNumber
   config?: any
 }
+
+/**
+ * PUT /dashboard/tpv/:tpvId/settings — sólo la FORMA de lo que el POS no puede mostrar (F0-B, Task 12). El cuerpo sigue
+ * parcial y ABIERTO (`passthrough`): el panel manda sólo la llave tocada y el servicio mezcla con lo guardado; validar aquí
+ * el resto de llaves rompería clientes que hoy funcionan.
+ */
+export const updateTerminalTpvSettingsSchema = z.object({
+  body: z.object({ tipSuggestions: tipSuggestionsRule.optional() }).passthrough(),
+})
+
+/**
+ * PUT …/org-tpv-defaults (stores-analysis y organizations) — LA misma regla de propinas, en `settings`, porque esas dos rutas
+ * guardan y EMPUJAN `settings` a TODAS las terminales de la organización (F0-B, ronda final: I1 / Codex P2-3). Igual que arriba:
+ * sólo esa forma, todo lo demás pasa intacto. `settings` ausente sigue llegando a la ruta, que conserva su propia respuesta.
+ */
+export const updateOrgTpvDefaultsSchema = z.object({
+  body: z
+    .object({
+      settings: z
+        .object({ tipSuggestions: tipSuggestionsRule.optional() }, { invalid_type_error: 'Los ajustes deben ser un objeto' })
+        .passthrough()
+        .optional(),
+    })
+    .passthrough(),
+})

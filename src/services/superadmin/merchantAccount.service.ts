@@ -5,7 +5,9 @@ import crypto from 'crypto'
 import socketManager from '../../communication/sockets'
 import { lookupRatesByBusinessName, lookupRatesByVenueType, type MCCLookupResult } from '../pricing/blumon-mcc-lookup.service'
 import {
+  assertAngelPayLoginsInVenue,
   assertMerchantTerminalCompatible,
+  assertNuevaLlaveEnLosNegociosDelComercio,
   assertVenueHasCompatibleTerminal,
   PROVIDER_DEVICE_COMPATIBILITY,
 } from '../../lib/providerDeviceCompatibility'
@@ -790,6 +792,7 @@ export async function updateMerchantAccount(id: string, data: UpdateMerchantAcco
   // `onDelete: SetNull` in Prisma so null is a valid assignment.
   if (data.angelpayUserAccountId !== undefined) {
     updateData.angelpayUserAccountId = data.angelpayUserAccountId
+    if (data.angelpayUserAccountId) await assertNuevaLlaveEnLosNegociosDelComercio(id, data.angelpayUserAccountId)
   }
 
   // Changing `externalMerchantId` can collide with the composite unique
@@ -1855,6 +1858,7 @@ export async function approveDiscoveredAngelPayMerchant(input: {
 
   // ---- Transaction: flip active + assign slot ----
   const result = await prisma.$transaction(async tx => {
+    await assertAngelPayLoginsInVenue(venueId, [merchantAccountId], tx)
     const updatedMerchant = await tx.merchantAccount.update({
       where: { id: merchantAccountId },
       data: { active: true },
@@ -1998,6 +2002,7 @@ export async function reserveAngelPaySlot(input: {
         ...(input.angelpayUserAccountId && { angelpayUserAccountId: input.angelpayUserAccountId }),
       },
     })
+    await assertAngelPayLoginsInVenue(input.venueId, [placeholder.id], tx)
 
     // Pick the slot: admin-specified, or first empty if not specified.
     const existingConfig = await tx.venuePaymentConfig.findUnique({
