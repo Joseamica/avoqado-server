@@ -24,7 +24,7 @@ import {
   validateDiscountScopeForItem,
 } from '../shared/discount.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
-import { esValeRevendido } from '../shared/renglonDeVale'
+import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -3141,6 +3141,12 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
       // When 0 items remain, order should be cancelled and removed from active list
       const isVoidingAllItems = remainingItems.length === 0
+      if (!isVoidingAllItems && itemsToVoid.some(esRenglonDeVale)) {
+        throw new ConflictError(
+          'Esta cuenta tiene vales: cancela la cuenta completa y vuelve a escanear los vales que sí vas a cobrar.',
+          'AREA_TICKET_PARTIAL_VOID_NOT_ALLOWED',
+        )
+      }
       // Anular TODO cancela la cuenta: la cocina deja de verla (el candado de comandas ya se tomó al inicio).
       if (isVoidingAllItems) await retirarComandasDeVentaAnulada(tx, venueId, orderId)
 

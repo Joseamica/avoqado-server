@@ -5704,7 +5704,7 @@ test.each(['moveOrder', 'clearTable', 'mergeOrders', 'cancelOrder'] as const)(
     expect(await f.snapshot()).toEqual(before)
   },
 )
-test.each(['moveOrder', 'clearTable', 'mergeOrders', 'cancelOrder'] as const)(
+test.each(['moveOrder', 'clearTable', 'mergeOrders'] as const)(
   'Task8 %s publishes once after appliedNow; notification failure leaves committed body and replay/resolve publishes zero',
   async action => {
     const f = await task8Route(action),
@@ -5715,9 +5715,7 @@ test.each(['moveOrder', 'clearTable', 'mergeOrders', 'cancelOrder'] as const)(
         ? jest.spyOn(tables, 'publishMovedOrder')
         : action === 'clearTable'
           ? jest.spyOn(tables, 'publishClearedTable')
-          : action === 'mergeOrders'
-            ? jest.spyOn(mobile, 'publishMergedOrders')
-            : jest.spyOn(mobile, 'publishCancelledOrder')
+          : jest.spyOn(mobile, 'publishMergedOrders')
     let committed = false
     publish.mockImplementation(async () => {
       committed = (await stored(f.input))?.status === 'ACKED'

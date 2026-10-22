@@ -65,7 +65,10 @@ import {
 import * as inventoryPostingModule from '@/services/inventory/inventoryPosting.service'
 import * as productInventoryModule from '@/services/dashboard/productInventoryIntegration.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
-import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
+import { addCustomerToOrder, voidItems } from '@/services/tpv/order.tpv.service'
+import { restockOrderItems } from '@/services/dashboard/inventoryRestock.service'
+import { execFile } from 'node:child_process'
+import { promisify } from 'node:util'
 import { PaidOrderReconcilerJob } from '@/jobs/paid-order-reconciler.job'
 import { findPaidButOpenOrders } from '@/services/shared/pagadaPeroAbierta'
 import prisma from '@/utils/prismaClient'
@@ -1505,6 +1508,213 @@ describe('🔴 D1: el vale de una venta cancelada se vuelve a cobrar en otra cue
     // B sólo tiene el renglón del vale, ya revendido: nada que descontar. A conserva el suelto: ése sí.
     expect(await descuenta(b.orderId)).toBe(false)
     expect(await descuenta(a.orderId)).toBe(true)
+  })
+
+  it.each(['TPV', 'DASHBOARD'])('D3: devolver A por %s no repone el vale que B sí vendió', async camino => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    await cancelarSesion(a.sessionId)
+    const b = await rearmarVale(a.ticketId)
+    await cobroDeLaTerminal(b.orderId, 60)
+    await cobroDeLaTerminal(a.orderId, 100)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    const pago = await prisma.payment.findFirstOrThrow({ where: { orderId: a.orderId, status: 'COMPLETED' } })
+    if (camino === 'TPV') {
+      await restockOrderItems({ venueId: venueId!, orderId: a.orderId, refundPaymentId: pago.id, staffId })
+    } else {
+      const items = await prisma.orderItem.findMany({ where: { orderId: a.orderId }, select: { id: true }, take: 10 })
+      await issueRefund({
+        venueId: venueId!,
+        paymentId: pago.id,
+        items: items.map(item => ({ orderItemId: item.id, quantity: 1 })),
+        tipRefundCents: 0,
+        reason: 'CUSTOMER_REQUEST' as never,
+        staffId,
+        restockItemIds: items.map(item => item.id),
+      })
+    }
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 10 })
+  })
+
+  it('D3: devolver A antes de rearmar tampoco repone un vale liberado sin consumo', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    await cancelarSesion(a.sessionId)
+    await cobroDeLaTerminal(a.orderId, 100)
+    expect(await stockDe()).toEqual({ vale: 10, suelto: 9 })
+    const pago = await prisma.payment.findFirstOrThrow({ where: { orderId: a.orderId, status: 'COMPLETED' } })
+    await restockOrderItems({ venueId: venueId!, orderId: a.orderId, refundPaymentId: pago.id, staffId })
+    expect(await stockDe()).toEqual({ vale: 10, suelto: 10 })
+  })
+
+  it('D3 vecino: devolver un vale válido sí repone lo consumido por la reserva', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    await cobroDeLaTerminal(a.orderId, 100)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+    const pago = await prisma.payment.findFirstOrThrow({ where: { orderId: a.orderId, status: 'COMPLETED' } })
+    await restockOrderItems({ venueId: venueId!, orderId: a.orderId, refundPaymentId: pago.id, staffId })
+    expect(await stockDe()).toEqual({ vale: 10, suelto: 10 })
+  })
+
+  it.each([
+    ['TPV', 'APPLIED'],
+    ['DASHBOARD', 'APPLIED'],
+    ['TPV', 'PENDING'],
+    ['DASHBOARD', 'PENDING'],
+    ['TPV', 'FAILED'],
+    ['DASHBOARD', 'FAILED'],
+    ['TPV', 'SIN_CONSUMO'],
+    ['DASHBOARD', 'SIN_CONSUMO'],
+  ] as const)('D3 R13: dividir, cobrar B con marca %s/%s, cancelar A y devolver B sí repone el consumo real', async (camino, marca) => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    const item = await renglonDelValeEn(a.orderId)
+    const sinGuarda = jest.spyOn(cuentaConValesModule, 'rechazarSiLaCuentaTieneVales').mockImplementation(() => undefined)
+    let b: Awaited<ReturnType<typeof splitOrderItems>>
+    try {
+      b = await splitOrderItems(venueId!, a.orderId, [item.id], staffId)
+    } finally {
+      sinGuarda.mockRestore()
+    }
+    const sinConsumo =
+      marca === 'SIN_CONSUMO'
+        ? jest.spyOn(productInventoryModule, 'deductInventoryForProduct').mockRejectedValueOnce(new Error('D3 falla antes del consumo'))
+        : null
+    try {
+      await payCashOrder(venueId!, b.created.id, { amount: 6000, tip: 0, staffId, idempotencyKey: `d3-r13-${sello}-${++n}` })
+    } finally {
+      sinConsumo?.mockRestore()
+    }
+    expect(await stockDe()).toEqual({ vale: sinConsumo ? 10 : 9, suelto: 10 })
+    const line = await prisma.inventoryPostingLine.findFirstOrThrow({
+      where: { posting: { venueId: venueId!, orderId: b.created.id, effectKind: 'SALE' }, effectKey: item.id },
+    })
+    expect(await prisma.inventoryMovement.count({ where: { postingLineId: line.id } })).toBe(sinConsumo ? 0 : 1)
+    if (marca === 'PENDING' || marca === 'FAILED') {
+      // Estado durable exacto de una caída después del consumo y antes de guardar APPLIED.
+      await prisma.inventoryPostingLine.update({ where: { id: line.id }, data: { status: marca, appliedQuantityBase: 0 } })
+      await prisma.inventoryPosting.update({
+        where: { id: line.postingId },
+        data: { status: marca === 'PENDING' ? 'APPLYING' : 'PARTIAL_FAILED', updatedAt: new Date(Date.now() - 11 * 60_000) },
+      })
+    }
+    await cancelOrder(venueId!, a.orderId, 'cancelar el resto sin cobrar', staffId)
+    expect((await prisma.areaTicket.findUniqueOrThrow({ where: { id: a.ticketId } })).orderId).toBeNull()
+    const pago = await prisma.payment.findFirstOrThrow({ where: { orderId: b.created.id, status: 'COMPLETED' } })
+    if (camino === 'TPV') {
+      await restockOrderItems({ venueId: venueId!, orderId: b.created.id, refundPaymentId: pago.id, staffId })
+    } else {
+      await issueRefund({
+        venueId: venueId!,
+        paymentId: pago.id,
+        items: [{ orderItemId: item.id, quantity: 1 }],
+        tipRefundCents: 0,
+        reason: 'CUSTOMER_REQUEST' as never,
+        staffId,
+        restockItemIds: [item.id],
+      })
+    }
+    // La devolución compensa tanto lo ya descontado como la obligación pendiente, igual que el stock normal.
+    expect(await stockDe()).toEqual({ vale: sinConsumo ? 11 : 10, suelto: 10 })
+    await inventoryPostingModule.applySalePosting(line.postingId, staffId)
+    expect(await stockDe()).toEqual({ vale: 10, suelto: 10 })
+  })
+
+  it.each([true, false])('D4: reserva NONE, cancelada=%s, sólo el vale vivo descuenta y el replay no repite', async cancelada => {
+    await reiniciarInventario(10)
+    await prisma.venueAreaTicketSettings.update({ where: { venueId: venueId! }, data: { inventoryReservationMode: 'NONE' } })
+    try {
+      const a = await ventaDeVales()
+      if (cancelada) await cancelarSesion(a.sessionId)
+      const llave = `d4-${sello}-${++n}`
+      await cobroDeLaTerminal(a.orderId, 100, llave)
+      expect(await stockDe()).toEqual({ vale: cancelada ? 10 : 9, suelto: 9 })
+      await cobroDeLaTerminal(a.orderId, 100, llave)
+      expect(await stockDe()).toEqual({ vale: cancelada ? 10 : 9, suelto: 9 })
+    } finally {
+      await prisma.venueAreaTicketSettings.update({
+        where: { venueId: venueId! },
+        data: { inventoryReservationMode: 'HOLD_AVAILABLE_STOCK' },
+      })
+    }
+  })
+
+  it('D6: anular sólo el renglón de vale rechaza antes de cambiar cuenta, sesión o reserva', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    const item = await renglonDelValeEn(a.orderId)
+    const antes = await foto(a)
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: a.orderId }, select: { version: true } })
+    await expect(
+      voidItems(venueId!, a.orderId, {
+        itemIds: [item.id],
+        staffId,
+        actorId: staffId,
+        expectedVersion: version,
+        reason: 'error al capturar',
+      }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'AREA_TICKET_PARTIAL_VOID_NOT_ALLOWED' })
+    expect(await foto(a)).toEqual(antes)
+    await cobroDeLaTerminal(a.orderId, 100)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
+  })
+
+  it('D6 vecino: anular sólo el artículo normal conserva el vale y cobra su importe completo', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    const item = await prisma.orderItem.findFirstOrThrow({ where: { orderId: a.orderId, productId: sueltoProductId } })
+    const { version } = await prisma.order.findUniqueOrThrow({ where: { id: a.orderId }, select: { version: true } })
+    await voidItems(venueId!, a.orderId, {
+      itemIds: [item.id],
+      staffId,
+      actorId: staffId,
+      expectedVersion: version,
+      reason: 'quitar el pan',
+    })
+    await cobroDeLaTerminal(a.orderId, 60)
+    expect(await stockDe()).toEqual({ vale: 9, suelto: 10 })
+    expect((await prisma.areaTicket.findUniqueOrThrow({ where: { id: a.ticketId } })).status).toBe('PAID')
+  })
+
+  it('D5: el script real limpia una orden normal vieja y respeta una cuenta de vales con la misma edad', async () => {
+    await reiniciarInventario(10)
+    const a = await ventaDeVales()
+    const vieja = new Date(Date.now() - 4 * 60 * 60 * 1000)
+    await prisma.order.update({ where: { id: a.orderId }, data: { createdAt: vieja, updatedAt: vieja } })
+    const normal = await prisma.order.create({
+      data: {
+        venueId: venueId!,
+        orderNumber: `d5-normal-${sello}`,
+        status: 'CONFIRMED',
+        paymentStatus: 'PENDING',
+        subtotal: new Prisma.Decimal(100),
+        taxAmount: new Prisma.Decimal(0),
+        total: new Prisma.Decimal(100),
+        contratoDePrecio: 'IVA_INCLUIDO',
+        createdAt: vieja,
+        updatedAt: vieja,
+      },
+    })
+    const { stdout } = await promisify(execFile)(
+      process.execPath,
+      [
+        'node_modules/tsx/dist/cli.mjs',
+        'scripts/cancelar-ordenes-fantasma.ts',
+        '--venue',
+        venueId!,
+        '--apply',
+        '--confirm-host',
+        new URL(process.env.TEST_DATABASE_URL!).hostname,
+      ],
+      { env: { ...process.env, USE_RENDER_DB: 'false' }, timeout: 60000 },
+    )
+    expect(stdout).toContain('1 orden(es) canceladas')
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: normal.id } })).status).toBe('CANCELLED')
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: a.orderId } })).status).toBe('CONFIRMED')
+    expect(await estadoDeLaSesion(a.sessionId)).toBe('MATERIALIZED')
+    await cancelarSesion(a.sessionId)
+    expect((await prisma.areaTicket.findUniqueOrThrow({ where: { id: a.ticketId } })).status).toBe('ISSUED')
   })
 
   it('si el dinero de A llegó ANTES de re-armar, A es una cuenta viva con el vale: re-armar contesta 409 con la cuenta, nunca 503', async () => {

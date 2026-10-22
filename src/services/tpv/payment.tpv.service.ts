@@ -2101,10 +2101,12 @@ async function updateOrderTotalsForStandalonePayment(
     // que quedó pendiente y nunca re-deduce lo ya aplicado. El loop de abajo NO
     // se toca: lo comparten 8 features del cobro y está probado en producción.
     let tpvPostingLines = new Map<string, string>()
+    let postingLinesRead = false
     try {
       if (tpvPostingId) {
         const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
         tpvPostingLines = new Map(lines.map(l => [l.effectKey, l.id]))
+        postingLinesRead = true
         await prisma.inventoryPosting.updateMany({
           where: { id: tpvPostingId, status: 'PENDING' },
           data: { status: 'APPLYING', attempts: { increment: 1 } },
@@ -2132,6 +2134,8 @@ async function updateOrderTotalsForStandalonePayment(
         logger.info('⏭️ Skipping deduction for a vale line resold in another order', { orderId, orderItemId: item.id })
         continue
       }
+      // R12/R13: el posting ya clasificó al dueño vivo, la liberación y el consumo previo del vale.
+      if (item.areaTicketLineId && !tpvPostingLines.has(item.id)) continue
       if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
         logger.info('⏭️ Skipping generic deduction for area-ticket line covered by reservation', {
           orderId,
@@ -2314,7 +2318,7 @@ async function updateOrderTotalsForStandalonePayment(
     // Estado final del posting: APPLIED si todo aplicó, PARTIAL_FAILED si algo
     // quedó pendiente (el sweeper lo recoge). Cercado por el claim APPLYING para
     // no pisar a otro worker.
-    if (tpvPostingId) {
+    if (tpvPostingId && (postingLinesRead || !updatedOrder.items.some(item => item.areaTicketLineId))) {
       void prisma.inventoryPosting
         .updateMany({
           where: { id: tpvPostingId, status: 'APPLYING' },
