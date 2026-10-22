@@ -46,5 +46,7 @@ router.post(
 router.get('/', validateRequest(s.listSchema), checkPermission('giftCards:read'), ctrl.list)
 router.get('/:giftCardId', validateRequest(s.detailSchema), checkPermission('giftCards:read'), ctrl.detail)
 router.post('/:giftCardId/operations', validateRequest(s.operationSchema), checkPermission('giftCards:manage'), ctrl.operate)
+// 1b S7 (Q16): reenviar o cambiar el destino desde el panel. Siempre de gerente: el panel no pide PIN, así que usa SU ruta.
+router.post('/:giftCardId/resend', validateRequest(s.resendSchema), checkPermission('giftCards:manage'), ctrl.resend)
 
 export default router

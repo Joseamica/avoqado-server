@@ -30,6 +30,7 @@ const mockEntregar = jest.fn().mockResolvedValue({ reclamadas: 0, enviadas: 0, r
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import * as ctrl from '@/controllers/mobile/giftCard.mobile.controller'
+import * as panel from '@/controllers/dashboard/giftCard.dashboard.controller'
 import { decryptGiftCardCode, formatGiftCardCode } from '@/services/giftCards/giftCardCode'
 import { TEXTO_DE_FALLO_DE_ENTREGA, urlDeLaPagina } from '@/services/giftCards/giftCardEntrega'
 import { estadoDeCancelacionDeVenta } from '@/services/giftCards/giftCardCancel.service'
@@ -137,6 +138,46 @@ async function llamar(
 }
 
 const CAJERO = () => ({ staffId: negocio.staffId, puedeVender: true, puedeGestionar: false })
+
+/**
+ * 1b S7: el controller del PANEL con `req`/`res`/`next` de prueba, de la sesión del gerente. Lo lanzado o lo que llega a `next`
+ * (el 503 de Q104 va por ahí) se devuelve como su status.
+ */
+async function llamarAlPanel(
+  handler: (req: any, res: any, next: (e?: unknown) => void) => Promise<void>,
+  p: { staffId?: string; params: Record<string, string>; body?: Record<string, unknown> },
+) {
+  const req: any = {
+    params: { venueId: negocio.venueId, ...p.params },
+    body: p.body ?? {},
+    headers: {},
+    ip: '127.0.0.1',
+    get: () => 'jest',
+    authContext: { userId: p.staffId ?? gerenteId, venueId: negocio.venueId, role: 'MANAGER' },
+  }
+  const res: any = {
+    statusCode: 200,
+    body: undefined as any,
+    status(c: number) {
+      this.statusCode = c
+      return this
+    },
+    json(b: unknown) {
+      this.body = b
+      return this
+    },
+  }
+  let error: any
+  try {
+    await handler(req, res, (e?: unknown) => {
+      error = e
+    })
+  } catch (e) {
+    error = e
+  }
+  if (error) return { status: (error.statusCode ?? 500) as number, data: undefined, body: res.body, error }
+  return { status: res.statusCode as number, data: res.body?.data, body: res.body, error: undefined as any }
+}
 
 describe('el detalle de la cuenta en el POS', () => {
   it('el detalle trae cada tarjeta sin código, con su destino enmascarado, sus banderas y su fallo', async () => {
@@ -595,5 +636,119 @@ describe('Q102: el secreto sólo sale con su renglón guardado', () => {
     expect(filas).toHaveLength(1)
     expect(filas[0].staffId).toBe(negocio.staffId)
     expect(filas[0].data).toMatchObject({ ruta, motivo: ruta === 'orders/:orderId/reveal' ? 'PRINT' : expect.any(String) })
+  })
+})
+
+describe('S7: el panel', () => {
+  async function reponerDesdeElPanel(giftCardId: string, operationKey: string, staffId?: string) {
+    const v = await prisma.orderItem.findFirstOrThrow({ where: { giftCardId }, select: { order: { select: { orderNumber: true } } } })
+    return llamarAlPanel(panel.operate, {
+      staffId,
+      params: { giftCardId },
+      body: { operationKey, tipo: 'REEMPLAZAR_CODIGO', reason: 'LOST_CARD', folio: v.order.orderNumber },
+    })
+  }
+
+  it('reponer K1 → reponer K2 → replay de K1 ⇒ el código vigente y su renglón', async () => {
+    const [id] = (await venta()).giftCardIds
+    const K1 = unico('K1')
+    const K2 = unico('K2')
+    const r1 = await reponerDesdeElPanel(id, K1)
+    const r2 = await reponerDesdeElPanel(id, K2)
+    expect([r1.status, r2.status]).toEqual([200, 200])
+    expect(r2.data.nuevoCodigo.display).not.toBe(r1.data.nuevoCodigo.display)
+    // Las dos primeras reponen (bitácora de mejor esfuerzo, como en la 1a): ninguna es un replay, no escriben REVEALED.
+    expect(await renglones('GIFT_CARD_CODE_REVEALED', id)).toHaveLength(0)
+    expect(bitacora('GIFT_CARD_CODE_REPLACED', id)).toHaveLength(2)
+
+    const r3 = await reponerDesdeElPanel(id, K1)
+
+    expect(r3.status).toBe(200)
+    // La libreta devuelve el código VIGENTE (el de K2), no el que K1 entregó.
+    expect(r3.data.nuevoCodigo).toEqual(r2.data.nuevoCodigo)
+    expect(r3.data.nuevoCodigo.display).toBe(await codigoDe(id))
+    // Al volver la llamada, su renglón ya está en la base.
+    const filas = await renglones('GIFT_CARD_CODE_REVEALED', id)
+    expect(filas).toHaveLength(1)
+    expect(filas[0]).toMatchObject({ staffId: gerenteId, entity: 'GiftCard', entityId: id })
+    expect(filas[0].data).toEqual({ operationKey: K1, motivo: 'REPLACE_REPLAY', ruta: 'dashboard:operate' })
+    expect(JSON.stringify(filas[0])).not.toContain(r3.data.nuevoCodigo.display)
+    expect(JSON.stringify(filas[0])).not.toContain((await fila(id)).pageToken)
+    expect(bitacora('GIFT_CARD_CODE_REPLACED', id)).toHaveLength(2)
+  })
+
+  it('🔴 Q104: si el renglón del replay no se guarda ⇒ 503 y el código no sale', async () => {
+    const [id] = (await venta()).giftCardIds
+    const K1 = unico('K1')
+    expect((await reponerDesdeElPanel(id, K1)).status).toBe(200)
+    // El mismo replay con un `Staff.id` que no existe: la libreta responde (no escribe nada) y el renglón choca con el FK.
+    const r = await reponerDesdeElPanel(id, K1, NADIE)
+    expect(r.status).toBe(503)
+    expect(r.error.message).toBe('No se pudo mostrar el código. Intenta otra vez.')
+    expect(r.body).toBeUndefined()
+    const todo = JSON.stringify({ message: r.error.message, details: r.error.details, code: r.error.code })
+    expect(todo).not.toContain(await codigoDe(id))
+    expect(await renglones('GIFT_CARD_CODE_REVEALED', id)).toHaveLength(0)
+  })
+
+  it('reenviar al mismo destino y cambiarlo a correo desde el panel, como gerente', async () => {
+    const [id] = (await venta()).giftCardIds
+    await prisma.giftCard.update({ where: { id }, data: { deliveryStatus: 'FAILED', deliveryErrorCode: 'WHATSAPP_SEND_FAILED' } })
+    const ultimos4 = (await fila(id)).codeLast4
+
+    const mismo = await llamarAlPanel(panel.resend, { params: { giftCardId: id }, body: { operationKey: unico('panel') } })
+    expect(mismo.status).toBe(200)
+    expect(mismo.data).toEqual({ giftCardId: id, deliveryStatus: 'PENDING', repuesta: false, ultimos4 })
+    expect(await fila(id)).toMatchObject({ deliveryStatus: 'PENDING', deliveryErrorCode: null, recipientPhone: '+525512345678' })
+    expect(bitacora('GIFT_CARD_RESENT', id)).toHaveLength(1)
+    expect(bitacora('GIFT_CARD_RESENT', id)[0].data).toMatchObject({
+      ruta: 'POST /dashboard/venues/:venueId/gift-cards/:giftCardId/resend',
+    })
+
+    const correo = await llamarAlPanel(panel.resend, {
+      params: { giftCardId: id },
+      body: { operationKey: unico('panel'), deliveryChannel: 'EMAIL', recipientEmail: 'Ana@Gmail.com' },
+    })
+    expect(correo.status).toBe(200)
+    expect(correo.data.repuesta).toBe(true)
+    expect(await fila(id)).toMatchObject({ deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com', recipientPhone: null })
+    const [cambio] = bitacora('GIFT_CARD_DESTINATION_CHANGED', id)
+    expect(cambio.data).toMatchObject({ destinoAnterior: '55•••••678', destinoNuevo: 'a•••@gmail.com' })
+    expect(JSON.stringify(cambio)).not.toMatch(/5512345678|ana@gmail\.com/)
+    expect(mockEntregar.mock.calls).toEqual([[{ ids: [id] }], [{ ids: [id] }]])
+  })
+
+  it('🔴 reenviar o cambiar el destino de una tarjeta de OTRO negocio ⇒ lo mismo que una que no existe, y no se toca', async () => {
+    const otro = await crearNegocioDePrueba('revelar-panel-otro')
+    const ajena = await sembrarVentaDeTarjetas({ ...otro, montos: [500], metodo: 'CASH', entrega: porWhatsApp })
+    const [idAjena] = ajena.giftCardIds
+    const antes = await fila(idAjena)
+    const inexistente = `cl9noexiste${'0'.repeat(14)}`
+    const pedir = (giftCardId: string, cuerpo: Record<string, unknown>) =>
+      llamarAlPanel(panel.resend, { params: { giftCardId }, body: { operationKey: unico('panel'), ...cuerpo } })
+    try {
+      for (const cuerpo of [{}, { deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com' }]) {
+        const deOtro = await pedir(idAjena, cuerpo)
+        const noExiste = await pedir(inexistente, cuerpo)
+        expect(deOtro.status).toBe(404)
+        expect({ status: deOtro.status, code: deOtro.error.code, message: deOtro.error.message }).toEqual({
+          status: noExiste.status,
+          code: noExiste.error.code,
+          message: noExiste.error.message,
+        })
+      }
+      const despues = await fila(idAjena)
+      expect([despues.codeLast4, despues.deliveryChannel, despues.recipientPhone, despues.recipientEmail]).toEqual([
+        antes.codeLast4,
+        antes.deliveryChannel,
+        antes.recipientPhone,
+        antes.recipientEmail,
+      ])
+      expect(despues.deliveryOperationKey).toBe(antes.deliveryOperationKey)
+      expect(await prisma.giftCardActivity.count({ where: { giftCardId: idAjena, type: 'CODE_REPLACED' } })).toBe(0)
+      expect(mockEntregar).not.toHaveBeenCalled()
+    } finally {
+      await limpiarNegocioDePrueba(otro.venueId)
+    }
   })
 })

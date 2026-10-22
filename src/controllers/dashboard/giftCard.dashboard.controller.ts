@@ -5,6 +5,8 @@
  */
 import type { NextFunction, Request, Response } from 'express'
 import logger from '@/config/logger'
+import { BadRequestError, ServiceUnavailableError } from '@/errors/AppError'
+import prisma from '@/utils/prismaClient'
 import { getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCards/giftCardSettings.service'
 import {
   getGiftCardDetail,
@@ -16,13 +18,25 @@ import {
   type EstadoDeListaDeTarjetas,
 } from '@/services/giftCards/giftCardReports.service'
 import {
+  auditarReenvio,
   auditarTarjetas,
   estadoDeVentaDeTarjetas,
   negocioTieneTarjetas,
   operarSobreDeGerente,
+  registrarSalidaDelSecreto,
   type GiftCardAuditAction,
   type OperacionDeGerenteHttp,
 } from '@/services/giftCards/giftCardSurface.service'
+import {
+  TEXTO_SIN_SECRETO,
+  cambiarDestinoDeTarjeta,
+  leerNuevoDestino,
+  reenviarTarjeta,
+  type QuienPregunta,
+  type ResultadoDeReenvio,
+} from '@/services/giftCards/giftCardCuenta.service'
+import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
+import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { origenDe, staffDe } from '@/utils/giftCardRequest'
 
 const ACCION_DE_GERENTE: Record<OperacionDeGerenteHttp['tipo'], GiftCardAuditAction> = {
@@ -67,11 +81,36 @@ export async function detail(req: Request, res: Response) {
   res.json({ success: true, data })
 }
 
-export async function operate(req: Request, res: Response) {
+export async function operate(req: Request, res: Response, next: NextFunction) {
   const { venueId, giftCardId } = req.params
   const staffId = staffDe(req)
   const body = req.body as OperacionDeGerenteHttp
   const r = await operarSobreDeGerente(venueId, giftCardId, staffId, body)
+  // 🔴 Q104 (Q102): el reintento de «Reponer código» devuelve el código VIGENTE (aunque otra reposición lo haya cambiado): es una
+  // salida del secreto. Su renglón se guarda ANTES de responder y con `await`; si no se guarda, 503 y el código no sale. Sin el
+  // código, sin `pageToken` y sin el destino en `data`. La primera reposición sigue con su bitácora de mejor esfuerzo, abajo.
+  if (r.replayed && r.nuevoCodigo) {
+    try {
+      await registrarSalidaDelSecreto(prisma, [
+        {
+          venueId,
+          staffId,
+          action: 'GIFT_CARD_CODE_REVEALED',
+          entity: 'GiftCard',
+          entityId: giftCardId,
+          data: { operationKey: body.operationKey, motivo: 'REPLACE_REPLAY', ruta: 'dashboard:operate' },
+          ...origenDe(req),
+        },
+      ])
+    } catch (error) {
+      logger.error('🎁 [tarjetas de regalo] no se guardó la salida del código del reintento de «Reponer código»: no se responde', {
+        venueId,
+        giftCardId,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      return next(new ServiceUnavailableError(TEXTO_SIN_SECRETO))
+    }
+  }
   // F9: `replayed` es el `replay` que la libreta decidió bajo el candado del sobre; ninguna lectura previa aquí.
   if (!r.replayed)
     auditarTarjetas({
@@ -91,6 +130,51 @@ export async function operate(req: Request, res: Response) {
       ...origenDe(req),
     })
   res.json({ success: true, data: { activityIds: r.activityIds, ...(r.nuevoCodigo ? { nuevoCodigo: r.nuevoCodigo } : {}) } })
+}
+
+// ─── 1b S7: reenviar o cambiar el destino desde el panel (Q16, P-2, D3) ───
+
+/** La ruta tal cual la monta `dashboard.routes.ts` (va a la bitácora como `ruta`). */
+const RUTA_REENVIO = 'POST /dashboard/venues/:venueId/gift-cards/:giftCardId/resend'
+
+/** Q17: la entrega inmediata, sin esperarla. El trabajo de cada minuto cubre lo que esta patada no alcance. */
+function patear(giftCardId: string): void {
+  void entregarTarjetas({ ids: [giftCardId] }).catch(error =>
+    logger.error('🎁 [tarjetas de regalo] la entrega inmediata falló; la toma el trabajo de cada minuto', {
+      giftCardIds: [giftCardId],
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  )
+}
+
+/**
+ * `POST …/gift-cards/:giftCardId/resend` del panel. La ruta exige `giftCards:manage`, así que quien llama es gerente (Q16).
+ * Sin destino ⇒ `reenviarTarjeta`; CON destino ⇒ siempre `cambiarDestinoDeTarjeta`, que ya trata el mismo destino como reenvío
+ * (D3: aquí no se comparan destinos). El negocio es el de la RUTA: una tarjeta de otro negocio responde lo mismo que una que no
+ * existe. La misma respuesta que el POS y la MISMA traducción a bitácora (`auditarReenvio`, S4); un reenvío nuevo patea la entrega.
+ */
+export async function resend(req: Request, res: Response) {
+  const { venueId, giftCardId } = req.params
+  const staffId = staffDe(req)
+  const { operationKey } = req.body as { operationKey: string }
+  const quien: QuienPregunta = { staffId, puedeVender: true, puedeGestionar: true }
+  const comun = { venueId, staffId, giftCardId, operationKey, ruta: RUTA_REENVIO, ...origenDe(req) }
+  let r: ResultadoDeReenvio
+  try {
+    const destino = leerNuevoDestino(req.body)
+    r = destino
+      ? await cambiarDestinoDeTarjeta(venueId, giftCardId, quien, { operationKey, destino })
+      : await reenviarTarjeta(venueId, giftCardId, quien, { operationKey })
+  } catch (error) {
+    if (error instanceof GiftCardError || error instanceof BadRequestError) auditarReenvio({ ...comun, rechazo: error })
+    throw error
+  }
+  auditarReenvio({ ...comun, resultado: r })
+  res.json({
+    success: true,
+    data: { giftCardId: r.giftCardId, deliveryStatus: r.deliveryStatus, repuesta: r.repuesta, ultimos4: r.ultimos4 },
+  })
+  if (!r.replay) patear(r.giftCardId)
 }
 
 export async function summary(req: Request, res: Response) {

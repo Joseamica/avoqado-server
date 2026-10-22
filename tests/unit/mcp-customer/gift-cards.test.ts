@@ -34,11 +34,20 @@ jest.mock('@/mcp/guard', () => ({
 }))
 
 const handlers = new Map<string, (a: Record<string, unknown>, e: unknown) => Promise<{ content: Array<{ text: string }> }>>()
+const descripciones = new Map<string, string>()
 const scope = { staffId: 's1', activeOrg: 'o1', allowedVenueIds: ['v1'], perVenueAccess: new Map() } as McpScope
 const llamar = async (nombre: string, args: Record<string, unknown>) => JSON.parse((await handlers.get(nombre)!(args, {})).content[0].text)
 
 beforeAll(() => {
-  registerGiftCardTools({ tool: (...a: unknown[]) => handlers.set(a[0] as string, a[a.length - 1] as never) } as never, scope)
+  registerGiftCardTools(
+    {
+      tool: (...a: unknown[]) => {
+        handlers.set(a[0] as string, a[a.length - 1] as never)
+        descripciones.set(a[0] as string, a[1] as string)
+      },
+    } as never,
+    scope,
+  )
 })
 beforeEach(() => jest.clearAllMocks())
 afterEach(() => jest.useRealTimers())
@@ -65,6 +74,9 @@ const FILA = {
   expiresAt: null,
   deliveryChannel: 'PRINTED',
   deliveryStatus: 'PENDING',
+  deliveredAt: null,
+  deliveryErrorCode: null,
+  deliveryError: null,
   recipientName: 'Ana',
   purchaserName: 'Luis',
   source: 'POS',
@@ -151,9 +163,58 @@ describe('gift_card_lookup', () => {
           recipient: 'Ana',
           buyer: 'Luis',
           saleTicket: 'ORD-1',
+          // S-8: impresa sigue PENDING; la IA decide por el canal.
+          delivery: { channel: 'PRINTED', status: 'PENDING', sentOn: null, errorCode: null, error: null },
         },
       ],
     })
+  })
+
+  it('gift_card_lookup dice cómo se entregó cada tarjeta', async () => {
+    mockList.mockResolvedValue({
+      items: [
+        {
+          ...FILA,
+          deliveryChannel: 'WHATSAPP',
+          deliveryStatus: 'SENT',
+          // 21:30 del 20-oct en México (UTC-6) ya es 21-oct en UTC: el día es el del negocio.
+          deliveredAt: '2026-10-21T03:30:00.000Z',
+          // Lo que una fila NUNCA debe dejar pasar aunque viniera: el contacto completo y los secretos.
+          recipientPhone: '+525512345678',
+          codigo: 'K7QZ-ABCD-EFGH-JKMN-P',
+          pageToken: 'tok-secreto-1',
+        },
+        {
+          ...FILA,
+          last4: 'M2PX',
+          deliveryChannel: 'EMAIL',
+          deliveryStatus: 'FAILED',
+          deliveryErrorCode: 'EMAIL_INVALID_ADDRESS',
+          deliveryError: 'No se pudo mandar el correo a esa dirección. Revisa el correo, cambia el destino o imprímela.',
+          recipientEmail: 'ana@gmail.com',
+        },
+      ],
+      page: 1,
+      pageSize: 10,
+      total: 2,
+    })
+    const r = await llamar('gift_card_lookup', { venueId: 'v1', customer: 'Ana' })
+    expect(r.cards[0].delivery).toEqual({ channel: 'WHATSAPP', status: 'SENT', sentOn: '2026-10-20', errorCode: null, error: null })
+    expect(r.cards[1].delivery).toEqual({
+      channel: 'EMAIL',
+      status: 'FAILED',
+      sentOn: null,
+      errorCode: 'EMAIL_INVALID_ADDRESS',
+      error: 'No se pudo mandar el correo a esa dirección. Revisa el correo, cambia el destino o imprímela.',
+    })
+    const texto = JSON.stringify(r)
+    expect(texto).not.toMatch(/"codigo"|"pageToken"|K7QZ-ABCD|tok-secreto|5512345678|ana@gmail\.com/)
+  })
+
+  it('la descripción dice que trae la entrega, sin nombrar tablas ni campos internos', () => {
+    const d = descripciones.get('gift_card_lookup')!
+    expect(d).toContain('and how it was delivered (WhatsApp, email, printed or handed to the buyer; sent or failed, with the reason)')
+    expect(d).not.toMatch(/deliveryErrorCode|deliveredAt|deliveryStatus|GiftCard\b|recipientPhone/)
   })
 
   it('por cliente; sin coincidencias → found:false con un texto para el usuario', async () => {

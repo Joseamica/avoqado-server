@@ -182,7 +182,7 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'gift_card_lookup',
-    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to and its sale ticket. NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
+    'Find gift cards (tarjetas de regalo) of a venue you can access by the LAST 4 characters of their code, or by the customer, recipient or buyer (name, phone or email). For each card: last 4, status (PENDING = sold but not paid yet, ACTIVE, BLOCKED, DEACTIVATED), expired (true = its expiry already passed: it can NOT be used even if status is ACTIVE), initial amount and current balance in PESOS, activation and expiry days (venue-local), who it belongs to, its sale ticket and how it was delivered (WhatsApp, email, printed or handed to the buyer; sent or failed, with the reason). NEVER returns the full code. Up to 10 matches plus the total; if there are more, ask the user to be more specific. Pass venueId and last4 or customer. Requires giftCards:read.',
     {
       venueId: z.string().describe('Venue that issued the cards (must be in your scope)'),
       last4: z
@@ -223,6 +223,15 @@ export function registerGiftCardTools(server: McpServer, scope: McpScope) {
           recipient: t.recipientName,
           buyer: t.purchaserName,
           saleTicket: t.order?.orderNumber ?? null,
+          // 1b S7 (aditivo): cómo se entregó. Nunca el teléfono ni el correo (ni enmascarados): el destino lo ve el panel.
+          // Impresa o en mano se queda en PENDING (S-8): la IA decide por el canal.
+          delivery: {
+            channel: t.deliveryChannel,
+            status: t.deliveryStatus,
+            sentOn: dia(t.deliveredAt ?? null),
+            errorCode: t.deliveryErrorCode ?? null,
+            error: t.deliveryError ?? null,
+          },
         })),
       })
     },

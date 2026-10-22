@@ -20,6 +20,20 @@ jest.mock('@/services/giftCards/giftCardSurface.service', () => ({
   estadoDeVentaDeTarjetas: jest.fn(),
   negocioTieneTarjetas: jest.fn(),
   operarSobreDeGerente: jest.fn(),
+  // 1b S7: la MISMA traducción a bitácora del reenvío que usa el POS (S4), y la bitácora que SÍ espera y lanza (Q102/Q104).
+  auditarReenvio: jest.fn(),
+  registrarSalidaDelSecreto: jest.fn().mockResolvedValue(undefined),
+}))
+// 1b S7: reenviar y cambiar el destino (su lógica la prueban giftCardCuenta.service.test.ts y la integración).
+jest.mock('@/services/giftCards/giftCardCuenta.service', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardCuenta.service'),
+  reenviarTarjeta: jest.fn(),
+  cambiarDestinoDeTarjeta: jest.fn(),
+}))
+// Q17: la patada de la entrega es un doble: nada sale a nadie.
+jest.mock('@/services/giftCards/giftCardDelivery.service', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardDelivery.service'),
+  entregarTarjetas: jest.fn().mockResolvedValue({ reclamadas: 0, enviadas: 0, reprogramadas: 0, fallidas: 0, atoradas: 0 }),
 }))
 jest.mock('@/services/giftCards/giftCardSettings.service', () => ({
   ...jest.requireActual('@/services/giftCards/giftCardSettings.service'),
@@ -43,7 +57,9 @@ import { getGiftCardSettings, updateGiftCardSettings } from '@/services/giftCard
 import * as reportes from '@/services/giftCards/giftCardReports.service'
 import { GiftCardError } from '@/services/giftCards/giftCardErrors'
 import { BadRequestError } from '@/errors/AppError'
-import { exportCsv } from '@/controllers/dashboard/giftCard.dashboard.controller'
+import { exportCsv, operate } from '@/controllers/dashboard/giftCard.dashboard.controller'
+import { cambiarDestinoDeTarjeta, reenviarTarjeta } from '@/services/giftCards/giftCardCuenta.service'
+import { entregarTarjetas } from '@/services/giftCards/giftCardDelivery.service'
 
 const m = (f: unknown) => f as jest.Mock
 const app = express()
@@ -206,6 +222,194 @@ describe('operaciones de gerente', () => {
       .send({ operationKey: 'bloquea-0001-abc', tipo: 'DESBLOQUEAR', reason: 'CUSTOMER_REQUEST' })
     expect(r.status).toBe(409)
     expect(r.body.code).toBe('IDEMPOTENCY_KEY_REUSED')
+  })
+})
+
+/** Q104 (r21-2): el replay de «Reponer código» devuelve el código VIGENTE: es una salida del secreto (Q102). */
+describe('Q104: el reintento de «Reponer código» deja su renglón antes de devolver el código', () => {
+  const salida = m(superficie.registrarSalidaDelSecreto)
+  const NUEVO = { display: 'AB12-CD34-EF56-GH78-J', last4: 'GH78' }
+  const REPONER = { operationKey: 'repone-0001-abc', tipo: 'REEMPLAZAR_CODIGO', reason: 'LOST_CARD', folio: 'ORD-1729' }
+  /** `operate` llamado directo, con `req`/`res`/`next` falsos: así se ve el orden entre la bitácora y la respuesta. */
+  const llamada = (body: Record<string, unknown> = REPONER) => {
+    const req = {
+      params: { venueId: 'v1', giftCardId: 'gc1' },
+      body,
+      authContext: { userId: 'gerente-1', venueId: 'v1', role: 'MANAGER' },
+      ip: '10.0.0.7',
+      get: (h: string) => (h.toLowerCase() === 'user-agent' ? 'panel-test' : undefined),
+    } as any
+    const res: any = { status: jest.fn(() => res), json: jest.fn(() => res) }
+    const next = jest.fn()
+    return { req, res, next }
+  }
+
+  it('replay con el código ⇒ UN GIFT_CARD_CODE_REVEALED (REPLACE_REPLAY) y la respuesta sale DESPUÉS de que se guardó', async () => {
+    m(superficie.operarSobreDeGerente).mockResolvedValue({ activityIds: ['a2'], nuevoCodigo: NUEVO, replayed: true })
+    let guardar: () => void = () => undefined
+    salida.mockImplementationOnce(() => new Promise<void>(r => (guardar = r)))
+    const { req, res, next } = llamada()
+    const enCurso = operate(req, res, next)
+    for (let i = 0; i < 5; i++) await new Promise(r => setImmediate(r))
+    expect(salida).toHaveBeenCalledTimes(1)
+    expect(res.json).not.toHaveBeenCalled()
+    guardar()
+    await enCurso
+    expect(res.json).toHaveBeenCalledTimes(1)
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { activityIds: ['a2'], nuevoCodigo: NUEVO } })
+    expect(next).not.toHaveBeenCalled()
+    const [db, filas] = salida.mock.calls[0]
+    expect(db).toBeDefined()
+    expect(filas).toEqual([
+      {
+        venueId: 'v1',
+        staffId: 'gerente-1',
+        action: 'GIFT_CARD_CODE_REVEALED',
+        entity: 'GiftCard',
+        entityId: 'gc1',
+        data: { operationKey: 'repone-0001-abc', motivo: 'REPLACE_REPLAY', ruta: 'dashboard:operate' },
+        ipAddress: '10.0.0.7',
+        userAgent: 'panel-test',
+      },
+    ])
+    expect(JSON.stringify(filas)).not.toMatch(/AB12-CD34|GH78/)
+    // Un replay nunca repite la bitácora de mejor esfuerzo de la reposición.
+    expect(audit).not.toHaveBeenCalled()
+  })
+
+  it('🔴 si ese renglón no se guarda ⇒ `next` recibe el 503 «No se pudo mostrar el código. Intenta otra vez.» y nunca se responde', async () => {
+    m(superficie.operarSobreDeGerente).mockResolvedValue({ activityIds: ['a2'], nuevoCodigo: NUEVO, replayed: true })
+    salida.mockRejectedValueOnce(new Error('la base no contestó'))
+    const { req, res, next } = llamada()
+    await operate(req, res, next)
+    expect(res.json).not.toHaveBeenCalled()
+    expect(next).toHaveBeenCalledTimes(1)
+    const [error] = next.mock.calls[0]
+    expect(error).toMatchObject({ statusCode: 503, message: 'No se pudo mostrar el código. Intenta otra vez.' })
+    expect(JSON.stringify({ message: error.message, code: error.code, details: error.details })).not.toMatch(/AB12-CD34|GH78/)
+  })
+
+  it('🔴 por la ruta: el 503 llega al panel sin `nuevoCodigo`', async () => {
+    m(superficie.operarSobreDeGerente).mockResolvedValue({ activityIds: ['a2'], nuevoCodigo: NUEVO, replayed: true })
+    salida.mockRejectedValueOnce(new Error('la base no contestó'))
+    const r = await request(app).post(`${B}/gc1/operations`).send(REPONER)
+    expect(r.status).toBe(503)
+    expect(r.body.message).toBe('No se pudo mostrar el código. Intenta otra vez.')
+    expect(JSON.stringify(r.body)).not.toMatch(/nuevoCodigo|AB12-CD34/)
+  })
+
+  it('la primera reposición (replayed: false) ⇒ ningún REVEALED y su bitácora de siempre', async () => {
+    m(superficie.operarSobreDeGerente).mockResolvedValue({ activityIds: ['a2'], nuevoCodigo: NUEVO, replayed: false })
+    const { req, res, next } = llamada()
+    await operate(req, res, next)
+    expect(salida).not.toHaveBeenCalled()
+    expect(audit).toHaveBeenCalledWith(expect.objectContaining({ action: 'GIFT_CARD_CODE_REPLACED', entityId: 'gc1' }))
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { activityIds: ['a2'], nuevoCodigo: NUEVO } })
+  })
+
+  it.each([
+    ['ajuste', { operationKey: 'ajuste-0009-abc', tipo: 'AJUSTE', direccion: 'INCREMENT', amount: 10, reason: 'CASHIER_ERROR', note: 'x' }],
+    ['bloqueo', { operationKey: 'bloquea-0009-abc', tipo: 'BLOQUEAR', reason: 'CHARGEBACK' }],
+  ])('un replay sin código (%s) ⇒ ningún REVEALED ni bitácora', async (_caso, body) => {
+    m(superficie.operarSobreDeGerente).mockResolvedValue({ activityIds: ['a3'], replayed: true })
+    const { req, res, next } = llamada(body)
+    await operate(req, res, next)
+    expect(salida).not.toHaveBeenCalled()
+    expect(audit).not.toHaveBeenCalled()
+    expect(res.json).toHaveBeenCalledWith({ success: true, data: { activityIds: ['a3'] } })
+  })
+})
+
+/** 1b S7 (Q16, P-2): el gerente reenvía o cambia el destino desde el panel; misma respuesta y misma bitácora que el POS. */
+describe('reenviar desde el panel', () => {
+  const RUTA = 'POST /dashboard/venues/:venueId/gift-cards/:giftCardId/resend'
+  const GERENTE = { staffId: 'gerente-1', puedeVender: true, puedeGestionar: true }
+  const RESULTADO = {
+    giftCardId: 'gc1',
+    deliveryStatus: 'PENDING',
+    repuesta: false,
+    ultimos4: 'JKMN',
+    replay: false,
+    destinoAnterior: null,
+    destinoNuevo: null,
+  }
+  const reenvio = m(superficie.auditarReenvio)
+
+  it('sin destino ⇒ reenviarTarjeta en SU negocio, como gerente; responde los cuatro campos, deja su bitácora y patea', async () => {
+    m(reenviarTarjeta).mockResolvedValue(RESULTADO)
+    const r = await request(app).post(`${B}/gc1/resend`).send({ operationKey: 'reenvia-0001-abc' })
+    expect(r.status).toBe(200)
+    expect(r.body).toEqual({ success: true, data: { giftCardId: 'gc1', deliveryStatus: 'PENDING', repuesta: false, ultimos4: 'JKMN' } })
+    expect(reenviarTarjeta).toHaveBeenCalledWith('v1', 'gc1', GERENTE, { operationKey: 'reenvia-0001-abc' })
+    expect(cambiarDestinoDeTarjeta).not.toHaveBeenCalled()
+    expect(reenvio).toHaveBeenCalledTimes(1)
+    expect(reenvio).toHaveBeenCalledWith(
+      expect.objectContaining({
+        venueId: 'v1',
+        staffId: 'gerente-1',
+        giftCardId: 'gc1',
+        operationKey: 'reenvia-0001-abc',
+        ruta: RUTA,
+        resultado: RESULTADO,
+      }),
+    )
+    expect(entregarTarjetas).toHaveBeenCalledWith({ ids: ['gc1'] })
+  })
+
+  it.each([
+    ['el destino actual', { deliveryChannel: 'WHATSAPP', recipientPhone: '5512345678' }],
+    ['un correo nuevo', { deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com' }],
+  ])('con destino (%s) ⇒ SIEMPRE cambiarDestinoDeTarjeta, como gerente; su bitácora y la patada (D3)', async (_caso, destino) => {
+    const cambio = { ...RESULTADO, repuesta: true, ultimos4: 'WXYZ', destinoAnterior: '55•••••678', destinoNuevo: 'a•••@gmail.com' }
+    m(cambiarDestinoDeTarjeta).mockResolvedValue(cambio)
+    const r = await request(app)
+      .post(`${B}/gc1/resend`)
+      .send({ operationKey: 'reenvia-0002-abc', ...destino })
+    expect(r.status).toBe(200)
+    expect(r.body.data).toEqual({ giftCardId: 'gc1', deliveryStatus: 'PENDING', repuesta: true, ultimos4: 'WXYZ' })
+    expect(cambiarDestinoDeTarjeta).toHaveBeenCalledWith('v1', 'gc1', GERENTE, { operationKey: 'reenvia-0002-abc', destino })
+    expect(reenviarTarjeta).not.toHaveBeenCalled()
+    expect(reenvio).toHaveBeenCalledWith(expect.objectContaining({ giftCardId: 'gc1', ruta: RUTA, resultado: cambio }))
+    expect(entregarTarjetas).toHaveBeenCalledWith({ ids: ['gc1'] })
+  })
+
+  it('🔴 un replay responde lo mismo y NO patea (la bitácora la descarta auditarReenvio)', async () => {
+    m(reenviarTarjeta).mockResolvedValue({ ...RESULTADO, replay: true, deliveryStatus: 'SENT' })
+    const r = await request(app).post(`${B}/gc1/resend`).send({ operationKey: 'reenvia-0001-abc' })
+    expect(r.body.data).toEqual({ giftCardId: 'gc1', deliveryStatus: 'SENT', repuesta: false, ultimos4: 'JKMN' })
+    expect(reenvio).toHaveBeenCalledWith(expect.objectContaining({ resultado: expect.objectContaining({ replay: true }) }))
+    expect(entregarTarjetas).not.toHaveBeenCalled()
+  })
+
+  it('un rechazo de la tarjeta va a la bitácora del reenvío y se relanza con su code; no patea', async () => {
+    const error = new GiftCardError('GIFT_CARD_ALREADY_USED', 'Esta tarjeta ya se usó: no se puede reponer.', 409)
+    m(cambiarDestinoDeTarjeta).mockRejectedValue(error)
+    const r = await request(app)
+      .post(`${B}/gc1/resend`)
+      .send({ operationKey: 'reenvia-0003-abc', deliveryChannel: 'EMAIL', recipientEmail: 'ana@gmail.com' })
+    expect(r.status).toBe(409)
+    expect(r.body.code).toBe('GIFT_CARD_ALREADY_USED')
+    expect(reenvio).toHaveBeenCalledWith(expect.objectContaining({ giftCardId: 'gc1', ruta: RUTA, rechazo: error }))
+    expect(entregarTarjetas).not.toHaveBeenCalled()
+  })
+
+  it('una tarjeta de otro negocio llega igual que una que no existe: 404 GIFT_CARD_NOT_FOUND', async () => {
+    m(reenviarTarjeta).mockRejectedValue(
+      new GiftCardError('GIFT_CARD_NOT_FOUND', 'No encontramos esa tarjeta de regalo en este negocio.', 404),
+    )
+    const r = await request(app).post(`${B}/gcAjena/resend`).send({ operationKey: 'reenvia-0004-abc' })
+    expect(r.status).toBe(404)
+    expect(r.body.code).toBe('GIFT_CARD_NOT_FOUND')
+    expect(m(reenviarTarjeta).mock.calls[0].slice(0, 2)).toEqual(['v1', 'gcAjena'])
+  })
+
+  it.each(['PRINTED', 'HANDED_TO_BUYER'])('a %s ⇒ 400 GIFT_CARD_DESTINATION_CHANNEL_INVALID sin tocar la tarjeta', async canal => {
+    const r = await request(app).post(`${B}/gc1/resend`).send({ operationKey: 'reenvia-0005-abc', deliveryChannel: canal })
+    expect(r.status).toBe(400)
+    expect(r.body).toMatchObject({ code: 'GIFT_CARD_DESTINATION_CHANNEL_INVALID' })
+    expect(reenviarTarjeta).not.toHaveBeenCalled()
+    expect(cambiarDestinoDeTarjeta).not.toHaveBeenCalled()
+    expect(entregarTarjetas).not.toHaveBeenCalled()
   })
 })
 
