@@ -16,7 +16,7 @@ import {
   RappiEscrituraBloqueadaError,
   TIMEOUT_RAPPI_MS,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
-import { _resetRappiTokenCacheForTests } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
+import { _resetRappiTokenCacheForTests, getRappiToken } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
 
 function respuesta(status: number, body = '{}') {
   return { ok: status >= 200 && status < 300, status, text: async () => body } as unknown as Response
@@ -173,6 +173,39 @@ describe('llamarRappi', () => {
     const fetchImpl = jest.fn().mockResolvedValue(respuesta(401))
     const r = await llamarRappi(deps({ fetchImpl }), { superficie: 'integrations', metodo: 'GET', ruta: '/orders' })
     expect(r.status).toBe(401)
+    expect(fetchImpl).toHaveBeenCalledTimes(2)
+  })
+
+  // Tarea 13 (Codex plan r1 #4): el «listo» de Rappi cuenta llamadas (a lo más 3 por pedido) ANTES de llamar; si un 401
+  // gastara un segundo intento por dentro, una reserva serían DOS peticiones y el tope dejaría de ser cierto.
+  it('🔴 un 401 del "listo" no se reintenta por dentro: con reintentarEn401 en false invalida el token y devuelve el 401 (UNA petición)', async () => {
+    const fetchToken = jest.fn(async () => ({ access_token: 'tok-nuevo' }))
+    const getToken = (s: 'integrations') => getRappiToken(s, { fetchToken })
+    await getToken('integrations') // el token queda en caché
+    const fetchImpl = jest.fn().mockResolvedValue(respuesta(401, 'expired'))
+
+    const r = await llamarRappi(deps({ fetchImpl, getToken, tiendasEscribibles: ['900'] }), {
+      superficie: 'integrations',
+      metodo: 'POST',
+      ruta: '/orders/1/ready-for-pickup',
+      storeId: '900',
+      reintentarEn401: false,
+    })
+
+    expect(fetchImpl).toHaveBeenCalledTimes(1)
+    expect(r).toMatchObject({ ok: false, status: 401, raw: 'expired' })
+    // Y el token SÍ se invalidó: la siguiente petición pide uno nuevo en vez de repetir el revocado.
+    expect(fetchToken).toHaveBeenCalledTimes(1)
+    await getToken('integrations')
+    expect(fetchToken).toHaveBeenCalledTimes(2)
+  })
+
+  it('reintentarEn401 en true (o sin decirlo) conserva el reintento de siempre', async () => {
+    const fetchImpl = jest.fn().mockResolvedValueOnce(respuesta(401)).mockResolvedValueOnce(respuesta(200))
+
+    const r = await llamarRappi(deps({ fetchImpl }), { superficie: 'integrations', metodo: 'GET', ruta: '/orders', reintentarEn401: true })
+
+    expect(r.status).toBe(200)
     expect(fetchImpl).toHaveBeenCalledTimes(2)
   })
 

@@ -5,7 +5,9 @@
  * completo en el webhook, así que la columna estaba libre — y así no hace falta migración de esquema (decisión T2 del plan).
  *  · `aceptacion`: Rappi YA aceptó el pedido. Se anota ANTES de registrar la venta: un reintento con la marca no vuelve a
  *    aceptar (Rappi contestaría 400) y registra.
- *  · `listo`: el contador de «listo para el repartidor» (Tarea 13; Rappi deja de hacerle caso a la 3.ª llamada).
+ *  · `listo`: el contador de «listo para el repartidor» (Tarea 13). Rappi deja de ejecutar acciones después de la TERCERA
+ *    solicitud y considera mal uso lo que siga: se cuenta ANTES de llamar (`reservarLlamadaDeListo`) y se cierra cuando ya no
+ *    tiene caso (`cerrarListo`). Vive en la base, así que un reinicio no lo olvida.
  *
  * 🔴 Nunca registrar un pedido a ciegas ni dos veces. Si el proceso muere entre el sí de Rappi y la marca, el reintento recibe
  * un 400 al aceptar; entonces el único que puede decir si el pedido es nuestro es su HISTORIAL del lado de Rappi
@@ -13,9 +15,12 @@
  */
 import { Prisma } from '@prisma/client'
 
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 
+import { RAPPI_EVENTS } from './rappi.adapter'
 import type { RappiRespuesta } from './rappi.http'
+import { llaveDeAvisoDePedido } from './rappi.webhookIngress'
 
 export type EvidenciaDeAceptacion = 'HTTP_2XX' | 'HISTORIAL_TAKEN'
 export type CierreDeListo = 'HTTP_2XX' | 'TRANSICION_INVALIDA' | 'TOPE'
@@ -137,4 +142,134 @@ export function leerRespuestaDelHistorial(r: RappiRespuesta | null | undefined):
       ...(typeof o.event_time === 'string' ? { event_time: o.event_time } : {}),
     }
   })
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  «Listo para el repartidor»: a lo más 3 llamadas por pedido (Tarea 13)
+// ────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * 🔴 Rappi: «después de tres solicitudes, el sistema dejará de ejecutar acciones adicionales, por lo que cualquier intento
+ * posterior será considerado un uso incorrecto del endpoint» (doc «managing-user-orders»), con la amenaza de revocar el acceso.
+ */
+export const MAX_LLAMADAS_LISTO = 3
+
+/** Una fila `NEW_ORDER` bloqueada para contar o cerrar su «listo». */
+type FilaDelAviso = { id: string; resourcePayload: Prisma.JsonValue }
+
+/**
+ * La fila del aviso `NEW_ORDER` del pedido, con `FOR UPDATE`, por la llave ÚNICA `dedupKey` que le puso el ingreso
+ * (`llaveDeAvisoDePedido`): nunca recorriendo eventos por `externalOrderId`, que no tiene índice. `storeId` es la tienda del
+ * vínculo del pedido, la misma con que el ingreso encontró el vínculo y armó la llave.
+ */
+async function avisoBloqueado(tx: Prisma.TransactionClient, externalOrderId: string, storeId: string): Promise<FilaDelAviso | null> {
+  const dedupKey = llaveDeAvisoDePedido(RAPPI_EVENTS.NEW_ORDER, storeId, externalOrderId)
+  const filas = await tx.$queryRaw<FilaDelAviso[]>`
+    SELECT "id", "resourcePayload" FROM "DeliveryOrderEvent"
+     WHERE "dedupKey" = ${dedupKey}
+       FOR UPDATE`
+  return filas[0] ?? null
+}
+
+/**
+ * 🔴 MEZCLA el contador dentro de `resourcePayload` (`||` de JSONB sólo cambia la llave `listo`): la marca de aceptación de
+ * la Tarea 9 (`aceptacion`) y lo demás sobreviven. Se escribe con la fila bloqueada por `avisoBloqueado`, así que una
+ * `anotarAceptacion` que llegue a la vez espera y mezcla sobre lo que esto dejó (o esto, sobre lo que dejó ella).
+ */
+function guardarListo(tx: Prisma.TransactionClient, filaId: string, listo: NonNullable<EstadoRappiDelPedido['listo']>) {
+  return tx.$executeRaw`
+    UPDATE "DeliveryOrderEvent"
+       SET "resourcePayload" = (CASE WHEN jsonb_typeof("resourcePayload") = 'object' THEN "resourcePayload" ELSE '{}'::jsonb END)
+                               || jsonb_build_object('listo', ${JSON.stringify(listo)}::jsonb)
+     WHERE "id" = ${filaId}`
+}
+
+/**
+ * ¿Se puede gastar una llamada de «listo» en este pedido? En UNA transacción: bloquea la fila del aviso, y si el «listo» ya
+ * cerró o ya se usaron las 3, no; si no, SUMA 1 Y LO GUARDA ANTES de que salga la llamada. Así una llamada que muere a media
+ * red ya contó, y un proceso que se reinicia no vuelve a empezar de cero.
+ *
+ * Sin la fila del aviso (no debería pasar: todo pedido de Rappi nace de uno) se permite con un warn: no hay dónde contar, y
+ * negar el «listo» por eso sería peor. El barrido de «listos» espera entre intentos de todos modos.
+ */
+export async function reservarLlamadaDeListo(externalOrderId: string, storeId: string): Promise<{ permitido: boolean }> {
+  return prisma.$transaction(async tx => {
+    const fila = await avisoBloqueado(tx, externalOrderId, storeId)
+    if (!fila) {
+      logger.warn('🛵 [Rappi] «listo» sin el aviso NEW_ORDER guardado: no hay dónde contar sus llamadas, se permite', {
+        externalOrderId,
+        storeId,
+      })
+      return { permitido: true }
+    }
+    const listo = leerEstado(fila.resourcePayload).listo
+    const llamadas = listo?.llamadas ?? 0
+    if (listo?.cerrado || llamadas >= MAX_LLAMADAS_LISTO) return { permitido: false }
+    await guardarListo(tx, fila.id, { llamadas: llamadas + 1 })
+    return { permitido: true }
+  })
+}
+
+/**
+ * El «listo» de este pedido ya no se intenta más, y por qué: `HTTP_2XX` (Rappi lo recibió), `TRANSICION_INVALIDA` (su estado
+ * ya no lo admite) o `TOPE` (se usaron las 3). Conserva las llamadas. 🔴 El PRIMER cierre manda: un `TOPE` que llega después
+ * no borra que Rappi ya había contestado 2xx. Sin la fila del aviso no hace nada.
+ */
+export async function cerrarListo(externalOrderId: string, storeId: string, como: CierreDeListo): Promise<void> {
+  await prisma.$transaction(async tx => {
+    const fila = await avisoBloqueado(tx, externalOrderId, storeId)
+    if (!fila) return
+    const listo = leerEstado(fila.resourcePayload).listo
+    if (listo?.cerrado) return
+    await guardarListo(tx, fila.id, { llamadas: listo?.llamadas ?? 0, cerrado: como })
+  })
+}
+
+/**
+ * ¿El 400 del «listo» dice que el pedido ya no admite esa transición? Entonces repetirlo daría lo mismo: se cierra.
+ *
+ * 🔴 Ajustar con M4 cuando se vea el 400 real (recorrido-real.md). En el sandbox el «listo» sólo contestó 424 («inténtelo
+ * más tarde», que NO es esto), así que la expresión es la del plan. La forma en inglés sí se vio, al rechazar un pedido
+ * tomado (M11): «[ORDER 722609056] Invalid transition from {TAKEN} to {REJECTED} state, check out …».
+ *
+ * Rappi envuelve el cuerpo de su servicio interno en otro `message`, con el código HTTP adelante: el 424 real llegó como
+ * `{"message":"424 {\"code\":…,\"message\":\"No se pudo…\"}"}`. Por eso se busca en el texto crudo y también en cada
+ * `message` y `code` de adentro, desenvolviendo hasta tres capas (así un acento escapado, `\u00f3`, también se lee).
+ */
+const TRANSICION_INVALIDA = /transici[oó]n inv[aá]lida|invalid transition/i
+const CAPAS_DEL_CUERPO = 3
+
+export function esTransicionInvalida(raw: string): boolean {
+  return textosDelCuerpo(raw).some(t => TRANSICION_INVALIDA.test(t))
+}
+
+/** El texto crudo y los `message`/`code` que trae adentro, capa por capa. */
+function textosDelCuerpo(raw: string): string[] {
+  const textos: string[] = []
+  let capa = [raw]
+  for (let i = 0; i <= CAPAS_DEL_CUERPO && capa.length > 0; i++) {
+    const siguiente: string[] = []
+    for (const texto of capa) {
+      textos.push(texto)
+      const json = jsonDentro(texto)
+      if (!esObjeto(json)) continue
+      for (const llave of ['message', 'code']) {
+        const v = json[llave]
+        if (typeof v === 'string') siguiente.push(v)
+      }
+    }
+    capa = siguiente
+  }
+  return textos
+}
+
+/** El JSON de un texto: todo él, o desde su primer `{` («424 {…}»). `undefined` si no hay uno legible. */
+function jsonDentro(texto: string): unknown {
+  const inicio = texto.indexOf('{')
+  if (inicio < 0) return undefined
+  try {
+    return JSON.parse(texto.slice(inicio))
+  } catch {
+    return undefined
+  }
 }

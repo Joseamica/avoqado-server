@@ -155,6 +155,12 @@ export interface ActionResult {
   status: number
   /** Cuerpo crudo — se guarda para auditoría cuando falla. */
   raw: string
+  /**
+   * El proveedor ya no admite esta acción para este pedido: NO repetirla. Lo decide el adaptador (un tope de llamadas
+   * del proveedor, una transición que su máquina de estados ya no permite). 🔴 No significa «hecho»: el núcleo nunca
+   * acredita nada por esta marca, sólo deja de intentar. Ausente = se puede volver a intentar, como siempre.
+   */
+  terminal?: boolean
 }
 
 /**
@@ -280,6 +286,9 @@ export interface DirectDeliveryAdapter {
    * "La comida ya está lista": avisa al proveedor que puede mandar (o apurar) al repartidor.
    * Capacidad que la validación de producción de Uber exige ver funcionando (caso 59605086,
    * "Order: Mark Order as Ready"). La dispara el KDS al marcar listo — sin botón nuevo.
+   *
+   * Un proveedor que limita cuántas veces se puede decir (o que ya no admite el cambio de estado) contesta `terminal`: el
+   * núcleo deja de intentar (`NO_REINTENTAR`) sin dar el pedido por listo. 🔴 Es el ÚNICO nombre que el núcleo busca.
    */
   markOrderReady?(orderId: string, storeId: string): Promise<ActionResult>
 
@@ -289,7 +298,6 @@ export interface DirectDeliveryAdapter {
    * `cartItemIds` son ids de LÍNEA del pedido del proveedor, no de nuestro menú.
    */
   resolveFulfillmentIssues?(orderId: string, storeId: string, cartItemIds: string[]): Promise<ActionResult>
-  markReady?(orderId: string, storeId: string): Promise<ActionResult>
 
   /**
    * "¿Quién trae este pedido?" — nombre, teléfono (con su código para poder llamarlo) y

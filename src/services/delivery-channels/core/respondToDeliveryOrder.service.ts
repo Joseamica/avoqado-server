@@ -43,6 +43,8 @@ export interface RespuestaPedido {
     | 'OP_IN_PROGRESS'
     // Hay un retiro de renglón PENDING|UNCERTAIN: un cambio a la vez por pedido.
     | 'LINE_ACTION_IN_PROGRESS'
+    // 🔴 El proveedor ya no admite la acción (`ActionResult.terminal`): se dejó de intentar. NUNCA significa «hecho».
+    | 'NO_REINTENTAR'
   error?: string
   /** Con `OP_IN_PROGRESS`: qué operación tiene el pedido. */
   ocupadaPor?: OperacionDeReparto
@@ -225,8 +227,9 @@ export async function markDeliveryOrderReady(venueId: string, orderId: string): 
     orderId,
     'READY',
     () => ctx.adapter.markOrderReady!(ctx.externalOrderId, ctx.storeId),
+    // 🔴 Sólo la evidencia HTTP sella, como siempre; una respuesta `terminal` jamás (es «se dejó de intentar», no «listo»).
     (tx, r) =>
-      esEvidenciaHttp(r.status)
+      esEvidenciaHttp(r.status) && !r.terminal
         ? tx.order.updateMany({ where: { id: orderId, readyReportedAt: null }, data: { readyReportedAt: new Date() } })
         : Promise.resolve(),
     // El 2xx del bump pudo acreditarse entre la lectura de arriba y la reserva: no se manda otro /ready.
@@ -236,6 +239,17 @@ export async function markDeliveryOrderReady(venueId: string, orderId: string): 
   if (s.tipo === 'BLOQUEADA') return s.respuesta
   if (s.tipo === 'TARDIA') return { outcome: 'FAILED', error: 'RESULTADO_TARDIO' }
   const r = s.r
+  if (!r.ok && r.terminal) {
+    // El proveedor ya no admite el «listo» de este pedido (tope de llamadas, transición inválida): repetirlo sólo gastaría
+    // llamadas. `readyReportedAt` sigue nulo a propósito: nadie confirmó que el proveedor lo tenga por listo.
+    logger.warn('El marketplace ya no admite el "listo" del pedido: se deja de intentar', {
+      orderId,
+      externalOrderId: ctx.externalOrderId,
+      status: r.status,
+      cuerpo: r.raw.slice(0, 200),
+    })
+    return { outcome: 'NO_REINTENTAR', error: r.raw.slice(0, 200) }
+  }
   if (!r.ok) {
     logger.warn('El marketplace rechazó el "listo" del pedido', {
       orderId,

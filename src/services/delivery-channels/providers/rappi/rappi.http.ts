@@ -149,6 +149,12 @@ export interface RappiPeticion {
   cabecerasExtra?: Record<string, string>
   /** Escrituras de varias tiendas (aprovisionar): el candado revisa CADA una. */
   storeIds?: readonly string[]
+  /**
+   * Por default `true`: ante un 401 se invalida el token y se reintenta UNA vez. Con `false` el token se invalida igual
+   * pero el 401 se devuelve sin segundo intento. 🔴 Lo usa el «listo», que Rappi deja de atender después de la TERCERA
+   * solicitud: cada llamada se cuenta ANTES de salir, y un reintento por dentro serían dos peticiones por una cuenta.
+   */
+  reintentarEn401?: boolean
 }
 
 /**
@@ -157,7 +163,7 @@ export interface RappiPeticion {
  * 🔴 Ante un 401 invalida el token y reintenta UNA vez. Rappi puede revocar un token antes de
  * que venza, y sin esto reintentaríamos con el mismo para siempre. Una sola vez, no en bucle:
  * si el segundo también da 401 el problema son las credenciales, y machacar sólo empeora la
- * tasa de éxito del 98% que Rappi exige.
+ * tasa de éxito del 98% que Rappi exige. Con `reintentarEn401: false` no hay segundo intento (ver `RappiPeticion`).
  */
 export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion): Promise<RappiRespuesta> {
   if (!LECTURAS.has(peticion.metodo.toUpperCase())) {
@@ -189,6 +195,8 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
   if (primera.status !== 401) return primera
 
   invalidarToken(peticion.superficie)
+  // El token ya quedó invalidado para la siguiente petición; ésta no gasta otra.
+  if (peticion.reintentarEn401 === false) return primera
   return intentar()
 }
 

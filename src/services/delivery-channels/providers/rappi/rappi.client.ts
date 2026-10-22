@@ -147,11 +147,21 @@ export async function rechazarPedidoRappi(
 /**
  * "Ya está listo para el repartidor."
  *
- * ⚠️ Rappi documenta que después de TRES llamadas por pedido deja de hacer efecto — no es un
- * botón de reintento infinito.
+ * ⚠️ Rappi documenta que después de TRES solicitudes por pedido deja de ejecutar acciones y considera mal uso lo que siga.
+ * El tope lo lleva `rappiAdapter.markOrderReady` (contado en la base); aquí sólo sale la llamada. `reintentarEn401: false`
+ * hace que sea UNA petición HTTP aunque el token haya vencido (ver `RappiPeticion`).
  */
-export async function marcarListoRappi(orderId: string, storeId: string): Promise<RappiRespuesta> {
-  return rappiApi({ metodo: 'POST', ruta: `${API}/orders/${encodeURIComponent(orderId)}/ready-for-pickup`, storeId })
+export async function marcarListoRappi(
+  orderId: string,
+  storeId: string,
+  opciones: Pick<RappiPeticion, 'reintentarEn401'> = {},
+): Promise<RappiRespuesta> {
+  return rappiApi({
+    metodo: 'POST',
+    ruta: `${API}/orders/${encodeURIComponent(orderId)}/ready-for-pickup`,
+    storeId,
+    reintentarEn401: opciones.reintentarEn401,
+  })
 }
 
 /**

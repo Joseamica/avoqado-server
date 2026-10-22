@@ -26,6 +26,8 @@ import type { DeliveryProvider } from '@prisma/client'
 import type { ActionResult, CanonicalDeliveryEvent, DenyReason, EventIdentity, NormalizedDeliveryOrder } from '../../core/types'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { HorarioSemanal } from '../../core/deliveryHours.service'
+// Sólo el TIPO (se borra al compilar): `rappi.estadoDelPedido` importa este archivo, así que su código se carga perezoso.
+import type { CierreDeListo } from './rappi.estadoDelPedido'
 import { aHorarioRappi } from './rappi.hours'
 import { construirMenuRappi, type PreciosDeCanal } from './rappi.menuMapper'
 import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type OpcionesDeTraduccion, type RappiOrderPayload } from './rappi.mapper'
@@ -191,10 +193,55 @@ export const rappiAdapter = {
     return http as ActionResult
   },
 
-  /** "Listo para el repartidor". ⚠️ Rappi ignora la CUARTA llamada en adelante por pedido. */
-  async markReady(orderId: string, storeId: string): Promise<ActionResult> {
-    const { marcarListoRappi } = await import('./rappi.client')
-    return marcarListoRappi(orderId, storeId)
+  /**
+   * "Listo para el repartidor". 🔴 Se llama `markOrderReady` porque es el nombre que el núcleo busca: con el nombre viejo
+   * (`markReady`) el núcleo contestaba NOT_A_DELIVERY_ORDER y Rappi nunca se enteraba.
+   *
+   * Rappi deja de ejecutar acciones después de la TERCERA solicitud por pedido, y lo que siga es mal uso. Por eso cada
+   * llamada se reserva y se CUENTA en la base ANTES de salir (`reservarLlamadaDeListo`, en la fila del aviso `NEW_ORDER`): un
+   * reinicio no las olvida. Y cada reserva es UNA petición HTTP (`reintentarEn401: false`).
+   *  · sin permiso (ya se usaron las 3, o ya cerró) ⇒ no sale a la red: `terminal`, `TOPE_DE_LISTO`;
+   *  · 2xx ⇒ se cierra (`HTTP_2XX`);
+   *  · 400 de transición inválida ⇒ se cierra y es `terminal` (repetirla daría lo mismo);
+   *  · lo demás (el 424 «inténtelo más tarde» que dio el sandbox, un 5xx, un 401) se devuelve tal cual: ya contó.
+   * Si la reserva no se puede escribir, la llamada NO sale (sin contar no se llama). Si falla el CIERRE, la respuesta se
+   * devuelve igual: el 2xx no se pierde (el núcleo lo acredita) y, sin cierre, el tope sigue protegiendo.
+   */
+  async markOrderReady(orderId: string, storeId: string): Promise<ActionResult> {
+    const [{ marcarListoRappi }, estado, { default: logger }] = await Promise.all([
+      import('./rappi.client'),
+      import('./rappi.estadoDelPedido'),
+      import('@/config/logger'),
+    ])
+    const cerrar = (como: CierreDeListo) =>
+      estado.cerrarListo(orderId, storeId, como).catch(error =>
+        logger.warn('🛵 [Rappi] no se pudo anotar el cierre del «listo» (el tope de llamadas sigue protegiendo)', {
+          orderId,
+          storeId,
+          como,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+
+    if (!(await estado.reservarLlamadaDeListo(orderId, storeId)).permitido) {
+      logger.warn('🛵 [Rappi] «listo» sin llamada: ya se usaron las 3 que Rappi atiende (o ya cerró); no sale a la red', {
+        orderId,
+        storeId,
+      })
+      await cerrar('TOPE')
+      return { ok: false, status: 0, raw: 'TOPE_DE_LISTO', terminal: true }
+    }
+
+    const r = await marcarListoRappi(orderId, storeId, { reintentarEn401: false })
+    if (r.status >= 200 && r.status < 300) {
+      await cerrar('HTTP_2XX')
+      return r
+    }
+    if (r.status === 400 && estado.esTransicionInvalida(r.raw)) {
+      await cerrar('TRANSICION_INVALIDA')
+      return { ...r, terminal: true }
+    }
+    return r
   },
 
   /**

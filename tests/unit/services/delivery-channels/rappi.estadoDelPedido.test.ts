@@ -8,12 +8,17 @@ import * as fs from 'fs'
 import * as path from 'path'
 
 import prisma from '../../../../src/utils/prismaClient'
+import logger from '../../../../src/config/logger'
 import {
   analizarHistorial,
   anotarAceptacion,
+  cerrarListo,
+  esTransicionInvalida,
   leerEstado,
   leerHistorial,
   leerRespuestaDelHistorial,
+  MAX_LLAMADAS_LISTO,
+  reservarLlamadaDeListo,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
 
 const SANDBOX = path.join(__dirname, 'fixtures/rappi/sandbox')
@@ -177,5 +182,166 @@ describe('anotarAceptacion', () => {
     ejecutar.mockResolvedValueOnce(0)
 
     expect(await anotarAceptacion('evt1', 'tok-viejo', 'HTTP_2XX')).toBe(false)
+  })
+})
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  Tarea 13: el «listo» de Rappi, a lo más 3 llamadas por pedido, contadas en la base ANTES de llamar
+// ────────────────────────────────────────────────────────────────────────────────────
+
+/** El cuerpo REAL del 424 del sandbox DEV (M4, recorrido-real.md, 21-oct): antes y después del tiempo de cocina. */
+const CUERPO_424_REAL =
+  '{"message":"424 {\\"code\\":\\"error.ready_for_pickup.unsuccessful\\",\\"message\\":\\"No se pudo procesar su solicitud, por favor intentelo mas tarde.\\"}"}'
+/** El texto REAL de «transición inválida» que dio Rappi al rechazar un pedido TOMADO (M11, 21-oct). */
+const TRANSICION_INVALIDA_REAL =
+  '[ORDER 722609056] Invalid transition from {TAKEN} to {REJECTED} state, check out https://dev-portal.rappi.com/managing-user-orders/#order-status for further details'
+
+describe('esTransicionInvalida', () => {
+  it('el cuerpo real del 424 tiene la forma esperada (envuelto en otro `message`)', () => {
+    const exterior = JSON.parse(CUERPO_424_REAL) as { message: string }
+    expect(exterior.message.startsWith('424 {')).toBe(true)
+    expect(JSON.parse(exterior.message.slice(4))).toEqual({
+      code: 'error.ready_for_pickup.unsuccessful',
+      message: 'No se pudo procesar su solicitud, por favor intentelo mas tarde.',
+    })
+  })
+
+  it('🔴 el 424 REAL («inténtelo más tarde») NO es transición inválida: no cierra el «listo»', () => {
+    expect(esTransicionInvalida(CUERPO_424_REAL)).toBe(false)
+  })
+
+  it('el texto real de Rappi («Invalid transition from {TAKEN} to …»), suelto o como `message` de un JSON', () => {
+    expect(esTransicionInvalida(TRANSICION_INVALIDA_REAL)).toBe(true)
+    expect(esTransicionInvalida(JSON.stringify({ message: TRANSICION_INVALIDA_REAL }))).toBe(true)
+  })
+
+  it('🔴 lo encuentra ADENTRO aunque venga envuelto como el 424 («400 {…}» dentro de otro `message`)', () => {
+    const interior = JSON.stringify({ code: 'error.ready_for_pickup.invalid', message: TRANSICION_INVALIDA_REAL })
+    expect(esTransicionInvalida(JSON.stringify({ message: `400 ${interior}` }))).toBe(true)
+  })
+
+  it('en español, con o sin acentos, aunque los acentos lleguen escapados dentro del JSON envuelto', () => {
+    expect(esTransicionInvalida('Transición inválida')).toBe(true)
+    expect(esTransicionInvalida('transicion invalida')).toBe(true)
+    const escapado = '{"message":"400 {\\"message\\":\\"Transici\\\\u00f3n inv\\\\u00e1lida\\"}"}'
+    expect(escapado).toContain('\\u00f3') // el acento viaja escapado: sin desenvolver, la expresión no lo vería
+    expect(esTransicionInvalida(escapado)).toBe(true)
+  })
+
+  it.each([
+    ['vacío', ''],
+    ['un 400 de otra cosa', '{"message":"Bad request: cookingTime out of range"}'],
+    ['HTML', '<html>error</html>'],
+    ['JSON roto', '{"message": "400 {roto'],
+  ])('%s ⇒ false, sin lanzar', (_caso, raw) => {
+    expect(esTransicionInvalida(raw)).toBe(false)
+  })
+})
+
+describe('reservarLlamadaDeListo — la llamada se cuenta en la fila del NEW_ORDER, ANTES de llamar', () => {
+  const consultar = (prisma as any).$queryRaw as jest.Mock
+  const ejecutar = (prisma as any).$executeRaw as jest.Mock
+  const sqlDe = (m: jest.Mock, i = 0) => (m.mock.calls[i][0] as TemplateStringsArray).join('?')
+  const valoresDe = (m: jest.Mock, i = 0) => m.mock.calls[i].slice(1)
+  const LLAVE = 'RAPPI:NEW_ORDER:900175625:722609056'
+
+  beforeEach(() => {
+    consultar.mockReset()
+    ejecutar.mockReset().mockResolvedValue(1)
+  })
+
+  it('el tope es 3: Rappi deja de hacer caso después de la TERCERA solicitud (doc «managing-user-orders»)', () => {
+    expect(MAX_LLAMADAS_LISTO).toBe(3)
+  })
+
+  it('🔴 busca la fila por la llave ÚNICA del aviso (dedupKey), en una transacción y con FOR UPDATE', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: null }])
+
+    await reservarLlamadaDeListo('722609056', '900175625')
+
+    expect((prisma as any).$transaction).toHaveBeenCalled()
+    expect(sqlDe(consultar)).toMatch(/FROM "DeliveryOrderEvent"\s+WHERE "dedupKey" = \?\s+FOR UPDATE/)
+    expect(valoresDe(consultar)).toEqual([LLAVE])
+  })
+
+  it('sin llamadas previas: permite, y guarda 1 MEZCLANDO en resourcePayload (no lo reemplaza)', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { aceptacion: { en: 'x', evidencia: 'HTTP_2XX' } } }])
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: true })
+
+    expect(sqlDe(ejecutar)).toMatch(/"resourcePayload" = .*\|\| jsonb_build_object\('listo'/s)
+    expect(sqlDe(ejecutar)).toMatch(/"id" = \?/)
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 1 })
+    expect(valoresDe(ejecutar)).toContain('evt1')
+  })
+
+  it('con 2 llamadas: permite la tercera y guarda 3', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 2 } } }])
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: true })
+
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 3 })
+  })
+
+  it('🔴 con 3 llamadas: NO permite y no escribe nada (la cuarta no sale)', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 3 } } }])
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: false })
+    expect(ejecutar).not.toHaveBeenCalled()
+  })
+
+  it.each(['HTTP_2XX', 'TRANSICION_INVALIDA', 'TOPE'])('ya cerrado (%s): NO permite aunque queden llamadas', async cerrado => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 1, cerrado } } }])
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: false })
+    expect(ejecutar).not.toHaveBeenCalled()
+  })
+
+  it('sin la fila del aviso: permite, con warn (no hay dónde contar), y no escribe', async () => {
+    consultar.mockResolvedValueOnce([])
+
+    expect(await reservarLlamadaDeListo('722609056', '900175625')).toEqual({ permitido: true })
+    expect(ejecutar).not.toHaveBeenCalled()
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(/listo/i), expect.objectContaining({ externalOrderId: '722609056' }))
+  })
+})
+
+describe('cerrarListo — el «listo» ya no se intenta más (y por qué)', () => {
+  const consultar = (prisma as any).$queryRaw as jest.Mock
+  const ejecutar = (prisma as any).$executeRaw as jest.Mock
+  const sqlDe = (m: jest.Mock, i = 0) => (m.mock.calls[i][0] as TemplateStringsArray).join('?')
+  const valoresDe = (m: jest.Mock, i = 0) => m.mock.calls[i].slice(1)
+
+  beforeEach(() => {
+    consultar.mockReset()
+    ejecutar.mockReset().mockResolvedValue(1)
+  })
+
+  it('anota el cierre CONSERVANDO las llamadas, mezclando en resourcePayload', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 2 } } }])
+
+    await cerrarListo('722609056', '900175625', 'HTTP_2XX')
+
+    expect(sqlDe(consultar)).toMatch(/WHERE "dedupKey" = \?\s+FOR UPDATE/)
+    expect(sqlDe(ejecutar)).toMatch(/\|\| jsonb_build_object\('listo'/)
+    const marca = valoresDe(ejecutar).find((v: unknown) => typeof v === 'string' && v.startsWith('{'))
+    expect(JSON.parse(marca)).toEqual({ llamadas: 2, cerrado: 'HTTP_2XX' })
+  })
+
+  it('el PRIMER cierre manda: un TOPE posterior no borra que Rappi ya contestó 2xx', async () => {
+    consultar.mockResolvedValueOnce([{ id: 'evt1', resourcePayload: { listo: { llamadas: 1, cerrado: 'HTTP_2XX' } } }])
+
+    await cerrarListo('722609056', '900175625', 'TOPE')
+
+    expect(ejecutar).not.toHaveBeenCalled()
+  })
+
+  it('sin la fila del aviso no hace nada y no lanza', async () => {
+    consultar.mockResolvedValueOnce([])
+
+    await expect(cerrarListo('722609056', '900175625', 'TOPE')).resolves.toBeUndefined()
+    expect(ejecutar).not.toHaveBeenCalled()
   })
 })
