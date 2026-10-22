@@ -27,6 +27,7 @@ import { ensureDeliveryTenderType } from './deliveryTenderProvisioning.service'
 import { toKdsModifierLabels } from '../../mobile/kds.mobile.service'
 import { estacionDePantallaParaReparto } from '../../kds/kitchenDisplayStations'
 import { withDeliveryOrderLock } from './deliveryOrderLock'
+import { lockExistingOrderForPayment } from '../../shared/paymentShiftClaim'
 import { marcarRetirosEnComandas } from './lineRemoval.service'
 import {
   assertLegacyCatalogGovernanceForVenue,
@@ -149,6 +150,9 @@ export async function ingestDeliveryOrder(
   /** HAY comanda, la haya creado esta pasada o una anterior. Es lo que decide si un pedido
    *  con instrucciones especiales debe cancelarse: `created` respondía otra pregunta. */
   hayComanda: boolean
+  /** La orden está CANCELLED: la trajo así el upsert, o la relectura bajo el candado de la orden la vio cancelada antes de
+   *  crear la comanda. Una cancelada no lleva comanda; sin comanda y sin `cancelada`, la comanda se perdió. */
+  cancelada: boolean
 }> {
   // 🔴 Dinero primero: un pedido cuyo reparto no cuadra NUNCA debe tocar la base — se
   // verifica ANTES de resolver el venue o abrir la transacción. Compara también contra los
@@ -585,6 +589,9 @@ export async function ingestDeliveryOrder(
     })
   }
 
+  // Lo que la relectura bajo el candado de la orden vio (abajo): `cancelada` y la orden que se devuelve dicen la verdad.
+  let canceladaBajoCandado = false
+
   if (!comandaYaExiste && !pedidoCancelado && !normalized.scheduledFor) {
     try {
       // Etapa 3 del KDS: la estación se elige ANTES de tomar el candado (una consulta menos con el pedido bloqueado).
@@ -592,11 +599,36 @@ export async function ingestDeliveryOrder(
       const estacionReparto = await estacionDePantallaParaReparto(venue.id)
       // 🔴 Bajo el candado del pedido [N-21]: si el proveedor retiró un renglón entre la venta
       // y esta comanda, `marcarRetirosEnComandas` la hace nacer con el renglón RETIRADO.
-      await withDeliveryOrderLock(order.id, async tx => {
+      // `true` sólo si la comanda nació en ESTA pasada (con la transacción del candado ya confirmada).
+      kitchenTicketCreated = await withDeliveryOrderLock(order.id, async tx => {
+        // 🔴 La comanda nunca nace de un pedido cancelado. La venta se guardó en OTRA transacción (arriba), así que entre
+        // las dos otro proceso pudo cancelarla: `cancelDeliveryOrder` la marca CANCELLED y borra sus comandas, y si la
+        // comanda se creaba después nacía VIVA sobre una orden cancelada, sin nadie que la quite (la cocina prepara comida
+        // que nadie recoge). Se toma el candado de FILA de la orden —el MISMO de `cancelDeliveryOrder` y del cobro— y se
+        // relee su estado: la cancelación o ya terminó (se ve aquí y no se crea) o espera a que esta comanda exista (y la
+        // borra). Orden de candados: el advisory del pedido (lo toma `withDeliveryOrderLock`) y luego la fila, como el
+        // resto del módulo.
+        if (!(await lockExistingOrderForPayment(tx, { venueId: venue.id, orderId: order.id }))) {
+          logger.error('[❌ DeliveryIngest] la orden ya no está en este negocio al crear la comanda: no llegó a la cocina', {
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+            venueId: venue.id,
+          })
+          return false
+        }
+        const actual = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } })
+        if (actual?.status === OrderStatus.CANCELLED) {
+          canceladaBajoCandado = true
+          logger.warn('[DeliveryIngest] el pedido se canceló mientras se registraba: no se imprime comanda', {
+            orderId: order.id,
+            orderNumber: order.orderNumber,
+          })
+          return false
+        }
         // Relectura dentro del candado: dos reprocesos simultáneos ya no imprimen dos comandas.
         if ((await tx.kdsOrder.count({ where: { orderId: order.id } })) > 0) {
           comandaYaExiste = true
-          return
+          return false
         }
         await tx.kdsOrder.create({
           data: {
@@ -637,8 +669,8 @@ export async function ingestDeliveryOrder(
           },
         })
         await marcarRetirosEnComandas(tx, order.id, venue.id)
+        return true
       })
-      kitchenTicketCreated = !comandaYaExiste
     } catch (error) {
       logger.error('[❌ DeliveryIngest] el pedido NO llegó a la cocina (venta guardada, comanda no)', {
         orderId: order.id,
@@ -649,12 +681,17 @@ export async function ingestDeliveryOrder(
     }
   }
 
+  // La orden que se devuelve (y que anuncia el socket) lleva el estado releído bajo el candado: el upsert la devolvió viva
+  // y otro proceso la canceló antes de la comanda. El procesador del canal decide con `order.status` si cancelar un pedido
+  // cuyas instrucciones no llegaron a la cocina, y sobre uno ya cancelado no hay nada que rescatar.
+  const orden: Order = canceladaBajoCandado ? { ...order, status: OrderStatus.CANCELLED } : order
+
   try {
     socketManager.broadcastToVenue(venue.id, isNew ? SocketEventType.ORDER_CREATED : SocketEventType.ORDER_UPDATED, {
       orderId: order.id,
       orderNumber: order.orderNumber,
       venueId: venue.id,
-      status: order.status,
+      status: orden.status,
       paymentStatus: order.paymentStatus,
       source: order.source,
       externalId: order.externalId,
@@ -691,6 +728,13 @@ export async function ingestDeliveryOrder(
   // cuyas instrucciones no llegaron a la cocina: la haya creado esta pasada o una anterior.
   // `created` (la orden no existía) respondía otra pregunta y desarmaba esa red de seguridad
   // en cualquier reproceso. Se conserva `kitchenTicketCreated` porque es otra cosa: si la
-  // comanda se creó AHORA.
-  return { order, created: isNew, kitchenTicketCreated, hayComanda: comandaYaExiste || kitchenTicketCreated }
+  // comanda se creó AHORA. `cancelada` (Tarea 11): sin comanda y sin cancelar, la comanda se PERDIÓ y el procesador del
+  // canal tiene que decidir qué hacer (reintentar, o cancelar si traía instrucciones), nunca cerrar como si nada.
+  return {
+    order: orden,
+    created: isNew,
+    kitchenTicketCreated,
+    hayComanda: comandaYaExiste || kitchenTicketCreated,
+    cancelada: pedidoCancelado || canceladaBajoCandado,
+  }
 }

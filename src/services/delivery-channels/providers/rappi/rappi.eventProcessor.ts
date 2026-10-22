@@ -35,6 +35,7 @@ import {
 } from './rappi.estadoDelPedido'
 import { tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
 import { leerEstadoAprovisionamiento, type ResultadoRappiTienda } from './rappi.selfOnboarding'
+import { llaveDeAvisoDePedido } from './rappi.webhookIngress'
 
 export type RappiProcessOutcome =
   | 'PROCESSED' // pedido aceptado en Rappi y convertido en venta
@@ -86,26 +87,39 @@ function motivoDeCancelacion(payload: Prisma.JsonValue): string {
   return `cancelado por Rappi: ${tipo || 'sin tipo'}`
 }
 
+/** El vínculo de un evento, con lo que hace falta para armar la llave de su aviso hermano. */
+type VinculoDelAviso = { id: string; externalLocationId: string }
+
 /**
  * El aviso de cancelación (`ORDER_EVENT_CANCEL`) ya guardado de un pedido, de su vínculo. Acotada: UNA fila y el `select`
  * mínimo (su `payload` trae el tipo para el motivo).
+ *
+ * 🔴 Por la llave ÚNICA `dedupKey`, la misma que el ingreso le pone a ese aviso (`llaveDeAvisoDePedido`): la tienda es el
+ * `externalLocationId` del vínculo porque el ingreso liga el aviso al vínculo por ESE valor. Antes recorría los eventos del
+ * vínculo por el prefijo `(provider, channelLinkId)` del índice compuesto, dos veces por pedido: crecía con la tienda.
+ * El `channelLinkId` se conserva para encontrar exactamente lo mismo que antes (nunca el aviso de otro vínculo).
  */
-function avisoDeCancelacion(externalOrderId: string, channelLinkId: string) {
+function avisoDeCancelacion(externalOrderId: string, vinculo: VinculoDelAviso) {
   return prisma.deliveryOrderEvent.findFirst({
-    where: { provider: DeliveryProvider.RAPPI, eventType: RAPPI_EVENTS.ORDER_EVENT_CANCEL, externalOrderId, channelLinkId },
+    where: {
+      dedupKey: llaveDeAvisoDePedido(RAPPI_EVENTS.ORDER_EVENT_CANCEL, vinculo.externalLocationId, externalOrderId),
+      channelLinkId: vinculo.id,
+    },
     select: { id: true, payload: true },
   })
 }
 
-/** El `NEW_ORDER` guardado de un pedido (del vínculo de la cancelación, si lo tiene). Acotada: UNA fila, el `select` mínimo. */
-function avisoDelPedido(externalOrderId: string, channelLinkId: string | null) {
+/**
+ * El `NEW_ORDER` guardado de un pedido (del vínculo de la cancelación, si lo tiene). Acotada: UNA fila, el `select` mínimo.
+ * Con vínculo, por la llave única (como `avisoDeCancelacion`). Sin vínculo no hay tienda confiable para armarla —el
+ * `store_id` de la cancelación no ligó con ningún vínculo— y se conserva la búsqueda por el pedido: es rara (una
+ * cancelación de una tienda sin vincular) y la reconciliación no la vuelve a tomar (la deja ORPHANED).
+ */
+function avisoDelPedido(externalOrderId: string, vinculo: VinculoDelAviso | null) {
   return prisma.deliveryOrderEvent.findFirst({
-    where: {
-      provider: DeliveryProvider.RAPPI,
-      eventType: RAPPI_EVENTS.NEW_ORDER,
-      externalOrderId,
-      ...(channelLinkId ? { channelLinkId } : {}),
-    },
+    where: vinculo
+      ? { dedupKey: llaveDeAvisoDePedido(RAPPI_EVENTS.NEW_ORDER, vinculo.externalLocationId, externalOrderId), channelLinkId: vinculo.id }
+      : { provider: DeliveryProvider.RAPPI, eventType: RAPPI_EVENTS.NEW_ORDER, externalOrderId },
     select: { id: true, status: true, error: true },
   })
 }
@@ -245,7 +259,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
     // el job la reintente con su espera normal; para entonces el NEW_ORDER ya la vio (la busca antes de aceptar y después
     // de registrar) o la venta ya existe y se cancela aquí. Con un NEW_ORDER terminado o que nunca llegó, nada que esperar.
     if (r.outcome === 'ORDER_NOT_FOUND' && evento.eventType === RAPPI_EVENTS.ORDER_EVENT_CANCEL) {
-      const pedido = await avisoDelPedido(identidad.orderId, evento.channelLink?.id ?? null)
+      const pedido = await avisoDelPedido(identidad.orderId, evento.channelLink ?? null)
       const seRegistraTodavia =
         pedido && pedido.status !== DeliveryOrderEventStatus.PROCESSED && !(pedido.error && ERRORES_TERMINALES.includes(pedido.error))
       if (seRegistraTodavia) {
@@ -428,7 +442,7 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // entre dos intentos. Se mira con el reclamo en la mano y la fila releída, ANTES de aceptar y de cualquier otra decisión
   // (también la del canal deshabilitado): un pedido cancelado ni se acepta ni se registra.
   if (identidad.orderId) {
-    const aviso = await avisoDeCancelacion(identidad.orderId, evento.channelLink.id)
+    const aviso = await avisoDeCancelacion(identidad.orderId, evento.channelLink)
     if (aviso) {
       const motivo = motivoDeCancelacion(aviso.payload)
       const datos = {
@@ -618,20 +632,22 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   // no encontró la venta (aún no existía) y quedó esperando. Se busca otra vez, ya con la venta creada, y se cancela AQUÍ:
   // `cancelDeliveryOrder` la deja CANCELLED y retira la comanda que la ingesta acaba de crear. No depende del nombre del
   // evento en el historial: un pedido aceptado y cancelado con un nombre que `leerHistorial` no conoce también cae aquí.
-  let cancelada = false
+  let canceladaTrasRegistrar = false
   try {
-    const aviso = await avisoDeCancelacion(normalizado.externalId, evento.channelLink.id)
+    const aviso = await avisoDeCancelacion(normalizado.externalId, evento.channelLink)
     if (aviso) {
       const motivo = motivoDeCancelacion(aviso.payload)
-      await cancelDeliveryOrder(normalizado.externalId, DeliveryProvider.RAPPI, motivo)
-      cancelada = true
-      logger.warn('🛵 [Rappi] la cancelación de Rappi llegó mientras se registraba el pedido: se canceló al terminar de registrarlo', {
-        eventRowId,
-        orderId,
-        venueId: evento.venueId,
-        avisoDeCancelacion: aviso.id,
-        motivo,
-      })
+      const r = await cancelDeliveryOrder(normalizado.externalId, DeliveryProvider.RAPPI, motivo)
+      // La venta se acaba de registrar: si la cancelación no la encuentra, algo no cuadra y no se da por cancelada (el
+      // catch la deja FAILED reintentable). ALREADY_CANCELLED sí es cancelada, pero la canceló otro: el log no dice «se canceló».
+      if (r.outcome === 'ORDER_NOT_FOUND') throw new Error('la cancelación no encontró la venta que se acaba de registrar')
+      canceladaTrasRegistrar = true
+      logger.warn(
+        r.outcome === 'CANCELLED'
+          ? '🛵 [Rappi] la cancelación de Rappi llegó mientras se registraba el pedido: se canceló al terminar de registrarlo'
+          : '🛵 [Rappi] la cancelación de Rappi llegó mientras se registraba el pedido: la venta ya estaba cancelada (la canceló otro proceso)',
+        { eventRowId, orderId, venueId: evento.venueId, avisoDeCancelacion: aviso.id, motivo, resultado: r.outcome },
+      )
     }
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err)
@@ -646,6 +662,24 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
       error: msg,
     })
     return { outcome: 'FAILED', orderId, accepted: true, error: `CANCELAR_TRAS_REGISTRAR: ${msg}` }
+  }
+
+  // 🔴 La comanda nunca se pierde en silencio. La ingesta guarda la venta aunque la comanda falle (perder la venta sería
+  // peor), y sólo lo dice en el log: cerrar PROCESSED aquí dejaba un pedido aceptado y cobrado que la cocina nunca ve. Queda
+  // FAILED REINTENTABLE (no está en `ERRORES_TERMINALES`): el job lo retoma con su espera normal, el reintento no vuelve a
+  // aceptar (está la marca) y la ingesta repone la comanda que falta. Una venta cancelada (por la ingesta, bajo el candado
+  // de la orden, o aquí arriba) no necesita comanda; un programado tampoco todavía.
+  const cancelada = canceladaTrasRegistrar || ingesta.cancelada
+  if (!ingesta.hayComanda && !cancelada && !normalizado.scheduledFor) {
+    await cerrar(DeliveryOrderEventStatus.FAILED, orderId, 'COMANDA_NO_CREADA')
+    logger.error('🚨 [Rappi] pedido ACEPTADO y registrado, pero la comanda NO llegó a la cocina — queda FAILED y se reintenta', {
+      eventRowId,
+      orderId,
+      venueId: evento.venueId,
+      linkId: evento.channelLink.id,
+      accepted: true,
+    })
+    return { outcome: 'FAILED', orderId, accepted: true, error: 'COMANDA_NO_CREADA' }
   }
   await cerrar(DeliveryOrderEventStatus.PROCESSED, orderId)
   return { outcome: cancelada ? 'CANCELLED' : 'PROCESSED', orderId, accepted: true }

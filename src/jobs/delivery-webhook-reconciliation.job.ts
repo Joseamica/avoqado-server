@@ -93,7 +93,8 @@ export class DeliveryWebhookReconciliationJob {
    *
    * `CANCELADO_ANTES_DE_REGISTRAR` — el NEW_ORDER de Rappi encontró su aviso de cancelación ya guardado: ni se aceptó ni se
    * registró. Reintentarlo no cambia nada (la cancelación sigue ahí). OJO: `CANCELACION_EN_ESPERA` NO va aquí — es la
-   * cancelación esperando a que su NEW_ORDER termine, y se reintenta con la espera normal.
+   * cancelación esperando a que su NEW_ORDER termine, y se reintenta con la espera normal. Tampoco `COMANDA_NO_CREADA`
+   * (Tarea 11): el pedido de Rappi se aceptó y se registró pero su comanda no nació; el reintento la repone sin aceptar otra vez.
    *
    * 🔴 `ERRORES_TERMINALES` de `rappi.eventProcessor.ts` es una copia de esta lista (una prueba las compara): si se agrega
    * un código aquí, va también allá.

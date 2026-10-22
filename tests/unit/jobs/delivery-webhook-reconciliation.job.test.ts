@@ -1051,6 +1051,50 @@ describe('DeliveryWebhookReconciliationJob', () => {
       })
     })
 
+    // Tarea 11: el pedido de Rappi se aceptó y se registró, pero su comanda no nació. No es terminal: se reintenta con la
+    // espera normal y el reintento la repone (sin volver a aceptar: está la marca). Es una falla de verdad, no una espera.
+    describe('COMANDA_NO_CREADA (Tarea 11)', () => {
+      const sinComanda = (over: Partial<any> = {}) =>
+        makeEvent({
+          id: 'evt_sin_comanda',
+          provider: 'RAPPI',
+          eventType: 'NEW_ORDER',
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          error: 'COMANDA_NO_CREADA',
+          ...over,
+        })
+
+      it('🔴 NO es terminal: la pasada la vuelve a tomar y, con la comanda repuesta, queda resuelta', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinComanda()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'PROCESSED', orderId: 'ord_rappi', accepted: true })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_sin_comanda')
+        expect(result.reprocessed).toBe(1)
+      })
+
+      it('🔴 si vuelve a fallar se reintenta con la espera normal (2 min la primera vez), como falla (error) y sin POISON', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinComanda()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', orderId: 'ord_rappi', accepted: true, error: 'COMANDA_NO_CREADA' })
+        const errores = jest.spyOn(logger, 'error')
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(result.reprocessed).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_sin_comanda' },
+          data: { attemptCount: 1, nextAttemptAt: new Date(NOW + 2 * 60_000) },
+        })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(false)
+        expect(errores).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to reprocess event'),
+          expect.objectContaining({ eventId: 'evt_sin_comanda', attemptCount: 1, error: 'COMANDA_NO_CREADA' }),
+        )
+      })
+    })
+
     describe('carril propio de Rappi (cada 30 s)', () => {
       const evRappi = (id: string, over: Partial<any> = {}) =>
         makeEvent({

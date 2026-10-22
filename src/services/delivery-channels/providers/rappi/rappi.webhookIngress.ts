@@ -123,6 +123,16 @@ interface CuerpoRappi {
 }
 
 /**
+ * La llave de un aviso CON PEDIDO (`NEW_ORDER`, cancelaciones…): `RAPPI:evento:tienda:pedido`. Es la base de
+ * `llaveDeDeduplicacion` y la usa también el procesador para encontrar el aviso hermano de un pedido (su cancelación, o el
+ * pedido de una cancelación) por el índice único `dedupKey`, en vez de recorrer los eventos del vínculo. 🔴 Una sola
+ * función: si la forma de la llave cambia aquí, la búsqueda cambia con ella.
+ */
+export function llaveDeAvisoDePedido(evento: string, storeId: string | null, orderId: string | null): string {
+  return `RAPPI:${evento}:${storeId ?? 'sin-tienda'}:${orderId ?? 'sin-pedido'}`
+}
+
+/**
  * La llave de deduplicación, compuesta — Rappi NO manda un id de evento propio.
  *
  * Tres familias, porque la identidad natural de cada evento es distinta:
@@ -151,7 +161,7 @@ export function llaveDeDeduplicacion(evento: string, payload: unknown, signature
   }
 
   const identidad = rappiAdapter.extractIdentity(payload)
-  const base = `RAPPI:${evento}:${identidad.storeId ?? 'sin-tienda'}:${identidad.orderId ?? 'sin-pedido'}`
+  const base = llaveDeAvisoDePedido(evento, identidad.storeId, identidad.orderId)
 
   if (evento === RAPPI_EVENTS.ORDER_OTHER_EVENT) {
     const c = (payload ?? {}) as CuerpoRappi

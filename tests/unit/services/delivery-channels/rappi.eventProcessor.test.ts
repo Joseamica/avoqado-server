@@ -24,6 +24,8 @@ import {
 import { confirmarTienda } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
 import { historialDelPedidoRappi, suscribirTiendaAEventos } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { anotarAceptacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
+import { rappiAdapter } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
+import { llaveDeDeduplicacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 
 jest.mock('../../../../src/services/delivery-channels/core/cancelDeliveryOrder.service', () => ({
   cancelDeliveryOrder: jest.fn(),
@@ -73,6 +75,9 @@ const MARCA = { aceptacion: { en: '2026-10-21T22:26:20.000Z', evidencia: 'HTTP_2
 /** El token del reclamo que este proceso obtiene en cada prueba (salvo las que simulan a otro dueño). */
 const TOKEN = 'tok-1'
 
+/** Lo que devuelve una ingesta normal: la venta nueva, con su comanda, viva (Tarea 11: `hayComanda` y `cancelada`). */
+const INGESTA_OK = { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true, hayComanda: true, cancelada: false }
+
 /** Un pedido completo, con los montos que el ejemplo del portal deja en cero ya rellenos. */
 function payloadPedido(over: Record<string, unknown> = {}) {
   return {
@@ -115,7 +120,7 @@ describe('processRappiEvent', () => {
   beforeEach(() => {
     jest.clearAllMocks()
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila())
-    mockIngest.mockResolvedValue({ order: { id: 'ord1' }, created: true, kitchenTicketCreated: true })
+    mockIngest.mockResolvedValue(INGESTA_OK)
     mockCancel.mockResolvedValue({ outcome: 'CANCELLED', orderId: 'ord1' })
     mockReclamar.mockResolvedValue(TOKEN)
     mockRenovar.mockResolvedValue(true)
@@ -142,7 +147,7 @@ describe('processRappiEvent', () => {
     })
     mockIngest.mockImplementationOnce(async () => {
       orden.push('ingest')
-      return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+      return INGESTA_OK
     })
 
     const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
@@ -550,7 +555,7 @@ describe('processRappiEvent', () => {
       })
       mockIngest.mockImplementationOnce(async () => {
         orden.push('ingest')
-        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+        return INGESTA_OK
       })
 
       await processRappiEvent('evt1', { aceptar: aceptarOk })
@@ -603,7 +608,7 @@ describe('processRappiEvent', () => {
       })
       mockIngest.mockImplementationOnce(async () => {
         orden.push('ingest')
-        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+        return INGESTA_OK
       })
 
       await processRappiEvent('evt1', { aceptar: aceptarMal, historial })
@@ -656,7 +661,7 @@ describe('processRappiEvent', () => {
       })
       mockIngest.mockImplementationOnce(async () => {
         orden.push('ingest')
-        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true }
+        return INGESTA_OK
       })
 
       const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
@@ -867,13 +872,18 @@ describe('processRappiEvent', () => {
         payload: { event: 'canceled_with_charge', order_id: '392625', store_id: '900105814' },
         ...over,
       })
+    /**
+     * El tipo de aviso que pide una búsqueda. Tarea 11: con vínculo se busca por la llave única `dedupKey`
+     * (`RAPPI:<evento>:<tienda>:<pedido>`); la cancelación sin vínculo conserva la búsqueda por `eventType`.
+     */
+    const tipoBuscado = (where: any): string | undefined => where.eventType ?? String(where.dedupKey ?? '').split(':')[1]
     /** La búsqueda contesta según el tipo de aviso que se pide. */
     const sembrar = ({ cancel = null, pedido = null }: { cancel?: unknown; pedido?: unknown }) =>
       findFirst().mockImplementation(async ({ where }: any) =>
-        where.eventType === 'ORDER_EVENT_CANCEL' ? cancel : where.eventType === 'NEW_ORDER' ? pedido : null,
+        tipoBuscado(where) === 'ORDER_EVENT_CANCEL' ? cancel : tipoBuscado(where) === 'NEW_ORDER' ? pedido : null,
       )
     const BUSQUEDA_DE_CANCELACION = {
-      where: { provider: 'RAPPI', eventType: 'ORDER_EVENT_CANCEL', externalOrderId: '392625', channelLinkId: 'link1' },
+      where: { dedupKey: 'RAPPI:ORDER_EVENT_CANCEL:900105814:392625', channelLinkId: 'link1' },
       select: { id: true, payload: true },
     }
     const rechazo400 = () => jest.fn(async () => ({ ok: false, status: 400, raw: 'Invalid transition from {TAKEN} to {TAKEN}' }))
@@ -938,7 +948,7 @@ describe('processRappiEvent', () => {
       // El aviso se guarda mientras se acepta y se registra: la búsqueda de antes de aceptar no lo ve, la de después sí.
       let guardada = false
       findFirst().mockImplementation(async ({ where }: any) =>
-        where.eventType === 'ORDER_EVENT_CANCEL' && guardada ? avisoCancel('canceled_with_charge') : null,
+        tipoBuscado(where) === 'ORDER_EVENT_CANCEL' && guardada ? avisoCancel('canceled_with_charge') : null,
       )
       const orden: string[] = []
       aceptarOk.mockImplementationOnce(async () => {
@@ -948,7 +958,7 @@ describe('processRappiEvent', () => {
       })
       mockIngest.mockImplementationOnce(async () => {
         orden.push('ingest')
-        return { order: { id: 'ord1' }, created: true, kitchenTicketCreated: true, hayComanda: true }
+        return INGESTA_OK
       })
       mockCancel.mockImplementationOnce(async () => {
         orden.push('cancel')
@@ -1004,7 +1014,7 @@ describe('processRappiEvent', () => {
       // El nombre no lo cubre `EVENTO_TERMINAL`, así que el historial dice ACEPTADO. Lo que gana es el AVISO, no el nombre.
       let guardada = false
       findFirst().mockImplementation(async ({ where }: any) =>
-        where.eventType === 'ORDER_EVENT_CANCEL' && guardada ? avisoCancel('order_voided_by_support') : null,
+        tipoBuscado(where) === 'ORDER_EVENT_CANCEL' && guardada ? avisoCancel('order_voided_by_support') : null,
       )
       const historial = jest.fn(async () => {
         guardada = true // el aviso de Rappi entra mientras se lee el historial
@@ -1052,7 +1062,7 @@ describe('processRappiEvent', () => {
       // Reintentable: el job lo vuelve a tomar con su espera normal.
       expect(ERRORES_TERMINALES).not.toContain('CANCELACION_EN_ESPERA')
       expect(findFirst()).toHaveBeenCalledWith({
-        where: { provider: 'RAPPI', eventType: 'NEW_ORDER', externalOrderId: '392625', channelLinkId: 'link1' },
+        where: { dedupKey: 'RAPPI:NEW_ORDER:900105814:392625', channelLinkId: 'link1' },
         select: { id: true, status: true, error: true },
       })
       // Primero se intenta cancelar la venta; sólo si no existe se busca el pedido.
@@ -1200,6 +1210,128 @@ describe('processRappiEvent', () => {
       const delJob = Array.from(lista.matchAll(/'([A-Z_]+)'/g), m => m[1])
       expect(delJob.length).toBeGreaterThan(0)
       expect([...ERRORES_TERMINALES].sort()).toEqual([...delJob].sort())
+    })
+
+    // ── Tarea 11 (pendiente 1 de la revisión de la Tarea 10): la búsqueda va por la llave única, no por el prefijo ──
+    // Antes recorría los eventos del vínculo por el prefijo `(provider, channelLinkId)` del índice compuesto, dos veces por
+    // pedido: crece con el volumen de la tienda. La llave es la MISMA que guarda el ingreso (`llaveDeDeduplicacion`), así que
+    // encuentra exactamente lo que encontraba la de antes; el `channelLinkId` se conserva para no ampliar a otro vínculo.
+    it('🔴 la llave que se busca es la que el ingreso guarda para ese aviso (las dos direcciones)', async () => {
+      // NEW_ORDER busca su cancelación.
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+      const llaveCancel = llaveDeDeduplicacion('ORDER_EVENT_CANCEL', avisoCancel('canceled_with_charge').payload, undefined)
+      expect(findFirst().mock.calls[0][0].where).toEqual({ dedupKey: llaveCancel, channelLinkId: 'link1' })
+      expect(findFirst().mock.calls[1][0].where).toEqual({ dedupKey: llaveCancel, channelLinkId: 'link1' })
+
+      // La cancelación sin venta busca su NEW_ORDER.
+      findFirst().mockClear()
+      findUnique().mockResolvedValue(filaCancel())
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+      const llavePedido = llaveDeDeduplicacion('NEW_ORDER', payloadPedido(), undefined)
+      expect(findFirst()).toHaveBeenCalledTimes(1)
+      expect(findFirst().mock.calls[0][0].where).toEqual({ dedupKey: llavePedido, channelLinkId: 'link1' })
+    })
+
+    // Pendiente 2: lo que devolvió `cancelDeliveryOrder` va al log. ALREADY_CANCELLED no es «se canceló»: la canceló otro.
+    it.each([
+      ['CANCELLED', /se canceló al terminar de registrarlo/],
+      ['ALREADY_CANCELLED', /ya estaba cancelada/],
+    ])('tras ingerir, el log dice lo que devolvió la cancelación (%s)', async (outcome, mensaje) => {
+      let veces = 0
+      findFirst().mockImplementation(async ({ where }: any) =>
+        tipoBuscado(where) === 'ORDER_EVENT_CANCEL' && veces++ > 0 ? avisoCancel('canceled_with_charge') : null,
+      )
+      mockCancel.mockResolvedValueOnce({ outcome, orderId: 'ord1' })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toMatchObject({ outcome: 'CANCELLED', orderId: 'ord1', accepted: true })
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringMatching(mensaje), expect.objectContaining({ resultado: outcome }))
+      if (outcome === 'ALREADY_CANCELLED')
+        expect(logger.warn).not.toHaveBeenCalledWith(expect.stringMatching(/se canceló al terminar/), expect.anything())
+    })
+
+    it('tras ingerir, una cancelación que no encuentra la venta recién registrada no se da por buena: FAILED reintentable', async () => {
+      let veces = 0
+      findFirst().mockImplementation(async ({ where }: any) =>
+        tipoBuscado(where) === 'ORDER_EVENT_CANCEL' && veces++ > 0 ? avisoCancel('canceled_with_charge') : null,
+      )
+      mockCancel.mockResolvedValueOnce({ outcome: 'ORDER_NOT_FOUND' })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toMatchObject({ outcome: 'FAILED', orderId: 'ord1', accepted: true })
+      expect(r.error).toMatch(/^CANCELAR_TRAS_REGISTRAR: /)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', 'ord1', expect.stringMatching(/^CANCELAR_TRAS_REGISTRAR: /))
+    })
+  })
+
+  // ── Tarea 11: la comanda nunca nace de un pedido cancelado, y nunca se pierde en silencio ──
+  describe('la comanda (Tarea 11)', () => {
+    it('🔴 sin comanda, sin cancelar y sin programar ⇒ COMANDA_NO_CREADA con 🚨 (reintentable)', async () => {
+      mockIngest.mockResolvedValueOnce({ ...INGESTA_OK, kitchenTicketCreated: false, hayComanda: false, cancelada: false })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(r).toEqual({ outcome: 'FAILED', orderId: 'ord1', accepted: true, error: 'COMANDA_NO_CREADA' })
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'FAILED', 'ord1', 'COMANDA_NO_CREADA')
+      // Reintentable: el job la vuelve a tomar con su espera normal; el reintento no acepta otra vez (la marca) y repone la comanda.
+      expect(ERRORES_TERMINALES).not.toContain('COMANDA_NO_CREADA')
+      expect(logger.error).toHaveBeenCalledWith(
+        expect.stringContaining('🚨'),
+        expect.objectContaining({ eventRowId: 'evt1', orderId: 'ord1', venueId: 'v1' }),
+      )
+    })
+
+    it('cancelada sin comanda ⇒ PROCESSED (la canceló otro proceso mientras se registraba: no hay comanda que reponer)', async () => {
+      mockIngest.mockResolvedValueOnce({ ...INGESTA_OK, kitchenTicketCreated: false, hayComanda: false, cancelada: true })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(mockCerrar).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      // La venta quedó cancelada: el desenlace es CANCELLED, no una venta viva.
+      expect(r).toEqual({ outcome: 'CANCELLED', orderId: 'ord1', accepted: true })
+    })
+
+    it('con comanda (creada ahora o antes) ⇒ PROCESSED, como siempre', async () => {
+      mockIngest.mockResolvedValueOnce({ ...INGESTA_OK, created: false, kitchenTicketCreated: false, hayComanda: true })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(r).toEqual({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+    })
+
+    it('un pedido con hora programada no exige comanda todavía (nace al liberarlo)', async () => {
+      const real = rappiAdapter.normalizeOrder.bind(rappiAdapter)
+      const espia = jest
+        .spyOn(rappiAdapter, 'normalizeOrder')
+        .mockImplementationOnce(p => ({ ...real(p), scheduledFor: new Date('2026-10-21T23:00:00.000Z') }))
+      mockIngest.mockResolvedValueOnce({ ...INGESTA_OK, kitchenTicketCreated: false, hayComanda: false, cancelada: false })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(r).toEqual({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
+      espia.mockRestore()
+    })
+
+    it('el reintento de COMANDA_NO_CREADA (con la marca) no vuelve a aceptar y cierra PROCESSED cuando la comanda ya está', async () => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+        fila({ resourcePayload: MARCA, status: 'FAILED', error: 'COMANDA_NO_CREADA', orderId: 'ord1' }),
+      )
+      mockIngest.mockResolvedValueOnce({ ...INGESTA_OK, created: false, kitchenTicketCreated: true, hayComanda: true })
+
+      const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      expect(aceptarOk).not.toHaveBeenCalled()
+      expect(mockIngest).toHaveBeenCalledTimes(1)
+      expect(mockCerrar).toHaveBeenCalledWith('evt1', TOKEN, 'PROCESSED', 'ord1')
+      expect(r).toEqual({ outcome: 'PROCESSED', orderId: 'ord1', accepted: true })
     })
   })
 })

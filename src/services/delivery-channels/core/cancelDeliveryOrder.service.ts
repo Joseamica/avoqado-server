@@ -49,8 +49,14 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
   // rechaza. Pero se marca bajo el MISMO candado de `Order` que la admisión de un cobro de terminal y el registro del
   // dinero, y DENTRO de él se mira si quedaba un cobro de terminal sin desenlace acreditado: ese dinero puede aterrizar
   // sobre una orden CANCELLED y alguien tiene que conciliarlo. No se oculta: 🚨 en el log y rastro en ActivityLog.
-  const cobroVivo = await prisma.$transaction(async tx => {
+  const bajoCandado = await prisma.$transaction(async tx => {
     await lockExistingOrderForPayment(tx, { venueId: order.venueId, orderId: order.id })
+    // 🔴 Se RELEE el estado con el candado en la mano: el `status` de arriba se leyó sin él. Dos cancelaciones a la vez (el
+    // aviso y su reintento, o la cancelación y el procesador que la encuentra tras registrar) leían las dos «viva» y las dos
+    // escribían: dos `DELIVERY_ORDER_CANCELLED` en la bitácora (el stock ya lo cuidaba un UNIQUE). La segunda ve aquí la
+    // CANCELLED de la primera y no escribe nada.
+    const actual = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } })
+    if (actual?.status === OrderStatus.CANCELLED) return { yaCancelada: true as const }
     const cobroVivo = await findLiveTerminalCharge(tx, { venueId: order.venueId, orderId: order.id })
 
     // `OrderStatus.CANCELLED` es la señal CANÓNICA de "esto no fue una venta": la
@@ -66,8 +72,11 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     // Order, en el ActivityLog y en el payload crudo del evento.
     await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: { orderId: order.id } } })
     await tx.kdsOrder.deleteMany({ where: { orderId: order.id } })
-    return cobroVivo
+    return { yaCancelada: false as const, cobroVivo }
   }, ORDER_LOCK_WAIT_BUDGET)
+
+  if (bajoCandado.yaCancelada) return { outcome: 'ALREADY_CANCELLED', orderId: order.id }
+  const { cobroVivo } = bajoCandado
 
   if (cobroVivo) {
     logger.error(
