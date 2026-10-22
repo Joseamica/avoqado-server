@@ -1768,7 +1768,7 @@ router.post(
 /**
  * GET /api/v1/mobile/venues/:venueId/payments/:paymentId/loyalty
  * Sello de la venta de ese pago para su cliente principal (spec 2026-10-14 §3.1). Sólo lee.
- * data: { stampsEnabled, stamped, reason, stampsEarned, stampsRequired, rewardReady } | null
+ * data: { stampsEnabled, stamped, reason, stampsEarned, stampsRequired, rewardReady, saleCard } | null
  * Sin checkFeatureAccess a propósito: un negocio sin el plan recibe `stampsEnabled: false` y la app no pinta nada.
  */
 router.get(
