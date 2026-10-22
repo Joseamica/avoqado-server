@@ -11,8 +11,8 @@
  *     medido en DEV el 20-oct). La API sigue en el host clásico (`hostRappi`).
  *   · La superficie `integrations` usa `/api/v2/restaurants-integrations-public-api/…` —
  *     ésa sí está publicada endpoint por endpoint.
- *   · Los prefijos de `utils` y `finance` NO están publicados completos: esas superficies
- *     esperan a la primera llamada real. No se inventaron aquí a propósito.
+ *   · `utils` va a `/api/rest-ops-utils/…` en el host clásico (M6 y M14, 22-oct: login 200 y `GET /store/schedule/{id}` 200).
+ *     El prefijo de `finance` NO está publicado completo: espera a la primera llamada real. No se inventó aquí a propósito.
  */
 import { env } from '@/config/env'
 import logger from '@/config/logger'
@@ -27,6 +27,7 @@ import {
   type RappiRespuesta,
 } from './rappi.http'
 import { getRappiToken, type SuperficieRappi } from './rappi.token'
+import { aplanarHorarioDeTienda, type FranjaActualRappi, type FranjaTiendaRappi } from './rappi.hours'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
 import {
   aplanarTiendas,
@@ -245,6 +246,57 @@ export async function marcarTiendaIntegradaRappi(storeId: string, integrada: boo
     ruta: `${API}/stores-pa/${encodeURIComponent(storeId)}/status?integrated=${integrada}`,
     storeId,
   })
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  Horario regular de la tienda — API de Utils (Tarea 19), doc: `fuentes/es__utils.md` «Horarios de tiendas»
+// ────────────────────────────────────────────────────────────────────────────────────
+
+const UTILS = '/api/rest-ops-utils'
+const rutaDeHorario = (storeId: string, storeScheduleId?: number | string) =>
+  `${UTILS}/store/schedule/${encodeURIComponent(storeId)}${storeScheduleId === undefined ? '' : `/${encodeURIComponent(String(storeScheduleId))}`}`
+
+/**
+ * Lo que Rappi tiene hoy como horario regular, YA APLANADO a `{ id, day, starts_time, ends_time }` (horas en `HH:MM:SS`). Es una
+ * LECTURA: va sin `storeId`. Medido en DEV (M14): 200 `{"storeScheduleDays":[]}` para una tienda sin horario.
+ * 🔴 Un 2xx con un cuerpo que no se entiende LANZA (`aplanarHorarioDeTienda`): nunca se devuelve como «no hay franjas». Un
+ * no-2xx se devuelve tal cual, sin `franjas`.
+ */
+export async function listarHorarioTiendaRappi(storeId: string): Promise<RappiRespuesta & { franjas?: FranjaActualRappi[] }> {
+  const r = await rappiApi({ superficie: 'utils', metodo: 'GET', ruta: rutaDeHorario(storeId) })
+  if (!r.ok) return r
+  return { ...r, franjas: aplanarHorarioDeTienda(r.raw) }
+}
+
+/** Crea UNA franja (`POST`, cuerpo en snake_case). Escritura: lleva `storeId`, el candado de tiendas aplica. */
+export async function crearFranjaTiendaRappi(storeId: string, franja: FranjaTiendaRappi): Promise<RappiRespuesta> {
+  return rappiApi({
+    superficie: 'utils',
+    metodo: 'POST',
+    ruta: rutaDeHorario(storeId),
+    cuerpo: { day: franja.day, starts_time: franja.starts_time, ends_time: franja.ends_time },
+    storeId,
+  })
+}
+
+/** Cambia las horas de UNA franja existente (`PUT`, cuerpo en camelCase, a diferencia del POST). Escritura con candado. */
+export async function actualizarFranjaTiendaRappi(
+  storeId: string,
+  storeScheduleId: number | string,
+  franja: FranjaTiendaRappi,
+): Promise<RappiRespuesta> {
+  return rappiApi({
+    superficie: 'utils',
+    metodo: 'PUT',
+    ruta: rutaDeHorario(storeId, storeScheduleId),
+    cuerpo: { startsTime: franja.starts_time, endsTime: franja.ends_time },
+    storeId,
+  })
+}
+
+/** Borra UNA franja (`DELETE`; Rappi contesta 200 sin cuerpo). Escritura con candado. */
+export async function borrarFranjaTiendaRappi(storeId: string, storeScheduleId: number | string): Promise<RappiRespuesta> {
+  return rappiApi({ superficie: 'utils', metodo: 'DELETE', ruta: rutaDeHorario(storeId, storeScheduleId), storeId })
 }
 
 /**

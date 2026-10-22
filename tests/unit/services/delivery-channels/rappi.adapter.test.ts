@@ -14,10 +14,18 @@ import { DeliveryWriteNotSentError, type DirectDeliveryAdapter } from '../../../
 const mockMarcarListoRappi = jest.fn()
 const mockPublicarMenuRappi = jest.fn()
 const mockMarcarIntegrada = jest.fn()
+const mockListarHorario = jest.fn()
+const mockCrearFranja = jest.fn()
+const mockActualizarFranja = jest.fn()
+const mockBorrarFranja = jest.fn()
 jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.client', () => ({
   marcarListoRappi: (...a: unknown[]) => mockMarcarListoRappi(...a),
   publicarMenuRappi: (...a: unknown[]) => mockPublicarMenuRappi(...a),
   marcarTiendaIntegradaRappi: (...a: unknown[]) => mockMarcarIntegrada(...a),
+  listarHorarioTiendaRappi: (...a: unknown[]) => mockListarHorario(...a),
+  crearFranjaTiendaRappi: (...a: unknown[]) => mockCrearFranja(...a),
+  actualizarFranjaTiendaRappi: (...a: unknown[]) => mockActualizarFranja(...a),
+  borrarFranjaTiendaRappi: (...a: unknown[]) => mockBorrarFranja(...a),
 }))
 const mockReservar = jest.fn()
 const mockCerrar = jest.fn()
@@ -341,6 +349,113 @@ describe('rappiAdapter.notifyIntegrationStatus — «integrada sí/no» (Tarea 1
     mockMarcarIntegrada.mockRejectedValue(bloqueo)
 
     await expect(rappiAdapter.notifyIntegrationStatus('99', true)).rejects.toBe(bloqueo)
+  })
+})
+
+describe('rappiAdapter.publishStoreHours — el horario de la tienda por la API de Utils (Tarea 19)', () => {
+  const CERRADO = { enabled: false, ranges: [] }
+  const abierto = (open: string, close: string) => ({ enabled: true, ranges: [{ open, close }] })
+  /** Lunes 09–19 y martes 09–22; lo demás cerrado (incluido el domingo, que hoy tiene franja en Rappi). */
+  const HORARIO = {
+    monday: abierto('09:00', '19:00'),
+    tuesday: abierto('09:00', '22:00'),
+    wednesday: CERRADO,
+    thursday: CERRADO,
+    friday: CERRADO,
+    saturday: CERRADO,
+    sunday: CERRADO,
+  }
+  const ok = (raw = '') => ({ ok: true, status: 200, raw })
+
+  beforeEach(() => {
+    mockListarHorario.mockReset().mockResolvedValue({
+      ...ok(),
+      franjas: [
+        { id: 11, day: 'mon', starts_time: '09:00:00', ends_time: '18:00:00' },
+        { id: 77, day: 'sun', starts_time: '10:00:00', ends_time: '18:00:00' },
+      ],
+    })
+    mockCrearFranja.mockReset().mockResolvedValue(ok())
+    mockActualizarFranja.mockReset().mockResolvedValue(ok())
+    mockBorrarFranja.mockReset().mockResolvedValue(ok())
+  })
+
+  it('es una capacidad OPCIONAL del contrato directo (el núcleo la busca por nombre, nunca por proveedor)', () => {
+    const _check = rappiAdapter satisfies DirectDeliveryAdapter
+    expect(typeof _check.publishStoreHours).toBe('function')
+  })
+
+  it('🔴 lee lo que Rappi tiene y ejecuta el plan EN ORDEN: actualiza, crea y al final borra el día que cierra', async () => {
+    const r = await rappiAdapter.publishStoreHours(HORARIO, '900175625')
+
+    expect(r.ok).toBe(true)
+    expect(mockListarHorario).toHaveBeenCalledWith('900175625')
+    expect(mockActualizarFranja).toHaveBeenCalledWith('900175625', 11, { day: 'mon', starts_time: '09:00:00', ends_time: '19:00:00' })
+    expect(mockCrearFranja).toHaveBeenCalledWith('900175625', { day: 'tue', starts_time: '09:00:00', ends_time: '22:00:00' })
+    expect(mockBorrarFranja).toHaveBeenCalledWith('900175625', 77)
+    const orden = [mockActualizarFranja, mockCrearFranja, mockBorrarFranja].map(m => m.mock.invocationCallOrder[0])
+    expect(orden).toEqual([...orden].sort((a, b) => a - b))
+    expect(mockListarHorario.mock.invocationCallOrder[0]).toBeLessThan(orden[0])
+  })
+
+  it('si Rappi ya tiene exactamente eso, no escribe nada (y contesta ok)', async () => {
+    mockListarHorario.mockResolvedValue({
+      ...ok(),
+      franjas: [
+        { id: 11, day: 'mon', starts_time: '09:00:00', ends_time: '19:00:00' },
+        { id: 12, day: 'tue', starts_time: '09:00:00', ends_time: '22:00:00' },
+      ],
+    })
+
+    const r = await rappiAdapter.publishStoreHours(HORARIO, '900175625')
+
+    expect(r.ok).toBe(true)
+    expect(mockCrearFranja).not.toHaveBeenCalled()
+    expect(mockActualizarFranja).not.toHaveBeenCalled()
+    expect(mockBorrarFranja).not.toHaveBeenCalled()
+  })
+
+  it('la lectura falla (HTTP) ⇒ ok:false y NO escribe nada (sin saber qué hay, cualquier escritura podría encimar)', async () => {
+    mockListarHorario.mockResolvedValue({ ok: false, status: 503, raw: 'Service Unavailable' })
+
+    const r = await rappiAdapter.publishStoreHours(HORARIO, '900175625')
+
+    expect(r).toMatchObject({ ok: false, status: 503 })
+    expect(r.raw).toContain('Service Unavailable')
+    expect(mockCrearFranja).not.toHaveBeenCalled()
+    expect(mockActualizarFranja).not.toHaveBeenCalled()
+    expect(mockBorrarFranja).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un cuerpo de lectura que no se entiende LANZA (el núcleo lo marca FAILED) y no escribe nada', async () => {
+    mockListarHorario.mockRejectedValue(new Error('[Rappi] el horario de la tienda no se entiende: falta storeScheduleDays'))
+
+    await expect(rappiAdapter.publishStoreHours(HORARIO, '900175625')).rejects.toThrow(/no se entiende/)
+    expect(mockCrearFranja).not.toHaveBeenCalled()
+    expect(mockActualizarFranja).not.toHaveBeenCalled()
+    expect(mockBorrarFranja).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un paso que falla a la mitad DETIENE el plan: ok:false con el paso en el motivo, y no sigue (lo demás lo rehace la siguiente pasada)', async () => {
+    mockCrearFranja.mockResolvedValue({ ok: false, status: 400, raw: '{"message":"overlapping schedules"}' })
+
+    const r = await rappiAdapter.publishStoreHours(HORARIO, '900175625')
+
+    expect(r).toMatchObject({ ok: false, status: 400 })
+    expect(r.raw).toMatch(/CREAR/)
+    expect(r.raw).toContain('overlapping schedules')
+    expect(mockActualizarFranja).toHaveBeenCalledTimes(1)
+    // El día que cierra NO se borra: con el plan a medias, quitarle franjas a la tienda es lo único que no se arriesga.
+    expect(mockBorrarFranja).not.toHaveBeenCalled()
+  })
+
+  it('🔴 el candado de escritura se relanza TAL CUAL (es un «no se envió»): el adaptador no lo traga ni lo disfraza', async () => {
+    const bloqueo = new DeliveryWriteNotSentError('STORE_NOT_AUTHORIZED', 'tienda fuera de la lista', 'sin permiso')
+    mockActualizarFranja.mockRejectedValue(bloqueo)
+
+    await expect(rappiAdapter.publishStoreHours(HORARIO, '99')).rejects.toBe(bloqueo)
+    expect(mockCrearFranja).not.toHaveBeenCalled()
+    expect(mockBorrarFranja).not.toHaveBeenCalled()
   })
 })
 

@@ -37,7 +37,7 @@ import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { HorarioSemanal } from '../../core/deliveryHours.service'
 // Sólo el TIPO (se borra al compilar): `rappi.estadoDelPedido` importa este archivo, así que su código se carga perezoso.
 import type { CierreDeListo } from './rappi.estadoDelPedido'
-import { aHorarioRappi } from './rappi.hours'
+import { aFranjasDeTienda, aHorarioRappi, DIAS_RAPPI, planDeHorario, type OperacionDeHorario } from './rappi.hours'
 import { construirMenuRappi, type PreciosDeCanal } from './rappi.menuMapper'
 import {
   extraerStoreId,
@@ -349,6 +349,66 @@ export const rappiAdapter = {
   },
 
   /**
+   * El horario regular de la TIENDA por la API de Utils (Tarea 19): lee lo que Rappi tiene, calcula la diferencia
+   * (`planDeHorario`: actualizar antes que crear, para no encimar; los días que cierran al final) y la ejecuta EN ORDEN, un
+   * paso por llamada.
+   *  · la lectura no es 2xx ⇒ `ok:false` sin escribir nada: sin saber qué hay, cualquier escritura podría encimar;
+   *  · la lectura no se entiende ⇒ LANZA (nunca se toma como «no hay franjas»), igual que unas deseadas encimadas;
+   *  · un paso no-2xx ⇒ se DETIENE y devuelve `ok:false` con el paso: lo que falta lo rehace la siguiente pasada, que vuelve a
+   *    leer. Como los días que cierran van al final, un plan a medias nunca le quitó a la tienda franjas que no fueran a quedar;
+   *  · el candado de tiendas (`DeliveryWriteNotSentError`) se relanza tal cual; otro error se relanza con el paso en el mensaje.
+   * ⚠️ Qué hace Rappi con un día sin franjas (¿cerrado o 24 h?) no está medido: se deja a la vista en el log al publicar.
+   */
+  async publishStoreHours(horario: HorarioSemanal, storeId: string): Promise<ActionResult> {
+    const [cliente, { default: logger }] = await Promise.all([import('./rappi.client'), import('@/config/logger')])
+
+    const deseadas = aFranjasDeTienda(horario)
+    const lectura = await cliente.listarHorarioTiendaRappi(storeId)
+    if (!lectura.ok || !lectura.franjas) {
+      return { ok: false, status: lectura.status, raw: `no se pudo leer el horario de la tienda: ${lectura.raw.slice(0, 300)}` }
+    }
+
+    const plan = planDeHorario(lectura.franjas, deseadas)
+    for (const [i, paso] of plan.entries()) {
+      const cual = `paso ${i + 1} de ${plan.length} (${describirPaso(paso)})`
+      let r: Awaited<ReturnType<typeof cliente.crearFranjaTiendaRappi>>
+      try {
+        r =
+          paso.tipo === 'BORRAR'
+            ? await cliente.borrarFranjaTiendaRappi(storeId, paso.id)
+            : paso.tipo === 'ACTUALIZAR'
+              ? await cliente.actualizarFranjaTiendaRappi(storeId, paso.id, paso.franja)
+              : await cliente.crearFranjaTiendaRappi(storeId, paso.franja)
+      } catch (error) {
+        if (error instanceof DeliveryWriteNotSentError) throw error
+        const msg = error instanceof Error ? error.message : String(error)
+        throw new Error(`[Rappi] el horario de la tienda se quedó a medias en el ${cual}: ${msg}`)
+      }
+      if (!r.ok) return { ok: false, status: r.status, raw: `${cual} rechazado: ${r.raw.slice(0, 300)}` }
+    }
+
+    if (plan.length > 0) {
+      const abiertos = new Set(deseadas.map(f => f.day))
+      const sinFranjas = DIAS_RAPPI.filter(d => !abiertos.has(d))
+      if (sinFranjas.length > 0) {
+        logger.warn(
+          '🛵 [Rappi] horario publicado con días SIN franjas (cerrados de nuestro lado): falta medir si Rappi los toma como cerrados',
+          {
+            storeId,
+            sinFranjas,
+            recienCerrados: [...new Set(plan.flatMap(p => (p.tipo === 'BORRAR' && !abiertos.has(p.day) ? [p.day] : [])))],
+          },
+        )
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      raw: plan.length ? `${plan.length} cambio(s) en el horario de la tienda` : 'el horario ya estaba igual',
+    }
+  },
+
+  /**
    * 🔴 El 2xx del `POST /menu` significa «en revisión» (*"Menu updated and ready to be validated"*), NO publicado: lo
    * publicado lo dice `MENU_APPROVED`. Con esto el sincronizador no sella la huella con el 2xx y no republica encima de la
    * revisión.
@@ -388,6 +448,13 @@ export const rappiAdapter = {
   mapHours(horario: HorarioSemanal): unknown {
     return aHorarioRappi(horario)
   },
+}
+
+/** Un paso del plan del horario, legible para el log (`ACTUALIZAR 1171828 → mon 09:00:00-19:00:00`). */
+function describirPaso(paso: OperacionDeHorario): string {
+  if (paso.tipo === 'BORRAR') return `BORRAR ${paso.id} (${paso.day})`
+  const franja = `${paso.franja.day} ${paso.franja.starts_time}-${paso.franja.ends_time}`
+  return paso.tipo === 'ACTUALIZAR' ? `ACTUALIZAR ${paso.id} → ${franja}` : `CREAR ${franja}`
 }
 
 /**

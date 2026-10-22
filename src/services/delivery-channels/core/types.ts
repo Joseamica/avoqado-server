@@ -366,6 +366,17 @@ export interface DirectDeliveryAdapter {
   notifyIntegrationStatus?(storeId: string, integrada: boolean): Promise<ActionResult>
 
   /**
+   * Deja el horario regular de la TIENDA en el proveedor igual a `horario` (el neutral del núcleo). `ok` = el proveedor ya tiene
+   * exactamente ese horario; sólo entonces el núcleo guarda la huella (`hoursSync.service.ts`).
+   *
+   * 🔴 El núcleo NUNCA la llama con una semana toda cerrada: hay proveedores que toman «sin horario» como abierta las 24 h. El
+   * adaptador decide CÓMO se dice el horario (una llamada o varias, crear o actualizar); si se detiene a la mitad devuelve
+   * `ok:false` (o lanza), y la siguiente pasada vuelve a partir de lo que el proveedor de verdad tenga. Una escritura que no salió
+   * (el candado de tiendas, el token) lanza `DeliveryWriteNotSentError`. Ausente = el proveedor no recibe el horario de la tienda.
+   */
+  publishStoreHours?(horario: HorarioSemanal, storeId: string): Promise<ActionResult>
+
+  /**
    * El menú YA TRADUCIDO al formato del proveedor, SIN publicarlo.
    *
    * Existe para que el sincronizador pueda sacarle huella y decidir si hace falta publicar,

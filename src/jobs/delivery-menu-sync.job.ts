@@ -5,6 +5,7 @@ import { CronJob } from 'cron'
 import logger from '../config/logger'
 import { scheduleJob } from '../observability/jobContext'
 import { calcularTasaInyeccion, UMBRAL_OBJETIVO } from '../services/delivery-channels/core/injectionRate.service'
+import { syncChannelHours } from '../services/delivery-channels/core/hoursSync.service'
 import { syncChannelAvailability, syncChannelMenu, syncableLinksWhere } from '../services/delivery-channels/core/menuSync.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -22,7 +23,8 @@ import { retry, shouldRetryDbConnectionError } from '../utils/retry'
  *     con la integración completa.
  *
  * Compara por HUELLA, no por eventos (ver `menuSync.service.ts`): detecta cambios vengan de
- * donde vengan y se auto-corrige si una publicación se perdió.
+ * donde vengan y se auto-corrige si una publicación se perdió. Con la misma idea publica el
+ * horario de la TIENDA donde el proveedor lo recibe aparte (`hoursSync.service.ts`).
  *
  * CADENCIA — 5 minutos, y el número está pensado, no elegido al azar: `PUT /menus` REEMPLAZA
  * el menú entero del proveedor, así que correrlo cada minuto mientras alguien edita su carta
@@ -89,6 +91,19 @@ export class DeliveryMenuSyncJob {
           await syncChannelAvailability(link)
         } catch (error) {
           logger.error('🚨 [MenuSync] falló la disponibilidad — el proveedor puede estar vendiendo lo que no hay', {
+            linkId: link.id,
+            venueId: link.venueId,
+            error: error instanceof Error ? error.message : String(error),
+          })
+        }
+
+        // El horario de la TIENDA (Tarea 19), DESPUÉS del menú y de la disponibilidad: por huella, así que sin cambios no
+        // cuesta red. `syncChannelHours` no lanza (cada falla vuelve como FAILED y ya la avisó); el try/catch es para que, si
+        // algún día lanzara, no deje sin menú a este canal ni a los que siguen.
+        try {
+          await syncChannelHours(link)
+        } catch (error) {
+          logger.error('🚨 [MenuSync] falló el horario de la tienda — el proveedor puede tener un horario viejo', {
             linkId: link.id,
             venueId: link.venueId,
             error: error instanceof Error ? error.message : String(error),
