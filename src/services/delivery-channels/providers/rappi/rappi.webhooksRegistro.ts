@@ -23,6 +23,8 @@
  *
  * 🔴 UN AVISO DE TIENDA QUE RAPPI TIENE Y EL ARCHIVO NO, SE ROTA (`eventosARotar`). Su secreto lo pone Rappi y sólo lo entrega
  * en la respuesta del CREAR; si esa respuesta se pierde, el plan ve todo bien (NADA) y el archivo se quedaba sin él para siempre.
+ * Para que «no está en el archivo» sea cierto, la clave de un aviso que se va a CREAR se quita antes (`clavesQueYaNoVerifican`):
+ * si no, la vieja tapaba a la nueva. Y nunca se rota un aviso que también tiene tiendas ajenas (cambiaría también su secreto).
  */
 import { RAPPI_EVENTS } from './rappi.adapter'
 import { RUTA_POR_EVENTO, secretosDelEvento } from './rappi.webhookIngress'
@@ -103,7 +105,7 @@ export function planDeWebhooks(
 
 /**
  * Qué avisos POR TIENDA hay que rotar con `PUT webhook/{evento}/reset-secret` después de ejecutar el plan: los que EXISTEN en
- * Rappi y cuyo secreto no está en el archivo.
+ * Rappi, cuyo secreto no está en el archivo y cuyas tiendas son TODAS nuestras.
  *
  * 🔴 Por qué (hallazgo #1 de Codex, bloque 0): Rappi crea el aviso, pero la respuesta que trae su secreto se pierde (vence a los
  * 10 s). Al repetir, el plan ve la tienda y la URL bien ⇒ NADA, y el servidor rechazaría (401) cada aviso de ese evento para
@@ -112,25 +114,50 @@ export function planDeWebhooks(
  * «Existe en Rappi» = estaba en lo leído (`registrados`), o esta corrida lo creó, le cambió la URL o le agregó tiendas y Rappi lo
  * ACEPTÓ (2xx; un CREAR aceptado cuya respuesta no traía el secreto también cuenta). Un CREAR que FALLÓ no cuenta: no se sabe si
  * existe, y si Rappi sí lo guardó, la corrida siguiente lo lee y entonces se rota.
+ *
+ * 🔴 `reset-secret` cambia el secreto de TODO el aviso, no sólo el de nuestras tiendas (ronda 2, I2). Un aviso LEÍDO con alguna
+ * fila de una tienda fuera de `tiendas` NO se rota: se le cambiaría el secreto a quien atiende esa tienda. Sale en
+ * `conTiendasAjenas` para que el script lo diga con 🚨 y no dé la corrida por terminada (a propósito: lo decide una persona).
+ * Un aviso que esta corrida CREÓ sólo tiene nuestras tiendas (un CREAR sólo sale cuando Rappi no tenía ninguna fila).
  * 🔴 El de la INTEGRACIÓN nunca sale de aquí: no tiene reset-secret (su secreto es nuestro; ver `secretoDeLaIntegracion`).
  *
  * @param registrados  lo leído de Rappi al empezar la corrida.
  * @param resultados   cada acción del plan con su desenlace: `aceptada` = Rappi contestó 2xx.
  * @param secretos     el archivo de secretos TAL COMO QUEDÓ en disco después del plan.
+ * @param tiendas      las tiendas donde SÍ se puede escribir (`tiendasEscribiblesRappi()`).
  */
 export function eventosARotar(
   registrados: WebhookRegistrado[],
   resultados: Array<{ accion: AccionWebhook; aceptada: boolean }>,
   secretos: Record<string, unknown>,
-): string[] {
+  tiendas: string[],
+): { rotar: string[]; conTiendasAjenas: string[] } {
   const enRappi = new Set(registrados.map(r => r.evento))
   for (const { accion, aceptada } of resultados) {
     if (aceptada && (accion.tipo === 'CREAR' || accion.tipo === 'CAMBIAR_URL' || accion.tipo === 'AGREGAR_TIENDAS')) {
       enRappi.add(accion.evento)
     }
   }
+  const nuestras = new Set(tiendas)
+  const conAjenas = (evento: string) => registrados.some(r => r.evento === evento && r.tiendas.some(t => !nuestras.has(t)))
   const mapa = JSON.stringify(secretos)
-  return EVENTOS_DE_TIENDA.filter(evento => enRappi.has(evento) && secretosDelEvento(mapa, evento).length === 0)
+  const sinSecreto = EVENTOS_DE_TIENDA.filter(evento => enRappi.has(evento) && secretosDelEvento(mapa, evento).length === 0)
+  return { rotar: sinSecreto.filter(e => !conAjenas(e)), conTiendasAjenas: sinSecreto.filter(conAjenas) }
+}
+
+/**
+ * Las claves del archivo que hay que QUITAR antes de ejecutar el plan: las de los avisos de tienda que van a CREARSE.
+ *
+ * 🔴 Por qué (ronda 2, I1): un CREAR sólo sale cuando Rappi no tiene ninguna fila de ese aviso, así que la clave que el archivo
+ * conserve de él ya no verifica nada. Si se quedara, TAPARÍA la nueva: con una respuesta sin secreto, perdida, o un guardado
+ * fallido, el archivo seguiría «teniendo secreto», `eventosARotar` no rotaría y la corrida siguiente diría «Sin fallos» con una
+ * clave que Rappi ya no usa. Se quita (de forma atómica) ANTES de mandar el CREAR; si no se puede quitar, no se manda nada.
+ * Se quita aunque el valor esté vacío o no sea texto: nada que parezca su secreto debe quedar.
+ * 🔴 La de la INTEGRACIÓN nunca: es nuestra, y su CREAR_DE_INTEGRACION vuelve a mandar ESA misma (ver `secretoDeLaIntegracion`).
+ */
+export function clavesQueYaNoVerifican(plan: AccionWebhook[], secretos: Record<string, unknown>): string[] {
+  const aCrear = new Set(plan.filter(a => a.tipo === 'CREAR').map(a => a.evento))
+  return EVENTOS_DE_TIENDA.filter(evento => aCrear.has(evento) && Object.prototype.hasOwnProperty.call(secretos, evento))
 }
 
 /**

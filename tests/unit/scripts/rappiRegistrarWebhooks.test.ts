@@ -51,6 +51,10 @@ let rappi: {
   rechazar: Map<string, number>
   /** Eventos cuyo CREAR responde 200 sin el campo `secret`. */
   crearSinSecreto: Set<string>
+  /** Eventos cuyo reset-secret responde 200 sin el campo `secret` (Rappi lo rota igual). */
+  resetSinSecreto: Set<string>
+  /** Eventos cuyo change-url / add-stores rota el secreto y lo devuelve (la doc no lo dice: por medir). */
+  cambioDevuelveSecreto: Set<string>
   llamadas: string[]
   /** Se llama en cada petición, antes de contestar: para mirar el disco mientras el script corre. */
   espiar?: () => void
@@ -59,7 +63,16 @@ let n = 0
 const secretoNuevo = () => `rappi-secreto-${++n}`
 
 function nuevoRappi(): typeof rappi {
-  return { porTienda: new Map(), secretoDe: new Map(), perder: new Set(), rechazar: new Map(), crearSinSecreto: new Set(), llamadas: [] }
+  return {
+    porTienda: new Map(),
+    secretoDe: new Map(),
+    perder: new Set(),
+    rechazar: new Map(),
+    crearSinSecreto: new Set(),
+    resetSinSecreto: new Set(),
+    cambioDevuelveSecreto: new Set(),
+    llamadas: [],
+  }
 }
 
 const ok = (cuerpo: unknown, status = 200) => ({ ok: true, status, raw: cuerpo === undefined ? '' : JSON.stringify(cuerpo) })
@@ -104,9 +117,13 @@ async function rappiSimulado(p: Peticion) {
       if (!r) throw Object.assign(new Error('406'), { status: 406 })
       if (que === 'change-url') r.url = (p.cuerpo as { url: string }).url
       if (que === 'add-stores') r.tiendas.push(...(p.cuerpo as Array<{ stores: string[] }>)[0].stores)
-      if (que === 'reset-secret') {
+      if (que !== 'reset-secret' && rappi.cambioDevuelveSecreto.has(event)) {
         rappi.secretoDe.set(event, secretoNuevo())
         return { event, secret: rappi.secretoDe.get(event) }
+      }
+      if (que === 'reset-secret') {
+        rappi.secretoDe.set(event, secretoNuevo())
+        return rappi.resetSinSecreto.has(event) ? { event } : { event, secret: rappi.secretoDe.get(event) }
       }
       return { event }
     }
@@ -329,5 +346,285 @@ describe('rappi-registrar-webhooks', () => {
     rappi.rechazar.set('GET webhook NEW_ORDER', 500) // falla la lectura: el script lanza
     await expect(main(args())).rejects.toThrow(/GET webhook\/NEW_ORDER/)
     expect(fs.existsSync(candado())).toBe(false)
+  })
+})
+
+// ══ Ronda 2: PASADA EXHAUSTIVA de la familia «el secreto de un aviso» ═══════════════════════════════════════════
+// Cada prueba es una celda de la tabla del reporte (`codex-b0-fix-report.md`, «Arreglo ronda 2»). La regla que vale en todas:
+// el script nunca sale con 0 si el archivo no tiene la clave VIGENTE de un aviso que existe en Rappi, y si sale con 1, la
+// corrida siguiente lo repara sola (salvo el aviso con tiendas ajenas, que es a propósito).
+
+const ENOSPC = () => Object.assign(new Error('ENOSPC: no space left on device'), { code: 'ENOSPC' })
+
+/** El disco se llena para los reemplazos que cumplan `cuando` (destino, contenido del temporal). Devuelve el espía. */
+function discoLleno(cuando: (destino: string, contenido: string) => boolean) {
+  const real = fs.renameSync
+  return jest.spyOn(fs, 'renameSync').mockImplementation((de, a) => {
+    if (cuando(String(a), fs.readFileSync(de, 'utf8'))) throw ENOSPC()
+    return real(de, a)
+  })
+}
+
+/** Rappi ya no tiene el aviso (alguien lo borró, o expiró): su secreto deja de existir allá. */
+function rappiPierde(evento: string) {
+  rappi.porTienda.delete(evento)
+  rappi.secretoDe.delete(evento)
+}
+
+/** Una corrida completa y buena: punto de partida con el archivo al día. */
+async function todoAlDia() {
+  expect(await main(args())).toBe(0)
+  rappi.llamadas = []
+  pantalla = []
+}
+
+const resetDe = (evento: string) => `PUT reset-secret ${evento}`
+
+describe('ronda 2 · el secreto de un aviso de tienda (I1: la clave vieja nunca tapa la nueva)', () => {
+  it('A1 · clave VIEJA + Rappi sin aviso + CREAR 2xx con secret ⇒ se quita la vieja, queda la nueva, exit 0', async () => {
+    await todoAlDia()
+    const vieja = archivo().PING
+    rappiPierde('PING')
+
+    expect(await main(args())).toBe(0)
+
+    expect(archivo().PING).not.toBe(vieja)
+    expect(archivo()).toEqual(secretosDeRappi())
+    expect(pantalla.find(l => l.startsWith('PING') && /CLAVE VIEJA/.test(l))).toBeDefined()
+    expect(rappi.llamadas).not.toContain(resetDe('PING'))
+  })
+
+  it('🔴 A3 · (I1a) clave VIEJA + CREAR 2xx SIN secret ⇒ se rota en la misma corrida y el archivo queda con la vigente', async () => {
+    await todoAlDia()
+    rappiPierde('PING')
+    rappi.crearSinSecreto.add('PING')
+
+    expect(await main(args())).toBe(0)
+
+    expect(rappi.llamadas).toContain(resetDe('PING'))
+    expect(archivo()).toEqual(secretosDeRappi())
+    // creado en esta misma corrida: no había un secreto anterior que dejara de servir
+    expect(pantalla.find(l => l.startsWith('PING') && l.includes('ROTAR_SECRETO'))).toMatch(/NUEVO/)
+  })
+
+  it('🔴 A4 · (I1b) clave VIEJA + la respuesta del CREAR se pierde ⇒ exit 1 sin la vieja; la siguiente rota y sale con 0', async () => {
+    await todoAlDia()
+    rappiPierde('PING')
+    rappi.perder.add('POST webhook PING')
+
+    expect(await main(args())).toBe(1)
+    expect(rappi.porTienda.has('PING')).toBe(true) // Rappi sí lo creó
+    expect(archivo().PING).toBeUndefined() // y la vieja ya no está para taparlo
+
+    rappi.perder.clear()
+    pantalla = []
+    expect(await main(args())).toBe(0)
+    expect(rappi.llamadas).toContain(resetDe('PING'))
+    expect(archivo()).toEqual(secretosDeRappi())
+    // I2: ya estaba registrado ⇒ el aviso dice que el anterior dejó de servir y que hay que reiniciar
+    const linea = pantalla.find(l => l.startsWith('PING') && l.includes('ROTAR_SECRETO'))
+    expect(linea).toMatch(/dejó de servir/)
+    expect(linea).toMatch(/RAPPI_WEBHOOK_SECRETS/)
+    expect(linea).toMatch(/reinicia/)
+  })
+
+  it('🔴 A2 · (I1b) clave VIEJA + CREAR 2xx con secret + el disco falla al guardarlo ⇒ exit 1 sin la vieja; la siguiente repara', async () => {
+    await todoAlDia()
+    const vieja = archivo().PING
+    rappiPierde('PING')
+    // El disco se llena justo al guardar una clave de PING que no es la vieja (la del CREAR o la de la rotación).
+    const disco = discoLleno((a, contenido) => {
+      const ping = (JSON.parse(contenido) as Record<string, unknown>).PING
+      return a === salida && ping !== undefined && ping !== vieja
+    })
+
+    expect(await main(args())).toBe(1)
+    expect(rappi.llamadas).toContain(resetDe('PING')) // aceptado ⇒ intentó rotar
+    expect(archivo().PING).toBeUndefined()
+
+    disco.mockRestore()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('A2 · (Minor 5) SIN clave + CREAR 2xx con secret + ENOSPC al guardar ⇒ intenta rotar, exit 1 y el archivo INTACTO', async () => {
+    rappi.rechazar.set('POST webhook PING', 500)
+    expect(await main(args())).toBe(1) // primera corrida: todo menos PING
+    rappi.rechazar.clear()
+    const antes = fs.readFileSync(salida, 'utf8')
+    const disco = discoLleno(a => a === salida)
+
+    expect(await main(args())).toBe(1)
+
+    expect(rappi.llamadas).toContain('POST webhook PING')
+    expect(rappi.llamadas).toContain(resetDe('PING'))
+    expect(fs.readFileSync(salida, 'utf8')).toBe(antes)
+    expect(fs.readdirSync(dir).sort()).toEqual(['secretos-dev.json'])
+    expect(dijo()).not.toContain('Sin fallos')
+
+    disco.mockRestore()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('A5 · clave VIEJA + CREAR rechazado ⇒ exit 1, no rota (no existe), sin la vieja; la siguiente lo crea y sale con 0', async () => {
+    await todoAlDia()
+    rappiPierde('PING')
+    rappi.rechazar.set('POST webhook PING', 500)
+
+    expect(await main(args())).toBe(1)
+    expect(rappi.llamadas).not.toContain(resetDe('PING'))
+    expect(archivo().PING).toBeUndefined()
+
+    rappi.rechazar.clear()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('🔴 A0 · clave VIEJA + el disco falla al QUITARLA ⇒ no se manda el CREAR (nada a Rappi), archivo intacto; la siguiente repara', async () => {
+    await todoAlDia()
+    const bueno = fs.readFileSync(salida, 'utf8')
+    rappiPierde('PING')
+    const disco = discoLleno(a => a === salida)
+
+    await expect(main(args())).rejects.toThrow(/clave vieja/i)
+    expect(rappi.llamadas.filter(l => !l.startsWith('GET'))).toEqual([]) // ni una escritura a Rappi
+    expect(fs.readFileSync(salida, 'utf8')).toBe(bueno)
+    expect(fs.existsSync(candado())).toBe(false)
+
+    disco.mockRestore()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('B2 · SIN clave + aviso registrado + reset 2xx SIN secret ⇒ exit 1 y lo dice; la siguiente rota otra vez y sale con 0', async () => {
+    await todoAlDia()
+    const sinPing = archivo()
+    delete sinPing.PING
+    fs.writeFileSync(salida, JSON.stringify(sinPing))
+    rappi.resetSinSecreto.add('PING')
+
+    expect(await main(args())).toBe(1)
+    expect(pantalla.find(l => l.startsWith('PING') && l.includes('ROTAR_SECRETO'))).toMatch(/no trae el secreto/)
+    expect(dijo()).not.toContain('Sin fallos')
+
+    rappi.resetSinSecreto.clear()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+})
+
+describe('ronda 2 · un aviso que sigue en Rappi (B)', () => {
+  it('B2 · SIN clave + aviso registrado + reset 2xx con secret + el disco falla ⇒ exit 1, archivo INTACTO; la siguiente rota y sale con 0', async () => {
+    await todoAlDia()
+    const sinPing = archivo()
+    delete sinPing.PING
+    fs.writeFileSync(salida, JSON.stringify(sinPing))
+    const antes = fs.readFileSync(salida, 'utf8')
+    const disco = discoLleno(a => a === salida)
+
+    expect(await main(args())).toBe(1)
+    expect(rappi.llamadas).toContain(resetDe('PING'))
+    expect(fs.readFileSync(salida, 'utf8')).toBe(antes)
+
+    disco.mockRestore()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('B1 · túnel nuevo: CAMBIAR_URL en los 10 y la integración con la MISMA clave; ninguna clave cambia, exit 0', async () => {
+    await todoAlDia()
+    const antes = archivo()
+
+    expect(await main(['--base', 'https://otro-tunel.ngrok.app', '--salida', salida])).toBe(0)
+
+    expect(rappi.llamadas.filter(l => l.startsWith('PUT change-url'))).toHaveLength(EVENTOS_DE_TIENDA.length)
+    expect(rappi.llamadas).toContain('POST clients webhooks')
+    expect(rappi.llamadas.filter(l => l.startsWith('PUT reset-secret'))).toEqual([])
+    expect(archivo()).toEqual(antes) // el servidor no necesita reiniciarse con otras claves
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('B1 · (por medir) si change-url DEVOLVIERA un secreto nuevo, se guarda: el del archivo sería el viejo', async () => {
+    await todoAlDia()
+    rappi.cambioDevuelveSecreto.add('NEW_ORDER')
+
+    expect(await main(['--base', 'https://otro-tunel.ngrok.app', '--salida', salida])).toBe(0)
+
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+})
+
+describe('ronda 2 · I2: reset-secret cambia el secreto de TODO el aviso', () => {
+  it('🔴 C2 · SIN clave + aviso con una tienda AJENA ⇒ NO se rota, 🚨 y exit 1; la siguiente igual (a propósito)', async () => {
+    await todoAlDia()
+    const sinNewOrder = archivo()
+    delete sinNewOrder.NEW_ORDER
+    fs.writeFileSync(salida, JSON.stringify(sinNewOrder))
+    rappi.porTienda.get('NEW_ORDER')!.tiendas.push('111') // otra tienda del mismo cliente, fuera de la lista
+
+    for (let vuelta = 0; vuelta < 2; vuelta++) {
+      pantalla = []
+      expect(await main(args())).toBe(1)
+      expect(rappi.llamadas).not.toContain(resetDe('NEW_ORDER'))
+      const aviso = pantalla.find(l => l.includes('🚨') && l.includes('NEW_ORDER'))
+      expect(aviso).toMatch(/tiendas? fuera/i)
+      expect(dijo()).not.toContain('Sin fallos')
+    }
+    expect(archivo().NEW_ORDER).toBeUndefined()
+  })
+
+  it('C1 · clave VIGENTE + aviso con una tienda ajena ⇒ nada que rotar, exit 0', async () => {
+    await todoAlDia()
+    rappi.porTienda.get('NEW_ORDER')!.tiendas.push('111')
+
+    expect(await main(args())).toBe(0)
+    expect(rappi.llamadas.filter(l => !l.startsWith('GET'))).toEqual([])
+  })
+})
+
+describe('ronda 2 · el secreto de la INTEGRACIÓN (`.pendiente`) se conserva', () => {
+  const pendiente = () => `${salida}.pendiente`
+
+  it('I-X · el POST de la integración se pierde ⇒ exit 1 con el pendiente; la siguiente manda el MISMO y sale con 0', async () => {
+    rappi.perder.add('POST clients webhooks')
+
+    expect(await main(args())).toBe(1)
+    const enviado = rappi.integracion?.secreto
+    expect(fs.readFileSync(pendiente(), 'utf8').trim()).toBe(enviado)
+    expect(archivo()[INTEGRACION]).toBeUndefined()
+
+    rappi.perder.clear()
+    expect(await main(args())).toBe(0)
+    expect(rappi.integracion?.secreto).toBe(enviado) // el mismo: el servidor no necesita otro
+    expect(archivo()).toEqual(secretosDeRappi())
+    expect(fs.existsSync(pendiente())).toBe(false)
+  })
+
+  it('I-D · el POST entra pero el disco falla al guardarlo ⇒ exit 1 con el pendiente; la siguiente manda el MISMO', async () => {
+    const disco = discoLleno((a, contenido) => a === salida && contenido.includes(INTEGRACION))
+
+    expect(await main(args())).toBe(1)
+    const enviado = rappi.integracion?.secreto
+    expect(fs.existsSync(pendiente())).toBe(true)
+
+    disco.mockRestore()
+    expect(await main(args())).toBe(0)
+    expect(rappi.integracion?.secreto).toBe(enviado)
+    expect(archivo()).toEqual(secretosDeRappi())
+  })
+
+  it('🔴 I-P · el disco falla al guardar el pendiente ⇒ NO se manda el POST y el mensaje no dice que quedó guardado', async () => {
+    const disco = discoLleno(a => a === pendiente())
+
+    expect(await main(args())).toBe(1)
+
+    expect(rappi.llamadas).not.toContain('POST clients webhooks')
+    expect(dijo()).not.toMatch(/quedó guardado/)
+    expect(dijo()).not.toMatch(/reintenta con el secreto de/)
+
+    disco.mockRestore()
+    expect(await main(args())).toBe(0)
+    expect(archivo()).toEqual(secretosDeRappi())
   })
 })

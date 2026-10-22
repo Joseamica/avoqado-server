@@ -19,6 +19,9 @@
  *  · 🔴 Un aviso de tienda que Rappi YA tiene y el archivo no (la respuesta del CREAR se perdió, aquí o en otra corrida) se
  *    ROTA con `reset-secret` al terminar el plan: Rappi no vuelve a mostrar un secreto, sólo da uno nuevo. Mientras falte el
  *    secreto de algún aviso, el script sale con 1 y dice cuál falta.
+ *  · 🔴 Una clave del archivo nunca tapa la vigente: antes de CREAR un aviso que Rappi ya no tiene, su clave vieja se quita del
+ *    archivo (si no se puede, no se manda nada). Y un aviso que también tiene tiendas fuera de la lista NUNCA se rota (el reset
+ *    cambia el secreto de todo el aviso): se avisa con 🚨 y la corrida sale con 1, a propósito.
  *  · 🔴 Una sola corrida a la vez por archivo: `<salida>.lock` se toma ANTES de leer nada y se suelta al terminar. Si ya existe,
  *    no se toca nada; un candado de una corrida que murió lo borra una persona, a mano.
  *
@@ -47,6 +50,7 @@ import { getRappiToken } from '../src/services/delivery-channels/providers/rappi
 import { RUTA_POR_EVENTO, secretosDelEvento } from '../src/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 import {
   azpDelJwt,
+  clavesQueYaNoVerifican,
   eventosARotar,
   planDeWebhooks,
   registradosDeRespuesta,
@@ -163,7 +167,7 @@ async function leerDeIntegracion(azp: string): Promise<Array<{ evento: string; u
  * nuestro, ya guardado como pendiente por quien llama), `null` si salió bien sin secreto (un CREAR cuya respuesta no lo trae
  * también: el aviso ya existe y `eventosARotar` lo rota al terminar el plan), y lanza si Rappi la rechazó o no contestó.
  * `storeIds: tiendas` en TODAS: es lo que el candado de `rappi.http.ts` revisa (la de integración no es de una tienda, pero
- * sin ninguna tienda autorizada tampoco debe salir).
+ * sin ninguna tienda autorizada tampoco debe salir). Si change-url o add-stores devolvieran un `secret`, también se devuelve.
  */
 async function ejecutar(accion: AccionWebhook, tiendas: string[], azp: string, secretoDeIntegracion: string): Promise<string | null> {
   if (accion.tipo === 'NADA') return null
@@ -190,7 +194,9 @@ async function ejecutar(accion: AccionWebhook, tiendas: string[], azp: string, s
       storeIds: accion.tiendas,
     })
     if (!r.ok) throw new Error(`Rappi respondió ${r.status}`)
-    return null
+    // 🔴 por medir en la Tarea 7: la doc no dice que change-url cambie el secreto ni que devuelva uno. Si lo devolviera, se
+    // guarda: es el vigente, y quedarse con el del archivo sería guardar uno viejo.
+    return secretoDeLaRespuesta(r.raw) ?? null
   }
 
   if (accion.tipo === 'AGREGAR_TIENDAS') {
@@ -202,7 +208,7 @@ async function ejecutar(accion: AccionWebhook, tiendas: string[], azp: string, s
       storeIds: accion.tiendas,
     })
     if (!r.ok) throw new Error(`Rappi respondió ${r.status}`)
-    return null
+    return secretoDeLaRespuesta(r.raw) ?? null // igual que change-url: por medir si alguna vez trae uno
   }
 
   // CREAR_DE_INTEGRACION: el secreto lo ponemos nosotros (la respuesta de Rappi no trae ninguno).
@@ -222,7 +228,9 @@ async function ejecutar(accion: AccionWebhook, tiendas: string[], azp: string, s
  * 🔴 por medir en la Tarea 7: (1) la forma de la respuesta (la doc la ejemplifica con `secret`, igual que el CREAR); (2) si el
  * secreto es POR EVENTO (la ruta lo es, pero el texto de la doc dice «genera uno nuevo al cliente autenticado»). Si fuera uno
  * solo por cliente, rotar un evento dejaría viejos los secretos guardados de los demás.
- * `storeIds: tiendas`, como toda escritura, para que el candado de `rappi.http.ts` la revise.
+ * 🔴 El reset cambia el secreto de TODO el aviso, también el de tiendas fuera de la lista: `storeIds: tiendas` sólo hace que el
+ * candado de `rappi.http.ts` vea una escritura con tiendas autorizadas, NO limita a quién afecta. La guarda de verdad está antes:
+ * `eventosARotar` nunca propone un aviso leído con alguna tienda ajena (ronda 2, I2).
  */
 async function rotarSecreto(evento: string, tiendas: string[]): Promise<string> {
   const r = await rappiApi({ metodo: 'PUT', ruta: `${API}/webhook/${evento}/reset-secret`, storeIds: tiendas })
@@ -303,21 +311,49 @@ async function registrar(salida: string, base: string, ambiente: string, tiendas
   const azp = azpDelJwt(token)
   const deIntegracion = await leerDeIntegracion(azp)
 
-  // 2) El plan y su ejecución.
+  // 2) El plan.
   // 🔴 Sin el secreto CONFIRMADO en el archivo, el aviso de la integración se vuelve a mandar aunque Rappi ya lo tenga con la misma URL.
   const plan = planDeWebhooks(registrados, deIntegracion, base, tiendas, integracion.origen === 'ARCHIVO')
+
+  // 🔴 (ronda 2, I1) Antes de la primera escritura a Rappi: la clave de un aviso que se va a CREAR ya no verifica nada (Rappi no
+  // tiene ese aviso) y, si se quedara, TAPARÍA la nueva (una respuesta sin secreto, perdida o un guardado fallido dejaban la vieja
+  // y la corrida siguiente decía «Sin fallos»). Se quitan todas de golpe; si no se puede escribir, no se manda nada.
+  const viejas = clavesQueYaNoVerifican(plan, secretos)
+  if (viejas.length) {
+    const sinViejas = Object.fromEntries(Object.entries(secretos).filter(([evento]) => !viejas.includes(evento)))
+    try {
+      escribirSecretos(salida, sinViejas)
+    } catch (e) {
+      throw new Error(
+        `No se pudo quitar del archivo la clave vieja de ${viejas.join(', ')} (${e instanceof Error ? e.message : 'error desconocido'}): ` +
+          `no se mandó nada a Rappi. Vuelve a correr cuando se pueda escribir en ${salida}.`,
+      )
+    }
+    secretos = sinViejas
+    for (const evento of viejas)
+      decir(evento, 'CLAVE VIEJA · se quitó del archivo (Rappi ya no tiene este aviso; la nueva llega con el CREAR)')
+  }
+
+  // 3) La ejecución del plan.
   const resultados: Array<{ accion: AccionWebhook; aceptada: boolean }> = []
   let fallos = 0
+  let pendienteEnDisco = integracion.origen === 'PENDIENTE' // ¿el secreto de la integración está en `.pendiente`?
   for (const accion of plan) {
     let aceptada = false
     try {
-      // 🔴 Antes del POST, a disco: si venciera después de que Rappi lo guardó, la siguiente corrida manda el MISMO.
-      if (accion.tipo === 'CREAR_DE_INTEGRACION' && integracion.origen !== 'PENDIENTE')
+      // 🔴 Antes del POST, a disco: si venciera después de que Rappi lo guardó, la siguiente corrida manda el MISMO. Si esta
+      // escritura falla, el POST no sale (lanza aquí).
+      if (accion.tipo === 'CREAR_DE_INTEGRACION' && integracion.origen !== 'PENDIENTE') {
         escribirAtomico600(rutaPendiente, `${integracion.secreto}\n`)
+        pendienteEnDisco = true
+      }
       const secreto = await ejecutar(accion, tiendas, azp, integracion.secreto)
       aceptada = true // Rappi contestó 2xx: el aviso existe allá, aunque guardar su secreto falle abajo
       if (secreto) guardar(accion.evento, secreto)
-      if (accion.tipo === 'CREAR_DE_INTEGRACION') fs.rmSync(rutaPendiente, { force: true }) // ya está confirmado en el principal
+      if (accion.tipo === 'CREAR_DE_INTEGRACION') {
+        fs.rmSync(rutaPendiente, { force: true }) // ya está confirmado en el principal
+        pendienteEnDisco = false
+      }
       const nota =
         accion.tipo === 'CREAR' && !secreto
           ? ' (la respuesta no trajo el secreto: se rota abajo)'
@@ -327,27 +363,38 @@ async function registrar(salida: string, base: string, ambiente: string, tiendas
       fallos++
       // Los mensajes que llegan aquí son nuestros (estado HTTP, candado, red, disco): nunca el cuerpo de Rappi.
       const remedio =
-        accion.tipo === 'CREAR_DE_INTEGRACION'
-          ? ` · el secreto quedó guardado en ${rutaPendiente}: vuelve a correr el script y reintenta con el MISMO`
-          : ''
+        accion.tipo !== 'CREAR_DE_INTEGRACION'
+          ? ''
+          : pendienteEnDisco
+            ? ` · el secreto quedó guardado en ${rutaPendiente}: vuelve a correr el script y reintenta con el MISMO`
+            : ' · no se pudo guardar el secreto antes del POST, así que no se mandó: vuelve a correr el script'
       decir(accion.evento, `${accion.tipo} · FALLÓ: ${e instanceof Error ? e.message : 'error desconocido'}${remedio}`)
     }
     resultados.push({ accion, aceptada })
   }
 
-  // 3) 🔴 Los avisos de tienda que Rappi tiene y el archivo no (una respuesta perdida, en ésta o en otra corrida) se rotan: Rappi
-  // no vuelve a mostrar un secreto, sólo da uno nuevo. Nunca el de la integración (no tiene reset-secret; ver la cabecera).
-  for (const evento of eventosARotar(registrados, resultados, secretos)) {
+  // 4) 🔴 Los avisos de tienda que Rappi tiene y el archivo no (una respuesta perdida, en ésta o en otra corrida) se rotan: Rappi
+  // no vuelve a mostrar un secreto, sólo da uno nuevo. Nunca el de la integración (no tiene reset-secret; ver la cabecera), y
+  // nunca uno que también tenga tiendas ajenas: el reset les cambiaría el secreto a ellas (ronda 2, I2).
+  const { rotar, conTiendasAjenas } = eventosARotar(registrados, resultados, secretos, tiendas)
+  for (const evento of rotar) {
+    const yaEstabaRegistrado = registrados.some(r => r.evento === evento)
     try {
       guardar(evento, await rotarSecreto(evento, tiendas))
-      decir(evento, 'ROTAR_SECRETO · listo (secreto NUEVO: copia el del archivo a RAPPI_WEBHOOK_SECRETS)')
+      decir(
+        evento,
+        yaEstabaRegistrado
+          ? 'ROTAR_SECRETO · listo · 🚨 el secreto anterior de este aviso dejó de servir: copia el nuevo del archivo a ' +
+              'RAPPI_WEBHOOK_SECRETS y reinicia el servidor'
+          : 'ROTAR_SECRETO · listo (secreto NUEVO: copia el del archivo a RAPPI_WEBHOOK_SECRETS y reinicia el servidor)',
+      )
     } catch (e) {
       fallos++
       decir(evento, `ROTAR_SECRETO · FALLÓ: ${e instanceof Error ? e.message : 'error desconocido'}`)
     }
   }
 
-  // 4) Avisos para el que corre el script.
+  // 5) Avisos para el que corre el script.
   for (const [evento, n] of Object.entries(deshabilitadas)) {
     decir(evento, `AVISO: ${n} tienda(s) en DISABLE en Rappi (siguen registradas, pero no reciben avisos)`)
   }
@@ -355,17 +402,28 @@ async function registrar(salida: string, base: string, ambiente: string, tiendas
   const mapa = JSON.stringify(secretos)
   const faltanDeTienda = EVENTOS_DE_TIENDA.filter(ev => secretosDelEvento(mapa, ev).length === 0)
   const faltaIntegracion = secretosDelEvento(mapa, RAPPI_EVENTS.STORE_PROVISIONING_STATUS).length === 0
-  if (faltanDeTienda.length) {
+  // Éstos NO se arreglan volviendo a correr (a propósito): lo decide una persona.
+  for (const evento of conTiendasAjenas) {
+    decir(
+      evento,
+      `🚨 FALTA su secreto, y en Rappi este aviso también tiene tiendas fuera de la lista (RAPPI_WRITABLE_STORE_IDS_${ambiente}). ` +
+        'reset-secret cambiaría el secreto de TODO el aviso, también el de esas tiendas: NO se rota. Consigue el secreto con quien ' +
+        'registró esas tiendas (o quítalas del aviso en Rappi) y vuelve a correr.',
+    )
+  }
+  const reparables = faltanDeTienda.filter(ev => !conTiendasAjenas.includes(ev))
+  if (reparables.length) {
     console.log(
-      `FALTA en ${salida} el secreto de: ${faltanDeTienda.join(', ')}. Sin él, el servidor rechaza (401) esos avisos. ` +
+      `FALTA en ${salida} el secreto de: ${reparables.join(', ')}. Sin él, el servidor rechaza (401) esos avisos. ` +
         'Vuelve a correr este script: crea en Rappi los que no existen y rota (reset-secret) los que ya existen.',
     )
   }
   // El de la integración NO se rota con reset-secret (no existe para ese aviso): se recupera volviendo a correr este script.
   if (faltaIntegracion) {
+    const como = fs.existsSync(rutaPendiente) ? `reintenta con el secreto guardado en ${rutaPendiente}` : 'manda uno nuevo'
     console.log(
       `FALTA: el aviso de la INTEGRACIÓN (${RAPPI_EVENTS.STORE_PROVISIONING_STATUS}) NO quedó confirmado en ${salida}. ` +
-        `No hay reset-secret para ese aviso: vuelve a correr este script (reintenta con el secreto de ${rutaPendiente}).`,
+        `No hay reset-secret para ese aviso: vuelve a correr este script (${como}).`,
     )
   }
   const faltan = faltanDeTienda.length + (faltaIntegracion ? 1 : 0)
