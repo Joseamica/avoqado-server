@@ -22,6 +22,8 @@ const STATUS_MAP: Record<string, TableStatus> = {
   cleaning: TableStatus.CLEANING,
 }
 
+const LIVE_CHECK_EXCLUDED = ['COMPLETED', 'CANCELLED', 'DELETED'] as const
+
 export function registerTableTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
@@ -38,7 +40,9 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
       const tables = await prisma.table.findMany({
         where: {
           ...base,
-          ...(includeInactive ? {} : { active: true }),
+          // An archived table still holding a live check stays listed (a device offline with the old floor plan opened it there);
+          // otherwise that check would be invisible here while the POS shows it. Same set as `/tables`.
+          ...(includeInactive ? {} : { OR: [{ active: true }, { orders: { some: { status: { notIn: [...LIVE_CHECK_EXCLUDED] } } } }] }),
           ...(area ? { area: { name: { contains: area, mode: 'insensitive' as const } } } : {}),
         },
         select: {
@@ -46,6 +50,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           number: true,
           capacity: true,
           status: true,
+          active: true,
           area: { select: { name: true } },
           currentOrder: {
             select: { orderNumber: true, total: true, paidAmount: true, remainingBalance: true, paymentStatus: true, createdAt: true },
@@ -65,7 +70,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           // the raw column — meaning an owner asking the assistant "¿cuántas mesas
           // tengo ocupadas?" got an inflated count with no way to tell it was wrong.
           orders: {
-            where: { status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } },
+            where: { status: { notIn: [...LIVE_CHECK_EXCLUDED] } },
             select: { id: true },
           },
         },
@@ -109,6 +114,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
           // Kept so a drifted row is diagnosable instead of silently corrected: when
           // this differs from `status`, the denormalized column is stale for that table.
           storedStatus: t.status,
+          ...(t.active === false ? { archived: true } : {}),
           order: t.currentOrder
             ? {
                 orderNumber: t.currentOrder.orderNumber,

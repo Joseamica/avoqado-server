@@ -1,6 +1,6 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
-import { AreaTicketInventoryReservationStatus, Order, PaymentStatus, Prisma } from '@prisma/client'
+import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -1607,6 +1607,7 @@ export async function addItemsToOrder(
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError('Cannot add items to a paid order')
       }
+      const reabrePorRonda = order.status === OrderStatus.COMPLETED
 
       // Etapa 3 del KDS: sólo una ronda de MESA manda su comanda a la pantalla (en mostrador nace al pagar). La marca viaja
       // en el CAS de versión de abajo.
@@ -2237,9 +2238,22 @@ export async function addItemsToOrder(
           remainingBalance: newRemainingBalance,
           version: { increment: 1 },
           ...(marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+          // Cuentas fuera del plano (23-oct; Codex r2 #1): una ronda (también la que llega sin red) sobre una cuenta CERRADA y no
+          // pagada la reabre, como un cobro tardío reabre una anulada; si siguiera COMPLETED debiendo, el plano no la vería.
+          ...(reabrePorRonda ? { status: OrderStatus.PENDING, completedAt: null } : {}),
         },
       })
       if (casBump.count === 0) throw conflictoDeVersion()
+      if (reabrePorRonda)
+        await tx.activityLog.create({
+          data: {
+            action: 'ORDER_REOPENED_BY_LATE_ROUND',
+            entity: 'Order',
+            entityId: orderId,
+            venueId,
+            data: { estadoAnterior: order.status, estadoNuevo: OrderStatus.PENDING, totalNuevo: newTotal },
+          },
+        })
       await dentroDeLaTx?.(tx, { orderId })
       const updatedOrder = await tx.order.findUniqueOrThrow({
         where: { id: orderId },

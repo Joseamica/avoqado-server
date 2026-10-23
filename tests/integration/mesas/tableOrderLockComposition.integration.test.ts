@@ -461,6 +461,12 @@ const { createOrder: createSimpleTpvOrder } =
   require('@/services/tpv/order.tpv.service') as typeof import('@/services/tpv/order.tpv.service')
 const { updateOrder: updateDashboardOrder } =
   require('@/services/dashboard/order.dashboard.service') as typeof import('@/services/dashboard/order.dashboard.service')
+/**
+ * Cuentas fuera del plano (23-oct-2026): el PUT del panel ya NO le cambia la mesa a una cuenta viva (400
+ * `ORDER_TABLE_CHANGE_NOT_ALLOWED`). Estas pruebas lo usaban sólo como el escritor concurrente que cambia `Order.tableId` sin mover
+ * `Table.currentOrderId`; ese mismo cambio de topología se escribe aquí directo (un dato viejo o cualquier otro escritor lo deja igual).
+ */
+const moverCuentaDeMesa = (orderId: string, tableId: string | null) => prisma.order.update({ where: { id: orderId }, data: { tableId } })
 async function accountFor(
   f: Awaited<ReturnType<typeof fixture>>,
   tableId: string | null = f.tableId,
@@ -660,12 +666,8 @@ describe('Task6 complete snapshots and pointer compatibility', () => {
         if (mutation === 'new101st') await createSimpleTpvOrder(f.venueId, { tableId: f.tableId, waiterId: f.staffId })
         else if (mutation === 'discordant-pointer')
           await prisma.table.update({ where: { id: f.tableId }, data: { currentOrderId: newMember.id } })
-        else
-          await updateDashboardOrder(
-            f.venueId,
-            source.id,
-            mutation === 'reopen' ? { status: 'PENDING' } : { tableId: mutation === 'T-null' ? null : other.id },
-          )
+        else if (mutation === 'reopen') await updateDashboardOrder(f.venueId, source.id, { status: 'PENDING' })
+        else await moverCuentaDeMesa(source.id, mutation === 'T-null' ? null : other.id)
         release.resolve()
         await expect(attempt).rejects.toBeInstanceOf(OrderTableTopologyChanged)
         expect((await prisma.table.findUniqueOrThrow({ where: { id: f.tableId } })).number).not.toBe('MUST-ROLL-BACK')
@@ -756,7 +758,7 @@ it('POS initially unbound classification still locks a concurrently joined table
     pending.push(writer)
     void writer.catch(() => undefined)
     const writerPid = await observeWait(readKey)
-    await updateDashboardOrder(f.venueId, source.id, { tableId: f.tableId })
+    await moverCuentaDeMesa(source.id, f.tableId)
     let siblingPid = 0
     const siblingHold = observer.$transaction(
       async tx => {
@@ -915,7 +917,7 @@ it.each(['http', 'legacy'] as const)('real stale discovery returns %s RETRY with
   void writer.catch(() => undefined)
   try {
     const pid = await observeWait(key)
-    await updateDashboardOrder(f.venueId, source.id, { tableId: other.id })
+    await moverCuentaDeMesa(source.id, other.id)
     release.resolve()
     const result = await writer
     if (mode === 'legacy')
