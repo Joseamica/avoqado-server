@@ -47,29 +47,42 @@ export async function notificarConciliacionDeReparto(a: {
 }): Promise<void> {
   try {
     const { titulo, texto } = MENSAJE[a.motivo]
-    const personas = await prisma.staffVenue.findMany({
-      where: { venueId: a.venueId, active: true, role: { in: [...ROLES_QUE_CONCILIAN] } },
-      select: { staffId: true },
-      take: 20,
+    const clave = `${a.motivo}:${a.orderId}`
+    // Codex código r2: «¿ya existe? → crear» bajo un candado de la base por motivo y pedido (sin Redis: `pg_advisory_xact_lock`).
+    // Dos registros simultáneos del mismo pedido (dos aparatos sincronizando a la vez) dejan UNA notificación por persona.
+    const creadas = await prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'aviso-reparto:' + a.venueId + ':' + clave}))`
+      const personas = await tx.staffVenue.findMany({
+        where: { venueId: a.venueId, active: true, role: { in: [...ROLES_QUE_CONCILIAN] } },
+        select: { staffId: true },
+        take: 20,
+      })
+      const nuevas = []
+      for (const { staffId } of personas) {
+        const ya = await tx.notification.count({
+          where: { venueId: a.venueId, recipientId: staffId, metadata: { path: ['avisoDeReparto'], equals: clave } },
+        })
+        if (ya > 0) continue
+        nuevas.push(
+          await tx.notification.create({
+            data: {
+              recipientId: staffId,
+              venueId: a.venueId,
+              type: NotificationType.PAYMENT_RECEIVED,
+              priority: NotificationPriority.HIGH,
+              title: titulo,
+              message: texto,
+              entityType: 'Order',
+              entityId: a.orderId,
+              metadata: { avisoDeReparto: clave, orderId: a.orderId, paymentId: a.paymentId ?? null, motivo: a.motivo },
+            },
+          }),
+        )
+      }
+      return nuevas
     })
-    for (const { staffId } of personas) {
-      const ya = await prisma.notification.count({
-        where: { venueId: a.venueId, recipientId: staffId, metadata: { path: ['avisoDeReparto'], equals: `${a.motivo}:${a.orderId}` } },
-      })
-      if (ya > 0) continue
-      const n = await prisma.notification.create({
-        data: {
-          recipientId: staffId,
-          venueId: a.venueId,
-          type: NotificationType.PAYMENT_RECEIVED,
-          priority: NotificationPriority.HIGH,
-          title: titulo,
-          message: texto,
-          entityType: 'Order',
-          entityId: a.orderId,
-          metadata: { avisoDeReparto: `${a.motivo}:${a.orderId}`, orderId: a.orderId, paymentId: a.paymentId ?? null, motivo: a.motivo },
-        },
-      })
+    // En vivo DESPUÉS del commit: nunca se avisa algo que no quedó guardado.
+    for (const n of creadas) {
       try {
         socketManager.getBroadcastingService()?.broadcastNewNotification({
           notificationId: n.id,

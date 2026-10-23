@@ -12,6 +12,7 @@ import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryO
 import { cancelDeliveryOrder } from '@/services/delivery-channels/core/cancelDeliveryOrder.service'
 import { normalizeRappiOrder } from '@/services/delivery-channels/providers/rappi/rappi.mapper'
 import { getOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
+import { notificarConciliacionDeReparto } from '@/services/shared/avisoDeRappiEfectivo'
 import pedido881655210 from '../../unit/services/delivery-channels/fixtures/rappi/sandbox/new-order-marketplace-efectivo.json'
 
 jest.setTimeout(60_000)
@@ -299,6 +300,20 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
     await cancelDeliveryOrder(folio, DeliveryProvider.RAPPI, 'qa')
     await cobrar(orderId, 20500, { isOfflineReplay: true })
     await new Promise(r => setTimeout(r, 300)) // el aviso corre después del commit, sin bloquear el cobro
+    expect(
+      await prisma.notification.count({
+        where: { venueId: venueId!, recipientId: staffId!, metadata: { path: ['orderId'], equals: orderId } },
+      }),
+    ).toBe(1)
+  })
+
+  it('código r2: dos avisos A LA VEZ del mismo pedido y motivo dejan UNA sola notificación por persona', async () => {
+    const orderId = await pedido()
+    await Promise.all([
+      notificarConciliacionDeReparto({ motivo: 'RAPPI_CASH_ON_CANCELLED_ORDER', venueId: venueId!, orderId }),
+      notificarConciliacionDeReparto({ motivo: 'RAPPI_CASH_ON_CANCELLED_ORDER', venueId: venueId!, orderId }),
+      notificarConciliacionDeReparto({ motivo: 'RAPPI_CASH_ON_CANCELLED_ORDER', venueId: venueId!, orderId }),
+    ])
     expect(
       await prisma.notification.count({
         where: { venueId: venueId!, recipientId: staffId!, metadata: { path: ['orderId'], equals: orderId } },

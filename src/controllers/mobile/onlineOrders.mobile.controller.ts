@@ -10,6 +10,7 @@ import type { OnlineOrderRejectReason } from '@prisma/client'
 import { evaluateRolePermission, resolveUserRoleForVenue } from '@/middlewares/checkPermission.middleware'
 import { ONLINE_ORDERS_TRAY_HEADER } from '@/services/online-ordering/constants'
 import { listInbox, type InboxFilter } from '@/services/online-ordering/inbox.service'
+import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
 import { getAcceptingStatus, storeView, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { pauseOnlineOrdering } from '@/services/online-ordering/settings.service'
 import {
@@ -87,6 +88,15 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
     // pausa es la del gerente (`manualPause`, que no se va sola).
     const state = await getAcceptingStatus(venueId).catch(() => null)
     return res.json({ success: true, data: { ...data, store: state ? storeView(state) : null } })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** Rappi 2b: los pedidos de plataforma que la caja cobra en efectivo (venta, propina y lo de la plataforma, en centavos). */
+export const deliveryCash = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    return res.json({ success: true, data: await listDeliveryCashPending({ venueId: req.params.venueId }) })
   } catch (e) {
     return next(e)
   }

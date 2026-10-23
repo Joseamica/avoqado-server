@@ -6,6 +6,7 @@ import { resolveDeliveryHours } from '@/services/delivery-channels/core/delivery
 import { calcularTasaInyeccion } from '@/services/delivery-channels/core/injectionRate.service'
 import { menuSyncStatusOf, revisionDeMenuOf } from '@/services/delivery-channels/core/menuSync.service'
 import { hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
+import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -140,6 +141,36 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
 
   // El mismo enlace que `GET /venues/:venueId/channels/rappi/connect-url` (mismas guardas: manage + PREMIUM).
   // Import perezoso: la cadena de Rappi lee el env al usarse, y ese chequeo debe fallar aquí, no al cargar el MCP.
+  server.tool(
+    'delivery_cash_pending',
+    'Pedidos de reparto que el negocio cobra en EFECTIVO con su propio repartidor (hoy, Rappi) y que la caja todavía no ha cobrado, de los últimos 2 días: por pedido, cuánto falta por cobrar y su desglose (venta, propina y lo que se cobra por cuenta de la plataforma, que no es venta). Es la misma lista «Rappi · por cobrar» de la pantalla de pedidos en línea del POS. Responde "¿qué pedidos de Rappi faltan por cobrar? ¿cuánto efectivo me debe traer el repartidor?". Montos en pesos. Pass venueId.',
+    { venueId: z.string().describe('Venue cuyos pedidos de reparto por cobrar leer (debe estar en tu scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // Mismo permiso que la bandeja del POS; sin candado de plan (R14: atender lo que ya existe nunca se bloquea).
+      guard.requirePermission('orders:read', venueId)
+      const r = await listDeliveryCashPending({ venueId })
+      const pesos = (c: number) => Math.round(c) / 100
+      return text({
+        total: r.total,
+        truncated: r.truncated,
+        orders: r.orders.map(o => ({
+          orderId: o.orderId,
+          orderNumber: o.orderNumber,
+          plataforma: o.thirdPartyLabel,
+          estado: o.status,
+          cocina: o.kitchenStatus,
+          cliente: o.customerName,
+          creado: o.createdAt,
+          porCobrar: pesos(o.remainingBalanceCents),
+          venta: pesos(o.saleCents),
+          propina: pesos(o.tipCents),
+          deLaPlataforma: pesos(o.thirdPartyCents),
+        })),
+      })
+    },
+  )
+
   server.tool(
     'rappi_connect_link',
     'Genera el enlace para que el dueño conecte SU cuenta de Rappi (Portal Partners) con Avoqado: al abrirlo autoriza y elige qué tiendas conectar. Vence en 10 minutos; si venció, se pide otro. Requiere permiso de administrar canales de delivery y plan PREMIUM. Responde "¿cómo conecto mi tienda de Rappi? ¿me pasas el enlace para conectar Rappi?". Luego el estado de cada tienda se ve con delivery_channels (conexionesRecientes). Pass venueId.',
