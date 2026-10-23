@@ -162,6 +162,14 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
           message: 'Cada item requiere productId o (name + unitPrice)',
         })
       }
+      // 🔴 Un «Otro importe» negativo bajaba la venta sin el permiso de descuentos
+      // (falda $500 + «Otro importe» −$300 = $200). Igual que la terminal (tpv.schema.ts).
+      if (!hasProductId && item.unitPrice < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'El precio de un «Otro importe» no puede ser negativo',
+        })
+      }
       if (item.discountId != null && typeof item.discountId !== 'string') {
         return res.status(400).json({
           success: false,
