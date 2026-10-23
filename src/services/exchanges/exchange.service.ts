@@ -161,7 +161,7 @@ export async function createExchange(input: {
       throw new ExchangeError('IDEMPOTENCY_KEY_REUSED', 'Esta llave ya se usó para otro cambio.', 409)
     if (!existing.result) throw new Error('EXCHANGE_RESULT_MISSING')
     const response = existing.result as unknown as ExchangeResponse
-    await exchangeReceipt(response)
+    await exchangeReceipt(venueId, response)
     return { exchange: response, replay: true }
   }
   const replay = await readReplay()
@@ -193,7 +193,7 @@ export async function createExchange(input: {
     throw error
   }
   if ('replay' in outcome) {
-    await exchangeReceipt(outcome.replay)
+    await exchangeReceipt(venueId, outcome.replay)
     return { exchange: outcome.replay, replay: true }
   }
   await runExchangePostCommit(outcome, input)
@@ -209,9 +209,14 @@ async function bestEffort(exchangeId: string, step: string, run: () => Promise<u
   }
 }
 
-async function exchangeReceipt(response: ExchangeResponse) {
+async function exchangeReceipt(venueId: string, response: ExchangeResponse) {
   await bestEffort(response.id, 'receipt', async () => {
-    const receipt = await generateAndStoreReceipt(response.paymentIds[response.paymentIds.length - 1])
+    const paymentId = response.paymentIds[response.paymentIds.length - 1]
+    // El candado y toda la consulta/creación usan la misma conexión; el dinero ya está confirmado.
+    const receipt = await prisma.$transaction(async tx => {
+      await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange-receipt:v1:' + paymentId}, 0))::text`
+      return generateAndStoreReceipt(venueId, paymentId, undefined, tx)
+    })
     response.receiptUrl = mapDigitalReceiptResponse(receipt)?.receiptUrl ?? null
   })
 }
@@ -230,7 +235,7 @@ async function runExchangePostCommit(
   await bestEffort(exchangeId, 'returnInventory', async () => {
     if (p.returnPostingId) await applyCustomerReturnPosting(p.returnPostingId, actorStaffId)
   })
-  await exchangeReceipt(response)
+  await exchangeReceipt(venueId, response)
   await bestEffort(exchangeId, 'loyalty', async () => {
     const order = await prisma.order.findFirst({
       where: { id: p.newOrderId, venueId },

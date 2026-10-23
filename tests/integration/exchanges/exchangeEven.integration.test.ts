@@ -3,7 +3,7 @@ import prisma from '@/utils/prismaClient'
 import socketManager from '@/communication/sockets'
 import { SocketEventType } from '@/communication/sockets/types'
 import { keptMarkdownDiscountRow } from '@/services/shared/discount.service'
-import { generateAndStoreReceipt } from '@/services/dashboard/receipt.dashboard.service'
+import * as receiptService from '@/services/dashboard/receipt.dashboard.service'
 import { createExchange } from '@/services/exchanges/exchange.service'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -21,9 +21,6 @@ jest.mock('@/communication/sockets', () => ({
   default: { broadcastToUser: jest.fn(), getBroadcastingService: jest.fn(() => null) },
 }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn(async () => undefined) }))
-jest.mock('@/services/dashboard/receipt.dashboard.service', () => ({
-  generateAndStoreReceipt: jest.fn(async () => ({ accessKey: 'test-receipt' })),
-}))
 jest.mock('@/services/shared/writeRefundInTx', () => ({
   ...jest.requireActual('@/services/shared/writeRefundInTx'),
   writeRefundInTx: jest.fn((...args: unknown[]) => jest.requireActual('@/services/shared/writeRefundInTx').writeRefundInTx(...args)),
@@ -46,6 +43,7 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 beforeEach(() => jest.clearAllMocks())
+afterEach(() => jest.restoreAllMocks())
 
 describe('even exchange (E1)', () => {
   it('V1: M to L completes with one credit refund, a PAID sale and the root link', async () => {
@@ -342,13 +340,56 @@ describe('even exchange (E1)', () => {
   it('a receipt failure after commit does not undo the exchange and a replay recovers the receipt', async () => {
     const s = await seed()
     const input = s.input()
-    jest.mocked(generateAndStoreReceipt).mockRejectedValueOnce(new Error('RECEIPT_DOWN'))
+    jest.spyOn(receiptService, 'generateAndStoreReceipt').mockRejectedValueOnce(new Error('RECEIPT_DOWN'))
     const a = await createExchange(input)
     expect(a.exchange.receiptUrl).toBeNull()
     expect(await prisma.exchange.count({ where: { venueId: s.venueId } })).toBe(1)
     const b = await createExchange(input)
-    expect(b).toMatchObject({ replay: true, exchange: { id: a.exchange.id, receiptUrl: expect.stringContaining('test-receipt') } })
+    const receipt = await prisma.digitalReceipt.findFirstOrThrow({ where: { paymentId: b.exchange.paymentIds[0] } })
+    expect(b).toMatchObject({ replay: true, exchange: { id: a.exchange.id, receiptUrl: expect.stringContaining(receipt.accessKey) } })
     expect(await stock(s.products[0].id)).toBe(11)
+  })
+
+  it('RF1: concurrent replays recover exactly one real receipt and return its canonical URL', async () => {
+    const s = await seed()
+    const input = s.input()
+    const first = await createExchange(input)
+    const paymentId = first.exchange.paymentIds[0]
+    expect(await prisma.digitalReceipt.count({ where: { paymentId } })).toBe(1)
+    // Se deja el recibo ausente sin repetir la operación financiera ya confirmada.
+    await prisma.digitalReceipt.deleteMany({ where: { paymentId } })
+    await prisma.exchange.update({
+      where: { id: first.exchange.id, venueId: s.venueId },
+      data: { result: { ...first.exchange, receiptUrl: null } as unknown as Prisma.InputJsonValue },
+    })
+
+    const [a, b] = await Promise.all([createExchange(input), createExchange(input)])
+
+    expect(await prisma.digitalReceipt.count({ where: { paymentId } })).toBe(1)
+    const receipt = await prisma.digitalReceipt.findFirstOrThrow({ where: { paymentId } })
+    expect(a.replay).toBe(true)
+    expect(b.replay).toBe(true)
+    expect(a.exchange.receiptUrl).toEqual(expect.stringContaining(receipt.accessKey))
+    expect(b.exchange.receiptUrl).toBe(a.exchange.receiptUrl)
+    expect(await prisma.exchange.count({ where: { venueId: s.venueId } })).toBe(1)
+  })
+
+  it('replays return the oldest receipt URL while preserving historical duplicates', async () => {
+    const s = await seed()
+    const input = s.input()
+    const first = await createExchange(input)
+    const paymentId = first.exchange.paymentIds[0]
+    const existing = await prisma.digitalReceipt.findFirstOrThrow({ where: { paymentId } })
+    const canonical = await prisma.digitalReceipt.create({
+      data: { paymentId, dataSnapshot: {}, createdAt: new Date(existing.createdAt.getTime() - 1000) },
+    })
+
+    const [a, b] = await Promise.all([createExchange(input), createExchange(input)])
+
+    expect(first.exchange.receiptUrl).toEqual(expect.stringContaining(existing.accessKey))
+    expect(a.exchange.receiptUrl).toEqual(expect.stringContaining(canonical.accessKey))
+    expect(b.exchange.receiptUrl).toBe(a.exchange.receiptUrl)
+    expect(await prisma.digitalReceipt.count({ where: { paymentId } })).toBe(2)
   })
 
   it('actor mismatch is 400 and disabled exchanges reject before creating an order', async () => {
