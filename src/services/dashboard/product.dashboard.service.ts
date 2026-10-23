@@ -5,6 +5,7 @@ import { deleteFileFromStorage } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
+import { rearmCustomerReturnPostingsInTx } from '../inventory/inventoryPosting.service'
 import {
   ensureQuantityInventoryRow,
   inventoryMethodForNewProduct,
@@ -1031,6 +1032,7 @@ export async function updateProduct(
     // cuadre. Después del Product y ANTES de Inventory (orden de candados del conector).
     await ajustarParejaAlProducto(tx, updated)
     await ensureQuantityInventoryRow(tx, updated)
+    await rearmCustomerReturnPostingsInTx(tx, updated)
     // Plan 6b (H14, §5.7): antes → después, autor y origen, en la MISMA transacción del cambio.
     await registrarCambioDeIva(tx, {
       venueId,
