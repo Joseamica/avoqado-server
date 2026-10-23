@@ -129,6 +129,7 @@ describe('Rappi 2b: la tarifa de Rappi en el cajón', () => {
       raw.order_detail.discounts = [{ amount_by_partner: 175, amount_by_rappi: 0 }]
       raw.order_detail.totals.total_discount_by_partner = 175
       raw.order_detail.totals.total_to_pay = 30
+      raw.order_detail.totals.total_order = 30
     })
     await payCashOrder(venueId!, orderId, {
       amount: 500,

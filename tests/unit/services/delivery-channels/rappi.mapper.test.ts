@@ -463,6 +463,20 @@ describe('normalizeRappiOrder', () => {
     expect(() => normalizeRappiOrder(p)).toThrow(/205\.00.*200\.00|200\.00.*205\.00/)
   })
 
+  it('🔴 2b · si `total_order` no es lo que se cobra en efectivo, no se registra (Codex código r1 #8)', () => {
+    const p = sandbox(MARKETPLACE_EFECTIVO)
+    p.order_detail.totals.total_order = 1
+    expect(() => normalizeRappiOrder(p)).toThrow(/total_order/)
+  })
+
+  it('2b · con tarifa de servicio en $0 el pedido conserva su carril (thirdPartyCashDue «0.00», no ausente)', () => {
+    const p = sandbox(MARKETPLACE_EFECTIVO)
+    p.order_detail.totals.charges.service_fee = 0
+    p.order_detail.totals.total_to_pay = 195
+    p.order_detail.totals.total_order = 195
+    expect(normalizeRappiOrder(p).payment).toMatchObject({ thirdPartyCashDue: '0.00', cashDueSale: '175.00', cashDueTip: '20.00' })
+  })
+
   it('🔴 2b · efectivo con créditos o RappiPay ⇒ VARIANTE_SIN_CALIBRAR (no medido)', () => {
     const p = sandbox(MARKETPLACE_EFECTIVO)
     p.order_detail.totals.other_totals.total_rappi_credits = 5

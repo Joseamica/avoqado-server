@@ -31,10 +31,13 @@ export function rechazarCobroNuevoSobreCancelada(status: string): void {
  *   defecto previo (el pago de la plataforma que vuelve a contar) vive en el plan de registro de cobros (B9).
  */
 export function estadoParaCobrar<S extends string>(
-  o: { status: S; originSystem: string },
+  o: { status: S; originSystem: string; source?: string | null },
   cobrado: Prisma.Decimal | number,
   cubreComoCancelada: boolean,
 ): S | 'PENDING' {
+  // 🔴 Rappi 2b (T8; Codex código r1 #3): el estado de un pedido de Rappi lo dicta Rappi. Si lo canceló y llega dinero (efectivo sin
+  // red, una tarjeta ya aprobada), el dinero se registra y el pedido SIGUE cancelado; quien llama avisa. Por cualquier canal.
+  if (o.source === 'RAPPI') return o.status
   return o.originSystem === 'AVOQADO' || cubreComoCancelada ? estadoAlRecibirDinero(o.status, cobrado) : o.status
 }
 
@@ -166,6 +169,8 @@ export async function reabrirSiRecibeDinero(
     orderId: string
     status: OrderStatus
     originSystem: string
+    /** Rappi 2b: un pedido de Rappi nunca se reabre (`estadoParaCobrar`). */
+    source?: string | null
     cobrado: Prisma.Decimal | number
     cubreComoCancelada: boolean
     canal: string

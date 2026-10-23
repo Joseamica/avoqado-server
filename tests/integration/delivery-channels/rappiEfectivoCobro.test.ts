@@ -60,6 +60,7 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
       const ids = (await prisma.order.findMany({ where: { venueId }, select: { id: true } })).map(o => o.id)
       const pagos = (await prisma.payment.findMany({ where: { venueId }, select: { id: true } })).map(p => p.id)
       await prisma.deliveryOrderEvent.deleteMany({ where: { venueId } })
+      await prisma.notification.deleteMany({ where: { venueId } })
       await prisma.activityLog.deleteMany({ where: { venueId } })
       await prisma.venueTransaction.deleteMany({ where: { venueId } })
       await prisma.paymentEffect.deleteMany({ where: { paymentId: { in: pagos } } })
@@ -178,6 +179,7 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
       raw.order_detail.discounts = [{ amount_by_partner: 175, amount_by_rappi: 0 }]
       raw.order_detail.totals.total_discount_by_partner = 175
       raw.order_detail.totals.total_to_pay = 30
+      raw.order_detail.totals.total_order = 30
     })
     await cobrar(orderId, 500, { isOfflineReplay: true })
     expect(reparto((await pagosDe(orderId))[0])).toEqual(['0', '0', '5'])
@@ -223,5 +225,84 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
     expect(await prisma.payment.count({ where: { orderId, status: 'COMPLETED' } })).toBe(1)
     expect(await bitacora(orderId, 'DELIVERY_CANCELLED_AFTER_CASH')).toBe(1)
+  })
+
+  // ── Codex código r1 ─────────────────────────────────────────────────────────────────────
+  it('#1 la cola vieja (H1) con una tarjeta YA cobrada no se recorta: se registra todo y no hay «cambio»', async () => {
+    const orderId = await pedido()
+    const r = await cobrar(orderId, 50000, { isOfflineReplay: true, colaConDefectoH1: true, method: 'CREDIT_CARD' })
+    expect(reparto((await pagosDe(orderId))[0])).toEqual(['480', '20', null])
+    expect(r.changeCents).toBe(0)
+  })
+
+  it('#2 con tarifa de Rappi en $0 el carril sigue: 195 = venta 175 + propina 20, sin cambio', async () => {
+    const orderId = await pedido(raw => {
+      raw.order_detail.totals.charges.service_fee = 0
+      raw.order_detail.totals.total_to_pay = 195
+      raw.order_detail.totals.total_order = 195
+    })
+    const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(o.thirdPartyCashDue?.toFixed(2)).toBe('0.00')
+    const r = await cobrar(orderId, 19500)
+    expect(reparto((await pagosDe(orderId))[0])).toEqual(['175', '20', '0'])
+    expect(r).toMatchObject({ changeCents: 0, cashRetainedCents: 19500 })
+  })
+
+  it('#4 con «Efectivo» del catálogo, el cobro igual congela la comisión de Rappi', async () => {
+    const orderId = await pedido()
+    await prisma.venueTenderType.updateMany({ where: { venueId: venueId!, name: 'Rappi' }, data: { commissionPercent: 30 } })
+    const efectivo = await prisma.venueTenderType.create({
+      data: {
+        venueId: venueId!,
+        name: 'Efectivo',
+        normalizedName: 'efectivo',
+        baseMethod: 'CASH',
+        isSystem: true,
+        countsAsPhysicalCash: true,
+        captureTip: true,
+        satFormaPago: '01',
+        showOnPos: true,
+        revision: 1,
+      },
+    })
+    await prisma.venueTenderTypeRevision.create({
+      data: {
+        venueId: venueId!,
+        tenderTypeId: efectivo.id,
+        revision: 1,
+        name: 'Efectivo',
+        countsAsPhysicalCash: true,
+        captureTip: true,
+        satFormaPago: '01',
+      },
+    })
+    try {
+      await cobrar(orderId, 20500, { tenderTypeId: efectivo.id, tenderRevision: 1 })
+      const [p] = await pagosDe(orderId)
+      expect(p.tenderCommissionAmount?.toFixed(2)).toBe('52.50')
+      expect(p.fundsFlow).toBe('CASH_DRAWER')
+      expect(reparto(p)).toEqual(['175', '20', '10'])
+    } finally {
+      await prisma.venueTenderType.updateMany({ where: { venueId: venueId!, name: 'Rappi' }, data: { commissionPercent: null } })
+    }
+  })
+
+  it('#5 cobrado con tarjeta externa (T5c): la precuenta ya no pide los $10 de Rappi a la caja', async () => {
+    const orderId = await pedido()
+    await cobrar(orderId, 20500, { method: 'CREDIT_CARD' })
+    expect((await getOrder(venueId!, orderId)).preBillBalance).toMatchObject({ remainingBalanceCents: 0 })
+  })
+
+  it('#6 Rappi canceló y llegó el efectivo: el gerente recibe una notificación (no sólo la bitácora)', async () => {
+    const orderId = await pedido()
+    const folio = (await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).externalId!.split(':')[1]
+    await cancelDeliveryOrder(folio, DeliveryProvider.RAPPI, 'qa')
+    await cobrar(orderId, 20500, { isOfflineReplay: true })
+    await new Promise(r => setTimeout(r, 300)) // el aviso corre después del commit, sin bloquear el cobro
+    expect(
+      await prisma.notification.count({
+        where: { venueId: venueId!, recipientId: staffId!, metadata: { path: ['orderId'], equals: orderId } },
+      }),
+    ).toBe(1)
   })
 })

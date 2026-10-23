@@ -130,20 +130,66 @@ async function resolveProductId(
   return created.id
 }
 
-/** Rappi 2b: el renglón del envío del negocio. Mismo SKU fijo por venue: un solo producto «Envío», reutilizado. */
+/** Rappi 2b: el renglón del envío del negocio. Un solo producto «Envío» por venue, reutilizado. */
 const NOMBRE_RENGLON_ENVIO = 'Envío'
 const SKU_RENGLON_ENVIO = 'delivery-envio'
+/**
+ * La identidad del producto «Envío» es ESTA marca, nunca el SKU (Codex código r1 #7): un producto del negocio que ya se llame
+ * `delivery-envio` (y lleve existencias) no se toma ni se toca.
+ */
+const ID_PROPIO_ENVIO = 'AVOQADO:ENVIO_DE_REPARTO'
 /** Clave SAT «Servicios de envío» y unidad «Unidad de servicio»: el envío se factura como servicio. */
 const SAT_ENVIO = { satProductKey: '78102203', satUnitKey: 'E48' }
 
 /**
- * El producto «Envío» del venue: el mismo camino que un SKU desconocido (placeholder inactivo, gobierno de catálogo
- * idempotente bajo carrera) y, si nadie le ha puesto clave SAT, la de servicio de envío.
+ * El producto «Envío» del venue: se busca por su marca propia; si no existe se crea inactivo, SIN inventario y con la clave SAT de
+ * servicio de envío, con el mismo gobierno de catálogo que un placeholder. Su SKU es `delivery-envio` o, si ése ya es de otro
+ * producto, uno libre derivado.
  */
 async function resolverProductoDeEnvio(tx: Prisma.TransactionClient, venueId: string, precio: string): Promise<string> {
-  const id = await resolveProductId(tx, venueId, SKU_RENGLON_ENVIO, NOMBRE_RENGLON_ENVIO, precio, null)
-  await tx.product.updateMany({ where: { id, satProductKey: null }, data: SAT_ENVIO })
-  return id
+  const buscar = () => tx.product.findFirst({ where: { venueId, externalId: ID_PROPIO_ENVIO }, select: { id: true } })
+  // Nace sin inventario (`trackInventory: false`); si el dueño lo activa a mano después, es decisión suya.
+  const existente = await buscar()
+  if (existente) return existente.id
+  await assertLegacyCatalogGovernanceForVenue(tx, {
+    venueId,
+    operation: 'CREATE',
+    willBeVendable: false,
+    actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
+  })
+  const creadoMientras = await buscar() // otra ingesta lo creó mientras se esperaba la cerca del venue
+  if (creadoMientras) return creadoMientras.id
+
+  let category = await tx.menuCategory.findUnique({ where: { venueId_slug: { venueId, slug: PLACEHOLDER_CATEGORY_SLUG } } })
+  if (!category) {
+    category = await tx.menuCategory.create({
+      data: { venueId, name: 'Delivery (sin mapear)', slug: PLACEHOLDER_CATEGORY_SLUG, active: false },
+    })
+  }
+  const skuOcupado = async (sku: string) => (await tx.product.count({ where: { venueId, sku } })) > 0
+  let sku = SKU_RENGLON_ENVIO
+  for (let n = 2; await skuOcupado(sku); n++) sku = `${SKU_RENGLON_ENVIO}-${n}`
+
+  const created = await tx.product.create({
+    data: {
+      venueId,
+      createdById: null,
+      sku,
+      externalId: ID_PROPIO_ENVIO,
+      name: NOMBRE_RENGLON_ENVIO,
+      price: D(precio),
+      categoryId: category.id,
+      active: false,
+      trackInventory: false,
+      ...SAT_ENVIO,
+    },
+  })
+  await writeLegacyServiceProductCreationAuditForVenue(tx, {
+    venueId,
+    productId: created.id,
+    actor: { type: 'SERVICE', servicePrincipalId: 'DELIVERY_INGESTION' },
+  })
+  return created.id
 }
 
 /**
@@ -299,7 +345,8 @@ export async function ingestDeliveryOrder(
           remainingBalance: porCobrar,
           // Rappi 2b: lo escribe SÓLO la ingesta (el upsert de una reingesta no lo toca). `cashTipDue` existe sólo en ese carril:
           // cada cobro reescribe `tipAmount` con lo cobrado y la propina por cobrar se perdería tras un abono chico.
-          ...(tercerosPorCobrar.greaterThan(0) ? { thirdPartyCashDue: tercerosPorCobrar, cashTipDue: D(p.cashDueTip) } : {}),
+          // Con tarifa de Rappi en $0 el carril sigue (Codex código r1 #2): la marca es que el normalizado TRAE el campo, no su importe.
+          ...(p.thirdPartyCashDue != null ? { thirdPartyCashDue: tercerosPorCobrar, cashTipDue: D(p.cashDueTip) } : {}),
           posRawData: normalized.raw as Prisma.InputJsonValue,
           createdAt: normalized.placedAt,
           syncedAt: new Date(),

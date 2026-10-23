@@ -30,6 +30,7 @@ describe('Rappi 2b: ingesta de un pedido con repartidor propio en efectivo', () 
   let orgId: string | undefined
   let venueId: string | undefined
   let link: DeliveryChannelLink
+  const venuesExtra: string[] = []
 
   beforeAll(async () => {
     orgId = (
@@ -48,6 +49,19 @@ describe('Rappi 2b: ingesta de un pedido con repartidor propio en efectivo', () 
   afterAll(async () => {
     if (!venueId || !orgId) return
     try {
+      for (const v of venuesExtra) {
+        const extra = (await prisma.order.findMany({ where: { venueId: v }, select: { id: true } })).map(o => o.id)
+        await prisma.kdsOrder.deleteMany({ where: { venueId: v } })
+        await prisma.orderItem.deleteMany({ where: { orderId: { in: extra } } })
+        await prisma.order.deleteMany({ where: { venueId: v } })
+        await prisma.deliveryChannelLink.deleteMany({ where: { venueId: v } })
+        await prisma.activityLog.deleteMany({ where: { venueId: v } })
+        await prisma.venueTenderTypeRevision.deleteMany({ where: { venueId: v } })
+        await prisma.venueTenderType.deleteMany({ where: { venueId: v } })
+        await prisma.product.deleteMany({ where: { venueId: v } })
+        await prisma.menuCategory.deleteMany({ where: { venueId: v } })
+        await prisma.venue.deleteMany({ where: { id: v } })
+      }
       const ids = (await prisma.order.findMany({ where: { venueId }, select: { id: true } })).map(o => o.id)
       const pagos = (await prisma.payment.findMany({ where: { venueId }, select: { id: true } })).map(p => p.id)
       await prisma.deliveryOrderEvent.deleteMany({ where: { venueId } })
@@ -132,5 +146,39 @@ describe('Rappi 2b: ingesta de un pedido con repartidor propio en efectivo', () 
     expect(o.paymentStatus).toBe('PAID')
     expect(o.items.map(i => i.productName).sort()).toEqual(['Agua Mineral 1L', 'Envío'].sort())
     expect(o.payments.map(p => [p.amount.toFixed(2), p.tipAmount.toFixed(2)])).toEqual([['55.00', '20.00']])
+  })
+
+  it('#7 un producto ajeno con SKU «delivery-envio» y existencias NO se usa como envío ni se toca', async () => {
+    // Un negocio propio de esta prueba: en el de arriba el «Envío» ya existe con ese SKU.
+    const otroVenue = (
+      await prisma.venue.create({ data: { organizationId: orgId!, name: `V2 efectivo-it ${sufijo}`, slug: `v2-efectivo-it-${sufijo}` } })
+    ).id
+    const otroLink = await prisma.deliveryChannelLink.create({
+      data: {
+        venueId: otroVenue,
+        provider: DeliveryProvider.RAPPI,
+        externalLocationId: `rappi-efectivo-it2-${sufijo}`,
+        webhookSecret: 'x',
+      },
+    })
+    venuesExtra.push(otroVenue)
+    const categoria = await prisma.menuCategory.create({ data: { venueId: otroVenue, name: 'Ajena', slug: `ajena-${sufijo}` } })
+    const ajeno = await prisma.product.create({
+      data: {
+        venueId: otroVenue,
+        sku: 'delivery-envio',
+        name: 'Caja de envío (producto del negocio)',
+        price: 15,
+        categoryId: categoria.id,
+        trackInventory: true,
+        inventoryMethod: 'QUANTITY',
+      },
+    })
+    const { order } = await ingestDeliveryOrder(normalizeRappiOrder(conFolio(pedido881655210, 'd')), otroLink)
+    const envio = (await prisma.orderItem.findMany({ where: { orderId: order.id } })).find(i => i.productName === 'Envío')!
+    expect(envio.productId).not.toBe(ajeno.id)
+    const producto = await prisma.product.findUniqueOrThrow({ where: { id: envio.productId! } })
+    expect(producto.trackInventory).toBe(false)
+    expect((await prisma.product.findUniqueOrThrow({ where: { id: ajeno.id } })).name).toBe('Caja de envío (producto del negocio)')
   })
 })

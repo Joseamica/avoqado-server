@@ -1569,8 +1569,9 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   // Proyección pura de lo ya leído: sin otra consulta ni cambios a los importes legacy.
   const completados = (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED')
   const balance = computeOrderBalance(flattenedOrder, completados)
-  // Rappi 2b: un pedido con repartidor propio en efectivo debe además propina y tarifa de Rappi (null en todo lo demás).
-  const reparto = saldoDeCobroDeReparto(flattenedOrder, completados)
+  // Rappi 2b: un pedido con repartidor propio en efectivo debe además propina y tarifa de Rappi (null en todo lo demás). Una venta ya
+  // cerrada no vuelve a pedir nada a la caja (Codex código r1 #5): si se saldó con otro medio, la tarifa la concilia el gerente.
+  const reparto = esVentaCerrada(flattenedOrder.paymentStatus) ? null : saldoDeCobroDeReparto(flattenedOrder, completados)
 
   return {
     id: flattenedOrder.id,
@@ -3339,7 +3340,8 @@ export async function registrarAbonoEnTx(
   if (repartoAntes) {
     const aCentavos = (d: Prisma.Decimal) => pesosToCents(d.toNumber())
     const recibido = amount + tip
-    const aplicado = conH1 || cobroNuevo ? Math.min(recibido, aCentavos(repartoAntes.totalACobrar)) : recibido
+    // H1 recorta sólo efectivo de cajón (como su regla de siempre): una tarjeta o transferencia ya cobrada se registra completa.
+    const aplicado = (conH1 && countsAsDrawerCash) || cobroNuevo ? Math.min(recibido, aCentavos(repartoAntes.totalACobrar)) : recibido
     cambioCents = recibido - aplicado
     let resto = aplicado
     tercerosCents = countsAsDrawerCash ? Math.min(resto, aCentavos(repartoAntes.tercerosPendiente)) : 0
@@ -3465,8 +3467,10 @@ export async function registrarAbonoEnTx(
   })
 
   // Rappi 2b: el tipo de pago del canal (lo creó la ingesta) para congelar su comisión en el cobro en efectivo.
+  // Codex código r1 #4: también cuando el cobro llega con el «Efectivo» del catálogo (método CASH); un vale que cuenta como efectivo
+  // (método OTHER) conserva el suyo.
   const tenderDelCanal =
-    repartoAntes && countsAsDrawerCash && !resolvedTender
+    repartoAntes && countsAsDrawerCash && (!resolvedTender || resolvedTender.method === 'CASH')
       ? await tx.venueTenderType.findFirst({
           where: { venueId, normalizedName: normalizeTenderName(deliveryTenderLabel('RAPPI')) },
           select: { id: true, revision: true, name: true, commissionPercent: true },
@@ -3507,17 +3511,18 @@ export async function registrarAbonoEnTx(
       // Rappi 2b (comisión del canal, Codex r3 #2): sin tender propio, el cobro en efectivo de un pedido de Rappi congela el tipo de
       // pago «Rappi» y su comisión sobre la venta (sin propina ni terceros), como la ingesta de un pedido pagado en línea. Sigue
       // siendo efectivo de cajón (`fundsFlow` CASH_DRAWER manda) y la forma SAT sale del método (01), no la del canal.
-      tenderTypeId: resolvedTender?.tenderTypeId ?? tenderDelCanal?.id,
-      tenderRevision: resolvedTender?.tenderRevision ?? tenderDelCanal?.revision,
-      tenderLabel: resolvedTender?.tenderLabel ?? tenderDelCanal?.name,
-      tenderCountsAsCash: resolvedTender?.tenderCountsAsCash ?? (tenderDelCanal ? true : undefined),
-      tenderCaptureTip: resolvedTender?.tenderCaptureTip ?? (tenderDelCanal ? true : undefined),
+      tenderTypeId: tenderDelCanal?.id ?? resolvedTender?.tenderTypeId,
+      tenderRevision: tenderDelCanal?.revision ?? resolvedTender?.tenderRevision,
+      tenderLabel: tenderDelCanal?.name ?? resolvedTender?.tenderLabel,
+      tenderCountsAsCash: tenderDelCanal ? true : resolvedTender?.tenderCountsAsCash,
+      tenderCaptureTip: tenderDelCanal ? true : resolvedTender?.tenderCaptureTip,
+      // La forma SAT sale del «Efectivo» elegido (01) o, sin tender, del método: nunca la del tipo de pago del canal.
       tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
-      tenderCommissionPercent: resolvedTender?.tenderCommissionPercent ?? tenderDelCanal?.commissionPercent,
-      tenderCommissionAmount: resolvedTender
-        ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
-        : tenderDelCanal
-          ? computeTenderCommission(tenderDelCanal.commissionPercent, new Prisma.Decimal(amountDecimal))
+      tenderCommissionPercent: tenderDelCanal ? tenderDelCanal.commissionPercent : resolvedTender?.tenderCommissionPercent,
+      tenderCommissionAmount: tenderDelCanal
+        ? computeTenderCommission(tenderDelCanal.commissionPercent, new Prisma.Decimal(amountDecimal))
+        : resolvedTender
+          ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
           : undefined,
       // Rappi 2b (T3): lo cobrado por cuenta de Rappi, en la MISMA transacción que el cobro. Fuera de `amount`/`tipAmount`.
       thirdPartyCashAmount: repartoAntes && countsAsDrawerCash ? new Prisma.Decimal(tercerosCents / 100) : undefined,

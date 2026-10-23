@@ -385,12 +385,16 @@ function mapearPago(
 
   if (enEfectivo) {
     const porCobrar = ventaNeta.plus(propina).plus(tarifa)
-    const declarado = centavos(deRappiAPesos(detail.totals?.total_to_pay))
-    if (!centavos(porCobrar).equals(declarado)) {
-      throw new Error(
-        `[Rappi] el efectivo no cuadra en el pedido ${orderId}: venta + envío − descuento + propina + tarifa = ` +
-          `${centavos(porCobrar).toFixed(2)}, pero \`total_to_pay\` = ${declarado.toFixed(2)}. No se registra con dinero adivinado.`,
-      )
+    // Medido en el pedido real 881655210: con efectivo, `total_to_pay` y `total_order` son lo mismo (205). Los dos se exigen
+    // (diseño T9; Codex código r1 #8): si alguno difiere, no se registra con dinero adivinado.
+    for (const campo of ['total_to_pay', 'total_order'] as const) {
+      const declarado = centavos(deRappiAPesos(detail.totals?.[campo]))
+      if (!centavos(porCobrar).equals(declarado)) {
+        throw new Error(
+          `[Rappi] el efectivo no cuadra en el pedido ${orderId}: venta + envío − descuento + propina + tarifa = ` +
+            `${centavos(porCobrar).toFixed(2)}, pero \`${campo}\` = ${declarado.toFixed(2)}. No se registra con dinero adivinado.`,
+        )
+      }
     }
   }
 

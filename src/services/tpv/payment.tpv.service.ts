@@ -19,6 +19,7 @@ import {
   MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN,
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { avisarDineroDeRappi } from '../shared/avisoDeRappiEfectivo'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 
 /**
@@ -1399,6 +1400,7 @@ export async function settleStandalonePaymentInTx(
           orderId,
           status: order.status,
           originSystem: order.originSystem,
+          source: order.source,
           cobrado: amount.plus(tipAmount),
           cubreComoCancelada,
           canal: 'recordOrderPayment',
@@ -1753,6 +1755,19 @@ async function updateOrderTotalsForStandalonePayment(
     })
   }
 
+  // 🚨 Rappi 2b (T7/T8; Codex código r1 #3): dinero YA autorizado (terminal, webhook de AngelPay) sobre un pedido de Rappi en efectivo.
+  // Se registró como siempre; aquí sólo se avisa: la tarifa de Rappi no está en el cajón, o Rappi ya lo había cancelado.
+  if (order.thirdPartyCashDue != null && currentPaymentId) {
+    avisarDineroDeRappi({
+      action: claseDeEstado(order.status) === 'CANCELADA' ? 'RAPPI_CASH_ON_CANCELLED_ORDER' : 'RAPPI_CASH_ORDER_OTHER_MEDIUM',
+      orderId,
+      venueId: order.venueId,
+      paymentId: currentPaymentId,
+      staffId: staffId ?? null,
+      data: { canal: 'terminal', amount: paymentAmount, tip: tipAmount },
+    })
+  }
+
   // 🚨 INVENTARIO INSUFICIENTE — detectar y gritar, NUNCA rechazar ni lanzar.
   //
   // Cuando este bloque corre, `prisma.$transaction` de `recordOrderPayment` YA
@@ -1928,6 +1943,7 @@ async function updateOrderTotalsForStandalonePayment(
               orderId,
               status: current.status,
               originSystem: order.originSystem,
+              source: order.source,
               cobrado: totalPaid,
               cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
               canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',

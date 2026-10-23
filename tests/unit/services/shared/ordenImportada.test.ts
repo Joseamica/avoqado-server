@@ -1,7 +1,7 @@
 import {
   esOrdenImportada,
   rechazarSiEsImportada,
-  tieneTotalAjeno,
+  esPedidoDePlataforma,
   MENSAJE_ORDEN_IMPORTADA,
   MENSAJE_ORDEN_DE_PLATAFORMA,
 } from '@/services/shared/ordenImportada'
@@ -20,7 +20,7 @@ describe('R11 (Codex r5): una cuenta importada de SoftRestaurant no se rearma de
   it('control: AVOQADO pasa', () => {
     expect(() => rechazarSiEsImportada({ originSystem: 'AVOQADO' })).not.toThrow()
     expect(esOrdenImportada({ originSystem: 'AVOQADO' })).toBe(false)
-    expect(tieneTotalAjeno({ originSystem: 'AVOQADO' })).toBe(false)
+    expect(esPedidoDePlataforma({ originSystem: 'AVOQADO' })).toBe(false)
   })
 })
 
@@ -39,7 +39,8 @@ describe('Rappi 2b (T10): el total de un pedido de plataforma lo manda la plataf
     expect(esOrdenImportada({ originSystem: 'DELIVERY_PLATFORM' })).toBe(false)
   })
 
-  it.each([['POS_SOFTRESTAURANT'], ['DELIVERY_PLATFORM']])('%s tiene el total ajeno (lo automático no lo rearma)', origen => {
-    expect(tieneTotalAjeno({ originSystem: origen })).toBe(true)
+  it('esPedidoDePlataforma sólo marca a la plataforma (las importadas siguen con esOrdenImportada)', () => {
+    expect(esPedidoDePlataforma({ originSystem: 'DELIVERY_PLATFORM' })).toBe(true)
+    expect(esPedidoDePlataforma({ originSystem: 'POS_SOFTRESTAURANT' })).toBe(false)
   })
 })

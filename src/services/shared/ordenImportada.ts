@@ -18,12 +18,12 @@ export function esOrdenImportada(orden: { originSystem: string | null }): boolea
 export const MENSAJE_ORDEN_DE_PLATAFORMA = 'Este pedido viene de la plataforma de reparto y su total lo manda ella: aquí sólo se cobra.'
 
 /**
- * Rappi 2b (diseño 2026-10-23, T10): ¿el total lo manda OTRO sistema? SoftRestaurant (su cabecera) o la plataforma de reparto
- * (lo que cobró o cobrará el repartidor). Lo usan las exclusiones de lo AUTOMÁTICO (cargos por comensales, descuentos automáticos):
- * no rearman esas cuentas. `esOrdenImportada` no cambia porque también decide el IVA.
+ * Rappi 2b (diseño 2026-10-23, T10): ¿es un pedido de una plataforma de reparto? Su total lo manda la plataforma (lo que cobró o
+ * cobrará el repartidor). Las exclusiones de lo AUTOMÁTICO (cargos por comensales, descuentos automáticos) lo saltan junto con las
+ * importadas: `if (esOrdenImportada(o) || esPedidoDePlataforma(o))`. `esOrdenImportada` no cambia porque también decide el IVA.
  */
-export function tieneTotalAjeno(orden: { originSystem: string | null }): boolean {
-  return esOrdenImportada(orden) || orden.originSystem === 'DELIVERY_PLATFORM'
+export function esPedidoDePlataforma(orden: { originSystem: string | null }): boolean {
+  return orden.originSystem === 'DELIVERY_PLATFORM'
 }
 
 /**

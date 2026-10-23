@@ -13,6 +13,7 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { reverseSalePosting } from '@/services/inventory/reverseSalePosting.service'
 import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
+import { notificarConciliacionDeReparto } from '@/services/shared/avisoDeRappiEfectivo'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export interface CancelResult {
@@ -108,6 +109,8 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
   if (bajoCandado.yaCancelada) return { outcome: 'ALREADY_CANCELLED', orderId: order.id }
   const { cobroVivo } = bajoCandado
   if (bajoCandado.cobradoEnCaja) {
+    // Codex código r1 #6: además de la bitácora (escrita bajo el candado), una notificación a quien concilia. Nunca lanza.
+    void notificarConciliacionDeReparto({ motivo: 'DELIVERY_CANCELLED_AFTER_CASH', venueId: order.venueId, orderId: order.id })
     // BetterStack vigila «🚨 [Rappi efectivo]» (mismo prefijo que `avisarDineroDeRappi`).
     logger.error('🚨 [Rappi efectivo] La plataforma canceló un pedido que ya se cobró en la caja: conciliar o devolver al cliente', {
       provider,
