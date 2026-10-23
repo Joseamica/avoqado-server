@@ -409,3 +409,42 @@ export function computeOrderBalance(order: OrderAmountsForBalance, completedPaym
     refundState: refunds.refundState,
   }
 }
+
+/** Lo que falta cobrar de un pedido de reparto en efectivo, por partes (Rappi 2b). Todo en pesos. */
+export interface SaldoDeCobroDeReparto {
+  /** Venta (productos + envío − descuento) que falta: el saldo común. */
+  ventaPendiente: Prisma.Decimal
+  /** Propina contractual que falta (`Order.cashTipDue` − propinas cobradas). */
+  propinaPendiente: Prisma.Decimal
+  /** Dinero por cuenta de la plataforma que falta (`Order.thirdPartyCashDue` − Σ `Payment.thirdPartyCashAmount`). */
+  tercerosPendiente: Prisma.Decimal
+  /** Lo que la caja tiene que cobrar: las tres partes. */
+  totalACobrar: Prisma.Decimal
+}
+
+/**
+ * 🔴 Rappi 2b (diseño 2026-10-23, T6): cuánto falta de un pedido con repartidor propio en efectivo. `null` si la orden no es de
+ * ese carril (sin `thirdPartyCashDue`): el resto del sistema sigue con `computeOrderBalance`, que no cambia.
+ *
+ * La propina pendiente sale de `cashTipDue`, NUNCA de `Order.tipAmount`: cada cobro reescribe esa columna con lo cobrado. Las
+ * devoluciones se tratan como en el saldo común (`summarizeRefunds`): no reabren propina ni terceros ya cobrados.
+ */
+export function saldoDeCobroDeReparto(
+  order: OrderAmountsForBalance & { thirdPartyCashDue: DecimalLike | null; cashTipDue: DecimalLike | null },
+  completedPayments: readonly (CompletedPaymentForBalance & { thirdPartyCashAmount?: DecimalLike | null })[],
+): SaldoDeCobroDeReparto | null {
+  if (order.thirdPartyCashDue == null) return null
+  const cobrados = completedPayments.filter(p => !isRefundPayment(p))
+  const tercerosCobrados = cobrados.reduce((s, p) => s.plus(dec(p.thirdPartyCashAmount)), ZERO)
+  const noNegativo = (v: Prisma.Decimal) => (v.isNegative() ? ZERO : v)
+
+  const ventaPendiente = computeOrderBalance(order, completedPayments).remainingBalance
+  const propinaPendiente = noNegativo(dec(order.cashTipDue).minus(summarizeRefunds(completedPayments).netTipAmount))
+  const tercerosPendiente = noNegativo(dec(order.thirdPartyCashDue).minus(tercerosCobrados))
+  return {
+    ventaPendiente,
+    propinaPendiente,
+    tercerosPendiente,
+    totalACobrar: ventaPendiente.plus(propinaPendiente).plus(tercerosPendiente),
+  }
+}

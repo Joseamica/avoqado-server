@@ -69,6 +69,7 @@ import {
 import {
   claseDeEstado,
   computeOrderBalance,
+  saldoDeCobroDeReparto,
   esVentaCerrada,
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
@@ -354,6 +355,11 @@ export interface OrderDetailResponse {
     totalPaidCents: number
     remainingBalanceCents: number
     tipAmountCents: number
+    /**
+     * Rappi 2b (aditivo, sólo en pedidos con repartidor propio en efectivo): lo que falta, por partes. `remainingBalanceCents`
+     * ya es la suma de las tres. La parte de terceros no es venta: entra al cajón como «cobrado por cuenta de Rappi».
+     */
+    deliveryCashBreakdown?: { saleCents: number; tipCents: number; thirdPartyCents: number; thirdPartyLabel: string }
   }
   staffName: string | null
   /** Additive: dueño del cheque (servedById) — el POS lo compara contra su
@@ -1515,6 +1521,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
           // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
           type: true,
+          // Rappi 2b: lo cobrado por cuenta de Rappi (sólo alimenta `deliveryCashBreakdown`; no se serializa en `payments[]`).
+          thirdPartyCashAmount: true,
           processedBy: {
             select: { firstName: true, lastName: true },
           },
@@ -1551,10 +1559,10 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   // Sólo dinero ocurrido: COMPLETED, incluido `type` para que REFUND no reabra deuda.
   // El calculador compartido suma la propina al total y al pagado; no se resta de la mercancía.
   // Proyección pura de lo ya leído: sin otra consulta ni cambios a los importes legacy.
-  const balance = computeOrderBalance(
-    flattenedOrder,
-    (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED'),
-  )
+  const completados = (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED')
+  const balance = computeOrderBalance(flattenedOrder, completados)
+  // Rappi 2b: un pedido con repartidor propio en efectivo debe además propina y tarifa de Rappi (null en todo lo demás).
+  const reparto = saldoDeCobroDeReparto(flattenedOrder, completados)
 
   return {
     id: flattenedOrder.id,
@@ -1573,8 +1581,18 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     preBillBalance: {
       orderTotalCents: pesosToCents(balance.total.toNumber()),
       totalPaidCents: pesosToCents(balance.paidAmount.toNumber()),
-      remainingBalanceCents: pesosToCents(balance.remainingBalance.toNumber()),
+      remainingBalanceCents: pesosToCents((reparto ? reparto.totalACobrar : balance.remainingBalance).toNumber()),
       tipAmountCents: pesosToCents(balance.tipAmount.toNumber()),
+      ...(reparto
+        ? {
+            deliveryCashBreakdown: {
+              saleCents: pesosToCents(reparto.ventaPendiente.toNumber()),
+              tipCents: pesosToCents(reparto.propinaPendiente.toNumber()),
+              thirdPartyCents: pesosToCents(reparto.tercerosPendiente.toNumber()),
+              thirdPartyLabel: 'Rappi',
+            },
+          }
+        : {}),
     },
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
     // Additive: dueño del cheque con id — para la UI read-only de propiedad de mesa.
