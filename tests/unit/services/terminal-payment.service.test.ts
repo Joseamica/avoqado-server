@@ -647,7 +647,7 @@ describe('TerminalPaymentService — durable per-terminal lock (Slice 1)', () =>
         where: expect.objectContaining({
           terminalId: 't-reconnect',
           venueId: 'venue-1',
-          expiresAt: { gt: expect.any(Date) },
+          OR: [{ expiresAt: { gt: expect.any(Date) } }, { status: 'CANCEL_REQUESTED' }],
         }),
       }),
     )
@@ -2904,5 +2904,151 @@ describe('Revisión final · B: retenerSolicitudLiberadaPorAprobacion', () => {
     expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
     expect(alerta).not.toHaveBeenCalled()
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('deferred'), expect.objectContaining({ requestId: 'REQ-B' }))
+  })
+})
+
+describe('IQ: cancelación recuperable tras reiniciar la TPV', () => {
+  const now = new Date('2026-10-23T16:23:38Z')
+  const requestId = 'REQ-CANCEL-RESTART'
+  const row = () => ({
+    id: 'row-cancel-restart',
+    requestId,
+    venueId: 'venue-1',
+    terminalId: 't-restart',
+    status: TerminalPaymentRequestStatus.CANCEL_REQUESTED,
+    amountCents: 485000,
+    tipCents: 0,
+    orderId: 'order-restart',
+    paymentId: null,
+    resultJson: null,
+    failureCode: null,
+    createdAt: new Date('2026-10-23T16:21:09Z'),
+    updatedAt: new Date('2026-10-23T16:23:03Z'),
+    expiresAt: new Date('2026-10-23T16:26:09Z'),
+    cancelDisposition: null,
+    deliveryProvenance: {
+      deliveries: [
+        {
+          protocol: 'DURABLE',
+          ackVersion: 1,
+          cancelDispositionVersion: 2,
+          probeVersion: 1,
+          socketId: 'previous-process',
+          at: '2026-10-23T16:21:09Z',
+          replay: false,
+        },
+      ],
+    },
+  })
+
+  beforeEach(() => {
+    mockedGetTerminal.mockReturnValue({
+      socketId: 'sock-restart',
+      terminalId: 't-restart',
+      venueId: 'venue-1',
+      identityVerified: true,
+      terminalPaymentAckVersion: 1,
+      terminalPaymentProbeVersion: 1,
+    })
+    tpr().findFirst.mockImplementation(async ({ where }: any) =>
+      where.venueId === 'venue-1' && (!where.requestId || where.requestId === requestId) ? row() : null,
+    )
+    tpr().findMany.mockResolvedValue([row()])
+    prismaMock.payment.findFirst.mockResolvedValue(null)
+  })
+
+  it('consulta la solicitud cancelada inmediatamente, sin esperar al watchdog ni ejecutar otro cobro', async () => {
+    await terminalPaymentService.cancelPayment('AVQD-T-RESTART', requestId, 'Cancelar desde POS', 'venue-1')
+    expect(directEmit).toHaveBeenCalledWith(
+      'terminal:payment_probe',
+      expect.objectContaining({ requestId, venueId: 'venue-1', terminalId: 'AVQD-T-RESTART' }),
+      expect.any(Function),
+    )
+    expect(tpr().findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ requestId, terminalId: 't-restart', venueId: 'venue-1' }),
+        take: 1,
+      }),
+    )
+    expect(directEmit).not.toHaveBeenCalledWith('terminal:payment_request', expect.anything(), expect.anything())
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'CANCELLED' }),
+      }),
+    )
+  })
+
+  it('si la consulta falla, conserva la cancelación durable y deja responder al POS', async () => {
+    tpr().findMany.mockRejectedValueOnce(new Error('Connection terminated'))
+    await expect(terminalPaymentService.cancelPayment('t-restart', requestId, 'Cancelar', 'venue-1')).resolves.toMatchObject({
+      cancelIntent: 'RECORDED',
+      cancelEmitted: true,
+    })
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'CANCELLED' }),
+      }),
+    )
+  })
+
+  it.each([
+    ['APK sin sonda', { terminalPaymentProbeVersion: 0 }],
+    ['identidad no acreditada', { identityVerified: false }],
+    ['otra sucursal', { venueId: 'venue-other' }],
+  ])('%s: no se sondea ni se inventa una cancelación segura', async (_name, override) => {
+    mockedGetTerminal.mockReturnValue({
+      socketId: 'sock-restart',
+      terminalId: 't-restart',
+      venueId: 'venue-1',
+      identityVerified: true,
+      terminalPaymentAckVersion: 1,
+      terminalPaymentProbeVersion: 1,
+      ...override,
+    })
+    await terminalPaymentService.cancelPayment('t-restart', requestId, 'Cancelar', 'venue-1')
+    expect(directEmit).not.toHaveBeenCalled()
+    expect(tpr().updateMany).not.toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'CANCELLED' }),
+      }),
+    )
+  })
+
+  it('al reconectar consulta una cancelación pendiente incluso si venció, sin reenviar el cobro', async () => {
+    tpr().findMany.mockResolvedValue([{ ...row(), expiresAt: new Date(Date.now() - 60_000) }])
+    await terminalPaymentService.replayPendingForTerminal('t-restart', 'venue-1', 'sock-restart')
+    expect(directEmit).toHaveBeenCalledWith('terminal:payment_probe', expect.objectContaining({ requestId }), expect.any(Function))
+    expect(tpr().findMany.mock.calls[0][0].where).toMatchObject({
+      OR: expect.arrayContaining([{ status: 'CANCEL_REQUESTED' }]),
+    })
+    expect(directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_request')).toHaveLength(0)
+  })
+
+  it('el correo describe los 149 segundos reales y la cancelación pendiente, sin afirmar cinco minutos', async () => {
+    const opsAlert = require('@/services/alerts/opsAlert.service')
+    const alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true)
+    try {
+      await terminalPaymentService.reconcileStaleRequests(now)
+      const text = alert.mock.calls.map(([message]: any) => message.lines.join('\n')).join('\n')
+      expect(text).toContain('149 segundos')
+      expect(text).toContain('cancelación')
+      expect(text).not.toContain('5 minutos')
+    } finally {
+      alert.mockRestore()
+    }
+  })
+
+  it('una fila que otro camino ya cerró no genera alerta crítica ni correo desde una lectura antigua', async () => {
+    const logger = require('@/config/logger').default
+    const opsAlert = require('@/services/alerts/opsAlert.service')
+    const alert = jest.spyOn(opsAlert, 'sendOpsAlert').mockResolvedValue(true)
+    tpr().updateMany.mockResolvedValue({ count: 0 })
+    try {
+      expect((await terminalPaymentService.reconcileStaleRequests(now)).unknown).toBe(0)
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('🚨 [Terminal-payment watchdog]'), expect.anything())
+      expect(alert).not.toHaveBeenCalled()
+    } finally {
+      alert.mockRestore()
+    }
   })
 })
