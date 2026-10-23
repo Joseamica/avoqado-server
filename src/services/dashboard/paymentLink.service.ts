@@ -30,6 +30,7 @@ import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/wh
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
+import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -1949,7 +1950,7 @@ async function notifyVenueOnLinkPaid(args: { paymentLinkId: string; venueId: str
     }),
     prisma.venue.findUnique({
       where: { id: args.venueId },
-      select: { name: true, timezone: true },
+      select: { name: true, slug: true, timezone: true },
     }),
     // Eligible recipients: active OWNER/ADMIN staff assigned to this venue.
     // Staff.email is non-nullable in schema so we don't filter for it.
@@ -1980,7 +1981,7 @@ async function notifyVenueOnLinkPaid(args: { paymentLinkId: string; venueId: str
   const paidAtRaw = formatInTimeZone(paidSession.completedAt ?? new Date(), tz, "EEEE d 'de' MMMM 'de' yyyy HH:mm", { locale: esLocale })
   const paidAtLong = paidAtRaw.charAt(0).toUpperCase() + paidAtRaw.slice(1)
   const dashboardOrigin = process.env.DASHBOARD_URL || 'https://app.avoqado.io'
-  const dashboardUrl = `${dashboardOrigin}/venues/${args.venueId}/payment-links/${args.paymentLinkId}`
+  const dashboardUrl = paymentLinksDashboardUrl(dashboardOrigin, venue.slug)
 
   // Tip lives on the Stripe session metadata (set when the checkout was
   // created, line ~1033 in this file). String-typed because Stripe's
