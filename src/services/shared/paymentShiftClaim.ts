@@ -6,7 +6,7 @@ import { turnoVivoWhere } from './turnoDeCaja'
 
 // `payGiftCardBalanceOnOrder` (tarjetas de regalo, A8): el cobro con saldo comparte el núcleo de `payCashOrder` pero su
 // auditoría no se atribuye al efectivo.
-export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder' | 'payGiftCardBalanceOnOrder'
+export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder' | 'payGiftCardBalanceOnOrder' | 'exchange'
 export type RefundPaymentChannel = 'recordRefund' | 'issueRefund' | 'createRefund'
 export type PaymentShiftReconciliationChannel =
   | CapturedPaymentChannel

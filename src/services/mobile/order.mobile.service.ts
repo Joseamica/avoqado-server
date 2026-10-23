@@ -1,4 +1,6 @@
 import type { HttpEnvelope } from './http-operation.mobile.service'
+import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome } from '../exchanges/exchangeTx'
+import type { ExchangeTxInput, ExchangeResponse } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
 /**
@@ -2949,6 +2951,8 @@ export interface AbonoEnTxContexto {
 }
 
 export interface AbonoEnTxEntrada {
+  /** El cambio espera al último abono: la tolerancia de un centavo no puede cerrar antes. */
+  cierreDiferido?: boolean
   /** Lo SOLICITADO, en centavos enteros (la frontera de `payCashOrder`). */
   amountCents: number
   tipCents: number
@@ -3290,7 +3294,7 @@ export async function registrarAbonoEnTx(
   // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
   // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
   // cierra).
-  const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
+  const isFullyPaid = !entrada.cierreDiferido && balance.isFullyPaid && cierreAutomaticoPermitido(estado)
   // 🔴 S1 (R8-1, como la terminal): dinero ya capturado sobre una venta CERRADA (leída bajo el candado) ⇒ conserva su estado, saldo
   // 0 y `cerrada`: no la vuelve a cerrar ni repite lo de saldar (inventario, lealtad, comanda, referido). El dinero se registra
   // completo y sale el aviso de sobrepago después del commit. R2-1: la cola con H1 no pasa por aquí (sin estado previo cerrado:
@@ -5246,4 +5250,16 @@ export async function stampRewardOutcomeForExistingOrder(venueId: string, orderI
     return { applied: false, reason: 'El premio no quedó aplicado a esta venta.' }
   }
   return { applied: true, discountAmount: Number(premio.amount), rewardLabel: premio.rewardLabel }
+}
+
+/** Único abridor de la transacción del cambio; conserva el núcleo de cobro en su carril certificado. */
+export async function executeExchangeInTransaction(input: ExchangeTxInput): Promise<ExchangeTxOutcome | { replay: ExchangeResponse }> {
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
+  return prisma.$transaction(async tx => {
+    const prepared = await prepareExchangeInTx(tx, input)
+    if ('replay' in prepared) return prepared
+    const settled: AbonoEnTx[] = []
+    for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
+    return finishExchangeInTx(tx, prepared, settled)
+  }, ORDER_LOCK_WAIT_BUDGET)
 }

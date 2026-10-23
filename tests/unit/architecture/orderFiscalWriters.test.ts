@@ -316,6 +316,7 @@ const WRITERS: Record<string, Writer> = {
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
       'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
       'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
+      'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
       'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
@@ -522,6 +523,11 @@ const WRITERS: Record<string, Writer> = {
     proof: T4('redeemPointsToOrder'),
   },
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'La orden, sus piezas y los espejos de rebaja nacen en la misma transacción del cambio.',
+  },
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     class: 'PRIVATE_CREATION',
     creates: ['.order.create('],
@@ -1082,6 +1088,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/service-charge.mobile.service.ts#removeServiceCharge': 1,
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': 1,
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': 1,
+  'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction': 1,
   'src/services/mobile/order.mobile.service.ts#updateOrderDetails': 1,
   'src/services/mobile/order.mobile.service.ts#applyOrderDiscount': 1,
   'src/services/mobile/order.mobile.service.ts#removeOrderDiscount': 1,
@@ -1303,6 +1310,7 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
   const MARCAS = ['rechazarSiEsImportada(', 'esOrdenImportada(']
   // Nacen en Avoqado en la misma transacción (nunca son importadas), o son el ayudante mismo, cuyos llamadores ya pasan la red.
   const EXENTOS = new Set([
+    'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
     'src/services/tpv/order.tpv.service.ts#createOrderWithItems',
     'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
     'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
