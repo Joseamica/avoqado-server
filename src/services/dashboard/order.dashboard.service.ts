@@ -1,9 +1,14 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
-import { asegurarCambioDeClienteBajoCandado, bloquearVentaParaLiga } from '@/services/shared/ligaDeClienteEnVenta'
+import {
+  asegurarCambioDeClienteBajoCandado,
+  bloquearVentaParaLiga,
+  esVentaYaCobrada,
+  ventaYaCobradaBajoCandado,
+} from '@/services/shared/ligaDeClienteEnVenta'
 // services/dashboard/order.dashboard.service.ts
 
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
-import { NotFoundError } from '../../errors/AppError'
+import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { PaginatedOrdersResponse } from '../../schemas/dashboard/order.schema'
 import prisma from '../../utils/prismaClient'
 import { STAFF_PUBLIC_SELECT } from '../../utils/staffPublicSelect'
@@ -31,6 +36,7 @@ import { ORDEN_RECIBO_CANONICO } from '../shared/reciboCanonico'
 import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
+import { formatoPesos } from '../giftCards/giftCardLimits'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -451,6 +457,15 @@ function mapOrderPromotions(
   })
 }
 
+export const MENSAJE_MESA_DE_CUENTA_ABIERTA =
+  'La mesa sólo se cambia aquí en una cuenta ya cobrada. Para mover una cuenta abierta usa «Mover» en el POS.'
+
+export const MENSAJE_CERRAR_SIN_PAGAR = 'Esta cuenta no está pagada. Ciérrala desde el POS o cancélala.'
+
+export function mensajeCerrarConSaldo(pendiente: Prisma.Decimal): string {
+  return `Esta cuenta todavía debe ${formatoPesos(pendiente)}. Cóbrala, dala de cortesía o cancélala antes de cerrarla.`
+}
+
 /**
  * Actualizar una orden.
  * SUPERADMIN puede actualizar más campos que usuarios normales.
@@ -517,11 +532,33 @@ export async function updateOrder(
         id: orderId,
         venueId,
       },
-      select: { status: true, venueId: true, paymentStatus: true, customerId: true },
+      select: { status: true, venueId: true, paymentStatus: true, customerId: true, tableId: true },
     })
 
     if (!currentOrder) {
       throw new NotFoundError(`Order with ID ${orderId} not found in this venue`)
+    }
+
+    // Cuentas fuera del plano (23-oct; founder «como Square»): el plano de mesas sólo pinta cuentas vivas CON mesa, así que este
+    // PUT no puede esconder una cuenta que todavía debe dinero. El diálogo reenvía `status` y `tableId` siempre: cuenta el CAMBIO.
+    // La mesa se cambia sólo en una cuenta que ya no puede revivir: cerrada Y cobrada, antes y después. Una anulada revive con un
+    // cobro hecho sin red, y una cerrada sin cobrar con una ronda tardía (Codex r3 #1): las dos necesitan su mesa. Mover una abierta
+    // es «Mover» en el POS.
+    if (
+      tableId !== undefined &&
+      (tableId || null) !== currentOrder.tableId &&
+      (currentOrder.status !== 'COMPLETED' || !esVentaYaCobrada(currentOrder) || (status !== undefined && status !== 'COMPLETED'))
+    )
+      throw new BadRequestError(MENSAJE_MESA_DE_CUENTA_ABIERTA, 'ORDER_TABLE_CHANGE_NOT_ALLOWED')
+    // Sólo una cuenta que el cobro ya marcó PAGADA (PAID/REFUNDED), como Square: se cierra con el pago, no antes. Todo lo que puede
+    // volver a subir el saldo (una ronda, quitar un descuento o una cortesía) ya rechaza una PAGADA; una cerrada aquí sin estarlo
+    // volvía a deber y seguía cerrada, fuera del plano (Codex r4: cortesía total; r5: abono + descuento que luego se quita).
+    if (status === 'COMPLETED' && currentOrder.status !== 'COMPLETED' && !esVentaYaCobrada(currentOrder)) {
+      const venta = await ventaYaCobradaBajoCandado(client, { venueId, orderId })
+      throw new BadRequestError(
+        venta?.pendiente.greaterThan(0) ? mensajeCerrarConSaldo(venta.pendiente) : MENSAJE_CERRAR_SIN_PAGAR,
+        'ORDER_CLOSE_WITH_BALANCE',
+      )
     }
 
     // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): `Order.customerId` es el respaldo heredado de la lealtad. En

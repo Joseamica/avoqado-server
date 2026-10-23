@@ -105,7 +105,9 @@ describe('la consulta', () => {
     expect(ESTADOS_EN_LA_MESA).toEqual(['PENDING', 'CONFIRMED', 'PREPARING', 'READY'])
     expect(sql.values).toEqual(expect.arrayContaining(['venue-1', ...ESTADOS_EN_LA_MESA]))
     expect(sql.values).not.toEqual(expect.arrayContaining(['COMPLETED']))
-    expect(sql.values.filter(v => v === 'venue-1')).toHaveLength(6)
+    // 8: dos más por las mesas archivadas con una cuenta viva, que `/tables` también manda — su fila y su puntero (cuentas fuera
+    // del plano, 23-oct; Codex r2 #2).
+    expect(sql.values.filter(v => v === 'venue-1')).toHaveLength(8)
   })
 
   it('una respuesta vacía da la versión del venue vacío, no truena', async () => {

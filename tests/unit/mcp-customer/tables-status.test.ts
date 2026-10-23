@@ -69,11 +69,29 @@ describe('tables_status', () => {
     })
     expect(out.tables[1].order).toBeNull()
     expect(out.tables[2].area).toBeNull()
-    // default excludes inactive tables
+    // default: active tables, plus an archived one only while it holds a live check (cuentas fuera del plano, 23-oct)
     expect((mockTableFind.mock.calls[0][0] as { where: Record<string, unknown> }).where).toMatchObject({
       venueId: { in: ['v1'] },
-      active: true,
+      OR: [{ active: true }, { orders: { some: { status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] } } } }],
     })
+    expect(out.tables[0].archived).toBeUndefined()
+  })
+
+  it('an archived table that still holds a live check is listed and flagged archived', async () => {
+    mockTableFind.mockResolvedValueOnce([
+      { number: '7', capacity: 4, status: 'OCCUPIED', active: false, area: null, orders: [{ id: 'o-viva' }], currentOrder: null },
+    ])
+    const out = parse(await call({ venueId: 'v1' }))
+    expect(out.byStatus).toEqual({ OCCUPIED: 1 })
+    expect(out.tables[0]).toMatchObject({ number: '7', status: 'OCCUPIED', archived: true })
+  })
+
+  it('includeInactive keeps listing every table, unfiltered by active', async () => {
+    mockTableFind.mockResolvedValueOnce([])
+    await call({ venueId: 'v1', includeInactive: true })
+    const where = (mockTableFind.mock.calls[0][0] as { where: Record<string, unknown> }).where
+    expect(where).not.toHaveProperty('OR')
+    expect(where).not.toHaveProperty('active')
   })
 
   it('reports AVAILABLE when the stored status is a stale OCCUPIED with no live order (phantom-table fix)', async () => {
