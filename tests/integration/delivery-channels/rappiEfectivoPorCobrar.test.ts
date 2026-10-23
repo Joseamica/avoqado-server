@@ -140,4 +140,34 @@ describe('Rappi 2b: la lista «Rappi · por cobrar»', () => {
     })
     expect(porId.get(abonado.orderId)).toMatchObject({ remainingBalanceCents: 10500, saleCents: 10500, tipCents: 0, thirdPartyCents: 0 })
   })
+
+  it('Codex código r3 #1: con más de 20 abonos el saldo es el mismo que el de la precuenta', async () => {
+    const { orderId } = await pedido(pedido881655210)
+    for (let i = 0; i < 21; i++) {
+      await payCashOrder(venues[0], orderId, {
+        amount: 500,
+        tip: 0,
+        staffId: staffId!,
+        idempotencyKey: `abono5-${i}-${orderId}`.slice(0, 64),
+        isOfflineReplay: true,
+      } as any)
+    }
+    const fila = (await listDeliveryCashPending({ venueId: venues[0] })).orders.find(o => o.orderId === orderId)!
+    // 21 × 5 = 105 recibidos ⇒ faltan 100 (la tarifa y la propina se cubrieron primero).
+    expect(fila.remainingBalanceCents).toBe(10000)
+  })
+
+  it('Codex código r3 #2: con más pedidos que el tope, el cursor da acceso a los restantes, sin repetir', async () => {
+    const venueId = venues[1]
+    for (let i = 0; i < 4; i++) await pedido(pedido881655210, 1)
+    const primera = await listDeliveryCashPending({ venueId, limit: 3 })
+    expect(primera.orders).toHaveLength(3)
+    expect(primera.truncated).toBe(true)
+    expect(primera.nextCursor).toBeTruthy()
+    const segunda = await listDeliveryCashPending({ venueId, limit: 3, cursor: primera.nextCursor! })
+    const ids = [...primera.orders, ...segunda.orders].map(o => o.orderId)
+    expect(new Set(ids).size).toBe(ids.length)
+    expect(ids.length).toBe(primera.total)
+    expect(segunda.nextCursor).toBeNull()
+  })
 })

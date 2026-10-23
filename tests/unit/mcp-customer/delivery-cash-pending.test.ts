@@ -50,6 +50,7 @@ describe('delivery_cash_pending', () => {
       ],
       total: 1,
       truncated: false,
+      nextCursor: null,
     })
 
     const r = parse(await handlers.get('delivery_cash_pending')!({ venueId: 'v1' }, {}))

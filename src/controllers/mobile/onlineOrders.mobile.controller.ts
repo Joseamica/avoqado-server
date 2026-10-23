@@ -96,7 +96,8 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
 /** Rappi 2b: los pedidos de plataforma que la caja cobra en efectivo (venta, propina y lo de la plataforma, en centavos). */
 export const deliveryCash = async (req: Request, res: Response, next: NextFunction) => {
   try {
-    return res.json({ success: true, data: await listDeliveryCashPending({ venueId: req.params.venueId }) })
+    const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
+    return res.json({ success: true, data: await listDeliveryCashPending({ venueId: req.params.venueId, ...(cursor !== undefined ? { cursor } : {}) }) })
   } catch (e) {
     return next(e)
   }

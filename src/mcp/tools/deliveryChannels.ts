@@ -144,16 +144,20 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
   server.tool(
     'delivery_cash_pending',
     'Pedidos de reparto que el negocio cobra en EFECTIVO con su propio repartidor (hoy, Rappi) y que la caja todavía no ha cobrado, de los últimos 2 días: por pedido, cuánto falta por cobrar y su desglose (venta, propina y lo que se cobra por cuenta de la plataforma, que no es venta). Es la misma lista «Rappi · por cobrar» de la pantalla de pedidos en línea del POS. Responde "¿qué pedidos de Rappi faltan por cobrar? ¿cuánto efectivo me debe traer el repartidor?". Montos en pesos. Pass venueId.',
-    { venueId: z.string().describe('Venue cuyos pedidos de reparto por cobrar leer (debe estar en tu scope)') },
-    async ({ venueId }) => {
+    {
+      venueId: z.string().describe('Venue cuyos pedidos de reparto por cobrar leer (debe estar en tu scope)'),
+      cursor: z.string().max(200).optional().describe('nextCursor de la respuesta anterior, para la siguiente página'),
+    },
+    async ({ venueId, cursor }) => {
       guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
       // Mismo permiso que la bandeja del POS; sin candado de plan (R14: atender lo que ya existe nunca se bloquea).
       guard.requirePermission('orders:read', venueId)
-      const r = await listDeliveryCashPending({ venueId })
+      const r = await listDeliveryCashPending({ venueId, ...(cursor !== undefined ? { cursor } : {}) })
       const pesos = (c: number) => Math.round(c) / 100
       return text({
         total: r.total,
         truncated: r.truncated,
+        nextCursor: r.nextCursor,
         orders: r.orders.map(o => ({
           orderId: o.orderId,
           orderNumber: o.orderNumber,
