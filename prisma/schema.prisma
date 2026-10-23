@@ -4034,6 +4034,12 @@ model Order {
   // Partial payment tracking (for split payments)
   paidAmount       Decimal @default(0) @db.Decimal(12, 2)
   remainingBalance Decimal @default(0) @db.Decimal(12, 2)
+  /// Rappi 2b: dinero que el negocio cobra en efectivo POR CUENTA de la plataforma (tarifa de servicio de Rappi en
+  /// marketplace/cash). No es venta, propina, CFDI, comisión ni lealtad. Lo escribe SÓLO la ingesta; null en todo lo demás.
+  thirdPartyCashDue Decimal? @db.Decimal(12, 2)
+  /// Rappi 2b: propina que el cliente paga en efectivo según la plataforma. La escribe SÓLO la ingesta, porque cada cobro
+  /// reescribe `tipAmount` con lo cobrado y la propina pendiente se perdería tras un abono chico. Null fuera de ese carril.
+  cashTipDue        Decimal? @db.Decimal(12, 2)
 
   // Status
   status        OrderStatus   @default(PENDING)
@@ -4588,6 +4594,10 @@ model Payment {
   // Amounts
   amount    Decimal @db.Decimal(12, 2)
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
+  /// Rappi 2b: parte de este cobro en efectivo que el negocio recibió por cuenta de un tercero (tarifa de Rappi). Fuera de
+  /// `amount`/`tipAmount`, o sea fuera de venta, propina, CFDI, comisión y lealtad; entra al cajón como PAY_IN
+  /// `srv-third-party:<id>`. Se escribe en la MISMA transacción que el cobro. Null en todo lo demás.
+  thirdPartyCashAmount Decimal? @db.Decimal(12, 2)
 
   // Payment info
   method    PaymentMethod
