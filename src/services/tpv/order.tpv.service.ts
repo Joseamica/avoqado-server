@@ -3074,6 +3074,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // Rappi 2b: anular TODO un pedido de Rappi es cancelarlo; su mensaje dice qué hacer («cancélalo en la app de Rappi») y va antes
+      // del candado general de plataforma (T10), que frena cualquier otra anulación.
+      if (order.items.every(item => input.itemIds.includes(item.id))) rechazarCancelacionLocalDeRappi(order)
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 y de las guardas de cobro.
       rechazarSiEsImportada(order)

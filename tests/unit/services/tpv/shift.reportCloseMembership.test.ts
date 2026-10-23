@@ -163,6 +163,7 @@ function esperarMembresiaCanonica(args: any) {
     id: true,
     amount: true,
     tipAmount: true,
+    thirdPartyCashAmount: true,
     method: true,
     fundsFlow: true,
     tenderTypeId: true,

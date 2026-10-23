@@ -72,6 +72,12 @@ const SERVER_CASH_SALE_LOCAL_ID_PREFIX = 'srv-cash-sale:'
  */
 const SERVER_REFUND_LOCAL_ID_PREFIX = 'srv-refund:'
 
+/**
+ * Rappi 2b (F7): prefijo de la entrada (PAY_IN) del dinero que el negocio cobró por cuenta de un tercero (la tarifa de Rappi).
+ * Una por cobro, derivada del `paymentId` como la venta: el índice único la hace idempotente.
+ */
+const SERVER_THIRD_PARTY_LOCAL_ID_PREFIX = 'srv-third-party:'
+
 /** `Shift.cashDifference` is Decimal(10,2); the drawer itself has the wider Decimal(12,2). */
 const SHIFT_CASH_DIFFERENCE_MAX = new Decimal('99999999.99')
 
@@ -121,6 +127,16 @@ export function cashSaleDrawerLocalId(paymentId: string): string {
   return `${SERVER_CASH_SALE_LOCAL_ID_PREFIX}${paymentId}`
 }
 
+/** La llave de la entrada de caja de lo cobrado por cuenta de un tercero (Rappi 2b). Determinista: mismo pago → misma llave. */
+export function cashThirdPartyDrawerLocalId(paymentId: string): string {
+  return `${SERVER_THIRD_PARTY_LOCAL_ID_PREFIX}${paymentId}`
+}
+
+/** 🔴 Texto del corte: el POS y el dueño lo leen en la línea propia de la entrada. Lo arma SÓLO este archivo. */
+export function notaDeCobroPorCuentaDeRappi(orderNumber: string | null | undefined): string {
+  return `Cobrado por cuenta de Rappi · pedido #${orderNumber ?? 's/n'}`
+}
+
 /** La llave del movimiento de caja de un reembolso. Determinista: mismo reembolso → misma llave. */
 export function cashRefundDrawerLocalId(refundPaymentId: string): string {
   return `${SERVER_REFUND_LOCAL_ID_PREFIX}${refundPaymentId}`
@@ -137,6 +153,13 @@ export interface CashSaleDrawerPosting extends TenderSemanticsPayment {
   amount: Decimal | number | string
   /** Propina, en unidades mayores (pesos). */
   tipAmount?: Decimal | number | string | null
+  /**
+   * Rappi 2b: lo cobrado por cuenta de un tercero (`Payment.thirdPartyCashAmount`). Entra al cajón como PAY_IN propio, en la MISMA
+   * sesión que la venta, nunca como venta.
+   */
+  thirdPartyCashAmount?: Decimal | number | string | null
+  /** Para la nota del PAY_IN; si falta, se lee de la orden. */
+  orderNumber?: string | null
   staffId?: string | null
   staffName?: string | null
   orderId?: string | null
@@ -198,9 +221,11 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     if (!paymentCountsAsDrawerCash(posting)) return 'NOT_DRAWER_CASH'
 
     const total = new Decimal(String(posting.amount ?? 0)).plus(new Decimal(String(posting.tipAmount ?? 0)))
+    // Rappi 2b: un cobro que sólo cubrió la tarifa de Rappi (venta y propina en $0) SÍ movió efectivo.
+    const terceros = new Decimal(String(posting.thirdPartyCashAmount ?? 0))
     // Un cobro en $0 (cuenta cortesiada al 100%) es una venta legítima que NO movió
     // efectivo: un movimiento de caja en cero sólo ensucia el listado del corte.
-    if (total.lessThanOrEqualTo(0)) return 'NOT_DRAWER_CASH'
+    if (total.plus(terceros.isNegative() ? 0 : terceros).lessThanOrEqualTo(0)) return 'NOT_DRAWER_CASH'
 
     const session = posting.targetSessionId
       ? await prisma.cashDrawerSession.findFirst({
@@ -221,10 +246,41 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     // frecuente, no una consulta extra en cada venta.
     const staffName = posting.staffName || (await resolveStaffName(posting.staffId))
 
+    const requireOpen = posting.exigirAbierta ?? !posting.targetSessionId
+    // Rappi 2b: la entrada de lo cobrado por cuenta de Rappi, en la MISMA sesión que la venta (idempotente por su llave).
+    const resultTerceros = terceros.greaterThan(0)
+      ? await createEventUnderSessionLock(session.id, requireOpen, {
+          sessionId: session.id,
+          venueId: posting.venueId,
+          type: 'PAY_IN',
+          amount: terceros,
+          staffId: posting.staffId || 'SYSTEM',
+          staffName,
+          orderId: posting.orderId || null,
+          note: notaDeCobroPorCuentaDeRappi(
+            posting.orderNumber ??
+              (posting.orderId
+                ? (
+                    await prisma.order.findFirst({
+                      where: { id: posting.orderId, venueId: posting.venueId },
+                      select: { orderNumber: true },
+                    })
+                  )?.orderNumber
+                : null),
+          ),
+          localId: cashThirdPartyDrawerLocalId(posting.paymentId),
+        })
+      : undefined
+    if (total.lessThanOrEqualTo(0)) {
+      // Sólo terceros: no hay venta que anotar.
+      if (!resultTerceros) return 'DRAWER_CLOSED'
+      return resultTerceros.count > 0 ? 'POSTED' : 'ALREADY_POSTED'
+    }
+
     // `createMany` + `skipDuplicates` en vez de `create`: con `create`, el replay de un
     // intent del outbox chocaría con el índice único y lanzaría P2002 DESPUÉS de que el
     // cobro ya está commiteado — un error en la respuesta de una venta que sí ocurrió.
-    const result = await createEventUnderSessionLock(session.id, posting.exigirAbierta ?? !posting.targetSessionId, {
+    const result = await createEventUnderSessionLock(session.id, requireOpen, {
       sessionId: session.id,
       venueId: posting.venueId,
       type: 'CASH_SALE',
@@ -243,7 +299,7 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
       return 'DRAWER_CLOSED'
     }
 
-    if (result.count === 0) {
+    if (result.count === 0 && !(resultTerceros && resultTerceros.count > 0)) {
       logger.info('💵 [CASH-DRAWER] Venta en efectivo ya registrada en el cajón (replay) — no se duplica', {
         venueId: posting.venueId,
         paymentId: posting.paymentId,

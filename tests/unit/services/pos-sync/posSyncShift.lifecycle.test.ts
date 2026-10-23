@@ -239,6 +239,7 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
         id: true,
         amount: true,
         tipAmount: true,
+        thirdPartyCashAmount: true,
         method: true,
         fundsFlow: true,
         tenderTypeId: true,

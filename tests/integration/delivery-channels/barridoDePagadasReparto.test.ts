@@ -237,6 +237,8 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
       pedido.payment = {
         ...pedido.payment,
         saleAmount: '100.00',
+        // Rappi 2b: el reparto base (M10) ya trae el envío como renglón; esta venta de prueba no lleva envío.
+        shippingAsLine: '0.00',
         merchantFees: '0.00',
         discountAmount: '100.00',
         tipAmount: propina,
@@ -297,7 +299,8 @@ describe('el barrido de «pagadas pero abiertas» y los pedidos de reparto (Code
     expect(despues.id).toBe(order.id)
     expect(despues.status).toBe('COMPLETED')
     expect(cierreAsentado(order.id)).toHaveLength(1)
-    expect(despues.subtotal.toFixed(2)).toBe('20.00')
+    // Rappi 2b (F5): el envío del negocio es renglón, así que la venta lo incluye (20 + 35); total, propina y pagado no cambian.
+    expect(despues.subtotal.toFixed(2)).toBe('55.00')
     expect(despues.total.toFixed(2)).toBe('55.00') // antes del arreglo: 40.00 (se fue el envío y entró la propina)
     expect(despues.tipAmount.toFixed(2)).toBe('20.00')
     expect(despues.paidAmount.toFixed(2)).toBe('75.00') // lo que liquida Rappi: 55 de venta + 20 de propina

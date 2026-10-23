@@ -1684,8 +1684,9 @@ describe('processRappiEvent', () => {
     /** La normalización que recibió la ingesta. */
     const normalizadoIngerido = () => mockIngest.mock.calls[0][0]
 
-    it('🔴 una variante pendiente (efectivo con repartidor propio) queda FAILED con su código y sin aceptar', async () => {
-      findUnique().mockResolvedValue(fila({ payload: payloadPedido({ delivery_method: 'marketplace', payment_method: 'cash' }) }))
+    it('🔴 una variante pendiente (para recoger en efectivo) queda FAILED con su código y sin aceptar', async () => {
+      // 2b (23-oct): repartidor propio en efectivo ya se registra; para recoger en efectivo sigue esperando a que Rappi aclare el reparto.
+      findUnique().mockResolvedValue(fila({ payload: payloadPedido({ delivery_method: 'pickup', payment_method: 'cash' }) }))
 
       const r = await processRappiEvent('evt1', { aceptar: aceptarOk })
 
@@ -1753,9 +1754,11 @@ describe('processRappiEvent', () => {
 
       expect(r).toMatchObject({ outcome: 'PROCESSED', accepted: true })
       expect(aceptarOk).toHaveBeenCalledWith('1444309268', '900175625', expect.any(Number))
+      // 2b (F5): el envío del negocio llega como renglón (`shippingAsLine`), no como cargo; lo liquidado no cambia.
       expect(normalizadoIngerido().payment).toMatchObject({
         saleAmount: '20.00',
-        merchantFees: '35.00',
+        shippingAsLine: '35.00',
+        merchantFees: '0.00',
         tipAmount: '20.00',
         externallyPaidSale: '55.00',
         externallyPaidTip: '20.00',

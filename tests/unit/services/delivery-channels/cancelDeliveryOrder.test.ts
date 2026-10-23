@@ -43,6 +43,8 @@ describe('cancelDeliveryOrder', () => {
     ;(prisma.order.update as jest.Mock).mockResolvedValue({ id: 'ord1' })
     ;(prisma.kdsOrderItem.deleteMany as jest.Mock).mockResolvedValue({ count: 0 })
     ;(prisma.kdsOrder.deleteMany as jest.Mock).mockResolvedValue({ count: 1 })
+    // Rappi 2b: sin cobros en la caja (el caso con efectivo cobrado se prueba contra Postgres en rappiEfectivoCobro.test.ts).
+    ;(prisma.payment.aggregate as jest.Mock).mockResolvedValue({ _count: { _all: 0 }, _sum: {} })
     mockCobroVivo.mockResolvedValue(null)
     mockReverse.mockResolvedValue({ outcome: 'REVERSED', movements: 1 })
   })

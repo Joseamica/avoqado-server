@@ -221,7 +221,8 @@ describe('🔴 R7-1: el pago manual rechaza una venta YA cobrada (PAID/REFUNDED)
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1) // el candado de siempre
     expect(lecturasDeLaVenta).toHaveLength(1)
     // R8-3a: sólo el estado de cobro — el cliente y el primario los pedía la regla R5-1, ya quitada.
-    expect(lecturasDeLaVenta[0]).toEqual({ where: { id: ORDER, venueId: VENUE }, select: { paymentStatus: true } })
+    // Rappi 2b (T7): la misma lectura bajo el candado también trae el carril de Rappi en efectivo.
+    expect(lecturasDeLaVenta[0]).toEqual({ where: { id: ORDER, venueId: VENUE }, select: { paymentStatus: true, thirdPartyCashDue: true } })
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(tx.order.findFirst.mock.invocationCallOrder[0])
     expect(tx.shift.findFirst).not.toHaveBeenCalled()
     expect(tx.payment.count).not.toHaveBeenCalled() // ni los cobros previos del turno ni reembolsos

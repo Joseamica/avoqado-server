@@ -58,6 +58,36 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     const actual = await tx.order.findUnique({ where: { id: order.id }, select: { status: true } })
     if (actual?.status === OrderStatus.CANCELLED) return { yaCancelada: true as const }
     const cobroVivo = await findLiveTerminalCharge(tx, { venueId: order.venueId, orderId: order.id })
+    // 🔴 Rappi 2b (F7/T8): la plataforma canceló un pedido que la caja YA cobró (efectivo con repartidor propio). No se mueve
+    // dinero (ni se devuelve solo): se cancela como siempre, el cobro se conserva y una persona concilia con la plataforma. Neutral
+    // al proveedor: un pedido pagado en línea sólo tiene cobros de la plataforma (`DELIVERY_PLATFORM`) y no entra aquí. La marca va
+    // DENTRO del candado, junto al cambio de estado: una cancelación repetida ya no llega aquí (ve CANCELLED arriba).
+    const cobradoEnCaja = await tx.payment.aggregate({
+      where: { orderId: order.id, status: 'COMPLETED', type: { not: 'REFUND' }, source: { not: 'DELIVERY_PLATFORM' } },
+      _sum: { amount: true, tipAmount: true, thirdPartyCashAmount: true },
+      _count: { _all: true },
+    })
+    if (cobradoEnCaja._count._all > 0) {
+      await tx.activityLog.create({
+        data: {
+          venueId: order.venueId,
+          action: 'DELIVERY_CANCELLED_AFTER_CASH',
+          entity: 'Order',
+          entityId: order.id,
+          data: {
+            provider,
+            externalId,
+            motivo: motivo ?? null,
+            cobros: cobradoEnCaja._count._all,
+            venta: (cobradoEnCaja._sum.amount ?? new Prisma.Decimal(0)).toString(),
+            propina: (cobradoEnCaja._sum.tipAmount ?? new Prisma.Decimal(0)).toString(),
+            terceros: (cobradoEnCaja._sum.thirdPartyCashAmount ?? new Prisma.Decimal(0)).toString(),
+            mensaje:
+              'La plataforma canceló un pedido que ya se cobró en la caja: ponte de acuerdo con ella o devuélvele el dinero al cliente',
+          },
+        },
+      })
+    }
 
     // `OrderStatus.CANCELLED` es la señal CANÓNICA de "esto no fue una venta": la
     // contabilidad ya la honra (`autoPosting.service.ts` — "orden cancelada → sin ingreso"),
@@ -72,11 +102,21 @@ export async function cancelDeliveryOrder(externalOrderId: string, provider: Del
     // Order, en el ActivityLog y en el payload crudo del evento.
     await tx.kdsOrderItem.deleteMany({ where: { kdsOrder: { orderId: order.id } } })
     await tx.kdsOrder.deleteMany({ where: { orderId: order.id } })
-    return { yaCancelada: false as const, cobroVivo }
+    return { yaCancelada: false as const, cobroVivo, cobradoEnCaja: cobradoEnCaja._count._all > 0 }
   }, ORDER_LOCK_WAIT_BUDGET)
 
   if (bajoCandado.yaCancelada) return { outcome: 'ALREADY_CANCELLED', orderId: order.id }
   const { cobroVivo } = bajoCandado
+  if (bajoCandado.cobradoEnCaja) {
+    // BetterStack vigila «🚨 [Rappi efectivo]» (mismo prefijo que `avisarDineroDeRappi`).
+    logger.error('🚨 [Rappi efectivo] La plataforma canceló un pedido que ya se cobró en la caja: conciliar o devolver al cliente', {
+      provider,
+      venueId: order.venueId,
+      orderId: order.id,
+      orderNumber: order.orderNumber,
+      externalId,
+    })
+  }
 
   if (cobroVivo) {
     logger.error(

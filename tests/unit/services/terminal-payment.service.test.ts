@@ -24,6 +24,7 @@ import {
 } from '@/services/terminal-payment.service'
 import {
   BadRequestError,
+  ConflictError,
   OrderAlreadyPaidError,
   TerminalBusyError,
   TerminalPaymentAdmissionRetryError,
@@ -1685,6 +1686,18 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     expect(directEmit).not.toHaveBeenCalled()
   })
 
+  it('🔴 Rappi 2b: un pedido de Rappi en efectivo no se manda a la terminal (409 RAPPI_CASH_ORDER_CASH_ONLY), antes de tocarla', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'R-1', status: 'CONFIRMED', thirdPartyCashDue: '10.00' })
+
+    const error = await terminalPaymentService.sendPaymentToTerminal(baseRequest({ terminalId: 'T-RAPPI', orderId: 'order-rappi' })).then(
+      () => null,
+      (e: any) => e,
+    )
+    expect(error).toMatchObject({ statusCode: 409, code: 'RAPPI_CASH_ORDER_CASH_ONLY' })
+    expect(tpr().create).not.toHaveBeenCalled()
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
   it('orden PENDING → el cobro procede normal (el candado no estorba cuentas abiertas)', async () => {
     order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'ORD-OPEN' })
 
@@ -2114,6 +2127,7 @@ describe('TerminalPaymentService — lápida de admisión: contención, choque d
     { failureCode: 'REJECTED_ORDER_CANCELLED', httpStatus: 400, code: 'ORDER_CANCELLED_NO_NEW_CHARGE', clase: BadRequestError },
     { failureCode: 'REJECTED_ORDER_PAID', httpStatus: 409, code: 'ORDER_ALREADY_PAID', clase: OrderAlreadyPaidError },
     { failureCode: 'REJECTED_ORDER_NOT_FOUND', httpStatus: 400, code: 'ORDER_NOT_FOUND', clase: BadRequestError },
+    { failureCode: 'REJECTED_ORDER_RAPPI_CASH', httpStatus: 409, code: 'RAPPI_CASH_ORDER_CASH_ONLY', clase: ConflictError },
   ])(
     'la réplica de una lápida $failureCode reproduce el rechazo ($httpStatus $code) aunque su respuesta guardada no se pueda leer',
     async ({ failureCode, httpStatus, code, clase }) => {

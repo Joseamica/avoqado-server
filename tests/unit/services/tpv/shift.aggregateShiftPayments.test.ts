@@ -167,4 +167,21 @@ describe('aggregateShiftPayments — la misma regla que el cierre del turno', ()
     expect(r.totalSales.toFixed(2)).toBe('0.30')
     expect(r.totalCashPayments.toFixed(2)).toBe('0.30')
   })
+
+  it('Rappi 2b: lo cobrado por cuenta de Rappi entra al efectivo esperado (totalDrawerExtra), NUNCA a ventas ni propinas', () => {
+    const r = aggregateShiftPayments([
+      pago({
+        amount: new Decimal(175),
+        tipAmount: new Decimal(20),
+        method: 'CASH',
+        fundsFlow: 'CASH_DRAWER',
+        thirdPartyCashAmount: new Decimal(10),
+      }),
+    ])
+    expect(r.totalSales.toNumber()).toBe(175)
+    expect(r.totalTips.toNumber()).toBe(20)
+    expect(r.totalCashPayments.toNumber()).toBe(175)
+    expect(r.totalCashTips.toNumber()).toBe(20)
+    expect(r.totalDrawerExtra.toNumber()).toBe(10)
+  })
 })

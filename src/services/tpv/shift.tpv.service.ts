@@ -303,6 +303,8 @@ const SHIFT_PAYMENT_TOTALS_SELECT = {
   id: true,
   amount: true,
   tipAmount: true,
+  // Rappi 2b: lo cobrado por cuenta de Rappi (entra al efectivo esperado como `totalDrawerExtra`).
+  thirdPartyCashAmount: true,
   method: true,
   fundsFlow: true,
   tenderTypeId: true,
@@ -1561,6 +1563,8 @@ async function broadcastClosedShift(venueId: string, updatedShift: Shift): Promi
 export interface ShiftPaymentForTotals {
   amount: Decimal | number | string | null
   tipAmount: Decimal | number | string | null
+  /** Rappi 2b: lo cobrado por cuenta de un tercero; está en el cajón pero no es venta ni propina. */
+  thirdPartyCashAmount?: Decimal | number | string | null
   method: PaymentMethod | string
   fundsFlow: PaymentFundsFlow | string | null
   tenderTypeId: string | null
@@ -1641,6 +1645,10 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
 
     if (payment.method !== 'CASH' && paymentCountsAsDrawerCash(payment)) {
       totalDrawerExtra = totalDrawerExtra.add(amount).add(tipAmount)
+    }
+    // Rappi 2b (T11): lo cobrado por cuenta de Rappi está en el cajón (su PAY_IN) pero no es venta ni propina.
+    if (payment.thirdPartyCashAmount != null && paymentCountsAsDrawerCash(payment)) {
+      totalDrawerExtra = totalDrawerExtra.add(new Decimal(payment.thirdPartyCashAmount))
     }
 
     switch (payment.method) {

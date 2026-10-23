@@ -1,5 +1,6 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import { asegurarCambioDeClienteBajoCandado, bloquearVentaParaLiga } from '@/services/shared/ligaDeClienteEnVenta'
+import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
 // services/dashboard/order.dashboard.service.ts
 
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
@@ -801,9 +802,19 @@ export async function settleOrder(
     await lockExistingOrderForPayment(tx, { venueId, orderId })
     const fresh = await tx.order.findFirst({
       where: { id: orderId, venueId },
-      select: { total: true, remainingBalance: true, tipAmount: true, paymentStatus: true, version: true, status: true },
+      select: {
+        total: true,
+        remainingBalance: true,
+        tipAmount: true,
+        paymentStatus: true,
+        version: true,
+        status: true,
+        thirdPartyCashDue: true,
+      },
     })
     if (!fresh) return null
+    // Rappi 2b (T7): liquidar crea un efectivo NUEVO sin propina ni lo de Rappi ⇒ 409 antes de escribir.
+    rechazarAccionDeCobroSobreRappiEnEfectivo(fresh)
     // 🔴 Founder 3-oct / Codex r13 #3: «liquidar» crea en este momento un efectivo a nombre del negocio: es un cobro NUEVO. Sobre una
     // cancelada o borrada ⇒ 400 con el texto del founder, dentro de la transacción y bajo el candado: nada se escribe. (No hay llave
     // que resolver: la liquidación no la recibe.)

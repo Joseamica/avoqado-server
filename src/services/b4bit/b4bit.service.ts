@@ -24,6 +24,7 @@ import prisma from '../../utils/prismaClient'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
+import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -324,12 +325,14 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
     if (orderIdToUse) {
       const targetOrder = await tx.order.findUnique({
         where: { id: orderIdToUse, venueId },
-        select: { id: true, status: true, paymentStatus: true },
+        select: { id: true, status: true, paymentStatus: true, thirdPartyCashDue: true },
       })
 
       if (!targetOrder) {
         throw new BadRequestError('La cuenta no existe o no pertenece a esta sucursal')
       }
+      // Rappi 2b (T7): un cobro NUEVO con cripto no cobra un pedido de Rappi en efectivo (antes de crear nada).
+      rechazarAccionDeCobroSobreRappiEnEfectivo(targetOrder)
       if (targetOrder.paymentStatus === 'PAID') {
         throw new BadRequestError('La cuenta ya está pagada')
       }
