@@ -51,7 +51,6 @@ import prisma from '@/utils/prismaClient'
 import { cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
 import { processIntents } from '@/services/mobile/sync.mobile.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
-import { deletePayment } from '@/services/dashboard/payment.dashboard.service'
 import { createTenderType, updateTenderType } from '@/services/dashboard/tenderType.dashboard.service'
 import { recordOrderPayment } from '@/services/tpv/payment.tpv.service'
 import {
@@ -741,7 +740,10 @@ describe('I7 · R2-6: dinero capturado en una mesa que reasignaron', () => {
       // La PRIMERA consulta de la llave (la del middleware) encontró el pago; antes de la del servicio, el panel lo borra.
       if (!borrado && r && args?.where?.venueId_idempotencyKey?.idempotencyKey === llave) {
         borrado = true
-        await deletePayment(venueId, paymentId)
+        // Antes era el «borrar» del panel; desde el 23-oct el panel no borra un cobro hecho, así que el borrado viene de fuera.
+        await prisma.digitalReceipt.deleteMany({ where: { paymentId } })
+        await prisma.transactionCost.deleteMany({ where: { paymentId } })
+        await prisma.payment.delete({ where: { id: paymentId } })
       }
       return r
     }) as never)
