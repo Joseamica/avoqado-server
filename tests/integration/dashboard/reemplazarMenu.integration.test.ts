@@ -457,7 +457,8 @@ describe('C5-1 · ola 2: la liga que pierde la carrera contra «Reemplazar» res
     const borrado = await retener(bloqueador, tx => tx.modifier.delete({ where: { id: shot } }), { confirmar: true })
     let guardado: Promise<void> = Promise.resolve()
     try {
-      guardado = handler(req as unknown as Request, res as unknown as Response)
+      // `get` como en Express: crear lee el encabezado Idempotency-Key (aquí no viene).
+      guardado = handler({ get: () => undefined, ...req } as unknown as Request, res as unknown as Response)
       await hastaQue(
         observador,
         'la liga espera al extra que se está borrando',
