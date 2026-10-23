@@ -39,31 +39,10 @@ import type { HorarioSemanal } from '../../core/deliveryHours.service'
 import type { CierreDeListo } from './rappi.estadoDelPedido'
 import { aFranjasDeTienda, aHorarioRappi, DIAS_RAPPI, planDeHorario, type OperacionDeHorario } from './rappi.hours'
 import { construirMenuRappi, type PreciosDeCanal } from './rappi.menuMapper'
-import {
-  extraerStoreId,
-  normalizeRappiOrder,
-  tiempoDeCoccion,
-  type MetodoDeEntrega,
-  type OpcionesDeTraduccion,
-  type RappiOrderPayload,
-} from './rappi.mapper'
+import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type OpcionesDeTraduccion, type RappiOrderPayload } from './rappi.mapper'
 import { verifyRappiSignature } from './rappi.signature'
-
-/**
- * Qué lee la cocina al intentar cancelar un pedido de Rappi YA ACEPTADO (F2). Rappi no deja cancelarlo por API (M11, 21-oct:
- * 400 «Invalid transition from {TAKEN} to {REJECTED}»), así que aquí nunca se cancela: la venta se cancela cuando llega el
- * aviso de cancelación de Rappi (`ORDER_EVENT_CANCEL`).
- */
-export const CANCELAR_ACEPTADO_RAPPI = {
-  /** Repartidor de Rappi: la cancelación la hace su soporte. También es el texto si no se sabe quién entrega. */
-  soporte:
-    'Rappi no deja cancelar por sistema un pedido ya aceptado. Pídele la cancelación al soporte de Rappi; aquí se cancela solo cuando Rappi la confirme.',
-  /** Repartidor del negocio o el cliente recoge: se cancela en la app de Rappi para aliados. */
-  appDeAliados: 'Cancélalo en la app de Rappi para aliados; aquí se cancela solo cuando Rappi lo confirme.',
-} as const
-
-/** Las variantes en las que Rappi no manda repartidor: el negocio cancela en la app de aliados. */
-const SIN_REPARTIDOR_DE_RAPPI: ReadonlySet<string> = new Set<MetodoDeEntrega>(['marketplace', 'pickup'])
+import { instruccionesParaCancelarRappi } from './rappi.cancellation'
+export { CANCELAR_ACEPTADO_RAPPI } from './rappi.cancellation'
 
 /** Los 11 eventos que Rappi documenta, tal cual los nombra. */
 export const RAPPI_EVENTS = {
@@ -231,12 +210,7 @@ export const rappiAdapter = {
    * `NEW_ORDER` guardado en la venta, leído igual que en la ingesta: sin mayúsculas ni espacios). Sin el dato, o con uno
    * que no se reconoce, el del soporte: nunca se manda a una app que quizá no aplica.
    */
-  instruccionesParaCancelar(raw: unknown): string {
-    const metodo = String((raw as RappiOrderPayload | null)?.order_detail?.delivery_method ?? '')
-      .trim()
-      .toLowerCase()
-    return SIN_REPARTIDOR_DE_RAPPI.has(metodo) ? CANCELAR_ACEPTADO_RAPPI.appDeAliados : CANCELAR_ACEPTADO_RAPPI.soporte
-  },
+  instruccionesParaCancelar: instruccionesParaCancelarRappi,
 
   /**
    * "Listo para el repartidor". 🔴 Se llama `markOrderReady` porque es el nombre que el núcleo busca: con el nombre viejo

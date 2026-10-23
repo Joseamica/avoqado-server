@@ -48,7 +48,12 @@ import {
   asegurarCambioDeClienteBajoCandado,
   esVentaYaCobrada,
 } from '../shared/ligaDeClienteEnVenta'
-import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import {
+  assertNoLiveTerminalCharge,
+  assertOrderCancellableUnderLock,
+  avisarOrdenCancelada,
+  rechazarCancelacionLocalDeRappi,
+} from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -2424,6 +2429,8 @@ export async function mergeOrdersInTransaction(
       specialRequests: true,
       contratoDePrecio: true,
       originSystem: true,
+      source: true,
+      posRawData: true,
       taxAmount: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
@@ -2437,7 +2444,15 @@ export async function mergeOrdersInTransaction(
       status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
       paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
     },
-    select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true, originSystem: true },
+    select: {
+      id: true,
+      specialRequests: true,
+      contratoDePrecio: true,
+      paidAmount: true,
+      originSystem: true,
+      source: true,
+      posRawData: true,
+    },
   })
   if (!freshSource || !freshTarget) {
     throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
@@ -2446,6 +2461,8 @@ export async function mergeOrdersInTransaction(
   // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
   rechazarSiEsImportada(freshSource)
   rechazarSiEsImportada(freshTarget)
+  rechazarCancelacionLocalDeRappi(freshSource)
+  rechazarCancelacionLocalDeRappi(freshTarget)
   await rechazarSiEsCuentaDeTarjetas(tx, sourceOrderId, 'uniones con otra cuenta')
   await rechazarSiEsCuentaDeTarjetas(tx, targetOrderId, 'uniones con otra cuenta')
   if (freshSource._count.items === 0) {
@@ -2738,6 +2755,8 @@ export interface CashPaymentResponse {
   tipAmount: number
   method: PaymentMethod
   status: 'COMPLETED'
+  /** Efectivo retenido por este cobro, en centavos enteros; Rappi2b sumará aquí su PAY_IN. Aditivo. */
+  cashRetainedCents?: number
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
   changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
@@ -3591,6 +3610,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // 🔴 `pesosToCents`, no un `* 100` pelón: reconstruir desde el Decimal guardado dejaba ruido de float (`19.99 → 1998.99…`).
       amount: pesosToCents(Number(pago.amount)),
       tipAmount: pesosToCents(Number(pago.tipAmount)),
+      cashRetainedCents: pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)),
       changeCents: cambioDeReintento(amount, pago.amount),
       // El método REAL del pago que ya existe: devolver 'CASH' fijo reportaría como efectivo el reintento de un cobro con tarjeta.
       method: pago.method as CashPaymentResponse['method'],
@@ -4074,6 +4094,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     orderNumber: order.orderNumber,
     amount: aplicadoCents,
     tipAmount: tip,
+    cashRetainedCents: aplicadoCents + tip,
     changeCents: cambioCents,
     method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',
@@ -4573,7 +4594,10 @@ export async function returnGiftBalanceAndCancelOrder(
       if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
       throw error
     }
-    const cuenta = await tx.order.findUnique({ where: { id: orderId, venueId }, select: { id: true, status: true, paymentStatus: true } })
+    const cuenta = await tx.order.findUnique({
+      where: { id: orderId, venueId },
+      select: { id: true, status: true, paymentStatus: true, source: true, posRawData: true },
+    })
     if (!cuenta) throw new NotFoundError('Order not found')
     /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
     const leerCobros = async () => ({
@@ -4621,6 +4645,7 @@ export async function returnGiftBalanceAndCancelOrder(
       }
       throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
     }
+    rechazarCancelacionLocalDeRappi(cuenta)
     if (cuenta.paymentStatus === 'PAID') {
       throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
     }

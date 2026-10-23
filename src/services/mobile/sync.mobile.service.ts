@@ -1461,6 +1461,7 @@ async function applyPayCash(
       ...(payment.amount !== undefined ? { amount: payment.amount } : {}),
       ...(payment.tipAmount !== undefined ? { tipAmount: payment.tipAmount } : {}),
       ...(payment.changeCents !== undefined ? { changeCents: payment.changeCents } : {}),
+      ...(payment.cashRetainedCents !== undefined ? { cashRetainedCents: payment.cashRetainedCents } : {}),
       ...(payment.method !== undefined ? { method: payment.method } : {}),
       // 🔴 El saldo autoritativo TAMBIÉN por aquí. El ack se arma a mano, así
       // que no heredaba los campos nuevos de `payCashOrder` y el contrato nuevo

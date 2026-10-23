@@ -3,6 +3,7 @@ import type { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { lockExistingOrderForPayment } from './paymentShiftClaim'
+import { instruccionesParaCancelarRappi } from '../delivery-channels/providers/rappi/rappi.cancellation'
 
 /**
  * Diseño §C.6 (11-sep): TODA ruta que cancela o anula una orden tiene que hacerlo bajo el MISMO candado de `Order` que
@@ -29,6 +30,8 @@ type GuardTx = Pick<Prisma.TransactionClient, '$queryRaw' | 'order' | 'payment' 
 
 export interface OrdenBajoCandado {
   id: string
+  source: string
+  posRawData: Prisma.JsonValue | null
   paymentStatus: string
   status: string
   version: number
@@ -53,7 +56,16 @@ export async function lockAndReadOrderForCancel(
   await lockExistingOrderForPayment(tx, input)
   const order = await tx.order.findUnique({
     where: { id: input.orderId, venueId: input.venueId },
-    select: { id: true, paymentStatus: true, status: true, version: true, paidAmount: true, tipAmount: true },
+    select: {
+      id: true,
+      source: true,
+      posRawData: true,
+      paymentStatus: true,
+      status: true,
+      version: true,
+      paidAmount: true,
+      tipAmount: true,
+    },
   })
   if (!order) throw new NotFoundError(notFoundMessage)
   return order as OrdenBajoCandado
@@ -104,6 +116,11 @@ export interface OrderCancelGuardOptions {
   notFoundMessage?: string
 }
 
+/** Se llama con la orden releída bajo su candado; sólo el aviso del proveedor puede cancelar un Rappi. */
+export function rechazarCancelacionLocalDeRappi(order: { source: string; posRawData: unknown }): void {
+  if (order.source === 'RAPPI') throw new BadRequestError(instruccionesParaCancelarRappi(order.posRawData), 'RAPPI_CANCEL_IN_PROVIDER')
+}
+
 /**
  * Candado de la orden → relectura → 400 si ya tiene dinero (PAID/PARTIAL) → 409 si hay un cobro de terminal vivo.
  * El orden importa: con dinero adentro la respuesta es «reembolsa primero», y no se consulta la terminal.
@@ -115,6 +132,7 @@ export async function assertOrderCancellableUnderLock(
   opciones: OrderCancelGuardOptions = {},
 ): Promise<OrdenBajoCandado> {
   const order = await lockAndReadOrderForCancel(tx, input, opciones.notFoundMessage)
+  rechazarCancelacionLocalDeRappi(order)
 
   // 🔴 Ninguna orden CON DINERO ENCIMA se cancela — ni PAID ni PARTIAL. Con pagos hechos el camino es reembolsar y
   // después cancelar, igual que en Square.

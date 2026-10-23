@@ -534,6 +534,22 @@ describe('sync.mobile.service processIntents', () => {
     )
   })
 
+  it.each([7255, undefined])('PAY_CASH conserva presencia o ausencia de cashRetainedCents (%s)', async retained => {
+    ;(orderMobileService.payCashOrder as jest.Mock).mockResolvedValue({
+      paymentId: 'pay-r',
+      orderNumber: 'A-9',
+      digitalReceipt: null,
+      amount: 6000,
+      tipAmount: 1255,
+      ...(retained !== undefined ? { cashRetainedCents: retained } : {}),
+    })
+    const acks = await processIntents(baseParams([{ id: 'i-ret', type: 'PAY_CASH', payload: { orderId: 'order-4', amountCents: 6000 } }]))
+
+    expect(acks[0].status).toBe('ACKED')
+    if (retained !== undefined) expect(acks[0].result).toHaveProperty('cashRetainedCents', 7255)
+    else expect(acks[0].result).not.toHaveProperty('cashRetainedCents')
+  })
+
   // 🔴 R3-1 (Codex r2, P2): $0 + $0 NO es dinero capturado. Con la cuenta de Beto en $0 (descuento del 100 %), Ana cerraba su mesa
   // con un PAY_CASH de $0. El pase de R2-6 sólo vale con importe + propina > 0; el $0 en mesa ajena conserva el rechazo de antes.
   it('🔴 R3-1: PAY_CASH de $0 + $0 en mesa ajena ⇒ REJECTED TABLE_OWNED_BY_OTHER, sin tocar payCashOrder', async () => {
