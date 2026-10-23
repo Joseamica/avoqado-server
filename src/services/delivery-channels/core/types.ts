@@ -47,7 +47,7 @@ export interface NormalizedDeliveryItem {
 /**
  * Reparto explícito de quién cobra qué. Lo entrega el ADAPTADOR; el core NO deduce nada.
  * Invariantes (verificadas por `assertDeliveryMoneyInvariants` en `core/money.ts`):
- *   saleAmount + merchantFees === externallyPaidSale + cashDueSale
+ *   saleAmount + shippingAsLine + merchantFees − discountAmount === externallyPaidSale + cashDueSale
  *   tipAmount                 === externallyPaidTip  + cashDueTip
  *
  * 🔴 Dinero en STRING DECIMAL, nunca `number` (`.claude/rules/critical-warnings.md`).
@@ -56,6 +56,12 @@ export interface NormalizedDeliveryPayment {
   currency: 'MXN'
   /** artículos, IVA incluido (México) */
   saleAmount: string
+  /**
+   * Rappi 2b: envío del NEGOCIO (repartidor propio) que se registra como RENGLÓN «Envío» de la orden, no como cargo: así lo
+   * cuentan el total canónico, el saldo y el CFDI. Es venta. Los renglones de `items` siguen cuadrando contra `saleAmount`
+   * (sin el envío). Opcional: los canales que no lo usan se leen como 0.
+   */
+  shippingAsLine?: string
   /** cargos cobrados al cliente que se pagan AL COMERCIO (bolsa, envío propio…) */
   merchantFees: string
   /**
@@ -78,6 +84,12 @@ export interface NormalizedDeliveryPayment {
   /** parte que el comercio cobra en efectivo en persona */
   cashDueSale: string
   cashDueTip: string
+  /**
+   * Rappi 2b (F7): dinero que el negocio cobra en efectivo POR CUENTA de la plataforma (tarifa de servicio de Rappi en
+   * marketplace/cash). No es venta ni propina: entra al cajón como PAY_IN «cobrado por cuenta de Rappi». Sólo existe si hay
+   * algo por cobrar en efectivo. Opcional (0).
+   */
+  thirdPartyCashDue?: string
 }
 
 export interface NormalizedDeliveryOrder {

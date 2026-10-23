@@ -41,6 +41,10 @@ const NUESTRO_MENU = 'new-order-full-delivery-nuestro-menu.json'
 const MARKETPLACE = 'new-order-marketplace-propina.json'
 /** M10: para recoger (Jugo 40, envío 35, servicio 10, propina 10, `total_order` 40). */
 const PICKUP = 'new-order-pickup-propina.json'
+/** 22-oct (2b): repartidor propio en EFECTIVO, pedido 881655210 (Burger 140 + envío 35 + servicio 10 + propina 20 = 205). */
+const MARKETPLACE_EFECTIVO = 'new-order-marketplace-efectivo.json'
+/** 22-oct (2b): para recoger en EFECTIVO, pedido 2017708051 (`total_order` 140 contra `total_to_pay` 205: reparto sin confirmar). */
+const PICKUP_EFECTIVO = 'new-order-pickup-efectivo.json'
 /**
  * M12: repartidor de Rappi, descuento COMPARTIDO de 40 sobre la orden completa (28 del negocio + 12 de Rappi) y dos
  * modificadores (Hamburguesa 129 + Chipotle Mayo 15 + Grande 30 = 174; `total_order` 146).
@@ -365,10 +369,12 @@ describe('normalizeRappiOrder', () => {
     // «sandbox» M10: Agua 20 + envío 35 + propina 20 = total_order 75.
     const o = normalizeRappiOrder(sandbox(MARKETPLACE), { calibradas: new Set(['delivery', 'marketplace']) })
 
+    // 2b (F5): el envío del negocio es un RENGLÓN (`shippingAsLine`), no un cargo; lo que liquida Rappi no cambia.
     expect(o.payment).toEqual({
       currency: 'MXN',
       saleAmount: '20.00',
-      merchantFees: '35.00',
+      shippingAsLine: '35.00',
+      merchantFees: '0.00',
       discountAmount: '0.00',
       tipAmount: '20.00',
       externallyPaidSale: '55.00',
@@ -400,12 +406,10 @@ describe('normalizeRappiOrder', () => {
   })
 
   it.each([
-    ['marketplace', 'cash'],
     ['marketplace', 'pos_terminal'],
     ['pickup', 'cash'],
     ['pickup', 'pos_terminal'],
-    ['marketplace', 'CASH'],
-  ])('🔴 efectivo o terminal con repartidor propio o para recoger ⇒ VARIANTE_BLOQUE_2B (%s, %s)', (metodo, pago) => {
+  ])('🔴 terminal del repartidor, o para recoger en efectivo ⇒ VARIANTE_BLOQUE_2B (%s, %s)', (metodo, pago) => {
     // La caja tendría que cobrarlo, y eso es el bloque 2b: en la fase 2 queda FAILED visible, nunca registrado como pagado.
     const p = sandbox(metodo === 'marketplace' ? MARKETPLACE : PICKUP)
     p.order_detail.payment_method = pago
@@ -422,6 +426,47 @@ describe('normalizeRappiOrder', () => {
     p.order_detail.totals.total_to_pay = 75
 
     expect(variantePendiente(() => normalizeRappiOrder(p)).codigo).toBe('VARIANTE_BLOQUE_2B')
+  })
+
+  // ── 2b: repartidor propio en EFECTIVO (pedido real DEV 881655210) ───────────────────
+  it('2b · marketplace en efectivo: venta + envío por cobrar, propina por cobrar y la tarifa de Rappi aparte', () => {
+    const o = normalizeRappiOrder(sandbox(MARKETPLACE_EFECTIVO))
+
+    expect(o.payment).toEqual({
+      currency: 'MXN',
+      saleAmount: '140.00',
+      shippingAsLine: '35.00',
+      merchantFees: '0.00',
+      discountAmount: '0.00',
+      tipAmount: '20.00',
+      externallyPaidSale: '0.00',
+      externallyPaidTip: '0.00',
+      cashDueSale: '175.00',
+      cashDueTip: '20.00',
+      thirdPartyCashDue: '10.00',
+    })
+  })
+
+  it('2b · marketplace con «CASH» en mayúsculas se lee igual', () => {
+    const p = sandbox(MARKETPLACE_EFECTIVO)
+    p.order_detail.payment_method = 'CASH'
+    expect(normalizeRappiOrder(p).payment.thirdPartyCashDue).toBe('10.00')
+  })
+
+  it('🔴 2b · para recoger en efectivo sigue bloqueado hasta que Rappi aclare 140 contra 205', () => {
+    expect(variantePendiente(() => normalizeRappiOrder(sandbox(PICKUP_EFECTIVO))).codigo).toBe('VARIANTE_BLOQUE_2B')
+  })
+
+  it('🔴 2b · si lo que se cobra no cuadra con `total_to_pay`, no se registra y dice los dos números', () => {
+    const p = sandbox(MARKETPLACE_EFECTIVO)
+    p.order_detail.totals.total_to_pay = 200
+    expect(() => normalizeRappiOrder(p)).toThrow(/205\.00.*200\.00|200\.00.*205\.00/)
+  })
+
+  it('🔴 2b · efectivo con créditos o RappiPay ⇒ VARIANTE_SIN_CALIBRAR (no medido)', () => {
+    const p = sandbox(MARKETPLACE_EFECTIVO)
+    p.order_detail.totals.other_totals.total_rappi_credits = 5
+    expect(variantePendiente(() => normalizeRappiOrder(p)).codigo).toBe('VARIANTE_SIN_CALIBRAR')
   })
 
   it('un método de pago nuevo (p. ej. "nequi") con marketplace cuenta como pagado en línea', () => {

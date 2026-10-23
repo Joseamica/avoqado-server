@@ -276,7 +276,18 @@ function verificarVariante(
   const pago = String(detail.payment_method ?? '')
     .trim()
     .toLowerCase()
-  if (metodo !== 'delivery' && (COBRA_EL_NEGOCIO.has(pago) || deRappiAPesos(detail.totals?.total_to_pay).gt(0))) {
+  // 2b (23-oct): repartidor propio en EFECTIVO ya se registra (pedido real 881655210 + guía del sandbox: con efectivo la tarifa
+  // de servicio va dentro de lo que cobra el negocio). Sin créditos ni RappiPay: esas mezclas no se han medido.
+  if (esEfectivoConRepartidorPropio(metodo, pago)) {
+    const otros = detail.totals?.other_totals
+    if (deRappiAPesos(otros?.total_rappi_pay).gt(0) || deRappiAPesos(otros?.total_rappi_credits).gt(0)) {
+      throw new VariantePendienteError(
+        'VARIANTE_SIN_CALIBRAR',
+        `[Rappi] variante pendiente: el pedido ${orderId} es repartidor propio en efectivo con RappiPay o créditos; esa mezcla no ` +
+          'se ha medido con un pedido real y no se registra con dinero adivinado.',
+      )
+    }
+  } else if (metodo !== 'delivery' && (COBRA_EL_NEGOCIO.has(pago) || deRappiAPesos(detail.totals?.total_to_pay).gt(0))) {
     throw new VariantePendienteError(
       'VARIANTE_BLOQUE_2B',
       `[Rappi] variante pendiente: bloque 2b. El pedido ${orderId} es «${metodo}» y lo cobra el negocio ` +
@@ -291,6 +302,11 @@ function verificarVariante(
         'No se registra con dinero adivinado.',
     )
   }
+}
+
+/** 2b: repartidor del negocio y el cliente le paga en efectivo. La única variante «la cobra el negocio» ya habilitada. */
+function esEfectivoConRepartidorPropio(metodo: MetodoDeEntrega, pago: string): boolean {
+  return metodo === 'marketplace' && pago === 'cash'
 }
 
 /**
@@ -349,23 +365,47 @@ function mapearPago(
   metodo: MetodoDeEntrega,
   venta: Prisma.Decimal,
   descuentoCrudo: Prisma.Decimal,
+  orderId: string,
 ): NormalizedDeliveryPayment {
   const esDelNegocio = metodo === 'marketplace'
   // Cada parte se lleva a centavos ANTES de sumar: así el reparto cuadra al centavo con lo que se guarda.
-  const cargos = esDelNegocio ? centavos(deRappiAPesos(detail.totals?.charges?.shipping)) : cero()
+  // 2b (F5): el envío del negocio es un RENGLÓN de la venta (`shippingAsLine`), no un cargo: así lo cuentan el saldo y el CFDI.
+  const envio = esDelNegocio ? centavos(deRappiAPesos(detail.totals?.charges?.shipping)) : cero()
   const propina = esDelNegocio ? centavos(deRappiAPesos(detail.totals?.other_totals?.tip)) : cero()
   const descuento = centavos(descuentoCrudo)
+  const ventaNeta = venta.plus(envio).minus(descuento)
+  const enEfectivo = esEfectivoConRepartidorPropio(
+    metodo,
+    String(detail.payment_method ?? '')
+      .trim()
+      .toLowerCase(),
+  )
+  // F7: la tarifa de servicio que el repartidor propio cobra en efectivo es de Rappi: entra al cajón como PAY_IN, no es venta.
+  const tarifa = enEfectivo ? centavos(deRappiAPesos(detail.totals?.charges?.service_fee)) : cero()
+
+  if (enEfectivo) {
+    const porCobrar = ventaNeta.plus(propina).plus(tarifa)
+    const declarado = centavos(deRappiAPesos(detail.totals?.total_to_pay))
+    if (!centavos(porCobrar).equals(declarado)) {
+      throw new Error(
+        `[Rappi] el efectivo no cuadra en el pedido ${orderId}: venta + envío − descuento + propina + tarifa = ` +
+          `${centavos(porCobrar).toFixed(2)}, pero \`total_to_pay\` = ${declarado.toFixed(2)}. No se registra con dinero adivinado.`,
+      )
+    }
+  }
 
   return {
     currency: 'MXN',
     saleAmount: venta.toFixed(2),
-    merchantFees: cargos.toFixed(2),
+    ...(esDelNegocio ? { shippingAsLine: envio.toFixed(2) } : {}),
+    merchantFees: cero().toFixed(2),
     discountAmount: descuento.toFixed(2),
     tipAmount: propina.toFixed(2),
-    externallyPaidSale: venta.plus(cargos).minus(descuento).toFixed(2),
-    externallyPaidTip: propina.toFixed(2),
-    cashDueSale: cero().toFixed(2),
-    cashDueTip: cero().toFixed(2),
+    externallyPaidSale: (enEfectivo ? cero() : ventaNeta).toFixed(2),
+    externallyPaidTip: (enEfectivo ? cero() : propina).toFixed(2),
+    cashDueSale: (enEfectivo ? ventaNeta : cero()).toFixed(2),
+    cashDueTip: (enEfectivo ? propina : cero()).toFixed(2),
+    ...(enEfectivo ? { thirdPartyCashDue: tarifa.toFixed(2) } : {}),
   }
 }
 
@@ -488,7 +528,7 @@ export function normalizeRappiOrder(raw: unknown, opts: OpcionesDeTraduccion = {
   const venta = sumar(items.map(it => new Prisma.Decimal(it.total)))
   verificarCuadre(venta, detail, orderId)
 
-  const payment = mapearPago(detail, metodo, venta, descuentoDelNegocio(detail, orderId))
+  const payment = mapearPago(detail, metodo, venta, descuentoDelNegocio(detail, orderId), orderId)
   // 🔴 Las mismas invariantes que revisa la ingesta, aquí ANTES de aceptar: un reparto que la ingesta rechazaría (un
   // descuento del negocio mayor que la venta, un monto negativo) no se acepta en Rappi para luego no poder registrarlo.
   assertDeliveryMoneyInvariants(payment, items)

@@ -130,6 +130,22 @@ async function resolveProductId(
   return created.id
 }
 
+/** Rappi 2b: el renglón del envío del negocio. Mismo SKU fijo por venue: un solo producto «Envío», reutilizado. */
+const NOMBRE_RENGLON_ENVIO = 'Envío'
+const SKU_RENGLON_ENVIO = 'delivery-envio'
+/** Clave SAT «Servicios de envío» y unidad «Unidad de servicio»: el envío se factura como servicio. */
+const SAT_ENVIO = { satProductKey: '78102203', satUnitKey: 'E48' }
+
+/**
+ * El producto «Envío» del venue: el mismo camino que un SKU desconocido (placeholder inactivo, gobierno de catálogo
+ * idempotente bajo carrera) y, si nadie le ha puesto clave SAT, la de servicio de envío.
+ */
+async function resolverProductoDeEnvio(tx: Prisma.TransactionClient, venueId: string, precio: string): Promise<string> {
+  const id = await resolveProductId(tx, venueId, SKU_RENGLON_ENVIO, NOMBRE_RENGLON_ENVIO, precio, null)
+  await tx.product.updateMany({ where: { id, satProductKey: null }, data: SAT_ENVIO })
+  return id
+}
+
 /**
  * Convierte una NormalizedDeliveryOrder (contrato unificado, Tarea 2) en una Order real de
  * Avoqado con su Payment externo ya liquidado (Avoqado no procesó el dinero — fee 0
@@ -164,7 +180,9 @@ export async function ingestDeliveryOrder(
   if (!venue) throw new Error(`Venue ${link.venueId} del channel link no existe`)
 
   const p = normalized.payment
-  const subtotal = D(p.saleAmount)
+  // Rappi 2b (F5): el envío del negocio es un RENGLÓN «Envío», no un cargo; la venta lo incluye.
+  const envioComoRenglon = D(p.shippingAsLine ?? '0.00')
+  const subtotal = D(p.saleAmount).plus(envioComoRenglon)
   const merchantFees = D(p.merchantFees)
   const tip = D(p.tipAmount)
   // Semántica canónica de la plataforma (decisión founder 2026-08-18, spec §6 "propina
@@ -178,7 +196,10 @@ export async function ingestDeliveryOrder(
   const descuento = D(p.discountAmount ?? '0.00')
   const total = subtotal.plus(merchantFees).minus(descuento)
   const pagadoExterno = D(p.externallyPaidSale).plus(D(p.externallyPaidTip))
-  const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip))
+  // F7: lo que el negocio cobra por cuenta de la plataforma también está «por cobrar» (sin eso la orden nacería PAID), pero no es
+  // venta ni propina: vive en `thirdPartyCashDue` y entra al cajón como PAY_IN al cobrarlo.
+  const tercerosPorCobrar = D(p.thirdPartyCashDue ?? '0.00')
+  const porCobrar = D(p.cashDueSale).plus(D(p.cashDueTip)).plus(tercerosPorCobrar)
   const paymentStatus = porCobrar.isZero() ? PaymentStatus.PAID : pagadoExterno.isZero() ? PaymentStatus.PENDING : PaymentStatus.PARTIAL
 
   // 🔴 El folio del pedido se namespacea por proveedor. `Order.externalId` es único por
@@ -276,6 +297,9 @@ export async function ingestDeliveryOrder(
           // cobrar en persona (efectivo contra entrega).
           paidAmount: pagadoExterno,
           remainingBalance: porCobrar,
+          // Rappi 2b: lo escribe SÓLO la ingesta (el upsert de una reingesta no lo toca). `cashTipDue` existe sólo en ese carril:
+          // cada cobro reescribe `tipAmount` con lo cobrado y la propina por cobrar se perdería tras un abono chico.
+          ...(tercerosPorCobrar.greaterThan(0) ? { thirdPartyCashDue: tercerosPorCobrar, cashTipDue: D(p.cashDueTip) } : {}),
           posRawData: normalized.raw as Prisma.InputJsonValue,
           createdAt: normalized.placedAt,
           syncedAt: new Date(),
@@ -355,6 +379,26 @@ export async function ingestDeliveryOrder(
               data: { orderItemId: createdItem.id, modifierId: null, name: m.name, quantity: m.quantity, price: D(m.price) },
             })
           }
+        }
+
+        // Rappi 2b: el envío del negocio como renglón propio. Va DESPUÉS de los platillos y fuera de `createdItems`/
+        // `renglonesCreados`: no descuenta inventario ni sale en la comanda, y su `externalId` (`…-envio`) no lo aparea por índice.
+        if (envioComoRenglon.greaterThan(0)) {
+          const envioProductId = await resolverProductoDeEnvio(tx, venue.id, envioComoRenglon.toFixed(2))
+          await tx.orderItem.create({
+            data: {
+              orderId: order.id,
+              productId: envioProductId,
+              productName: NOMBRE_RENGLON_ENVIO,
+              productSku: SKU_RENGLON_ENVIO,
+              quantity: 1,
+              unitPrice: envioComoRenglon,
+              total: envioComoRenglon,
+              taxAmount: new Prisma.Decimal(0),
+              originSystem: OriginSystem.DELIVERY_PLATFORM,
+              externalId: `${externalIdNamespaceado}-envio`,
+            },
+          })
         }
 
         // 🔴 El bug que este cambio mata: antes `Payment.amount` era `normalized.total`

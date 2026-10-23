@@ -117,6 +117,11 @@ export async function reconcileDeliveryOrderFromProvider(
     try {
       foto = ctx.adapter.normalizeOrder(await leerConLimite(signal => ctx.adapter.fetchOrder!(ctx.externalOrderId, signal), plazo))
       assertDeliveryMoneyInvariants(foto.payment, foto.items)
+      // Rappi 2b: el reprecio (sección 5) no sabe escribir el envío como renglón ni el dinero de terceros. Hoy Rappi no tiene
+      // `fetchOrder`, así que no llega aquí; si algún día llega, no se reescribe dinero con una fórmula que lo ignora.
+      if (new Prisma.Decimal(foto.payment.shippingAsLine ?? '0').gt(0) || new Prisma.Decimal(foto.payment.thirdPartyCashDue ?? '0').gt(0)) {
+        throw new Error('la foto trae envío como renglón o dinero de terceros: el reprecio todavía no los escribe')
+      }
       if (foto.externalId !== ctx.externalOrderId) throw new Error(`la foto es del pedido ${foto.externalId}`)
       if (foto.items.some(i => !i.lineId)) throw new Error('la foto trae renglones sin id de línea: no prueba ausencias')
       cerradoEnProveedor = foto.providerClosed === true
