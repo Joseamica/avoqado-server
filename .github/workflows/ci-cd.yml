@@ -93,16 +93,16 @@ jobs:
         run: npm ci
 
       # CI más rápido (14-oct-2026, medido en docs/proyectos/pruebas-mas-rapidas-del-server--medicion-ci-14-oct.md):
-      # lint 2 → 0 min y typecheck 4 → 0.5 min cuando casi nada cambió. Va DESPUÉS de `npm ci`, que borra node_modules.
+      # lint 2 → 0 min cuando casi nada cambió. Va DESPUÉS de `npm ci`, que borra node_modules.
       # Es seguro: el lint revisa cada archivo por separado (ninguna regla mira otros archivos) y su caché se invalida si
-      # cambia el contenido del archivo o la configuración; tsc incremental vuelve a revisar todo lo que depende de un
-      # archivo cambiado. Si cambian dependencias o configuración (también la de Prettier, que ESLint aplica), la llave
-      # cambia y se arranca en frío.
-      - name: 💾 Caché de lint y typecheck
+      # cambia el contenido del archivo o la configuración. Si cambian dependencias o configuración (también la de
+      # Prettier, que ESLint aplica), la llave cambia y se arranca en frío.
+      # El typecheck ya NO usa caché (23-oct; ahorraba hasta 4 → 0.5 min): restaurar el .tsbuildinfo de dabad07 dio un
+      # TS2540 que no existe (catalogImportConfirmation.service.test.ts:389) y tuvo rojo a develop; en frío, 0 errores.
+      - name: 💾 Caché de lint
         uses: actions/cache@v4
         with:
           path: |
-            node_modules/.cache/tsc
             node_modules/.cache/eslint
           key: lint-tsc-${{ runner.os }}-${{ hashFiles('package-lock.json', 'eslint.config.mjs', '.prettierrc', '.prettierignore', 'tsconfig*.json') }}-${{ github.sha }}
           restore-keys: lint-tsc-${{ runner.os }}-${{ hashFiles('package-lock.json', 'eslint.config.mjs', '.prettierrc', '.prettierignore', 'tsconfig*.json') }}-
