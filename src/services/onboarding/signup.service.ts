@@ -482,14 +482,10 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
       // `emailVerified` no se toca: ya verificada sigue verificada.
       ...(codigo ? { emailVerificationCode: codigo.codigo, emailVerificationExpires: codigo.expira } : {}),
     }
-    if (codigo) {
-      // Con código, el correo va en el `where` (como en `reenviarCodigoDeLanding`): si la cuenta cambió de correo a
-      // media escritura, 0 filas y no sale ningún correo al buzón anterior (Codex r4).
-      const { count } = await prisma.staff.updateMany({ where: { id: existing.id, email: existing.email }, data })
-      if (count === 0) throw new BadRequestError('No pudimos registrar tus datos. Intenta de nuevo.', 'CUENTA_CAMBIO')
-    } else {
-      await prisma.staff.update({ where: { id: existing.id }, data })
-    }
+    // El correo va SIEMPRE en el `where` (como en `reenviarCodigoDeLanding`): si la cuenta cambió de correo a media
+    // escritura, 0 filas y no sale ningún enlace ni código al buzón anterior (Codex r4/r5).
+    const { count } = await prisma.staff.updateMany({ where: { id: existing.id, email: existing.email }, data })
+    if (count === 0) throw new BadRequestError('No pudimos registrar tus datos. Intenta de nuevo.', 'CUENTA_CAMBIO')
     const orgPrevia = await getPrimaryOrganizationId(existing.id)
     // Alta previa sin terminar: vuelve por un anuncio, así que su campaña se ACTUALIZA (último
     // toque). La rama «ya es cliente» de arriba, en cambio, ignora el código a propósito.
@@ -734,7 +730,11 @@ export async function canjearBoletoDeAlta(boleto: string): Promise<{ accessToken
     entity: 'Staff',
     entityId: staffId,
   })
-  return tokensDeDuenoSinSucursal(staffId)
+  const tokens = await tokensDeDuenoSinSucursal(staffId)
+  // Los awaits de arriba dejan una ventana: un restablecimiento o «cerrar todas mis sesiones» que caiga ahí no debe
+  // ser sobrevivido por tokens firmados después (Codex r5). Se revisa DE NUEVO con los tokens ya firmados.
+  if ((await motivoDeConcesionInvalidada(staffId, emitido)) !== null) throw usado()
+  return tokens
 }
 
 /**

@@ -292,7 +292,8 @@ describe('signupFromLanding con el interruptor PRENDIDO', () => {
 
     const r = await signupFromLanding(entrada)
 
-    const { data } = staffUpdate.mock.calls[0][0]
+    const { where, data } = staffUpdateMany.mock.calls[0][0]
+    expect(where).toEqual({ id: 'staff-g', email: 'ana@example.com' })
     expect(Object.keys(data).sort()).toEqual(['resetToken', 'resetTokenExpiry', 'resetTokenUsedAt'])
     expect(r.codigoVerificacion).toBeNull()
     expect(r.magicLinkToken).toEqual(expect.any(String))
@@ -343,10 +344,20 @@ describe('signupFromLanding con el interruptor APAGADO: idéntico a hoy', () => 
 
     const r = await signupFromLanding(entrada)
 
-    const { data } = staffUpdate.mock.calls[0][0]
+    const { where, data } = staffUpdateMany.mock.calls[0][0]
+    expect(where).toEqual({ id: 'staff-p', email: 'ana@example.com' })
     expect(Object.keys(data).sort()).toEqual(['resetToken', 'resetTokenExpiry', 'resetTokenUsedAt'])
+    expect(staffUpdate).not.toHaveBeenCalled()
     expect(staffFindFirst).not.toHaveBeenCalled()
     expect(r.codigoVerificacion).toBeNull()
+  })
+
+  it('cuenta existente que cambió de correo a media escritura (0 filas): CUENTA_CAMBIO y ningún enlace', async () => {
+    staffFindUnique.mockResolvedValue({ id: 'staff-p', email: 'ana@example.com', password: null, emailVerified: true })
+    staffUpdateMany.mockResolvedValue({ count: 0 })
+
+    await expect(signupFromLanding(entrada)).rejects.toMatchObject({ code: 'CUENTA_CAMBIO' })
+    expect(staffUpdate).not.toHaveBeenCalled()
   })
 
   it('cliente con contraseña: igual que hoy', async () => {

@@ -96,6 +96,12 @@ describe('canjearBoletoDeAlta', () => {
     expect(jwtService.generateAccessToken).not.toHaveBeenCalled()
   })
 
+  it('un restablecimiento que cae DESPUÉS de la escritura y ANTES de firmar: BOLETO_USADO y no se devuelven tokens', async () => {
+    mockMotivoDeConcesion.mockResolvedValueOnce(null).mockResolvedValueOnce('PASSWORD_CHANGED')
+    expect(await codigoDelError(canjearBoletoDeAlta(firmarBoletoDeAlta('staff-1', 'ana@example.com')))).toBe('BOLETO_USADO')
+    expect(mockMotivoDeConcesion).toHaveBeenCalledTimes(2)
+  })
+
   it('cuenta desactivada / ya no es prospecto: BOLETO_USADO sin escribir', async () => {
     mockFindFirst.mockResolvedValue(null)
     expect(await codigoDelError(canjearBoletoDeAlta(firmarBoletoDeAlta('staff-1', 'ana@example.com')))).toBe('BOLETO_USADO')

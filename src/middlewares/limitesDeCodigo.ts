@@ -69,6 +69,13 @@ export const limiteDiarioDeIntentosDeCodigoEnAlta = rateLimit({
 })
 
 /**
+ * El MISMO tope diario (misma instancia, mismo contador) en `/onboarding/verify-email`, que acepta el mismo código
+ * guardado: sin esto, la puerta vieja era un camino sin tope diario. Sólo con el interruptor prendido; apagado, pasa.
+ */
+export const limiteDiarioSiAltaConCodigo: RequestHandler = (req, res, next) =>
+  altaLandingConCodigo() ? limiteDiarioDeIntentosDeCodigoEnAlta(req, res, next) : next()
+
+/**
  * Mandar códigos al correo de alguien: 3 por correo por hora (en desarrollo, 20).
  *
  * UNA sola instancia (y por tanto UN solo contador por correo) para `/onboarding/resend-verification`

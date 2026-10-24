@@ -9,7 +9,7 @@ import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { ipDelCliente, llavePorCorreoOIp } from '../utils/clientIp'
 import { validateRequest } from '../middlewares/validation'
-import { limiteEnviosDeCodigo, limiteIntentosDeCodigo } from '../middlewares/limitesDeCodigo'
+import { limiteDiarioSiAltaConCodigo, limiteEnviosDeCodigo, limiteIntentosDeCodigo } from '../middlewares/limitesDeCodigo'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { requireOnboardingOrgOwner, requireOnboardingVenueOwner } from '../middlewares/requireOnboardingOrgOwner.middleware'
 import * as onboardingController from '../controllers/onboarding.controller'
@@ -138,7 +138,7 @@ router.post('/signup', signupRateLimiter, validateRequest(SignupSchema), onboard
  *       400:
  *         description: Invalid or expired verification code
  */
-router.post('/verify-email', limiteIntentosDeCodigo, onboardingController.verifyEmail)
+router.post('/verify-email', limiteIntentosDeCodigo, limiteDiarioSiAltaConCodigo, onboardingController.verifyEmail)
 
 /**
  * @openapi

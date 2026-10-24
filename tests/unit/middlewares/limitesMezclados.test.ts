@@ -69,9 +69,33 @@ describe('límites mezclados entre onboarding y alta con código', () => {
     expect((await request(app).post('/public/alta/verificar').send({ email: 'otro@example.com' })).status).toBe(400)
   })
 
+  it('tope diario compartido: con el interruptor prendido, 15 intentos repartidos entre las dos rutas agotan el día; apagado, verify-email no lo siente', async () => {
+    const { limiteDiarioDeIntentosDeCodigoEnAlta, limiteDiarioSiAltaConCodigo } = cargarComoEnProduccion()
+    const app = express()
+    app.use(express.json())
+    app.post('/onboarding/verify-email', limiteDiarioSiAltaConCodigo, (_q, s) => s.status(400).json({ ok: false }))
+    app.post('/public/alta/verificar', limiteDiarioDeIntentosDeCodigoEnAlta, (_q, s) => s.status(400).json({ ok: false }))
+    const original = process.env.ALTA_LANDING_CON_CODIGO
+    try {
+      process.env.ALTA_LANDING_CON_CODIGO = 'true'
+      const cuerpo = { email: 'Compartido@Example.com' }
+      for (let i = 0; i < 8; i++) expect((await request(app).post('/onboarding/verify-email').send(cuerpo)).status).toBe(400)
+      for (let i = 0; i < 7; i++) expect((await request(app).post('/public/alta/verificar').send(cuerpo)).status).toBe(400)
+      expect((await request(app).post('/public/alta/verificar').send(cuerpo)).status).toBe(429)
+      expect((await request(app).post('/onboarding/verify-email').send(cuerpo)).status).toBe(429)
+
+      process.env.ALTA_LANDING_CON_CODIGO = 'false'
+      const otro = { email: 'apagado-diario@example.com' }
+      for (let i = 0; i < 20; i++) expect((await request(app).post('/onboarding/verify-email').send(otro)).status).toBe(400)
+    } finally {
+      if (original === undefined) delete process.env.ALTA_LANDING_CON_CODIGO
+      else process.env.ALTA_LANDING_CON_CODIGO = original
+    }
+  })
+
   it('las rutas REALES usan esas mismas instancias, con la compuerta primero', () => {
     const fuente = (f: string) => fs.readFileSync(path.join(__dirname, '../../../src', f), 'utf8')
-    expect(fuente('routes/onboarding.routes.ts')).toMatch(/router\.post\('\/verify-email', limiteIntentosDeCodigo,/)
+    expect(fuente('routes/onboarding.routes.ts')).toMatch(/router\.post\('\/verify-email', limiteIntentosDeCodigo, limiteDiarioSiAltaConCodigo,/)
     const publicas = fuente('routes/public.routes.ts')
     expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
     expect(publicas).toMatch(/router\.post\('\/alta\/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest\(altaReenviarSchema\), reenviarAlta\)/)
