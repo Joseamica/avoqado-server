@@ -10,12 +10,12 @@
  * Run (a disposable database only, never the shared av-db-25): export TEST_DATABASE_URL pointing to it, then
  *   TZ=UTC npx jest --selectProjects=integration --runTestsByPath tests/integration/exchanges/schema.integration.test.ts --runInBand --ci
  *
- * `Exchange` and `ExchangeCreditLink` carry scalar ids on purpose (no FK to Order, Payment or Venue), so the rows use made-up
- * order and payment ids. Each run uses its own venue with unique names, and only that venue's rows are cleaned.
+ * Las relaciones del crédito exigen pagos reales: la siembra crea órdenes y pagos del mismo negocio con ids cuid v1 de Prisma.
+ * Cada corrida usa su propio negocio con nombre único y sólo limpia sus filas.
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
-import { crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembrarTarjetasDeRegalo'
+import { crearCuentaDeMercancia, crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembrarTarjetasDeRegalo'
 
 const D = (pesos: number) => new Prisma.Decimal(pesos)
 const SUF = `cambio-esq-${process.pid}-${Date.now()}`
@@ -34,16 +34,39 @@ afterAll(async () => {
   await limpiarNegocioDePrueba(venueId)
 })
 
-function exchangeData(extra: Partial<Prisma.ExchangeUncheckedCreateInput> = {}): Prisma.ExchangeUncheckedCreateInput {
+async function payment(orderId: string, type: 'REGULAR' | 'REFUND' = 'REGULAR'): Promise<string> {
+  const amount = D(type === 'REFUND' ? -100 : 100)
+  const row = await prisma.payment.create({
+    data: {
+      venueId,
+      orderId,
+      amount,
+      netAmount: amount,
+      feePercentage: D(0),
+      feeAmount: D(0),
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      status: 'COMPLETED',
+      type,
+      processedById: staffId,
+    },
+  })
+  return row.id
+}
+
+async function exchangeData(extra: Partial<Prisma.ExchangeUncheckedCreateInput> = {}): Promise<Prisma.ExchangeUncheckedCreateInput> {
+  const original = await crearCuentaDeMercancia({ venueId, staffId, total: 500 })
+  const nueva = await crearCuentaDeMercancia({ venueId, staffId, total: 500 })
+  const originalPaymentId = await payment(original.orderId)
   n += 1
   return {
     venueId,
     idempotencyKey: `${SUF}-k${n}`,
     requestHash: 'a'.repeat(64),
     status: 'COMPLETED',
-    originalOrderId: `${SUF}-original-order${n}`,
-    originalPaymentId: `${SUF}-original-payment${n}`,
-    newOrderId: `${SUF}-new-order${n}`,
+    originalOrderId: original.orderId,
+    originalPaymentId,
+    newOrderId: nueva.orderId,
     returnedAmount: D(500),
     takenAmount: D(500),
     differenceAmount: D(0),
@@ -54,15 +77,17 @@ function exchangeData(extra: Partial<Prisma.ExchangeUncheckedCreateInput> = {}):
   }
 }
 
-function creditLink(exchangeId: string, extra: Partial<Prisma.ExchangeCreditLinkUncheckedCreateInput> = {}) {
-  n += 1
+async function creditLink(exchangeId: string, extra: Partial<Prisma.ExchangeCreditLinkUncheckedCreateInput> = {}) {
+  const exchange = await prisma.exchange.findFirstOrThrow({ where: { id: exchangeId, venueId } })
+  const creditPaymentId = extra.creditPaymentId ?? (await payment(exchange.newOrderId!))
+  const creditRefundPaymentId = extra.creditRefundPaymentId ?? (await payment(exchange.originalOrderId, 'REFUND'))
   return prisma.exchangeCreditLink.create({
     data: {
       venueId,
       exchangeId,
-      originPaymentId: `${SUF}-origin-payment${n}`,
-      creditRefundPaymentId: `${SUF}-credit-refund${n}`,
-      creditPaymentId: `${SUF}-credit-payment${n}`,
+      originPaymentId: exchange.originalPaymentId,
+      creditRefundPaymentId,
+      creditPaymentId,
       amount: D(100),
       ...extra,
     },
@@ -81,16 +106,16 @@ describe('exchange schema', () => {
   })
 
   it('rejects a second Exchange with the same venueId and idempotencyKey with P2002', async () => {
-    const first = exchangeData()
+    const first = await exchangeData()
     await prisma.exchange.create({ data: first })
-    await expect(prisma.exchange.create({ data: exchangeData({ idempotencyKey: first.idempotencyKey }) })).rejects.toMatchObject({
+    await expect(prisma.exchange.create({ data: await exchangeData({ idempotencyKey: first.idempotencyKey }) })).rejects.toMatchObject({
       code: 'P2002',
       meta: { target: ['venueId', 'idempotencyKey'] },
     })
   })
 
   it('rejects two ExchangeCreditLink rows for the same creditPaymentId with P2002', async () => {
-    const exchange = await prisma.exchange.create({ data: exchangeData() })
+    const exchange = await prisma.exchange.create({ data: await exchangeData() })
     const first = await creditLink(exchange.id)
     await expect(creditLink(exchange.id, { creditPaymentId: first.creditPaymentId })).rejects.toMatchObject({
       code: 'P2002',
@@ -99,7 +124,7 @@ describe('exchange schema', () => {
   })
 
   it('rejects two ExchangeCreditLink rows for the same creditRefundPaymentId with P2002', async () => {
-    const exchange = await prisma.exchange.create({ data: exchangeData() })
+    const exchange = await prisma.exchange.create({ data: await exchangeData() })
     const first = await creditLink(exchange.id)
     await expect(creditLink(exchange.id, { creditRefundPaymentId: first.creditRefundPaymentId })).rejects.toMatchObject({
       code: 'P2002',
