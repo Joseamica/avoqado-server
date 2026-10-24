@@ -5,7 +5,7 @@ import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { refundedItemsOfOrder } from '../dashboard/refund.dashboard.service'
 import { centavosDevueltosPorComponente } from '../shared/devueltoDeUnCobro'
 import { productGroupInclude, withVariantFields } from '../product-variants/variantPayload'
-import { ExchangeError } from './exchangeErrors'
+import { ExchangeError, itemNotReturnable } from './exchangeErrors'
 import type { SaleForExchange } from './exchange.service'
 import type { MoneyShape } from './exchangeRules'
 
@@ -73,9 +73,7 @@ export async function loadSaleForExchange(
     select: { amount: true, tipAmount: true, status: true, processorData: true },
   })
   if (lines.length > TOPES_POR_ORDEN.renglones || payments.length > 50 || refunds.length > TOPES_POR_ORDEN.movimientos) {
-    throw new ExchangeError('EXCHANGE_ITEM_NOT_RETURNABLE', 'Esta venta tiene demasiados movimientos para hacer un cambio.', 422, {
-      reason: 'NOT_ATTRIBUTABLE',
-    })
+    itemNotReturnable('NOT_ATTRIBUTABLE')
   }
   const links = await db.exchangeCreditLink.findMany({ take: 50, where: { venueId, creditPaymentId: { in: payments.map(p => p.id) } } })
   const roots = await db.payment.findMany({

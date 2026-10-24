@@ -113,11 +113,8 @@ import { writeLegacyActivityAuditTx } from '../activityAudit.service'
 import {
   CODIGO_PRECIO_CAMBIADO,
   cambiosDeOrdenExistente,
-  clasificarLinea,
   horaDeLaVenta,
-  precioMostradoValido,
-  preciosQueFueronVigentes,
-  ventanaDeLaLinea,
+  resolverPreciosDeLineas,
   type CambioDePrecio,
 } from './precioQueVioElCliente'
 
@@ -755,30 +752,18 @@ export async function buildOrderItemsData(
   const respetadas = new Set<number>()
   const cambiosDePrecio: CambioDePrecio[] = []
   if (precioMostrado) {
-    const lineas = productInputs.map((item, k) => {
-      const mostradoCents = precioMostradoValido(item.displayedUnitPrice)
-      const catalogAt = typeof item.catalogAt === 'string' ? new Date(item.catalogAt) : null
-      const actualCents = Math.round(Number(precioDeLinea[k]) * 100)
-      const veredicto = clasificarLinea({ actualCents, mostradoCents, catalogAt, horaDeLaVenta: precioMostrado.horaDeLaVenta })
-      return { k, item, mostradoCents, catalogAt, actualCents, veredicto }
-    })
-    const buscar = lineas.filter(l => l.veredicto === 'BUSCAR')
-    const vigentes = buscar.length
-      ? await preciosQueFueronVigentes(
-          venueId,
-          buscar.map(l => ({
-            productId: l.item.productId,
-            mostradoCents: l.mostradoCents!,
-            ...ventanaDeLaLinea(l.catalogAt!, precioMostrado.horaDeLaVenta),
-          })),
-          cliente,
-        )
-      : []
-    buscar.forEach((l, j) => {
-      if (!vigentes[j]) return
+    const decisiones = await resolverPreciosDeLineas(
+      venueId,
+      productInputs.map((item, k) => ({ ...item, actualCents: Math.round(Number(precioDeLinea[k]) * 100) })),
+      precioMostrado.horaDeLaVenta,
+      cliente,
+    )
+    const lineas = decisiones.map(l => ({ ...l, item: productInputs[l.k], actualCents: l.item.actualCents }))
+    for (const l of decisiones) {
+      if (!l.respetado) continue
       respetadas.add(l.k)
-      precioDeLinea[l.k] = new Prisma.Decimal(l.mostradoCents!).div(100)
-    })
+      precioDeLinea[l.k] = new Prisma.Decimal(l.unitPriceCents).div(100)
+    }
     let sinReconocer = false
     for (const l of lineas) {
       if (l.mostradoCents === null || l.mostradoCents === l.actualCents || respetadas.has(l.k)) continue

@@ -5,7 +5,7 @@ import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { keptMarkdownDiscountRow } from '../shared/discount.service'
 import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
-import { bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
+import { assertRefundableLines, assertPromotionLineFullQuantity, bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
 import type { RefundMoneySemantics } from '../dashboard/refund.dashboard.service'
 import { writeRefundInTx } from '../shared/writeRefundInTx'
 import { createCustomerReturnPostingInTx } from '../inventory/inventoryPosting.service'
@@ -23,7 +23,9 @@ import {
 } from './exchangeRules'
 import { EXCHANGE_REFUND_ROLE } from './exchangeMarks'
 import { resolveExchangeCreditTenderInTx } from './exchangeCreditTender'
-import { ExchangeError } from './exchangeErrors'
+import { ExchangeError, itemNotReturnable as notReturnable } from './exchangeErrors'
+import { NON_MERCHANDISE_PRODUCT_TYPES } from './exchangePredicates'
+import { resolverPreciosDeLineas } from '../mobile/precioQueVioElCliente'
 import type { ExchangeResponse, ExchangeReturnedLine, ExchangeTakenLine, ExchangeTxInput, SaleForExchange } from './exchange.service'
 
 export interface PreparedExchange {
@@ -86,11 +88,6 @@ export async function prepareExchangeInTx(
   }
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: originalOrderId }))) throw new NotFoundError('No se encontró la venta.')
   const sale = await loadSaleForExchange(tx, venueId, originalOrderId)
-  if (body.settlement.kind !== 'EVEN' || body.settlement.method !== null)
-    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'El cobro o devolución de diferencias aún no está disponible.', 422)
-  const notReturnable = (reason: string, orderItemId?: string): never => {
-    throw new ExchangeError('EXCHANGE_ITEM_NOT_RETURNABLE', 'Este artículo no se puede cambiar.', 422, { reason, orderItemId })
-  }
   if (!sale.payments.some(p => p.id === body.originalPaymentId)) notReturnable('NOT_PAID')
   if (!sale.charged.atribuible) notReturnable('NOT_ATTRIBUTABLE')
   const saleReason = saleBlockReason({ ...sale.order, paymentSources: sale.payments.map(p => p.money.source ?? '') })
@@ -102,7 +99,7 @@ export async function prepareExchangeInTx(
   const pieces: ReturnedPiece[] = []
   for (const r of body.returned) {
     const l = byId.get(r.orderItemId)
-    if (!l) notReturnable('NOT_IN_ORDER', r.orderItemId)
+    if (!l) notReturnable('NOT_MERCHANDISE', r.orderItemId)
     const line = l!
     const prior = sale.returnedByLine.get(line.id)
     const soFar = used.get(line.id) ?? { quantity: 0, cents: 0 }
@@ -115,8 +112,8 @@ export async function prepareExchangeInTx(
       remainingQtyOrder: left,
       serialized: line.serialized,
     })
-    if (reason) notReturnable(reason, line.id)
-    if (!Number.isSafeInteger(r.quantity) || r.quantity < 1 || r.quantity > left) notReturnable('ALREADY_RETURNED', line.id)
+    if (reason) notReturnable(reason, line.id, left)
+    if (!Number.isSafeInteger(r.quantity) || r.quantity < 1 || r.quantity > left) notReturnable('ALREADY_RETURNED', line.id, left)
     const values = pieceValuesCents(
       sale.charged.cobradoCents.get(line.id)!,
       line.quantity,
@@ -136,32 +133,95 @@ export async function prepareExchangeInTx(
         listCents: line.product && !line.product.deletedAt ? line.product.priceCents : null,
       })
   }
+  try {
+    assertRefundableLines(sale.charged.renglones, [...used.keys()])
+    for (const [id, selection] of used) assertPromotionLineFullQuantity(byId.get(id)!, selection.quantity)
+  } catch (error) {
+    if (!(error instanceof BadRequestError)) throw error
+    const id = body.returned.find(r => byId.get(r.orderItemId)?.orderPromotionId)?.orderItemId ?? null
+    notReturnable('PROMOTION_PARTIAL', id)
+  }
   const ids = [...new Set(body.taken.map(l => l.productId))]
   const products = await tx.product.findMany({ take: ids.length, where: { venueId, id: { in: ids } } })
   const productById = new Map(products.map(p => [p.id, p]))
   const taken = body.taken.map(l => {
     const p = productById.get(l.productId)
-    if (!p || !p.active || p.deletedAt || !Number.isSafeInteger(l.quantity) || l.quantity < 1)
-      throw new ExchangeError('EXCHANGE_TAKEN_NOT_SELLABLE', 'Este producto ya no está disponible para vender.', 422, {
-        productId: l.productId,
-      })
+    const reason = !p
+      ? 'NOT_FOUND'
+      : p.deletedAt
+        ? 'ARCHIVED'
+        : !p.active
+          ? 'INACTIVE'
+          : NON_MERCHANDISE_PRODUCT_TYPES.has(p.type)
+            ? 'NOT_MERCHANDISE'
+            : p.soldByWeight
+              ? 'SOLD_BY_WEIGHT'
+              : null
+    if (reason)
+      throw new ExchangeError(
+        'EXCHANGE_TAKEN_NOT_SELLABLE',
+        'Este producto no se puede vender ahora (archivado, apagado o no es mercancía).',
+        422,
+        {
+          productId: l.productId,
+          reason,
+        },
+      )
+    if (!Number.isSafeInteger(l.quantity) || l.quantity < 1) throw new BadRequestError('La cantidad debe ser un entero mayor que cero.')
+    const product = p!
     return {
-      productId: p.id,
-      productGroupId: p.productGroupId,
-      listCents: p.price.mul(100).toNumber(),
+      productId: product.id,
+      productGroupId: product.productGroupId,
+      listCents: product.price.mul(100).toNumber(),
       quantity: l.quantity,
       inheritsFromOrderItemId: l.inheritsFromOrderItemId ?? null,
     }
   })
-  const calc = calculateExchange(pieces, taken)
+  const pairing = calculateExchange(pieces, taken)
+  const unpairedLines = new Set(pairing.takenPieces.filter(p => p.inheritedFrom === null).map(p => p.lineIndex))
+  const prices = await resolverPreciosDeLineas(
+    venueId,
+    taken.map((l, i) => ({
+      productId: l.productId,
+      actualCents: l.listCents,
+      displayedUnitPrice: unpairedLines.has(i) ? body.taken[i].displayedUnitPriceCents : undefined,
+      catalogAt: body.taken[i].catalogAt,
+    })),
+    new Date(),
+    tx,
+  )
+  const calc = calculateExchange(
+    pieces,
+    taken.map((l, i) => ({ ...l, unitPriceCents: prices[i].unitPriceCents })),
+  )
+  const takenLines: ExchangeTakenLine[] = taken.map((l, i) => {
+    const prices = calc.takenPieces.filter(p => p.lineIndex === i)
+    return {
+      productId: l.productId,
+      productName: productById.get(l.productId)!.name,
+      quantity: l.quantity,
+      listCents: l.listCents,
+      priceCents: prices.reduce((sum, p) => sum + p.priceCents, 0),
+      pieces: prices.map(p => ({ priceCents: p.priceCents, inheritedFromOrderItemId: p.inheritedFrom?.orderItemId ?? null })),
+      newOrderItemIds: [],
+    }
+  })
   if (calc.differenceCents !== body.settlement.expectedDifferenceCents)
     throw new ExchangeError(
       'EXCHANGE_DIFFERENCE_CHANGED',
       'La diferencia cambió desde que abriste el cambio (cambió un precio). Revisa el nuevo total antes de continuar.',
       409,
-      { returnedCents: calc.returnedCents, takenCents: calc.takenCents, differenceCents: calc.differenceCents },
+      {
+        calculation: {
+          returnedCents: calc.returnedCents,
+          takenCents: calc.takenCents,
+          differenceCents: calc.differenceCents,
+          kind: calc.kind,
+          lines: { returned, taken: takenLines },
+        },
+      },
     )
-  if (calc.kind !== 'EVEN')
+  if (body.settlement.kind !== 'EVEN' || body.settlement.method !== null || calc.kind !== 'EVEN')
     throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'El cobro o devolución de diferencias aún no está disponible.', 422)
   const orderedPayments = [...sale.payments].sort(
     (a, b) =>
@@ -178,7 +238,10 @@ export async function prepareExchangeInTx(
     Math.min(calc.returnedCents, calc.takenCents),
     null,
   )
-  if (!allocation.ok) notReturnable(allocation.reason)
+  if (!allocation.ok) {
+    if (allocation.reason === 'NOTHING_LEFT_TO_REFUND') notReturnable(allocation.reason)
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'No se puede devolver la diferencia por ese medio.', 422)
+  }
   const slices: AllocationSlice[] = allocation.ok ? allocation.slices : []
   if (calc.returnedCents === 0) slices.push({ paymentId: body.originalPaymentId, cents: 0, role: 'CREDIT', mode: null })
   const paymentById = new Map(sale.payments.map(p => [p.id, p]))
@@ -196,18 +259,6 @@ export async function prepareExchangeInTx(
     )
       notReturnable('NOT_ATTRIBUTABLE')
   }
-  const takenLines: ExchangeTakenLine[] = taken.map((l, i) => {
-    const prices = calc.takenPieces.filter(p => p.lineIndex === i)
-    return {
-      productId: l.productId,
-      productName: productById.get(l.productId)!.name,
-      quantity: l.quantity,
-      listCents: l.listCents,
-      priceCents: prices.reduce((sum, p) => sum + p.priceCents, 0),
-      pieces: prices.map(p => ({ priceCents: p.priceCents, inheritedFromOrderItemId: p.inheritedFrom?.orderItemId ?? null })),
-      newOrderItemIds: [],
-    }
-  })
   const newOrder = await createExchangeSaleInTx(tx, input, sale, takenLines)
   const lines = { returned, taken: takenLines }
   const exchange = await tx.exchange.create({

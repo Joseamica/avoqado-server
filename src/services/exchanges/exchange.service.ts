@@ -179,7 +179,10 @@ export async function createExchange(input: {
     )
   await assertVenueSalesEnabled(venueId)
   await validateStaffVenue(actorStaffId, venueId)
-  const original = await prisma.payment.findFirst({ where: { id: body.originalPaymentId, venueId }, select: { orderId: true } })
+  const original = await prisma.payment.findFirst({
+    where: { id: body.originalPaymentId, venueId, OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+    select: { orderId: true },
+  })
   if (!original?.orderId) throw new NotFoundError('No se encontró el cobro en esta sucursal.')
   await ensureExchangeCreditTender(prisma, venueId)
   let outcome: Awaited<ReturnType<typeof executeExchangeInTransaction>>
