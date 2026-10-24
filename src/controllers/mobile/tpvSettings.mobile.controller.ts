@@ -19,6 +19,7 @@ import { VenuePlanInfo, getVenuePlanInfo } from '../../services/access/basePlan.
 import { TpvSettings, getTpvSettings, updateTpvSettings } from '../../services/dashboard/tpv.dashboard.service'
 import { assertSettingsConfigurable, resolveConfigurableSettings } from '../../services/device-capabilities.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import { effectiveExchangesEnabled } from '../../services/exchanges/exchangeRules'
 import type { UpdateDisplayModeInput, UpdateTerminalSettingsInput } from '../../schemas/mobile/tpvSettings.mobile.schema'
 import {
   DisplayModeRequestError,
@@ -60,7 +61,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
     //    venue's plan-tier info (additive `plan` field — POS apps gate UI by plan).
     //    RESILIENT: a plan-lookup failure must NEVER break venue-select on the POS — log it
     //    and return the settings WITHOUT the plan field (apps fail open).
-    const [terminals, plan, venueSettings, receiptPayload] = await Promise.all([
+    const [terminals, plan, venueSettings, receiptPayload, venue] = await Promise.all([
       prisma.terminal.findMany({
         where: { venueId },
         select: {
@@ -97,7 +98,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
       prisma.venueSettings
         .findUnique({
           where: { venueId },
-          select: { promotionsPanelCashier: true, promotionsPanelCustomer: true, managerPinOverrideEnabled: true },
+          select: { promotionsPanelCashier: true, promotionsPanelCustomer: true, managerPinOverrideEnabled: true, exchangesEnabled: true },
         })
         .catch(error => {
           logger.error('Failed to resolve venue-level POS settings — returning defaults', { venueId, error })
@@ -111,6 +112,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         logger.error('Failed to resolve receipt payload for mobile venue settings — returning settings without it', { venueId, error })
         return {}
       }),
+      prisma.venue.findUnique({ where: { id: venueId }, select: { type: true } }).catch(() => null),
     ])
 
     // 2. Prefer the terminal that made this request. A venue can have an area
@@ -190,6 +192,7 @@ export const getVenueTpvSettings = async (req: Request, res: Response, next: Nex
         // es el comportamiento de hoy. Es de VENUE, no de terminal — por eso vive
         // aquí y no dentro de `settings`.
         managerPinOverrideEnabled: venueSettings?.managerPinOverrideEnabled ?? false,
+        exchangesEnabled: effectiveExchangesEnabled(venueSettings?.exchangesEnabled, venue?.type),
         // Encabezado y diseño del ticket (aditivo y opcional, mismo contrato que `plan`):
         // un POS viejo los ignora. `receiptInfo` conserva EXACTAMENTE sus campos de siempre
         // y suma los emisores por venta; `receiptLayout` es nuevo (spec § 7.3).

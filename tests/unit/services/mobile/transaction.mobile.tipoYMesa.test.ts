@@ -8,6 +8,9 @@ import * as refundService from '@/services/dashboard/refund.dashboard.service'
 import { getTransactionDetail, getTransactions } from '@/services/mobile/transaction.mobile.service'
 
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ listRefundsForPayment: jest.fn() }))
+jest.mock('@/services/exchanges/exchangeDetail', () => ({
+  exchangeDetailFields: jest.fn(async () => ({ fields: {}, itemExtras: new Map() })),
+}))
 
 const prismaMock = prisma as any
 const pago = (order: Record<string, unknown> | null) => ({
