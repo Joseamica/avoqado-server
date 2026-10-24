@@ -9137,6 +9137,9 @@ model Discount {
   // Promociones tipo DISCOUNT que apuntan a este descuento.
   promotions Promotion[]
 
+  // Ligas de pago que tomaron este descuento del catálogo.
+  paymentLinks PaymentLink[]
+
   @@index([venueId])
   @@index([isAutomatic])
   @@index([active])
@@ -15786,6 +15789,12 @@ model PaymentLink {
   // Tipping config: { presets: [10, 15, 20], allowCustom: true } — null = disabled
   tippingConfig Json?
 
+  /// Descuento de la liga (foto): { v:1, origen, discountId, type, value, name }.
+  /// `discountId` apunta al catálogo sólo para trazabilidad; el valor vive aquí.
+  discount    Json?
+  discountId  String?
+  discountRef Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+
   status         PaymentLinkStatus @default(ACTIVE)
   totalCollected Decimal           @default(0) @db.Decimal(12, 2)
   paymentCount   Int               @default(0)
@@ -15801,6 +15810,7 @@ model PaymentLink {
   @@index([shortCode])
   @@index([status])
   @@index([createdAt])
+  @@index([discountId, status])
 }
 
 /// Line item for an ITEM-purpose PaymentLink (bundle). Fixed quantity per

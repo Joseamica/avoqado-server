@@ -33,6 +33,37 @@ const tippingConfigSchema = z
   .optional()
   .nullable()
 
+/** Descuento de una liga: manual (el valor se escribe en la liga) o tomado del catálogo de descuentos del negocio. */
+export const paymentLinkDiscountInput = z
+  .discriminatedUnion('mode', [
+    z.object({
+      mode: z.literal('MANUAL'),
+      type: z.enum(['PERCENTAGE', 'FIXED_AMOUNT']),
+      value: z.number().positive('El descuento debe ser mayor a 0'),
+      name: z
+        .string()
+        .trim()
+        .min(1, 'El nombre no puede estar vacío')
+        .max(60, 'El nombre no puede exceder 60 caracteres')
+        .default('Descuento'),
+    }),
+    z.object({
+      mode: z.literal('CATALOG'),
+      discountId: z.string().cuid('ID de descuento inválido'),
+    }),
+  ])
+  .superRefine((d, ctx) => {
+    if (d.mode !== 'MANUAL') return
+    if (d.type === 'PERCENTAGE' && d.value >= 100) {
+      ctx.addIssue({ code: 'custom', path: ['value'], message: 'El porcentaje debe ser mayor a 0 y menor a 100' })
+    }
+    if (d.type === 'FIXED_AMOUNT' && Math.round(d.value * 100) / 100 !== d.value) {
+      ctx.addIssue({ code: 'custom', path: ['value'], message: 'El monto admite máximo 2 decimales' })
+    }
+  })
+  .nullable()
+  .optional()
+
 // ═══════════════════════════════════════════════════════════════════════════
 // VENUE-WIDE SETTINGS — backs PaymentLinkSettings.tsx in the dashboard
 // ═══════════════════════════════════════════════════════════════════════════
@@ -99,6 +130,7 @@ export const createPaymentLinkBodySchema = z
     attributedStaffIds: z.array(z.string().min(1)).max(10, 'Máximo 10 personas atribuidas').optional(),
     customFields: customFieldsSchema,
     tippingConfig: tippingConfigSchema,
+    discount: paymentLinkDiscountInput,
   })
   .refine(
     data => {
@@ -159,6 +191,7 @@ export const updatePaymentLinkBodySchema = z.object({
     .nullable(),
   customFields: customFieldsSchema,
   tippingConfig: tippingConfigSchema,
+  discount: paymentLinkDiscountInput,
 })
 
 // ═══════════════════════════════════════════════════════════════════════════
