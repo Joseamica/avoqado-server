@@ -1736,10 +1736,38 @@ function mapBlumonCardBrandToEnum(
 /** Lo que la sesión de pago congeló del descuento (T5). La orden se arma con esto, nunca releyendo la liga ni el catálogo. */
 type DescuentoDeLaSesion = { foto: DescuentoDeLiga; descuento: number; base: number }
 
-/** `null` si la sesión se cobró sin descuento: la orden queda exactamente como hoy. */
-function descuentoDeLaSesion(metadata: Record<string, any> | null | undefined): DescuentoDeLaSesion | null {
+/**
+ * `null` si la sesión se cobró sin descuento: la orden queda exactamente como hoy. También `null` (con un error en el log) si
+ * el descuento guardado no cuadra con lo cobrado sin propina o viene mal formado: el banco ya cobró, así que nunca se lanza
+ * dentro del registro (en Blumon perdería una venta cobrada) y lo guardado es lo que se cobró.
+ */
+function descuentoDeLaSesion(
+  metadata: Record<string, any> | null | undefined,
+  cobradoSinPropina: Prisma.Decimal,
+  sessionId: string,
+): DescuentoDeLaSesion | null {
   const d = metadata?.descuento
-  return d?.foto && Number(d.descuento) > 0 ? { foto: d.foto, descuento: Number(d.descuento), base: Number(d.base) } : null
+  if (d == null) return null
+  const base = Number(d.base)
+  const descuento = Number(d.descuento)
+  const foto = d.foto
+  const fotoValida =
+    !!foto &&
+    (foto.type === 'PERCENTAGE' || foto.type === 'FIXED_AMOUNT') &&
+    typeof foto.name === 'string' &&
+    Number.isFinite(Number(foto.value))
+  const cuadra =
+    Number.isFinite(base) &&
+    Number.isFinite(descuento) &&
+    descuento > 0 &&
+    Math.round(base * 100) - Math.round(descuento * 100) === Math.round(Number(cobradoSinPropina) * 100)
+  if (fotoValida && cuadra) return { foto, descuento, base }
+  logger.error('🚨 [PaymentLink] El descuento de la sesión no cuadra con lo cobrado; la venta se registra sin descuento', {
+    sessionId,
+    cobradoSinPropina: cobradoSinPropina.toString(),
+    descuento: d,
+  })
+  return null
 }
 
 /**
@@ -1976,7 +2004,7 @@ export async function finalizePaymentLinkCheckout(args: {
   const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
   const subtotal = session.amount.sub(tipAmount) // session.amount already includes tip
   // Con descuento: la orden lleva la base y el descuento; el cobro, la lealtad y la comisión siguen sobre `subtotal` (el neto).
-  const descuentoDeLiga = descuentoDeLaSesion(metadata)
+  const descuentoDeLiga = descuentoDeLaSesion(metadata, subtotal, session.sessionId)
   const stripePaymentIntentId = args.paymentIntentId ?? null
 
   // Commission attribution: the first attributed staff is the "named seller" on Payment.processedById; the commission is
@@ -2100,6 +2128,7 @@ export async function finalizePaymentLinkCheckout(args: {
           orderId: order.id,
           foto: { ...descuentoDeLiga.foto, discountId },
           montoPesos: descuentoDeLiga.descuento,
+          basePesos: descuentoDeLiga.base,
         }),
       })
       await sincronizarRepartos(tx, order.id)
@@ -2886,7 +2915,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       //                  is already the gross + tip).
       const orderTipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
       // Con descuento, la sesión manda: base, descuento y lo cobrado (neto + propina) son los que vio y pagó la clienta.
-      const descuentoDeLiga = descuentoDeLaSesion(metadata)
+      const descuentoDeLiga = descuentoDeLaSesion(metadata, session.amount.sub(orderTipAmount), session.sessionId)
       const subtotal = descuentoDeLiga
         ? new Prisma.Decimal(descuentoDeLiga.base)
         : isItemLink
@@ -2975,6 +3004,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
             orderId: order.id,
             foto: { ...descuentoDeLiga.foto, discountId },
             montoPesos: descuentoDeLiga.descuento,
+            basePesos: descuentoDeLiga.base,
           }),
         })
         await sincronizarRepartos(tx, order.id)
@@ -3789,7 +3819,7 @@ export async function finalizeMercadoPagoCheckout(args: {
   const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
   const subtotal = gross.sub(tipAmount).gte(0) ? gross.sub(tipAmount) : new Prisma.Decimal(0)
   // Con descuento: la orden lleva la base y el descuento; el cobro, la lealtad y la comisión siguen sobre `subtotal` (el neto).
-  const descuentoDeLiga = isLink ? descuentoDeLaSesion(metadata) : null
+  const descuentoDeLiga = isLink ? descuentoDeLaSesion(metadata, subtotal, session.sessionId) : null
   const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
   const netAmount = subtotal.sub(feeAmount).gte(0) ? subtotal.sub(feeAmount) : new Prisma.Decimal(0)
   const feePercentage = subtotal.gt(0) ? feeAmount.div(subtotal).toDecimalPlaces(4) : new Prisma.Decimal(0)
@@ -3889,6 +3919,7 @@ export async function finalizeMercadoPagoCheckout(args: {
             orderId: order.id,
             foto: { ...descuentoDeLiga.foto, discountId },
             montoPesos: descuentoDeLiga.descuento,
+            basePesos: descuentoDeLiga.base,
           }),
         })
         await sincronizarRepartos(tx, order.id)

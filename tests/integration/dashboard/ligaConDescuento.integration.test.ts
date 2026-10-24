@@ -19,6 +19,9 @@ import {
 } from '@/services/dashboard/paymentLink.service'
 import { loadOrderForCfdiFromDb } from '@/services/fiscal/cfdi.service'
 import { ORDER_SELECT, ticketParaGlobal } from '@/services/fiscal/cfdiGlobal.service'
+import logger from '@/config/logger'
+import { importesDeLasFilas } from '@/services/shared/repartoDescuento'
+import { RENGLON_PARA_REPARTO_SELECT } from '@/services/shared/repartoDescuentoTx'
 import { borrarMundoComisiones, categoria, crearMundoComisiones, MundoComisiones, procesarEfectos } from '../commission/_mundoComisiones'
 
 // Blumon E-commerce: el banco aprueba (la autorización real no es lo que se prueba aquí).
@@ -106,10 +109,22 @@ const foto = () => ({ v: 1, origen: 'CATALOGO', discountId: w.regla, type: 'PERC
  * Una liga atribuida a Ana y pagada por `camino`, con la sesión como la deja la T5: `amount` = neto + propina y, sólo con
  * descuento, `metadata.descuento = { foto, descuento, base }`. Devuelve la orden que crea el finalizador.
  */
-async function ligaPagada(camino: Camino, o: { productos: boolean; descuento: boolean; propina?: number }) {
+async function ligaPagada(
+  camino: Camino,
+  o: {
+    productos: boolean
+    descuento: boolean
+    propina?: number
+    /** El monto y la foto del descuento (default: Promo 15 → 150). */
+    monto?: number
+    foto?: Record<string, unknown>
+    /** `metadata.descuento` tal cual (mal formado o que no cuadra); `amount` sigue saliendo de `descuento`/`monto`. */
+    guardado?: unknown
+  },
+) {
   const propina = o.propina ?? 50
   const base = 1000
-  const descuento = o.descuento ? 150 : 0
+  const descuento = o.descuento ? (o.monto ?? 150) : 0
   const items = o.productos
     ? w.productos.map(p => ({ productId: p.id, productName: p.nombre, quantity: 1, unitPrice: p.precio, modifiers: [] }))
     : []
@@ -129,7 +144,11 @@ async function ligaPagada(camino: Camino, o: { productos: boolean; descuento: bo
   const sessionId = camino === 'stripe' ? `pi_${m.key}_${n}` : `cs_${camino}_${m.key}_${n}`
   const metadata: Record<string, unknown> = {
     ...(propina > 0 ? { tipAmount: propina } : {}),
-    ...(o.descuento ? { descuento: { foto: foto(), descuento, base } } : {}),
+    ...(o.guardado !== undefined
+      ? { descuento: o.guardado }
+      : o.descuento
+        ? { descuento: { foto: o.foto ?? foto(), descuento, base } }
+        : {}),
     ...(o.productos ? { purpose: 'ITEM', items } : {}),
     ...(camino === 'blumon' ? { cardToken: 'tok_prueba', cvv: '123', maskedPan: '************4242', cardBrand: 'VISA' } : {}),
   }
@@ -285,4 +304,57 @@ describe('T6 · la venta de una liga con descuento guarda su descuento', () => {
       enviar.mockRestore()
     }
   })
+
+  it('🔴 fix r1: un % topado por el catálogo (20 % con tope 100 sobre 1000) guarda el tope y un recálculo da 100, no 200', async () => {
+    const { orden } = await ligaPagada('stripe', {
+      productos: true,
+      descuento: true,
+      monto: 100,
+      foto: { ...foto(), value: 20, name: 'Promo 20 tope 100' },
+    })
+    const [fila] = orden.orderDiscounts
+    expect([fila.type, Number(fila.value), txt(fila.amount), (fila.reparto as { tope?: number }).tope]).toEqual([
+      'PERCENTAGE',
+      20,
+      '100.00',
+      100,
+    ])
+    const renglones = await prisma.orderItem.findMany({ where: { orderId: orden.id }, select: RENGLON_PARA_REPARTO_SELECT })
+    const { montosRederivados } = importesDeLasFilas(renglones, await prisma.orderDiscount.findMany({ where: { orderId: orden.id } }))
+    expect(montosRederivados.get(fila.id)).toBe(100)
+  })
+
+  it('un % sin tope (15 % = 150) no guarda tope', async () => {
+    const { orden } = await ligaPagada('stripe', { productos: true, descuento: true })
+    expect((orden.orderDiscounts[0].reparto as { tope?: number }).tope).toBeUndefined()
+  })
+
+  it.each([
+    ...CAMINOS.map(c => [c, 'no cuadra con lo cobrado', { descuento: 150, base: 1000 }] as const),
+    ...CAMINOS.map(c => [c, 'trae importes que no son números', { descuento: 'abc', base: null }] as const),
+  ])(
+    '🔴 fix r1: %s con un descuento guardado que %s → la venta de hoy (lo que cobró el banco), sin lanzar y con error en el log',
+    async (camino, _caso, valores) => {
+      const error = jest.spyOn(logger, 'error')
+      try {
+        const { orden, sessionId } = await ligaPagada(camino, {
+          productos: false,
+          descuento: false,
+          guardado: { foto: foto(), ...valores },
+        })
+        expect([txt(orden.subtotal), txt(orden.discountAmount), txt(orden.total), txt(orden.paidAmount)]).toEqual([
+          '1000.00',
+          '0.00',
+          '1050.00',
+          '1050.00',
+        ])
+        expect(orden.orderDiscounts).toEqual([])
+        expect(orden.payments.map(p => [txt(p.amount), txt(p.tipAmount)])).toEqual([['1000.00', '50.00']])
+        expect((await prisma.discount.findUniqueOrThrow({ where: { id: w.regla } })).currentUses).toBe(0)
+        expect(error).toHaveBeenCalledWith(expect.stringContaining('no cuadra con lo cobrado'), expect.objectContaining({ sessionId }))
+      } finally {
+        error.mockRestore()
+      }
+    },
+  )
 })

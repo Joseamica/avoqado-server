@@ -195,8 +195,14 @@ export function filaDeDescuentoDeLiga(p: {
   orderId: string
   foto: DescuentoDeLiga
   montoPesos: number
+  /** La base de la sesión: con ella se reconoce un % que el catálogo topó (`maxDiscountAmount`). */
+  basePesos: number
 }): Prisma.OrderDiscountUncheckedCreateInput {
   const monto = roundPesos(p.montoPesos)
+  // R6: un % que cobró menos que su porcentaje fue topado; el tope viaja en el reparto para que un recálculo no lo pase
+  // (como el motor y la terminal). Sale de la sesión sola: la foto no guarda `maxDiscountAmount`.
+  const porcentaje = new Prisma.Decimal(p.basePesos).mul(p.foto.value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+  const tope = p.foto.type === 'PERCENTAGE' && porcentaje.gt(monto) ? monto : null
   return {
     orderId: p.orderId,
     discountId: p.foto.discountId,
@@ -207,7 +213,7 @@ export function filaDeDescuentoDeLiga(p: {
     taxReduction: 0,
     isManual: p.foto.origen === 'MANUAL',
     appliedById: null,
-    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
+    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
   }
 }
 
