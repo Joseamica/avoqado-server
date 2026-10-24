@@ -1,5 +1,6 @@
 const mockStaffVenueFindUnique = jest.fn()
 const mockConsumeOverride = jest.fn()
+const mockExchangeFindUnique = jest.fn()
 
 jest.mock('@/middlewares/validation', () => {
   const actual = jest.requireActual('@/middlewares/validation')
@@ -9,6 +10,7 @@ jest.mock('@/middlewares/validation', () => {
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
+    exchange: { findUnique: (...a: unknown[]) => mockExchangeFindUnique(...a) },
     staff: { findUnique: async () => ({ active: true }) },
     staffVenue: { findFirst: async () => null, findUnique: (...a: unknown[]) => mockStaffVenueFindUnique(...a) },
     venue: { findUnique: async () => null },
@@ -62,9 +64,45 @@ async function correr(role: StaffRole, body: unknown, headers: Record<string, st
   return out
 }
 
-beforeEach(() => jest.clearAllMocks())
+beforeEach(() => {
+  jest.clearAllMocks()
+  mockExchangeFindUnique.mockReset().mockResolvedValue(null)
+  mockConsumeOverride.mockReset()
+})
 
 describe('exchange mobile route permissions', () => {
+  it('reaches the controller after a lost response without consuming the manager PIN again', async () => {
+    mockExchangeFindUnique.mockResolvedValue({ staffId: 'u1' })
+    mockConsumeOverride.mockResolvedValue(null)
+    const body = { idempotencyKey: 'exchange-replay-1', settlement: { kind: 'EVEN', method: null } }
+    expect(await correr(StaffRole.WAITER, body, { 'x-permission-override': 'consumed-token' })).toEqual({ next: true })
+    expect(mockExchangeFindUnique).toHaveBeenCalledWith({
+      where: { venueId_idempotencyKey: { venueId: 'v1', idempotencyKey: body.idempotencyKey } },
+      select: { staffId: true },
+    })
+    expect(mockConsumeOverride).not.toHaveBeenCalled()
+    expect(mockStaffVenueFindUnique).not.toHaveBeenCalled()
+  })
+
+  it('checks permissions normally when another staff owns the exchange key', async () => {
+    mockExchangeFindUnique.mockResolvedValue({ staffId: 'c0000000000000000000000099' })
+    expect(await correr(StaffRole.WAITER, { idempotencyKey: 'exchange-replay-1' })).toMatchObject({
+      next: false,
+      status: 403,
+      json: { required: 'payments:refund' },
+    })
+    expect(mockStaffVenueFindUnique).toHaveBeenCalled()
+    expect(mockConsumeOverride).not.toHaveBeenCalled()
+  })
+
+  it.each([StaffRole.WAITER, StaffRole.CASHIER])('falls through to normal permissions on lookup failure for %s', async role => {
+    mockExchangeFindUnique.mockRejectedValue(new Error('La base no responde.'))
+    const result = await correr(role, { idempotencyKey: 'exchange-replay-1' })
+    expect(mockExchangeFindUnique).toHaveBeenCalledTimes(1)
+    expect(mockStaffVenueFindUnique).toHaveBeenCalled()
+    expect(result).toMatchObject(role === StaffRole.WAITER ? { next: false, status: 403 } : { next: true })
+  })
+
   it('the route chain is authenticate → validate → permisoDeCambio → controller', () => {
     const layer = (mobileRouter as any).stack.find((l: any) => l.route?.path === '/venues/:venueId/exchanges' && l.route.methods.post)
     expect(validator).toEqual(expect.any(Function))

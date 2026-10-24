@@ -1,16 +1,16 @@
 import { z } from 'zod'
 
-const texto = z.string({ required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser texto.' })
-const id = texto.cuid('El identificador no es válido.')
-const entero = z
+const textSchema = z.string({ required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser texto.' })
+const id = textSchema.cuid('El identificador no es válido.')
+const integerSchema = z
   .number({ required_error: 'Este número es requerido.', invalid_type_error: 'Debe ser un número.' })
   .int('Debe ser un número entero.')
   .safe('Debe ser un entero seguro.')
-const cantidad = entero.min(1, 'La cantidad mínima es 1.').max(999, 'La cantidad máxima es 999.')
-const booleano = z.boolean({ required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser verdadero o falso.' })
-const fecha = texto.datetime({ offset: true, message: 'La fecha debe ser ISO 8601 con zona horaria.' })
-const opciones = { errorMap: () => ({ message: 'Elige una de las opciones permitidas.' }) }
-const objeto = { required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser un objeto.' }
+const quantitySchema = integerSchema.min(1, 'La cantidad mínima es 1.').max(999, 'La cantidad máxima es 999.')
+const booleanSchema = z.boolean({ required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser verdadero o falso.' })
+const dateTimeSchema = textSchema.datetime({ offset: true, message: 'La fecha debe ser ISO 8601 con zona horaria.' })
+const enumOptions = { errorMap: () => ({ message: 'Elige una de las opciones permitidas.' }) }
+const objectOptions = { required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser un objeto.' }
 
 export const createExchangeSchema = z.object({
   params: z.object({ venueId: id }),
@@ -18,18 +18,21 @@ export const createExchangeSchema = z.object({
   body: z
     .object(
       {
-        idempotencyKey: texto.regex(/^[A-Za-z0-9_-]{8,64}$/, 'La llave debe tener de 8 a 64 letras, números, guiones o guiones bajos.'),
+        idempotencyKey: textSchema.regex(
+          /^[A-Za-z0-9_-]{8,64}$/,
+          'La llave debe tener de 8 a 64 letras, números, guiones o guiones bajos.',
+        ),
         originalPaymentId: id,
         returned: z
           .array(
             z.object(
               {
                 orderItemId: id,
-                quantity: cantidad,
-                restock: booleano,
-                reason: z.enum(['SIZE', 'TASTE', 'DEFECT'], opciones),
+                quantity: quantitySchema,
+                restock: booleanSchema,
+                reason: z.enum(['SIZE', 'TASTE', 'DEFECT'], enumOptions),
               },
-              objeto,
+              objectOptions,
             ),
             { required_error: 'Incluye los artículos que se devuelven.', invalid_type_error: 'Debe ser una lista de artículos.' },
           )
@@ -40,38 +43,38 @@ export const createExchangeSchema = z.object({
             z.object(
               {
                 productId: id,
-                quantity: cantidad,
+                quantity: quantitySchema,
                 inheritsFromOrderItemId: id.nullish(),
-                displayedUnitPriceCents: entero.nonnegative('El precio no puede ser negativo.').optional(),
-                catalogAt: fecha.optional(),
+                displayedUnitPriceCents: integerSchema.nonnegative('El precio no puede ser negativo.').optional(),
+                catalogAt: dateTimeSchema.optional(),
               },
-              objeto,
+              objectOptions,
             ),
             { required_error: 'Incluye los artículos que se lleva.', invalid_type_error: 'Debe ser una lista de artículos.' },
           )
           .min(1, 'Incluye al menos un artículo que se lleva.')
           .max(100, 'Sólo se permiten hasta 100 artículos por cambio.'),
         staffId: id,
-        deviceId: texto.min(1, 'El aparato es requerido.').max(128, 'El identificador del aparato no puede exceder 128 caracteres.'),
-        createdAtLocal: fecha,
+        deviceId: textSchema.min(1, 'El aparato es requerido.').max(128, 'El identificador del aparato no puede exceder 128 caracteres.'),
+        createdAtLocal: dateTimeSchema,
         isOfflineReplay: z
           .literal(false, { errorMap: () => ({ message: 'El cambio sin red se envía por la cola de sincronización.' }) })
           .optional(),
         settlement: z.object(
           {
-            kind: z.enum(['EVEN', 'COLLECT', 'PAYOUT'], opciones),
-            method: z.enum(['CASH', 'CARD_TERMINAL', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE', 'TENDER'], opciones).nullable(),
-            expectedDifferenceCents: entero,
+            kind: z.enum(['EVEN', 'COLLECT', 'PAYOUT'], enumOptions),
+            method: z.enum(['CASH', 'CARD_TERMINAL', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE', 'TENDER'], enumOptions).nullable(),
+            expectedDifferenceCents: integerSchema,
             cashDrawerSessionId: id.nullish(),
             terminalId: id.nullish(),
             tenderTypeId: id.nullish(),
-            tenderRevision: entero.nonnegative('La versión del tipo de pago no puede ser negativa.').nullish(),
-            cashFromNonCash: booleano.optional(),
+            tenderRevision: integerSchema.nonnegative('La versión del tipo de pago no puede ser negativa.').nullish(),
+            cashFromNonCash: booleanSchema.optional(),
           },
           { required_error: 'Falta la liquidación del cambio.', invalid_type_error: 'La liquidación del cambio no es válida.' },
         ),
       },
-      objeto,
+      objectOptions,
     )
     .superRefine((body, ctx) => {
       const seen = new Set<string>()

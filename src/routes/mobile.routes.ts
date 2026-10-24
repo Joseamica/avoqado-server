@@ -6,6 +6,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import prisma from '../utils/prismaClient'
 import { getMobile as getServiceCourses } from '../controllers/dashboard/serviceCourse.controller'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as coachClassController from '../controllers/mobile/coachClass.mobile.controller'
@@ -3106,7 +3107,20 @@ export const permisoDeReembolso = Object.assign(
 
 // Una sola revisión: el código del encargado autoriza un permiso y se consume una vez.
 export const permisoDeCambio = Object.assign(
-  (req: Request, res: Response, next: NextFunction) => {
+  async (req: Request, res: Response, next: NextFunction) => {
+    // Un reintento propio ya autorizado no gasta otro PIN; el servicio comprueba la huella del cuerpo.
+    // shortcut: dos simultáneas aún dan 201 + 403 y el siguiente reintento pasa; ampliar si se exige 201 + 200 simultáneo.
+    let existing: { staffId: string } | null = null
+    try {
+      existing = await prisma.exchange.findUnique({
+        where: { venueId_idempotencyKey: { venueId: req.params.venueId, idempotencyKey: req.body.idempotencyKey } },
+        select: { staffId: true },
+      })
+    } catch {
+      // Si falla la lectura, se exige el permiso normal; nunca se concede acceso por el fallo.
+    }
+    if (existing && existing.staffId === req.authContext!.userId) return next()
+
     const settlement = req.body?.settlement
     return settlement?.kind === 'PAYOUT' && settlement.method === 'CASH' && settlement.cashFromNonCash === true
       ? revisarDevolverEnEfectivo(req, res, next)
