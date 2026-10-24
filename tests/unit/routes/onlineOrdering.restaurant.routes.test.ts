@@ -46,6 +46,7 @@ jest.mock('@/controllers/mobile/onlineOrders.mobile.controller', () => {
   return {
     __esModule: true,
     inbox: respond,
+    deliveryCash: respond,
     accept: respond,
     reject: respond,
     ready: respond,
@@ -114,6 +115,11 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
   it('la bandeja usa orders:read sin candado de plan: perder el plan no deja varados los pedidos (R14)', async () => {
     const r = await request(app).get(`${M}/inbox`)
     expect(r.body).toEqual({ perms: ['orders:read'], plans: [], schemas: ['inboxSchema'] })
+  })
+
+  it('Rappi 2b: la lista «Rappi · por cobrar» usa orders:read sin candado de plan, como la bandeja (R14)', async () => {
+    const r = await request(app).get(`${M}/delivery-cash`)
+    expect(r.body).toEqual({ perms: ['orders:read'], plans: [], schemas: ['deliveryCashSchema'] })
   })
 
   it('PUT /settings exige online-orders:manage y el plan', async () => {

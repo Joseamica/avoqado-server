@@ -3,7 +3,10 @@ import { prismaMock } from '@tests/__helpers__/setup'
 import { getVenueTpvSettings } from '@/controllers/mobile/tpvSettings.mobile.controller'
 
 jest.mock('@/services/access/basePlan.service', () => ({ getVenuePlanInfo: jest.fn(async () => undefined) }))
-jest.mock('@/services/dashboard/receiptLayout/devicePayload.service', () => ({ getDeviceReceiptPayload: jest.fn(async () => ({})) }))
+jest.mock('@/services/dashboard/receiptLayout/devicePayload.service', () => ({
+  ...jest.requireActual('@/services/dashboard/receiptLayout/devicePayload.service'),
+  getDeviceReceiptPayloadWithStatus: jest.fn(async () => ({ payload: {}, status: 'ok' })),
+}))
 
 beforeEach(() => {
   prismaMock.terminal.findMany.mockResolvedValue([])

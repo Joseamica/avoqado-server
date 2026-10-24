@@ -1,4 +1,4 @@
-import type { Prisma } from '@prisma/client'
+import { Prisma } from '@prisma/client'
 import { ForbiddenError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
@@ -109,7 +109,13 @@ export async function ventaYaCobradaBajoCandado(
   tx: Pick<Prisma.TransactionClient, 'order' | 'payment'>,
   venta: { venueId: string; orderId: string },
   leida?: VentaParaCobrada,
-): Promise<{ paymentStatus: string | null; customerId: string | null; cobrada: boolean } | null> {
+): Promise<{
+  paymentStatus: string | null
+  customerId: string | null
+  cobrada: boolean
+  /** Lo que falta por cobrar (0 si está cerrada por estado). Cuentas fuera del plano, 23-oct. */
+  pendiente: Prisma.Decimal
+} | null> {
   const orden: VentaParaCobrada | null =
     leida ??
     (await tx.order.findFirst({
@@ -127,7 +133,7 @@ export async function ventaYaCobradaBajoCandado(
     }))
   if (!orden) return null
   const base = { paymentStatus: orden.paymentStatus ?? null, customerId: orden.customerId ?? null }
-  if (esVentaYaCobrada(orden)) return { ...base, cobrada: true }
+  if (esVentaYaCobrada(orden)) return { ...base, cobrada: true, pendiente: new Prisma.Decimal(0) }
   // Una suma, no la lista de cobros: los REFUND fuera (con `type` NULL dentro, como `COBRO_QUE_CUBRE`); la propina se cancela a
   // los dos lados del saldo.
   const cobrado = await tx.payment.aggregate({
@@ -135,7 +141,11 @@ export async function ventaYaCobradaBajoCandado(
     _sum: { amount: true, tipAmount: true },
   })
   const saldo = computeOrderBalance(orden, [{ amount: cobrado._sum.amount, tipAmount: cobrado._sum.tipAmount }])
-  return { ...base, cobrada: saldo.paidAmount.greaterThan(0) && saldo.isFullyPaid }
+  return {
+    ...base,
+    cobrada: saldo.paidAmount.greaterThan(0) && saldo.isFullyPaid,
+    pendiente: saldo.remainingBalance,
+  }
 }
 
 /**

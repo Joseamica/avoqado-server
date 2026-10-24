@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import type { TpvSettings } from '../../services/dashboard/tpv.dashboard.service'
+import { tipSuggestionsRule } from '../../schemas/mobile/tpvSettings.mobile.schema'
 
 const toggle = z.boolean({ invalid_type_error: 'Debe ser verdadero o falso' }).optional()
 const integer = z.number({ invalid_type_error: 'Debe ser un número' }).int('Debe ser entero')
@@ -8,12 +9,8 @@ const fields = {
   showTipScreen: toggle,
   showReceiptScreen: toggle,
   defaultTipPercentage: integer.min(0, 'Mínimo 0').max(100, 'Máximo 100').nullable().optional(),
-  tipSuggestions: z
-    .array(integer.min(1, 'Mínimo 1').max(100, 'Máximo 100'))
-    .min(1, 'Agrega al menos una propina')
-    .max(6, 'Máximo 6 propinas')
-    .refine(values => new Set(values).size === values.length, 'No repitas porcentajes')
-    .optional(),
+  // LA regla del POS (mismos límites que la copia que vivía aquí); una sola para todas las puertas (F0-B, ronda final).
+  tipSuggestions: tipSuggestionsRule.optional(),
   requirePinLogin: toggle,
   requireAvoqadoServerForCardPayment: toggle,
   showVerificationScreen: toggle,

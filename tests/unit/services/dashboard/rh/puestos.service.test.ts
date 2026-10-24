@@ -36,6 +36,22 @@ describe('puestos (spec RH §3.1)', () => {
       expect(p.id).toBe('p1')
       expect(p.personasVigentes).toBe(0)
     })
+    it('«Checa entrada y salida» nace apagado sólo en un puesto de «Solo ver» (inversionistas); se respeta si lo mandan', async () => {
+      prismaMock.staffPosition.create.mockResolvedValue(conConteo({ id: 'p1', name: 'X', suggestedRole: 'VIEWER', componentKinds: [] }))
+      const checaAlCrear = () => prismaMock.staffPosition.create.mock.calls.at(-1)![0].data.tracksAttendanceDefault
+      await crearPuesto({ venueId: 'v1', actorId: 'a1', name: 'Inversionista', suggestedRole: 'VIEWER' as any })
+      expect(checaAlCrear()).toBe(false)
+      await crearPuesto({ venueId: 'v1', actorId: 'a1', name: 'Mesero', suggestedRole: 'WAITER' as any })
+      expect(checaAlCrear()).toBe(true)
+      await crearPuesto({
+        venueId: 'v1',
+        actorId: 'a1',
+        name: 'Socio en piso',
+        suggestedRole: 'VIEWER' as any,
+        tracksAttendanceDefault: true,
+      })
+      expect(checaAlCrear()).toBe(true)
+    })
     it('lista con tope 100 aunque pidan más', async () => {
       prismaMock.staffPosition.count.mockResolvedValue(0)
       prismaMock.staffPosition.findMany.mockResolvedValue([])

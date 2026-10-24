@@ -130,6 +130,7 @@ const MODELS = [
   'loyaltyConfig',
   'staffVenue',
   'stampReward',
+  'stampCard',
   'shift',
 ]
 const WRITES = ['create', 'createMany', 'update', 'updateMany', 'delete', 'deleteMany']
@@ -266,6 +267,8 @@ beforeEach(() => {
     where.orderDiscountId ? { id: 'rw-od', customerId: 'customer', rewardLabel: 'Premio' } : { ...REWARD },
   )
   tx.stampReward.updateMany.mockResolvedValue({ count: 1 })
+  // D3 (21-oct): devolver un premio canjeado lee su cartilla; llena = el premio vuelve por cobrar (el caso de estas pruebas).
+  tx.stampCard.findUnique.mockResolvedValue({ id: 'sc', stampsEarned: 7, stampsRequired: 7 })
   tx.shift.findFirst.mockResolvedValue(null)
 
   prismaMock.$transaction.mockImplementation(async (callback: any) => {
@@ -348,8 +351,13 @@ describe('locked mobile writers', () => {
         expect(delegate.mock.invocationCallOrder.slice(2).every((call: number) => call > tableLock)).toBe(true)
       }
     } else {
-      expect(raw.map((call: any[]) => call.slice(1))).toEqual([['order', 'venue']])
-      expect(tx.$queryRaw.mock.invocationCallOrder[raw.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
+      // D3 (21-oct): quitar un descuento que vino de un premio de sellos bloquea DESPUÉS la fila de ese premio (la misma que
+      // toma la reversa del sello). No es un candado de la cuenta: va aparte y siempre después del candado de la cuenta.
+      const esDelPremio = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : '').includes('FROM "StampReward"')
+      const deLaCuenta = raw.filter((call: any[]) => !esDelPremio(call))
+      expect(deLaCuenta.map((call: any[]) => call.slice(1))).toEqual([['order', 'venue']])
+      expect(tx.$queryRaw.mock.invocationCallOrder[deLaCuenta.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
+      if (raw.length > deLaCuenta.length) expect(name).toBe('removeDiscount')
     }
     expect(tx.order.update).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -701,7 +709,14 @@ describe('writer-specific fresh decisions', () => {
       },
     })
     expect(tx.stampReward.updateMany.mock.invocationCallOrder[0]).toBeGreaterThan(tx.$queryRaw.mock.invocationCallOrder[0])
-    expect(tx.stampReward.update).toHaveBeenCalledWith({ where: { id: 'rw' }, data: { orderDiscountId: 'od-new' } })
+    // D4 (21-oct): el rastro al descuento va en la MISMA escritura que quema el premio; ya no hay segunda escritura.
+    expect(tx.stampReward.update).not.toHaveBeenCalled()
+    // El descuento del premio es el que nace con id propio (el histórico que se conserva antes no lo trae).
+    const idDelDescuento = tx.orderDiscount.create.mock.calls.map(([args]: any[]) => args.data.id).find(Boolean)
+    expect(idDelDescuento).toMatch(/^c[a-z0-9]{24}$/)
+    expect(tx.stampReward.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ status: 'REDEEMED', orderDiscountId: idDelDescuento }) }),
+    )
   })
 
   it('redeemStamp losing the reward CAS creates no discount and no totals', async () => {

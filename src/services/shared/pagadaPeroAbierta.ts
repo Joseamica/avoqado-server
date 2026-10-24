@@ -1,4 +1,6 @@
 import { Prisma, type PrismaClient } from '@prisma/client'
+import { DEFAULT_TIMEZONE } from '../../utils/datetime'
+import { BUSINESS_DAY_START_HOUR } from './cashDrawerAutoClose'
 import { utcTs } from '../../utils/sqlDates'
 
 /**
@@ -72,7 +74,8 @@ export function baseQueDebeCubrirseSql(alias = 'o'): string {
  *  - la suma es CIEGA AL TIPO salvo REFUND: los TEST y los ADJUSTMENT cuentan, igual que
  *    en el camino de cierre. No se filtra por `type` más allá de excluir la devolución;
  *  - existe al menos un cobro REGULAR o FAST positivo — así una cuenta de $0 sin cobro
- *    (cortesía total) NO se marca pagada: ésa la cierra el cajero cobrando $0;
+ *    (cortesía total) NO se marca pagada: ésa la cierra el cajero cobrando $0. Excepción: plataforma aceptada y PAID con
+ *    venta y saldo exactamente cero; la ingesta puede liquidarla con descuento total sin crear Payment;
  *  - asimetría deliberada con `type` NULL: la puerta del EXISTS lo RECHAZA (un NULL no
  *    entra en un `IN (...)`) pero la suma sí lo CUENTA (`IS DISTINCT FROM` conserva los
  *    NULL). Es el lado conservador: un tipo desconocido no basta para declarar cobrada una
@@ -85,15 +88,149 @@ export function criterioPagadaPeroAbiertaSql(alias = 'o'): string {
   const o = alias
   return `
     ${o}.status NOT IN ('COMPLETED', 'CANCELLED', 'DELETED')
-    AND EXISTS (
+    AND (EXISTS (
       SELECT 1 FROM "Payment" p
       WHERE p."orderId" = ${o}.id AND p.status = 'COMPLETED'
         AND p.type IN ('REGULAR', 'FAST') AND p.amount > 0
-    )
+    ) OR (${pedidoDePlataformaPagadoYAceptadoSql(o)}
+      AND ${o}.total = 0 AND ${o}."remainingBalance" = 0 AND (${baseQueDebeCubrirseSql(o)}) = 0))
     AND (
       SELECT COALESCE(SUM(p.amount), 0) FROM "Payment" p
       WHERE p."orderId" = ${o}.id AND ${COBRO_QUE_CUBRE}
     ) >= ${baseQueDebeCubrirseSql(o)} - 0.01`
+}
+
+/**
+ * 🔴 ¿El dinero de esta orden lo liquida una PLATAFORMA de reparto (Uber, Rappi, DiDi, Deliverect)? Sólo la ingesta de reparto
+ * escribe `originSystem = DELIVERY_PLATFORM` (`deliveryOrderIngestion.service.ts`; la ingesta vieja de Uber hacía lo mismo).
+ *
+ * Su `Order.total` es el BLOQUE del proveedor —venta + cargos del comercio (el envío del repartidor propio, los cargos de Uber)
+ * − descuento, sin la propina (`deliveryReconciliation.service.ts#reprecio`)— y esos cargos no viven en ninguna columna que lea
+ * `baseQueDebeCubrirseSql`. El reparador del cobro (`reconcileOrderFromPayments`) reescribe el total con
+ * `subtotal − descuento + cargo por servicio + propina`: a un Rappi de 20 + 35 de envío + 20 de propina le dejaba 40 en vez de
+ * 55 y denunciaba un sobrepago de $35 que no existe (Codex b1 #1, Rappi fase 2; a Uber le pasaba igual con sus cargos). El
+ * dinero de estas órdenes lo cuida el núcleo de reparto: el barrido NUNCA lo recalcula.
+ *
+ * `originSystem` es NOT NULL (default AVOQADO), así que su negación (`NOT (…)`) no deja fuera órdenes por un NULL.
+ */
+export function esDeUnaPlataformaSql(alias = 'o'): string {
+  return `${alias}."originSystem" = 'DELIVERY_PLATFORM'`
+}
+
+/**
+ * 🔴 Un pedido de plataforma ACEPTADO: CONFIRMED o más adelante (la ingesta lo deja así cuando ya le dijimos que sí al
+ * proveedor: modo AUTO, y Rappi siempre) o PENDING con la aceptación acreditada (`providerAcceptedAt`, modo MANUAL). Un PENDING
+ * sin esa marca todavía espera a la cocina: el barrido lo cerraba a los 5-15 min, el tablero dejaba de pedir «aceptar» (sólo lo
+ * pide con la venta PENDING) y Uber lo cancelaba solo a los ~11.5 min. El barrido nunca cierra uno así.
+ */
+export function pedidoDePlataformaAceptadoSql(alias = 'o'): string {
+  return `(${alias}.status <> 'PENDING' OR ${alias}."providerAcceptedAt" IS NOT NULL)`
+}
+
+/**
+ * El AHORA de una corrida como literal del reloj de pared UTC (`TIMESTAMP 'YYYY-MM-DD HH:MM:SS.mmm'`), comparable contra
+ * cualquier columna DateTime (guardan UTC sin zona). Va INLINE, igual que el corte del vigilante (`corteDeAlerta`): así la MISMA
+ * condición de CUÁNDO cabe en el `$queryRaw` del barrido y en el texto del vigilante, y ninguno depende de la zona de la sesión
+ * (un bind de `Date` llega como `timestamptz` y se corre seis horas en la Mac; ver `utils/sqlDates.ts`). Sale de un `Date`: no
+ * hay texto externo que escapar.
+ */
+export function instanteUtcSql(d: Date): string {
+  if (Number.isNaN(d.getTime())) throw new Error('instanteUtcSql: fecha inválida')
+  return `TIMESTAMP '${d.toISOString().replace('T', ' ').replace('Z', '')}'`
+}
+
+/**
+ * 🔴 Decisión B, primera señal: «la cocina lo terminó». El pedido tiene comanda y NINGUNA sigue en la cocina (NEW o PREPARING).
+ *
+ * Es el MISMO «comanda abierta» que ya usa el sistema, en los tres sitios que leen el fin de la cocina:
+ *  - el tablero de cocina (`services/mobile/kdsCapacidades.ts`, `COMANDA_ABIERTA = {NEW, PREPARING}`), que con READY/COMPLETED
+ *    deja de ofrecer acciones sobre el pedido;
+ *  - el «listo» al proveedor, que sale con READY o COMPLETED (`kds.mobile.service.ts#updateKdsOrderStatus`, el bump y el lote);
+ *  - su reintento (`delivery-line-action-reconciler.job.ts`, `k.status IN ('READY', 'COMPLETED')`).
+ * Es una fila del servidor que escriben TODOS los aparatos: el KDS de Android e iOS (estado y bump), el «listo sin red» de la
+ * cola (`KDS_TICKET_MARK`) y la preparación por producto (`kitchenPreparation.service.ts`, que deriva el estado de la comanda).
+ * Varias comandas (una por estación): terminadas TODAS. Sin ninguna comanda (negocio sin cocina, o un programado que aún no
+ * llega a la cocina) no hay señal: sólo lo cierra el fin del día.
+ *
+ * Usa el índice `KdsOrder(orderId)`; el `venueId` amarra la comanda al negocio de la venta.
+ */
+export function laCocinaLoTerminoSql(alias = 'o'): string {
+  const o = alias
+  return `(EXISTS (SELECT 1 FROM "KdsOrder" k WHERE k."orderId" = ${o}.id AND k."venueId" = ${o}."venueId")
+      AND NOT EXISTS (
+        SELECT 1 FROM "KdsOrder" k WHERE k."orderId" = ${o}.id AND k."venueId" = ${o}."venueId" AND k.status IN ('NEW', 'PREPARING')
+      ))`
+}
+
+/**
+ * 🔴 Decisión B, segunda señal: «se acabó su día del negocio». El día del negocio de la venta y el de `ahora`, los DOS en la zona
+ * del negocio (`Venue.timezone`), nunca en la del servidor ni en UTC a secas.
+ *
+ * 🔴 El «día del negocio» es el de la CAJA (decisión del controlador, Ronda de arreglo 1 de la Tarea 22): empieza a las
+ * `BUSINESS_DAY_START_HOUR` (04:00) de la zona del venue, el MISMO corte de `businessDayStart` (`cashDrawerAutoClose.ts`) con el
+ * que el sistema ya cierra cosas solas (la caja olvidada). NO es la medianoche de los reportes: un bar que cierra a las 2 am no
+ * pierde «Cancelar» a las 00:00 con el pedido todavía en la cocina, y Toast también corta su día de madrugada. En SQL: el día de
+ * un instante es la FECHA de su hora local menos el corte (las 03:59 todavía son de la víspera). Así:
+ *  - uno aceptado a las 23:50 sigue abierto a las 00:30 y a las 03:59, y se cierra a las 04:00;
+ *  - uno aceptado a las 02:00 es del día de la víspera: se cierra a las 04:00 de ESE mismo día, no del siguiente.
+ *
+ * El día de la venta es el ÚLTIMO de: cuándo llegó, cuándo se aceptó (MANUAL) y para cuándo se programó (`scheduledFor`): un
+ * programado para mañana no se cierra al acabar hoy.
+ *
+ * La zona sale del negocio de ESA venta (correlacionada por llave primaria). Una zona que Postgres no reconoce caería en error
+ * y tumbaría la pasada entera (barrido y vigilante, de todos los negocios): cae en la de default (`DEFAULT_TIMEZONE`). El
+ * `IN (SELECT name FROM pg_timezone_names)` se resuelve UNA vez por consulta (subplan con hash; medido: ~25 ms, ~240 ms en frío).
+ *
+ * `ahora` es una expresión SQL del reloj de pared UTC (`instanteUtcSql`).
+ */
+export function seAcaboSuDiaDelNegocioSql(alias: string, ahora: string): string {
+  const o = alias
+  if (!Number.isInteger(BUSINESS_DAY_START_HOUR) || BUSINESS_DAY_START_HOUR < 0 || BUSINESS_DAY_START_HOUR > 23) {
+    throw new Error(`seAcaboSuDiaDelNegocioSql: hora de corte inválida (${BUSINESS_DAY_START_HOUR})`)
+  }
+  // El día del negocio de una hora local: su fecha, una vez descontado el corte de la caja.
+  const diaDelNegocio = (instanteUtc: string) =>
+    `(((${instanteUtc} AT TIME ZONE 'UTC') AT TIME ZONE z.tz) - INTERVAL '${BUSINESS_DAY_START_HOUR} hours')::date`
+  return `EXISTS (
+        SELECT 1 FROM "Venue" vz
+        CROSS JOIN LATERAL (
+          SELECT CASE WHEN vz.timezone IN (SELECT name FROM pg_timezone_names) THEN vz.timezone ELSE '${DEFAULT_TIMEZONE}' END AS tz
+        ) z
+        WHERE vz.id = ${o}."venueId"
+          AND ${diaDelNegocio(`GREATEST(${o}."createdAt", ${o}."providerAcceptedAt", ${o}."scheduledFor")`)} < ${diaDelNegocio(ahora)}
+      )`
+}
+
+/**
+ * 🔴 CUÁNDO se da por cerrado un pedido de plataforma aceptado y pagado. Decisión «B» del founder (22-oct-2026; Codex b1 #5,
+ * opciones en `.superpowers/sdd/2026-10-20-rappi-fase-2/codex-b1-fix-B-report.md`): **cuando la cocina lo termina, o al acabar
+ * el día del negocio, lo que pase primero**. Es lo que hacen Square y Toast (help 6649; «Close Out Day»).
+ *
+ * Mientras no pase ninguna de las dos, el pedido sigue abierto: la cocina conserva «Cancelar» (y, con Rappi, las instrucciones de
+ * F2), y el vigilante no lo cuenta como «pagada pero abierta» (`pedidoDePlataformaQueBDejaAbiertoSql`).
+ *
+ * La decisión se escribe AQUÍ y en ningún otro sitio: la leen el barrido (`findPedidosDePlataformaPorCerrar`) y, negada, la
+ * invariante 6 del vigilante. Nunca NULL (`COALESCE`): su negación no puede dejar una fila fuera por un NULL.
+ */
+export function momentoDeCerrarUnPedidoDePlataformaSql(alias: string, ahora: string): string {
+  return `COALESCE((${laCocinaLoTerminoSql(alias)} OR ${seAcaboSuDiaDelNegocioSql(alias, ahora)}), FALSE)`
+}
+
+/** Pedido de plataforma que el núcleo de reparto dio por PAGADO y que ya está aceptado: el universo de la decisión B. */
+function pedidoDePlataformaPagadoYAceptadoSql(alias: string): string {
+  return `${esDeUnaPlataformaSql(alias)}
+      AND ${alias}."paymentStatus" = 'PAID'
+      AND ${pedidoDePlataformaAceptadoSql(alias)}`
+}
+
+/**
+ * Lo que la decisión B deja ABIERTO a propósito: pedido de plataforma pagado y aceptado al que todavía no le toca cerrarse (la
+ * cocina lo prepara y su día no ha terminado). Es el complemento EXACTO, dentro del mismo universo, de lo que el barrido cierra:
+ * la invariante 6 del vigilante lo resta y sigue gritando por lo que ya tocaba cerrar y sigue abierto.
+ */
+export function pedidoDePlataformaQueBDejaAbiertoSql(alias: string, ahora: string): string {
+  return `(${pedidoDePlataformaPagadoYAceptadoSql(alias)}
+      AND NOT ${momentoDeCerrarUnPedidoDePlataformaSql(alias, ahora)})`
 }
 
 export interface CandidataPagadaAbierta {
@@ -134,6 +271,10 @@ type Db = Pick<PrismaClient, '$queryRaw'> | Pick<Prisma.TransactionClient, '$que
  * por la FORMA de los importes y no por el origen: lo que decide si el reparador la corrompería
  * es que guarde el IVA aparte. Vive aquí y NO en el criterio compartido: el vigilante (check #6)
  * la sigue reportando como pagada pero abierta, y la decide una persona.
+ *
+ * 🔴 Y por la misma razón —la FORMA de los importes— nunca propone una orden cuyo dinero liquida una plataforma de reparto
+ * (`esDeUnaPlataformaSql`): su total lleva cargos que el reparador no ve y se los quitaba (Codex b1 #1). Ésas las cierra, sólo de
+ * estado y sin tocar su dinero, `findPedidosDePlataformaPorCerrar` + `cerrarPedidoDePlataformaSoloDeEstado`.
  */
 export async function findPaidButOpenOrders(
   db: Db,
@@ -151,10 +292,73 @@ export async function findPaidButOpenOrders(
     FROM "Order" o
     WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
       AND COALESCE(o."taxAmount", 0) <= 0
+      AND NOT (${Prisma.raw(esDeUnaPlataformaSql('o'))})
       AND o."updatedAt" < ${utcTs(antesDe)}
       ${opts.since ? Prisma.sql`AND o."createdAt" >= ${utcTs(opts.since)}` : Prisma.empty}
     ORDER BY o."createdAt" ASC
     LIMIT ${opts.limit}
   `
   return rows
+}
+
+export interface PedidoDePlataformaPorCerrar {
+  id: string
+  venueId: string
+  orderNumber: string
+  status: string
+}
+
+/**
+ * Los pedidos de PLATAFORMA que el barrido cierra sólo de estado, del más viejo al más nuevo, con la misma gracia y la misma
+ * ventana que las candidatas a reparar. Cumplen el criterio compartido (el vigilante ve el mismo conjunto) y además:
+ *  - el núcleo de reparto ya los dio por pagados (`paymentStatus = PAID`). El barrido no decide si están pagados: uno con
+ *    efectivo por cobrar no se cierra aquí (lo cobra la caja, que lo cierra);
+ *  - están aceptados (`pedidoDePlataformaAceptadoSql`): uno que espera a la cocina nunca se cierra;
+ *  - y ya es momento de cerrarlos (`momentoDeCerrarUnPedidoDePlataformaSql`, decisión B): la cocina lo terminó o se acabó su día
+ *    del negocio, medido con el MISMO `now` de la pasada (el de su gracia), no con el reloj de la sesión.
+ *
+ * Todo va en la condición: dos `EXISTS` sobre `KdsOrder(orderId)` y uno sobre `Venue` por llave primaria, correlacionados con
+ * cada fila que ya cumple el resto del filtro (el mismo tope de antes). Ninguna consulta extra por pedido.
+ */
+export async function findPedidosDePlataformaPorCerrar(
+  db: Db,
+  opts: { graceMs: number; limit: number; now?: Date; since?: Date },
+): Promise<PedidoDePlataformaPorCerrar[]> {
+  const now = opts.now ?? new Date()
+  const antesDe = new Date(now.getTime() - opts.graceMs)
+  return db.$queryRaw<PedidoDePlataformaPorCerrar[]>`
+    SELECT o.id, o."venueId", o."orderNumber", o.status::text AS status
+    FROM "Order" o
+    WHERE ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
+      AND ${Prisma.raw(pedidoDePlataformaPagadoYAceptadoSql('o'))}
+      AND ${Prisma.raw(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(now)))}
+      AND o."updatedAt" < ${utcTs(antesDe)}
+      ${opts.since ? Prisma.sql`AND o."createdAt" >= ${utcTs(opts.since)}` : Prisma.empty}
+    ORDER BY o."createdAt" ASC
+    LIMIT ${opts.limit}
+  `
+}
+
+/**
+ * Cierra UN pedido de plataforma sólo de estado: `COMPLETED` + `completedAt`, y nada más. Ni `total`, ni `tipAmount`, ni
+ * `paidAmount`, ni `remainingBalance`, ni el estado de cobro: ese dinero es del núcleo de reparto (Codex b1 #1). No hay efectos
+ * que se pierdan: el vale de inventario y los sobres nacieron en la ingesta, y no tiene mesa.
+ *
+ * Repite la decisión B EN el UPDATE: «Deshacer» puede reabrir la cocina sin cambiar el estado de la venta entre selección y
+ * cierre. El CAS conserva también el negocio y el estado leído, y vuelve a exigir el cobro vigente.
+ */
+export async function cerrarPedidoDePlataformaSoloDeEstado(
+  db: Pick<PrismaClient, '$executeRaw'>,
+  p: Pick<PedidoDePlataformaPorCerrar, 'id' | 'venueId' | 'status'>,
+  ahora: Date,
+): Promise<boolean> {
+  const count = await db.$executeRaw`
+    UPDATE "Order" o
+    SET status = 'COMPLETED', "completedAt" = ${utcTs(ahora)}, "updatedAt" = ${utcTs(ahora)}
+    WHERE o.id = ${p.id} AND o."venueId" = ${p.venueId} AND o.status = ${p.status}::"OrderStatus"
+      AND ${Prisma.raw(criterioPagadaPeroAbiertaSql('o'))}
+      AND ${Prisma.raw(pedidoDePlataformaPagadoYAceptadoSql('o'))}
+      AND ${Prisma.raw(momentoDeCerrarUnPedidoDePlataformaSql('o', instanteUtcSql(ahora)))}
+  `
+  return count === 1
 }

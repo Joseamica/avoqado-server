@@ -35,6 +35,7 @@ jest.mock('@/services/access/basePlan.service', () => ({
 }))
 
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
+import { grantStamp } from '@/services/wallet/stampLedger.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { addCustomerToOrder } from '@/services/tpv/order.tpv.service'
 import { awardLoyaltyForLateCustomer } from '@/services/shared/loyaltyOnLateCustomer'
@@ -236,6 +237,19 @@ describe('ventaTieneReembolso against a real database: the refunds of an exchang
   ])('refunds %j ⇒ %s', async (filas, esperado) => {
     const orderId = await ventaCon(filas)
     await expect(ventaTieneReembolso(prisma, { venueId, orderId })).resolves.toBe(esperado)
+  })
+
+  it.each<[Fila[], boolean]>([
+    [['CREDIT', 'DIFFERENCE'], true],
+    [['CHAIN'], false],
+    [['ORDINARIA'], false],
+  ])('grantStamp respects exchange refund roles %j after merging the refund guard', async (filas, granted) => {
+    const orderId = await ventaCon(filas)
+    const customerId = await cliente('Sello tras cambio')
+    const result = await grantStamp(venueId, customerId, orderId)
+    expect(result.granted).toBe(granted)
+    if (!granted) expect(result.reason).toBe('ORDER_REFUNDED')
+    expect(await sellos(orderId, 'EARN')).toBe(granted ? 1 : 0)
   })
 })
 

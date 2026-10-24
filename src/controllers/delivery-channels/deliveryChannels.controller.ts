@@ -4,6 +4,7 @@
  */
 import { NextFunction, Request, Response } from 'express'
 import { env } from '../../config/env'
+import AppError from '../../errors/AppError'
 import * as deliveryChannelLinkService from '../../services/delivery-channels/core/deliveryChannelLink.service'
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
 import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
@@ -121,6 +122,37 @@ export const getUberConnectUrl = async (req: Request, res: Response, next: NextF
       url: `${base}/api/v1/delivery/uber/oauth/start?intent=${encodeURIComponent(firmado)}`,
       instrucciones:
         'Abre este enlace con la cuenta de Uber Eats Manager del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
+    })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/**
+ * El mismo enlace para el self-onboarding de Rappi (spec 2026-09-29): una intención firmada con la
+ * llave de Rappi, nunca el `venueId` suelto. Import perezoso: la cadena de Rappi lee el env al usarse.
+ */
+export const getRappiConnectUrl = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const { userId } = (req as any).authContext
+    // Primero la configuración ENTERA (retorno, host y webhooks): sin ella el enlace truena en `/start`, o
+    // peor, Rappi aprovisiona la tienda y ésta no recibe pedidos. Nada se crea si falta algo.
+    const { preflightSelfOnboardingRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.client')
+    let base: string
+    try {
+      base = preflightSelfOnboardingRappi()
+    } catch {
+      throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')
+    }
+    const { depsDesdeEnv, crearIntentRappi } = await import('../../services/delivery-channels/providers/rappi/rappi.connect')
+    const { urlDeInicio } = await import('../../services/delivery-channels/providers/rappi/rappi.selfOnboarding')
+    const { firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: userId })
+    return res.json({
+      ok: true,
+      url: urlDeInicio(base, firmado),
+      instrucciones:
+        'Abre este enlace con la cuenta del Portal Partners de Rappi del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
     })
   } catch (e) {
     return next(e)

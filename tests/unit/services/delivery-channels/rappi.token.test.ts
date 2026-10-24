@@ -6,6 +6,8 @@
  */
 import {
   _resetRappiTokenCacheForTests,
+  anotarLoginExitoso,
+  anotarLoginFallido,
   cabeceraRappi,
   getRappiToken,
   invalidarToken,
@@ -97,6 +99,26 @@ describe('getRappiToken', () => {
     await expect(getRappiToken('integrations', { fetchToken })).rejects.toThrow(/access_token/)
   })
 
+  it.each(['   ', 7, {}, true])('un access_token inválido (%j) no se guarda y permite pedir uno válido después', async access_token => {
+    const fetchToken = jest.fn().mockResolvedValueOnce({ access_token }).mockResolvedValueOnce({ access_token: 'valido' })
+    await expect(getRappiToken('integrations', { fetchToken })).rejects.toThrow(/access_token/)
+    expect(await getRappiToken('integrations', { fetchToken })).toBe('valido')
+    expect(fetchToken).toHaveBeenCalledTimes(2)
+  })
+
+  it.each(['LEAK42\nBAD', 'LEAK42\rBAD', 'LEAK42\0BAD', 'LEAK42\tBAD', 'LEAK42 BAD', 'LEAK42😀'])(
+    'un token no utilizable como Bearer no se cachea (%j)',
+    async access_token => {
+      const fetchToken = jest
+        .fn()
+        .mockResolvedValueOnce({ access_token, expires_in: 604800 })
+        .mockResolvedValueOnce({ access_token: 'recuperado' })
+      await expect(getRappiToken('integrations', { fetchToken })).rejects.toThrow(/access_token/)
+      expect(await getRappiToken('integrations', { fetchToken })).toBe('recuperado')
+      expect(fetchToken).toHaveBeenCalledTimes(2)
+    },
+  )
+
   it('un fallo no deja la petición atorada: el siguiente intento vuelve a pedir', async () => {
     const fetchToken = jest.fn().mockRejectedValueOnce(new Error('red caída')).mockResolvedValue({ access_token: 't1', expires_in: 604800 })
 
@@ -135,5 +157,79 @@ describe('cabeceraRappi', () => {
     const h = cabeceraRappi('abc')
     expect(h['x-authorization']).toBe('Bearer abc')
     expect(h.Authorization).toBeUndefined()
+  })
+})
+
+// Tarea 20, ronda 1 (I-1): un login rechazado gritaba 🚨 en CADA intento (con el sondeo prendido, ~3,800 al día). Ahora el 🚨
+// sale sólo al EMPEZAR una racha de fallos por superficie; el primer login bueno la cierra y rearma el aviso.
+describe('racha de logins fallidos', () => {
+  beforeEach(() => _resetRappiTokenCacheForTests())
+
+  it('🔴 sólo el PRIMER fallo de la racha la empieza; los siguientes no', () => {
+    expect(anotarLoginFallido('integrations')).toBe(true)
+    expect(anotarLoginFallido('integrations')).toBe(false)
+    expect(anotarLoginFallido('integrations')).toBe(false)
+  })
+
+  it('el primer login bueno cierra la racha y rearma el aviso', () => {
+    anotarLoginFallido('integrations')
+    expect(anotarLoginExitoso('integrations')).toBe(true)
+    expect(anotarLoginExitoso('integrations')).toBe(false) // sin racha, un éxito no dice nada
+    expect(anotarLoginFallido('integrations')).toBe(true) // racha nueva: avisa otra vez
+  })
+
+  it('cada superficie lleva su racha', () => {
+    expect(anotarLoginFallido('integrations')).toBe(true)
+    expect(anotarLoginFallido('utils')).toBe(true)
+    expect(anotarLoginExitoso('utils')).toBe(true)
+    expect(anotarLoginFallido('integrations')).toBe(false)
+  })
+
+  // Menores del bloque 2 (T20 re-revisión): un 🚨 por racha SIN límite de tiempo callaba una caída de login de días.
+  describe('🔴 una racha que sigue vuelve a gritar cada hora (en memoria)', () => {
+    const HORA = 60 * 60 * 1000
+    const T0 = 1_761_130_000_000
+    let reloj: jest.SpyInstance
+    beforeEach(() => {
+      reloj = jest.spyOn(Date, 'now').mockReturnValue(T0)
+    })
+    afterEach(() => reloj.mockRestore())
+    const a = (ms: number) => reloj.mockReturnValue(T0 + ms)
+
+    it('dentro de la hora no repite; al cumplirse la hora desde el último 🚨, sí; y la hora se cuenta desde ese 🚨', () => {
+      expect(anotarLoginFallido('integrations')).toBe(true) // empieza la racha
+      a(HORA - 1)
+      expect(anotarLoginFallido('integrations')).toBe(false)
+      a(HORA)
+      expect(anotarLoginFallido('integrations')).toBe(true) // la caída sigue: otro 🚨
+      a(HORA + 5 * 60_000)
+      expect(anotarLoginFallido('integrations')).toBe(false) // la hora cuenta desde el 🚨 repetido, no desde el inicio
+      a(2 * HORA - 1)
+      expect(anotarLoginFallido('integrations')).toBe(false)
+      a(2 * HORA)
+      expect(anotarLoginFallido('integrations')).toBe(true)
+    })
+
+    it('cada superficie lleva su propio reloj', () => {
+      anotarLoginFallido('integrations')
+      a(HORA / 2)
+      expect(anotarLoginFallido('utils')).toBe(true) // su racha empieza ahora
+      a(HORA)
+      expect(anotarLoginFallido('integrations')).toBe(true)
+      expect(anotarLoginFallido('utils')).toBe(false)
+    })
+
+    it('un login bueno cierra la racha: el siguiente fallo vuelve a ser inicio de racha, sin esperar la hora', () => {
+      anotarLoginFallido('integrations')
+      a(60_000)
+      expect(anotarLoginExitoso('integrations')).toBe(true)
+      expect(anotarLoginFallido('integrations')).toBe(true)
+    })
+  })
+
+  it('el reset de pruebas también borra las rachas', () => {
+    anotarLoginFallido('integrations')
+    _resetRappiTokenCacheForTests()
+    expect(anotarLoginFallido('integrations')).toBe(true)
   })
 })

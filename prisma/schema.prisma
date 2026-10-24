@@ -710,6 +710,9 @@ model Venue {
   // Diseñador de tickets, fase 1 — la receta del ticket en papel (spec § 7.1)
   receiptLayout ReceiptLayout?
 
+  // Pantalla del cliente (F0-A) — las imágenes que sube el negocio para el diseño
+  customerDisplayAssets CustomerDisplayAsset[]
+
   // Lanzamiento con campañas ligeras (spec 2026-09-17 § 2.2). SET NULL: el local puede
   // desaparecer sin que la historia del cobro deje de existir.
   launchCampaignRedemptions LaunchCampaignRedemption[] @relation("LaunchCampaignRedemptionVenue")
@@ -4036,6 +4039,12 @@ model Order {
   // Partial payment tracking (for split payments)
   paidAmount       Decimal @default(0) @db.Decimal(12, 2)
   remainingBalance Decimal @default(0) @db.Decimal(12, 2)
+  /// Rappi 2b: dinero que el negocio cobra en efectivo POR CUENTA de la plataforma (tarifa de servicio de Rappi en
+  /// marketplace/cash). No es venta, propina, CFDI, comisión ni lealtad. Lo escribe SÓLO la ingesta; null en todo lo demás.
+  thirdPartyCashDue Decimal? @db.Decimal(12, 2)
+  /// Rappi 2b: propina que el cliente paga en efectivo según la plataforma. La escribe SÓLO la ingesta, porque cada cobro
+  /// reescribe `tipAmount` con lo cobrado y la propina pendiente se perdería tras un abono chico. Null fuera de ese carril.
+  cashTipDue        Decimal? @db.Decimal(12, 2)
 
   // Status
   status        OrderStatus   @default(PENDING)
@@ -4380,6 +4389,11 @@ model OrderItem {
   /// Origen v7 inmutable. Único evita importar dos veces la misma línea de vale.
   areaTicketLineId String?         @unique
   areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
+  /// Procedencia de un renglón de vale cuya venta se CANCELÓ y cuyo vale se volvió a cobrar en otra cuenta (21-oct-2026, tablero
+  /// hz:11d84b54:D1). El renglón se queda en su cuenta cancelada (producto, IVA, peso, asignaciones), pero suelta `areaTicketLineId`
+  /// (único) para que la cuenta nueva lo tome. Sigue siendo un renglón DE VALE para clasificar la cuenta, y nunca se descuenta ni se
+  /// cocina aquí: el vale ya es de otra cuenta (si R12-1 reabre esta con dinero tardío). Ver `renglonDeVale.ts`.
+  releasedAreaTicketLineId String?
 
   /// Tarjetas de regalo (spec 2026-10-14 § 4.4): el sobre que esta línea VENDE. Una línea = un sobre (1:1, molde
   /// `areaTicketLineId`). Una cuenta cuyas líneas TODAS tienen `giftCardId` es una «cuenta de tarjetas»: el servidor
@@ -4412,6 +4426,7 @@ model OrderItem {
   @@index([syncStatus]) // ✅ NUEVO
   @@index([fulfillmentAreaId]) // pantalla "vales pendientes" por área
   @@index([orderPromotionId]) // retiro de promoción completa borra por aquí
+  @@index([releasedAreaTicketLineId]) // vale revendido: de qué cuenta cancelada salió
 }
 
 // ==========================================
@@ -4592,6 +4607,10 @@ model Payment {
   // Amounts
   amount    Decimal @db.Decimal(12, 2)
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
+  /// Rappi 2b: parte de este cobro en efectivo que el negocio recibió por cuenta de un tercero (tarifa de Rappi). Fuera de
+  /// `amount`/`tipAmount`, o sea fuera de venta, propina, CFDI, comisión y lealtad; entra al cajón como PAY_IN
+  /// `srv-third-party:<id>`. Se escribe en la MISMA transacción que el cobro. Null en todo lo demás.
+  thirdPartyCashAmount Decimal? @db.Decimal(12, 2)
 
   // Payment info
   method    PaymentMethod
@@ -5631,6 +5650,18 @@ model Terminal {
   customerDisplayRequestVersion   Int       @default(0)
   customerDisplayRequestExpiresAt DateTime?
 
+  /// null = el aparato no entiende diseños; 1 = marca, textos y pasos; 2 = además carrusel y promos
+  customerDisplayDesignVersion        Int?
+  /// La instalación que reportó por última vez. Si cambia, se limpia el ack (spec §5.7.2)
+  customerDisplayInstallationId       String?
+  /// Hora DEL SERVIDOR en que esa instalación tomó la fila
+  customerDisplayInstallationSince    DateTime?
+  /// Las últimas 5 horas (del servidor) en que cambió la instalación
+  customerDisplayInstallationSwitches Json?
+  /// { fingerprint, seq, receivedAt, storedAt, shownAt, clientClockSkew, surface, imagesReady, imagesPending, imagesFailed, unsupportedSchema }
+  customerDisplayAck                  Json?
+  customerDisplayDesign               CustomerDisplayDesign?
+
   scaleProfileId String?
   scaleProfile   ScaleProfile? @relation(fields: [scaleProfileId], references: [id], onDelete: SetNull)
 
@@ -5708,6 +5739,46 @@ model Terminal {
   @@index([customerDisplayRequestExpiresAt])
   @@index([type, createdAt, id]) // TPV fleet pagination
 
+}
+
+/// El diseño de la pantalla del cliente de UNA terminal. El venue sale SIEMPRE de la terminal:
+/// duplicarlo aquí abriría la puerta a que las dos fuentes discrepen tras un traslado.
+model CustomerDisplayDesign {
+  id             String               @id @default(cuid())
+  terminalId     String               @unique
+  terminal       Terminal             @relation(fields: [terminalId], references: [id], onDelete: Cascade)
+  theme          CustomerDisplayTheme @default(LIGHT)
+  accentColor    String? /// #RRGGBB; null = los colores de hoy
+  logoAssetId    String? /// activo LOGO; null = el logo del negocio
+  welcomeText    String? /// null = "Bienvenido"
+  thanksText     String? /// null = "Gracias por tu compra"
+  slides         Json                 @default("[]") /// [{ "assetId": "…" }], ≤ 4, activos SLIDE
+  slideSeconds   Int                  @default(8)
+  showPromotions Boolean              @default(false)
+  schemaVersion  Int                  @default(1)
+  /// Restablecer NO la reinicia: es otra escritura. Mover la terminal de negocio SÍ borra la fila.
+  revision       Int                  @default(1)
+  updatedById    String?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+}
+
+/// Una imagen que subió el negocio. Es INMUTABLE: su ruta lleva un uuid y su sha256 viaja en la ficha.
+model CustomerDisplayAsset {
+  id          String                   @id @default(cuid())
+  venueId     String
+  venue       Venue                    @relation(fields: [venueId], references: [id], onDelete: Cascade)
+  kind        CustomerDisplayAssetKind
+  objectPath  String                   @unique /// {env}/customer-display-assets/{venueId}/{uuid}.{ext}
+  sha256      String
+  mime        String
+  width       Int
+  height      Int
+  bytes       Int
+  createdById String?
+  createdAt   DateTime                 @default(now())
+
+  @@index([venueId, kind])
 }
 
 // ==========================================
@@ -6571,6 +6642,7 @@ model CheckoutSession {
   description String? // Description of the payment
 
   // Customer info (optional)
+  attributedCustomerId String? // Internal attribution snapshot; payer contacts stay separate
   customerEmail String?
   customerPhone String?
   customerName  String?
@@ -7778,6 +7850,7 @@ model ActivityLog {
 // ==========================================
 
 model Customer {
+  paymentLinks PaymentLink[]
   id    String  @id @default(cuid())
   email String? // Unique per venue, not globally (allows same email in different venues)
   phone String? // Unique per venue, not globally
@@ -10210,6 +10283,16 @@ enum TerminalStatus {
   INACTIVE
   MAINTENANCE
   RETIRED
+}
+
+enum CustomerDisplayTheme {
+  LIGHT
+  DARK
+}
+
+enum CustomerDisplayAssetKind {
+  SLIDE
+  LOGO
 }
 
 enum SyncStatus {
@@ -15684,6 +15767,11 @@ model PaymentLink {
   createdById         String
   createdBy           Staff             @relation("PaymentLinkCreatedBy", fields: [createdById], references: [id])
 
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  creationKey  String?   @db.VarChar(128)
+  creationHash String?
+
   /// Staff explicitly chosen by the link creator to receive commission
   /// attribution when the link is paid. Separate from `createdById`:
   /// the link CREATOR may be an admin/manager who shouldn't earn the
@@ -15725,6 +15813,8 @@ model PaymentLink {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([venueId, customerId, createdAt, id])
+  @@unique([venueId, createdById, creationKey])
   @@index([venueId])
   @@index([shortCode])
   @@index([status])
@@ -18682,6 +18772,8 @@ model PosSyncIntent {
   errorCode      String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
   /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
   resultJson     Json?
+  /// Obligación interna post-commit de CANCEL HTTP; SQL NULL = sin efectos pendientes. No viaja al cliente.
+  cancelEffectsJson Json?
   createdAt      DateTime @default(now())
 
   @@unique([venueId, idempotencyKey])

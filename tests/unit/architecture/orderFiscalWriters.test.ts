@@ -260,6 +260,10 @@ const PAYMENT_LANE = (mentions: string) =>
 
 /** Fiscal writers (detected by the scan). Keys are `file#owner`. */
 const WRITERS: Record<string, Writer> = {
+  'src/services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado': {
+    class: 'METADATA',
+    reason: 'platform order closed by status and dates only; the raw UPDATE rechecks decision B without writing money columns',
+  },
   // ── TPV line and inline-discount writers (T2) ─────────────────────────────────────────────────
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': {
     class: 'LOCKED',
@@ -589,6 +593,18 @@ const WRITERS: Record<string, Writer> = {
     proof: PAYMENT_LANE('registrarAbonoEnTx'),
   },
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': { class: 'LOCKED', lock: LOCK, proof: PAYMENT_LANE('settleOrder') },
+  // D2 (24-oct): corregir el importe de una venta verificada mueve la cuenta. `editOrgSaleVerification` toma la cuenta con
+  // `lockExistingOrderForPayment` ANTES que el cobro y llama a este escritor dentro de la misma transacción.
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#moverCuentaAlImporte': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification'],
+    proof: proof(
+      'tests/integration/payments/ventaCorregidaMueveLaCuenta.integration.test.ts',
+      'editOrgSaleVerification',
+      'EDITOR PRIMERO · con la corrección en curso la cuenta está TOMADA',
+      'OTRO PRIMERO · si otro escritor tiene la cuenta y le agrega un cobro, la corrección espera, relee y responde 409',
+    ),
+  },
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': {
     class: 'LOCKED',
     lock: LOCK,
@@ -710,10 +726,17 @@ const WRITERS: Record<string, Writer> = {
     class: 'METADATA',
     reason: 'kitchen ticket authoring: sentToKitchenAt stamp on lines and the kitchenPendingAt marker on the order',
   },
+  // D1 (21-oct, tablero hz:11d84b54:D1): re-cobrar el vale de una venta CANCELADA. Bajo el candado de esa Order (sesión → vales →
+  // Order), sólo en una cuenta CANCELLED/DELETED, mueve el vínculo único del vale a la procedencia; no toca dinero ni el contenido.
+  'src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas': {
+    class: 'METADATA',
+    reason: 'vale provenance: areaTicketLineId → releasedAreaTicketLineId on a CANCELLED order line, under its Order lock; no money',
+  },
 }
 
 /** Functions that are not fiscal writers themselves but hold the Order lock for a CALLER_LOCKED helper. */
 const LOCK_HOLDERS: Record<string, string[]> = {
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': LOCK,
   'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': LOCK,
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': ['lockDiscountOrder('],
   'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
@@ -1126,6 +1149,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#mergeOrders': 1,
   'src/services/mobile/order.mobile.service.ts#cancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': 1,
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': 1,
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': 1,
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': 1,

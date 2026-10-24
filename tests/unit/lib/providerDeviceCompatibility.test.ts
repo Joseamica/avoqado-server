@@ -11,20 +11,34 @@ import {
   PROVIDER_DEVICE_COMPATIBILITY,
   isProviderCompatibleWithBrand,
   assertVenueHasCompatibleTerminal,
+  assertAngelPayLoginsInVenue,
+  assertMerchantsTerminalCompatible,
+  assertNuevaLlaveEnLosNegociosDelComercio,
+  ANGELPAY_LOGIN_EN_OTRO_NEGOCIO,
 } from '@/lib/providerDeviceCompatibility'
-import { IncompatibleDeviceError } from '@/errors/AppError'
+import { ConflictError, IncompatibleDeviceError } from '@/errors/AppError'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     terminal: {
       count: jest.fn(),
+      findUnique: jest.fn(),
+      findFirst: jest.fn(),
     },
+    merchantAccount: {
+      findMany: jest.fn(),
+    },
+    angelPayUserAccount: { findUnique: jest.fn() },
+    venuePaymentConfig: { findFirst: jest.fn() },
   },
 }))
 
 const mockedPrisma = prisma as unknown as {
-  terminal: { count: jest.Mock }
+  terminal: { count: jest.Mock; findUnique: jest.Mock; findFirst: jest.Mock }
+  merchantAccount: { findMany: jest.Mock }
+  angelPayUserAccount: { findUnique: jest.Mock }
+  venuePaymentConfig: { findFirst: jest.Mock }
 }
 
 describe('providerDeviceCompatibility', () => {
@@ -135,6 +149,111 @@ describe('providerDeviceCompatibility', () => {
       // Tx mock was used, default prisma client was NOT
       expect((txMock as any).terminal.count).toHaveBeenCalledTimes(1)
       expect(mockedPrisma.terminal.count).not.toHaveBeenCalled()
+    })
+  })
+
+  // IQ, 20-oct-2026: a la Nexgo de IQ se le asignó el comercio «IQ T», cuya llave de AngelPay seguía en Amaena. El panel
+  // dijo «guardado» y la terminal no podía cobrar («Faltan credenciales de AngelPay»).
+  describe('assertAngelPayLoginsInVenue()', () => {
+    const ajeno = {
+      id: 'ma-iq-t',
+      displayName: 'IQ T',
+      externalMerchantId: '1416',
+      angelpayUserAccount: { venue: { name: 'Amaena' } },
+    }
+
+    it('rechaza un comercio cuya llave de AngelPay es de otro negocio, nombrando el comercio y el negocio', async () => {
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([ajeno])
+
+      const intento = assertAngelPayLoginsInVenue('venue-iq', ['ma-iq-t'])
+
+      await expect(intento).rejects.toBeInstanceOf(ConflictError)
+      await expect(intento).rejects.toMatchObject({ code: ANGELPAY_LOGIN_EN_OTRO_NEGOCIO, statusCode: 409 })
+      await expect(intento).rejects.toThrow(/IQ T.*Amaena.*IA/)
+      expect(mockedPrisma.merchantAccount.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { id: { in: ['ma-iq-t'] }, angelpayUserAccount: { venueId: { not: 'venue-iq' } } },
+          take: 1,
+        }),
+      )
+    })
+
+    it('deja pasar cuando todas las llaves son del negocio (o el comercio no es de AngelPay)', async () => {
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([])
+
+      await expect(assertAngelPayLoginsInVenue('venue-iq', ['ma-1', 'ma-2'])).resolves.toBeUndefined()
+    })
+
+    it('no consulta nada sin comercios (ignora vacíos y repetidos)', async () => {
+      await expect(assertAngelPayLoginsInVenue('venue-iq', [])).resolves.toBeUndefined()
+      await expect(assertAngelPayLoginsInVenue('venue-iq', [null, undefined])).resolves.toBeUndefined()
+      expect(mockedPrisma.merchantAccount.findMany).not.toHaveBeenCalled()
+
+      mockedPrisma.merchantAccount.findMany.mockResolvedValue([])
+      await assertAngelPayLoginsInVenue('venue-iq', ['ma-1', 'ma-1'])
+      expect(mockedPrisma.merchantAccount.findMany.mock.calls[0][0].where.id.in).toEqual(['ma-1'])
+    })
+  })
+
+  describe('assertMerchantsTerminalCompatible() — llave de AngelPay del negocio', () => {
+    beforeEach(() => {
+      mockedPrisma.terminal.findUnique.mockResolvedValue({ id: 't-1', brand: 'NEXGO', venueId: 'venue-iq' })
+    })
+
+    it('compara contra el negocio actual de la terminal por default', async () => {
+      mockedPrisma.merchantAccount.findMany
+        .mockResolvedValueOnce([{ id: 'ma-iq-t', provider: { code: 'ANGELPAY' } }])
+        .mockResolvedValueOnce([
+          { id: 'ma-iq-t', displayName: 'IQ T', externalMerchantId: '1416', angelpayUserAccount: { venue: { name: 'Amaena' } } },
+        ])
+
+      await expect(assertMerchantsTerminalCompatible('t-1', ['ma-iq-t'])).rejects.toMatchObject({ code: ANGELPAY_LOGIN_EN_OTRO_NEGOCIO })
+      expect(mockedPrisma.merchantAccount.findMany.mock.calls[1][0].where.angelpayUserAccount).toEqual({ venueId: { not: 'venue-iq' } })
+    })
+
+    it('en una migración compara contra el negocio DESTINO, no el actual', async () => {
+      mockedPrisma.merchantAccount.findMany
+        .mockResolvedValueOnce([{ id: 'ma-1', provider: { code: 'ANGELPAY' } }])
+        .mockResolvedValueOnce([])
+
+      await expect(assertMerchantsTerminalCompatible('t-1', ['ma-1'], undefined, 'venue-destino')).resolves.toBeUndefined()
+      expect(mockedPrisma.merchantAccount.findMany.mock.calls[1][0].where.angelpayUserAccount).toEqual({
+        venueId: { not: 'venue-destino' },
+      })
+    })
+  })
+
+  describe('assertNuevaLlaveEnLosNegociosDelComercio()', () => {
+    beforeEach(() => {
+      mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue({ venueId: 'venue-amaena', venue: { name: 'Amaena' } })
+      mockedPrisma.terminal.findFirst.mockResolvedValue(null)
+      mockedPrisma.venuePaymentConfig.findFirst.mockResolvedValue(null)
+    })
+
+    it('rechaza cambiar a una llave de otro negocio si el comercio ya cobra en una terminal', async () => {
+      mockedPrisma.terminal.findFirst.mockResolvedValue({ venue: { name: 'IQ' } })
+
+      const intento = assertNuevaLlaveEnLosNegociosDelComercio('ma-iq-t', 'login-amaena')
+
+      await expect(intento).rejects.toMatchObject({ code: ANGELPAY_LOGIN_EN_OTRO_NEGOCIO })
+      await expect(intento).rejects.toThrow(/IQ.*Amaena.*IA/)
+      expect(mockedPrisma.terminal.findFirst.mock.calls[0][0].where).toEqual({
+        assignedMerchantIds: { has: 'ma-iq-t' },
+        venueId: { not: 'venue-amaena' },
+      })
+    })
+
+    it('rechaza si el comercio es cuenta de otro negocio aunque ninguna terminal lo tenga', async () => {
+      mockedPrisma.venuePaymentConfig.findFirst.mockResolvedValue({ venue: { name: 'IQ' } })
+
+      await expect(assertNuevaLlaveEnLosNegociosDelComercio('ma-iq-t', 'login-amaena')).rejects.toBeInstanceOf(ConflictError)
+    })
+
+    it('deja pasar si el comercio no cobra en otro negocio, o si la llave no existe (la rechaza la base)', async () => {
+      await expect(assertNuevaLlaveEnLosNegociosDelComercio('ma-iq-t', 'login-amaena')).resolves.toBeUndefined()
+
+      mockedPrisma.angelPayUserAccount.findUnique.mockResolvedValue(null)
+      await expect(assertNuevaLlaveEnLosNegociosDelComercio('ma-iq-t', 'no-existe')).resolves.toBeUndefined()
     })
   })
 })

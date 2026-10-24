@@ -46,6 +46,7 @@ import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
 import AppError, {
   BadRequestError,
+  ConflictError,
   OrderAlreadyPaidError,
   TerminalBusyError,
   TerminalPaymentAdmissionRetryError,
@@ -53,6 +54,7 @@ import AppError, {
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
 import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
@@ -1194,6 +1196,8 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_CANCELLED'
   | 'REJECTED_ORDER_PAID'
   | 'REJECTED_ORDER_NOT_FOUND'
+  /** Rappi 2b: pedido de Rappi en efectivo (lo cobra el repartidor; se registra con «Cobrar» en efectivo). */
+  | 'REJECTED_ORDER_RAPPI_CASH'
 
 /** Lo que decide la transacción de admisión. El rechazo se DEVUELVE (no se lanza: el throw revertiría la lápida). */
 type Admision =
@@ -1269,6 +1273,8 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         'ORDER_CANCELLED_NO_NEW_CHARGE',
         details,
       )
+    case 'REJECTED_ORDER_RAPPI_CASH':
+      return new ConflictError(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
     case 'REJECTED_ORDER_PAID':
       return new OrderAlreadyPaidError(mensaje('La cuenta ya está pagada por completo. Actualiza la lista de órdenes.'), details)
     case 'REJECTED_ORDER_NOT_FOUND':
@@ -1720,7 +1726,7 @@ class TerminalPaymentService {
         if (mine) return { tipo: 'replica', fila: mine }
         const order = await tx.order.findFirst({
           where: { id: request.orderId, venueId },
-          select: { paymentStatus: true, orderNumber: true, status: true },
+          select: { paymentStatus: true, orderNumber: true, status: true, thirdPartyCashDue: true },
         })
         if (!order) {
           return rechazar(
@@ -1740,6 +1746,14 @@ class TerminalPaymentService {
               'ORDER_CANCELLED_NO_NEW_CHARGE',
               detalles,
             ),
+          )
+        }
+        // Rappi 2b (T7): una autorización NUEVA de tarjeta no cobra un pedido de Rappi en efectivo (no sabe repartir venta, propina y
+        // lo de Rappi). Bajo el MISMO lock y antes de tocar la terminal: no hay dinero movido.
+        if (esRappiEnEfectivo(order)) {
+          return rechazar(
+            'REJECTED_ORDER_RAPPI_CASH',
+            new ConflictError(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
           )
         }
         if (order.paymentStatus === 'PAID') {
@@ -2333,7 +2347,7 @@ class TerminalPaymentService {
         terminalId: normalizedTerminalId,
         venueId,
         status: { in: IN_FLIGHT },
-        expiresAt: { gt: new Date() },
+        OR: [{ expiresAt: { gt: new Date() } }, { status: TerminalPaymentRequestStatus.CANCEL_REQUESTED }],
       },
       orderBy: { createdAt: 'asc' },
       take: 1,
@@ -2355,6 +2369,9 @@ class TerminalPaymentService {
           reason: 'Cancelación pendiente durante reconexión',
           timestamp: new Date().toISOString(),
         })
+        await this.probeUnresolvedForTerminal(terminalId, venueId, socketId, row.requestId).catch(error =>
+          logger.warn('⚠️ [TerminalPayment] Cancellation probe deferred on reconnect', { requestId: row.requestId, error: String(error) }),
+        )
         continue
       }
 
@@ -3578,21 +3595,22 @@ class TerminalPaymentService {
         continue
       }
 
-      // Unknown outcome — HOLD the slot (never free blind), alert, flag for manual reconcile.
-      // 🚨 token is the stable string Better Stack's alert rule matches — do NOT rename.
-      logger.error(`🚨 [Terminal-payment watchdog] Row went UNKNOWN — manual reconcile needed`, {
-        requestId: row.requestId,
-        terminalId: row.terminalId,
-        venueId: row.venueId,
-        orderId: row.orderId,
-        ageSeconds: Math.floor((now.getTime() - row.createdAt.getTime()) / 1000),
-      })
+      // Unknown outcome — HOLD the slot; only the transition winner alerts.
       const r = await prisma.terminalPaymentRequest.updateMany({
-        where: { id: row.id, status: { in: IN_FLIGHT } },
+        where: { id: row.id, venueId: row.venueId, status: { in: IN_FLIGHT } },
         data: { status: TerminalPaymentRequestStatus.UNKNOWN, failureCode: 'TIMED_OUT' },
       })
       unknown += r.count
       if (r.count > 0) {
+        const ageSeconds = Math.max(0, Math.floor((now.getTime() - row.createdAt.getTime()) / 1000))
+        // 🚨 token is the stable string Better Stack's alert rule matches — do NOT rename.
+        logger.error(`🚨 [Terminal-payment watchdog] Row went UNKNOWN — manual reconcile needed`, {
+          requestId: row.requestId,
+          terminalId: row.terminalId,
+          venueId: row.venueId,
+          orderId: row.orderId,
+          ageSeconds,
+        })
         // Second channel, independent of the log pipeline (see opsAlert.service.ts). Outside
         // any retry/transaction on purpose, and NOT awaited: a hung mail provider must never stall
         // this tick (the job's isRunning latch would then skip every following sweep, including
@@ -3600,9 +3618,12 @@ class TerminalPaymentService {
         void sendOpsAlert({
           subject: `Terminal ${row.terminalId}: cobro sin respuesta (${row.venueId})`,
           lines: [
-            `Un cobro de $${(row.amountCents / 100).toFixed(2)} enviado a la terminal ${row.terminalId} no obtuvo respuesta en 5 minutos (requestId ${row.requestId}, orden ${row.orderId ?? 'sin orden'}).`,
-            'La terminal conserva la reserva hasta confirmar el resultado del cobro y que terminó su ejecución; reconectar o esperar no la libera.',
-            'Confirma el resultado en la terminal o concilia con el procesador. No vuelvas a pasar la tarjeta mientras siga pendiente.',
+            `Un cobro de $${(row.amountCents / 100).toFixed(2)} enviado a la terminal ${row.terminalId} lleva ${ageSeconds} segundos sin resultado confirmado (requestId ${row.requestId}, orden ${row.orderId ?? 'sin orden'}).`,
+            row.status === TerminalPaymentRequestStatus.CANCEL_REQUESTED
+              ? 'La cancelación solicitada sigue sin confirmarse; solicitarla no demuestra que no se cobró.'
+              : 'La terminal no ha confirmado el resultado del cobro.',
+            'Mientras el resultado siga pendiente, la solicitud conserva la reserva. El sistema sigue consultando la evidencia disponible.',
+            'Revisa el estado actual: si continúa pendiente, confirma el resultado en la terminal o concilia con el procesador. No vuelvas a pasar la tarjeta mientras siga pendiente.',
           ],
         })
       }
@@ -6045,6 +6066,11 @@ class TerminalPaymentService {
     // `cancelEmitted` significa EMITIDO a un socket del registro. No promete recepción: la terminal puede estar
     // dormida (Doze) con el socket todavía registrado, y el APK publicado ni siquiera contesta la disposición.
     const cancelEmitted = await this.emitCancelToTerminal(terminalEntry?.socketId, terminalId, requestId, reason)
+    if (terminalEntry?.socketId) {
+      await this.probeUnresolvedForTerminal(terminalId, venueId, terminalEntry.socketId, requestId).catch(error =>
+        logger.warn('⚠️ [TerminalPayment] Cancellation probe deferred', { requestId, venueId, error: String(error) }),
+      )
+    }
     // Se relee DESPUÉS del CAS y de la emisión: la terminal puede haber contestado ACCEPTED en ese hueco, y la
     // proyección tiene que decir la verdad de ESTE instante, no la que se supuso al escribir la intención.
     const fila = await prisma.terminalPaymentRequest.findFirst({ where: { requestId, venueId } })
@@ -6729,7 +6755,7 @@ class TerminalPaymentService {
    * evidencia llega en `terminal:payment_probe_result` y se aplica en `handleProbeResultFromSocket`.
    * Un APK viejo no anuncia la capacidad ⇒ no se le pregunta ⇒ ninguna liberación falsa.
    */
-  async probeUnresolvedForTerminal(terminalId: string, venueId: string | undefined, socketId: string): Promise<number> {
+  async probeUnresolvedForTerminal(terminalId: string, venueId: string | undefined, socketId: string, requestId?: string): Promise<number> {
     if (!venueId) return 0
     const entry = terminalRegistry.getTerminal(terminalId)
     if (
@@ -6745,10 +6771,18 @@ class TerminalPaymentService {
     if (!directSocket) return 0
 
     const rows = await prisma.terminalPaymentRequest.findMany({
-      where: { terminalId: normalizeTerminalId(terminalId), venueId, ...SIN_DESENLACE_ACREDITADO },
+      where: {
+        terminalId: normalizeTerminalId(terminalId),
+        venueId,
+        // A cancellation must not queue behind 25 historical obligations; never probe a new SENT/PENDING charge.
+        ...(requestId
+          ? { requestId, OR: [{ status: TerminalPaymentRequestStatus.CANCEL_REQUESTED }, SIN_DESENLACE_ACREDITADO] }
+          : SIN_DESENLACE_ACREDITADO),
+      },
       select: { requestId: true, amountCents: true, tipCents: true, status: true },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: PROBE_BATCH,
+      // UNKNOWN is the highest enum value: query the held slot before historical obligations.
+      orderBy: [{ status: 'desc' }, { createdAt: 'asc' }, { id: 'asc' }],
+      take: requestId ? 1 : PROBE_BATCH,
     })
     const ahora = Date.now()
     const candidatas = rows.filter(row => {
@@ -6982,17 +7016,25 @@ class TerminalPaymentService {
       // preguntar y escribía otro 🚨 y otro asiento (≈2 880 al día por fila).
       this.marcarEsperaDeSonda(requestId)
       const auditar = await this.debeAuditar('TERMINAL_PAYMENT_PROBE_CONTRADICTION', row.id)
-      logger.error(
-        '🚨 [Terminal-payment] Probe contradiction: the terminal acknowledged this request but no longer has it — reservation kept',
-        {
-          requestId,
-          terminalId: row.terminalId,
-          venueId: terminal.venueId,
-          status: row.status,
-          acknowledgedAt: row.acknowledgedAt,
-          audited: auditar,
-        },
-      )
+      const aviso = {
+        requestId,
+        terminalId: row.terminalId,
+        venueId: terminal.venueId,
+        status: row.status,
+        acknowledgedAt: row.acknowledgedAt,
+        audited: auditar,
+      }
+      // La espera de arriba vive en memoria: cada reconexión de la terminal o reinicio del servidor vuelve a preguntar por
+      // la MISMA fila (24-oct-2026: 9 filas de Testarudo del 9 y 10-sep ⇒ el correo «🚨 Terminal-payment crítico» varias
+      // veces al día). El 🚨 es para la PRIMERA contradicción, que queda en ActivityLog; repetirla no trae evidencia nueva.
+      if (auditar) {
+        logger.error(
+          '🚨 [Terminal-payment] Probe contradiction: the terminal acknowledged this request but no longer has it — reservation kept',
+          aviso,
+        )
+      } else {
+        logger.info('🔎 [TerminalPayment] Probe contradiction repeated on a row already kept for an operator (no new evidence)', aviso)
+      }
       if (auditar)
         void logAction({
           venueId: terminal.venueId,

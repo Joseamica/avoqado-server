@@ -7,7 +7,13 @@ import {
   findSesionesDeVentasCerradasPorOtroCanal,
   type SesionDeVentaCerradaPorOtroCanal,
 } from '../services/mobile/areaTicketV7.mobile.service'
-import { findPaidButOpenOrders, type CandidataPagadaAbierta } from '../services/shared/pagadaPeroAbierta'
+import {
+  cerrarPedidoDePlataformaSoloDeEstado,
+  findPaidButOpenOrders,
+  findPedidosDePlataformaPorCerrar,
+  type CandidataPagadaAbierta,
+  type PedidoDePlataformaPorCerrar,
+} from '../services/shared/pagadaPeroAbierta'
 import { findSesionesDeValesAtoradas, reconcileOrderFromPayments, retomarCobroDeValesAtorado } from '../services/tpv/payment.tpv.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -64,6 +70,14 @@ import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
  * reservas sin mover stock (`cerrarSesionDeVentaCerradaPorOtroCanal`). Sin pagos, descuentos, lealtad ni comanda. Asiento:
  * `AREA_TICKET_SESSION_CLOSED_BY_SALE`.
  *
+ * 🔴 Y Codex b1 #1/#5 (Rappi fase 2, 22-oct-2026): un pedido cuyo dinero liquida una PLATAFORMA de reparto (Uber, Rappi…) nunca
+ * pasa por el reparador. Su total lleva cargos del comercio (el envío del repartidor propio, los cargos de Uber) que la aritmética
+ * del cobro no ve: se los quitaba y denunciaba un sobrepago falso. Una cuarta pasada lo cierra SÓLO DE ESTADO, sin tocar su
+ * dinero, y nunca uno que todavía espera a que la cocina lo acepte (Uber MANUAL). CUÁNDO se cierra uno aceptado lo dice la
+ * decisión «B» del founder (22-oct-2026, `momentoDeCerrarUnPedidoDePlataformaSql`): cuando la cocina lo termina o al acabar su
+ * día del negocio (el de la caja: corte de las 04:00 en la zona del venue, `businessDayStart`), lo que pase primero; mientras tanto la cocina conserva «Cancelar». Asiento:
+ * `ORDER_RECONCILED_PAID` con `effects: 'PLATFORM_ORDER_STATUS_ONLY'`.
+ *
  * 🔴 Y cierra SIEMPRE por ese camino, nunca por `computeOrderBalance`: el criterio y el cierre
  * tienen que compartir aritmética, o una orden quedaría elegida por uno y rechazada por el otro
  * en cada pasada, para siempre. Hoy la base del criterio vive en `shared/pagadaPeroAbierta.ts`
@@ -107,6 +121,10 @@ export interface ReconcileResult {
   sessionsClosed: number
   /** R13-4: en la simulación, las sesiones que la tercera pasada cerraría (la misma selección); fuera de ella, vacío. */
   sessionsToClose: SesionDeVentaCerradaPorOtroCanal[]
+  /** Codex b1 #1: pedidos de plataforma que la cuarta pasada cerró sólo de estado (su dinero, intacto). */
+  platformClosed: number
+  /** En la simulación, los pedidos de plataforma que la cuarta pasada cerraría (la misma selección); fuera de ella, vacío. */
+  platformToClose: PedidoDePlataformaPorCerrar[]
 }
 
 interface Dependencies {
@@ -123,6 +141,10 @@ interface Dependencies {
   findSesionesDeVentasCerradas: (opts: { limit: number; since: Date }) => Promise<SesionDeVentaCerradaPorOtroCanal[]>
   /** R12-3: la cierra bajo la jerarquía de vales y suelta sus reservas; `false` = bajo el candado ya no cumple. */
   cerrarSesionDeVentaCerrada: (venueId: string, orderId: string) => Promise<boolean>
+  /** Codex b1 #1: los pedidos de plataforma pagados y aceptados que ya toca cerrar (acotados, del más viejo al más nuevo). */
+  findPedidosDePlataforma: (opts: { graceMs: number; limit: number; now: Date; since: Date }) => Promise<PedidoDePlataformaPorCerrar[]>
+  /** Lo cierra sólo de estado (CAS); `false` = otro lo cambió en medio. Nunca toca su dinero. */
+  cerrarPedidoDePlataforma: (p: PedidoDePlataformaPorCerrar, ahora: Date) => Promise<boolean>
 }
 
 export const defaults: Dependencies = {
@@ -134,6 +156,8 @@ export const defaults: Dependencies = {
   findSesionesAtoradas: opts => findSesionesDeValesAtoradas(prisma, opts),
   findSesionesDeVentasCerradas: opts => findSesionesDeVentasCerradasPorOtroCanal(prisma, opts),
   cerrarSesionDeVentaCerrada: cerrarSesionDeVentaCerradaPorOtroCanal,
+  findPedidosDePlataforma: opts => findPedidosDePlataformaPorCerrar(prisma, opts),
+  cerrarPedidoDePlataforma: (p, ahora) => cerrarPedidoDePlataformaSoloDeEstado(prisma, p, ahora),
 }
 
 export class PaidOrderReconcilerJob {
@@ -185,6 +209,8 @@ export class PaidOrderReconcilerJob {
       sessionsRecovered: 0,
       sessionsClosed: 0,
       sessionsToClose: [],
+      platformClosed: 0,
+      platformToClose: [],
     }
     if (this.running) return { ...empty, skipped: 1 }
     this.running = true
@@ -202,6 +228,7 @@ export class PaidOrderReconcilerJob {
       if (dryRun) {
         // R13-4: la simulación también lista las sesiones de la tercera pasada (sólo lee), como lista las candidatas.
         result.sessionsToClose = await this.buscarSesionesDeVentasCerradas(since)
+        result.platformToClose = await this.buscarPedidosDePlataforma(now, since)
         return result
       }
       for (const c of candidates) {
@@ -274,8 +301,9 @@ export class PaidOrderReconcilerJob {
       }
       await this.retomarSesionesAtoradas(now, since, result, new Set(candidates.map(c => c.id)))
       await this.cerrarSesionesDeVentasCerradas(since, result)
-      if (result.scanned > 0 || result.sessionsRecovered > 0 || result.sessionsClosed > 0)
-        logger.info('🧾 [paid-order-reconciler] barrido', { ...result, candidates: undefined })
+      await this.cerrarPedidosDePlataforma(now, since, result)
+      if (result.scanned > 0 || result.sessionsRecovered > 0 || result.sessionsClosed > 0 || result.platformClosed > 0)
+        logger.info('🧾 [paid-order-reconciler] barrido', { ...result, candidates: undefined, platformToClose: undefined })
       return result
     } finally {
       this.running = false
@@ -348,6 +376,49 @@ export class PaidOrderReconcilerJob {
         logger.warn('🧾 [paid-order-reconciler] no se pudo cerrar la sesión ni soltar las reservas de una venta ya cerrada', {
           orderId: s.orderId,
           venueId: s.venueId,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
+    }
+  }
+
+  private buscarPedidosDePlataforma(now: Date, since: Date): Promise<PedidoDePlataformaPorCerrar[]> {
+    return this.d.retryEntry(() => this.d.findPedidosDePlataforma({ graceMs: GRACE_MS, limit: BATCH_LIMIT, now, since }), {
+      retries: 2,
+      initialDelay: 1500,
+      shouldRetry: shouldRetryDbConnectionError,
+      context: 'paid-order-reconciler.find-platform-orders',
+    })
+  }
+
+  /**
+   * 🔴 Codex b1 #1: la cuarta pasada. Un pedido de plataforma se cierra SÓLO de estado: su dinero es del núcleo de reparto y el
+   * reparador del cobro se lo corrompía. Uno que otro cambió en medio no se asienta; un fallo no detiene a los demás.
+   */
+  private async cerrarPedidosDePlataforma(now: Date, since: Date, result: ReconcileResult): Promise<void> {
+    const pedidos = await this.buscarPedidosDePlataforma(now, since)
+    for (const p of pedidos) {
+      try {
+        if (!(await this.d.cerrarPedidoDePlataforma(p, now))) continue
+        result.platformClosed += 1
+        await logAction({
+          staffId: null,
+          venueId: p.venueId,
+          action: 'ORDER_RECONCILED_PAID',
+          entity: 'Order',
+          entityId: p.id,
+          data: {
+            orderNumber: p.orderNumber,
+            before: { status: p.status },
+            sweep: 'paid-order-reconciler',
+            effects: 'PLATFORM_ORDER_STATUS_ONLY',
+          },
+        })
+      } catch (error) {
+        result.failed += 1
+        logger.warn('🧾 [paid-order-reconciler] no se pudo cerrar de estado un pedido de plataforma; se conserva como está', {
+          orderId: p.id,
+          venueId: p.venueId,
           error: error instanceof Error ? error.message : String(error),
         })
       }

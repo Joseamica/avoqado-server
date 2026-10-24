@@ -29,6 +29,8 @@ interface TableStatusResponse {
   /** Tamaño propio (spec 2026-10-12), 0–1 de la cuadrícula de su área; null = automático. Opcional: create/updateTable no lo mandan. */
   width?: number | null
   height?: number | null
+  /** Cuentas fuera del plano (23-oct): mesa ARCHIVADA que sigue aquí porque tiene una cuenta viva. Va sin posición. Opcional. */
+  archived?: boolean
   currentOrder: {
     id: string
     orderNumber: string
@@ -112,7 +114,9 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
   const tables = await prisma.table.findMany({
     // Only active tables — soft-deleted ones (active: false) must not resurface
     // on the floor plan. Mirrors getFloorElements, which already filters active.
-    where: { venueId, active: true },
+    // 🔴 Salvo una archivada con una cuenta VIVA (la abrió o la movió un aparato sin red con el plano viejo): sin ella, esa cuenta no
+    // se veía en ningún aparato (cuentas fuera del plano, 23-oct). Mismo conjunto que cuenta `tablesVersionSql`.
+    where: { venueId, OR: [{ active: true }, { id: { in: [...openByTable.keys()] } }] },
     include: {
       area: {
         select: { id: true, name: true, sortOrder: true, floorShape: true },
@@ -139,8 +143,10 @@ export async function getTablesWithStatus(venueId: string): Promise<TableStatusR
     id: table.id,
     number: table.number,
     capacity: table.capacity,
-    positionX: table.positionX,
-    positionY: table.positionY,
+    // La archivada va SIN posición: su lugar pudo tomarlo otra mesa; las apps la ponen en «Sin ubicación en el plano» (Codex r1 #1).
+    positionX: table.active ? table.positionX : null,
+    positionY: table.active ? table.positionY : null,
+    ...(table.active ? {} : { archived: true }),
     shape: table.shape,
     rotation: table.rotation,
     status: table.status,

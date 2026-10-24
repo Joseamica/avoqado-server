@@ -185,7 +185,11 @@ describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las 
     prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'post-r12', status: 'PENDING' } as any)
     prismaMock.areaTicketInventoryReservation.updateMany.mockResolvedValue({ count: 1 } as any)
     // Por omisión los dos vales siguen ligados a esta venta.
-    prismaMock.areaTicketLine.findMany.mockResolvedValue([{ id: 'line-vale' }, { id: 'line-vale-2' }] as any)
+    // D1: cada renglón de vale es el DUEÑO VIVO de su vínculo (`orderItem`).
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([
+      { id: 'line-vale', orderItem: { id: 'oi-vale' } },
+      { id: 'line-vale-2', orderItem: { id: 'oi-vale-2' } },
+    ] as any)
   })
 
   const conVale = [
@@ -229,7 +233,7 @@ describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las 
   })
 
   it('🔴 R12-1: un renglón cuyo vale liberó la cancelación de la sesión (sin venta) ⇒ ni línea de descuento ni se suelta su reserva', async () => {
-    prismaMock.areaTicketLine.findMany.mockResolvedValue([{ id: 'line-vale-2' }] as any)
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([{ id: 'line-vale-2', orderItem: { id: 'oi-vale-2' } }] as any)
 
     await crear()
 
@@ -257,6 +261,44 @@ describe('🔴 R10-2 (R12-2) + R12-1: el vale de VENTA de otro canal suelta las 
         },
       }),
     )
+  })
+
+  /**
+   * 🔴 D1 (21-oct, tablero hz:11d84b54:D1): el vale de una venta cancelada se volvió a cobrar en otra cuenta. Codex r2 #1: una lectura VIEJA
+   * de la cuenta cancelada todavía trae el vínculo, pero su dueño vivo ya es el renglón de la otra cuenta ⇒ ni línea ni se suelta su reserva.
+   */
+  it('🔴 D1: un renglón que todavía trae el vínculo pero ya no es su dueño vivo ⇒ ni línea de descuento ni se suelta la reserva', async () => {
+    prismaMock.areaTicketLine.findMany.mockResolvedValue([
+      { id: 'line-vale', orderItem: { id: 'oi-de-otra-cuenta' } },
+      { id: 'line-vale-2', orderItem: { id: 'oi-vale-2' } },
+    ] as any)
+
+    await crear()
+
+    expect(datosDelVale().lines.create.map((l: any) => l.orderItemId)).toEqual(['oi-vale-2', 'oi-suelto'])
+    expect(prismaMock.areaTicketInventoryReservation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ areaTicketLineId: { in: ['line-vale-2'] } }) }),
+    )
+  })
+
+  it('🔴 D1: el renglón de un vale revendido (sin vínculo, con procedencia) ⇒ no descuenta aquí', async () => {
+    const conRevendido = [
+      {
+        id: 'oi-revendido',
+        productId: 'p-queso',
+        quantity: 1,
+        weightQuantity: null,
+        modifiers: [],
+        areaTicketLineId: null,
+        releasedAreaTicketLineId: 'line-vale',
+      },
+      { id: 'oi-suelto', productId: 'p-pan', quantity: 1, weightQuantity: null, modifiers: [], areaTicketLineId: null },
+    ]
+
+    await crear(conRevendido)
+
+    expect(datosDelVale().lines.create.map((l: any) => l.orderItemId)).toEqual(['oi-suelto'])
+    expect(prismaMock.areaTicketLine.findMany).not.toHaveBeenCalled()
   })
 
   it('🔴 R12-1: la cancelación liberó todos sus vales ⇒ sólo el suelto se descuenta y no se suelta ninguna reserva', async () => {

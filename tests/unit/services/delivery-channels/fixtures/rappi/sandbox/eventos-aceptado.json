@@ -1,0 +1,9 @@
+[
+  {
+    "id": 531547,
+    "event": "taken_visible_order",
+    "event_time": "2026-10-21T22:26:18",
+    "additional_information": { "courier_data": null, "eta_to_store": 240 },
+    "store_timezone": "America/Bogota"
+  }
+]

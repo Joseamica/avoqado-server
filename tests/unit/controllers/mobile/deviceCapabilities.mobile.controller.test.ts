@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import express, { type NextFunction, type Request, type Response } from 'express'
 import request from 'supertest'
 
@@ -172,19 +173,46 @@ describe('PUT /mobile/venues/:venueId/device-capabilities', () => {
     })
     expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
     const update = prismaMock.terminal.updateMany.mock.calls[0][0]
-    expect(update.where).toEqual({ id: 'terminal-1', venueId: VENUE, deviceUid: DEVICE_UID, type: 'POS_ANDROID' })
-    expect(update.data).toEqual({
+    // Ronda final de F0-B (Codex P2-1): además del binding, el CAS exige que lo guardado no sea más nuevo que ESTE reporte,
+    // con la MISMA hora del servidor que se escribe.
+    expect(update.where).toEqual({
+      id: 'terminal-1',
+      venueId: VENUE,
+      deviceUid: DEVICE_UID,
+      type: 'POS_ANDROID',
+      OR: [{ capabilitiesObservedAt: null }, { capabilitiesObservedAt: { lte: update.data.capabilitiesObservedAt } }],
+    })
+    expect(update.data).toStrictEqual({
       customerDisplayPresent: true,
       customerDisplayInvertible: false,
       displayModeProtocolVersion: 1,
       capabilitiesObservedAt: expect.any(Date),
       lastHeartbeat: expect.any(Date),
+      // F0-B (spec §5.7.2): una app que no reporta versión no entiende diseños; su ack (si lo había) ya no vale.
+      customerDisplayDesignVersion: null,
+      customerDisplayAck: Prisma.DbNull,
     })
     expect(update.data.lastHeartbeat).toBe(update.data.capabilitiesObservedAt)
     expect(response.body).toEqual({
       data: { terminalId: 'terminal-1', observedAt: update.data.capabilitiesObservedAt.toISOString() },
     })
     expect(registerDeviceSeenMock).not.toHaveBeenCalled()
+  })
+
+  // Por la ruta real: `validateRequest` reemplaza el cuerpo por el normalizado, así que el servicio nunca ve el null.
+  it('los dos campos nuevos en null (encodeDefaults=true): 200 y la escritura de la app vieja, no un 400 eterno', async () => {
+    const response = await request(makeApp())
+      .put(ENDPOINT)
+      .set(authHeader())
+      .set(deviceHeaders())
+      .send({ ...validBody, customerDisplayDesignVersion: null, installationId: null })
+
+    expect(response.status).toBe(200)
+    expect(prismaMock.terminal.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.terminal.updateMany.mock.calls[0][0].data).toMatchObject({
+      customerDisplayDesignVersion: null,
+      customerDisplayAck: Prisma.DbNull,
+    })
   })
 
   it('rechaza atómicamente cuando el binding exacto dejó de existir antes de escribir', async () => {
@@ -194,7 +222,13 @@ describe('PUT /mobile/venues/:venueId/device-capabilities', () => {
 
     expect(response.status).toBe(403)
     expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith({
-      where: { id: 'terminal-1', venueId: VENUE, deviceUid: DEVICE_UID, type: 'POS_ANDROID' },
+      where: {
+        id: 'terminal-1',
+        venueId: VENUE,
+        deviceUid: DEVICE_UID,
+        type: 'POS_ANDROID',
+        OR: [{ capabilitiesObservedAt: null }, { capabilitiesObservedAt: { lte: expect.any(Date) } }],
+      },
       data: expect.objectContaining({
         customerDisplayPresent: true,
         customerDisplayInvertible: false,
@@ -213,6 +247,33 @@ describe('PUT /mobile/venues/:venueId/device-capabilities', () => {
     expect(prismaMock.terminal.updateMany).not.toHaveBeenCalled()
     // El finish hook reconoce que este PUT ya intentó el registro y no lo duplica.
     expect(registerDeviceSeenMock).not.toHaveBeenCalled()
+  })
+
+  it('un reporte con versión e instalación nuevas: lee la instalación, escribe CONDICIONADO a ella y responde lo de siempre', async () => {
+    prismaMock.terminal.findFirst.mockResolvedValue({
+      customerDisplayInstallationId: null,
+      customerDisplayInstallationSwitches: null,
+    } as any)
+    const response = await request(makeApp())
+      .put(ENDPOINT)
+      .set(authHeader())
+      .set(deviceHeaders())
+      .send({ ...validBody, customerDisplayDesignVersion: 1, installationId: 'inst-1' })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ data: { terminalId: 'terminal-1', observedAt: expect.any(String) } })
+    expect(prismaMock.terminal.updateMany).toHaveBeenCalledWith({
+      where: {
+        id: 'terminal-1',
+        venueId: VENUE,
+        deviceUid: DEVICE_UID,
+        type: 'POS_ANDROID',
+        customerDisplayInstallationId: null,
+        customerDisplayInstallationSwitches: { equals: Prisma.AnyNull }, // la lista leída también (Codex r1 #4)
+      },
+      data: expect.objectContaining({ customerDisplayDesignVersion: 1, customerDisplayInstallationId: 'inst-1' }),
+    })
+    // `toHaveBeenCalledWith` no distingue las clases de nulo de Prisma: AnyNull (NULL de SQL o `null` de JSON) por identidad.
+    expect(prismaMock.terminal.updateMany.mock.calls[0][0].where.customerDisplayInstallationSwitches.equals).toBe(Prisma.AnyNull)
   })
 })
 

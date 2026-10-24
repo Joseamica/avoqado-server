@@ -8,6 +8,7 @@
  * El problema de fondo: Avoqado NO guarda a qué hora abre un negocio. Lo único parecido es
  * el horario del módulo de reservas. Por eso esto resuelve en cascada Y DICE de dónde salió.
  */
+import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { esHorarioValido, resolveDeliveryHours } from '@/services/delivery-channels/core/deliveryHours.service'
 
@@ -69,6 +70,31 @@ describe('resolveDeliveryHours — de dónde salen las horas que publicamos', ()
     const r = await resolveDeliveryHours(link({ deliveryHours: { monday: 'a las 9' } }))
 
     expect(r.fuente).toBe('RESERVAS')
+  })
+
+  // 🔴 Un solo 🚨 por pasada (Tarea 19, ronda 1): el menú y el horario de la tienda resuelven las MISMAS horas en la misma
+  // pasada; avisa el menú (default) y el horario llama con `avisar: false`.
+  describe('avisar', () => {
+    const avisosDeHorario = () => (logger.warn as jest.Mock).mock.calls.filter(([m]) => String(m).includes('[DeliveryHours]'))
+
+    it('por default AVISA el estimado con 🚨 (el menú sigue avisando como siempre)', async () => {
+      await resolveDeliveryHours(link())
+
+      expect(avisosDeHorario()).toHaveLength(1)
+      expect(avisosDeHorario()[0][0]).toMatch(/🚨/)
+      // Ronda 2: el texto dice la verdad desde la ronda 1 — el estimado sólo va en el MENÚ; el horario de la tienda espera.
+      expect(avisosDeHorario()[0][0]).toMatch(/menú lleva un ESTIMADO/)
+      expect(avisosDeHorario()[0][0]).toMatch(/horario de la tienda no se publica hasta que se configure/)
+    })
+
+    it('con `avisar: false` no avisa nada (ni el estimado ni la forma inválida), y resuelve igual', async () => {
+      const estimado = await resolveDeliveryHours(link(), { avisar: false })
+      const invalido = await resolveDeliveryHours(link({ deliveryHours: { monday: 'a las 9' } }), { avisar: false })
+
+      expect(estimado.fuente).toBe('ESTIMADO')
+      expect(invalido.fuente).toBe('ESTIMADO')
+      expect(avisosDeHorario()).toHaveLength(0)
+    })
   })
 
   describe('esHorarioValido', () => {

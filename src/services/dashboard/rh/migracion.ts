@@ -6,6 +6,7 @@ import { venueDayKey } from '../../../utils/venueDateKeys'
 import { withSerializableRetry } from '../../../utils/serializableRetry'
 import { fechaComoDbDate } from '../staffPay/periodos'
 import { tomarCandadoPersona } from './candado'
+import { checaPorDefault } from './checaAsistencia'
 import { Fecha } from './vigencias'
 
 /*
@@ -124,8 +125,14 @@ async function planearSede(tx: Prisma.TransactionClient, venueId: string): Promi
       plan.puestoArchivado.push(a.staffId) // un humano lo archivó: sus personas no se reasignan
       continue
     }
-    // El checador de la asignación sale del puesto, como en el alta manual (un puesto nuevo nace con el default: true).
-    plan.asignaciones.push({ ...a, positionId: puesto?.id ?? null, tracksAttendance: puesto?.tracksAttendanceDefault ?? true })
+    // El checador de la asignación sale del puesto, como en el alta manual (un puesto nuevo nace con el default de su rol:
+    // «Solo ver» no checa). La clave es `role:<venueId>:<ROL>`.
+    const rol = a.puestoKey.split(':')[2] as StaffRole
+    plan.asignaciones.push({
+      ...a,
+      positionId: puesto?.id ?? null,
+      tracksAttendance: puesto?.tracksAttendanceDefault ?? checaPorDefault(rol),
+    })
   }
 
   // Un puesto sólo nace si alguien lo recibe en esta corrida (nada de un «Mesero (WAITER)» vacío junto al «Mesero» que el
@@ -171,7 +178,13 @@ export async function migrarSede(venueId: string): Promise<{ puestosCreados: num
       const nuevos = new Map<string, string>()
       for (const x of plan.puestos) {
         const p = await tx.staffPosition.create({
-          data: { venueId, name: x.name, suggestedRole: x.suggestedRole, migrationKey: x.migrationKey },
+          data: {
+            venueId,
+            name: x.name,
+            suggestedRole: x.suggestedRole,
+            tracksAttendanceDefault: checaPorDefault(x.suggestedRole),
+            migrationKey: x.migrationKey,
+          },
           select: { id: true },
         })
         nuevos.set(x.migrationKey, p.id)

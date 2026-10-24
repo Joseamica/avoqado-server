@@ -9,9 +9,18 @@ jest.mock('@/services/venueSalesGuard', () => ({
 // El finalizador de Stripe hace `new Stripe(...)` para leer el cargo; sin connectAccountId ni lo llama (casi todas las
 // pruebas). La del tipo del cargo (Codex r1, 19-oct) sí lo necesita.
 const retrieveStripePi = jest.fn()
+const createStripePi = jest.fn()
+const createStripeHosted = jest.fn()
+jest.mock('@/services/superadmin/platformSettings.service', () => ({ getVatRateBps: jest.fn().mockResolvedValue(1600) }))
+jest.mock('@/services/mercado-pago/connection.service', () => ({
+  loadCredentials: jest.fn().mockResolvedValue({ accessToken: 'fixture', publicKey: 'fixture', expiresAt: new Date('2099-01-01') }),
+}))
 jest.mock('stripe', () => ({
   __esModule: true,
-  default: jest.fn().mockImplementation(() => ({ paymentIntents: { retrieve: retrieveStripePi } })),
+  default: jest.fn().mockImplementation(() => ({
+    paymentIntents: { retrieve: retrieveStripePi, create: createStripePi },
+    checkout: { sessions: { create: createStripeHosted } },
+  })),
 }))
 
 // Mock nanoid before imports
@@ -79,6 +88,10 @@ jest.mock('@/services/tpv/paymentEffects.service', () => ({
 
 import {
   createPaymentLink,
+  createStripePaymentIntentForPaymentLink,
+  createStripeCheckoutForPaymentLink,
+  createCheckoutSession,
+  createMercadoPagoPaymentIntentForPaymentLink,
   getPaymentLinks,
   getPaymentLinkById,
   updatePaymentLink,
@@ -92,6 +105,7 @@ import {
 import { prismaMock } from '../../../__helpers__/setup'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '../../../../src/services/tpv/candadoDeIntento'
 import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError } from '../../../../src/errors/AppError'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { mapFormaPago } from '../../../../src/services/fiscal/satCatalog'
 import { paymentCountsAsDrawerCash } from '../../../../src/services/shared/tenderSemantics'
@@ -218,6 +232,312 @@ describe('PaymentLink Service', () => {
     mockEarnPoints.mockResolvedValue({ pointsEarned: 0, newBalance: 0 })
     mockUpdateCustomerMetrics.mockResolvedValue(undefined)
     mockEnqueuePaymentCommissionInTx.mockResolvedValue(undefined)
+  })
+
+  describe('atribución explícita del cliente', () => {
+    beforeEach(() => {
+      prismaMock.customer.findFirst.mockReset()
+    })
+
+    it.each(['Stripe inline', 'Stripe hosted', 'Blumon', 'MercadoPago'])(
+      '%s: guarda snapshot interno A e ignora id público B',
+      async canal => {
+        process.env.STRIPE_PUBLISHABLE_KEY = 'fixture-public-key'
+        const provider = canal === 'Blumon' ? 'BLUMON' : canal === 'MercadoPago' ? 'MERCADO_PAGO' : 'STRIPE_CONNECT'
+        prismaMock.paymentLink.findUnique.mockResolvedValue(
+          createMockPaymentLink({
+            customerId: 'customer-A',
+            ecommerceMerchant: {
+              id: 'merchant-123',
+              provider: { code: provider },
+              chargesEnabled: true,
+              platformFeeBps: 100,
+              providerCredentials: { connectAccountId: 'acct_fixture', accessToken: 'fixture' },
+            },
+          }),
+        )
+        prismaMock.checkoutSession.create.mockResolvedValue({ sessionId: 'session-fixture' })
+        createStripePi.mockResolvedValue({ id: 'pi_fixture', client_secret: 'fixture' })
+        createStripeHosted.mockResolvedValue({ id: 'cs_fixture', url: 'https://example.test' })
+        const input = { customerEmail: 'payer-b@example.test', attributedCustomerId: 'customer-B', customerId: 'customer-B' }
+        if (canal === 'Stripe inline') await createStripePaymentIntentForPaymentLink('abc12345', input)
+        else if (canal === 'Stripe hosted') await createStripeCheckoutForPaymentLink('abc12345', input)
+        else if (canal === 'MercadoPago') await createMercadoPagoPaymentIntentForPaymentLink('abc12345', input)
+        else
+          await createCheckoutSession('abc12345', {
+            ...input,
+            pan: '4242424242424242',
+            cvv: '123',
+            expMonth: '12',
+            expYear: '2030',
+            holderName: 'Pagador B',
+          })
+        expect(prismaMock.checkoutSession.create).toHaveBeenCalledWith(
+          expect.objectContaining({
+            data: expect.objectContaining({ attributedCustomerId: 'customer-A', customerEmail: 'payer-b@example.test' }),
+          }),
+        )
+      },
+    )
+
+    it.each(['ajeno', 'inactivo'])('rechaza cliente %s antes de crear', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockResolvedValue(createMockPaymentLink())
+      await expect(
+        createPaymentLink(VENUE_ID, { title: 'Anticipo', amountType: 'FIXED', amount: 100, customerId: 'customer-A' } as any, STAFF_ID),
+      ).rejects.toThrow(/cliente/i)
+      expect(prismaMock.paymentLink.create).not.toHaveBeenCalled()
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledWith(
+        expect.objectContaining({ where: { id: 'customer-A', venueId: VENUE_ID, active: true } }),
+      )
+    })
+
+    it('guarda el cliente validado y su resumen privado', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockResolvedValue(createMockPaymentLink())
+      await createPaymentLink(VENUE_ID, { title: 'Anticipo', amountType: 'FIXED', amount: 100, customerId: 'customer-A' } as any, STAFF_ID)
+      expect(prismaMock.paymentLink.create).toHaveBeenCalledWith(
+        expect.objectContaining({
+          data: expect.objectContaining({ customerId: 'customer-A' }),
+          include: expect.objectContaining({
+            customer: { select: { id: true, firstName: true, lastName: true, email: true, phone: true } },
+          }),
+        }),
+      )
+    })
+
+    it('conserva la opción reutilizable con atribución explícita', async () => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockResolvedValue(createMockPaymentLink())
+      await createPaymentLink(
+        VENUE_ID,
+        { title: 'Anticipo', amountType: 'OPEN', customerId: 'customer-A', isReusable: true } as any,
+        STAFF_ID,
+      )
+      expect(prismaMock.paymentLink.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ isReusable: true, customerId: 'customer-A' }) }),
+      )
+    })
+
+    it('no permite reasignar ni borrar la atribución al editar', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-B' })
+      for (const customerId of ['customer-B', null]) {
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId } as any)).rejects.toThrow(/cliente/i)
+      }
+      expect(prismaMock.paymentLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    // Founder 23-oct: en «Editar liga» se puede AGREGAR un cliente si la liga no tiene; nunca cambiarlo.
+    describe('agregar cliente al editar una liga sin cliente', () => {
+      const sinCliente = () => createMockPaymentLink({ customerId: null })
+
+      it('lo agrega sólo donde sigue vacío (CAS) y deja rastro', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 1 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(prismaMock.customer.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: 'customer-A', venueId: VENUE_ID, active: true } }),
+        )
+        expect(prismaMock.paymentLink.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pl-123', venueId: VENUE_ID, customerId: null, status: { not: 'ARCHIVED' } },
+          data: { customerId: 'customer-A' },
+        })
+        expect(logAction).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: 'PAYMENT_LINK_CUSTOMER_ADDED',
+            staffId: STAFF_ID,
+            entityId: 'pl-123',
+            data: { customerId: 'customer-A' },
+          }),
+        )
+      })
+
+      it('desde el MCP, su auditoría reemplaza la nativa (una sola fila)', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 1 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        const auditar = jest.fn().mockResolvedValue(undefined)
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID, auditar)
+        expect(auditar).toHaveBeenCalledTimes(1)
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_CUSTOMER_ADDED' }))
+      })
+
+      it('rechaza un cliente ajeno o inactivo sin escribir', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue(null)
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)).rejects.toThrow(/cliente/i)
+        expect(prismaMock.paymentLink.updateMany).not.toHaveBeenCalled()
+      })
+
+      it('el mismo cliente otra vez no escribe ni audita de nuevo', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(prismaMock.paymentLink.updateMany).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_CUSTOMER_ADDED' }))
+      })
+
+      it('si otro guardado puso otro cliente primero, responde 409 y no toca nada más', async () => {
+        prismaMock.paymentLink.findUnique
+          .mockResolvedValueOnce(sinCliente())
+          .mockResolvedValueOnce({ customerId: 'customer-B' } as any)
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
+        await expect(
+          updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A', title: 'Nuevo' } as any, STAFF_ID),
+        ).rejects.toMatchObject({ statusCode: 409 })
+        expect(prismaMock.paymentLink.update).not.toHaveBeenCalled()
+      })
+
+      // Codex r1 #1: repetir sólo { customerId } igual no escribe NI deja filas de «liga editada».
+      it('repetir sólo el mismo cliente no escribe ni audita nada', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(prismaMock.paymentLink.update).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalled()
+      })
+
+      it('agregar sólo el cliente no deja también una fila de «liga editada»', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 1 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_UPDATED' }))
+        expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_CUSTOMER_ADDED' }))
+      })
+
+      // Codex r1 #2: si la archivan entre la lectura y la escritura, no se le agrega el cliente.
+      it('una liga archivada a media edición no recibe el cliente', async () => {
+        prismaMock.paymentLink.findUnique
+          .mockResolvedValueOnce(sinCliente())
+          .mockResolvedValueOnce({ customerId: null, status: 'ARCHIVED' } as any)
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)).rejects.toThrow(/archivada/)
+        expect(prismaMock.paymentLink.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ status: { not: 'ARCHIVED' } }) }),
+        )
+      })
+
+      it('si otro guardado puso el MISMO cliente primero, sigue sin error', async () => {
+        prismaMock.paymentLink.findUnique
+          .mockResolvedValueOnce(sinCliente())
+          .mockResolvedValueOnce({ customerId: 'customer-A' } as any)
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)).resolves.toBeTruthy()
+      })
+    })
+  })
+
+  describe('idempotencia de creación', () => {
+    const body = { title: 'Anticipo', amountType: 'FIXED' as const, amount: 100 }
+    const callWithKey = (data = body, staff = STAFF_ID, venue = VENUE_ID) =>
+      (createPaymentLink as any)(venue, data, staff, 'logical-attempt')
+    beforeEach(() => {
+      prismaMock.paymentLink.findUnique.mockReset()
+      prismaMock.paymentLink.create.mockReset()
+    })
+    it('reusa la liga ante respuesta perdida, con hash canónico y sin nueva auditoría', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockImplementation(async (args: any) => createMockPaymentLink(args.data))
+      const first = await callWithKey()
+      const firstCall: any = prismaMock.paymentLink.create.mock.calls[0][0]
+      expect(firstCall.data).toMatchObject({ creationKey: 'logical-attempt', creationHash: expect.stringMatching(/^[a-f0-9]{64}$/) })
+      prismaMock.paymentLink.findUnique.mockResolvedValue(first)
+      expect(await callWithKey({ amount: 100, title: 'Anticipo', amountType: 'FIXED' })).toEqual(first)
+      expect(prismaMock.paymentLink.create).toHaveBeenCalledTimes(1)
+      expect(prismaMock.paymentLink.findUnique).toHaveBeenLastCalledWith(
+        expect.objectContaining({
+          where: { venueId_createdById_creationKey: { venueId: VENUE_ID, createdById: STAFF_ID, creationKey: 'logical-attempt' } },
+        }),
+      )
+      await expect(callWithKey({ ...body, amount: 200 })).rejects.toMatchObject({ statusCode: 409 })
+    })
+    it('recupera P2002 concurrente sólo con hash igual', async () => {
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      let written: any
+      prismaMock.paymentLink.findUnique.mockImplementation(async () => written ?? null)
+      prismaMock.paymentLink.create.mockImplementation(async (args: any) => {
+        written = createMockPaymentLink(args.data)
+        throw Object.assign(new Error('race'), { code: 'P2002' })
+      })
+      expect(await callWithKey()).toMatchObject({ id: 'pl-123', creationKey: 'logical-attempt' })
+      expect(prismaMock.paymentLink.create).toHaveBeenCalledTimes(1)
+    })
+    it('ordena claves anidadas pero conserva orden de arrays', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockImplementation(async (args: any) => createMockPaymentLink(args.data))
+      const fields = [
+        { id: 'f1', type: 'TEXT', label: 'Referencia', required: true },
+        { id: 'f2', type: 'TEXT', label: 'Nota', required: false },
+      ]
+      const first = await callWithKey({ ...body, customFields: fields } as any)
+      prismaMock.paymentLink.findUnique.mockResolvedValue(first)
+      await expect(
+        callWithKey({ ...body, customFields: fields.map(({ label, required, type, id }) => ({ required, label, id, type })) } as any),
+      ).resolves.toEqual(first)
+      await expect(callWithKey({ ...body, customFields: [...fields].reverse() } as any)).rejects.toMatchObject({ statusCode: 409 })
+    })
+
+    it('replay conserva archivada/inactiva sin revalidar canal ni cliente ni auditar', async () => {
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockImplementation(async (args: any) => createMockPaymentLink(args.data))
+      const first = await callWithKey()
+      prismaMock.paymentLink.findUnique.mockResolvedValue({ ...first, status: 'ARCHIVED' })
+      prismaMock.ecommerceMerchant.findMany.mockClear()
+      prismaMock.customer.findFirst.mockClear()
+      const callback = jest.fn()
+      expect(await (createPaymentLink as any)(VENUE_ID, body, STAFF_ID, 'logical-attempt', callback)).toMatchObject({ status: 'ARCHIVED' })
+      expect(prismaMock.ecommerceMerchant.findMany).not.toHaveBeenCalled()
+      expect(prismaMock.customer.findFirst).not.toHaveBeenCalled()
+      expect(callback).not.toHaveBeenCalled()
+    })
+
+    it('la escritura MCP reemplaza auditoría nativa, no duplica al reintentar y soporta fallo de auditoría', async () => {
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockImplementation(async (args: any) => createMockPaymentLink(args.data))
+      const callback = jest.fn().mockResolvedValue(undefined)
+      const first = await (createPaymentLink as any)(VENUE_ID, body, STAFF_ID, 'logical-attempt', callback)
+      expect(callback).toHaveBeenCalledTimes(1)
+      expect(prismaMock.activityLog.create).not.toHaveBeenCalled()
+      prismaMock.paymentLink.findUnique.mockResolvedValue(first)
+      await (createPaymentLink as any)(VENUE_ID, body, STAFF_ID, 'logical-attempt', callback)
+      expect(callback).toHaveBeenCalledTimes(1)
+      prismaMock.paymentLink.findUnique.mockResolvedValue(null)
+      callback.mockRejectedValue(new Error('audit temporal'))
+      await expect((createPaymentLink as any)(VENUE_ID, body, STAFF_ID, 'attempt2', callback)).resolves.toMatchObject({ id: 'pl-123' })
+    })
+
+    it.each(['', ' ', 'x'.repeat(129)])('rechaza clave inválida %j', async key => {
+      await expect((createPaymentLink as any)(VENUE_ID, body, STAFF_ID, key)).rejects.toMatchObject({ statusCode: 400 })
+      expect(prismaMock.paymentLink.create).not.toHaveBeenCalled()
+    })
+
+    it('separa claves por actor y venue', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValue(null)
+      prismaMock.ecommerceMerchant.findMany.mockResolvedValue(chargeableMerchants)
+      prismaMock.paymentLink.create.mockResolvedValue(createMockPaymentLink())
+      await callWithKey(body, 'staff-otro', 'venue-otro')
+      expect(prismaMock.paymentLink.findUnique).toHaveBeenCalledWith(
+        expect.objectContaining({
+          where: { venueId_createdById_creationKey: { venueId: 'venue-otro', createdById: 'staff-otro', creationKey: 'logical-attempt' } },
+        }),
+      )
+    })
   })
 
   // ─── CREATE ──────────────────────────────────────
@@ -384,6 +704,16 @@ describe('PaymentLink Service', () => {
 
   // ─── LIST ──────────────────────────────────────
   describe('getPaymentLinks', () => {
+    it('impone tope100 y orden estable sin ocultar total', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(150)
+      const result = await getPaymentLinks(VENUE_ID, { limit: 10000, offset: -5 })
+      expect(prismaMock.paymentLink.findMany).toHaveBeenCalledWith(
+        expect.objectContaining({ take: 100, skip: 0, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
+      )
+      expect(result).toMatchObject({ limit: 100, offset: 0, total: 150, hasMore: true })
+    })
+
     it('should return paginated links', async () => {
       const mockLinks = [createMockPaymentLink()]
       prismaMock.paymentLink.findMany.mockResolvedValueOnce(mockLinks)
@@ -503,6 +833,24 @@ describe('PaymentLink Service', () => {
 
   // ─── PUBLIC: RESOLVE BY SHORT CODE ─────────────────
   describe('getPaymentLinkByShortCode', () => {
+    it('no filtra identidad seleccionada, ni llaves de creación al público', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(
+        createMockPaymentLink({
+          customerId: 'customer-A',
+          creationKey: 'private-key',
+          creationHash: 'private-hash',
+          customer: { id: 'customer-A', email: 'selected@example.test', phone: '+525500000000' },
+          venue: { id: VENUE_ID, name: 'Fixture', slug: 'fixture', logo: null },
+        }),
+      )
+      const result = await getPaymentLinkByShortCode('abc12345')
+      expect(result).not.toHaveProperty('customerId')
+      expect(result).not.toHaveProperty('customer')
+      expect(result).not.toHaveProperty('creationKey')
+      expect(result).not.toHaveProperty('creationHash')
+      expect(JSON.stringify(result)).not.toContain('selected@example.test')
+    })
+
     it('should return link with venue branding', async () => {
       prismaMock.paymentLink.findUnique.mockResolvedValueOnce(
         createMockPaymentLink({
@@ -902,7 +1250,11 @@ describe('PaymentLink Service', () => {
     it('Stripe: sin tipo en el webhook, el método sale del cargo — OXXO → OTHER + SAT 01, nunca efectivo del cajón', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
         ...createMockCheckoutSession(),
-        ecommerceMerchant: { id: 'merchant-123', providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+        ecommerceMerchant: {
+          id: 'merchant-123',
+          providerCredentials: { connectAccountId: 'acct_1' },
+          provider: { code: 'STRIPE_CONNECT' },
+        },
       })
       armarCobro('order-stripe-oxxo')
       retrieveStripePi.mockResolvedValueOnce({ latest_charge: { receipt_url: null, payment_method_details: { type: 'oxxo' } } })
@@ -920,14 +1272,18 @@ describe('PaymentLink Service', () => {
     it('Stripe: sin tipo y la consulta del cargo falla por algo pasajero → lanza sin guardar', async () => {
       prismaMock.checkoutSession.findUnique.mockResolvedValueOnce({
         ...createMockCheckoutSession(),
-        ecommerceMerchant: { id: 'merchant-123', providerCredentials: { connectAccountId: 'acct_1' }, provider: { code: 'STRIPE_CONNECT' } },
+        ecommerceMerchant: {
+          id: 'merchant-123',
+          providerCredentials: { connectAccountId: 'acct_1' },
+          provider: { code: 'STRIPE_CONNECT' },
+        },
       })
       // Sin `armarCobro`: lanza antes de cobrar, y sus `…Once` se derramarían a las pruebas siguientes.
       retrieveStripePi.mockRejectedValueOnce(Object.assign(new Error('stripe caído'), { type: 'StripeConnectionError' }))
 
-      await expect(finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1', stripePaymentMethodType: null })).rejects.toThrow(
-        'stripe caído',
-      )
+      await expect(
+        finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1', stripePaymentMethodType: null }),
+      ).rejects.toThrow('stripe caído')
       expect(prismaMock.payment.create).not.toHaveBeenCalled()
     })
 
@@ -1130,6 +1486,33 @@ describe('PaymentLink Service', () => {
       // deja su valor encolado y el siguiente lo consume: sin este reset, el test
       // del "pagador anónimo" veía al cliente del test anterior.
       prismaMock.customer.findFirst.mockReset()
+    })
+
+    it.each(['Stripe', 'Blumon', 'MercadoPago'])('%s: el snapshot A gana aunque B paga; conserva al cliente inactivo', async canal => {
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+      if (canal === 'MercadoPago') {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(mpSession({ attributedCustomerId: 'customer-A' }))
+        armarMp()
+        await finalizeMercadoPagoCheckout({ sessionId: 'mp_sess_1', mpPaymentId: 'mp1' })
+      } else {
+        prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession({ attributedCustomerId: 'customer-A' }))
+        armarCobro()
+        if (canal === 'Stripe') await finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })
+        else await completeCharge('abc12345', 'cs_pl_test123')
+      }
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1)
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledWith({ where: { id: 'customer-A', venueId: VENUE_ID }, select: { id: true } })
+      expect(prismaMock.order.create).toHaveBeenCalledWith(
+        expect.objectContaining({ data: expect.objectContaining({ customerId: 'customer-A' }) }),
+      )
+    })
+
+    it('snapshot de otro venue falla cerrado y nunca adopta al pagador', async () => {
+      prismaMock.checkoutSession.findUnique.mockResolvedValueOnce(createMockCheckoutSession({ attributedCustomerId: 'customer-ajeno' }))
+      prismaMock.customer.findFirst.mockResolvedValue(null)
+      await expect(finalizePaymentLinkCheckout({ stripeSessionId: 'cs_pl_test123', paymentIntentId: 'pi_1' })).rejects.toThrow(/cliente/i)
+      expect(prismaMock.customer.findFirst).toHaveBeenCalledTimes(1)
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
     })
 
     it('Blumon: un cliente registrado del venue recibe sus puntos UNA vez, sobre el total cobrado', async () => {

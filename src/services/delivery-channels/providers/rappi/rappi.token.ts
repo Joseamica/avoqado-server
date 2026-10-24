@@ -2,11 +2,12 @@
  * Token de Rappi — caché con single-flight, por superficie.
  *
  * 🔴 TRES SUPERFICIES, TRES TOKENS. Rappi no tiene un solo login: son endpoints distintos y
- * **el token de uno no sirve en otro**.
+ * **el token de uno no sirve en otro**. El login es
+ * `{hostDeLoginRappi}/restaurants/auth/v1/token/login/<superficie>/` (dominio nuevo, con barra final; ver `rappi.http.ts`):
  *
- *   `token/login/integrations` → pedidos, menú, disponibilidad, tiendas
- *   `token/login/utils`        → horarios (pasillo, producto, tienda)
- *   `token/login/finance`      → pagos, comisiones, compensaciones
+ *   `token/login/integrations/` → pedidos, menú, disponibilidad, tiendas
+ *   `token/login/utils/`        → horarios (pasillo, producto, tienda)
+ *   `token/login/finance/`      → pagos, comisiones, compensaciones
  *
  * Cachearlos juntos sería el bug clásico: pedir el horario con el token de pedidos, recibir
  * 401, y no entender por qué si "el token está fresco". La caché es por superficie.
@@ -25,6 +26,11 @@
  */
 
 export type SuperficieRappi = 'integrations' | 'utils' | 'finance'
+
+/** RFC6750 §2.1: un token inutilizable no debe anunciar recuperación ni entrar en caché. */
+export function tokenRappiValido(token: unknown): token is string {
+  return typeof token === 'string' && /^[A-Za-z0-9._~+/-]+=*$/.exec(token)?.[0] === token
+}
 
 export interface RappiTokenDeps {
   /** Pide el token a Rappi. Lo implementa quien sí puede leer env y hablar HTTP. */
@@ -47,12 +53,21 @@ interface Entrada {
 }
 
 const cache = new Map<SuperficieRappi, Entrada>()
+/**
+ * Superficies cuyo login viene fallando (ver `anotarLoginFallido`) y cuándo salió su último 🚨 (ms). En memoria, como la caché:
+ * se pierde al reiniciar (a lo más, un 🚨 de más).
+ */
+const loginsEnRacha = new Map<SuperficieRappi, number>()
+
+/** Mientras una racha siga, el 🚨 se repite cada hora: una caída de login de días no puede callarse tras el primer aviso. */
+export const REPETIR_ALARMA_DE_LOGIN_MS = 60 * 60 * 1000
 const enVuelo = new Map<SuperficieRappi, Promise<string>>()
 let generacion = 0
 
 export function _resetRappiTokenCacheForTests(): void {
   cache.clear()
   enVuelo.clear()
+  loginsEnRacha.clear()
   generacion++
 }
 
@@ -70,7 +85,7 @@ export async function getRappiToken(superficie: SuperficieRappi, deps: RappiToke
   const gen = generacion
   const peticion = (async () => {
     const r = await deps.fetchToken(superficie)
-    if (!r?.access_token) throw new Error(`[Rappi] la respuesta de ${superficie} no trae access_token`)
+    if (!tokenRappiValido(r?.access_token)) throw new Error(`[Rappi] la respuesta de ${superficie} no trae access_token válido`)
 
     // Nunca cachear si hubo un reset mientras esta petición viajaba: guardaría un token de
     // credenciales que ya nadie está usando.
@@ -107,4 +122,26 @@ export function cabeceraRappi(token: string): Record<string, string> {
  */
 export function invalidarToken(superficie: SuperficieRappi): void {
   cache.delete(superficie)
+}
+
+/**
+ * Lleva la cuenta de una RACHA de logins rechazados, por superficie, para que el aviso no grite en cada intento (Tarea 20).
+ *
+ * 🔴 Sin esto, un login rechazado gritaba 🚨 en CADA intento, y con el sondeo de pedidos prendido son ~2 intentos cada 45 s:
+ * miles de 🚨 al día por UNA causa. Devuelve `true` si a este fallo le toca el 🚨: el que EMPIEZA la racha, y después uno por
+ * hora (`REPETIR_ALARMA_DE_LOGIN_MS`) mientras la racha siga, para que una caída de días (con ventas reales sin poder
+ * aceptarse) no pase con un solo aviso del primer día. Los demás devuelven `false` (van como warn). No cambia nada del token:
+ * quien llama sigue recibiendo el mismo error.
+ */
+export function anotarLoginFallido(superficie: SuperficieRappi): boolean {
+  const ahora = Date.now()
+  const ultimo = loginsEnRacha.get(superficie)
+  if (ultimo !== undefined && ahora - ultimo < REPETIR_ALARMA_DE_LOGIN_MS) return false
+  loginsEnRacha.set(superficie, ahora)
+  return true
+}
+
+/** El primer login bueno cierra la racha y REARMA el aviso. `true` si había una racha abierta (para decir que volvió). */
+export function anotarLoginExitoso(superficie: SuperficieRappi): boolean {
+  return loginsEnRacha.delete(superficie)
 }

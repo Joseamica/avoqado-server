@@ -416,8 +416,26 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
     })
   })
 
-  it('control: a payment of the original sale that gave no credit is edited as always', async () => {
-    await updatePayment(venueId, sinCredito.id, { amount: 90 })
-    expect(Number((await pago(sinCredito.id)).amount)).toBe(90)
+  it('control: a completed payment without exchange credit keeps the settled guard and editable metadata', async () => {
+    await expect(updatePayment(venueId, sinCredito.id, { amount: 90 })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PAYMENT_SETTLED_USE_REFUND',
+    })
+    await expect(deletePayment(venueId, sinCredito.id)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PAYMENT_SETTLED_USE_REFUND',
+    })
+    await updatePayment(venueId, sinCredito.id, { referenceNumber: 'REF-SIN-CREDITO' })
+    const tras = await pago(sinCredito.id)
+    expect({ amount: Number(tras.amount), referenceNumber: tras.referenceNumber }).toEqual({
+      amount: 100,
+      referenceNumber: 'REF-SIN-CREDITO',
+    })
+  })
+
+  it('control: an unlinked pending payment on the original sale remains editable', async () => {
+    const pendiente = await cobro(sinCredito.orderId!, { status: 'PENDING' })
+    await updatePayment(venueId, pendiente.id, { amount: 90 })
+    expect(Number((await pago(pendiente.id)).amount)).toBe(90)
   })
 })

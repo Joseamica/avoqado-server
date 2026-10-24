@@ -53,6 +53,12 @@ import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.
 import { handlePassWebhook } from './controllers/aggregators/passWebhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
 import {
+  activarRappiOAuth,
+  rappiOAuthCallback,
+  resultadoRappiOAuth,
+  startRappiOAuth,
+} from './controllers/delivery-channels/rappi.oauth.controller'
+import {
   handleShopifyWebhook,
   SHOPIFY_WEBHOOK_MAX_BYTES,
   SHOPIFY_WEBHOOK_ROUTE,
@@ -210,6 +216,18 @@ app.post(
   express.urlencoded({ extended: false, limit: '16kb' }),
   activarUberOAuth,
 )
+
+// Self-onboarding de Rappi (spec 2026-09-29). PÚBLICAS a propósito, igual que las de Uber: Rappi
+// redirige aquí el navegador del comerciante sin sesión nuestra; la prueba de origen es la firma.
+app.get('/api/v1/delivery/rappi/oauth/start', requestLoggerMiddleware, startRappiOAuth)
+app.get('/api/v1/delivery/rappi/oauth/callback', requestLoggerMiddleware, rappiOAuthCallback)
+app.post(
+  '/api/v1/delivery/rappi/oauth/activate',
+  requestLoggerMiddleware,
+  express.urlencoded({ extended: false, limit: '16kb' }),
+  activarRappiOAuth,
+)
+app.get('/api/v1/delivery/rappi/oauth/result', requestLoggerMiddleware, resultadoRappiOAuth)
 
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).

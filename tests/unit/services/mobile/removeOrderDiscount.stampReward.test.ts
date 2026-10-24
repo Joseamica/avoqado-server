@@ -30,8 +30,15 @@ describe('removeOrderDiscount + premio de sellos', () => {
       loyaltyTransactionId: null,
     } as any)
     prismaMock.orderDiscount.delete.mockResolvedValue({} as any)
-    prismaMock.stampReward.findFirst.mockResolvedValue({ id: 'rw1', customerId: 'c1', rewardLabel: 'Un café gratis' } as any)
+    prismaMock.stampReward.findFirst.mockResolvedValue({
+      id: 'rw1',
+      customerId: 'c1',
+      rewardLabel: 'Un café gratis',
+      stampCardId: 'sc1',
+    } as any)
     prismaMock.stampReward.update.mockResolvedValue({} as any)
+    // D3 (21-oct): sólo vuelve por cobrar si su cartilla sigue llena.
+    prismaMock.stampCard.findUnique.mockResolvedValue({ id: 'sc1', stampsEarned: 7, stampsRequired: 7 } as any)
   })
 
   it('🔴 el premio vuelve a estar disponible al quitar su descuento', async () => {

@@ -97,8 +97,11 @@ export async function updateOrder(req: Request<{ venueId: string; orderId: strin
     const { venueId, orderId } = req.params
     // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
     // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae `customerId`.
-    const opciones =
-      req.body?.customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) } : {}
+    const opciones = {
+      ...(req.body?.customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) } : {}),
+      // D2: quien cancela una venta de vales firma la bitácora de los vales que quedan libres.
+      staffId: (req as any).authContext?.userId as string | undefined,
+    }
     const updatedOrder = await orderDashboardService.updateOrder(venueId, orderId, req.body, opciones)
     res.status(200).json(updatedOrder)
   } catch (error) {
@@ -125,7 +128,7 @@ async function puedeCambiarClienteEnVentaCobrada(req: Request<any, any, any>): P
 export async function deleteOrder(req: Request<{ venueId: string; orderId: string }>, res: Response, next: NextFunction) {
   try {
     const { venueId, orderId } = req.params
-    await orderDashboardService.deleteOrder(venueId, orderId)
+    await orderDashboardService.deleteOrder(venueId, orderId, (req as any).authContext?.userId)
     res.status(204).send() // 204 No Content es una respuesta común para DELETE exitoso
   } catch (error) {
     next(error)

@@ -51,6 +51,24 @@ export const updateDisplayModeSchema = z.object({
 export type UpdateDisplayModeInput = z.infer<typeof updateDisplayModeSchema>['body']
 
 /**
+ * LA regla de los porcentajes de propina (1 a 100, enteros, sin repetidos, de 1 a 6). La comparten el PATCH del aparato y el
+ * PUT del dashboard (F0-B, Task 12): si las dos superficies aceptaran cosas distintas, el mismo negocio acabaría con dos listas
+ * según dónde las editó, y el POS no puede mostrar más de 6. La lista vacía se rechaza aparte para poder explicarla.
+ */
+export const tipSuggestionsRule = z
+  .array(
+    z
+      .number({ invalid_type_error: 'Los porcentajes de propina deben ser números' })
+      .int('Los porcentajes de propina deben ser números enteros')
+      .min(1, 'Un porcentaje de propina debe ser al menos 1')
+      .max(100, 'Un porcentaje de propina no puede pasar de 100'),
+    { invalid_type_error: 'Los porcentajes de propina deben ser una lista' },
+  )
+  .min(1, 'Deja al menos un porcentaje de propina')
+  .max(6, 'No puedes ofrecer más de 6 porcentajes de propina')
+  .refine(valores => new Set(valores).size === valores.length, 'No repitas el mismo porcentaje')
+
+/**
  * PATCH /mobile/venues/:venueId/terminals/:terminalId/settings — el POS configura SU PROPIA ficha.
  *
  * 🔴 Aquí sólo se declara la FORMA (qué llaves existen y de qué tipo). **Quién puede cambiar qué NO
@@ -65,21 +83,8 @@ const configurableTpvSettingsBody = z
   .object({
     showReviewScreen: z.boolean().optional(),
     showTipScreen: z.boolean().optional(),
-    // Espejo EXACTO de lo que ya valida el editor del dashboard (1 a 100, sin repetidos, máximo
-    // 6): si las dos superficies aceptaran cosas distintas, el mismo negocio acabaría con dos
-    // listas según dónde las editó. La lista vacía se rechaza aparte para poder explicarla.
-    tipSuggestions: z
-      .array(
-        z
-          .number({ invalid_type_error: 'Los porcentajes de propina deben ser números' })
-          .int('Los porcentajes de propina deben ser números enteros')
-          .min(1, 'Un porcentaje de propina debe ser al menos 1')
-          .max(100, 'Un porcentaje de propina no puede pasar de 100'),
-      )
-      .min(1, 'Deja al menos un porcentaje de propina')
-      .max(6, 'No puedes ofrecer más de 6 porcentajes de propina')
-      .refine(valores => new Set(valores).size === valores.length, 'No repitas el mismo porcentaje')
-      .optional(),
+    // Espejo EXACTO de lo que ya valida el editor del dashboard: la regla es una sola (`tipSuggestionsRule`).
+    tipSuggestions: tipSuggestionsRule.optional(),
   })
   .strict()
 

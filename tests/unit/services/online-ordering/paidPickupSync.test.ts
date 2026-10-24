@@ -43,7 +43,11 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
         venueId: 'v1',
         paymentMode: 'PAY_AT_PICKUP',
         order: CUENTA_PAGADA,
-        OR: [{ status: 'READY' }, { status: 'ACCEPTED', estimatedReadyAt: { lte: NOW } }],
+        OR: [
+          { status: 'READY' },
+          // S4: una comanda empezada (reclamada) y no confirmada no se entrega sola por hora.
+          { status: 'ACCEPTED', estimatedReadyAt: { lte: NOW }, OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] },
+        ],
       },
       select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
       orderBy: { id: 'asc' },
@@ -79,7 +83,7 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: 'oo-B', status: 'ACCEPTED', order: CUENTA_PAGADA },
+      where: { id: 'oo-B', status: 'ACCEPTED', order: CUENTA_PAGADA, OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
@@ -152,5 +156,72 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
     expect(error).toHaveBeenCalledWith(expect.any(String), expect.objectContaining({ onlineOrderId: 'oo-B' }))
     announceCollectedAutomatically(won, NOW)
     expect(logAction).toHaveBeenCalledTimes(2)
+  })
+})
+
+describe('S4: la entrega por hora espera a una comanda empezada y no confirmada', () => {
+  const PASADA = new Date(NOW.getTime() - 60_000)
+  /** Evaluador mínimo del `where` de la lectura: status, estimatedReadyAt.lte, printClaimedAt/printedAt (null / not null) y OR. */
+  const cumple = (f: any, w: any): boolean =>
+    Object.entries(w).every(([k, v]: [string, any]) => {
+      if (k === 'OR') return v.some((b: any) => cumple(f, b))
+      if (k === 'status') return f.status === v
+      if (k === 'estimatedReadyAt') return f.estimatedReadyAt !== null && f.estimatedReadyAt <= v.lte
+      if (v === null) return f[k] === null
+      if (v && 'not' in v) return f[k] !== v.not
+      return true
+    })
+  const base = (filas: any[]) => {
+    prismaMock.onlineOrder.findMany.mockImplementation((async (a: any) =>
+      filas.filter(f => a.where.OR.some((b: any) => cumple(f, b)))) as any)
+    prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
+  }
+  const aceptada = (id: string, o: Record<string, unknown> = {}) =>
+    fila(id, { status: 'ACCEPTED', estimatedReadyAt: PASADA, printClaimedAt: null, printedAt: null, ...o })
+
+  it('paid ACCEPTED order past ETA with an unconfirmed print claim is not auto-delivered', async () => {
+    base([aceptada('A', { printClaimedAt: new Date(NOW.getTime() - 120_000) })])
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+    expect(won).toEqual([])
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('same order is auto-delivered once printedAt is set', async () => {
+    base([aceptada('A', { printClaimedAt: new Date(NOW.getTime() - 120_000), printedAt: new Date(NOW.getTime() - 90_000) })])
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+    expect(won.map(w => w.id)).toEqual(['oo-A'])
+  })
+
+  it('paid ACCEPTED order past ETA that never claimed print is still auto-delivered', async () => {
+    base([aceptada('A')])
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+    expect(won.map(w => w.id)).toEqual(['oo-A'])
+  })
+
+  it('READY paid order is delivered regardless of print', async () => {
+    base([fila('A', { status: 'READY', estimatedReadyAt: null, printClaimedAt: new Date(NOW.getTime() - 120_000), printedAt: null })])
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+    expect(won.map(w => w.id)).toEqual(['oo-A'])
+  })
+
+  it('a print claim that lands between the read and the CAS is not delivered (the CAS repeats the guard, ACCEPTED only)', async () => {
+    // La lectura ve el pedido SIN reclamo; antes del CAS alguien lo reclama. La base simulada aplica el filtro del CAS.
+    const f: any = aceptada('A')
+    prismaMock.onlineOrder.findMany.mockImplementation((async () => {
+      const leida = [{ ...f }]
+      f.printClaimedAt = new Date(NOW.getTime() - 1_000)
+      return leida
+    }) as any)
+    prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => ({
+      count: cumple(f, { OR: a.where.OR ?? [{}] }) ? 1 : 0,
+    })) as any)
+
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+
+    expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
+      where: { id: 'oo-A', status: 'ACCEPTED', order: CUENTA_PAGADA, OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] },
+      data: { status: 'COMPLETED', completedAt: NOW },
+    })
+    expect(won).toEqual([])
   })
 })

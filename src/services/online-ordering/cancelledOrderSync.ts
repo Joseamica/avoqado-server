@@ -1,20 +1,14 @@
 import { OnlineOrderStatus, OrderStatus, type Prisma } from '@prisma/client'
 import logger from '@/config/logger'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { SYNC_BATCH_SIZE } from './constants'
+import { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES, SYNC_BATCH_SIZE } from './constants'
 import { notifyOrderEvent } from './notifications.service'
 import { emitOnlineOrderUpdated } from './traySocket'
 import type { ReadCandidates } from './types'
 
-/** Estados del pedido en línea que todavía esperan algo del restaurante. */
-export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
-  OnlineOrderStatus.PENDING_ACCEPTANCE,
-  OnlineOrderStatus.ACCEPTED,
-  OnlineOrderStatus.READY,
-]
-
-/** `cancelledBy` cuando la cuenta se canceló por otra vía: no sabemos quién, sí que fue el negocio y no el comensal. */
-export const CANCELLED_ELSEWHERE = 'ORDER_CANCELLED_ELSEWHERE'
+// Viven en `constants.ts` (sin dependencias) para que el cobro capturado (`shared/cuentaCancelada.ts`) cierre el pedido con los
+// MISMOS valores sin cargar este módulo (correo, WhatsApp, sockets). Se reexportan: los que ya los importaban de aquí siguen igual.
+export { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES }
 
 /** Un pedido que ESTA pasada cerró (ganó su CAS): sólo éstos se anuncian. */
 export interface CancelledElsewhere {

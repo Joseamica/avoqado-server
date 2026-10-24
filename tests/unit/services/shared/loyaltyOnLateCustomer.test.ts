@@ -56,6 +56,20 @@ const hace = (ms: number) => new Date(AHORA_FIJO - ms)
 const D = (n: number) => new Prisma.Decimal(n)
 const EARN = (customerId: string) => ({ type: 'EARN', stampCard: { customerId } })
 const cron = () => ({ start: jest.fn(), stop: jest.fn() })
+/** El sello EARN de la venta con su cartilla (lo que lee `cartillaDeLaVenta`). */
+const earnDeLaVenta = (c: {
+  stampsEarned: number
+  stampsRequired: number
+  completa?: boolean
+  premio?: { rewardLabel: string; status: string }
+}) => ({
+  stampCard: {
+    stampsEarned: c.stampsEarned,
+    stampsRequired: c.stampsRequired,
+    completedAt: c.completa ? new Date(AHORA_FIJO) : null,
+    rewards: c.premio ? [c.premio] : [],
+  },
+})
 /**
  * La MARCA de fila que deja la reapertura (ruling del coordinador tras la medición de S3b): el cierre «sin cliente» de
  * `awardLoyaltyForPaidOrder` que esperó el candado de la liga sólo relee las columnas de la fila; esta columna lo detiene.
@@ -291,6 +305,7 @@ describe('esElegibleParaLealtad (¿se corre —o se COMPLETA— la lealtad? audi
 describe('awardLoyaltyForLateCustomer', () => {
   it('🔴 venta pagada hace 30 min: llama la lealtad con el actor y la base sin propina, y sella', async () => {
     cardMock.mockResolvedValue({ stampsEarned: 4, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
+    prismaMock.stampEvent.findFirst.mockResolvedValueOnce(earnDeLaVenta({ stampsEarned: 4, stampsRequired: 7 }) as any)
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST, staffId: STAFF })
     // H1: la lealtad NO cierra la venta; la cierra el envoltorio después de su comprobación final de reembolso.
     expect(awardMock).toHaveBeenCalledWith(
@@ -298,7 +313,22 @@ describe('awardLoyaltyForLateCustomer', () => {
       // H4 (segunda ola): el beneficiario VALIDADO viaja a la lealtad; si el primario cambia, no acredita a nadie.
       { cerrar: false, beneficiario: CUST },
     )
-    expect(r).toEqual({ stampsEnabled: true, stamped: true, reason: null, stampsEarned: 4, stampsRequired: 7, rewardReady: false })
+    // La tarjetita de «Cobro exitoso» (21-oct): la cartilla de ESTA venta y lo que ofrece hoy el negocio.
+    expect(r).toEqual({
+      stampsEnabled: true,
+      stamped: true,
+      reason: null,
+      stampsEarned: 4,
+      stampsRequired: 7,
+      rewardReady: false,
+      saleCard: { stampsEarned: 4, stampsRequired: 7, completed: false, rewardLabel: 'Café', rewardPending: false },
+    })
+    expect((prismaMock.stampEvent.findFirst as jest.Mock).mock.calls[0][0].where).toEqual({
+      venueId: VENUE,
+      orderId: ORDER,
+      type: 'EARN',
+      stampCard: { customerId: CUST },
+    })
   })
 
   it('🔴 idempotencia: dos ligas seguidas = UN sello y UNOS puntos (la lealtad se llama las dos veces: es idempotente)', async () => {
@@ -324,6 +354,48 @@ describe('awardLoyaltyForLateCustomer', () => {
     cardMock.mockResolvedValue({ stampsEarned: 0, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 1 })
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
     expect(r).toMatchObject({ stamped: true, stampsEarned: 0, rewardReady: true })
+  })
+
+  // Codex r1 #1-#3 (21-oct): la tarjetita describe la cartilla de ESTA venta, no la abierta hoy.
+  it('su cartilla de 7 está llena aunque el negocio ya pide 10 y ya renombró el premio: dice 7 de 7 y el premio GANADO', async () => {
+    cardMock.mockResolvedValue({ stampsEarned: 0, stampsRequired: 10, rewardLabel: '10 % de descuento', pendingRewards: 1 })
+    prismaMock.stampEvent.findFirst.mockResolvedValueOnce(
+      earnDeLaVenta({
+        stampsEarned: 7,
+        stampsRequired: 7,
+        completa: true,
+        premio: { rewardLabel: 'Café gratis', status: 'PENDING' },
+      }) as any,
+    )
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(r?.saleCard).toEqual({ stampsEarned: 7, stampsRequired: 7, completed: true, rewardLabel: 'Café gratis', rewardPending: true })
+    // Codex r2 #2 / r3 #1: no se ordenan sellos para adivinar cuál llenó la cartilla; una sola lectura, la del sello de la venta.
+    expect(prismaMock.stampEvent.findFirst).toHaveBeenCalledTimes(1)
+  })
+
+  it('cartilla llena y otro aparato ya cobró el premio: no dice «por cobrar»', async () => {
+    cardMock.mockResolvedValue({ stampsEarned: 0, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
+    prismaMock.stampEvent.findFirst.mockResolvedValueOnce(
+      earnDeLaVenta({ stampsEarned: 7, stampsRequired: 7, completa: true, premio: { rewardLabel: 'Café', status: 'REDEEMED' } }) as any,
+    )
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(r?.saleCard).toMatchObject({ completed: true, rewardPending: false })
+  })
+
+  it('cartilla reabierta por una devolución tras cobrar el premio (6 de 7 con fecha de llena): sin tarjetita, nunca «7 de 7»', async () => {
+    cardMock.mockResolvedValue({ stampsEarned: 0, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
+    prismaMock.stampEvent.findFirst.mockResolvedValueOnce(
+      earnDeLaVenta({ stampsEarned: 6, stampsRequired: 7, completa: true, premio: { rewardLabel: 'Café', status: 'REDEEMED' } }) as any,
+    )
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(r).toMatchObject({ stamped: true, saleCard: null })
+  })
+
+  it('sin sello EARN de la venta (no quedó o se revirtió): sin tarjetita', async () => {
+    cardMock.mockResolvedValue({ stampsEarned: 1, stampsRequired: 7, rewardLabel: 'Café', pendingRewards: 0 })
+    prismaMock.stampEvent.findFirst.mockResolvedValueOnce(null)
+    const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
+    expect(r).toMatchObject({ stamped: true, saleCard: null })
   })
 
   it('23 h 59 min después del cobro: sí sella', async () => {
@@ -461,7 +533,7 @@ describe('awardLoyaltyForLateCustomer', () => {
     awardMock.mockResolvedValue({ complete: true, errors: [] })
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
     expect(awardMock).toHaveBeenCalledTimes(1)
-    expect(r).toMatchObject({ stampsEnabled: false, stamped: false, reason: null })
+    expect(r).toMatchObject({ stampsEnabled: false, stamped: false, reason: null, saleCard: null })
   })
 
   it('sin el plan (LOYALTY_PROGRAM): stampsEnabled false', async () => {

@@ -14,7 +14,7 @@ import { PaymentFundsFlow, PaymentMethod, PaymentSource, PaymentType, Prisma, ty
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
-import { restockItem } from './inventoryRestock.service'
+import { restockOrderItems } from './inventoryRestock.service'
 import { generateAndStoreReceipt } from './receipt.dashboard.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '../payments/deferredTransactionCost.service'
@@ -30,6 +30,7 @@ import {
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { reverseStampForOrder } from '../wallet/stampLedger.service'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
 import { NO_SE_PUEDE_POR_ARTICULOS, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
@@ -1402,6 +1403,22 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     })
   }
 
+  // 🔴 D1 (24-oct): revierte el sello que la venta otorgó, igual que la terminal (`refund.tpv.service.ts`, STEP 6). Sin esto
+  // una devolución desde el POS o el panel dejaba el sello vivo: el reconciliador de lealtad sólo mira ventas sin cerrar
+  // (`loyaltyProcessedAt: null`) y nunca lo recogía. Fuera de la transacción y sin lanzar: el dinero ya salió; la reversa es
+  // idempotente (una venta se revierte una sola vez, aunque se devuelva en partes).
+  // 🔴 Sin `await` (Codex D1-r1 #1): la reversa espera el candado del cliente hasta 3 × 15 s; esperarla aquí pasaba de los 30 s
+  // del POS, que mostraba error de una devolución YA hecha y dejaba reintentarla.
+  // ponytail: no es durable; si el proceso muere aquí el sello queda vivo, igual que en la terminal. Efecto encolado si pasa.
+  reverseStampForOrder(input.venueId, result.originalOrderId).catch(err => {
+    logger.error('[REFUND.DASHBOARD] No se pudo revertir el sello de una venta reembolsada', {
+      venueId: input.venueId,
+      orderId: result.originalOrderId,
+      refundPaymentId: result.refundPaymentId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  })
+
   // El referido NO se revierte aquí: su obligación (`referral-refund:<devolución>`) ya quedó encolada en la transacción de la
   // devolución (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker. El enganche post-commit que vivía aquí era
   // redundante y no durable (A6 F4, Codex bloque A r1).
@@ -1412,23 +1429,19 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   if (input.restockItemIds && input.restockItemIds.length > 0) {
     const restockSet = new Set(input.restockItemIds)
     const toRestock = result.refundedItems.filter(r => r.productId && restockSet.has(r.orderItemId))
-    for (const item of toRestock) {
-      try {
-        await restockItem({
-          venueId: input.venueId,
-          productId: item.productId!,
-          quantity: item.quantity,
-          refundPaymentId: result.refundPaymentId,
-          staffId: input.staffId ?? undefined,
-        })
-      } catch (err: any) {
-        logger.warn('[REFUND.DASHBOARD] Failed to restock item', {
-          refundPaymentId: result.refundPaymentId,
-          orderItemId: item.orderItemId,
-          productId: item.productId,
-          error: err?.message ?? err,
-        })
-      }
+    try {
+      await restockOrderItems({
+        venueId: input.venueId,
+        orderId: result.originalOrderId,
+        items: toRestock.map(item => ({ orderItemId: item.orderItemId, quantity: item.quantity })),
+        refundPaymentId: result.refundPaymentId,
+        staffId: input.staffId ?? undefined,
+      })
+    } catch (err: any) {
+      logger.warn('[REFUND.DASHBOARD] Failed to restock refunded items', {
+        refundPaymentId: result.refundPaymentId,
+        error: err?.message ?? err,
+      })
     }
   }
 

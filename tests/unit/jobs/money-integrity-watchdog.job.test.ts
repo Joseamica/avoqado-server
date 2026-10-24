@@ -24,7 +24,13 @@ import {
   corteDeAlerta,
   buildWatchdogSql,
 } from '@/jobs/money-integrity-watchdog.job'
-import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '@/services/shared/pagadaPeroAbierta'
+import {
+  baseQueDebeCubrirseSql,
+  COBRO_QUE_CUBRE,
+  criterioPagadaPeroAbiertaSql,
+  instanteUtcSql,
+  pedidoDePlataformaQueBDejaAbiertoSql,
+} from '@/services/shared/pagadaPeroAbierta'
 import { ordenDescuentaInventarioSql } from '@/services/inventory/inventoryPosting.service'
 
 jest.mock('@/utils/prismaClient', () => ({
@@ -118,6 +124,25 @@ describe('money-integrity-watchdog · la forma de las consultas', () => {
     expect(pagadaAbierta).toContain(`' base=' || ${baseQueDebeCubrirseSql('o')}`)
     expect(baseQueDebeCubrirseSql('o')).toContain('COALESCE(o."serviceChargeAmount", 0)')
     expect(pagadaAbierta).toContain('Grupo Avoqado Prime')
+  })
+
+  /**
+   * Decisión B del founder (22-oct-2026): un pedido de plataforma pagado y aceptado sigue ABIERTO mientras la cocina lo prepara,
+   * hasta que la cocina lo termina o se acaba el día del negocio. Es un estado sano, no «pagada pero abierta»: sin esta excepción
+   * el vigilante gritaría por cada pedido de Rappi o de Uber a los 15 min. La excepción sale de la MISMA función que decide el
+   * barrido, con el MISMO reloj de la corrida: lo que ya toca cerrar y sigue abierto, sí grita.
+   */
+  it('🔴 «pagada pero abierta» no grita por un pedido de plataforma que la decisión B todavía deja abierto', () => {
+    const T = new Date('2026-10-22T18:17:00Z')
+    const { details, counts } = buildWatchdogSql(T)
+    const desde = details.indexOf(`'PAGADA PERO ABIERTA'`)
+    const regla6 = details.slice(desde, details.indexOf('UNION ALL', desde))
+
+    const excepcion = `AND NOT (${pedidoDePlataformaQueBDejaAbiertoSql('o', instanteUtcSql(T))})`
+    expect(regla6).toContain(excepcion)
+    expect(counts).toContain(excepcion)
+    // Sigue mirando el criterio compartido completo: la excepción sólo RESTA lo que B deja abierto a propósito.
+    expect(regla6).toContain(criterioPagadaPeroAbiertaSql('o'))
   })
 
   it('🔴 «orden sin vale de inventario»: cerrada, con mercancía que descuenta, y sin vale que lo respalde', () => {

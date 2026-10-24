@@ -192,6 +192,16 @@ router.get(
   ctrl.getUberConnectUrl,
 )
 
+/** El mismo enlace para el self-onboarding de Rappi (spec 2026-09-29): mismas guardas, PREMIUM, revalidado en cada paso. */
+router.get(
+  '/venues/:venueId/channels/rappi/connect-url',
+  authenticateTokenMiddleware,
+  checkPermission('delivery-channels:manage'),
+  withDeliveryPremiumMessage,
+  checkFeatureAccess('DELIVERY_CHANNELS'),
+  ctrl.getRappiConnectUrl,
+)
+
 router.post(
   '/venues/:venueId/activation-request',
   authenticateTokenMiddleware,

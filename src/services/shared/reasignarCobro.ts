@@ -101,7 +101,7 @@ export interface OrdenFoto extends OrderAmountsForBalance {
   source: string
   externalId: string | null
   /** `giftCardId` OBLIGATORIO (⭐ B6 M4): una cuenta de tarjetas no da ni recibe cobros reasignados. */
-  items: Array<{ areaTicketLineId: string | null; giftCardId: string | null }>
+  items: Array<{ areaTicketLineId: string | null; releasedAreaTicketLineId?: string | null; giftCardId: string | null }>
   /** La mesa que se libera al saldar (Tarea 6d, M-1). */
   tableId: string | null
   /** Cobros COMPLETED de la orden (reembolsos incluidos: el saldo los distingue por `type`). */
@@ -158,6 +158,8 @@ export function validarReasignacion(caso: CasoReasignacion, cobro: CobroFoto, or
   }
   if (tieneRenglonDeTarjeta(origen.items)) motivos.push('el origen es una venta de tarjetas de regalo: su cobro no se reasigna')
   if (tieneRenglonDeTarjeta(destino.items)) motivos.push('el destino es una venta de tarjetas de regalo: no recibe cobros reasignados')
+  // Rappi 2b (T7): el dinero de un pedido de Rappi lo reparte el servidor (venta, propina y lo de Rappi); moverlo lo descuadraría.
+  if (origen.source === 'RAPPI' || destino.source === 'RAPPI') motivos.push('un pedido de Rappi no da ni recibe cobros reasignados')
 
   const cobrosDestino = destino.cobros.filter(esCobroQueCuenta)
   if (cobrosDestino.length > 0) motivos.push(`el destino ya tiene ${cobrosDestino.length} cobro(s) completado(s)`)

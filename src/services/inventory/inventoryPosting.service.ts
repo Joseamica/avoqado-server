@@ -24,6 +24,7 @@ import { Prisma } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { deductInventoryForProduct, getProductInventoryMethods } from '../dashboard/productInventoryIntegration.service'
+import { esValeRevendido } from '../shared/renglonDeVale'
 
 /** Mismo shape estructural que OrderInventoryWarning['issues'] (payment.tpv). */
 export type InventoryPostingIssue = {
@@ -43,6 +44,8 @@ type SalePostingItem = {
   modifiers?: Array<{ quantity: number; modifier: Record<string, unknown> | null }> | null
   /** El renglón vino de un vale por área v7 (puede tener su reserva de inventario ACTIVE). */
   areaTicketLineId?: string | null
+  /** D1: el vale de este renglón se volvió a cobrar en otra cuenta (`renglonDeVale.ts`): aquí no se descuenta. */
+  releasedAreaTicketLineId?: string | null
 }
 
 const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
@@ -67,6 +70,7 @@ const itemHasInventoryModifiers = (item: SalePostingItem): boolean =>
  *    —fallback de los productos legacy— una `Recipe`;
  *  · o el renglón trae un modificador con materia prima (`itemHasInventoryModifiers` exige
  *    `rawMaterialId` Y `quantityPerUnit`), que descuenta aunque el producto no lleve inventario.
+ *  · D1: el renglón de un vale que se volvió a cobrar en otra cuenta (`esValeRevendido`) no descuenta aquí.
  *
  * ⚠️ Falso NEGATIVO conocido, y va hacia el silencio: `OrderItemModifier.modifierId` es
  * `onDelete: SetNull`, así que borrar el modificador del menú deja el renglón sin con qué
@@ -83,6 +87,7 @@ export function ordenDescuentaInventarioSql(alias = 'o'): string {
   return `EXISTS (
             SELECT 1 FROM "OrderItem" oi
             WHERE oi."orderId" = ${o}.id AND oi."productId" IS NOT NULL
+              AND NOT (oi."areaTicketLineId" IS NULL AND oi."releasedAreaTicketLineId" IS NOT NULL)
               AND (
                 EXISTS (
                   SELECT 1 FROM "Product" pr
@@ -171,10 +176,15 @@ export async function createSalePostingInTx(
               areaTicket: { venueId, orderId: { not: null } },
               reservations: { none: { status: 'CONSUMED' } },
             },
-            select: { id: true },
+            select: { id: true, orderItem: { select: { id: true } } },
             take: lineasDeVale.length,
           })
-        ).map(l => l.id)
+        )
+          // D1 (Codex r2 #1 / r3): el renglón tiene que ser el DUEÑO VIVO del vínculo, no una lectura vieja que todavía lo trae. Si el
+          // vale se volvió a cobrar en otra cuenta, su vínculo ya es de otro renglón: éste no se descuenta ni suelta la reserva ajena.
+          // Dividir o fusionar (R13-2) mueve el MISMO renglón, así que sigue siendo el dueño y sigue descontando.
+          .filter(l => l.orderItem != null && items.some(i => i.id === l.orderItem!.id && i.areaTicketLineId === l.id))
+          .map(l => l.id)
       : [],
   )
 
@@ -190,6 +200,7 @@ export async function createSalePostingInTx(
     const methods = await getProductInventoryMethods(productIds, tx as any, venueId)
     for (const item of items) {
       if (!item.productId) continue
+      if (esValeRevendido(item)) continue
       if (item.areaTicketLineId && !lineasPropias.has(item.areaTicketLineId)) continue
       const method = methods.get(item.productId) ?? null
       if (!method && !itemHasInventoryModifiers(item)) continue

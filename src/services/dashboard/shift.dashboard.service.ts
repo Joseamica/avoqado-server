@@ -1402,7 +1402,19 @@ export async function updateShift(
           puedeVerEsperado,
         )
 
-  const expectedCash = gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawer)
+  // Rappi 2b (T11): sin gaveta, la fórmula del turno también suma lo cobrado por cuenta de Rappi en sus cobros (está en el cajón y
+  // no es venta ni propina). Sólo se consulta cuando la fórmula del turno es la que manda.
+  const tercerosDelTurno = async () => {
+    const r = await prisma.payment.aggregate({
+      where: { venueId, shiftId: existingShift.id, status: 'COMPLETED', thirdPartyCashAmount: { gt: 0 } },
+      _sum: { thirdPartyCashAmount: true },
+    })
+    return Number(r?._sum?.thirdPartyCashAmount ?? 0)
+  }
+  const mandaLaFormulaDelTurno = gaveta != null && gaveta.fuente !== 'DESCONOCIDO' && gaveta.esperado == null
+  const cashInDrawerConTerceros = cashInDrawer + (mandaLaFormulaDelTurno ? await tercerosDelTurno() : 0)
+  const expectedCash =
+    gaveta == null || gaveta.fuente === 'DESCONOCIDO' ? null : (gaveta.esperado ?? effectiveStartingCash + cashInDrawerConTerceros)
 
   const difference =
     gaveta == null || gaveta.fuente === 'DESCONOCIDO'
@@ -1410,7 +1422,7 @@ export async function updateShift(
       : computeCashDifference({
           countedCash,
           startingCash: effectiveStartingCash,
-          cashInDrawer,
+          cashInDrawer: cashInDrawerConTerceros,
           expectedCash: gaveta.esperado,
         })
   if (data.endingCash === null) {
