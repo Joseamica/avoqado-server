@@ -439,6 +439,20 @@ export interface ReverseStampResult {
   stampCardId?: string
 }
 
+/** Hasta 2 reintentos (100 ms, 300 ms) si la transacción se vence esperando un candado (P2028); cualquier otro error sube. */
+async function reintentarSiSeVence<T>(venueId: string, orderId: string, correr: () => Promise<T>): Promise<T> {
+  for (let intento = 0; ; intento++) {
+    try {
+      return await correr()
+    } catch (error) {
+      const vencida = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028'
+      if (!vencida || intento >= 2) throw error
+      logger.warn('Reversa de sello vencida esperando el candado (P2028): se reintenta', { venueId, orderId, intento: intento + 1 })
+      await new Promise(resolve => setTimeout(resolve, 100 * 3 ** intento))
+    }
+  }
+}
+
 /**
  * Revierte el sello que otorgó una venta que se reembolsó.
  *
@@ -467,13 +481,16 @@ export async function reverseStampForOrder(
   // 🔴 D3 (24-oct): el sello se busca bajo el candado de la VENTA, el mismo que `grantStamp` sostiene hasta su commit. Sin él, un
   // cobro que estaba otorgando cuando entró la devolución todavía no se veía aquí; la reversión salía sin hacer nada y el sello
   // quedaba vivo. Transacción corta y sólo con ese candado: nunca se toma junto con el del cliente (no hay orden inverso).
-  const otorgado = await prisma.$transaction(async tx => {
-    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
-    return tx.stampEvent.findFirst({
-      where: { venueId, orderId, type: StampEventType.EARN },
-      select: { id: true, stampCardId: true, quantity: true },
-    })
-  }, PRESUPUESTO_DEL_SELLO)
+  // Con los mismos reintentos P2028 que la reversa (Codex D3-r1 #1): si esta lectura se vence, el sello no puede quedar vivo.
+  const otorgado = await reintentarSiSeVence(venueId, orderId, () =>
+    prisma.$transaction(async tx => {
+      await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+      return tx.stampEvent.findFirst({
+        where: { venueId, orderId, type: StampEventType.EARN },
+        select: { id: true, stampCardId: true, quantity: true },
+      })
+    }, PRESUPUESTO_DEL_SELLO),
+  )
   if (!otorgado) return { reversed: false }
 
   // 🔴 Un mismo cobro puede reembolsarse en partes, y cada parte pasa por aquí. Sin
@@ -495,19 +512,11 @@ export async function reverseStampForOrder(
   // 5 s por defecto, la reversión de un reembolso se vencía y el sello de la venta devuelta quedaba vivo (el reembolso sólo lo
   // registra). Y si aun así se vence (P2028), hasta 2 reintentos (100 ms, 300 ms): es idempotente porque cada intento vuelve a
   // tomar el candado y relee las reversas de la venta antes de escribir, con el índice único de la reversa detrás.
-  const revertirConReintento = async () => {
-    for (let intento = 0; ; intento++) {
-      try {
-        revertida = false
-        return await prisma.$transaction(revertirDentroDelCandado, PRESUPUESTO_DEL_SELLO)
-      } catch (error) {
-        const vencida = error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2028'
-        if (!vencida || intento >= 2) throw error
-        logger.warn('Reversa de sello vencida esperando el candado (P2028): se reintenta', { venueId, orderId, intento: intento + 1 })
-        await new Promise(resolve => setTimeout(resolve, 100 * 3 ** intento))
-      }
-    }
-  }
+  const revertirConReintento = () =>
+    reintentarSiSeVence(venueId, orderId, () => {
+      revertida = false
+      return prisma.$transaction(revertirDentroDelCandado, PRESUPUESTO_DEL_SELLO)
+    })
   const revertirDentroDelCandado = async (tx: Prisma.TransactionClient) => {
     // 🔴 PRIMERA sentencia: el candado (negocio, cliente). Un otorgamiento del mismo cliente que esté completando la cartilla
     // termina antes de que aquí se lea nada.

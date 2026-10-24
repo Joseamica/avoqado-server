@@ -412,6 +412,15 @@ describe('reverseStampForOrder', () => {
     expect(prismaMock.stampEvent.create).toHaveBeenCalledTimes(1)
   })
 
+  it('🔴 si se vence la LECTURA del sello bajo el candado de la venta (P2028), también se reintenta y se revierte (Codex D3-r1 #1)', async () => {
+    const p2028 = new Prisma.PrismaClientKnownRequestError('Transaction already closed', { code: 'P2028', clientVersion: 'test' })
+    prismaMock.$transaction.mockRejectedValueOnce(p2028)
+    const r = await reverseStampForOrder('v1', 'o1')
+    expect(r.reversed).toBe(true)
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(3)
+    expect(prismaMock.stampEvent.create).toHaveBeenCalledTimes(1)
+  })
+
   it('otro error de la transacción NO se reintenta', async () => {
     prismaMock.$transaction
       .mockImplementationOnce(((cb: any) => cb(prismaMock)) as never)
