@@ -11,6 +11,7 @@
 import crypto from 'crypto'
 import { OrgRole } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { logAction } from '@/services/dashboard/activity-log.service'
 
 const enviarCorreo = jest.fn().mockResolvedValue(true)
 jest.mock('@/services/email.service', () => ({
@@ -46,7 +47,11 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 
-beforeEach(() => enviarCorreo.mockClear())
+beforeEach(() => {
+  enviarCorreo.mockClear()
+  // `logAction` está simulado globalmente en integración: se revisa la llamada.
+  ;(logAction as jest.Mock).mockClear()
+})
 
 let n = 0
 /** Un prospecto de landing como lo deja `signupFromLanding` con el interruptor prendido. */
@@ -116,7 +121,9 @@ describe('verificarCodigoDeLanding', () => {
     expect(despues.emailVerified).toBe(true)
     expect(despues.password).toBeTruthy()
     expect(despues.emailVerificationCode).toBeNull()
-    expect(await prisma.activityLog.count({ where: { staffId: staff.id, action: 'LANDING_EMAIL_VERIFIED_BY_CODE' } })).toBe(1)
+    const bitacora = (logAction as jest.Mock).mock.calls.filter(([a]) => a.action === 'LANDING_EMAIL_VERIFIED_BY_CODE')
+    expect(bitacora).toHaveLength(1)
+    expect(bitacora[0][0]).toMatchObject({ staffId: staff.id })
   })
 
   it('🔴 el link del correo abierto DESPUÉS de entrar con código ya no sirve', async () => {
