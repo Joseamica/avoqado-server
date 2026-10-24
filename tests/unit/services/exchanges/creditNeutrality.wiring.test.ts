@@ -28,6 +28,7 @@ describe('commission: the exchange credit refund neither measures nor counts as 
       venueId: 'venue-1',
       orderId: 'order-1',
       type: 'REFUND',
+      processorData: { originalPaymentId: 'pay-orig' },
       amount: new Decimal(-40),
       tipAmount: new Decimal(0),
       createdAt: new Date('2026-10-21T18:00:00Z'),
@@ -90,8 +91,20 @@ describe('commission: the exchange credit refund neither measures nor counts as 
       venueId: 'venue-1',
       type: 'REFUND',
       status: 'COMPLETED',
-      processorData: { path: ['originalPaymentId'], equals: 'pay-orig' },
-      AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+      AND: [
+        {
+          OR: [
+            { processorData: { path: ['rootPaymentId'], equals: 'pay-orig' } },
+            {
+              AND: [
+                { processorData: { path: ['rootPaymentId'], equals: Prisma.AnyNull } },
+                { processorData: { path: ['originalPaymentId'], equals: 'pay-orig' } },
+              ],
+            },
+          ],
+        },
+        WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
+      ],
     })
   })
 

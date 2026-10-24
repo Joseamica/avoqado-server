@@ -6,7 +6,7 @@ import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import logger from '@/config/logger'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
-import { esVentaNuevaDeCambio } from '@/services/exchanges/exchangeMarks'
+import { esVentaNuevaDeCambio, sqlOrigenEconomico } from '@/services/exchanges/exchangeMarks'
 
 export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
@@ -200,6 +200,15 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
     // Use the same lock order as financial producers (Order before its effect rows).
     if (claim.orderId)
       await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${claim.orderId} AND "venueId" = ${claim.venueId} FOR UPDATE`)
+    // La anulación toma la raíz: el worker también, después de la venta nueva y antes de bloquear su efecto (R19).
+    if (claim.kind === 'COMMISSION')
+      await tx.$queryRaw(Prisma.sql`
+        SELECT o.id FROM "Order" o
+        JOIN "Payment" original ON original."orderId" = o.id AND original."venueId" = o."venueId"
+        JOIN "Payment" r ON ${sqlOrigenEconomico('r')} = original.id AND r."venueId" = original."venueId"
+        WHERE r.id = ${claim.paymentId} AND r."venueId" = ${claim.venueId} AND r.type = 'REFUND'
+          AND r."orderId" IS NOT DISTINCT FROM ${claim.orderId} AND o.id IS DISTINCT FROM ${claim.orderId}
+        FOR UPDATE OF o`)
     const [effect] = await tx.$queryRaw<PaymentEffect[]>(Prisma.sql`
       SELECT * FROM "PaymentEffect" WHERE id = ${claim.id} AND "claimToken" = ${claim.claimToken}
       AND status = 'PROCESSING' FOR UPDATE
@@ -328,6 +337,8 @@ export async function enqueueRefundPaymentEffectsInTx(
   originalPaymentId: string,
 ): Promise<void> {
   const { createRefundCommission } = await import('../dashboard/commission/commission-calculation.service')
+  // El sobre conserva la orden de SU cobro; sólo el cálculo congelado se atribuye a la raíz (R6).
+  const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   // Fase 3 (A2, resolución del ensamblaje): una falla al CALCULAR el reverso de la comisión nunca bloquea la devolución —el
   // dinero ya salió o está saliendo—. Se revierte sólo ese cálculo y queda una obligación visible para revisión, igual que en
   // el cobro. Una conexión perdida de verdad sigue tumbando el commit (la siguiente consulta falla igual).
@@ -341,7 +352,7 @@ export async function enqueueRefundPaymentEffectsInTx(
         await enqueuePaymentEffect(tx, {
           venueId: data.venueId,
           paymentId: refundPaymentId,
-          orderId: data.orderId ?? null,
+          orderId: payment.orderId,
           kind: 'COMMISSION',
           dedupeKey,
           payload: JSON.parse(JSON.stringify(data)),
@@ -374,7 +385,6 @@ export async function enqueueRefundPaymentEffectsInTx(
     })
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
   }
-  const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,
     paymentId: refundPaymentId,
