@@ -67,9 +67,18 @@ it('create conserva customerId validado y exige customers:read sin bloquear anó
   await run('post', '/', { title: 'Anticipo', amountType: 'FIXED', amount: 100 }, ['customers:read'])
   expect(mockCreate).toHaveBeenCalledWith('v1', expect.anything(), 'staff1', 'attempt1')
 })
-it('update rechaza intento explícito en lugar de quitarlo silenciosamente', () => {
-  expect(updatePaymentLinkBodySchema.safeParse({ customerId: CUSTOMER }).success).toBe(false)
+it('update acepta AGREGAR un cliente válido pero nunca quitarlo', () => {
+  expect(updatePaymentLinkBodySchema.safeParse({ customerId: CUSTOMER }).success).toBe(true)
   expect(updatePaymentLinkBodySchema.safeParse({ customerId: null }).success).toBe(false)
+  expect(updatePaymentLinkBodySchema.safeParse({ customerId: 'no-es-cuid' }).success).toBe(false)
+})
+it('update con cliente exige customers:read y pasa quién lo agregó', async () => {
+  const denied = await run('put', '/:linkId', { customerId: CUSTOMER }, ['customers:read'])
+  expect(denied.res.status).toHaveBeenCalledWith(403)
+  expect(mockUpdate).not.toHaveBeenCalled()
+  mockUpdate.mockResolvedValue({ id: 'pl1' })
+  await run('put', '/:linkId', { title: 'Sin cliente' }, ['customers:read'])
+  expect(mockUpdate).toHaveBeenCalledWith('v1', 'pl1', { title: 'Sin cliente' }, 'staff1')
 })
 it.each([false, true])('respuestas privadas redactan id y contactos cuando read=%s', async allowed => {
   ;(hasPermission as jest.Mock).mockResolvedValue(allowed)

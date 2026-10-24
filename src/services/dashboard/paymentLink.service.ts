@@ -350,7 +350,8 @@ export interface CreatePaymentLinkData {
 }
 
 export interface UpdatePaymentLinkData {
-  customerId?: never
+  /** Sólo AGREGA a una liga sin cliente; nunca cambia ni quita uno puesto (founder, 23-oct). */
+  customerId?: string
   title?: string
   description?: string | null
   imageUrl?: string | null
@@ -681,11 +682,19 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
 /**
  * Updates a payment link
  */
-export async function updatePaymentLink(venueId: string, linkId: string, data: UpdatePaymentLinkData) {
-  if (Object.prototype.hasOwnProperty.call(data, 'customerId')) throw new BadRequestError('El cliente de una liga no se puede cambiar')
+export async function updatePaymentLink(
+  venueId: string,
+  linkId: string,
+  data: UpdatePaymentLinkData,
+  staffId?: string,
+  // El MCP audita con su propio sello en lugar del registro nativo (mismo patrón que createPaymentLink).
+  auditCustomerAdded?: () => Promise<void>,
+) {
+  const addsCustomer = Object.prototype.hasOwnProperty.call(data, 'customerId')
+  if (addsCustomer && !data.customerId) throw new BadRequestError('El cliente de una liga no se puede quitar')
   const existing = await prisma.paymentLink.findUnique({
     where: { id: linkId },
-    select: { id: true, venueId: true, status: true },
+    select: { id: true, venueId: true, status: true, customerId: true },
   })
 
   if (!existing) {
@@ -699,6 +708,20 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   if (existing.status === 'ARCHIVED') {
     throw new BadRequestError('No se puede editar una liga de pago archivada')
   }
+
+  // Agregar cliente: sólo a una liga que no tiene. El mismo cliente otra vez no hace nada (reintento).
+  // Sólo cuenta para los pagos que empiecen después: cada sesión copia el cliente al abrirse.
+  const customerToAdd = addsCustomer && existing.customerId !== data.customerId ? data.customerId! : null
+  if (addsCustomer) {
+    if (existing.customerId && existing.customerId !== data.customerId) {
+      throw new ConflictError('Esta liga ya tiene un cliente y no se puede cambiar')
+    }
+    const customer = await prisma.customer.findFirst({ where: { id: data.customerId, venueId, active: true }, select: { id: true } })
+    if (!customer) throw new BadRequestError('El cliente no existe, está inactivo o no pertenece a este negocio')
+  }
+  // Sólo el cliente y ya era ése (reintento): nada que escribir ni que auditar (Codex r1 #1).
+  const onlyCustomer = addsCustomer && Object.keys(data).every(key => key === 'customerId')
+  if (onlyCustomer && !customerToAdd) return getPaymentLinkById(venueId, linkId)
 
   const updateData: Prisma.PaymentLinkUpdateInput = {}
 
@@ -740,8 +763,23 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   // rows are atomic — partial state would confuse the customer checkout.
   // Nested modifier rows can't be inserted via createMany (Prisma limitation),
   // so we loop and use create() per item which accepts the nested write.
+  let customerAdded = false
   const updated = await prisma
     .$transaction(async tx => {
+      if (customerToAdd) {
+        // CAS: sólo donde sigue vacío. Si otro guardado ganó, gana él (o era el mismo cliente).
+        // Tampoco a una liga que archivaron entre la lectura y aquí (Codex r1 #2).
+        const { count } = await tx.paymentLink.updateMany({
+          where: { id: linkId, venueId, customerId: null, status: { not: 'ARCHIVED' } },
+          data: { customerId: customerToAdd },
+        })
+        if (count === 0) {
+          const now = await tx.paymentLink.findUnique({ where: { id: linkId }, select: { customerId: true, status: true } })
+          if (now?.status === 'ARCHIVED') throw new BadRequestError('No se puede editar una liga de pago archivada')
+          if (now?.customerId !== customerToAdd) throw new ConflictError('Esta liga ya tiene un cliente y no se puede cambiar')
+        }
+        customerAdded = count === 1 // sólo quien escribió deja rastro; el reintento que llegó segundo, no
+      }
       if (itemReplacement !== null) {
         // Cascade deletes the modifier rows because PaymentLinkItemModifier
         // has onDelete: Cascade on paymentLinkItemId.
@@ -772,12 +810,26 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
 
   logger.info('Payment link updated', { paymentLinkId: linkId, venueId })
 
-  logAction({
-    venueId,
-    action: 'PAYMENT_LINK_UPDATED',
-    entity: 'PaymentLink',
-    entityId: linkId,
-  })
+  if (!onlyCustomer) {
+    logAction({
+      venueId,
+      action: 'PAYMENT_LINK_UPDATED',
+      entity: 'PaymentLink',
+      entityId: linkId,
+    })
+  }
+  if (customerAdded && auditCustomerAdded) {
+    await auditCustomerAdded()
+  } else if (customerAdded) {
+    logAction({
+      venueId,
+      staffId,
+      action: 'PAYMENT_LINK_CUSTOMER_ADDED',
+      entity: 'PaymentLink',
+      entityId: linkId,
+      data: { customerId: customerToAdd! },
+    })
+  }
 
   return updated
 }
