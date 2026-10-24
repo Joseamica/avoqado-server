@@ -103,10 +103,12 @@ export function desgloseDeLiga(
     foto.type === 'PERCENTAGE'
       ? b.mul(foto.value).div(100).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
       : new Prisma.Decimal(foto.value).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
-  if (foto.origen === 'CATALOGO' && regla?.maxDiscountAmount != null && d.gt(regla.maxDiscountAmount)) {
-    d = new Prisma.Decimal(regla.maxDiscountAmount)
+  if (foto.origen === 'CATALOGO' && regla?.maxDiscountAmount && regla.maxDiscountAmount > 0) {
+    // Igual que el POS: un tope de 0 significa «sin tope».
+    const tope = new Prisma.Decimal(regla.maxDiscountAmount).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP)
+    if (d.gt(tope)) d = tope
   }
-  if (b.minus(d).lte(0)) return sinDescuento('MINIMO')
+  if (d.lte(0) || b.minus(d).lte(0)) return sinDescuento('MINIMO')
 
   return {
     base,

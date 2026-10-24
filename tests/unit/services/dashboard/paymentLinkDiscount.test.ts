@@ -120,7 +120,7 @@ describe('desgloseDeLiga', () => {
   })
 
   it('CATALOGO lunes a viernes en sábado (CDMX) → FUERA_DE_HORARIO', () => {
-    // Sábado 2026-10-24 01:00 CDMX = 07:00Z; en UTC ya sería sábado también, así que usamos viernes 23:00 CDMX = sábado 05:00Z
+    // viernes 23:00 CDMX = sábado 05:00Z
     const viernesNocheCdmx = new Date('2026-10-24T05:00:00Z')
     const r = regla({ daysOfWeek: [1, 2, 3, 4, 5] })
     expect(desgloseDeLiga(1000, catalogo('PERCENTAGE', 10), r, viernesNocheCdmx, ZONA).aplica).toBe(true) // sigue siendo viernes allá
@@ -138,5 +138,20 @@ describe('desgloseDeLiga', () => {
   it('CATALOGO FIXED mayor que la base no aplica (MINIMO)', () => {
     const d = desgloseDeLiga(100, catalogo('FIXED_AMOUNT', 150), regla(), AHORA, ZONA)
     expect([d.aplica, d.motivo, d.neto]).toEqual([false, 'MINIMO', 100])
+  })
+
+  it('tope 0 significa sin tope (como el POS): 20 % de 1000 → 200', () => {
+    const d = desgloseDeLiga(1000, catalogo('PERCENTAGE', 20), regla({ maxDiscountAmount: 0 }), AHORA, ZONA)
+    expect([d.aplica, d.descuento, d.neto]).toEqual([true, 200, 800])
+  })
+
+  it('descuento de valor 0 no aplica (MINIMO)', () => {
+    const d = desgloseDeLiga(1000, catalogo('PERCENTAGE', 0), regla(), AHORA, ZONA)
+    expect([d.aplica, d.motivo, d.descuento, d.neto]).toEqual([false, 'MINIMO', 0, 1000])
+  })
+
+  it('validUntil más tarde hoy, evaluado más temprano hoy → aplica', () => {
+    const r = regla({ validUntil: new Date('2026-10-24T05:59:59Z') })
+    expect(desgloseDeLiga(1000, catalogo('PERCENTAGE', 10), r, AHORA, ZONA).aplica).toBe(true)
   })
 })
