@@ -5,6 +5,7 @@ import {
   lineGross,
   lineGrossSql,
   lineRevenue,
+  lineOrderDiscountSql,
   lineRevenueSql,
   lineUnits,
   lineUnitsSql,
@@ -113,7 +114,11 @@ describe('lineRevenue — one definition of what a line earned', () => {
     // The two implementations drift apart silently; pin the shape that makes
     // `net = gross − discounts` hold in the reports that show both.
     // (Same gross expression, minus the discount, inside the same `removedAt` guard.)
-    expect(lineRevenueSql()).toBe(lineGrossSql().replace(' ELSE 0 END)', ' - oi."discountAmount" ELSE 0 END)'))
+    // net = gross − descuento del renglón − su parte de los descuentos de cuenta (reparto, sin espejos).
+    const cuenta = lineOrderDiscountSql().replace('(CASE WHEN oi."removedAt" IS NULL THEN ', '').replace(' ELSE 0 END)', '')
+    expect(cuenta).toContain(`od."reparto"->'renglones'->>oi."id"`)
+    expect(cuenta).toContain(`'espejo')::boolean, false) = false`)
+    expect(lineRevenueSql()).toBe(lineGrossSql().replace(' ELSE 0 END)', ` - oi."discountAmount" - ${cuenta} ELSE 0 END)`))
     const line = { quantity: 1, unitPrice: 169, discountAmount: 20, modifiers: [{ price: 280, quantity: 1 }] }
     expect(lineGross(line)).toBe(449)
     expect(lineRevenue(line)).toBe(429)

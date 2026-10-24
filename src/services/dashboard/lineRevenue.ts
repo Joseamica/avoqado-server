@@ -96,7 +96,24 @@ export const lineGrossSql = (alias = 'oi'): string => aliveSql(alias, rawGrossSq
  *
  * @param alias - the `OrderItem` alias in the query (every call site uses `oi`).
  */
-export const lineRevenueSql = (alias = 'oi'): string => aliveSql(alias, `${rawGrossSql(alias)} - ${alias}."discountAmount"`)
+export const lineRevenueSql = (alias = 'oi'): string =>
+  aliveSql(alias, `${rawGrossSql(alias)} - ${alias}."discountAmount" - ${rawOrderDiscountSql(alias)}`)
+
+/**
+ * La parte del renglón en los descuentos de CUENTA (en pesos): Σ `OrderDiscount.reparto.renglones[<id del renglón>]`
+ * (centavos) de las filas de cuenta de su orden que NO son espejo. Un espejo (`espejo: true`) duplica un descuento que ya
+ * vive en `OrderItem.discountAmount`: restarlo otra vez lo contaría dos veces. Una fila sin reparto (anterior a B2,
+ * `reparto` nulo) no aporta nada por renglón, igual que antes. Subconsulta correlacionada: cada término es por fila, así
+ * que es seguro dentro de `SUM(...)` y no multiplica renglones.
+ */
+const rawOrderDiscountSql = (alias: string): string =>
+  `COALESCE((SELECT SUM((od."reparto"->'renglones'->>${alias}."id")::numeric) / 100 FROM "OrderDiscount" od
+     WHERE od."orderId" = ${alias}."orderId"
+       AND od."reparto"->>'alcance' = 'CUENTA'
+       AND COALESCE((od."reparto"->>'espejo')::boolean, false) = false), 0)`
+
+/** Descuentos de cuenta repartidos a ESTE renglón, en pesos (0 si el renglón se quitó). Va en la columna `discounts`. */
+export const lineOrderDiscountSql = (alias = 'oi'): string => aliveSql(alias, rawOrderDiscountSql(alias))
 
 /**
  * SQL twin of `isItemLevelDiscount`: true when the line total is already net of
