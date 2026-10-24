@@ -42,6 +42,7 @@ import {
   limiteContactoPorIp,
   limiteEnviosDeCodigoEnContacto,
   limiteIntentosDeCodigoEnAlta,
+  limiteDiarioDeIntentosDeCodigoEnAlta,
 } from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
@@ -625,7 +626,7 @@ const altaVerificarSchema = z.object({
 })
 const altaReenviarSchema = z.object({ body: z.object({ email: z.string().trim().email('Formato de correo invalido') }) })
 
-router.post('/alta/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
+router.post('/alta/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
 router.post('/alta/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest(altaReenviarSchema), reenviarAlta)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige

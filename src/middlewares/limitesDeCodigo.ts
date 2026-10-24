@@ -49,6 +49,26 @@ export const limiteIntentosDeCodigoEnAlta: RequestHandler = (req, res, next) => 
 }
 
 /**
+ * Tope DIARIO de intentos de código por correo en `/public/alta/verificar`: 15 cada 24 h (en desarrollo, 150).
+ * Va DESPUÉS de `limiteIntentosDeCodigoEnAlta` (5 cada 15 min): sin él, 5 por ventana serían ~480 al día.
+ */
+// ponytail: en memoria, se reinicia con cada despliegue; contador por código (columna nueva) si hace falta
+export const limiteDiarioDeIntentosDeCodigoEnAlta = rateLimit({
+  windowMs: 24 * 60 * 60 * 1000,
+  max: isDevelopment ? 150 : 15,
+  standardHeaders: true,
+  legacyHeaders: false,
+  keyGenerator: llavePorCorreoOIp,
+  handler: (_req, res, _next, options) => {
+    res.status(options.statusCode).json({
+      success: false,
+      code: 'DEMASIADOS_INTENTOS',
+      message: 'Demasiados intentos con este correo hoy. Pide ayuda en WhatsApp o intenta mañana.',
+    })
+  },
+})
+
+/**
  * Mandar códigos al correo de alguien: 3 por correo por hora (en desarrollo, 20).
  *
  * UNA sola instancia (y por tanto UN solo contador por correo) para `/onboarding/resend-verification`

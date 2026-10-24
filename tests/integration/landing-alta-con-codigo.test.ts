@@ -22,7 +22,11 @@ jest.mock('@/services/email.service', () => ({
   },
 }))
 
-import { esProspectoDeLanding, reenviarCodigoDeLanding, verificarCodigoDeLanding } from '@/services/onboarding/signup.service'
+import {
+  canjearBoletoDeAlta,
+  esProspectoDeLanding,
+  reenviarCodigoDeLanding, verificarCodigoDeLanding,
+} from '@/services/onboarding/signup.service'
 import { leerBoletoDeAlta } from '@/services/onboarding/boletoDeAlta'
 import { validateResetToken } from '@/services/dashboard/auth.service'
 import { confirmarCambioDeCorreo, solicitarCambioDeCorreo } from '@/services/dashboard/cambioDeCorreo.service'
@@ -139,6 +143,33 @@ describe('verificarCodigoDeLanding', () => {
       code: 'CUENTA_YA_ACTIVA',
     })
     expect((await prisma.staff.findUniqueOrThrow({ where: { id: staff.id } })).password).toBe('hash-propio')
+  })
+})
+
+describe('canjearBoletoDeAlta', () => {
+  async function conBoleto() {
+    const { staff } = await prospecto()
+    const { entrarUrl } = await verificarCodigoDeLanding({ email: staff.email, codigo: '123456', password: CLAVE })
+    return { staff, boleto: entrarUrl.split('#boleto=')[1] }
+  }
+
+  it('🔴 dos canjes simultáneos del mismo boleto: exactamente uno recibe sesión, el otro BOLETO_USADO (410)', async () => {
+    const { boleto } = await conBoleto()
+    const intentos = await Promise.allSettled([canjearBoletoDeAlta(boleto), canjearBoletoDeAlta(boleto)])
+    const entraron = intentos.filter(i => i.status === 'fulfilled') as PromiseFulfilledResult<{ accessToken: string; refreshToken: string }>[]
+    expect(entraron).toHaveLength(1)
+    expect(entraron[0].value.accessToken).toBeTruthy()
+    expect(entraron[0].value.refreshToken).toBeTruthy()
+    const rechazo = intentos.find(i => i.status === 'rejected') as PromiseRejectedResult
+    expect(rechazo.reason.code).toBe('BOLETO_USADO')
+    expect(rechazo.reason.statusCode).toBe(410)
+  })
+
+  it('🔴 contraseña restablecida DESPUÉS de emitir el boleto: el canje da BOLETO_USADO', async () => {
+    const { staff, boleto } = await conBoleto()
+    // Lo que deja el restablecimiento real (`lastPasswordReset = new Date()`), con margen sobre la emisión.
+    await prisma.staff.update({ where: { id: staff.id }, data: { lastPasswordReset: new Date(Date.now() + 60_000) } })
+    await expect(canjearBoletoDeAlta(boleto)).rejects.toMatchObject({ code: 'BOLETO_USADO' })
   })
 })
 

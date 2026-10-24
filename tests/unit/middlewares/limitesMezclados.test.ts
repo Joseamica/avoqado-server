@@ -52,11 +52,28 @@ describe('límites mezclados entre onboarding y alta con código', () => {
     expect((await request(app).post('/public/alta/verificar').send({ email: 'otra@example.com' })).status).toBe(400)
   })
 
+  it('tope diario: el intento 16 del mismo correo da 429 en JSON; otro correo no se afecta', async () => {
+    const { limiteDiarioDeIntentosDeCodigoEnAlta } = cargarComoEnProduccion()
+    const app = express()
+    app.use(express.json())
+    app.post('/public/alta/verificar', limiteDiarioDeIntentosDeCodigoEnAlta, (_q, s) => s.status(400).json({ ok: false }))
+    const cuerpo = { email: 'Diario@Example.com' }
+    for (let i = 0; i < 15; i++) expect((await request(app).post('/public/alta/verificar').send(cuerpo)).status).toBe(400)
+    const mas = await request(app).post('/public/alta/verificar').send(cuerpo)
+    expect(mas.status).toBe(429)
+    expect(mas.body).toEqual({
+      success: false,
+      code: 'DEMASIADOS_INTENTOS',
+      message: 'Demasiados intentos con este correo hoy. Pide ayuda en WhatsApp o intenta mañana.',
+    })
+    expect((await request(app).post('/public/alta/verificar').send({ email: 'otro@example.com' })).status).toBe(400)
+  })
+
   it('las rutas REALES usan esas mismas instancias, con la compuerta primero', () => {
     const fuente = (f: string) => fs.readFileSync(path.join(__dirname, '../../../src', f), 'utf8')
     expect(fuente('routes/onboarding.routes.ts')).toMatch(/router\.post\('\/verify-email', limiteIntentosDeCodigo,/)
     const publicas = fuente('routes/public.routes.ts')
-    expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
+    expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
     expect(publicas).toMatch(/router\.post\('\/alta\/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest\(altaReenviarSchema\), reenviarAlta\)/)
   })
 
