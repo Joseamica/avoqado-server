@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
-import { signupFromLanding } from '../../services/onboarding/signup.service'
+import { reenviarCodigoDeLanding, signupFromLanding, verificarCodigoDeLanding } from '../../services/onboarding/signup.service'
 import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../services/onboarding/campanaDelCorreo.service'
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
@@ -878,4 +878,26 @@ export async function continuarOnboarding(req: Request, res: Response, _next: Ne
   }
 
   return res.redirect(302, destino)
+}
+
+// POST /api/v1/public/alta/verificar — código de 6 dígitos + contraseña. 200: { success, entrarUrl }.
+export async function verificarAlta(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { entrarUrl } = await verificarCodigoDeLanding(req.body)
+    res.json({ success: true, entrarUrl })
+  } catch (error) {
+    // Los errores de la landing llevan `success:false` + `code` + `message` (la landing lee esos tres).
+    if (error instanceof BadRequestError) return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
+    next(error)
+  }
+}
+
+// POST /api/v1/public/alta/reenviar — responde siempre { success: true }, exista o no el correo.
+export async function reenviarAlta(req: Request, res: Response, next: NextFunction) {
+  try {
+    await reenviarCodigoDeLanding(req.body.email)
+    res.json({ success: true })
+  } catch (error) {
+    next(error)
+  }
 }

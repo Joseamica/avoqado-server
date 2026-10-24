@@ -17,6 +17,10 @@ import { StaffRole, OrgRole } from '@prisma/client'
 import emailService from '@/services/email.service'
 import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
 import { altaLandingConCodigo } from '@/config/altaLandingConCodigo'
+import { motivoContrasenaInvalida } from '@/utils/contrasenaNueva'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import logger from '@/config/logger'
+import { firmarBoletoDeAlta } from './boletoDeAlta'
 
 export interface SignupInput {
   hybridOfferSlug?: string
@@ -595,4 +599,97 @@ function buildMagicLinkToken() {
   const expiryTime = new Date()
   expiryTime.setHours(expiryTime.getHours() + 24) // 24h: el correo de una landing se abre mas tarde que un reset pedido a proposito
   return { resetToken, hashedToken, expiryTime }
+}
+
+/** Compara dos códigos en tiempo constante (sin revelar cuántos dígitos coinciden). */
+function codigosIguales(a: string, b: string): boolean {
+  const x = Buffer.from(a)
+  const y = Buffer.from(b)
+  return x.length === y.length && crypto.timingSafeEqual(x, y)
+}
+
+/**
+ * Alta con código: verifica el código de 6 dígitos Y fija la contraseña en UNA escritura condicionada.
+ *
+ * El `where` del `updateMany` repite todo lo que se comprobó (incluido el CORREO y el código): si algo
+ * cambió mientras corría bcrypt —un cambio de correo, un doble clic, otro código— afecta 0 filas y
+ * responde `CODIGO_INVALIDO`. Devuelve la URL del DASHBOARD con un boleto de 5 min que se canjea por sesión.
+ */
+export async function verificarCodigoDeLanding(input: { email: string; codigo: string; password: string }): Promise<{ entrarUrl: string }> {
+  const correo = input.email.trim().toLowerCase()
+  const staff = await prisma.staff.findUnique({
+    where: { email: correo },
+    select: { id: true, active: true, password: true, googleId: true, emailVerificationCode: true, emailVerificationExpires: true },
+  })
+  // Sin cuenta no se dice nada de más: es lo mismo que un código equivocado.
+  if (!staff) throw new BadRequestError(CODIGO_INVALIDO, 'CODIGO_INVALIDO')
+  if (staff.password !== null || staff.googleId !== null || !staff.active || !(await esProspectoDeLanding(staff.id))) {
+    throw new BadRequestError('Ya tienes cuenta con ese correo: entra en dashboard.avoqado.io', 'CUENTA_YA_ACTIVA')
+  }
+  const motivo = motivoContrasenaInvalida(input.password)
+  if (motivo) throw new BadRequestError(motivo, 'CONTRASENA_INVALIDA')
+
+  if (!staff.emailVerificationCode || !staff.emailVerificationExpires || !codigosIguales(staff.emailVerificationCode, input.codigo)) {
+    throw new BadRequestError(CODIGO_INVALIDO, 'CODIGO_INVALIDO')
+  }
+  const ahora = new Date()
+  if (staff.emailVerificationExpires <= ahora) {
+    throw new BadRequestError('El código venció. Pide uno nuevo con "Reenviar código".', 'CODIGO_VENCIDO')
+  }
+
+  const hash = await bcrypt.hash(input.password, 10)
+  const { count } = await prisma.staff.updateMany({
+    where: {
+      id: staff.id,
+      email: correo,
+      password: null,
+      googleId: null,
+      active: true,
+      emailVerificationCode: input.codigo,
+      emailVerificationExpires: { gt: ahora },
+    },
+    data: {
+      password: hash,
+      emailVerified: true,
+      emailVerificationCode: null,
+      emailVerificationExpires: null,
+      // El link del correo de bienvenida ya no sirve: la contraseña quedó fijada por aquí.
+      resetToken: null,
+      resetTokenExpiry: null,
+    },
+  })
+  if (count === 0) throw new BadRequestError(CODIGO_INVALIDO, 'CODIGO_INVALIDO')
+
+  await logAction({
+    staffId: staff.id,
+    organizationId: await getPrimaryOrganizationId(staff.id),
+    action: 'LANDING_EMAIL_VERIFIED_BY_CODE',
+    entity: 'Staff',
+    entityId: staff.id,
+  })
+  const frontend = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+  return { entrarUrl: `${frontend}/auth/entrar#boleto=${firmarBoletoDeAlta(staff.id, correo)}` }
+}
+
+const CODIGO_INVALIDO = 'Ese código no es correcto. Revisa el correo más reciente.'
+
+/**
+ * «Reenviar código»: sólo a un prospecto activo, sin contraseña ni Google. Genera un código NUEVO
+ * (el primero pudo no salir) y lo manda. Nunca revela si el correo existe: no lanza en ningún caso.
+ */
+export async function reenviarCodigoDeLanding(email: string): Promise<void> {
+  const correo = email.trim().toLowerCase()
+  try {
+    const staff = await prisma.staff.findUnique({
+      where: { email: correo },
+      select: { id: true, email: true, firstName: true, active: true, password: true, googleId: true },
+    })
+    if (!staff || !staff.active || staff.password !== null || staff.googleId !== null || !(await esProspectoDeLanding(staff.id))) return
+    const { codigo, expira } = nuevoCodigoDeVerificacion()
+    await prisma.staff.update({ where: { id: staff.id }, data: { emailVerificationCode: codigo, emailVerificationExpires: expira } })
+    await emailService.sendEmailVerification(staff.email, { firstName: staff.firstName, verificationCode: codigo })
+  } catch (err) {
+    // Sin código ni correo en el log. La respuesta es la misma pase lo que pase.
+    logger.error('Reenviar código de landing falló', { error: err instanceof Error ? err.message : String(err) })
+  }
 }
