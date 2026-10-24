@@ -429,7 +429,7 @@ describe('even exchange (E1)', () => {
     expect(await prisma.order.count({ where: { venueId: s.venueId } })).toBe(1)
   })
 
-  it.each(['COLLECT', 'PAYOUT'] as const)('rejects %s until Task 11', async kind => {
+  it.each(['COLLECT', 'PAYOUT'] as const)('rejects a %s request when the calculated difference is EVEN', async kind => {
     const s = await seed()
     await expect(
       createExchange(s.input(s.body({ settlement: { kind, method: 'CASH', expectedDifferenceCents: 0 } }))),

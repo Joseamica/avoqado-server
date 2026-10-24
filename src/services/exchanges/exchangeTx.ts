@@ -14,6 +14,8 @@ import type { TenderSemanticsPayment } from '../shared/tenderSemantics'
 import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
 import { seDevuelveEnTerminal } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { bloquearSobresDelReembolsoEnTx, alRegistrarReembolsoEnTx } from '../giftCards/giftCardCancel.service'
+import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { loadSaleForExchange } from './exchangeSale'
 import { calculateExchange, pieceValuesCents, splitItemsAcrossRefundRows, type ReturnedPiece } from './exchangeCalculator'
 import {
@@ -46,7 +48,8 @@ export interface PreparedExchange {
     role: AllocationSlice['role']
     cents: number
     rootPaymentId: string
-    money: RefundMoneySemantics
+    money: TenderSemanticsPayment & { method: string }
+    sessionId: string | null
   }>
   newSalePayments: Array<{
     ctx: AbonoEnTxContexto
@@ -63,8 +66,8 @@ export interface ExchangeTxOutcome {
   postCommit: {
     salePostingId: string | null
     returnPostingId: string | null
-    cashSale: { paymentId: string; sessionId: string | null; amountPesos: number } | null
-    cashPayouts: Array<{ refundPaymentId: string; amountPesos: number; money: TenderSemanticsPayment }>
+    cashSale: { paymentId: string; sessionId: string | null; amountPesos: number; money: TenderSemanticsPayment } | null
+    cashPayouts: Array<{ refundPaymentId: string; sessionId: string | null; amountPesos: number; money: TenderSemanticsPayment }>
     receiptPaymentId: string
     newOrderId: string
     originalOrderId: string
@@ -282,28 +285,75 @@ export async function prepareExchangeInTx(
         },
       },
     )
-  if (body.settlement.kind !== 'EVEN' || body.settlement.method !== null || calc.kind !== 'EVEN')
-    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'El cobro o devolución de diferencias aún no está disponible.', 422)
+  const { settlement } = body
+  if (settlement.kind !== calc.kind || (calc.kind === 'EVEN' ? settlement.method !== null : settlement.method === null))
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'El medio elegido no corresponde a la diferencia del cambio.', 422)
+  if (settlement.method === 'CARD_TERMINAL')
+    throw new ExchangeError(
+      'EXCHANGE_SETTLEMENT_UNAVAILABLE',
+      'Cobrar o devolver con tarjeta en un cambio todavía no está disponible.',
+      422,
+      {
+        reason: 'CARD_TERMINAL_NOT_ENABLED',
+      },
+    )
+  if (calc.kind === 'COLLECT' && settlement.method === 'GIFT_CARD_BALANCE')
+    throw new ExchangeError(
+      'EXCHANGE_SETTLEMENT_UNAVAILABLE',
+      'Cobrar la diferencia con saldo de tarjeta de regalo todavía no está disponible.',
+      422,
+      {
+        reason: 'GIFT_CARD_COLLECT_NOT_AVAILABLE',
+      },
+    )
+  if (settlement.method === 'TENDER' && (calc.kind !== 'COLLECT' || !settlement.tenderTypeId || settlement.tenderRevision == null))
+    throw new BadRequestError('Selecciona un tipo de pago vigente para cobrar la diferencia.')
   const orderedPayments = [...sale.payments].sort(
     (a, b) =>
       Number(b.id === body.originalPaymentId) - Number(a.id === body.originalPaymentId) ||
       a.createdAt.getTime() - b.createdAt.getTime() ||
       a.id.localeCompare(b.id),
   )
-  const allocation = allocateAcrossPayments(
-    orderedPayments.map(p => ({
+  // Una raíz con procesador tampoco presta capacidad de PAYOUT aunque su método diga efectivo.
+  const chains = new Map<string, ChainRefundResolution>()
+  const capacities = []
+  for (const p of orderedPayments) {
+    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? await chainRefundSemanticsInTx(tx, venueId, p.id) : null
+    if (chain) chains.set(p.id, chain)
+    capacities.push({
       paymentId: p.id,
       saleRemainingCents: p.amountCents - p.saleRefundedCents,
-      modes: p.money.tenderSystemKind === 'EXCHANGE_CREDIT' ? modesForExchangeCreditRoot(p.rootMoney) : payoutModesFor(p.money),
-    })),
+      modes: chain ? (chain.kind === 'INHERIT' ? modesForExchangeCreditRoot(p.rootMoney) : {}) : payoutModesFor(p.money),
+    })
+  }
+  const payoutMethod = settlement.method
+  if (calc.kind === 'PAYOUT' && payoutMethod !== 'CASH' && payoutMethod !== 'BANK_TRANSFER' && payoutMethod !== 'GIFT_CARD_BALANCE')
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'Selecciona un medio disponible para devolver la diferencia.', 422)
+  const allocation = allocateAcrossPayments(
+    capacities,
     Math.min(calc.returnedCents, calc.takenCents),
-    null,
+    calc.kind === 'PAYOUT'
+      ? { method: payoutMethod as 'CASH' | 'BANK_TRANSFER' | 'GIFT_CARD_BALANCE', cents: -calc.differenceCents }
+      : null,
   )
   if (!allocation.ok) {
     if (allocation.reason === 'NOTHING_LEFT_TO_REFUND') notReturnable(allocation.reason)
-    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'No se puede devolver la diferencia por ese medio.', 422)
+    const max = allocation.payoutOptions.find(o => o.method === settlement.method)?.maxCents ?? 0
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', `Por este medio sólo se pueden devolver $${pesos(max).toFixed(2)}.`, 422, {
+      reason: 'INSUFFICIENT_FOR_METHOD',
+      payoutOptions: allocation.payoutOptions,
+    })
   }
-  const slices: AllocationSlice[] = allocation.ok ? allocation.slices : []
+  if (allocation.needsRefundToCash && !settlement.cashFromNonCash)
+    throw new ExchangeError(
+      'EXCHANGE_SETTLEMENT_UNAVAILABLE',
+      'Devolver en efectivo lo que se pagó con otro medio necesita autorización.',
+      422,
+      {
+        reason: 'NEEDS_REFUND_TO_CASH',
+      },
+    )
+  const slices: AllocationSlice[] = allocation.slices
   if (calc.returnedCents === 0) slices.push({ paymentId: body.originalPaymentId, cents: 0, role: 'CREDIT', mode: null })
   const paymentById = new Map(sale.payments.map(p => [p.id, p]))
   // Payment antes que Shift: pone en fila la edición manual de las raíces contra la nueva liga del crédito.
@@ -320,6 +370,24 @@ export async function prepareExchangeInTx(
     )
       notReturnable('NOT_ATTRIBUTABLE')
   }
+  // Todos los sobres se toman antes del primer reclamo de turno (también si otro cobro aporta crédito).
+  for (const slice of slices.filter(s => s.role === 'PAYOUT' && isGiftCardTenderKind(paymentById.get(s.paymentId)!.money.tenderSystemKind)))
+    await bloquearSobresDelReembolsoEnTx(tx, {
+      venueId,
+      originalPaymentId: slice.paymentId,
+      original: {
+        orderId: originalOrderId,
+        tenderSystemKind: 'GIFT_CARD',
+      },
+    })
+  const payoutCash = calc.kind === 'PAYOUT' && settlement.method === 'CASH'
+  const drawer = payoutCash ? await tx.cashDrawerSession.findFirst({ where: { venueId, status: 'OPEN' }, select: { id: true } }) : null
+  if (payoutCash && settlement.cashDrawerSessionId && drawer?.id !== settlement.cashDrawerSessionId)
+    throw new ExchangeError(
+      'EXCHANGE_SETTLEMENT_UNAVAILABLE',
+      'La caja del cambio ya no está abierta. Revisa la caja antes de continuar.',
+      422,
+    )
   const newOrder = await createExchangeSaleInTx(tx, input, sale, takenLines)
   const lines = { returned, taken: takenLines }
   const exchange = await tx.exchange.create({
@@ -334,8 +402,8 @@ export async function prepareExchangeInTx(
       returnedAmount: pesos(calc.returnedCents),
       takenAmount: pesos(calc.takenCents),
       differenceAmount: pesos(calc.differenceCents),
-      settlementKind: 'EVEN',
-      settlementMethod: null,
+      settlementKind: calc.kind,
+      settlementMethod: settlement.method,
       lines: lines as unknown as Prisma.InputJsonValue,
       staffId: actorStaffId,
       deviceId: body.deviceId,
@@ -353,6 +421,8 @@ export async function prepareExchangeInTx(
   const refundAt = Date.now()
   for (const [i, slice] of slices.entries()) {
     const rootPaymentId = paymentById.get(slice.paymentId)!.rootPaymentId
+    const credit = slice.role === 'CREDIT'
+    const chain = chains.get(slice.paymentId)
     const refund = await writeRefundInTx(tx, {
       venueId,
       originalPaymentId: slice.paymentId,
@@ -364,13 +434,42 @@ export async function prepareExchangeInTx(
       staffId: actorStaffId,
       tenderCommission: 'NONE',
       shift: 'CLAIM_LIVE',
-      moneyAs: money,
-      skipNegativeCostObligation: true,
-      exchangeMark: { exchangeId: exchange.id, role: EXCHANGE_REFUND_ROLE.CREDIT, rootPaymentId },
+      ...(credit
+        ? { moneyAs: money, skipNegativeCostObligation: true }
+        : chain?.kind === 'INHERIT'
+          ? { moneyAs: chain.money }
+          : { devolverCon: slice.mode === 'CHOSEN' ? (settlement.method as 'CASH' | 'BANK_TRANSFER') : undefined }),
+      exchangeMark: {
+        exchangeId: exchange.id,
+        role: credit ? EXCHANGE_REFUND_ROLE.CREDIT : EXCHANGE_REFUND_ROLE.DIFFERENCE,
+        rootPaymentId,
+      },
     })
+    if (!credit) {
+      await enqueueRefundPaymentEffectsInTx(tx, refund.refundPaymentId, rootPaymentId)
+      if (isGiftCardTenderKind(paymentById.get(slice.paymentId)!.money.tenderSystemKind))
+        await alRegistrarReembolsoEnTx(tx, {
+          venueId,
+          originalPaymentId: slice.paymentId,
+          refundPaymentId: refund.refundPaymentId,
+          amount: pesos(slice.cents),
+          staffId: actorStaffId,
+          devuelveTodoElCobro:
+            slice.cents === paymentById.get(slice.paymentId)!.amountCents - paymentById.get(slice.paymentId)!.saleRefundedCents,
+          original: { orderId: originalOrderId, tenderSystemKind: 'GIFT_CARD' },
+        })
+    }
     // El libro ordena por fecha e id; el reloj de Postgres es fijo durante la transacción.
-    await tx.payment.update({ where: { id: refund.refundPaymentId, venueId }, data: { createdAt: new Date(refundAt + i) } })
-    refundRows.push({ id: refund.refundPaymentId, paymentId: slice.paymentId, role: slice.role, cents: slice.cents, rootPaymentId, money })
+    const row = await tx.payment.update({ where: { id: refund.refundPaymentId, venueId }, data: { createdAt: new Date(refundAt + i) } })
+    refundRows.push({
+      id: refund.refundPaymentId,
+      paymentId: slice.paymentId,
+      role: slice.role,
+      cents: slice.cents,
+      rootPaymentId,
+      money: row,
+      sessionId: drawer?.id ?? null,
+    })
   }
   const ctx: AbonoEnTxContexto = {
     venueId,
@@ -381,7 +480,7 @@ export async function prepareExchangeInTx(
     rechazoDelPersonal: null,
   }
   const newSalePayments: PreparedExchange['newSalePayments'] = slices
-    .filter(s => s.cents > 0)
+    .filter(s => s.role === 'CREDIT' && s.cents > 0)
     .map(s => ({
       ctx,
       role: 'CREDIT',
@@ -399,6 +498,18 @@ export async function prepareExchangeInTx(
         },
       },
     }))
+  if (calc.kind === 'COLLECT')
+    newSalePayments.push({
+      ctx,
+      role: 'DIFFERENCE',
+      entrada: {
+        method: settlement.method === 'TENDER' ? 'OTHER' : (settlement.method as 'CASH' | 'BANK_TRANSFER'),
+        amountCents: calc.differenceCents,
+        tipCents: 0,
+        tender: settlement.method === 'TENDER' ? { ref: { id: settlement.tenderTypeId!, revision: settlement.tenderRevision! } } : null,
+        canal: { turno: 'exchange', reapertura: 'exchange' },
+      },
+    })
   if (calc.takenCents === 0)
     newSalePayments.push({
       ctx,
@@ -545,9 +656,9 @@ export async function finishExchangeInTx(
     takenCents: p.takenCents,
     differenceCents: p.differenceCents,
     settlement: {
-      kind: 'EVEN',
-      method: null,
-      amountCents: 0,
+      kind: p.input.body.settlement.kind,
+      method: p.input.body.settlement.method,
+      amountCents: Math.abs(p.differenceCents),
       sources: p.refundRows.map(r => ({
         originalPaymentId: r.paymentId,
         refundPaymentId: r.id,
@@ -568,8 +679,18 @@ export async function finishExchangeInTx(
     postCommit: {
       salePostingId: settled.at(-1)!.postingId ?? null,
       returnPostingId: returnPosting?.id ?? null,
-      cashSale: null,
-      cashPayouts: [],
+      cashSale:
+        p.newSalePayments.at(-1)?.role === 'DIFFERENCE' && paymentCountsAsDrawerCash(settled.at(-1)!.newPayment)
+          ? {
+              paymentId: settled.at(-1)!.newPayment.id,
+              sessionId: settled.at(-1)!.cajaAlCobrarId,
+              amountPesos: p.differenceCents / 100,
+              money: settled.at(-1)!.newPayment,
+            }
+          : null,
+      cashPayouts: p.refundRows
+        .filter(r => r.role === 'PAYOUT')
+        .map(r => ({ refundPaymentId: r.id, sessionId: r.sessionId, amountPesos: r.cents / 100, money: r.money })),
       receiptPaymentId: settled.at(-1)!.newPayment.id,
       newOrderId: p.newOrder.id,
       originalOrderId: p.sale.order.id,

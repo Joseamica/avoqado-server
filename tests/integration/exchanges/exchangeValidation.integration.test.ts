@@ -132,10 +132,15 @@ describe('exchange validation RF3/RF4', () => {
         calculation: { takenCents: 45000, differenceCents: -5000, kind: 'PAYOUT' },
       },
     })
-    // T11 habilita la liquidación; con la diferencia correcta ya pasa la validación de precio, sin 409.
-    await expect(
-      createExchange(s.input(s.body({ taken, settlement: { kind: 'PAYOUT', method: 'CASH', expectedDifferenceCents: -5000 } }))),
-    ).rejects.toMatchObject({ code: 'EXCHANGE_SETTLEMENT_UNAVAILABLE', statusCode: 422 })
+    const { exchange } = await createExchange(
+      s.input(s.body({ taken, settlement: { kind: 'PAYOUT', method: 'CASH', expectedDifferenceCents: -5000 } })),
+    )
+    expect(exchange).toMatchObject({
+      status: 'COMPLETED',
+      takenCents: 45000,
+      differenceCents: -5000,
+      settlement: { kind: 'PAYOUT', method: 'CASH', amountCents: 5000 },
+    })
   })
   it('persists the honored price on the new non-inherited sale line', async () => {
     const s = await seed({ paid: 450 })

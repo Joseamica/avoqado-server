@@ -19,6 +19,7 @@ import { logAction } from '../dashboard/activity-log.service'
 import { applySalePosting, applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 import { buildInventoryWarning, mapDigitalReceiptResponse } from '../tpv/payment.tpv.service'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
+import { postCashSaleToDrawer, postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { effectiveExchangesEnabled } from './exchangeRules'
 import { ensureExchangeCreditTender } from './exchangeCreditTender'
 import { ExchangeError } from './exchangeErrors'
@@ -238,6 +239,36 @@ async function runExchangePostCommit(
   await bestEffort(exchangeId, 'returnInventory', async () => {
     if (p.returnPostingId) await applyCustomerReturnPosting(p.returnPostingId, actorStaffId)
   })
+  if (p.cashSale?.sessionId)
+    await bestEffort(exchangeId, 'cashSale', () =>
+      postCashSaleToDrawer({
+        ...p.cashSale!.money,
+        venueId,
+        paymentId: p.cashSale!.paymentId,
+        targetSessionId: p.cashSale!.sessionId,
+        exigirAbierta: true,
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        amount: p.cashSale!.amountPesos,
+        tipAmount: 0,
+        staffId: actorStaffId,
+        orderId: p.newOrderId,
+      }),
+    )
+  for (const payout of p.cashPayouts)
+    if (payout.sessionId)
+      await bestEffort(exchangeId, 'cashPayout', () =>
+        postCashRefundToDrawer({
+          ...payout.money,
+          venueId,
+          refundPaymentId: payout.refundPaymentId,
+          targetSessionId: payout.sessionId,
+          amount: payout.amountPesos,
+          staffId: actorStaffId,
+          orderId: p.originalOrderId,
+          reason: 'Cambio de producto',
+        }),
+      )
   await exchangeReceipt(venueId, response)
   await bestEffort(exchangeId, 'loyalty', async () => {
     const order = await prisma.order.findFirst({
