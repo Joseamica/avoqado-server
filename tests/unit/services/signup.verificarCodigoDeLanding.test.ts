@@ -162,7 +162,8 @@ describe('reenviarCodigoDeLanding', () => {
   it('a un prospecto activo sin contraseña ni googleId le genera un código NUEVO y se lo manda', async () => {
     mockFindUnique.mockResolvedValue({ id: 'staff-1', email: 'ana@example.com', firstName: 'Ana', active: true, password: null, googleId: null })
     await reenviarCodigoDeLanding(' Ana@Example.com ')
-    const data = mockUpdate.mock.calls[0][0].data
+    const { where, data } = mockUpdateMany.mock.calls[0][0]
+    expect(where).toEqual({ id: 'staff-1', email: 'ana@example.com' })
     expect(data.emailVerificationCode).toMatch(/^\d{6}$/)
     expect(data.emailVerificationExpires.getTime()).toBeGreaterThan(Date.now() + 9 * 60 * 1000)
     expect(emailService.sendEmailVerification).toHaveBeenCalledWith('ana@example.com', {
@@ -179,7 +180,14 @@ describe('reenviarCodigoDeLanding', () => {
   ])('si %s: no manda nada y no lanza', async (_n, staff) => {
     mockFindUnique.mockResolvedValue(staff)
     await expect(reenviarCodigoDeLanding('a@b.c')).resolves.toBeUndefined()
-    expect(mockUpdate).not.toHaveBeenCalled()
+    expect(mockUpdateMany).not.toHaveBeenCalled()
+    expect(emailService.sendEmailVerification).not.toHaveBeenCalled()
+  })
+
+  it('si la cuenta cambió de correo entre leerla y escribir (0 filas): no manda el código al correo anterior', async () => {
+    mockFindUnique.mockResolvedValue({ id: 's', email: 'anterior@b.c', firstName: 'A', active: true, password: null, googleId: null })
+    mockUpdateMany.mockResolvedValue({ count: 0 })
+    await expect(reenviarCodigoDeLanding('anterior@b.c')).resolves.toBeUndefined()
     expect(emailService.sendEmailVerification).not.toHaveBeenCalled()
   })
 

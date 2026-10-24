@@ -19,7 +19,7 @@ const mockTx = {
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    staff: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn() },
+    staff: { findUnique: jest.fn(), findFirst: jest.fn(), update: jest.fn(), updateMany: jest.fn() },
     $transaction: jest.fn(async (cb: (tx: unknown) => unknown) => cb(mockTx)),
   },
 }))
@@ -55,6 +55,7 @@ import {
 const staffFindUnique = prisma.staff.findUnique as jest.Mock
 const staffFindFirst = prisma.staff.findFirst as jest.Mock
 const staffUpdate = prisma.staff.update as jest.Mock
+const staffUpdateMany = prisma.staff.updateMany as jest.Mock
 
 const DIEZ_MINUTOS = 10 * 60 * 1000
 const SEIS_DIGITOS = /^\d{6}$/
@@ -71,6 +72,7 @@ beforeEach(() => {
   jest.clearAllMocks()
   mockStaffCreate.mockResolvedValue({ id: 'staff-nuevo', email: 'ana@example.com' })
   staffUpdate.mockResolvedValue({})
+  staffUpdateMany.mockResolvedValue({ count: 1 })
   staffFindUnique.mockResolvedValue(null)
   staffFindFirst.mockResolvedValue(null)
   interruptor(undefined)
@@ -260,9 +262,10 @@ describe('signupFromLanding con el interruptor PRENDIDO', () => {
 
     const r = await signupFromLanding(entrada)
 
-    expect(staffUpdate).toHaveBeenCalledTimes(1)
-    const { where, data } = staffUpdate.mock.calls[0][0]
-    expect(where).toEqual({ id: 'staff-p' })
+    expect(staffUpdate).not.toHaveBeenCalled()
+    expect(staffUpdateMany).toHaveBeenCalledTimes(1)
+    const { where, data } = staffUpdateMany.mock.calls[0][0]
+    expect(where).toEqual({ id: 'staff-p', email: 'ana@example.com' })
     expect(data.emailVerificationCode).toMatch(SEIS_DIGITOS)
     expect(data.emailVerificationExpires.getTime() - Date.now()).toBeGreaterThan(DIEZ_MINUTOS - 5000)
     expect(data).toEqual(
@@ -272,6 +275,15 @@ describe('signupFromLanding con el interruptor PRENDIDO', () => {
     expect(staffFindFirst.mock.calls[0][0].where.id).toBe('staff-p')
     expect(r).toMatchObject({ alreadyExisted: true, yaEsCliente: false, codigoVerificacion: data.emailVerificationCode })
     expect(r.magicLinkToken).toEqual(expect.any(String))
+  })
+
+  it('si la cuenta cambió de correo a media escritura (0 filas): error y ningún código guardado ni devuelto', async () => {
+    staffFindUnique.mockResolvedValue({ id: 'staff-p', email: 'ana@example.com', password: null, emailVerified: true })
+    staffFindFirst.mockResolvedValue({ id: 'staff-p' })
+    staffUpdateMany.mockResolvedValue({ count: 0 })
+
+    await expect(signupFromLanding(entrada)).rejects.toMatchObject({ code: 'CUENTA_CAMBIO' })
+    expect(staffUpdate).not.toHaveBeenCalled()
   })
 
   it('una cuenta de Google o un empleado sin contraseña (no es prospecto): sin código, se comporta como hoy', async () => {

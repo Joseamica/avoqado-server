@@ -475,16 +475,21 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
     // cuenta de Google o un empleado sin contraseña (que también tienen `password: null`) siguen
     // como hoy, sin código. Con el interruptor apagado ni se pregunta.
     const codigo = conCodigo && (await esProspectoDeLanding(existing.id)) ? nuevoCodigoDeVerificacion() : null
-    await prisma.staff.update({
-      where: { id: existing.id },
-      data: {
-        resetToken: hashedToken,
-        resetTokenExpiry: expiryTime,
-        resetTokenUsedAt: null,
-        // `emailVerified` no se toca: ya verificada sigue verificada.
-        ...(codigo ? { emailVerificationCode: codigo.codigo, emailVerificationExpires: codigo.expira } : {}),
-      },
-    })
+    const data = {
+      resetToken: hashedToken,
+      resetTokenExpiry: expiryTime,
+      resetTokenUsedAt: null,
+      // `emailVerified` no se toca: ya verificada sigue verificada.
+      ...(codigo ? { emailVerificationCode: codigo.codigo, emailVerificationExpires: codigo.expira } : {}),
+    }
+    if (codigo) {
+      // Con código, el correo va en el `where` (como en `reenviarCodigoDeLanding`): si la cuenta cambió de correo a
+      // media escritura, 0 filas y no sale ningún correo al buzón anterior (Codex r4).
+      const { count } = await prisma.staff.updateMany({ where: { id: existing.id, email: existing.email }, data })
+      if (count === 0) throw new BadRequestError('No pudimos registrar tus datos. Intenta de nuevo.', 'CUENTA_CAMBIO')
+    } else {
+      await prisma.staff.update({ where: { id: existing.id }, data })
+    }
     const orgPrevia = await getPrimaryOrganizationId(existing.id)
     // Alta previa sin terminar: vuelve por un anuncio, así que su campaña se ACTUALIZA (último
     // toque). La rama «ya es cliente» de arriba, en cambio, ignora el código a propósito.
@@ -745,7 +750,13 @@ export async function reenviarCodigoDeLanding(email: string): Promise<void> {
     })
     if (!staff || !staff.active || staff.password !== null || staff.googleId !== null || !(await esProspectoDeLanding(staff.id))) return
     const { codigo, expira } = nuevoCodigoDeVerificacion()
-    await prisma.staff.update({ where: { id: staff.id }, data: { emailVerificationCode: codigo, emailVerificationExpires: expira } })
+    // El correo va en el `where`: si la cuenta cambió de correo después de leerla, no se guarda un código que llegaría
+    // al buzón anterior y abriría la cuenta con el correo nuevo (Codex r4).
+    const { count } = await prisma.staff.updateMany({
+      where: { id: staff.id, email: staff.email },
+      data: { emailVerificationCode: codigo, emailVerificationExpires: expira },
+    })
+    if (count === 0) return
     await emailService.sendEmailVerification(staff.email, { firstName: staff.firstName, verificationCode: codigo })
   } catch (err) {
     // Sin código ni correo en el log. La respuesta es la misma pase lo que pase.
