@@ -21,6 +21,7 @@ import { PaymentFundsFlow, Prisma, TransactionStatus } from '@prisma/client'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export type RefundOutcome = 'APPLIED' | 'ALREADY_APPLIED' | 'ORDER_NOT_FOUND' | 'NOTHING_TO_APPLY'
@@ -170,5 +171,13 @@ export async function applyDeliveryRefund(params: {
     monto: monto.toString(),
     motivo: params.motivo,
   })
+  // D4 (24-oct): quita el sello que la venta dio (una liga tardía de cliente puede haberlo dado), igual que la terminal y el POS.
+  // Sin `await` ni lanzar: el dinero ya quedó; la reversa es idempotente y espera el candado del cliente.
+  reverseStampForOrder(order.venueId, order.id).catch(error =>
+    logger.error('[DeliveryRefund] No se pudo revertir el sello de una venta reembolsada', {
+      orderId: order.id,
+      error: error instanceof Error ? error.message : String(error),
+    }),
+  )
   return { outcome: 'APPLIED', orderId: order.id }
 }
