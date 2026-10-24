@@ -13,6 +13,7 @@
  * Las órdenes salen de las marcas de B1. Un negocio que nunca tuvo una tarjeta paga UNA consulta indexada y nada más.
  * Sólo lecturas, dentro de la foto de quien llama (recibe `tx`; no abre otra).
  */
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 import { ValidationError } from '../../errors/AppError'
 import { parseDbDateRange } from '../../utils/datetime'
@@ -101,7 +102,7 @@ export async function tarjetasDeRegaloEnFoto(
     )
     // Las mismas reglas que `sumarMovimiento` del estado de resultados: del periodo, en el alcance fiscal, la parte con su signo.
     await recorrerLibros(tx, { venueId, orderIds: lote, hasta: to }, (m, parte) => {
-      if (m.createdAt < from || m.createdAt > to) return
+      if (m.createdAt < from || m.createdAt > to || isExchangeCreditTenderKind(m.tenderSystemKind)) return
       const metodo = m.type === PaymentType.REFUND ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method
       if (!paymentInFiscalScope(metodo, m.incluirEnContabilidad, includeCashInAccounting)) return
       if (deTarjetas.has(m.orderId)) cargasCents += parte.netCents

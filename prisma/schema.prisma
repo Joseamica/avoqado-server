@@ -4560,6 +4560,8 @@ enum ActionType {
 // ==========================================
 
 model Payment {
+  exchangeCreditAsCredit ExchangeCreditLink? @relation("ExchangeCreditAsCredit")
+  exchangeCreditsAsOrigin ExchangeCreditLink[] @relation("ExchangeCreditAsOrigin")
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   venueId        String
@@ -19264,8 +19266,10 @@ model ExchangeCreditLink {
   exchangeId            String
   exchange              Exchange @relation(fields: [exchangeId], references: [id], onDelete: Cascade)
   originPaymentId       String
+  originPayment         Payment @relation("ExchangeCreditAsOrigin", fields: [originPaymentId], references: [id], onDelete: Restrict)
   creditRefundPaymentId String   @unique
   creditPaymentId       String   @unique
+  creditPayment         Payment @relation("ExchangeCreditAsCredit", fields: [creditPaymentId], references: [id], onDelete: Restrict)
   amount                Decimal  @db.Decimal(12, 2)
   createdAt             DateTime @default(now())
 
