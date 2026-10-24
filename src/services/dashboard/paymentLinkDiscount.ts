@@ -1,4 +1,5 @@
 import { Prisma, PrismaClient } from '@prisma/client'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
 
 /** Foto del descuento guardada en `PaymentLink.discount`. */
 export type DescuentoDeLiga = {
@@ -209,6 +210,22 @@ export async function cargarRegla(
       compatible: false,
     }
   }
+  return reglaDeFila(d)
+}
+
+type FilaDeDescuento = CandidatoALiga & {
+  active: boolean
+  validFrom: Date | null
+  validUntil: Date | null
+  daysOfWeek: number[]
+  timeFrom: string | null
+  timeUntil: string | null
+  minPurchaseAmount: { toNumber(): number } | null
+  maxDiscountAmount: { toNumber(): number } | null
+}
+
+/** Fila de `Discount` → regla viva. Una sola función para `cargarRegla` y para la lista (que lee varias de golpe). */
+export function reglaDeFila(d: FilaDeDescuento): ReglaDelCatalogo {
   return {
     active: d.active,
     validFrom: d.validFrom,
@@ -220,5 +237,109 @@ export async function cargarRegla(
     maxDiscountAmount: d.maxDiscountAmount?.toNumber() ?? null,
     existe: true,
     compatible: esCompatibleConLigas(d).ok,
+  }
+}
+
+export type EntradaDescuento =
+  | { mode: 'MANUAL'; type: 'PERCENTAGE' | 'FIXED_AMOUNT'; value: number; name?: string }
+  | { mode: 'CATALOG'; discountId: string }
+
+/** Base para ligas de importe abierto (no hay monto al crear): sólo para que salgan razones de fecha/activo/compatibilidad. */
+export const BASE_LIGA_ABIERTA = 1_000_000
+
+const MENSAJE_DE_MOTIVO: Partial<Record<MotivoNoDisponible, string>> = {
+  INACTIVO: 'Este descuento está apagado',
+  NO_INICIA: 'Este descuento aún no empieza',
+  VENCIDO: 'Este descuento ya venció',
+  MINIMO: 'El descuento es mayor o igual que el importe de la liga',
+}
+
+/**
+ * Valida una foto contra la base de la liga (al crear o al editar). `base` null = importe abierto.
+ * El horario/día del descuento NO se revisa aquí (se revisa al cobrar): sólo activo, fechas, compatibilidad y que quepa en la base.
+ */
+export async function validarFotoContraBase(
+  tx: Prisma.TransactionClient | PrismaClient,
+  venueId: string,
+  foto: DescuentoDeLiga,
+  base: number | null,
+): Promise<void> {
+  const regla = await cargarRegla(tx, foto)
+  const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+  const zona = venue?.timezone ?? 'America/Mexico_City'
+  const reglaSinHorario = regla ? { ...regla, daysOfWeek: [], timeFrom: null, timeUntil: null } : null
+  const d = desgloseDeLiga(base ?? BASE_LIGA_ABIERTA, foto, reglaSinHorario, new Date(), zona)
+  if (d.aplica || !d.motivo) return
+  if (d.motivo === 'MINIMO' && base === null) return
+  throw new BadRequestError(MENSAJE_DE_MOTIVO[d.motivo] ?? 'El descuento no está disponible')
+}
+
+/**
+ * Entrada del dashboard/MCP → foto a guardar en la liga (valida venue, compatibilidad, fechas y base).
+ * `link.base`: FIXED → amount · ITEM → total del paquete · OPEN → null.
+ */
+export async function resolverDescuentoDeEntrada(
+  tx: Prisma.TransactionClient | PrismaClient,
+  venueId: string,
+  input: EntradaDescuento | null | undefined,
+  link: { isReusable: boolean; base: number | null },
+): Promise<{ foto: DescuentoDeLiga | null; discountId: string | null }> {
+  void link.isReusable // las reglas con cupo (maxTotalUses) ya no caben en ligas: no hay nada distinto para reutilizables
+  if (!input) return { foto: null, discountId: null }
+
+  let foto: DescuentoDeLiga
+  if (input.mode === 'MANUAL') {
+    foto = { v: 1, origen: 'MANUAL', discountId: null, type: input.type, value: input.value, name: input.name?.trim() || 'Descuento' }
+  } else {
+    const d = await tx.discount.findFirst({
+      where: { id: input.discountId, venueId },
+      select: {
+        name: true,
+        type: true,
+        value: true,
+        scope: true,
+        requiresApproval: true,
+        isAutomatic: true,
+        buyQuantity: true,
+        getQuantity: true,
+        getDiscountPercent: true,
+        buyItemIds: true,
+        getItemIds: true,
+        maxTotalUses: true,
+        maxUsesPerCustomer: true,
+        customerGroupId: true,
+      },
+    })
+    if (!d) throw new NotFoundError('Descuento no encontrado')
+    const compat = esCompatibleConLigas(d)
+    if (!compat.ok) throw new BadRequestError(compat.razon)
+    foto = {
+      v: 1,
+      origen: 'CATALOGO',
+      discountId: input.discountId,
+      type: d.type as 'PERCENTAGE' | 'FIXED_AMOUNT',
+      value: Number(d.value),
+      name: d.name,
+    }
+  }
+  await validarFotoContraBase(tx, venueId, foto, link.base)
+  return { foto, discountId: foto.discountId }
+}
+
+/** Lo que la lista y el detalle del panel muestran del descuento de una liga (se calcula al leer, sin proceso de fondo). */
+export function vistaDeDescuento(
+  foto: DescuentoDeLiga | null,
+  regla: ReglaDelCatalogo | null,
+  base: number | null,
+  ahora: Date,
+  zona: string,
+) {
+  if (!foto) return { discount: null, discountStatus: null, discountValidUntil: null }
+  // Sin base (importe abierto) se evalúa con una base grande: sólo pueden salir razones de activo/fecha/compatibilidad.
+  const d = desgloseDeLiga(base ?? BASE_LIGA_ABIERTA, foto, regla, ahora, zona)
+  return {
+    discount: { name: foto.name, type: foto.type, value: foto.value, origen: foto.origen },
+    discountStatus: d.aplica ? ('OK' as const) : d.motivo,
+    discountValidUntil: regla?.validUntil ? regla.validUntil.toISOString() : null,
   }
 }

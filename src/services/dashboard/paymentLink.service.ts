@@ -31,6 +31,14 @@ import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
+import {
+  DescuentoDeLiga,
+  EntradaDescuento,
+  reglaDeFila,
+  resolverDescuentoDeEntrada,
+  validarFotoContraBase,
+  vistaDeDescuento,
+} from '@/services/dashboard/paymentLinkDiscount'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -256,6 +264,28 @@ function computeBundleTotal(
   }, 0)
 }
 
+/** Total del paquete para validar un descuento al crear/editar: lee precios vigentes de productos y extras. */
+async function totalDeItemsResueltos(
+  venueId: string,
+  items: Array<{ productId: string; quantity: number; modifiers: Array<{ modifierId: string; quantity: number }> }>,
+): Promise<number> {
+  const productIds = items.map(i => i.productId)
+  const modifierIds = items.flatMap(i => i.modifiers.map(m => m.modifierId))
+  const [products, modifiers] = await Promise.all([
+    prisma.product.findMany({ where: { id: { in: productIds }, venueId }, select: { id: true, price: true } }),
+    modifierIds.length > 0 ? prisma.modifier.findMany({ where: { id: { in: modifierIds } }, select: { id: true, price: true } }) : [],
+  ])
+  const productPrice = new Map(products.map(p => [p.id, p.price]))
+  const modifierPrice = new Map(modifiers.map(m => [m.id, m.price]))
+  return computeBundleTotal(
+    items.map(i => ({
+      quantity: i.quantity,
+      product: { price: productPrice.get(i.productId) ?? 0 },
+      modifiers: i.modifiers.map(m => ({ quantity: m.quantity, modifier: { price: modifierPrice.get(m.modifierId) ?? 0 } })),
+    })),
+  )
+}
+
 /** Project the Prisma-loaded items into the snapshot shape we put on
  *  CheckoutSession.metadata. The webhook handler reads this back to create
  *  OrderItem + OrderItemModifier rows. */
@@ -347,6 +377,8 @@ export interface CreatePaymentLinkData {
    * salespeople, or create uncredited links for donations.
    */
   attributedStaffIds?: string[]
+  /** Descuento de la liga: escrito a mano o tomado del catálogo. `null`/ausente = sin descuento. */
+  discount?: EntradaDescuento | null
 }
 
 export interface UpdatePaymentLinkData {
@@ -370,6 +402,8 @@ export interface UpdatePaymentLinkData {
   }> | null
   customFields?: CustomFieldDefinition[] | null
   tippingConfig?: TippingConfig | null
+  /** Poner/cambiar con un objeto; `null` lo quita; ausente no lo toca. */
+  discount?: EntradaDescuento | null
 }
 
 export interface ListPaymentLinksFilters {
@@ -476,6 +510,19 @@ export async function createPaymentLink(
     resolvedItems = await validateBundleItems(venueId, data.items ?? [])
   }
 
+  // 2b. Descuento: se valida contra la base (fija → amount, ITEM → total del paquete, abierta → sin base).
+  const createBase = !data.discount
+    ? null
+    : data.purpose === 'ITEM'
+      ? await totalDeItemsResueltos(venueId, resolvedItems)
+      : data.amountType === 'FIXED' && data.amount != null
+        ? data.amount
+        : null
+  const { foto: discountFoto, discountId } = await resolverDescuentoDeEntrada(prisma, venueId, data.discount, {
+    isReusable: data.isReusable ?? false,
+    base: createBase,
+  })
+
   // 3. Validate every attributedStaffId belongs to this venue and is active.
   // Prevents misattribution across organizations. Dedupe + drop falsy values
   // up-front so the caller can send sloppy input safely.
@@ -533,6 +580,8 @@ export async function createPaymentLink(
         redirectUrl: data.redirectUrl,
         customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
         tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
+        discount: discountFoto ? (discountFoto as unknown as Prisma.InputJsonValue) : undefined,
+        discountId,
       },
       include: {
         customer: { select: CUSTOMER_SUMMARY_SELECT },
@@ -583,6 +632,44 @@ export async function createPaymentLink(
   return paymentLink
 }
 
+const DISCOUNT_RULE_SELECT = {
+  id: true,
+  active: true,
+  validFrom: true,
+  validUntil: true,
+  daysOfWeek: true,
+  timeFrom: true,
+  timeUntil: true,
+  minPurchaseAmount: true,
+  maxDiscountAmount: true,
+  scope: true,
+  type: true,
+  requiresApproval: true,
+  isAutomatic: true,
+  buyQuantity: true,
+  getQuantity: true,
+  getDiscountPercent: true,
+  buyItemIds: true,
+  getItemIds: true,
+  maxTotalUses: true,
+  maxUsesPerCustomer: true,
+  customerGroupId: true,
+} as const
+
+/** Descuento del catálogo que ya no existe: se lee como «apagado». */
+const MISSING_RULE = {
+  active: false,
+  validFrom: null,
+  validUntil: null,
+  daysOfWeek: [],
+  timeFrom: null,
+  timeUntil: null,
+  minPurchaseAmount: null,
+  maxDiscountAmount: null,
+  existe: false,
+  compatible: false,
+}
+
 /**
  * Lists payment links for a venue with filtering
  */
@@ -622,8 +709,29 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
     prisma.paymentLink.count({ where }),
   ])
 
+  // Estado del descuento calculado al leer: una consulta para los descuentos del catálogo de la página y una para la zona (sin N+1).
+  const conDescuento = paymentLinks.filter(l => l.discount)
+  const catalogIds = [...new Set(conDescuento.map(l => (l.discount as unknown as DescuentoDeLiga).discountId).filter((id): id is string => !!id))]
+  const [filas, venue] =
+    conDescuento.length > 0
+      ? await Promise.all([
+          catalogIds.length > 0
+            ? prisma.discount.findMany({ where: { id: { in: catalogIds }, venueId }, select: DISCOUNT_RULE_SELECT })
+            : [],
+          prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
+        ])
+      : [[], null]
+  const reglas = new Map(filas.map(f => [f.id, reglaDeFila(f)]))
+  const ahora = new Date()
+  const zona = venue?.timezone ?? 'America/Mexico_City'
+  const withDiscount = paymentLinks.map(l => {
+    const foto = (l.discount as unknown as DescuentoDeLiga | null) ?? null
+    const regla = foto?.discountId ? (reglas.get(foto.discountId) ?? MISSING_RULE) : null
+    return { ...l, ...vistaDeDescuento(foto, regla, l.amount != null ? Number(l.amount) : null, ahora, zona) }
+  })
+
   return {
-    paymentLinks,
+    paymentLinks: withDiscount,
     total,
     limit,
     offset,
@@ -676,7 +784,20 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
     throw new UnauthorizedError('No tienes acceso a esta liga de pago')
   }
 
-  return paymentLink
+  const foto = (paymentLink.discount as unknown as DescuentoDeLiga | null) ?? null
+  if (!foto) return { ...paymentLink, ...vistaDeDescuento(null, null, null, new Date(), 'UTC') }
+  const [fila, venue] = await Promise.all([
+    foto.discountId ? prisma.discount.findFirst({ where: { id: foto.discountId, venueId }, select: DISCOUNT_RULE_SELECT }) : null,
+    prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
+  ])
+  const regla = foto.discountId ? (fila ? reglaDeFila(fila) : MISSING_RULE) : null
+  const base =
+    paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0
+      ? computeBundleTotal(paymentLink.items)
+      : paymentLink.amount != null
+        ? Number(paymentLink.amount)
+        : null
+  return { ...paymentLink, ...vistaDeDescuento(foto, regla, base, new Date(), venue?.timezone ?? 'America/Mexico_City') }
 }
 
 /**
@@ -694,7 +815,7 @@ export async function updatePaymentLink(
   if (addsCustomer && !data.customerId) throw new BadRequestError('El cliente de una liga no se puede quitar')
   const existing = await prisma.paymentLink.findUnique({
     where: { id: linkId },
-    select: { id: true, venueId: true, status: true, customerId: true },
+    select: { id: true, venueId: true, status: true, customerId: true, purpose: true, amountType: true, amount: true, isReusable: true, discount: true },
   })
 
   if (!existing) {
@@ -723,7 +844,7 @@ export async function updatePaymentLink(
   const onlyCustomer = addsCustomer && Object.keys(data).every(key => key === 'customerId')
   if (onlyCustomer && !customerToAdd) return getPaymentLinkById(venueId, linkId)
 
-  const updateData: Prisma.PaymentLinkUpdateInput = {}
+  const updateData: Prisma.PaymentLinkUncheckedUpdateInput = {}
 
   if (data.title !== undefined) updateData.title = data.title
   if (data.description !== undefined) updateData.description = data.description
@@ -757,6 +878,44 @@ export async function updatePaymentLink(
   }
   if (data.tippingConfig !== undefined) {
     updateData.tippingConfig = data.tippingConfig === null ? Prisma.JsonNull : (data.tippingConfig as unknown as Prisma.InputJsonValue)
+  }
+
+  // Descuento: se vuelve a validar al cambiarlo y también si cambia lo que lo sostiene (importe o productos).
+  const effectiveAmountType = data.amountType ?? existing.amountType
+  const effectiveAmount = data.amount !== undefined ? data.amount : existing.amount != null ? Number(existing.amount) : null
+  const touchesBase = data.amount !== undefined || data.amountType !== undefined || data.items !== undefined
+  if (data.discount !== undefined || touchesBase) {
+    const keptFoto = data.discount === undefined ? ((existing.discount as unknown as DescuentoDeLiga | null) ?? null) : null
+    if (data.discount !== undefined || keptFoto) {
+      let base: number | null
+      if (existing.purpose === 'ITEM') {
+        const items =
+          itemReplacement !== null
+            ? itemReplacement
+            : (
+                await prisma.paymentLinkItem.findMany({
+                  where: { paymentLinkId: linkId },
+                  select: { productId: true, quantity: true, modifiers: { select: { modifierId: true, quantity: true } } },
+                })
+              ).map(i => ({ productId: i.productId, quantity: i.quantity, modifiers: i.modifiers }))
+        base = items.length > 0 ? await totalDeItemsResueltos(venueId, items) : null
+      } else {
+        base = effectiveAmountType === 'FIXED' && effectiveAmount != null ? effectiveAmount : null
+      }
+      if (data.discount === undefined) {
+        await validarFotoContraBase(prisma, venueId, keptFoto!, base)
+      } else if (data.discount === null) {
+        updateData.discount = Prisma.JsonNull
+        updateData.discountId = null
+      } else {
+        const { foto, discountId } = await resolverDescuentoDeEntrada(prisma, venueId, data.discount, {
+          isReusable: data.isReusable ?? existing.isReusable,
+          base,
+        })
+        updateData.discount = foto as unknown as Prisma.InputJsonValue
+        updateData.discountId = discountId
+      }
+    }
   }
 
   // Wrap the metadata update + items replacement in a transaction so the

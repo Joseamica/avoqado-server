@@ -8,7 +8,7 @@
  * @module routes/dashboard/paymentLink
  */
 
-import { Router } from 'express'
+import { Router, Request, Response, NextFunction } from 'express'
 import { validateRequest } from '@/middlewares/validation'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as paymentLinkController from '@/controllers/dashboard/paymentLink.dashboard.controller'
@@ -30,6 +30,14 @@ const router = Router({ mergeParams: true })
  */
 router.get('/', validateRequest(listPaymentLinksSchema), paymentLinkController.listPaymentLinks)
 
+/** Poner o cambiar un descuento exige `discounts:apply`; elegirlo del catálogo, además `discounts:read`. `discount: null` (quitarlo) no pide nada extra. */
+const discountPermissions = [
+  (req: Request, res: Response, next: NextFunction) =>
+    req.body.discount && typeof req.body.discount === 'object' ? checkPermission('discounts:apply')(req, res, next) : next(),
+  (req: Request, res: Response, next: NextFunction) =>
+    req.body.discount?.mode === 'CATALOG' ? checkPermission('discounts:read')(req, res, next) : next(),
+]
+
 /**
  * POST /api/v1/dashboard/venues/:venueId/payment-links
  * Creates a new payment link
@@ -39,6 +47,7 @@ router.post(
   checkPermission('payment-link:create'),
   validateRequest(createPaymentLinkSchema),
   (req, res, next) => (req.body.customerId ? checkPermission('customers:read')(req, res, next) : next()),
+  ...discountPermissions,
   paymentLinkController.createPaymentLink,
 )
 
@@ -97,6 +106,7 @@ router.put(
   checkPermission('payment-link:update'),
   validateRequest(updatePaymentLinkSchema),
   (req, res, next) => (req.body.customerId ? checkPermission('customers:read')(req, res, next) : next()),
+  ...discountPermissions,
   paymentLinkController.updatePaymentLink,
 )
 
