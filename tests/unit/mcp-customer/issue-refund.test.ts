@@ -2,10 +2,12 @@ import { registerPaymentTools } from '../../../src/mcp/tools/payments'
 import type { McpScope } from '../../../src/mcp/scope'
 import { GiftCardError } from '../../../src/services/giftCards/giftCardErrors'
 import { ConflictError } from '../../../src/errors/AppError'
+import { ExchangeError } from '../../../src/services/exchanges/exchangeErrors'
 
 const mockPaymentFindFirst = jest.fn()
 const mockIssue = jest.fn()
 const mockAudit = jest.fn()
+const mockChain = jest.fn()
 
 jest.mock('@/mcp/guard', () => ({
   createGuard: () => ({
@@ -22,6 +24,7 @@ jest.mock('@/mcp/guard', () => ({
 }))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ issueRefund: (...a: unknown[]) => mockIssue(...(a as [])) }))
+jest.mock('@/services/exchanges/exchangeTx', () => ({ chainRefundSemanticsInTx: (...a: unknown[]) => mockChain(...a) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -60,6 +63,40 @@ beforeAll(() => {
 beforeEach(() => jest.clearAllMocks())
 
 describe('issue_refund (critical money write, confirm-gated)', () => {
+  it('previews exchange credit with the root method and drawer semantics from the single resolver', async () => {
+    mockPaymentFindFirst.mockResolvedValueOnce({
+      ...completedPayment,
+      method: 'OTHER',
+      fundsFlow: 'EXTERNAL_RECORDED',
+      tenderType: { systemKind: 'EXCHANGE_CREDIT' },
+    })
+    mockChain.mockResolvedValueOnce({
+      kind: 'INHERIT',
+      rootPaymentId: 'root',
+      exchangeId: 'exchange',
+      money: { method: 'CASH', fundsFlow: 'CASH_DRAWER' },
+    })
+    const out = parse(await call(base))
+    expect(mockChain).toHaveBeenCalledWith(expect.anything(), 'v1', 'pay-1')
+    expect(out.preview).toMatchObject({ payment: { method: 'OTHER' }, refundMethod: 'CASH', saleDeCajonDeEfectivo: true })
+    expect(out.message).toMatch(/cajón/)
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
+  it('returns chain rejection codes and details during preview without confirming', async () => {
+    for (const code of ['EXCHANGE_CHAIN_NEEDS_TERMINAL', 'EXCHANGE_CHAIN_GIFT_CARD_PENDING'] as const) {
+      mockPaymentFindFirst.mockResolvedValueOnce({ ...completedPayment, method: 'OTHER', tenderType: { systemKind: 'EXCHANGE_CREDIT' } })
+      mockChain.mockResolvedValueOnce({
+        kind: 'BLOCKED',
+        error: new ExchangeError(code, 'No disponible', 422, { reason: 'PROCESSOR_ROOT' }),
+      })
+      const out = parse(await call(base))
+      expect(out).toMatchObject({ ok: false, code, error: 'No disponible', details: { reason: 'PROCESSOR_ROOT' } })
+      expect(out.requiresConfirmation).toBeUndefined()
+    }
+    expect(mockIssue).not.toHaveBeenCalled()
+  })
+
   it('🔴 tarjeta de regalo: con refundMethod se rechaza con GIFT_CARD_REFUND_TO_BALANCE_ONLY; sin él, la vista previa dice que regresa al saldo', async () => {
     const conSaldo = {
       ...completedPayment,

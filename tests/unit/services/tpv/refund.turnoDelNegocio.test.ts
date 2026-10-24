@@ -143,6 +143,15 @@ const decremento = () => (prismaMock as any).shift.updateMany.mock.calls[0]?.[0]
 beforeEach(() => jest.clearAllMocks())
 
 describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda la terminal', () => {
+  it('rejects an EXCHANGE_CREDIT original before any transaction or money write', async () => {
+    const original = armar()
+    Object.assign(original, { tenderType: { systemKind: 'EXCHANGE_CREDIT' }, method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED' })
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toMatchObject({ statusCode: 400 })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(postCashRefundToDrawer).not.toHaveBeenCalled()
+  })
+
   it('acota la lectura inicial al paymentId y venue sin observar pagos de otro negocio', async () => {
     armar()
 

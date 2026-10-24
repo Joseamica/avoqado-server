@@ -1,4 +1,4 @@
-import { OrderSource, OrderType, Prisma } from '@prisma/client'
+import { OrderSource, OrderType, PaymentFundsFlow, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
@@ -11,6 +11,9 @@ import { writeRefundInTx } from '../shared/writeRefundInTx'
 import { createCustomerReturnPostingInTx } from '../inventory/inventoryPosting.service'
 import type { AbonoEnTx, AbonoEnTxContexto, AbonoEnTxEntrada } from '../mobile/order.mobile.service'
 import type { TenderSemanticsPayment } from '../shared/tenderSemantics'
+import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
+import { seDevuelveEnTerminal } from '../tpv/terminalRefundTarget'
+import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { loadSaleForExchange } from './exchangeSale'
 import { calculateExchange, pieceValuesCents, splitItemsAcrossRefundRows, type ReturnedPiece } from './exchangeCalculator'
 import {
@@ -24,7 +27,7 @@ import {
 import { EXCHANGE_REFUND_ROLE } from './exchangeMarks'
 import { resolveExchangeCreditTenderInTx } from './exchangeCreditTender'
 import { ExchangeError, itemNotReturnable as notReturnable } from './exchangeErrors'
-import { NON_MERCHANDISE_PRODUCT_TYPES } from './exchangePredicates'
+import { isExchangeCreditTenderKind, NON_MERCHANDISE_PRODUCT_TYPES } from './exchangePredicates'
 import { resolverPreciosDeLineas } from '../mobile/precioQueVioElCliente'
 import type { ExchangeResponse, ExchangeReturnedLine, ExchangeTakenLine, ExchangeTxInput, SaleForExchange } from './exchange.service'
 
@@ -71,6 +74,64 @@ export interface ExchangeTxOutcome {
   }
 }
 const pesos = (c: number) => new Prisma.Decimal(c).div(100)
+
+export type ChainRefundResolution =
+  | { kind: 'INHERIT'; rootPaymentId: string; exchangeId: string; money: RefundMoneySemantics }
+  | { kind: 'BLOCKED'; error: ExchangeError }
+
+/** Sólo lee: el reembolso ya bloqueó el crédito; la vista previa y el detalle reutilizan la misma regla sin candados. */
+export async function chainRefundSemanticsInTx(
+  tx: Prisma.TransactionClient,
+  venueId: string,
+  creditPaymentId: string,
+): Promise<ChainRefundResolution> {
+  const link = await tx.exchangeCreditLink.findFirst({ where: { venueId, creditPaymentId } })
+  const root = link
+    ? await tx.payment.findFirst({
+        where: { venueId, id: link.originPaymentId },
+        include: { tenderType: { select: { systemKind: true } } },
+      })
+    : null
+  if (!link || !root || isExchangeCreditTenderKind(root.tenderType?.systemKind))
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'No se pudo comprobar el origen de este crédito de cambio.', 422)
+  if (isGiftCardTenderKind(root.tenderType?.systemKind))
+    return {
+      kind: 'BLOCKED',
+      error: new ExchangeError(
+        'EXCHANGE_CHAIN_GIFT_CARD_PENDING',
+        'Esto se pagó con un crédito que salió de una tarjeta de regalo; regresarlo al saldo todavía no está disponible.',
+        422,
+      ),
+    }
+  const processorRoot = !!root.merchantAccountId || !!root.ecommerceMerchantId || paymentIsAvoqadoSettled(root)
+  if (seDevuelveEnTerminal(root) || processorRoot)
+    return {
+      kind: 'BLOCKED',
+      error: new ExchangeError(
+        'EXCHANGE_CHAIN_NEEDS_TERMINAL',
+        'Esto se pagó con un crédito que salió de una tarjeta: se devuelve a esa tarjeta en la terminal, y eso todavía no está disponible.',
+        422,
+        processorRoot ? { reason: 'PROCESSOR_ROOT' } : undefined,
+      ),
+    }
+  return {
+    kind: 'INHERIT',
+    rootPaymentId: root.id,
+    exchangeId: link.exchangeId,
+    money: {
+      method: root.method,
+      fundsFlow: root.fundsFlow ?? (paymentCountsAsDrawerCash(root) ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED),
+      merchantAccountId: null,
+      source: root.source,
+      tenderTypeId: root.tenderTypeId,
+      tenderRevision: root.tenderRevision,
+      tenderLabel: root.tenderLabel,
+      tenderCountsAsCash: root.tenderCountsAsCash,
+      tenderCaptureTip: root.tenderCaptureTip,
+      tenderSatFormaPago: root.tenderSatFormaPago,
+    },
+  }
+}
 
 /** La llave decide antes que el estado vigente de la venta: repetir algo ya hecho nunca devuelve dos piezas. */
 export async function prepareExchangeInTx(

@@ -354,6 +354,11 @@ export async function recordRefund(
     )
   }
 
+  // El crédito no acredita un reembolso del SDK: sólo el POS/panel puede resolver el origen de la cadena.
+  if (originalPayment.tenderType?.systemKind === 'EXCHANGE_CREDIT') {
+    throw new BadRequestError('Lo pagado con crédito de cambio se devuelve desde el POS o el panel, por el medio de su origen.')
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 1.5: Reintento idempotente — se resuelve ANTES del guardia de importe
   // ═══════════════════════════════════════════════════════════════════════════

@@ -52,6 +52,8 @@ import {
   esCantidadPositivaEnCentavos,
 } from '../shared/devueltoDeUnCobro'
 import { EXCHANGE_REFUND_ROLE, type ExchangeRefundRole } from '../exchanges/exchangeMarks'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
+import { chainRefundSemanticsInTx } from '../exchanges/exchangeTx'
 
 export type RefundReason =
   | 'RETURNED_GOODS'
@@ -197,6 +199,7 @@ interface RefundTransactionResult {
   remainingAfterCents: number
   refundAmountCents: number
   originalMethod: string
+  rootPaymentId?: string
   refundTender: {
     method: string
     fundsFlow: string | null
@@ -971,6 +974,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // Same original-payment lock as every refund channel: the second caller sees the first commit.
       const replayResult = await existingAttempt(tx)
       if (replayResult) return { replayResult }
+      const esCreditoDeCambio = isExchangeCreditTenderKind(cobro.original.tenderSystemKind)
+      if (esCreditoDeCambio && input.refundMethod)
+        throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
+      const chain = esCreditoDeCambio ? await chainRefundSemanticsInTx(tx, input.venueId, cobro.original.id) : null
+      if (chain?.kind === 'BLOCKED') throw chain.error
       // Tarjetas de regalo (B1): los sobres del cobro se bloquean AQUÍ —Order → Payment → sobres → Shift—, antes de que el núcleo
       // reclame el turno. Un canje en otra caja toma Order → sobres → Shift; al revés se abrazarían (40P01).
       await bloquearSobresDelReembolsoEnTx(tx, {
@@ -1268,12 +1276,18 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         provenance: 'MANUAL',
         bloqueado: cobro,
         devolverCon: devolverConEfectivo(original, input.refundMethod),
+        ...(chain
+          ? {
+              moneyAs: chain.money,
+              exchangeMark: { exchangeId: chain.exchangeId, role: EXCHANGE_REFUND_ROLE.CHAIN, rootPaymentId: chain.rootPaymentId },
+            }
+          : {}),
       })
       // Fase 3 (A2, Codex r1-2): el reverso de la comisión del personal y la reconciliación del referido se ENCOLAN en esta
       // misma transacción, como en la terminal. Antes se disparaban después del commit sin esperarlos: si el proceso moría
       // ahí, la devolución quedaba sin reverso para siempre y el sobre de pago al personal pagaría la comisión de una venta
       // devuelta. Cubre también la devolución ligada de las apps (`refund.mobile.controller.ts`), que llega aquí.
-      await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, original.id)
+      await enqueueRefundPaymentEffectsInTx(tx, refundPaymentId, chain?.rootPaymentId ?? original.id)
       // Tarjetas de regalo (B1/B2, R2): el gancho único, en la MISMA transacción que el REFUND y sus reversas. Un cobro con saldo
       // vuelve al saldo; la venta de tarjetas exige la cancelación iniciada. Un replay ya lo corrió cuando se escribió la fila.
       const tarjetas = replay
@@ -1297,21 +1311,24 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         refundedItems,
         remainingAfterCents: Math.max(0, remainingBeforeCents - refundCents),
         refundAmountCents: refundCents,
-        originalMethod: original.method,
+        originalMethod: chain?.money.method ?? original.method,
+        ...(chain ? { rootPaymentId: chain.rootPaymentId } : {}),
         // Semántica con que SALIÓ el dinero, para el movimiento de caja de abajo.
-        refundTender: devolverCon
-          ? {
-              method: devolverCon,
-              fundsFlow: devolverCon === 'CASH' ? 'CASH_DRAWER' : 'EXTERNAL_RECORDED',
-              tenderTypeId: null,
-              tenderCountsAsCash: null,
-            }
-          : {
-              method: original.method,
-              fundsFlow: original.fundsFlow,
-              tenderTypeId: original.tenderTypeId,
-              tenderCountsAsCash: original.tenderCountsAsCash,
-            },
+        refundTender: chain
+          ? chain.money
+          : devolverCon
+            ? {
+                method: devolverCon,
+                fundsFlow: devolverCon === 'CASH' ? 'CASH_DRAWER' : 'EXTERNAL_RECORDED',
+                tenderTypeId: null,
+                tenderCountsAsCash: null,
+              }
+            : {
+                method: original.method,
+                fundsFlow: original.fundsFlow,
+                tenderTypeId: original.tenderTypeId,
+                tenderCountsAsCash: original.tenderCountsAsCash,
+              },
         cuentaDeTarjetasCancelada: tarjetas.cuentaCancelada,
       }
     }, ORDER_LOCK_WAIT_BUDGET)
@@ -1463,6 +1480,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       refundedItemCount: result.refundedItems.length,
       refundMethod: input.refundMethod ?? null,
       originalMethod: result.originalMethod,
+      ...(result.rootPaymentId ? { rootPaymentId: result.rootPaymentId } : {}),
       source: 'DASHBOARD',
     },
   })
