@@ -1,3 +1,4 @@
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 // src/services/dashboard/tenderType.dashboard.service.ts
 
 /**
@@ -555,7 +556,13 @@ export async function getTenderCommissionsReport(
   // secas daría jul-31 18:00 en México y el reporte arrancaría un día antes.
   const { from, to } = parseDbDateRange(filters.from, filters.to, venue?.timezone, 30)
 
-  const base = { venueId, tenderTypeId: { not: null }, status: 'COMPLETED' as const, createdAt: { gte: from, lte: to } }
+  const base = {
+    venueId,
+    tenderTypeId: { not: null },
+    status: 'COMPLETED' as const,
+    createdAt: { gte: from, lte: to },
+    AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
+  }
   // 🔴 `{ not: 'REFUND' }`, NO `'REGULAR'`: la venta rápida del mostrador se guarda como
   // `FAST`, y es justo donde más se usan los tipos propios. Filtrar por REGULAR mostraba
   // CERO en el caso más común (encontrado validando contra datos reales, no con mocks).

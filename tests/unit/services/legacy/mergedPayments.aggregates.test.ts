@@ -1,3 +1,4 @@
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '@/services/exchanges/exchangeMarks'
 /**
  * Agregados en Postgres del puente legacy (2026-09-01, query-guard en producción).
  *
@@ -66,6 +67,7 @@ describe('aggregatePaymentsByMethod', () => {
         {
           venueId: 'v1',
           status: 'COMPLETED',
+          AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
           createdAt: { gte: filters.fromDate, lte: filters.toDate },
           type: { not: 'REFUND' },
           order: { status: { not: 'CANCELLED' } },

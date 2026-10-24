@@ -1,3 +1,4 @@
+import { EXCHANGE_REFUND_ROLE, WHERE_PAYMENT_IS_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 /**
  * Refunds Report Dashboard Service
  *
@@ -47,6 +48,9 @@ export interface RefundRecord {
   totalAmount: number // saleAmount + tipAmount
   status: TransactionStatus
   processedByName: string | null
+  isExchange: boolean
+  exchangeId: string | null
+  chainOfExchangeId: string | null
 }
 
 export interface RefundsReportResponse {
@@ -60,6 +64,8 @@ export interface RefundsReportResponse {
     totalRefunded: number
     totalSale: number
     totalTips: number
+    exchangesCount: number
+    exchangeCreditTotal: number
   }
   byReason: Array<{
     reason: RefundReason | 'UNKNOWN'
@@ -90,6 +96,20 @@ export async function getRefundsReport(venueId: string, filters: RefundsReportFi
 
   logger.info('Calculating refunds report', { venueId, startDate, endDate })
 
+  const [exchangesCount, exchangeCredit] = await Promise.all([
+    prisma.exchange.count({ where: { venueId, createdAt: { gte: parsedStartDate, lte: parsedEndDate } } }),
+    prisma.payment.aggregate({
+      where: {
+        venueId,
+        status: TransactionStatus.COMPLETED,
+        type: { not: PaymentType.REFUND },
+        createdAt: { gte: parsedStartDate, lte: parsedEndDate },
+        AND: [WHERE_PAYMENT_IS_EXCHANGE_CREDIT],
+      },
+      _sum: { amount: true },
+    }),
+  ])
+
   const rows = await prisma.payment.findMany({
     where: {
       venueId,
@@ -113,6 +133,9 @@ export async function getRefundsReport(venueId: string, filters: RefundsReportFi
 
   const refunds: RefundRecord[] = rows.map(r => {
     const pd = (r.processorData as Record<string, unknown> | null) || {}
+    const exchange = pd.exchange as { role?: unknown; exchangeId?: unknown } | null | undefined
+    const isExchange = exchange?.role === EXCHANGE_REFUND_ROLE.CREDIT || exchange?.role === EXCHANGE_REFUND_ROLE.DIFFERENCE
+    const exchangeId = typeof exchange?.exchangeId === 'string' ? exchange.exchangeId : null
     // Stored amounts are negative for refunds — present positive magnitudes.
     const saleAmount = Math.abs(Number(r.amount))
     const tipAmount = Math.abs(Number(r.tipAmount ?? 0))
@@ -131,6 +154,9 @@ export async function getRefundsReport(venueId: string, filters: RefundsReportFi
       totalAmount: saleAmount + tipAmount,
       status: r.status,
       processedByName,
+      isExchange,
+      exchangeId: isExchange ? exchangeId : null,
+      chainOfExchangeId: exchange?.role === EXCHANGE_REFUND_ROLE.CHAIN ? exchangeId : null,
     }
   })
 
@@ -163,7 +189,7 @@ export async function getRefundsReport(venueId: string, filters: RefundsReportFi
   return {
     dateRange: { startDate: parsedStartDate, endDate: parsedEndDate },
     refunds,
-    totals,
+    totals: { ...totals, exchangesCount, exchangeCreditTotal: Number(exchangeCredit._sum.amount ?? 0) },
     byReason,
   }
 }

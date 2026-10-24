@@ -1,3 +1,4 @@
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
 import { PaymentMethod, ProductType, TransactionStatus, OrderStatus, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
@@ -542,6 +543,7 @@ export async function getBasicMetricsData(venueId: string, filters: BasicMetrics
         AND p."createdAt" >= ${utcTs(fromDate)} AND p."createdAt" <= ${utcTs(toDate)}
         AND (o."id" IS NULL OR o."status" <> 'CANCELLED')
         AND ${sqlOrdenSinTarjetas('p."orderId"')}
+        AND ${sqlPaymentIsNotExchangeCredit('p')}
       GROUP BY 1, 2
       ORDER BY 1, 2
     `,
@@ -659,6 +661,7 @@ async function fetchLegacyBasicMetricPayments(venueId: string, fromDate: Date, t
         createdAt: { gte: fromDate, lte: toDate },
         // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
         order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
+        AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
       },
       select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
@@ -769,9 +772,11 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
         createdAt: { gte: fromDate, lte: toDate },
         // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
         order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
+        AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
         ...(boundary
           ? {
               AND: [
+                WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
                 {
                   OR: [
                     { createdAt: { lt: new Date(boundary.createdAt) } },
@@ -816,6 +821,7 @@ export async function getBasicMetricsDetailsPage(venueId: string, filters: Basic
         createdAt: { gte: fromDate, lte: toDate },
         // Tarjetas de regalo (spec §7): la venta de una tarjeta no es venta; mismo filtro que el KPI de arriba.
         order: { status: { not: 'CANCELLED' }, ...WHERE_ORDEN_SIN_TARJETAS },
+        AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
       },
       select: { id: true, amount: true, tipAmount: true, method: true, createdAt: true },
       orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
