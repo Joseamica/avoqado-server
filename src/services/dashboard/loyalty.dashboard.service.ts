@@ -658,27 +658,33 @@ export async function adjustPoints(
     throw new BadRequestError(`Cannot adjust points. Would result in negative balance (${newBalance})`)
   }
 
-  // Create transaction and update balance
-  const [_transaction, updatedCustomer] = await prisma.$transaction([
-    prisma.loyaltyTransaction.create({
-      data: {
-        customerId,
-        type: LoyaltyTransactionType.ADJUST,
-        points,
-        reason,
-        createdById: staffId,
-      },
-    }),
-    prisma.customer.update({
-      where: { id: customerId },
-      data: {
-        loyaltyPoints: { increment: points },
-      },
-      select: {
-        loyaltyPoints: true,
-      },
-    }),
-  ])
+  // 🔴 D1 (24-oct): la lectura de arriba sólo da el mensaje. Lo que impide el saldo negativo es la resta CONDICIONAL: dos
+  // gerentes que leyeron 10 y quitan 6 a la vez ya no dejan −2 (el segundo espera la fila, ve 4 y no mueve nada).
+  // El tiempo es explícito (Codex r1): con los 5 s por defecto de Prisma, un ajuste que espera la fila tomada por otro vencía.
+  const updatedCustomer = await prisma.$transaction(
+    async tx => {
+      const moved = await tx.customer.updateMany({
+        where: { id: customerId, venueId, loyaltyPoints: { gte: -points } },
+        data: { loyaltyPoints: { increment: points } },
+      })
+      if (moved.count === 0) {
+        throw new BadRequestError(
+          'Cannot adjust points. Would result in negative balance (another adjustment was processed at the same time)',
+        )
+      }
+      await tx.loyaltyTransaction.create({
+        data: {
+          customerId,
+          type: LoyaltyTransactionType.ADJUST,
+          points,
+          reason,
+          createdById: staffId,
+        },
+      })
+      return tx.customer.findUniqueOrThrow({ where: { id: customerId }, select: { loyaltyPoints: true } })
+    },
+    { timeout: 15_000, maxWait: 5_000 },
+  )
 
   logAction({
     staffId,
