@@ -7,6 +7,8 @@ import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
 import { TOPES_POR_ORDEN } from '@/services/fiscal/librosDeOrdenes'
 import { seedClothingSale } from './seedExchange'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
+import { exchangeDetailFields } from '@/services/exchanges/exchangeDetail'
+import type { PrismaClient } from '@prisma/client'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.fn(async () => undefined) }))
@@ -41,6 +43,97 @@ afterAll(async () => {
 })
 
 describe('exchange transaction detail', () => {
+  it.each([
+    [false, 'CASH'],
+    [true, 'CASH'],
+    [false, 'BANK_TRANSFER'],
+    [true, 'BANK_TRANSFER'],
+  ] as const)(
+    'a historical amount-only refund contributes zero capacity, with another usable payment: %s, payout: %s',
+    async (otherPayment, method) => {
+      const s = await seed({ quantity: otherPayment ? 2 : 1, payments: otherPayment ? [500, 500] : [500] })
+      await prisma.payment.update({ where: { id: s.payments[0].id }, data: { processorData: { refundedAmount: 100 } } })
+      const d = await detail(s)
+      expect(d.payoutOptions).toEqual(
+        otherPayment
+          ? [
+              { method: 'CASH', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false },
+              { method: 'BANK_TRANSFER', maxCents: 50000, maxSameCents: 0, needsRefundToCash: false },
+            ]
+          : [],
+      )
+      await prisma.product.update({ where: { id: s.products[3].id }, data: { price: 400 } })
+      const b = s.body({
+        taken: [{ productId: s.products[3].id, quantity: 1 }],
+        settlement: { kind: 'PAYOUT', method, expectedDifferenceCents: -10000, cashDrawerSessionId: s.drawer.id },
+      })
+      if (!otherPayment) {
+        await expect(createExchange(s.input(b))).rejects.toMatchObject({
+          code: 'EXCHANGE_ITEM_NOT_RETURNABLE',
+          details: { reason: 'NOTHING_LEFT_TO_REFUND' },
+        })
+        expect(await prisma.exchange.count({ where: { venueId: s.venueId } })).toBe(0)
+      } else {
+        const { exchange } = await createExchange(s.input(b))
+        expect(exchange.settlement).toMatchObject({ kind: 'PAYOUT', method, amountCents: 10000 })
+        const rows = await prisma.payment.findMany({ take: 10, where: { venueId: s.venueId, orderId: s.order.id, type: 'REFUND' } })
+        expect(rows.length).toBeGreaterThan(0)
+        expect(rows.every(r => (r.processorData as { originalPaymentId: string }).originalPaymentId === s.payments[1].id)).toBe(true)
+      }
+    },
+  )
+
+  it('reads chains in a constant number of queries for one or ten EC payments', async () => {
+    const s = await seed()
+    const { exchange } = await createExchange(s.input())
+    const credit = await prisma.payment.findUniqueOrThrow({ where: { id: exchange.paymentIds[0] } })
+    const link = await prisma.exchangeCreditLink.findUniqueOrThrow({ where: { creditPaymentId: credit.id } })
+    const counts: Record<string, number> = {}
+    const db = new Proxy(prisma, {
+      get(target, key) {
+        const delegate = Reflect.get(target, key)
+        if (key !== 'payment' && key !== 'exchangeCreditLink') return delegate
+        return new Proxy(delegate, {
+          get(model, operation) {
+            const fn = Reflect.get(model, operation)
+            if (typeof fn !== 'function') return fn
+            return (...args: unknown[]) => {
+              const name = `${key}.${String(operation)}`
+              counts[name] = (counts[name] ?? 0) + 1
+              return fn.apply(model, args)
+            }
+          },
+        })
+      },
+    }) as PrismaClient
+    const read = async () => {
+      for (const key of Object.keys(counts)) delete counts[key]
+      expect((await exchangeDetailFields(db, s.venueId, credit.id)).fields.chainRefundMethod).toBe('CASH')
+      return { ...counts }
+    }
+    const one = await read()
+    const paymentData = {
+      ...credit,
+      id: undefined,
+      processorData: undefined,
+      routingEvaluation: undefined,
+      posRawData: undefined,
+      amount: 0,
+      netAmount: 0,
+    }
+    for (let i = 0; i < 9; i++) {
+      const extra = await prisma.payment.create({ data: paymentData })
+      const refundRow = await prisma.payment.create({ data: { ...paymentData, type: 'REFUND' } })
+      await prisma.exchangeCreditLink.create({
+        data: { ...link, id: undefined, creditPaymentId: extra.id, creditRefundPaymentId: refundRow.id, amount: 0 },
+      })
+    }
+    expect(await read()).toEqual(one)
+    expect(one['exchangeCreditLink.findMany']).toBe(1)
+    expect(one['exchangeCreditLink.findFirst'] ?? 0).toBe(0)
+    expect(one['payment.findFirst']).toBe(1)
+  })
+
   it('RF3: returnedQtyOrder counts a unit refunded through ANOTHER payment while legacy refundedQty stays per payment', async () => {
     const s = await seed({ quantity: 2, payments: [500, 500] })
     await refund(s, s.payments[1].id, 1, 50000)
@@ -89,10 +182,12 @@ describe('exchange transaction detail', () => {
     const s = await seed()
     const { exchange } = await createExchange(s.input())
     expect((await detail(s)).exchange).toEqual({
+      asOriginalTotal: 1,
       asOriginal: [{ exchangeId: exchange.id, newOrderNumber: exchange.newOrderNumber, status: 'COMPLETED' }],
       asNew: null,
     })
     expect((await detail(s, exchange.paymentIds[0])).exchange).toEqual({
+      asOriginalTotal: 0,
       asOriginal: [],
       asNew: { exchangeId: exchange.id, originalOrderNumber: s.order.orderNumber },
     })
@@ -108,6 +203,17 @@ describe('exchange transaction detail', () => {
       chainRefundLabel: expect.any(String),
       chainRefundBlockedCode: null,
       payoutOptions: [{ method: 'CASH', maxCents: 50000, maxSameCents: 50000, needsRefundToCash: false }],
+    })
+  })
+
+  it('keeps the root information when the opened EC payment is already REFUNDED', async () => {
+    const s = await seed()
+    const { exchange } = await createExchange(s.input())
+    await prisma.payment.update({ where: { id: exchange.paymentIds[0] }, data: { status: 'REFUNDED' } })
+    expect(await detail(s, exchange.paymentIds[0])).toMatchObject({
+      chainRefundMethod: 'CASH',
+      chainRefundBlockedCode: null,
+      payoutOptions: [],
     })
   })
 
@@ -320,6 +426,20 @@ describe('exchange transaction detail', () => {
       ids.push(e.id)
     }
     const expected = ids.sort().reverse().slice(0, 50)
+    const other = await seed()
+    await prisma.exchange.create({
+      data: {
+        ...template,
+        id: undefined,
+        venueId: other.venueId,
+        newOrderId: other.order.id,
+        staffId: other.staffId,
+        idempotencyKey: 'foreign-detail',
+        lines: {},
+        result: undefined,
+      },
+    })
+    expect((await detail(s)).exchange).toMatchObject({ asOriginalTotal: 52 })
     expect((await detail(s)).exchange.asOriginal.map(e => e.exchangeId)).toEqual(expected)
     expect((await detail(s)).exchange.asOriginal.map(e => e.exchangeId)).toEqual(expected)
   })

@@ -3,6 +3,8 @@ import type { ExchangeReason } from './exchangePredicates'
 import type { VariantFields } from '../product-variants/variantPayload'
 import type { CobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import type { MoneyShape } from './exchangeRules'
+import type { FilaDeReembolso } from '../shared/devueltoDeUnCobro'
+import type { ChainRefundRoot } from './exchangeChainRefund'
 import type { OrderInventoryWarning } from '../tpv/payment.tpv.service'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
@@ -93,10 +95,14 @@ export interface SaleForExchange {
   }>
   charged: CobradoDeLaOrden
   returnedByLine: Map<string, { orderItemId: string; quantity: number; amountCents: number }>
+  chainByPaymentId: Map<string, { link: { exchangeId: string }; root: ChainRefundRoot | undefined }>
   payments: Array<{
     id: string
     createdAt: Date
     amountCents: number
+    tipCents: number
+    processorData: unknown
+    refunds: FilaDeReembolso[]
     saleRefundedCents: number
     money: MoneyShape
     rootPaymentId: string

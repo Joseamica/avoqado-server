@@ -5,6 +5,7 @@ import { ExchangeError } from './exchangeErrors'
 import { isExchangeCreditTenderKind, type LineBlockReason } from './exchangePredicates'
 import {
   lineBlockReason,
+  effectiveExchangeCapacity,
   modesForExchangeCreditRoot,
   payoutModesFor,
   payoutOptionsOf,
@@ -13,7 +14,7 @@ import {
   type PayoutOption,
 } from './exchangeRules'
 import { loadSaleForExchange } from './exchangeSale'
-import { chainRefundSemanticsInTx, type ChainRefundResolution } from './exchangeTx'
+import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
 
 export interface ExchangeItemExtras {
   productId: string | null
@@ -25,6 +26,7 @@ export interface ExchangeItemExtras {
    */
   chargedTotalCents: number
   quantity: number
+  /** Cuenta todos los estados de reembolso, igual que la política del escritor de reembolsos. */
   returnedQtyOrder: number
   returnedCentsOrder: number
   remainingQtyOrder: number
@@ -47,6 +49,7 @@ export interface ExchangeDetailFields {
   chainRefundBlockedReason?: string | null
   payoutOptions: PayoutOption[]
   exchange: {
+    asOriginalTotal: number
     asOriginal: Array<{ exchangeId: string; newOrderNumber: string; status: ExchangeStatus }>
     asNew: { exchangeId: string; originalOrderNumber: string } | null
   }
@@ -73,26 +76,11 @@ export async function exchangeDetailFields(
     chainRefundBlockedCode: null,
     chainRefundBlockedReason: null,
     payoutOptions: [],
-    exchange: { asOriginal: [], asNew: null },
+    exchange: { asOriginal: [], asOriginalTotal: 0, asNew: null },
   }
   const itemExtras = new Map<string, ExchangeItemExtras>()
   if (payment.type === 'REFUND' || !payment.orderId) return { fields, itemExtras }
-  const chains = new Map<string, ChainRefundResolution>()
-  const readChain = async (id: string): Promise<ChainRefundResolution> => {
-    const cached = chains.get(id)
-    if (cached) return cached
-    let chain: ChainRefundResolution
-    try {
-      chain = await chainRefundSemanticsInTx(db, venueId, id)
-    } catch (error) {
-      if (!(error instanceof ExchangeError) || error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE') throw error
-      chain = { kind: 'BLOCKED', error }
-    }
-    chains.set(id, chain)
-    return chain
-  }
-
-  const [asOriginal, asNew] = await Promise.all([
+  const [asOriginal, asNew, asOriginalTotal] = await Promise.all([
     db.exchange.findMany({
       take: 50,
       where: { venueId, originalOrderId: payment.orderId },
@@ -103,6 +91,7 @@ export async function exchangeDetailFields(
       where: { newOrderId: payment.orderId, venueId },
       select: { id: true, originalOrderId: true },
     }),
+    db.exchange.count({ where: { venueId, originalOrderId: payment.orderId } }),
   ])
   const orders = await db.order.findMany({
     take: 51,
@@ -110,6 +99,7 @@ export async function exchangeDetailFields(
     select: { id: true, orderNumber: true },
   })
   const numberById = new Map(orders.map(o => [o.id, o.orderNumber]))
+  fields.exchange.asOriginalTotal = asOriginalTotal
   fields.exchange.asOriginal = asOriginal.flatMap(e => {
     const newOrderNumber = numberById.get(e.newOrderId)
     return newOrderNumber ? [{ exchangeId: e.id, newOrderNumber, status: e.status }] : []
@@ -117,8 +107,38 @@ export async function exchangeDetailFields(
   const originalOrderNumber = asNew && numberById.get(asNew.originalOrderId)
   fields.exchange.asNew = asNew && originalOrderNumber ? { exchangeId: asNew.id, originalOrderNumber } : null
 
+  let sale
+  try {
+    sale = await loadSaleForExchange(db, venueId, payment.orderId, paymentId)
+  } catch (error) {
+    if (
+      !(error instanceof ExchangeError) ||
+      ((error.details as { reason?: unknown } | undefined)?.reason !== 'NOT_ATTRIBUTABLE' &&
+        error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE')
+    )
+      throw error
+    fields.notExchangeableReason = 'NOT_ATTRIBUTABLE'
+    if (isExchangeCreditTenderKind(kind) && error.code === 'EXCHANGE_SETTLEMENT_UNAVAILABLE') fields.chainRefundBlockedCode = error.code
+    return { fields, itemExtras }
+  }
+  const chains = new Map<string, ChainRefundResolution>()
+  const readChain = (id: string): ChainRefundResolution => {
+    const cached = chains.get(id)
+    if (cached) return cached
+    let chain: ChainRefundResolution
+    try {
+      const data = sale.chainByPaymentId.get(id)
+      chain = resolveChainRefund(data?.link, data?.root)
+    } catch (error) {
+      if (!(error instanceof ExchangeError) || error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE') throw error
+      chain = { kind: 'BLOCKED', error }
+    }
+    chains.set(id, chain)
+    return chain
+  }
+
   if (isExchangeCreditTenderKind(kind)) {
-    const chain = await readChain(paymentId)
+    const chain = readChain(paymentId)
     if (chain.kind === 'BLOCKED') {
       fields.chainRefundBlockedCode = chain.error.code ?? null
       const reason = (chain.error.details as { reason?: unknown } | undefined)?.reason
@@ -143,19 +163,6 @@ export async function exchangeDetailFields(
     }
   }
 
-  let sale
-  try {
-    sale = await loadSaleForExchange(db, venueId, payment.orderId)
-  } catch (error) {
-    if (
-      !(error instanceof ExchangeError) ||
-      ((error.details as { reason?: unknown } | undefined)?.reason !== 'NOT_ATTRIBUTABLE' &&
-        error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE')
-    )
-      throw error
-    fields.notExchangeableReason = 'NOT_ATTRIBUTABLE'
-    return { fields, itemExtras }
-  }
   if (!sale.charged.atribuible) {
     fields.notExchangeableReason = 'NOT_ATTRIBUTABLE'
     return { fields, itemExtras }
@@ -189,10 +196,10 @@ export async function exchangeDetailFields(
   }
   const capacities: PaymentCapacity[] = []
   for (const p of sale.payments) {
-    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? await readChain(p.id) : null
+    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? readChain(p.id) : null
     capacities.push({
       paymentId: p.id,
-      saleRemainingCents: p.amountCents - p.saleRefundedCents,
+      saleRemainingCents: effectiveExchangeCapacity(p),
       modes: chain ? (chain.kind === 'INHERIT' ? modesForExchangeCreditRoot(p.rootMoney) : {}) : payoutModesFor(p.money),
     })
   }

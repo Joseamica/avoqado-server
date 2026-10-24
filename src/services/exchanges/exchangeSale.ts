@@ -35,6 +35,7 @@ export async function loadSaleForExchange(
   db: Prisma.TransactionClient | PrismaClient,
   venueId: string,
   orderId: string,
+  detailPaymentId?: string,
 ): Promise<SaleForExchange> {
   const order = await db.order.findFirst({
     where: { venueId, id: orderId },
@@ -69,15 +70,22 @@ export async function loadSaleForExchange(
   })
   const refunds = await db.payment.findMany({
     take: TOPES_POR_ORDEN.movimientos + 1,
-    where: { venueId, orderId, type: 'REFUND' },
+    where: {
+      venueId,
+      type: 'REFUND',
+      // El candado de reembolso busca por cobro original, incluso si una fila histórica trae otra orden.
+      OR: [{ orderId }, ...payments.map(p => ({ processorData: { path: ['originalPaymentId'], equals: p.id } }))],
+    },
     select: { amount: true, tipAmount: true, status: true, processorData: true },
   })
   if (lines.length > TOPES_POR_ORDEN.renglones || payments.length > 50 || refunds.length > TOPES_POR_ORDEN.movimientos) {
     itemNotReturnable('NOT_ATTRIBUTABLE')
   }
-  const links = await db.exchangeCreditLink.findMany({ take: 50, where: { venueId, creditPaymentId: { in: payments.map(p => p.id) } } })
+  // El detalle conserva el origen del cobro abierto aunque ya esté REFUNDED, sin aportarlo al dinero disponible.
+  const chainPaymentIds = [...payments.map(p => p.id), ...(detailPaymentId ? [detailPaymentId] : [])]
+  const links = await db.exchangeCreditLink.findMany({ take: 51, where: { venueId, creditPaymentId: { in: chainPaymentIds } } })
   const roots = await db.payment.findMany({
-    take: 50,
+    take: 51,
     where: { venueId, id: { in: links.map(l => l.originPaymentId) } },
     include: { tenderType: { select: { systemKind: true } } },
   })
@@ -112,6 +120,7 @@ export async function loadSaleForExchange(
     }),
     charged: await leerCobradoDeLaOrden(db, orderId),
     returnedByLine: await refundedItemsOfOrder(db, venueId, orderId),
+    chainByPaymentId: new Map(links.map(link => [link.creditPaymentId, { link, root: rootById.get(link.originPaymentId) }])),
     payments: payments.map(p => {
       const link = linkById.get(p.id)
       const root = link ? rootById.get(link.originPaymentId) : p
@@ -123,6 +132,9 @@ export async function loadSaleForExchange(
         id: p.id,
         createdAt: p.createdAt,
         amountCents: cents(p.amount),
+        tipCents: p.tipAmount ? cents(p.tipAmount) : 0,
+        processorData: p.processorData,
+        refunds: ownRefunds,
         saleRefundedCents: centavosDevueltosPorComponente(ownRefunds).salesCents,
         money: moneyOf(p),
         rootPaymentId: root.id,

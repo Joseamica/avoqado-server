@@ -4,6 +4,7 @@
  * qué cobro sale cada peso cuando la venta tiene varios. Sin Prisma ni red: quien llama trae los datos y aplica el veredicto.
  */
 import type { VenueType } from '@prisma/client'
+import { centavosYaDevueltos, centavosDevueltosPorComponente, type FilaDeReembolso } from '../shared/devueltoDeUnCobro'
 import { categoryOfVenueType } from '../../utils/venueTypeCategory'
 import { isGiftCardTenderKind } from '../giftCards/giftCardPredicados'
 import { claseDeEstado, esVentaCerrada } from '../shared/orderBalance'
@@ -68,6 +69,19 @@ export function saleBlockReason(sale: {
 
 /** Por dónde se le devuelve a la clienta la diferencia a su favor (spec §6.3). La tarjeta no está aquí: va por la terminal (§6.5). */
 export type PayoutMethod = 'CASH' | 'BANK_TRANSFER' | 'GIFT_CARD_BALANCE'
+
+/** El historial sin reparto comprobable no aporta capacidad; el escritor repite la regla bajo su candado. */
+export function effectiveExchangeCapacity(payment: {
+  amountCents: number
+  tipCents: number
+  processorData: unknown
+  refunds: readonly FilaDeReembolso[]
+}): number {
+  const totalRefunded = centavosYaDevueltos({ processorData: payment.processorData, filas: payment.refunds })
+  const { salesCents, tipCents } = centavosDevueltosPorComponente(payment.refunds)
+  if (totalRefunded > salesCents + tipCents) return 0
+  return Math.max(0, Math.min(payment.amountCents - salesCents, payment.amountCents + payment.tipCents - totalRefunded))
+}
 /** `SAME` = por el mismo medio del cobro; `CHOSEN` = «Devolver con» otro medio que el cobro admite. */
 export type PayoutMode = 'SAME' | 'CHOSEN'
 /** Por qué medios se devuelve lo de un cobro, y en qué modo. */

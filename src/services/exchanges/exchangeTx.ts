@@ -1,4 +1,4 @@
-import { OrderSource, OrderType, PaymentFundsFlow, Prisma } from '@prisma/client'
+import { OrderSource, OrderType, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
@@ -11,15 +11,16 @@ import { writeRefundInTx } from '../shared/writeRefundInTx'
 import { createCustomerReturnPostingInTx } from '../inventory/inventoryPosting.service'
 import type { AbonoEnTx, AbonoEnTxContexto, AbonoEnTxEntrada } from '../mobile/order.mobile.service'
 import type { TenderSemanticsPayment } from '../shared/tenderSemantics'
-import { paymentCountsAsDrawerCash, paymentIsAvoqadoSettled } from '../shared/tenderSemantics'
-import { seDevuelveEnTerminal } from '../tpv/terminalRefundTarget'
+import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { bloquearSobresDelReembolsoEnTx, alRegistrarReembolsoEnTx } from '../giftCards/giftCardCancel.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import { loadSaleForExchange } from './exchangeSale'
+import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
 import { calculateExchange, pieceValuesCents, splitItemsAcrossRefundRows, type ReturnedPiece } from './exchangeCalculator'
 import {
   allocateAcrossPayments,
+  effectiveExchangeCapacity,
   lineBlockReason,
   modesForExchangeCreditRoot,
   payoutModesFor,
@@ -32,6 +33,8 @@ import { ExchangeError, itemNotReturnable as notReturnable } from './exchangeErr
 import { isExchangeCreditTenderKind, NON_MERCHANDISE_PRODUCT_TYPES } from './exchangePredicates'
 import { resolverPreciosDeLineas } from '../mobile/precioQueVioElCliente'
 import type { ExchangeResponse, ExchangeReturnedLine, ExchangeTakenLine, ExchangeTxInput, SaleForExchange } from './exchange.service'
+
+export type { ChainRefundResolution } from './exchangeChainRefund'
 
 export interface PreparedExchange {
   input: ExchangeTxInput
@@ -78,10 +81,6 @@ export interface ExchangeTxOutcome {
 }
 const pesos = (c: number) => new Prisma.Decimal(c).div(100)
 
-export type ChainRefundResolution =
-  | { kind: 'INHERIT'; rootPaymentId: string; exchangeId: string; money: RefundMoneySemantics }
-  | { kind: 'BLOCKED'; error: ExchangeError }
-
 /** Sólo lee: el reembolso ya bloqueó el crédito; la vista previa y el detalle reutilizan la misma regla sin candados. */
 export async function chainRefundSemanticsInTx(
   tx: Prisma.TransactionClient,
@@ -95,45 +94,7 @@ export async function chainRefundSemanticsInTx(
         include: { tenderType: { select: { systemKind: true } } },
       })
     : null
-  if (!link || !root || isExchangeCreditTenderKind(root.tenderType?.systemKind))
-    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'No se pudo comprobar el origen de este crédito de cambio.', 422)
-  if (isGiftCardTenderKind(root.tenderType?.systemKind))
-    return {
-      kind: 'BLOCKED',
-      error: new ExchangeError(
-        'EXCHANGE_CHAIN_GIFT_CARD_PENDING',
-        'Esto se pagó con un crédito que salió de una tarjeta de regalo; regresarlo al saldo todavía no está disponible.',
-        422,
-      ),
-    }
-  const processorRoot = !!root.merchantAccountId || !!root.ecommerceMerchantId || paymentIsAvoqadoSettled(root)
-  if (seDevuelveEnTerminal(root) || processorRoot)
-    return {
-      kind: 'BLOCKED',
-      error: new ExchangeError(
-        'EXCHANGE_CHAIN_NEEDS_TERMINAL',
-        'Esto se pagó con un crédito que salió de una tarjeta: se devuelve a esa tarjeta en la terminal, y eso todavía no está disponible.',
-        422,
-        processorRoot ? { reason: 'PROCESSOR_ROOT' } : undefined,
-      ),
-    }
-  return {
-    kind: 'INHERIT',
-    rootPaymentId: root.id,
-    exchangeId: link.exchangeId,
-    money: {
-      method: root.method,
-      fundsFlow: root.fundsFlow ?? (paymentCountsAsDrawerCash(root) ? PaymentFundsFlow.CASH_DRAWER : PaymentFundsFlow.EXTERNAL_RECORDED),
-      merchantAccountId: null,
-      source: root.source,
-      tenderTypeId: root.tenderTypeId,
-      tenderRevision: root.tenderRevision,
-      tenderLabel: root.tenderLabel,
-      tenderCountsAsCash: root.tenderCountsAsCash,
-      tenderCaptureTip: root.tenderCaptureTip,
-      tenderSatFormaPago: root.tenderSatFormaPago,
-    },
-  }
+  return resolveChainRefund(link, root)
 }
 
 /** La llave decide antes que el estado vigente de la venta: repetir algo ya hecho nunca devuelve dos piezas. */
@@ -322,7 +283,7 @@ export async function prepareExchangeInTx(
     if (chain) chains.set(p.id, chain)
     capacities.push({
       paymentId: p.id,
-      saleRemainingCents: p.amountCents - p.saleRefundedCents,
+      saleRemainingCents: effectiveExchangeCapacity(p),
       modes: chain ? (chain.kind === 'INHERIT' ? modesForExchangeCreditRoot(p.rootMoney) : {}) : payoutModesFor(p.money),
     })
   }
@@ -365,8 +326,13 @@ export async function prepareExchangeInTx(
     if (
       slices.some(s => s.paymentId === id) &&
       (locked.unclassifiedPriorRefundCents > 0 ||
-        portion > locked.remainingBeforeCents ||
-        portion > paymentById.get(id)!.amountCents - locked.refundedSalesCents)
+        portion >
+          effectiveExchangeCapacity({
+            amountCents: new Prisma.Decimal(String(locked.original.amount ?? 0)).mul(100).toDecimalPlaces(0).toNumber(),
+            tipCents: new Prisma.Decimal(String(locked.original.tipAmount ?? 0)).mul(100).toDecimalPlaces(0).toNumber(),
+            processorData: locked.original.processorData,
+            refunds: locked.existingRefunds,
+          }))
     )
       notReturnable('NOT_ATTRIBUTABLE')
   }

@@ -5,6 +5,7 @@
 import {
   allocateAcrossPayments,
   effectiveExchangesEnabled,
+  effectiveExchangeCapacity,
   lineBlockReason,
   modesForExchangeCreditRoot,
   payoutModesFor,
@@ -17,6 +18,21 @@ import {
   type PayoutMode,
   type PayoutModes,
 } from '../../../../src/services/exchanges/exchangeRules'
+
+describe('effectiveExchangeCapacity', () => {
+  it.each([
+    [0, [], 50000],
+    [10000, [], 0],
+    [10000, [{ amount: -100, tipAmount: 0, status: 'COMPLETED' }], 40000],
+    [0, [{ amount: -100, tipAmount: -20, status: 'COMPLETED' }], 40000],
+    [0, [{ amount: -500, tipAmount: -100, status: 'FAILED' }], 50000],
+    [0, [{ amount: -600, tipAmount: 0, status: 'COMPLETED' }], 0],
+  ])('reconciles persisted total %s and refund rows %j as capacity %s', (refundedAmountCents, refunds, expected) => {
+    expect(effectiveExchangeCapacity({ amountCents: 50000, tipCents: 10000, processorData: { refundedAmountCents }, refunds })).toBe(
+      expected,
+    )
+  })
+})
 
 /** Un cobro con lo que le queda por devolver y sus medios de devolución. */
 const cap = (paymentId: string, saleRemainingCents: number, modes: PaymentCapacity['modes']): PaymentCapacity => ({
