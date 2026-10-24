@@ -32,11 +32,13 @@ import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
 import {
+  BASE_LIGA_ABIERTA,
   cargarRegla,
   Desglose,
   DescuentoDeLiga,
   desgloseDeLiga,
   EntradaDescuento,
+  MotivoNoDisponible,
   reglaDeFila,
   resolverDescuentoDeEntrada,
   validarFotoContraBase,
@@ -1242,6 +1244,18 @@ export async function updatePaymentLinkBranding(
  * Resolves a payment link by short code (public, no auth)
  * Returns venue branding + link data for the checkout page
  */
+type PublicDiscount = {
+  name: string
+  type: 'PERCENTAGE' | 'FIXED_AMOUNT'
+  value: number
+  minPurchaseAmount: number | null
+  maxDiscountAmount: number | null
+  amount: number | null
+  available: boolean
+  reason: MotivoNoDisponible | null
+  validUntil: string | null
+}
+
 export async function getPaymentLinkByShortCode(shortCode: string) {
   const paymentLink = await prisma.paymentLink.findUnique({
     where: { shortCode },
@@ -1258,6 +1272,9 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
           // visibility of logo/image/title/price). Public checkout reads this
           // to skin its Pay button and hide fields per the admin's choices.
           paymentLinkBranding: true,
+          // WhatsApp del negocio (la página lo ofrece si el descuento ya no está disponible) y su zona para evaluar horarios.
+          phone: true,
+          timezone: true,
         },
       },
       ...BUNDLE_ITEMS_INCLUDE,
@@ -1311,6 +1328,31 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     paymentMethod = 'MERCADO_PAGO_BRICKS'
   }
 
+  // Base viva: la MISMA que cobra `cobroDeLiga` (paquete = precios de hoy; fija = amount; abierta = sin base).
+  const baseAmount =
+    paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0
+      ? computeBundleTotal(paymentLink.items)
+      : paymentLink.amountType === 'FIXED' && paymentLink.amount != null
+        ? Number(paymentLink.amount)
+        : null
+  const foto = (paymentLink.discount as unknown as DescuentoDeLiga | null) ?? null
+  let discount: PublicDiscount | null = null
+  if (foto) {
+    const regla = await cargarRegla(prisma, foto)
+    const d = desgloseDeLiga(baseAmount ?? BASE_LIGA_ABIERTA, foto, regla, new Date(), paymentLink.venue.timezone || 'America/Mexico_City')
+    discount = {
+      name: foto.name,
+      type: foto.type,
+      value: foto.value,
+      minPurchaseAmount: regla?.minPurchaseAmount ?? null,
+      maxDiscountAmount: regla?.maxDiscountAmount ?? null,
+      amount: baseAmount !== null && d.aplica ? d.descuento : null,
+      available: d.aplica,
+      reason: d.motivo,
+      validUntil: regla?.validUntil ? regla.validUntil.toISOString() : null,
+    }
+  }
+
   return {
     id: paymentLink.id,
     shortCode: paymentLink.shortCode,
@@ -1328,7 +1370,10 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
       logo: paymentLink.venue.logo,
       primaryColor: paymentLink.venue.primaryColor,
       secondaryColor: paymentLink.venue.secondaryColor,
+      whatsappPhone: paymentLink.venue.phone?.trim() || null,
     },
+    discount,
+    baseAmount,
     // Branding overrides for this checkout. Always merged with defaults so
     // the customer-facing page never has to handle null/undefined fields.
     branding: mergeBranding(paymentLink.venue.paymentLinkBranding, paymentLink.venue.primaryColor),
