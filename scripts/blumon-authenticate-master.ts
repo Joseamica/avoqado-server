@@ -16,6 +16,7 @@
  * 4. Displays tokens for manual use if needed
  */
 
+import 'dotenv/config'
 import prisma from '../src/utils/prismaClient'
 import { blumonAuthService } from '../src/services/blumon/blumonAuth.service'
 import logger from '../src/config/logger'
@@ -24,9 +25,18 @@ import logger from '../src/config/logger'
 // MASTER CREDENTIALS (Sandbox)
 // ═══════════════════════════════════════════════════════════════════════════
 
+// Read from the environment (same names as .env.example). Never hardcode them here: this repo is public.
+const BLUMON_MASTER_USERNAME = process.env.BLUMON_MASTER_USERNAME
+const BLUMON_MASTER_PASSWORD = process.env.BLUMON_MASTER_PASSWORD
+
+if (!BLUMON_MASTER_USERNAME || !BLUMON_MASTER_PASSWORD) {
+  logger.error('❌ Missing BLUMON_MASTER_USERNAME and/or BLUMON_MASTER_PASSWORD in .env (see .env.example)')
+  process.exit(1)
+}
+
 const BLUMON_MASTER_CREDENTIALS = {
-  username: 'jose@avoqado.io',
-  password: 'U!Sr{9DHN4-wKH|',
+  username: BLUMON_MASTER_USERNAME,
+  password: BLUMON_MASTER_PASSWORD,
 }
 
 // ═══════════════════════════════════════════════════════════════════════════

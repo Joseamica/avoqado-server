@@ -591,6 +591,42 @@ describe('payCashOrder — saldo autoritativo en la respuesta', () => {
     })
   })
 
+  // ── 7b. cashRetainedCents (contrato con Rappi 2b) ────────────────────────────
+
+  it('pay response includes cashRetainedCents = recorded amount + tip', async () => {
+    // Cuenta $100: el cliente da $60 con $12.55 de propina → en el cajón se queda 6000 + 1255 centavos, ENTERO.
+    installFakeStore()
+
+    const res = await payCashOrder('venue-1', 'order-1', { amount: 6000, tip: 1255, staffId: 'staff-1' })
+
+    expect(res.cashRetainedCents).toBe(res.amount + res.tipAmount)
+    expect(res.cashRetainedCents).toBe(7255)
+    expect(Number.isInteger(res.cashRetainedCents)).toBe(true)
+  })
+
+  it('idempotent retry returns the same cashRetainedCents', async () => {
+    installFakeStore()
+
+    const first = await payCashOrder('venue-1', 'order-1', { amount: 1999, tip: 55, staffId: 'staff-1', idempotencyKey: 'k-retained' })
+    const retry = await payCashOrder('venue-1', 'order-1', { amount: 1999, tip: 55, staffId: 'staff-1', idempotencyKey: 'k-retained' })
+
+    expect(first.cashRetainedCents).toBe(2054)
+    expect(retry.cashRetainedCents).toBe(first.cashRetainedCents)
+    expect(Number.isInteger(retry.cashRetainedCents)).toBe(true)
+  })
+
+  it('overpayment: cashRetainedCents excludes the change (live call and idempotent retry)', async () => {
+    // Cuenta $100, el cliente da $150: se queda $100 en el cajón y $50 son cambio.
+    installFakeStore()
+
+    const first = await payCashOrder('venue-1', 'order-1', { amount: 15000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-sobrepago' })
+    expect(first.cashRetainedCents).toBe(10000)
+    expect(first.changeCents).toBe(5000)
+
+    const retry = await payCashOrder('venue-1', 'order-1', { amount: 15000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-sobrepago' })
+    expect(retry.cashRetainedCents).toBe(10000)
+  })
+
   // ── 8. Aislamiento de tenant ─────────────────────────────────────────────────
 
   it('🔴 TENANT: TODA lectura de la orden va filtrada por venueId', async () => {

@@ -1,4 +1,14 @@
-import type { OnlineOrderPaymentMode } from '@prisma/client'
+import { OnlineOrderStatus, type OnlineOrderPaymentMode } from '@prisma/client'
+
+/** Estados del pedido en línea que todavía esperan algo del restaurante. */
+export const OPEN_ONLINE_STATUSES: OnlineOrderStatus[] = [
+  OnlineOrderStatus.PENDING_ACCEPTANCE,
+  OnlineOrderStatus.ACCEPTED,
+  OnlineOrderStatus.READY,
+]
+
+/** `cancelledBy` cuando la cuenta se canceló por otra vía: no sabemos quién, sí que fue el negocio y no el comensal. */
+export const CANCELLED_ELSEWHERE = 'ORDER_CANCELLED_ELSEWHERE'
 
 /** Minutos que tiene el restaurante para contestar. Constante, no ajuste (R20): el spec dice «no expuesto». */
 export const ACCEPT_TIMEOUT_MINUTES = 10

@@ -18,7 +18,8 @@ const tables = {
   // `createdAt`: la ventana de alerta (7bffb295) fecha la orden por su último cobro. NULL = la fecha de la orden.
   Payment:
     '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp',
-  OrderItem: 'id text, "orderId" text, "productId" text',
+  // D1 (vale cancelado que se vuelve a cobrar): el renglón de un vale revendido en otra cuenta no descuenta aquí.
+  OrderItem: 'id text, "orderId" text, "productId" text, "areaTicketLineId" text, "releasedAreaTicketLineId" text',
   // B2c F2: «descuento excede el consumo» compara la cabecera con la suma de sus filas.
   OrderDiscount: '"orderId" text, amount numeric',
   Product: 'id text, "venueId" text, "trackInventory" boolean, "inventoryMethod" text',

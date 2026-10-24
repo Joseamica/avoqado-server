@@ -1,3 +1,4 @@
+import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import type { HttpEnvelope } from './http-operation.mobile.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -2049,7 +2050,7 @@ export async function splitOrderItemsInTransaction(
       contratoDePrecio: true,
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
-      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true } },
+      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -2230,7 +2231,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
       contratoDePrecio: true,
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
-      items: { select: { id: true, seat: true, areaTicketLineId: true } },
+      items: { select: { id: true, seat: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
@@ -2388,7 +2389,12 @@ export async function mergeOrdersInTransaction(
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
-    items: { where: { areaTicketLineId: { not: null } }, select: { areaTicketLineId: true }, take: 1 },
+    items: {
+      // D1: el renglón de un vale revendido (procedencia) también hace a la cuenta «con vales».
+      where: { OR: [{ areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] as Prisma.OrderItemWhereInput[] },
+      select: { areaTicketLineId: true, releasedAreaTicketLineId: true },
+      take: 1,
+    },
   } as const
   const [target, source] = await Promise.all([
     tx.order.findFirst({
@@ -3042,6 +3048,8 @@ export interface AbonoEnTx {
   isFullyPaid: boolean
   /** S1: la venta ya estaba cerrada (PAID/REFUNDED) y recibió dinero ya capturado; se conservó cerrada (`estadoDeCobroAlRecibirDinero`). */
   ventaCerrada: boolean
+  /** Pedidos en línea 1c (S1): la cuenta estaba CANCELADA y este dinero capturado la reabrió ⇒ quien llama no arma la comanda. */
+  reabiertaDeCancelada: boolean
   areaTicketOrder: boolean
   areaTicketSessionId?: string
   tableId?: string | null
@@ -3309,6 +3317,11 @@ export async function registrarAbonoEnTx(
           staffId: effectiveStaffId ?? null,
         })
       : fresh.status
+  // 🔴 Pedidos en línea 1c, S1 (Codex plan r1 #7): una cuenta CANCELADA que se reabre por dinero ya capturado no vuelve a la
+  // cocina: ni la marca durable (`kitchenPendingAt`, que el barrido arma después) ni el armado de después del commit. Su cancelación
+  // ya retiró las comandas; cobrarla no es pedirla otra vez. Vale para toda cuenta cancelada, no sólo la web.
+  const reabiertaDeCancelada = estado !== fresh.status
+  const marcarCocinaAqui = marcarCocina && !reabiertaDeCancelada
   // La cuenta con el estado con el que RECIBE este dinero: los dos saldos se calculan con él (el cierre, con `estado`). La reapertura
   // no toca `version`, así que la CAS de abajo sigue amarrada a la versión leída.
   // 🔴 R4-2 (Codex r3; la misma raíz que la terminal): la cancelada CERRADA sigue cancelada (R2-2) pero se calcula como cuando se
@@ -3437,7 +3450,7 @@ export async function registrarAbonoEnTx(
       // cripto ya se comportaban así.)
       ...(saldaAqui ? { status: 'COMPLETED' as const } : {}),
       ...(saldaAqui ? { loyaltyEligibleAt: new Date(), loyaltyStaffId: effectiveStaffId } : {}),
-      ...(saldaAqui && marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+      ...(saldaAqui && marcarCocinaAqui ? { kitchenPendingAt: new Date() } : {}),
       paidAmount: new Prisma.Decimal(totalPaidIncludingTip),
       remainingBalance: cobro.remainingBalance,
       tipAmount: totalTip,
@@ -3577,7 +3590,7 @@ export async function registrarAbonoEnTx(
     // S1 (R9-1, como la terminal): sobre una venta ya cerrada, la finalización concilia el cobro capturado —sin volver a consumir
     // lo que ya tomó su vale de inventario— y decide bajo sus candados si es el primer saldado (`primerSaldado`).
     reconcileCapturedPayment: cobro.cerrada,
-    marcarCocina,
+    marcarCocina: marcarCocinaAqui,
     locked: lockedAreaCheckout,
   })
   // Quién corre los efectos de saldar: el cobro que la saldó, o el que recupera el saldado de un vale (venta cerrada por el barrido).
@@ -3636,6 +3649,7 @@ export async function registrarAbonoEnTx(
     paymentStatus: cobro.paymentStatus,
     isFullyPaid: efectosDeSaldar,
     ventaCerrada: cobro.cerrada,
+    reabiertaDeCancelada,
     aplicadoCents,
     cambioCents,
     propinaCents: pesosToCents(tipDecimal),
@@ -4210,7 +4224,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
 
   // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al quedar la venta PAGADA. Después del commit; si falla, la marca
   // `kitchenPendingAt` queda y el barrido la arma. `armarComandasTrasCommit` nunca lanza.
-  if (orderFullyPaid && marcarCocina) {
+  // S1: una cancelada reabierta por dinero capturado no vuelve a la cocina (`reabiertaDeCancelada`).
+  if (orderFullyPaid && marcarCocina && !paymentResult.reabiertaDeCancelada) {
     await armarComandasTrasCommit(venueId, orderId, 'PAID')
   }
 
@@ -4679,7 +4694,7 @@ export async function payGiftCardBalanceOnOrder(
       })
     }
   }
-  if (isFullyPaid && marcarCocina) await armarComandasTrasCommit(venueId, orderId, 'PAID')
+  if (isFullyPaid && marcarCocina && !abono.reabiertaDeCancelada) await armarComandasTrasCommit(venueId, orderId, 'PAID')
 
   const broadcastingService = socketManager.getBroadcastingService()
   if (broadcastingService) {
@@ -5229,6 +5244,9 @@ export async function cancelOrderInTransaction(
   }
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId })
+  // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
+  const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
+  const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
@@ -5250,12 +5268,13 @@ export async function cancelOrderInTransaction(
     ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
     ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
   ]
-  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs, valesSoltados }
 }
 
 export async function publishCancelledOrder(
   venueId: string,
-  result: Awaited<ReturnType<typeof cancelOrderInTransaction>>,
+  // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
+  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
   staffId?: string,
   reason?: string,
 ): Promise<void> {
@@ -5287,6 +5306,9 @@ export async function publishCancelledOrder(
   }
   const { logAction } = await import('../dashboard/activity-log.service')
   void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
+  // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
+  const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
+  auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.

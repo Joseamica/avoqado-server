@@ -156,8 +156,8 @@ export class BlumonAuthService {
    * @example
    * ```typescript
    * const result = await blumonAuth.authenticate({
-   *   username: 'jose@avoqado.io',
-   *   password: 'Exitosoy777:)'
+   *   username: process.env.BLUMON_MASTER_USERNAME,
+   *   password: process.env.BLUMON_MASTER_PASSWORD
    * }, true);
    *
    * console.log(result.accessToken); // Use in Bearer header

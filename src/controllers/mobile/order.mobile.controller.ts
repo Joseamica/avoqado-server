@@ -162,6 +162,14 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
           message: 'Cada item requiere productId o (name + unitPrice)',
         })
       }
+      // 🔴 Un «Otro importe» negativo bajaba la venta sin el permiso de descuentos
+      // (falda $500 + «Otro importe» −$300 = $200). Igual que la terminal (tpv.schema.ts).
+      if (!hasProductId && item.unitPrice < 0) {
+        return res.status(400).json({
+          success: false,
+          message: 'El precio de un «Otro importe» no puede ser negativo',
+        })
+      }
       if (item.discountId != null && typeof item.discountId !== 'string') {
         return res.status(400).json({
           success: false,
@@ -436,21 +444,28 @@ export const cancelOrder = async (req: Request, res: Response, next: NextFunctio
     if (!parsed.success || parsed.data.action !== 'cancelOrder')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let result: Awaited<ReturnType<typeof orderMobileService.cancelOrderInTransaction>> | undefined
     const reply = await executeHttpOperation({ venueId, actorId: performedBy, operation, manifest }, async tx => {
-      result = await orderMobileService.cancelOrderInTransaction(tx, venueId, orderId, manifest.payload.reason ?? undefined, performedBy)
+      const result = await orderMobileService.cancelOrderInTransaction(
+        tx,
+        venueId,
+        orderId,
+        manifest.payload.reason ?? undefined,
+        performedBy,
+      )
       return {
         response: { status: 200, body: { success: true, message: 'Orden cancelada exitosamente' } },
         affectedRefs: result.affectedRefs,
+        cancelEffects: {
+          version: 1 as const,
+          phase: 'PENDING' as const,
+          orderId,
+          staffId: performedBy,
+          reason: manifest.payload.reason,
+          tableIds: result.tables.map(table => table.id),
+          valesSoltados: result.valesSoltados ?? null,
+        },
       }
     })
-    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
-      try {
-        await orderMobileService.publishCancelledOrder(venueId, result, performedBy, manifest.payload.reason ?? undefined)
-      } catch (error) {
-        logger.error('cancelOrder committed; notification failed', error)
-      }
-    }
     return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     logger.error('Error in cancelOrder controller:', error)

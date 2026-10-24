@@ -918,6 +918,57 @@ describe('recordOrderPayment — cuenta con vale por área cobrada con terminal 
   })
 })
 
+// 🔴 Pedidos en línea 1c, S1 (Codex plan r1 #7): una cuenta CANCELADA que la terminal reabre con dinero ya capturado no vuelve a la
+// cocina por NINGUNO de los dos caminos de la TPV: ni la marca durable (`kitchenPendingAt`, la que toma el barrido) ni el armado
+// inmediato. Aplica a toda cuenta cancelada, no sólo a la web. Los controles de arriba prueban que una viva sí arma.
+describe('no kitchen tickets come back for a cancelled order reopened by captured payment — terminal (`recordOrderPayment`)', () => {
+  beforeEach(() => debeMarcarCocinaMock.mockResolvedValue(true))
+  afterEach(() => debeMarcarCocinaMock.mockResolvedValue(false))
+  const sinCocina = () => {
+    const conMarca = (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.kitchenPendingAt !== undefined)
+    expect(conMarca).toBe(false)
+    expect(armarComandasMock).not.toHaveBeenCalled()
+  }
+  const reabierta = () =>
+    (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.status === 'PENDING') &&
+    (prisma.order.update as jest.Mock).mock.calls.some(([a]) => a?.data?.status === 'COMPLETED')
+
+  it('cierre transaccional (`settleStandalonePaymentInTx` + su post-commit): la tarjeta salda la cancelada ⇒ sin marca ni armado', async () => {
+    const order = makeOrder({ status: 'CANCELLED', originSystem: 'AVOQADO', contratoDePrecio: 'IVA_INCLUIDO', taxAmount: new Decimal(0) })
+    ;(prisma.order.findUnique as jest.Mock).mockResolvedValue(order)
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'cancelada-1' }, 'user-1')
+
+    expect(reabierta()).toBe(true)
+    sinCocina()
+  })
+
+  it('recálculo de totales (`updateOrderTotalsForStandalonePayment`, cuenta con vale sin sesión): la cancelada reabierta ⇒ sin marca ni armado', async () => {
+    const order = makeOrder({
+      status: 'CANCELLED',
+      originSystem: 'AVOQADO',
+      contratoDePrecio: 'IVA_INCLUIDO',
+      taxAmount: new Decimal(0),
+      items: [
+        { ...makeOrder().items[0], id: 'item-suelto', areaTicketLineId: null },
+        { ...makeOrder().items[0], id: 'item-vale', productId: 'prod-vale', areaTicketLineId: 'line-1' },
+      ],
+    })
+    ;(prisma.order.findUnique as jest.Mock).mockImplementation(async (args: any) =>
+      args?.select?.paymentStatus ? { paymentStatus: 'PAID' } : order,
+    )
+    ;(prisma.order.update as jest.Mock).mockResolvedValue({ ...order, items: order.items })
+    ;(productInventoryService.getProductInventoryStatus as jest.Mock).mockResolvedValue(STOCK_OK)
+
+    await (paymentService as any).recordOrderPayment(VENUE_ID, ORDER_ID, { ...paymentData, idempotencyKey: 'cancelada-vale-1' }, 'user-1')
+
+    expect(reabierta()).toBe(true)
+    sinCocina()
+  })
+})
+
 // 🔴 DINERO: sólo COMPLETED es dinero capturado — la misma regla que ya sigue el saldado DENTRO de la transacción
 // (`settleStandalonePaymentInTx` exige COMPLETED). El camino legado de después sumaba el importe del pago actual sin
 // mirar su estado: un FAILED/PENDING/PROCESSING/REFUNDED que «cubría» el saldo dejaba la venta PAID y COMPLETED,

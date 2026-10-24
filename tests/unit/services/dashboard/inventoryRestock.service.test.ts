@@ -87,6 +87,46 @@ describe('inventoryRestock.service', () => {
 
   // ─────────────────────────── restockOrderItems ──────────────────────────
   describe('restockOrderItems', () => {
+    it('D3: una devolución seleccionada repone sólo la cantidad devuelta de ese artículo', async () => {
+      prismaMock.orderItem.findMany.mockResolvedValue([
+        { id: 'oi1', productId: 'p1', quantity: 3 },
+        { id: 'oi2', productId: 'p2', quantity: 2 },
+      ] as any)
+      prismaMock.product.findUnique.mockResolvedValue({ inventoryMethod: 'QUANTITY', trackInventory: true } as any)
+      prismaMock.inventory.findUnique.mockResolvedValue({ id: 'inv' } as any)
+      prismaMock.inventory.update.mockResolvedValue({ currentStock: new Decimal(10) } as any)
+      await restockOrderItems({
+        venueId: 'v1',
+        orderId: 'o1',
+        refundPaymentId: 'r1',
+        items: [{ orderItemId: 'oi1', quantity: 1 }],
+      })
+      expect(
+        prismaMock.inventory.update.mock.calls.map(([args]: any[]) => [args.where.productId, args.data.currentStock.increment]),
+      ).toEqual([['p1', 1]])
+    })
+
+    it.each(['liberado', 'revendido'])('D3: el vale %s no inventa existencias al devolver la venta vieja', async estado => {
+      prismaMock.orderItem.findMany.mockResolvedValue([
+        {
+          id: 'vale-viejo',
+          productId: 'p1',
+          quantity: 1,
+          areaTicketLineId: estado === 'liberado' ? 'linea' : null,
+          releasedAreaTicketLineId: estado === 'revendido' ? 'linea' : null,
+          areaTicketLine: estado === 'liberado' ? { areaTicket: { orderId: null } } : null,
+        },
+        { id: 'normal', productId: 'p2', quantity: 1, areaTicketLineId: null, releasedAreaTicketLineId: null },
+      ] as any)
+      prismaMock.product.findUnique.mockResolvedValue({ inventoryMethod: 'QUANTITY', trackInventory: true } as any)
+      prismaMock.inventory.findUnique.mockResolvedValue({ id: 'inv' } as any)
+      prismaMock.inventory.update.mockResolvedValue({ currentStock: new Decimal(10) } as any)
+
+      await restockOrderItems({ venueId: 'v1', orderId: 'o1', refundPaymentId: 'r1' })
+
+      expect(prismaMock.inventory.update.mock.calls.map(([args]: any[]) => args.where.productId)).toEqual(['p2'])
+    })
+
     it('restocks each inventory item of the order and skips items without a productId', async () => {
       prismaMock.orderItem.findMany.mockResolvedValue([
         { id: 'oi1', productId: 'p1', quantity: 2 },
@@ -105,7 +145,7 @@ describe('inventoryRestock.service', () => {
       const res = await restockOrderItems({ venueId: 'v1', orderId: 'o1', refundPaymentId: 'r1', staffId: 's1' })
 
       expect(prismaMock.orderItem.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: { orderId: 'o1', productId: { not: null } } }),
+        expect.objectContaining({ where: { orderId: 'o1', order: { venueId: 'v1' }, productId: { not: null } } }),
       )
       expect(prismaMock.inventory.update).toHaveBeenCalledTimes(1) // only the item with a productId
       expect(res).toEqual({ items: 2, restocked: 1 })

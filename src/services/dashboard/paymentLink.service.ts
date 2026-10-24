@@ -8,6 +8,8 @@
  */
 
 import prisma from '@/utils/prismaClient'
+import { createHash } from 'node:crypto'
+import { canonicalJson } from '@/services/customer-display/canonicalHash'
 import { PaymentMethod, Prisma } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
@@ -28,6 +30,7 @@ import { sendReceiptWhatsApp, sendPaymentLinkShareWhatsApp } from '@/services/wh
 import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
+import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -207,6 +210,8 @@ function rethrowMenuChangedWhileSaving(error: unknown): never {
 // SHARED HELPERS (items with modifiers)
 // ═══════════════════════════════════════════════════════════════════════════
 
+const CUSTOMER_SUMMARY_SELECT = { id: true, firstName: true, lastName: true, email: true, phone: true } as const
+
 /** Prisma include clause for loading a bundle's items + modifiers ready for
  *  pricing/snapshotting. Centralised so the 3 checkout flows (Stripe Elements,
  *  Stripe Hosted, Blumon) stay in sync. */
@@ -293,6 +298,7 @@ export interface TippingConfig {
 }
 
 export interface CreatePaymentLinkData {
+  customerId?: string | null
   title: string
   description?: string
   imageUrl?: string
@@ -344,6 +350,8 @@ export interface CreatePaymentLinkData {
 }
 
 export interface UpdatePaymentLinkData {
+  /** Sólo AGREGA a una liga sin cliente; nunca cambia ni quita uno puesto (founder, 23-oct). */
+  customerId?: string
   title?: string
   description?: string | null
   imageUrl?: string | null
@@ -382,8 +390,37 @@ export interface ListPaymentLinksFilters {
 /**
  * Creates a new payment link for a venue
  */
-export async function createPaymentLink(venueId: string, data: CreatePaymentLinkData, staffId: string) {
+export async function createPaymentLink(
+  venueId: string,
+  data: CreatePaymentLinkData,
+  staffId: string,
+  creationKey?: string,
+  onCreated?: (link: { id: string }) => Promise<void>,
+) {
+  if (creationKey !== undefined && (!creationKey.trim() || creationKey.length > 128)) {
+    throw new BadRequestError('La clave de creación debe tener entre 1 y 128 caracteres')
+  }
+  const creationHash = creationKey ? createHash('sha256').update(canonicalJson(data)).digest('hex') : undefined
+  const previousCreation = async () => {
+    if (!creationKey) return null
+    const previous = await prisma.paymentLink.findUnique({
+      where: { venueId_createdById_creationKey: { venueId, createdById: staffId, creationKey } },
+      include: {
+        customer: { select: CUSTOMER_SUMMARY_SELECT },
+        createdBy: { select: { id: true, firstName: true, lastName: true } },
+        _count: { select: { checkoutSessions: true } },
+      },
+    })
+    if (previous && previous.creationHash !== creationHash) throw new ConflictError('Esta clave de creación ya se usó con otros datos')
+    return previous
+  }
+  const previous = await previousCreation()
+  if (previous) return previous
   await assertVenueSalesEnabled(venueId)
+  if (data.customerId) {
+    const customer = await prisma.customer.findFirst({ where: { id: data.customerId, venueId, active: true }, select: { id: true } })
+    if (!customer) throw new BadRequestError('El cliente no existe, está inactivo o no pertenece a este negocio')
+  }
   // 1. Resolve the ecommerce merchant (channel) to attach the link to.
   //
   // Two paths:
@@ -461,10 +498,14 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
   const shortCode = nanoid(8)
 
   // 5. Create payment link
+  let replayed = false
   const paymentLink = await prisma.paymentLink
     .create({
       data: {
         shortCode,
+        customerId: data.customerId ?? null,
+        creationKey,
+        creationHash,
         venueId,
         ecommerceMerchantId: ecommerceMerchant.id,
         createdById: staffId,
@@ -494,6 +535,7 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
         tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
       },
       include: {
+        customer: { select: CUSTOMER_SUMMARY_SELECT },
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
         },
@@ -502,7 +544,17 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
         },
       },
     })
-    .catch(rethrowMenuChangedWhileSaving)
+    .catch(async error => {
+      if (creationKey && error?.code === 'P2002') {
+        const winner = await previousCreation()
+        if (winner) {
+          replayed = true
+          return winner
+        }
+      }
+      return rethrowMenuChangedWhileSaving(error)
+    })
+  if (replayed) return paymentLink
 
   logger.info('Payment link created', {
     paymentLinkId: paymentLink.id,
@@ -511,13 +563,22 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
     amountType: data.amountType,
   })
 
-  logAction({
-    venueId,
-    staffId,
-    action: 'PAYMENT_LINK_CREATED',
-    entity: 'PaymentLink',
-    entityId: paymentLink.id,
-  })
+  if (onCreated) {
+    try {
+      await onCreated(paymentLink)
+    } catch (error) {
+      logger.error('No se pudo auditar la creación MCP de la liga', { paymentLinkId: paymentLink.id, error })
+    }
+  } else {
+    logAction({
+      venueId,
+      staffId,
+      action: 'PAYMENT_LINK_CREATED',
+      entity: 'PaymentLink',
+      entityId: paymentLink.id,
+      data: data.customerId ? { customerId: data.customerId } : undefined,
+    })
+  }
 
   return paymentLink
 }
@@ -526,7 +587,9 @@ export async function createPaymentLink(venueId: string, data: CreatePaymentLink
  * Lists payment links for a venue with filtering
  */
 export async function getPaymentLinks(venueId: string, filters: ListPaymentLinksFilters = {}) {
-  const { status, search, limit = 20, offset = 0 } = filters
+  const { status, search } = filters
+  const limit = Number.isFinite(filters.limit) ? Math.min(100, Math.max(1, Math.floor(filters.limit!))) : 20
+  const offset = Number.isFinite(filters.offset) ? Math.max(0, Math.floor(filters.offset!)) : 0
 
   const where: Prisma.PaymentLinkWhereInput = { venueId }
 
@@ -542,6 +605,7 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
     prisma.paymentLink.findMany({
       where,
       include: {
+        customer: { select: CUSTOMER_SUMMARY_SELECT },
         createdBy: {
           select: { id: true, firstName: true, lastName: true },
         },
@@ -574,6 +638,7 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
   const paymentLink = await prisma.paymentLink.findUnique({
     where: { id: linkId },
     include: {
+      customer: { select: CUSTOMER_SUMMARY_SELECT },
       createdBy: {
         select: { id: true, firstName: true, lastName: true },
       },
@@ -617,10 +682,19 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
 /**
  * Updates a payment link
  */
-export async function updatePaymentLink(venueId: string, linkId: string, data: UpdatePaymentLinkData) {
+export async function updatePaymentLink(
+  venueId: string,
+  linkId: string,
+  data: UpdatePaymentLinkData,
+  staffId?: string,
+  // El MCP audita con su propio sello en lugar del registro nativo (mismo patrón que createPaymentLink).
+  auditCustomerAdded?: () => Promise<void>,
+) {
+  const addsCustomer = Object.prototype.hasOwnProperty.call(data, 'customerId')
+  if (addsCustomer && !data.customerId) throw new BadRequestError('El cliente de una liga no se puede quitar')
   const existing = await prisma.paymentLink.findUnique({
     where: { id: linkId },
-    select: { id: true, venueId: true, status: true },
+    select: { id: true, venueId: true, status: true, customerId: true },
   })
 
   if (!existing) {
@@ -634,6 +708,20 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   if (existing.status === 'ARCHIVED') {
     throw new BadRequestError('No se puede editar una liga de pago archivada')
   }
+
+  // Agregar cliente: sólo a una liga que no tiene. El mismo cliente otra vez no hace nada (reintento).
+  // Sólo cuenta para los pagos que empiecen después: cada sesión copia el cliente al abrirse.
+  const customerToAdd = addsCustomer && existing.customerId !== data.customerId ? data.customerId! : null
+  if (addsCustomer) {
+    if (existing.customerId && existing.customerId !== data.customerId) {
+      throw new ConflictError('Esta liga ya tiene un cliente y no se puede cambiar')
+    }
+    const customer = await prisma.customer.findFirst({ where: { id: data.customerId, venueId, active: true }, select: { id: true } })
+    if (!customer) throw new BadRequestError('El cliente no existe, está inactivo o no pertenece a este negocio')
+  }
+  // Sólo el cliente y ya era ése (reintento): nada que escribir ni que auditar (Codex r1 #1).
+  const onlyCustomer = addsCustomer && Object.keys(data).every(key => key === 'customerId')
+  if (onlyCustomer && !customerToAdd) return getPaymentLinkById(venueId, linkId)
 
   const updateData: Prisma.PaymentLinkUpdateInput = {}
 
@@ -675,8 +763,23 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
   // rows are atomic — partial state would confuse the customer checkout.
   // Nested modifier rows can't be inserted via createMany (Prisma limitation),
   // so we loop and use create() per item which accepts the nested write.
+  let customerAdded = false
   const updated = await prisma
     .$transaction(async tx => {
+      if (customerToAdd) {
+        // CAS: sólo donde sigue vacío. Si otro guardado ganó, gana él (o era el mismo cliente).
+        // Tampoco a una liga que archivaron entre la lectura y aquí (Codex r1 #2).
+        const { count } = await tx.paymentLink.updateMany({
+          where: { id: linkId, venueId, customerId: null, status: { not: 'ARCHIVED' } },
+          data: { customerId: customerToAdd },
+        })
+        if (count === 0) {
+          const now = await tx.paymentLink.findUnique({ where: { id: linkId }, select: { customerId: true, status: true } })
+          if (now?.status === 'ARCHIVED') throw new BadRequestError('No se puede editar una liga de pago archivada')
+          if (now?.customerId !== customerToAdd) throw new ConflictError('Esta liga ya tiene un cliente y no se puede cambiar')
+        }
+        customerAdded = count === 1 // sólo quien escribió deja rastro; el reintento que llegó segundo, no
+      }
       if (itemReplacement !== null) {
         // Cascade deletes the modifier rows because PaymentLinkItemModifier
         // has onDelete: Cascade on paymentLinkItemId.
@@ -697,6 +800,7 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
         where: { id: linkId },
         data: updateData,
         include: {
+          customer: { select: CUSTOMER_SUMMARY_SELECT },
           createdBy: { select: { id: true, firstName: true, lastName: true } },
           _count: { select: { checkoutSessions: true } },
         },
@@ -706,12 +810,26 @@ export async function updatePaymentLink(venueId: string, linkId: string, data: U
 
   logger.info('Payment link updated', { paymentLinkId: linkId, venueId })
 
-  logAction({
-    venueId,
-    action: 'PAYMENT_LINK_UPDATED',
-    entity: 'PaymentLink',
-    entityId: linkId,
-  })
+  if (!onlyCustomer) {
+    logAction({
+      venueId,
+      action: 'PAYMENT_LINK_UPDATED',
+      entity: 'PaymentLink',
+      entityId: linkId,
+    })
+  }
+  if (customerAdded && auditCustomerAdded) {
+    await auditCustomerAdded()
+  } else if (customerAdded) {
+    logAction({
+      venueId,
+      staffId,
+      action: 'PAYMENT_LINK_CUSTOMER_ADDED',
+      entity: 'PaymentLink',
+      entityId: linkId,
+      data: { customerId: customerToAdd! },
+    })
+  }
 
   return updated
 }
@@ -1156,6 +1274,7 @@ export async function createStripePaymentIntentForPaymentLink(
       sessionId: paymentIntent.id,
       ecommerceMerchantId: paymentLink.ecommerceMerchant.id,
       paymentLinkId: paymentLink.id,
+      attributedCustomerId: paymentLink.customerId ?? null,
       amount: new Prisma.Decimal(chargeAmount),
       currency: paymentLink.currency,
       description: paymentLink.title,
@@ -1377,8 +1496,8 @@ function mapBlumonCardBrandToEnum(
 // ese hueco REUSANDO los mismos dos servicios — aquí no se calcula ni un punto.
 
 /**
- * Resuelve el cliente REGISTRADO del venue detrás de un checkout, a partir del
- * correo/teléfono que capturó la página de cobro.
+ * Resuelve la atribución congelada del checkout o, para sesiones legacy,
+ * el cliente registrado que coincide con el correo/teléfono del pagador.
  *
  * Reglas deliberadas:
  * - **Sólo empata, nunca crea.** Un pago anónimo por link no debe dar de alta un
@@ -1386,9 +1505,19 @@ function mapBlumonCardBrandToEnum(
  *   registró. Sin coincidencia → `null` y no cambia nada (ni puntos ni métricas).
  * - **El correo manda sobre el teléfono** (es el dato que capturan los tres
  *   canales) y el orden es fijo, para que el mismo pago resuelva siempre igual.
- * - **Nunca lanza.** Es un enganche accesorio de un cobro ya aprobado.
+ * - Sin snapshot, conserva el fallback legacy no bloqueante. Con snapshot, falla cerrado si no se puede validar el venue.
  */
-async function resolvePaymentLinkCustomerId(venueId: string, email?: string | null, phone?: string | null): Promise<string | null> {
+async function resolvePaymentLinkCustomerId(
+  venueId: string,
+  email?: string | null,
+  phone?: string | null,
+  attributedCustomerId?: string | null,
+): Promise<string | null> {
+  if (attributedCustomerId) {
+    const customer = await prisma.customer.findFirst({ where: { id: attributedCustomerId, venueId }, select: { id: true } })
+    if (!customer) throw new BadRequestError('El cliente atribuido a esta sesión no pertenece al negocio')
+    return customer.id
+  }
   const normalizedEmail = email?.trim().toLowerCase() || null
   const normalizedPhone = phone?.trim() || null
   if (!normalizedEmail && !normalizedPhone) return null
@@ -1598,7 +1727,12 @@ export async function finalizePaymentLinkCheckout(args: {
   let postingId: string | null = null
   // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
   // transacción para poder sellar `Order.customerId`.
-  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(venueId, session.customerEmail, session.customerPhone)
+  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(
+    venueId,
+    session.customerEmail,
+    session.customerPhone,
+    session.attributedCustomerId,
+  )
   // Base de lealtad = lo cobrado por la venta, con IVA y SIN propina.
   const loyaltyBase = subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal
 
@@ -1868,7 +2002,7 @@ async function notifyVenueOnLinkPaid(args: { paymentLinkId: string; venueId: str
     }),
     prisma.venue.findUnique({
       where: { id: args.venueId },
-      select: { name: true, timezone: true },
+      select: { name: true, slug: true, timezone: true },
     }),
     // Eligible recipients: active OWNER/ADMIN staff assigned to this venue.
     // Staff.email is non-nullable in schema so we don't filter for it.
@@ -1899,7 +2033,7 @@ async function notifyVenueOnLinkPaid(args: { paymentLinkId: string; venueId: str
   const paidAtRaw = formatInTimeZone(paidSession.completedAt ?? new Date(), tz, "EEEE d 'de' MMMM 'de' yyyy HH:mm", { locale: esLocale })
   const paidAtLong = paidAtRaw.charAt(0).toUpperCase() + paidAtRaw.slice(1)
   const dashboardOrigin = process.env.DASHBOARD_URL || 'https://app.avoqado.io'
-  const dashboardUrl = `${dashboardOrigin}/venues/${args.venueId}/payment-links/${args.paymentLinkId}`
+  const dashboardUrl = paymentLinksDashboardUrl(dashboardOrigin, venue.slug)
 
   // Tip lives on the Stripe session metadata (set when the checkout was
   // created, line ~1033 in this file). String-typed because Stripe's
@@ -2096,6 +2230,7 @@ export async function createStripeCheckoutForPaymentLink(
       sessionId: stripeSession.id,
       ecommerceMerchantId: paymentLink.ecommerceMerchant.id,
       paymentLinkId: paymentLink.id,
+      attributedCustomerId: paymentLink.customerId ?? null,
       amount: new Prisma.Decimal(chargeAmount),
       currency: paymentLink.currency,
       description: paymentLink.title,
@@ -2283,6 +2418,7 @@ export async function createCheckoutSession(
       sessionId,
       ecommerceMerchantId: paymentLink.ecommerceMerchant.id,
       paymentLinkId: paymentLink.id,
+      attributedCustomerId: paymentLink.customerId ?? null,
       amount: new Prisma.Decimal(chargeAmount),
       currency: paymentLink.currency,
       description: paymentLink.title,
@@ -2380,6 +2516,14 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
     )
   }
 
+  // Valida el snapshot antes de autorizar en el banco; nunca sustituye al cliente elegido por el pagador.
+  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(
+    session.paymentLink.venueId,
+    session.customerEmail,
+    session.customerPhone,
+    session.attributedCustomerId,
+  )
+
   // 2. Extract card token from metadata
   const metadata = session.metadata as Record<string, any>
   const cardToken = metadata?.cardToken
@@ -2456,10 +2600,6 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
   const primaryStaffId = attributedStaffIds[0] ?? null
   let orderIdForReferral: string | null = null
   let postingId: string | null = null
-  // Cliente registrado detrás del cobro (si lo hay). Se resuelve ANTES de la
-  // transacción para poder sellar `Order.customerId`: sin eso la venta queda
-  // huérfana en el historial del cliente aunque los puntos sí se acrediten.
-  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(venueId, session.customerEmail, session.customerPhone)
   let loyaltyBase: Prisma.Decimal | null = null
 
   await prisma.$transaction(async tx => {
@@ -3155,6 +3295,7 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
       sessionId,
       ecommerceMerchantId: paymentLink.ecommerceMerchant.id,
       paymentLinkId: paymentLink.id,
+      attributedCustomerId: paymentLink.customerId ?? null,
       amount: new Prisma.Decimal(chargeAmount),
       currency: 'MXN',
       description: paymentLink.title,
@@ -3412,7 +3553,12 @@ export async function finalizeMercadoPagoCheckout(args: {
   // checkout directo sin liga: es la misma función y el mismo `Order` COMPLETED,
   // y la regla es "acumula en cualquier venta con cliente" — excluirlo habría
   // pedido una excepción que nadie pidió.
-  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(venueId, session.customerEmail, session.customerPhone)
+  const loyaltyCustomerId = await resolvePaymentLinkCustomerId(
+    venueId,
+    session.customerEmail,
+    session.customerPhone,
+    session.attributedCustomerId,
+  )
   try {
     await prisma.$transaction(async tx => {
       // Re-check inside the tx so two concurrent finalizers (optimistic + IPN)

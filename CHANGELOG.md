@@ -9,6 +9,8 @@ The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 
 ### Fixed
 
+- Cobros POS → TPV: cancelar consulta de inmediato la evidencia de esa solicitud, también al reconectar con una cancelación pendiente, sin repetir la autorización ni esperar al vigía. Los avisos muestran la antigüedad real y sólo se emiten si el vigía ganó la transición a resultado desconocido.
+
 - Anuncios: las primeras aperturas simultáneas ya no fallan por clave duplicada; conservan una sola interacción y sus fechas de apertura, cierre y CTA.
 
 - TPV: entrega y confirmación verifican identidad; resultados finales inmutables, cancelación y reversión atómicas e idempotencia de comandos. Las TPVs del protocolo nuevo usan cola sin vencimiento y recuperación por eventos, con permiso de ejecución ligado al arranque. La migración requiere recibo completado y nuevo arranque autenticado. Versiones validan enteros, plataforma, audiencia y canal Nexgo/TMS; comandos no implementados se rechazan.

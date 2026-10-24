@@ -82,6 +82,7 @@ import { inventoryPostingSweeperJob } from './jobs/inventory-posting-sweeper.job
 import { loyaltyReconciliationJob } from './jobs/loyalty-reconciliation.job'
 import { kitchenTicketsReconciliationJob } from './jobs/kitchen-tickets-reconciliation.job'
 import { paymentEffectsJob } from './jobs/payment-effects.job'
+import { cancelOrderEffectsJob } from './jobs/cancel-order-effects.job'
 import { angelpayEventWorkerJob } from './jobs/angelpay-event-worker.job'
 import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
 import { shopifyWorkerJob } from './jobs/shopify-worker.job'
@@ -185,6 +186,7 @@ const gracefulShutdown = async (signal: string) => {
       loyaltyReconciliationJob.stop()
       kitchenTicketsReconciliationJob.stop()
       paymentEffectsJob.stop()
+      cancelOrderEffectsJob.stop()
       angelpayEventWorkerJob.stop()
       aggregatorPassWorkerJob.stop()
       shopifyWorkerJob.stop()
@@ -535,6 +537,7 @@ const startApplication = async (retries = 3) => {
       // Etapa 3 del KDS: arma las comandas de pantalla que un proceso caído dejó con su marca.
       kitchenTicketsReconciliationJob.start()
       paymentEffectsJob.start()
+      cancelOrderEffectsJob.start()
       // S4: los eventos PENDING de AngelPay (webhook antes que el registro, vínculo tardío, caídas) los retoma un
       // worker propio con claim atómico y lease — nunca el vigía de 30 s.
       angelpayEventWorkerJob.start()

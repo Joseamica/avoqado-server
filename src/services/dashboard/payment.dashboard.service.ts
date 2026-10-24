@@ -453,6 +453,21 @@ const protegidoPorElProtocolo = (paymentId: string, fields: string[], originalPa
     { paymentId, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO, ...(originalPaymentId ? { originalPaymentId } : {}) },
   )
 
+// Un cobro que YA movió dinero (COMPLETED, o REFUNDED) no cambia su dinero ni se borra desde el panel: se corrige con Reembolso
+// (founder 23-oct, «como Square»). Este camino cambiaba la fila Payment sin recalcular la cuenta — una venta de $100 PAID cuyo
+// cobro se corregía a $50 seguía PAID «debe $0» — y cambiaba `method` sin su `fundsFlow`, así que un CASH → tarjeta seguía
+// contando en el cajón. Lo que no mueve dinero (marca, últimos dígitos, autorización, referencia, modo de lectura) sí se corrige.
+const COBRO_YA_HECHO = new Set<string>([TransactionStatus.COMPLETED, TransactionStatus.REFUNDED])
+const CAMPOS_DE_DINERO = new Set<string>(['amount', 'tipAmount', 'status', 'method'])
+const cobroYaHecho = (paymentId: string, fields: string[]) =>
+  new ConflictError(
+    fields.includes('delete')
+      ? 'Un cobro ya hecho no se borra. Para devolver dinero usa Reembolso.'
+      : 'Este cobro ya se hizo: su importe, propina, estado y forma de pago no se corrigen aquí. Para devolver dinero usa Reembolso.',
+    'PAYMENT_SETTLED_USE_REFUND',
+    { paymentId, fields },
+  )
+
 const PROYECCION_DEL_PAYMENT = {
   processedBy: { select: STAFF_PUBLIC_SELECT },
   shift: true,
@@ -499,6 +514,13 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
       }
     }
 
+    // Decide sobre la fila RELEÍDA bajo el mutex: mandar los mismos valores (el formulario manda todo) no es un cambio.
+    const yaHecho = COBRO_YA_HECHO.has(vigente.status)
+    if (yaHecho) {
+      const dinero = camposQueCambian(vigente, data).filter(campo => CAMPOS_DE_DINERO.has(campo))
+      if (dinero.length > 0) throw cobroYaHecho(paymentId, dinero)
+    }
+
     // This endpoint corrects bookkeeping fields; it is not a capture rail. Letting
     // a client promote PENDING/FAILED/PROCESSING to COMPLETED here would create
     // real-looking money without the Order → Payment → Shift transaction, the
@@ -523,10 +545,11 @@ export async function updatePayment(venueId: string, paymentId: string, data: Up
     const updated = await tx.payment.update({
       where: { id: paymentId },
       data: {
-        ...(data.amount !== undefined && { amount: data.amount }),
-        ...(data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
-        ...(data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
-        ...(data.method !== undefined && { method: data.method }),
+        // En un cobro ya hecho los campos de dinero llegan iguales (si no, ya se rechazó): no se reescriben.
+        ...(!yaHecho && data.amount !== undefined && { amount: data.amount }),
+        ...(!yaHecho && data.tipAmount !== undefined && { tipAmount: data.tipAmount }),
+        ...(!yaHecho && data.status !== undefined && !omitNoopCompletedStatus && { status: data.status }),
+        ...(!yaHecho && data.method !== undefined && { method: data.method }),
         ...(data.cardBrand !== undefined && { cardBrand: data.cardBrand }),
         ...(data.last4 !== undefined && { last4: data.last4 }),
         ...(data.maskedPan !== undefined && { maskedPan: data.maskedPan }),
@@ -583,6 +606,8 @@ export async function deletePayment(venueId: string, paymentId: string): Promise
     if ((await cobrosDelProtocolo(tx, [paymentId])).has(paymentId)) {
       throw protegidoPorElProtocolo(paymentId, ['delete'], candado.originalPaymentId)
     }
+    const vigente = await tx.payment.findFirst({ where: { id: paymentId, venueId }, select: { status: true } })
+    if (vigente && COBRO_YA_HECHO.has(vigente.status)) throw cobroYaHecho(paymentId, ['delete'])
     // Delete transaction cost if exists
     if (payment.transactionCost) {
       await tx.transactionCost.delete({

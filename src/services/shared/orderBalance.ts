@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client'
+import { esRenglonDeVale } from './renglonDeVale'
 
 /**
  * Aritmética canónica del saldo de una cuenta — PURA, sin DB y sin efectos.
@@ -284,10 +285,11 @@ export function estadoDeCobroAlRecibirDinero<S extends string, R>(
 export function cierreDelCobroSaldaLaCuenta(o: {
   source: string
   externalId: string | null
-  items: ReadonlyArray<{ areaTicketLineId: string | null }>
+  /** D1: `releasedAreaTicketLineId` (vale que se volvió a cobrar en otra cuenta) también la hace cuenta con vales. */
+  items: ReadonlyArray<{ areaTicketLineId: string | null; releasedAreaTicketLineId?: string | null }>
 }): boolean {
   const integrada = o.source === 'POS' && !!o.externalId?.trim()
-  return !integrada && !o.items.some(i => i.areaTicketLineId != null)
+  return !integrada && !o.items.some(esRenglonDeVale)
 }
 
 /**

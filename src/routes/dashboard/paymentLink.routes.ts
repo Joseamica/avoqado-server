@@ -34,7 +34,13 @@ router.get('/', validateRequest(listPaymentLinksSchema), paymentLinkController.l
  * POST /api/v1/dashboard/venues/:venueId/payment-links
  * Creates a new payment link
  */
-router.post('/', checkPermission('payment-link:create'), validateRequest(createPaymentLinkSchema), paymentLinkController.createPaymentLink)
+router.post(
+  '/',
+  checkPermission('payment-link:create'),
+  validateRequest(createPaymentLinkSchema),
+  (req, res, next) => (req.body.customerId ? checkPermission('customers:read')(req, res, next) : next()),
+  paymentLinkController.createPaymentLink,
+)
 
 // ───────────────────────────────────────────────────────────────────────────
 // Static-prefix routes — MUST be declared BEFORE `/:linkId` because Express
@@ -90,6 +96,7 @@ router.put(
   '/:linkId',
   checkPermission('payment-link:update'),
   validateRequest(updatePaymentLinkSchema),
+  (req, res, next) => (req.body.customerId ? checkPermission('customers:read')(req, res, next) : next()),
   paymentLinkController.updatePaymentLink,
 )
 

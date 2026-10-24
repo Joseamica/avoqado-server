@@ -24,6 +24,12 @@ const m = prisma as unknown as {
   tpvCommandQueue: { findFirst: jest.Mock; findMany: jest.Mock }
 }
 
+// La consulta de «llave de AngelPay en otro negocio» filtra por `angelpayUserAccount`; estos comercios nunca salen ahí.
+const soloComercios =
+  (comercios: unknown[]) =>
+  ({ where }: { where: { angelpayUserAccount?: unknown } }) =>
+    Promise.resolve(where.angelpayUserAccount ? [] : comercios)
+
 const healthy = () => {
   m.terminal.findUnique.mockResolvedValue({
     id: 'term-1',
@@ -50,7 +56,9 @@ const healthy = () => {
     routingRules: null,
   })
   m.organizationPaymentConfig.findUnique.mockResolvedValue(null)
-  m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
+  m.merchantAccount.findMany.mockImplementation(
+    soloComercios([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }]),
+  )
   m.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1' })
   m.tpvCommandQueue.findFirst.mockResolvedValue(null)
   m.tpvCommandQueue.findMany.mockResolvedValue([])
@@ -398,7 +406,7 @@ describe('migratePreflight — migrateMerchant', () => {
   it('el único merchant del origen está inactivo → ORIGIN_HAS_NO_MERCHANT (existir el id no basta)', async () => {
     healthy()
     m.venuePaymentConfig.findFirst.mockResolvedValue(null) // destino sin config
-    m.merchantAccount.findMany.mockResolvedValue([]) // merch-p existe pero active:false → excluido por la query
+    m.merchantAccount.findMany.mockImplementation(soloComercios([])) // merch-p existe pero active:false → excluido por la query
     const r = await migratePreflight('term-1', 'venue-new', true)
     expect(r.canProceed).toBe(false)
     expect(r.blockers.map(b => b.code)).toContain('ORIGIN_HAS_NO_MERCHANT')
@@ -418,7 +426,9 @@ describe('migratePreflight — migrateMerchant', () => {
       assignedMerchantIds: ['merch-p', 'merch-inactive'],
     })
     // La query real filtraría active:true — el mock simula que sólo merch-p sobrevive ese filtro.
-    m.merchantAccount.findMany.mockResolvedValue([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
+    m.merchantAccount.findMany.mockImplementation(
+      soloComercios([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }]),
+    )
     const r = await migratePreflight('term-1', 'venue-new', true)
     expect(r.merchantMigration.available).toBe(true)
     expect(r.merchantMigration.merchants).toEqual([{ id: 'merch-p', displayName: 'playtelecom-p', provider: { code: 'BLUMON' } }])
@@ -459,5 +469,27 @@ describe('migratePreflight — migrateMerchant', () => {
     expect(r.canProceed).toBe(true)
     expect(r.blockers).toHaveLength(0)
     expect(r.blockers.map(b => b.code)).not.toContain('DESTINATION_ALREADY_CONFIGURED_MERCHANT')
+  })
+})
+
+describe('migratePreflight — llave de AngelPay en otro negocio', () => {
+  beforeEach(() => jest.clearAllMocks())
+
+  it('bloquea con el mensaje que dice qué comercio, dónde está su llave y qué hacer; compara contra el DESTINO', async () => {
+    healthy()
+    m.merchantAccount.findMany.mockImplementation(({ where }: { where: { angelpayUserAccount?: unknown } }) =>
+      Promise.resolve(
+        where.angelpayUserAccount
+          ? [{ displayName: 'IQ T', externalMerchantId: '1416', angelpayUserAccount: { venue: { name: 'Amaena' } } }]
+          : [{ id: 'merch-p', displayName: 'IQ T', provider: { code: 'BLUMON' } }],
+      ),
+    )
+
+    const r = await migratePreflight('term-1', 'venue-new')
+
+    expect(r.canProceed).toBe(false)
+    expect(r.blockers).toEqual([expect.objectContaining({ code: 'INVALID_MERCHANT', message: expect.stringMatching(/IQ T.*Amaena.*IA/) })])
+    const consulta = m.merchantAccount.findMany.mock.calls.find(([a]) => a.where.angelpayUserAccount)?.[0]
+    expect(consulta.where.angelpayUserAccount).toEqual({ venueId: { not: 'venue-new' } })
   })
 })

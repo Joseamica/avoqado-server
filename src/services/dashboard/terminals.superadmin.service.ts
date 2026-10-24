@@ -8,7 +8,11 @@ import { generateActivationCode as generateActivationCodeUtil } from './terminal
 import { notifyAffectedTerminals } from '../superadmin/merchantAccount.service'
 import { tpvCommandQueueService } from '../tpv/command-queue.service'
 import { updateTpvSettings, type TpvSettings } from './tpv.dashboard.service'
-import { assertMerchantsTerminalCompatible, isProviderCompatibleWithBrand } from '../../lib/providerDeviceCompatibility'
+import {
+  assertAngelPayLoginsInVenue,
+  assertMerchantsTerminalCompatible,
+  isProviderCompatibleWithBrand,
+} from '../../lib/providerDeviceCompatibility'
 import { logAction } from './activity-log.service'
 import { normalizeTerminalSerialNumber } from '../../utils/terminalSerial'
 import { type TerminalWriteScope, scopedTerminalWhere, writeScopedTerminal } from '../shared/terminalScopedWrites'
@@ -291,6 +295,7 @@ export async function createTerminal(data: {
     if (merchantCount !== data.assignedMerchantIds.length) {
       throw new BadRequestError('One or more merchant accounts not found')
     }
+    await assertAngelPayLoginsInVenue(data.venueId, data.assignedMerchantIds)
 
     // Provider ↔ device-brand compatibility guard (Task 11 / validation point #2).
     // For a fresh terminal we don't have an id yet, so we inline the check
@@ -637,7 +642,7 @@ export async function updateTerminal(
     // Rejects e.g. ANGELPAY merchants → PAX terminals, BLUMON merchants → NEXGO.
     // Permissive on unconstrained providers (STRIPE/MENTA) and null brand
     // (PENDING_ACTIVATION terminals).
-    await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds)
+    await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, undefined, data.venueId)
   }
 
   if (venueChanged) {
@@ -685,7 +690,7 @@ export async function updateTerminal(
               select: { id: true },
             })
             if (active.length !== data.assignedMerchantIds.length) throw new BadRequestError('Los merchants deben existir y estar activos.')
-            await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, tx)
+            await assertMerchantsTerminalCompatible(terminalId, data.assignedMerchantIds, tx, data.venueId!)
           }
           const pending = await tx.tpvCommandQueue.findFirst({
             where: {

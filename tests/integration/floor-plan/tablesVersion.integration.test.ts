@@ -329,10 +329,13 @@ describe('tablesVersion se mueve por cada ruta que cambia mesas o cuentas (spec 
 
   // Corrección C2 (hallazgo 4): el PUT del dashboard deja `tableId = null` sin limpiar `Table.currentOrderId`, y /tables
   // sigue pintando esa cuenta por el puntero. Sus cambios siguientes tienen que mover la versión.
-  it('una cuenta que la mesa apunta aunque ya no tenga tableId (PUT del dashboard) sigue moviendo la versión', async () => {
+  // Cuentas fuera del plano (23-oct): el PUT ya NO quita la mesa de una cuenta abierta (400), pero ese estado puede venir de antes,
+  // así que la versión lo sigue cubriendo; se arma directo en la base.
+  it('una cuenta que la mesa apunta aunque ya no tenga tableId (dato de antes del 23-oct) sigue moviendo la versión', async () => {
     const t = await mesa()
     const o = await cuentaEnMesa(t.id)
-    await updateOrder(venueId, o.id, { tableId: null } as any)
+    await expect(updateOrder(venueId, o.id, { tableId: null } as any)).rejects.toMatchObject({ code: 'ORDER_TABLE_CHANGE_NOT_ALLOWED' })
+    await prisma.order.update({ where: { id: o.id }, data: { tableId: null } })
     const otro = (await prisma.staff.create({ data: { email: `${venueId}@otro.test`, firstName: 'Otro', lastName: 'Mesero' } })).id
     await prisma.staffVenue.create({ data: { venueId, staffId: otro, role: 'WAITER' } })
     const { antes, despues } = await alrededorDe(() => updateOrder(venueId, o.id, { servedById: otro } as any))

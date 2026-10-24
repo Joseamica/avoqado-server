@@ -165,6 +165,133 @@ afterEach(async () => {
 
 const fixtureSocket = () => ({ socketId: 'fixture-socket', terminalId: fixture, venueId })
 
+describe('IQ: cancelación tras reiniciar sin esperar al watchdog', () => {
+  const terminal = () => ({
+    terminalId: fixture,
+    venueId,
+    socketId: 'fixture-socket',
+    identityVerified: true,
+    terminalPaymentAckVersion: 1,
+    terminalPaymentProbeVersion: 1,
+  })
+  const delivered = {
+    deliveries: [
+      {
+        protocol: 'DURABLE',
+        ackVersion: 1,
+        probeVersion: 1,
+        cancelDispositionVersion: 2,
+        socketId: 'previous-process',
+        at: '2026-10-23T16:21:09Z',
+        replay: false,
+      },
+    ],
+  }
+
+  beforeEach(() => {
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation(() => terminal())
+  })
+
+  async function historicalObligations() {
+    for (let n = 0; n < 25; n++) {
+      await auditRequest({
+        status: 'CANCELLED',
+        cancelDisposition: 'ACTIVE',
+        orderId: null,
+        createdAt: new Date(Date.now() - (n + 1) * 60_000),
+      })
+    }
+  }
+
+  it('consulta la solicitud exacta aunque haya 25 históricos y sólo cierra tras la evidencia de la TPV', async () => {
+    await historicalObligations()
+    const row = await auditRequest({ status: 'SENT', deliveryProvenance: delivered, expiresAt: new Date(Date.now() + 300_000) })
+    await terminalPaymentService.cancelPayment(fixture, row.requestId, 'Cancelar desde el POS', venueId)
+    const probes = directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe')
+    expect(probes.map(([, payload]) => payload.requestId)).toEqual([row.requestId])
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('CANCEL_REQUESTED')
+
+    await terminalPaymentService.handleProbeResultFromSocket(
+      {
+        requestId: row.requestId,
+        disposition: 'RECEIVED_CANCELLED',
+        finalResult: { requestId: row.requestId, status: 'cancelled', outcomeEvidence: 'PRE_AUTHORIZATION' },
+      },
+      terminal(),
+    )
+    const resolved = await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })
+    expect(resolved).toMatchObject({ status: 'CANCELLED', cancelDisposition: 'ACCEPTED', paymentId: null })
+    expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+    expect(directEmit.mock.calls.some(([event]) => event === 'terminal:payment_request')).toBe(false)
+    expect((await terminalPaymentService.reconcileStaleRequests()).unknown).toBe(0)
+    expect(await prisma.terminalPaymentRequest.count({ where: { venueId, cancelDisposition: 'ACTIVE' } })).toBe(25)
+  })
+
+  it('ACTIVE o silencio mantienen la reserva; consultar no equivale a no cobrado', async () => {
+    const row = await auditRequest({ status: 'SENT', deliveryProvenance: delivered, expiresAt: new Date(Date.now() + 300_000) })
+    await terminalPaymentService.cancelPayment(fixture, row.requestId, 'Cancelar', venueId)
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('CANCEL_REQUESTED')
+    await terminalPaymentService.handleProbeResultFromSocket({ requestId: row.requestId, disposition: 'ACTIVE' }, terminal())
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('CANCEL_REQUESTED')
+    expect(await terminalPaymentService.isTerminalBusy(fixture, venueId)).toBe(true)
+    expect(await prisma.payment.count({ where: { venueId, orderId } })).toBe(0)
+  })
+
+  it('al reconectar consulta una cancelación vencida sin perderse entre 25 históricos', async () => {
+    await historicalObligations()
+    const row = await auditRequest({ status: 'CANCEL_REQUESTED', deliveryProvenance: delivered, expiresAt: new Date(Date.now() - 60_000) })
+    await terminalPaymentService.replayPendingForTerminal(fixture, venueId, 'fixture-socket')
+    const probes = directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe')
+    expect(probes.map(([, payload]) => payload.requestId)).toEqual([row.requestId])
+    expect(directEmit.mock.calls.some(([event]) => event === 'terminal:payment_request')).toBe(false)
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('CANCEL_REQUESTED')
+  })
+
+  it.each(['reconexión', 'vigía'])('%s: consulta UNKNOWN tras cancelar desconectada aunque haya 25 históricos', async recovery => {
+    await historicalObligations()
+    const row = await auditRequest({ status: 'SENT', deliveryProvenance: delivered, expiresAt: new Date(Date.now() + 300_000) })
+    ;(terminalRegistry.getTerminal as jest.Mock).mockReturnValue(undefined)
+    await terminalPaymentService.cancelPayment(fixture, row.requestId, 'Cancelar sin terminal conectada', venueId)
+    expect(directEmit).not.toHaveBeenCalled()
+    await terminalPaymentService.reconcileStaleRequests(new Date(Date.now() + 31_000))
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNKNOWN')
+    ;(terminalRegistry.getTerminal as jest.Mock).mockImplementation(() => terminal())
+    if (recovery === 'reconexión') {
+      await terminalPaymentService.replayPendingForTerminal(fixture, venueId, 'fixture-socket')
+      await terminalPaymentService.probeUnresolvedForTerminal(fixture, venueId, 'fixture-socket')
+    } else {
+      await terminalPaymentService.reconcileUnknownRequests()
+    }
+    const probes = directEmit.mock.calls.filter(([event]) => event === 'terminal:payment_probe')
+    expect(probes.map(([, payload]) => payload.requestId)).toContain(row.requestId)
+    expect(probes.length).toBeLessThanOrEqual(25)
+    expect(directEmit.mock.calls.some(([event]) => event === 'terminal:payment_request')).toBe(false)
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('UNKNOWN')
+
+    await terminalPaymentService.handleProbeResultFromSocket(
+      {
+        requestId: row.requestId,
+        disposition: 'RECEIVED_CANCELLED',
+        finalResult: { requestId: row.requestId, status: 'cancelled', outcomeEvidence: 'PRE_AUTHORIZATION' },
+      },
+      terminal(),
+    )
+    expect(await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).toMatchObject({
+      status: 'CANCELLED',
+      cancelDisposition: 'ACCEPTED',
+      paymentId: null,
+    })
+  })
+
+  it.each(['PENDING', 'SENT'] as const)('una solicitud %s vencida no se reenvía ni se sondea como una cancelación', async status => {
+    const row = await auditRequest({ status, deliveryProvenance: delivered, expiresAt: new Date(Date.now() - 60_000) })
+    await terminalPaymentService.replayPendingForTerminal(fixture, venueId, 'fixture-socket')
+    await terminalPaymentService.probeUnresolvedForTerminal(fixture, venueId, 'fixture-socket', row.requestId)
+    expect(directEmit).not.toHaveBeenCalled()
+    expect((await prisma.terminalPaymentRequest.findUniqueOrThrow({ where: { id: row.id } })).status).toBe(status)
+  })
+})
+
 describe('Task4 audit round1 regressions', () => {
   it('historical Payment association cannot close a second request even without processor metadata', async () => {
     const payment = await auditPayment()

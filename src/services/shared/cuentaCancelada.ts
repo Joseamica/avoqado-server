@@ -1,8 +1,17 @@
-import { Prisma, type OrderStatus } from '@prisma/client'
+import {
+  NotificationChannel,
+  NotificationPriority,
+  NotificationType,
+  OnlineOrderStatus,
+  Prisma,
+  StaffRole,
+  type OrderStatus,
+} from '@prisma/client'
 
 import logger from '@/config/logger'
 import AppError, { BadRequestError, ConflictError } from '@/errors/AppError'
-import { claseDeEstado, estadoAlRecibirDinero } from './orderBalance'
+import { CANCELLED_ELSEWHERE, OPEN_ONLINE_STATUSES } from '@/services/online-ordering/constants'
+import { claseDeEstado, estadoAlRecibirDinero, impuestoQueSeCobraAparte } from './orderBalance'
 
 /** El texto del founder (3-oct). El código es el de la solicitud a la terminal (`terminal-payment.service.ts:1737`): las apps ya lo conocen. */
 export const MENSAJE_CUENTA_CANCELADA = 'Esta cuenta está cancelada, abre una nueva.'
@@ -157,13 +166,31 @@ export async function salirSiLaLlaveYaTienePago(
   throw new CobroYaRegistrado(ya.id)
 }
 
+/** Pedidos en línea 1c (S1): quién recibe el aviso de un pedido web cancelado que después se cobró. */
+const ROLES_QUE_RECIBEN_EL_AVISO: StaffRole[] = [StaffRole.MANAGER, StaffRole.ADMIN, StaffRole.OWNER]
+/** Tope del reparto del aviso (regla de consultas acotadas): un negocio real tiene unos cuantos gerentes, no cientos. */
+const MAX_GERENTES_AVISADOS = 50
+/**
+ * Lo que `conciliarPedidoEnLinea` LEE de la cuenta al reabrirla. Va fuera de la llamada a propósito: la guarda de escritores del
+ * contrato de precio (`orderContratoDePrecioWriters.test.ts`) busca `contratoDePrecio:` dentro de cada `order.update`, y aquí sólo
+ * se lee; el `data` de esa escritura nunca lo toca.
+ */
+const LO_QUE_LEE_LA_CONCILIACION = {
+  orderNumber: true,
+  contratoDePrecio: true,
+  taxAmount: true,
+  onlineOrder: { select: { id: true, status: true } },
+} satisfies Prisma.OrderSelect
+
 /**
  * Dinero YA capturado sobre una cancelada ⇒ la saca de CANCELADA según `estadoParaCobrar`, bajo el candado de la orden de quien
  * llama, y deja rastro: cambia un resultado firmado. Devuelve el estado con el que quien llama calcula y guarda. CALLER_LOCKED.
  * La bitácora va con el `tx` a propósito (preflight R-6): auditoría atómica de un resultado firmado, no `logAction`.
+ * Pedidos en línea 1c (S1): si la cuenta es de un pedido web, también lo concilia, con el MISMO `tx` (`conciliarPedidoEnLinea`).
+ * La firma y el retorno no cambian (Codex plan r1 #13: la TPV usa el retorno como estado).
  */
 export async function reabrirSiRecibeDinero(
-  tx: Pick<Prisma.TransactionClient, 'order' | 'activityLog'>,
+  tx: Pick<Prisma.TransactionClient, 'order' | 'activityLog' | 'onlineOrder' | 'staffVenue' | 'notification'>,
   a: {
     venueId: string
     orderId: string
@@ -181,7 +208,12 @@ export async function reabrirSiRecibeDinero(
 ): Promise<OrderStatus> {
   const estado = estadoParaCobrar(a, a.cobrado, a.cubreComoCancelada)
   if (estado === a.status) return estado
-  await tx.order.update({ where: { id: a.orderId, venueId: a.venueId }, data: { status: estado } })
+  // La MISMA escritura trae lo que el pedido en línea necesita (sin otra lectura para las cuentas que no son web).
+  const reabierta = await tx.order.update({
+    where: { id: a.orderId, venueId: a.venueId },
+    data: { status: estado },
+    select: LO_QUE_LEE_LA_CONCILIACION,
+  })
   const datos = {
     estadoAnterior: a.status,
     estadoNuevo: estado,
@@ -206,5 +238,137 @@ export async function reabrirSiRecibeDinero(
     orderId: a.orderId,
     ...datos,
   })
+  if (reabierta?.onlineOrder) await conciliarPedidoEnLinea(tx, a, estado, reabierta)
   return estado
+}
+
+/**
+ * 🔴 Pedidos en línea 1c, S1 (regla del founder 3-oct: el dinero ya capturado nunca se rechaza ni se pierde). La cuenta de un pedido
+ * web cancelado acaba de reabrirse con dinero capturado (la cola sin red, la terminal). Antes la cuenta quedaba COMPLETED/PAID y el
+ * pedido CANCELLED_BY_STAFF —o ACCEPTED, si lo canceló el panel y nadie leyó la bandeja (Codex plan r2 #4)—, partido en dos y sin
+ * que nadie se enterara. Todo va con el `tx` del dinero: si la transacción revierte no queda ni el pago ni el aviso, y si confirma
+ * quedan los dos (Codex plan r1 #14; por eso NO `createNotification`, que escribe con el cliente global).
+ *
+ * ¿El cobro deja la cuenta saldada? Lo decide `cubreComoCancelada`, el `isFullyPaid` que cada llamador calculó con TODOS sus cobros
+ * (los previos más éste), y que con IVA incluido es exactamente el saldo de la cuenta viva: las dos aritméticas sólo difieren en el
+ * IVA que va aparte, que una cancelada no debe (`impuestoQueSeCobraAparte`). Los pedidos web nacen con IVA incluido; si alguna vez
+ * llega uno con IVA aparte, «cubre como cancelada» no prueba que cubra viva y el pedido no se completa (se reporta igual).
+ */
+async function conciliarPedidoEnLinea(
+  tx: Pick<Prisma.TransactionClient, 'activityLog' | 'onlineOrder' | 'staffVenue' | 'notification'>,
+  a: Parameters<typeof reabrirSiRecibeDinero>[1],
+  estado: OrderStatus,
+  cuenta: {
+    orderNumber: string
+    contratoDePrecio: string
+    taxAmount: Prisma.Decimal | null
+    onlineOrder: { id: string; status: OnlineOrderStatus } | null
+  },
+): Promise<void> {
+  const pedido = cuenta.onlineOrder
+  // Un pedido ya ENTREGADO no se toca ni se reporta.
+  if (!pedido || pedido.status === OnlineOrderStatus.COMPLETED) return
+
+  const saldada = a.cubreComoCancelada && impuestoQueSeCobraAparte({ ...cuenta, status: estado }).isZero()
+  const ahora = new Date()
+  // Saldada ⇒ el pedido se ENTREGA (desde cualquier estado salvo COMPLETED). No saldada ⇒ hay dinero en una cuenta cancelada que
+  // quedó viva otra vez: si el pedido sigue ABIERTO (el panel canceló y nadie leyó la bandeja, Codex plan r2 #4) se cierra como lo
+  // cierra la bandeja al leer (`cancelledOrderSync.ts`, mismos valores). Así el resultado no depende de esa lectura, y el pedido no
+  // queda «En preparación», cobrable ni imprimible en la cocina (`printClaim.service.ts`). Si ya estaba cancelado, no se toca.
+  const destino = saldada
+    ? {
+        puedeSalirDe: (s: OnlineOrderStatus) => s !== OnlineOrderStatus.COMPLETED,
+        data: { status: OnlineOrderStatus.COMPLETED, completedAt: ahora },
+      }
+    : {
+        puedeSalirDe: (s: OnlineOrderStatus) => OPEN_ONLINE_STATUSES.includes(s),
+        data: { status: OnlineOrderStatus.CANCELLED_BY_STAFF, cancelledAt: ahora, cancelledBy: CANCELLED_ELSEWHERE },
+      }
+  let estadoAnterior: OnlineOrderStatus = pedido.status
+  let estadoFinal: OnlineOrderStatus = pedido.status
+  if (destino.puedeSalirDe(pedido.status)) {
+    // CAS sobre el estado leído. Si la bandeja lo movió entre la lectura y la escritura (sincroniza la cancelación AL LEER, sin el
+    // candado de la orden), se relee UNA vez: si todavía puede moverse, se reintenta; si no, se respeta lo que quedó.
+    const cas = await tx.onlineOrder.updateMany({ where: { id: pedido.id, status: pedido.status }, data: destino.data })
+    if (cas.count === 1) {
+      estadoFinal = destino.data.status
+    } else {
+      const releido = await tx.onlineOrder.findUnique({ where: { orderId: a.orderId }, select: { id: true, status: true } })
+      if (releido) {
+        estadoAnterior = releido.status
+        estadoFinal = releido.status
+        if (destino.puedeSalirDe(releido.status)) {
+          const otraVez = await tx.onlineOrder.updateMany({ where: { id: releido.id, status: releido.status }, data: destino.data })
+          if (otraVez.count === 1) estadoFinal = destino.data.status
+        }
+      }
+      if (estadoFinal !== destino.data.status && destino.puedeSalirDe(estadoFinal)) {
+        logger.warn('[OnlineOrdering] el pedido de una cuenta cobrada tras cancelarse cambió dos veces bajo el cobro; no se movió', {
+          venueId: a.venueId,
+          orderId: a.orderId,
+          onlineOrderId: pedido.id,
+          destino: destino.data.status,
+        })
+      }
+    }
+  }
+  const completado = estadoFinal === OnlineOrderStatus.COMPLETED
+
+  await tx.activityLog.create({
+    data: {
+      action: 'ONLINE_ORDER_COLLECTED_AFTER_CANCEL',
+      entity: 'OnlineOrder',
+      entityId: pedido.id,
+      venueId: a.venueId,
+      staffId: a.staffId ?? null,
+      data: {
+        onlineOrderId: pedido.id,
+        orderId: a.orderId,
+        estadoAnterior,
+        cobradoCents: new Prisma.Decimal(a.cobrado).times(100).toDecimalPlaces(0).toNumber(),
+        canal: a.canal,
+        idempotencyKey: a.idempotencyKey ?? null,
+      },
+    },
+  })
+
+  // Un aviso por gerente activo del negocio. Hay dinero en un pedido que alguien canceló: se avisa aunque el cobro sea parcial.
+  const gerentes = await tx.staffVenue.findMany({
+    where: { venueId: a.venueId, active: true, role: { in: ROLES_QUE_RECIBEN_EL_AVISO } },
+    select: { staffId: true },
+    orderBy: { staffId: 'asc' },
+    take: MAX_GERENTES_AVISADOS,
+  })
+  // Fix r1: la página llena NO se recorta en silencio. Se avisa a los que caben y queda el rastro para revisarlo.
+  if (gerentes.length === MAX_GERENTES_AVISADOS) {
+    logger.warn('⚠️ [OnlineOrdering] página llena de gerentes al avisar de un pedido cobrado tras cancelarse; puede haber más sin aviso', {
+      venueId: a.venueId,
+      orderId: a.orderId,
+      tope: MAX_GERENTES_AVISADOS,
+    })
+  }
+  if (gerentes.length > 0) {
+    await tx.notification.createMany({
+      data: gerentes.map(g => ({
+        recipientId: g.staffId,
+        venueId: a.venueId,
+        type: NotificationType.ALERT,
+        priority: NotificationPriority.HIGH,
+        channels: [NotificationChannel.IN_APP],
+        entityType: 'Order',
+        entityId: a.orderId,
+        title: 'Se cobró un pedido en línea cancelado',
+        message: `El pedido #${cuenta.orderNumber} se había cancelado y después se registró su cobro. Revisa con quien lo canceló.`,
+        metadata: { onlineOrderId: pedido.id, orderNumber: cuenta.orderNumber, completado, canal: a.canal },
+      })),
+    })
+  }
+  logger.warn('🧾 [OnlineOrdering] se registró dinero en un pedido en línea cancelado', {
+    venueId: a.venueId,
+    orderId: a.orderId,
+    onlineOrderId: pedido.id,
+    estadoAnterior,
+    completado,
+    gerentesAvisados: gerentes.length,
+  })
 }

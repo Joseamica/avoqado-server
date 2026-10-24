@@ -5,6 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError 
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
+import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
@@ -1353,8 +1354,16 @@ async function enqueueCommittedPaymentEffects(
   if (payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
 }
 
-/** `ventaCerrada` (R9-2): la venta ya estaba cerrada y se conservó (R8-1) — lo dice el log de después. */
-type CommittedStandaloneSettlement = { firstSettlement: boolean; postingId: string | null; ventaCerrada: boolean }
+/**
+ * `ventaCerrada` (R9-2): la venta ya estaba cerrada y se conservó (R8-1) — lo dice el log de después.
+ * `reabiertaDeCancelada` (pedidos en línea 1c, S1): estaba CANCELADA y este dinero capturado la reabrió ⇒ el post-commit no arma la comanda.
+ */
+type CommittedStandaloneSettlement = {
+  firstSettlement: boolean
+  postingId: string | null
+  ventaCerrada: boolean
+  reabiertaDeCancelada: boolean
+}
 
 /** Caller holds the Order lock; money and its inventory/loyalty obligation share one commit. */
 export async function settleStandalonePaymentInTx(
@@ -1409,6 +1418,9 @@ export async function settleStandalonePaymentInTx(
         })
   // 🔴 R4-2 (Codex r3): la cancelada CERRADA se guarda cancelada, pero se calcula como cuando se cobró (base + IVA aparte): el total
   // que se escribe aquí es el MISMO con el que mide el aviso de sobrepago de después del commit (`updateOrderTotalsForStandalonePayment`).
+  // 🔴 Pedidos en línea 1c, S1 (Codex plan r1 #7): la cancelada que este dinero reabre no vuelve a la cocina (ni marca ni armado):
+  // su cancelación ya retiró las comandas. Vale para toda cuenta cancelada, no sólo la web.
+  const reabiertaDeCancelada = status !== order.status
   const cuenta = { ...order, status: estadoParaCalcular(status, order.paymentStatus, entraDinero) }
   const balance = computeOrderBalance(cuenta, [{ amount, tipAmount }])
   const previous = computeOrderBalance(cuenta, [{ amount: amount.minus(payment.amount), tipAmount: tipAmount.minus(payment.tipAmount) }])
@@ -1433,7 +1445,7 @@ export async function settleStandalonePaymentInTx(
       ...(saldada && !cobro.cerrada && { status: 'COMPLETED', completedAt: order.completedAt ?? new Date() }),
       ...(!order.servedById && staffId && { servedById: staffId, createdById: order.createdById ?? staffId }),
       ...(firstSettlement && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-      ...(firstSettlement && marcarCocina && { kitchenPendingAt: new Date() }),
+      ...(firstSettlement && marcarCocina && !reabiertaDeCancelada && { kitchenPendingAt: new Date() }),
     },
   })
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
@@ -1445,7 +1457,7 @@ export async function settleStandalonePaymentInTx(
   if (efectosDeCierre && saldada) {
     await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId: staffId ?? null, items: order.items })
   }
-  return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada }
+  return { firstSettlement, postingId: posting?.id ?? null, ventaCerrada: cobro.cerrada, reabiertaDeCancelada }
 }
 
 /**
@@ -1579,7 +1591,7 @@ async function updateOrderTotalsForStandalonePayment(
   if (!order) {
     throw new Error(`Order ${orderId} not found for total update`)
   }
-  const isAreaTicketOrder = order.items.some(item => item.areaTicketLineId != null)
+  const isAreaTicketOrder = order.items.some(esRenglonDeVale)
 
   // 🔴 UN REEMBOLSO NO REABRE SALDO (founder, 2026-08-18).
   //
@@ -1801,6 +1813,8 @@ async function updateOrderTotalsForStandalonePayment(
       (item: any) =>
         item.productId &&
         (!item.paymentAllocations || item.paymentAllocations.length === 0) &&
+        // D1: el vale de este renglón se volvió a cobrar en otra cuenta; aquí no se valida ni se descuenta.
+        !esValeRevendido(item) &&
         (!item.areaTicketLineId || !coveredAreaTicketLines.has(item.areaTicketLineId)),
     )
 
@@ -1904,6 +1918,8 @@ async function updateOrderTotalsForStandalonePayment(
   const { createSalePostingInTx } = await import('@/services/inventory/inventoryPosting.service')
   let tpvPostingId: string | null = options?.committedSettlement?.postingId ?? null
   const debeRegistrarPosting = isFullyPaid && !settledBeforeThisPayment && !options?.areaTicketAlreadyFinalized
+  // Pedidos en línea 1c (S1): la escritura de abajo lo pone si reabre una CANCELADA con este dinero (no se marca ni arma la cocina).
+  let reabiertaEnEstaPasada = false
 
   const updatedOrder =
     options?.areaTicketAlreadyFinalized || options?.committedSettlement
@@ -1938,7 +1954,7 @@ async function updateOrderTotalsForStandalonePayment(
           // `originSystem` no cambia. `staffId` llega validado (`validateStaffVenue`) o ausente: la bitácora lo amarra por FK.
           // R4-5: la venta CERRADA que recibe dinero no se reabre (decidido con el estado de cobro releído bajo el candado).
           if (!(entraDinero && esVentaCerrada(current.paymentStatus))) {
-            await reabrirSiRecibeDinero(tx, {
+            const estadoTrasCobro = await reabrirSiRecibeDinero(tx, {
               venueId: order.venueId,
               orderId,
               status: current.status,
@@ -1950,6 +1966,8 @@ async function updateOrderTotalsForStandalonePayment(
               paymentId: currentPaymentId ?? null,
               staffId: staffId ?? null,
             })
+            // S1: la cancelada que este dinero reabre no vuelve a la cocina (ni la marca de abajo ni el armado de después).
+            reabiertaEnEstaPasada = estadoTrasCobro !== current.status
           }
 
           const updated = await tx.order.update({
@@ -1974,7 +1992,7 @@ async function updateOrderTotalsForStandalonePayment(
                   completedAt: new Date(),
                 }),
               ...(debeRegistrarPosting && { loyaltyEligibleAt: new Date(), loyaltyStaffId: staffId }),
-              ...(debeRegistrarPosting && options?.marcarCocina && { kitchenPendingAt: new Date() }),
+              ...(debeRegistrarPosting && options?.marcarCocina && !reabiertaEnEstaPasada && { kitchenPendingAt: new Date() }),
             },
             include: {
               items: {
@@ -2099,10 +2117,12 @@ async function updateOrderTotalsForStandalonePayment(
     // que quedó pendiente y nunca re-deduce lo ya aplicado. El loop de abajo NO
     // se toca: lo comparten 8 features del cobro y está probado en producción.
     let tpvPostingLines = new Map<string, string>()
+    let postingLinesRead = false
     try {
       if (tpvPostingId) {
         const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
         tpvPostingLines = new Map(lines.map(l => [l.effectKey, l.id]))
+        postingLinesRead = true
         await prisma.inventoryPosting.updateMany({
           where: { id: tpvPostingId, status: 'PENDING' },
           data: { status: 'APPLYING', attempts: { increment: 1 } },
@@ -2125,6 +2145,13 @@ async function updateOrderTotalsForStandalonePayment(
 
     // Deduct stock for each product in the order
     for (const item of updatedOrder.items) {
+      // D1: el vale de este renglón se volvió a cobrar en otra cuenta (R12-1 reabrió ésta): su producto lo descuenta la otra.
+      if (esValeRevendido(item)) {
+        logger.info('⏭️ Skipping deduction for a vale line resold in another order', { orderId, orderItemId: item.id })
+        continue
+      }
+      // R12/R13: el posting ya clasificó al dueño vivo, la liberación y el consumo previo del vale.
+      if (item.areaTicketLineId && !tpvPostingLines.has(item.id)) continue
       if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
         logger.info('⏭️ Skipping generic deduction for area-ticket line covered by reservation', {
           orderId,
@@ -2307,7 +2334,7 @@ async function updateOrderTotalsForStandalonePayment(
     // Estado final del posting: APPLIED si todo aplicó, PARTIAL_FAILED si algo
     // quedó pendiente (el sweeper lo recoge). Cercado por el claim APPLYING para
     // no pisar a otro worker.
-    if (tpvPostingId) {
+    if (tpvPostingId && (postingLinesRead || !updatedOrder.items.some(item => item.areaTicketLineId))) {
       void prisma.inventoryPosting
         .updateMany({
           where: { id: tpvPostingId, status: 'APPLYING' },
@@ -2438,7 +2465,8 @@ async function updateOrderTotalsForStandalonePayment(
     }
 
     // 🍳 Etapa 3 del KDS: la comanda de pantalla nace al saldar (después del commit; nunca tumba el cobro).
-    if (options?.marcarCocina) {
+    // S1: una cancelada reabierta por dinero capturado —en el cierre transaccional o en la escritura de esta pasada— no arma.
+    if (options?.marcarCocina && !options.committedSettlement?.reabiertaDeCancelada && !reabiertaEnEstaPasada) {
       await armarComandasTrasCommit(updatedOrder.venueId, orderId, 'PAID')
     }
   }
@@ -3656,7 +3684,7 @@ export async function recordOrderPayment(
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
-  const hasAreaTicketLines = activeOrder.items.some(item => item.areaTicketLineId != null)
+  const hasAreaTicketLines = activeOrder.items.some(esRenglonDeVale)
   if (hasAreaTicketLines && !paymentData.idempotencyKey) {
     throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
@@ -3907,12 +3935,12 @@ export async function recordOrderPayment(
                 contratoDePrecio: true,
                 taxAmount: true,
                 status: true,
-                items: { select: { areaTicketLineId: true } },
+                items: { select: { areaTicketLineId: true, releasedAreaTicketLineId: true } },
               },
             })
             if (ordenBloqueada) {
               const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
-                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(i => i.areaTicketLineId != null) },
+                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(esRenglonDeVale) },
                 {
                   subtotal: ordenBloqueada.subtotal,
                   discountAmount: ordenBloqueada.discountAmount,
