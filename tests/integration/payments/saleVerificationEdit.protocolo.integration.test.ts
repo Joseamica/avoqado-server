@@ -116,6 +116,13 @@ const legacy = async () => {
   await prisma.transactionCost.deleteMany({ where: { paymentId: p.id } })
   return p
 }
+/** D2: la corrección del importe mueve la cuenta, y sólo acepta la venta con la forma de producción (1 artículo, cantidad 1). */
+const conUnArticulo = async <P extends { id: string; orderId: string | null; amount: unknown }>(p: P) => {
+  await prisma.orderItem.create({
+    data: { orderId: p.orderId!, productName: 'SIM', quantity: 1, unitPrice: p.amount as never, taxAmount: 0, total: p.amount as never },
+  })
+  return p
+}
 const verificacionDe = (p: { id: string }) =>
   prisma.saleVerification.create({
     data: { venueId: f.venueId, paymentId: p.id, staffId: f.staffId, photos: [], status: 'PENDING', isPortabilidad: false },
@@ -226,7 +233,7 @@ describe('Codex R13-3 · el editor de verificaciones de venta no cambia el diner
   })
 
   it('un cobro ANTERIOR al protocolo (sin snapshot ni obligación) se sigue corrigiendo como siempre: importe y forma de pago cambian, con bitácora', async () => {
-    const p = await legacy()
+    const p = await conUnArticulo(await legacy())
     const sv = await verificacionDe(p)
     const editada = await editar(sv, { amount: 120, paymentForm: 'CASH' })
     expect(editada.payment).toMatchObject({ method: 'CASH' })
@@ -319,7 +326,7 @@ describe('Codex R16-1 · el editor de verificaciones sobre un REEMBOLSO protege 
       SELECT pid, pg_blocking_pids(pid) AS "bloqueadoPor" FROM pg_stat_activity
       WHERE datname = current_database() AND wait_event_type = 'Lock' AND query ILIKE '%FROM "Payment"%FOR UPDATE%'`
 
-  it('ORIGINAL PRIMERO · un segundo reembolso real R2 (−$30) sostiene P (obligación asegurada, sin commit): el editor de R1 (amount: 40) ESPERA el candado de P (bloqueado por el pid de R2) y mientras espera deja R1 LIBRE; al commitear R2 —P ya del protocolo—, el editor relee, clasifica a R1 por su original y responde 409: importe (−$40), método, costo, venta, verificación y bitácora intactos', async () => {
+  it('ORIGINAL PRIMERO · un segundo reembolso real R2 (−$30) sostiene P (obligación asegurada, sin commit): el editor de R1 (amount: 40) ESPERA a R2 (la cuenta primero, luego P) y mientras espera deja R1 LIBRE; al commitear R2 —P ya del protocolo—, el editor relee, clasifica a R1 por su original y responde 409: importe (−$40), método, costo, venta, verificación y bitácora intactos', async () => {
     const { P, R1, sv } = await escenario()
     const antesR1 = await foto(R1.id)
     const antesSv = await exigir(prisma.saleVerification.findUnique({ where: { id: sv.id } }))
@@ -344,12 +351,17 @@ describe('Codex R16-1 · el editor de verificaciones sobre un REEMBOLSO protege 
     let fallo: Fallo = null
     try {
       obs.pausado = await b.pausadaEn(5000)
-      const lineaBase = await f.pidsQueEsperan('proteccion')
       edicion = A.lanzar('edición de la verificación de R1', editar(sv, { amount: 40 }))
-      // El editor toma PRIMERO el original (orden original → reembolso, el de la unidad de costo): espera P, bloqueado por R2…
+      // El editor espera a R2 ANTES de tomar nada del par: desde D2 (24-oct) corregir un IMPORTE toma primero la CUENTA (orden
+      // global Order → Payment, que R2 ya sostiene); sin esa espera tomaría P (original → reembolso, el de la unidad de costo)…
       // (ventanas cortas: la transacción pausada de R2 tiene el presupuesto de Prisma, y una espera ausente debe caer por ASERCIÓN,
       // no por vencer ese presupuesto).
-      enEspera = await f.esperarBloqueados('proteccion', 1, 2000, lineaBase)
+      await f.esperar(async () => {
+        enEspera = await prisma.$queryRaw<{ pid: number; bloqueadoPor: number[] }[]>`
+          SELECT pid, pg_blocking_pids(pid) AS "bloqueadoPor" FROM pg_stat_activity
+          WHERE datname = current_database() AND wait_event_type = 'Lock' AND ${pidDeR2}::int = ANY(pg_blocking_pids(pid))`
+        return enEspera.length >= 1
+      }, 2000)
       // …y mientras espera, la fila de R1 sigue LIBRE (si la hubiera tomado antes, este NOWAIT reventaría con 55P03).
       obs.r1 = await sondaSinEsperar(R1.id)
       // La obligación que R2 aseguró sobre P todavía no está commiteada: desde fuera, P sigue siendo legacy.
@@ -379,7 +391,7 @@ describe('Codex R16-1 · el editor de verificaciones sobre un REEMBOLSO protege 
     })
   })
 
-  it('EDITOR PRIMERO · el editor de R1 (amount: 40) se detiene tras clasificar (legacy) con los candados tomados: sostiene P Y R1 (los dos TOMADOS para una sonda NOWAIT); el reembolso real R2 sobre P ESPERA al pid del editor; al reanudar, el editor escribe +$40 con la clasificación que hizo y sólo entonces R2 entra y mete a P al protocolo — serializado, nunca cruzado', async () => {
+  it('EDITOR PRIMERO · el editor de R1 (amount: 40) se detiene tras clasificar (legacy) con los candados tomados: sostiene P Y R1 (los dos TOMADOS para una sonda NOWAIT); el reembolso real R2 sobre P ESPERA al pid del editor; al reanudar, el editor escribe la forma de pago (EFECTIVO) con la clasificación que hizo y sólo entonces R2 entra y mete a P al protocolo — serializado, nunca cruzado', async () => {
     const { P, R1, sv } = await escenario()
     const A = actores()
     const b = barrera()
@@ -395,7 +407,9 @@ describe('Codex R16-1 · el editor de verificaciones sobre un REEMBOLSO protege 
       await b.liberada
       return r
     })
-    const edicion = A.lanzar('edición de la verificación de R1', editar(sv, { amount: 40 }))
+    // D2 (24-oct): el IMPORTE de un reembolso ya no se corrige desde la verificación (no es la venta de un solo cobro: 409
+    // SALE_AMOUNT_NOT_SIMPLE). La carrera se prueba con la otra edición económica que sigue pasando: la forma de pago.
+    const edicion = A.lanzar('edición de la verificación de R1', editar(sv, { paymentForm: 'CASH' }))
     let r2!: ReturnType<typeof A.lanzar<Awaited<ReturnType<typeof reembolsoReal>>>>
     const obs = { pausado: false, p: null as 'LIBRE' | 'TOMADA' | null, r1: null as 'LIBRE' | 'TOMADA' | null, r2Bloqueado: false }
     let fallo: Fallo = null
@@ -423,10 +437,10 @@ describe('Codex R16-1 · el editor de verificaciones sobre un REEMBOLSO protege 
       const editada = await edicion.resultado()
       expect(await r2.resultado()).toMatchObject({ status: 'COMPLETED' })
       expect(obs).toMatchObject({ p: 'TOMADA', r1: 'TOMADA', r2Bloqueado: true })
-      // Serializado: el editor escribió +$40 ANTES de que R2 entrara (su clasificación «legacy» era cierta con P tomado), y P
-      // entró al protocolo DESPUÉS, por R2.
-      expect(Number(editada.payment.amount)).toBe(40)
-      expect((await foto(R1.id)).amount).toBe(40)
+      // Serializado: el editor escribió la forma de pago ANTES de que R2 entrara (su clasificación «legacy» era cierta con P
+      // tomado), y P entró al protocolo DESPUÉS, por R2.
+      expect(editada.payment.method).toBe('CASH')
+      expect((await foto(R1.id)).method).toBe('CASH')
       expect(await efectoDe(P.id)).not.toBeNull()
       expect(await prisma.activityLog.count({ where: { entityId: sv.id, action: 'SALE_VERIFICATION_EDIT' } })).toBe(1)
     })
@@ -479,7 +493,7 @@ describe('Excepción de efectivo manual · un cobro CASH sin afiliación (pricin
   })
 
   it('CASH sin afiliación · cambiar el IMPORTE ($100 → $120) pasa y el método (y su fundsFlow) no se tocan', async () => {
-    const p = await efectivoSinAfiliacion()
+    const p = await conUnArticulo(await efectivoSinAfiliacion())
     const antes = await pago(p.id)
     const sv = await verificacionDe(p)
     const editada = await editar(sv, { amount: 120 })

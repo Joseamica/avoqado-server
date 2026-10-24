@@ -559,6 +559,12 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'SIN_FILAS',
     nota: 'POS importado: la cabecera es la del POS externo (D8)',
   },
+  // D2 (24-oct): corregir el importe de una venta verificada mueve su único renglón; `cuentaQueSigueAlCobro` lo permite sólo sin
+  // descuento en la cuenta ni en el renglón (409 si no), así que no hay reparto que sincronizar.
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#moverCuentaAlImporte': {
+    clase: 'SIN_FILAS',
+    nota: 'venta de un solo artículo sin descuentos (lo exige cuentaQueSigueAlCobro): no hay filas con reparto',
+  },
   // No mueven total ni descuento.
   'src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets': {
     clase: 'METADATA',
