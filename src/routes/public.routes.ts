@@ -30,6 +30,7 @@ import * as customerEmailController from '../controllers/public/customerEmail.pu
 import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
+import { limiteContactoPorCorreo, limiteEnviosDeCodigo } from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
@@ -585,7 +586,9 @@ router.get(
   getFeaturedLaunchOffer,
 )
 
-router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)
+// `/contact` cuenta por CORREO (la landing llama desde su servidor: todos comparten IP) y además
+// cuenta como un envío de código, igual que `/onboarding/resend-verification`.
+router.post('/contact', limiteContactoPorCorreo, limiteEnviosDeCodigo, validateRequest(contactSchema), submitContact)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige
 // a la pantalla de contrasena del dashboard. readLimit (no writeLimit) porque un

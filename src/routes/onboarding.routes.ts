@@ -9,6 +9,7 @@ import multer from 'multer'
 import rateLimit from 'express-rate-limit'
 import { ipDelCliente, llavePorCorreoOIp } from '../utils/clientIp'
 import { validateRequest } from '../middlewares/validation'
+import { limiteEnviosDeCodigo, limiteIntentosDeCodigo } from '../middlewares/limitesDeCodigo'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { requireOnboardingOrgOwner, requireOnboardingVenueOwner } from '../middlewares/requireOnboardingOrgOwner.middleware'
 import * as onboardingController from '../controllers/onboarding.controller'
@@ -46,24 +47,6 @@ const signupRateLimiter = rateLimit({
   legacyHeaders: false,
   // 🔴 S14: era `req.ip`, que en producción es SIEMPRE un borde de Cloudflare compartido por
   // todos los visitantes de la región — o sea 3 altas por hora PARA TODOS. Ver `utils/clientIp`.
-  keyGenerator: llavePorCorreoOIp,
-})
-
-const verificationRateLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000, // 15 minutes
-  max: isDevelopment ? 50 : 5, // Dev: 50/15min, Prod: 5/15min
-  message: 'Too many verification attempts. Please try again later.',
-  standardHeaders: true,
-  legacyHeaders: false,
-  keyGenerator: llavePorCorreoOIp,
-})
-
-const resendRateLimiter = rateLimit({
-  windowMs: 60 * 60 * 1000, // 1 hour
-  max: isDevelopment ? 20 : 3, // Dev: 20/hour, Prod: 3/hour
-  message: 'Too many resend requests. Please try again later.',
-  standardHeaders: true,
-  legacyHeaders: false,
   keyGenerator: llavePorCorreoOIp,
 })
 
@@ -155,7 +138,7 @@ router.post('/signup', signupRateLimiter, validateRequest(SignupSchema), onboard
  *       400:
  *         description: Invalid or expired verification code
  */
-router.post('/verify-email', verificationRateLimiter, onboardingController.verifyEmail)
+router.post('/verify-email', limiteIntentosDeCodigo, onboardingController.verifyEmail)
 
 /**
  * @openapi
@@ -186,7 +169,7 @@ router.post('/verify-email', verificationRateLimiter, onboardingController.verif
  *       400:
  *         description: Email not found or already verified
  */
-router.post('/resend-verification', resendRateLimiter, onboardingController.resendVerification)
+router.post('/resend-verification', limiteEnviosDeCodigo, onboardingController.resendVerification)
 
 /**
  * @openapi
