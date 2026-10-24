@@ -2,6 +2,7 @@ import { PaymentType, TransactionStatus } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { issueRefund, listRefundsForPayment, TOPE_DEVOLUCIONES_POR_COBRO } from '@/services/dashboard/refund.dashboard.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import { TOPES_POR_ORDEN } from '@/services/fiscal/librosDeOrdenes'
 
@@ -17,6 +18,10 @@ jest.mock('@/services/tpv/paymentEffects.service', () => ({
 
 jest.mock('@/services/dashboard/rawMaterial.service', () => ({
   adjustStock: jest.fn(),
+}))
+// D1 (24-oct): la devolución del POS y del panel revierte el sello de la venta, igual que la de la terminal.
+jest.mock('@/services/wallet/stampLedger.service', () => ({
+  reverseStampForOrder: jest.fn().mockResolvedValue({ reversed: true }),
 }))
 
 const ORDER_GENERATION = new Date('2026-09-04T09:00:00.000Z')
@@ -602,6 +607,56 @@ describe('refund.dashboard.service', () => {
 
       await expect(reembolsar()).rejects.toThrow(/Cannot refund payment with status/i)
       expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+    })
+  })
+
+  // 🔴 D1 (24-oct): el sello de lealtad de una venta devuelta desde el POS o el panel quedaba vivo; sólo la terminal lo revertía.
+  describe('el reembolso revierte el sello de la venta', () => {
+    const pago = () => ({
+      id: 'payment-original',
+      venueId: 'venue-1',
+      status: TransactionStatus.COMPLETED,
+      type: PaymentType.REGULAR,
+      method: 'CASH',
+      source: 'APP',
+      amount: 200,
+      tipAmount: 0,
+      orderId: 'order-1',
+      shiftId: null,
+      merchantAccountId: null,
+      processorData: {},
+      fundsFlow: null,
+      tenderTypeId: null,
+      tenderCountsAsCash: null,
+    })
+    const reembolsar = () =>
+      issueRefund({ venueId: 'venue-1', paymentId: 'payment-original', amount: 15000, reason: 'RETURNED_GOODS', staffId: 'staff-9' })
+
+    beforeEach(() => {
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-stamp-1' })
+    })
+
+    it('revierte el sello de la venta del cobro devuelto', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pago()]).mockResolvedValueOnce([])
+
+      await reembolsar()
+
+      expect(reverseStampForOrder).toHaveBeenCalledWith('venue-1', 'order-1')
+    })
+
+    it('🔴 si revertir el sello falla, el reembolso sigue COMPLETED (el dinero ya salió)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pago()]).mockResolvedValueOnce([])
+      ;(reverseStampForOrder as jest.Mock).mockRejectedValueOnce(new Error('candado vencido'))
+
+      await expect(reembolsar()).resolves.toMatchObject({ refundId: 'refund-stamp-1', status: 'COMPLETED' })
+    })
+
+    it('un reembolso rechazado no toca el sello', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ ...pago(), status: 'PENDING' }]).mockResolvedValueOnce([])
+
+      await expect(reembolsar()).rejects.toThrow(/Cannot refund payment with status/i)
+      expect(reverseStampForOrder).not.toHaveBeenCalled()
     })
   })
 
@@ -1892,7 +1947,9 @@ describe('refund.dashboard.service', () => {
         { amount: 10, reparto: espejo({ A: 1000 }) },
       ])
 
-      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow('No se puede devolver $90.00: de este cobro sólo quedan $40.00 por devolver.')
+      await expect(reembolsar([{ orderItemId: 'A' }])).rejects.toThrow(
+        'No se puede devolver $90.00: de este cobro sólo quedan $40.00 por devolver.',
+      )
       expect(prismaMock.payment.create).not.toHaveBeenCalled()
     })
   })

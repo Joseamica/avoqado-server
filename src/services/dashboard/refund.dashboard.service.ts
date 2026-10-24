@@ -30,6 +30,7 @@ import {
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
+import { reverseStampForOrder } from '../wallet/stampLedger.service'
 import { parteDeUnidades as getUnitRefundCents } from '../shared/parteDeUnidades'
 import { NO_SE_PUEDE_POR_ARTICULOS, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
@@ -1249,6 +1250,22 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
     })
   } catch (err) {
     logger.error('[REFUND.DASHBOARD] Cash drawer posting failed (refund unaffected)', {
+      refundPaymentId: result.refundPaymentId,
+      error: err instanceof Error ? err.message : String(err),
+    })
+  }
+
+  // 🔴 D1 (24-oct): revierte el sello que la venta otorgó, igual que la terminal (`refund.tpv.service.ts`, STEP 6). Sin esto
+  // una devolución desde el POS o el panel dejaba el sello vivo: el reconciliador de lealtad sólo mira ventas sin cerrar
+  // (`loyaltyProcessedAt: null`) y nunca lo recogía. Fuera de la transacción y sin lanzar: el dinero ya salió; la reversa es
+  // idempotente (una venta se revierte una sola vez, aunque se devuelva en partes).
+  // ponytail: no es durable; si el proceso muere aquí el sello queda vivo, igual que en la terminal. Efecto encolado si pasa.
+  try {
+    await reverseStampForOrder(input.venueId, result.originalOrderId)
+  } catch (err) {
+    logger.error('[REFUND.DASHBOARD] No se pudo revertir el sello de una venta reembolsada', {
+      venueId: input.venueId,
+      orderId: result.originalOrderId,
       refundPaymentId: result.refundPaymentId,
       error: err instanceof Error ? err.message : String(err),
     })
