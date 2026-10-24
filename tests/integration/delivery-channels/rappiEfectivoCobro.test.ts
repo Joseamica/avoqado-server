@@ -114,6 +114,8 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
     const [p] = await pagosDe(orderId)
     expect(reparto(p)).toEqual(['175', '20', '10'])
     expect(r).toMatchObject({ amount: 17500, tipAmount: 2000, cashRetainedCents: 20500, changeCents: 0, remainingBalanceCents: 0 })
+    // Plan de apps (Codex r1 #2): la app concilia con lo que este pago cubrió de cada parte, no con lo que mandó.
+    expect(r.deliveryCashAllocation).toEqual({ saleCents: 17500, tipCents: 2000, thirdPartyCents: 1000 })
     const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
     expect(o.paymentStatus).toBe('PAID')
     expect(o.remainingBalance.toFixed(2)).toBe('0.00')
@@ -138,6 +140,7 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
     const r = await cobrar(orderId, 10000, { isOfflineReplay: true })
     expect(reparto((await pagosDe(orderId))[0])).toEqual(['70', '20', '10'])
     expect(r).toMatchObject({ remainingBalanceCents: 10500, cashRetainedCents: 10000, changeCents: 0 })
+    expect(r.deliveryCashAllocation).toEqual({ saleCents: 7000, tipCents: 2000, thirdPartyCents: 1000 })
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PARTIAL')
 
     const o = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
@@ -151,10 +154,11 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
   it('dos aparatos lo cobran: el segundo se registra completo como venta y avisa sobrepago', async () => {
     const orderId = await pedido()
     await cobrar(orderId, 20500)
-    await cobrar(orderId, 20500, { isOfflineReplay: true })
+    const otro = await cobrar(orderId, 20500, { isOfflineReplay: true })
 
     const [, segundo] = await pagosDe(orderId)
     expect(reparto(segundo)).toEqual(['205', '0', '0'])
+    expect(otro.deliveryCashAllocation).toEqual({ saleCents: 20500, tipCents: 0, thirdPartyCents: 0 })
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PAID')
     expect(await bitacora(orderId, 'SOBREPAGO_DETECTADO')).toBe(1)
   })
@@ -172,6 +176,8 @@ describe('Rappi 2b: cobrar un pedido con repartidor propio en efectivo', () => {
     const b = await cobrar(orderId, 20500, { idempotencyKey: llave })
     expect(b.paymentId).toBe(a.paymentId)
     expect(b).toMatchObject({ cashRetainedCents: 20500, changeCents: 0 })
+    expect(b.deliveryCashAllocation).toEqual(a.deliveryCashAllocation)
+    expect(b.deliveryCashAllocation).toEqual({ saleCents: 17500, tipCents: 2000, thirdPartyCents: 1000 })
     expect(await prisma.payment.count({ where: { orderId } })).toBe(1)
   })
 

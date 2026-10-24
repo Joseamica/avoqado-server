@@ -566,6 +566,8 @@ describe('payCashOrder — saldo autoritativo en la respuesta', () => {
       const res = await payCashOrder('venue-1', 'order-1', { amount: 6000, tip: 1255, staffId: 'staff-1' })
 
       expect(res.cashRetainedCents).toBe(7255)
+      // Sólo los pedidos de plataforma en efectivo traen el reparto (Rappi 2b): un cobro normal no.
+      expect(res.deliveryCashAllocation).toBeUndefined()
       expect(Number.isInteger(res.cashRetainedCents)).toBe(true)
     })
 

@@ -2785,6 +2785,11 @@ export interface CashPaymentResponse {
   status: 'COMPLETED'
   /** Efectivo retenido por este cobro, en centavos enteros; Rappi2b sumará aquí su PAY_IN. Aditivo. */
   cashRetainedCents?: number
+  /**
+   * Rappi 2b (aditivo, sólo pedidos de plataforma en efectivo): lo que ESTE pago cubrió de cada parte, en centavos. El servidor reparte
+   * lo recibido (terceros → propina → venta), así que la app concilia contra esto y no contra el `amount`/`tip` que mandó.
+   */
+  deliveryCashAllocation?: { saleCents: number; tipCents: number; thirdPartyCents: number }
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
   changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
@@ -3727,6 +3732,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       amount: pesosToCents(Number(pago.amount)),
       tipAmount: pesosToCents(Number(pago.tipAmount)),
       cashRetainedCents: retenidoDelCobro(pago),
+      ...(order.thirdPartyCashDue != null
+        ? {
+            deliveryCashAllocation: {
+              saleCents: pesosToCents(Number(pago.amount)),
+              tipCents: pesosToCents(Number(pago.tipAmount)),
+              thirdPartyCents: pesosToCents(Number(pago.thirdPartyCashAmount ?? 0)),
+            },
+          }
+        : {}),
       // Rappi 2b: en el carril el servidor repartió lo recibido (`amount + tip`), así que el cambio es lo recibido menos lo retenido.
       changeCents:
         order.thirdPartyCashDue != null ? Math.max(0, amount + tip - retenidoDelCobro(pago)) : cambioDeReintento(amount, pago.amount),
@@ -4230,6 +4244,15 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     amount: pesosToCents(amountDecimal),
     tipAmount: pesosToCents(tipDecimal),
     cashRetainedCents: pesosToCents(amountDecimal) + pesosToCents(tipDecimal) + pesosToCents(tercerosDecimal),
+    ...(order.thirdPartyCashDue != null
+      ? {
+          deliveryCashAllocation: {
+            saleCents: pesosToCents(amountDecimal),
+            tipCents: pesosToCents(tipDecimal),
+            thirdPartyCents: pesosToCents(tercerosDecimal),
+          },
+        }
+      : {}),
     changeCents: cambioCents,
     method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',

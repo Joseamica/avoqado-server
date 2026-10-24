@@ -108,6 +108,9 @@ export async function getOrders(
     paymentStatus: {
       in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
     },
+    // Rappi 2b: un pedido de plataforma con efectivo por cobrar se cobra en «Pedidos en línea» del POS, que reparte lo recibido
+    // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
+    thirdPartyCashDue: null,
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list

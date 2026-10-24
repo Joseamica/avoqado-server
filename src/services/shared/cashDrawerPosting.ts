@@ -247,50 +247,51 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     const staffName = posting.staffName || (await resolveStaffName(posting.staffId))
 
     const requireOpen = posting.exigirAbierta ?? !posting.targetSessionId
-    // Rappi 2b: la entrada de lo cobrado por cuenta de Rappi, en la MISMA sesión que la venta (idempotente por su llave).
-    const resultTerceros = terceros.greaterThan(0)
-      ? await createEventUnderSessionLock(session.id, requireOpen, {
-          sessionId: session.id,
-          venueId: posting.venueId,
-          type: 'PAY_IN',
-          amount: terceros,
-          staffId: posting.staffId || 'SYSTEM',
-          staffName,
-          orderId: posting.orderId || null,
-          note: notaDeCobroPorCuentaDeRappi(
-            posting.orderNumber ??
-              (posting.orderId
-                ? (
-                    await prisma.order.findFirst({
-                      where: { id: posting.orderId, venueId: posting.venueId },
-                      select: { orderNumber: true },
-                    })
-                  )?.orderNumber
-                : null),
-          ),
-          localId: cashThirdPartyDrawerLocalId(posting.paymentId),
-        })
-      : undefined
-    if (total.lessThanOrEqualTo(0)) {
-      // Sólo terceros: no hay venta que anotar.
-      if (!resultTerceros) return 'DRAWER_CLOSED'
-      return resultTerceros.count > 0 ? 'POSTED' : 'ALREADY_POSTED'
+    // Rappi 2b: la entrada de lo cobrado por cuenta de Rappi, en la MISMA sesión que la venta (idempotente por su llave). La venta y
+    // esa entrada van en UNA transacción bajo el candado de la sesión (Codex código de apps r3): nadie lee una sin la otra (un iPad
+    // que cuadra en medio contaría $10 de más) y la caja no puede cerrarse entre las dos.
+    const filas: Prisma.CashDrawerEventCreateManyInput[] = []
+    if (terceros.greaterThan(0)) {
+      filas.push({
+        sessionId: session.id,
+        venueId: posting.venueId,
+        type: 'PAY_IN',
+        amount: terceros,
+        staffId: posting.staffId || 'SYSTEM',
+        staffName,
+        orderId: posting.orderId || null,
+        note: notaDeCobroPorCuentaDeRappi(
+          posting.orderNumber ??
+            (posting.orderId
+              ? (
+                  await prisma.order.findFirst({
+                    where: { id: posting.orderId, venueId: posting.venueId },
+                    select: { orderNumber: true },
+                  })
+                )?.orderNumber
+              : null),
+        ),
+        localId: cashThirdPartyDrawerLocalId(posting.paymentId),
+      })
     }
-
     // `createMany` + `skipDuplicates` en vez de `create`: con `create`, el replay de un
     // intent del outbox chocaría con el índice único y lanzaría P2002 DESPUÉS de que el
     // cobro ya está commiteado — un error en la respuesta de una venta que sí ocurrió.
-    const result = await createEventUnderSessionLock(session.id, requireOpen, {
-      sessionId: session.id,
-      venueId: posting.venueId,
-      type: 'CASH_SALE',
-      amount: total,
-      staffId: posting.staffId || 'SYSTEM',
-      staffName,
-      orderId: posting.orderId || null,
-      note: null,
-      localId: cashSaleDrawerLocalId(posting.paymentId),
-    })
+    if (total.greaterThan(0)) {
+      filas.push({
+        sessionId: session.id,
+        venueId: posting.venueId,
+        type: 'CASH_SALE',
+        amount: total,
+        staffId: posting.staffId || 'SYSTEM',
+        staffName,
+        orderId: posting.orderId || null,
+        note: null,
+        localId: cashSaleDrawerLocalId(posting.paymentId),
+      })
+    }
+    if (filas.length === 0) return 'DRAWER_CLOSED'
+    const result = await createEventUnderSessionLock(session.id, requireOpen, filas)
     if (!result) {
       logger.info('💵 [CASH-DRAWER] La caja se cerró mientras se registraba el movimiento — no entra a una caja cerrada', {
         venueId: posting.venueId,
@@ -299,7 +300,7 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
       return 'DRAWER_CLOSED'
     }
 
-    if (result.count === 0 && !(resultTerceros && resultTerceros.count > 0)) {
+    if (result.count === 0) {
       logger.info('💵 [CASH-DRAWER] Venta en efectivo ya registrada en el cajón (replay) — no se duplica', {
         venueId: posting.venueId,
         paymentId: posting.paymentId,
@@ -499,15 +500,34 @@ export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): 
 async function createEventUnderSessionLock(
   sessionId: string,
   requireOpen: boolean,
-  data: Prisma.CashDrawerEventCreateManyInput,
+  /** Uno, o varios del MISMO cobro (Rappi 2b: la venta y lo cobrado por cuenta de Rappi), que entran juntos o no entran. */
+  movimientos: Prisma.CashDrawerEventCreateManyInput | Prisma.CashDrawerEventCreateManyInput[],
 ): Promise<{ count: number } | null> {
+  const pedidas = Array.isArray(movimientos) ? movimientos : [movimientos]
   const transactionResult = await prisma.$transaction(async (tx): Promise<LateEventTransactionResult | null> => {
     const lock = await tx.cashDrawerSession.updateMany({
-      where: requireOpen ? { id: sessionId, venueId: data.venueId, status: 'OPEN' } : { id: sessionId, venueId: data.venueId },
+      where: requireOpen ? { id: sessionId, venueId: pedidas[0].venueId, status: 'OPEN' } : { id: sessionId, venueId: pedidas[0].venueId },
       data: { updatedAt: new Date() },
     })
     if (!lock || lock.count === 0) return null
-    const result = await tx.cashDrawerEvent.createMany({ data: [data], skipDuplicates: true })
+    // Varios del mismo cobro (Rappi 2b): sólo los que FALTAN (un replay parcial ya dejó uno), para que el aviso del barrido diga
+    // lo que de verdad se agregó (Codex código de apps r4). Uno solo: como siempre, sin consulta extra.
+    const yaEstan =
+      pedidas.length > 1
+        ? new Set(
+            (
+              await tx.cashDrawerEvent.findMany({
+                where: { venueId: pedidas[0].venueId, localId: { in: pedidas.map(f => f.localId).filter((l): l is string => !!l) } },
+                select: { localId: true },
+                take: pedidas.length,
+              })
+            ).map(e => e.localId),
+          )
+        : new Set<string | null>()
+    const filas = pedidas.filter(f => !f.localId || !yaEstan.has(f.localId))
+    if (filas.length === 0) return { result: { count: 0 } }
+    const data = filas[0]
+    const result = await tx.cashDrawerEvent.createMany({ data: filas, skipDuplicates: true })
     // 🔴 P1 (Codex, 2ª auditoría): el barrido (fase 3) repone dentro de una caja YA CERRADA y contada.
     // Sin esto el esperado subía y el `overShort` firmado se quedaba viejo: "esperado 1,100 / contado
     // 1,000 / diferencia 0". Se recalcula con la MISMA fórmula del cierre, bajo el mismo candado.
@@ -581,9 +601,9 @@ async function createEventUnderSessionLock(
           venueId: session.venueId,
           sessionId,
           linkedShiftId: session.shiftId,
-          cause: data.type,
+          cause: filas.map(f => f.type).join('+'),
           localId: data.localId ?? null,
-          amountPesos: new Decimal(data.amount.toString()).toFixed(2),
+          amountPesos: filas.reduce((s, f) => s.plus(new Decimal(f.amount.toString())), new Decimal(0)).toFixed(2),
           expectedAfterPesos: expectedDecimal.toFixed(2),
           overShortBeforePesos: session.overShort?.toFixed(2) ?? null,
           overShortAfterPesos: overShort.toFixed(2),
