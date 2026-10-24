@@ -14,13 +14,45 @@ jest.mock('@/utils/prismaClient', () => {
     // devuelve filas ⇒ cobro anterior al protocolo) y relee importe y método VIGENTES (`findUniqueOrThrow`).
     // Codex R16-1: el candado toma el PAR original → reembolso (`bloquearConSuOriginal`): lee la foto del Payment (`findFirst`: id, tipo,
     // puntero) antes y después de bloquear, entre savepoints (`$executeRaw`). Aquí el cobro NO es un reembolso.
-    $queryRaw: jest.fn(async () => []),
+    // D2: el candado de la cuenta (`lockExistingOrderForPayment`) contesta su fila; lo demás sigue vacío.
+    $queryRaw: jest.fn(async (q: TemplateStringsArray) => (q.join('').includes('FROM "Order"') ? [{ id: 'ord-1' }] : [])),
     $executeRaw: jest.fn(async () => 0),
     payment: {
       update: jest.fn(),
-      findUniqueOrThrow: jest.fn(async () => ({ amount: 100, method: 'CASH' })),
+      findUniqueOrThrow: jest.fn(async () => ({
+        amount: 100,
+        method: 'CASH',
+        feeAmount: 0,
+        orderId: 'ord-1',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        tipAmount: 0,
+      })),
       findFirst: jest.fn(async () => ({ id: 'pay-1', type: 'CASH', processorData: {} })),
+      // D2: la corrección del importe mueve la cuenta; la venta es la de producción (1 artículo, ningún otro cobro).
+      count: jest.fn(async () => 0),
     },
+    order: {
+      findFirst: jest.fn(async () => ({
+        id: 'ord-1',
+        version: 1,
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+        contratoDePrecio: null,
+        subtotal: 100,
+        discountAmount: 0,
+        serviceChargeAmount: 0,
+        deliveryFeeAmount: 0,
+        taxAmount: 0,
+        tipAmount: 0,
+        total: 100,
+        paidAmount: 100,
+        remainingBalance: 0,
+        items: [{ id: 'it-1', quantity: 1, weightQuantity: null, discountAmount: 0, taxAmount: 0, _count: { modifiers: 0 } }],
+      })),
+      update: jest.fn(),
+    },
+    orderItem: { update: jest.fn() },
     saleVerification: { update: jest.fn() },
     activityLog: { create: jest.fn() },
   }
@@ -61,7 +93,7 @@ function existingSale(overrides: Record<string, any> = {}) {
     isPortabilidad: false,
     reviewNotes: null,
     rejectionReasons: [],
-    payment: { id: 'pay-1', amount: 100, method: 'CASH' },
+    payment: { id: 'pay-1', amount: 100, method: 'CASH', orderId: 'ord-1' },
     venue: { organizationId: ORG_ID },
     ...overrides,
   }
