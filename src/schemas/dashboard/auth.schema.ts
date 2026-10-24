@@ -94,6 +94,6 @@ export type ResetPasswordDto = z.infer<typeof resetPasswordSchema.shape.body>
 
 export const entrarConBoletoSchema = z.object({
   body: z.object({
-    boleto: z.string({ required_error: 'El boleto es requerido.' }).min(20, 'El boleto no es válido.').max(2048, 'El boleto no es válido.'),
+    boleto: z.string({ required_error: 'El boleto es requerido.' }).max(2048, 'El boleto no es válido.'),
   }),
 })

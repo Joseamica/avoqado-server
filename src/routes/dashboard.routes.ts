@@ -1,8 +1,8 @@
 import hybridBillingRoutes from './dashboard/hybridBilling.routes'
 import serviceCourseRoutes from './dashboard/serviceCourse.routes'
 import express, { RequestHandler } from 'express'
-import { NotFoundError } from '../errors/AppError'
-import { altaLandingConCodigo } from '../config/altaLandingConCodigo'
+import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
+import { ipDelCliente } from '../utils/clientIp'
 import { z } from 'zod'
 import {
   OrdersListQuerySchema,
@@ -1202,13 +1202,13 @@ router.post('/auth/confirm-email-change', validateRequest(confirmEmailChangeSche
 const boletoRateLimiter = rateLimit({
   windowMs: 15 * 60 * 1000,
   max: isDevelopment ? 100 : 20,
+  keyGenerator: req => ipDelCliente(req) || 'desconocida', // detrás de Cloudflare req.ip es el borde compartido
   standardHeaders: true,
   legacyHeaders: false,
   handler: (_req, res) => {
     res.status(429).json({ success: false, code: 'DEMASIADOS_INTENTOS', message: 'Demasiados intentos. Intenta de nuevo en unos minutos.' })
   },
 })
-const soloConAltaConCodigo: RequestHandler = (_req, _res, next) => (altaLandingConCodigo() ? next() : next(new NotFoundError()))
 /**
  * @openapi
  * /api/v1/dashboard/auth/entrar-con-boleto:

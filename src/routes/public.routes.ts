@@ -1,8 +1,7 @@
 import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
-import express, { Router, type RequestHandler } from 'express'
-import { altaLandingConCodigo } from '../config/altaLandingConCodigo'
-import { NotFoundError } from '../errors/AppError'
+import express, { Router } from 'express'
+import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
 import { z } from 'zod'
 import cors from 'cors'
 import crypto from 'crypto'
@@ -24,7 +23,13 @@ import * as paymentLinkPublicController from '../controllers/public/paymentLink.
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import * as walletPassController from '../controllers/public/walletPass.public.controller'
 import * as walletStampsController from '../controllers/public/walletStamps.public.controller'
-import { submitContact, submitLabsBrief, continuarOnboarding, verificarAlta, reenviarAlta } from '../controllers/public/landing.public.controller'
+import {
+  submitContact,
+  submitLabsBrief,
+  continuarOnboarding,
+  verificarAlta,
+  reenviarAlta,
+} from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
@@ -609,7 +614,6 @@ router.post(
 // Con ALTA_LANDING_CON_CODIGO apagado las dos rutas responden 404 (antes de gastar ningún límite).
 // Los límites son las MISMAS instancias de `/onboarding/*` y `/contact`: un correo tiene UN solo
 // presupuesto de intentos (5/15 min) y UN solo presupuesto de envíos (3/h) entre todas las puertas.
-const soloConAltaConCodigo: RequestHandler = (_req, _res, next) => (altaLandingConCodigo() ? next() : next(new NotFoundError()))
 
 const altaVerificarSchema = z.object({
   body: z.object({

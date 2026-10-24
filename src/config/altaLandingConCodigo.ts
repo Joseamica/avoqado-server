@@ -1,3 +1,6 @@
+import type { RequestHandler } from 'express'
+import { NotFoundError } from '@/errors/AppError'
+
 /**
  * Interruptor del alta desde la landing CON CÓDIGO de 6 dígitos (`ALTA_LANDING_CON_CODIGO=true`).
  *
@@ -10,3 +13,6 @@
 export function altaLandingConCodigo(): boolean {
   return process.env.ALTA_LANDING_CON_CODIGO === 'true'
 }
+
+/** Compuerta de ruta: con el interruptor apagado responde 404, igual que si la ruta no existiera. */
+export const soloConAltaConCodigo: RequestHandler = (_req, _res, next) => (altaLandingConCodigo() ? next() : next(new NotFoundError()))

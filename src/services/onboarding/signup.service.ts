@@ -711,7 +711,12 @@ export async function canjearBoletoDeAlta(boleto: string): Promise<{ accessToken
       active: true,
       emailVerified: true,
       password: { not: null },
-      OR: [{ lastLoginAt: null }, { lastLoginAt: { lt: emitido } }],
+      // Un solo uso, y el mismo corte que revisó `motivoDeConcesionInvalidada` pero dentro de la escritura (sin hueco).
+      AND: [
+        { OR: [{ lastLoginAt: null }, { lastLoginAt: { lt: emitido } }] },
+        { OR: [{ lastPasswordReset: null }, { lastPasswordReset: { lt: emitido } }] },
+        { OR: [{ sessionsRevokedAt: null }, { sessionsRevokedAt: { lt: emitido } }] },
+      ],
     },
     data: { lastLoginAt: new Date() },
   })

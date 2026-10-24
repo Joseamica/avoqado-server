@@ -60,7 +60,10 @@ describe('tokensDeDuenoSinSucursal', () => {
 
 describe('canjearBoletoDeAlta', () => {
   it('boleto válido: exige prospecto con contraseña, una escritura condicionada, bitácora y tokens', async () => {
+    jest.useFakeTimers().setSystemTime(new Date('2026-10-24T12:00:00.000Z'))
     const boleto = firmarBoletoDeAlta('staff-1', 'ana@example.com')
+    jest.setSystemTime(new Date('2026-10-24T12:01:00.000Z'))
+    const emitido = new Date('2026-10-24T12:00:00.000Z')
     await expect(canjearBoletoDeAlta(boleto)).resolves.toEqual({ accessToken: 'access-tok', refreshToken: 'refresh-tok' })
 
     // esProspectoDeLanding SIN la condición de password null
@@ -76,8 +79,13 @@ describe('canjearBoletoDeAlta', () => {
       emailVerified: true,
       password: { not: null },
     })
-    expect(arg.where.OR).toEqual([{ lastLoginAt: null }, { lastLoginAt: { lt: expect.any(Date) } }])
-    expect(arg.data.lastLoginAt).toBeInstanceOf(Date)
+    expect(arg.where.AND).toEqual([
+      { OR: [{ lastLoginAt: null }, { lastLoginAt: { lt: emitido } }] },
+      { OR: [{ lastPasswordReset: null }, { lastPasswordReset: { lt: emitido } }] },
+      { OR: [{ sessionsRevokedAt: null }, { sessionsRevokedAt: { lt: emitido } }] },
+    ])
+    expect(arg.data.lastLoginAt).toEqual(new Date('2026-10-24T12:01:00.000Z'))
+    jest.useRealTimers()
     expect(mockLogAction).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'staff-1', action: 'LANDING_DIRECT_ENTRY' }))
   })
 
