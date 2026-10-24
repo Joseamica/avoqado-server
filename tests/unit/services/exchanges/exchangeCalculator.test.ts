@@ -189,6 +189,12 @@ describe('pieceValuesCents', () => {
   it('splits a line charged 10000 over 3 units as 3334/3333/3333', () =>
     expect(pieceValuesCents(10000, 3, 0, 0, 3)).toEqual([3334, 3333, 3333]))
 
+  it('returns two units of a three-unit line charged 10000 as 6667, not 6668', () => {
+    const pieces = pieceValuesCents(10000, 3, 0, 0, 2)
+    expect(pieces).toEqual([3334, 3333])
+    expect(pieces.reduce((total, cents) => total + cents, 0)).toBe(6667)
+  })
+
   it('continues after units already returned', () => expect(pieceValuesCents(10000, 3, 1, 3334, 2)).toEqual([3333, 3333]))
 
   it('never exceeds what is left of the line, trimming from the last piece', () =>

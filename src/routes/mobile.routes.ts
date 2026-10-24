@@ -45,6 +45,8 @@ import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.m
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
 import * as refundMobileController from '../controllers/mobile/refund.mobile.controller'
+import * as exchangeMobileController from '../controllers/mobile/exchange.mobile.controller'
+import { createExchangeSchema } from '../schemas/mobile/exchange.mobile.schema'
 import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
@@ -3102,6 +3104,17 @@ export const permisoDeReembolso = Object.assign(
   { requiredPermission: 'payments:refund' },
 )
 
+// Una sola revisión: el código del encargado autoriza un permiso y se consume una vez.
+export const permisoDeCambio = Object.assign(
+  (req: Request, res: Response, next: NextFunction) => {
+    const settlement = req.body?.settlement
+    return settlement?.kind === 'PAYOUT' && settlement.method === 'CASH' && settlement.cashFromNonCash === true
+      ? revisarDevolverEnEfectivo(req, res, next)
+      : revisarReembolso(req, res, next)
+  },
+  { requiredPermission: 'payments:refund' as const },
+)
+
 /**
  * POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  * Issue an associated refund (by amount OR by items, with optional restock).
@@ -3112,6 +3125,14 @@ router.post(
   authenticateTokenMiddleware,
   permisoDeReembolso,
   refundMobileController.issueAssociatedRefund,
+)
+
+router.post(
+  '/venues/:venueId/exchanges',
+  authenticateTokenMiddleware,
+  validateRequest(createExchangeSchema),
+  permisoDeCambio,
+  exchangeMobileController.createExchange,
 )
 
 // ============================================================================
