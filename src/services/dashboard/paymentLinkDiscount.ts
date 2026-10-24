@@ -263,14 +263,22 @@ export async function validarFotoContraBase(
   venueId: string,
   foto: DescuentoDeLiga,
   base: number | null,
+  /** true = la foto ya estaba en la liga: solo se revisa que quepa en la nueva base (la vigencia se ve en la lista y se revisa al cobrar). */
+  conservada = false,
 ): Promise<void> {
-  const regla = await cargarRegla(tx, foto)
+  let regla = await cargarRegla(tx, foto)
+  if (conservada && regla) {
+    regla = { ...regla, active: true, existe: true, compatible: true, validFrom: null, validUntil: null }
+  }
   const venue = await tx.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
   const zona = venue?.timezone ?? 'America/Mexico_City'
   const reglaSinHorario = regla ? { ...regla, daysOfWeek: [], timeFrom: null, timeUntil: null } : null
   const d = desgloseDeLiga(base ?? BASE_LIGA_ABIERTA, foto, reglaSinHorario, new Date(), zona)
   if (d.aplica || !d.motivo) return
   if (d.motivo === 'MINIMO' && base === null) return
+  if (d.motivo === 'MINIMO' && base !== null && regla?.minPurchaseAmount != null && base < regla.minPurchaseAmount) {
+    throw new BadRequestError(`Este descuento pide una compra mínima de $${regla.minPurchaseAmount.toFixed(2)}`)
+  }
   throw new BadRequestError(MENSAJE_DE_MOTIVO[d.motivo] ?? 'El descuento no está disponible')
 }
 

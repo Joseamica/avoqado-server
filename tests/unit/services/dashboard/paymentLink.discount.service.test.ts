@@ -265,6 +265,24 @@ describe('editar liga con descuento', () => {
     await expect(updatePaymentLink(VENUE, 'pl-1', { amount: 50 })).rejects.toThrow(BadRequestError)
   })
 
+  it('foto conservada ya vencida + cambio de importe → se guarda (la vigencia no bloquea)', async () => {
+    const foto = { v: 1, origen: 'CATALOGO', discountId: DISC, type: 'PERCENTAGE', value: 15, name: 'Mayo' }
+    prismaMock.paymentLink.findUnique.mockResolvedValue(existing({ discount: foto }) as any)
+    prismaMock.discount.findUnique.mockResolvedValue(fila({ validUntil: new Date(Date.now() - 86_400_000) }) as any)
+    await updatePaymentLink(VENUE, 'pl-1', { amount: 200 })
+    expect(prismaMock.paymentLink.update).toHaveBeenCalled()
+  })
+
+  it('foto conservada con compra mínima mayor al nuevo importe → 400 con el mínimo', async () => {
+    const foto = { v: 1, origen: 'CATALOGO', discountId: DISC, type: 'PERCENTAGE', value: 15, name: 'Mayo' }
+    prismaMock.paymentLink.findUnique.mockResolvedValue(existing({ discount: foto }) as any)
+    prismaMock.discount.findUnique.mockResolvedValue(fila({ minPurchaseAmount: new Decimal(500) }) as any)
+    await expect(updatePaymentLink(VENUE, 'pl-1', { amount: 200 })).rejects.toMatchObject({
+      message: 'Este descuento pide una compra mínima de $500.00',
+      statusCode: 400,
+    })
+  })
+
   it('liga archivada → 400 aunque traiga descuento', async () => {
     prismaMock.paymentLink.findUnique.mockResolvedValue(existing({ status: 'ARCHIVED' }) as any)
     await expect(updatePaymentLink(VENUE, 'pl-1', { discount: MANUAL15 })).rejects.toThrow(BadRequestError)

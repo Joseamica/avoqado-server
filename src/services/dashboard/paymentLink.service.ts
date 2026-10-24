@@ -903,7 +903,7 @@ export async function updatePaymentLink(
         base = effectiveAmountType === 'FIXED' && effectiveAmount != null ? effectiveAmount : null
       }
       if (data.discount === undefined) {
-        await validarFotoContraBase(prisma, venueId, keptFoto!, base)
+        await validarFotoContraBase(prisma, venueId, keptFoto!, base, true)
       } else if (data.discount === null) {
         updateData.discount = Prisma.JsonNull
         updateData.discountId = null
