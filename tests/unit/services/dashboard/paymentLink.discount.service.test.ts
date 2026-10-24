@@ -301,7 +301,7 @@ describe('lista con descuento', () => {
     prismaMock.discount.findMany.mockResolvedValue([fila({ validUntil: new Date(Date.now() - 86_400_000) })] as any)
     const r = await getPaymentLinks(VENUE)
     expect(r.paymentLinks.map(l => l.discountStatus)).toEqual(['VENCIDO', 'OK', null])
-    expect(r.paymentLinks[0].discount).toEqual({ name: 'Mayo', type: 'PERCENTAGE', value: 15, origen: 'CATALOGO' })
+    expect(r.paymentLinks[0].discount).toEqual({ name: 'Mayo', type: 'PERCENTAGE', value: 15, origen: 'CATALOGO', discountId: DISC })
     expect(r.paymentLinks[2].discount).toBeNull()
     expect(prismaMock.discount.findMany).toHaveBeenCalledTimes(1)
   })

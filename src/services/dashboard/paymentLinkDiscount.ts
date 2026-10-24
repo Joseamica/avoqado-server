@@ -346,7 +346,7 @@ export function vistaDeDescuento(
   // Sin base (importe abierto) se evalúa con una base grande: sólo pueden salir razones de activo/fecha/compatibilidad.
   const d = desgloseDeLiga(base ?? BASE_LIGA_ABIERTA, foto, regla, ahora, zona)
   return {
-    discount: { name: foto.name, type: foto.type, value: foto.value, origen: foto.origen },
+    discount: { name: foto.name, type: foto.type, value: foto.value, origen: foto.origen, discountId: foto.discountId },
     discountStatus: d.aplica ? ('OK' as const) : d.motivo,
     discountValidUntil: regla?.validUntil ? regla.validUntil.toISOString() : null,
   }
