@@ -39,6 +39,7 @@ import { registerCreditPackTools } from './tools/creditPacks'
 import { registerGiftCardTools } from './tools/giftCards'
 import { registerShiftTools } from './tools/shifts'
 import { registerDiscountTools } from './tools/discounts'
+import { registerExchangeTools } from './tools/exchanges'
 import { registerUpsellTools } from './tools/upsell'
 import { registerPromotionTools } from './tools/promotions'
 import { registerServiceChargeTools } from './tools/service-charges'
@@ -136,6 +137,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
+  registerExchangeTools(server, scope) // Sólo el MCP libre; no pertenece al catálogo certificado.
   registerUpsellTools(server, scope)
   registerPromotionTools(server, scope)
   registerServiceChargeTools(server, scope)

@@ -181,6 +181,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_customer_groups: 'read',
   list_devices: 'read',
   list_discounts: 'read',
+  list_exchanges: 'read',
   list_document_requests: 'read',
   list_venue_document_requests: 'read',
   list_document_request_venue_options: 'read',
