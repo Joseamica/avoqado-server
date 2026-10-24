@@ -279,8 +279,10 @@ async function totalDeItemsResueltos(
   const productIds = items.map(i => i.productId)
   const modifierIds = items.flatMap(i => i.modifiers.map(m => m.modifierId))
   const [products, modifiers] = await Promise.all([
-    prisma.product.findMany({ where: { id: { in: productIds }, venueId }, select: { id: true, price: true } }),
-    modifierIds.length > 0 ? prisma.modifier.findMany({ where: { id: { in: modifierIds } }, select: { id: true, price: true } }) : [],
+    prisma.product.findMany({ where: { id: { in: productIds }, venueId }, take: productIds.length, select: { id: true, price: true } }),
+    modifierIds.length > 0
+      ? prisma.modifier.findMany({ where: { id: { in: modifierIds } }, take: modifierIds.length, select: { id: true, price: true } })
+      : [],
   ])
   const productPrice = new Map(products.map(p => [p.id, p.price]))
   const modifierPrice = new Map(modifiers.map(m => [m.id, m.price]))
@@ -804,7 +806,11 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
     conDescuento.length > 0
       ? await Promise.all([
           catalogIds.length > 0
-            ? prisma.discount.findMany({ where: { id: { in: catalogIds }, venueId }, select: DISCOUNT_RULE_SELECT })
+            ? prisma.discount.findMany({
+                where: { id: { in: catalogIds }, venueId },
+                take: catalogIds.length,
+                select: DISCOUNT_RULE_SELECT,
+              })
             : [],
           prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
         ])
@@ -993,6 +999,7 @@ export async function updatePaymentLink(
             : (
                 await prisma.paymentLinkItem.findMany({
                   where: { paymentLinkId: linkId },
+                  take: 20, // tope del esquema: máximo 20 productos por liga
                   select: { productId: true, quantity: true, modifiers: { select: { modifierId: true, quantity: true } } },
                 })
               ).map(i => ({ productId: i.productId, quantity: i.quantity, modifiers: i.modifiers }))
