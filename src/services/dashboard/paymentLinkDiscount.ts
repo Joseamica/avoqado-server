@@ -1,4 +1,4 @@
-import { Prisma } from '@prisma/client'
+import { Prisma, PrismaClient } from '@prisma/client'
 
 /** Foto del descuento guardada en `PaymentLink.discount`. */
 export type DescuentoDeLiga = {
@@ -117,5 +117,108 @@ export function desgloseDeLiga(
     aplica: true,
     motivo: null,
     nombre: foto.name,
+  }
+}
+
+type CandidatoALiga = {
+  scope: string
+  type: string
+  requiresApproval: boolean
+  isAutomatic: boolean
+  buyQuantity: number | null
+  getQuantity: number | null
+  getDiscountPercent: unknown
+  buyItemIds: string[]
+  getItemIds: string[]
+  maxTotalUses: number | null
+  maxUsesPerCustomer: number | null
+  customerGroupId: string | null
+}
+
+/**
+ * Qué descuentos del catálogo caben en una liga: sólo los sin reglas de uso ni de cliente.
+ * Activo y fechas NO cuentan aquí (`desgloseDeLiga` los resuelve como INACTIVO / VENCIDO).
+ * Gana la primera regla que falle; `razon` se muestra al negocio.
+ */
+export function esCompatibleConLigas(d: CandidatoALiga): { ok: true } | { ok: false; razon: string } {
+  const bogo =
+    d.buyQuantity != null || d.getQuantity != null || d.getDiscountPercent != null || d.buyItemIds.length > 0 || d.getItemIds.length > 0
+  const falla =
+    d.maxTotalUses != null
+      ? 'Tiene límite de usos: escríbelo a mano'
+      : d.maxUsesPerCustomer != null
+        ? 'Tiene límite por cliente: escríbelo a mano'
+        : d.customerGroupId != null
+          ? 'Es solo para un grupo de clientes'
+          : d.requiresApproval
+            ? 'Pide autorización de un gerente'
+            : d.type === 'COMP'
+              ? 'Es una cortesía'
+              : d.isAutomatic
+                ? 'Se aplica solo en el POS'
+                : bogo
+                  ? 'Es una promoción de tipo 2×1'
+                  : d.scope !== 'ORDER'
+                    ? 'Es solo para ciertos productos o categorías'
+                    : null
+  return falla ? { ok: false, razon: falla } : { ok: true }
+}
+
+/** Lee la regla viva del descuento del catálogo de una liga. `null` si es manual o no hay descuento. */
+export async function cargarRegla(
+  tx: Prisma.TransactionClient | PrismaClient,
+  foto: DescuentoDeLiga | null,
+): Promise<ReglaDelCatalogo | null> {
+  if (!foto || foto.origen !== 'CATALOGO' || !foto.discountId) return null
+  const d = await tx.discount.findUnique({
+    where: { id: foto.discountId },
+    select: {
+      active: true,
+      validFrom: true,
+      validUntil: true,
+      daysOfWeek: true,
+      timeFrom: true,
+      timeUntil: true,
+      minPurchaseAmount: true,
+      maxDiscountAmount: true,
+      scope: true,
+      type: true,
+      requiresApproval: true,
+      isAutomatic: true,
+      buyQuantity: true,
+      getQuantity: true,
+      getDiscountPercent: true,
+      buyItemIds: true,
+      getItemIds: true,
+      maxTotalUses: true,
+      maxUsesPerCustomer: true,
+      customerGroupId: true,
+    },
+  })
+  if (!d) {
+    return {
+      active: false,
+      validFrom: null,
+      validUntil: null,
+      daysOfWeek: [],
+      timeFrom: null,
+      timeUntil: null,
+      minPurchaseAmount: null,
+      maxDiscountAmount: null,
+      existe: false,
+      compatible: false,
+    }
+  }
+  return {
+    active: d.active,
+    validFrom: d.validFrom,
+    validUntil: d.validUntil,
+    daysOfWeek: d.daysOfWeek,
+    timeFrom: d.timeFrom,
+    timeUntil: d.timeUntil,
+    minPurchaseAmount: d.minPurchaseAmount?.toNumber() ?? null,
+    maxDiscountAmount: d.maxDiscountAmount?.toNumber() ?? null,
+    existe: true,
+    compatible: esCompatibleConLigas(d).ok,
   }
 }
