@@ -42,6 +42,8 @@ import {
   validarFotoContraBase,
   vistaDeDescuento,
 } from '@/services/dashboard/paymentLinkDiscount'
+import { filaDeDescuentoDeLiga } from '@/services/shared/discount.service'
+import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -1731,6 +1733,26 @@ function mapBlumonCardBrandToEnum(
 // por link se quedaba sin sus puntos y sin su visita. Estos dos helpers cierran
 // ese hueco REUSANDO los mismos dos servicios — aquí no se calcula ni un punto.
 
+/** Lo que la sesión de pago congeló del descuento (T5). La orden se arma con esto, nunca releyendo la liga ni el catálogo. */
+type DescuentoDeLaSesion = { foto: DescuentoDeLiga; descuento: number; base: number }
+
+/** `null` si la sesión se cobró sin descuento: la orden queda exactamente como hoy. */
+function descuentoDeLaSesion(metadata: Record<string, any> | null | undefined): DescuentoDeLaSesion | null {
+  const d = metadata?.descuento
+  return d?.foto && Number(d.descuento) > 0 ? { foto: d.foto, descuento: Number(d.descuento), base: Number(d.base) } : null
+}
+
+/**
+ * Suma el uso al descuento del catálogo en la transacción del cobro y devuelve el `discountId` para la fila. Si el descuento
+ * se borró después de abrir la sesión, la venta se registra igual con lo cobrado y la fila queda sin `discountId`: el dinero
+ * ya se cobró, así que nunca lanza ni recalcula el precio.
+ */
+async function contarUsoDelDescuento(tx: Prisma.TransactionClient, venueId: string, discountId: string | null): Promise<string | null> {
+  if (!discountId) return null
+  const { count } = await tx.discount.updateMany({ where: { id: discountId, venueId }, data: { currentUses: { increment: 1 } } })
+  return count > 0 ? discountId : null
+}
+
 /**
  * Resuelve la atribución congelada del checkout o, para sesiones legacy,
  * el cliente registrado que coincide con el correo/teléfono del pagador.
@@ -1953,6 +1975,8 @@ export async function finalizePaymentLinkCheckout(args: {
 
   const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
   const subtotal = session.amount.sub(tipAmount) // session.amount already includes tip
+  // Con descuento: la orden lleva la base y el descuento; el cobro, la lealtad y la comisión siguen sobre `subtotal` (el neto).
+  const descuentoDeLiga = descuentoDeLaSesion(metadata)
   const stripePaymentIntentId = args.paymentIntentId ?? null
 
   // Commission attribution: the first attributed staff is the "named seller" on Payment.processedById; the commission is
@@ -2022,8 +2046,8 @@ export async function finalizePaymentLinkCheckout(args: {
         ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
         customerName: session.customerName,
         customerEmail: session.customerEmail,
-        subtotal: subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
-        discountAmount: 0,
+        subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
+        discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
         taxAmount: 0,
         contratoDePrecio: 'IVA_INCLUIDO',
         tipAmount,
@@ -2067,6 +2091,19 @@ export async function finalizePaymentLinkCheckout(args: {
       // inventario necesita para nacer dentro de esta misma transacción.
       include: { items: { include: { modifiers: { include: { modifier: true } } } } },
     })
+
+    // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+    if (descuentoDeLiga) {
+      const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+      await tx.orderDiscount.create({
+        data: filaDeDescuentoDeLiga({
+          orderId: order.id,
+          foto: { ...descuentoDeLiga.foto, discountId },
+          montoPesos: descuentoDeLiga.descuento,
+        }),
+      })
+      await sincronizarRepartos(tx, order.id)
+    }
 
     // 3b. Vale durable de inventario, en la MISMA transacción que la orden PAID.
     //     Antes se deducía en un `for` fuera de la transacción y con
@@ -2826,6 +2863,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           ...(metadata.customFieldResponses && { customFieldResponses: metadata.customFieldResponses }),
           // Preserve item list for reference + audit
           ...(isItemLink && { items: sessionItems }),
+          ...(metadata.descuento && { descuento: metadata.descuento }),
         } as unknown as Prisma.InputJsonValue,
       },
     })
@@ -2847,16 +2885,21 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       //                  : session.amount - tip (for PAYMENT/DONATION the amount
       //                  is already the gross + tip).
       const orderTipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
-      const subtotal = isItemLink
-        ? sessionItems.reduce((sum, it) => {
-            const modSumPerUnit = (it.modifiers ?? []).reduce((s, m) => s + m.price * m.quantity, 0)
-            return sum.add(new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity))
-          }, new Prisma.Decimal(0))
-        : session.amount.sub(orderTipAmount)
+      // Con descuento, la sesión manda: base, descuento y lo cobrado (neto + propina) son los que vio y pagó la clienta.
+      const descuentoDeLiga = descuentoDeLaSesion(metadata)
+      const subtotal = descuentoDeLiga
+        ? new Prisma.Decimal(descuentoDeLiga.base)
+        : isItemLink
+          ? sessionItems.reduce((sum, it) => {
+              const modSumPerUnit = (it.modifiers ?? []).reduce((s, m) => s + m.price * m.quantity, 0)
+              return sum.add(new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity))
+            }, new Prisma.Decimal(0))
+          : session.amount.sub(orderTipAmount)
       const taxAmount = new Prisma.Decimal(0) // Tax included in price for payment links
-      const total = subtotal.add(orderTipAmount)
-      // Base de lealtad = total con IVA SIN propina (= subtotal aquí).
-      loyaltyBase = subtotal
+      const total = descuentoDeLiga ? session.amount : subtotal.add(orderTipAmount)
+      // Lo cobrado por la venta, con IVA y SIN propina (sin descuento = subtotal): el cobro, la lealtad y la comisión.
+      const neto = total.sub(orderTipAmount)
+      loyaltyBase = neto
 
       const orderNumber = `PL-${Date.now()}`
 
@@ -2879,7 +2922,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           customerName: session.customerName,
           customerEmail: session.customerEmail,
           subtotal,
-          discountAmount: 0,
+          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
           taxAmount,
           contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: orderTipAmount,
@@ -2924,6 +2967,19 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
         include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
 
+      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+      if (descuentoDeLiga) {
+        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeLiga({
+            orderId: order.id,
+            foto: { ...descuentoDeLiga.foto, discountId },
+            montoPesos: descuentoDeLiga.descuento,
+          }),
+        })
+        await sincronizarRepartos(tx, order.id)
+      }
+
       // Vale durable de inventario, atómico con la orden PAID — mismo motivo
       // que en el camino Stripe: antes se deducía fuera de la transacción y
       // contra el id de la sesión de checkout, no contra la orden.
@@ -2954,7 +3010,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           // Same EcommerceMerchant link as the Stripe path — drives the
           // dashboard's "Cuenta Comercial" column for payment-link rows.
           ecommerceMerchantId: session.ecommerceMerchant?.id,
-          amount: subtotal,
+          amount: neto,
           tipAmount: orderTipAmount,
           method: 'CREDIT_CARD',
           source: 'WEB',
@@ -2964,7 +3020,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           processorId: chargeResult.transactionId,
           feePercentage: 0,
           feeAmount: 0,
-          netAmount: subtotal,
+          netAmount: neto,
           // Card details captured at tokenize time + persisted in
           // CheckoutSession.metadata (see createCheckoutSession).
           cardBrand: mapBlumonCardBrandToEnum(metadata.cardBrand),
@@ -3271,7 +3327,9 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
     venueEmail: payment.venue.email ?? undefined,
     currency: payment.venue.currency ?? 'MXN',
     items,
-    subtotal: Number(payment.amount),
+    // La venta antes del descuento y el descuento, de la orden (sin descuento, el subtotal es lo cobrado, como antes).
+    subtotal: payment.order ? Number(payment.order.subtotal) : Number(payment.amount),
+    discountAmount: payment.order && Number(payment.order.discountAmount) > 0 ? Number(payment.order.discountAmount) : undefined,
     tipAmount: payment.tipAmount ? Number(payment.tipAmount) : undefined,
     totalAmount: total,
     paymentMethod,
@@ -3730,6 +3788,8 @@ export async function finalizeMercadoPagoCheckout(args: {
   const gross = session.amount
   const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
   const subtotal = gross.sub(tipAmount).gte(0) ? gross.sub(tipAmount) : new Prisma.Decimal(0)
+  // Con descuento: la orden lleva la base y el descuento; el cobro, la lealtad y la comisión siguen sobre `subtotal` (el neto).
+  const descuentoDeLiga = isLink ? descuentoDeLaSesion(metadata) : null
   const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
   const netAmount = subtotal.sub(feeAmount).gte(0) ? subtotal.sub(feeAmount) : new Prisma.Decimal(0)
   const feePercentage = subtotal.gt(0) ? feeAmount.div(subtotal).toDecimalPlaces(4) : new Prisma.Decimal(0)
@@ -3777,8 +3837,8 @@ export async function finalizeMercadoPagoCheckout(args: {
           createdById: session.paymentLink?.createdById ?? undefined,
           ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
           customerEmail: session.customerEmail,
-          subtotal,
-          discountAmount: 0,
+          subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal,
+          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
           taxAmount: 0,
           contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount,
@@ -3820,6 +3880,19 @@ export async function finalizeMercadoPagoCheckout(args: {
         },
         include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
+
+      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+      if (descuentoDeLiga) {
+        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeLiga({
+            orderId: order.id,
+            foto: { ...descuentoDeLiga.foto, discountId },
+            montoPesos: descuentoDeLiga.descuento,
+          }),
+        })
+        await sincronizarRepartos(tx, order.id)
+      }
 
       // Vale durable de inventario, atómico con la orden PAID (igual que
       // Stripe/Blumon). Para un cobro de puro monto nace SKIPPED, que es lo que

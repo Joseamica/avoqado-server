@@ -16,6 +16,7 @@
 import { Prisma } from '@prisma/client'
 import { BadRequestError } from '../../errors/AppError'
 import { comoJson, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from './repartoDescuento'
+import type { DescuentoDeLiga } from '../dashboard/paymentLinkDiscount'
 
 /**
  * Compute the peso amount a `Discount` reduces a given base (line or order)
@@ -181,6 +182,31 @@ export function filaDeDescuentoDeCuenta(p: {
     taxReduction: 0,
     isManual: true,
     appliedById: p.appliedById,
+    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
+  }
+}
+
+/**
+ * Descuento en ligas de pago (spec 2026-10-24): la fila de CUENTA de la venta de una liga con descuento, desde la foto que
+ * guardó la sesión de pago. Misma regla que `filaDeDescuentoDeCuenta`; aquí con el tipo, valor, nombre y `discountId` de la
+ * foto (null si el descuento del catálogo ya no existe) y sin quien lo aplicó (lo paga la clienta desde la web).
+ */
+export function filaDeDescuentoDeLiga(p: {
+  orderId: string
+  foto: DescuentoDeLiga
+  montoPesos: number
+}): Prisma.OrderDiscountUncheckedCreateInput {
+  const monto = roundPesos(p.montoPesos)
+  return {
+    orderId: p.orderId,
+    discountId: p.foto.discountId,
+    type: p.foto.type,
+    name: p.foto.name,
+    value: new Prisma.Decimal(p.foto.value),
+    amount: new Prisma.Decimal(monto),
+    taxReduction: 0,
+    isManual: p.foto.origen === 'MANUAL',
+    appliedById: null,
     reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true })),
   }
 }
