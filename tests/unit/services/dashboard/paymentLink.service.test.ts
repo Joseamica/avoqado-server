@@ -105,6 +105,7 @@ import {
 import { prismaMock } from '../../../__helpers__/setup'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO } from '../../../../src/services/tpv/candadoDeIntento'
 import { BadRequestError, NotFoundError, PaymentOutcomeUnknownError } from '../../../../src/errors/AppError'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import { Decimal } from '@prisma/client/runtime/library'
 import { mapFormaPago } from '../../../../src/services/fiscal/satCatalog'
 import { paymentCountsAsDrawerCash } from '../../../../src/services/shared/tenderSemantics'
@@ -323,9 +324,120 @@ describe('PaymentLink Service', () => {
 
     it('no permite reasignar ni borrar la atribución al editar', async () => {
       prismaMock.paymentLink.findUnique.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+      prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-B' })
       for (const customerId of ['customer-B', null]) {
         await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId } as any)).rejects.toThrow(/cliente/i)
       }
+      expect(prismaMock.paymentLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    // Founder 23-oct: en «Editar liga» se puede AGREGAR un cliente si la liga no tiene; nunca cambiarlo.
+    describe('agregar cliente al editar una liga sin cliente', () => {
+      const sinCliente = () => createMockPaymentLink({ customerId: null })
+
+      it('lo agrega sólo donde sigue vacío (CAS) y deja rastro', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 1 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(prismaMock.customer.findFirst).toHaveBeenCalledWith(
+          expect.objectContaining({ where: { id: 'customer-A', venueId: VENUE_ID, active: true } }),
+        )
+        expect(prismaMock.paymentLink.updateMany).toHaveBeenCalledWith({
+          where: { id: 'pl-123', venueId: VENUE_ID, customerId: null, status: { not: 'ARCHIVED' } },
+          data: { customerId: 'customer-A' },
+        })
+        expect(logAction).toHaveBeenCalledWith(
+          expect.objectContaining({
+            action: 'PAYMENT_LINK_CUSTOMER_ADDED',
+            staffId: STAFF_ID,
+            entityId: 'pl-123',
+            data: { customerId: 'customer-A' },
+          }),
+        )
+      })
+
+      it('desde el MCP, su auditoría reemplaza la nativa (una sola fila)', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 1 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        const auditar = jest.fn().mockResolvedValue(undefined)
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID, auditar)
+        expect(auditar).toHaveBeenCalledTimes(1)
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_CUSTOMER_ADDED' }))
+      })
+
+      it('rechaza un cliente ajeno o inactivo sin escribir', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue(null)
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)).rejects.toThrow(/cliente/i)
+        expect(prismaMock.paymentLink.updateMany).not.toHaveBeenCalled()
+      })
+
+      it('el mismo cliente otra vez no escribe ni audita de nuevo', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(prismaMock.paymentLink.updateMany).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_CUSTOMER_ADDED' }))
+      })
+
+      it('si otro guardado puso otro cliente primero, responde 409 y no toca nada más', async () => {
+        prismaMock.paymentLink.findUnique
+          .mockResolvedValueOnce(sinCliente())
+          .mockResolvedValueOnce({ customerId: 'customer-B' } as any)
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
+        await expect(
+          updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A', title: 'Nuevo' } as any, STAFF_ID),
+        ).rejects.toMatchObject({ statusCode: 409 })
+        expect(prismaMock.paymentLink.update).not.toHaveBeenCalled()
+      })
+
+      // Codex r1 #1: repetir sólo { customerId } igual no escribe NI deja filas de «liga editada».
+      it('repetir sólo el mismo cliente no escribe ni audita nada', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(prismaMock.paymentLink.update).not.toHaveBeenCalled()
+        expect(logAction).not.toHaveBeenCalled()
+      })
+
+      it('agregar sólo el cliente no deja también una fila de «liga editada»', async () => {
+        prismaMock.paymentLink.findUnique.mockResolvedValue(sinCliente())
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 1 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)
+        expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_UPDATED' }))
+        expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'PAYMENT_LINK_CUSTOMER_ADDED' }))
+      })
+
+      // Codex r1 #2: si la archivan entre la lectura y la escritura, no se le agrega el cliente.
+      it('una liga archivada a media edición no recibe el cliente', async () => {
+        prismaMock.paymentLink.findUnique
+          .mockResolvedValueOnce(sinCliente())
+          .mockResolvedValueOnce({ customerId: null, status: 'ARCHIVED' } as any)
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)).rejects.toThrow(/archivada/)
+        expect(prismaMock.paymentLink.updateMany).toHaveBeenCalledWith(
+          expect.objectContaining({ where: expect.objectContaining({ status: { not: 'ARCHIVED' } }) }),
+        )
+      })
+
+      it('si otro guardado puso el MISMO cliente primero, sigue sin error', async () => {
+        prismaMock.paymentLink.findUnique
+          .mockResolvedValueOnce(sinCliente())
+          .mockResolvedValueOnce({ customerId: 'customer-A' } as any)
+        prismaMock.customer.findFirst.mockResolvedValue({ id: 'customer-A' })
+        prismaMock.paymentLink.updateMany.mockResolvedValue({ count: 0 })
+        prismaMock.paymentLink.update.mockResolvedValue(createMockPaymentLink({ customerId: 'customer-A' }))
+        await expect(updatePaymentLink(VENUE_ID, 'pl-123', { customerId: 'customer-A' } as any, STAFF_ID)).resolves.toBeTruthy()
+      })
     })
   })
 
