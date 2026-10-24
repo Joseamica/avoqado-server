@@ -24,6 +24,8 @@ export interface ReceiptSaleItem {
   areaSourceLabel?: string | null
   isComboHeader?: boolean
   isComboComponent?: boolean
+  exchangeSide?: 'RETURN' | 'TAKE' | null
+  reason?: string | null
 }
 
 export interface ReceiptTender {
@@ -41,8 +43,10 @@ export interface ReceiptTender {
 
 /** Snapshot de la venta al momento de imprimir. Centavos enteros; instante ISO; zona IANA. */
 export interface ReceiptSale {
-  kind: 'SALE' | 'REFUND'
+  kind: 'SALE' | 'REFUND' | 'EXCHANGE'
   orderNumber: string
+  exchangeOfOrderNumber?: string | null
+  pendingUpload?: boolean | null
   orderType: string
   occurredAt: string
   timezone: string

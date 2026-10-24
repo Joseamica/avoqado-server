@@ -184,7 +184,7 @@ export function buildReceiptInput(params: {
   order: OrderParaTicket
   payment: PaymentParaTicket
   venue: VenueParaTicket
-  kind?: 'SALE' | 'REFUND'
+  kind?: ReceiptSale['kind']
   areaDeliveryCode?: string | null
   transactionId?: string | null
   reprintAt?: Date | null
