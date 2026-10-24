@@ -7002,17 +7002,25 @@ class TerminalPaymentService {
       // preguntar y escribía otro 🚨 y otro asiento (≈2 880 al día por fila).
       this.marcarEsperaDeSonda(requestId)
       const auditar = await this.debeAuditar('TERMINAL_PAYMENT_PROBE_CONTRADICTION', row.id)
-      logger.error(
-        '🚨 [Terminal-payment] Probe contradiction: the terminal acknowledged this request but no longer has it — reservation kept',
-        {
-          requestId,
-          terminalId: row.terminalId,
-          venueId: terminal.venueId,
-          status: row.status,
-          acknowledgedAt: row.acknowledgedAt,
-          audited: auditar,
-        },
-      )
+      const aviso = {
+        requestId,
+        terminalId: row.terminalId,
+        venueId: terminal.venueId,
+        status: row.status,
+        acknowledgedAt: row.acknowledgedAt,
+        audited: auditar,
+      }
+      // La espera de arriba vive en memoria: cada reconexión de la terminal o reinicio del servidor vuelve a preguntar por
+      // la MISMA fila (24-oct-2026: 9 filas de Testarudo del 9 y 10-sep ⇒ el correo «🚨 Terminal-payment crítico» varias
+      // veces al día). El 🚨 es para la PRIMERA contradicción, que queda en ActivityLog; repetirla no trae evidencia nueva.
+      if (auditar) {
+        logger.error(
+          '🚨 [Terminal-payment] Probe contradiction: the terminal acknowledged this request but no longer has it — reservation kept',
+          aviso,
+        )
+      } else {
+        logger.info('🔎 [TerminalPayment] Probe contradiction repeated on a row already kept for an operator (no new evidence)', aviso)
+      }
       if (auditar)
         void logAction({
           venueId: terminal.venueId,
