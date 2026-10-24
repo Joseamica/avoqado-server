@@ -652,6 +652,14 @@ describe('refund.dashboard.service', () => {
       await expect(reembolsar()).resolves.toMatchObject({ refundId: 'refund-stamp-1', status: 'COMPLETED' })
     })
 
+    it('🔴 la devolución responde sin esperar la reversa (el candado del cliente puede tardar más que el POS)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([pago()]).mockResolvedValueOnce([])
+      ;(reverseStampForOrder as jest.Mock).mockReturnValueOnce(new Promise(() => undefined))
+
+      await expect(reembolsar()).resolves.toMatchObject({ refundId: 'refund-stamp-1', status: 'COMPLETED' })
+      expect(reverseStampForOrder).toHaveBeenCalledWith('venue-1', 'order-1')
+    })
+
     it('un reembolso rechazado no toca el sello', async () => {
       prismaMock.$queryRaw.mockResolvedValueOnce([{ ...pago(), status: 'PENDING' }]).mockResolvedValueOnce([])
 

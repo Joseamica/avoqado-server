@@ -1259,17 +1259,17 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // una devolución desde el POS o el panel dejaba el sello vivo: el reconciliador de lealtad sólo mira ventas sin cerrar
   // (`loyaltyProcessedAt: null`) y nunca lo recogía. Fuera de la transacción y sin lanzar: el dinero ya salió; la reversa es
   // idempotente (una venta se revierte una sola vez, aunque se devuelva en partes).
+  // 🔴 Sin `await` (Codex D1-r1 #1): la reversa espera el candado del cliente hasta 3 × 15 s; esperarla aquí pasaba de los 30 s
+  // del POS, que mostraba error de una devolución YA hecha y dejaba reintentarla.
   // ponytail: no es durable; si el proceso muere aquí el sello queda vivo, igual que en la terminal. Efecto encolado si pasa.
-  try {
-    await reverseStampForOrder(input.venueId, result.originalOrderId)
-  } catch (err) {
+  reverseStampForOrder(input.venueId, result.originalOrderId).catch(err => {
     logger.error('[REFUND.DASHBOARD] No se pudo revertir el sello de una venta reembolsada', {
       venueId: input.venueId,
       orderId: result.originalOrderId,
       refundPaymentId: result.refundPaymentId,
       error: err instanceof Error ? err.message : String(err),
     })
-  }
+  })
 
   // El referido NO se revierte aquí: su obligación (`referral-refund:<devolución>`) ya quedó encolada en la transacción de la
   // devolución (`enqueueRefundPaymentEffectsInTx`) y la cumple el worker. El enganche post-commit que vivía aquí era
