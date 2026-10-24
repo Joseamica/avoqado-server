@@ -210,6 +210,7 @@ export const checkoutBodySchema = z.object({
   quantity: z.number().int().min(1).default(1), // For ITEM payment links
   tipAmount: z.number().min(0, 'La propina no puede ser negativa').optional(),
   customFieldResponses: z.record(z.string(), z.string()).optional(), // { fieldId: value }
+  expectedTotal: z.number().positive().optional(), // total que mostró la página; distinto → 409
 })
 
 export const chargeBodySchema = z.object({
@@ -450,6 +451,7 @@ export const publicStripeCheckoutSchema = z.object({
     tipAmount: z.number().nonnegative().optional(),
     customerEmail: z.string().email('Email inválido').optional(),
     customFieldResponses: z.record(z.string()).optional(),
+    expectedTotal: z.number().positive().optional(),
     returnUrl: z.string().url('URL de retorno inválida').optional(),
   }),
 })
@@ -469,5 +471,6 @@ export const publicStripePaymentIntentSchema = z.object({
     tipAmount: z.number().nonnegative().optional(),
     customerEmail: z.string().email('Email inválido').optional(),
     customFieldResponses: z.record(z.string()).optional(),
+    expectedTotal: z.number().positive().optional(),
   }),
 })

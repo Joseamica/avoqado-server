@@ -32,7 +32,10 @@ import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
 import {
+  cargarRegla,
+  Desglose,
   DescuentoDeLiga,
+  desgloseDeLiga,
   EntradaDescuento,
   reglaDeFila,
   resolverDescuentoDeEntrada,
@@ -284,6 +287,85 @@ async function totalDeItemsResueltos(
       modifiers: i.modifiers.map(m => ({ quantity: m.quantity, modifier: { price: modifierPrice.get(m.modifierId) ?? 0 } })),
     })),
   )
+}
+
+/**
+ * Lo que se cobra en los cuatro caminos de una liga: base − descuento + propina.
+ * - Base: fija = `amount`; abierta = lo que escribió la clienta; productos = total vivo del paquete.
+ * - Un descuento del catálogo que ya no aplica (vencido, apagado, fuera de horario, sin la compra mínima) se cobra sin
+ *   descuento: es lo que la página muestra como «ya no está disponible».
+ * - Abierta con un descuento que no cabe en lo escrito → 400 (nunca se cobra completo en silencio).
+ * - `expectedTotal` (el total que mostró la página) distinto, en centavos → 409 con el desglose nuevo, sin cobrar.
+ * - `minimoNeto` (pesos): con descuento efectivo, el neto solo, sin propina, debe alcanzar el mínimo del procesador.
+ *   Sin descuento, cada camino valida el total exactamente como antes.
+ */
+export async function cobroDeLiga(
+  link: {
+    venueId: string
+    purpose: string
+    amountType: string
+    amount: Prisma.Decimal | number | null
+    discount?: Prisma.JsonValue | null
+    tippingConfig: Prisma.JsonValue | null
+    items: Parameters<typeof computeBundleTotal>[0]
+  },
+  input: { amount?: number; tipAmount?: number; expectedTotal?: number },
+  ahora: Date,
+  minimoNeto = 0,
+): Promise<{
+  desglose: Desglose
+  propina: number
+  total: number
+  fotoParaSesion: { foto: DescuentoDeLiga; descuento: number; base: number } | null
+}> {
+  const esPaquete = link.purpose === 'ITEM' && link.items.length > 0
+  let base: number
+  if (esPaquete) {
+    base = computeBundleTotal(link.items)
+  } else if (link.amountType === 'FIXED') {
+    base = Number(link.amount)
+  } else {
+    if (!input.amount || input.amount <= 0) {
+      throw new BadRequestError('El monto es requerido para esta liga de pago')
+    }
+    base = input.amount
+  }
+
+  const foto = (link.discount as unknown as DescuentoDeLiga | null) ?? null
+  let desglose: Desglose
+  if (foto) {
+    const [regla, venue] = await Promise.all([
+      cargarRegla(prisma, foto),
+      prisma.venue.findUnique({ where: { id: link.venueId }, select: { timezone: true } }),
+    ])
+    desglose = desgloseDeLiga(base, foto, regla, ahora, venue?.timezone ?? 'America/Mexico_City')
+    const porCompraMinima = regla?.minPurchaseAmount != null && base < regla.minPurchaseAmount
+    if (!esPaquete && link.amountType !== 'FIXED' && desglose.motivo === 'MINIMO' && !porCompraMinima) {
+      throw new BadRequestError('El descuento es mayor que el importe')
+    }
+  } else {
+    desglose = desgloseDeLiga(base, null, null, ahora, 'America/Mexico_City')
+  }
+
+  const propina = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
+  if (propina > 0 && !link.tippingConfig) {
+    throw new BadRequestError('Esta liga de pago no acepta propinas')
+  }
+  const total = new Prisma.Decimal(desglose.neto).plus(propina).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+
+  if (input.expectedTotal != null && Math.round(input.expectedTotal * 100) !== Math.round(total * 100)) {
+    throw new ConflictError('El precio de esta liga cambió', 'PAYMENT_LINK_PRICE_CHANGED', { desglose })
+  }
+  if (desglose.descuento > 0 && desglose.neto < minimoNeto) {
+    throw new BadRequestError(`Con el descuento, el importe queda debajo del mínimo de cobro ($${minimoNeto.toFixed(2)} MXN)`)
+  }
+
+  return {
+    desglose,
+    propina,
+    total,
+    fotoParaSesion: foto && desglose.aplica ? { foto, descuento: desglose.descuento, base: desglose.base } : null,
+  }
 }
 
 /** Project the Prisma-loaded items into the snapshot shape we put on
@@ -711,7 +793,9 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
 
   // Estado del descuento calculado al leer: una consulta para los descuentos del catálogo de la página y una para la zona (sin N+1).
   const conDescuento = paymentLinks.filter(l => l.discount)
-  const catalogIds = [...new Set(conDescuento.map(l => (l.discount as unknown as DescuentoDeLiga).discountId).filter((id): id is string => !!id))]
+  const catalogIds = [
+    ...new Set(conDescuento.map(l => (l.discount as unknown as DescuentoDeLiga).discountId).filter((id): id is string => !!id)),
+  ]
   const [filas, venue] =
     conDescuento.length > 0
       ? await Promise.all([
@@ -815,7 +899,17 @@ export async function updatePaymentLink(
   if (addsCustomer && !data.customerId) throw new BadRequestError('El cliente de una liga no se puede quitar')
   const existing = await prisma.paymentLink.findUnique({
     where: { id: linkId },
-    select: { id: true, venueId: true, status: true, customerId: true, purpose: true, amountType: true, amount: true, isReusable: true, discount: true },
+    select: {
+      id: true,
+      venueId: true,
+      status: true,
+      customerId: true,
+      purpose: true,
+      amountType: true,
+      amount: true,
+      isReusable: true,
+      discount: true,
+    },
   })
 
   if (!existing) {
@@ -1283,6 +1377,8 @@ export async function createStripePaymentIntentForPaymentLink(
     amount?: number
     quantity?: number
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     customerEmail?: string
     customFieldResponses?: Record<string, string>
   },
@@ -1319,23 +1415,11 @@ export async function createStripePaymentIntentForPaymentLink(
     throw new BadRequestError('La cuenta Stripe Connect del comercio no está configurada')
   }
 
-  // 1. Resolve charge amount.
-  //
-  // For ITEM purpose this is the FIXED bundle total: sum(qty × price). The
-  // `input.quantity` parameter is ignored — the bundle defines its own
-  // quantities. For PAYMENT/DONATION links we honor the legacy single-amount
-  // flow (FIXED uses `paymentLink.amount`, OPEN uses `input.amount`).
-  let chargeAmount: number
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!input.amount || input.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = input.amount
-  }
+  // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
+  const bounds = getStripeChargeBounds()
+  const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2. Validate custom fields
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -1355,17 +1439,8 @@ export async function createStripePaymentIntentForPaymentLink(
     }
   }
 
-  // 3. Tip
-  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-  chargeAmount = chargeAmount + tipAmount
-
   // 4. Stripe amount + fee
   const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
-  const bounds = getStripeChargeBounds()
   if (stripeAmount < bounds.min) throw new BadRequestError('El monto es menor al mínimo permitido por Stripe')
   if (stripeAmount > bounds.max) throw new BadRequestError('El monto excede el máximo permitido por transacción')
 
@@ -1446,6 +1521,8 @@ export async function createStripePaymentIntentForPaymentLink(
         provider: 'STRIPE_CONNECT',
         flow: 'stripe_elements',
         ...(tipAmount > 0 && { tipAmount }),
+        // La orden lee el descuento de aquí (no de la liga, que pudo cambiar después).
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
         // Persist the full line-item snapshot (incl. modifiers) on the
         // CheckoutSession so the webhook handler can replay OrderItem +
@@ -2248,6 +2325,8 @@ export async function createStripeCheckoutForPaymentLink(
     quantity?: number
     /** Optional tip on top of base amount. */
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     /** Pre-fills Stripe Checkout email field. */
     customerEmail?: string
     /** Custom field responses (validated against link.customFields). */
@@ -2284,19 +2363,11 @@ export async function createStripeCheckoutForPaymentLink(
     throw new BadRequestError('La cuenta de Stripe del comercio aún no está activa')
   }
 
-  // 1. Resolve charge amount. Bundle ITEM links use sum(qty × price) and
-  // ignore the legacy `input.quantity` parameter.
-  let chargeAmount: number
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!input.amount || input.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = input.amount
-  }
+  // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
+  const bounds = getStripeChargeBounds()
+  const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2. Validate custom fields
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -2316,18 +2387,9 @@ export async function createStripeCheckoutForPaymentLink(
     }
   }
 
-  // 3. Add tip (validated against tipping config)
-  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-  chargeAmount = chargeAmount + tipAmount
-
   // 4. Compute Stripe amount + fee. Bounds check protects against pennies
   //    (Stripe rejects sub-$10 MXN) and absurdly large amounts.
   const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
-  const bounds = getStripeChargeBounds()
   if (stripeAmount < bounds.min) throw new BadRequestError('El monto es menor al mínimo permitido por Stripe')
   if (stripeAmount > bounds.max) throw new BadRequestError('El monto excede el máximo permitido por transacción')
 
@@ -2402,6 +2464,7 @@ export async function createStripeCheckoutForPaymentLink(
         platformFeeBps: paymentLink.ecommerceMerchant.platformFeeBps,
         provider: 'STRIPE_CONNECT',
         ...(tipAmount > 0 && { tipAmount }),
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
         // Persist the full line-item snapshot (incl. modifiers) on the
         // CheckoutSession so the webhook handler can replay OrderItem +
@@ -2449,6 +2512,8 @@ export async function createCheckoutSession(
     amount?: number
     quantity?: number
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     customFieldResponses?: Record<string, string>
   },
 ) {
@@ -2512,20 +2577,11 @@ export async function createCheckoutSession(
     }
   }
 
-  // 2. Determine amount. Bundle ITEM links sum all line items; legacy single-
-  // amount semantics remain for PAYMENT/DONATION links.
-  let chargeAmount: number
-
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!cardData.amount || cardData.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = cardData.amount
-  }
+  // 2. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. Blumon no tiene mínimo
+  // propio: con descuento sólo se exige neto > 0 (lo garantiza el desglose).
+  const cobro = await cobroDeLiga(paymentLink, cardData, new Date())
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2b. Validate custom field responses if link has custom fields
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -2545,16 +2601,6 @@ export async function createCheckoutSession(
       }
     }
   }
-
-  // 2c. Calculate tip amount
-  const tipAmount = cardData.tipAmount && cardData.tipAmount > 0 ? cardData.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-
-  // Add tip to total charge amount
-  chargeAmount = chargeAmount + tipAmount
 
   // 3. Resolve provider
 
@@ -2591,6 +2637,7 @@ export async function createCheckoutSession(
         cvv: cardData.cvv, // Needed for charge step
         // Tip tracking
         ...(tipAmount > 0 && { tipAmount }),
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         // Custom field responses
         ...(cardData.customFieldResponses && { customFieldResponses: cardData.customFieldResponses }),
         // ITEM link metadata for order creation
@@ -3353,6 +3400,8 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
   input: {
     amount?: number
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     customerEmail?: string
     customFieldResponses?: Record<string, string>
   },
@@ -3391,18 +3440,16 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
     throw new BadRequestError('El token de Mercado Pago expiró. El comercio debe reconectar.')
   }
 
-  // 1. Resolve charge amount (same logic as Stripe Elements flow)
-  let chargeAmount: number
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!input.amount || input.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = input.amount
-  }
+  // MercadoPago Mexico rejects amounts below its platform minimum (~$10 MXN)
+  // with a generic 2072 "Invalid value for transaction_amount" — and that only
+  // surfaces at payment time (mp-pay), after the customer entered their card.
+  // Fail fast here, at intent creation, with a clear message.
+  const mpMinMxn = Number(process.env.MP_MIN_CHARGE_MXN ?? 5)
+
+  // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total.
+  const cobro = await cobroDeLiga(paymentLink, input, new Date(), mpMinMxn)
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2. Validate custom fields (same as Stripe)
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -3422,19 +3469,6 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
     }
   }
 
-  // 3. Tip
-  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-  chargeAmount = chargeAmount + tipAmount
-
-  // MercadoPago Mexico rejects amounts below its platform minimum (~$10 MXN)
-  // with a generic 2072 "Invalid value for transaction_amount" — and that only
-  // surfaces at payment time (mp-pay), after the customer entered their card.
-  // Fail fast here, at intent creation, with a clear message.
-  const mpMinMxn = Number(process.env.MP_MIN_CHARGE_MXN ?? 5)
   if (chargeAmount < mpMinMxn) {
     throw new BadRequestError(`El monto mínimo para pagar con Mercado Pago es $${mpMinMxn} MXN`)
   }
@@ -3467,6 +3501,7 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
         provider: 'MERCADO_PAGO',
         flow: 'mp_bricks',
         ...(tipAmount > 0 && { tipAmount }),
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
         ...(paymentLink.purpose === 'ITEM' &&
           paymentLink.items.length > 0 && {
