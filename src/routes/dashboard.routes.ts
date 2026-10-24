@@ -1,6 +1,8 @@
 import hybridBillingRoutes from './dashboard/hybridBilling.routes'
 import serviceCourseRoutes from './dashboard/serviceCourse.routes'
 import express, { RequestHandler } from 'express'
+import { NotFoundError } from '../errors/AppError'
+import { altaLandingConCodigo } from '../config/altaLandingConCodigo'
 import { z } from 'zod'
 import {
   OrdersListQuerySchema,
@@ -178,6 +180,7 @@ import {
   requestPasswordResetSchema,
   resetPasswordSchema,
   confirmEmailChangeSchema,
+  entrarConBoletoSchema,
   switchVenueSchema,
   updateAccountSchema,
 } from '../schemas/dashboard/auth.schema'
@@ -1193,6 +1196,45 @@ router.post('/auth/reset-password', validateRequest(resetPasswordSchema), authDa
  *       409: { description: El correo ya lo usa otra cuenta }
  */
 router.post('/auth/confirm-email-change', validateRequest(confirmEmailChangeSchema), authDashboardController.confirmEmailChange)
+
+// Alta con código: el DASHBOARD canjea el boleto de 5 min (#boleto=) por las cookies de sesión. Detrás del interruptor:
+// apagado responde 404, igual que /public/alta/*. El boleto es un JWT firmado de un solo uso; el límite sólo frena ruido.
+const boletoRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDevelopment ? 100 : 20,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ success: false, code: 'DEMASIADOS_INTENTOS', message: 'Demasiados intentos. Intenta de nuevo en unos minutos.' })
+  },
+})
+const soloConAltaConCodigo: RequestHandler = (_req, _res, next) => (altaLandingConCodigo() ? next() : next(new NotFoundError()))
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/entrar-con-boleto:
+ *   post:
+ *     tags: [Dashboard - Auth]
+ *     summary: Canjea el boleto de alta (landing) por la sesión (público, detrás de ALTA_LANDING_CON_CODIGO)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [boleto]
+ *             properties:
+ *               boleto: { type: string }
+ *     responses:
+ *       200: { description: Sesión abierta (cookies) }
+ *       410: { description: "BOLETO_USADO: ya se usó, venció o no es válido" }
+ */
+router.post(
+  '/auth/entrar-con-boleto',
+  soloConAltaConCodigo,
+  boletoRateLimiter,
+  validateRequest(entrarConBoletoSchema),
+  authDashboardController.entrarConBoleto,
+)
 
 // --- Menu Category Routes ---
 

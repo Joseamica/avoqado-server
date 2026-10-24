@@ -91,3 +91,9 @@ export type SwitchVenueDto = z.infer<typeof switchVenueSchema.shape.body>
 export type UpdateAccountDto = z.infer<typeof updateAccountSchema.shape.body>
 export type RequestPasswordResetDto = z.infer<typeof requestPasswordResetSchema.shape.body>
 export type ResetPasswordDto = z.infer<typeof resetPasswordSchema.shape.body>
+
+export const entrarConBoletoSchema = z.object({
+  body: z.object({
+    boleto: z.string({ required_error: 'El boleto es requerido.' }).min(20, 'El boleto no es válido.').max(2048, 'El boleto no es válido.'),
+  }),
+})

@@ -11,7 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { claimLaunchCampaign } from '../launchCampaigns/launchCampaignClaim.service'
 import { findClaimableByCodeOrSlug } from '../launchCampaigns/launchCampaign.service'
 import { crearNegocioNuevo, resolverAtribucionDelAlta } from './nuevoNegocio'
-import { BadRequestError } from '@/errors/AppError'
+import { AuthenticationError, BadRequestError, GoneError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
 import { StaffRole, OrgRole } from '@prisma/client'
 import emailService from '@/services/email.service'
@@ -20,7 +20,8 @@ import { altaLandingConCodigo } from '@/config/altaLandingConCodigo'
 import { motivoContrasenaInvalida } from '@/utils/contrasenaNueva'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
-import { firmarBoletoDeAlta } from './boletoDeAlta'
+import { firmarBoletoDeAlta, leerBoletoDeAlta } from './boletoDeAlta'
+import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 export interface SignupInput {
   hybridOfferSlug?: string
@@ -135,6 +136,15 @@ export async function esProspectoDeLanding(staffId: string, opts: { exigirSinCon
     select: { id: true },
   })
   return prospecto !== null
+}
+
+/** Tokens de sesión de un OWNER que aún no eligió sucursal (`'pending'`): fin de la verificación y canje del boleto. */
+export async function tokensDeDuenoSinSucursal(staffId: string): Promise<{ accessToken: string; refreshToken: string }> {
+  const orgId = await getPrimaryOrganizationId(staffId)
+  return {
+    accessToken: jwtService.generateAccessToken(staffId, orgId, 'pending', StaffRole.OWNER),
+    refreshToken: jwtService.generateRefreshToken(staffId, orgId),
+  }
 }
 
 /**
@@ -257,9 +267,7 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
     })
 
     // Generate JWT tokens for auto-login
-    const orgId = await getPrimaryOrganizationId(staff.id)
-    const accessToken = jwtService.generateAccessToken(staff.id, orgId, 'pending', StaffRole.OWNER)
-    const refreshToken = jwtService.generateRefreshToken(staff.id, orgId)
+    const { accessToken, refreshToken } = await tokensDeDuenoSinSucursal(staff.id)
 
     return {
       emailVerified: true,
@@ -671,6 +679,52 @@ export async function verificarCodigoDeLanding(input: { email: string; codigo: s
   })
   const frontend = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   return { entrarUrl: `${frontend}/auth/entrar#boleto=${firmarBoletoDeAlta(staff.id, correo)}` }
+}
+
+const BOLETO_USADO = 'Este enlace ya se usó o venció. Inicia sesión con tu correo y tu contraseña.'
+
+/**
+ * Canjea el boleto de 5 min (T4) por una sesión de OWNER. UN solo uso: la escritura condicionada sobre
+ * `lastLoginAt` (anterior a la emisión del boleto) deja pasar sólo al primero. Cualquier falla —boleto alterado o
+ * vencido, cuenta desactivada, contraseña restablecida o sesiones cerradas después de la emisión, segundo
+ * canje— sale igual (410 `BOLETO_USADO`): no se le dan pistas a quien lo altere.
+ */
+export async function canjearBoletoDeAlta(boleto: string): Promise<{ accessToken: string; refreshToken: string }> {
+  const usado = () => new GoneError(BOLETO_USADO, 'BOLETO_USADO')
+  let leido: { staffId: string; email: string; emitidoMs: number }
+  try {
+    leido = leerBoletoDeAlta(boleto)
+  } catch (e) {
+    if (e instanceof AuthenticationError) throw usado()
+    throw e
+  }
+  const { staffId, email, emitidoMs } = leido
+  const emitido = new Date(emitidoMs)
+
+  if (!(await esProspectoDeLanding(staffId, { exigirSinContrasena: false }))) throw usado()
+  if ((await motivoDeConcesionInvalidada(staffId, emitido)) !== null) throw usado()
+
+  const { count } = await prisma.staff.updateMany({
+    where: {
+      id: staffId,
+      email,
+      active: true,
+      emailVerified: true,
+      password: { not: null },
+      OR: [{ lastLoginAt: null }, { lastLoginAt: { lt: emitido } }],
+    },
+    data: { lastLoginAt: new Date() },
+  })
+  if (count === 0) throw usado()
+
+  await logAction({
+    staffId,
+    organizationId: await getPrimaryOrganizationId(staffId),
+    action: 'LANDING_DIRECT_ENTRY',
+    entity: 'Staff',
+    entityId: staffId,
+  })
+  return tokensDeDuenoSinSucursal(staffId)
 }
 
 /**
