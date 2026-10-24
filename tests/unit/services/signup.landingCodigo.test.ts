@@ -193,6 +193,16 @@ describe('esProspectoDeLanding: una sola consulta, todas las condiciones', () =>
     expect(await esProspectoDeLanding('staff-p')).toBe(false)
   })
 
+  it('un OWNER NO primario + OTRA membresía MEMBER primaria → false (las condiciones deben cumplirse en la MISMA fila)', async () => {
+    const fila = prospecto()
+    fila.organizations = [
+      { role: OrgRole.OWNER, isActive: true, isPrimary: false, organization: { onboardingCompletedAt: null } },
+      { role: OrgRole.MEMBER, isActive: true, isPrimary: true, organization: { onboardingCompletedAt: null } },
+    ]
+    sembrar(fila)
+    expect(await esProspectoDeLanding('staff-p')).toBe(false)
+  })
+
   it('una membresía desactivada → false', async () => {
     sembrar(prospecto({}, {}, { isActive: false }))
     expect(await esProspectoDeLanding('staff-p')).toBe(false)

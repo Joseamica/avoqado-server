@@ -16,6 +16,7 @@ import * as jwtService from '@/jwt.service'
 import { StaffRole, OrgRole } from '@prisma/client'
 import emailService from '@/services/email.service'
 import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
+import { altaLandingConCodigo } from '@/config/altaLandingConCodigo'
 
 export interface SignupInput {
   hybridOfferSlug?: string
@@ -90,14 +91,9 @@ export interface VerifyEmailResult {
   refreshToken: string
 }
 
-/**
- * Interruptor del alta desde la landing CON CÓDIGO de 6 dígitos (`ALTA_LANDING_CON_CODIGO=true`).
- * Se lee en CADA llamada, no al importar: prenderlo o apagarlo no pide reiniciar nada y las
- * pruebas lo cambian sobre la marcha. Apagado, el alta es exactamente la de siempre.
- */
-export function altaLandingConCodigo(): boolean {
-  return process.env.ALTA_LANDING_CON_CODIGO === 'true'
-}
+// El interruptor vive en `config/altaLandingConCodigo` (módulo mínimo que también lee el límite de
+// `/contact`); se vuelve a exportar aquí para que el servicio siga siendo su casa natural.
+export { altaLandingConCodigo }
 
 /**
  * Código de verificación de 6 dígitos, criptográficamente seguro, con 10 minutos de vigencia.
