@@ -101,7 +101,7 @@ export const lineRevenueSql = (alias = 'oi'): string =>
 
 /**
  * La parte del renglón en los descuentos de CUENTA (en pesos): Σ `OrderDiscount.reparto.renglones[<id del renglón>]`
- * (centavos) de las filas de cuenta de su orden que NO son espejo. Un espejo (`espejo: true`) duplica un descuento que ya
+ * (centavos) de las filas de su orden que NO son espejo (CUENTA siempre trae espejo:false; las DIRIGIDO con espejo:false —motor, TPV, sellos— nunca escriben `OrderItem.discountAmount`, así que su parte sólo existe aquí). Un espejo (`espejo: true`) duplica un descuento que ya
  * vive en `OrderItem.discountAmount`: restarlo otra vez lo contaría dos veces. Una fila sin reparto (anterior a B2,
  * `reparto` nulo) no aporta nada por renglón, igual que antes. Subconsulta correlacionada: cada término es por fila, así
  * que es seguro dentro de `SUM(...)` y no multiplica renglones.
@@ -109,7 +109,6 @@ export const lineRevenueSql = (alias = 'oi'): string =>
 const rawOrderDiscountSql = (alias: string): string =>
   `COALESCE((SELECT SUM((od."reparto"->'renglones'->>${alias}."id")::numeric) / 100 FROM "OrderDiscount" od
      WHERE od."orderId" = ${alias}."orderId"
-       AND od."reparto"->>'alcance' = 'CUENTA'
        AND COALESCE((od."reparto"->>'espejo')::boolean, false) = false), 0)`
 
 /** Descuentos de cuenta repartidos a ESTE renglón, en pesos (0 si el renglón se quitó). Va en la columna `discounts`. */

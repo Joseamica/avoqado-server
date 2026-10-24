@@ -6,6 +6,8 @@
  */
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import { nuevoRepartoDirigido } from '@/services/shared/repartoDescuento'
+import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 import { getSalesByItem } from '@/services/dashboard/sales-by-item.dashboard.service'
 import { lineRevenueSql } from '@/services/dashboard/lineRevenue'
 import { getCategoryBreakdown } from '@/jobs/nightly-sales-summary.job'
@@ -96,6 +98,29 @@ describe('reportes por artículo: descuento de cuenta repartido', () => {
       [{ amount: 20, reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: true, renglones: { Taco: 2000 } } }],
     )
     // C) anterior a B2: fila sin reparto, no aporta nada por renglón (igual que hoy).
+    // D) DIRIGIDO espejo:false (motor/TPV/sellos): el renglón NO lleva discountAmount; su parte sólo vive en el reparto.
+    //    Pasa por el escritor real (`nuevoRepartoDirigido` + `sincronizarRepartos`), no por un JSON a mano.
+    await crearOrden(
+      'D',
+      [
+        { key: 'Flan', price: 100 },
+        { key: 'Cafe', price: 50 },
+      ],
+      [{ amount: 30, reparto: { v: 1, alcance: 'DIRIGIDO', conPromociones: null, espejo: false, renglones: { Flan: 3000 } } }],
+    )
+    {
+      const fila = await prisma.orderDiscount.findFirstOrThrow({
+        where: { orderId: (await prisma.orderItem.findUniqueOrThrow({ where: { id: ids.Flan.itemId } })).orderId },
+      })
+      await prisma.orderDiscount.update({
+        where: { id: fila.id },
+        data: {
+          appliedToItemIds: [ids.Flan.itemId],
+          reparto: nuevoRepartoDirigido(30, { [ids.Flan.itemId]: 30 }, { espejo: false }) as any,
+        },
+      })
+      await prisma.$transaction(tx => sincronizarRepartos(tx, fila.orderId))
+    }
     await crearOrden('C', [{ key: 'Sopa', price: 80 }], [{ amount: 8, reparto: null }])
   })
 
@@ -114,7 +139,9 @@ describe('reportes por artículo: descuento de cuenta repartido', () => {
     expect(por.get('Pasta')).toEqual([40000, 6000, 34000])
     expect(por.get('Taco')).toEqual([10000, 2000, 8000]) // el espejo no se resta otra vez
     expect(por.get('Sopa')).toEqual([8000, 0, 8000]) // reparto nulo: igual que hoy
-    expect(cents(r.totals.netSales)).toBe(51000 + 34000 + 8000 + 8000)
+    expect(por.get('Flan')).toEqual([10000, 3000, 7000]) // DIRIGIDO no espejo: su parte baja el neto del renglón
+    expect(por.get('Cafe')).toEqual([5000, 0, 5000])
+    expect(cents(r.totals.netSales)).toBe(51000 + 34000 + 8000 + 8000 + 7000 + 5000)
   })
 
   it('product_sales (lineRevenueSql) y el desglose nocturno dan el MISMO neto', async () => {
@@ -125,6 +152,6 @@ describe('reportes por artículo: descuento de cuenta repartido', () => {
     expect(cents(Number(agg.revenue))).toBe(51000)
 
     const cat = await getCategoryBreakdown(n.venueId, new Date(FROM_ISO), new Date(TO_ISO))
-    expect(cat.reduce((s, c) => s + cents(c.netSales), 0)).toBe(51000 + 34000 + 8000 + 8000)
+    expect(cat.reduce((s, c) => s + cents(c.netSales), 0)).toBe(51000 + 34000 + 8000 + 8000 + 7000 + 5000)
   })
 })
