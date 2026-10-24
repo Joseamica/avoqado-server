@@ -516,6 +516,19 @@ describe('Excepción de efectivo manual · un cobro CASH sin afiliación (pricin
     expect(await bitacoras(sv)).toBe(2)
   })
 
+  // Rappi 2b (Codex, unión con develop 24-oct): el total de un pedido de plataforma lo manda la plataforma. Corregir el importe
+  // aquí movía también el renglón y el total de la venta (D2 de develop); cambiar la forma rompía «Rappi sólo en efectivo».
+  it.each([{ amount: 50 }, { paymentForm: 'OTHER' }])('RAPPI · un pedido de plataforma no se corrige desde la verificación (%o): 400 y nada cambia', async cambio => {
+    const p = await conUnArticulo(await efectivoSinAfiliacion())
+    await prisma.order.update({ where: { id: p.orderId! }, data: { originSystem: 'DELIVERY_PLATFORM' } })
+    const antes = { pago: await pago(p.id), orden: await prisma.order.findUniqueOrThrow({ where: { id: p.orderId! } }) }
+    const sv = await verificacionDe(p)
+    await expect(editar(sv, cambio)).rejects.toMatchObject({ code: 'ORDEN_DE_PLATAFORMA' })
+    expect(await pago(p.id)).toEqual(antes.pago)
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: p.orderId! } })).toEqual(antes.orden)
+    expect(await bitacoras(sv)).toBe(0)
+  })
+
   it('CONTROL · pasar a TARJETA (CASH → CARD) ⇒ 409: la excepción sólo mueve la forma entre efectivo y otro', async () => {
     const p = await efectivoSinAfiliacion()
     const sv = await verificacionDe(p)

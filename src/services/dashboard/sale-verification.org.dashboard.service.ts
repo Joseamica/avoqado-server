@@ -10,6 +10,8 @@ import {
 } from '../shared/cobroDelProtocolo'
 import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { esPedidoDePlataforma, MENSAJE_ORDEN_DE_PLATAFORMA } from '../shared/ordenImportada'
+import { BadRequestError } from '../../errors/AppError'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
   PROMOTER_FEEDBACK_MIN_CHARS,
@@ -1527,6 +1529,15 @@ export async function editOrgSaleVerification(
       methodChanged = params.paymentForm != null && derivePaymentForm(vigente.method) !== params.paymentForm
       const amountChanged = params.amount != null && new Prisma.Decimal(params.amount).toDecimalPlaces(2).comparedTo(vigente.amount) !== 0
       if (amountChanged || methodChanged) {
+        // Rappi 2b: el total de un pedido de plataforma lo manda la plataforma (y Rappi con repartidor propio es sólo efectivo).
+        if (existing.payment.orderId) {
+          const orden = await tx.order.findFirst({
+            where: { id: existing.payment.orderId, venueId: existing.venueId },
+            select: { originSystem: true },
+          })
+          if (orden && esPedidoDePlataforma(orden))
+            throw new BadRequestError(MENSAJE_ORDEN_DE_PLATAFORMA, 'ORDEN_DE_PLATAFORMA', { originSystem: orden.originSystem })
+        }
         const esDelProtocolo = (await cobrosDelProtocolo(tx, [existing.payment.id])).has(existing.payment.id)
         // Excepción de efectivo manual (ver `efectivoManualEditable`): el cobro CASH sin afiliación lleva la llave `pricing: null`
         // y por eso «pertenece», pero no hay tarifa ni obligación que proteger. Sólo mueve la forma entre efectivo y otro.
