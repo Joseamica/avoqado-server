@@ -601,6 +601,8 @@ function buildMagicLinkToken() {
   return { resetToken, hashedToken, expiryTime }
 }
 
+const CODIGO_INVALIDO = 'Ese código no es correcto. Revisa el correo más reciente.'
+
 /** Compara dos códigos en tiempo constante (sin revelar cuántos dígitos coinciden). */
 function codigosIguales(a: string, b: string): boolean {
   const x = Buffer.from(a)
@@ -670,8 +672,6 @@ export async function verificarCodigoDeLanding(input: { email: string; codigo: s
   const frontend = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
   return { entrarUrl: `${frontend}/auth/entrar#boleto=${firmarBoletoDeAlta(staff.id, correo)}` }
 }
-
-const CODIGO_INVALIDO = 'Ese código no es correcto. Revisa el correo más reciente.'
 
 /**
  * «Reenviar código»: sólo a un prospecto activo, sin contraseña ni Google. Genera un código NUEVO

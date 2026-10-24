@@ -27,17 +27,27 @@ function cargarComoEnProduccion(): Limites {
 
 describe('límites mezclados entre onboarding y alta con código', () => {
   it('3 en /onboarding/verify-email + 3 en /public/alta/verificar con el mismo correo: el sexto da 429', async () => {
-    const { limiteIntentosDeCodigo } = cargarComoEnProduccion()
+    const { limiteIntentosDeCodigo, limiteIntentosDeCodigoEnAlta } = cargarComoEnProduccion()
     const app = express()
     app.use(express.json())
     // Mismo cableado que las rutas reales (ver la prueba de código fuente de abajo).
     app.post('/onboarding/verify-email', limiteIntentosDeCodigo, (_q, s) => s.status(400).json({ ok: false }))
-    app.post('/public/alta/verificar', limiteIntentosDeCodigo, (_q, s) => s.status(400).json({ ok: false }))
+    app.post('/public/alta/verificar', limiteIntentosDeCodigoEnAlta, (_q, s) => s.status(400).json({ ok: false }))
 
     const cuerpo = { email: 'Mezclado@Example.com' }
     for (let i = 0; i < 3; i++) expect((await request(app).post('/onboarding/verify-email').send(cuerpo)).status).toBe(400)
     for (let i = 0; i < 2; i++) expect((await request(app).post('/public/alta/verificar').send(cuerpo)).status).toBe(400)
-    expect((await request(app).post('/public/alta/verificar').send(cuerpo)).status).toBe(429)
+    const sexto = await request(app).post('/public/alta/verificar').send(cuerpo)
+    expect(sexto.status).toBe(429)
+    expect(sexto.body).toEqual({
+      success: false,
+      code: 'DEMASIADOS_INTENTOS',
+      message: 'Hiciste demasiados intentos. Espera unos minutos y pide un código nuevo.',
+    })
+    // /onboarding/verify-email conserva su respuesta de hoy: texto plano.
+    const onb = await request(app).post('/onboarding/verify-email').send(cuerpo)
+    expect(onb.status).toBe(429)
+    expect(onb.text).toBe('Too many verification attempts. Please try again later.')
     // Otro correo no se ve afectado.
     expect((await request(app).post('/public/alta/verificar').send({ email: 'otra@example.com' })).status).toBe(400)
   })
@@ -46,7 +56,7 @@ describe('límites mezclados entre onboarding y alta con código', () => {
     const fuente = (f: string) => fs.readFileSync(path.join(__dirname, '../../../src', f), 'utf8')
     expect(fuente('routes/onboarding.routes.ts')).toMatch(/router\.post\('\/verify-email', limiteIntentosDeCodigo,/)
     const publicas = fuente('routes/public.routes.ts')
-    expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, limiteIntentosDeCodigo, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
+    expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
     expect(publicas).toMatch(/router\.post\('\/alta\/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest\(altaReenviarSchema\), reenviarAlta\)/)
     expect(publicas).toMatch(/altaLandingConCodigo\(\) \? next\(\) : next\(new NotFoundError\(\)\)/)
   })

@@ -17,6 +17,9 @@ import { ipDelCliente, llavePorCorreoOIp } from '../utils/clientIp'
 // Más permisivo en desarrollo para poder probar a mano.
 const isDevelopment = process.env.NODE_ENV !== 'production'
 
+/** Marca de `res.locals` con la que `/contact` pide que el 429 salga en JSON y en español. */
+const RESPUESTA_EN_JSON = 'limiteDeCodigoEnJson'
+
 /** Adivinar el código: 5 intentos por correo cada 15 minutos (en desarrollo, 50). */
 export const limiteIntentosDeCodigo = rateLimit({
   windowMs: 15 * 60 * 1000, // 15 minutes
@@ -25,10 +28,25 @@ export const limiteIntentosDeCodigo = rateLimit({
   standardHeaders: true,
   legacyHeaders: false,
   keyGenerator: llavePorCorreoOIp,
+  handler: (_req, res, _next, options) => {
+    if (res.locals[RESPUESTA_EN_JSON]) {
+      res.status(options.statusCode).json({
+        success: false,
+        code: 'DEMASIADOS_INTENTOS',
+        message: 'Hiciste demasiados intentos. Espera unos minutos y pide un código nuevo.',
+      })
+      return
+    }
+    // Idéntico al manejador por defecto de express-rate-limit: onboarding no cambia.
+    res.status(options.statusCode).send(options.message)
+  },
 })
 
-/** Marca de `res.locals` con la que `/contact` pide que el 429 salga en JSON y en español. */
-const RESPUESTA_EN_JSON = 'limiteDeCodigoEnJson'
+/** MISMA instancia (mismo contador) que `limiteIntentosDeCodigo`, pero el 429 sale en JSON y en español: para `/public/alta/verificar`. */
+export const limiteIntentosDeCodigoEnAlta: RequestHandler = (req, res, next) => {
+  res.locals[RESPUESTA_EN_JSON] = true
+  return limiteIntentosDeCodigo(req, res, next)
+}
 
 /**
  * Mandar códigos al correo de alguien: 3 por correo por hora (en desarrollo, 20).

@@ -58,7 +58,7 @@ async function prospecto(
   const id = `${sufijo}-${n}`
   const resetToken = crypto.randomBytes(32).toString('hex')
   const org = await prisma.organization.create({
-    data: { id, name: id, email: `${id}@test.mx`, phone: '5500000000', ...(altaTerminada ? { onboardingCompletedAt: new Date() } : {}) },
+    data: { name: id, email: `${id}@test.mx`, phone: '5500000000', ...(altaTerminada ? { onboardingCompletedAt: new Date() } : {}) },
   })
   orgIds.push(org.id)
   const staff = await prisma.staff.create({
