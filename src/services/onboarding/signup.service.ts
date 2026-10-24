@@ -77,12 +77,64 @@ export interface LandingSignupResult {
   /** true = ya es cliente (tiene contrasena). Cambia el correo que se le manda
    *  y el aviso interno: no es un prospecto nuevo. */
   yaEsCliente: boolean
+  /** Código de 6 dígitos EN CLARO, sólo para el correo de bienvenida (en la DB vive tal cual,
+   *  igual que el del alta del dashboard). null con el interruptor `ALTA_LANDING_CON_CODIGO`
+   *  apagado, si ya es cliente, o si la cuenta existente no es un prospecto de landing (Google,
+   *  empleado sin contraseña): a esos NO se les manda código. */
+  codigoVerificacion: string | null
 }
 
 export interface VerifyEmailResult {
   emailVerified: boolean
   accessToken: string
   refreshToken: string
+}
+
+/**
+ * Interruptor del alta desde la landing CON CÓDIGO de 6 dígitos (`ALTA_LANDING_CON_CODIGO=true`).
+ * Se lee en CADA llamada, no al importar: prenderlo o apagarlo no pide reiniciar nada y las
+ * pruebas lo cambian sobre la marcha. Apagado, el alta es exactamente la de siempre.
+ */
+export function altaLandingConCodigo(): boolean {
+  return process.env.ALTA_LANDING_CON_CODIGO === 'true'
+}
+
+/**
+ * Código de verificación de 6 dígitos, criptográficamente seguro, con 10 minutos de vigencia.
+ * Lo usan el alta del dashboard, el reenvío y el alta desde la landing: un solo generador.
+ * `randomInt` EXCLUYE el tope, por eso 1000000 (con 999999 el código 999999 nunca salía).
+ */
+export function nuevoCodigoDeVerificacion(): { codigo: string; expira: Date } {
+  return {
+    codigo: crypto.randomInt(100000, 1000000).toString(),
+    expira: new Date(Date.now() + 10 * 60 * 1000),
+  }
+}
+
+/**
+ * ¿Esta cuenta es un prospecto de landing que aún no termina su alta? (UNA consulta, sin N+1.)
+ *
+ * Verdadero sólo si TODO se cumple: la cuenta está activa, no es de Google, es OWNER de su
+ * organización primaria (activa) y esa organización NO ha terminado el onboarding. Con
+ * `exigirSinContrasena` (por defecto) además no debe tener contraseña: quien ya la fijó es un
+ * cliente. Quien ya terminó su alta o es un empleado sin contraseña NO es un prospecto, y por
+ * eso no se le regala un código que le abriría la cuenta.
+ */
+export async function esProspectoDeLanding(staffId: string, opts: { exigirSinContrasena?: boolean } = {}): Promise<boolean> {
+  const { exigirSinContrasena = true } = opts
+  const prospecto = await prisma.staff.findFirst({
+    where: {
+      id: staffId,
+      active: true,
+      googleId: null,
+      ...(exigirSinContrasena ? { password: null } : {}),
+      organizations: {
+        some: { role: OrgRole.OWNER, isActive: true, isPrimary: true, organization: { onboardingCompletedAt: null } },
+      },
+    },
+    select: { id: true },
+  })
+  return prospecto !== null
 }
 
 /**
@@ -135,12 +187,8 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
     }),
   )
 
-  // 5. Generate 6-digit cryptographically secure verification code and send email
-  const verificationCode = crypto.randomInt(100000, 999999).toString()
-
-  // Set expiration to 10 minutes from now
-  const expirationTime = new Date()
-  expirationTime.setMinutes(expirationTime.getMinutes() + 10)
+  // 5. Generate 6-digit cryptographically secure verification code (10 min) and send email
+  const { codigo: verificationCode, expira: expirationTime } = nuevoCodigoDeVerificacion()
 
   // Update staff record with verification code
   await prisma.staff.update({
@@ -304,12 +352,8 @@ export async function resendVerificationCode(email: string): Promise<{ success: 
     throw new BadRequestError('Email is already verified')
   }
 
-  // 3. Generate new 6-digit cryptographically secure verification code
-  const verificationCode = crypto.randomInt(100000, 999999).toString()
-
-  // 4. Set expiration to 10 minutes from now
-  const expirationTime = new Date()
-  expirationTime.setMinutes(expirationTime.getMinutes() + 10)
+  // 3. Generate new 6-digit cryptographically secure verification code (10 min)
+  const { codigo: verificationCode, expira: expirationTime } = nuevoCodigoDeVerificacion()
 
   // 5. Update staff record with new verification code
   await prisma.staff.update({
@@ -380,10 +424,17 @@ export async function checkEmailVerificationStatus(email: string): Promise<{ ema
  *     dejaria al usuario fuera aun despues de fijar su contrasena.
  *   - La cuenta nace vacia (sin venue ni datos), asi que no hay nada que
  *     proteger todavia mas alla del acceso mismo.
+ *
+ * Con `ALTA_LANDING_CON_CODIGO=true` (ver `altaLandingConCodigo`) la cuenta nace en cambio SIN
+ * verificar y con un código de 6 dígitos (10 min) que viaja en el correo de bienvenida: quien lo
+ * escribe demuestra que el correo es suyo y es lo que la verifica (los endpoints que lo canjean
+ * son de otras tareas). Una cuenta EXISTENTE sólo recibe código si `esProspectoDeLanding`; su
+ * `emailVerified` no se toca. Apagado, todo lo de arriba queda byte por byte como siempre.
  */
 export async function signupFromLanding(input: LandingSignupInput): Promise<LandingSignupResult> {
   const { email, firstName = '', lastName = '', organizationName = '', phone, source, utm, launchCampaignCode } = input
   const normalizedEmail = email.toLowerCase().trim()
+  const conCodigo = altaLandingConCodigo()
 
   // 1. Cuenta existente: hay DOS casos y tratarlos igual hace dano.
   const existing = await prisma.staff.findUnique({ where: { email: normalizedEmail } })
@@ -402,6 +453,7 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
       magicLinkToken: null,
       alreadyExisted: true,
       yaEsCliente: true,
+      codigoVerificacion: null,
     }
   }
 
@@ -410,9 +462,20 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
   if (existing) {
     // Alta previa por landing que nunca se completo (sin contrasena). Aqui SI se
     // renueva el link: es un recordatorio util, no una intromision.
+    //
+    // 🔴 El código es otra cosa: abre la cuenta. Sólo se le da a un PROSPECTO de landing; una
+    // cuenta de Google o un empleado sin contraseña (que también tienen `password: null`) siguen
+    // como hoy, sin código. Con el interruptor apagado ni se pregunta.
+    const codigo = conCodigo && (await esProspectoDeLanding(existing.id)) ? nuevoCodigoDeVerificacion() : null
     await prisma.staff.update({
       where: { id: existing.id },
-      data: { resetToken: hashedToken, resetTokenExpiry: expiryTime, resetTokenUsedAt: null },
+      data: {
+        resetToken: hashedToken,
+        resetTokenExpiry: expiryTime,
+        resetTokenUsedAt: null,
+        // `emailVerified` no se toca: ya verificada sigue verificada.
+        ...(codigo ? { emailVerificationCode: codigo.codigo, emailVerificationExpires: codigo.expira } : {}),
+      },
     })
     const orgPrevia = await getPrimaryOrganizationId(existing.id)
     // Alta previa sin terminar: vuelve por un anuncio, así que su campaña se ACTUALIZA (último
@@ -424,6 +487,7 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
       magicLinkToken: resetToken,
       alreadyExisted: true,
       yaEsCliente: false,
+      codigoVerificacion: codigo?.codigo ?? null,
     }
   }
 
@@ -434,6 +498,8 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
   // resolver, el alta sigue sin campaña — nunca al revés.
   const campanaReclamada = launchCampaignCode ? await findClaimableByCodeOrSlug(launchCampaignCode).catch(() => null) : null
   const utmParaProgreso = utm && Object.keys(utm).length > 0 ? utm : undefined
+  // Interruptor prendido: la cuenta nace SIN verificar y con código (10 min). Apagado: como siempre.
+  const codigoNuevo = conCodigo ? nuevoCodigoDeVerificacion() : null
 
   const result = await prisma.$transaction(async tx => {
     const organization = await tx.organization.create({
@@ -452,7 +518,8 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
         lastName,
         phone: phone || null,
         active: true,
-        emailVerified: true, // ver nota del encabezado
+        emailVerified: codigoNuevo === null, // true como siempre; false si nace con código (ver nota del encabezado)
+        ...(codigoNuevo ? { emailVerificationCode: codigoNuevo.codigo, emailVerificationExpires: codigoNuevo.expira } : {}),
         resetToken: hashedToken,
         resetTokenExpiry: expiryTime,
         resetTokenUsedAt: null,
@@ -521,6 +588,7 @@ export async function signupFromLanding(input: LandingSignupInput): Promise<Land
     magicLinkToken: resetToken,
     alreadyExisted: false,
     yaEsCliente: false,
+    codigoVerificacion: codigoNuevo?.codigo ?? null,
   }
 }
 
