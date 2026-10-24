@@ -28,6 +28,7 @@ import { applyLineRemoval } from './lineRemoval.service'
 import { assertDeliveryMoneyInvariants } from './money'
 import { contexto } from './respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from './types'
+import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 
 export type ResultadoReconciliacion = {
   /**
@@ -85,6 +86,8 @@ export async function reconcileDeliveryOrderFromProvider(
   // ponytail: se mide ANTES de pedir el tx, así la espera de conexión cuenta como gastada (conservador).
   const inicio = Date.now()
   let cerradoEnProveedor = false
+  // D4 (24-oct): el negocio de la compensación escrita, para quitar el sello DESPUÉS del commit.
+  let selloPorRevertir: string | null = null
   const r = await withDeliveryOrderLock(orderId, async (tx): Promise<ResultadoReconciliacion> => {
     const orden = await tx.order.findUnique({
       where: { id: orderId },
@@ -506,8 +509,18 @@ export async function reconcileDeliveryOrderFromProvider(
       eventId: opts.eventId,
       refundPaymentId,
     })
+    selloPorRevertir = venueId
     return { outcome: 'REFUNDED' as const }
   })
+  // D4 (24-oct): la compensación es una devolución: quita el sello de la venta, igual que la terminal y el POS. Sin `await` ni
+  // lanzar; la reversa es idempotente y espera el candado del cliente.
+  if (r.outcome === 'REFUNDED' && selloPorRevertir)
+    reverseStampForOrder(selloPorRevertir, orderId).catch(error =>
+      logger.error('[Delivery] No se pudo revertir el sello de una venta compensada', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
   // Sólo cuenta si la pasada llegó a reconciliar: una que falló después de leer no cierra nada.
   return r.outcome === 'READ_FAILED' ? r : { ...r, providerClosed: cerradoEnProveedor }
 }

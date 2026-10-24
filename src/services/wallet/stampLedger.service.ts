@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
+import { ventaTieneReembolso } from '../shared/ligaDeClienteEnVenta'
 
 /**
  * Cuarta ola (15-oct-2026): el MISMO presupuesto que la escritura de los puntos (`PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA` en
@@ -35,7 +36,14 @@ import { sendFirstStampEmailIfDue } from './firstStampEmail.service'
  *    de cartón, donde el empleado sella de más a un conocido y nadie se entera.
  */
 
-export type GrantStampReason = 'STAMPS_DISABLED' | 'ALREADY_STAMPED' | 'DAILY_LIMIT_REACHED' | 'PROGRAM_INACTIVE' | 'OTHER_CUSTOMER'
+// `ORDER_REFUNDED` es interno: sólo lo lee `earnPoints`; ninguna respuesta de la API lo manda a las apps.
+export type GrantStampReason =
+  | 'STAMPS_DISABLED'
+  | 'ALREADY_STAMPED'
+  | 'DAILY_LIMIT_REACHED'
+  | 'PROGRAM_INACTIVE'
+  | 'OTHER_CUSTOMER'
+  | 'ORDER_REFUNDED'
 
 // ── Avisos al pase y correos del primer sello, en SEGUNDO PLANO (H7) ───────────────────────────────────────────────────
 //
@@ -173,6 +181,7 @@ function esChoqueDelSelloDeLaOrden(error: unknown): boolean {
 
 type DentroDelCandado =
   | { otorgado: false; reason: 'DAILY_LIMIT_REACHED' }
+  | { otorgado: false; reason: 'ORDER_REFUNDED' }
   | { otorgado: false; reason: 'ALREADY_STAMPED'; cardId: string }
   | { otorgado: false; reason: 'OTHER_CUSTOMER' }
   | { otorgado: true; cardId: string; ganados: number; meta: number; completed: boolean; rewardId?: string }
@@ -225,6 +234,11 @@ export async function grantStamp(
         select: { id: true, stampCardId: true },
       })
       if (propio) return { otorgado: false, reason: 'ALREADY_STAMPED', cardId: propio.stampCardId }
+
+      // 🔴 D3 (24-oct): una venta ya devuelta no da sello, la misma regla que la lealtad tardía (`ventaTieneReembolso`). Se lee
+      // bajo el candado de la venta: si la devolución entra DESPUÉS de esta lectura, su reversa espera ese mismo candado (ver
+      // `reverseStampForOrder`) y quita el sello que esta transacción deje.
+      if (await ventaTieneReembolso(tx, { venueId, orderId })) return { otorgado: false, reason: 'ORDER_REFUNDED' }
 
       // H4, tercera ola: si OTRO cliente ya recibió los PUNTOS de esta venta, este sello tampoco se da.
       const puntosDeOtro = await tx.loyaltyTransaction.findFirst({
@@ -450,10 +464,16 @@ export async function reverseStampForOrder(
   orderId: string,
   options: { staffVenueId?: string } = {},
 ): Promise<ReverseStampResult> {
-  const otorgado = await prisma.stampEvent.findFirst({
-    where: { venueId, orderId, type: StampEventType.EARN },
-    select: { id: true, stampCardId: true, quantity: true },
-  })
+  // 🔴 D3 (24-oct): el sello se busca bajo el candado de la VENTA, el mismo que `grantStamp` sostiene hasta su commit. Sin él, un
+  // cobro que estaba otorgando cuando entró la devolución todavía no se veía aquí; la reversión salía sin hacer nada y el sello
+  // quedaba vivo. Transacción corta y sólo con ese candado: nunca se toma junto con el del cliente (no hay orden inverso).
+  const otorgado = await prisma.$transaction(async tx => {
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${orderId}))`
+    return tx.stampEvent.findFirst({
+      where: { venueId, orderId, type: StampEventType.EARN },
+      select: { id: true, stampCardId: true, quantity: true },
+    })
+  }, PRESUPUESTO_DEL_SELLO)
   if (!otorgado) return { reversed: false }
 
   // 🔴 Un mismo cobro puede reembolsarse en partes, y cada parte pasa por aquí. Sin
