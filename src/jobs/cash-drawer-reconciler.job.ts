@@ -3,7 +3,12 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { logAction } from '../services/dashboard/activity-log.service'
 import { scheduleJob } from '../observability/jobContext'
-import { postCashRefundToDrawer, postCashSaleToDrawer, cashRefundDrawerLocalId } from '../services/shared/cashDrawerPosting'
+import {
+  postCashRefundToDrawer,
+  postCashSaleToDrawer,
+  cashRefundDrawerLocalId,
+  cashSaleDrawerLocalId,
+} from '../services/shared/cashDrawerPosting'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../services/shared/tenderSemantics'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -56,6 +61,8 @@ export interface UnpostedCashPayment {
   tenderCountsAsCash: boolean | null
   amount: unknown
   tipAmount: unknown
+  /** Rappi 2b: lo cobrado por cuenta de un tercero; su PAY_IN va a la misma sesión que la venta. */
+  thirdPartyCashAmount?: unknown
   processedById: string | null
   createdAt: Date
 }
@@ -120,6 +127,8 @@ interface Dependencies {
   findUnpostedCashPayments: (since: Date, until: Date, limit: number) => Promise<UnpostedCashPayment[]>
   findUnpostedCashRefunds: (since: Date, until: Date, limit: number) => Promise<UnpostedCashPayment[]>
   findSessionsCovering: (venueId: string, at: Date) => Promise<SessionWindow[]>
+  /** Rappi 2b: la sesión donde YA quedó la venta de este cobro (`srv-cash-sale:`), o null. */
+  findCashSaleSession: (venueId: string, paymentId: string) => Promise<string | null>
   postSale: (p: UnpostedCashPayment, sessionId: string) => Promise<string>
   postRefund: (p: UnpostedCashPayment, sessionId: string) => Promise<string>
 }
@@ -153,9 +162,23 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
         p."fundsFlow" = 'CASH_DRAWER'
         OR (p."fundsFlow" IS NULL AND (p.method = 'CASH' OR p."tenderCountsAsCash" = true))
       )
-      AND NOT EXISTS (
-        SELECT 1 FROM "CashDrawerEvent" e
-        WHERE e."venueId" = p."venueId" AND e."localId" = 'srv-cash-sale:' || p.id
+      AND (
+        (
+          NOT EXISTS (
+            SELECT 1 FROM "CashDrawerEvent" e
+            WHERE e."venueId" = p."venueId" AND e."localId" = 'srv-cash-sale:' || p.id
+          )
+          -- Rappi 2b: un cobro que sólo cubrió la tarifa de Rappi no tiene venta que anotar (sin esto volvería en cada barrido).
+          AND (p."thirdPartyCashAmount" IS NULL OR p.amount + p."tipAmount" > 0)
+        )
+        -- Rappi 2b: la entrada de lo cobrado por cuenta de Rappi que se perdió (el proceso murió tras el commit).
+        OR (
+          COALESCE(p."thirdPartyCashAmount", 0) > 0
+          AND NOT EXISTS (
+            SELECT 1 FROM "CashDrawerEvent" t
+            WHERE t."venueId" = p."venueId" AND t."localId" = 'srv-third-party:' || p.id
+          )
+        )
       )
       AND EXISTS (
         SELECT 1 FROM "CashDrawerSession" s
@@ -189,6 +212,7 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
       type: true,
       amount: true,
       tipAmount: true,
+      thirdPartyCashAmount: true,
       processedById: true,
       createdAt: true,
       ...TENDER_SEMANTICS_SELECT,
@@ -272,6 +296,9 @@ export const defaults: Dependencies = {
   findUnpostedCashPayments: findUnpostedCashPaymentsDb,
   findUnpostedCashRefunds: findUnpostedCashRefundsDb,
   findSessionsCovering: findSessionsCoveringDb,
+  findCashSaleSession: async (venueId, paymentId) =>
+    (await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId: cashSaleDrawerLocalId(paymentId) }, select: { sessionId: true } }))
+      ?.sessionId ?? null,
   postSale: (p, sessionId) =>
     postCashSaleToDrawer({
       venueId: p.venueId,
@@ -281,6 +308,7 @@ export const defaults: Dependencies = {
       type: p.type,
       amount: p.amount as never,
       tipAmount: p.tipAmount as never,
+      thirdPartyCashAmount: (p.thirdPartyCashAmount ?? null) as never,
       method: p.method,
       fundsFlow: p.fundsFlow,
       tenderTypeId: p.tenderTypeId,
@@ -370,6 +398,11 @@ export class CashDrawerReconcilerJob {
       const sessionCache = new Map<string, SessionWindow[]>()
 
       const resolveSession = async (p: UnpostedCashPayment): Promise<DrawerChoice> => {
+        // Rappi 2b: si la venta de este cobro ya quedó en una caja, su entrada de Rappi va a ESA (aunque ya se haya cerrado).
+        if (Number(p.thirdPartyCashAmount ?? 0) > 0) {
+          const deLaVenta = await this.d.findCashSaleSession(p.venueId, p.id)
+          if (deLaVenta) return { kind: 'SESSION', id: deLaVenta }
+        }
         const key = `${p.venueId}:${p.createdAt.toISOString()}`
         let windows = sessionCache.get(key)
         if (!windows) {

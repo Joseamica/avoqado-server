@@ -6,11 +6,15 @@ import { buildWatchdogSql } from '@/jobs/money-integrity-watchdog.job'
 // tables are changed, and rollback drops everything even when an assertion fails.
 const tables = {
   Organization: 'id text, name text',
-  Venue: 'id text, name text, slug text, "organizationId" text',
+  // `timezone`: la decisión B (22-oct) lee la zona del negocio para saber si se acabó su día. NULL = la zona de default.
+  Venue: 'id text, name text, slug text, "organizationId" text, timezone text',
   Order: `id text, "venueId" text, "orderNumber" text, source text, "originSystem" text,
     status text, "paymentStatus" text, subtotal numeric, "discountAmount" numeric,
     "serviceChargeAmount" numeric, "taxAmount" numeric, "tipAmount" numeric,
-    total numeric, "paidAmount" numeric, "createdAt" timestamp, "updatedAt" timestamp, "completedAt" timestamp`,
+    total numeric, "paidAmount" numeric, "createdAt" timestamp, "updatedAt" timestamp, "completedAt" timestamp,
+    "providerAcceptedAt" timestamp, "scheduledFor" timestamp, "remainingBalance" numeric DEFAULT 0`,
+  // Decisión B (22-oct): la invariante 6 resta el pedido de plataforma que la cocina todavía prepara.
+  KdsOrder: 'id text, "orderId" text, "venueId" text, status text',
   // `createdAt`: la ventana de alerta (7bffb295) fecha la orden por su último cobro. NULL = la fecha de la orden.
   Payment:
     '"orderId" text, "venueId" text, amount numeric, "tipAmount" numeric, status text, type text, "originSystem" text, "createdAt" timestamp',

@@ -25,7 +25,7 @@ import {
 } from '../shared/discount.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
-import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
+import { assertNoLiveTerminalCharge, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
@@ -110,6 +110,9 @@ export async function getOrders(
     paymentStatus: {
       in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
     },
+    // Rappi 2b: un pedido de plataforma con efectivo por cobrar se cobra en «Pedidos en línea» del POS, que reparte lo recibido
+    // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
+    thirdPartyCashDue: null,
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list
@@ -3098,6 +3101,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // Rappi 2b: anular TODO un pedido de Rappi es cancelarlo; su mensaje dice qué hacer («cancélalo en la app de Rappi») y va antes
+      // del candado general de plataforma (T10), que frena cualquier otra anulación.
+      if (order.items.every(item => input.itemIds.includes(item.id))) rechazarCancelacionLocalDeRappi(order)
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 y de las guardas de cobro.
       rechazarSiEsImportada(order)
@@ -3155,6 +3161,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
       // When 0 items remain, order should be cancelled and removed from active list
       const isVoidingAllItems = remainingItems.length === 0
+      if (isVoidingAllItems) rechazarCancelacionLocalDeRappi(order)
       if (!isVoidingAllItems && itemsToVoid.some(esRenglonDeVale)) {
         throw new ConflictError(
           'Esta cuenta tiene vales: cancela la cuenta completa y vuelve a escanear los vales que sí vas a cobrar.',

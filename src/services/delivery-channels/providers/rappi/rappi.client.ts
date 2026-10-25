@@ -7,18 +7,40 @@
  * conectan las piezas. Un `if` de negocio en este archivo está en el lugar equivocado.
  *
  * ⚠️ RUTAS CON SUPUESTOS ABIERTOS (sin sandbox no se pueden confirmar):
- *   · El login se documenta como `/{host}/restaurants/auth/v1/token/login/{superficie}`.
+ *   · El login es `{hostDeLoginRappi}/restaurants/auth/v1/token/login/{superficie}/` (dominio nuevo, CON barra final:
+ *     medido en DEV el 20-oct). La API sigue en el host clásico (`hostRappi`).
  *   · La superficie `integrations` usa `/api/v2/restaurants-integrations-public-api/…` —
  *     ésa sí está publicada endpoint por endpoint.
- *   · Los prefijos de `utils` y `finance` NO están publicados completos: esas superficies
- *     esperan a la primera llamada real. No se inventaron aquí a propósito.
+ *   · `utils` va a `/api/rest-ops-utils/…` en el host clásico (M6 y M14, 22-oct: login 200 y `GET /store/schedule/{id}` 200).
+ *     El prefijo de `finance` NO está publicado completo: espera a la primera llamada real. No se inventó aquí a propósito.
  */
 import { env } from '@/config/env'
 import logger from '@/config/logger'
 
-import { llamarRappi, type AmbienteRappi, type RappiRespuesta } from './rappi.http'
-import { getRappiToken, type SuperficieRappi } from './rappi.token'
+import {
+  hostDeLoginRappi,
+  llamarRappi,
+  RappiEscrituraBloqueadaError,
+  TIMEOUT_RAPPI_MS,
+  type AmbienteRappi,
+  type RappiPeticion,
+  type RappiRespuesta,
+} from './rappi.http'
+import { anotarLoginExitoso, anotarLoginFallido, getRappiToken, tokenRappiValido, type SuperficieRappi } from './rappi.token'
+import { aplanarHorarioDeTienda, type FranjaActualRappi, type FranjaTiendaRappi } from './rappi.hours'
 import { aMotivoRappi, type ResultadoRechazo } from './rappi.rejectReason'
+import {
+  aplanarTiendas,
+  cuerpoAprovisionamiento,
+  elegirIdToken,
+  hostDeLogin,
+  leerRespuestaAprovisionamiento,
+  type RespuestaAprovisionamiento,
+  type TiendaRappi,
+} from './rappi.selfOnboarding'
+import { RAPPI_EVENTS } from './rappi.adapter'
+import { RUTA_POR_EVENTO, secretosDelEvento } from './rappi.webhookIngress'
+import { tiendaConWebhookHabilitado } from './rappi.webhooksRegistro'
 import type { DenyReason } from '../../core/types'
 
 const API = '/api/v2/restaurants-integrations-public-api'
@@ -41,6 +63,21 @@ function credenciales(): { clientId: string; clientSecret: string } {
   return { clientId, clientSecret }
 }
 
+/**
+ * ¿Hay llaves de la integración para el ambiente en uso? La pregunta del PING (`rappi.webhook.controller`): sin ellas no
+ * podemos contestarle a Rappi nada de lo que nos pida, así que la tienda no está "ahí para recibir".
+ * Envuelve `credenciales()` y NUNCA lanza ni imprime nada: el PING no puede revolver un Error (llega cada 3 minutos por
+ * tienda) y mucho menos soltar el texto de una llave. Devuelve sólo el booleano.
+ */
+export function credencialesPresentes(): boolean {
+  try {
+    credenciales()
+    return true
+  } catch {
+    return false
+  }
+}
+
 /** Tiendas donde SÍ se puede escribir. Vacía = ninguna — el candado del incidente 2026-08-17. */
 export function tiendasEscribiblesRappi(): string[] {
   const crudo = getRappiEnvironment() === 'SANDBOX' ? env.RAPPI_WRITABLE_STORE_IDS_SANDBOX : env.RAPPI_WRITABLE_STORE_IDS_PRODUCTION
@@ -56,30 +93,37 @@ export function tiendasEscribiblesRappi(): string[] {
  */
 async function fetchTokenReal(superficie: SuperficieRappi): Promise<{ access_token: string; expires_in?: number }> {
   const { clientId, clientSecret } = credenciales()
-  const { hostRappi } = await import('./rappi.http')
-  const url = `${hostRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)}/restaurants/auth/v1/token/login/${superficie}`
+  // 🔴 Dominio nuevo y barra FINAL: sin ella Rappi contesta 307 (medido el 20-oct).
+  const url = `${hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)}/restaurants/auth/v1/token/login/${superficie}/`
 
-  const r = await fetch(url, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
-  })
-  if (!r.ok) {
-    const cuerpo = await r.text()
-    logger.error('🚨 [Rappi] el login falló', { superficie, status: r.status, cuerpo: cuerpo.slice(0, 300) })
-    throw new Error(`[Rappi] login de ${superficie} respondió ${r.status}`)
+  let status: number | undefined
+  let motivo = 'TRANSPORTE'
+  try {
+    const r = await fetch(url, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ client_id: clientId, client_secret: clientSecret }),
+      signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
+    })
+    status = r.status
+    motivo = 'HTTP'
+    if (!r.ok) throw new Error(`[Rappi] login de ${superficie} respondió ${r.status}`)
+    motivo = 'RESPUESTA_INVALIDA'
+    const cuerpo = (await r.json()) as { access_token: string; expires_in?: number }
+    if (!tokenRappiValido(cuerpo?.access_token)) throw new Error(`[Rappi] la respuesta de ${superficie} no trae access_token válido`)
+    if (anotarLoginExitoso(superficie)) logger.info('[Rappi] el login volvió a funcionar', { superficie })
+    return cuerpo
+  } catch {
+    // Una sola racha cubre HTTP, transporte y cuerpo ilegible; el cuerpo del login puede contener secretos.
+    const datos = { superficie, status, motivo }
+    if (anotarLoginFallido(superficie)) logger.error('🚨 [Rappi] el login falló', datos)
+    else logger.warn('[Rappi] el login sigue fallando (ya se avisó; el aviso se repite cada hora mientras siga la racha)', datos)
+    throw new Error(`[Rappi] login de ${superficie} falló (${status ?? 'SIN_RESPUESTA'}; ${motivo})`)
   }
-  return (await r.json()) as { access_token: string; expires_in?: number }
 }
 
 /** Petición autenticada, con token cacheado y el candado de escrituras ya armados. */
-export async function rappiApi(peticion: {
-  superficie?: SuperficieRappi
-  metodo: string
-  ruta: string
-  cuerpo?: unknown
-  storeId?: string
-}): Promise<RappiRespuesta> {
+export async function rappiApi(peticion: Omit<RappiPeticion, 'superficie'> & { superficie?: SuperficieRappi }): Promise<RappiRespuesta> {
   return llamarRappi(
     {
       ambiente: getRappiEnvironment(),
@@ -132,11 +176,21 @@ export async function rechazarPedidoRappi(
 /**
  * "Ya está listo para el repartidor."
  *
- * ⚠️ Rappi documenta que después de TRES llamadas por pedido deja de hacer efecto — no es un
- * botón de reintento infinito.
+ * ⚠️ Rappi documenta que después de TRES solicitudes por pedido deja de ejecutar acciones y considera mal uso lo que siga.
+ * El tope lo lleva `rappiAdapter.markOrderReady` (contado en la base); aquí sólo sale la llamada. `reintentarEn401: false`
+ * hace que sea UNA petición HTTP aunque el token haya vencido (ver `RappiPeticion`).
  */
-export async function marcarListoRappi(orderId: string, storeId: string): Promise<RappiRespuesta> {
-  return rappiApi({ metodo: 'POST', ruta: `${API}/orders/${encodeURIComponent(orderId)}/ready-for-pickup`, storeId })
+export async function marcarListoRappi(
+  orderId: string,
+  storeId: string,
+  opciones: Pick<RappiPeticion, 'reintentarEn401'> = {},
+): Promise<RappiRespuesta> {
+  return rappiApi({
+    metodo: 'POST',
+    ruta: `${API}/orders/${encodeURIComponent(orderId)}/ready-for-pickup`,
+    storeId,
+    reintentarEn401: opciones.reintentarEn401,
+  })
 }
 
 /**
@@ -191,10 +245,299 @@ export async function habilitarTiendaRappi(
 }
 
 /**
- * El sondeo de pedidos: la RED por si un webhook se perdió (Rappi no documenta reintentos).
- * Devuelve sólo los pedidos pendientes de contestar, y el propio GET los pasa de READY a
- * SENT del lado de Rappi. El ritmo de 45 s lo pone el caller con `crearEspaciadorDeSondeo`.
+ * «Integrada sí/no» (Tarea 18): `PUT stores-pa/{storeId}/status?integrated=<bool>`. NO prende ni apaga la tienda: dice si sus pedidos
+ * llegan por la integración o se atienden a mano en el portal de aliados (por eso es aparte de `habilitarTiendaRappi`).
+ *
+ * 🔴 Host CLÁSICO (el de siempre, sin `host` alterno): la medición M9 (21-oct) contestó HTTP 500 «contact support» en los DOS
+ * hosts, así que el sandbox no decidió cuál es el bueno; hasta que Rappi lo aclare se queda en el de toda la API. Es una
+ * ESCRITURA: lleva `storeId`, así que el candado de tiendas aplica (fuera de la lista lanza `RappiEscrituraBloqueadaError` y no
+ * sale nada). Un 500 se DEVUELVE tal cual, no se lanza: quien llama (best-effort) lo registra.
  */
-export async function sondearPedidosRappi(): Promise<RappiRespuesta> {
-  return rappiApi({ metodo: 'GET', ruta: `${API}/orders` })
+export async function marcarTiendaIntegradaRappi(storeId: string, integrada: boolean): Promise<RappiRespuesta> {
+  return rappiApi({
+    metodo: 'PUT',
+    ruta: `${API}/stores-pa/${encodeURIComponent(storeId)}/status?integrated=${integrada}`,
+    storeId,
+  })
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  Horario regular de la tienda — API de Utils (Tarea 19), doc: `fuentes/es__utils.md` «Horarios de tiendas»
+// ────────────────────────────────────────────────────────────────────────────────────
+
+const UTILS = '/api/rest-ops-utils'
+const rutaDeHorario = (storeId: string, storeScheduleId?: number | string) =>
+  `${UTILS}/store/schedule/${encodeURIComponent(storeId)}${storeScheduleId === undefined ? '' : `/${encodeURIComponent(String(storeScheduleId))}`}`
+
+/**
+ * Lo que Rappi tiene hoy como horario regular, YA APLANADO a `{ id, day, starts_time, ends_time }` (horas en `HH:MM:SS`). Es una
+ * LECTURA: va sin `storeId`. Medido en DEV (M14): 200 `{"storeScheduleDays":[]}` para una tienda sin horario.
+ * 🔴 Un 2xx con un cuerpo que no se entiende LANZA (`aplanarHorarioDeTienda`): nunca se devuelve como «no hay franjas». Un
+ * no-2xx se devuelve tal cual, sin `franjas`.
+ */
+export async function listarHorarioTiendaRappi(storeId: string): Promise<RappiRespuesta & { franjas?: FranjaActualRappi[] }> {
+  const r = await rappiApi({ superficie: 'utils', metodo: 'GET', ruta: rutaDeHorario(storeId) })
+  if (!r.ok) return r
+  return { ...r, franjas: aplanarHorarioDeTienda(r.raw) }
+}
+
+/** Crea UNA franja (`POST`, cuerpo en snake_case). Escritura: lleva `storeId`, el candado de tiendas aplica. */
+export async function crearFranjaTiendaRappi(storeId: string, franja: FranjaTiendaRappi): Promise<RappiRespuesta> {
+  return rappiApi({
+    superficie: 'utils',
+    metodo: 'POST',
+    ruta: rutaDeHorario(storeId),
+    cuerpo: { day: franja.day, starts_time: franja.starts_time, ends_time: franja.ends_time },
+    storeId,
+  })
+}
+
+/** Cambia las horas de UNA franja existente (`PUT`, cuerpo en camelCase, a diferencia del POST). Escritura con candado. */
+export async function actualizarFranjaTiendaRappi(
+  storeId: string,
+  storeScheduleId: number | string,
+  franja: FranjaTiendaRappi,
+): Promise<RappiRespuesta> {
+  return rappiApi({
+    superficie: 'utils',
+    metodo: 'PUT',
+    ruta: rutaDeHorario(storeId, storeScheduleId),
+    cuerpo: { startsTime: franja.starts_time, endsTime: franja.ends_time },
+    storeId,
+  })
+}
+
+/** Borra UNA franja (`DELETE`; Rappi contesta 200 sin cuerpo). Escritura con candado. */
+export async function borrarFranjaTiendaRappi(storeId: string, storeScheduleId: number | string): Promise<RappiRespuesta> {
+  return rappiApi({ superficie: 'utils', metodo: 'DELETE', ruta: rutaDeHorario(storeId, storeScheduleId), storeId })
+}
+
+/**
+ * El historial de eventos de UN pedido del lado de Rappi (Tarea 9): lo único que dice si un pedido que contestó 400 al
+ * aceptar sí quedó aceptado (`taken_visible_order`). Medido el 21-oct en DEV: 200 con una lista; `[]` si nunca se aceptó.
+ * Es una LECTURA: va sin `storeId`, como las demás. 🔴 No confundir con el GET de pedidos por tienda (`sondearPedidosRappi`),
+ * que NO es una lectura: pasa los pedidos de READY a SENT. El cuerpo lo interpreta `leerRespuestaDelHistorial` (`rappi.estadoDelPedido`).
+ */
+export async function historialDelPedidoRappi(orderId: string): Promise<RappiRespuesta> {
+  return rappiApi({ metodo: 'GET', ruta: `${API}/orders/${encodeURIComponent(orderId)}/events` })
+}
+
+/**
+ * El sondeo de pedidos de UNA tienda: la RED por si su aviso NEW_ORDER se perdió (Tarea 20; Rappi no documenta reintentos).
+ *
+ * 🔴 NO es una lectura: el propio GET pasa los pedidos de READY a SENT del lado de Rappi, y quien lee primero se los lleva
+ * (medido el 22-oct, M13: el segundo GET, 26 s después, vino vacío). Por eso:
+ *   · es POR TIENDA y en el host NUEVO (`hostDeLoginRappi`; M13: 200 con la lista). El `GET {API}/orders` clásico es GLOBAL:
+ *     pasaría a SENT los pedidos de tiendas que no son nuestras o no están en la lista, y ya no se usa;
+ *   · lleva el candado de tiendas como una escritura (`cambiaEstado`): una tienda fuera de `RAPPI_WRITABLE_STORE_IDS_*` lanza
+ *     `RappiEscrituraBloqueadaError` y no sale nada;
+ *   · su único llamador es `rappi-order-poll.job.ts`, que guarda cada pedido ANTES de cualquier otra llamada de red. Nunca se
+ *     llama fuera del sondeo.
+ * Cada elemento de la lista tiene la forma del cuerpo del aviso NEW_ORDER (`{ store, customer, order_detail }`). El cuerpo lo
+ * interpreta el job; aquí sólo sale la llamada.
+ */
+export async function sondearPedidosRappi(storeId: string): Promise<RappiRespuesta> {
+  return rappiApi({
+    metodo: 'GET',
+    ruta: `/restaurants/orders/v1/stores/${encodeURIComponent(storeId)}/orders`,
+    host: hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY),
+    storeId,
+    cambiaEstado: true,
+  })
+}
+
+/**
+ * Los pedidos en SENT (entregados a la integración y todavía sin contestar) de TODAS las tiendas de la integración: la
+ * recuperación del sondeo (Tarea 20). Si el proceso muere entre el GET por tienda y el guardado, el pedido ya no vuelve por ese
+ * GET; vuelve por aquí (~10 min). Es una LECTURA (M13: 200 con la lista, mismo formato), host CLÁSICO y sin `storeId`: la
+ * variante por tienda del host nuevo da 404. Quien llama descarta los pedidos de tiendas que no son suyas.
+ */
+export async function pedidosEnviadosRappi(): Promise<RappiRespuesta> {
+  return rappiApi({ metodo: 'GET', ruta: `${API}/orders/status/sent` })
+}
+
+// ────────────────────────────────────────────────────────────────────────────────────
+//  Self-onboarding (spec 2026-09-29) — doc: dev-portal.rappi.com/es/self-onboarding
+// ────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Una base configurable, validada AQUÍ y no en el arranque: estas variables son de una función opcional, y
+ * un valor mal escrito en el env tumbaría TODA la API (`process.exit` del parseo). Lo que se niega es el flujo.
+ * La barra final se quita: `//api/...` ya no coincide con la `redirect_uri` registrada en Rappi, y un webhook
+ * con `//` no recibe nada sin avisar.
+ */
+function baseHttpValida(nombre: string, valor: string): string {
+  const base = valor.trim().replace(/\/+$/, '')
+  let url: URL | undefined
+  try {
+    url = new URL(base)
+  } catch {
+    // cae abajo: el mensaje es el mismo para «no es una URL» y «no es http(s)»
+  }
+  if (!url || (url.protocol !== 'http:' && url.protocol !== 'https:')) {
+    throw new Error(`${nombre} no es una URL http(s) válida (se configuró ${JSON.stringify(valor)}); ej. https://api.avoqado.io`)
+  }
+  return base
+}
+
+export function apiBaseSelfOnboarding(): string {
+  if (env.RAPPI_SELF_ONBOARDING_API_BASE) return baseHttpValida('RAPPI_SELF_ONBOARDING_API_BASE', env.RAPPI_SELF_ONBOARDING_API_BASE)
+  // Ya publicado (docs de Rappi, «dominios nuevos»): DEV `api.dev.rappi.com`, México `api.rappi.com.mx`. La variable sólo lo sustituye.
+  return hostDeLoginRappi(getRappiEnvironment(), env.RAPPI_COUNTRY)
+}
+
+const RUTA_CALLBACK = '/api/v1/delivery/rappi/oauth/callback'
+
+export function redirectUriRappi(): string {
+  if (!env.RAPPI_OAUTH_REDIRECT_BASE) throw new Error('Falta RAPPI_OAUTH_REDIRECT_BASE (debe ser idéntica a la registrada con el TAM).')
+  return `${baseHttpValida('RAPPI_OAUTH_REDIRECT_BASE', env.RAPPI_OAUTH_REDIRECT_BASE)}${RUTA_CALLBACK}`
+}
+
+/** La base pública a la que Rappi manda los pedidos de cada tienda. */
+function baseDeWebhooksRappi(): string {
+  if (!env.RAPPI_WEBHOOK_BASE_URL) throw new Error('Falta RAPPI_WEBHOOK_BASE_URL')
+  return baseHttpValida('RAPPI_WEBHOOK_BASE_URL', env.RAPPI_WEBHOOK_BASE_URL)
+}
+
+/** Eventos cuya URL es POR TIENDA. `STORE_PROVISIONING_STATUS` es por integración: no va aquí. */
+const EVENTOS_POR_TIENDA = Object.entries(RUTA_POR_EVENTO).filter(([, ev]) => ev !== RAPPI_EVENTS.STORE_PROVISIONING_STATUS)
+
+/**
+ * 🔴 Todo lo que el self-onboarding va a necesitar, validado ANTES de crear el intent. Sin esto, una base de
+ * webhooks faltante se descubría hasta suscribir: Rappi ya había aprovisionado la tienda y ésta se quedaba sin
+ * recibir pedidos. Devuelve la base del enlace de inicio — la MISMA de la `redirect_uri` registrada en Rappi.
+ * Incluye el secreto de CADA webhook que la tienda va a recibir (la misma lista que `suscribirTiendaAEventos`,
+ * más el aviso de aprovisionamiento): Rappi acepta la suscripción aunque nos falte, y luego nuestro endpoint le
+ * contesta 401 a cada pedido.
+ * También las dos llaves de Rappi (la integración M2M y el Client ID del login del dueño): sin ellas el dueño ya
+ * habría autorizado en Rappi cuando el canje o el aprovisionamiento fallaran, con el intent creado.
+ */
+export function preflightSelfOnboardingRappi(): string {
+  credenciales()
+  clientIdRappi()
+  const callback = redirectUriRappi()
+  apiBaseSelfOnboarding()
+  baseDeWebhooksRappi()
+  const eventos = [RAPPI_EVENTS.STORE_PROVISIONING_STATUS, ...EVENTOS_POR_TIENDA.map(([, ev]) => ev)]
+  const sinSecreto = eventos.filter(ev => secretosDelEvento(env.RAPPI_WEBHOOK_SECRETS, ev).length === 0)
+  if (sinSecreto.length) {
+    throw new Error(`Falta en RAPPI_WEBHOOK_SECRETS el secreto de ${sinSecreto.join(', ')} (Rappi lo entrega al registrar cada webhook).`)
+  }
+  return callback.slice(0, -RUTA_CALLBACK.length)
+}
+
+/**
+ * Client ID del login del DUEÑO (self-onboarding). 🔴 No es el de la integración: al activar Self Onboarding en el
+ * Integrations Manager, Rappi crea otra aplicación con su propio Client ID (verificado el 14-oct en DEV). Nunca cae
+ * al de la integración: el login de Rappi lo rechazaría y el dueño vería un error de Rappi, no el nuestro.
+ */
+export function clientIdRappi(): string {
+  const sufijo = getRappiEnvironment() === 'SANDBOX' ? 'SANDBOX' : 'PRODUCTION'
+  const clientId = (
+    sufijo === 'SANDBOX' ? env.RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX : env.RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION
+  )?.trim()
+  if (!clientId) {
+    throw new Error(
+      `Falta RAPPI_SELF_ONBOARDING_CLIENT_ID_${sufijo}: es el Client ID de la página Self Onboarding del Integrations Manager ` +
+        '(distinto al de la integración).',
+    )
+  }
+  return clientId
+}
+
+/** Cliente PÚBLICO con PKCE: sin `client_secret` (doc). Devuelve el id_token, nunca el access_token. */
+export async function canjearCodigoRappi(code: string, verifier: string): Promise<string> {
+  const r = await fetch(`${hostDeLogin(getRappiEnvironment())}/oauth/token`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
+      grant_type: 'authorization_code',
+      code,
+      client_id: clientIdRappi(),
+      code_verifier: verifier,
+      redirect_uri: redirectUriRappi(),
+    }).toString(),
+    signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
+  })
+  if (!r.ok) {
+    logger.error('🚨 [Rappi] el canje del código falló', { status: r.status })
+    throw new Error(`RAPPI_CANJE_${r.status}`)
+  }
+  return elegirIdToken(await r.json())
+}
+
+const deComercio = (idToken: string) => {
+  if (!tokenRappiValido(idToken)) throw new Error('RAPPI_ID_TOKEN_INVALIDO')
+  return { 'Authorization-Partners': `Bearer ${idToken}` }
+}
+
+export async function tiendasDelComercio(idToken: string): Promise<TiendaRappi[]> {
+  const r = await rappiApi({
+    metodo: 'GET',
+    ruta: `${API}/stores/integration-status`,
+    host: apiBaseSelfOnboarding(),
+    cabecerasExtra: deComercio(idToken),
+  })
+  if (!r.ok) throw new Error(`RAPPI_INTEGRATION_STATUS_${r.status}`)
+  return aplanarTiendas(JSON.parse(r.raw))
+}
+
+export async function aprovisionarTiendasRappi(
+  idToken: string,
+  tiendas: Array<{ storeId: string; name: string }>,
+): Promise<RespuestaAprovisionamiento> {
+  const pedidas = tiendas.map(t => t.storeId)
+  const r = await rappiApi({
+    metodo: 'POST',
+    ruta: `${API}/stores/provisioning`,
+    host: apiBaseSelfOnboarding(),
+    cabecerasExtra: deComercio(idToken),
+    storeIds: pedidas,
+    cuerpo: cuerpoAprovisionamiento(tiendas),
+  })
+  return leerRespuestaAprovisionamiento(r.status, r.raw, pedidas)
+}
+
+/**
+ * 🔴 El paso que se olvida: una tienda aprovisionada pero sin suscribir a cada webhook queda
+ * "conectada" y no recibe NADA. Se reporta qué eventos fallaron para no promoverla a ACTIVE.
+ *
+ * Siempre devuelve `{ ok, fallidos }`: un fallo de red en UN evento (la llamada lanza) cuenta como fallido y se
+ * sigue con los demás. La única excepción es el candado: un rechazo de `RappiEscrituraBloqueadaError` no es un
+ * fallo por evento sino una tienda que NO se puede escribir, así que se relanza.
+ */
+export async function suscribirTiendaAEventos(storeId: string): Promise<{ ok: boolean; fallidos: string[] }> {
+  const base = baseDeWebhooksRappi()
+  const fallidos: string[] = []
+  for (const [segmento, evento] of EVENTOS_POR_TIENDA) {
+    try {
+      const url = `${base}/api/v1/webhooks/delivery/rappi/${segmento}`
+      const r = await rappiApi({
+        metodo: 'PUT',
+        ruta: `${API}/webhook/${evento}/add-stores`,
+        storeId,
+        cuerpo: [{ url, stores: [storeId] }],
+      })
+      if (r.status === 406) {
+        const actual = await rappiApi({ metodo: 'GET', ruta: `${API}/webhook/${evento}` })
+        let cuerpo: unknown
+        try {
+          cuerpo = actual.ok ? JSON.parse(actual.raw) : null
+        } catch {
+          cuerpo = null
+        }
+        if (tiendaConWebhookHabilitado(evento, cuerpo, storeId, url)) continue
+      }
+      if (!r.ok) fallidos.push(evento)
+    } catch (error) {
+      if (error instanceof RappiEscrituraBloqueadaError) throw error
+      logger.error('🚨 [Rappi] la suscripción de un evento lanzó', {
+        storeId,
+        evento,
+        error: error instanceof Error ? error.message : String(error),
+      })
+      fallidos.push(evento)
+    }
+  }
+  return { ok: fallidos.length === 0, fallidos }
 }

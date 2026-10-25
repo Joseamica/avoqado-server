@@ -260,6 +260,10 @@ const PAYMENT_LANE = (mentions: string) =>
 
 /** Fiscal writers (detected by the scan). Keys are `file#owner`. */
 const WRITERS: Record<string, Writer> = {
+  'src/services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado': {
+    class: 'METADATA',
+    reason: 'platform order closed by status and dates only; the raw UPDATE rechecks decision B without writing money columns',
+  },
   // ── TPV line and inline-discount writers (T2) ─────────────────────────────────────────────────
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': {
     class: 'LOCKED',

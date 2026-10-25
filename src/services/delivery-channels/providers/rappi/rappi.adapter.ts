@@ -1,21 +1,21 @@
 /**
  * Adaptador de Rappi — los CINCO métodos obligatorios del contrato directo.
  *
- * 🔴 ESTE ADAPTADOR NO ESTÁ REGISTRADO TODAVÍA, y es a propósito.
+ * 🔴 Este adaptador YA ESTÁ REGISTRADO en `adapterRegistry` (fase 2, Tarea 5).
  *
- * `adapterRegistry` es la única fuente de verdad de "¿ya hay a quién delegarle?", y el
- * dashboard pinta `integrationReady` a partir de él. Registrarlo hoy diría que Rappi funciona
- * cuando lo único que existe es lo que se puede escribir SIN sandbox: traducir lo que entra.
- * No hay forma de aceptar un pedido, publicar un menú ni prender la tienda, porque no hay
- * credenciales con las que probar una sola llamada de salida.
+ * `adapterRegistry` es la única fuente de verdad de "¿ya hay a quién delegarle?", y el dashboard
+ * pinta `integrationReady` a partir de él. Con el registro, un canal RAPPI deja de verse como "no
+ * lista": se puede pausar y reanudar la tienda desde Avoqado, y el menú, los agotados y el horario
+ * viajan con las mismas llamadas que Uber.
  *
- * Registrarlo es UNA línea en `adapterRegistry.ts` el día que Rappi conteste el alta. Hasta
- * entonces, un canal RAPPI se ve como "no lista" — que es la verdad.
+ * Rappi cancela solo el pedido que no se acepta en 4–6 minutos, por eso este adaptador declara
+ * `soloAceptacionAutomatica`: no hay modo manual (ver la propiedad, más abajo).
  *
  * Lo que sí está aquí es lo caro y lo verificable: la firma (algoritmo distinto al de Uber),
  * la traducción de los 11 eventos, el mapeo del pedido con su red de cuadre, y las llamadas
  * de salida escritas contra los endpoints publicados — TODAS pasan por el candado de tiendas
- * de `rappi.http`, así que con la lista vacía ninguna puede tocar un comercio real.
+ * de `rappi.http`, así que una tienda fuera de la lista de escritura del ambiente (o con la lista
+ * vacía) no la puede tocar ninguna.
  *
  * 🔴 Las capacidades usan `import()` PEREZOSO de `rappi.client` a propósito: ese módulo lee
  * `@/config/env`, que valida y hace `process.exit` al cargarse — un import normal mataría a
@@ -23,13 +23,26 @@
  */
 import type { DeliveryProvider } from '@prisma/client'
 
-import type { ActionResult, CanonicalDeliveryEvent, DenyReason, EventIdentity, NormalizedDeliveryOrder } from '../../core/types'
+import {
+  DeliveryWriteNotSentError,
+  type ActionResult,
+  type CanonicalDeliveryEvent,
+  type DenyReason,
+  type EventIdentity,
+  type NormalizedDeliveryOrder,
+  type ProblemaDeMenu,
+  type PublicacionDeMenu,
+} from '../../core/types'
 import type { MenuSnapshot } from '../../core/menuSnapshot.service'
 import type { HorarioSemanal } from '../../core/deliveryHours.service'
-import { aHorarioRappi } from './rappi.hours'
+// Sólo el TIPO (se borra al compilar): `rappi.estadoDelPedido` importa este archivo, así que su código se carga perezoso.
+import type { CierreDeListo } from './rappi.estadoDelPedido'
+import { aFranjasDeTienda, aHorarioRappi, DIAS_RAPPI, planDeHorario, type OperacionDeHorario } from './rappi.hours'
 import { construirMenuRappi, type PreciosDeCanal } from './rappi.menuMapper'
-import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type RappiOrderPayload } from './rappi.mapper'
+import { extraerStoreId, normalizeRappiOrder, tiempoDeCoccion, type OpcionesDeTraduccion, type RappiOrderPayload } from './rappi.mapper'
 import { verifyRappiSignature } from './rappi.signature'
+import { instruccionesParaCancelarRappi } from './rappi.cancellation'
+export { CANCELAR_ACEPTADO_RAPPI } from './rappi.cancellation'
 
 /** Los 11 eventos que Rappi documenta, tal cual los nombra. */
 export const RAPPI_EVENTS = {
@@ -48,6 +61,14 @@ export const RAPPI_EVENTS = {
 
 export const rappiAdapter = {
   provider: 'RAPPI' as DeliveryProvider,
+
+  /**
+   * 🔴 Rappi no admite el modo MANUAL: cancela el pedido que no se acepta en 4 a 6 minutos, así que una
+   * cocina que "decide desde el POS" lo dejaría vencer. El núcleo lee este texto (nunca compara contra
+   * el nombre del proveedor) y rechaza el MANUAL al crear o editar un canal con él.
+   */
+  soloAceptacionAutomatica:
+    'Los pedidos de Rappi se aceptan solos: Rappi los cancela si no se aceptan en 4 a 6 minutos. Para dejar de recibirlos, pausa la tienda.',
 
   /**
    * HMAC-SHA256 sobre `timestamp.payload` — NO sobre el body crudo como Uber.
@@ -144,16 +165,18 @@ export const rappiAdapter = {
     return [RAPPI_EVENTS.NEW_ORDER, RAPPI_EVENTS.NEW_ORDER_SCHEDULED]
   },
 
-  normalizeOrder(raw: unknown): NormalizedDeliveryOrder {
-    return normalizeRappiOrder(raw)
+  /** `opts` es de Rappi (la zona del negocio para la hora del pedido); el núcleo llama con el crudo solo. */
+  normalizeOrder(raw: unknown, opts?: OpcionesDeTraduccion): NormalizedDeliveryOrder {
+    return normalizeRappiOrder(raw, opts)
   },
 
   /**
    * Aceptar, declarando los minutos de preparación que RAPPI mismo sugirió en el pedido.
    *
-   * Este camino lo usa el botón "Aceptar" del POS (modo MANUAL), que sólo trae los ids: el
-   * tiempo se recupera del evento persistido — el pedido completo viajó en el webhook y ahí
-   * quedó guardado. Sin dato se cae al recorte de `tiempoDeCoccion`, nunca a un número fuera
+   * Este camino lo usa el botón "Aceptar" del POS (`acceptDeliveryOrder`), que sólo trae los ids. Rappi ya no admite el
+   * modo MANUAL: el procesador de eventos acepta SIEMPRE solo (`rappi.eventProcessor.ts`), así que el botón sólo aplica a un
+   * pedido PENDING viejo, de antes de esa migración. El tiempo se recupera del evento persistido — el pedido completo
+   * viajó en el webhook y ahí quedó guardado. Sin dato se cae al recorte de `tiempoDeCoccion`, nunca a un número fuera
    * del rango (Rappi lo rechazaría y el pedido seguiría vivo con el reloj corriendo).
    */
   async acceptOrder(orderId: string, storeId: string): Promise<ActionResult> {
@@ -181,10 +204,85 @@ export const rappiAdapter = {
     return http as ActionResult
   },
 
-  /** "Listo para el repartidor". ⚠️ Rappi ignora la CUARTA llamada en adelante por pedido. */
-  async markReady(orderId: string, storeId: string): Promise<ActionResult> {
-    const { marcarListoRappi } = await import('./rappi.client')
-    return marcarListoRappi(orderId, storeId)
+  /**
+   * 🔴 No hay `cancelOrder` A PROPÓSITO: Rappi no deja cancelar por API un pedido ya aceptado (M11). Sin él, el núcleo no
+   * cancela nada en Avoqado y muestra ESTE texto, que depende de quién entrega (`order_detail.delivery_method` del aviso
+   * `NEW_ORDER` guardado en la venta, leído igual que en la ingesta: sin mayúsculas ni espacios). Sin el dato, o con uno
+   * que no se reconoce, el del soporte: nunca se manda a una app que quizá no aplica.
+   */
+  instruccionesParaCancelar: instruccionesParaCancelarRappi,
+
+  /**
+   * "Listo para el repartidor". 🔴 Se llama `markOrderReady` porque es el nombre que el núcleo busca: con el nombre viejo
+   * (`markReady`) el núcleo contestaba NOT_A_DELIVERY_ORDER y Rappi nunca se enteraba.
+   *
+   * Rappi deja de ejecutar acciones después de la TERCERA solicitud por pedido, y lo que siga es mal uso. Por eso cada
+   * llamada se reserva y se CUENTA en la base ANTES de salir (`reservarLlamadaDeListo`, en la fila del aviso `NEW_ORDER`): un
+   * reinicio no las olvida. Y cada reserva es UNA petición HTTP (`reintentarEn401: false`).
+   *  · sin permiso (ya se usaron las 3, o ya cerró) ⇒ no sale a la red: `terminal`, `TOPE_DE_LISTO`;
+   *  · sin el aviso del pedido, ni por su llave ni por el pedido (no hay dónde contar) ⇒ tampoco sale: `terminal`,
+   *    `LISTO_SIN_AVISO`, sin cierre (no hay fila; el 🚨 lo deja la reserva). Codex b1 #4;
+   *  · 2xx ⇒ se cierra (`HTTP_2XX`);
+   *  · 400 de transición inválida ⇒ se cierra y es `terminal` (repetirla daría lo mismo);
+   *  · el candado de tiendas o un token que no se pudo pedir (`DeliveryWriteNotSentError`: la llamada NO salió, Rappi no recibió
+   *    nada) ⇒ se DEVUELVE la reserva (`devolverLlamadaDeListo`) y el error se relanza igual: no gasta una de las 3;
+   *  · lo demás (el 424 «inténtelo más tarde» que dio el sandbox, un 5xx, un 401) se devuelve tal cual: ya contó.
+   * Si la reserva no se puede escribir, la llamada NO sale (sin contar no se llama). Si falla el CIERRE, la respuesta se
+   * devuelve igual: el 2xx no se pierde (el núcleo lo acredita) y, sin cierre, el tope sigue protegiendo.
+   */
+  async markOrderReady(orderId: string, storeId: string): Promise<ActionResult> {
+    const [{ marcarListoRappi }, estado, { default: logger }] = await Promise.all([
+      import('./rappi.client'),
+      import('./rappi.estadoDelPedido'),
+      import('@/config/logger'),
+    ])
+    const cerrar = (como: CierreDeListo) =>
+      estado.cerrarListo(orderId, storeId, como).catch(error =>
+        logger.warn('🛵 [Rappi] no se pudo anotar el cierre del «listo» (el tope de llamadas sigue protegiendo)', {
+          orderId,
+          storeId,
+          como,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
+
+    const reserva = await estado.reservarLlamadaDeListo(orderId, storeId)
+    if (!reserva.permitido) {
+      // Sin aviso no hay qué cerrar: otra búsqueda sólo repetiría la que acaba de fallar.
+      if (reserva.sinAviso) return { ok: false, status: 0, raw: 'LISTO_SIN_AVISO', terminal: true }
+      logger.warn('🛵 [Rappi] «listo» sin llamada: ya se usaron las 3 que Rappi atiende (o ya cerró); no sale a la red', {
+        orderId,
+        storeId,
+      })
+      await cerrar('TOPE')
+      return { ok: false, status: 0, raw: 'TOPE_DE_LISTO', terminal: true }
+    }
+
+    let r: Awaited<ReturnType<typeof marcarListoRappi>>
+    try {
+      r = await marcarListoRappi(orderId, storeId, { reintentarEn401: false })
+    } catch (error) {
+      // 🔴 SÓLO cuando se SABE que no salió. Cualquier otra falla (red a medias, un timeout) pudo haber llegado a Rappi: ya contó.
+      if (error instanceof DeliveryWriteNotSentError) {
+        await estado.devolverLlamadaDeListo(orderId, storeId).catch(e =>
+          logger.warn('🛵 [Rappi] no se pudo devolver la reserva del «listo» que no salió (queda contada: el tope sigue protegiendo)', {
+            orderId,
+            storeId,
+            error: e instanceof Error ? e.message : String(e),
+          }),
+        )
+      }
+      throw error
+    }
+    if (r.status >= 200 && r.status < 300) {
+      await cerrar('HTTP_2XX')
+      return r
+    }
+    if (r.status === 400 && estado.esTransicionInvalida(r.raw)) {
+      await cerrar('TRANSICION_INVALIDA')
+      return { ...r, terminal: true }
+    }
+    return r
   },
 
   /**
@@ -214,22 +312,110 @@ export const rappiAdapter = {
   },
 
   /**
+   * «Integrada sí/no» (Tarea 18). Devuelve la respuesta de Rappi tal cual (un 500 es `ok:false`, no una excepción) y relanza lo
+   * que lance el cliente (el candado de escritura, un fallo de red): quien llama es best-effort y lo registra, nunca lo traga
+   * este adaptador. 🔴 Hoy sólo se llama con `true` (al promover una tienda a ACTIVE, `rappi.provisioning`); el `false` queda
+   * listo para el botón «desconectar» de la fase 3 (ver `DirectDeliveryAdapter.notifyIntegrationStatus`).
+   */
+  async notifyIntegrationStatus(storeId: string, integrada: boolean): Promise<ActionResult> {
+    const { marcarTiendaIntegradaRappi } = await import('./rappi.client')
+    return marcarTiendaIntegradaRappi(storeId, integrada)
+  },
+
+  /**
+   * El horario regular de la TIENDA por la API de Utils (Tarea 19): lee lo que Rappi tiene, calcula la diferencia
+   * (`planDeHorario`: actualizar antes que crear, para no encimar; los días que cierran al final) y la ejecuta EN ORDEN, un
+   * paso por llamada.
+   *  · la lectura no es 2xx ⇒ `ok:false` sin escribir nada: sin saber qué hay, cualquier escritura podría encimar;
+   *  · la lectura no se entiende ⇒ LANZA (nunca se toma como «no hay franjas»); turnos encimados o que se tocan se fusionan;
+   *  · un paso no-2xx ⇒ se DETIENE y devuelve `ok:false` con el paso: lo que falta lo rehace la siguiente pasada, que vuelve a
+   *    leer. Como los días que cierran van al final, un plan a medias nunca le quitó a la tienda franjas que no fueran a quedar;
+   *  · un `DeliveryWriteNotSentError` (candado, token) en el PRIMER paso se relanza tal cual: no salió nada. En un paso posterior,
+   *    y cualquier otro error, se relanza con el paso en el mensaje (los anteriores sí salieron).
+   * ⚠️ Qué hace Rappi con un día sin franjas (¿cerrado o 24 h?) no está medido: se deja a la vista en el log al publicar.
+   */
+  async publishStoreHours(horario: HorarioSemanal, storeId: string): Promise<ActionResult> {
+    const [cliente, { default: logger }] = await Promise.all([import('./rappi.client'), import('@/config/logger')])
+
+    const deseadas = aFranjasDeTienda(horario)
+    const lectura = await cliente.listarHorarioTiendaRappi(storeId)
+    if (!lectura.ok || !lectura.franjas) {
+      return { ok: false, status: lectura.status, raw: `no se pudo leer el horario de la tienda: ${lectura.raw.slice(0, 300)}` }
+    }
+
+    const plan = planDeHorario(lectura.franjas, deseadas)
+    for (const [i, paso] of plan.entries()) {
+      const cual = `paso ${i + 1} de ${plan.length} (${describirPaso(paso)})`
+      let r: Awaited<ReturnType<typeof cliente.crearFranjaTiendaRappi>>
+      try {
+        r =
+          paso.tipo === 'BORRAR'
+            ? await cliente.borrarFranjaTiendaRappi(storeId, paso.id)
+            : paso.tipo === 'ACTUALIZAR'
+              ? await cliente.actualizarFranjaTiendaRappi(storeId, paso.id, paso.franja)
+              : await cliente.crearFranjaTiendaRappi(storeId, paso.franja)
+      } catch (error) {
+        // «No se envió» sólo es cierto en el PRIMER paso: en el paso k > 0 los anteriores sí salieron, y el log no debe decir
+        // que no salió nada. Ahí es el fallo normal del paso k.
+        if (error instanceof DeliveryWriteNotSentError && i === 0) throw error
+        const msg = error instanceof Error ? error.message : String(error)
+        throw new Error(`[Rappi] el horario de la tienda se quedó a medias en el ${cual}: ${msg}`)
+      }
+      if (!r.ok) return { ok: false, status: r.status, raw: `${cual} rechazado: ${r.raw.slice(0, 300)}` }
+    }
+
+    if (plan.length > 0) {
+      const abiertos = new Set(deseadas.map(f => f.day))
+      const sinFranjas = DIAS_RAPPI.filter(d => !abiertos.has(d))
+      if (sinFranjas.length > 0) {
+        logger.warn(
+          '🛵 [Rappi] horario publicado con días SIN franjas (cerrados de nuestro lado): falta medir si Rappi los toma como cerrados',
+          {
+            storeId,
+            sinFranjas,
+            recienCerrados: [...new Set(plan.flatMap(p => (p.tipo === 'BORRAR' && !abiertos.has(p.day) ? [p.day] : [])))],
+          },
+        )
+      }
+    }
+    return {
+      ok: true,
+      status: 200,
+      raw: plan.length ? `${plan.length} cambio(s) en el horario de la tienda` : 'el horario ya estaba igual',
+    }
+  },
+
+  /**
+   * 🔴 El 2xx del `POST /menu` significa «en revisión» (*"Menu updated and ready to be validated"*), NO publicado: lo
+   * publicado lo dice `MENU_APPROVED`. Con esto el sincronizador no sella la huella con el 2xx y no republica encima de la
+   * revisión.
+   */
+  menuConRevision: true,
+
+  /**
    * Publicar el menú. 🔴 Un `ok` aquí significa "en revisión", NO publicado — lo publicado
    * llega por `MENU_APPROVED`. Los productos que Rappi rechazaría se filtran y REPORTAN
-   * antes de mandar: el rechazo de Rappi viene sin motivo, así que cada regla atrapada aquí
-   * es un rechazo que no habrá que adivinar.
+   * antes de mandar: el rechazo asíncrono (`MENU_REJECTED`) viene sin motivo, así que cada
+   * regla atrapada aquí es un rechazo que no habrá que adivinar.
+   *
+   * `problemas` junta, a la vista del dueño: lo que el mapeo filtró, cada precio redondeado y, con un 400 (o 422) del POST,
+   * los `errors[]` del cuerpo (la validación inmediata de Rappi SÍ trae motivos: `{ reason, relatedItems[] }`).
    */
-  async publishMenu(snapshot: MenuSnapshot, storeId: string, opts?: { precios?: unknown }): Promise<ActionResult> {
+  async publishMenu(snapshot: MenuSnapshot, storeId: string, opts?: { precios?: unknown }): Promise<PublicacionDeMenu> {
     const [{ publicarMenuRappi }, { default: logger }] = await Promise.all([import('./rappi.client'), import('@/config/logger')])
 
     const { payload, problemas } = construirMenuRappi(snapshot, storeId, { precios: opts?.precios as PreciosDeCanal | undefined })
     if (problemas.length) {
-      logger.warn('📋 [Rappi] productos que NO se publican (Rappi los rechazaría, y sin decir por qué)', { storeId, problemas })
+      logger.warn('📋 [Rappi] lo que no se publica tal cual (filtrado porque Rappi lo rechazaría, o precio redondeado)', {
+        storeId,
+        problemas,
+      })
     }
     if (payload.items.length === 0) {
-      return { ok: false, status: 0, raw: 'El menú quedó vacío tras filtrar lo que Rappi rechazaría — no se mandó nada.' }
+      return { ok: false, status: 0, raw: 'El menú quedó vacío tras filtrar lo que Rappi rechazaría — no se mandó nada.', problemas }
     }
-    return publicarMenuRappi(payload)
+    const r = await publicarMenuRappi(payload)
+    return { ...r, problemas: r.status === 400 || r.status === 422 ? [...problemas, ...motivosDelRechazo(r.raw)] : problemas }
   },
 
   buildMenuPayload(snapshot: MenuSnapshot, opts?: { precios?: unknown }): unknown {
@@ -241,6 +427,37 @@ export const rappiAdapter = {
   },
 }
 
+/** Un paso del plan del horario, legible para el log (`ACTUALIZAR 1171828 → mon 09:00:00-19:00:00`). */
+function describirPaso(paso: OperacionDeHorario): string {
+  if (paso.tipo === 'BORRAR') return `BORRAR ${paso.id} (${paso.day})`
+  const franja = `${paso.franja.day} ${paso.franja.starts_time}-${paso.franja.ends_time}`
+  return paso.tipo === 'ACTUALIZAR' ? `ACTUALIZAR ${paso.id} → ${franja}` : `CREAR ${franja}`
+}
+
+/**
+ * Los motivos de un 400 del `POST /menu`, uno por producto señalado. Forma documentada (referencia de menús, «400 La estructura
+ * del menú es invalida»): `{ message, errors: [{ reason, relatedItems: [{ sku, … }] }] }`. Un error sin productos queda como
+ * `(menú)`. Un cuerpo que no tiene esa forma no truena: queda su texto (recortado) como único motivo.
+ */
+export function motivosDelRechazo(raw: string): ProblemaDeMenu[] {
+  let errores: unknown
+  try {
+    errores = (JSON.parse(raw) as { errors?: unknown } | null)?.errors
+  } catch {
+    errores = undefined
+  }
+  if (!Array.isArray(errores) || errores.length === 0) {
+    return [{ sku: '(menú)', problema: `Rappi rechazó el menú sin motivos legibles: ${raw.slice(0, 300)}` }]
+  }
+  return errores.flatMap((e): ProblemaDeMenu[] => {
+    const err = (e ?? {}) as { reason?: unknown; relatedItems?: unknown }
+    const problema = `Rappi rechazó: ${String(err.reason ?? 'sin motivo').slice(0, 500)}`
+    const items = Array.isArray(err.relatedItems) ? err.relatedItems : []
+    if (items.length === 0) return [{ sku: '(menú)', problema }]
+    return items.map(i => ({ sku: String((i as { sku?: unknown } | null)?.sku ?? '(sin sku)').slice(0, 500), problema }))
+  })
+}
+
 /**
  * Lo que Rappi espera cuando nos hace PING (cada 3 minutos).
  *
@@ -249,10 +466,21 @@ export const rappiAdapter = {
  * del contrato es cosas que nosotros llamamos— y por eso vive aquí, junto al adaptador, en vez
  * de escondida en una ruta.
  *
- * Se contesta OK siempre que el proceso esté vivo, que es literalmente lo que la pregunta
- * significa: "¿estás ahí para recibir pedidos?". Encadenar la respuesta al estado de la base o
- * del proveedor haría que un hipo de 30 segundos apague la tienda de un comercio.
+ * La pregunta es "¿ESTA tienda está ahí para recibir pedidos?", así que el veredicto es POR TIENDA y lo da el controlador
+ * (`rappi.webhook.controller`): OK sólo si hay un vínculo RAPPI vivo (ACTIVE, PAUSED o PENDING), la tienda está en la lista
+ * de escritura del ambiente y hay llaves de la integración. Cualquier otra cosa —también una consulta que falla— es ERROR:
+ * un OK mentiroso deja que Rappi siga mandando pedidos que no vamos a poder aceptar, y los cancela solo a los 4–6 minutos.
+ * Un hipo de la base no apaga la tienda por sí solo: Rappi necesita DOS negativos seguidos, con 3 minutos de por medio.
+ *
+ * Rappi toma cualquier `status` distinto de "OK" como tienda caída; la `description` es opcional. 🔴 El ERROR NO dice cuál de
+ * las condiciones faltó (vínculo, lista o llaves): eso es configuración nuestra y no se le filtra a Rappi. El motivo lo
+ * escribe el controlador en el log (sin secretos); viaja en el tipo para que el contrato quede a la vista, pero NUNCA
+ * se copia al cuerpo.
  */
-export function respuestaPing(nombreTienda?: string | null): { status: 'OK'; description: string } {
-  return { status: 'OK', description: nombreTienda?.trim() || 'Avoqado' }
+export function respuestaPing(r: { ok: true; nombre: string | null } | { ok: false; motivo: string }): {
+  status: 'OK' | 'ERROR'
+  description: string
+} {
+  if (!r.ok) return { status: 'ERROR', description: 'Avoqado: la tienda no está disponible para recibir pedidos' }
+  return { status: 'OK', description: r.nombre?.trim() || 'Avoqado' }
 }

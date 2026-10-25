@@ -169,6 +169,22 @@ describe('el esperado de una edición sale de la GAVETA, igual que el del cierre
     expect(escrito.cashDifference).toBe(1300)
   })
 
+  it('Rappi 2b: sin gaveta, lo cobrado por cuenta de Rappi en el turno entra al esperado (no aparece un sobrante falso)', async () => {
+    mundo({ gaveta: null, turno: { cashDeclared: '3810.00', endingCash: '3810.00' } })
+    const previa = prismaMock.payment.aggregate.getMockImplementation()
+    prismaMock.payment.aggregate.mockImplementation(async (args: any) =>
+      args?._sum?.thirdPartyCashAmount ? { _sum: { thirdPartyCashAmount: '10.00' } } : previa?.(args),
+    )
+    try {
+      await updateShift(VENUE, TURNO, { totalSales: 1900 }, DUENO)
+    } finally {
+      prismaMock.payment.aggregate.mockImplementation(previa ?? (async () => undefined))
+    }
+
+    // 3810 − (2000 + 1800 + 10) = 0
+    expect(escrito.cashDifference).toBe(0)
+  })
+
   it('sin gaveta, la fórmula de siempre queda BYTE A BYTE (el venue sin módulo de caja)', async () => {
     mundo({ gaveta: null, turno: { cashDeclared: '3800.00', endingCash: '3800.00' } })
 

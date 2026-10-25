@@ -17,6 +17,7 @@ import { decideCustomerApproval } from '@/services/public/customerBookingAccess.
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
+import { esRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -899,9 +900,11 @@ export async function settleCustomerBalance(
       // fencing se releen bajo lock y con alcance tenant+cliente.
       const fresh = await tx.order.findFirst({
         where: { id: orderId, venueId, orderCustomers: { some: { customerId } } },
-        select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true },
+        select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true, thirdPartyCashDue: true },
       })
       if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue
+      // Rappi 2b (T7): el barrido no liquida un pedido de Rappi en efectivo (no sabe repartir venta, propina y lo de Rappi).
+      if (esRappiEnEfectivo(fresh)) continue
 
       const paidAgg = await tx.payment.aggregate({
         where: { orderId, venueId, status: 'COMPLETED' },

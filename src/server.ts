@@ -38,6 +38,7 @@ import { deliverySnoozeResumeJob } from './jobs/delivery-snooze-resume.job'
 import { deliveryLineActionReconcilerJob } from './jobs/delivery-line-action-reconciler.job'
 import { deliveryConnectIntentCleanupJob } from './jobs/delivery-connect-intent-cleanup.job'
 import { deliveryWebhookReconciliationJob } from './jobs/delivery-webhook-reconciliation.job'
+import { rappiOrderPollJob } from './jobs/rappi-order-poll.job'
 import { stripeWebhookReconciliationJob } from './jobs/stripe-webhook-reconciliation.job'
 import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
@@ -233,6 +234,7 @@ const gracefulShutdown = async (signal: string) => {
 
       logger.info('Stopping delivery webhook reconciliation job...')
       deliveryWebhookReconciliationJob.stop()
+      rappiOrderPollJob.stop()
       deliveryMenuSyncJob.stop()
       deliverySnoozeResumeJob.stop()
       deliveryLineActionReconcilerJob.stop()
@@ -611,8 +613,14 @@ const startApplication = async (retries = 3) => {
       blumonPaymentAuditJob.start()
 
       // Start delivery webhook reconciliation job (every 2min at :45s — retries
-      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED)
+      // FAILED/stuck-RECEIVED DeliveryOrderEvent rows; sweeps >24h to ORPHANED).
+      // It also starts its own Rappi lane (every 30s at :15/:45) with an in-memory lock (`rappiEnCurso`):
+      // single instance only — see .claude/rules/una-sola-instancia.md, #5.
       deliveryWebhookReconciliationJob.start()
+      // Sondeo de pedidos de Rappi por tienda (cada 45 s): la red por si se pierde un aviso NEW_ORDER. APAGADO salvo
+      // RAPPI_ORDER_POLL_ENABLED=true (start() no programa nada si no). 🔴 Prendido en UN solo servidor por integración: el GET
+      // pasa los pedidos a SENT y dos servidores se los roban — .claude/rules/una-sola-instancia.md, #7.
+      rappiOrderPollJob.start()
       deliveryMenuSyncJob.start()
       deliverySnoozeResumeJob.start()
       // KDS de Uber (spec §3.4): retiros a medias, reservas huérfanas y «listos» sin avisar — cada minuto en :52

@@ -46,6 +46,7 @@ import socketManager from '../communication/sockets/managers/socketManager'
 import logger from '../config/logger'
 import AppError, {
   BadRequestError,
+  ConflictError,
   OrderAlreadyPaidError,
   TerminalBusyError,
   TerminalPaymentAdmissionRetryError,
@@ -53,6 +54,7 @@ import AppError, {
   type TerminalBusyBlockingRequest,
 } from '../errors/AppError'
 import { resolveTerminalRefundTarget } from './tpv/terminalRefundTarget'
+import { esRappiEnEfectivo, MENSAJE_RAPPI_SOLO_EFECTIVO } from './shared/rappiEfectivoGuard'
 import { exigirCancelacionParaDevolverEnTerminal } from './giftCards/giftCardCancel.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { logAction } from './dashboard/activity-log.service'
@@ -1194,6 +1196,8 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_CANCELLED'
   | 'REJECTED_ORDER_PAID'
   | 'REJECTED_ORDER_NOT_FOUND'
+  /** Rappi 2b: pedido de Rappi en efectivo (lo cobra el repartidor; se registra con «Cobrar» en efectivo). */
+  | 'REJECTED_ORDER_RAPPI_CASH'
 
 /** Lo que decide la transacción de admisión. El rechazo se DEVUELVE (no se lanza: el throw revertiría la lápida). */
 type Admision =
@@ -1269,6 +1273,8 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
         'ORDER_CANCELLED_NO_NEW_CHARGE',
         details,
       )
+    case 'REJECTED_ORDER_RAPPI_CASH':
+      return new ConflictError(mensaje(MENSAJE_RAPPI_SOLO_EFECTIVO), 'RAPPI_CASH_ORDER_CASH_ONLY', details)
     case 'REJECTED_ORDER_PAID':
       return new OrderAlreadyPaidError(mensaje('La cuenta ya está pagada por completo. Actualiza la lista de órdenes.'), details)
     case 'REJECTED_ORDER_NOT_FOUND':
@@ -1720,7 +1726,7 @@ class TerminalPaymentService {
         if (mine) return { tipo: 'replica', fila: mine }
         const order = await tx.order.findFirst({
           where: { id: request.orderId, venueId },
-          select: { paymentStatus: true, orderNumber: true, status: true },
+          select: { paymentStatus: true, orderNumber: true, status: true, thirdPartyCashDue: true },
         })
         if (!order) {
           return rechazar(
@@ -1740,6 +1746,14 @@ class TerminalPaymentService {
               'ORDER_CANCELLED_NO_NEW_CHARGE',
               detalles,
             ),
+          )
+        }
+        // Rappi 2b (T7): una autorización NUEVA de tarjeta no cobra un pedido de Rappi en efectivo (no sabe repartir venta, propina y
+        // lo de Rappi). Bajo el MISMO lock y antes de tocar la terminal: no hay dinero movido.
+        if (esRappiEnEfectivo(order)) {
+          return rechazar(
+            'REJECTED_ORDER_RAPPI_CASH',
+            new ConflictError(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
           )
         }
         if (order.paymentStatus === 'PAID') {

@@ -124,6 +124,15 @@ describe('validarReasignacion — cuándo un cobro puede moverse', () => {
     )
   })
 
+  it('🔴 Rappi 2b: un pedido de Rappi no da ni recibe cobros reasignados (su dinero lo reparte el servidor)', () => {
+    expect(motivosDe(validarReasignacion(caso, cobro(), vecina({ source: 'RAPPI' }), cancelada()))).toEqual(
+      expect.arrayContaining([expect.stringContaining('Rappi')]),
+    )
+    expect(motivosDe(validarReasignacion(caso, cobro(), vecina(), cancelada({ source: 'RAPPI' })))).toEqual(
+      expect.arrayContaining([expect.stringContaining('Rappi')]),
+    )
+  })
+
   it('🔴 rechaza si el cobro no está hoy en la orden de origen declarada (carrera o plan viejo)', () => {
     const v = validarReasignacion(caso, cobro({ orderId: 'otra' }), vecina(), cancelada())
     expect(motivosDe(v)).toEqual(expect.arrayContaining([expect.stringContaining('origen')]))
