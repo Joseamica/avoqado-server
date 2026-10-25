@@ -432,4 +432,14 @@ export interface DirectDeliveryAdapter {
    * (la cocina decide desde el POS) lo dejaría correr hasta que el reloj del proveedor lo cancele.
    */
   readonly soloAceptacionAutomatica?: string
+
+  /**
+   * Campos EXTRA que el listado de canales le agrega a cada vínculo de este proveedor (aditivos: nunca pisan los de
+   * siempre). Recibe TODOS los vínculos del proveedor en el venue y debe resolverlos en una sola consulta.
+   *
+   * Existe para que el listado del núcleo no tenga que saber qué necesita cada proveedor. El caso (Rappi fase 3): cuántos
+   * pedidos siguen en curso (el panel pone «Desconectar» en gris) y qué conexión está viendo el dueño (la manda de vuelta
+   * al desconectar).
+   */
+  datosDelListado?(links: Array<{ id: string; config: unknown; externalLocationId: string }>): Promise<Map<string, Record<string, unknown>>>
 }
