@@ -30,7 +30,7 @@ import { menuSyncStatusOf, revisionDeMenuOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
 /** Select explícito — NUNCA incluye `webhookSecret`. Usado por list/create/update. */
-const SAFE_SELECT = {
+export const SAFE_SELECT = {
   id: true,
   venueId: true,
   provider: true,
@@ -72,21 +72,46 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
   //
   // Se calculan aquí, en el listado que la pantalla ya pide, en vez de en un endpoint aparte:
   // un dato que exige una segunda llamada es un dato que la UI acaba no mostrando.
-  return Promise.all(
-    links.map(async l => {
-      const { lastMenuHash: _oculto, ...resto } = l
-      return {
-        ...resto,
-        menuSyncStatus: menuSyncStatusOf(l),
-        // La revisión del menú (pendiente, último rechazo, problemas), sacada de `config`, que este mismo select ya trae: ni una
-        // consulta más por canal. Aditivo: el `config` crudo sigue saliendo como siempre, y esto sin huellas.
-        menuRevision: revisionDeMenuOf(l.config),
-        // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
-        // invita a que alguien la use como si significara algo.
-        injectionRate: await calcularTasaInyeccion({ venueId, provider: l.provider }).catch(() => null),
+  //
+  // La tasa es del PROVEEDOR en el venue, no del vínculo: una vez por proveedor (antes, una por vínculo).
+  const porProveedor = new Map<DeliveryProvider, typeof links>()
+  for (const l of links) porProveedor.set(l.provider, [...(porProveedor.get(l.provider) ?? []), l])
+  const proveedores = [...porProveedor.keys()]
+  const tasas = new Map(
+    await Promise.all(proveedores.map(async p => [p, await calcularTasaInyeccion({ venueId, provider: p }).catch(() => null)] as const)),
+  )
+  // Lo que cada proveedor quiera agregar a sus vínculos (Rappi fase 3: pedidos en curso y la conexión que ve el dueño), una
+  // llamada por proveedor con todos sus vínculos. Si falla, esos campos no salen: el servidor sigue validando al actuar.
+  const extras = new Map<string, Record<string, unknown>>()
+  await Promise.all(
+    proveedores.map(async p => {
+      const adaptador = hasAdapter(p) ? adapterFor(p) : null
+      if (!adaptador?.datosDelListado) return
+      try {
+        for (const [id, campos] of await adaptador.datosDelListado(porProveedor.get(p) ?? [])) extras.set(id, campos)
+      } catch (e) {
+        logger.warn('🛵 [delivery] el proveedor no pudo completar el listado de canales', {
+          venueId,
+          provider: p,
+          error: (e as Error).message,
+        })
       }
     }),
-  ) as unknown as DeliveryChannelLinkSafe[]
+  )
+  return links.map(l => {
+    const { lastMenuHash: _oculto, ...resto } = l
+    return {
+      ...(extras.get(l.id) ?? {}),
+      ...resto,
+      menuSyncStatus: menuSyncStatusOf(l),
+      // La revisión del menú (pendiente, último rechazo, problemas), sacada de `config`, que este mismo select ya trae: ni una
+      // consulta más por canal. Aditivo: el `config` crudo sigue saliendo como siempre, y esto sin huellas.
+      menuRevision: revisionDeMenuOf(l.config),
+      // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
+      // invita a que alguien la use como si significara algo.
+      injectionRate: tasas.get(l.provider) ?? null,
+    }
+  }) as unknown as DeliveryChannelLinkSafe[]
 }
 
 /**

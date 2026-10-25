@@ -9,6 +9,7 @@ import * as deliveryChannelLinkService from '../../services/delivery-channels/co
 import * as activationService from '../../services/delivery-channels/core/deliveryActivation.service'
 import * as deliverySummaryService from '../../services/delivery-channels/core/deliverySummary.service'
 import * as connectIntentService from '../../services/delivery-channels/core/deliveryConnectIntent.service'
+import { desconectarTiendaRappi } from '../../services/delivery-channels/providers/rappi/rappi.desconectar'
 
 /** GET /venues/:venueId/channels */
 export async function listChannels(req: Request, res: Response, next: NextFunction): Promise<void> {
@@ -52,6 +53,25 @@ export async function pauseChannel(req: Request, res: Response, next: NextFuncti
     const { userId } = (req as any).authContext
     const result = await deliveryChannelLinkService.pauseChannelLink(venueId, linkId, req.body.paused, userId)
     res.status(200).json({ success: true, data: result })
+  } catch (error) {
+    next(error)
+  }
+}
+
+/** POST /venues/:venueId/channels/:linkId/disconnect — Rappi fase 3 (`desconectarTiendaRappi`). */
+export async function disconnectChannel(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { venueId, linkId } = req.params
+    const { userId } = (req as any).authContext
+    const r = await desconectarTiendaRappi({
+      venueId,
+      linkId,
+      conexionId: req.body.conexionId,
+      forzar: req.body.forzar,
+      performedBy: userId,
+      origen: 'DASHBOARD',
+    })
+    res.status(200).json({ success: true, data: r.link, yaEstaba: r.yaEstaba, forzada: r.forzada })
   } catch (error) {
     next(error)
   }

@@ -271,6 +271,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   quarantine_batch: 'write',
   quote_hybrid_purchase: 'write',
   rappi_connect_link: 'write',
+  rappi_disconnect: 'write',
   delivery_cash_pending: 'read',
   raw_material_presentations: 'read',
   reassign_sim_promoter: 'write',
