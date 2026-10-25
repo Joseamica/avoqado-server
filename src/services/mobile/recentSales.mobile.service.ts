@@ -6,6 +6,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { utcTs } from '@/utils/sqlDates'
 import {
   decodeSalesCursor,
+  decodeSalesSince,
   encodeSalesCursor,
   encodeSalesSince,
   RECENT_SALES_COPY_VERSION,
@@ -102,6 +103,49 @@ export function fullPageSql(p: {
         : Prisma.empty
     }
     ${p.take === null ? Prisma.empty : Prisma.sql`ORDER BY o."createdAt" DESC, o.id DESC LIMIT ${p.take}`}
+  `
+}
+
+export function deltaEventsSql(p: {
+  venueId: string
+  since: Date
+  previousWindowStart: Date
+  windowStart: Date
+  until: Date
+  after: { at: Date; id: string } | null
+  take: number | null
+}): Prisma.Sql {
+  return Prisma.sql`
+    SELECT ${p.take === null ? Prisma.sql`count(*)::int AS total` : Prisma.sql`ev.kind, ev."orderId", ev.at, ev.id`}
+    FROM (
+      SELECT 'X'::text AS kind, o.id AS "orderId", o."createdAt" AS at, o.id AS id
+      FROM "Order" o
+      WHERE o."venueId" = ${p.venueId}
+        AND o."createdAt" >= ${utcTs(p.previousWindowStart)} AND o."createdAt" < ${utcTs(p.windowStart)}
+        AND ${SQL_IS_COPY_SALE}
+      UNION ALL
+      SELECT 'P', p."orderId", p."updatedAt", p.id
+      FROM "Payment" p
+      WHERE p."venueId" = ${p.venueId}
+        AND p."updatedAt" >= ${utcTs(p.since)} AND p."updatedAt" < ${utcTs(p.until)}
+      UNION ALL
+      SELECT 'E', e."originalOrderId", e."updatedAt", e.id || ':o'
+      FROM "Exchange" e
+      WHERE e."venueId" = ${p.venueId} AND e."createdAt" >= ${utcTs(p.windowStart)}
+        AND e."updatedAt" >= ${utcTs(p.since)} AND e."updatedAt" < ${utcTs(p.until)}
+      UNION ALL
+      SELECT 'E', e."newOrderId", e."updatedAt", e.id || ':n'
+      FROM "Exchange" e
+      WHERE e."venueId" = ${p.venueId} AND e."createdAt" >= ${utcTs(p.windowStart)}
+        AND e."updatedAt" >= ${utcTs(p.since)} AND e."updatedAt" < ${utcTs(p.until)}
+    ) ev
+    ${
+      p.after
+        ? Prisma.sql`WHERE ev.at >= ${utcTs(p.after.at)}
+          AND (ev.at > ${utcTs(p.after.at)} OR ev.id > ${p.after.id})`
+        : Prisma.empty
+    }
+    ${p.take === null ? Prisma.empty : Prisma.sql`ORDER BY ev.at ASC, ev.id ASC LIMIT ${p.take}`}
   `
 }
 
@@ -213,53 +257,64 @@ export async function listRecentSales(
   const venue = await db.venue.findUnique({ where: { id: input.venueId }, select: { timezone: true } })
   if (!venue) throw new NotFoundError('No se encontró la sucursal.')
   const cursor = input.cursor === undefined ? null : decodeSalesCursor(input.cursor)
-  if (input.cursor !== undefined && (!cursor || cursor.m !== 'F')) throw new BadRequestError('El cursor no es válido.')
+  if (input.cursor !== undefined && !cursor) throw new BadRequestError('El cursor no es válido.')
   const t0 = cursor ? new Date(cursor.t0) : (input.now ?? new Date())
   const windowStart = cursor ? new Date(cursor.ws) : recentSalesWindowStart(t0, venue.timezone)
   const after = cursor ? { at: new Date(cursor.at), id: cursor.id } : null
   if (![t0, windowStart, ...(after ? [after.at] : [])].every(date => Number.isFinite(date.getTime())))
     throw new BadRequestError('El cursor no es válido.')
   const limit = Math.min(RECENT_SALES_PAGE_MAX, Math.max(1, Math.floor(input.limit) || RECENT_SALES_PAGE_MAX))
-  const total = cursor
-    ? cursor.total
-    : (
-        await db.$queryRaw<Array<{ total: number }>>(
-          fullPageSql({
-            venueId: input.venueId,
-            windowStart,
-            after: null,
-            take: null,
-          }),
-        )
-      )[0].total
-  const rows = await db.$queryRaw<Array<{ id: string; at: Date }>>(
-    fullPageSql({ venueId: input.venueId, windowStart, after, take: limit + 1 }),
-  )
+  const since = input.since === undefined ? null : decodeSalesSince(input.since)
+  const validSince =
+    since &&
+    since.v === RECENT_SALES_COPY_VERSION &&
+    since.w >= t0.getTime() - RECENT_SALES_MAX_DELTA_AGE_MS &&
+    since.w <= t0.getTime() + RECENT_SALES_FUTURE_SKEW_MS &&
+    since.ws <= windowStart.getTime() &&
+    Number.isFinite(new Date(since.ws).getTime())
+      ? since
+      : null
+  const delta = cursor ? cursor.m === 'D' : validSince !== null
+  const w = cursor ? cursor.w : (validSince?.w ?? null)
+  const ws0 = cursor ? cursor.ws0 : (validSince?.ws ?? null)
+  if (delta && (w === null || ws0 === null || ![w, ws0].every(value => Number.isFinite(new Date(value).getTime()))))
+    throw new BadRequestError('El cursor no es válido.')
+  const query = (after: { at: Date; id: string } | null, take: number | null) =>
+    delta
+      ? deltaEventsSql({
+          venueId: input.venueId,
+          since: new Date(w!),
+          previousWindowStart: new Date(ws0!),
+          windowStart,
+          until: t0,
+          after,
+          take,
+        })
+      : fullPageSql({ venueId: input.venueId, windowStart, after, take })
+  const total = cursor ? cursor.total : (await db.$queryRaw<Array<{ total: number }>>(query(null, null)))[0].total
+  const rows = await db.$queryRaw<Array<{ id: string; at: Date; kind?: 'X' | 'P' | 'E'; orderId?: string }>>(query(after, limit + 1))
   const hasMore = rows.length > limit
   const consumed = rows.slice(0, limit)
-  const result = await buildSalesPage(
-    db,
-    input.venueId,
-    windowStart,
-    consumed.map(row => row.id),
-  )
+  const exits = new Set(consumed.filter(row => row.kind === 'X').map(row => row.orderId!))
+  const candidates = [...new Set(consumed.filter(row => row.kind !== 'X').map(row => row.orderId ?? row.id))].filter(id => !exits.has(id))
+  const result = await buildSalesPage(db, input.venueId, windowStart, candidates, [...exits])
   const last = consumed[consumed.length - 1]
   return {
     ...result,
     meta: {
-      mode: 'FULL',
-      reset: input.since !== undefined,
+      mode: delta ? 'DELTA' : 'FULL',
+      reset: !delta && input.since !== undefined,
       total,
       limit,
       hasMore,
       nextCursor: hasMore
         ? encodeSalesCursor({
             v: RECENT_SALES_COPY_VERSION,
-            m: 'F',
+            m: delta ? 'D' : 'F',
             t0: t0.getTime(),
             ws: windowStart.getTime(),
-            w: null,
-            ws0: null,
+            w: delta ? w : null,
+            ws0: delta ? ws0 : null,
             total,
             at: last.at.getTime(),
             id: last.id,

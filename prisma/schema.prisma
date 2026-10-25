@@ -4753,6 +4753,7 @@ model Payment {
   @@index([method])
   @@index([status])
   @@index([venueId, createdAt])
+  @@index([venueId, updatedAt])
   @@index([venueId, status, createdAt])
   @@index([merchantAccountId, createdAt])
   @@index([venueId, externalSource])
