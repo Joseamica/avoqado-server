@@ -22,6 +22,8 @@ import * as terminalPaymentMobileController from '../controllers/mobile/terminal
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import * as wasteController from '../controllers/mobile/inventoryWaste.mobile.controller'
 import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.controller'
+import * as loyaltyDashboardController from '../controllers/dashboard/loyalty.dashboard.controller'
+import { AdjustStampsSchema } from '../schemas/dashboard/loyalty.schema'
 import * as serviceChargeMobileController from '../controllers/mobile/service-charge.mobile.controller'
 import * as menuMobileController from '../controllers/mobile/menu.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
@@ -3292,6 +3294,31 @@ router.get(
   checkFeatureAccess('LOYALTY_PROGRAM'),
   checkPermission('loyalty:read'),
   loyaltyMobileController.getCustomerLoyalty,
+)
+
+/**
+ * GET /api/v1/mobile/venues/:venueId/customers/:customerId/stamp-card
+ * Cartilla de sellos del cliente (avance, `version` y `stampsEnabled`) para el ajuste manual.
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId/stamp-card',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('LOYALTY_PROGRAM'),
+  checkPermission('loyalty:read'),
+  loyaltyDashboardController.getStampCardHandler,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/customers/:customerId/stamps/adjust
+ * Ajuste manual de sellos desde el POS (deja la cartilla abierta en `stampsEarned`; 409 si cambió).
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/stamps/adjust',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('LOYALTY_PROGRAM'),
+  checkPermission('loyalty:adjust'),
+  validateRequest(AdjustStampsSchema),
+  loyaltyDashboardController.adjustStampsHandler,
 )
 
 /**

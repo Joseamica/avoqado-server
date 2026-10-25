@@ -314,7 +314,7 @@ describe('reverseStampForOrder', () => {
     cartillas([{ id: 'sc1', cycle: 1, stampsEarned: 0, llena: false }]) // la de la venta, ya sin el sello
     expect(await reverseStampForOrder('v1', 'o1')).toMatchObject({ reversed: true })
     expect(prismaMock.stampEvent.create).toHaveBeenCalledWith(
-      expect.objectContaining({ data: expect.objectContaining({ type: 'REVERSAL' }) }),
+      expect.objectContaining({ data: expect.objectContaining({ type: 'REVERSAL', quantity: 0 }) }),
     )
     expect(prismaMock.stampCard.update).not.toHaveBeenCalled()
   })

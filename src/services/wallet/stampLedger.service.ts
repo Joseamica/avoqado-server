@@ -3,6 +3,7 @@ import prisma from '../../utils/prismaClient'
 import { venueStartOfDay, venueEndOfDay } from '../../utils/datetime'
 import logger from '../../config/logger'
 import { logAction } from '../dashboard/activity-log.service'
+import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 
 /**
  * Cuarta ola (15-oct-2026): el MISMO presupuesto que la escritura de los puntos (`PRESUPUESTO_DE_LA_LEALTAD_DE_LA_VENTA` en
@@ -177,6 +178,89 @@ type DentroDelCandado =
   | { otorgado: false; reason: 'OTHER_CUSTOMER' }
   | { otorgado: true; cardId: string; ganados: number; meta: number; completed: boolean; rewardId?: string }
 
+/**
+ * La cartilla se llenó: la marca completada, deja su premio PENDING y abre la siguiente. Corre DENTRO de la transacción de
+ * quien la llama (el sello de `grantStamp` y el ajuste a mano `adjustStamps`). Sin cambio de conducta respecto a cuando vivía
+ * en línea dentro de `grantStamp`.
+ * 🔴 Quien la llama YA tiene el candado del cliente (`pg_advisory_xact_lock(hashtext(venueId), hashtext(customerId))`) y la
+ * llama sólo cuando la cartilla ACABA de llegar a su meta: sin ese candado, el paso D2 («¿hay otra abierta?» → crear) no es seguro.
+ */
+async function completarCartilla(
+  tx: Prisma.TransactionClient,
+  card: { id: string; cycle: number },
+  config: StampConfigView,
+  venueId: string,
+  customerId: string,
+): Promise<{ rewardId: string }> {
+  await tx.stampCard.update({ where: { id: card.id }, data: { completedAt: new Date() } })
+
+  // 🔴 El premio CONGELA sus condiciones (quien ya lo ganó recibe lo que se le prometió).
+  const condiciones = {
+    status: StampRewardStatus.PENDING,
+    rewardType: config.stampRewardType,
+    rewardValue: config.stampRewardValue as Prisma.Decimal | null,
+    rewardProductId: config.stampRewardProductId,
+    rewardLabel: config.stampRewardLabel,
+  }
+  // 🔴 D1 (21-oct): una devolución reabre la cartilla llena y CANCELA su premio, pero la fila se queda (un premio por
+  // cartilla: `stampCardId @unique`). Crear otro chocaba y la compra perdía su sello en cada reintento. Se REACTIVA el
+  // mismo, se ganó hoy: condiciones y fecha de hoy, sin rastro de canje (como `refundStampRewardForOrderDiscount`).
+  const anterior = await tx.stampReward.findUnique({ where: { stampCardId: card.id }, select: { id: true, status: true } })
+  const premio =
+    anterior?.status === StampRewardStatus.CANCELLED
+      ? await tx.stampReward.update({
+          where: { id: anterior.id },
+          data: { ...condiciones, redeemedAt: null, orderDiscountId: null, expiresAt: null, createdAt: new Date() },
+          select: { id: true },
+        })
+      : await tx.stampReward.create({
+          data: { stampCardId: card.id, customerId, venueId, ...condiciones },
+          select: { id: true },
+        })
+
+  // 🔴 Y la siguiente cartilla arranca AQUÍ, no al canjear el premio (hallazgo C7), con la regla de HOY. Su número sale de la
+  // ÚLTIMA cartilla, no de ésta (D1, Codex r1 #1): una devolución puede reabrir una cartilla vieja cuando ya existen otras
+  // llenas después de ella, y «ésta + 1» chocaría con `[customerId, venueId, cycle]`.
+  // Y si ya hay otra abierta (la que quedó cuando una devolución reabrió ésta, D2), ésa es la siguiente: no se crea otra.
+  const otraAbierta = await tx.stampCard.findFirst({
+    where: { venueId, customerId, completedAt: null, id: { not: card.id } },
+    select: { id: true },
+  })
+  if (!otraAbierta) {
+    const ultimaCartilla = await tx.stampCard.findFirst({
+      where: { venueId, customerId },
+      orderBy: { cycle: 'desc' },
+      select: { cycle: true },
+    })
+    await tx.stampCard.create({
+      data: {
+        venueId,
+        customerId,
+        cycle: Math.max(card.cycle, ultimaCartilla?.cycle ?? 0) + 1,
+        stampsRequired: config.stampsRequired,
+        stampsEarned: 0,
+      },
+    })
+  }
+
+  return { rewardId: premio.id }
+}
+
+/**
+ * Abre la cartilla de un cliente que no tiene ninguna abierta: ciclo = último + 1, con la meta de HOY, que queda congelada en
+ * ella. Dentro del candado del cliente, como `completarCartilla`.
+ */
+async function abrirCartilla(tx: Prisma.TransactionClient, venueId: string, customerId: string, stampsRequired: number) {
+  const ultima = await tx.stampCard.findFirst({
+    where: { venueId, customerId },
+    orderBy: { cycle: 'desc' },
+    select: { cycle: true },
+  })
+  return tx.stampCard.create({
+    data: { venueId, customerId, cycle: (ultima?.cycle ?? 0) + 1, stampsRequired, stampsEarned: 0 },
+  })
+}
+
 export async function grantStamp(
   venueId: string,
   customerId: string,
@@ -254,22 +338,7 @@ export async function grantStamp(
         where: { venueId, customerId, completedAt: null },
         orderBy: { cycle: 'asc' },
       })
-      if (!card) {
-        const ultima = await tx.stampCard.findFirst({
-          where: { venueId, customerId },
-          orderBy: { cycle: 'desc' },
-          select: { cycle: true },
-        })
-        card = await tx.stampCard.create({
-          data: {
-            venueId,
-            customerId,
-            cycle: (ultima?.cycle ?? 0) + 1,
-            stampsRequired: config.stampsRequired,
-            stampsEarned: 0,
-          },
-        })
-      }
+      if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
 
       await tx.stampEvent.create({
         data: {
@@ -295,58 +364,9 @@ export async function grantStamp(
       if (ganados < meta) return { otorgado: true, cardId: card.id, ganados, meta, completed: false }
 
       // ── La cartilla se llenó ────────────────────────────────────────────────
-      await tx.stampCard.update({ where: { id: card.id }, data: { completedAt: new Date() } })
+      const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
 
-      // 🔴 El premio CONGELA sus condiciones (quien ya lo ganó recibe lo que se le prometió).
-      const condiciones = {
-        status: StampRewardStatus.PENDING,
-        rewardType: config.stampRewardType,
-        rewardValue: config.stampRewardValue as Prisma.Decimal | null,
-        rewardProductId: config.stampRewardProductId,
-        rewardLabel: config.stampRewardLabel,
-      }
-      // 🔴 D1 (21-oct): una devolución reabre la cartilla llena y CANCELA su premio, pero la fila se queda (un premio por
-      // cartilla: `stampCardId @unique`). Crear otro chocaba y la compra perdía su sello en cada reintento. Se REACTIVA el
-      // mismo, se ganó hoy: condiciones y fecha de hoy, sin rastro de canje (como `refundStampRewardForOrderDiscount`).
-      const anterior = await tx.stampReward.findUnique({ where: { stampCardId: card.id }, select: { id: true, status: true } })
-      const premio =
-        anterior?.status === StampRewardStatus.CANCELLED
-          ? await tx.stampReward.update({
-              where: { id: anterior.id },
-              data: { ...condiciones, redeemedAt: null, orderDiscountId: null, expiresAt: null, createdAt: new Date() },
-              select: { id: true },
-            })
-          : await tx.stampReward.create({
-              data: { stampCardId: card.id, customerId, venueId, ...condiciones },
-              select: { id: true },
-            })
-
-      // 🔴 Y la siguiente cartilla arranca AQUÍ, no al canjear el premio (hallazgo C7), con la regla de HOY. Su número sale de la
-      // ÚLTIMA cartilla, no de ésta (D1, Codex r1 #1): una devolución puede reabrir una cartilla vieja cuando ya existen otras
-      // llenas después de ella, y «ésta + 1» chocaría con `[customerId, venueId, cycle]`.
-      // Y si ya hay otra abierta (la que quedó cuando una devolución reabrió ésta, D2), ésa es la siguiente: no se crea otra.
-      const otraAbierta = await tx.stampCard.findFirst({
-        where: { venueId, customerId, completedAt: null, id: { not: card.id } },
-        select: { id: true },
-      })
-      if (!otraAbierta) {
-        const ultimaCartilla = await tx.stampCard.findFirst({
-          where: { venueId, customerId },
-          orderBy: { cycle: 'desc' },
-          select: { cycle: true },
-        })
-        await tx.stampCard.create({
-          data: {
-            venueId,
-            customerId,
-            cycle: Math.max(card.cycle, ultimaCartilla?.cycle ?? 0) + 1,
-            stampsRequired: config.stampsRequired,
-            stampsEarned: 0,
-          },
-        })
-      }
-
-      return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId: premio.id }
+      return { otorgado: true, cardId: card.id, ganados, meta, completed: true, rewardId }
     }, PRESUPUESTO_DEL_SELLO)
 
     if (!resultado.otorgado) {
@@ -385,6 +405,8 @@ export interface StampCardStatus {
   rewardLabel: string
   /** Premios ya ganados y aun sin canjear. */
   pendingRewards: number
+  /** La cartilla que se está leyendo (la abierta más vieja); null si aún no tiene. El ajuste a mano la manda en su CAS. */
+  stampCardId: string | null
 }
 
 /**
@@ -405,7 +427,7 @@ export async function getStampCardStatus(venueId: string, customerId: string): P
     prisma.stampCard.findFirst({
       where: { venueId, customerId, completedAt: null },
       orderBy: { cycle: 'asc' },
-      select: { stampsEarned: true, stampsRequired: true },
+      select: { id: true, stampsEarned: true, stampsRequired: true },
     }),
     prisma.stampReward.count({ where: { venueId, customerId, status: StampRewardStatus.PENDING } }),
   ])
@@ -417,6 +439,7 @@ export async function getStampCardStatus(venueId: string, customerId: string): P
     stampsRequired: card?.stampsRequired ?? config?.stampsRequired ?? 10,
     rewardLabel: config?.stampRewardLabel ?? 'Un producto gratis',
     pendingRewards,
+    stampCardId: card?.id ?? null,
   }
 }
 
@@ -541,8 +564,10 @@ export async function reverseStampForOrder(
         venueId,
         orderId,
         type: StampEventType.REVERSAL,
-        // Negativo: el libro se lee sumando, así que el asiento contrario resta.
-        quantity: -cantidad,
+        // Negativo: el libro se lee sumando, así que el asiento contrario resta. Sin cartilla con saldo (`elegida` null) el
+        // asiento SIGUE existiendo, para que la misma venta no se revierta dos veces, pero resta 0 porque no restó nada:
+        // así el libro (suma de asientos) sigue igual al contador.
+        quantity: elegida ? -cantidad : 0,
         createdById: options.staffVenueId,
       },
     })
@@ -608,4 +633,141 @@ export async function reverseStampForOrder(
   logger.info('Sello revertido por reembolso', { venueId, orderId, stampCardId: otorgado.stampCardId })
 
   return { reversed: true, stampCardId: otorgado.stampCardId }
+}
+
+// ── Sellos a mano (23-oct-2026) ─────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * La VERSIÓN de una cartilla: cuántos asientos tiene; 0 si no hay cartilla. Los asientos nunca se borran ni se editan, así que
+ * sólo sube: es lo que el ajuste a mano compara además del id y del número.
+ */
+export async function contarVersionDeCartilla(stampCardId: string | null, db: Prisma.TransactionClient = prisma): Promise<number> {
+  if (!stampCardId) return 0
+  return db.stampEvent.count({ where: { stampCardId } })
+}
+
+export interface AdjustStampsInput {
+  /** El TOTAL que debe quedar en la cartilla abierta (como habla el negocio al migrar un cartón), no un +/−. */
+  stampsEarned: number
+  /** Lo que vio quien pide el ajuste: la cartilla (null si no había), su número, su versión y su META. Es el CAS. */
+  expectedStampCardId: string | null
+  expectedStampsEarned: number
+  expectedVersion: number
+  /** La meta que vio: la de la cartilla, o la de la config si no había cartilla (F1: sin ella, «null/0/0» no ve un cambio de meta). */
+  expectedStampsRequired: number
+  reason: string
+  /** 🔴 StaffVenue.id, la FK del asiento. Opcional: un dueño de la organización puede no tener fila en StaffVenue. */
+  staffVenueId?: string
+  /** Staff.id: el autor en la bitácora (siempre lo hay, aunque no haya StaffVenue). */
+  actorStaffId?: string
+}
+
+export interface AdjustStampsResult {
+  stampCardId: string
+  from: number
+  to: number
+  delta: number
+  completed: boolean
+  rewardId?: string
+  stampsRequired: number
+}
+
+/**
+ * Ajuste a mano de los sellos de un cliente: migrar su cartón de papel o corregir un error.
+ *
+ * 🔴 DINERO. Un sello de más es producto regalado, y un ajuste aplicado dos veces (doble clic, reintento del panel) puede ser
+ * un premio regalado. Por eso:
+ * - Se escribe el TOTAL y el servidor calcula la diferencia: un asiento ADJUST con signo, motivo y autor. Nunca se borra nada.
+ * - CAS sobre la cartilla, su número y su VERSIÓN, DENTRO del candado del cliente. Sólo el número no basta (Codex r1 #1): un
+ *   ajuste que completa deja otra cartilla en 0 y el reintento volvería a cumplir «0». Id y número tampoco (Codex r2 #1): una
+ *   devolución puede reabrir la MISMA cartilla al mismo número. La versión sólo sube: ninguna secuencia revive una petición vieja.
+ *   Y la META (F1, 24-oct): sin cartilla, «null/0/0» coincide aunque otro admin haya cambiado la meta de la config.
+ * - La meta es la CONGELADA de la cartilla, no la de la config. Llegar a ella completa igual que un sello (`completarCartilla`).
+ * - Sin correo del primer sello: es una migración, no una visita.
+ */
+export async function adjustStamps(venueId: string, customerId: string, input: AdjustStampsInput): Promise<AdjustStampsResult> {
+  const reason = input.reason.trim()
+  if (reason.length < 5 || reason.length > 500) throw new BadRequestError('El motivo debe tener de 5 a 500 caracteres', 'INVALID_REASON')
+
+  const customer = await prisma.customer.findFirst({ where: { id: customerId, venueId }, select: { id: true } })
+  if (!customer) throw new NotFoundError('Cliente no encontrado')
+
+  const resultado = await prisma.$transaction(async (tx): Promise<AdjustStampsResult> => {
+    // 🔴 PRIMERA sentencia: el MISMO candado (negocio, cliente) que `grantStamp` y la reversa. Una venta o una devolución del
+    // cliente termina antes de que aquí se lea la cartilla. No hay venta, así que no hay segundo candado.
+    await tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${venueId}), hashtext(${customerId}))`
+
+    // F3: la config se lee DESPUÉS del candado, y esa UNA lectura compara y abre la cartilla. Sin `FOR SHARE` a propósito: con
+    // una sola lectura, cualquier orden contra un cambio de config de otro admin es válido (el ajuste fue antes, con lo que vio
+    // el gerente, o después, y da 409).
+    const config = await tx.loyaltyConfig.findUnique({ where: { venueId } })
+    if (!config || !config.active || !config.stampsEnabled) throw new ConflictError('El programa de sellos está apagado', 'STAMPS_DISABLED')
+
+    // La abierta MÁS VIEJA: la que llena `grantStamp` y la que muestra `getStampCardStatus` (D2).
+    let card = await tx.stampCard.findFirst({
+      where: { venueId, customerId, completedAt: null },
+      orderBy: { cycle: 'asc' },
+      select: { id: true, cycle: true, stampsEarned: true, stampsRequired: true },
+    })
+    const version = await contarVersionDeCartilla(card?.id ?? null, tx)
+    // La meta va en la MISMA comparación, antes de abrir la cartilla y antes de validar el total (F1).
+    const stampsRequired = card?.stampsRequired ?? config.stampsRequired
+    if (
+      (card?.id ?? null) !== input.expectedStampCardId ||
+      (card?.stampsEarned ?? 0) !== input.expectedStampsEarned ||
+      version !== input.expectedVersion ||
+      stampsRequired !== input.expectedStampsRequired
+    ) {
+      // La foto COMPLETA de hoy: el cliente la reemplaza entera y sólo un acto nuevo del usuario la usa.
+      throw new ConflictError('Los sellos de este cliente cambiaron mientras tanto', 'STAMPS_CHANGED', {
+        stampCardId: card?.id ?? null,
+        stampsEarned: card?.stampsEarned ?? 0,
+        stampsRequired,
+        version,
+        rewardLabel: config.stampRewardLabel,
+      })
+    }
+    // Sin cartilla (y se esperaba ninguna): se abre igual que con el primer sello. Si el ajuste rebota abajo, se revierte.
+    if (!card) card = await abrirCartilla(tx, venueId, customerId, config.stampsRequired)
+
+    const from = card.stampsEarned
+    const to = input.stampsEarned
+    if (to < 0 || to > card.stampsRequired) throw new BadRequestError('No puede pasar de la meta de la tarjeta', 'ABOVE_GOAL')
+    if (to === from) throw new BadRequestError('No hay cambio', 'NO_CHANGE')
+    const delta = to - from
+
+    await tx.stampEvent.create({
+      data: {
+        stampCardId: card.id,
+        venueId,
+        orderId: null,
+        type: StampEventType.ADJUST,
+        quantity: delta,
+        reason,
+        createdById: input.staffVenueId ?? null,
+      },
+    })
+    // El contador en la MISMA transacción que su asiento. Valor absoluto: dentro del candado, todo el que lo mueve está formado.
+    await tx.stampCard.update({ where: { id: card.id }, data: { stampsEarned: to } })
+
+    const base = { stampCardId: card.id, from, to, delta, stampsRequired: card.stampsRequired }
+    if (to < card.stampsRequired) return { ...base, completed: false }
+    const { rewardId } = await completarCartilla(tx, card, config, venueId, customerId)
+    return { ...base, completed: true, rewardId }
+  }, PRESUPUESTO_DEL_SELLO)
+
+  // La tarjeta del teléfono refleja el ajuste, como con un sello (en segundo plano; nunca lanza).
+  enSegundoPlano('aviso', notifyCustomerPassUpdated(venueId, customerId))
+  // 🔴 Un ajuste a mano es justo lo que un dueño audita: quién, cuánto y por qué. Fire-and-forget: no deshace el ajuste.
+  const { stampCardId, from, to, delta, completed, rewardId } = resultado
+  void logAction({
+    staffId: input.actorStaffId,
+    venueId,
+    action: 'STAMPS_ADJUSTED',
+    entity: 'Customer',
+    entityId: customerId,
+    data: { stampCardId, from, to, delta, reason, completed, rewardId },
+  })
+
+  return resultado
 }

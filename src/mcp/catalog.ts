@@ -32,6 +32,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   add_ledger_account: 'write',
   add_to_waitlist: 'write',
   adjust_loyalty_points: 'write',
+  adjust_stamps: 'write',
   adjust_raw_material_stock: 'write',
   adjust_stock: 'write',
   aggregator_capacity_rules: 'read',
@@ -423,6 +424,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   work_shifts: 'read',
 }
 
+/** Campos de concurrencia cuyo `null` es un valor visto (p. ej. `adjust_stamps` sin cartilla): se atan aunque valgan null. */
+const NULLABLE_CONFIRMATION_FIELDS = new Set(['expectedStampCardId'])
+
 const outputSchema = {
   status: z.enum(['success', 'needs_input', 'not_found', 'error']),
   data: z.unknown().describe('Resultado de la herramienta; conserva sus campos de dominio'),
@@ -546,8 +550,17 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedElecciones',
             // «Desde Shopify» (variantes, bloque 5): se confirman exactamente los pares producto + huella que se VIERON.
             'expectedItems',
+            // Sellos a mano (`adjust_stamps`, F8): se ajusta el cliente, la cartilla, el número, la versión y la meta que se VIERON.
+            'expectedCustomerId',
+            'expectedStampCardId',
+            'expectedStampsEarned',
+            'expectedVersion',
+            'expectedStampsRequired',
           ]) {
-            if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
+            // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
+            // no atar un `null` que el esquema de otra herramienta no acepta.
+            const presente = NULLABLE_CONFIRMATION_FIELDS.has(field) ? field in data : data[field] != null
+            if (config.inputSchema?.[field] && presente) confirmationArguments[field] = data[field]
           }
           return structureToolResult(
             text({
