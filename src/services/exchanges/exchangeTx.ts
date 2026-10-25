@@ -112,8 +112,8 @@ export async function prepareExchangeInTx(
     if (!existing.result) throw new Error('EXCHANGE_RESULT_MISSING')
     return { replay: existing.result as unknown as ExchangeResponse }
   }
-  const accountingAt = new Date()
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: originalOrderId }))) throw new NotFoundError('No se encontró la venta.')
+  const accountingAt = new Date()
   const sale = await loadSaleForExchange(tx, venueId, originalOrderId)
   if (!sale.payments.some(p => p.id === body.originalPaymentId)) notReturnable('NOT_PAID')
   if (!sale.charged.atribuible) notReturnable('NOT_ATTRIBUTABLE')
