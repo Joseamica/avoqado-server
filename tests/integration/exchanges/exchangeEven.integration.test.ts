@@ -6,7 +6,6 @@ import { keptMarkdownDiscountRow } from '@/services/shared/discount.service'
 import * as receiptService from '@/services/dashboard/receipt.dashboard.service'
 import { createExchange } from '@/services/exchanges/exchange.service'
 import { writeRefundInTx } from '@/services/shared/writeRefundInTx'
-import { logAction } from '@/services/dashboard/activity-log.service'
 import { leerCobradoDeLaOrden } from '@/services/fiscal/cobradoDeLaOrden'
 import { refundedItemsOfOrder, issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { defaults as giftCardReview } from '@/jobs/giftCardReconciliation.job'
@@ -250,8 +249,9 @@ describe('even exchange (E1)', () => {
 
   it('logs EXCHANGE_CREATED with amounts in pesos', async () => {
     const s = await seed()
-    await createExchange(s.input())
-    expect(logAction).toHaveBeenCalledWith(
+    const { exchange: e } = await createExchange(s.input())
+    const logs = await prisma.activityLog.findMany({ where: { venueId: s.venueId, entityId: e.id, action: 'EXCHANGE_CREATED' }, take: 2 })
+    expect(logs).toEqual([
       expect.objectContaining({
         action: 'EXCHANGE_CREATED',
         staffId: s.staffId,
@@ -264,7 +264,7 @@ describe('even exchange (E1)', () => {
           isOfflineReplay: false,
         }),
       }),
-    )
+    ])
   })
 
   it('an all-free exchange has a zero anchor, closes the new sale and restocks only once', async () => {

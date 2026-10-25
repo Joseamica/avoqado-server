@@ -778,6 +778,11 @@ const CANCEL = (marker: string) => ({
 
 /** Every other function that writes an Order row: none touches money columns or fiscal children. */
 const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
+  'src/services/exchanges/exchangeTx.ts#finishExchangeInTx': {
+    class: 'METADATA',
+    why: 'aligns shiftId of the private exchange order with its settled payments; no money or fiscal content changes',
+    markers: ['shiftId: settled.at(-1)!.newPayment.shiftId ?? null'],
+  },
   'src/services/tpv/order.tpv.service.ts#updateGuestInfo': {
     class: 'METADATA',
     why: 'covers/name/phone/requests/customerId (on a paid sale only with payments:create, under the link lock — R3-4)',

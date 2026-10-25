@@ -355,7 +355,7 @@
     "src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx#bloquearCobroParaReembolso": {
       "count": 1,
       "loops": 0,
-      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6). R8 sólo admite la fecha contable interna fijada por Cambio; no cambia el conjunto, orden ni duración de los candados."
     },
     "src/services/dashboard/refund.dashboard.service.ts#issueRefund#bloquearCobroParaReembolso": {
       "count": 1,
@@ -400,12 +400,12 @@
     "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. R8 persiste la caja sin tomar candados de caja después de Payment/Shift; conserva la misma unión."
     },
     "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#bloquearCobroParaReembolso": {
       "count": 1,
       "loops": 1,
-      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6). R8 fija una fecha contable común; la lectura de la porción recién creada no agrega candados."
     },
     "src/services/fiscal/cfdi.service.ts#emitirConEntrada#bloquearOrdenParaFacturar": {
       "count": 1,
@@ -595,17 +595,17 @@
     "src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#lockAreaTicketCheckoutHierarchy": {
       "count": 1,
       "loops": 0,
-      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders. R8 sólo admite la fecha contable interna fijada por Cambio; no cambia el conjunto, orden ni duración de los candados."
     },
     "src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. R8 sólo admite la fecha contable interna fijada por Cambio; no cambia el conjunto, orden ni duración de los candados."
     },
     "src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#finalizeAreaTicketPaymentInTransaction": {
       "count": 1,
       "loops": 0,
-      "reason": "Una Order de la sesión ya poseída; los reingresos de sesión, vales y Order son del mismo conjunto."
+      "reason": "Una Order de la sesión ya poseída; los reingresos de sesión, vales y Order son del mismo conjunto. R8 sólo admite la fecha contable interna fijada por Cambio; no cambia el conjunto, orden ni duración de los candados."
     },
     "src/services/mobile/order.mobile.service.ts#payCashOrder#onOrderPaid": {
       "count": 1,

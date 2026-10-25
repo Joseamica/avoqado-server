@@ -512,6 +512,8 @@ function camposDeSemanticaDada(m: RefundMoneySemantics) {
  * `issueRefund` lo llama con los defaults de siempre (`NONE` · `CLAIM_LIVE` · `MANUAL`).
  */
 interface WriteRefundBase {
+  /** Fecha contable de una operación compuesta; ausente conserva el reloj del reembolso ordinario. */
+  createdAt?: Date
   originalPaymentId: string
   venueId: string
   salesRefundCents: number
@@ -683,6 +685,7 @@ export async function writeRefundInTx(
   const refundPayment = await tx.payment.create({
     data: {
       venueId: input.venueId,
+      createdAt: input.createdAt,
       orderId: original.orderId,
       shiftId: shiftId || undefined,
       processedById: input.staffId || undefined,

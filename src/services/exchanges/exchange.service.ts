@@ -17,7 +17,6 @@ import { SocketEventType } from '@/communication/sockets/types'
 import { executeExchangeInTransaction } from '../mobile/order.mobile.service'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { logAction } from '../dashboard/activity-log.service'
 import { applySalePosting, applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 import { buildInventoryWarning, mapDigitalReceiptResponse } from '../tpv/payment.tpv.service'
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
@@ -234,7 +233,7 @@ async function runExchangePostCommit(
   input: { venueId: string; actorStaffId: string; body: CreateExchangeBody },
 ) {
   const { exchangeId, response, postCommit: p } = outcome
-  const { venueId, actorStaffId, body } = input
+  const { venueId, actorStaffId } = input
   await bestEffort(exchangeId, 'saleInventory', async () => {
     if (!p.salePostingId) return
     const applied = await applySalePosting(p.salePostingId, actorStaffId)
@@ -299,26 +298,6 @@ async function runExchangePostCommit(
     })
     for (const orderId of [p.originalOrderId, p.newOrderId])
       broadcasting.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId })
-  })
-  await bestEffort(exchangeId, 'audit', async () => {
-    void logAction({
-      action: 'EXCHANGE_CREATED',
-      entity: 'Exchange',
-      entityId: exchangeId,
-      staffId: actorStaffId,
-      venueId,
-      data: {
-        originalOrderNumber: response.originalOrderNumber,
-        newOrderNumber: response.newOrderNumber,
-        returnedAmount: response.returnedCents / 100,
-        takenAmount: response.takenCents / 100,
-        differenceAmount: response.differenceCents / 100,
-        settlement: { kind: response.settlement.kind, method: response.settlement.method, amount: response.settlement.amountCents / 100 },
-        reasons: body.returned.map(r => ({ orderItemId: r.orderItemId, reason: r.reason, quantity: r.quantity, restock: r.restock })),
-        deviceId: body.deviceId,
-        isOfflineReplay: false,
-      },
-    })
   })
   await bestEffort(exchangeId, 'response', async () => {
     await prisma.exchange.update({ where: { id: exchangeId, venueId }, data: { result: response as unknown as Prisma.InputJsonValue } })

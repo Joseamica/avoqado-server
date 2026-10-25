@@ -41,7 +41,7 @@ export interface PreparedExchange {
   input: ExchangeTxInput
   exchangeId: string
   sale: SaleForExchange
-  newOrder: { id: string; orderNumber: string }
+  newOrder: { id: string; orderNumber: string; createdAt: Date }
   lines: ExchangeResponse['lines']
   returnedCents: number
   takenCents: number
@@ -112,6 +112,7 @@ export async function prepareExchangeInTx(
     if (!existing.result) throw new Error('EXCHANGE_RESULT_MISSING')
     return { replay: existing.result as unknown as ExchangeResponse }
   }
+  const accountingAt = new Date()
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: originalOrderId }))) throw new NotFoundError('No se encontró la venta.')
   const sale = await loadSaleForExchange(tx, venueId, originalOrderId)
   if (!sale.payments.some(p => p.id === body.originalPaymentId)) notReturnable('NOT_PAID')
@@ -390,7 +391,7 @@ export async function prepareExchangeInTx(
       'La caja del cambio ya no está abierta. Revisa la caja antes de continuar.',
       422,
     )
-  const newOrder = await createExchangeSaleInTx(tx, input, sale, takenLines)
+  const newOrder = await createExchangeSaleInTx(tx, input, sale, takenLines, accountingAt)
   const lines = { returned, taken: takenLines }
   const exchange = await tx.exchange.create({
     data: {
@@ -406,10 +407,12 @@ export async function prepareExchangeInTx(
       differenceAmount: pesos(calc.differenceCents),
       settlementKind: calc.kind,
       settlementMethod: settlement.method,
+      cashDrawerSessionId: drawer?.id ?? null,
       lines: lines as unknown as Prisma.InputJsonValue,
       staffId: actorStaffId,
       deviceId: body.deviceId,
       createdAtLocal: new Date(body.createdAtLocal),
+      createdAt: accountingAt,
       isOfflineReplay: false,
     },
   })
@@ -419,7 +422,6 @@ export async function prepareExchangeInTx(
     slices.map((s, i) => ({ key: String(i), cents: s.cents })),
   )
   const refundRows: PreparedExchange['refundRows'] = []
-  const refundAt = Date.now()
   for (const [i, slice] of slices.entries()) {
     const rootPaymentId = paymentById.get(slice.paymentId)!.rootPaymentId
     const credit = slice.role === 'CREDIT'
@@ -435,6 +437,7 @@ export async function prepareExchangeInTx(
       staffId: actorStaffId,
       tenderCommission: 'NONE',
       shift: 'CLAIM_LIVE',
+      createdAt: accountingAt,
       ...(credit
         ? { moneyAs: money, skipNegativeCostObligation: true }
         : chain?.kind === 'INHERIT'
@@ -460,8 +463,8 @@ export async function prepareExchangeInTx(
           original: { orderId: originalOrderId, tenderSystemKind: 'GIFT_CARD' },
         })
     }
-    // El libro ordena por fecha e id; el reloj de Postgres es fijo durante la transacción.
-    const row = await tx.payment.update({ where: { id: refund.refundPaymentId, venueId }, data: { createdAt: new Date(refundAt + i) } })
+    // La fecha contable es única; el cuid desempata en el orden de las porciones, sin desplazarla.
+    const row = await tx.payment.findUniqueOrThrow({ where: { id: refund.refundPaymentId, venueId } })
     refundRows.push({
       id: refund.refundPaymentId,
       paymentId: slice.paymentId,
@@ -517,7 +520,10 @@ export async function prepareExchangeInTx(
       role: 'CREDIT',
       entrada: { method: 'CASH', amountCents: 0, tipCents: 0, tender: null, canal: { turno: 'exchange', reapertura: 'exchange' } },
     })
-  for (let i = 0; i < newSalePayments.length - 1; i++) newSalePayments[i].entrada.cierreDiferido = true
+  for (const [i, payment] of newSalePayments.entries()) {
+    payment.entrada.createdAt = accountingAt
+    if (i < newSalePayments.length - 1) payment.entrada.cierreDiferido = true
+  }
   const returnLines = [...used].flatMap(([orderItemId]) => {
     const l = byId.get(orderItemId)!
     const quantity = returned.filter(r => r.orderItemId === orderItemId && r.restock).reduce((sum, r) => sum + r.quantity, 0)
@@ -546,6 +552,7 @@ async function createExchangeSaleInTx(
   input: ExchangeTxInput,
   sale: SaleForExchange,
   lines: ExchangeTakenLine[],
+  accountingAt: Date,
 ) {
   const { venueId, body, actorStaffId } = input
   const items: Array<Prisma.OrderItemUncheckedCreateWithoutOrderInput> = []
@@ -605,6 +612,7 @@ async function createExchangeSaleInTx(
   const order = await tx.order.create({
     data: {
       venueId,
+      createdAt: accountingAt,
       orderNumber: `ORD-${Date.now()}`,
       externalId: `exchange:${body.idempotencyKey}`,
       shiftId: shift?.id ?? null,
@@ -643,7 +651,7 @@ async function createExchangeSaleInTx(
       })
   }
   await sincronizarRepartos(tx, order.id)
-  return { id: order.id, orderNumber: order.orderNumber }
+  return { id: order.id, orderNumber: order.orderNumber, createdAt: order.createdAt }
 }
 
 export async function finishExchangeInTx(
@@ -665,6 +673,7 @@ export async function finishExchangeInTx(
         creditRefundPaymentId: refund.id,
         creditPaymentId: settled[i].newPayment.id,
         amount: pesos(payment.slice.cents),
+        createdAt: p.newOrder.createdAt,
       },
     })
   }
@@ -702,22 +711,56 @@ export async function finishExchangeInTx(
     pendingCardRefundCents: 0,
     receiptUrl: null,
   }
-  await tx.exchange.update({ where: { id: p.exchangeId, venueId }, data: { result: response as unknown as Prisma.InputJsonValue } })
+  const cashSale = p.newSalePayments.at(-1)?.role === 'DIFFERENCE' && paymentCountsAsDrawerCash(settled.at(-1)!.newPayment)
+  // La venta nació antes del reclamo: conserva el turno que ganaron sus cobros, incluso si quedó sin turno.
+  await tx.order.update({ where: { id: p.newOrder.id, venueId }, data: { shiftId: settled.at(-1)!.newPayment.shiftId ?? null } })
+  await tx.exchange.update({
+    where: { id: p.exchangeId, venueId },
+    data: {
+      result: response as unknown as Prisma.InputJsonValue,
+      ...(cashSale ? { cashDrawerSessionId: settled.at(-1)!.cajaAlCobrarId } : {}),
+    },
+  })
+  await tx.activityLog.create({
+    data: {
+      action: 'EXCHANGE_CREATED',
+      createdAt: p.newOrder.createdAt,
+      entity: 'Exchange',
+      entityId: p.exchangeId,
+      staffId: p.input.actorStaffId,
+      venueId,
+      data: {
+        originalOrderNumber: response.originalOrderNumber,
+        newOrderNumber: response.newOrderNumber,
+        returnedAmount: response.returnedCents / 100,
+        takenAmount: response.takenCents / 100,
+        differenceAmount: response.differenceCents / 100,
+        settlement: { kind: response.settlement.kind, method: response.settlement.method, amount: response.settlement.amountCents / 100 },
+        reasons: p.input.body.returned.map(r => ({
+          orderItemId: r.orderItemId,
+          reason: r.reason,
+          quantity: r.quantity,
+          restock: r.restock,
+        })),
+        deviceId: p.input.body.deviceId,
+        isOfflineReplay: false,
+      },
+    },
+  })
   return {
     exchangeId: p.exchangeId,
     response,
     postCommit: {
       salePostingId: settled.at(-1)!.postingId ?? null,
       returnPostingId: returnPosting?.id ?? null,
-      cashSale:
-        p.newSalePayments.at(-1)?.role === 'DIFFERENCE' && paymentCountsAsDrawerCash(settled.at(-1)!.newPayment)
-          ? {
-              paymentId: settled.at(-1)!.newPayment.id,
-              sessionId: settled.at(-1)!.cajaAlCobrarId,
-              amountPesos: p.differenceCents / 100,
-              money: settled.at(-1)!.newPayment,
-            }
-          : null,
+      cashSale: cashSale
+        ? {
+            paymentId: settled.at(-1)!.newPayment.id,
+            sessionId: settled.at(-1)!.cajaAlCobrarId,
+            amountPesos: p.differenceCents / 100,
+            money: settled.at(-1)!.newPayment,
+          }
+        : null,
       cashPayouts: p.refundRows
         .filter(r => r.role === 'PAYOUT')
         .map(r => ({ refundPaymentId: r.id, sessionId: r.sessionId, amountPesos: r.cents / 100, money: r.money })),

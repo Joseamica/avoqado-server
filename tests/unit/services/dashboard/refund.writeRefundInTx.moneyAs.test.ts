@@ -224,13 +224,14 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
-  it('without moneyAs creates exactly the same row as before for a cash refund', async () => {
+  it('without moneyAs preserves the cash refund fields and leaves the date to Prisma', async () => {
     const efectivo = cobroBloqueado({ method: 'CASH', merchantAccountId: null, fundsFlow: 'CASH_DRAWER' })
     await writeRefundInTx(tx, entrada({ salesRefundCents: 5000 }, efectivo))
 
     expect(prismaMock.payment.create.mock.calls[0][0]).toStrictEqual({
       data: {
         venueId: VENUE,
+        createdAt: undefined,
         orderId: ORDER,
         shiftId: SHIFT,
         processedById: STAFF,

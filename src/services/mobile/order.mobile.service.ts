@@ -3001,6 +3001,8 @@ export interface AbonoEnTxContexto {
 }
 
 export interface AbonoEnTxEntrada {
+  /** Fecha contable de una operación compuesta; sólo interna, nunca tomada del cuerpo del cobro. */
+  createdAt?: Date
   /** El cambio espera al último abono: la tolerancia de un centavo no puede cerrar antes. */
   cierreDiferido?: boolean
   /** Lo SOLICITADO, en centavos enteros (la frontera de `payCashOrder`). */
@@ -3493,6 +3495,7 @@ export async function registrarAbonoEnTx(
     data: {
       venueId,
       orderId,
+      createdAt: entrada.createdAt,
       amount: amountDecimal,
       tipAmount: tipDecimal,
       method: resolvedTender?.method ?? paymentMethod,
