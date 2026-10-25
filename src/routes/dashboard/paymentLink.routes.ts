@@ -12,6 +12,7 @@ import { Router, Request, Response, NextFunction } from 'express'
 import { validateRequest } from '@/middlewares/validation'
 import { checkPermission } from '@/middlewares/checkPermission.middleware'
 import * as paymentLinkController from '@/controllers/dashboard/paymentLink.dashboard.controller'
+import { cambiaBaseDeLigaConDescuento } from '@/services/dashboard/paymentLink.service'
 import {
   listPaymentLinksSchema,
   createPaymentLinkSchema,
@@ -107,6 +108,17 @@ router.put(
   validateRequest(updatePaymentLinkSchema),
   (req, res, next) => (req.body.customerId ? checkPermission('customers:read')(req, res, next) : next()),
   ...discountPermissions,
+  // Cambiar el importe o los productos de una liga con descuento aplica ese descuento a otro precio: también pide discounts:apply.
+  async (req: Request, res: Response, next: NextFunction) => {
+    try {
+      if (await cambiaBaseDeLigaConDescuento(req.params.venueId, req.params.linkId, req.body)) {
+        return checkPermission('discounts:apply')(req, res, next)
+      }
+      next()
+    } catch (error) {
+      next(error)
+    }
+  },
   paymentLinkController.updatePaymentLink,
 )
 

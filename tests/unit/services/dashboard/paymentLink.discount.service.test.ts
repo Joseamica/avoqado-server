@@ -86,10 +86,16 @@ jest.mock('@/services/tpv/paymentEffects.service', () => ({
   enqueuePaymentCommissionInTx: (...a: unknown[]) => mockEnqueuePaymentCommissionInTx(...a),
 }))
 
-import { createPaymentLink, updatePaymentLink, getPaymentLinks } from '../../../../src/services/dashboard/paymentLink.service'
+import {
+  cambiaBaseDeLigaConDescuento,
+  createPaymentLink,
+  updatePaymentLink,
+  getPaymentLinks,
+} from '../../../../src/services/dashboard/paymentLink.service'
 import { prismaMock } from '../../../__helpers__/setup'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { Decimal } from '@prisma/client/runtime/library'
+import { logAction } from '../../../../src/services/dashboard/activity-log.service'
 
 const VENUE = 'venue-123'
 const STAFF = 'staff-123'
@@ -121,7 +127,13 @@ const fila = (o: Record<string, any> = {}) => ({
   maxDiscountAmount: null,
   ...o,
 })
-const fixed = (amount: number, discount: any) => ({ title: 'Anticipo', amountType: 'FIXED' as const, amount, purpose: 'PAYMENT' as const, discount })
+const fixed = (amount: number, discount: any) => ({
+  title: 'Anticipo',
+  amountType: 'FIXED' as const,
+  amount,
+  purpose: 'PAYMENT' as const,
+  discount,
+})
 const MANUAL15 = { mode: 'MANUAL' as const, type: 'PERCENTAGE' as const, value: 15 }
 const CAT = { mode: 'CATALOG' as const, discountId: DISC }
 
@@ -175,9 +187,10 @@ describe('crear liga con descuento', () => {
   })
 
   it('liga fija $100 con −$150 → 400', async () => {
-    await expect(
-      createPaymentLink(VENUE, fixed(100, { mode: 'MANUAL', type: 'FIXED_AMOUNT', value: 150 }), STAFF),
-    ).rejects.toMatchObject({ message: 'El descuento es mayor o igual que el importe de la liga', statusCode: 400 })
+    await expect(createPaymentLink(VENUE, fixed(100, { mode: 'MANUAL', type: 'FIXED_AMOUNT', value: 150 }), STAFF)).rejects.toMatchObject({
+      message: 'El descuento es mayor o igual que el importe de la liga',
+      statusCode: 400,
+    })
   })
 
   it('importe abierto con −$150 se acepta (se valida al pagar)', async () => {
@@ -195,12 +208,66 @@ describe('crear liga con descuento', () => {
       .mockResolvedValueOnce([{ id: 'p1', price: new Decimal(500) }] as any) // precios para la base
     await createPaymentLink(
       VENUE,
-      { title: 'Paquete', amountType: 'FIXED', amount: 1000, purpose: 'ITEM', items: [{ productId: 'p1', quantity: 2 }], discount: MANUAL15 },
+      {
+        title: 'Paquete',
+        amountType: 'FIXED',
+        amount: 1000,
+        purpose: 'ITEM',
+        items: [{ productId: 'p1', quantity: 2 }],
+        discount: MANUAL15,
+      },
       STAFF,
     )
     const data = (prismaMock.paymentLink.create.mock.calls[0][0] as any).data
     expect(data.discount).toEqual({ v: 1, origen: 'MANUAL', type: 'PERCENTAGE', value: 15, name: 'Descuento', discountId: null })
     expect(data.discountId).toBeNull()
+  })
+
+  // Codex r1 P1: OrderDiscount.value es Decimal(10,4) y amount Decimal(10,2): lo que no cabe se rechaza al crear, no tras cobrar.
+  it('fijo de $1,000,000 (sin pasar por zod) → 400; $999,999.99 sí se guarda', async () => {
+    await expect(
+      createPaymentLink(VENUE, fixed(1_010_000, { mode: 'MANUAL', type: 'FIXED_AMOUNT', value: 1_000_000 }), STAFF),
+    ).rejects.toMatchObject({ statusCode: 400, message: 'El descuento no puede pasar de $999,999.99' })
+    await createPaymentLink(VENUE, fixed(1_010_000, { mode: 'MANUAL', type: 'FIXED_AMOUNT', value: 999_999.99 }), STAFF)
+    expect(prismaMock.paymentLink.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('50 % de $200,000,000 (monto $100,000,000) no cabe en Decimal(10,2) → 400; de $199,999,998 sí', async () => {
+    await expect(
+      createPaymentLink(VENUE, fixed(200_000_000, { mode: 'MANUAL', type: 'PERCENTAGE', value: 50 }), STAFF),
+    ).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'El descuento no puede pasar de $99,999,999.99',
+    })
+    await createPaymentLink(VENUE, fixed(199_999_998, { mode: 'MANUAL', type: 'PERCENTAGE', value: 50 }), STAFF)
+    expect(prismaMock.paymentLink.create).toHaveBeenCalledTimes(1)
+  })
+
+  it('donación con descuento → 400 «Las donaciones no llevan descuento»', async () => {
+    await expect(
+      createPaymentLink(VENUE, { title: 'Dona', amountType: 'OPEN', purpose: 'DONATION', discount: MANUAL15 }, STAFF),
+    ).rejects.toMatchObject({ statusCode: 400, message: 'Las donaciones no llevan descuento' })
+    expect(prismaMock.paymentLink.create).not.toHaveBeenCalled()
+  })
+
+  it('importe abierto con un % del catálogo ≥ 100 → 400 «Este descuento deja el importe en cero»', async () => {
+    const f = fila({ value: new Decimal(100) }) as any
+    prismaMock.discount.findFirst.mockResolvedValue(f)
+    prismaMock.discount.findUnique.mockResolvedValue(f)
+    await expect(
+      createPaymentLink(VENUE, { title: 'Abierta', amountType: 'OPEN', purpose: 'PAYMENT', discount: CAT }, STAFF),
+    ).rejects.toMatchObject({ statusCode: 400, message: 'Este descuento deja el importe en cero' })
+  })
+
+  it('bitácora: registra el descuento puesto (tipo, valor, origen, discountId) y quién', async () => {
+    await createPaymentLink(VENUE, fixed(100, MANUAL15), STAFF)
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({
+        staffId: STAFF,
+        action: 'PAYMENT_LINK_CREATED',
+        data: { discount: { type: 'PERCENTAGE', value: 15, origen: 'MANUAL', discountId: null } },
+      }),
+    )
   })
 
   it('sin descuento no escribe nada nuevo', async () => {
@@ -283,6 +350,52 @@ describe('editar liga con descuento', () => {
     })
   })
 
+  it('poner descuento a una donación → 400', async () => {
+    prismaMock.paymentLink.findUnique.mockResolvedValue(existing({ purpose: 'DONATION', amountType: 'OPEN', amount: null }) as any)
+    await expect(updatePaymentLink(VENUE, 'pl-1', { discount: MANUAL15 })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Las donaciones no llevan descuento',
+    })
+  })
+
+  it('pasar a importe abierto con un % del catálogo de 100 → 400', async () => {
+    const f = fila({ value: new Decimal(100) }) as any
+    prismaMock.paymentLink.findUnique.mockResolvedValue(existing() as any)
+    prismaMock.discount.findFirst.mockResolvedValue(f)
+    prismaMock.discount.findUnique.mockResolvedValue(f)
+    await expect(updatePaymentLink(VENUE, 'pl-1', { amountType: 'OPEN', amount: null, discount: CAT })).rejects.toMatchObject({
+      statusCode: 400,
+      message: 'Este descuento deja el importe en cero',
+    })
+  })
+
+  it('bitácora: cambiar y quitar el descuento quedan con antes/después y quién', async () => {
+    const antes = { v: 1, origen: 'MANUAL', discountId: null, type: 'PERCENTAGE', value: 15, name: 'D' }
+    prismaMock.paymentLink.findUnique.mockResolvedValue(existing({ discount: antes }) as any)
+    await updatePaymentLink(VENUE, 'pl-1', { discount: { mode: 'MANUAL', type: 'FIXED_AMOUNT', value: 20 } }, STAFF)
+    expect(logAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        staffId: STAFF,
+        action: 'PAYMENT_LINK_UPDATED',
+        data: {
+          discount: {
+            change: 'CHANGED',
+            before: { type: 'PERCENTAGE', value: 15, origen: 'MANUAL', discountId: null },
+            after: { type: 'FIXED_AMOUNT', value: 20, origen: 'MANUAL', discountId: null },
+          },
+        },
+      }),
+    )
+    await updatePaymentLink(VENUE, 'pl-1', { discount: null }, STAFF)
+    expect(logAction).toHaveBeenLastCalledWith(
+      expect.objectContaining({
+        data: {
+          discount: { change: 'REMOVED', before: { type: 'PERCENTAGE', value: 15, origen: 'MANUAL', discountId: null }, after: null },
+        },
+      }),
+    )
+  })
+
   it('liga archivada → 400 aunque traiga descuento', async () => {
     prismaMock.paymentLink.findUnique.mockResolvedValue(existing({ status: 'ARCHIVED' }) as any)
     await expect(updatePaymentLink(VENUE, 'pl-1', { discount: MANUAL15 })).rejects.toThrow(BadRequestError)
@@ -304,5 +417,48 @@ describe('lista con descuento', () => {
     expect(r.paymentLinks[0].discount).toEqual({ name: 'Mayo', type: 'PERCENTAGE', value: 15, origen: 'CATALOGO', discountId: DISC })
     expect(r.paymentLinks[2].discount).toBeNull()
     expect(prismaMock.discount.findMany).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('cambiaBaseDeLigaConDescuento (la ruta pide discounts:apply)', () => {
+  const FOTO = { v: 1, origen: 'MANUAL', discountId: null, type: 'PERCENTAGE', value: 15, name: 'D' }
+  const liga = (o: Record<string, any> = {}) => ({
+    purpose: 'PAYMENT',
+    amountType: 'FIXED',
+    amount: new Decimal(100),
+    discount: FOTO,
+    items: [],
+    ...o,
+  })
+  it('importe distinto en una liga con descuento → true; el mismo importe reenviado → false', async () => {
+    prismaMock.paymentLink.findFirst.mockResolvedValue(liga() as any)
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { amount: 200 })).toBe(true)
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { amount: 100, amountType: 'FIXED', title: 'x' })).toBe(false)
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { amountType: 'OPEN' })).toBe(true)
+  })
+  it('sin descuento, o sin tocar la base, o trayendo su propio discount → false sin consultar', async () => {
+    prismaMock.paymentLink.findFirst.mockResolvedValue(liga({ discount: null }) as any)
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { amount: 200 })).toBe(false)
+    prismaMock.paymentLink.findFirst.mockClear()
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { title: 'x' })).toBe(false)
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { amount: 200, discount: null })).toBe(false)
+    expect(prismaMock.paymentLink.findFirst).not.toHaveBeenCalled()
+  })
+  it('ITEM: otros productos → true; los mismos (otro orden) → false; el importe no cuenta', async () => {
+    prismaMock.paymentLink.findFirst.mockResolvedValue(
+      liga({
+        purpose: 'ITEM',
+        items: [
+          { productId: 'p1', quantity: 1, modifiers: [{ modifierId: 'm1', quantity: 1 }] },
+          { productId: 'p2', quantity: 2, modifiers: [] },
+        ],
+      }) as any,
+    )
+    const mismos = [
+      { productId: 'p2', quantity: 2 },
+      { productId: 'p1', quantity: 1, modifiers: [{ modifierId: 'm1' }] },
+    ]
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { items: mismos, amount: 999 })).toBe(false)
+    expect(await cambiaBaseDeLigaConDescuento(VENUE, 'pl-1', { items: [{ productId: 'p3', quantity: 1 }] })).toBe(true)
   })
 })

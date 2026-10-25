@@ -9,7 +9,7 @@ import prisma from '@/utils/prismaClient'
 import { nuevoRepartoDirigido } from '@/services/shared/repartoDescuento'
 import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 import { getSalesByItem } from '@/services/dashboard/sales-by-item.dashboard.service'
-import { lineRevenueSql } from '@/services/dashboard/lineRevenue'
+import { lineRevenue, lineRevenueSql } from '@/services/dashboard/lineRevenue'
 import { getCategoryBreakdown } from '@/jobs/nightly-sales-summary.job'
 import { crearNegocio, NegocioDePrueba } from '../product-variants/fixtures'
 
@@ -153,5 +153,32 @@ describe('reportes por artículo: descuento de cuenta repartido', () => {
 
     const cat = await getCategoryBreakdown(n.venueId, new Date(FROM_ISO), new Date(TO_ISO))
     expect(cat.reduce((s, c) => s + cents(c.netSales), 0)).toBe(51000 + 34000 + 8000 + 8000 + 7000 + 5000)
+  })
+
+  it('el gemelo JS (lineRevenue, reporte de turno) da lo mismo que lineRevenueSql en cada renglón', async () => {
+    const sql = await prisma.$queryRaw<Array<{ id: string; revenue: Prisma.Decimal }>>`
+      SELECT oi.id, ${Prisma.raw(lineRevenueSql())} AS revenue
+      FROM "OrderItem" oi INNER JOIN "Order" o ON o.id = oi."orderId"
+      WHERE o."venueId" = ${n.venueId}`
+    const orders = await prisma.order.findMany({
+      where: { venueId: n.venueId },
+      take: 10,
+      select: {
+        items: {
+          select: {
+            id: true,
+            quantity: true,
+            unitPrice: true,
+            discountAmount: true,
+            weightQuantity: true,
+            modifiers: { select: { price: true, quantity: true } },
+          },
+        },
+        orderDiscounts: { select: { reparto: true } },
+      },
+    })
+    const js = new Map(orders.flatMap(o => o.items.map(i => [i.id, cents(lineRevenue(i, o.orderDiscounts))] as const)))
+    expect(sql.length).toBe(js.size)
+    for (const r of sql) expect([r.id, js.get(r.id)]).toEqual([r.id, cents(Number(r.revenue))])
   })
 })

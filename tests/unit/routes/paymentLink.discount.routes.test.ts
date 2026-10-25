@@ -11,9 +11,11 @@ jest.mock('@/middlewares/checkPermission.middleware', () => ({
 jest.mock('@/services/access/access.service', () => ({ getUserAccess: jest.fn().mockResolvedValue({}), hasPermission: jest.fn() }))
 const mockCreate = jest.fn()
 const mockUpdate = jest.fn()
+const mockCambiaBase = jest.fn()
 jest.mock('@/services/dashboard/paymentLink.service', () => ({
   createPaymentLink: (...a: unknown[]) => mockCreate(...a),
   updatePaymentLink: (...a: unknown[]) => mockUpdate(...a),
+  cambiaBaseDeLigaConDescuento: (...a: unknown[]) => mockCambiaBase(...a),
 }))
 import router from '@/routes/dashboard/paymentLink.routes'
 import { hasPermission } from '@/services/access/access.service'
@@ -54,6 +56,7 @@ beforeEach(() => {
   ;(hasPermission as jest.Mock).mockResolvedValue(false)
   mockCreate.mockResolvedValue({ id: 'pl1' })
   mockUpdate.mockResolvedValue({ id: 'pl1' })
+  mockCambiaBase.mockResolvedValue(false)
 })
 
 describe.each([
@@ -90,5 +93,20 @@ describe.each([
     const pedidos = mockPermission.mock.calls.map(c => c[0])
     expect(pedidos).not.toContain('discounts:apply')
     expect(pedidos).not.toContain('discounts:read')
+  })
+})
+
+describe('put: cambiar la base de una liga que ya trae descuento', () => {
+  it('sin discounts:apply → 403 y no llega al servicio', async () => {
+    mockCambiaBase.mockResolvedValue(true)
+    const { res } = await run('put', '/:linkId', { amount: 500 }, ['discounts:apply'])
+    expect(mockCambiaBase).toHaveBeenCalledWith('v1', 'pl1', { amount: 500 })
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(mockUpdate).not.toHaveBeenCalled()
+  })
+  it('si no cambia la base (o no hay descuento) pasa sin discounts:apply', async () => {
+    mockCambiaBase.mockResolvedValue(false)
+    await run('put', '/:linkId', { amount: 500 }, ['discounts:apply'])
+    expect(mockUpdate).toHaveBeenCalled()
   })
 })

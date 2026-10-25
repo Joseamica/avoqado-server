@@ -8,7 +8,14 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { createPaymentLink, updatePaymentLink } from '@/services/dashboard/paymentLink.service'
 import { paymentLinkDiscountInput } from '@/schemas/dashboard/paymentLink.schema'
-import { BASE_LIGA_ABIERTA, cargarRegla, desgloseDeLiga, resolverDescuentoDeEntrada } from '@/services/dashboard/paymentLinkDiscount'
+import {
+  BASE_LIGA_ABIERTA,
+  cargarRegla,
+  desgloseDeLiga,
+  rechazarDescuentoEnDonacion,
+  resolverDescuentoDeEntrada,
+  resumenDeDescuento,
+} from '@/services/dashboard/paymentLinkDiscount'
 import type { EntradaDescuento } from '@/services/dashboard/paymentLinkDiscount'
 
 const STATUS_MAP: Record<string, PaymentLinkStatus> = {
@@ -41,7 +48,12 @@ async function previewDeDescuento(venueId: string, discount: EntradaDescuento, a
         : `descuento "${foto.name}" (${valor}) NO aplica hoy (${d.motivo ?? 'sin motivo'}): se cobrarían ${mxn(d.base)}`
   return {
     resumen,
-    detalle: { name: foto.name, base: amount ?? null, discount: amount === undefined ? null : d.descuento, net: amount === undefined ? null : d.neto },
+    detalle: {
+      name: foto.name,
+      base: amount ?? null,
+      discount: amount === undefined ? null : d.descuento,
+      net: amount === undefined ? null : d.neto,
+    },
   }
 }
 
@@ -111,7 +123,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'create_payment_link',
-    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount (in PESOS, e.g. 150.50) or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Because it mints a PUBLIC, shareable checkout that anyone can pay, by DEFAULT it only PREVIEWS the link; call again with confirm:true to actually create it. Returns the short code. Optionally a discount (manual % or fixed amount, or one from the venue catalog): the payer is charged amount minus the discount; this additionally requires discounts:apply (and discounts:read for a catalog discount). This WRITES — requires payment-link:create. (Item-based links with product line items are not created here — use the dashboard.)',
+    'Create a NEW payment link (pay.avoqado.io) in a venue you can access — a shareable link to collect a payment. Set a title and either a fixed amount (in PESOS, e.g. 150.50) or leave it open (the payer chooses how much). Optionally a description, purpose (payment / donation) and an expiry. Because it mints a PUBLIC, shareable checkout that anyone can pay, by DEFAULT it only PREVIEWS the link; call again with confirm:true to actually create it. Returns the short code. Optionally a discount (manual % or fixed amount, or one from the venue catalog; not valid for donations): the payer is charged amount minus the discount; this additionally requires discounts:apply (and discounts:read for a catalog discount). This WRITES — requires payment-link:create. (Item-based links with product line items are not created here — use the dashboard.)',
     {
       venueId: z.string().describe('Venue to create the link in (must be in your scope)'),
       title: z.string().min(1).describe('What the payment is for, e.g. "Anticipo boda"'),
@@ -144,6 +156,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
         let descuento: Awaited<ReturnType<typeof previewDeDescuento>> = null
         if (discount) {
           try {
+            rechazarDescuentoEnDonacion(purpose === 'donation' ? 'DONATION' : 'PAYMENT', discount)
             descuento = await previewDeDescuento(venueId, discount, amount, false)
           } catch (err) {
             return text({ ok: false, error: (err as Error).message })
@@ -185,7 +198,12 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           entity: 'PaymentLink',
           entityId: link.id,
           venueId,
-          data: { title, amountType: amount !== undefined ? 'FIXED' : 'OPEN', amount: amount ?? null },
+          data: {
+            title,
+            amountType: amount !== undefined ? 'FIXED' : 'OPEN',
+            amount: amount ?? null,
+            discount: resumenDeDescuento(link.discount),
+          },
         })
         return text({
           ok: true,
@@ -205,7 +223,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
   )
   server.tool(
     'create_customer_payment_link',
-    'Create a payment link attributed to an existing customer of this venue. Payer contacts stay separate. Preview first, then human confirmation. Reusable links attribute every payment to this customer. Optional discount (manual or from the catalog) also requires discounts:apply (and discounts:read for a catalog one). Requires payment-link:create and customers:read. Customer creation remains in create_customer. A creationKey makes retries return the same link.',
+    'Create a payment link attributed to an existing customer of this venue. Payer contacts stay separate. Preview first, then human confirmation. Reusable links attribute every payment to this customer. Optional discount (manual or from the catalog; not valid for donations) also requires discounts:apply (and discounts:read for a catalog one). Requires payment-link:create and customers:read. Customer creation remains in create_customer. A creationKey makes retries return the same link.',
     {
       venueId: z.string(),
       customerId: z.string().cuid('ID de cliente inválido'),
@@ -220,7 +238,20 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
       creationKey: z.string().min(1).max(128).optional(),
       confirm: z.boolean().optional(),
     },
-    async ({ venueId, customerId, title, amount, purpose, description, currency, expiresAt, isReusable = false, discount, creationKey, confirm }) => {
+    async ({
+      venueId,
+      customerId,
+      title,
+      amount,
+      purpose,
+      description,
+      currency,
+      expiresAt,
+      isReusable = false,
+      discount,
+      creationKey,
+      confirm,
+    }) => {
       const where = guard.venueFilter(venueId)
       guard.requirePermission('payment-link:create', venueId)
       guard.requirePermission('customers:read', venueId)
@@ -234,6 +265,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
         let descuento: Awaited<ReturnType<typeof previewDeDescuento>> = null
         if (discount) {
           try {
+            rechazarDescuentoEnDonacion(purpose === 'donation' ? 'DONATION' : 'PAYMENT', discount)
             descuento = await previewDeDescuento(venueId, discount, amount, isReusable)
           } catch (error) {
             return text({ ok: false, error: (error as Error).message })
@@ -241,7 +273,15 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
         }
         return text({
           requiresConfirmation: true,
-          preview: { venueId, customerId, customer, title, amount: amount ?? null, isReusable, ...(descuento ? { discount: descuento.detalle } : {}) },
+          preview: {
+            venueId,
+            customerId,
+            customer,
+            title,
+            amount: amount ?? null,
+            isReusable,
+            ...(descuento ? { discount: descuento.detalle } : {}),
+          },
           message: `Confirma crear la liga${descuento ? ` (${descuento.resumen})` : ''}. Todos sus pagos se atribuirán a este cliente.`,
         })
       }
@@ -268,7 +308,7 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
               entity: 'PaymentLink',
               entityId: created.id,
               venueId,
-              data: { customerId, title, amount: amount ?? null, isReusable },
+              data: { customerId, title, amount: amount ?? null, isReusable, discount: resumenDeDescuento(created.discount) },
             }),
         )
         return text({
@@ -307,7 +347,8 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
           select: { id: true, title: true, customerId: true, status: true, isReusable: true },
         })
         if (!link) return text({ ok: false, error: 'Liga de pago no encontrada' })
-        if (link.customerId && link.customerId !== customerId) return text({ ok: false, error: 'Esta liga ya tiene un cliente y no se puede cambiar' })
+        if (link.customerId && link.customerId !== customerId)
+          return text({ ok: false, error: 'Esta liga ya tiene un cliente y no se puede cambiar' })
         const customer = await prisma.customer.findFirst({
           where: { ...where, id: customerId, active: true },
           select: { id: true, firstName: true, lastName: true, email: true, phone: true },

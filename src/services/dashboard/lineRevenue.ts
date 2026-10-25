@@ -123,6 +123,7 @@ export const isItemLevelDiscountSql = (alias = 'oi'): string =>
   `(${alias}."discountAmount" > 0 AND ABS(${alias}."total" - ${lineBaseSql(alias)}) < 0.005)`
 
 interface LineLike {
+  id?: string
   quantity: number
   unitPrice: unknown
   discountAmount?: unknown
@@ -161,8 +162,24 @@ export function lineGross(item: LineLike): number {
  * relation is treated as "no modifiers", which is correct for a line that has
  * none and wrong for a select that forgot to ask.
  */
-export function lineRevenue(item: LineLike): number {
-  return lineGross(item) - Number(item.discountAmount ?? 0)
+export function lineRevenue(item: LineLike, orderDiscounts?: Array<{ reparto: unknown }> | null): number {
+  return lineGross(item) - Number(item.discountAmount ?? 0) - lineOrderDiscount(item, orderDiscounts)
+}
+
+/**
+ * Gemelo de `rawOrderDiscountSql`: la parte del renglón (centavos → pesos) en los descuentos de su orden que NO son
+ * espejo. 🔴 El llamador debe traer `orderDiscounts: { select: { reparto: true } }` y el `id` del renglón.
+ */
+export function lineOrderDiscount(item: Pick<LineLike, 'id'>, orderDiscounts?: Array<{ reparto: unknown }> | null): number {
+  if (!item.id || !orderDiscounts) return 0
+  let centavos = 0
+  for (const { reparto } of orderDiscounts) {
+    const r = reparto as { espejo?: boolean | null; renglones?: Record<string, unknown> } | null
+    if (!r || r.espejo === true) continue
+    const parte = r.renglones?.[item.id]
+    if (parte != null) centavos += Number(parte)
+  }
+  return centavos / 100
 }
 
 /**

@@ -60,6 +60,10 @@ export const paymentLinkDiscountInput = z
     if (d.type === 'FIXED_AMOUNT' && Math.round(d.value * 100) / 100 !== d.value) {
       ctx.addIssue({ code: 'custom', path: ['value'], message: 'El monto admite máximo 2 decimales' })
     }
+    // OrderDiscount.value es Decimal(10,4): un fijo mayor desborda al escribir la orden, ya cobrada (Codex r1 P1).
+    if (d.type === 'FIXED_AMOUNT' && d.value > 999_999.99) {
+      ctx.addIssue({ code: 'custom', path: ['value'], message: 'El descuento no puede pasar de $999,999.99' })
+    }
   })
   .nullable()
   .optional()

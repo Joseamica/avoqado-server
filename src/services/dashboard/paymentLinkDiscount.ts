@@ -244,6 +244,21 @@ export type EntradaDescuento =
   | { mode: 'MANUAL'; type: 'PERCENTAGE' | 'FIXED_AMOUNT'; value: number; name?: string }
   | { mode: 'CATALOG'; discountId: string }
 
+/** Topes de las columnas de OrderDiscount: `value` Decimal(10,4) y `amount` Decimal(10,2) (= Order.discountAmount). */
+const MAX_VALOR_DESCUENTO = 999_999.99
+const MAX_MONTO_DESCUENTO = 99_999_999.99
+
+/** Las donaciones no llevan descuento (dashboard, MCP y servicio). */
+export function rechazarDescuentoEnDonacion(purpose: string | null | undefined, input: unknown): void {
+  if (purpose === 'DONATION' && input) throw new BadRequestError('Las donaciones no llevan descuento')
+}
+
+/** Lo que la bitácora guarda de un descuento de liga. */
+export function resumenDeDescuento(foto: unknown) {
+  const f = foto as DescuentoDeLiga | null | undefined
+  return f ? { type: f.type, value: f.value, origen: f.origen, discountId: f.discountId } : null
+}
+
 /** Base para ligas de importe abierto (no hay monto al crear): sólo para que salgan razones de fecha/activo/compatibilidad. */
 export const BASE_LIGA_ABIERTA = 1_000_000
 
@@ -266,6 +281,8 @@ export async function validarFotoContraBase(
   /** true = la foto ya estaba en la liga: solo se revisa que quepa en la nueva base (la vigencia se ve en la lista y se revisa al cobrar). */
   conservada = false,
 ): Promise<void> {
+  // Lo que no cabe en OrderDiscount (value Decimal(10,4), amount Decimal(10,2)) truena al escribir la orden YA cobrada.
+  if (foto.value > MAX_VALOR_DESCUENTO) throw new BadRequestError('El descuento no puede pasar de $999,999.99')
   let regla = await cargarRegla(tx, foto)
   if (conservada && regla) {
     regla = { ...regla, active: true, existe: true, compatible: true, validFrom: null, validUntil: null }
@@ -274,8 +291,15 @@ export async function validarFotoContraBase(
   const zona = venue?.timezone ?? 'America/Mexico_City'
   const reglaSinHorario = regla ? { ...regla, daysOfWeek: [], timeFrom: null, timeUntil: null } : null
   const d = desgloseDeLiga(base ?? BASE_LIGA_ABIERTA, foto, reglaSinHorario, new Date(), zona)
+  if (d.aplica && base !== null && d.descuento > MAX_MONTO_DESCUENTO) {
+    throw new BadRequestError('El descuento no puede pasar de $99,999,999.99')
+  }
   if (d.aplica || !d.motivo) return
-  if (d.motivo === 'MINIMO' && base === null) return
+  if (d.motivo === 'MINIMO' && base === null) {
+    // Importe abierto: un % de 100 o más deja cualquier importe en $0 y la liga nunca se podría pagar.
+    if (foto.type === 'PERCENTAGE' && foto.value >= 100) throw new BadRequestError('Este descuento deja el importe en cero')
+    return
+  }
   if (d.motivo === 'MINIMO' && base !== null && regla?.minPurchaseAmount != null && base < regla.minPurchaseAmount) {
     throw new BadRequestError(`Este descuento pide una compra mínima de $${regla.minPurchaseAmount.toFixed(2)}`)
   }

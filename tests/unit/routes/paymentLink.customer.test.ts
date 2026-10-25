@@ -18,6 +18,7 @@ jest.mock('@/services/dashboard/paymentLink.service', () => ({
   getPaymentLinks: (...a: unknown[]) => mockList(...a),
   getPaymentLinkById: (...a: unknown[]) => mockGet(...a),
   updatePaymentLink: (...a: unknown[]) => mockUpdate(...a),
+  cambiaBaseDeLigaConDescuento: async () => false,
 }))
 import router from '@/routes/dashboard/paymentLink.routes'
 import { hasPermission } from '@/services/access/access.service'

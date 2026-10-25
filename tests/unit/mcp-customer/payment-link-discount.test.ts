@@ -52,7 +52,15 @@ beforeEach(() => {
   perms.length = 0
   denied.clear()
   mockResolver.mockResolvedValue({ foto: FOTO, discountId: null })
-  mockCreate.mockResolvedValue({ id: 'l1', shortCode: 'abc', title: 'Clase', amountType: 'FIXED', amount: 1000, status: 'ACTIVE', customer: null })
+  mockCreate.mockResolvedValue({
+    id: 'l1',
+    shortCode: 'abc',
+    title: 'Clase',
+    amountType: 'FIXED',
+    amount: 1000,
+    status: 'ACTIVE',
+    customer: null,
+  })
 })
 
 describe.each([
@@ -88,6 +96,36 @@ describe.each([
     expect(out.ok).toBe(true)
     expect(mockCreate).toHaveBeenCalledTimes(1)
     expect(mockCreate.mock.calls[0][1]).toMatchObject({ discount: MANUAL })
+  })
+
+  it('donación con descuento: ni preview ni creación', async () => {
+    const out = parse(await call(tool, { ...base, purpose: 'donation' }))
+    expect(out).toMatchObject({ ok: false, error: 'Las donaciones no llevan descuento' })
+    expect(mockCreate).not.toHaveBeenCalled()
+  })
+
+  it('la auditoría MCP registra el descuento', async () => {
+    mockCreate.mockImplementation(async (_v: unknown, _d: unknown, _s: unknown, _k: unknown, onCreated?: (l: unknown) => Promise<void>) => {
+      const link = {
+        id: 'l1',
+        shortCode: 'abc',
+        title: 'Clase',
+        amountType: 'FIXED',
+        amount: 1000,
+        status: 'ACTIVE',
+        customer: null,
+        discount: FOTO,
+      }
+      if (onCreated) await onCreated(link)
+      return link
+    })
+    await call(tool, { ...base, confirm: true })
+    expect(mockAudit).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({
+        data: expect.objectContaining({ discount: { type: 'PERCENTAGE', value: 15, origen: 'MANUAL', discountId: null } }),
+      }),
+    )
   })
 
   it('sin descuento no pide permisos de descuentos', async () => {

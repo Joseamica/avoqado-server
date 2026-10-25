@@ -39,6 +39,16 @@ describe('paymentLink discount schema', () => {
     }
   })
 
+  it('FIXED_AMOUNT cabe en OrderDiscount.value Decimal(10,4): $999,999.99 sí, $1,000,000 no', () => {
+    const con = (value: number) =>
+      createPaymentLinkBodySchema.safeParse({ ...base, amount: 1_010_000, discount: { mode: 'MANUAL', type: 'FIXED_AMOUNT', value } })
+    expect(con(999_999.99).success).toBe(true)
+    expect(con(1_000_000).success).toBe(false)
+    expect(updatePaymentLinkBodySchema.safeParse({ discount: { mode: 'MANUAL', type: 'FIXED_AMOUNT', value: 1_000_000 } }).success).toBe(
+      false,
+    )
+  })
+
   it('rechaza name vacío o de más de 60 caracteres', () => {
     for (const name of ['', 'x'.repeat(61)]) {
       expect(

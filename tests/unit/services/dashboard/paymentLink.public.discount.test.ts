@@ -48,38 +48,72 @@ const pedir = async (over: Record<string, unknown> = {}) => {
 }
 
 describe('getPaymentLinkByShortCode — descuento', () => {
-  it('sin descuento: discount null, baseAmount = amount, amount y WhatsApp del negocio', async () => {
+  it('sin descuento: discount null, baseAmount = amount, amount y SIN el teléfono del negocio', async () => {
     const r = await pedir()
     expect(r.discount).toBeNull()
     expect(r.baseAmount).toBe(1000)
     expect(r.amount).toEqual(new Decimal(1000))
-    expect(r.venue.whatsappPhone).toBe('5512345678')
+    expect(r.venue.whatsappPhone).toBeNull()
     expect(r.venue).not.toHaveProperty('phone')
     expect(r.venue).not.toHaveProperty('timezone')
   })
 
+  it('con descuento sí trae el WhatsApp del negocio', async () => {
+    const r = await pedir({ discount: MANUAL_15 })
+    expect(r.venue.whatsappPhone).toBe('5512345678')
+  })
+
   it('whatsappPhone null si el teléfono está vacío', async () => {
-    const r = await pedir({ venue: { ...liga().venue, phone: '  ' } })
+    const r = await pedir({ discount: MANUAL_15, venue: { ...liga().venue, phone: '  ' } })
     expect(r.venue.whatsappPhone).toBeNull()
   })
 
   it('fija 1000 −15 %: amount 150, disponible', async () => {
     const r = await pedir({ discount: MANUAL_15 })
     expect(r.discount).toMatchObject({
-      name: 'Buen Fin', type: 'PERCENTAGE', value: 15, amount: 150, available: true, reason: null,
-      minPurchaseAmount: null, maxDiscountAmount: null, validUntil: null,
+      name: 'Buen Fin',
+      type: 'PERCENTAGE',
+      value: 15,
+      amount: 150,
+      available: true,
+      reason: null,
+      minPurchaseAmount: null,
+      maxDiscountAmount: null,
+      validUntil: null,
     })
   })
 
   it('descuento del catálogo vencido: available false, reason VENCIDO, amount null', async () => {
     ;(prismaMock.discount.findUnique as jest.Mock).mockResolvedValue({
-      active: true, validFrom: null, validUntil: new Date('2020-01-01T00:00:00Z'), daysOfWeek: [], timeFrom: null, timeUntil: null,
-      minPurchaseAmount: new Decimal(500), maxDiscountAmount: null,
-      scope: 'ORDER', type: 'PERCENTAGE', requiresApproval: false, isAutomatic: false, buyQuantity: null, getQuantity: null,
-      getDiscountPercent: null, buyItemIds: [], getItemIds: [], maxTotalUses: null, maxUsesPerCustomer: null, customerGroupId: null,
+      active: true,
+      validFrom: null,
+      validUntil: new Date('2020-01-01T00:00:00Z'),
+      daysOfWeek: [],
+      timeFrom: null,
+      timeUntil: null,
+      minPurchaseAmount: new Decimal(500),
+      maxDiscountAmount: null,
+      scope: 'ORDER',
+      type: 'PERCENTAGE',
+      requiresApproval: false,
+      isAutomatic: false,
+      buyQuantity: null,
+      getQuantity: null,
+      getDiscountPercent: null,
+      buyItemIds: [],
+      getItemIds: [],
+      maxTotalUses: null,
+      maxUsesPerCustomer: null,
+      customerGroupId: null,
     })
     const r = await pedir({ discount: CATALOGO })
-    expect(r.discount).toMatchObject({ available: false, reason: 'VENCIDO', amount: null, minPurchaseAmount: 500, validUntil: '2020-01-01T00:00:00.000Z' })
+    expect(r.discount).toMatchObject({
+      available: false,
+      reason: 'VENCIDO',
+      amount: null,
+      minPurchaseAmount: 500,
+      validUntil: '2020-01-01T00:00:00.000Z',
+    })
   })
 
   it('importe abierto: baseAmount null, amount null, disponible por fecha/compat', async () => {
@@ -89,7 +123,14 @@ describe('getPaymentLinkByShortCode — descuento', () => {
   })
 
   it('productos: baseAmount con precios vivos (misma suma que cobra)', async () => {
-    const items = [{ id: 'i1', quantity: 2, product: { price: new Decimal(300) }, modifiers: [{ id: 'm1', quantity: 1, modifier: { price: new Decimal(50) } }] }]
+    const items = [
+      {
+        id: 'i1',
+        quantity: 2,
+        product: { price: new Decimal(300) },
+        modifiers: [{ id: 'm1', quantity: 1, modifier: { price: new Decimal(50) } }],
+      },
+    ]
     const r = await pedir({ purpose: 'ITEM', amountType: 'FIXED', amount: new Decimal(1), items, discount: MANUAL_15 })
     expect(r.baseAmount).toBe(700)
     expect(r.discount.amount).toBe(105)

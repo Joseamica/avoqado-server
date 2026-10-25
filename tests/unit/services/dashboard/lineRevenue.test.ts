@@ -125,6 +125,23 @@ describe('lineRevenue — one definition of what a line earned', () => {
   })
 })
 
+describe('lineRevenue — descuentos de CUENTA repartidos (gemelo de lineRevenueSql)', () => {
+  const linea = { id: 'oi-1', quantity: 1, unitPrice: 600, discountAmount: 0 }
+  it('resta su parte de las filas NO espejo (centavos ÷ 100) y no la de un espejo ni la de otro renglón', () => {
+    const filas = [
+      { reparto: { espejo: false, renglones: { 'oi-1': 9000, 'oi-2': 6000 } } },
+      { reparto: { espejo: true, renglones: { 'oi-1': 2000 } } },
+      { reparto: null },
+      { reparto: { renglones: { 'oi-1': 500 } } }, // sin bandera: como el SQL (COALESCE(espejo, false))
+    ]
+    expect(lineRevenue(linea, filas)).toBeCloseTo(600 - 90 - 5, 2)
+  })
+  it('sin filas de descuento queda como antes', () => {
+    expect(lineRevenue(linea, [])).toBe(600)
+    expect(lineRevenue(linea)).toBe(600)
+  })
+})
+
 describe('isItemLevelDiscount — only count a giveaway once', () => {
   it('counts a combo line, whose total is already net', () => {
     expect(isItemLevelDiscount(COMBO_LINE)).toBe(true)
@@ -200,6 +217,18 @@ describe('shift top products — revenue is net of the line discount', () => {
 
     expect(tacos.revenue).toBeCloseTo(77.29, 2)
     expect(tacos.quantity).toBe(1)
+  })
+
+  it('resta el descuento de CUENTA repartido al renglón (igual que lineRevenueSql)', async () => {
+    const pizza = { id: 'oi-1', quantity: 1, unitPrice: 600, discountAmount: 0, total: 600, product: { id: 'p9', name: 'Pizza' } }
+    const row = shiftRow([pizza])
+    prismaMock.order.findMany.mockResolvedValue([
+      { ...orderRow([pizza]), orderDiscounts: [{ reparto: { espejo: false, renglones: { 'oi-1': 9000 } } }] },
+    ] as any)
+    prismaMock.shift.findFirst.mockResolvedValue(row as any)
+    const shift = await getShiftById('venue-1', 'shift-1')
+    expect(shift.topProducts.find((p: any) => p.name === 'Pizza').revenue).toBe(510)
+    expect((prismaMock.order.findMany.mock.calls[0][0] as any).select.orderDiscounts).toEqual({ select: { reparto: true } })
   })
 
   it('still reports an undiscounted line at full price (regression)', async () => {

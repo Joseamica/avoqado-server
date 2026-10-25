@@ -39,8 +39,10 @@ import {
   desgloseDeLiga,
   EntradaDescuento,
   MotivoNoDisponible,
+  rechazarDescuentoEnDonacion,
   reglaDeFila,
   resolverDescuentoDeEntrada,
+  resumenDeDescuento,
   validarFotoContraBase,
   vistaDeDescuento,
 } from '@/services/dashboard/paymentLinkDiscount'
@@ -517,7 +519,7 @@ export async function createPaymentLink(
   data: CreatePaymentLinkData,
   staffId: string,
   creationKey?: string,
-  onCreated?: (link: { id: string }) => Promise<void>,
+  onCreated?: (link: { id: string; discount: Prisma.JsonValue }) => Promise<void>,
 ) {
   if (creationKey !== undefined && (!creationKey.trim() || creationKey.length > 128)) {
     throw new BadRequestError('La clave de creación debe tener entre 1 y 128 caracteres')
@@ -599,6 +601,7 @@ export async function createPaymentLink(
   }
 
   // 2b. Descuento: se valida contra la base (fija → amount, ITEM → total del paquete, abierta → sin base).
+  rechazarDescuentoEnDonacion(data.purpose, data.discount)
   const createBase = !data.discount
     ? null
     : data.purpose === 'ITEM'
@@ -713,7 +716,13 @@ export async function createPaymentLink(
       action: 'PAYMENT_LINK_CREATED',
       entity: 'PaymentLink',
       entityId: paymentLink.id,
-      data: data.customerId ? { customerId: data.customerId } : undefined,
+      data:
+        data.customerId || discountFoto
+          ? {
+              ...(data.customerId ? { customerId: data.customerId } : {}),
+              ...(discountFoto ? { discount: resumenDeDescuento(discountFoto) } : {}),
+            }
+          : undefined,
     })
   }
 
@@ -988,6 +997,7 @@ export async function updatePaymentLink(
   const effectiveAmountType = data.amountType ?? existing.amountType
   const effectiveAmount = data.amount !== undefined ? data.amount : existing.amount != null ? Number(existing.amount) : null
   const touchesBase = data.amount !== undefined || data.amountType !== undefined || data.items !== undefined
+  rechazarDescuentoEnDonacion(existing.purpose, data.discount)
   if (data.discount !== undefined || touchesBase) {
     const keptFoto = data.discount === undefined ? ((existing.discount as unknown as DescuentoDeLiga | null) ?? null) : null
     if (data.discount !== undefined || keptFoto) {
@@ -1075,11 +1085,21 @@ export async function updatePaymentLink(
   logger.info('Payment link updated', { paymentLinkId: linkId, venueId })
 
   if (!onlyCustomer) {
+    // Bitácora: el descuento puesto, cambiado o quitado (precio de una liga ya compartida), con antes/después.
+    const before = resumenDeDescuento(existing.discount)
+    const after =
+      data.discount === undefined ? before : resumenDeDescuento(updateData.discount === Prisma.JsonNull ? null : updateData.discount)
+    const discountChange =
+      data.discount === undefined || (!before && !after)
+        ? null
+        : { change: !before ? 'SET' : !after ? 'REMOVED' : 'CHANGED', before, after }
     logAction({
       venueId,
+      staffId,
       action: 'PAYMENT_LINK_UPDATED',
       entity: 'PaymentLink',
       entityId: linkId,
+      data: discountChange ? { discount: discountChange } : undefined,
     })
   }
   if (customerAdded && auditCustomerAdded) {
@@ -1096,6 +1116,44 @@ export async function updatePaymentLink(
   }
 
   return updated
+}
+
+/**
+ * ¿Este PUT cambia la base (importe y tipo; en ITEM, los productos) de una liga que ya trae descuento?
+ * Si sí, la ruta pide también `discounts:apply`: cambiar la base aplica ese descuento a otro precio.
+ * Compara contra lo guardado porque el panel reenvía importe y productos en cada edición.
+ */
+export async function cambiaBaseDeLigaConDescuento(venueId: string, linkId: string, body: UpdatePaymentLinkData): Promise<boolean> {
+  if (body.discount !== undefined) return false // poner/cambiar ya pide discounts:apply; null lo quita
+  if (body.amount === undefined && body.amountType === undefined && body.items === undefined) return false
+  const link = await prisma.paymentLink.findFirst({
+    where: { id: linkId, venueId },
+    select: {
+      purpose: true,
+      amountType: true,
+      amount: true,
+      discount: true,
+      items: {
+        take: 20, // tope del esquema
+        select: { productId: true, quantity: true, modifiers: { take: 20, select: { modifierId: true, quantity: true } } },
+      },
+    },
+  })
+  if (!link?.discount) return false
+  if (link.purpose === 'ITEM') {
+    if (body.items === undefined) return false
+    const firma = (items: Array<{ productId: string; quantity: number; modifiers?: Array<{ modifierId: string; quantity?: number }> }>) =>
+      JSON.stringify(
+        items
+          .map(i => [i.productId, i.quantity, (i.modifiers ?? []).map(m => `${m.modifierId}x${m.quantity ?? 1}`).sort()] as const)
+          .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      )
+    return firma(body.items ?? []) !== firma(link.items)
+  }
+  if (body.amountType !== undefined && body.amountType !== link.amountType) return true
+  if (body.amount === undefined) return false
+  if (body.amount === null || link.amount === null) return body.amount !== link.amount
+  return !new Prisma.Decimal(body.amount).eq(link.amount)
 }
 
 /**
@@ -1377,7 +1435,8 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
       logo: paymentLink.venue.logo,
       primaryColor: paymentLink.venue.primaryColor,
       secondaryColor: paymentLink.venue.secondaryColor,
-      whatsappPhone: paymentLink.venue.phone?.trim() || null,
+      // Sólo con descuento: la página lo ofrece cuando el descuento ya no está; sin él, el teléfono no se hace público.
+      whatsappPhone: foto ? paymentLink.venue.phone?.trim() || null : null,
     },
     discount,
     baseAmount,
