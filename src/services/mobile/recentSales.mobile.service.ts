@@ -36,6 +36,7 @@ export interface RecentSaleLine extends ExchangeItemExtras {
   id: string
   productName: string
   quantity: number
+  orderPromotionId: string | null
   trackInventory: boolean
   isGiftCardSale: boolean
 }
@@ -209,6 +210,7 @@ function toRecentSale(
               id: line.id,
               productName: line.productName,
               quantity: line.quantity,
+              orderPromotionId: line.orderPromotionId,
               trackInventory: line.product?.trackInventory ?? false,
               isGiftCardSale: line.giftCardId !== null,
             },

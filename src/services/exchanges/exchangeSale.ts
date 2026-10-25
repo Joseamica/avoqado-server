@@ -64,9 +64,14 @@ export async function loadSalesForExchange(
   const result = new Map<string, LoadedSaleForExchange>()
   if (!orderIds.length) return result
   const sizes = await db.$queryRaw<Array<{ id: string; lines: number; payments: number; refunds: number; scope: number }>>(Prisma.sql`
-    WITH refunds AS MATERIALIZED (
+    WITH page_payments AS MATERIALIZED (
+      SELECT p.id FROM "Payment" p WHERE p."venueId" = ${venueId} AND p."orderId" IN (${Prisma.join(orderIds)})
+        AND p.status = 'COMPLETED' AND (p.type IS NULL OR p.type <> 'REFUND')
+    ), refunds AS MATERIALIZED (
       SELECT r."orderId", r."processorData"->>'originalPaymentId' AS "originalPaymentId"
       FROM "Payment" r WHERE r."venueId" = ${venueId} AND r.type = 'REFUND'
+        AND (r."orderId" IN (${Prisma.join(orderIds)})
+          OR r."processorData"->>'originalPaymentId' IN (SELECT id FROM page_payments))
     )
     SELECT o.id,
       (SELECT count(*)::int FROM "OrderItem" l WHERE l."orderId" = o.id) AS lines,

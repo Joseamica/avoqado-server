@@ -11,6 +11,7 @@ import {
 import { decodeSalesSince, decodeSalesCursor, recentSalesQuerySchema } from '@/schemas/mobile/recentSales.mobile.schema'
 import { exchangeDetailFields } from '@/services/exchanges/exchangeDetail'
 import { createExchange } from '@/services/exchanges/exchange.service'
+import { assertRefundableLines } from '@/services/dashboard/refund.dashboard.service'
 import { seedClothingSale } from './seedExchange'
 import { seedManySales } from './seedRecentSales'
 
@@ -43,6 +44,63 @@ afterEach(async () => {
 })
 
 describe('sales/recent full copy (B)', () => {
+  it('preserves two separate promotion groups and the refund selection rule in the copy', async () => {
+    const sale = await seedClothingSale({ list: 100, paid: 100 })
+    try {
+      const lineIds = [sale.order.items[0].id, ...Array.from({ length: 4 }, () => cuid())]
+      const promotion = await prisma.promotion.create({
+        data: { venueId: sale.venueId, name: 'Pair', type: 'BUNDLE', pricingMode: 'FIXED_TOTAL' },
+      })
+      const promotionIds = [cuid(), cuid()]
+      await prisma.orderPromotion.createMany({
+        data: promotionIds.map(id => ({
+          id,
+          orderId: sale.order.id,
+          promotionId: promotion.id,
+          instanceId: id,
+          snapshotJson: { name: 'Pair' },
+          grossCents: 20000,
+          discountCents: 0,
+          netCents: 20000,
+        })),
+      })
+      const groups = [promotionIds[0], promotionIds[0], promotionIds[1], promotionIds[1], null]
+      await prisma.orderItem.update({ where: { id: lineIds[0] }, data: { orderPromotionId: groups[0] } })
+      await prisma.orderItem.createMany({
+        data: lineIds.slice(1).map((id, i) => ({
+          id,
+          orderId: sale.order.id,
+          productId: sale.products[i + 1].id,
+          productName: sale.products[i + 1].name,
+          quantity: 1,
+          unitPrice: new Prisma.Decimal(100),
+          total: new Prisma.Decimal(100),
+          taxAmount: new Prisma.Decimal(0),
+          orderPromotionId: groups[i + 1],
+        })),
+      })
+      await prisma.order.update({ where: { id: sale.order.id }, data: { subtotal: 500, total: 500, paidAmount: 500 } })
+      await prisma.payment.update({ where: { id: sale.payments[0].id }, data: { amount: 500, netAmount: 500 } })
+      const copy = (await listRecentSales({ venueId: sale.venueId, limit: 100, now: new Date() })).sales[0]
+      const stored = await prisma.orderItem.findMany({ take: 5, where: { orderId: sale.order.id, order: { venueId: sale.venueId } } })
+      expect(copy.lines).toHaveLength(5)
+      for (const [i, id] of lineIds.entries())
+        expect(copy.lines.find(line => line.id === id)).toMatchObject({ orderPromotionId: groups[i] })
+      const copiedLines = copy.lines.map(line => ({ ...line, total: line.chargedTotalCents / 100 }))
+      for (let mask = 0; mask < 32; mask++) {
+        const selected = lineIds.filter((_, i) => mask & (1 << i))
+        const partial = Boolean(mask & 1) !== Boolean(mask & 2) || Boolean(mask & 4) !== Boolean(mask & 8)
+        for (const lines of [stored, copiedLines]) {
+          const validate = () => assertRefundableLines(lines, selected)
+          if (partial) expect(validate).toThrow('Una promoción se reembolsa completa')
+          else expect(validate).not.toThrow()
+        }
+      }
+    } finally {
+      await sale.cleanup()
+    }
+  })
+
   it('returns the last 30 venue days newest first with total and a watermark', async () => {
     const [oldest] = await seed(1, ago(20))
     const [newest] = await seed(1, now)
