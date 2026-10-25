@@ -257,6 +257,7 @@ import {
   CalculateDiscountSchema,
   RedeemPointsSchema,
   AdjustPointsSchema,
+  AdjustStampsSchema,
   LoyaltyTransactionsQuerySchema,
   LoyaltyParamsSchema,
   LoyaltyVenueParamsSchema,
@@ -11246,6 +11247,54 @@ router.post(
   checkPermission('loyalty:adjust'),
   validateRequest(AdjustPointsSchema),
   loyaltyController.adjustPoints,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/stamps/adjust:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Manual stamp adjustment (leaves the open card at stampsEarned)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [stampsEarned, expectedStampCardId, expectedStampsEarned, expectedVersion, expectedStampsRequired, reason]
+ *             properties:
+ *               stampsEarned: { type: integer, minimum: 0, maximum: 100 }
+ *               expectedStampCardId: { type: string, nullable: true }
+ *               expectedStampsEarned: { type: integer, minimum: 0 }
+ *               expectedVersion: { type: integer, minimum: 0 }
+ *               expectedStampsRequired: { type: integer, minimum: 1 }
+ *               reason: { type: string, minLength: 5, maxLength: 500 }
+ *     responses:
+ *       200:
+ *         description: Stamps adjusted successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       409:
+ *         description: STAMPS_DISABLED or STAMPS_CHANGED (the card changed since the caller read it)
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/loyalty/stamps/adjust',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:adjust'),
+  validateRequest(AdjustStampsSchema),
+  loyaltyController.adjustStampsHandler,
 )
 
 /**

@@ -318,6 +318,10 @@ const WRITERS: Record<string, Writer> = {
       'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
       'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
+      // Descuento en ligas de pago: la orden recién creada en la misma transacción (PRIVATE_CREATION).
+      'src/services/dashboard/paymentLink.service.ts#completeCharge',
+      'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout',
+      'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout',
       'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
       'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
       'src/services/mobile/order.mobile.service.ts#createOrderWithItems',
@@ -666,6 +670,22 @@ const WRITERS: Record<string, Writer> = {
     creates: ['.order.create('],
     note: 'retroactive manual sale: new Order and line in one transaction',
   },
+  // Descuento en ligas de pago (spec 2026-10-24): la venta de la liga nace con su fila de descuento de cuenta en la misma transacción.
+  'src/services/dashboard/paymentLink.service.ts#completeCharge': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
+  },
+  'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
+  },
+  'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
+  },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
   'src/services/online-ordering/transitions.service.ts#casTransition': {
     class: 'LOCKED',
@@ -918,21 +938,6 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     markers: NEW_ORDER,
   },
   'src/services/b4bit/b4bit.service.ts#initiateCryptoPayment': { class: 'PRIVATE_CREATION', why: 'new crypto order', markers: NEW_ORDER },
-  'src/services/dashboard/paymentLink.service.ts#completeCharge': {
-    class: 'PRIVATE_CREATION',
-    why: 'new paid-link order',
-    markers: NEW_ORDER,
-  },
-  'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
-    class: 'PRIVATE_CREATION',
-    why: 'new paid-link order',
-    markers: NEW_ORDER,
-  },
-  'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
-    class: 'PRIVATE_CREATION',
-    why: 'new paid-link order',
-    markers: NEW_ORDER,
-  },
 }
 
 const LOCKING = new Set(['LOCKED', 'CALLER_LOCKED', 'PRIVATE_CREATION'])
@@ -1332,6 +1337,10 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
     'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
     // B2c T5: el vale nace en Avoqado (`openAreaTicket`): nunca es importado.
     'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
+    // Descuento en ligas de pago: la venta de la liga nace en la misma transacción (nunca es importada).
+    'src/services/dashboard/paymentLink.service.ts#completeCharge',
+    'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout',
+    'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout',
   ])
   const rearman = [
     ...new Set(calls.filter(c => c.callee === 'sincronizarRepartos' || c.callee === 'recalculateOrderTotals').map(c => c.owner)),

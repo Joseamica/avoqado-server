@@ -85,6 +85,37 @@ export const AdjustPointsSchema = z.object({
 })
 
 /**
+ * Ajuste manual de sellos: `stampsEarned` es el TOTAL que debe quedar (no un +/−) y los cuatro `expected*` son lo que vio
+ * quien pide el ajuste (el CAS contra otro aparato o una venta que cambió la cartilla). `.strict()` para que un campo
+ * desconocido se rechace en vez de borrarse en silencio.
+ */
+export const AdjustStampsSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('Invalid venue ID format'),
+    customerId: z.string().cuid('Invalid customer ID format'),
+  }),
+  body: z
+    .object({
+      stampsEarned: z
+        .number()
+        .int('Los sellos deben ser un número entero')
+        .min(0, 'Los sellos no pueden ser negativos')
+        .max(100, 'Máximo 100 sellos'),
+      expectedStampCardId: z.string().cuid('La cartilla no es válida').nullable(),
+      expectedStampsEarned: z.number().int().min(0),
+      expectedVersion: z.number().int().min(0),
+      // La meta que vio quien pide (F1): sin ella, un cliente sin cartilla («null/0/0») no ve que cambió la meta.
+      expectedStampsRequired: z.number().int().min(1),
+      reason: z
+        .string()
+        .trim()
+        .min(5, 'El motivo debe tener al menos 5 caracteres')
+        .max(500, 'El motivo debe tener menos de 500 caracteres'),
+    })
+    .strict(),
+})
+
+/**
  * Loyalty Transactions Query Parameters
  */
 export const LoyaltyTransactionsQuerySchema = z.object({

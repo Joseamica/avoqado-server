@@ -31,6 +31,23 @@ import { assertVenueSalesEnabled } from '@/services/venueSalesGuard'
 import { earnPoints } from '@/services/dashboard/loyalty.dashboard.service'
 import { updateCustomerMetrics } from '@/services/dashboard/customer.dashboard.service'
 import { paymentLinksDashboardUrl } from '@/services/dashboard/paymentLink.dashboardUrl'
+import {
+  BASE_LIGA_ABIERTA,
+  cargarRegla,
+  Desglose,
+  DescuentoDeLiga,
+  desgloseDeLiga,
+  EntradaDescuento,
+  MotivoNoDisponible,
+  rechazarDescuentoEnDonacion,
+  reglaDeFila,
+  resolverDescuentoDeEntrada,
+  resumenDeDescuento,
+  validarFotoContraBase,
+  vistaDeDescuento,
+} from '@/services/dashboard/paymentLinkDiscount'
+import { filaDeDescuentoDeLiga } from '@/services/shared/discount.service'
+import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
 
 // Stripe charge bounds (MXN cents). Kept inline to avoid yet-another shared
 // module for what is functionally a pair of env-tunable constants. Defaults
@@ -256,6 +273,109 @@ function computeBundleTotal(
   }, 0)
 }
 
+/** Total del paquete para validar un descuento al crear/editar: lee precios vigentes de productos y extras. */
+async function totalDeItemsResueltos(
+  venueId: string,
+  items: Array<{ productId: string; quantity: number; modifiers: Array<{ modifierId: string; quantity: number }> }>,
+): Promise<number> {
+  const productIds = items.map(i => i.productId)
+  const modifierIds = items.flatMap(i => i.modifiers.map(m => m.modifierId))
+  const [products, modifiers] = await Promise.all([
+    prisma.product.findMany({ where: { id: { in: productIds }, venueId }, take: productIds.length, select: { id: true, price: true } }),
+    modifierIds.length > 0
+      ? prisma.modifier.findMany({ where: { id: { in: modifierIds } }, take: modifierIds.length, select: { id: true, price: true } })
+      : [],
+  ])
+  const productPrice = new Map(products.map(p => [p.id, p.price]))
+  const modifierPrice = new Map(modifiers.map(m => [m.id, m.price]))
+  return computeBundleTotal(
+    items.map(i => ({
+      quantity: i.quantity,
+      product: { price: productPrice.get(i.productId) ?? 0 },
+      modifiers: i.modifiers.map(m => ({ quantity: m.quantity, modifier: { price: modifierPrice.get(m.modifierId) ?? 0 } })),
+    })),
+  )
+}
+
+/**
+ * Lo que se cobra en los cuatro caminos de una liga: base − descuento + propina.
+ * - Base: fija = `amount`; abierta = lo que escribió la clienta; productos = total vivo del paquete.
+ * - Un descuento del catálogo que ya no aplica (vencido, apagado, fuera de horario, sin la compra mínima) se cobra sin
+ *   descuento: es lo que la página muestra como «ya no está disponible».
+ * - Abierta con un descuento que no cabe en lo escrito → 400 (nunca se cobra completo en silencio).
+ * - `expectedTotal` (el total que mostró la página) distinto, en centavos → 409 con el desglose nuevo, sin cobrar.
+ * - `minimoNeto` (pesos): con descuento efectivo, el neto solo, sin propina, debe alcanzar el mínimo del procesador.
+ *   Sin descuento, cada camino valida el total exactamente como antes.
+ */
+export async function cobroDeLiga(
+  link: {
+    venueId: string
+    purpose: string
+    amountType: string
+    amount: Prisma.Decimal | number | null
+    discount?: Prisma.JsonValue | null
+    tippingConfig: Prisma.JsonValue | null
+    items: Parameters<typeof computeBundleTotal>[0]
+  },
+  input: { amount?: number; tipAmount?: number; expectedTotal?: number },
+  ahora: Date,
+  minimoNeto = 0,
+): Promise<{
+  desglose: Desglose
+  propina: number
+  total: number
+  fotoParaSesion: { foto: DescuentoDeLiga; descuento: number; base: number } | null
+}> {
+  const esPaquete = link.purpose === 'ITEM' && link.items.length > 0
+  let base: number
+  if (esPaquete) {
+    base = computeBundleTotal(link.items)
+  } else if (link.amountType === 'FIXED') {
+    base = Number(link.amount)
+  } else {
+    if (!input.amount || input.amount <= 0) {
+      throw new BadRequestError('El monto es requerido para esta liga de pago')
+    }
+    base = input.amount
+  }
+
+  const foto = (link.discount as unknown as DescuentoDeLiga | null) ?? null
+  let desglose: Desglose
+  if (foto) {
+    const [regla, venue] = await Promise.all([
+      cargarRegla(prisma, foto),
+      prisma.venue.findUnique({ where: { id: link.venueId }, select: { timezone: true } }),
+    ])
+    desglose = desgloseDeLiga(base, foto, regla, ahora, venue?.timezone ?? 'America/Mexico_City')
+    const porCompraMinima = regla?.minPurchaseAmount != null && base < regla.minPurchaseAmount
+    if (!esPaquete && link.amountType !== 'FIXED' && desglose.motivo === 'MINIMO' && !porCompraMinima) {
+      throw new BadRequestError('El descuento es mayor que el importe')
+    }
+  } else {
+    desglose = desgloseDeLiga(base, null, null, ahora, 'America/Mexico_City')
+  }
+
+  const propina = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
+  if (propina > 0 && !link.tippingConfig) {
+    throw new BadRequestError('Esta liga de pago no acepta propinas')
+  }
+  const total = new Prisma.Decimal(desglose.neto).plus(propina).toDecimalPlaces(2, Prisma.Decimal.ROUND_HALF_UP).toNumber()
+
+  if (input.expectedTotal != null && Math.round(input.expectedTotal * 100) !== Math.round(total * 100)) {
+    throw new ConflictError('El precio de esta liga cambió', 'PAYMENT_LINK_PRICE_CHANGED', { desglose })
+  }
+  if (desglose.descuento > 0 && desglose.neto < minimoNeto) {
+    throw new BadRequestError(`Con el descuento, el importe queda debajo del mínimo de cobro ($${minimoNeto.toFixed(2)} MXN)`)
+  }
+
+  return {
+    desglose,
+    propina,
+    total,
+    fotoParaSesion: foto && desglose.aplica ? { foto, descuento: desglose.descuento, base: desglose.base } : null,
+  }
+}
+
 /** Project the Prisma-loaded items into the snapshot shape we put on
  *  CheckoutSession.metadata. The webhook handler reads this back to create
  *  OrderItem + OrderItemModifier rows. */
@@ -347,6 +467,8 @@ export interface CreatePaymentLinkData {
    * salespeople, or create uncredited links for donations.
    */
   attributedStaffIds?: string[]
+  /** Descuento de la liga: escrito a mano o tomado del catálogo. `null`/ausente = sin descuento. */
+  discount?: EntradaDescuento | null
 }
 
 export interface UpdatePaymentLinkData {
@@ -370,6 +492,8 @@ export interface UpdatePaymentLinkData {
   }> | null
   customFields?: CustomFieldDefinition[] | null
   tippingConfig?: TippingConfig | null
+  /** Poner/cambiar con un objeto; `null` lo quita; ausente no lo toca. */
+  discount?: EntradaDescuento | null
 }
 
 export interface ListPaymentLinksFilters {
@@ -395,7 +519,7 @@ export async function createPaymentLink(
   data: CreatePaymentLinkData,
   staffId: string,
   creationKey?: string,
-  onCreated?: (link: { id: string }) => Promise<void>,
+  onCreated?: (link: { id: string; discount: Prisma.JsonValue }) => Promise<void>,
 ) {
   if (creationKey !== undefined && (!creationKey.trim() || creationKey.length > 128)) {
     throw new BadRequestError('La clave de creación debe tener entre 1 y 128 caracteres')
@@ -476,6 +600,20 @@ export async function createPaymentLink(
     resolvedItems = await validateBundleItems(venueId, data.items ?? [])
   }
 
+  // 2b. Descuento: se valida contra la base (fija → amount, ITEM → total del paquete, abierta → sin base).
+  rechazarDescuentoEnDonacion(data.purpose, data.discount)
+  const createBase = !data.discount
+    ? null
+    : data.purpose === 'ITEM'
+      ? await totalDeItemsResueltos(venueId, resolvedItems)
+      : data.amountType === 'FIXED' && data.amount != null
+        ? data.amount
+        : null
+  const { foto: discountFoto, discountId } = await resolverDescuentoDeEntrada(prisma, venueId, data.discount, {
+    isReusable: data.isReusable ?? false,
+    base: createBase,
+  })
+
   // 3. Validate every attributedStaffId belongs to this venue and is active.
   // Prevents misattribution across organizations. Dedupe + drop falsy values
   // up-front so the caller can send sloppy input safely.
@@ -533,6 +671,8 @@ export async function createPaymentLink(
         redirectUrl: data.redirectUrl,
         customFields: data.customFields ? (data.customFields as unknown as Prisma.InputJsonValue) : undefined,
         tippingConfig: data.tippingConfig ? (data.tippingConfig as unknown as Prisma.InputJsonValue) : undefined,
+        discount: discountFoto ? (discountFoto as unknown as Prisma.InputJsonValue) : undefined,
+        discountId,
       },
       include: {
         customer: { select: CUSTOMER_SUMMARY_SELECT },
@@ -576,11 +716,55 @@ export async function createPaymentLink(
       action: 'PAYMENT_LINK_CREATED',
       entity: 'PaymentLink',
       entityId: paymentLink.id,
-      data: data.customerId ? { customerId: data.customerId } : undefined,
+      data:
+        data.customerId || discountFoto
+          ? {
+              ...(data.customerId ? { customerId: data.customerId } : {}),
+              ...(discountFoto ? { discount: resumenDeDescuento(discountFoto) } : {}),
+            }
+          : undefined,
     })
   }
 
   return paymentLink
+}
+
+const DISCOUNT_RULE_SELECT = {
+  id: true,
+  active: true,
+  validFrom: true,
+  validUntil: true,
+  daysOfWeek: true,
+  timeFrom: true,
+  timeUntil: true,
+  minPurchaseAmount: true,
+  maxDiscountAmount: true,
+  scope: true,
+  type: true,
+  requiresApproval: true,
+  isAutomatic: true,
+  buyQuantity: true,
+  getQuantity: true,
+  getDiscountPercent: true,
+  buyItemIds: true,
+  getItemIds: true,
+  maxTotalUses: true,
+  maxUsesPerCustomer: true,
+  customerGroupId: true,
+} as const
+
+/** Descuento del catálogo que ya no existe: se lee como «apagado». */
+const MISSING_RULE = {
+  active: false,
+  validFrom: null,
+  validUntil: null,
+  daysOfWeek: [],
+  timeFrom: null,
+  timeUntil: null,
+  minPurchaseAmount: null,
+  maxDiscountAmount: null,
+  existe: false,
+  compatible: false,
 }
 
 /**
@@ -622,8 +806,35 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
     prisma.paymentLink.count({ where }),
   ])
 
+  // Estado del descuento calculado al leer: una consulta para los descuentos del catálogo de la página y una para la zona (sin N+1).
+  const conDescuento = paymentLinks.filter(l => l.discount)
+  const catalogIds = [
+    ...new Set(conDescuento.map(l => (l.discount as unknown as DescuentoDeLiga).discountId).filter((id): id is string => !!id)),
+  ]
+  const [filas, venue] =
+    conDescuento.length > 0
+      ? await Promise.all([
+          catalogIds.length > 0
+            ? prisma.discount.findMany({
+                where: { id: { in: catalogIds }, venueId },
+                take: catalogIds.length,
+                select: DISCOUNT_RULE_SELECT,
+              })
+            : [],
+          prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
+        ])
+      : [[], null]
+  const reglas = new Map(filas.map(f => [f.id, reglaDeFila(f)]))
+  const ahora = new Date()
+  const zona = venue?.timezone ?? 'America/Mexico_City'
+  const withDiscount = paymentLinks.map(l => {
+    const foto = (l.discount as unknown as DescuentoDeLiga | null) ?? null
+    const regla = foto?.discountId ? (reglas.get(foto.discountId) ?? MISSING_RULE) : null
+    return { ...l, ...vistaDeDescuento(foto, regla, l.amount != null ? Number(l.amount) : null, ahora, zona) }
+  })
+
   return {
-    paymentLinks,
+    paymentLinks: withDiscount,
     total,
     limit,
     offset,
@@ -676,7 +887,20 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
     throw new UnauthorizedError('No tienes acceso a esta liga de pago')
   }
 
-  return paymentLink
+  const foto = (paymentLink.discount as unknown as DescuentoDeLiga | null) ?? null
+  if (!foto) return { ...paymentLink, ...vistaDeDescuento(null, null, null, new Date(), 'UTC') }
+  const [fila, venue] = await Promise.all([
+    foto.discountId ? prisma.discount.findFirst({ where: { id: foto.discountId, venueId }, select: DISCOUNT_RULE_SELECT }) : null,
+    prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
+  ])
+  const regla = foto.discountId ? (fila ? reglaDeFila(fila) : MISSING_RULE) : null
+  const base =
+    paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0
+      ? computeBundleTotal(paymentLink.items)
+      : paymentLink.amount != null
+        ? Number(paymentLink.amount)
+        : null
+  return { ...paymentLink, ...vistaDeDescuento(foto, regla, base, new Date(), venue?.timezone ?? 'America/Mexico_City') }
 }
 
 /**
@@ -694,7 +918,17 @@ export async function updatePaymentLink(
   if (addsCustomer && !data.customerId) throw new BadRequestError('El cliente de una liga no se puede quitar')
   const existing = await prisma.paymentLink.findUnique({
     where: { id: linkId },
-    select: { id: true, venueId: true, status: true, customerId: true },
+    select: {
+      id: true,
+      venueId: true,
+      status: true,
+      customerId: true,
+      purpose: true,
+      amountType: true,
+      amount: true,
+      isReusable: true,
+      discount: true,
+    },
   })
 
   if (!existing) {
@@ -723,7 +957,7 @@ export async function updatePaymentLink(
   const onlyCustomer = addsCustomer && Object.keys(data).every(key => key === 'customerId')
   if (onlyCustomer && !customerToAdd) return getPaymentLinkById(venueId, linkId)
 
-  const updateData: Prisma.PaymentLinkUpdateInput = {}
+  const updateData: Prisma.PaymentLinkUncheckedUpdateInput = {}
 
   if (data.title !== undefined) updateData.title = data.title
   if (data.description !== undefined) updateData.description = data.description
@@ -757,6 +991,46 @@ export async function updatePaymentLink(
   }
   if (data.tippingConfig !== undefined) {
     updateData.tippingConfig = data.tippingConfig === null ? Prisma.JsonNull : (data.tippingConfig as unknown as Prisma.InputJsonValue)
+  }
+
+  // Descuento: se vuelve a validar al cambiarlo y también si cambia lo que lo sostiene (importe o productos).
+  const effectiveAmountType = data.amountType ?? existing.amountType
+  const effectiveAmount = data.amount !== undefined ? data.amount : existing.amount != null ? Number(existing.amount) : null
+  const touchesBase = data.amount !== undefined || data.amountType !== undefined || data.items !== undefined
+  rechazarDescuentoEnDonacion(existing.purpose, data.discount)
+  if (data.discount !== undefined || touchesBase) {
+    const keptFoto = data.discount === undefined ? ((existing.discount as unknown as DescuentoDeLiga | null) ?? null) : null
+    if (data.discount !== undefined || keptFoto) {
+      let base: number | null
+      if (existing.purpose === 'ITEM') {
+        const items =
+          itemReplacement !== null
+            ? itemReplacement
+            : (
+                await prisma.paymentLinkItem.findMany({
+                  where: { paymentLinkId: linkId },
+                  take: 20, // tope del esquema: máximo 20 productos por liga
+                  select: { productId: true, quantity: true, modifiers: { select: { modifierId: true, quantity: true } } },
+                })
+              ).map(i => ({ productId: i.productId, quantity: i.quantity, modifiers: i.modifiers }))
+        base = items.length > 0 ? await totalDeItemsResueltos(venueId, items) : null
+      } else {
+        base = effectiveAmountType === 'FIXED' && effectiveAmount != null ? effectiveAmount : null
+      }
+      if (data.discount === undefined) {
+        await validarFotoContraBase(prisma, venueId, keptFoto!, base, true)
+      } else if (data.discount === null) {
+        updateData.discount = Prisma.JsonNull
+        updateData.discountId = null
+      } else {
+        const { foto, discountId } = await resolverDescuentoDeEntrada(prisma, venueId, data.discount, {
+          isReusable: data.isReusable ?? existing.isReusable,
+          base,
+        })
+        updateData.discount = foto as unknown as Prisma.InputJsonValue
+        updateData.discountId = discountId
+      }
+    }
   }
 
   // Wrap the metadata update + items replacement in a transaction so the
@@ -811,11 +1085,21 @@ export async function updatePaymentLink(
   logger.info('Payment link updated', { paymentLinkId: linkId, venueId })
 
   if (!onlyCustomer) {
+    // Bitácora: el descuento puesto, cambiado o quitado (precio de una liga ya compartida), con antes/después.
+    const before = resumenDeDescuento(existing.discount)
+    const after =
+      data.discount === undefined ? before : resumenDeDescuento(updateData.discount === Prisma.JsonNull ? null : updateData.discount)
+    const discountChange =
+      data.discount === undefined || (!before && !after)
+        ? null
+        : { change: !before ? 'SET' : !after ? 'REMOVED' : 'CHANGED', before, after }
     logAction({
       venueId,
+      staffId,
       action: 'PAYMENT_LINK_UPDATED',
       entity: 'PaymentLink',
       entityId: linkId,
+      data: discountChange ? { discount: discountChange } : undefined,
     })
   }
   if (customerAdded && auditCustomerAdded) {
@@ -832,6 +1116,44 @@ export async function updatePaymentLink(
   }
 
   return updated
+}
+
+/**
+ * ¿Este PUT cambia la base (importe y tipo; en ITEM, los productos) de una liga que ya trae descuento?
+ * Si sí, la ruta pide también `discounts:apply`: cambiar la base aplica ese descuento a otro precio.
+ * Compara contra lo guardado porque el panel reenvía importe y productos en cada edición.
+ */
+export async function cambiaBaseDeLigaConDescuento(venueId: string, linkId: string, body: UpdatePaymentLinkData): Promise<boolean> {
+  if (body.discount !== undefined) return false // poner/cambiar ya pide discounts:apply; null lo quita
+  if (body.amount === undefined && body.amountType === undefined && body.items === undefined) return false
+  const link = await prisma.paymentLink.findFirst({
+    where: { id: linkId, venueId },
+    select: {
+      purpose: true,
+      amountType: true,
+      amount: true,
+      discount: true,
+      items: {
+        take: 20, // tope del esquema
+        select: { productId: true, quantity: true, modifiers: { take: 20, select: { modifierId: true, quantity: true } } },
+      },
+    },
+  })
+  if (!link?.discount) return false
+  if (link.purpose === 'ITEM') {
+    if (body.items === undefined) return false
+    const firma = (items: Array<{ productId: string; quantity: number; modifiers?: Array<{ modifierId: string; quantity?: number }> }>) =>
+      JSON.stringify(
+        items
+          .map(i => [i.productId, i.quantity, (i.modifiers ?? []).map(m => `${m.modifierId}x${m.quantity ?? 1}`).sort()] as const)
+          .sort((a, b) => (a[0] < b[0] ? -1 : a[0] > b[0] ? 1 : 0)),
+      )
+    return firma(body.items ?? []) !== firma(link.items)
+  }
+  if (body.amountType !== undefined && body.amountType !== link.amountType) return true
+  if (body.amount === undefined) return false
+  if (body.amount === null || link.amount === null) return body.amount !== link.amount
+  return !new Prisma.Decimal(body.amount).eq(link.amount)
 }
 
 /**
@@ -987,6 +1309,18 @@ export async function updatePaymentLinkBranding(
  * Resolves a payment link by short code (public, no auth)
  * Returns venue branding + link data for the checkout page
  */
+type PublicDiscount = {
+  name: string
+  type: 'PERCENTAGE' | 'FIXED_AMOUNT'
+  value: number
+  minPurchaseAmount: number | null
+  maxDiscountAmount: number | null
+  amount: number | null
+  available: boolean
+  reason: MotivoNoDisponible | null
+  validUntil: string | null
+}
+
 export async function getPaymentLinkByShortCode(shortCode: string) {
   const paymentLink = await prisma.paymentLink.findUnique({
     where: { shortCode },
@@ -1003,6 +1337,9 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
           // visibility of logo/image/title/price). Public checkout reads this
           // to skin its Pay button and hide fields per the admin's choices.
           paymentLinkBranding: true,
+          // WhatsApp del negocio (la página lo ofrece si el descuento ya no está disponible) y su zona para evaluar horarios.
+          phone: true,
+          timezone: true,
         },
       },
       ...BUNDLE_ITEMS_INCLUDE,
@@ -1056,6 +1393,31 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     paymentMethod = 'MERCADO_PAGO_BRICKS'
   }
 
+  // Base viva: la MISMA que cobra `cobroDeLiga` (paquete = precios de hoy; fija = amount; abierta = sin base).
+  const baseAmount =
+    paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0
+      ? computeBundleTotal(paymentLink.items)
+      : paymentLink.amountType === 'FIXED' && paymentLink.amount != null
+        ? Number(paymentLink.amount)
+        : null
+  const foto = (paymentLink.discount as unknown as DescuentoDeLiga | null) ?? null
+  let discount: PublicDiscount | null = null
+  if (foto) {
+    const regla = await cargarRegla(prisma, foto)
+    const d = desgloseDeLiga(baseAmount ?? BASE_LIGA_ABIERTA, foto, regla, new Date(), paymentLink.venue.timezone || 'America/Mexico_City')
+    discount = {
+      name: foto.name,
+      type: foto.type,
+      value: foto.value,
+      minPurchaseAmount: regla?.minPurchaseAmount ?? null,
+      maxDiscountAmount: regla?.maxDiscountAmount ?? null,
+      amount: baseAmount !== null && d.aplica ? d.descuento : null,
+      available: d.aplica,
+      reason: d.motivo,
+      validUntil: regla?.validUntil ? regla.validUntil.toISOString() : null,
+    }
+  }
+
   return {
     id: paymentLink.id,
     shortCode: paymentLink.shortCode,
@@ -1073,7 +1435,11 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
       logo: paymentLink.venue.logo,
       primaryColor: paymentLink.venue.primaryColor,
       secondaryColor: paymentLink.venue.secondaryColor,
+      // Sólo con descuento: la página lo ofrece cuando el descuento ya no está; sin él, el teléfono no se hace público.
+      whatsappPhone: foto ? paymentLink.venue.phone?.trim() || null : null,
     },
+    discount,
+    baseAmount,
     // Branding overrides for this checkout. Always merged with defaults so
     // the customer-facing page never has to handle null/undefined fields.
     branding: mergeBranding(paymentLink.venue.paymentLinkBranding, paymentLink.venue.primaryColor),
@@ -1124,6 +1490,8 @@ export async function createStripePaymentIntentForPaymentLink(
     amount?: number
     quantity?: number
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     customerEmail?: string
     customFieldResponses?: Record<string, string>
   },
@@ -1160,23 +1528,11 @@ export async function createStripePaymentIntentForPaymentLink(
     throw new BadRequestError('La cuenta Stripe Connect del comercio no está configurada')
   }
 
-  // 1. Resolve charge amount.
-  //
-  // For ITEM purpose this is the FIXED bundle total: sum(qty × price). The
-  // `input.quantity` parameter is ignored — the bundle defines its own
-  // quantities. For PAYMENT/DONATION links we honor the legacy single-amount
-  // flow (FIXED uses `paymentLink.amount`, OPEN uses `input.amount`).
-  let chargeAmount: number
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!input.amount || input.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = input.amount
-  }
+  // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
+  const bounds = getStripeChargeBounds()
+  const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2. Validate custom fields
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -1196,17 +1552,8 @@ export async function createStripePaymentIntentForPaymentLink(
     }
   }
 
-  // 3. Tip
-  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-  chargeAmount = chargeAmount + tipAmount
-
   // 4. Stripe amount + fee
   const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
-  const bounds = getStripeChargeBounds()
   if (stripeAmount < bounds.min) throw new BadRequestError('El monto es menor al mínimo permitido por Stripe')
   if (stripeAmount > bounds.max) throw new BadRequestError('El monto excede el máximo permitido por transacción')
 
@@ -1287,6 +1634,8 @@ export async function createStripePaymentIntentForPaymentLink(
         provider: 'STRIPE_CONNECT',
         flow: 'stripe_elements',
         ...(tipAmount > 0 && { tipAmount }),
+        // La orden lee el descuento de aquí (no de la liga, que pudo cambiar después).
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
         // Persist the full line-item snapshot (incl. modifiers) on the
         // CheckoutSession so the webhook handler can replay OrderItem +
@@ -1494,6 +1843,54 @@ function mapBlumonCardBrandToEnum(
 // Las ligas de pago disparaban comisión y NUNCA tocaban al cliente: quien pagaba
 // por link se quedaba sin sus puntos y sin su visita. Estos dos helpers cierran
 // ese hueco REUSANDO los mismos dos servicios — aquí no se calcula ni un punto.
+
+/** Lo que la sesión de pago congeló del descuento (T5). La orden se arma con esto, nunca releyendo la liga ni el catálogo. */
+type DescuentoDeLaSesion = { foto: DescuentoDeLiga; descuento: number; base: number }
+
+/**
+ * `null` si la sesión se cobró sin descuento: la orden queda exactamente como hoy. También `null` (con un error en el log) si
+ * el descuento guardado no cuadra con lo cobrado sin propina o viene mal formado: el banco ya cobró, así que nunca se lanza
+ * dentro del registro (en Blumon perdería una venta cobrada) y lo guardado es lo que se cobró.
+ */
+function descuentoDeLaSesion(
+  metadata: Record<string, any> | null | undefined,
+  cobradoSinPropina: Prisma.Decimal,
+  sessionId: string,
+): DescuentoDeLaSesion | null {
+  const d = metadata?.descuento
+  if (d == null) return null
+  const base = Number(d.base)
+  const descuento = Number(d.descuento)
+  const foto = d.foto
+  const fotoValida =
+    !!foto &&
+    (foto.type === 'PERCENTAGE' || foto.type === 'FIXED_AMOUNT') &&
+    typeof foto.name === 'string' &&
+    Number.isFinite(Number(foto.value))
+  const cuadra =
+    Number.isFinite(base) &&
+    Number.isFinite(descuento) &&
+    descuento > 0 &&
+    Math.round(base * 100) - Math.round(descuento * 100) === Math.round(Number(cobradoSinPropina) * 100)
+  if (fotoValida && cuadra) return { foto, descuento, base }
+  logger.error('🚨 [PaymentLink] El descuento de la sesión no cuadra con lo cobrado; la venta se registra sin descuento', {
+    sessionId,
+    cobradoSinPropina: cobradoSinPropina.toString(),
+    descuento: d,
+  })
+  return null
+}
+
+/**
+ * Suma el uso al descuento del catálogo en la transacción del cobro y devuelve el `discountId` para la fila. Si el descuento
+ * se borró después de abrir la sesión, la venta se registra igual con lo cobrado y la fila queda sin `discountId`: el dinero
+ * ya se cobró, así que nunca lanza ni recalcula el precio.
+ */
+async function contarUsoDelDescuento(tx: Prisma.TransactionClient, venueId: string, discountId: string | null): Promise<string | null> {
+  if (!discountId) return null
+  const { count } = await tx.discount.updateMany({ where: { id: discountId, venueId }, data: { currentUses: { increment: 1 } } })
+  return count > 0 ? discountId : null
+}
 
 /**
  * Resuelve la atribución congelada del checkout o, para sesiones legacy,
@@ -1717,6 +2114,8 @@ export async function finalizePaymentLinkCheckout(args: {
 
   const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
   const subtotal = session.amount.sub(tipAmount) // session.amount already includes tip
+  // Con descuento: la orden lleva la base y el descuento; el cobro, la lealtad y la comisión siguen sobre `subtotal` (el neto).
+  const descuentoDeLiga = descuentoDeLaSesion(metadata, subtotal, session.sessionId)
   const stripePaymentIntentId = args.paymentIntentId ?? null
 
   // Commission attribution: the first attributed staff is the "named seller" on Payment.processedById; the commission is
@@ -1786,8 +2185,8 @@ export async function finalizePaymentLinkCheckout(args: {
         ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
         customerName: session.customerName,
         customerEmail: session.customerEmail,
-        subtotal: subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
-        discountAmount: 0,
+        subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal.lt(0) ? new Prisma.Decimal(0) : subtotal,
+        discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
         taxAmount: 0,
         contratoDePrecio: 'IVA_INCLUIDO',
         tipAmount,
@@ -1831,6 +2230,20 @@ export async function finalizePaymentLinkCheckout(args: {
       // inventario necesita para nacer dentro de esta misma transacción.
       include: { items: { include: { modifiers: { include: { modifier: true } } } } },
     })
+
+    // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+    if (descuentoDeLiga) {
+      const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+      await tx.orderDiscount.create({
+        data: filaDeDescuentoDeLiga({
+          orderId: order.id,
+          foto: { ...descuentoDeLiga.foto, discountId },
+          montoPesos: descuentoDeLiga.descuento,
+          basePesos: descuentoDeLiga.base,
+        }),
+      })
+      await sincronizarRepartos(tx, order.id)
+    }
 
     // 3b. Vale durable de inventario, en la MISMA transacción que la orden PAID.
     //     Antes se deducía en un `for` fuera de la transacción y con
@@ -2089,6 +2502,8 @@ export async function createStripeCheckoutForPaymentLink(
     quantity?: number
     /** Optional tip on top of base amount. */
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     /** Pre-fills Stripe Checkout email field. */
     customerEmail?: string
     /** Custom field responses (validated against link.customFields). */
@@ -2125,19 +2540,11 @@ export async function createStripeCheckoutForPaymentLink(
     throw new BadRequestError('La cuenta de Stripe del comercio aún no está activa')
   }
 
-  // 1. Resolve charge amount. Bundle ITEM links use sum(qty × price) and
-  // ignore the legacy `input.quantity` parameter.
-  let chargeAmount: number
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!input.amount || input.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = input.amount
-  }
+  // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. `input.quantity` se ignora.
+  const bounds = getStripeChargeBounds()
+  const cobro = await cobroDeLiga(paymentLink, input, new Date(), bounds.min / 100)
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2. Validate custom fields
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -2157,18 +2564,9 @@ export async function createStripeCheckoutForPaymentLink(
     }
   }
 
-  // 3. Add tip (validated against tipping config)
-  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-  chargeAmount = chargeAmount + tipAmount
-
   // 4. Compute Stripe amount + fee. Bounds check protects against pennies
   //    (Stripe rejects sub-$10 MXN) and absurdly large amounts.
   const stripeAmount = toStripeAmount(new Prisma.Decimal(chargeAmount))
-  const bounds = getStripeChargeBounds()
   if (stripeAmount < bounds.min) throw new BadRequestError('El monto es menor al mínimo permitido por Stripe')
   if (stripeAmount > bounds.max) throw new BadRequestError('El monto excede el máximo permitido por transacción')
 
@@ -2243,6 +2641,7 @@ export async function createStripeCheckoutForPaymentLink(
         platformFeeBps: paymentLink.ecommerceMerchant.platformFeeBps,
         provider: 'STRIPE_CONNECT',
         ...(tipAmount > 0 && { tipAmount }),
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
         // Persist the full line-item snapshot (incl. modifiers) on the
         // CheckoutSession so the webhook handler can replay OrderItem +
@@ -2290,6 +2689,8 @@ export async function createCheckoutSession(
     amount?: number
     quantity?: number
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     customFieldResponses?: Record<string, string>
   },
 ) {
@@ -2353,20 +2754,11 @@ export async function createCheckoutSession(
     }
   }
 
-  // 2. Determine amount. Bundle ITEM links sum all line items; legacy single-
-  // amount semantics remain for PAYMENT/DONATION links.
-  let chargeAmount: number
-
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!cardData.amount || cardData.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = cardData.amount
-  }
+  // 2. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total. Blumon no tiene mínimo
+  // propio: con descuento sólo se exige neto > 0 (lo garantiza el desglose).
+  const cobro = await cobroDeLiga(paymentLink, cardData, new Date())
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2b. Validate custom field responses if link has custom fields
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -2386,16 +2778,6 @@ export async function createCheckoutSession(
       }
     }
   }
-
-  // 2c. Calculate tip amount
-  const tipAmount = cardData.tipAmount && cardData.tipAmount > 0 ? cardData.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-
-  // Add tip to total charge amount
-  chargeAmount = chargeAmount + tipAmount
 
   // 3. Resolve provider
 
@@ -2432,6 +2814,7 @@ export async function createCheckoutSession(
         cvv: cardData.cvv, // Needed for charge step
         // Tip tracking
         ...(tipAmount > 0 && { tipAmount }),
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         // Custom field responses
         ...(cardData.customFieldResponses && { customFieldResponses: cardData.customFieldResponses }),
         // ITEM link metadata for order creation
@@ -2620,6 +3003,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           ...(metadata.customFieldResponses && { customFieldResponses: metadata.customFieldResponses }),
           // Preserve item list for reference + audit
           ...(isItemLink && { items: sessionItems }),
+          ...(metadata.descuento && { descuento: metadata.descuento }),
         } as unknown as Prisma.InputJsonValue,
       },
     })
@@ -2641,16 +3025,21 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       //                  : session.amount - tip (for PAYMENT/DONATION the amount
       //                  is already the gross + tip).
       const orderTipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
-      const subtotal = isItemLink
-        ? sessionItems.reduce((sum, it) => {
-            const modSumPerUnit = (it.modifiers ?? []).reduce((s, m) => s + m.price * m.quantity, 0)
-            return sum.add(new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity))
-          }, new Prisma.Decimal(0))
-        : session.amount.sub(orderTipAmount)
+      // Con descuento, la sesión manda: base, descuento y lo cobrado (neto + propina) son los que vio y pagó la clienta.
+      const descuentoDeLiga = descuentoDeLaSesion(metadata, session.amount.sub(orderTipAmount), session.sessionId)
+      const subtotal = descuentoDeLiga
+        ? new Prisma.Decimal(descuentoDeLiga.base)
+        : isItemLink
+          ? sessionItems.reduce((sum, it) => {
+              const modSumPerUnit = (it.modifiers ?? []).reduce((s, m) => s + m.price * m.quantity, 0)
+              return sum.add(new Prisma.Decimal(it.unitPrice + modSumPerUnit).mul(it.quantity))
+            }, new Prisma.Decimal(0))
+          : session.amount.sub(orderTipAmount)
       const taxAmount = new Prisma.Decimal(0) // Tax included in price for payment links
-      const total = subtotal.add(orderTipAmount)
-      // Base de lealtad = total con IVA SIN propina (= subtotal aquí).
-      loyaltyBase = subtotal
+      const total = descuentoDeLiga ? session.amount : subtotal.add(orderTipAmount)
+      // Lo cobrado por la venta, con IVA y SIN propina (sin descuento = subtotal): el cobro, la lealtad y la comisión.
+      const neto = total.sub(orderTipAmount)
+      loyaltyBase = neto
 
       const orderNumber = `PL-${Date.now()}`
 
@@ -2673,7 +3062,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           customerName: session.customerName,
           customerEmail: session.customerEmail,
           subtotal,
-          discountAmount: 0,
+          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
           taxAmount,
           contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount: orderTipAmount,
@@ -2718,6 +3107,20 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
         include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
 
+      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+      if (descuentoDeLiga) {
+        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeLiga({
+            orderId: order.id,
+            foto: { ...descuentoDeLiga.foto, discountId },
+            montoPesos: descuentoDeLiga.descuento,
+            basePesos: descuentoDeLiga.base,
+          }),
+        })
+        await sincronizarRepartos(tx, order.id)
+      }
+
       // Vale durable de inventario, atómico con la orden PAID — mismo motivo
       // que en el camino Stripe: antes se deducía fuera de la transacción y
       // contra el id de la sesión de checkout, no contra la orden.
@@ -2748,7 +3151,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           // Same EcommerceMerchant link as the Stripe path — drives the
           // dashboard's "Cuenta Comercial" column for payment-link rows.
           ecommerceMerchantId: session.ecommerceMerchant?.id,
-          amount: subtotal,
+          amount: neto,
           tipAmount: orderTipAmount,
           method: 'CREDIT_CARD',
           source: 'WEB',
@@ -2758,7 +3161,7 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
           processorId: chargeResult.transactionId,
           feePercentage: 0,
           feeAmount: 0,
-          netAmount: subtotal,
+          netAmount: neto,
           // Card details captured at tokenize time + persisted in
           // CheckoutSession.metadata (see createCheckoutSession).
           cardBrand: mapBlumonCardBrandToEnum(metadata.cardBrand),
@@ -3065,7 +3468,9 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
     venueEmail: payment.venue.email ?? undefined,
     currency: payment.venue.currency ?? 'MXN',
     items,
-    subtotal: Number(payment.amount),
+    // La venta antes del descuento y el descuento, de la orden (sin descuento, el subtotal es lo cobrado, como antes).
+    subtotal: payment.order ? Number(payment.order.subtotal) : Number(payment.amount),
+    discountAmount: payment.order && Number(payment.order.discountAmount) > 0 ? Number(payment.order.discountAmount) : undefined,
     tipAmount: payment.tipAmount ? Number(payment.tipAmount) : undefined,
     totalAmount: total,
     paymentMethod,
@@ -3194,6 +3599,8 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
   input: {
     amount?: number
     tipAmount?: number
+    /** Total (neto + propina) que mostró la página; distinto → 409 sin cobrar. Ausente = no se compara. */
+    expectedTotal?: number
     customerEmail?: string
     customFieldResponses?: Record<string, string>
   },
@@ -3232,18 +3639,16 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
     throw new BadRequestError('El token de Mercado Pago expiró. El comercio debe reconectar.')
   }
 
-  // 1. Resolve charge amount (same logic as Stripe Elements flow)
-  let chargeAmount: number
-  if (paymentLink.purpose === 'ITEM' && paymentLink.items.length > 0) {
-    chargeAmount = computeBundleTotal(paymentLink.items)
-  } else if (paymentLink.amountType === 'FIXED') {
-    chargeAmount = Number(paymentLink.amount)
-  } else {
-    if (!input.amount || input.amount <= 0) {
-      throw new BadRequestError('El monto es requerido para esta liga de pago')
-    }
-    chargeAmount = input.amount
-  }
+  // MercadoPago Mexico rejects amounts below its platform minimum (~$10 MXN)
+  // with a generic 2072 "Invalid value for transaction_amount" — and that only
+  // surfaces at payment time (mp-pay), after the customer entered their card.
+  // Fail fast here, at intent creation, with a clear message.
+  const mpMinMxn = Number(process.env.MP_MIN_CHARGE_MXN ?? 5)
+
+  // 1. Lo que se cobra (base − descuento + propina) y el 409 si la página mostró otro total.
+  const cobro = await cobroDeLiga(paymentLink, input, new Date(), mpMinMxn)
+  const tipAmount = cobro.propina
+  const chargeAmount = cobro.total
 
   // 2. Validate custom fields (same as Stripe)
   const customFields = paymentLink.customFields as CustomFieldDefinition[] | null
@@ -3263,19 +3668,6 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
     }
   }
 
-  // 3. Tip
-  const tipAmount = input.tipAmount && input.tipAmount > 0 ? input.tipAmount : 0
-  const tippingConfig = paymentLink.tippingConfig as TippingConfig | null
-  if (tipAmount > 0 && !tippingConfig) {
-    throw new BadRequestError('Esta liga de pago no acepta propinas')
-  }
-  chargeAmount = chargeAmount + tipAmount
-
-  // MercadoPago Mexico rejects amounts below its platform minimum (~$10 MXN)
-  // with a generic 2072 "Invalid value for transaction_amount" — and that only
-  // surfaces at payment time (mp-pay), after the customer entered their card.
-  // Fail fast here, at intent creation, with a clear message.
-  const mpMinMxn = Number(process.env.MP_MIN_CHARGE_MXN ?? 5)
   if (chargeAmount < mpMinMxn) {
     throw new BadRequestError(`El monto mínimo para pagar con Mercado Pago es $${mpMinMxn} MXN`)
   }
@@ -3308,6 +3700,7 @@ export async function createMercadoPagoPaymentIntentForPaymentLink(
         provider: 'MERCADO_PAGO',
         flow: 'mp_bricks',
         ...(tipAmount > 0 && { tipAmount }),
+        ...(cobro.fotoParaSesion && { descuento: cobro.fotoParaSesion }),
         ...(input.customFieldResponses && { customFieldResponses: input.customFieldResponses }),
         ...(paymentLink.purpose === 'ITEM' &&
           paymentLink.items.length > 0 && {
@@ -3536,6 +3929,8 @@ export async function finalizeMercadoPagoCheckout(args: {
   const gross = session.amount
   const tipAmount = new Prisma.Decimal(metadata.tipAmount || 0)
   const subtotal = gross.sub(tipAmount).gte(0) ? gross.sub(tipAmount) : new Prisma.Decimal(0)
+  // Con descuento: la orden lleva la base y el descuento; el cobro, la lealtad y la comisión siguen sobre `subtotal` (el neto).
+  const descuentoDeLiga = isLink ? descuentoDeLaSesion(metadata, subtotal, session.sessionId) : null
   const feeAmount = session.applicationFeeCents ? new Prisma.Decimal(session.applicationFeeCents).div(100) : new Prisma.Decimal(0)
   const netAmount = subtotal.sub(feeAmount).gte(0) ? subtotal.sub(feeAmount) : new Prisma.Decimal(0)
   const feePercentage = subtotal.gt(0) ? feeAmount.div(subtotal).toDecimalPlaces(4) : new Prisma.Decimal(0)
@@ -3583,8 +3978,8 @@ export async function finalizeMercadoPagoCheckout(args: {
           createdById: session.paymentLink?.createdById ?? undefined,
           ...(loyaltyCustomerId ? { customerId: loyaltyCustomerId } : {}),
           customerEmail: session.customerEmail,
-          subtotal,
-          discountAmount: 0,
+          subtotal: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.base) : subtotal,
+          discountAmount: descuentoDeLiga ? new Prisma.Decimal(descuentoDeLiga.descuento) : 0,
           taxAmount: 0,
           contratoDePrecio: 'IVA_INCLUIDO',
           tipAmount,
@@ -3626,6 +4021,20 @@ export async function finalizeMercadoPagoCheckout(args: {
         },
         include: { items: { include: { modifiers: { include: { modifier: true } } } } },
       })
+
+      // El descuento de la liga es su fila de CUENTA, repartida entre los renglones, y un uso del descuento del catálogo.
+      if (descuentoDeLiga) {
+        const discountId = await contarUsoDelDescuento(tx, venueId, descuentoDeLiga.foto.discountId)
+        await tx.orderDiscount.create({
+          data: filaDeDescuentoDeLiga({
+            orderId: order.id,
+            foto: { ...descuentoDeLiga.foto, discountId },
+            montoPesos: descuentoDeLiga.descuento,
+            basePesos: descuentoDeLiga.base,
+          }),
+        })
+        await sincronizarRepartos(tx, order.id)
+      }
 
       // Vale durable de inventario, atómico con la orden PAID (igual que
       // Stripe/Blumon). Para un cobro de puro monto nace SKIPPED, que es lo que

@@ -9,7 +9,7 @@
  * - unitsSold: Sum of OrderItem.quantity
  * - grossSales: list value sold before discounts (price x units sold, plus
  *   paid modifiers) via the shared lineGrossSql()
- * - discounts: Sum of discountAmount
+ * - discounts: Sum of discountAmount + la parte de cada renglón en los descuentos de cuenta (lineOrderDiscountSql)
  * - netSales: grossSales - discounts
  * - refunds: From refunded orders (tracked separately)
  */
@@ -19,7 +19,7 @@ import { BadRequestError } from '@/errors/AppError'
 import prisma from '@/utils/prismaClient'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { localInstantRaw, localWallClockRaw, utcTsParam } from '@/utils/sqlDates'
-import { lineGrossSql, lineRevenueSql } from './lineRevenue'
+import { lineGrossSql, lineOrderDiscountSql, lineRevenueSql } from './lineRevenue'
 
 // ============================================================
 // Types
@@ -202,7 +202,7 @@ export async function getSalesByItem(venueId: string, filters: SalesByItemFilter
       COUNT(oi.id)::integer as items_sold,
       SUM(oi.quantity)::integer as units_sold,
       COALESCE(SUM(${lineGrossSql()}), 0) as gross_sales,
-      COALESCE(SUM(oi."discountAmount"), 0) as discounts
+      COALESCE(SUM(oi."discountAmount" + ${lineOrderDiscountSql()}), 0) as discounts
     FROM "OrderItem" oi
     INNER JOIN "Order" o ON o.id = oi."orderId"
     LEFT JOIN "Product" p ON p.id = oi."productId"
@@ -498,7 +498,7 @@ async function calculateTimePeriodItemMetrics(
     SELECT
       ${groupByExpression} as period,
       COALESCE(SUM(${lineGrossSql()}), 0) as gross_sales,
-      COALESCE(SUM(oi."discountAmount"), 0) as discounts,
+      COALESCE(SUM(oi."discountAmount" + ${lineOrderDiscountSql()}), 0) as discounts,
       COALESCE(SUM(${lineRevenueSql()}), 0) as net_sales,
       COUNT(oi.id)::integer as items_sold
     FROM "OrderItem" oi

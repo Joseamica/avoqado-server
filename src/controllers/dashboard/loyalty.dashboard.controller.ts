@@ -22,7 +22,7 @@ import * as loyaltyService from '@/services/dashboard/loyalty.dashboard.service'
 import * as cardDesignService from '@/services/wallet/cardDesign.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
-import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
+import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { fetchDecodedPng, readPngSize } from '@/services/wallet/remotePng'
 import { stampStripPng } from '@/services/wallet/stampStripPng'
 import { buildStoragePath, uploadFileToStorage } from '@/services/storage.service'
@@ -403,14 +403,49 @@ export async function redeemStampRewardHandler(req: Request, res: Response) {
 export async function getStampCardHandler(req: Request, res: Response) {
   const { venueId, customerId } = req.params
 
-  const [estado, pendientes] = await Promise.all([
+  const [estado, pendientes, config] = await Promise.all([
     getStampCardStatus(venueId, customerId),
     prisma.stampReward.findMany({
       where: { venueId, customerId, status: 'PENDING' },
       select: { id: true, rewardLabel: true, rewardType: true, rewardValue: true, expiresAt: true, createdAt: true },
       orderBy: { createdAt: 'asc' },
     }),
+    prisma.loyaltyConfig.findUnique({ where: { venueId } }),
   ])
 
-  return res.status(200).json({ ...estado, rewardsToClaim: pendientes })
+  // `version` es la mitad del CAS del ajuste manual; `stampsEnabled` deja a la pantalla apagar el botón con su razón.
+  const version = await contarVersionDeCartilla(estado.stampCardId)
+  const stampsEnabled = config?.active === true && config?.stampsEnabled === true
+
+  return res.status(200).json({ ...estado, version, stampsEnabled, rewardsToClaim: pendientes })
+}
+
+/**
+ * POST /api/v1/dashboard/venues/:venueId/customers/:customerId/loyalty/stamps/adjust
+ * (y /api/v1/mobile/venues/:venueId/customers/:customerId/stamps/adjust)
+ *
+ * Ajuste manual de sellos: deja la cartilla abierta en `stampsEarned`. A diferencia de `adjustPoints` NO usa
+ * `getStaffVenueId`: un dueño de la organización puede no tener fila en StaffVenue y ese helper lanzaría; aquí se
+ * ajusta igual, con el autor en la bitácora por `actorStaffId`.
+ */
+export async function adjustStampsHandler(req: Request, res: Response) {
+  const { venueId, customerId } = req.params
+  const authContext = (req as any).authContext
+
+  if (!authContext?.userId) {
+    return res.status(403).json({ error: 'Staff authentication required for stamp adjustments' })
+  }
+
+  const sv = await prisma.staffVenue.findUnique({
+    where: { staffId_venueId: { staffId: authContext.userId, venueId } },
+    select: { id: true },
+  })
+
+  const result = await adjustStamps(venueId, customerId, {
+    ...req.body,
+    staffVenueId: sv?.id,
+    actorStaffId: authContext.userId,
+  })
+
+  return res.status(200).json(result)
 }

@@ -44,7 +44,7 @@ import prisma from '@/utils/prismaClient'
 import { parseDbDateRange } from '@/utils/datetime'
 import { sanitizeTimezone } from '@/utils/sanitizeTimezone'
 import { localWallClockRaw, utcTsParam } from '@/utils/sqlDates'
-import { lineGrossSql, lineRevenueSql } from './lineRevenue'
+import { lineGrossSql, lineOrderDiscountSql, lineRevenueSql } from './lineRevenue'
 
 // ============================================================
 // Types
@@ -167,7 +167,7 @@ export async function getPromotionSales(venueId: string, filters: PromotionSales
       COUNT(DISTINCT op.id)::integer as times_sold,
       COUNT(DISTINCT op.id) FILTER (WHERE op."needsReview")::integer as needs_review,
       COALESCE(SUM(${lineGrossSql()}), 0) as gross_sales,
-      COALESCE(SUM(oi."discountAmount"), 0) as discounts,
+      COALESCE(SUM(oi."discountAmount" + ${lineOrderDiscountSql()}), 0) as discounts,
       COALESCE(SUM(${lineRevenueSql()}), 0) as net_sales
     FROM "OrderPromotion" op
     INNER JOIN "Order" o ON o.id = op."orderId"
@@ -267,7 +267,7 @@ async function calculatePromotionPeriodMetrics(
       ${groupByExpression} as period,
       COUNT(DISTINCT op.id)::integer as times_sold,
       COALESCE(SUM(${lineGrossSql()}), 0) as gross_sales,
-      COALESCE(SUM(oi."discountAmount"), 0) as discounts,
+      COALESCE(SUM(oi."discountAmount" + ${lineOrderDiscountSql()}), 0) as discounts,
       COALESCE(SUM(${lineRevenueSql()}), 0) as net_sales
     FROM "OrderPromotion" op
     INNER JOIN "Order" o ON o.id = op."orderId"

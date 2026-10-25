@@ -341,6 +341,8 @@ const ORDEN_DEL_DETALLE = {
       product: { select: { id: true, name: true } },
     },
   },
+  // Descuentos de cuenta repartidos: lineRevenue los resta como lineRevenueSql (pocas filas por orden).
+  orderDiscounts: { select: { reparto: true } },
   payments: {
     where: { status: 'COMPLETED' },
     select: { id: true, method: true, cardBrand: true, maskedPan: true, shiftId: true, type: true, createdAt: true },
@@ -556,7 +558,7 @@ export async function getShiftById(venueId: string, shiftId: string, incluirEspe
       const quantity = item.quantity || 1
       // Revenue is net of the line's own discount — charging it at list price
       // overstated every shift that sold a combo or a discounted item.
-      const revenue = lineRevenue(item)
+      const revenue = lineRevenue(item, order.orderDiscounts)
 
       if (productMap.has(productName)) {
         const existing = productMap.get(productName)!
