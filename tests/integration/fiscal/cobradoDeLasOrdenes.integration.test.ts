@@ -48,7 +48,7 @@ async function seedOrder(owner: Venue, count = 2) {
 }
 
 beforeAll(async () => {
-  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toBe('/avoqado_cambio_test_20261020')
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/)
   venue = await crearNegocioDePrueba('batch-charged')
   otherVenue = await crearNegocioDePrueba('batch-charged-foreign')
   plain = (await seedOrder(venue)).id

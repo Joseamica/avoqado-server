@@ -102,7 +102,7 @@ async function refund(orderId: string, originalPaymentId: string, lineId: string
 beforeAll(async () => {
   const u = new URL(process.env.TEST_DATABASE_URL!)
   expect(['localhost', '127.0.0.1']).toContain(u.hostname)
-  expect(u.pathname).toBe('/avoqado_cambio_test_20261020')
+  expect(u.pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/)
   s = await seedClothingSale({ list: 100, quantity: 10, payments: [400, 600] })
   await prisma.payment.update({
     where: { id: s.payments[1].id },
