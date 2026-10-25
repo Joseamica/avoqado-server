@@ -50,6 +50,7 @@ import * as transferMobileController from '../controllers/mobile/transfer.mobile
 import * as refundMobileController from '../controllers/mobile/refund.mobile.controller'
 import * as exchangeMobileController from '../controllers/mobile/exchange.mobile.controller'
 import { createExchangeSchema } from '../schemas/mobile/exchange.mobile.schema'
+import { recentSalesQuerySchema } from '../schemas/mobile/recentSales.mobile.schema'
 import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
@@ -1069,6 +1070,60 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   transactionMobileController.getTransaction,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/sales/recent:
+ *   get:
+ *     tags: [Mobile - Transactions]
+ *     summary: Copy recent paid sales for offline use
+ *     description: Returns bounded pages of sales from the last 30 venue days. Requires payments:read.
+ *     security:
+ *       - bearerAuth: []
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - name: limit
+ *         in: query
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 100
+ *       - name: cursor
+ *         in: query
+ *         description: Continuation token; mutually exclusive with since.
+ *         schema:
+ *           type: string
+ *           maxLength: 512
+ *       - name: since
+ *         in: query
+ *         description: Synchronization watermark; mutually exclusive with cursor.
+ *         schema:
+ *           type: string
+ *           maxLength: 512
+ *     responses:
+ *       200:
+ *         description: "{ success: true, data: { sales, removed }, meta: { mode, reset, total, limit, hasMore, nextCursor, nextSince, windowStart } }"
+ *       400:
+ *         description: Invalid query or cursor
+ *       401:
+ *         description: Not authenticated
+ *       403:
+ *         description: Missing payments:read permission
+ *       404:
+ *         description: Venue not found
+ */
+router.get(
+  '/venues/:venueId/sales/recent',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(recentSalesQuerySchema),
+  transactionMobileController.listRecentSales,
 )
 
 /**
