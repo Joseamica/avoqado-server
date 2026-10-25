@@ -200,9 +200,14 @@ jobs:
 
       - name: 🧪 Run unit tests
         # Lo mismo que `npm run test:unit:ci`, con 4 procesos en vez de 2 (el runner trae 4 núcleos).
+        # Las de cronómetro (miden el event loop contra 50 ms) corren después y solas: con 4 procesos compartiendo CPU
+        # daban rojos falsos (59.7 ms, 22-oct). La guardia de deployProduccionCommitExacto exige que CRONOMETRO sea
+        # exactamente los archivos que importan el arnés o utils/eventLoopBudget: ninguna queda fuera.
         run: |
           START=$(date +%s)
-          NODE_OPTIONS='--max-old-space-size=4096' npx jest tests/unit --maxWorkers=4 --workerIdleMemoryLimit=512MB --detectOpenHandles=false --verbose=false --cacheDirectory=node_modules/.cache/jest
+          CRONOMETRO='tests/unit/(utils/eventLoopBudget|services/dashboard/sale-verification\.org\.eventloop-budget|services/master-catalog/(catalogImport(Canonical|Dependencies|DurableEventLoop|FieldValidation|StagedPayload)\.service|catalogWorkbook\.eventloop-budget))\.test\.ts$'
+          NODE_OPTIONS='--max-old-space-size=4096' npx jest tests/unit --maxWorkers=4 --workerIdleMemoryLimit=512MB --detectOpenHandles=false --verbose=false --cacheDirectory=node_modules/.cache/jest --testPathIgnorePatterns="$CRONOMETRO"
+          NODE_OPTIONS='--max-old-space-size=4096' npx jest "$CRONOMETRO" --runInBand --detectOpenHandles=false --verbose=false --cacheDirectory=node_modules/.cache/jest
           END=$(date +%s)
           echo "Unit tests (1 job, 4 workers) duration: $((END - START)) seconds" >> "$GITHUB_STEP_SUMMARY"
 

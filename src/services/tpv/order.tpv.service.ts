@@ -1,6 +1,6 @@
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import prisma from '../../utils/prismaClient'
-import { AreaTicketInventoryReservationStatus, Order, PaymentStatus, Prisma } from '@prisma/client'
+import { AreaTicketInventoryReservationStatus, Order, OrderStatus, PaymentStatus, Prisma } from '@prisma/client'
 import { NotFoundError, BadRequestError, ConflictError, ValidationError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
@@ -25,7 +25,7 @@ import {
 } from '../shared/discount.service'
 import { computeStoredOrderTotal, impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
-import { assertNoLiveTerminalCharge } from '../shared/orderCancelGuard'
+import { assertNoLiveTerminalCharge, rechazarCancelacionLocalDeRappi } from '../shared/orderCancelGuard'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
@@ -110,6 +110,9 @@ export async function getOrders(
     paymentStatus: {
       in: ['PENDING', 'PARTIAL'], // Equivalent to legacy 'OPEN' status
     },
+    // Rappi 2b: un pedido de plataforma con efectivo por cobrar se cobra en «Pedidos en línea» del POS, que reparte lo recibido
+    // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
+    thirdPartyCashDue: null,
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list
@@ -1607,6 +1610,7 @@ export async function addItemsToOrder(
       if (order.paymentStatus === 'PAID') {
         throw new BadRequestError('Cannot add items to a paid order')
       }
+      const reabrePorRonda = order.status === OrderStatus.COMPLETED
 
       // Etapa 3 del KDS: sólo una ronda de MESA manda su comanda a la pantalla (en mostrador nace al pagar). La marca viaja
       // en el CAS de versión de abajo.
@@ -2237,9 +2241,22 @@ export async function addItemsToOrder(
           remainingBalance: newRemainingBalance,
           version: { increment: 1 },
           ...(marcarCocina ? { kitchenPendingAt: new Date() } : {}),
+          // Cuentas fuera del plano (23-oct; Codex r2 #1): una ronda (también la que llega sin red) sobre una cuenta CERRADA y no
+          // pagada la reabre, como un cobro tardío reabre una anulada; si siguiera COMPLETED debiendo, el plano no la vería.
+          ...(reabrePorRonda ? { status: OrderStatus.PENDING, completedAt: null } : {}),
         },
       })
       if (casBump.count === 0) throw conflictoDeVersion()
+      if (reabrePorRonda)
+        await tx.activityLog.create({
+          data: {
+            action: 'ORDER_REOPENED_BY_LATE_ROUND',
+            entity: 'Order',
+            entityId: orderId,
+            venueId,
+            data: { estadoAnterior: order.status, estadoNuevo: OrderStatus.PENDING, totalNuevo: newTotal },
+          },
+        })
       await dentroDeLaTx?.(tx, { orderId })
       const updatedOrder = await tx.order.findUniqueOrThrow({
         where: { id: orderId },
@@ -3084,6 +3101,9 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       if (!order) {
         throw new NotFoundError('Order not found')
       }
+      // Rappi 2b: anular TODO un pedido de Rappi es cancelarlo; su mensaje dice qué hacer («cancélalo en la app de Rappi») y va antes
+      // del candado general de plataforma (T10), que frena cualquier otra anulación.
+      if (order.items.every(item => input.itemIds.includes(item.id))) rechazarCancelacionLocalDeRappi(order)
       // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
       // el IVA dos veces (P12). Esos cambios se hacen en el POS externo. Antes de R9 y de las guardas de cobro.
       rechazarSiEsImportada(order)
@@ -3141,6 +3161,7 @@ export async function voidItems(venueId: string, orderId: string, input: VoidIte
       // ⭐ FIX: Auto-close order if voiding all items (Toast/Square pattern)
       // When 0 items remain, order should be cancelled and removed from active list
       const isVoidingAllItems = remainingItems.length === 0
+      if (isVoidingAllItems) rechazarCancelacionLocalDeRappi(order)
       if (!isVoidingAllItems && itemsToVoid.some(esRenglonDeVale)) {
         throw new ConflictError(
           'Esta cuenta tiene vales: cancela la cuenta completa y vuelve a escanear los vales que sí vas a cobrar.',

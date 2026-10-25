@@ -90,6 +90,38 @@ describe('workflow: el deploy de producción', () => {
     expect(String(paso.run)).not.toMatch(RECORTES)
   })
 
+  // Las de cronómetro (miden el event loop contra 50 ms) corren aparte y solas (24-oct-2026): con 4 procesos compartiendo
+  // CPU daban rojos falsos (59.7 ms en develop el 22-oct). Aparte, nunca fuera: la lista es EXACTAMENTE los archivos que
+  // importan el arnés o utils/eventLoopBudget, salen de la corrida en paralelo con el mismo patrón y entran solas en el mismo paso.
+  it('las de cronómetro corren solas en el mismo paso, y la lista es exactamente las que miden el event loop', () => {
+    const paso = workflow.jobs['unit-tests'].steps.find((p: Record<string, any>) => /jest tests\/unit /.test(String(p.run ?? '')))
+    const run = String(paso.run)
+    const cronometro = run.match(/CRONOMETRO='([^']+)'/)?.[1]
+    expect(cronometro).toBeDefined()
+    expect(run).toMatch(/npx jest tests\/unit [^\n]*--testPathIgnorePatterns="\$CRONOMETRO"/)
+    expect(run).toMatch(/npx jest "\$CRONOMETRO" [^\n]*--runInBand/)
+
+    const archivos: string[] = []
+    const recorrer = (dir: string) => {
+      for (const e of fs.readdirSync(path.join(RAIZ, dir), { withFileTypes: true })) {
+        const rel = `${dir}/${e.name}`
+        if (e.isDirectory()) recorrer(rel)
+        else if (rel.endsWith('.test.ts')) archivos.push(rel)
+      }
+    }
+    recorrer('tests/unit')
+    // Lo que SÍ garantiza: cada archivo corre una sola vez (la partición de abajo es la misma que hace Jest). Detectar
+    // un cronómetro NUEVO es de buena fe (import, import(), require; con o sin .ts): si uno se escapa, corre en paralelo
+    // como antes del 24-oct (un rojo falso a veces), nunca se pierde una prueba.
+    const CARGA_CRONOMETRO = /(from\s+|import\(\s*|require\(\s*)['"`][^'"`\n]*(catalogImportEventLoopTestHarness|utils\/eventLoopBudget)(\.ts)?['"`]/
+    const esta = path.relative(RAIZ, __filename).split(path.sep).join('/')
+    const miden = archivos.filter(f => f !== esta && CARGA_CRONOMETRO.test(fs.readFileSync(path.join(RAIZ, f), 'utf8')))
+    // Jest compara el patrón con la ruta ABSOLUTA y con «/»: aquí también, para que un `^tests/...` no pase aquí y falle allá.
+    const aparte = archivos.filter(f => new RegExp(cronometro!).test(`${RAIZ.split(path.sep).join('/')}/${f}`))
+    expect(miden.length).toBeGreaterThan(0)
+    expect(aparte.sort()).toEqual(miden.sort())
+  })
+
   it('despliega con el script del commit exacto, con el SHA probado y el secreto NUEVO del servicio (el viejo, de respaldo)', () => {
     const paso = pasos.find(p => String(p.run ?? '').includes('.github/scripts/render-deploy-commit-exacto.sh'))
     expect(paso).toBeDefined()

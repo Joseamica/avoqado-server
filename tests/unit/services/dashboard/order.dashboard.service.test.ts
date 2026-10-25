@@ -375,11 +375,12 @@ describe('order.dashboard.service — updateOrder no toca inventario', () => {
     prismaMock.table.findMany.mockResolvedValue([])
   })
 
+  // Cobrada: desde el 23-oct el panel sólo cierra una cuenta cobrada (cuentas fuera del plano); lo que se prueba es el inventario.
   const orderConItems = (status: string) => ({
     id: 'order-1',
     venueId: 'venue-1',
     status,
-    paymentStatus: 'PENDING',
+    paymentStatus: 'PAID',
     items: [{ id: 'oi-1', productId: 'p1', quantity: 3, weightQuantity: null, modifiers: [] }],
   })
 

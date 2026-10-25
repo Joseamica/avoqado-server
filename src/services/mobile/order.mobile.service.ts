@@ -21,7 +21,15 @@ import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppE
 import prisma from '../../utils/prismaClient'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
+import {
+  resolveTenderForCharge,
+  computeTenderCommission,
+  normalizeTenderName,
+  type ResolvedTenderCharge,
+} from '../dashboard/tenderType.dashboard.service'
+import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderProvisioning.service'
+import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
+import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
@@ -49,7 +57,12 @@ import {
   asegurarCambioDeClienteBajoCandado,
   esVentaYaCobrada,
 } from '../shared/ligaDeClienteEnVenta'
-import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import {
+  assertNoLiveTerminalCharge,
+  assertOrderCancellableUnderLock,
+  avisarOrdenCancelada,
+  rechazarCancelacionLocalDeRappi,
+} from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
   ORDER_LOCK_WAIT_BUDGET,
@@ -65,6 +78,7 @@ import {
 import {
   claseDeEstado,
   computeOrderBalance,
+  saldoDeCobroDeReparto,
   esVentaCerrada,
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
@@ -350,6 +364,11 @@ export interface OrderDetailResponse {
     totalPaidCents: number
     remainingBalanceCents: number
     tipAmountCents: number
+    /**
+     * Rappi 2b (aditivo, sólo en pedidos con repartidor propio en efectivo): lo que falta, por partes. `remainingBalanceCents`
+     * ya es la suma de las tres. La parte de terceros no es venta: entra al cajón como «cobrado por cuenta de Rappi».
+     */
+    deliveryCashBreakdown?: { saleCents: number; tipCents: number; thirdPartyCents: number; thirdPartyLabel: string }
   }
   staffName: string | null
   /** Additive: dueño del cheque (servedById) — el POS lo compara contra su
@@ -1511,6 +1530,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           // negativo. NO se serializa en `payments[]` (contrato viejo intacto);
           // alimenta `refundState`/`refundedAmount` y el saldo aditivo de precuenta.
           type: true,
+          // Rappi 2b: lo cobrado por cuenta de Rappi (sólo alimenta `deliveryCashBreakdown`; no se serializa en `payments[]`).
+          thirdPartyCashAmount: true,
           processedBy: {
             select: { firstName: true, lastName: true },
           },
@@ -1547,10 +1568,11 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   // Sólo dinero ocurrido: COMPLETED, incluido `type` para que REFUND no reabra deuda.
   // El calculador compartido suma la propina al total y al pagado; no se resta de la mercancía.
   // Proyección pura de lo ya leído: sin otra consulta ni cambios a los importes legacy.
-  const balance = computeOrderBalance(
-    flattenedOrder,
-    (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED'),
-  )
+  const completados = (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED')
+  const balance = computeOrderBalance(flattenedOrder, completados)
+  // Rappi 2b: un pedido con repartidor propio en efectivo debe además propina y tarifa de Rappi (null en todo lo demás). Una venta ya
+  // cerrada no vuelve a pedir nada a la caja (Codex código r1 #5): si se saldó con otro medio, la tarifa la concilia el gerente.
+  const reparto = esVentaCerrada(flattenedOrder.paymentStatus) ? null : saldoDeCobroDeReparto(flattenedOrder, completados)
 
   return {
     id: flattenedOrder.id,
@@ -1569,8 +1591,18 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     preBillBalance: {
       orderTotalCents: pesosToCents(balance.total.toNumber()),
       totalPaidCents: pesosToCents(balance.paidAmount.toNumber()),
-      remainingBalanceCents: pesosToCents(balance.remainingBalance.toNumber()),
+      remainingBalanceCents: pesosToCents((reparto ? reparto.totalACobrar : balance.remainingBalance).toNumber()),
       tipAmountCents: pesosToCents(balance.tipAmount.toNumber()),
+      ...(reparto
+        ? {
+            deliveryCashBreakdown: {
+              saleCents: pesosToCents(reparto.ventaPendiente.toNumber()),
+              tipCents: pesosToCents(reparto.propinaPendiente.toNumber()),
+              thirdPartyCents: pesosToCents(reparto.tercerosPendiente.toNumber()),
+              thirdPartyLabel: 'Rappi',
+            },
+          }
+        : {}),
     },
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
     // Additive: dueño del cheque con id — para la UI read-only de propiedad de mesa.
@@ -2430,6 +2462,8 @@ export async function mergeOrdersInTransaction(
       specialRequests: true,
       contratoDePrecio: true,
       originSystem: true,
+      source: true,
+      posRawData: true,
       taxAmount: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
@@ -2443,13 +2477,24 @@ export async function mergeOrdersInTransaction(
       status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
       paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
     },
-    select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true, originSystem: true },
+    select: {
+      id: true,
+      specialRequests: true,
+      contratoDePrecio: true,
+      paidAmount: true,
+      originSystem: true,
+      source: true,
+      posRawData: true,
+    },
   })
   if (!freshSource || !freshTarget) {
     throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
   }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; fusionarla (en
   // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
+  // Rappi primero: su mensaje dice qué hacer («cancélalo en la app de Rappi»); el candado general de plataforma va después.
+  rechazarCancelacionLocalDeRappi(freshSource)
+  rechazarCancelacionLocalDeRappi(freshTarget)
   rechazarSiEsImportada(freshSource)
   rechazarSiEsImportada(freshTarget)
   await rechazarSiEsCuentaDeTarjetas(tx, sourceOrderId, 'uniones con otra cuenta')
@@ -2744,11 +2789,13 @@ export interface CashPaymentResponse {
   tipAmount: number
   method: PaymentMethod
   status: 'COMPLETED'
-  /**
-   * Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. En CENTAVOS enteros (hoy `amount + tipAmount` de lo
-   * REGISTRADO). Las apps calculan el cambio como recibido − `cashRetainedCents`. ADITIVO y opcional: nunca se quita ni se renombra.
-   */
+  /** Efectivo retenido por este cobro, en centavos enteros; Rappi2b sumará aquí su PAY_IN. Aditivo. */
   cashRetainedCents?: number
+  /**
+   * Rappi 2b (aditivo, sólo pedidos de plataforma en efectivo): lo que ESTE pago cubrió de cada parte, en centavos. El servidor reparte
+   * lo recibido (terceros → propina → venta), así que la app concilia contra esto y no contra el `amount`/`tip` que mandó.
+   */
+  deliveryCashAllocation?: { saleCents: number; tipCents: number; thirdPartyCents: number }
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
   changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
@@ -2827,6 +2874,11 @@ function pesosToCents(pesos: number): number {
  */
 function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | number | null | undefined): number {
   return Math.max(0, pedidoCents - pesosToCents(Number(registrado ?? 0)))
+}
+
+/** Lo que se quedó en la caja por ESE cobro: venta + propina + lo cobrado por cuenta de terceros (Rappi 2b), en centavos. */
+function retenidoDelCobro(pago: { amount: unknown; tipAmount: unknown; thirdPartyCashAmount?: unknown }): number {
+  return pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)) + pesosToCents(Number(pago.thirdPartyCashAmount ?? 0))
 }
 
 /**
@@ -2940,6 +2992,8 @@ export interface CuentaBajoCandado {
     version: number
     areaTicketCode: string | null
     tableId: string | null
+    /** Rappi 2b: el carril de efectivo con dinero de terceros (lo lee el cobro con saldo para rechazarlo). */
+    thirdPartyCashDue: Prisma.Decimal | null
   }>
   readonly previousPayments: ReadonlyArray<Readonly<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: PaymentType | null }>>
 }
@@ -3003,6 +3057,9 @@ export interface AbonoEnTx {
   /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
   aplicadoCents: number
   cambioCents: number
+  /** Rappi 2b (T5b): la propina y lo de terceros que se REGISTRARON (el reparto del servidor), en centavos. */
+  propinaCents: number
+  tercerosCents: number
   /** Base de puntos en pesos, sin propinas. */
   loyaltyBase: number
   balance: OrderBalanceSnapshot
@@ -3010,6 +3067,8 @@ export interface AbonoEnTx {
   tenderResuelto: ResolvedTenderCharge | null
   /** R6-3: la mesa resultó ajena hasta la relectura bajo el candado y el dinero ya capturado se registró (rastro de R2-6). */
   mesaAjena: { ownerId: string; ownerName: string } | null
+  /** Rappi 2b: aviso que la persona tiene que conciliar con Rappi (post-commit), o null. */
+  avisoRappi: AvisoDeRappiEfectivo | null
 }
 
 /**
@@ -3034,7 +3093,8 @@ export async function registrarAbonoEnTx(
   const tip = entrada.tipCents
   const paymentMethod = entrada.method
   const amountSolicitadoDecimal = amount / 100
-  const tipDecimal = tip / 100
+  // Rappi 2b: el reparto del servidor puede cambiarla (terceros → propina → venta); todo lo de abajo usa la repartida.
+  let tipDecimal = tip / 100
   const input = {
     idempotencyKey: entrada.idempotencyKey,
     isOfflineReplay: entrada.isOfflineReplay,
@@ -3138,6 +3198,10 @@ export async function registrarAbonoEnTx(
       // Tarea 6a: una cancelada de Avoqado se reabre con cualquier dinero ya capturado; una externa, sólo cuando hoy salía
       // de CANCELADA (Codex r12 #5, r13 #1).
       originSystem: true,
+      // Rappi 2b: el carril de efectivo con dinero de terceros y su propina contractual (sólo los escribe la ingesta).
+      source: true,
+      thirdPartyCashDue: true,
+      cashTipDue: true,
       version: true,
       areaTicketCode: true,
       tableId: true,
@@ -3189,7 +3253,7 @@ export async function registrarAbonoEnTx(
   // REFUND para reportar `refundState` — filtrarlos aquí los escondería.
   const previousPayments = await tx.payment.findMany({
     where: { orderId, status: 'COMPLETED' },
-    select: { amount: true, tipAmount: true, type: true },
+    select: { amount: true, tipAmount: true, type: true, thirdPartyCashAmount: true },
   })
 
   // Tarea A7: el cobro con saldo bloquea aquí sus sobres (Order → sobres → turno) y valida el monto contra el saldo.
@@ -3236,8 +3300,11 @@ export async function registrarAbonoEnTx(
   // escriben los vales v6, que no tienen sesión y se cobran como cualquier cuenta (revisión de 6a-2, I-1).
   // 🔴 R2-2 (R8-1): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED leída bajo el candado), aunque esté cancelada:
   // se registra el dinero y queda cancelada con su estado de cobro. La cancelada que DEBE se reabre como siempre.
+  // 🔴 Rappi 2b (T8): el estado de un pedido de Rappi lo dicta Rappi. Si lo canceló y después llega efectivo ya capturado, el dinero
+  // se registra, el pedido SIGUE cancelado y se avisa (post-commit). Antes salía de CANCELADA y quedaba COMPLETED si cubría.
+  const rappiCanceladaConDinero = fresh.source === 'RAPPI' && claseDeEstado(fresh.status) === 'CANCELADA' && !cobroNuevo
   const estado =
-    !cobroNuevo && !lockedAreaCheckout && !esVentaCerrada(fresh.paymentStatus)
+    !cobroNuevo && !lockedAreaCheckout && !esVentaCerrada(fresh.paymentStatus) && fresh.source !== 'RAPPI'
       ? await reabrirSiRecibeDinero(tx, {
           venueId,
           orderId,
@@ -3277,9 +3344,33 @@ export async function registrarAbonoEnTx(
   // que el aparato APLICÓ, sin el cambio (que se quedó en el aparato)— se registra tal cual: recortarlo contra un saldo que otra
   // caja movió después registraba $50 de $100 recibidos y le inventaba $50 de «cambio» que nadie entregó.
   // R2-1: la cola con H1 manda el TOTAL, no lo aplicado: se recorta como antes (efectivo de cajón).
-  const cambioCents = (conH1 ? countsAsDrawerCash : cobroNuevo) ? Math.max(0, amount - saldoCents) : 0
-  const aplicadoCents = amount - cambioCents
-  const amountDecimal = aplicadoCents / 100
+  let cambioCents = (conH1 ? countsAsDrawerCash : cobroNuevo) ? Math.max(0, amount - saldoCents) : 0
+  let aplicadoCents = amount - cambioCents
+  let amountDecimal = aplicadoCents / 100
+
+  // 🔴 Rappi 2b (T5): pedido con repartidor propio en efectivo. El reparto lo pone el SERVIDOR con lo recibido (`amount + tip`):
+  // primero lo de Rappi, luego la propina contractual, luego la venta (lo que exceda la venta es sobrepago y lo avisa S1). Así
+  // «el saldo común dice saldada» implica que Rappi y la propina ya se cubrieron. Cobro nuevo o cola H1 (que manda el TOTAL): se
+  // recorta a lo que falta y el resto es cambio. Dinero ya capturado: se registra completo. Otro medio (T5c): sin terceros (ese
+  // dinero no está en el cajón) y se avisa. `null` fuera de este carril: nada cambia.
+  const repartoAntes = saldoDeCobroDeReparto(cuenta, previousPayments)
+  let tercerosCents = 0
+  if (repartoAntes) {
+    const aCentavos = (d: Prisma.Decimal) => pesosToCents(d.toNumber())
+    const recibido = amount + tip
+    // H1 recorta sólo efectivo de cajón (como su regla de siempre): una tarjeta o transferencia ya cobrada se registra completa.
+    const aplicado = (conH1 && countsAsDrawerCash) || cobroNuevo ? Math.min(recibido, aCentavos(repartoAntes.totalACobrar)) : recibido
+    cambioCents = recibido - aplicado
+    let resto = aplicado
+    tercerosCents = countsAsDrawerCash ? Math.min(resto, aCentavos(repartoAntes.tercerosPendiente)) : 0
+    resto -= tercerosCents
+    // Un tipo de pago que no captura propina la deja en la venta (si no, el guard de abajo rechazaría dinero ya recibido).
+    const propinaCents = resolvedTender && !resolvedTender.tenderCaptureTip ? 0 : Math.min(resto, aCentavos(repartoAntes.propinaPendiente))
+    resto -= propinaCents
+    aplicadoCents = resto
+    amountDecimal = resto / 100
+    tipDecimal = propinaCents / 100
+  }
 
   if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
     throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
@@ -3304,11 +3395,27 @@ export async function registrarAbonoEnTx(
   const totalTip = balance.tipAmount.toNumber()
   const newTotal = balance.total.toNumber()
   const totalPaidIncludingTip = balance.paidAmount.toNumber()
-  const remainingAfterPayment = balance.remainingBalance.toNumber()
+  // Rappi 2b: lo que falta DESPUÉS de este cobro, por partes (null fuera del carril).
+  const repartoDespues = repartoAntes
+    ? saldoDeCobroDeReparto(cuenta, [
+        ...previousPayments,
+        { amount: amountDecimal, tipAmount: tipDecimal, thirdPartyCashAmount: tercerosCents / 100, type: 'REGULAR' },
+      ])
+    : null
+  // En el carril de Rappi sólo queda saldada si además la propina y lo de Rappi quedaron cubiertos (una venta neta en $0 con tarifa
+  // y propina no se cierra con $5); otro medio (T5c) puede saldar con la tarifa por conciliar, y se avisa.
+  const cubreLoDeTerceros =
+    !repartoDespues || (repartoDespues.propinaPendiente.isZero() && (repartoDespues.tercerosPendiente.isZero() || !countsAsDrawerCash))
   // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
   // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
   // cierra).
-  const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
+  const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado) && cubreLoDeTerceros
+  // La columna `remainingBalance` del carril es lo que falta de las tres partes: la lee el reintento (`readOrderBalanceSnapshot`).
+  const remainingAfterPayment = repartoDespues
+    ? isFullyPaid
+      ? 0
+      : repartoDespues.totalACobrar.toNumber()
+    : balance.remainingBalance.toNumber()
   // 🔴 S1 (R8-1, como la terminal): dinero ya capturado sobre una venta CERRADA (leída bajo el candado) ⇒ conserva su estado, saldo
   // 0 y `cerrada`: no la vuelve a cerrar ni repite lo de saldar (inventario, lealtad, comanda, referido). El dinero se registra
   // completo y sale el aviso de sobrepago después del commit. R2-1: la cola con H1 no pasa por aquí (sin estado previo cerrado:
@@ -3377,6 +3484,17 @@ export async function registrarAbonoEnTx(
     orderId,
   })
 
+  // Rappi 2b: el tipo de pago del canal (lo creó la ingesta) para congelar su comisión en el cobro en efectivo.
+  // Codex código r1 #4: también cuando el cobro llega con el «Efectivo» del catálogo (método CASH); un vale que cuenta como efectivo
+  // (método OTHER) conserva el suyo.
+  const tenderDelCanal =
+    repartoAntes && countsAsDrawerCash && (!resolvedTender || resolvedTender.method === 'CASH')
+      ? await tx.venueTenderType.findFirst({
+          where: { venueId, normalizedName: normalizeTenderName(deliveryTenderLabel('RAPPI')) },
+          select: { id: true, revision: true, name: true, commissionPercent: true },
+        })
+      : null
+
   // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
   //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
   const paymentSource = countsAsDrawerCash ? 'APP' : 'OTHER'
@@ -3408,16 +3526,24 @@ export async function registrarAbonoEnTx(
       netAmount: amountDecimal + tipDecimal,
       // Snapshots inmutables del tender (todos resueltos por el server). Editar
       // el catálogo mañana NO reinterpreta este cobro.
-      tenderTypeId: resolvedTender?.tenderTypeId,
-      tenderRevision: resolvedTender?.tenderRevision,
-      tenderLabel: resolvedTender?.tenderLabel,
-      tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
-      tenderCaptureTip: resolvedTender?.tenderCaptureTip,
+      // Rappi 2b (comisión del canal, Codex r3 #2): sin tender propio, el cobro en efectivo de un pedido de Rappi congela el tipo de
+      // pago «Rappi» y su comisión sobre la venta (sin propina ni terceros), como la ingesta de un pedido pagado en línea. Sigue
+      // siendo efectivo de cajón (`fundsFlow` CASH_DRAWER manda) y la forma SAT sale del método (01), no la del canal.
+      tenderTypeId: tenderDelCanal?.id ?? resolvedTender?.tenderTypeId,
+      tenderRevision: tenderDelCanal?.revision ?? resolvedTender?.tenderRevision,
+      tenderLabel: tenderDelCanal?.name ?? resolvedTender?.tenderLabel,
+      tenderCountsAsCash: tenderDelCanal ? true : resolvedTender?.tenderCountsAsCash,
+      tenderCaptureTip: tenderDelCanal ? true : resolvedTender?.tenderCaptureTip,
+      // La forma SAT sale del «Efectivo» elegido (01) o, sin tender, del método: nunca la del tipo de pago del canal.
       tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
-      tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
-      tenderCommissionAmount: resolvedTender
-        ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
-        : undefined,
+      tenderCommissionPercent: tenderDelCanal ? tenderDelCanal.commissionPercent : resolvedTender?.tenderCommissionPercent,
+      tenderCommissionAmount: tenderDelCanal
+        ? computeTenderCommission(tenderDelCanal.commissionPercent, new Prisma.Decimal(amountDecimal))
+        : resolvedTender
+          ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
+          : undefined,
+      // Rappi 2b (T3): lo cobrado por cuenta de Rappi, en la MISMA transacción que el cobro. Fuera de `amount`/`tipAmount`.
+      thirdPartyCashAmount: repartoAntes && countsAsDrawerCash ? new Prisma.Decimal(tercerosCents / 100) : undefined,
     },
   })
 
@@ -3526,6 +3652,8 @@ export async function registrarAbonoEnTx(
     reabiertaDeCancelada,
     aplicadoCents,
     cambioCents,
+    propinaCents: pesosToCents(tipDecimal),
+    tercerosCents: repartoAntes && countsAsDrawerCash ? tercerosCents : 0,
     areaTicketOrder: areaFinalization.areaTicketOrder,
     areaTicketSessionId: areaFinalization.sessionId,
     tableId: fresh.tableId,
@@ -3543,6 +3671,11 @@ export async function registrarAbonoEnTx(
     loyaltyBase: Math.max(0, newTotal - totalTip),
     tenderResuelto: resolvedTender,
     mesaAjena: mesaAjenaBajoCandado,
+    avisoRappi: rappiCanceladaConDinero
+      ? 'RAPPI_CASH_ON_CANCELLED_ORDER'
+      : repartoAntes && !countsAsDrawerCash
+        ? 'RAPPI_CASH_ORDER_OTHER_MEDIUM'
+        : null,
   }
 }
 
@@ -3577,6 +3710,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       serviceChargeAmount: true,
       total: true,
       remainingBalance: true,
+      // Rappi 2b: ¿es del carril de efectivo con dinero de terceros? (el cambio de un reintento se calcula distinto)
+      thirdPartyCashDue: true,
       venueId: true,
       tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
@@ -3610,9 +3745,19 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // 🔴 `pesosToCents`, no un `* 100` pelón: reconstruir desde el Decimal guardado dejaba ruido de float (`19.99 → 1998.99…`).
       amount: pesosToCents(Number(pago.amount)),
       tipAmount: pesosToCents(Number(pago.tipAmount)),
-      // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. Mismo valor que la primera vez.
-      cashRetainedCents: pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)),
-      changeCents: cambioDeReintento(amount, pago.amount),
+      cashRetainedCents: retenidoDelCobro(pago),
+      ...(order.thirdPartyCashDue != null
+        ? {
+            deliveryCashAllocation: {
+              saleCents: pesosToCents(Number(pago.amount)),
+              tipCents: pesosToCents(Number(pago.tipAmount)),
+              thirdPartyCents: pesosToCents(Number(pago.thirdPartyCashAmount ?? 0)),
+            },
+          }
+        : {}),
+      // Rappi 2b: en el carril el servidor repartió lo recibido (`amount + tip`), así que el cambio es lo recibido menos lo retenido.
+      changeCents:
+        order.thirdPartyCashDue != null ? Math.max(0, amount + tip - retenidoDelCobro(pago)) : cambioDeReintento(amount, pago.amount),
       // El método REAL del pago que ya existe: devolver 'CASH' fijo reportaría como efectivo el reintento de un cobro con tarjeta.
       method: pago.method as CashPaymentResponse['method'],
       status: 'COMPLETED',
@@ -3689,8 +3834,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // la marca viaja en la MISMA escritura que salda la orden.
   const marcarCocina = await debeMarcarCocina(venueId, { orderId })
 
-  // Centavos → pesos para el post-commit. Lo SOLICITADO contra lo registrado se decide en el núcleo (`aplicadoCents`).
-  const tipDecimal = tip / 100
+  // Centavos → pesos para el post-commit. Lo SOLICITADO contra lo registrado se decide en el núcleo (`aplicadoCents`). Rappi 2b (T5b):
+  // tras el commit se reemplaza por la propina DEL PAGO, que el reparto del servidor puede haber cambiado.
+  let tipDecimal = tip / 100
 
   // ══════════════════════════════════════════════════════════════════════════════
   // 🔴 COBRO ATÓMICO — arregla un doble-cobro que YA estaba desplegado.
@@ -3820,8 +3966,21 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // El tender lo resolvió el núcleo; el cajón, los sockets y la respuesta lo leen de este holder, como antes.
   tenderState.resolved = paymentResult.tenderResuelto
   const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance, aplicadoCents, cambioCents, loyaltyBase } = paymentResult
-  // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado.
+  // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado: lo que el núcleo guardó en el pago (Rappi 2b, T5b: el
+  // servidor reparte venta, propina y terceros; para cualquier otra orden son los mismos valores que antes).
   const amountDecimal = aplicadoCents / 100
+  tipDecimal = paymentResult.propinaCents / 100
+  const tercerosDecimal = paymentResult.tercerosCents / 100
+  if (paymentResult.avisoRappi) {
+    avisarDineroDeRappi({
+      action: paymentResult.avisoRappi,
+      orderId,
+      venueId,
+      paymentId: payment.id,
+      staffId: effectiveStaffId ?? null,
+      data: { amount: amountDecimal, tip: tipDecimal, terceros: tercerosDecimal },
+    })
+  }
   if (cambioCents > 0) {
     logger.warn('[ORDER.MOBILE] payCash: el monto excede el saldo; se registra el saldo y el resto es cambio', {
       venueId,
@@ -3922,6 +4081,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         type: 'REGULAR',
         amount: amountDecimal,
         tipAmount: tipDecimal,
+        // Rappi 2b (T4): la entrada «cobrado por cuenta de Rappi», en la misma caja que la venta.
+        thirdPartyCashAmount: tercerosDecimal,
+        orderNumber: order.orderNumber,
         staffId: effectiveStaffId || input.staffId || null,
         orderId,
       })
@@ -4094,10 +4256,18 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     paymentId: payment.id,
     orderId,
     orderNumber: order.orderNumber,
-    amount: aplicadoCents,
-    tipAmount: tip,
-    // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN.
-    cashRetainedCents: aplicadoCents + tip,
+    amount: pesosToCents(amountDecimal),
+    tipAmount: pesosToCents(tipDecimal),
+    cashRetainedCents: pesosToCents(amountDecimal) + pesosToCents(tipDecimal) + pesosToCents(tercerosDecimal),
+    ...(order.thirdPartyCashDue != null
+      ? {
+          deliveryCashAllocation: {
+            saleCents: pesosToCents(amountDecimal),
+            tipCents: pesosToCents(tipDecimal),
+            thirdPartyCents: pesosToCents(tercerosDecimal),
+          },
+        }
+      : {}),
     changeCents: cambioCents,
     method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',
@@ -4255,9 +4425,12 @@ export async function payGiftCardBalanceOnOrder(
       tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
       customer: { select: { id: true, firstName: true, lastName: true } },
+      thirdPartyCashDue: true,
     },
   })
   if (!order) throw new NotFoundError('Order not found')
+  // Rappi 2b (T7): un cobro NUEVO con saldo no cobra un pedido de Rappi en efectivo (antes de buscar o tocar ninguna tarjeta).
+  rechazarAccionDeCobroSobreRappiEnEfectivo(order)
   if (order.areaTicketCheckoutSession) {
     throw new GiftCardError(
       'GIFT_CARD_TENDER_NOT_ALLOWED',
@@ -4332,6 +4505,8 @@ export async function payGiftCardBalanceOnOrder(
           trasCandadoDeOrden: async (txCandado, cuenta) => {
             // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
             rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
+            // Rappi 2b (T7): releído bajo el candado (la lectura de arriba fue sin él).
+            rechazarAccionDeCobroSobreRappiEnEfectivo(cuenta.fresh)
             // Codex #1 (cierre): el candado de la Order serializa escrituras, no el desenlace del banco. Con un cobro de terminal
             // cuyo resultado no está acreditado, el banco todavía puede aprobar ese dinero: descontar el saldo cobraría la venta
             // dos veces. Las salidas de repetición (la llave que ya cobró, la ganadora de una carrera) siguen antes y en el catch.
@@ -4597,7 +4772,10 @@ export async function returnGiftBalanceAndCancelOrder(
       if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
       throw error
     }
-    const cuenta = await tx.order.findUnique({ where: { id: orderId, venueId }, select: { id: true, status: true, paymentStatus: true } })
+    const cuenta = await tx.order.findUnique({
+      where: { id: orderId, venueId },
+      select: { id: true, status: true, paymentStatus: true, source: true, posRawData: true },
+    })
     if (!cuenta) throw new NotFoundError('Order not found')
     /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
     const leerCobros = async () => ({
@@ -4645,6 +4823,7 @@ export async function returnGiftBalanceAndCancelOrder(
       }
       throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
     }
+    rechazarCancelacionLocalDeRappi(cuenta)
     if (cuenta.paymentStatus === 'PAID') {
       throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
     }

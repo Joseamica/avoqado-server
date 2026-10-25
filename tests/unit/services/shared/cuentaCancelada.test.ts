@@ -142,3 +142,14 @@ describe('Founder 3-oct: cobrar una cuenta CANCELADA (el núcleo del servidor)',
     expect(sinLlave.payment.findUnique).not.toHaveBeenCalled()
   })
 })
+
+describe('Rappi 2b (T8, Codex código r1 #3): un pedido de Rappi no se reabre al recibir dinero, por ningún canal', () => {
+  it('cancelada de Rappi que recibe dinero que la cubre ⇒ sigue CANCELLED', () => {
+    expect(estadoParaCobrar({ status: 'CANCELLED', originSystem: 'DELIVERY_PLATFORM', source: 'RAPPI' }, 205, true)).toBe('CANCELLED')
+  })
+  it('control: una cancelada de otra plataforma conserva la regla de hoy (sale de CANCELADA si cubre)', () => {
+    expect(estadoParaCobrar({ status: 'CANCELLED', originSystem: 'DELIVERY_PLATFORM', source: 'UBER_EATS' }, 205, true)).not.toBe(
+      'CANCELLED',
+    )
+  })
+})

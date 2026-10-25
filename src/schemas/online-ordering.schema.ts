@@ -102,6 +102,12 @@ export const rejectSchema = z.object({
   }),
 })
 export const pauseSchema = z.object({ params: venueParams, body: z.object({ minutes: floorPauseMinutes }) })
+/** Rappi 2b: la lista «Rappi · por cobrar» de la bandeja (sin filtros: el servidor la acota). */
+export const deliveryCashSchema = z.object({
+  params: venueParams,
+  // El `nextCursor` de la página anterior (opaco); sin él, la primera página.
+  query: z.object({ cursor: z.string().max(200, 'Cursor inválido').optional() }),
+})
 /** 1b: el «menú en línea» del panel. El cursor es el `id` del último platillo de la página anterior (`nextCursor`). */
 export const menuCategoryId = safeId('Categoría inválida')
 export const menuCursor = safeId('Cursor inválido')

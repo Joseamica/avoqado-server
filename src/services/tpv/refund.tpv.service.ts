@@ -1311,18 +1311,22 @@ export async function recordRefund(
   // dinero YA se devolvió al cliente. Si un fallo al revertir el sello propagara, el
   // reembolso se vería fallido con el dinero fuera — infinitamente peor que un sello
   // de más. La reversión es idempotente, así que se puede reintentar después.
+  //
+  // 🔴 Sin `await` (24-oct, Codex D3-r1 #2): la reversa espera los candados de la venta y del cliente (los puntos de un cobro
+  // en curso pueden retener el de la venta), y la terminal corta la llamada a los 12 s: vería pendiente una devolución ya
+  // registrada. Igual que el POS, el panel y Uber.
   // ═══════════════════════════════════════════════════════════════════════════
-  try {
-    const { reverseStampForOrder } = await import('../wallet/stampLedger.service')
-    await reverseStampForOrder(venueId, postCommitAuthority.orderId)
-  } catch (error) {
-    logger.error('No se pudo revertir el sello de una venta reembolsada', {
-      venueId,
-      orderId: postCommitAuthority.orderId,
-      refundPaymentId: result.id,
-      error: error instanceof Error ? error.message : String(error),
+  const orderIdDelSello = postCommitAuthority.orderId
+  import('../wallet/stampLedger.service')
+    .then(({ reverseStampForOrder }) => reverseStampForOrder(venueId, orderIdDelSello))
+    .catch(error => {
+      logger.error('No se pudo revertir el sello de una venta reembolsada', {
+        venueId,
+        orderId: orderIdDelSello,
+        refundPaymentId: result.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
     })
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 7: Generate digital receipt for refund

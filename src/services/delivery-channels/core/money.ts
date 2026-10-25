@@ -39,6 +39,8 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment, item
     ['externallyPaidTip', p.externallyPaidTip],
     ['cashDueSale', p.cashDueSale],
     ['cashDueTip', p.cashDueTip],
+    ['shippingAsLine', p.shippingAsLine ?? '0.00'],
+    ['thirdPartyCashDue', p.thirdPartyCashDue ?? '0.00'],
   ]
   for (const [nombre, valor] of campos) {
     let d: Prisma.Decimal
@@ -55,15 +57,24 @@ export function assertDeliveryMoneyInvariants(p: NormalizedDeliveryPayment, item
   // que la venta declarada y el dinero recibido dejaran de cuadrar — y como el mapper la
   // aplastaba a cero, el invariante no lo notaba.
   const descuento = q(D(p.discountAmount ?? '0.00'))
-  const ventaTotal = q(D(p.saleAmount).plus(D(p.merchantFees)).minus(descuento))
+  // Rappi 2b: el envío del negocio como renglón es venta (`shippingAsLine`), igual que un cargo del comercio.
+  const envioComoRenglon = q(D(p.shippingAsLine ?? '0.00'))
+  const ventaTotal = q(D(p.saleAmount).plus(envioComoRenglon).plus(D(p.merchantFees)).minus(descuento))
   const ventaSplit = q(D(p.externallyPaidSale).plus(D(p.cashDueSale)))
   if (!ventaTotal.equals(ventaSplit)) {
     throw new DeliveryMoneyMismatchError(
-      `La venta no cuadra: saleAmount + merchantFees − discountAmount = ${ventaTotal.toFixed(2)}, ` +
+      `La venta no cuadra: saleAmount + shippingAsLine + merchantFees − discountAmount = ${ventaTotal.toFixed(2)}, ` +
         `pero externallyPaidSale + cashDueSale = ${ventaSplit.toFixed(2)}.`,
     )
   }
-  if (descuento.greaterThan(q(D(p.saleAmount).plus(D(p.merchantFees))))) {
+  // El dinero de terceros sólo se cobra junto con algo del negocio en efectivo: sin efectivo por cobrar, nadie lo recibe.
+  const terceros = q(D(p.thirdPartyCashDue ?? '0.00'))
+  if (terceros.greaterThan(0) && q(D(p.cashDueSale).plus(D(p.cashDueTip))).isZero()) {
+    throw new DeliveryMoneyMismatchError(
+      `Hay ${terceros.toFixed(2)} por cobrar por cuenta de terceros (thirdPartyCashDue) en un pedido sin efectivo por cobrar.`,
+    )
+  }
+  if (descuento.greaterThan(q(D(p.saleAmount).plus(envioComoRenglon).plus(D(p.merchantFees))))) {
     throw new DeliveryMoneyMismatchError(`El descuento (${descuento.toFixed(2)}) excede la venta: no se ingiere para no invertir el signo.`)
   }
 

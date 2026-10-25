@@ -1,0 +1,89 @@
+{
+  "store": {
+    "name": "«quitado»",
+    "external_id": "900175625",
+    "internal_id": "900175625"
+  },
+  "customer": {
+    "email": "«quitado»",
+    "last_name": "«quitado»",
+    "first_name": "«quitado»",
+    "phone_number": "«quitado»"
+  },
+  "order_detail": {
+    "items": [
+      {
+        "id": "11655956",
+        "sku": "BEBIDAS-002",
+        "name": "Agua Mineral 1L",
+        "type": "product",
+        "price": 20,
+        "comments": "",
+        "quantity": 1,
+        "subitems": [],
+        "toppingId": null,
+        "toppingCategoryId": null,
+        "categoryDescription": null,
+        "percentage_discount": 0,
+        "unit_price_with_discount": 20,
+        "unit_price_without_discount": 20
+      }
+    ],
+    "totals": {
+      "charges": {
+        "shipping": 35
+      },
+      "total_order": 75,
+      "other_totals": {
+        "tip": 20,
+        "total_rappi_pay": 0,
+        "total_rappi_credits": 0
+      },
+      "total_to_pay": 0,
+      "total_products": 20,
+      "total_discounts": 0,
+      "discount_by_support": 0,
+      "total_other_discounts": 0,
+      "total_discount_by_partner": 0,
+      "total_products_with_discount": 20,
+      "total_products_without_discount": 20
+    },
+    "vendors": [],
+    "order_id": "1444309268",
+    "place_at": null,
+    "discounts": [],
+    "created_at": "2026-10-21 22:31:10",
+    "cooking_time": 15,
+    "payment_method": "cc",
+    "delivery_method": "marketplace",
+    "max_cooking_time": 0,
+    "min_cooking_time": 0,
+    "delivery_discount": {
+      "total_value_discount": 0,
+      "total_percentage_discount": 0
+    },
+    "billing_information": null,
+    "delivery_information": {
+      "city": "Bogotá",
+      "meter": "«quitado»",
+      "complement": "«quitado»",
+      "postal_code": "«quitado»",
+      "neighborhood": "«quitado»",
+      "complete_address": "«quitado»",
+      "main_street_prefix": null,
+      "complete_main_street": "«quitado»",
+      "main_street_quadrant": null,
+      "main_street_number_letter": "",
+      "main_street_prefix_letter": null,
+      "main_street_number_or_name": "«quitado»",
+      "complementary_street_letter": "",
+      "complementary_street_number": "«quitado»",
+      "complementary_street_prefix": null,
+      "complementary_street_quadrant": null,
+      "complete_complementary_street": "«quitado»",
+      "complementary_street_prefix_letter": null,
+      "complementary_street_without_meter": "«quitado»"
+    },
+    "delivery_operation_type": "regular"
+  }
+}

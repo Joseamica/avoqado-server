@@ -560,6 +560,37 @@ describe('payCashOrder — saldo autoritativo en la respuesta', () => {
     expect('remainingBalanceCents' in res).toBe(false)
   })
 
+  describe('cashRetainedCents — contrato con Pedidos1c y Rappi2b', () => {
+    it('devuelve sólo el efectivo aplicado y la propina, en centavos enteros', async () => {
+      installFakeStore()
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 6000, tip: 1255, staffId: 'staff-1' })
+
+      expect(res.cashRetainedCents).toBe(7255)
+      // Sólo los pedidos de plataforma en efectivo traen el reparto (Rappi 2b): un cobro normal no.
+      expect(res.deliveryCashAllocation).toBeUndefined()
+      expect(Number.isInteger(res.cashRetainedCents)).toBe(true)
+    })
+
+    it('excluye el cambio del dinero retenido', async () => {
+      installFakeStore()
+      const res = await payCashOrder('venue-1', 'order-1', { amount: 15000, tip: 500, staffId: 'staff-1' })
+
+      expect(res.amount).toBe(10000)
+      expect(res.changeCents).toBe(5000)
+      expect(res.cashRetainedCents).toBe(10500)
+    })
+
+    it('reconstruye el importe original aunque el reintento solicite otro monto', async () => {
+      installFakeStore()
+      const first = await payCashOrder('venue-1', 'order-1', { amount: 1999, tip: 55, staffId: 'staff-1', idempotencyKey: 'k-retained' })
+      const retry = await payCashOrder('venue-1', 'order-1', { amount: 9000, tip: 0, staffId: 'staff-1', idempotencyKey: 'k-retained' })
+
+      expect(first.cashRetainedCents).toBe(2054)
+      expect(retry.cashRetainedCents).toBe(2054)
+      expect(Number.isInteger(retry.cashRetainedCents)).toBe(true)
+    })
+  })
+
   // ── 7b. cashRetainedCents (contrato con Rappi 2b) ────────────────────────────
 
   it('pay response includes cashRetainedCents = recorded amount + tip', async () => {

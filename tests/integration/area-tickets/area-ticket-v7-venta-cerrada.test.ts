@@ -54,7 +54,6 @@ import * as cuentaConValesModule from '@/services/shared/cuentaConVales'
 import { moveOrderToTable } from '@/services/tpv/table.tpv.service'
 import { getOperations, getOverview } from '@/services/dashboard/areaTicket.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
-import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
 import {
   findSesionesDeValesAtoradas,
   markAreaTicketPaymentForReconciliation,
@@ -279,7 +278,9 @@ async function ventaDeValesCerradaPorOtroCanal() {
     method: PaymentMethod.CASH,
     source: PaymentSource.POS,
   })
-  await updatePayment(venueId!, manual.id, { amount: 30 })
+  // El panel corregía el cobro a $30 sin recalcular la venta; desde el 23-oct ya no deja («usa Reembolso»): el estado queda en
+  // datos de antes y se fabrica directo en la base.
+  await prisma.payment.update({ where: { id: manual.id }, data: { amount: 30 } })
   const venta80 = await prisma.order.findUniqueOrThrow({ where: { id: venta.orderId }, select: { paymentStatus: true, status: true } })
   expect(venta80).toEqual({ paymentStatus: 'PAID', status: 'COMPLETED' }) // el panel no recalcula: sigue PAID con $80
   return venta

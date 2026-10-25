@@ -9,8 +9,15 @@
  * nunca con la vieja de 3 campos (eso colisionaría eventos de canales distintos).
  */
 import { DeliveryOrderEventStatus, DeliveryProvider } from '@prisma/client'
+import logger from '@/config/logger'
 import prisma from '../../../../src/utils/prismaClient'
-import { persistDeliveryEvent, markEventResult } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
+import {
+  persistDeliveryEvent,
+  markEventResult,
+  reclamarEvento,
+  renovarReclamo,
+  cerrarEventoReclamado,
+} from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
 
 const baseParams = {
   provider: DeliveryProvider.DELIVERECT,
@@ -134,6 +141,148 @@ describe('deliveryWebhookEvent.service', () => {
       expect(prisma.deliveryOrderEvent.update).toHaveBeenCalledWith({
         where: { id: 'evt1' },
         data: { status: DeliveryOrderEventStatus.FAILED, orderId: undefined, error: 'boom', processedAt: expect.any(Date) },
+      })
+    })
+
+    it('regresión: sigue sin reclamo — Uber lo usa tal cual y no toca claimToken ni lockedUntil', async () => {
+      await markEventResult('evt1', DeliveryOrderEventStatus.PROCESSED, 'order1')
+
+      const { data } = (prisma.deliveryOrderEvent.update as jest.Mock).mock.calls[0][0]
+      expect(data).not.toHaveProperty('claimToken')
+      expect(data).not.toHaveProperty('lockedUntil')
+      expect(prisma.deliveryOrderEvent.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  // ============================================================
+  // El reclamo del evento: dos procesos nunca trabajan el MISMO evento a la vez
+  // ============================================================
+  describe('reclamo del evento', () => {
+    const NOW = new Date('2026-10-21T18:00:00.000Z').getTime()
+    const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
+
+    beforeEach(() => {
+      jest.useFakeTimers({ now: NOW })
+    })
+    afterEach(() => {
+      jest.useRealTimers()
+    })
+
+    describe('reclamarEvento', () => {
+      it('🔴 un solo updateMany condicional: excluye PROCESSED y los reclamos vigentes; escribe un token nuevo y el vencimiento', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        const token = await reclamarEvento('evt1', 45_000)
+
+        expect(prisma.deliveryOrderEvent.updateMany).toHaveBeenCalledTimes(1)
+        const { where, data } = (prisma.deliveryOrderEvent.updateMany as jest.Mock).mock.calls[0][0]
+        expect(where).toEqual({
+          id: 'evt1',
+          status: { not: DeliveryOrderEventStatus.PROCESSED },
+          OR: [{ lockedUntil: null }, { lockedUntil: { lt: new Date(NOW) } }],
+        })
+        expect(data).toEqual({ claimToken: expect.stringMatching(UUID), lockedUntil: new Date(NOW + 45_000) })
+        // Devuelve EXACTAMENTE el token que escribió: con él renueva y cierra.
+        expect(token).toBe(data.claimToken)
+        // Ni lectura previa ni escritura sin condición: la decisión la toma la base en ese único UPDATE.
+        expect(prisma.deliveryOrderEvent.findUnique).not.toHaveBeenCalled()
+        expect(prisma.deliveryOrderEvent.update).not.toHaveBeenCalled()
+      })
+
+      it('si el UPDATE no tocó la fila (otro lo tiene, ya está PROCESSED o no existe) devuelve null', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+        await expect(reclamarEvento('evt1', 45_000)).resolves.toBeNull()
+      })
+
+      it('cada reclamo lleva un token distinto: el de un dueño viejo nunca coincide con el del nuevo', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        const a = await reclamarEvento('evt1', 45_000)
+        const b = await reclamarEvento('evt1', 45_000)
+
+        expect(a).not.toBe(b)
+      })
+    })
+
+    describe('renovarReclamo', () => {
+      it('extiende el vencimiento SÓLO si el token sigue siendo el suyo', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        await expect(renovarReclamo('evt1', 'tok-A', 45_000)).resolves.toBe(true)
+
+        expect(prisma.deliveryOrderEvent.updateMany).toHaveBeenCalledWith({
+          where: { id: 'evt1', claimToken: 'tok-A' },
+          data: { lockedUntil: new Date(NOW + 45_000) },
+        })
+      })
+
+      it('con el token de otro no toca nada y devuelve false: otro lo tomó', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+        await expect(renovarReclamo('evt1', 'tok-viejo', 45_000)).resolves.toBe(false)
+        expect(prisma.deliveryOrderEvent.update).not.toHaveBeenCalled()
+      })
+    })
+
+    describe('cerrarEventoReclamado', () => {
+      it('escribe el resultado como markEventResult y suelta el reclamo, sólo con su token', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        await expect(cerrarEventoReclamado('evt1', 'tok-A', DeliveryOrderEventStatus.PROCESSED, 'order1')).resolves.toBe(true)
+
+        expect(prisma.deliveryOrderEvent.updateMany).toHaveBeenCalledWith({
+          where: { id: 'evt1', claimToken: 'tok-A' },
+          data: {
+            status: DeliveryOrderEventStatus.PROCESSED,
+            orderId: 'order1',
+            error: null,
+            processedAt: new Date(NOW),
+            claimToken: null,
+            lockedUntil: null,
+          },
+        })
+        expect(prisma.deliveryOrderEvent.update).not.toHaveBeenCalled()
+      })
+
+      it('🔴 PROCESSED escribe error: null (con undefined Prisma deja el texto de un intento anterior: PROCESSED con un error viejo)', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        await cerrarEventoReclamado('evt1', 'tok-A', DeliveryOrderEventStatus.PROCESSED)
+
+        const data = (prisma.deliveryOrderEvent.updateMany as jest.Mock).mock.calls[0][0].data
+        expect(data.error).toBeNull()
+        expect('error' in data).toBe(true)
+      })
+
+      it('FAILED con su error, sin orderId', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+
+        await cerrarEventoReclamado('evt1', 'tok-A', DeliveryOrderEventStatus.FAILED, undefined, 'ACCEPT_500: boom')
+
+        expect((prisma.deliveryOrderEvent.updateMany as jest.Mock).mock.calls[0][0].data).toMatchObject({
+          status: DeliveryOrderEventStatus.FAILED,
+          orderId: undefined,
+          error: 'ACCEPT_500: boom',
+          claimToken: null,
+          lockedUntil: null,
+        })
+      })
+
+      it('🔴 con un token ajeno devuelve false, grita 🚨 y NO sobrescribe nada: el cierre de un dueño viejo nunca borra el reclamo del nuevo', async () => {
+        ;(prisma.deliveryOrderEvent.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
+
+        await expect(cerrarEventoReclamado('evt1', 'tok-viejo', DeliveryOrderEventStatus.FAILED, undefined, 'INGEST: x')).resolves.toBe(
+          false,
+        )
+
+        // La única escritura fue la condicionada (que no tocó nada); ninguna escritura de respaldo por id.
+        expect(prisma.deliveryOrderEvent.updateMany).toHaveBeenCalledTimes(1)
+        expect(prisma.deliveryOrderEvent.update).not.toHaveBeenCalled()
+        expect(logger.error).toHaveBeenCalledWith(
+          expect.stringContaining('🚨'),
+          expect.objectContaining({ eventId: 'evt1', status: DeliveryOrderEventStatus.FAILED }),
+        )
       })
     })
   })

@@ -39,6 +39,7 @@ import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryO
 import { markEventResult } from '@/services/delivery-channels/core/deliveryWebhookEvent.service'
 import { processUberEvent } from '@/services/delivery-channels/providers/uber-eats/uber.eventProcessor'
 import { processRappiEvent } from '@/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import * as jobContext from '@/observability/jobContext'
 import { DeliveryWebhookReconciliationJob } from '@/jobs/delivery-webhook-reconciliation.job'
 
 const mockedFindMany = (prisma as any).deliveryOrderEvent.findMany as jest.Mock
@@ -76,6 +77,26 @@ function makeEvent(overrides: Partial<any> = {}) {
     ...overrides,
   }
 }
+
+/** Evalúa el `where` REAL del job sobre una tabla en memoria (sólo los operadores que usa). */
+const cumple = (f: any, w: any): boolean =>
+  Object.entries(w ?? {}).every(([k, v]: [string, any]) => {
+    if (k === 'AND') return v.every((x: any) => cumple(f, x))
+    if (k === 'OR') return v.some((x: any) => cumple(f, x))
+    if (k === 'NOT') return !cumple(f, v)
+    const x = f[k]
+    if (v === null) return x == null
+    if (typeof v !== 'object' || v instanceof Date) return x === v
+    return Object.entries(v).every(([op, arg]: [string, any]) => {
+      const n = (d: any) => (d instanceof Date ? d.getTime() : d)
+      if (op === 'in') return arg.includes(x)
+      if (op === 'notIn') return x != null && !arg.includes(x)
+      if (op === 'gte') return x != null && n(x) >= n(arg)
+      if (op === 'lt') return x != null && n(x) < n(arg)
+      if (op === 'lte') return x != null && n(x) <= n(arg)
+      throw new Error(`operador no soportado en la prueba: ${op}`)
+    })
+  })
 
 describe('DeliveryWebhookReconciliationJob', () => {
   beforeEach(() => {
@@ -194,13 +215,19 @@ describe('DeliveryWebhookReconciliationJob', () => {
       receivedAt: new Date(NOW - 5 * 60_000), // fresh — immediate orphan doesn't wait for the 24h TTL
     })
     mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
+    mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
     ;(logger.error as jest.Mock).mockClear()
 
     const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
     expect(mockedParse).not.toHaveBeenCalled()
     expect(mockedIngest).not.toHaveBeenCalled()
-    expect(mockedMarkEventResult).toHaveBeenCalledWith('evt_orphan_immediate', DeliveryOrderEventStatus.FAILED, undefined, 'ORPHANED')
+    // Tarea 9: un UPDATE condicionado (sigue FAILED/RECEIVED y sin reclamo vigente), no un `update` por id a ciegas.
+    expect(mockedMarkEventResult).not.toHaveBeenCalled()
+    expect(mockedUpdateMany).toHaveBeenCalledWith({
+      where: expect.objectContaining({ id: 'evt_orphan_immediate', status: { in: ['FAILED', 'RECEIVED'] } }),
+      data: { status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED', processedAt: expect.any(Date) },
+    })
     // BetterStack alerts on the '🚨 [Delivery recon] ORPHANED' pattern — the immediate
     // orphan (deleted channel link) must fire the SAME per-event alert as the 24h sweep,
     // otherwise a venue disabling its integration orphans events with zero ops visibility.
@@ -215,6 +242,101 @@ describe('DeliveryWebhookReconciliationJob', () => {
       }),
     )
     expect(result).toEqual({ reprocessed: 0, orphaned: 1 })
+  })
+
+  // Pendiente de la revisión de la Tarea 8, cerrado en la Tarea 9: el ORPHANED inmediato era un `update` por id SIN condición.
+  // Podía regresar a FAILED/ORPHANED un evento que otro proceso acababa de dejar PROCESSED, o dejarlo PROCESSED con
+  // `error = 'ORPHANED'` y un 🚨 falso. Ahora protege lo mismo que el barrido de 24 h, más el reclamo vigente.
+  describe('🔴 el ORPHANED inmediato (sin vínculo) no pisa lo que otro terminó o tiene reclamado', () => {
+    const sinVinculo = (over: Partial<any> = {}) =>
+      makeEvent({
+        id: 'evt_sin_vinculo',
+        provider: 'RAPPI',
+        eventType: 'NEW_ORDER',
+        channelLink: null,
+        channelLinkId: null,
+        receivedAt: new Date(NOW - 5 * 60_000),
+        ...over,
+      })
+    /** La base en memoria: las lecturas Y el UPDATE respetan su `where`. `trasLeer` corre después de leer los carriles. */
+    const tabla = (filas: any[], trasLeer: () => void = () => {}) => {
+      mockedFindMany.mockImplementation(async (args: any) => {
+        const res = filas.filter(f => cumple(f, args.where)).map(f => ({ ...f }))
+        if (!args.select) trasLeer() // los carriles leen con `include`; el barrido de 24 h, con `select`
+        return res.slice(0, args.take ?? res.length)
+      })
+      mockedUpdateMany.mockImplementation(async ({ where, data }: any) => {
+        const tocadas = filas.filter(f => cumple(f, where))
+        tocadas.forEach(f => Object.assign(f, data))
+        return { count: tocadas.length }
+      })
+    }
+    const huerfanos = () =>
+      (logger.error as jest.Mock).mock.calls.filter(([m]) => String(m).includes('🚨 [Delivery recon] ORPHANED delivery event'))
+
+    beforeEach(() => (logger.error as jest.Mock).mockClear())
+
+    it.each([
+      ['PROCESSED (lo terminó la petición viva)', { status: DeliveryOrderEventStatus.PROCESSED, error: null, orderId: 'ord_1' }],
+      ['con un error terminal', { status: DeliveryOrderEventStatus.FAILED, error: 'PEDIDO_YA_NO_ACTIVO' }],
+    ])('si otro lo deja %s entre la lectura y la escritura, se queda así y sin 🚨', async (_caso, despues) => {
+      const fila = sinVinculo()
+      tabla([fila], () => Object.assign(fila, despues))
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(fila).toMatchObject(despues)
+      expect(result.orphaned).toBe(0)
+      expect(huerfanos()).toHaveLength(0)
+    })
+
+    it('con un reclamo VIGENTE no se toca: lo termina su dueño', async () => {
+      const fila = sinVinculo({ claimToken: 'tok-de-otro', lockedUntil: new Date(NOW + 30_000) })
+      tabla([fila])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(fila).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'some previous ingestion error' })
+      expect(result.orphaned).toBe(0)
+      expect(huerfanos()).toHaveLength(0)
+    })
+
+    it('con un reclamo VENCIDO (su dueño murió) sí queda ORPHANED, con su 🚨', async () => {
+      const fila = sinVinculo({ claimToken: 'tok-muerto', lockedUntil: new Date(NOW - 1_000) })
+      tabla([fila])
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(fila).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED' })
+      expect(result.orphaned).toBe(1)
+      expect(huerfanos()).toHaveLength(1)
+    })
+  })
+
+  it.each([
+    ['ACEPTACION_INCIERTA', 'un pedido de Rappi que quedó así no se vuelve a tomar (registrarlo sería a ciegas)'],
+    ['CANCELADO_ANTES_DE_REGISTRAR', 'Rappi ya canceló el pedido antes de registrarlo: reintentarlo lo aceptaría (Tarea 10)'],
+    [
+      'VARIANTE_BLOQUE_2B',
+      'efectivo con repartidor propio o para recoger: lo resuelve el bloque 2b, reintentarlo no cambia nada (Tarea 12)',
+    ],
+    ['VARIANTE_SIN_CALIBRAR', 'una variante sin calibrar no se registra con dinero adivinado (Tarea 12)'],
+  ])('%s es terminal: %s', async error => {
+    const incierto = makeEvent({
+      id: 'evt_incierto',
+      provider: 'RAPPI',
+      eventType: 'NEW_ORDER',
+      channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+      channelLinkId: 'link_rappi',
+      error,
+    })
+    mockedFindMany.mockImplementation(async (args: any) => [incierto].filter(f => cumple(f, args.where)))
+
+    const job = new DeliveryWebhookReconciliationJob()
+    await job.runOnce()
+    await job.reprocesarCarrilRappi()
+
+    expect(mockedProcessRappi).not.toHaveBeenCalled()
   })
 
   it('an event that fails again during reprocessing is left FAILED (no markEventResult write) but its attemptCount/backoff bookkeeping IS updated, so the next pass retries it later', async () => {
@@ -332,13 +454,29 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // own findMany, the 3rd findMany call in the pass: after the two lanes, N-5) — the bulk update is scoped to
     // exactly the fetched batch's ids (see below), not this broader where.
     const orphanFetchWhere = mockedFindMany.mock.calls[2][0].where
-    expect(orphanFetchWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
+    expect(orphanFetchWhere.OR).toEqual([
+      { error: null },
+      {
+        error: {
+          notIn: [
+            'ORPHANED',
+            'PEDIDO_YA_NO_ACTIVO',
+            'CHANNEL_DISABLED',
+            'ACEPTACION_INCIERTA',
+            'CANCELADO_ANTES_DE_REGISTRAR',
+            'VARIANTE_BLOQUE_2B',
+            'VARIANTE_SIN_CALIBRAR',
+          ],
+        },
+      },
+    ])
     expect(orphanFetchWhere.receivedAt.lt).toEqual(new Date(NOW - 24 * 3600_000))
     expect(mockedFindMany.mock.calls[2][0].take).toBe(50)
     // The bulk flip is scoped to EXACTLY the fetched (and logged) batch — never the broader
     // orphanWhere — so a row is never marked ORPHANED without first getting its per-event alert.
+    // R1: and it KEEPS the eligibility predicates, so a row resolved between SELECT and UPDATE isn't flipped back.
     const orphanUpdateWhere = mockedUpdateMany.mock.calls[0][0].where
-    expect(orphanUpdateWhere).toEqual({ id: { in: ['evt_stale'] } })
+    expect(orphanUpdateWhere).toEqual({ ...orphanFetchWhere, id: { in: ['evt_stale'] } })
     expect(mockedUpdateMany.mock.calls[0][0].data).toMatchObject({ status: DeliveryOrderEventStatus.FAILED, error: 'ORPHANED' })
     expect(result.orphaned).toBe(1)
   })
@@ -364,7 +502,9 @@ describe('DeliveryWebhookReconciliationJob', () => {
     // The bulk flip never targets more than what was actually fetched/logged this pass —
     // a backlog bigger than BATCH_SIZE finishes across subsequent 2-minute passes instead
     // of being swept unbounded in one shot.
-    expect(mockedUpdateMany).toHaveBeenCalledWith(expect.objectContaining({ where: { id: { in: batch.map(row => row.id) } } }))
+    expect(mockedUpdateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { ...mockedFindMany.mock.calls[2][0].where, id: { in: batch.map(row => row.id) } } }),
+    )
     expect(result.orphaned).toBe(50)
   })
 
@@ -375,10 +515,19 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     const scanWhere = mockedFindMany.mock.calls[0][0].where
     const nullSafeErrorGuard = scanWhere.AND.find((c: any) => Array.isArray(c.OR) && 'error' in (c.OR[0] ?? {}))
-    expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
+    const terminales = [
+      'ORPHANED',
+      'PEDIDO_YA_NO_ACTIVO',
+      'CHANNEL_DISABLED',
+      'ACEPTACION_INCIERTA',
+      'CANCELADO_ANTES_DE_REGISTRAR',
+      'VARIANTE_BLOQUE_2B',
+      'VARIANTE_SIN_CALIBRAR',
+    ]
+    expect(nullSafeErrorGuard.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
     // markOrphaned's own lookup query is the third findMany call in the pass (after the two lanes, N-5).
     const orphanLookupWhere = mockedFindMany.mock.calls[2][0].where
-    expect(orphanLookupWhere.OR).toEqual([{ error: null }, { error: { notIn: ['ORPHANED', 'PEDIDO_YA_NO_ACTIVO'] } }])
+    expect(orphanLookupWhere.OR).toEqual([{ error: null }, { error: { notIn: terminales } }])
   })
 
   it('scans oldest-first and caps the batch at 50', async () => {
@@ -562,6 +711,7 @@ describe('DeliveryWebhookReconciliationJob', () => {
 
     it('P1-3: cualquier OTRO evento sin vínculo sigue siendo ORPHANED de inmediato', async () => {
       mockedFindMany.mockResolvedValueOnce([eventoUber({ channelLinkId: null, channelLink: null })]).mockResolvedValueOnce([])
+      mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
 
       const result = await new DeliveryWebhookReconciliationJob().runOnce()
 
@@ -633,25 +783,6 @@ describe('DeliveryWebhookReconciliationJob', () => {
     })
 
     describe('N-8: el seguimiento tiene presupuesto garantizado y no caduca sin haber tenido turno', () => {
-      /** Evalúa el `where` REAL del job sobre una tabla en memoria (sólo los operadores que usa). */
-      const cumple = (f: any, w: any): boolean =>
-        Object.entries(w ?? {}).every(([k, v]: [string, any]) => {
-          if (k === 'AND') return v.every((x: any) => cumple(f, x))
-          if (k === 'OR') return v.some((x: any) => cumple(f, x))
-          if (k === 'NOT') return !cumple(f, v)
-          const x = f[k]
-          if (v === null) return x == null
-          if (typeof v !== 'object' || v instanceof Date) return x === v
-          return Object.entries(v).every(([op, arg]: [string, any]) => {
-            const n = (d: any) => (d instanceof Date ? d.getTime() : d)
-            if (op === 'in') return arg.includes(x)
-            if (op === 'notIn') return x != null && !arg.includes(x)
-            if (op === 'gte') return x != null && n(x) >= n(arg)
-            if (op === 'lt') return x != null && n(x) < n(arg)
-            if (op === 'lte') return x != null && n(x) <= n(arg)
-            throw new Error(`operador no soportado en la prueba: ${op}`)
-          })
-        })
       const tabla = (filas: any[]) =>
         mockedFindMany.mockImplementation(async (args: any) =>
           filas
@@ -734,6 +865,522 @@ describe('DeliveryWebhookReconciliationJob', () => {
       expect(mockedParse).not.toHaveBeenCalled()
       expect(result.reprocessed).toBe(1)
     })
+
+    const rappiSinVinculo = (eventType: string) =>
+      makeEvent({
+        id: 'evt_rappi',
+        provider: 'RAPPI',
+        eventType,
+        channelLinkId: null,
+        channelLink: null,
+        payload: { batchId: 'b-1', results: [] },
+      })
+
+    it('🔴 R9: un STORE_PROVISIONING_STATUS SIN vínculo va al procesador — su cuerpo nunca trae tienda, no es huérfano', async () => {
+      // Si se tirara como ORPHANED, un aviso que falló una vez ya nunca confirmaría sus tiendas. Lo toma SU carril
+      // (la pasada de pedidos ya no lo selecciona, ver N1).
+      mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('STORE_PROVISIONING_STATUS')])
+      mockedProcessRappi.mockResolvedValueOnce({ outcome: 'STORE_STATE' })
+
+      expect(await new DeliveryWebhookReconciliationJob().reprocesarAprovisionamientos()).toBe(1)
+
+      const carril = mockedFindMany.mock.calls[0][0].where.AND.find((c: any) => c.eventType)
+      expect(carril.eventType).toEqual({ in: ['STORE_PROVISIONING_STATUS'] })
+      expect(mockedProcessRappi).toHaveBeenCalledWith('evt_rappi')
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+    })
+
+    // R1: con los carriles separados, el barrido de 24 h de la pasada de pedidos podía tomar un aviso que el carril de
+    // aprovisionamiento seguía procesando, y su UPDATE (sólo por id) devolvía a FAILED/ORPHANED uno ya PROCESSED.
+    describe('R1: el barrido de 24 h de los avisos de aprovisionamiento', () => {
+      const viejo = () => ({
+        ...rappiSinVinculo('STORE_PROVISIONING_STATUS'),
+        id: 'evt_aprov_viejo',
+        status: DeliveryOrderEventStatus.FAILED,
+        error: 'PROVISIONING_SUBSCRIBE_FAILED',
+        attemptCount: 3,
+        receivedAt: new Date(NOW - 25 * 3600_000),
+        nextAttemptAt: new Date(NOW + 30 * 60_000), // en backoff: el carril no lo reprocesa en esta vuelta
+      })
+      /** La base en memoria: las lecturas Y el UPDATE del barrido respetan su `where`. */
+      const tablaViva = (filas: any[], alLeerElBarrido: () => void = () => {}) => {
+        mockedFindMany.mockImplementation(async (args: any) => {
+          const res = filas.filter(f => cumple(f, args.where)).map(f => ({ ...f }))
+          if (args.select) alLeerElBarrido() // el SELECT del barrido ya salió; su UPDATE todavía no
+          return res.slice(0, args.take ?? res.length)
+        })
+        mockedUpdateMany.mockImplementation(async ({ where, data }: any) => {
+          const tocadas = filas.filter(f => cumple(f, where))
+          tocadas.forEach(f => Object.assign(f, data))
+          return { count: tocadas.length }
+        })
+      }
+
+      it('la pasada de pedidos NO lo selecciona; lo barre su propio carril, al terminar su vuelta', async () => {
+        const aviso = viejo()
+        tablaViva([aviso])
+        const job = new DeliveryWebhookReconciliationJob()
+
+        await job.runOnce()
+        expect(aviso).toMatchObject({ status: 'FAILED', error: 'PROVISIONING_SUBSCRIBE_FAILED' })
+        const barridoDePedidos = mockedFindMany.mock.calls.find(c => c[0].select)![0].where
+        expect(barridoDePedidos.eventType).toEqual({ notIn: ['STORE_PROVISIONING_STATUS'] })
+
+        await job.reprocesarAprovisionamientos()
+        expect(aviso).toMatchObject({ status: 'FAILED', error: 'ORPHANED' })
+      })
+
+      it('🔴 si el procesador lo deja PROCESSED entre el SELECT y el UPDATE del barrido, se queda PROCESSED', async () => {
+        const aviso = viejo()
+        tablaViva([aviso], () => Object.assign(aviso, { status: DeliveryOrderEventStatus.PROCESSED, error: null }))
+
+        await new DeliveryWebhookReconciliationJob().reprocesarAprovisionamientos()
+
+        expect(aviso).toMatchObject({ status: 'PROCESSED', error: null })
+      })
+    })
+
+    // N1: confirmar un lote suscribe cada tienda a sus webhooks (hasta 20 × 10 PUT: minutos). Dentro de la pasada de
+    // pedidos, su `enCurso` saltaba los ticks siguientes y un pedido que falló DESPUÉS vencía antes de recuperarse.
+    it('🔴 con la suscripción de un aviso colgada, el SIGUIENTE tick procesa el pedido que falló después', async () => {
+      const job = new DeliveryWebhookReconciliationJob()
+      const tick = () => (job as unknown as { tick(): Promise<void> }).tick()
+      const vaciar = async () => {
+        for (let k = 0; k < 5; k++) await new Promise(r => setImmediate(r))
+      }
+      const aviso = { ...rappiSinVinculo('STORE_PROVISIONING_STATUS'), id: 'evt_aprov', receivedAt: new Date(NOW - 60 * 60_000) }
+      const pedido = makeEvent({
+        id: 'evt_pedido',
+        provider: 'RAPPI',
+        eventType: 'NEW_ORDER',
+        channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+        channelLinkId: 'link_rappi',
+        receivedAt: new Date(NOW - 60_000),
+      })
+      const tabla: any[] = [aviso]
+      mockedFindMany.mockImplementation(async (args: any) => {
+        if (args.where?.receivedAt?.lt) return [] // barrido de 24 h
+        const carril = (args.where?.AND ?? []).find((c: any) => c.eventType)?.eventType
+        return tabla.filter(f => (carril.in ? carril.in.includes(f.eventType) : !carril.notIn.includes(f.eventType)))
+      })
+      let soltar!: (r: unknown) => void
+      mockedProcessRappi.mockImplementation((id: string) =>
+        id === 'evt_aprov' ? new Promise(r => (soltar = r)) : Promise.resolve({ outcome: 'PROCESSED', orderId: 'ord_r' }),
+      )
+
+      // El tick devuelve la promesa de sus carriles: el registro de jobs en vuelo lo ve mientras el aviso cuelga.
+      let primerTickTermino = false
+      void tick().then(() => (primerTickTermino = true))
+      await vaciar()
+      expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_aprov']) // la suscripción sigue colgada
+
+      tabla.push(pedido) // el pedido falla DESPUÉS de esa pasada
+      void tick()
+      await vaciar()
+      // El pedido ya se procesó con el aviso todavía colgado, y el aviso no se volvió a tomar (su propio candado).
+      expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_aprov', 'evt_pedido'])
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+      expect(primerTickTermino).toBe(false)
+
+      soltar({ outcome: 'STORE_STATE' })
+      await vaciar()
+      expect(primerTickTermino).toBe(true)
+      mockedProcessRappi.mockResolvedValue({ outcome: 'STORE_STATE' })
+      expect(await job.reprocesarAprovisionamientos()).toBe(1) // suelto el candado, el carril vuelve a correr
+    })
+
+    it('cualquier OTRO evento de Rappi sin vínculo sigue siendo ORPHANED de inmediato', async () => {
+      mockedFindMany.mockResolvedValueOnce([rappiSinVinculo('NEW_ORDER')]).mockResolvedValueOnce([])
+      mockedUpdateMany.mockResolvedValueOnce({ count: 1 })
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(mockedProcessRappi).not.toHaveBeenCalled()
+      expect(result.orphaned).toBe(1)
+    })
+
+    // ── Tarea 8: el reclamo del evento y el carril propio de Rappi (≤ 90 s) ─────────────────
+    it('🔴 IN_FLIGHT (otro proceso lo tiene reclamado) no cuenta como intento ni programa espera', async () => {
+      const event = makeEvent({
+        id: 'evt_rappi',
+        provider: 'RAPPI',
+        eventType: 'NEW_ORDER',
+        channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+        channelLinkId: 'link_rappi',
+      })
+      mockedFindMany.mockResolvedValueOnce([event]).mockResolvedValueOnce([])
+      mockedProcessRappi.mockResolvedValueOnce({ outcome: 'IN_FLIGHT' })
+      const errores = jest.spyOn(logger, 'error')
+
+      const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+      expect(result).toEqual({ reprocessed: 0, orphaned: 0 })
+      expect(mockedUpdate).not.toHaveBeenCalled() // ni attemptCount ni nextAttemptAt
+      expect(mockedMarkEventResult).not.toHaveBeenCalled()
+      expect(errores.mock.calls.some(([m]) => String(m).includes('Failed to reprocess'))).toBe(false)
+    })
+
+    // Tarea 10: la cancelación que llegó antes de que existiera la venta, con su NEW_ORDER todavía por registrarse.
+    describe('CANCELACION_EN_ESPERA (Tarea 10)', () => {
+      const enEspera = (over: Partial<any> = {}) =>
+        makeEvent({
+          id: 'evt_cancel',
+          provider: 'RAPPI',
+          eventType: 'ORDER_EVENT_CANCEL',
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          error: 'CANCELACION_EN_ESPERA',
+          ...over,
+        })
+
+      it('🔴 NO es terminal: la pasada la vuelve a tomar', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [enEspera()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'CANCELLED', orderId: 'ord_rappi' })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_cancel')
+        expect(result.reprocessed).toBe(1)
+      })
+
+      it('🔴 se reintenta con la espera normal (2 min la primera vez), sin POISON, y es una espera (warn), no una falla', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [enEspera()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'CANCELACION_EN_ESPERA' })
+        const errores = jest.spyOn(logger, 'error')
+        const avisos = jest.spyOn(logger, 'warn')
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(result.reprocessed).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_cancel' },
+          data: { attemptCount: 1, nextAttemptAt: new Date(NOW + 2 * 60_000) },
+        })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(false)
+        expect(errores.mock.calls.some(([m]) => String(m).includes('Failed to reprocess event'))).toBe(false)
+        expect(avisos).toHaveBeenCalledWith(
+          expect.stringContaining('cancelación espera'),
+          expect.objectContaining({ eventId: 'evt_cancel', attemptCount: 1 }),
+        )
+      })
+
+      it('con su presupuesto agotado sí se vuelve POISON, como cualquier otro (no espera para siempre)', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [enEspera({ attemptCount: 9 })].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'CANCELACION_EN_ESPERA' })
+        const errores = jest.spyOn(logger, 'error')
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedUpdate).toHaveBeenCalledWith({ where: { id: 'evt_cancel' }, data: { attemptCount: 10, nextAttemptAt: null } })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(true)
+      })
+    })
+
+    // Tarea 11: el pedido de Rappi se aceptó y se registró, pero su comanda no nació. No es terminal: se reintenta con la
+    // espera normal y el reintento la repone (sin volver a aceptar: está la marca). Es una falla de verdad, no una espera.
+    describe('COMANDA_NO_CREADA (Tarea 11)', () => {
+      const sinComanda = (over: Partial<any> = {}) =>
+        makeEvent({
+          id: 'evt_sin_comanda',
+          provider: 'RAPPI',
+          eventType: 'NEW_ORDER',
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          error: 'COMANDA_NO_CREADA',
+          ...over,
+        })
+
+      it('🔴 NO es terminal: la pasada la vuelve a tomar y, con la comanda repuesta, queda resuelta', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinComanda()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'PROCESSED', orderId: 'ord_rappi', accepted: true })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_sin_comanda')
+        expect(result.reprocessed).toBe(1)
+      })
+
+      it('🔴 si vuelve a fallar se reintenta con la espera normal (2 min la primera vez), como falla (error) y sin POISON', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinComanda()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', orderId: 'ord_rappi', accepted: true, error: 'COMANDA_NO_CREADA' })
+        const errores = jest.spyOn(logger, 'error')
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(result.reprocessed).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_sin_comanda' },
+          data: { attemptCount: 1, nextAttemptAt: new Date(NOW + 2 * 60_000) },
+        })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(false)
+        expect(errores).toHaveBeenCalledWith(
+          expect.stringContaining('Failed to reprocess event'),
+          expect.objectContaining({ eventId: 'evt_sin_comanda', attemptCount: 1, error: 'COMANDA_NO_CREADA' }),
+        )
+      })
+    })
+
+    // Codex b1 #2: el historial de Rappi no se pudo leer (timeout, 5xx, cuerpo ilegible) tras un 400 al aceptar. No es
+    // terminal: el pedido pudo quedar aceptado. Se reintenta con la espera normal; si el historial no vuelve nunca, el
+    // presupuesto del job se agota y queda POISON con su 🚨 (nunca se registra a ciegas ni se reintenta para siempre).
+    describe('HISTORIAL_NO_LEIDO (Codex b1 #2)', () => {
+      const sinHistorial = (over: Partial<any> = {}) =>
+        makeEvent({
+          id: 'evt_sin_historial',
+          provider: 'RAPPI',
+          eventType: 'NEW_ORDER',
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          error: 'HISTORIAL_NO_LEIDO',
+          ...over,
+        })
+
+      it('🔴 NO es terminal: la pasada la vuelve a tomar y, con el historial de vuelta, queda resuelta', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'PROCESSED', orderId: 'ord_rappi', accepted: true })
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_sin_historial')
+        expect(result.reprocessed).toBe(1)
+      })
+
+      it('si el historial sigue caído se reintenta con la espera normal (2 min la primera vez), sin POISON', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial()].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+        const errores = jest.spyOn(logger, 'error')
+
+        const result = await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(result.reprocessed).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_sin_historial' },
+          data: { attemptCount: 1, nextAttemptAt: new Date(NOW + 2 * 60_000) },
+        })
+        expect(errores.mock.calls.some(([m]) => String(m).includes('POISON'))).toBe(false)
+      })
+
+      it('🔴 con el historial caído para siempre, el décimo intento lo deja POISON con 🚨 y ya no se vuelve a tomar', async () => {
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial({ attemptCount: 9 })].filter(f => cumple(f, args.where)))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'HISTORIAL_NO_LEIDO' })
+        const errores = jest.spyOn(logger, 'error')
+
+        await new DeliveryWebhookReconciliationJob().runOnce()
+
+        expect(mockedUpdate).toHaveBeenCalledWith({ where: { id: 'evt_sin_historial' }, data: { attemptCount: 10, nextAttemptAt: null } })
+        expect(errores).toHaveBeenCalledWith(
+          expect.stringContaining('🚨 [Delivery recon] POISON'),
+          expect.objectContaining({ eventId: 'evt_sin_historial', attemptCount: 10 }),
+        )
+
+        // Con el tope alcanzado, ni la pasada general ni el carril de Rappi lo vuelven a tomar.
+        mockedProcessRappi.mockClear()
+        mockedFindMany.mockImplementation(async (args: any) => [sinHistorial({ attemptCount: 10 })].filter(f => cumple(f, args.where)))
+        const job = new DeliveryWebhookReconciliationJob()
+        await job.runOnce()
+        await job.reprocesarCarrilRappi()
+        expect(mockedProcessRappi).not.toHaveBeenCalled()
+      })
+
+      it('el presupuesto: ~5 h de reintentos (2+4+8+16+32+60×4 min) antes de rendirse', () => {
+        const job = new DeliveryWebhookReconciliationJob() as unknown as { backoffMs(n: number): number; MAX_ATTEMPTS: number }
+        let esperaMs = 0
+        for (let n = 1; n < job.MAX_ATTEMPTS; n++) esperaMs += job.backoffMs(n)
+        expect(esperaMs).toBe(302 * 60_000)
+      })
+    })
+
+    describe('carril propio de Rappi (cada 30 s)', () => {
+      const evRappi = (id: string, over: Partial<any> = {}) =>
+        makeEvent({
+          id,
+          provider: 'RAPPI',
+          eventType: 'NEW_ORDER',
+          status: DeliveryOrderEventStatus.RECEIVED,
+          error: null,
+          channelLink: { ...activeLink, id: 'link_rappi', provider: 'RAPPI' },
+          channelLinkId: 'link_rappi',
+          receivedAt: new Date(NOW - 50_000),
+          ...over,
+        })
+      /** Una tabla en memoria que respeta el `where` REAL del carril y su `take`. */
+      const tabla = (filas: any[]) =>
+        mockedFindMany.mockImplementation(async (args: any) => filas.filter(f => cumple(f, args.where)).slice(0, args.take ?? filas.length))
+      const vaciar = async () => {
+        for (let k = 0; k < 10; k++) await new Promise(r => setImmediate(r))
+      }
+
+      it('corre cada 30 s en :15 y :45 (nunca en :00), con 45 s de antigüedad mínima, 10 por vuelta y 5 a la vez', () => {
+        const job = new DeliveryWebhookReconciliationJob() as any
+        expect(job.RAPPI_CRON).toBe('15,45 * * * * *')
+        expect(job.RAPPI_RECEIVED_MIN_AGE_MS).toBe(45_000)
+        expect(job.RAPPI_POR_VUELTA).toBe(10)
+        expect(job.RAPPI_EN_PARALELO).toBe(5)
+      })
+
+      it('start() registra el carril con su propio cron y nombre; stop() lo detiene junto con la pasada general', () => {
+        const falsos: Array<{ start: jest.Mock; stop: jest.Mock }> = []
+        const programar = jest.spyOn(jobContext, 'scheduleJob').mockImplementation((() => {
+          const f = { start: jest.fn(), stop: jest.fn() }
+          falsos.push(f)
+          return f
+        }) as any)
+        const job = new DeliveryWebhookReconciliationJob()
+
+        job.start()
+        job.start() // idempotente: no registra dos veces
+
+        expect(programar.mock.calls.map(c => [c[0], c[1]])).toEqual([
+          ['delivery-webhook-reconciliation', '45 */2 * * * *'],
+          ['delivery-webhook-reconciliation-rappi', '15,45 * * * * *'],
+        ])
+        expect(falsos.every(f => f.start.mock.calls.length === 1)).toBe(true)
+
+        job.stop()
+        job.stop()
+        expect(falsos.every(f => f.stop.mock.calls.length === 1)).toBe(true)
+      })
+
+      it('🔴 toma un evento de Rappi en RECEIVED con 50 s y nunca uno de Uber ni un STORE_PROVISIONING_STATUS', async () => {
+        tabla([
+          evRappi('evt_rappi_50s'),
+          evRappi('evt_uber_50s', { provider: 'UBER_EATS', eventType: 'orders.notification' }),
+          evRappi('evt_aprov_50s', { eventType: 'STORE_PROVISIONING_STATUS', channelLink: null, channelLinkId: null }),
+          evRappi('evt_rappi_30s', { receivedAt: new Date(NOW - 30_000) }), // todavía puede estar en su petición viva
+          evRappi('evt_rappi_failed', { status: DeliveryOrderEventStatus.FAILED, error: 'ACCEPT_500' }), // lo lleva la pasada general
+          evRappi('evt_rappi_25h', { receivedAt: new Date(NOW - 25 * 3600_000) }), // ya es del barrido de 24 h
+          evRappi('evt_rappi_procesado', { status: DeliveryOrderEventStatus.PROCESSED }),
+        ])
+        mockedProcessRappi.mockResolvedValue({ outcome: 'PROCESSED', orderId: 'ord_r' })
+
+        const resueltos = await new DeliveryWebhookReconciliationJob().reprocesarCarrilRappi()
+
+        expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_rappi_50s'])
+        expect(mockedProcessUber).not.toHaveBeenCalled()
+        expect(resueltos).toBe(1)
+        const args = mockedFindMany.mock.calls[0][0]
+        expect(args.take).toBe(10)
+        // La lectura de entrada va con el reintento de conexión (regla de los crons).
+        expect(mockedRetry).toHaveBeenCalledWith(
+          expect.any(Function),
+          expect.objectContaining({ shouldRetry: shouldRetryDbConnectionError }),
+        )
+      })
+
+      it('lee sólo lo que necesita y por antigüedad: tope 10 aunque haya más', async () => {
+        tabla(Array.from({ length: 14 }, (_, i) => evRappi(`evt_${i}`, { receivedAt: new Date(NOW - 60_000 - i * 1000) })))
+        mockedProcessRappi.mockResolvedValue({ outcome: 'PROCESSED', orderId: 'ord_r' })
+
+        expect(await new DeliveryWebhookReconciliationJob().reprocesarCarrilRappi()).toBe(10)
+        expect(mockedFindMany.mock.calls[0][0].orderBy).toEqual([{ receivedAt: 'asc' }, { id: 'asc' }])
+      })
+
+      it('🔴 con 6 eventos, el sexto empieza en cuanto termina el primero de los cinco, sin esperar al grupo', async () => {
+        tabla(Array.from({ length: 6 }, (_, i) => evRappi(`evt_${i + 1}`, { receivedAt: new Date(NOW - 60_000 + i * 1000) })))
+        const soltar: Record<string, (r: unknown) => void> = {}
+        mockedProcessRappi.mockImplementation((id: string) => new Promise(r => (soltar[id] = r)))
+
+        const vuelta = new DeliveryWebhookReconciliationJob().reprocesarCarrilRappi()
+        await vaciar()
+        expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_1', 'evt_2', 'evt_3', 'evt_4', 'evt_5'])
+
+        soltar.evt_1({ outcome: 'PROCESSED', orderId: 'o1' })
+        await vaciar()
+        // Entró el sexto con los otros cuatro todavía en vuelo.
+        expect(mockedProcessRappi.mock.calls.map(c => c[0])).toEqual(['evt_1', 'evt_2', 'evt_3', 'evt_4', 'evt_5', 'evt_6'])
+
+        for (const id of ['evt_2', 'evt_3', 'evt_4', 'evt_5', 'evt_6']) soltar[id]({ outcome: 'PROCESSED', orderId: id })
+        await expect(vuelta).resolves.toBe(6)
+      })
+
+      it('IN_FLIGHT en el carril tampoco cuenta como intento ni programa espera', async () => {
+        tabla([evRappi('evt_rappi_50s')])
+        mockedProcessRappi.mockResolvedValue({ outcome: 'IN_FLIGHT' })
+
+        expect(await new DeliveryWebhookReconciliationJob().reprocesarCarrilRappi()).toBe(0)
+        expect(mockedUpdate).not.toHaveBeenCalled()
+      })
+
+      it('un FAILED en el carril sí agenda su espera, igual que en la pasada general', async () => {
+        tabla([evRappi('evt_rappi_50s')])
+        mockedProcessRappi.mockResolvedValue({ outcome: 'FAILED', error: 'ACCEPT_500' })
+
+        expect(await new DeliveryWebhookReconciliationJob().reprocesarCarrilRappi()).toBe(0)
+        expect(mockedUpdate).toHaveBeenCalledWith({
+          where: { id: 'evt_rappi_50s' },
+          data: { attemptCount: 1, nextAttemptAt: expect.any(Date) },
+        })
+      })
+
+      it('un evento sin vínculo va al procesador (que lo cierra bajo su reclamo), nunca a un ORPHANED sin reclamo', async () => {
+        tabla([evRappi('evt_sin_vinculo', { channelLink: null, channelLinkId: null })])
+        mockedProcessRappi.mockResolvedValue({ outcome: 'ORPHANED' })
+
+        await new DeliveryWebhookReconciliationJob().reprocesarCarrilRappi()
+
+        expect(mockedProcessRappi).toHaveBeenCalledWith('evt_sin_vinculo')
+        expect(mockedMarkEventResult).not.toHaveBeenCalled()
+      })
+
+      it('una vuelta a la vez (su propio candado), y el candado se suelta aunque la vuelta truene', async () => {
+        const job = new DeliveryWebhookReconciliationJob()
+        let soltar!: (r: unknown) => void
+        mockedFindMany.mockImplementationOnce(() => new Promise(r => (soltar = r)))
+
+        const primera = job.reprocesarCarrilRappi()
+        expect(await job.reprocesarCarrilRappi()).toBe(0) // la segunda no entra
+        expect(mockedFindMany).toHaveBeenCalledTimes(1)
+        soltar([])
+        await expect(primera).resolves.toBe(0)
+
+        mockedFindMany.mockRejectedValueOnce(new Error('la base se cayó'))
+        await expect(job.reprocesarCarrilRappi()).resolves.toBe(0) // truena por dentro, no lanza
+        mockedFindMany.mockResolvedValueOnce([])
+        await job.reprocesarCarrilRappi()
+        expect(mockedFindMany).toHaveBeenCalledTimes(3) // y la siguiente sí corre
+      })
+
+      it('la pasada general no cambia: el tick de 2 min corre pedidos y aprovisionamiento, nunca el carril de Rappi', async () => {
+        const job = new DeliveryWebhookReconciliationJob()
+        const carrilRappi = jest.spyOn(job, 'reprocesarCarrilRappi')
+
+        await (job as unknown as { tick(): Promise<void> }).tick()
+
+        expect(carrilRappi).not.toHaveBeenCalled()
+        // Su lectura urgente conserva los 10 min para RECEIVED y no se restringe a un proveedor.
+        const urgente = mockedFindMany.mock.calls[0][0].where
+        const statusOr = urgente.AND.find((c: any) => Array.isArray(c.OR) && c.OR[0].status).OR
+        expect(statusOr.find((c: any) => c.status === DeliveryOrderEventStatus.RECEIVED).receivedAt.lt).toEqual(new Date(NOW - 10 * 60_000))
+        expect(urgente.AND.find((c: any) => c.provider !== undefined).provider.in.sort()).toEqual(['DELIVERECT', 'RAPPI', 'UBER_EATS'])
+      })
+    })
+  })
+})
+
+describe('los carriles del tick nunca fallan en silencio', () => {
+  it('si un carril rechaza, se registra con logger.error y el nombre del carril (antes `allSettled` se lo tragaba)', async () => {
+    const job = new DeliveryWebhookReconciliationJob()
+    jest.spyOn(job, 'runOnce').mockRejectedValueOnce(new Error('se cayó la pasada'))
+    jest.spyOn(job, 'reprocesarAprovisionamientos').mockResolvedValueOnce(0)
+    const errores = jest.spyOn(logger, 'error')
+
+    await expect((job as unknown as { tick(): Promise<void> }).tick()).resolves.toBeUndefined()
+
+    expect(errores).toHaveBeenCalledWith(
+      expect.stringContaining('carril'),
+      expect.objectContaining({ carril: 'pedidos', error: 'se cayó la pasada' }),
+    )
+    expect(errores.mock.calls.some(c => (c as unknown[])[1] && ((c as unknown[])[1] as any).carril === 'aprovisionamiento')).toBe(false)
+  })
+
+  it('lo mismo con el tick del carril de Rappi', async () => {
+    const job = new DeliveryWebhookReconciliationJob()
+    jest.spyOn(job, 'reprocesarCarrilRappi').mockRejectedValueOnce(new Error('se cayó el carril'))
+    const errores = jest.spyOn(logger, 'error')
+
+    await expect((job as unknown as { tickRappi(): Promise<void> }).tickRappi()).resolves.toBeUndefined()
+
+    expect(errores).toHaveBeenCalledWith(expect.stringContaining('carril'), expect.objectContaining({ carril: 'rappi' }))
   })
 })
 

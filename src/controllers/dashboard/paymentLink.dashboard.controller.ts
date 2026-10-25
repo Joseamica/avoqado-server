@@ -131,7 +131,7 @@ export async function updatePaymentLink(req: Request, res: Response) {
   try {
     const { venueId, linkId } = req.params
 
-    const paymentLink = await paymentLinkService.updatePaymentLink(venueId, linkId, req.body)
+    const paymentLink = await paymentLinkService.updatePaymentLink(venueId, linkId, req.body, req.authContext?.userId)
 
     res.json({
       success: true,

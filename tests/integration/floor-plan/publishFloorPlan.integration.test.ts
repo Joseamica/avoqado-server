@@ -165,7 +165,10 @@ describe('publishFloorPlan', () => {
       await prisma.floorPlanPublication.count({ where: { venueId } }),
       await prisma.activityLog.count({ where: { venueId, action: 'FLOOR_PLAN_PUBLISHED' } }),
     ]
+    // logAction es fire-and-forget: la bitácora de la publicación del setup puede llegar DESPUÉS de medir (CI, 23-oct).
+    for (let i = 0; i < 100 && (await contar())[1] === 0; i++) await new Promise(r => setTimeout(r, 50))
     const antes = await contar()
+    expect(antes).toEqual([1, 1])
     const broadcast = jest.fn()
     jest.spyOn(socketManager, 'getBroadcastingService').mockReturnValue({ broadcastToVenue: broadcast } as never)
     const saveId = randomUUID()

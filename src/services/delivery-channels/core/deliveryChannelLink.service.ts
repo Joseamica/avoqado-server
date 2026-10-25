@@ -25,7 +25,8 @@ import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
 import { calcularTasaInyeccion } from './injectionRate.service'
-import { menuSyncStatusOf } from './menuSync.service'
+import { configComoObjeto, LLAVES_DEL_SISTEMA } from './llavesDelSistema'
+import { menuSyncStatusOf, revisionDeMenuOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
 /** Select explícito — NUNCA incluye `webhookSecret`. Usado por list/create/update. */
@@ -60,10 +61,12 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
     orderBy: { createdAt: 'desc' },
   })) as unknown as Array<DeliveryChannelLinkSafe & { autoSyncMenu: boolean; lastMenuHash: string | null; provider: DeliveryProvider }>
 
-  // 🔴 Dos cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
+  // 🔴 Tres cosas que el dueño necesita VER y que hasta hoy sólo existían en el log o en la
   // base:
   //   · `menuSyncStatus` — un menú que nunca se logró publicar deja al proveedor vendiendo
   //     otra carta, o ninguna, y nadie se entera hasta que un cliente se queja.
+  //   · `menuRevision` — si el menú está en revisión del proveedor, desde cuándo, si ya pasó el
+  //     plazo sin veredicto, cuándo lo rechazó y por qué. Antes sólo se leía en el log.
   //   · `injectionRate` — es el número con el que el proveedor decide REVOCAR el acceso
   //     (Uber: exige 99.9%, revoca bajo 99%). Era invisible: se podía estar cayendo semanas.
   //
@@ -75,12 +78,28 @@ export async function listChannelLinks(venueId: string): Promise<DeliveryChannel
       return {
         ...resto,
         menuSyncStatus: menuSyncStatusOf(l),
+        // La revisión del menú (pendiente, último rechazo, problemas), sacada de `config`, que este mismo select ya trae: ni una
+        // consulta más por canal. Aditivo: el `config` crudo sigue saliendo como siempre, y esto sin huellas.
+        menuRevision: revisionDeMenuOf(l.config),
         // La huella misma no se expone: fuera del sincronizador no le sirve a nadie y sólo
         // invita a que alguien la use como si significara algo.
         injectionRate: await calcularTasaInyeccion({ venueId, provider: l.provider }).catch(() => null),
       }
     }),
   ) as unknown as DeliveryChannelLinkSafe[]
+}
+
+/**
+ * 🔴 Un proveedor que declara `soloAceptacionAutomatica` en su adaptador NO admite el modo manual: un
+ * `ValidationError` con la RAZÓN que el propio adaptador trae. El núcleo no sabe qué proveedor es ni por
+ * qué: lee la propiedad del contrato (nunca compara contra un nombre; lo vigila el guardrail de
+ * `adapterRegistry.test.ts`). Sin modo pedido, o en AUTO, no hay nada que rechazar.
+ */
+function exigirAceptacionPermitida(provider: DeliveryProvider, modo: OrderAcceptanceMode | undefined): void {
+  if (modo === undefined || modo === OrderAcceptanceMode.AUTO) return
+  if (!hasAdapter(provider)) return
+  const razon = adapterFor(provider).soloAceptacionAutomatica
+  if (razon) throw new ValidationError(razon)
 }
 
 export interface CreateChannelLinkInput {
@@ -102,6 +121,8 @@ export async function createChannelLink(
   data: CreateChannelLinkInput,
   performedBy?: string,
 ): Promise<DeliveryChannelLinkSafe> {
+  exigirAceptacionPermitida(data.provider, data.orderAcceptanceMode)
+
   const webhookSecret = crypto.randomBytes(32).toString('hex')
 
   let link: DeliveryChannelLinkSafe
@@ -116,7 +137,8 @@ export async function createChannelLink(
         orderAcceptanceMode: data.orderAcceptanceMode ?? OrderAcceptanceMode.AUTO,
         status: DeliveryChannelStatus.PENDING,
         autoSyncMenu: data.autoSyncMenu ?? true,
-        config: data.config ?? undefined,
+        // Mismo filtro que el PATCH: las llaves del sistema no se siembran desde fuera (ver `mezclarConfig`).
+        config: data.config != null ? mezclarConfig({}, data.config) : undefined,
       },
       select: SAFE_SELECT,
     })) as unknown as DeliveryChannelLinkSafe
@@ -231,11 +253,27 @@ function validarPrecios(v: unknown): void {
  *
  * `config: null` sigue limpiando todo — es la forma explícita de borrar, y se distingue de
  * `undefined` (no lo tocaste).
+ *
+ * 🔴 Salvo las LLAVES DEL SISTEMA (`llavesDelSistema.ts`): la reclamación del aprovisionamiento de la
+ * tienda, el menú en revisión, el rechazado, sus problemas y el horario publicado. Las escriben SÓLO
+ * el sistema (el aprovisionamiento, el sincronizador, los avisos del proveedor). Desde aquí nunca se
+ * tocan — ni con `config: null` — y lo que llegue con esos nombres se ignora: editable, la reclamación
+ * se apuntaba a la intención de otro negocio; borrado, el menú en revisión se republicaba encima de la
+ * revisión (o el rechazado, cada 5 minutos); sembrado, bloqueaba la publicación del menú para siempre.
  */
-function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue): Prisma.InputJsonValue {
-  const base = actual && typeof actual === 'object' && !Array.isArray(actual) ? (actual as Record<string, unknown>) : {}
-  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) return entrante
-  return { ...base, ...(entrante as Record<string, unknown>) } as Prisma.InputJsonValue
+function mezclarConfig(actual: unknown, entrante: Prisma.InputJsonValue | null): Prisma.InputJsonValue | typeof Prisma.JsonNull {
+  const base = configComoObjeto(actual)
+  const reservadas = Object.fromEntries(
+    LLAVES_DEL_SISTEMA.filter(llave => base[llave] !== undefined).map(llave => [llave, base[llave]]),
+  ) as Prisma.InputJsonObject
+  const hayReservadas = Object.keys(reservadas).length > 0
+  if (typeof entrante !== 'object' || entrante === null || Array.isArray(entrante)) {
+    return hayReservadas ? reservadas : (entrante ?? Prisma.JsonNull)
+  }
+  const pedido = Object.fromEntries(
+    Object.entries(entrante as Record<string, unknown>).filter(([llave]) => !(LLAVES_DEL_SISTEMA as readonly string[]).includes(llave)),
+  )
+  return { ...base, ...pedido, ...reservadas } as Prisma.InputJsonValue
 }
 
 /**
@@ -271,11 +309,19 @@ export async function updateChannelLink(
   // dos lecturas ven lo mismo y gana el último con datos viejos). Sin el `FOR UPDATE`, dos admins
   // guardando horario y precios a la vez se pisaban, y un PATCH leído antes de que el job de
   // disponibilidad guardara sus agotados los borraba al escribir: el producto se quedaba agotado en Uber.
+  // Lo mismo con Rappi: un PATCH leído antes de que guardara su lote lo borraba al escribir.
   const link = await prisma.$transaction(async tx => {
+    // 🔴 El proveedor se lee de la FILA, en la misma transacción que el update (el cliente nunca lo manda en un
+    // PATCH): un modo manual sobre un canal cuyo proveedor sólo admite el automático se rechaza ANTES de escribir.
+    // Con el modo ausente o en AUTO no se lee nada. Un canal de otro negocio no da fila: no se rechaza aquí y el
+    // `updateMany` de abajo lo resuelve como 404, sin revelar qué proveedor es.
+    if (data.orderAcceptanceMode !== undefined && data.orderAcceptanceMode !== OrderAcceptanceMode.AUTO) {
+      const fila = await tx.deliveryChannelLink.findFirst({ where: { id: linkId, venueId }, select: { provider: true } })
+      if (fila) exigirAceptacionPermitida(fila.provider, data.orderAcceptanceMode)
+    }
+
     let config: Prisma.InputJsonValue | typeof Prisma.JsonNull | undefined
-    if (data.config === null) {
-      config = Prisma.JsonNull
-    } else if (data.config !== undefined) {
+    if (data.config !== undefined) {
       // Tenant-scoped igual que la mutación: un link de otro venue no da fila y el
       // `updateMany` de abajo devuelve count 0 → NotFoundError, sin filtrar nada.
       const [actual] = await tx.$queryRaw<Array<{ config: Prisma.JsonValue }>>`

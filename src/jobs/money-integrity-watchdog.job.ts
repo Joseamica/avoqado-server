@@ -5,7 +5,13 @@ import prisma from '../utils/prismaClient'
 import logger from '../config/logger'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
-import { baseQueDebeCubrirseSql, COBRO_QUE_CUBRE, criterioPagadaPeroAbiertaSql } from '../services/shared/pagadaPeroAbierta'
+import {
+  baseQueDebeCubrirseSql,
+  COBRO_QUE_CUBRE,
+  criterioPagadaPeroAbiertaSql,
+  instanteUtcSql,
+  pedidoDePlataformaQueBDejaAbiertoSql,
+} from '../services/shared/pagadaPeroAbierta'
 import { ordenDescuentaInventarioSql } from '../services/inventory/inventoryPosting.service'
 import { historicalStockMovementSql, LEGACY_INVENTORY_NOTICE } from './money-integrity-watchdog-legacy'
 
@@ -299,6 +305,10 @@ export function buildWatchdogSql(now: Date = new Date()): { counts: string; deta
         --        ticks siguientes.
         --    Y lo que la ventana de VENTANA_DEL_BARRIDO_MIN deja fuera es, a propósito, lo que
         --    todavía está a tiempo de sanarse solo.
+        --    🔴 Y NO es «pagada pero abierta» un pedido de PLATAFORMA (Rappi, Uber…) pagado y aceptado que
+        --    la decisión B del founder (22-oct-2026) deja abierto a propósito: la cocina lo prepara y su día
+        --    del negocio (el de la caja, con corte a las 04:00 del venue) no ha terminado. Se resta con la MISMA función que decide el barrido, con el reloj de
+        --    esta corrida: en cuanto la cocina lo termina o se acaba su día, si sigue abierto, grita.
         --    Sin tope de fecha a propósito, al revés que la invariante 5: el barrido sólo mira
         --    30 días hacia atrás, así que el rezago más viejo no lo vigila nadie más.
         SELECT 'PAGADA PERO ABIERTA', v.name, o.id,
@@ -308,6 +318,7 @@ export function buildWatchdogSql(now: Date = new Date()): { counts: string; deta
         FROM "Order" o JOIN "Venue" v ON v.id = o."venueId"
         WHERE ${criterioPagadaPeroAbiertaSql('o')}
           AND o."updatedAt" < (NOW() AT TIME ZONE 'UTC') - INTERVAL '${VENTANA_DEL_BARRIDO_MIN} minutes'
+          AND NOT (${pedidoDePlataformaQueBDejaAbiertoSql('o', instanteUtcSql(now))})
           AND ${REAL_VENUES}
 
         UNION ALL

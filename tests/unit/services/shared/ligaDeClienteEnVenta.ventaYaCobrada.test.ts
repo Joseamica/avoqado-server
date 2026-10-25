@@ -181,3 +181,32 @@ describe('🔴 R11-2: ventaYaCobradaBajoCandado', () => {
     await expect(lee(t)).resolves.toBeNull()
   })
 })
+
+/** Cuentas fuera del plano (23-oct): el PUT del panel no cierra una cuenta sin cobrar y dice lo que falta (`pendiente`). */
+describe('ventaYaCobradaBajoCandado — pendiente', () => {
+  const lee = (t: any) => ventaYaCobradaBajoCandado(t, { venueId: VENUE, orderId: ORDER })
+
+  it('abono de $40 a $100 ⇒ faltan $60, no cobrada', async () => {
+    const r = await lee(venta('PENDING', '40.00'))
+    expect(r).toMatchObject({ cobrada: false })
+    expect(r!.pendiente.toFixed(2)).toBe('60.00')
+  })
+
+  it('PAID ⇒ nada pendiente, sin leer los cobros', async () => {
+    const t = venta('PAID', null)
+    const r = await lee(t)
+    expect(r).toMatchObject({ cobrada: true })
+    expect(r!.pendiente.toFixed(2)).toBe('0.00')
+    expect(t.payment.aggregate).not.toHaveBeenCalled()
+  })
+
+  it('cortesía total ($0) sin cobros ⇒ nada pendiente, pero NO cobrada (como hoy)', async () => {
+    const r = await lee(venta('PENDING', null, { discountAmount: '100.00' }))
+    expect(r).toMatchObject({ cobrada: false })
+    expect(r!.pendiente.toFixed(2)).toBe('0.00')
+  })
+
+  it('$99.99 cobrados de $100 ⇒ cobrada (la tolerancia de un centavo de los cobros)', async () => {
+    await expect(lee(venta('PENDING', '99.99'))).resolves.toMatchObject({ cobrada: true })
+  })
+})

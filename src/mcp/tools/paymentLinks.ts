@@ -6,7 +6,7 @@ import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
-import { createPaymentLink } from '@/services/dashboard/paymentLink.service'
+import { createPaymentLink, updatePaymentLink } from '@/services/dashboard/paymentLink.service'
 
 const STATUS_MAP: Record<string, PaymentLinkStatus> = {
   active: PaymentLinkStatus.ACTIVE,
@@ -219,6 +219,57 @@ export function registerPaymentLinkTools(server: McpServer, scope: McpScope) {
             amount: link.amount == null ? null : Number(link.amount),
             status: link.status,
           },
+        })
+      } catch (error) {
+        return text({ ok: false, error: (error as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'add_customer_to_payment_link',
+    'Add an existing customer to a payment link that has NO customer yet (the operator forgot it when creating it). Only adds: a link that already has a customer is never changed or cleared. Counts for payments that start after this; past payments keep their owner. Preview first, then human confirmation with confirm:true. Requires payment-link:update and customers:read.',
+    {
+      venueId: z.string(),
+      linkId: z.string().min(1),
+      customerId: z.string().cuid('ID de cliente inválido'),
+      confirm: z.boolean().optional(),
+    },
+    async ({ venueId, linkId, customerId, confirm }) => {
+      const where = guard.venueFilter(venueId)
+      guard.requirePermission('payment-link:update', venueId)
+      guard.requirePermission('customers:read', venueId)
+      if (!confirm) {
+        const link = await prisma.paymentLink.findFirst({
+          where: { ...where, id: linkId },
+          select: { id: true, title: true, customerId: true, status: true, isReusable: true },
+        })
+        if (!link) return text({ ok: false, error: 'Liga de pago no encontrada' })
+        if (link.customerId && link.customerId !== customerId) return text({ ok: false, error: 'Esta liga ya tiene un cliente y no se puede cambiar' })
+        const customer = await prisma.customer.findFirst({
+          where: { ...where, id: customerId, active: true },
+          select: { id: true, firstName: true, lastName: true, email: true, phone: true },
+        })
+        if (!customer) return text({ ok: false, error: 'El cliente no existe, está inactivo o no pertenece al negocio' })
+        return text({
+          requiresConfirmation: true,
+          preview: { venueId, linkId, title: link.title, status: link.status, isReusable: link.isReusable, customer },
+          message: 'Confirma agregar el cliente. Contará para los pagos que empiecen después; no se podrá cambiar.',
+        })
+      }
+      try {
+        const link = await updatePaymentLink(venueId, linkId, { customerId }, scope.staffId, () =>
+          auditMcpWrite(scope, {
+            action: 'PAYMENT_LINK_CUSTOMER_ADDED',
+            entity: 'PaymentLink',
+            entityId: linkId,
+            venueId,
+            data: { customerId },
+          }),
+        )
+        return text({
+          ok: true,
+          paymentLink: { id: link.id, shortCode: link.shortCode, title: link.title, customer: link.customer, status: link.status },
         })
       } catch (error) {
         return text({ ok: false, error: (error as Error).message })

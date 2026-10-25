@@ -15,14 +15,22 @@
  * `services.mxgrability.rappi.com`. No hay forma de pedir el token de pruebas contra el host de
  * producción: se resuelven del mismo `ambiente` o no se resuelven.
  *
+ * 🔴 DOS DOMINIOS (medido el 20-oct-2026): la API (`/api/v2/restaurants-integrations-public-api`,
+ * `/api/rest-ops-utils`) sigue en el host clásico de `hostRappi`; el LOGIN se mudó al dominio nuevo de
+ * `hostDeLoginRappi` y su ruta lleva barra final (sin ella, 307).
+ *
  * Módulo PURO: `fetchImpl`, el token y la lista de tiendas se inyectan. No lee `@/config/env`
  * (importarlo hace `process.exit` y mata workers de Jest — regla del repo).
  */
+import { DeliveryWriteNotSentError } from '../../core/types'
 import { cabeceraRappi, invalidarToken, type SuperficieRappi } from './rappi.token'
 
 export type AmbienteRappi = 'SANDBOX' | 'PRODUCTION'
 
-/** País → host de producción. Sólo México por ahora; agregar uno es una línea. */
+/**
+ * País → host CLÁSICO de producción (la tabla «Dominios» de la doc de Rappi: 9 países); agregar uno es una línea.
+ * OJO: el login de producción (`hostDeLoginRappi`, dominio nuevo) sólo está cableado para México.
+ */
 export const HOSTS_PRODUCCION: Readonly<Record<string, string>> = {
   MX: 'https://services.mxgrability.rappi.com',
   CO: 'https://services.rappi.com',
@@ -50,17 +58,66 @@ export function hostRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
   return host
 }
 
-export class RappiEscrituraBloqueadaError extends Error {
+const HOST_LOGIN_SANDBOX = 'https://api.dev.rappi.com'
+const HOST_LOGIN_PRODUCCION_MX = 'https://api.rappi.com.mx'
+
+/**
+ * El dominio NUEVO de Rappi: el del login (`/restaurants/auth/v1/token/login/{superficie}/`) y el del self-onboarding.
+ * 🔴 No es `hostDeLogin` (`rappi.selfOnboarding.ts`): aquel es el OAuth del DUEÑO (autorizar su tienda); éste es el token de
+ * la INTEGRACIÓN (pedidos, menú, Utils).
+ * La API de pedidos, menú y Utils NO va aquí: sigue en `hostRappi`. En producción sólo está cableado México
+ * (`api.rappi.com.mx`: lo confirma la doc de Rappi, no se ha medido; la doc lista también el dominio nuevo de otros países, pero
+ * aquí no se agregaron); otro país LANZA en vez de caer al de México, por la misma razón que `hostRappi`. Sandbox lo ignora.
+ */
+export function hostDeLoginRappi(ambiente: AmbienteRappi, pais = 'MX'): string {
+  if (ambiente === 'SANDBOX') return HOST_LOGIN_SANDBOX
+  if (pais.trim().toUpperCase() !== 'MX') {
+    throw new Error(
+      `[Rappi] el dominio nuevo (login y self-onboarding) sólo está publicado para México en producción; país "${pais}" no soportado`,
+    )
+  }
+  return HOST_LOGIN_PRODUCCION_MX
+}
+
+/**
+ * 🔴 Es un «no se envió»: el candado salta ANTES de la red, así que se SABE que Rappi no recibió nada. Por eso extiende
+ * `DeliveryWriteNotSentError` (`STORE_NOT_AUTHORIZED`, igual que `UberStoreWriteBlockedError`): la cocina lo recibe como un
+ * 409 en vez de un 500 sin explicación. `instanceof RappiEscrituraBloqueadaError` sigue valiendo.
+ *
+ * 🔴 `paraLaCocina`: NO es «desconectada». El candado es la lista de tiendas del entorno (`RAPPI_WRITABLE_STORE_IDS_*`); reconectar desde el
+ * panel no la abre (el aprovisionamiento contesta `NOT_ENABLED_FOR_PILOT`), así que a la cocina no se le manda a «reconectar».
+ */
+export class RappiEscrituraBloqueadaError extends DeliveryWriteNotSentError {
   constructor(readonly storeId: string) {
     super(
+      'STORE_NOT_AUTHORIZED',
       `[Rappi] escritura BLOQUEADA para la tienda ${storeId}: no está en la lista de tiendas autorizadas. ` +
         'Es el candado que impide tocar el comercio de alguien más — agrégala explícitamente si de verdad es tuya.',
+      'Rappi todavía no está habilitada para esta tienda; avisa a soporte de Avoqado.',
     )
     this.name = 'RappiEscrituraBloqueadaError'
   }
 }
 
 const LECTURAS = new Set(['GET', 'HEAD', 'OPTIONS'])
+
+/**
+ * 🔴 Las rutas de la LISTA DE PEDIDOS: un GET a cualquiera de ellas NO es una lectura (pasa los pedidos de READY a SENT y quien lee
+ * primero se los lleva; medido el 22-oct, M13), así que lleva el candado de tiendas aunque el llamador no ponga `cambiaEstado`. El
+ * candado vive aquí, en el punto más bajo, para que un caller nuevo no pueda olvidarlo:
+ *   · por tienda, host nuevo: `/restaurants/orders/v1/stores/{storeId}/orders` (con o sin barra final);
+ *   · la global del host clásico: `/api/v2/restaurants-integrations-public-api/orders` (sin `storeId` siempre queda bloqueada).
+ * NO entran `…/orders/status/sent` ni `…/orders/{id}/events`: ésas sí son lecturas. Se compara la ruta sin la query.
+ */
+const RUTAS_DE_LA_LISTA_DE_PEDIDOS = [
+  /^\/restaurants\/orders\/v1\/stores\/[^/]+\/orders\/?$/,
+  /^\/api\/v2\/restaurants-integrations-public-api\/orders\/?$/,
+]
+
+function esLaListaDePedidos(ruta: string): boolean {
+  const camino = ruta.split('?')[0]
+  return RUTAS_DE_LA_LISTA_DE_PEDIDOS.some(r => r.test(camino))
+}
 
 /**
  * ¿Se puede escribir en esta tienda?
@@ -84,6 +141,13 @@ export interface RappiHttpDeps {
   tiendasEscribibles?: readonly string[]
 }
 
+/**
+ * Techo de espera de CUALQUIER llamada a Rappi (API, login y canje OAuth). Sin él, una llamada colgada
+ * sostenía la pasada de la reconciliación y detrás de ella esperaban los pedidos. Uno vencido LANZA, igual
+ * que un fallo de red: quien llama lo trata como tal (un aprovisionamiento queda incierto, no rechazado).
+ */
+export const TIMEOUT_RAPPI_MS = 10_000
+
 export interface RappiRespuesta {
   ok: boolean
   status: number
@@ -97,6 +161,25 @@ export interface RappiPeticion {
   cuerpo?: unknown
   /** Obligatorio en escrituras: es lo que el candado revisa. */
   storeId?: string
+  /** Host alterno: los endpoints del self-onboarding viven en otro dominio que el resto de la API. */
+  host?: string
+  /** El self-onboarding manda DOS tokens: el del integrador (`x-authorization`) y el del comercio. */
+  cabecerasExtra?: Record<string, string>
+  /** Escrituras de varias tiendas (aprovisionar): el candado revisa CADA una. */
+  storeIds?: readonly string[]
+  /**
+   * Por default `true`: ante un 401 se invalida el token y se reintenta UNA vez. Con `false` el token se invalida igual
+   * pero el 401 se devuelve sin segundo intento. 🔴 Lo usa el «listo», que Rappi deja de atender después de la TERCERA
+   * solicitud: cada llamada se cuenta ANTES de salir, y un reintento por dentro serían dos peticiones por una cuenta.
+   */
+  reintentarEn401?: boolean
+  /**
+   * 🔴 Un GET que NO es lectura: cambia el estado del lado de Rappi, así que lleva el candado de tiendas como una escritura.
+   * Lo usa el sondeo de pedidos por tienda (`GET …/stores/{storeId}/orders`), que pasa los pedidos de READY a SENT: quien lee
+   * primero se los lleva (medido el 22-oct, M13). Las rutas de la lista de pedidos ya llevan el candado solas
+   * (`RUTAS_DE_LA_LISTA_DE_PEDIDOS`); la bandera es para cualquier otro GET que se descubra que cambia estado.
+   */
+  cambiaEstado?: boolean
 }
 
 /**
@@ -105,24 +188,50 @@ export interface RappiPeticion {
  * 🔴 Ante un 401 invalida el token y reintenta UNA vez. Rappi puede revocar un token antes de
  * que venza, y sin esto reintentaríamos con el mismo para siempre. Una sola vez, no en bucle:
  * si el segundo también da 401 el problema son las credenciales, y machacar sólo empeora la
- * tasa de éxito del 98% que Rappi exige.
+ * tasa de éxito del 98% que Rappi exige. Con `reintentarEn401: false` no hay segundo intento (ver `RappiPeticion`).
  */
 export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion): Promise<RappiRespuesta> {
-  if (!LECTURAS.has(peticion.metodo.toUpperCase())) {
-    assertTiendaEscribible(peticion.storeId, deps.tiendasEscribibles ?? [])
+  const escritura = !LECTURAS.has(peticion.metodo.toUpperCase()) || peticion.cambiaEstado === true || esLaListaDePedidos(peticion.ruta)
+  if (escritura) {
+    const autorizadas = deps.tiendasEscribibles ?? []
+    const tiendas = peticion.storeIds ?? [peticion.storeId]
+    // Un lote vacío no es un pase libre: sin ninguna tienda que revisar, el candado se niega igual.
+    if (tiendas.length === 0) assertTiendaEscribible(undefined, autorizadas)
+    for (const t of tiendas) assertTiendaEscribible(t, autorizadas)
   }
 
-  const url = `${hostRappi(deps.ambiente, deps.pais)}${peticion.ruta}`
+  const url = `${peticion.host ?? hostRappi(deps.ambiente, deps.pais)}${peticion.ruta}`
+
+  /**
+   * 🔴 Una ESCRITURA cuyo token no se pudo pedir NO salió, y se SABE: se lanza como `DeliveryWriteNotSentError('UNAVAILABLE')`
+   * (igual que Uber). Como Error común, quien llamaba no podía distinguirlo de un timeout: el menú se quedaba «en revisión»
+   * esperando un veredicto que nunca iba a llegar, y el «listo» gastaba una de sus 3 llamadas. También vale tras un 401: Rappi
+   * contestó «token inválido», así que tampoco procesó la escritura. Las LECTURAS lanzan el error de siempre.
+   */
+  const token = async (): Promise<string> => {
+    try {
+      return await deps.getToken(peticion.superficie)
+    } catch (error) {
+      if (!escritura) throw error
+      const causa = error instanceof Error ? error.message : String(error)
+      throw new DeliveryWriteNotSentError(
+        'UNAVAILABLE',
+        `[Rappi] no se envió nada: no se pudo obtener el token de ${peticion.superficie} (${causa})`,
+      )
+    }
+  }
 
   const intentar = async (): Promise<RappiRespuesta> => {
-    const token = await deps.getToken(peticion.superficie)
+    const vigente = await token()
     const r = await deps.fetchImpl(url, {
       method: peticion.metodo,
       headers: {
-        ...cabeceraRappi(token),
+        ...cabeceraRappi(vigente),
+        ...(peticion.cabecerasExtra ?? {}),
         ...(peticion.cuerpo !== undefined ? { 'content-type': 'application/json' } : {}),
       },
       ...(peticion.cuerpo !== undefined ? { body: JSON.stringify(peticion.cuerpo) } : {}),
+      signal: AbortSignal.timeout(TIMEOUT_RAPPI_MS),
     })
     return { ok: r.ok, status: r.status, raw: await r.text() }
   }
@@ -131,6 +240,8 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
   if (primera.status !== 401) return primera
 
   invalidarToken(peticion.superficie)
+  // El token ya quedó invalidado para la siguiente petición; ésta no gasta otra.
+  if (peticion.reintentarEn401 === false) return primera
   return intentar()
 }
 
@@ -140,32 +251,6 @@ export async function llamarRappi(deps: RappiHttpDeps, peticion: RappiPeticion):
  * 🔴 Rappi lo pide textual en sus estándares: *"realiza solicitudes a la API de Rappi para
  * descargar órdenes dejando un intervalo de 45 segundos"*. Es SÓLO para descargar pedidos — no
  * aplica al menú ni a la disponibilidad, y confundirlo volvería lentísima la sincronización sin
- * necesidad.
- *
- * Es un espaciador, no un limitador: no rechaza, espera. Rechazar dejaría un ciclo de sondeo
- * sin correr, y perder una vuelta de sondeo es perder pedidos cuando el webhook falló — que es
- * exactamente para lo que el sondeo existe, porque Rappi **no documenta reintentos** de webhook.
+ * necesidad. Lo usa el job del sondeo (`rappi-order-poll.job.ts`), que lleva el ritmo.
  */
 export const INTERVALO_SONDEO_MS = 45_000
-
-export function crearEspaciadorDeSondeo(opts: { now?: () => number; sleep?: (ms: number) => Promise<void> } = {}) {
-  const now = opts.now ?? Date.now
-  const sleep = opts.sleep ?? ((ms: number) => new Promise<void>(r => setTimeout(r, ms)))
-  // Por VENUE: dos negocios distintos no tienen por qué hacerse fila entre ellos — el límite
-  // es sobre cuánto sondeamos una tienda, no sobre cuántas tiendas atendemos.
-  const ultima = new Map<string, number>()
-
-  return {
-    async esperarTurno(venueId: string): Promise<void> {
-      const previa = ultima.get(venueId)
-      if (previa !== undefined) {
-        const falta = INTERVALO_SONDEO_MS - (now() - previa)
-        if (falta > 0) await sleep(falta)
-      }
-      ultima.set(venueId, now())
-    },
-    _reset(): void {
-      ultima.clear()
-    },
-  }
-}

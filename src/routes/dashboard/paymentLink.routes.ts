@@ -96,6 +96,7 @@ router.put(
   '/:linkId',
   checkPermission('payment-link:update'),
   validateRequest(updatePaymentLinkSchema),
+  (req, res, next) => (req.body.customerId ? checkPermission('customers:read')(req, res, next) : next()),
   paymentLinkController.updatePaymentLink,
 )
 
