@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '../../../__helpers__/setup'
 import { processPosOrderItemEvent } from '../../../../src/services/pos-sync/posSyncOrderItem.service'
 import {
@@ -170,7 +171,8 @@ describe('posSyncOrderItem.service — line events serialized on the parent Orde
       select: { id: true },
     })
     // lockExistingOrderForPayment: source id, then the route venue.
-    expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['order-1', 'venue-1'])
+    const [strings, ...values] = tx.$queryRaw.mock.calls[0]
+    expect(Prisma.sql(strings, ...values).values).toEqual(['order-1', 'venue-1'])
     expect(tx.order.findFirst).toHaveBeenCalledWith({
       where: { id: 'order-1', venueId: 'venue-1', externalId: 'order-ext-1' },
       select: { id: true },

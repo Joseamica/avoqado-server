@@ -1,5 +1,6 @@
 import { OrderSource, OrderType, Prisma } from '@prisma/client'
-import { BadRequestError, NotFoundError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
+import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
@@ -341,10 +342,13 @@ export async function prepareExchangeInTx(
       notReturnable('NOT_ATTRIBUTABLE')
   }
   // Todos los sobres se toman antes del primer reclamo de turno (también si otro cobro aporta crédito).
-  for (const slice of slices.filter(s => s.role === 'PAYOUT' && isGiftCardTenderKind(paymentById.get(s.paymentId)!.money.tenderSystemKind)))
+  const giftPayoutIds = slices
+    .filter(s => s.role === 'PAYOUT' && isGiftCardTenderKind(paymentById.get(s.paymentId)!.money.tenderSystemKind))
+    .map(s => s.paymentId)
+  if (giftPayoutIds.length > 0)
     await bloquearSobresDelReembolsoEnTx(tx, {
       venueId,
-      originalPaymentId: slice.paymentId,
+      originalPaymentId: giftPayoutIds,
       original: {
         orderId: originalOrderId,
         tenderSystemKind: 'GIFT_CARD',
@@ -518,11 +522,23 @@ async function createExchangeSaleInTx(
 ) {
   const { venueId, body, actorStaffId } = input
   const items: Array<Prisma.OrderItemUncheckedCreateWithoutOrderInput> = []
-  const owner: number[] = []
+  const owners: Array<Set<number>> = []
+  const grouped = new Map<string, number>()
   for (const [i, line] of lines.entries()) {
     const append = (quantity: number, priceCents: number, inherited: boolean) => {
       const unit = inherited ? Math.max(line.listCents, priceCents) : priceCents
       const discount = (unit - priceCents) * quantity
+      const key = `${line.productId}:${unit}:${priceCents}`
+      const existing = grouped.get(key)
+      if (existing !== undefined) {
+        const item = items[existing]
+        item.quantity += quantity
+        item.discountAmount = (item.discountAmount as Prisma.Decimal).plus(pesos(discount))
+        item.total = (item.total as Prisma.Decimal).plus(pesos(unit * quantity))
+        owners[existing].add(i)
+        return
+      }
+      grouped.set(key, items.length)
       items.push({
         productId: line.productId,
         productName: line.productName,
@@ -533,14 +549,31 @@ async function createExchangeSaleInTx(
         taxAmount: pesos(0),
         externalId: `exchange:${body.idempotencyKey}:${items.length}`,
       })
-      owner.push(i)
+      owners.push(new Set([i]))
     }
     for (const piece of line.pieces.filter(p => p.inheritedFromOrderItemId !== null)) append(1, piece.priceCents, true)
     const unpaired = line.pieces.filter(p => p.inheritedFromOrderItemId === null)
     if (unpaired.length) append(unpaired.length, unpaired[0].priceCents, false)
   }
+  if (
+    items.length > TOPES_POR_ORDEN.renglones ||
+    items.filter(i => (i.discountAmount as Prisma.Decimal).gt(0)).length > TOPES_POR_ORDEN.descuentos
+  )
+    throw new ConflictError(
+      'El cambio genera demasiados renglones o rebajas para poder devolverlo por artículos y calcular sus reportes. Haz cambios más pequeños.',
+      'EXCHANGE_SALE_TOO_LARGE',
+    )
   const subtotal = items.reduce((sum, item) => sum.plus(new Prisma.Decimal(item.unitPrice as Prisma.Decimal).mul(item.quantity)), pesos(0))
   const discountAmount = items.reduce((sum, item) => sum.plus(item.discountAmount as Prisma.Decimal), pesos(0))
+  const returnedIds = new Set(body.returned.map(line => line.orderItemId))
+  const productIds = [
+    ...new Set([
+      ...lines.map(line => line.productId),
+      ...sale.lines.flatMap(line => (returnedIds.has(line.id) && line.productId ? [line.productId] : [])),
+    ]),
+  ]
+  // Las FK de artículos también toman KEY SHARE: toda la unión antes de insertar evita un orden por renglón.
+  await tx.$queryRaw`SELECT id FROM "Product" WHERE "venueId" = ${venueId} AND id IN (${Prisma.join(productIds)}) ORDER BY id FOR KEY SHARE`
   const shift = await turnoAbiertoDelNegocio(tx, venueId)
   const order = await tx.order.create({
     data: {
@@ -571,7 +604,7 @@ async function createExchangeSaleInTx(
   // El sufijo numérico relaciona las piezas incluso cuando el orden lexicográfico es 0, 1, 10, 11, 2.
   for (const item of order.items) {
     const index = Number(item.externalId!.slice(item.externalId!.lastIndexOf(':') + 1))
-    lines[owner[index]].newOrderItemIds.push(item.id)
+    for (const owner of owners[index]) lines[owner].newOrderItemIds.push(item.id)
     if (item.discountAmount.greaterThan(0))
       await tx.orderDiscount.create({
         data: keptMarkdownDiscountRow({

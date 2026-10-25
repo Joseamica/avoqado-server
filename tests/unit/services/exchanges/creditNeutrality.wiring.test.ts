@@ -175,7 +175,7 @@ describe('transaction cost: the exchange credit refund has no negative cost', ()
     mock.$transaction.mockImplementation(async (fn: unknown) => (fn as (tx: unknown) => unknown)(prismaMock))
     // El candado de la fila del cobro responde con la fila; la página de reembolsos, vacía.
     mock.$queryRaw.mockImplementation(async (...args: unknown[]) =>
-      textoDe(args).includes('LEFT JOIN "TransactionCost"') ? [] : [{ id: 'p1' }],
+      textoDe(args).includes('/* convergencia */') || !textoDe(args).includes('LEFT JOIN "TransactionCost"') ? [{ id: 'p1' }] : [],
     )
     mock.payment.findUniqueOrThrow.mockResolvedValue({
       id: 'p1',

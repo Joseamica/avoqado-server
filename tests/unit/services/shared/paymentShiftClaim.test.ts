@@ -550,4 +550,8 @@ describe('lockExistingOrderForPayment — el candado de la Order decide dinero y
 
     await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
   })
+  it('conserva false para un lector que no devuelve filas', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue(undefined) }
+    await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
+  })
 })

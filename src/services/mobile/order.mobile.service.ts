@@ -4799,7 +4799,7 @@ export async function returnGiftBalanceAndCancelOrder(
       const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
       if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
         let todoDevuelto = true
-        for (const cobro of cobros) {
+        for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
           const pendiente = pendienteDeDevolver(
             await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
           )
@@ -4840,16 +4840,16 @@ export async function returnGiftBalanceAndCancelOrder(
     // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
     // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
     // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
-    // de `cobros` y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
+    // de id y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
     // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
     // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
-    const bloqueos: Array<Awaited<ReturnType<typeof bloquearCobroParaReembolso>>> = []
-    for (const cobro of cobros) {
-      bloqueos.push(await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
+    const bloqueos = new Map<string, Awaited<ReturnType<typeof bloquearCobroParaReembolso>>>()
+    for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
+      bloqueos.set(cobro.id, await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
     }
     // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
     const porDevolver = cobros
-      .map((cobro, i) => ({ cobro, bloqueado: bloqueos[i], ...pendienteDeDevolver(bloqueos[i]) }))
+      .map(cobro => ({ cobro, bloqueado: bloqueos.get(cobro.id)!, ...pendienteDeDevolver(bloqueos.get(cobro.id)!) }))
       .filter(p => p.ventaCents + p.propinaCents > 0)
     const sobresDeLosCobros: string[] = []
     for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))

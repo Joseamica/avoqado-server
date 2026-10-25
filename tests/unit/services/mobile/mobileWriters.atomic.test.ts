@@ -360,7 +360,9 @@ describe('locked mobile writers', () => {
       // toma la reversa del sello). No es un candado de la cuenta: va aparte y siempre después del candado de la cuenta.
       const esDelPremio = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : '').includes('FROM "StampReward"')
       const deLaCuenta = raw.filter((call: any[]) => !esDelPremio(call))
-      expect(deLaCuenta.map((call: any[]) => call.slice(1))).toEqual([['order', 'venue']])
+      expect(
+        deLaCuenta.map((call: any[]) => (Array.isArray(call[0]) ? Prisma.sql(call[0], ...call.slice(1)).values : call[0].values)),
+      ).toEqual([['order', 'venue']])
       expect(tx.$queryRaw.mock.invocationCallOrder[deLaCuenta.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
       if (raw.length > deLaCuenta.length) expect(name).toBe('removeDiscount')
     }

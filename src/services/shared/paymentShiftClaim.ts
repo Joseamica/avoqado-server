@@ -2,6 +2,7 @@ import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
+import { ConflictError } from '../../errors/AppError'
 import { turnoVivoWhere } from './turnoDeCaja'
 
 // `payGiftCardBalanceOnOrder` (tarjetas de regalo, A8): el cobro con saldo comparte el núcleo de `payCashOrder` pero su
@@ -50,6 +51,8 @@ interface ClaimCapturedPaymentShiftInput {
  * Lo pasa la función que ABRE la transacción; `orderFiscalWriters.test.ts` lo exige en cada una.
  */
 export const ORDER_LOCK_WAIT_BUDGET = { timeout: 15_000, maxWait: 5_000 } as const
+// Una cadena de cambios de IQ ocupa pocas ventas; 50 permite holgura sin reclamar un historial ilimitado en cada cobro/reembolso.
+export const MAX_ORDER_LOCK_SCOPE = 50
 
 /**
  * Lock order global para dinero ligado a una Order durable:
@@ -72,13 +75,11 @@ export async function lockExistingOrderForPayment(
     throw new Error('lockExistingOrderForPayment requiere una transacción con $queryRaw')
   }
   // El fence materializado frena el borrado de demos ANTES de poseer sus Orders/Payments.
-  const rows = await tx.$queryRaw<Array<{ id: string }>>`
+  const rows = await tx.$queryRaw<Array<{ id: string | null; scopeTooLarge?: boolean }>>`
     WITH RECURSIVE input AS (
       SELECT ${input.orderId}::text AS order_id, ${input.venueId}::text AS venue_id
-    ), fence AS MATERIALIZED (
-      SELECT v.id FROM "Venue" v JOIN input i ON v.id = i.venue_id FOR KEY SHARE OF v
     ), ancestors(id) AS (
-      SELECT o.id FROM "Order" o JOIN fence v ON v.id = o."venueId" JOIN input i ON o.id = i.order_id
+      SELECT o.id FROM "Order" o JOIN input i ON o.id = i.order_id AND o."venueId" = i.venue_id
       UNION
       SELECT parent.id
       FROM ancestors child
@@ -87,13 +88,32 @@ export async function lockExistingOrderForPayment(
       JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
       JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
       JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
+    ), scope AS MATERIALIZED (
+      SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE + 1))}
+    ), size AS MATERIALIZED (
+      SELECT COUNT(*) AS n FROM scope
+    ), fence AS MATERIALIZED (
+      SELECT v.id FROM "Venue" v JOIN input i ON v.id = i.venue_id
+      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      FOR KEY SHARE OF v
+    ), locked AS MATERIALIZED (
+      SELECT o.id
+      FROM "Order" o JOIN scope a ON a.id = o.id
+      JOIN fence v ON v.id = o."venueId"
+      JOIN input i ON o."venueId" = i.venue_id
+      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      ORDER BY o."createdAt" DESC, o.id DESC
+      FOR UPDATE OF o
     )
-    SELECT o.id
-    FROM "Order" o JOIN ancestors a ON a.id = o.id
-    JOIN input i ON o."venueId" = i.venue_id
-    ORDER BY o."createdAt" DESC, o.id DESC
-    FOR UPDATE OF o
+    SELECT id, false AS "scopeTooLarge" FROM locked
+    UNION ALL
+    SELECT NULL::text AS id, true AS "scopeTooLarge" FROM size WHERE n > ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
   `
+  if (Array.isArray(rows) && rows.some(row => row.scopeTooLarge))
+    throw new ConflictError(
+      'Esta venta tiene demasiados cambios enlazados para procesarla con seguridad. Pide ayuda a soporte con el folio de la venta.',
+      'ORDER_LOCK_SCOPE_TOO_LARGE',
+    )
   return Array.isArray(rows) && rows.some(row => row.id === input.orderId)
 }
 

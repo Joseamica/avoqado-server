@@ -8,6 +8,7 @@ jest.unmock('@/services/dashboard/activity-log.service')
 import { randomUUID } from 'crypto'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
+import logger from '@/config/logger'
 import { getFloorPlan, publishFloorPlan } from '@/services/dashboard/floorPlan/floorPlan.service'
 import { getTablesWithStatus, updateTablePosition } from '@/services/tpv/table.tpv.service'
 import { getFloorElements, updateFloorElement } from '@/services/tpv/floor-element.tpv.service'
@@ -742,4 +743,104 @@ describe('publishFloorPlan — tamaño libre (spec 2026-10-12)', () => {
     expect(auto.tables[0]).toMatchObject({ width: null, height: null })
     expect(auto.fingerprint).not.toBe(antes.fingerprint)
   })
+})
+
+it('Cambio R6: revive una mesa archivada de id menor en la misma unión que las mesas activas', async () => {
+  const archived = await prisma.table.create({ data: { venueId, number: '5', active: false, capacity: 4, qrCode: randomUUID() } })
+  await prisma.table.create({ data: { venueId, number: '6', capacity: 4, qrCode: randomUUID() } })
+  const current = await getFloorPlan(venueId)
+  const live = current.tables[0]
+  expect(archived.id < live.id).toBe(true)
+  const warn = jest.spyOn(logger, 'warn')
+  let ready!: (pid: number) => void, release!: () => void
+  const locked = new Promise<number>(r => (ready = r)),
+    resume = new Promise<void>(r => (release = r))
+  const blocker = Promise.allSettled([
+    prisma.$transaction(
+      async tx => {
+        await tx.$queryRaw`SELECT id FROM "Table" WHERE id = ${archived.id} FOR NO KEY UPDATE`
+        const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        ready(pid)
+        await resume
+        await tx.$queryRaw`SELECT id FROM "Table" WHERE id = ${live.id} FOR NO KEY UPDATE`
+      },
+      { timeout: 15000 },
+    ),
+  ])
+  let work: ReturnType<typeof Promise.allSettled> | undefined
+  try {
+    const pid = await locked
+    work = Promise.allSettled([
+      publish({ baseFingerprint: current.fingerprint, tables: [igual(live), mesa('revive', '5', { areaRef: null })] }),
+    ])
+    const until = Date.now() + 5000
+    for (;;) {
+      const [{ n }] = await prisma.$queryRaw<
+        Array<{ n: number }>
+      >`SELECT COUNT(*)::int AS n FROM pg_stat_activity WHERE ${pid}::int = ANY(pg_blocking_pids(pid))`
+      if (n) break
+      if (Date.now() > until) throw new Error('La publicación no esperó la mesa archivada')
+      await new Promise(r => setTimeout(r, 10))
+    }
+    release()
+    const results = [...(await blocker), ...(await work)]
+    expect(results.map(r => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled'])
+    expect(warn.mock.calls.filter(([message]) => String(message).includes('choque de concurrencia'))).toHaveLength(0)
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: archived.id } })).toMatchObject({ active: true })
+  } finally {
+    release()
+    await blocker
+    if (work) await work
+    warn.mockRestore()
+  }
+})
+
+it('Cambio R6: una mesa archivada que aparece después de fijar la unión rechaza el guardado antes de tomarla', async () => {
+  await prisma.table.create({ data: { venueId, number: '6', capacity: 4, qrCode: randomUUID() } })
+  const current = await getFloorPlan(venueId)
+  let ready!: () => void, release!: () => void
+  const locked = new Promise<void>(r => (ready = r)),
+    resume = new Promise<void>(r => (release = r))
+  const real = prisma.$transaction.bind(prisma)
+  const spy = jest.spyOn(prisma, '$transaction').mockImplementationOnce(((callback: any, options: any) =>
+    real(
+      async tx =>
+        callback(
+          new Proxy(tx, {
+            get(target, key) {
+              if (key !== '$queryRaw') return Reflect.get(target, key)
+              return async (...args: unknown[]) => {
+                const rows = await Reflect.apply(target.$queryRaw, target, args)
+                const sql = Array.isArray(args[0]) ? args[0].join(' ') : ''
+                if (sql.includes('SELECT id FROM "Table"') && sql.includes('FOR NO KEY UPDATE')) {
+                  ready()
+                  await resume
+                }
+                return rows
+              }
+            },
+          }),
+        ),
+      options,
+    )) as never)
+  const work = Promise.allSettled([
+    publish({ baseFingerprint: current.fingerprint, tables: [igual(current.tables[0]), mesa('revive', '5', { areaRef: null })] }),
+  ])
+  try {
+    await Promise.race([
+      locked,
+      work.then(() => {
+        throw new Error('No llegó al primer candado de mesas')
+      }),
+    ])
+    const late = await prisma.table.create({ data: { venueId, number: '5', active: false, capacity: 4, qrCode: randomUUID() } })
+    release()
+    const [result] = await work
+    expect(result.status === 'rejected' ? result.reason : 'guardó el plano').toMatchObject({ statusCode: 409, code: 'FLOOR_PLAN_CHANGED' })
+    expect(await prisma.table.findUniqueOrThrow({ where: { id: late.id } })).toMatchObject({ active: false })
+  } finally {
+    release()
+    await work
+    spy.mockRestore()
+  }
 })

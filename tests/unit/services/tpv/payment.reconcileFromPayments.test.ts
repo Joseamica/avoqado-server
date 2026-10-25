@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 /**
  * Tests: `reconcileOrderFromPayments` cierra —SIN cobro nuevo— la orden cuyos `Payment`
  * COMPLETED ya la cubren pero que se quedó abierta (CONFIRMED/PENDING).
@@ -424,7 +425,9 @@ describe('reconcileOrderFromPayments — la orden cobrada que quedó abierta (OR
       const [write] = fakeTx.order.update.mock.invocationCallOrder
       expect(lock).toBeLessThan(reread)
       expect(reread).toBeLessThan(write)
-      expect(fakeTx.$queryRaw.mock.calls[0].slice(1)).toEqual(['ord-1', 'v1'])
+      expect(
+        Prisma.sql(fakeTx.$queryRaw.mock.calls[0][0] as TemplateStringsArray, ...fakeTx.$queryRaw.mock.calls[0].slice(1)).values,
+      ).toEqual(['ord-1', 'v1'])
       expect(fakeTx.order.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { id: 'ord-1', venueId: 'v1' } }))
       // Distinct doubles: the global client has no `$queryRaw` and did only the pre-read.
       expect((prisma as unknown as { $queryRaw?: unknown }).$queryRaw).toBeUndefined()

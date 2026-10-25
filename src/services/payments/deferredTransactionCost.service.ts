@@ -363,7 +363,7 @@ const esContencion = (error: unknown): boolean => {
 /**
  * Codex R5-3 / R6 (diseño B): el ÚNICO criterio de cumplimiento de la obligación de costo, en UNA unidad transaccional que lo
  * comparten el worker (tras esperar la marca) y el cálculo SÍNCRONO del REST:
- *   fila del Payment `FOR NO KEY UPDATE NOWAIT` (el mutex: esa fila ya existe) → relectura del Payment bajo el candado → efecto de
+ *   unión del Payment y lote pendiente por id `FOR NO KEY UPDATE NOWAIT` → relectura del Payment bajo el candado → efecto de
  *   costo → TransactionCost → proyecciones en Payment y VenueTransaction → liquidación → costos negativos de los reembolsos
  *   (lote acotado) → decisión de `costPending` y transición autorizada de la obligación → COMMIT.
  * Todo con el MISMO `tx`: un fallo operativo aborta la unidad entera y nada escapa por el cliente global. Dos corridas no se
@@ -380,14 +380,23 @@ export async function convergerCostoDeTransaccion(
   try {
     return await prisma.$transaction(
       async tx => {
-        // El mutex: la fila del Payment, sin espera. Se relee BAJO el candado; nada se decide sobre lo leído antes.
-        // `FOR NO KEY UPDATE` (no `FOR UPDATE`): excluye a otra corrida de convergencia igual, pero NO bloquea los INSERT
-        // ajenos que referencian este Payment por FK (recibo, reembolso, efecto): un `FOR UPDATE` los haría esperar toda la
-        // unidad; es la misma fuerza de candado que exige la reapertura (`/* reapertura */`).
-        const filas = await tx.$queryRaw<
-          { id: string }[]
-        >`SELECT "id" FROM "Payment" /* convergencia */ WHERE "id" = ${paymentId} FOR NO KEY UPDATE NOWAIT`
-        if (filas.length !== 1) return 'NO_APLICA' as const
+        // Original y lote pendiente en UNA unión: un reembolso histórico puede tener id menor que su original.
+        const PAGINA_DE_REEMBOLSOS = paginaDeReembolsos()
+        const MAX_PAGINAS_DE_REEMBOLSOS = maxPaginasDeReembolsos()
+        const pendientes = sqlReembolsosConTrabajoPendiente(
+          Prisma.sql`(SELECT "venueId" FROM "Payment" WHERE id = ${paymentId})`,
+          paymentId,
+          null,
+          PAGINA_DE_REEMBOLSOS * MAX_PAGINAS_DE_REEMBOLSOS,
+        )
+        const filas = await tx.$queryRaw<{ id: string }[]>(Prisma.sql`
+          WITH pendientes AS MATERIALIZED (${pendientes})
+          SELECT "id" FROM "Payment" /* convergencia */
+          WHERE "id" = ${paymentId} OR "id" IN (SELECT id FROM pendientes)
+          ORDER BY "id" FOR NO KEY UPDATE NOWAIT
+        `)
+        if (!filas.some(f => f.id === paymentId)) return 'NO_APLICA' as const
+        const alcance = filas.map(f => f.id)
         const payment = await tx.payment.findUniqueOrThrow({ where: { id: paymentId } })
         if (payment.status !== 'COMPLETED') {
           await cerrarSegunElCierre(tx, paymentId, cierre)
@@ -508,13 +517,11 @@ export async function convergerCostoDeTransaccion(
         // Codex R13-5: el cumplimiento incluye las PROYECCIONES del reembolso (Payment y VenueTransaction, desde su costo negativo
         // persistido): se recorren los reembolsos SIN costo y también los que YA lo tienen con proyecciones incompletas.
         let reembolsosVistos = 0
-        const PAGINA_DE_REEMBOLSOS = paginaDeReembolsos()
-        const MAX_PAGINAS_DE_REEMBOLSOS = maxPaginasDeReembolsos()
         let ultimo: { createdAt: Date; id: string } | null = null
         for (let pagina = 0; pagina < MAX_PAGINAS_DE_REEMBOLSOS && costo; pagina++) {
           // Codex R4 (P3): los reembolsos YA cumplidos se excluyen EN LA CONSULTA (no se recorren para saltarlos): la continuación
           // tras un corte o un presupuesto agotado arranca donde falta trabajo. Keyset sobre columnas inmutables (createdAt, id).
-          const reembolsos = await reembolsosConTrabajoPendiente(tx, payment.venueId, paymentId, ultimo, PAGINA_DE_REEMBOLSOS)
+          const reembolsos = await reembolsosConTrabajoPendiente(tx, payment.venueId, paymentId, ultimo, PAGINA_DE_REEMBOLSOS, alcance)
           for (const reembolso of reembolsos) {
             reembolsosVistos++
             if (!(await tx.transactionCost.findUnique({ where: { paymentId: reembolso.id }, select: { id: true } }))) {
@@ -550,6 +557,12 @@ export async function convergerCostoDeTransaccion(
           }
         }
 
+        // Si nació un reembolso entre la fotografía y el candado, sigue pendiente para otra unidad; nunca se toma fuera del alcance.
+        if ((await reembolsosConTrabajoPendiente(tx, payment.venueId, paymentId, null, 1)).length > 0) {
+          await marcarCostPending(tx, paymentId, true)
+          return 'PENDIENTE' as const
+        }
+
         await marcarCostPending(tx, paymentId, false)
         await cerrarSegunElCierre(tx, paymentId, cierre)
         logger.info('✅ [S2] Costo de transacción convergió', { paymentId, yaExistia, reembolsos: reembolsosVistos, cierre: cierre.tipo })
@@ -574,17 +587,28 @@ export async function convergerCostoDeTransaccion(
  * corte de fecha va por `utcTs`: un `Date` crudo en `$queryRaw` llega como timestamptz y la sesión local lo corre 6 h.
  * Sin las devoluciones de crédito de cambio: no regresaron por la tarjeta, así que no llevan costo negativo.
  */
-async function reembolsosConTrabajoPendiente(
+function reembolsosConTrabajoPendiente(
   tx: Prisma.TransactionClient,
   venueId: string,
   originalPaymentId: string,
   ultimo: { createdAt: Date; id: string } | null,
   pagina: number,
+  alcance?: string[],
 ): Promise<{ id: string; createdAt: Date }[]> {
+  return tx.$queryRaw(sqlReembolsosConTrabajoPendiente(venueId, originalPaymentId, ultimo, pagina, alcance))
+}
+
+function sqlReembolsosConTrabajoPendiente(
+  venueId: string | Prisma.Sql,
+  originalPaymentId: string,
+  ultimo: { createdAt: Date; id: string } | null,
+  pagina: number,
+  alcance?: string[],
+): Prisma.Sql {
   const desde = ultimo
     ? Prisma.sql`AND (r."createdAt" > ${utcTs(ultimo.createdAt)} OR (r."createdAt" = ${utcTs(ultimo.createdAt)} AND r."id" > ${ultimo.id}))`
     : Prisma.empty
-  return tx.$queryRaw<{ id: string; createdAt: Date }[]>`
+  return Prisma.sql`
     SELECT r."id", r."createdAt"
     FROM "Payment" r
     LEFT JOIN "TransactionCost" tc ON tc."paymentId" = r."id"
@@ -607,6 +631,7 @@ async function reembolsosConTrabajoPendiente(
         OR vt."netSettlementAmount" IS DISTINCT FROM esperado.net
       )
       ${desde}
+      ${alcance ? Prisma.sql`AND r.id = ANY(${alcance}::text[])` : Prisma.empty}
     ORDER BY r."createdAt" ASC, r."id" ASC
     LIMIT ${pagina}`
 }

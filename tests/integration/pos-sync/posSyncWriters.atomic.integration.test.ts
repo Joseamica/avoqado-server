@@ -157,7 +157,9 @@ function pauseAfterOrderLock(orderId: string, mode: 'scope' | 'legacy') {
                   if (key !== '$queryRaw') return Reflect.get(target, key)
                   return async (...args: unknown[]) => {
                     const rows: unknown = await Reflect.apply(target.$queryRaw, target, args)
-                    const sql = Array.isArray(args[0]) ? args[0].join('?').replace(/\s+/g, ' ').trim() : ''
+                    const raw = args[0] as { strings?: readonly string[]; values?: unknown[] }
+                    const sql = (Array.isArray(raw) ? raw : (raw.strings ?? [])).join('?').replace(/\s+/g, ' ').trim()
+                    const values = Array.isArray(raw) ? Prisma.sql(raw, ...args.slice(1)).values : (raw.values ?? [])
                     const scopeClaim =
                       mode === 'scope' &&
                       sql ===
@@ -168,9 +170,9 @@ function pauseAfterOrderLock(orderId: string, mode: 'scope' | 'legacy') {
                     const legacyClaim =
                       mode === 'legacy' &&
                       sql.includes('ancestors(id) AS') &&
-                      sql.endsWith('ORDER BY o."createdAt" DESC, o.id DESC FOR UPDATE OF o') &&
-                      args[1] === orderId &&
-                      args[2] === venueId
+                      sql.includes('FOR UPDATE OF o') &&
+                      values[0] === orderId &&
+                      values[1] === venueId
                     if (!paused && (scopeClaim || legacyClaim) && Array.isArray(rows) && rows.some(row => row.id === orderId)) {
                       paused = true
                       entered.release(await backendPid(target))
