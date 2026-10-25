@@ -42,7 +42,7 @@ describe('límites mezclados entre onboarding y alta con código', () => {
     expect(sexto.body).toEqual({
       success: false,
       code: 'DEMASIADOS_INTENTOS',
-      message: 'Hiciste demasiados intentos. Espera unos minutos y pide un código nuevo.',
+      message: 'Hiciste demasiados intentos. Espera 15 minutos y vuelve a intentarlo con el código más reciente.',
     })
     // /onboarding/verify-email conserva su respuesta de hoy: texto plano.
     const onb = await request(app).post('/onboarding/verify-email').send(cuerpo)
@@ -97,7 +97,7 @@ describe('límites mezclados entre onboarding y alta con código', () => {
     const fuente = (f: string) => fs.readFileSync(path.join(__dirname, '../../../src', f), 'utf8')
     expect(fuente('routes/onboarding.routes.ts')).toMatch(/router\.post\('\/verify-email', limiteIntentosDeCodigo, limiteDiarioSiAltaConCodigo,/)
     const publicas = fuente('routes/public.routes.ts')
-    expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
+    expect(publicas).toMatch(/router\.post\('\/alta\/verificar', soloConAltaConCodigo, contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest\(altaVerificarSchema\), verificarAlta\)/)
     expect(publicas).toMatch(/router\.post\('\/alta\/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest\(altaReenviarSchema\), reenviarAlta\)/)
   })
 
@@ -123,5 +123,23 @@ describe('límites mezclados entre onboarding y alta con código', () => {
       if (original === undefined) delete process.env.ALTA_LANDING_CON_CODIGO
       else process.env.ALTA_LANDING_CON_CODIGO = original
     }
+  })
+
+  it('una contraseña rechazada NO gasta intentos: 6 con «12345678» dan 400 CONTRASENA_INVALIDA y la siguiente buena no da 429', async () => {
+    const { contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta } = cargarComoEnProduccion()
+    const app = express()
+    app.use(express.json())
+    app.post('/public/alta/verificar', contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, (_q, s) =>
+      s.status(400).json({ ok: false }),
+    )
+    const email = 'contra@example.com'
+    for (let i = 0; i < 6; i++) {
+      const r = await request(app).post('/public/alta/verificar').send({ email, codigo: '123456', password: '12345678' })
+      expect(r.status).toBe(400)
+      expect(r.body).toEqual({ success: false, code: 'CONTRASENA_INVALIDA', message: 'Esa contraseña es muy común. Elige otra.' })
+    }
+    const buena = await request(app).post('/public/alta/verificar').send({ email, codigo: '123456', password: 'Una-contrasena-larga-1' })
+    expect(buena.status).toBe(400)
+    expect(buena.body).toEqual({ ok: false }) // llegó al final de la cadena: ningún 429
   })
 })

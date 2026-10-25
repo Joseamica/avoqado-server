@@ -13,6 +13,7 @@ import type { RequestHandler } from 'express'
 import rateLimit from 'express-rate-limit'
 import { altaLandingConCodigo } from '../config/altaLandingConCodigo'
 import { ipDelCliente, llavePorCorreoOIp } from '../utils/clientIp'
+import { motivoContrasenaInvalida } from '../utils/contrasenaNueva'
 
 // Más permisivo en desarrollo para poder probar a mano.
 const isDevelopment = process.env.NODE_ENV !== 'production'
@@ -33,7 +34,7 @@ export const limiteIntentosDeCodigo = rateLimit({
       res.status(options.statusCode).json({
         success: false,
         code: 'DEMASIADOS_INTENTOS',
-        message: 'Hiciste demasiados intentos. Espera unos minutos y pide un código nuevo.',
+        message: 'Hiciste demasiados intentos. Espera 15 minutos y vuelve a intentarlo con el código más reciente.',
       })
       return
     }
@@ -46,6 +47,18 @@ export const limiteIntentosDeCodigo = rateLimit({
 export const limiteIntentosDeCodigoEnAlta: RequestHandler = (req, res, next) => {
   res.locals[RESPUESTA_EN_JSON] = true
   return limiteIntentosDeCodigo(req, res, next)
+}
+
+/**
+ * Una contraseña que la regla rechaza se contesta ANTES de los límites: no es un intento de adivinar el código,
+ * y si gastara el presupuesto, 5 contraseñas flojas bloquearían el código 15 min. Misma respuesta que el servicio
+ * (`verificarCodigoDeLanding`, que conserva su propia revisión).
+ */
+export const contrasenaValidaEnAlta: RequestHandler = (req, res, next) => {
+  const password = req.body?.password
+  const motivo = typeof password === 'string' && password !== '' ? motivoContrasenaInvalida(password) : null
+  if (motivo) return res.status(400).json({ success: false, code: 'CONTRASENA_INVALIDA', message: motivo })
+  next()
 }
 
 /**
