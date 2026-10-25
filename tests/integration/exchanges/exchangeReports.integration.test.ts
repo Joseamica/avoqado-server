@@ -54,7 +54,7 @@ async function difference(f: Seed, price: number) {
   )
 }
 beforeAll(async () => {
-  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/)
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/)
   s = await seed({ card: true, quantity: 2 })
   await prisma.venue.update({ where: { id: s.venueId }, data: { seatCapExempt: true } })
   const even = await createExchange(s.input())

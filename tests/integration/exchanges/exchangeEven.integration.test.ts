@@ -36,7 +36,7 @@ const seed = async (opts?: Parameters<typeof seedClothingSale>[0]) => {
 }
 const stock = async (id: string) => Number((await prisma.inventory.findUniqueOrThrow({ where: { productId: id } })).currentStock)
 beforeAll(() => {
-  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/)
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/)
 })
 afterAll(async () => {
   for (const s of fixtures) await s.cleanup()

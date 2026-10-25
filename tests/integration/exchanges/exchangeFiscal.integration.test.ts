@@ -52,7 +52,7 @@ afterAll(async () => {
   await prisma.$disconnect()
 })
 describe('exchange fiscal treatment against Postgres', () => {
-  beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/))
+  beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/))
   it('new order paid with exchange credit resolves the issuer through the root merchant with two RFCs', async () => {
     const s = await seed(true)
     const other = await issuer(s, 'BBB010101BBB')

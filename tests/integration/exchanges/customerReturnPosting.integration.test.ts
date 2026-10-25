@@ -21,7 +21,7 @@ const fixture = `return-${process.pid}-${Date.now()}`
 const old = () => new Date(Date.now() - 4 * 60 * 1000)
 
 beforeAll(async () => {
-  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/)
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/)
   organizationId = (await prisma.organization.create({ data: { name: fixture, email: `${fixture}@example.test`, phone: '5500000000' } })).id
   venueId = (await prisma.venue.create({ data: { organizationId, name: fixture, slug: fixture } })).id
   staffId = (await prisma.staff.create({ data: { email: `${fixture}@staff.test`, firstName: 'Caja', lastName: 'Cambio' } })).id

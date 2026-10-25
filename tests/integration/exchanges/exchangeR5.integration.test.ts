@@ -23,7 +23,7 @@ let s: Seed
 beforeAll(() => {
   const u = new URL(process.env.TEST_DATABASE_URL!)
   expect(['localhost', '127.0.0.1']).toContain(u.hostname)
-  expect(u.pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/)
+  expect(u.pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/)
 })
 beforeEach(async () => {
   s = await seedClothingSale()

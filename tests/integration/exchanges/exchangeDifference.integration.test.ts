@@ -67,7 +67,7 @@ async function expectNoExchange(s: Seed, before: number) {
   expect(await prisma.inventoryPosting.count({ where: { venueId: s.venueId } })).toBe(0)
   expect(await eventsOf(s)).toEqual([])
 }
-beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/))
+beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/))
 beforeEach(() => jest.clearAllMocks())
 afterEach(() => jest.restoreAllMocks())
 afterAll(async () => {
