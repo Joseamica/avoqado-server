@@ -144,6 +144,7 @@ const filaCreada = () => prismaMock.payment.create.mock.calls[0][0].data as Reco
 describe('writeRefundInTx — semántica de dinero explícita y marca del cambio', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date('2026-10-25T12:00:00.000Z') }])
     prismaMock.shift.findFirst.mockResolvedValue({ id: SHIFT, status: 'OPEN' } as never)
     prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as never)
     prismaMock.payment.create.mockResolvedValue({ id: REFUND } as never)
@@ -224,14 +225,14 @@ describe('writeRefundInTx — semántica de dinero explícita y marca del cambio
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
   })
 
-  it('without moneyAs preserves the cash refund fields and leaves the date to Prisma', async () => {
+  it('without moneyAs preserves the cash refund fields with the locked accounting date', async () => {
     const efectivo = cobroBloqueado({ method: 'CASH', merchantAccountId: null, fundsFlow: 'CASH_DRAWER' })
     await writeRefundInTx(tx, entrada({ salesRefundCents: 5000 }, efectivo))
 
     expect(prismaMock.payment.create.mock.calls[0][0]).toStrictEqual({
       data: {
         venueId: VENUE,
-        createdAt: undefined,
+        createdAt: new Date('2026-10-25T12:00:00.000Z'),
         orderId: ORDER,
         shiftId: SHIFT,
         processedById: STAFF,

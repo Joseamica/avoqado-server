@@ -69,6 +69,7 @@ import { combinarContratos } from '../fiscal/contratoDePrecio'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
+  accountingAtForLockedOrder,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
@@ -3495,7 +3496,7 @@ export async function registrarAbonoEnTx(
     data: {
       venueId,
       orderId,
-      createdAt: entrada.createdAt,
+      createdAt: entrada.createdAt ?? (await accountingAtForLockedOrder(tx, { venueId, orderId })),
       amount: amountDecimal,
       tipAmount: tipDecimal,
       method: resolvedTender?.method ?? paymentMethod,

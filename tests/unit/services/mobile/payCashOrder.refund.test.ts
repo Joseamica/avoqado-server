@@ -126,6 +126,7 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}, seededPayments: F
 
   const payments: FakePayment[] = [...seededPayments]
 
+  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
 
   prismaMock.order.findUnique.mockImplementation(async ({ where }: any) => {

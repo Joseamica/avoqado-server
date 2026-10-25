@@ -45,6 +45,7 @@ jest.mock('@/services/dashboard/autoReorder.service', () => ({
 describe('order.mobile.service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     // payCashOrder sums prior COMPLETED payments (split-the-bill); default: none.
     prismaMock.payment.findMany.mockResolvedValue([])
@@ -917,6 +918,7 @@ describe('createOrderWithItems — enums del body validados ANTES de tocar la DB
 describe('createOrderWithItems idempotency (externalId)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
   })
 

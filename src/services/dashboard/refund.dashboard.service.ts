@@ -38,6 +38,7 @@ import { computeTenderCommission } from './tenderType.dashboard.service'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
+  accountingAtForLockedOrder,
   lockExistingOrderForPayment,
   recordRefundAuthorityReconciliation,
   recordPendingPaymentShiftReconciliation,
@@ -512,7 +513,7 @@ function camposDeSemanticaDada(m: RefundMoneySemantics) {
  * `issueRefund` lo llama con los defaults de siempre (`NONE` · `CLAIM_LIVE` · `MANUAL`).
  */
 interface WriteRefundBase {
-  /** Fecha contable de una operación compuesta; ausente conserva el reloj del reembolso ordinario. */
+  /** Fecha común de una operación compuesta; ausente usa la autoridad contable bajo los candados del cobro. */
   createdAt?: Date
   originalPaymentId: string
   venueId: string
@@ -685,7 +686,7 @@ export async function writeRefundInTx(
   const refundPayment = await tx.payment.create({
     data: {
       venueId: input.venueId,
-      createdAt: input.createdAt,
+      createdAt: input.createdAt ?? (await accountingAtForLockedOrder(tx, { venueId: input.venueId, orderId: original.orderId })),
       orderId: original.orderId,
       shiftId: shiftId || undefined,
       processedById: input.staffId || undefined,

@@ -98,6 +98,7 @@ describe('deductTrackedInventoryForFreeCart — vales por área', () => {
         },
       ],
     }
+    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
     prismaMock.payment.findUnique.mockResolvedValue(null)
@@ -252,6 +253,7 @@ describe('🔴 R12-1: payCashOrder le dice a la sesión de vales si el dinero ya
   }
   beforeEach(() => {
     jest.clearAllMocks()
+    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     prismaMock.staffVenue.findFirst.mockResolvedValue({ id: 'sv-1', staffId: 'staff-1', venueId: 'venue-1', active: true })
     prismaMock.payment.findUnique.mockResolvedValue(null)

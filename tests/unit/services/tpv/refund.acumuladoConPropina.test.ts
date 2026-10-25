@@ -573,6 +573,7 @@ describe('Task 5r — lo que el dashboard escribe es lo que la terminal lee', ()
       .mockResolvedValueOnce([{ id: 'order-1' }])
       .mockResolvedValueOnce([cobro])
       .mockResolvedValueOnce([reembolsoPrevio])
+      .mockResolvedValue([{ accountingAt: new Date() }])
 
     await issueRefund({ venueId: VENUE, paymentId: 'pay-orig', amount: 6000, reason: 'RETURNED_GOODS', staffId: 'staff-9' })
 

@@ -1,9 +1,8 @@
 import { OrderSource, OrderType, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
-import { utcTs } from '@/utils/sqlDates'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeOrderBalance } from '../shared/orderBalance'
-import { lockExistingOrderForPayment, MAX_ORDER_LOCK_SCOPE } from '../shared/paymentShiftClaim'
+import { accountingAtForLockedOrder, lockExistingOrderForPayment, MAX_ORDER_LOCK_SCOPE } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { keptMarkdownDiscountRow } from '../shared/discount.service'
 import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
@@ -119,23 +118,7 @@ export async function prepareExchangeInTx(
     return { replay: existing.result as unknown as ExchangeResponse }
   }
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: originalOrderId }))) throw new NotFoundError('No se encontró la venta.')
-  // Las mismas Orders ya reclamadas: el reloj no puede adelantar el cambio a un movimiento confirmado del libro.
-  const [{ accountingAt }] = await tx.$queryRaw<Array<{ accountingAt: Date }>>`
-    WITH RECURSIVE ancestors(id) AS (
-      SELECT id FROM "Order" WHERE id = ${originalOrderId} AND "venueId" = ${venueId}
-      UNION
-      SELECT root."orderId" FROM ancestors child
-      JOIN "Payment" credit ON credit."orderId" = child.id AND credit."venueId" = ${venueId}
-      JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
-      JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
-      JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
-    ), scope AS MATERIALIZED (SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))})
-    SELECT GREATEST(${utcTs(new Date())}, MAX(m."createdAt") + INTERVAL '1 millisecond') AS "accountingAt"
-    FROM scope LEFT JOIN LATERAL (
-      SELECT p."createdAt" FROM "Payment" p
-      WHERE p."orderId" = scope.id AND p."venueId" = ${venueId} AND p.status = 'COMPLETED'
-      ORDER BY p."createdAt" DESC LIMIT 1
-    ) m ON true`
+  const accountingAt = await accountingAtForLockedOrder(tx, { venueId, orderId: originalOrderId })
   const sale = await loadSaleForExchange(tx, venueId, originalOrderId)
   if (!sale.payments.some(p => p.id === body.originalPaymentId)) notReturnable('NOT_PAID')
   if (!sale.charged.atribuible) notReturnable('NOT_ATTRIBUTABLE')
