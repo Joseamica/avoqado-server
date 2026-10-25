@@ -6,6 +6,7 @@
  * Sólo crea filas propias (sufijo único) y las borra en `afterAll`, falle o no.
  */
 import { DeliveryProvider, type DeliveryChannelLink } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { cancelDeliveryOrder } from '@/services/delivery-channels/core/cancelDeliveryOrder.service'
@@ -98,6 +99,8 @@ describe('Rappi 2b: la lista «Rappi · por cobrar»', () => {
   async function pedido(raw: any, venue = 0): Promise<{ orderId: string; folio: string }> {
     const copia = JSON.parse(JSON.stringify(raw))
     copia.order_detail.order_id = `${copia.order_detail.order_id}-${sufijo}-${++n}`
+    // La lista «por cobrar» sólo mira 2 días atrás: con la fecha fija del pedido grabado, la prueba caducaba sola (25-oct).
+    copia.order_detail.created_at = formatInTimeZone(new Date(), 'America/Mexico_City', 'yyyy-MM-dd HH:mm:ss')
     const { order } = await ingestDeliveryOrder(normalizeRappiOrder(copia), links[venue])
     return { orderId: order.id, folio: copia.order_detail.order_id }
   }
