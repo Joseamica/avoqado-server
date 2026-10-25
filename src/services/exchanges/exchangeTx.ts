@@ -2,7 +2,7 @@ import { OrderSource, OrderType, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeOrderBalance } from '../shared/orderBalance'
-import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { lockExistingOrderForPayment, MAX_ORDER_LOCK_SCOPE } from '../shared/paymentShiftClaim'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { keptMarkdownDiscountRow } from '../shared/discount.service'
 import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
@@ -16,7 +16,7 @@ import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
 import { bloquearSobresDelReembolsoEnTx, alRegistrarReembolsoEnTx } from '../giftCards/giftCardCancel.service'
 import { enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
-import { loadSaleForExchange } from './exchangeSale'
+import { loadSaleForExchange, MAX_EXCHANGE_SALE_PAYMENTS } from './exchangeSale'
 import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
 import { calculateExchange, pieceValuesCents, splitItemsAcrossRefundRows, type ReturnedPiece } from './exchangeCalculator'
 import {
@@ -29,7 +29,7 @@ import {
   type AllocationSlice,
 } from './exchangeRules'
 import { EXCHANGE_REFUND_ROLE } from './exchangeMarks'
-import { resolveExchangeCreditTenderInTx } from './exchangeCreditTender'
+import { ensureExchangeCreditTender, resolveExchangeCreditTenderInTx } from './exchangeCreditTender'
 import { ExchangeError, itemNotReturnable as notReturnable } from './exchangeErrors'
 import { isExchangeCreditTenderKind, NON_MERCHANDISE_PRODUCT_TYPES } from './exchangePredicates'
 import { resolverPreciosDeLineas } from '../mobile/precioQueVioElCliente'
@@ -322,6 +322,34 @@ export async function prepareExchangeInTx(
   const slices: AllocationSlice[] = allocation.slices
   if (calc.returnedCents === 0) slices.push({ paymentId: body.originalPaymentId, cents: 0, role: 'CREDIT', mode: null })
   const paymentById = new Map(sale.payments.map(p => [p.id, p]))
+  const credits = slices.filter(s => s.role === 'CREDIT' && s.cents > 0)
+  const paymentCount = credits.length + Number(calc.kind === 'COLLECT') + Number(calc.takenCents === 0)
+  const resultTooLarge = () =>
+    new ConflictError(
+      'El cambio generaría una venta con demasiados cobros o ventas enlazadas para poder devolverla con seguridad. Haz un cambio más pequeño.',
+      'EXCHANGE_RESULT_TOO_LARGE',
+    )
+  if (paymentCount > MAX_EXCHANGE_SALE_PAYMENTS) throw resultTooLarge()
+  const roots = [...new Set(credits.map(s => paymentById.get(s.paymentId)!.rootPaymentId))]
+  if (roots.length) {
+    // El crédito apunta a las raíces, no necesariamente al origen. Incluye SU ascendencia (incluso créditos ya devueltos).
+    const [{ n }] = await tx.$queryRaw<Array<{ n: number }>>`
+      WITH RECURSIVE ancestors(id) AS (
+        SELECT "orderId" FROM "Payment" WHERE "venueId"=${venueId} AND id=ANY(${roots}::text[]) AND "orderId" IS NOT NULL
+        UNION
+        SELECT parent.id FROM ancestors child
+        JOIN "Payment" credit ON credit."orderId"=child.id AND credit."venueId"=${venueId}
+        JOIN "ExchangeCreditLink" link ON link."creditPaymentId"=credit.id AND link."venueId"=credit."venueId"
+        JOIN "Payment" root ON root.id=link."originPaymentId" AND root."venueId"=credit."venueId"
+        JOIN "Order" parent ON parent.id=root."orderId" AND parent."venueId"=credit."venueId"
+      ), scope AS MATERIALIZED (SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))})
+      SELECT COUNT(*)::int AS n FROM scope`
+    // La venta nueva es una Order adicional. Leer sólo MAX alcanza para rechazar, nunca para truncar y aceptar.
+    if (n + 1 > MAX_ORDER_LOCK_SCOPE) throw resultTooLarge()
+  }
+  // Se crea sólo tras validar topes y en ESTA transacción: no se suelta el cerco Venue/Orders ni se deja configuración al rechazar.
+  await ensureExchangeCreditTender(tx, venueId, true)
+  const ec = await resolveExchangeCreditTenderInTx(tx, venueId)
   // Las órdenes y TODAS sus raíces ya están tomadas por fecha; aquí el id sólo ordena Payments, nunca Orders.
   const lockIds = [...new Set(slices.flatMap(s => [s.paymentId, paymentById.get(s.paymentId)!.rootPaymentId]))].sort()
   for (const id of lockIds) {
@@ -385,7 +413,6 @@ export async function prepareExchangeInTx(
       isOfflineReplay: false,
     },
   })
-  const ec = await resolveExchangeCreditTenderInTx(tx, venueId)
   const money: RefundMoneySemantics = { ...ec, merchantAccountId: null, source: 'OTHER' }
   const split = splitItemsAcrossRefundRows(
     pieces.map(p => ({ orderItemId: p.orderItemId, cents: p.paidCents })),

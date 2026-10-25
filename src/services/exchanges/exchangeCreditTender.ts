@@ -14,10 +14,11 @@ import { normalizeTenderName, type ResolvedTenderCharge } from '../dashboard/ten
 export const EXCHANGE_CREDIT_TENDER_NAME = 'Crédito de cambio'
 const EXCHANGE_CREDIT_TENDER_ALTERNATE_NAME = 'Crédito de cambio (Avoqado)'
 
-/** Llamar con el cliente GLOBAL, fuera de transacciones de dinero: el `create` puede chocar en una carrera (P2002). */
+/** En una transacción existente, el savepoint permite recuperar P2002 sin abortar el cambio ni soltar sus candados. */
 export async function ensureExchangeCreditTender(
   db: Prisma.TransactionClient | PrismaClient,
   venueId: string,
+  inTransaction = false,
 ): Promise<{ id: string; revision: number }> {
   const existente = await db.venueTenderType.findFirst({
     where: { venueId, systemKind: 'EXCHANGE_CREDIT' },
@@ -31,6 +32,7 @@ export async function ensureExchangeCreditTender(
   })
   const nombre = nombreOcupado ? EXCHANGE_CREDIT_TENDER_ALTERNATE_NAME : EXCHANGE_CREDIT_TENDER_NAME
 
+  if (inTransaction) await db.$executeRaw`SAVEPOINT exchange_credit_tender`
   try {
     return await db.venueTenderType.create({
       data: {
@@ -64,6 +66,7 @@ export async function ensureExchangeCreditTender(
       select: { id: true, revision: true },
     })
   } catch (error) {
+    if (inTransaction) await db.$executeRaw`ROLLBACK TO SAVEPOINT exchange_credit_tender`
     if ((error as { code?: string }).code !== 'P2002') throw error
     const ganador = await db.venueTenderType.findFirst({
       where: { venueId, systemKind: 'EXCHANGE_CREDIT' },
@@ -71,6 +74,8 @@ export async function ensureExchangeCreditTender(
     })
     if (ganador) return ganador
     throw error
+  } finally {
+    if (inTransaction) await db.$executeRaw`RELEASE SAVEPOINT exchange_credit_tender`
   }
 }
 

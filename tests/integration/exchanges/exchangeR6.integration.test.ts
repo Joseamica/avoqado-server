@@ -1,6 +1,7 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createExchange } from '@/services/exchanges/exchange.service'
+import { ensureExchangeCreditTender } from '@/services/exchanges/exchangeCreditTender'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { getIncomeStatement } from '@/services/dashboard/accounting.dashboard.service'
 import { leerCobradoDeLaOrden } from '@/services/fiscal/cobradoDeLaOrden'
@@ -32,8 +33,10 @@ afterEach(async () => {
 })
 afterAll(() => prisma.$disconnect())
 
-it('serializes two sales paid A+B when one payout starts at A and the other at B, with exact balances', async () => {
+it.each([false, true])('serializes two sales paid A+B with exact balances (tender initialized=%s)', async initialized => {
   s = await seedClothingSale({ list: 200 })
+  // El caso con barrera observa sobres, no la serialización única del primer alta del tender.
+  if (initialized) await ensureExchangeCreditTender(prisma, s.venueId)
   await prisma.payment.deleteMany({ where: { venueId: s.venueId } })
   const cards = await sembrarVentaDeTarjetas({ ...s, montos: [500, 500], metodo: 'CASH' })
   await prisma.product.update({ where: { id: s.products[3].id }, data: { price: 50 } })
@@ -82,42 +85,48 @@ it('serializes two sales paid A+B when one payout starts at A and the other at B
   const secondPid = new Promise<number>(r => (secondPidReady = r))
   let firstPid = 0
   const real = ledger.lockGiftCardsForUpdate
-  jest.spyOn(ledger, 'lockGiftCardsForUpdate').mockImplementation(async (tx, ids) => {
-    const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
-    const first = firstPid === 0
-    if (first) firstPid = pid
-    if (pid !== firstPid) secondPidReady(pid)
-    const rows = await real(tx, ids)
-    if (first) {
-      ready()
-      await resume
-    }
-    return rows
-  })
+  if (initialized)
+    jest.spyOn(ledger, 'lockGiftCardsForUpdate').mockImplementation(async (tx, ids) => {
+      const [{ pid }] = await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+      const first = firstPid === 0
+      if (first) firstPid = pid
+      if (pid !== firstPid) secondPidReady(pid)
+      const rows = await real(tx, ids)
+      if (first) {
+        ready()
+        await resume
+      }
+      return rows
+    })
   const a = Promise.allSettled([createExchange(input(0))])
   let b: typeof a | undefined
   try {
-    await Promise.race([
-      firstLocked,
-      a.then(() => {
-        throw new Error('First payout never acquired an envelope')
-      }),
-    ])
-    b = Promise.allSettled([createExchange(input(1))])
-    const pid = await Promise.race([
-      secondPid,
-      b.then(() => {
-        throw new Error('Second payout never reached envelopes')
-      }),
-    ])
-    const until = Date.now() + 5000
-    for (;;) {
-      const [{ blocked }] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`
+    if (initialized) {
+      await Promise.race([
+        firstLocked,
+        a.then(() => {
+          throw new Error('First payout never acquired an envelope')
+        }),
+      ])
+      b = Promise.allSettled([createExchange(input(1))])
+      const pid = await Promise.race([
+        secondPid,
+        b.then(results => {
+          throw new Error(
+            'Second payout never reached envelopes: ' +
+              results.map(r => (r.status === 'rejected' ? String(r.reason) : r.status)).join('; '),
+          )
+        }),
+      ])
+      const until = Date.now() + 5000
+      for (;;) {
+        const [{ blocked }] = await prisma.$queryRaw<Array<{ blocked: boolean }>>`
         SELECT ${firstPid}::int = ANY(pg_blocking_pids(${pid}::int)) AS blocked`
-      if (blocked) break
-      if (Date.now() > until) throw new Error('Second payout never waited on the first envelope')
-      await new Promise(r => setTimeout(r, 10))
-    }
+        if (blocked) break
+        if (Date.now() > until) throw new Error('Second payout never waited on the first envelope')
+        await new Promise(r => setTimeout(r, 10))
+      }
+    } else b = Promise.allSettled([createExchange(input(1))])
     release()
     const results = [...(await a), ...(await b)]
     expect(results.map(r => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled'])

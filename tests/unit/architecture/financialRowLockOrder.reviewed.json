@@ -1,0 +1,1046 @@
+{
+  "sql": {
+    "src/jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSalesForRule": {
+      "count": 2,
+      "loops": 0,
+      "reason": "El bucle abre una transacción POR Order; dentro toma una Order y todos sus Payments por id, sin retener ventas previas."
+    },
+    "src/services/b4bit/b4bit.service.ts#lockB4BitPaymentRow": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createRefundCommission": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Reentrada de la raíz tras reclamar la venta y ascendencia completas; el worker y CHAIN las poseen antes de Payments."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#anularComision": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createSplitCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#freezePaymentCommissionInTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/fiscal/admisionIva.ts#bloquearOrdenParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/fiscal/admisionIva.ts#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Varias Orders en UNA sentencia, createdAt DESC/id DESC; fiscal no toma sesiones después de Orders."
+    },
+    "src/services/giftCards/giftCardLedger.ts#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
+    },
+    "src/services/mobile/areaTicketV7.mobile.service.ts#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order de la sesión; sesión y vales antes. El modo lockOrder:false sólo toma sesiones/vales para la unión posterior."
+    },
+    "src/services/mobile/areaTicketV7.mobile.service.ts#finalizeAreaTicketPaymentInTransaction": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order de la sesión; sesión y vales antes. El modo lockOrder:false sólo toma sesiones/vales para la unión posterior."
+    },
+    "src/services/payments/deferredTransactionCost.service.ts#convergerCostoDeTransaccion": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
+    },
+    "src/services/referrals/referralQualification.service.ts#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/referrals/referralRefund.service.ts#revertQualifiedReferral": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/shared/candadosDelLote.ts#bloquearSinEsperar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Payment de la unión global ya ordenada de candadosDelLote; NOWAIT/savepoints liberan el intento antes de retomarlo (R6)."
+    },
+    "src/services/shared/cobroDelProtocolo.ts#bloquearPayments": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
+    },
+    "src/services/shared/ligaDeClienteEnVenta.ts#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/shared/paymentShiftClaim.ts#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y TODA su ascendencia en UNA sentencia canónica, máximo 50; Venue antes de Orders."
+    },
+    "src/services/shared/tableOrderLock.ts#lockOrdersForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Varias Orders en UNA sentencia, createdAt DESC/id DESC; fiscal no toma sesiones después de Orders."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.sendPaymentToTerminal": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/angelpay-webhook.service.ts#reabrirEventosDebiles": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de Payments o GiftCards por id ASC antes del primer candado; los reingresos no amplían el conjunto (R6)."
+    },
+    "src/services/tpv/digitalReceipt.tpv.service.ts#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/no-instrument-resolution.service.ts#resolveNoInstrument": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Reentrada de la raíz ya poseída por lockExistingOrderForPayment(claim.orderId); no reclama otra Order nueva (R5)."
+    },
+    "src/services/tpv/refund.tpv.service.ts#recordRefund": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/registroRepetido.ts#consolidarRegistroRepetidoDetallado": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/sale-verification.service.ts#lockPaymentAuthority": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/uncharged-reconciliation.service.ts#reconcileUncharged": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    }
+  },
+  "callers": {
+    "src/controllers/mobile/terminal-payment.mobile.controller.ts#sendTerminalPayment#sendPaymentToTerminal": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/controllers/tpv/refund.tpv.controller.ts#recordRefund#recordRefund": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/controllers/tpv/terminal-payment.tpv.controller.ts#resolveNoInstrument#resolveNoInstrument": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/jobs/giftCardReconciliation.job.ts#activarCuentaEnDb#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/jobs/playtelecomEventSimReassignment.job.ts#reassignEventSimSales#reassignEventSimSalesForRule": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/b4bit/b4bit.service.ts#failB4BitPaymentInTx#lockB4BitPaymentRow": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment cripto por transacción; la confirmación ya tomó su Order y el fallo no espera Orders."
+    },
+    "src/services/b4bit/b4bit.service.ts#completeAndAttributeB4BitPaymentInTx#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/b4bit/b4bit.service.ts#completeAndAttributeB4BitPaymentInTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/b4bit/b4bit.service.ts#completeAndAttributeB4BitPaymentInTx#lockB4BitPaymentRow": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment cripto por transacción; la confirmación ya tomó su Order y el fallo no espera Orders."
+    },
+    "src/services/b4bit/b4bit.service.ts#handlePaymentConfirmed#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/b4bit/b4bit.service.ts#handlePaymentConfirmed#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createCommissionForPayment#createCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createRefundCommission#createRefundCommission": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createRefundCommission#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#anularComision#anularComision": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#voidCommissionCalculation#anularComision": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createSplitCommissionForPayment#createCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#createSplitCommissionForPayment#createSplitCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#freezePaymentCommissionInTx#createSplitCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/dashboard/commission/commission-calculation.service.ts#freezePaymentCommissionInTx#createCommissionForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/dashboard/commission/commission-clawback.service.ts#createClawback#anularComision": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance#lockOrdersForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Varias Orders: pasa el conjunto COMPLETO una sola vez al helper canónico, nunca por grupos; sesiones/vales previos cuando aplican."
+    },
+    "src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance#onOrderPaid": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/discountEngine.service.ts#lockDiscountOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/dashboard/manualPayment.service.ts#createManualPayment#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/dashboard/manualPayment.service.ts#createManualPayment#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/dashboard/manualPayment.service.ts#createManualPayment#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#updateOrder#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#updateOrder#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#settleOrder#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#settleOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/dashboard/order.dashboard.service.ts#settleOrder#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/paymentLink.service.ts#completeCharge#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#bloquearCobroParaReembolso#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#writeRefundInTx#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+    },
+    "src/services/dashboard/refund.dashboard.service.ts#issueRefund#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/delivery-channels/core/cancelDeliveryOrder.service.ts#cancelDeliveryOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/delivery-channels/core/deliveryReconciliation.service.ts#reconcileDeliveryOrderFromProvider#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 0,
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 1,
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+    },
+    "src/services/fiscal/cfdi.service.ts#emitirConEntrada#bloquearOrdenParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order fiscal por transacción; admisión antes de la Order y sus Products después."
+    },
+    "src/services/fiscal/cfdi.service.ts#enviarIntentoCapturado#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/fiscal/cfdi.service.ts#anotarIntencionDeCancelar#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/fiscal/cfdi.service.ts#aplicarCancelacion#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/fiscal/cfdiCreditNote.service.ts#emitRefundCreditNote#bloquearOrdenParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order fiscal por transacción; admisión antes de la Order y sus Products después."
+    },
+    "src/services/fiscal/cfdiCreditNote.service.ts#emitirLegacy#bloquearOrdenParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order fiscal por transacción; admisión antes de la Order y sus Products después."
+    },
+    "src/services/fiscal/cfdiExtraccion.service.ts#emitirExtraccion#bloquearOrdenParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order fiscal por transacción; admisión antes de la Order y sus Products después."
+    },
+    "src/services/fiscal/cfdiGlobal.service.ts#anularFilaViejaConMotivo#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/fiscal/cfdiGlobal.service.ts#emitirGlobalDelPeriodo#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/fiscal/cfdiGlobal.service.ts#emitirGlobalLegacy#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/fiscal/encendidoIva.service.ts#encenderBajoCandados#bloquearOrdenesParaFacturar": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Manifiesto COMPLETO y unión de admisiones antes de una sentencia canónica de Orders; no llama por página ni pide sesiones después."
+    },
+    "src/services/giftCards/giftCardCancel.service.ts#bloquearSobresDelReembolsoEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardCancel.service.ts#devolverVentaDeTarjetasEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardCancel.service.ts#abrirVentaDeTarjetasEnTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/giftCards/giftCardCancel.service.ts#abrirVentaDeTarjetasEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#activarSobresDeCuentaPagadaEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#revertirCanjeEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#operarSobreDeGerenteEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#desactivarSobresDeCuentaEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/giftCards/giftCardLedger.ts#desactivarSobresPendientesDeCuentaEnTx#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/kds/kitchenTicketAuthoring.service.ts#authorKitchenTickets#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas#lockOrdersForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Varias Orders: pasa el conjunto COMPLETO una sola vez al helper canónico, nunca por grupos; sesiones/vales previos cuando aplican."
+    },
+    "src/services/mobile/areaTicketV7.mobile.service.ts#lockAreaTicketCheckoutForPayment#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/mobile/areaTicketV7.mobile.service.ts#cerrarSesionDeVentaCerradaPorOtroCanal#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/mobile/cancelOrderEffects.service.ts#tryDrainCancelledOrderEffects#revertQualifiedReferral": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/mobile/comp-item.mobile.service.ts#compOrderItemInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/comp-item.mobile.service.ts#compWholeOrderInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/kdsOutOfStock.mobile.service.ts#enviarYAplicar#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/loyalty.mobile.service.ts#redeemPointsToOrderInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/order.mobile.service.ts#createOrderWithItems#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/order.mobile.service.ts#removeOrderDiscountInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/order.mobile.service.ts#splitOrderItemsInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/order.mobile.service.ts#splitOrderBySeatInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/order.mobile.service.ts#mergeOrdersInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx#finalizeAreaTicketPaymentInTransaction": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order de la sesión ya poseída; los reingresos de sesión, vales y Order son del mismo conjunto."
+    },
+    "src/services/mobile/order.mobile.service.ts#payCashOrder#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder#bloquearCobroParaReembolso": {
+      "count": 2,
+      "loops": 2,
+      "reason": "La Order y ascendencia están poseídas antes de Payments; una Payment o unión por id ASC. En bucle no introduce Orders nuevas (R5/R6)."
+    },
+    "src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+    },
+    "src/services/mobile/order.mobile.service.ts#attachCustomerToOrder#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
+    },
+    "src/services/mobile/order.mobile.service.ts#cancelOrderInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/mobile/service-charge.mobile.service.ts#requireOpenOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/transitions.service.ts#casTransition#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/payments/deferredTransactionCost.service.ts#asegurarCostoSincrono#convergerCostoDeTransaccion": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/payments/deferredTransactionCost.service.ts#settleDeferredTransactionCost#convergerCostoDeTransaccion": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/pos-sync/posSyncOrder.service.ts#processPosOrderEvent#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/pos-sync/posSyncOrderItem.service.ts#applyPosOrderItemEvent#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/promotions/promotion.service.ts#applyPromotionInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/promotions/promotion.service.ts#removePromotionFromOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/referrals/referralRefund.service.ts#revertReferralRewardForOrder#revertQualifiedReferral": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/reservation/createOrderFromReservation.ts#createOrderFromReservation#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/shared/candadosDelLote.ts#bloquearLoteConOriginales#bloquearSinEsperar": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Recorre la UNIÓN global de originales/candidatos en id ASC; savepoint suelta el intento completo antes de retomar, no grupos (R6)."
+    },
+    "src/services/shared/candadosDelLote.ts#bloquearLoteConOriginales#bloquearPayments": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Recorre la UNIÓN global de originales/candidatos en id ASC; savepoint suelta el intento completo antes de retomar, no grupos (R6)."
+    },
+    "src/services/shared/cobroDelProtocolo.ts#bloquearConSuOriginal#bloquearPayments": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Recorre la UNIÓN global de originales/candidatos en id ASC; savepoint suelta el intento completo antes de retomar, no grupos (R6)."
+    },
+    "src/services/shared/orderCancelGuard.ts#lockAndReadOrderForCancel#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/shared/receiptForPayment.service.ts#getReceiptForPayment#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/shared/tableOrderLock.ts#lockTableOrderScope#lockOrdersForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Varias Orders: pasa el conjunto COMPLETO una sola vez al helper canónico, nunca por grupos; sesiones/vales previos cuando aplican."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.closeRow#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.reconcileStaleRequests#findReconcilablePayment": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.reconcileStaleRequests#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.releaseUnprovenNegative#findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.releaseUnprovenNegative#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.conciliarORetenerLiberada#findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.conciliarORetenerLiberada#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.reconcileUnknownRequests#findReconcilablePayment": {
+      "count": 2,
+      "loops": 1,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.reconcileUnknownRequests#closeRowFromPaymentTx": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.releaseUnknownRequest#reconcileUncharged": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.releaseUnknownRequest#findReconcilablePayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/terminal-payment.service.ts#TerminalPaymentService.releaseUnknownRequest#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/tpv/angelpay-webhook.service.ts#recuperarEventosDebilesPorVinculo#reabrirEventosDebiles": {
+      "count": 2,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/tpv/discount.tpv.service.ts#applyCouponCode#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/fastPaymentCustomer.ts#linkCustomerToExistingOrder#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
+    },
+    "src/services/tpv/order.tpv.service.ts#createOrder#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/order.tpv.service.ts#createOrderWithItems#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/order.tpv.service.ts#addItemsToOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/order.tpv.service.ts#updateGuestInfo#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
+    },
+    "src/services/tpv/order.tpv.service.ts#removeOrderItem#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/order.tpv.service.ts#compItems#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/order.tpv.service.ts#voidItems#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/order.tpv.service.ts#applyDiscount#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/order.tpv.service.ts#leerVentaBajoCandado#bloquearVentaParaLiga": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por transacción FOR NO KEY UPDATE; no toma ventas de clientes/filas previas."
+    },
+    "src/services/tpv/order.tpv.service.ts#addSerializedItemToOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/payment.tpv.service.ts#resolverPorReferencia#consolidarRegistroRepetidoDetallado": {
+      "count": 1,
+      "loops": 1,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/payment.tpv.service.ts#ensureDigitalReceiptResponse#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/payment.tpv.service.ts#finalizeCapturedAreaTicketPayment#finalizeAreaTicketPaymentInTransaction": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order de la sesión ya poseída; los reingresos de sesión, vales y Order son del mismo conjunto."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordOrderPayment#lockAreaTicketCheckoutHierarchy": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una sesión/vales antes de su venta; liquidación usa lockOrder:false en todas y después toma la unión de Orders."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordOrderPayment#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordOrderPayment#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordOrderPayment#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordFastPayment#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/tpv/payment.tpv.service.ts#recordFastPayment#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect#revertQualifiedReferral": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect#onOrderPaid": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/paymentEffects.service.ts#enqueuePaymentCommissionInTx#freezePaymentCommissionInTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/tpv/paymentEffects.service.ts#enqueueRefundPaymentEffectsInTx#createRefundCommission": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta por efecto, o reentrada de las Orders ya tomadas por el escritor financiero; no amplía el conjunto entre porciones."
+    },
+    "src/services/tpv/refund.tpv.service.ts#recordRefund#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/refund.tpv.service.ts#recordRefund#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/registroRepetido.ts#consolidarRegistroRepetidoDetallado#closeRowFromPaymentTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment exacto por solicitud; reentrada del registrado en esa misma transacción, o transacción propia por fila."
+    },
+    "src/services/tpv/registroRepetido.ts#consolidarRegistroRepetido#consolidarRegistroRepetidoDetallado": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+    },
+    "src/services/tpv/sale-verification.service.ts#createSaleVerification#lockPaymentAuthority": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment tenant-scoped por transacción; sin Orders ni otro Payment después."
+    },
+    "src/services/tpv/sale-verification.service.ts#updateVerificationStatus#lockPaymentAuthority": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment tenant-scoped por transacción; sin Orders ni otro Payment después."
+    },
+    "src/services/tpv/sale-verification.service.ts#createPendingSaleVerification#lockPaymentAuthority": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment tenant-scoped por transacción; sin Orders ni otro Payment después."
+    },
+    "src/services/tpv/sale-verification.service.ts#createOrUpdateProofOfSale#lockPaymentAuthority": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Un Payment tenant-scoped por transacción; sin Orders ni otro Payment después."
+    },
+    "src/services/tpv/table.tpv.service.ts#assignTable#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/table.tpv.service.ts#clearTableInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/table.tpv.service.ts#releaseTableIfSettled#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/table.tpv.service.ts#moveOrderToTableInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/table.tpv.service.ts#reconcileTableAfterOrderRemoved#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/table.tpv.service.ts#assignOrderWaiterInTransaction#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/tpv/table.tpv.service.ts#deleteTable#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/table.tpv.service.ts#setTableStatusInTransaction#lockTableOrderScope": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+    },
+    "src/services/tpv/uncharged-reconciliation.service.ts#reconcileBankDeclined#reconcileUncharged": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/wallet/redeemStampReward.service.ts#redeemStampReward#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    }
+  }
+}

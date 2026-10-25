@@ -31,6 +31,8 @@ const moneyOf = (p: {
 })
 
 /** Una sola lectura acotada de la venta para el cambio y su pantalla. Quien escribe ya tiene el candado de Order. */
+export const MAX_EXCHANGE_SALE_PAYMENTS = 50
+
 export async function loadSaleForExchange(
   db: Prisma.TransactionClient | PrismaClient,
   venueId: string,
@@ -63,7 +65,7 @@ export async function loadSaleForExchange(
     },
   })
   const payments = await db.payment.findMany({
-    take: 51,
+    take: MAX_EXCHANGE_SALE_PAYMENTS + 1,
     where: { venueId, orderId, status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     include: { tenderType: { select: { systemKind: true } } },
@@ -78,7 +80,11 @@ export async function loadSaleForExchange(
     },
     select: { amount: true, tipAmount: true, status: true, processorData: true },
   })
-  if (lines.length > TOPES_POR_ORDEN.renglones || payments.length > 50 || refunds.length > TOPES_POR_ORDEN.movimientos) {
+  if (
+    lines.length > TOPES_POR_ORDEN.renglones ||
+    payments.length > MAX_EXCHANGE_SALE_PAYMENTS ||
+    refunds.length > TOPES_POR_ORDEN.movimientos
+  ) {
     itemNotReturnable('NOT_ATTRIBUTABLE')
   }
   // El detalle conserva el origen del cobro abierto aunque ya esté REFUNDED, sin aportarlo al dinero disponible.

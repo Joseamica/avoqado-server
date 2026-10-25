@@ -612,7 +612,7 @@ const WRITERS: Record<string, Writer> = {
   },
   'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': {
     class: 'LOCKED',
-    lock: LOCK,
+    lock: ['lockOrdersForUpdate('],
     proof: proof(PAYMENT_GUARD, 'settleCustomerBalance', 'adquiere el conjunto estable completo de Orders antes de cualquier Shift'),
   },
   'src/services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment': {
@@ -1215,6 +1215,13 @@ function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
   const visit = (node: ts.Node): void => {
     if (node !== scope && (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node))) return
     if (
+      ts.isCallExpression(node) &&
+      calleeName(node) === 'lockOrdersForUpdate' &&
+      ts.isAwaitExpression(node.parent) &&
+      node.arguments[0]?.getText(sf) === client.text
+    )
+      claims.push(node.getStart(sf))
+    if (
       ts.isTaggedTemplateExpression(node) &&
       ts.isPropertyAccessExpression(node.tag) &&
       node.tag.name.text === '$queryRaw' &&
@@ -1248,6 +1255,7 @@ function orderLockHelpers(code: Map<string, string>, calls: Call[]): Set<string>
   // `bloquearVentaParaLiga` (sellos tardíos, ronda 3): el candado de la venta de las LIGAS de cliente — la MISMA fila, en modo
   // `FOR NO KEY UPDATE` (serializa contra el cobro y las demás ligas sin chocar con las llaves foráneas de las métricas).
   const helpers = new Set(['lockExistingOrderForPayment', 'bloquearVentaParaLiga'])
+  if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockOrdersForUpdate') ?? '')) helpers.add('lockOrdersForUpdate')
   if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockTableOrderScope') ?? '')) helpers.add('lockTableOrderScope')
   for (let grew = true; grew; ) {
     grew = false

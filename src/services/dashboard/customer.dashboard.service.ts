@@ -18,10 +18,10 @@ import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryP
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
 import { esRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
+import { lockOrdersForUpdate } from '../shared/tableOrderLock'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
-  lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
@@ -882,18 +882,19 @@ export async function settleCustomerBalance(
   let sesionesDeValesCerradas = 0
   await prisma.$transaction(async tx => {
     sesionesDeValesCerradas = 0
+    // El mismo cerco de borrado de demo que el cobro individual, antes de reclamar cualquier fila de su unidad.
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
     // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
     // toma el conjunto completo de Orders en orden estable; sólo después puede
     // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
     // esperando Order B frente a un writer unitario que ya posee B.
-    // 🔴 R11-8: por cada venta, en el MISMO orden estable, su jerarquía de vales (sesión → vales → venta; `null` sin sesión) ANTES
-    // de su candado: el orden de la finalización. Nadie toma una sesión después de una venta ajena.
+    // R11-8: TODAS las sesiones/vales antes de cualquier Order; después la unión canónica de ventas, como topología y fiscal.
     const sesionesDeVales = new Map<string, NonNullable<Awaited<ReturnType<typeof lockAreaTicketCheckoutHierarchy>>>['session']>()
     for (const orderId of targetOrderIds) {
-      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId }, { lockOrder: false })
       if (vales) sesionesDeVales.set(orderId, vales.session)
-      await lockExistingOrderForPayment(tx, { venueId, orderId })
     }
+    await lockOrdersForUpdate(tx, { venueId, orderIds: targetOrderIds })
 
     for (const orderId of targetOrderIds) {
       // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y

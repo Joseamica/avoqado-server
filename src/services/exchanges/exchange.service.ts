@@ -23,7 +23,6 @@ import { buildInventoryWarning, mapDigitalReceiptResponse } from '../tpv/payment
 import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import { postCashSaleToDrawer, postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import { effectiveExchangesEnabled } from './exchangeRules'
-import { ensureExchangeCreditTender } from './exchangeCreditTender'
 import { ExchangeError } from './exchangeErrors'
 import type { ExchangeTxOutcome } from './exchangeTx'
 
@@ -191,7 +190,6 @@ export async function createExchange(input: {
     select: { orderId: true },
   })
   if (!original?.orderId) throw new NotFoundError('No se encontró el cobro en esta sucursal.')
-  await ensureExchangeCreditTender(prisma, venueId)
   let outcome: Awaited<ReturnType<typeof executeExchangeInTransaction>>
   try {
     outcome = await executeExchangeInTransaction({ ...input, requestHash, originalOrderId: original.orderId })

@@ -100,6 +100,25 @@ describe('exchangeCreditTender — the «Crédito de cambio» system tender', ()
     await expect(ensureExchangeCreditTender(prismaMock, VENUE)).rejects.toEqual({ code: 'P2028' })
   })
 
+  it('recovers a concurrent tender creation inside the money transaction without leaving it aborted', async () => {
+    prismaMock.$executeRaw.mockResolvedValue(0)
+    prismaMock.venueTenderType.findFirst
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null)
+      .mockImplementationOnce(async () => {
+        const statements = prismaMock.$executeRaw.mock.calls.map((call: unknown[]) => String(call[0]))
+        if (!statements.includes('ROLLBACK TO SAVEPOINT exchange_credit_tender')) throw new Error('25P02 transaction is aborted')
+        return { id: 'tt-winner', revision: 1 }
+      })
+    prismaMock.venueTenderType.create.mockRejectedValueOnce({ code: 'P2002' })
+    await expect(ensureExchangeCreditTender(prismaMock, VENUE, true)).resolves.toEqual({ id: 'tt-winner', revision: 1 })
+    expect(prismaMock.$executeRaw.mock.calls.map((call: unknown[]) => String(call[0]))).toEqual([
+      'SAVEPOINT exchange_credit_tender',
+      'ROLLBACK TO SAVEPOINT exchange_credit_tender',
+      'RELEASE SAVEPOINT exchange_credit_tender',
+    ])
+  })
+
   it('resolveExchangeCreditTenderInTx returns method OTHER, fundsFlow EXTERNAL_RECORDED, tenderCountsAsCash false, tenderSatFormaPago 17', async () => {
     prismaMock.venueTenderType.findFirst.mockResolvedValue({ id: 'tt-ec', baseMethod: 'OTHER', revision: 1 })
     prismaMock.venueTenderTypeRevision.findFirst.mockResolvedValue({

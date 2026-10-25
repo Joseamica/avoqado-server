@@ -1779,14 +1779,13 @@ function topLevelStatementInFunction(call: AstCall): ts.Statement | undefined {
 }
 
 function bulkOrderSetPrecedesShift(calls: AstCall[], functionName: string): boolean {
-  const orderLock = callsForFunction(calls, functionName, 'lockExistingOrderForPayment')[0]
+  const orderLock = callsForFunction(calls, functionName, 'lockOrdersForUpdate')[0]
   const shiftLock = callsForFunction(calls, functionName, 'claimShiftForCapturedPayment')[0]
   if (!orderLock || !shiftLock) return false
   const orderLoop = topLevelStatementInFunction(orderLock)
   const shiftLoop = topLevelStatementInFunction(shiftLock)
-  if (!orderLoop || !shiftLoop || orderLoop === shiftLoop || !ts.isForOfStatement(orderLoop) || !ts.isForOfStatement(shiftLoop))
-    return false
-  if (orderLoop.expression.getText(orderLock.sourceFile) !== 'targetOrderIds') return false
+  if (!orderLoop || !shiftLoop || orderLoop === shiftLoop || ts.isForOfStatement(orderLoop) || !ts.isForOfStatement(shiftLoop)) return false
+  if (!/orderIds:\s*targetOrderIds\b/.test(orderLock.node.arguments[1]?.getText(orderLock.sourceFile) ?? '')) return false
   if (shiftLoop.expression.getText(shiftLock.sourceFile) !== 'targetOrderIds') return false
   if (callsInside(orderLoop, calls).some(call => call.expression === 'claimShiftForCapturedPayment')) return false
   return orderLoop.getStart(orderLock.sourceFile) < shiftLoop.getStart(shiftLock.sourceFile)
@@ -3279,7 +3278,11 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
     ] as const) {
       const calls = parseCalls(file)
       const jerarquia = callsForFunction(calls, lockFn, 'lockAreaTicketCheckoutHierarchy')[0]
-      const venta = callsForFunction(calls, lockFn, 'lockExistingOrderForPayment')[0]
+      const venta = callsForFunction(
+        calls,
+        lockFn,
+        lockFn === 'settleCustomerBalance' ? 'lockOrdersForUpdate' : 'lockExistingOrderForPayment',
+      )[0]
       const vale = callsForFunction(calls, closeFn, posting)[0]
       const cierre = callsForFunction(calls, closeFn, 'cerrarSesionDeValesAlCerrarLaVenta')[0]
       expect({
