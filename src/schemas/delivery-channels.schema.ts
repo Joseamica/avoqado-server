@@ -68,6 +68,23 @@ export const pauseChannelSchema = z.object({
 
 export type PauseChannelLinkBody = z.infer<typeof pauseChannelSchema>['body']
 
+/** POST /venues/:venueId/channels/:linkId/disconnect — el dueño desconecta su tienda de Rappi (fase 3). */
+export const disconnectChannelSchema = z.object({
+  body: z
+    .object({
+      conexionId: z.string({ message: 'La conexión (conexionId) es requerida' }).min(1, 'La conexión (conexionId) es requerida'),
+      forzar: z.boolean({ message: 'forzar debe ser verdadero o falso' }).optional(),
+    })
+    .strict(),
+  params: z
+    .object({
+      venueId: z.string().min(1, 'El venue es requerido'),
+      linkId: z.string().min(1, 'El canal es requerido'),
+    })
+    .passthrough(),
+  query: z.object({}).passthrough().optional(),
+})
+
 /** POST /venues/:venueId/activation-request — el dueño solicita activar delivery (self-serve). */
 export const createActivationRequestSchema = z.object({
   body: z

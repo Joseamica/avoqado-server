@@ -206,4 +206,68 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
       })
     },
   )
+
+  server.tool(
+    'rappi_disconnect',
+    'Desconecta una tienda de Rappi del venue: Avoqado le avisa a Rappi que ya no está integrada y los pedidos nuevos de Rappi dejan de llegar a Avoqado (el historial y los ajustes se conservan; se reconecta con rappi_connect_link). Si Rappi no confirma, no se desconecta (con forzar:true se desconecta igual, y Rappi podría seguir mandando pedidos que sólo se verán en su tableta). Con pedidos de esa tienda en curso no se puede. Primero muestra qué se desconecta; se aplica al llamar de nuevo con confirm:true y el conexionId de la vista previa. Requiere permiso de administrar canales de delivery y plan PREMIUM. Responde "desconecta mi tienda de Rappi". El linkId sale de delivery_channels. Pass venueId.',
+    {
+      venueId: z.string().describe('Venue de la tienda (debe estar en tu scope)'),
+      linkId: z.string().describe('Id del canal de Rappi (de delivery_channels)'),
+      conexionId: z.string().optional().describe('El conexionId que devolvió la vista previa; obligatorio con confirm:true'),
+      confirm: z.boolean().optional().describe('true sólo después de mostrar la vista previa y que el dueño la acepte'),
+      forzar: z
+        .boolean()
+        .optional()
+        .describe(
+          'true sólo si Rappi no aceptó o no confirmó un intento anterior y el dueño acepta que Rappi podría seguir mandando pedidos',
+        ),
+    },
+    async ({ venueId, linkId, conexionId, confirm, forzar }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('delivery-channels:manage', venueId) // mirror the REST route's delivery-channels:manage gate
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Desconectar canales de delivery') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+      const { conexionIdDe, contarPedidosEnCurso, desconectarTiendaRappi } = await import(
+        '@/services/delivery-channels/providers/rappi/rappi.desconectar'
+      )
+      if (confirm !== true || !conexionId) {
+        const link = await prisma.deliveryChannelLink.findFirst({
+          where: { id: linkId, venueId },
+          select: { id: true, provider: true, status: true, externalLocationId: true, externalAccountId: true, config: true },
+        })
+        if (!link) throw new AppError('Canal de delivery no encontrado', 404, true, 'NOT_FOUND')
+        if (link.provider !== 'RAPPI') throw new AppError('Sólo las tiendas de Rappi se desconectan desde aquí.', 400, true, 'SOLO_RAPPI')
+        const pedidosEnCurso = (await contarPedidosEnCurso(prisma, [link.id])).get(link.id) ?? 0
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          venueId,
+          linkId,
+          tienda: link.externalAccountId ?? link.externalLocationId,
+          storeId: link.externalLocationId,
+          estado: link.status,
+          pedidosEnCurso,
+          conexionId: conexionIdDe(link),
+          queVaAPasar:
+            link.status === 'DISABLED'
+              ? 'La tienda ya está desconectada; no hay nada que hacer.'
+              : pedidosEnCurso > 0
+                ? `Hay ${pedidosEnCurso} pedido(s) de Rappi en curso: hay que terminarlos antes de desconectar.`
+                : 'Avoqado le avisa a Rappi que la tienda ya no está integrada y deja de recibir sus pedidos nuevos. El historial y los ajustes se conservan para reconectar.',
+        })
+      }
+      const r = await desconectarTiendaRappi({ venueId, linkId, conexionId, forzar, performedBy: scope.staffId, origen: 'MCP' })
+      // Si otra persona se adelantó no hubo cambio: no se audita un hecho que no ocurrió.
+      if (!r.yaEstaba) {
+        await auditMcpWrite(scope, {
+          action: 'RAPPI_DISCONNECTED',
+          entity: 'DeliveryChannelLink',
+          entityId: linkId,
+          venueId,
+          data: { forzada: r.forzada },
+        })
+      }
+      return text({ ok: true, venueId, linkId, estado: r.link.status, yaEstaba: r.yaEstaba, forzada: r.forzada })
+    },
+  )
 }
