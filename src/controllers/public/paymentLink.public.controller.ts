@@ -11,6 +11,9 @@ import { Request, Response } from 'express'
 import * as paymentLinkService from '@/services/dashboard/paymentLink.service'
 import logger from '@/config/logger'
 
+/** 409 «El precio de esta liga cambió»: el código y el desglose nuevo, para que la página muestre el total nuevo. */
+const precioCambiado = (error: any) => (error?.code === 'PAYMENT_LINK_PRICE_CHANGED' ? { code: error.code, details: error.details } : {})
+
 /**
  * GET /api/v1/public/payment-links/:shortCode
  * Resolves a payment link by short code — returns venue branding + link data
@@ -53,6 +56,7 @@ export async function createCheckout(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Error al procesar el pago',
+      ...precioCambiado(error),
       // El código sí; el identificador del cobro en vuelo NO (es de otro pagador; va al registro del servidor).
       ...(error.code === 'PAYMENT_IN_FLIGHT' ? { code: error.code } : {}),
     })
@@ -79,6 +83,7 @@ export async function createStripeCheckout(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Error al iniciar pago con Stripe',
+      ...precioCambiado(error),
     })
   }
 }
@@ -103,6 +108,7 @@ export async function createStripePaymentIntent(req: Request, res: Response) {
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Error al iniciar pago con Stripe',
+      ...precioCambiado(error),
     })
   }
 }
@@ -126,6 +132,7 @@ export async function createMercadoPagoPaymentIntent(req: Request, res: Response
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Error al iniciar pago con Mercado Pago',
+      ...precioCambiado(error),
     })
   }
 }

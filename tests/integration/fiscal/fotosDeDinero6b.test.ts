@@ -191,8 +191,10 @@ const esperado = {
   cuentaDelCanje: CUENTA.v4,
   // Corte de caja: el efectivo que debe haber (ventas en efectivo más su propina) y cuántos cobros lo forman.
   corte: { esperado: EFECTIVO + PROPINA.v0, cobros: 5 },
-  // El café: nueve piezas en ocho renglones. Sólo el descuento de RENGLÓN baja el renglón; el de cuenta, el combo (mitad café) y el canje no.
-  cafe: { piezas: 9, renglones: 8, vendido: suma(11_600, CUENTA.v1, 2 * 11_600, CUENTA.v3 / 2, 11_600, CUENTA.t1, CUENTA.t2) },
+  // El café: nueve piezas en ocho renglones, a su precio NETO (`lineRevenueSql`). Desde el 24-oct (descuento en ligas, Tarea 0) el renglón
+  // resta también su parte (`reparto.renglones`) de cada descuento que no es espejo: el de CUENTA de V2 ($23.20) y el canje de V4 ($11.60)
+  // ya bajan el café, como el de renglón de V1. El combo de V3 aporta la mitad. Σ café + pan del combo (V3 / 2) = VENDIDO.
+  cafe: { piezas: 9, renglones: 8, vendido: suma(11_600, CUENTA.v1, CUENTA.v2, CUENTA.v3 / 2, CUENTA.v4, CUENTA.t1, CUENTA.t2) },
   // El turno cerrado con conteo (la devolución, del día siguiente, ya no entró).
   turno: {
     startingCash: FONDO,

@@ -20,6 +20,7 @@ import {
   MOTIVO_MEDIO_CENTAVO_SIN_REGLA,
   MOTIVO_OCHO_SIN_REGLA,
   MOTIVO_TODO_CORTESIA,
+  conceptoDeVentaSinRenglones,
   type RenglonParaCfdi,
   consultarIntentoCapturado,
   enviarIntentoCapturado,
@@ -3081,16 +3082,6 @@ function conceptosRealesDelTicket(
   return { reales, motivo: null } // con el descuento ORIGINAL: el ajuste no se congela aquí
 }
 
-/** El concepto de una venta sin renglones (importe libre): el MISMO que arma la factura individual (`loadOrderForCfdiFromDb`). */
-const ventaSinRenglones = (paidCents: number): RenglonParaCfdi => ({
-  productName: 'Venta',
-  quantity: 1,
-  unitPrice: new Prisma.Decimal(paidCents).div(100),
-  discountAmount: 0,
-  product: null,
-  tratamiento: 'IVA_16',
-})
-
 /** C1: un ticket entra a la global con su foto, o sale con UN motivo de la lista cerrada. */
 export type TicketGlobal =
   | { ok: true; orden: Omit<OrdenGlobalV2, 'huella'>; motivoReales: string | null }
@@ -3194,7 +3185,12 @@ export function ticketParaGlobal(o: GlobalCandidateOrder): TicketGlobal {
     // «precio con IVA» que la factura individual y la línea (`taxAmount` = 0 o sin renglones).
     const hoy = lineasDeHoy(o)
     if ('motivo' in hoy) return fuera(hoy.motivo, hoy.detalle)
-    return foto({ IVA_16: paidCents }, hoy.lineas, hoy.conceptos ?? [ventaSinRenglones(paidCents)], hoy.priceIncludesIva)
+    return foto(
+      { IVA_16: paidCents },
+      hoy.lineas,
+      hoy.conceptos ?? [conceptoDeVentaSinRenglones(paidCents, o.orderDiscounts)],
+      hoy.priceIncludesIva,
+    )
   }
 
   // IVA mezclado: sólo con el precio cobrado con IVA incluido (§4.2; la individual pide lo mismo).
