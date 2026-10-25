@@ -8,7 +8,7 @@ import { onOrderPaid } from '@/services/referrals/referralQualification.service'
 
 describe('onOrderPaid · the new sale of an exchange', () => {
   beforeEach(() => {
-    prismaMock.order.findUnique.mockResolvedValue({ paymentStatus: 'PAID' })
+    prismaMock.order.findUnique.mockResolvedValue({ status: 'COMPLETED', paymentStatus: 'PAID', total: 100, tipAmount: 0 })
     // Sin devoluciones y sin referido que reclamar: así la prueba llega al reclamo (`referral.updateMany`).
     prismaMock.payment.findMany.mockResolvedValue([])
     prismaMock.referral.updateMany.mockResolvedValue({ count: 0 })
@@ -26,6 +26,17 @@ describe('onOrderPaid · the new sale of an exchange', () => {
     await onOrderPaid({ orderId: 'o-1', venueId: 'v1' })
     expect(prismaMock.referral.updateMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { qualifyingOrderId: 'o-1', status: 'PENDING' } }),
+    )
+  })
+
+  it('control: a fully refunded ordinary order is voided instead of qualifying', async () => {
+    prismaMock.exchange.findUnique.mockResolvedValue(null)
+    prismaMock.payment.findMany.mockResolvedValue([{ amount: -100 }])
+    await onOrderPaid({ orderId: 'o-1', venueId: 'v1' })
+    expect(prismaMock.referral.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: expect.objectContaining({ status: 'VOID', voidReason: 'ORDER_REFUNDED' }),
+      }),
     )
   })
 })

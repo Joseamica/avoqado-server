@@ -70,6 +70,53 @@ async function promotion(s: Seed) {
 }
 
 describe('exchange validation RF3/RF4', () => {
+  it('identifies the partially returned second promotion, not the complete first one', async () => {
+    const s = await seed({ quantity: 3 })
+    await promotion(s)
+    await prisma.orderItem.update({ where: { id: s.order.items[0].id }, data: { quantity: 1, total: 500 } })
+    const p = await prisma.promotion.create({ data: { venueId: s.venueId, name: 'Segunda', type: 'BUNDLE', pricingMode: 'FIXED_TOTAL' } })
+    const op = await prisma.orderPromotion.create({
+      data: {
+        orderId: s.order.id,
+        promotionId: p.id,
+        instanceId: s.venueId + '-B',
+        snapshotJson: { name: 'Segunda' },
+        grossCents: 100000,
+        discountCents: 0,
+        netCents: 100000,
+      },
+    })
+    const second = await prisma.orderItem.create({
+      data: {
+        orderId: s.order.id,
+        productId: s.products[0].id,
+        productName: 'Segunda promoción',
+        quantity: 2,
+        unitPrice: 500,
+        total: 1000,
+        taxAmount: 0,
+        orderPromotionId: op.id,
+      },
+    })
+    await expect(
+      createExchange(
+        s.input(
+          s.body({
+            returned: [
+              s.body().returned[0],
+              {
+                orderItemId: second.id,
+                quantity: 1,
+                restock: false,
+                reason: 'SIZE',
+              },
+            ],
+          }),
+        ),
+      ),
+    ).rejects.toMatchObject({ code: 'EXCHANGE_ITEM_NOT_RETURNABLE', details: { reason: 'PROMOTION_PARTIAL', orderItemId: second.id } })
+  })
+
   it('RF3: rejects both units after a refund through the other payment, with the remaining quantity', async () => {
     const s = await seed({ quantity: 2, payments: [500, 500] })
     await refundOne(s)
@@ -290,7 +337,7 @@ describe('exchange validation RF3/RF4', () => {
         orderPromotionId: op.id,
       },
     })
-    await blocked(s, 'PROMOTION_PARTIAL', 'Una promoción se cambia completa: incluye todos sus artículos.')
+    await blocked(s, 'PROMOTION_PARTIAL', 'Una promoción se cambia completa: incluye todos sus artículos.', null)
     const b = s.body({
       returned: [s.body().returned[0], { orderItemId: second.id, quantity: 1, restock: true, reason: 'SIZE' }],
       taken: [{ productId: s.products[1].id, quantity: 2 }],

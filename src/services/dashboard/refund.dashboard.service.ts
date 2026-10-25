@@ -980,6 +980,15 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')
       const chain = esCreditoDeCambio ? await chainRefundSemanticsInTx(tx, input.venueId, cobro.original.id) : null
       if (chain?.kind === 'BLOCKED') throw chain.error
+      // También la raíz va ANTES del turno: el reverso de comisión la vuelve a tomar al congelarse.
+      if (chain?.kind === 'INHERIT') {
+        const root = await tx.payment.findFirst({
+          where: { venueId: input.venueId, id: chain.rootPaymentId },
+          select: { orderId: true },
+        })
+        if (!root?.orderId || !(await lockExistingOrderForPayment(tx, { venueId: input.venueId, orderId: root.orderId })))
+          throw refundAuthorityUnavailable()
+      }
       // Tarjetas de regalo (B1): los sobres del cobro se bloquean AQUÍ —Order → Payment → sobres → Shift—, antes de que el núcleo
       // reclame el turno. Un canje en otra caja toma Order → sobres → Shift; al revés se abrazarían (40P01).
       await bloquearSobresDelReembolsoEnTx(tx, {

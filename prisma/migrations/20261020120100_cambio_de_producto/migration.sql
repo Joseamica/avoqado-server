@@ -8,6 +8,9 @@
 --   DROP TABLE "ExchangeCreditLink", "Exchange";
 --   DROP TYPE "ExchangeSettlementMethod", "ExchangeSettlementKind", "ExchangeStatus";
 
+BEGIN;
+SET LOCAL lock_timeout = '5s';
+
 -- CreateEnum
 CREATE TYPE "ExchangeStatus" AS ENUM ('COMPLETED', 'PENDING_PAYMENT', 'COMPLETED_PENDING_CARD_REFUND', 'NEEDS_REVIEW');
 
@@ -93,3 +96,5 @@ CREATE INDEX "ExchangeCreditLink_exchangeId_idx" ON "ExchangeCreditLink"("exchan
 
 -- AddForeignKey
 ALTER TABLE "ExchangeCreditLink" ADD CONSTRAINT "ExchangeCreditLink_exchangeId_fkey" FOREIGN KEY ("exchangeId") REFERENCES "Exchange"("id") ON DELETE CASCADE ON UPDATE CASCADE;
+
+COMMIT;

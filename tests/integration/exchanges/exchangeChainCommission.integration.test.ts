@@ -6,6 +6,7 @@ import { anularComision, createRefundCommission } from '@/services/dashboard/com
 import { createClawback } from '@/services/dashboard/commission/commission-clawback.service'
 import { comisionesBarribles } from '@/services/dashboard/staffPay/fuentesVenta'
 import { enqueuePaymentEffect, enqueueRefundPaymentEffectsInTx, runClaimedPaymentEffect } from '@/services/tpv/paymentEffects.service'
+import * as shiftClaims from '@/services/shared/paymentShiftClaim'
 import {
   asegurarBaseDePrueba,
   barreraDeFila,
@@ -85,6 +86,91 @@ async function aplicar(e: PaymentEffect) {
 }
 
 describe('chain commission through real enqueue and staff pay', () => {
+  it.each(['direct', 'chain'] as const)(
+    'serializes a CHAIN refund against a %s writer sharing its root (real lock barriers)',
+    async other => {
+      const v = await ventaCambiada(true, 500, 2)
+      let secondPaymentId = v.pago
+      if (other === 'chain') {
+        const item = await prisma.orderItem.findFirstOrThrow({
+          where: { orderId: v.orderId, id: { not: v.exchange.lines.returned[0].orderItemId } },
+        })
+        const { exchange } = await createExchange({
+          venueId: m.venueId,
+          actorStaffId: m.bea,
+          body: {
+            idempotencyKey: `${v.pago}-otro-cambio`,
+            originalPaymentId: v.pago,
+            returned: [{ orderItemId: item.id, quantity: 1, restock: false, reason: 'SIZE' }],
+            taken: [{ productId: item.productId!, quantity: 1 }],
+            settlement: { kind: 'EVEN', method: null, expectedDifferenceCents: 0 },
+            staffId: m.bea,
+            deviceId: 'caja-cadena',
+            createdAtLocal: new Date().toISOString(),
+          },
+        })
+        secondPaymentId = exchange.paymentIds[0]
+      }
+      const shift = await prisma.shift.create({
+        data: { venueId: m.venueId, staffId: m.bea, startTime: new Date(), status: 'OPEN', startingCash: 0, totalSales: 1000 },
+      })
+      let claimed!: (pid: number) => void
+      let resume!: () => void
+      const paused = new Promise<number>(r => (claimed = r))
+      const resumed = new Promise<void>(r => (resume = r))
+      const claim = shiftClaims.claimShiftForRefund
+      const spy = jest.spyOn(shiftClaims, 'claimShiftForRefund').mockImplementationOnce(async (tx, input) => {
+        const result = await claim(tx, input)
+        expect(result.shiftId).toBe(shift.id)
+        const [{ pid }] = await (tx as Prisma.TransactionClient).$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid() AS pid`
+        claimed(pid)
+        await resumed
+        return result
+      })
+      const first = devolverCredito(v.creditId)
+      const firstResult = Promise.allSettled([first])
+      let secondResult: ReturnType<typeof Promise.allSettled> | undefined
+      try {
+        const pid = await Promise.race([
+          paused,
+          first.then(() => {
+            throw new Error('CHAIN did not reach the shift barrier')
+          }),
+        ])
+        secondResult = Promise.allSettled([devolverCredito(secondPaymentId)])
+        const deadline = Date.now() + 5000
+        for (;;) {
+          const waiters = await prisma.$queryRaw<Array<{ pid: number; query: string }>>`
+          SELECT pid, query FROM pg_stat_activity WHERE pg_blocking_pids(pid) @> ARRAY[${pid}::int]`
+          if (waiters.length) {
+            // The second connection really owns/waits on database locks before CHAIN continues.
+            expect(waiters[0].pid).not.toBe(pid)
+            break
+          }
+          if (Date.now() > deadline) throw new Error('Second refund never waited on the CHAIN connection')
+          await new Promise(r => setTimeout(r, 10))
+        }
+        resume()
+        const results = [...(await firstResult), ...(await secondResult)]
+        expect(results.map(r => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled'])
+        const refunds = results.map(r => (r as PromiseFulfilledResult<Awaited<typeof first>>).value)
+        for (const r of refunds) {
+          const e = await efectoDe(r.refundId)
+          expect(e.lastError).toBeNull()
+          expect(e.payload).toMatchObject({ orderId: v.orderId, netCommission: '-50' })
+        }
+        expect(Number((await prisma.shift.findUniqueOrThrow({ where: { id: shift.id } })).totalSales)).toBe(0)
+        await procesarEfectos(m)
+        expect(await netoVivo({ venueId: m.venueId })).toBe('0.00')
+      } finally {
+        resume()
+        await firstResult
+        if (secondResult) await secondResult
+        spy.mockRestore()
+      }
+    },
+  )
+
   it('chain refund after an even exchange reverses the 5000 commission down to the staff pay amount', async () => {
     const v = await ventaCambiada()
     expect(await netoVivo({ venueId: m.venueId, staffId: m.ana })).toBe('50.00')

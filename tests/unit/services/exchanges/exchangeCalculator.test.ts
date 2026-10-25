@@ -12,6 +12,8 @@ import {
   type TakenLine,
 } from '../../../../src/services/exchanges/exchangeCalculator'
 import { parteDeUnidades } from '../../../../src/services/shared/parteDeUnidades'
+import { abrirLibro } from '../../../../src/services/fiscal/libroDeLaOrden'
+import { mezclaDeLaOrden } from '../../../../src/services/fiscal/mezclaDeOrden'
 
 /** Una pieza que regresa; por default, de la familia «falda». */
 const p = (
@@ -323,7 +325,7 @@ describe('splitItemsAcrossRefundRows', () => {
     expect(out.get('credit')).toEqual([{ orderItemId: 'a', quantity: 1, amountCents: 500 }])
   })
 
-  it('a zero-value piece that comes after the pour left the first row still lands there with quantity 1', () => {
+  it('a zero-value piece stays after the preceding units across refund rows', () => {
     const out = splitItemsAcrossRefundRows(
       [
         { orderItemId: 'a', cents: 600 },
@@ -334,11 +336,68 @@ describe('splitItemsAcrossRefundRows', () => {
         { key: 'credit', cents: 200 },
       ],
     )
-    expect(out.get('payout')).toEqual([
-      { orderItemId: 'a', quantity: 1, amountCents: 400 },
+    expect(out.get('payout')).toEqual([{ orderItemId: 'a', quantity: 1, amountCents: 400 }])
+    expect(out.get('credit')).toEqual([
+      { orderItemId: 'a', quantity: 0, amountCents: 200 },
       { orderItemId: 'b', quantity: 1, amountCents: 0 },
     ])
-    expect(out.get('credit')).toEqual([{ orderItemId: 'a', quantity: 0, amountCents: 200 }])
+  })
+
+  it('keeps the 1-cent residue on its tax treatment when the next unit is free', () => {
+    const rows = [
+      { key: 'payout', cents: 100 },
+      { key: 'credit', cents: 1 },
+    ]
+    const items = splitItemsAcrossRefundRows(
+      [
+        { orderItemId: 'B', cents: 100 },
+        { orderItemId: 'A', cents: 1 },
+        { orderItemId: 'A', cents: 0 },
+      ],
+      rows,
+    )
+    const line = (id: string, quantity: number, total: number, ivaTratamiento: 'IVA_16' | 'EXENTO') => ({
+      id,
+      quantity,
+      unitPrice: total / quantity,
+      total,
+      discountAmount: 0,
+      orderPromotionId: null,
+      isCortesia: false,
+      ivaTratamiento,
+      product: null,
+    })
+    const book = abrirLibro(mezclaDeLaOrden([line('B', 1, 1, 'IVA_16'), line('A', 2, 0.01, 'IVA_16'), line('exempt', 1, 100, 'EXENTO')]))
+    book.registrar({ id: 'sale', type: 'REGULAR', amountCents: 10101 })
+    for (const row of rows) {
+      const part = book.registrar({
+        id: row.key,
+        type: 'REFUND',
+        amountCents: -row.cents,
+        processorData: { refundedItems: items.get(row.key) },
+      })
+      expect(part.aproximada).toBe(false)
+      expect(part.porTratamiento.EXENTO).toBeUndefined()
+      expect(part.netCents + part.taxCents).toBe(-row.cents)
+    }
+    expect(
+      [...items.values()]
+        .flat()
+        .filter(x => x.orderItemId === 'A')
+        .reduce((q, x) => q + x.quantity, 0),
+    ).toBe(2)
+    const last = book.registrar({
+      id: 'last',
+      type: 'REFUND',
+      amountCents: -10000,
+      processorData: { refundedItems: [{ orderItemId: 'exempt', quantity: 1, amountCents: 10000 }] },
+    })
+    expect(last).toMatchObject({
+      netCents: -10000,
+      taxCents: 0,
+      aproximada: false,
+      porTratamiento: { EXENTO: { baseCents: -10000, ivaCents: 0 } },
+    })
   })
 
   it('refuses cents that are not safe non-negative integers', () => {

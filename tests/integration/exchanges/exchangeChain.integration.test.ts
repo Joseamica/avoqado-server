@@ -1,6 +1,6 @@
 import prisma from '@/utils/prismaClient'
 import { createExchange } from '@/services/exchanges/exchange.service'
-import { chainRefundSemanticsInTx } from '@/services/exchanges/exchangeTx'
+import { chainRefundSemanticsInTx, prepareExchangeInTx } from '@/services/exchanges/exchangeTx'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { ensureGiftCardTender } from '@/services/giftCards/giftCardTender'
@@ -38,6 +38,57 @@ afterAll(async () => {
 })
 
 describe('exchange chain refunds', () => {
+  it('resolves one or four credits with the same batched queries and no per-credit resolution reads', async () => {
+    const counts = []
+    for (const credits of [1, 4]) {
+      const s = await seed({ payments: Array<number>(credits).fill(500 / credits) })
+      const { e } = await exchange(s)
+      expect(e.paymentIds).toHaveLength(credits)
+      const body = s.body({
+        originalPaymentId: e.paymentIds[0],
+        returned: [{ orderItemId: e.lines.taken[0].newOrderItemIds[0], quantity: 1, restock: false, reason: 'SIZE' }],
+        taken: [{ productId: s.products[2].id, quantity: 1 }],
+      })
+      const queries = { batch: 0, single: 0 }
+      await prisma.$transaction(
+        async tx => {
+          const observed = new Proxy(tx, {
+            get(target, property) {
+              if (property !== 'exchangeCreditLink') return Reflect.get(target, property)
+              return new Proxy(target.exchangeCreditLink, {
+                get(delegate, operation) {
+                  if (operation === 'findMany')
+                    return (...args: Parameters<typeof delegate.findMany>) => {
+                      queries.batch++
+                      return delegate.findMany(...args)
+                    }
+                  if (operation === 'findFirst')
+                    return (...args: Parameters<typeof delegate.findFirst>) => {
+                      queries.single++
+                      return delegate.findFirst(...args)
+                    }
+                  return Reflect.get(delegate, operation)
+                },
+              })
+            },
+          })
+          const prepared = await prepareExchangeInTx(observed, {
+            ...s.input(body),
+            originalOrderId: e.newOrderId,
+            requestHash: 'f'.repeat(64),
+          })
+          expect(prepared).not.toHaveProperty('replay')
+        },
+        { timeout: 15000 },
+      )
+      counts.push(queries)
+    }
+    expect(counts).toEqual([
+      { batch: 1, single: 0 },
+      { batch: 1, single: 0 },
+    ])
+  })
+
   it('refunds cash credit as cash, posts one PAY_OUT and caps refunds by the credit payment', async () => {
     const s = await seed()
     const { e, creditId } = await exchange(s)

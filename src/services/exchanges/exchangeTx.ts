@@ -158,13 +158,16 @@ export async function prepareExchangeInTx(
         listCents: line.product && !line.product.deletedAt ? line.product.priceCents : null,
       })
   }
+  let promotionItemId: string | null = null
   try {
     assertRefundableLines(sale.charged.renglones, [...used.keys()])
-    for (const [id, selection] of used) assertPromotionLineFullQuantity(byId.get(id)!, selection.quantity)
+    for (const [id, selection] of used) {
+      promotionItemId = id
+      assertPromotionLineFullQuantity(byId.get(id)!, selection.quantity)
+    }
   } catch (error) {
     if (!(error instanceof BadRequestError)) throw error
-    const id = body.returned.find(r => byId.get(r.orderItemId)?.orderPromotionId)?.orderItemId ?? null
-    notReturnable('PROMOTION_PARTIAL', id)
+    notReturnable('PROMOTION_PARTIAL', promotionItemId)
   }
   const ids = [...new Set(body.taken.map(l => l.productId))]
   const products = await tx.product.findMany({ take: ids.length, where: { venueId, id: { in: ids } } })
@@ -279,7 +282,8 @@ export async function prepareExchangeInTx(
   const chains = new Map<string, ChainRefundResolution>()
   const capacities = []
   for (const p of orderedPayments) {
-    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? await chainRefundSemanticsInTx(tx, venueId, p.id) : null
+    const loaded = sale.chainByPaymentId.get(p.id)
+    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? resolveChainRefund(loaded?.link, loaded?.root) : null
     if (chain) chains.set(p.id, chain)
     capacities.push({
       paymentId: p.id,

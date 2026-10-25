@@ -149,8 +149,8 @@ export function pieceValuesCents(
 /**
  * Reparte las piezas que regresan sobre las filas REFUND del cambio, en su orden (primero las de la diferencia, luego las de
  * crédito). Cada pieza vacía sus centavos en la fila en curso, como al mezclar dos listas, y su cantidad 1 queda en la fila
- * que recibe su primer centavo; los pedazos que siguen llevan 0. Una pieza de valor cero no recibe centavos: su cantidad va a la
- * PRIMERA fila, para que cuente devuelta y vuelva al inventario una sola vez (spec §7.1). Por eso se admite la fila de $0 que
+ * que recibe su primer centavo; los pedazos que siguen llevan 0. Una pieza de valor cero conserva su posición: su cantidad va a la
+ * fila actual (la primera si aún no se vertió nada), para que cuente devuelta una sola vez. Por eso se admite la fila de $0 que
  * ancla un cambio donde nada de lo que regresa costó. Se agrupa por fila y `orderItemId`, pero el pedazo sin cantidad nunca se
  * junta con la entrada que sí la lleva: el libro de la orden (`libroDeLaOrden.ts`) topa por unidad la que lleva cantidad, y lo
  * que pasara del tope quedaría sin atribuir. En cada fila, Σ amountCents = sus centavos.
@@ -182,7 +182,7 @@ export function splitItemsAcrossRefundRows(
   let left = 0
   for (const piece of pieces) {
     if (piece.cents === 0) {
-      add(rows[0].key, piece.orderItemId, 1, 0)
+      add(rows[Math.max(0, row)].key, piece.orderItemId, 1, 0)
       continue
     }
     let cents = piece.cents

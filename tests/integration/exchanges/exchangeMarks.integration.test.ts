@@ -25,6 +25,7 @@ import {
 } from '@/services/exchanges/exchangeMarks'
 import { deletePayment, updatePayment } from '@/services/dashboard/payment.dashboard.service'
 import { editOrgSaleVerification } from '@/services/dashboard/sale-verification.org.dashboard.service'
+import { cobrosDelProtocolo, efectivoManualEditable } from '@/services/shared/cobroDelProtocolo'
 import { crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembrarTarjetasDeRegalo'
 
 jest.mock('@/communication/sockets', () => ({
@@ -350,6 +351,64 @@ describe('the money of an exchange is not edited nor deleted by hand (spec §6.2
   it('DELETE of an EXCHANGE_CREDIT payment is 409', async () => {
     await rechazo(deletePayment(venueId, conCredito.id), conCredito.id, ['delete'])
     await expect(prisma.payment.findUnique({ where: { id: conCredito.id } })).resolves.not.toBeNull()
+  })
+
+  it.each([
+    ['CHAIN refund', () => devolucionDeCadena],
+    ['linked root', () => raiz],
+  ] as const)('DELETE of a %s is 409 and preserves the row', async (_name, row) => {
+    const before = await pago(row().id)
+    await rechazo(deletePayment(venueId, before.id), before.id, ['delete'])
+    expect(await pago(before.id)).toEqual(before)
+  })
+
+  it('sale verification cannot edit an EC payment and leaves the verification pending', async () => {
+    const sv = await prisma.saleVerification.create({
+      data: { venueId, paymentId: conCredito.id, staffId, photos: [], status: 'PENDING', isPortabilidad: false },
+    })
+    const before = await pago(conCredito.id)
+    await rechazo(
+      editOrgSaleVerification(organizationId, {
+        saleVerificationId: sv.id,
+        editedById: staffId,
+        amount: 250,
+        paymentForm: 'CASH',
+        reason: 'Corrección EC',
+        status: 'COMPLETED',
+      }),
+      before.id,
+      ['amount', 'method'],
+    )
+    expect(await pago(before.id)).toEqual(before)
+    expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: sv.id } })).status).toBe('PENDING')
+  })
+
+  it.each([true, false])('manual-cash exception cannot bypass EC protection (credit=%s)', async credit => {
+    const p = await cobro(await orden(), { ...(credit ? conTender(ecTenderId) : {}), processorData: { pricing: null } })
+    await prisma.orderItem.create({
+      data: { orderId: p.orderId!, productName: 'Artículo manual', quantity: 1, unitPrice: 100, total: 100, taxAmount: 0 },
+    })
+    expect(await efectivoManualEditable(prisma, p.id)).toBe(true)
+    expect((await cobrosDelProtocolo(prisma, [p.id])).has(p.id)).toBe(true)
+    const sv = await prisma.saleVerification.create({
+      data: { venueId, paymentId: p.id, staffId, photos: [], status: 'PENDING', isPortabilidad: false },
+    })
+    const edit = editOrgSaleVerification(organizationId, {
+      saleVerificationId: sv.id,
+      editedById: staffId,
+      amount: 90,
+      reason: 'Efectivo manual',
+      status: 'COMPLETED',
+    })
+    if (credit) {
+      await rechazo(edit, p.id, ['amount'])
+      expect(await pago(p.id)).toEqual(p)
+      expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: sv.id } })).status).toBe('PENDING')
+    } else {
+      await edit
+      expect(Number((await pago(p.id)).amount)).toBe(90)
+      expect((await prisma.saleVerification.findUniqueOrThrow({ where: { id: sv.id } })).status).toBe('COMPLETED')
+    }
   })
 
   it('changing the amount of a root already linked to an exchange is 409', async () => {
