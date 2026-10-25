@@ -1,4 +1,4 @@
-import { Prisma, type PrismaClient } from '@prisma/client'
+import { Prisma, type PrismaClient, type Product } from '@prisma/client'
 import { NotFoundError } from '@/errors/AppError'
 import { leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
@@ -38,7 +38,7 @@ export async function loadSaleForExchange(
   venueId: string,
   orderId: string,
   detailPaymentId?: string,
-): Promise<SaleForExchange> {
+): Promise<SaleForExchange & { catalogProducts: Map<string, Product> }> {
   const order = await db.order.findFirst({
     where: { venueId, id: orderId },
     select: {
@@ -98,6 +98,7 @@ export async function loadSaleForExchange(
   const rootById = new Map(roots.map(p => [p.id, p]))
   const linkById = new Map(links.map(l => [l.creditPaymentId, l]))
   return {
+    catalogProducts: new Map(lines.flatMap(l => (l.product?.venueId === venueId ? [[l.product.id, l.product] as const] : []))),
     order: { ...order, primaryCustomerId: order.orderCustomers[0]?.customerId ?? null },
     lines: lines.map(l => {
       const p = l.product && withVariantFields(l.product)

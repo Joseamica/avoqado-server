@@ -561,7 +561,12 @@ type CustomerReturnParams = {
   venueId: string
   refundPaymentId: string
   orderId: string
-  lines: Array<{ orderItemId: string; productId: string; quantity: number }>
+  lines: Array<{
+    orderItemId: string
+    productId: string
+    quantity: number
+    eligibility?: { inventoryMethod: string | null; eligible: boolean }
+  }>
   staffId?: string | null
 }
 
@@ -584,12 +589,15 @@ export async function createCustomerReturnPostingInTx(
   })
   if (existing) return existing
 
-  const productIds = [...new Set(lines.map(l => l.productId))]
-  const products = await tx.product.findMany({
-    where: { venueId, id: { in: productIds } },
-    select: { id: true, trackInventory: true, inventoryMethod: true, inventory: { select: { id: true } } },
-    take: productIds.length,
-  })
+  // El cambio ya decidió qué vuelve: releer aquí podría descartar para siempre una pieza al apagar inventario.
+  const productIds = [...new Set(lines.filter(l => !l.eligibility).map(l => l.productId))]
+  const products = productIds.length
+    ? await tx.product.findMany({
+        where: { venueId, id: { in: productIds } },
+        select: { id: true, trackInventory: true, inventoryMethod: true, inventory: { select: { id: true } } },
+        take: productIds.length,
+      })
+    : []
   const byId = new Map(products.map(p => [p.id, p]))
   return tx.inventoryPosting.create({
     data: {
@@ -605,8 +613,8 @@ export async function createCustomerReturnPostingInTx(
           return {
             orderItemId: l.orderItemId,
             productId: l.productId,
-            inventoryMethod: p?.inventoryMethod ?? null,
-            eligible: !!(p?.trackInventory && p.inventoryMethod === 'QUANTITY' && p.inventory),
+            inventoryMethod: l.eligibility ? l.eligibility.inventoryMethod : (p?.inventoryMethod ?? null),
+            eligible: l.eligibility ? l.eligibility.eligible : !!(p?.trackInventory && p.inventoryMethod === 'QUANTITY' && p.inventory),
           }
         }),
       },
