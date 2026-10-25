@@ -23,6 +23,7 @@ describe('migrations on the hot Order table', () => {
     // Revisión final (I-1): órdenes con la reconciliación bloqueada.
     'Order_deliveryReconcileBlocked_idx',
     'Payment_venueId_updatedAt_idx',
+    'Payment_venueId_type_idx',
   ])('builds %s concurrently in a standalone migration', name => {
     const migrationsRoot = path.resolve(process.cwd(), 'prisma/migrations')
     const matches = fs

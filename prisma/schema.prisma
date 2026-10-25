@@ -4754,6 +4754,7 @@ model Payment {
   @@index([status])
   @@index([venueId, createdAt])
   @@index([venueId, updatedAt])
+  @@index([venueId, type])
   @@index([venueId, status, createdAt])
   @@index([merchantAccountId, createdAt])
   @@index([venueId, externalSource])

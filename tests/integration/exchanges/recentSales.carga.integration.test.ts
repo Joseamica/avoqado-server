@@ -191,6 +191,21 @@ describe('sales/recent at 30 days × 1,000 sales a day (B)', () => {
       expect(JSON.stringify(plan)).toMatch(/Index/)
       expect(plan['Execution Time']).toBeLessThanOrEqual(300)
     }
+    const count = fullPageSql({ venueId: s.venueId, windowStart, after: null, take: null })
+    let indexedCount: Explained
+    await pg.query('BEGIN')
+    try {
+      await pg.query('SET LOCAL enable_seqscan = off')
+      indexedCount = await explain('FULL COUNT indexed alternative', count.text, count.values)
+    } finally {
+      await pg.query('ROLLBACK')
+    }
+    const usesOrderIndex = (plan: Plan): boolean =>
+      (plan['Relation Name'] === 'Order' && ['Index Scan', 'Index Only Scan', 'Bitmap Heap Scan'].includes(plan['Node Type'])) ||
+      (plan.Plans ?? []).some(usesOrderIndex)
+    expect(usesOrderIndex(indexedCount.Plan)).toBe(true)
+    expect(scans(indexedCount.Plan)).toEqual([])
+    expect(indexedCount['Execution Time']).toBeLessThanOrEqual(300)
   })
 
   it('keeps SQL constant from one occupied sale to 100 and measures every actual statement', async () => {
@@ -255,11 +270,20 @@ describe('sales/recent at 30 days × 1,000 sales a day (B)', () => {
     expect(deltaSales.result.sales.map(sale => sale.orderId)).toEqual(ids.slice(0, 100))
     expect(deltaSales.result.removed).toEqual([])
     const plans: Explained[] = []
+    const fullCount = fullPageSql({ venueId: s.venueId, windowStart, after: null, take: null })
+    let fullCountPlans = 0
     for (const [i, event] of hundred.queries.entries()) {
       console.log('MEDICIÓN local statement', i + 1, { ms: event.duration, sql: event.query, params: event.params })
-      if (/^\s*(SELECT|WITH)\b/i.test(event.query))
-        plans.push(await explain(`page100 statement ${i + 1}`, event.query, JSON.parse(event.params)))
+      if (/^\s*(SELECT|WITH)\b/i.test(event.query)) {
+        const plan = await explain(`page100 statement ${i + 1}`, event.query, JSON.parse(event.params))
+        if (event.query === fullCount.text) {
+          // This fixture owns almost all Order rows, so scanning its FULL COUNT is optimal; production venues own a fraction.
+          fullCountPlans++
+          expect(plan['Execution Time']).toBeLessThanOrEqual(300)
+        } else plans.push(plan)
+      }
     }
+    expect(fullCountPlans).toBe(1)
     expect(hundred.queries.length).toBe(one.queries.length)
     for (const page of [one, hundred, deep, delta, deltaSales]) {
       expect(page.queries.length).toBeLessThanOrEqual(40)
