@@ -103,7 +103,6 @@ function installFakeStore(initial: Partial<FakeOrderRow> = {}, options: { openSh
   // concurrentes se intercalen de verdad en vez de correr uña tras otra.
   const yieldTurn = () => new Promise(resolve => setImmediate(resolve))
 
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
 
   prismaMock.order.findUnique.mockImplementation(async () => {

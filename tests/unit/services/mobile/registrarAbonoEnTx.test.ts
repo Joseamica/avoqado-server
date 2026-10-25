@@ -51,8 +51,7 @@ const pasos: string[] = []
 beforeEach(() => {
   jest.clearAllMocks()
   pasos.length = 0
-  prismaMock.$queryRaw.mockReset().mockImplementation(async (query: TemplateStringsArray) => {
-    if (query.join('').includes('AS "accountingAt"')) return [{ accountingAt: new Date() }]
+  prismaMock.$queryRaw.mockReset().mockImplementation(async () => {
     pasos.push('candado-de-la-orden')
     return [{ id: 'order-1' }]
   })

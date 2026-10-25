@@ -367,7 +367,6 @@ import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCompletedPayment,
   lockExistingOrderForPayment,
-  accountingAtForLockedOrder,
   recordCapturedPaymentOrderReconciliation,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
@@ -3978,10 +3977,6 @@ export async function recordOrderPayment(
           data: {
             venueId,
             orderId: activeOrder.id,
-            createdAt:
-              paymentStatusSnapshot === 'COMPLETED'
-                ? await accountingAtForLockedOrder(tx, { venueId, orderId: activeOrder.id })
-                : undefined,
             amount: totalAmount,
             tipAmount,
             method: classicMethod as PaymentMethod, // Cast to PaymentMethod enum

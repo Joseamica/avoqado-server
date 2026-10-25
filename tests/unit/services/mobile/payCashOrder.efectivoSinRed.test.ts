@@ -104,7 +104,6 @@ function instalarBase(inicial: { paymentStatus: Estado; status?: string; total: 
   const cas: any[] = []
   const turno = () => new Promise(resolve => setImmediate(resolve))
 
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockImplementation(async () => {
     await turno()

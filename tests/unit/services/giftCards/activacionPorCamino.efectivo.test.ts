@@ -41,7 +41,6 @@ beforeEach(() => {
   jest.clearAllMocks()
   activarSobresMock.mockResolvedValue({ activated: ['gc-1'] })
   txDoble = Object.create(prismaMock)
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(txDoble))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',

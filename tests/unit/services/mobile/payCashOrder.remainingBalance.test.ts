@@ -142,7 +142,6 @@ function installFakeStore(
 
   const payments: FakePayment[] = [...seededPayments]
 
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
 
   // 🔴 BASE FALSA MULTI-TENANT — el `where` SÍ se respeta.

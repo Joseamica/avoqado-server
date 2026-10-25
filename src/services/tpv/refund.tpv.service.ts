@@ -14,7 +14,6 @@ import { postCashRefundToDrawer } from '../shared/cashDrawerPosting'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForRefund,
-  accountingAtForLockedOrder,
   lockExistingOrderForPayment,
   recordRefundAuthorityReconciliation,
   recordPendingPaymentShiftReconciliation,
@@ -791,7 +790,6 @@ export async function recordRefund(
         data: {
           venueId,
           orderId: locked.orderId, // Link to the Order proven by this locked row
-          createdAt: locked.orderId ? await accountingAtForLockedOrder(tx, { venueId, orderId: locked.orderId }) : undefined,
           shiftId: shiftId || undefined,
           processedById: userId,
           // Merchant/terminal are tenant-bearing relations. The body is wire-compatible

@@ -62,7 +62,6 @@ import { prismaMock } from '../../../__helpers__/setup'
  * regresa en la respuesta como `changeCents`. La propina va aparte y no se toca.
  */
 function seedOrder(overrides: Record<string, unknown> = {}) {
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',

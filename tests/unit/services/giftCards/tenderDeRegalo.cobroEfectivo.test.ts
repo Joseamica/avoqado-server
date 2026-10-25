@@ -31,7 +31,6 @@ import { postCashSaleToDrawer } from '@/services/shared/cashDrawerPosting'
 import { prismaMock } from '../../../__helpers__/setup'
 
 function seedOrder() {
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',

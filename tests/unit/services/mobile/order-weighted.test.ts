@@ -126,7 +126,6 @@ function mockOrderCreateEcho() {
 describe('venta por peso — createOrderWithItems (mobile)', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     prismaMock.payment.findMany.mockResolvedValue([])
     prismaMock.modifier.findMany.mockResolvedValue([])
@@ -264,7 +263,6 @@ describe('venta por peso — payCashOrder full-payment inventory deduction hook'
 
   beforeEach(() => {
     jest.clearAllMocks()
-    prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
     prismaMock.$transaction.mockImplementation(async (callback: any) => callback(prismaMock))
     mockStaff()
     prismaMock.payment.findMany.mockResolvedValue([])

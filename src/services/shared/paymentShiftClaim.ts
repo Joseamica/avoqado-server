@@ -4,7 +4,6 @@ import { Prisma, ShiftStatus } from '@prisma/client'
 import logger from '../../config/logger'
 import { ConflictError } from '../../errors/AppError'
 import { turnoVivoWhere } from './turnoDeCaja'
-import { utcTs } from '../../utils/sqlDates'
 
 // `payGiftCardBalanceOnOrder` (tarjetas de regalo, A8): el cobro con saldo comparte el núcleo de `payCashOrder` pero su
 // auditoría no se atribuye al efectivo.
@@ -116,34 +115,6 @@ export async function lockExistingOrderForPayment(
       'ORDER_LOCK_SCOPE_TOO_LARGE',
     )
   return Array.isArray(rows) && rows.some(row => row.id === input.orderId)
-}
-
-/**
- * Instante del siguiente movimiento del libro. Precondición: la Order y TODA su ascendencia ya están reclamadas
- * por `lockExistingOrderForPayment` en ESTA transacción (incluido su tope de alcance); aquí sólo se lee.
- * Un instante explícito de una operación compuesta se conserva en todos sus escritores, sin incrementarlo por porción.
- */
-export async function accountingAtForLockedOrder(
-  tx: ExistingOrderLockTransaction,
-  input: { venueId: string; orderId: string },
-): Promise<Date> {
-  const [{ accountingAt }] = await tx.$queryRaw<Array<{ accountingAt: Date }>>`
-    WITH RECURSIVE ancestors(id) AS (
-      SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId}
-      UNION
-      SELECT root."orderId" FROM ancestors child
-      JOIN "Payment" credit ON credit."orderId" = child.id AND credit."venueId" = ${input.venueId}
-      JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
-      JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
-      JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
-    ), scope AS MATERIALIZED (SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))})
-    SELECT GREATEST(${utcTs(new Date())}, MAX(m."createdAt") + INTERVAL '1 millisecond') AS "accountingAt"
-    FROM scope LEFT JOIN LATERAL (
-      SELECT p."createdAt" FROM "Payment" p
-      WHERE p."orderId" = scope.id AND p."venueId" = ${input.venueId} AND p.status = 'COMPLETED'
-      ORDER BY p."createdAt" DESC LIMIT 1
-    ) m ON true`
-  return accountingAt
 }
 
 interface RefundAuthorityReconciliationInput {

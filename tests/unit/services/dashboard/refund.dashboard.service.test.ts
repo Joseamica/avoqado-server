@@ -57,7 +57,6 @@ describe('refund.dashboard.service', () => {
             : Array.isArray(query?.sql)
               ? query.sql.join('?')
               : String(query)
-        if (sql.includes('AS "accountingAt"')) return [{ accountingAt: new Date() }]
         if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
         // C2 A-1: los descuentos de la cuenta que lee el cargador de lo cobrado (proyección del libro). Por default, ninguno.
         if (sql.includes('FROM "OrderDiscount"')) return descuentosDeLaCuenta
@@ -1216,8 +1215,7 @@ describe('refund.dashboard.service', () => {
             .fn()
             .mockResolvedValueOnce([{ id: 'order-1' }])
             .mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })])
-            .mockResolvedValueOnce([])
-            .mockResolvedValue([{ accountingAt: new Date() }]),
+            .mockResolvedValueOnce([]),
           shift: {
             findFirst: jest.fn().mockResolvedValue({ id: 'shift-open', status: 'OPEN' }),
             updateMany: jest.fn().mockImplementation(async ({ data }: any) => {
@@ -1274,8 +1272,7 @@ describe('refund.dashboard.service', () => {
             .fn()
             .mockResolvedValueOnce([{ id: 'order-1' }])
             .mockResolvedValueOnce([pagoConTurnoViejo({ tipAmount: 20 })])
-            .mockResolvedValueOnce([])
-            .mockResolvedValue([{ accountingAt: new Date() }]),
+            .mockResolvedValueOnce([]),
           shift: {
             findFirst: jest.fn().mockResolvedValue({ id: 'shift-closing', status: 'CLOSING' }),
             updateMany: jest.fn(),

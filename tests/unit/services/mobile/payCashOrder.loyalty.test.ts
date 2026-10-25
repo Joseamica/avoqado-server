@@ -64,7 +64,6 @@ import { prismaMock } from '../../../__helpers__/setup'
 const awardMock = awardLoyaltyForPaidOrder as jest.Mock
 
 function seedOrder(overrides: Record<string, unknown> = {}) {
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',

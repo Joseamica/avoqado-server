@@ -100,7 +100,6 @@ function primePayCash(initial: { status?: string; paymentStatus?: string; paidAm
     areaTicketCode: null,
   }
 
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockImplementation(async ({ where }: any) => {
     if (where?.venueId !== row.venueId || (where.id !== undefined && where.id !== row.id)) return null

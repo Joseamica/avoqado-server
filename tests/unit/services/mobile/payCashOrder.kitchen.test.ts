@@ -38,7 +38,6 @@ import { prismaMock } from '../../../__helpers__/setup'
 import { releaseTableIfSettled } from '@/services/tpv/table.tpv.service'
 
 function seedOrder(tableId: string | null = null) {
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockResolvedValue({
     id: 'order-1',

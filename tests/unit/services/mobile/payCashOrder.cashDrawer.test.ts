@@ -67,7 +67,6 @@ function installFakeStore() {
 
   const payments: Array<{ id: string; idempotencyKey: string | null }> = []
 
-  prismaMock.$queryRaw.mockResolvedValue([{ accountingAt: new Date() }])
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
   prismaMock.order.findUnique.mockImplementation(async () => ({ ...row }))
   prismaMock.order.updateMany.mockImplementation(async ({ where, data }: any) => {
