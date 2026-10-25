@@ -1,4 +1,4 @@
-import type { ExchangeStatus, PrismaClient } from '@prisma/client'
+import { Prisma, type ExchangeStatus, type PrismaClient } from '@prisma/client'
 import { NotFoundError } from '@/errors/AppError'
 import type { VariantFields } from '../product-variants/variantPayload'
 import { ExchangeError } from './exchangeErrors'
@@ -14,6 +14,7 @@ import {
   type PayoutOption,
 } from './exchangeRules'
 import { loadSaleForExchange } from './exchangeSale'
+import type { SaleForExchange } from './exchange.service'
 import { resolveChainRefund, type ChainRefundResolution } from './exchangeChainRefund'
 
 export interface ExchangeItemExtras {
@@ -41,7 +42,7 @@ export interface ExchangeItemExtras {
 
 export interface ExchangeDetailFields {
   exchangeable: boolean
-  notExchangeableReason: LineBlockReason | 'NOT_A_SALE' | null
+  notExchangeableReason: LineBlockReason | 'NOT_A_SALE' | 'ORDER_LOCK_SCOPE_TOO_LARGE' | null
   tenderSystemKind: 'GIFT_CARD' | 'EXCHANGE_CREDIT' | null
   chainRefundMethod: 'CARD_TERMINAL' | 'CASH' | 'GIFT_CARD_BALANCE' | 'BANK_TRANSFER' | 'OTHER' | null
   chainRefundLabel: string | null
@@ -80,32 +81,7 @@ export async function exchangeDetailFields(
   }
   const itemExtras = new Map<string, ExchangeItemExtras>()
   if (payment.type === 'REFUND' || !payment.orderId) return { fields, itemExtras }
-  const [asOriginal, asNew, asOriginalTotal] = await Promise.all([
-    db.exchange.findMany({
-      take: 50,
-      where: { venueId, originalOrderId: payment.orderId },
-      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
-      select: { id: true, newOrderId: true, status: true },
-    }),
-    db.exchange.findUnique({
-      where: { newOrderId: payment.orderId, venueId },
-      select: { id: true, originalOrderId: true },
-    }),
-    db.exchange.count({ where: { venueId, originalOrderId: payment.orderId } }),
-  ])
-  const orders = await db.order.findMany({
-    take: 51,
-    where: { venueId, id: { in: [...asOriginal.map(e => e.newOrderId), ...(asNew ? [asNew.originalOrderId] : [])] } },
-    select: { id: true, orderNumber: true },
-  })
-  const numberById = new Map(orders.map(o => [o.id, o.orderNumber]))
-  fields.exchange.asOriginalTotal = asOriginalTotal
-  fields.exchange.asOriginal = asOriginal.flatMap(e => {
-    const newOrderNumber = numberById.get(e.newOrderId)
-    return newOrderNumber ? [{ exchangeId: e.id, newOrderNumber, status: e.status }] : []
-  })
-  const originalOrderNumber = asNew && numberById.get(asNew.originalOrderId)
-  fields.exchange.asNew = asNew && originalOrderNumber ? { exchangeId: asNew.id, originalOrderNumber } : null
+  fields.exchange = (await loadExchangeLinksForOrders(db, venueId, [payment.orderId])).get(payment.orderId)!
 
   let sale
   try {
@@ -121,24 +97,106 @@ export async function exchangeDetailFields(
     if (isExchangeCreditTenderKind(kind) && error.code === 'EXCHANGE_SETTLEMENT_UNAVAILABLE') fields.chainRefundBlockedCode = error.code
     return { fields, itemExtras }
   }
-  const chains = new Map<string, ChainRefundResolution>()
-  const readChain = (id: string): ChainRefundResolution => {
-    const cached = chains.get(id)
-    if (cached) return cached
-    let chain: ChainRefundResolution
-    try {
-      const data = sale.chainByPaymentId.get(id)
-      chain = resolveChainRefund(data?.link, data?.root)
-    } catch (error) {
-      if (!(error instanceof ExchangeError) || error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE') throw error
-      chain = { kind: 'BLOCKED', error }
-    }
-    chains.set(id, chain)
-    return chain
+  const result = fieldsForSale(sale, fields.exchange, payment.status === 'COMPLETED' && sale.payments.some(p => p.id === paymentId))
+  return {
+    fields: { ...fields, ...result.fields, ...fieldsForPayment(sale, paymentId, kind ?? null) },
+    itemExtras: result.itemExtras,
   }
+}
 
+export type SaleExchangeFields = Pick<ExchangeDetailFields, 'exchangeable' | 'notExchangeableReason' | 'payoutOptions' | 'exchange'>
+export type PaymentExchangeFields = Pick<
+  ExchangeDetailFields,
+  'tenderSystemKind' | 'chainRefundMethod' | 'chainRefundLabel' | 'chainRefundBlockedCode' | 'chainRefundBlockedReason'
+>
+
+const MAX_EXCHANGE_ORIGINAL_LINKS = 50
+
+export async function loadExchangeLinksForOrders(
+  db: Prisma.TransactionClient | PrismaClient,
+  venueId: string,
+  orderIds: string[],
+): Promise<Map<string, ExchangeDetailFields['exchange']>> {
+  const result = new Map<string, ExchangeDetailFields['exchange']>()
+  if (!orderIds.length) return result
+  // LIMIT belongs inside each order's lateral read; a global limit starves the other orders.
+  const rows = await db.$queryRaw<
+    Array<{
+      orderId: string
+      total: number
+      direction: string | null
+      id: string | null
+      otherOrderId: string | null
+      status: ExchangeStatus | null
+    }>
+  >(Prisma.sql`
+    WITH orders AS MATERIALIZED (
+      SELECT o.id, (SELECT count(*)::int FROM "Exchange" x
+        WHERE x."venueId" = ${venueId} AND x."originalOrderId" = o.id) AS total
+      FROM "Order" o WHERE o."venueId" = ${venueId} AND o.id IN (${Prisma.join(orderIds)})
+    )
+    SELECT o.id AS "orderId", o.total, e.id, e.direction, e."otherOrderId", e.status
+    FROM orders o LEFT JOIN LATERAL (
+      (SELECT x.id, 'original' AS direction, x."newOrderId" AS "otherOrderId", x.status, x."createdAt"
+       FROM "Exchange" x WHERE x."venueId" = ${venueId} AND x."originalOrderId" = o.id
+       ORDER BY x."createdAt" DESC, x.id DESC LIMIT ${MAX_EXCHANGE_ORIGINAL_LINKS})
+      UNION ALL
+      (SELECT x.id, 'new' AS direction, x."originalOrderId" AS "otherOrderId", x.status, x."createdAt"
+       FROM "Exchange" x WHERE x."venueId" = ${venueId} AND x."newOrderId" = o.id LIMIT 1)
+    ) e ON true
+    ORDER BY o.id, e."createdAt" DESC, e.id DESC
+  `)
+  const otherIds = [...new Set(rows.flatMap(r => (r.otherOrderId ? [r.otherOrderId] : [])))]
+  const orders = await db.order.findMany({
+    take: otherIds.length,
+    where: { venueId, id: { in: otherIds } },
+    select: { id: true, orderNumber: true },
+  })
+  const numberById = new Map(orders.map(o => [o.id, o.orderNumber]))
+  for (const row of rows) {
+    let links = result.get(row.orderId)
+    if (!links) {
+      links = { asOriginal: [], asOriginalTotal: row.total, asNew: null }
+      result.set(row.orderId, links)
+    }
+    const number = row.otherOrderId && numberById.get(row.otherOrderId)
+    if (!row.id || !number) continue
+    if (row.direction === 'original') links.asOriginal.push({ exchangeId: row.id, newOrderNumber: number, status: row.status! })
+    else links.asNew = { exchangeId: row.id, originalOrderNumber: number }
+  }
+  return result
+}
+
+function readChain(sale: SaleForExchange, id: string): ChainRefundResolution {
+  try {
+    const data = sale.chainByPaymentId.get(id)
+    return resolveChainRefund(data?.link, data?.root)
+  } catch (error) {
+    if (!(error instanceof ExchangeError) || error.code !== 'EXCHANGE_SETTLEMENT_UNAVAILABLE') throw error
+    return { kind: 'BLOCKED', error }
+  }
+}
+
+export function paymentExchangeFields(sale: SaleForExchange, paymentId: string): PaymentExchangeFields {
+  const payment = sale.payments.find(p => p.id === paymentId)
+  const kind = payment ? payment.money.tenderSystemKind : sale.chainByPaymentId.has(paymentId) ? 'EXCHANGE_CREDIT' : null
+  return fieldsForPayment(sale, paymentId, kind)
+}
+
+function fieldsForPayment(sale: SaleForExchange, paymentId: string, kind: string | null): PaymentExchangeFields {
+  const fields: PaymentExchangeFields = {
+    tenderSystemKind: kind === 'EXCHANGE_CREDIT' || kind === 'GIFT_CARD' ? kind : null,
+    chainRefundMethod: null,
+    chainRefundLabel: null,
+    chainRefundBlockedCode: null,
+    chainRefundBlockedReason: null,
+  }
+  if (sale.settlementUnavailable) {
+    if (isExchangeCreditTenderKind(kind)) fields.chainRefundBlockedCode = 'EXCHANGE_SETTLEMENT_UNAVAILABLE'
+    return fields
+  }
   if (isExchangeCreditTenderKind(kind)) {
-    const chain = readChain(paymentId)
+    const chain = readChain(sale, paymentId)
     if (chain.kind === 'BLOCKED') {
       fields.chainRefundBlockedCode = chain.error.code ?? null
       const reason = (chain.error.details as { reason?: unknown } | undefined)?.reason
@@ -163,7 +221,25 @@ export async function exchangeDetailFields(
     }
   }
 
-  if (!sale.charged.atribuible) {
+  return fields
+}
+
+export function saleExchangeFields(
+  sale: SaleForExchange,
+  exchange: ExchangeDetailFields['exchange'],
+): { fields: SaleExchangeFields; itemExtras: Map<string, ExchangeItemExtras> } {
+  return fieldsForSale(sale, exchange, sale.payments.length > 0)
+}
+
+function fieldsForSale(
+  sale: SaleForExchange,
+  exchange: ExchangeDetailFields['exchange'],
+  openedPaymentIsPaid: boolean,
+): { fields: SaleExchangeFields; itemExtras: Map<string, ExchangeItemExtras> } {
+  const fields: SaleExchangeFields = { exchangeable: false, notExchangeableReason: 'NOT_ATTRIBUTABLE', payoutOptions: [], exchange }
+  const itemExtras = new Map<string, ExchangeItemExtras>()
+
+  if (sale.settlementUnavailable || !sale.charged.atribuible) {
     fields.notExchangeableReason = 'NOT_ATTRIBUTABLE'
     return { fields, itemExtras }
   }
@@ -196,7 +272,7 @@ export async function exchangeDetailFields(
   }
   const capacities: PaymentCapacity[] = []
   for (const p of sale.payments) {
-    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? readChain(p.id) : null
+    const chain = isExchangeCreditTenderKind(p.money.tenderSystemKind) ? readChain(sale, p.id) : null
     capacities.push({
       paymentId: p.id,
       saleRemainingCents: effectiveExchangeCapacity(p),
@@ -208,9 +284,10 @@ export async function exchangeDetailFields(
   const merchandise = lines.filter(l => l.notExchangeableReason === null || l.notExchangeableReason === 'ALREADY_RETURNED')
   fields.notExchangeableReason =
     saleBlockReason({ ...sale.order, paymentSources: sale.payments.map(p => p.money.source ?? '') }) ??
+    (sale.orderLockScopeTooLarge ? 'ORDER_LOCK_SCOPE_TOO_LARGE' : null) ??
     (merchandise.length && merchandise.every(l => l.remainingQtyOrder === 0)
       ? 'ALREADY_RETURNED'
-      : payment.status !== 'COMPLETED' || !sale.payments.some(p => p.id === paymentId)
+      : !openedPaymentIsPaid
         ? 'NOT_PAID'
         : lines.some(l => l.notExchangeableReason === null)
           ? null

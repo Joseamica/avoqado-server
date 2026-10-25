@@ -59,6 +59,9 @@ export interface ExchangeTxInput {
   originalOrderId: string
 }
 export interface SaleForExchange {
+  /** Batch reads retain business refusals; the single-sale writer still throws for missing settlement evidence. */
+  settlementUnavailable?: boolean
+  orderLockScopeTooLarge?: boolean
   order: {
     id: string
     orderNumber: string
@@ -99,6 +102,8 @@ export interface SaleForExchange {
     createdAt: Date
     amountCents: number
     tipCents: number
+    tenderLabel: string | null
+    saleRemainingCents: number
     processorData: unknown
     refunds: FilaDeReembolso[]
     saleRefundedCents: number

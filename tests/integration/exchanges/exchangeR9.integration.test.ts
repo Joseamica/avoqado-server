@@ -14,7 +14,7 @@ let s: Awaited<ReturnType<typeof seedClothingSale>> | undefined
 beforeAll(() => {
   const u = new URL(process.env.TEST_DATABASE_URL!)
   expect(['localhost', '127.0.0.1']).toContain(u.hostname)
-  expect(u.pathname).toMatch(/^\/avoqado_h1a_test_\d{8}(?:_\d+)?$/)
+  expect(u.pathname).toMatch(/^\/avoqado_(?:h1a_test_\d{8}(?:_\d+)?|cambio_test_20261020)$/)
 })
 afterEach(async () => {
   if (s?.venueId) await s.cleanup()
