@@ -13,7 +13,7 @@ it.each(['UTC', 'America/Mexico_City'])('claim and lease preserve UTC instants i
   // 🔴 Con el prefijo ÚNICO de una sola sesión, estas suites fallaban SIEMPRE en CI
   // (su base es `avoqado_h1a_test_20260808`): 38 pruebas en rojo el 12-sep. La guarda
   // debe cerrar el paso a una base real, no a la del CI.
-  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/)
   url.searchParams.set('connection_limit', '1')
   const db = new PrismaClient({ datasources: { db: { url: url.toString() } } })
   let venueId: string | undefined

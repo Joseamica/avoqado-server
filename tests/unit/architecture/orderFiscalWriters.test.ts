@@ -1086,6 +1086,7 @@ describe('locked-transaction helpers never receive the global client', () => {
  * the same literal values). Only the function that OPENS the transaction takes the options.
  */
 const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
+  'src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect': 1,
   'src/services/tpv/order.tpv.service.ts#createOrder': 1,
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': 1,
   // Mesas topology-lock and controller entry points, with the same budget contract.
@@ -1194,7 +1195,7 @@ function hasOrderedOrderClaim(body: string): boolean {
   let found = false
   const visit = (node: ts.Node): void => {
     if (ts.isTaggedTemplateExpression(node) && ts.isPropertyAccessExpression(node.tag) && node.tag.name.text === '$queryRaw') {
-      found ||= /FROM\s+"Order"[\s\S]*?ORDER BY id FOR UPDATE/.test(node.template.getText(sf))
+      found ||= /FROM\s+"Order"[\s\S]*?ORDER BY "createdAt" DESC, id DESC FOR UPDATE/.test(node.template.getText(sf))
     }
     ts.forEachChild(node, visit)
   }
@@ -1222,7 +1223,7 @@ function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
       ts.isAwaitExpression(node.parent)
     ) {
       const sql = node.template.getText(sf)
-      if (/FROM\s+"Order"[\s\S]*?ORDER BY id FOR UPDATE/.test(sql)) claims.push(node.getStart(sf))
+      if (/FROM\s+"Order"[\s\S]*?ORDER BY "createdAt" DESC, id DESC FOR UPDATE/.test(sql)) claims.push(node.getStart(sf))
       if (/FROM\s+"Venue"[\s\S]*?FOR KEY SHARE/.test(sql)) {
         const declaration = node.parent.parent
         // A nested/conditional/foreign-client fence does not prove the unconditional claim ordering.
@@ -1375,7 +1376,8 @@ describe('Mesas lock/budget scanner regressions', () => {
   }
 
   it('seeds only the real ordered Order SQL and propagates through a tx-only helper', () => {
-    const body = 'async function lockTableOrderScope(tx) { await tx.$queryRaw`SELECT id FROM "Order" ORDER BY id FOR UPDATE`; }'
+    const body =
+      'async function lockTableOrderScope(tx) { await tx.$queryRaw`SELECT id FROM "Order" ORDER BY "createdAt" DESC, id DESC FOR UPDATE`; }'
     const key = 'src/services/shared/tableOrderLock.ts#lockTableOrderScope'
     const call: Call = {
       callee: 'lockTableOrderScope',
@@ -1391,11 +1393,12 @@ describe('Mesas lock/budget scanner regressions', () => {
     expect(orderLockHelpers(code, [call]).has('mergeOrdersInTransaction')).toBe(true)
     expect(orderLockHelpers(new Map([[key, body.replace('FOR UPDATE', 'FOR SHARE')]]), [call]).has('lockTableOrderScope')).toBe(false)
     expect(hasOrderedOrderClaim(body.replace('"Order"', '"Table"'))).toBe(false)
+    expect(hasOrderedOrderClaim(body.replace('ORDER BY "createdAt" DESC, id DESC', 'ORDER BY id'))).toBe(false)
   })
 
   it('rejects a removed, reordered, conditional or foreign-client Venue fence', () => {
     const venue = 'const venues = await tx.$queryRaw`SELECT id FROM "Venue" FOR KEY SHARE`;'
-    const order = 'const orders = await tx.$queryRaw`SELECT id FROM "Order" ORDER BY id FOR UPDATE`;'
+    const order = 'const orders = await tx.$queryRaw`SELECT id FROM "Order" ORDER BY "createdAt" DESC, id DESC FOR UPDATE`;'
     const scope = (parts: string) => `async function lockTableOrderScope(tx) { ${parts} }`
     expect(hasVenueFenceBeforeOrderedOrderClaim(scope(venue + order))).toBe(true)
     expect(hasVenueFenceBeforeOrderedOrderClaim(scope(order))).toBe(false)

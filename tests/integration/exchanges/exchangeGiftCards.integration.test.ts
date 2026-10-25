@@ -14,7 +14,7 @@ jest.setTimeout(120000)
 let s: Awaited<ReturnType<typeof seedClothingSale>>
 
 beforeAll(() => {
-  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toBe('/avoqado_cambio_test_20261020')
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/)
 })
 afterAll(async () => {
   if (s) await s.cleanup()

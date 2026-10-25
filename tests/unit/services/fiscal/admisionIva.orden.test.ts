@@ -1,14 +1,10 @@
 /**
  * IVA por producto, plan 6b (spec §2 D10, §5.3): UN solo orden de candados para todos — admisión `iva-emision` primero, después las
- * órdenes por id y al final los productos por id. Con el orden viejo (orden → productos → admisión) el encendido, que toma la admisión
+ * órdenes por createdAt DESC/id DESC (R5) y al final los productos por id. Con el orden viejo (orden → productos → admisión) el encendido toma la admisión
  * EXCLUSIVA primero, se trababa con cualquier emisión.
  */
 import { Prisma } from '@prisma/client'
-import {
-  bloquearOrdenParaFacturar,
-  bloquearOrdenesParaFacturar,
-  tomarAdmisionExclusiva,
-} from '@/services/fiscal/admisionIva'
+import { bloquearOrdenParaFacturar, bloquearOrdenesParaFacturar, tomarAdmisionExclusiva } from '@/services/fiscal/admisionIva'
 
 function txQueGraba(respuestas: Array<{ si: RegExp; filas: unknown[] }>) {
   const sql: string[] = []
@@ -62,6 +58,17 @@ describe('bloquearOrdenParaFacturar — D10', () => {
 })
 
 describe('bloquearOrdenesParaFacturar — D10', () => {
+  it('locks a manifest larger than 100 in one global date order and returns only a database count', async () => {
+    const { tx, sql, valores } = txQueGraba([{ si: /FROM "Venue" WHERE id/, filas: [{ organizationId: 'org1' }] }])
+    const ids = Array.from({ length: 201 }, (_, i) => `order-${i}`)
+    await bloquearOrdenesParaFacturar(tx, ids, 'v1')
+    const claims = sql.map((s, i) => (/FROM "Order" WHERE[\s\S]*FOR UPDATE/.test(s) ? i : -1)).filter(i => i >= 0)
+    expect(claims).toHaveLength(1)
+    expect(sql[claims[0]]).toContain('SELECT COUNT(*) FROM')
+    expect(sql[claims[0]]).toContain('ORDER BY "createdAt" DESC, id DESC FOR UPDATE')
+    expect(valores[claims[0]][0]).toMatchObject({ values: ['v1', ids] })
+  })
+
   it('con negocio: la admisión de su organización antes de la primera orden', async () => {
     const { tx, sql } = txQueGraba([{ si: /FROM "Venue" WHERE id/, filas: [{ organizationId: 'org1' }] }])
     await bloquearOrdenesParaFacturar(tx, ['o1', 'o2'], 'v1')

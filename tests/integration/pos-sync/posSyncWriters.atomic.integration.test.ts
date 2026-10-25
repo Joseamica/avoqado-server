@@ -1,9 +1,8 @@
 /**
  * Plan3b T6: imported POS events (pos-sync header and lines) serialize with fiscal capture on the real Order row, decide
  * from the row read under that lock, and never change the imported header money (the POS header is the monetary
- * authority, IVA_APARTE). A line that needs a placeholder Product takes the Venue governance fence BEFORE the Order
- * (deleteVenue holds the Venue first, then deletes the venue's OrderItems and Payments before its Orders — T8-R4
- * residual, kept); the existing-product fast path never takes it.
+ * authority, IVA_APARTE). R5: both existing products and placeholder paths take Venue before Order, closing T8-R4
+ * against deleteVenue's child deletes. Placeholders retain the governance check before the Order.
  * Characterization block: the upstream-completeness limit (§14), which Plan 3b does NOT resolve.
  * Plan 6b block (spec §5.4): with IVA por producto ON, no POS writer writes anything (the reverse exclusion).
  */
@@ -50,7 +49,7 @@ jest.mock('@/services/mobile/deviceRegistry.service', () => ({
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(database.pathname)
+  !/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(database.pathname)
 ) {
   throw new Error('This suite requires an explicitly selected isolated local test database.')
 }
@@ -161,13 +160,15 @@ function pauseAfterOrderLock(orderId: string, mode: 'scope' | 'legacy') {
                     const sql = Array.isArray(args[0]) ? args[0].join('?').replace(/\s+/g, ' ').trim() : ''
                     const scopeClaim =
                       mode === 'scope' &&
-                      sql === 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE' &&
+                      sql ===
+                        'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE' &&
                       args[1] === venueId &&
                       Array.isArray(args[2]) &&
                       args[2].includes(orderId)
                     const legacyClaim =
                       mode === 'legacy' &&
-                      sql === 'SELECT id FROM "Order" WHERE id = ? AND "venueId" = ? FOR UPDATE' &&
+                      sql.includes('ancestors(id) AS') &&
+                      sql.endsWith('ORDER BY o."createdAt" DESC, o.id DESC FOR UPDATE OF o') &&
                       args[1] === orderId &&
                       args[2] === venueId
                     if (!paused && (scopeClaim || legacyClaim) && Array.isArray(rows) && rows.some(row => row.id === orderId)) {
@@ -594,9 +595,7 @@ describe('placeholder Product: Venue fence first, one transaction, bounded retry
     const lock = jest.spyOn(orderLock, 'lockExistingOrderForPayment')
     const deleting = prisma.$transaction(
       async tx => {
-        // deleteVenue's Venue → Order part: Venue FOR UPDATE, then this Order. (The real deleteVenue deletes the venue's
-        // OrderItems/modifiers and Payments BEFORE its Orders; against a writer already holding an Order that is a
-        // possible 40P01, the kept T8-R4 residual — not modeled here.)
+        // Venue → Order, including the common R5 fence: deletion cannot get ahead of a writer already holding its Order.
         await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
         entered.release(await backendPid(tx))
         await finish.promise
@@ -626,11 +625,11 @@ describe('placeholder Product: Venue fence first, one transaction, bounded retry
     expect((await snapshot(o.id)).items).toHaveLength(1)
   })
 
-  it('the existing-product fast path never needs the Venue: it finishes while a deletion holds the Venue', async () => {
+  it('an existing-product line waits for deletion before holding its Order, then finishes (R5 closes T8-R4)', async () => {
     const o = await posOrder()
     const entered = barrier<number>(),
       finish = barrier()
-    // Only the Venue step of deleteVenue (it then deletes OrderItems and Payments before Orders — T8-R4, not modeled).
+    // The common fence must serialize even an existing-product writer before deletion can touch its child rows.
     const deleting = prisma.$transaction(
       async tx => {
         await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR UPDATE`
@@ -643,18 +642,15 @@ describe('placeholder Product: Venue fence first, one transaction, bounded retry
     let waitedOnDeletion: boolean | undefined
     try {
       const pid = await entered.promise
-      let finished = false
-      writer = resultOf(processPosOrderItemEvent(line(o.externalId, `${o.externalId}:FAST`))).finally(() => {
-        finished = true
-      })
-      // Postgres, not a fixed window, says whether it waited: a slow writer on a loaded machine is not a blocked one.
-      waitedOnDeletion = await blockedBy(pid, () => finished)
+      writer = resultOf(processPosOrderItemEvent(line(o.externalId, `${o.externalId}:FAST`)))
+      waitedOnDeletion = await blockedBy(pid)
+      await prisma.$transaction(tx => tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${o.id} FOR UPDATE NOWAIT`)
     } finally {
       finish.release()
       await deleting
       await writer
     }
-    expect(waitedOnDeletion).toBe(false)
+    expect(waitedOnDeletion).toBe(true)
     expect((await writer!).error).toBeUndefined()
     expect((await snapshot(o.id)).items).toHaveLength(1)
   })

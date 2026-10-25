@@ -54,7 +54,7 @@ export const ORDER_LOCK_WAIT_BUDGET = { timeout: 15_000, maxWait: 5_000 } as con
 /**
  * Lock order global para dinero ligado a una Order durable:
  *
- *   Order → Payment (si el carril necesita serializar uno) → Shift
+ *   Venue (KEY SHARE) → Orders (createdAt DESC, id DESC; incluye raíces de crédito) → Payment → Shift
  *
  * Un carril de orden nueva/sombra puede reclamar Shift antes de insertar la
  * Order porque todavía no existe una fila Order que otro writer pueda poseer.
@@ -71,13 +71,30 @@ export async function lockExistingOrderForPayment(
   if (typeof tx.$queryRaw !== 'function') {
     throw new Error('lockExistingOrderForPayment requiere una transacción con $queryRaw')
   }
+  // El fence materializado frena el borrado de demos ANTES de poseer sus Orders/Payments.
   const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT id
-    FROM "Order"
-    WHERE id = ${input.orderId} AND "venueId" = ${input.venueId}
-    FOR UPDATE
+    WITH RECURSIVE input AS (
+      SELECT ${input.orderId}::text AS order_id, ${input.venueId}::text AS venue_id
+    ), fence AS MATERIALIZED (
+      SELECT v.id FROM "Venue" v JOIN input i ON v.id = i.venue_id FOR KEY SHARE OF v
+    ), ancestors(id) AS (
+      SELECT o.id FROM "Order" o JOIN fence v ON v.id = o."venueId" JOIN input i ON o.id = i.order_id
+      UNION
+      SELECT parent.id
+      FROM ancestors child
+      JOIN "Payment" credit ON credit."orderId" = child.id
+      JOIN input i ON credit."venueId" = i.venue_id
+      JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
+      JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
+      JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
+    )
+    SELECT o.id
+    FROM "Order" o JOIN ancestors a ON a.id = o.id
+    JOIN input i ON o."venueId" = i.venue_id
+    ORDER BY o."createdAt" DESC, o.id DESC
+    FOR UPDATE OF o
   `
-  return Array.isArray(rows) && rows.length === 1
+  return Array.isArray(rows) && rows.some(row => row.id === input.orderId)
 }
 
 interface RefundAuthorityReconciliationInput {

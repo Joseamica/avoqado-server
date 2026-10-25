@@ -6,6 +6,7 @@
  * Sólo crea filas propias (sufijo único) y las borra en `afterAll`, falle o no.
  */
 import { DeliveryProvider, type DeliveryChannelLink } from '@prisma/client'
+import { formatInTimeZone } from 'date-fns-tz'
 import prisma from '@/utils/prismaClient'
 import { ingestDeliveryOrder } from '@/services/delivery-channels/core/deliveryOrderIngestion.service'
 import { cancelDeliveryOrder } from '@/services/delivery-channels/core/cancelDeliveryOrder.service'
@@ -25,7 +26,8 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
 }))
 
 /** 🔴 La base es compartida por ~20 sesiones: fuera de una base de PRUEBAS no se toca nada. */
-const esBaseDePrueba = (nombre: string) => nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(nombre)
+const esBaseDePrueba = (nombre: string) =>
+  nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(nombre)
 {
   const url = new URL(process.env.DATABASE_URL ?? '')
   const nombre = decodeURIComponent(url.pathname.slice(1))
@@ -98,6 +100,8 @@ describe('Rappi 2b: la lista «Rappi · por cobrar»', () => {
   async function pedido(raw: any, venue = 0): Promise<{ orderId: string; folio: string }> {
     const copia = JSON.parse(JSON.stringify(raw))
     copia.order_detail.order_id = `${copia.order_detail.order_id}-${sufijo}-${++n}`
+    // La lista cubre 48 h: el pedido del sandbox debe representar una venta reciente.
+    copia.order_detail.created_at = formatInTimeZone(new Date(), 'America/Mexico_City', 'yyyy-MM-dd HH:mm:ss')
     const { order } = await ingestDeliveryOrder(normalizeRappiOrder(copia), links[venue])
     return { orderId: order.id, folio: copia.order_detail.order_id }
   }

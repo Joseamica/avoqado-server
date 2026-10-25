@@ -36,7 +36,7 @@ async function refund(s: Seed, paymentId: string, quantity: number, cents: numbe
     }),
   )
 }
-beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toBe('/avoqado_cambio_test_20261020'))
+beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/))
 afterAll(async () => {
   for (const s of fixtures) await s.cleanup()
   await prisma.$disconnect()

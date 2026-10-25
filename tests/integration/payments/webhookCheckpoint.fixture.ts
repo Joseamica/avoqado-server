@@ -24,7 +24,10 @@ export async function exigir<T>(consulta: Promise<T | null>): Promise<T> {
 
 export function exigirBaseDesechable(): void {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
-  if (!['localhost', '127.0.0.1'].includes(url.hostname) || !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(url.pathname)) {
+  if (
+    !['localhost', '127.0.0.1'].includes(url.hostname) ||
+    !/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(url.pathname)
+  ) {
     throw new Error(`TEST_DATABASE_URL no apunta a una base local desechable: ${url.hostname}${url.pathname}`)
   }
 }

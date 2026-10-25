@@ -31,7 +31,8 @@ const sleep = (ms: number) => new Promise(r => setTimeout(r, ms))
  * Acepta la de esta Mac (`av-db-25-test`) o la desechable de CI (`avoqado_*_test_*`, p. ej. `avoqado_h1a_test_20260808`);
  * mismo criterio que `payments/paymentEffectsReview.integration.test.ts`. Rechaza `av-db-25` y cualquier otra.
  */
-const esBaseDePrueba = (nombre: string) => nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(nombre)
+const esBaseDePrueba = (nombre: string) =>
+  nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(nombre)
 {
   // A nivel de MÓDULO, no en un hook: corre antes de cualquier `beforeAll`/`afterAll`, así que ningún hook
   // llega a ejecutarse contra una base ajena. `DATABASE_URL` es a la que se conecta el `prisma` de abajo.

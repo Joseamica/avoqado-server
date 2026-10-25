@@ -113,7 +113,7 @@ const p = prisma as unknown as Record<string, Record<string, jest.Mock>> & { $tr
  * it (by default the same row the pre-read returned, i.e. nothing changed meanwhile), then the write.
  */
 const lockedTx = (update: jest.Mock, reread: jest.Mock = jest.fn(() => p.order.findUnique.mock.results.slice(-1)[0]?.value)) => ({
-  $queryRaw: jest.fn().mockResolvedValue([{ id: 'locked' }]),
+  $queryRaw: jest.fn(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }]),
   order: { findFirst: reread, update },
   inventoryPosting: { findUnique: jest.fn(), create: jest.fn() },
 })

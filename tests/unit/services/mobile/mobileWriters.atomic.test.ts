@@ -206,7 +206,9 @@ beforeEach(() => {
   tx = {
     $queryRaw: jest.fn().mockImplementation(async (query: any) => {
       const sql = Array.isArray(query) ? query.join('?') : query.sql
-      return [{ id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') ? 'venue' : 'order' }]
+      return [
+        { id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') && !sql.includes('FROM "Order"') ? 'venue' : 'order' },
+      ]
     }),
     ...Object.fromEntries(MODELS.map(name => [name, model()])),
   }
@@ -320,7 +322,10 @@ describe('locked mobile writers', () => {
       }))
       expect(statements).toEqual([
         { sql: 'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE', values: ['venue'] },
-        { sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE', values: ['venue', ['order']] },
+        {
+          sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
+          values: ['venue', ['order']],
+        },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
       ])
       const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder

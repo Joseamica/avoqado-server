@@ -18,7 +18,10 @@ jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBr
 
 // Crea órdenes y mesas reales: sólo corre en una base de prueba local y desechable.
 const target = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(target.pathname)) {
+if (
+  !['localhost', '127.0.0.1'].includes(target.hostname) ||
+  !/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(target.pathname)
+) {
   throw new Error('Exige una base de prueba local y desechable (p. ej. avoqado_mesas40_test_20261006).')
 }
 const venueId = `audit40-${randomUUID()}`

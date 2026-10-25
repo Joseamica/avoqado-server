@@ -7,6 +7,7 @@ import logger from '@/config/logger'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
 import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
 import { esVentaNuevaDeCambio, sqlOrigenEconomico } from '@/services/exchanges/exchangeMarks'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 
 export type PaymentEffectKind = 'REVIEW' | 'RECEIPT' | 'REFERRAL' | 'COMMISSION' | 'TRANSACTION_COST'
 export type PaymentEffectInput = {
@@ -198,9 +199,8 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
   }
   return db.$transaction(async tx => {
     // Use the same lock order as financial producers (Order before its effect rows).
-    if (claim.orderId)
-      await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${claim.orderId} AND "venueId" = ${claim.venueId} FOR UPDATE`)
-    // La anulación toma la raíz: el worker también, después de la venta nueva y antes de bloquear su efecto (R19).
+    if (claim.orderId) await lockExistingOrderForPayment(tx, { venueId: claim.venueId, orderId: claim.orderId })
+    // R19: la raíz ya quedó tomada con las otras órdenes; esta reentrada conserva la comprobación del origen económico.
     if (claim.kind === 'COMMISSION')
       await tx.$queryRaw(Prisma.sql`
         SELECT o.id FROM "Order" o
@@ -268,7 +268,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       data: { status: 'DONE', completedAt: new Date(), claimToken: null, leaseUntil: null, lastError: null },
     })
     return true
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 export async function failClaimedPaymentEffect(

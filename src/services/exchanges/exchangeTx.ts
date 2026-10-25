@@ -321,7 +321,7 @@ export async function prepareExchangeInTx(
   const slices: AllocationSlice[] = allocation.slices
   if (calc.returnedCents === 0) slices.push({ paymentId: body.originalPaymentId, cents: 0, role: 'CREDIT', mode: null })
   const paymentById = new Map(sale.payments.map(p => [p.id, p]))
-  // Payment antes que Shift: pone en fila la edición manual de las raíces contra la nueva liga del crédito.
+  // Las órdenes y TODAS sus raíces ya están tomadas por fecha; aquí el id sólo ordena Payments, nunca Orders.
   const lockIds = [...new Set(slices.flatMap(s => [s.paymentId, paymentById.get(s.paymentId)!.rootPaymentId]))].sort()
   for (const id of lockIds) {
     const p = await tx.payment.findFirst({ where: { venueId, id }, select: { orderId: true } })

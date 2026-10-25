@@ -21,6 +21,7 @@
  */
 
 import prisma from '../../../utils/prismaClient'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../../shared/paymentShiftClaim'
 import { organizacionDeLaSedeActivada, venueHasServicePayAccess } from '../staffPay/acceso'
 import logger from '../../../config/logger'
 import {
@@ -514,17 +515,18 @@ export async function createRefundCommission(
   originalPaymentId: string,
   options: CommissionOptions = {},
 ): Promise<CommissionCalculationResult[]> {
-  if (!options.db) return prisma.$transaction(tx => createRefundCommission(refundPaymentId, originalPaymentId, { ...options, db: tx }))
+  if (!options.db)
+    return prisma.$transaction(
+      tx => createRefundCommission(refundPaymentId, originalPaymentId, { ...options, db: tx }),
+      ORDER_LOCK_WAIT_BUDGET,
+    )
   const db = options.db
   const refundPayment = await db.payment.findUnique({ where: { id: refundPaymentId } })
   if (!refundPayment) throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
-  if (refundPayment.orderId)
-    await db.$queryRaw(
-      Prisma.sql`SELECT id FROM "Order" WHERE id = ${refundPayment.orderId} AND "venueId" = ${refundPayment.venueId} FOR UPDATE`,
-    )
+  if (refundPayment.orderId) await lockExistingOrderForPayment(db, { venueId: refundPayment.venueId, orderId: refundPayment.orderId })
   if (origenEconomicoDeDevolucion(refundPayment.processorData) !== originalPaymentId) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
   const originalPayment = await cobroOriginalDelReverso(db, refundPayment)
-  // La cadena serializa TODOS los reversos de la raíz, siempre nueva → raíz (también al congelar el efecto).
+  // La raíz de CHAIN ya está tomada por el helper, antes de pagos/turno; esta reentrada valida el origen económico.
   if (originalPayment.orderId && originalPayment.orderId !== refundPayment.orderId)
     await db.$queryRaw(
       Prisma.sql`SELECT id FROM "Order" WHERE id = ${originalPayment.orderId} AND "venueId" = ${refundPayment.venueId} FOR UPDATE`,

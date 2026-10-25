@@ -30,7 +30,7 @@ async function exchange(s: Seed) {
 }
 const refund = (s: Seed, paymentId: string, amount = 50000) =>
   issueRefund({ venueId: s.venueId, staffId: s.staffId, paymentId, amount, reason: 'RETURNED_GOODS' })
-beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toBe('/avoqado_cambio_test_20261020'))
+beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_cambio_(r5_)?test_202610(20|24)$/))
 beforeEach(() => jest.clearAllMocks())
 afterAll(async () => {
   for (const s of fixtures) await s.cleanup()

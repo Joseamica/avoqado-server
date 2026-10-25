@@ -133,6 +133,10 @@ export async function cleanDemoData(venueId: string, staffId?: string | null): P
       // (These are always temporary demo data)
       // ==========================================
 
+      // El crédito restringe sus cobros: el cambio del mismo negocio se elimina primero.
+      await tx.exchangeCreditLink.deleteMany({ where: { venueId } })
+      await tx.exchange.deleteMany({ where: { venueId } })
+
       // 1. Delete Payments (must delete before orders due to FK)
       const deletedPayments = await tx.payment.deleteMany({
         where: { venueId },

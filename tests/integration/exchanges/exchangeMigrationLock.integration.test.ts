@@ -8,7 +8,7 @@ let reader: Client
 
 beforeAll(async () => {
   const url = new URL(process.env.TEST_DATABASE_URL!)
-  if (!['localhost', '127.0.0.1'].includes(url.hostname) || !/^\/avoqado_cambio_(fix_)?test_202610(20|24)$/.test(url.pathname))
+  if (!['localhost', '127.0.0.1'].includes(url.hostname) || !/^\/avoqado_cambio_(fix_|r5_)?test_202610(20|24)$/.test(url.pathname))
     throw new Error('La prueba de migración requiere su base desechable local.')
   writer = new Client({ connectionString: url.toString() })
   reader = new Client({ connectionString: url.toString() })

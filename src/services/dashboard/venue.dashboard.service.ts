@@ -441,6 +441,10 @@ export async function deleteVenue(orgId: string, venueId: string, options?: { sk
 
     logger.info(`🗑️  Starting venue deletion for venueId: ${venueId}`)
 
+    // El crédito restringe sus cobros: el cambio del mismo negocio se elimina primero.
+    await tx.exchangeCreditLink.deleteMany({ where: { venueId } })
+    await tx.exchange.deleteMany({ where: { venueId } })
+
     // 1. Delete OrderItems (depends on Orders)
     const orderIds = await tx.order.findMany({
       where: { venueId },

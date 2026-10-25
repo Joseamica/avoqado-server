@@ -169,7 +169,7 @@ describe('posSyncOrderItem.service — line events serialized on the parent Orde
       where: { venueId_externalId: { venueId: 'venue-1', externalId: 'order-ext-1' } },
       select: { id: true },
     })
-    // lockExistingOrderForPayment: SELECT id FROM "Order" WHERE id = ? AND "venueId" = ? FOR UPDATE
+    // lockExistingOrderForPayment: source id, then the route venue.
     expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['order-1', 'venue-1'])
     expect(tx.order.findFirst).toHaveBeenCalledWith({
       where: { id: 'order-1', venueId: 'venue-1', externalId: 'order-ext-1' },

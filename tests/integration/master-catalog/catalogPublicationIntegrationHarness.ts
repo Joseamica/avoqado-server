@@ -31,8 +31,12 @@ export function assertDisposableCatalogPublicationDatabase(): void {
   const declared = new URL(process.env.TEST_DATABASE_URL ?? '')
 
   // WHY: No runtime Prisma import or destructive cleanup is permitted until
-  // both aliases identify the exact disposable H1 database byte-for-byte.
-  if (!isDisposableH1Url(effective) || !isDisposableH1Url(declared) || effective.toString() !== declared.toString()) {
+  // both aliases identify the same disposable database byte-for-byte.
+  const r5 =
+    ['postgres:', 'postgresql:'].includes(effective.protocol) &&
+    ['localhost', '127.0.0.1'].includes(effective.hostname) &&
+    effective.pathname === '/avoqado_cambio_r5_test_20261024'
+  if ((!r5 && (!isDisposableH1Url(effective) || !isDisposableH1Url(declared))) || effective.toString() !== declared.toString()) {
     throw new Error('Task 9 integration requires the exact disposable local H1 database')
   }
 }
