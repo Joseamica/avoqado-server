@@ -35,6 +35,8 @@ export interface ExchangeItemExtras {
   variantOptions: VariantFields['variantOptions']
   productType: string | null
   isPromotionLine: boolean
+  /** Su promoción: los renglones con el mismo id se cambian juntos y completos (spec §5.2). */
+  orderPromotionId: string | null
   notExchangeableReason: LineBlockReason | null
   restockable: boolean
   currentListPriceCents: number | null
@@ -279,6 +281,7 @@ function fieldsForSale(
       variantOptions: product?.variantOptions ?? null,
       productType: product?.type ?? null,
       isPromotionLine: line.orderPromotionId != null,
+      orderPromotionId: line.orderPromotionId ?? null,
       notExchangeableReason: lineBlockReason({
         productId: line.productId,
         productType: product?.type ?? null,

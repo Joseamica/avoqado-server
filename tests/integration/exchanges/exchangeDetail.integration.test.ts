@@ -346,6 +346,43 @@ describe('exchange transaction detail', () => {
     expect(d).toMatchObject({ exchangeable: false, notExchangeableReason: 'ALREADY_RETURNED' })
   })
 
+  it('detail items carry orderPromotionId so two promotions of one sale are distinct groups', async () => {
+    const s = await seed()
+    const instance = async (name: string) => {
+      const p = await prisma.promotion.create({ data: { venueId: s.venueId, name, type: 'BUNDLE', pricingMode: 'FIXED_TOTAL' } })
+      return prisma.orderPromotion.create({
+        data: {
+          orderId: s.order.id,
+          promotionId: p.id,
+          instanceId: `${s.venueId}-${name}`,
+          snapshotJson: { name },
+          grossCents: 50000,
+          discountCents: 0,
+          netCents: 50000,
+        },
+      })
+    }
+    const first = await instance('A')
+    const second = await instance('B')
+    await prisma.orderItem.update({ where: { id: s.order.items[0].id }, data: { orderPromotionId: first.id } })
+    const other = await prisma.orderItem.create({
+      data: {
+        orderId: s.order.id,
+        productId: s.products[0].id,
+        productName: 'Segunda promoción',
+        quantity: 1,
+        unitPrice: 0,
+        total: 0,
+        taxAmount: 0,
+        orderPromotionId: second.id,
+      },
+    })
+    const items = (await detail(s)).items as Array<{ id: string; orderPromotionId?: string | null; isPromotionLine?: boolean }>
+    const byId = new Map(items.map(i => [i.id, i]))
+    expect(byId.get(s.order.items[0].id)).toMatchObject({ isPromotionLine: true, orderPromotionId: first.id })
+    expect(byId.get(other.id)).toMatchObject({ isPromotionLine: true, orderPromotionId: second.id })
+  })
+
   it('a platform sale is blocked with DELIVERY_PLATFORM', async () => {
     const s = await seed()
     await prisma.order.update({ where: { id: s.order.id }, data: { source: 'UBER_EATS' } })
