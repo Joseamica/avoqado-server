@@ -10,6 +10,7 @@ import {
   activarSeleccion,
   cerrarSiTodoFinal,
   confirmarTienda,
+  tiendasParaReconectar,
   type ProvisioningDeps,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
 import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
@@ -75,9 +76,11 @@ function deps(over: Partial<ProvisioningDeps> = {}) {
     suscribir: jest.fn(async () => ({ ok: true, fallidos: [] as string[] })),
     // Tarea 18: «integrada sí/no». Por default sale bien; el aviso va SIN esperar y nunca decide el resultado.
     avisarIntegrada: jest.fn(async () => ({ ok: true, status: 200, raw: '' })),
+    // D8: la lectura fresca de `integration-status` antes de reconectar; sólo se pide si hay una integrada elegida.
+    listar: jest.fn(async () => [] as Array<{ storeId: string; name: string; integrated: boolean; integrationId?: string }>),
     tiendasEscribibles: ['10', '11', '12'],
     ...over,
-  } as ProvisioningDeps & { aprovisionar: jest.Mock; suscribir: jest.Mock; avisarIntegrada: jest.Mock }
+  } as ProvisioningDeps & { aprovisionar: jest.Mock; suscribir: jest.Mock; avisarIntegrada: jest.Mock; listar: jest.Mock }
 }
 
 describe('activarSeleccion', () => {
@@ -830,6 +833,249 @@ describe('orden webhook ↔ 202 (R14)', () => {
     // La de OTRA intención sí es alarma.
     expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i9' })).toBe('IGNORED')
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('sin vínculo pendiente nuestro'), expect.anything())
+  })
+})
+
+// D8 (26-oct): tras «Desconectar de todos modos» Rappi sigue listando la tienda integrada con NUESTRA integración y la
+// página la pintaba en gris. Se reconecta la MISMA fila sin aprovisionar otra vez (medido en Rappi DEV, full-testing/d5.md).
+describe('reconectar una tienda que Rappi sigue teniendo integrada (D8)', () => {
+  const asentar = () => new Promise<void>(r => setImmediate(r))
+  const integrada = (storeId = '10', integrationId = 'AVQ') => ({ storeId, name: `T${storeId}`, integrated: true, integrationId })
+  /** La fila que deja una conexión confirmada y luego «Desconectar»: DISABLED, con su config y su reclamación vieja. */
+  const desconectada = (over: Fila = {}, prov: Fila = {}) =>
+    vinculo('10', {
+      status: 'DISABLED',
+      config: {
+        rappiPendingMenuHash: 'h',
+        rappiProvisioning: {
+          intentId: 'viejo',
+          since: 'x',
+          batchId: 'bv',
+          integrationId: 'AVQ',
+          statusPrevio: 'DISABLED',
+          confirmedAt: 'y',
+          ...prov,
+        },
+      },
+      ...over,
+    })
+
+  describe('tiendasParaReconectar', () => {
+    it('sólo la integrada con nuestra fila en ESE negocio, no conectada y con el MISMO integrationId guardado', async () => {
+      desconectada()
+      expect(await tiendasParaReconectar('v1', [integrada()])).toEqual(new Set(['10']))
+      expect(await tiendasParaReconectar('v1', [integrada('10', 'OTRA')])).toEqual(new Set())
+      expect(await tiendasParaReconectar('OTRO', [integrada()])).toEqual(new Set())
+      expect(await tiendasParaReconectar('v1', [{ ...integrada(), integrated: false }])).toEqual(new Set())
+      expect(await tiendasParaReconectar('v1', [{ storeId: '10', name: 'T10', integrated: true }])).toEqual(new Set())
+      expect(await tiendasParaReconectar('v1', [integrada('11')])).toEqual(new Set())
+    })
+
+    it('una fila ACTIVE o PAUSED no es reconectable (ya está conectada); una sin conexión anterior guardada, tampoco', async () => {
+      for (const status of ['ACTIVE', 'PAUSED']) {
+        desconectada({ status })
+        expect(await tiendasParaReconectar('v1', [integrada()])).toEqual(new Set())
+      }
+      desconectada({ config: { rappiPendingMenuHash: 'h' } })
+      expect(await tiendasParaReconectar('v1', [integrada()])).toEqual(new Set())
+    })
+
+    it('sin tiendas integradas no consulta la base', async () => {
+      L.findMany.mockClear()
+      expect(await tiendasParaReconectar('v1', [tienda('10')])).toEqual(new Set())
+      expect(L.findMany).not.toHaveBeenCalled()
+    })
+  })
+
+  /** Rappi, leído otra vez al confirmar (Codex r1 #2): por default la sigue teniendo con nuestra integración. */
+  const dr = (over: Partial<ProvisioningDeps> = {}) => deps({ listar: jest.fn(async () => [integrada()]), ...over })
+
+  it('la MISMA fila vuelve a ACTIVE sin aprovisionar: suscribe, conserva config, bitácora, «integrada: sí» y cierra el intent', async () => {
+    desconectada()
+    const d = dr()
+    const r = await activarSeleccion(sembrar({ staffId: 's1', environment: 'SANDBOX' }), 'idt', [integrada()], d)
+    await asentar()
+    expect(r['10'].outcome).toBe('ACTIVATED')
+    expect(d.listar).toHaveBeenCalledWith('idt')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(L.createMany).not.toHaveBeenCalled()
+    expect(d.suscribir).toHaveBeenCalledWith('10')
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'ACTIVE', config: { rappiPendingMenuHash: 'h' } })
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', integrationId: 'AVQ', confirmedAt: expect.any(String) })
+    expect(aprov('10').batchId).toBeUndefined() // el lote viejo no sobrevive a la reclamación nueva
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.intents.get('i1')).toMatchObject({ state: 'CONSUMED', merchantTokenEnvelope: null })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'DELIVERY_CHANNEL_CONNECTED', entityId: 'x10', staffId: 's1' }),
+    )
+    expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+  })
+
+  it('🔴 Codex r1 #2: si al confirmar Rappi ya NO la tiene integrada, va por el camino de siempre (aprovisionar)', async () => {
+    desconectada()
+    const d = dr({ listar: jest.fn(async () => [{ ...integrada(), integrated: false, integrationId: undefined }]) })
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'T10' }])
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(r['10'].outcome).toBe('PROVISIONING')
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'PENDING', config: { rappiPendingMenuHash: 'h' } })
+  })
+
+  it('🔴 Codex r1 #2: si al confirmar Rappi la tiene con OTRA integración, o ya no la lista: FAILED y no se toca nada', async () => {
+    for (const ahora of [[integrada('10', 'OTRA')], []]) {
+      desconectada()
+      const d = dr({ listar: jest.fn(async () => ahora) })
+      const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+      expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+      expect(db.links.get('10')).toMatchObject({ status: 'DISABLED', config: { rappiProvisioning: { intentId: 'viejo' } } })
+      expect(d.aprovisionar).not.toHaveBeenCalled()
+      expect(d.suscribir).not.toHaveBeenCalled()
+    }
+  })
+
+  it('si la lectura fresca falla: FAILED, no se reclama ni se llama a nada más; las tiendas nuevas siguen su camino', async () => {
+    desconectada()
+    const d = dr({ listar: jest.fn(async () => Promise.reject(new Error('RAPPI_INTEGRATION_STATUS_503'))) })
+    const r = await activarSeleccion(sembrar({ selectionJson: ['10', '11'] }), 'idt', [integrada(), tienda('11')], d)
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_ERROR' })
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '11', name: 'T11' }])
+  })
+
+  it('otro integrationId guardado: no se reclama (FAILED) y la fila sigue DISABLED con su config', async () => {
+    desconectada({}, { integrationId: 'OTRA' })
+    const d = dr()
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+    expect(resultado('10')).toMatchObject({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+    expect(db.links.get('10')).toMatchObject({
+      status: 'DISABLED',
+      config: { rappiProvisioning: { intentId: 'viejo', integrationId: 'OTRA' } },
+    })
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('integrada sin fila nuestra: no nace una (FAILED), ni HTTP', async () => {
+    const d = dr()
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+    expect(db.links.has('10')).toBe(false)
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('las reglas de siempre siguen: de otro negocio OTHER_VENUE, ya ACTIVE ALREADY_CONNECTED, reclamada por otra viva CLAIMED_BY_OTHER', async () => {
+    desconectada({ venueId: 'OTRO' })
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], dr()))['10'].outcome).toBe('OTHER_VENUE')
+    desconectada({ status: 'ACTIVE' })
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], dr()))['10'].outcome).toBe('ALREADY_CONNECTED')
+    sembrar({ id: 'i2', state: 'ACTIVATING' })
+    desconectada({ status: 'PENDING' }, { intentId: 'i2', confirmedAt: undefined })
+    const d = dr()
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], d))['10'].outcome).toBe('CLAIMED_BY_OTHER')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r1 #1: si suscribir falla, la fila REGRESA a DISABLED (nunca queda PENDING), FAILED final, y se puede reintentar', async () => {
+    desconectada()
+    const r = await activarSeleccion(
+      sembrar(),
+      'idt',
+      [integrada()],
+      dr({ suscribir: jest.fn(async () => ({ ok: false, fallidos: ['NEW_ORDER'] })) }),
+    )
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' })
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', integrationId: 'AVQ' }) // la prueba para el siguiente intento sigue
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+
+    // El dueño lo vuelve a intentar con otro enlace: ahora sí.
+    const d = dr()
+    const r2 = await activarSeleccion(sembrar({ id: 'i3' }), 'idt', [integrada()], d)
+    expect(r2['10'].outcome).toBe('ACTIVATED')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+  })
+
+  it('🔴 Codex r1 #1: una baja de Rappi que cae a media reconexión se difiere; al reintentarla, deja la fila DISABLED', async () => {
+    desconectada()
+    const baja = { storeId: '10', status: 'INACTIVE' as const, operation: 'DEPROVISION' as const, integrationId: 'AVQ', batchId: 'bd' }
+    const enMedio: string[] = []
+    const d = dr({
+      suscribir: jest.fn(async () => {
+        enMedio.push(await confirmarTienda(baja, deps()))
+        return { ok: true, fallidos: [] as string[] }
+      }),
+    })
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], d))['10'].outcome).toBe('ACTIVATED')
+    expect(enMedio).toEqual(['DEFERRED']) // el procesador de avisos lo reintenta
+    expect(await confirmarTienda(baja, deps())).toBe('DISABLED')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+  })
+
+  it('🔴 familia «baja a la vez»: si Rappi la suelta mientras se suscribe, la revisión antes de promover lo ve y no se promueve', async () => {
+    for (const despues of [[], [{ ...integrada(), integrated: false, integrationId: undefined }], [integrada('10', 'OTRA')]]) {
+      desconectada()
+      const listar = jest.fn().mockResolvedValueOnce([integrada()]).mockResolvedValueOnce(despues)
+      const d = dr({ listar })
+      const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+      expect(listar).toHaveBeenCalledTimes(2) // antes de reclamar, y tras suscribir (justo antes de promover)
+      expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' })
+      expect(db.links.get('10')).toMatchObject({ status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'DELIVERY_CHANNEL_CONNECTED' }))
+      expect(d.avisarIntegrada).not.toHaveBeenCalled()
+    }
+  })
+
+  it('si la revisión antes de promover no se puede leer: no se promueve (sin verla, no queda ACTIVE)', async () => {
+    desconectada()
+    const listar = jest.fn().mockResolvedValueOnce([integrada()]).mockRejectedValueOnce(new Error('RAPPI_INTEGRATION_STATUS_503'))
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], dr({ listar }))
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' })
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+  })
+
+  it('🔴 Codex r2 #1: una baja que leyó PENDING y encuentra la fila YA promovida entre sus dos lecturas se aplica (DISABLED)', async () => {
+    // La reclamación de una reconexión: sin lote, sin confirmar.
+    desconectada({ status: 'PENDING' }, { intentId: 'i1', batchId: undefined, confirmedAt: undefined })
+    sembrar()
+    const baja = { storeId: '10', status: 'INACTIVE' as const, operation: 'DEPROVISION' as const, integrationId: 'AVQ', batchId: 'bd' }
+    let n = 0
+    p.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+      const r = await txOriginal(cb)
+      if (++n === 1) db.links.get('10')!.status = 'ACTIVE' // la reconexión promovió justo después de la primera lectura
+      return r
+    })
+    expect(await confirmarTienda(baja, deps())).toBe('DISABLED')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'DELIVERY_CHANNEL_DISCONNECTED', data: expect.objectContaining({ origen: 'RAPPI_DEPROVISION' }) }),
+    )
+  })
+
+  it('junto con una tienda nueva: sólo la nueva viaja en el lote de aprovisionar', async () => {
+    desconectada()
+    const d = dr()
+    const r = await activarSeleccion(sembrar({ selectionJson: ['10', '11'] }), 'idt', [integrada(), tienda('11')], d)
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '11', name: 'T11' }])
+    expect(r['10'].outcome).toBe('ACTIVATED')
+    expect(r['11'].outcome).toBe('PROVISIONING')
+  })
+
+  it('sin integradas elegidas no se vuelve a leer Rappi; fuera de la lista del piloto: ni lectura, ni reclamación, ni HTTP', async () => {
+    const d0 = dr()
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d0)
+    expect(d0.listar).not.toHaveBeenCalled()
+
+    desconectada()
+    const d = dr({ tiendasEscribibles: ['11'] })
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(r['10'].outcome).toBe('NOT_ENABLED_FOR_PILOT')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(d.listar).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
   })
 })
 

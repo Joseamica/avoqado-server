@@ -44,6 +44,14 @@ export function crearDbFalsa(): DbFalsa {
       }
     return { count }
   })
+  // Las filas de un negocio entre unas tiendas (todas las de la base falsa son de Rappi).
+  L.findMany
+    .mockReset()
+    .mockImplementation(async ({ where }: Fila) =>
+      [...db.links.values()]
+        .filter(f => f.venueId === where.venueId && (where.externalLocationId?.in ?? []).includes(f.externalLocationId))
+        .map(f => ({ ...f, config: f.config ?? null })),
+    )
   L.update.mockReset().mockImplementation(async ({ where, data }: Fila) => Object.assign(porId(where.id), data))
   L.delete.mockReset().mockImplementation(async ({ where }: Fila) => {
     const f = porId(where.id)

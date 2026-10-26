@@ -8,6 +8,8 @@
  *  (c) el que llega tarde con SUBSCRIBE_FAILED no degrada el ACTIVATED (la guarda del `WHERE` de `anotar`);
  *  (d) editar el canal (PATCH de config) mientras el aprovisionamiento guarda su lote: el PATCH espera el
  *      candado y no borra el `batchId` (H2).
+ *  (e) D8: reconectar una tienda que Rappi sigue teniendo integrada (la consulta real de `tiendasParaReconectar`), y dos
+ *      reconexiones a la vez de la misma tienda ⇒ una sola la deja ACTIVE y se suscribe una sola vez.
  *
  * La red de Rappi va stubbeada (aprovisionar y suscribir); todo lo demás es SQL real por el `prisma` real.
  * Sólo crea filas propias (sufijo único) y las borra en `afterAll`, falle o no.
@@ -16,7 +18,12 @@ import { DeliveryChannelStatus, type DeliveryConnectIntent, type Prisma } from '
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { updateChannelLink } from '@/services/delivery-channels/core/deliveryChannelLink.service'
-import { activarSeleccion, confirmarTienda, type ProvisioningDeps } from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
+import {
+  activarSeleccion,
+  confirmarTienda,
+  tiendasParaReconectar,
+  type ProvisioningDeps,
+} from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
 
 // La bitácora no es lo que se prueba aquí, y el staff de estas intenciones no existe: sin esto quedarían filas de
 // ActivityLog sueltas en la base de pruebas. Sí se cuenta cuántas veces se registró la conexión (sólo el ganador).
@@ -93,6 +100,7 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
       inciertas: [],
     })),
     suscribir: jest.fn(async () => ({ ok: true, fallidos: [] })),
+    listar: jest.fn(async () => []),
     tiendasEscribibles: [storeId],
   })
 
@@ -325,5 +333,51 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
 
     // Sin el `FOR UPDATE` del PATCH, su copia leída ANTES del lote lo borraba al escribir.
     expect((await vinculo(s)).config).toEqual({ note: 'horario nuevo', rappiProvisioning: { ...reclamacion, batchId: 'b-d' } })
+  })
+
+  it('(e) D8: reconectar la tienda que Rappi sigue teniendo integrada; dos reconexiones a la vez dejan UNA sola conexión', async () => {
+    const s = tienda('e')
+    const integrada = { storeId: s, name: 'T', integrated: true, integrationId: `int-${s}` }
+    const link = await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: 'RAPPI',
+        externalLocationId: s,
+        webhookSecret: 'x',
+        status: DeliveryChannelStatus.DISABLED,
+        config: { note: 'conservar', rappiProvisioning: { intentId: 'viejo', since: 'x', integrationId: `int-${s}`, confirmedAt: 'y' } },
+      },
+    })
+    // La consulta real: por proveedor, negocio y tienda.
+    expect(await tiendasParaReconectar(venueId, [integrada])).toEqual(new Set([s]))
+    expect(await tiendasParaReconectar(`otro-${sufijo}`, [integrada])).toEqual(new Set())
+
+    const [i1, i2] = [await intentActivando(s), await intentActivando(s)]
+    const ahora = jest.fn(async () => [integrada])
+    const [d1, d2] = [
+      { ...depsPara(s), listar: ahora },
+      { ...depsPara(s), listar: ahora },
+    ]
+    const p = puerta(link.id)
+    await p.pid
+    const a = activarSeleccion(i1 as DeliveryConnectIntent, 'idt', [integrada], d1)
+    const b = activarSeleccion(i2 as DeliveryConnectIntent, 'idt', [integrada], d2)
+    await soltarCuandoEsperen(p, 2)
+    const [ra, rb] = await Promise.all([a, b])
+
+    const resultados = [ra[s].outcome, rb[s].outcome]
+    expect(resultados.filter(o => o === 'ACTIVATED')).toHaveLength(1)
+    expect(['CLAIMED_BY_OTHER', 'ALREADY_CONNECTED']).toContain(resultados.find(o => o !== 'ACTIVATED'))
+    expect(d1.aprovisionar).not.toHaveBeenCalled()
+    expect(d2.aprovisionar).not.toHaveBeenCalled()
+    expect((d1.suscribir as jest.Mock).mock.calls.length + (d2.suscribir as jest.Mock).mock.calls.length).toBe(1)
+    const fila = await vinculo(s)
+    expect(fila.id).toBe(link.id)
+    expect(fila.status).toBe(DeliveryChannelStatus.ACTIVE)
+    expect(fila.config).toMatchObject({
+      note: 'conservar',
+      rappiProvisioning: { integrationId: `int-${s}`, confirmedAt: expect.any(String) },
+    })
+    expect(await prisma.deliveryChannelLink.count({ where: { provider: 'RAPPI', externalLocationId: s } })).toBe(1)
   })
 })

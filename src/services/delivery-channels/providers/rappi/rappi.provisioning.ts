@@ -33,11 +33,13 @@ import { enLotes, type RespuestaAprovisionamiento, type ResultadoRappiTienda, ty
 export interface ProvisioningDeps {
   aprovisionar(idToken: string, tiendas: Array<{ storeId: string; name: string }>): Promise<RespuestaAprovisionamiento>
   suscribir(storeId: string): Promise<{ ok: boolean; fallidos: string[] }>
+  /** `integration-status` con el id_token del dueño: lo que Rappi dice AHORA de una tienda que se va a reconectar (D8). */
+  listar(idToken: string): Promise<TiendaRappi[]>
   tiendasEscribibles: readonly string[]
   /**
-   * «Integrada sí/no» (Tarea 18). 🔴 Quien llama a `confirmarTienda` DEBE cablearla (el webhook y el re-chequeo lo hacen, con
-   * `rappiAdapter.notifyIntegrationStatus`): sin ella la tienda se promueve igual pero Rappi nunca se entera de que ya está
-   * integrada, y `confirmarTienda` lo deja a la vista en el log. Sólo la usa `confirmarTienda`, no `activarSeleccion`.
+   * «Integrada sí/no» (Tarea 18). 🔴 Quien llama a `confirmarTienda` DEBE cablearla (el webhook, el re-chequeo y la reconexión de
+   * `activarSeleccion` lo hacen, con `rappiAdapter.notifyIntegrationStatus`): sin ella la tienda se promueve igual pero Rappi nunca
+   * se entera de que ya está integrada, y `confirmarTienda` lo deja a la vista en el log.
    */
   avisarIntegrada?(storeId: string, integrada: boolean): Promise<ActionResult>
 }
@@ -124,38 +126,130 @@ async function intentVivo(tx: Tx, id: string): Promise<boolean> {
   return !!i && (ESTADOS_VIVOS as readonly string[]).includes(i.state) && i.expiresAt.getTime() > Date.now()
 }
 
-/** R4: INSERT … ON CONFLICT DO NOTHING, luego la fila BLOQUEADA decide. El resultado se anota en la misma transacción. */
+// ─── Reconectar (D8) ────────────────────────────────────────────────────────────────────
+
+/**
+ * D8 (26-oct): tras «Desconectar de todos modos» (Rappi contesta 500 al «no integrada»), Rappi sigue listando la tienda
+ * `integrated:true` con NUESTRA integración (medido en DEV, `docs/audit/2026-10-24-rappi-fase-3/full-testing/d5.md`). Se
+ * reconecta la misma fila sin aprovisionar si es de ESTE negocio, no está conectada y su última reclamación guardó el MISMO
+ * `integrationId`. La misma regla en la página (`tiendasParaReconectar`) y bajo el candado (`reclamar`).
+ */
+const reconectable = (status: DeliveryChannelStatus, config: unknown, integrationId: string | undefined): boolean =>
+  status !== DeliveryChannelStatus.ACTIVE &&
+  status !== DeliveryChannelStatus.PAUSED &&
+  !!integrationId &&
+  aprov(config)?.integrationId === integrationId
+const yaIntegrada = (): ResultadoRappi => ({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+
+/** De las que Rappi lista integradas, las que se pueden reconectar a `venueId`. Una consulta, acotada a esas tiendas. */
+export async function tiendasParaReconectar(venueId: string, tiendas: TiendaRappi[]): Promise<Set<string>> {
+  const integradas = new Map(tiendas.filter(t => t.integrated && t.integrationId).map(t => [t.storeId, t.integrationId]))
+  if (!integradas.size) return new Set()
+  const filas = await prisma.deliveryChannelLink.findMany({
+    where: { provider: 'RAPPI', venueId, externalLocationId: { in: [...integradas.keys()] } },
+    select: { externalLocationId: true, status: true, config: true },
+    take: integradas.size, // la tienda es única por proveedor: a lo más una fila por cada una
+  })
+  return new Set(filas.filter(f => reconectable(f.status, f.config, integradas.get(f.externalLocationId))).map(f => f.externalLocationId))
+}
+
+/** Lo que Rappi dice AHORA de las integradas elegidas (Codex r1 #2: la foto del callback puede ser vieja). `null` = no se pudo leer. */
+async function leerAhora(idToken: string, integradas: TiendaRappi[], deps: ProvisioningDeps): Promise<Map<string, TiendaRappi> | null> {
+  if (!integradas.length) return new Map()
+  try {
+    return new Map((await deps.listar(idToken)).map(t => [t.storeId, t]))
+  } catch (e) {
+    logger.warn('🛵 [Rappi] no se pudo re-leer integration-status antes de reconectar', {
+      storeIds: integradas.map(t => t.storeId),
+      error: (e as Error).message,
+    })
+    return null
+  }
+}
+
+/** Devuelve la fila a como estaba, CON la reclamación: su `integrationId` es la prueba del siguiente intento. */
+const devolver = (tx: Tx, fila: Fila, a: Aprov) =>
+  tx.deliveryChannelLink.update({
+    where: { id: fila.id },
+    data: { status: a.statusPrevio ?? DeliveryChannelStatus.DISABLED, config: conAprov(fila.config, a) },
+  })
+
+/**
+ * Rappi la sigue teniendo con nuestra integración: no se aprovisiona, se confirma como el re-chequeo (R7: la misma intención y
+ * el mismo `integrationId`, recién leído). De todo o nada (Codex r1 #1): si no queda ACTIVE, la fila regresa a como estaba y el
+ * resultado es final. Una reclamación PENDING sin lote no tendría salida si en medio llega una baja de Rappi.
+ *
+ * 🔴 Una baja de Rappi a la vez (Codex r1 #1 y r2 #1, la misma familia): tras suscribir, que es lo lento, y justo antes de
+ * promover, se le vuelve a preguntar a Rappi. Si la baja ya cambió su lista, aquí se ve y no se promueve. Si no, su aviso llega
+ * DESPUÉS (Rappi lo manda con la operación terminada) y encuentra la fila ACTIVE (`bajaDeRappi`), o PENDING por un instante
+ * (se difiere, o lo atrapa la segunda revisión de `confirmarTienda`). Sin leerla, no se promueve.
+ */
+async function reconectar(intentId: string, idToken: string, t: TiendaRappi, deps: ProvisioningDeps): Promise<ResultadoRappi> {
+  const sigueNuestra = async () => {
+    const ahora = (await leerAhora(idToken, [t], deps))?.get(t.storeId)
+    return !!ahora?.integrated && ahora.integrationId === t.integrationId
+  }
+  const suscribirYVerificar = async (storeId: string) => {
+    const s = await deps.suscribir(storeId)
+    if (!s.ok || (await sigueNuestra())) return s
+    return { ok: false, fallidos: ['RAPPI_YA_NO_LA_TIENE_INTEGRADA'] }
+  }
+  let c: Confirmacion | 'LANZO' = 'LANZO'
+  try {
+    c = await confirmarTienda(
+      { storeId: t.storeId, status: 'ACTIVE', integrationId: t.integrationId },
+      { ...deps, suscribir: suscribirYVerificar },
+      { intentId },
+    )
+  } catch (e) {
+    logger.error('🚨 [Rappi] la reconexión lanzó al confirmar', { intentId, storeId: t.storeId, error: (e as Error).message })
+  }
+  if (c === 'PROMOTED') return { outcome: 'ACTIVATED' }
+  logger.warn('🛵 [Rappi] la reconexión no quedó activa: la tienda vuelve a como estaba', { intentId, storeId: t.storeId, confirmacion: c })
+  const r: ResultadoRappi = { outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' }
+  await bajoReclamo(intentId, t.storeId, devolver, r)
+  return r
+}
+
+/**
+ * R4: INSERT … ON CONFLICT DO NOTHING, luego la fila BLOQUEADA decide. El resultado se anota en la misma transacción.
+ * Una tienda `integrated:true` (D8) nunca estrena fila: sólo se reclama la nuestra si es `reconectable`.
+ */
 async function reclamar(intent: DeliveryConnectIntent, t: TiendaRappi): Promise<ResultadoRappi> {
   return prisma.$transaction(async tx => {
-    const { count: creada } = await tx.deliveryChannelLink.createMany({
-      data: [
-        {
-          venueId: intent.venueId,
-          provider: 'RAPPI',
-          externalLocationId: t.storeId,
-          externalAccountId: t.name,
-          webhookSecret: crypto.randomBytes(32).toString('hex'),
-          // 🔴 SIEMPRE AUTO, aunque el intent diga otra cosa: Rappi no admite modo manual (cancela solo el
-          // pedido que no se acepta en 4–6 min). El intent se comparte con otros proveedores y puede traer MANUAL.
-          orderAcceptanceMode: OrderAcceptanceMode.AUTO,
-          status: DeliveryChannelStatus.PENDING,
-          ownerAuthorizedAt: new Date(),
-          activatingIntentId: null,
-        },
-      ],
-      skipDuplicates: true,
-    })
+    const { count: creada } = t.integrated
+      ? { count: 0 }
+      : await tx.deliveryChannelLink.createMany({
+          data: [
+            {
+              venueId: intent.venueId,
+              provider: 'RAPPI',
+              externalLocationId: t.storeId,
+              externalAccountId: t.name,
+              webhookSecret: crypto.randomBytes(32).toString('hex'),
+              // 🔴 SIEMPRE AUTO, aunque el intent diga otra cosa: Rappi no admite modo manual (cancela solo el
+              // pedido que no se acepta en 4–6 min). El intent se comparte con otros proveedores y puede traer MANUAL.
+              orderAcceptanceMode: OrderAcceptanceMode.AUTO,
+              status: DeliveryChannelStatus.PENDING,
+              ownerAuthorizedAt: new Date(),
+              activatingIntentId: null,
+            },
+          ],
+          skipDuplicates: true,
+        })
     const fila = await leerVinculo(tx, t.storeId)
-    if (!fila) throw new Error('RAPPI_RECLAMO_SIN_FILA') // tras el INSERT no puede faltar: fallo local, sin HTTP
+    if (!fila && !t.integrated) throw new Error('RAPPI_RECLAMO_SIN_FILA') // tras el INSERT no puede faltar: fallo local, sin HTTP
 
-    const previo = aprov(fila.config)
+    const previo = aprov(fila?.config)
     let r: ResultadoRappi
-    if (fila.venueId !== intent.venueId) r = { outcome: 'OTHER_VENUE' }
+    if (!fila) r = yaIntegrada()
+    else if (fila.venueId !== intent.venueId) r = { outcome: 'OTHER_VENUE' }
     // PAUSED también está conectada (la pausó el negocio): reaprovisionar la dejaría PENDING.
     else if (fila.status === DeliveryChannelStatus.ACTIVE || fila.status === DeliveryChannelStatus.PAUSED)
       r = { outcome: 'ALREADY_CONNECTED' }
     else if (previo && previo.intentId !== intent.id && !previo.confirmedAt && (await intentVivo(tx, previo.intentId)))
       r = { outcome: 'CLAIMED_BY_OTHER' }
+    else if (t.integrated && !reconectable(fila.status, fila.config, t.integrationId)) r = yaIntegrada()
     else {
       // Libre, de este intent, de uno muerto, o DISABLED. La reclamación NUEVA reemplaza entera a la vieja:
       // un `batchId` de antes no puede confirmar esta. Pero si la fila está PENDING por esa reclamación
@@ -170,6 +264,8 @@ async function reclamar(intent: DeliveryConnectIntent, t: TiendaRappi): Promise<
           config: conAprov(fila.config, {
             intentId: intent.id,
             since: new Date().toISOString(),
+            // Una reconexión no manda lote: la prueba de R7 es este `integrationId` (recién leído de Rappi).
+            ...(t.integrated ? { integrationId: t.integrationId } : {}),
             ...(creado ? { creado: true as const } : { statusPrevio: origen?.statusPrevio ?? fila.status }),
           }),
         },
@@ -277,10 +373,29 @@ export async function activarSeleccion(
 
   const out: Record<string, ResultadoRappi> = {}
   const reclamadas: TiendaRappi[] = []
-  for (const t of new Map(elegidas.map(x => [x.storeId, x])).values()) {
-    if (!escribible(t.storeId, deps.tiendasEscribibles)) {
-      out[t.storeId] = { outcome: 'NOT_ENABLED_FOR_PILOT' } // ni vínculo ni HTTP
-      await prisma.$transaction(tx => anotar(tx, intent.id, t.storeId, out[t.storeId]))
+  const reconexiones: TiendaRappi[] = []
+  const unicas = [...new Map(elegidas.map(x => [x.storeId, x])).values()]
+  const fuera = (t: TiendaRappi) => !escribible(t.storeId, deps.tiendasEscribibles)
+  const ahora = await leerAhora(
+    idToken,
+    unicas.filter(t => t.integrated && !fuera(t)),
+    deps,
+  )
+  for (const elegida of unicas) {
+    let t: TiendaRappi | undefined = elegida
+    let sinTocar: ResultadoRappi | null = null
+    if (fuera(elegida))
+      sinTocar = { outcome: 'NOT_ENABLED_FOR_PILOT' } // ni vínculo ni HTTP
+    else if (elegida.integrated) {
+      // D8: manda lo que Rappi dice AHORA; si ya no la tiene integrada, va por el camino de siempre (aprovisionar).
+      t = ahora?.get(elegida.storeId)
+      if (!ahora)
+        sinTocar = { outcome: 'FAILED', detalle: 'RAPPI_ERROR' } // no se pudo leer: no se toca nada
+      else if (!t) sinTocar = yaIntegrada() // Rappi ya no la lista
+    }
+    if (sinTocar || !t) {
+      out[elegida.storeId] = sinTocar ?? yaIntegrada()
+      await prisma.$transaction(tx => anotar(tx, intent.id, elegida.storeId, out[elegida.storeId]))
       continue
     }
     try {
@@ -290,9 +405,10 @@ export async function activarSeleccion(
       out[t.storeId] = { outcome: 'FAILED', detalle: 'LOCAL_ERROR' }
       await prisma.$transaction(tx => anotar(tx, intent.id, t.storeId, out[t.storeId]))
     }
-    if (out[t.storeId].outcome === 'PROVISIONING') reclamadas.push(t)
+    if (out[t.storeId].outcome === 'PROVISIONING') (t.integrated ? reconexiones : reclamadas).push(t)
   }
 
+  for (const t of reconexiones) out[t.storeId] = await reconectar(intent.id, idToken, t, deps)
   for (const lote of enLotes(reclamadas)) await enviarLote(intent.id, idToken, lote, deps, out)
   await cerrarSiTodoFinal(intent.id)
   return out
@@ -463,7 +579,15 @@ export async function confirmarTienda(
     await anotar(tx, a.intentId, r.storeId, res)
     return { fila, confirmacion, intentId: a.intentId, intent }
   })
-  if (!hecho.confirmacion) return sinConfirmar(hecho.fila, r, esperado) // cambió mientras suscribíamos
+  if (!hecho.confirmacion) {
+    // Codex r2 #1: una baja que al principio leyó PENDING y ahora encuentra la fila ya promovida (la reconexión de D8 confirma
+    // sin lote, justo entre las dos lecturas) se aplica aquí: si no, se ignoraba y el aviso quedaba procesado con la tienda ACTIVE.
+    if (r.operation === 'DEPROVISION' && r.status === 'INACTIVE') {
+      const baja = await bajaDeRappi(r)
+      if (baja) return baja
+    }
+    return sinConfirmar(hecho.fila, r, esperado) // cambió mientras suscribíamos
+  }
   if (hecho.confirmacion === 'IGNORED') return 'IGNORED'
   if (hecho.confirmacion === 'PROMOTED' && hecho.fila && hecho.intent) {
     // Como Uber: sólo el ganador, DESPUÉS del commit, y sin poder deshacerla (logAction nunca lanza).
