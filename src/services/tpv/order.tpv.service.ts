@@ -57,6 +57,7 @@ import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourse
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
+import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -125,13 +126,15 @@ export async function getOrders(
   }
 
   // Pay-later filtering logic
-  // Pay-later orders = orders with customer linkage (OrderCustomer relationship)
+  // Pay-later orders = orders with customer linkage (OrderCustomer relationship) que no se crearon para cobrarse en el
+  // momento (`porCobrar.ts`): un cobro con tarjeta que falló es una cuenta abierta normal, no un fiado.
   if (options?.onlyPayLater) {
     // Only return pay-later orders (has OrderCustomer)
     where.orderCustomers = { some: {} }
+    Object.assign(where, NO_ES_COBRO_DEL_MOMENTO)
   } else if (!options?.includePayLater) {
-    // Default behavior: EXCLUDE pay-later orders (no OrderCustomer)
-    where.orderCustomers = { none: {} }
+    // Default behavior: EXCLUDE pay-later orders (no OrderCustomer, o con cliente pero creada para cobrarse en el momento)
+    where.OR = [{ orderCustomers: { none: {} } }, { payLater: false }]
   }
   // If includePayLater is true, no filter is added (returns all)
 

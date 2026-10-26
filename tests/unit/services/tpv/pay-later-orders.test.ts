@@ -75,7 +75,9 @@ describe('Pay Later Orders - getOrders()', () => {
           where: expect.objectContaining({
             venueId,
             paymentStatus: { in: ['PENDING', 'PARTIAL'] },
-            orderCustomers: { none: {} }, // ✅ Key assertion: Excludes orders with customers
+            // ✅ Key assertion: excluye los fiados. Una cuenta con cliente creada para cobrarse en el momento (un cobro con
+            // tarjeta que falló, `payLater: false`) es una cuenta abierta normal y SÍ sale aquí («como Toast», 26-oct).
+            OR: [{ orderCustomers: { none: {} } }, { payLater: false }],
           }),
         }),
       )
@@ -155,6 +157,8 @@ describe('Pay Later Orders - getOrders()', () => {
             venueId,
             paymentStatus: { in: ['PENDING', 'PARTIAL'] },
             orderCustomers: { some: {} }, // ✅ Key assertion: ONLY orders with customers
+            // …y sin los cobros del momento que fallaron (`shared/porCobrar.ts`).
+            OR: [{ payLater: true }, { payLater: null }],
           }),
         }),
       )

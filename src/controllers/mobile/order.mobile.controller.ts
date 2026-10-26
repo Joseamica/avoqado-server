@@ -18,6 +18,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
 import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
+import { payLaterDesdeMetodoDePago } from '@/services/shared/porCobrar'
 
 /**
  * List orders for a venue (paginated)
@@ -82,6 +83,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       stampRewardExpectedDiscount,
       isOfflineReplay,
       createdAtLocal,
+      paymentMethod,
     } = req.body
 
     // Validate required fields
@@ -227,6 +229,9 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       splitType,
       reservationId: typeof reservationId === 'string' ? reservationId : null,
       externalId: typeof externalId === 'string' ? externalId : null,
+      // «Pagar después» (fiado) como Toast: el POS manda `PAY_LATER` sólo desde su botón «Pagar después»; un cobro normal
+      // manda su método (CARD, CASH…) y, si falla, la cuenta NO es deuda del cliente. Sin método: null, la regla de antes.
+      payLater: payLaterDesdeMetodoDePago(paymentMethod),
       // 🔴 Premio de cartilla a aplicar EN LA CREACIÓN — pero SÓLO para una caja que
       // declara `stampRewardAware: true`, o sea, que resta el premio de lo que cobra.
       // Hasta Android 2.19.1 / iOS 1.12.0 la caja mandaba el premio y cobraba el precio

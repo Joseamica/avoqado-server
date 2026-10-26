@@ -4045,6 +4045,10 @@ model Order {
   status        OrderStatus   @default(PENDING)
   kitchenStatus KitchenStatus @default(PENDING)
   paymentStatus PaymentStatus @default(PENDING)
+  /// «Pagar después» (fiado) elegido A PROPÓSITO por el cajero, como la cuenta de la casa de Toast (founder 26-oct).
+  /// true = lo mandó a pagar después; false = se creó para cobrarse en el momento (un cobro con tarjeta que falla NO es
+  /// deuda del cliente); null = no se sabe (filas viejas y caminos que no lo declaran) → la regla de antes (`porCobrar.ts`).
+  payLater      Boolean?
 
   // Durable post-payment loyalty recovery. Only the transaction that first
   // settles the order sets eligibleAt; inline processing sets processedAt, and
