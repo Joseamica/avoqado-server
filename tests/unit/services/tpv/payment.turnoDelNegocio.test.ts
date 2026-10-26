@@ -282,6 +282,7 @@ function installStatefulP2002Rollback() {
       },
       inventoryPosting: prisma.inventoryPosting,
       $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
+      exchange: { findUnique: jest.fn().mockResolvedValue(null) },
     }
 
     const result = await callback(tx)
@@ -359,6 +360,7 @@ beforeEach(() => {
         aggregate: jest.fn().mockResolvedValue({ _sum: { baseAmount: null, tipAmount: null } }),
       },
       $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+      exchange: { findUnique: jest.fn().mockResolvedValue(null) },
       payment: {
         ...(prisma as any).payment,
         // El conteo de cobros previos ya no cae a 0 en silencio: el doble lo declara.
@@ -603,6 +605,8 @@ describe('recordOrderPayment — el conteo de cobros previos nunca contesta en s
   it('🔴 un tx sin payment.count revienta nombrando la dependencia, sin crear el Payment ni reclamar turno', async () => {
     const txSinCount: any = {
       $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
+      $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+      exchange: { findUnique: jest.fn().mockResolvedValue(null) },
       payment: { create: jest.fn() }, // 🔴 INCOMPLETO A PROPÓSITO: este test comprueba que un tx sin `count` reviente nombrando la dependencia. NO heredar del mock aquí.
       shift: { findFirst: jest.fn(), updateMany: jest.fn(), update: jest.fn() },
       activityLog: { create: jest.fn() },
