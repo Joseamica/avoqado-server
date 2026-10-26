@@ -77,6 +77,7 @@ import * as switchUserMobileController from '../controllers/mobile/switch-user.m
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
+import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -1068,6 +1069,14 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   transactionMobileController.getTransaction,
+)
+
+router.post(
+  '/venues/:venueId/transactions/:paymentId/customer',
+  authenticateTokenMiddleware,
+  validateRequest(transactionCustomerSchema),
+  // El controller exige permiso efectivo Y piso MANAGER, sin override de PIN.
+  transactionMobileController.assignCustomer,
 )
 
 /**

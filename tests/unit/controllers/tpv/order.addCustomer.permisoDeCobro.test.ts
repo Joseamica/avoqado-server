@@ -88,7 +88,8 @@ beforeEach(() => {
   })
   // La venta YA pagada (lectura previa y la de DENTRO de la transacción).
   prismaMock.order.findUnique.mockResolvedValue({ id: ORDER, orderNumber: 'ORD-1' } as any)
-  prismaMock.order.findFirst.mockResolvedValue({ paymentStatus: 'PAID' } as any)
+  prismaMock.order.findFirst.mockResolvedValue({ paymentStatus: 'PAID', status: 'COMPLETED', customerId: null } as any)
+  prismaMock.payment.findFirst.mockResolvedValue({ status: 'COMPLETED', type: null, createdAt: new Date(), processedById: STAFF } as any)
   // F1 (ronda 1): el candado canónico de la venta y el primario vigente, dentro de la transacción.
   prismaMock.$queryRaw.mockReset()
   prismaMock.$queryRaw.mockResolvedValue([{ id: ORDER }] as never)
@@ -211,14 +212,13 @@ describe('🔴 MEDIO-1: TPV orders/:orderId/customers — el sello tardío exige
     expect(await elPosLoDejaria()).toBe(false)
   })
 
-  it('🔴 si el permiso no se puede resolver (la base truena): falla CERRADO — la liga sale igual, sin sello', async () => {
+  it('si no se puede resolver la autoridad, el error de infraestructura no se convierte en permiso', async () => {
     quienLiga({ rol: 'CASHIER' })
     prismaMock.venueRolePermission.findUnique.mockRejectedValue(new Error('P1001'))
-    const { status, cuerpo, next } = await ligarExistente()
-    expect(next).not.toHaveBeenCalled()
-    expect(status).toBe(201)
-    expect(cuerpo.loyalty).toBeNull()
-    expect(cuerpo.data).toEqual(LISTA)
+    const { status, next } = await ligarExistente()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ message: 'P1001' }))
+    expect(status).toBeUndefined()
+    expect(prismaMock.orderCustomer.create).not.toHaveBeenCalled()
     expect(mockLate).not.toHaveBeenCalled()
   })
 
@@ -298,20 +298,22 @@ describe('🔴 Ronda 2: TPV DELETE orders/:orderId/customers/:customerId — pro
     return { status: r.status.mock.calls[0]?.[0], cuerpo: r.json.mock.calls[0]?.[0], next }
   }
 
-  it('🔴 KITCHEN quita al primario de una venta PAGADA: 200, pero NADIE queda primario', async () => {
+  it('KITCHEN no puede quitar al primario de una venta PAGADA', async () => {
     quienLiga({ rol: 'KITCHEN' })
     const { status, next } = await quitar()
-    expect(next).not.toHaveBeenCalled()
-    expect(status).toBe(200)
-    expect(prismaMock.orderCustomer.delete).toHaveBeenCalled()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }))
+    expect(status).toBeUndefined()
+    expect(prismaMock.orderCustomer.delete).not.toHaveBeenCalled()
     expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
     expect(await elPosLoDejaria()).toBe(false)
   })
 
-  it('CASHIER (tiene payments:create): promueve al siguiente, como siempre', async () => {
+  it('CASHIER no puede sustituir al cliente por delete y promoción', async () => {
     quienLiga({ rol: 'CASHIER' })
-    await quitar()
-    expect(prismaMock.orderCustomer.update).toHaveBeenCalledWith({ where: { id: 'oc-C' }, data: { isPrimary: true } })
+    const { next } = await quitar()
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409 }))
+    expect(prismaMock.orderCustomer.delete).not.toHaveBeenCalled()
+    expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
   })
 
   it('🔴 override que QUITA payments:create al CASHIER: no promueve', async () => {
@@ -320,11 +322,12 @@ describe('🔴 Ronda 2: TPV DELETE orders/:orderId/customers/:customerId — pro
     expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
   })
 
-  it('🔴 si el permiso no se puede resolver: falla CERRADO (quita, sin promover)', async () => {
+  it('si el permiso no se puede resolver: falla CERRADO sin quitar al cliente', async () => {
     quienLiga({ rol: 'CASHIER' })
     prismaMock.venueRolePermission.findUnique.mockRejectedValue(new Error('P1001'))
     const { status } = await quitar()
-    expect(status).toBe(200)
+    expect(status).toBeUndefined()
+    expect(prismaMock.orderCustomer.delete).not.toHaveBeenCalled()
     expect(prismaMock.orderCustomer.update).not.toHaveBeenCalled()
   })
 

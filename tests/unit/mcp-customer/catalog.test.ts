@@ -108,26 +108,49 @@ it('pago por servicio: liquidar una diferencia escribe; la lista de diferencias 
   expect(TOOL_EFFECTS.configure_service_pay).toBe('write')
 })
 
+function toolNamesInSource(file: string, source: string): string[] {
+  const ts = require('typescript') as typeof import('typescript')
+  const ast = ts.createSourceFile(file, source, ts.ScriptTarget.Latest, true)
+  const names: string[] = []
+  const literalNames = (expression: import('typescript').Expression): string[] => {
+    if (ts.isStringLiteral(expression) || ts.isNoSubstitutionTemplateLiteral(expression)) return [expression.text]
+    if (ts.isParenthesizedExpression(expression)) return literalNames(expression.expression)
+    if (ts.isConditionalExpression(expression)) return [...literalNames(expression.whenTrue), ...literalNames(expression.whenFalse)]
+    throw new Error(`${file}: nombre MCP no determinable: ${expression.getText(ast)}`)
+  }
+  const visit = (node: import('typescript').Node) => {
+    if (
+      ts.isCallExpression(node) &&
+      ts.isPropertyAccessExpression(node.expression) &&
+      ['tool', 'registerTool'].includes(node.expression.name.text)
+    ) {
+      if (!node.arguments[0]) throw new Error(`${file}: registro MCP sin nombre`)
+      names.push(...literalNames(node.arguments[0]))
+    }
+    ts.forEachChild(node, visit)
+  }
+  visit(ast)
+  return names
+}
+
+it('enumera todas las ramas literales del nombre sin esconder duplicados', () => {
+  expect(toolNamesInSource('fixture.ts', `server.tool(a ? 'uno' : (b ? 'dos' : 'uno'), {}, run)`)).toEqual(['uno', 'dos', 'uno'])
+})
+
+it.each([`server.tool(variable, {}, run)`, `server.registerTool(a ? 'uno' : resolver(), {}, run)`])(
+  'un nombre no determinable falla cerrado: %s',
+  source => {
+    expect(() => toolNamesInSource('fixture.ts', source)).toThrow(/nombre MCP no determinable/)
+  },
+)
+
 it('cada herramienta del código tiene exactamente una declaración de efectos', () => {
   const fs = require('fs') as typeof import('fs')
   const path = require('path') as typeof import('path')
-  const ts = require('typescript') as typeof import('typescript')
   const directory = path.resolve(__dirname, '../../../src/mcp/tools')
   const names: string[] = []
   for (const file of fs.readdirSync(directory).filter(f => f.endsWith('.ts'))) {
-    const ast = ts.createSourceFile(file, fs.readFileSync(path.join(directory, file), 'utf8'), ts.ScriptTarget.Latest, true)
-    const visit = (node: import('typescript').Node) => {
-      if (
-        ts.isCallExpression(node) &&
-        ts.isPropertyAccessExpression(node.expression) &&
-        ['tool', 'registerTool'].includes(node.expression.name.text) &&
-        node.arguments[0] &&
-        ts.isStringLiteral(node.arguments[0])
-      )
-        names.push(node.arguments[0].text)
-      ts.forEachChild(node, visit)
-    }
-    visit(ast)
+    names.push(...toolNamesInSource(file, fs.readFileSync(path.join(directory, file), 'utf8')))
   }
   expect(names.length).toBe(new Set(names).size)
   expect(names.sort()).toEqual(Object.keys(TOOL_EFFECTS).sort())

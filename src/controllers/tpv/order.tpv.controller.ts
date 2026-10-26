@@ -2,6 +2,7 @@ import { NextFunction, Request, Response } from 'express'
 
 import logger from '../../config/logger'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
+import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
 
 export async function getOrders(req: Request<{ venueId: string }>, res: Response, next: NextFunction): Promise<void> {
@@ -343,6 +344,7 @@ export async function addCustomerToOrder(
     const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
     const { orderCustomers, loyalty } = await orderTpvService.addCustomerToOrder(venueId, orderId, customerId, req.authContext?.userId, {
       otorgarLealtad,
+      customerAttribution: await customerAttributionActor(req),
     })
 
     res.status(201).json({
@@ -369,7 +371,10 @@ export async function removeCustomerFromOrder(
 
     // Ronda 2: en una venta cobrada, quitar al primario sólo promueve al siguiente si quien quita tiene `payments:create`.
     const otorgarLealtad = await puedeOtorgarLealtadTardia(req)
-    const orderCustomers = await orderTpvService.removeCustomerFromOrder(venueId, orderId, customerId, { otorgarLealtad })
+    const orderCustomers = await orderTpvService.removeCustomerFromOrder(venueId, orderId, customerId, {
+      otorgarLealtad,
+      customerAttribution: await customerAttributionActor(req),
+    })
 
     res.status(200).json({
       success: true,
@@ -398,7 +403,7 @@ export async function createAndAddCustomerToOrder(
       orderId,
       { firstName, phone, email },
       req.authContext?.userId,
-      { otorgarLealtad },
+      { otorgarLealtad, customerAttribution: await customerAttributionActor(req) },
     )
 
     res.status(201).json({

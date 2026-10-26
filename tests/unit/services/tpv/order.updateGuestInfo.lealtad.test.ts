@@ -1,9 +1,6 @@
 /**
- * 🔴 R3-4 (ronda 3 post-QA de sellos tardíos; «vía vieja» de Codex recheck-7): editar los datos del invitado
- * (`PATCH /tpv/venues/:venueId/orders/:orderId/guest`, `orders:update`) puede escribir `Order.customerId`. En una venta PAGADA
- * con la lealtad pendiente y SIN primario, el reconciliador premia a ese cliente por el respaldo heredado: COCINA se saltaría la
- * decisión «A». Ahora, en una venta cobrada (PAID/REFUNDED), un actor SIN `payments:create` edita los datos del invitado pero NO
- * fija ni cambia `Order.customerId` (lo demás se guarda igual); con permiso, como hoy. Decidido bajo el candado de la venta.
+ * Postventa: editar invitado no evita el gate histórico ni reemplaza al cliente cobrado.
+ * Ante rechazo no se guarda parcialmente el resto de datos. Las cuentas abiertas siguen igual.
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import { updateGuestInfo } from '@/services/tpv/order.tpv.service'
@@ -36,6 +33,19 @@ beforeEach(() => {
   // R7-2: los reembolsos ya no deciden «cobrada»; el conteo no debe preguntarse (las pruebas lo vigilan).
   prismaMock.payment.count.mockReset()
   prismaMock.payment.count.mockResolvedValue(0)
+  prismaMock.order.findFirst.mockImplementation((async () => ({
+    id: ORDER,
+    status: 'COMPLETED',
+    paymentStatus: estado,
+    customerId: null,
+  })) as never)
+  prismaMock.orderCustomer.findFirst.mockResolvedValue(null)
+  prismaMock.payment.findFirst.mockResolvedValue({
+    status: 'COMPLETED',
+    type: 'REGULAR',
+    createdAt: new Date('2026-01-01'),
+    processedById: 'cashier',
+  } as any)
   prismaMock.order.update.mockReset()
   prismaMock.order.update.mockImplementation((async ({ data }: any) => ({
     id: ORDER,
@@ -51,29 +61,51 @@ beforeEach(() => {
 
 const datosEscritos = () => (prismaMock.order.update.mock.calls[0] as any)[0].data
 
-describe('TPV updateGuestInfo — en una venta COBRADA, Order.customerId sólo con payments:create', () => {
-  it.each(['PAID', 'REFUNDED'])(
-    '🔴 venta %s y SIN permiso: guarda los datos del invitado pero NO fija Order.customerId',
-    async paymentStatus => {
-      estado = paymentStatus
-      await updateGuestInfo(
-        VENUE,
-        ORDER,
-        { customerName: 'Kev', customerPhone: '5512345678', customerId: 'cust-K' },
-        { otorgarLealtad: false },
-      )
-      expect(datosEscritos()).toEqual({ customerName: 'Kev', customerPhone: '5512345678' })
-    },
-  )
-
-  it('🔴 sin decir el permiso (llamador interno) falla CERRADO: en una venta cobrada no toca Order.customerId', async () => {
-    await updateGuestInfo(VENUE, ORDER, { covers: 3, customerId: 'cust-K' })
-    expect(datosEscritos()).toEqual({ covers: 3 })
+describe('TPV updateGuestInfo — atribución histórica del cliente', () => {
+  it.each([
+    ['PAID', 403, 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER'],
+    ['REFUNDED', 409, 'SALE_NOT_ELIGIBLE_FOR_CUSTOMER'],
+  ])('venta %s sin autoridad: rechaza %s y no guarda datos parciales', async (paymentStatus, statusCode, code) => {
+    estado = paymentStatus as string
+    await expect(
+      updateGuestInfo(VENUE, ORDER, { customerName: 'Kev', customerPhone: '5512345678', customerId: 'cust-K' }, { otorgarLealtad: false }),
+    ).rejects.toMatchObject({ statusCode, code })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
 
-  it('venta cobrada y CON permiso: como hoy, también fija Order.customerId', async () => {
-    await updateGuestInfo(VENUE, ORDER, { customerName: 'Kev', customerId: 'cust-K' }, { otorgarLealtad: true })
+  it.each([undefined, { otorgarLealtad: true }])('sin autoridad nueva (opciones %j) falla cerrado antes de guardar', async opciones => {
+    await expect(updateGuestInfo(VENUE, ORDER, { covers: 3, customerId: 'cust-K' }, opciones)).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER',
+    })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+  })
+
+  it('gerente autorizado puede fijar cliente olvidado de venta elegible', async () => {
+    await updateGuestInfo(
+      VENUE,
+      ORDER,
+      { customerName: 'Kev', customerId: 'cust-K' },
+      {
+        customerAttribution: { staffId: 'manager', canAssignHistorical: true },
+      },
+    )
     expect(datosEscritos()).toEqual({ customerName: 'Kev', customerId: 'cust-K' })
+  })
+
+  it('ni gerente puede reemplazar el cliente cobrado; tampoco guarda los otros datos', async () => {
+    prismaMock.orderCustomer.findFirst.mockResolvedValue({ customerId: 'cust-A' } as any)
+    await expect(
+      updateGuestInfo(
+        VENUE,
+        ORDER,
+        { customerName: 'Kev', customerId: 'cust-K' },
+        {
+          customerAttribution: { staffId: 'manager', canAssignHistorical: true },
+        },
+      ),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'SALE_CUSTOMER_ALREADY_ASSIGNED' })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
   })
 
   it.each(['PENDING', 'PARTIAL'])(

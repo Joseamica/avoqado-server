@@ -43,6 +43,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   area_ticket_reconciliation_queue: 'read',
   area_ticket_status: 'read',
   assign_table_check: 'write',
+  assign_customer_to_paid_sale: 'write',
   attach_customer_to_sale: 'write',
   attendance_heatmap: 'read',
   attendance_payroll_summary: 'read',
