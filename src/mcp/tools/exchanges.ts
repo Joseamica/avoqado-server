@@ -1,9 +1,8 @@
-import { createHash, randomUUID } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { ExchangeStatus } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import { z } from 'zod'
-import { BadRequestError, ConflictError, NotFoundError, ValidationError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
 import { markExchangeReviewed } from '@/services/dashboard/exchange.dashboard.service'
 import { exchangeReviewNoteSchema } from '@/schemas/dashboard/exchange.dashboard.schema'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
@@ -121,7 +120,7 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
 
   server.tool(
     'review_exchange',
-    'Marca revisado un cambio de talla o producto que está por revisar y deja una nota obligatoria. Conserva su estado: no mueve dinero ni existencias, no aplica crédito ni reabre la venta. Requiere permiso para reembolsar y una conexión con escritura. Dos pasos: primero muestra al operador la vista previa y su nota; sólo con su confirmación expresa repite los datos de confirmationPayload tal cual, con confirm:true, el folio y su huella. Si alguien ya lo revisó, se informa el conflicto.',
+    'Marca revisado un cambio de talla o producto que está por revisar y deja una nota obligatoria. Conserva su estado: no mueve dinero ni existencias, no aplica crédito ni reabre la venta. Requiere permiso para reembolsar y una conexión con escritura. Dos pasos: primero muestra al operador la vista previa y su nota; sólo con su confirmación expresa repite confirmationArguments tal cual, con confirm:true y el confirmationToken de la vista previa. Si alguien ya lo revisó, se informa el conflicto.',
     {
       venueId: z
         .string({ required_error: 'Indica la sucursal', invalid_type_error: 'La sucursal debe ser texto' })
@@ -130,35 +129,17 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
         .string({ required_error: 'Indica el cambio', invalid_type_error: 'El cambio debe ser texto' })
         .min(1, 'Indica el cambio'),
       note: exchangeReviewNoteSchema,
-      idempotencyKey: z
-        .string({ invalid_type_error: 'El folio de la vista previa debe ser texto' })
-        .uuid('El folio de la vista previa no es válido')
-        .optional()
-        .describe('Folio que dio la vista previa, sólo al confirmar'),
-      previewDigest: z
-        .string({ invalid_type_error: 'La huella de la vista previa debe ser texto' })
-        .max(128, 'La huella de la vista previa es demasiado larga')
-        .optional(),
       confirm: z
         .boolean({ invalid_type_error: 'La confirmación debe ser true o false' })
         .optional()
         .describe('true sólo tras la confirmación expresa del operador'),
     },
-    async ({ venueId, exchangeId, note, idempotencyKey, previewDigest, confirm }) => {
+    async ({ venueId, exchangeId, note, confirm }) => {
       const venueFilter = guard.venueFilter(venueId)
       requireWriteScopeAlways(scope, 'payments:refund', 'registra la revisión de un cambio')
       guard.requirePermission('payments:refund', venueId)
-      const digest = (key: string) =>
-        createHash('sha256')
-          .update(JSON.stringify(['review_exchange', venueId, scope.staffId, exchangeId, note, key]))
-          .digest('hex')
-          .slice(0, 32)
+      // The catalog's signed confirmation (configureToolCatalog) binds venue, exchange and note to the preview.
       if (confirm) {
-        if (!idempotencyKey || previewDigest !== digest(idempotencyKey))
-          throw new ValidationError(
-            'Confirma los datos de la vista previa tal cual, con su folio y huella; si cambiaron, pide otra vista previa.',
-            'EXCHANGE_REVIEW_PREVIEW_MISMATCH',
-          )
         // The shared service writes the audit in its transaction; a second MCP audit would duplicate it.
         const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
         if (!venue) throw new NotFoundError('No se encontró la sucursal')
@@ -180,7 +161,6 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
       if (!row) throw new NotFoundError('No se encontró el cambio')
       if (row.reviewedAt) throw new ConflictError('Este cambio ya fue revisado', 'EXCHANGE_ALREADY_REVIEWED')
       if (row.status !== 'NEEDS_REVIEW') throw new ConflictError('Este cambio no está por revisar', 'EXCHANGE_NOT_IN_REVIEW')
-      const key = randomUUID()
       return text({
         ok: false,
         requiresConfirmation: true,
@@ -190,10 +170,8 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
           motivoDeRevision: row.reviewReason,
           revisado: !!row.reviewedAt,
           nota: note,
-          folio: key,
         },
         message: `Vas a marcar revisado el cambio ${row.id}, de «Por revisar» a «Revisado», con la nota «${note}». No mueve dinero ni existencias. Confirma con el operador antes de continuar.`,
-        confirmationPayload: { venueId, exchangeId, note, idempotencyKey: key, previewDigest: digest(key), confirm: true },
       })
     },
   )

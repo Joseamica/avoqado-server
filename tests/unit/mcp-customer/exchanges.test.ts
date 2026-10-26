@@ -327,38 +327,16 @@ describe('exchange review MCP', () => {
     expect(result.cambios[0].revisado).toEqual({ fecha: '2026-10-26T12:00:00.000-06:00', quien: scope.staffId, nota: input.note })
   })
 
-  it('requires a preview and confirms the same exchange and note through the shared service', async () => {
+  // The signed preview gate lives in the catalog: exchanges.twoStep.test.ts drives it end to end.
+  it('previews without writing and confirms the same exchange and note through the shared service', async () => {
     const review = tool(writer, 'review_exchange')
     const preview = await review.call(input)
     expect(preview).toMatchObject({ ok: false, requiresConfirmation: true, preview: { nota: input.note } })
     expect(mockReview).not.toHaveBeenCalled()
-    expect(preview.confirmationPayload).toMatchObject({
-      venueId,
-      exchangeId,
-      note: input.note,
-      confirm: true,
-      idempotencyKey: expect.any(String),
-      previewDigest: expect.any(String),
-    })
-    expect(await review.call(preview.confirmationPayload)).toMatchObject({ ok: true })
+    expect(await review.call({ ...input, confirm: true })).toMatchObject({ ok: true })
     expect(mockReview).toHaveBeenCalledWith(
       expect.objectContaining({ venueId, exchangeId, staffId: scope.staffId, note: input.note, source: 'MCP' }),
     )
-  })
-
-  it('rejects missing preview or changed payload before writing', async () => {
-    const review = tool(writer, 'review_exchange')
-    await expect(review.call({ ...input, confirm: true })).rejects.toThrow(/vista previa/i)
-    const preview = await review.call(input)
-    for (const changed of [
-      { note: 'Different note' },
-      { exchangeId: otherVenueId },
-      { idempotencyKey: '12345678-1234-4123-8123-123456789abc' },
-      { previewDigest: 'bad' },
-    ]) {
-      await expect(review.call({ ...preview.confirmationPayload, ...changed })).rejects.toThrow(/vista previa/i)
-    }
-    expect(mockReview).not.toHaveBeenCalled()
   })
 
   it('requires write scope, refund permission and tenant scope for previews and confirmations', async () => {
@@ -379,8 +357,7 @@ describe('exchange review MCP', () => {
     const review = tool(reviewer, 'review_exchange')
     for (const note of [undefined, '', 'ab', '   ', 'x'.repeat(501)]) await expect(review.call({ ...input, note })).rejects.toThrow(/nota/i)
     expect(mockDetail).not.toHaveBeenCalled()
-    const preview = await review.call(input)
-    expect(await review.call(preview.confirmationPayload)).toMatchObject({ ok: true, revisado: { fecha: '2026-10-26T12:00:00.000-06:00' } })
+    expect(await review.call({ ...input, confirm: true })).toMatchObject({ ok: true, revisado: { fecha: '2026-10-26T12:00:00.000-06:00' } })
   })
 
   it.each([
@@ -396,11 +373,10 @@ describe('exchange review MCP', () => {
     const review = tool(writer, 'review_exchange')
     mockDetail.mockResolvedValueOnce(null)
     await expect(review.call(input)).rejects.toMatchObject({ statusCode: 404 })
-    const preview = await review.call(input)
     mockReview.mockRejectedValueOnce(
       Object.assign(new Error('Este cambio ya fue revisado'), { statusCode: 409, code: 'EXCHANGE_ALREADY_REVIEWED' }),
     )
-    await expect(review.call(preview.confirmationPayload)).rejects.toMatchObject({ code: 'EXCHANGE_ALREADY_REVIEWED' })
+    await expect(review.call({ ...input, confirm: true })).rejects.toMatchObject({ code: 'EXCHANGE_ALREADY_REVIEWED' })
   })
 
   it('classifies the write and excludes it from the certified catalog without internal descriptions', () => {
