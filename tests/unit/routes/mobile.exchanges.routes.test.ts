@@ -75,6 +75,11 @@ beforeEach(() => {
 })
 
 describe('exchange mobile route permissions', () => {
+  it('does not register the retired recent sales copy endpoint', () => {
+    const layer = (mobileRouter as any).stack.find((l: any) => l.route?.path === '/venues/:venueId/sales/recent')
+    expect(layer).toBeUndefined()
+  })
+
   it('cancel is authenticate → validate → payments:refund → controller', () => {
     const layer = (mobileRouter as any).stack.find(
       (l: any) => l.route?.path === '/venues/:venueId/exchanges/:exchangeId/cancel' && l.route.methods.post,

@@ -6,8 +6,6 @@
 
 import { NextFunction, Request, Response } from 'express'
 import * as transactionService from '../../services/mobile/transaction.mobile.service'
-import * as recentSalesService from '../../services/mobile/recentSales.mobile.service'
-import type { RecentSalesQuery } from '../../schemas/mobile/recentSales.mobile.schema'
 
 /**
  * List transactions (paginated)
@@ -51,18 +49,6 @@ export const getTransaction = async (req: Request, res: Response, next: NextFunc
       success: true,
       transaction,
     })
-  } catch (error) {
-    next(error)
-  }
-}
-
-export const listRecentSales = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-  try {
-    const { sales, removed, meta } = await recentSalesService.listRecentSales({
-      venueId: req.params.venueId,
-      ...(req.query as unknown as RecentSalesQuery),
-    })
-    res.json({ success: true, data: { sales, removed }, meta })
   } catch (error) {
     next(error)
   }
