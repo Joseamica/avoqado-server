@@ -283,4 +283,24 @@ describe('switchUserByPin — cierres de la auditoría (2026-08-30)', () => {
     await expect(llamar()).rejects.toThrow()
     expect(createSessionMock).not.toHaveBeenCalled()
   })
+  it('🔴 [D7] un negocio a medio alta del asistente no acuña tokens nuevos por PIN', async () => {
+    // Una tablet con sesión de ANTES del arreglo podía seguir operando el negocio sin plan cambiando de usuario.
+    const venue = {
+      ...staffVenueEncontrado().venue,
+      status: 'ONBOARDING',
+      organization: { onboardingProgress: { completedAt: null, wizardVersion: 2 } },
+    }
+    mockPrisma.staffVenue.findFirst.mockResolvedValue(staffVenueEncontrado({ venue }))
+
+    await expect(llamar()).rejects.toMatchObject({ code: 'ALTA_SIN_TERMINAR' })
+    expect(createSessionMock).not.toHaveBeenCalled()
+    expect(mockPrisma.staffVenue.findFirst.mock.calls[0][0].include.venue.select.organization).toBeDefined()
+  })
+
+  it('un ONBOARDING del SUPERADMIN (KYC, sin alta del asistente) sigue cambiando de usuario', async () => {
+    const venue = { ...staffVenueEncontrado().venue, status: 'ONBOARDING', organization: { onboardingProgress: null } }
+    mockPrisma.staffVenue.findFirst.mockResolvedValue(staffVenueEncontrado({ venue }))
+
+    await expect(llamar()).resolves.toBeDefined()
+  })
 })
