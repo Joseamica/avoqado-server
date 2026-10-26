@@ -61,6 +61,9 @@ beforeAll(async () => {
     if (role === 'MANAGER') managerId = staff.id
     if (role === 'VIEWER') readerId = staff.id
   }
+  // Las pruebas de cortesía (Task3 comp*) actúan como el MESERO. Desde el 25-oct la cortesía pide `orders:comp`, que el mesero no trae
+  // de fábrica: aquí el dueño se la da a su rol desde el panel (`tpv-orders:comp`), el mismo camino que usa un negocio real.
+  await prisma.venueRolePermission.create({ data: { venueId, role: 'WAITER', permissions: ['tpv-orders:comp'], modifiedBy: managerId } })
 })
 
 afterEach(() => jest.restoreAllMocks())

@@ -364,7 +364,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
 
   server.tool(
     'comp_table_check',
-    'TABLE_SERVICE: comp the ENTIRE open check of a table ("Cortesía en la cuenta") — every line stays visible but stops costing money; totals recompute. Blocked once the order is paid/partially paid. This WRITES money; requires orders:update. Pass venueId + table number + reason.',
+    'TABLE_SERVICE: comp the ENTIRE open check of a table ("Cortesía en la cuenta") — every line stays visible but stops costing money; totals recompute. Blocked once the order is paid/partially paid. This WRITES money; requires orders:comp. Pass venueId + table number + reason.',
     {
       venueId: z.string().describe('Venue that owns the table (must be in your scope)'),
       number: z.string().min(1).describe('Table number whose check to comp, e.g. "8"'),
@@ -372,7 +372,7 @@ export function registerTableTools(server: McpServer, scope: McpScope) {
     },
     async ({ venueId, number, reason }) => {
       const where = guard.venueFilter(venueId)
-      guard.requirePermission('orders:update', venueId)
+      guard.requirePermission('orders:comp', venueId)
       const table = await prisma.table.findFirst({
         where: { ...where, number, active: true },
         select: { id: true, currentOrderId: true },
