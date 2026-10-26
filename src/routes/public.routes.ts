@@ -1,6 +1,7 @@
 import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
 import express, { Router } from 'express'
+import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
 import { z } from 'zod'
 import cors from 'cors'
 import crypto from 'crypto'
@@ -22,7 +23,13 @@ import * as paymentLinkPublicController from '../controllers/public/paymentLink.
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import * as walletPassController from '../controllers/public/walletPass.public.controller'
 import * as walletStampsController from '../controllers/public/walletStamps.public.controller'
-import { submitContact, submitLabsBrief, continuarOnboarding } from '../controllers/public/landing.public.controller'
+import {
+  submitContact,
+  submitLabsBrief,
+  continuarOnboarding,
+  verificarAlta,
+  reenviarAlta,
+} from '../controllers/public/landing.public.controller'
 import * as venueChatController from '../controllers/public/venueChat.public.controller'
 import * as tpvOrderPublicController from '../controllers/public/tpvOrder.public.controller'
 import { getUnsubscribePage, postUnsubscribe } from '../controllers/public/unsubscribe.public.controller'
@@ -30,6 +37,14 @@ import * as customerEmailController from '../controllers/public/customerEmail.pu
 import { getPublicPrivacyNotice } from '../controllers/public/privacyNotice.public.controller'
 import { assignSerialsPublicSchema, rejectSpeiSchema } from '../schemas/public/tpvOrder.public.schema'
 import { validateRequest } from '../middlewares/validation'
+import {
+  limiteContactoPorCorreo,
+  limiteContactoPorIp,
+  limiteEnviosDeCodigoEnContacto,
+  contrasenaValidaEnAlta,
+  limiteIntentosDeCodigoEnAlta,
+  limiteDiarioDeIntentosDeCodigoEnAlta,
+} from '../middlewares/limitesDeCodigo'
 import { paymentLinkMpPaySchema } from '../schemas/public/mercadoPagoPaymentIntent.schema'
 import { authenticateCustomer, authenticateCustomerOptional } from '../middlewares/customerAuth.middleware'
 import { resolveVenueBySlug } from '../middlewares/resolveVenueBySlug.middleware'
@@ -585,7 +600,35 @@ router.get(
   getFeaturedLaunchOffer,
 )
 
-router.post('/contact', writeLimit, validateRequest(contactSchema), submitContact)
+// `/contact` cuenta por CORREO (la landing llama desde su servidor: todos comparten IP), con un techo
+// holgado por IP, y —sólo con ALTA_LANDING_CON_CODIGO prendido— cuenta como un envío de código, igual
+// que `/onboarding/resend-verification` (mismo contador).
+router.post(
+  '/contact',
+  limiteContactoPorIp,
+  limiteContactoPorCorreo,
+  limiteEnviosDeCodigoEnContacto,
+  validateRequest(contactSchema),
+  submitContact,
+)
+
+// ---- Alta con código (landing): verificar el código de 6 dígitos + crear contraseña, y reenviar ----
+// Con ALTA_LANDING_CON_CODIGO apagado las dos rutas responden 404 (antes de gastar ningún límite).
+// Los límites son las MISMAS instancias de `/onboarding/*` y `/contact`: un correo tiene UN solo
+// presupuesto de intentos (5/15 min) y UN solo presupuesto de envíos (3/h) entre todas las puertas.
+
+const altaVerificarSchema = z.object({
+  body: z.object({
+    email: z.string().trim().email('Formato de correo invalido'),
+    codigo: z.string({ required_error: 'El código es requerido.' }).trim().min(1, 'El código es requerido.'),
+    // La regla de contraseña la aplica el servicio (responde CONTRASENA_INVALIDA con su mensaje).
+    password: z.string({ required_error: 'La contraseña es requerida.' }).min(1, 'La contraseña es requerida.').max(1024),
+  }),
+})
+const altaReenviarSchema = z.object({ body: z.object({ email: z.string().trim().email('Formato de correo invalido') }) })
+
+router.post('/alta/verificar', soloConAltaConCodigo, contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
+router.post('/alta/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest(altaReenviarSchema), reenviarAlta)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige
 // a la pantalla de contrasena del dashboard. readLimit (no writeLimit) porque un

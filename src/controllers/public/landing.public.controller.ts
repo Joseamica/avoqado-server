@@ -2,7 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import emailService from '../../services/email.service'
 import logger from '../../config/logger'
 import { BadRequestError } from '../../errors/AppError'
-import { signupFromLanding } from '../../services/onboarding/signup.service'
+import { reenviarCodigoDeLanding, signupFromLanding, verificarCodigoDeLanding } from '../../services/onboarding/signup.service'
 import { ofertaReclamadaEnTexto, parametrosDeCampanaDelStaff } from '../../services/onboarding/campanaDelCorreo.service'
 import { sendLeadToHubspot, isHubspotEnabled } from '../../services/integrations/hubspot.client'
 import crypto from 'crypto'
@@ -187,6 +187,9 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // magic link de abajo. Si esto falla NO se aborta el contacto: el lead
     // sigue valiendo aunque el alta no haya podido crearse.
     let magicLink: string | null = null
+    // Código de 6 dígitos del alta con código (interruptor `ALTA_LANDING_CON_CODIGO`). Sólo viaja
+    // en el correo AL PROSPECTO: ni el aviso interno ni la respuesta pública lo llevan.
+    let codigoVerificacion: string | null = null
     let yaEsCliente = false
     // Que paso con el alta, para poder decirselo al equipo sin que lo adivine
     // del contenido del correo del cliente.
@@ -237,6 +240,7 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
           return null
         })
       }
+      codigoVerificacion = alta.codigoVerificacion ?? null
       if (alta.magicLinkToken) {
         // Pasa por el redirect propio para poder contar el clic (ver continuarOnboarding).
         const apiUrl = process.env.PUBLIC_API_URL || 'https://api.avoqado.io'
@@ -268,7 +272,21 @@ export async function submitContact(req: Request, res: Response, next: NextFunct
     // seria mandarlo a vender algo que ya compro).
     const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
     const ctaUrl = magicLink || (yaEsCliente ? `${dashboardUrl}/login` : 'https://avoqado.io/restaurants')
-    const ctaTexto = magicLink ? 'Continúa tu onboarding' : yaEsCliente ? 'Entrar a mi cuenta' : 'Ver cómo funciona'
+    const ctaTexto = magicLink
+      ? codigoVerificacion
+        ? 'Continúa tu alta'
+        : 'Continúa tu onboarding'
+      : yaEsCliente
+        ? 'Entrar a mi cuenta'
+        : 'Ver cómo funciona'
+    // El bloque del código va ARRIBA del botón en el HTML y antes del enlace en el texto plano.
+    const codigoHtml = codigoVerificacion
+      ? `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:24px;margin:8px 0 16px 0;text-align:center;">
+      <p style="margin:0 0 6px 0;font-size:12px;font-weight:600;color:#666;letter-spacing:0.5px;text-transform:uppercase;">Tu código para entrar</p>
+      <p style="margin:0 0 8px 0;font-size:36px;font-weight:700;color:#000;letter-spacing:8px;">${escapeHtml(codigoVerificacion)}</p>
+      <p style="margin:0;font-size:13px;color:#666;">(vence en 10 minutos)</p>
+    </div>`
+      : ''
 
     // Estado de la cuenta para el equipo. 🔴 Aqui NUNCA va el magic link: ese
     // enlace fija la contrasena de la cuenta del cliente, y este correo se
@@ -443,6 +461,8 @@ Campaña: ${utmTexto || '—'}
       }
     </div>
 
+    ${codigoHtml}
+
     ${
       magicLink
         ? `<div style="border:1px solid #e5e7eb;border-radius:8px;padding:24px;margin:8px 0 24px 0;text-align:center;">
@@ -523,7 +543,7 @@ ${
       : 'El plan inicial es gratis para siempre y no pedimos tarjeta.'
 }
 
-${magicLink ? `Paso 1: elige tu contraseña. Tu cuenta ya está creada.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
+${codigoVerificacion ? `Tu código para entrar: ${codigoVerificacion} (vence en 10 minutos)\n\n` : ''}${magicLink ? `Paso 1: elige tu contraseña. Tu cuenta ya está creada.\n${ctaTexto}: ${ctaUrl}\n(el enlace sirve 24 horas y una sola vez)` : `${ctaTexto}: ${ctaUrl}`}
 
 ${descargarAppTexto({ paso: magicLink ? 2 : undefined })}
 
@@ -604,7 +624,14 @@ Política de Privacidad: https://avoqado.io/privacy
       }
     }
 
-    return res.status(200).json({ success: true, message: 'Demo solicitada exitosamente', conversion })
+    // `verificacion: 'codigo'` le dice a la landing que pase a pedir el código que acaba de mandarse
+    // por correo. Sólo existe con código; el código mismo NUNCA va en la respuesta pública.
+    return res.status(200).json({
+      success: true,
+      message: 'Demo solicitada exitosamente',
+      conversion,
+      ...(codigoVerificacion ? { verificacion: 'codigo' } : {}),
+    })
   } catch (err) {
     return next(err)
   }
@@ -851,4 +878,26 @@ export async function continuarOnboarding(req: Request, res: Response, _next: Ne
   }
 
   return res.redirect(302, destino)
+}
+
+// POST /api/v1/public/alta/verificar — código de 6 dígitos + contraseña. 200: { success, entrarUrl }.
+export async function verificarAlta(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { entrarUrl } = await verificarCodigoDeLanding(req.body)
+    res.json({ success: true, entrarUrl })
+  } catch (error) {
+    // Los errores de la landing llevan `success:false` + `code` + `message` (la landing lee esos tres).
+    if (error instanceof BadRequestError) return res.status(error.statusCode).json({ success: false, code: error.code, message: error.message })
+    next(error)
+  }
+}
+
+// POST /api/v1/public/alta/reenviar — responde siempre { success: true }, exista o no el correo.
+export async function reenviarAlta(req: Request, res: Response, next: NextFunction) {
+  try {
+    await reenviarCodigoDeLanding(req.body.email)
+    res.json({ success: true })
+  } catch (error) {
+    next(error)
+  }
 }
