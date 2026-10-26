@@ -1332,6 +1332,7 @@ async function enqueueCommittedPaymentEffects(
   reviewRating: string | undefined,
   staffId: string | undefined,
   expectsSettlement: boolean,
+  saleEffects = true,
 ): Promise<void> {
   if (payment.status !== 'COMPLETED') return
   const source = { venueId: payment.venueId, paymentId: payment.id, orderId: payment.orderId }
@@ -1344,14 +1345,14 @@ async function enqueueCommittedPaymentEffects(
       dedupeKey: 'review:' + payment.id + ':v1',
       payload: { rating, servedById: staffId ?? null },
     })
-  if (expectsSettlement)
+  if (saleEffects && expectsSettlement)
     await enqueuePaymentEffect(tx, {
       ...source,
       kind: 'REFERRAL',
       dedupeKey: 'referral:' + payment.orderId + ':v1',
       payload: { expectsSettlement: true },
     })
-  if (payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
+  if (saleEffects && payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
 }
 
 /**
@@ -3736,6 +3737,8 @@ export async function recordOrderPayment(
   let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
   let areaTicketCheckoutState: string | null = null
   let committedStandaloneSettlement: CommittedStandaloneSettlement | undefined
+  let suppressExchangeSaleEffects = false
+  let isExchangeSale = false
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
   // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
   let inventoryWarning: OrderInventoryWarning | null = null
@@ -3792,6 +3795,33 @@ export async function recordOrderPayment(
             'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
           )
         }
+
+        await tx.$executeRawUnsafe('SAVEPOINT exchange_sale_policy')
+        try {
+          const exchange = await tx.exchange.findUnique({
+            where: { newOrderId: activeOrder.id, venueId },
+            select: { status: true, reviewReason: true },
+          })
+          isExchangeSale = Boolean(exchange)
+          if (exchange) {
+            const order = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId }, select: { status: true } })
+            suppressExchangeSaleEffects =
+              exchange.status === 'CANCELLED' ||
+              (exchange.status === 'NEEDS_REVIEW' && exchange.reviewReason === 'LATE_CHARGE_AFTER_RELEASE') ||
+              (exchange.status === 'PENDING_PAYMENT' && (order.status === 'CANCELLED' || order.status === 'DELETED'))
+          }
+        } catch (error) {
+          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT exchange_sale_policy')
+          // Captured money survives an auxiliary read failure; unsafe sale effects wait for reconciliation.
+          suppressExchangeSaleEffects = true
+          isExchangeSale = true
+          logger.error('🚨 [Exchange] No se pudo comprobar el cambio; se registra el cargo sin efectos de venta', {
+            venueId,
+            orderId,
+            error,
+          })
+        }
+        await tx.$executeRawUnsafe('RELEASE SAVEPOINT exchange_sale_policy')
 
         // S0 (Codex, 13-sep): UN ganador por solicitud POS→terminal, decidido AQUÍ — bajo el candado de la fila, antes
         // de reclamar turno y antes de crear cualquier Payment. Ver `arbitrarRegistroDeSolicitud`.
@@ -4180,7 +4210,12 @@ export async function recordOrderPayment(
 
         // Integradas y con vales por área conservan a su dueño del cierre (`cierreDelCobroSaldaLaCuenta`, el mismo criterio que la
         // reasignación de cobros).
-        if (newPayment.status === 'COMPLETED' && !lockedAreaCheckout && cierreDelCobroSaldaLaCuenta(activeOrder)) {
+        if (
+          newPayment.status === 'COMPLETED' &&
+          !suppressExchangeSaleEffects &&
+          !lockedAreaCheckout &&
+          cierreDelCobroSaldaLaCuenta(activeOrder)
+        ) {
           committedStandaloneSettlement = await settleStandalonePaymentInTx(
             tx,
             venueId,
@@ -4194,7 +4229,7 @@ export async function recordOrderPayment(
         if (newPayment.status === 'COMPLETED') {
           const paidOrder = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId } })
           let expectsSettlement = paidOrder.paymentStatus === 'PAID'
-          if (!expectsSettlement && !committedStandaloneSettlement) {
+          if (!suppressExchangeSaleEffects && !expectsSettlement && !committedStandaloneSettlement) {
             // SR and area-ticket flows retain their settlement owner. Freeze the
             // expectation now so their referral survives a delayed settlement.
             const sums = await tx.payment.aggregate({
@@ -4208,8 +4243,31 @@ export async function recordOrderPayment(
             })
             expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums._sum.amount, tipAmount: sums._sum.tipAmount }]).isFullyPaid
           }
-          await enqueueCommittedPaymentEffects(tx, newPayment, paymentData.reviewRating, validatedStaffId, expectsSettlement)
+          await enqueueCommittedPaymentEffects(
+            tx,
+            newPayment,
+            paymentData.reviewRating,
+            validatedStaffId,
+            expectsSettlement && !isExchangeSale,
+            !suppressExchangeSaleEffects,
+          )
           await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
+          if (isExchangeSale) {
+            await tx.$executeRawUnsafe('SAVEPOINT exchange_charge_mark')
+            try {
+              const { markExchangeChargeInTx } = await import('../exchanges/exchangeCharge')
+              await markExchangeChargeInTx(tx, { venueId, orderId: activeOrder.id, paymentId: newPayment.id })
+            } catch (error) {
+              await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT exchange_charge_mark')
+              logger.error('🚨 [Exchange] El sello del cargo no se escribió; lo encontrará el barrido', {
+                venueId,
+                orderId: activeOrder.id,
+                paymentId: newPayment.id,
+                error,
+              })
+            }
+            await tx.$executeRawUnsafe('RELEASE SAVEPOINT exchange_charge_mark')
+          }
         }
         return newPayment
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO),
@@ -4524,7 +4582,7 @@ export async function recordOrderPayment(
       })
 
       // Create commission calculation for this payment (non-blocking)
-      if (payment.type !== 'TEST') {
+      if (payment.type !== 'TEST' && !suppressExchangeSaleEffects) {
         // Real-time auto-reorder: if this sale left any ingredient at/below its
         // reorder point, create the PO + email the supplier right away instead of
         // waiting for the nightly job. Non-blocking (never affects the payment)
@@ -4594,7 +4652,9 @@ export async function recordOrderPayment(
     hasExternalId: !!activeOrder.externalId,
   })
 
-  if (isIntegratedMode) {
+  if (suppressExchangeSaleEffects) {
+    logger.warn('[Exchange] Cargo registrado sin reabrir ni aplicar efectos de venta', { venueId, orderId, paymentId: payment.id })
+  } else if (isIntegratedMode) {
     // MODO INTEGRADO: Enviar comando a POS, POS maneja los totales
     try {
       const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())

@@ -11,6 +11,10 @@ export type ExchangeErrorCode =
   | 'EXCHANGE_CHAIN_GIFT_CARD_PENDING'
   | 'IDEMPOTENCY_KEY_REUSED'
   | 'ACTOR_MISMATCH'
+  | 'EXCHANGE_CHARGE_UNRESOLVED'
+  | 'EXCHANGE_NOT_CHARGED'
+  | 'EXCHANGE_CHARGE_EXISTS'
+  | 'EXCHANGE_ALREADY_SETTLED'
 
 export class ExchangeError extends AppError {
   constructor(code: ExchangeErrorCode, message: string, status: 400 | 409 | 422, details?: Record<string, unknown>) {

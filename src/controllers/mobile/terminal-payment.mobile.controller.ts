@@ -224,6 +224,17 @@ export async function sendTerminalPayment(req: Request, res: Response) {
       })
     }
 
+    if (error instanceof AppError && error.code === 'EXCHANGE_DIFFERENCE_ALREADY_CHARGED') {
+      return res.status(error.statusCode).json({
+        success: false,
+        status: 'failed',
+        code: error.code,
+        message,
+        errorMessage: message,
+        ...conDetalles(error.details),
+      })
+    }
+
     logger.error('Error in sendTerminalPayment', {
       error: message,
       stack: error instanceof Error ? error.stack : undefined,

@@ -5,6 +5,8 @@ import { crearNegocioDePrueba, limpiarNegocioDePrueba } from '../giftCards/sembr
 import type { CreateExchangeBody } from '@/services/exchanges/exchange.service'
 import { keptMarkdownDiscountRow } from '@/services/shared/discount.service'
 import { sincronizarRepartos } from '@/services/shared/repartoDescuentoTx'
+import cuid from 'cuid'
+import { terminalIdentityKey } from '@/utils/terminalSerial'
 
 export async function seedClothingSale(
   opts: { paid?: number; list?: number; payments?: number[]; card?: boolean; quantity?: number } = {},
@@ -199,6 +201,149 @@ export async function seedClothingSale(
       await prisma.product.deleteMany({ where: { venueId } })
       await prisma.productGroup.deleteMany({ where: { venueId } })
       if (merchantId) await prisma.merchantAccount.deleteMany({ where: { id: merchantId } })
+    },
+  }
+}
+
+export async function seedCardSale(opts: { provider: 'BLUMON' | 'ANGELPAY' | null; amounts: number[] }) {
+  const total = opts.amounts.reduce((sum, amount) => sum + amount, 0)
+  const s = await seedClothingSale({ paid: total, list: total, payments: opts.amounts, card: opts.provider !== null })
+  const merchantIds: string[] = []
+  const terminals = []
+  for (const [index, payment] of s.payments.entries()) {
+    const provider = opts.provider
+      ? await prisma.paymentProvider.upsert({
+          where: { code: opts.provider },
+          update: {},
+          create: { code: opts.provider, name: opts.provider, type: 'PAYMENT_PROCESSOR', countryCode: ['MX'] },
+        })
+      : null
+    const merchant = provider
+      ? await prisma.merchantAccount.create({
+          data: { providerId: provider.id, externalMerchantId: cuid(), alias: 'Test card merchant', credentialsEncrypted: {} },
+        })
+      : null
+    if (merchant) merchantIds.push(merchant.id)
+    const serialNumber = `AVQD-${cuid()}`
+    const terminal = await prisma.terminal.create({
+      data: { venueId: s.venueId, serialNumber, name: `Test terminal ${index}`, type: 'TPV_ANDROID' },
+    })
+    terminals.push({ ...terminal, serialNumber })
+    s.payments[index] = await prisma.payment.update({
+      where: { id: payment.id },
+      data: {
+        method: 'CREDIT_CARD',
+        source: 'TPV',
+        fundsFlow: 'AVOQADO_PROCESSED',
+        merchantAccountId: merchant?.id ?? null,
+        terminalId: terminal.id,
+        processorData: { blumonOperationNumber: index + 1 },
+      },
+    })
+  }
+  const terminal = terminals[0]
+  const newOrder = (amount = 100) =>
+    prisma.order.create({
+      data: {
+        venueId: s.venueId,
+        orderNumber: cuid(),
+        source: 'AVOQADO_IOS',
+        type: 'TAKEOUT',
+        status: 'PENDING',
+        paymentStatus: 'PENDING',
+        subtotal: amount,
+        total: amount,
+        taxAmount: 0,
+        remainingBalance: amount,
+        customerId: s.customer.id,
+        createdById: s.staffId,
+        items: {
+          create: { productId: s.products[3].id, productName: 'Replacement', quantity: 1, unitPrice: amount, total: amount, taxAmount: 0 },
+        },
+      },
+    })
+  // T4 owns reservation; seed only its durable boundary so T3 never enables an unfinished checkout.
+  const pendingExchange = async (returnedAmount = 0, differenceAmount = 100) => {
+    const order = await newOrder(returnedAmount + differenceAmount)
+    const exchangeId = cuid()
+    const exchange = await prisma.exchange.create({
+      data: {
+        id: exchangeId,
+        venueId: s.venueId,
+        idempotencyKey: cuid(),
+        requestHash: 'test',
+        status: 'PENDING_PAYMENT',
+        originalOrderId: s.order.id,
+        originalPaymentId: s.payments[0].id,
+        newOrderId: order.id,
+        returnedAmount,
+        takenAmount: returnedAmount + differenceAmount,
+        differenceAmount,
+        settlementKind: 'COLLECT',
+        settlementMethod: 'CARD_TERMINAL',
+        lines: {},
+        staffId: s.staffId,
+        result: { id: exchangeId, status: 'PENDING_PAYMENT', newOrderId: order.id, paymentIds: [], chargePaymentId: null },
+      },
+    })
+    return { order, exchange }
+  }
+  const seedRequest = (orderId: string, overrides: Partial<Prisma.TerminalPaymentRequestUncheckedCreateInput> = {}) =>
+    prisma.terminalPaymentRequest.create({
+      data: {
+        venueId: s.venueId,
+        requestId: cuid(),
+        terminalId: terminalIdentityKey(terminal.serialNumber),
+        orderId,
+        amountCents: 10000,
+        expiresAt: new Date(Date.now() + 300_000),
+        status: 'SENT',
+        ...overrides,
+      },
+    })
+  const terminalCharge = async (orderId: string, cents: number, overrides: Record<string, unknown> = {}) => {
+    const { recordOrderPayment } = await import('@/services/tpv/payment.tpv.service')
+    const attempt = cuid()
+    return recordOrderPayment(
+      s.venueId,
+      orderId,
+      {
+        venueId: s.venueId,
+        amount: cents,
+        tip: 0,
+        status: 'COMPLETED',
+        method: 'CREDIT_CARD',
+        source: 'TPV',
+        splitType: 'FULLPAYMENT',
+        tpvId: terminal.id,
+        staffId: s.staffId,
+        paidProductsId: [],
+        currency: 'MXN',
+        isInternational: false,
+        idempotencyKey: attempt,
+        referenceNumber: attempt,
+        authorizationNumber: attempt,
+        merchantAccountId: merchantIds[0],
+        deviceSerialNumber: terminal.serialNumber,
+        authenticatedTerminalSerial: terminal.serialNumber,
+        ...overrides,
+      },
+      s.staffId,
+    )
+  }
+  return {
+    ...s,
+    terminal,
+    newOrder,
+    pendingExchange,
+    seedRequest,
+    terminalCharge,
+    async cleanup() {
+      if (!s.venueId) return
+      await prisma.terminalPaymentRequest.deleteMany({ where: { venueId: s.venueId } })
+      await s.cleanup()
+      await prisma.terminal.deleteMany({ where: { venueId: s.venueId } })
+      await prisma.merchantAccount.deleteMany({ where: { id: { in: merchantIds } } })
     },
   }
 }
