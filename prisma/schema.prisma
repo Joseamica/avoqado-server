@@ -4504,6 +4504,9 @@ model Modifier {
   reservationItems ReservationModifier[]
 
   @@index([rawMaterialId])
+  // Postgres no indexa sola la llave foránea: sin esto cada lectura de las opciones de un grupo (menú del POS, carta de
+  // pedidos en línea, panel) y el borrado en cascada de un grupo recorrían la tabla entera (26-oct, pizarrón hz:12c781a4:D2).
+  @@index([groupId])
 }
 
 model ProductModifierGroup {
