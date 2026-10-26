@@ -63,6 +63,8 @@ export async function loadSalesForExchange(
   // shortcut: no read snapshot; use REPEATABLE READ per page if clients observe mixed balances.
   const result = new Map<string, LoadedSaleForExchange>()
   if (!orderIds.length) return result
+  // ponytail: REFUND rows are found by (venueId, type) and filtered to the page, one pass over the venue's refunds per
+  // page; add an expression index on processorData->>'originalPaymentId' if a venue grows past ~50k refunds.
   const sizes = await db.$queryRaw<Array<{ id: string; lines: number; payments: number; refunds: number; scope: number }>>(Prisma.sql`
     WITH page_payments AS MATERIALIZED (
       SELECT p.id FROM "Payment" p WHERE p."venueId" = ${venueId} AND p."orderId" IN (${Prisma.join(orderIds)})
