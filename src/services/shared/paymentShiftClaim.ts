@@ -74,18 +74,19 @@ export async function lockExistingOrderForPayment(
   if (typeof tx.$queryRaw !== 'function') {
     throw new Error('lockExistingOrderForPayment requiere una transacción con $queryRaw')
   }
+  const extras = [...new Set(input.additionalOrderIds ?? [])].filter(id => id !== input.orderId)
   // El fence materializado frena el borrado de demos ANTES de poseer sus Orders/Payments.
   const rows = await tx.$queryRaw<Array<{ id: string | null; scopeTooLarge?: boolean }>>`
     WITH RECURSIVE input AS (
-      SELECT unnest(${[...new Set([input.orderId, ...(input.additionalOrderIds ?? [])])]}::text[]) AS order_id,
-        ${input.venueId}::text AS venue_id
+      SELECT ${input.orderId}::text AS order_id, ${input.venueId}::text AS venue_id
+      ${extras.length ? Prisma.sql`UNION SELECT unnest(${extras}::text[]), ${input.venueId}::text` : Prisma.empty}
     ), ancestors(id) AS (
       SELECT o.id FROM "Order" o JOIN input i ON o.id = i.order_id AND o."venueId" = i.venue_id
       UNION
       SELECT parent.id
       FROM ancestors child
       JOIN "Payment" credit ON credit."orderId" = child.id
-      JOIN input i ON credit."venueId" = i.venue_id
+      JOIN (SELECT DISTINCT venue_id FROM input) i ON credit."venueId" = i.venue_id
       JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
       JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
       JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
@@ -94,15 +95,14 @@ export async function lockExistingOrderForPayment(
     ), size AS MATERIALIZED (
       SELECT COUNT(*) AS n FROM scope
     ), fence AS MATERIALIZED (
-      SELECT v.id FROM "Venue" v WHERE v.id = ${input.venueId}
-        AND (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      SELECT v.id FROM "Venue" v JOIN (SELECT DISTINCT venue_id FROM input) i ON v.id = i.venue_id
+      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
       FOR KEY SHARE OF v
     ), locked AS MATERIALIZED (
       SELECT o.id
       FROM "Order" o JOIN scope a ON a.id = o.id
       JOIN fence v ON v.id = o."venueId"
-      WHERE o."venueId" = ${input.venueId}
-        AND (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
       ORDER BY o."createdAt" DESC, o.id DESC
       FOR UPDATE OF o
     )
