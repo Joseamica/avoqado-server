@@ -1,11 +1,13 @@
 import type { Request, Response } from 'express'
-import { listExchanges, reviewExchange } from '@/controllers/dashboard/exchange.dashboard.controller'
+import { getExchange, listExchanges, reviewExchange } from '@/controllers/dashboard/exchange.dashboard.controller'
 import { listExchangesSchema, reviewExchangeSchema } from '@/schemas/dashboard/exchange.dashboard.schema'
 import { validateRequest } from '@/middlewares/validation'
 
 const mockList = jest.fn()
+const mockGet = jest.fn()
 const mockReview = jest.fn()
 jest.mock('@/services/dashboard/exchange.dashboard.service', () => ({
+  getExchangeForDashboard: (...a: unknown[]) => mockGet(...a),
   listExchangesForReview: (...a: unknown[]) => mockList(...a),
   markExchangeReviewed: (...a: unknown[]) => mockReview(...a),
 }))
@@ -38,7 +40,15 @@ describe('dashboard exchange controller', () => {
     expect(next).toHaveBeenCalledWith()
     mockList.mockResolvedValue({ total, items: Array.from({ length: count }, (_, id) => ({ id })) })
     await listExchanges(request, res, next)
-    expect(mockList).toHaveBeenCalledWith({ venueId, pendingReview: true, limit: 2, offset })
+    expect(mockList).toHaveBeenCalledWith({
+      venueId,
+      pendingReview: true,
+      limit: 2,
+      offset,
+      cursor: undefined,
+      originalOrderId: undefined,
+      status: undefined,
+    })
     expect(res.json).toHaveBeenCalledWith({ success: true, data: expect.objectContaining({ total, hayMas, siguienteOffset }) })
   })
 
@@ -95,4 +105,47 @@ describe('dashboard exchange controller', () => {
     expect(next).toHaveBeenLastCalledWith(expect.objectContaining({ statusCode: 401 }))
     expect(mockReview).toHaveBeenCalledTimes(1)
   })
+})
+
+it('forwards cursor and filters to the shared list and uses cursor hasMore', async () => {
+  const request = req({ cursor: 'opaque', originalOrderId: 'cm12345678901234567890123', status: 'CANCELLED', limit: '25' })
+  const res = response()
+  const next = jest.fn()
+  await validateRequest(listExchangesSchema)(request, res, next)
+  mockList.mockResolvedValue({ total: 99, items: [{ id: 'last' }], nextCursor: null })
+  await listExchanges(request, res, next)
+  expect(mockList).toHaveBeenCalledWith({
+    venueId,
+    cursor: 'opaque',
+    originalOrderId: 'cm12345678901234567890123',
+    status: 'CANCELLED',
+    limit: 25,
+    offset: 0,
+    pendingReview: undefined,
+  })
+  expect(res.json).toHaveBeenCalledWith({ success: true, data: expect.objectContaining({ hayMas: false, nextCursor: null }) })
+})
+it('in cursor mode never offers an offset, even with more pages', async () => {
+  const request = req({ cursor: 'opaque', limit: '25' })
+  const res = response()
+  const next = jest.fn()
+  await validateRequest(listExchangesSchema)(request, res, next)
+  mockList.mockResolvedValue({ total: 99, items: [{ id: 'a' }], nextCursor: 'next' })
+  await listExchanges(request, res, next)
+  expect(res.json).toHaveBeenCalledWith({
+    success: true,
+    data: expect.objectContaining({ hayMas: true, nextCursor: 'next', siguienteOffset: null }),
+  })
+})
+it('gets a single detail using the route venue and propagates 404', async () => {
+  const res = response()
+  const next = jest.fn()
+  mockGet.mockResolvedValueOnce({ id: 'exchange-id', applied: false })
+  await getExchange(req(), res, next)
+  expect(mockGet).toHaveBeenCalledWith({ venueId, exchangeId: 'exchange-id' })
+  expect(res.json).toHaveBeenCalledWith({ success: true, data: { id: 'exchange-id', applied: false } })
+  const error = Object.assign(new Error('No se encontró el cambio'), { statusCode: 404 })
+  mockGet.mockRejectedValueOnce(error)
+  await getExchange(req(), res, next)
+  expect(next).toHaveBeenLastCalledWith(error)
 })

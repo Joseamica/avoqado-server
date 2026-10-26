@@ -3,7 +3,9 @@ import { ExchangeStatus } from '@prisma/client'
 import { formatInTimeZone } from 'date-fns-tz'
 import { z } from 'zod'
 import { BadRequestError, ConflictError, NotFoundError } from '@/errors/AppError'
-import { markExchangeReviewed } from '@/services/dashboard/exchange.dashboard.service'
+import { getExchangeForDashboard, markExchangeReviewed } from '@/services/dashboard/exchange.dashboard.service'
+import { effectiveExchangesEnabled } from '@/services/exchanges/exchangeRules'
+import { updateVenueSettings } from '@/services/dashboard/venueSettings.dashboard.service'
 import { exchangeReviewNoteSchema } from '@/schemas/dashboard/exchange.dashboard.schema'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { parseDbDateRange } from '@/utils/datetime'
@@ -31,6 +33,11 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
         .optional()
         .describe('Fecha final inclusiva en la zona horaria de la sucursal (YYYY-MM-DD)'),
       status: z.nativeEnum(ExchangeStatus, { errorMap: () => ({ message: 'Selecciona un estado de cambio válido' }) }).optional(),
+      originalOrderId: z
+        .string({ invalid_type_error: 'El identificador de la venta debe ser texto' })
+        .cuid('El identificador de la venta no es válido')
+        .optional()
+        .describe('Venta original cuyos cambios quieres consultar'),
       porRevisar: z.boolean({ invalid_type_error: 'Indica si quieres sólo los cambios por revisar' }).optional(),
       limit: z
         .number({ invalid_type_error: 'El tamaño de página debe ser numérico' })
@@ -44,7 +51,7 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
         .max(2147483647, 'El desplazamiento es demasiado grande')
         .optional(),
     },
-    async ({ venueId, fromDate, toDate, status, porRevisar, limit, offset }) => {
+    async ({ venueId, fromDate, toDate, status, porRevisar, limit, offset, originalOrderId }) => {
       const venueFilter = guard.venueFilter(venueId)
       guard.requirePermission('payments:read', venueId)
       const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { name: true, timezone: true } })
@@ -54,6 +61,7 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
       const skip = offset ?? 0
       const where = {
         ...venueFilter,
+        ...(originalOrderId ? { originalOrderId } : {}),
         ...(range ? { createdAt: { gte: range.from, lte: range.to } } : {}),
         ...(status ? { status } : {}),
         ...(porRevisar ? { status: ExchangeStatus.NEEDS_REVIEW, reviewedAt: null } : {}),
@@ -85,6 +93,15 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
           },
         }),
       ])
+      const orderIds = [...new Set(exchanges.flatMap(e => [e.originalOrderId, e.newOrderId]).filter(Boolean))]
+      const orders = orderIds.length
+        ? await prisma.order.findMany({
+            where: { ...venueFilter, id: { in: orderIds } },
+            take: orderIds.length,
+            select: { id: true, orderNumber: true },
+          })
+        : []
+      const numbers = new Map(orders.map(o => [o.id, o.orderNumber]))
       const hayMas = skip + exchanges.length < total
       const fechaLocal = (date: Date) => formatInTimeZone(date, venue.timezone, "yyyy-MM-dd'T'HH:mm:ss.SSSXXX")
       return text({
@@ -102,6 +119,8 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
           fecha: fechaLocal(exchange.createdAt),
           ventaOriginal: exchange.originalOrderId,
           ventaNueva: exchange.newOrderId,
+          ventaOriginalFolio: numbers.get(exchange.originalOrderId) ?? null,
+          ventaNuevaFolio: numbers.get(exchange.newOrderId) ?? null,
           regresa: Number(exchange.returnedAmount),
           seLleva: Number(exchange.takenAmount),
           diferencia: Number(exchange.differenceAmount),
@@ -114,6 +133,116 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
           liquidacion: { tipo: exchange.settlementKind, medio: exchange.settlementMethod },
           hizo: exchange.staffId,
         })),
+      })
+    },
+  )
+
+  const venueInput = z
+    .string({ required_error: 'Indica la sucursal', invalid_type_error: 'La sucursal debe ser texto' })
+    .min(1, 'Indica la sucursal')
+  const readSetting = async (venueId: string) => {
+    const venue = await prisma.venue.findUnique({
+      where: { id: venueId },
+      select: { type: true, settings: { select: { exchangesEnabled: true } } },
+    })
+    if (!venue) throw new NotFoundError('No se encontró la sucursal')
+    const guardado = venue.settings?.exchangesEnabled ?? null
+    return { prendido: effectiveExchangesEnabled(guardado, venue.type), guardado, porGiro: effectiveExchangesEnabled(null, venue.type) }
+  }
+  server.tool(
+    'get_exchanges_setting',
+    'Consulta si los cambios de talla o producto están prendidos en una sucursal, el ajuste guardado (null significa sin elegir) y el valor predeterminado por giro. Requiere permiso para consultar la sucursal. Sólo lectura.',
+    { venueId: venueInput },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('venues:read', venueId)
+      return text(await readSetting(venueId))
+    },
+  )
+  server.tool(
+    'set_exchanges_setting',
+    'Prende o apaga los cambios de talla o producto de una sucursal. Requiere permiso para editar la sucursal y conexión con escritura. Primero muestra actual → nuevo; sólo tras confirmación expresa del operador repite confirmationArguments con confirm:true y el confirmationToken firmado. Guarda la elección y su bitácora. No mueve dinero ni existencias.',
+    {
+      venueId: venueInput,
+      exchangesEnabled: z.boolean({ required_error: 'Indica si quieres prender los cambios', invalid_type_error: 'Indica true o false' }),
+      confirm: z.boolean({ invalid_type_error: 'La confirmación debe ser true o false' }).optional(),
+    },
+    async ({ venueId, exchangesEnabled, confirm }) => {
+      guard.venueFilter(venueId)
+      requireWriteScopeAlways(scope, 'venues:update', 'cambia el ajuste de cambios de producto')
+      guard.requirePermission('venues:update', venueId)
+      if (!confirm) {
+        const setting = await readSetting(venueId)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: { actual: setting.prendido, nuevo: exchangesEnabled },
+          message: `Cambios de producto: ${setting.prendido ? 'Prendido' : 'Apagado'} → ${exchangesEnabled ? 'Prendido' : 'Apagado'}. Confirma con el operador antes de guardar.`,
+        })
+      }
+      // The shared settings service records the authenticated actor and before/after values.
+      await updateVenueSettings(venueId, { exchangesEnabled }, scope.staffId)
+      return text({ ok: true, ...(await readSetting(venueId)) })
+    },
+  )
+  server.tool(
+    'get_exchange',
+    'Consulta un cambio de talla o producto: ventas y folios, piezas solicitadas para regresar y llevarse, valores, diferencia, liquidación y revisión. aplicado sólo es true cuando el cambio se completó; restock expresa lo solicitado y no demuestra una devolución al inventario. Incluye el total esperado y cobrado de TODOS los cargos y sus identificadores; null si no consta. Todos los importes en pesos. Requiere permiso para consultar pagos. Sólo lectura.',
+    {
+      venueId: venueInput,
+      exchangeId: z
+        .string({ required_error: 'Indica el cambio', invalid_type_error: 'El cambio debe ser texto' })
+        .min(1, 'Indica el cambio'),
+    },
+    async ({ venueId, exchangeId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:read', venueId)
+      const row = await getExchangeForDashboard({ venueId, exchangeId })
+      const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } })
+      if (!venue) throw new NotFoundError('No se encontró la sucursal')
+      const local = (date: Date) => formatInTimeZone(date, venue.timezone, "yyyy-MM-dd'T'HH:mm:ss.SSSXXX")
+      return text({
+        id: row.id,
+        estado: row.status,
+        aplicado: row.applied,
+        fecha: local(row.createdAt),
+        ventaOriginal: row.originalOrderId,
+        ventaOriginalFolio: row.originalOrderNumber,
+        cobroOriginal: row.originalPaymentId,
+        ventaNueva: row.newOrderId,
+        ventaNuevaFolio: row.newOrderNumber,
+        hizo: row.staffId,
+        nombre: row.staffName,
+        regresa: row.returnedCents / 100,
+        seLleva: row.takenCents / 100,
+        diferencia: row.differenceCents / 100,
+        devueltos: row.returned.map(line => ({
+          orderItemId: line.orderItemId,
+          productId: line.productId,
+          nombre: line.productName,
+          cantidad: line.quantity,
+          motivo: line.reason,
+          restock: line.restock,
+          valor: line.valueCents / 100,
+          valoresPorPieza: line.pieceValuesCents?.map(c => c / 100) ?? [],
+        })),
+        llevados: row.taken.map(line => ({
+          productId: line.productId,
+          nombre: line.productName,
+          cantidad: line.quantity,
+          precioLista: line.listCents / 100,
+          precio: line.priceCents / 100,
+          piezas: line.pieces?.map(p => ({ precio: p.priceCents / 100, heredadoDe: p.inheritedFromOrderItemId })) ?? [],
+          newOrderItemIds: line.newOrderItemIds,
+        })),
+        liquidacion: { tipo: row.settlement.kind, medio: row.settlement.method, importe: row.settlement.amountCents / 100 },
+        esperado: row.expectedChargeCents === null ? null : row.expectedChargeCents / 100,
+        cobrado: row.chargedCents === null ? null : row.chargedCents / 100,
+        cantidadDeCobros: row.chargePaymentCount,
+        cobros: row.paymentIds,
+        cobroDeLaTerminal: row.chargePaymentId,
+        motivoDeRevision: row.reviewReason,
+        revisado: row.reviewedAt ? { fecha: local(row.reviewedAt), quien: row.reviewedById, nota: row.reviewNote } : null,
       })
     },
   )

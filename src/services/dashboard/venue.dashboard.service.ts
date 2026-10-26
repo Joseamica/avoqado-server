@@ -25,6 +25,7 @@
  * - Framework independent: Could switch from Express to Fastify without touching services
  */
 import prisma from '../../utils/prismaClient'
+import { effectiveExchangesEnabled } from '../exchanges/exchangeRules'
 import { CreateVenueDto } from '../../schemas/dashboard/venue.schema'
 import { EnhancedCreateVenueBody } from '../../schemas/dashboard/cost-management.schema'
 import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueOperationalRole, VenueType } from '@prisma/client'
@@ -115,7 +116,11 @@ export async function listVenuesForOrganization(orgId: string, _queryOptions: an
   })
 }
 
-export async function getVenueById(orgId: string, venueId: string, options?: { skipOrgCheck?: boolean }): Promise<Venue> {
+export async function getVenueById(
+  orgId: string,
+  venueId: string,
+  options?: { skipOrgCheck?: boolean },
+): Promise<Venue & { exchangesEnabledEffective: boolean }> {
   // SUPERADMIN can access venues across organizations (skipOrgCheck = true)
   // Other roles (including OWNER) are restricted to their own organization
   const whereClause: any = { id: venueId }
@@ -146,7 +151,7 @@ export async function getVenueById(orgId: string, venueId: string, options?: { s
   if (!venue) {
     throw new NotFoundError(`Venue with ID ${venueId} not found`)
   }
-  return venue
+  return { ...venue, exchangesEnabledEffective: effectiveExchangesEnabled(venue.settings?.exchangesEnabled, venue.type) }
 }
 
 /**

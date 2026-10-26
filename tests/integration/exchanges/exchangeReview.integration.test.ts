@@ -128,7 +128,7 @@ describe('exchange review', () => {
 
   it('another venue cannot read or mark an exchange', async () => {
     const row = await seedReview()
-    expect(await listExchangesForReview({ venueId: cuid(), pendingReview: true })).toEqual({ total: 0, items: [] })
+    expect(await listExchangesForReview({ venueId: cuid(), pendingReview: true })).toEqual({ total: 0, items: [], nextCursor: null })
     await expect(review(row.id, { venueId: cuid() })).rejects.toMatchObject({ statusCode: 404 })
   })
 })

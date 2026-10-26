@@ -1,3 +1,4 @@
+import { loadExchangeLinksForOrders } from '../exchanges/exchangeDetail'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import {
   asegurarCambioDeClienteBajoCandado,
@@ -401,6 +402,7 @@ export async function getOrderById(venueId: string, orderId: string) {
   const refunds = summarizeRefunds((flattened.payments ?? []).filter((p: any) => p.status === 'COMPLETED'))
   return {
     ...flattened,
+    exchange: (await loadExchangeLinksForOrders(prisma, venueId, [orderId])).get(orderId),
     payments: mapOrderPaymentsWithRefunds(flattened.payments ?? []),
     promotions: mapOrderPromotions(order.promotions ?? []),
     refundState: refunds.refundState,

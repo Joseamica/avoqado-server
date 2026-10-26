@@ -51,8 +51,14 @@ export interface ExchangeDetailFields {
   payoutOptions: PayoutOption[]
   exchange: {
     asOriginalTotal: number
-    asOriginal: Array<{ exchangeId: string; newOrderNumber: string; status: ExchangeStatus }>
-    asNew: { exchangeId: string; originalOrderNumber: string } | null
+    asOriginal: Array<{ exchangeId: string; newOrderId: string; newOrderNumber: string; status: ExchangeStatus; reviewedAt: string | null }>
+    asNew: {
+      exchangeId: string
+      originalOrderId: string
+      originalOrderNumber: string
+      status: ExchangeStatus
+      reviewedAt: string | null
+    } | null
   }
 }
 
@@ -128,6 +134,7 @@ export async function loadExchangeLinksForOrders(
       id: string | null
       otherOrderId: string | null
       status: ExchangeStatus | null
+      reviewedAt: Date | null
     }>
   >(Prisma.sql`
     WITH orders AS MATERIALIZED (
@@ -135,13 +142,13 @@ export async function loadExchangeLinksForOrders(
         WHERE x."venueId" = ${venueId} AND x."originalOrderId" = o.id) AS total
       FROM "Order" o WHERE o."venueId" = ${venueId} AND o.id IN (${Prisma.join(orderIds)})
     )
-    SELECT o.id AS "orderId", o.total, e.id, e.direction, e."otherOrderId", e.status
+    SELECT o.id AS "orderId", o.total, e.id, e.direction, e."otherOrderId", e.status, e."reviewedAt"
     FROM orders o LEFT JOIN LATERAL (
-      (SELECT x.id, 'original' AS direction, x."newOrderId" AS "otherOrderId", x.status, x."createdAt"
+      (SELECT x.id, 'original' AS direction, x."newOrderId" AS "otherOrderId", x.status, x."createdAt", x."reviewedAt"
        FROM "Exchange" x WHERE x."venueId" = ${venueId} AND x."originalOrderId" = o.id
        ORDER BY x."createdAt" DESC, x.id DESC LIMIT ${MAX_EXCHANGE_ORIGINAL_LINKS})
       UNION ALL
-      (SELECT x.id, 'new' AS direction, x."originalOrderId" AS "otherOrderId", x.status, x."createdAt"
+      (SELECT x.id, 'new' AS direction, x."originalOrderId" AS "otherOrderId", x.status, x."createdAt", x."reviewedAt"
        FROM "Exchange" x WHERE x."venueId" = ${venueId} AND x."newOrderId" = o.id LIMIT 1)
     ) e ON true
     ORDER BY o.id, e."createdAt" DESC, e.id DESC
@@ -161,8 +168,22 @@ export async function loadExchangeLinksForOrders(
     }
     const number = row.otherOrderId && numberById.get(row.otherOrderId)
     if (!row.id || !number) continue
-    if (row.direction === 'original') links.asOriginal.push({ exchangeId: row.id, newOrderNumber: number, status: row.status! })
-    else links.asNew = { exchangeId: row.id, originalOrderNumber: number }
+    if (row.direction === 'original')
+      links.asOriginal.push({
+        exchangeId: row.id,
+        newOrderId: row.otherOrderId!,
+        newOrderNumber: number,
+        status: row.status!,
+        reviewedAt: row.reviewedAt?.toISOString() ?? null,
+      })
+    else
+      links.asNew = {
+        exchangeId: row.id,
+        originalOrderId: row.otherOrderId!,
+        originalOrderNumber: number,
+        status: row.status!,
+        reviewedAt: row.reviewedAt?.toISOString() ?? null,
+      }
   }
   return result
 }

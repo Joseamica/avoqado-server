@@ -3,6 +3,7 @@
  * catálogo. Una huella que el cliente pueda calcular solo (sha256 de los argumentos) no sirve como vista previa.
  */
 import { createHash, randomUUID } from 'crypto'
+import prisma from '@/utils/prismaClient'
 import { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { Client } from '@modelcontextprotocol/sdk/client/index.js'
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js'
@@ -12,12 +13,20 @@ import { registerExchangeTools } from '@/mcp/tools/exchanges'
 
 const mockDetail = jest.fn()
 const mockReview = jest.fn()
+const mockSettingsUpdate = jest.fn()
+jest.mock('@/services/dashboard/venueSettings.dashboard.service', () => ({
+  updateVenueSettings: (...a: unknown[]) => mockSettingsUpdate(...a),
+}))
 jest.mock('@/services/dashboard/exchange.dashboard.service', () => ({ markExchangeReviewed: (...a: unknown[]) => mockReview(...a) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
     exchange: { findFirst: (...a: unknown[]) => mockDetail(...a), findMany: jest.fn(), count: jest.fn() },
-    venue: { findUnique: jest.fn().mockResolvedValue({ timezone: 'America/Mexico_City' }) },
+    venue: {
+      findUnique: jest
+        .fn()
+        .mockResolvedValue({ timezone: 'America/Mexico_City', type: 'RESTAURANT', settings: { exchangesEnabled: null } }),
+    },
   },
 }))
 jest.mock('@/services/access/access.service', () => ({
@@ -32,7 +41,7 @@ const scope: McpScope = {
   activeOrg: 'cm42345678901234567890123',
   scopes: ['mcp:read', 'mcp:write'],
   allowedVenueIds: [venueId],
-  perVenueAccess: new Map([[venueId, { corePermissions: ['payments:read', 'payments:refund'] } as never]]),
+  perVenueAccess: new Map([[venueId, { corePermissions: ['payments:read', 'payments:refund', 'venues:update'] } as never]]),
 }
 const args = { venueId, exchangeId, note }
 
@@ -95,4 +104,38 @@ it('los mismos argumentos + confirm:true + el token sí marcan revisado, por el 
   expect(r).toMatchObject({ ok: true, cambio: exchangeId })
   expect(mockReview).toHaveBeenCalledTimes(1)
   expect(mockReview).toHaveBeenCalledWith({ venueId, exchangeId, staffId: scope.staffId, note, source: 'MCP' })
+})
+
+it('setting write requires a signed preview bound to venue and requested value', async () => {
+  const settingCall = async (args: Record<string, unknown>) => {
+    const result = await client.callTool({ name: 'set_exchanges_setting', arguments: args })
+    return JSON.parse((result.content as Array<{ text: string }>)[0].text)
+  }
+  const args = { venueId, exchangesEnabled: true }
+  expect(await settingCall({ ...args, confirm: true })).toMatchObject({ needsInput: true, field: 'confirmationToken' })
+  expect(mockSettingsUpdate).not.toHaveBeenCalled()
+  const preview = await settingCall(args)
+  expect(preview).toMatchObject({
+    requiresConfirmation: true,
+    confirmationToken: expect.any(String),
+    preview: { actual: false, nuevo: true },
+  })
+  expect(mockSettingsUpdate).not.toHaveBeenCalled()
+  for (const changed of [{ exchangesEnabled: false }, { venueId: 'cm62345678901234567890123' }]) {
+    expect(
+      await settingCall({ ...preview.confirmationArguments, ...changed, confirm: true, confirmationToken: preview.confirmationToken }),
+    ).toMatchObject({ needsInput: true })
+  }
+  expect(mockSettingsUpdate).not.toHaveBeenCalled()
+  mockSettingsUpdate.mockImplementation(async () => {
+    jest
+      .mocked(prisma.venue.findUnique)
+      .mockResolvedValue({ timezone: 'America/Mexico_City', type: 'RESTAURANT', settings: { exchangesEnabled: true } } as never)
+    return { exchangesEnabled: true }
+  })
+  expect(
+    await settingCall({ ...preview.confirmationArguments, confirm: true, confirmationToken: preview.confirmationToken }),
+  ).toMatchObject({ ok: true, prendido: true, guardado: true })
+  expect(mockSettingsUpdate).toHaveBeenCalledTimes(1)
+  expect(mockSettingsUpdate).toHaveBeenCalledWith(venueId, { exchangesEnabled: true }, scope.staffId)
 })

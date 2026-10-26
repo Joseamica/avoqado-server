@@ -1,4 +1,5 @@
 import { z } from 'zod'
+import { ExchangeStatus } from '@prisma/client'
 
 export const exchangeReviewNoteSchema = z
   .string({ required_error: 'Escribe una nota de revisión', invalid_type_error: 'La nota debe ser texto' })
@@ -14,6 +15,16 @@ const venueParams = z.object({
 export const listExchangesSchema = z.object({
   params: venueParams,
   query: z.object({
+    cursor: z
+      .string({ invalid_type_error: 'El cursor debe ser texto' })
+      .min(1, 'El cursor no puede estar vacío')
+      .max(512, 'El cursor es demasiado largo')
+      .optional(),
+    originalOrderId: z
+      .string({ invalid_type_error: 'El identificador de la venta debe ser texto' })
+      .cuid('El identificador de la venta no es válido')
+      .optional(),
+    status: z.nativeEnum(ExchangeStatus, { errorMap: () => ({ message: 'Selecciona un estado de cambio válido' }) }).optional(),
     pendingReview: z
       .enum(['true', 'false'], { errorMap: () => ({ message: 'Indica true o false para filtrar por revisar' }) })
       .transform(v => v === 'true')
@@ -39,3 +50,5 @@ export const reviewExchangeSchema = z.object({
   }),
   body: z.object({ note: exchangeReviewNoteSchema }),
 })
+
+export const getExchangeSchema = z.object({ params: reviewExchangeSchema.shape.params })

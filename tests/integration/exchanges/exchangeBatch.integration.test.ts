@@ -319,7 +319,13 @@ describe('exchange reads in batch (B)', () => {
         .slice(0, 50),
     )
     expect(links.get(second.id)?.asOriginal.map(e => e.exchangeId)).toEqual([only.id])
-    expect(links.get(rows[0].newOrderId)?.asNew).toEqual({ exchangeId: rows[0].id, originalOrderNumber: first.orderNumber })
+    expect(links.get(rows[0].newOrderId)?.asNew).toEqual({
+      exchangeId: rows[0].id,
+      originalOrderId: first.id,
+      originalOrderNumber: first.orderNumber,
+      status: rows[0].status,
+      reviewedAt: null,
+    })
     expect(links.get(s.order.id)).toEqual({ asOriginal: [], asOriginalTotal: 0, asNew: null })
   })
   it('keeps A parity at the exact refund row cap without counting the original payment twice', async () => {

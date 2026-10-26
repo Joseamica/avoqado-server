@@ -10,7 +10,17 @@ const mockCount = jest.fn()
 const mockVenue = jest.fn()
 const mockDetail = jest.fn()
 const mockReview = jest.fn()
-jest.mock('@/services/dashboard/exchange.dashboard.service', () => ({ markExchangeReviewed: (...args: unknown[]) => mockReview(...args) }))
+const mockDashboardDetail = jest.fn()
+const mockUpdateSettings = jest.fn()
+const mockOrders = jest.fn()
+const mockStaff = jest.fn()
+jest.mock('@/services/dashboard/exchange.dashboard.service', () => ({
+  markExchangeReviewed: (...args: unknown[]) => mockReview(...args),
+  getExchangeForDashboard: (...args: unknown[]) => mockDashboardDetail(...args),
+}))
+jest.mock('@/services/dashboard/venueSettings.dashboard.service', () => ({
+  updateVenueSettings: (...args: unknown[]) => mockUpdateSettings(...args),
+}))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
@@ -20,6 +30,8 @@ jest.mock('@/utils/prismaClient', () => ({
       count: (...args: unknown[]) => mockCount(...args),
     },
     venue: { findUnique: (...args: unknown[]) => mockVenue(...args) },
+    order: { findMany: (...args: unknown[]) => mockOrders(...args) },
+    staff: { findMany: (...args: unknown[]) => mockStaff(...args) },
   },
 }))
 jest.mock('@/services/access/access.service', () => ({
@@ -60,6 +72,8 @@ beforeEach(() => {
   mockVenue.mockResolvedValue({ name: 'Tienda de prueba', timezone: 'America/Mexico_City' })
   mockFind.mockResolvedValue([])
   mockCount.mockResolvedValue(0)
+  mockOrders.mockResolvedValue([])
+  mockStaff.mockResolvedValue([])
 })
 
 describe('list_exchanges', () => {
@@ -176,6 +190,8 @@ describe('list_exchanges', () => {
           fecha: '2026-10-02T01:30:00.000-06:00',
           ventaOriginal: 'cm62345678901234567890123',
           ventaNueva: 'cm72345678901234567890123',
+          ventaOriginalFolio: null,
+          ventaNuevaFolio: null,
           regresa: 150.5,
           seLleva: 120.25,
           diferencia: -30.25,
@@ -383,5 +399,105 @@ describe('exchange review MCP', () => {
     expect(TOOL_EFFECTS.review_exchange).toBe('write')
     expect(DIRECTORY_TOOLS.has('review_exchange')).toBe(false)
     expect(tool(writer, 'review_exchange').description).not.toMatch(/\bExchange\b|\bPayment\b|\bPrisma\b|\btabla\b|src\/|\/api\/|\/mcp\b/)
+  })
+})
+
+describe('dashboard exchange MCP additions', () => {
+  const settingsReader = { ...scope, perVenueAccess: new Map([[venueId, { corePermissions: ['venues:read'] } as never]]) }
+  it.each([
+    ['RESTAURANT', null, false],
+    ['CLOTHING', null, true],
+    ['CLOTHING', false, false],
+    ['RESTAURANT', true, true],
+  ])('reads stored and effective settings for %s/%s', async (type, stored, effective) => {
+    mockVenue.mockResolvedValue({ type, settings: { exchangesEnabled: stored } })
+    expect(await tool(settingsReader, 'get_exchanges_setting').call()).toEqual({
+      prendido: effective,
+      guardado: stored,
+      porGiro: type === 'CLOTHING',
+    })
+  })
+  it('requires the exact read permission and tenant before looking up settings', async () => {
+    await expect(tool(scope, 'get_exchanges_setting').call()).rejects.toThrow('venues:read')
+    await expect(tool(settingsReader, 'get_exchanges_setting').call({ venueId: otherVenueId })).rejects.toThrow('not in your scope')
+    expect(mockVenue).not.toHaveBeenCalled()
+  })
+  it('projects the shared detail in pesos and retains requested versus applied', async () => {
+    mockDashboardDetail.mockResolvedValue({
+      id: 'exchange',
+      createdAt: new Date('2026-10-26T18:00:00Z'),
+      status: 'NEEDS_REVIEW',
+      applied: false,
+      returnedCents: 15050,
+      takenCents: 25050,
+      differenceCents: 10000,
+      returned: [{ productName: 'Saved return', valueCents: 15050, pieceValuesCents: [15050], restock: true }],
+      taken: [
+        {
+          productName: 'Saved replacement',
+          listCents: 30000,
+          priceCents: 25050,
+          pieces: [{ priceCents: 25050, inheritedFromOrderItemId: null }],
+        },
+      ],
+      settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', amountCents: 10000 },
+      expectedChargeCents: 10000,
+      chargedCents: 20000,
+      chargePaymentCount: 2,
+      paymentIds: ['p1', 'p2'],
+      chargePaymentId: 'p1',
+      reviewedAt: null,
+    })
+    const result = await tool(scope, 'get_exchange').call({ exchangeId: 'exchange' })
+    expect(result).toMatchObject({
+      aplicado: false,
+      regresa: 150.5,
+      seLleva: 250.5,
+      diferencia: 100,
+      esperado: 100,
+      cobrado: 200,
+      cantidadDeCobros: 2,
+      cobros: ['p1', 'p2'],
+      cobroDeLaTerminal: 'p1',
+      devueltos: [{ valor: 150.5, valoresPorPieza: [150.5], restock: true }],
+      llevados: [{ precioLista: 300, precio: 250.5, piezas: [{ precio: 250.5 }] }],
+      liquidacion: { importe: 100 },
+    })
+    expect(JSON.stringify(result)).not.toMatch(/Cents/)
+    expect(mockDashboardDetail).toHaveBeenCalledWith({ venueId, exchangeId: 'exchange' })
+  })
+  it('requires payment read permission and propagates detail 404', async () => {
+    await expect(tool(settingsReader, 'get_exchange').call({ exchangeId: 'exchange' })).rejects.toThrow('payments:read')
+    expect(mockDashboardDetail).not.toHaveBeenCalled()
+    mockDashboardDetail.mockRejectedValueOnce(Object.assign(new Error('No se encontró el cambio'), { statusCode: 404 }))
+    await expect(tool(scope, 'get_exchange').call({ exchangeId: 'exchange' })).rejects.toMatchObject({ statusCode: 404 })
+  })
+  it('lists saved order folios and filters by original sale', async () => {
+    const originalOrderId = 'cm62345678901234567890123'
+    const newOrderId = 'cm72345678901234567890123'
+    mockFind.mockResolvedValue([
+      { originalOrderId, newOrderId, createdAt: new Date(), status: 'COMPLETED', returnedAmount: 0, takenAmount: 0, differenceAmount: 0 },
+    ])
+    mockOrders.mockResolvedValue([
+      { id: originalOrderId, orderNumber: 'ORD-1' },
+      { id: newOrderId, orderNumber: 'ORD-2' },
+    ])
+    expect((await tool().call({ originalOrderId })).cambios[0]).toMatchObject({ ventaOriginalFolio: 'ORD-1', ventaNuevaFolio: 'ORD-2' })
+    expect(mockFind.mock.calls[0][0].where.originalOrderId).toBe(originalOrderId)
+    expect(mockOrders).toHaveBeenCalledWith(
+      expect.objectContaining({ take: 2, where: expect.objectContaining({ venueId: { in: [venueId] } }) }),
+    )
+  })
+  it.each(['get_exchange', 'get_exchanges_setting', 'set_exchanges_setting'])('classifies %s only in the free catalog', name => {
+    expect(TOOL_EFFECTS[name]).toBe(name.startsWith('set_') ? 'write' : 'read')
+    expect(DIRECTORY_TOOLS.has(name)).toBe(false)
+  })
+  it('requires write scope and venues:update before previewing or saving', async () => {
+    for (const confirm of [false, true]) {
+      for (const connection of [scope, { ...scope, scopes: ['mcp:write'] }])
+        await expect(tool(connection, 'set_exchanges_setting').call({ exchangesEnabled: false, confirm })).rejects.toThrow()
+    }
+    expect(mockVenue).not.toHaveBeenCalled()
+    expect(mockUpdateSettings).not.toHaveBeenCalled()
   })
 })

@@ -36,7 +36,11 @@ async function refund(s: Seed, paymentId: string, quantity: number, cents: numbe
     }),
   )
 }
-beforeAll(() => expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(/^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/))
+beforeAll(() =>
+  expect(new URL(process.env.TEST_DATABASE_URL!).pathname).toMatch(
+    /^\/avoqado_(?:cambio_(?:fix_|r5_)?test_\d{8}|h1a_test_\d{8}(?:_\d+)?)$/,
+  ),
+)
 afterAll(async () => {
   for (const s of fixtures) await s.cleanup()
   await prisma.$disconnect()
@@ -183,13 +187,27 @@ describe('exchange transaction detail', () => {
     const { exchange } = await createExchange(s.input())
     expect((await detail(s)).exchange).toEqual({
       asOriginalTotal: 1,
-      asOriginal: [{ exchangeId: exchange.id, newOrderNumber: exchange.newOrderNumber, status: 'COMPLETED' }],
+      asOriginal: [
+        {
+          exchangeId: exchange.id,
+          newOrderId: exchange.newOrderId,
+          newOrderNumber: exchange.newOrderNumber,
+          status: 'COMPLETED',
+          reviewedAt: null,
+        },
+      ],
       asNew: null,
     })
     expect((await detail(s, exchange.paymentIds[0])).exchange).toEqual({
       asOriginalTotal: 0,
       asOriginal: [],
-      asNew: { exchangeId: exchange.id, originalOrderNumber: s.order.orderNumber },
+      asNew: {
+        exchangeId: exchange.id,
+        originalOrderId: s.order.id,
+        originalOrderNumber: s.order.orderNumber,
+        status: 'COMPLETED',
+        reviewedAt: null,
+      },
     })
   })
 

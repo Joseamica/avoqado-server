@@ -59,6 +59,7 @@ export const UpdateVenueSettingsSchema = z.object({
     // el POS sólo lo lee. Sin esta línea el PUT descartaba el campo en silencio
     // y el switch parecería funcionar sin guardar nada.
     managerPinOverrideEnabled: z.boolean().optional(),
+    exchangesEnabled: z.boolean({ invalid_type_error: 'El ajuste de cambios debe ser true o false' }).optional(),
     requireClockInPhoto: z.boolean().optional(), // Anti-fraud: require photo on clock-in
     trackPromoterLocation: z.boolean().optional(), // "Cambaceo": emit/accept periodic promoter location pings
 
