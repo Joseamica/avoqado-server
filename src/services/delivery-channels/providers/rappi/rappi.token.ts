@@ -46,10 +46,21 @@ const VIGENCIA_POR_DEFECTO_MS = 7 * 24 * 3600 * 1000
  * antes es despreciable, y lo que se evita —una llamada con token vencido a media comida— no.
  */
 const MARGEN_RENOVACION_MS = 24 * 3600 * 1000
+/** Con menos de esto de vida, el token no se guarda: la siguiente llamada vuelve a pedirlo. */
+const MARGEN_MINIMO_MS = 60 * 1000
+
+/**
+ * 🔴 D6 (26-oct): Rappi entrega el MISMO token hasta que vence (medido en DEV el 25-oct: pedirlo otra vez devolvió el de siempre
+ * con 23 h de vida). Con el margen fijo de un día, en su último día nunca quedaba en caché: cada llamada pedía login, y el script
+ * de avisos no encontraba el token para sacar el `azp`. Por eso, a un token que llega con menos de dos días, el margen es la
+ * MITAD de su vida (con piso de un minuto): se vuelve a pedir pocas veces y siempre antes de que venza.
+ */
+const margenPara = (vigenciaMs: number): number => Math.min(MARGEN_RENOVACION_MS, Math.max(MARGEN_MINIMO_MS, vigenciaMs / 2))
 
 interface Entrada {
   token: string
   venceEnMs: number
+  margenMs: number
 }
 
 const cache = new Map<SuperficieRappi, Entrada>()
@@ -75,7 +86,7 @@ export async function getRappiToken(superficie: SuperficieRappi, deps: RappiToke
   const ahora = deps.now ?? Date.now
 
   const guardado = cache.get(superficie)
-  if (guardado && guardado.venceEnMs - ahora() > MARGEN_RENOVACION_MS) return guardado.token
+  if (guardado && guardado.venceEnMs - ahora() > guardado.margenMs) return guardado.token
 
   // Single-flight POR SUPERFICIE: si tres pedidos entran a la vez sólo se pide un token, pero
   // pedir el de `utils` no debe esperar al de `integrations` — son independientes.
@@ -92,7 +103,7 @@ export async function getRappiToken(superficie: SuperficieRappi, deps: RappiToke
     if (gen === generacion) {
       const vigencia =
         Number.isFinite(r.expires_in) && (r.expires_in as number) > 0 ? (r.expires_in as number) * 1000 : VIGENCIA_POR_DEFECTO_MS
-      cache.set(superficie, { token: r.access_token, venceEnMs: ahora() + vigencia })
+      cache.set(superficie, { token: r.access_token, venceEnMs: ahora() + vigencia, margenMs: margenPara(vigencia) })
     }
     return r.access_token
   })()

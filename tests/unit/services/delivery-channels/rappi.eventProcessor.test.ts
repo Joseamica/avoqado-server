@@ -29,6 +29,7 @@ import {
   historialDelPedidoRappi,
   marcarTiendaIntegradaRappi,
   suscribirTiendaAEventos,
+  tiendaIntegradaEnRappi,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { anotarAceptacion } from '../../../../src/services/delivery-channels/providers/rappi/rappi.estadoDelPedido'
 import { rappiAdapter } from '../../../../src/services/delivery-channels/providers/rappi/rappi.adapter'
@@ -56,6 +57,7 @@ jest.mock('../../../../src/services/delivery-channels/providers/rappi/rappi.clie
   suscribirTiendaAEventos: jest.fn(),
   historialDelPedidoRappi: jest.fn(),
   marcarTiendaIntegradaRappi: jest.fn(),
+  tiendaIntegradaEnRappi: jest.fn(),
 }))
 // La marca de aceptación es un UPDATE condicionado al token (se prueba en `rappi.estadoDelPedido.test.ts` y contra Postgres);
 // aquí se observa cuándo se escribe. `leerEstado` y `leerHistorial` son los reales.
@@ -566,6 +568,43 @@ describe('processRappiEvent', () => {
     expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
   })
 
+  // D4 (26-oct): la nota «cerrada en el proveedor» (medido en DEV: nuestra propia pausa NO produce este aviso). Va en UN UPDATE que
+  // mezcla en la base y filtra el estado: una pausa del POS (PAUSED con reloj) también la recibe; PENDING y DISABLED no.
+  it.each(['ACTIVE', 'PAUSED'])(
+    'enabled:false sobre un canal %s deja la nota «cerrada en el proveedor», mezclada en la base',
+    async status => {
+      ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+        fila({
+          eventType: 'STORE_CONNECTIVITY',
+          payload: { external_store_id: '900105814', enabled: false },
+          channelLink: { ...fila().channelLink, status },
+        }),
+      )
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: status === 'ACTIVE' ? 1 : 0 })
+
+      await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+      const nota = (prisma.$executeRaw as jest.Mock).mock.calls.find(([sql]) => sql.join('?').includes('cerradaEnElProveedor'))
+      expect(nota).toBeDefined()
+      const [sql, ...valores] = nota!
+      expect(sql.join('?')).toMatch(/"status" IN \('ACTIVE', 'PAUSED'\)/)
+      expect(sql.join('?')).toContain('||')
+      expect(valores).toContain('link1')
+    },
+  )
+
+  // Codex D4 r3 #4: un «abierta» viejo, reprocesado tarde, borraría la nota de un cierre NUEVO. La borra sólo quien reabre desde el panel.
+  it('enabled:true NO borra la nota', async () => {
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(
+      fila({ eventType: 'STORE_CONNECTIVITY', payload: { external_store_id: '900105814', enabled: true } }),
+    )
+
+    await processRappiEvent('evt1', { aceptar: aceptarOk })
+
+    const sqls = (prisma.$executeRaw as jest.Mock).mock.calls.map(([sql]) => sql.join('?'))
+    expect(sqls.some(t => t.includes('cerradaEnElProveedor'))).toBe(false)
+  })
+
   // ── Los bordes ───────────────────────────────────────────────────────────────────
   it('un pedido de una tienda SIN vincular queda FAILED y VISIBLE — hay comida de alguien ahí', async () => {
     ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue(fila({ channelLink: null }))
@@ -677,6 +716,8 @@ describe('processRappiEvent', () => {
     expect(confirmarTienda).toHaveBeenCalledWith(expect.objectContaining({ storeId: '10', batchId: 'lote-7' }), {
       suscribir: suscribirTiendaAEventos,
       avisarIntegrada: expect.any(Function),
+      // D9: la baja del aviso se contrasta con la foto actual de la integración.
+      integradaEnRappi: tiendaIntegradaEnRappi,
     })
 
     // 🔴 Tarea 18: el aviso «integrada sí/no» sale por el ADAPTADOR (y de ahí al cliente), con el valor tal cual.

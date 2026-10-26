@@ -82,6 +82,66 @@ describe('getRappiToken', () => {
     expect(fetchToken).toHaveBeenCalledTimes(2)
   })
 
+  // ── D6 (26-oct) ────────────────────────────────────────────────────────────────────
+  // Rappi entrega el MISMO token hasta que vence (medido en DEV el 25-oct: pedirlo de nuevo devolvió el de siempre con 23 h
+  // de vida). Con el margen fijo de un día, en su último día ese token nunca quedaba en caché: cada llamada volvía a pedir
+  // login, y el script de avisos no encontraba el token para sacar el `azp`.
+  describe('🔴 D6: el último día del token', () => {
+    const HORA = 3600 * 1000
+
+    it('un token con menos de un día de vida se guarda y se reusa', async () => {
+      const fetchToken = jest.fn().mockResolvedValue({ access_token: 't1', expires_in: 23 * 3600 })
+      let ahora = 1_000_000
+      const now = () => ahora
+      expect(await getRappiToken('integrations', { fetchToken, now })).toBe('t1')
+      ahora += HORA
+      expect(await getRappiToken('integrations', { fetchToken, now })).toBe('t1')
+      expect(fetchToken).toHaveBeenCalledTimes(1)
+    })
+
+    it('se renueva a la mitad de lo que le queda: unas pocas veces en el día, nunca en cada llamada', async () => {
+      const fetchToken = jest.fn().mockResolvedValue({ access_token: 't1', expires_in: 23 * 3600 })
+      let ahora = 1_000_000
+      const now = () => ahora
+      await getRappiToken('integrations', { fetchToken, now })
+      ahora += 11 * HORA // le quedan 12 h: más que la mitad (11.5 h), todavía sirve
+      await getRappiToken('integrations', { fetchToken, now })
+      expect(fetchToken).toHaveBeenCalledTimes(1)
+      ahora += 1 * HORA // le quedan 11 h: ahora sí se pide (y Rappi devuelve el mismo, con 11 h)
+      fetchToken.mockResolvedValue({ access_token: 't1', expires_in: 11 * 3600 })
+      await getRappiToken('integrations', { fetchToken, now })
+      await getRappiToken('integrations', { fetchToken, now })
+      await getRappiToken('integrations', { fetchToken, now })
+      expect(fetchToken).toHaveBeenCalledTimes(2)
+    })
+
+    it('el script de avisos encuentra en caché el token aunque le quede menos de un día', async () => {
+      await getRappiToken('integrations', { fetchToken: async () => ({ access_token: 't1', expires_in: 20 * 3600 }) })
+      const sinLogin = { fetchToken: () => Promise.reject(new Error('el token no quedó en caché')) }
+      await expect(getRappiToken('integrations', sinLogin)).resolves.toBe('t1')
+    })
+
+    it('regresión: un token de una semana se sigue renovando con un día de anticipación', async () => {
+      const fetchToken = jest.fn().mockResolvedValue({ access_token: 't1', expires_in: 604800 })
+      let ahora = 1_000_000
+      const now = () => ahora
+      await getRappiToken('integrations', { fetchToken, now })
+      ahora += (7 * 24 - 25) * HORA // le quedan 25 h
+      await getRappiToken('integrations', { fetchToken, now })
+      expect(fetchToken).toHaveBeenCalledTimes(1)
+      ahora += 2 * HORA // le quedan 23 h: dentro del día de anticipación
+      await getRappiToken('integrations', { fetchToken, now })
+      expect(fetchToken).toHaveBeenCalledTimes(2)
+    })
+
+    it('con menos de un minuto de vida no se guarda: la siguiente llamada vuelve a pedir', async () => {
+      const fetchToken = jest.fn().mockResolvedValue({ access_token: 't1', expires_in: 30 })
+      expect(await getRappiToken('integrations', { fetchToken })).toBe('t1')
+      expect(await getRappiToken('integrations', { fetchToken })).toBe('t1')
+      expect(fetchToken).toHaveBeenCalledTimes(2)
+    })
+  })
+
   it('sin `expires_in` asume la semana que Rappi documenta, no cero', async () => {
     // Asumir cero pediría un token en CADA llamada y agotaría cualquier límite.
     const fetchToken = jest.fn().mockResolvedValue({ access_token: 't1' })

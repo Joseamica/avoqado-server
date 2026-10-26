@@ -105,6 +105,7 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import { featuredVerticalParams, LANDING_SLUG_RE } from '../services/launchCampaigns/launchCampaign.schema'
 import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.service'
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
+import { getPriceList, postPriceSelection } from '../controllers/public/priceList.public.controller'
 import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
 
 const router = Router()
@@ -131,6 +132,8 @@ const offerReadLimit = rateLimit({ windowMs: 60_000, max: 600, standardHeaders: 
 
 router.get('/feature-catalog', offerReadLimit, validateRequest(z.object({ query: featureCatalogQuery })), getFeatureCatalog)
 router.get('/hybrid-offers', offerReadLimit, publicHybridOffers)
+// /presentacion/precios del DASHBOARD: precios de lista vivos del SUPERADMIN (spec 2026-10-26-presentacion-de-precios).
+router.get('/price-list', offerReadLimit, getPriceList)
 router.get('/hybrid-offers/:slug', offerReadLimit, publicHybridOffer)
 
 // CFDI stamping costs money — tight per-IP cap to prevent abuse
@@ -611,6 +614,27 @@ router.post(
   validateRequest(contactSchema),
   submitContact,
 )
+
+// El prospecto manda los módulos que eligió en /presentacion/precios: un correo interno a onboarding, nunca a él.
+const priceSelectionSchema = z.object({
+  body: z
+    .object({
+      nombre: z.string().trim().max(80, 'El nombre es muy largo').optional(),
+      telefono: z
+        .string()
+        .trim()
+        .max(20, 'El teléfono es muy largo')
+        .regex(/^[0-9+\s()-]*$/, 'Teléfono inválido')
+        .optional(),
+      ids: z
+        .array(z.string().max(64), { invalid_type_error: 'Elige al menos un módulo' })
+        .min(1, 'Elige al menos un módulo')
+        .max(50, 'Son demasiados módulos'),
+      pageUri: paginaSchema,
+    })
+    .refine(body => !!body.nombre || !!body.telefono, { message: 'Escribe tu nombre o tu teléfono', path: ['nombre'] }),
+})
+router.post('/price-list/selection', writeLimit, validateRequest(priceSelectionSchema), postPriceSelection)
 
 // ---- Alta con código (landing): verificar el código de 6 dígitos + crear contraseña, y reenviar ----
 // Con ALTA_LANDING_CON_CODIGO apagado las dos rutas responden 404 (antes de gastar ningún límite).

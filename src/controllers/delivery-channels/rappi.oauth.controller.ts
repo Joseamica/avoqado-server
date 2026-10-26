@@ -265,7 +265,16 @@ export const rappiOAuthCallback = publica('Falló la conexión', async (req, res
   }
   if (!tiendas.length) {
     await fallar(intent.id, 'RAPPI_SIN_TIENDAS')
-    res.status(200).send(page('Autorizado, pero sin tiendas', '<p>Rappi no devolvió ninguna tienda para esta cuenta.</p>'))
+    // D7 (26-oct): Rappi DEV devolvió la lista vacía ~30 min con la cuenta correcta y luego completa, sin cambio nuestro.
+    res
+      .status(200)
+      .send(
+        page(
+          'Autorizado, pero sin tiendas',
+          '<p>Rappi no devolvió ninguna tienda para esta cuenta. Revisa que entraste con la cuenta de Rappi Partners dueña de la tienda.</p>' +
+            `<p>Si es la correcta, puede ser una falla momentánea de Rappi: espera unos minutos. ${PIDE_OTRO}</p>`,
+        ),
+      )
     return
   }
   const reconectar = await reconectables(intent, tiendas)

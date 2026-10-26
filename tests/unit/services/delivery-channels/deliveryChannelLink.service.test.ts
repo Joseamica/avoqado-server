@@ -820,7 +820,7 @@ describe('deliveryChannelLink.service', () => {
 
       expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
         where: { id: 'link1', venueId: 'venue1' },
-        select: { status: true, snoozedUntil: true, provider: true },
+        select: { status: true, snoozedUntil: true, provider: true, config: true },
       })
       expect(getAdapter).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
@@ -869,7 +869,7 @@ describe('deliveryChannelLink.service', () => {
 
       expect(prisma.deliveryChannelLink.findFirst).toHaveBeenCalledWith({
         where: { id: 'link1', venueId: 'venue-otro' },
-        select: { status: true, snoozedUntil: true, provider: true },
+        select: { status: true, snoozedUntil: true, provider: true, config: true },
       })
       expect(getAdapter).not.toHaveBeenCalled()
       expect(logAction).not.toHaveBeenCalled()
@@ -1084,8 +1084,72 @@ describe('deliveryChannelLink.service', () => {
 
       const r = await reanudarSnoozesVencidos()
 
-      expect(r).toEqual({ reanudados: 0, fallidos: 1 })
+      expect(r).toEqual({ reanudados: 0, fallidos: 1, noReabiertos: 0 })
       expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    // Regla de capacidad: el barrido de cada minuto nunca carga todos los canales.
+    it('lee por páginas con tope y en orden de id', async () => {
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([])
+      await reanudarSnoozesVencidos()
+      const q = (prisma.deliveryChannelLink.findMany as jest.Mock).mock.calls[0][0]
+      expect(q.take).toBe(100)
+      expect(q.orderBy).toEqual({ id: 'asc' })
+    })
+
+    // Codex r2 (código): con un tope fijo, cien canales que fallan siempre le quitaban el turno al 101 para siempre.
+    it('🔴 una página llena de canales que fallan no deja sin turno a los siguientes: se sigue con la próxima página', async () => {
+      const pagina = Array.from({ length: 100 }, (_, i) => ({
+        id: `l${String(i).padStart(3, '0')}`,
+        venueId: 'v',
+        provider: DeliveryProvider.UBER_EATS,
+      }))
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock)
+        .mockResolvedValueOnce(pagina)
+        .mockResolvedValueOnce([{ id: 'l100', venueId: 'v', provider: DeliveryProvider.UBER_EATS }])
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue(null) // cada canal falla (NotFound)
+
+      const r = await reanudarSnoozesVencidos()
+
+      expect(prisma.deliveryChannelLink.findMany).toHaveBeenCalledTimes(2)
+      expect((prisma.deliveryChannelLink.findMany as jest.Mock).mock.calls[1][0].where.id).toEqual({ gt: 'l099' })
+      expect(r.fallidos).toBe(101)
+    })
+
+    // D4 (26-oct): Rappi avisó que la tienda se cerró de SU lado. La pausa del POS que vence ya no la reabre: queda pausada
+    // sin fecha, y se dice por qué.
+    it('🔴 la tienda cerrada desde el proveedor NO se reabre: se le quita el reloj, sin llamarle al proveedor', async () => {
+      const vencio = new Date(Date.now() - 60_000)
+      const setStoreStatus = jest.fn()
+      ;(hasAdapter as jest.Mock).mockReturnValue(true)
+      ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus })
+      ;(prisma.deliveryChannelLink.findMany as jest.Mock).mockResolvedValue([{ id: 'l1', venueId: 'v1', provider: DeliveryProvider.RAPPI }])
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider: DeliveryProvider.RAPPI,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: vencio,
+        config: { cerradaEnElProveedor: { desde: '2026-10-26T18:00:00.000Z' } },
+      })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({
+        ...baseLink,
+        provider: DeliveryProvider.RAPPI,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: null,
+      })
+
+      const r = await reanudarSnoozesVencidos()
+
+      expect(r).toEqual({ reanudados: 0, fallidos: 0, noReabiertos: 1 })
+      expect(setStoreStatus).not.toHaveBeenCalled()
+      expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledTimes(1)
+      expect(prisma.deliveryChannelLink.updateMany).toHaveBeenCalledWith({
+        where: { id: 'l1', venueId: 'v1', status: DeliveryChannelStatus.PAUSED, snoozedUntil: vencio },
+        data: { snoozedUntil: null },
+      })
+      expect(logAction).toHaveBeenCalledWith(
+        expect.objectContaining({ staffId: null, action: 'DELIVERY_CHANNEL_SNOOZE_NO_REABIERTO', entityId: 'l1' }),
+      )
     })
   })
 
@@ -1123,6 +1187,83 @@ describe('deliveryChannelLink.service', () => {
 
       await expect(cancelarSnooze('venue-otro', 'link1')).rejects.toThrow(NotFoundError)
       expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+
+    // D4 (Codex r3 #5): lo que se cerró desde el proveedor lo reabre quien administra el negocio, desde el panel. El POS lo dice
+    // así, con o sin reloj (el job ya se lo quitó, o todavía no vence), y no culpa al dashboard.
+    it.each([
+      ['sin reloj', null],
+      ['con reloj', new Date(Date.now() + 600_000)],
+    ])('🔴 la tienda cerrada desde el proveedor (%s): el POS no la reabre y dice por qué', async (_caso, snoozedUntil) => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider: DeliveryProvider.RAPPI,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil,
+        config: { cerradaEnElProveedor: { desde: 'x' } },
+      })
+
+      const p = cancelarSnooze('venue1', 'link1', 'staff1')
+      await expect(p).rejects.toThrow(ValidationError)
+      await expect(p).rejects.toThrow(/portal de la app de reparto/)
+      expect(prisma.deliveryChannelLink.updateMany).not.toHaveBeenCalled()
+    })
+  })
+
+  describe('reabrir desde el panel una tienda cerrada desde el proveedor (D4)', () => {
+    it('reabre y borra la nota, con la fila bloqueada', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider: DeliveryProvider.DELIVERECT,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: null,
+        config: { cerradaEnElProveedor: { desde: 'x' } },
+      })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.ACTIVE })
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        { config: { note: 'x', cerradaEnElProveedor: { desde: 'x' } }, lastMenuHash: null },
+      ])
+
+      await pauseChannelLink('venue1', 'link1', false, 'staff1')
+
+      expect(prisma.deliveryChannelLink.update).toHaveBeenCalledWith({
+        where: { id: 'link1' },
+        data: { config: { note: 'x', cerradaEnElProveedor: null } },
+      })
+    })
+
+    // Codex r2 (código): un cierre NUEVO que llega mientras el panel reabre no se borra: sólo la nota que había al empezar.
+    it('un cierre nuevo que llegó mientras se reabría NO se borra', async () => {
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider: DeliveryProvider.DELIVERECT,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: null,
+        config: { cerradaEnElProveedor: { desde: '2026-10-26T18:00:00.000Z' } },
+      })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, status: DeliveryChannelStatus.ACTIVE })
+      ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([
+        { config: { cerradaEnElProveedor: { desde: '2026-10-26T18:05:00.000Z' } }, lastMenuHash: null },
+      ])
+
+      await pauseChannelLink('venue1', 'link1', false, 'staff1')
+
+      expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
+    })
+
+    it('si el proveedor no acepta reabrir, la nota se queda', async () => {
+      ;(hasAdapter as jest.Mock).mockReturnValue(true)
+      ;(adapterFor as jest.Mock).mockReturnValue({ setStoreStatus: jest.fn().mockResolvedValue({ ok: false, status: 500, raw: '' }) })
+      ;(prisma.deliveryChannelLink.findFirst as jest.Mock).mockResolvedValue({
+        provider: DeliveryProvider.RAPPI,
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: null,
+        config: { cerradaEnElProveedor: { desde: 'x' } },
+      })
+      ;(prisma.deliveryChannelLink.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+      ;(prisma.deliveryChannelLink.findUnique as jest.Mock).mockResolvedValue({ ...baseLink, provider: DeliveryProvider.RAPPI })
+
+      await expect(pauseChannelLink('venue1', 'link1', false, 'staff1')).rejects.toThrow(ConflictError)
+      expect(prisma.deliveryChannelLink.update).not.toHaveBeenCalled()
     })
   })
 

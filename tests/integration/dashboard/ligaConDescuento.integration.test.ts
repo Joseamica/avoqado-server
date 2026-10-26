@@ -15,8 +15,10 @@ import {
   completeCharge,
   finalizeMercadoPagoCheckout,
   finalizePaymentLinkCheckout,
+  getSessionStatus,
   sendPaymentLinkReceiptEmail,
 } from '@/services/dashboard/paymentLink.service'
+import { ticketTotalsDelSnapshot } from '@/services/shared/ticketTotals'
 import { loadOrderForCfdiFromDb } from '@/services/fiscal/cfdi.service'
 import { ORDER_SELECT, ticketParaGlobal } from '@/services/fiscal/cfdiGlobal.service'
 import logger from '@/config/logger'
@@ -302,6 +304,53 @@ describe('T6 · la venta de una liga con descuento guarda su descuento', () => {
       expect([datos.subtotal, datos.discountAmount, datos.tipAmount, datos.totalAmount]).toEqual([1000, 150, 50, 900])
     } finally {
       enviar.mockRestore()
+    }
+  })
+
+  it('🔴 D7 Mercado Pago: el estado da el recibo de Avoqado, el mismo en cada consulta, con lo cobrado (1000 − 150 + 50)', async () => {
+    const antes = process.env.FRONTEND_URL
+    process.env.FRONTEND_URL = 'https://dashboard.test'
+    const avisos = jest.spyOn(logger, 'warn')
+    try {
+      const { orden, liga, sessionId } = await ligaPagada('mercadopago', { productos: false, descuento: true })
+      // En Mercado Pago la sesión la marca COMPLETED el cobro (`executeMercadoPagoPaymentForPaymentLink`) o su aviso, no el finalizador.
+      await prisma.checkoutSession.update({ where: { sessionId }, data: { status: 'COMPLETED', completedAt: new Date() } })
+      // Dos pestañas a la vez la primera vez (Codex r1 #2): el candado del pago les da el mismo recibo.
+      const [primera, segunda] = await Promise.all([getSessionStatus(liga.shortCode, sessionId), getSessionStatus(liga.shortCode, sessionId)])
+      const tercera = await getSessionStatus(liga.shortCode, sessionId)
+
+      // Si el generador falla, el estado lo traga (no tumba la página): aquí se exige que no haya fallado, con su motivo.
+      expect(avisos.mock.calls.filter(c => String(c[0]).includes('recibo de Avoqado'))).toEqual([])
+      expect([primera.status, primera.payment === null]).toEqual(['COMPLETED', false])
+      const recibos = await prisma.digitalReceipt.findMany({ where: { paymentId: orden.payments[0].id } })
+      expect(recibos).toHaveLength(1)
+      expect(primera.payment?.receiptUrl).toBe(`https://dashboard.test/receipts/public/${recibos[0].accessKey}`)
+      expect([segunda.payment?.receiptUrl, tercera.payment?.receiptUrl]).toEqual([primera.payment?.receiptUrl, primera.payment?.receiptUrl])
+      const t = ticketTotalsDelSnapshot(recibos[0].dataSnapshot)
+      expect([t?.subtotal, t?.discount, t?.tip, t?.total]).toEqual([1000, 150, 50, 900])
+      // Codex r1 #1: la venta quedó ligada a Ana por su correo, sin verificar; el recibo público no lleva sus datos.
+      expect(orden.customerId).toBeTruthy()
+      expect((recibos[0].dataSnapshot as { customer?: unknown }).customer).toBeUndefined()
+      expect(JSON.stringify(recibos[0].dataSnapshot)).not.toContain(w.emailCliente)
+    } finally {
+      avisos.mockRestore()
+      process.env.FRONTEND_URL = antes
+    }
+  })
+
+  it('🔴 D7 Blumon: la sesión apunta a su pago y el estado da el recibo de Avoqado', async () => {
+    const antes = process.env.FRONTEND_URL
+    process.env.FRONTEND_URL = 'https://dashboard.test'
+    try {
+      const { orden, liga, sessionId } = await ligaPagada('blumon', { productos: false, descuento: true })
+      const sesion = await prisma.checkoutSession.findUniqueOrThrow({ where: { sessionId }, select: { paymentId: true } })
+      expect(sesion.paymentId).toBe(orden.payments[0].id)
+
+      const r = await getSessionStatus(liga.shortCode, sessionId)
+      const recibo = await prisma.digitalReceipt.findFirstOrThrow({ where: { paymentId: orden.payments[0].id } })
+      expect(r.payment?.receiptUrl).toBe(`https://dashboard.test/receipts/public/${recibo.accessKey}`)
+    } finally {
+      process.env.FRONTEND_URL = antes
     }
   })
 

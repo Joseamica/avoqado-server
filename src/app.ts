@@ -20,7 +20,8 @@ import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
-import AppError, { BadRequestError, ConflictError } from './errors/AppError'
+import AppError, { BadRequestError, ConflictError, ServiceUnavailableError } from './errors/AppError'
+import { OrderTableTopologyChanged } from './services/shared/tableOrderLock'
 import { GiftCardError } from './services/giftCards/giftCardErrors'
 import {
   AFILIACION_EN_VARIOS_SLOTS,
@@ -467,6 +468,13 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
   // duros de demo quitan antes las órdenes); si una futura llega, responde 409 con su mensaje, nunca un 500 anónimo.
   if (esProductoConVentas(err)) {
     err = new ConflictError(MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  }
+
+  // D9 (26-oct): la cuenta o la mesa cambiaron en el mismo instante (`lockTableOrderScope`); se resuelve reintentando. Por las
+  // rutas sin protocolo de operación salía 500 anónimo. 503 y no 409: las apps ya tratan un 5xx/503 como «reintenta» o lo
+  // encolan, y un 409 haría rendirse a la cancelación durable de ANDROID. Sin `Retry-After` (OkHttp reenvía solo con 0).
+  if (err instanceof OrderTableTopologyChanged) {
+    err = new ServiceUnavailableError('La cuenta o la mesa cambiaron en ese mismo momento. Intenta de nuevo.', 'ORDER_TABLE_TOPOLOGY_CHANGED')
   }
 
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }

@@ -11,7 +11,7 @@ import { descargarAppHtml, descargarAppTexto } from '../../services/emailDescarg
 
 // El aviso del prospecto va SÓLO a onboarding (founder, 18-oct-2026): hola@ y onboarding@ son alias del mismo buzón, y
 // mandar una copia a cada uno le llegaba doble. Antes iba a los dos (founder, 2026-08-17).
-const ONBOARDING_NOTIFY_EMAIL = process.env.ONBOARDING_NOTIFY_EMAIL || 'onboarding@avoqado.io'
+export const ONBOARDING_NOTIFY_EMAIL = process.env.ONBOARDING_NOTIFY_EMAIL || 'onboarding@avoqado.io'
 const LABS_NOTIFY_EMAIL = process.env.LABS_NOTIFY_EMAIL || 'hola@avoqado.io'
 
 const projectLabel: Record<string, string> = {
@@ -130,7 +130,7 @@ const MODULOS: Record<string, { label: string; beneficio: string }> = {
  * pide el formulario. Un numero que ya trae lada se respeta: nunca se le
  * anteponen dos ladas a un extranjero.
  */
-function telefonoParaWhatsApp(raw: unknown): string {
+export function telefonoParaWhatsApp(raw: unknown): string {
   const d = String(raw ?? '').replace(/\D/g, '')
   if (!d) return ''
   if (d.length === 10) return `52${d}` // celular mexicano tal como lo pide la landing
