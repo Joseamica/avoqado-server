@@ -32,14 +32,17 @@ const scope: McpScope = {
 function tool(connection = scope) {
   let schema: z.ZodObject<z.ZodRawShape>
   let handler: (args: any) => Promise<any>
+  let description: string
   const server = {
-    tool: (_name: string, _description: string, shape: z.ZodRawShape, callback: typeof handler) => {
+    tool: (_name: string, toolDescription: string, shape: z.ZodRawShape, callback: typeof handler) => {
       schema = z.object(shape)
       handler = callback
+      description = toolDescription
     },
   } as never
   registerExchangeTools(server, connection)
   return {
+    description: description!,
     call: async (input: Record<string, unknown> = {}) => JSON.parse((await handler(schema.parse({ venueId, ...input }))).content[0].text),
   }
 }
@@ -52,6 +55,67 @@ beforeEach(() => {
 })
 
 describe('list_exchanges', () => {
+  it.each([
+    ['PENDING_PAYMENT', 30.25],
+    ['CANCELLED', null],
+    ['NEEDS_REVIEW', null],
+    ['COMPLETED', null],
+    ['COMPLETED_PENDING_CARD_REFUND', null],
+  ])('filters %s and exposes an amount due only for pending payment', async (status, amountDue) => {
+    mockCount.mockResolvedValue(1)
+    mockFind.mockResolvedValue([
+      {
+        status,
+        createdAt: new Date('2026-10-02T07:30:00Z'),
+        returnedAmount: new Prisma.Decimal('120.25'),
+        takenAmount: new Prisma.Decimal('150.50'),
+        differenceAmount: new Prisma.Decimal('30.25'),
+        settlementKind: 'COLLECT',
+        settlementMethod: 'CARD_TERMINAL',
+        chargePaymentId: null,
+        reviewReason: null,
+      },
+    ])
+    const output = await tool().call({ status })
+    expect(mockFind.mock.calls[0][0].where.status).toBe(status)
+    expect(mockCount.mock.calls[0][0].where).toEqual(mockFind.mock.calls[0][0].where)
+    expect(output.cambios).toEqual([expect.objectContaining({ estado: status, porCobrar: amountDue })])
+  })
+
+  it.each([
+    ['cm82345678901234567890123', 'LATE_CHARGE_AFTER_CANCEL'],
+    [null, null],
+    [undefined, undefined],
+  ])('exposes the terminal charge %s and review reason %s, or null when absent', async (chargePaymentId, reviewReason) => {
+    mockFind.mockResolvedValue([
+      {
+        status: 'NEEDS_REVIEW',
+        createdAt: new Date('2026-10-02T07:30:00Z'),
+        returnedAmount: new Prisma.Decimal('120.25'),
+        takenAmount: new Prisma.Decimal('150.50'),
+        differenceAmount: new Prisma.Decimal('30.25'),
+        settlementKind: 'COLLECT',
+        settlementMethod: 'CARD_TERMINAL',
+        chargePaymentId,
+        reviewReason,
+      },
+    ])
+    const output = await tool().call()
+    expect(mockFind.mock.calls[0][0].select).toMatchObject({ chargePaymentId: true, reviewReason: true })
+    expect(output.cambios).toEqual([
+      expect.objectContaining({ cobroDeLaTerminal: chargePaymentId ?? null, motivoDeRevision: reviewReason ?? null, porCobrar: null }),
+    ])
+  })
+
+  it('describes cancellation, amount due, terminal charge and review reason without model, table or route names', () => {
+    const { description } = tool()
+    expect(description).toMatch(/CANCELLED\s*\(cancelado\)/)
+    expect(description).toMatch(/por cobrar/i)
+    expect(description).toMatch(/cobro de la terminal/i)
+    expect(description).toMatch(/motivo de revisi[oó]n/i)
+    expect(description).not.toMatch(/\bExchange\b|\bPayment\b|\bPrisma\b|\btabla\b|src\/|\/api\/|\/mcp\b/)
+  })
+
   it('clamps limit 500 to 100, uses skip/take, and count uses the same where as findMany', async () => {
     await tool().call({ limit: 500, offset: 100 })
     expect(mockFind).toHaveBeenCalledWith(expect.objectContaining({ take: 100, skip: 100 }))
@@ -107,6 +171,9 @@ describe('list_exchanges', () => {
           regresa: 150.5,
           seLleva: 120.25,
           diferencia: -30.25,
+          porCobrar: null,
+          cobroDeLaTerminal: null,
+          motivoDeRevision: null,
           liquidacion: { tipo: 'PAYOUT', medio: 'CASH' },
           hizo: scope.staffId,
         },

@@ -13,7 +13,7 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
   const guard = createGuard(scope)
   server.tool(
     'list_exchanges',
-    'Consulta los cambios de talla o producto de una sucursal: venta original, venta nueva, importe que regresa, importe que se lleva, diferencia y cómo se liquida. Montos en pesos. Filtra por fechas locales y estado, incluido NEEDS_REVIEW (por revisar). Sin fechas consulta los últimos 7 días. Devuelve el total y siguienteOffset para recorrer todas las páginas; 25 cambios por defecto y máximo 100 por página. Requiere permiso para consultar pagos. Sólo lectura.',
+    'Consulta los cambios de talla o producto de una sucursal: venta original, venta nueva, importe que regresa, importe que se lleva, diferencia y cómo se liquida. Incluye el importe por cobrar sólo en PENDING_PAYMENT (pendiente de pago), el identificador del cobro de la terminal y el motivo de revisión; si no corresponden, devuelve null. Montos en pesos. Filtra por fechas locales y estado, incluidos NEEDS_REVIEW (por revisar) y CANCELLED (cancelado). Sin fechas consulta los últimos 7 días. Devuelve el total y siguienteOffset para recorrer todas las páginas; 25 cambios por defecto y máximo 100 por página. Requiere permiso para consultar pagos. Sólo lectura.',
     {
       venueId: z
         .string({ required_error: 'Indica la sucursal', invalid_type_error: 'La sucursal debe ser texto' })
@@ -65,6 +65,8 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
             returnedAmount: true,
             takenAmount: true,
             differenceAmount: true,
+            chargePaymentId: true,
+            reviewReason: true,
             settlementKind: true,
             settlementMethod: true,
             staffId: true,
@@ -91,6 +93,9 @@ export function registerExchangeTools(server: McpServer, scope: McpScope): void 
           regresa: Number(exchange.returnedAmount),
           seLleva: Number(exchange.takenAmount),
           diferencia: Number(exchange.differenceAmount),
+          porCobrar: exchange.status === ExchangeStatus.PENDING_PAYMENT ? Number(exchange.differenceAmount) : null,
+          cobroDeLaTerminal: exchange.chargePaymentId ?? null,
+          motivoDeRevision: exchange.reviewReason ?? null,
           liquidacion: { tipo: exchange.settlementKind, medio: exchange.settlementMethod },
           hizo: exchange.staffId,
         })),
