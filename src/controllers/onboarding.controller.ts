@@ -787,6 +787,12 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
       throw new NotFoundError('Onboarding progress not found')
     }
 
+    // 🔴 D8 (26-oct): este carril no tiene paso de plan. Un alta del asistente nuevo, o cualquiera con el plan obligatorio,
+    // terminaba aquí sin plan ni tarjeta (armando step/2, step/3 y complete a mano) y el POS la dejaba entrar.
+    if (progress.wizardVersion === 2 || requiresBaseSubscriptionPlan()) {
+      throw new BadRequestError('Termina tu alta en dashboard.avoqado.io/setup: ahí eliges tu plan.', 'ALTA_EN_SETUP')
+    }
+
     // Validate required steps completed
     if (!progress.step2_onboardingType) {
       throw new BadRequestError('Step 2 (Onboarding Type) must be completed')
