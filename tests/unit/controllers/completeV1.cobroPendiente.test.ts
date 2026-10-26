@@ -144,3 +144,54 @@ describe('completeOnboarding (V1) con un cobro del alta sin cerrar', () => {
     expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 409, code: 'PLAN_ACTIVATION_IN_PROGRESS' }))
   })
 })
+
+/**
+ * 🔴 D8 (26-oct): el carril viejo no pide plan. Un alta del asistente nuevo (o cualquiera con el plan obligatorio) que
+ * llegara aquí armando las peticiones a mano terminaba sin plan ni tarjeta, y entonces el POS la dejaba entrar (D7).
+ */
+describe('completeOnboarding (V1) no termina un alta que debe elegir plan', () => {
+  const banderaAntes = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 1 })
+    ;(createVenueFromOnboarding as jest.Mock).mockResolvedValue({ venue: { id: 'venue_1', slug: 'bar', name: 'Bar' } })
+  })
+  afterEach(() => {
+    if (banderaAntes === undefined) delete process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
+    else process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = banderaAntes
+  })
+
+  it.each(['true', 'false'])('alta del asistente nuevo (v2), plan obligatorio=%s: 400 ALTA_EN_SETUP sin candado ni negocio', async bandera => {
+    process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = bandera
+    progreso({ wizardVersion: 2 })
+    const next = jest.fn()
+
+    await completeOnboarding(req, res, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, code: 'ALTA_EN_SETUP' }))
+    expect(prisma.onboardingProgress.updateMany).not.toHaveBeenCalled()
+    expect(createVenueFromOnboarding).not.toHaveBeenCalled()
+  })
+
+  it('alta v1 con el plan obligatorio: también 400 (el asistente viejo no tiene paso de plan)', async () => {
+    process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
+    progreso({ wizardVersion: 1 })
+    const next = jest.fn()
+
+    await completeOnboarding(req, res, next)
+
+    expect(next).toHaveBeenCalledWith(expect.objectContaining({ statusCode: 400, code: 'ALTA_EN_SETUP' }))
+    expect(createVenueFromOnboarding).not.toHaveBeenCalled()
+  })
+
+  it('alta v1 sin plan obligatorio: sigue igual que hoy', async () => {
+    delete process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
+    progreso({ wizardVersion: 1 })
+    const next = jest.fn()
+
+    await completeOnboarding(req, res, next)
+
+    expect(next).not.toHaveBeenCalled()
+    expect(createVenueFromOnboarding).toHaveBeenCalledTimes(1)
+  })
+})
