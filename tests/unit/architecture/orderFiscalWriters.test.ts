@@ -627,8 +627,15 @@ const WRITERS: Record<string, Writer> = {
   },
   'src/services/tpv/payment.tpv.service.ts#settleStandalonePaymentInTx': {
     class: 'CALLER_LOCKED',
-    callers: ['src/services/tpv/payment.tpv.service.ts#recordOrderPayment'],
-    proof: PAYMENT_LANE('recordOrderPayment'),
+    callers: ['src/services/tpv/payment.tpv.service.ts#recordOrderPayment', 'src/services/exchanges/exchangeTx.ts#finishExchangeInTx'],
+    proof: [
+      ...PAYMENT_LANE('recordOrderPayment'),
+      ...proof(
+        'tests/integration/exchanges/exchangeCardSettle.integration.test.ts',
+        'settleStandalonePaymentInTx',
+        'recovers the pending SALE posting of an already paid R=0 order without another charge or deduction',
+      ),
+    ],
   },
   'src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment': {
     class: 'LOCKED',
@@ -747,6 +754,8 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   ],
   'src/services/mobile/kdsOutOfStock.mobile.service.ts#enviarYAplicar': ['withDeliveryOrderLock(', ...LOCK],
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': LOCK,
+  // C06/C09: prepared by the single exchange opener below; inherits its complete Order union before Payment/Shift.
+  'src/services/exchanges/exchangeTx.ts#finishExchangeInTx': ['const p = prepared', 'if (cardOnly)', 'p.existingCharge!'],
   // B2c T5: abrir el vale crea la orden en la MISMA transacción (creación privada, nadie más la ve) y ahí le escribe sus espejos.
   'src/services/mobile/areaTicket.mobile.service.ts#openAreaTicket': ['.order.create('],
 }
@@ -780,8 +789,8 @@ const CANCEL = (marker: string) => ({
 const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
   'src/services/exchanges/exchangeTx.ts#finishExchangeInTx': {
     class: 'METADATA',
-    why: 'aligns shiftId of the private exchange order with its settled payments; no money or fiscal content changes',
-    markers: ['shiftId: settled.at(-1)!.newPayment.shiftId ?? null'],
+    why: 'aligns shiftId with the last EC or existing card charge (R=0); the fiscal write delegates to the caller-locked settlement',
+    markers: ['const lastPayment = settled.at(-1)?.newPayment ?? p.existingCharge!', 'shiftId: lastPayment.shiftId ?? null'],
   },
   'src/services/tpv/order.tpv.service.ts#updateGuestInfo': {
     class: 'METADATA',
@@ -1026,6 +1035,40 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       expect({ file: p.file, mentions: p.mentions, found: text.includes(p.mentions) }).toMatchObject({ found: true })
     },
   )
+
+  it('C06/C09/C13 exchange recovery delegates to one budgeted opener and inherits its Order union', () => {
+    const opener = 'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction'
+    const finish = 'src/services/exchanges/exchangeTx.ts#finishExchangeInTx'
+    expect([...new Set(calls.filter(c => c.callee === 'finishExchangeInTx').map(c => c.owner))]).toEqual([opener])
+    const body = codeOf(opener)
+    expect(body.indexOf('await prepareExchangeInTx(tx, input)')).toBeLessThan(body.indexOf('await registrarAbonoEnTx('))
+    expect(body.indexOf('await registrarAbonoEnTx(')).toBeLessThan(body.indexOf('finishExchangeInTx(tx, prepared, settled)'))
+    expect(body).toContain('ORDER_LOCK_WAIT_BUDGET')
+    expect(codeOf('src/services/exchanges/exchangeTx.ts#prepareExchangeInTx')).toMatch(
+      /if \('mode' in input\)\s+return prepareCardSettlementInTx\(tx, input\)/,
+    )
+    const prepare = codeOf('src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx')
+    expect(prepare.indexOf('pg_advisory_xact_lock')).toBeLessThan(prepare.indexOf('lockExistingOrderForPayment('))
+    expect(prepare).toContain('additionalOrderIds: [initial.originalOrderId]')
+    expect(prepare.indexOf('lockExistingOrderForPayment(')).toBeLessThan(prepare.indexOf('exchangeChargeEvidence('))
+    expect(prepare).toContain('ORDER BY id ASC FOR UPDATE')
+    expect(codeOf(finish)).toContain('settleStandalonePaymentInTx(tx, venueId, p.newOrder.id, p.existingCharge!')
+    const sweep = codeOf('src/jobs/exchange-card-settlement.job.ts#ExchangeCardSettlementJob.run')
+    // The sweep owns no transaction: each candidate waits on the settle/cancel opener's ORDER_LOCK_WAIT_BUDGET.
+    expect(sweep).not.toContain('$transaction(')
+    expect(sweep).toContain('await settleExchangeCharge(')
+    expect(sweep).toContain('await cancelExchange(')
+    expect(codeOf('src/services/exchanges/exchange.service.ts#settleExchangeCharge')).toContain('await executeExchangeInTransaction(')
+  })
+
+  it('C05 reads the late-charge policy after Order, without taking an exchange advisory behind it', () => {
+    const body = codeOf('src/services/tpv/payment.tpv.service.ts#recordOrderPayment')
+    expect(body.indexOf('lockExistingOrderForPayment(')).toBeLessThan(body.indexOf('SAVEPOINT exchange_sale_policy'))
+    expect(body.indexOf('SAVEPOINT exchange_sale_policy')).toBeLessThan(body.indexOf('tx.exchange.findUnique('))
+    expect(body).not.toContain('pg_advisory_xact_lock')
+    expect(body).toContain('ROLLBACK TO SAVEPOINT exchange_sale_policy')
+    expect(body).toContain('suppressExchangeSaleEffects = true')
+  })
 })
 
 describe('documentary capture dependencies (what the frozen entry reads, and what protects it)', () => {
@@ -1118,6 +1161,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': 1,
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': 1,
   'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction': 1,
+  // C06: exchange advisory → kitchen/topology → new Order; charged evidence rolls back before the separate settle opener.
+  'src/services/exchanges/exchange.service.ts#cancelExchange': 1,
   'src/services/mobile/order.mobile.service.ts#updateOrderDetails': 1,
   'src/services/mobile/order.mobile.service.ts#applyOrderDiscount': 1,
   'src/services/mobile/order.mobile.service.ts#removeOrderDiscount': 1,

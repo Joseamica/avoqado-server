@@ -163,7 +163,7 @@
     "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx": {
       "count": 1,
       "loops": 0,
-      "reason": "C06: advisory then Venue and the full new/original/ancestor Order union; credit/root/charge Payments are claimed once by id ASC before snapshots and Shift. PostgreSQL exchangeCardLockOrder exercises CHAIN/direct refunds and terminal registration."
+      "reason": "C06: executeExchangeInTransaction owns ORDER_LOCK_WAIT_BUDGET. Advisory then Venue KEY SHARE and all new/original/ancestor Orders by createdAt DESC/id DESC; credit/root/charge Payments once by id ASC before snapshots and Shift. finishExchangeInTx inherits these locks; the sweep delegates here, never opens a transaction. PostgreSQL exchangeCardLockOrder covers CHAIN/direct refunds and terminal registration."
     }
   },
   "callers": {
@@ -1050,7 +1050,7 @@
     "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "C06: one canonical union seeded with new + original and their ancestors, before evidence or any Payment/Shift; changed scope rolls back and retries."
+      "reason": "C06: one canonical union seeded with scalar new Order plus distinct original extras and ancestors, before evidence or Payment/Shift; no duplicate venue rows. Scope is capped before any row lock, then reread; changed scope rolls back and retries under executeExchangeInTransaction's ORDER_LOCK_WAIT_BUDGET."
     },
     "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#bloquearCobroParaReembolso": {
       "count": 1,
@@ -1065,7 +1065,7 @@
     "src/services/exchanges/exchange.service.ts#cancelExchange#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "C06 task6: only an already CANCELLED/DELETED new Order; exchange advisory first, canonical Order ancestry next, evidence and release CAS under Order. No original Orders or Payment/Shift locks are acquired afterwards; PostgreSQL cancel/terminal barriers cover both winners."
+      "reason": "C06 task6: cancelExchange opens with ORDER_LOCK_WAIT_BUDGET, including calls from the sweep. Only an already CANCELLED/DELETED new Order uses this direct path: exchange advisory then canonical Order ancestry, evidence and release CAS under Order. The live path takes kitchen/topology then Order through cancelOrderInTransaction. No later original Order/Payment/Shift claims; CHARGED rolls back before a separate settle opener. PostgreSQL cancel/terminal barriers cover both winners."
     }
   }
 }

@@ -41,6 +41,8 @@ function funciones(archivo: string): Map<string, string> {
 const SITIOS: Array<[string, string, string]> = [
   ['services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'createSalePostingInTx('],
   ['services/tpv/payment.tpv.service.ts', 'settleStandalonePaymentInTx', 'createSalePostingInTx('],
+  // C09: recovery/review uses the existing charge under the exchange opener's Order lock and transaction budget.
+  ['services/exchanges/exchangeSettle.ts', 'exchangeSalePostingInTx', 'createSalePostingInTx('],
   ['services/tpv/payment.tpv.service.ts', 'updateOrderTotalsForStandalonePayment', 'createSalePostingInTx('],
   ['services/b4bit/b4bit.service.ts', 'settleOrderForConfirmedCryptoPayment', 'crearValeDeInventario('],
   ['services/dashboard/customer.dashboard.service.ts', 'settleCustomerBalance', 'createSalePostingInTx('],

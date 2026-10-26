@@ -5,6 +5,7 @@ import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
 import { assertRefundableLines, assertPromotionLineFullQuantity, bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
 import { createSalePostingInTx } from '../inventory/inventoryPosting.service'
+import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { exchangeChargeEvidence } from './exchangeCharge'
 import { exchangeAccountingAt } from './exchangeAccountingAt'
 import { loadSaleForExchange, MAX_EXCHANGE_SALE_PAYMENTS } from './exchangeSale'
@@ -32,7 +33,9 @@ export async function exchangeSalePostingInTx(tx: Prisma.TransactionClient, venu
     include: { modifiers: { include: { modifier: true } } },
   })
   if (items.length > TOPES_POR_ORDEN.renglones) throw new Error('EXCHANGE_SALE_TOO_LARGE')
-  return createSalePostingInTx(tx, { venueId, orderId, items, staffId })
+  const posting = await createSalePostingInTx(tx, { venueId, orderId, items, staffId })
+  await activarSobresDeCuentaPagadaEnTx(tx, { venueId, orderId, staffId, items })
+  return posting
 }
 
 export async function prepareCardSettlementInTx(
