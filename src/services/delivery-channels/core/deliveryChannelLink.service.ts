@@ -25,7 +25,7 @@ import { logAction } from '../../dashboard/activity-log.service'
 import { adapterFor, hasAdapter } from './adapterRegistry'
 import { esHorarioValido } from './deliveryHours.service'
 import { calcularTasaInyeccion } from './injectionRate.service'
-import { configComoObjeto, LLAVES_DEL_SISTEMA } from './llavesDelSistema'
+import { cerradaEnElProveedor, configComoObjeto, escribirLlavesDelSistema, LLAVES_DEL_SISTEMA } from './llavesDelSistema'
 import { menuSyncStatusOf, revisionDeMenuOf } from './menuSync.service'
 import { getAdapter } from './statusDispatcher.service'
 
@@ -434,7 +434,7 @@ export async function pauseChannelLink(
   // cómo el dueño vuelve indefinida una pausa del POS.
   const previo = await prisma.deliveryChannelLink.findFirst({
     where: { id: linkId, venueId },
-    select: { status: true, snoozedUntil: true, provider: true },
+    select: { status: true, snoozedUntil: true, provider: true, config: true },
   })
   if (!previo) throw new NotFoundError('Canal de delivery no encontrado')
   const desde: DeliveryChannelStatus[] = paused
@@ -449,6 +449,13 @@ export async function pauseChannelLink(
     throw new ConflictError(`No se puede pausar un canal en estado ${previo.status}: sólo un canal activo se pausa.`)
   }
   if (!paused && soloSnooze) {
+    const cerrada = cerradaEnElProveedor(previo.config)
+    // D4: lo que se cerró desde el proveedor tampoco se reabre desde el POS (Codex r3 #5), con o sin reloj.
+    if (cerrada && soloSnooze === 'CUALQUIERA') {
+      throw new ValidationError(
+        'Esta tienda se cerró desde el portal de la app de reparto. Para volver a recibir pedidos, reábrela desde el dashboard o pídeselo a quien administra el negocio.',
+      )
+    }
     if (previo.snoozedUntil === null) {
       throw new ValidationError(
         'Este canal lo pausaron desde el dashboard, sin fecha de reactivación. Para volver a recibir pedidos, pídeselo a quien administra el negocio.',
@@ -457,6 +464,7 @@ export async function pauseChannelLink(
     if (soloSnooze === 'VENCIDO' && previo.snoozedUntil > new Date()) {
       throw new ConflictError('La pausa de este canal se extendió; se reanudará cuando venza.')
     }
+    if (cerrada) return dejarCerrada(venueId, linkId, previo)
   }
 
   // Resolver capacidad ANTES del CAS: sin adaptador nunca se simula una pausa local.
@@ -561,6 +569,16 @@ export async function pauseChannelLink(
     }
   }
 
+  // D4: reabrir desde el panel lo decidió una persona; la nota de «cerrada en el proveedor» ya cumplió. Sólo después de que el
+  // proveedor aceptó: si no, se lanzó arriba y la nota se queda.
+  // Sólo la nota que había al empezar: un cierre NUEVO que llegó mientras se reabría se queda (Codex r2 de código).
+  if (!paused && !soloSnooze && cerradaEnElProveedor(previo.config)) {
+    const nota = JSON.stringify(configComoObjeto(previo.config).cerradaEnElProveedor)
+    await escribirLlavesDelSistema(linkId, fila =>
+      JSON.stringify(fila.config.cerradaEnElProveedor) === nota ? { cerradaEnElProveedor: null } : null,
+    )
+  }
+
   void logAction({
     staffId: performedBy,
     venueId,
@@ -571,6 +589,39 @@ export async function pauseChannelLink(
   })
 
   const { webhookSecret: _webhookSecret, ...safeLink } = fullLink
+  return safeLink
+}
+
+/**
+ * D4: la pausa del POS venció, pero el proveedor avisó que la tienda se cerró de su lado: NO se reabre. Se le quita el reloj con
+ * el mismo CAS (queda pausada sin fecha, como la del dashboard) y la bitácora dice por qué. Sin llamarle al proveedor.
+ */
+async function dejarCerrada(
+  venueId: string,
+  linkId: string,
+  previo: { status: DeliveryChannelStatus; snoozedUntil: Date | null; provider: DeliveryProvider },
+): Promise<DeliveryChannelLinkSafe> {
+  const { count } = await prisma.deliveryChannelLink.updateMany({
+    where: { id: linkId, venueId, status: previo.status, snoozedUntil: previo.snoozedUntil },
+    data: { snoozedUntil: null },
+  })
+  if (count === 0) throw new ConflictError('El canal cambió mientras se procesaba la pausa. Recarga e inténtalo de nuevo.')
+  logger.error('🚨 [DeliveryChannel] venció la pausa del POS, pero la tienda se cerró desde el proveedor: queda pausada sin fecha', {
+    linkId,
+    venueId,
+    provider: previo.provider,
+  })
+  void logAction({
+    staffId: null, // nadie la reabrió: lo decidió el sistema por el aviso del proveedor
+    venueId,
+    action: 'DELIVERY_CHANNEL_SNOOZE_NO_REABIERTO',
+    entity: 'DeliveryChannelLink',
+    entityId: linkId,
+    data: { provider: previo.provider, snoozedUntil: previo.snoozedUntil?.toISOString() ?? null },
+  })
+  const link = await prisma.deliveryChannelLink.findUnique({ where: { id: linkId } })
+  if (!link) throw new NotFoundError('Canal de delivery no encontrado')
+  const { webhookSecret: _webhookSecret, ...safeLink } = link
   return safeLink
 }
 
@@ -649,6 +700,9 @@ export async function cancelarSnooze(venueId: string, linkId: string, performedB
   return pauseChannelLink(venueId, linkId, false, performedBy, 'CUALQUIERA')
 }
 
+/** Cuántos canales lee cada página del barrido de pausas vencidas. */
+const PAGINA_DE_PAUSAS = 100
+
 /**
  * Reactiva los canales cuyo reloj ya venció. Lo llama un job cada minuto.
  *
@@ -657,36 +711,54 @@ export async function cancelarSnooze(venueId: string, linkId: string, performedB
  * convierte una falla de uno en una falla de todos, y nadie se entera porque desde afuera
  * "la tienda está pausada" se ve igual que "la tienda no reanudó".
  */
-export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; fallidos: number }> {
-  const vencidos = await prisma.deliveryChannelLink.findMany({
-    where: { status: DeliveryChannelStatus.PAUSED, snoozedUntil: { lte: new Date() } },
-    select: { id: true, venueId: true, provider: true },
-  })
-
+export async function reanudarSnoozesVencidos(): Promise<{ reanudados: number; fallidos: number; noReabiertos: number }> {
+  const ahora = new Date()
   let reanudados = 0
   let fallidos = 0
+  let noReabiertos = 0
 
-  for (const canal of vencidos) {
-    try {
-      await pauseChannelLink(canal.venueId, canal.id, false, undefined, 'VENCIDO')
-      reanudados++
-      logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
-        linkId: canal.id,
-        venueId: canal.venueId,
-        provider: canal.provider,
-      })
-    } catch (error) {
-      fallidos++
-      // Se deja el reloj puesto para reintentar en el siguiente tick: borrarlo aquí
-      // dejaría el canal pausado PARA SIEMPRE, que es justo lo que esto evita.
-      logger.error('🚨 [DeliveryChannel] no se pudo reactivar un canal cuya pausa venció', {
-        linkId: canal.id,
-        venueId: canal.venueId,
-        provider: canal.provider,
-        error: error instanceof Error ? error.message : String(error),
-      })
+  // Por páginas (regla de capacidad): nunca se carga la lista entera, y una página llena de canales que fallan no le quita el
+  // turno a los siguientes (Codex r2 de código: con un tope fijo, el 101 no se intentaba nunca).
+  for (let despuesDe: string | undefined; ; ) {
+    const vencidos = await prisma.deliveryChannelLink.findMany({
+      where: {
+        status: DeliveryChannelStatus.PAUSED,
+        snoozedUntil: { lte: ahora },
+        ...(despuesDe ? { id: { gt: despuesDe } } : {}),
+      },
+      select: { id: true, venueId: true, provider: true },
+      orderBy: { id: 'asc' },
+      take: PAGINA_DE_PAUSAS,
+    })
+
+    for (const canal of vencidos) {
+      try {
+        const link = await pauseChannelLink(canal.venueId, canal.id, false, undefined, 'VENCIDO')
+        if (link.status === DeliveryChannelStatus.PAUSED) {
+          noReabiertos++ // D4: se cerró desde el proveedor (ya quedó en el log y en la bitácora)
+          continue
+        }
+        reanudados++
+        logger.info('⏰ [DeliveryChannel] se acabó la pausa: canal reactivado', {
+          linkId: canal.id,
+          venueId: canal.venueId,
+          provider: canal.provider,
+        })
+      } catch (error) {
+        fallidos++
+        // Se deja el reloj puesto para reintentar en el siguiente tick: borrarlo aquí
+        // dejaría el canal pausado PARA SIEMPRE, que es justo lo que esto evita.
+        logger.error('🚨 [DeliveryChannel] no se pudo reactivar un canal cuya pausa venció', {
+          linkId: canal.id,
+          venueId: canal.venueId,
+          provider: canal.provider,
+          error: error instanceof Error ? error.message : String(error),
+        })
+      }
     }
+    if (vencidos.length < PAGINA_DE_PAUSAS) break
+    despuesDe = vencidos[vencidos.length - 1].id
   }
 
-  return { reanudados, fallidos }
+  return { reanudados, fallidos, noReabiertos }
 }

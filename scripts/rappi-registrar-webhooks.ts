@@ -45,8 +45,8 @@ import {
   getRappiEnvironment,
   rappiApi,
   tiendasEscribiblesRappi,
+  tokenDeRappi,
 } from '../src/services/delivery-channels/providers/rappi/rappi.client'
-import { getRappiToken } from '../src/services/delivery-channels/providers/rappi/rappi.token'
 import { RUTA_POR_EVENTO, secretosDelEvento } from '../src/services/delivery-channels/providers/rappi/rappi.webhookIngress'
 import {
   azpDelJwt,
@@ -303,11 +303,9 @@ async function registrar(salida: string, base: string, ambiente: string, tiendas
 
   // 1) Leer lo registrado (nada se escribe hasta tenerlo completo).
   const { registrados, deshabilitadas } = await leerRegistrados()
-  // El token ya quedó en la caché de `rappi.token` con la primera lectura; de ahí sale el `azp`. Si no estuviera, falla AQUÍ,
-  // antes de la primera escritura.
-  const token = await getRappiToken('integrations', {
-    fetchToken: () => Promise.reject(new Error('el token de Rappi no quedó en caché tras la primera lectura: no se pudo sacar el `azp`')),
-  })
+  // El `azp` sale del token de la integración. Normalmente ya está en caché tras la primera lectura; si no (su último minuto,
+  // D6), se pide otra vez. Un login que falla lanza AQUÍ, antes de la primera escritura.
+  const token = await tokenDeRappi('integrations')
   const azp = azpDelJwt(token)
   const deIntegracion = await leerDeIntegracion(azp)
 
