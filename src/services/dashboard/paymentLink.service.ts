@@ -21,6 +21,7 @@ import { isEcommerceMerchantChargeable } from '@/services/payments/ecommerceCapa
 import { calculateApplicationFeeWithVAT, toStripeAmount } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import emailService from '@/services/email.service'
+import { generateDigitalReceipt } from '@/services/tpv/digitalReceipt.tpv.service'
 import { formatInTimeZone } from 'date-fns-tz'
 import { es as esLocale } from 'date-fns/locale'
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
@@ -2328,6 +2329,8 @@ export async function finalizePaymentLinkCheckout(args: {
     // se calculaba después del commit sin esperarla: si el proceso moría ahí se perdía para siempre, y si la venta se
     // devolvía antes de que apareciera, el reverso no la encontraba y se pagaba sobre una venta devuelta.
     if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+    // D7: la sesión apunta a su pago, como en Mercado Pago (la página alojada de Stripe es `cs_…` y el pago `pi_…`).
+    await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
     // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
     await activarSobresDeCuentaPagadaEnTx(tx, {
       venueId,
@@ -3172,6 +3175,8 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
       })
       // Fase 3 (A5): la comisión se congela con el cobro, en esta transacción.
       if (attributedStaffIds.length > 0) await enqueuePaymentCommissionInTx(tx, createdPayment.id, attributedStaffIds)
+      // D7: la sesión apunta a su pago, como en Mercado Pago (Blumon guarda el pago con su transactionId, no la sesión).
+      await tx.checkoutSession.update({ where: { id: session.id }, data: { paymentId: createdPayment.id } })
       // R8: activar sobres va DESPUÉS del Payment (compara lo cobrado). Las ligas venden catálogo: hoy no encuentra sobres.
       await activarSobresDeCuentaPagadaEnTx(tx, {
         venueId,
@@ -3255,6 +3260,37 @@ export async function completeCharge(shortCode: string, sessionId: string, _thre
 }
 
 /**
+ * D7 (26-oct): el pago de una sesión cobrada. Mercado Pago deja `CheckoutSession.paymentId` y su sesión (`cs_mp_…`) no es
+ * el `processorId` del pago; Stripe guarda la sesión como el PaymentIntent (`pi_…`), que sí es el `processorId`.
+ */
+function pagoDeLaSesion(session: { sessionId: string; paymentId: string | null }): Prisma.PaymentWhereInput {
+  return session.paymentId ? { id: session.paymentId } : { processorId: session.sessionId }
+}
+
+/**
+ * D7: el recibo que ve el cliente. El del proveedor si lo trae (Stripe); si no (Mercado Pago, Blumon, o Stripe sin su
+ * `receipt_url`), el recibo digital de Avoqado: el canónico de la terminal, bajo candado del pago (dos consultas a la vez
+ * reciben el mismo) y sin datos del cliente (en una liga el cliente puede venir de un correo que nadie verificó). Nunca
+ * lanza: sin recibo, `null`.
+ */
+async function reciboParaElCliente(payment: { id: string; receiptUrl: string | null }): Promise<string | null> {
+  if (payment.receiptUrl) return payment.receiptUrl
+  if (!process.env.FRONTEND_URL) return null
+  try {
+    const recibo = await generateDigitalReceipt(payment.id)
+    // Codex r2 #1: si el recibo ya existía, generado desde el panel con los datos del cliente, no se le da a quien pagó.
+    if ((recibo.dataSnapshot as { customer?: unknown } | null)?.customer) return null
+    return `${process.env.FRONTEND_URL}/receipts/public/${recibo.accessKey}`
+  } catch (err) {
+    logger.warn('No se pudo generar el recibo de Avoqado de una liga (no fatal)', {
+      paymentId: payment.id,
+      error: err instanceof Error ? err.message : String(err),
+    })
+    return null
+  }
+}
+
+/**
  * Gets the status of a checkout session (for polling after 3DS)
  */
 export async function getSessionStatus(shortCode: string, sessionId: string) {
@@ -3262,6 +3298,7 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
     where: { sessionId },
     select: {
       sessionId: true,
+      paymentId: true,
       status: true,
       amount: true,
       currency: true,
@@ -3289,13 +3326,13 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
   let payment: { receiptUrl: string | null; cardBrand: string | null; last4: string | null } | null = null
   if (session.status === 'COMPLETED') {
     const p = await prisma.payment.findFirst({
-      where: { processorId: sessionId },
-      select: { receiptUrl: true, cardBrand: true, maskedPan: true },
+      where: pagoDeLaSesion(session),
+      select: { id: true, receiptUrl: true, cardBrand: true, maskedPan: true },
       orderBy: { createdAt: 'desc' },
     })
     if (p) {
       payment = {
-        receiptUrl: p.receiptUrl,
+        receiptUrl: await reciboParaElCliente(p),
         cardBrand: p.cardBrand,
         // maskedPan is stored as ************4242 — extract the last 4 for
         // the UI so the customer-facing page doesn't have to parse it.
@@ -3319,15 +3356,17 @@ export async function getSessionStatus(shortCode: string, sessionId: string) {
 /**
  * Send the Stripe-hosted receipt for a completed payment-link payment to a
  * customer-provided phone number via the venue's WhatsApp Business template
- * (`receipt_link`). Looks up the Payment by its CheckoutSession.sessionId
- * (which is the PaymentIntent id for Stripe and the Blumon session id for
- * legacy flows). Validates the link + session match so a customer can't
- * trigger sends for unrelated payments.
+ * (`receipt_link`). Looks up the Payment with `pagoDeLaSesion` and the receipt
+ * with `reciboParaElCliente` (Stripe's, or Avoqado's own for Mercado Pago).
+ * Validates the link + session match so a customer can't trigger sends for
+ * unrelated payments.
  */
 export async function sendPaymentLinkReceiptWhatsapp(shortCode: string, sessionId: string, phone: string) {
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },
     select: {
+      sessionId: true,
+      paymentId: true,
       status: true,
       paymentLink: { select: { shortCode: true } },
     },
@@ -3342,8 +3381,9 @@ export async function sendPaymentLinkReceiptWhatsapp(shortCode: string, sessionI
   }
 
   const payment = await prisma.payment.findFirst({
-    where: { processorId: sessionId },
+    where: pagoDeLaSesion(session),
     select: {
+      id: true,
       amount: true,
       tipAmount: true,
       receiptUrl: true,
@@ -3353,7 +3393,8 @@ export async function sendPaymentLinkReceiptWhatsapp(shortCode: string, sessionI
   })
 
   if (!payment) throw new NotFoundError('Pago no encontrado')
-  if (!payment.receiptUrl) {
+  const receiptUrl = await reciboParaElCliente(payment)
+  if (!receiptUrl) {
     throw new BadRequestError('Recibo aún no disponible — intenta de nuevo en unos segundos')
   }
 
@@ -3363,7 +3404,7 @@ export async function sendPaymentLinkReceiptWhatsapp(shortCode: string, sessionI
   await sendReceiptWhatsApp(phone, {
     venueName: payment.venue.name,
     totalAmount: formatted,
-    receiptUrl: payment.receiptUrl,
+    receiptUrl,
   })
 
   return { sent: true }
@@ -3373,14 +3414,16 @@ export async function sendPaymentLinkReceiptWhatsapp(shortCode: string, sessionI
  * Email the Stripe-hosted receipt URL for a completed payment-link payment
  * to a customer-supplied address. Mirrors `sendPaymentLinkReceiptWhatsapp`
  * — validates the link↔session relationship, requires COMPLETED status, and
- * requires the Payment row to already carry a `receiptUrl` (captured at
- * webhook time). Uses the existing `sendReceiptEmail` template so the
+ * requires a receipt from `reciboParaElCliente` (Stripe's, or Avoqado's own
+ * for Mercado Pago). Uses the existing `sendReceiptEmail` template so the
  * customer gets the same branded receipt email Avoqado sends elsewhere.
  */
 export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: string, email: string) {
   const session = await prisma.checkoutSession.findUnique({
     where: { sessionId },
     select: {
+      sessionId: true,
+      paymentId: true,
       status: true,
       paymentLink: { select: { shortCode: true } },
     },
@@ -3395,7 +3438,7 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
   }
 
   const payment = await prisma.payment.findFirst({
-    where: { processorId: sessionId },
+    where: pagoDeLaSesion(session),
     include: {
       venue: {
         select: {
@@ -3428,7 +3471,8 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
   })
 
   if (!payment) throw new NotFoundError('Pago no encontrado')
-  if (!payment.receiptUrl) {
+  const receiptUrl = await reciboParaElCliente(payment)
+  if (!receiptUrl) {
     throw new BadRequestError('Recibo aún no disponible — intenta de nuevo en unos segundos')
   }
 
@@ -3458,7 +3502,7 @@ export async function sendPaymentLinkReceiptEmail(shortCode: string, sessionId: 
 
   await emailService.sendReceiptEmail(email, {
     venueName: payment.venue.name,
-    receiptUrl: payment.receiptUrl,
+    receiptUrl,
     receiptNumber,
     venueLogoUrl: payment.venue.logo ?? undefined,
     venueAddress: payment.venue.address ?? undefined,
