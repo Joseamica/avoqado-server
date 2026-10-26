@@ -16,6 +16,7 @@
  *      servicios puros: (venueId, orderId, <input>, staffId).
  */
 import { BadRequestError, ConflictError } from '@/errors/AppError'
+import { OrderTableTopologyChanged } from '@/services/shared/tableOrderLock'
 import * as controller from '@/controllers/tpv/order-table.tpv.controller'
 import * as orderMobileService from '@/services/mobile/order.mobile.service'
 import * as serviceChargeMobileService from '@/services/mobile/service-charge.mobile.service'
@@ -288,6 +289,17 @@ describe('order-table.tpv.controller — cancelOrder', () => {
     expect(res.status).toHaveBeenCalledWith(400)
     expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ success: false, message: 'Cannot cancel a paid order' }))
     // A rejected transaction never publishes a successful cancellation.
+    expect(publishCancelledOrderMock).not.toHaveBeenCalled()
+  })
+
+  it('D9: un choque de cuenta o mesa responde 503 («reintenta»), no 500', async () => {
+    cancelOrderMock.mockRejectedValue(new OrderTableTopologyChanged())
+    const req: any = { params: { venueId: 'v', orderId: 'o' }, body: {}, authContext: { userId: 's' } }
+    const res = mockRes()
+
+    await controller.cancelOrder(req, res)
+
+    expect(res.status).toHaveBeenCalledWith(503)
     expect(publishCancelledOrderMock).not.toHaveBeenCalled()
   })
 
