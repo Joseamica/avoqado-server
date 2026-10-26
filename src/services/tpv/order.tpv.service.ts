@@ -16,6 +16,8 @@ import {
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import type { ValesSoltados } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
+import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import {
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -2382,7 +2384,6 @@ export async function updateGuestInfo(
   opciones: OpcionesDeLigaTpv = {},
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`👥 [ORDER SERVICE] Updating guest info for order ${orderId}`)
-  const puedeFijarClienteEnVentaCobrada = opciones.otorgarLealtad === true
 
   // Validate covers if provided
   if (guestInfo.covers !== undefined && guestInfo.covers < 1) {
@@ -2401,12 +2402,14 @@ export async function updateGuestInfo(
         throw new NotFoundError('Order not found')
       }
       // «Cobrada»: la regla compartida (R11-2: también con los cobros capturados que ya la cubren), sólo cuando decide algo.
-      const fijaCliente =
-        guestInfo.customerId !== undefined &&
-        (puedeFijarClienteEnVentaCobrada || !(await ventaYaCobradaBajoCandado(tx, { venueId, orderId }, order))?.cobrada)
-      if (guestInfo.customerId !== undefined && !fijaCliente) {
-        logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: guest edit without payments:create keeps Order.customerId`)
-      }
+      const fijaCliente = guestInfo.customerId !== undefined
+      if (fijaCliente)
+        await assertCustomerAttributionUnderLock(tx, {
+          venueId,
+          orderId,
+          customerId: guestInfo.customerId ?? null,
+          actor: opciones.customerAttribution,
+        })
 
       // Update order with new guest info
       const updatedOrder = await tx.order.update({
@@ -3843,6 +3846,7 @@ export async function getOrderCustomers(venueId: string, orderId: string) {
  */
 export interface OpcionesDeLigaTpv {
   otorgarLealtad?: boolean
+  customerAttribution?: CustomerAttributionActor
 }
 
 /**
@@ -3878,13 +3882,24 @@ async function leerVentaBajoCandado(
 async function ligarClienteBajoCandado(
   tx: Prisma.TransactionClient,
   venta: { paymentStatus: PaymentStatus | null; cobrada: boolean },
-  args: { venueId: string; orderId: string; customerId: string; staffId: string | null; otorgarLealtad: boolean },
+  args: {
+    venueId: string
+    orderId: string
+    customerId: string
+    staffId: string | null
+    otorgarLealtad: boolean
+    customerAttribution?: CustomerAttributionActor
+  },
   reabrirLealtad: ReabrirLealtad,
 ): Promise<{ ligaNueva: boolean; esPrimario: boolean }> {
   const { venueId, orderId, customerId, otorgarLealtad } = args
   const puedeSerPrimario = !venta.cobrada || otorgarLealtad
   const existente = await tx.orderCustomer.findUnique({ where: { orderId_customerId: { orderId, customerId } } })
   const primario = await tx.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { id: true, customerId: true } })
+  // Los acompañantes no cambian la atribución: el candado nuevo protege crear/promover al beneficiario.
+  if (venta.cobrada && !primario && puedeSerPrimario) {
+    await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId, actor: args.customerAttribution })
+  }
 
   let ligaNueva = false
   let esPrimario: boolean
@@ -3994,7 +4009,7 @@ export async function addCustomerToOrder(
   opciones: OpcionesDeLigaTpv = {},
 ): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`👤 [ORDER SERVICE] Adding customer ${customerId} to order ${orderId}`)
-  const otorgarLealtad = opciones.otorgarLealtad === true
+  const otorgarLealtad = opciones.otorgarLealtad === true || opciones.customerAttribution?.canAssignHistorical === true
 
   // Verify order exists and belongs to venue
   const order = await prisma.order.findUnique({
@@ -4033,7 +4048,7 @@ export async function addCustomerToOrder(
           const r = await ligarClienteBajoCandado(
             tx,
             venta,
-            { venueId, orderId, customerId, staffId: staffId ?? null, otorgarLealtad },
+            { venueId, orderId, customerId, staffId: staffId ?? null, otorgarLealtad, customerAttribution: opciones.customerAttribution },
             reabrirLealtadSiAplica,
           )
           return { ...r, cobrada: venta.cobrada }
@@ -4111,6 +4126,10 @@ export async function removeCustomerFromOrder(venueId: string, orderId: string, 
         throw new NotFoundError('Customer not associated with this order')
       }
 
+      if (venta.cobrada && association.isPrimary) {
+        await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: null, actor: opciones.customerAttribution })
+      }
+
       // Remove the association
       await tx.orderCustomer.delete({
         where: { orderId_customerId: { orderId, customerId } },
@@ -4161,7 +4180,7 @@ export async function createAndAddCustomerToOrder(
   opciones: OpcionesDeLigaTpv = {},
 ): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`🆕 [ORDER SERVICE] Creating customer and adding to order ${orderId}`)
-  const otorgarLealtad = opciones.otorgarLealtad === true
+  const otorgarLealtad = opciones.otorgarLealtad === true || opciones.customerAttribution?.canAssignHistorical === true
 
   // Normalize email to lowercase for consistent lookups
   const normalizedEmail = customerData.email?.toLowerCase()
@@ -4232,7 +4251,14 @@ export async function createAndAddCustomerToOrder(
           const liga = await ligarClienteBajoCandado(
             tx,
             venta,
-            { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null, otorgarLealtad },
+            {
+              venueId,
+              orderId,
+              customerId: newCustomer.id,
+              staffId: staffId ?? null,
+              otorgarLealtad,
+              customerAttribution: opciones.customerAttribution,
+            },
             reabrirLealtadSiAplica,
           )
 

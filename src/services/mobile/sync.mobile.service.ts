@@ -514,107 +514,106 @@ export async function processIntents(params: {
     }
 
     if (!reclamo) {
-
-    // Fence monotónico: una reinstalación/bug no puede reutilizar una seq con
-    // otro UUID y ejecutar una operación vieja como si fuera nueva. Clientes
-    // legacy sin seq siguen soportados.
-    if (typeof intent.seq === 'number') {
-      const latestForDevice = await prisma.posSyncIntent.findFirst({
-        where: {
-          venueId,
-          deviceId,
-          seq: { not: null },
-          type: lane === 'preparation' ? 'KDS_ITEM_PROGRESS' : { notIn: ['HTTP_OP_V1', 'KDS_ITEM_PROGRESS'] },
-        },
-        orderBy: { seq: 'desc' },
-        select: { seq: true },
-      })
-      if (typeof latestForDevice?.seq === 'number' && latestForDevice.seq >= intent.seq) {
-        // The same UUID may have been reserved after the first lookup; its result wins over the sequence fence.
-        const concurrent = await prisma.posSyncIntent.findUnique({
-          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+      // Fence monotónico: una reinstalación/bug no puede reutilizar una seq con
+      // otro UUID y ejecutar una operación vieja como si fuera nueva. Clientes
+      // legacy sin seq siguen soportados.
+      if (typeof intent.seq === 'number') {
+        const latestForDevice = await prisma.posSyncIntent.findFirst({
+          where: {
+            venueId,
+            deviceId,
+            seq: { not: null },
+            type: lane === 'preparation' ? 'KDS_ITEM_PROGRESS' : { notIn: ['HTTP_OP_V1', 'KDS_ITEM_PROGRESS'] },
+          },
+          orderBy: { seq: 'desc' },
+          select: { seq: true },
         })
-        if (concurrent) {
-          const ack = await ackFromExisting(concurrent, intent.id, intent.type)
-          if (concurrent.localRef && ack.result?.orderId) localRefMap.set(concurrent.localRef, String(ack.result.orderId))
-          acks.push(ack)
-          if (ack.status === 'RETRY') blockedLanes.add(lane)
-          continue
-        }
-        acks.push({
-          id: intent.id,
-          status: 'REJECTED',
-          errorCode: 'STALE_DEVICE_SEQUENCE',
-          message: 'La secuencia del dispositivo ya fue utilizada. Requiere revisión antes de repetir la operación.',
-          details: { latestSeq: latestForDevice.seq },
-        })
-        continue
-      }
-    }
-
-    // 2. Reservar ANTES del efecto. La unique hace de compare-and-set: sólo
-    // un request puede ejecutar; los concurrentes observan PROCESSING.
-    marca = marcaInicial(intent)
-    const nuevoReclamo = new Date()
-    try {
-      await prisma.posSyncIntent.create({
-        data: {
-          venueId,
-          deviceId,
-          staffId,
-          seq: intent.seq ?? null,
-          type: intent.type,
-          idempotencyKey: intent.id,
-          localRef: typeof intent.payload?.localOrderId === 'string' ? (intent.payload.localOrderId as string) : null,
-          status: 'PROCESSING',
-          createdAt: nuevoReclamo,
-          ...(marca ? { resultJson: marca as unknown as Prisma.InputJsonValue } : {}),
-        },
-      })
-      reclamo = nuevoReclamo
-    } catch (reserveError: any) {
-      if (reserveError?.code === 'P2002') {
-        const winner = await prisma.posSyncIntent.findUnique({
-          where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
-        })
-        if (winner) {
-          const winnerAck = await ackFromExisting(winner, intent.id, intent.type)
-          acks.push(winnerAck)
-          if (winnerAck.status === 'RETRY') blockedLanes.add(lane)
-          continue
-        }
-        if (typeof intent.seq === 'number') {
-          const sequenceWinner = await prisma.posSyncIntent.findFirst({
-            where: { venueId, deviceId, seq: intent.seq, type: { not: 'HTTP_OP_V1' } },
-            select: { idempotencyKey: true },
+        if (typeof latestForDevice?.seq === 'number' && latestForDevice.seq >= intent.seq) {
+          // The same UUID may have been reserved after the first lookup; its result wins over the sequence fence.
+          const concurrent = await prisma.posSyncIntent.findUnique({
+            where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
           })
-          if (sequenceWinner) {
-            const latestForDevice = await prisma.posSyncIntent.findFirst({
-              where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
-              orderBy: { seq: 'desc' },
-              select: { seq: true },
-            })
-            acks.push({
-              id: intent.id,
-              status: 'REJECTED',
-              errorCode: 'STALE_DEVICE_SEQUENCE',
-              message: 'La secuencia del dispositivo pertenece a otra operación. Requiere revisión.',
-              details: { latestSeq: latestForDevice?.seq ?? intent.seq },
-            })
+          if (concurrent) {
+            const ack = await ackFromExisting(concurrent, intent.id, intent.type)
+            if (concurrent.localRef && ack.result?.orderId) localRefMap.set(concurrent.localRef, String(ack.result.orderId))
+            acks.push(ack)
+            if (ack.status === 'RETRY') blockedLanes.add(lane)
             continue
           }
+          acks.push({
+            id: intent.id,
+            status: 'REJECTED',
+            errorCode: 'STALE_DEVICE_SEQUENCE',
+            message: 'La secuencia del dispositivo ya fue utilizada. Requiere revisión antes de repetir la operación.',
+            details: { latestSeq: latestForDevice.seq },
+          })
+          continue
         }
       }
-      logger.error(`❌ [POS SYNC] No se pudo reservar el intent ${intent.id}`, reserveError)
-      acks.push({
-        id: intent.id,
-        status: 'RETRY',
-        errorCode: reserveError?.code ?? 'INTENT_RESERVATION_FAILED',
-        message: 'No se pudo reservar la operación de forma segura. Reintenta.',
-      })
-      blockedLanes.add(lane)
-      continue
-    }
+
+      // 2. Reservar ANTES del efecto. La unique hace de compare-and-set: sólo
+      // un request puede ejecutar; los concurrentes observan PROCESSING.
+      marca = marcaInicial(intent)
+      const nuevoReclamo = new Date()
+      try {
+        await prisma.posSyncIntent.create({
+          data: {
+            venueId,
+            deviceId,
+            staffId,
+            seq: intent.seq ?? null,
+            type: intent.type,
+            idempotencyKey: intent.id,
+            localRef: typeof intent.payload?.localOrderId === 'string' ? (intent.payload.localOrderId as string) : null,
+            status: 'PROCESSING',
+            createdAt: nuevoReclamo,
+            ...(marca ? { resultJson: marca as unknown as Prisma.InputJsonValue } : {}),
+          },
+        })
+        reclamo = nuevoReclamo
+      } catch (reserveError: any) {
+        if (reserveError?.code === 'P2002') {
+          const winner = await prisma.posSyncIntent.findUnique({
+            where: { venueId_idempotencyKey: { venueId, idempotencyKey: intent.id } },
+          })
+          if (winner) {
+            const winnerAck = await ackFromExisting(winner, intent.id, intent.type)
+            acks.push(winnerAck)
+            if (winnerAck.status === 'RETRY') blockedLanes.add(lane)
+            continue
+          }
+          if (typeof intent.seq === 'number') {
+            const sequenceWinner = await prisma.posSyncIntent.findFirst({
+              where: { venueId, deviceId, seq: intent.seq, type: { not: 'HTTP_OP_V1' } },
+              select: { idempotencyKey: true },
+            })
+            if (sequenceWinner) {
+              const latestForDevice = await prisma.posSyncIntent.findFirst({
+                where: { venueId, deviceId, seq: { not: null }, type: { not: 'HTTP_OP_V1' } },
+                orderBy: { seq: 'desc' },
+                select: { seq: true },
+              })
+              acks.push({
+                id: intent.id,
+                status: 'REJECTED',
+                errorCode: 'STALE_DEVICE_SEQUENCE',
+                message: 'La secuencia del dispositivo pertenece a otra operación. Requiere revisión.',
+                details: { latestSeq: latestForDevice?.seq ?? intent.seq },
+              })
+              continue
+            }
+          }
+        }
+        logger.error(`❌ [POS SYNC] No se pudo reservar el intent ${intent.id}`, reserveError)
+        acks.push({
+          id: intent.id,
+          status: 'RETRY',
+          errorCode: reserveError?.code ?? 'INTENT_RESERVATION_FAILED',
+          message: 'No se pudo reservar la operación de forma segura. Reintenta.',
+        })
+        blockedLanes.add(lane)
+        continue
+      }
     }
     const turno = reclamo as Date
 
@@ -761,7 +760,12 @@ async function intentarRetomar(p: {
   if (sinPermiso) {
     return {
       tipo: 'contestar',
-      ack: { id: intent.id, status: 'REJECTED', errorCode: 'PERMISSION_DENIED', message: `No tienes permiso para reproducir ${intent.type}.` },
+      ack: {
+        id: intent.id,
+        status: 'REJECTED',
+        errorCode: 'PERMISSION_DENIED',
+        message: `No tienes permiso para reproducir ${intent.type}.`,
+      },
     }
   }
   const reclamo = new Date()
@@ -1434,7 +1438,9 @@ async function applyPayCash(
     isOfflineReplay: true,
     ...marcaDeMesaAjena,
     ...propiedadDeMesa,
-    ...(dejarHuella ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) } : {}),
+    ...(dejarHuella
+      ? { dentroDeLaTx: (tx: Prisma.TransactionClient, cobro: { orderId: string; paymentId: string }) => dejarHuella(tx, cobro) }
+      : {}),
   })
   return {
     id: intent.id,
@@ -1526,7 +1532,16 @@ async function applyOrderMutation(
       // la venta, si se puede cambiar el cliente de una venta COBRADA; aquí sólo se le dice si quien encoló tiene
       // `payments:create` (sin `authorizeIntent`, falla cerrado). Sin red no es puerta trasera.
       const opciones =
-        customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: authorizeIntent?.(intent, 'payments:create') === true } : {}
+        customerId !== undefined
+          ? {
+              puedeCambiarClienteEnVentaCobrada: authorizeIntent?.(intent, 'payments:create') === true,
+              customerAttribution: {
+                staffId,
+                canAssignHistorical: authorizeIntent?.(intent, 'orders:attach-customer') === true,
+                canAttachAtReceipt: authorizeIntent?.(intent, 'payments:create') === true,
+              },
+            }
+          : {}
       await orderMobileService.updateOrderDetails(
         venueId,
         orderId,

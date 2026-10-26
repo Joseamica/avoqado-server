@@ -19,6 +19,8 @@ import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
+import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 import {
@@ -1709,6 +1711,7 @@ export interface OrderDetailsInput {
 }
 
 export interface OpcionesDeDetalleDeCuenta {
+  customerAttribution?: CustomerAttributionActor
   /**
    * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos): ¿quien edita tiene `payments:create`? Lo resuelven el controller (resolvedor
    * efectivo), el reducer offline (`authorizeIntent`) y el MCP (`guard.tienePermiso`). Sin él, en una venta COBRADA no se cambia
@@ -1748,6 +1751,7 @@ export async function updateOrderDetailsInTransaction(
       orderId,
       clienteNuevo: input.customerId || null,
       puedeCobrar: opciones.puedeCambiarClienteEnVentaCobrada === true,
+      actor: opciones.customerAttribution,
     })
   }
 
@@ -4935,7 +4939,13 @@ export async function returnGiftBalanceAndCancelOrder(
  * «Agregar cliente» en «Cobro exitoso» (POST /mobile/venues/:venueId/payments/:paymentId/customer).
  * `staffId` = quien LIGA (authContext.userId del controller): es el actor del sello tardío y de la bitácora.
  */
-export async function attachCustomerToPayment(venueId: string, paymentId: string, customerId: string, staffId?: string | null) {
+export async function attachCustomerToPayment(
+  venueId: string,
+  paymentId: string,
+  customerId: string,
+  staffId?: string | null,
+  opciones: { actor?: CustomerAttributionActor; historicalOnly?: boolean } = {},
+) {
   const normalizedPaymentId = paymentId?.trim()
   const normalizedCustomerId = customerId?.trim()
 
@@ -4961,7 +4971,11 @@ export async function attachCustomerToPayment(venueId: string, paymentId: string
     throw new NotFoundError('Payment not found')
   }
 
-  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, staffId)
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, staffId, {
+    ...opciones,
+    paymentId: normalizedPaymentId,
+    actor: opciones.actor ?? { staffId, canAttachAtReceipt: true },
+  })
 }
 
 export async function attachCustomerToLatestPayment(
@@ -4973,6 +4987,7 @@ export async function attachCustomerToLatestPayment(
     staffId?: string | null
     /** Quien LIGA (authContext.userId). `staffId` sigue siendo quien COBRÓ: filtra processedById. */
     actorStaffId?: string | null
+    actor?: CustomerAttributionActor
   },
 ) {
   const normalizedCustomerId = input.customerId?.trim()
@@ -5010,7 +5025,10 @@ export async function attachCustomerToLatestPayment(
     throw new NotFoundError('Payment not found')
   }
 
-  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, input.actorStaffId)
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, input.actorStaffId, {
+    paymentId: payment.id,
+    actor: input.actor ?? { staffId: input.actorStaffId, canAttachAtReceipt: true },
+  })
 }
 
 /**
@@ -5030,7 +5048,13 @@ const INTENTOS_DE_LIGA = 3
  * Idempotente ante el mismo cliente agregado varias veces (BAJO-3): una sola liga, ningún 500, y la fila de auditoría sólo
  * desde la llamada que CREÓ (o promovió a primario) la liga (`ligaNueva`).
  */
-export async function attachCustomerToOrder(venueId: string, orderId: string, customerId: string, staffId?: string | null) {
+export async function attachCustomerToOrder(
+  venueId: string,
+  orderId: string,
+  customerId: string,
+  staffId?: string | null,
+  opciones: { actor?: CustomerAttributionActor; historicalOnly?: boolean; paymentId?: string } = {},
+) {
   const normalizedCustomerId = customerId?.trim()
 
   if (!normalizedCustomerId) {
@@ -5083,6 +5107,7 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
       // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
       if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: normalizedCustomerId, ...opciones })
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {
           orderId_customerId: {

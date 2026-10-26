@@ -1,7 +1,10 @@
 import { Prisma } from '@prisma/client'
+import { ConflictError, ForbiddenError } from '../../errors/AppError'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
 import { bloquearVentaParaLiga, motivoDeReintentoDeLiga } from '../shared/ligaDeClienteEnVenta'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
+import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 
 /**
  * El CLIENTE de una venta rápida (`POST /fast`).
@@ -299,6 +302,7 @@ export async function linkCustomerToExistingOrder(
   venueId: string,
   orderId: string | null | undefined,
   rawCustomerId: unknown,
+  actor: CustomerAttributionActor = {},
 ): Promise<FastPaymentCustomerLink> {
   const requestedCustomerId = normalizeRequestedCustomerId(rawCustomerId)
   if (!requestedCustomerId) return NO_CUSTOMER_REQUESTED
@@ -359,6 +363,7 @@ export async function linkCustomerToExistingOrder(
           if (!vigente) return { kind: 'gone' }
           const veredictoDentro = judgeAttribution(vigente, customer.id)
           if (veredictoDentro.kind !== 'fill') return veredictoDentro
+          await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: customer.id, actor })
           await escribir(tx, vigente)
           return { kind: 'escrito' }
         },
@@ -461,6 +466,6 @@ export async function linkCustomerToExistingOrder(
       requestedCustomerId,
       error: err instanceof Error ? err.message : String(err),
     })
-    return unverified
+    return err instanceof ForbiddenError || err instanceof ConflictError ? { ...unverified, warning: err.message } : unverified
   }
 }

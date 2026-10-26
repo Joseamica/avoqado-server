@@ -624,7 +624,7 @@ describe('🔴 R8: la cadena exacta de Codex r12 — un cobro tardío de la TPV 
       updateOrderDetails(venueId!, orderId, { customerId: nuevo }, { puedeCambiarClienteEnVentaCobrada: false }),
     ).rejects.toMatchObject({
       statusCode: 403,
-      code: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE',
+      code: 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER',
     })
     expect(await foto(orderId, nuevo)).toEqual(antes)
   })

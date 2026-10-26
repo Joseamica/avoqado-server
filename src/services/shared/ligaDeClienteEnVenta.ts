@@ -1,8 +1,14 @@
 import { Prisma } from '@prisma/client'
-import { ForbiddenError } from '../../errors/AppError'
+import { ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
 import { isDeadlockError, isRetryableDbError } from '../../utils/serializableRetry'
 import { computeOrderBalance, esVentaCerrada, type OrderAmountsForBalance } from './orderBalance'
+import {
+  isCustomerAssignableSale,
+  ownsRecentReceipt,
+  requireHistoricalCustomerAuthority,
+  type CustomerAttributionActor,
+} from './customerAttributionPolicy'
 
 /**
  * La liga de un cliente a una venta (`OrderCustomer`) ante choques de únicos, en UN solo lugar para el POS (móvil y MCP) y la
@@ -194,16 +200,67 @@ export function asegurarCambioDeClienteEnVentaCobrada(args: {
  * decide: quien llama ya responde 404.
  */
 export async function asegurarCambioDeClienteBajoCandado(
-  tx: Pick<Prisma.TransactionClient, 'order' | 'payment'>,
-  args: { venueId: string; orderId: string; clienteNuevo: string | null; puedeCobrar: boolean },
+  tx: Pick<Prisma.TransactionClient, 'order' | 'orderCustomer' | 'payment'>,
+  args: { venueId: string; orderId: string; clienteNuevo: string | null; puedeCobrar: boolean; actor?: CustomerAttributionActor },
 ): Promise<void> {
-  if (args.puedeCobrar) return
-  const venta = await ventaYaCobradaBajoCandado(tx, args)
-  if (!venta) return
-  asegurarCambioDeClienteEnVentaCobrada({
-    cobrada: venta.cobrada,
-    clienteActual: venta.customerId,
-    clienteNuevo: args.clienteNuevo,
-    puedeCobrar: false,
+  await assertCustomerAttributionUnderLock(tx, {
+    venueId: args.venueId,
+    orderId: args.orderId,
+    customerId: args.clienteNuevo,
+    actor: args.actor,
   })
+}
+
+/** Quien llama ya tiene el candado canónico de la venta. */
+export async function assertCustomerAttributionUnderLock(
+  tx: Pick<Prisma.TransactionClient, 'order' | 'orderCustomer' | 'payment'>,
+  args: {
+    venueId: string
+    orderId: string
+    customerId: string | null
+    actor?: CustomerAttributionActor
+    paymentId?: string
+    historicalOnly?: boolean
+  },
+): Promise<void> {
+  const actor = args.actor ?? {}
+  if (args.historicalOnly) requireHistoricalCustomerAuthority(actor)
+  const order = await tx.order.findFirst({
+    where: { id: args.orderId, venueId: args.venueId },
+    select: {
+      status: true,
+      paymentStatus: true,
+      customerId: true,
+      subtotal: true,
+      discountAmount: true,
+      serviceChargeAmount: true,
+      contratoDePrecio: true,
+      taxAmount: true,
+    },
+  })
+  if (!order) throw new NotFoundError('Venta no encontrada')
+  const paid = await ventaYaCobradaBajoCandado(tx, args, order)
+  if (!paid?.cobrada && !args.historicalOnly) return
+  const primary = await tx.orderCustomer.findFirst({ where: { orderId: args.orderId, isPrimary: true }, select: { customerId: true } })
+  const owners = [order.customerId, primary?.customerId].filter((id): id is string => !!id)
+  if (owners.some(id => id !== args.customerId))
+    throw new ConflictError('Esta venta ya tiene un cliente asignado y no se puede reemplazar.', 'SALE_CUSTOMER_ALREADY_ASSIGNED')
+  // Una repetición no crea autoridad nueva ni modifica el beneficiario de la venta.
+  if (owners.length > 0 && args.customerId) return
+  if (!args.customerId) return
+  const payment = await tx.payment.findFirst({
+    where: {
+      venueId: args.venueId,
+      orderId: args.orderId,
+      ...(args.paymentId ? { id: args.paymentId } : { status: 'COMPLETED', OR: [{ type: null }, { type: { not: 'REFUND' } }] }),
+    },
+    select: { status: true, type: true, createdAt: true, processedById: true },
+    orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+  })
+  const original = actor.originalCustomer
+  if (!args.historicalOnly && original?.orderId === args.orderId && original.customerId === args.customerId) return
+  if (!isCustomerAssignableSale(payment, order))
+    throw new ConflictError('Esta venta no admite asignar un cliente.', 'SALE_NOT_ELIGIBLE_FOR_CUSTOMER')
+  if (actor.canAssignHistorical || (!args.historicalOnly && ownsRecentReceipt(payment, actor))) return
+  requireHistoricalCustomerAuthority(actor)
 }

@@ -1,9 +1,6 @@
 /**
- * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A» del founder): el «detalle de la cuenta» del POS
- * (`POST /mobile/venues/:venueId/orders/:orderId/details`, `orders:update`) resuelve `payments:create` de quien edita — con el
- * resolvedor EFECTIVO (`tienePermisoEnVenue`), cerrado ante falla — y se lo pasa al servicio, que decide bajo el candado de la
- * venta (en una venta COBRADA, cambiar el cliente sin el permiso ⇒ 403). En los dos caminos del controller: el directo y el de
- * operación HTTP idempotente. Sólo cuando la petición trae un `customerId` que cambie algo (no `null`/ausente).
+ * Ambos caminos del controller (directo y operación HTTP) transportan la autoridad
+ * efectiva histórica separada del permiso de recibo. Si falla la DB, no escriben.
  */
 const mockExecute = jest.fn()
 jest.mock('@/services/mobile/http-operation.mobile.service', () => ({
@@ -72,20 +69,24 @@ afterEach(() => {
   enTransaccion.mockRestore()
 })
 
-describe('🔴 R4-2: el detalle de la cuenta del POS resuelve payments:create de quien cambia el cliente', () => {
+describe('detalle POS — autoridad efectiva para atribución del cliente', () => {
   it('🔴 KITCHEN (camino directo): el servicio recibe puedeCambiarClienteEnVentaCobrada: false', async () => {
     quienEdita('KITCHEN')
     const { next } = await editar({ customerId: 'cust-K' }, 'KITCHEN')
     expect(next).not.toHaveBeenCalled()
     expect(directo).toHaveBeenCalledWith(VENUE, ORDER, expect.objectContaining({ customerId: 'cust-K' }), {
       puedeCambiarClienteEnVentaCobrada: false,
+      customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: false },
     })
   })
 
   it('CASHIER (camino directo): puedeCambiarClienteEnVentaCobrada: true', async () => {
     quienEdita('CASHIER')
     await editar({ customerId: 'cust-K' }, 'CASHIER')
-    expect(directo).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), { puedeCambiarClienteEnVentaCobrada: true })
+    expect(directo).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), {
+      puedeCambiarClienteEnVentaCobrada: true,
+      customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: true },
+    })
   })
 
   it('🔴 KITCHEN por la operación HTTP idempotente: la transacción recibe puedeCambiarClienteEnVentaCobrada: false', async () => {
@@ -95,14 +96,38 @@ describe('🔴 R4-2: el detalle de la cuenta del POS resuelve payments:create de
     expect(next).not.toHaveBeenCalled()
     expect(enTransaccion).toHaveBeenCalledWith({}, VENUE, ORDER, expect.objectContaining({ customerId: 'cust-K' }), {
       puedeCambiarClienteEnVentaCobrada: false,
+      customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: false },
     })
   })
 
-  it('🔴 si el permiso no se puede resolver ⇒ CERRADO (false)', async () => {
+  it('MANAGER transmite autoridad histórica efectiva además del recibo', async () => {
+    quienEdita('MANAGER')
+    await editar({ customerId: 'cust-K' }, 'MANAGER')
+    expect(directo).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), {
+      puedeCambiarClienteEnVentaCobrada: true,
+      customerAttribution: { staffId: STAFF, canAssignHistorical: true, canAttachAtReceipt: true },
+    })
+  })
+
+  it('rol alto en JWT no vence al CASHIER actual, aun con permiso explícito', async () => {
     quienEdita('CASHIER')
-    prismaMock.staffVenue.findUnique.mockRejectedValue(new Error('se cayó la base'))
-    await editar({ customerId: 'cust-K' }, 'CASHIER')
-    expect(directo).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), { puedeCambiarClienteEnVentaCobrada: false })
+    prismaMock.venueRolePermission.findUnique.mockResolvedValue({ permissions: ['orders:attach-customer'], deniedPermissions: [] } as any)
+    await editar({ customerId: 'cust-K', staffId: 'manager-spoof' }, 'OWNER')
+    expect(directo).toHaveBeenCalledWith(VENUE, ORDER, expect.any(Object), {
+      puedeCambiarClienteEnVentaCobrada: true,
+      customerAttribution: { staffId: STAFF, canAssignHistorical: false, canAttachAtReceipt: true },
+    })
+  })
+
+  it('falla la resolución: no invoca el servicio ni la operación HTTP', async () => {
+    quienEdita('CASHIER')
+    const error = new Error('se cayó la base')
+    prismaMock.staffVenue.findUnique.mockRejectedValue(error)
+    const { next } = await editar({ customerId: 'cust-K' }, 'CASHIER')
+    expect(next).toHaveBeenCalledWith(error)
+    expect(directo).not.toHaveBeenCalled()
+    expect(enTransaccion).not.toHaveBeenCalled()
+    expect(mockExecute).not.toHaveBeenCalled()
   })
 
   it.each([[{ name: 'Mesa 4' }], [{ name: 'Mesa 4', customerId: null }]])(

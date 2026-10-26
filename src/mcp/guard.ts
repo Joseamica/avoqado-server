@@ -2,6 +2,11 @@ import { hasPermission } from '@/services/access/access.service'
 import logger from '@/config/logger'
 import type { McpScope } from './scope'
 import { ScopeError } from './errors'
+import {
+  ATTACH_CUSTOMER_PERMISSION,
+  hasHistoricalCustomerAuthority,
+  type CustomerAttributionActor,
+} from '../services/shared/customerAttributionPolicy'
 
 export { ScopeError }
 
@@ -47,6 +52,14 @@ export function requireCatalogWriteScope(scope: McpScope): void {
 
 export function createGuard(scope: McpScope) {
   return {
+    customerAttributionActor(venueId: string): CustomerAttributionActor {
+      const access = scope.perVenueAccess.get(venueId)
+      return {
+        staffId: scope.staffId,
+        canAssignHistorical: !!access && hasHistoricalCustomerAuthority(access.role, hasPermission(access, ATTACH_CUSTOMER_PERMISSION)),
+        canAttachAtReceipt: !!access && hasPermission(access, 'payments:create'),
+      }
+    },
     /** The venue filter EVERY query must spread into its `where`. Throws on out-of-scope. */
     venueFilter(requestedVenueId?: string): { venueId: { in: string[] } } {
       if (requestedVenueId) {

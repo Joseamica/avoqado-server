@@ -1233,38 +1233,48 @@ describe('sync.mobile.service processIntents', () => {
     expect(acks.map(a => a.status)).toEqual(['ACKED', 'ACKED'])
   })
 
-  // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): el intent offline usa el MISMO servicio que la ruta online, y
-  // le pasa si quien lo encoló tiene `payments:create` (el `authorizeIntent` del lote): en una venta COBRADA, cambiar el cliente
-  // sin él ⇒ el servicio lo rechaza (403 ⇒ REJECTED, cuarentena visible). Sincronizar no es puerta trasera.
+  // La autorización del lote ya resolvió el piso de rol y el permiso vigente.
+  // El reducer debe transportar ambos permisos por separado, con el staff del lote.
   it.each([
-    ['sin payments:create', false],
-    ['con payments:create', true],
-  ])('🔴 UPDATE_DETAILS con customerId pasa el permiso de cobrar de quien lo encoló (%s)', async (_n, puede) => {
+    [false, false],
+    [true, false],
+    [false, true],
+    [true, true],
+  ])('UPDATE_DETAILS pasa recibo %s y autoridad histórica %s sin confundirlos', async (receipt, historical) => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
     const params = baseParams([
-      { id: 'i-r42', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K' } },
+      { id: 'i-r42', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K', staffId: 'manager-spoof' } },
     ])
-    params.authorizeIntent.mockImplementation((_i: any, permiso: string) => (permiso === 'payments:create' ? puede : true))
-    await processIntents(params)
+    params.authorizeIntent.mockImplementation((_i: any, permission: string) => {
+      if (permission === 'payments:create') return receipt
+      if (permission === 'orders:attach-customer') return historical
+      return true
+    })
+    const acks = await processIntents(params)
+    expect(acks[0].status).toBe('ACKED')
     expect(orderMobileService.updateOrderDetails).toHaveBeenCalledWith(
       VENUE,
       'order-12',
       expect.objectContaining({ customerId: 'cust-K' }),
-      { puedeCambiarClienteEnVentaCobrada: puede },
+      {
+        puedeCambiarClienteEnVentaCobrada: receipt,
+        customerAttribution: { staffId: STAFF, canAssignHistorical: historical, canAttachAtReceipt: receipt },
+      },
     )
   })
 
-  it('🔴 UPDATE_DETAILS: el 403 del servicio (venta cobrada, sin permiso) queda REJECTED con su mensaje, no se reintenta', async () => {
+  it.each([
+    [403, 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER'],
+    [409, 'SALE_CUSTOMER_ALREADY_ASSIGNED'],
+  ])('UPDATE_DETAILS: rechazo %s %s queda REJECTED y no RETRY', async (statusCode, code) => {
     ;(prisma.order.findFirst as jest.Mock).mockResolvedValue({ version: 2, tableId: 't1', servedById: STAFF })
-    const prohibido = Object.assign(new Error('Para cambiar el cliente de una venta ya cobrada necesitas el permiso de cobrar.'), {
-      statusCode: 403,
-      code: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE',
-    })
-    ;(orderMobileService.updateOrderDetails as jest.Mock).mockRejectedValueOnce(prohibido)
+    const denied = Object.assign(new Error('No se puede asignar este cliente a la venta.'), { statusCode, code })
+    ;(orderMobileService.updateOrderDetails as jest.Mock).mockRejectedValueOnce(denied)
     const acks = await processIntents(
       baseParams([{ id: 'i-r42b', seq: 1, type: 'UPDATE_DETAILS', payload: { orderId: 'order-12', customerId: 'cust-K' } }]),
     )
-    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: 'CUSTOMER_CHANGE_REQUIRES_PAYMENTS_CREATE' })
+    expect(acks[0]).toMatchObject({ status: 'REJECTED', errorCode: code, message: denied.message })
+    expect(orderMobileService.updateOrderDetails).toHaveBeenCalledTimes(1)
   })
 
   // ─── SPLIT_ORDER / MERGE_ORDERS (Fase 3, split offline) ───────────────────

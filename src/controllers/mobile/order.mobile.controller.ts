@@ -7,6 +7,7 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
+import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import logger from '../../config/logger'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
@@ -678,7 +679,10 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae un `customerId` (null = sin cambio).
     const opciones =
       customerId !== undefined && customerId !== null
-        ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) }
+        ? {
+            puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req),
+            customerAttribution: await customerAttributionActor(req),
+          }
         : {}
     if (!operation) {
       const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType }, opciones)

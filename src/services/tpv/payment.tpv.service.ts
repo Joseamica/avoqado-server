@@ -429,6 +429,7 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
@@ -4974,7 +4975,13 @@ async function verifyDelegatedPaymentLanded(
  * @param orgId Organization ID
  * @returns Created payment
  */
-export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
+export async function recordFastPayment(
+  venueId: string,
+  paymentData: PaymentCreationData,
+  userId?: string,
+  _orgId?: string,
+  customerActor: CustomerAttributionActor = {},
+) {
   const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
@@ -5020,6 +5027,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
 
     const target = resolveFastPaymentTarget(arbitrationRow, venueId)
+    if (arbitrationRow?.venueId === venueId && arbitrationRow.orderId && arbitrationRow.customerId) {
+      customerActor = { ...customerActor, originalCustomer: { orderId: arbitrationRow.orderId, customerId: arbitrationRow.customerId } }
+    }
 
     // 🔑 El del BODY GANA sobre el de la fila: es el dato más fresco (el cajero lo acaba
     // de elegir), mientras la fila puede llevar minutos escrita. `target.seededCustomerId`
@@ -5092,7 +5102,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         // venta que YA existe. Sólo RELLENA (nunca reasigna) y nunca lanza, así que no
         // altera la semántica del catch de abajo. Así `customerLink` viaja en TODAS las
         // respuestas exitosas de `/fast` y el cliente móvil no tiene que adivinar.
-        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, effectiveCustomerId)
+        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, effectiveCustomerId, customerActor)
         return { ...delegated, customerLink }
       } catch (err) {
         // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
@@ -5228,7 +5238,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // si el primer intento entró anónimo, sin esto la venta se quedaba sin cliente para
       // siempre (la idempotencia devuelve el pago y nadie vuelve a mirar). Rellenar es
       // aditivo y no toca dinero; reasignar está prohibido (ver `fastPaymentCustomer.ts`).
-      const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingByKey), effectiveCustomerId)
+      const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingByKey), effectiveCustomerId, customerActor)
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -5254,7 +5264,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Return existing payment with receipt (safe retry - client gets same response)
     // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
     // (TPV < v1.10.10, sin llave) también puede traer el cliente que faltaba.
-    const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingPayment), effectiveCustomerId)
+    const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingPayment), effectiveCustomerId, customerActor)
     return {
       ...existingPayment,
       digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
@@ -5833,7 +5843,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         if (winner) {
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
-          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId)
+          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId, customerActor)
           return {
             ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, null)) ?? winner),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),

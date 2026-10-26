@@ -4042,6 +4042,23 @@ describe('Task5 receipt coverage', () => {
       for (const action of actions) {
         const f = await detailsFixture(action)
         await prisma.order.update({ where: { id: f.o.id }, data: { paymentStatus } })
+        // PAID usa el recibo real propio y reciente; el estado solo no prueba autoridad de atribución.
+        if (paymentStatus === 'PAID') {
+          await prisma.payment.create({
+            data: {
+              venueId,
+              orderId: f.o.id,
+              amount: 100,
+              feePercentage: 0,
+              feeAmount: 0,
+              netAmount: 100,
+              method: 'CASH',
+              status: 'COMPLETED',
+              type: 'REGULAR',
+              processedById: authorId,
+            },
+          })
+        }
         expect((await callHttp(f.input, 'post', detailsPath(f.input), detailsBody(f.input))).status).toBe(200)
         await assertDetailsApplied(f)
       }
