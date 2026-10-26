@@ -166,6 +166,40 @@ describe('card exchange outcomes (E2)', () => {
     await noReturnEffects(e.id)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.objectContaining({ exchangeId: e.id }))
   })
+  it.each(['sweep', 'complete'] as const)(
+    'late charge after the new sale is deleted is reviewed by %s without credit, stock effects or reopening',
+    async path => {
+      const { exchange: e } = await reserve()
+      await decline(e.newOrderId)
+      // Mirror the dashboard's soft deletion, which leaves the exchange pending.
+      await prisma.$transaction(async tx => {
+        await tx.order.update({ where: { id: e.newOrderId, venueId: s.venueId }, data: { status: 'DELETED', version: { increment: 1 } } })
+        await tx.activityLog.create({
+          data: {
+            venueId: s.venueId,
+            staffId: s.staffId,
+            entity: 'Order',
+            entityId: e.newOrderId,
+            action: 'ORDER_UPDATED',
+            data: { status: 'DELETED', reason: 'Customer left before the card charge was confirmed' },
+          },
+        })
+      })
+      const card = await s.terminalCharge(e.newOrderId, 10000)
+      expect((await row(e.id)).status).toBe('PENDING_PAYMENT')
+      expect(await prisma.order.findUnique({ where: { id: e.newOrderId } })).toMatchObject({ status: 'DELETED' })
+      await noReturnEffects(e.id)
+      if (path === 'sweep') expect(await (await worker()).run()).toMatchObject({ reviewed: 1 })
+      else expect((await complete(e.id)).status).toBe('NEEDS_REVIEW')
+      expect(await row(e.id)).toMatchObject({ status: 'NEEDS_REVIEW', reviewReason: 'LATE_CHARGE_AFTER_RELEASE', chargePaymentId: card.id })
+      expect(await prisma.order.findUnique({ where: { id: e.newOrderId } })).toMatchObject({ status: 'DELETED' })
+      await noReturnEffects(e.id)
+      expect(await prisma.payment.count({ where: { venueId: s.venueId, tenderType: { is: { systemKind: 'EXCHANGE_CREDIT' } } } })).toBe(0)
+      const savedCharge = await prisma.payment.findUniqueOrThrow({ where: { id: card.id, venueId: s.venueId } })
+      expect(savedCharge).toMatchObject({ orderId: e.newOrderId, status: 'COMPLETED' })
+      expect(savedCharge.amount.toNumber()).toBe(100)
+    },
+  )
   it.each(['UNKNOWN', 'TIMED_OUT'] as const)('never releases an hour-old unresolved %s request, including AUTO_RELEASED', async status => {
     const { exchange: e } = await reserve()
     await age(e.id, 61)

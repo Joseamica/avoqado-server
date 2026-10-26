@@ -2,7 +2,7 @@ import { Prisma } from '@prisma/client'
 import { NotFoundError } from '@/errors/AppError'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
-import { computeOrderBalance } from '../shared/orderBalance'
+import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
 import { assertRefundableLines, assertPromotionLineFullQuantity, bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
 import { createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { exchangeChargeEvidence } from './exchangeCharge'
@@ -124,7 +124,7 @@ export async function prepareCardSettlementInTx(
     return { review: response, salePostingId: posting?.id ?? null }
   }
   const order = await tx.order.findFirstOrThrow({ where: { venueId, id: exchange.newOrderId } })
-  if (exchange.status === 'CANCELLED' || order.status === 'CANCELLED') return review('LATE_CHARGE_AFTER_RELEASE')
+  if (exchange.status === 'CANCELLED' || claseDeEstado(order.status) === 'CANCELADA') return review('LATE_CHARGE_AFTER_RELEASE')
   const refundedCharge = await tx.payment.findFirst({
     where: {
       venueId,
