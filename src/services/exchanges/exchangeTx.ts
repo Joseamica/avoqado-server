@@ -1,6 +1,9 @@
 import { OrderSource, OrderType, Prisma } from '@prisma/client'
 import { BadRequestError, NotFoundError, ConflictError } from '@/errors/AppError'
-import { utcTs } from '@/utils/sqlDates'
+import { exchangeAccountingAt } from './exchangeAccountingAt'
+import { prepareCardSettlementInTx, exchangeSalePostingInTx, ExchangeGenerationChanged, type ExchangeSettleTxInput } from './exchangeSettle'
+import type { ExchangeChargeEvidence } from './exchangeCharge'
+import type { Payment, ExchangeStatus } from '@prisma/client'
 import { TOPES_POR_ORDEN } from '../fiscal/librosDeOrdenes'
 import { computeOrderBalance } from '../shared/orderBalance'
 import { lockExistingOrderForPayment, MAX_ORDER_LOCK_SCOPE } from '../shared/paymentShiftClaim'
@@ -40,6 +43,12 @@ export type { ChainRefundResolution } from './exchangeChainRefund'
 
 export interface PreparedExchange {
   input: ExchangeTxInput
+  accountingAt: Date
+  actorStaffId: string | null
+  expectedStatus: ExchangeStatus
+  resultRevision: number
+  existingCharge: Payment | null
+  finalStatus: 'COMPLETED'
   exchangeId: string
   sale: SaleForExchange
   newOrder: { id: string; orderNumber: string; createdAt: Date }
@@ -72,6 +81,7 @@ export interface PreparedExchange {
 }
 export interface ExchangeTxOutcome {
   exchangeId: string
+  resultRevision: number
   response: ExchangeResponse
   postCommit: {
     salePostingId: string | null
@@ -86,6 +96,12 @@ export interface ExchangeTxOutcome {
     source: string
   }
 }
+export type ExchangeTxEarly =
+  | { replay: ExchangeResponse; resultRevision: number }
+  | { reserved: ExchangeResponse }
+  | { review: ExchangeResponse; salePostingId: string | null }
+  | { unsettled: ExchangeResponse; evidence: ExchangeChargeEvidence | null }
+
 const pesos = (c: number) => new Prisma.Decimal(c).div(100)
 
 /** Sólo lee: el reembolso ya bloqueó el crédito; la vista previa y el detalle reutilizan la misma regla sin candados. */
@@ -107,8 +123,9 @@ export async function chainRefundSemanticsInTx(
 /** La llave decide antes que el estado vigente de la venta: repetir algo ya hecho nunca devuelve dos piezas. */
 export async function prepareExchangeInTx(
   tx: Prisma.TransactionClient,
-  input: ExchangeTxInput,
-): Promise<PreparedExchange | { replay: ExchangeResponse }> {
+  input: ExchangeTxInput | ExchangeSettleTxInput,
+): Promise<PreparedExchange | ExchangeTxEarly> {
+  if ('mode' in input) return prepareCardSettlementInTx(tx, input)
   const { venueId, body, actorStaffId, originalOrderId } = input
   await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange:v1:' + venueId + ':' + body.idempotencyKey}, 0))::text`
   const existing = await tx.exchange.findUnique({ where: { venueId_idempotencyKey: { venueId, idempotencyKey: body.idempotencyKey } } })
@@ -116,26 +133,10 @@ export async function prepareExchangeInTx(
     if (existing.requestHash !== input.requestHash)
       throw new ExchangeError('IDEMPOTENCY_KEY_REUSED', 'Esta llave ya se usó para otro cambio.', 409)
     if (!existing.result) throw new Error('EXCHANGE_RESULT_MISSING')
-    return { replay: existing.result as unknown as ExchangeResponse }
+    return { replay: existing.result as unknown as ExchangeResponse, resultRevision: existing.resultRevision }
   }
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId: originalOrderId }))) throw new NotFoundError('No se encontró la venta.')
-  // Las mismas Orders ya reclamadas: el reloj no puede adelantar el cambio a un movimiento confirmado del libro.
-  const [{ accountingAt }] = await tx.$queryRaw<Array<{ accountingAt: Date }>>`
-    WITH RECURSIVE ancestors(id) AS (
-      SELECT id FROM "Order" WHERE id = ${originalOrderId} AND "venueId" = ${venueId}
-      UNION
-      SELECT root."orderId" FROM ancestors child
-      JOIN "Payment" credit ON credit."orderId" = child.id AND credit."venueId" = ${venueId}
-      JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
-      JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
-      JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
-    ), scope AS MATERIALIZED (SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))})
-    SELECT GREATEST(${utcTs(new Date())}, MAX(m."createdAt") + INTERVAL '1 millisecond') AS "accountingAt"
-    FROM scope LEFT JOIN LATERAL (
-      SELECT p."createdAt" FROM "Payment" p
-      WHERE p."orderId" = scope.id AND p."venueId" = ${venueId} AND p.status = 'COMPLETED'
-      ORDER BY p."createdAt" DESC LIMIT 1
-    ) m ON true`
+  const accountingAt = await exchangeAccountingAt(tx, venueId, [originalOrderId])
   const sale = await loadSaleForExchange(tx, venueId, originalOrderId)
   if (!sale.payments.some(p => p.id === body.originalPaymentId)) notReturnable('NOT_PAID')
   if (!sale.charged.atribuible) notReturnable('NOT_ATTRIBUTABLE')
@@ -280,7 +281,12 @@ export async function prepareExchangeInTx(
   const { settlement } = body
   if (settlement.kind !== calc.kind || (calc.kind === 'EVEN' ? settlement.method !== null : settlement.method === null))
     throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'El medio elegido no corresponde a la diferencia del cambio.', 422)
-  if (settlement.method === 'CARD_TERMINAL')
+  const reserveCard = calc.kind === 'COLLECT' && settlement.method === 'CARD_TERMINAL'
+  if (settlement.method === 'CARD_TERMINAL' && body.isOfflineReplay)
+    throw new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'Cobrar o devolver con tarjeta necesita conexión.', 422, {
+      reason: 'CARD_NEEDS_CONNECTION',
+    })
+  if (settlement.method === 'CARD_TERMINAL' && !reserveCard)
     throw new ExchangeError(
       'EXCHANGE_SETTLEMENT_UNAVAILABLE',
       'Cobrar o devolver con tarjeta en un cambio todavía no está disponible.',
@@ -358,11 +364,12 @@ export async function prepareExchangeInTx(
     )
   if (paymentCount > MAX_EXCHANGE_SALE_PAYMENTS) throw resultTooLarge()
   const roots = [...new Set(credits.map(s => paymentById.get(s.paymentId)!.rootPaymentId))]
-  if (roots.length) {
+  if (roots.length || reserveCard) {
     // El crédito apunta a las raíces, no necesariamente al origen. Incluye SU ascendencia (incluso créditos ya devueltos).
     const [{ n }] = await tx.$queryRaw<Array<{ n: number }>>`
       WITH RECURSIVE ancestors(id) AS (
         SELECT "orderId" FROM "Payment" WHERE "venueId"=${venueId} AND id=ANY(${roots}::text[]) AND "orderId" IS NOT NULL
+        UNION SELECT id FROM "Order" WHERE ${reserveCard} AND id=${originalOrderId} AND "venueId"=${venueId}
         UNION
         SELECT parent.id FROM ancestors child
         JOIN "Payment" credit ON credit."orderId"=child.id AND credit."venueId"=${venueId}
@@ -419,12 +426,19 @@ export async function prepareExchangeInTx(
     )
   const newOrder = await createExchangeSaleInTx(tx, input, sale, takenLines, accountingAt)
   const lines = { returned, taken: takenLines }
+  const returnLines = [...used].flatMap(([orderItemId]) => {
+    const l = byId.get(orderItemId)!
+    const quantity = returned.filter(r => r.orderItemId === orderItemId && r.restock).reduce((sum, r) => sum + r.quantity, 0)
+    return quantity > 0 && l.productId && l.product?.trackInventory && l.product.inventoryMethod === 'QUANTITY' && l.product.hasInventoryRow
+      ? [{ orderItemId, productId: l.productId, quantity, eligibility: { inventoryMethod: 'QUANTITY' as const, eligible: true as const } }]
+      : []
+  })
   const exchange = await tx.exchange.create({
     data: {
       venueId,
       idempotencyKey: body.idempotencyKey,
       requestHash: input.requestHash,
-      status: 'COMPLETED',
+      status: reserveCard ? 'PENDING_PAYMENT' : 'COMPLETED',
       originalOrderId,
       originalPaymentId: body.originalPaymentId,
       newOrderId: newOrder.id,
@@ -434,7 +448,7 @@ export async function prepareExchangeInTx(
       settlementKind: calc.kind,
       settlementMethod: settlement.method,
       cashDrawerSessionId: drawer?.id ?? null,
-      lines: lines as unknown as Prisma.InputJsonValue,
+      lines: { ...lines, returnLines } as unknown as Prisma.InputJsonValue,
       staffId: actorStaffId,
       deviceId: body.deviceId,
       createdAtLocal: new Date(body.createdAtLocal),
@@ -442,6 +456,78 @@ export async function prepareExchangeInTx(
       isOfflineReplay: false,
     },
   })
+  const prepared: Omit<PreparedExchange, 'refundRows' | 'newSalePayments'> = {
+    input,
+    exchangeId: exchange.id,
+    sale,
+    newOrder,
+    lines,
+    returnLines,
+    returnedCents: calc.returnedCents,
+    takenCents: calc.takenCents,
+    differenceCents: calc.differenceCents,
+    accountingAt,
+    actorStaffId,
+    expectedStatus: exchange.status,
+    resultRevision: exchange.resultRevision,
+    existingCharge: null,
+    finalStatus: 'COMPLETED',
+  }
+  if (reserveCard) {
+    const response: ExchangeResponse = {
+      id: exchange.id,
+      status: 'PENDING_PAYMENT',
+      originalOrderId,
+      originalOrderNumber: sale.order.orderNumber,
+      newOrderId: newOrder.id,
+      newOrderNumber: newOrder.orderNumber,
+      returnedCents: calc.returnedCents,
+      takenCents: calc.takenCents,
+      differenceCents: calc.differenceCents,
+      amountToChargeCents: calc.differenceCents,
+      chargePaymentId: null,
+      settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', amountCents: calc.differenceCents, sources: [] },
+      lines,
+      refundPaymentIds: [],
+      paymentIds: [],
+      pendingCardRefundCents: 0,
+      receiptUrl: null,
+    }
+    await tx.exchange.update({ where: { id: exchange.id, venueId }, data: { result: response as unknown as Prisma.InputJsonValue } })
+    await tx.activityLog.create({
+      data: {
+        venueId,
+        entity: 'Exchange',
+        entityId: exchange.id,
+        action: 'EXCHANGE_RESERVED',
+        staffId: actorStaffId,
+        createdAt: accountingAt,
+        data: { originalOrderId, newOrderId: newOrder.id, differenceAmount: calc.differenceCents / 100 },
+      },
+    })
+    return { reserved: response }
+  }
+  return prepareExchangeCreditsInTx(tx, prepared, slices, chains, ec, drawer?.id ?? null)
+}
+
+/** Shared CREDIT writers; all existing Orders/Payments were claimed before this function. */
+export async function prepareExchangeCreditsInTx(
+  tx: Prisma.TransactionClient,
+  prepared: Omit<PreparedExchange, 'refundRows' | 'newSalePayments'>,
+  slices: AllocationSlice[],
+  chains: Map<string, ChainRefundResolution>,
+  ec: Awaited<ReturnType<typeof resolveExchangeCreditTenderInTx>>,
+  drawerId: string | null = null,
+  snapshots = new Map<string, Awaited<ReturnType<typeof bloquearCobroParaReembolso>>>(),
+): Promise<PreparedExchange> {
+  const { input, sale, newOrder, accountingAt, exchangeId } = prepared
+  const { venueId, actorStaffId, body, originalOrderId } = input
+  const { settlement } = body
+  const calc = prepared
+  const paymentById = new Map(sale.payments.map(p => [p.id, p]))
+  const pieces = prepared.lines.returned.flatMap(line =>
+    line.pieceValuesCents.map(paidCents => ({ orderItemId: line.orderItemId, paidCents })),
+  )
   const money: RefundMoneySemantics = { ...ec, merchantAccountId: null, source: 'OTHER' }
   const split = splitItemsAcrossRefundRows(
     pieces.map(p => ({ orderItemId: p.orderItemId, cents: p.paidCents })),
@@ -463,6 +549,7 @@ export async function prepareExchangeInTx(
       staffId: actorStaffId,
       tenderCommission: 'NONE',
       shift: 'CLAIM_LIVE',
+      bloqueado: snapshots.get(slice.paymentId),
       createdAt: accountingAt,
       ...(credit
         ? { moneyAs: money, skipNegativeCostObligation: true }
@@ -470,7 +557,7 @@ export async function prepareExchangeInTx(
           ? { moneyAs: chain.money }
           : { devolverCon: slice.mode === 'CHOSEN' ? (settlement.method as 'CASH' | 'BANK_TRANSFER') : undefined }),
       exchangeMark: {
-        exchangeId: exchange.id,
+        exchangeId,
         role: credit ? EXCHANGE_REFUND_ROLE.CREDIT : EXCHANGE_REFUND_ROLE.DIFFERENCE,
         rootPaymentId,
       },
@@ -498,7 +585,7 @@ export async function prepareExchangeInTx(
       cents: slice.cents,
       rootPaymentId,
       money: row,
-      sessionId: drawer?.id ?? null,
+      sessionId: drawerId,
     })
   }
   const ctx: AbonoEnTxContexto = {
@@ -528,7 +615,7 @@ export async function prepareExchangeInTx(
         },
       },
     }))
-  if (calc.kind === 'COLLECT')
+  if (body.settlement.kind === 'COLLECT' && !prepared.existingCharge)
     newSalePayments.push({
       ctx,
       role: 'DIFFERENCE',
@@ -550,26 +637,7 @@ export async function prepareExchangeInTx(
     payment.entrada.createdAt = accountingAt
     if (i < newSalePayments.length - 1) payment.entrada.cierreDiferido = true
   }
-  const returnLines = [...used].flatMap(([orderItemId]) => {
-    const l = byId.get(orderItemId)!
-    const quantity = returned.filter(r => r.orderItemId === orderItemId && r.restock).reduce((sum, r) => sum + r.quantity, 0)
-    return quantity > 0 && l.productId && l.product?.trackInventory && l.product.inventoryMethod === 'QUANTITY' && l.product.hasInventoryRow
-      ? [{ orderItemId, productId: l.productId, quantity, eligibility: { inventoryMethod: 'QUANTITY' as const, eligible: true as const } }]
-      : []
-  })
-  return {
-    input,
-    exchangeId: exchange.id,
-    sale,
-    newOrder,
-    lines,
-    returnedCents: calc.returnedCents,
-    takenCents: calc.takenCents,
-    differenceCents: calc.differenceCents,
-    refundRows,
-    newSalePayments,
-    returnLines,
-  }
+  return { ...prepared, refundRows, newSalePayments }
 }
 
 /** La venta es privada hasta el commit: no pasa por el constructor general ni vuelve a aplicar promociones. */
@@ -687,7 +755,17 @@ export async function finishExchangeInTx(
 ): Promise<ExchangeTxOutcome> {
   const p = prepared
   const { venueId } = p.input
-  if (settled.length !== p.newSalePayments.length || !settled.at(-1)?.isFullyPaid) throw new Error('EXCHANGE_SALE_BALANCE_MISMATCH')
+  const cardOnly = p.existingCharge !== null && p.returnedCents === 0 && p.newSalePayments.length === 0 && settled.length === 0
+  if (settled.length !== p.newSalePayments.length || (!cardOnly && !settled.at(-1)?.isFullyPaid))
+    throw new Error('EXCHANGE_SALE_BALANCE_MISMATCH')
+  if (cardOnly) {
+    const order = await tx.order.findFirstOrThrow({ where: { id: p.newOrder.id, venueId } })
+    if (!computeOrderBalance(order, [p.existingCharge!]).isFullyPaid) throw new Error('EXCHANGE_SALE_BALANCE_MISMATCH')
+    const { settleStandalonePaymentInTx } = await import('../tpv/payment.tpv.service')
+    await settleStandalonePaymentInTx(tx, venueId, p.newOrder.id, p.existingCharge!, p.input.actorStaffId)
+  }
+  const lastPayment = settled.at(-1)?.newPayment ?? p.existingCharge!
+  const salePosting = p.existingCharge ? await exchangeSalePostingInTx(tx, venueId, p.newOrder.id, p.input.actorStaffId) : null
   for (const [i, payment] of p.newSalePayments.entries()) {
     if (!payment.slice || payment.slice.cents === 0) continue
     const refund = p.refundRows.find(r => r.paymentId === payment.slice!.paymentId && r.role === 'CREDIT')!
@@ -699,7 +777,7 @@ export async function finishExchangeInTx(
         creditRefundPaymentId: refund.id,
         creditPaymentId: settled[i].newPayment.id,
         amount: pesos(payment.slice.cents),
-        createdAt: p.newOrder.createdAt,
+        createdAt: p.accountingAt,
       },
     })
   }
@@ -712,7 +790,7 @@ export async function finishExchangeInTx(
   })
   const response: ExchangeResponse = {
     id: p.exchangeId,
-    status: 'COMPLETED',
+    status: p.finalStatus,
     originalOrderId: p.sale.order.id,
     originalOrderNumber: p.sale.order.orderNumber,
     newOrderId: p.newOrder.id,
@@ -733,27 +811,33 @@ export async function finishExchangeInTx(
     },
     lines: p.lines,
     refundPaymentIds: p.refundRows.map(r => r.id),
-    paymentIds: settled.map(s => s.newPayment.id),
+    paymentIds: [...(p.existingCharge ? [p.existingCharge.id] : []), ...settled.map(s => s.newPayment.id)],
     pendingCardRefundCents: 0,
     receiptUrl: null,
+    ...(p.existingCharge ? { chargePaymentId: p.existingCharge.id, reviewReason: null } : {}),
   }
   const cashSale = p.newSalePayments.at(-1)?.role === 'DIFFERENCE' && paymentCountsAsDrawerCash(settled.at(-1)!.newPayment)
   // La venta nació antes del reclamo: conserva el turno que ganaron sus cobros, incluso si quedó sin turno.
-  await tx.order.update({ where: { id: p.newOrder.id, venueId }, data: { shiftId: settled.at(-1)!.newPayment.shiftId ?? null } })
-  await tx.exchange.update({
-    where: { id: p.exchangeId, venueId },
+  await tx.order.update({ where: { id: p.newOrder.id, venueId }, data: { shiftId: lastPayment.shiftId ?? null } })
+  const transition = await tx.exchange.updateMany({
+    where: { id: p.exchangeId, venueId, status: p.expectedStatus, resultRevision: p.resultRevision },
     data: {
+      status: p.finalStatus,
+      createdAt: p.accountingAt,
+      resultRevision: { increment: 1 },
+      ...(p.existingCharge ? { chargePaymentId: p.existingCharge.id, reviewReason: null } : {}),
       result: response as unknown as Prisma.InputJsonValue,
       ...(cashSale ? { cashDrawerSessionId: settled.at(-1)!.cajaAlCobrarId } : {}),
     },
   })
+  if (transition.count !== 1) throw new ExchangeGenerationChanged()
   await tx.activityLog.create({
     data: {
       action: 'EXCHANGE_CREATED',
-      createdAt: p.newOrder.createdAt,
+      createdAt: p.accountingAt,
       entity: 'Exchange',
       entityId: p.exchangeId,
-      staffId: p.input.actorStaffId,
+      staffId: p.actorStaffId,
       venueId,
       data: {
         originalOrderNumber: response.originalOrderNumber,
@@ -770,14 +854,22 @@ export async function finishExchangeInTx(
         })),
         deviceId: p.input.body.deviceId,
         isOfflineReplay: false,
+        ...(p.existingCharge
+          ? {
+              chargePaymentId: p.existingCharge.id,
+              originalStaffId: p.input.actorStaffId,
+              origin: p.actorStaffId === null ? 'SWEEP' : 'HTTP',
+            }
+          : {}),
       },
     },
   })
   return {
     exchangeId: p.exchangeId,
+    resultRevision: p.resultRevision + 1,
     response,
     postCommit: {
-      salePostingId: settled.at(-1)!.postingId ?? null,
+      salePostingId: salePosting?.id ?? settled.at(-1)?.postingId ?? null,
       returnPostingId: returnPosting?.id ?? null,
       cashSale: cashSale
         ? {
@@ -790,10 +882,10 @@ export async function finishExchangeInTx(
       cashPayouts: p.refundRows
         .filter(r => r.role === 'PAYOUT')
         .map(r => ({ refundPaymentId: r.id, sessionId: r.sessionId, amountPesos: r.cents / 100, money: r.money })),
-      receiptPaymentId: settled.at(-1)!.newPayment.id,
+      receiptPaymentId: p.existingCharge?.id ?? lastPayment.id,
       newOrderId: p.newOrder.id,
       originalOrderId: p.sale.order.id,
-      loyaltyBasePesos: settled.at(-1)!.loyaltyBase,
+      loyaltyBasePesos: p.existingCharge ? p.takenCents / 100 : settled.at(-1)!.loyaltyBase,
       orderType: p.sale.order.type,
       source: p.sale.order.source,
     },

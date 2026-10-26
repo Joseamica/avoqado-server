@@ -37,11 +37,13 @@ import { StaffRole } from '@prisma/client'
 import mobileRouter, { permisoDeCambio } from '@/routes/mobile.routes'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { validateRequest } from '@/middlewares/validation'
-import { createExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
-import { createExchange } from '@/controllers/mobile/exchange.mobile.controller'
+import { createExchangeSchema, exchangeIdParamsSchema } from '@/schemas/mobile/exchange.mobile.schema'
+import { createExchange, completeExchange } from '@/controllers/mobile/exchange.mobile.controller'
 
 const validatorIndex = jest.mocked(validateRequest).mock.calls.findIndex(([schema]) => schema === createExchangeSchema)
 const validator = jest.mocked(validateRequest).mock.results[validatorIndex]?.value
+const completeValidatorIndex = jest.mocked(validateRequest).mock.calls.findIndex(([schema]) => schema === exchangeIdParamsSchema)
+const completeValidator = jest.mocked(validateRequest).mock.results[completeValidatorIndex]?.value
 
 async function correr(role: StaffRole, body: unknown, headers: Record<string, string> = {}) {
   mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
@@ -71,6 +73,14 @@ beforeEach(() => {
 })
 
 describe('exchange mobile route permissions', () => {
+  it('complete is authenticate → validate → payments:refund → controller', () => {
+    const layer = (mobileRouter as any).stack.find(
+      (l: any) => l.route?.path === '/venues/:venueId/exchanges/:exchangeId/complete' && l.route.methods.post,
+    )
+    const handles = layer.route.stack.map((l: any) => l.handle)
+    expect(handles).toEqual([authenticateTokenMiddleware, completeValidator, expect.any(Function), completeExchange])
+    expect(handles[2].requiredPermission).toBe('payments:refund')
+  })
   it('reaches the controller after a lost response without consuming the manager PIN again', async () => {
     mockExchangeFindUnique.mockResolvedValue({ staffId: 'u1' })
     mockConsumeOverride.mockResolvedValue(null)

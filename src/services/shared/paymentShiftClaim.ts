@@ -65,7 +65,7 @@ export const MAX_ORDER_LOCK_SCOPE = 50
  */
 export async function lockExistingOrderForPayment(
   tx: ExistingOrderLockTransaction,
-  input: { venueId: string; orderId: string },
+  input: { venueId: string; orderId: string; additionalOrderIds?: string[] },
 ): Promise<boolean> {
   // `false` significa «la orden ya no es de este venue» y decide dinero: un
   // doble sin `$queryRaw` no puede contestar eso en silencio. El Prisma
@@ -77,7 +77,8 @@ export async function lockExistingOrderForPayment(
   // El fence materializado frena el borrado de demos ANTES de poseer sus Orders/Payments.
   const rows = await tx.$queryRaw<Array<{ id: string | null; scopeTooLarge?: boolean }>>`
     WITH RECURSIVE input AS (
-      SELECT ${input.orderId}::text AS order_id, ${input.venueId}::text AS venue_id
+      SELECT unnest(${[...new Set([input.orderId, ...(input.additionalOrderIds ?? [])])]}::text[]) AS order_id,
+        ${input.venueId}::text AS venue_id
     ), ancestors(id) AS (
       SELECT o.id FROM "Order" o JOIN input i ON o.id = i.order_id AND o."venueId" = i.venue_id
       UNION
@@ -93,15 +94,15 @@ export async function lockExistingOrderForPayment(
     ), size AS MATERIALIZED (
       SELECT COUNT(*) AS n FROM scope
     ), fence AS MATERIALIZED (
-      SELECT v.id FROM "Venue" v JOIN input i ON v.id = i.venue_id
-      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      SELECT v.id FROM "Venue" v WHERE v.id = ${input.venueId}
+        AND (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
       FOR KEY SHARE OF v
     ), locked AS MATERIALIZED (
       SELECT o.id
       FROM "Order" o JOIN scope a ON a.id = o.id
       JOIN fence v ON v.id = o."venueId"
-      JOIN input i ON o."venueId" = i.venue_id
-      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      WHERE o."venueId" = ${input.venueId}
+        AND (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
       ORDER BY o."createdAt" DESC, o.id DESC
       FOR UPDATE OF o
     )
@@ -114,6 +115,22 @@ export async function lockExistingOrderForPayment(
       'Esta venta tiene demasiados cambios enlazados para procesarla con seguridad. Pide ayuda a soporte con el folio de la venta.',
       'ORDER_LOCK_SCOPE_TOO_LARGE',
     )
+  if (input.additionalOrderIds?.length) {
+    const current = await tx.$queryRaw<Array<{ id: string }>>`
+      WITH RECURSIVE ancestors(id) AS (
+        SELECT id FROM "Order" WHERE "venueId"=${input.venueId}
+          AND id=ANY(${[input.orderId, ...input.additionalOrderIds]}::text[])
+        UNION
+        SELECT parent.id FROM ancestors child
+        JOIN "Payment" credit ON credit."orderId"=child.id AND credit."venueId"=${input.venueId}
+        JOIN "ExchangeCreditLink" link ON link."creditPaymentId"=credit.id AND link."venueId"=credit."venueId"
+        JOIN "Payment" root ON root.id=link."originPaymentId" AND root."venueId"=credit."venueId"
+        JOIN "Order" parent ON parent.id=root."orderId" AND parent."venueId"=credit."venueId"
+      ) SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE + 1))}`
+    const lockedIds = new Set(rows.map(row => row.id))
+    if (current.length !== lockedIds.size || current.some(row => !lockedIds.has(row.id)))
+      throw new ConflictError('Las ventas enlazadas cambiaron. Intenta de nuevo.', 'ORDER_LOCK_SCOPE_CHANGED')
+  }
   return Array.isArray(rows) && rows.some(row => row.id === input.orderId)
 }
 

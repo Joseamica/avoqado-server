@@ -159,6 +159,11 @@
       "count": 1,
       "loops": 0,
       "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
+    },
+    "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "C06: advisory then Venue and the full new/original/ancestor Order union; credit/root/charge Payments are claimed once by id ASC before snapshots and Shift. PostgreSQL exchangeCardLockOrder exercises CHAIN/direct refunds and terminal registration."
     }
   },
   "callers": {
@@ -1041,6 +1046,21 @@
       "count": 1,
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+    },
+    "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "C06: one canonical union seeded with new + original and their ancestors, before evidence or any Payment/Shift; changed scope rolls back and retries."
+    },
+    "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#bloquearCobroParaReembolso": {
+      "count": 1,
+      "loops": 1,
+      "reason": "C06: reentrant snapshots of credit Payments already in the locked union, before Shift; writeRefundInTx receives those snapshots, so no late lock-set expansion."
+    },
+    "src/services/exchanges/exchangeTx.ts#prepareExchangeInTx#prepareCardSettlementInTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "C09 dispatch is the first branch, before immediate-exchange locks or money. It enters the same C06 opener with new + original scope; no lock union is extended after Payment or Shift."
     }
   }
 }

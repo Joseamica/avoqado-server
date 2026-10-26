@@ -148,7 +148,6 @@ describe('exchange difference without a terminal (RF2)', () => {
 
   it.each([
     ['COLLECT', 'GIFT_CARD_BALANCE', 'GIFT_CARD_COLLECT_NOT_AVAILABLE'],
-    ['COLLECT', 'CARD_TERMINAL', 'CARD_TERMINAL_NOT_ENABLED'],
     ['PAYOUT', 'CARD_TERMINAL', 'CARD_TERMINAL_NOT_ENABLED'],
   ] as const)('%s %s is unavailable and writes no exchange', async (kind, method, reason) => {
     const s = await seed()

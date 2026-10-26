@@ -2,12 +2,12 @@ import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { listRecentSales, recentSalesWindowStart } from '@/services/mobile/recentSales.mobile.service'
 import { decodeSalesCursor, decodeSalesSince, encodeSalesCursor, encodeSalesSince } from '@/schemas/mobile/recentSales.mobile.schema'
-import { createExchange } from '@/services/exchanges/exchange.service'
+import { createExchange, completeExchange } from '@/services/exchanges/exchange.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { updatePayment } from '@/services/dashboard/payment.dashboard.service'
 import { payCashOrder, payGiftCardBalanceOnOrder, returnGiftBalanceAndCancelOrder } from '@/services/mobile/order.mobile.service'
 import { encryptGiftCardCode, generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
-import { seedClothingSale } from './seedExchange'
+import { seedClothingSale, seedCardSale } from './seedExchange'
 import { seedManySales } from './seedRecentSales'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
@@ -46,6 +46,39 @@ afterEach(async () => {
 })
 
 describe('sales/recent delta copy (B)', () => {
+  it('keeps original quantities while reserved, omits the pending/partial replacement and includes it only after complete', async () => {
+    const c = await seedCardSale({ provider: 'BLUMON', amounts: [350] })
+    try {
+      await prisma.product.update({ where: { id: c.products[3].id }, data: { price: 450 } })
+      const readCard = (since?: string) =>
+        listRecentSales({ venueId: c.venueId, limit: 100, now: new Date(Date.now() + 10), ...(since ? { since } : {}) })
+      const initial = await readCard()
+      const { exchange } = await createExchange(
+        c.input(
+          c.body({
+            taken: [{ productId: c.products[3].id, quantity: 1 }],
+            settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 10000 },
+          }),
+        ),
+      )
+      const reserved = await readCard(initial.meta.nextSince!)
+      const original = reserved.sales.find(row => row.orderId === c.order.id)!
+      expect(original.lines[0]).toMatchObject({ returnedQtyOrder: 0, remainingQtyOrder: 1 })
+      expect(original.exchange.asOriginal[0]).toMatchObject({ exchangeId: exchange.id, status: 'PENDING_PAYMENT' })
+      expect(reserved.sales.some(row => row.orderId === exchange.newOrderId)).toBe(false)
+      await c.terminalCharge(exchange.newOrderId, 10000)
+      const partial = await readCard(reserved.meta.nextSince!)
+      expect(partial.sales.some(row => row.orderId === exchange.newOrderId)).toBe(false)
+      await completeExchange({ venueId: c.venueId, exchangeId: exchange.id, actorStaffId: c.staffId })
+      const done = await readCard(partial.meta.nextSince!)
+      expect(done.sales.map(row => row.orderId).sort()).toEqual([c.order.id, exchange.newOrderId].sort())
+      expect(done.sales.find(row => row.orderId === c.order.id)!.lines[0]).toMatchObject({ returnedQtyOrder: 1, remainingQtyOrder: 0 })
+      expect(done.sales.find(row => row.orderId === exchange.newOrderId)!.exchange.asNew).toMatchObject({ exchangeId: exchange.id })
+      expect(done.sales.find(row => row.orderId === c.order.id)!.exchange.asOriginal[0]).toMatchObject({ status: 'COMPLETED' })
+    } finally {
+      await c.cleanup()
+    }
+  })
   it('brings a sale created after the watermark and excludes untouched and foreign sales', async () => {
     const initial = await full()
     const [id] = await seed(1, new Date())

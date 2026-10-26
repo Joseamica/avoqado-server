@@ -12,6 +12,8 @@ const dateTimeSchema = textSchema.datetime({ offset: true, message: 'La fecha de
 const enumOptions = { errorMap: () => ({ message: 'Elige una de las opciones permitidas.' }) }
 const objectOptions = { required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser un objeto.' }
 
+export const exchangeIdParamsSchema = z.object({ params: z.object({ venueId: id, exchangeId: id }) })
+
 export const createExchangeSchema = z.object({
   params: z.object({ venueId: id }),
   query: z.object({}),
@@ -57,9 +59,7 @@ export const createExchangeSchema = z.object({
         staffId: id,
         deviceId: textSchema.min(1, 'El aparato es requerido.').max(128, 'El identificador del aparato no puede exceder 128 caracteres.'),
         createdAtLocal: dateTimeSchema,
-        isOfflineReplay: z
-          .literal(false, { errorMap: () => ({ message: 'El cambio sin red se envía por la cola de sincronización.' }) })
-          .optional(),
+        isOfflineReplay: booleanSchema.optional(),
         settlement: z.object(
           {
             kind: z.enum(['EVEN', 'COLLECT', 'PAYOUT'], enumOptions),
@@ -90,6 +90,13 @@ export const createExchangeSchema = z.object({
         seen.add(line.orderItemId)
       }
       const { kind, method, expectedDifferenceCents, tenderTypeId, tenderRevision, cashFromNonCash } = body.settlement
+      if (body.isOfflineReplay && method !== 'CARD_TERMINAL') {
+        ctx.addIssue({
+          code: z.ZodIssueCode.custom,
+          path: ['isOfflineReplay'],
+          message: 'El cambio sin red se envía por la cola de sincronización.',
+        })
+      }
       if (
         (kind === 'EVEN' && (expectedDifferenceCents !== 0 || method !== null)) ||
         (kind === 'COLLECT' && (expectedDifferenceCents <= 0 || method === null)) ||

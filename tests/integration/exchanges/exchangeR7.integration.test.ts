@@ -1,7 +1,7 @@
 import prisma from '@/utils/prismaClient'
 import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
 import { mergeOrdersInTransaction, payCashOrder } from '@/services/mobile/order.mobile.service'
-import { createExchange } from '@/services/exchanges/exchange.service'
+import { createExchange, completeExchange } from '@/services/exchanges/exchange.service'
 import { loadSaleForExchange } from '@/services/exchanges/exchangeSale'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
@@ -310,8 +310,9 @@ describe('R7: conjuntos de candados y venta resultante dentro de sus topes', () 
     expect(await snapshot()).toEqual(before)
   })
 
-  it('rechaza también por alcance 51 aunque los pagos resultantes sean sólo 50', async () => {
+  it.each(['CASH', 'CARD_TERMINAL'] as const)('rejects scope 51 before leaving any reservation or configuration (%s)', async method => {
     const input = await history(49)
+    input.body.settlement.method = method
     const link = await prisma.exchangeCreditLink.findUniqueOrThrow({ where: { creditPaymentId: input.body.originalPaymentId } })
     const root = await prisma.payment.findUniqueOrThrow({ where: { id: link.originPaymentId } })
     await prisma.$transaction(async tx => {
@@ -367,6 +368,56 @@ describe('R7: conjuntos de candados y venta resultante dentro de sus topes', () 
     const before = await snapshot()
     await expect(createExchange(input)).rejects.toMatchObject({ statusCode: 409, code: 'EXCHANGE_RESULT_TOO_LARGE' })
     expect(await snapshot()).toEqual(before)
+  })
+
+  it('accepts the card reservation with exactly 50 Orders including new + original, then closes with 50 Payments', async () => {
+    const input = await history(49)
+    input.body.settlement.method = 'CARD_TERMINAL'
+    const { exchange } = await createExchange(input)
+    expect(exchange.status).toBe('PENDING_PAYMENT')
+    expect(
+      await prisma.$transaction(tx =>
+        lockExistingOrderForPayment(tx, { venueId: s.venueId, orderId: exchange.newOrderId, additionalOrderIds: [s.order.id] }),
+      ),
+    ).toBe(true)
+    await prisma.payment.create({
+      data: {
+        venueId: s.venueId,
+        orderId: exchange.newOrderId,
+        amount: 1,
+        tipAmount: 0,
+        netAmount: 1,
+        feeAmount: 0,
+        feePercentage: 0,
+        method: 'CREDIT_CARD',
+        fundsFlow: 'AVOQADO_PROCESSED',
+        status: 'COMPLETED',
+        type: 'REGULAR',
+        source: 'TPV',
+      },
+    })
+    const done = await completeExchange({ venueId: s.venueId, exchangeId: exchange.id, actorStaffId: s.staffId })
+    expect(done.status).toBe('COMPLETED')
+    expect(done.paymentIds).toHaveLength(50)
+    expect(
+      await prisma.payment.count({
+        where: { venueId: s.venueId, orderId: exchange.newOrderId, OR: [{ type: null }, { type: { not: 'REFUND' } }] },
+      }),
+    ).toBe(50)
+  })
+
+  it('rejects a future 51st card payment before creating its system tender', async () => {
+    s = await seedClothingSale({ list: 50, payments: Array(50).fill(1) })
+    await prisma.product.update({ where: { id: s.products[3].id }, data: { price: 51 } })
+    const input = s.input(
+      s.body({
+        taken: [{ productId: s.products[3].id, quantity: 1 }],
+        settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 100 },
+      }),
+    )
+    await expect(createExchange(input)).rejects.toMatchObject({ code: 'EXCHANGE_RESULT_TOO_LARGE' })
+    expect(await prisma.venueTenderType.count({ where: { venueId: s.venueId, systemKind: 'EXCHANGE_CREDIT' } })).toBe(0)
+    expect(await prisma.exchange.count({ where: { venueId: s.venueId } })).toBe(0)
   })
 
   it('desde 49 acepta la diferencia, deja 50 pagos y permite después una devolución CHAIN', async () => {

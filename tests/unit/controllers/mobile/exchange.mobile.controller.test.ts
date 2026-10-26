@@ -3,12 +3,12 @@ import request from 'supertest'
 import type { z } from 'zod'
 import type { CreateExchangeBody } from '@/services/exchanges/exchange.service'
 
-jest.mock('@/services/exchanges/exchange.service', () => ({ createExchange: jest.fn() }))
+jest.mock('@/services/exchanges/exchange.service', () => ({ createExchange: jest.fn(), completeExchange: jest.fn() }))
 
 import { globalErrorHandler } from '@/app'
 import { validateRequest } from '@/middlewares/validation'
-import { createExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
-import { createExchange } from '@/controllers/mobile/exchange.mobile.controller'
+import { createExchangeSchema, exchangeIdParamsSchema } from '@/schemas/mobile/exchange.mobile.schema'
+import { createExchange, completeExchange } from '@/controllers/mobile/exchange.mobile.controller'
 import * as service from '@/services/exchanges/exchange.service'
 import { ExchangeError } from '@/services/exchanges/exchangeErrors'
 
@@ -34,6 +34,7 @@ app.use((req, _res, next) => {
   next()
 })
 app.post('/venues/:venueId/exchanges', validateRequest(createExchangeSchema), createExchange)
+app.post('/venues/:venueId/exchanges/:exchangeId/complete', validateRequest(exchangeIdParamsSchema), completeExchange)
 app.use(globalErrorHandler)
 const post = (body: object, venue = venueId) => request(app).post(`/venues/${venue}/exchanges`).send(body)
 const mockCreate = jest.mocked(service.createExchange)
@@ -41,6 +42,42 @@ const mockCreate = jest.mocked(service.createExchange)
 beforeEach(() => jest.resetAllMocks())
 
 describe('exchange mobile endpoint', () => {
+  it('lets a card offline replay reach the explicit 422 CARD_NEEDS_CONNECTION service refusal', async () => {
+    mockCreate.mockRejectedValue(
+      new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'Cobrar o devolver con tarjeta necesita conexión.', 422, {
+        reason: 'CARD_NEEDS_CONNECTION',
+      }),
+    )
+    const body = {
+      ...validBody(),
+      isOfflineReplay: true,
+      settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 100 },
+    }
+    const res = await post(body)
+    expect(res.status).toBe(422)
+    expect(res.body).toMatchObject({ code: 'EXCHANGE_SETTLEMENT_UNAVAILABLE', details: { reason: 'CARD_NEEDS_CONNECTION' } })
+    expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body })
+  })
+  it('completes with the HTTP actor and returns the exchange envelope', async () => {
+    const exchange = { id: productId, status: 'COMPLETED' } as any
+    jest.mocked(service.completeExchange).mockResolvedValue(exchange)
+    const res = await request(app).post(`/venues/${venueId}/exchanges/${productId}/complete`).send({ staffId: itemId })
+    expect(res.status).toBe(200)
+    expect(res.body).toEqual({ success: true, data: { exchange } })
+    expect(service.completeExchange).toHaveBeenCalledWith({ venueId, exchangeId: productId, actorStaffId: staffId })
+  })
+  it.each(['EXCHANGE_NOT_CHARGED', 'EXCHANGE_CHARGE_UNRESOLVED'] as const)('preserves %s status, code and details', async code => {
+    jest
+      .mocked(service.completeExchange)
+      .mockRejectedValue(new ExchangeError(code, 'Espera a que conste el cobro.', 409, { requestId: 'request' }))
+    const res = await request(app).post(`/venues/${venueId}/exchanges/${productId}/complete`).send({})
+    expect(res.status).toBe(409)
+    expect(res.body).toEqual({ code, message: 'Espera a que conste el cobro.', details: { requestId: 'request' } })
+  })
+  it('validates both complete identifiers before reaching the service', async () => {
+    expect((await request(app).post(`/venues/${venueId}/exchanges/invalid/complete`).send({})).status).toBe(400)
+    expect(service.completeExchange).not.toHaveBeenCalled()
+  })
   it.each([false, true])('returns the exchange envelope with replay=%s', async replay => {
     const exchange = { id: 'c0000000000000000000000007', status: 'COMPLETED' }
     mockCreate.mockResolvedValue({ exchange, replay } as Awaited<ReturnType<typeof service.createExchange>>)

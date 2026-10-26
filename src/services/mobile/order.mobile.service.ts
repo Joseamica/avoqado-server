@@ -1,7 +1,8 @@
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import type { HttpEnvelope } from './http-operation.mobile.service'
-import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome } from '../exchanges/exchangeTx'
-import type { ExchangeTxInput, ExchangeResponse } from '../exchanges/exchange.service'
+import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type ExchangeTxEarly } from '../exchanges/exchangeTx'
+import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
+import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
 /**
@@ -5451,13 +5452,22 @@ export async function stampRewardOutcomeForExistingOrder(venueId: string, orderI
 }
 
 /** Único abridor de la transacción del cambio; conserva el núcleo de cobro en su carril certificado. */
-export async function executeExchangeInTransaction(input: ExchangeTxInput): Promise<ExchangeTxOutcome | { replay: ExchangeResponse }> {
+export async function executeExchangeInTransaction(
+  input: ExchangeTxInput | ExchangeSettleTxInput,
+): Promise<ExchangeTxOutcome | ExchangeTxEarly> {
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
-  return prisma.$transaction(async tx => {
-    const prepared = await prepareExchangeInTx(tx, input)
-    if ('replay' in prepared) return prepared
-    const settled: AbonoEnTx[] = []
-    for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
-    return finishExchangeInTx(tx, prepared, settled)
-  }, ORDER_LOCK_WAIT_BUDGET)
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(async tx => {
+        const prepared = await prepareExchangeInTx(tx, input)
+        if (!('newSalePayments' in prepared)) return prepared
+        const settled: AbonoEnTx[] = []
+        for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
+        return finishExchangeInTx(tx, prepared, settled)
+      }, ORDER_LOCK_WAIT_BUDGET)
+    } catch (error) {
+      if (attempt >= 2 || !(error instanceof ExchangeGenerationChanged || (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED'))
+        throw error
+    }
+  }
 }

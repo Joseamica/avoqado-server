@@ -152,6 +152,12 @@ export interface ExchangeResponse {
   paymentIds: string[]
   pendingCardRefundCents: number
   receiptUrl: string | null
+  amountToChargeCents?: number
+  chargePaymentId?: string | null
+  chargedSaleCents?: number
+  chargePaymentCount?: number
+  expectedCents?: number
+  reviewReason?: import('./exchangeSettle').ExchangeReviewReason | null
   inventoryWarning?: OrderInventoryWarning
 }
 export async function createExchange(input: {
@@ -172,7 +178,7 @@ export async function createExchange(input: {
     if (!existing.result) throw new Error('EXCHANGE_RESULT_MISSING')
     const response = existing.result as unknown as ExchangeResponse
     await exchangeReceipt(venueId, response)
-    return { exchange: response, replay: true }
+    return { exchange: await patchExchangePresentation(venueId, response, existing.resultRevision), replay: true }
   }
   const replay = await readReplay()
   if (replay) return replay
@@ -206,8 +212,10 @@ export async function createExchange(input: {
   }
   if ('replay' in outcome) {
     await exchangeReceipt(venueId, outcome.replay)
-    return { exchange: outcome.replay, replay: true }
+    return { exchange: await patchExchangePresentation(venueId, outcome.replay, outcome.resultRevision), replay: true }
   }
+  if ('reserved' in outcome) return { exchange: outcome.reserved, replay: false }
+  if (!('postCommit' in outcome)) throw new Error('EXCHANGE_CREATE_OUTCOME_INVALID')
   await runExchangePostCommit(outcome, input)
   return { exchange: outcome.response, replay: false }
 }
@@ -221,9 +229,10 @@ async function bestEffort(exchangeId: string, step: string, run: () => Promise<u
   }
 }
 
-async function exchangeReceipt(venueId: string, response: ExchangeResponse) {
+async function exchangeReceipt(venueId: string, response: ExchangeResponse, receiptPaymentId?: string) {
+  if (!response.paymentIds.length || response.status !== 'COMPLETED') return
   await bestEffort(response.id, 'receipt', async () => {
-    const paymentId = response.paymentIds[response.paymentIds.length - 1]
+    const paymentId = receiptPaymentId ?? response.chargePaymentId ?? response.paymentIds[response.paymentIds.length - 1]
     // El candado y toda la consulta/creación usan la misma conexión; el dinero ya está confirmado.
     const receipt = await prisma.$transaction(async tx => {
       await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange-receipt:v1:' + paymentId}, 0))::text`
@@ -233,10 +242,7 @@ async function exchangeReceipt(venueId: string, response: ExchangeResponse) {
   })
 }
 
-async function runExchangePostCommit(
-  outcome: ExchangeTxOutcome,
-  input: { venueId: string; actorStaffId: string; body: CreateExchangeBody },
-) {
+async function runExchangePostCommit(outcome: ExchangeTxOutcome, input: { venueId: string; actorStaffId: string }) {
   const { exchangeId, response, postCommit: p } = outcome
   const { venueId, actorStaffId } = input
   await bestEffort(exchangeId, 'saleInventory', async () => {
@@ -277,7 +283,7 @@ async function runExchangePostCommit(
           reason: 'Cambio de producto',
         }),
       )
-  await exchangeReceipt(venueId, response)
+  await exchangeReceipt(venueId, response, p.receiptPaymentId)
   await bestEffort(exchangeId, 'loyalty', async () => {
     const order = await prisma.order.findFirst({
       where: { id: p.newOrderId, venueId },
@@ -305,6 +311,93 @@ async function runExchangePostCommit(
       broadcasting.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId })
   })
   await bestEffort(exchangeId, 'response', async () => {
-    await prisma.exchange.update({ where: { id: exchangeId, venueId }, data: { result: response as unknown as Prisma.InputJsonValue } })
+    outcome.response = await patchExchangePresentation(venueId, response, outcome.resultRevision)
   })
+}
+
+/** A slow receipt may patch presentation, never restore its old financial snapshot. */
+async function patchExchangePresentation(venueId: string, response: ExchangeResponse, revision: number): Promise<ExchangeResponse> {
+  if (response.status !== 'COMPLETED' || !response.paymentIds.length) return response
+  let current = response
+  for (let attempt = 0; attempt < 2; attempt++) {
+    const merged = {
+      ...current,
+      ...(response.receiptUrl && !current.receiptUrl ? { receiptUrl: response.receiptUrl } : {}),
+      ...(response.inventoryWarning && !current.inventoryWarning ? { inventoryWarning: response.inventoryWarning } : {}),
+    }
+    const written = await prisma.exchange.updateMany({
+      where: { id: response.id, venueId, status: response.status, resultRevision: revision },
+      data: { result: merged as unknown as Prisma.InputJsonValue, resultRevision: { increment: 1 } },
+    })
+    if (written.count === 1) return merged
+    const row = await prisma.exchange.findFirstOrThrow({ where: { id: response.id, venueId } })
+    if (!row.result) throw new Error('EXCHANGE_RESULT_MISSING')
+    current = row.result as unknown as ExchangeResponse
+    if (
+      row.status !== response.status ||
+      current.chargePaymentId !== response.chargePaymentId ||
+      JSON.stringify(current.paymentIds) !== JSON.stringify(response.paymentIds) ||
+      operationHash({ ...current, receiptUrl: null, inventoryWarning: undefined }) !==
+        operationHash({ ...response, receiptUrl: null, inventoryWarning: undefined })
+    )
+      return current
+    revision = row.resultRevision
+  }
+  return current
+}
+
+export async function settleExchangeCharge(input: { venueId: string; exchangeId: string; actorStaffId: string | null }): Promise<{
+  exchange: ExchangeResponse
+  outcome: 'SETTLED' | 'REVIEW' | 'FINAL' | 'NOT_CHARGED' | 'UNRESOLVED'
+  requestId?: string | null
+}> {
+  const result = await executeExchangeInTransaction({ mode: 'SETTLE_CARD_CHARGE', ...input })
+  if ('unsettled' in result)
+    return {
+      exchange: result.unsettled,
+      outcome: result.evidence === null ? 'FINAL' : result.evidence.kind === 'NOT_CHARGED' ? 'NOT_CHARGED' : 'UNRESOLVED',
+      requestId: result.evidence?.kind === 'UNRESOLVED' ? result.evidence.requestId : null,
+    }
+  if ('review' in result) {
+    await bestEffort(result.review.id, 'reviewInventory', async () => {
+      if (result.salePostingId) {
+        const author = await prisma.exchange.findFirstOrThrow({
+          where: { id: input.exchangeId, venueId: input.venueId },
+          select: { staffId: true },
+        })
+        await applySalePosting(result.salePostingId, author.staffId)
+      }
+    })
+    if (result.review.reviewReason === 'LATE_CHARGE_AFTER_RELEASE')
+      logger.error('🚨 [Exchange] Cobro tardío sobre un cambio ya liberado', {
+        exchangeId: result.review.id,
+        chargePaymentId: result.review.chargePaymentId,
+      })
+    return { exchange: result.review, outcome: 'REVIEW' }
+  }
+  if (!('postCommit' in result)) throw new Error('EXCHANGE_SETTLE_OUTCOME_INVALID')
+  const author = await prisma.exchange.findFirstOrThrow({
+    where: { id: input.exchangeId, venueId: input.venueId },
+    select: { staffId: true },
+  })
+  await runExchangePostCommit(result, { venueId: input.venueId, actorStaffId: author.staffId })
+  return { exchange: result.response, outcome: 'SETTLED' }
+}
+
+export async function completeExchange(input: { venueId: string; exchangeId: string; actorStaffId: string }): Promise<ExchangeResponse> {
+  const result = await settleExchangeCharge(input)
+  if (result.outcome === 'NOT_CHARGED')
+    throw new ExchangeError(
+      'EXCHANGE_NOT_CHARGED',
+      'No consta ningún cobro de la diferencia. Puedes volver a cobrar o cancelar el cambio.',
+      409,
+    )
+  if (result.outcome === 'UNRESOLVED')
+    throw new ExchangeError(
+      'EXCHANGE_CHARGE_UNRESOLVED',
+      'Todavía no consta si la terminal cobró la diferencia. Espera a que conste antes de cancelar o volver a cobrar.',
+      409,
+      { requestId: result.requestId ?? null },
+    )
+  return result.exchange
 }

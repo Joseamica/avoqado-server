@@ -164,7 +164,7 @@ describe('R8: el dato confirmado sobrevive a recuperación y reportes', () => {
     const requestHash = operationHash({ venueId: s.venueId, ...input.body, idempotencyKey: undefined, isOfflineReplay: undefined })
     const outcome = await executeExchangeInTransaction({ ...input, requestHash, originalOrderId: s.order.id })
     expect('replay' in outcome).toBe(false)
-    if ('replay' in outcome) throw new Error('No era un replay')
+    if (!('postCommit' in outcome)) throw new Error('Expected a completed immediate exchange')
     const log = await prisma.activityLog.findMany({ where: { venueId: s.venueId, action: 'EXCHANGE_CREATED' }, take: 10 })
     expect(log).toHaveLength(1)
     expect(log[0]).toMatchObject({
@@ -185,7 +185,7 @@ describe('R8: el dato confirmado sobrevive a recuperación y reportes', () => {
     const input = s.input(body(s, 600))
     const requestHash = operationHash({ venueId: s.venueId, ...input.body, idempotencyKey: undefined, isOfflineReplay: undefined })
     const outcome = await executeExchangeInTransaction({ ...input, requestHash, originalOrderId: s.order.id })
-    if ('replay' in outcome) throw new Error('No era un replay')
+    if (!('postCommit' in outcome)) throw new Error('Expected a completed immediate exchange')
     const payment = await prisma.payment.findUniqueOrThrow({ where: { id: outcome.response.paymentIds.at(-1)! } })
     await prisma.cashDrawerSession.update({
       where: { id: s.drawer.id },
