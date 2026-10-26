@@ -15,6 +15,7 @@ export type ExchangeErrorCode =
   | 'EXCHANGE_NOT_CHARGED'
   | 'EXCHANGE_CHARGE_EXISTS'
   | 'EXCHANGE_ALREADY_SETTLED'
+  | 'EXCHANGE_RETRY_CONFLICT'
 
 export class ExchangeError extends AppError {
   constructor(code: ExchangeErrorCode, message: string, status: 400 | 409 | 422, details?: Record<string, unknown>) {

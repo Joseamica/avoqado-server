@@ -44,6 +44,7 @@ import { moneyIntegrityWatchdogJob } from './jobs/money-integrity-watchdog.job'
 import { displayModeRequestExpiryJob } from './jobs/display-mode-request-expiry.job'
 import { onlineOrderAcceptanceExpiryJob } from './jobs/online-order-acceptance-expiry.job'
 import { terminalPaymentWatchdogJob } from './jobs/terminal-payment-watchdog.job'
+import { exchangeCardSettlementJob } from './jobs/exchange-card-settlement.job'
 import { reservationDepositReconciliationJob } from './jobs/reservation-deposit-reconciliation.job'
 import { reservationReminderJob } from './jobs/reservation-reminder.job'
 import { reservationAutoNoShowJob } from './jobs/reservation-auto-no-show.job'
@@ -175,6 +176,7 @@ const gracefulShutdown = async (signal: string) => {
       displayModeRequestExpiryJob.stop()
       onlineOrderAcceptanceExpiryJob.stop()
       terminalPaymentWatchdogJob.stop()
+      exchangeCardSettlementJob.stop()
 
       // WHY: Publication delivery and expired attempts have independent
       // durable recovery loops and both must stop before Prisma disconnects.
@@ -519,6 +521,7 @@ const startApplication = async (retries = 3) => {
       displayModeRequestExpiryJob.start()
       onlineOrderAcceptanceExpiryJob.start()
       terminalPaymentWatchdogJob.start()
+      exchangeCardSettlementJob.start()
 
       // WHY: APPLIED delivery and abandoned APPLYING reservations recover only
       // through these no-overlap durable workers after a process restart.

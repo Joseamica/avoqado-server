@@ -1,5 +1,9 @@
 import { Prisma, type PrismaClient } from '@prisma/client'
 import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, sqlPaymentIsNotExchangeCredit } from './exchangeMarks'
+import { ExchangeError } from './exchangeErrors'
+import { releaseIsDue } from './exchangeRules'
+import { ExchangeGenerationChanged } from './exchangeSettle'
+import type { ExchangeResponse } from './exchange.service'
 
 export type ExchangeChargeEvidence =
   | { kind: 'CHARGED'; paymentIds: string[]; chargedSaleCents: number; paymentCount: number; exceedsPaymentLimit: boolean }
@@ -95,4 +99,61 @@ export async function markExchangeChargeInTx(
     data: { chargePaymentId: input.paymentId, resultRevision: { increment: 1 }, ...(result ? { result } : {}) },
   })
   if (stamped.count !== 1) throw new Error('Exchange charge stamp generation changed')
+}
+
+export class ExchangeReleaseNotDue extends Error {
+  constructor(readonly exchange: ExchangeResponse) {
+    super('Exchange release is not due')
+  }
+}
+
+/** Caller owns the exchange advisory and the new Order in the cancellation hierarchy, never its original afterwards. */
+export async function releaseExchangeInTx(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; exchangeId: string; actorStaffId: string | null; origin: 'POS' | 'SWEEP'; reason?: string },
+): Promise<ExchangeResponse> {
+  const exchange = await tx.exchange.findFirstOrThrow({ where: { id: input.exchangeId, venueId: input.venueId } })
+  if (exchange.status !== 'PENDING_PAYMENT') throw new ExchangeGenerationChanged()
+  if (!exchange.result) throw new Error('EXCHANGE_RESULT_MISSING')
+  const evidence = await exchangeChargeEvidence(tx, input.venueId, exchange.newOrderId)
+  if (evidence.kind === 'CHARGED')
+    throw new ExchangeError(
+      'EXCHANGE_CHARGE_EXISTS',
+      'La terminal sí cobró la diferencia, así que el cambio ya no se puede cancelar. Revisa cómo quedó.',
+      409,
+    )
+  if (evidence.kind === 'UNRESOLVED')
+    throw new ExchangeError(
+      'EXCHANGE_CHARGE_UNRESOLVED',
+      'Todavía no consta si la terminal cobró la diferencia. Espera a que conste antes de cancelar o volver a cobrar.',
+      409,
+      { requestId: evidence.requestId },
+    )
+  const now = new Date()
+  const stored = exchange.result as unknown as ExchangeResponse
+  if (input.origin === 'SWEEP' && !releaseIsDue(evidence, exchange.createdAt, now)) throw new ExchangeReleaseNotDue(stored)
+  const result: ExchangeResponse = { ...stored, status: 'CANCELLED' }
+  delete result.amountToChargeCents
+  const written = await tx.exchange.updateMany({
+    where: { id: exchange.id, venueId: input.venueId, status: 'PENDING_PAYMENT', resultRevision: exchange.resultRevision },
+    data: { status: 'CANCELLED', result: result as unknown as Prisma.InputJsonValue, resultRevision: { increment: 1 } },
+  })
+  if (written.count !== 1) throw new ExchangeGenerationChanged()
+  await tx.activityLog.create({
+    data: {
+      venueId: input.venueId,
+      entity: 'Exchange',
+      entityId: exchange.id,
+      action: 'EXCHANGE_CANCELLED',
+      staffId: input.actorStaffId,
+      createdAt: now,
+      data: {
+        origin: input.origin,
+        requestCount: evidence.requestCount,
+        lastActivityAt: evidence.lastActivityAt?.toISOString() ?? null,
+        reason: input.reason ?? null,
+      },
+    },
+  })
+  return result
 }

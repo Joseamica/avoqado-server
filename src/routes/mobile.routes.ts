@@ -49,7 +49,7 @@ import * as purchaseOrderMobileController from '../controllers/mobile/purchase-o
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
 import * as refundMobileController from '../controllers/mobile/refund.mobile.controller'
 import * as exchangeMobileController from '../controllers/mobile/exchange.mobile.controller'
-import { createExchangeSchema, exchangeIdParamsSchema } from '../schemas/mobile/exchange.mobile.schema'
+import { createExchangeSchema, exchangeIdParamsSchema, cancelExchangeSchema } from '../schemas/mobile/exchange.mobile.schema'
 import { recentSalesQuerySchema } from '../schemas/mobile/recentSales.mobile.schema'
 import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
@@ -3642,6 +3642,14 @@ router.post(
   validateRequest(exchangeIdParamsSchema),
   checkPermission('payments:refund'),
   exchangeMobileController.completeExchange,
+)
+
+router.post(
+  '/venues/:venueId/exchanges/:exchangeId/cancel',
+  authenticateTokenMiddleware,
+  validateRequest(cancelExchangeSchema),
+  checkPermission('payments:refund'),
+  exchangeMobileController.cancelExchange,
 )
 
 // ============================================================================

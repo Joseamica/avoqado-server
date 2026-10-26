@@ -1061,6 +1061,11 @@
       "count": 1,
       "loops": 0,
       "reason": "C09 dispatch is the first branch, before immediate-exchange locks or money. It enters the same C06 opener with new + original scope; no lock union is extended after Payment or Shift."
+    },
+    "src/services/exchanges/exchange.service.ts#cancelExchange#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "C06 task6: only an already CANCELLED/DELETED new Order; exchange advisory first, canonical Order ancestry next, evidence and release CAS under Order. No original Orders or Payment/Shift locks are acquired afterwards; PostgreSQL cancel/terminal barriers cover both winners."
     }
   }
 }

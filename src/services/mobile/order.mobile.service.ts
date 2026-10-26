@@ -2,6 +2,7 @@ import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import type { HttpEnvelope } from './http-operation.mobile.service'
 import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type ExchangeTxEarly } from '../exchanges/exchangeTx'
 import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
+import { ExchangeError } from '../exchanges/exchangeErrors'
 import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -5466,8 +5467,9 @@ export async function executeExchangeInTransaction(
         return finishExchangeInTx(tx, prepared, settled)
       }, ORDER_LOCK_WAIT_BUDGET)
     } catch (error) {
-      if (attempt >= 2 || !(error instanceof ExchangeGenerationChanged || (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED'))
-        throw error
+      if (!(error instanceof ExchangeGenerationChanged || (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED')) throw error
+      if (attempt >= 2)
+        throw new ExchangeError('EXCHANGE_RETRY_CONFLICT', 'El cambio se movió mientras lo cerrábamos. Intenta de nuevo.', 409)
     }
   }
 }

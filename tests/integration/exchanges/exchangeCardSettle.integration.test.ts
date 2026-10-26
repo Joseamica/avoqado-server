@@ -49,6 +49,32 @@ const stock = async () =>
   )
 
 describe('settle card exchange by evidence', () => {
+  it('m2: a partial refund row on a still-COMPLETED card causes review without credit refund or original stock return', async () => {
+    const { exchange: e } = await reserve()
+    const charge = await s.terminalCharge(e.newOrderId, 10000)
+    await prisma.payment.create({
+      data: {
+        venueId: s.venueId,
+        orderId: e.newOrderId,
+        amount: 25,
+        tipAmount: 0,
+        netAmount: 25,
+        feeAmount: 0,
+        feePercentage: 0,
+        method: 'CREDIT_CARD',
+        source: 'TPV',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        processorData: { originalPaymentId: charge.id },
+      },
+    })
+    expect(await prisma.payment.findUnique({ where: { id: charge.id } })).toMatchObject({ status: 'COMPLETED' })
+    expect(await complete(e.id)).toMatchObject({ status: 'NEEDS_REVIEW', reviewReason: 'CHARGE_AMOUNT_MISMATCH' })
+    expect(await prisma.payment.count({ where: { venueId: s.venueId, type: 'REFUND' } })).toBe(1)
+    expect(await prisma.exchangeCreditLink.count({ where: { exchangeId: e.id } })).toBe(0)
+    expect((await stock())[0]).toBe(10)
+    expect(await prisma.inventoryPosting.count({ where: { venueId: s.venueId, effectKind: 'CUSTOMER_RETURN' } })).toBe(0)
+  })
   it('retains A priority for the selected original payment when its credit fits in one slice', async () => {
     s = await seedCardSale({ provider: 'BLUMON', amounts: [150, 350] })
     await prisma.orderItem.update({ where: { id: s.order.items[0].id }, data: { quantity: 2, unitPrice: 250 } })

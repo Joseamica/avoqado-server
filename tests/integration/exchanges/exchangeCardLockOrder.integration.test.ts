@@ -1,5 +1,5 @@
 import prisma from '@/utils/prismaClient'
-import { createExchange, completeExchange } from '@/services/exchanges/exchange.service'
+import { createExchange, completeExchange, cancelExchange, settleExchangeCharge } from '@/services/exchanges/exchange.service'
 import { issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
 import { seedCardSale } from './seedExchange'
@@ -18,6 +18,35 @@ afterEach(async () => {
   if (s) await s.cleanup()
 })
 const close = (id: string) => completeExchange({ venueId: s.venueId, exchangeId: id, actorStaffId: s.staffId })
+
+it.each([false, true])('serializes cancel against terminal registration with a real Order wait (charge first=%s)', async chargeFirst => {
+  const { exchange: e } = await reserve()
+  const barrier = await barreraDeFila('Order', e.newOrderId)
+  const cancelling = () => cancelExchange({ venueId: s.venueId, exchangeId: e.id, actorStaffId: s.staffId, origin: 'POS' })
+  const charging = () => s.terminalCharge(e.newOrderId, 10000)
+  const first = Promise.allSettled([chargeFirst ? charging() : cancelling()])
+  let second: ReturnType<typeof Promise.allSettled> | undefined
+  try {
+    await barrier.esperarA(1)
+    second = Promise.allSettled([chargeFirst ? cancelling() : charging()])
+    await barrier.esperarA(2)
+  } finally {
+    await barrier.soltar()
+  }
+  const results = [...(await first), ...(await second!)]
+  expect(results.map(r => (r.status === 'rejected' ? String(r.reason) : '')).join(' ')).not.toMatch(/40P01|deadlock/i)
+  const cancelled = results[chargeFirst ? 1 : 0]
+  const charged = results[chargeFirst ? 0 : 1]
+  expect(charged.status).toBe('fulfilled')
+  if (cancelled.status === 'rejected') expect(cancelled.reason).toMatchObject({ code: 'EXCHANGE_CHARGE_EXISTS' })
+  await settleExchangeCharge({ venueId: s.venueId, exchangeId: e.id, actorStaffId: null })
+  const exchange = await prisma.exchange.findUniqueOrThrow({ where: { id: e.id } })
+  if (cancelled.status === 'fulfilled') {
+    expect(exchange).toMatchObject({ status: 'NEEDS_REVIEW', reviewReason: 'LATE_CHARGE_AFTER_RELEASE' })
+    expect(await prisma.order.findUnique({ where: { id: e.newOrderId } })).toMatchObject({ status: 'CANCELLED' })
+    expect(await prisma.inventoryPosting.count({ where: { venueId: s.venueId } })).toBe(0)
+  } else expect(exchange.status).toBe('COMPLETED')
+})
 async function reserve(chain = false) {
   s = await seedCardSale({ provider: 'BLUMON', amounts: [700] })
   await prisma.orderItem.update({ where: { id: s.order.items[0].id }, data: { quantity: 2, unitPrice: 350 } })

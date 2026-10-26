@@ -3,12 +3,16 @@ import request from 'supertest'
 import type { z } from 'zod'
 import type { CreateExchangeBody } from '@/services/exchanges/exchange.service'
 
-jest.mock('@/services/exchanges/exchange.service', () => ({ createExchange: jest.fn(), completeExchange: jest.fn() }))
+jest.mock('@/services/exchanges/exchange.service', () => ({
+  createExchange: jest.fn(),
+  completeExchange: jest.fn(),
+  cancelExchange: jest.fn(),
+}))
 
 import { globalErrorHandler } from '@/app'
 import { validateRequest } from '@/middlewares/validation'
-import { createExchangeSchema, exchangeIdParamsSchema } from '@/schemas/mobile/exchange.mobile.schema'
-import { createExchange, completeExchange } from '@/controllers/mobile/exchange.mobile.controller'
+import { createExchangeSchema, exchangeIdParamsSchema, cancelExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
+import { createExchange, completeExchange, cancelExchange } from '@/controllers/mobile/exchange.mobile.controller'
 import * as service from '@/services/exchanges/exchange.service'
 import { ExchangeError } from '@/services/exchanges/exchangeErrors'
 
@@ -35,6 +39,7 @@ app.use((req, _res, next) => {
 })
 app.post('/venues/:venueId/exchanges', validateRequest(createExchangeSchema), createExchange)
 app.post('/venues/:venueId/exchanges/:exchangeId/complete', validateRequest(exchangeIdParamsSchema), completeExchange)
+app.post('/venues/:venueId/exchanges/:exchangeId/cancel', validateRequest(cancelExchangeSchema), cancelExchange)
 app.use(globalErrorHandler)
 const post = (body: object, venue = venueId) => request(app).post(`/venues/${venue}/exchanges`).send(body)
 const mockCreate = jest.mocked(service.createExchange)
@@ -42,6 +47,42 @@ const mockCreate = jest.mocked(service.createExchange)
 beforeEach(() => jest.resetAllMocks())
 
 describe('exchange mobile endpoint', () => {
+  it('cancels with the authenticated actor, POS origin and a 200 exchange envelope', async () => {
+    const exchange = { id: productId, status: 'CANCELLED' } as any
+    jest.mocked(service.cancelExchange).mockResolvedValue(exchange)
+    const response = await request(app)
+      .post(`/venues/${venueId}/exchanges/${productId}/cancel`)
+      .send({ reason: 'Customer left', staffId: itemId, origin: 'SWEEP' })
+    expect(response.status).toBe(200)
+    expect(response.body).toEqual({ success: true, data: { exchange } })
+    expect(service.cancelExchange).toHaveBeenCalledWith({
+      venueId,
+      exchangeId: productId,
+      actorStaffId: staffId,
+      origin: 'POS',
+      reason: 'Customer left',
+    })
+  })
+  it.each([null, 123, 'a'.repeat(201)])(
+    'rejects an invalid cancellation reason (%j) in Spanish before calling the service',
+    async reason => {
+      const response = await request(app).post(`/venues/${venueId}/exchanges/${productId}/cancel`).send({ reason })
+      expect(response.status).toBe(400)
+      expect(response.body.message).not.toMatch(/Expected|Invalid|must|should/)
+      expect(service.cancelExchange).not.toHaveBeenCalled()
+    },
+  )
+  it.each(['EXCHANGE_CHARGE_EXISTS', 'EXCHANGE_CHARGE_UNRESOLVED', 'EXCHANGE_ALREADY_SETTLED', 'EXCHANGE_RETRY_CONFLICT'] as const)(
+    'preserves %s with its 409 details',
+    async code => {
+      jest
+        .mocked(service.cancelExchange)
+        .mockRejectedValue(new ExchangeError(code, 'No se puede cancelar.', 409, { exchange: { status: 'NEEDS_REVIEW' } }))
+      const response = await request(app).post(`/venues/${venueId}/exchanges/${productId}/cancel`).send({})
+      expect(response.status).toBe(409)
+      expect(response.body).toMatchObject({ code, details: { exchange: { status: 'NEEDS_REVIEW' } } })
+    },
+  )
   it('lets a card offline replay reach the explicit 422 CARD_NEEDS_CONNECTION service refusal', async () => {
     mockCreate.mockRejectedValue(
       new ExchangeError('EXCHANGE_SETTLEMENT_UNAVAILABLE', 'Cobrar o devolver con tarjeta necesita conexión.', 422, {

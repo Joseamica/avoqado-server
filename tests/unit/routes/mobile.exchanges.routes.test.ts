@@ -37,13 +37,15 @@ import { StaffRole } from '@prisma/client'
 import mobileRouter, { permisoDeCambio } from '@/routes/mobile.routes'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { validateRequest } from '@/middlewares/validation'
-import { createExchangeSchema, exchangeIdParamsSchema } from '@/schemas/mobile/exchange.mobile.schema'
+import { createExchangeSchema, exchangeIdParamsSchema, cancelExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
 import { createExchange, completeExchange } from '@/controllers/mobile/exchange.mobile.controller'
 
 const validatorIndex = jest.mocked(validateRequest).mock.calls.findIndex(([schema]) => schema === createExchangeSchema)
 const validator = jest.mocked(validateRequest).mock.results[validatorIndex]?.value
 const completeValidatorIndex = jest.mocked(validateRequest).mock.calls.findIndex(([schema]) => schema === exchangeIdParamsSchema)
 const completeValidator = jest.mocked(validateRequest).mock.results[completeValidatorIndex]?.value
+const cancelValidatorIndex = jest.mocked(validateRequest).mock.calls.findIndex(([schema]) => schema === cancelExchangeSchema)
+const cancelValidator = jest.mocked(validateRequest).mock.results[cancelValidatorIndex]?.value
 
 async function correr(role: StaffRole, body: unknown, headers: Record<string, string> = {}) {
   mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
@@ -73,6 +75,20 @@ beforeEach(() => {
 })
 
 describe('exchange mobile route permissions', () => {
+  it('cancel is authenticate → validate → payments:refund → controller', () => {
+    const layer = (mobileRouter as any).stack.find(
+      (l: any) => l.route?.path === '/venues/:venueId/exchanges/:exchangeId/cancel' && l.route.methods.post,
+    )
+    expect(layer).toBeDefined()
+    const handles = layer.route.stack.map((l: any) => l.handle)
+    expect(handles).toEqual([
+      authenticateTokenMiddleware,
+      cancelValidator,
+      expect.any(Function),
+      require('@/controllers/mobile/exchange.mobile.controller').cancelExchange,
+    ])
+    expect(handles[2].requiredPermission).toBe('payments:refund')
+  })
   it('complete is authenticate → validate → payments:refund → controller', () => {
     const layer = (mobileRouter as any).stack.find(
       (l: any) => l.route?.path === '/venues/:venueId/exchanges/:exchangeId/complete' && l.route.methods.post,

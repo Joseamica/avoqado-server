@@ -1,6 +1,21 @@
 import type { Request, Response, NextFunction } from 'express'
 import * as exchangeService from '../../services/exchanges/exchange.service'
 
+export async function cancelExchange(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const exchange = await exchangeService.cancelExchange({
+      venueId: req.params.venueId,
+      exchangeId: req.params.exchangeId,
+      actorStaffId: req.authContext!.userId,
+      origin: 'POS',
+      reason: req.body.reason,
+    })
+    res.status(200).json({ success: true, data: { exchange } })
+  } catch (error) {
+    next(error)
+  }
+}
+
 export async function completeExchange(req: Request, res: Response, next: NextFunction): Promise<void> {
   try {
     const exchange = await exchangeService.completeExchange({

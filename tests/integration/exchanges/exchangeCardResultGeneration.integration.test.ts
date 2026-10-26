@@ -1,7 +1,7 @@
 import express from 'express'
 import request from 'supertest'
 import prisma from '@/utils/prismaClient'
-import { createExchange, completeExchange } from '@/services/exchanges/exchange.service'
+import { createExchange, completeExchange, cancelExchange } from '@/services/exchanges/exchange.service'
 import { createExchange as createController } from '@/controllers/mobile/exchange.mobile.controller'
 import { validateRequest } from '@/middlewares/validation'
 import { createExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
@@ -119,4 +119,74 @@ it('a stopped post-commit continuation leaves the committed result and audit coh
     staffId: null,
     data: { origin: 'SWEEP', originalStaffId: s.staffId },
   })
+})
+
+it.each([false, true])('m3: a replay without new presentation preserves revision and updatedAt (receipt=%s)', async withReceipt => {
+  const { input, exchange: e } = await reserve()
+  if (withReceipt) jest.mocked(generateAndStoreReceipt).mockResolvedValue({ accessKey: 'same-receipt' } as any)
+  await completeExchange({ venueId: s.venueId, exchangeId: e.id, actorStaffId: s.staffId })
+  if (withReceipt) {
+    const stored = await prisma.exchange.findUniqueOrThrow({ where: { id: e.id } })
+    await prisma.exchange.update({
+      where: { id: e.id },
+      data: {
+        result: {
+          ...(stored.result as object),
+          inventoryWarning: { code: 'INVENTORY_NOT_DEDUCTED', inventoryDeducted: false, message: 'El cobro quedó registrado.', issues: [] },
+        },
+        resultRevision: { increment: 1 },
+      },
+    })
+  }
+  const before = await prisma.exchange.findUniqueOrThrow({ where: { id: e.id } })
+  await createExchange(input)
+  const after = await prisma.exchange.findUniqueOrThrow({ where: { id: e.id } })
+  expect(after.resultRevision).toBe(before.resultRevision)
+  expect(after.updatedAt).toEqual(before.updatedAt)
+  expect(after.result).toEqual(before.result)
+})
+
+it('C11: reserve, cancel, late approval and review retain the current result through real POST replays without sale effects', async () => {
+  s = await seedCardSale({ provider: 'BLUMON', amounts: [0] })
+  await prisma.product.update({ where: { id: s.products[3].id }, data: { price: 100 } })
+  const input = s.input(
+    s.body({
+      taken: [{ productId: s.products[3].id, quantity: 1 }],
+      settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 10000 },
+    }),
+  )
+  const { exchange: e } = await createExchange(input)
+  const app = express()
+  app.use(express.json())
+  app.post(
+    '/venues/:venueId/exchanges',
+    (req, _res, next) => {
+      ;(req as any).authContext = { userId: s.staffId }
+      next()
+    },
+    validateRequest(createExchangeSchema),
+    createController,
+  )
+  const replay = async (status: string) => {
+    const before = await prisma.exchange.findUniqueOrThrow({ where: { id: e.id } })
+    const response = await request(app).post(`/venues/${s.venueId}/exchanges`).send(input.body)
+    expect(response.status).toBe(200)
+    expect(response.body.data.exchange.status).toBe(status)
+    expect(await prisma.exchange.findUniqueOrThrow({ where: { id: e.id } })).toEqual(before)
+  }
+  await replay('PENDING_PAYMENT')
+  await cancelExchange({ venueId: s.venueId, exchangeId: e.id, actorStaffId: s.staffId, origin: 'POS' })
+  await replay('CANCELLED')
+  const charge = await s.terminalCharge(e.newOrderId, 10000)
+  expect(await completeExchange({ venueId: s.venueId, exchangeId: e.id, actorStaffId: s.staffId })).toMatchObject({
+    status: 'NEEDS_REVIEW',
+    chargePaymentId: charge.id,
+    reviewReason: 'LATE_CHARGE_AFTER_RELEASE',
+  })
+  await replay('NEEDS_REVIEW')
+  expect(generateAndStoreReceipt).not.toHaveBeenCalled()
+  expect(await prisma.inventoryPosting.count({ where: { venueId: s.venueId } })).toBe(0)
+  expect(await prisma.activityLog.count({ where: { entityId: e.id, action: 'EXCHANGE_CANCELLED' } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { entityId: e.id, action: 'EXCHANGE_NEEDS_REVIEW' } })).toBe(1)
+  expect(await prisma.activityLog.count({ where: { entityId: e.id, action: 'EXCHANGE_CREATED' } })).toBe(0)
 })

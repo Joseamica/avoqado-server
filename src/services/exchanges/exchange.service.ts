@@ -9,12 +9,16 @@ import type { OrderInventoryWarning } from '../tpv/payment.tpv.service'
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { NotFoundError } from '@/errors/AppError'
+import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { operationHash } from '@/utils/operationHash'
 import { validateStaffVenue } from '@/utils/staff-venue.util'
 import socketManager from '@/communication/sockets'
 import { SocketEventType } from '@/communication/sockets/types'
-import { executeExchangeInTransaction } from '../mobile/order.mobile.service'
+import { executeExchangeInTransaction, cancelOrderInTransaction, publishCancelledOrder } from '../mobile/order.mobile.service'
+import { lockExistingOrderForPayment, ORDER_LOCK_WAIT_BUDGET } from '../shared/paymentShiftClaim'
+import { ExchangeGenerationChanged } from './exchangeSettle'
+import { ExchangeReleaseNotDue, releaseExchangeInTx } from './exchangeCharge'
+import { OrderTableTopologyChanged } from '../shared/tableOrderLock'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
 import { applySalePosting, applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
@@ -318,18 +322,36 @@ async function runExchangePostCommit(outcome: ExchangeTxOutcome, input: { venueI
 /** A slow receipt may patch presentation, never restore its old financial snapshot. */
 async function patchExchangePresentation(venueId: string, response: ExchangeResponse, revision: number): Promise<ExchangeResponse> {
   if (response.status !== 'COMPLETED' || !response.paymentIds.length) return response
-  let current = response
+  const initial = await prisma.exchange.findFirstOrThrow({ where: { id: response.id, venueId } })
+  if (!initial.result) throw new Error('EXCHANGE_RESULT_MISSING')
+  let current = initial.result as unknown as ExchangeResponse
+  let canReplacePresentation = initial.resultRevision === revision
   for (let attempt = 0; attempt < 2; attempt++) {
+    if (
+      current.status !== response.status ||
+      current.chargePaymentId !== response.chargePaymentId ||
+      operationHash({ ...current, receiptUrl: null, inventoryWarning: undefined }) !==
+        operationHash({ ...response, receiptUrl: null, inventoryWarning: undefined })
+    )
+      return current
     const merged = {
       ...current,
-      ...(response.receiptUrl && !current.receiptUrl ? { receiptUrl: response.receiptUrl } : {}),
-      ...(response.inventoryWarning && !current.inventoryWarning ? { inventoryWarning: response.inventoryWarning } : {}),
+      ...(response.receiptUrl && (canReplacePresentation || !current.receiptUrl) ? { receiptUrl: response.receiptUrl } : {}),
+      ...(response.inventoryWarning && (canReplacePresentation || !current.inventoryWarning)
+        ? { inventoryWarning: response.inventoryWarning }
+        : {}),
     }
+    if (
+      merged.receiptUrl === current.receiptUrl &&
+      operationHash(merged.inventoryWarning ?? null) === operationHash(current.inventoryWarning ?? null)
+    )
+      return current
     const written = await prisma.exchange.updateMany({
       where: { id: response.id, venueId, status: response.status, resultRevision: revision },
       data: { result: merged as unknown as Prisma.InputJsonValue, resultRevision: { increment: 1 } },
     })
     if (written.count === 1) return merged
+    canReplacePresentation = false
     const row = await prisma.exchange.findFirstOrThrow({ where: { id: response.id, venueId } })
     if (!row.result) throw new Error('EXCHANGE_RESULT_MISSING')
     current = row.result as unknown as ExchangeResponse
@@ -400,4 +422,88 @@ export async function completeExchange(input: { venueId: string; exchangeId: str
       { requestId: result.requestId ?? null },
     )
   return result.exchange
+}
+
+export async function cancelExchange(input: {
+  venueId: string
+  exchangeId: string
+  actorStaffId: string | null
+  origin: 'POS' | 'SWEEP'
+  reason?: string
+}): Promise<ExchangeResponse> {
+  for (let attempt = 0; ; attempt++) {
+    try {
+      const result = await prisma.$transaction(async tx => {
+        const initial = await tx.exchange.findFirst({ where: { id: input.exchangeId, venueId: input.venueId } })
+        if (!initial) throw new NotFoundError('No se encontró el cambio en esta sucursal.')
+        await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtextextended(${'avoqado:exchange:v1:' + input.venueId + ':' + initial.idempotencyKey}, 0))::text`
+        const exchange = await tx.exchange.findFirstOrThrow({ where: { id: input.exchangeId, venueId: input.venueId } })
+        if (!exchange.result) throw new Error('EXCHANGE_RESULT_MISSING')
+        if (exchange.status === 'CANCELLED') return { exchange: exchange.result as unknown as ExchangeResponse }
+        if (exchange.status !== 'PENDING_PAYMENT' || exchange.settlementKind !== 'COLLECT' || exchange.settlementMethod !== 'CARD_TERMINAL')
+          throw new ExchangeError('EXCHANGE_ALREADY_SETTLED', 'Este cambio ya se cerró; no se puede cancelar.', 409)
+        const order = await tx.order.findFirstOrThrow({
+          where: { id: exchange.newOrderId, venueId: input.venueId },
+          select: { status: true },
+        })
+        if (order.status === 'CANCELLED' || order.status === 'DELETED') {
+          await lockExistingOrderForPayment(tx, { venueId: input.venueId, orderId: exchange.newOrderId })
+          return { exchange: await releaseExchangeInTx(tx, input) }
+        }
+        let released!: ExchangeResponse
+        const cancelledOrder = await cancelOrderInTransaction(
+          tx,
+          input.venueId,
+          exchange.newOrderId,
+          'Cambio cancelado: no se cobró la diferencia',
+          input.actorStaffId ?? undefined,
+          async locked => {
+            released = await releaseExchangeInTx(locked, input)
+          },
+        )
+        return { exchange: released, cancelledOrder }
+      }, ORDER_LOCK_WAIT_BUDGET)
+      if (result.cancelledOrder)
+        await bestEffort(input.exchangeId, 'cancelledOrder', () =>
+          publishCancelledOrder(input.venueId, result.cancelledOrder!, input.actorStaffId ?? undefined, input.reason),
+        )
+      return result.exchange
+    } catch (error) {
+      if (error instanceof ExchangeReleaseNotDue) return error.exchange
+      if (
+        error instanceof ExchangeGenerationChanged ||
+        error instanceof OrderTableTopologyChanged ||
+        (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED'
+      ) {
+        if (attempt < 2) continue
+        throw new ExchangeError('EXCHANGE_RETRY_CONFLICT', 'El cambio se movió mientras lo cerrábamos. Intenta de nuevo.', 409)
+      }
+      // Only the two money refusals of assertOrderCancellableUnderLock are translated; other business errors keep their type.
+      const moneyGuard =
+        error instanceof BadRequestError &&
+        !error.code &&
+        ['Cannot cancel a paid order', 'Esta cuenta ya tiene pagos registrados. Reembólsalos antes de cancelarla.'].includes(error.message)
+      const code = (error as { code?: string }).code
+      if (code === 'EXCHANGE_CHARGE_EXISTS' || code === 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE' || moneyGuard) {
+        // The cancellation transaction has rolled back before this opener takes original/root Orders.
+        const settled = await settleExchangeCharge(input)
+        if (settled.outcome === 'UNRESOLVED')
+          throw new ExchangeError(
+            'EXCHANGE_CHARGE_UNRESOLVED',
+            'Todavía no consta si la terminal cobró la diferencia. Espera a que conste antes de cancelar o volver a cobrar.',
+            409,
+            { requestId: settled.requestId ?? null },
+          )
+        if (settled.outcome === 'NOT_CHARGED') throw error
+        if (settled.outcome === 'FINAL' && settled.exchange.status === 'CANCELLED') return settled.exchange
+        throw new ExchangeError(
+          'EXCHANGE_CHARGE_EXISTS',
+          'La terminal sí cobró la diferencia, así que el cambio ya no se puede cancelar. Revisa cómo quedó.',
+          409,
+          { exchange: settled.exchange },
+        )
+      }
+      throw error
+    }
+  }
 }

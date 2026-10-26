@@ -13,6 +13,9 @@ const enumOptions = { errorMap: () => ({ message: 'Elige una de las opciones per
 const objectOptions = { required_error: 'Este dato es requerido.', invalid_type_error: 'Debe ser un objeto.' }
 
 export const exchangeIdParamsSchema = z.object({ params: z.object({ venueId: id, exchangeId: id }) })
+export const cancelExchangeSchema = exchangeIdParamsSchema.extend({
+  body: z.object({ reason: textSchema.max(200, 'El motivo admite hasta 200 caracteres.').optional() }),
+})
 
 export const createExchangeSchema = z.object({
   params: z.object({ venueId: id }),
