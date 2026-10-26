@@ -8,10 +8,17 @@ import { DIRECTORY_TOOLS } from '@/mcp/directory/catalog'
 const mockFind = jest.fn()
 const mockCount = jest.fn()
 const mockVenue = jest.fn()
+const mockDetail = jest.fn()
+const mockReview = jest.fn()
+jest.mock('@/services/dashboard/exchange.dashboard.service', () => ({ markExchangeReviewed: (...args: unknown[]) => mockReview(...args) }))
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
   default: {
-    exchange: { findMany: (...args: unknown[]) => mockFind(...args), count: (...args: unknown[]) => mockCount(...args) },
+    exchange: {
+      findFirst: (...args: unknown[]) => mockDetail(...args),
+      findMany: (...args: unknown[]) => mockFind(...args),
+      count: (...args: unknown[]) => mockCount(...args),
+    },
     venue: { findUnique: (...args: unknown[]) => mockVenue(...args) },
   },
 }))
@@ -29,12 +36,13 @@ const scope: McpScope = {
   perVenueAccess: new Map([[venueId, { corePermissions: ['payments:read'] } as never]]),
 }
 
-function tool(connection = scope) {
+function tool(connection = scope, name = 'list_exchanges') {
   let schema: z.ZodObject<z.ZodRawShape>
   let handler: (args: any) => Promise<any>
   let description: string
   const server = {
     tool: (_name: string, toolDescription: string, shape: z.ZodRawShape, callback: typeof handler) => {
+      if (_name !== name) return
       schema = z.object(shape)
       handler = callback
       description = toolDescription
@@ -174,6 +182,7 @@ describe('list_exchanges', () => {
           porCobrar: null,
           cobroDeLaTerminal: null,
           motivoDeRevision: null,
+          revisado: null,
           liquidacion: { tipo: 'PAYOUT', medio: 'CASH' },
           hizo: scope.staffId,
         },
@@ -275,5 +284,128 @@ describe('list_exchanges', () => {
   it('classifies the tool as read-only and keeps it out of the certified catalog', () => {
     expect(TOOL_EFFECTS.list_exchanges).toBe('read')
     expect(DIRECTORY_TOOLS.has('list_exchanges')).toBe(false)
+  })
+})
+
+describe('exchange review MCP', () => {
+  const exchangeId = 'cm52345678901234567890123'
+  const writer = {
+    ...scope,
+    scopes: ['mcp:read', 'mcp:write'],
+    perVenueAccess: new Map([[venueId, { corePermissions: ['payments:read', 'payments:refund'] } as never]]),
+  }
+  const input = { exchangeId, note: 'Reviewed with the manager' }
+  beforeEach(() => {
+    mockDetail.mockResolvedValue({
+      id: exchangeId,
+      venueId,
+      status: 'NEEDS_REVIEW',
+      reviewReason: 'CHARGE_AMOUNT_MISMATCH',
+      reviewedAt: null,
+    })
+    mockReview.mockResolvedValue({
+      id: exchangeId,
+      reviewedAt: new Date('2026-10-26T18:00:00Z'),
+      reviewedById: scope.staffId,
+      reviewNote: input.note,
+    })
+  })
+
+  it('filters pending reviews without an implicit date cutoff and projects local review details', async () => {
+    mockFind.mockResolvedValue([
+      {
+        status: 'NEEDS_REVIEW',
+        createdAt: new Date('2026-10-01T06:00:00Z'),
+        reviewedAt: new Date('2026-10-26T18:00:00Z'),
+        reviewedById: scope.staffId,
+        reviewNote: input.note,
+      },
+    ])
+    const result = await tool().call({ porRevisar: true })
+    expect(mockFind.mock.calls[0][0].where).toEqual({ venueId: { in: [venueId] }, status: 'NEEDS_REVIEW', reviewedAt: null })
+    expect(mockCount.mock.calls[0][0].where).toEqual(mockFind.mock.calls[0][0].where)
+    expect(result.cambios[0].revisado).toEqual({ fecha: '2026-10-26T12:00:00.000-06:00', quien: scope.staffId, nota: input.note })
+  })
+
+  it('requires a preview and confirms the same exchange and note through the shared service', async () => {
+    const review = tool(writer, 'review_exchange')
+    const preview = await review.call(input)
+    expect(preview).toMatchObject({ ok: false, requiresConfirmation: true, preview: { nota: input.note } })
+    expect(mockReview).not.toHaveBeenCalled()
+    expect(preview.confirmationPayload).toMatchObject({
+      venueId,
+      exchangeId,
+      note: input.note,
+      confirm: true,
+      idempotencyKey: expect.any(String),
+      previewDigest: expect.any(String),
+    })
+    expect(await review.call(preview.confirmationPayload)).toMatchObject({ ok: true })
+    expect(mockReview).toHaveBeenCalledWith(
+      expect.objectContaining({ venueId, exchangeId, staffId: scope.staffId, note: input.note, source: 'MCP' }),
+    )
+  })
+
+  it('rejects missing preview or changed payload before writing', async () => {
+    const review = tool(writer, 'review_exchange')
+    await expect(review.call({ ...input, confirm: true })).rejects.toThrow(/vista previa/i)
+    const preview = await review.call(input)
+    for (const changed of [
+      { note: 'Different note' },
+      { exchangeId: otherVenueId },
+      { idempotencyKey: '12345678-1234-4123-8123-123456789abc' },
+      { previewDigest: 'bad' },
+    ]) {
+      await expect(review.call({ ...preview.confirmationPayload, ...changed })).rejects.toThrow(/vista previa/i)
+    }
+    expect(mockReview).not.toHaveBeenCalled()
+  })
+
+  it('requires write scope, refund permission and tenant scope for previews and confirmations', async () => {
+    for (const connection of [scope, { ...writer, scopes: undefined }, { ...writer, perVenueAccess: scope.perVenueAccess }]) {
+      await expect(tool(connection, 'review_exchange').call(input)).rejects.toThrow()
+    }
+    await expect(tool(writer, 'review_exchange').call({ ...input, venueId: otherVenueId })).rejects.toThrow('not in your scope')
+    expect(mockDetail).not.toHaveBeenCalled()
+    expect(mockReview).not.toHaveBeenCalled()
+  })
+
+  it('permits review with refund permission alone and rejects invalid notes before any read', async () => {
+    const reviewer = {
+      ...writer,
+      scopes: ['mcp:write'],
+      perVenueAccess: new Map([[venueId, { corePermissions: ['payments:refund'] } as never]]),
+    }
+    const review = tool(reviewer, 'review_exchange')
+    for (const note of [undefined, '', 'ab', '   ', 'x'.repeat(501)]) await expect(review.call({ ...input, note })).rejects.toThrow(/nota/i)
+    expect(mockDetail).not.toHaveBeenCalled()
+    const preview = await review.call(input)
+    expect(await review.call(preview.confirmationPayload)).toMatchObject({ ok: true, revisado: { fecha: '2026-10-26T12:00:00.000-06:00' } })
+  })
+
+  it.each([
+    [{ status: 'COMPLETED', reviewedAt: null }, 'EXCHANGE_NOT_IN_REVIEW'],
+    [{ status: 'NEEDS_REVIEW', reviewedAt: new Date() }, 'EXCHANGE_ALREADY_REVIEWED'],
+  ])('does not offer an inapplicable preview for %j', async (fields, code) => {
+    mockDetail.mockResolvedValue({ id: exchangeId, ...fields })
+    await expect(tool(writer, 'review_exchange').call(input)).rejects.toMatchObject({ statusCode: 409, code })
+    expect(mockReview).not.toHaveBeenCalled()
+  })
+
+  it('returns 404 for another venue and propagates shared-service conflicts', async () => {
+    const review = tool(writer, 'review_exchange')
+    mockDetail.mockResolvedValueOnce(null)
+    await expect(review.call(input)).rejects.toMatchObject({ statusCode: 404 })
+    const preview = await review.call(input)
+    mockReview.mockRejectedValueOnce(
+      Object.assign(new Error('Este cambio ya fue revisado'), { statusCode: 409, code: 'EXCHANGE_ALREADY_REVIEWED' }),
+    )
+    await expect(review.call(preview.confirmationPayload)).rejects.toMatchObject({ code: 'EXCHANGE_ALREADY_REVIEWED' })
+  })
+
+  it('classifies the write and excludes it from the certified catalog without internal descriptions', () => {
+    expect(TOOL_EFFECTS.review_exchange).toBe('write')
+    expect(DIRECTORY_TOOLS.has('review_exchange')).toBe(false)
+    expect(tool(writer, 'review_exchange').description).not.toMatch(/\bExchange\b|\bPayment\b|\bPrisma\b|\btabla\b|src\/|\/api\/|\/mcp\b/)
   })
 })

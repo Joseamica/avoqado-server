@@ -139,7 +139,7 @@ export function registerAllTools(server: McpServer, scope: McpScope, flags: Tool
   registerGiftCardTools(server, scope) // lectura y operación del gerente; sin candado de plan (el saldo vendido siempre se lee y se opera)
   registerShiftTools(server, scope)
   registerDiscountTools(server, scope)
-  registerExchangeTools(server, scope) // Sólo el MCP libre; no pertenece al catálogo certificado.
+  registerExchangeTools(server, scope) // list_exchanges + review_exchange: free mode only, outside the certified catalog.
   registerUpsellTools(server, scope)
   registerPromotionTools(server, scope)
   registerServiceChargeTools(server, scope)

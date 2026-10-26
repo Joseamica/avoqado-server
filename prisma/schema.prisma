@@ -19344,6 +19344,9 @@ model Exchange {
   isOfflineReplay         Boolean                   @default(false)
   cashDrawerSessionId     String?
   reviewReason            String?                   @db.VarChar(64) // bloque C
+  reviewedAt              DateTime?
+  reviewedById            String?
+  reviewNote              String?                   @db.VarChar(500)
   createdAt               DateTime                  @default(now())
   updatedAt               DateTime                  @updatedAt
   creditLinks             ExchangeCreditLink[]
