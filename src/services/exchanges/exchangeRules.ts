@@ -18,6 +18,15 @@ import {
   type LineBlockReason,
 } from './exchangePredicates'
 
+export const RELEASE_QUIET_MS = 10 * 60_000
+export const RELEASE_NO_REQUEST_MS = 30 * 60_000
+
+// Evaluate the delay only AFTER proving NOT_CHARGED under lock; elapsed time alone never releases an exchange.
+export function releaseIsDue(evidence: { requestCount: number; lastActivityAt: Date | null }, exchangeCreatedAt: Date, now: Date): boolean {
+  if (evidence.requestCount === 0) return now.getTime() - exchangeCreatedAt.getTime() >= RELEASE_NO_REQUEST_MS
+  return evidence.lastActivityAt !== null && now.getTime() - evidence.lastActivityAt.getTime() >= RELEASE_QUIET_MS
+}
+
 /**
  * El interruptor que de verdad rige (spec §4): el ajuste de la sucursal si lo hay; si es nulo, el default por giro, prendido en
  * tiendas, belleza y servicios (`RETAIL` y `SERVICES`) y apagado en restaurantes, bares, hoteles y entretenimiento. Un giro

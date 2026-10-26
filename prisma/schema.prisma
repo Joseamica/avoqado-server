@@ -19299,6 +19299,7 @@ enum ExchangeStatus {
   PENDING_PAYMENT // set aside: the new sale exists, the card charge for the difference is still missing (spec §6.4)
   COMPLETED_PENDING_CARD_REFUND // closed, with the refund of the difference still pending on the terminal (spec §6.5)
   NEEDS_REVIEW // a person resolves it; why goes in `reviewReason` (e.g. a late charge after the hold was released, spec §6.4)
+  CANCELLED
 }
 
 /// What the exchange has to settle: nothing (`EVEN`), collect the difference (`COLLECT`) or pay it out (`PAYOUT`).
@@ -19327,6 +19328,7 @@ model Exchange {
   originalOrderId         String
   originalPaymentId       String
   newOrderId              String                    @unique
+  chargePaymentId         String?                   @unique
   returnedAmount          Decimal                   @db.Decimal(12, 2)
   takenAmount             Decimal                   @db.Decimal(12, 2)
   differenceAmount        Decimal                   @db.Decimal(12, 2) // con signo: + cobra, − devuelve
@@ -19335,6 +19337,7 @@ model Exchange {
   pendingCardRefundAmount Decimal                   @default(0) @db.Decimal(12, 2)
   lines                   Json // v1: lo que regresa y lo que se lleva, con valor por pieza, motivo y si vuelve al inventario
   result                  Json? // v1: la respuesta del POST, para devolverla igual en una repetición (RF1)
+  resultRevision          Int                       @default(0)
   staffId                 String
   deviceId                String?                   @db.VarChar(128)
   createdAtLocal          DateTime?
@@ -19349,6 +19352,7 @@ model Exchange {
   @@index([venueId, createdAt])
   @@index([venueId, status, createdAt])
   @@index([venueId, originalOrderId])
+  @@index([status, createdAt, id])
 }
 
 /// Una porción del crédito: el REFUND EXCHANGE_CREDIT de la venta original ↔ el cobro EXCHANGE_CREDIT de la nueva.
