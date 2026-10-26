@@ -171,7 +171,9 @@ function pauseAfterOrderLock(orderId: string, mode: 'scope' | 'legacy') {
                       mode === 'legacy' &&
                       sql.includes('ancestors(id) AS') &&
                       sql.includes('FOR UPDATE OF o') &&
-                      values[0] === orderId &&
+                      // The payment lock seeds its CTE with a list of Orders (exchange settlement adds the original).
+                      Array.isArray(values[0]) &&
+                      values[0].includes(orderId) &&
                       values[1] === venueId
                     if (!paused && (scopeClaim || legacyClaim) && Array.isArray(rows) && rows.some(row => row.id === orderId)) {
                       paused = true
