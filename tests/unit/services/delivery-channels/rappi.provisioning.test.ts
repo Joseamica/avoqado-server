@@ -163,6 +163,23 @@ describe('activarSeleccion', () => {
     expect(aprov('10')).toMatchObject({ intentId: 'i0', batchId: 'b0' })
   })
 
+  // Codex D9 r2 #2 (26-oct): una reclamación que D8 conserva como PRUEBA (la reconexión falló, la fila volvió a DISABLED) no
+  // reserva la tienda, aunque su intención siga viva por OTRA tienda del mismo enlace.
+  it('la reclamación de una intención viva cuyo resultado para ESA tienda ya es final no bloquea: se reclama otra vez', async () => {
+    sembrar({
+      id: 'i0',
+      state: 'ACTIVATING',
+      selectionJson: ['10', '11'],
+      resultsJson: { '10': { outcome: 'FAILED' }, '11': { outcome: 'PROVISIONING' } },
+    })
+    vinculo('10', { status: 'DISABLED', config: { rappiProvisioning: { intentId: 'i0', since: 'x', statusPrevio: 'DISABLED' } } })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('PROVISIONING')
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'T10' }])
+    expect(aprov('10')).toMatchObject({ intentId: 'i1' })
+  })
+
   it('la de una intención MUERTA se retoma, y el lote viejo no sobrevive a la reclamación nueva', async () => {
     sembrar({ id: 'i0', state: 'EXPIRED' })
     vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', batchId: 'viejo', creado: true } } })
@@ -506,6 +523,91 @@ describe('confirmarTienda', () => {
       reclamada()
       expect(await baja()).toBe('IGNORED')
       expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+  })
+
+  // D9 (26-oct): la baja que llega por el AVISO se contrasta con la foto actual de Rappi (`GET stores-pa`) antes de apagar nada.
+  describe('baja contrastada con la foto de Rappi (D9)', () => {
+    const conFoto = (foto: jest.Mock) =>
+      confirmarTienda(
+        { storeId: '10', status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'lote-de-baja' },
+        { ...deps(), integradaEnRappi: foto },
+      )
+    const activa = () =>
+      vinculo('10', {
+        status: 'ACTIVE',
+        config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10', confirmedAt: 'y' } },
+      })
+
+    it('Rappi ya no la tiene: la conectada queda DISABLED, como antes', async () => {
+      activa()
+      const foto = jest.fn(async () => false)
+      expect(await conFoto(foto)).toBe('DISABLED')
+      expect(foto).toHaveBeenCalledWith('10')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    it('Rappi la SIGUE teniendo (baja vieja, o la foto tarda): DEFERRED y la conexión no se toca', async () => {
+      activa()
+      expect(await conFoto(jest.fn(async () => true))).toBe('DEFERRED')
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    // Codex D9 r3 #1: sin foto, nunca peor que antes de D9.
+    it('la foto no se pudo leer: la baja se aplica como antes', async () => {
+      activa()
+      expect(await conFoto(jest.fn(async () => Promise.reject(new Error('RAPPI_STORES_PA_HTTP_500'))))).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    it('la conexión PENDIENTE de una tienda que Rappi ya no tiene: se devuelve CON su prueba y queda FAILED final', async () => {
+      sembrar()
+      reclamada()
+      expect(await conFoto(jest.fn(async () => false))).toBe('REMOVED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+      expect(aprov('10')).toMatchObject({ intentId: 'i1', integrationId: 'int10' }) // D8 la puede reconectar
+      expect(resultado('10')).toMatchObject({ outcome: 'FAILED', detalle: 'RAPPI_BAJA_DURANTE_LA_CONEXION' })
+      expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+      // El alta atrasada ya no la activa.
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    // Codex D9 r3 #2: soltar antes de guardar el 202 perdería su `integrationId`.
+    it('la conexión pendiente cuyo 202 todavía no se guarda: DEFERRED, sin preguntar ni tocar', async () => {
+      sembrar()
+      reclamada({ batchId: undefined, integrationId: undefined })
+      const foto = jest.fn(async () => false)
+      expect(await conFoto(foto)).toBe('DEFERRED')
+      expect(foto).not.toHaveBeenCalled()
+      expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+
+    it('la conexión pendiente y Rappi sí la tiene: DEFERRED, sigue PENDING', async () => {
+      sembrar()
+      reclamada()
+      expect(await conFoto(jest.fn(async () => true))).toBe('DEFERRED')
+      expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+
+    // Codex D9 r3 #3: el alta se promueve mientras la baja espera la foto; la baja atrasada no la apaga.
+    it('la fila cambió entre la foto y el candado: DEFERRED y no se apaga la conexión recién promovida', async () => {
+      sembrar()
+      reclamada()
+      const foto = jest.fn(async () => {
+        await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())
+        return false
+      })
+      expect(await conFoto(foto)).toBe('DEFERRED')
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+    })
+
+    it.each([['DISABLED'], ['sin fila']])('nada que apagar (%s): no pregunta a Rappi', async caso => {
+      if (caso === 'DISABLED') vinculo('10', { status: 'DISABLED' })
+      const foto = jest.fn(async () => false)
+      expect(await conFoto(foto)).toBe('IGNORED')
+      expect(foto).not.toHaveBeenCalled()
     })
   })
 

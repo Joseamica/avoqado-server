@@ -129,11 +129,19 @@ export async function rappiApi(peticion: Omit<RappiPeticion, 'superficie'> & { s
       ambiente: getRappiEnvironment(),
       pais: env.RAPPI_COUNTRY,
       fetchImpl: fetch,
-      getToken: superficie => getRappiToken(superficie, { fetchToken: fetchTokenReal }),
+      getToken: tokenDeRappi,
       tiendasEscribibles: tiendasEscribiblesRappi(),
     },
     { superficie: peticion.superficie ?? 'integrations', ...peticion },
   )
+}
+
+/**
+ * El token vigente de una superficie, con el login real si la caché ya no lo tiene. El script de avisos saca de aquí el `azp`:
+ * leerlo SÓLO de la caché fallaba en el último minuto del token (D6, Codex r1 #4).
+ */
+export function tokenDeRappi(superficie: SuperficieRappi): Promise<string> {
+  return getRappiToken(superficie, { fetchToken: fetchTokenReal })
 }
 
 // ────────────────────────────────────────────────────────────────────────────────────
@@ -268,6 +276,21 @@ export async function marcarTiendaIntegradaRappi(storeId: string, integrada: boo
 const UTILS = '/api/rest-ops-utils'
 const rutaDeHorario = (storeId: string, storeScheduleId?: number | string) =>
   `${UTILS}/store/schedule/${encodeURIComponent(storeId)}${storeScheduleId === undefined ? '' : `/${encodeURIComponent(String(storeScheduleId))}`}`
+
+/**
+ * D9: ¿nuestra integración tiene AHORA esta tienda? `GET stores-pa`, con el token del integrador, lista las tiendas integradas a
+ * NUESTRA integración: `[{ rappiId, integrationId, name }]`, los dos ids = la tienda (medido en DEV el 26-oct; refleja altas y
+ * bajas en menos de un segundo). Es una LECTURA: va sin `storeId`. Un no-2xx o un cuerpo que no es lista LANZA: nunca se lee
+ * como «no la tiene».
+ * ponytail: trae la lista entera (Rappi no filtra por tienda); sólo la pide cada aviso de baja, que es raro.
+ */
+export async function tiendaIntegradaEnRappi(storeId: string): Promise<boolean> {
+  const r = await rappiApi({ metodo: 'GET', ruta: `${API}/stores-pa` })
+  if (!r.ok) throw new Error(`RAPPI_STORES_PA_HTTP_${r.status}`)
+  const lista: unknown = JSON.parse(r.raw)
+  if (!Array.isArray(lista)) throw new Error('RAPPI_STORES_PA_SIN_LISTA')
+  return lista.some(t => String(t?.rappiId) === storeId || String(t?.integrationId) === storeId)
+}
 
 /**
  * Lo que Rappi tiene hoy como horario regular, YA APLANADO a `{ id, day, starts_time, ends_time }` (horas en `HH:MM:SS`). Es una

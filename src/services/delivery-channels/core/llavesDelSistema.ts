@@ -18,7 +18,14 @@ import prisma from '@/utils/prismaClient'
 
 import type { ProblemaDeMenu } from './types'
 
-export const LLAVES_DEL_SISTEMA = ['rappiProvisioning', 'menuEnRevision', 'menuRechazado', 'menuProblemas', 'horarioPublicado'] as const
+export const LLAVES_DEL_SISTEMA = [
+  'rappiProvisioning',
+  'menuEnRevision',
+  'menuRechazado',
+  'menuProblemas',
+  'horarioPublicado',
+  'cerradaEnElProveedor',
+] as const
 export type LlaveDelSistema = (typeof LLAVES_DEL_SISTEMA)[number]
 
 /** El menú que se mandó y espera veredicto. Fechas en ISO (UTC). */
@@ -65,6 +72,27 @@ export function leerMenuEnRevision(config: unknown): MenuEnRevision | null {
       : {}),
     ...(typeof p.sinVeredictoAvisadoEn === 'string' ? { sinVeredictoAvisadoEn: p.sinVeredictoAvisadoEn } : {}),
   }
+}
+
+/**
+ * D4 (26-oct): el proveedor avisó que la tienda se cerró de SU lado (en Rappi, `STORE_CONNECTIVITY enabled:false`; medido en DEV:
+ * nuestra propia pausa NO lo produce). Mientras esté, la pausa del POS que vence no la reabre. La borra sólo quien la reabre
+ * desde el panel: un aviso de «abierta» puede llegar viejo y reabriría un cierre nuevo (Codex D4 r3 #4).
+ */
+export function cerradaEnElProveedor(config: unknown): boolean {
+  return esObjeto(configComoObjeto(config).cerradaEnElProveedor)
+}
+
+/**
+ * Pone la nota en UN UPDATE que mezcla en la base y filtra el estado: no pisa las demás llaves de `config` (ni una escritura
+ * bloqueada que esté en curso), y un PENDING o un DISABLED no la estrenan. Devuelve cuántas filas tocó.
+ */
+export function anotarCerradaEnElProveedor(linkId: string): Promise<number> {
+  return prisma.$executeRaw`
+    UPDATE "DeliveryChannelLink"
+       SET "config" = (CASE WHEN jsonb_typeof("config") = 'object' THEN "config" ELSE '{}'::jsonb END)
+                      || jsonb_build_object('cerradaEnElProveedor', jsonb_build_object('desde', ${new Date().toISOString()}::text))
+     WHERE "id" = ${linkId} AND "status" IN ('ACTIVE', 'PAUSED')`
 }
 
 /** La huella rechazada vigente, o `null`. */

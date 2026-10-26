@@ -51,6 +51,7 @@ import {
   rappiApi,
   redirectUriRappi,
   suscribirTiendaAEventos,
+  tiendaIntegradaEnRappi,
   tiendasDelComercio,
 } from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
 import { urlDeInicio } from '../../../../src/services/delivery-channels/providers/rappi/rappi.selfOnboarding'
@@ -565,6 +566,31 @@ describe('rappi.client — self-onboarding', () => {
       await marcarTiendaIntegradaRappi('a/b?c', true)
 
       expect(llamadas[0].url).toBe(`${RUTA}/a%2Fb%3Fc/status?integrated=true`)
+    })
+  })
+
+  // D9: la foto actual de NUESTRA integración. Forma medida en DEV el 26-oct: `[{ rappiId, integrationId, name }]`, los dos ids = la tienda.
+  describe('tiendaIntegradaEnRappi', () => {
+    const lista = [
+      { rappiId: '900175500', integrationId: '900175500', name: 'Otra' },
+      { rappiId: '10', integrationId: '10', name: 'Centro' },
+    ]
+
+    it('GET stores-pa con el token del integrador, sin candado (es lectura): está o no está', async () => {
+      const llamadas = simularRed(() => json(200, lista))
+      await expect(tiendaIntegradaEnRappi('10')).resolves.toBe(true)
+      await expect(tiendaIntegradaEnRappi('99')).resolves.toBe(false) // 99 no es escribible y aun así se pregunta
+      expect(llamadas[0].init.method).toBe('GET')
+      expect(llamadas[0].url).toBe('https://microservices.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores-pa')
+      expect(llamadas[0].init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ' })
+    })
+
+    it.each([
+      ['un 500', () => json(500, { message: 'x' })],
+      ['un cuerpo que no es lista', () => json(200, { stores: lista })],
+    ])('%s LANZA: nunca se lee como «no la tiene»', async (_n, respuesta) => {
+      simularRed(respuesta)
+      await expect(tiendaIntegradaEnRappi('10')).rejects.toThrow(/RAPPI_STORES_PA/)
     })
   })
 

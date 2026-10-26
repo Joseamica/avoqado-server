@@ -197,6 +197,21 @@ describe('callback', () => {
     expect(h).not.toContain('value="11"')
   })
 
+  // D7 (26-oct): Rappi DEV devolvió la lista vacía ~30 min con la cuenta correcta y luego la devolvió completa, sin cambio
+  // nuestro. La página no puede dejar al dueño pensando que su cuenta no tiene tiendas: le dice qué revisar y qué hacer.
+  it('D7: sin tiendas, FAILED RAPPI_SIN_TIENDAS y la página dice qué revisar y que pida otro enlace en unos minutos', async () => {
+    sembrar()
+    cliente.tiendasDelComercio.mockResolvedValue([])
+    const r = await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') })
+    const h = html(r)
+    expect(r.status).toHaveBeenCalledWith(200)
+    expect(intent()).toMatchObject({ state: 'FAILED', failureReason: 'RAPPI_SIN_TIENDAS' })
+    expect(h).toContain('Autorizado, pero sin tiendas')
+    expect(h).toContain('cuenta de Rappi Partners dueña de la tienda')
+    expect(h).toContain('espera unos minutos')
+    expect(h).toContain('Pide un enlace nuevo desde el dashboard de Avoqado')
+  })
+
   // 🔴 R12
   it('el código se canjea DESPUÉS de ganar el CAS CREATED → EXCHANGED', async () => {
     sembrar()

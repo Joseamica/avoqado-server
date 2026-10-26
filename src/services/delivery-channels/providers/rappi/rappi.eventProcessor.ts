@@ -23,6 +23,7 @@ import prisma from '@/utils/prismaClient'
 import { cancelDeliveryOrder } from '../../core/cancelDeliveryOrder.service'
 import { ingestDeliveryOrder } from '../../core/deliveryOrderIngestion.service'
 import { cerrarEventoReclamado, reclamarEvento, renovarReclamo } from '../../core/deliveryWebhookEvent.service'
+import { anotarCerradaEnElProveedor } from '../../core/llavesDelSistema'
 import { aplicarVeredictoDeMenu } from '../../core/menuSync.service'
 import { rappiAdapter, RAPPI_EVENTS } from './rappi.adapter'
 import {
@@ -181,14 +182,16 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
   const confirmar =
     deps.confirmar ??
     (async (r: ResultadoRappiTienda & { batchId?: string; operation?: 'PROVISION' | 'DEPROVISION' }) => {
-      const [{ confirmarTienda }, { suscribirTiendaAEventos }] = await Promise.all([
+      const [{ confirmarTienda }, { suscribirTiendaAEventos, tiendaIntegradaEnRappi }] = await Promise.all([
         import('./rappi.provisioning'),
         import('./rappi.client'),
       ])
       // Tarea 18: el «integrada» sale por el ADAPTADOR (el mismo camino que usará el botón de desconectar), sin esperarlo.
+      // D9: una baja que llega por aviso se contrasta con la foto actual de la integración antes de apagar nada.
       return confirmarTienda(r, {
         suscribir: suscribirTiendaAEventos,
         avisarIntegrada: (storeId, integrada) => rappiAdapter.notifyIntegrationStatus(storeId, integrada),
+        integradaEnRappi: tiendaIntegradaEnRappi,
       })
     })
   const historial =
@@ -481,6 +484,8 @@ export async function processRappiEvent(eventRowId: string, deps: RappiProcessDe
           where: { id: evento.channelLink.id, status: DeliveryChannelStatus.ACTIVE },
           data: { status: DeliveryChannelStatus.PAUSED },
         })
+        // D4 (26-oct): para que la pausa del POS que vence no la reabra (medido en DEV: nuestra propia pausa NO produce este aviso).
+        await anotarCerradaEnElProveedor(evento.channelLink.id)
         const datos = { eventRowId, linkId: evento.channelLink.id, venueId: evento.venueId, mensaje: cuerpo.message }
         if (count) logger.error('🚨 [Rappi] la tienda quedó DESHABILITADA del lado de Rappi', datos)
         else
