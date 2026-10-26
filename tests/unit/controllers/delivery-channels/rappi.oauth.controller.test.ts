@@ -177,6 +177,26 @@ describe('callback', () => {
     expect(descifrarIdToken(deps, intent() as never)).toBe('idt')
   })
 
+  // D8: tras «Desconectar de todos modos» Rappi la sigue listando integrada con NUESTRA integración.
+  it('la integrada que estaba conectada a ESTE negocio se puede marcar para reconectar; la ajena sigue en gris', async () => {
+    sembrar()
+    db.links.set('10', {
+      id: 'x10',
+      externalLocationId: '10',
+      venueId: 'v1',
+      status: 'DISABLED',
+      config: { rappiProvisioning: { intentId: 'viejo', since: 'x', integrationId: 'AVQ', confirmedAt: 'y' } },
+    })
+    cliente.tiendasDelComercio.mockResolvedValue([
+      { storeId: '10', name: 'A', integrated: true, integrationId: 'AVQ' },
+      { storeId: '11', name: 'B', integrated: true, integrationId: 'AVQ' },
+    ])
+    const h = html(await callback({ code: 'c', state: firmar(deps, 'i1', 'callback') }))
+    expect(h).toMatch(/<input type="checkbox" name="tiendas" value="10">[^<]*<strong>A<\/strong>.*márcala para reconectarla/)
+    expect(h).toMatch(/<input type="checkbox" disabled>[^<]*<strong>B<\/strong>.*ya integrada/)
+    expect(h).not.toContain('value="11"')
+  })
+
   // 🔴 R12
   it('el código se canjea DESPUÉS de ganar el CAS CREATED → EXCHANGED', async () => {
     sembrar()
@@ -325,6 +345,39 @@ describe('activate', () => {
     const r2 = await activar({ tiendas: '10', confirmo_negocio: 'si' })
     expect(cliente.aprovisionarTiendasRappi).toHaveBeenCalledTimes(1)
     expect(r2.redirect).toHaveBeenCalledWith(303, expect.stringContaining('/api/v1/delivery/rappi/oauth/result?intent='))
+  })
+
+  // D8
+  it('reconectar: la MISMA fila queda ACTIVE sin aprovisionar, con «integrada: sí», y la página dice Conectada', async () => {
+    canjeado({ storesJson: [{ storeId: '10', name: 'A', integrated: true, integrationId: 'AVQ' }] })
+    db.links.set('10', {
+      id: 'x10',
+      externalLocationId: '10',
+      venueId: 'v1',
+      status: 'DISABLED',
+      config: { rappiProvisioning: { intentId: 'viejo', since: 'x', integrationId: 'AVQ', confirmedAt: 'y' } },
+    })
+    // Al confirmar se le vuelve a preguntar a Rappi (Codex r1 #2): la sigue teniendo con nuestra integración.
+    cliente.tiendasDelComercio.mockResolvedValue([{ storeId: '10', name: 'A', integrated: true, integrationId: 'AVQ' }])
+    const r1 = await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    expect(cliente.tiendasDelComercio).toHaveBeenCalledWith('idt')
+    await new Promise<void>(resolver => setImmediate(resolver))
+    expect(cliente.aprovisionarTiendasRappi).not.toHaveBeenCalled()
+    expect(cliente.suscribirTiendaAEventos).toHaveBeenCalledWith('10')
+    expect(cliente.marcarTiendaIntegradaRappi).toHaveBeenCalledWith('10', true)
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'ACTIVE' })
+    expect(intent()).toMatchObject({ state: 'CONSUMED', resultsJson: { '10': { outcome: 'ACTIVATED' } } })
+    expect(r1.redirect).toHaveBeenCalledWith(303, expect.stringContaining('/api/v1/delivery/rappi/oauth/result?intent='))
+    expect(html(await resultado())).toContain('Conectada')
+  })
+
+  it('reconectar no confía en la página: si la fila ya no es reconectable al enviar, 400 y nada sale a Rappi', async () => {
+    canjeado({ storesJson: [{ storeId: '10', name: 'A', integrated: true, integrationId: 'AVQ' }] })
+    db.links.set('10', { id: 'x10', externalLocationId: '10', venueId: 'v1', status: 'ACTIVE', config: null })
+    const r = await activar({ tiendas: '10', confirmo_negocio: 'si' })
+    expect(r.status).toHaveBeenCalledWith(400)
+    expect(cliente.suscribirTiendaAEventos).not.toHaveBeenCalled()
+    expect(intent().state).toBe('EXCHANGED')
   })
 
   it.each([
