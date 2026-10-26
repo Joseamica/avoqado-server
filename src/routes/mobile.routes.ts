@@ -3219,19 +3219,16 @@ router.delete(
   orderMobileController.removeOrderDiscount,
 )
 
-// 🔴 ASIMETRÍA DECLARADA, NO ARREGLADA (auditoría de permisos de piso, 2026-08-17).
-// Regalar la cuenta entera pide aquí `orders:update` (lo traen WAITER y CASHIER), pero
-// la MISMA cortesía pide `orders:comp` (MANAGER+) por TPV y por la cola offline
-// (intents COMP_ORDER y ADD_ITEMS con isCortesia). Es PREEXISTENTE — no la abrió esta
-// auditoría — y apretarla le quitaría a los meseros de todos los venues algo que hoy
-// usan. Es decisión de producto con dinero enfrente, del founder. Detalle y tabla
-// medida: `src/services/mobile/sync.mobile.service.ts` (case 'COMP_ORDER').
+// Regalar pide `orders:comp`, igual que la TPV y la cola sin red (intents COMP_ORDER y
+// ADD_ITEMS con isCortesia). Hasta el 25-oct pedía `orders:update` (WAITER y CASHIER):
+// decisión del founder «A» (21-oct), cerrarla. De fábrica regala MANAGER+; el dueño se lo
+// da a otro rol desde el panel (`tpv-orders:comp`), y sin él el 403 abre el PIN de gerente.
 router.post(
   '/venues/:venueId/orders/:orderId/comp',
   authenticateTokenMiddleware,
   httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('orders:comp'),
   checkTableOwnership('order'),
   orderMobileController.compWholeOrder,
 )
@@ -3357,14 +3354,13 @@ router.post(
   orderMobileController.updateOrderDetails,
 )
 
-// 🔴 Misma asimetría declarada que la cortesía de la cuenta entera (ver arriba):
-// `orders:update` aquí vs `orders:comp` en TPV y en el replay offline. Preexistente.
+// Mismo candado que la cortesía de la cuenta entera (ver arriba).
 router.post(
   '/venues/:venueId/orders/:orderId/items/:itemId/comp',
   authenticateTokenMiddleware,
   httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('orders:comp'),
   checkTableOwnership('order'),
   orderMobileController.compOrderItem,
 )
