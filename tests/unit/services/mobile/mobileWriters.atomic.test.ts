@@ -324,9 +324,14 @@ describe('locked mobile writers', () => {
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
       ])
       const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
-      expect(venueLock).toBeLessThan(Math.min(...txCallOrders()))
+      // D2 (27-oct): lo único antes del candado es buscar si es fiado y, si lo es, apartar a su cliente (Cliente → mesa,
+      // como las métricas del cobro). Esa búsqueda se vuelve a comprobar ya con la mesa apartada.
+      const [buscarFiado, ...lecturasDeLaCuenta] = tx.order.findFirst.mock.invocationCallOrder
+      expect(tx.order.findFirst.mock.calls[0][0]).toMatchObject({ where: { id: 'order', venueId: 'venue' }, select: { payLater: true } })
+      expect(buscarFiado).toBeLessThan(venueLock)
+      expect(venueLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findFirst]), ...lecturasDeLaCuenta))
       expect(orderLock).toBeLessThan(tableLock)
-      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany])))
+      expect(orderLock).toBeLessThan(Math.min(...txCallOrders([tx.order.findMany, tx.table.findMany, tx.order.findFirst]), ...lecturasDeLaCuenta))
       const orderTopology = { id: true, tableId: true, status: true, paymentStatus: true, createdAt: true }
       const tableTopology = { id: true, number: true, status: true, currentOrderId: true }
       expect(tx.order.findMany.mock.calls.map(([args]: any[]) => args)).toEqual(
@@ -604,6 +609,37 @@ describe('writer-specific fresh decisions', () => {
       where: { id: { in: ['op1'] }, orderId: 'order' },
       data: { orderId: 'child' },
     })
+  })
+
+  it('🔴 split de un fiado: aparta al cliente ANTES que la mesa y la parte nueva nace con su cliente (D2)', async () => {
+    const FIADO = { ...ORDER, payLater: true, orderCustomers: [{ customerId: 'customer', isPrimary: true }] }
+    tx.order.findFirst.mockResolvedValue(FIADO)
+
+    await splitOrderItems('venue', 'order', ['i2'], 'staff')
+
+    const sql = tx.$queryRaw.mock.calls.map(([q]: any[]) => (Array.isArray(q) ? q.join('?') : q.sql))
+    // Negocio → Cliente → (el candado de siempre) Negocio → Cuenta → Mesa.
+    expect(sql.slice(0, 4)).toEqual([
+      'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
+      'SELECT id FROM "Customer" WHERE id = ANY(?::text[]) ORDER BY id FOR KEY SHARE',
+      'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
+      'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE',
+    ])
+    expect(tx.$queryRaw.mock.calls[1].slice(1)).toEqual([['customer']])
+    expect(tx.order.create.mock.calls[0][0].data).toMatchObject({
+      payLater: true,
+      customerId: 'customer',
+      orderCustomers: { create: [{ customerId: 'customer', isPrimary: true }] },
+    })
+  })
+
+  it('split de un fiado cuyo cliente cambió mientras esperaba el candado: no copia un vínculo sin apartar (D2)', async () => {
+    tx.order.findFirst
+      .mockResolvedValueOnce({ payLater: true, customerId: 'customer', orderCustomers: [{ customerId: 'customer' }] })
+      .mockResolvedValue({ ...ORDER, payLater: true, customerId: 'otro', orderCustomers: [{ customerId: 'otro', isPrimary: true }] })
+
+    await expect(splitOrderItems('venue', 'order', ['i2'], 'staff')).rejects.toThrow(/cambió de cliente/)
+    expect(txWrites()).toEqual([])
   })
 
   it('splitBySeat groups the locked seats', async () => {
