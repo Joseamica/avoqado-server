@@ -66,7 +66,14 @@ import {
   rechazarCancelacionLocalDeRappi,
 } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
-import { combinarPayLater } from '../shared/porCobrar'
+import {
+  apartarClientesDelFiado,
+  clienteDelFiado,
+  combinarPayLater,
+  duenoDeLaCuenta,
+  exigirClientesApartados,
+  exigirUnSoloCliente,
+} from '../shared/porCobrar'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -2019,6 +2026,40 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
 // MARK: - Separate checks (Square: dividir en cuentas separadas)
 
 /**
+ * La parte separada de un fiado sigue a nombre de su cliente (hz:01185fe7:D2): sin su `OrderCustomer` se borraba de su
+ * saldo y de «Cuentas por cobrar». Una cuenta que no es fiado se separa como antes, sin copiar al cliente.
+ */
+function clienteDeLaParteSeparada(source: {
+  payLater: boolean | null
+  customerId: string | null
+  orderCustomers: { customerId: string; isPrimary: boolean }[]
+}): Pick<Prisma.OrderUncheckedCreateInput, 'customerId' | 'orderCustomers'> {
+  const cliente = source.payLater === true ? clienteDelFiado(source) : null
+  if (!cliente) return {}
+  return {
+    customerId: cliente.dueno,
+    orderCustomers: {
+      create: [{ customerId: cliente.dueno, isPrimary: true }, ...cliente.otros.map(customerId => ({ customerId, isPrimary: false }))],
+    },
+  }
+}
+
+/**
+ * El fiado que se queda también debe salir como deuda: si su cliente estaba sólo en «Detalles» (sin `OrderCustomer`), se le
+ * pone su vínculo al dividirlo (Codex r2 de D2). Su cliente ya está apartado (`apartarClientesDelFiado`).
+ */
+async function vincularAlDuenoDelFiado(
+  tx: Prisma.TransactionClient,
+  source: { id: string; payLater: boolean | null; customerId: string | null; orderCustomers: { customerId: string; isPrimary: boolean }[] },
+) {
+  const cliente = source.payLater === true ? clienteDelFiado(source) : null
+  if (!cliente || source.orderCustomers.some(c => c.customerId === cliente.dueno)) return
+  await tx.orderCustomer.create({
+    data: { orderId: source.id, customerId: cliente.dueno, isPrimary: !source.orderCustomers.some(c => c.isPrimary) },
+  })
+}
+
+/**
  * TABLE_SERVICE — splits the selected SENT items of an open check into a NEW
  * check on the SAME table (Square's separate checks). The source keeps the
  * rest; both orders' money is recomputed from their items. The table stays
@@ -2036,6 +2077,8 @@ export async function splitOrderItemsInTransaction(
     throw new BadRequestError('itemIds es requerido')
   }
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
+  const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
     await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
   } catch (error) {
@@ -2057,6 +2100,8 @@ export async function splitOrderItemsInTransaction(
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
       items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
@@ -2065,6 +2110,10 @@ export async function splitOrderItemsInTransaction(
     },
   })
   if (!source) throw new NotFoundError('Order not found')
+  if (source.payLater === true) {
+    exigirClientesApartados(clientesApartados, source, 'dividía')
+    clienteDelFiado(source) // una cuenta con dos clientes no se divide (FIADO_CON_DOS_CLIENTES)
+  }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
@@ -2148,6 +2197,7 @@ export async function splitOrderItemsInTransaction(
       contratoDePrecio: source.contratoDePrecio,
       // La marca «Pagar después» se hereda: separar no decide si es fiado (`shared/porCobrar.ts`).
       payLater: source.payLater,
+      ...clienteDeLaParteSeparada(source),
     },
     select: { id: true, orderNumber: true, version: true },
   })
@@ -2156,6 +2206,7 @@ export async function splitOrderItemsInTransaction(
     where: { id: { in: toMove }, orderId: source.id },
     data: { orderId: created.id },
   })
+  await vincularAlDuenoDelFiado(tx, source)
 
   // La INSTANCIA de cada promoción movida completa sigue a sus líneas: si se
   // quedara en el origen, el histórico y el guard de reembolso apuntarían a
@@ -2220,6 +2271,8 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
  */
 export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string, staffId?: string) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
+  const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
     await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
   } catch (error) {
@@ -2241,6 +2294,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
       shiftId: true,
       contratoDePrecio: true,
       payLater: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
       items: { select: { id: true, seat: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
@@ -2249,6 +2304,10 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
     },
   })
   if (!source) throw new NotFoundError('Order not found')
+  if (source.payLater === true) {
+    exigirClientesApartados(clientesApartados, source, 'dividía')
+    clienteDelFiado(source) // una cuenta con dos clientes no se divide (FIADO_CON_DOS_CLIENTES)
+  }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
@@ -2319,6 +2378,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
         contratoDePrecio: source.contratoDePrecio,
         // La marca «Pagar después» se hereda (`shared/porCobrar.ts`).
         payLater: source.payLater,
+        ...clienteDeLaParteSeparada(source),
       },
       select: { id: true, orderNumber: true },
     })
@@ -2329,6 +2389,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
     movedItemIds.push(...itemIds)
     results.push({ id: newOrder.id, orderNumber: newOrder.orderNumber, seat })
   }
+
+  await vincularAlDuenoDelFiado(tx, source)
 
   // 🔴 Recalcular DENTRO de la tx (auditoría): un crash después del commit y
   // antes del recálculo dejaría el origen sobre-cobrando los asientos movidos.
@@ -2387,6 +2449,8 @@ export async function mergeOrdersInTransaction(
     throw new BadRequestError('No se puede fusionar una cuenta consigo misma')
   }
 
+  // Negocio → Cliente → mesa (`apartarClientesDelFiado`): la cuenta que queda recibe el vínculo del fiado.
+  const clientesApartados = await apartarClientesDelFiado(tx, venueId, [targetOrderId, sourceOrderId])
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
     scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
@@ -2476,6 +2540,8 @@ export async function mergeOrdersInTransaction(
       specialRequests: true,
       contratoDePrecio: true,
       payLater: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
       source: true,
       posRawData: true,
@@ -2498,6 +2564,8 @@ export async function mergeOrdersInTransaction(
       contratoDePrecio: true,
       payLater: true,
       paidAmount: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
       source: true,
       posRawData: true,
@@ -2520,6 +2588,29 @@ export async function mergeOrdersInTransaction(
   }
   if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
     throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
+  }
+  // 🔴 Un fiado no se pierde al juntar (hz:01185fe7:D2): la cuenta que queda, si es fiado, queda a nombre de su cliente y con
+  // su vínculo. Si una de las dos es fiado y son de clientes DISTINTOS no se juntan, en cualquier sentido (founder 27-oct,
+  // «a»): la deuda de Ana no se vuelve de Bruno, ni la cuenta de Bruno se suma a la deuda de Ana.
+  const hayFiado = freshSource.payLater === true || freshTarget.payLater === true
+  let duenoQueQueda: string | null = null
+  if (hayFiado) {
+    exigirUnSoloCliente(freshSource)
+    exigirUnSoloCliente(freshTarget)
+    for (const lado of [freshSource, freshTarget]) if (lado.payLater === true) exigirClientesApartados(clientesApartados, lado, 'juntaba')
+    const duenoDelOrigen = duenoDeLaCuenta(freshSource)
+    const duenoDelDestino = duenoDeLaCuenta(freshTarget)
+    if (duenoDelOrigen && duenoDelDestino && duenoDelOrigen !== duenoDelDestino) {
+      throw new BadRequestError(
+        'Una de estas cuentas es un «Pagar después» y son de clientes distintos: no se pueden juntar. Cóbralas por separado.',
+        'MERGE_FIADO_DE_OTRO_CLIENTE',
+      )
+    }
+    duenoQueQueda = duenoDelDestino ?? duenoDelOrigen
+    // El vínculo se escribe con el cliente apartado; si no lo está (cambió en medio), se reintenta.
+    if (duenoQueQueda && !clientesApartados.has(duenoQueQueda)) {
+      throw new BadRequestError('La cuenta cambió de cliente mientras se juntaba — vuelve a intentar')
+    }
   }
   // Fusionar CANCELA el origen: un cobro de terminal sin desenlace acreditado sobre él aterrizaría en una orden
   // cancelada. Mismo 409 que `cancelOrder`, con `orderId` aditivo para decir cuál cuenta lo tiene. El DESTINO no se
@@ -2603,12 +2694,25 @@ export async function mergeOrdersInTransaction(
       contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
       // Si una de las dos era fiado, lo que queda es fiado: la deuda no se esconde al juntar (`shared/porCobrar.ts`).
       payLater: combinarPayLater(freshTarget.payLater, freshSource.payLater),
+      ...(duenoQueQueda && !freshTarget.customerId ? { customerId: duenoQueQueda } : {}),
       ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
       ...(freshSource.specialRequests?.trim()
         ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
         : {}),
     },
   })
+
+  if (duenoQueQueda) {
+    const destinoTienePrimario = freshTarget.orderCustomers.some(c => c.isPrimary)
+    const otrosDelOrigen = freshSource.payLater === true ? freshSource.orderCustomers.map(c => c.customerId) : []
+    await tx.orderCustomer.createMany({
+      data: [
+        { orderId: target.id, customerId: duenoQueQueda, isPrimary: !destinoTienePrimario },
+        ...[...new Set(otrosDelOrigen)].filter(id => id !== duenoQueQueda).map(customerId => ({ orderId: target.id, customerId, isPrimary: false })),
+      ],
+      skipDuplicates: true,
+    })
+  }
 
   const removedSource = await tx.order.update({
     where: { id: source.id },
