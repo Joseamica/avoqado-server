@@ -3855,10 +3855,9 @@ export interface OpcionesDeLigaTpv {
 /**
  * 🔴 F1 / R3-2: PRIMERA sentencia de la transacción de la liga — el candado de la venta (`bloquearVentaParaLiga`: la fila en
  * `SELECT … FOR NO KEY UPDATE`). Serializa contra el `FOR UPDATE` del cobro (`lockExistingOrderForPayment`) y entre ligas, y no
- * bloquea el `FOR KEY SHARE` de las revisiones de llaves foráneas (las métricas del cobro). En Serializable, si un cobro escribió
- * la venta mientras esperábamos, Postgres aborta la liga con un error de serialización (P2010/40001 en esta sentencia cruda;
- * P2034 en una consulta de modelo) y el reintento lee el estado nuevo. Después, el estado VIGENTE (F1, segunda ola: también en
- * cada reintento).
+ * bloquea el `FOR KEY SHARE` de las revisiones de llaves foráneas (las métricas del cobro). Con el aislamiento de siempre (no
+ * Serializable, D10), si un cobro u otra liga escribió la venta mientras esperábamos, cada sentencia de después ya lee lo que
+ * ellos dejaron. Después, el estado VIGENTE (F1, segunda ola: también en cada reintento).
  */
 async function leerVentaBajoCandado(
   tx: Prisma.TransactionClient,
@@ -4037,9 +4036,9 @@ export async function addCustomerToOrder(
   // Import dinámico, como en `attachCustomerToOrder` (móvil): ANTES de abrir la transacción, para no cargar módulos dentro de ella.
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
-  // 🔒 Serializable + el candado de la venta; el índice parcial del primario es la defensa de fondo. Reintentos con backoff ante
-  // lo que clasifica `motivoDeReintentoDeLiga`: serialización (P2034, P2010/40001), interbloqueo (40P01) y P2002 (choque de
-  // únicos): el reintento relee todo bajo el candado.
+  // 🔒 El candado de la venta; el índice parcial del primario es la defensa de fondo. Reintentos con backoff ante lo que
+  // clasifica `motivoDeReintentoDeLiga`: serialización (P2034, P2010/40001), interbloqueo (40P01) y P2002 (choque de únicos): el
+  // reintento relee todo bajo el candado.
   const MAX_RETRIES = 5
   let liga: { ligaNueva: boolean; esPrimario: boolean; cobrada: boolean } | undefined
 
@@ -4056,8 +4055,10 @@ export async function addCustomerToOrder(
           )
           return { ...r, cobrada: venta.cobrada }
         },
-        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), en Serializable.
-        { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), con el aislamiento
+        // de siempre, como la liga del POS: el candado ya pone en fila a las ligas. En Serializable, la que esperaba el candado
+        // perdía (40001) cada vez que otra cambiaba la venta, y con 6 ligas a la vez agotaba sus 5 intentos (D10, 27-oct-2026).
+        ORDER_LOCK_WAIT_BUDGET,
       )
 
       logger.info(
@@ -4220,7 +4221,7 @@ export async function createAndAddCustomerToOrder(
   // Import dinámico, como en `addCustomerToOrder`: ANTES de abrir la transacción.
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
-  // 🔒 Serializable + el candado de la venta (igual que `addCustomerToOrder`); el índice parcial del primario es la defensa de
+  // 🔒 El candado de la venta (igual que `addCustomerToOrder`); el índice parcial del primario es la defensa de
   // fondo. Reintentos con backoff ante lo que clasifica `motivoDeReintentoDeLiga` (serialización P2034 o P2010/40001,
   // interbloqueo 40P01, choque de únicos que no sea el correo/teléfono duplicado).
   const MAX_RETRIES = 5
@@ -4269,8 +4270,10 @@ export async function createAndAddCustomerToOrder(
             `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${liga.esPrimario}`,
           )
         },
-        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), en Serializable.
-        { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), con el aislamiento
+        // de siempre, como la liga del POS: el candado ya pone en fila a las ligas. En Serializable, la que esperaba el candado
+        // perdía (40001) cada vez que otra cambiaba la venta, y con 6 ligas a la vez agotaba sus 5 intentos (D10, 27-oct-2026).
+        ORDER_LOCK_WAIT_BUDGET,
       )
       // Success - exit the retry loop
       break
