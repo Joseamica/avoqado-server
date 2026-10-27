@@ -7,6 +7,7 @@
  * escape to the global client fails here instead of hiding behind a shared double.
  */
 import { Prisma } from '@prisma/client'
+import { esErrorTransitorio } from '@/services/shared/erroresTransitorios'
 import { prismaMock } from '../../../__helpers__/setup'
 import {
   updateOrderDetails,
@@ -638,7 +639,10 @@ describe('writer-specific fresh decisions', () => {
       .mockResolvedValueOnce({ payLater: true, customerId: 'customer', orderCustomers: [{ customerId: 'customer' }] })
       .mockResolvedValue({ ...ORDER, payLater: true, customerId: 'otro', orderCustomers: [{ customerId: 'otro', isPrimary: true }] })
 
-    await expect(splitOrderItems('venue', 'order', ['i2'], 'staff')).rejects.toThrow(/cambió de cliente/)
+    const error = await splitOrderItems('venue', 'order', ['i2'], 'staff').catch((e: unknown) => e)
+    expect(error).toMatchObject({ message: expect.stringMatching(/cambió de cliente/), code: 'VERSION_CONFLICT', statusCode: 409 })
+    // La cola sin red lo reintenta (RETRY), no lo manda a cuarentena (Codex, revisión de apps viejas del 27-oct).
+    expect(esErrorTransitorio(error)).toBe(true)
     expect(txWrites()).toEqual([])
   })
 

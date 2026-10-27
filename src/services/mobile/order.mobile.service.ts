@@ -2609,7 +2609,7 @@ export async function mergeOrdersInTransaction(
     duenoQueQueda = duenoDelDestino ?? duenoDelOrigen
     // El vínculo se escribe con el cliente apartado; si no lo está (cambió en medio), se reintenta.
     if (duenoQueQueda && !clientesApartados.has(duenoQueQueda)) {
-      throw new BadRequestError('La cuenta cambió de cliente mientras se juntaba — vuelve a intentar')
+      throw new ConflictError('La cuenta cambió de cliente mientras se juntaba — vuelve a intentar', 'VERSION_CONFLICT')
     }
   }
   // Fusionar CANCELA el origen: un cobro de terminal sin desenlace acreditado sobre él aterrizaría en una orden
