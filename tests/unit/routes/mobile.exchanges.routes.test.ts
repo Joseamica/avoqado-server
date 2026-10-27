@@ -34,7 +34,7 @@ jest.mock('@/config/logger', () => ({
 }))
 
 import { StaffRole } from '@prisma/client'
-import mobileRouter, { permisoDeCambio } from '@/routes/mobile.routes'
+import mobileRouter, { permisoDeCambio, permisoDeCerrarCambio } from '@/routes/mobile.routes'
 import { authenticateTokenMiddleware } from '@/middlewares/authenticateToken.middleware'
 import { validateRequest } from '@/middlewares/validation'
 import { createExchangeSchema, exchangeIdParamsSchema, cancelExchangeSchema } from '@/schemas/mobile/exchange.mobile.schema'
@@ -74,6 +74,42 @@ beforeEach(() => {
   mockConsumeOverride.mockReset()
 })
 
+async function cerrar(role: StaffRole, exchangeId = 'cx1') {
+  mockStaffVenueFindUnique.mockResolvedValue({ role, active: true, permissionSetId: null, permissionSet: null })
+  const req: any = {
+    method: 'POST',
+    originalUrl: `/api/v1/mobile/venues/v1/exchanges/${exchangeId}/complete`,
+    params: { venueId: 'v1', exchangeId },
+    headers: {},
+    body: {},
+    authContext: { userId: 'u1', venueId: 'v1', role },
+  }
+  const out: { status?: number; json?: any; next: boolean } = { next: false }
+  const res: any = { status: (s: number) => ((out.status = s), res), json: (j: unknown) => ((out.json = j), res) }
+  await permisoDeCerrarCambio(req, res, () => {
+    out.next = true
+  })
+  return out
+}
+
+describe('closing an exchange (complete/cancel) by its own creator', () => {
+  it('lets the staff who created the exchange in this venue close it without another manager PIN', async () => {
+    mockExchangeFindUnique.mockResolvedValue({ staffId: 'u1', venueId: 'v1' })
+    expect(await cerrar(StaffRole.WAITER)).toEqual({ next: true })
+    expect(mockExchangeFindUnique).toHaveBeenCalledWith({ where: { id: 'cx1' }, select: { staffId: true, venueId: true } })
+    expect(mockStaffVenueFindUnique).not.toHaveBeenCalled()
+  })
+  it('checks payments:refund normally for another staff, another venue or a failed lookup', async () => {
+    for (const found of [{ staffId: 'other', venueId: 'v1' }, { staffId: 'u1', venueId: 'v2' }, null]) {
+      mockExchangeFindUnique.mockReset().mockResolvedValue(found)
+      expect(await cerrar(StaffRole.WAITER)).toMatchObject({ next: false, status: 403, json: { required: 'payments:refund' } })
+    }
+    mockExchangeFindUnique.mockReset().mockRejectedValue(new Error('La base no responde.'))
+    expect(await cerrar(StaffRole.WAITER)).toMatchObject({ next: false, status: 403 })
+    expect(await cerrar(StaffRole.CASHIER)).toEqual({ next: true })
+  })
+})
+
 describe('exchange mobile route permissions', () => {
   it('does not register the retired recent sales copy endpoint', () => {
     const layer = (mobileRouter as any).stack.find((l: any) => l.route?.path === '/venues/:venueId/sales/recent')
@@ -89,7 +125,7 @@ describe('exchange mobile route permissions', () => {
     expect(handles).toEqual([
       authenticateTokenMiddleware,
       cancelValidator,
-      expect.any(Function),
+      permisoDeCerrarCambio,
       require('@/controllers/mobile/exchange.mobile.controller').cancelExchange,
     ])
     expect(handles[2].requiredPermission).toBe('payments:refund')
@@ -99,7 +135,7 @@ describe('exchange mobile route permissions', () => {
       (l: any) => l.route?.path === '/venues/:venueId/exchanges/:exchangeId/complete' && l.route.methods.post,
     )
     const handles = layer.route.stack.map((l: any) => l.handle)
-    expect(handles).toEqual([authenticateTokenMiddleware, completeValidator, expect.any(Function), completeExchange])
+    expect(handles).toEqual([authenticateTokenMiddleware, completeValidator, permisoDeCerrarCambio, completeExchange])
     expect(handles[2].requiredPermission).toBe('payments:refund')
   })
   it('reaches the controller after a lost response without consuming the manager PIN again', async () => {

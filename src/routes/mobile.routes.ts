@@ -3561,6 +3561,22 @@ export const permisoDeCambio = Object.assign(
   { requiredPermission: 'payments:refund' as const },
 )
 
+// Cerrar (complete/cancel) un cambio que la misma persona creó en esta sucursal no pide otro PIN: el código del encargado
+// ya autorizó el cambio al crearlo y es de un solo uso. Cualquier otra persona, otra sucursal o una lectura fallida → permiso normal.
+export const permisoDeCerrarCambio = Object.assign(
+  async (req: Request, res: Response, next: NextFunction) => {
+    let existing: { staffId: string; venueId: string } | null = null
+    try {
+      existing = await prisma.exchange.findUnique({ where: { id: req.params.exchangeId }, select: { staffId: true, venueId: true } })
+    } catch {
+      // Sin la lectura se exige el permiso normal; nunca se concede acceso por el fallo.
+    }
+    if (existing && existing.venueId === req.params.venueId && existing.staffId === req.authContext!.userId) return next()
+    return revisarReembolso(req, res, next)
+  },
+  { requiredPermission: 'payments:refund' as const },
+)
+
 /**
  * POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  * Issue an associated refund (by amount OR by items, with optional restock).
@@ -3585,7 +3601,7 @@ router.post(
   '/venues/:venueId/exchanges/:exchangeId/complete',
   authenticateTokenMiddleware,
   validateRequest(exchangeIdParamsSchema),
-  checkPermission('payments:refund'),
+  permisoDeCerrarCambio,
   exchangeMobileController.completeExchange,
 )
 
@@ -3593,7 +3609,7 @@ router.post(
   '/venues/:venueId/exchanges/:exchangeId/cancel',
   authenticateTokenMiddleware,
   validateRequest(cancelExchangeSchema),
-  checkPermission('payments:refund'),
+  permisoDeCerrarCambio,
   exchangeMobileController.cancelExchange,
 )
 
