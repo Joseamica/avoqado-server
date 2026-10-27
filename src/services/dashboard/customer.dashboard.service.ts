@@ -26,6 +26,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
+import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import {
   CUSTOMER_PAGE_SIZE_DEFAULT,
   CUSTOMER_PAGE_SIZE_MAX,
@@ -209,6 +210,7 @@ export async function getCustomers(
               paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
               remainingBalance: { gt: 0 },
               ...CUENTA_NO_CANCELADA,
+              ...NO_ES_COBRO_DEL_MOMENTO,
             },
           },
         },
@@ -837,6 +839,8 @@ export async function settleCustomerBalance(
             paymentStatus: { in: ['PENDING', 'PARTIAL'] },
             remainingBalance: { gt: 0 },
             ...CUENTA_NO_CANCELADA,
+            // Un cobro con tarjeta que falló no es fiado: «Liquidar todo» lo marcaría pagado en efectivo sin que nadie pagara.
+            ...NO_ES_COBRO_DEL_MOMENTO,
           },
         },
         include: {
@@ -915,7 +919,7 @@ export async function settleCustomerBalance(
       // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y
       // fencing se releen bajo lock y con alcance tenant+cliente.
       const fresh = await tx.order.findFirst({
-        where: { id: orderId, venueId, orderCustomers: { some: { customerId } } },
+        where: { id: orderId, venueId, orderCustomers: { some: { customerId } }, ...NO_ES_COBRO_DEL_MOMENTO },
         select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true, thirdPartyCashDue: true },
       })
       if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue

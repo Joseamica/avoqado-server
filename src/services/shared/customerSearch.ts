@@ -1,4 +1,5 @@
 import { Prisma } from '@prisma/client'
+import { SQL_NO_ES_COBRO_DEL_MOMENTO } from './porCobrar'
 
 /**
  * Búsqueda de clientes del negocio (spec 2026-10-14 §3.2, C2 de Testarudo: «Dany no aparece»).
@@ -120,7 +121,7 @@ export function sqlDeFiltrosDeClientes(f: FiltrosDeClientes): Prisma.Sql {
   if (f.tags?.length) partes.push(Prisma.sql`"tags" && ${f.tags}::text[]`)
   if (f.hasPendingBalance) {
     partes.push(
-      Prisma.sql`EXISTS (SELECT 1 FROM "OrderCustomer" oc JOIN "Order" o ON o."id" = oc."orderId" WHERE oc."customerId" = "Customer"."id" AND o."paymentStatus" IN ('PENDING', 'PARTIAL') AND o."remainingBalance" > 0 AND o."status" NOT IN ('CANCELLED', 'DELETED'))`,
+      Prisma.sql`EXISTS (SELECT 1 FROM "OrderCustomer" oc JOIN "Order" o ON o."id" = oc."orderId" WHERE oc."customerId" = "Customer"."id" AND o."paymentStatus" IN ('PENDING', 'PARTIAL') AND o."remainingBalance" > 0 AND o."status" NOT IN ('CANCELLED', 'DELETED') AND ${SQL_NO_ES_COBRO_DEL_MOMENTO})`,
     )
   }
   return partes.length ? Prisma.sql` AND ${Prisma.join(partes, ' AND ')}` : Prisma.empty
@@ -151,7 +152,7 @@ export function sqlDeConteoDeClientes(venueId: string, busqueda: CustomerSearch,
  * 🔴 H6 (auditoría de Codex del código, 15-oct-2026): cuántas cuentas por cobrar tiene cada cliente de UNA página y cuánto
  * deben, agregado en la base. Antes `getCustomers` traía con cada cliente TODAS sus cuentas pendientes (sin tope) para contar
  * y sumar en JavaScript: el tope de 100 clientes no topaba esas filas. La regla es la MISMA del `include` de antes y del filtro
- * «con saldo pendiente» (`sqlDeFiltrosDeClientes`): pendiente o parcial, saldo > 0, sin cuentas canceladas ni borradas. El
+ * «con saldo pendiente» (`sqlDeFiltrosDeClientes`): pendiente o parcial, saldo > 0, sin cuentas canceladas ni borradas, y no un cobro del momento que falló (`porCobrar.ts`). El
  * negocio va por el cliente (los ids ya salen de una consulta del negocio: no cambia ningún valor). La suma es EXACTA
  * (decimal de Postgres), sin el ruido de flotante de sumar en JavaScript.
  */
@@ -159,6 +160,6 @@ export function sqlDeSaldosPendientesDeClientes(venueId: string, customerIds: re
   return Prisma.sql`SELECT oc."customerId" AS "customerId", COUNT(*)::int AS "pendientes", COALESCE(SUM(o."remainingBalance"), 0) AS "saldo"
     FROM "OrderCustomer" oc JOIN "Order" o ON o."id" = oc."orderId"
     JOIN "Customer" c ON c."id" = oc."customerId" AND c."venueId" = ${venueId}
-    WHERE oc."customerId" IN (${Prisma.join([...customerIds])}) AND o."paymentStatus" IN ('PENDING', 'PARTIAL') AND o."remainingBalance" > 0 AND o."status" NOT IN ('CANCELLED', 'DELETED')
+    WHERE oc."customerId" IN (${Prisma.join([...customerIds])}) AND o."paymentStatus" IN ('PENDING', 'PARTIAL') AND o."remainingBalance" > 0 AND o."status" NOT IN ('CANCELLED', 'DELETED') AND ${SQL_NO_ES_COBRO_DEL_MOMENTO}
     GROUP BY oc."customerId"`
 }

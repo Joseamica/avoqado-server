@@ -66,6 +66,7 @@ import {
   rechazarCancelacionLocalDeRappi,
 } from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
+import { combinarPayLater } from '../shared/porCobrar'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -188,6 +189,8 @@ export interface CreateOrderInput {
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
   customerId?: string | null
+  /** «Pagar después» elegido por el cajero (true), cobro del momento (false) o no se sabe (null). Ver `shared/porCobrar.ts`. */
+  payLater?: boolean | null
   customerName?: string | null
   customerPhone?: string | null
   specialRequests?: string | null
@@ -1170,6 +1173,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
           type: input.orderType || 'DINE_IN',
           source: input.source || 'AVOQADO_IOS',
           customerId: normalizedCustomerId,
+          payLater: input.payLater ?? null,
           subtotal: new Prisma.Decimal(subtotal),
           discountAmount: new Prisma.Decimal(discountDecimal),
           taxAmount: new Prisma.Decimal(0),
@@ -2052,6 +2056,7 @@ export async function splitOrderItemsInTransaction(
       paidAmount: true,
       shiftId: true,
       contratoDePrecio: true,
+      payLater: true,
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
       items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
@@ -2141,6 +2146,8 @@ export async function splitOrderItemsInTransaction(
       // Separar cuenta no cambia el precio que el cliente ya vio: la cuenta nueva
       // hereda el mismo contrato del origen, nunca se resuelve de nuevo.
       contratoDePrecio: source.contratoDePrecio,
+      // La marca «Pagar después» se hereda: separar no decide si es fiado (`shared/porCobrar.ts`).
+      payLater: source.payLater,
     },
     select: { id: true, orderNumber: true, version: true },
   })
@@ -2233,6 +2240,7 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
       paidAmount: true,
       shiftId: true,
       contratoDePrecio: true,
+      payLater: true,
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
       items: { select: { id: true, seat: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
@@ -2309,6 +2317,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
         // Dividir por puesto no cambia el precio que el cliente ya vio: cada
         // cheque por asiento hereda el mismo contrato del origen.
         contratoDePrecio: source.contratoDePrecio,
+        // La marca «Pagar después» se hereda (`shared/porCobrar.ts`).
+        payLater: source.payLater,
       },
       select: { id: true, orderNumber: true },
     })
@@ -2465,6 +2475,7 @@ export async function mergeOrdersInTransaction(
       id: true,
       specialRequests: true,
       contratoDePrecio: true,
+      payLater: true,
       originSystem: true,
       source: true,
       posRawData: true,
@@ -2485,6 +2496,7 @@ export async function mergeOrdersInTransaction(
       id: true,
       specialRequests: true,
       contratoDePrecio: true,
+      payLater: true,
       paidAmount: true,
       originSystem: true,
       source: true,
@@ -2589,6 +2601,8 @@ export async function mergeOrdersInTransaction(
     where: { id: target.id },
     data: {
       contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
+      // Si una de las dos era fiado, lo que queda es fiado: la deuda no se esconde al juntar (`shared/porCobrar.ts`).
+      payLater: combinarPayLater(freshTarget.payLater, freshSource.payLater),
       ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
       ...(freshSource.specialRequests?.trim()
         ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
