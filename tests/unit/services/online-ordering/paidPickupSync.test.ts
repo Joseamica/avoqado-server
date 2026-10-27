@@ -45,8 +45,8 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
         order: CUENTA_PAGADA,
         OR: [
           { status: 'READY' },
-          // S4: una comanda empezada (reclamada) y no confirmada no se entrega sola por hora.
-          { status: 'ACCEPTED', estimatedReadyAt: { lte: NOW }, OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] },
+          // 22-oct: espera la impresión aunque nunca se haya podido reclamar.
+          { status: 'ACCEPTED', estimatedReadyAt: { lte: NOW }, printedAt: { not: null } },
         ],
       },
       select: { id: true, orderId: true, venueId: true, status: true, order: { select: { orderNumber: true } } },
@@ -83,7 +83,7 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenNthCalledWith(2, {
-      where: { id: 'oo-B', status: 'ACCEPTED', order: CUENTA_PAGADA, OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] },
+      where: { id: 'oo-B', status: 'ACCEPTED', order: CUENTA_PAGADA, printedAt: { not: null } },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
@@ -159,7 +159,7 @@ describe('syncOnlineOrdersOfPaidPickups (opción 1 del founder, 17-oct)', () => 
   })
 })
 
-describe('S4: la entrega por hora espera a una comanda empezada y no confirmada', () => {
+describe('S4: la entrega por hora espera a la comanda confirmada o a Listo', () => {
   const PASADA = new Date(NOW.getTime() - 60_000)
   /** Evaluador mínimo del `where` de la lectura: status, estimatedReadyAt.lte, printClaimedAt/printedAt (null / not null) y OR. */
   const cumple = (f: any, w: any): boolean =>
@@ -192,10 +192,18 @@ describe('S4: la entrega por hora espera a una comanda empezada y no confirmada'
     expect(won.map(w => w.id)).toEqual(['oo-A'])
   })
 
-  it('paid ACCEPTED order past ETA that never claimed print is still auto-delivered', async () => {
+  it('paid ACCEPTED order past ETA with no first print claim stays active, including venues without printers', async () => {
     base([aceptada('A')])
     const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
-    expect(won.map(w => w.id)).toEqual(['oo-A'])
+    expect(won).toEqual([])
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('a confirmed print still waits for ETA while the paid order remains ACCEPTED', async () => {
+    base([aceptada('A', { estimatedReadyAt: new Date(NOW.getTime() + 60_000), printedAt: PASADA })])
+    const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
+    expect(won).toEqual([])
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
   it('READY paid order is delivered regardless of print', async () => {
@@ -204,22 +212,21 @@ describe('S4: la entrega por hora espera a una comanda empezada y no confirmada'
     expect(won.map(w => w.id)).toEqual(['oo-A'])
   })
 
-  it('a print claim that lands between the read and the CAS is not delivered (the CAS repeats the guard, ACCEPTED only)', async () => {
-    // La lectura ve el pedido SIN reclamo; antes del CAS alguien lo reclama. La base simulada aplica el filtro del CAS.
+  it('the CAS keeps an unprinted ACCEPTED order active even if a stale candidate reached the write', async () => {
+    // El CAS también aplica la regla aunque le llegue un candidato sin confirmación de papel.
     const f: any = aceptada('A')
     prismaMock.onlineOrder.findMany.mockImplementation((async () => {
       const leida = [{ ...f }]
-      f.printClaimedAt = new Date(NOW.getTime() - 1_000)
       return leida
     }) as any)
     prismaMock.onlineOrder.updateMany.mockImplementation((async (a: any) => ({
-      count: cumple(f, { OR: a.where.OR ?? [{}] }) ? 1 : 0,
+      count: cumple(f, a.where) ? 1 : 0,
     })) as any)
 
     const won = await syncOnlineOrdersOfPaidPickups(prismaMock, { venueId: 'v1' }, NOW)
 
     expect(prismaMock.onlineOrder.updateMany).toHaveBeenCalledWith({
-      where: { id: 'oo-A', status: 'ACCEPTED', order: CUENTA_PAGADA, OR: [{ printClaimedAt: null }, { printedAt: { not: null } }] },
+      where: { id: 'oo-A', status: 'ACCEPTED', order: CUENTA_PAGADA, printedAt: { not: null } },
       data: { status: 'COMPLETED', completedAt: NOW },
     })
     expect(won).toEqual([])
