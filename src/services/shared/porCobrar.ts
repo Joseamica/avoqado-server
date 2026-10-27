@@ -1,5 +1,5 @@
 import { Prisma } from '@prisma/client'
-import { BadRequestError } from '@/errors/AppError'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
 
 /**
  * «Por cobrar» (fiado) como Toast (founder 26-oct): sólo es deuda del cliente lo que el cajero mandó a «Pagar después».
@@ -81,10 +81,14 @@ export function exigirUnSoloCliente(o: VinculosDeLaCuenta): void {
   }
 }
 
-/** Ya con la mesa apartada: si el fiado cambió de cliente en medio, no se copia un vínculo que no se apartó. */
+/**
+ * Ya con la mesa apartada: si el fiado cambió de cliente en medio, no se copia un vínculo que no se apartó. Es una carrera,
+ * no una regla de negocio: `VERSION_CONFLICT` (409), que la cola sin red reintenta en vez de mandarlo a cuarentena (Codex,
+ * revisión de apps viejas del 27-oct).
+ */
 export function exigirClientesApartados(apartados: Set<string>, o: VinculosDeLaCuenta, accion: string): void {
   const ids = [o.customerId, ...o.orderCustomers.map(c => c.customerId)].filter((id): id is string => !!id)
-  if (ids.some(id => !apartados.has(id))) throw new BadRequestError(`La cuenta cambió de cliente mientras se ${accion} — vuelve a intentar`)
+  if (ids.some(id => !apartados.has(id))) throw new ConflictError(`La cuenta cambió de cliente mientras se ${accion} — vuelve a intentar`, 'VERSION_CONFLICT')
 }
 
 /**
