@@ -142,6 +142,30 @@ export const UpdateCustomerSchema = z.object({
     }),
 })
 
+/**
+ * Editar cliente desde el POS (ANDROID e iOS, 26-oct-2026). Mismo permiso que el dashboard (`customers:update`),
+ * pero la puerta de las apps SÓLO cambia datos de contacto: `.strict()` rechaza `active`, `tags`, consentimiento, etc.
+ * Mismos formatos que `UpdateCustomerSchema`; los mensajes van en español porque las apps los muestran.
+ */
+export const MobileUpdateCustomerSchema = z.object({
+  params: z.object({
+    venueId: z.string().cuid('Negocio inválido'),
+    customerId: z.string().cuid('Cliente inválido'),
+  }),
+  body: z
+    .object({
+      firstName: z.string().min(1, 'El nombre no puede quedar vacío').max(50, 'El nombre es demasiado largo').optional(),
+      lastName: z.string().min(1, 'El apellido no puede quedar vacío').max(50, 'El apellido es demasiado largo').optional(),
+      phone: z
+        .string()
+        .regex(/^\+?[0-9]{10,15}$/, 'El teléfono debe tener de 10 a 15 dígitos')
+        .optional(),
+      email: z.string().email('El correo no es válido').optional(),
+    })
+    .strict('Desde el POS sólo se edita nombre, apellido, teléfono y correo')
+    .refine(data => Object.keys(data).length > 0, { message: 'Cambia al menos un dato del cliente' }),
+})
+
 // ==========================================
 // TYPE EXPORTS
 // ==========================================

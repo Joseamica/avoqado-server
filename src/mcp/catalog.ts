@@ -329,6 +329,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_aggregator_capacity_rule: 'write',
   set_birthday_automation: 'write',
   set_customer_tags: 'write',
+  update_customer_contact: 'write',
   set_feature_list_price: 'write',
   set_fiscal_loss: 'write',
   set_hybrid_campaign_status: 'write',
