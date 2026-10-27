@@ -14,6 +14,8 @@
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
   enqueuePaymentEffect: jest.fn().mockResolvedValue(undefined),
+  // S3: el reintento idempotente asegura el aviso de una venta apartada (aquí ninguna lo es); su lógica se prueba en su propia suite.
+  asegurarAvisoDeVentaApartada: jest.fn().mockResolvedValue(undefined),
 }))
 jest.mock('@/services/venueSalesGuard', () => ({ __esModule: true, assertVenueSalesEnabled: jest.fn() }))
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
@@ -1131,5 +1133,100 @@ describe('R8: el punto único de la llave, bajo el candado, antes de cualquier r
       ).rejects.toMatchObject({ statusCode: 403, code: 'TABLE_OWNED_BY_OTHER' })
       expect(pagos).toHaveLength(0)
     })
+  })
+})
+
+describe('Task4: el primer cierre en cero espera el desenlace acreditado de la terminal', () => {
+  beforeEach(() => {
+    prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(null)
+  })
+
+  const ordenDelCandado = () => {
+    const index = prismaMock.$queryRaw.mock.calls.findIndex(([query]: any[]) => {
+      const sql = Array.isArray(query) ? query.join(' ') : ''
+      return sql.includes('FROM "Order"') && sql.includes('FOR UPDATE')
+    })
+    expect(index).toBeGreaterThanOrEqual(0)
+    return prismaMock.$queryRaw.mock.invocationCallOrder[index]
+  }
+
+  const consultaRealDeTerminal = async () => {
+    const { UNRESOLVED_FINANCIAL_OUTCOME } = await import('@/services/terminal-payment.service')
+    expect(prismaMock.terminalPaymentRequest.findFirst).toHaveBeenCalledWith({
+      where: { venueId: 'venue-1', orderId: 'order-1', ...UNRESOLVED_FINANCIAL_OUTCOME },
+      select: { requestId: true },
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+    })
+    const guard = prismaMock.terminalPaymentRequest.findFirst.mock.invocationCallOrder[0]
+    expect(ordenDelCandado()).toBeLessThan(guard)
+    return guard
+  }
+
+  it.each([
+    ['en vivo', {}],
+    ['de la cola sin red', { isOfflineReplay: true }],
+  ] as const)('primer pago0 %s con cobro de terminal incierto rechaza antes del pago y del inventario', async (_via, extra) => {
+    const { row, pagos, cas } = instalarBase({ paymentStatus: 'PENDING', total: 0 })
+    const antes = { ...row }
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-INCIERTO' })
+
+    await expect(
+      payCashOrder('venue-1', 'order-1', { amount: 0, tip: 0, staffId: 'staff-1', idempotencyKey: 'primer-cero', ...extra }),
+    ).rejects.toMatchObject({ statusCode: 409, code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE', details: { requestId: 'REQ-INCIERTO' } })
+
+    await consultaRealDeTerminal()
+    expect(row).toEqual(antes)
+    expect(pagos).toHaveLength(0)
+    expect(cas).toHaveLength(0)
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    sinEfectosDeSaldar(cas)
+  })
+
+  it('K0 ya confirmada bajo el candado devuelve el mismo pago aunque haya una terminal incierta posterior', async () => {
+    const { pagos, cas } = instalarBase({ paymentStatus: 'PAID', total: 0 }, [{ amount: 0, idempotencyKey: 'cero-ya-confirmado' }])
+    prismaMock.payment.findUnique.mockResolvedValueOnce(null)
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-POSTERIOR' })
+
+    const result = await payCashOrder('venue-1', 'order-1', cola(0, 'cero-ya-confirmado'))
+
+    expect(result).toMatchObject({ paymentId: 'previo-1', status: 'COMPLETED', amount: 0, tipAmount: 0 })
+    ordenDelCandado()
+    expect(prismaMock.payment.findUnique.mock.calls.length).toBeGreaterThanOrEqual(2)
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(pagos).toHaveLength(1)
+    expect(cas).toHaveLength(0)
+    sinEfectosDeSaldar(cas)
+  })
+
+  it('efectivo positivo ya capturado sigue registrándose íntegro sobre venta cerrada con terminal incierta', async () => {
+    const { row, pagos, cas } = instalarBase({ paymentStatus: 'PAID', total: 100 }, [{ amount: 100 }])
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue({ requestId: 'REQ-POSTERIOR' })
+
+    const result = await payCashOrder('venue-1', 'order-1', cola(10000, 'positivo-tardio'))
+
+    expect(result).toMatchObject({ paymentId: 'payment-2', status: 'COMPLETED', amount: 10000, remainingBalanceCents: 0 })
+    expect(pagos.map(p => p.amount)).toEqual([100, 100])
+    expect([row.paymentStatus, Number(row.paidAmount)]).toEqual(['PAID', 200])
+    expect(prismaMock.terminalPaymentRequest.findFirst).not.toHaveBeenCalled()
+    expect(postCashSaleToDrawer).toHaveBeenCalledWith(expect.objectContaining({ paymentId: 'payment-2', amount: 100 }))
+    sinEfectosDeSaldar(cas)
+  })
+
+  it('primer pago0 sin cobro de terminal pendiente cierra después de lock y consulta, con un solo posting', async () => {
+    const { row, pagos } = instalarBase({ paymentStatus: 'PENDING', total: 0 })
+
+    const result = await payCashOrder('venue-1', 'order-1', cola(0, 'cero-sin-bloqueador'))
+
+    expect(result).toMatchObject({ paymentId: 'payment-1', status: 'COMPLETED', amount: 0, tipAmount: 0, remainingBalanceCents: 0 })
+    const guard = await consultaRealDeTerminal()
+    expect(guard).toBeLessThan(prismaMock.payment.create.mock.invocationCallOrder[0])
+    expect([row.paymentStatus, Number(row.paidAmount)]).toEqual(['PAID', 0])
+    expect(pagos).toHaveLength(1)
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(createSalePostingInTx).toHaveBeenCalledTimes(1)
+    expect(prismaMock.payment.create.mock.invocationCallOrder[0]).toBeLessThan((createSalePostingInTx as jest.Mock).mock.invocationCallOrder[0])
   })
 })

@@ -3,6 +3,7 @@ import { AreaTicketFulfillmentMethod, AreaTicketPrintAttemptKind, AreaTicketPrin
 
 import logger from '../../config/logger'
 import AppError from '../../errors/AppError'
+import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
 import * as service from '../../services/mobile/areaTicketV7.mobile.service'
 
 function requiredEnum<T extends string>(value: unknown, allowed: readonly T[], field: string, code: string): T {
@@ -74,6 +75,11 @@ export async function issue(req: Request, res: Response, next: NextFunction) {
       deviceUid: deviceUid(req),
       staffId: staffId(req),
       lines: req.body?.lines,
+      canCompItems:
+        Array.isArray(req.body?.lines) &&
+        req.body.lines.some((line: any) => !!line.discountId) &&
+        (await tienePermisoEnVenue(req, 'orders:comp')),
+      performedBy: req.authContext?.userId,
     })
     return success(res, { ticket }, 201)
   } catch (error) {
@@ -150,6 +156,12 @@ export async function materialize(req: Request, res: Response, next: NextFunctio
       deviceUid: deviceUid(req),
       staffId: staffId(req),
       normalItems: req.body?.normalItems,
+      // Los snapshots previos no se vuelven a autorizar ni calcular: sólo las nuevas líneas de catálogo de la caja.
+      canCompItems:
+        Array.isArray(req.body?.normalItems) &&
+        req.body.normalItems.some((item: any) => !!item.discountId) &&
+        (await tienePermisoEnVenue(req, 'orders:comp')),
+      performedBy: req.authContext?.userId,
       source: req.body?.source,
       customerName: req.body?.customerName,
       note: req.body?.note,

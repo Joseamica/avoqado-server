@@ -15,6 +15,7 @@
  */
 
 jest.mock('@/services/tpv/paymentEffects.service', () => ({
+  asegurarAvisoDeVentaApartada: jest.fn().mockResolvedValue(undefined),
   enqueuePaymentCommissionInTx: jest.fn().mockResolvedValue(undefined),
   enqueuePaymentEffect: jest.fn().mockResolvedValue(undefined),
 }))

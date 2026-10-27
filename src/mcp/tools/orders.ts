@@ -6,11 +6,22 @@ import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { getRecentIntents } from '@/services/mobile/sync.mobile.service'
+import { lookupSyncRecovery } from '@/services/mobile/sync-recovery.mobile.service'
 import { text } from '../respond'
 import { hasPermission } from '@/services/access/access.service'
 // El carril del reembolso: la MISMA definición que usan los cuatro canales de
 // cobro, para que el MCP no pueda contradecir al saldo persistido.
 import { summarizeRefunds } from '@/services/shared/orderBalance'
+import AppError from '@/errors/AppError'
+import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.mobile.service'
+import {
+  courtesyReviewPublicInputSchema,
+  courtesyReviewVenueIdSchema,
+  parseCourtesyReviewPublicInput,
+  toCourtesyReviewPublicReply,
+} from '@/services/mobile/cortesia-pendiente.public'
+import { auditMcpWrite } from '../audit'
+import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
 const ORDER_STATUS_MAP: Record<string, OrderStatus> = {
@@ -32,6 +43,48 @@ const ORDER_TYPE_MAP: Record<string, OrderType> = {
 
 export function registerOrderTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
+
+  server.tool(
+    'review_pending_courtesy',
+    'Revisa una captura ORIGINAL completa de cortesía pendiente con importe y propina cero. Todos los importes se expresan en PESOS. Sin confirm sólo muestra la cuenta canónica y la foto que deberá confirmarse; no crea cuentas ni pagos. Confirmar exige autorización humana, orders:comp y la misma foto. No acredita que una tarjeta no cobró por silencio ni reintenta el pago desde el MCP.',
+    courtesyReviewPublicInputSchema.omit({ expected: true }).extend({
+      venueId: courtesyReviewVenueIdSchema,
+      expectedCourtesySnapshot: z.unknown().optional(),
+    }).shape,
+    async ({ venueId, expectedCourtesySnapshot, ...publicInput }) => {
+      try {
+        const input = parseCourtesyReviewPublicInput({
+          ...publicInput,
+          ...(expectedCourtesySnapshot !== undefined ? { expected: expectedCourtesySnapshot } : {}),
+        })
+        guard.venueFilter(venueId)
+        guard.requirePermission(input.confirm ? 'orders:comp' : 'orders:read', venueId)
+        const reply = await revisarCortesiaPendiente(venueId, { actorId: scope.staffId, isImpersonating: false }, input)
+        const result = toCourtesyReviewPublicReply(reply)
+        if (!input.confirm)
+          return text({
+            requiresConfirmation: true,
+            ...result,
+            expectedCourtesySnapshot: result.snapshot,
+            message:
+              'Revisa la cuenta completa y pide autorización antes de aplicar la cortesía. El intento de pago original permanece guardado.',
+          })
+        avisarBeneficiosCortesiaPendiente(venueId, reply)
+        if (reply.outcome === 'APPLIED')
+          await auditMcpWrite(scope, {
+            action: 'ORDER_COURTESY_REVIEW_APPLIED',
+            entity: 'Order',
+            entityId: reply.snapshot.orderId,
+            venueId,
+            data: { originalPaymentKey: reply.originalPaymentKey },
+          })
+        return text({ ok: true, ...result })
+      } catch (error) {
+        if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
+        throw error
+      }
+    },
+  )
 
   // WHY: order tools expose money (totals, line items, per-payment amounts). The dashboard
   // gates order reads with orders:read; the MCP was only venue-scoped, so any in-scope role
@@ -361,6 +414,29 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
           at: o.createdAt.toISOString(),
         })),
       })
+    },
+  )
+
+  server.tool(
+    'pos_sync_recovery',
+    'Consulta folios originales de ventas del POS y acredita si una cuenta cancelada tiene algún cobro o solicitud de terminal. Sólo lectura: no registra ventas, no cancela cobros y no marca pendientes como revisados. Una cuenta abierta o con cobros o solicitudes no acredita una cancelación sin dinero. Indica la sucursal y los folios originales del aparato.',
+    {
+      venueId: z.string().min(1, 'La sucursal es requerida').describe('Sucursal de la venta, dentro de tu acceso'),
+      externalOrderIds: z
+        .array(
+          z
+            .string()
+            .min(1, 'El folio no puede estar vacío')
+            .max(256, 'El folio no puede exceder 256 caracteres')
+            .refine(value => value.trim().length > 0, 'El folio no puede estar vacío'),
+        )
+        .min(1, 'Envía al menos un folio original')
+        .max(100, 'Máximo 100 folios por consulta')
+        .describe('De 1 a 100 folios originales de ventas, tal cual los conserva el aparato'),
+    },
+    async ({ venueId, externalOrderIds }) => {
+      orderReadableVenues(venueId)
+      return text(await lookupSyncRecovery(venueId, { externalOrderIds, includeCancelledPaymentEvidence: true }))
     },
   )
 

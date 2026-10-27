@@ -21,6 +21,7 @@ import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT, WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 import { ventasDelTurnoSinTarjetas } from '../shared/ventasDelTurno'
+import { COBRO_SIN_MARCA_DE_TURNO_CERRADO } from '../shared/paymentShiftClaim'
 
 interface ShiftFilters {
   staffId?: string
@@ -400,8 +401,8 @@ async function rollupDeCobrosPorTurno(
     OR: [
       { shiftId: { in: ids } },
       // El huérfano se alcanza sólo por su orden, y la orden respeta el mismo rango de fechas que
-      // respetaba el `include` de las órdenes.
-      { shiftId: null, order: { venueId, shiftId: { in: ids }, ...rangoDeFechas } },
+      // respetaba el `include` de las órdenes. Una venta tardía de un turno cerrado nunca (Codex servidor r1 #2).
+      { shiftId: null, order: { venueId, shiftId: { in: ids }, ...rangoDeFechas }, ...COBRO_SIN_MARCA_DE_TURNO_CERRADO },
     ],
   }
 
@@ -1738,6 +1739,8 @@ function shiftPaymentsForCloseWhere(venueId: string, shiftId: string, startTime:
         shiftId: null,
         createdAt: { gte: startTime, lte: claimedAt },
         order: { venueId, shiftId },
+        // 🔴 Codex servidor r1 #2: una venta tardía de un turno cerrado (`ventaDeTurnoCerrado`) no la firma este corte.
+        ...COBRO_SIN_MARCA_DE_TURNO_CERRADO,
       },
     ],
   }

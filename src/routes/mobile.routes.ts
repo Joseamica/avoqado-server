@@ -103,6 +103,9 @@ import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schem
 import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema'
 import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
+import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
+import { checkCortesiaPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
 
 const router = Router()
 
@@ -657,9 +660,29 @@ const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFu
 }
 
 router.post(
+  '/venues/:venueId/orders/courtesy-review',
+  authenticateTokenMiddleware,
+  (req, res, next) => {
+    try {
+      // Validar la subacción ANTES de elegir permiso; la revisión también sirve en mostrador.
+      const input = parseCourtesyReviewPublicInput(req.body)
+      res.locals.courtesyReviewInput = input
+      return checkPermission(input.confirm ? 'orders:comp' : 'orders:read')(req, res, next)
+    } catch (error) {
+      next(error)
+    }
+  },
+  orderMobileController.reviewPendingCourtesy,
+)
+
+router.post(
   '/venues/:venueId/orders',
   authenticateTokenMiddleware,
+  // S7: si la venta de la cola de una terminal se rechaza (también el 403 del permiso), avisa al gerente.
+  avisarSiLaVentaDeLaColaFalla,
   checkPermission('orders:create'),
+  // S9: regalar una línea (`isCortesia`) pide `orders:comp`. Después del aviso (S7) para que su 403 también avise al gerente.
+  checkCortesiaPermissionIfPresent,
   checkPromotionGuardsIfPresent,
   orderMobileController.createOrder,
 )
@@ -917,6 +940,7 @@ router.use('/venues/:venueId/online-orders', onlineOrdersMobileRoutes)
 router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
+  avisarSiLaVentaDeLaColaFalla,
   checkPermission('payments:create'),
   checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES, { dineroCapturado: true }),
   orderMobileController.payCash,
@@ -2836,6 +2860,9 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
   checkTableOwnership('order'),
+  // S9: esta ruta también honra `items[].isCortesia` (`addItemsToOrder`, lineComped/plainComped): sin el candado, la cortesía se
+  // regalaba en dos pasos (crear la orden sin cortesía y luego agregar el renglón regalado).
+  checkCortesiaPermissionIfPresent,
   checkPromotionGuardsIfPresent,
   orderMobileController.addItemsToOrder,
 )

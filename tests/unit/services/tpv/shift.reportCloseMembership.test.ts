@@ -10,6 +10,7 @@
  */
 
 import { Decimal } from '@prisma/client/runtime/library'
+import { Prisma } from '@prisma/client'
 
 jest.mock('@/utils/prismaClient', () => ({
   __esModule: true,
@@ -156,6 +157,12 @@ function esperarMembresiaCanonica(args: any) {
         shiftId: null,
         createdAt: { gte: INICIO, lte: CLAIMED_AT },
         order: { venueId: VENUE, shiftId: TURNO },
+        // Codex servidor r1 #2: una venta tardía de un turno cerrado (marcada) nunca se adopta por su orden. S3 (Codex plan r4 #2):
+        // tampoco la de una caja cerrada sin turno (las DOS marcas de venta apartada, `COBRO_SIN_MARCA_DE_TURNO_CERRADO`).
+        AND: [
+          { posRawData: { path: ['ventaDeTurnoCerrado'], equals: Prisma.AnyNull } },
+          { posRawData: { path: ['cajaDeLaVentaCerrada'], equals: Prisma.AnyNull } },
+        ],
       },
     ],
   })

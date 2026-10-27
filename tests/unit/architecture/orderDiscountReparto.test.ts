@@ -130,9 +130,10 @@ const SYNC = 'sincronizarRepartos('
 const HISTORICO = 'conservarDescuentoHistorico('
 const RECORTA = 'recortarDescuentosDeRenglones('
 const ESCRITORES_DE_FILAS: Record<string, Fila> = {
+  // Cobrar sin red S4: la cortesía y el descuento de catálogo de la cuenta, con las mismas filas que «Cobrar» de la terminal.
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     clase: 'ESCRIBE',
-    marcas: ['buildItemDiscountRow(', 'filaDeDescuentoDeCuenta(', SYNC],
+    marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', 'filaDeDescuentoDeCuenta(', SYNC],
   },
   'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction': {
     clase: 'ESCRIBE',
@@ -145,7 +146,7 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     clase: 'ESCRIBE',
-    marcas: ['nuevoRepartoDirigido(', 'buildItemDiscountRow(', 'nuevoRepartoDeCuenta(', SYNC],
+    marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', SYNC],
   },
   'src/services/tpv/order.tpv.service.ts#applyDiscount': {
     clase: 'ESCRIBE',
@@ -226,7 +227,7 @@ type Origen = { origen: 'FILAS' | 'RECALCULO' | 'CERO' | 'RENGLON' | 'D8'; nota:
 const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     origen: 'FILAS',
-    nota: 'espejos de artículo + fila de cuenta del POS; con promociones, reafirmada',
+    nota: 'espejos de cortesía y de artículo + fila de cuenta del POS o de catálogo; con promociones, reafirmada',
   },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     origen: 'FILAS',
@@ -386,6 +387,10 @@ describe('B2: inventario de quien escribe descuentos (spec §4.1)', () => {
   })
   it('buildItemDiscountRow guarda el reparto espejo', () => {
     expect(de('src/services/shared/discount.service.ts#buildItemDiscountRow')).toContain('nuevoRepartoDirigido(')
+  })
+  it('la fila de cortesías guarda su reparto espejo y la de catálogo de la cuenta su reparto de cuenta', () => {
+    expect(de('src/services/shared/discount.service.ts#filaDeCortesias')).toMatch(/nuevoRepartoDirigido\([^;]*\{\s*espejo: true\s*\}\s*\)/)
+    expect(de('src/services/shared/discount.service.ts#filaDeDescuentoDeCatalogoEnCuenta')).toContain('nuevoRepartoDeCuenta(')
   })
   it('toda función que escribe Order.discountAmount declara de dónde sale', () => {
     expect([...cabecera].sort()).toEqual(Object.keys(ORIGEN_DE_LA_CABECERA).sort())

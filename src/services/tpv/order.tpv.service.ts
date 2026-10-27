@@ -19,8 +19,11 @@ import { logAction } from '../dashboard/activity-log.service'
 import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import {
+  accionDeCortesia,
   buildItemDiscountRow,
   calculateDiscountPesos,
+  filaDeCortesias,
+  filaDeDescuentoDeCatalogoEnCuenta,
   filaDeDescuentoDeCuenta,
   validateDiscountActive,
   validateDiscountScopeForItem,
@@ -680,6 +683,9 @@ type TpvCreateOrderWithItemsInput = {
     itemDiscountId?: string | null
   }>
   staffId: string
+  /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
+  canCompItems?: boolean
+  performedBy?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
@@ -1094,7 +1100,11 @@ export async function createOrderWithItems(
     throw new BadRequestError(`Discounts not found or do not belong to this venue: ${missingIds.join(', ')}`)
   }
 
-  discounts.forEach(validateDiscountActive)
+  discounts.forEach(discount => validateDiscountActive(discount))
+  // Se autoriza el tipo que realmente calcula esta creación, aunque haya cambiado después del precheck HTTP.
+  if (discounts.some(discount => discount.type === 'COMP') && (input.canCompItems !== true || !input.performedBy)) {
+    throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
 
   const preparedLines: PreparedCheckoutLine[] = input.items.map(item => {
     if (item.isCortesia && item.itemDiscountId) {
@@ -1286,32 +1296,15 @@ export async function createOrderWithItems(
       }
 
       const cortesiaItems = createdItems.filter(item => item.line.input.isCortesia)
+      // La misma fila, la misma acción y el mismo descuento de cuenta que la orden de mobile (`../shared/discount.service`).
+      const enCortesia = (item: (typeof createdItems)[number]) => ({
+        id: item.id,
+        brutoPesos: item.line.lineGrossPesos,
+        motivo: item.line.input.cortesiaReason,
+      })
       if (cortesiaItems.length > 0) {
-        const cortesiaAmountPesos = roundPesos(cortesiaItems.reduce((sum, item) => sum + item.line.lineGrossPesos, 0))
         await tx.orderDiscount.create({
-          data: {
-            orderId: order.id,
-            type: 'COMP',
-            name: 'Cortesía',
-            value: new Prisma.Decimal(100),
-            amount: decimalFromPesos(cortesiaAmountPesos),
-            taxReduction: 0,
-            isComp: true,
-            isManual: true,
-            compReason:
-              cortesiaItems
-                .map(item => item.line.input.cortesiaReason)
-                .filter(Boolean)
-                .join('; ') || 'Cortesía',
-            appliedById: activeStaffVenue.id,
-            appliedToItemIds: cortesiaItems.map(item => item.id),
-            // B2: la cortesía ya vive en cada renglón (bruto + discountAmount = bruto); la fila la duplica ⇒ espejo.
-            reparto: comoJson(
-              nuevoRepartoDirigido(cortesiaAmountPesos, Object.fromEntries(cortesiaItems.map(i => [i.id, i.line.lineGrossPesos])), {
-                espejo: true,
-              }),
-            ),
-          },
+          data: filaDeCortesias({ orderId: order.id, renglones: cortesiaItems.map(enCortesia), appliedById: activeStaffVenue.id }),
         })
       }
 
@@ -1329,24 +1322,13 @@ export async function createOrderWithItems(
 
       if (orderDiscount && orderDiscountPesos > 0) {
         await tx.orderDiscount.create({
-          data: {
+          data: filaDeDescuentoDeCatalogoEnCuenta({
             orderId: order.id,
-            discountId: orderDiscount.id,
-            type: orderDiscount.type,
-            name: orderDiscount.name,
-            value: orderDiscount.value,
-            amount: decimalFromPesos(orderDiscountPesos),
-            taxReduction: 0,
-            isComp: orderDiscount.type === 'COMP',
-            isManual: true,
-            compReason: orderDiscount.type === 'COMP' ? orderDiscount.compReason || orderDiscount.name : null,
+            discount: orderDiscount,
+            montoPesos: orderDiscountPesos,
             appliedById: activeStaffVenue.id,
-            appliedToItemIds: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
-            // B2: su base fue bruto − artículo − cortesías, sobre los renglones sin cortesía.
-            reparto: comoJson(
-              nuevoRepartoDeCuenta({ conPromociones: false, base: createdItems.filter(i => !i.line.input.isCortesia).map(i => i.id) }),
-            ),
-          },
+            renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
+          }),
         })
       }
       if (!orderDiscount && orderDiscountPesos > 0) {
@@ -1370,19 +1352,13 @@ export async function createOrderWithItems(
 
       for (const item of cortesiaItems) {
         await tx.orderAction.create({
-          data: {
+          data: accionDeCortesia({
             orderId: order.id,
-            actionType: 'COMP',
             performedById: input.staffId,
-            reason: item.line.input.cortesiaReason || 'Cortesía',
-            metadata: {
-              orderItemId: item.id,
-              productId: item.line.product?.id || null,
-              productName: item.line.product?.name || item.line.input.name || 'Otro importe',
-              lineSubtotalGivenAway: roundPesos(item.line.lineGrossPesos),
-              cortesiaReason: item.line.input.cortesiaReason,
-            },
-          },
+            renglon: enCortesia(item),
+            productId: item.line.product?.id || null,
+            productName: item.line.product?.name || item.line.input.name || 'Otro importe',
+          }),
         })
       }
 

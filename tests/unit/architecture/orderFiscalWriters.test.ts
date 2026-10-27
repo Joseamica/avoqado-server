@@ -1106,6 +1106,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/discount.tpv.service.ts#applyCouponCode': 1,
   'src/services/mobile/comp-item.mobile.service.ts#compOrderItem': 1,
   'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder': 1,
+  'src/services/mobile/cortesia-pendiente.mobile.service.ts#revisarCortesiaPendiente': 1,
   'src/services/mobile/service-charge.mobile.service.ts#applyServiceCharge': 1,
   'src/services/mobile/service-charge.mobile.service.ts#removeServiceCharge': 1,
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': 1,

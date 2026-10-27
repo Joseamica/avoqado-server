@@ -1,9 +1,10 @@
 /**
  * menu.tpv.controller — menú, productos y categorías bajo /tpv (Plan B Task 5, 2026-07-27).
  *
- * `getProducts` es un RE-EXPORT VERBATIM del controller de dashboard (mismo módulo, misma
- * función) — mockeamos el servicio que ya delega (productService.getProducts) y probamos el
- * shape que produce, NO reimplementamos su lógica de negocio (ya cubierta del lado de dashboard).
+ * `getProducts` responde el MISMO sobre que el controller de dashboard (comparten
+ * `buildProductsListResponse`) más `catalogAt` en la raíz (Cobrar sin red, S1) — mockeamos el servicio
+ * que ya delega (productService.getProducts) y probamos el shape que produce, NO reimplementamos su
+ * lógica de negocio (ya cubierta del lado de dashboard).
  *
  * `getCategories` y `getMenus` SÍ son nuevos:
  *   - getCategories replica la MISMA query que /mobile ya corre con éxito
@@ -15,7 +16,7 @@
  *     (menuCategoryService.getMenus) y replica su shape (array plano, sin sobre).
  *
  * Lo que se protege (no el test débil del plan que solo afirma 200 + anything()):
- *   1. products: shape idéntico al de dashboard ({ message, data, correlationId }) con campos
+ *   1. products: shape idéntico al de dashboard ({ message, data, correlationId }, más catalogAt) con campos
  *      concretos, sin transformar.
  *   2. categories: array plano compatible con CategoryDto, con el filtro/orden exactos.
  *   3. menus: array plano, mismo shape que dashboard.
@@ -43,7 +44,7 @@ const getMenusServiceMock = menuCategoryService.getMenus as jest.Mock
 
 beforeEach(() => jest.clearAllMocks())
 
-describe('menu.tpv.controller — getProducts (re-export verbatim de dashboard)', () => {
+describe('menu.tpv.controller — getProducts (mismo sobre que dashboard + catalogAt)', () => {
   // NEW FEATURE TESTS
   it('responde el shape EXACTO de dashboard: { message, data, correlationId } con los campos concretos que ProductDto parsea', async () => {
     const product = {
@@ -74,7 +75,10 @@ describe('menu.tpv.controller — getProducts (re-export verbatim de dashboard)'
     await (controller.getProducts as any)(req, res, next)
 
     expect(res.status).toHaveBeenCalledWith(200)
-    expect(res.json).toHaveBeenCalledWith({
+    // `catalogAt` es ADITIVO (Cobrar sin red, S1): lo demás queda idéntico al panel
+    const { catalogAt, ...resto } = res.json.mock.calls[0][0]
+    expect(typeof catalogAt).toBe('string')
+    expect(resto).toEqual({
       message: 'Products for venue venue-a',
       data: [product],
       correlationId: 'corr-1',
@@ -107,6 +111,91 @@ describe('menu.tpv.controller — getProducts (re-export verbatim de dashboard)'
 
     expect(next).toHaveBeenCalledWith(boom)
     expect(res.status).not.toHaveBeenCalled()
+  })
+})
+
+describe('menu.tpv.controller — getProducts · catalogAt (Cobrar sin red, S1)', () => {
+  const PRODUCTO = { id: 'prod-1', name: 'Café', price: 45, gtin: '7501234567890', sku: 'CAFE-001' }
+  const pedir = async () => {
+    const req: any = { params: { venueId: 'venue-a' }, query: {}, authContext: { venueId: 'venue-a' }, correlationId: 'corr-1' }
+    const res = mockRes()
+    const next = jest.fn()
+    await (controller.getProducts as any)(req, res, next)
+    return { res, next, body: res.json.mock.calls[0]?.[0] }
+  }
+
+  beforeEach(() => {
+    jest.useFakeTimers()
+    jest.setSystemTime(new Date('2026-10-20T18:00:00.000Z'))
+  })
+  afterEach(() => {
+    jest.useRealTimers()
+  })
+
+  it('catalogAt se toma ANTES del findMany: aunque la lectura tarde 5 s, trae la hora de antes de leer', async () => {
+    getProductsMock.mockImplementation(async () => {
+      jest.setSystemTime(new Date('2026-10-20T18:00:05.000Z')) // la lectura tarda 5 s
+      return [PRODUCTO]
+    })
+
+    const { body } = await pedir()
+
+    expect(body.catalogAt).toBe('2026-10-20T18:00:00.000Z')
+    expect(new Date(body.catalogAt).getTime()).toBeLessThan(new Date('2026-10-20T18:00:05.000Z').getTime())
+  })
+
+  it('catalogAt mide 24 caracteres: ISO-8601 UTC con milisegundos (iOS lo parsea con fracciones)', async () => {
+    jest.setSystemTime(new Date('2026-10-20T18:00:00.007Z'))
+    getProductsMock.mockResolvedValue([PRODUCTO])
+
+    const { body } = await pedir()
+
+    expect(body.catalogAt).toHaveLength(24)
+    expect(body.catalogAt).toMatch(/^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}\.\d{3}Z$/)
+    expect(body.catalogAt).toBe('2026-10-20T18:00:00.007Z')
+  })
+
+  it('la respuesta conserva message/data/correlationId: catalogAt sólo se SUMA en la raíz (aditivo)', async () => {
+    getProductsMock.mockResolvedValue([PRODUCTO])
+
+    const { body, res } = await pedir()
+
+    expect(res.status).toHaveBeenCalledWith(200)
+    expect(Object.keys(body).sort()).toEqual(['catalogAt', 'correlationId', 'data', 'message'])
+    expect(body.message).toBe('Products for venue venue-a')
+    expect(body.correlationId).toBe('corr-1')
+    expect(body.data).toHaveLength(1)
+    expect(body.data[0]).not.toHaveProperty('catalogAt')
+  })
+
+  it('cada producto conserva gtin (escalar del modelo; la terminal lo necesita para escanear sin red)', async () => {
+    getProductsMock.mockResolvedValue([PRODUCTO, { ...PRODUCTO, id: 'prod-2', gtin: null }])
+
+    const { body } = await pedir()
+
+    expect(body.data[0].gtin).toBe('7501234567890')
+    expect(body.data[1]).toHaveProperty('gtin', null)
+  })
+
+  it('si el servicio falla no hay catalogAt ni 200: el error va a next()', async () => {
+    const boom = new Error('db down')
+    getProductsMock.mockRejectedValue(boom)
+
+    const { next, res } = await pedir()
+
+    expect(next).toHaveBeenCalledWith(boom)
+    expect(res.status).not.toHaveBeenCalled()
+  })
+
+  it('el panel NO cambia: el handler de dashboard sigue sin catalogAt', async () => {
+    getProductsMock.mockResolvedValue([PRODUCTO])
+    const { getProductsHandler } = await import('@/controllers/dashboard/product.dashboard.controller')
+    const res = mockRes()
+
+    await getProductsHandler({ params: { venueId: 'venue-a' }, query: {}, correlationId: 'corr-1' } as any, res, jest.fn())
+
+    const body = res.json.mock.calls[0][0]
+    expect(Object.keys(body).sort()).toEqual(['correlationId', 'data', 'message'])
   })
 })
 

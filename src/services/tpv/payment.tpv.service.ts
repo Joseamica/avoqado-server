@@ -366,13 +366,20 @@ import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCompletedPayment,
+  esVentaDeCajaCerrada,
+  esVentaDeTurnoCerrado,
   lockExistingOrderForPayment,
+  marcaDeCajaDeLaVenta,
+  marcaDeCajaDeLaVentaCerrada,
+  marcaDeVentaDeTurnoCerrado,
   recordCapturedPaymentOrderReconciliation,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
+  ventaDeLaColaEnTx,
+  entradaDelClaim,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
-import { enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
+import { asegurarAvisoDeVentaApartada, enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
 import { COSTO_PENDIENTE_PLAZO_MS, asegurarCostoSincrono } from '../payments/deferredTransactionCost.service'
 import { esEvidenciaDeConciliacion } from './segundaCaptura'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
@@ -1333,9 +1340,19 @@ async function enqueueCommittedPaymentEffects(
   reviewRating: string | undefined,
   staffId: string | undefined,
   expectsSettlement: boolean,
+  /** S3: los datos del aviso de una venta APARTADA (turno o caja ya cerrados); con ellos nace su efecto durable `AVISO_TURNO_CERRADO`. */
+  avisoDeVentaApartada?: { externalId: string; montoCents: number; terminalSerial: string | null },
 ): Promise<void> {
   if (payment.status !== 'COMPLETED') return
   const source = { venueId: payment.venueId, paymentId: payment.id, orderId: payment.orderId }
+  // S3 (Codex plan r3 #6 y r4 #3): el ÚNICO emisor del aviso de una venta apartada es este efecto, nacido con el dinero.
+  if (avisoDeVentaApartada)
+    await enqueuePaymentEffect(tx, {
+      ...source,
+      kind: 'AVISO_TURNO_CERRADO',
+      dedupeKey: 'aviso-turno-cerrado:' + payment.id,
+      payload: { ...avisoDeVentaApartada, orderId: payment.orderId },
+    })
   await enqueuePaymentEffect(tx, { ...source, kind: 'RECEIPT', dedupeKey: 'receipt:' + payment.id + ':v1', payload: {} })
   const rating = reviewRating ? mapTpvRatingToNumeric(reviewRating) : null
   if (rating !== null)
@@ -2765,6 +2782,23 @@ export async function getPayments(
 /**
  * Interface for payment creation data
  */
+/**
+ * S3 «Efectivo sin red en el turno correcto»: los datos del aviso al gerente de una venta de la cola que quedó APARTE (su turno, o su
+ * caja sin turno, ya se había cerrado), o `undefined`. Sustituye al aviso directo después del commit (S7 de «Cobrar sin red»): ahora
+ * lo manda SÓLO el efecto durable `AVISO_TURNO_CERRADO`, que nace con el dinero y se reintenta hasta que consta (Codex plan r4 #3).
+ */
+function avisoDeVentaApartada(
+  payment: { id: string; posRawData: Prisma.JsonValue },
+  paymentData: Pick<PaymentCreationData, 'idempotencyKey' | 'authenticatedTerminalSerial' | 'amount'>,
+): { externalId: string; montoCents: number; terminalSerial: string | null } | undefined {
+  if (!esVentaDeTurnoCerrado(payment.posRawData) && !esVentaDeCajaCerrada(payment.posRawData)) return undefined
+  return {
+    externalId: paymentData.idempotencyKey ?? payment.id,
+    montoCents: paymentData.amount,
+    terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
+  }
+}
+
 interface PaymentCreationData {
   venueId: string
   amount: number // Amount in cents
@@ -2784,6 +2818,11 @@ interface PaymentCreationData {
   // Founder 3-oct / Codex r10 #3 (Tarea 6a): «este efectivo lo tiene el cajero en la mano y todavía lo puede devolver».
   // Sólo `true` cambia algo; ausente, `null` o `false` es lo de hoy. La TPV todavía no lo manda.
   cobroNuevo?: boolean | null
+  // «Cobrar sin red» (D4): el turno en que se VENDIÓ, sólo de la cola de la terminal. Si ya no es el vivo, el cobro (y la orden
+  // rápida) quedan sin turno con conciliación `SALE_SHIFT_CLOSED`; nunca se estampa. Ausente = como hoy.
+  shiftIdDeLaVenta?: string | null
+  /** S3: la caja que el POS tenía abierta al cobrar (sólo cuenta con `isOfflineReplay === true`). */
+  cashDrawerSessionId?: string | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3147,7 +3186,7 @@ async function resolverAfiliacionDelCobro(
  * @param deviceSerialNumber Terminal serial number (e.g., "AVQD-2841548417")
  * @returns Terminal ID or null if not found
  */
-async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: string): Promise<string | null> {
+export async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: string): Promise<string | null> {
   try {
     const terminal = await prisma.terminal.findFirst({
       where: {
@@ -3547,6 +3586,17 @@ export async function recordOrderPayment(
         existingByKey.status === 'COMPLETED'
           ? await resumeCapturedAreaTicketPayment(venueId, orderId, existingByKey, paymentData.idempotencyKey)
           : null
+      // Codex servidor r1 #6 + S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante.
+      await asegurarAvisoDeVentaApartada({
+        venueId,
+        paymentId: existingByKey.id,
+        orderId: existingByKey.orderId,
+        status: existingByKey.status,
+        posRawData: existingByKey.posRawData,
+        externalId: paymentData.idempotencyKey ?? existingByKey.id,
+        montoPesos: existingByKey.amount,
+        terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
+      })
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, orderId)) ?? existingByKey),
         ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
@@ -3971,6 +4021,7 @@ export async function recordOrderPayment(
           tipPesos: shiftTip,
           incrementTotalOrders: priorCompletedPaymentCount === 0,
           orderId: activeOrder.id,
+          expectedShiftId: paymentData.isOfflineReplay === true ? paymentData.shiftIdDeLaVenta : null,
         })
 
         // Create the payment record
@@ -4058,6 +4109,8 @@ export async function recordOrderPayment(
               ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
               ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
               ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+              // D4: su efectivo ya lo contó el cajón de SU turno (cerrado); el cajón no lo vuelve a sumar (en línea ni barrido).
+              ...marcaDeVentaDeTurnoCerrado(shiftClaim?.saleShiftId),
             },
           },
           include: {
@@ -4209,7 +4262,14 @@ export async function recordOrderPayment(
             })
             expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums._sum.amount, tipAmount: sums._sum.tipAmount }]).isFullyPaid
           }
-          await enqueueCommittedPaymentEffects(tx, newPayment, paymentData.reviewRating, validatedStaffId, expectsSettlement)
+          await enqueueCommittedPaymentEffects(
+            tx,
+            newPayment,
+            paymentData.reviewRating,
+            validatedStaffId,
+            expectsSettlement,
+            avisoDeVentaApartada(newPayment, paymentData),
+          )
           await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
         }
         return newPayment
@@ -4433,6 +4493,7 @@ export async function recordOrderPayment(
       tipAmount: payment.tipAmount,
       staffId: payment.processedById,
       orderId: activeOrder.id,
+      ventaDeTurnoCerrado: esVentaDeTurnoCerrado(payment.posRawData),
     }),
   )
 
@@ -5239,6 +5300,17 @@ export async function recordFastPayment(
       // siempre (la idempotencia devuelve el pago y nadie vuelve a mirar). Rellenar es
       // aditivo y no toca dinero; reasignar está prohibido (ver `fastPaymentCustomer.ts`).
       const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingByKey), effectiveCustomerId, customerActor)
+      // Codex servidor r1 #6 + S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante.
+      await asegurarAvisoDeVentaApartada({
+        venueId,
+        paymentId: existingByKey.id,
+        orderId: existingByKey.orderId,
+        status: existingByKey.status,
+        posRawData: existingByKey.posRawData,
+        externalId: paymentData.idempotencyKey ?? existingByKey.id,
+        montoPesos: existingByKey.amount,
+        terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
+      })
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -5364,6 +5436,8 @@ export async function recordFastPayment(
   // the concurrent retry behave exactly like an idempotent success.
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
+  /** S3 (Codex r1 código #1): la caja que el POS capturó al cobrar sin red, si el cobro entró a su turno: el efectivo va a ESA o a ninguna. */
+  let cajaDeLaCola: string | null = null
   const s0 = {
     segundaCaptura: null as SegundaCapturaRegistrada | null,
     colision: null as ColisionDeReferenciaRegistrada | null,
@@ -5473,6 +5547,11 @@ export async function recordFastPayment(
             },
           )
         }
+        // S3: el turno de la venta de la cola (TPV: `shiftIdDeLaVenta`; POS por `/mobile/…/fast`: el ligado a la caja capturada).
+        const ventaDeLaCola = await ventaDeLaColaEnTx(tx, venueId, {
+          shiftIdDeLaVenta: paymentData.isOfflineReplay === true ? paymentData.shiftIdDeLaVenta : null,
+          cashDrawerSessionId: paymentData.isOfflineReplay === true ? paymentData.cashDrawerSessionId : null,
+        })
         const shiftClaim = await claimShiftForCompletedPayment(tx, {
           paymentStatus: paymentStatusSnapshot,
           venueId,
@@ -5481,6 +5560,8 @@ export async function recordFastPayment(
           incrementTotalOrders: true,
           // La venta rápida nace DESPUÉS del claim, sin tarjetas de regalo: nunca es una cuenta de tarjetas.
           orderId: null,
+          // S3: todo lo de la venta de la cola por `entradaDelClaim` (Codex r5 código #1: incluida la relectura de la caja sin turno).
+          ...entradaDelClaim(ventaDeLaCola),
         })
 
         // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
@@ -5667,6 +5748,12 @@ export async function recordFastPayment(
               source: fuenteDelCobroRapido,
               paymentType: 'FAST',
               ...(effectiveReviewRating && { reviewRating: effectiveReviewRating }),
+              // D4: su efectivo ya lo contó el cajón de SU turno (cerrado); el cajón no lo vuelve a sumar (en línea ni barrido).
+              ...marcaDeVentaDeTurnoCerrado(shiftClaim?.saleShiftId),
+              // S3: la venta de una caja cerrada sin turno ligado, mismo trato.
+              ...marcaDeCajaDeLaVentaCerrada(shiftClaim?.saleDrawerId),
+              // S3 (Codex r6 código #1): la no apartada lleva su caja capturada, para que el barrido la reponga ahí y no por la hora.
+              ...(shiftClaim?.saleShiftId || shiftClaim?.saleDrawerId ? {} : marcaDeCajaDeLaVenta(ventaDeLaCola.cajaId)),
             },
           },
           include: {
@@ -5790,14 +5877,31 @@ export async function recordFastPayment(
 
         if (newPayment.status === 'COMPLETED') {
           await tx.order.update({ where: { id: order.id }, data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId } })
-          await enqueueCommittedPaymentEffects(tx, newPayment, effectiveReviewRating, validatedStaffId, true)
+          await enqueueCommittedPaymentEffects(
+            tx,
+            newPayment,
+            effectiveReviewRating,
+            validatedStaffId,
+            true,
+            avisoDeVentaApartada(newPayment, paymentData),
+          )
           await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
         }
-        return { payment: newPayment, fastOrder: order }
+        return {
+          payment: newPayment,
+          fastOrder: order,
+          // 🔴 S3 (Codex r1 código #1): el replay de la cola con su caja capturada manda su efectivo a ESA caja (o a ninguna si la contaron:
+          // la repone el barrido en su ventana). Sin esto, si otro aparato cierra esa caja y abre otra entre el commit y el movimiento,
+          // sumaba al esperado de la caja nueva. Codex r6 código #3: también cuando el claim no tomó turno (`SHIFT_NOT_OPEN`, `NO_SHIFT`):
+          // el billete sigue en esa caja. Sólo la venta apartada no va a ninguna. Un cobro en línea, como hoy (la ventana de milisegundos
+          // que ya existía para todo cobro en línea está en `docs/audit/deuda-encontrada.md`).
+          cajaDeLaCola: shiftClaim?.saleShiftId || shiftClaim?.saleDrawerId ? null : (ventaDeLaCola.cajaId ?? null),
+        }
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO),
     )
     payment = result.payment
     fastOrder = result.fastOrder
+    cajaDeLaCola = result.cajaDeLaCola ?? null
   } catch (error) {
     if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
@@ -5904,6 +6008,10 @@ export async function recordFastPayment(
       tipAmount: payment.tipAmount,
       staffId: payment.processedById,
       orderId: fastOrder.id,
+      // S3: el replay con su caja capturada va a ESA caja, y sólo si sigue abierta o la cerró el sistema sin conteo (Codex r6 código #1).
+      ...(cajaDeLaCola ? { targetSessionId: cajaDeLaCola, exigirAbierta: true, admiteCerradaSinConteo: true } : {}),
+      // D4 y S3: la venta apartada (turno o caja ya cerrados) no entra a ninguna caja.
+      ventaDeTurnoCerrado: esVentaDeTurnoCerrado(payment.posRawData) || esVentaDeCajaCerrada(payment.posRawData),
     }),
   )
 

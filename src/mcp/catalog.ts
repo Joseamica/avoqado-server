@@ -11,6 +11,7 @@ import { directoryInputSchema } from './directory/input'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
+  review_pending_courtesy: 'write',
   venue_administration: 'read',
   update_venue_business_profile: 'write',
   update_venue_organization: 'write',
@@ -251,6 +252,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   pending_area_ticket_deliveries: 'read',
   pending_external_confirmations: 'read',
   pos_sync_status: 'read',
+  pos_sync_recovery: 'read',
   kitchen_preparation: 'read',
   preview_catalog_import: 'write',
   preview_catalog_publication: 'write',
@@ -562,6 +564,8 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedStampsEarned',
             'expectedVersion',
             'expectedStampsRequired',
+            // Cortesía pendiente: ligar la cabecera y todas las líneas que se vieron, en pesos.
+            'expectedCourtesySnapshot',
           ]) {
             // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
             // no atar un `null` que el esquema de otra herramienta no acepta.

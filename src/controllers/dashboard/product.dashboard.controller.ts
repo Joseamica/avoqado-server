@@ -7,42 +7,52 @@ import { resolveLegacyCatalogActor } from '../../services/master-catalog/catalog
 import { estadoIvaPorProducto } from '../../services/fiscal/encendidoIva.service'
 
 /**
+ * Cuerpo común del listado de productos: lo usan el panel (`getProductsHandler`) y la terminal
+ * (`menu.tpv.controller.getProducts`, que le suma `catalogAt`). Devuelve el sobre
+ * `{ message, data, correlationId }` tal cual lo responde el panel.
+ */
+export const buildProductsListResponse = async (req: Request) => {
+  const { venueId } = req.params
+  const { includeRecipe, includeModifiers, includePricingPolicy, categoryId, orderBy } = req.query
+  const correlationId = (req as any).correlationId
+
+  // The modifier + recipe trees default ON (backward-compatible — this list always loaded them).
+  // Callers that only need id/name/price opt OUT with ?includeRecipe=false / ?includeModifiers=false
+  // to skip the deep includes (big speed win on large catalogs). Only an explicit 'false' turns it off.
+  const wantRecipe = includeRecipe !== 'false'
+  const wantModifiers = includeModifiers !== 'false'
+
+  logger.info(`Fetching products for venue ${venueId}`, {
+    correlationId,
+    includeRecipe: wantRecipe,
+    includeModifiers: wantModifiers,
+    includePricingPolicy: includePricingPolicy === 'true',
+    categoryId: categoryId || undefined,
+    orderBy: orderBy || 'displayOrder',
+  })
+
+  const products = await productService.getProducts(venueId, {
+    includeRecipe: wantRecipe,
+    includeModifiers: wantModifiers,
+    includePricingPolicy: includePricingPolicy === 'true',
+    categoryId: categoryId as string | undefined,
+    orderBy: (orderBy === 'name' ? 'name' : 'displayOrder') as 'name' | 'displayOrder',
+  })
+
+  return {
+    message: `Products for venue ${venueId}`,
+    data: products.map(toLegacyProductPayload),
+    correlationId,
+  }
+}
+
+/**
  * Get all products for a venue
  */
 export const getProductsHandler = async (req: Request, res: Response, next: NextFunction): Promise<void> => {
   try {
-    const { venueId } = req.params
-    const { includeRecipe, includeModifiers, includePricingPolicy, categoryId, orderBy } = req.query
-    const correlationId = (req as any).correlationId
-
-    // The modifier + recipe trees default ON (backward-compatible — this list always loaded them).
-    // Callers that only need id/name/price opt OUT with ?includeRecipe=false / ?includeModifiers=false
-    // to skip the deep includes (big speed win on large catalogs). Only an explicit 'false' turns it off.
-    const wantRecipe = includeRecipe !== 'false'
-    const wantModifiers = includeModifiers !== 'false'
-
-    logger.info(`Fetching products for venue ${venueId}`, {
-      correlationId,
-      includeRecipe: wantRecipe,
-      includeModifiers: wantModifiers,
-      includePricingPolicy: includePricingPolicy === 'true',
-      categoryId: categoryId || undefined,
-      orderBy: orderBy || 'displayOrder',
-    })
-
-    const products = await productService.getProducts(venueId, {
-      includeRecipe: wantRecipe,
-      includeModifiers: wantModifiers,
-      includePricingPolicy: includePricingPolicy === 'true',
-      categoryId: categoryId as string | undefined,
-      orderBy: (orderBy === 'name' ? 'name' : 'displayOrder') as 'name' | 'displayOrder',
-    })
-
-    res.status(200).json({
-      message: `Products for venue ${venueId}`,
-      data: products.map(toLegacyProductPayload),
-      correlationId,
-    })
+    const body = await buildProductsListResponse(req)
+    res.status(200).json(body)
   } catch (error) {
     next(error)
   }

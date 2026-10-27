@@ -325,6 +325,9 @@ app.get('/health', (req: ExpressRequest, res: ExpressResponse) => {
 app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressResponse) => {
   const correlationId = (req as any).correlationId || 'N/A'
   const startTime = Date.now()
+  // Nunca se guarda (ni en el navegador ni en un proxy): las apps la usan para saber si el servidor contesta AHORA (el tope del
+  // cierre de caja que espera a sus ventas sin red, 24-oct-2026). Una respuesta vieja diría «sano» con el servidor caído.
+  res.set('Cache-Control', 'no-store')
 
   try {
     // Import prisma lazily to avoid circular dependency

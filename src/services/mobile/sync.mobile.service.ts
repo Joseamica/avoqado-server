@@ -1017,6 +1017,21 @@ async function applyOpenTable(
   if (!tableId) {
     return { id: intent.id, status: 'REJECTED', errorCode: 'INVALID_PAYLOAD', message: 'OPEN_TABLE requiere tableId' }
   }
+  // S3: la caja en que el aparato abrió la mesa sin red (misma forma que en PAY_CASH).
+  const cajaDeLaMesa = intent.payload.cashDrawerSessionId
+  if (
+    cajaDeLaMesa !== undefined &&
+    cajaDeLaMesa !== null &&
+    cajaDeLaMesa !== '' &&
+    (typeof cajaDeLaMesa !== 'string' || cajaDeLaMesa.length > 64)
+  ) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'OPEN_TABLE: cashDrawerSessionId debe ser texto de hasta 64 caracteres',
+    }
+  }
 
   // Propiedad de mesa: abrir una mesa ocupada por otro reutilizaría su orden.
   if (await isTableOwnershipEnforced(venueId)) {
@@ -1042,6 +1057,8 @@ async function applyOpenTable(
     covers,
     undefined,
     dejarHuella ? (tx, admitida) => dejarHuella(tx, admitida) : undefined,
+    // Sin caja, la llamada de hoy byte a byte (sin un séptimo argumento).
+    ...(typeof cajaDeLaMesa === 'string' && cajaDeLaMesa !== '' ? [{ cashDrawerSessionId: cajaDeLaMesa }] : []),
   )
   if (localOrderId) localRefMap.set(localOrderId, order.id)
   return {
@@ -1362,6 +1379,22 @@ async function applyPayCash(
       message: 'PAY_CASH: manda method o tenderTypeId, no ambos',
     }
   }
+  // S3 «Efectivo sin red en el turno correcto»: la caja que el aparato tenía abierta al cobrar. Misma forma que en HTTP (texto de
+  // hasta 64); otra cosa es un rechazo visible en la cola, nunca un valor sin tope que llegue al servicio.
+  const cashDrawerSessionId = intent.payload.cashDrawerSessionId
+  if (
+    cashDrawerSessionId !== undefined &&
+    cashDrawerSessionId !== null &&
+    cashDrawerSessionId !== '' &&
+    (typeof cashDrawerSessionId !== 'string' || cashDrawerSessionId.length > 64)
+  ) {
+    return {
+      id: intent.id,
+      status: 'REJECTED',
+      errorCode: 'INVALID_PAYLOAD',
+      message: 'PAY_CASH: cashDrawerSessionId debe ser texto de hasta 64 caracteres',
+    }
+  }
   // Espejo del guard HTTP: una propina negativa es un descuento disfrazado e
   // inconciliable. El reducer no lo validaba y era el hueco por donde entraba.
   if (!Number.isFinite(tipCents) || tipCents < 0) {
@@ -1436,6 +1469,8 @@ async function applyPayCash(
     // La venta YA ocurrió: se honra su revisión aunque el catálogo haya cambiado
     // mientras el dispositivo estaba sin red.
     isOfflineReplay: true,
+    // S3: el servicio la convierte en el turno de la venta (liga 1:1 caja↔turno).
+    ...(typeof cashDrawerSessionId === 'string' && cashDrawerSessionId !== '' ? { cashDrawerSessionId } : {}),
     ...marcaDeMesaAjena,
     ...propiedadDeMesa,
     ...(dejarHuella

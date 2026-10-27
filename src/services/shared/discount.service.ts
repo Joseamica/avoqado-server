@@ -56,9 +56,16 @@ export function calculateDiscountPesos(discount: any, basePesos: number): number
  * Validate that a `Discount` row is currently usable: active, within its
  * validity window, and under its total-use cap.
  *
+ * `opciones.horaDeLaVenta` (sólo una venta de la cola sin red, «Cobrar sin red» S6): el vencimiento se mide a la hora en que se
+ * VENDIÓ, no a la de llegada; «todavía no empieza» sigue midiéndose a la llegada, así un reloj del aparato atrasado nunca rechaza
+ * más que hoy. Sin ella, todo a la llegada, como siempre.
+ *
+ * 🔴 Va en un OBJETO a propósito: `discounts.forEach(validateDiscountActive)` le pasaba el ÍNDICE como segundo argumento, y un
+ * `0` posicional como «hora» aceptaba en silencio un descuento vencido. Llámala siempre con una flecha.
+ *
  * @throws BadRequestError on any failed check.
  */
-export function validateDiscountActive(discount: any): void {
+export function validateDiscountActive(discount: any, opciones?: { horaDeLaVenta?: Date }): void {
   const now = new Date()
   if (!discount.active) {
     throw new BadRequestError(`Discount "${discount.name}" is inactive`)
@@ -66,7 +73,7 @@ export function validateDiscountActive(discount: any): void {
   if (discount.validFrom && discount.validFrom > now) {
     throw new BadRequestError(`Discount "${discount.name}" is not active yet`)
   }
-  if (discount.validUntil && discount.validUntil < now) {
+  if (discount.validUntil && discount.validUntil < (opciones?.horaDeLaVenta ?? now)) {
     throw new BadRequestError(`Discount "${discount.name}" has expired`)
   }
   if (discount.maxTotalUses != null && discount.currentUses >= discount.maxTotalUses) {
@@ -214,6 +221,92 @@ export function filaDeDescuentoDeLiga(p: {
     isManual: p.foto.origen === 'MANUAL',
     appliedById: null,
     reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: true, tope })),
+  }
+}
+
+/** Un renglón regalado entero en una venta nueva: su bruto ((precio + extras) × cantidad) y el motivo que dio la caja. */
+export type RenglonEnCortesia = { id: string; brutoPesos: number; motivo?: string | null }
+
+/**
+ * La fila COMP «Cortesía» de una venta nueva: UNA por venta, con todos sus renglones regalados. La escriben «Cobrar» de la
+ * terminal (`/tpv/with-items`) y la orden de mobile (la cola sin red de la terminal), así que es un solo literal.
+ * B2: la cortesía ya vive en cada renglón (bruto + discountAmount = bruto); la fila la duplica ⇒ espejo.
+ */
+export function filaDeCortesias(p: {
+  orderId: string
+  renglones: RenglonEnCortesia[]
+  appliedById: string | null
+}): Prisma.OrderDiscountUncheckedCreateInput {
+  const montoPesos = roundPesos(p.renglones.reduce((sum, r) => sum + r.brutoPesos, 0))
+  return {
+    orderId: p.orderId,
+    type: 'COMP',
+    name: 'Cortesía',
+    value: new Prisma.Decimal(100),
+    amount: new Prisma.Decimal(roundPesos(montoPesos)),
+    taxReduction: 0,
+    isComp: true,
+    isManual: true,
+    compReason:
+      p.renglones
+        .map(r => r.motivo)
+        .filter(Boolean)
+        .join('; ') || 'Cortesía',
+    appliedById: p.appliedById,
+    appliedToItemIds: p.renglones.map(r => r.id),
+    reparto: comoJson(nuevoRepartoDirigido(montoPesos, Object.fromEntries(p.renglones.map(r => [r.id, r.brutoPesos])), { espejo: true })),
+  }
+}
+
+/** La OrderAction COMP de cada renglón regalado en una venta nueva (mismos dos escritores que `filaDeCortesias`). */
+export function accionDeCortesia(p: {
+  orderId: string
+  performedById: string
+  renglon: RenglonEnCortesia
+  productId: string | null
+  productName: string
+}): Prisma.OrderActionUncheckedCreateInput {
+  return {
+    orderId: p.orderId,
+    actionType: 'COMP',
+    performedById: p.performedById,
+    reason: p.renglon.motivo || 'Cortesía',
+    metadata: {
+      orderItemId: p.renglon.id,
+      productId: p.productId,
+      productName: p.productName,
+      lineSubtotalGivenAway: roundPesos(p.renglon.brutoPesos),
+      cortesiaReason: p.renglon.motivo,
+    },
+  }
+}
+
+/**
+ * La fila del descuento de catálogo de la CUENTA de una venta nueva (`orderDiscountId`, mismos dos escritores). B2: su base fue
+ * bruto − artículo − cortesías, sobre los renglones sin cortesía; los centavos por renglón los pone `sincronizarRepartos`.
+ */
+export function filaDeDescuentoDeCatalogoEnCuenta(p: {
+  orderId: string
+  discount: any
+  montoPesos: number
+  appliedById: string | null
+  renglonesSinCortesia: string[]
+}): Prisma.OrderDiscountUncheckedCreateInput {
+  const { discount } = p
+  return {
+    orderId: p.orderId,
+    discountId: discount.id,
+    type: discount.type,
+    name: discount.name,
+    value: discount.value,
+    amount: new Prisma.Decimal(roundPesos(p.montoPesos)),
+    taxReduction: 0,
+    isComp: discount.type === 'COMP',
+    isManual: true,
+    compReason: discount.type === 'COMP' ? discount.compReason || discount.name : null,
+    appliedById: p.appliedById,
+    appliedToItemIds: p.renglonesSinCortesia,
+    reparto: comoJson(nuevoRepartoDeCuenta({ conPromociones: false, base: p.renglonesSinCortesia })),
   }
 }
 
