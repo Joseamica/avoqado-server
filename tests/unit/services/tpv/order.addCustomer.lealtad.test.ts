@@ -20,8 +20,11 @@ const SELLO = { stampsEnabled: true, stamped: true, reason: null, stampsEarned: 
 /** MEDIO-1: quien liga TIENE `payments:create` (lo decide el controller con el resolvedor de permisos). */
 const CON_PERMISO = { otorgarLealtad: true, customerAttribution: { staffId: 'staff-1', canAssignHistorical: true } }
 const SIN_PERMISO = { otorgarLealtad: false }
-/** El presupuesto de toda transacción que toma el candado canónico de la venta (`ORDER_LOCK_WAIT_BUDGET`), en Serializable. */
-const OPCIONES_DE_LA_TX = { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 }
+/**
+ * El presupuesto de toda transacción que toma el candado canónico de la venta (`ORDER_LOCK_WAIT_BUDGET`), con el aislamiento de
+ * siempre, como la liga del POS: en Serializable, 6 ligas a la vez agotaban los intentos de la TPV (D10, 27-oct-2026).
+ */
+const OPCIONES_DE_LA_TX = { timeout: 15_000, maxWait: 5_000 }
 /** Un P2002 como lo deja Prisma (`code` + `meta.target`). */
 const choque = (target: unknown) => Object.assign(new Error('unique'), { code: 'P2002', meta: { target } })
 
@@ -206,7 +209,7 @@ describe('TPV addCustomerToOrder', () => {
 
   // ── F1 (revisión final Minor 1, 15-oct-2026) ─────────────────────────────────────────────────────────────────────────
   it.each(['PENDING', 'PARTIAL'])(
-    '🔴 F1: cuenta %s (lo normal en la TPV): NO se llama a la reapertura (no ensancha la lectura Serializable de una cuenta abierta)',
+    '🔴 F1: cuenta %s (lo normal en la TPV): NO se llama a la reapertura (no ensancha la lectura de una cuenta abierta)',
     async paymentStatus => {
       estadoDentro = [paymentStatus]
       mockLate.mockResolvedValue(null) // cuenta abierta: el helper no pinta nada
