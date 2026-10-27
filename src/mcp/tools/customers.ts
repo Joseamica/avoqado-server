@@ -7,7 +7,14 @@ import { personSearchWhere } from '../personSearch'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { planGateMessage } from '../planGate'
-import { createCustomer, decideCustomerApprovalFromDashboard } from '@/services/dashboard/customer.dashboard.service'
+import {
+  CUSTOMER_EMAIL_TAKEN,
+  CUSTOMER_PHONE_TAKEN,
+  createCustomer,
+  decideCustomerApprovalFromDashboard,
+  updateCustomer,
+} from '@/services/dashboard/customer.dashboard.service'
+import { MobileUpdateCustomerSchema } from '@/schemas/dashboard/customer.schema'
 
 const RESERVATIONS_GATE = ['RESERVATIONS', 'Las reservaciones'] as const
 
@@ -23,6 +30,13 @@ export function applyTagChanges(current: string[], add: string[] = [], remove: s
     result.push(t)
   }
   return result
+}
+
+/** Sin espacios, guiones ni paréntesis; un `+` sólo al principio. Igual que las apps del POS. */
+export function normalizarTelefono(texto: string): string {
+  const limpio = texto.trim()
+  const digitos = limpio.replace(/\D/g, '')
+  return limpio.startsWith('+') ? `+${digitos}` : digitos
 }
 
 export function registerCustomerTools(server: McpServer, scope: McpScope) {
@@ -321,6 +335,130 @@ export function registerCustomerTools(server: McpServer, scope: McpScope) {
           ...(consentWarning ? { consentWarning } : {}),
         })
       } catch (err) {
+        return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'update_customer_contact',
+    "Change the first name, last name, phone and/or email of an existing customer of a venue you can access (e.g. put a name on a customer that only had a phone). Find them by name/email/phone. TWO STEPS: the first call returns requiresConfirmation with a 'before → after' preview and the customerId, and writes NOTHING; call again with the returned confirmationArguments (they carry expectedCustomerId), confirm:true and the confirmationToken (the confirmation only applies to that customer). Only the fields that actually change are written; a field cannot be emptied. This WRITES — requires customers:update. If the search matches several customers it returns them so you can be specific. Does NOT touch money, balances, loyalty, tags or notes.",
+    {
+      venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
+      search: z
+        .string()
+        .optional()
+        .describe('Customer name, email or phone (partial, case-insensitive); not needed once you have customerId'),
+      expectedCustomerId: z.string().optional().describe('The customer shown in the preview; required with confirm:true'),
+      firstName: z.string().optional().describe('New first name'),
+      lastName: z.string().optional().describe('New last name'),
+      phone: z.string().optional().describe('New phone, digits with optional leading + (spaces and dashes are removed)'),
+      email: z.string().optional().describe('New email'),
+      confirm: z.boolean().optional().describe('true = save; omit to get the before → after preview first'),
+    },
+    async ({ venueId, search, expectedCustomerId, firstName, lastName, phone, email, confirm }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('customers:update', venueId) // write gate (per-venue role; custom roles honored)
+
+      const pedido = {
+        firstName: firstName?.trim() || undefined,
+        lastName: lastName?.trim() || undefined,
+        phone: phone ? normalizarTelefono(phone) || undefined : undefined,
+        email: email?.trim() || undefined,
+      }
+      if (!pedido.firstName && !pedido.lastName && !pedido.phone && !pedido.email) {
+        return text({ ok: false, error: 'Pasa al menos un dato nuevo: nombre, apellido, teléfono o correo.' })
+      }
+
+      // 🔴 La confirmación queda amarrada al cliente REVISADO (Codex r4 #1): repetir la búsqueda podía apuntar a otra
+      // persona si entre la vista previa y el «sí» alguien renombró a un cliente.
+      if (confirm && !expectedCustomerId) {
+        return text({
+          ok: false,
+          error: 'Para guardar usa los datos de la vista previa (traen expectedCustomerId), junto con confirm:true.',
+        })
+      }
+      if (!expectedCustomerId && !search?.trim()) return text({ ok: false, error: 'Pasa una búsqueda (nombre, correo o teléfono).' })
+      const matches = await prisma.customer.findMany({
+        where: expectedCustomerId ? { ...base, id: expectedCustomerId } : { ...base, ...personSearchWhere(search!, { contact: true }) },
+        select: { id: true, firstName: true, lastName: true, phone: true, email: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré ningún cliente que coincida con "${expectedCustomerId ?? search}" en este local.` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${search}" coincide con varios clientes — sé más específico.`,
+          matches: matches.map(m => ({
+            expectedCustomerId: m.id,
+            name: `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || m.phone || m.email || '(sin nombre)',
+          })),
+        })
+      }
+      const c = matches[0]
+
+      // Sólo lo que cambia de verdad: no se pisa lo que otro editó en los demás campos.
+      const cambios: Record<string, string> = {}
+      const preview: string[] = []
+      const campos = [
+        ['firstName', 'Nombre', c.firstName],
+        ['lastName', 'Apellido', c.lastName],
+        ['phone', 'Teléfono', c.phone],
+        ['email', 'Correo', c.email],
+      ] as const
+      for (const [campo, etiqueta, actual] of campos) {
+        const nuevo = pedido[campo]
+        const igual = campo === 'email' ? nuevo?.toLowerCase() === actual?.toLowerCase() : nuevo === actual
+        if (nuevo && !igual) {
+          cambios[campo] = nuevo
+          preview.push(`${etiqueta}: ${actual || '(vacío)'} → ${nuevo}`)
+        }
+      }
+      if (preview.length === 0) return text({ ok: false, error: 'El cliente ya tiene esos datos; no hay nada que cambiar.' })
+
+      // Los mismos formatos que la puerta del POS (y mensajes en español).
+      const forma = MobileUpdateCustomerSchema.shape.body.safeParse(cambios)
+      if (!forma.success) return text({ ok: false, error: forma.error.errors.map(e => e.message).join(', ') })
+
+      if (!confirm) {
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          // El candado de confirmación del catálogo (catalog.ts) ata este campo a la confirmación.
+          expectedCustomerId: c.id,
+          preview,
+          message: 'Revisa el cambio con el usuario antes de guardarlo.',
+        })
+      }
+
+      try {
+        const updated = await updateCustomer(venueId, c.id, cambios, scope.staffId)
+        await auditMcpWrite(scope, {
+          action: 'CUSTOMER_CONTACT_UPDATED',
+          entity: 'Customer',
+          entityId: c.id,
+          venueId,
+          data: { cambios: preview },
+        })
+        // Sólo contacto: el registro completo trae la contraseña cifrada del portal del cliente.
+        return text({
+          ok: true,
+          customer: {
+            id: updated.id,
+            firstName: updated.firstName,
+            lastName: updated.lastName,
+            phone: updated.phone,
+            email: updated.email,
+          },
+        })
+      } catch (err) {
+        const code = (err as { code?: string }).code
+        if (code === CUSTOMER_PHONE_TAKEN) return text({ ok: false, error: 'Ese teléfono ya es de otro cliente.' })
+        if (code === CUSTOMER_EMAIL_TAKEN) return text({ ok: false, error: 'Ese correo ya es de otro cliente.' })
         return text({ ok: false, error: (err as Error).message })
       }
     },

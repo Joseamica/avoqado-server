@@ -100,6 +100,8 @@ import {
   syncPrintJobsSchema,
 } from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
+import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema'
+import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
 
 const router = Router()
@@ -1572,6 +1574,31 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('customers:create'),
   customerController.createCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customers/{customerId}:
+ *   put:
+ *     tags: [Mobile - Customers]
+ *     summary: Editar los datos de contacto de un cliente desde el POS
+ *     description: >
+ *       Mismo servicio que el dashboard; responde sólo datos de contacto. Exige `customers:update` (gerente para arriba por default;
+ *       acepta el PIN de gerente con `X-Permission-Override`). Sólo nombre, apellido, teléfono y correo.
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200: { description: Cliente actualizado }
+ *       400: { description: 'Datos inválidos, o code CUSTOMER_PHONE_TAKEN / CUSTOMER_EMAIL_TAKEN' }
+ *       403: { description: Sin permiso (con `overridable` si el negocio tiene el PIN de gerente) }
+ *       404: { description: El cliente no es de este negocio }
+ */
+router.put(
+  '/venues/:venueId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('customers:update'),
+  validateRequest(MobileUpdateCustomerSchema),
+  updateCustomerContact,
 )
 
 // ─── CREDIT PACKS (prepaid packages — sell in person / redeem at the POS) ───
