@@ -130,6 +130,28 @@ describe('exchange mobile endpoint', () => {
     expect(mockCreate).toHaveBeenCalledWith({ venueId, actorStaffId: staffId, body })
   })
 
+  it.each(['NB4R2A0001234', '2841548417', 'c0000000000000000000000009'])(
+    'accepts the terminal serial the POS sends from /terminals/online as terminalId (%s)',
+    terminalId => {
+      const parsed = createExchangeSchema.safeParse({
+        params: { venueId },
+        query: {},
+        body: { ...validBody(), settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 5000, terminalId } },
+      })
+      expect(parsed.success).toBe(true)
+    },
+  )
+  it('rejects an empty or oversized terminalId', () => {
+    for (const terminalId of ['', 'x'.repeat(129)]) {
+      const parsed = createExchangeSchema.safeParse({
+        params: { venueId },
+        query: {},
+        body: { ...validBody(), settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 5000, terminalId } },
+      })
+      expect(parsed.success).toBe(false)
+    }
+  })
+
   it('preserves displayed prices, optional references and the service body type', () => {
     const body: CreateExchangeBody = createExchangeSchema.parse({
       params: { venueId },

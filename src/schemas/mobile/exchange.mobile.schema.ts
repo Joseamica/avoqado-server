@@ -69,7 +69,11 @@ export const createExchangeSchema = z.object({
             method: z.enum(['CASH', 'CARD_TERMINAL', 'BANK_TRANSFER', 'GIFT_CARD_BALANCE', 'TENDER'], enumOptions).nullable(),
             expectedDifferenceCents: integerSchema,
             cashDrawerSessionId: id.nullish(),
-            terminalId: id.nullish(),
+            // La terminal se identifica por su número de serie (el que da /terminals/online), no por un cuid.
+            terminalId: textSchema
+              .min(1, 'La terminal es requerida.')
+              .max(128, 'El identificador de la terminal no puede exceder 128 caracteres.')
+              .nullish(),
             tenderTypeId: id.nullish(),
             tenderRevision: integerSchema.nonnegative('La versión del tipo de pago no puede ser negativa.').nullish(),
             cashFromNonCash: booleanSchema.optional(),
