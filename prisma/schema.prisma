@@ -4423,6 +4423,15 @@ model OrderItem {
   giftCardId String?   @unique
   giftCard   GiftCard? @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
 
+  /// Paquetes de créditos (Modo Autoservicio, 0.d): el paquete que esta línea VENDE. Restrict: un paquete vendido no se borra.
+  /// `creditPackSnapshot` es la FOTO de lo vendido (nombre, precio, vigencia, productos y cantidades) y es lo único que se
+  /// entrega: la dueña puede editar o apagar el paquete después del cobro sin cambiar lo que recibe la clienta. Sólo la arma
+  /// `buildCreditPackSnapshot` y sólo la entrega `fulfillCreditPacksForOrder` (`src/services/shared/creditPacksOnPaidOrder.ts`).
+  creditPackId       String?
+  creditPack         CreditPack?         @relation(fields: [creditPackId], references: [id], onDelete: Restrict)
+  creditPackSnapshot Json?
+  creditPackPurchase CreditPackPurchase?
+
   // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
   // An OrderItem has Product OR SerializedItem, never both.
@@ -15643,8 +15652,9 @@ model CreditPack {
   stripePriceId   String?
 
   // Relations
-  items     CreditPackItem[]
-  purchases CreditPackPurchase[]
+  items      CreditPackItem[]
+  purchases  CreditPackPurchase[]
+  orderItems OrderItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -15695,6 +15705,11 @@ model CreditPackPurchase {
   paymentId String?  @unique
   payment   Payment? @relation("CreditPackPurchasePayment", fields: [paymentId], references: [id], onDelete: SetNull)
 
+  // Renglón de orden que vendió el paquete (Modo Autoservicio, 0.d). La unicidad hace idempotente la entrega desde la foto:
+  // un renglón entrega a lo más UNA compra (`fulfillCreditPacksForOrder`).
+  orderItemId String?    @unique
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
   // Relations
   itemBalances CreditItemBalance[]
   transactions CreditTransaction[]
@@ -15719,8 +15734,10 @@ model CreditItemBalance {
   creditPackPurchaseId String
   creditPackPurchase   CreditPackPurchase @relation(fields: [creditPackPurchaseId], references: [id], onDelete: Cascade)
 
-  creditPackItemId String
-  creditPackItem   CreditPackItem @relation(fields: [creditPackItemId], references: [id])
+  // null = saldo nacido de la FOTO de un renglón de orden (0.d): el id de `CreditPackItem` cambia cada vez que la dueña edita
+  // el paquete, así que la foto no lo guarda. Restrict explícito: es la regla que ya tenía la FK cuando era obligatoria.
+  creditPackItemId String?
+  creditPackItem   CreditPackItem? @relation(fields: [creditPackItemId], references: [id], onDelete: Restrict)
 
   productId String
   product   Product @relation(fields: [productId], references: [id])
