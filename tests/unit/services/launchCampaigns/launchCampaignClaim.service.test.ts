@@ -101,4 +101,16 @@ describe('claimLaunchCampaign', () => {
     await expect(claimLaunchCampaign('org-1', 'POS22', 'dashboard_attach')).resolves.toMatchObject({ claimed: false })
     expect(logAction).not.toHaveBeenCalled()
   })
+
+  it('🔴 D12: reemplazar los UTMs conserva el referente que guardó el registro', async () => {
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(fichaActiva() as never)
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue({ acquisitionUtm: { referrer: 'avoqado.io', utm_source: 'viejo' } } as never)
+
+    await claimLaunchCampaign('org-1', 'POS22', 'landing_oferta', { utm_source: 'google' })
+
+    expect(prismaMock.onboardingProgress.updateMany.mock.calls[0][0].data.acquisitionUtm).toEqual({
+      utm_source: 'google',
+      referrer: 'avoqado.io',
+    })
+  })
 })

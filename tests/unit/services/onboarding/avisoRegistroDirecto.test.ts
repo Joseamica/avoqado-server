@@ -66,4 +66,22 @@ describe('avisarRegistroDirecto', () => {
 
     await expect(avisarRegistroDirecto('staff-1', 'google')).resolves.toBeUndefined()
   })
+
+  it('D12: dice desde dónde llegó (el host de la página anterior) o «Origen no disponible»', async () => {
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      acquisitionSource: 'dashboard_signup',
+      acquisitionUtm: { referrer: 'avoqado.io' },
+      launchCampaign: null,
+    })
+    await avisarRegistroDirecto('staff-1', 'correo')
+    expect(resendService.sendDirectSignupNotice).toHaveBeenCalledWith(expect.objectContaining({ llegoDesde: 'avoqado.io' }))
+
+    ;(prisma.onboardingProgress.findUnique as jest.Mock).mockResolvedValue({
+      acquisitionSource: 'dashboard_signup',
+      acquisitionUtm: null,
+      launchCampaign: null,
+    })
+    await avisarRegistroDirecto('staff-1', 'correo')
+    expect(resendService.sendDirectSignupNotice).toHaveBeenLastCalledWith(expect.objectContaining({ llegoDesde: 'Origen no disponible' }))
+  })
 })

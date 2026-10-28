@@ -466,6 +466,9 @@ Venue ID: ${data.venueId}
 // ---------------------------------------------------------------------------
 
 interface NewVenueOnboardingDigestData {
+  /** D12 (28-oct): la oferta de la campaña reclamada y los UTMs legibles, si los hay; sin ellos no se pinta nada. */
+  ofertaCodigo?: string | null
+  campanaUtm?: string | null
   venueId: string
   venueName: string
   venueSlug: string
@@ -577,6 +580,8 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     `  Tel negocio:   ${waPlain(data.businessInfo.phone)}`,
     `  Email negocio: ${data.businessInfo.email || '—'}`,
     `  Dirección:     ${addressLine || '—'}`,
+    ...(data.ofertaCodigo ? [`  Oferta:        ${data.ofertaCodigo}`] : []),
+    ...(data.campanaUtm ? [`  Campaña:       ${data.campanaUtm}`] : []),
     '',
     'DUEÑO (signup)',
     `  Nombre: ${ownerName || '—'}`,
@@ -647,6 +652,8 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
       ${row('Tel negocio', waLink(data.businessInfo.phone))}
       ${row('Email negocio', mailto(data.businessInfo.email))}
       ${row('Dirección', plain(addressLine))}
+      ${data.ofertaCodigo ? row('Oferta', code(data.ofertaCodigo)) : ''}
+      ${data.campanaUtm ? row('Campaña', plain(data.campanaUtm)) : ''}
     </table>`
 
   const ownerSection = data.owner
@@ -881,6 +888,8 @@ export interface DirectSignupNoticeData {
   /** utm_source · utm_medium · utm_campaign, ya juntos; null si llegó sin marca. */
   campanaUtm: string | null
   ofertaCodigo: string | null
+  /** D12: host de la página de la que llegó al registro, o «Origen no disponible». */
+  llegoDesde?: string | null
 }
 
 export async function sendDirectSignupNotice(data: DirectSignupNoticeData): Promise<boolean> {
@@ -893,7 +902,8 @@ export async function sendDirectSignupNotice(data: DirectSignupNoticeData): Prom
     ['Nombre', data.nombre || '—'],
     ['Entró con', data.metodo === 'google' ? 'Google' : 'Correo y contraseña'],
     ['Origen', data.origen ?? '—'],
-    ['Campaña', data.campanaUtm ?? 'Sin marca (llegó directo)'],
+    ['Llegó desde', data.llegoDesde ?? 'Origen no disponible'],
+    ['Campaña', data.campanaUtm ?? 'Sin marca'],
     ['Oferta', data.ofertaCodigo ?? 'Sin oferta'],
   ]
   const text = [

@@ -155,19 +155,19 @@ describe('leerCobradoDeLasOrdenes (batch of leerCobradoDeLaOrden)', () => {
 
   it('uses the same SQL statement count for one order and three orders', async () => {
     await counter.db.$connect()
-    counter.reiniciar()
+    await counter.reiniciar()
     await leerCobradoDeLasOrdenes(counter.db, venue.venueId, [plain])
-    const one = counter.consultas()
-    counter.reiniciar()
+    const one = await counter.consultas()
+    await counter.reiniciar()
     await leerCobradoDeLasOrdenes(counter.db, venue.venueId, [plain, discounted, promo])
     expect(one).toBe(3)
-    expect(counter.consultas()).toBe(one)
+    expect(await counter.consultas()).toBe(one)
   })
 
   it('returns an empty map without SQL for an empty input', async () => {
-    counter.reiniciar()
+    await counter.reiniciar()
     expect(await leerCobradoDeLasOrdenes(counter.db, venue.venueId, [])).toEqual(new Map())
-    expect(counter.consultas()).toBe(0)
+    expect(await counter.consultas()).toBe(0)
   })
 
   it('returns only the cap rejection when no order fits', async () => {
