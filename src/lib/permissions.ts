@@ -438,7 +438,10 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // ===========================
   'reservations:read': ['reservations:read'],
   'reservations:create': ['reservations:read', 'reservations:create'],
-  'reservations:update': ['reservations:read', 'reservations:update'],
+  // El check-in del kiosco es un subconjunto de editar reservaciones (mismo patrón que `tpv-orders:comp` → `orders:comp`).
+  'reservations:update': ['reservations:read', 'reservations:update', 'self-service:check-in'],
+  // `resolvePermissions` busca la llave exacta: un Conjunto guardado desde el preset ADMIN trae `reservations:*` crudo.
+  'reservations:*': ['reservations:*', 'self-service:check-in'],
   'reservations:cancel': ['reservations:read', 'reservations:cancel'],
   // Conector de pases (TotalPass/Wellhub): conectar la sucursal, ligar clases, modo de confirmación y lugares para pases.
   // Ver y confirmar check-ins usa reservations:read / reservations:update.
@@ -450,6 +453,10 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
   // `reservations:read`, que abre la agenda completa del negocio — quien da una clase de
   // yoga no tiene por qué ver quién viene a las siete ni cuánto pagó.
   'class-sessions:read-assigned': ['class-sessions:read-assigned'],
+
+  // Modo Autoservicio 0.e — la lista y el check-in del kiosco, y nada más: no implica
+  // `reservations:read` (la agenda del negocio) ni `reservations:update` (editar cualquier reserva).
+  'self-service:check-in': ['self-service:check-in'],
 
   // ===========================
   // SETTINGS
@@ -743,6 +750,16 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
  * //                    payments:read, menu:read, inventory:read
  * ```
  */
+/**
+ * Permisos que se implican también cuando el que implica llega por COMODÍN (`*:update`, `reservations:*`).
+ * `PERMISSION_DEPENDENCIES` sólo mira la llave exacta; esto cubre a los permisos nuevos que heredan una ruta que antes
+ * pedía otro: quien antes pasaba el check-in del kiosco con `reservations:update` (por la vía que sea) lo sigue pasando
+ * (Codex, código r1 #5). Se mide con `permissionListGrants`, la misma regla de comodines con la que se autoriza.
+ */
+const IMPLICADOS_TAMBIEN_POR_COMODIN: ReadonlyArray<readonly [quienImplica: string, implicado: string]> = [
+  ['reservations:update', 'self-service:check-in'],
+]
+
 export function resolvePermissions(permissions: string[]): Set<string> {
   const resolved = new Set<string>()
 
@@ -764,6 +781,10 @@ export function resolvePermissions(permissions: string[]): Set<string> {
         resolved.add(dep)
       })
     }
+  }
+
+  for (const [quienImplica, implicado] of IMPLICADOS_TAMBIEN_POR_COMODIN) {
+    if (permissionListGrants(resolved, quienImplica)) resolved.add(implicado)
   }
 
   return resolved
@@ -1011,6 +1032,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'inventory:log-waste', // registrar merma desde el POS (además tiene inventory:adjust)
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'self-service:check-in', // Autoservicio 0.e — lista y check-in del kiosco
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
     'home:read',
@@ -1191,6 +1213,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.ADMIN]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
     'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
@@ -1342,6 +1365,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
   [StaffRole.OWNER]: [
     'cash-drawer:view-expected', // ve el esperado del cajón físico (conteo ciego para el resto)
     'class-sessions:read-assigned', // Fase 8 — su propia clase, sólo lectura
+    'self-service:check-in', // Autoservicio 0.e — explícito: no hay comodín self-service:*
     'attendance:read', // Revisar el checador — nunca a roles de piso
     'attendance:manage',
     'staff-documents:read', // Expediente del personal — datos sensibles, sólo OWNER/ADMIN
@@ -1696,7 +1720,18 @@ export function getEffectiveRolePermissions(
   // Por eso lo que sobrevive se recorta a lo que la base SIN exclusiones ya concedía, medido
   // con la misma regla de comodines con la que se autoriza. La decisión del 18-ago queda
   // intacta: lo implicado por un permiso que el rol conserva vuelve — si la base lo concedía.
-  return Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+  const efectivos = Array.from(resolvePermissions(sobreviven)).filter(p => permissionListGrants(resuelto, p))
+
+  // Lo IMPLICADO se va con lo que lo implicaba (Codex, código r2 #4): sin esto, quitar `reservations:update` (o el
+  // `*:update` que lo daba) dejaba el check-in del kiosco suelto, porque la resta de arriba sólo quita lo nombrado. Se queda
+  // si el rol o el negocio lo tienen ESCRITO (MANAGER lo trae en sus defaults; un negocio puede darlo a mano).
+  return efectivos.filter(
+    p =>
+      !IMPLICADOS_TAMBIEN_POR_COMODIN.some(
+        ([quienImplica, implicado]) =>
+          p === implicado && !permissionListGrants(basePermissions, implicado) && !permissionListGrants(efectivos, quienImplica),
+      ),
+  )
 }
 
 /**
@@ -2041,6 +2076,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
   tables: ['tables:read', 'tables:update', 'tables:manage-all', 'tables:pay-any', 'tables:configure'],
   reservations: ['reservations:read', 'reservations:create', 'reservations:update', 'reservations:cancel', 'reservations:manage-passes'],
   'class-sessions': ['class-sessions:read-assigned'],
+  'self-service': ['self-service:check-in'],
   settings: ['settings:read', 'settings:manage'],
   venues: ['venues:read', 'venues:update'],
   customers: [

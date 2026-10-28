@@ -20,7 +20,8 @@ type PackWithItems = {
   active: boolean
   validityDays: number | null
   maxPerCustomer: number | null
-  items: { id: string; productId: string; quantity: number }[]
+  /** `id` = el `CreditPackItem` del catálogo (POS y kiosco lo mandan). `null` = renglón nacido de la FOTO (0.d). */
+  items: { id: string | null; productId: string; quantity: number }[]
 }
 
 /**
@@ -30,8 +31,11 @@ type PackWithItems = {
  * carrera que deja pasar dos compras simultaneas, porque las dos leen el mismo
  * conteo antes de que ninguna escriba. Con el conteo adentro y aislamiento
  * Serializable, la segunda ve a la primera o la transacción se reintenta.
+ *
+ * `orderItemId` ata la compra al renglón que la vendió (su unicidad es la llave de la entrega desde la foto, 0.d).
+ * `countSpend: false` no suma a `totalSpent`: lo usa esa entrega porque el cobro de la orden ya lo cuenta.
  */
-async function grantPackInTx(
+export async function grantPackInTx(
   tx: Prisma.TransactionClient,
   args: {
     pack: PackWithItems
@@ -40,10 +44,12 @@ async function grantPackInTx(
     staffId?: string | null
     amountPaid: Prisma.Decimal
     paymentId?: string | null
+    orderItemId?: string | null
     note?: string
+    countSpend?: boolean
   },
 ) {
-  const { pack, venueId, customerId, staffId, amountPaid, paymentId, note } = args
+  const { pack, venueId, customerId, staffId, amountPaid, paymentId, orderItemId, note, countSpend = true } = args
 
   if (pack.maxPerCustomer != null) {
     const priorCount = await tx.creditPackPurchase.count({
@@ -70,6 +76,7 @@ async function grantPackInTx(
       expiresAt,
       status: CreditPurchaseStatus.ACTIVE,
       ...(paymentId ? { paymentId } : {}),
+      ...(orderItemId ? { orderItemId } : {}),
     },
   })
 
@@ -98,10 +105,12 @@ async function grantPackInTx(
     })
   }
 
-  await tx.customer.update({
-    where: { id: customerId },
-    data: { totalSpent: { increment: amountPaid } },
-  })
+  if (countSpend) {
+    await tx.customer.update({
+      where: { id: customerId },
+      data: { totalSpent: { increment: amountPaid } },
+    })
+  }
 
   return newPurchase
 }

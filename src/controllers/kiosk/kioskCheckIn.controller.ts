@@ -11,6 +11,7 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
+import { z } from 'zod'
 
 import {
   CHALLENGE_TTL_SECONDS,
@@ -18,11 +19,12 @@ import {
   consumeKioskCheckInChallenge,
   createKioskCheckInChallenge,
   getKioskCheckInChallengeStatus,
+  getKioskRoster,
+  kioskCheckInReservation,
 } from '@/services/reservation/kioskCheckIn.service'
 import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
-import { createCheckoutSession, getAvailablePacks } from '@/services/dashboard/creditPack.public.service'
+import { createKioskPackCheckout, getAvailablePacks, getKioskPackCheckoutStatus } from '@/services/dashboard/creditPack.public.service'
 import { canVenueChargeOnline } from '@/services/payments/ecommerceCapability'
-import prisma from '@/utils/prismaClient'
 
 /** Nada de esto se cachea, y el secreto no debe viajar en un `Referer`. */
 function harden(res: Response) {
@@ -121,6 +123,62 @@ export async function checkInByCode(req: Request, res: Response, next: NextFunct
 }
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/kiosk/roster  (0.e)
+ *
+ * La clase del kiosco ahora mismo. Sin `from/to`: la ventana la calcula el servidor (un rango del
+ * aparato sólo podría ampliarla). `closesAt`/`closesInMs` son para la cola sin red del aparato.
+ */
+export async function kioskRoster(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const venueId = resolveVenueId(req)
+    res.json({ roster: await getKioskRoster({ venueId, now: new Date() }) })
+  } catch (error) {
+    next(error)
+  }
+}
+
+// Los dos o ninguno: vacío = toque en vivo; con ellos = toque guardado sin red (hora = closesAt − msBeforeClose).
+const reservationCheckInBody = z
+  .object({
+    closesAt: z.string({ invalid_type_error: 'Hora de cierre inválida' }).datetime({ message: 'Hora de cierre inválida' }),
+    // Tope de 24 h: un número enorme volvería inválida la hora del toque (y un 500 en vez de un 400).
+    msBeforeClose: z
+      .number({ invalid_type_error: 'Tiempo inválido' })
+      .int('Tiempo inválido')
+      .positive('Tiempo inválido')
+      .max(24 * 60 * 60_000, 'Tiempo fuera de rango'),
+  })
+  .partial()
+  .refine(b => !b.closesAt === !b.msBeforeClose, 'Manda closesAt y msBeforeClose juntos')
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/kiosk/reservations/:reservationId/check-in  (0.e)
+ *
+ * body opcional `{ closesAt, msBeforeClose }` → `{ reservationId, orderId }`.
+ * 422 CHECK_IN_OUTSIDE_WINDOW · 422 CHECK_IN_TOO_OLD · 409 RESERVATION_NOT_CHECKINABLE.
+ */
+export async function kioskReservationCheckIn(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const venueId = resolveVenueId(req)
+    const parsed = reservationCheckInBody.safeParse(req.body ?? {})
+    if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Solicitud incorrecta')
+    const { closesAt, msBeforeClose } = parsed.data
+
+    const out = await kioskCheckInReservation({
+      venueId,
+      reservationId: req.params.reservationId,
+      now: new Date(),
+      tapped: closesAt && msBeforeClose ? { closesAt: new Date(closesAt), msBeforeClose } : undefined,
+    })
+    res.json(out)
+  } catch (error) {
+    next(error)
+  }
+}
+
+/**
  * POST /api/v1/public/venues/:venueSlug/customer/checkin/:challengeId
  *
  * Desde el teléfono del cliente, con SU sesión. El secreto va en el BODY —nunca en la
@@ -186,40 +244,56 @@ export async function kioskPacks(req: Request, res: Response, next: NextFunction
   }
 }
 
+const packCheckoutBody = z.object({
+  packId: z.string().min(1, 'Elige un paquete'),
+  // E.164 (máx. 15 dígitos con la lada). El kiosco compone «+<lada><número>»: 10 dígitos con +52 o +1, de 8 en
+  // adelante con otra lada (Cuba: +53 y 8 dígitos = 10 en total).
+  // 🔴 Al menos 11 dígitos: «+» + 10 lo lee `@/utils/phone` como celular mexicano mal guardado, y «+49 20123456» caería
+  // en la ficha de «+52 4920123456» (Codex r2, D3). El kiosco ya no deja mandar uno así.
+  phone: z.string().regex(/^\+\d{11,15}$/, 'Escribe tu teléfono completo'),
+})
+
 /**
- * POST /api/v1/mobile/venues/:venueId/kiosk/pack-checkout
+ * POST /api/v1/mobile/venues/:venueId/kiosk/pack-checkout · body `{ packId, phone }`
  *
- * Devuelve una URL de pago para enseñarla como QR.
+ * Devuelve `{ url, sessionId, expiresAt }`: la URL se enseña como QR y `sessionId` sirve para
+ * preguntar si ya se pagó.
  *
  * 🔴 El cliente paga en SU teléfono, no en la pantalla del kiosco. Es lo que dice el spec
- * ("CreditPack → PAX o Stripe Checkout como QR") y resuelve tres cosas de una:
- *   · nadie mete su tarjeta en un aparato compartido de la entrada;
- *   · el kiosco no tiene que averiguar quién eres antes de cobrarte, así que no se
- *     convierte en un buscador de personas; y
+ * ("CreditPack → PAX o Stripe Checkout como QR") y resuelve dos cosas de una:
+ *   · nadie mete su tarjeta en un aparato compartido de la entrada; y
  *   · reutiliza el carril de pago en línea que YA existe y ya está probado, en vez de
  *     estrenar código nuevo en el camino del dinero.
+ * El teléfono es para que las clases caigan a SU nombre (D3: sin contacto, Stripe cobraba y el
+ * webhook no podía entregar). La respuesta no dice nada de la ficha encontrada.
  */
 export async function kioskPackCheckout(req: Request, res: Response, next: NextFunction) {
   try {
     harden(res)
     const venueId = resolveVenueId(req)
-    const packId = String(req.body?.packId ?? '')
-    if (!packId) throw new BadRequestError('packId es requerido')
+    const parsed = packCheckoutBody.safeParse(req.body ?? {})
+    if (!parsed.success) throw new BadRequestError(parsed.error.issues[0]?.message ?? 'Solicitud incorrecta')
 
-    const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
-    if (!venue) throw new BadRequestError('Local no encontrado')
+    res.json(await createKioskPackCheckout({ venueId, packId: parsed.data.packId, phone: parsed.data.phone }))
+  } catch (error) {
+    next(error)
+  }
+}
 
-    const base = process.env.BOOKING_SITE_URL ?? 'https://book.avoqado.io'
-    const session = await createCheckoutSession(
-      venueId,
-      packId,
-      undefined,
-      undefined,
-      `${base}/${venue.slug}?packs=1&ok=1`,
-      `${base}/${venue.slug}?packs=1`,
-    )
+/**
+ * GET /api/v1/mobile/venues/:venueId/kiosk/pack-checkout/:sessionId/status
+ *
+ * El kiosco pregunta cada pocos segundos si ya se pagó. `PAID` sólo cuando las clases ya son
+ * suyas (el webhook ya entregó); este sondeo nunca entrega nada.
+ */
+export async function kioskPackCheckoutStatus(req: Request, res: Response, next: NextFunction) {
+  try {
+    harden(res)
+    const venueId = resolveVenueId(req)
+    const sessionId = String(req.params.sessionId ?? '')
+    if (!/^cs_[A-Za-z0-9_]+$/.test(sessionId)) throw new BadRequestError('Pago no encontrado')
 
-    res.json({ url: (session as { url?: string }).url ?? null })
+    res.json({ status: await getKioskPackCheckoutStatus({ venueId, sessionId }) })
   } catch (error) {
     next(error)
   }
