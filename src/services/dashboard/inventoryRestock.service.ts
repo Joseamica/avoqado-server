@@ -11,8 +11,8 @@
 import { MovementType, Prisma, RawMaterialMovementType } from '@prisma/client'
 import logger from '../../config/logger'
 import prisma from '../../utils/prismaClient'
-import { esValeRevendido } from '../shared/renglonDeVale'
 import { adjustStock } from './rawMaterial.service'
+import { renglonesQueSeReponen } from '../inventory/reponerLoQueFalta'
 
 /**
  * Add stock back for a single refunded item.
@@ -144,61 +144,21 @@ export async function restockOrderItems(args: {
   items?: Array<{ orderItemId: string; quantity: number }>
 }) {
   const { venueId, orderId, refundPaymentId, staffId } = args
-  const selected = args.items ? new Map(args.items.map(item => [item.orderItemId, item.quantity])) : null
-  let cursor: string | undefined
-  let totalItems = 0
+  const renglones = await renglonesQueSeReponen(prisma, venueId, orderId, args.items)
   let restocked = 0
-  do {
-    const items = await prisma.orderItem.findMany({
-      where: { orderId, order: { venueId }, productId: { not: null }, ...(selected ? { id: { in: [...selected.keys()] } } : {}) },
-      select: {
-        id: true,
-        productId: true,
-        quantity: true,
-        areaTicketLineId: true,
-        releasedAreaTicketLineId: true,
-        areaTicketLine: { select: { areaTicket: { select: { orderId: true } } } },
-      },
-      orderBy: { id: 'asc' },
-      take: 100,
-      ...(cursor ? { cursor: { id: cursor }, skip: 1 } : {}),
-    })
-    totalItems += items.length
-    const releasedIds = items.filter(item => item.areaTicketLineId && !item.areaTicketLine?.areaTicket.orderId).map(item => item.id)
-    const ownPosting = releasedIds.length
-      ? await prisma.inventoryPosting.findUnique({
-          where: { venueId_sourceKind_sourceId_effectKind: { venueId, sourceKind: 'ORDER', sourceId: orderId, effectKind: 'SALE' } },
-          select: {
-            lines: {
-              where: { effectKey: { in: releasedIds } },
-              select: { effectKey: true },
-              take: 100,
-            },
-          },
-        })
-      : null
-    const deductionIds = new Set(ownPosting?.lines.map(line => line.effectKey))
-    for (const item of items) {
-      const quantity = selected ? (selected.get(item.id) ?? 0) : item.quantity
-      if (!item.productId || quantity <= 0) continue
-      // El posting propio también acredita una deducción PENDIENTE: su reposición la compensa cuando se recupere.
-      if (esValeRevendido(item) || (item.areaTicketLineId && !item.areaTicketLine?.areaTicket.orderId && !deductionIds.has(item.id)))
-        continue
-      try {
-        await restockItem({ venueId, productId: item.productId, quantity, refundPaymentId, staffId })
-        restocked++
-      } catch (err: any) {
-        logger.warn('[INVENTORY RESTOCK] Failed to restock order item', {
-          orderId,
-          orderItemId: item.id,
-          productId: item.productId,
-          error: err?.message ?? err,
-        })
-      }
+  for (const item of renglones) {
+    try {
+      await restockItem({ venueId, productId: item.productId, quantity: item.quantity, refundPaymentId, staffId })
+      restocked++
+    } catch (err: any) {
+      logger.warn('[INVENTORY RESTOCK] Failed to restock order item', {
+        orderId,
+        orderItemId: item.orderItemId,
+        productId: item.productId,
+        error: err?.message ?? err,
+      })
     }
-    cursor = items.length === 100 ? items[items.length - 1].id : undefined
-  } while (cursor)
-
-  logger.info('[INVENTORY RESTOCK] Restocked order items', { venueId, orderId, refundPaymentId, items: totalItems, restocked })
-  return { items: totalItems, restocked }
+  }
+  logger.info('[INVENTORY RESTOCK] Restocked order items', { venueId, orderId, refundPaymentId, items: renglones.length, restocked })
+  return { items: renglones.length, restocked }
 }

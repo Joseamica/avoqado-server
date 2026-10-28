@@ -569,6 +569,10 @@ prismaMock.inventoryPosting.create.mockResolvedValue({ id: 'posting-default', st
 // ventana no tengan que mockearlo.
 prismaMock.payment.aggregate.mockResolvedValue({ _sum: { amount: null, tipAmount: null } })
 prismaMock.inventoryPosting.updateMany.mockResolvedValue({ count: 0 })
+// «Regresa lo que salió menos lo que ya regresó» (28-oct): las devoluciones leen lo ya resuelto de la venta. Por default nada:
+// ninguna anotación de regreso ni devolución previa, salvo que la prueba diga otra cosa.
+prismaMock.inventoryPostingLine.findMany.mockResolvedValue([])
+prismaMock.payment.findMany.mockResolvedValue([])
 // IVA por producto: por default el flag está APAGADO (ningún VenueIvaPorProducto sembrado) —
 // el estado real de casi todo negocio hoy. Tests que lo necesitan encendido lo sobrescriben.
 prismaMock.venueIvaPorProducto.count.mockResolvedValue(0)

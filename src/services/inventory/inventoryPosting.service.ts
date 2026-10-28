@@ -566,8 +566,15 @@ type CustomerReturnParams = {
     productId: string
     quantity: number
     eligibility?: { inventoryMethod: string | null; eligible: boolean }
+    /**
+     * «Regresa lo que salió menos lo que ya regresó» (28-oct): una cantidad ya RESUELTA que no vuelve al estante (prenda dañada,
+     * renglón no elegido). Nace SKIPPED con su propia `effectKey` y no entra al snapshot del aplicador.
+     */
+    noReponer?: { reason: string }
   }>
   staffId?: string | null
+  /** El motivo del movimiento de inventario; sin él, el del Cambio. */
+  motivo?: string
 }
 
 /** Congela la obligación junto al reembolso: ni reintentos ni cambios del catálogo la redefinen. */
@@ -590,7 +597,7 @@ export async function createCustomerReturnPostingInTx(
   if (existing) return existing
 
   // El cambio ya decidió qué vuelve: releer aquí podría descartar para siempre una pieza al apagar inventario.
-  const productIds = [...new Set(lines.filter(l => !l.eligibility).map(l => l.productId))]
+  const productIds = [...new Set(lines.filter(l => !l.eligibility && !l.noReponer).map(l => l.productId))]
   const products = productIds.length
     ? await tx.product.findMany({
         where: { venueId, id: { in: productIds } },
@@ -608,7 +615,8 @@ export async function createCustomerReturnPostingInTx(
       orderId,
       payloadSnapshot: {
         staffId: staffId ?? null,
-        lines: lines.map(l => {
+        ...(params.motivo ? { motivo: params.motivo } : {}),
+        lines: lines.filter(l => !l.noReponer).map(l => {
           const p = byId.get(l.productId)
           return {
             orderItemId: l.orderItemId,
@@ -620,10 +628,11 @@ export async function createCustomerReturnPostingInTx(
       },
       lines: {
         create: lines.map(l => ({
-          effectKey: l.orderItemId,
+          effectKey: l.noReponer ? l.orderItemId + NO_REPONER : l.orderItemId,
           orderItemId: l.orderItemId,
           productId: l.productId,
           expectedQuantityBase: new Prisma.Decimal(l.quantity),
+          ...(l.noReponer ? { status: 'SKIPPED' as const, reason: l.noReponer.reason } : {}),
         })),
       },
     },
@@ -632,6 +641,8 @@ export async function createCustomerReturnPostingInTx(
 }
 
 const INVENTORY_DISABLED_AFTER_EXCHANGE = 'INVENTORY_DISABLED_AFTER_EXCHANGE'
+/** Sufijo de la `effectKey` de una cantidad resuelta que no vuelve al estante (ver `noReponer`). */
+export const NO_REPONER = '#NO_REPONER'
 
 /** La ficha reactivada despierta sólo sus regresos detenidos, sin tocar un worker en curso. */
 export async function rearmCustomerReturnPostingsInTx(
@@ -659,7 +670,11 @@ export async function applyCustomerReturnPosting(
   if (!claimStamp) return null
   const posting = await prisma.inventoryPosting.findUnique({ where: { id: postingId }, include: { lines: true } })
   if (!posting) return null
-  const snapshot = posting.payloadSnapshot as { staffId?: string | null; lines?: Array<{ orderItemId: string; eligible: boolean }> } | null
+  const snapshot = posting.payloadSnapshot as {
+    staffId?: string | null
+    motivo?: string
+    lines?: Array<{ orderItemId: string; eligible: boolean }>
+  } | null
   let waiting = false
   let failure: string | null = null
 
@@ -715,7 +730,7 @@ export async function applyCustomerReturnPosting(
             quantity: line.expectedQuantityBase,
             previousStock: inventory.currentStock.minus(line.expectedQuantityBase),
             newStock: inventory.currentStock,
-            reason: 'Cambio de producto: regresa al inventario',
+            reason: snapshot?.motivo ?? 'Cambio de producto: regresa al inventario',
             reference: posting.sourceId,
             postingLineId: line.id,
             createdBy: staffId ?? snapshot?.staffId ?? null,
