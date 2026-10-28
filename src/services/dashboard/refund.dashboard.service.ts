@@ -53,6 +53,8 @@ import {
   esCantidadPositivaEnCentavos,
 } from '../shared/devueltoDeUnCobro'
 import { EXCHANGE_REFUND_ROLE, type ExchangeRefundRole } from '../exchanges/exchangeMarks'
+import { anotarRegresoDeArticulosEnTx, type Regreso } from '../inventory/reponerLoQueFalta'
+import { applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { chainRefundSemanticsInTx } from '../exchanges/exchangeTx'
 
@@ -193,6 +195,8 @@ interface RefundedItemSnapshot {
 }
 
 interface RefundTransactionResult {
+  /** «Regresa lo que salió menos lo que ya regresó» (28-oct): lo anotado en la transacción; se aplica después del commit. */
+  regreso: Regreso | null
   refundPaymentId: string
   originalPaymentId: string
   originalOrderId: string
@@ -1316,8 +1320,23 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
             original: { orderId: original.orderId, tenderSystemKind: original.tenderSystemKind },
           })
       const devolverCon = devolverConEfectivo(original, input.refundMethod)
+      // «Regresa lo que salió menos lo que ya regresó» (28-oct): cada artículo devuelto queda RESUELTO en la misma transacción,
+      // bajo el candado de la orden; el elegido para reponer vuelve al estante (topado por lo que falta) y el otro no. Antes se
+      // reponía fuera de la transacción sin mirar lo que ya había regresado por la terminal o por un cambio.
+      const regreso =
+        replay || !original.orderId || refundedItems.length === 0
+          ? null
+          : await anotarRegresoDeArticulosEnTx(tx, {
+              venueId: input.venueId,
+              orderId: original.orderId,
+              refundPaymentId,
+              staffId: input.staffId ?? null,
+              articulos: refundedItems,
+              reponerIds: new Set(input.restockItemIds ?? []),
+            })
 
       return {
+        regreso,
         refundPaymentId,
         originalPaymentId: original.id,
         originalOrderId: original.orderId,
@@ -1438,18 +1457,19 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // Restock inventory for selected items (best-effort, outside the payment tx
   // because it touches multiple Inventory rows and a partial failure shouldn't
   // roll back the refund itself).
-  if (input.restockItemIds && input.restockItemIds.length > 0) {
-    const restockSet = new Set(input.restockItemIds)
-    const toRestock = result.refundedItems.filter(r => r.productId && restockSet.has(r.orderItemId))
+  if (result.regreso && result.originalOrderId) {
     try {
-      await restockOrderItems({
-        venueId: input.venueId,
-        orderId: result.originalOrderId,
-        items: toRestock.map(item => ({ orderItemId: item.orderItemId, quantity: item.quantity })),
-        refundPaymentId: result.refundPaymentId,
-        staffId: input.staffId ?? undefined,
-      })
+      if (result.regreso.postingId) await applyCustomerReturnPosting(result.regreso.postingId, input.staffId ?? null)
+      if (result.regreso.recetas.length)
+        await restockOrderItems({
+          venueId: input.venueId,
+          orderId: result.originalOrderId,
+          items: result.regreso.recetas,
+          refundPaymentId: result.refundPaymentId,
+          staffId: input.staffId ?? undefined,
+        })
     } catch (err: any) {
+      // El barrido aplica el posting; el dinero ya salió.
       logger.warn('[REFUND.DASHBOARD] Failed to restock refunded items', {
         refundPaymentId: result.refundPaymentId,
         error: err?.message ?? err,

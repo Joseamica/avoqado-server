@@ -207,12 +207,20 @@ describe('even exchange (E1)', () => {
     expect(modesForExchangeCreditRoot(sale.payments[0].rootMoney)).not.toHaveProperty('CASH')
   })
 
-  it('DEFECT without restock leaves the original stock unchanged and creates no return posting', async () => {
+  // 28-oct («regresa lo que salió menos lo que ya regresó»): la prenda dañada queda RESUELTA en una línea NO_REPONER (SKIPPED),
+  // para que una devolución posterior de la terminal no la regrese al estante; el stock no se mueve.
+  it('DEFECT without restock leaves the original stock unchanged and only records it as resolved', async () => {
     const s = await seed()
     const b = s.body({ returned: [{ orderItemId: s.order.items[0].id, quantity: 1, restock: false, reason: 'DEFECT' }] })
     await createExchange(s.input(b))
     expect(await stock(s.products[0].id)).toBe(10)
-    expect(await prisma.inventoryPosting.count({ where: { venueId: s.venueId, effectKind: 'CUSTOMER_RETURN' } })).toBe(0)
+    const lineas = await prisma.inventoryPostingLine.findMany({
+      where: { posting: { venueId: s.venueId, effectKind: 'CUSTOMER_RETURN' } },
+      select: { effectKey: true, status: true, reason: true, expectedQuantityBase: true },
+    })
+    expect(lineas).toEqual([
+      { effectKey: s.order.items[0].id + '#NO_REPONER', status: 'SKIPPED', reason: 'NOT_RESTOCKED', expectedQuantityBase: new Prisma.Decimal(1) },
+    ])
   })
 
   it('rolls everything back when the SECOND refund slice fails', async () => {

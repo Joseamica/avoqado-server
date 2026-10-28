@@ -45,12 +45,9 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
-import {
-  centavosQueUsaronLosCambios,
-  laTerminalYaDevolvio,
-  mandarCambiosARevisarEnTx,
-  piezasPorReponerTrasCambios,
-} from '../exchanges/exchangeTerminalRefund'
+import { centavosQueUsaronLosCambios, laTerminalYaDevolvio, mandarCambiosARevisarEnTx } from '../exchanges/exchangeTerminalRefund'
+import { anotarRegresoDeLaVentaEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
+import { applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 
 /**
  * Refund request data from TPV Android app
@@ -1086,11 +1083,19 @@ export async function recordRefund(
           staffId: userId ?? null,
         })
 
+      // «Regresa lo que salió menos lo que ya regresó» (28-oct): si con esta devolución la venta queda toda devuelta, lo que vuelve
+      // al almacén se decide AQUÍ, bajo el candado de la orden, restando lo que ya regresó por un cambio o por el panel. El stock
+      // se aplica después del commit (y el barrido lo recupera). Antes se decidía fuera de la transacción: dos devoluciones a la
+      // vez reponían dos veces, y una pieza ya regresada volvía a entrar.
+      const regreso =
+        locked.orderId && (await quedaTodaDevueltaEnTx(tx, venueId, locked.orderId, salesRefund))
+          ? await anotarRegresoDeLaVentaEnTx(tx, { venueId, orderId: locked.orderId, refundPaymentId: refundPayment.id, staffId: userId })
+          : null
+
       return {
         refundPayment,
         postCommitAuthority: Object.freeze({
-          // El cambio ya regresó su pieza al inventario: reponer «toda la venta» aquí la contaría dos veces. Lo decide quien revisa.
-          anotadaTrasUnCambio,
+          regreso,
           orderId: locked.orderId,
           method: locked.method,
           fundsFlow: locked.fundsFlow,
@@ -1282,45 +1287,26 @@ export async function recordRefund(
   // only once the cumulative refunds reach the order total — i.e. the whole
   // order is reversed. Non-blocking (a restock failure must not fail the refund)
   // and processor-agnostic, so it covers both AngelPay and Blumon refunds.
-  if (postCommitAuthority.orderId && originalPayment.order && !postCommitAuthority.anotadaTrasUnCambio) {
+  const regreso = postCommitAuthority.regreso
+  if (regreso && postCommitAuthority.orderId) {
     try {
-      const orderTotal = Number(originalPayment.order.total)
-      if (orderTotal > 0) {
-        // This refund row is already committed, so it's included in the sum.
-        const orderRefunds = await prisma.payment.findMany({
-          where: { orderId: postCommitAuthority.orderId, type: PaymentType.REFUND, status: TransactionStatus.COMPLETED },
-          select: { amount: true },
+      if (regreso.postingId) await applyCustomerReturnPosting(regreso.postingId, userId)
+      if (regreso.recetas.length)
+        await restockOrderItems({
+          venueId,
+          orderId: postCommitAuthority.orderId,
+          refundPaymentId: result.id,
+          staffId: userId,
+          items: regreso.recetas,
         })
-        const totalRefundedSale = orderRefunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
-        // 🔴 El umbral compara MERCANCÍA contra refunds de VENTA (auditoría
-        // 2026-08-12): `Order.total` incluye la propina acumulada, pero los
-        // refunds suman solo `Payment.amount` (la parte de venta — la propina
-        // viaja aparte en tipAmount). Comparar contra el total con propina
-        // hacía que una orden CON propina jamás cruzara y jamás repusiera stock.
-        const crossedToFullyRefunded = crossedFullRefundThreshold({
-          orderTotal,
-          orderTipAmount: Number(originalPayment.order.tipAmount || 0),
-          totalRefundedSale,
-          salesRefundThisTime: salesRefund,
-        })
-        if (crossedToFullyRefunded) {
-          const summary = await restockOrderItems({
-            venueId,
-            orderId: postCommitAuthority.orderId,
-            refundPaymentId: result.id,
-            staffId: userId,
-            // Cambio de producto (rM2 #2): lo que ya regresó con un cambio no vuelve a entrar.
-            items: await piezasPorReponerTrasCambios(prisma, venueId, postCommitAuthority.orderId),
-          })
-          logger.info('Order fully refunded — inventory restocked', {
-            orderId: postCommitAuthority.orderId,
-            refundPaymentId: result.id,
-            ...summary,
-          })
-        }
-      }
+      logger.info('Order fully refunded — inventory return posted', {
+        orderId: postCommitAuthority.orderId,
+        refundPaymentId: result.id,
+        postingId: regreso.postingId,
+        recetas: regreso.recetas.length,
+      })
     } catch (error) {
-      // Never fail the refund because restock failed — the money movement already succeeded.
+      // Never fail the refund because restock failed — the money movement already succeeded. El barrido aplica el posting.
       logger.error('Failed to restock inventory on full refund', {
         refundPaymentId: result.id,
         orderId: postCommitAuthority.orderId,
