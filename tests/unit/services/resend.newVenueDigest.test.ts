@@ -320,3 +320,67 @@ describe('sendNewVenueOnboardingDigest', () => {
     expect(args.to).toBe('onboarding@avoqado.io')
   })
 })
+
+describe('D12: los avisos del alta dicen la oferta y desde dónde llegó', () => {
+  beforeEach(() => {
+    mockSend.mockReset()
+    process.env.RESEND_API_KEY = 're_test_key'
+    mockSend.mockResolvedValue({ data: { id: 'resend-d12' }, error: null })
+  })
+
+  it('«Empezó el alta» dice la oferta y la campaña cuando las hay', async () => {
+    const mod = await import('../../../src/services/resend.service')
+    await mod.sendNewVenueOnboardingDigest({
+      venueId: 'v1',
+      venueName: 'QA E2E 10',
+      venueSlug: 'qa-e2e-10',
+      stage: 'STARTED',
+      venueStatus: 'ONBOARDING',
+      kycStatus: 'NOT_SUBMITTED',
+      hasKycDocuments: false,
+      businessInfo: { phone: null, email: null, address: null, city: null, state: null, country: 'MX', zipCode: null, entityType: null },
+      owner: null,
+      paymentInfo: null,
+      ofertaCodigo: 'POS-10-REST',
+      campanaUtm: 'utm_source=meta · utm_medium=cpc',
+    } as any)
+    const args = mockSend.mock.calls[0][0]
+    const bodies = `${args.html}\n${args.text}`
+    expect(bodies).toContain('POS-10-REST')
+    expect(bodies).toContain('utm_source=meta')
+  })
+
+  it('«Empezó el alta» sin oferta no inventa renglones', async () => {
+    const mod = await import('../../../src/services/resend.service')
+    await mod.sendNewVenueOnboardingDigest({
+      venueId: 'v1',
+      venueName: 'QA',
+      venueSlug: 'qa',
+      stage: 'STARTED',
+      venueStatus: 'ONBOARDING',
+      kycStatus: 'NOT_SUBMITTED',
+      hasKycDocuments: false,
+      businessInfo: { phone: null, email: null, address: null, city: null, state: null, country: 'MX', zipCode: null, entityType: null },
+      owner: null,
+      paymentInfo: null,
+    } as any)
+    const args = mockSend.mock.calls[0][0]
+    expect(`${args.html}\n${args.text}`).not.toMatch(/Oferta:|undefined/)
+  })
+
+  it('«Nuevo registro directo» dice desde dónde llegó', async () => {
+    const mod = await import('../../../src/services/resend.service')
+    await mod.sendDirectSignupNotice({
+      email: 'a@x.com',
+      nombre: '',
+      metodo: 'correo',
+      origen: 'dashboard_signup',
+      campanaUtm: null,
+      ofertaCodigo: null,
+      llegoDesde: 'avoqado.io',
+    } as any)
+    const args = mockSend.mock.calls[0][0]
+    expect(`${args.html}\n${args.text}`).toContain('Llegó desde')
+    expect(`${args.html}\n${args.text}`).toContain('avoqado.io')
+  })
+})

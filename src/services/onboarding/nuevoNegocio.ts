@@ -13,12 +13,15 @@ import type { Prisma } from '@prisma/client'
 import { OrgRole } from '@prisma/client'
 import { isAcceptedLegalVersion } from '../../config/legal'
 import { findClaimableByCodeOrSlug } from '../launchCampaigns/launchCampaign.service'
+import { normalizarReferente } from './atribucionLegible'
 
 export interface AtribucionDelAlta {
   hybridOfferSlug?: string
   legalVersion?: string
   launchCampaignCode?: string
   utm?: Record<string, string>
+  /** D12: el host de la página de la que llegó al registro (`document.referrer`); se guarda en `acquisitionUtm.referrer`. */
+  referrer?: string
 }
 
 export interface AtribucionResuelta {
@@ -35,10 +38,12 @@ export interface AtribucionResuelta {
  */
 export async function resolverAtribucionDelAlta(a: AtribucionDelAlta): Promise<AtribucionResuelta> {
   const campana = a.launchCampaignCode ? await findClaimableByCodeOrSlug(a.launchCampaignCode).catch(() => null) : null
+  const referrer = normalizarReferente(a.referrer)
+  const utm = { ...(a.utm ?? {}), ...(referrer ? { referrer } : {}) }
   return {
     ...(a.hybridOfferSlug && /^[a-z0-9][a-z0-9-]{0,99}$/.test(a.hybridOfferSlug) ? { hybridOfferSlug: a.hybridOfferSlug } : {}),
     campanaId: campana?.id ?? null,
-    utm: a.utm && Object.keys(a.utm).length > 0 ? a.utm : undefined,
+    utm: Object.keys(utm).length > 0 ? utm : undefined,
     legalVersion: isAcceptedLegalVersion(a.legalVersion) ? a.legalVersion : undefined,
   }
 }

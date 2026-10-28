@@ -20,6 +20,8 @@ import { createSession } from '@/services/auth/session.service'
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 import { enviarEnlaceDeRestablecimiento } from './enlaceDeRestablecimiento'
 import { esProspectoDeLanding } from '@/services/onboarding/signup.service'
+import { firmarBoletoDeAlta, huellaDeContrasena } from '@/services/onboarding/boletoDeAlta'
+import { altaLandingConCodigo } from '@/config/altaLandingConCodigo'
 
 /**
  * 🔐 MASTER TOTP LOGIN - Dashboard Emergency Access
@@ -840,6 +842,18 @@ export async function resetPassword(data: ResetPasswordDto) {
     throw new BadRequestError('Este enlace de restablecimiento ya fue utilizado. Por favor solicita uno nuevo.')
   }
 
+  // 🔴 D10 (28-oct): ¿es el prospecto de la landing que vuelve por «Continúa tu alta»? Se pregunta ANTES de fijar la
+  // contraseña (sin contraseña es parte de la definición). Sólo a él se le da el boleto de entrada; una duda = como hoy.
+  // Con el alta con código APAGADA su canje responde 404: no se entrega un boleto que nadie puede canjear (Codex r2).
+  const eraProspectoDeLanding =
+    altaLandingConCodigo() &&
+    (await esProspectoDeLanding(staff.id).catch(error => {
+      logger.warn('resetPassword: no se pudo saber si la cuenta era prospecto de la landing', { staffId: staff.id, error })
+      return false
+    }))
+  // La fecha de ESTE cambio: el boleto queda atado a ella (abajo).
+  const cambio = new Date()
+
   // 6. Hash new password
   const hashedPassword = await bcrypt.hash(newPassword, 10)
 
@@ -864,7 +878,7 @@ export async function resetPassword(data: ResetPasswordDto) {
       resetToken: null, // Clear token
       resetTokenExpiry: null,
       resetTokenUsedAt: new Date(), // Mark as used
-      lastPasswordReset: new Date(),
+      lastPasswordReset: cambio,
       // Reset failed login attempts (fresh start)
       failedLoginAttempts: 0,
       lockedUntil: null,
@@ -889,6 +903,31 @@ export async function resetPassword(data: ResetPasswordDto) {
   await cerrarSesionesNuevasPorCambioDeContrasena(staff.id)
 
   logger.info(`Password reset successfully for staff: ${staff.email}`)
+
+  if (eraProspectoDeLanding) {
+    // El MISMO boleto de 5 min del alta con código (`verificarCodigoDeLanding`): se firma DESPUÉS del corte de arriba, y su
+    // canje es de un solo uso y vuelve a revisar los cortes con los tokens ya firmados (Codex codex-d10-r1.md #1–#3).
+    const boleto = firmarBoletoDeAlta(staff.id, staff.email, { cambioMs: cambio.getTime(), huella: huellaDeContrasena(hashedPassword) })
+    // 🔴 Codex r2: atado a ESTE cambio. Si mientras se cerraban las sesiones hubo otro cambio de contraseña (soporte), una
+    // revocación de sesiones o una baja, no se entrega. Lo que pase DESPUÉS de esta lectura ya es posterior a la firma, y
+    // eso lo rechaza el canje (`lastPasswordReset`/`sessionsRevokedAt` < fecha del boleto).
+    const sigueSiendoEsteCambio = await prisma.staff.findFirst({
+      where: {
+        id: staff.id,
+        active: true,
+        password: hashedPassword,
+        lastPasswordReset: cambio,
+        // Estricto: una revocación en el mismo milisegundo también cuenta (Codex r4).
+        OR: [{ sessionsRevokedAt: null }, { sessionsRevokedAt: { lt: cambio } }],
+      },
+      select: { id: true },
+    })
+    if (sigueSiendoEsteCambio) {
+      const frontend = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+      return { message: 'Listo, tu contraseña quedó guardada.', entrarUrl: `${frontend}/auth/entrar#boleto=${boleto}` }
+    }
+    logger.warn('resetPassword: la cuenta cambió mientras se cerraban las sesiones — sin boleto de entrada', { staffId: staff.id })
+  }
 
   return { message: 'Contraseña restablecida exitosamente. Ya puedes iniciar sesión con tu nueva contraseña.' }
 }
