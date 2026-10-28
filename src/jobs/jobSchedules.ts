@@ -6,6 +6,7 @@ export const DATABASE_JOB_SCHEDULES = {
   documentRequests: '19 */2 * * * *',
   displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',
+  exchangeCardSettlement: '7,37 * * * * *',
   blumonWebhookReconciliation: '11,41 * * * * *',
   tpvHealthMonitor: '14 */2 * * * *',
   posConnectionMonitor: '17 1-59/5 * * * *',

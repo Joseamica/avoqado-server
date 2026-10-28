@@ -921,6 +921,11 @@ model VenueSettings {
   /// de plan. Switch canónico en el dashboard; el POS sólo lo lee.
   managerPinOverrideEnabled Boolean @default(false)
 
+  /// Cambio de talla o de producto en una venta ya cobrada (spec 2026-10-20). `null` = el default por giro, que resuelve el
+  /// SERVIDOR (prendido en tiendas y servicios; apagado en restaurantes, bares y entretenimiento); `true`/`false` = decisión
+  /// explícita del negocio. Core, sin candado de plan. Switch canónico en el dashboard; el POS sólo lo lee.
+  exchangesEnabled Boolean?
+
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
@@ -4423,6 +4428,15 @@ model OrderItem {
   giftCardId String?   @unique
   giftCard   GiftCard? @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
 
+  /// Paquetes de créditos (Modo Autoservicio, 0.d): el paquete que esta línea VENDE. Restrict: un paquete vendido no se borra.
+  /// `creditPackSnapshot` es la FOTO de lo vendido (nombre, precio, vigencia, productos y cantidades) y es lo único que se
+  /// entrega: la dueña puede editar o apagar el paquete después del cobro sin cambiar lo que recibe la clienta. Sólo la arma
+  /// `buildCreditPackSnapshot` y sólo la entrega `fulfillCreditPacksForOrder` (`src/services/shared/creditPacksOnPaidOrder.ts`).
+  creditPackId       String?
+  creditPack         CreditPack?         @relation(fields: [creditPackId], references: [id], onDelete: Restrict)
+  creditPackSnapshot Json?
+  creditPackPurchase CreditPackPurchase?
+
   // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
   // An OrderItem has Product OR SerializedItem, never both.
@@ -4601,6 +4615,8 @@ enum ActionType {
 // ==========================================
 
 model Payment {
+  exchangeCreditAsCredit ExchangeCreditLink? @relation("ExchangeCreditAsCredit")
+  exchangeCreditsAsOrigin ExchangeCreditLink[] @relation("ExchangeCreditAsOrigin")
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   venueId        String
@@ -4804,9 +4820,9 @@ model VenueTenderType {
   /// Immutable after creation (service-enforced).
   baseMethod PaymentMethod
   isSystem   Boolean           @default(false)
-  /// Tender que Avoqado administra (spec tarjetas de regalo § 4.4). NULL para TODOS los demás, incluidos
-  /// Efectivo/Tarjetas/Transferencia. `GIFT_CARD` = «Tarjeta de regalo»: showOnPos=false, nadie lo edita ni lo apaga,
-  /// y `resolveTenderForCharge` lo rechaza; sólo lo usa el cobro con saldo.
+  /// Tender que Avoqado administra; NULL para TODOS los demás, incluidos Efectivo/Tarjetas/Transferencia. showOnPos=false, nadie lo
+  /// edita ni lo apaga y `resolveTenderForCharge` lo rechaza. `GIFT_CARD` = «Tarjeta de regalo» (sólo el cobro con saldo, spec tarjetas
+  /// § 4.4). `EXCHANGE_CREDIT` = «Crédito de cambio» (sólo la operación de Cambio, forma SAT 17, fuera del cajón; spec cambio § 6.2).
   systemKind TenderSystemKind?
 
   /// Does money received with this tender physically enter the cash drawer?
@@ -8541,6 +8557,7 @@ enum GiftCardSource {
 
 enum TenderSystemKind {
   GIFT_CARD
+  EXCHANGE_CREDIT
 }
 
 /// El sobre (un regalo). El código nunca se guarda en claro: `codeHash` (HMAC) para buscar, `codeEnc` (AES-GCM) para
@@ -15643,8 +15660,9 @@ model CreditPack {
   stripePriceId   String?
 
   // Relations
-  items     CreditPackItem[]
-  purchases CreditPackPurchase[]
+  items      CreditPackItem[]
+  purchases  CreditPackPurchase[]
+  orderItems OrderItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -15695,6 +15713,11 @@ model CreditPackPurchase {
   paymentId String?  @unique
   payment   Payment? @relation("CreditPackPurchasePayment", fields: [paymentId], references: [id], onDelete: SetNull)
 
+  // Renglón de orden que vendió el paquete (Modo Autoservicio, 0.d). La unicidad hace idempotente la entrega desde la foto:
+  // un renglón entrega a lo más UNA compra (`fulfillCreditPacksForOrder`).
+  orderItemId String?    @unique
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
   // Relations
   itemBalances CreditItemBalance[]
   transactions CreditTransaction[]
@@ -15719,8 +15742,10 @@ model CreditItemBalance {
   creditPackPurchaseId String
   creditPackPurchase   CreditPackPurchase @relation(fields: [creditPackPurchaseId], references: [id], onDelete: Cascade)
 
-  creditPackItemId String
-  creditPackItem   CreditPackItem @relation(fields: [creditPackItemId], references: [id])
+  // null = saldo nacido de la FOTO de un renglón de orden (0.d): el id de `CreditPackItem` cambia cada vez que la dueña edita
+  // el paquete, así que la foto no lo guarda. Restrict explícito: es la regla que ya tenía la FK cuando era obligatoria.
+  creditPackItemId String?
+  creditPackItem   CreditPackItem? @relation(fields: [creditPackItemId], references: [id], onDelete: Restrict)
 
   productId String
   product   Product @relation(fields: [productId], references: [id])
@@ -19323,6 +19348,90 @@ model PaymentEffect {
   @@index([status, nextAttemptAt, id])
   @@index([status, leaseUntil, id])
   @@index([venueId, status, createdAt, id])
+}
+
+enum ExchangeStatus {
+  COMPLETED // return, new sale, credit and stock all written
+  PENDING_PAYMENT // set aside: the new sale exists, the card charge for the difference is still missing (spec §6.4)
+  COMPLETED_PENDING_CARD_REFUND // closed, with the refund of the difference still pending on the terminal (spec §6.5)
+  NEEDS_REVIEW // a person resolves it; why goes in `reviewReason` (e.g. a late charge after the hold was released, spec §6.4)
+  CANCELLED
+}
+
+/// What the exchange has to settle: nothing (`EVEN`), collect the difference (`COLLECT`) or pay it out (`PAYOUT`).
+enum ExchangeSettlementKind {
+  EVEN
+  COLLECT
+  PAYOUT
+}
+
+enum ExchangeSettlementMethod {
+  CASH
+  CARD_TERMINAL
+  BANK_TRANSFER
+  GIFT_CARD_BALANCE
+  TENDER
+}
+
+/// Cambio de talla o de producto: liga la venta original, sus devoluciones y la venta nueva (spec 2026-10-20 §6.2).
+/// `venueId` escalar a propósito, como `InventoryPosting`: no agrega relaciones inversas a Venue, Order ni Payment.
+model Exchange {
+  id                      String                    @id @default(cuid())
+  venueId                 String
+  idempotencyKey          String                    @db.VarChar(64)
+  requestHash             String                    @db.VarChar(64)
+  status                  ExchangeStatus
+  originalOrderId         String
+  originalPaymentId       String
+  newOrderId              String                    @unique
+  chargePaymentId         String?                   @unique
+  returnedAmount          Decimal                   @db.Decimal(12, 2)
+  takenAmount             Decimal                   @db.Decimal(12, 2)
+  differenceAmount        Decimal                   @db.Decimal(12, 2) // con signo: + cobra, − devuelve
+  settlementKind          ExchangeSettlementKind
+  settlementMethod        ExchangeSettlementMethod?
+  pendingCardRefundAmount Decimal                   @default(0) @db.Decimal(12, 2)
+  lines                   Json // v1: lo que regresa y lo que se lleva, con valor por pieza, motivo y si vuelve al inventario
+  result                  Json? // v1: la respuesta del POST, para devolverla igual en una repetición (RF1)
+  resultRevision          Int                       @default(0)
+  staffId                 String
+  deviceId                String?                   @db.VarChar(128)
+  createdAtLocal          DateTime?
+  isOfflineReplay         Boolean                   @default(false)
+  cashDrawerSessionId     String?
+  reviewReason            String?                   @db.VarChar(64) // bloque C
+  reviewedAt              DateTime?
+  reviewedById            String?
+  reviewNote              String?                   @db.VarChar(500)
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  creditLinks             ExchangeCreditLink[]
+
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, createdAt])
+  @@index([venueId, status, createdAt])
+  @@index([venueId, originalOrderId])
+  @@index([status, createdAt, id])
+}
+
+/// Una porción del crédito: el REFUND EXCHANGE_CREDIT de la venta original ↔ el cobro EXCHANGE_CREDIT de la nueva.
+/// `originPaymentId` es el cobro RAÍZ del dinero (si la porción salió de otro crédito, el origen de aquél): por él sale
+/// lo que después se devuelva (spec §6.7).
+model ExchangeCreditLink {
+  id                    String   @id @default(cuid())
+  venueId               String
+  exchangeId            String
+  exchange              Exchange @relation(fields: [exchangeId], references: [id], onDelete: Cascade)
+  originPaymentId       String
+  originPayment         Payment @relation("ExchangeCreditAsOrigin", fields: [originPaymentId], references: [id], onDelete: Restrict)
+  creditRefundPaymentId String   @unique
+  creditPaymentId       String   @unique
+  creditPayment         Payment @relation("ExchangeCreditAsCredit", fields: [creditPaymentId], references: [id], onDelete: Restrict)
+  amount                Decimal  @db.Decimal(12, 2)
+  createdAt             DateTime @default(now())
+
+  @@index([venueId, originPaymentId])
+  @@index([exchangeId])
 }
 
 /// La receta del ticket en papel de un venue (diseñador de tickets, spec § 7.1).

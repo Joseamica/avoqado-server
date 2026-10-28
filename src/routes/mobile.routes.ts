@@ -6,6 +6,7 @@
  */
 
 import { Router, type Request, type Response, type NextFunction } from 'express'
+import prisma from '../utils/prismaClient'
 import { getMobile as getServiceCourses } from '../controllers/dashboard/serviceCourse.controller'
 import * as authMobileController from '../controllers/mobile/auth.mobile.controller'
 import * as coachClassController from '../controllers/mobile/coachClass.mobile.controller'
@@ -49,6 +50,8 @@ import * as cashDrawerMobileController from '../controllers/mobile/cash-drawer.m
 import * as purchaseOrderMobileController from '../controllers/mobile/purchase-order.mobile.controller'
 import * as transferMobileController from '../controllers/mobile/transfer.mobile.controller'
 import * as refundMobileController from '../controllers/mobile/refund.mobile.controller'
+import * as exchangeMobileController from '../controllers/mobile/exchange.mobile.controller'
+import { createExchangeSchema, exchangeIdParamsSchema, cancelExchangeSchema } from '../schemas/mobile/exchange.mobile.schema'
 import * as estimateMobileController from '../controllers/mobile/estimate.mobile.controller'
 import * as productOptionMobileController from '../controllers/mobile/product-option.mobile.controller'
 import * as measurementUnitMobileController from '../controllers/mobile/measurement-unit.mobile.controller'
@@ -3620,6 +3623,46 @@ export const permisoDeReembolso = Object.assign(
   { requiredPermission: 'payments:refund' },
 )
 
+// Una sola revisión: el código del encargado autoriza un permiso y se consume una vez.
+export const permisoDeCambio = Object.assign(
+  async (req: Request, res: Response, next: NextFunction) => {
+    // Un reintento propio ya autorizado no gasta otro PIN; el servicio comprueba la huella del cuerpo.
+    // shortcut: dos simultáneas aún dan 201 + 403 y el siguiente reintento pasa; ampliar si se exige 201 + 200 simultáneo.
+    let existing: { staffId: string } | null = null
+    try {
+      existing = await prisma.exchange.findUnique({
+        where: { venueId_idempotencyKey: { venueId: req.params.venueId, idempotencyKey: req.body.idempotencyKey } },
+        select: { staffId: true },
+      })
+    } catch {
+      // Si falla la lectura, se exige el permiso normal; nunca se concede acceso por el fallo.
+    }
+    if (existing && existing.staffId === req.authContext!.userId) return next()
+
+    const settlement = req.body?.settlement
+    return settlement?.kind === 'PAYOUT' && settlement.method === 'CASH' && settlement.cashFromNonCash === true
+      ? revisarDevolverEnEfectivo(req, res, next)
+      : revisarReembolso(req, res, next)
+  },
+  { requiredPermission: 'payments:refund' as const },
+)
+
+// Cerrar (complete/cancel) un cambio que la misma persona creó en esta sucursal no pide otro PIN: el código del encargado
+// ya autorizó el cambio al crearlo y es de un solo uso. Cualquier otra persona, otra sucursal o una lectura fallida → permiso normal.
+export const permisoDeCerrarCambio = Object.assign(
+  async (req: Request, res: Response, next: NextFunction) => {
+    let existing: { staffId: string; venueId: string } | null = null
+    try {
+      existing = await prisma.exchange.findUnique({ where: { id: req.params.exchangeId }, select: { staffId: true, venueId: true } })
+    } catch {
+      // Sin la lectura se exige el permiso normal; nunca se concede acceso por el fallo.
+    }
+    if (existing && existing.venueId === req.params.venueId && existing.staffId === req.authContext!.userId) return next()
+    return revisarReembolso(req, res, next)
+  },
+  { requiredPermission: 'payments:refund' as const },
+)
+
 /**
  * POST /api/v1/mobile/venues/:venueId/payments/:paymentId/refund
  * Issue an associated refund (by amount OR by items, with optional restock).
@@ -3630,6 +3673,30 @@ router.post(
   authenticateTokenMiddleware,
   permisoDeReembolso,
   refundMobileController.issueAssociatedRefund,
+)
+
+router.post(
+  '/venues/:venueId/exchanges',
+  authenticateTokenMiddleware,
+  validateRequest(createExchangeSchema),
+  permisoDeCambio,
+  exchangeMobileController.createExchange,
+)
+
+router.post(
+  '/venues/:venueId/exchanges/:exchangeId/complete',
+  authenticateTokenMiddleware,
+  validateRequest(exchangeIdParamsSchema),
+  permisoDeCerrarCambio,
+  exchangeMobileController.completeExchange,
+)
+
+router.post(
+  '/venues/:venueId/exchanges/:exchangeId/cancel',
+  authenticateTokenMiddleware,
+  validateRequest(cancelExchangeSchema),
+  permisoDeCerrarCambio,
+  exchangeMobileController.cancelExchange,
 )
 
 // ============================================================================
@@ -4336,11 +4403,31 @@ router.get(
 // catálogo y el cliente paga con SU tarjeta en SU teléfono, no que se pida un PIN.
 router.get('/venues/:venueId/kiosk/packs', authenticateTokenMiddleware, kioskCheckInController.kioskPacks)
 router.post('/venues/:venueId/kiosk/pack-checkout', authenticateTokenMiddleware, kioskCheckInController.kioskPackCheckout)
+// El kiosco pregunta cada 3 s si ya se pagó (D3): PAID sólo cuando las clases ya son suyas.
+router.get(
+  '/venues/:venueId/kiosk/pack-checkout/:sessionId/status',
+  authenticateTokenMiddleware,
+  kioskCheckInController.kioskPackCheckoutStatus,
+)
 
+// Modo Autoservicio 0.e — lista y check-in del kiosco: `self-service:check-in` (la identidad «Autoservicio» de la
+// Fase 1). `reservations:update` lo implica (PERMISSION_DEPENDENCIES), así que quien hace check-in hoy no pierde acceso.
+router.get(
+  '/venues/:venueId/kiosk/roster',
+  authenticateTokenMiddleware,
+  checkPermission('self-service:check-in'),
+  kioskCheckInController.kioskRoster,
+)
+router.post(
+  '/venues/:venueId/kiosk/reservations/:reservationId/check-in',
+  authenticateTokenMiddleware,
+  checkPermission('self-service:check-in'),
+  kioskCheckInController.kioskReservationCheckIn,
+)
 router.post(
   '/venues/:venueId/kiosk/check-in',
   authenticateTokenMiddleware,
-  checkPermission('reservations:update'),
+  checkPermission('self-service:check-in'),
   kioskCheckInController.checkInByCode,
 )
 

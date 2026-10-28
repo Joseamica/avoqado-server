@@ -44,6 +44,7 @@ import { DONDE_TIMBRE_EN_DUDA, timbreEnDuda } from './timbreEnDuda'
 import type { NotaDeDevolucion } from './facturaConDevolucion'
 import { leerReparto } from '../shared/repartoDescuento'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
 import { formaGanadoraDeCobros } from './formaDePagoGanadora'
 
@@ -2144,6 +2145,10 @@ export async function loadOrderForCfdiFromDb(
           method: true,
           merchantAccountId: true,
           ecommerceMerchantId: true,
+          // El crédito conserva el emisor del dinero raíz; no se escribe comercio en el cobro EC.
+          exchangeCreditAsCredit: {
+            select: { venueId: true, originPayment: { select: { venueId: true, merchantAccountId: true, ecommerceMerchantId: true } } },
+          },
           tenderSatFormaPago: true,
           amount: true,
           type: true,
@@ -2190,7 +2195,27 @@ export async function loadOrderForCfdiFromDb(
   // el efectivo no trae merchant, así que se prefiere el pago con tarjeta para resolver el emisor.
   // Defensa en profundidad: el `where` ya filtra, pero la regla de elegibilidad vive también aquí para
   // que ningún llamador con filas sin filtrar (o una prueba) sume un pago TEST/ADJUSTMENT/REFUND.
-  const pays = order.payments.filter(pp => esCobroElegible(pp))
+  const cobros = order.payments.filter(pp => esCobroElegible(pp))
+  // El vínculo ya guarda la raíz, incluso tras varios cambios; un origen ajeno o ausente no se adivina.
+  if (
+    cobros.some(
+      pp =>
+        isExchangeCreditTenderKind(pp.tenderType?.systemKind) &&
+        (!pp.exchangeCreditAsCredit ||
+          pp.exchangeCreditAsCredit.venueId !== order.venueId ||
+          pp.exchangeCreditAsCredit.originPayment.venueId !== order.venueId),
+    )
+  )
+    return null
+  const pays = cobros.map(pp =>
+    isExchangeCreditTenderKind(pp.tenderType?.systemKind)
+      ? {
+          ...pp,
+          merchantAccountId: pp.exchangeCreditAsCredit!.originPayment.merchantAccountId,
+          ecommerceMerchantId: pp.exchangeCreditAsCredit!.originPayment.ecommerceMerchantId,
+        }
+      : pp,
+  )
   const pay = pays.find(pp => pp.merchantAccountId || pp.ecommerceMerchantId) ?? pays[0]
   if (!pay) return null
 
@@ -2228,7 +2253,15 @@ export async function loadOrderForCfdiFromDb(
     // 698 ventas en efectivo y una transferencia de $3,082 en 30 días no se podían facturar porque el
     // emisor sólo se sacaba del comercio de la terminal. El emisor es el del NEGOCIO, y sólo cuando es
     // inequívoco: con UN solo RFC. Con dos o más no se adivina (queda como antes).
-    if (pays.some(pp => !METODOS_SIN_COMERCIO.has(pp.method) && !isGiftCardTenderKind(pp.tenderType?.systemKind))) return null
+    if (
+      pays.some(
+        pp =>
+          !METODOS_SIN_COMERCIO.has(pp.method) &&
+          !isGiftCardTenderKind(pp.tenderType?.systemKind) &&
+          !isExchangeCreditTenderKind(pp.tenderType?.systemKind),
+      )
+    )
+      return null
     const emisores = await db.fiscalEmisor.findMany({
       where: { venueId: order.venueId },
       select: { ...EMISOR_SELECT, merchantConfigs: { select: { facturacionEnabled: true, autofacturaEnabled: true }, take: 50 } },
@@ -2423,8 +2456,8 @@ export async function loadOrderForCfdiFromDb(
 
   // r1 B-2 (Anexo 20, spec §7): en una cuenta con cobro con SALDO, la forma del CFDI es la de MAYOR importe, con la MISMA regla que la
   // global; `pay` sigue siendo sólo quien resuelve el emisor (el cobro con comercio, arriba): $500 de saldo + $100 con tarjeta ⇒ 01.
-  // B3 r1 (fix 1): SÓLO con saldo. Sin él, la forma es la de siempre (la de `pay`): generalizar la regla es decisión del proyecto fiscal.
-  const conSaldo = pays.some(pp => isGiftCardTenderKind(pp.tenderType?.systemKind))
+  // Con saldo de regalo o crédito de cambio gana la mayor forma; sin ellos se conserva la forma de siempre.
+  const conSaldo = pays.some(pp => isGiftCardTenderKind(pp.tenderType?.systemKind) || isExchangeCreditTenderKind(pp.tenderType?.systemKind))
   const porForma = conSaldo ? (formaGanadoraDeCobros(pays).pagos[0] ?? pay) : pay
   return {
     venueId: order.venueId,

@@ -74,7 +74,7 @@ app.use((error: { statusCode?: number; message?: string; code?: string }, _req: 
 jest.setTimeout(90_000)
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(database.pathname)) {
+if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(database.pathname)) {
   throw new Error('Esta suite exige una base local DESECHABLE (avoqado_<tarea>_test_…), nunca av-db-25.')
 }
 

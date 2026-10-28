@@ -91,7 +91,7 @@ function actorLabel(actor: CheckInActor): string {
 }
 
 /** Campos de ActivityLog que satisfacen `ActivityLog_actor_identity_check` para cada actor. */
-function activityActorFields(actor: CheckInActor, organizationId: string) {
+export function activityActorFields(actor: CheckInActor, organizationId: string) {
   return actor.type === 'HUMAN'
     ? {
         actorType: 'HUMAN' as const,
@@ -110,7 +110,7 @@ function activityActorFields(actor: CheckInActor, organizationId: string) {
 }
 
 /** La organización DEL VENUE — la única que el tenant guard de ActivityLog acepta. */
-async function venueOrganizationId(client: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<string> {
+export async function venueOrganizationId(client: Prisma.TransactionClient | typeof prisma, venueId: string): Promise<string> {
   const venue = await client.venue.findUniqueOrThrow({ where: { id: venueId }, select: { organizationId: true } })
   return venue.organizationId
 }
@@ -241,6 +241,16 @@ export async function checkInReservationAndOpenOrder(cmd: CheckInCommand): Promi
   // que ya está pagado (spec §7). Misma respuesta plana, sin orden y sin error.
   const passBooking = await prisma.aggregatorBooking.findUnique({ where: { reservationId: cmd.reservationId }, select: { id: true } })
   if (passBooking) return { ...result.reservation, services: result.services, orderId: null, orderCreated: false }
+
+  // 0.e — el kiosco reenvía su toque (cola sin red, doble toque). Ya registrada ⇒ se devuelve la orden viva y NUNCA se
+  // abre otra: si la del primer toque se canceló, reabrirla sería cobrarle a la persona algo que el negocio ya anuló.
+  if (cmd.source === 'KIOSK' && result.outcome === 'ALREADY_CHECKED_IN') {
+    const alive = await prisma.order.findFirst({
+      where: { reservationId: cmd.reservationId, venueId: cmd.venueId, status: { notIn: ['CANCELLED', 'DELETED'] } },
+      select: { id: true },
+    })
+    return { ...result.reservation, services: result.services, orderId: alive?.id ?? null, orderCreated: false }
+  }
 
   let orderId: string | null = null
   let orderCreated = false

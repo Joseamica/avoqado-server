@@ -300,10 +300,7 @@ export async function createSalePostingInTx(
  */
 const APPLYING_LEASE_MS = 10 * 60 * 1000
 
-export async function applySalePosting(
-  postingId: string,
-  staffId?: string | null,
-): Promise<{ postingId: string; applied: boolean; issues: InventoryPostingIssue[] } | null> {
+async function claimPosting(postingId: string, effectKind: 'SALE' | 'CUSTOMER_RETURN'): Promise<Date | null> {
   // El sello del claim funciona como CERCA COOPERATIVA: si otro worker
   // re-reclama (lease vencido), cambia updatedAt; el dueño original lo detecta
   // antes de cada línea y se retira en vez de deducir en paralelo.
@@ -311,6 +308,7 @@ export async function applySalePosting(
   const claim = await prisma.inventoryPosting.updateMany({
     where: {
       id: postingId,
+      effectKind,
       OR: [
         { status: { in: ['PENDING', 'PARTIAL_FAILED'] } },
         // Rescate de claims huérfanos: un crash entre el CAS y el update final
@@ -319,9 +317,22 @@ export async function applySalePosting(
         { status: 'APPLYING', updatedAt: { lt: new Date(Date.now() - APPLYING_LEASE_MS) } },
       ],
     },
-    data: { status: 'APPLYING', attempts: { increment: 1 }, updatedAt: claimStamp },
+    // El regreso cuenta sólo fallos reales al cerrar; esperar inventario apagado no consume intentos (R33).
+    data: { status: 'APPLYING', ...(effectKind === 'SALE' ? { attempts: { increment: 1 } } : {}), updatedAt: claimStamp },
   })
-  if (claim.count === 0) return null
+  return claim.count === 0 ? null : claimStamp
+}
+
+async function finalizePosting(postingId: string, claimStamp: Date, data: Prisma.InventoryPostingUpdateManyMutationInput) {
+  return prisma.inventoryPosting.updateMany({ where: { id: postingId, status: 'APPLYING', updatedAt: claimStamp }, data })
+}
+
+export async function applySalePosting(
+  postingId: string,
+  staffId?: string | null,
+): Promise<{ postingId: string; applied: boolean; issues: InventoryPostingIssue[] } | null> {
+  const claimStamp = await claimPosting(postingId, 'SALE')
+  if (!claimStamp) return null
 
   const posting = await prisma.inventoryPosting.findUnique({
     where: { id: postingId },
@@ -529,12 +540,13 @@ export async function applySalePosting(
   // atoró después de su última línea no puede pisar el resultado de un
   // reemplazo que ya re-reclamó, reintentó la línea fallida y marcó APPLIED —
   // sobreescribirlo con un PARTIAL_FAILED stale re-encolaría trabajo ya hecho.
-  const finalized = await prisma.inventoryPosting.updateMany({
-    where: { id: postingId, updatedAt: claimStamp },
-    data: anyFailed
+  const finalized = await finalizePosting(
+    postingId,
+    claimStamp,
+    anyFailed
       ? { status: 'PARTIAL_FAILED', lastError: issues.find(i => i.available === null)?.reason ?? 'línea fallida' }
       : { status: 'APPLIED', appliedAt: new Date(), lastError: null },
-  })
+  )
   if (finalized.count === 0) {
     logger.warn('🛡️ [InventoryPosting] Cierre perdido: otro worker re-reclamó el posting — el nuevo dueño decide el estado final', {
       postingId,
@@ -543,4 +555,200 @@ export async function applySalePosting(
   }
 
   return { postingId, applied: !anyFailed, issues }
+}
+
+type CustomerReturnParams = {
+  venueId: string
+  refundPaymentId: string
+  orderId: string
+  lines: Array<{
+    orderItemId: string
+    productId: string
+    quantity: number
+    eligibility?: { inventoryMethod: string | null; eligible: boolean }
+  }>
+  staffId?: string | null
+}
+
+/** Congela la obligación junto al reembolso: ni reintentos ni cambios del catálogo la redefinen. */
+export async function createCustomerReturnPostingInTx(
+  tx: Prisma.TransactionClient,
+  params: CustomerReturnParams,
+): Promise<{ id: string } | null> {
+  if (params.lines.length === 0) return null
+  const { venueId, refundPaymentId, orderId, lines, staffId } = params
+  const existing = await tx.inventoryPosting.findUnique({
+    where: {
+      venueId_sourceKind_sourceId_effectKind: {
+        venueId,
+        sourceKind: 'REFUND_PAYMENT',
+        sourceId: refundPaymentId,
+        effectKind: 'CUSTOMER_RETURN',
+      },
+    },
+  })
+  if (existing) return existing
+
+  // El cambio ya decidió qué vuelve: releer aquí podría descartar para siempre una pieza al apagar inventario.
+  const productIds = [...new Set(lines.filter(l => !l.eligibility).map(l => l.productId))]
+  const products = productIds.length
+    ? await tx.product.findMany({
+        where: { venueId, id: { in: productIds } },
+        select: { id: true, trackInventory: true, inventoryMethod: true, inventory: { select: { id: true } } },
+        take: productIds.length,
+      })
+    : []
+  const byId = new Map(products.map(p => [p.id, p]))
+  return tx.inventoryPosting.create({
+    data: {
+      venueId,
+      sourceKind: 'REFUND_PAYMENT',
+      sourceId: refundPaymentId,
+      effectKind: 'CUSTOMER_RETURN',
+      orderId,
+      payloadSnapshot: {
+        staffId: staffId ?? null,
+        lines: lines.map(l => {
+          const p = byId.get(l.productId)
+          return {
+            orderItemId: l.orderItemId,
+            productId: l.productId,
+            inventoryMethod: l.eligibility ? l.eligibility.inventoryMethod : (p?.inventoryMethod ?? null),
+            eligible: l.eligibility ? l.eligibility.eligible : !!(p?.trackInventory && p.inventoryMethod === 'QUANTITY' && p.inventory),
+          }
+        }),
+      },
+      lines: {
+        create: lines.map(l => ({
+          effectKey: l.orderItemId,
+          orderItemId: l.orderItemId,
+          productId: l.productId,
+          expectedQuantityBase: new Prisma.Decimal(l.quantity),
+        })),
+      },
+    },
+    select: { id: true },
+  })
+}
+
+const INVENTORY_DISABLED_AFTER_EXCHANGE = 'INVENTORY_DISABLED_AFTER_EXCHANGE'
+
+/** La ficha reactivada despierta sólo sus regresos detenidos, sin tocar un worker en curso. */
+export async function rearmCustomerReturnPostingsInTx(
+  tx: Prisma.TransactionClient,
+  product: { id: string; venueId: string; trackInventory: boolean; inventoryMethod: string | null },
+): Promise<void> {
+  if (!product.trackInventory || product.inventoryMethod !== 'QUANTITY') return
+  await tx.inventoryPosting.updateMany({
+    where: {
+      venueId: product.venueId,
+      effectKind: 'CUSTOMER_RETURN',
+      status: { in: ['PENDING', 'PARTIAL_FAILED'] },
+      lines: { some: { productId: product.id, status: { in: ['PENDING', 'FAILED'] }, reason: INVENTORY_DISABLED_AFTER_EXCHANGE } },
+    },
+    data: { attempts: 0, updatedAt: new Date(0) },
+  })
+}
+
+// ponytail: sólo piezas (QUANTITY); una receta no se reingresa — ampliar con postingLineId en adjustStock si una tienda lo pide
+export async function applyCustomerReturnPosting(
+  postingId: string,
+  staffId?: string | null,
+): Promise<{ postingId: string; applied: boolean } | null> {
+  const claimStamp = await claimPosting(postingId, 'CUSTOMER_RETURN')
+  if (!claimStamp) return null
+  const posting = await prisma.inventoryPosting.findUnique({ where: { id: postingId }, include: { lines: true } })
+  if (!posting) return null
+  const snapshot = posting.payloadSnapshot as { staffId?: string | null; lines?: Array<{ orderItemId: string; eligible: boolean }> } | null
+  let waiting = false
+  let failure: string | null = null
+
+  for (const line of posting.lines) {
+    if (line.status === 'APPLIED' || line.status === 'SKIPPED') continue
+    try {
+      const result = await prisma.$transaction(async tx => {
+        // Orden compartido con la ficha: Product → posting → Inventory. La configuración no cambia a media devolución.
+        if (line.productId)
+          await tx.$queryRaw`SELECT id FROM "Product" WHERE id = ${line.productId} AND "venueId" = ${posting.venueId} FOR NO KEY UPDATE`
+        // El cerco se bloquea hasta el commit: ni un lease vencido permite dos incrementos de la misma línea.
+        const owned = await tx.inventoryPosting.updateMany({
+          where: { id: postingId, venueId: posting.venueId, status: 'APPLYING', updatedAt: claimStamp },
+          data: { updatedAt: claimStamp },
+        })
+        if (!owned.count) return 'LOST'
+        const current = await tx.inventoryPostingLine.findFirst({
+          where: { id: line.id, postingId, status: { in: ['PENDING', 'FAILED'] } },
+        })
+        if (!current) return 'DONE'
+        if (await tx.inventoryMovement.count({ where: { postingLineId: line.id, inventory: { venueId: posting.venueId } } })) {
+          await tx.inventoryPostingLine.update({
+            where: { id: line.id },
+            data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: 'RECOVERED_FROM_MOVEMENTS' },
+          })
+          return 'DONE'
+        }
+        const frozen = snapshot?.lines?.find(l => l.orderItemId === line.effectKey)
+        if (!frozen) throw new Error('RETURN_SNAPSHOT_MISSING')
+        if (!frozen.eligible) {
+          await tx.inventoryPostingLine.update({ where: { id: line.id }, data: { status: 'SKIPPED', reason: 'NOT_QUANTITY_METHOD' } })
+          return 'DONE'
+        }
+        const product = await tx.product.findFirst({
+          where: { id: line.productId!, venueId: posting.venueId },
+          select: { trackInventory: true, inventoryMethod: true, inventory: { select: { id: true } } },
+        })
+        if (!product?.trackInventory || product.inventoryMethod !== 'QUANTITY' || !product.inventory) {
+          await tx.inventoryPostingLine.update({
+            where: { id: line.id },
+            data: { status: 'PENDING', reason: INVENTORY_DISABLED_AFTER_EXCHANGE },
+          })
+          return 'WAITING'
+        }
+        const inventory = await tx.inventory.update({
+          where: { id: product.inventory.id, venueId: posting.venueId },
+          data: { currentStock: { increment: line.expectedQuantityBase } },
+        })
+        await tx.inventoryMovement.create({
+          data: {
+            inventoryId: inventory.id,
+            type: 'ADJUSTMENT',
+            quantity: line.expectedQuantityBase,
+            previousStock: inventory.currentStock.minus(line.expectedQuantityBase),
+            newStock: inventory.currentStock,
+            reason: 'Cambio de producto: regresa al inventario',
+            reference: posting.sourceId,
+            postingLineId: line.id,
+            createdBy: staffId ?? snapshot?.staffId ?? null,
+          },
+        })
+        await tx.inventoryPostingLine.update({
+          where: { id: line.id },
+          data: { status: 'APPLIED', appliedQuantityBase: line.expectedQuantityBase, reason: null },
+        })
+        return 'DONE'
+      })
+      if (result === 'LOST') return null
+      if (result === 'WAITING') waiting = true
+    } catch (error) {
+      failure = error instanceof Error ? error.message : 'CUSTOMER_RETURN_FAILED'
+      // También el cierre de falla se cerca: un dueño viejo no pisa al que lo reemplazó.
+      await prisma.inventoryPostingLine.updateMany({
+        where: {
+          id: line.id,
+          status: { in: ['PENDING', 'FAILED'] },
+          posting: { id: postingId, status: 'APPLYING', updatedAt: claimStamp },
+        },
+        data: { status: 'FAILED', reason: failure },
+      })
+      logger.error('Customer return posting line failed', { postingId, lineId: line.id, venueId: posting.venueId, error: failure })
+    }
+  }
+  const applied = !waiting && !failure
+  const finalized = await finalizePosting(postingId, claimStamp, {
+    status: applied ? 'APPLIED' : 'PARTIAL_FAILED',
+    appliedAt: applied ? new Date() : null,
+    lastError: failure ?? (waiting ? INVENTORY_DISABLED_AFTER_EXCHANGE : null),
+    ...(failure ? { attempts: { increment: 1 } } : {}),
+  })
+  return finalized.count ? { postingId, applied } : null
 }

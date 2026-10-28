@@ -30,7 +30,8 @@ const mockLog = logAction as jest.Mock
  * 🔴 La base es compartida por ~20 sesiones: fuera de una base de PRUEBAS no se toca nada. Mismo criterio que
  * `rappiCandadoDeFila.test.ts`: `av-db-25-test` o una desechable `avoqado_*_test_*`. Rechaza `av-db-25` y cualquier otra.
  */
-const esBaseDePrueba = (nombre: string) => nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(nombre)
+const esBaseDePrueba = (nombre: string) =>
+  nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(nombre)
 {
   const url = new URL(process.env.DATABASE_URL ?? '')
   const nombre = decodeURIComponent(url.pathname.slice(1))

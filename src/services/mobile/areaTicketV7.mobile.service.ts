@@ -46,6 +46,7 @@ import { createStockBatch } from '../dashboard/fifoBatch.service'
 import { convertUnit } from '../../utils/unitConversion'
 import prisma from '../../utils/prismaClient'
 import { withSerializableRetry } from '../../utils/serializableRetry'
+import { lockOrdersForUpdate } from '../shared/tableOrderLock'
 import { utcTs } from '../../utils/sqlDates'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
@@ -1512,7 +1513,7 @@ function orderItemFromSnapshot(line: any, fulfillmentAreaId: string) {
  * vale. Por qué así y no mudarlo ni borrarlo: R12-1 puede reabrir la cuenta cancelada con dinero ya capturado (Codex r1/r2/r3,
  * `docs/audit/2026-10-21-vale-cancelado-recobrable/`); `renglonDeVale.ts` dice cómo se lee esa procedencia.
  *
- * Jerarquía de vales: sesión → vales (ya bloqueados por quien llama) → Order, una a una como `lockAreaTicketCheckoutHierarchy`: el registro
+ * Jerarquía de vales: sesión → vales (ya bloqueados por quien llama) → TODAS las Orders en el orden canónico: el registro
  * del dinero tardío de esa cuenta toma su Order igual, así que no se cruzan. Sólo se suelta de una cuenta CANCELLED/DELETED; una cuenta viva
  * que tiene el vale se respeta y se dice con un 409. Devuelve las cuentas de las que se soltó (bitácora).
  */
@@ -1525,9 +1526,7 @@ async function soltarValesDeCuentasCanceladas(tx: Prisma.TransactionClient, venu
   })
   if (ocupados.length === 0) return []
   const ordenIds = [...new Set(ocupados.map(item => item.orderId))].sort()
-  for (const ordenId of ordenIds) {
-    await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${ordenId} AND "venueId" = ${venueId} FOR UPDATE`
-  }
+  await lockOrdersForUpdate(tx, { venueId, orderIds: ordenIds })
   const renglones = await tx.orderItem.findMany({
     where: { areaTicketLineId: { in: lineIds } },
     select: { id: true, orderId: true, areaTicketLineId: true, order: { select: { venueId: true, status: true, orderNumber: true } } },
@@ -2491,7 +2490,11 @@ export interface LockedAreaTicketPayment {
  * rechaza una sesión ya pagada, y eso dejaba fuera, sin evidencia, al segundo intento acreditado (Codex, P1-3).
  * `null` = la orden no tiene sesión de vales.
  */
-export async function lockAreaTicketCheckoutHierarchy(tx: Prisma.TransactionClient, input: { venueId: string; orderId: string }) {
+export async function lockAreaTicketCheckoutHierarchy(
+  tx: Prisma.TransactionClient,
+  input: { venueId: string; orderId: string },
+  options: { lockOrder?: boolean } = {},
+) {
   const candidate = await tx.areaTicketCheckoutSession.findFirst({
     where: { venueId: input.venueId, orderId: input.orderId },
     select: { id: true },
@@ -2515,7 +2518,9 @@ export async function lockAreaTicketCheckoutHierarchy(tx: Prisma.TransactionClie
       )}) ORDER BY id FOR UPDATE`,
     )
   }
-  await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`
+  // Un escritor de varias ventas difiere TODAS las Orders hasta tener TODAS las sesiones/vales.
+  if (options.lockOrder !== false)
+    await tx.$queryRaw`SELECT id FROM "Order" WHERE id = ${input.orderId} AND "venueId" = ${input.venueId} FOR UPDATE`
   return { session }
 }
 

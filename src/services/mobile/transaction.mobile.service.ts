@@ -16,6 +16,7 @@ import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/d
 import { totalesDelComprobante } from '../shared/ticketTotals'
 import { seDevuelveEnTerminal, sePuedeEscogerComoDevolver } from '../tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { exchangeDetailFields } from '../exchanges/exchangeDetail'
 
 export interface MobileTransactionFilters {
   search?: string
@@ -232,6 +233,8 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     throw new NotFoundError(`Payment con ID ${paymentId} no encontrado`)
   }
 
+  const { fields, itemExtras } = await exchangeDetailFields(prisma, venueId, paymentId)
+
   const refunds = payment.status !== 'PENDING' && payment.status !== 'REFUNDED' ? await listRefundsForPayment(venueId, payment.id) : []
   // C2 A-R4: lo que cobró cada artículo, con el MISMO cargador que usa el escritor de devoluciones (la pantalla y el servidor no difieren).
   const cobrado = payment.orderId ? await leerCobradoDeLaOrden(prisma, payment.orderId) : null
@@ -356,8 +359,10 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
           name: m.name,
           price: Number(m.price),
         })),
+        ...itemExtras.get(item.id),
       }
     }),
+    ...fields,
   }
 }
 

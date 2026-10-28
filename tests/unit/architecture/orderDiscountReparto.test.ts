@@ -130,6 +130,7 @@ const SYNC = 'sincronizarRepartos('
 const HISTORICO = 'conservarDescuentoHistorico('
 const RECORTA = 'recortarDescuentosDeRenglones('
 const ESCRITORES_DE_FILAS: Record<string, Fila> = {
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': { clase: 'ESCRIBE', marcas: ['keptMarkdownDiscountRow(', SYNC] },
   // Cobrar sin red S4: la cortesía y el descuento de catálogo de la cuenta, con las mismas filas que «Cobrar» de la terminal.
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     clase: 'ESCRIBE',
@@ -225,6 +226,10 @@ const RECALCULADORES = [
 
 type Origen = { origen: 'FILAS' | 'RECALCULO' | 'CERO' | 'RENGLON' | 'D8'; nota: string }
 const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': {
+    origen: 'FILAS',
+    nota: 'Rebajas heredadas con filas espejo en la misma transacción.',
+  },
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     origen: 'FILAS',
     nota: 'espejos de cortesía y de artículo + fila de cuenta del POS o de catálogo; con promociones, reafirmada',
@@ -508,6 +513,7 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     nota: 'igual que splitOrderItems, por puesto',
   },
   // La orden nace en la misma transacción: no hay repartos anteriores.
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': { clase: 'CREACION', nota: 'Venta nueva con rebajas conservadas.' },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     clase: 'CREACION',
     nota: '«Cobrar»: orden, renglones y filas con su reparto (B2)',

@@ -67,6 +67,8 @@ import * as announcementReadController from '../controllers/shared/announcement.
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as refundController from '../controllers/dashboard/refund.dashboard.controller'
+import * as exchangeController from '../controllers/dashboard/exchange.dashboard.controller'
+import { listExchangesSchema, reviewExchangeSchema, getExchangeSchema } from '../schemas/dashboard/exchange.dashboard.schema'
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
@@ -4013,6 +4015,28 @@ router.get(
 )
 
 // Refund endpoints (manual cash/dashboard refunds — not the TPV terminal flow)
+router.get(
+  '/venues/:venueId/exchanges',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(listExchangesSchema),
+  exchangeController.listExchanges,
+)
+router.get(
+  '/venues/:venueId/exchanges/:exchangeId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(getExchangeSchema),
+  exchangeController.getExchange,
+)
+router.post(
+  '/venues/:venueId/exchanges/:exchangeId/review',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  validateRequest(reviewExchangeSchema),
+  exchangeController.reviewExchange,
+)
+
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,

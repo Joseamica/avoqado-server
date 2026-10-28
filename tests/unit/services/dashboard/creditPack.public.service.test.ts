@@ -499,7 +499,8 @@ describe('CreditPack Public Service', () => {
 
       const result = await createCheckoutSession(VENUE_ID, PACK_ID, email, phone, successUrl, cancelUrl)
 
-      expect(result).toEqual({ checkoutUrl: 'https://checkout.stripe.com/session/cs_test_session' })
+      // Aditivo (kiosco, D3): ahora también trae sessionId y expiresAt; quien lee checkoutUrl no cambia.
+      expect(result).toMatchObject({ checkoutUrl: 'https://checkout.stripe.com/session/cs_test_session' })
 
       const [params, options] = mockStripeCheckoutCreate.mock.calls[0]
       // Money routes to the venue: session scoped to its connected account.

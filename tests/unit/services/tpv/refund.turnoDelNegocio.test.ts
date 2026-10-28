@@ -113,6 +113,8 @@ function armar() {
     create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
   }
   ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
+  // Cambio de producto (rM2 #2): la devolución completa pregunta qué piezas ya regresaron con un cambio; aquí, ninguno.
+  prismaMock.exchange.findMany.mockResolvedValue([])
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([original])
   return original
@@ -143,6 +145,15 @@ const decremento = () => (prismaMock as any).shift.updateMany.mock.calls[0]?.[0]
 beforeEach(() => jest.clearAllMocks())
 
 describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda la terminal', () => {
+  it('rejects an EXCHANGE_CREDIT original before any transaction or money write', async () => {
+    const original = armar()
+    Object.assign(original, { tenderType: { systemKind: 'EXCHANGE_CREDIT' }, method: 'OTHER', fundsFlow: 'EXTERNAL_RECORDED' })
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toMatchObject({ statusCode: 400 })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(postCashRefundToDrawer).not.toHaveBeenCalled()
+  })
+
   it('acota la lectura inicial al paymentId y venue sin observar pagos de otro negocio', async () => {
     armar()
 

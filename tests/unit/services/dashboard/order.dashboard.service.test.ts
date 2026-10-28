@@ -364,7 +364,8 @@ describe('order.dashboard.service — updateOrder no toca inventario', () => {
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
     prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
-      const sql = Array.isArray(query) ? query.join(' ') : ''
+      const sql = (Array.isArray(query) ? query : ((query as { strings?: string[] }).strings ?? [])).join(' ')
+      if (sql.includes('ancestors(id) AS')) return [{ id: 'order-1' }]
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       throw new Error('Unexpected dashboard topology SQL')
@@ -415,7 +416,8 @@ describe('order.dashboard.service — updateOrder ignora total/tipAmount/subtota
     jest.clearAllMocks()
     prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
     prismaMock.$queryRaw.mockImplementation(async (query: unknown) => {
-      const sql = Array.isArray(query) ? query.join(' ') : ''
+      const sql = (Array.isArray(query) ? query : ((query as { strings?: string[] }).strings ?? [])).join(' ')
+      if (sql.includes('ancestors(id) AS')) return [{ id: 'order-1' }]
       if (sql.includes('FROM "Venue"')) return [{ id: 'venue-1' }]
       if (sql.includes('FROM "Order"')) return [{ id: 'order-1' }]
       throw new Error('Unexpected dashboard topology SQL')

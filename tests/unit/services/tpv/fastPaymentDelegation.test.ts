@@ -278,10 +278,10 @@ const ordenActualizadaTrasCobro = {
 describe('recordFastPayment — un cobro con orden NO crea venta sintetica', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     arbitrationRow = null
     payments = []
     installFakes()
@@ -737,10 +737,10 @@ describe('recordFastPayment — venta rápida con un tipo de pago del catálogo'
 
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     arbitrationRow = null
     payments = []
     installFakes()
@@ -901,10 +901,10 @@ describe('recordFastPayment — qué queda "por depositar" en VenueTransaction',
 
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     arbitrationRow = null
     payments = []
     transacciones = []

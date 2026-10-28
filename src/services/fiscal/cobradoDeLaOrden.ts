@@ -45,8 +45,16 @@ export async function leerCobradoDeLaOrden(db: Db, orderId: string): Promise<Cob
   const descuentos = await db.$queryRaw<Array<{ amount: Prisma.Decimal; reparto: unknown }>>(
     Prisma.sql`${sqlDeLosDescuentos([orderId])} LIMIT ${TOPES_POR_ORDEN.descuentos + 1}`,
   )
-  // Una orden que pasa un tope no se aproxima: no es atribuible (en producción, 5-oct: a lo más 62 renglones y 2 descuentos).
-  const cabe = orden !== null && renglones.length <= TOPES_POR_ORDEN.renglones && descuentos.length <= TOPES_POR_ORDEN.descuentos
+  return cobradoDeFilas(orden, renglones, descuentos)
+}
+
+export function cobradoDeFilas(
+  orden: { discountAmount: Prisma.Decimal; contratoDePrecio: string | null; originSystem: string | null } | null,
+  renglones: CobradoDeLaOrden['renglones'],
+  descuentos: Array<{ amount: Prisma.Decimal; reparto: unknown }>,
+  excedeTope = renglones.length > TOPES_POR_ORDEN.renglones || descuentos.length > TOPES_POR_ORDEN.descuentos,
+): CobradoDeLaOrden {
+  const cabe = orden !== null && !excedeTope
   const c = cabe ? cobradoPorRenglon(renglones, { ...orden, orderDiscounts: descuentos }) : null
   return {
     atribuible: c?.atribuible ?? false,
@@ -61,6 +69,43 @@ export async function leerCobradoDeLaOrden(db: Db, orderId: string): Promise<Cob
     renglones,
     cobradoCents: new Map(c?.atribuible ? c.renglones.map(r => [r.llave, r.cents] as const) : []),
   }
+}
+
+export async function leerCobradoDeLasOrdenes(db: Db, venueId: string, orderIds: string[]): Promise<Map<string, CobradoDeLaOrden>> {
+  const result = new Map<string, CobradoDeLaOrden>()
+  if (orderIds.length === 0) return result
+  const orders = await db.order.findMany({
+    take: orderIds.length,
+    where: { id: { in: orderIds }, venueId },
+    select: {
+      id: true,
+      discountAmount: true,
+      contratoDePrecio: true,
+      originSystem: true,
+      _count: { select: { items: true, orderDiscounts: true } },
+    },
+  })
+  const eligible = orders.filter(o => o._count.items <= TOPES_POR_ORDEN.renglones && o._count.orderDiscounts <= TOPES_POR_ORDEN.descuentos)
+  for (const order of orders) result.set(order.id, cobradoDeFilas(order, [], [], true))
+  if (eligible.length === 0) return result
+
+  const ids = eligible.map(o => o.id)
+  const items = await db.orderItem.findMany({
+    take: eligible.reduce<number>((sum, o) => sum + o._count.items, 0),
+    where: { orderId: { in: ids } },
+    orderBy: [{ orderId: 'asc' }, { id: 'asc' }],
+    select: SELECT_RENGLON,
+  })
+  // Counts bound the discount read; a LIMIT can select a costly generic plan (T8-A).
+  const discounts = await db.$queryRaw<Array<{ orderId: string; amount: Prisma.Decimal; reparto: unknown }>>(sqlDeLosDescuentos(ids))
+  const itemsByOrder = new Map(ids.map(id => [id, [] as CobradoDeLaOrden['renglones']]))
+  const discountsByOrder = new Map(ids.map(id => [id, [] as typeof discounts]))
+  for (const item of items) itemsByOrder.get(item.orderId)!.push(item)
+  for (const discount of discounts) discountsByOrder.get(discount.orderId)!.push(discount)
+  for (const order of eligible) {
+    result.set(order.id, cobradoDeFilas(order, itemsByOrder.get(order.id)!, discountsByOrder.get(order.id)!))
+  }
+  return result
 }
 
 /** A-R4: lo que cobró el renglón completo, en pesos; `undefined` (el campo se omite) si la orden no es atribuible. */

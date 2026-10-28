@@ -47,7 +47,7 @@ import { uberAdapter } from '@/services/delivery-channels/providers/uber-eats/ub
 import { capacidadesDeComanda, ventasDeComandas } from '@/services/mobile/kdsCapacidades'
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(database.pathname)) {
+if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(database.pathname)) {
   throw new Error('Esta suite exige una base de pruebas local y desechable, elegida explícitamente.')
 }
 

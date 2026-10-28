@@ -172,6 +172,39 @@ async function fueronVigentes(
   return vigentes
 }
 
+/** Decide por renglón y consulta el historial por bloques, con la misma conexión de la venta o del cambio. */
+export async function resolverPreciosDeLineas(
+  venueId: string,
+  entradas: Array<{ productId: string; actualCents: number; displayedUnitPrice?: unknown; catalogAt?: unknown }>,
+  horaDeLaVenta: Date,
+  db: Pick<Prisma.TransactionClient, '$queryRaw'> = prisma,
+) {
+  const lineas = entradas.map((item, k) => {
+    const mostradoCents = precioMostradoValido(item.displayedUnitPrice)
+    const catalogAt = typeof item.catalogAt === 'string' ? new Date(item.catalogAt) : null
+    const veredicto = clasificarLinea({ actualCents: item.actualCents, mostradoCents, catalogAt, horaDeLaVenta })
+    return { k, item, mostradoCents, catalogAt, veredicto, unitPriceCents: item.actualCents, respetado: false }
+  })
+  const buscar = lineas.filter(l => l.veredicto === 'BUSCAR')
+  const vigentes = buscar.length
+    ? await preciosQueFueronVigentes(
+        venueId,
+        buscar.map(l => ({
+          productId: l.item.productId,
+          mostradoCents: l.mostradoCents!,
+          ...ventanaDeLaLinea(l.catalogAt!, horaDeLaVenta),
+        })),
+        db,
+      )
+    : []
+  buscar.forEach((l, j) => {
+    if (!vigentes[j]) return
+    l.respetado = true
+    l.unitPriceCents = l.mostradoCents!
+  })
+  return lineas
+}
+
 /**
  * Reintento de una orden que ya existe (respuesta perdida): reconstruye `priceChanges` comparando cada línea que trae precio
  * mostrado con la línea guardada del MISMO `externalId`. Sin `externalId` o sin guardada ⇒ nada; nunca adivina por

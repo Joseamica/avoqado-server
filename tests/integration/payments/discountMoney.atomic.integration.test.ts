@@ -10,7 +10,7 @@ jest.mock('@/services/dashboard/activity-log.service', () => ({ logAction: jest.
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(database.pathname)
+  !/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(database.pathname)
 ) {
   throw new Error('This suite requires an explicitly selected isolated local test database.')
 }

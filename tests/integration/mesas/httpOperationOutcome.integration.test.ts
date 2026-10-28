@@ -23,7 +23,7 @@ try {
 if (
   !['postgres:', 'postgresql:'].includes(testDatabase.protocol) ||
   !['localhost', '127.0.0.1'].includes(testDatabase.hostname) ||
-  !/^\/avoqado_[a-z0-9]+_test_/.test(testDatabase.pathname) ||
+  !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(testDatabase.pathname) ||
   process.env.DATABASE_URL !== testDatabaseUrl
 ) {
   throw new Error('Exige DB propia local y DATABASE_URL=TEST_DATABASE_URL; no se imprimió la URL')
@@ -5054,7 +5054,7 @@ async function task8HoldOrders(ids: string[]) {
   const hold = holder.$transaction(
     async tx => {
       pid = (await tx.$queryRaw<Array<{ pid: number }>>`SELECT pg_backend_pid()::int pid`)[0].pid
-      await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId"=${venueId} AND id=ANY(${ids}::text[]) ORDER BY id FOR UPDATE`
+      await tx.$queryRaw`SELECT id FROM "Order" WHERE "venueId"=${venueId} AND id=ANY(${ids}::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE`
       ready.resolve()
       await release.promise
     },

@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 /**
  * Vales por área — pruebas del server (§10).
  *
@@ -709,7 +710,11 @@ describe('area tickets — addAreaTicketItems decides on the locked Order (Plan 
 
     expect(committed).toBe(true)
     // Tagged template: [strings, ...values] — the ticket's Order, scoped to the ROUTE venue.
-    expect(tx.$queryRaw.mock.calls.map((call: any[]) => call.slice(1))).toEqual([['order-1', VENUE]])
+    expect(
+      tx.$queryRaw.mock.calls.map((call: any[]) =>
+        Array.isArray(call[0]) ? Prisma.sql(call[0], ...call.slice(1)).values : call[0].values,
+      ),
+    ).toEqual([['order-1', VENUE]])
     expect(tx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(Math.min(...txModelCalls()))
     expect(tx.order.findFirstOrThrow.mock.calls[0][0].where).toEqual({ id: 'order-1', venueId: VENUE })
     const { where, data } = tx.order.update.mock.calls[0][0]

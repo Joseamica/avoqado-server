@@ -26,7 +26,8 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
 }))
 
 /** 🔴 La base es compartida por ~20 sesiones: fuera de una base de PRUEBAS no se toca nada. */
-const esBaseDePrueba = (nombre: string) => nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(nombre)
+const esBaseDePrueba = (nombre: string) =>
+  nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(nombre)
 {
   const url = new URL(process.env.DATABASE_URL ?? '')
   const nombre = decodeURIComponent(url.pathname.slice(1))

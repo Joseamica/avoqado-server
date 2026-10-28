@@ -347,3 +347,23 @@ describe('registrarAbonoEnTx', () => {
     expect(typeof gancho).toBe('function')
   })
 })
+
+describe('exchange deferred close', () => {
+  it('keeps the order partial until the last exchange installment, even within one cent', async () => {
+    const result = await registrarAbonoEnTx(
+      prismaMock,
+      CTX,
+      {
+        amountCents: 79999,
+        tipCents: 0,
+        method: 'OTHER',
+        tender: { resuelto: TENDER_DE_REGALO },
+        cierreDiferido: true,
+      },
+      RECONCILIACION,
+    )
+    expect(result.isFullyPaid).toBe(false)
+    expect(result.paymentStatus).toBe('PARTIAL')
+    expect(result.postingId).toBeNull()
+  })
+})

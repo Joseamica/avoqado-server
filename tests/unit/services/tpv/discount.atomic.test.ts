@@ -174,7 +174,7 @@ describe('fresh discount mutations', () => {
     expect(tx.order.findUnique.mock.calls.filter(([args]: any[]) => args?.select?.venueId)).toHaveLength(0)
     expect(tx.$queryRaw).toHaveBeenCalledTimes(1)
     // Tagged template: [strings, orderId, venueId] — the bound venue must be the route's.
-    expect(tx.$queryRaw.mock.calls[0].slice(1)).toEqual(['order', 'venue'])
+    expect(Prisma.sql(tx.$queryRaw.mock.calls[0][0], ...tx.$queryRaw.mock.calls[0].slice(1)).values).toEqual(['order', 'venue'])
   })
   // B2b T4 (D16): este caso esperaba `taxReduction: 3.2` (el 16 % inventado) sobre una orden sin contrato; desde B2b T2 ya da
   // 0 y el impuesto no se toca. Lo reemplaza P10 (nace verde con T2 ⇒ control). Sigue probando que todo sale del tx.

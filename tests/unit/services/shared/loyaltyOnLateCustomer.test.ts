@@ -35,6 +35,7 @@ import {
   reabrirLealtadSiAplica,
   type SaleStampSnapshot,
 } from '@/services/shared/loyaltyOnLateCustomer'
+import { WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO } from '@/services/exchanges/exchangeMarks'
 
 const awardMock = awardLoyaltyForPaidOrder as jest.Mock
 const cardMock = getStampCardStatus as jest.Mock
@@ -192,6 +193,7 @@ describe('decideSaleStamp (pura)', () => {
     pointsOwnerCustomerIds: [],
     settledAt: new Date(AHORA - 30 * MIN),
     esVentaDeTarjetas: false,
+    esVentaNuevaDeCambio: false,
   }
   it.each<[string, Partial<SaleStampSnapshot>, string]>([
     ['elegible', {}, 'ELIGIBLE'],
@@ -282,6 +284,7 @@ describe('esElegibleParaLealtad (¿se corre —o se COMPLETA— la lealtad? audi
     pointsOwnerCustomerIds: [],
     settledAt: new Date(AHORA - 30 * MIN),
     esVentaDeTarjetas: false,
+    esVentaNuevaDeCambio: false,
   }
   const vieja = new Date(AHORA - 3 * LATE_STAMP_WINDOW_MS)
   it.each<[string, Partial<SaleStampSnapshot>, boolean, boolean]>([
@@ -427,8 +430,9 @@ describe('awardLoyaltyForLateCustomer', () => {
     const r = await awardLoyaltyForLateCustomer({ venueId: VENUE, orderId: ORDER, customerId: CUST })
     expect(awardMock).not.toHaveBeenCalled()
     expect(r).toMatchObject({ stamped: false, reason: 'NOT_PAID' })
+    // Sin las devoluciones de un cambio de producto (el gemelo del crédito y la diferencia): no le quitan el sello a la venta.
     expect(prismaMock.payment.count).toHaveBeenCalledWith({
-      where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' },
+      where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED', AND: [WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO] },
     })
   })
 
@@ -782,7 +786,9 @@ describe('awardLoyaltyForLateCustomer', () => {
 
 describe('otorgarLealtadRespetandoReembolsos (B2: UN envoltorio para la liga tardía, el reconciliador y la reparación S9)', () => {
   const ARGS = { venueId: VENUE, orderId: ORDER, orderTotal: 80, staffId: STAFF, legacyCustomer: null }
-  const REEMBOLSO_EXACTO = { where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED' } }
+  const REEMBOLSO_EXACTO = {
+    where: { orderId: ORDER, venueId: VENUE, type: 'REFUND', status: 'COMPLETED', AND: [WHERE_DEVOLUCION_NO_ES_DEL_CAMBIO] },
+  }
 
   it('sin reembolso: otorga con los MISMOS argumentos, no revierte y devuelve el resultado de la lealtad', async () => {
     const r = await otorgarLealtadRespetandoReembolsos(ARGS)

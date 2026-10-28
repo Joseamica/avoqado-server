@@ -65,6 +65,34 @@ beforeEach(() => {
 })
 
 describe('generatePoliciesForVenue · tarjetas de regalo', () => {
+  it('with cash excluded from accounting, a chain cash refund is excluded from autoposting like an ordinary cash refund', async () => {
+    p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: false })
+    const refunds = [
+      cobro({
+        id: 'ordinary',
+        amount: -116,
+        method: PaymentMethod.CASH,
+        type: PaymentType.REFUND,
+        processorData: { originalPaymentId: 'cash', originalMethod: 'CASH' },
+      }),
+      cobro({
+        id: 'chain',
+        amount: -116,
+        method: PaymentMethod.CASH,
+        type: PaymentType.REFUND,
+        processorData: {
+          originalPaymentId: 'credit',
+          rootPaymentId: 'cash',
+          originalMethod: 'CASH',
+          exchange: { exchangeId: 'exchange', role: 'CHAIN', rootPaymentId: 'cash' },
+        },
+      }),
+    ]
+    p.payment.findMany.mockResolvedValueOnce(refunds).mockResolvedValueOnce(refunds)
+    expect(await generatePoliciesForVenue('v1')).toMatchObject({ candidates: 2, posted: 0, skipped: 2, pendientesDeRevision: 0 })
+    expect(postJournalEntry).not.toHaveBeenCalled()
+  })
+
   it('🔴 la VENTA de una tarjeta (cobro con tarjeta de una cuenta de tarjetas) no se postea: queda pendiente de revisión', async () => {
     p.payment.findMany.mockResolvedValueOnce([
       cobro({ id: 'p-venta', amount: 500, order: { status: OrderStatus.COMPLETED, orderNumber: 'GC', items: [renglonDeTarjeta] } }),

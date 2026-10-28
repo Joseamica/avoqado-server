@@ -144,6 +144,8 @@ const CANALES_EN_LINEA = new Set(['WEB', 'QR', 'SDK', 'DASHBOARD_TEST'])
 export function sePuedeEscogerComoDevolver(payment: CobroParaDevolver): boolean {
   // Tarjetas de regalo (spec §5.5): lo pagado con saldo sólo regresa al saldo. Nunca efectivo ni transferencia, aunque lo pida una app vieja.
   if (payment.tenderSystemKind === TenderSystemKind.GIFT_CARD) return false
+  // Cambio de producto (spec 2026-10-20 §6.7): lo pagado con crédito de cambio sale por el medio de su cobro RAÍZ, nunca por uno escogido.
+  if (payment.tenderSystemKind === TenderSystemKind.EXCHANGE_CREDIT) return false
   if (CARD_METHODS.has(payment.method) || METODOS_DE_PROCESADOR.has(payment.method)) return false
   if (payment.tenderSatFormaPago && FORMAS_SAT_DE_TARJETA.has(payment.tenderSatFormaPago)) return false
   if (/^tarjeta/i.test(payment.externalSource ?? '')) return false

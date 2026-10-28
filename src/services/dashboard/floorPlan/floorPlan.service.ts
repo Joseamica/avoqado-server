@@ -31,7 +31,7 @@ const PLAN_CHANGED = 'Alguien más cambió el plano mientras lo editabas. Recarg
 const BUSY = 'El servidor está ocupado y no pudo guardar. Intenta de nuevo; tus cambios siguen en pantalla.'
 
 /**
- * Candado del plano VIVO: todas las mesas y elementos activos del venue, por id, ANTES de leer el plano y su huella.
+ * Candado del plano: unión de mesas activas y archivadas que pueden revivir por id, y elementos activos, ANTES de leer la huella.
  * Sin esto, la PAX (que no toma el candado del plano) podía mover una mesa entre la huella y la escritura, y la
  * publicación la pisaba sin haberla visto. Con él, la PAX espera a que se publique y su cambio queda encima (el
  * siguiente guardado del editor verá la huella nueva y recibirá 409). Acotado igual que la lectura (límite + 1).
@@ -41,10 +41,15 @@ const BUSY = 'El servidor está ocupado y no pudo guardar. Intenta de nuevo; tus
  * mesa, `assignTable` que cuelga una cuenta), pero NO con las inserciones que sólo apuntan a la mesa por llave foránea
  * (una orden nueva o una cuenta dividida en otra mesa toman `FOR KEY SHARE`): esas ya no esperan a que se publique.
  */
-async function lockLivePlan(tx: Tx, venueId: string): Promise<void> {
+async function lockLivePlan(tx: Tx, venueId: string, desiredNumbers: string[]): Promise<Set<string>> {
   await tx.$queryRaw`SELECT id FROM "Venue" WHERE id = ${venueId} FOR KEY SHARE`
-  await tx.$queryRaw`SELECT id FROM "Table" WHERE "venueId" = ${venueId} AND active = true ORDER BY id LIMIT ${FLOOR_PLAN_LIMITS.tables + 1} FOR NO KEY UPDATE`
+  // La mesa archivada que revive también pertenece a la unión, aunque su id sea menor que todas las activas.
+  const tables = await tx.$queryRaw<Array<{ id: string }>>`SELECT id FROM "Table" WHERE "venueId" = ${venueId} AND (
+    id IN (SELECT id FROM "Table" WHERE "venueId" = ${venueId} AND active = true ORDER BY id LIMIT ${FLOOR_PLAN_LIMITS.tables + 1})
+    OR number = ANY(${desiredNumbers}::text[])
+  ) ORDER BY id FOR NO KEY UPDATE`
   await tx.$queryRaw`SELECT id FROM "FloorElement" WHERE "venueId" = ${venueId} AND active = true ORDER BY id LIMIT ${FLOOR_PLAN_LIMITS.elements + 1} FOR NO KEY UPDATE`
+  return new Set(tables.map(t => t.id))
 }
 
 interface LockedTable {
@@ -61,7 +66,7 @@ const hasOpenOrder = (t: LockedTable) => t.pointerOpen || t.liveOrderId !== null
 
 /**
  * Bloquea (por id) las mesas que se archivan o se reviven y dice cuáles tienen una cuenta abierta. Las activas ya
- * las tiene `lockLivePlan`; aquí se suman las archivadas que se reviven, a las que un POS pudo colgarle una cuenta.
+ * las tiene `lockLivePlan`, junto con las archivadas que se reviven; aquí sólo se reentra y se revisan sus cuentas.
  *
  * El puntero `Table.currentOrderId` no basta: cobrar la cuenta apuntada de una cuenta dividida NO mueve el puntero a la
  * que sigue viva, y una orden dada de alta en el POS se liga sólo por `tableId`. Por eso también se busca, en UNA
@@ -162,7 +167,11 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
   })
   if (prior) return { replayed: true as const, publicationId: prior.id }
 
-  await lockLivePlan(tx, venueId)
+  const lockedTableIds = await lockLivePlan(
+    tx,
+    venueId,
+    input.tables.map(t => t.number.trim()),
+  )
   const current = await loadFloorPlanState(tx, venueId)
   if (current.overLimit)
     throw new ValidationError('Este plano pasa los límites del editor; escríbenos y lo revisamos contigo', 'FLOOR_PLAN_OVER_LIMIT')
@@ -205,6 +214,8 @@ async function applyPublication(tx: Tx, venueId: string, input: PublishFloorPlan
   //    se rechaza; revivir una así la deja con su cuenta (un POS se la abrió justo antes de que se archivara).
   const archiveIds = new Set(diff.tables.archive)
   const lockIds = [...diff.tables.archive, ...diff.tables.revive.map(r => r.id)]
+  // Un alta concurrente no puede ampliar la unión después del primer candado.
+  if (lockIds.some(id => !lockedTableIds.has(id))) throw new ConflictError(PLAN_CHANGED, 'FLOOR_PLAN_CHANGED')
   const locked = lockIds.length ? await lockTablesWithOrders(tx, venueId, lockIds) : []
   const lockedById = new Map(locked.map(t => [t.id, t]))
   const blocked = locked

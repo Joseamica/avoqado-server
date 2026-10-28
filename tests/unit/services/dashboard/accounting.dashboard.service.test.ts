@@ -124,6 +124,7 @@ const movimiento = (f: Record<string, any>): MovimientoLeido => ({
   tipCents: Math.round(Number(f.tipAmount ?? 0) * 100),
   method: f.method ?? null,
   processorData: f.processorData,
+  tenderSystemKind: f.tenderSystemKind,
   incluirEnContabilidad: f.merchantAccount?.fiscalConfig?.includeInAccounting ?? f.ecommerceMerchant?.fiscalConfig?.includeInAccounting,
 })
 const enumeracion = () => p.$queryRaw.mock.calls[0][0] as Prisma.Sql
@@ -903,4 +904,16 @@ describe('B4b · el Resumen y Bancos suman en la base (Codex r1 P2 #7; r3 R3-5)'
     expect(r.accounts).toEqual([{ key: 'card', kind: 'bank', methods: ['DEBIT_CARD'], inflowCents: 15000, tipCents: 500, count: 2 }])
     expect(r.totals.feesCents).toBe(400) // 3 + 1
   })
+})
+
+it('keeps EC movements managerial while excluding both from fiscal revenue', async () => {
+  p.fiscalEmisor.findFirst.mockResolvedValue({ includeCashInAccounting: true })
+  sembrar([
+    { amount: 500, type: 'REGULAR', method: PaymentMethod.CASH },
+    { amount: 500, type: 'REGULAR', method: PaymentMethod.OTHER, tenderSystemKind: 'EXCHANGE_CREDIT' },
+    { amount: -500, type: 'REFUND', method: PaymentMethod.OTHER, tenderSystemKind: 'EXCHANGE_CREDIT' },
+  ])
+  const r = await getIncomeStatement(VENUE, FILTERS)
+  expect(r.revenue).toMatchObject({ grossSalesCents: 100000, refundsCents: 50000 })
+  expect(r.fiscalRevenue).toMatchObject({ grossSalesCents: 50000, refundsCents: 0 })
 })

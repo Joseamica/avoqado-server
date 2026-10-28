@@ -169,6 +169,18 @@ export function buildItemDiscountRow(input: ItemDiscountRowInput): Prisma.OrderD
   }
 }
 
+/** La rebaja heredada ya vive en el renglón: la fila sólo la explica, con el mismo reparto espejo. */
+export function keptMarkdownDiscountRow(input: Omit<ItemDiscountRowInput, 'discount'>): Prisma.OrderDiscountUncheckedCreateInput {
+  return {
+    ...buildItemDiscountRow({
+      ...input,
+      discount: { id: null, type: 'FIXED_AMOUNT', name: 'Rebaja conservada (cambio)', value: input.discountAmountPesos },
+    }),
+    isManual: false,
+    isAutomatic: true,
+  }
+}
+
 /**
  * B2 (founder, 27-sep): el descuento de CUENTA del POS (`discount` del móvil, el descuento libre de «Cobrar») es su propia
  * fila, con su regla (la cuenta CON promociones). Vivía sólo en la cabecera y cualquier recálculo posterior lo borraba. Los

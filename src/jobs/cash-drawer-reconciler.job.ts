@@ -15,6 +15,7 @@ import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { utcTs } from '../utils/sqlDates'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
+import { EXCHANGE_REFUND_ROLE } from '../services/exchanges/exchangeMarks'
 
 /**
  * Cash drawer reconciler — fase 3 de la unificación de caja: NINGUNA venta en efectivo se
@@ -68,6 +69,9 @@ export interface UnpostedCashPayment {
   thirdPartyCashAmount?: unknown
   processedById: string | null
   createdAt: Date
+  /** Cambio: la elección durable manda sobre cualquier ventana/turno inferido, incluso si fue «sin caja». */
+  exchangeId?: string | null
+  cashDrawerSessionId?: string | null
 }
 
 export interface SessionWindow {
@@ -163,9 +167,12 @@ interface Dependencies {
  * pago que sí hiciera falta reponer habría quedado detrás de esos 466 sin ser alcanzado jamás.
  */
 async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: number): Promise<UnpostedCashPayment[]> {
-  const candidatos = await prisma.$queryRaw<Array<{ id: string }>>`
-    SELECT p.id
+  const candidatos = await prisma.$queryRaw<Array<{ id: string; exchangeId: string | null; cashDrawerSessionId: string | null }>>`
+    SELECT p.id, x.id AS "exchangeId", x."cashDrawerSessionId"
     FROM "Payment" p
+    LEFT JOIN "Exchange" x ON x."venueId" = p."venueId" AND x."newOrderId" = p."orderId"
+      -- Sólo SUS abonos: un efectivo ya capturado puede llegar después a esa misma venta cerrada.
+      AND ((x.result->'paymentIds') ? p.id)
     WHERE p.status = 'COMPLETED'
       AND p.type NOT IN ('REFUND', 'TEST')
       AND p."originSystem" = 'AVOQADO'
@@ -203,21 +210,24 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
         EXISTS (
           SELECT 1 FROM "CashDrawerSession" s
           WHERE s."venueId" = p."venueId"
+            -- Cambio: la caja que eligió el cambio manda; si eligió «sin caja», ninguna.
+            AND ((x.id IS NOT NULL AND s.id = x."cashDrawerSessionId") OR (x.id IS NULL
             AND p."createdAt" >= s."openedAt"
             -- 🔴 Sin NOW(): las columnas son timestamp SIN zona con UTC dentro, y NOW() es timestamptz,
             -- así que COALESCE(closedAt, NOW()) resolvía a timestamptz y Postgres reinterpretaba el
             -- createdAt en la zona de la SESIÓN — en una sesión México, un pago de hace una hora
             -- quedaba FUERA de la caja abierta (medido el 5-sep-2026). En prod (UTC) coincidía por
             -- accidente. Misma forma que la consulta de reembolsos; el bind until ya acota por arriba.
-            AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")
+            AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")))
         )
         -- S3 (Codex r6 código #1): o la caja que el POS capturó al cobrar sin red (marca cajaDeLaVenta), aunque cerrara antes.
-        OR EXISTS (
+        -- Un abono de un Cambio nunca: el Cambio pide red y su caja es la que eligió.
+        OR (x.id IS NULL AND EXISTS (
           SELECT 1 FROM "CashDrawerSession" s
           WHERE s."venueId" = p."venueId" AND s.id = p."posRawData" ->> 'cajaDeLaVenta'
-        )
+        ))
       )
-    ORDER BY p."createdAt" ASC
+    ORDER BY p."createdAt" ASC, p.id ASC
     LIMIT ${limit}
   `
   if (candidatos.length === 0) return []
@@ -244,21 +254,25 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
       posRawData: true,
       ...TENDER_SEMANTICS_SELECT,
     },
-    orderBy: { createdAt: 'asc' },
+    orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
     take: limit,
   })
   // El anti-join ya se hizo en SQL: aquí no queda nada que filtrar, y se ahorra la consulta
   // extra que antes traía los `localId` de las 200 filas para descartarlas en memoria.
-  return rows.map(({ posRawData, ...row }) => ({ ...row, cajaDeLaVenta: cajaDeLaVentaDe(posRawData) })) as UnpostedCashPayment[]
+  const choices = new Map(candidatos.map(c => [c.id, c]))
+  return rows.map(({ posRawData, ...row }) => ({ ...row, ...choices.get(row.id), cajaDeLaVenta: cajaDeLaVentaDe(posRawData) })) as UnpostedCashPayment[]
 }
 
 async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number): Promise<UnpostedCashPayment[]> {
   const refundLocalIdPrefix = cashRefundDrawerLocalId('')
   // Resolve eligibility before LIMIT. Otherwise already-posted refunds (or refunds
   // that can never belong to a drawer session) permanently spend the whole batch.
-  const candidates = await prisma.$queryRaw<Array<{ id: string }>>`
-    SELECT p.id
+  const candidates = await prisma.$queryRaw<Array<{ id: string; exchangeId: string | null; cashDrawerSessionId: string | null }>>`
+    SELECT p.id, x.id AS "exchangeId", x."cashDrawerSessionId"
     FROM "Payment" p
+    LEFT JOIN "Exchange" x ON x."venueId" = p."venueId"
+      AND p."processorData"->'exchange'->>'role' = ${EXCHANGE_REFUND_ROLE.DIFFERENCE}
+      AND x.id = p."processorData"->'exchange'->>'exchangeId'
     WHERE p.status = 'COMPLETED'
       AND p.type = 'REFUND'
       AND p."originSystem" = 'AVOQADO'
@@ -275,8 +289,9 @@ async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number
       AND EXISTS (
         SELECT 1 FROM "CashDrawerSession" s
         WHERE s."venueId" = p."venueId"
+          AND ((x.id IS NOT NULL AND s.id = x."cashDrawerSessionId") OR (x.id IS NULL
           AND p."createdAt" >= s."openedAt"
-          AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")
+          AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")))
       )
     ORDER BY p."createdAt" ASC, p.id ASC
     LIMIT ${limit}
@@ -303,7 +318,8 @@ async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number
   })
   // The anti-join and drawer-window filter already ran in SQL, so every hydrated
   // row is actionable and none of the batch budget is discarded in memory.
-  return rows as UnpostedCashPayment[]
+  const choices = new Map(candidates.map(c => [c.id, c]))
+  return rows.map(row => ({ ...row, ...choices.get(row.id) })) as UnpostedCashPayment[]
 }
 
 /** Sesiones del venue cuya ventana [openedAt, closedAt ∨ ahora] cubre el instante. */
@@ -350,6 +366,7 @@ export const defaults: Dependencies = {
       venueId: p.venueId,
       refundPaymentId: p.id,
       orderId: p.orderId,
+      reason: p.exchangeId ? 'Cambio de producto' : undefined,
       // 🔴 Venta + propina: el cajón sólo ve billetes y el CASH_SALE original entró como la
       // SUMA. Reponer sólo `amount` deja el esperado arriba por la propina, y como el repost
       // es idempotente por `localId` ese faltante inventado ya no se puede corregir.
@@ -427,6 +444,7 @@ export class CashDrawerReconcilerJob {
       const sessionCache = new Map<string, SessionWindow[]>()
 
       const resolveSession = async (p: UnpostedCashPayment): Promise<DrawerChoice> => {
+        if (p.exchangeId) return p.cashDrawerSessionId ? { kind: 'SESSION', id: p.cashDrawerSessionId } : { kind: 'OUTSIDE' }
         // Rappi 2b: si la venta de este cobro ya quedó en una caja, su entrada de Rappi va a ESA (aunque ya se haya cerrado).
         if (Number(p.thirdPartyCashAmount ?? 0) > 0) {
           const deLaVenta = await this.d.findCashSaleSession(p.venueId, p.id)

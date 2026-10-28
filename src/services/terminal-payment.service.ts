@@ -1198,6 +1198,8 @@ type MotivoDeRechazo =
   | 'REJECTED_ORDER_NOT_FOUND'
   /** Rappi 2b: pedido de Rappi en efectivo (lo cobra el repartidor; se registra con «Cobrar» en efectivo). */
   | 'REJECTED_ORDER_RAPPI_CASH'
+  | 'REJECTED_EXCHANGE_CHARGE_MISMATCH'
+  | 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED'
 
 /** Lo que decide la transacción de admisión. El rechazo se DEVUELVE (no se lanza: el throw revertiría la lápida). */
 type Admision =
@@ -1247,6 +1249,18 @@ function errorDeLapida(row: { failureCode?: string | null; resultJson: Prisma.Js
   const mensaje = (porDefecto: string) =>
     typeof guardada.message === 'string' && guardada.message.length > 0 ? guardada.message : porDefecto
   switch (row.failureCode as MotivoDeRechazo) {
+    case 'REJECTED_EXCHANGE_CHARGE_MISMATCH':
+      return new BadRequestError(
+        mensaje('Este cobro debe ser la diferencia exacta del cambio, sin propina.'),
+        'EXCHANGE_CHARGE_MISMATCH',
+        details,
+      )
+    case 'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED':
+      return new ConflictError(
+        mensaje('La diferencia de este cambio ya tiene un cargo. Consulta su resultado.'),
+        'EXCHANGE_DIFFERENCE_ALREADY_CHARGED',
+        details,
+      )
     case 'REJECTED_TERMINAL_NOT_CONNECTED':
       return new TerminalUnavailableError(mensaje('La terminal no está conectada'), 404, 'TERMINAL_NOT_CONNECTED', details)
     case 'REJECTED_TERMINAL_NO_SOCKET':
@@ -1756,6 +1770,24 @@ class TerminalPaymentService {
             new ConflictError(MENSAJE_RAPPI_SOLO_EFECTIVO, 'RAPPI_CASH_ORDER_CASH_ONLY', detalles),
           )
         }
+        const exchange = await tx.exchange.findUnique({
+          where: { newOrderId: request.orderId, venueId },
+          select: { id: true, status: true, differenceAmount: true },
+        })
+        if (exchange) {
+          const { exchangeChargeEvidence } = await import('./exchanges/exchangeCharge')
+          const evidence = await exchangeChargeEvidence(tx, venueId, request.orderId)
+          if (evidence.kind === 'CHARGED' || (evidence.kind === 'UNRESOLVED' && evidence.positiveRequestId)) {
+            return rechazar(
+              'REJECTED_EXCHANGE_DIFFERENCE_ALREADY_CHARGED',
+              new ConflictError(
+                'La diferencia de este cambio ya tiene un cargo. Consulta su resultado antes de volver a pasar la tarjeta.',
+                'EXCHANGE_DIFFERENCE_ALREADY_CHARGED',
+                { ...detalles, exchangeId: exchange.id },
+              ),
+            )
+          }
+        }
         if (order.paymentStatus === 'PAID') {
           return rechazar(
             'REJECTED_ORDER_PAID',
@@ -1764,6 +1796,19 @@ class TerminalPaymentService {
               detalles,
             ),
           )
+        }
+        if (exchange?.status === 'PENDING_PAYMENT') {
+          const amountCents = exchange.differenceAmount.mul(100).toDecimalPlaces(0).toNumber()
+          if (request.amountCents !== amountCents || (request.tipCents ?? 0) !== 0) {
+            return rechazar(
+              'REJECTED_EXCHANGE_CHARGE_MISMATCH',
+              new BadRequestError(
+                `Este cobro es la diferencia de un cambio: se cobran exactamente $${exchange.differenceAmount.toFixed(2)}, sin propina.`,
+                'EXCHANGE_CHARGE_MISMATCH',
+                { ...detalles, exchangeId: exchange.id, amountCents, tipCents: 0 },
+              ),
+            )
+          }
         }
         const blocker = await tx.terminalPaymentRequest.findFirst({
           where: {

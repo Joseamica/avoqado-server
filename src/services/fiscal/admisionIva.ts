@@ -39,7 +39,7 @@ export async function bloquearOrdenParaFacturar(
 }
 
 /**
- * Recibe IDs únicos y ordenados. Plan 6b (D10): primero la admisión de cada organización involucrada (en orden), luego TODAS las órdenes y
+ * Recibe IDs únicos. Plan 6b (D10): primero la admisión de cada organización involucrada (en orden), luego TODAS las órdenes y
  * al final los productos en UNA pasada ascendente. Sin `venueId` (la cancelación) las órdenes se toman por id: sus ids salen del
  * manifiesto de UNA factura, y una orden que después se movió de negocio sigue siendo de ella (Ruling 4b-R13).
  * `productosExtra`: productos que el llamador va a escribir (el encendido: el producto que se edita) dentro de la misma pasada.
@@ -68,12 +68,13 @@ export async function bloquearOrdenesParaFacturar(
   // Un solo orden para todos los que piden varias: ascendente (el de JS; sólo este helper toma más de una).
   const admisiones = [...new Set([...antes, ...(opts.organizacionesExtra ?? [])])].sort()
   for (const organizationId of admisiones) await tomarAdmisionCompartida(tx, organizationId)
-  const PAGE = 100
-  for (let at = 0; at < ids.length; at += PAGE) {
-    const page = ids.slice(at, at + PAGE)
+  if (ids.length) {
     const donde =
-      venueId === undefined ? Prisma.sql`id = ANY(${page}::text[])` : Prisma.sql`"venueId" = ${venueId} AND id = ANY(${page}::text[])`
-    await tx.$queryRaw`SELECT id FROM "Order" WHERE ${donde} ORDER BY id ASC FOR UPDATE`
+      venueId === undefined ? Prisma.sql`id = ANY(${ids}::text[])` : Prisma.sql`"venueId" = ${venueId} AND id = ANY(${ids}::text[])`
+    // R5: un solo orden global (también entre las antiguas páginas); COUNT evita devolver todo el manifiesto a Node.
+    await tx.$queryRaw`SELECT COUNT(*) FROM (
+      SELECT id FROM "Order" WHERE ${donde} ORDER BY "createdAt" DESC, id DESC FOR UPDATE
+    ) AS locked_orders`
   }
   // Un negocio movido de organización entre la lectura y los candados: su admisión no la tenemos ⇒ 409 y se reintenta.
   if ((await organizaciones()).map(o => o.organizationId).join() !== antes.join()) throw negocioCambioDeOrganizacionError()

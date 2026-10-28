@@ -2,7 +2,7 @@ import type { CronJob } from 'cron'
 import logger from '../config/logger'
 import { logAction } from '../services/dashboard/activity-log.service'
 import { scheduleJob } from '../observability/jobContext'
-import { applySalePosting } from '../services/inventory/inventoryPosting.service'
+import { applySalePosting, applyCustomerReturnPosting } from '../services/inventory/inventoryPosting.service'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { DATABASE_JOB_SCHEDULES } from './jobSchedules'
@@ -37,6 +37,7 @@ interface SweepCandidate {
   venueId: string
   status: string
   attempts: number
+  effectKind: string
 }
 
 interface InventoryPostingSweeperDependencies {
@@ -45,6 +46,7 @@ interface InventoryPostingSweeperDependencies {
   now: () => Date
   retryEntry: typeof retry
   apply: typeof applySalePosting
+  applyReturn: typeof applyCustomerReturnPosting
 }
 
 const defaults: InventoryPostingSweeperDependencies = {
@@ -52,6 +54,7 @@ const defaults: InventoryPostingSweeperDependencies = {
   now: () => new Date(),
   retryEntry: retry,
   apply: applySalePosting,
+  applyReturn: applyCustomerReturnPosting,
 }
 
 export class InventoryPostingSweeperJob {
@@ -103,7 +106,7 @@ export class InventoryPostingSweeperJob {
                 { status: 'APPLYING', updatedAt: { lt: staleBefore } },
               ],
             },
-            select: { id: true, venueId: true, status: true, attempts: true },
+            select: { id: true, venueId: true, status: true, attempts: true, effectKind: true },
             orderBy: [{ updatedAt: 'asc' }, { id: 'asc' }],
             take: BATCH_LIMIT,
           }),
@@ -122,7 +125,10 @@ export class InventoryPostingSweeperJob {
 
       for (const candidate of candidates) {
         try {
-          const result = await this.dependencies.apply(candidate.id, null)
+          const result = await (candidate.effectKind === 'CUSTOMER_RETURN' ? this.dependencies.applyReturn : this.dependencies.apply)(
+            candidate.id,
+            null,
+          )
           if (result === null) {
             // Otro worker tiene el claim (o el posting ya no es reclamable).
             skipped += 1
@@ -132,7 +138,7 @@ export class InventoryPostingSweeperJob {
               postingId: candidate.id,
               venueId: candidate.venueId,
               previousStatus: candidate.status,
-              attempts: candidate.attempts + 1,
+              attempts: candidate.effectKind === 'CUSTOMER_RETURN' ? candidate.attempts : candidate.attempts + 1,
             })
           } else {
             partial += 1
@@ -141,13 +147,22 @@ export class InventoryPostingSweeperJob {
             // exclusión era silenciosa — la deducción-perdida-invisible exacta
             // que el outbox nació para eliminar. Se grita en el log Y en el
             // ActivityLog del venue (la bitácora que el dueño sí audita).
-            if (candidate.attempts + 1 >= MAX_ATTEMPTS) {
+            let attempts = candidate.attempts + 1
+            if (candidate.effectKind === 'CUSTOMER_RETURN' && attempts >= MAX_ATTEMPTS) {
+              // Esperar inventario apagado no suma fallos: sólo el contador guardado acredita el abandono.
+              const stored = await this.dependencies.prisma.inventoryPosting.findUnique({
+                where: { id: candidate.id },
+                select: { attempts: true },
+              })
+              attempts = stored?.attempts ?? candidate.attempts
+            }
+            if (attempts >= MAX_ATTEMPTS) {
               logger.error(
                 '🚨 [InventoryPostingSweeper] Posting ABANDONADO: alcanzó el tope de reintentos — requiere conciliación manual',
                 {
                   postingId: candidate.id,
                   venueId: candidate.venueId,
-                  attempts: candidate.attempts + 1,
+                  attempts,
                   maxAttempts: MAX_ATTEMPTS,
                 },
               )
@@ -156,7 +171,7 @@ export class InventoryPostingSweeperJob {
                 action: 'INVENTORY_POSTING_ABANDONED',
                 entity: 'InventoryPosting',
                 entityId: candidate.id,
-                data: { attempts: candidate.attempts + 1, maxAttempts: MAX_ATTEMPTS, previousStatus: candidate.status },
+                data: { attempts, maxAttempts: MAX_ATTEMPTS, previousStatus: candidate.status },
               })
             }
           }

@@ -11,7 +11,7 @@ try {
 if (
   !['postgres:', 'postgresql:'].includes(target.protocol) ||
   !['localhost', '127.0.0.1'].includes(target.hostname) ||
-  !/^\/avoqado_[a-z0-9]+_test_/.test(target.pathname) ||
+  !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(target.pathname) ||
   process.env.DATABASE_URL !== testDatabaseUrl
 ) {
   throw new Error('Owned local database and equal DATABASE_URL/TEST_DATABASE_URL required; URL withheld')
@@ -774,7 +774,7 @@ it('POS initially unbound classification still locks a concurrently joined table
     readRelease.resolve()
     const waiter = await observeBlockedBy(siblingPid)
     expect(waiter.pid).toBe(writerPid)
-    expect(waiter.query).toContain('ORDER BY id FOR UPDATE')
+    expect(waiter.query).toContain('ORDER BY "createdAt" DESC, id DESC FOR UPDATE')
     expect(await tableProbe(f.venueId, f.tableId)).toBe(true)
     evidence('pos-null-table-sibling', { writerPid, siblingPid, waiter, sourceId: source.id, siblingId: sibling.id })
     siblingRelease.resolve()
@@ -1410,7 +1410,7 @@ it('optional POS candidate deleted during the real Order claim retains only the 
     expect(blocked.pid).toBe(waiterPid)
     expect(blocked.blockers).toContain(holderPid)
     expect(blocked.query).toContain('FROM "Order"')
-    expect(blocked.query).toContain('ORDER BY id FOR UPDATE')
+    expect(blocked.query).toContain('ORDER BY "createdAt" DESC, id DESC FOR UPDATE')
     expect(claims.map(claim => claim.relation)).toEqual(['Venue', 'Order'])
     expect(claims[0].returnedIds).toEqual([f.venueId])
     expect(claims[1].boundValues).toEqual([f.venueId, [candidate.id]])

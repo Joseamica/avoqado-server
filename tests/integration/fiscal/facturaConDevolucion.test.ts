@@ -67,7 +67,7 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // Sólo una base local desechable (`avoqado_<tarea>_test_<fecha>` o una H1 validada); nunca `av-db-25`.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !(isDisposableH1Url(database) || /^\/avoqado_[a-z0-9]+_test_[0-9]+$/.test(database.pathname))
+  !(isDisposableH1Url(database) || /^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_[0-9]+$/.test(database.pathname))
 )
   throw new Error('Esta suite exige una base local desechable (avoqado_<tarea>_test_<fecha>).')
 

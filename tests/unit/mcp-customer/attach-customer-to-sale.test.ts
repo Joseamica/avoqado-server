@@ -189,6 +189,8 @@ describe('attach_customer_to_sale', () => {
     [{ decision: 'STAMPED' }, /no \(esta venta ya le sumó su sello a este cliente/],
     // Cierre de tarjetas 1a (punto 15): comprar tarjetas de regalo no suma sellos; la vista previa no promete uno.
     [{ decision: 'NOT_APPLICABLE' }, /no \(es una venta de tarjetas de regalo/],
+    // Cambio de producto: la venta nueva de un cambio no es una visita nueva; la diferencia cobrada sí da puntos.
+    [{ decision: 'NOT_APPLICABLE', esVentaNuevaDeCambio: true }, /no \(es la venta nueva de un cambio/],
     [{ decision: 'ELIGIBLE', dailyLimitReached: true }, /no \(ya recibió su sello de hoy/],
     [{ decision: 'ELIGIBLE', stampsEnabled: false }, /no \(el negocio no tiene activa la tarjeta de sellos/],
   ])('vista previa explica por qué no suma: %p', async (over, patron) => {
