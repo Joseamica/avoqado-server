@@ -1718,7 +1718,11 @@ ${t.textSignoff}
   }
 
   async sendEmailVerification(email: string, data: EmailVerificationData): Promise<boolean> {
-    const subject = `Verifica tu correo electronico`
+    // El código en el asunto: se lee en la notificación sin abrir el correo (como Google o Slack).
+    const subject = `${data.verificationCode} es tu código de Avoqado`
+    // «Usuario» era el relleno del registro directo, que no pide nombre: «Hola Usuario» se veía de robot.
+    const nombre = (data.firstName || '').trim()
+    const saludo = nombre && nombre !== 'Usuario' ? `Hola, ${nombre}:` : 'Hola:'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
 
     const html = `
@@ -1745,16 +1749,16 @@ ${t.textSignoff}
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola ${data.firstName},</p>
+      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">${saludo}</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electronico usando el siguiente codigo:
+        Gracias por registrarte en Avoqado. Para continuar, verifica tu correo con este código:
       </p>
     </div>
 
     <!-- Verification Code Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 32px; margin-bottom: 24px; text-align: center;">
       <p style="margin: 0 0 12px 0; font-size: 13px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;">
-        TU CODIGO DE VERIFICACION
+        TU CÓDIGO DE VERIFICACIÓN
       </p>
       <div style="font-size: 40px; font-weight: 600; color: #000; letter-spacing: 12px; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', monospace; line-height: 1.2;">
         ${data.verificationCode}
@@ -1764,10 +1768,10 @@ ${t.textSignoff}
     <!-- Warning -->
     <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
       <p style="font-size: 14px; color: #92400e; margin: 0 0 4px 0; font-weight: 500;">
-        Este codigo expirara en 10 minutos
+        Este código vence en 10 minutos
       </p>
       <p style="font-size: 13px; color: #92400e; margin: 0;">
-        Si no solicitaste este codigo, puedes ignorar este correo.
+        Si no lo pediste tú, ignora este correo.
       </p>
     </div>
 
@@ -1779,10 +1783,10 @@ ${t.textSignoff}
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Necesitas ayuda? Contactanos en cualquier momento.
+        ¿Necesitas ayuda? Escríbenos a hola@avoqado.io.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -1792,17 +1796,17 @@ ${t.textSignoff}
     `
 
     const text = `
-Hola ${data.firstName},
+${saludo}
 
-Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electronico usando el siguiente codigo:
+Gracias por registrarte en Avoqado. Para continuar, verifica tu correo con este código:
 
-Codigo de verificacion: ${data.verificationCode}
+Código de verificación: ${data.verificationCode}
 
-Este codigo expirara en 10 minutos.
+Este código vence en 10 minutos.
 
-Si no solicitaste este codigo, puedes ignorar este correo.
+Si no lo pediste tú, ignora este correo.
 
-Necesitas ayuda? Contactanos en cualquier momento.
+¿Necesitas ayuda? Escríbenos a hola@avoqado.io.
 
 Equipo de Avoqado
     `

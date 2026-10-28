@@ -21,6 +21,7 @@ import { motivoContrasenaInvalida } from '@/utils/contrasenaNueva'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
 import { firmarBoletoDeAlta, leerBoletoDeAlta } from './boletoDeAlta'
+import { avisarRegistroDirecto } from './avisoRegistroDirecto'
 import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
 export interface SignupInput {
@@ -313,14 +314,19 @@ export async function verifyEmailCode(email: string, verificationCode: string): 
   }
 
   // 6. Mark email as verified and clear verification fields
-  await prisma.staff.update({
-    where: { id: staff.id },
+  // Condicionada a que siga SIN verificar: dos verificaciones simultáneas con el mismo código pasan las dos la lectura
+  // de arriba, y sólo la que de verdad lo marcó avisa al equipo (Codex r1, 27-oct). La respuesta no cambia.
+  const marcada = await prisma.staff.updateMany({
+    where: { id: staff.id, emailVerified: false },
     data: {
       emailVerified: true,
       emailVerificationCode: null,
       emailVerificationExpires: null,
     },
   })
+
+  // Registro directo verificado: aviso al equipo y a HubSpot. Si la cuenta nació en la landing, el helper no avisa.
+  if (marcada.count === 1) void avisarRegistroDirecto(staff.id, 'correo')
 
   // 7. Generate JWT tokens for auto-login
   const orgId = await getPrimaryOrganizationId(staff.id)

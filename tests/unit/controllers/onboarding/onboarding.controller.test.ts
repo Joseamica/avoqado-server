@@ -29,7 +29,7 @@ jest.mock('../../../../src/services/onboarding/ensureVenue.service', () => ({
 }))
 jest.mock('../../../../src/utils/prismaClient', () => ({
   __esModule: true,
-  default: { launchCampaign: { findUnique: jest.fn() } },
+  default: { launchCampaign: { findUnique: jest.fn() }, organization: { findUnique: jest.fn() } },
 }))
 
 // Mock logger
@@ -172,6 +172,38 @@ describe('GET progress — planQuote', () => {
       annualNetCents: 1699000,
       intro: null,
     })
+  })
+})
+
+describe('GET progress — negocio sugerido (27-oct)', () => {
+  const pedir = async (acquisitionSource: string | null, org: { name: string; phone: string | null } | null) => {
+    const onboardingProgressService = jest.requireMock('../../../../src/services/onboarding/onboardingProgress.service')
+    const ensureVenue = jest.requireMock('../../../../src/services/onboarding/ensureVenue.service')
+    const prismaMock = jest.requireMock('../../../../src/utils/prismaClient').default
+    onboardingProgressService.getOnboardingProgress.mockResolvedValue({
+      id: 'p1',
+      currentStep: 0,
+      launchCampaignId: null,
+      termsVersion: null,
+      acquisitionSource,
+    })
+    onboardingProgressService.getOnboardingCompletionPercentage.mockResolvedValue(0)
+    onboardingProgressService.parseV2Step8.mockReturnValue(null)
+    ensureVenue.ensureVenueForOnboarding.mockResolvedValue(null)
+    prismaMock.organization.findUnique.mockResolvedValue(org)
+    const res = { status: jest.fn().mockReturnThis(), json: jest.fn().mockReturnThis() }
+    await getOnboardingProgress({ params: { organizationId: 'org_1' } } as unknown as Request, res as unknown as Response, jest.fn())
+    return res.json.mock.calls[0][0].progress
+  }
+
+  it('alta de la landing: regresa el nombre y el WhatsApp que ya escribió', async () => {
+    const progress = await pedir('landing_oferta', { name: 'Tacos Lupita', phone: '5512345678' })
+    expect(progress.suggestedBusiness).toEqual({ name: 'Tacos Lupita', phone: '5512345678' })
+  })
+
+  it('no sugiere el relleno «Nuevo Negocio» ni nada en el registro directo', async () => {
+    expect((await pedir('landing_contacto', { name: 'Nuevo Negocio', phone: '' })).suggestedBusiness).toBeUndefined()
+    expect((await pedir('dashboard_signup', { name: 'Algo', phone: null })).suggestedBusiness).toBeUndefined()
   })
 })
 

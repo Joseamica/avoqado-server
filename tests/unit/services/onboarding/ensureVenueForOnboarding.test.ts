@@ -105,6 +105,8 @@ describe('ensureVenueForOnboarding', () => {
         // Demo trials go through a different path.
         onboardingType: 'REAL',
         businessInfo: expect.objectContaining({ name: 'Pelusis Café' }),
+        // A medio camino del alta: sin bienvenida al cliente y con el aviso «empezó el alta» (26-oct).
+        provisional: true,
       }),
     )
   })
