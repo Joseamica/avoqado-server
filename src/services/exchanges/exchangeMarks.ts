@@ -13,7 +13,36 @@
  * 🔴 Toda marca con `OR` se compone dentro de `AND: [...]`: dos `OR` esparcidos en el mismo `where` se pisan sin error.
  */
 import { Prisma, TenderSystemKind } from '@prisma/client'
-import { ConflictError } from '@/errors/AppError'
+import { BadRequestError, ConflictError } from '@/errors/AppError'
+
+/** La llave de la venta nueva de un cambio: `exchange:<llave del cambio>` (`exchangeTx.createExchangeSaleInTx`). Es sólo del cambio. */
+const PREFIJO_DE_CAMBIO = 'exchange:'
+
+/**
+ * La venta nueva de un cambio que todavía espera el cobro de la diferencia: una cuenta `CONFIRMED/PENDING` con el precio COMPLETO,
+ * porque el crédito se aplica al cerrar. No se ofrece en las listas de cuentas abiertas (MKT_26_oct, codex-apps-viejas-r2, 28-oct):
+ * una TPV vieja o el POS la cobraban completa en vez de la diferencia. Cobrada vuelve a salir; soltada se cancela.
+ *
+ * Se filtra dentro de la MISMA consulta de órdenes, por su llave: sin una lectura previa no hay carrera con un cambio que nace en
+ * medio, ni tope (codex-apartada-r2). La llave está reservada (`rechazarLlaveDeCambio`), así que una cuenta normal no la puede traer
+ * (codex-apartada P2). Como fiado tampoco cuenta: nace `payLater=false`. NULL-safe. Lleva `OR`: va dentro de `AND: [...]`.
+ */
+export const WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO = {
+  OR: [
+    { externalId: null },
+    { NOT: { externalId: { startsWith: PREFIJO_DE_CAMBIO } } },
+    { paymentStatus: { notIn: ['PENDING', 'PARTIAL'] } },
+  ],
+} satisfies Prisma.OrderWhereInput
+
+/**
+ * Una app no puede crear una cuenta con la llave de un cambio: la idempotencia de crear cuenta le devolvería la cuenta apartada
+ * para cobrarla completa, y una cuenta suya con esa llave se escondería de las listas (codex-apartada P2).
+ */
+export function rechazarLlaveDeCambio(externalId: string | null | undefined): void {
+  if (externalId?.trim().startsWith(PREFIJO_DE_CAMBIO))
+    throw new BadRequestError('Ese identificador de cuenta está reservado para los cambios de producto.')
+}
 
 export const WHERE_PAYMENT_IS_EXCHANGE_CREDIT = {
   tenderType: { is: { systemKind: TenderSystemKind.EXCHANGE_CREDIT } },
