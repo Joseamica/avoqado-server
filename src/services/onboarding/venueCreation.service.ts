@@ -83,6 +83,12 @@ export interface CreateVenueInput {
     accountHolder: string
   }
   selectedFeatures?: string[]
+  /**
+   * El alta corta crea el negocio A MEDIO CAMINO (ensureVenueForOnboarding), antes del plan y la tarjeta. Entonces
+   * no se le da la bienvenida al cliente —creía que ya había terminado y no ponía la tarjeta (26-oct)— y el aviso
+   * interno dice «empezó el alta». La bienvenida real es el correo de confirmación del plan, al activarlo.
+   */
+  provisional?: boolean
   stripePaymentMethodId?: string // Payment method collected via Stripe Elements
   teamInvites?: Array<{
     email: string
@@ -122,6 +128,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     selectedFeatures,
     stripePaymentMethodId,
     teamInvites,
+    provisional = false,
   } = input
 
   // Generate unique slug
@@ -296,6 +303,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
         venueId: venue.id,
         venueName: venue.name,
         venueSlug: venue.slug,
+        stage: provisional ? 'STARTED' : 'COMPLETED',
         venueStatus,
         kycStatus,
         hasKycDocuments: Boolean(hasKycDocuments),
@@ -333,7 +341,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     //    next. Without this, completing onboarding lands them on a dashboard
     //    with no confirmation that anything happened on our side.
     //    Fire-and-forget; failure must NOT block onboarding.
-    if (ownerStaff?.email) {
+    //    Provisional (alta corta, antes del plan): no. Ver `CreateVenueInput.provisional`.
+    if (ownerStaff?.email && !provisional) {
       void resendService
         .sendOnboardingWelcomeEmail({
           ownerEmail: ownerStaff.email,

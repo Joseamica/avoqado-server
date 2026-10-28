@@ -22,6 +22,12 @@ jest.mock('../../../src/services/onboarding/onboardingProgress.service', () => (
 jest.mock('../../../src/services/onboarding/venueCreation.service', () => ({
   __esModule: true,
   createVenueFromOnboarding: jest.fn(),
+  applyBusinessInfoToVenue: jest.fn().mockResolvedValue(undefined),
+}))
+
+jest.mock('../../../src/services/resend.service', () => ({
+  __esModule: true,
+  sendOnboardingWelcomeEmail: jest.fn().mockResolvedValue(true),
 }))
 
 jest.mock('../../../src/services/onboarding/ensureVenue.service', () => ({
@@ -89,6 +95,7 @@ import * as venueCreationService from '../../../src/services/onboarding/venueCre
 import { resolvePlanNotificationTarget } from '../../../src/services/access/planNotification.service'
 import emailService from '../../../src/services/email.service'
 import prisma from '../../../src/utils/prismaClient'
+import * as resendService from '../../../src/services/resend.service'
 
 const VENUE = { id: 'venue_1', slug: 'bar-test', name: 'Bar Test' }
 
@@ -440,5 +447,56 @@ describe('completeV2Onboarding — plan confirmation email + venue.language', ()
     expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
     // language is still persisted, completion still succeeds
     expect(res.status).toHaveBeenCalledWith(201)
+  })
+})
+
+describe('completeV2Onboarding — bienvenida cuando el negocio ya existía (alta corta, 27-oct)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks()
+    ;(prisma.$transaction as jest.Mock).mockImplementation(async fn => fn(prisma))
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([])
+    ;(prisma.hybridPurchase.findFirst as jest.Mock).mockResolvedValue(null)
+    process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = 'true'
+  })
+
+  const conProvisional = (plan: Record<string, any>) => {
+    primeHappyPath(plan)
+    ;(prisma.venue.findFirst as jest.Mock).mockResolvedValue({ ...VENUE, status: 'ONBOARDING' })
+  }
+
+  it('termina sin plan (Gratis / Enterprise / compra híbrida): le llega la bienvenida, sin precios', async () => {
+    conProvisional({ tier: 'FREE', paymentMethodId: null, payNow: false })
+    const res = buildRes()
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, jest.fn())
+    await vaciarCorreo()
+
+    expect(res.status).toHaveBeenCalledWith(201)
+    expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
+    expect(resendService.sendOnboardingWelcomeEmail).toHaveBeenCalledTimes(1)
+    expect(resendService.sendOnboardingWelcomeEmail).toHaveBeenCalledWith(
+      expect.objectContaining({ ownerEmail: 'bar@test.com', venueSlug: 'bar-test' }),
+    )
+  })
+
+  it('este cierre cobró y mandó el correo del plan: no manda además la bienvenida', async () => {
+    conProvisional({})
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, buildRes() as Response, jest.fn())
+    await vaciarCorreo()
+
+    expect(emailService.sendPlanConfirmationEmail).toHaveBeenCalledTimes(1)
+    expect(resendService.sendOnboardingWelcomeEmail).not.toHaveBeenCalled()
+  })
+
+  it('el banco rechazó la tarjeta y termina en Gratis: le llega la bienvenida (Codex r2)', async () => {
+    conProvisional({})
+    ;(stripeService.createPlanSubscription as jest.Mock).mockRejectedValueOnce(
+      Object.assign(new Error('Your card was declined.'), { type: 'StripeCardError', code: 'card_declined' }),
+    )
+    const res = buildRes()
+    await completeV2Onboarding(buildReq({ language: 'es' }) as Request, res as Response, jest.fn())
+    await vaciarCorreo()
+
+    expect(emailService.sendPlanConfirmationEmail).not.toHaveBeenCalled()
+    expect(resendService.sendOnboardingWelcomeEmail).toHaveBeenCalledTimes(1)
   })
 })

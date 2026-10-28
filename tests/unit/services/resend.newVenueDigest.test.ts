@@ -96,6 +96,76 @@ describe('sendNewVenueOnboardingDigest', () => {
     expect(bodies).toContain('PERSONA_FISICA')
   })
 
+  it('alta corta a medio camino (STARTED): dice «empezó el alta», nunca «completó», y sin «undefined» del banco', async () => {
+    process.env.RESEND_API_KEY = 're_test_key'
+    mockSend.mockResolvedValue({ data: { id: 'resend-started' }, error: null })
+    const mod = await import('../../../src/services/resend.service')
+
+    // Así llega del alta corta: un bankInfo con campos vacíos (26-oct: «CLABE: undefined»).
+    await mod.sendNewVenueOnboardingDigest(
+      buildData({ stage: 'STARTED', paymentInfo: { clabe: undefined, bankName: null, accountHolder: undefined } }),
+    )
+
+    const args = mockSend.mock.calls[0][0]
+    expect(args.subject).toBe('Empezó el alta (falta el plan): AUTO DETAILING MEXA (Ensenada)')
+    const bodies = `${args.html}\n${args.text}`
+    expect(bodies).toContain('Todavía no elige plan ni pone su tarjeta')
+    expect(bodies).not.toContain('completó el wizard')
+    expect(bodies).not.toContain('undefined')
+    expect(bodies).not.toContain('CLABE')
+  })
+
+  it('sin etapa sigue diciendo «Nuevo venue» (el alta larga y la vieja no cambian)', async () => {
+    process.env.RESEND_API_KEY = 're_test_key'
+    mockSend.mockResolvedValue({ data: { id: 'resend-legacy' }, error: null })
+    const mod = await import('../../../src/services/resend.service')
+
+    await mod.sendNewVenueOnboardingDigest(buildData())
+
+    expect(mockSend.mock.calls[0][0].subject).toBe('Nuevo venue: AUTO DETAILING MEXA (Ensenada)')
+    expect(mockSend.mock.calls[0][0].text).toContain('completó el wizard de onboarding')
+  })
+
+  describe('sendPlanActivatedNotice', () => {
+    const aviso = {
+      venueId: 'cmpnplqwe0015no1s156beoay',
+      venueName: 'Tacos Lupita',
+      ownerEmail: 'lupita@example.com',
+      planName: 'Pro' as const,
+      payNow: true,
+      firstChargeCents: 1000,
+      nextChargeAt: '2026-11-27T18:00:00.000Z',
+      campaignCode: 'POS-10-REST',
+    }
+
+    it('avisa a onboarding@ quién terminó el alta, con plan, oferta y cobro', async () => {
+      process.env.RESEND_API_KEY = 're_test_key'
+      mockSend.mockResolvedValue({ data: { id: 'resend-activo' }, error: null })
+      const mod = await import('../../../src/services/resend.service')
+
+      expect(await mod.sendPlanActivatedNotice(aviso)).toBe(true)
+      const args = mockSend.mock.calls[0][0]
+      expect(args.to).toBe('onboarding@avoqado.io')
+      expect(args.subject).toBe('Activó su plan Pro: Tacos Lupita')
+      const bodies = `${args.html}\n${args.text}`
+      expect(bodies).toContain('POS-10-REST')
+      expect(bodies).toContain('Pagó hoy $10.00')
+      expect(bodies).toContain('lupita@example.com')
+      expect(args.subject).not.toMatch(/\p{Extended_Pictographic}/u)
+    })
+
+    it('prueba gratis: dice cuándo y cuánto es el primer cobro', async () => {
+      process.env.RESEND_API_KEY = 're_test_key'
+      mockSend.mockResolvedValue({ data: { id: 'resend-prueba' }, error: null })
+      const mod = await import('../../../src/services/resend.service')
+
+      await mod.sendPlanActivatedNotice({ ...aviso, payNow: false, firstChargeCents: 115884, campaignCode: null })
+      const text: string = mockSend.mock.calls[0][0].text
+      expect(text).toContain('Prueba gratis con tarjeta. Primer cobro: $1,158.84 el 27 de noviembre de 2026.')
+      expect(text).toContain('Oferta: Sin oferta')
+    })
+  })
+
   // -------------------------------------------------------------------------
   // EMAIL_STANDARDS.md compliance — every customer-visible/admin email must
   // match the Avoqado design system (logo header+footer, black CTA, no
@@ -136,7 +206,7 @@ describe('sendNewVenueOnboardingDigest', () => {
       const mod = await import('../../../src/services/resend.service')
       await mod.sendNewVenueOnboardingDigest(buildData())
       const html: string = mockSend.mock.calls[0][0].html
-      expect(html).toContain('Servicios Tecnologicos Avo S.A. de C.V.')
+      expect(html).toContain('Servicios Tecnológicos Avo S.A. de C.V.')
     })
 
     it('plain-text body is non-empty and includes the title', async () => {

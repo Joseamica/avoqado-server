@@ -12,6 +12,7 @@ import { assertCanAddSeatsBulk } from '../access/seatCap.service'
 import { logAction } from './activity-log.service'
 import { createSession } from '@/services/auth/session.service'
 import { crearNegocioNuevo, resolverAtribucionDelAlta, type AtribucionDelAlta } from '../onboarding/nuevoNegocio'
+import { avisarRegistroDirecto } from '../onboarding/avisoRegistroDirecto'
 
 /**
  * El sobre que SÓLO manda la pantalla de alta (`/signup` → «Continuar con Google»). Es lo que
@@ -253,6 +254,8 @@ export async function loginWithGoogle(
         organizationId: creado.organization.id,
         conCampana: !!atribucion.campanaId,
       })
+      // Registro directo con Google (ya viene verificado): aviso al equipo y a HubSpot.
+      void avisarRegistroDirecto(creado.staff.id, 'google')
       isNewUser = true
       businessCreated = true
     } else if (!invitation) {

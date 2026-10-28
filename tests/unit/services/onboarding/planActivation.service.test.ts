@@ -61,6 +61,11 @@ jest.mock('@/services/email.service', () => ({
   __esModule: true,
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
+jest.mock('@/services/resend.service', () => ({
+  __esModule: true,
+  sendPlanActivatedNotice: jest.fn().mockResolvedValue(true),
+  sendOnboardingWelcomeEmail: jest.fn().mockResolvedValue(true),
+}))
 
 import {
   activatePlan,
@@ -857,6 +862,14 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
 
     expect(mockSubCreate.mock.calls[0][0].trial_period_days).toBe(30)
     expect(mockSubCreate.mock.calls[0][0].discounts).toBeUndefined()
+
+    // Aviso al equipo (27-oct, Codex r1): en la prueba la factura de hoy vale $0; el aviso dice lo que se cobrará al
+    // terminar la prueba, como el correo del cliente, y nunca «Primer cobro: $0.00».
+    await new Promise(r => setImmediate(r))
+    const resend = jest.requireMock('@/services/resend.service')
+    expect(resend.sendPlanActivatedNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ payNow: false, firstChargeCents: 115884, planName: 'Pro', campaignCode: null }),
+    )
   })
 
   it('🔴 la promoción legacy NO se derrama a PREMIUM anual', async () => {
