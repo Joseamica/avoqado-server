@@ -53,26 +53,46 @@ const TOPE = 500
 
 /**
  * Codex rM2 #2: al cruzar «toda la venta devuelta», la terminal repone CADA pieza de la venta. Las que ya regresaron con un cambio
- * (no cancelado) no vuelven a entrar. `undefined` = la venta no tiene cambios y se repone como siempre. Rebasar el tope no adivina:
- * no se repone nada y queda en el log.
+ * no vuelven a entrar. Un cambio regresó sus piezas sólo si ya está APLICADO, o sea, si escribió sus devoluciones (CREDIT o
+ * DIFFERENCE, rM3): uno apartado esperando su cobro (PENDING_PAYMENT, o NEEDS_REVIEW nacido de ahí) todavía no las regresó.
+ * `undefined` = ningún cambio aplicado; se repone como siempre. Rebasar el tope no adivina: no se repone nada y queda en el log.
  */
 export async function piezasPorReponerTrasCambios(
-  db: Pick<Prisma.TransactionClient, 'exchange' | 'orderItem'>,
+  db: Pick<Prisma.TransactionClient, 'exchange' | 'orderItem' | 'payment'>,
   venueId: string,
   orderId: string,
 ): Promise<Array<{ orderItemId: string; quantity: number }> | undefined> {
+  const devoluciones = await db.payment.findMany({
+    where: {
+      venueId,
+      orderId,
+      type: 'REFUND',
+      status: 'COMPLETED',
+      AND: [
+        {
+          OR: [
+            { processorData: { path: ['exchange', 'role'], equals: EXCHANGE_REFUND_ROLE.CREDIT } },
+            { processorData: { path: ['exchange', 'role'], equals: EXCHANGE_REFUND_ROLE.DIFFERENCE } },
+          ],
+        },
+      ],
+    },
+    select: { amount: true, tipAmount: true, status: true, processorData: true },
+    take: TOPE + 1,
+  })
+  const aplicados = [...new Set(devoluciones.flatMap(d => marcaDeCambio(d)?.exchangeId ?? []))]
+  if (aplicados.length === 0) return undefined
   const cambios = await db.exchange.findMany({
-    where: { venueId, originalOrderId: orderId, status: { not: 'CANCELLED' } },
+    where: { venueId, originalOrderId: orderId, id: { in: aplicados } },
     select: { lines: true },
     take: TOPE + 1,
   })
-  if (cambios.length === 0) return undefined
   const renglones = await db.orderItem.findMany({
     where: { orderId, order: { venueId } },
     select: { id: true, quantity: true },
     take: TOPE + 1,
   })
-  if (cambios.length > TOPE || renglones.length > TOPE) {
+  if (devoluciones.length > TOPE || cambios.length > TOPE || renglones.length > TOPE) {
     logger.error('Venta con demasiados cambios o renglones: no se repone el inventario de la devolución completa', { venueId, orderId })
     return []
   }

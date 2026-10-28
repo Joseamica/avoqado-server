@@ -2,7 +2,8 @@ import prisma from '@/utils/prismaClient'
 import { createExchange } from '@/services/exchanges/exchange.service'
 import { recordRefund } from '@/services/tpv/refund.tpv.service'
 import { centavosYaDevueltos } from '@/services/shared/devueltoDeUnCobro'
-import { seedClothingSale } from './seedExchange'
+import { Prisma } from '@prisma/client'
+import { seedCardSale, seedClothingSale } from './seedExchange'
 
 jest.mock('@/communication/sockets', () => ({
   __esModule: true,
@@ -98,6 +99,29 @@ describe('devolución de la terminal después de un Cambio', () => {
     await terminalRefund(s, 50000)
     expect(await piezas()).toBe(antes + 2)
     expect((await prisma.exchange.findUniqueOrThrow({ where: { id: exchange.id } })).status).toBe('COMPLETED')
+  })
+
+  // Codex rM3: un Cambio que espera el cobro de la diferencia (PENDING_PAYMENT) todavía no regresó la prenda al inventario. Si la
+  // terminal devuelve toda la venta, esa prenda SÍ se repone.
+  it('un Cambio que todavía espera su cobro no cuenta como pieza regresada', async () => {
+    const c = await seedCardSale({ provider: 'ANGELPAY', amounts: [500] })
+    const s = c as unknown as Seed
+    fixtures.push(s)
+    await prisma.product.update({ where: { id: c.products[3].id }, data: { price: new Prisma.Decimal(600) } })
+    const piezas = async () => Number((await prisma.inventory.findUniqueOrThrow({ where: { productId: c.products[0].id } })).currentStock)
+    const antes = await piezas()
+    const { exchange } = await createExchange(
+      c.input(
+        c.body({
+          taken: [{ productId: c.products[3].id, quantity: 1 }],
+          settlement: { kind: 'COLLECT', method: 'CARD_TERMINAL', expectedDifferenceCents: 10000 },
+        }),
+      ),
+    )
+    expect(exchange.status).toBe('PENDING_PAYMENT')
+    expect(await piezas()).toBe(antes)
+    await terminalRefund(s, 50000)
+    expect(await piezas()).toBe(antes + 1)
   })
 
   it('sin Cambio, el exceso con tarjeta se rechaza igual que hoy', async () => {
