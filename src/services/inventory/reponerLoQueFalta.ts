@@ -5,8 +5,8 @@
  *
  * - «Salió» es la regla de HOY (`renglonesQueSeReponen`): no se cambia qué cuenta, así que nunca se repone más que hoy. Única
  *   excepción: la venta nueva de un cambio que nunca registró su venta no regresa nada.
- * - «Ya resuelto» son las líneas CUSTOMER_RETURN de la venta (las que se reponen y las `NO_REPONER`), más, para devoluciones
- *   anteriores a este arreglo, los artículos de las devoluciones sin anotación.
+ * - «Ya resuelto» son las líneas CUSTOMER_RETURN de la venta (las que se reponen y las `NO_REPONER`). Las devoluciones anteriores a
+ *   este arreglo no dejaron anotación y no se adivinan: para esas ventas, igual que hoy (decisión «A» del founder, 28-oct).
  * - Quien devuelve (la TPV, el panel o el POS, y el Cambio) lo calcula y anota DENTRO de su transacción, bajo el candado de la
  *   orden: dos devoluciones a la vez no reponen dos veces. El stock se aplica después del commit con `applyCustomerReturnPosting`.
  */
@@ -19,7 +19,7 @@ const TOPE = 500
 
 type Db = Pick<
   Prisma.TransactionClient,
-  'orderItem' | 'inventoryPosting' | 'inventoryPostingLine' | 'exchange' | 'payment' | 'inventoryMovement' | 'rawMaterialMovement' | 'product'
+  'orderItem' | 'inventoryPosting' | 'inventoryPostingLine' | 'exchange' | 'payment'
 >
 
 /**
@@ -92,100 +92,32 @@ async function nuncaSalio(db: Db, venueId: string, orderId: string): Promise<boo
 }
 
 /**
- * Lo ya resuelto de cada renglón. `sinContar` es la devolución EN CURSO: su fila ya existe pero su anotación todavía no (Codex c1
- * #1: el panel se contaba a sí mismo y no reponía nada). Rebasar el tope no adivina: devuelve `null` y quien llama no repone nada.
+ * Lo ya resuelto de cada renglón: las líneas CUSTOMER_RETURN de la venta (las que se reponen y las `NO_REPONER`). Las devoluciones
+ * anteriores a este arreglo no dejaron anotación y NO se adivinan (decisión «A» del founder, 28-oct, tras 3 rondas de Codex en las
+ * que cada regla para leerlas abría otro hueco): para esas ventas el comportamiento es el de hoy. Rebasar el tope no adivina:
+ * devuelve `null` y quien llama no repone nada.
  */
-async function yaResuelto(db: Db, venueId: string, orderId: string, sinContar?: string): Promise<Map<string, number> | null> {
+async function yaResuelto(db: Db, venueId: string, orderId: string): Promise<Map<string, number> | null> {
   const lineas = await db.inventoryPostingLine.findMany({
     where: { posting: { venueId, orderId, effectKind: 'CUSTOMER_RETURN' }, orderItemId: { not: null } },
-    select: { orderItemId: true, expectedQuantityBase: true, posting: { select: { sourceId: true } } },
+    select: { orderItemId: true, expectedQuantityBase: true },
     take: TOPE + 1,
   })
-  // Devoluciones anteriores a este arreglo: sus artículos cuentan como resueltos si la devolución no tiene anotación. Las de un
-  // cambio nunca caen aquí (el Cambio anota siempre, y no hay cambios anteriores a este arreglo en producción).
-  const devoluciones = await db.payment.findMany({
-    where: { venueId, orderId, type: 'REFUND', status: 'COMPLETED' },
-    select: { id: true, processorData: true },
-    take: TOPE + 1,
-  })
-  if (lineas.length > TOPE || devoluciones.length > TOPE) {
-    logger.error('Venta con demasiados regresos o devoluciones: no se repone nada', { venueId, orderId })
+  if (lineas.length > TOPE) {
+    logger.error('Venta con demasiados regresos anotados: no se repone nada', { venueId, orderId })
     return null
   }
   const resuelto = new Map<string, number>()
-  const suma = (orderItemId: string, cantidad: number) => resuelto.set(orderItemId, (resuelto.get(orderItemId) ?? 0) + cantidad)
-  for (const l of lineas) suma(l.orderItemId!, Number(l.expectedQuantityBase))
-  const anotadas = new Set(lineas.map(l => l.posting.sourceId))
-  type Datos = { exchange?: unknown; refundedItems?: Array<{ orderItemId?: unknown; productId?: unknown; quantity?: unknown }> } | null
-  const viejas = devoluciones.filter(d => {
-    const datos = d.processorData as Datos
-    return d.id !== sinContar && !anotadas.has(d.id) && !datos?.exchange && Array.isArray(datos?.refundedItems)
-  })
-  // Codex c1 #2 y c2: lo viejo se atribuye prenda por prenda, por SU movimiento de almacén (el `restockItem` de antes deja
-  // `reference` = la devolución): una pieza cuenta sólo con un movimiento de su producto y hasta esa cantidad. Una receta cuenta si
-  // la devolución movió insumos. Sin movimiento (no pidió reponer, o falló) la pieza sigue pendiente, igual que hoy. Si los
-  // movimientos no caben en la lectura no se adivina: `null`, y quien llama no repone nada.
-  const ids = viejas.map(d => d.id)
-  if (ids.length === 0) return resuelto
-  const piezas = await db.inventoryMovement.findMany({
-    where: { reference: { in: ids }, inventory: { venueId } },
-    select: { reference: true, quantity: true, inventory: { select: { productId: true } } },
-    take: TOPE + 1,
-  })
-  const insumos = await db.rawMaterialMovement.findMany({
-    where: { venueId, reference: { in: ids } },
-    select: { reference: true },
-    take: TOPE + 1,
-  })
-  if (piezas.length > TOPE || insumos.length > TOPE) {
-    logger.error('Venta con demasiados movimientos de devoluciones viejas: no se repone nada', { venueId, orderId })
-    return null
-  }
-  const conInsumos = new Set(insumos.map(m => m.reference))
-  const productosViejos = [
-    ...new Set(
-      viejas.flatMap(d => ((d.processorData as Datos)!.refundedItems ?? []).flatMap(i => (typeof i.productId === 'string' ? [i.productId] : []))),
-    ),
-  ]
-  const deReceta = new Set(
-    conInsumos.size && productosViejos.length
-      ? (
-          await db.product.findMany({
-            where: { venueId, id: { in: productosViejos }, inventoryMethod: 'RECIPE' },
-            select: { id: true },
-            take: productosViejos.length,
-          })
-        ).map(p => p.id)
-      : [],
-  )
-  for (const d of viejas) {
-    const disponible = new Map<string, number>()
-    for (const m of piezas)
-      if (m.reference === d.id && m.inventory.productId)
-        disponible.set(m.inventory.productId, (disponible.get(m.inventory.productId) ?? 0) + Math.abs(Number(m.quantity)))
-    const items = (d.processorData as Datos)!.refundedItems!
-    for (const item of items) {
-      if (typeof item.orderItemId !== 'string' || typeof item.quantity !== 'number' || !Number.isFinite(item.quantity)) continue
-      const productId = typeof item.productId === 'string' ? item.productId : null
-      const hay = productId ? (disponible.get(productId) ?? 0) : 0
-      if (hay > 0) {
-        const toma = Math.min(item.quantity, hay)
-        disponible.set(productId!, hay - toma)
-        suma(item.orderItemId, toma)
-      } else if (productId && deReceta.has(productId) && conInsumos.has(d.id)) {
-        suma(item.orderItemId, item.quantity)
-      }
-    }
-  }
+  for (const l of lineas) resuelto.set(l.orderItemId!, (resuelto.get(l.orderItemId!) ?? 0) + Number(l.expectedQuantityBase))
   return resuelto
 }
 
 /** Lo que falta por reponer de cada renglón de la venta (sólo los que tienen algo). */
-export async function faltaPorReponerEnTx(db: Db, venueId: string, orderId: string, sinContar?: string): Promise<Map<string, Falta>> {
+export async function faltaPorReponerEnTx(db: Db, venueId: string, orderId: string): Promise<Map<string, Falta>> {
   const falta = new Map<string, Falta>()
   const renglones = await renglonesQueSeReponen(db, venueId, orderId)
   if (renglones.length === 0 || (await nuncaSalio(db, venueId, orderId))) return falta
-  const resuelto = await yaResuelto(db, venueId, orderId, sinContar)
+  const resuelto = await yaResuelto(db, venueId, orderId)
   if (!resuelto) return falta
   for (const r of renglones) {
     const queda = Math.max(0, r.quantity - (resuelto.get(r.orderItemId) ?? 0))
@@ -290,7 +222,7 @@ export async function anotarRegresoDeLaVentaEnTx(
   tx: Prisma.TransactionClient,
   args: { venueId: string; orderId: string; refundPaymentId: string; staffId?: string | null },
 ): Promise<Regreso> {
-  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId, args.refundPaymentId)
+  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId)
   return anotarRegresoEnTx(tx, {
     ...args,
     motivo: 'Devolución: regresa al inventario',
@@ -314,7 +246,7 @@ export async function anotarRegresoDeArticulosEnTx(
     reponerIds: ReadonlySet<string>
   },
 ): Promise<Regreso> {
-  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId, args.refundPaymentId)
+  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId)
   const pedidos = new Map<string, number>()
   for (const a of args.articulos) pedidos.set(a.orderItemId, (pedidos.get(a.orderItemId) ?? 0) + a.quantity)
   const reponer: Array<{ orderItemId: string; productId: string; cantidad: number }> = []

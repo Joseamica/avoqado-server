@@ -255,39 +255,6 @@ describe('reponer lo que falta — Codex c1', () => {
   })
 })
 
-// Codex c2: lo viejo se atribuye prenda por prenda, por su propio movimiento.
-describe('reponer lo que falta — Codex c2', () => {
-  it('#1 una devolución vieja que repuso A pero no B: B sigue pendiente y la TPV la regresa', async () => {
-    const s = await seed({ card: true, quantity: 2 })
-    const b = await prisma.orderItem.create({
-      data: { orderId: s.order.id, productId: s.products[2].id, productName: 'Falda XL', quantity: 1, unitPrice: 0, taxAmount: 0, total: 0 },
-    })
-    const antesA = await stock(s.products[0].id)
-    const antesB = await stock(s.products[2].id)
-    const { refundId } = await issueRefund({
-      venueId: s.venueId,
-      staffId: s.staffId,
-      paymentId: s.payments[0].id,
-      reason: 'RETURNED_GOODS',
-      items: [
-        { orderItemId: s.order.items[0].id, quantity: 1 },
-        { orderItemId: b.id, quantity: 1 },
-      ],
-      restockItemIds: [s.order.items[0].id, b.id],
-    })
-    await asentado(s.order.id)
-    // Como antes del arreglo, y con la reposición de B fallida: sin posting; A sí movió el almacén, B no.
-    await prisma.inventoryPosting.deleteMany({ where: { orderId: s.order.id, effectKind: 'CUSTOMER_RETURN' } })
-    const invB = await prisma.inventory.findUniqueOrThrow({ where: { productId: s.products[2].id } })
-    await prisma.inventoryMovement.deleteMany({ where: { reference: refundId, inventoryId: invB.id } })
-    await prisma.inventory.update({ where: { productId: s.products[2].id }, data: { currentStock: antesB } })
-    await terminal(s, 50000)
-    await asentado(s.order.id)
-    expect(await stock(s.products[0].id)).toBe(antesA + 2)
-    expect(await stock(s.products[2].id)).toBe(antesB + 1)
-  })
-})
-
 describe('reponer lo que falta — igual que hoy', () => {
   it('la TPV devuelve toda una venta sin cambios: entran todas sus piezas', async () => {
     const s = await seed({ card: true, quantity: 2 })
@@ -314,7 +281,9 @@ describe('reponer lo que falta — igual que hoy', () => {
     expect(await stock(s.products[0].id)).toBe(antes + 1)
   })
 
-  it('una devolución vieja del panel que repuso sin anotación cuenta como resuelta', async () => {
+  // Límite conocido, decisión «A» del founder (28-oct): las devoluciones de ANTES de este arreglo no dejaron anotación y no se
+  // adivinan. Una vieja del panel que repuso una pieza, y después la TPV devuelve el resto: entran las dos otra vez, IGUAL QUE HOY.
+  it('límite conocido: una devolución vieja sin anotación no se ve, igual que hoy', async () => {
     const s = await seed({ card: true, quantity: 2 })
     const antes = await stock(s.products[0].id)
     await issueRefund({
@@ -330,6 +299,6 @@ describe('reponer lo que falta — igual que hoy', () => {
     await prisma.inventoryPosting.deleteMany({ where: { orderId: s.order.id, effectKind: 'CUSTOMER_RETURN' } })
     await terminal(s, 50000)
     await asentado(s.order.id)
-    expect(await stock(s.products[0].id)).toBe(antes + 2)
+    expect(await stock(s.products[0].id)).toBe(antes + 3)
   })
 })
