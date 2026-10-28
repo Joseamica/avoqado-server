@@ -5,6 +5,7 @@ import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
 import { isValidIANATimezone } from '../utils/sanitizeTimezone'
 import type { PriceSelection } from './launchCampaigns/publicPriceList.service'
+import { formatMoney } from './shared/receiptLayout/format'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
@@ -4588,11 +4589,8 @@ Servicios Tecnologicos Avo S.A. de C.V.`
    * 3 months on monthly). Money formatted via Intl.NumberFormat (es-MX/en-US, currency MXN).
    */
   async sendPlanConfirmationEmail(email: string, data: PlanConfirmationEmailData): Promise<boolean> {
-    const fmt = (cents: number) =>
-      new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
-        style: 'currency',
-        currency: 'MXN',
-      }).format(cents / 100)
+    // D13 (28-oct): sin Intl. En producción el ICU escribió «$1970.84» (sin coma de miles); `formatMoney` agrupa siempre.
+    const fmt = (cents: number) => formatMoney(cents)
     // 🔴 En la zona del NEGOCIO: con la del servidor (UTC), un cobro a las 20:00 de México se anunciaba para «mañana».
     const dateFormatted = data.firstChargeDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',
@@ -4816,10 +4814,8 @@ Equipo de Avoqado`
    * `trial_will_end` webhook (3 days before).
    */
   async sendPlanRenewalReminderEmail(email: string, data: PlanRenewalReminderEmailData): Promise<boolean> {
-    const amount = new Intl.NumberFormat(data.locale === 'en' ? 'en-US' : 'es-MX', {
-      style: 'currency',
-      currency: 'MXN',
-    }).format(data.amountCents / 100)
+    // D13 (28-oct): sin Intl, como la confirmación del plan (en producción el ICU no ponía la coma de miles).
+    const amount = formatMoney(data.amountCents)
     // Sin zona explícita la fecha salía en la del servidor (UTC en Render): un cobro a las 20:00 del 16 en CDMX decía «17».
     const dateFormatted = data.renewalDate.toLocaleDateString(data.locale === 'en' ? 'en-US' : 'es-MX', {
       year: 'numeric',

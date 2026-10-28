@@ -13,15 +13,7 @@ import logger from '@/config/logger'
 import * as resendService from '@/services/resend.service'
 import { sendLeadToHubspot } from '@/services/integrations/hubspot.client'
 import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
-
-function utmLegible(raw: unknown): string | null {
-  if (!raw || typeof raw !== 'object') return null
-  const u = raw as Record<string, unknown>
-  const partes = ['utm_source', 'utm_medium', 'utm_campaign']
-    .map(k => (typeof u[k] === 'string' && u[k] ? `${k}=${u[k]}` : null))
-    .filter(Boolean)
-  return partes.length > 0 ? partes.join(' · ') : null
-}
+import { referenteLegible, utmLegible } from './atribucionLegible'
 
 export async function avisarRegistroDirecto(staffId: string, metodo: 'correo' | 'google'): Promise<void> {
   try {
@@ -47,6 +39,7 @@ export async function avisarRegistroDirecto(staffId: string, metodo: 'correo' | 
         origen: progreso?.acquisitionSource ?? null,
         campanaUtm: utmLegible(progreso?.acquisitionUtm),
         ofertaCodigo: progreso?.launchCampaign?.code ?? null,
+        llegoDesde: referenteLegible(progreso?.acquisitionUtm),
       }),
       // Vacíos a propósito: `sendLeadToHubspot` quita los campos vacíos antes de mandarlos (el directo
       // no pide teléfono ni negocio). Si el formulario de HubSpot los exige, HubSpot lo rechaza y sólo
