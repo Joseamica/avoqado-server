@@ -61,7 +61,7 @@ import { applyPromotionToOrder, type PromotionSelection } from '../promotions/pr
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
-import { whereNoEsCuentaApartadaDeCambio } from '../exchanges/exchangeMarks'
+import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -121,7 +121,7 @@ export async function getOrders(
     // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
     thirdPartyCashDue: null,
     // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
-    AND: [await whereNoEsCuentaApartadaDeCambio(prisma, venueId)],
+    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO],
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list
@@ -380,6 +380,7 @@ export async function createOrder(venueId: string, input: CreateOrderInput): Pro
     `🆕 [ORDER SERVICE] Creating new order | venue=${venueId} | type=${input.orderType || 'DINE_IN'} | table=${input.tableId || 'none'} | source=${input.source || 'TPV'}`,
   )
 
+  rechazarLlaveDeCambio(input.externalId)
   if (input.externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: {
@@ -1001,6 +1002,7 @@ export async function createOrderWithItems(
   // un cliente que reintenta tras perder la respuesta debe recuperar SU orden,
   // no crear otra (que en free-cart significaba segunda deducción de stock).
   const externalId = input.externalId?.trim() || null
+  rechazarLlaveDeCambio(externalId)
   if (externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: { venueId_externalId: { venueId, externalId } },

@@ -1,8 +1,8 @@
 import { Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { createExchange } from '@/services/exchanges/exchange.service'
-import { getOrders } from '@/services/tpv/order.tpv.service'
-import { listOrders } from '@/services/mobile/order.mobile.service'
+import { createOrder as createTpvOrder, createOrderWithItems as createTpvOrderWithItems, getOrders } from '@/services/tpv/order.tpv.service'
+import { createOrderWithItems as createPosOrder, listOrders } from '@/services/mobile/order.mobile.service'
 import { sqlDeSaldosPendientesDeClientes } from '@/services/shared/customerSearch'
 import { seedCardSale } from './seedExchange'
 
@@ -26,7 +26,7 @@ afterAll(async () => {
 })
 
 describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
-  it('no sale en «Órdenes» de la TPV, en la lista del POS ni en la deuda del cliente; una cuenta abierta normal sí', async () => {
+  it('no sale en «Órdenes» de la TPV, en la lista del POS ni en la deuda del cliente, y su llave no se puede reusar; una cuenta normal sí', async () => {
     s = await seedCardSale({ provider: 'ANGELPAY', amounts: [500] })
     await prisma.product.update({ where: { id: s.products[3].id }, data: { price: new Prisma.Decimal(600) } })
     const { exchange } = await createExchange(
@@ -38,11 +38,9 @@ describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
       ),
     )
     expect(exchange.status).toBe('PENDING_PAYMENT')
-    // codex-apartada P2: una cuenta normal cuya llave empieza con «exchange:» (sin cambio detrás) sigue saliendo.
     const abierta = await prisma.order.create({
       data: {
         venueId: s.venueId,
-        externalId: `exchange:pedido-externo-${s.venueId}`,
         orderNumber: `ABIERTA-${s.venueId}`,
         type: 'TAKEOUT',
         source: 'AVOQADO_IOS',
@@ -70,5 +68,14 @@ describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
     expect(nueva.payLater).toBe(false)
     const saldos = await prisma.$queryRaw<{ saldo: Prisma.Decimal }[]>(sqlDeSaldosPendientesDeClientes(s.venueId, [s.customer.id]))
     expect(saldos.reduce((t, r) => t + Number(r.saldo), 0)).toBe(0)
+
+    // codex-apartada P2: la llave del cambio está reservada. Con ella, crear cuenta devolvía la apartada (idempotencia) para cobrarla.
+    const llave = (await prisma.order.findUniqueOrThrow({ where: { id: exchange.newOrderId } })).externalId!
+    for (const crear of [
+      () => createTpvOrder(s!.venueId, { externalId: llave, items: [] } as never),
+      () => createTpvOrderWithItems(s!.venueId, { externalId: ` ${llave}`, items: [] } as never),
+      () => createPosOrder(s!.venueId, { externalId: llave, items: [] } as never),
+    ])
+      await expect(crear()).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('reservado') })
   })
 })
