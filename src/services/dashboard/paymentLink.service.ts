@@ -828,10 +828,27 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
   const reglas = new Map(filas.map(f => [f.id, reglaDeFila(f)]))
   const ahora = new Date()
   const zona = venue?.timezone ?? 'America/Mexico_City'
+
+  // «Pagada el» del dashboard: el último cobro COMPLETADO de cada liga (también si después se archivó). Un solo agregado
+  // acotado a las ligas de esta página: una liga reutilizable con miles de cobros no trae sus cobros, sólo la fecha mayor.
+  const ultimosCobros =
+    paymentLinks.length > 0
+      ? await prisma.checkoutSession.groupBy({
+          by: ['paymentLinkId'],
+          where: { paymentLinkId: { in: paymentLinks.map(l => l.id) }, status: 'COMPLETED' },
+          _max: { completedAt: true },
+        })
+      : []
+  const pagadaEl = new Map(ultimosCobros.map(c => [c.paymentLinkId, c._max.completedAt]))
+
   const withDiscount = paymentLinks.map(l => {
     const foto = (l.discount as unknown as DescuentoDeLiga | null) ?? null
     const regla = foto?.discountId ? (reglas.get(foto.discountId) ?? MISSING_RULE) : null
-    return { ...l, ...vistaDeDescuento(foto, regla, l.amount != null ? Number(l.amount) : null, ahora, zona) }
+    return {
+      ...l,
+      ...vistaDeDescuento(foto, regla, l.amount != null ? Number(l.amount) : null, ahora, zona),
+      lastPaidAt: pagadaEl.get(l.id) ?? null,
+    }
   })
 
   return {
