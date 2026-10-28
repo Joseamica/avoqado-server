@@ -15,6 +15,20 @@
 import { Prisma, TenderSystemKind } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
 
+/**
+ * La venta nueva de un cambio que todavía espera el cobro de la diferencia: nace `CONFIRMED/PENDING` con el precio COMPLETO (el
+ * crédito se aplica al cerrar) y su `externalId` es `exchange:<llave>` (`exchangeTx.createExchangeSaleInTx`). No se ofrece en listas
+ * cobrables: una TPV vieja o el POS la cobraban completa en vez de la diferencia (MKT_26_oct, codex-apps-viejas-r2, 28-oct). Ya
+ * pagada vuelve a verse. NULL-safe: sin `externalId` cuenta. Lleva `OR`: va dentro de `AND: [...]`.
+ */
+export const WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO = {
+  OR: [
+    { externalId: null },
+    { NOT: { externalId: { startsWith: 'exchange:' } } },
+    { paymentStatus: { notIn: ['PENDING', 'PARTIAL'] } },
+  ],
+} satisfies Prisma.OrderWhereInput
+
 export const WHERE_PAYMENT_IS_EXCHANGE_CREDIT = {
   tenderType: { is: { systemKind: TenderSystemKind.EXCHANGE_CREDIT } },
 } satisfies Prisma.PaymentWhereInput

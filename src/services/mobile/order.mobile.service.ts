@@ -3,6 +3,7 @@ import type { HttpEnvelope } from './http-operation.mobile.service'
 import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type ExchangeTxEarly } from '../exchanges/exchangeTx'
 import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
 import { ExchangeError } from '../exchanges/exchangeErrors'
+import { WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
 import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
@@ -578,6 +579,8 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
   const where: any = {
     venueId,
     status: { not: 'DELETED' },
+    // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
+    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO],
   }
 
   // Filter by status if provided
