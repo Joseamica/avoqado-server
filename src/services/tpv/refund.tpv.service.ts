@@ -45,6 +45,7 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { centavosQueUsaronLosCambios, laTerminalYaDevolvio, mandarCambiosARevisarEnTx } from '../exchanges/exchangeTerminalRefund'
 
 /**
  * Refund request data from TPV Android app
@@ -445,7 +446,19 @@ export async function recordRefund(
   const alreadyRefunded = yaDevueltoCentsPrevuelo / 100
   const remainingRefundable = remainingRefundableCents / 100
 
-  if (esteReembolsoCentsPrevuelo > remainingRefundableCents) {
+  // Cambio de producto (rM1, decisión «A»): con tarjeta, el tope es lo que el BANCO todavía tiene; lo que un cambio usó sin pasar
+  // por el banco se lee sólo en este caso raro (el bloque bloqueado es quien decide).
+  const usadoPorCambiosPrevuelo =
+    esteReembolsoCentsPrevuelo > remainingRefundableCents && laTerminalYaDevolvio(originalPayment)
+      ? centavosQueUsaronLosCambios(
+          await prisma.payment.findMany({
+            where: { venueId, type: PaymentType.REFUND, processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId } },
+            select: { amount: true, tipAmount: true, status: true, processorData: true },
+            take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
+          }),
+        )
+      : 0
+  if (esteReembolsoCentsPrevuelo > remainingRefundableCents + usadoPorCambiosPrevuelo) {
     logger.error('Refund amount exceeds remaining refundable', {
       originalPaymentId: refundData.originalPaymentId,
       requestedRefund: refundAmountInPesos,
@@ -675,7 +688,7 @@ export async function recordRefund(
           type: PaymentType.REFUND,
           processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
         },
-        select: { amount: true, tipAmount: true, status: true },
+        select: { amount: true, tipAmount: true, status: true, processorData: true },
         take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
       })
 
@@ -719,9 +732,13 @@ export async function recordRefund(
       const lockedTotalCents = Math.round(Number(locked.amount) * 100) + Math.round(Number(locked.tipAmount ?? 0) * 100)
       const lockedRemainingCents = lockedTotalCents - lockedAlreadyRefundedCents
       const lockedRemaining = lockedRemainingCents / 100
-      if (esteReembolsoCents > lockedRemainingCents) {
+      // Cambio de producto (rM1, decisión «A»): el SDK ya devolvió. Si un cambio usó este cobro sin pasar por el banco, se anota
+      // hasta lo que el banco todavía tiene y el cambio va a revisar (`exchangeTerminalRefund.ts`).
+      const usadoPorCambios = laTerminalYaDevolvio(locked) ? centavosQueUsaronLosCambios(filasDeReembolso) : 0
+      if (esteReembolsoCents > lockedRemainingCents + usadoPorCambios) {
         throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
       }
+      const anotadaTrasUnCambio = esteReembolsoCents > lockedRemainingCents
 
       // ═══════════════════════════════════════════════════════════════════════
       // Turno del NEGOCIO: observar → reclamar OPEN o conciliar post-corte
@@ -1054,10 +1071,21 @@ export async function recordRefund(
         : { cuentaCancelada: false }
       // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
       await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
+      if (anotadaTrasUnCambio)
+        await mandarCambiosARevisarEnTx(tx, {
+          venueId,
+          filas: filasDeReembolso,
+          originalPaymentId: locked.id,
+          refundPaymentId: refundPayment.id,
+          refundCents: esteReembolsoCents,
+          staffId: userId ?? null,
+        })
 
       return {
         refundPayment,
         postCommitAuthority: Object.freeze({
+          // El cambio ya regresó su pieza al inventario: reponer «toda la venta» aquí la contaría dos veces. Lo decide quien revisa.
+          anotadaTrasUnCambio,
           orderId: locked.orderId,
           method: locked.method,
           fundsFlow: locked.fundsFlow,
@@ -1249,7 +1277,7 @@ export async function recordRefund(
   // only once the cumulative refunds reach the order total — i.e. the whole
   // order is reversed. Non-blocking (a restock failure must not fail the refund)
   // and processor-agnostic, so it covers both AngelPay and Blumon refunds.
-  if (postCommitAuthority.orderId && originalPayment.order) {
+  if (postCommitAuthority.orderId && originalPayment.order && !postCommitAuthority.anotadaTrasUnCambio) {
     try {
       const orderTotal = Number(originalPayment.order.total)
       if (orderTotal > 0) {
