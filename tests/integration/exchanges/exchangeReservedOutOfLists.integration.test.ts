@@ -4,6 +4,7 @@ import { createExchange } from '@/services/exchanges/exchange.service'
 import { createOrder as createTpvOrder, createOrderWithItems as createTpvOrderWithItems, getOrders } from '@/services/tpv/order.tpv.service'
 import { createOrderWithItems as createPosOrder, listOrders } from '@/services/mobile/order.mobile.service'
 import { sqlDeSaldosPendientesDeClientes } from '@/services/shared/customerSearch'
+import { processPosOrderEvent } from '@/services/pos-sync/posSyncOrder.service'
 import { seedCardSale } from './seedExchange'
 
 jest.mock('@/communication/sockets', () => ({
@@ -75,6 +76,8 @@ describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
       () => createTpvOrder(s!.venueId, { externalId: llave, items: [] } as never),
       () => createTpvOrderWithItems(s!.venueId, { externalId: ` ${llave}`, items: [] } as never),
       () => createPosOrder(s!.venueId, { externalId: llave, items: [] } as never),
+      // codex-apartada-r3: el puente de SoftRestaurant (RabbitMQ) también escribe `Order.externalId`.
+      () => processPosOrderEvent({ venueId: s!.venueId, orderData: { externalId: llave } } as never),
     ])
       await expect(crear()).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('reservado') })
   })
