@@ -10,7 +10,7 @@
 import prisma from '@/utils/prismaClient'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@/services/customer-display/canonicalHash'
-import { PaymentMethod, Prisma } from '@prisma/client'
+import { PaymentLinkStatus, PaymentMethod, Prisma } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
@@ -497,11 +497,28 @@ export interface UpdatePaymentLinkData {
   discount?: EntradaDescuento | null
 }
 
+/** Pestañas de la lista del dashboard. «used» no es un estado de la base: es una liga de un solo uso ya cobrada (sigue ACTIVE). */
+export type VistaDeLigas = 'all' | 'active' | 'used' | 'paused' | 'expired'
+
 export interface ListPaymentLinksFilters {
   status?: string
+  /** Varios estados a la vez (filtro «Estado» del dashboard); si viene, manda sobre `status`. */
+  statuses?: string[]
+  view?: VistaDeLigas
   search?: string
   limit?: number
   offset?: number
+  /** Contadores por pestaña y totales del conjunto filtrado: los pide la tabla del dashboard; el MCP y el chatbot no. */
+  withCounts?: boolean
+}
+
+const LIGA_USADA: Prisma.PaymentLinkWhereInput = { status: 'ACTIVE', isReusable: false, paymentCount: { gt: 0 } }
+const WHERE_DE_LA_VISTA: Record<VistaDeLigas, Prisma.PaymentLinkWhereInput | null> = {
+  all: null,
+  active: { status: 'ACTIVE', OR: [{ isReusable: true }, { paymentCount: 0 }] },
+  used: LIGA_USADA,
+  paused: { status: 'PAUSED' },
+  expired: { status: 'EXPIRED' },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -772,19 +789,26 @@ const MISSING_RULE = {
  * Lists payment links for a venue with filtering
  */
 export async function getPaymentLinks(venueId: string, filters: ListPaymentLinksFilters = {}) {
-  const { status, search } = filters
-  const limit = Number.isFinite(filters.limit) ? Math.min(100, Math.max(1, Math.floor(filters.limit!))) : 20
+  const { status, statuses, view, search, withCounts } = filters
+  // Tope 200 = la página más grande que ofrece la tabla del dashboard.
+  const limit = Number.isFinite(filters.limit) ? Math.min(200, Math.max(1, Math.floor(filters.limit!))) : 20
   const offset = Number.isFinite(filters.offset) ? Math.max(0, Math.floor(filters.offset!)) : 0
 
-  const where: Prisma.PaymentLinkWhereInput = { venueId }
+  // `base` = búsqueda y estados; `where` le suma la pestaña. Los contadores de las pestañas se sacan de `base`.
+  const base: Prisma.PaymentLinkWhereInput = { venueId }
 
-  if (status) {
-    where.status = status as any
+  if (statuses?.length) {
+    base.status = { in: statuses as PaymentLinkStatus[] }
+  } else if (status) {
+    base.status = status as any
   }
 
   if (search) {
-    where.title = { contains: search, mode: 'insensitive' }
+    base.title = { contains: search, mode: 'insensitive' }
   }
+
+  const deLaVista = view ? WHERE_DE_LA_VISTA[view] : null
+  const where: Prisma.PaymentLinkWhereInput = deLaVista ? { ...base, AND: [deLaVista] } : base
 
   const [paymentLinks, total] = await Promise.all([
     prisma.paymentLink.findMany({
@@ -851,12 +875,36 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
     }
   })
 
+  // Pestañas y tarjetas del dashboard con números del servidor (antes se contaban en el navegador sobre la página que llegó).
+  // Agregados exactos: un groupBy por estado, dos conteos y una suma; nunca se traen las filas.
+  let counts: Record<VistaDeLigas, number> | undefined
+  let summary: { totalCollected: number; paidLinks: number } | undefined
+  if (withCounts) {
+    const [porEstado, usadas, cobrado, conPago] = await Promise.all([
+      prisma.paymentLink.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+      prisma.paymentLink.count({ where: { AND: [base, LIGA_USADA] } }),
+      prisma.paymentLink.aggregate({ where, _sum: { totalCollected: true } }),
+      prisma.paymentLink.count({ where: { AND: [where, { paymentCount: { gt: 0 } }] } }),
+    ])
+    const deEstado = (s: PaymentLinkStatus) => porEstado.find(f => f.status === s)?._count._all ?? 0
+    counts = {
+      all: porEstado.reduce((suma, f) => suma + f._count._all, 0),
+      active: deEstado('ACTIVE') - usadas,
+      used: usadas,
+      paused: deEstado('PAUSED'),
+      expired: deEstado('EXPIRED'),
+    }
+    summary = { totalCollected: Number(cobrado._sum.totalCollected ?? 0), paidLinks: conPago }
+  }
+
   return {
     paymentLinks: withDiscount,
     total,
     limit,
     offset,
     hasMore: offset + limit < total,
+    ...(counts && { counts }),
+    ...(summary && { summary }),
   }
 }
 

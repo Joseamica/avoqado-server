@@ -365,12 +365,22 @@ export const sharePaymentLinkWhatsappSchema = z.object({
   }),
 })
 
+const PAYMENT_LINK_STATUSES = ['ACTIVE', 'PAUSED', 'EXPIRED', 'ARCHIVED'] as const
+
 export const listPaymentLinksSchema = z.object({
   params: z.object({
     venueId: z.string().min(1),
   }),
   query: z.object({
-    status: z.enum(['ACTIVE', 'PAUSED', 'EXPIRED', 'ARCHIVED']).optional(),
+    status: z.enum(PAYMENT_LINK_STATUSES).optional(),
+    /** Varios estados separados por coma (filtro «Estado» del dashboard), p. ej. `ACTIVE,PAUSED`. */
+    statuses: z
+      .string()
+      .transform(s => s.split(',').filter(Boolean))
+      .pipe(z.array(z.enum(PAYMENT_LINK_STATUSES)).max(PAYMENT_LINK_STATUSES.length))
+      .optional(),
+    /** Pestaña del dashboard; «used» = de un solo uso ya cobrada. */
+    view: z.enum(['all', 'active', 'used', 'paused', 'expired']).optional(),
     search: z.string().optional(),
     limit: z.string().transform(Number).optional(),
     offset: z.string().transform(Number).optional(),

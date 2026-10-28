@@ -704,14 +704,15 @@ describe('PaymentLink Service', () => {
 
   // ─── LIST ──────────────────────────────────────
   describe('getPaymentLinks', () => {
-    it('impone tope100 y orden estable sin ocultar total', async () => {
+    // Tope 200 = la página más grande que ofrece la tabla del dashboard (10…200); más grande se recorta, nunca se ignora.
+    it('impone tope200 y orden estable sin ocultar total', async () => {
       prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
-      prismaMock.paymentLink.count.mockResolvedValueOnce(150)
+      prismaMock.paymentLink.count.mockResolvedValueOnce(350)
       const result = await getPaymentLinks(VENUE_ID, { limit: 10000, offset: -5 })
       expect(prismaMock.paymentLink.findMany).toHaveBeenCalledWith(
-        expect.objectContaining({ take: 100, skip: 0, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
+        expect.objectContaining({ take: 200, skip: 0, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }] }),
       )
-      expect(result).toMatchObject({ limit: 100, offset: 0, total: 150, hasMore: true })
+      expect(result).toMatchObject({ limit: 200, offset: 0, total: 350, hasMore: true })
     })
 
     it('should return paginated links', async () => {
@@ -797,6 +798,88 @@ describe('PaymentLink Service', () => {
 
       expect(result.paymentLinks).toEqual([])
       expect(prismaMock.checkoutSession.groupBy.mock.calls).toHaveLength(0)
+    })
+
+    // ─── Pestañas, filtro de estados y contadores en el servidor (antes el dashboard filtraba y contaba sólo las 20 que le llegaban)
+    const whereDeLaLista = () => prismaMock.paymentLink.findMany.mock.calls[0][0]?.where
+    const USADA = { status: 'ACTIVE', isReusable: false, paymentCount: { gt: 0 } }
+
+    it('pestaña «used»: de un solo uso ya cobrada (sigue ACTIVE en la base), en el where del servidor', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(0)
+      await getPaymentLinks(VENUE_ID, { view: 'used' })
+      expect(whereDeLaLista()).toEqual({ venueId: VENUE_ID, AND: [USADA] })
+    })
+
+    it('pestaña «active»: ACTIVE sin las de un solo uso ya cobradas', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(0)
+      await getPaymentLinks(VENUE_ID, { view: 'active' })
+      expect(whereDeLaLista()).toEqual({
+        venueId: VENUE_ID,
+        AND: [{ status: 'ACTIVE', OR: [{ isReusable: true }, { paymentCount: 0 }] }],
+      })
+    })
+
+    it('pestañas «paused»/«expired» filtran su estado; «all» no agrega nada', async () => {
+      for (const [view, extra] of [
+        ['paused', { AND: [{ status: 'PAUSED' }] }],
+        ['expired', { AND: [{ status: 'EXPIRED' }] }],
+        ['all', {}],
+      ] as const) {
+        prismaMock.paymentLink.findMany.mockClear()
+        prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+        prismaMock.paymentLink.count.mockResolvedValueOnce(0)
+        await getPaymentLinks(VENUE_ID, { view })
+        expect(whereDeLaLista()).toEqual({ venueId: VENUE_ID, ...extra })
+      }
+    })
+
+    it('varios estados a la vez (filtro «Estado») van como status in, junto con la búsqueda', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(0)
+      await getPaymentLinks(VENUE_ID, { statuses: ['ACTIVE', 'PAUSED'], search: 'clase' })
+      expect(whereDeLaLista()).toEqual({
+        venueId: VENUE_ID,
+        status: { in: ['ACTIVE', 'PAUSED'] },
+        title: { contains: 'clase', mode: 'insensitive' },
+      })
+    })
+
+    it('withCounts: contadores por pestaña (sin la pestaña, con búsqueda y estados) y totales del conjunto filtrado', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count
+        .mockResolvedValueOnce(4) // total de la pestaña
+        .mockResolvedValueOnce(3) // usadas (para los contadores)
+        .mockResolvedValueOnce(2) // ligas con al menos un pago (tasa de uso)
+      prismaMock.paymentLink.groupBy.mockResolvedValueOnce([
+        { status: 'ACTIVE', _count: { _all: 5 } },
+        { status: 'PAUSED', _count: { _all: 2 } },
+        { status: 'ARCHIVED', _count: { _all: 1 } },
+      ] as any)
+      prismaMock.paymentLink.aggregate.mockResolvedValueOnce({ _sum: { totalCollected: new Decimal('1550.50') } } as any)
+
+      const result = await getPaymentLinks(VENUE_ID, { view: 'used', search: 'clase', withCounts: true })
+
+      expect(result.counts).toEqual({ all: 8, active: 2, used: 3, paused: 2, expired: 0 })
+      expect(result.summary).toEqual({ totalCollected: 1550.5, paidLinks: 2 })
+      const base = { venueId: VENUE_ID, title: { contains: 'clase', mode: 'insensitive' } }
+      expect(prismaMock.paymentLink.groupBy.mock.calls[0][0]).toEqual({ by: ['status'], where: base, _count: { _all: true } })
+      const conteos = prismaMock.paymentLink.count.mock.calls.map((c: unknown[]) => (c[0] as { where: unknown }).where)
+      expect(conteos).toContainEqual({ AND: [base, USADA] })
+      const filtrado = { ...base, AND: [USADA] }
+      expect(conteos).toContainEqual({ AND: [filtrado, { paymentCount: { gt: 0 } }] })
+      expect(prismaMock.paymentLink.aggregate.mock.calls[0][0]).toEqual({ where: filtrado, _sum: { totalCollected: true } })
+    })
+
+    it('sin withCounts (MCP, chatbot) no gasta las consultas de contadores', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(0)
+      const result = await getPaymentLinks(VENUE_ID, { view: 'active' })
+      expect(result.counts).toBeUndefined()
+      expect(result.summary).toBeUndefined()
+      expect(prismaMock.paymentLink.groupBy.mock.calls).toHaveLength(0)
+      expect(prismaMock.paymentLink.aggregate.mock.calls).toHaveLength(0)
     })
   })
 
