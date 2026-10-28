@@ -113,6 +113,8 @@ function armar() {
     create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
   }
   ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
+  // Cambio de producto (rM2 #2): la devolución completa pregunta qué piezas ya regresaron con un cambio; aquí, ninguno.
+  prismaMock.exchange.findMany.mockResolvedValue([])
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([original])
   return original

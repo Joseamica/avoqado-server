@@ -48,12 +48,53 @@ export function laTerminalYaDevolvio(cobro: TenderSemanticsPayment): boolean {
  * (CAS por `status` y `resultRevision`); uno pendiente de cobro, cancelado o ya en revisión sólo deja su línea en la bitácora,
  * porque cambiarle el estado rompería el cierre del cobro de la diferencia.
  */
+/** Tope de lecturas acotadas de este archivo: una venta de IQ tiene pocas piezas y pocos cambios. */
+const TOPE = 500
+
+/**
+ * Codex rM2 #2: al cruzar «toda la venta devuelta», la terminal repone CADA pieza de la venta. Las que ya regresaron con un cambio
+ * (no cancelado) no vuelven a entrar. `undefined` = la venta no tiene cambios y se repone como siempre. Rebasar el tope no adivina:
+ * no se repone nada y queda en el log.
+ */
+export async function piezasPorReponerTrasCambios(
+  db: Pick<Prisma.TransactionClient, 'exchange' | 'orderItem'>,
+  venueId: string,
+  orderId: string,
+): Promise<Array<{ orderItemId: string; quantity: number }> | undefined> {
+  const cambios = await db.exchange.findMany({
+    where: { venueId, originalOrderId: orderId, status: { not: 'CANCELLED' } },
+    select: { lines: true },
+    take: TOPE + 1,
+  })
+  if (cambios.length === 0) return undefined
+  const renglones = await db.orderItem.findMany({
+    where: { orderId, order: { venueId } },
+    select: { id: true, quantity: true },
+    take: TOPE + 1,
+  })
+  if (cambios.length > TOPE || renglones.length > TOPE) {
+    logger.error('Venta con demasiados cambios o renglones: no se repone el inventario de la devolución completa', { venueId, orderId })
+    return []
+  }
+  const regresadas = new Map<string, number>()
+  for (const cambio of cambios) {
+    const returned = (cambio.lines as { returned?: Array<{ orderItemId?: unknown; quantity?: unknown }> } | null)?.returned ?? []
+    for (const linea of returned)
+      if (typeof linea.orderItemId === 'string' && typeof linea.quantity === 'number' && Number.isFinite(linea.quantity))
+        regresadas.set(linea.orderItemId, (regresadas.get(linea.orderItemId) ?? 0) + linea.quantity)
+  }
+  return renglones.map(r => ({ orderItemId: r.id, quantity: Math.max(0, r.quantity - (regresadas.get(r.id) ?? 0)) }))
+}
+
 export async function mandarCambiosARevisarEnTx(
   tx: Prisma.TransactionClient,
   args: { venueId: string; filas: readonly FilaDeReembolso[]; originalPaymentId: string; refundPaymentId: string; refundCents: number; staffId: string | null },
 ): Promise<string[]> {
   const ids = [...new Set(args.filas.filter(f => f.status === 'COMPLETED').flatMap(f => marcaDeCambio(f)?.exchangeId ?? []))].sort()
   for (const exchangeId of ids) {
+    // Codex rM2 #1: apartada ANTES de leerla. Guardar la liga del recibo (`patchExchangePresentation`) sube `resultRevision`; leída
+    // sin candado, el CAS de abajo fallaba y el cambio se quedaba COMPLETED, fuera de «Cambios por revisar».
+    await tx.$queryRaw`SELECT id FROM "Exchange" WHERE id = ${exchangeId} AND "venueId" = ${args.venueId} FOR UPDATE`
     const actual = await tx.exchange.findFirst({
       where: { id: exchangeId, venueId: args.venueId },
       select: { status: true, resultRevision: true, result: true },

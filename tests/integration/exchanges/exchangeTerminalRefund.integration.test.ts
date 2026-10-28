@@ -86,6 +86,20 @@ describe('devolución de la terminal después de un Cambio', () => {
     expect((await prisma.exchange.findUniqueOrThrow({ where: { id: exchange.id } })).status).toBe('COMPLETED')
   })
 
+  // Codex rM2 #2: dos piezas, se cambia una (regresa al inventario) y la terminal devuelve EXACTO el resto. Al cruzar «toda la
+  // venta devuelta» se reponían las DOS piezas originales: una ya había regresado con el Cambio.
+  it('cambio de una pieza y devolución exacta del resto: sólo regresa la pieza que el Cambio no regresó', async () => {
+    const s = await seed({ card: true, quantity: 2 })
+    const piezas = async () => Number((await prisma.inventory.findUniqueOrThrow({ where: { productId: s.products[0].id } })).currentStock)
+    const antes = await piezas()
+    const { exchange } = await createExchange(s.input())
+    expect(exchange.status).toBe('COMPLETED')
+    expect(await piezas()).toBe(antes + 1)
+    await terminalRefund(s, 50000)
+    expect(await piezas()).toBe(antes + 2)
+    expect((await prisma.exchange.findUniqueOrThrow({ where: { id: exchange.id } })).status).toBe('COMPLETED')
+  })
+
   it('sin Cambio, el exceso con tarjeta se rechaza igual que hoy', async () => {
     const s = await seed({ card: true })
     await expect(terminalRefund(s, 50001)).rejects.toThrow(/exceeds remaining refundable/)

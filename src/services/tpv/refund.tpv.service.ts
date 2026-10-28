@@ -45,7 +45,12 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
-import { centavosQueUsaronLosCambios, laTerminalYaDevolvio, mandarCambiosARevisarEnTx } from '../exchanges/exchangeTerminalRefund'
+import {
+  centavosQueUsaronLosCambios,
+  laTerminalYaDevolvio,
+  mandarCambiosARevisarEnTx,
+  piezasPorReponerTrasCambios,
+} from '../exchanges/exchangeTerminalRefund'
 
 /**
  * Refund request data from TPV Android app
@@ -1304,6 +1309,8 @@ export async function recordRefund(
             orderId: postCommitAuthority.orderId,
             refundPaymentId: result.id,
             staffId: userId,
+            // Cambio de producto (rM2 #2): lo que ya regresó con un cambio no vuelve a entrar.
+            items: await piezasPorReponerTrasCambios(prisma, venueId, postCommitAuthority.orderId),
           })
           logger.info('Order fully refunded — inventory restocked', {
             orderId: postCommitAuthority.orderId,
