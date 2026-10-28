@@ -17,7 +17,10 @@ import { createCustomerReturnPostingInTx } from './inventoryPosting.service'
 
 const TOPE = 500
 
-type Db = Pick<Prisma.TransactionClient, 'orderItem' | 'inventoryPosting' | 'inventoryPostingLine' | 'exchange' | 'payment'>
+type Db = Pick<
+  Prisma.TransactionClient,
+  'orderItem' | 'inventoryPosting' | 'inventoryPostingLine' | 'exchange' | 'payment' | 'inventoryMovement' | 'rawMaterialMovement'
+>
 
 /**
  * CUÁNTO repone hoy cada renglón de la venta, sin escribir nada: la cantidad original (o la elegida en `items`), sin productos
@@ -88,8 +91,11 @@ async function nuncaSalio(db: Db, venueId: string, orderId: string): Promise<boo
   return !!cambio && (cambio.status === 'CANCELLED' || (cambio.status === 'NEEDS_REVIEW' && cambio.reviewReason === 'LATE_CHARGE_AFTER_RELEASE'))
 }
 
-/** Lo ya resuelto de cada renglón. Rebasar el tope no adivina: devuelve `null` y quien llama no repone nada. */
-async function yaResuelto(db: Db, venueId: string, orderId: string): Promise<Map<string, number> | null> {
+/**
+ * Lo ya resuelto de cada renglón. `sinContar` es la devolución EN CURSO: su fila ya existe pero su anotación todavía no (Codex c1
+ * #1: el panel se contaba a sí mismo y no reponía nada). Rebasar el tope no adivina: devuelve `null` y quien llama no repone nada.
+ */
+async function yaResuelto(db: Db, venueId: string, orderId: string, sinContar?: string): Promise<Map<string, number> | null> {
   const lineas = await db.inventoryPostingLine.findMany({
     where: { posting: { venueId, orderId, effectKind: 'CUSTOMER_RETURN' }, orderItemId: { not: null } },
     select: { orderItemId: true, expectedQuantityBase: true, posting: { select: { sourceId: true } } },
@@ -110,11 +116,32 @@ async function yaResuelto(db: Db, venueId: string, orderId: string): Promise<Map
   const suma = (orderItemId: string, cantidad: number) => resuelto.set(orderItemId, (resuelto.get(orderItemId) ?? 0) + cantidad)
   for (const l of lineas) suma(l.orderItemId!, Number(l.expectedQuantityBase))
   const anotadas = new Set(lineas.map(l => l.posting.sourceId))
-  for (const d of devoluciones) {
-    if (anotadas.has(d.id)) continue
-    const datos = d.processorData as { exchange?: unknown; refundedItems?: Array<{ orderItemId?: unknown; quantity?: unknown }> } | null
-    if (datos?.exchange || !Array.isArray(datos?.refundedItems)) continue
-    for (const item of datos.refundedItems)
+  type Datos = { exchange?: unknown; refundedItems?: Array<{ orderItemId?: unknown; quantity?: unknown }> } | null
+  const viejas = devoluciones.filter(d => {
+    const datos = d.processorData as Datos
+    return d.id !== sinContar && !anotadas.has(d.id) && !datos?.exchange && Array.isArray(datos?.refundedItems)
+  })
+  // Codex c1 #2: una devolución vieja cuenta sólo si de verdad movió el almacén (su `restockItem` deja el movimiento con
+  // `reference` = la devolución). Si pidió reponer y falló, o no pidió, la pieza sigue pendiente, igual que hoy.
+  const ids = viejas.map(d => d.id)
+  const conMovimiento = ids.length
+    ? new Set([
+        ...(
+          await db.inventoryMovement.findMany({
+            where: { reference: { in: ids }, inventory: { venueId } },
+            select: { reference: true },
+            take: TOPE + 1,
+          })
+        ).map(m => m.reference),
+        ...(
+          await db.rawMaterialMovement.findMany({ where: { venueId, reference: { in: ids } }, select: { reference: true }, take: TOPE + 1 })
+        ).map(m => m.reference),
+      ])
+    : new Set<string | null>()
+  for (const d of viejas) {
+    if (!conMovimiento.has(d.id)) continue
+    const datos = d.processorData as Datos
+    for (const item of datos!.refundedItems!)
       if (typeof item.orderItemId === 'string' && typeof item.quantity === 'number' && Number.isFinite(item.quantity))
         suma(item.orderItemId, item.quantity)
   }
@@ -122,11 +149,11 @@ async function yaResuelto(db: Db, venueId: string, orderId: string): Promise<Map
 }
 
 /** Lo que falta por reponer de cada renglón de la venta (sólo los que tienen algo). */
-export async function faltaPorReponerEnTx(db: Db, venueId: string, orderId: string): Promise<Map<string, Falta>> {
+export async function faltaPorReponerEnTx(db: Db, venueId: string, orderId: string, sinContar?: string): Promise<Map<string, Falta>> {
   const falta = new Map<string, Falta>()
   const renglones = await renglonesQueSeReponen(db, venueId, orderId)
   if (renglones.length === 0 || (await nuncaSalio(db, venueId, orderId))) return falta
-  const resuelto = await yaResuelto(db, venueId, orderId)
+  const resuelto = await yaResuelto(db, venueId, orderId, sinContar)
   if (!resuelto) return falta
   for (const r of renglones) {
     const queda = Math.max(0, r.quantity - (resuelto.get(r.orderItemId) ?? 0))
@@ -188,15 +215,22 @@ export async function anotarRegresoEnTx(
   const reponer = args.reponer.filter(r => r.cantidad > 0)
   const noReponer = args.noReponer.filter(r => r.cantidad > 0)
   if (reponer.length === 0 && noReponer.length === 0) return { postingId: null, recetas: [] }
-  const productIds = [...new Set(reponer.map(r => r.productId))]
-  const recetas = productIds.length
+  // Codex c1 #3: el producto se clasifica UNA vez (pieza o receta) y de esa lectura salen la elegibilidad de su línea y el camino
+  // de recetas; con dos lecturas, un cambio de método en medio regresaba la prenda por los dos caminos.
+  const productIds = [...new Set(reponer.filter(r => !r.eligibility).map(r => r.productId))]
+  const productos = productIds.length
     ? await tx.product.findMany({
-        where: { venueId: args.venueId, id: { in: productIds }, trackInventory: true, inventoryMethod: 'RECIPE' },
-        select: { id: true },
+        where: { venueId: args.venueId, id: { in: productIds } },
+        select: { id: true, trackInventory: true, inventoryMethod: true, inventory: { select: { id: true } } },
         take: productIds.length,
       })
     : []
-  const deReceta = new Set(recetas.map(p => p.id))
+  const porId = new Map(productos.map(p => [p.id, p]))
+  const deReceta = new Set(productos.filter(p => p.trackInventory && p.inventoryMethod === 'RECIPE').map(p => p.id))
+  const elegibilidad = (productId: string) => {
+    const p = porId.get(productId)
+    return { inventoryMethod: p?.inventoryMethod ?? null, eligible: !!(p?.trackInventory && p.inventoryMethod === 'QUANTITY' && p.inventory) }
+  }
   const posting = await createCustomerReturnPostingInTx(tx, {
     venueId: args.venueId,
     refundPaymentId: args.refundPaymentId,
@@ -204,13 +238,18 @@ export async function anotarRegresoEnTx(
     staffId: args.staffId,
     motivo: args.motivo,
     lines: [
-      ...reponer.map(r => ({ orderItemId: r.orderItemId, productId: r.productId, quantity: r.cantidad, eligibility: r.eligibility })),
+      ...reponer.map(r => ({
+        orderItemId: r.orderItemId,
+        productId: r.productId,
+        quantity: r.cantidad,
+        eligibility: r.eligibility ?? elegibilidad(r.productId),
+      })),
       ...noReponer.map(r => ({ orderItemId: r.orderItemId, productId: r.productId, quantity: r.cantidad, noReponer: { reason: 'NOT_RESTOCKED' } })),
     ],
   })
   return {
     postingId: posting?.id ?? null,
-    recetas: reponer.filter(r => deReceta.has(r.productId)).map(r => ({ orderItemId: r.orderItemId, quantity: r.cantidad })),
+    recetas: reponer.filter(r => !r.eligibility && deReceta.has(r.productId)).map(r => ({ orderItemId: r.orderItemId, quantity: r.cantidad })),
   }
 }
 
@@ -219,7 +258,7 @@ export async function anotarRegresoDeLaVentaEnTx(
   tx: Prisma.TransactionClient,
   args: { venueId: string; orderId: string; refundPaymentId: string; staffId?: string | null },
 ): Promise<Regreso> {
-  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId)
+  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId, args.refundPaymentId)
   return anotarRegresoEnTx(tx, {
     ...args,
     motivo: 'Devolución: regresa al inventario',
@@ -243,7 +282,7 @@ export async function anotarRegresoDeArticulosEnTx(
     reponerIds: ReadonlySet<string>
   },
 ): Promise<Regreso> {
-  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId)
+  const falta = await faltaPorReponerEnTx(tx, args.venueId, args.orderId, args.refundPaymentId)
   const pedidos = new Map<string, number>()
   for (const a of args.articulos) pedidos.set(a.orderItemId, (pedidos.get(a.orderItemId) ?? 0) + a.quantity)
   const reponer: Array<{ orderItemId: string; productId: string; cantidad: number }> = []

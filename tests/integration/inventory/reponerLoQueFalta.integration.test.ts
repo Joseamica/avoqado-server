@@ -161,14 +161,16 @@ describe('reponer lo que falta — los 6 casos de rM4', () => {
     await terminal(s, 50000)
     await asentado(s.order.id)
     expect(await stock(s.products[2].id)).toBe(antes + 1)
-    await createExchange(
+    // Codex c1: la prueba no debe tragarse un rechazo del cambio; si no termina, no demuestra nada.
+    const { exchange } = await createExchange(
       s.input(
         s.body({
           returned: [{ orderItemId: gratis.id, quantity: 1, restock: true, reason: 'SIZE' }],
           taken: [{ productId: s.products[3].id, quantity: 1 }],
         }),
       ),
-    ).catch(() => undefined)
+    )
+    expect(exchange.status).toBe('COMPLETED')
     await asentado(s.order.id)
     expect(await stock(s.products[2].id)).toBe(antes + 1)
   })
@@ -195,6 +197,59 @@ describe('reponer lo que falta — los 6 casos de rM4', () => {
     const s = await seed({ card: true, quantity: 2 })
     const antes = await stock(s.products[0].id)
     await Promise.all([terminal(s, 50000), terminal(s, 50000)])
+    await asentado(s.order.id)
+    expect(await stock(s.products[0].id)).toBe(antes + 2)
+  })
+})
+
+// Codex c1 (auditoría del código): los tres que rompían la promesa.
+describe('reponer lo que falta — Codex c1', () => {
+  const panel = (s: Seed, cantidad: number, reponer = true) =>
+    issueRefund({
+      venueId: s.venueId,
+      staffId: s.staffId,
+      paymentId: s.payments[0].id,
+      reason: 'RETURNED_GOODS',
+      items: [{ orderItemId: s.order.items[0].id, quantity: cantidad }],
+      ...(reponer ? { restockItemIds: [s.order.items[0].id] } : {}),
+    })
+
+  it('#1 el panel devuelve 1 de 1 con reponer: entra 1 (no se cuenta a sí mismo)', async () => {
+    const s = await seed({ card: true })
+    const antes = await stock(s.products[0].id)
+    await panel(s, 1)
+    await asentado(s.order.id)
+    expect(await stock(s.products[0].id)).toBe(antes + 1)
+  })
+
+  it('#1 dos devoluciones del panel sobre el mismo renglón: entran 2', async () => {
+    const s = await seed({ card: true, quantity: 2 })
+    const antes = await stock(s.products[0].id)
+    await panel(s, 1)
+    await panel(s, 1)
+    await asentado(s.order.id)
+    expect(await stock(s.products[0].id)).toBe(antes + 2)
+  })
+
+  it('#1 un cambio de una pieza y el panel devuelve la otra: entran 2', async () => {
+    const s = await seed({ card: true, quantity: 2 })
+    const antes = await stock(s.products[0].id)
+    await createExchange(s.input())
+    await panel(s, 1)
+    await asentado(s.order.id)
+    expect(await stock(s.products[0].id)).toBe(antes + 2)
+  })
+
+  it('#2 una devolución vieja que pidió reponer pero no movió el almacén no cuenta como regresada', async () => {
+    const s = await seed({ card: true, quantity: 2 })
+    const antes = await stock(s.products[0].id)
+    const { refundId } = await panel(s, 1)
+    await asentado(s.order.id)
+    // Como antes del arreglo, y con la reposición fallida: sin posting y sin movimiento; el almacén no se movió.
+    await prisma.inventoryPosting.deleteMany({ where: { orderId: s.order.id, effectKind: 'CUSTOMER_RETURN' } })
+    await prisma.inventoryMovement.deleteMany({ where: { reference: refundId } })
+    await prisma.inventory.update({ where: { productId: s.products[0].id }, data: { currentStock: antes } })
+    await terminal(s, 50000)
     await asentado(s.order.id)
     expect(await stock(s.products[0].id)).toBe(antes + 2)
   })
