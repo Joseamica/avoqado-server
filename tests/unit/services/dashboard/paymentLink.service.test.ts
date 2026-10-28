@@ -718,6 +718,7 @@ describe('PaymentLink Service', () => {
       const mockLinks = [createMockPaymentLink()]
       prismaMock.paymentLink.findMany.mockResolvedValueOnce(mockLinks)
       prismaMock.paymentLink.count.mockResolvedValueOnce(1)
+      prismaMock.checkoutSession.groupBy.mockResolvedValueOnce([] as any)
 
       const result = await getPaymentLinks(VENUE_ID)
 
@@ -757,6 +758,45 @@ describe('PaymentLink Service', () => {
           },
         }),
       )
+    })
+
+    // El dashboard muestra cuándo se pagó cada liga: la fecha del último cobro COMPLETADO, también si después se archivó.
+    it('trae lastPaidAt = último cobro completado de cada liga, en UNA consulta acotada a la página', async () => {
+      const pagadaAyer = new Date('2026-10-27T18:05:00.000Z')
+      const ultimoPago = new Date('2026-10-28T20:40:00.000Z')
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([
+        createMockPaymentLink({ id: 'pl-unica', status: 'ARCHIVED', isReusable: false, paymentCount: 1 }),
+        createMockPaymentLink({ id: 'pl-reusable', isReusable: true, paymentCount: 3 }),
+        createMockPaymentLink({ id: 'pl-sin-pago', paymentCount: 0 }),
+      ])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(3)
+      prismaMock.checkoutSession.groupBy.mockResolvedValueOnce([
+        { paymentLinkId: 'pl-unica', _max: { completedAt: pagadaAyer } },
+        { paymentLinkId: 'pl-reusable', _max: { completedAt: ultimoPago } },
+      ] as any)
+
+      const result = await getPaymentLinks(VENUE_ID)
+
+      // Se comparan los argumentos como datos simples: si la aserción falla, jest no intenta imprimir el mock profundo de Prisma.
+      const llamadas = prismaMock.checkoutSession.groupBy.mock.calls.map((c: unknown[]) => c[0])
+      expect(llamadas).toHaveLength(1)
+      expect(llamadas[0]).toEqual({
+        by: ['paymentLinkId'],
+        where: { paymentLinkId: { in: ['pl-unica', 'pl-reusable', 'pl-sin-pago'] }, status: 'COMPLETED' },
+        _max: { completedAt: true },
+      })
+      const porId = Object.fromEntries(result.paymentLinks.map(l => [l.id, l.lastPaidAt]))
+      expect(porId).toEqual({ 'pl-unica': pagadaAyer, 'pl-reusable': ultimoPago, 'pl-sin-pago': null })
+    })
+
+    it('sin ligas en la página no consulta los cobros', async () => {
+      prismaMock.paymentLink.findMany.mockResolvedValueOnce([])
+      prismaMock.paymentLink.count.mockResolvedValueOnce(0)
+
+      const result = await getPaymentLinks(VENUE_ID)
+
+      expect(result.paymentLinks).toEqual([])
+      expect(prismaMock.checkoutSession.groupBy.mock.calls).toHaveLength(0)
     })
   })
 
