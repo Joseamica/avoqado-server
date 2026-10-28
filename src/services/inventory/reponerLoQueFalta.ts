@@ -19,7 +19,7 @@ const TOPE = 500
 
 type Db = Pick<
   Prisma.TransactionClient,
-  'orderItem' | 'inventoryPosting' | 'inventoryPostingLine' | 'exchange' | 'payment' | 'inventoryMovement' | 'rawMaterialMovement'
+  'orderItem' | 'inventoryPosting' | 'inventoryPostingLine' | 'exchange' | 'payment' | 'inventoryMovement' | 'rawMaterialMovement' | 'product'
 >
 
 /**
@@ -116,34 +116,66 @@ async function yaResuelto(db: Db, venueId: string, orderId: string, sinContar?: 
   const suma = (orderItemId: string, cantidad: number) => resuelto.set(orderItemId, (resuelto.get(orderItemId) ?? 0) + cantidad)
   for (const l of lineas) suma(l.orderItemId!, Number(l.expectedQuantityBase))
   const anotadas = new Set(lineas.map(l => l.posting.sourceId))
-  type Datos = { exchange?: unknown; refundedItems?: Array<{ orderItemId?: unknown; quantity?: unknown }> } | null
+  type Datos = { exchange?: unknown; refundedItems?: Array<{ orderItemId?: unknown; productId?: unknown; quantity?: unknown }> } | null
   const viejas = devoluciones.filter(d => {
     const datos = d.processorData as Datos
     return d.id !== sinContar && !anotadas.has(d.id) && !datos?.exchange && Array.isArray(datos?.refundedItems)
   })
-  // Codex c1 #2: una devolución vieja cuenta sólo si de verdad movió el almacén (su `restockItem` deja el movimiento con
-  // `reference` = la devolución). Si pidió reponer y falló, o no pidió, la pieza sigue pendiente, igual que hoy.
+  // Codex c1 #2 y c2: lo viejo se atribuye prenda por prenda, por SU movimiento de almacén (el `restockItem` de antes deja
+  // `reference` = la devolución): una pieza cuenta sólo con un movimiento de su producto y hasta esa cantidad. Una receta cuenta si
+  // la devolución movió insumos. Sin movimiento (no pidió reponer, o falló) la pieza sigue pendiente, igual que hoy. Si los
+  // movimientos no caben en la lectura no se adivina: `null`, y quien llama no repone nada.
   const ids = viejas.map(d => d.id)
-  const conMovimiento = ids.length
-    ? new Set([
-        ...(
-          await db.inventoryMovement.findMany({
-            where: { reference: { in: ids }, inventory: { venueId } },
-            select: { reference: true },
-            take: TOPE + 1,
+  if (ids.length === 0) return resuelto
+  const piezas = await db.inventoryMovement.findMany({
+    where: { reference: { in: ids }, inventory: { venueId } },
+    select: { reference: true, quantity: true, inventory: { select: { productId: true } } },
+    take: TOPE + 1,
+  })
+  const insumos = await db.rawMaterialMovement.findMany({
+    where: { venueId, reference: { in: ids } },
+    select: { reference: true },
+    take: TOPE + 1,
+  })
+  if (piezas.length > TOPE || insumos.length > TOPE) {
+    logger.error('Venta con demasiados movimientos de devoluciones viejas: no se repone nada', { venueId, orderId })
+    return null
+  }
+  const conInsumos = new Set(insumos.map(m => m.reference))
+  const productosViejos = [
+    ...new Set(
+      viejas.flatMap(d => ((d.processorData as Datos)!.refundedItems ?? []).flatMap(i => (typeof i.productId === 'string' ? [i.productId] : []))),
+    ),
+  ]
+  const deReceta = new Set(
+    conInsumos.size && productosViejos.length
+      ? (
+          await db.product.findMany({
+            where: { venueId, id: { in: productosViejos }, inventoryMethod: 'RECIPE' },
+            select: { id: true },
+            take: productosViejos.length,
           })
-        ).map(m => m.reference),
-        ...(
-          await db.rawMaterialMovement.findMany({ where: { venueId, reference: { in: ids } }, select: { reference: true }, take: TOPE + 1 })
-        ).map(m => m.reference),
-      ])
-    : new Set<string | null>()
+        ).map(p => p.id)
+      : [],
+  )
   for (const d of viejas) {
-    if (!conMovimiento.has(d.id)) continue
-    const datos = d.processorData as Datos
-    for (const item of datos!.refundedItems!)
-      if (typeof item.orderItemId === 'string' && typeof item.quantity === 'number' && Number.isFinite(item.quantity))
+    const disponible = new Map<string, number>()
+    for (const m of piezas)
+      if (m.reference === d.id && m.inventory.productId)
+        disponible.set(m.inventory.productId, (disponible.get(m.inventory.productId) ?? 0) + Math.abs(Number(m.quantity)))
+    const items = (d.processorData as Datos)!.refundedItems!
+    for (const item of items) {
+      if (typeof item.orderItemId !== 'string' || typeof item.quantity !== 'number' || !Number.isFinite(item.quantity)) continue
+      const productId = typeof item.productId === 'string' ? item.productId : null
+      const hay = productId ? (disponible.get(productId) ?? 0) : 0
+      if (hay > 0) {
+        const toma = Math.min(item.quantity, hay)
+        disponible.set(productId!, hay - toma)
+        suma(item.orderItemId, toma)
+      } else if (productId && deReceta.has(productId) && conInsumos.has(d.id)) {
         suma(item.orderItemId, item.quantity)
+      }
+    }
   }
   return resuelto
 }
