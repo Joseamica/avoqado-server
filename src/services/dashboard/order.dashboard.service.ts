@@ -40,6 +40,7 @@ import { rechazarCobroNuevoSobreCancelada } from '../shared/cuentaCancelada'
 import { retirarComandasDeVentaAnulada } from '../kds/kitchenTicketAuthoring.service'
 import { desactivarSobresPendientesDeCuentaEnTx } from '../giftCards/cuentaDeTarjetas'
 import { formatoPesos } from '../giftCards/giftCardLimits'
+import { CAMPOS_DE_LA_REGLA, estadoDeFacturaDeLaVenta, FACTURAS_QUE_CUENTAN_DE_LA_VENTA } from '../fiscal/facturaDeLaVenta'
 
 /**
  * Flatten order modifiers from nested structure to flat array
@@ -63,6 +64,14 @@ function flattenOrderModifiers(order: any): any {
   }
 }
 
+/** Lo que el buscador de «Nueva factura» lee de cada venta. */
+function filaConFactura(
+  facturas: Array<{ id: string; replacesCfdiId: string | null; status: string; cancelStatus: string | null }> | undefined,
+) {
+  const estado = estadoDeFacturaDeLaVenta(facturas)
+  return { facturada: estado === 'VIGENTE', facturaEnCancelacion: estado === 'EN_CANCELACION' }
+}
+
 /** Valor sintético que manda el dashboard para «Venta sin productos»; no existe en `OrderType`. */
 export const FAST_TYPE_FILTER = 'FAST'
 export const FAST_ORDER_NUMBER_PREFIX = 'FAST-'
@@ -77,7 +86,22 @@ export interface OrderFilters {
   endDate?: string
 }
 
-export async function getOrders(venueId: string, page: number, pageSize: number, filters?: OrderFilters): Promise<PaginatedOrdersResponse> {
+export interface OrderListOptions {
+  /**
+   * «Nueva factura» (28-oct-2026): cada fila dice si la venta ya tiene su factura (`facturada`) o si su cancelación está en trámite
+   * (`facturaEnCancelacion`). Opt-in: sólo lo pide el buscador de Facturas, y el controlador sólo lo deja pasar con el tope de 100 por
+   * página (`paginated-v1`); el listado legado (hasta 10,000) y los demás llamadores no pagan la consulta extra.
+   */
+  conFactura?: boolean
+}
+
+export async function getOrders(
+  venueId: string,
+  page: number,
+  pageSize: number,
+  filters?: OrderFilters,
+  options: OrderListOptions = {},
+): Promise<PaginatedOrdersResponse> {
   if (!venueId) {
     throw new NotFoundError('Venue ID es requerido')
   }
@@ -120,6 +144,10 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
           where: { status: 'COMPLETED' },
           select: { amount: true, tipAmount: true, type: true },
         },
+        // ADITIVO y opt-in — «Nueva factura»: las facturas que deciden si la venta ya está facturada (la regla del candado de
+        // emisión, en `facturaDeLaVenta.ts`). Una consulta más por página (`orderId IN (…)`, índice `Cfdi(orderId)`), no N+1;
+        // una venta trae una o dos (con sustitución).
+        ...(options.conFactura ? { cfdis: { where: FACTURAS_QUE_CUENTAN_DE_LA_VENTA, select: CAMPOS_DE_LA_REGLA } } : {}),
       },
       // Desempate por id: con el tope de 100 el cliente pagina de verdad (ver payment.dashboard.service).
       orderBy: [{ updatedAt: 'desc' }, { id: 'desc' }],
@@ -132,12 +160,18 @@ export async function getOrders(venueId: string, page: number, pageSize: number,
   ])
 
   return {
-    // 🔴 ADITIVO: la fila sale igual que siempre MÁS `refundState`/`refundedAmount`.
-    // Los pagos se quitan a propósito — se leyeron para calcular el resumen, no
+    // 🔴 ADITIVO: la fila sale igual que siempre MÁS `refundState`/`refundedAmount` (y, sólo con `conFactura`, `facturada` y
+    // `facturaEnCancelacion`).
+    // Los pagos y las facturas se quitan a propósito — se leyeron para calcular el resumen, no
     // para engordar la lista con un array que esta pantalla no usa.
-    data: orders.map(({ payments, ...rest }: any) => {
+    data: orders.map(({ payments, cfdis, ...rest }: any) => {
       const refunds = summarizeRefunds(payments ?? [])
-      return { ...rest, refundState: refunds.refundState, refundedAmount: Number(refunds.refundedAmount) }
+      return {
+        ...rest,
+        refundState: refunds.refundState,
+        refundedAmount: Number(refunds.refundedAmount),
+        ...(options.conFactura ? filaConFactura(cfdis) : {}),
+      }
     }),
     meta: {
       total,

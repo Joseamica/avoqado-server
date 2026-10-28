@@ -11,6 +11,8 @@ import {
 } from '../../services/dashboard/export.helpers'
 import logger from '../../config/logger'
 import { tienePermisoEnVenue } from '../../middlewares/permissionFlag.middleware'
+import { venueHasFeatureAccess, venueIsExemptFromPlanGating } from '../../services/access/basePlan.service'
+import { esSuperadminReal } from '../../services/access/rolVigente'
 import * as orderSummaryService from '../../services/dashboard/orderSummary.dashboard.service'
 import {
   LIST_PAGE_SIZE_MAX,
@@ -25,6 +27,23 @@ import {
 const str = (v: unknown): string | undefined => (typeof v === 'string' && v !== '' ? v : undefined)
 /** CSV o parámetro repetido (arreglo): los dos caminos llegan a parseCsv. */
 const list = (v: unknown): string[] | undefined => (Array.isArray(v) ? parseCsv(v.map(String)) : parseCsv(str(v)))
+
+/**
+ * ¿Quien pide puede ver el estado fiscal de las ventas? Los mismos dos candados que `GET /cfdi`: `cfdi:view` y la función CFDI.
+ * Falla CERRADO (sin el dato), que aquí es el lado seguro: la lista sale igual que siempre.
+ */
+async function puedeVerFacturas(req: Request, venueId: string): Promise<boolean> {
+  try {
+    if (!(await tienePermisoEnVenue(req, 'cfdi:view'))) return false
+    // El mismo criterio que `checkFeatureAccess('CFDI')`: superadmin real (sin impersonar), exento, o con la función (Codex código r2 #2).
+    const authContext = (req as any).authContext
+    if (authContext?.userId && !authContext.isImpersonating && (await esSuperadminReal(authContext.userId))) return true
+    return (await venueIsExemptFromPlanGating(venueId)) || (await venueHasFeatureAccess(venueId, 'CFDI'))
+  } catch (error) {
+    logger.warn('[orders] no se pudo resolver el acceso a facturación; la lista sale sin el estado de la factura', { error })
+    return false
+  }
+}
 
 /** Los filtros del listado, tal como llegan en la query (CSV) → `OrderFilters`. */
 function orderFiltersFromQuery(q: Record<string, unknown>): orderDashboardService.OrderFilters {
@@ -47,7 +66,10 @@ export async function getOrdersData(req: Request<{ venueId: string }>, res: Resp
     const boundedResponse = q.responseMode === 'paginated-v1'
     const pageSize = boundedResponse ? clampPageSize(q.pageSize) : clampLegacyPageSize(q.pageSize)
 
-    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, orderFiltersFromQuery(q))
+    // «Nueva factura»: el estado de la factura de cada venta sólo con el tope de 100 por página (nunca en el listado legado), y sólo
+    // para quien puede ver facturas en un negocio con facturación: la ruta pide `orders:read`, no `cfdi:view` (Codex código r1 #3).
+    const conFactura = boundedResponse && q.conFactura === '1' && (await puedeVerFacturas(req, venueId))
+    const ordersData = await orderDashboardService.getOrders(venueId, page, pageSize, orderFiltersFromQuery(q), { conFactura })
 
     res.status(200).json({
       ...ordersData,
