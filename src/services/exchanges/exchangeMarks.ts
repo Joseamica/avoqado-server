@@ -16,18 +16,17 @@ import { Prisma, TenderSystemKind } from '@prisma/client'
 import { ConflictError } from '@/errors/AppError'
 
 /**
- * La venta nueva de un cambio que todavía espera el cobro de la diferencia: nace `CONFIRMED/PENDING` con el precio COMPLETO (el
- * crédito se aplica al cerrar) y su `externalId` es `exchange:<llave>` (`exchangeTx.createExchangeSaleInTx`). No se ofrece en listas
- * cobrables: una TPV vieja o el POS la cobraban completa en vez de la diferencia (MKT_26_oct, codex-apps-viejas-r2, 28-oct). Ya
- * pagada vuelve a verse. NULL-safe: sin `externalId` cuenta. Lleva `OR`: va dentro de `AND: [...]`.
+ * La venta nueva de un cambio que todavía espera el cobro de la diferencia (`Exchange.status = PENDING_PAYMENT`): una cuenta
+ * `CONFIRMED/PENDING` con el precio COMPLETO, porque el crédito se aplica al cerrar. No se ofrece en las listas de cuentas abiertas
+ * (MKT_26_oct, codex-apps-viejas-r2, 28-oct): una TPV vieja o el POS la cobraban completa en vez de la diferencia. Se reconoce por el
+ * cambio, no por la llave (codex-apartada): una cuenta normal con `externalId` «exchange:…» sigue saliendo. Cobrada o soltada (al
+ * soltarla se cancela), vuelve a la regla de siempre. Como fiado no cuenta: nace `payLater=false` (`createExchangeSaleInTx`).
  */
-export const WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO = {
-  OR: [
-    { externalId: null },
-    { NOT: { externalId: { startsWith: 'exchange:' } } },
-    { paymentStatus: { notIn: ['PENDING', 'PARTIAL'] } },
-  ],
-} satisfies Prisma.OrderWhereInput
+export async function whereNoEsCuentaApartadaDeCambio(db: Prisma.TransactionClient, venueId: string): Promise<Prisma.OrderWhereInput> {
+  // ponytail: tope de 500 apartadas por negocio; el barrido suelta cada una en minutos, así que en la práctica son 0 o 1.
+  const apartadas = await db.exchange.findMany({ where: { venueId, status: 'PENDING_PAYMENT' }, select: { newOrderId: true }, take: 500 })
+  return { id: { notIn: apartadas.map(x => x.newOrderId) } }
+}
 
 export const WHERE_PAYMENT_IS_EXCHANGE_CREDIT = {
   tenderType: { is: { systemKind: TenderSystemKind.EXCHANGE_CREDIT } },

@@ -61,7 +61,7 @@ import { applyPromotionToOrder, type PromotionSelection } from '../promotions/pr
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
 import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
-import { WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import { whereNoEsCuentaApartadaDeCambio } from '../exchanges/exchangeMarks'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -121,7 +121,7 @@ export async function getOrders(
     // (terceros → propina → venta). Esta lista legacy no tiene ese reparto, así que no lo ofrece.
     thirdPartyCashDue: null,
     // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
-    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO],
+    AND: [await whereNoEsCuentaApartadaDeCambio(prisma, venueId)],
   }
 
   // 🥝 KIOSK filtering: Exclude abandoned KIOSK orders from regular TPV order list

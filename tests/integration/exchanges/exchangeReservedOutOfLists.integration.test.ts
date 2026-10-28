@@ -3,6 +3,7 @@ import prisma from '@/utils/prismaClient'
 import { createExchange } from '@/services/exchanges/exchange.service'
 import { getOrders } from '@/services/tpv/order.tpv.service'
 import { listOrders } from '@/services/mobile/order.mobile.service'
+import { sqlDeSaldosPendientesDeClientes } from '@/services/shared/customerSearch'
 import { seedCardSale } from './seedExchange'
 
 jest.mock('@/communication/sockets', () => ({
@@ -25,7 +26,7 @@ afterAll(async () => {
 })
 
 describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
-  it('no sale en «Órdenes» de la TPV ni en las cuentas por cobrar del POS; una cuenta abierta normal sí', async () => {
+  it('no sale en «Órdenes» de la TPV, en la lista del POS ni en la deuda del cliente; una cuenta abierta normal sí', async () => {
     s = await seedCardSale({ provider: 'ANGELPAY', amounts: [500] })
     await prisma.product.update({ where: { id: s.products[3].id }, data: { price: new Prisma.Decimal(600) } })
     const { exchange } = await createExchange(
@@ -37,9 +38,11 @@ describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
       ),
     )
     expect(exchange.status).toBe('PENDING_PAYMENT')
+    // codex-apartada P2: una cuenta normal cuya llave empieza con «exchange:» (sin cambio detrás) sigue saliendo.
     const abierta = await prisma.order.create({
       data: {
         venueId: s.venueId,
+        externalId: `exchange:pedido-externo-${s.venueId}`,
         orderNumber: `ABIERTA-${s.venueId}`,
         type: 'TAKEOUT',
         source: 'AVOQADO_IOS',
@@ -60,5 +63,12 @@ describe('la cuenta apartada de un cambio no se ofrece para cobrar', () => {
     const pos = (await listOrders(s.venueId, { page: 1, pageSize: 50, paymentStatus: 'PENDING,PARTIAL' })).data.map(o => o.id)
     expect(pos).toContain(abierta.id)
     expect(pos).not.toContain(exchange.newOrderId)
+
+    // codex-apartada P1: tampoco es fiado. Va ligada al cliente, pero su deuda (y «Liquidar saldo», que usa la misma regla) no la cuenta.
+    const nueva = await prisma.order.findUniqueOrThrow({ where: { id: exchange.newOrderId }, include: { orderCustomers: true } })
+    expect(nueva.orderCustomers.map(c => c.customerId)).toContain(s.customer.id)
+    expect(nueva.payLater).toBe(false)
+    const saldos = await prisma.$queryRaw<{ saldo: Prisma.Decimal }[]>(sqlDeSaldosPendientesDeClientes(s.venueId, [s.customer.id]))
+    expect(saldos.reduce((t, r) => t + Number(r.saldo), 0)).toBe(0)
   })
 })

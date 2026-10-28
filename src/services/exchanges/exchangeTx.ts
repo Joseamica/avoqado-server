@@ -717,6 +717,8 @@ async function createExchangeSaleInTx(
       source: sale.order.source as OrderSource,
       status: 'CONFIRMED',
       paymentStatus: 'PENDING',
+      // Se cobra en el momento (la diferencia, en la terminal), nunca es fiado: la deuda del cliente y «Liquidar saldo» no la cuentan.
+      payLater: false,
       kitchenStatus: 'SERVED',
       contratoDePrecio: 'IVA_INCLUIDO',
       taxAmount: pesos(0),
