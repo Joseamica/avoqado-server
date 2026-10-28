@@ -26,7 +26,8 @@ jest.mock('@/jwt.service', () => ({
 
 import * as jwtService from '@/jwt.service'
 import { GoneError } from '@/errors/AppError'
-import { firmarBoletoDeAlta } from '@/services/onboarding/boletoDeAlta'
+import { firmarBoletoDeAlta, huellaDeContrasena } from '@/services/onboarding/boletoDeAlta'
+import prisma from '@/utils/prismaClient'
 import { canjearBoletoDeAlta, tokensDeDuenoSinSucursal } from '@/services/onboarding/signup.service'
 
 async function codigoDelError(p: Promise<unknown>): Promise<string | undefined> {
@@ -128,5 +129,61 @@ describe('canjearBoletoDeAlta', () => {
     } finally {
       jest.useRealTimers()
     }
+  })
+})
+
+describe('🔴 Codex r3/r4 (D10): el boleto de «Crear contraseña y entrar» sólo vale con la cuenta EXACTAMENTE como la dejó ese cambio', () => {
+  const CAMBIO = new Date('2026-10-28T16:00:00.000Z').getTime()
+  const HASH = '$2b$10$hashDeLaRecuperacion'
+  const autorizacion = { cambioMs: CAMBIO, huella: huellaDeContrasena(HASH) }
+
+  beforeEach(() => {
+    ;(prisma.staff.findUnique as jest.Mock).mockReset().mockResolvedValue({ password: HASH })
+  })
+
+  it('el canje exige ESE cambio, ESA contraseña y ninguna revocación en ese momento o después', async () => {
+    const boleto = firmarBoletoDeAlta('staff-1', 'dueno@tacos.mx', autorizacion)
+
+    await expect(canjearBoletoDeAlta(boleto)).resolves.toEqual({ accessToken: 'access-tok', refreshToken: 'refresh-tok' })
+
+    const where = mockUpdateMany.mock.calls[0][0].where
+    expect(where.AND).toEqual(
+      expect.arrayContaining([
+        { lastPasswordReset: new Date(CAMBIO) },
+        { password: HASH },
+        // 🔴 Estricto: una revocación en el MISMO milisegundo también lo invalida (Codex r4).
+        { OR: [{ sessionsRevokedAt: null }, { sessionsRevokedAt: { lt: new Date(CAMBIO) } }] },
+      ]),
+    )
+  })
+
+  it('🔴 otra contraseña (aunque la hora del cambio coincida al milisegundo) → BOLETO_USADO', async () => {
+    const boleto = firmarBoletoDeAlta('staff-1', 'dueno@tacos.mx', autorizacion)
+    ;(prisma.staff.findUnique as jest.Mock).mockResolvedValue({ password: '$2b$10$otraContrasenaDeSoporte' })
+
+    expect(await codigoDelError(canjearBoletoDeAlta(boleto))).toBe('BOLETO_USADO')
+    expect(mockUpdateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un cambio guardado DESPUÉS de firmar lo invalida en la revisión final', async () => {
+    const boleto = firmarBoletoDeAlta('staff-1', 'dueno@tacos.mx', autorizacion)
+    // 1.ª lectura: es prospecto; 2.ª (revisión final, ya con los tokens firmados): la cuenta ya no está como la dejó el cambio.
+    mockFindFirst.mockResolvedValueOnce({ id: 'staff-1' }).mockResolvedValueOnce(null)
+
+    expect(await codigoDelError(canjearBoletoDeAlta(boleto))).toBe('BOLETO_USADO')
+  })
+
+  it('el boleto del alta con código (sin cambio de contraseña) sigue como antes', async () => {
+    const boleto = firmarBoletoDeAlta('staff-1', 'dueno@tacos.mx')
+    await canjearBoletoDeAlta(boleto)
+    const where = mockUpdateMany.mock.calls[0][0].where
+    expect(JSON.stringify(where)).not.toContain('"password":"')
+    expect(prisma.staff.findUnique).not.toHaveBeenCalled()
+    expect(mockFindFirst).toHaveBeenCalledTimes(1)
+  })
+
+  it('la huella no es la contraseña ni el hash', () => {
+    expect(huellaDeContrasena(HASH)).not.toContain(HASH)
+    expect(huellaDeContrasena(HASH)).toMatch(/^[0-9a-f]{64}$/)
   })
 })

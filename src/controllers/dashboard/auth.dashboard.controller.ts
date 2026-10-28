@@ -14,6 +14,9 @@ import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/perm
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
 import { canjearBoletoDeAlta } from '../../services/onboarding/signup.service'
+import { renovarSesionConLaSucursal, sucursalDelAltaTerminada } from '../../services/onboarding/sesionTrasElAlta'
+import { buildAuthContextFromPayload } from '../../security'
+import { esSucursalReal } from '../../utils/sucursalDelToken'
 import { verifyAccessToken } from '../../jwt.service'
 import {
   mensajeDeCorte,
@@ -145,6 +148,18 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         user: null,
         message: mensajeDeCorte(motivoDelCorte),
       })
+    }
+
+    // 🔴 H0 (28-oct): el alta ya se termina sin el navegador (el cobro, el aviso de Stripe o el barrido). Quien vuelve con la
+    // cookie del alta (sucursal `pending`) recibe aquí su sesión con la sucursal real, como si hubiera tocado «Entrar».
+    // Nunca tumba el estado de sesión.
+    const sesion = buildAuthContextFromPayload(decoded)
+    if (!esSucursalReal(sesion.venueId) && !sesion.isImpersonating) {
+      const sucursal = await sucursalDelAltaTerminada(sesion.userId, sesion.orgId).catch(error => {
+        logger.warn('[AUTH] 📊 No se pudo revisar si el alta ya terminó', { error })
+        return null
+      })
+      if (sucursal) await renovarSesionConLaSucursal(sesion, res, sucursal)
     }
 
     // Buscar staff con venues y organization (World-Class Pattern: Need org to detect OWNER during onboarding)

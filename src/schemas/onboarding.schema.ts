@@ -7,7 +7,7 @@
 import { z } from 'zod'
 import { OnboardingType, ProductType } from '@prisma/client'
 import { zTimezone } from '@/utils/sanitizeTimezone'
-import { optionalLaunchCampaignCode, optionalHybridOfferSlug, utmSchema } from './acquisition.schema'
+import { optionalLaunchCampaignCode, optionalHybridOfferSlug, utmSchema, optionalReferrer } from './acquisition.schema'
 
 /**
  * Validates signup request (creates user + organization)
@@ -29,6 +29,7 @@ export const SignupSchema = z.object({
     launchCampaignCode: optionalLaunchCampaignCode,
     hybridOfferSlug: optionalHybridOfferSlug,
     utm: utmSchema,
+    referrer: optionalReferrer,
   }),
 })
 

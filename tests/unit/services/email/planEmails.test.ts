@@ -37,6 +37,28 @@ describe('Subscription lifecycle plan emails', () => {
       expect(html).not.toContain('21 de octubre de 2027')
     })
 
+    it('🔴 D13: el monto lleva coma de miles aunque el Intl del servidor no la ponga (prod escribió «$1970.84»)', async () => {
+      const original = Intl.NumberFormat
+      ;(Intl as any).NumberFormat = jest.fn(() => ({ format: () => 'SIN-COMA' }))
+      try {
+        await emailService.sendPlanConfirmationEmail('a@x.com', {
+          locale: 'es',
+          venueName: 'Bar',
+          planName: 'Premium',
+          payNow: false,
+          interval: 'monthly',
+          firstChargeDate: new Date('2026-11-27'),
+          firstChargeAmountCents: 197084,
+          billingPortalUrl: 'u',
+        } as any)
+      } finally {
+        ;(Intl as any).NumberFormat = original
+      }
+      const html = JSON.stringify(spy.mock.calls.at(-1))
+      expect(html).toContain('$1,970.84')
+      expect(html).not.toContain('SIN-COMA')
+    })
+
     it('confirmation: trial es subject, no emoji', async () => {
       await emailService.sendPlanConfirmationEmail('a@x.com', {
         locale: 'es',

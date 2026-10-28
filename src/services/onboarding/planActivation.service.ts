@@ -58,6 +58,7 @@ import { buildLaunchOfferView, launchOfferAvailability, standardFirstChargeCents
 import { LAUNCH_CAMPAIGN_SELECT, toOfferRow, type LaunchCampaignRow } from '../launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS, REDEMPTION_STATUS } from '../launchCampaigns/launchCampaignEnums'
 import { idDelCuponDelDescuento } from './cuponDelDescuento'
+import { terminarAltaCobradaSinRomper, type ViaDelCierre } from './terminarAltaCobrada'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -744,16 +745,24 @@ export async function activatePlan(
    * 🔴 R2: `soloRecuperar` = el id de la suscripción que el revisor de altas a medio pago viene a cerrar. Con él, esta
    * función sólo puede RECUPERAR esa suscripción ya cobrada: si el alta no apunta a ella, o si Stripe no la da por cobrada,
    * sale sin cobrar, sin anular y sin estrenar intento.
+   * `via`: quién terminó el alta, para la bitácora (H0). Sin él, es el cobro del navegador.
    */
-  opciones: { soloRecuperar?: string } = {},
+  opciones: { soloRecuperar?: string; via?: ViaDelCierre } = {},
 ): Promise<ActivatePlanResult> {
   const { organizationId, staffId } = input
   const now = new Date()
+  // 🔴 H0 (28-oct): con el plan confirmado el alta se termina AQUÍ, no cuando el navegador toca «Entrar». Un fallo no cambia
+  // la respuesta (el dinero ya se movió): lo retoma el barrido. Promesa: Avoqado/docs/audit/2026-10-28-alta-pagada-se-termina-sola/.
+  const terminarElAlta = () => terminarAltaCobradaSinRomper(organizationId, { via: opciones.via ?? 'cobro', staffId })
 
   // ---- PASO 1: carga ----
   const progress = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
   if (!progress) throw new NotFoundError('No encontramos tu registro', 'ONBOARDING_NOT_FOUND')
-  if (progress.completedAt) throw new ConflictError('Este registro ya terminó', 'ONBOARDING_ALREADY_COMPLETED')
+  // Un alta terminada con su plan ACTIVO sigue al PASO 2 (contesta «plan activo» con sus tres comprobaciones): el reenvío del
+  // navegador tras el reto del banco puede llegar cuando el aviso de Stripe o el barrido ya la terminaron (H0, Codex r1).
+  if (progress.completedAt && progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE) {
+    throw new ConflictError('Este registro ya terminó', 'ONBOARDING_ALREADY_COMPLETED')
+  }
 
   // 🔴 CONSENTIMIENTO ANTES DEL CARGO (auditoría de Codex, 18-sep).
   //
@@ -822,6 +831,7 @@ export async function activatePlan(
       where: { organizationId, status: REDEMPTION_STATUS.APPLIED },
       include: { campaign: { select: { code: true } } },
     })
+    await terminarElAlta()
     return {
       status: 'ACTIVE',
       alreadyActive: true,
@@ -1444,6 +1454,7 @@ export async function activatePlan(
     campaign,
   })
 
+  await terminarElAlta()
   return {
     status: 'ACTIVE',
     alreadyActive: false,
@@ -1478,7 +1489,10 @@ export async function activatePlan(
  *
  * 🔴 Nunca cobra, nunca anula ni crea nada en Stripe. Cada escritura es un CAS: si el cliente vuelve a la vez, gana uno.
  */
-export async function cerrarAltaSinNavegador(organizationId: string): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
+export async function cerrarAltaSinNavegador(
+  organizationId: string,
+  via: ViaDelCierre = 'barrido',
+): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
   const p = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
   const leaseVivo = p?.planActivationLeaseUntil != null && p.planActivationLeaseUntil > new Date()
   if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || !p.planStripeSubscriptionId || leaseVivo)
@@ -1552,7 +1566,7 @@ export async function cerrarAltaSinNavegador(organizationId: string): Promise<'C
         ? { kind: 'LAUNCH', code: m.launchCampaignCode ?? '', offerVersion: Number(m.launchOfferVersion), expectedFirstChargeCents: cents }
         : { kind: 'STANDARD', expectedFirstChargeCents: cents },
     },
-    { soloRecuperar: sub.id },
+    { soloRecuperar: sub.id, via },
   )
   logger.info('altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador', {
     organizationId,

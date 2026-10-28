@@ -17,6 +17,14 @@ interface Boleto {
   sub: string
   email: string
   emitidoMs: number
+  /**
+   * D10 (28-oct, Codex r3): la hora EXACTA del cambio de contraseña que autorizó este boleto («Crear contraseña y entrar»
+   * desde el correo). El canje exige que la cuenta siga con ESE cambio: un cambio o una revocación que se guarden después
+   * de firmar —aunque su hora sea anterior a la firma— lo invalidan. El boleto del alta con código no la lleva.
+   */
+  cambioMs?: number
+  /** Huella (sha256) del hash de la contraseña que dejó ese cambio. Nunca la contraseña ni su hash (Codex r4). */
+  huella?: string
   proposito: typeof PROPOSITO
 }
 
@@ -26,13 +34,35 @@ function llaveDelBoleto(): string {
   return crypto.createHmac('sha256', base).update(PROPOSITO).digest('hex')
 }
 
-export function firmarBoletoDeAlta(staffId: string, email: string): string {
-  const payload: Boleto = { sub: staffId, email, emitidoMs: Date.now(), proposito: PROPOSITO }
+/** D10: qué cambio de contraseña autorizó el boleto. Con él, el canje exige la cuenta EXACTAMENTE en ese estado. */
+export interface AutorizacionDelBoleto {
+  cambioMs: number
+  huella: string
+}
+
+/** sha256 del hash bcrypt: distingue una contraseña de otra sin poner en el boleto nada que sirva para entrar. */
+export function huellaDeContrasena(hash: string): string {
+  return crypto.createHash('sha256').update(hash).digest('hex')
+}
+
+export function firmarBoletoDeAlta(staffId: string, email: string, autorizacion?: AutorizacionDelBoleto): string {
+  const payload: Boleto = {
+    sub: staffId,
+    email,
+    emitidoMs: Date.now(),
+    ...(autorizacion ? { cambioMs: autorizacion.cambioMs, huella: autorizacion.huella } : {}),
+    proposito: PROPOSITO,
+  }
   return jwt.sign(payload, llaveDelBoleto(), { algorithm: 'HS256', expiresIn: VIGENCIA })
 }
 
 /** Lanza `AuthenticationError` si está vencido, alterado o es de otro propósito. */
-export function leerBoletoDeAlta(boleto: string): { staffId: string; email: string; emitidoMs: number } {
+export function leerBoletoDeAlta(boleto: string): {
+  staffId: string
+  email: string
+  emitidoMs: number
+  autorizacion?: AutorizacionDelBoleto
+} {
   let b: Boleto
   try {
     b = jwt.verify(boleto, llaveDelBoleto(), { algorithms: ['HS256'] }) as Boleto
@@ -40,5 +70,7 @@ export function leerBoletoDeAlta(boleto: string): { staffId: string; email: stri
     throw new AuthenticationError('El boleto no es válido o ya venció.')
   }
   if (b.proposito !== PROPOSITO || !b.sub || !b.email) throw new AuthenticationError('El boleto no es válido o ya venció.')
-  return { staffId: b.sub, email: b.email, emitidoMs: b.emitidoMs }
+  const autorizacion =
+    typeof b.cambioMs === 'number' && typeof b.huella === 'string' ? { cambioMs: b.cambioMs, huella: b.huella } : undefined
+  return { staffId: b.sub, email: b.email, emitidoMs: b.emitidoMs, ...(autorizacion ? { autorizacion } : {}) }
 }
