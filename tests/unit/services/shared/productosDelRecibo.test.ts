@@ -22,3 +22,38 @@ describe('productosDelSnapshot', () => {
     expect(productosDelSnapshot(null)).toEqual([])
   })
 })
+
+// D15 (28-oct): el recibo de una PARTE (ticketTotals.parcial) pinta un renglón «Pago parcial» con su subtotal, como el papel del cobro.
+describe('productosDelSnapshot · parte de una venta dividida (D15)', () => {
+  const parcial = { kind: 'COBRO', desglosado: false, parcial: true, subtotal: 15, serviceCharge: 0, addedTax: 0, tip: 2, total: 17 }
+  const pagoParcial = [{ name: 'Pago parcial', quantity: 1, price: 15, totalPrice: 15, weightKg: null, modifiers: [] }]
+
+  it('recibo de la terminal de una parte: un renglón «Pago parcial»', () => {
+    expect(
+      productosDelSnapshot({
+        ticketTotals: parcial,
+        items: [
+          { productName: 'Agua', quantity: 1, unitPrice: 20, total: 20 },
+          { productName: 'Café', quantity: 1, unitPrice: 10, total: 10 },
+        ],
+      }),
+    ).toEqual(pagoParcial)
+  })
+
+  it('recibo del panel de una parte: también «Pago parcial»', () => {
+    expect(productosDelSnapshot({ ticketTotals: parcial, order: { items: [{ name: 'Gorra', quantity: 1, price: 30, totalPrice: 30, modifiers: [] }] } })).toEqual(
+      pagoParcial,
+    )
+  })
+
+  it('sin la marca (venta completa o recibo viejo): sus productos, como hoy', () => {
+    const sinMarca = { ...parcial, parcial: undefined, desglosado: false }
+    expect(productosDelSnapshot({ ticketTotals: sinMarca, items: [{ productName: 'Agua', quantity: 1, unitPrice: 20, total: 20 }] })).toEqual([
+      { name: 'Agua', quantity: 1, price: 20, totalPrice: 20, weightKg: null, modifiers: [] },
+    ])
+  })
+
+  it('una parte sin productos guardados: lista vacía, como hoy', () => {
+    expect(productosDelSnapshot({ ticketTotals: parcial, items: [] })).toEqual([])
+  })
+})
