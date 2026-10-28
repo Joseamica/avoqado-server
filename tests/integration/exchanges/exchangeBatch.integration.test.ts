@@ -393,10 +393,10 @@ describe('exchange reads in batch (B)', () => {
     const line = await prisma.orderItem.findFirstOrThrow({ where: { orderId: credit.orderId, order: { venueId: s.venueId } } })
     const returned = await refund(credit.orderId, credit.id, line.id)
     const read = async (orderIds: string[]) => {
-      counter.reiniciar()
+      await counter.reiniciar()
       await loadSalesForExchange(counter.db, s.venueId, orderIds)
       await loadExchangeLinksForOrders(counter.db, s.venueId, orderIds)
-      return counter.consultas()
+      return await counter.consultas()
     }
     try {
       const simple = await read([ids[0]])
@@ -413,9 +413,9 @@ describe('exchange reads in batch (B)', () => {
   it('isolates tenants and handles empty input without reading the database', async () => {
     expect(await loadSalesForExchange(prisma, s.organizationId, ids)).toEqual(new Map())
     expect(await loadExchangeLinksForOrders(prisma, s.organizationId, ids)).toEqual(new Map())
-    counter.reiniciar()
+    await counter.reiniciar()
     expect(await loadSalesForExchange(counter.db, s.venueId, [])).toEqual(new Map())
     expect(await loadExchangeLinksForOrders(counter.db, s.venueId, [])).toEqual(new Map())
-    expect(counter.consultas()).toBe(0)
+    expect(await counter.consultas()).toBe(0)
   })
 })
