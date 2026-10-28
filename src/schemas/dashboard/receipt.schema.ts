@@ -85,6 +85,8 @@ export const ReceiptDataSnapshotSchema = z.object({
       addedTax: z.number(),
       tip: z.number(),
       total: z.number(),
+      // D15: sólo existe en el comprobante de UNA parte de una venta dividida (sin esta línea zod la quitaría).
+      parcial: z.literal(true).optional(),
     })
     .nullable()
     .optional(),

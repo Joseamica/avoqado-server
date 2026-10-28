@@ -101,7 +101,9 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
       },
       // D8: la plantilla usa el formato de la terminal (`productName`, `unitPrice`, `total`): sus `items` tal cual, o los del
       // panel (`order.items`) traducidos a ese formato.
-      items: dataSnapshot.items?.length
+      // D15: el recibo de UNA parte (`ticketTotals.parcial`) va por el helper, que lo vuelve un renglón «Pago parcial».
+      items:
+        dataSnapshot.ticketTotals?.parcial !== true && dataSnapshot.items?.length
         ? dataSnapshot.items
         : productosDelSnapshot(dataSnapshot).map(p => ({
             productName: p.name,

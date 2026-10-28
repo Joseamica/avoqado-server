@@ -470,7 +470,6 @@ const INVENTARIO: Record<string, number> = {
   'src/services/tpv/merchantRouting.service.ts': 3,
   'src/services/tpv/order.tpv.service.ts': 12,
   'src/services/tpv/payment.tpv.service.ts': 4,
-  'src/services/tpv/refund.tpv.service.ts': 1,
   'src/services/tpv/sale-verification.service.ts': 1,
   // 2026-09-04, ronda de arreglo 1 (P1.3/P2.5): de 7 a 4. Se fueron el `include` anidado sin tope
   // de `getShifts` (`orders → payments → allocations`) y los dos `findMany` de `getCurrentShift`,

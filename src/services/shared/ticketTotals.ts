@@ -1,5 +1,5 @@
 import { Prisma, type PrismaClient } from '@prisma/client'
-import { impuestoQueSeCobraAparte } from './orderBalance'
+import { FULL_PAYMENT_TOLERANCE, impuestoQueSeCobraAparte } from './orderBalance'
 import { reciboCanonicoDelPago } from './reciboCanonico'
 
 /** Un importe en PESOS como llega de Prisma (Decimal), de un JSON congelado (number) o de un texto. */
@@ -38,6 +38,12 @@ export interface TicketTotals {
   addedTax: number
   tip: number
   total: number
+  /**
+   * D15 (28-oct), aditivo: sólo existe (y vale `true`) cuando este cobro es UNA PARTE de una venta dividida: un cobro de venta
+   * (COMPLETED, > 0) de una orden que tiene más de un cobro de venta, o que paga menos de lo que la orden debe por más del centavo de
+   * tolerancia. La reimpresión, el recibo digital y el correo pintan entonces un renglón «Pago parcial», como el papel del cobro.
+   */
+  parcial?: true
 }
 
 export interface EntradaDelTicket {
@@ -94,15 +100,20 @@ export function ticketTotals(e: EntradaDelTicket): TicketTotals {
   const esDevolucion = e.payment.type === 'REFUND' || amount.isNegative() || (amount.isZero() && tip.isNegative())
   if (esDevolucion) return sinDesglose('DEVOLUCION', amount.abs(), tip.abs())
   const o = e.order
-  // El cobro consultado tiene que SER el único cobro de venta que se contó (r2 R2-8): un intento fallido no lo es.
-  if (!o || e.cobrosDeVenta !== 1 || e.payment.status !== 'COMPLETED' || !amount.gt(0)) return sinDesglose('COBRO', amount, tip)
+  // Sólo un cobro de VENTA (COMPLETED, > 0) puede desglosarse o ser una parte: un intento fallido o un registro de sólo propina no.
+  if (!o || e.payment.status !== 'COMPLETED' || !amount.gt(0)) return sinDesglose('COBRO', amount, tip)
   const bruto = aDecimal(o.subtotal)
   const mercanciaBruta = bruto.minus(aDecimal(o.discountAmount))
   const mercancia = mercanciaBruta.isNegative() ? CERO_DEC : mercanciaBruta
   const cargo = aDecimal(o.serviceChargeAmount)
   const impuesto = impuestoQueSeCobraAparte({ contratoDePrecio: o.contratoDePrecio, taxAmount: o.taxAmount, status: o.status })
   const loQueDebe = mercancia.plus(cargo).plus(impuesto)
-  if (cargo.isNegative() || !amount.eq(loQueDebe)) return sinDesglose('COBRO', amount, tip)
+  // D15: una PARTE de una venta dividida. Una cuenta de $2.01 saldada con $2.00 es venta completa (la tolerancia de `orderBalance`).
+  if (e.cobrosDeVenta >= 1 && (e.cobrosDeVenta > 1 || loQueDebe.minus(amount).gt(FULL_PAYMENT_TOLERANCE))) {
+    return { ...sinDesglose('COBRO', amount, tip), parcial: true }
+  }
+  // El cobro consultado tiene que SER el único cobro de venta que se contó (r2 R2-8).
+  if (e.cobrosDeVenta !== 1 || cargo.isNegative() || !amount.eq(loQueDebe)) return sinDesglose('COBRO', amount, tip)
   // Ronda 1 (A7-R6): la MISMA definición que el papel del cobro (`TotalesDelTicket.desdeLoCobrado`, Android e iOS): el
   // descuento es lo que falta del bruto + cargo + IVA agregado para llegar a lo cobrado; si saliera negativo (subtotal guardado
   // negativo), el subtotal pasa a ser lo cobrado sin cargo ni IVA y no hay descuento. Aquí lo cobrado ES lo que la cuenta debe,

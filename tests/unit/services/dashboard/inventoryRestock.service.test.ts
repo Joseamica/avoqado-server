@@ -148,7 +148,8 @@ describe('inventoryRestock.service', () => {
         expect.objectContaining({ where: { orderId: 'o1', order: { venueId: 'v1' }, productId: { not: null } } }),
       )
       expect(prismaMock.inventory.update).toHaveBeenCalledTimes(1) // only the item with a productId
-      expect(res).toEqual({ items: 2, restocked: 1 })
+      // `items` cuenta los renglones que se reponen (renglonesQueSeReponen): el que no tiene producto no es uno.
+      expect(res).toEqual({ items: 1, restocked: 1 })
     })
 
     it('is best-effort: one item failing does not stop the rest', async () => {
