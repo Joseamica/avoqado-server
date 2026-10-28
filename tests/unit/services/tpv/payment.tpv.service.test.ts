@@ -116,6 +116,7 @@ jest.mock('@/utils/prismaClient', () => ({
       findFirst: jest.fn().mockResolvedValue(null),
       updateMany: jest.fn().mockResolvedValue({ count: 0 }),
     },
+    exchange: { findUnique: jest.fn().mockResolvedValue(null) },
     inventoryPosting: { findUnique: jest.fn(), create: jest.fn(), updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
     inventoryPostingLine: { findMany: jest.fn().mockResolvedValue([]), update: jest.fn() },
     $transaction: jest.fn(),

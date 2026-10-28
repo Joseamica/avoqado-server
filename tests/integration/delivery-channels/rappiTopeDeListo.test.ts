@@ -45,7 +45,8 @@ jest.mock('@/services/delivery-channels/providers/rappi/rappi.client', () => ({
 jest.setTimeout(60_000)
 
 /** 🔴 La base es compartida por ~20 sesiones: fuera de una base de PRUEBAS no se toca nada (mismo criterio que `rappiMarcaDeAceptacion.test.ts`). */
-const esBaseDePrueba = (nombre: string) => nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(nombre)
+const esBaseDePrueba = (nombre: string) =>
+  nombre === 'av-db-25-test' || /^(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(nombre)
 {
   // A nivel de MÓDULO, no en un hook: corre antes de cualquier `beforeAll`/`afterAll`.
   const url = new URL(process.env.DATABASE_URL ?? '')

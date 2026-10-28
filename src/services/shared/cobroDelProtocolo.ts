@@ -17,17 +17,16 @@
  * original y la unidad de costo lo proyecta bajo el mutex del original (`reembolsosConTrabajoPendiente`: `type = 'REFUND'` y
  * `processorData->>'originalPaymentId'`, mismo venue). Editar su importe o borrarlo deja una devolución bancaria sin contrapartida
  * financiera. Por eso la pertenencia alcanza a todo REFUND cuyo original pertenece — el MISMO predicado que la unidad usa para
- * encontrarlos — y quien protege toma los candados en el orden de la unidad: ORIGINAL → reembolso.
+ * encontrarlos — y quien protege toma la UNIÓN de original y reembolso en `id ASC`, igual que la unidad.
  *
  * Codex R15-2: la corrección por LOTE (apply/reverse) clasifica y escribe reembolsos cuya pertenencia depende de su ORIGINAL —
  * dentro o fuera del lote—: bloquear sólo el lote deja al original libre entre la clasificación y la escritura (una acreditación
- * que entre ahí convierte una corrección en «acreditación» del reembolso), y bloquear el lote en `id ASC` puede tomar el
- * reembolso antes que su original (el orden inverso al de la unidad). `bloquearLoteConOriginales` (`candadosDelLote.ts`) fija el protocolo del lote:
- * ORIGINALES primero (dentro y fuera del lote, únicos, ordenados, SIN ESPERAR — un original ocupado aparta a sus reembolsos y a sí
- * mismo si está en el lote, en vez de esperar a la unidad), después el LOTE en `id ASC`, después la RELECTURA bajo los candados
+ * que entre ahí convierte una corrección en «acreditación» del reembolso). Ordenar originales y candidatos por separado permite
+ * un cruce entre lotes o frente a la unidad de costo. `bloquearLoteConOriginales` (`candadosDelLote.ts`) fija el protocolo del lote:
+ * UNIÓN de originales y candidatos en `id ASC` (los originales SIN ESPERAR: uno ocupado aparta a sus reembolsos y a sí
+ * mismo si está en el lote), después la RELECTURA bajo los candados
  * (tipo, venue y puntero de todos los candidatos: si algo cambió, se sueltan TODOS los candados del intento y se reinicia; ≤3
- * intentos, después conflicto explícito). Residuo declarado: la fase del lote sí espera; dos lotes concurrentes cuyos originales
- * están cruzados con sus lotes pueden interbloquearse (Postgres aborta uno con 40P01 y ese lote queda FAILED, reintentable).
+ * intentos, después conflicto explícito). La unión evita el cruce de dos lotes con originales y candidatos intercambiados.
  */
 import { Prisma, PaymentType } from '@prisma/client'
 import { ConflictError } from '../../errors/AppError'
@@ -132,8 +131,8 @@ export type CandadoDelProtocolo = { existe: false } | { existe: true; originalPa
 
 /**
  * Codex R14-2: toma el mutex de un Payment Y el de su original (si es un reembolso), en el orden de la unidad de costo —
- * ORIGINAL → reembolso — para que una protección administrativa nunca se cruce con la unidad (que toma el original y después
- * escribe sus reembolsos). El puntero al original se lee sin candado, se bloquea el original, se bloquea el reembolso y se RELEE
+ * id ASC sobre la UNIÓN — sin depender de qué id llegó primero en un historial importado. El puntero al original se lee sin
+ * candado, se bloquea el par junto y se RELEE
  * el puntero bajo el candado: si cambió mientras se esperaba, los candados tomados son los de otro par — se sueltan (savepoint)
  * y se vuelve a empezar. Tres intentos; después, conflicto explícito (nunca proteger contra el original equivocado).
  */
@@ -148,8 +147,7 @@ export async function bloquearConSuOriginal(
     const lectura = await tx.payment.findFirst({ where: { id: destino.paymentId, venueId: destino.venueId }, select })
     if (!lectura) return { existe: false }
     const original = originalDelReembolso(lectura)
-    if (original) await bloquearPayments(tx, [original], marcador)
-    await bloquearPayments(tx, [destino.paymentId], marcador)
+    await bloquearPayments(tx, original ? [original, destino.paymentId] : [destino.paymentId], marcador)
     const relectura = await tx.payment.findFirst({ where: { id: destino.paymentId, venueId: destino.venueId }, select })
     if (!relectura) return { existe: false }
     if (originalDelReembolso(relectura) === original) {

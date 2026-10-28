@@ -379,6 +379,10 @@ async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number>
   await borrar(tx.cfdiGlobalOrden.deleteMany({ where: { order: { venueId }, cfdi: { venueId } } }))
   await borrar(tx.cfdi.deleteMany({ where: { venueId } }))
 
+  // El crédito restringe el borrado de sus cobros; primero se borra el cambio del mismo demo.
+  await borrar(tx.exchangeCreditLink.deleteMany({ where: { venueId } }))
+  await borrar(tx.exchange.deleteMany({ where: { venueId } }))
+
   // 1. Order items and payments
   await borrar(tx.orderItem.deleteMany({ where: { order: { venueId } } }))
   await borrar(tx.payment.deleteMany({ where: { order: { venueId } } }))

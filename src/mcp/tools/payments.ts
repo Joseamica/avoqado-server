@@ -12,6 +12,8 @@ import { createManualPayment, MENSAJE_VENTA_YA_COBRADA } from '@/services/dashbo
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '@/services/shared/tenderSemantics'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, seDevuelveEnTerminal } from '@/services/tpv/terminalRefundTarget'
 import { isGiftCardTenderKind } from '@/services/giftCards/giftCardTender'
+import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
+import { chainRefundSemanticsInTx } from '@/services/exchanges/exchangeTx'
 import { WHERE_ORDEN_DE_TARJETAS } from '@/services/giftCards/giftCardMarks'
 import { formatoPesos } from '@/services/giftCards/giftCardLimits'
 import AppError from '@/errors/AppError'
@@ -525,48 +527,52 @@ export function registerPaymentTools(server: McpServer, scope: McpScope) {
       ) {
         return text({ ok: false, error: 'Este cobro sólo se devuelve por el mismo medio con que se pagó.' })
       }
-      const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
-      if (amount > originalTotal) {
-        return text({ ok: false, error: `El reembolso ($${amount}) excede el total original del pago ($${originalTotal}).` })
-      }
-
-      // 🔴 Desde 2026-08-16 el reembolso en efectivo RESTA del cajón del local
-      // (`postCashRefundToDrawer`). Quien opera por MCP no está frente a esa caja, así
-      // que la vista previa tiene que decirlo: está autorizando que alguien saque
-      // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
-      // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
-      const saleDeCajonDeEfectivo = refundMethod ? refundMethod === 'CASH' : paymentCountsAsDrawerCash(payment)
-
-      if (!confirm) {
-        return text({
-          ok: false,
-          requiresConfirmation: true,
-          preview: {
-            payment: {
-              id: paymentId,
-              orderNumber: payment.order?.orderNumber ?? null,
-              method: payment.method,
-              originalTotal,
-              paidAt: payment.createdAt.toISOString(),
-            },
-            refundAmount: amount,
-            reason: REFUND_REASON_MAP[reason],
-            note: note ?? null,
-            saleDeCajonDeEfectivo,
-            refundMethod: refundMethod ?? null,
-            ...(esSaldoDeRegalo ? { regresaAlSaldoDeRegalo: true } : {}),
-          },
-          message:
-            `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
-            (saleDeCajonDeEfectivo
-              ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
-              : '') +
-            ' Vuelve a llamar con confirm:true para ejecutar.' +
-            (esSaldoDeRegalo ? ' Regresa al saldo de la tarjeta de regalo del cliente.' : ''),
-        })
-      }
-
       try {
+        const chain = isExchangeCreditTenderKind(cobroParaDevolver.tenderSystemKind)
+          ? await chainRefundSemanticsInTx(prisma, venueId, paymentId)
+          : null
+        if (chain?.kind === 'BLOCKED') throw chain.error
+        const originalTotal = round2(num(payment.amount) + num(payment.tipAmount))
+        if (amount > originalTotal) {
+          return text({ ok: false, error: `El reembolso ($${amount}) excede el total original del pago ($${originalTotal}).` })
+        }
+
+        // 🔴 Desde 2026-08-16 el reembolso en efectivo RESTA del cajón del local
+        // (`postCashRefundToDrawer`). Quien opera por MCP no está frente a esa caja, así
+        // que la vista previa tiene que decirlo: está autorizando que alguien saque
+        // billetes de un cajón físico, no sólo un apunte contable. La pregunta la
+        // contesta `tenderSemantics`, nunca un `method === 'CASH'` local.
+        const saleDeCajonDeEfectivo = refundMethod ? refundMethod === 'CASH' : paymentCountsAsDrawerCash(chain?.money ?? payment)
+
+        if (!confirm) {
+          return text({
+            ok: false,
+            requiresConfirmation: true,
+            preview: {
+              payment: {
+                id: paymentId,
+                orderNumber: payment.order?.orderNumber ?? null,
+                method: payment.method,
+                originalTotal,
+                paidAt: payment.createdAt.toISOString(),
+              },
+              refundAmount: amount,
+              reason: REFUND_REASON_MAP[reason],
+              note: note ?? null,
+              saleDeCajonDeEfectivo,
+              refundMethod: chain?.money.method ?? refundMethod ?? null,
+              ...(esSaldoDeRegalo ? { regresaAlSaldoDeRegalo: true } : {}),
+            },
+            message:
+              `Esto DEVOLVERÁ $${amount} del pago de $${originalTotal} (orden ${payment.order?.orderNumber ?? 's/n'}).` +
+              (saleDeCajonDeEfectivo
+                ? ` Saldrá en EFECTIVO: si el local tiene la caja abierta, se registrará la salida de $${amount} del cajón y alguien tendrá que entregarlo físicamente.`
+                : '') +
+              ' Vuelve a llamar con confirm:true para ejecutar.' +
+              (esSaldoDeRegalo ? ' Regresa al saldo de la tarjeta de regalo del cliente.' : ''),
+          })
+        }
+
         const result = await issueRefund({
           venueId,
           paymentId,

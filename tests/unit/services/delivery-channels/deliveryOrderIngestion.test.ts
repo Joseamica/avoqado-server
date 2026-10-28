@@ -1,4 +1,13 @@
-import { OrderSource, OrderType, OriginSystem, PaymentMethod, PaymentSource, PaymentStatus, TransactionStatus } from '@prisma/client'
+import {
+  Prisma,
+  OrderSource,
+  OrderType,
+  OriginSystem,
+  PaymentMethod,
+  PaymentSource,
+  PaymentStatus,
+  TransactionStatus,
+} from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
 import logger from '@/config/logger'
 import { socketManager } from '../../../../src/communication/sockets/managers/socketManager'
@@ -952,7 +961,7 @@ describe('ingestDeliveryOrder', () => {
       expect(advisory).toBeGreaterThanOrEqual(0)
       expect(fila).toBeGreaterThanOrEqual(0)
       // La fila de ESTA orden en ESTE negocio (el mismo `lockExistingOrderForPayment` de `cancelDeliveryOrder`).
-      expect(raw.calls[fila].slice(1)).toEqual(['order1', 'venue1'])
+      expect(Prisma.sql(raw.calls[fila][0], ...raw.calls[fila].slice(1)).values).toEqual(['order1', 'venue1'])
       const relectura = (prisma.order.findUnique as jest.Mock).mock.calls.findIndex(([a]: any) => a?.where?.id === 'order1')
       const t = {
         advisory: raw.invocationCallOrder[advisory],

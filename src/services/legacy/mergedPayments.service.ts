@@ -40,6 +40,7 @@
  * ─────────────────────────────────────────────────────────────────────────
  */
 
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 import { Prisma, TransactionStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
@@ -80,6 +81,7 @@ function analyticsWhere(venueId: string, filters: AnalyticsPaymentFilters): Pris
     venueId,
     status: TransactionStatus.COMPLETED,
     createdAt: { gte: fromDate, lte: toDate },
+    AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
     ...(includeRefunds ? {} : { type: { not: 'REFUND' } }),
     ...(excludeCancelledOrders ? { order: { status: { not: 'CANCELLED' } } } : {}),
   }

@@ -2,11 +2,12 @@ import type { PrismaClient } from '@prisma/client'
 import { Prisma, ShiftStatus } from '@prisma/client'
 
 import logger from '../../config/logger'
+import { ConflictError } from '../../errors/AppError'
 import { turnoVivoWhere } from './turnoDeCaja'
 
 // `payGiftCardBalanceOnOrder` (tarjetas de regalo, A8): el cobro con saldo comparte el núcleo de `payCashOrder` pero su
 // auditoría no se atribuye al efectivo.
-export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder' | 'payGiftCardBalanceOnOrder'
+export type CapturedPaymentChannel = 'recordOrderPayment' | 'recordFastPayment' | 'payCashOrder' | 'payGiftCardBalanceOnOrder' | 'exchange'
 export type RefundPaymentChannel = 'recordRefund' | 'issueRefund' | 'createRefund'
 export type PaymentShiftReconciliationChannel =
   | CapturedPaymentChannel
@@ -316,11 +317,13 @@ async function turnoDeLaVentaQueSeRespeta(
  * Lo pasa la función que ABRE la transacción; `orderFiscalWriters.test.ts` lo exige en cada una.
  */
 export const ORDER_LOCK_WAIT_BUDGET = { timeout: 15_000, maxWait: 5_000 } as const
+// Una cadena de cambios de IQ ocupa pocas ventas; 50 permite holgura sin reclamar un historial ilimitado en cada cobro/reembolso.
+export const MAX_ORDER_LOCK_SCOPE = 50
 
 /**
  * Lock order global para dinero ligado a una Order durable:
  *
- *   Order → Payment (si el carril necesita serializar uno) → Shift
+ *   Venue (KEY SHARE) → Orders (createdAt DESC, id DESC; incluye raíces de crédito) → Payment → Shift
  *
  * Un carril de orden nueva/sombra puede reclamar Shift antes de insertar la
  * Order porque todavía no existe una fila Order que otro writer pueda poseer.
@@ -328,7 +331,7 @@ export const ORDER_LOCK_WAIT_BUDGET = { timeout: 15_000, maxWait: 5_000 } as con
  */
 export async function lockExistingOrderForPayment(
   tx: ExistingOrderLockTransaction,
-  input: { venueId: string; orderId: string },
+  input: { venueId: string; orderId: string; additionalOrderIds?: string[] },
 ): Promise<boolean> {
   // `false` significa «la orden ya no es de este venue» y decide dinero: un
   // doble sin `$queryRaw` no puede contestar eso en silencio. El Prisma
@@ -337,13 +340,64 @@ export async function lockExistingOrderForPayment(
   if (typeof tx.$queryRaw !== 'function') {
     throw new Error('lockExistingOrderForPayment requiere una transacción con $queryRaw')
   }
-  const rows = await tx.$queryRaw<Array<{ id: string }>>`
-    SELECT id
-    FROM "Order"
-    WHERE id = ${input.orderId} AND "venueId" = ${input.venueId}
-    FOR UPDATE
+  const extras = [...new Set(input.additionalOrderIds ?? [])].filter(id => id !== input.orderId)
+  // El fence materializado frena el borrado de demos ANTES de poseer sus Orders/Payments.
+  const rows = await tx.$queryRaw<Array<{ id: string | null; scopeTooLarge?: boolean }>>`
+    WITH RECURSIVE input AS (
+      SELECT ${input.orderId}::text AS order_id, ${input.venueId}::text AS venue_id
+      ${extras.length ? Prisma.sql`UNION SELECT unnest(${extras}::text[]), ${input.venueId}::text` : Prisma.empty}
+    ), ancestors(id) AS (
+      SELECT o.id FROM "Order" o JOIN input i ON o.id = i.order_id AND o."venueId" = i.venue_id
+      UNION
+      SELECT parent.id
+      FROM ancestors child
+      JOIN "Payment" credit ON credit."orderId" = child.id
+      JOIN (SELECT DISTINCT venue_id FROM input) i ON credit."venueId" = i.venue_id
+      JOIN "ExchangeCreditLink" link ON link."creditPaymentId" = credit.id AND link."venueId" = credit."venueId"
+      JOIN "Payment" root ON root.id = link."originPaymentId" AND root."venueId" = credit."venueId"
+      JOIN "Order" parent ON parent.id = root."orderId" AND parent."venueId" = credit."venueId"
+    ), scope AS MATERIALIZED (
+      SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE + 1))}
+    ), size AS MATERIALIZED (
+      SELECT COUNT(*) AS n FROM scope
+    ), fence AS MATERIALIZED (
+      SELECT v.id FROM "Venue" v JOIN (SELECT DISTINCT venue_id FROM input) i ON v.id = i.venue_id
+      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      FOR KEY SHARE OF v
+    ), locked AS MATERIALIZED (
+      SELECT o.id
+      FROM "Order" o JOIN scope a ON a.id = o.id
+      JOIN fence v ON v.id = o."venueId"
+      WHERE (SELECT n FROM size) <= ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
+      ORDER BY o."createdAt" DESC, o.id DESC
+      FOR UPDATE OF o
+    )
+    SELECT id, false AS "scopeTooLarge" FROM locked
+    UNION ALL
+    SELECT NULL::text AS id, true AS "scopeTooLarge" FROM size WHERE n > ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE))}
   `
-  return Array.isArray(rows) && rows.length === 1
+  if (Array.isArray(rows) && rows.some(row => row.scopeTooLarge))
+    throw new ConflictError(
+      'Esta venta tiene demasiados cambios enlazados para procesarla con seguridad. Pide ayuda a soporte con el folio de la venta.',
+      'ORDER_LOCK_SCOPE_TOO_LARGE',
+    )
+  if (input.additionalOrderIds?.length) {
+    const current = await tx.$queryRaw<Array<{ id: string }>>`
+      WITH RECURSIVE ancestors(id) AS (
+        SELECT id FROM "Order" WHERE "venueId"=${input.venueId}
+          AND id=ANY(${[input.orderId, ...input.additionalOrderIds]}::text[])
+        UNION
+        SELECT parent.id FROM ancestors child
+        JOIN "Payment" credit ON credit."orderId"=child.id AND credit."venueId"=${input.venueId}
+        JOIN "ExchangeCreditLink" link ON link."creditPaymentId"=credit.id AND link."venueId"=credit."venueId"
+        JOIN "Payment" root ON root.id=link."originPaymentId" AND root."venueId"=credit."venueId"
+        JOIN "Order" parent ON parent.id=root."orderId" AND parent."venueId"=credit."venueId"
+      ) SELECT id FROM ancestors LIMIT ${Prisma.raw(String(MAX_ORDER_LOCK_SCOPE + 1))}`
+    const lockedIds = new Set(rows.map(row => row.id))
+    if (current.length !== lockedIds.size || current.some(row => !lockedIds.has(row.id)))
+      throw new ConflictError('Las ventas enlazadas cambiaron. Intenta de nuevo.', 'ORDER_LOCK_SCOPE_CHANGED')
+  }
+  return Array.isArray(rows) && rows.some(row => row.id === input.orderId)
 }
 
 interface RefundAuthorityReconciliationInput {

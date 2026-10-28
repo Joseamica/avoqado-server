@@ -8,6 +8,7 @@ import {
   cobrosDelProtocolo,
   efectivoManualEditable,
 } from '../shared/cobroDelProtocolo'
+import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchanges/exchangeMarks'
 import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
 import { esPedidoDePlataforma, MENSAJE_ORDEN_DE_PLATAFORMA } from '../shared/ordenImportada'
@@ -1529,6 +1530,7 @@ export async function editOrgSaleVerification(
       methodChanged = params.paymentForm != null && derivePaymentForm(vigente.method) !== params.paymentForm
       const amountChanged = params.amount != null && new Prisma.Decimal(params.amount).toDecimalPlaces(2).comparedTo(vigente.amount) !== 0
       if (amountChanged || methodChanged) {
+        const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
         // Rappi 2b: el total de un pedido de plataforma lo manda la plataforma (y Rappi con repartidor propio es sólo efectivo).
         if (existing.payment.orderId) {
           const orden = await tx.order.findFirst({
@@ -1545,7 +1547,6 @@ export async function editOrgSaleVerification(
           esDelProtocolo && (!methodChanged || params.paymentForm !== 'CARD') && (await efectivoManualEditable(tx, existing.payment.id))
         viaExcepcionEfectivoManual = efectivoManual
         if (esDelProtocolo && !efectivoManual) {
-          const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
           const err = createServiceError(
             'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe y su forma de pago sólo cambian por reembolso, anulación o corrección acreditada, no desde la verificación de venta.',
             409,
@@ -1553,6 +1554,11 @@ export async function editOrgSaleVerification(
           err.code = 'PAYMENT_PROTECTED_BY_COST_PROTOCOL'
           err.details = { paymentId: existing.payment.id, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO }
           throw err
+        }
+        // Cambio de producto (spec 2026-10-20 §6.2, §6.7): el dinero de un cambio tampoco cambia de importe ni de forma desde aquí,
+        // ni por la excepción de efectivo manual (409 PAYMENT_PROTECTED_BY_EXCHANGE, nada se escribe).
+        if ((await exchangeProtectedPayments(tx, [existing.payment.id])).has(existing.payment.id)) {
+          throw paymentProtectedByExchange(existing.payment.id, fields)
         }
         // D2: la cuenta sigue al importe; se valida ANTES de escribir el cobro para que un 409 no deje nada a medias.
         const cuenta = amountChanged ? await cuentaQueSigueAlCobro(tx, existing.payment.id, existing.venueId, cuentaTomada) : null

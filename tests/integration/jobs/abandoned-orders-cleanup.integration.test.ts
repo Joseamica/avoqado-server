@@ -15,7 +15,10 @@ import { AbandonedOrdersCleanupJob } from '@/jobs/abandoned-orders-cleanup.job'
 
 // Borra órdenes reales: sólo corre en una base de prueba local y desechable.
 const url = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(url.hostname) || !/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/.test(url.pathname)) {
+if (
+  !['localhost', '127.0.0.1'].includes(url.hostname) ||
+  !/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/.test(url.pathname)
+) {
   throw new Error('Exige una base de prueba local y desechable (p. ej. avoqado_h1a_test_20260808).')
 }
 

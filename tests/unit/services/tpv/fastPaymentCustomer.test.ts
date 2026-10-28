@@ -8,7 +8,10 @@ const esConsultaDelOutbox = (a: any) =>
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
   Object.keys(a?.select ?? {}).every(
-    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+    (k: string) =>
+      k === 'orderId' ||
+      (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId) ||
+      (k === 'tenderType' && a.select.tenderType?.select?.systemKind === true),
   ) &&
   a?.select?.orderId === true
 /**
@@ -213,10 +216,10 @@ function datosDeLaOrdenFast() {
 describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     installFakes()
   })
 
@@ -738,10 +741,10 @@ describe('recordFastPayment — el CLIENTE de la venta rápida', () => {
 describe('recordFastPayment — el cliente SEMBRADO por la solicitud de la terminal', () => {
   beforeEach(() => {
     jest.clearAllMocks()
-    // 5s: `lockExistingOrderForPayment` hace `SELECT … FOR UPDATE` por `$queryRaw` y exige UNA fila.
+    // El candado canónico devuelve la orden pedida junto con sus ancestros.
     // Sin ella reporta la orden como ajena y la delegación cae a FAST — justo lo que estas
     // pruebas afirman que NO debe pasar. La fila simula la orden bloqueada.
-    prismaMock.$queryRaw.mockResolvedValue([{ id: 'orden-bloqueada' }])
+    prismaMock.$queryRaw.mockImplementation(async (_sql: unknown, ...values: unknown[]) => [{ id: values[0] }])
     installFakes()
   })
 

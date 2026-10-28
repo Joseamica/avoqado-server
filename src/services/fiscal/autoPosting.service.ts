@@ -15,6 +15,8 @@ import { ivaDeDevolucion, processorDataDeDevoluciones } from './deliveryFiscalDe
 import { contabilidadPausada, contabilidadPausadaError, esExclusionContable } from './exclusionContable'
 import logger from '../../config/logger'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
+import { WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 
 /**
  * Motor de POSTEO AUTOMÁTICO de pólizas (Capa B, slice 2). Genera asientos de doble partida
@@ -166,6 +168,7 @@ export function buildRefundLines(
 
 /** ¿El pago es elegible para auto-postear? (espejo de las exclusiones del read-model de ingresos). */
 export function isEligible(p: PaymentRow): boolean {
+  if (isExchangeCreditTenderKind(p.tenderType?.systemKind)) return false // el par sólo transfiere crédito, no dinero
   if (p.type === PaymentType.TEST) return false // pagos de prueba no son contables
   if (p.type === PaymentType.ADJUSTMENT) return false // semántica ambigua → revisión manual
   if (p.method === PaymentMethod.CRYPTOCURRENCY) return false // no-MXN → manual (diferido)
@@ -181,6 +184,7 @@ export function isEligible(p: PaymentRow): boolean {
  */
 export const WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN = {
   AND: [
+    WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
     { status: TransactionStatus.COMPLETED },
     // NULL-safe: `type` es opcional y una fila vieja sin tipo cuenta como venta; `notIn` sola la descartaría (NOT IN con NULL).
     { OR: [{ type: null }, { type: { notIn: [PaymentType.TEST, PaymentType.ADJUSTMENT] } }] },

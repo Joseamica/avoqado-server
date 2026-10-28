@@ -117,6 +117,25 @@ beforeEach(() => {
 })
 
 describe('/settings — la huella', () => {
+  it.each([
+    [null, 'RETAIL_STORE', true],
+    [null, 'RESTAURANT', false],
+    [false, 'RETAIL_STORE', false],
+    [true, 'RESTAURANT', true],
+  ])('keeps the display envelope and effective exchange setting (%s, %s)', async (exchangesEnabled, type, expected) => {
+    prismaMock.venueSettings.findUnique.mockResolvedValue({ exchangesEnabled } as any)
+    prismaMock.venue.findUnique.mockResolvedValue({ type } as any)
+    const r = res()
+    const next = jest.fn() as NextFunction
+    await getVenueTpvSettings(req('dev-1'), r, next)
+    expect(next).not.toHaveBeenCalled()
+    expect(r.body.data).toMatchObject({
+      exchangesEnabled: expected,
+      componentsStatus: { promotionsPanel: 'ok', customerDisplay: 'ok' },
+      customerDisplay: { terminalId: 't1' },
+    })
+  })
+
   it('🔴 las FIRMAS se leen ANTES de que empiece cualquier lectura del cuerpo', async () => {
     const firmas = diferida<unknown>()
     readVenueSignaturesMock.mockReturnValue(firmas.promesa)

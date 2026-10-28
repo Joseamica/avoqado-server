@@ -5,7 +5,9 @@ import { utcTs } from '@/utils/sqlDates'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import logger from '@/config/logger'
 import { SELECT_MARCA_DE_CUENTA_DE_TARJETAS, esCuentaDeTarjetasSeleccionada } from '@/services/giftCards/giftCardMarks'
-import { esVentaDeCajaCerrada, esVentaDeTurnoCerrado } from '@/services/shared/paymentShiftClaim'
+import { isExchangeCreditTenderKind } from '@/services/exchanges/exchangePredicates'
+import { esVentaNuevaDeCambio, sqlOrigenEconomico } from '@/services/exchanges/exchangeMarks'
+import { ORDER_LOCK_WAIT_BUDGET, esVentaDeCajaCerrada, esVentaDeTurnoCerrado, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { aCentavos } from '@/services/shared/repartoDescuento'
 
 /**
@@ -90,8 +92,16 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   } satisfies Prisma.PaymentWhereInput
   // Tarjetas de regalo (R1): la marca COMPLETA de la cuenta (⭐ B6 M2: con tarjeta y sin renglones sin ella) viaja en esta MISMA
   // lectura, y sólo para comisión y referido: sin `relationJoins` son SQL de más dentro de la transacción del cobro (con el FOR UPDATE).
-  const source: { orderId: string; order?: { items?: Array<{ id: string }>; _count?: { items?: number } } } | null = premiaVenta
-    ? await tx.payment.findFirst({ where, select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS } } })
+  // El tender del cobro (crédito de cambio) viaja en la misma lectura, por la misma razón.
+  const source: {
+    orderId: string
+    order?: { items?: Array<{ id: string }>; _count?: { items?: number } }
+    tenderType?: { systemKind: string | null } | null
+  } | null = premiaVenta
+    ? await tx.payment.findFirst({
+        where,
+        select: { orderId: true, order: { select: SELECT_MARCA_DE_CUENTA_DE_TARJETAS }, tenderType: { select: { systemKind: true } } },
+      })
     : await tx.payment.findFirst({ where, select: { orderId: true } })
   if (!source || source.orderId !== input.orderId) throw new Error('PAYMENT_EFFECT_SOURCE_MISMATCH')
   // R1 (tarjetas de regalo): VENDER tarjetas no genera comisión ni califica referidos, así que tampoco tiene reversas. Aquí pasan todas
@@ -99,6 +109,11 @@ export async function enqueuePaymentEffect(tx: Prisma.TransactionClient, input: 
   // la cuenta de mercancía pagada con saldo no es de tarjetas.
   // r1 (lote ⭐): el `?.` de `items` NO sobra: el reembolso de la TPV llega con `order` sin `items`.
   if (premiaVenta && esCuentaDeTarjetasSeleccionada(source.order)) return
+  // Crédito de cambio (spec §7.6): ni el cobro de la venta nueva comisiona ni su devolución gemela revierte la comisión, y ninguno
+  // toca referidos. Así un cambio parejo deja la comisión igual con cualquier esquema; sólo la diferencia comisiona o revierte.
+  if (premiaVenta && isExchangeCreditTenderKind(source.tenderType?.systemKind)) return
+  // La venta nueva de un cambio no es una compra nueva: no dispara referidos, ni con la diferencia cobrada. Su comisión sí va.
+  if (input.kind === 'REFERRAL' && (await esVentaNuevaDeCambio(tx, input.orderId))) return
   await tx.paymentEffect.createMany({ data: [{ ...input, version: 1 }], skipDuplicates: true })
 }
 
@@ -290,8 +305,16 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
   }
   return db.$transaction(async tx => {
     // Use the same lock order as financial producers (Order before its effect rows).
-    if (claim.orderId)
-      await tx.$queryRaw(Prisma.sql`SELECT id FROM "Order" WHERE id = ${claim.orderId} AND "venueId" = ${claim.venueId} FOR UPDATE`)
+    if (claim.orderId) await lockExistingOrderForPayment(tx, { venueId: claim.venueId, orderId: claim.orderId })
+    // R19: la raíz ya quedó tomada con las otras órdenes; esta reentrada conserva la comprobación del origen económico.
+    if (claim.kind === 'COMMISSION')
+      await tx.$queryRaw(Prisma.sql`
+        SELECT o.id FROM "Order" o
+        JOIN "Payment" original ON original."orderId" = o.id AND original."venueId" = o."venueId"
+        JOIN "Payment" r ON ${sqlOrigenEconomico('r')} = original.id AND r."venueId" = original."venueId"
+        WHERE r.id = ${claim.paymentId} AND r."venueId" = ${claim.venueId} AND r.type = 'REFUND'
+          AND r."orderId" IS NOT DISTINCT FROM ${claim.orderId} AND o.id IS DISTINCT FROM ${claim.orderId}
+        FOR UPDATE OF o`)
     const [effect] = await tx.$queryRaw<PaymentEffect[]>(Prisma.sql`
       SELECT * FROM "PaymentEffect" WHERE id = ${claim.id} AND "claimToken" = ${claim.claimToken}
       AND status = 'PROCESSING' FOR UPDATE
@@ -351,7 +374,7 @@ export async function runClaimedPaymentEffect(claim: PaymentEffectClaim, db: Pri
       data: { status: 'DONE', completedAt: new Date(), claimToken: null, leaseUntil: null, lastError: null },
     })
     return true
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 }
 
 export async function failClaimedPaymentEffect(
@@ -422,6 +445,8 @@ export async function enqueueRefundPaymentEffectsInTx(
   originalPaymentId: string,
 ): Promise<void> {
   const { createRefundCommission } = await import('../dashboard/commission/commission-calculation.service')
+  // El sobre conserva la orden de SU cobro; sólo el cálculo congelado se atribuye a la raíz (R6).
+  const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   // Fase 3 (A2, resolución del ensamblaje): una falla al CALCULAR el reverso de la comisión nunca bloquea la devolución —el
   // dinero ya salió o está saliendo—. Se revierte sólo ese cálculo y queda una obligación visible para revisión, igual que en
   // el cobro. Una conexión perdida de verdad sigue tumbando el commit (la siguiente consulta falla igual).
@@ -435,7 +460,7 @@ export async function enqueueRefundPaymentEffectsInTx(
         await enqueuePaymentEffect(tx, {
           venueId: data.venueId,
           paymentId: refundPaymentId,
-          orderId: data.orderId ?? null,
+          orderId: payment.orderId,
           kind: 'COMMISSION',
           dedupeKey,
           payload: JSON.parse(JSON.stringify(data)),
@@ -468,7 +493,6 @@ export async function enqueueRefundPaymentEffectsInTx(
     })
     await tx.$executeRawUnsafe('RELEASE SAVEPOINT refund_commission_snapshot')
   }
-  const payment = await tx.payment.findUniqueOrThrow({ where: { id: refundPaymentId }, select: { venueId: true, orderId: true } })
   await enqueuePaymentEffect(tx, {
     venueId: payment.venueId,
     paymentId: refundPaymentId,

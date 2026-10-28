@@ -44,7 +44,7 @@ beforeAll(async () => {
   expect(['localhost', '127.0.0.1']).toContain(url.hostname)
   // Watchdog sweeps are global. Never point this test at a shared development/test fixture database.
   // La base de este trabajo en la Mac, o la de CI (`avoqado_*_test_*`): nunca otra.
-  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/)
   await prisma.organization.create({ data: { id: fixture, name: fixture, email: `${fixture}@example.test`, phone: '5500000000' } })
   await prisma.venue.create({ data: { id: venueId, organizationId: fixture, name: fixture, slug: fixture } })
   const order = await prisma.order.create({

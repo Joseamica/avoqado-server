@@ -34,8 +34,9 @@ const testDatabase = new URL(process.env.TEST_DATABASE_URL ?? '')
 if (
   !['localhost', '127.0.0.1'].includes(testDatabase.hostname) ||
   !(
-    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808'].includes(testDatabase.pathname) ||
-    isDisposableH1Url(testDatabase)
+    ['/av_db_25_iva_test', '/av_db_25_iva_test_b3c', '/avoqado_h1a_test_20260808', '/avoqado_cambio_r5_test_20261024'].includes(
+      testDatabase.pathname,
+    ) || isDisposableH1Url(testDatabase)
   )
 ) {
   throw new Error('Esta suite exige la base local av_db_25_iva_test o una base H1 desechable validada.')

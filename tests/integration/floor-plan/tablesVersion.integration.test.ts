@@ -44,7 +44,7 @@ jest.mock('@/services/wallet/notifyPassUpdated.service', () => ({
 }))
 
 const target = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(target.pathname)) {
+if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(target.pathname)) {
   throw new Error('Exige una base de prueba local y desechable (p. ej. avoqado_planopos_test_20261009).')
 }
 

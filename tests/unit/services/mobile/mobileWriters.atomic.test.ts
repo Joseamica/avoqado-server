@@ -207,7 +207,9 @@ beforeEach(() => {
   tx = {
     $queryRaw: jest.fn().mockImplementation(async (query: any) => {
       const sql = Array.isArray(query) ? query.join('?') : query.sql
-      return [{ id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') ? 'venue' : 'order' }]
+      return [
+        { id: sql.includes('FROM "Table"') ? 't1' : sql.includes('FROM "Venue"') && !sql.includes('FROM "Order"') ? 'venue' : 'order' },
+      ]
     }),
     ...Object.fromEntries(MODELS.map(name => [name, model()])),
   }
@@ -321,7 +323,10 @@ describe('locked mobile writers', () => {
       }))
       expect(statements).toEqual([
         { sql: 'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE', values: ['venue'] },
-        { sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE', values: ['venue', ['order']] },
+        {
+          sql: 'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
+          values: ['venue', ['order']],
+        },
         { sql: 'SELECT id FROM "Table" WHERE "venueId"=? AND id IN (?) ORDER BY id FOR NO KEY UPDATE', values: ['venue', 't1'] },
       ])
       const [venueLock, orderLock, tableLock] = tx.$queryRaw.mock.invocationCallOrder
@@ -361,7 +366,9 @@ describe('locked mobile writers', () => {
       // toma la reversa del sello). No es un candado de la cuenta: va aparte y siempre después del candado de la cuenta.
       const esDelPremio = (call: any[]) => (Array.isArray(call[0]) ? call[0].join('?') : '').includes('FROM "StampReward"')
       const deLaCuenta = raw.filter((call: any[]) => !esDelPremio(call))
-      expect(deLaCuenta.map((call: any[]) => call.slice(1))).toEqual([['order', 'venue']])
+      expect(
+        deLaCuenta.map((call: any[]) => (Array.isArray(call[0]) ? Prisma.sql(call[0], ...call.slice(1)).values : call[0].values)),
+      ).toEqual([['order', 'venue']])
       expect(tx.$queryRaw.mock.invocationCallOrder[deLaCuenta.length - 1]).toBeLessThan(Math.min(...txCallOrders()))
       if (raw.length > deLaCuenta.length) expect(name).toBe('removeDiscount')
     }
@@ -624,7 +631,7 @@ describe('writer-specific fresh decisions', () => {
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
       'SELECT id FROM "Customer" WHERE id = ANY(?::text[]) ORDER BY id FOR KEY SHARE',
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
-      'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE',
+      'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
     ])
     expect(tx.$queryRaw.mock.calls[1].slice(1)).toEqual([['customer']])
     expect(tx.order.create.mock.calls[0][0].data).toMatchObject({

@@ -36,7 +36,11 @@ const sinTarifa = (paymentId: string) =>
   new Error(`COST_PENDING_${MOTIVO}: payment ${paymentId} was processed by m1 with no contracted pricing`)
 
 beforeEach(() => {
-  ;(prismaMock as any).$queryRaw.mockReset().mockImplementation(async () => [{ id: 'x' }])
+  ;(prismaMock as any).$queryRaw
+    .mockReset()
+    .mockImplementation(async (sql: { strings: string[]; values: unknown[] }) =>
+      sql.strings.join('').includes('/* convergencia */') ? [{ id: sql.values.at(-1) }] : [],
+    )
   ;(prismaMock as any).$executeRaw.mockReset().mockResolvedValue(1)
   ;(prismaMock as any).$transaction
     .mockReset()

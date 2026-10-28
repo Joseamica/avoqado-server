@@ -6,6 +6,7 @@
  */
 import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from 'fs'
 import { basename, resolve } from 'path'
+import { createHash } from 'crypto'
 import {
   effectiveLayout,
   interpret,
@@ -43,6 +44,31 @@ const caseFiles = readdirSync(resolve(ROOT, 'cases'))
   .sort()
 
 describe('casos dorados — el intérprete de referencia', () => {
+  it('SALE and REFUND goldens are unchanged byte for byte', () => {
+    const hash = createHash('sha256')
+    for (const file of readdirSync(resolve(ROOT, 'golden'))
+      .filter(f => f.endsWith('.json') && !f.startsWith('cambio.'))
+      .sort()) {
+      hash.update(file)
+      hash.update(readFileSync(resolve(ROOT, 'golden', file)))
+    }
+    expect(hash.digest('hex')).toBe('51e3733e88d7eb8185bb5b8e7e18b4a9d7feadfce5803549f3e50b7cc793d5d5')
+  })
+
+  it.each(PAPER_WIDTHS)('EXCHANGE golden renders signed groups and the difference at width %i', width => {
+    const sale: ReceiptSale = read(resolve(ROOT, 'samples/exchange.json'))
+    const venue: ReceiptVenueInfo = read(resolve(ROOT, 'venues/one-emisor.json'))
+    const lines = interpret(TEMPLATES.canonical.blocks, { sale, venue }, width)
+    const text = lines.flatMap(l => (l.kind === 'text' ? [l.text] : [])).join('\n')
+    expect(text).toMatch(/CAMBIO/)
+    expect(text).toMatch(/Orden:\s+ORD-new/)
+    expect(text).toMatch(/De la venta:\s+ORD-orig/)
+    expect(text).toMatch(/Regresa[\s\S]*-\$500\.00[\s\S]*Motivo: Talla[\s\S]*Se lleva[\s\S]*\$450\.00/)
+    expect(text).toMatch(/DIFERENCIA:\s+-\$50\.00/)
+    expect(text).toMatch(/Devuelto:\s+Efectivo/)
+    expect(lines).toContainEqual({ kind: 'qr', data: sale.receiptUrl })
+  })
+
   it('hay al menos 25 casos', () => expect(caseFiles.length).toBeGreaterThanOrEqual(25))
 
   describe.each(caseFiles)('%s', file => {

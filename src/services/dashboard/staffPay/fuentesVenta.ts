@@ -3,6 +3,7 @@ import { Prisma } from '@prisma/client'
 import prisma from '../../../utils/prismaClient'
 import { utcTs } from '../../../utils/sqlDates'
 import { fueraDelSobre, limitesPorSede, RangoSede, Rangos, rangosConParticipacion, Ventana } from './rangos'
+import { sqlOrigenEconomico } from '../../exchanges/exchangeMarks'
 
 type Db = Prisma.TransactionClient | typeof prisma
 
@@ -132,13 +133,14 @@ const comisionViva = (a: 'cc') => Prisma.sql`
   AND NOT EXISTS (
     SELECT 1 FROM "ServiceEarning" e WHERE e."sourceType" = 'COMMISSION' AND e."sourceId" = ${Prisma.raw(a)}.id AND e.concept = 'SERVICE')`
 
-/** La comisión original `o` —no anulada— de un reverso de devolución: la llave de `createRefundCommission` (`originalPaymentId` + esquema + persona). */
+/** La comisión original `o` —no anulada— del origen económico del reverso, incluida la cadena de cambios. */
 const originalDelReverso = (a: 'cc') => Prisma.sql`
-  FROM "Payment" rf
+  FROM "Payment" r
   JOIN "CommissionCalculation" o
-    ON o."paymentId" = rf."processorData"->>'originalPaymentId' AND o."configId" = ${Prisma.raw(a)}."configId"
+    ON o."paymentId" = ${sqlOrigenEconomico('r')} AND o."configId" = ${Prisma.raw(a)}."configId"
    AND o."staffId" = ${Prisma.raw(a)}."staffId"
-  WHERE rf.id = ${Prisma.raw(a)}."paymentId" AND rf.type = 'REFUND' AND o.status <> 'VOIDED'`
+   AND o."venueId" = r."venueId"
+  WHERE r.id = ${Prisma.raw(a)}."paymentId" AND r."venueId" = ${Prisma.raw(a)}."venueId" AND r.type = 'REFUND' AND o.status <> 'VOIDED'`
 
 /** Una devolución de propina (alias `p`) que todavía no tiene su propio `SERVICE`. */
 const reembolsoDePropina = (a: 'p') => Prisma.sql`(

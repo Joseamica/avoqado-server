@@ -1,5 +1,6 @@
 // La reserva global congela el periodo completo; sólo su entrada llega al PAC.
 import { textoDeTimbreEnDuda, timbreEnDuda } from './timbreEnDuda'
+import { WHERE_PAYMENT_IS_EXCHANGE_CREDIT, WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 import { CsdStatus, Prisma } from '@prisma/client'
 import type { GlobalPeriodicity } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
@@ -2358,15 +2359,34 @@ export function dondePertenece(
   unSoloEmisor: boolean,
   p: Pertenencia,
 ): Prisma.OrderWhereInput {
-  const conComercio: Prisma.PaymentWhereInput = { OR: [{ merchantAccountId: { not: null } }, { ecommerceMerchantId: { not: null } }] }
-  const deConfig = (cfg: Prisma.MerchantFiscalConfigWhereInput): Prisma.PaymentWhereInput => ({
-    OR: [{ merchantAccount: { fiscalConfig: cfg } }, { ecommerceMerchant: { fiscalConfig: cfg } }],
+  // La pertenencia del crédito sigue al dinero raíz; la forma SAT del ticket sigue siendo 17.
+  const origenValido = {
+    originPayment: { is: { AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, { venue: { fiscalEmisors: { some: { id: emisor.id } } } }] } },
+  } satisfies Prisma.ExchangeCreditLinkWhereInput
+  const porOrigen = (w: Prisma.PaymentWhereInput): Prisma.PaymentWhereInput => ({
+    OR: [
+      { AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, w] },
+      {
+        AND: [WHERE_PAYMENT_IS_EXCHANGE_CREDIT, { exchangeCreditAsCredit: { is: { AND: [origenValido, { originPayment: { is: w } }] } } }],
+      },
+    ],
   })
+  // Sin una raíz propia comprobable no es un cobro fuera de terminal: queda SIN_EMISOR.
+  const conComercio: Prisma.PaymentWhereInput = {
+    OR: [
+      porOrigen({ OR: [{ merchantAccountId: { not: null } }, { ecommerceMerchantId: { not: null } }] }),
+      { AND: [WHERE_PAYMENT_IS_EXCHANGE_CREDIT, { NOT: { exchangeCreditAsCredit: { is: origenValido } } }] },
+    ],
+  }
+  const deConfig = (cfg: Prisma.MerchantFiscalConfigWhereInput): Prisma.PaymentWhereInput =>
+    porOrigen({
+      OR: [{ merchantAccount: { fiscalConfig: cfg } }, { ecommerceMerchant: { fiscalConfig: cfg } }],
+    })
   const nuestro = deConfig({ fiscalEmisorId: emisor.id })
   const compatible = deConfig(configQueEntraALaGlobal(emisor.id))
   const ajeno = deConfig({ fiscalEmisorId: { not: emisor.id } })
   const incompatible: Prisma.PaymentWhereInput = { AND: [conComercio, { NOT: compatible }] }
-  const efectivo: Prisma.PaymentWhereInput = { method: 'CASH' }
+  const efectivo = porOrigen({ method: 'CASH' })
   const conEfectivo = emisor.invoiceCashSales ? NUNCA : algun(efectivo)
   const sinEfectivo = emisor.invoiceCashSales ? {} : ninguno(efectivo)
   // Ajuste del founder (7-oct): lo cobrado SÓLO fuera de la terminal (ningún cobro con comercio), con un solo RFC, se revisa como efectivo o

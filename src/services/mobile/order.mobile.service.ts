@@ -1,5 +1,9 @@
 import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import type { HttpEnvelope } from './http-operation.mobile.service'
+import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type ExchangeTxEarly } from '../exchanges/exchangeTx'
+import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
+import { ExchangeError } from '../exchanges/exchangeErrors'
+import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
 /**
@@ -3461,6 +3465,10 @@ export interface AbonoEnTxContexto {
 }
 
 export interface AbonoEnTxEntrada {
+  /** Fecha contable de una operación compuesta; sólo interna, nunca tomada del cuerpo del cobro. */
+  createdAt?: Date
+  /** El cambio espera al último abono: la tolerancia de un centavo no puede cerrar antes. */
+  cierreDiferido?: boolean
   /** Lo SOLICITADO, en centavos enteros (la frontera de `payCashOrder`). */
   amountCents: number
   tipCents: number
@@ -3866,7 +3874,7 @@ export async function registrarAbonoEnTx(
   // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
   // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
   // cierra).
-  const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado) && cubreLoDeTerceros
+  const isFullyPaid = !entrada.cierreDiferido && balance.isFullyPaid && cierreAutomaticoPermitido(estado) && cubreLoDeTerceros
   // La columna `remainingBalance` del carril es lo que falta de las tres partes: la lee el reintento (`readOrderBalanceSnapshot`).
   const remainingAfterPayment = repartoDespues
     ? isFullyPaid
@@ -3970,6 +3978,7 @@ export async function registrarAbonoEnTx(
     data: {
       venueId,
       orderId,
+      createdAt: entrada.createdAt,
       amount: amountDecimal,
       tipAmount: tipDecimal,
       method: resolvedTender?.method ?? paymentMethod,
@@ -5398,7 +5407,7 @@ export async function returnGiftBalanceAndCancelOrder(
       const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
       if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
         let todoDevuelto = true
-        for (const cobro of cobros) {
+        for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
           const pendiente = pendienteDeDevolver(
             await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
           )
@@ -5439,16 +5448,16 @@ export async function returnGiftBalanceAndCancelOrder(
     // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
     // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
     // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
-    // de `cobros` y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
+    // de id y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
     // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
     // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
-    const bloqueos: Array<Awaited<ReturnType<typeof bloquearCobroParaReembolso>>> = []
-    for (const cobro of cobros) {
-      bloqueos.push(await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
+    const bloqueos = new Map<string, Awaited<ReturnType<typeof bloquearCobroParaReembolso>>>()
+    for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
+      bloqueos.set(cobro.id, await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
     }
     // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
     const porDevolver = cobros
-      .map((cobro, i) => ({ cobro, bloqueado: bloqueos[i], ...pendienteDeDevolver(bloqueos[i]) }))
+      .map(cobro => ({ cobro, bloqueado: bloqueos.get(cobro.id)!, ...pendienteDeDevolver(bloqueos.get(cobro.id)!) }))
       .filter(p => p.ventaCents + p.propinaCents > 0)
     const sobresDeLosCobros: string[] = []
     for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))
@@ -6065,4 +6074,26 @@ export async function stampRewardOutcomeForExistingOrder(venueId: string, orderI
     return { applied: false, reason: 'El premio no quedó aplicado a esta venta.' }
   }
   return { applied: true, discountAmount: Number(premio.amount), rewardLabel: premio.rewardLabel }
+}
+
+/** Único abridor de la transacción del cambio; conserva el núcleo de cobro en su carril certificado. */
+export async function executeExchangeInTransaction(
+  input: ExchangeTxInput | ExchangeSettleTxInput,
+): Promise<ExchangeTxOutcome | ExchangeTxEarly> {
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(async tx => {
+        const prepared = await prepareExchangeInTx(tx, input)
+        if (!('newSalePayments' in prepared)) return prepared
+        const settled: AbonoEnTx[] = []
+        for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
+        return finishExchangeInTx(tx, prepared, settled)
+      }, ORDER_LOCK_WAIT_BUDGET)
+    } catch (error) {
+      if (!(error instanceof ExchangeGenerationChanged || (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED')) throw error
+      if (attempt >= 2)
+        throw new ExchangeError('EXCHANGE_RETRY_CONFLICT', 'El cambio se movió mientras lo cerrábamos. Intenta de nuevo.', 409)
+    }
+  }
 }

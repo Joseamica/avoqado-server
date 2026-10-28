@@ -13,6 +13,7 @@
  * status/refund definition are correct.
  */
 import prisma from '@/utils/prismaClient'
+import { sqlPaymentIsNotExchangeCredit } from '@/services/exchanges/exchangeMarks'
 import { venueStartOfDay, venueEndOfDay } from '@/utils/datetime'
 import { registerSalesTools } from '@/mcp/tools/sales'
 import { registerPaymentTools } from '@/mcp/tools/payments'
@@ -110,6 +111,7 @@ async function main() {
   // VenueTenderType.systemKind. Un REFUND hereda el tender de su cobro, así que su reverso también es GIFT_CARD.
   const sinCargas = `NOT EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = p."orderId" AND gc_oi."giftCardId" IS NOT NULL)`
   const esCarga = `EXISTS (SELECT 1 FROM "OrderItem" gc_oi WHERE gc_oi."orderId" = p."orderId" AND gc_oi."giftCardId" IS NOT NULL)`
+  const sinCreditoDeCambio = sqlPaymentIsNotExchangeCredit('p').sql
   const metodo = `CASE WHEN gt."systemKind" = 'GIFT_CARD' THEN 'GIFT_CARD' ELSE p.method::text END`
   // Ground truth GROSS = all COMPLETED by method (incl refunds-as-negatives + cancelled) INCLUDING TIPS —
   // mirrors the dashboard "Métodos de Pago" panel (sum(amount + tipAmount), no type/order filter) — CON las cargas en su
@@ -118,7 +120,7 @@ async function main() {
     `SELECT p.method::text AS method, count(*)::int c, COALESCE(sum(p.amount + COALESCE(p."tipAmount",0)),0)::float8 s
        FROM "Payment" p LEFT JOIN "VenueTenderType" gt ON gt.id = p."tenderTypeId"
       WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
-        AND gt."systemKind" IS DISTINCT FROM 'GIFT_CARD'
+        AND gt."systemKind" IS DISTINCT FROM 'GIFT_CARD' AND ${sinCreditoDeCambio}
       GROUP BY 1`,
     VENUE,
     start,
@@ -131,7 +133,7 @@ async function main() {
     `SELECT ${metodo} AS method, count(*)::int c, COALESCE(sum(p.amount),0)::float8 s
        FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "VenueTenderType" gt ON gt.id = p."tenderTypeId"
       WHERE p."venueId"=$1 AND p.status='COMPLETED' AND (o.status IS NULL OR o.status!='CANCELLED') AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
-        AND ${sinCargas}
+        AND ${sinCargas} AND ${sinCreditoDeCambio}
       GROUP BY 1`,
     VENUE,
     start,
@@ -212,7 +214,7 @@ async function main() {
     `SELECT p."processedById" sid, trim(concat(st."firstName", ' ', st."lastName")) name, count(*)::int c, COALESCE(sum(p."tipAmount"),0)::float8 s
      FROM "Payment" p LEFT JOIN "Order" o ON o.id=p."orderId" LEFT JOIN "Staff" st ON st.id=p."processedById"
      WHERE p."venueId"=$1 AND p.status='COMPLETED' AND p.type!='REFUND' AND (o.status IS NULL OR o.status!='CANCELLED')
-       AND p."tipAmount">0 AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
+       AND ${sinCreditoDeCambio} AND p."tipAmount">0 AND p."createdAt">=${utcTsParam(2)} AND p."createdAt"<=${utcTsParam(3)}
      GROUP BY p."processedById", name ORDER BY s DESC`,
     VENUE,
     start,

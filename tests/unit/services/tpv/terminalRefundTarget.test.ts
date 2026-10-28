@@ -270,3 +270,23 @@ describe('sePuedeEscogerComoDevolver — tarjeta de regalo (spec §5.5, Review F
     expect(sePuedeEscogerComoDevolver(viejo)).toBe(true)
   })
 })
+
+// Cambio de producto (spec 2026-10-20 §6.7): lo pagado con «Crédito de cambio» sale por el medio del cobro RAÍZ, nunca por uno escogido.
+describe('sePuedeEscogerComoDevolver — crédito de cambio (spec cambio §6.7)', () => {
+  const conCredito = {
+    method: 'OTHER',
+    source: 'OTHER',
+    externalSource: null,
+    tenderSatFormaPago: '17',
+    fundsFlow: 'EXTERNAL_RECORDED',
+    tenderTypeId: 't',
+    tenderCountsAsCash: false,
+    tenderSystemKind: 'EXCHANGE_CREDIT',
+  }
+
+  it('sePuedeEscogerComoDevolver is false for an EXCHANGE_CREDIT payment', () => expect(sePuedeEscogerComoDevolver(conCredito)).toBe(false))
+
+  it('control: the same payment with a business tender (no system kind) can still choose', () => {
+    expect(sePuedeEscogerComoDevolver({ ...conCredito, tenderSystemKind: null })).toBe(true)
+  })
+})

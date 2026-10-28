@@ -11,7 +11,7 @@ import prisma from '@/utils/prismaClient'
 import { deletePayment, updatePayment } from '@/services/dashboard/payment.dashboard.service'
 
 const target = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_[a-z0-9]+_test_/.test(target.pathname)) {
+if (!['localhost', '127.0.0.1'].includes(target.hostname) || !/^\/avoqado_(?:[a-z0-9]+|cambio_r5)_test_/.test(target.pathname)) {
   throw new Error('Exige una base de prueba local y desechable (p. ej. avoqado_cobrohecho_test_20261023).')
 }
 

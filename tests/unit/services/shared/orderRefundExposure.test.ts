@@ -165,6 +165,12 @@ describe('mobile — listado de órdenes (`listOrders`) expone el carril del ree
 })
 
 describe('dashboard — detalle de orden (`getOrderById`) expone el carril del reembolso', () => {
+  // El detalle también trae los vínculos del Cambio («Cambiada en / Cambio de»): sin cambios, ninguno.
+  beforeEach(() => {
+    prismaMock.$queryRaw.mockResolvedValue([] as any)
+    prismaMock.order.findMany.mockResolvedValue([] as any)
+  })
+
   it('🔴 marca FULL y el monto devuelto, sin tocar lo que ya devolvía', async () => {
     prismaMock.order.findFirst.mockResolvedValue(orderRow(paidAndFullyRefunded.map(p => ({ ...p, processorData: {} }))) as any)
 

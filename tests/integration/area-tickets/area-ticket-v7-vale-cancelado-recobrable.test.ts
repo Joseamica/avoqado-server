@@ -10,6 +10,8 @@ import {
 import { payCashOrder } from '@/services/mobile/order.mobile.service'
 import prisma from '@/utils/prismaClient'
 import { encenderIvaPorProducto } from '@tests/__helpers__/iva-por-producto'
+import { barreraDeFila } from '../commission/_mundoComisiones'
+import { bloquearOrdenesParaFacturar } from '@/services/fiscal/admisionIva'
 
 /**
  * Un vale cuyo cobro se canceló DESPUÉS de armar su cuenta se vuelve a escanear y a cobrar (QA N86, 21-oct-2026; tablero
@@ -162,6 +164,51 @@ describe('Area tickets v7 — un vale cancelado se vuelve a cobrar', () => {
     expect(historico.areaTicketLineId).toBeNull()
     expect(historico.releasedAreaTicketLineId).toBe(renglonDelVale)
     expect((await prisma.areaTicket.findUniqueOrThrow({ where: { id: vale.id } })).orderId).toBe(segunda.order!.id)
+  })
+
+  it('R7: recuperar vales de dos cuentas canceladas usa el mismo orden de Orders que la captura fiscal', async () => {
+    const first = await emitirVale()
+    const oldFirst = await armarCuenta(first.code)
+    await cancelar(oldFirst.id)
+    const second = await emitirVale()
+    const oldSecond = await armarCuenta(second.code)
+    await cancelar(oldSecond.id)
+    const ids = [oldFirst.order!.id, oldSecond.order!.id]
+    await prisma.order.update({ where: { id: ids[0] }, data: { createdAt: new Date(Date.now() - 60000) } })
+    expect(ids[0] < ids[1]).toBe(true)
+    const session = await createAreaTicketCheckout(venueId, { idempotencyKey: llave('r7-caja'), deviceUid: checkoutDeviceUid, staffId })
+    for (const ticket of [first, second])
+      await addTicketToCheckout(venueId, session.id, ticket.code, {
+        idempotencyKey: llave('r7-apartar'),
+        deviceUid: checkoutDeviceUid,
+        staffId,
+      })
+    const barrier = await barreraDeFila('Order', ids[1])
+    const fiscal = Promise.allSettled([prisma.$transaction(tx => bloquearOrdenesParaFacturar(tx, ids, venueId), { timeout: 30000 })])
+    let materialized: ReturnType<typeof Promise.allSettled> | undefined
+    try {
+      await barrier.esperarA(1)
+      materialized = Promise.allSettled([
+        materializeAreaTicketCheckout(venueId, session.id, {
+          idempotencyKey: llave('r7-armar'),
+          deviceUid: checkoutDeviceUid,
+          staffId,
+          source: 'AVOQADO_ANDROID',
+        }),
+      ])
+      await barrier.esperarA(2)
+      await barrier.soltar()
+      const results = [...(await fiscal), ...(await materialized)]
+      expect(results.map(r => (r.status === 'rejected' ? String(r.reason) : r.status))).toEqual(['fulfilled', 'fulfilled'])
+      const current = await prisma.areaTicketCheckoutSession.findUniqueOrThrow({ where: { id: session.id } })
+      expect(await prisma.orderItem.count({ where: { orderId: current.orderId!, areaTicketLineId: { not: null } } })).toBe(2)
+      expect(Number((await prisma.order.findUniqueOrThrow({ where: { id: current.orderId! } })).total)).toBe(60)
+      expect(await prisma.orderItem.count({ where: { orderId: { in: ids }, areaTicketLineId: { not: null } } })).toBe(0)
+    } finally {
+      await barrier.soltar()
+      await fiscal
+      if (materialized) await materialized
+    }
   })
 
   it('la cuenta nueva se cobra en efectivo y el vale queda pagado (el recorrido de la N86)', async () => {

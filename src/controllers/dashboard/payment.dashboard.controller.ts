@@ -23,6 +23,7 @@ import {
 } from '../../services/dashboard/listSummary.shared'
 
 import prisma from '../../utils/prismaClient'
+import { loadExchangeLinksForOrders } from '../../services/exchanges/exchangeDetail'
 import { NotFoundError } from '../../errors/AppError'
 import logger from '../../config/logger'
 
@@ -102,7 +103,10 @@ export async function getPayment(req: Request<{ venueId: string; paymentId: stri
   try {
     const { venueId, paymentId } = req.params
     const payment = await paymentDashboardService.getPaymentById(venueId, paymentId)
-    res.status(200).json(payment)
+    const exchange = payment.orderId
+      ? (await loadExchangeLinksForOrders(prisma, venueId, [payment.orderId])).get(payment.orderId)
+      : undefined
+    res.status(200).json({ ...payment, ...(exchange && { exchange }) })
   } catch (error) {
     next(error)
   }

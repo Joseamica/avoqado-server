@@ -129,7 +129,7 @@ describe('Inventario de escritores que cancelan una orden (§C.6)', () => {
 describe('Mesas merge cancellation keeps the ordered Order lock', () => {
   it('the transaction helper delegates to the topology lock whose raw Order claim remains ordered', () => {
     const helper = fs.readFileSync(path.join(SRC, 'services/shared/tableOrderLock.ts'), 'utf8')
-    expect(helper).toMatch(/FROM "Order"[\s\S]*?ORDER BY id FOR UPDATE/)
+    expect(helper).toMatch(/FROM "Order"[\s\S]*?ORDER BY "createdAt" DESC, id DESC FOR UPDATE/)
     expect(helper).toContain('locked.length !== ids.length')
     expect(helper).toContain('shape(before) !== shape(after)')
   })

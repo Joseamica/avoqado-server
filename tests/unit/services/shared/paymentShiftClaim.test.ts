@@ -773,6 +773,10 @@ describe('lockExistingOrderForPayment — el candado de la Order decide dinero y
 
     await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
   })
+  it('conserva false para un lector que no devuelve filas', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue(undefined) }
+    await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
+  })
 })
 
 // 🔴 Revisión de S5 #1: el efectivo de la venta tardía ya lo contó el cajón de SU turno (cerrado). La marca va en la MISMA fila del
