@@ -1066,6 +1066,16 @@
       "count": 1,
       "loops": 0,
       "reason": "C06 task6: cancelExchange opens with ORDER_LOCK_WAIT_BUDGET, including calls from the sweep. Only an already CANCELLED/DELETED new Order uses this direct path: exchange advisory then canonical Order ancestry, evidence and release CAS under Order. The live path takes kitchen/topology then Order through cancelOrderInTransaction. No later original Order/Payment/Shift claims; CHARGED rolls back before a separate settle opener. PostgreSQL cancel/terminal barriers cover both winners."
+    },
+    "src/services/dashboard/paymentLink.service.ts#reciboParaElCliente#generateDigitalReceipt": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Fuera de toda transacción: generateDigitalReceipt abre y termina la suya sobre UN pago; la liga no retiene filas previas."
+    },
+    "src/services/mobile/cortesia-pendiente.mobile.service.ts#revisarCortesiaPendiente#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una Order por operación: abre su transacción y la toma primero, antes de leer sus Payments."
     }
   }
 }

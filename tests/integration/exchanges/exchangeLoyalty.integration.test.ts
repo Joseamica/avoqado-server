@@ -370,8 +370,12 @@ describe('loyalty reconciliation around a product exchange (real reconciler)', (
     await prisma.order.update({ where: { id: nueva.orderId }, data: { loyaltyProcessedAt: new Date() } })
     ;(logAction as jest.Mock).mockClear()
 
-    // La TPV liga a Eva después del cobro (con permiso de cobrar): no hay sello que prometer ni un «no sumó por error».
-    const ligada = await addCustomerToOrder(venueId, nueva.orderId, eva, staffId, { otorgarLealtad: true })
+    // Un gerente liga a Eva desde la TPV después del cobro (develop, 28-oct: ligar a una venta ya cobrada es de gerente o
+    // superior): no hay sello que prometer ni un «no sumó por error».
+    const ligada = await addCustomerToOrder(venueId, nueva.orderId, eva, staffId, {
+      otorgarLealtad: true,
+      customerAttribution: { staffId, canAssignHistorical: true },
+    })
     expect(ligada.loyalty).toBeNull()
     // La app reintenta (re-liga): igual, y los puntos no se repiten.
     expect(await awardLoyaltyForLateCustomer({ venueId, orderId: nueva.orderId, customerId: eva, staffId, ligaNueva: false })).toBeNull()

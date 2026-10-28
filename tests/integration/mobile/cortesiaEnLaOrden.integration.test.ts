@@ -206,13 +206,15 @@ describe('Task4: Order lock entre primer cierre0 y admisión real de terminal', 
       movimientos: await prisma.inventoryMovement.count({ where: { inventoryId: f.inventoryId } }),
     }
   }
+  // Sin buscar «FOR UPDATE» en el texto: `pg_stat_activity.query` se corta a 1024 bytes y el candado canónico de las Orders
+  // (`lockExistingOrderForPayment`, un CTE recursivo) lo dice después del corte. Basta con que espere un Lock del titular.
   async function esperarOrderBloqueada(pidTitular: number) {
     const limite = Date.now() + 5000
     while (Date.now() < limite) {
       const rows = await prisma.$queryRaw<Array<{ pid: number }>>`
         SELECT a.pid FROM pg_stat_activity a
         WHERE a.datname = current_database() AND ${pidTitular}::int = ANY(pg_blocking_pids(a.pid))
-          AND a.wait_event_type = 'Lock' AND a.query ILIKE '%"Order"%' AND a.query ILIKE '%FOR UPDATE%'`
+          AND a.wait_event_type = 'Lock' AND a.query ILIKE '%"Order"%'`
       if (rows.length > 0) {
         expect(rows[0].pid).not.toBe(pidTitular)
         return rows[0].pid

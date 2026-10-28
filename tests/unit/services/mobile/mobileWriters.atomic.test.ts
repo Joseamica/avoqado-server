@@ -631,7 +631,7 @@ describe('writer-specific fresh decisions', () => {
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
       'SELECT id FROM "Customer" WHERE id = ANY(?::text[]) ORDER BY id FOR KEY SHARE',
       'SELECT id FROM "Venue" WHERE id=? FOR KEY SHARE',
-      'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY id FOR UPDATE',
+      'SELECT id FROM "Order" WHERE "venueId"=? AND id=ANY(?::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE',
     ])
     expect(tx.$queryRaw.mock.calls[1].slice(1)).toEqual([['customer']])
     expect(tx.order.create.mock.calls[0][0].data).toMatchObject({
