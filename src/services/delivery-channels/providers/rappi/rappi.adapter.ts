@@ -71,6 +71,22 @@ export const rappiAdapter = {
     'Los pedidos de Rappi se aceptan solos: Rappi los cancela si no se aceptan en 4 a 6 minutos. Para dejar de recibirlos, pausa la tienda.',
 
   /**
+   * Rappi fase 3: por tienda, cuántos pedidos siguen en curso (con ≥1 el panel pone «Desconectar» en gris) y qué conexión
+   * ve el dueño (la manda de vuelta al desconectar). Una sola consulta para todas las tiendas del venue.
+   */
+  async datosDelListado(links: Array<{ id: string; config: unknown; externalLocationId: string }>) {
+    const [{ conexionIdDe, contarPedidosEnCurso }, { default: prisma }] = await Promise.all([
+      import('./rappi.pedidosEnCurso'),
+      import('@/utils/prismaClient'),
+    ])
+    const enCurso = await contarPedidosEnCurso(
+      prisma,
+      links.map(l => l.id),
+    )
+    return new Map(links.map(l => [l.id, { conexionId: conexionIdDe(l), pedidosEnCurso: enCurso.get(l.id) ?? 0 }]))
+  },
+
+  /**
    * HMAC-SHA256 sobre `timestamp.payload` — NO sobre el body crudo como Uber.
    *
    * Se prueban todos los secretos que el llamador pase (rotación) y basta uno. El detalle del

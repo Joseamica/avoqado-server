@@ -131,6 +131,41 @@ describe('toda orden nueva decide explícitamente si cae en el turno de caja', (
     }
   }
 
+  /**
+   * 🔴 «Cobrar sin red» (S5, D4): las puertas por las que sube la cola de la terminal reciben `shiftIdDeLaVenta`, el turno en
+   * que se VENDIÓ. La orden que nace ahí cae en el turno vivo SÓLO si es el de la venta; si no, queda sin turno (nunca el
+   * nuevo, que es justo el que no la vendió). Cada archivo que lo lee se clasifica aquí con la forma en que su orden lo respeta.
+   */
+  const RESPETAN_EL_TURNO_DE_LA_VENTA: Record<string, RegExp> = {
+    // `createOrderWithItems`: el turno vivo se descarta si el de la venta es OTRO turno real del negocio (Codex servidor r1 #1).
+    // S3 «Efectivo sin red en el turno correcto»: la regla vive ahora en `turnoDeLaOrdenQueNace` (paymentShiftClaim.ts), compartida
+    // con abrir mesa (`assignTable`), y también la alimenta la caja que capturó el POS (`ventaDeLaColaEnTx`). Cambio de forma A
+    // PROPÓSITO, misma regla: la orden sólo cae en el vivo si es el de la venta.
+    'mobile/order.mobile.service.ts':
+      /const ventaDeLaCola = await ventaDeLaColaEnTx\(tx, venueId, \{\s*shiftIdDeLaVenta: input\.shiftIdDeLaVenta,[\s\S]*?\}\)\n\s*const turnoDeLaOrden = await turnoDeLaOrdenQueNace\(tx, venueId, ventaDeLaCola, turnoVivo\)\n[\s\S]*?await tx\.order\.create\(\{[\s\S]*?shiftId: turnoDeLaOrden\?\.id \?\? null/,
+    // `recordFastPayment`: la orden toma el turno que GANÓ el claim, y el claim recibe el de la venta (lo clasifica
+    // `paymentShiftClaim.callers.guard.test.ts`). `recordOrderPayment` no crea orden: la suya ya existe.
+    'tpv/payment.tpv.service.ts': /const order = await tx\.order\.create\(\{[\s\S]*?shiftId: shiftClaim\?\.shiftId \?\? null/,
+    // El claim compara y sólo QUITA: si el de la venta (validado) no es el vivo OPEN, devuelve `shiftId: null` antes de tocar totales.
+    // y la orden que nace en el replay (S3): con el turno de la venta que no es el vivo, sin turno (`turnoDeLaOrdenQueNace`). Codex
+    // r7 código #1: el turno de una caja ya validada no se pone en duda (si lo borraron a media subida, la orden nace sin turno).
+    'shared/paymentShiftClaim.ts':
+      /if \(!pedido \|\| pedido === turnoVivo\?\.id\) return turnoVivo\n(?:\s*\/\/[^\n]*\n)*\s*if \(venta\.cajaCapturada\) return null\n\s*return \(await esTurnoDelNegocio\(tx, venueId, pedido\)\) \? null : turnoVivo[\s\S]*if \(turnoDeLaVenta && turnoDeLaVenta !== vivoOpenId\) \{\s*return \{\s*shiftId: null,[\s\S]*?pendingReason: 'SALE_SHIFT_CLOSED'[\s\S]*?\n\s*\}\n\n\s*if \(!candidate\)/,
+  }
+
+  it('cada servicio que lee shiftIdDeLaVenta está clasificado, y su orden lo respeta', () => {
+    const salida = execFileSync('grep', ['-rl', '--include=*.ts', 'shiftIdDeLaVenta', raizServicios], { encoding: 'utf8' })
+    const archivos = salida
+      .trim()
+      .split('\n')
+      .map(ruta => ruta.slice(raizServicios.length + 1))
+      .sort()
+    expect(archivos).toEqual(Object.keys(RESPETAN_EL_TURNO_DE_LA_VENTA).sort())
+    for (const [rel, forma] of Object.entries(RESPETAN_EL_TURNO_DE_LA_VENTA)) {
+      expect(readFileSync(join(raizServicios, rel), 'utf8')).toMatch(forma)
+    }
+  })
+
   it('el upsert de pos-sync conecta por RELACIÓN sólo el turno que ganó el lock', () => {
     // El `grep` de arriba ya lo incluye, pero sólo comprueba que la palabra `shiftId` aparezca:
     // aquí se fija la FORMA, porque pos-sync es el único que lo ata por relación (SoftRestaurant

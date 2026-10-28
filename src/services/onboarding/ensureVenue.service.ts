@@ -117,6 +117,7 @@ export async function ensureVenueForOnboarding(organizationId: string, userId?: 
     selectedFeatures: undefined,
     stripePaymentMethodId: undefined,
     teamInvites: undefined,
+    provisional: true,
   } as any)
 
   return {

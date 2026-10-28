@@ -158,6 +158,55 @@ describe('registrarAbonoEnTx', () => {
     expect(r.balance).toMatchObject({ orderPaymentStatus: 'PARTIAL', remainingBalanceCents: 50000 })
   })
 
+  // 🔴 «Cobrar sin red» (S5, D4): la cola de la terminal manda el turno en que se vendió.
+  it('turno de la venta cerrado y otro abierto ⇒ Payment sin turno, el vivo intacto y PAYMENT_WITHOUT_SHIFT SALE_SHIFT_CLOSED', async () => {
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-B', status: 'OPEN' } as any)
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'caja-B' } as any)
+
+    const r = await registrarAbonoEnTx(
+      prismaMock,
+      CTX,
+      { amountCents: 80000, tipCents: 0, method: 'CASH', tender: null, idempotencyKey: 'llave-venta-A', shiftIdDeLaVenta: 'turno-A' },
+      true,
+    )
+
+    expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create.mock.calls[0][0].data.shiftId).toBeNull()
+    // 🔴 Su efectivo ya lo contó el cajón de SU turno (cerrado): no entra a la caja abierta de B (faltante falso al cerrarla), y la
+    // marca durable en la fila le dice lo mismo al barrido de respaldo.
+    expect(r.cajaAlCobrarId).toBeNull()
+    expect(prismaMock.payment.create.mock.calls[0][0].data.posRawData).toEqual({ ventaDeTurnoCerrado: 'turno-A' })
+    expect(prismaMock.activityLog.create).toHaveBeenCalledWith({
+      data: expect.objectContaining({
+        action: 'PAYMENT_WITHOUT_SHIFT',
+        data: expect.objectContaining({
+          reason: 'SALE_SHIFT_CLOSED',
+          saleShiftId: 'turno-A',
+          candidateShiftId: 'turno-B',
+          channel: 'payCashOrder',
+        }),
+      }),
+    })
+  })
+
+  it('turno de la venta = el vivo ⇒ como hoy: el Payment entra al turno y a la caja abierta', async () => {
+    prismaMock.shift.findFirst.mockResolvedValue({ id: 'turno-A', status: 'OPEN' } as any)
+    prismaMock.shift.updateMany.mockResolvedValue({ count: 1 })
+    prismaMock.cashDrawerSession.findFirst.mockResolvedValue({ id: 'caja-A' } as any)
+
+    const r = await registrarAbonoEnTx(
+      prismaMock,
+      CTX,
+      { amountCents: 80000, tipCents: 0, method: 'CASH', tender: null, idempotencyKey: 'llave-venta-A2', shiftIdDeLaVenta: 'turno-A' },
+      true,
+    )
+
+    expect(prismaMock.shift.updateMany).toHaveBeenCalledTimes(1)
+    expect(prismaMock.payment.create.mock.calls[0][0].data.shiftId).toBe('turno-A')
+    expect(r.cajaAlCobrarId).toBe('caja-A')
+    expect(prismaMock.payment.create.mock.calls[0][0].data.posRawData).toBeUndefined()
+  })
+
   it('si el gancho rechaza, no se escribe nada (ni la Order, ni el turno, ni el Payment)', async () => {
     await expect(
       registrarAbonoEnTx(

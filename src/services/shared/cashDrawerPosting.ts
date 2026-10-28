@@ -176,6 +176,17 @@ export interface CashSaleDrawerPosting extends TenderSemanticsPayment {
    * un proceso que despierta tarde metía el efectivo en la caja abierta de AHORA.
    */
   exigirAbierta?: boolean
+  /**
+   * S3 (Codex r6 código #1): con `exigirAbierta`, acepta también la caja que cerró el SISTEMA sin conteo (`isAutoClosedSession`). Es la
+   * caja que el POS capturó al cobrar sin red: el billete está ahí y nadie firmó un corte, así que se anota sin recalcular nada. Una caja
+   * contada se sigue rechazando bajo el mismo candado.
+   */
+  admiteCerradaSinConteo?: boolean
+  /**
+   * «Cobrar sin red» (D4): venta tardía de un turno ya cerrado (`esVentaDeTurnoCerrado`, `paymentShiftClaim.ts`). Su efectivo ya lo
+   * contó el cajón de SU turno: no entra a la caja abierta de hoy (su cierre firmaría un faltante falso) ni a la cerrada.
+   */
+  ventaDeTurnoCerrado?: boolean
 }
 
 export type CashSaleDrawerOutcome =
@@ -216,6 +227,8 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
     // aquí restaría el reembolso DOS veces. Un pago de prueba (demo en vivo) no es
     // dinero real.
     if (posting.type === 'REFUND' || posting.type === 'TEST') return 'NOT_DRAWER_CASH'
+    // D4: el de una venta tardía ya está en el cajón de su turno cerrado; ningún otro lo vuelve a contar.
+    if (posting.ventaDeTurnoCerrado) return 'NOT_DRAWER_CASH'
 
     // 🔴 La ÚNICA respuesta válida a "¿este dinero está en el cajón?".
     if (!paymentCountsAsDrawerCash(posting)) return 'NOT_DRAWER_CASH'
@@ -291,7 +304,7 @@ export async function postCashSaleToDrawer(posting: CashSaleDrawerPosting): Prom
       })
     }
     if (filas.length === 0) return 'DRAWER_CLOSED'
-    const result = await createEventUnderSessionLock(session.id, requireOpen, filas)
+    const result = await createEventUnderSessionLock(session.id, requireOpen, filas, posting.admiteCerradaSinConteo === true)
     if (!result) {
       logger.info('💵 [CASH-DRAWER] La caja se cerró mientras se registraba el movimiento — no entra a una caja cerrada', {
         venueId: posting.venueId,
@@ -502,11 +515,17 @@ async function createEventUnderSessionLock(
   requireOpen: boolean,
   /** Uno, o varios del MISMO cobro (Rappi 2b: la venta y lo cobrado por cuenta de Rappi), que entran juntos o no entran. */
   movimientos: Prisma.CashDrawerEventCreateManyInput | Prisma.CashDrawerEventCreateManyInput[],
+  // S3: con `requireOpen`, también la caja que cerró el sistema sin conteo (misma firma que `isAutoClosedSession`). El WHERE se re-evalúa
+  // tras el candado de fila: si alguien la contó mientras tanto, no hay fila y no se toca su corte.
+  admiteCerradaSinConteo = false,
 ): Promise<{ count: number } | null> {
   const pedidas = Array.isArray(movimientos) ? movimientos : [movimientos]
   const transactionResult = await prisma.$transaction(async (tx): Promise<LateEventTransactionResult | null> => {
+    const abierta: Prisma.CashDrawerSessionWhereInput = admiteCerradaSinConteo
+      ? { OR: [{ status: 'OPEN' }, { status: 'CLOSED', actualAmount: null, closedByStaffId: null }] }
+      : { status: 'OPEN' }
     const lock = await tx.cashDrawerSession.updateMany({
-      where: requireOpen ? { id: sessionId, venueId: pedidas[0].venueId, status: 'OPEN' } : { id: sessionId, venueId: pedidas[0].venueId },
+      where: requireOpen ? { id: sessionId, venueId: pedidas[0].venueId, ...abierta } : { id: sessionId, venueId: pedidas[0].venueId },
       data: { updatedAt: new Date() },
     })
     if (!lock || lock.count === 0) return null

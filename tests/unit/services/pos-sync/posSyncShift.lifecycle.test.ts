@@ -7,6 +7,7 @@
  * TPV, nunca los importes de Order.
  */
 
+import { Prisma } from '@prisma/client'
 import { Decimal } from '@prisma/client/runtime/library'
 import { prismaMock } from '../../../__helpers__/setup'
 import { processPosShiftEvent } from '@/services/pos-sync/posSyncShift.service'
@@ -232,6 +233,11 @@ describe('processPosShiftEvent closed — Payment canónico + CAS observado', ()
             shiftId: null,
             createdAt: { gte: START, lte: CLAIMED_AT },
             order: { venueId: VENUE, shiftId: TURNO },
+            // D4 y S3: una venta apartada (turno o caja ya cerrados) nunca se adopta por su orden (`COBRO_SIN_MARCA_DE_TURNO_CERRADO`).
+            AND: [
+              { posRawData: { path: ['ventaDeTurnoCerrado'], equals: Prisma.AnyNull } },
+              { posRawData: { path: ['cajaDeLaVentaCerrada'], equals: Prisma.AnyNull } },
+            ],
           },
         ],
       },

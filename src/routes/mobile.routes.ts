@@ -23,6 +23,8 @@ import * as terminalPaymentMobileController from '../controllers/mobile/terminal
 import * as inventoryMobileController from '../controllers/mobile/inventory.mobile.controller'
 import * as wasteController from '../controllers/mobile/inventoryWaste.mobile.controller'
 import * as loyaltyMobileController from '../controllers/mobile/loyalty.mobile.controller'
+import * as loyaltyDashboardController from '../controllers/dashboard/loyalty.dashboard.controller'
+import { AdjustStampsSchema } from '../schemas/dashboard/loyalty.schema'
 import * as serviceChargeMobileController from '../controllers/mobile/service-charge.mobile.controller'
 import * as menuMobileController from '../controllers/mobile/menu.mobile.controller'
 import * as receiptMobileController from '../controllers/mobile/receipt.mobile.controller'
@@ -78,6 +80,7 @@ import * as switchUserMobileController from '../controllers/mobile/switch-user.m
 import { createPermissionOverrideSchema } from '../schemas/mobile/permissionOverride.mobile.schema'
 import { switchUserSchema } from '../schemas/mobile/switchUser.mobile.schema'
 import { attachCustomerToLatestPaymentSchema, attachCustomerToPaymentSchema } from '../schemas/mobile/paymentCustomer.mobile.schema'
+import { transactionCustomerSchema } from '../schemas/mobile/transactionCustomer.mobile.schema'
 import { handoffSchema, confirmExternalSettlementSchema, notChargedSchema } from '../schemas/mobile/areaTicketExternal.schema'
 import { areaTicketResolveRateLimiter } from '../middlewares/area-ticket-rate-limit.middleware'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
@@ -100,7 +103,12 @@ import {
   syncPrintJobsSchema,
 } from '../schemas/mobile/print.mobile.schema'
 import { setKitchenDisplaySchema } from '../schemas/dashboard/printStation.schema'
+import { MobileUpdateCustomerSchema } from '../schemas/dashboard/customer.schema'
+import { updateCustomerContact } from '../controllers/mobile/customer.mobile.controller'
 import * as announcementReadController from '../controllers/shared/announcement.read.controller'
+import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
+import { checkCortesiaPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
+import { parseCourtesyReviewPublicInput } from '../services/mobile/cortesia-pendiente.public'
 
 const router = Router()
 
@@ -655,9 +663,29 @@ const checkPromotionGuardsIfPresent = (req: Request, res: Response, next: NextFu
 }
 
 router.post(
+  '/venues/:venueId/orders/courtesy-review',
+  authenticateTokenMiddleware,
+  (req, res, next) => {
+    try {
+      // Validar la subacción ANTES de elegir permiso; la revisión también sirve en mostrador.
+      const input = parseCourtesyReviewPublicInput(req.body)
+      res.locals.courtesyReviewInput = input
+      return checkPermission(input.confirm ? 'orders:comp' : 'orders:read')(req, res, next)
+    } catch (error) {
+      next(error)
+    }
+  },
+  orderMobileController.reviewPendingCourtesy,
+)
+
+router.post(
   '/venues/:venueId/orders',
   authenticateTokenMiddleware,
+  // S7: si la venta de la cola de una terminal se rechaza (también el 403 del permiso), avisa al gerente.
+  avisarSiLaVentaDeLaColaFalla,
   checkPermission('orders:create'),
+  // S9: regalar una línea (`isCortesia`) pide `orders:comp`. Después del aviso (S7) para que su 403 también avise al gerente.
+  checkCortesiaPermissionIfPresent,
   checkPromotionGuardsIfPresent,
   orderMobileController.createOrder,
 )
@@ -915,6 +943,7 @@ router.use('/venues/:venueId/online-orders', onlineOrdersMobileRoutes)
 router.post(
   '/venues/:venueId/orders/:orderId/pay',
   authenticateTokenMiddleware,
+  avisarSiLaVentaDeLaColaFalla,
   checkPermission('payments:create'),
   checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES, { dineroCapturado: true }),
   orderMobileController.payCash,
@@ -1069,6 +1098,14 @@ router.get(
   authenticateTokenMiddleware,
   checkPermission('payments:read'),
   transactionMobileController.getTransaction,
+)
+
+router.post(
+  '/venues/:venueId/transactions/:paymentId/customer',
+  authenticateTokenMiddleware,
+  validateRequest(transactionCustomerSchema),
+  // El controller exige permiso efectivo Y piso MANAGER, sin override de PIN.
+  transactionMobileController.assignCustomer,
 )
 
 /**
@@ -1564,6 +1601,31 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('customers:create'),
   customerController.createCustomer,
+)
+
+/**
+ * @openapi
+ * /api/v1/mobile/venues/{venueId}/customers/{customerId}:
+ *   put:
+ *     tags: [Mobile - Customers]
+ *     summary: Editar los datos de contacto de un cliente desde el POS
+ *     description: >
+ *       Mismo servicio que el dashboard; responde sólo datos de contacto. Exige `customers:update` (gerente para arriba por default;
+ *       acepta el PIN de gerente con `X-Permission-Override`). Sólo nombre, apellido, teléfono y correo.
+ *     security:
+ *       - BearerAuth: []
+ *     responses:
+ *       200: { description: Cliente actualizado }
+ *       400: { description: 'Datos inválidos, o code CUSTOMER_PHONE_TAKEN / CUSTOMER_EMAIL_TAKEN' }
+ *       403: { description: Sin permiso (con `overridable` si el negocio tiene el PIN de gerente) }
+ *       404: { description: El cliente no es de este negocio }
+ */
+router.put(
+  '/venues/:venueId/customers/:customerId',
+  authenticateTokenMiddleware,
+  checkPermission('customers:update'),
+  validateRequest(MobileUpdateCustomerSchema),
+  updateCustomerContact,
 )
 
 // ─── CREDIT PACKS (prepaid packages — sell in person / redeem at the POS) ───
@@ -2801,6 +2863,9 @@ router.post(
   checkFeatureAccess('TABLE_SERVICE'),
   checkPermission('orders:create'),
   checkTableOwnership('order'),
+  // S9: esta ruta también honra `items[].isCortesia` (`addItemsToOrder`, lineComped/plainComped): sin el candado, la cortesía se
+  // regalaba en dos pasos (crear la orden sin cortesía y luego agregar el renglón regalado).
+  checkCortesiaPermissionIfPresent,
   checkPromotionGuardsIfPresent,
   orderMobileController.addItemsToOrder,
 )
@@ -3220,19 +3285,16 @@ router.delete(
   orderMobileController.removeOrderDiscount,
 )
 
-// 🔴 ASIMETRÍA DECLARADA, NO ARREGLADA (auditoría de permisos de piso, 2026-08-17).
-// Regalar la cuenta entera pide aquí `orders:update` (lo traen WAITER y CASHIER), pero
-// la MISMA cortesía pide `orders:comp` (MANAGER+) por TPV y por la cola offline
-// (intents COMP_ORDER y ADD_ITEMS con isCortesia). Es PREEXISTENTE — no la abrió esta
-// auditoría — y apretarla le quitaría a los meseros de todos los venues algo que hoy
-// usan. Es decisión de producto con dinero enfrente, del founder. Detalle y tabla
-// medida: `src/services/mobile/sync.mobile.service.ts` (case 'COMP_ORDER').
+// Regalar pide `orders:comp`, igual que la TPV y la cola sin red (intents COMP_ORDER y
+// ADD_ITEMS con isCortesia). Hasta el 25-oct pedía `orders:update` (WAITER y CASHIER):
+// decisión del founder «A» (21-oct), cerrarla. De fábrica regala MANAGER+; el dueño se lo
+// da a otro rol desde el panel (`tpv-orders:comp`), y sin él el 403 abre el PIN de gerente.
 router.post(
   '/venues/:venueId/orders/:orderId/comp',
   authenticateTokenMiddleware,
   httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('orders:comp'),
   checkTableOwnership('order'),
   orderMobileController.compWholeOrder,
 )
@@ -3298,6 +3360,31 @@ router.get(
 )
 
 /**
+ * GET /api/v1/mobile/venues/:venueId/customers/:customerId/stamp-card
+ * Cartilla de sellos del cliente (avance, `version` y `stampsEnabled`) para el ajuste manual.
+ */
+router.get(
+  '/venues/:venueId/customers/:customerId/stamp-card',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('LOYALTY_PROGRAM'),
+  checkPermission('loyalty:read'),
+  loyaltyDashboardController.getStampCardHandler,
+)
+
+/**
+ * POST /api/v1/mobile/venues/:venueId/customers/:customerId/stamps/adjust
+ * Ajuste manual de sellos desde el POS (deja la cartilla abierta en `stampsEarned`; 409 si cambió).
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/stamps/adjust',
+  authenticateTokenMiddleware,
+  checkFeatureAccess('LOYALTY_PROGRAM'),
+  checkPermission('loyalty:adjust'),
+  validateRequest(AdjustStampsSchema),
+  loyaltyDashboardController.adjustStampsHandler,
+)
+
+/**
  * POST /api/v1/mobile/venues/:venueId/orders/:orderId/loyalty/redeem
  * Burns points and applies the matching discount to the OPEN check in ONE
  * transaction (see loyalty.mobile.service — the dashboard path never did).
@@ -3333,14 +3420,13 @@ router.post(
   orderMobileController.updateOrderDetails,
 )
 
-// 🔴 Misma asimetría declarada que la cortesía de la cuenta entera (ver arriba):
-// `orders:update` aquí vs `orders:comp` en TPV y en el replay offline. Preexistente.
+// Mismo candado que la cortesía de la cuenta entera (ver arriba).
 router.post(
   '/venues/:venueId/orders/:orderId/items/:itemId/comp',
   authenticateTokenMiddleware,
   httpOperationGuard(true),
   checkFeatureAccess('TABLE_SERVICE'),
-  checkPermission('orders:update'),
+  checkPermission('orders:comp'),
   checkTableOwnership('order'),
   orderMobileController.compOrderItem,
 )

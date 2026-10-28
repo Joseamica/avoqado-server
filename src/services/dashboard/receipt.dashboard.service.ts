@@ -9,6 +9,7 @@ import logger from '@/config/logger'
 import emailService from '../email.service'
 import { contarCobrosDeVenta, ticketTotals, ticketTotalsDelSnapshot, ticketTotalsSinDesglose } from '../shared/ticketTotals'
 import { ORDEN_RECIBO_CANONICO, reciboCanonicoDelPago } from '../shared/reciboCanonico'
+import { productosDelSnapshot } from '../shared/productosDelRecibo'
 
 // Main function to generate and store a digital receipt
 export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt>
@@ -302,8 +303,8 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
       receiptUrl: `${process.env.FRONTEND_URL}/receipts/public/${receipt.accessKey}`,
       receiptNumber: receipt.accessKey.slice(-4).toUpperCase(),
       orderNumber: order.number?.toString() || undefined,
-      // Order items
-      items: order.items || [],
+      // Order items (D8: también los del recibo de la terminal, que van fuera de `order`)
+      items: productosDelSnapshot(dataSnapshot),
       // Totals (IVA por producto, plan 7): misma regla de cuadre que el ticket (subtotal − descuento + cargo + IVA + propina = total)
       subtotal: totales.subtotal,
       discountAmount: totales.discount,

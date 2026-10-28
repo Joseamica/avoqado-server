@@ -2111,6 +2111,29 @@ model ProductPriceHistory {
   @@index([productId, validFrom])
 }
 
+/// Historial de `Modifier.price` (hermano de `ProductPriceHistory`): cada precio de un extra con su intervalo
+/// `[validFrom, validTo)` en UTC; `validTo` nulo = vigente (a lo más UNA abierta por extra, índice parcial de la
+/// migración). Sirve para saber si el precio de extra que vio el cliente fue real (spec cobrar-sin-red-tpv).
+/// 🔴 Lo escriben SÓLO los disparadores DIFERIDOS de `Modifier` (migración 20261020120000): fechan el cambio al
+/// CONFIRMARSE la transacción y cubren a todo escritor (Prisma, SQL directo, importaciones). Nunca escribas aquí.
+/// `Modifier` no tiene `venueId`: el disparador lo copia de `ModifierGroup.venueId` (vía `groupId`) y por eso la FK es
+/// sólo al extra. `id` autoincremental porque un disparador no genera cuid; nunca se expone.
+model ModifierPriceHistory {
+  id         BigInt    @id @default(autoincrement())
+  venueId    String
+  modifierId String
+  modifier   Modifier  @relation(fields: [modifierId], references: [id], onDelete: Cascade)
+  price      Decimal   @db.Decimal(10, 2)
+  validFrom  DateTime
+  validTo    DateTime?
+  /// Transacción (xid8 de nivel superior, con época) que creó la fila. El disparador la usa para corregir en su lugar un
+  /// precio intermedio de la misma confirmación. Nadie la escribe a mano.
+  /// Tras un restore LÓGICO (pg_dump/pg_restore a otro cluster) el xid8 no vale: `UPDATE "ModifierPriceHistory" SET "creadoEnTx" = 0`.
+  creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+
+  @@index([modifierId, validFrom])
+}
+
 model Inventory {
   id            String   @id @default(cuid())
   productId     String   @unique
@@ -4050,6 +4073,10 @@ model Order {
   status        OrderStatus   @default(PENDING)
   kitchenStatus KitchenStatus @default(PENDING)
   paymentStatus PaymentStatus @default(PENDING)
+  /// «Pagar después» (fiado) elegido A PROPÓSITO por el cajero, como la cuenta de la casa de Toast (founder 26-oct).
+  /// true = lo mandó a pagar después; false = se creó para cobrarse en el momento (un cobro con tarjeta que falla NO es
+  /// deuda del cliente); null = no se sabe (filas viejas y caminos que no lo declaran) → la regla de antes (`porCobrar.ts`).
+  payLater      Boolean?
 
   // Durable post-payment loyalty recovery. Only the transaction that first
   // settles the order sets eligibleAt; inline processing sets processedAt, and
@@ -4507,8 +4534,12 @@ model Modifier {
   orderItems       OrderItemModifier[]
   paymentLinkItems PaymentLinkItemModifier[]
   reservationItems ReservationModifier[]
+  priceHistory     ModifierPriceHistory[]
 
   @@index([rawMaterialId])
+  // Postgres no indexa sola la llave foránea: sin esto cada lectura de las opciones de un grupo (menú del POS, carta de
+  // pedidos en línea, panel) y el borrado en cascada de un grupo recorrían la tabla entera (26-oct, pizarrón hz:12c781a4:D2).
+  @@index([groupId])
 }
 
 model ProductModifierGroup {
@@ -9154,6 +9185,9 @@ model Discount {
 
   // Promociones tipo DISCOUNT que apuntan a este descuento.
   promotions Promotion[]
+
+  // Ligas de pago que tomaron este descuento del catálogo.
+  paymentLinks PaymentLink[]
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -15804,6 +15838,12 @@ model PaymentLink {
   // Tipping config: { presets: [10, 15, 20], allowCustom: true } — null = disabled
   tippingConfig Json?
 
+  /// Descuento de la liga (foto): { v:1, origen, discountId, type, value, name }.
+  /// `discountId` apunta al catálogo sólo para trazabilidad; el valor vive aquí.
+  discount    Json?
+  discountId  String?
+  discountRef Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+
   status         PaymentLinkStatus @default(ACTIVE)
   totalCollected Decimal           @default(0) @db.Decimal(12, 2)
   paymentCount   Int               @default(0)
@@ -15819,6 +15859,7 @@ model PaymentLink {
   @@index([shortCode])
   @@index([status])
   @@index([createdAt])
+  @@index([discountId, status])
 }
 
 /// Line item for an ITEM-purpose PaymentLink (bundle). Fixed quantity per

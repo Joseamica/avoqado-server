@@ -306,7 +306,7 @@ const INVENTARIO: Record<string, number> = {
   'src/services/dashboard/workSchedule.service.ts': 1,
   'src/services/dashboard/workShift.service.ts': 5,
   'src/services/delivery-channels/core/deliveryActivation.service.ts': 1,
-  'src/services/delivery-channels/core/deliveryChannelLink.service.ts': 3,
+  'src/services/delivery-channels/core/deliveryChannelLink.service.ts': 2,
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts': 2,
   'src/services/delivery-channels/core/menuSnapshot.service.ts': 1,
   'src/services/delivery-channels/core/menuSync.service.ts': 2,

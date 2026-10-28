@@ -576,9 +576,10 @@ describe('🔴 I-1: si Rappi rechaza el login, el sondeo se pausa y no grita en 
     expect(eventos.map(e => e.externalOrderId)).toEqual(['R1'])
     expect(logger.info).toHaveBeenCalledWith(expect.stringContaining('el login volvió'), expect.anything())
 
-    // Una racha NUEVA vuelve a avisar con 🚨 (el login bueno rearmó el aviso).
+    // Una racha NUEVA vuelve a avisar con 🚨 (el login bueno rearmó el aviso). D6: el token de 1 h de esta prueba se reusa
+    // hasta la mitad de su vida, así que el siguiente login sale pasados esos 30 min (antes salía en cada pasada).
     login = { status: 401, texto: 'invalid_client' }
-    a(650_000)
+    a(602_000 + 31 * 60_000)
     await job.runOnce()
     expect(alarmas()).toBe(2)
   })

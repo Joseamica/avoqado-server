@@ -9,6 +9,7 @@ import {
   cashRefundDrawerLocalId,
   cashSaleDrawerLocalId,
 } from '../services/shared/cashDrawerPosting'
+import { cajaDeLaVentaDe } from '../services/shared/paymentShiftClaim'
 import { paymentCountsAsDrawerCash, TENDER_SEMANTICS_SELECT } from '../services/shared/tenderSemantics'
 import prisma from '../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
@@ -54,6 +55,8 @@ export interface UnpostedCashPayment {
   orderId: string | null
   /** El turno al que el cobro quedó atado al nacer: la liga EXACTA con su caja (`CashDrawerSession.shiftId`). */
   shiftId?: string | null
+  /** S3: la caja que el POS capturó al cobrar sin red (marca `cajaDeLaVenta` de `Payment.posRawData`, la escribe el servidor). */
+  cajaDeLaVenta?: string | null
   status: string
   type: string | null
   method: string
@@ -106,9 +109,19 @@ export interface ReconcilerResult {
  *   3. si hay varias y ninguna es la ligada, AMBIGUO: no se repone y se cuenta;
  *   4. si no hay ninguna, FUERA DE CAJA (regla original).
  */
-export type DrawerChoice = { kind: 'SESSION'; id: string } | { kind: 'OUTSIDE' } | { kind: 'AMBIGUOUS'; candidates: string[] }
+export type DrawerChoice =
+  /** `fueraDeSuVentana`: la caja capturada, que cerró antes de que subiera la venta; sólo se anota si nadie la contó. */
+  { kind: 'SESSION'; id: string; fueraDeSuVentana?: true } | { kind: 'OUTSIDE' } | { kind: 'AMBIGUOUS'; candidates: string[] }
 
-export function elegirCajaParaReponer(p: Pick<UnpostedCashPayment, 'shiftId'>, windows: SessionWindow[]): DrawerChoice {
+export function elegirCajaParaReponer(p: Pick<UnpostedCashPayment, 'shiftId' | 'cajaDeLaVenta'>, windows: SessionWindow[]): DrawerChoice {
+  // 🔴 S3 (Codex r6 código #1): la caja que el POS capturó al cobrar manda sobre la hora. Si la cerró el sistema antes de que la venta
+  // subiera, su ventana ya no cubre el cobro y la única que lo cubre es la que se abrió después: ahí no va. Dentro de su ventana, como
+  // cualquier reposición; fuera, sólo si nadie la contó (el posting lo comprueba bajo el candado de la caja).
+  if (p.cajaDeLaVenta) {
+    return windows.some(w => w.id === p.cajaDeLaVenta)
+      ? { kind: 'SESSION', id: p.cajaDeLaVenta }
+      : { kind: 'SESSION', id: p.cajaDeLaVenta, fueraDeSuVentana: true }
+  }
   if (windows.length === 0) return { kind: 'OUTSIDE' }
   if (p.shiftId) {
     const ligada = windows.find(w => w.shiftId === p.shiftId)
@@ -133,7 +146,7 @@ interface Dependencies {
   findSessionsCovering: (venueId: string, at: Date) => Promise<SessionWindow[]>
   /** Rappi 2b: la sesión donde YA quedó la venta de este cobro (`srv-cash-sale:`), o null. */
   findCashSaleSession: (venueId: string, paymentId: string) => Promise<string | null>
-  postSale: (p: UnpostedCashPayment, sessionId: string) => Promise<string>
+  postSale: (p: UnpostedCashPayment, sessionId: string, fueraDeSuVentana?: boolean) => Promise<string>
   postRefund: (p: UnpostedCashPayment, sessionId: string) => Promise<string>
 }
 
@@ -187,17 +200,32 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
           )
         )
       )
-      AND EXISTS (
-        SELECT 1 FROM "CashDrawerSession" s
-        WHERE s."venueId" = p."venueId"
-          AND ((x.id IS NOT NULL AND s.id = x."cashDrawerSessionId") OR (x.id IS NULL
-          AND p."createdAt" >= s."openedAt"
-          -- 🔴 Sin NOW(): las columnas son timestamp SIN zona con UTC dentro, y NOW() es timestamptz,
-          -- así que COALESCE(closedAt, NOW()) resolvía a timestamptz y Postgres reinterpretaba el
-          -- createdAt en la zona de la SESIÓN — en una sesión México, un pago de hace una hora
-          -- quedaba FUERA de la caja abierta (medido el 5-sep-2026). En prod (UTC) coincidía por
-          -- accidente. Misma forma que la consulta de reembolsos; el bind until ya acota por arriba.
-          AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")))
+      -- 🔴 «Cobrar sin red» (D4): una venta tardía de un turno ya cerrado (marca de marcaDeVentaDeTurnoCerrado,
+      -- paymentShiftClaim.ts) ya la contó el cajón de SU turno. Se trata como fuera de cajón —aquí, igual que las que
+      -- ninguna caja cubre: fuera del lote— y nunca se adopta en la caja abierta que la ve llegar (faltante falso al cerrar).
+      AND p."posRawData" ->> 'ventaDeTurnoCerrado' IS NULL
+      -- S3: la venta de una caja cerrada SIN turno ligado (marca de marcaDeCajaDeLaVentaCerrada) tiene el mismo trato.
+      AND p."posRawData" ->> 'cajaDeLaVentaCerrada' IS NULL
+      AND (
+        EXISTS (
+          SELECT 1 FROM "CashDrawerSession" s
+          WHERE s."venueId" = p."venueId"
+            -- Cambio: la caja que eligió el cambio manda; si eligió «sin caja», ninguna.
+            AND ((x.id IS NOT NULL AND s.id = x."cashDrawerSessionId") OR (x.id IS NULL
+            AND p."createdAt" >= s."openedAt"
+            -- 🔴 Sin NOW(): las columnas son timestamp SIN zona con UTC dentro, y NOW() es timestamptz,
+            -- así que COALESCE(closedAt, NOW()) resolvía a timestamptz y Postgres reinterpretaba el
+            -- createdAt en la zona de la SESIÓN — en una sesión México, un pago de hace una hora
+            -- quedaba FUERA de la caja abierta (medido el 5-sep-2026). En prod (UTC) coincidía por
+            -- accidente. Misma forma que la consulta de reembolsos; el bind until ya acota por arriba.
+            AND (s."closedAt" IS NULL OR p."createdAt" <= s."closedAt")))
+        )
+        -- S3 (Codex r6 código #1): o la caja que el POS capturó al cobrar sin red (marca cajaDeLaVenta), aunque cerrara antes.
+        -- Un abono de un Cambio nunca: el Cambio pide red y su caja es la que eligió.
+        OR (x.id IS NULL AND EXISTS (
+          SELECT 1 FROM "CashDrawerSession" s
+          WHERE s."venueId" = p."venueId" AND s.id = p."posRawData" ->> 'cajaDeLaVenta'
+        ))
       )
     ORDER BY p."createdAt" ASC, p.id ASC
     LIMIT ${limit}
@@ -223,6 +251,7 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
       thirdPartyCashAmount: true,
       processedById: true,
       createdAt: true,
+      posRawData: true,
       ...TENDER_SEMANTICS_SELECT,
     },
     orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
@@ -231,7 +260,7 @@ async function findUnpostedCashPaymentsDb(since: Date, until: Date, limit: numbe
   // El anti-join ya se hizo en SQL: aquí no queda nada que filtrar, y se ahorra la consulta
   // extra que antes traía los `localId` de las 200 filas para descartarlas en memoria.
   const choices = new Map(candidatos.map(c => [c.id, c]))
-  return rows.map(row => ({ ...row, ...choices.get(row.id) })) as UnpostedCashPayment[]
+  return rows.map(({ posRawData, ...row }) => ({ ...row, ...choices.get(row.id), cajaDeLaVenta: cajaDeLaVentaDe(posRawData) })) as UnpostedCashPayment[]
 }
 
 async function findUnpostedCashRefundsDb(since: Date, until: Date, limit: number): Promise<UnpostedCashPayment[]> {
@@ -313,7 +342,7 @@ export const defaults: Dependencies = {
   findCashSaleSession: async (venueId, paymentId) =>
     (await prisma.cashDrawerEvent.findFirst({ where: { venueId, localId: cashSaleDrawerLocalId(paymentId) }, select: { sessionId: true } }))
       ?.sessionId ?? null,
-  postSale: (p, sessionId) =>
+  postSale: (p, sessionId, fueraDeSuVentana) =>
     postCashSaleToDrawer({
       venueId: p.venueId,
       paymentId: p.id,
@@ -329,6 +358,8 @@ export const defaults: Dependencies = {
       tenderCountsAsCash: p.tenderCountsAsCash,
       staffId: p.processedById,
       targetSessionId: sessionId,
+      // S3: la caja capturada fuera de su ventana sólo si sigue sin conteo; nunca recalcula un corte firmado.
+      ...(fueraDeSuVentana ? { exigirAbierta: true, admiteCerradaSinConteo: true } : {}),
     }),
   postRefund: (p, sessionId) =>
     postCashRefundToDrawer({
@@ -428,7 +459,10 @@ export class CashDrawerReconcilerJob {
         return elegirCajaParaReponer(p, windows)
       }
 
-      const handle = async (p: UnpostedCashPayment, post: (p: UnpostedCashPayment, sid: string) => Promise<string>) => {
+      const handle = async (
+        p: UnpostedCashPayment,
+        post: (p: UnpostedCashPayment, sid: string, fueraDeSuVentana?: boolean) => Promise<string>,
+      ) => {
         try {
           if (!paymentCountsAsDrawerCash(p)) {
             result.notDrawerCash += 1
@@ -450,7 +484,7 @@ export class CashDrawerReconcilerJob {
             return
           }
           const sessionId = eleccion.id
-          const outcome = await post(p, sessionId)
+          const outcome = eleccion.fueraDeSuVentana ? await post(p, sessionId, true) : await post(p, sessionId)
           if (outcome === 'POSTED') {
             result.reposted += 1
             repostedByVenue.set(p.venueId, (repostedByVenue.get(p.venueId) ?? 0) + 1)

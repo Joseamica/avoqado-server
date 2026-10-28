@@ -131,9 +131,10 @@ const HISTORICO = 'conservarDescuentoHistorico('
 const RECORTA = 'recortarDescuentosDeRenglones('
 const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': { clase: 'ESCRIBE', marcas: ['keptMarkdownDiscountRow(', SYNC] },
+  // Cobrar sin red S4: la cortesía y el descuento de catálogo de la cuenta, con las mismas filas que «Cobrar» de la terminal.
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     clase: 'ESCRIBE',
-    marcas: ['buildItemDiscountRow(', 'filaDeDescuentoDeCuenta(', SYNC],
+    marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', 'filaDeDescuentoDeCuenta(', SYNC],
   },
   'src/services/mobile/order.mobile.service.ts#applyOrderDiscountInTransaction': {
     clase: 'ESCRIBE',
@@ -146,7 +147,7 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     clase: 'ESCRIBE',
-    marcas: ['nuevoRepartoDirigido(', 'buildItemDiscountRow(', 'nuevoRepartoDeCuenta(', SYNC],
+    marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', SYNC],
   },
   'src/services/tpv/order.tpv.service.ts#applyDiscount': {
     clase: 'ESCRIBE',
@@ -180,6 +181,16 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDirigido(', 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
+  },
+  // Descuento en ligas de pago (spec 2026-10-24): la venta de una liga con descuento nace con su fila de cuenta, repartida.
+  'src/services/dashboard/paymentLink.service.ts#completeCharge': { clase: 'ESCRIBE', marcas: ['filaDeDescuentoDeLiga(', SYNC] },
+  'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
+    clase: 'ESCRIBE',
+    marcas: ['filaDeDescuentoDeLiga(', SYNC],
+  },
+  'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
+    clase: 'ESCRIBE',
+    marcas: ['filaDeDescuentoDeLiga(', SYNC],
   },
   'src/services/shared/repartoDescuentoTx.ts#sincronizarRepartos': { clase: 'SINCRONIZA', marcas: ['repartosDeLaOrden('] },
   // B2c T2 (P4 + P13): conserva el resto histórico (R7-1), recorta lo dirigido a lo anulado, recalcula como borrar y sincroniza;
@@ -221,7 +232,7 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
   },
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
     origen: 'FILAS',
-    nota: 'espejos de artículo + fila de cuenta del POS; con promociones, reafirmada',
+    nota: 'espejos de cortesía y de artículo + fila de cuenta del POS o de catálogo; con promociones, reafirmada',
   },
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': {
     origen: 'FILAS',
@@ -278,14 +289,18 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     origen: 'CERO',
     nota: 'cobro en línea sin descuento de cuenta',
   },
-  'src/services/dashboard/paymentLink.service.ts#completeCharge': { origen: 'CERO', nota: 'liga de pago: la orden nace sin descuento' },
+  // Descuento en ligas de pago (spec 2026-10-24): la cabecera = el descuento de la sesión, que es su única fila de cuenta.
+  'src/services/dashboard/paymentLink.service.ts#completeCharge': {
+    origen: 'FILAS',
+    nota: 'liga de pago: el descuento de la sesión de pago (0 sin descuento), su fila filaDeDescuentoDeLiga',
+  },
   'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
-    origen: 'CERO',
-    nota: 'liga de pago: la orden nace sin descuento',
+    origen: 'FILAS',
+    nota: 'liga de pago: el descuento de la sesión de pago (0 sin descuento), su fila filaDeDescuentoDeLiga',
   },
   'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
-    origen: 'CERO',
-    nota: 'liga de pago: la orden nace sin descuento',
+    origen: 'FILAS',
+    nota: 'liga de pago: el descuento de la sesión de pago (0 sin descuento), su fila filaDeDescuentoDeLiga',
   },
   'src/services/mobile/estimate.mobile.service.ts#convertToOrder': {
     origen: 'CERO',
@@ -377,6 +392,10 @@ describe('B2: inventario de quien escribe descuentos (spec §4.1)', () => {
   })
   it('buildItemDiscountRow guarda el reparto espejo', () => {
     expect(de('src/services/shared/discount.service.ts#buildItemDiscountRow')).toContain('nuevoRepartoDirigido(')
+  })
+  it('la fila de cortesías guarda su reparto espejo y la de catálogo de la cuenta su reparto de cuenta', () => {
+    expect(de('src/services/shared/discount.service.ts#filaDeCortesias')).toMatch(/nuevoRepartoDirigido\([^;]*\{\s*espejo: true\s*\}\s*\)/)
+    expect(de('src/services/shared/discount.service.ts#filaDeDescuentoDeCatalogoEnCuenta')).toContain('nuevoRepartoDeCuenta(')
   })
   it('toda función que escribe Order.discountAmount declara de dónde sale', () => {
     expect([...cabecera].sort()).toEqual(Object.keys(ORIGEN_DE_LA_CABECERA).sort())
@@ -522,15 +541,18 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
   },
   'src/services/dashboard/paymentLink.service.ts#completeCharge': {
     clase: 'CREACION',
-    nota: 'liga de pago: la orden nace sin descuentos',
+    marcas: [SYNC],
+    nota: 'liga de pago: orden y renglones nuevos; con descuento, su fila de cuenta se reparte en la misma transacción',
   },
   'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
     clase: 'CREACION',
-    nota: 'liga de pago: la orden nace sin descuentos',
+    marcas: [SYNC],
+    nota: 'liga de pago: orden y renglones nuevos; con descuento, su fila de cuenta se reparte en la misma transacción',
   },
   'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
     clase: 'CREACION',
-    nota: 'liga de pago: la orden nace sin descuentos',
+    marcas: [SYNC],
+    nota: 'liga de pago: orden y renglones nuevos; con descuento, su fila de cuenta se reparte en la misma transacción',
   },
   'src/services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder': {
     clase: 'CREACION',

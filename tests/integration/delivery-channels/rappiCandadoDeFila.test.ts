@@ -8,6 +8,12 @@
  *  (c) el que llega tarde con SUBSCRIBE_FAILED no degrada el ACTIVATED (la guarda del `WHERE` de `anotar`);
  *  (d) editar el canal (PATCH de config) mientras el aprovisionamiento guarda su lote: el PATCH espera el
  *      candado y no borra el `batchId` (H2).
+ *  (e) D8: reconectar una tienda que Rappi sigue teniendo integrada (la consulta real de `tiendasParaReconectar`), y dos
+ *      reconexiones a la vez de la misma tienda ⇒ una sola la deja ACTIVE y se suscribe una sola vez.
+ *  (f) D4: la nota «cerrada en el proveedor» se mezcla en la base (no pisa otras llaves), sólo en ACTIVE o PAUSED, y el PATCH
+ *      del panel no la borra.
+ *  (g) D9: la baja durante una conexión pendiente se aplica con la foto de Rappi; si el alta se promueve mientras se mira la
+ *      foto, la baja atrasada no la apaga.
  *
  * La red de Rappi va stubbeada (aprovisionar y suscribir); todo lo demás es SQL real por el `prisma` real.
  * Sólo crea filas propias (sufijo único) y las borra en `afterAll`, falle o no.
@@ -16,7 +22,13 @@ import { DeliveryChannelStatus, type DeliveryConnectIntent, type Prisma } from '
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { updateChannelLink } from '@/services/delivery-channels/core/deliveryChannelLink.service'
-import { activarSeleccion, confirmarTienda, type ProvisioningDeps } from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
+import { anotarCerradaEnElProveedor, cerradaEnElProveedor } from '@/services/delivery-channels/core/llavesDelSistema'
+import {
+  activarSeleccion,
+  confirmarTienda,
+  tiendasParaReconectar,
+  type ProvisioningDeps,
+} from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
 
 // La bitácora no es lo que se prueba aquí, y el staff de estas intenciones no existe: sin esto quedarían filas de
 // ActivityLog sueltas en la base de pruebas. Sí se cuenta cuántas veces se registró la conexión (sólo el ganador).
@@ -94,6 +106,7 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
       inciertas: [],
     })),
     suscribir: jest.fn(async () => ({ ok: true, fallidos: [] })),
+    listar: jest.fn(async () => []),
     tiendasEscribibles: [storeId],
   })
 
@@ -326,5 +339,113 @@ describe('Rappi self-onboarding — candado de fila contra Postgres', () => {
 
     // Sin el `FOR UPDATE` del PATCH, su copia leída ANTES del lote lo borraba al escribir.
     expect((await vinculo(s)).config).toEqual({ note: 'horario nuevo', rappiProvisioning: { ...reclamacion, batchId: 'b-d' } })
+  })
+
+  it('(e) D8: reconectar la tienda que Rappi sigue teniendo integrada; dos reconexiones a la vez dejan UNA sola conexión', async () => {
+    const s = tienda('e')
+    const integrada = { storeId: s, name: 'T', integrated: true, integrationId: `int-${s}` }
+    const link = await prisma.deliveryChannelLink.create({
+      data: {
+        venueId,
+        provider: 'RAPPI',
+        externalLocationId: s,
+        webhookSecret: 'x',
+        status: DeliveryChannelStatus.DISABLED,
+        config: { note: 'conservar', rappiProvisioning: { intentId: 'viejo', since: 'x', integrationId: `int-${s}`, confirmedAt: 'y' } },
+      },
+    })
+    // La consulta real: por proveedor, negocio y tienda.
+    expect(await tiendasParaReconectar(venueId, [integrada])).toEqual(new Set([s]))
+    expect(await tiendasParaReconectar(`otro-${sufijo}`, [integrada])).toEqual(new Set())
+
+    const [i1, i2] = [await intentActivando(s), await intentActivando(s)]
+    const ahora = jest.fn(async () => [integrada])
+    const [d1, d2] = [
+      { ...depsPara(s), listar: ahora },
+      { ...depsPara(s), listar: ahora },
+    ]
+    const p = puerta(link.id)
+    await p.pid
+    const a = activarSeleccion(i1 as DeliveryConnectIntent, 'idt', [integrada], d1)
+    const b = activarSeleccion(i2 as DeliveryConnectIntent, 'idt', [integrada], d2)
+    await soltarCuandoEsperen(p, 2)
+    const [ra, rb] = await Promise.all([a, b])
+
+    const resultados = [ra[s].outcome, rb[s].outcome]
+    expect(resultados.filter(o => o === 'ACTIVATED')).toHaveLength(1)
+    expect(['CLAIMED_BY_OTHER', 'ALREADY_CONNECTED']).toContain(resultados.find(o => o !== 'ACTIVATED'))
+    expect(d1.aprovisionar).not.toHaveBeenCalled()
+    expect(d2.aprovisionar).not.toHaveBeenCalled()
+    expect((d1.suscribir as jest.Mock).mock.calls.length + (d2.suscribir as jest.Mock).mock.calls.length).toBe(1)
+    const fila = await vinculo(s)
+    expect(fila.id).toBe(link.id)
+    expect(fila.status).toBe(DeliveryChannelStatus.ACTIVE)
+    expect(fila.config).toMatchObject({
+      note: 'conservar',
+      rappiProvisioning: { integrationId: `int-${s}`, confirmedAt: expect.any(String) },
+    })
+    expect(await prisma.deliveryChannelLink.count({ where: { provider: 'RAPPI', externalLocationId: s } })).toBe(1)
+  })
+
+  it('(f) D4: la nota «cerrada en el proveedor» se mezcla en la base, sólo en ACTIVE o PAUSED, y el PATCH no la borra', async () => {
+    const crear = (n: string, status: DeliveryChannelStatus, config?: Prisma.InputJsonObject) =>
+      prisma.deliveryChannelLink.create({
+        data: { venueId, provider: 'RAPPI', externalLocationId: tienda(n), webhookSecret: 'x', status, ...(config ? { config } : {}) },
+      })
+    const reclamacion = { intentId: 'x', since: 'y' }
+    const activa = await crear('f1', DeliveryChannelStatus.ACTIVE, { note: 'conservar', rappiProvisioning: reclamacion })
+    const sinConfig = await crear('f2', DeliveryChannelStatus.PAUSED) // `config` NULL de SQL
+    const pendiente = await crear('f3', DeliveryChannelStatus.PENDING, { note: 'p' })
+
+    expect(await anotarCerradaEnElProveedor(activa.id)).toBe(1)
+    expect(await anotarCerradaEnElProveedor(sinConfig.id)).toBe(1)
+    expect(await anotarCerradaEnElProveedor(pendiente.id)).toBe(0)
+
+    const nota = { cerradaEnElProveedor: { desde: expect.any(String) } }
+    expect((await vinculo(tienda('f1'))).config).toEqual({ note: 'conservar', rappiProvisioning: reclamacion, ...nota })
+    expect((await vinculo(tienda('f2'))).config).toEqual(nota)
+    expect((await vinculo(tienda('f3'))).config).toEqual({ note: 'p' })
+
+    await updateChannelLink(venueId, activa.id, { config: null })
+    expect(cerradaEnElProveedor((await vinculo(tienda('f1'))).config)).toBe(true)
+  })
+
+  it('(g) D9: la baja de una conexión pendiente se aplica con la foto; si el alta se promueve mientras se mira, no se apaga', async () => {
+    const pendiente = async (n: string) => {
+      const s = tienda(n)
+      const intent = await intentActivando(s)
+      await prisma.deliveryChannelLink.create({
+        data: {
+          venueId,
+          provider: 'RAPPI',
+          externalLocationId: s,
+          webhookSecret: 'x',
+          status: DeliveryChannelStatus.PENDING,
+          config: { rappiProvisioning: { intentId: intent.id, since: 'x', batchId: `b-${n}`, integrationId: `int-${s}`, creado: true } },
+        },
+      })
+      return { s, intent }
+    }
+    const suscribir = jest.fn(async () => ({ ok: true, fallidos: [] as string[] }))
+    const baja = (s: string, integradaEnRappi: (storeId: string) => Promise<boolean>) =>
+      confirmarTienda({ storeId: s, status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'baja' }, { suscribir, integradaEnRappi })
+
+    // Rappi ya no la tiene: vuelve DISABLED CON su prueba (D8 la reconecta) y el resultado queda FAILED final.
+    const g1 = await pendiente('g1')
+    expect(await baja(g1.s, async () => false)).toBe('REMOVED')
+    expect(await vinculo(g1.s)).toMatchObject({
+      status: DeliveryChannelStatus.DISABLED,
+      config: { rappiProvisioning: { intentId: g1.intent.id, integrationId: `int-${g1.s}` } },
+    })
+    expect(await resultadoDe(g1.intent.id, g1.s)).toBe('FAILED')
+
+    // El alta se promueve mientras la baja espera la foto: la baja se difiere y la conexión sigue ACTIVE.
+    const g2 = await pendiente('g2')
+    const foto = async () => {
+      expect(await confirmarTienda({ storeId: g2.s, status: 'ACTIVE', batchId: 'b-g2' }, { suscribir })).toBe('PROMOTED')
+      return false
+    }
+    expect(await baja(g2.s, foto)).toBe('DEFERRED')
+    expect((await vinculo(g2.s)).status).toBe(DeliveryChannelStatus.ACTIVE)
   })
 })

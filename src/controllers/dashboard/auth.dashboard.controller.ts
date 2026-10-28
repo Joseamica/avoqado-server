@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken'
 import { esTokenDeLaApi } from '../../utils/tokenDeLaApi'
 import { ponerCookiesDeSesion } from '../../utils/cookiesDeSesion'
 import prisma from '../../utils/prismaClient' // Corrected import path
-import { AuthenticationError } from '../../errors/AppError'
+import { AuthenticationError, GoneError } from '../../errors/AppError'
 import { StaffRole, VenueStatus } from '@prisma/client'
 import { UpdateAccountDto, RequestPasswordResetDto, ResetPasswordDto } from '../../schemas/dashboard/auth.schema'
 import logger from '../../config/logger'
@@ -13,6 +13,7 @@ import bcrypt from 'bcrypt'
 import { DEFAULT_PERMISSIONS, getEffectiveRolePermissions } from '../../lib/permissions'
 import { getRoleDisplayNames, DEFAULT_ROLE_DISPLAY_NAMES } from '../../services/dashboard/venueRoleConfig.dashboard.service'
 import { logAction } from '../../services/dashboard/activity-log.service'
+import { canjearBoletoDeAlta } from '../../services/onboarding/signup.service'
 import { verifyAccessToken } from '../../jwt.service'
 import {
   mensajeDeCorte,
@@ -1216,6 +1217,24 @@ export async function confirmEmailChange(req: Request, res: Response, next: Next
     const { correoNuevo } = await confirmarCambioDeCorreo(token)
     res.status(200).json({ success: true, message: 'Tu correo quedó actualizado.', email: correoNuevo })
   } catch (error) {
+    next(error)
+  }
+}
+
+/**
+ * Canjea el boleto de alta (`#boleto=` de la URL que armó la landing) por las cookies de sesión.
+ * PÚBLICO a propósito: el boleto firmado de 5 min y de un solo uso es la credencial. Nunca se loguea.
+ */
+export async function entrarConBoleto(req: Request, res: Response, next: NextFunction): Promise<void> {
+  try {
+    const { accessToken, refreshToken } = await canjearBoletoDeAlta(req.body.boleto)
+    ponerCookiesDeSesion(res, accessToken, refreshToken)
+    res.status(200).json({ success: true })
+  } catch (error) {
+    if (error instanceof GoneError) {
+      res.status(410).json({ success: false, code: error.code, message: error.message })
+      return
+    }
     next(error)
   }
 }

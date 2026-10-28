@@ -1,7 +1,7 @@
 /**
  * 🔴 DINERO — BORRAR UN TURNO NO DEJABA AUTOR.
  *
- * `deleteShift` es un borrado DURO (`prisma.shift.delete`): la fila desaparece, y con ella el
+ * `deleteShift` es un borrado DURO (`prisma.shift.deleteMany`, condicionado a que su caja no siga abierta): la fila desaparece, y con ella el
  * corte firmado — el conteo, el esperado y el descuadre. Lo que NO desaparece es el dinero: las
  * órdenes, los pagos, las comisiones y la sesión de gaveta que apuntaban a ese turno están
  * declarados `onDelete: SetNull` (`prisma/schema.prisma:3572`, `:4089`, `:12015`, `:14088`), así
@@ -52,7 +52,7 @@ function turnoCerrado(over: Record<string, unknown> = {}) {
 function mundo(over: Record<string, unknown> = {}) {
   const turno = turnoCerrado(over)
   prismaMock.shift.findFirst.mockResolvedValue(turno)
-  prismaMock.shift.delete.mockResolvedValue(turno)
+  prismaMock.shift.deleteMany.mockResolvedValue({ count: 1 })
   return turno
 }
 
@@ -123,7 +123,7 @@ describe('lo que ya protegía y no se toca', () => {
     mundo({ status: 'OPEN', endTime: null })
 
     await expect(deleteShift(VENUE, TURNO, AUTOR)).rejects.toThrow(/open shift/i)
-    expect(prismaMock.shift.delete).not.toHaveBeenCalled()
+    expect(prismaMock.shift.deleteMany).not.toHaveBeenCalled()
   })
 
   it('🔴 un turno en CLOSING TAMPOCO se borra (P1.4 de la auditoría de Codex, 3-sep-2026)', async () => {
@@ -135,7 +135,7 @@ describe('lo que ya protegía y no se toca', () => {
     mundo({ status: 'CLOSING', endTime: null })
 
     await expect(deleteShift(VENUE, TURNO, AUTOR)).rejects.toThrow(/cerrando|closing/i)
-    expect(prismaMock.shift.delete).not.toHaveBeenCalled()
+    expect(prismaMock.shift.deleteMany).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })
 
@@ -151,14 +151,14 @@ describe('lo que ya protegía y no se toca', () => {
     mundo({ status: 'CLOSING', endTime: new Date('2020-01-01T00:00:00.000Z') })
 
     await expect(deleteShift(VENUE, TURNO, AUTOR)).rejects.toThrow(/cerrando|closing/i)
-    expect(prismaMock.shift.delete).not.toHaveBeenCalled()
+    expect(prismaMock.shift.deleteMany).not.toHaveBeenCalled()
   })
 
   it('un turno de OTRO venue no se borra ni se registra', async () => {
     prismaMock.shift.findFirst.mockResolvedValue(null)
 
     await expect(deleteShift(VENUE, TURNO, AUTOR)).resolves.toBe(false)
-    expect(prismaMock.shift.delete).not.toHaveBeenCalled()
+    expect(prismaMock.shift.deleteMany).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
   })
 })

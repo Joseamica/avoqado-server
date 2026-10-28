@@ -16,9 +16,14 @@ import {
 import type { OrderModifierForInventory } from '../dashboard/rawMaterial.service'
 import type { ValesSoltados } from '../mobile/areaTicketV7.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
+import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import {
+  accionDeCortesia,
   buildItemDiscountRow,
   calculateDiscountPesos,
+  filaDeCortesias,
+  filaDeDescuentoDeCatalogoEnCuenta,
   filaDeDescuentoDeCuenta,
   validateDiscountActive,
   validateDiscountScopeForItem,
@@ -55,6 +60,7 @@ import { parseServiceCourseSnapshot, legacyCourseForSnapshot, type ServiceCourse
 import { applyPromotionToOrder, type PromotionSelection } from '../promotions/promotion.service'
 import { venueHasFeatureAccess } from '../access/basePlan.service'
 import type { SaleStampOutcome } from '../shared/loyaltyOnLateCustomer'
+import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 
 /**
  * Helper function to flatten OrderItemModifier structure for Android compatibility
@@ -123,13 +129,15 @@ export async function getOrders(
   }
 
   // Pay-later filtering logic
-  // Pay-later orders = orders with customer linkage (OrderCustomer relationship)
+  // Pay-later orders = orders with customer linkage (OrderCustomer relationship) que no se crearon para cobrarse en el
+  // momento (`porCobrar.ts`): un cobro con tarjeta que falló es una cuenta abierta normal, no un fiado.
   if (options?.onlyPayLater) {
     // Only return pay-later orders (has OrderCustomer)
     where.orderCustomers = { some: {} }
+    Object.assign(where, NO_ES_COBRO_DEL_MOMENTO)
   } else if (!options?.includePayLater) {
-    // Default behavior: EXCLUDE pay-later orders (no OrderCustomer)
-    where.orderCustomers = { none: {} }
+    // Default behavior: EXCLUDE pay-later orders (no OrderCustomer, o con cliente pero creada para cobrarse en el momento)
+    where.OR = [{ orderCustomers: { none: {} } }, { payLater: false }]
   }
   // If includePayLater is true, no filter is added (returns all)
 
@@ -675,6 +683,9 @@ type TpvCreateOrderWithItemsInput = {
     itemDiscountId?: string | null
   }>
   staffId: string
+  /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
+  canCompItems?: boolean
+  performedBy?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
@@ -1089,7 +1100,11 @@ export async function createOrderWithItems(
     throw new BadRequestError(`Discounts not found or do not belong to this venue: ${missingIds.join(', ')}`)
   }
 
-  discounts.forEach(validateDiscountActive)
+  discounts.forEach(discount => validateDiscountActive(discount))
+  // Se autoriza el tipo que realmente calcula esta creación, aunque haya cambiado después del precheck HTTP.
+  if (discounts.some(discount => discount.type === 'COMP') && (input.canCompItems !== true || !input.performedBy)) {
+    throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
 
   const preparedLines: PreparedCheckoutLine[] = input.items.map(item => {
     if (item.isCortesia && item.itemDiscountId) {
@@ -1281,32 +1296,15 @@ export async function createOrderWithItems(
       }
 
       const cortesiaItems = createdItems.filter(item => item.line.input.isCortesia)
+      // La misma fila, la misma acción y el mismo descuento de cuenta que la orden de mobile (`../shared/discount.service`).
+      const enCortesia = (item: (typeof createdItems)[number]) => ({
+        id: item.id,
+        brutoPesos: item.line.lineGrossPesos,
+        motivo: item.line.input.cortesiaReason,
+      })
       if (cortesiaItems.length > 0) {
-        const cortesiaAmountPesos = roundPesos(cortesiaItems.reduce((sum, item) => sum + item.line.lineGrossPesos, 0))
         await tx.orderDiscount.create({
-          data: {
-            orderId: order.id,
-            type: 'COMP',
-            name: 'Cortesía',
-            value: new Prisma.Decimal(100),
-            amount: decimalFromPesos(cortesiaAmountPesos),
-            taxReduction: 0,
-            isComp: true,
-            isManual: true,
-            compReason:
-              cortesiaItems
-                .map(item => item.line.input.cortesiaReason)
-                .filter(Boolean)
-                .join('; ') || 'Cortesía',
-            appliedById: activeStaffVenue.id,
-            appliedToItemIds: cortesiaItems.map(item => item.id),
-            // B2: la cortesía ya vive en cada renglón (bruto + discountAmount = bruto); la fila la duplica ⇒ espejo.
-            reparto: comoJson(
-              nuevoRepartoDirigido(cortesiaAmountPesos, Object.fromEntries(cortesiaItems.map(i => [i.id, i.line.lineGrossPesos])), {
-                espejo: true,
-              }),
-            ),
-          },
+          data: filaDeCortesias({ orderId: order.id, renglones: cortesiaItems.map(enCortesia), appliedById: activeStaffVenue.id }),
         })
       }
 
@@ -1324,24 +1322,13 @@ export async function createOrderWithItems(
 
       if (orderDiscount && orderDiscountPesos > 0) {
         await tx.orderDiscount.create({
-          data: {
+          data: filaDeDescuentoDeCatalogoEnCuenta({
             orderId: order.id,
-            discountId: orderDiscount.id,
-            type: orderDiscount.type,
-            name: orderDiscount.name,
-            value: orderDiscount.value,
-            amount: decimalFromPesos(orderDiscountPesos),
-            taxReduction: 0,
-            isComp: orderDiscount.type === 'COMP',
-            isManual: true,
-            compReason: orderDiscount.type === 'COMP' ? orderDiscount.compReason || orderDiscount.name : null,
+            discount: orderDiscount,
+            montoPesos: orderDiscountPesos,
             appliedById: activeStaffVenue.id,
-            appliedToItemIds: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
-            // B2: su base fue bruto − artículo − cortesías, sobre los renglones sin cortesía.
-            reparto: comoJson(
-              nuevoRepartoDeCuenta({ conPromociones: false, base: createdItems.filter(i => !i.line.input.isCortesia).map(i => i.id) }),
-            ),
-          },
+            renglonesSinCortesia: createdItems.filter(item => !item.line.input.isCortesia).map(item => item.id),
+          }),
         })
       }
       if (!orderDiscount && orderDiscountPesos > 0) {
@@ -1365,19 +1352,13 @@ export async function createOrderWithItems(
 
       for (const item of cortesiaItems) {
         await tx.orderAction.create({
-          data: {
+          data: accionDeCortesia({
             orderId: order.id,
-            actionType: 'COMP',
             performedById: input.staffId,
-            reason: item.line.input.cortesiaReason || 'Cortesía',
-            metadata: {
-              orderItemId: item.id,
-              productId: item.line.product?.id || null,
-              productName: item.line.product?.name || item.line.input.name || 'Otro importe',
-              lineSubtotalGivenAway: roundPesos(item.line.lineGrossPesos),
-              cortesiaReason: item.line.input.cortesiaReason,
-            },
-          },
+            renglon: enCortesia(item),
+            productId: item.line.product?.id || null,
+            productName: item.line.product?.name || item.line.input.name || 'Otro importe',
+          }),
         })
       }
 
@@ -2382,7 +2363,6 @@ export async function updateGuestInfo(
   opciones: OpcionesDeLigaTpv = {},
 ): Promise<Order & { tableName: string | null }> {
   logger.info(`👥 [ORDER SERVICE] Updating guest info for order ${orderId}`)
-  const puedeFijarClienteEnVentaCobrada = opciones.otorgarLealtad === true
 
   // Validate covers if provided
   if (guestInfo.covers !== undefined && guestInfo.covers < 1) {
@@ -2401,12 +2381,14 @@ export async function updateGuestInfo(
         throw new NotFoundError('Order not found')
       }
       // «Cobrada»: la regla compartida (R11-2: también con los cobros capturados que ya la cubren), sólo cuando decide algo.
-      const fijaCliente =
-        guestInfo.customerId !== undefined &&
-        (puedeFijarClienteEnVentaCobrada || !(await ventaYaCobradaBajoCandado(tx, { venueId, orderId }, order))?.cobrada)
-      if (guestInfo.customerId !== undefined && !fijaCliente) {
-        logger.info(`🔒 [ORDER SERVICE] Paid order ${orderId}: guest edit without payments:create keeps Order.customerId`)
-      }
+      const fijaCliente = guestInfo.customerId !== undefined
+      if (fijaCliente)
+        await assertCustomerAttributionUnderLock(tx, {
+          venueId,
+          orderId,
+          customerId: guestInfo.customerId ?? null,
+          actor: opciones.customerAttribution,
+        })
 
       // Update order with new guest info
       const updatedOrder = await tx.order.update({
@@ -3843,15 +3825,15 @@ export async function getOrderCustomers(venueId: string, orderId: string) {
  */
 export interface OpcionesDeLigaTpv {
   otorgarLealtad?: boolean
+  customerAttribution?: CustomerAttributionActor
 }
 
 /**
  * 🔴 F1 / R3-2: PRIMERA sentencia de la transacción de la liga — el candado de la venta (`bloquearVentaParaLiga`: la fila en
  * `SELECT … FOR NO KEY UPDATE`). Serializa contra el `FOR UPDATE` del cobro (`lockExistingOrderForPayment`) y entre ligas, y no
- * bloquea el `FOR KEY SHARE` de las revisiones de llaves foráneas (las métricas del cobro). En Serializable, si un cobro escribió
- * la venta mientras esperábamos, Postgres aborta la liga con un error de serialización (P2010/40001 en esta sentencia cruda;
- * P2034 en una consulta de modelo) y el reintento lee el estado nuevo. Después, el estado VIGENTE (F1, segunda ola: también en
- * cada reintento).
+ * bloquea el `FOR KEY SHARE` de las revisiones de llaves foráneas (las métricas del cobro). Con el aislamiento de siempre (no
+ * Serializable, D10), si un cobro u otra liga escribió la venta mientras esperábamos, cada sentencia de después ya lee lo que
+ * ellos dejaron. Después, el estado VIGENTE (F1, segunda ola: también en cada reintento).
  */
 async function leerVentaBajoCandado(
   tx: Prisma.TransactionClient,
@@ -3878,13 +3860,24 @@ async function leerVentaBajoCandado(
 async function ligarClienteBajoCandado(
   tx: Prisma.TransactionClient,
   venta: { paymentStatus: PaymentStatus | null; cobrada: boolean },
-  args: { venueId: string; orderId: string; customerId: string; staffId: string | null; otorgarLealtad: boolean },
+  args: {
+    venueId: string
+    orderId: string
+    customerId: string
+    staffId: string | null
+    otorgarLealtad: boolean
+    customerAttribution?: CustomerAttributionActor
+  },
   reabrirLealtad: ReabrirLealtad,
 ): Promise<{ ligaNueva: boolean; esPrimario: boolean }> {
   const { venueId, orderId, customerId, otorgarLealtad } = args
   const puedeSerPrimario = !venta.cobrada || otorgarLealtad
   const existente = await tx.orderCustomer.findUnique({ where: { orderId_customerId: { orderId, customerId } } })
   const primario = await tx.orderCustomer.findFirst({ where: { orderId, isPrimary: true }, select: { id: true, customerId: true } })
+  // Los acompañantes no cambian la atribución: el candado nuevo protege crear/promover al beneficiario.
+  if (venta.cobrada && !primario && puedeSerPrimario) {
+    await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId, actor: args.customerAttribution })
+  }
 
   let ligaNueva = false
   let esPrimario: boolean
@@ -3994,7 +3987,7 @@ export async function addCustomerToOrder(
   opciones: OpcionesDeLigaTpv = {},
 ): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`👤 [ORDER SERVICE] Adding customer ${customerId} to order ${orderId}`)
-  const otorgarLealtad = opciones.otorgarLealtad === true
+  const otorgarLealtad = opciones.otorgarLealtad === true || opciones.customerAttribution?.canAssignHistorical === true
 
   // Verify order exists and belongs to venue
   const order = await prisma.order.findUnique({
@@ -4019,9 +4012,9 @@ export async function addCustomerToOrder(
   // Import dinámico, como en `attachCustomerToOrder` (móvil): ANTES de abrir la transacción, para no cargar módulos dentro de ella.
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
-  // 🔒 Serializable + el candado de la venta; el índice parcial del primario es la defensa de fondo. Reintentos con backoff ante
-  // lo que clasifica `motivoDeReintentoDeLiga`: serialización (P2034, P2010/40001), interbloqueo (40P01) y P2002 (choque de
-  // únicos): el reintento relee todo bajo el candado.
+  // 🔒 El candado de la venta; el índice parcial del primario es la defensa de fondo. Reintentos con backoff ante lo que
+  // clasifica `motivoDeReintentoDeLiga`: serialización (P2034, P2010/40001), interbloqueo (40P01) y P2002 (choque de únicos): el
+  // reintento relee todo bajo el candado.
   const MAX_RETRIES = 5
   let liga: { ligaNueva: boolean; esPrimario: boolean; cobrada: boolean } | undefined
 
@@ -4033,13 +4026,15 @@ export async function addCustomerToOrder(
           const r = await ligarClienteBajoCandado(
             tx,
             venta,
-            { venueId, orderId, customerId, staffId: staffId ?? null, otorgarLealtad },
+            { venueId, orderId, customerId, staffId: staffId ?? null, otorgarLealtad, customerAttribution: opciones.customerAttribution },
             reabrirLealtadSiAplica,
           )
           return { ...r, cobrada: venta.cobrada }
         },
-        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), en Serializable.
-        { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), con el aislamiento
+        // de siempre, como la liga del POS: el candado ya pone en fila a las ligas. En Serializable, la que esperaba el candado
+        // perdía (40001) cada vez que otra cambiaba la venta, y con 6 ligas a la vez agotaba sus 5 intentos (D10, 27-oct-2026).
+        ORDER_LOCK_WAIT_BUDGET,
       )
 
       logger.info(
@@ -4111,6 +4106,10 @@ export async function removeCustomerFromOrder(venueId: string, orderId: string, 
         throw new NotFoundError('Customer not associated with this order')
       }
 
+      if (venta.cobrada && association.isPrimary) {
+        await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: null, actor: opciones.customerAttribution })
+      }
+
       // Remove the association
       await tx.orderCustomer.delete({
         where: { orderId_customerId: { orderId, customerId } },
@@ -4161,7 +4160,7 @@ export async function createAndAddCustomerToOrder(
   opciones: OpcionesDeLigaTpv = {},
 ): Promise<{ orderCustomers: Awaited<ReturnType<typeof getOrderCustomers>>; loyalty: SaleStampOutcome | null }> {
   logger.info(`🆕 [ORDER SERVICE] Creating customer and adding to order ${orderId}`)
-  const otorgarLealtad = opciones.otorgarLealtad === true
+  const otorgarLealtad = opciones.otorgarLealtad === true || opciones.customerAttribution?.canAssignHistorical === true
 
   // Normalize email to lowercase for consistent lookups
   const normalizedEmail = customerData.email?.toLowerCase()
@@ -4198,7 +4197,7 @@ export async function createAndAddCustomerToOrder(
   // Import dinámico, como en `addCustomerToOrder`: ANTES de abrir la transacción.
   const { reabrirLealtadSiAplica } = await import('../shared/loyaltyOnLateCustomer')
 
-  // 🔒 Serializable + el candado de la venta (igual que `addCustomerToOrder`); el índice parcial del primario es la defensa de
+  // 🔒 El candado de la venta (igual que `addCustomerToOrder`); el índice parcial del primario es la defensa de
   // fondo. Reintentos con backoff ante lo que clasifica `motivoDeReintentoDeLiga` (serialización P2034 o P2010/40001,
   // interbloqueo 40P01, choque de únicos que no sea el correo/teléfono duplicado).
   const MAX_RETRIES = 5
@@ -4232,7 +4231,14 @@ export async function createAndAddCustomerToOrder(
           const liga = await ligarClienteBajoCandado(
             tx,
             venta,
-            { venueId, orderId, customerId: newCustomer.id, staffId: staffId ?? null, otorgarLealtad },
+            {
+              venueId,
+              orderId,
+              customerId: newCustomer.id,
+              staffId: staffId ?? null,
+              otorgarLealtad,
+              customerAttribution: opciones.customerAttribution,
+            },
             reabrirLealtadSiAplica,
           )
 
@@ -4240,8 +4246,10 @@ export async function createAndAddCustomerToOrder(
             `✅ [ORDER SERVICE] Created customer ${newCustomer.id} and added to order ${order.orderNumber} | isPrimary=${liga.esPrimario}`,
           )
         },
-        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), en Serializable.
-        { isolationLevel: 'Serializable', timeout: 15_000, maxWait: 5_000 },
+        // El presupuesto de toda transacción que toma el candado de la venta (`ORDER_LOCK_WAIT_BUDGET`, T8-R2), con el aislamiento
+        // de siempre, como la liga del POS: el candado ya pone en fila a las ligas. En Serializable, la que esperaba el candado
+        // perdía (40001) cada vez que otra cambiaba la venta, y con 6 ligas a la vez agotaba sus 5 intentos (D10, 27-oct-2026).
+        ORDER_LOCK_WAIT_BUDGET,
       )
       // Success - exit the retry loop
       break

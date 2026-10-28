@@ -7,6 +7,7 @@ import {
   ventaYaCobradaBajoCandado,
 } from '@/services/shared/ligaDeClienteEnVenta'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 // services/dashboard/order.dashboard.service.ts
 
 import { enqueuePaymentCommissionInTx } from '@/services/tpv/paymentEffects.service'
@@ -483,6 +484,7 @@ export async function updateOrder(
      * resolvedor efectivo. Sin él, en una venta COBRADA no se cambia el cliente (403). Sin decirlo, falla CERRADO.
      */
     puedeCambiarClienteEnVentaCobrada?: boolean
+    customerAttribution?: CustomerAttributionActor
     /** Quien edita (`authContext.userId`): firma la bitácora si cancelar suelta los vales de la venta (D2). */
     staffId?: string
   } = {},
@@ -574,6 +576,7 @@ export async function updateOrder(
         orderId,
         clienteNuevo: customerId || null,
         puedeCobrar: opciones.puedeCambiarClienteEnVentaCobrada === true,
+        actor: opciones.customerAttribution,
       })
 
     if (customerId) {

@@ -91,6 +91,7 @@ export const PERMISSION_DEPENDENCIES: Record<string, string[]> = {
     'products:read',
     'inventory:read', // May need to update stock when modifying order
   ],
+  'orders:attach-customer': ['orders:attach-customer', 'orders:read', 'payments:read', 'customers:read'],
   'orders:cancel': [
     'orders:read',
     'orders:cancel',
@@ -1035,6 +1036,7 @@ export const DEFAULT_PERMISSIONS: Record<StaffRole, string[]> = {
     'orders:update',
     'orders:cancel',
     'orders:merge', // Fusionar cuentas — MANAGER+; WAITER queda a un PIN de distancia
+    'orders:attach-customer', // Cliente olvidado en venta cobrada — MANAGER+, sin reemplazo.
     'area-tickets:issue',
     'area-tickets:checkout',
     'area-tickets:cancel',
@@ -1954,6 +1956,7 @@ export const INDIVIDUAL_PERMISSIONS_BY_RESOURCE: Record<string, string[]> = {
     'orders:read',
     'orders:create',
     'orders:update',
+    'orders:attach-customer',
     'orders:cancel',
     'orders:cancel-unpaid',
     'orders:comp',

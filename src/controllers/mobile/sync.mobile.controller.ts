@@ -13,6 +13,7 @@ import * as syncService from '../../services/mobile/sync.mobile.service'
 import { lookupSyncRecovery } from '../../services/mobile/sync-recovery.mobile.service'
 import logger from '../../config/logger'
 import { getUserAccess, hasPermission } from '../../services/access/access.service'
+import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 
 const MAX_BATCH = 100
 
@@ -59,12 +60,20 @@ export async function syncIntents(req: Request, res: Response): Promise<void> {
       if (!/has no access to venue/.test(String(accessError?.message))) throw accessError
       logger.warn(`[SYNC MOBILE CONTROLLER] staff ${staffId} sin acceso a ${venueId}: sus intents se rechazan`)
     }
+    const customerActor = intents.some(
+      (i: { type: string; payload?: Record<string, unknown> }) => i.type === 'UPDATE_DETAILS' && typeof i.payload?.customerId === 'string',
+    )
+      ? await customerAttributionActor(req)
+      : {}
     const acks = await syncService.processIntents({
       venueId,
       staffId,
       deviceId,
       intents,
-      authorizeIntent: (_intent, requiredPermission) => access !== null && hasPermission(access, requiredPermission),
+      authorizeIntent: (_intent, requiredPermission) =>
+        requiredPermission === 'orders:attach-customer'
+          ? customerActor.canAssignHistorical === true
+          : access !== null && hasPermission(access, requiredPermission),
     })
     res.status(200).json({ success: true, data: acks })
   } catch (error: any) {

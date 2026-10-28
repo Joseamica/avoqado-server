@@ -1,6 +1,6 @@
 /**
  * El script que registra los avisos de Rappi, de punta a punta contra un Rappi SIMULADO en memoria y un directorio temporal
- * real. Ni red ni `.env`: `rappi.client` y `rappi.token` se sustituyen aquí.
+ * real. Ni red ni `.env`: `rappi.client` (con su token) se sustituye aquí.
  *
  * Reproduce los tres bloqueantes que Codex encontró en el bloque 0 de «Rappi fase 2» (docs/audit/2026-10-20-rappi-fase-2/codex-b0.md):
  *  · #1 🔴 la respuesta de un CREAR se pierde ⇒ Rappi tiene el aviso y el archivo no tiene su secreto. La corrida siguiente
@@ -21,10 +21,8 @@ jest.mock('../../../src/services/delivery-channels/providers/rappi/rappi.client'
   getRappiEnvironment: () => 'DEV',
   tiendasEscribiblesRappi: () => ['900175499'],
   apiBaseSelfOnboarding: () => 'https://self-onboarding.rappi.prueba',
-}))
-jest.mock('../../../src/services/delivery-channels/providers/rappi/rappi.token', () => ({
   // Un JWT con el `azp` (el clientId de la integración); la firma no se verifica.
-  getRappiToken: async () => `cabecera.${Buffer.from(JSON.stringify({ azp: 'cliente-prueba' })).toString('base64url')}.firma`,
+  tokenDeRappi: async () => `cabecera.${Buffer.from(JSON.stringify({ azp: 'cliente-prueba' })).toString('base64url')}.firma`,
 }))
 
 const API = '/api/v2/restaurants-integrations-public-api'

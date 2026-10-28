@@ -17,9 +17,23 @@ export type PaymentShiftReconciliationChannel =
   | 'posSyncOrder'
   | 'settleOrder'
   | 'settleCustomerBalance'
-export type PendingPaymentShiftReason = 'NO_SHIFT' | 'SHIFT_NOT_OPEN' | 'CLAIM_LOST' | 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY'
+/**
+ * `SALE_SHIFT_CLOSED` («Cobrar sin red», D4): la cola de la terminal subió una venta de un turno que ya no es el vivo (lo cerró
+ * otro aparato mientras ésta no tenía red). No entra al turno nuevo; su corte firmado tampoco se recalcula aquí.
+ */
+export type PendingPaymentShiftReason =
+  | 'NO_SHIFT'
+  | 'SHIFT_NOT_OPEN'
+  | 'CLAIM_LOST'
+  | 'UNCLASSIFIED_REFUND_COMPONENT_HISTORY'
+  | 'SALE_SHIFT_CLOSED'
+  /**
+   * S3 «Efectivo sin red en el turno correcto»: el POS subió una venta de una caja que ya se cerró y que NO tiene turno ligado
+   * (negocio sin turnos o caja anterior a la liga). No entra al turno vivo; se concilia contra el corte de esa caja (`saleDrawerId`).
+   */
+  | 'SALE_DRAWER_CLOSED'
 
-type PaymentShiftTransaction = Pick<Prisma.TransactionClient, 'shift' | 'activityLog' | 'orderItem'>
+type PaymentShiftTransaction = Pick<Prisma.TransactionClient, 'shift' | 'activityLog' | 'orderItem' | 'order' | 'cashDrawerSession'>
 type PaymentShiftSettingsReader = Pick<PrismaClient, 'venueSettings'> | Pick<Prisma.TransactionClient, 'venueSettings'>
 type ExistingOrderLockTransaction = Pick<Prisma.TransactionClient, '$queryRaw'>
 type ActivityLogReader = Pick<PrismaClient, 'activityLog'> | Pick<Prisma.TransactionClient, 'activityLog'>
@@ -29,6 +43,10 @@ export interface CapturedPaymentShiftClaim {
   candidateShiftId: string | null
   observedStatus: string | null
   pendingReason: PendingPaymentShiftReason | null
+  /** Sólo con `SALE_SHIFT_CLOSED`: el turno en que se vendió, para conciliarlo contra SU corte. */
+  saleShiftId?: string
+  /** Sólo con `SALE_DRAWER_CLOSED`: la caja en que se vendió, ya cerrada (sin turno ligado o con su turno todavía vivo, Codex r4 #1). */
+  saleDrawerId?: string
 }
 
 interface ClaimCapturedPaymentShiftInput {
@@ -42,6 +60,254 @@ interface ClaimCapturedPaymentShiftInput {
    * de tarjetas de regalo no suma una orden al turno, y un llamador que lo olvide debe enterarse en el compilador.
    */
   orderId: string | null
+  /**
+   * El turno en que se VENDIÓ (`shiftIdDeLaVenta`), sólo de la cola de la terminal. Nunca se estampa: si no es el turno vivo
+   * OPEN, el cobro queda sin turno (`SALE_SHIFT_CLOSED`) sin tocar totales; si lo es, todo como hoy. Ausente/vacío, o un id que no
+   * es turno de este negocio = como hoy. Si la orden ya tiene turno del servidor, manda el de la orden (`turnoDeLaVentaQueSeRespeta`).
+   */
+  expectedShiftId?: string | null
+  /**
+   * S3: `expectedShiftId` salió de la CAJA que el POS capturó al cobrar (`cashDrawerSessionId`), no de la cola de la terminal. Con
+   * caja capturada NO se aplica «si la orden ya tiene turno del servidor, manda el de la orden»: la cuenta que el replay materializa
+   * al reconectar (OPEN_TABLE, crear orden) nace en el turno vivo y no puede reemplazar dónde quedó el billete (Codex plan r3 #1).
+   */
+  cajaCapturada?: boolean
+  /**
+   * S3: la caja capturada ya se cerró y NO tiene turno ligado. «Vino una caja cerrada» no es «no vino nada» (Codex plan r3 #2): el
+   * cobro queda sin turno (`SALE_DRAWER_CLOSED`) y nunca se busca el vivo.
+   */
+  apartePorCajaCerrada?: { cajaId: string }
+  /**
+   * S3 (Codex r4 código #2): la caja capturada estaba ABIERTA y SIN turno al leerla. Tras el claim se relee: si otro aparato la cerró o
+   * la ligó a otro turno a media transacción, el claim se deshace y la venta queda aparte (nunca en el turno nuevo).
+   */
+  cajaSinTurno?: string
+  /**
+   * S3 (Codex r6 código #2): la caja capturada estaba ABIERTA y LIGADA a su turno al leerla. Tras el claim se relee: si otro aparato la
+   * cerró CONTANDO a media transacción (con su turno todavía abierto), se deshace la suma y la venta queda aparte. Si la cerró el sistema
+   * sin conteo, vale: nadie firmó un corte.
+   */
+  cajaLigadaAbierta?: string
+}
+
+/**
+ * 🔴 «Cobrar sin red» (D4, revisión de S5 #1): el efectivo de una venta tardía ya lo contó el cajón de SU turno, que está cerrado.
+ * Esta marca va en `Payment.posRawData` (la MISMA fila, sin migración y sin depender de `enableShifts`) y le dice al cajón —el
+ * posting en línea y el barrido de respaldo (`cash-drawer-reconciler.job.ts`, que la filtra en SQL con este mismo nombre)— que no
+ * lo sume a la caja abierta de hoy (su cierre firmaría un faltante falso) ni a la cerrada (recalcularía su corte firmado).
+ */
+const MARCA_VENTA_DE_TURNO_CERRADO = 'ventaDeTurnoCerrado'
+
+export function marcaDeVentaDeTurnoCerrado(saleShiftId: string | undefined): { ventaDeTurnoCerrado: string } | undefined {
+  return saleShiftId ? { [MARCA_VENTA_DE_TURNO_CERRADO]: saleShiftId } : undefined
+}
+
+export function esVentaDeTurnoCerrado(posRawData: Prisma.JsonValue | undefined): boolean {
+  return typeof posRawData === 'object' && posRawData !== null && !Array.isArray(posRawData) && MARCA_VENTA_DE_TURNO_CERRADO in posRawData
+}
+
+/**
+ * S3: la hermana de `ventaDeTurnoCerrado` para la caja cerrada SIN turno ligado (`SALE_DRAWER_CLOSED`). Mismo trato: la venta no entra
+ * a la caja abierta de hoy (ni en línea ni por el barrido) y ningún corte la adopta por su orden.
+ */
+const MARCA_CAJA_DE_LA_VENTA_CERRADA = 'cajaDeLaVentaCerrada'
+
+export function marcaDeCajaDeLaVentaCerrada(saleDrawerId: string | undefined): { cajaDeLaVentaCerrada: string } | undefined {
+  return saleDrawerId ? { [MARCA_CAJA_DE_LA_VENTA_CERRADA]: saleDrawerId } : undefined
+}
+
+export function esVentaDeCajaCerrada(posRawData: Prisma.JsonValue | undefined): boolean {
+  return typeof posRawData === 'object' && posRawData !== null && !Array.isArray(posRawData) && MARCA_CAJA_DE_LA_VENTA_CERRADA in posRawData
+}
+
+/**
+ * S3 (Codex r6 código #1): la caja que el POS capturó al cobrar, en la venta de la cola que NO quedó aparte. El barrido del cajón la usa
+ * para reponer el movimiento perdido en ESA caja aunque la hora del cobro quede fuera de su ventana (la cerró el sistema antes de que
+ * subiera la venta), en vez de adivinar por la hora la caja que estaba abierta al llegar.
+ */
+const MARCA_CAJA_DE_LA_VENTA = 'cajaDeLaVenta'
+
+export function marcaDeCajaDeLaVenta(cajaId: string | undefined): { cajaDeLaVenta: string } | undefined {
+  return cajaId ? { [MARCA_CAJA_DE_LA_VENTA]: cajaId } : undefined
+}
+
+export function cajaDeLaVentaDe(posRawData: Prisma.JsonValue | undefined): string | null {
+  if (typeof posRawData !== 'object' || posRawData === null || Array.isArray(posRawData)) return null
+  const caja = posRawData[MARCA_CAJA_DE_LA_VENTA]
+  return typeof caja === 'string' && caja.length > 0 ? caja : null
+}
+
+/** S3: las marcas durables de una venta apartada (por su turno o por su caja cerrada sin turno), para `Payment.posRawData`. */
+export function marcasDeVentaApartada(
+  claim: Pick<CapturedPaymentShiftClaim, 'saleShiftId' | 'saleDrawerId'>,
+): Prisma.InputJsonObject | undefined {
+  const marcas = { ...marcaDeVentaDeTurnoCerrado(claim.saleShiftId), ...marcaDeCajaDeLaVentaCerrada(claim.saleDrawerId) }
+  return Object.keys(marcas).length > 0 ? marcas : undefined
+}
+
+/**
+ * S3: la caja que el POS capturó al cobrar, si es de ESTE negocio (una de otro negocio o inexistente se ignora, como un turno
+ * inventado). Su `shiftId` (liga 1:1, fase 2 del turno del negocio) es el turno de la venta; puede ser nulo.
+ */
+export async function laCajaDeLaVenta(
+  tx: Pick<Prisma.TransactionClient, 'cashDrawerSession'>,
+  venueId: string,
+  cashDrawerSessionId: string | null | undefined,
+): Promise<{ id: string; status: string; shiftId: string | null; cerradaSinConteo: boolean } | null> {
+  if (!cashDrawerSessionId) return null
+  // Lectura simple, sin candado (Codex r3 código #3): el cobro no aparta la caja. Las transacciones que tocan caja y turno no van en un
+  // solo orden (la apertura del día siguiente va turno → caja; la del mismo día y las reparaciones del barrido, caja → turno), así que
+  // cualquier candado de caja dentro del cobro se cruzaba con alguna (40P01, medido). Lo que cambie a media transacción lo cubre la
+  // relectura tras el claim (`cajaSinTurno`, Codex r4 código #2). Ver `docs/audit/2026-10-21-efectivo-sin-red-turno/opus-r4-codigo.md`.
+  const caja = await tx.cashDrawerSession.findFirst({
+    where: { id: cashDrawerSessionId, venueId },
+    select: { id: true, status: true, shiftId: true, actualAmount: true, closedByStaffId: true },
+  })
+  if (!caja) return null
+  // Codex r5 código #3: la cerró el SISTEMA (sin conteo ni persona, `isAutoClosedSession`), no un corte firmado.
+  const cerradaSinConteo = caja.status === 'CLOSED' && caja.actualAmount == null && caja.closedByStaffId == null
+  return { id: caja.id, status: caja.status, shiftId: caja.shiftId, cerradaSinConteo }
+}
+
+/** S3: lo que la cola de un aparato dice de la venta —su turno y si su caja ya cerró sin turno—, resuelto UNA vez dentro de la tx. */
+export interface VentaDeLaCola {
+  /** El turno en que se vendió: `shiftIdDeLaVenta` (TPV) o el ligado a la caja capturada (POS). `null` = como hoy. */
+  expectedShiftId: string | null
+  /** El turno salió de la caja capturada: la cuenta materializada al reconectar no lo reemplaza (`turnoDeLaVentaQueSeRespeta`). */
+  cajaCapturada: boolean
+  /** La caja capturada ya se cerró y no tiene turno ligado: la venta queda aparte (`SALE_DRAWER_CLOSED`). */
+  apartePorCajaCerrada?: { cajaId: string }
+  /** La caja capturada (de este negocio), para que el efectivo del replay vaya a ESA caja y no a la que esté abierta al subir. */
+  cajaId?: string
+  /** La caja capturada estaba ABIERTA y sin turno: el claim la relee (Codex r4 código #2). */
+  cajaSinTurno?: string
+  /** La caja capturada estaba ABIERTA y ligada a su turno: el claim la relee (Codex r6 código #2). */
+  cajaLigadaAbierta?: string
+}
+
+/**
+ * S3: un solo lugar para la regla que comparten crear la orden, `registrarAbonoEnTx`, la venta rápida y abrir mesa (OPEN_TABLE).
+ * Sólo se llama con un replay de la cola (el llamador ya filtró `isOfflineReplay`). Manda `shiftIdDeLaVenta` cuando viene (la cola de
+ * la TPV, que no manda caja); si además vino una caja ligada a OTRO turno, queda rastro en el log, nunca en silencio.
+ */
+export async function ventaDeLaColaEnTx(
+  tx: Pick<Prisma.TransactionClient, 'cashDrawerSession'>,
+  venueId: string,
+  venta: { shiftIdDeLaVenta?: string | null; cashDrawerSessionId?: string | null },
+): Promise<VentaDeLaCola> {
+  const caja = await laCajaDeLaVenta(tx, venueId, venta.cashDrawerSessionId)
+  if (venta.shiftIdDeLaVenta) {
+    if (caja?.shiftId && caja.shiftId !== venta.shiftIdDeLaVenta) {
+      logger.warn('[TURNO DE LA VENTA] La caja y el turno de la venta no coinciden', {
+        venueId,
+        shiftIdDeLaVenta: venta.shiftIdDeLaVenta,
+        cashDrawerSessionId: caja.id,
+        turnoDeLaCaja: caja.shiftId,
+      })
+    }
+    return { expectedShiftId: venta.shiftIdDeLaVenta, cajaCapturada: false }
+  }
+  if (!caja) return { expectedShiftId: null, cajaCapturada: false }
+  // 🔴 Codex r4 código #1: una caja CERRADA aparta la venta aunque conserve su turno ligado y ese turno siga abierto (el cierre va en dos
+  // pasos, caja y luego turno; si el segundo falla, abrir otra caja ese día reutiliza el turno). Su turno viaja para el D4: si ya cerró,
+  // el claim la deja como `SALE_SHIFT_CLOSED`, como antes; si sigue vivo, `SALE_DRAWER_CLOSED`.
+  // Codex r5 código #3: la que cerró el SISTEMA sola (sin conteo; `cashDrawerAutoClose` no toca el turno) con su turno ligado no aparta:
+  // nadie firmó un corte. La venta va a su turno (o `SALE_SHIFT_CLOSED` si ya cerró) y su efectivo sólo a ESA caja (cerrada ⇒ el barrido).
+  if (caja.status !== 'OPEN' && caja.shiftId && caja.cerradaSinConteo) {
+    return { expectedShiftId: caja.shiftId, cajaCapturada: true, cajaId: caja.id }
+  }
+  if (caja.status !== 'OPEN') {
+    return { expectedShiftId: caja.shiftId, cajaCapturada: true, apartePorCajaCerrada: { cajaId: caja.id }, cajaId: caja.id }
+  }
+  if (caja.shiftId) return { expectedShiftId: caja.shiftId, cajaCapturada: true, cajaId: caja.id, cajaLigadaAbierta: caja.id }
+  return { expectedShiftId: null, cajaCapturada: true, cajaId: caja.id, cajaSinTurno: caja.id }
+}
+
+/**
+ * S3 (Codex r5 código #1): lo que la venta de la cola le pasa al claim, en UN solo lugar. Los llamadores (`/pay` vía `registrarAbonoEnTx` y
+ * `/fast`) usan esto en vez de copiar campo por campo: así ninguno se queda sin la relectura de la caja sin turno.
+ */
+export function entradaDelClaim(
+  venta: VentaDeLaCola,
+): Pick<
+  ClaimCapturedPaymentShiftInput,
+  'expectedShiftId' | 'cajaCapturada' | 'apartePorCajaCerrada' | 'cajaSinTurno' | 'cajaLigadaAbierta'
+> {
+  return {
+    expectedShiftId: venta.expectedShiftId,
+    cajaCapturada: venta.cajaCapturada,
+    apartePorCajaCerrada: venta.apartePorCajaCerrada,
+    cajaSinTurno: venta.cajaSinTurno,
+    cajaLigadaAbierta: venta.cajaLigadaAbierta,
+  }
+}
+
+/**
+ * S3: el turno de una orden que NACE en el replay (crear orden, abrir mesa). Misma regla que el pago: venta aparte por caja cerrada, o
+ * turno de la venta que no es el vivo (y es de este negocio) ⇒ la orden nace sin turno; si no, el vivo, como hoy.
+ */
+export async function turnoDeLaOrdenQueNace<T extends { id: string }>(
+  tx: Pick<Prisma.TransactionClient, 'shift' | 'cashDrawerSession'>,
+  venueId: string,
+  venta: VentaDeLaCola,
+  turnoVivo: T | null,
+): Promise<T | null> {
+  if (venta.apartePorCajaCerrada) return null
+  // Codex r4 código #2: la caja sin turno se relee DESPUÉS de leer el turno vivo; si cambió, la orden no nace en el turno nuevo.
+  if (venta.cajaSinTurno) {
+    const ahora = await laCajaDeLaVenta(tx, venueId, venta.cajaSinTurno)
+    if (!ahora || ahora.status !== 'OPEN') return null
+    if (ahora.shiftId) return ahora.shiftId === turnoVivo?.id ? turnoVivo : null
+  }
+  const pedido = venta.expectedShiftId
+  if (!pedido || pedido === turnoVivo?.id) return turnoVivo
+  // Codex r7 código #1: el turno de una caja ya validada no se pone en duda (ver `turnoDeLaVentaQueSeRespeta`).
+  if (venta.cajaCapturada) return null
+  return (await esTurnoDelNegocio(tx, venueId, pedido)) ? null : turnoVivo
+}
+
+/**
+ * 🔴 Codex servidor r1 #2: el cobro SIN la marca. Lo usan las consultas que adoptan un cobro sin turno por el turno de su orden
+ * (`shift.tpv.service.ts`: el cierre y la lista de turnos): una venta tardía marcada nunca se suma a ningún corte por esa vía.
+ * `equals: AnyNull` con `path` es lo único que deja pasar la columna nula, el JSON `null`, los objetos SIN la llave y lo que no es
+ * objeto (medido contra Postgres el 21-oct); un `NOT` sobre la llave excluiría en silencio todo eso (`NOT (NULL)` es NULL).
+ */
+export const COBRO_SIN_MARCA_DE_TURNO_CERRADO: Prisma.PaymentWhereInput = {
+  // S3 (Codex plan r4 #2): las DOS marcas de venta apartada. Se usa con spread dentro de un `where` que no trae su propio `AND`.
+  AND: [
+    { posRawData: { path: [MARCA_VENTA_DE_TURNO_CERRADO], equals: Prisma.AnyNull } },
+    { posRawData: { path: [MARCA_CAJA_DE_LA_VENTA_CERRADA], equals: Prisma.AnyNull } },
+  ],
+}
+
+/** 🔴 Codex servidor r1 #1: ¿es un turno REAL de ESTE negocio? Un id inventado o ajeno no puede sacar una venta del turno vivo. */
+export async function esTurnoDelNegocio(db: Pick<Prisma.TransactionClient, 'shift'>, venueId: string, shiftId: string): Promise<boolean> {
+  return (await db.shift.findFirst({ where: { id: shiftId, venueId }, select: { id: true } })) !== null
+}
+
+/**
+ * El turno en que se vendió, el que el cobro respeta (D4), o `null` = como si no viniera (el vivo, como hoy):
+ *  · el que mandó la terminal es el vivo OPEN ⇒ ése (aunque la orden sea de un turno anterior: una cuenta abierta que se cobra hoy);
+ *  · no es un turno de este negocio ⇒ `null` (Codex servidor r1 #1: un id inventado sacaba el efectivo del arqueo);
+ *  · la orden ya tiene turno del servidor ⇒ el de la orden (Codex servidor r1 #2: la terminal la creó EN LÍNEA, el servidor la puso
+ *    en su turno vivo y la respuesta se perdió; el turno que la terminal tenía guardado estaba viejo). Sin turno en la orden, el suyo.
+ */
+async function turnoDeLaVentaQueSeRespeta(
+  tx: PaymentShiftTransaction,
+  input: ClaimCapturedPaymentShiftInput,
+  vivoOpenId: string | null,
+): Promise<string | null> {
+  const pedido = input.expectedShiftId
+  if (!pedido) return null
+  if (pedido === vivoOpenId) return pedido
+  // 🔴 S3 (Codex r7 código #1): el turno que salió de la caja capturada (`ventaDeLaColaEnTx`, ya validada contra este negocio) no es un id
+  // del cliente: si ya no se encuentra es que un ADMIN lo borró desde el panel a media subida (`deleteShift` sólo borra turnos cerrados y
+  // suelta la liga de la caja). Se respeta igual ⇒ la venta queda aparte por ese turno; nunca vuelve al vivo.
+  if (input.cajaCapturada) return pedido
+  if (!(await esTurnoDelNegocio(tx, input.venueId, pedido))) return null
+  if (!input.orderId) return pedido
+  const orden = await tx.order.findFirst({ where: { id: input.orderId, venueId: input.venueId }, select: { shiftId: true } })
+  return orden?.shiftId ?? pedido
 }
 
 /**
@@ -271,6 +537,36 @@ export async function resolvePaymentShiftReconciliationEnabled(db: PaymentShiftS
  * seguro para estamparse en Order/Payment; un candidato que perdió contra el
  * cierre se conserva únicamente como evidencia de conciliación.
  */
+/** La salida «aparte» de una venta de la cola: por su caja cerrada (`SALE_DRAWER_CLOSED`) o por su turno ya cerrado (`SALE_SHIFT_CLOSED`). */
+function aparteSinTurno(
+  candidate: { id: string; status: ShiftStatus } | null,
+  por: { cajaId: string } | { turnoId: string },
+): CapturedPaymentShiftClaim {
+  const base = { shiftId: null, candidateShiftId: candidate?.id ?? null, observedStatus: candidate?.status ?? null }
+  return 'cajaId' in por
+    ? { ...base, pendingReason: 'SALE_DRAWER_CLOSED', saleDrawerId: por.cajaId }
+    : { ...base, pendingReason: 'SALE_SHIFT_CLOSED', saleShiftId: por.turnoId }
+}
+
+/**
+ * S3: ¿la caja que se leyó ABIERTA cambió a media transacción? `null` = no (sigue abierta, o la ligaron a `turnoReclamado`).
+ *  · sin turno (Codex r4 código #2): cerrada ⇒ aparte por su caja; ligada a OTRO turno ⇒ aparte por ese turno;
+ *  · ligada (Codex r6 código #2): cerrada CONTANDO ⇒ aparte por su caja (su corte ya está firmado); cerrada por el sistema sin conteo ⇒
+ *    vale (nadie firmó: su efectivo se anota ahí, `admiteCerradaSinConteo`).
+ */
+async function laCajaAbiertaCambio(
+  tx: PaymentShiftTransaction,
+  venueId: string,
+  caja: { id: string; ligada: boolean },
+  turnoReclamado: string | null,
+): Promise<{ cajaId: string } | { turnoId: string } | null> {
+  const ahora = await laCajaDeLaVenta(tx, venueId, caja.id)
+  if (!ahora) return { cajaId: caja.id }
+  if (ahora.status !== 'OPEN') return caja.ligada && ahora.cerradaSinConteo ? null : { cajaId: caja.id }
+  if (ahora.shiftId && ahora.shiftId !== turnoReclamado) return { turnoId: ahora.shiftId }
+  return null
+}
+
 export async function claimShiftForCapturedPayment(
   tx: PaymentShiftTransaction,
   input: ClaimCapturedPaymentShiftInput,
@@ -285,6 +581,37 @@ export async function claimShiftForCapturedPayment(
     orderBy: { startTime: 'desc' },
     select: { id: true, status: true },
   })
+
+  // 🔴 «Cobrar sin red» (D4): una venta tardía de un turno que ya no es el vivo nunca se mezcla en silencio con el nuevo.
+  const vivoOpenId = candidate?.status === ShiftStatus.OPEN ? candidate.id : null
+  const turnoDeLaVenta = await turnoDeLaVentaQueSeRespeta(tx, input, vivoOpenId)
+  if (turnoDeLaVenta && turnoDeLaVenta !== vivoOpenId) {
+    return {
+      shiftId: null,
+      candidateShiftId: candidate?.id ?? null,
+      observedStatus: candidate?.status ?? null,
+      pendingReason: 'SALE_SHIFT_CLOSED',
+      saleShiftId: turnoDeLaVenta,
+    }
+  }
+
+  // 🔴 S3: la venta de una caja ya cerrada queda aparte; nunca se busca el vivo (Codex plan r3 #2). Va DESPUÉS del D4 para que una caja
+  // cerrada con su turno ya cerrado siga siendo `SALE_SHIFT_CLOSED`; aquí llegan la caja sin turno y la de turno todavía vivo (r4 #1).
+  if (input.apartePorCajaCerrada) return aparteSinTurno(candidate, { cajaId: input.apartePorCajaCerrada.cajaId })
+
+  // S3: la caja capturada que se leyó ABIERTA (sin turno, o ligada: Codex r6 código #2) se relee antes de dar la venta por buena.
+  const cajaAbierta = input.cajaSinTurno
+    ? { id: input.cajaSinTurno, ligada: false }
+    : input.cajaLigadaAbierta
+      ? { id: input.cajaLigadaAbierta, ligada: true }
+      : null
+
+  // 🔴 Codex r5 código #2: sin turno vivo OPEN, la caja se relee aquí también (antes de estas salidas no había relectura y la venta
+  // perdía su marca y su aviso si la caja cerró a media transacción). La ligada no llega aquí: sin su turno vivo, sale por el D4.
+  if ((!candidate || candidate.status !== ShiftStatus.OPEN) && cajaAbierta) {
+    const cambio = await laCajaAbiertaCambio(tx, input.venueId, cajaAbierta, null)
+    if (cambio) return aparteSinTurno(candidate, cambio)
+  }
 
   if (!candidate) {
     return { shiftId: null, candidateShiftId: null, observedStatus: null, pendingReason: 'NO_SHIFT' }
@@ -307,6 +634,7 @@ export async function claimShiftForCapturedPayment(
     input.orderId !== null &&
     Boolean(await tx.orderItem.findFirst({ where: { orderId: input.orderId, giftCardId: { not: null } }, select: { id: true } }))
 
+  const sumaOrden = input.incrementTotalOrders && !esCuentaDeTarjetas
   const claimed = await tx.shift.updateMany({
     where: {
       id: candidate.id,
@@ -317,9 +645,28 @@ export async function claimShiftForCapturedPayment(
     data: {
       totalSales: { increment: input.amountPesos },
       totalTips: { increment: input.tipPesos },
-      ...(input.incrementTotalOrders && !esCuentaDeTarjetas ? { totalOrders: { increment: 1 } } : {}),
+      ...(sumaOrden ? { totalOrders: { increment: 1 } } : {}),
     },
   })
+
+  // 🔴 S3 (Codex r4 código #2): la caja capturada estaba abierta y sin turno. Con la fila del turno ya apartada por el CAS, se relee: si
+  // otro aparato la cerró o la ligó a otro turno a media transacción, la decisión «sin turno ⇒ el vivo» ya no vale; se deshace la suma
+  // (mismo turno, misma transacción) y la venta queda aparte, con su aviso. Sigue abierta sin turno, o ligada a ESTE turno ⇒ vale.
+  // Codex r6 código #2: lo mismo con la caja LIGADA que otro aparato cerró contando mientras su turno sigue abierto (dos pasos a medias).
+  const cambio = cajaAbierta ? await laCajaAbiertaCambio(tx, input.venueId, cajaAbierta, candidate.id) : null
+  if (cambio) {
+    if (claimed.count === 1) {
+      await tx.shift.updateMany({
+        where: { id: candidate.id, venueId: input.venueId },
+        data: {
+          totalSales: { decrement: input.amountPesos },
+          totalTips: { decrement: input.tipPesos },
+          ...(sumaOrden ? { totalOrders: { decrement: 1 } } : {}),
+        },
+      })
+    }
+    return aparteSinTurno(candidate, cambio)
+  }
 
   if (claimed.count === 1) {
     return {
@@ -327,6 +674,17 @@ export async function claimShiftForCapturedPayment(
       candidateShiftId: candidate.id,
       observedStatus: candidate.status,
       pendingReason: null,
+    }
+  }
+
+  // El cierre ganó el CAS: si era el turno de la venta, ya lo cerró otro aparato (D4), con el mismo motivo que arriba.
+  if (turnoDeLaVenta) {
+    return {
+      shiftId: null,
+      candidateShiftId: candidate.id,
+      observedStatus: candidate.status,
+      pendingReason: 'SALE_SHIFT_CLOSED',
+      saleShiftId: turnoDeLaVenta,
     }
   }
 
@@ -487,6 +845,8 @@ export async function recordPendingPaymentShiftReconciliation(
         totalPesos: input.amountPesos.add(input.tipPesos).toFixed(2),
         ...(input.claim.candidateShiftId ? { candidateShiftId: input.claim.candidateShiftId } : {}),
         ...(input.claim.observedStatus ? { observedShiftStatus: input.claim.observedStatus } : {}),
+        ...(input.claim.saleShiftId ? { saleShiftId: input.claim.saleShiftId } : {}),
+        ...(input.claim.saleDrawerId ? { saleDrawerId: input.claim.saleDrawerId } : {}),
         ...(input.unclassifiedPriorRefundPesos
           ? {
               shiftAttributionStatus: 'PENDING',

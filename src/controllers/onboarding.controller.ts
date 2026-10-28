@@ -24,6 +24,7 @@ import {
 } from '../services/stripe.service'
 import { autorizarObligacionNueva } from '../services/access/autorizarObligacionNueva'
 import { resolvePlanNotificationTarget } from '../services/access/planNotification.service'
+import * as resendService from '../services/resend.service'
 import {
   LEGACY_INTRO_OFFER,
   STANDARD_PLAN_GROSS_CENTS,
@@ -332,12 +333,33 @@ export async function getOnboardingProgress(req: Request, res: Response, next: N
         // venue-scoped backend APIs before the wizard finishes.
         ...(venue ? { venueId: venue.id, venueSlug: venue.slug } : {}),
         // Don't expose step8_paymentInfo for security (contains CLABE)
+        // ADITIVO: lo que la persona ya escribió en el formulario de la landing, para que el /setup no
+        // se lo vuelva a pedir en blanco (27-oct). Ruta con sesión y guarda de dueño: son sus propios datos.
+        ...(await negocioSugerido(organizationId, progress.acquisitionSource)),
       },
     })
   } catch (error) {
     logger.error('Error getting onboarding progress:', error)
     next(error)
   }
+}
+
+/** El placeholder con el que nace la organización cuando el formulario no trae negocio (signup.service). */
+const NOMBRE_DE_RELLENO = 'Nuevo Negocio'
+
+/**
+ * Nombre y teléfono del negocio que la persona ya dio en la landing. Sólo para altas de landing:
+ * en el registro directo la organización nace sin nombre real y no hay nada que sugerir.
+ */
+async function negocioSugerido(
+  organizationId: string,
+  acquisitionSource: string | null,
+): Promise<{ suggestedBusiness?: { name: string; phone: string | null } }> {
+  if (!acquisitionSource?.startsWith('landing')) return {}
+  const org = await prisma.organization.findUnique({ where: { id: organizationId }, select: { name: true, phone: true } }).catch(() => null)
+  const name = org?.name?.trim()
+  if (!name || name === NOMBRE_DE_RELLENO) return {}
+  return { suggestedBusiness: { name, phone: org?.phone?.trim() || null } }
 }
 
 /**
@@ -785,6 +807,12 @@ export async function completeOnboarding(req: Request, res: Response, next: Next
 
     if (!progress) {
       throw new NotFoundError('Onboarding progress not found')
+    }
+
+    // 🔴 D8 (26-oct): este carril no tiene paso de plan. Un alta del asistente nuevo, o cualquiera con el plan obligatorio,
+    // terminaba aquí sin plan ni tarjeta (armando step/2, step/3 y complete a mano) y el POS la dejaba entrar.
+    if (progress.wizardVersion === 2 || requiresBaseSubscriptionPlan()) {
+      throw new BadRequestError('Termina tu alta en dashboard.avoqado.io/setup: ahí eliges tu plan.', 'ALTA_EN_SETUP')
     }
 
     // Validate required steps completed
@@ -1420,6 +1448,8 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // quedaría sin aplicar. Ese cobro le toca a `activate-plan`, que sí lee la oferta, aparta el
     // cupo y libera el lugar si el banco rechaza.
     const traeCampanaReclamada = Boolean(progress.launchCampaignId)
+    // Si este cierre manda el correo de confirmación del plan (la bienvenida con precio). Ver la bienvenida genérica abajo.
+    let correoDelPlanEnviado = false
     if (planEnabled && !planYaCobrado && !traeCampanaReclamada && planData && planData.tier !== 'FREE' && planData.paymentMethodId) {
       // The guard above already excluded FREE; name the paid tier once so neither the coupon
       // decision nor the price lookup below has to re-derive it.
@@ -1507,6 +1537,7 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
         // recipient or any email/Stripe hiccup must never break onboarding.
         // 🔴 Sin `await`, como el correo de `activatePlan`: leer la fecha de Stripe (con sus reintentos) o mandar el correo
         // detenía la respuesta, la marca final y la sesión de un alta YA cobrada (Codex r3, 20-oct).
+        correoDelPlanEnviado = true
         void (async () => {
           try {
             const target = await resolvePlanNotificationTarget(result.venue.id)
@@ -1590,6 +1621,26 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
           await dejarCobroEnCurso(organizationId)
         }
       }
+    }
+
+    // La bienvenida del alta corta. El negocio provisional ya no la manda (antes de la tarjeta el cliente creía que había
+    // terminado), así que se da aquí cuando este cierre NO llevó el correo del plan: ni lo cobró `activate-plan` ni lo
+    // mandó el bloque de arriba (Enterprise, compra híbrida, Gratis, banco que rechazó, cobro anterior recuperado).
+    // Se mide por el correo que de verdad salió, no por las condiciones de entrada al cobro (Codex r1 y r2, 27-oct).
+    if (existingVenue && !planYaCobrado && !correoDelPlanEnviado) {
+      void resolvePlanNotificationTarget(result.venue.id)
+        .then(target =>
+          target.email
+            ? resendService.sendOnboardingWelcomeEmail({
+                ownerEmail: target.email,
+                ownerFirstName: target.ownerName ?? '',
+                venueName: target.venueName ?? result.venue.name,
+                venueSlug: result.venue.slug,
+                hasKycDocuments: false,
+              })
+            : false,
+        )
+        .catch(err => logger.error(`V2 completion: no se pudo mandar la bienvenida de ${result.venue.id}`, err))
     }
 
     // Mark organization as onboarding completed

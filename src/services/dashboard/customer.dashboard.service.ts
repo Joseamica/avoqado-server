@@ -26,6 +26,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
+import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import {
   CUSTOMER_PAGE_SIZE_DEFAULT,
   CUSTOMER_PAGE_SIZE_MAX,
@@ -209,6 +210,7 @@ export async function getCustomers(
               paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
               remainingBalance: { gt: 0 },
               ...CUENTA_NO_CANCELADA,
+              ...NO_ES_COBRO_DEL_MOMENTO,
             },
           },
         },
@@ -544,6 +546,10 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
  * @param performedBy - staffId del actor (authContext.userId del controller). Opcional para no
  *   romper a otros callers — patrón del repo.
  */
+/** Códigos estables del 400 de «ya registrado»: las apps traducen por código, no por el texto en inglés. */
+export const CUSTOMER_PHONE_TAKEN = 'CUSTOMER_PHONE_TAKEN'
+export const CUSTOMER_EMAIL_TAKEN = 'CUSTOMER_EMAIL_TAKEN'
+
 export async function updateCustomer(venueId: string, customerId: string, data: UpdateCustomerRequest, performedBy?: string) {
   // Check if customer exists and belongs to this venue
   const existingCustomer = await prisma.customer.findFirst({
@@ -572,7 +578,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     })
 
     if (duplicateEmail) {
-      throw new BadRequestError(`Customer with email ${data.email} already exists`)
+      throw new BadRequestError(`Customer with email ${data.email} already exists`, CUSTOMER_EMAIL_TAKEN)
     }
   }
 
@@ -586,7 +592,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     })
 
     if (duplicatePhone) {
-      throw new BadRequestError(`Customer with phone ${data.phone} already exists`)
+      throw new BadRequestError(`Customer with phone ${data.phone} already exists`, CUSTOMER_PHONE_TAKEN)
     }
   }
 
@@ -636,27 +642,38 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     }
   }
 
-  const updatedCustomer = await prisma.customer.update({
-    where: { id: customerId },
-    data: {
-      email: normalizedEmail,
-      phone: data.phone,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      birthDate: data.birthDate,
-      gender: data.gender,
-      customerGroupId: data.customerGroupId,
-      notes: data.notes,
-      tags: data.tags,
-      // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
-      // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
-      // hubo cambio de verdad).
-      active: data.active,
-    },
-    include: {
-      customerGroup: true,
-    },
-  })
+  const updatedCustomer = await prisma.customer
+    .update({
+      where: { id: customerId },
+      data: {
+        email: normalizedEmail,
+        phone: data.phone,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        birthDate: data.birthDate,
+        gender: data.gender,
+        customerGroupId: data.customerGroupId,
+        notes: data.notes,
+        tags: data.tags,
+        // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
+        // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
+        // hubo cambio de verdad).
+        active: data.active,
+      },
+      include: {
+        customerGroup: true,
+      },
+    })
+    .catch(error => {
+      // Dos aparatos asignan el mismo teléfono/correo a la vez: los dos pasan la búsqueda de arriba y el índice único
+      // frena al segundo. Es el mismo «ya registrado», no un 500 (Codex r1 #7, editar cliente desde el POS).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const campos = String(error.meta?.target ?? '')
+        if (campos.includes('phone')) throw new BadRequestError(`Customer with phone ${data.phone} already exists`, CUSTOMER_PHONE_TAKEN)
+        if (campos.includes('email')) throw new BadRequestError(`Customer with email ${data.email} already exists`, CUSTOMER_EMAIL_TAKEN)
+      }
+      throw error
+    })
 
   logger.info(`Customer updated: ${customerId}`, {
     venueId,
@@ -665,10 +682,11 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
 
   logAction({
     venueId,
+    staffId: performedBy,
     action: 'CUSTOMER_UPDATED',
     entity: 'Customer',
     entityId: customerId,
-    data: { email: updatedCustomer.email, phone: updatedCustomer.phone },
+    data: { email: updatedCustomer.email, phone: updatedCustomer.phone, fields: Object.keys(data) },
   })
 
   return consentWarning ? { ...updatedCustomer, consentWarning } : updatedCustomer
@@ -821,6 +839,8 @@ export async function settleCustomerBalance(
             paymentStatus: { in: ['PENDING', 'PARTIAL'] },
             remainingBalance: { gt: 0 },
             ...CUENTA_NO_CANCELADA,
+            // Un cobro con tarjeta que falló no es fiado: «Liquidar todo» lo marcaría pagado en efectivo sin que nadie pagara.
+            ...NO_ES_COBRO_DEL_MOMENTO,
           },
         },
         include: {
@@ -900,7 +920,7 @@ export async function settleCustomerBalance(
       // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y
       // fencing se releen bajo lock y con alcance tenant+cliente.
       const fresh = await tx.order.findFirst({
-        where: { id: orderId, venueId, orderCustomers: { some: { customerId } } },
+        where: { id: orderId, venueId, orderCustomers: { some: { customerId } }, ...NO_ES_COBRO_DEL_MOMENTO },
         select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true, thirdPartyCashDue: true },
       })
       if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue

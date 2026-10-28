@@ -1,5 +1,6 @@
 import { z } from 'zod'
 import { optionalClearablePinSchema } from '../common/pin.schema'
+import { contrasenaNuevaSchema } from '../../utils/contrasenaNueva'
 
 export const loginSchema = z.object({
   body: z.object({
@@ -24,13 +25,9 @@ export const switchVenueSchema = z.object({
   }),
 })
 
-// Password validation: 8+ chars, uppercase, lowercase, number
-const strongPasswordSchema = z
-  .string()
-  .min(8, { message: 'La contraseña debe tener al menos 8 caracteres.' })
-  .regex(/[A-Z]/, { message: 'La contraseña debe contener al menos una letra mayúscula.' })
-  .regex(/[a-z]/, { message: 'La contraseña debe contener al menos una letra minúscula.' })
-  .regex(/[0-9]/, { message: 'La contraseña debe contener al menos un número.' })
+// Contraseña nueva: 8 a 128 caracteres y que no sea una común; sin exigir mayúsculas, números ni símbolos.
+// Se deja el nombre `strongPasswordSchema` para no tocar a sus consumidores.
+const strongPasswordSchema = contrasenaNuevaSchema
 
 export const updateAccountSchema = z.object({
   body: z
@@ -94,3 +91,9 @@ export type SwitchVenueDto = z.infer<typeof switchVenueSchema.shape.body>
 export type UpdateAccountDto = z.infer<typeof updateAccountSchema.shape.body>
 export type RequestPasswordResetDto = z.infer<typeof requestPasswordResetSchema.shape.body>
 export type ResetPasswordDto = z.infer<typeof resetPasswordSchema.shape.body>
+
+export const entrarConBoletoSchema = z.object({
+  body: z.object({
+    boleto: z.string({ required_error: 'El boleto es requerido.' }).max(2048, 'El boleto no es válido.'),
+  }),
+})

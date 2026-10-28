@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import * as orderDashboardService from '../../services/dashboard/order.dashboard.service'
 import {
   encodeExport,
@@ -98,6 +99,7 @@ export async function updateOrder(req: Request<{ venueId: string; orderId: strin
     // 🔴 R4-2 (ronda 4 post-QA de sellos tardíos; decisión «A»): cambiar el cliente de una venta COBRADA exige `payments:create`
     // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae `customerId`.
     const opciones = {
+      ...(req.body?.customerId !== undefined ? { customerAttribution: await customerAttributionActor(req) } : {}),
       ...(req.body?.customerId !== undefined ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) } : {}),
       // D2: quien cancela una venta de vales firma la bitácora de los vales que quedan libres.
       staffId: (req as any).authContext?.userId as string | undefined,

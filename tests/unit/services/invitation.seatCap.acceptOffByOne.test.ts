@@ -111,7 +111,7 @@ describe('acceptInvitation — accept-time seat-cap off-by-one guard', () => {
   // 🔴 Codex (5th audit): the Free seat-cap enforcement locks pending invitations BEFORE touching StaffVenue; accept wrote
   // StaffVenue first and the invitation last, so the two could deadlock. Accept now locks its invitation first too.
   it('🔴 locks its invitation BEFORE writing any StaffVenue (same lock order as the seat-cap enforcement)', async () => {
-    await acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Password123' })
+    await acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Zorro-verde-42' })
 
     const sql = (mockTxQueryRaw.mock.calls[0][0] as string[]).join('?')
     expect(sql).toContain('"Invitation"')
@@ -125,7 +125,7 @@ describe('acceptInvitation — accept-time seat-cap off-by-one guard', () => {
   it('🔴 an invitation revoked while it was being accepted is not overwritten: the accept aborts', async () => {
     mockTxInvitationUpdateMany.mockResolvedValueOnce({ count: 0 })
 
-    await expect(acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Password123' })).rejects.toThrow(
+    await expect(acceptInvitation('accept-token', { firstName: 'New', lastName: 'User', password: 'Zorro-verde-42' })).rejects.toThrow(
       'ya no está disponible',
     )
     expect(mockTxInvitationUpdateMany).toHaveBeenCalledWith(
@@ -137,7 +137,7 @@ describe('acceptInvitation — accept-time seat-cap off-by-one guard', () => {
     const result = await acceptInvitation('accept-token', {
       firstName: 'New',
       lastName: 'User',
-      password: 'Password123',
+      password: 'Zorro-verde-42',
     })
 
     // The accept succeeded (a legit accept is NOT wrongly blocked).

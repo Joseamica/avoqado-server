@@ -233,3 +233,122 @@ describe('submitContact: aviso interno del prospecto', () => {
     expect(internos[0]).toEqual(expect.objectContaining({ to: 'onboarding@avoqado.io', subject: 'Nuevo prospecto - Cafe Ana' }))
   })
 })
+
+describe('submitContact: alta con código de 6 dígitos', () => {
+  const CODIGO = '482915'
+  const altaConCodigo = {
+    staff: { id: 'staff-new', email: contactBody.email },
+    organizationId: 'org-new',
+    magicLinkToken: 'token-new',
+    alreadyExisted: false,
+    yaEsCliente: false,
+    codigoVerificacion: CODIGO,
+  }
+
+  /** El correo al prospecto y el aviso interno, separados por destinatario. */
+  const correos = () => {
+    const todos = mockSendEmail.mock.calls.map(([correo]) => correo)
+    return {
+      cliente: todos.find(correo => correo.to === contactBody.email),
+      interno: todos.find(correo => correo.to !== contactBody.email),
+    }
+  }
+
+  it('la respuesta trae verificacion «codigo» sólo cuando hay código', async () => {
+    mockSignupFromLanding.mockResolvedValueOnce(altaConCodigo)
+    const conCodigo = await submit()
+    expect(conCodigo.res.body).toEqual({
+      success: true,
+      message: 'Demo solicitada exitosamente',
+      conversion: { leadCreated: true, registrationCompleted: true, eventId: huella('org-new') },
+      verificacion: 'codigo',
+    })
+
+    mockSignupFromLanding.mockResolvedValueOnce({ ...altaConCodigo, codigoVerificacion: null })
+    const sinCodigo = await submit()
+    expect(sinCodigo.res.body).not.toHaveProperty('verificacion')
+  })
+
+  it('con el interruptor apagado (el servicio no manda el campo) la respuesta es la de hoy', async () => {
+    const comoHoy = {
+      staff: altaConCodigo.staff,
+      organizationId: altaConCodigo.organizationId,
+      magicLinkToken: altaConCodigo.magicLinkToken,
+      alreadyExisted: false,
+      yaEsCliente: false,
+    }
+    mockSignupFromLanding.mockResolvedValue(comoHoy)
+
+    const { res } = await submit()
+
+    expect(res.body).toEqual({
+      success: true,
+      message: 'Demo solicitada exitosamente',
+      conversion: { leadCreated: true, registrationCompleted: true, eventId: huella('org-new') },
+    })
+  })
+
+  it('el correo al cliente trae el código y su vigencia, en HTML y en texto, arriba del botón «Continúa tu alta»', async () => {
+    mockSignupFromLanding.mockResolvedValue(altaConCodigo)
+
+    await submit()
+
+    const { cliente } = correos()
+    expect(cliente.html).toContain(CODIGO)
+    expect(cliente.html).toMatch(/vence en 10 minutos/)
+    expect(cliente.text).toContain(CODIGO)
+    expect(cliente.text).toMatch(/vence en 10 minutos/)
+    expect(cliente.text).toContain('Tu código para entrar: 482915 (vence en 10 minutos)')
+    // El botón sigue llevando el enlace de hoy, con el texto nuevo.
+    expect(cliente.html).toContain('Continúa tu alta')
+    expect(cliente.html).not.toContain('Continúa tu onboarding')
+    expect(cliente.text).toContain('Continúa tu alta: ')
+    expect(cliente.html).toContain('/api/v1/public/onboarding/continuar/token-new')
+    // El bloque del código va ANTES del botón.
+    expect(cliente.html.indexOf(CODIGO)).toBeGreaterThan(-1)
+    expect(cliente.html.indexOf(CODIGO)).toBeLessThan(cliente.html.indexOf('Continúa tu alta'))
+    expect(cliente.text.indexOf(CODIGO)).toBeLessThan(cliente.text.indexOf('Continúa tu alta'))
+  })
+
+  it('el aviso interno NO contiene el código (ni en HTML ni en texto)', async () => {
+    mockSignupFromLanding.mockResolvedValue(altaConCodigo)
+
+    await submit()
+
+    const { interno } = correos()
+    expect(interno.to).toBe('onboarding@avoqado.io')
+    expect(interno.html).not.toContain(CODIGO)
+    expect(interno.text).not.toContain(CODIGO)
+  })
+
+  it('sin código el correo es el de hoy: «Continúa tu onboarding» y ninguna mención del código', async () => {
+    mockSignupFromLanding.mockResolvedValue({ ...altaConCodigo, codigoVerificacion: null })
+
+    await submit()
+
+    const { cliente } = correos()
+    expect(cliente.html).toContain('Continúa tu onboarding')
+    expect(cliente.html).not.toContain('Continúa tu alta')
+    expect(cliente.html).not.toMatch(/Tu código para entrar/)
+    expect(cliente.text).toContain('Continúa tu onboarding: ')
+    expect(cliente.text).not.toMatch(/Tu código para entrar/)
+  })
+
+  it('un cliente que ya tenía cuenta no recibe código ni «Continúa tu alta»', async () => {
+    mockSignupFromLanding.mockResolvedValue({
+      staff: { id: 'staff-existing', email: contactBody.email },
+      organizationId: 'org-existing',
+      magicLinkToken: null,
+      alreadyExisted: true,
+      yaEsCliente: true,
+      codigoVerificacion: null,
+    })
+
+    const { res } = await submit()
+
+    const { cliente } = correos()
+    expect(res.body).not.toHaveProperty('verificacion')
+    expect(cliente.html).not.toMatch(/Tu código para entrar|Continúa tu alta/)
+    expect(cliente.text).not.toMatch(/Tu código para entrar|Continúa tu alta/)
+  })
+})

@@ -5,6 +5,7 @@ import {
   cambiosDeOrdenExistente,
   clasificarLinea,
   horaDeLaVenta,
+  precioDeExtraMostrado,
   precioMostradoValido,
   ventanaDeLaLinea,
 } from '@/services/mobile/precioQueVioElCliente'
@@ -66,6 +67,72 @@ describe('precio que vio el cliente — regla pura', () => {
       ).toBe('BUSCAR'))
   })
 
+  /**
+   * Reloj del aparato (Review Focus 1; Codex plan-r2 #9): `catalogAt` lo sella el SERVIDOR y `createdAtLocal` el aparato. De
+   * la cola, la venta no pudo ser antes de que el aparato leyera ese catálogo ni después de llegar: la ventana de la línea es
+   * `[catalogAt − 60 s, min(llegada, max(horaDeLaVenta, catalogAt))]`, y un catálogo posterior a la llegada no se reconoce.
+   * 🔴 Codex servidor r1 #5: si la hora capturada cae claramente ANTES del catálogo (más que la holgura), el reloj del aparato está
+   * mal y esa hora no dice nada: la línea se mide hasta la LLEGADA (si no, la edad salía 0 y la regla de 72 h desaparecía).
+   */
+  describe('cola: reloj del aparato adelantado o atrasado', () => {
+    const catalogAt = hace(30 * 60_000) // el servidor lo selló hace 30 min
+    const ventaReal = hace(29 * 60_000) // un minuto después de leerlo
+    const linea = (horaDeLaVentaLinea: Date, cat = catalogAt) => ({
+      ...base,
+      mostradoCents: 4500,
+      catalogAt: cat,
+      horaDeLaVenta: horaDeLaVentaLinea,
+      llegada,
+    })
+    const desdeLaCola = (capturadaMs: number) => horaDeLaVenta({ isOfflineReplay: true, createdAtLocal: capturadaMs }, llegada)
+
+    it('catalogAt del servidor y createdAtLocal con reloj +5 min ⇒ se busca, hasta la hora capturada', () => {
+      const venta = desdeLaCola(ventaReal.getTime() + 5 * 60_000)
+      expect(clasificarLinea(linea(venta))).toBe('BUSCAR')
+      expect(ventanaDeLaLinea(catalogAt, venta, llegada)).toEqual({ desde: new Date(catalogAt.getTime() - 60_000), hasta: venta })
+    })
+
+    it('reloj +5 min y la venta llega enseguida: la hora se topa en la llegada', () => {
+      const cat = hace(60_000)
+      const venta = desdeLaCola(llegada.getTime() + 4 * 60_000)
+      expect(venta).toEqual(llegada)
+      expect(clasificarLinea(linea(venta, cat))).toBe('BUSCAR')
+      expect(ventanaDeLaLinea(cat, venta, llegada).hasta).toEqual(llegada)
+    })
+
+    it('catalogAt del servidor y createdAtLocal con reloj ATRASADO 5 min (catálogo fresco) ⇒ se busca, con la ventana hasta la llegada', () => {
+      const venta = desdeLaCola(ventaReal.getTime() - 5 * 60_000) // 4 min ANTES del catálogo, según el aparato
+      expect(clasificarLinea(linea(venta))).toBe('BUSCAR')
+      expect(ventanaDeLaLinea(catalogAt, venta, llegada)).toEqual({ desde: new Date(catalogAt.getTime() - 60_000), hasta: llegada })
+    })
+
+    it('hora capturada dentro de la holgura antes del catálogo (30 s) ⇒ la ventana termina en el catálogo, como antes', () => {
+      const venta = desdeLaCola(catalogAt.getTime() - 30_000)
+      expect(clasificarLinea(linea(venta))).toBe('BUSCAR')
+      expect(ventanaDeLaLinea(catalogAt, venta, llegada).hasta).toEqual(catalogAt)
+    })
+
+    it('reloj atrasado días con un catálogo de 30 min: la edad se mide hasta la llegada ⇒ se busca', () =>
+      expect(clasificarLinea(linea(hace(10 * 86_400_000)))).toBe('BUSCAR'))
+
+    it('🔴 catálogo de 96 h con el reloj del aparato ANTES del catálogo ⇒ NO se reconoce (la regla de 72 h sigue viva)', () => {
+      const cat = hace(96 * 3_600_000)
+      expect(clasificarLinea(linea(new Date(cat.getTime() - 86_400_000), cat))).toBe('NO_RECONOCIDO')
+      expect(clasificarLinea(linea(new Date(cat.getTime() - 5 * 60_000), cat))).toBe('NO_RECONOCIDO')
+    })
+
+    it('catalogAt posterior a la llegada ⇒ no se reconoce, aunque esté dentro de la holgura', () => {
+      const cat = new Date(llegada.getTime() + 30_000)
+      expect(clasificarLinea(linea(hace(10_000), cat))).toBe('NO_RECONOCIDO')
+    })
+
+    it('la regla de las 72 h sigue contando desde el catálogo hasta la hora de la línea', () => {
+      const cat = hace(VENTANA_DEL_CATALOGO_MS + 60_000)
+      expect(clasificarLinea(linea(hace(VENTANA_DEL_CATALOGO_MS + 30_000), cat))).toBe('BUSCAR') // 30 s después del catálogo
+      expect(clasificarLinea(linea(llegada, cat))).toBe('NO_RECONOCIDO')
+    })
+  })
+
   describe('ventanaDeLaLinea', () => {
     it('la ventana termina en la venta, nunca después', () =>
       expect(ventanaDeLaLinea(hace(5_000), hace(1_000))).toEqual({ desde: hace(65_000), hasta: hace(1_000) }))
@@ -94,6 +161,25 @@ describe('precio que vio el cliente — regla pura', () => {
       expect(precioMostradoValido(x)).toBeNull(),
     )
     it.each([0, 100_000_000, 2_147_483_647])('precio legítimo %p se conserva', x => expect(precioMostradoValido(x)).toBe(x))
+  })
+
+  describe('precioDeExtraMostrado', () => {
+    it('lee el precio del extra en centavos', () => expect(precioDeExtraMostrado({ m1: 1000, m2: 0 }, 'm1')).toBe(1000))
+    it('cero es un precio legítimo', () => expect(precioDeExtraMostrado({ m2: 0 }, 'm2')).toBe(0))
+    it.each([
+      ['sin el extra', { m2: 1000 }],
+      ['negativo', { m1: -1 }],
+      ['decimal', { m1: 10.5 }],
+      ['texto', { m1: '1000' }],
+      ['null', { m1: null }],
+    ])('entrada basura (%s) ⇒ null', (_, x) => expect(precioDeExtraMostrado(x, 'm1')).toBeNull())
+    it.each([undefined, null, 'x', 42, [1000], true])('displayedModifierPrices que no es objeto (%p) ⇒ null', x =>
+      expect(precioDeExtraMostrado(x, '0')).toBeNull(),
+    )
+    it('una llave heredada no cuenta como precio mostrado', () => {
+      expect(precioDeExtraMostrado({}, 'constructor')).toBeNull()
+      expect(precioDeExtraMostrado(Object.create({ m1: 1000 }), 'm1')).toBeNull()
+    })
   })
 
   describe('cambiosDeOrdenExistente', () => {
@@ -141,6 +227,53 @@ describe('precio que vio el cliente — regla pura', () => {
         cambiosDeOrdenExistente(
           [{ externalId: 'e1', productId: 'p1', displayedUnitPrice: 820, catalogAt: 'C2' }],
           [{ externalId: 'e1', productId: 'p1', productName: 'Galleta', unitPrice: 8.2 }],
+        ),
+      ).toEqual([]))
+
+    it('reintento con extras: cada extra mostrado distinto de lo GUARDADO sale con su modifierId', () =>
+      expect(
+        cambiosDeOrdenExistente(
+          [
+            {
+              externalId: 'e1',
+              productId: 'p1',
+              displayedUnitPrice: 5000,
+              catalogAt: 'C2',
+              modifierIds: ['m1', 'm2', 'm1'],
+              displayedModifierPrices: { m1: 1000, m2: 500, mX: 1 },
+            },
+          ],
+          [
+            {
+              externalId: 'e1',
+              productId: 'p1',
+              productName: 'Café',
+              unitPrice: 50,
+              modifiers: [
+                { modifierId: 'm1', price: 15 },
+                { modifierId: 'm2', price: 5 },
+                { modifierId: 'm1', price: 15 },
+              ],
+            },
+          ],
+        ),
+      ).toEqual([
+        {
+          externalId: 'e1',
+          productId: 'p1',
+          productName: 'Café',
+          modifierId: 'm1',
+          catalogAt: 'C2',
+          displayedUnitPriceCents: 1000,
+          unitPriceCents: 1500,
+        },
+      ]))
+
+    it('reintento: extras mostrados sin catalogAt no cuentan (igual que en la creación)', () =>
+      expect(
+        cambiosDeOrdenExistente(
+          [{ externalId: 'e1', productId: 'p1', modifierIds: ['m1'], displayedModifierPrices: { m1: 1000 } }],
+          [{ externalId: 'e1', productId: 'p1', productName: 'Café', unitPrice: 50, modifiers: [{ modifierId: 'm1', price: 15 }] }],
         ),
       ).toEqual([]))
 

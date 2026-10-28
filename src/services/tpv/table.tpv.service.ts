@@ -9,7 +9,7 @@ import { SocketEventType } from '../../communication/sockets/types'
 import { assertVenueSalesEnabled } from '../venueSalesGuard'
 import { logAction } from '../dashboard/activity-log.service'
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
-import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment, turnoDeLaOrdenQueNace, ventaDeLaColaEnTx } from '../shared/paymentShiftClaim'
 import { ESTADOS_FUERA_DE_LA_MESA } from '../shared/cuentaEnLaMesa'
 
 interface TableStatusResponse {
@@ -229,6 +229,12 @@ export async function assignTable(
    * salidas, así que la admisión y la prueba de que ocurrió commitean juntas — o ninguna.
    */
   dentroDeLaTx?: (tx: Prisma.TransactionClient, admitida: { orderId: string; isNewOrder: boolean }) => Promise<void>,
+  /**
+   * S3 «Efectivo sin red en el turno correcto»: sólo el reducer `OPEN_TABLE` del outbox lo pasa, con la caja en que el POS
+   * (ANDROID/iOS) abrió la mesa sin red. Si esa caja es de un turno que ya no es el vivo, o es una caja cerrada sin turno ligado, la
+   * cuenta nace SIN turno (misma regla que `createOrderWithItems`: `ventaDeLaColaEnTx` + `turnoDeLaOrdenQueNace`). Sin él, como hoy.
+   */
+  ventaDeLaCola?: { cashDrawerSessionId: string },
 ): Promise<{ order: Order; isNewOrder: boolean }> {
   logger.info(`🪑 [TABLE SERVICE] Assigning table ${tableId} with ${covers} covers (staff: ${staffId}, terminal: ${terminalId || 'none'})`)
 
@@ -344,7 +350,10 @@ export async function assignTable(
     // (`../shared/turnoDeCaja.ts`). Desde la fase 1, `getActiveShifts` cuenta las órdenes del
     // turno agrupando por `Order.shiftId`: sin esto, un restaurante entero salía con «0 órdenes».
     // Opcional a propósito — un negocio que no abrió caja sigue atendiendo mesas.
-    const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+    const turnoVivo = await turnoAbiertoDelNegocio(tx, venueId)
+    const currentShift = ventaDeLaCola
+      ? await turnoDeLaOrdenQueNace(tx, venueId, await ventaDeLaColaEnTx(tx, venueId, ventaDeLaCola), turnoVivo)
+      : turnoVivo
 
     const newOrder = await tx.order.create({
       data: {

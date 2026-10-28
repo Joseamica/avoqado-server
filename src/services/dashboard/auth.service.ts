@@ -19,6 +19,7 @@ import { createSession } from '@/services/auth/session.service'
 // 🔐 Master TOTP Login imports
 import { TOTP, NobleCryptoPlugin, ScureBase32Plugin } from 'otplib'
 import { enviarEnlaceDeRestablecimiento } from './enlaceDeRestablecimiento'
+import { esProspectoDeLanding } from '@/services/onboarding/signup.service'
 
 /**
  * 🔐 MASTER TOTP LOGIN - Dashboard Emergency Access
@@ -708,8 +709,13 @@ export async function requestPasswordReset(data: RequestPasswordResetDto) {
       return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
     }
 
-    // 2. Check if email is verified
-    if (!staff.emailVerified) {
+    // 2. Check if email is verified.
+    // Excepción (alta de landing con código): el prospecto nace con `emailVerified: false`, y si
+    // pierde el correo de bienvenida o su código ESTE es su camino de regreso. Sólo a él: un
+    // empleado sin contraseña y sin verificar entra aceptando su invitación, y una cuenta con
+    // contraseña sin verificar sigue callada. Por eso lo decide `esProspectoDeLanding` y no
+    // `password === null`. El link prueba el correo: `resetPassword` lo deja verificado.
+    if (!staff.emailVerified && !(await esProspectoDeLanding(staff.id))) {
       logger.warn(`Password reset attempted for unverified email: ${normalizedEmail}`)
       // SECURITY: Don't reveal that email is unverified
       return { message: 'Si existe una cuenta con este email, recibirás un enlace de restablecimiento.' }
@@ -852,6 +858,9 @@ export async function resetPassword(data: ResetPasswordDto) {
     },
     data: {
       password: hashedPassword,
+      // El token llegó al correo de la cuenta: abrirlo PRUEBA ese correo. Misma escritura que la
+      // contraseña (atómica con el token), así no hay cuenta con contraseña y sin verificar.
+      emailVerified: true,
       resetToken: null, // Clear token
       resetTokenExpiry: null,
       resetTokenUsedAt: new Date(), // Mark as used

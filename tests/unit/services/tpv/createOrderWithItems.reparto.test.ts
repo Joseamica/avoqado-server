@@ -165,3 +165,44 @@ it('control de regresión: una venta de «Cobrar» sin descuentos ni cortesías 
     total: new Prisma.Decimal(100),
   })
 })
+
+// 🔴 «Cobrar sin red» S6, ronda 1: `validateDiscountActive` ganó opciones (la hora de la venta de mobile). `/tpv` lo llamaba con
+// `discounts.forEach(validateDiscountActive)`, que le pasa el ÍNDICE como 2.º argumento: un descuento VENCIDO se aceptaba en silencio.
+// Los dos índices (0 y 1), porque `0` y `1` eran «horas» distintas para el validador.
+describe('/tpv con un descuento VENCIDO (en línea) ⇒ 400 como siempre', () => {
+  const ayer = new Date(Date.now() - 86_400_000)
+  const venta = (extra: Record<string, unknown>) =>
+    createOrderWithItems('venue-1', {
+      items: [{ productId: 'cafe', quantity: 1, unitPrice: 100, itemDiscountId: 'art10' }],
+      staffId: 'staff-1',
+      taxAmount: 0,
+      subtotal: 100,
+      total: 90,
+      tip: 0,
+      ...extra,
+    } as any)
+
+  it('descuento de línea vencido ⇒ 400', async () => {
+    armarTx([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      catalogo('art10', { type: 'PERCENTAGE', value: new Prisma.Decimal(10), scope: 'ITEM', targetItemIds: [], validUntil: ayer }),
+    ] as any)
+
+    await expect(venta({})).rejects.toMatchObject({ statusCode: 400, message: expect.stringContaining('has expired') })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
+  it('descuento de cuenta vencido ⇒ 400', async () => {
+    armarTx([])
+    prismaMock.discount.findMany.mockResolvedValue([
+      catalogo('art10', { type: 'PERCENTAGE', value: new Prisma.Decimal(10), scope: 'ITEM', targetItemIds: [] }),
+      catalogo('orden20', { type: 'FIXED_AMOUNT', value: new Prisma.Decimal(20), scope: 'ORDER', validUntil: ayer }),
+    ] as any)
+
+    await expect(venta({ orderDiscountId: 'orden20', discount: 20, total: 70 })).rejects.toMatchObject({
+      statusCode: 400,
+      message: expect.stringContaining('has expired'),
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+})

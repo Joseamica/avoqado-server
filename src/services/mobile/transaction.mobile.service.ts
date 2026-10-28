@@ -9,6 +9,7 @@
 import { PaymentMethod, TransactionStatus } from '@prisma/client'
 import { NotFoundError } from '../../errors/AppError'
 import prisma from '../../utils/prismaClient'
+import { isCustomerAssignableSale, type CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { listRefundsForPayment } from '../dashboard/refund.dashboard.service'
 import { chargedTotalDe, leerCobradoDeLaOrden } from '../fiscal/cobradoDeLaOrden'
 import { centavosDevueltosPorComponente, centavosYaDevueltos } from '../shared/devueltoDeUnCobro'
@@ -172,6 +173,7 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       // Tarjetas de regalo (B1): la marca del tender de sistema decide «Devolver con» y el aviso «regresa al saldo».
       tenderType: { select: { systemKind: true } },
       status: true,
+      type: true,
       cardBrand: true,
       maskedPan: true,
       referenceNumber: true,
@@ -187,6 +189,15 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
       },
       order: {
         select: {
+          status: true,
+          paymentStatus: true,
+          customerId: true,
+          customerName: true,
+          orderCustomers: {
+            where: { isPrimary: true },
+            select: { customerId: true, customer: { select: { firstName: true, lastName: true } } },
+            take: 1,
+          },
           orderNumber: true,
           // D4 (mesas40): la reimpresión dice «Mesa N» / «Para llevar» como el ticket del cobro.
           type: true,
@@ -275,6 +286,15 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
 
   return {
     id: payment.id,
+    customerId: payment.order?.customerId ?? payment.order?.orderCustomers?.[0]?.customerId ?? null,
+    customerName: payment.order?.customerId
+      ? payment.order.customerName
+      : payment.order?.orderCustomers?.[0]
+        ? `${payment.order.orderCustomers[0].customer.firstName ?? ''} ${payment.order.orderCustomers[0].customer.lastName ?? ''}`.trim() ||
+          null
+        : null,
+    canAssignCustomer:
+      isCustomerAssignableSale(payment, payment.order) && !payment.order?.customerId && !payment.order?.orderCustomers?.[0],
     amount: Number(payment.amount),
     tipAmount: Number(payment.tipAmount),
     method: payment.method,
@@ -344,4 +364,9 @@ export async function getTransactionDetail(venueId: string, paymentId: string) {
     }),
     ...fields,
   }
+}
+
+export async function assignTransactionCustomer(venueId: string, paymentId: string, customerId: string, actor: CustomerAttributionActor) {
+  const { attachCustomerToPayment } = await import('./order.mobile.service')
+  return attachCustomerToPayment(venueId, paymentId, customerId, actor.staffId, { actor, historicalOnly: true })
 }

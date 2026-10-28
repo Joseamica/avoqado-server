@@ -56,7 +56,7 @@ import { claseDeEstado, computeOrderBalance, esVentaCerrada, estadoDeCobroAlReci
 import { turnoAbiertoDelNegocio } from '../shared/turnoDeCaja'
 import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 import { externalRouteBlockers } from './areaTicketExternalCodes'
-import { buildOrderItemsData, CreateOrderItemInput } from './order.mobile.service'
+import { buildOrderItemsData, CreateOrderItemInput, type CreateOrderInput } from './order.mobile.service'
 
 const DEFAULT_CLAIM_TTL_SECONDS = 300
 const DEFAULT_SESSION_MAX_AGE_MINUTES = 30
@@ -74,7 +74,7 @@ export interface AreaTicketLineInput {
   discountId?: string | null
 }
 
-export interface IssueAreaTicketInput {
+export interface IssueAreaTicketInput extends Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
   idempotencyKey: string
   deviceUid: string
   staffId?: string | null
@@ -93,7 +93,7 @@ export interface CheckoutMutationInput {
   staffId?: string | null
 }
 
-export interface MaterializeCheckoutInput extends CheckoutMutationInput {
+export interface MaterializeCheckoutInput extends CheckoutMutationInput, Pick<CreateOrderInput, 'canCompItems' | 'performedBy'> {
   normalItems?: CreateOrderItemInput[]
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'POS'
   customerName?: string | null
@@ -820,7 +820,14 @@ export async function issueAreaTicket(venueId: string, input: IssueAreaTicketInp
   const isExternal = fulfillmentArea.settlementRoute === AreaSettlementRoute.EXTERNAL
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
   const normalizedItems = normalizeIssueLines(input.lines)
-  const { itemsData, subtotal, itemDiscountTotal, modifierSkus } = await buildOrderItemsData(venueId, normalizedItems, fulfillmentAreaId)
+  const { itemsData, subtotal, itemDiscountTotal, modifierSkus } = await buildOrderItemsData(
+    venueId,
+    normalizedItems,
+    fulfillmentAreaId,
+    undefined,
+    undefined,
+    input,
+  )
   const snapshots = buildSnapshotLines(input.lines, itemsData, modifierSkus)
   if (isExternal) assertExternalRouteIssuable(snapshots)
   const snapshotHash = canonicalSnapshotHash('MXN', snapshots)
@@ -1568,7 +1575,7 @@ export async function materializeAreaTicketCheckout(venueId: string, sessionId: 
   }
   const normalBuild =
     normalItems.length > 0
-      ? await buildOrderItemsData(venueId, normalItems, null)
+      ? await buildOrderItemsData(venueId, normalItems, null, undefined, undefined, input)
       : { itemsData: [] as any[], subtotal: 0, itemDiscountTotal: 0 }
   const staffId = await validateStaffVenue(input.staffId ?? undefined, venueId)
 

@@ -1649,6 +1649,30 @@ export type RenglonParaCfdi = {
 const centavos = (d: any) => Math.round(Number(d ?? 0) * 100)
 
 /**
+ * El concepto de una venta SIN renglones (importe libre): lo pagado, IVA incluido, con la clave genérica del SAT. Con filas de
+ * descuento de CUENTA (la liga de pago con descuento) lleva la base (pagado + descuento) y ese descuento, así el total sigue
+ * siendo lo pagado. Sin esas filas, el concepto de siempre. Lo usan la factura individual y la captura de la global (la
+ * extracción factura con éste): un solo concepto.
+ */
+export function conceptoDeVentaSinRenglones(
+  paidCents: number,
+  filas: Array<{ amount: unknown; reparto?: unknown }> | null | undefined,
+): RenglonParaCfdi {
+  const descuentoCents = (filas ?? []).reduce((s, f) => {
+    const r = leerReparto(f.reparto)
+    return r?.alcance === 'CUENTA' && !r.espejo ? s + centavos(f.amount) : s
+  }, 0)
+  return {
+    productName: 'Venta',
+    quantity: 1,
+    unitPrice: new Prisma.Decimal(paidCents + descuentoCents).div(100),
+    discountAmount: descuentoCents > 0 ? new Prisma.Decimal(descuentoCents).div(100) : 0,
+    product: { satProductKey: '01010101', satUnitKey: 'ACT', objetoImp: '02', taxRate: 0.16, category: null },
+    tratamiento: 'IVA_16',
+  }
+}
+
+/**
  * Tasa con la que el PAC calculará el concepto. Con tratamiento, la de su traslado (IVA_0/EXENTO/NO_OBJETO = 0);
  * sin él (legacy), la del producto, y 16 % sin producto — la regla de siempre. Un bloqueado no llega al PAC
  * (lo detiene su motivo); aquí sólo conserva la tasa guardada.
@@ -2315,16 +2339,7 @@ export async function loadOrderForCfdiFromDb(
     requiereReglaDelPac = false,
   }: ConceptosDeRenglon = sinRenglones
     ? {
-        items: [
-          {
-            productName: 'Venta',
-            quantity: 1,
-            unitPrice: new Prisma.Decimal(paidCents / 100),
-            discountAmount: 0,
-            product: { satProductKey: '01010101', satUnitKey: 'ACT', objetoImp: '02', taxRate: 0.16, category: null },
-            tratamiento: 'IVA_16',
-          } as unknown as RenglonParaCfdi,
-        ],
+        items: [conceptoDeVentaSinRenglones(paidCents, orderDiscounts)],
         // Las exclusiones de ORDEN (cargo por servicio) aplican también sin renglones.
         motivos: motivosDeOrden(order as OrdenParaConceptos),
       }

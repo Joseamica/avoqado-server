@@ -123,6 +123,8 @@ import {
 } from '../services/master-catalog/catalogGovernance.service'
 
 import * as walletScanController from '../controllers/tpv/walletScan.tpv.controller'
+import { avisarSiLaVentaDeLaColaFalla } from '../services/mobile/avisoDeVentaSinRed'
+import { checkCortesiaPermissionIfPresent } from '../middlewares/cortesiaPidePermiso.middleware'
 import { esSuperadminDeLaSesion, esSuperadminReal } from '../services/access/rolVigente'
 
 const router = express.Router()
@@ -720,6 +722,9 @@ router.post(
   authenticateTokenMiddleware,
   checkPermission('orders:create'),
   validateRequest(createOrderWithItemsSchema),
+  // S9: regalar una línea (`isCortesia`) pide `orders:comp`. DESPUÉS de validar: un cuerpo mal armado sigue siendo 400 del esquema (no
+  // 403), y el candado lee el cuerpo ya parseado, el mismo que recibe el controlador.
+  checkCortesiaPermissionIfPresent,
   orderController.createOrderWithItems,
 )
 
@@ -3022,6 +3027,8 @@ router.get('/auth/permissions', authenticateTokenMiddleware, async (req: Request
 router.post(
   '/venues/:venueId/orders/:orderId',
   authenticateTokenMiddleware,
+  // S7: la venta de la cola de la terminal que se rechaza (también el 403 del permiso) avisa al gerente.
+  avisarSiLaVentaDeLaColaFalla,
   checkPermission('payments:create'),
   validateRequest(recordPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
@@ -3147,6 +3154,8 @@ router.post(
 router.post(
   '/venues/:venueId/fast',
   authenticateTokenMiddleware,
+  // S7: la venta de la cola de la terminal que se rechaza (también el 403 del permiso) avisa al gerente.
+  avisarSiLaVentaDeLaColaFalla,
   checkPermission('payments:create'),
   validateRequest(recordFastPaymentParamsSchema),
   validateRequest(recordPaymentBodySchema),
@@ -4438,8 +4447,8 @@ router.post(
 
 /**
  * GET /tpv/venues/{venueId}/products
- * Re-export verbatim de dashboard/venues/{venueId}/products — mismo shape que el cliente ya
- * parsea hoy (`{ message, data, correlationId }`).
+ * Mismo sobre que dashboard/venues/{venueId}/products — el shape que el cliente ya parsea hoy
+ * (`{ message, data, correlationId }`) — más `catalogAt` (hora del servidor) en la raíz.
  */
 router.get(
   '/venues/:venueId/products',
@@ -6048,6 +6057,10 @@ router.get(
  *                 data:
  *                   type: object
  *                   description: Product details with inventory, modifiers, recipe
+ *                 catalogAt:
+ *                   type: string
+ *                   description: Server time (ISO-8601 UTC, 24 chars) taken BEFORE reading the product. Optional for old clients.
+ *                   example: "2026-10-20T18:00:00.000Z"
  *       404:
  *         description: Product not found (client should show Quick Add dialog)
  *       401:
@@ -6055,52 +6068,58 @@ router.get(
  *       403:
  *         description: Forbidden (terminal lacks menu:read permission)
  */
-router.get(
-  '/venues/:venueId/products/barcode/:barcode',
-  authenticateTokenMiddleware,
-  checkPermission('menu:read'),
-  async (req: Request, res: Response, next: NextFunction) => {
-    try {
-      const { venueId, barcode } = req.params
+export async function getTpvProductByBarcodeHandler(req: Request, res: Response, next: NextFunction) {
+  try {
+    const { venueId, barcode } = req.params
+    // Cobrar sin red (S1): la hora del SERVIDOR, tomada ANTES de leer el producto, en la raíz (aditivo). Un producto
+    // escaneado con red lleva así su fecha al carrito, igual que el listado (menu.tpv.controller.getProducts).
+    const catalogAt = new Date().toISOString()
 
-      logger.info(`🔍 [TPV Barcode] Searching product by barcode: ${barcode} for venueId: ${venueId}`, {
+    logger.info(`🔍 [TPV Barcode] Searching product by barcode: ${barcode} for venueId: ${venueId}`, {
+      correlationId: req.correlationId,
+      venueId,
+      barcode,
+    })
+
+    // Search product by SKU (Product.sku stores barcode)
+    const product = await productService.getProductByBarcode(venueId, barcode)
+
+    if (!product) {
+      logger.warn(`⚠️ [TPV Barcode] Product not found for barcode: ${barcode}`, {
         correlationId: req.correlationId,
         venueId,
         barcode,
       })
 
-      // Search product by SKU (Product.sku stores barcode)
-      const product = await productService.getProductByBarcode(venueId, barcode)
-
-      if (!product) {
-        logger.warn(`⚠️ [TPV Barcode] Product not found for barcode: ${barcode}`, {
-          correlationId: req.correlationId,
-          venueId,
-          barcode,
-        })
-
-        return next(new AppError(`Product with barcode ${barcode} not found in venue ${venueId}`, 404))
-      }
-
-      logger.info(`✅ [TPV Barcode] Product found: ${product.name} (${product.id})`, {
-        correlationId: req.correlationId,
-        productId: product.id,
-        productName: product.name,
-      })
-
-      res.status(200).json({
-        message: `Product found for barcode ${barcode}`,
-        data: toLegacyProductPayload(product),
-        correlationId: req.correlationId,
-      })
-    } catch (error) {
-      logger.error(`❌ [TPV Barcode] Error searching product by barcode`, {
-        correlationId: req.correlationId,
-        error: error instanceof Error ? error.message : 'Unknown error',
-      })
-      next(error)
+      return next(new AppError(`Product with barcode ${barcode} not found in venue ${venueId}`, 404))
     }
-  },
+
+    logger.info(`✅ [TPV Barcode] Product found: ${product.name} (${product.id})`, {
+      correlationId: req.correlationId,
+      productId: product.id,
+      productName: product.name,
+    })
+
+    res.status(200).json({
+      message: `Product found for barcode ${barcode}`,
+      data: toLegacyProductPayload(product),
+      correlationId: req.correlationId,
+      catalogAt,
+    })
+  } catch (error) {
+    logger.error(`❌ [TPV Barcode] Error searching product by barcode`, {
+      correlationId: req.correlationId,
+      error: error instanceof Error ? error.message : 'Unknown error',
+    })
+    next(error)
+  }
+}
+
+router.get(
+  '/venues/:venueId/products/barcode/:barcode',
+  authenticateTokenMiddleware,
+  checkPermission('menu:read'),
+  getTpvProductByBarcodeHandler,
 )
 
 /**

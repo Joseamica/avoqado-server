@@ -4,10 +4,20 @@ import { isDeliverableRecipient } from '../utils/undeliverableEmail'
 import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
 import { isValidIANATimezone } from '../utils/sanitizeTimezone'
+import type { PriceSelection } from './launchCampaigns/publicPriceList.service'
 
 // Initialize Resend client
 const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null
 const FROM_EMAIL = process.env.EMAIL_FROM || 'Avoqado <noreply@avoqado.io>'
+const PRICE_PAGE_URL = 'https://dashboard.avoqado.io/presentacion/precios'
+
+export interface PriceSelectionEmailData {
+  nombre: string | null
+  telefono: string | null
+  whatsappUrl: string | null
+  pageUri: string | null
+  selection: PriceSelection
+}
 
 interface EmailAttachment {
   filename: string
@@ -1708,7 +1718,11 @@ ${t.textSignoff}
   }
 
   async sendEmailVerification(email: string, data: EmailVerificationData): Promise<boolean> {
-    const subject = `Verifica tu correo electronico`
+    // El código en el asunto: se lee en la notificación sin abrir el correo (como Google o Slack).
+    const subject = `${data.verificationCode} es tu código de Avoqado`
+    // «Usuario» era el relleno del registro directo, que no pide nombre: «Hola Usuario» se veía de robot.
+    const nombre = (data.firstName || '').trim()
+    const saludo = nombre && nombre !== 'Usuario' ? `Hola, ${nombre}:` : 'Hola:'
     const logoUrl = 'https://avoqado.io/isotipo.svg'
 
     const html = `
@@ -1735,16 +1749,16 @@ ${t.textSignoff}
 
     <!-- Content -->
     <div style="padding-bottom: 24px;">
-      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">Hola ${data.firstName},</p>
+      <p style="font-size: 16px; color: #000; margin: 0 0 16px 0;">${saludo}</p>
       <p style="font-size: 15px; color: #000; margin: 0 0 24px 0;">
-        Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electronico usando el siguiente codigo:
+        Gracias por registrarte en Avoqado. Para continuar, verifica tu correo con este código:
       </p>
     </div>
 
     <!-- Verification Code Box -->
     <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 32px; margin-bottom: 24px; text-align: center;">
       <p style="margin: 0 0 12px 0; font-size: 13px; color: #666; text-transform: uppercase; letter-spacing: 0.5px; font-weight: 500;">
-        TU CODIGO DE VERIFICACION
+        TU CÓDIGO DE VERIFICACIÓN
       </p>
       <div style="font-size: 40px; font-weight: 600; color: #000; letter-spacing: 12px; font-family: 'SF Mono', 'Monaco', 'Inconsolata', 'Fira Mono', monospace; line-height: 1.2;">
         ${data.verificationCode}
@@ -1754,10 +1768,10 @@ ${t.textSignoff}
     <!-- Warning -->
     <div style="background: #fef3c7; border-radius: 8px; padding: 16px; margin-bottom: 24px;">
       <p style="font-size: 14px; color: #92400e; margin: 0 0 4px 0; font-weight: 500;">
-        Este codigo expirara en 10 minutos
+        Este código vence en 10 minutos
       </p>
       <p style="font-size: 13px; color: #92400e; margin: 0;">
-        Si no solicitaste este codigo, puedes ignorar este correo.
+        Si no lo pediste tú, ignora este correo.
       </p>
     </div>
 
@@ -1769,10 +1783,10 @@ ${t.textSignoff}
         <span style="font-size: 16px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
       </div>
       <p style="margin: 0; font-size: 14px; color: #666;">
-        Necesitas ayuda? Contactanos en cualquier momento.
+        ¿Necesitas ayuda? Escríbenos a hola@avoqado.io.
       </p>
       <p style="margin: 16px 0 0 0; font-size: 14px;">
-        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Politica de Privacidad</a>
+        <a href="https://avoqado.io/privacy" style="color: #000; text-decoration: none; font-weight: 600;">Política de Privacidad</a>
       </p>
     </div>
 
@@ -1782,17 +1796,17 @@ ${t.textSignoff}
     `
 
     const text = `
-Hola ${data.firstName},
+${saludo}
 
-Gracias por registrarte en Avoqado. Para continuar, por favor verifica tu correo electronico usando el siguiente codigo:
+Gracias por registrarte en Avoqado. Para continuar, verifica tu correo con este código:
 
-Codigo de verificacion: ${data.verificationCode}
+Código de verificación: ${data.verificationCode}
 
-Este codigo expirara en 10 minutos.
+Este código vence en 10 minutos.
 
-Si no solicitaste este codigo, puedes ignorar este correo.
+Si no lo pediste tú, ignora este correo.
 
-Necesitas ayuda? Contactanos en cualquier momento.
+¿Necesitas ayuda? Escríbenos a hola@avoqado.io.
 
 Equipo de Avoqado
     `
@@ -4720,6 +4734,80 @@ Equipo de Avoqado`
     })
 
     return this.sendEmail({ to: email, subject, html, text })
+  }
+
+  /**
+   * A prospect sent the modules they chose on /presentacion/precios. Internal notice to Avoqado sales, never to the
+   * prospect; everything in it was recomputed by the server (`priceSelection`).
+   */
+  async sendPriceSelectionEmail(to: string, data: PriceSelectionEmailData): Promise<boolean> {
+    const esc = escapeHtmlForReferralEmail
+    const money = (totalCents: number) =>
+      new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalCents / 100)
+    const { selection } = data
+    // One line: the name travels in the subject, where a newline must never open a header.
+    const who = (data.nombre || data.telefono || 'Un prospecto').replace(/\s+/g, ' ').trim()
+    const count = selection.chosen.length + selection.quoted.length
+    const subject = `${who} eligió ${count} ${count === 1 ? 'módulo' : 'módulos'} · ${money(selection.best.totalCents)}/mes`
+    const when = new Intl.DateTimeFormat('es-MX', { dateStyle: 'long', timeStyle: 'short', timeZone: 'America/Mexico_City' }).format(
+      new Date(),
+    )
+    const nameOf = (id: string) => selection.chosen.find(f => f.id === id)?.name ?? id
+    const optionLabel = (kind: string) => (kind === 'SUELTO' ? 'Funciones sueltas' : `Plan ${kind === 'PRO' ? 'Pro' : 'Premium'}`)
+    const row = (left: string, right: string) =>
+      `<tr><td style="padding: 8px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px;">${left}</td><td style="padding: 8px 0; border-bottom: 1px solid #e0e0e0; font-size: 14px; text-align: right; white-space: nowrap;">${right}</td></tr>`
+    const chosenRows = selection.chosen.map(f => {
+      const why = selection.addedByRequirement.includes(f.id)
+        ? ` <span style="color: #666;">(lo requiere ${esc(selection.chosen.find(o => o.requires.includes(f.id))?.name ?? '')})</span>`
+        : ''
+      return row(`${esc(f.name)}${why}`, money(Math.round(f.price! * 100)))
+    })
+    const quotedRows = selection.quoted.map(f => row(esc(f.name), 'Se cotiza aparte'))
+    const optionRows = selection.options.map(o => {
+      const extras = o.extras.length ? ` <span style="color: #666;">+ ${o.extras.map(id => esc(nameOf(id))).join(', ')}</span>` : ''
+      const label = `${optionLabel(o.kind)}${extras}`
+      return row(o === selection.best ? `<strong>${label}</strong>` : label, o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents))
+    })
+    const advice =
+      selection.best.kind === 'SUELTO'
+        ? ''
+        : `<p style="font-size: 16px; margin: 24px 0 0 0;">💡 Le conviene el <strong>${optionLabel(selection.best.kind)}</strong>${
+            selection.best.extras.length ? ` + ${selection.best.extras.map(id => esc(nameOf(id))).join(', ')}` : ''
+          }: ${money(selection.best.totalCents)}/mes, ahorra ${money(selection.savingsCents)} al mes.</p>`
+    // The button never points where the visitor says (Codex r1 #2: a public POST must not put a phishing link in an
+    // Avoqado e-mail): WhatsApp to the number, or the canonical page. `pageUri` is shown as text only when it is ours.
+    const ctaUrl = data.whatsappUrl ?? PRICE_PAGE_URL
+    const pageUri = data.pageUri?.startsWith(PRICE_PAGE_URL) ? data.pageUri : null
+    const bodyHtml = `
+      <div style="border: 1px solid #e0e0e0; border-radius: 8px; padding: 20px; margin: 0 0 24px 0;">
+        <p style="font-size: 14px; margin: 0; color: #000;"><strong>${esc(data.nombre) || '—'}</strong></p>
+        <p style="font-size: 14px; margin: 4px 0 0 0; color: #666;">${esc(data.telefono) || 'Sin teléfono'} · ${when}</p>
+      </div>
+      <p style="font-size: 14px; margin: 0 0 8px 0; color: #666;">Lo que eligió (IVA incluido)</p>
+      <table style="width: 100%; border-collapse: collapse;">${[...chosenRows, ...quotedRows].join('')}</table>
+      <p style="font-size: 14px; margin: 24px 0 8px 0; color: #666;">Cuánto pagaría al mes</p>
+      <table style="width: 100%; border-collapse: collapse;">${optionRows.join('')}</table>
+      ${advice}
+      ${pageUri ? `<p style="font-size: 12px; margin: 24px 0 0 0; color: #666;">Desde: ${esc(pageUri)}</p>` : ''}`
+    const html = this.buildPlanEmailHtml({
+      locale: 'es',
+      title: esc(subject),
+      venueName: 'Presentación de precios',
+      bodyHtml,
+      ctaLabel: data.whatsappUrl ? 'Escribir por WhatsApp' : 'Ver la presentación',
+      ctaUrl: esc(ctaUrl),
+    })
+    const text = [
+      subject,
+      `${data.nombre ?? '—'} · ${data.telefono ?? 'Sin teléfono'} · ${when}`,
+      '',
+      ...selection.chosen.map(f => `- ${f.name}: ${money(Math.round(f.price! * 100))}`),
+      ...selection.quoted.map(f => `- ${f.name}: se cotiza aparte`),
+      '',
+      ...selection.options.map(o => `${optionLabel(o.kind)}: ${money(o.totalCents)}`),
+      pageUri ? `\nDesde: ${pageUri}` : '',
+    ].join('\n')
+    return this.sendEmail({ to, subject, html, text })
   }
 
   /**

@@ -38,6 +38,7 @@ import {
   cerrarSiTodoFinal,
   confirmarTienda,
   esFinal,
+  tiendasParaReconectar,
   type ResultadoRappi,
 } from '@/services/delivery-channels/providers/rappi/rappi.provisioning'
 import { urlDeAutorizacion, type TiendaRappi } from '@/services/delivery-channels/providers/rappi/rappi.selfOnboarding'
@@ -178,13 +179,30 @@ function motivoDeCanje(e: unknown): string {
     : 'RAPPI_ERROR'
 }
 
+/**
+ * D8: las integradas que se pueden reconectar a este negocio. Si la base no contesta, ninguna (salen en gris, como antes de
+ * D8): un fallo aquí no puede dejar el enlace gastado sin página de selección.
+ */
+async function reconectables(intent: DeliveryConnectIntent, tiendas: TiendaRappi[]): Promise<Set<string>> {
+  try {
+    return await tiendasParaReconectar(intent.venueId, tiendas)
+  } catch (e) {
+    logger.error('🚨 [RappiOAuth] no se pudo revisar qué tiendas se reconectan', { intentId: intent.id, error: (e as Error).message })
+    return new Set()
+  }
+}
+
 /** La selección: A QUÉ negocio van (R11), una palomita obligatoria que lo confirma, y nada marcado de antemano. */
-function paginaSeleccion(deps: ConnectDeps, id: string, tiendas: TiendaRappi[], negocio: string): string {
+function paginaSeleccion(deps: ConnectDeps, id: string, tiendas: TiendaRappi[], negocio: string, reconectar: Set<string>): string {
+  const marcable = (t: TiendaRappi, nota = '') =>
+    `<li><label><input type="checkbox" name="tiendas" value="${esc(t.storeId)}"> <strong>${esc(t.name)}</strong> <code>${esc(t.storeId)}</code>${nota}</label></li>`
   const opciones = tiendas
     .map(t =>
-      t.integrated
-        ? `<li><label><input type="checkbox" disabled> <strong>${esc(t.name)}</strong> <code>${esc(t.storeId)}</code> — ya integrada</label></li>`
-        : `<li><label><input type="checkbox" name="tiendas" value="${esc(t.storeId)}"> <strong>${esc(t.name)}</strong> <code>${esc(t.storeId)}</code></label></li>`,
+      !t.integrated
+        ? marcable(t)
+        : reconectar.has(t.storeId)
+          ? marcable(t, ' — estaba conectada a este negocio: márcala para reconectarla')
+          : `<li><label><input type="checkbox" disabled> <strong>${esc(t.name)}</strong> <code>${esc(t.storeId)}</code> — ya integrada</label></li>`,
     )
     .join('')
   return page(
@@ -247,9 +265,19 @@ export const rappiOAuthCallback = publica('Falló la conexión', async (req, res
   }
   if (!tiendas.length) {
     await fallar(intent.id, 'RAPPI_SIN_TIENDAS')
-    res.status(200).send(page('Autorizado, pero sin tiendas', '<p>Rappi no devolvió ninguna tienda para esta cuenta.</p>'))
+    // D7 (26-oct): Rappi DEV devolvió la lista vacía ~30 min con la cuenta correcta y luego completa, sin cambio nuestro.
+    res
+      .status(200)
+      .send(
+        page(
+          'Autorizado, pero sin tiendas',
+          '<p>Rappi no devolvió ninguna tienda para esta cuenta. Revisa que entraste con la cuenta de Rappi Partners dueña de la tienda.</p>' +
+            `<p>Si es la correcta, puede ser una falla momentánea de Rappi: espera unos minutos. ${PIDE_OTRO}</p>`,
+        ),
+      )
     return
   }
+  const reconectar = await reconectables(intent, tiendas)
   // La selección sólo se enseña si ESTE callback guardó token y tiendas (count 1).
   const guardado = await casEstado(intent.id, 'EXCHANGED', 'EXCHANGED', {
     merchantTokenEnvelope: cifrarIdToken(deps, intent, idToken),
@@ -259,7 +287,7 @@ export const rappiOAuthCallback = publica('Falló la conexión', async (req, res
     res.status(400).send(YA_USADO)
     return
   }
-  res.status(200).send(paginaSeleccion(deps, intent.id, tiendas, negocio))
+  res.status(200).send(paginaSeleccion(deps, intent.id, tiendas, negocio, reconectar))
 })
 
 // ─── Paso 3: activate ───────────────────────────────────────────────────────────────────
@@ -284,8 +312,10 @@ export const activarRappiOAuth = publica('Falló la conexión', async (req, res,
       )
     return
   }
-  // Nunca se confía en el formulario: sólo tiendas que Rappi listó (y no integradas ya), sin repetir.
-  const listadas = new Map(((intent.storesJson as TiendaRappi[] | null) ?? []).filter(t => !t.integrated).map(t => [t.storeId, t]))
+  // Nunca se confía en el formulario: sólo tiendas que Rappi listó (no integradas, o reconectables según la base AHORA), sin repetir.
+  const todas = (intent.storesJson as TiendaRappi[] | null) ?? []
+  const reconectar = await tiendasParaReconectar(intent.venueId, todas)
+  const listadas = new Map(todas.filter(t => !t.integrated || reconectar.has(t.storeId)).map(t => [t.storeId, t]))
   const pedidas = new Set(([] as unknown[]).concat(req.body?.tiendas ?? []))
   const elegidas = [...pedidas].flatMap(s => (typeof s === 'string' ? (listadas.get(s) ?? []) : []))
   if (!elegidas.length) {
@@ -313,7 +343,10 @@ export const activarRappiOAuth = publica('Falló la conexión', async (req, res,
   await activarSeleccion(fresco, idToken, elegidas, {
     aprovisionar: c.aprovisionarTiendasRappi,
     suscribir: c.suscribirTiendaAEventos,
+    listar: c.tiendasDelComercio,
     tiendasEscribibles: c.tiendasEscribiblesRappi(),
+    // D8: una reconexión se confirma aquí mismo (no espera aviso de Rappi), así que también avisa «integrada».
+    avisarIntegrada: (storeId, integrada) => rappiAdapter.notifyIntegrationStatus(storeId, integrada),
   })
   aResultado()
 })

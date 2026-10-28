@@ -1,4 +1,5 @@
 import { NextFunction, Request, Response } from 'express'
+import { customerAttributionActorForRecordedPayment } from '../../middlewares/customerAttribution.middleware'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
@@ -161,7 +162,13 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
     paymentData.authenticatedTerminalSerial = req.authContext?.terminalSerialNumber ?? null
 
     // Call service to record the fast payment
-    const result = await paymentTpvService.recordFastPayment(venueId, paymentData, userId, orgId)
+    const result = await paymentTpvService.recordFastPayment(
+      venueId,
+      paymentData,
+      userId,
+      orgId,
+      paymentData.customerId ? await customerAttributionActorForRecordedPayment(req) : {},
+    )
 
     // 📸 NON-BLOCKING VERIFICATION: Create PENDING SaleVerification for SERIALIZED_INVENTORY payments
     // When the TPV sends isPortabilidad/serialNumbers, it means this is a serialized sale

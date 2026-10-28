@@ -1756,7 +1756,9 @@ describe('Declaración del cajero', () => {
     expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     const link = await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })
     expect(link.operatorResolution).toMatchObject({ staffId: owner.id, by: 'SUPERVISOR_PIN' })
-    expect(JSON.stringify(link.operatorResolution)).not.toContain('4321')
+    // Sin `bodyHash`: es un sha256 de la petición y a veces trae «4321» por azar (CI de main, 22-oct-2026). El PIN tampoco
+    // puede ir ahí: un hash no se puede leer de vuelta.
+    expect(JSON.stringify(link.operatorResolution, (k, v) => (k === 'bodyHash' ? undefined : v))).not.toContain('4321')
     const asiento = await prisma.activityLog.findFirst({
       where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id },
     })

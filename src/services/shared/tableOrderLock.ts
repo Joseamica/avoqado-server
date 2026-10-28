@@ -17,6 +17,12 @@ type ScopeInput = {
   optionalOrderId?: string
 }
 export class OrderTableTopologyChanged extends Error {
+  /**
+   * D9 (26-oct): un choque se resuelve reintentando. Las ~118 rutas que responden `error.statusCode || 500` dan 503 y las apps
+   * lo reintentan o lo encolan. NO es AppError a propósito: el protocolo de operación (`http-operation.mobile.service.ts`) lo
+   * trata como RETRY, y un AppError lo haría lanzar como respuesta. El texto se queda: la cola sin red y el MCP lo leen.
+   */
+  readonly statusCode = 503
   constructor() {
     super('ORDER_TABLE_TOPOLOGY_CHANGED')
   }
