@@ -57,7 +57,7 @@ function displayNameFromFull(full?: string | null): string {
   return displayName(parts[0], parts.slice(1).join(' '))
 }
 
-function spotLabel(spotIds: unknown, layoutConfig: unknown): string | null {
+export function spotLabel(spotIds: unknown, layoutConfig: unknown): string | null {
   const ids = Array.isArray(spotIds) ? spotIds : []
   if (ids.length === 0) return null
   const layout = (layoutConfig ?? {}) as { spots?: Array<{ id?: string; label?: string }> }

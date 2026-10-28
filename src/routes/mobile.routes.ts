@@ -4336,11 +4336,31 @@ router.get(
 // catálogo y el cliente paga con SU tarjeta en SU teléfono, no que se pida un PIN.
 router.get('/venues/:venueId/kiosk/packs', authenticateTokenMiddleware, kioskCheckInController.kioskPacks)
 router.post('/venues/:venueId/kiosk/pack-checkout', authenticateTokenMiddleware, kioskCheckInController.kioskPackCheckout)
+// El kiosco pregunta cada 3 s si ya se pagó (D3): PAID sólo cuando las clases ya son suyas.
+router.get(
+  '/venues/:venueId/kiosk/pack-checkout/:sessionId/status',
+  authenticateTokenMiddleware,
+  kioskCheckInController.kioskPackCheckoutStatus,
+)
 
+// Modo Autoservicio 0.e — lista y check-in del kiosco: `self-service:check-in` (la identidad «Autoservicio» de la
+// Fase 1). `reservations:update` lo implica (PERMISSION_DEPENDENCIES), así que quien hace check-in hoy no pierde acceso.
+router.get(
+  '/venues/:venueId/kiosk/roster',
+  authenticateTokenMiddleware,
+  checkPermission('self-service:check-in'),
+  kioskCheckInController.kioskRoster,
+)
+router.post(
+  '/venues/:venueId/kiosk/reservations/:reservationId/check-in',
+  authenticateTokenMiddleware,
+  checkPermission('self-service:check-in'),
+  kioskCheckInController.kioskReservationCheckIn,
+)
 router.post(
   '/venues/:venueId/kiosk/check-in',
   authenticateTokenMiddleware,
-  checkPermission('reservations:update'),
+  checkPermission('self-service:check-in'),
   kioskCheckInController.checkInByCode,
 )
 

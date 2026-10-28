@@ -14,7 +14,7 @@ import { nanoid } from 'nanoid'
 import { Prisma, CreditPurchaseStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
-import { BadRequestError, ConflictError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, ConflictError, ForbiddenError, NotFoundError, UnauthorizedError } from '@/errors/AppError'
 import { withSerializableRetry } from '@/utils/serializableRetry'
 import { logAction } from './activity-log.service'
 import { assertCustomerCanCreateReservation } from '@/services/public/customerBookingAccess.service'
@@ -245,6 +245,10 @@ export async function createCheckoutSession(
   const session = await stripe.checkout.sessions.create(
     {
       mode: 'payment',
+      // 🔴 Sólo tarjeta (Codex r1, D3). Sin esto Stripe ofrece los métodos que tenga prendidos la cuenta Connect; con
+      // uno DIFERIDO (OXXO) `checkout.session.completed` llega sin pagar, el webhook no entrega y nadie atiende
+      // `async_payment_succeeded`: se cobraría sin dar las clases. Aplica al kiosco y al widget.
+      payment_method_types: ['card'],
       line_items: [
         {
           price_data: {
@@ -287,7 +291,89 @@ export async function createCheckoutSession(
     amount: pack.price.toString(),
   })
 
-  return { checkoutUrl: session.url }
+  return {
+    checkoutUrl: session.url,
+    sessionId: session.id,
+    expiresAt: session.expires_at ? new Date(session.expires_at * 1000).toISOString() : null,
+  }
+}
+
+/**
+ * Compra de paquete desde el kiosco (D3 del pizarrón): el QR que se escanea con el teléfono.
+ *
+ * 🔴 La sesión SIEMPRE lleva contacto. Sin él, Stripe cobraba y `fulfillPurchase` reventaba en
+ * `findOrCreateCustomer` («Se requiere email o telefono»): dinero cobrado, clases nunca entregadas.
+ * Con ficha existente viaja su `customerId` (entrega a prueba de formatos de teléfono, tope por
+ * clienta y candado de aprobación por id); sin ficha, va como invitada con su teléfono.
+ *
+ * 🔒 Nunca el correo de la ficha: el kiosco está en la entrada y cualquiera teclea cualquier
+ * número; con `customer_email` la página de Stripe le enseñaría ese correo a quien escanea.
+ */
+export async function createKioskPackCheckout(args: {
+  venueId: string
+  packId: string
+  phone: string
+}): Promise<{ url: string; sessionId: string; expiresAt: string | null }> {
+  const { venueId, packId, phone } = args
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } })
+  if (!venue) throw new NotFoundError('Local no encontrado')
+
+  const foundId = await findCustomerIdByPhone(prisma, venueId, phone)
+  const customer = foundId ? await prisma.customer.findFirst({ where: { id: foundId, venueId }, select: { id: true } }) : null
+
+  const base = process.env.BOOKING_SITE_URL ?? 'https://book.avoqado.io'
+  let session: Awaited<ReturnType<typeof createCheckoutSession>>
+  try {
+    session = await createCheckoutSession(
+      venueId,
+      packId,
+      undefined,
+      phone,
+      `${base}/${venue.slug}?packs=1&ok=1`,
+      `${base}/${venue.slug}?packs=1`,
+      { customerId: customer?.id ?? null },
+    )
+  } catch (error) {
+    // 🔴 Un 401 aquí le cierra la sesión al POS: la app lo toma como token vencido, refresca,
+    // reintenta y, al volver 401, borra la sesión. El candado de aprobación habla de la CLIENTA,
+    // no del aparato: se contesta 403 con el mismo código.
+    if (error instanceof UnauthorizedError) {
+      throw new ForbiddenError('No podemos venderte este paquete aquí. Pide ayuda en el mostrador.', error.code)
+    }
+    throw error
+  }
+  if (!session.checkoutUrl) throw new BadRequestError('No pudimos preparar el pago. Intenta otra vez.')
+  return { url: session.checkoutUrl, sessionId: session.sessionId, expiresAt: session.expiresAt }
+}
+
+/**
+ * Estado del QR del kiosco. `PAID` sólo cuando ya existe NUESTRA compra (las clases ya son
+ * suyas): Stripe cobrado sin webhook todavía sigue siendo `OPEN`. A Stripe sólo se le pregunta
+ * para saber si venció. Este sondeo nunca entrega nada; eso lo hace el webhook.
+ */
+export async function getKioskPackCheckoutStatus(args: { venueId: string; sessionId: string }): Promise<'OPEN' | 'PAID' | 'EXPIRED'> {
+  const { venueId, sessionId } = args
+  const purchase = await prisma.creditPackPurchase.findFirst({
+    where: { stripeCheckoutSessionId: sessionId, venueId },
+    select: { id: true },
+  })
+  if (purchase) return 'PAID'
+
+  const merchant = await resolveChargeableStripeMerchant(venueId)
+  const stripeAccount = (merchant?.providerCredentials as { connectAccountId?: string } | null)?.connectAccountId
+  if (!stripeAccount) return 'OPEN'
+
+  let session: Stripe.Checkout.Session
+  try {
+    session = await stripe.checkout.sessions.retrieve(sessionId, undefined, { stripeAccount })
+  } catch (error: any) {
+    if (error?.code === 'resource_missing') throw new NotFoundError('Pago no encontrado')
+    throw error
+  }
+  if (session.metadata?.type !== 'credit_pack_purchase' || session.metadata?.venueId !== venueId) {
+    throw new NotFoundError('Pago no encontrado')
+  }
+  return session.status === 'expired' ? 'EXPIRED' : 'OPEN'
 }
 
 /**
