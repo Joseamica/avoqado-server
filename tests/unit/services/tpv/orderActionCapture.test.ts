@@ -24,6 +24,16 @@ import { Decimal } from '@prisma/client/runtime/library'
 // mock below invokes the transaction callback with THIS SAME mock object, so
 // `tx.orderItem.update` / `tx.order.update` / `tx.orderAction.create` resolve
 // through the exact jest.fn()s the tests assert against.
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/utils/prismaClient', () => {
   const mockPrismaObj: any = {
     order: {

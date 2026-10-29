@@ -25,6 +25,7 @@ import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { computeOrderBalance, estadoDeCobroAlRecibirDinero } from '../shared/orderBalance'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
+import { assertNotCardOnlineOrderInTx } from '../online-ordering/card/guards'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
@@ -333,6 +334,8 @@ export async function initiateCryptoPayment(params: InitiateCryptoPaymentParams)
       }
       // Rappi 2b (T7): un cobro NUEVO con cripto no cobra un pedido de Rappi en efectivo (antes de crear nada).
       rechazarAccionDeCobroSobreRappiEnEfectivo(targetOrder)
+      // Pedidos en línea fase 2: un cobro NUEVO con cripto no cobra un pedido pagado con tarjeta en línea.
+      await assertNotCardOnlineOrderInTx(tx, { venueId, orderId: orderIdToUse })
       if (targetOrder.paymentStatus === 'PAID') {
         throw new BadRequestError('La cuenta ya está pagada')
       }

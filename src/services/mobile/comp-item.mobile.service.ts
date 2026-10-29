@@ -18,6 +18,7 @@ import prisma from '../../utils/prismaClient'
 import { BadRequestError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { impuestoQueSeCobraAparte } from '../shared/orderBalance'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
@@ -50,6 +51,8 @@ export async function compOrderItemInTransaction(
   }
 
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findUnique({
     where: { id: orderId, venueId },
     select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true },
@@ -144,6 +147,8 @@ export async function compWholeOrderInTransaction(
   }
 
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
   const order = await tx.order.findUnique({
     where: { id: orderId, venueId },
     select: { id: true, paymentStatus: true, discountAmount: true, paidAmount: true, orderNumber: true, originSystem: true },

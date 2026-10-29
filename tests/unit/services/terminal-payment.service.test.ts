@@ -1698,6 +1698,26 @@ describe('TerminalPaymentService — candado de sobrepago (orden YA pagada, caso
     expect(directEmit).not.toHaveBeenCalled()
   })
 
+  it('Pedidos en línea fase 2: un pedido pagado con tarjeta en línea no se manda a la terminal (409 ONLINE_ORDER_PAID_BY_CARD), con lápida', async () => {
+    order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'WEB-1', status: 'PENDING', thirdPartyCashDue: null })
+    prismaMock.onlineOrder.findFirst.mockResolvedValueOnce({
+      paymentMode: 'CARD_ONLINE',
+      charge: { id: 'ch1', status: 'AUTHORIZED', paymentIntentId: 'pi_1' },
+    } as any)
+
+    const error = await terminalPaymentService
+      .sendPaymentToTerminal(baseRequest({ terminalId: 'T-WEB', orderId: 'order-web', requestId: 'REQ-WEB' }))
+      .then(
+        () => null,
+        (e: any) => e,
+      )
+    expect(error).toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_PAID_BY_CARD', details: { requestId: 'REQ-WEB' } })
+    // Sólo la lápida (FAILED): ningún cobro PENDING nace y la terminal no se entera.
+    expect(tpr().create).toHaveBeenCalledTimes(1)
+    expect(tpr().create.mock.calls[0][0].data).toMatchObject({ status: 'FAILED', failureCode: 'REJECTED_ORDER_PAID_BY_CARD' })
+    expect(directEmit).not.toHaveBeenCalled()
+  })
+
   it('orden PENDING → el cobro procede normal (el candado no estorba cuentas abiertas)', async () => {
     order().findFirst.mockResolvedValue({ paymentStatus: 'PENDING', orderNumber: 'ORD-OPEN' })
 
@@ -2128,6 +2148,7 @@ describe('TerminalPaymentService — lápida de admisión: contención, choque d
     { failureCode: 'REJECTED_ORDER_PAID', httpStatus: 409, code: 'ORDER_ALREADY_PAID', clase: OrderAlreadyPaidError },
     { failureCode: 'REJECTED_ORDER_NOT_FOUND', httpStatus: 400, code: 'ORDER_NOT_FOUND', clase: BadRequestError },
     { failureCode: 'REJECTED_ORDER_RAPPI_CASH', httpStatus: 409, code: 'RAPPI_CASH_ORDER_CASH_ONLY', clase: ConflictError },
+    { failureCode: 'REJECTED_ORDER_PAID_BY_CARD', httpStatus: 409, code: 'ONLINE_ORDER_PAID_BY_CARD', clase: ConflictError },
   ])(
     'la réplica de una lápida $failureCode reproduce el rechazo ($httpStatus $code) aunque su respuesta guardada no se pueda leer',
     async ({ failureCode, httpStatus, code, clase }) => {

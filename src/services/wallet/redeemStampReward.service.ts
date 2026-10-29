@@ -6,6 +6,7 @@ import { recalculateOrderTotals } from '../mobile/comp-item.mobile.service'
 import { logAction } from '../dashboard/activity-log.service'
 import { notifyCustomerPassUpdated } from './notifyPassUpdated.service'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { rechazarSiEsImportada } from '../shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '../giftCards/cuentaDeTarjetas'
 import { aCentavos, capacidadRestante, comoJson, leerReparto, nuevoRepartoDeCuenta, nuevoRepartoDirigido } from '../shared/repartoDescuento'
@@ -98,6 +99,8 @@ export async function redeemStampReward(
   // el premio a PENDING y la cuenta queda como estaba.
   const { reward, discountAmount, totals } = await prisma.$transaction(async tx => {
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new NotFoundError('Orden no encontrada')
+    // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+    await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
     const order = await tx.order.findFirst({
       where: { id: orderId, venueId },
       select: {

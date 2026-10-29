@@ -322,6 +322,50 @@ describe('refund.dashboard.service', () => {
     )
   })
 
+  // Pedidos en línea fase 2 (T8): el cobro de Stripe de un pedido con tarjeta sólo se devuelve desde Pedidos en línea (T10).
+  describe('cobro de Stripe de un pedido en línea con tarjeta', () => {
+    const cobroDeStripe = () => {
+      prismaMock.payment.findFirst.mockResolvedValue({ orderId: 'order-1', processorId: 'pi_1', order: { updatedAt: ORDER_GENERATION } } as any)
+      prismaMock.onlineOrder.findFirst.mockResolvedValue({
+        paymentMode: 'CARD_ONLINE',
+        charge: { id: 'ch1', status: 'CAPTURED', paymentIntentId: 'pi_1' },
+      } as any)
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          {
+            id: 'payment-original',
+            venueId: 'venue-1',
+            status: TransactionStatus.COMPLETED,
+            type: PaymentType.REGULAR,
+            method: 'CREDIT_CARD',
+            source: 'WEB',
+            amount: 250,
+            tipAmount: 0,
+            orderId: 'order-1',
+            shiftId: null,
+            merchantAccountId: null,
+            processorData: {},
+            fundsFlow: 'AVOQADO_PROCESSED',
+          },
+        ])
+        .mockResolvedValueOnce([])
+      prismaMock.payment.create.mockResolvedValue({ id: 'refund-web-1' })
+    }
+    const pedir = (extra: Record<string, unknown> = {}) =>
+      issueRefund({ venueId: 'venue-1', paymentId: 'payment-original', amount: 25000, reason: 'CUSTOMER_REQUEST' as any, ...extra })
+
+    it('sin viaOnlineOrders → 409 ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS y ningún reembolso', async () => {
+      cobroDeStripe()
+      await expect(pedir()).rejects.toMatchObject({ statusCode: 409, code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS' })
+      expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    })
+
+    it('con viaOnlineOrders pasa', async () => {
+      cobroDeStripe()
+      await expect(pedir({ viaOnlineOrders: true })).resolves.toMatchObject({ refundId: 'refund-web-1' })
+    })
+  })
+
   it('reestablece paymentId + venueId + orderId bajo lock y conserva el mismo alcance al actualizar', async () => {
     prismaMock.$queryRaw
       .mockResolvedValueOnce([
@@ -360,7 +404,7 @@ describe('refund.dashboard.service', () => {
 
     expect(prismaMock.payment.findFirst).toHaveBeenCalledWith({
       where: { id: 'payment-original', venueId: 'venue-1' },
-      select: { orderId: true, order: { select: { updatedAt: true } } },
+      select: { orderId: true, processorId: true, order: { select: { updatedAt: true } } },
     })
     const lockedPaymentQuery = (prismaMock.$queryRaw as jest.Mock).mock.calls[0][0]
     expect(String(lockedPaymentQuery.sql).replace(/\s+/g, ' ')).toMatch(/WHERE id = .*"venueId" = .*"orderId" =/)

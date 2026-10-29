@@ -13,6 +13,16 @@
 // FT-GRAVES T2: este cobro encola su comisión en la transacción, con el MISMO gancho que la terminal. No es objeto de esta
 // suite (sus pruebas son tests/integration/commission/cobrosDelDashboard y cobrosEnLineaYCripto).
 // R11-8 (sellos tardíos): el cierre toma la jerarquía de vales ANTES del candado de la venta; esta suite no prueba vales (sin sesión).
+// Pedidos en línea fase 2 (T8): las guardas de pedidos con tarjeta leen `onlineOrder`, que los `tx` a mano de esta suite no traen.
+// Esta suite prueba otra cosa; las guardas se prueban en `online-ordering/card/guards.test.ts` y `cardGuards.integration.test.ts`.
+jest.mock('@/services/online-ordering/card/guards', () => ({
+  ...jest.requireActual('@/services/online-ordering/card/guards'),
+  findCardOnlineOrderInTx: jest.fn(async () => null),
+  isCardOnlineOrderInTx: jest.fn(async () => false),
+  assertNotCardOnlineOrderInTx: jest.fn(async () => undefined),
+  assertCardOrderMoneyFrozenInTx: jest.fn(async () => undefined),
+  avisarCobroDobleSobrePedidoConTarjeta: jest.fn(async () => undefined),
+}))
 jest.mock('@/services/mobile/areaTicketV7.mobile.service', () => ({
   lockAreaTicketCheckoutHierarchy: jest.fn().mockResolvedValue(null),
   cerrarSesionDeValesAlCerrarLaVenta: jest.fn().mockResolvedValue(false),

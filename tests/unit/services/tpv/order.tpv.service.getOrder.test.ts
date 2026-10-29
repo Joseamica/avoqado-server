@@ -26,6 +26,8 @@ jest.mock('@/utils/prismaClient', () => ({
     order: {
       findUnique: jest.fn(),
     },
+    // Pedidos en línea fase 2: la lectura de la TPV pregunta si la cuenta es un pedido con tarjeta; aquí no lo es.
+    onlineOrder: { findFirst: jest.fn().mockResolvedValue(null) },
   },
 }))
 

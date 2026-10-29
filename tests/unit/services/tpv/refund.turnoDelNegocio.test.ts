@@ -611,3 +611,42 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
     )
   })
 })
+
+// Pedidos en línea fase 2 (T8, Codex r4 #4): sólo el cobro de Stripe de un pedido con tarjeta se devuelve desde Pedidos en línea; un
+// cobro tardío de la TPV sobre ese mismo pedido se devuelve por la vía normal de la terminal.
+describe('reembolso de la TPV sobre un pedido en línea con tarjeta', () => {
+  const pedidoConTarjeta = (processorId: string, method = 'CREDIT_CARD') => {
+    const original = armar()
+    Object.assign(original, {
+      orderId: 'order-web',
+      order: { id: 'order-web', updatedAt: ORDER_GENERATION },
+      method,
+      fundsFlow: 'AVOQADO_PROCESSED',
+      processorId,
+    })
+    ;(prismaMock as any).$queryRaw = jest.fn().mockImplementation(async (q: any) => {
+      const sql = Array.isArray(q?.strings) ? q.strings.join('?') : Array.isArray(q) ? q.join('?') : String(q?.sql ?? q)
+      return sql.includes('FROM "Order"') || sql.includes('"Order"') ? [{ id: 'order-web' }] : [original]
+    })
+    prismaMock.onlineOrder.findFirst.mockResolvedValue({
+      paymentMode: 'CARD_ONLINE',
+      charge: { id: 'ch1', status: 'CAPTURED', paymentIntentId: 'pi_web' },
+    } as any)
+    return original
+  }
+
+  it('el cobro de Stripe del cargo → 409 ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS y ningún reembolso', async () => {
+    pedidoConTarjeta('pi_web')
+    await expect(refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS',
+    })
+    expect((prismaMock as any).payment.create).not.toHaveBeenCalled()
+  })
+
+  it('un cobro tardío de la TPV sobre un pedido CAPTURED se devuelve por la vía normal (sólo el de Stripe está protegido)', async () => {
+    pedidoConTarjeta('blumon-op-1')
+    await refundService.recordRefund(VENUE, cuerpo() as never, 'staff-1')
+    expect((prismaMock as any).payment.create).toHaveBeenCalledTimes(1)
+  })
+})

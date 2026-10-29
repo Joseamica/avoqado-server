@@ -21,6 +21,7 @@ import { asegurarObligacionDeCostoNegativo, costearYProyectarReembolso } from '.
 import { logAction } from './activity-log.service'
 import type { FiscalCongelado } from '../fiscal/deliveryFiscalDelta'
 import { devolverConEfectivo, sePuedeEscogerComoDevolver, type DevolverCon } from '../tpv/terminalRefundTarget'
+import { assertCardRefundGoesThroughOnlineOrders } from '../online-ordering/card/guards'
 import { GiftCardError } from '../giftCards/giftCardErrors'
 import {
   MENSAJE_SALDO_SOLO_A_SALDO,
@@ -120,6 +121,11 @@ export interface IssueRefundInput {
    * Sólo se acepta donde `sePuedeEscogerComoDevolver` es verdadero; si no, 400.
    */
   refundMethod?: DevolverCon
+  /**
+   * Pedidos en línea fase 2: sólo lo pone el reembolso de Pedidos en línea (que devuelve a la tarjeta con Stripe). Sin él, el cobro de
+   * Stripe de un pedido con tarjeta no se devuelve por aquí (409 `ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS`).
+   */
+  viaOnlineOrders?: true
 }
 
 export interface IssueRefundResult {
@@ -967,7 +973,7 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
   // fila Payment se vuelve a leer y valida bajo FOR UPDATE dentro de la tx.
   const originalOrder = await prisma.payment.findFirst({
     where: { id: input.paymentId, venueId: input.venueId },
-    select: { orderId: true, order: { select: { updatedAt: true } } },
+    select: { orderId: true, processorId: true, order: { select: { updatedAt: true } } },
   })
   if (!originalOrder) throw new NotFoundError('Payment not found')
 
@@ -982,6 +988,13 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
       // Same original-payment lock as every refund channel: the second caller sees the first commit.
       const replayResult = await existingAttempt(tx)
       if (replayResult) return { replayResult }
+      // Pedidos en línea fase 2: bajo el candado del cobro, el de Stripe de un pedido con tarjeta sólo sale por Pedidos en línea.
+      await assertCardRefundGoesThroughOnlineOrders(tx, {
+        venueId: input.venueId,
+        paymentId: input.paymentId,
+        viaOnlineOrders: input.viaOnlineOrders,
+        payment: { orderId: originalOrder.orderId, processorId: originalOrder.processorId ?? null },
+      })
       const esCreditoDeCambio = isExchangeCreditTenderKind(cobro.original.tenderSystemKind)
       if (esCreditoDeCambio && input.refundMethod)
         throw new BadRequestError('Este cobro sólo se devuelve por el mismo medio con que se pagó.')

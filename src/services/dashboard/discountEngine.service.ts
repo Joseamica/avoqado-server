@@ -31,6 +31,7 @@ import {
 import { conservarDescuentoHistorico, revertirDescuentoDelRenglon, sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { repartirProporcional } from '../fiscal/ivaMath'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '../online-ordering/card/guards'
 import { baseDeCargos, recalcularCargosPorServicio } from '../shared/serviceCharges'
 
 // ==========================================
@@ -871,7 +872,10 @@ async function evaluateOrderDiscounts(
 async function lockDiscountOrder(tx: Prisma.TransactionClient, orderId: string, venueId?: string): Promise<string | null> {
   const tenant = venueId ?? (await tx.order.findUnique({ where: { id: orderId }, select: { venueId: true } }))?.venueId
   if (!tenant) return null
-  return (await lockExistingOrderForPayment(tx, { venueId: tenant, orderId })) ? tenant : null
+  if (!(await lockExistingOrderForPayment(tx, { venueId: tenant, orderId }))) return null
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo; ningún descuento lo toca.
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId: tenant, orderId })
+  return tenant
 }
 
 /** TPV callers (authoritative venue) keep their 404; legacy callers keep the result object they always received. */

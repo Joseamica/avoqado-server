@@ -6,6 +6,7 @@ import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { DEFAULT_TIMEZONE, isWithinVenueSchedule } from '@/utils/datetime'
 import { resolvePromotionLines, type PromotionOptionSnapshot } from './resolvePromotionLines'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { assertCardOrderMoneyFrozenInTx } from '@/services/online-ordering/card/guards'
 import { rechazarSiEsImportada } from '@/services/shared/ordenImportada'
 import { rechazarSiEsCuentaDeTarjetas } from '@/services/giftCards/cuentaDeTarjetas'
 import { conservarDescuentoHistorico, recortarDescuentosDeRenglones } from '@/services/shared/repartoDescuentoTx'
@@ -94,6 +95,8 @@ async function applyPromotionInTransaction(
   if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
     throw new NotFoundError('No encontramos esa cuenta en este establecimiento.')
   }
+  // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+  await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
 
   const existing = await tx.orderPromotion.findUnique({
     where: { orderId_instanceId: { orderId, instanceId } },
@@ -277,6 +280,8 @@ export async function removePromotionFromOrder(params: { venueId: string; orderI
     if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) {
       throw new NotFoundError('No encontramos esa promoción en la cuenta.')
     }
+    // Pedidos en línea fase 2: un pedido de tarjeta sin cobrar tiene un total fijo (el de la tarjeta apartada).
+    await assertCardOrderMoneyFrozenInTx(tx, { venueId, orderId })
     const found = await tx.orderPromotion.findFirst({
       where: { id: orderPromotionId, orderId, order: { venueId } },
       select: { id: true, order: { select: { paymentStatus: true, discountAmount: true, paidAmount: true, originSystem: true } } },
