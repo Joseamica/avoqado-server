@@ -20410,6 +20410,11 @@ model OnlineOrderCharge {
   checkoutAttempt  Int     @default(1)
   lastError        String?
   attempts         Int     @default(0)
+  /// El conciliador lo vio por primera vez en duda (`CAPTURING`/`RELEASING`): de aquí se cuentan los 15 min de la alerta
+  /// (`updatedAt` no sirve: cada pasada y cada reintento lo tocan).
+  inDoubtSince     DateTime?
+  /// Ya se alertó 🚨 este episodio (una sola vez); se borra al salir de él.
+  stuckAlertedAt   DateTime?
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt

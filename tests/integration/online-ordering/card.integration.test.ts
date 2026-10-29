@@ -9,6 +9,10 @@ import prisma from '@/utils/prismaClient'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
+import { reconcileCardCharges } from '@/services/online-ordering/card/reconcile.service'
+import { CARD_RECONCILE_BATCH } from '@/services/online-ordering/constants'
+import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByCustomer,
@@ -948,5 +952,280 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(c).toMatchObject({ status: 'CAPTURING', lastError: 'TOTAL_CHANGED' })
     expect((await onlineOf(orderId)).status).toBe('PENDING_ACCEPTANCE')
     expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PENDING')
+  })
+
+  // ── Tarea 7: el conciliador termina lo que quedó en duda ──
+  const NONFINAL = ['PENDING_AUTH', 'AUTHORIZED', 'CAPTURING', 'RELEASING'] as const
+  /** El conciliador lee TODOS los cargos de la base (desechable): los de otras pruebas se cierran para que no cuenten. */
+  const quiet = (keep: string[] = []) =>
+    prisma.onlineOrderCharge.updateMany({ where: { status: { in: [...NONFINAL] }, id: { notIn: keep } }, data: { status: 'ABANDONED' } })
+  const reconcile = (now = new Date()) => reconcileCardCharges(now, read => read())
+  const chargeById = (id: string) => prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id } })
+  const ago = (ms: number) => new Date(Date.now() - ms)
+  /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
+  const stuckLogs = async (chargeId: string) =>
+    (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'ONLINE_ORDER_CARD_RELEASE_STUCK' && p.entityId === chargeId).length
+  /** Un pedido cuya captura quedó en duda (`CAPTURING`) hace 2 min. */
+  const capturingOrder = async () => {
+    const a = await authorizedOrder()
+    captureSpy.mockRejectedValueOnce(lost())
+    authSpy.mockResolvedValueOnce({ ...authorized(), paymentIntentId: a.charge.paymentIntentId })
+    await expect(accept(a.orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    await prisma.onlineOrderCharge.update({ where: { id: a.charge.id }, data: { updatedAt: ago(2 * MIN) } })
+    await quiet([a.charge.id])
+    return a
+  }
+  /** Un borrador cuya sesión ya venció, con `updatedAt` controlado (filas sintéticas: rápidas y sin carrito). */
+  const expiredDraftRow = async (o: { session?: string | null; updatedAt: Date; template: Awaited<ReturnType<typeof chargeOf>> }) => {
+    ++seq
+    return prisma.onlineOrderCharge.create({
+      data: {
+        venueId: venueId!,
+        ecommerceMerchantId: merchantId,
+        idempotencyKey: nextKey(),
+        trackingToken: `rec${RUN}${seq}`.padEnd(32, 't'),
+        customerPhone: o.template.customerPhone,
+        request: o.template.request as Prisma.InputJsonValue,
+        requestHash: o.template.requestHash,
+        checkoutSessionId: o.session === undefined ? `cs_rec_${RUN}_${seq}` : o.session,
+        checkoutExpiresAt: ago(10 * MIN),
+        amount: o.template.amount,
+        platformFeeBps: o.template.platformFeeBps,
+        applicationFeeCents: o.template.applicationFeeCents,
+        merchantSnapshot: o.template.merchantSnapshot as Prisma.InputJsonValue,
+        updatedAt: o.updatedAt,
+      },
+    })
+  }
+
+  it('conciliador: un CAPTURING cuyo PI ya está succeeded termina con un solo Payment', async () => {
+    const { charge, orderId } = await capturingOrder()
+    authSpy.mockResolvedValue(capturedState({ paymentIntentId: charge.paymentIntentId!, amountCents: 25_000 }))
+
+    const r = await reconcile()
+    expect(r).toMatchObject({ scanned: 1, finished: 1, errors: 0 })
+    expect(captureSpy).toHaveBeenCalledTimes(1) // sólo la de aceptar: no se vuelve a cobrar
+    expect((await chargeById(charge.id)).status).toBe('CAPTURED')
+    expect((await onlineOf(orderId)).status).toBe('ACCEPTED')
+    expect(await paymentsOf(orderId)).toHaveLength(1)
+
+    await reconcile(new Date(Date.now() + 5 * MIN))
+    expect(await paymentsOf(orderId)).toHaveLength(1)
+  })
+
+  it('conciliador: un CAPTURING que sigue requires_capture reintenta con la misma clave; uno de menos de 60 s no se toca', async () => {
+    const { charge, orderId } = await capturingOrder()
+    await prisma.onlineOrderCharge.update({ where: { id: charge.id }, data: { updatedAt: ago(20_000) } })
+    authSpy.mockClear()
+    authSpy.mockResolvedValue({ ...authorized(), paymentIntentId: charge.paymentIntentId })
+
+    // Ruling 2: puede haber una captura en vuelo.
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 0 })
+    expect(authSpy).not.toHaveBeenCalled()
+
+    await prisma.onlineOrderCharge.update({ where: { id: charge.id }, data: { updatedAt: ago(2 * MIN) } })
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 1, finished: 1 })
+    expect(captureSpy).toHaveBeenCalledTimes(2)
+    expect(captureSpy.mock.calls[1][1]).toEqual(captureSpy.mock.calls[0][1])
+    expect(captureSpy.mock.calls[1][1].idempotencyKey).toBe(`online-order:${orderId}:capture`)
+    expect((await chargeById(charge.id)).status).toBe('CAPTURED')
+    expect(await paymentsOf(orderId)).toHaveLength(1)
+  })
+
+  it('conciliador: un CAPTURING cuyo PI quedó canceled sigue el camino de captura fallida', async () => {
+    const { charge, orderId } = await capturingOrder()
+    authSpy.mockResolvedValue({ ...authorized(), paymentIntentId: charge.paymentIntentId, piStatus: 'canceled', amountCapturableCents: 0 })
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 1, finished: 1 })
+    expect((await chargeById(charge.id)).status).toBe('CAPTURE_FAILED')
+    expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
+    expect(await paymentsOf(orderId)).toHaveLength(0)
+  })
+
+  it('conciliador: un RELEASING se libera', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    voidSpy.mockRejectedValueOnce(lost())
+    await expect(reject(orderId)).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    expect((await chargeById(charge.id)).status).toBe('RELEASING')
+    await quiet([charge.id])
+
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 1, released: 1 })
+    expect(voidSpy).toHaveBeenCalledTimes(2)
+    expect(voidSpy.mock.calls[1][1]).toEqual({ paymentIntentId: charge.paymentIntentId, idempotencyKey: `online-order:${orderId}:release` })
+    expect((await chargeById(charge.id)).status).toBe('RELEASED')
+  })
+
+  it('conciliador: la caja canceló la cuenta con la tarjeta apartada → el conciliador libera', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    const keep = await authorizedOrder() // su pedido sigue por aceptar: su tarjeta NO se toca
+    await prisma.order.update({ where: { id: orderId }, data: { status: 'CANCELLED' } })
+    await quiet([charge.id, keep.charge.id])
+
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 1, released: 1 })
+    expect(voidSpy).toHaveBeenCalledTimes(1)
+    expect(voidSpy.mock.calls[0][1]).toEqual({ paymentIntentId: charge.paymentIntentId, idempotencyKey: `online-order:${orderId}:release` })
+    expect((await chargeById(charge.id)).status).toBe('RELEASED')
+    expect((await chargeById(keep.charge.id)).status).toBe('AUTHORIZED')
+  })
+
+  it('conciliador: PENDING_AUTH vencido pero autorizado (aviso perdido) crea el pedido', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    await prisma.onlineOrderCharge.update({ where: { id: c.id }, data: { checkoutExpiresAt: ago(MIN) } })
+    await quiet([c.id])
+    authSpy.mockResolvedValue(authorized())
+
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 1, finished: 1 })
+    const after = await chargeOf(key)
+    expect(after.status).toBe('AUTHORIZED')
+    expect((await prisma.onlineOrder.findUniqueOrThrow({ where: { id: after.onlineOrderId! } })).status).toBe('PENDING_ACCEPTANCE')
+  })
+
+  it('conciliador: PENDING_AUTH sin sesión guardada repite la clave del último intento; si Stripe rechaza el vencimiento → ABANDONED', async () => {
+    // A: Stripe sí creó la sesión pero la respuesta se perdió → la repetición la devuelve, se guarda y se confirma.
+    const k1 = nextKey()
+    const lostId = `cs_itest_${RUN}_lost_${seq}`
+    spy.mockImplementationOnce(async (_m: any, p: any) => {
+      const id = lostId
+      sessions.set(p.idempotencyKey, { id, url: `https://checkout.stripe.test/${id}`, expiresAt: p.expiresAt })
+      throw lost()
+    })
+    await expect(draft({ key: k1 })).rejects.toMatchObject({ code: 'CARD_PROVIDER_UNAVAILABLE' })
+    const a = await chargeOf(k1)
+    expect(a.checkoutSessionId).toBeNull()
+
+    // B: la clave nunca se ejecutó y ya pasó el vencimiento: Stripe rechaza expires_at.
+    const k2 = nextKey()
+    spy.mockRejectedValueOnce(new Error('Stripe no responde'))
+    await expect(draft({ key: k2 })).rejects.toMatchObject({ code: 'CARD_PROVIDER_UNAVAILABLE' })
+    const b = await chargeOf(k2)
+
+    const [paramsA, paramsB] = spy.mock.calls.map(([, p]) => p)
+    await quiet([a.id, b.id])
+    spy.mockClear()
+    spy.mockImplementation(async (_m: any, p: any) => {
+      const s = sessions.get(p.idempotencyKey)
+      if (s) return s
+      throw Object.assign(new Error('expires_at must be at least 30 minutes in the future'), {
+        type: 'StripeInvalidRequestError',
+        param: 'expires_at',
+      })
+    })
+    authSpy.mockResolvedValue(authorized())
+
+    // Ya pasó el vencimiento guardado de los dos (35 min).
+    await expect(reconcile(new Date(Date.now() + 40 * MIN))).resolves.toMatchObject({ scanned: 2, finished: 1, abandoned: 1 })
+    // La MISMA clave y los MISMOS parámetros que el intento original (Stripe los compara).
+    const sent = spy.mock.calls.map(([, p]) => p)
+    expect(sent).toHaveLength(2)
+    expect(sent).toEqual(expect.arrayContaining([paramsA, paramsB]))
+    expect(paramsA.idempotencyKey).toBe(`online-order-charge:${a.id}:checkout:1`)
+    expect(await chargeOf(k1)).toMatchObject({ status: 'AUTHORIZED', checkoutSessionId: lostId })
+    expect(await chargeOf(k2)).toMatchObject({ status: 'ABANDONED', checkoutSessionId: null })
+  })
+
+  it('conciliador: un cargo que lanza no impide procesar los demás', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const template = await chargeOf(key)
+    const bad = await expiredDraftRow({ template, updatedAt: ago(10 * MIN) })
+    const good = await expiredDraftRow({ template, updatedAt: ago(9 * MIN) })
+    await quiet([bad.id, good.id])
+    authSpy.mockImplementation(async (_m: any, ref: any) => {
+      if (ref.checkoutSessionId === bad.checkoutSessionId) throw lost()
+      return { ...authorized(), sessionStatus: 'expired', paymentIntentId: null, piStatus: null, amountCapturableCents: 0 }
+    })
+
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 2, abandoned: 1, errors: 1 })
+    expect((await chargeById(good.id)).status).toBe('ABANDONED')
+    expect(await chargeById(bad.id)).toMatchObject({ status: 'PENDING_AUTH', attempts: 1 })
+  })
+
+  it('ruling 4: un lote lleno de cargos que truenan no tapa para siempre al sano de atrás (lo procesa en 2 pasadas)', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const template = await chargeOf(key)
+    const bads = []
+    for (let n = 0; n < CARD_RECONCILE_BATCH; n++) bads.push(await expiredDraftRow({ template, updatedAt: ago(20 * MIN - n) }))
+    const good = await expiredDraftRow({ template, updatedAt: ago(5 * MIN) })
+    await quiet([...bads.map(b => b.id), good.id])
+    const badSessions = new Set(bads.map(b => b.checkoutSessionId))
+    authSpy.mockImplementation(async (_m: any, ref: any) => {
+      if (badSessions.has(ref.checkoutSessionId)) throw lost()
+      return { ...authorized(), sessionStatus: 'expired', paymentIntentId: null, piStatus: null, amountCapturableCents: 0 }
+    })
+
+    await expect(reconcile()).resolves.toMatchObject({ scanned: CARD_RECONCILE_BATCH, errors: CARD_RECONCILE_BATCH })
+    expect((await chargeById(good.id)).status).toBe('PENDING_AUTH')
+    await expect(reconcile()).resolves.toMatchObject({ abandoned: 1 })
+    expect((await chargeById(good.id)).status).toBe('ABANDONED')
+  })
+
+  it('conciliador: alerta 🚨 una sola vez a los 15 min y borra la marca al terminar', async () => {
+    const errorSpy = jest.spyOn(logger, 'error')
+    try {
+      const { charge, orderId } = await authorizedOrder()
+      voidSpy.mockRejectedValue(lost())
+      await expect(reject(orderId)).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+      await quiet([charge.id])
+      const t0 = new Date()
+      const alerts = () =>
+        errorSpy.mock.calls.filter(([m, meta]: any[]) => m === '🚨 [OnlineOrderCard] cargo atorado' && meta?.chargeId === charge.id)
+
+      await expect(reconcile(t0)).resolves.toMatchObject({ stuck: 1 })
+      expect((await chargeById(charge.id)).inDoubtSince).toEqual(t0)
+      await reconcile(new Date(t0.getTime() + 10 * MIN))
+      expect(alerts()).toHaveLength(0)
+      expect(await stuckLogs(charge.id)).toBe(0)
+
+      await reconcile(new Date(t0.getTime() + 16 * MIN))
+      await reconcile(new Date(t0.getTime() + 17 * MIN))
+      expect(alerts()).toHaveLength(1)
+      expect((alerts()[0] as unknown[])[1]).toMatchObject({ chargeId: charge.id, status: 'RELEASING', venueId })
+      expect(await stuckLogs(charge.id)).toBe(1)
+      expect((await chargeById(charge.id)).stuckAlertedAt).toBeInstanceOf(Date)
+
+      voidSpy.mockImplementation(async (_m: any, p: any) => ({ ...authorized(), paymentIntentId: p.paymentIntentId, piStatus: 'canceled' }))
+      await expect(reconcile(new Date(t0.getTime() + 18 * MIN))).resolves.toMatchObject({ released: 1 })
+      expect(await chargeById(charge.id)).toMatchObject({ status: 'RELEASED', stuckAlertedAt: null, inDoubtSince: null })
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('ruling 3: un CAPTURING con TOTAL_CHANGED alerta de inmediato y una sola vez', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    captureSpy.mockImplementationOnce(async (_m: any, p: any) => {
+      await prisma.order.update({ where: { id: orderId }, data: { total: new Prisma.Decimal('300.00') } })
+      return capturedState(p)
+    })
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    await prisma.onlineOrderCharge.update({ where: { id: charge.id }, data: { updatedAt: ago(2 * MIN) } })
+    await quiet([charge.id])
+    authSpy.mockResolvedValue(capturedState({ paymentIntentId: charge.paymentIntentId!, amountCents: 25_000 }))
+
+    const t0 = new Date()
+    await expect(reconcile(t0)).resolves.toMatchObject({ stuck: 1 })
+    await reconcile(new Date(t0.getTime() + 2 * MIN))
+    expect(await chargeById(charge.id)).toMatchObject({ status: 'CAPTURING', lastError: 'TOTAL_CHANGED', stuckAlertedAt: expect.any(Date) })
+    expect(await stuckLogs(charge.id)).toBe(1)
+    expect(await paymentsOf(orderId)).toHaveLength(0)
+  })
+
+  it('ruling 3: un PENDING_AUTH vencido cuya confirmación truena 3 pasadas alerta una sola vez', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const template = await chargeOf(key)
+    const bad = await expiredDraftRow({ template, updatedAt: ago(10 * MIN) })
+    await quiet([bad.id])
+    authSpy.mockRejectedValue(lost())
+
+    await reconcile()
+    await reconcile()
+    expect(await stuckLogs(bad.id)).toBe(0)
+    await reconcile()
+    await reconcile()
+    expect(await stuckLogs(bad.id)).toBe(1)
+    expect(await chargeById(bad.id)).toMatchObject({ status: 'PENDING_AUTH', attempts: 4, stuckAlertedAt: expect.any(Date) })
   })
 })

@@ -80,10 +80,10 @@ const keyConflict = () =>
 const notAccepted = () => new BadRequestError('Este negocio no acepta pagar con tarjeta en línea.', 'CARD_PAYMENT_NOT_ACCEPTED')
 
 /** Codex r2 #4: Stripe rechazó `expires_at` (ya no quedan 30 min). Sólo pasa si la clave NUNCA se ejecutó: su repetición no revalida. */
-const expiresAtRejected = (e: any): boolean => e?.type === 'StripeInvalidRequestError' && (e.param ?? e.raw?.param) === 'expires_at'
+export const expiresAtRejected = (e: any): boolean => e?.type === 'StripeInvalidRequestError' && (e.param ?? e.raw?.param) === 'expires_at'
 
 /** Parámetros de la sesión derivados SÓLO de la fila guardada: la misma clave siempre lleva los mismos datos (Stripe los compara). */
-function checkoutParams(charge: OnlineOrderCharge) {
+export function checkoutParams(charge: OnlineOrderCharge) {
   const request = charge.request as unknown as CardDraftRequest
   return {
     amountCents: toStripeAmount(new Prisma.Decimal(charge.amount)),

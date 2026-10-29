@@ -149,8 +149,11 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
   }
 }
 
-/** Cobra con Stripe (fuera de toda transacción) un cargo que esta llamada ya pasó a `CAPTURING`, y termina según el desenlace. */
-async function captureCharge(
+/**
+ * Cobra con Stripe (fuera de toda transacción) un cargo que ya está en `CAPTURING`, y termina según el desenlace. La usa también el
+ * conciliador (tarea 7) para reintentar con la MISMA clave.
+ */
+export async function captureCharge(
   charge: OnlineOrderCharge,
   orderId: string,
   meta: { staffId: string | null; estimatedMinutes: number; now: Date },

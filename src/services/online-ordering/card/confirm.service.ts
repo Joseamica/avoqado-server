@@ -25,7 +25,8 @@ export type ConfirmOutcome = 'CREATED' | 'ALREADY' | 'NOT_YET' | 'ABANDONED' | '
 async function releaseLate(charge: OnlineOrderCharge, auth: AuthorizationState, why: string): Promise<ConfirmOutcome> {
   const won = await prisma.onlineOrderCharge.updateMany({
     where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
-    data: { status: OnlineOrderChargeStatus.RELEASING, paymentIntentId: auth.paymentIntentId, lastError: why },
+    // Sale de PENDING_AUTH: un episodio nuevo para la alerta del conciliador.
+    data: { status: OnlineOrderChargeStatus.RELEASING, paymentIntentId: auth.paymentIntentId, lastError: why, stuckAlertedAt: null },
   })
   if (won.count === 0) return 'ALREADY'
   logger.error('🚨 [OnlineOrderCard] tarjeta apartada que no se vuelve pedido: se libera', {
@@ -73,6 +74,7 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
             authorizedAt: now,
             captureBefore: auth.captureBefore,
             lastError: null,
+            stuckAlertedAt: null, // sale de PENDING_AUTH: la alerta del conciliador empieza de cero
           },
         })
         if (won.count === 0) return null
