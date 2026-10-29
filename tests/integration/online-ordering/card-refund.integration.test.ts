@@ -19,6 +19,8 @@ import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/onli
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
 import { advanceCardRefund, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { issueRefund, writeRefundInTx } from '@/services/dashboard/refund.dashboard.service'
+import { ORDER_LOCK_WAIT_BUDGET } from '@/services/shared/paymentShiftClaim'
 
 /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
 const logged = (action: string, entityId: string) =>
@@ -344,6 +346,55 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     expect(await prisma.onlineOrderCardRefund.count({ where: { venueId, chargeId: { not: '' }, status: 'REQUESTED' } })).toBe(0)
     await expect(pedir(orderId, { amount: '150.00' })).resolves.toMatchObject({ status: 'RECORDED' })
     expect(refundSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('fix r1: con $250 a la tarjeta PENDING, un «Cambio» de $100 (writeRefundInTx) o issueRefund → 400; la devolución en curso sí se anota', async () => {
+    const { orderId, paymentId } = await capturedOrder()
+    nextRefundStatus = 'PENDING'
+    const r = await pedir(orderId)
+    expect(r).toMatchObject({ status: 'PENDING', refundId: null })
+
+    // El camino del «Cambio»: el núcleo del reembolso, con el candado compartido del cobro.
+    await expect(
+      prisma.$transaction(
+        tx =>
+          writeRefundInTx(tx, {
+            venueId: venueId!,
+            originalPaymentId: paymentId,
+            salesRefundCents: 10_000,
+            tipRefundCents: 0,
+            refundedItems: [],
+            reason: 'RETURNED_GOODS',
+            note: 'Cambio ITEST',
+            staffId,
+            tenderCommission: 'NONE',
+            shift: 'CLAIM_LIVE',
+          }),
+        ORDER_LOCK_WAIT_BUDGET,
+      ),
+    ).rejects.toMatchObject({ statusCode: 400 })
+    // issueRefund por el carril de pedidos en línea pero de otra devolución (sin excluir la suya) → 400 por saldo…
+    await expect(
+      issueRefund({ venueId: venueId!, paymentId, amount: 10_000, reason: 'OTHER', staffId, viaOnlineOrders: true }),
+    ).rejects.toMatchObject({ statusCode: 400 })
+    // …y sin el carril, la guarda de T8 lo manda a Pedidos en línea.
+    await expect(issueRefund({ venueId: venueId!, paymentId, amount: 10_000, reason: 'OTHER', staffId })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS',
+    })
+    expect(await refundsOf(orderId)).toHaveLength(0)
+
+    // La devolución en curso no se rechaza a sí misma al anotarse.
+    getRefundSpy.mockImplementation(async (_m: any, id: string) => ({
+      refundId: id,
+      status: 'SUCCEEDED',
+      amountCents: 25_000,
+      failureReason: null,
+    }))
+    await expect(advanceCardRefund(r.cardRefundId)).resolves.toBe('RECORDED')
+    const ledger = await refundsOf(orderId)
+    expect(ledger).toHaveLength(1)
+    expect(ledger[0].amount.toFixed(2)).toBe('-250.00')
   })
 
   it('r4 #5: la repetición de una devolución SUCCEEDED escribe su renglón sin bloquearse (se avanza fuera del candado)', async () => {
