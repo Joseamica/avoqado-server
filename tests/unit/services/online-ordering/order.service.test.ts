@@ -1002,7 +1002,8 @@ describe('el armado de la cuenta se comparte (fase 2: la tarjeta crea la cuenta 
     })
 
     expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1' })
-    expect((prismaMock.order.create.mock.calls[0][0] as any).data).toEqual(order)
+    // Codex r1 C1: la de tarjeta, además, nace cobro del momento (nunca fiado).
+    expect((prismaMock.order.create.mock.calls[0][0] as any).data).toEqual({ ...order, payLater: false })
     expect((prismaMock.onlineOrder.create.mock.calls[0][0] as any).data).toEqual({ ...online, paymentMode: 'CARD_ONLINE' })
   })
 
