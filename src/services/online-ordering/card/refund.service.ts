@@ -59,15 +59,37 @@ const KEY_PATTERN = /^[A-Za-z0-9_-]{8,64}$/
 /** `SENDING`/`PENDING`: cada minuto los primeros 15, luego cada 15. */
 const nextPendingCheck = (createdAt: Date, now: Date) =>
   new Date(now.getTime() + (now.getTime() - createdAt.getTime() < FAST_WINDOW_MS ? MIN : FAST_WINDOW_MS))
-/** `RECORDED`: a 1 h, 1 día, 3, 7 y 30 días; luego nunca. */
-const nextLateCheck = (createdAt: Date, now: Date) => {
-  const due = LATE_CHECKS_MS.map(ms => createdAt.getTime() + ms).find(t => t > now.getTime())
+/** `RECORDED`: a 1 h, 1 día, 3, 7 y 30 días desde que quedó anotada (fix r1 M3); luego nunca. */
+const nextLateCheck = (recordedAt: Date, now: Date) => {
+  const due = LATE_CHECKS_MS.map(ms => recordedAt.getTime() + ms).find(t => t > now.getTime())
   return due === undefined ? NEVER_AGAIN : new Date(due)
+}
+/** Desde cuándo cuenta la revisión tardía: el renglón del libro (filas viejas sin la marca: su creación). */
+const ledgerBase = (row: Row) => row.recordedAt ?? row.createdAt
+/** Margen tras los 30 días durante el que un error todavía se reintenta (después, la fila se deja). */
+const LATE_GRACE_MS = DAY
+/** Un SENDING que Stripe confirma que no tiene se re-envía con la MISMA clave si su último envío pasó de esto (ruling r1). */
+const RESEND_AFTER_MS = 5 * MIN
+
+/** Cuándo se vuelve a mirar una fila tras un error: nunca más tarde que su calendario ni que 15 min (fix r1 M3). */
+function nextCheckAfterError(row: Row, now: Date): Date {
+  if (!WITH_LEDGER.includes(row.status)) return nextPendingCheck(row.createdAt, now)
+  if (now.getTime() >= ledgerBase(row).getTime() + LATE_CHECKS_MS[LATE_CHECKS_MS.length - 1] + LATE_GRACE_MS) return NEVER_AGAIN
+  const soon = new Date(now.getTime() + FAST_WINDOW_MS)
+  if (row.status !== R.RECORDED) return soon // REVERSED/RESOLVED: sólo queda el sello
+  const late = nextLateCheck(ledgerBase(row), now)
+  return late < soon ? late : soon
 }
 const pesos = (cents: number) => fromStripeAmount(cents).toFixed(2)
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error)).slice(0, 500)
-/** Stripe contestó «no» a la solicitud: la devolución NO existe (evidencia, no silencio). */
-const stripeRejected = (error: unknown) => (error as { type?: string } | null)?.type === 'StripeInvalidRequestError'
+/**
+ * Stripe contestó «no» a la solicitud: la devolución NO existe (evidencia, no silencio). Sólo un 400/404: un 409
+ * (`idempotency_key_in_use` tras los reintentos del SDK) dice «hay otra con esta clave en vuelo», no «no existe» (fix r1 M1).
+ */
+const stripeRejected = (error: unknown) => {
+  const e = error as { type?: string; statusCode?: number } | null
+  return e?.type === 'StripeInvalidRequestError' && (e.statusCode === 400 || e.statusCode === 404)
+}
 
 type Row = OnlineOrderCardRefund
 type Cur = { row: Row; alerted: boolean }
@@ -155,13 +177,18 @@ const afterStripe = (to: R, row: Row, now: Date) => ({ nextCheckAt: to === R.PEN
 async function send(cur: Cur, now: Date): Promise<void> {
   const won = await prisma.onlineOrderCardRefund.updateMany({
     where: { id: cur.row.id, status: R.REQUESTED },
-    data: { status: R.SENDING, nextCheckAt: nextPendingCheck(cur.row.createdAt, now) },
+    data: { status: R.SENDING, nextCheckAt: nextPendingCheck(cur.row.createdAt, now), lastSentAt: now },
   })
   if (won.count !== 1) {
     cur.row = (await load(cur.row.id))!
     return
   }
-  cur.row = { ...cur.row, status: R.SENDING, nextCheckAt: nextPendingCheck(cur.row.createdAt, now) }
+  cur.row = { ...cur.row, status: R.SENDING, nextCheckAt: nextPendingCheck(cur.row.createdAt, now), lastSentAt: now }
+  await callStripeRefund(cur, now)
+}
+
+/** El envío a Stripe de una fila ya `SENDING`, con la MISMA clave siempre (Stripe repite o crea exactamente una). */
+async function callStripeRefund(cur: Cur, now: Date): Promise<void> {
   const { orderId, paymentIntentId, merchant } = await chargeOf(cur.row)
   let result
   try {
@@ -191,6 +218,24 @@ async function findSent(cur: Cur, now: Date): Promise<void> {
   if (found) {
     const to = STATUS_OF[found.status]
     await moveTo(cur, to, { stripeRefundId: found.refundId, lastError: null, ...afterStripe(to, cur.row, now) })
+    return
+  }
+  // Ruling r1: Stripe confirmó (todas las páginas) que no la tiene y el último envío ya tiene más de 5 min → se re-envía con la
+  // MISMA clave. El CAS sobre `lastSentAt` deja un solo re-envío por pasada aunque dos ejecutores lleguen a la vez.
+  const lastSent = cur.row.lastSentAt ?? cur.row.createdAt
+  if (now.getTime() - lastSent.getTime() > RESEND_AFTER_MS) {
+    const won = await prisma.onlineOrderCardRefund.updateMany({
+      where: { id: cur.row.id, status: R.SENDING, stripeRefundId: null, lastSentAt: cur.row.lastSentAt },
+      data: { lastSentAt: now, nextCheckAt: nextPendingCheck(cur.row.createdAt, now) },
+    })
+    if (won.count === 1) {
+      cur.row = { ...cur.row, lastSentAt: now, nextCheckAt: nextPendingCheck(cur.row.createdAt, now) }
+      logger.warn('⚠️ [OnlineOrderCardRefund] Stripe no tiene la devolución: se re-envía con la misma clave', { cardRefundId: cur.row.id })
+      await callStripeRefund(cur, now)
+      if (cur.row.status === R.SENDING) await maybeAlertStuck(cur, now, 'SENDING_RESENT')
+      return
+    }
+    cur.row = (await load(cur.row.id))!
     return
   }
   await touch(cur, nextPendingCheck(cur.row.createdAt, now))
@@ -251,11 +296,14 @@ async function record(cur: Cur, now: Date): Promise<void> {
     idempotencyKey: `oocr_${cur.row.id}`,
     viaOnlineOrders: true,
     platformFeeRefundCents: cur.row.feeRefundedCents!,
+    // Fix r1: su propio monto ya está apartado en el candado compartido; sin esto se rechazaría a sí misma.
+    excludeCardRefundId: cur.row.id,
   })
   // Corto: la reversa del sello va enseguida; si falla, el recorrido la retoma al minuto. Sólo quien gana el CAS anota (el otro
   // ejecutor recibió el MISMO renglón por la llave).
   const won = await moveTo(cur, R.RECORDED, {
     refundPaymentId: ledger.refundId,
+    recordedAt: now,
     lastError: null,
     nextCheckAt: new Date(now.getTime() + MIN),
   })
@@ -282,9 +330,14 @@ async function record(cur: Cur, now: Date): Promise<void> {
 async function reverseStamp(cur: Cur, now: Date): Promise<void> {
   const { orderId } = await chargeOf(cur.row)
   await reverseStampForOrder(cur.row.venueId, orderId)
+  // También en REVERSED/RESOLVED: la venta sigue devuelta. Ésas ya no se revisan después.
   await prisma.onlineOrderCardRefund.updateMany({
-    where: { id: cur.row.id, status: R.RECORDED, stampReversedAt: null },
-    data: { stampReversedAt: now, nextCheckAt: nextLateCheck(cur.row.createdAt, now), lastError: null },
+    where: { id: cur.row.id, status: cur.row.status, stampReversedAt: null },
+    data: {
+      stampReversedAt: now,
+      nextCheckAt: cur.row.status === R.RECORDED ? nextLateCheck(ledgerBase(cur.row), now) : NEVER_AGAIN,
+      lastError: null,
+    },
   })
   cur.row = (await load(cur.row.id))!
 }
@@ -293,7 +346,7 @@ async function reverseStamp(cur: Cur, now: Date): Promise<void> {
 async function reviewLate(cur: Cur, now: Date): Promise<void> {
   const { orderId, paymentIntentId, merchant } = await chargeOf(cur.row)
   const state = await getProvider(merchant).getRefund(merchant, cur.row.stripeRefundId!)
-  if (state.status !== 'FAILED' && state.status !== 'CANCELED') return touch(cur, nextLateCheck(cur.row.createdAt, now))
+  if (state.status !== 'FAILED' && state.status !== 'CANCELED') return touch(cur, nextLateCheck(ledgerBase(cur.row), now))
   await reverseRecordedRefund(cur, { orderId, paymentIntentId, failureReason: state.failureReason ?? state.status.toLowerCase() }, now)
 }
 
@@ -311,7 +364,7 @@ async function reverseRecordedRefund(cur: Cur, s: { orderId: string; paymentInte
     }
     const moved = await tx.onlineOrderCardRefund.updateMany({
       where: { id: row.id, status: R.RECORDED },
-      data: { status: R.REVERSED, lastError: s.failureReason },
+      data: { status: R.REVERSED, lastError: s.failureReason, nextCheckAt: row.stampReversedAt ? NEVER_AGAIN : now },
     })
     if (moved.count !== 1) return false
     await tx.onlineOrderCardRefundReversal.create({
@@ -430,21 +483,25 @@ async function advance(id: string, now: Date): Promise<{ status: R; alerted: boo
       case R.SUCCEEDED:
         break
       case R.RECORDED:
-        if (!cur.row.stampReversedAt) await reverseStamp(cur, now)
+        // Fix r1 M2: la revisión tardía PRIMERO; un sello que falla siempre nunca tapa la detección de un fallo de Stripe.
         await reviewLate(cur, now)
         break
+      case R.REVERSED:
+      case R.RESOLVED:
+        if (cur.row.stampReversedAt) return { status: cur.row.status, alerted: false }
+        break // sólo queda la reversa del sello
       default:
-        return { status: cur.row.status, alerted: false } // FAILED, CANCELED, REVERSED, RESOLVED: ya terminó
+        return { status: cur.row.status, alerted: false } // FAILED, CANCELED: ya terminó
     }
     if (cur.row.status === R.SUCCEEDED) await record(cur, now)
-    if (cur.row.status === R.RECORDED && !cur.row.stampReversedAt) await reverseStamp(cur, now)
+    if (WITH_LEDGER.includes(cur.row.status) && !cur.row.stampReversedAt) await reverseStamp(cur, now)
     return { status: cur.row.status, alerted: cur.alerted }
   } catch (error) {
     const lastError = errorText(error)
     await prisma.onlineOrderCardRefund
       .updateMany({
         where: { id: cur.row.id, status: cur.row.status },
-        data: { lastError, nextCheckAt: nextPendingCheck(cur.row.createdAt, now) },
+        data: { lastError, nextCheckAt: nextCheckAfterError(cur.row, now) },
       })
       .catch(() => undefined)
     cur.row = { ...cur.row, lastError }
@@ -544,13 +601,10 @@ export async function refundCardOnlineOrder(i: {
       select: { id: true },
     })
     if (!payment) throw new ConflictError('No se encontró el cobro de la tarjeta de este pedido.', 'CARD_PAYMENT_NOT_FOUND')
+    // Ruling 2 + fix r1: lo que queda por devolver del cobro de Stripe YA descuenta todo REFUND del libro (también un «Cambio») y
+    // lo apartado por devoluciones a la tarjeta sin renglón todavía: el candado compartido lo calcula para todos los caminos.
     const cobro = await bloquearCobroParaReembolso(tx, { venueId: i.venueId, paymentId: payment.id, expectedOrderId: i.orderId })
-    // Ruling 2: lo reservado por filas sin renglón todavía (con el paso 2 es 0, pero la regla es ésta).
-    const reservado = await tx.onlineOrderCardRefund.aggregate({
-      where: { chargeId: charge.id, status: { in: NO_LEDGER_YET } },
-      _sum: { amountCents: true },
-    })
-    const disponible = cobro.remainingBeforeCents - (reservado._sum.amountCents ?? 0)
+    const disponible = cobro.remainingBeforeCents
     if (amountCents > disponible) {
       throw new BadRequestError(
         `No se puede devolver $${pesos(amountCents)}: de este pedido sólo quedan $${pesos(Math.max(0, disponible))} por devolver.`,

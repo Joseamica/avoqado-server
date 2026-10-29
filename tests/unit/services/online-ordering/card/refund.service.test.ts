@@ -69,6 +69,7 @@ let seq = 0
 const matches = (row: Row, where: Record<string, any> = {}): boolean =>
   Object.entries(where).every(([k, v]) => {
     if (k === 'chargeId_key') return row.chargeId === v.chargeId && row.key === v.key
+    if (k === 'OR') return (v as Record<string, any>[]).some(sub => matches(row, sub))
     // El filtro por relación (`charge: { onlineOrder: { orderId } }`): en este doble el único cargo es ch1, del pedido ord1.
     if (k === 'charge') return row.chargeId === 'ch1' && v?.onlineOrder?.orderId === 'ord1'
     if (v && typeof v === 'object' && !(v instanceof Date)) {
@@ -108,6 +109,8 @@ const cardRefund = {
       stampReversedAt: null,
       alertedAt: null,
       lastError: null,
+      recordedAt: null,
+      lastSentAt: null,
       note: null,
       ...data,
     }
@@ -173,6 +176,8 @@ const seed = (o: Row): Row => {
     nextCheckAt: NOW,
     lastError: null,
     alertedAt: null,
+    recordedAt: null,
+    lastSentAt: null,
     createdAt: NOW,
     ...o,
   }
@@ -261,6 +266,7 @@ beforeEach(() => {
     status: 'COMPLETED',
   }))
   refund.mockResolvedValue(created('SUCCEEDED'))
+  ;(reverseStampForOrder as jest.Mock).mockResolvedValue({ reversed: true })
   getRefund.mockResolvedValue(stateOf('SUCCEEDED'))
   listRefunds.mockResolvedValue([])
   getApplicationFeeRefundedCents.mockResolvedValue(290)
@@ -290,6 +296,7 @@ describe('refundCardOnlineOrder', () => {
       idempotencyKey: `oocr_${row.id}`,
       viaOnlineOrders: true,
       platformFeeRefundCents: 290,
+      excludeCardRefundId: row.id,
     })
     expect(row).toMatchObject({
       status: 'RECORDED',
@@ -384,11 +391,31 @@ describe('refundCardOnlineOrder', () => {
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_FAILED' }))
   })
 
-  it('Stripe rechaza la solicitud (StripeInvalidRequestError) → FAILED con su motivo: no se movió dinero', async () => {
-    refund.mockRejectedValue(Object.assign(new Error('Charge ch_1 has been charged back'), { type: 'StripeInvalidRequestError' }))
+  it.each([400, 404])(
+    'Stripe rechaza la solicitud (StripeInvalidRequestError %s) → FAILED con su motivo: no se movió dinero',
+    async code => {
+      refund.mockRejectedValue(
+        Object.assign(new Error('Charge ch_1 has been charged back'), { type: 'StripeInvalidRequestError', statusCode: code }),
+      )
+      const r = await pedir()
+      expect(r.status).toBe('FAILED')
+      expect(get(r.cardRefundId)).toMatchObject({ status: 'FAILED', lastError: 'Charge ch_1 has been charged back' })
+    },
+  )
+
+  it('fix r1 M1: un 409 (idempotency_key_in_use tras los reintentos del SDK) NO es «no existe»: queda SENDING y se resuelve por listRefunds', async () => {
+    refund.mockRejectedValue(
+      Object.assign(new Error('There is currently another in-progress request using this Idempotent Key'), {
+        type: 'StripeInvalidRequestError',
+        statusCode: 409,
+      }),
+    )
     const r = await pedir()
-    expect(r.status).toBe('FAILED')
-    expect(get(r.cardRefundId)).toMatchObject({ status: 'FAILED', lastError: 'Charge ch_1 has been charged back' })
+    expect(r).toMatchObject({ status: 'UNKNOWN', cardRefundStatus: 'SENDING' })
+    listRefunds.mockResolvedValue([{ ...stateOf('SUCCEEDED', { refundId: 're_late' }), metadata: { cardRefundId: r.cardRefundId } }])
+    await expect(advanceCardRefund(r.cardRefundId, at(MIN))).resolves.toBe('RECORDED')
+    expect(get(r.cardRefundId).stripeRefundId).toBe('re_late')
+    expect(refund).toHaveBeenCalledTimes(1)
   })
 
   it('la respuesta de Stripe se pierde → UNKNOWN: la fila queda SENDING (su monto reservado) con lastError', async () => {
@@ -407,15 +434,35 @@ describe('advanceCardRefund', () => {
     expect(get(found.id).stripeRefundId).toBe('re_found')
     expect(refund).not.toHaveBeenCalled()
 
-    const lost = seed({ status: 'SENDING' })
+    // Ruling r1: ausente en Stripe y su último envío de hace más de 5 min → se re-envía con la MISMA clave, uno por pasada.
+    const lost = seed({ status: 'SENDING', lastSentAt: NOW })
     listRefunds.mockResolvedValue([{ ...stateOf('SUCCEEDED', { refundId: 're_other' }), metadata: { cardRefundId: 'otra' } }])
-    await expect(advanceCardRefund(lost.id, at(5 * MIN))).resolves.toBe('SENDING')
-    expect(get(lost.id).alertedAt).toBeNull()
-    await expect(advanceCardRefund(lost.id, at(HOUR))).resolves.toBe('SENDING')
-    await expect(advanceCardRefund(lost.id, at(HOUR + 15 * MIN))).resolves.toBe('SENDING')
-    expect(get(lost.id)).toMatchObject({ status: 'SENDING', stripeRefundId: null, alertedAt: at(HOUR), nextCheckAt: at(HOUR + 30 * MIN) })
-    expect((logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'ONLINE_ORDER_CARD_REFUND_STUCK')).toHaveLength(1)
+    refund.mockRejectedValue(Object.assign(new Error('Stripe no responde'), { type: 'StripeConnectionError' }))
+    await expect(advanceCardRefund(lost.id, at(5 * MIN))).resolves.toBe('SENDING') // justo 5 min: todavía no
     expect(refund).not.toHaveBeenCalled()
+    expect(get(lost.id).alertedAt).toBeNull()
+    await expect(advanceCardRefund(lost.id, at(HOUR))).rejects.toThrow('Stripe no responde')
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(refund.mock.calls[0][1]).toMatchObject({ idempotencyKey: `online-order:ord1:refund:${lost.id}`, amount: 25_000 })
+    await expect(advanceCardRefund(lost.id, at(HOUR + 15 * MIN))).rejects.toThrow('Stripe no responde')
+    expect(refund).toHaveBeenCalledTimes(2)
+    expect(get(lost.id)).toMatchObject({ status: 'SENDING', stripeRefundId: null, alertedAt: at(HOUR), lastSentAt: at(HOUR + 15 * MIN) })
+    expect((logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'ONLINE_ORDER_CARD_REFUND_STUCK')).toHaveLength(1)
+  })
+
+  it('ruling r1: SENDING ausente re-enviado cuando Stripe sí contesta → toma el id y sigue; nunca más de un re-envío por pasada', async () => {
+    const lost = seed({ status: 'SENDING', lastSentAt: at(-10 * MIN) })
+    refund.mockResolvedValue(created('SUCCEEDED', 're_resent'))
+    await expect(advanceCardRefund(lost.id, NOW)).resolves.toBe('RECORDED')
+    expect(refund).toHaveBeenCalledTimes(1)
+    expect(get(lost.id)).toMatchObject({ stripeRefundId: 're_resent', lastSentAt: NOW })
+
+    // Dos ejecutores a la vez sobre la MISMA fila ausente: sólo uno gana el CAS del re-envío.
+    refund.mockClear()
+    const twin = seed({ status: 'SENDING', lastSentAt: at(-10 * MIN) })
+    refund.mockResolvedValue(created('PENDING', 're_twin'))
+    await Promise.all([advanceCardRefund(twin.id, NOW), advanceCardRefund(twin.id, NOW)])
+    expect(refund).toHaveBeenCalledTimes(1)
   })
 
   it('pedido con sello previo: la devolución revierte el sello una vez, también si se repite', async () => {
@@ -431,10 +478,11 @@ describe('advanceCardRefund', () => {
   it('REFUND confirmado y la reversa del sello falla → la siguiente pasada la revierte una sola vez y fija stampReversedAt', async () => {
     ;(reverseStampForOrder as jest.Mock).mockRejectedValueOnce(new Error('se murió el proceso'))
     const r = await pedir()
-    expect(get(r.cardRefundId)).toMatchObject({ status: 'RECORDED', stampReversedAt: null, nextCheckAt: at(MIN) })
+    // fix r1 M3: el error de una RECORDED espera min(revisión tardía, 15 min).
+    expect(get(r.cardRefundId)).toMatchObject({ status: 'RECORDED', stampReversedAt: null, nextCheckAt: at(15 * MIN), recordedAt: NOW })
 
-    await sweepCardRefunds(at(MIN), readEntry)
-    expect(get(r.cardRefundId).stampReversedAt).toEqual(at(MIN))
+    await sweepCardRefunds(at(15 * MIN), readEntry)
+    expect(get(r.cardRefundId).stampReversedAt).toEqual(at(15 * MIN))
     await sweepCardRefunds(at(HOUR), readEntry)
     expect(reverseStampForOrder).toHaveBeenCalledTimes(2) // la que falló + la que quedó
     expect(issueRefund).toHaveBeenCalledTimes(1)
@@ -445,6 +493,35 @@ describe('advanceCardRefund', () => {
     await expect(advanceCardRefund(row.id, at(MIN))).resolves.toBe('RECORDED')
     expect(getApplicationFeeRefundedCents).not.toHaveBeenCalled() // la comisión ya estaba guardada: no se vuelve a leer
     expect((issueRefund as jest.Mock).mock.calls[0][0]).toMatchObject({ idempotencyKey: `oocr_${row.id}`, platformFeeRefundCents: 290 })
+  })
+
+  it('fix r1 M2: un sello que falla siempre no tapa la revisión tardía: Stripe dice failed → REVERSED; el sello se retoma después', async () => {
+    ;(reverseStampForOrder as jest.Mock).mockRejectedValue(new Error('el candado del cliente no se suelta'))
+    const r = await pedir()
+    getRefund.mockResolvedValue(stateOf('FAILED'))
+    const pasada = await sweepCardRefunds(at(15 * MIN), readEntry)
+    expect(pasada.errors).toBe(1) // el sello volvió a fallar…
+    expect(get(r.cardRefundId).status).toBe('REVERSED') // …pero el fallo tardío ya se detectó
+    expect(reversals).toHaveLength(1)
+    ;(reverseStampForOrder as jest.Mock).mockResolvedValue({ reversed: true })
+    await sweepCardRefunds(at(30 * MIN), readEntry)
+    expect(get(r.cardRefundId)).toMatchObject({ status: 'REVERSED', stampReversedAt: at(30 * MIN) })
+    getRefund.mockClear()
+    await sweepCardRefunds(at(400 * DAY), readEntry)
+    expect(getRefund).not.toHaveBeenCalled()
+  })
+
+  it('fix r1 M3: el calendario tardío cuenta desde que quedó RECORDED (no desde que se pidió) y un error no lo alarga más de 15 min', async () => {
+    const row = seed({ status: 'PENDING', stripeRefundId: 're_slow', createdAt: at(-5 * DAY), nextCheckAt: at(-MIN) })
+    await expect(advanceCardRefund(row.id, NOW)).resolves.toBe('RECORDED')
+    expect(get(row.id)).toMatchObject({ recordedAt: NOW, nextCheckAt: at(HOUR) })
+    getRefund.mockRejectedValue(new Error('Stripe no responde'))
+    await sweepCardRefunds(at(HOUR), readEntry)
+    expect(get(row.id).nextCheckAt).toEqual(at(HOUR + 15 * MIN))
+    await sweepCardRefunds(at(30 * DAY), readEntry)
+    expect(get(row.id).nextCheckAt).toEqual(at(30 * DAY + 15 * MIN)) // dentro del margen: sigue intentando
+    await sweepCardRefunds(at(32 * DAY), readEntry)
+    expect(get(row.id).nextCheckAt.getTime()).toBeGreaterThan(at(365 * DAY).getTime()) // pasado 30 días + margen: se deja
   })
 
   it('RECORDED reciente: se vuelve a revisar a 1 h, 1 día, 3, 7 y 30 días; luego deja de revisarse', async () => {

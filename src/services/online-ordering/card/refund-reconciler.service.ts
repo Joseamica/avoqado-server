@@ -9,7 +9,10 @@ import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { CARD_RECONCILE_BATCH } from '../constants'
 import type { ReadCandidates } from '../types'
+import { OnlineOrderCardRefundStatus } from '@prisma/client'
 import { SWEPT_CARD_REFUND_STATUSES, advanceCardRefundForSweep } from './refund.service'
+
+const SEALED_STATUSES = [OnlineOrderCardRefundStatus.REVERSED, OnlineOrderCardRefundStatus.RESOLVED]
 
 export interface CardRefundSweepResult {
   scanned: number
@@ -22,7 +25,11 @@ export async function sweepCardRefunds(now: Date, readEntry: ReadCandidates): Pr
   const result: CardRefundSweepResult = { scanned: 0, advanced: 0, alerted: 0, errors: 0 }
   const due = await readEntry(() =>
     prisma.onlineOrderCardRefund.findMany({
-      where: { status: { in: SWEPT_CARD_REFUND_STATUSES }, nextCheckAt: { lte: now } },
+      where: {
+        nextCheckAt: { lte: now },
+        // Las que ya no se revisan (REVERSED/RESOLVED) sólo vuelven si les falta la reversa del sello (fix r1 M2).
+        OR: [{ status: { in: SWEPT_CARD_REFUND_STATUSES } }, { status: { in: SEALED_STATUSES }, stampReversedAt: null }],
+      },
       orderBy: [{ nextCheckAt: 'asc' }, { id: 'asc' }],
       take: CARD_RECONCILE_BATCH,
       select: { id: true, status: true },
