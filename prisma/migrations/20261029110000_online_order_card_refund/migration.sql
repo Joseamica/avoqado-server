@@ -20,6 +20,8 @@ CREATE TABLE "OnlineOrderCardRefund" (
     "nextCheckAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "lastError" TEXT,
     "alertedAt" TIMESTAMP(3),
+    "lastSentAt" TIMESTAMP(3),
+    "recordedAt" TIMESTAMP(3),
     "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
     "updatedAt" TIMESTAMP(3) NOT NULL,
 

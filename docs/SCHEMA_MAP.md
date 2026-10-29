@@ -167,12 +167,12 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `DeviceToken` → `schema.prisma:L9739`
 - `DigitalReceipt` → `schema.prisma:L4923`
 - `Discount` → `schema.prisma:L9101`
-- `DocumentRequest` → `schema.prisma:L20507`
-- `DocumentRequestDelivery` → `schema.prisma:L20571`
-- `DocumentRequestFile` → `schema.prisma:L20549`
-- `DocumentRequestSubmission` → `schema.prisma:L20591`
-- `DocumentRequestSubmissionFile` → `schema.prisma:L20604`
-- `DocumentRequestVenueLink` → `schema.prisma:L20613`
+- `DocumentRequest` → `schema.prisma:L20511`
+- `DocumentRequestDelivery` → `schema.prisma:L20575`
+- `DocumentRequestFile` → `schema.prisma:L20553`
+- `DocumentRequestSubmission` → `schema.prisma:L20595`
+- `DocumentRequestSubmissionFile` → `schema.prisma:L20608`
+- `DocumentRequestVenueLink` → `schema.prisma:L20617`
 - `EcommerceMerchant` → `schema.prisma:L6484`
 - `EmailQuotaLedger` → `schema.prisma:L8258`
 - `EmailSuppression` → `schema.prisma:L8246`
@@ -277,7 +277,7 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `OnboardingProgress` → `schema.prisma:L1636`
 - `OnlineOrder` → `schema.prisma:L20316`
 - `OnlineOrderCardRefund` → `schema.prisma:L20445`
-- `OnlineOrderCardRefundReversal` → `schema.prisma:L20484`
+- `OnlineOrderCardRefundReversal` → `schema.prisma:L20488`
 - `OnlineOrderCharge` → `schema.prisma:L20369`
 - `OnlineOrderingSettings` → `schema.prisma:L20290`
 - `Order` → `schema.prisma:L4002`

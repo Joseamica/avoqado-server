@@ -20470,6 +20470,10 @@ model OnlineOrderCardRefund {
   lastError        String?
   /// Ya se alertó 🚨 que sigue SENDING sin id (una sola vez).
   alertedAt        DateTime?
+  /// El último envío a Stripe (el primero y cada re-envío de un SENDING que Stripe confirma que no tiene).
+  lastSentAt       DateTime?
+  /// Cuándo nació el renglón del libro: de aquí se cuenta la revisión tardía (1 h … 30 días).
+  recordedAt       DateTime?
 
   reversal OnlineOrderCardRefundReversal?
 
