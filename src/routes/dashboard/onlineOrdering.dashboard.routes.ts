@@ -7,6 +7,9 @@ import * as orders from '@/controllers/mobile/onlineOrders.mobile.controller'
 import * as admin from '@/controllers/dashboard/onlineOrdering.dashboard.controller'
 import {
   acceptSchema,
+  cardRefundResolveSchema,
+  cardRefundSchema,
+  cardRefundsListSchema,
   inboxSchema,
   menuAvailabilitySchema,
   menuCategoriesSchema,
@@ -50,5 +53,20 @@ router.post('/orders/:orderId/reject', validateRequest(rejectSchema), checkPermi
 router.post('/orders/:orderId/ready', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.ready)
 router.post('/orders/:orderId/delivered', validateRequest(orderActionSchema), checkPermission('orders:update'), orders.delivered)
 router.post('/orders/:orderId/cancel', validateRequest(orderActionSchema), checkPermission('orders:cancel-unpaid'), orders.cancel)
+
+// Fase 2 (T10): devolver a la tarjeta y «Devolver por otro medio». El dinero ya cobrado se devuelve aunque se pierda el plan.
+router.get(
+  '/orders/:orderId/card-refunds',
+  validateRequest(cardRefundsListSchema),
+  checkPermission('payments:read'),
+  admin.listCardRefundsHandler,
+)
+router.post('/orders/:orderId/card-refund', validateRequest(cardRefundSchema), checkPermission('payments:refund'), admin.refundCardHandler)
+router.post(
+  '/orders/:orderId/card-refund/:refundId/resolve',
+  validateRequest(cardRefundResolveSchema),
+  checkPermission('payments:refund'),
+  admin.resolveCardRefundHandler,
+)
 
 export default router

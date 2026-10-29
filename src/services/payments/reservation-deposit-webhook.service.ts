@@ -7,6 +7,7 @@ import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.se
 import { finalizeVenueCheckout } from '@/services/dashboard/venueCheckout.service'
 import { fulfillPurchase as fulfillCreditPackPurchase } from '@/services/dashboard/creditPack.public.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
+import { handleStripeRefundEvent } from '@/services/online-ordering/card/refund.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -682,7 +683,23 @@ async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeI
   }
 }
 
+/**
+ * Fase 2 (T10): `refund.created|updated|failed` de la cuenta conectada. El aviso sólo dispara una relectura de Stripe
+ * (`handleStripeRefundEvent`); con el reclamo de siempre: si la relectura truena, se suelta y Stripe reintenta (y el recorrido
+ * de cada minuto lo cubre si el aviso nunca vuelve). ponytail: `isDone` siempre verdadero — un aviso es sólo un disparador.
+ */
+const STRIPE_REFUND_EVENTS = new Set(['refund.created', 'refund.updated', 'refund.failed'])
+
 export async function processStripeConnectWebhookEvent(event: VerifiedWebhookEvent) {
+  if (STRIPE_REFUND_EVENTS.has(event.type)) {
+    await withClaimedEvent(
+      event,
+      'refund',
+      () => handleStripeRefundEvent(event),
+      async () => true,
+    )
+    return
+  }
   const metadata = (event.data as { metadata?: Record<string, string> | null } | null)?.metadata
   if (metadata?.type === 'online_order') {
     await handleOnlineOrderStripeEvent(event, metadata.chargeId)

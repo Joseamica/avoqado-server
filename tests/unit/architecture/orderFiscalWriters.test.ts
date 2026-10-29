@@ -1241,6 +1241,10 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
+  // Fase 2 (T10): decidir la devolución a la tarjeta, la reversa de un fallo tardío y «Devolver por otro medio», cada una con la Order.
+  'src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder': 1,
+  'src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund': 1,
+  'src/services/online-ordering/card/refund.service.ts#resolveReversedCardRefund': 1,
   // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,

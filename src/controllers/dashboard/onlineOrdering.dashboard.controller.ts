@@ -1,10 +1,19 @@
 import type { NextFunction, Request, Response } from 'express'
+import { Prisma } from '@prisma/client'
+import { UnauthorizedError } from '@/errors/AppError'
+import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { settingsView } from '@/services/online-ordering/settingsView.service'
 
 const staffOf = (req: Request): string | null => (req as any).authContext?.userId ?? null
+/** Mover dinero exige saber quién: sin usuario autenticado no hay devolución. */
+const requireStaff = (req: Request): string => {
+  const staffId = staffOf(req)
+  if (!staffId) throw new UnauthorizedError('Inicia sesión para devolver un cobro')
+  return staffId
+}
 
 /** 1b: además de los ajustes, el estado de la tienda (el mismo cálculo que `/info`) y qué falta para poder encenderla (R18). */
 export const getSettingsHandler = async (req: Request, res: Response, next: NextFunction) => {
@@ -60,6 +69,54 @@ export const listMenuProductsHandler = async (req: Request, res: Response, next:
       success: true,
       data: await listOnlineMenuProducts({ venueId: req.params.venueId, categoryId, search, cursor, limit }),
     })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** Fase 2 (T10): las devoluciones a la tarjeta de un pedido (estado, y si falló después, «Devolver por otro medio»). */
+export const listCardRefundsHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    return res.json({ success: true, data: await listCardRefunds(venueId, orderId) })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** Fase 2 (T10): devolver a la tarjeta. El cuerpo ya viene validado por `cardRefundSchema` (monto en pesos). */
+export const refundCardHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId } = req.params
+    const { amount, reason, note, idempotencyKey } = req.body
+    const data = await refundCardOnlineOrder({
+      venueId,
+      orderId,
+      amount: new Prisma.Decimal(amount),
+      reason,
+      staffId: requireStaff(req),
+      idempotencyKey,
+      note: note ?? null,
+    })
+    return res.json({ success: true, data })
+  } catch (e) {
+    return next(e)
+  }
+}
+
+/** Fase 2 (T10): «Devolver por otro medio» (efectivo con caja abierta, o transferencia). */
+export const resolveCardRefundHandler = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId, orderId, refundId } = req.params
+    const data = await resolveReversedCardRefund({
+      venueId,
+      orderId,
+      cardRefundId: refundId,
+      method: req.body.method,
+      staffId: requireStaff(req),
+      note: req.body.note ?? null,
+    })
+    return res.json({ success: true, data })
   } catch (e) {
     return next(e)
   }

@@ -11,12 +11,22 @@ jest.mock('@/observability/jobContext', () => ({
 
 const NOW = new Date('2026-10-29T18:30:00.000Z')
 const EMPTY = { scanned: 0, finished: 0, released: 0, abandoned: 0, stuck: 0, errors: 0 }
+const REFUNDS = { scanned: 1, advanced: 1, alerted: 0, errors: 0 }
 
-function harness(reconcile = jest.fn().mockResolvedValue({ ...EMPTY, scanned: 2, finished: 1, released: 1 })) {
+function harness(
+  reconcile = jest.fn().mockResolvedValue({ ...EMPTY, scanned: 2, finished: 1, released: 1 }),
+  sweepRefunds = jest.fn().mockResolvedValue(REFUNDS),
+) {
   const cron = { start: jest.fn(), stop: jest.fn() }
   const retryEntry = jest.fn(async (op: () => Promise<unknown>) => op())
-  const job = new OnlineOrderCardReconcilerJob({ cron: cron as never, now: () => NOW, reconcile, retryEntry: retryEntry as never })
-  return { job, cron, reconcile, retryEntry }
+  const job = new OnlineOrderCardReconcilerJob({
+    cron: cron as never,
+    now: () => NOW,
+    reconcile,
+    sweepRefunds,
+    retryEntry: retryEntry as never,
+  })
+  return { job, cron, reconcile, sweepRefunds, retryEntry }
 }
 
 describe('online-order-card-reconciler.job', () => {
@@ -32,8 +42,10 @@ describe('online-order-card-reconciler.job', () => {
     )
 
     const h = harness()
-    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, scanned: 2, finished: 1, released: 1 })
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, scanned: 2, finished: 1, released: 1, refunds: REFUNDS })
     expect(h.reconcile).toHaveBeenCalledWith(NOW, expect.any(Function))
+    // T10: las devoluciones se recorren en la misma pasada, con la misma lectura con reintento.
+    expect(h.sweepRefunds).toHaveBeenCalledWith(NOW, h.reconcile.mock.calls[0][1])
     // La lectura que recibe el conciliador pasa por el reintento por conexión (y sólo ella).
     const readEntry = h.reconcile.mock.calls[0][1]
     await expect(readEntry(async () => 'filas')).resolves.toBe('filas')
@@ -49,7 +61,12 @@ describe('online-order-card-reconciler.job', () => {
     release(EMPTY)
     await first
     reconcile.mockRejectedValueOnce(new Error('la base se cayó'))
-    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, errors: 1 })
+    // Los cargos que truenan no frenan las devoluciones…
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, errors: 1, refunds: REFUNDS })
+    // …ni al revés.
+    h.sweepRefunds.mockRejectedValueOnce(new Error('Stripe no responde'))
+    reconcile.mockResolvedValueOnce(EMPTY)
+    await expect(h.job.checkNow()).resolves.toEqual({ ...EMPTY, refunds: { scanned: 0, advanced: 0, alerted: 0, errors: 1 } })
   })
 
   it('arranca y para el cron', () => {

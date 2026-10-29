@@ -71,6 +71,9 @@ jest.mock('@/controllers/dashboard/onlineOrdering.dashboard.controller', () => {
     setMenuAvailabilityHandler: respond,
     getMenuCategoriesHandler: respond,
     listMenuProductsHandler: respond,
+    listCardRefundsHandler: respond,
+    refundCardHandler: respond,
+    resolveCardRefundHandler: respond,
   }
 })
 
@@ -181,6 +184,27 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
     expect(r.body).toEqual({ perms: ['online-orders:pause'], plans: [], schemas: ['pauseSchema'] })
     const capa = (dashboardRouter as any).stack.find((l: any) => l.route?.path === '/pause' && l.route.methods.post)
     expect(capa.route.stack[capa.route.stack.length - 1].handle).toBe(mobileCtrl.pause)
+  })
+
+  it('T10: devolver a la tarjeta y «Devolver por otro medio» exigen payments:refund; verlas, payments:read; ninguna con plan', async () => {
+    const casos: Array<['get' | 'post', string, string, string]> = [
+      ['get', 'orders/ord1/card-refunds', 'payments:read', 'cardRefundsListSchema'],
+      ['post', 'orders/ord1/card-refund', 'payments:refund', 'cardRefundSchema'],
+      ['post', 'orders/ord1/card-refund/cr1/resolve', 'payments:refund', 'cardRefundResolveSchema'],
+    ]
+    for (const [method, path, perm, schema] of casos) {
+      const r = await request(app)[method](`${P}/${path}`)
+      expect({ path, ...r.body }).toEqual({ path, perms: [perm], plans: [], schemas: [schema] })
+    }
+  })
+
+  it('T10: sin payments:refund ⇒ 403 al devolver y al resolver (aunque pueda ver y mover pedidos)', async () => {
+    for (const path of ['orders/ord1/card-refund', 'orders/ord1/card-refund/cr1/resolve']) {
+      const sin = await request(app).post(`${P}/${path}`).set('x-test-permisos', 'orders:read,orders:update,payments:read')
+      expect({ path, status: sin.status }).toEqual({ path, status: 403 })
+      const con = await request(app).post(`${P}/${path}`).set('x-test-permisos', 'payments:refund')
+      expect({ path, status: con.status }).toEqual({ path, status: 200 })
+    }
   })
 
   it('1b: pausar desde el panel con SÓLO online-orders:pause ⇒ 200; sin él ⇒ 403', async () => {

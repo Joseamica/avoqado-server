@@ -103,6 +103,35 @@ export const rejectSchema = z.object({
   }),
 })
 export const pauseSchema = z.object({ params: venueParams, body: z.object({ minutes: floorPauseMinutes }) })
+/** Fase 2 (T10): devolver a la tarjeta. El monto va en PESOS (como todo el panel), con hasta dos decimales. */
+export const cardRefundSchema = z.object({
+  params: orderParams,
+  body: z.object({
+    amount: z.preprocess(
+      v => (typeof v === 'number' ? String(v) : v),
+      z
+        .string({ required_error: 'El monto es obligatorio', invalid_type_error: 'El monto debe ser un número en pesos' })
+        .regex(/^\d{1,7}(\.\d{1,2})?$/, 'El monto debe estar en pesos, con hasta dos decimales')
+        .refine(v => Number(v) > 0, 'El monto debe ser mayor que cero'),
+    ),
+    reason: z.enum(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'], {
+      errorMap: () => ({ message: 'Motivo inválido' }),
+    }),
+    note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
+    idempotencyKey: z
+      .string({ required_error: 'Falta la llave de idempotencia' })
+      .regex(/^[A-Za-z0-9_-]{8,64}$/, 'La llave de idempotencia debe tener de 8 a 64 caracteres alfanuméricos, guiones o guiones bajos'),
+  }),
+})
+/** «Devolver por otro medio» de una devolución a la tarjeta que falló después (sólo efectivo o transferencia). */
+export const cardRefundResolveSchema = z.object({
+  params: orderParams.extend({ refundId: z.string().min(1, 'Devolución inválida') }),
+  body: z.object({
+    method: z.enum(['CASH', 'BANK_TRANSFER'], { errorMap: () => ({ message: 'El método debe ser efectivo o transferencia' }) }),
+    note: z.string().trim().max(200, 'La nota admite hasta 200 caracteres').optional(),
+  }),
+})
+export const cardRefundsListSchema = z.object({ params: orderParams })
 /** Rappi 2b: la lista «Rappi · por cobrar» de la bandeja (sin filtros: el servidor la acota). */
 export const deliveryCashSchema = z.object({
   params: venueParams,
