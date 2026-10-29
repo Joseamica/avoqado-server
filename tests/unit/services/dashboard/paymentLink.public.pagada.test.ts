@@ -117,25 +117,41 @@ describe('getPaymentLinkByShortCode — liga de un solo uso ya cobrada', () => {
     expect(pago.where).toEqual({ processorId: 'pi_123', venueId: 'v1' })
   })
 
-  it('Mercado Pago (sin recibo del proveedor): el pago por su id y el recibo digital de Avoqado', async () => {
+  it('🔴 Mercado Pago (sin recibo del proveedor): el pago por su id y SIN el recibo de Avoqado (su llave abre la factura)', async () => {
     ;(prismaMock.checkoutSession.findFirst as jest.Mock).mockResolvedValue({ ...COBRO_STRIPE, sessionId: 'cs_mp_1', paymentId: 'pay-mp' })
-    ;(prismaMock.payment.findFirst as jest.Mock).mockResolvedValue({ id: 'pay-mp', receiptUrl: null, cardBrand: null, maskedPan: null })
+    ;(prismaMock.payment.findFirst as jest.Mock).mockResolvedValue({ receiptUrl: null, cardBrand: null, maskedPan: null })
 
     const err = await errorDe({ ecommerceMerchant: { provider: { code: 'MERCADO_PAGO' } } })
 
     const pago = (prismaMock.payment.findFirst as jest.Mock).mock.calls.map((c: unknown[]) => c[0])[0] as any
     expect(pago.where).toEqual({ id: 'pay-mp', venueId: 'v1' })
-    expect(generateDigitalReceipt).toHaveBeenCalledWith('pay-mp')
-    expect(err.details.payment).toEqual({
-      cardBrand: null,
-      last4: null,
-      receiptUrl: 'https://dashboard.example.com/receipts/public/recibo-avq-1',
+    // Ni se genera ni se busca el recibo digital: con sólo el shortCode no se entrega una llave que abre el CFDI.
+    expect(generateDigitalReceipt).not.toHaveBeenCalled()
+    expect(err.details.payment).toEqual({ cardBrand: null, last4: null, receiptUrl: null })
+  })
+
+  it('🔴 un recibo de Avoqado guardado en el pago tampoco sale', async () => {
+    ;(prismaMock.checkoutSession.findFirst as jest.Mock).mockResolvedValue(COBRO_STRIPE)
+    ;(prismaMock.payment.findFirst as jest.Mock).mockResolvedValue({
+      receiptUrl: 'https://dashboard.example.com/receipts/public/llave-con-cfdi',
+      cardBrand: 'VISA',
+      maskedPan: '************4242',
     })
+
+    const err = await errorDe()
+
+    expect(err.details.payment.receiptUrl).toBeNull()
+    expect(JSON.stringify(err.details)).not.toContain('llave-con-cfdi')
   })
 
   it('no lleva datos de quien pagó ni el teléfono del negocio', async () => {
     ;(prismaMock.checkoutSession.findFirst as jest.Mock).mockResolvedValue(COBRO_STRIPE)
-    ;(prismaMock.payment.findFirst as jest.Mock).mockResolvedValue({ id: 'pay1', receiptUrl: null, cardBrand: 'VISA', maskedPan: '************4242' })
+    ;(prismaMock.payment.findFirst as jest.Mock).mockResolvedValue({
+      id: 'pay1',
+      receiptUrl: null,
+      cardBrand: 'VISA',
+      maskedPan: '************4242',
+    })
 
     const err = await errorDe()
 

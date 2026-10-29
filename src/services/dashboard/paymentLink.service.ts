@@ -1387,15 +1387,28 @@ export async function updatePaymentLinkBranding(
 
 /**
  * Lo que ve quien vuelve a abrir una liga de un solo uso ya cobrada: «Pagada», cuándo, cuánto y su recibo.
- * Sólo lo que ya mostraba la página de «Pago exitoso» (tarjeta enmascarada y recibo sin datos del cliente), sin
- * nombre, correo ni teléfono de quien pagó. Dos consultas acotadas: el último cobro completado y su pago.
+ * Tarjeta enmascarada, sin nombre, correo ni teléfono de quien pagó. Dos consultas acotadas: el último cobro completado
+ * y su pago.
+ *
+ * 🔴 Sólo el recibo del PROVEEDOR (el de Stripe), nunca el recibo digital de Avoqado que sí da `reciboParaElCliente`:
+ * aquí basta el shortCode (la liga se reenvía en chats) y la llave de ese recibo también abre la factura del cliente
+ * (`/receipt/:accessKey/cfdi`, con RFC y domicilio) y la autofactura de la venta (Codex, revisión de este cambio). La
+ * página de «Pago exitoso» sí lo da porque pide la sesión, que sólo tiene el navegador de quien pagó. Sin recibo del
+ * proveedor (Mercado Pago), la página dice «Pagada» sin botón.
  */
 async function ligaYaPagada(paymentLink: {
   id: string
   venueId: string
   title: string
   currency: string
-  venue: { name: string; slug: string; logo: string | null; primaryColor: string | null; timezone: string | null; paymentLinkBranding: unknown }
+  venue: {
+    name: string
+    slug: string
+    logo: string | null
+    primaryColor: string | null
+    timezone: string | null
+    paymentLinkBranding: unknown
+  }
 }) {
   const session = await prisma.checkoutSession.findFirst({
     where: { paymentLinkId: paymentLink.id, status: 'COMPLETED' },
@@ -1406,7 +1419,7 @@ async function ligaYaPagada(paymentLink: {
     ? await prisma.payment.findFirst({
         where: { ...pagoDeLaSesion(session), venueId: paymentLink.venueId },
         orderBy: { createdAt: 'desc' },
-        select: { id: true, receiptUrl: true, cardBrand: true, maskedPan: true },
+        select: { receiptUrl: true, cardBrand: true, maskedPan: true },
       })
     : null
   return {
@@ -1421,7 +1434,8 @@ async function ligaYaPagada(paymentLink: {
       ? {
           cardBrand: payment.cardBrand,
           last4: payment.maskedPan ? payment.maskedPan.replace(/^[*]+/, '').slice(-4) : null,
-          receiptUrl: await reciboParaElCliente(payment),
+          // Hoy `Payment.receiptUrl` sólo guarda el `receipt_url` de Stripe; si algún día guardara uno de Avoqado, no sale.
+          receiptUrl: payment.receiptUrl && !payment.receiptUrl.includes('/receipts/public/') ? payment.receiptUrl : null,
         }
       : null,
   }

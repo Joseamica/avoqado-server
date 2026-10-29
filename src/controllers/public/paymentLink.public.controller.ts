@@ -34,7 +34,12 @@ export async function resolvePaymentLink(req: Request, res: Response) {
   } catch (error: any) {
     // Una liga pagada, vencida o inexistente es una respuesta normal: aviso sin el detalle (lleva la liga del recibo).
     if (error?.statusCode && error.statusCode < 500) {
-      logger.warn('Payment link not available', { shortCode: req.params.shortCode, statusCode: error.statusCode, code: error.code, message: error.message })
+      logger.warn('Payment link not available', {
+        shortCode: req.params.shortCode,
+        statusCode: error.statusCode,
+        code: error.code,
+        message: error.message,
+      })
     } else {
       logger.error('Error resolving payment link:', error)
     }
