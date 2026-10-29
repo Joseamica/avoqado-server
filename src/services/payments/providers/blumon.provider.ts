@@ -3,8 +3,11 @@ import { getBlumonEcommerceService } from '@/services/sdk/blumon-ecommerce.servi
 import { ProviderCapabilityError } from './not-implemented.error'
 import {
   AuthorizeCardPaymentParams,
+  AuthorizationState,
   AuthorizeCardPaymentResult,
+  CaptureParams,
   CheckoutSession,
+  CreateAuthorizationCheckoutParams,
   CreateCheckoutParams,
   EcommerceMerchantWithProvider,
   IEcommerceProvider,
@@ -16,6 +19,7 @@ import {
   TokenizeCardParams,
   TokenizeCardResult,
   VerifiedWebhookEvent,
+  VoidParams,
 } from './provider.interface'
 
 const PROVIDER_CODE = 'BLUMON'
@@ -99,5 +103,27 @@ export class BlumonProvider implements IEcommerceProvider {
       status: result.status,
       authorizationCode: result.authorizationCode,
     }
+  }
+
+  async createAuthorizationCheckout(
+    _merchant: EcommerceMerchantWithProvider,
+    _params: CreateAuthorizationCheckoutParams,
+  ): Promise<CheckoutSession> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'createAuthorizationCheckout')
+  }
+
+  async getAuthorization(
+    _merchant: EcommerceMerchantWithProvider,
+    _ref: { checkoutSessionId: string } | { paymentIntentId: string },
+  ): Promise<AuthorizationState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'getAuthorization')
+  }
+
+  async capture(_merchant: EcommerceMerchantWithProvider, _params: CaptureParams): Promise<AuthorizationState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'capture')
+  }
+
+  async voidAuthorization(_merchant: EcommerceMerchantWithProvider, _params: VoidParams): Promise<AuthorizationState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'voidAuthorization')
   }
 }

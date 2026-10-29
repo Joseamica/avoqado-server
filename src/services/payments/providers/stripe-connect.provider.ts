@@ -7,8 +7,11 @@ import logger from '@/config/logger'
 import { ProviderCapabilityError } from './not-implemented.error'
 import {
   AuthorizeCardPaymentParams,
+  AuthorizationState,
   AuthorizeCardPaymentResult,
+  CaptureParams,
   CheckoutSession,
+  CreateAuthorizationCheckoutParams,
   CreateCheckoutParams,
   EcommerceMerchantWithProvider,
   IEcommerceProvider,
@@ -20,8 +23,9 @@ import {
   TokenizeCardParams,
   TokenizeCardResult,
   VerifiedWebhookEvent,
+  VoidParams,
 } from './provider.interface'
-import { fromStripeAmount } from './money'
+import { fromStripeAmount, getStripeChargeBoundsCents } from './money'
 
 const PROVIDER_CODE = 'STRIPE_CONNECT'
 export const STRIPE_API_VERSION = '2026-02-25.clover'
@@ -358,6 +362,190 @@ export class StripeConnectProvider implements IEcommerceProvider {
     _params: AuthorizeCardPaymentParams,
   ): Promise<AuthorizeCardPaymentResult> {
     throw new ProviderCapabilityError(PROVIDER_CODE, 'authorizeCardPayment')
+  }
+
+  // ────────────────────────────────────────────────────────────────────────
+  // Apartar ahora, cobrar después (capture_method: 'manual'). La comisión de
+  // plataforma (application_fee_amount) viaja SÓLO al cobrar, con el monto final.
+  // ────────────────────────────────────────────────────────────────────────
+
+  async createAuthorizationCheckout(
+    merchant: EcommerceMerchantWithProvider,
+    params: CreateAuthorizationCheckoutParams,
+  ): Promise<CheckoutSession> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+
+    if (!params.idempotencyKey) {
+      throw new BadRequestError('idempotencyKey es requerido para crear Checkout Session')
+    }
+
+    const bounds = getStripeChargeBoundsCents()
+    if (!Number.isInteger(params.amountCents) || params.amountCents < bounds.min || params.amountCents > bounds.max) {
+      throw new BadRequestError('El monto a apartar esta fuera de los limites permitidos')
+    }
+
+    const metadata = Object.fromEntries(Object.entries(params.metadata).map(([key, value]) => [key, String(value)]))
+
+    const session = await this.stripe.checkout.sessions.create(
+      {
+        mode: 'payment',
+        payment_method_types: ['card'],
+        line_items: [
+          {
+            quantity: 1,
+            price_data: {
+              currency: params.currency.toLowerCase(),
+              unit_amount: params.amountCents,
+              product_data: { name: params.description },
+            },
+          },
+        ],
+        payment_intent_data: {
+          capture_method: 'manual',
+          metadata,
+          description: params.description,
+        },
+        customer_email: params.customerEmail,
+        success_url: params.successUrl,
+        cancel_url: params.cancelUrl,
+        expires_at: Math.floor(params.expiresAt.getTime() / 1000),
+        metadata,
+      },
+      { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
+    )
+
+    if (!session.url) {
+      throw new BadRequestError('Stripe no devolvio URL de Checkout')
+    }
+
+    return {
+      id: session.id,
+      url: session.url,
+      expiresAt: new Date((session.expires_at ?? Math.floor(params.expiresAt.getTime() / 1000)) * 1000),
+    }
+  }
+
+  async getAuthorization(
+    merchant: EcommerceMerchantWithProvider,
+    ref: { checkoutSessionId: string } | { paymentIntentId: string },
+  ): Promise<AuthorizationState> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+
+    if ('checkoutSessionId' in ref) {
+      const session = await this.stripe.checkout.sessions.retrieve(
+        ref.checkoutSessionId,
+        { expand: ['payment_intent.latest_charge'] },
+        { stripeAccount: connectAccountId },
+      )
+      const pi = typeof session.payment_intent === 'object' ? session.payment_intent : null
+      return this.toAuthorizationState(pi, session.status ?? null)
+    }
+
+    return this.toAuthorizationState(await this.retrievePaymentIntent(connectAccountId, ref.paymentIntentId), null)
+  }
+
+  async capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+
+    if (!params.idempotencyKey) {
+      throw new BadRequestError('idempotencyKey es requerido para cobrar')
+    }
+    if (!Number.isInteger(params.amountCents) || params.amountCents <= 0) {
+      throw new BadRequestError('El monto a cobrar debe ser mayor a cero')
+    }
+    if (
+      !Number.isInteger(params.applicationFeeCents) ||
+      params.applicationFeeCents < 0 ||
+      params.applicationFeeCents > params.amountCents
+    ) {
+      throw new BadRequestError('La comision de plataforma no puede exceder el monto a cobrar')
+    }
+
+    try {
+      const pi = await this.stripe.paymentIntents.capture(
+        params.paymentIntentId,
+        { amount_to_capture: params.amountCents, application_fee_amount: params.applicationFeeCents },
+        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
+      )
+      return this.toAuthorizationState(pi, null)
+    } catch (error) {
+      return this.recoverIfAlready('succeeded', connectAccountId, params.paymentIntentId, error)
+    }
+  }
+
+  async voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+
+    if (!params.idempotencyKey) {
+      throw new BadRequestError('idempotencyKey es requerido para liberar')
+    }
+
+    try {
+      const pi = await this.stripe.paymentIntents.cancel(
+        params.paymentIntentId,
+        {},
+        { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
+      )
+      return this.toAuthorizationState(pi, null)
+    } catch (error) {
+      return this.recoverIfAlready('canceled', connectAccountId, params.paymentIntentId, error)
+    }
+  }
+
+  /**
+   * Tras un error de Stripe en cobrar/liberar (timeout, reintento, estado ya cambiado) se lee el PaymentIntent:
+   * si ya quedó como se buscaba es éxito; si no, o si la lectura también falla, se relanza el error ORIGINAL.
+   */
+  private async recoverIfAlready(
+    wanted: 'succeeded' | 'canceled',
+    connectAccountId: string,
+    paymentIntentId: string,
+    originalError: unknown,
+  ): Promise<AuthorizationState> {
+    let pi: Stripe.PaymentIntent
+    try {
+      pi = await this.retrievePaymentIntent(connectAccountId, paymentIntentId)
+    } catch {
+      throw originalError
+    }
+    if (pi.status !== wanted) throw originalError
+    return this.toAuthorizationState(pi, null)
+  }
+
+  private retrievePaymentIntent(connectAccountId: string, paymentIntentId: string): Promise<Stripe.PaymentIntent> {
+    return this.stripe.paymentIntents.retrieve(paymentIntentId, { expand: ['latest_charge'] }, { stripeAccount: connectAccountId })
+  }
+
+  private toAuthorizationState(pi: Stripe.PaymentIntent | null, sessionStatus: AuthorizationState['sessionStatus']): AuthorizationState {
+    const charge = pi && typeof pi.latest_charge === 'object' ? pi.latest_charge : null
+    const details = charge?.payment_method_details
+    const card = details?.card
+    const captureBefore = card?.capture_before
+
+    return {
+      sessionStatus,
+      paymentIntentId: pi?.id ?? null,
+      piStatus: (pi?.status as AuthorizationState['piStatus']) ?? null,
+      amountCapturableCents: pi?.amount_capturable ?? 0,
+      amountReceivedCents: pi?.amount_received ?? 0,
+      captureBefore: captureBefore ? new Date(captureBefore * 1000) : null,
+      card: card
+        ? {
+            brand: card.brand ?? null,
+            last4: card.last4 ?? null,
+            funding: (card.funding as 'credit' | 'debit' | 'prepaid' | 'unknown') ?? null,
+          }
+        : null,
+      paymentMethodType: details?.type ?? null,
+    }
+  }
+
+  private requireConnectAccountId(merchant: EcommerceMerchantWithProvider): string {
+    const connectAccountId = this.getCredentials(merchant).connectAccountId
+    if (!connectAccountId) {
+      throw new BadRequestError('La cuenta Stripe Connect no esta configurada para este negocio')
+    }
+    return connectAccountId
   }
 
   private getCredentials(merchant: EcommerceMerchantWithProvider): StripeConnectCredentials {

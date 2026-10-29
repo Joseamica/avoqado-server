@@ -34,8 +34,11 @@ import * as oauthService from '@/services/mercado-pago/oauth.service'
 import * as paymentService from '@/services/mercado-pago/payment.service'
 import type {
   AuthorizeCardPaymentParams,
+  AuthorizationState,
   AuthorizeCardPaymentResult,
+  CaptureParams,
   CheckoutSession,
+  CreateAuthorizationCheckoutParams,
   CreateCheckoutParams,
   EcommerceMerchantWithProvider,
   IEcommerceProvider,
@@ -47,6 +50,7 @@ import type {
   TokenizeCardParams,
   TokenizeCardResult,
   VerifiedWebhookEvent,
+  VoidParams,
 } from './provider.interface'
 import type { MercadoPagoOAuthState } from '@/services/mercado-pago/types'
 
@@ -258,5 +262,27 @@ export class MercadoPagoProvider implements IEcommerceProvider {
       PROVIDER_CODE,
       'authorizeCardPayment: use the public mp-pay endpoint instead (it accepts the Brick token + creates the MP payment)',
     )
+  }
+
+  async createAuthorizationCheckout(
+    _merchant: EcommerceMerchantWithProvider,
+    _params: CreateAuthorizationCheckoutParams,
+  ): Promise<CheckoutSession> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'createAuthorizationCheckout')
+  }
+
+  async getAuthorization(
+    _merchant: EcommerceMerchantWithProvider,
+    _ref: { checkoutSessionId: string } | { paymentIntentId: string },
+  ): Promise<AuthorizationState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'getAuthorization')
+  }
+
+  async capture(_merchant: EcommerceMerchantWithProvider, _params: CaptureParams): Promise<AuthorizationState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'capture')
+  }
+
+  async voidAuthorization(_merchant: EcommerceMerchantWithProvider, _params: VoidParams): Promise<AuthorizationState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'voidAuthorization')
   }
 }

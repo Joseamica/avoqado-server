@@ -111,6 +111,50 @@ export interface AuthorizeCardPaymentResult {
   authorizationCode?: string
 }
 
+/** Apartar ahora, cobrar después (captura manual). Dinero en centavos: sólo en la frontera con Stripe. */
+export interface CreateAuthorizationCheckoutParams {
+  amountCents: number
+  currency: 'MXN'
+  description: string
+  successUrl: string
+  cancelUrl: string
+  expiresAt: Date
+  customerEmail?: string
+  metadata: Record<string, string>
+  idempotencyKey: string
+}
+
+export interface AuthorizationState {
+  sessionStatus: 'open' | 'complete' | 'expired' | null
+  paymentIntentId: string | null
+  piStatus:
+    | 'requires_payment_method'
+    | 'requires_confirmation'
+    | 'requires_action'
+    | 'processing'
+    | 'requires_capture'
+    | 'succeeded'
+    | 'canceled'
+    | null
+  amountCapturableCents: number
+  amountReceivedCents: number
+  captureBefore: Date | null
+  card: { brand: string | null; last4: string | null; funding: 'credit' | 'debit' | 'prepaid' | 'unknown' | null } | null
+  paymentMethodType: string | null
+}
+
+export interface CaptureParams {
+  paymentIntentId: string
+  amountCents: number
+  applicationFeeCents: number
+  idempotencyKey: string
+}
+
+export interface VoidParams {
+  paymentIntentId: string
+  idempotencyKey: string
+}
+
 export interface IEcommerceProvider {
   createOnboardingLink(merchant: EcommerceMerchantWithProvider, returnPath?: string): Promise<OnboardingLink>
   getOnboardingStatus(merchant: EcommerceMerchantWithProvider): Promise<OnboardingStatus>
@@ -121,4 +165,12 @@ export interface IEcommerceProvider {
 
   tokenizeCard(merchant: EcommerceMerchantWithProvider, params: TokenizeCardParams): Promise<TokenizeCardResult>
   authorizeCardPayment(merchant: EcommerceMerchantWithProvider, params: AuthorizeCardPaymentParams): Promise<AuthorizeCardPaymentResult>
+
+  createAuthorizationCheckout(merchant: EcommerceMerchantWithProvider, params: CreateAuthorizationCheckoutParams): Promise<CheckoutSession>
+  getAuthorization(
+    merchant: EcommerceMerchantWithProvider,
+    ref: { checkoutSessionId: string } | { paymentIntentId: string },
+  ): Promise<AuthorizationState>
+  capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState>
+  voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState>
 }
