@@ -1,7 +1,9 @@
 // src/services/online-ordering/card/merchant.ts
 import type { Prisma } from '@prisma/client'
+import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
 import { isEcommerceMerchantChargeable } from '@/services/payments/ecommerceCapability'
-import type { EcommerceMerchantWithProvider } from '@/services/payments/providers/provider.interface'
+import type { EcommerceMerchantWithProvider, VerifiedWebhookEvent } from '@/services/payments/providers/provider.interface'
 
 const STRIPE_CONNECT = 'STRIPE_CONNECT'
 
@@ -55,4 +57,33 @@ export function chargeMerchant(charge: { ecommerceMerchantId: string; merchantSn
     sandboxMode: snap.sandboxMode,
     provider: { code: STRIPE_CONNECT },
   }
+}
+
+/**
+ * Codex r1 C2: un aviso de Stripe sólo sirve para ENCONTRAR el cargo. Si no viene de la cuenta conectada de su foto, o del modo
+ * (real/prueba) de esa foto, no se escribe nada: `MoneyAnomaly` (una por aviso) y 🚨. `true` = el aviso es de otra cuenta.
+ */
+export async function isForeignStripeEvent(
+  event: Pick<VerifiedWebhookEvent, 'id' | 'type' | 'account' | 'livemode'>,
+  charge: { id: string; venueId: string; merchantSnapshot: Prisma.JsonValue },
+): Promise<boolean> {
+  const snap = charge.merchantSnapshot as unknown as MerchantSnapshot | null
+  const ours = !!snap?.connectAccountId && event.account === snap.connectAccountId && event.livemode === !snap.sandboxMode
+  if (ours) return false
+  const observed = { eventId: event.id, type: event.type, account: event.account ?? null, livemode: event.livemode }
+  const expected = {
+    venueId: charge.venueId,
+    chargeId: charge.id,
+    account: snap?.connectAccountId ?? null,
+    livemode: snap ? !snap.sandboxMode : null,
+  }
+  logger.error('🚨 [OnlineOrderCard] aviso de Stripe de otra cuenta o de otro modo sobre un cargo: no se escribe nada', {
+    ...expected,
+    ...observed,
+  })
+  await prisma.moneyAnomaly.createMany({
+    data: [{ category: 'ONLINE_ORDER_STRIPE_EVENT_FOREIGN', stripeEventId: event.id, expectedState: expected, observedState: observed }],
+    skipDuplicates: true,
+  })
+  return true
 }

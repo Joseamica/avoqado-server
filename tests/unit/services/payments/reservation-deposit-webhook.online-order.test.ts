@@ -11,6 +11,12 @@ jest.mock('@/services/whatsapp.service', () => ({
 }))
 jest.mock('@/services/online-ordering/card/confirm.service', () => ({ __esModule: true, confirmCardAuthorization: jest.fn() }))
 
+const mockGetAuthorization = jest.fn()
+jest.mock('@/services/payments/provider-registry', () => ({
+  __esModule: true,
+  getProvider: () => ({ getAuthorization: (...a: unknown[]) => mockGetAuthorization(...a) }),
+}))
+
 import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 
@@ -20,11 +26,26 @@ import { confirmCardAuthorization } from '@/services/online-ordering/card/confir
  */
 const event = (type: string, data: Record<string, unknown>) => ({ id: 'evt_oo', type, account: 'acct_123', livemode: false, data })
 const META = { type: 'online_order', chargeId: 'ch1', venueId: 'v1' }
+/** El cargo `ch1` de la cuenta `acct_123` en modo prueba (la foto que manda sobre el aviso, Codex r1 C2). */
+const cargo = (status: string, extra: Record<string, unknown> = {}) => ({
+  id: 'ch1',
+  venueId: 'v1',
+  status,
+  paymentIntentId: 'pi_1',
+  ecommerceMerchantId: 'm1',
+  merchantSnapshot: { connectAccountId: 'acct_123', sandboxMode: true, providerCode: 'STRIPE_CONNECT' },
+  amount: '250.00',
+  onlineOrderId: null,
+  onlineOrder: null,
+  ...extra,
+})
 
 beforeEach(() => {
   jest.clearAllMocks()
   ;(confirmCardAuthorization as jest.Mock).mockResolvedValue('CREATED')
   prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 1 } as any)
+  prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(cargo('PENDING_AUTH') as any)
+  mockGetAuthorization.mockResolvedValue({ piStatus: 'canceled' })
 })
 
 describe('avisos de Stripe de un pedido en línea con tarjeta', () => {
@@ -43,18 +64,32 @@ describe('avisos de Stripe de un pedido en línea con tarjeta', () => {
     expect(prismaMock.reservation.findFirst).not.toHaveBeenCalled()
   })
 
-  it('payment_intent.canceled marca RELEASED (apartado) o ABANDONED (sin autorizar), sólo por CAS', async () => {
+  it('payment_intent.canceled sobre un cargo liberándose: relee su PaymentIntent y, cancelado, marca RELEASED sólo por CAS', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(cargo('RELEASING') as any)
     await processStripeConnectWebhookEvent(event('payment_intent.canceled', { id: 'pi_1', metadata: META }))
 
+    expect(mockGetAuthorization).toHaveBeenCalledWith(expect.anything(), { paymentIntentId: 'pi_1' })
     expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
       where: { id: 'ch1', status: { in: ['AUTHORIZED', 'RELEASING'] } },
       data: { status: 'RELEASED', releasedAt: expect.any(Date) },
     })
-    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
-      where: { id: 'ch1', status: 'PENDING_AUTH' },
-      data: { status: 'ABANDONED' },
-    })
     expect(confirmCardAuthorization).not.toHaveBeenCalled()
+  })
+
+  it('payment_intent.canceled sobre un borrador no lo abandona a ciegas: relee la sesión propia (confirmar)', async () => {
+    await processStripeConnectWebhookEvent(event('payment_intent.canceled', { id: 'pi_x', metadata: META }))
+    expect(confirmCardAuthorization).toHaveBeenCalledWith('ch1')
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('Codex r1 C2: aviso de otra cuenta → MoneyAnomaly y nada más', async () => {
+    await processStripeConnectWebhookEvent({ ...event('checkout.session.completed', { id: 'cs_1', metadata: META }), account: 'acct_otro' })
+    expect(confirmCardAuthorization).not.toHaveBeenCalled()
+    expect(prismaMock.moneyAnomaly.createMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        data: [expect.objectContaining({ category: 'ONLINE_ORDER_STRIPE_EVENT_FOREIGN', stripeEventId: 'evt_oo' })],
+      }),
+    )
   })
 
   it('si confirmar lanza, el aviso responde error (Stripe reintenta)', async () => {

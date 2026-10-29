@@ -262,6 +262,7 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     await prisma.moneyAnomaly.deleteMany({
       where: { stripeEventId: { startsWith: 'oocr:' }, expectedState: { path: ['venueId'], equals: venueId } },
     })
+    await prisma.moneyAnomaly.deleteMany({ where: { stripeEventId: { startsWith: `evt_itest_cr_${RUN}` } } })
     await prisma.idempotencyRequest.deleteMany({ where: { organizationId: `venue:${venueId}` } })
     await prisma.activityLog.deleteMany({ where: v })
     await prisma.paymentEffect.deleteMany({ where: v })
@@ -499,6 +500,43 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       expect.objectContaining({ cardRefundId: row.id, amountCents: 25_000 }),
     ])
     expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `oocr:REVERSED:${row.stripeRefundId}` } })).toBe(1)
+  })
+
+  it('Codex r1 C2: un refund.failed de OTRA cuenta (o de otro modo) con nuestra metadata → anomalía, sin releer Stripe ni escribir', async () => {
+    const { orderId } = await capturedOrder()
+    const r = await pedir(orderId)
+    const row = await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: r.cardRefundId } })
+    expect(row.status).toBe('RECORDED')
+    getRefundSpy.mockClear()
+    const data = {
+      id: row.stripeRefundId,
+      object: 'refund',
+      metadata: { type: 'online_order_refund', cardRefundId: row.id, orderId, venueId },
+    }
+    await processStripeConnectWebhookEvent({
+      id: `evt_itest_cr_${RUN}_f1`,
+      type: 'refund.failed',
+      account: 'acct_otro',
+      livemode: false,
+      data,
+    })
+    await processStripeConnectWebhookEvent({
+      id: `evt_itest_cr_${RUN}_f2`,
+      type: 'refund.failed',
+      account: 'acct_itest_A',
+      livemode: true,
+      data,
+    })
+    expect(getRefundSpy).not.toHaveBeenCalled()
+    expect((await prisma.onlineOrderCardRefund.findUniqueOrThrow({ where: { id: row.id } })).status).toBe('RECORDED')
+    expect(
+      await prisma.moneyAnomaly.count({
+        where: {
+          category: 'ONLINE_ORDER_STRIPE_EVENT_FOREIGN',
+          stripeEventId: { in: [`evt_itest_cr_${RUN}_f1`, `evt_itest_cr_${RUN}_f2`] },
+        },
+      }),
+    ).toBe(2)
   })
 
   it('«Devolver por otro medio» en efectivo: sin caja → 409 y nada escrito; con caja abierta → RESOLVED y un PAY_OUT; repetir no escribe otro', async () => {

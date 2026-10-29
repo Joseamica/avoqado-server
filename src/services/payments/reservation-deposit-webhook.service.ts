@@ -8,6 +8,9 @@ import { finalizeVenueCheckout } from '@/services/dashboard/venueCheckout.servic
 import { fulfillPurchase as fulfillCreditPackPurchase } from '@/services/dashboard/creditPack.public.service'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { handleStripeRefundEvent } from '@/services/online-ordering/card/refund.service'
+import { chargeMerchant, isForeignStripeEvent } from '@/services/online-ordering/card/merchant'
+import { getProvider } from '@/services/payments/provider-registry'
+import { logAction } from '@/services/dashboard/activity-log.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -628,15 +631,36 @@ async function processPaymentIntentFailed(event: VerifiedWebhookEvent) {
 
 /**
  * Fase 2 — pedido en línea con tarjeta (`metadata.type === 'online_order'` en la sesión y en el PaymentIntent). Va antes de todo:
- * con captura manual la sesión llega `unpaid`, y un tipo desconocido caería en la rama de depósitos. El aviso nunca es la única
- * fuente: `confirmCardAuthorization` lee el PaymentIntent. ponytail: sin reclamo en `ProcessedStripeEvent` (el servicio es
- * idempotente por CAS); agrégalo si un aviso corre dos veces en paralelo con efecto duplicado. Si lanza, Stripe reintenta.
+ * con captura manual la sesión llega `unpaid`, y un tipo desconocido caería en la rama de depósitos. Codex r1 C2: el aviso sólo
+ * ENCUENTRA el cargo (su `metadata` la puede editar el negocio en su Stripe): de otra cuenta o de otro modo no escribe nada, y lo
+ * que se escribe sale de releer Stripe con los ids PROPIOS del cargo (`confirmCardAuthorization` relee su sesión; la cancelación
+ * relee su PaymentIntent). ponytail: sin reclamo en `ProcessedStripeEvent` (el servicio es idempotente por CAS); agrégalo si un
+ * aviso corre dos veces en paralelo con efecto duplicado. Si lanza, Stripe reintenta.
  */
 async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeId: string | undefined) {
   if (!chargeId) {
     logger.warn('⚠️ [STRIPE CONNECT] online_order event without chargeId', { eventId: event.id, type: event.type })
     return
   }
+  const charge = await prisma.onlineOrderCharge.findUnique({
+    where: { id: chargeId },
+    select: {
+      id: true,
+      venueId: true,
+      status: true,
+      paymentIntentId: true,
+      ecommerceMerchantId: true,
+      merchantSnapshot: true,
+      amount: true,
+      onlineOrderId: true,
+      onlineOrder: { select: { orderId: true } },
+    },
+  })
+  if (!charge) {
+    logger.warn('⚠️ [STRIPE CONNECT] online_order event for an unknown charge', { eventId: event.id, type: event.type, chargeId })
+    return
+  }
+  if (await isForeignStripeEvent(event, charge)) return
   switch (event.type) {
     case 'checkout.session.completed':
     case 'checkout.session.expired':
@@ -646,36 +670,67 @@ async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeI
       return
     }
     case 'payment_intent.canceled': {
-      // Sin autorizar → abandonado; apartado (o liberándose) → liberado. Sólo por CAS: lo demás ya tiene su desenlace.
-      await prisma.onlineOrderCharge.updateMany({
-        where: { id: chargeId, status: OnlineOrderChargeStatus.PENDING_AUTH },
-        data: { status: OnlineOrderChargeStatus.ABANDONED },
-      })
-      const markReleased = (db: Prisma.TransactionClient) =>
-        db.onlineOrderCharge.updateMany({
+      // Un borrador: su sesión propia dice si ya venció (sólo eso lo abandona; una cancelación sola no prueba que no se pagará).
+      if (charge.status === OnlineOrderChargeStatus.PENDING_AUTH) {
+        const outcome = await confirmCardAuthorization(chargeId)
+        logger.info('ℹ️ [STRIPE CONNECT] online_order canceled on a draft', { eventId: event.id, chargeId, outcome })
+        return
+      }
+      if (charge.status !== OnlineOrderChargeStatus.AUTHORIZED && charge.status !== OnlineOrderChargeStatus.RELEASING) return
+      const eventPi = (event.data as { id?: string } | null)?.id
+      if (!charge.paymentIntentId || eventPi !== charge.paymentIntentId) {
+        logger.error('🚨 [OnlineOrderCard] cancelación de un PaymentIntent que no es el del cargo: se ignora', {
+          eventId: event.id,
+          chargeId,
+          venueId: charge.venueId,
+          eventPaymentIntentId: eventPi ?? null,
+        })
+        return
+      }
+      const merchant = chargeMerchant(charge)
+      const state = await getProvider(merchant).getAuthorization(merchant, { paymentIntentId: charge.paymentIntentId })
+      if (state.piStatus !== 'canceled') {
+        logger.error('🚨 [OnlineOrderCard] aviso de cancelación, pero Stripe dice que la tarjeta sigue: se ignora', {
+          eventId: event.id,
+          chargeId,
+          venueId: charge.venueId,
+          piStatus: state.piStatus,
+        })
+        return
+      }
+      // Apartado (o liberándose) → liberado. Sólo por CAS: lo demás ya tiene su desenlace.
+      let released = false
+      const markReleased = async (db: Prisma.TransactionClient) => {
+        const r = await db.onlineOrderCharge.updateMany({
           where: { id: chargeId, status: { in: [OnlineOrderChargeStatus.AUTHORIZED, OnlineOrderChargeStatus.RELEASING] } },
           data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
         })
+        // ponytail: si la transacción del rechazo se revierte después de ganar aquí, el CAS de afuera vuelve a ganar: una bitácora.
+        if (r.count === 1) released = true
+      }
       // Ruling T6: un pedido por aceptar cuya tarjeta soltó Stripe ya no tiene con qué cobrarse: se rechaza con PAYMENT_FAILED en
       // la MISMA transacción que libera el cargo.
-      const charge = await prisma.onlineOrderCharge.findUnique({
-        where: { id: chargeId },
-        select: { status: true, venueId: true, onlineOrder: { select: { orderId: true } } },
-      })
-      if (charge?.status === OnlineOrderChargeStatus.AUTHORIZED && charge.onlineOrder) {
+      if (charge.status === OnlineOrderChargeStatus.AUTHORIZED && charge.onlineOrder) {
         const { rejectOnlineOrder } = await import('@/services/online-ordering/transitions.service')
         await rejectOnlineOrder({
           venueId: charge.venueId,
           orderId: charge.onlineOrder.orderId,
           staffId: null,
           reason: OnlineOrderRejectReason.PAYMENT_FAILED,
-          afterCas: async tx => {
-            await markReleased(tx)
-          },
+          afterCas: markReleased,
         })
       }
       // Sin pedido, ya rechazado o si la transición se revirtió: el cargo igual queda liberado.
       await markReleased(prisma)
+      if (released) {
+        void logAction({
+          venueId: charge.venueId,
+          action: 'ONLINE_ORDER_CARD_RELEASED',
+          entity: charge.onlineOrderId ? 'OnlineOrder' : 'OnlineOrderCharge',
+          entityId: charge.onlineOrderId ?? charge.id,
+          data: { chargeId: charge.id, amount: new Prisma.Decimal(charge.amount).toFixed(2), source: 'STRIPE_CANCELED' },
+        })
+      }
       return
     }
     default:

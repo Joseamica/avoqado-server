@@ -82,9 +82,10 @@ const matches = (row: Row, where: Record<string, any> = {}): boolean =>
   })
 const rows = () => [...store.values()]
 const cardRefund = {
-  findUnique: jest.fn(async ({ where }: any) => {
+  findUnique: jest.fn(async ({ where, select }: any) => {
     const r = rows().find(x => matches(x, where))
-    return r ? { ...r } : null
+    // El aviso de Stripe pide la foto del cargo (Codex r1 C2): en este doble el único cargo es ch1.
+    return r ? { ...r, ...(select?.charge ? { charge: CHARGE } : {}) } : null
   }),
   findFirst: jest.fn(async ({ where }: any) => {
     const r = rows().find(x => matches(x, where))
@@ -685,7 +686,12 @@ describe('handleStripeRefundEvent', () => {
   })
 
   it('sin metadata, de un cargo de pedido en línea y sin fila → MoneyAnomaly (devolución hecha fuera de Avoqado), sin dinero', async () => {
-    prismaMock.onlineOrderCharge.findUnique.mockResolvedValueOnce({ id: 'ch1', venueId: 'v1', onlineOrderId: 'oo1' } as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValueOnce({
+      id: 'ch1',
+      venueId: 'v1',
+      onlineOrderId: 'oo1',
+      merchantSnapshot: CHARGE.merchantSnapshot,
+    } as any)
     await handleStripeRefundEvent(
       event({ id: 're_manual', payment_intent: 'pi_1', amount: 5_000, status: 'succeeded', metadata: {} }, 'refund.created'),
     )

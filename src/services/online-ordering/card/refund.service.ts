@@ -34,7 +34,7 @@ import type { RefundState, VerifiedWebhookEvent } from '@/services/payments/prov
 import { postPayOutInTx } from '@/services/shared/cashDrawerPosting'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
-import { chargeMerchant } from './merchant'
+import { chargeMerchant, isForeignStripeEvent } from './merchant'
 
 /** Los motivos que el panel puede escoger (el de las apps de reparto no aplica aquí). */
 export const CARD_REFUND_REASONS = ['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'] as const
@@ -762,11 +762,18 @@ export async function handleStripeRefundEvent(event: VerifiedWebhookEvent): Prom
   if (!refund.id) return
   if (refund.metadata?.type === 'online_order_refund') {
     const id = refund.metadata.cardRefundId
-    const row = id ? await prisma.onlineOrderCardRefund.findUnique({ where: { id }, select: { id: true } }) : null
+    const row = id
+      ? await prisma.onlineOrderCardRefund.findUnique({
+          where: { id },
+          select: { id: true, charge: { select: { id: true, venueId: true, merchantSnapshot: true } } },
+        })
+      : null
     if (!row) {
       logger.warn('⚠️ [OnlineOrderCardRefund] aviso de una devolución que no está aquí', { eventId: event.id, refundId: refund.id, id })
       return
     }
+    // Codex r1 C2: de otra cuenta o de otro modo no se avanza nada; `advanceCardRefund` relee Stripe con los ids de la FILA.
+    if (await isForeignStripeEvent(event, row.charge)) return
     await advanceCardRefund(row.id)
     return
   }
@@ -774,9 +781,10 @@ export async function handleStripeRefundEvent(event: VerifiedWebhookEvent): Prom
   if (!paymentIntentId) return
   const charge = await prisma.onlineOrderCharge.findUnique({
     where: { paymentIntentId },
-    select: { id: true, venueId: true, onlineOrderId: true },
+    select: { id: true, venueId: true, onlineOrderId: true, merchantSnapshot: true },
   })
   if (!charge) return
+  if (await isForeignStripeEvent(event, charge)) return
   const ours = await prisma.onlineOrderCardRefund.findUnique({ where: { stripeRefundId: refund.id }, select: { id: true } })
   if (ours) return
   const inserted = await prisma.moneyAnomaly.createMany({
