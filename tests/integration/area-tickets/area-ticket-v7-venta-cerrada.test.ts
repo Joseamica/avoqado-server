@@ -78,6 +78,19 @@ const sello = `${Date.now()}-${Math.random().toString(36).slice(2, 8)}`
 let n = 0
 let organizationId: string | undefined
 let venueId: string | undefined
+
+/**
+ * El aviso de sobrepago (`avisarSobrepago`) se escribe con `void prisma.activityLog.create(...)`, sin esperarlo y fuera de la
+ * transacción, a propósito: una falla del audit no toca el cobro. Leerlo en seguida a veces da 0 en el CI (D1, 28-oct): se espera.
+ */
+async function sobrepagos(orderId: string) {
+  for (let i = 0; i < 40; i++) {
+    const c = await prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' } })
+    if (c > 0) break
+    await new Promise(resolve => setTimeout(resolve, 50))
+  }
+  return prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' } })
+}
 let staffId: string
 let cocinaId: string
 let issueDeviceUid: string
@@ -983,9 +996,7 @@ describe('🔴 Ronda 11: reembolso antes de recuperar, decisión A con el dinero
       })
       expect([orden.paymentStatus, Number(orden.remainingBalance), Number(orden.paidAmount)]).toEqual(['PAID', 0, 150])
       expect(await stockDe()).toEqual({ vale: 9, suelto: 9 })
-      expect(
-        await prisma.activityLog.count({ where: { venueId, entityId: venta.orderId, action: 'SOBREPAGO_DETECTADO' } }),
-      ).toBeGreaterThan(0)
+      expect(await sobrepagos(venta.orderId)).toBeGreaterThan(0)
       expect(await estadoDeLaSesion(venta.sessionId)).toBe(AreaTicketCheckoutStatus.PAID)
     })
 
@@ -1818,14 +1829,6 @@ describe('🔴 Ronda 14: una cuenta con vales no se separa ni se junta; se paga 
  * PAID y el inventario NO se toca otra vez.
  */
 describe('🔴 S1: la cola sin red del POS sobre una venta de vales ya cerrada', () => {
-  const sobrepagos = async (orderId: string) => {
-    for (let i = 0; i < 40; i++) {
-      const c = await prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' } })
-      if (c > 0) break
-      await new Promise(resolve => setTimeout(resolve, 50))
-    }
-    return prisma.activityLog.count({ where: { venueId, entityId: orderId, action: 'SOBREPAGO_DETECTADO' } })
-  }
   const alInicio = async () => {
     await prisma.areaTicketInventoryReservation.updateMany({
       where: { venueId, inventoryId: valeInventoryId, status: 'ACTIVE' },
