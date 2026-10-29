@@ -1386,6 +1386,48 @@ export async function updatePaymentLinkBranding(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Lo que ve quien vuelve a abrir una liga de un solo uso ya cobrada: «Pagada», cuándo, cuánto y su recibo.
+ * Sólo lo que ya mostraba la página de «Pago exitoso» (tarjeta enmascarada y recibo sin datos del cliente), sin
+ * nombre, correo ni teléfono de quien pagó. Dos consultas acotadas: el último cobro completado y su pago.
+ */
+async function ligaYaPagada(paymentLink: {
+  id: string
+  venueId: string
+  title: string
+  currency: string
+  venue: { name: string; slug: string; logo: string | null; primaryColor: string | null; timezone: string | null; paymentLinkBranding: unknown }
+}) {
+  const session = await prisma.checkoutSession.findFirst({
+    where: { paymentLinkId: paymentLink.id, status: 'COMPLETED' },
+    orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+    select: { sessionId: true, paymentId: true, amount: true, currency: true, completedAt: true },
+  })
+  const payment = session
+    ? await prisma.payment.findFirst({
+        where: { ...pagoDeLaSesion(session), venueId: paymentLink.venueId },
+        orderBy: { createdAt: 'desc' },
+        select: { id: true, receiptUrl: true, cardBrand: true, maskedPan: true },
+      })
+    : null
+  return {
+    title: paymentLink.title,
+    venue: { name: paymentLink.venue.name, slug: paymentLink.venue.slug, logo: paymentLink.venue.logo },
+    branding: mergeBranding(paymentLink.venue.paymentLinkBranding, paymentLink.venue.primaryColor),
+    timezone: paymentLink.venue.timezone || 'America/Mexico_City',
+    paidAt: session?.completedAt ? session.completedAt.toISOString() : null,
+    amount: session ? Number(session.amount) : null,
+    currency: session?.currency ?? paymentLink.currency,
+    payment: payment
+      ? {
+          cardBrand: payment.cardBrand,
+          last4: payment.maskedPan ? payment.maskedPan.replace(/^[*]+/, '').slice(-4) : null,
+          receiptUrl: await reciboParaElCliente(payment),
+        }
+      : null,
+  }
+}
+
+/**
  * Resolves a payment link by short code (public, no auth)
  * Returns venue branding + link data for the checkout page
  */
@@ -1438,6 +1480,14 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     throw new NotFoundError('Liga de pago no encontrada')
   }
 
+  // Check if single-use link has already been paid
+  // Antes que «expirada» o «no disponible»: a quien pagó le importa que está pagada, aunque después la archiven o venza.
+  // Sigue siendo 400 con el mismo mensaje (un checkout viejo lo muestra igual que antes); el código y el detalle le dejan
+  // al checkout nuevo dibujar «Pagada» con su fecha y su recibo.
+  if (!paymentLink.isReusable && paymentLink.paymentCount > 0) {
+    throw new BadRequestError('Esta liga de pago ya fue utilizada', 'PAYMENT_LINK_ALREADY_PAID', await ligaYaPagada(paymentLink))
+  }
+
   // Check if link is active
   if (paymentLink.status !== 'ACTIVE') {
     throw new BadRequestError(paymentLink.status === 'EXPIRED' ? 'Esta liga de pago ha expirado' : 'Esta liga de pago no está disponible')
@@ -1451,11 +1501,6 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
       data: { status: 'EXPIRED' },
     })
     throw new BadRequestError('Esta liga de pago ha expirado')
-  }
-
-  // Check if single-use link has already been paid
-  if (!paymentLink.isReusable && paymentLink.paymentCount > 0) {
-    throw new BadRequestError('Esta liga de pago ya fue utilizada')
   }
 
   // `paymentMethod` tells the public checkout which UX to render:

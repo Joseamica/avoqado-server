@@ -14,6 +14,9 @@ import logger from '@/config/logger'
 /** 409 «El precio de esta liga cambió»: el código y el desglose nuevo, para que la página muestre el total nuevo. */
 const precioCambiado = (error: any) => (error?.code === 'PAYMENT_LINK_PRICE_CHANGED' ? { code: error.code, details: error.details } : {})
 
+/** 400 de una liga de un solo uso ya cobrada: el código y el resumen del pago, para que la página muestre «Pagada». */
+const yaPagada = (error: any) => (error?.code === 'PAYMENT_LINK_ALREADY_PAID' ? { code: error.code, details: error.details } : {})
+
 /**
  * GET /api/v1/public/payment-links/:shortCode
  * Resolves a payment link by short code — returns venue branding + link data
@@ -29,10 +32,16 @@ export async function resolvePaymentLink(req: Request, res: Response) {
       data,
     })
   } catch (error: any) {
-    logger.error('Error resolving payment link:', error)
+    // Una liga pagada, vencida o inexistente es una respuesta normal: aviso sin el detalle (lleva la liga del recibo).
+    if (error?.statusCode && error.statusCode < 500) {
+      logger.warn('Payment link not available', { shortCode: req.params.shortCode, statusCode: error.statusCode, code: error.code, message: error.message })
+    } else {
+      logger.error('Error resolving payment link:', error)
+    }
     res.status(error.statusCode || 500).json({
       success: false,
       error: error.message || 'Liga de pago no encontrada',
+      ...yaPagada(error),
     })
   }
 }
