@@ -116,11 +116,20 @@ function toRefundState(r: Stripe.Refund): RefundState {
   return { refundId: r.id, status, amountCents: r.amount, failureReason: r.failure_reason ?? null }
 }
 
+/** La llave con que habla el servidor con Stripe: de ella sale el modo real (live/test) de todo lo que este proveedor hace. */
+const serverStripeKey = () => process.env.STRIPE_SECRET_KEY || ''
+
+/**
+ * r2 R3: el modo REAL del proveedor (el de la llave del servidor). `EcommerceMerchant.sandboxMode` no lo decide: este proveedor no
+ * lo lee. Lo usan los avisos de Stripe para saber si un aviso es del mismo modo.
+ */
+export const stripeServerLivemode = (apiKey: string = serverStripeKey()): boolean => /^(sk|rk)_live_/.test(apiKey)
+
 export class StripeConnectProvider implements IEcommerceProvider {
   private readonly stripe: Stripe
   private readonly accountsV2Client: AxiosInstance
 
-  constructor(apiKey = process.env.STRIPE_SECRET_KEY || '') {
+  constructor(apiKey = serverStripeKey()) {
     this.stripe = new Stripe(apiKey, {
       apiVersion: STRIPE_API_VERSION as Stripe.LatestApiVersion,
     })
