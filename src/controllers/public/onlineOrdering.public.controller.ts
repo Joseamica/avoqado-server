@@ -66,6 +66,11 @@ export async function getInfo(req: Request, res: Response) {
     ])
     // Fase 2: la tienda sólo anuncia tarjeta si el switch está prendido Y el comercio puede cobrar hoy.
     const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, venue.id)) !== null
+    // Sin ningún medio de pago vivo (pagar al recoger apagado y la tarjeta ya no cobra) la tienda no puede recibir pedidos: no se
+    // anuncia OPEN. Se calcula aquí y no en `getAcceptingStatus` (esa lectura está en el camino caliente de crear pedidos).
+    const noPaymentMode = state.status === 'OPEN' && !state.config.acceptsPayAtPickup && !cardOnline
+    const status = noPaymentMode ? 'PAUSED' : state.status
+    const reason = noPaymentMode ? 'NO_PAYMENT_MODE' : state.reason
     return res.json({
       success: true,
       data: {
@@ -78,8 +83,8 @@ export async function getInfo(req: Request, res: Response) {
           // Tienda rediseñada (aditivo): la misma `Venue.heroImageUrl` de la página de reservas; sin foto, null.
           heroImageUrl: row?.heroImageUrl ?? null,
         },
-        status: state.status,
-        reason: state.reason,
+        status,
+        reason,
         // S2: la pausa de 15/30/60 min de la bandeja y la del gerente comparten `reason`; la hora sólo se anuncia en la primera
         // (la del gerente no termina sola) y mientras siga vigente. La tienda dice «Volvemos a recibir pedidos a las HH:MM».
         pausedUntil:

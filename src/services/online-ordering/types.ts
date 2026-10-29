@@ -1,7 +1,7 @@
 import type { HorarioSemanal } from '@/services/delivery-channels/core/deliveryHours.service'
 
 export type AcceptingStatus = 'OPEN' | 'CLOSED' | 'PAUSED' | 'OFFLINE' | 'DISABLED'
-export type AcceptingReason = 'NOT_ENABLED' | 'MANUAL_PAUSE' | 'OUTSIDE_HOURS' | 'NO_DEVICE' | 'TOO_BUSY' | null
+export type AcceptingReason = 'NOT_ENABLED' | 'MANUAL_PAUSE' | 'OUTSIDE_HOURS' | 'NO_DEVICE' | 'TOO_BUSY' | 'NO_PAYMENT_MODE' | null
 
 /** Sólo aceptación manual (F1): sin `acceptanceMode`. `acceptsCardOnline` (fase 2): el switch de pagar con tarjeta al pedir. */
 export interface OnlineOrderingConfig {

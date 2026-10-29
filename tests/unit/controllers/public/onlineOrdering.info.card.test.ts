@@ -13,9 +13,9 @@ const res = () => {
   r.json = jest.fn(() => r)
   return r
 }
-const state = (config: Record<string, unknown>) => ({
-  status: 'OPEN',
-  reason: null,
+const state = (config: Record<string, unknown>, status = 'OPEN', reason: string | null = null) => ({
+  status,
+  reason,
   config: { acceptsPayAtPickup: true, acceptsCardOnline: false, minOrderAmount: 0, defaultPrepMinutes: 15, hours: null, ...config },
 })
 const call = async () => {
@@ -43,5 +43,40 @@ describe('GET /info paymentModes', () => {
     ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsCardOnline: true }))
     ;(findCardMerchant as jest.Mock).mockResolvedValue(null)
     expect((await call()).paymentModes).toEqual({ payAtPickup: true, cardOnline: false })
+  })
+})
+
+describe('GET /info sin ningún medio de pago vivo', () => {
+  it('pickup apagado, tarjeta prendida y el comercio ya no cobra: la tienda NO está OPEN (PAUSED / NO_PAYMENT_MODE)', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsPayAtPickup: false, acceptsCardOnline: true }))
+    ;(findCardMerchant as jest.Mock).mockResolvedValue(null)
+    const d = await call()
+    expect(d.paymentModes).toEqual({ payAtPickup: false, cardOnline: false })
+    expect(d.status).toBe('PAUSED')
+    expect(d.reason).toBe('NO_PAYMENT_MODE')
+    expect(d.pausedUntil).toBeNull()
+  })
+
+  it('pickup apagado y tarjeta cobrando: sigue OPEN', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsPayAtPickup: false, acceptsCardOnline: true }))
+    ;(findCardMerchant as jest.Mock).mockResolvedValue({ id: 'em1' })
+    const d = await call()
+    expect(d.status).toBe('OPEN')
+    expect(d.reason).toBeNull()
+  })
+
+  it('con pagar al recoger prendido, aunque la tarjeta no cobre, sigue OPEN', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(state({ acceptsPayAtPickup: true, acceptsCardOnline: true }))
+    ;(findCardMerchant as jest.Mock).mockResolvedValue(null)
+    expect((await call()).status).toBe('OPEN')
+  })
+
+  it('un estado que ya no era OPEN conserva su motivo (no lo pisa)', async () => {
+    ;(getAcceptingStatus as jest.Mock).mockResolvedValue(
+      state({ acceptsPayAtPickup: false, acceptsCardOnline: false }, 'CLOSED', 'OUTSIDE_HOURS'),
+    )
+    const d = await call()
+    expect(d.status).toBe('CLOSED')
+    expect(d.reason).toBe('OUTSIDE_HOURS')
   })
 })
