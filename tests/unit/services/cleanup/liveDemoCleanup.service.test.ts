@@ -561,6 +561,33 @@ describe('🔴 ninguna llave foránea bloqueante queda sin atender', () => {
 
     expect(problemas).toEqual([])
   })
+
+  /**
+   * T10 fix r1 (M5): la otra mitad de la familia. Un hijo con `venueId` pero SIN relación al venue (no muere en el cascade) que
+   * apunta con Restrict a un padre que SÍ muere en él frena el `venue.delete` siempre (`OnlineOrderCardRefund → OnlineOrderCharge`).
+   * La prueba de arriba no lo ve porque exige que hijo y padre estén los dos en el cascade. El padre `Venue` mismo (una relación
+   * directa al venue sin Cascade) es otra deuda, previa y conocida: no se cuenta aquí.
+   */
+  it('🔴 un hijo con venueId fuera del cascade que frena a un padre del cascade se borra antes que ese padre', () => {
+    // Deuda previa conocida (no de T10): `AreaTicket` también es Restrict sobre `Venue`, así que un demo con vales ya frena antes.
+    const deudaPrevia = new Set(['AreaTicket.fulfillmentAreaId'])
+    const conVenueId = new Set(modelos.filter(m => m.fields.some(f => f.name === 'venueId' && f.kind === 'scalar')).map(m => m.name))
+    const yaBorrado = new Set<string>()
+    const problemas: string[] = []
+    for (const paso of borradosEnOrden) {
+      const seVan = cierreDe(paso)
+      for (const arista of bloqueantes) {
+        if (arista.hijo === arista.padre || arista.padre === 'Venue' || cierre.has(arista.hijo) || !conVenueId.has(arista.hijo)) continue
+        if (!seVan.has(arista.padre) || !cierre.has(arista.padre) || yaBorrado.has(arista.hijo)) continue
+        if (deudaPrevia.has(`${arista.hijo}.${arista.campo}`)) continue
+        problemas.push(
+          `${paso} borra ${arista.padre}, pero ${arista.hijo}.${arista.campo} (fuera del cascade) lo referencia con ${arista.accion}`,
+        )
+      }
+      for (const modelo of seVan) yaBorrado.add(modelo)
+    }
+    expect(problemas).toEqual([])
+  })
 })
 
 // Las FK del crédito no dejan borrar cobros mientras exista el vínculo.
