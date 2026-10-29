@@ -778,9 +778,12 @@ describe('A4 · una sola operación de anulación (spec §6.4, §9-5; Codex r1-1
           motivo: 'Venta capturada por error',
         })
         await detenidaPor(observador, pidPago)
+        // Se escucha el rechazo ANTES de soltar el pago: si la anulación rechaza mientras se espera `pago`, Node lo cuenta
+        // como un rechazo sin atender y la prueba sale roja aunque el 400 sea el correcto (D2, CI del PR #200).
+        const rechazo = expect(anulacion).rejects.toMatchObject({ statusCode: 400 })
         confirmar()
         await pago
-        await expect(anulacion).rejects.toMatchObject({ statusCode: 400 })
+        await rechazo
       } finally {
         confirmar()
         await Promise.allSettled([pago])
