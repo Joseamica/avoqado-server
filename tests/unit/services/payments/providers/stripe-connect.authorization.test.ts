@@ -145,21 +145,62 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
 
       expect(mockStripe.paymentIntents.capture).toHaveBeenCalledWith(
         'pi_1',
-        { amount_to_capture: 25000, application_fee_amount: 290 },
+        { amount_to_capture: 25000, application_fee_amount: 290, expand: ['latest_charge'] },
         { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:capture' },
       )
       expect(state.piStatus).toBe('succeeded')
       expect(state.amountReceivedCents).toBe(25000)
+      expect(state.card).toEqual({ brand: 'visa', last4: '4242', funding: 'debit' })
+      expect(state.captureBefore).toEqual(new Date(1730000000 * 1000))
     })
 
     it('NO lanza si Stripe responde error pero el PI ya está succeeded', async () => {
       mockStripe.paymentIntents.capture.mockRejectedValue(stripeError('payment_intent_unexpected_state'))
-      mockStripe.paymentIntents.retrieve.mockResolvedValue({ ...piBase, status: 'succeeded', amount_received: 25000 })
+      mockStripe.paymentIntents.retrieve.mockResolvedValue({
+        ...piBase,
+        status: 'succeeded',
+        amount_received: 25000,
+        application_fee_amount: 290,
+      })
 
       const state = await provider.capture(merchant as any, params)
 
       expect(mockStripe.paymentIntents.retrieve).toHaveBeenCalledWith('pi_1', { expand: ['latest_charge'] }, { stripeAccount: 'acct_x' })
       expect(state.piStatus).toBe('succeeded')
+    })
+
+    it('lanza el error original si el PI quedó succeeded pero con otro monto cobrado', async () => {
+      const original = stripeError('payment_intent_unexpected_state')
+      mockStripe.paymentIntents.capture.mockRejectedValue(original)
+      mockStripe.paymentIntents.retrieve.mockResolvedValue({
+        ...piBase,
+        status: 'succeeded',
+        amount_received: 10000,
+        application_fee_amount: 290,
+      })
+
+      await expect(provider.capture(merchant as any, params)).rejects.toBe(original)
+    })
+
+    it('lanza el error original si el PI quedó succeeded pero con otra comisión (o sin ella)', async () => {
+      const original = stripeError('payment_intent_unexpected_state')
+      mockStripe.paymentIntents.capture.mockRejectedValue(original)
+      mockStripe.paymentIntents.retrieve.mockResolvedValue({
+        ...piBase,
+        status: 'succeeded',
+        amount_received: 25000,
+        application_fee_amount: null,
+      })
+
+      await expect(provider.capture(merchant as any, params)).rejects.toBe(original)
+    })
+
+    it('un error que no es de Stripe se relanza sin leer el PI', async () => {
+      const original = new Error('boom')
+      mockStripe.paymentIntents.capture.mockRejectedValue(original)
+
+      await expect(provider.capture(merchant as any, params)).rejects.toBe(original)
+      expect(mockStripe.paymentIntents.retrieve).not.toHaveBeenCalled()
     })
 
     it('lanza el error original si tras fallar el PI sigue requires_capture', async () => {
@@ -194,10 +235,11 @@ describe('StripeConnectProvider — apartar, cobrar, liberar, leer', () => {
 
       expect(mockStripe.paymentIntents.cancel).toHaveBeenCalledWith(
         'pi_1',
-        {},
+        { expand: ['latest_charge'] },
         { stripeAccount: 'acct_x', idempotencyKey: 'online-order:o1:void' },
       )
       expect(state.piStatus).toBe('canceled')
+      expect(state.card?.funding).toBe('debit')
     })
 
     it('tolera ya cancelado', async () => {

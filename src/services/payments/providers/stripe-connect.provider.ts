@@ -464,12 +464,15 @@ export class StripeConnectProvider implements IEcommerceProvider {
     try {
       const pi = await this.stripe.paymentIntents.capture(
         params.paymentIntentId,
-        { amount_to_capture: params.amountCents, application_fee_amount: params.applicationFeeCents },
+        { amount_to_capture: params.amountCents, application_fee_amount: params.applicationFeeCents, expand: ['latest_charge'] },
         { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
       )
       return this.toAuthorizationState(pi, null)
     } catch (error) {
-      return this.recoverIfAlready('succeeded', connectAccountId, params.paymentIntentId, error)
+      return this.recoverIfAlready('succeeded', connectAccountId, params.paymentIntentId, error, {
+        amountCents: params.amountCents,
+        applicationFeeCents: params.applicationFeeCents,
+      })
     }
   }
 
@@ -483,7 +486,7 @@ export class StripeConnectProvider implements IEcommerceProvider {
     try {
       const pi = await this.stripe.paymentIntents.cancel(
         params.paymentIntentId,
-        {},
+        { expand: ['latest_charge'] },
         { stripeAccount: connectAccountId, idempotencyKey: params.idempotencyKey },
       )
       return this.toAuthorizationState(pi, null)
@@ -495,13 +498,17 @@ export class StripeConnectProvider implements IEcommerceProvider {
   /**
    * Tras un error de Stripe en cobrar/liberar (timeout, reintento, estado ya cambiado) se lee el PaymentIntent:
    * si ya quedó como se buscaba es éxito; si no, o si la lectura también falla, se relanza el error ORIGINAL.
+   * Sólo se intenta con errores de Stripe. Al cobrar, "succeeded" sólo cuenta si el monto y la comisión cobrados son
+   * los pedidos (otro cobro con otro monto no es el nuestro).
    */
   private async recoverIfAlready(
     wanted: 'succeeded' | 'canceled',
     connectAccountId: string,
     paymentIntentId: string,
     originalError: unknown,
+    expected?: { amountCents: number; applicationFeeCents: number },
   ): Promise<AuthorizationState> {
+    if (!(originalError as { type?: string } | null)?.type?.startsWith('Stripe')) throw originalError
     let pi: Stripe.PaymentIntent
     try {
       pi = await this.retrievePaymentIntent(connectAccountId, paymentIntentId)
@@ -509,6 +516,9 @@ export class StripeConnectProvider implements IEcommerceProvider {
       throw originalError
     }
     if (pi.status !== wanted) throw originalError
+    if (expected && (pi.amount_received !== expected.amountCents || (pi.application_fee_amount ?? 0) !== expected.applicationFeeCents)) {
+      throw originalError
+    }
     return this.toAuthorizationState(pi, null)
   }
 
