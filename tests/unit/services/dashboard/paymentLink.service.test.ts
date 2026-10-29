@@ -887,10 +887,35 @@ describe('PaymentLink Service', () => {
   describe('getPaymentLinkById', () => {
     it('should return link with checkout sessions', async () => {
       prismaMock.paymentLink.findUnique.mockResolvedValueOnce(createMockPaymentLink({ checkoutSessions: [] }))
+      prismaMock.checkoutSession.findMany.mockResolvedValueOnce([])
+      prismaMock.checkoutSession.count.mockResolvedValueOnce(0)
 
       const result = await getPaymentLinkById(VENUE_ID, 'pl-123')
       expect(result).toBeDefined()
       expect(result.id).toBe('pl-123')
+    })
+
+    // El detalle de la liga en el dashboard lista sus pagos con «Ver recibo» (abre el detalle del pago, donde vive su recibo).
+    it('trae los pagos completados (con paymentId), del más reciente al más viejo, con tope 50 y el total', async () => {
+      prismaMock.paymentLink.findUnique.mockResolvedValueOnce(createMockPaymentLink({ checkoutSessions: [] }))
+      const pagos = [
+        { id: 'cs-2', amount: new Decimal(250), completedAt: new Date('2026-10-28T20:40:00.000Z'), paymentId: 'pay-2' },
+        { id: 'cs-1', amount: new Decimal(250), completedAt: new Date('2026-10-25T15:00:00.000Z'), paymentId: 'pay-1' },
+      ]
+      prismaMock.checkoutSession.findMany.mockResolvedValueOnce(pagos as any)
+      prismaMock.checkoutSession.count.mockResolvedValueOnce(57)
+
+      const result = await getPaymentLinkById(VENUE_ID, 'pl-123')
+
+      expect(prismaMock.checkoutSession.findMany.mock.calls[0][0]).toEqual({
+        where: { paymentLinkId: 'pl-123', status: 'COMPLETED' },
+        orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+        take: 50,
+        select: { id: true, amount: true, completedAt: true, paymentId: true },
+      })
+      expect(prismaMock.checkoutSession.count.mock.calls[0][0]).toEqual({ where: { paymentLinkId: 'pl-123', status: 'COMPLETED' } })
+      expect(result.completedPayments).toEqual(pagos)
+      expect(result.completedPaymentsTotal).toBe(57)
     })
 
     it('should reject if link not found', async () => {
