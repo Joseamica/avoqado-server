@@ -20416,12 +20416,91 @@ model OnlineOrderCharge {
   /// Ya se alertó 🚨 este episodio (una sola vez); se borra al salir de él.
   stuckAlertedAt   DateTime?
 
+  /// Fase 2 (T10): las devoluciones a la tarjeta de este cargo.
+  cardRefunds OnlineOrderCardRefund[]
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
   @@unique([venueId, idempotencyKey])
   @@index([status, updatedAt])
   @@index([venueId, status, customerPhone])
+}
+
+/// Fase 2 (T10): estados de una devolución a la tarjeta de un pedido en línea. Sólo avanzan; cada escritura es CAS.
+enum OnlineOrderCardRefundStatus {
+  REQUESTED // la fila existe; nadie ha hablado con Stripe
+  SENDING // alguien ganó el envío; sin `stripeRefundId` es DESCONOCIDO (se busca por metadata, nunca se da por fallido)
+  PENDING // Stripe la tiene, sin desenlace
+  SUCCEEDED // Stripe la devolvió; falta el renglón REFUND del libro
+  RECORDED // el renglón REFUND existe (`refundPaymentId`); se sigue revisando hasta 30 días por un fallo tardío
+  FAILED // Stripe dijo que falló antes de anotarla: ningún renglón
+  CANCELED // Stripe la canceló antes de anotarla: ningún renglón
+  REVERSED // ya anotada, Stripe pasó a failed/canceled: el dinero regresó a la cuenta del negocio y se le debe al cliente
+  RESOLVED // el negocio le pagó al cliente por otro medio (efectivo o transferencia)
+}
+
+/// Fase 2 (T10): una devolución a la tarjeta de un pedido en línea. Stripe es la fuente de verdad; el renglón REFUND del libro
+/// nace sólo con `succeeded` (por `issueRefund`, llave `oocr_<id>`) y nunca se edita.
+model OnlineOrderCardRefund {
+  id       String            @id @default(cuid())
+  venueId  String
+  chargeId String
+  charge   OnlineOrderCharge @relation(fields: [chargeId], references: [id], onDelete: Restrict)
+
+  /// La llave idempotente del cliente (única por cargo).
+  key         String
+  amountCents Int
+  /// `RefundReason` de `refund.dashboard.service` (validado en la frontera).
+  reason      String
+  staffId     String
+  note        String?
+  /// sha256 de importe + motivo + nota: la misma llave con otra solicitud es 409.
+  requestHash String
+
+  stripeRefundId   String?                     @unique
+  status           OnlineOrderCardRefundStatus @default(REQUESTED)
+  /// El `Payment` REFUND del libro.
+  refundPaymentId  String?                     @unique
+  /// La comisión de Avoqado que Stripe devolvió con ESTA devolución (leída de Stripe, no calculada).
+  feeRefundedCents Int?
+  /// La reversa del sello de la venta ya quedó hecha (Codex r6: la de `issueRefund` no es durable).
+  stampReversedAt  DateTime?
+  nextCheckAt      DateTime                    @default(now())
+  lastError        String?
+  /// Ya se alertó 🚨 que sigue SENDING sin id (una sola vez).
+  alertedAt        DateTime?
+
+  reversal OnlineOrderCardRefundReversal?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([chargeId, key])
+  @@index([status, nextCheckAt])
+}
+
+/// Fase 2 (T10): sólo se agrega. Una devolución ya anotada que Stripe reportó fallida/cancelada después, y cómo la resolvió el negocio.
+model OnlineOrderCardRefundReversal {
+  id             String                @id @default(cuid())
+  venueId        String
+  cardRefundId   String                @unique
+  cardRefund     OnlineOrderCardRefund @relation(fields: [cardRefundId], references: [id], onDelete: Restrict)
+  stripeRefundId String                @unique
+  amountCents    Int
+  feeCents       Int
+  failureReason  String?
+  detectedAt     DateTime
+
+  /// Sólo `CASH` | `BANK_TRANSFER`.
+  resolvedMethod    PaymentMethod?
+  resolvedByStaffId String?
+  resolvedAt        DateTime?
+  resolvedNote      String?
+  /// El `CashDrawerEvent` PAY_OUT, si se resolvió en efectivo.
+  cashDrawerEventId String?
+
+  @@index([venueId, resolvedAt])
 }
 
 /// Platform onboarding invitations; deliberately independent of a venue.

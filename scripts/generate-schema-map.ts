@@ -334,6 +334,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   OnlineOrderingSettings: 'Orders, KDS & Cash',
   OnlineOrder: 'Orders, KDS & Cash',
   OnlineOrderCharge: 'Orders, KDS & Cash',
+  OnlineOrderCardRefund: 'Orders, KDS & Cash',
+  OnlineOrderCardRefundReversal: 'Orders, KDS & Cash',
   OrderItemModifier: 'Orders, KDS & Cash',
   OrderAction: 'Orders, KDS & Cash',
   OrderDiscount: 'Orders, KDS & Cash',
