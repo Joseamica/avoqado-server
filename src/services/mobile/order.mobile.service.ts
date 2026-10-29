@@ -3995,7 +3995,7 @@ export async function registrarAbonoEnTx(
       venueId,
       orderId,
       createdAt: entrada.createdAt,
-      ...(copiaDelTicket ? { processorData: { lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue } : {}),
+      processorData: copiaDelTicket ? ({ lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue) : undefined,
       amount: amountDecimal,
       tipAmount: tipDecimal,
       method: resolvedTender?.method ?? paymentMethod,
