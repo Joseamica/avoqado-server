@@ -325,7 +325,11 @@ describe('refund.dashboard.service', () => {
   // Pedidos en línea fase 2 (T8): el cobro de Stripe de un pedido con tarjeta sólo se devuelve desde Pedidos en línea (T10).
   describe('cobro de Stripe de un pedido en línea con tarjeta', () => {
     const cobroDeStripe = () => {
-      prismaMock.payment.findFirst.mockResolvedValue({ orderId: 'order-1', processorId: 'pi_1', order: { updatedAt: ORDER_GENERATION } } as any)
+      prismaMock.payment.findFirst.mockResolvedValue({
+        orderId: 'order-1',
+        processorId: 'pi_1',
+        order: { updatedAt: ORDER_GENERATION },
+      } as any)
       prismaMock.onlineOrder.findFirst.mockResolvedValue({
         paymentMode: 'CARD_ONLINE',
         charge: { id: 'ch1', status: 'CAPTURED', paymentIntentId: 'pi_1' },
@@ -363,6 +367,26 @@ describe('refund.dashboard.service', () => {
     it('con viaOnlineOrders pasa', async () => {
       cobroDeStripe()
       await expect(pedir({ viaOnlineOrders: true })).resolves.toMatchObject({ refundId: 'refund-web-1' })
+    })
+
+    it('T10 r5 #5: con platformFeeRefundCents, el REFUND y su VenueTransaction llevan la MISMA comisión devuelta', async () => {
+      cobroDeStripe()
+      await pedir({ viaOnlineOrders: true, platformFeeRefundCents: 290 })
+      const data = prismaMock.payment.create.mock.calls.at(-1)![0].data
+      expect(data.feeAmount.toFixed(2)).toBe('-2.90')
+      expect(data.netAmount.toFixed(2)).toBe('-247.10')
+      const vt = prismaMock.venueTransaction.create.mock.calls.at(-1)![0].data
+      expect(vt.grossAmount.toFixed(2)).toBe('-250.00')
+      expect(vt.feeAmount.toFixed(2)).toBe('-2.90')
+      expect(vt.netAmount.toFixed(2)).toBe('-247.10')
+    })
+
+    it('T10: con viaOnlineOrders el reembolso hereda el turno del cobro (ninguno) y no le resta al turno vivo', async () => {
+      cobroDeStripe()
+      prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
+      await pedir({ viaOnlineOrders: true })
+      expect(prismaMock.payment.create.mock.calls.at(-1)![0].data.shiftId).toBeUndefined()
+      expect(prismaMock.shift.updateMany).not.toHaveBeenCalled()
     })
   })
 

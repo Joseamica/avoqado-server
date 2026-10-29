@@ -56,6 +56,7 @@ import { Decimal } from '@prisma/client/runtime/library'
 
 import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
+import { ConflictError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import { paymentCountsAsDrawerCash, TenderSemanticsPayment } from './tenderSemantics'
 
@@ -496,6 +497,46 @@ export async function postCashRefundToDrawer(posting: CashRefundDrawerPosting): 
     })
     return 'FAILED'
   }
+}
+
+/**
+ * Pedidos en línea fase 2 (T10, Codex r5 #2): la salida de caja de «Devolver por otro medio» en efectivo, DENTRO de la transacción
+ * de quien resuelve. A diferencia de `postCashRefundToDrawer` (post-commit, fail-open), aquí la caja SÍ autoriza: sin una caja
+ * abierta lanza 409 y la resolución entera se revierte. Bloquea `FOR UPDATE` la caja abierta (un cierre en vuelo la saca del
+ * `WHERE` al re-evaluarlo); la llave va en `localId` (única por negocio): repetir devuelve el movimiento ya escrito. Efectivo de
+ * cajón siempre (no hereda el `fundsFlow` del cobro de Stripe). Devuelve el id del `CashDrawerEvent`.
+ */
+export async function postPayOutInTx(
+  tx: Prisma.TransactionClient,
+  i: { venueId: string; amount: Decimal; reason: string; idempotencyKey: string; staffId: string; orderId?: string | null },
+): Promise<string> {
+  const previo = await tx.cashDrawerEvent.findFirst({
+    where: { venueId: i.venueId, localId: i.idempotencyKey },
+    select: { id: true },
+  })
+  if (previo) return previo.id
+  const [session] = await tx.$queryRaw<Array<{ id: string }>>`
+    SELECT id FROM "CashDrawerSession"
+    WHERE "venueId" = ${i.venueId} AND status = 'OPEN'
+    ORDER BY "openedAt" DESC, id DESC
+    LIMIT 1
+    FOR UPDATE`
+  if (!session) throw new ConflictError('Abre caja para devolver en efectivo.', 'CASH_DRAWER_NOT_OPEN')
+  const event = await tx.cashDrawerEvent.create({
+    data: {
+      sessionId: session.id,
+      venueId: i.venueId,
+      type: 'PAY_OUT',
+      amount: new Decimal(i.amount.toString()).abs(),
+      staffId: i.staffId,
+      staffName: await resolveStaffName(i.staffId),
+      orderId: i.orderId ?? null,
+      note: `${DRAWER_REFUND_NOTE_PREFIX} ${i.reason}`,
+      localId: i.idempotencyKey,
+    },
+    select: { id: true },
+  })
+  return event.id
 }
 
 /** Nombre legible del cajero para el listado de movimientos. Nunca lanza. */

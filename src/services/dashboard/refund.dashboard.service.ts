@@ -126,6 +126,11 @@ export interface IssueRefundInput {
    * Stripe de un pedido con tarjeta no se devuelve por aquí (409 `ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS`).
    */
   viaOnlineOrders?: true
+  /**
+   * Pedidos en línea fase 2 (T10): la comisión de Avoqado que Stripe devolvió con ESTA devolución, en centavos (leída de Stripe).
+   * El REFUND y su `VenueTransaction` nacen con `feeAmount = −comisión` y `netAmount = −(monto − comisión)`. Ausente = fee 0.
+   */
+  platformFeeRefundCents?: number
 }
 
 export interface IssueRefundResult {
@@ -550,6 +555,8 @@ interface WriteRefundBase {
   moneyAs?: RefundMoneySemantics
   /** La fila no abre la obligación de costo negativo del cobro: no regresó dinero por el procesador (el crédito de un cambio). */
   skipNegativeCostObligation?: boolean
+  /** Pedidos en línea fase 2 (T10): comisión de la plataforma devuelta por Stripe, en centavos (ver `IssueRefundInput`). */
+  platformFeeRefundCents?: number
   /**
    * La marca del cambio, que la fila lleva en `processorData.exchange`. El gemelo del crédito (`CREDIT`) lleva la raíz SÓLO aquí.
    * Cualquier otro papel con `moneyAs` y `rootPaymentId` sale del dinero de esa raíz: la fila la nombra también en
@@ -613,6 +620,10 @@ export async function writeRefundInTx(
     throw new BadRequestError('Un reembolso con la semántica de dinero dada no admite escoger con qué se devuelve.')
   }
   const refundCents = input.salesRefundCents + input.tipRefundCents
+  const feeRefundCents = input.platformFeeRefundCents ?? 0
+  if (!esCantidadNoNegativaEnCentavos(feeRefundCents) || feeRefundCents > refundCents) {
+    throw new BadRequestError('La comisión devuelta debe ser un entero de centavos entre cero y el monto devuelto')
+  }
   // La única fila de $0 es el gemelo del crédito de un cambio de piezas que cobraron $0: el ancla de las cantidades devueltas y
   // del regreso al inventario. Cualquier otro reembolso de $0 se rechaza como siempre.
   const esAnclaDelCredito = input.exchangeMark?.role === EXCHANGE_REFUND_ROLE.CREDIT && input.moneyAs !== undefined
@@ -705,8 +716,8 @@ export async function writeRefundInTx(
       // Negative amount/tip so that sum(refunds) mirrors the original split.
       amount: centsToDecimal(-input.salesRefundCents),
       tipAmount: centsToDecimal(-input.tipRefundCents),
-      netAmount: centsToDecimal(-refundCents),
-      feeAmount: new Prisma.Decimal(0),
+      netAmount: centsToDecimal(-(refundCents - feeRefundCents)),
+      feeAmount: feeRefundCents > 0 ? centsToDecimal(-feeRefundCents) : new Prisma.Decimal(0),
       feePercentage: 0,
 
       method: dada ? dada.method : ((devolverCon ?? original.method) as PaymentMethod),
@@ -889,8 +900,8 @@ export async function writeRefundInTx(
       paymentId: refundPayment.id,
       type: 'REFUND',
       grossAmount: centsToDecimal(-refundCents),
-      feeAmount: new Prisma.Decimal(0),
-      netAmount: centsToDecimal(-refundCents),
+      feeAmount: feeRefundCents > 0 ? centsToDecimal(-feeRefundCents) : new Prisma.Decimal(0),
+      netAmount: centsToDecimal(-(refundCents - feeRefundCents)),
       status: 'SETTLED',
     },
   })
@@ -1302,9 +1313,11 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
             }
           : {}),
         tenderCommission: 'NONE',
-        shift: 'CLAIM_LIVE',
+        // T10: la devolución de un pedido en línea no le resta al turno vivo (el cobro de Stripe nunca entró a uno).
+        shift: input.viaOnlineOrders ? 'INHERIT_ORIGINAL' : 'CLAIM_LIVE',
         provenance: 'MANUAL',
         bloqueado: cobro,
+        ...(input.platformFeeRefundCents !== undefined ? { platformFeeRefundCents: input.platformFeeRefundCents } : {}),
         devolverCon: devolverConEfectivo(original, input.refundMethod),
         ...(chain
           ? {
