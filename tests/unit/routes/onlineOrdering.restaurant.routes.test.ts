@@ -207,6 +207,17 @@ describe('API del restaurante: permiso, candado de plan y esquema por ruta', () 
     }
   })
 
+  it('F2: «Devolver por otro medio» en EFECTIVO exige payments:refund-to-cash (como el POS); por transferencia, payments:refund', async () => {
+    const resolver = (method: string, permisos: string) =>
+      request(app).post(`${P}/orders/ord1/card-refund/cr1/resolve`).set('x-test-permisos', permisos).send({ method })
+    // Un cajero (puede reembolsar, no sacar efectivo del cajón por un cobro de tarjeta) → 403 en efectivo, 200 en transferencia.
+    expect((await resolver('CASH', 'payments:refund')).status).toBe(403)
+    expect((await resolver('CASH', 'payments:refund')).body).toMatchObject({ required: 'payments:refund-to-cash' })
+    expect((await resolver('BANK_TRANSFER', 'payments:refund')).status).toBe(200)
+    expect((await resolver('CASH', 'payments:refund-to-cash')).status).toBe(200)
+    expect((await resolver('CASH', 'payments:refund-to-cash')).body).toMatchObject({ perms: ['payments:refund-to-cash'] })
+  })
+
   it('1b: pausar desde el panel con SÓLO online-orders:pause ⇒ 200; sin él ⇒ 403', async () => {
     expect((await request(app).post(`${P}/pause`).set('x-test-permisos', 'online-orders:pause')).status).toBe(200)
     expect((await request(app).post(`${P}/pause`).set('x-test-permisos', 'orders:read,orders:update')).status).toBe(403)
