@@ -78,7 +78,8 @@ async function capturedOutside(charge: OnlineOrderCharge, auth: AuthorizationSta
       data: { lastError: CAPTURED_OUTSIDE, paymentIntentId: auth.paymentIntentId, stuckAlertedAt: now },
     })
     if (marked.count !== 1) return false
-    await tx.moneyAnomaly.createMany({
+    // La anomalía (llave única por cargo) es la marca de «una sola vez»: aunque la marca del cargo se pierda y se vuelva a poner.
+    const inserted = await tx.moneyAnomaly.createMany({
       data: [
         {
           category: 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE',
@@ -94,7 +95,7 @@ async function capturedOutside(charge: OnlineOrderCharge, auth: AuthorizationSta
       ],
       skipDuplicates: true,
     })
-    return true
+    return inserted.count > 0
   })
   if (!won) return 'CAPTURED_OUTSIDE'
   logger.error('🚨 [OnlineOrderCard] tarjeta capturada fuera de Avoqado antes de ser pedido: no se crea el pedido, devuélvela en Stripe', {
