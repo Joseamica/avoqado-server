@@ -233,6 +233,61 @@ describe('acceptCardOnlineOrder', () => {
   })
 })
 
+describe('fix r1', () => {
+  it('I1: pedido de tarjeta sin cargo → rechaza con PAYMENT_FAILED, nunca acepta sin cobrar', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ charge: null }) as any)
+    await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+    expect(rejectOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ reason: 'PAYMENT_FAILED' }))
+    expect(acceptWithoutCapture).not.toHaveBeenCalled()
+    expect(capture).not.toHaveBeenCalled()
+  })
+
+  it('I1: pago parcial de otro camino → suelta la tarjeta y rechaza con PAYMENT_FAILED; no captura ni acepta', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ order: { paymentStatus: 'PARTIAL', paidAmount: D('100.00') } }) as any)
+    await acceptCardOnlineOrder(base)
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ch1', status: 'AUTHORIZED' },
+      data: { status: 'RELEASING' },
+    })
+    expect(rejectOnlineOrder).toHaveBeenCalledWith(expect.objectContaining({ reason: 'PAYMENT_FAILED' }))
+    expect(releaseCharge).toHaveBeenCalledWith('ch1')
+    expect(acceptWithoutCapture).not.toHaveBeenCalled()
+    expect(capture).not.toHaveBeenCalled()
+  })
+
+  it('I2: el total cambió antes de registrar el cobro → revierte (sin Payment), lastError TOTAL_CHANGED y CONFIRMING_PAYMENT', async () => {
+    capture.mockResolvedValue(succeeded())
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('300.00'), items: [] } as any)
+    await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(casTransitionInTx).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'ch1', status: 'CAPTURING' },
+      data: { lastError: 'TOTAL_CHANGED' },
+    })
+  })
+
+  it('M1: Stripe cobró otro monto → lastError CAPTURED_AMOUNT_MISMATCH y CONFIRMING_PAYMENT, sin Payment', async () => {
+    capture.mockResolvedValue({ ...succeeded(), amountReceivedCents: 20_000 })
+    await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'ch1', status: 'CAPTURING' },
+      data: { lastError: 'CAPTURED_AMOUNT_MISMATCH' },
+    })
+  })
+
+  it('M5: un error que no es de Stripe al capturar, con el PI aún requires_capture, deja su mensaje en lastError', async () => {
+    capture.mockRejectedValue(new TypeError('fetch failed'))
+    getAuthorization.mockResolvedValue({ ...succeeded(), piStatus: 'requires_capture', amountReceivedCents: 0 })
+    await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenLastCalledWith({
+      where: { id: 'ch1', status: 'CAPTURING' },
+      data: { lastError: 'fetch failed' },
+    })
+  })
+})
+
 describe('failCapture', () => {
   it('si el cargo ya no está CAPTURING cuando la transición rechazó, se revierte: no se rechaza un pedido cobrado', async () => {
     ;(rejectOnlineOrder as jest.Mock).mockImplementationOnce(async (i: any) => {

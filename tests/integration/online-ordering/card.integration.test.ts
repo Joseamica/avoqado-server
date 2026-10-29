@@ -916,4 +916,37 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(captureSpy).not.toHaveBeenCalled()
     expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('RELEASED')
   })
+
+  // ── Fix r1 de la tarea 6 ──
+  it('fix r1 I1: un pedido de tarjeta sin cargo nunca se acepta sin cobrar: PAYMENT_FAILED', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    await prisma.onlineOrderCharge.update({ where: { id: charge.id }, data: { onlineOrderId: null } })
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+    expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
+    expect(captureSpy).not.toHaveBeenCalled()
+  })
+
+  it('fix r1 I1: con un pago parcial de otro camino no captura ni acepta; suelta la tarjeta', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'PARTIAL', paidAmount: new Prisma.Decimal('100.00') } })
+    const r = await accept(orderId)
+    expect(r.outcome).not.toBe('OK')
+    expect(captureSpy).not.toHaveBeenCalled()
+    expect((await onlineOf(orderId)).status).not.toBe('ACCEPTED')
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('RELEASED')
+  })
+
+  it('fix r1 I2: el total cambia entre la primera transacción y el registro del cobro → sin Payment, cargo CAPTURING con TOTAL_CHANGED', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    captureSpy.mockImplementation(async (_m: any, p: any) => {
+      await prisma.order.update({ where: { id: orderId }, data: { total: new Prisma.Decimal('300.00') } })
+      return capturedState(p)
+    })
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(await paymentsOf(orderId)).toHaveLength(0)
+    const c = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
+    expect(c).toMatchObject({ status: 'CAPTURING', lastError: 'TOTAL_CHANGED' })
+    expect((await onlineOf(orderId)).status).toBe('PENDING_ACCEPTANCE')
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).paymentStatus).toBe('PENDING')
+  })
 })

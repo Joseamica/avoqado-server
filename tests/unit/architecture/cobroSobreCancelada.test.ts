@@ -95,7 +95,7 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
   // acepta (R2), así que se revierte todo y el cargo queda en duda para el conciliador.
   'services/online-ordering/card/capture.service.ts#finishCapture': {
     clase: 'RECHAZA (la aceptación bajo el candado revierte el cobro)',
-    marcadores: [['finishCapture', 'throw new CaptureNotAccepted(r.r)']],
+    marcadores: [['finishCapture', 'throw new CaptureNotAccepted(`ACCEPT_${r.r}`)']],
   },
   'services/onboarding/demoSeed.service.ts#seedOrders': { clase: 'ORDEN PROPIA (demo)', marcadores: [] },
   'services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder': {

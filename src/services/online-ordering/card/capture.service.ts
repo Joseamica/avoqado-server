@@ -46,7 +46,7 @@ const captureKey = (orderId: string) => `online-order:${orderId}:capture`
 type Plan =
   | { do: 'ANSWER'; result: TransitionResult }
   | { do: 'ACCEPT_WITHOUT_CAPTURE'; releaseChargeId?: string }
-  | { do: 'REJECT_PAYMENT_FAILED' }
+  | { do: 'REJECT_PAYMENT_FAILED'; releaseChargeId?: string }
   | { do: 'EXPIRE'; now: Date }
   | { do: 'CAPTURE'; charge: OnlineOrderCharge; now: Date }
 
@@ -76,19 +76,31 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
     const charge = row.charge
     if (charge?.status === OnlineOrderChargeStatus.CAPTURING) return { do: 'ANSWER', result: { outcome: 'CONFIRMING_PAYMENT' } }
     if (row.status !== OnlineOrderStatus.PENDING_ACCEPTANCE) return { do: 'ANSWER', result: { outcome: 'STALE', status: row.status } }
-    // Sin cargo (no debería) o con la cuenta cancelada por otra vía (R2): la aceptación de siempre decide y sincroniza.
-    if (!charge || row.order.status === OrderStatus.CANCELLED || row.order.status === OrderStatus.DELETED) {
-      return { do: 'ACCEPT_WITHOUT_CAPTURE' }
+    // La cuenta cancelada por otra vía (R2): la aceptación de siempre lo sincroniza (no acepta nada).
+    if (row.order.status === OrderStatus.CANCELLED || row.order.status === OrderStatus.DELETED) return { do: 'ACCEPT_WITHOUT_CAPTURE' }
+    // Fix r1 I1: un pedido de tarjeta nunca se acepta sin cobrar (entregarlo no pide cobro). Sin cargo no hay con qué cobrar.
+    if (!charge) {
+      logger.error('🚨 [OnlineOrderCard] pedido con tarjeta sin cargo: se rechaza', { venueId: i.venueId, orderId: i.orderId })
+      return { do: 'REJECT_PAYMENT_FAILED' }
     }
 
-    // La cuenta ya trae dinero de otro camino: no se cobra la tarjeta otra vez. Se suelta y se acepta como hoy.
+    // La cuenta ya trae dinero de otro camino: no se cobra la tarjeta otra vez; se suelta. Sólo si ya está PAGADA se acepta como
+    // hoy; con un pago parcial no se acepta (quedaría sin cobrar el resto): se rechaza.
     const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
     if (hasMoney) {
       const moved = await tx.onlineOrderCharge.updateMany({
         where: { id: charge.id, status: OnlineOrderChargeStatus.AUTHORIZED },
         data: { status: OnlineOrderChargeStatus.RELEASING },
       })
-      return { do: 'ACCEPT_WITHOUT_CAPTURE', ...(moved.count === 1 ? { releaseChargeId: charge.id } : {}) }
+      const release = moved.count === 1 ? { releaseChargeId: charge.id } : {}
+      if (row.order.paymentStatus === PaymentStatus.PAID) return { do: 'ACCEPT_WITHOUT_CAPTURE', ...release }
+      logger.error('🚨 [OnlineOrderCard] pedido con tarjeta con un pago parcial de otro camino: no se cobra ni se acepta', {
+        chargeId: charge.id,
+        venueId: i.venueId,
+        orderId: i.orderId,
+        paidAmount: new Prisma.Decimal(row.order.paidAmount).toFixed(2),
+      })
+      return { do: 'REJECT_PAYMENT_FAILED', ...release }
     }
     // Ruling T6: sin tarjeta apartada (Stripe la soltó o el cobro ya falló) no hay con qué cobrar.
     if (charge.status !== OnlineOrderChargeStatus.AUTHORIZED) return { do: 'REJECT_PAYMENT_FAILED' }
@@ -121,8 +133,11 @@ export async function acceptCardOnlineOrder(i: AcceptInput): Promise<TransitionR
       if (plan.releaseChargeId) await releaseCharge(plan.releaseChargeId)
       return r
     }
-    case 'REJECT_PAYMENT_FAILED':
-      return rejectedForPayment(i)
+    case 'REJECT_PAYMENT_FAILED': {
+      const r = await rejectedForPayment(i)
+      if (plan.releaseChargeId) await releaseCharge(plan.releaseChargeId)
+      return r
+    }
     case 'EXPIRE': {
       // El camino de hoy: aceptar tarde vence aquí mismo (y la transición del vencimiento suelta la tarjeta).
       const expired = await expireOnlineOrder({ venueId: i.venueId, orderId: i.orderId, now: plan.now })
@@ -165,7 +180,13 @@ async function captureCharge(
     return failCapture(charge.id, { staffId: meta.staffId, now: meta.now })
   }
 
-  const why = failure instanceof Error ? failure.message : `Stripe dejó el PaymentIntent en ${state?.piStatus ?? 'desconocido'}`
+  // Fix r1 M5: cualquier error de `capture` (de Stripe o no) queda escrito para la alerta del conciliador.
+  const why =
+    failure != null
+      ? failure instanceof Error
+        ? failure.message
+        : String(failure)
+      : `Stripe dejó el PaymentIntent en ${state?.piStatus ?? 'desconocido'}`
   await prisma.onlineOrderCharge.updateMany({
     where: { id: charge.id, status: OnlineOrderChargeStatus.CAPTURING },
     data: { lastError: why.slice(0, 500) },
@@ -203,6 +224,10 @@ export async function finishCapture(
       capturedCents: state.amountReceivedCents,
       expected: new Prisma.Decimal(charge.amount).toFixed(2),
     })
+    await prisma.onlineOrderCharge.updateMany({
+      where: { id: chargeId, status: OnlineOrderChargeStatus.CAPTURING },
+      data: { lastError: 'CAPTURED_AMOUNT_MISMATCH' },
+    })
     return { outcome: 'CONFIRMING_PAYMENT' }
   }
 
@@ -219,7 +244,7 @@ export async function finishCapture(
   let done: { r: Extract<CasResult, { r: 'OK' }>; paymentId: string; postingId: string | null } | null
   try {
     done = await prisma.$transaction(async tx => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new CaptureNotAccepted('NOT_FOUND')
+      if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new CaptureNotAccepted('ORDER_NOT_FOUND')
       const won = await tx.onlineOrderCharge.updateMany({
         where: { id: chargeId, status: OnlineOrderChargeStatus.CAPTURING },
         data: { status: OnlineOrderChargeStatus.CAPTURED, capturedAt: meta.now, capturedAmount, lastError: null },
@@ -230,6 +255,8 @@ export async function finishCapture(
         where: { id: orderId },
         select: { total: true, items: { include: { modifiers: { include: { modifier: true } } } } },
       })
+      // Fix r1 I2: bajo el candado, la cuenta debe valer lo cobrado; si cambió desde la primera transacción, se revierte todo.
+      if (!new Prisma.Decimal(order.total).equals(capturedAmount)) throw new CaptureNotAccepted('TOTAL_CHANGED')
       const payment = await tx.payment.create({
         data: {
           venueId,
@@ -256,7 +283,7 @@ export async function finishCapture(
       })
       await tx.order.update({
         where: { id: orderId },
-        data: { paymentStatus: PaymentStatus.PAID, paidAmount: order.total, remainingBalance: 0 },
+        data: { paymentStatus: PaymentStatus.PAID, paidAmount: capturedAmount, remainingBalance: 0 },
       })
       const posting = await createSalePostingInTx(tx, { venueId, orderId, items: order.items as any, staffId: meta.staffId })
       // R8: como cada vale de una venta saldada (la tienda en línea hoy no vende tarjetas de regalo: no encuentra sobres).
@@ -273,11 +300,11 @@ export async function finishCapture(
         orderExtra: now => (marcarCocina ? { kitchenPendingAt: now } : {}),
       })
       // Nunca un Payment sobre un pedido no aceptado: se revierte todo.
-      if (r.r !== 'OK') throw new CaptureNotAccepted(r.r)
+      if (r.r !== 'OK') throw new CaptureNotAccepted(`ACCEPT_${r.r}`)
       return { r, paymentId: payment.id, postingId: posting?.id ?? null }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
-    const why = error instanceof CaptureNotAccepted ? `ACCEPT_${error.message}` : error instanceof Error ? error.message : String(error)
+    const why = error instanceof Error ? error.message : String(error)
     logger.error('🚨 [OnlineOrderCard] Stripe cobró pero la cuenta no quedó aceptada: queda CAPTURING', { chargeId, venueId, why })
     await prisma.onlineOrderCharge
       .updateMany({ where: { id: chargeId, status: OnlineOrderChargeStatus.CAPTURING }, data: { lastError: why.slice(0, 500) } })
