@@ -49,6 +49,14 @@ jest.mock('@/mcp/requireWriteScopeAlways', () => {
   return { requireWriteScopeAlways: (...a: unknown[]) => (mockRealGuards ? real.requireWriteScopeAlways(...a) : undefined) }
 })
 jest.mock('@/mcp/planGate', () => ({ planGateMessage: (...a: unknown[]) => mockPlanGate(...(a as [])) }))
+const mockListCardRefunds = jest.fn()
+const mockRefundCard = jest.fn()
+const mockResolveCardRefund = jest.fn()
+jest.mock('@/services/online-ordering/card/refund.service', () => ({
+  listCardRefunds: (...a: unknown[]) => mockListCardRefunds(...(a as [])),
+  refundCardOnlineOrder: (...a: unknown[]) => mockRefundCard(...(a as [])),
+  resolveReversedCardRefund: (...a: unknown[]) => mockResolveCardRefund(...(a as [])),
+}))
 jest.mock('@/mcp/audit', () => ({ auditMcpWrite: (...a: unknown[]) => mockAudit(...(a as [])) }))
 jest.mock('@/services/online-ordering/inbox.service', () => ({
   listInbox: (...a: unknown[]) => mockListInbox(...(a as [])),
@@ -458,7 +466,9 @@ describe('online_ordering_configure', () => {
 
   it('fase 2: otro error del servicio no se disfraza: se propaga', async () => {
     mockUpdateSettings.mockRejectedValue(new Error('boom'))
-    await expect(call('online_ordering_configure', { venueId: 'v1', changes: { minOrderAmount: 80 }, confirm: true })).rejects.toThrow('boom')
+    await expect(call('online_ordering_configure', { venueId: 'v1', changes: { minOrderAmount: 80 }, confirm: true })).rejects.toThrow(
+      'boom',
+    )
   })
 
   it('marca platillos en línea con la disponibilidad del menú', async () => {
@@ -550,6 +560,9 @@ describe('online_ordering_menu (1b: el menú en línea, sólo lectura)', () => {
 describe('descripciones', () => {
   it('no mencionan internos (tablas, modelos ni campos) y todas las herramientas son online_*', () => {
     expect([...descriptions.keys()].sort()).toEqual([
+      'online_order_card_refund',
+      'online_order_card_refund_resolve',
+      'online_order_card_refunds',
       'online_order_respond',
       'online_ordering_configure',
       'online_ordering_menu',
@@ -666,5 +679,128 @@ describe('A14: seguridad con los guardias REALES (scope de la conexión y permis
     expect(r).toMatchObject({ ok: true, status: 'ACCEPTED' })
     expect(mockAccept).toHaveBeenCalledTimes(1)
     expect(mockAudit).toHaveBeenCalledTimes(1)
+  })
+})
+
+// ── F3 (revisión final): «MCP en sync» — devolver a la tarjeta y «Devolver por otro medio» también por el MCP ──
+describe('devoluciones a la tarjeta de un pedido en línea', () => {
+  const cobrado = {
+    ...enPreparacion,
+    paymentMode: 'CARD_ONLINE',
+    status: 'COMPLETED',
+    card: { status: 'CAPTURED', amount: 250, capturedAmount: 250, authorizedAt: 'x', capturedAt: 'y' },
+  }
+  const fila = (o: Record<string, unknown> = {}) => ({
+    id: 'cr1',
+    status: 'RECORDED',
+    amount: '100.00',
+    reason: 'CANCELLED_ORDER',
+    note: null,
+    stripeRefundId: 're_1',
+    refundPaymentId: 'p1',
+    feeRefunded: '1.16',
+    createdAt: 'x',
+    reversal: null,
+    ...o,
+  })
+  const revertida = fila({
+    status: 'REVERSED',
+    reversal: { failureReason: 'lost_card', detectedAt: 'x', resolvedMethod: null, resolvedAt: null, resolvedNote: null },
+  })
+  beforeAll(() => {
+    process.env.ACCESS_TOKEN_SECRET = process.env.ACCESS_TOKEN_SECRET || 'test-secret'
+  })
+  beforeEach(() => {
+    mockGetInboxOrder.mockResolvedValue(cobrado)
+    mockListCardRefunds.mockResolvedValue([fila()])
+    mockRefundCard.mockResolvedValue({
+      status: 'RECORDED',
+      cardRefundStatus: 'RECORDED',
+      cardRefundId: 'cr2',
+      refundId: 'p2',
+      replay: false,
+    })
+    mockResolveCardRefund.mockResolvedValue({ status: 'RESOLVED', replay: false })
+  })
+
+  it('online_order_card_refunds: lista con payments:read, montos en pesos (número)', async () => {
+    const r = parse(await call('online_order_card_refunds', { venueId: 'v1', orderId: 'ord1' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('payments:read', 'v1')
+    expect(mockListCardRefunds).toHaveBeenCalledWith('v1', 'ord1')
+    expect(r).toMatchObject({ ok: true, devoluciones: [{ id: 'cr1', status: 'RECORDED', amount: 100, feeRefunded: 1.16 }] })
+  })
+
+  it('online_order_card_refund sin confirm: vista previa «Se devuelven $X a la tarjeta del cliente» y su confirmationToken; no devuelve', async () => {
+    const r = parse(await call('online_order_card_refund', { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('payments:refund', 'v1')
+    expect(r).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(r.preview.efecto).toContain('Se devuelven $120.50 a la tarjeta del cliente')
+    expect(typeof r.confirmationToken).toBe('string')
+    expect(mockRefundCard).not.toHaveBeenCalled()
+  })
+
+  it('online_order_card_refund con confirm y el token: devuelve en pesos con una llave sacada de la confirmación; repetir = misma llave', async () => {
+    const args = { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }
+    const { confirmationToken } = parse(await call('online_order_card_refund', args))
+    const r = parse(await call('online_order_card_refund', { ...args, confirm: true, confirmationToken }))
+    expect(r).toMatchObject({ ok: true, status: 'RECORDED', cardRefundId: 'cr2' })
+    const i = mockRefundCard.mock.calls[0][0]
+    expect(i).toMatchObject({ venueId: 'v1', orderId: 'ord1', reason: 'CANCELLED_ORDER', staffId: 's1' })
+    expect(i.amount.toFixed(2)).toBe('120.50')
+    expect(i.idempotencyKey).toMatch(/^[A-Za-z0-9_-]{8,64}$/)
+    await call('online_order_card_refund', { ...args, confirm: true, confirmationToken })
+    expect(mockRefundCard.mock.calls[1][0].idempotencyKey).toBe(i.idempotencyKey)
+    expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP', entityId: 'cr2' }))
+  })
+
+  it('online_order_card_refund: confirm sin token, o con el token de OTRO monto → no devuelve', async () => {
+    const args = { venueId: 'v1', orderId: 'ord1', amount: 120.5, reason: 'CANCELLED_ORDER' }
+    const sin = parse(await call('online_order_card_refund', { ...args, confirm: true }))
+    expect(sin).toMatchObject({ ok: false })
+    const { confirmationToken } = parse(await call('online_order_card_refund', args))
+    const otro = parse(await call('online_order_card_refund', { ...args, amount: 250, confirm: true, confirmationToken }))
+    expect(otro).toMatchObject({ ok: false })
+    expect(mockRefundCard).not.toHaveBeenCalled()
+  })
+
+  it('online_order_card_refund sobre un pedido que no se cobró con tarjeta → no ofrece la devolución', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...cobrado, paymentMode: 'PAY_AT_PICKUP', card: null })
+    const r = parse(await call('online_order_card_refund', { venueId: 'v1', orderId: 'ord1', amount: 50, reason: 'OTHER' }))
+    expect(r).toMatchObject({ ok: false })
+    expect(r.requiresConfirmation).toBeUndefined()
+  })
+
+  it('online_order_card_refund_resolve: en efectivo exige payments:refund-to-cash; por transferencia, payments:refund; dos pasos', async () => {
+    mockListCardRefunds.mockResolvedValue([revertida])
+    const prev = parse(await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'CASH' }))
+    expect(mockRequirePermission).toHaveBeenCalledWith('payments:refund-to-cash', 'v1')
+    expect(prev).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(prev.preview.efecto).toContain('$100.00')
+    expect(mockResolveCardRefund).not.toHaveBeenCalled()
+
+    const r = parse(
+      await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'CASH', confirm: true }),
+    )
+    expect(r).toMatchObject({ ok: true, status: 'RESOLVED' })
+    expect(mockResolveCardRefund).toHaveBeenCalledWith({
+      venueId: 'v1',
+      orderId: 'ord1',
+      cardRefundId: 'cr1',
+      method: 'CASH',
+      staffId: 's1',
+      note: null,
+    })
+    expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ action: 'ONLINE_ORDER_CARD_REFUND_RESOLVED_VIA_MCP' }))
+
+    mockRequirePermission.mockClear()
+    await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'BANK_TRANSFER' })
+    expect(mockRequirePermission).toHaveBeenCalledWith('payments:refund', 'v1')
+    expect(mockRequirePermission).not.toHaveBeenCalledWith('payments:refund-to-cash', 'v1')
+  })
+
+  it('online_order_card_refund_resolve sobre una devolución que no falló → no ofrece resolver', async () => {
+    const r = parse(await call('online_order_card_refund_resolve', { venueId: 'v1', orderId: 'ord1', refundId: 'cr1', method: 'CASH' }))
+    expect(r).toMatchObject({ ok: false })
+    expect(r.requiresConfirmation).toBeUndefined()
   })
 })

@@ -1,13 +1,17 @@
+import { createHash } from 'crypto'
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
+import { Prisma } from '@prisma/client'
 import { z } from 'zod'
-import { BadRequestError } from '@/errors/AppError'
+import AppError, { BadRequestError } from '@/errors/AppError'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
+import { CONFIRMATION_TTL, issueConfirmation, validConfirmation } from '../confirmation'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
 import { planGateMessage } from '../planGate'
 import { getInboxOrder, listInbox } from '@/services/online-ordering/inbox.service'
+import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
 import { getSettings, pauseOnlineOrdering, updateSettings } from '@/services/online-ordering/settings.service'
@@ -377,6 +381,167 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         data: { minutes },
       })
       return text({ ok: true, ...r })
+    },
+  )
+
+  // ── Fase 2 (F3, «MCP en sync»): devolver a la tarjeta y «Devolver por otro medio», con los MISMOS servicios del panel ──
+
+  server.tool(
+    'online_order_card_refunds',
+    'Devoluciones a la tarjeta de un pedido en línea pagado con tarjeta al pedir, sólo lectura: monto en pesos, motivo, estado (REQUESTED, SENDING, PENDING, SUCCEEDED o RECORDED = devuelta y anotada; FAILED o CANCELED = el banco no la hizo; REVERSED = falló después de anotarla y falta devolver por otro medio; RESOLVED = ya se devolvió por otro medio) y, si falló después, el motivo y cómo se resolvió.',
+    {
+      venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
+      orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
+    },
+    async ({ venueId, orderId }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:read', venueId)
+      const filas = await listCardRefunds(venueId, orderId)
+      // Pesos 1:1 como número (el servicio del panel los da como texto con dos decimales).
+      const devoluciones = filas.map(f => ({
+        ...f,
+        amount: Number(f.amount),
+        feeRefunded: f.feeRefunded == null ? null : Number(f.feeRefunded),
+      }))
+      return text({ ok: true, devoluciones })
+    },
+  )
+
+  server.tool(
+    'online_order_card_refund',
+    'Devuelve a la tarjeta del cliente (total o parcial) un pedido en línea que se cobró con tarjeta al pedir. El monto va en pesos (por ejemplo 120.50) y no puede pasar de lo que queda por devolver. Dos pasos: sin confirm:true sólo muestra la vista previa y un confirmationToken; para devolver, repite los mismos datos con confirm:true y ese confirmationToken (vale 10 minutos). Repetir la confirmación con el mismo token no devuelve dos veces. Pide permiso para reembolsar.',
+    {
+      venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
+      orderId: z.string().describe('Id del pedido (orderId de la lista de pedidos en línea)'),
+      amount: z.number().positive().finite().multipleOf(0.01).max(9_999_999.99).describe('Monto a devolver en PESOS, por ejemplo 120.50'),
+      reason: z
+        .enum(['RETURNED_GOODS', 'ACCIDENTAL_CHARGE', 'CANCELLED_ORDER', 'FRAUDULENT_CHARGE', 'OTHER'])
+        .describe('Motivo de la devolución'),
+      note: z.string().trim().max(200).optional().describe('Nota para la bitácora'),
+      confirm: z.boolean().optional().describe('true para devolver de verdad (con el confirmationToken de la vista previa)'),
+      confirmationToken: z.string().optional().describe('El confirmationToken que dio la vista previa'),
+    },
+    async ({ venueId, orderId, amount, reason, note, confirm, confirmationToken }) => {
+      guard.venueFilter(venueId)
+      guard.requirePermission('payments:refund', venueId)
+      requireWriteScopeAlways(scope, 'payments:refund', 'devuelve dinero a la tarjeta del cliente')
+      const monto = new Prisma.Decimal(amount).toDecimalPlaces(2)
+      const nota = note || null
+      const binding = { venueId, orderId, amount: monto.toFixed(2), reason, note: nota }
+
+      if (!confirm) {
+        const order = await getInboxOrder({ venueId, orderId })
+        if (!order) return text({ ok: false, error: 'Ese pedido no existe en este negocio.' })
+        if (order.paymentMode !== 'CARD_ONLINE' || order.card?.status !== 'CAPTURED') {
+          return text({ ok: false, error: 'Este pedido no se cobró con tarjeta en línea; no hay nada que devolver a la tarjeta.' })
+        }
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            pedido: order.orderNumber,
+            cliente: order.customerName,
+            cobrado: order.card.capturedAmount,
+            devolver: Number(monto.toFixed(2)),
+            motivo: reason,
+            nota,
+            efecto: `Se devuelven $${monto.toFixed(2)} a la tarjeta del cliente.`,
+          },
+          confirmationToken: issueConfirmation(scope, 'online_order_card_refund', binding),
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con los mismos datos, confirm:true y el confirmationToken.',
+        })
+      }
+
+      if (!validConfirmation(confirmationToken, scope, 'online_order_card_refund', binding)) {
+        return text({
+          ok: false,
+          error: `La vista previa venció (dura ${CONFIRMATION_TTL / 60} minutos) o estos datos no son los que se vieron (pedido, monto, motivo o nota). Pide una vista previa nueva y confírmala tal cual.`,
+        })
+      }
+      // La llave sale de la confirmación: repetir ESTA confirmación es la misma devolución; una vista previa nueva, otra.
+      const idempotencyKey = `mcp_${createHash('sha256').update(confirmationToken!).digest('hex').slice(0, 40)}`
+      try {
+        const r = await refundCardOnlineOrder({
+          venueId,
+          orderId,
+          amount: monto,
+          reason,
+          staffId: scope.staffId,
+          idempotencyKey,
+          note: nota,
+        })
+        await auditMcpWrite(scope, {
+          action: 'ONLINE_ORDER_CARD_REFUND_VIA_MCP',
+          entity: 'OnlineOrderCardRefund',
+          entityId: r.cardRefundId,
+          venueId,
+          data: { orderId, amount: monto.toFixed(2), reason, note: nota, status: r.status, replay: r.replay },
+        })
+        return text({ ok: true, ...r })
+      } catch (err) {
+        if (!(err instanceof AppError)) throw err
+        return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+      }
+    },
+  )
+
+  server.tool(
+    'online_order_card_refund_resolve',
+    'Devolver por otro medio: cuando una devolución a la tarjeta falló en el banco después de anotarse (estado REVERSED en online_order_card_refunds), registra que el negocio ya le devolvió ese dinero al cliente en efectivo (sale de la caja abierta) o por transferencia. Dos pasos: sin confirm:true sólo muestra la vista previa. En efectivo pide el permiso de devolver en efectivo; por transferencia, el de reembolsar.',
+    {
+      venueId: z.string().describe('Venue del pedido (debe estar en tu scope)'),
+      orderId: z.string().describe('Id del pedido'),
+      refundId: z.string().describe('Id de la devolución (de online_order_card_refunds)'),
+      method: z.enum(['CASH', 'BANK_TRANSFER']).describe('CASH = efectivo de la caja abierta · BANK_TRANSFER = transferencia'),
+      note: z.string().trim().max(200).optional().describe('Nota para la bitácora'),
+      confirm: z.boolean().optional().describe('true para registrarlo de verdad'),
+    },
+    async ({ venueId, orderId, refundId, method, note, confirm }) => {
+      guard.venueFilter(venueId)
+      // F2: sacar efectivo del cajón por un cobro de tarjeta pide su propio permiso (como el panel y el POS).
+      const permiso = method === 'CASH' ? 'payments:refund-to-cash' : 'payments:refund'
+      guard.requirePermission(permiso, venueId)
+      requireWriteScopeAlways(scope, permiso, 'registra la devolución de dinero al cliente por otro medio')
+      const nota = note || null
+
+      if (!confirm) {
+        const fila = (await listCardRefunds(venueId, orderId)).find(f => f.id === refundId)
+        if (!fila || fila.status !== 'REVERSED' || fila.reversal?.resolvedAt) {
+          return text({ ok: false, error: 'Esta devolución no está pendiente de pagarse por otro medio.' })
+        }
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            devolucion: fila.id,
+            monto: Number(fila.amount),
+            metodo: method,
+            nota,
+            efecto:
+              method === 'CASH'
+                ? `Salen $${fila.amount} en efectivo de la caja abierta para devolvérselos al cliente.`
+                : `Queda registrado que le devolviste $${fila.amount} al cliente por transferencia.`,
+          },
+          mensaje: 'Confírmalo con la persona y vuelve a llamar con confirm:true.',
+        })
+      }
+
+      try {
+        const r = await resolveReversedCardRefund({ venueId, orderId, cardRefundId: refundId, method, staffId: scope.staffId, note: nota })
+        if (!r.replay) {
+          await auditMcpWrite(scope, {
+            action: 'ONLINE_ORDER_CARD_REFUND_RESOLVED_VIA_MCP',
+            entity: 'OnlineOrderCardRefund',
+            entityId: refundId,
+            venueId,
+            data: { orderId, method, note: nota },
+          })
+        }
+        return text({ ok: true, ...r })
+      } catch (err) {
+        if (!(err instanceof AppError)) throw err
+        return text({ ok: false, error: err.message, ...(err.code ? { code: err.code } : {}) })
+      }
     },
   )
 }
