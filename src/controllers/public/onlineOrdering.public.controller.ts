@@ -6,6 +6,7 @@ import { assertOrderingPlan } from '@/middlewares/requirePublicVenueFeatureStric
 import { assertOperationalVenue } from '@/middlewares/resolveOperationalVenueBySlug.middleware'
 import { ACCEPT_TIMEOUT_MINUTES } from '@/services/online-ordering/constants'
 import { getPublicMenu } from '@/services/online-ordering/menu.service'
+import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
@@ -21,8 +22,12 @@ function fail(res: Response, error: any, fallback: string) {
   // Nombre y pila SÓLO al log del servidor (para diagnosticar un 5xx en producción); al comensal, el texto genérico.
   if (status >= 500) logger.error('[OnlineOrdering] error público', { error: error?.message, name: error?.name, stack: error?.stack })
   // Un 5xx no expone su código interno (p. ej. el de Prisma). Excepción explícita: «no pudimos verificar el plan» (503 nuestro,
-  // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar.
-  const expose = status < 500 || (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE')
+  // con texto para el comensal) conserva su código: la tienda sabe que puede reintentar. Igual «no pudimos abrir la página de
+  // pago» (502 nuestro, fase 2): el reintento con la misma llave recupera la sesión.
+  const expose =
+    status < 500 ||
+    (status === 503 && error?.code === 'FEATURE_CHECK_UNAVAILABLE') ||
+    (status === 502 && error?.code === 'CARD_PROVIDER_UNAVAILABLE')
   return res.status(status).json({
     success: false,
     code: expose ? error?.code : undefined,
@@ -132,12 +137,33 @@ export async function postOrder(req: Request, res: Response) {
 
     const body = req.body as {
       items: any[]
-      paymentMode: 'PAY_AT_PICKUP'
+      paymentMode: 'PAY_AT_PICKUP' | 'CARD_ONLINE'
       expectedTotal: string
       customer: { name: string; phone: string; email?: string }
       note?: string
       whatsappConsent?: boolean
     }
+    // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
+    const opts = { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) }
+
+    // Fase 2: con tarjeta no se pide OTP (la tarjeta apartada respalda el pedido): borrador + página de pago de Stripe.
+    if (body.paymentMode === 'CARD_ONLINE') {
+      const draft = await createCardOnlineDraft(
+        {
+          venueId: venue.id,
+          venueSlug: venue.slug,
+          idempotencyKey: key,
+          items: body.items,
+          expectedTotal: body.expectedTotal,
+          customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
+          note: body.note ?? null,
+          whatsappConsent: body.whatsappConsent === true,
+        },
+        opts,
+      )
+      return res.status(draft.replay ? 200 : 201).json({ success: true, data: draft })
+    }
+
     // R6/H1: el cliente y el teléfono PROBADO por el OTP de WhatsApp salen del token de PEDIDOS, nunca del cuerpo. El servicio
     // exige que el teléfono del pedido sea ése; sin sesión responde 401 PHONE_VERIFICATION_REQUIRED.
     const auth = (req as any).customerAuth as CustomerAuthContext | null
@@ -147,7 +173,7 @@ export async function postOrder(req: Request, res: Response) {
         venueId: venue.id,
         idempotencyKey: key,
         items: body.items,
-        paymentMode: body.paymentMode,
+        paymentMode: 'PAY_AT_PICKUP',
         expectedTotal: body.expectedTotal,
         customer: { name: body.customer.name, phone: body.customer.phone, email: body.customer.email ?? null },
         customerId: auth?.customerId ?? null,
@@ -155,8 +181,7 @@ export async function postOrder(req: Request, res: Response) {
         note: body.note ?? null,
         whatsappConsent: body.whatsappConsent === true,
       },
-      // P1-06: negocio operativo y plan sólo para un pedido NUEVO; su rechazo se decide después de buscar la repetición.
-      { assertCanCreate: () => assertOperationalVenue(venue.id).then(() => assertOrderingPlan(venue.id)) },
+      opts,
     )
     return res.status(result.replay ? 200 : 201).json({ success: true, data: result })
   } catch (error) {

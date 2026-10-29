@@ -144,7 +144,7 @@ async function findReplay(
 }
 
 /** R4: la admisión de pedidos de un negocio se serializa con este candado consultivo de Postgres (sin Redis). */
-function lockAdmission(tx: Prisma.TransactionClient, venueId: string) {
+export function lockAdmission(tx: Prisma.TransactionClient, venueId: string) {
   return tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-order-admission:' + venueId}))`
 }
 
@@ -152,7 +152,7 @@ function lockAdmission(tx: Prisma.TransactionClient, venueId: string) {
  * Codex r2: un solo envío de esta llave a la vez mientras DECIDE (repetición, rechazo guardado, topes y creación). Un reintento
  * espera a que el envío vivo termine: si creó, recibe su pedido. Siempre ANTES del candado del negocio (sin abrazo mortal).
  */
-function lockKey(tx: Prisma.TransactionClient, venueId: string, externalId: string) {
+export function lockKey(tx: Prisma.TransactionClient, venueId: string, externalId: string) {
   return tx.$executeRaw`SELECT pg_advisory_xact_lock(hashtext(${'online-order-key:' + venueId + ':' + externalId}))`
 }
 
@@ -170,16 +170,16 @@ const rejectionKey = (venueId: string, customerId: string, idempotencyKey: strin
 })
 
 /** El rechazo que la tienda da por definitivo y con el que suelta la llave: todo 4xx salvo 401, 408 y 429 (`isDefinitive`). */
-const isDefinitiveRejection = (error: unknown): error is AppError =>
+export const isDefinitiveRejection = (error: unknown): error is AppError =>
   error instanceof AppError && error.statusCode >= 400 && error.statusCode < 500 && ![401, 408, 429].includes(error.statusCode)
 
 /**
  * Codex r4: decisión DURABLE sobre la llave (rechazo guardado, o la llave ya es de otro pedido). El controlador la responde con
  * `final: true` y sólo con ella la tienda puede soltar la llave ante un 404 (el del resolver, previo a decidir, no la lleva).
  */
-const final = <E extends AppError>(error: E): E & { final: true } => Object.assign(error, { final: true as const })
+export const final = <E extends AppError>(error: E): E & { final: true } => Object.assign(error, { final: true as const })
 
-const TX_OPTIONS = { timeout: 15_000, maxWait: 5_000 }
+export const TX_OPTIONS = { timeout: 15_000, maxWait: 5_000 }
 
 /** Folio corto que no choque con otra cuenta ABIERTA del mismo negocio (dentro del candado de admisión). */
 async function pickOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
@@ -399,6 +399,12 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
    */
   const decidedBefore = async (tx: Prisma.TransactionClient): Promise<CreateOnlineOrderResult | null> => {
     await lockKey(tx, input.venueId, externalId)
+    // Codex r2 #5: la llave ya abrió un borrador de TARJETA (mismo candado y mismo `externalId`): nunca otro pedido con ella.
+    const card = await tx.onlineOrderCharge.findUnique({
+      where: { venueId_idempotencyKey: { venueId: input.venueId, idempotencyKey: input.idempotencyKey } },
+      select: { id: true },
+    })
+    if (card) throw final(new ConflictError('Esa llave ya se usó para otro pedido. Vuelve a armar tu pedido.', 'IDEMPOTENCY_KEY_CONFLICT'))
     const replay = await findReplay(tx, input.venueId, externalId, customerId, requestHash)
     if (replay) return replay
     const rejected = await tx.idempotencyRequest.findUnique({

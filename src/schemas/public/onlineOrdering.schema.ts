@@ -67,7 +67,7 @@ export const createOrderSchema = z.object({
   params: slugParams,
   body: z.object({
     items,
-    paymentMode: z.literal('PAY_AT_PICKUP', { errorMap: () => ({ message: 'Medio de pago no disponible' }) }),
+    paymentMode: z.enum(['PAY_AT_PICKUP', 'CARD_ONLINE'], { errorMap: () => ({ message: 'Medio de pago no disponible' }) }),
     // R5: el total que el comensal vio y confirmó; si el del servidor difiere, 409 PRICE_CHANGED.
     expectedTotal: z.string().regex(/^\d{1,7}\.\d{2}$/, 'Total inválido: pesos con dos decimales, por ejemplo 206.00'),
     customer: z.object({

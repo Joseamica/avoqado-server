@@ -220,6 +220,20 @@ describe('createOnlineOrder', () => {
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ statusCode: 409, code: 'IDEMPOTENCY_KEY_CONFLICT' })
   })
 
+  it('Codex r2 #5: una llave que ya tiene borrador de TARJETA es 409 IDEMPOTENCY_KEY_CONFLICT (final) y no crea nada', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValueOnce({ id: 'ch1' } as any)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'IDEMPOTENCY_KEY_CONFLICT',
+      final: true,
+    })
+    expect(prismaMock.onlineOrderCharge.findUnique).toHaveBeenCalledWith({
+      where: { venueId_idempotencyKey: { venueId: 'v1', idempotencyKey: KEY } },
+      select: { id: true },
+    })
+    expect(prismaMock.order.create).not.toHaveBeenCalled()
+  })
+
   const PEDIDO_DISTINTO = {
     statusCode: 409,
     code: 'IDEMPOTENCY_KEY_CONFLICT',
@@ -431,6 +445,7 @@ describe('createOnlineOrder', () => {
       },
       customer: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() }, // S3: el nombre se completa en la misma transacción
       idempotencyRequest: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() }, // Codex r3
+      onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null) }, // Codex r2 #5: la llave sin borrador de tarjeta
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
 
@@ -586,6 +601,7 @@ describe('Codex r2 (antes R2-2): ningún rechazo se adelanta a un envío vivo de
       $executeRaw: jest.fn().mockResolvedValue(0),
       order: { findUnique: jest.fn().mockResolvedValue(null) },
       idempotencyRequest: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn().mockResolvedValue({}) },
+      onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null) }, // Codex r2 #5
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_CLOSED' })

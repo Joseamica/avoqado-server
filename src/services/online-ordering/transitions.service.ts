@@ -181,7 +181,7 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
     if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
   }
   // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
-  // un modo ya cobrado de antemano (`PREPAID_MODES`, vacío en 1a) se libra de exigirlo.
+  // un modo ya cobrado de antemano (`PREPAID_MODES`: la tarjeta en línea, que se captura al aceptar) se libra de exigirlo.
   if (a.kind === 'DELIVER' && !PREPAID_MODES.includes(row.paymentMode) && row.order.paymentStatus !== PaymentStatus.PAID) {
     return { r: 'PAYMENT_REQUIRED' }
   }
