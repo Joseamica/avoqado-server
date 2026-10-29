@@ -511,7 +511,7 @@ describe('advanceCardRefund', () => {
       expect(get(r.cardRefundId)).toMatchObject({ status: 'RECORDED', stampReversedAt: null, nextCheckAt: NEVER_AGAIN })
       expect(stampStuck()).toHaveLength(1)
       expect(stampStuck()[0][0]).toMatchObject({ entity: 'OnlineOrderCardRefund', entityId: r.cardRefundId, venueId: 'v1' })
-      expect(errorSpy.mock.calls.filter(([m]) => typeof m === 'string' && m.includes('sello'))).toHaveLength(1)
+      expect(errorSpy.mock.calls.filter(([m]: unknown[]) => typeof m === 'string' && m.includes('sello'))).toHaveLength(1)
       expect(llaves.has(`oocr:STAMP_STUCK:${r.cardRefundId}`)).toBe(true)
       // Otra pasada o un aviso de Stripe que la avance a mano: ni otra alerta ni otra bitácora.
       await sweepCardRefunds(at(400 * DAY), readEntry)

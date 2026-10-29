@@ -946,7 +946,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       expect(await chargeById(charge.id)).toMatchObject({ status: 'AUTHORIZED', releasedAt: null })
       expect(await onlineOf(orderId)).toMatchObject({ status: 'PENDING_ACCEPTANCE' })
       expect(authSpy).toHaveBeenCalledTimes(1) // sólo la confirmación del pedido; el aviso ajeno ni se relee
-      expect(errorSpy.mock.calls.some(([m]) => typeof m === 'string' && m.startsWith('🚨'))).toBe(true)
+      expect(errorSpy.mock.calls.some(([m]: unknown[]) => typeof m === 'string' && m.startsWith('🚨'))).toBe(true)
 
       // El PaymentIntent propio, pero Stripe dice que sigue apartado (aviso viejo o inventado): tampoco.
       authSpy.mockResolvedValueOnce({ ...authorized(), paymentIntentId: charge.paymentIntentId })
@@ -1014,7 +1014,9 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
           where: { category: 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE', stripeEventId: `ooc:CAPTURED_OUTSIDE:${d.id}` },
         }),
       ).toBe(1)
-      expect(errorSpy.mock.calls.filter(([m]) => typeof m === 'string' && m.includes('capturada fuera de Avoqado'))).toHaveLength(1)
+      expect(
+        errorSpy.mock.calls.filter(([m]: unknown[]) => typeof m === 'string' && m.includes('capturada fuera de Avoqado')),
+      ).toHaveLength(1)
 
       // Otra vez (aviso, seguimiento): ni Stripe, ni otra alerta.
       await expect(confirmCardAuthorization(d.id)).resolves.toBe('CAPTURED_OUTSIDE')
