@@ -9,6 +9,7 @@ import { getPublicMenu } from '@/services/online-ordering/menu.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { createOnlineOrder, getTrackingByToken } from '@/services/online-ordering/order.service'
 import { getAcceptingStatus } from '@/services/online-ordering/presence.service'
+import { findCardMerchant } from '@/services/online-ordering/card/merchant'
 import { buildVenueContact } from '@/services/online-ordering/settings.service'
 import { quoteCart, toPublicQuote } from '@/services/online-ordering/quote.service'
 import { cancelOnlineOrderByCustomer } from '@/services/online-ordering/transitions.service'
@@ -63,6 +64,8 @@ export async function getInfo(req: Request, res: Response) {
         },
       }),
     ])
+    // Fase 2: la tienda sólo anuncia tarjeta si el switch está prendido Y el comercio puede cobrar hoy.
+    const cardOnline = state.config.acceptsCardOnline && (await findCardMerchant(prisma, venue.id)) !== null
     return res.json({
       success: true,
       data: {
@@ -88,7 +91,7 @@ export async function getInfo(req: Request, res: Response) {
             ? state.config.pausedUntil
             : null,
         hours: state.config.hours,
-        paymentModes: { payAtPickup: state.config.acceptsPayAtPickup },
+        paymentModes: { payAtPickup: state.config.acceptsPayAtPickup, cardOnline },
         minOrderAmount: state.config.minOrderAmount,
         estimatedPrepMinutes: state.config.defaultPrepMinutes,
         acceptTimeoutMinutes: ACCEPT_TIMEOUT_MINUTES,

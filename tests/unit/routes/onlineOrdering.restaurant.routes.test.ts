@@ -233,6 +233,7 @@ describe('panel: GET y PUT /settings (controlador real)', () => {
     prismaMock.venue.findUnique.mockResolvedValue(VENUE as any)
     prismaMock.privacyNoticeVersion.findFirst.mockResolvedValue(AVISO as any)
     prismaMock.onlineOrder.count.mockResolvedValue(0)
+    prismaMock.ecommerceMerchant.findMany.mockResolvedValue([]) // fase 2: settingsView.card lee el comercio Stripe
   })
 
   it('GET trae el estado de la tienda (mismo cálculo que /info) con sus pausas, y los requisitos; lee los ajustes UNA vez', async () => {

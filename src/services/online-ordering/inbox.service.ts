@@ -25,6 +25,8 @@ export interface InboxOrder {
   total: number
   remaining: number
   paymentStatus: string
+  /** Fase 2: `AUTHORIZED` (tarjeta apartada, falta aceptar), `CONFIRMING` (cobrando) o `null` (al recoger, ya cobrado o sin cargo vivo). */
+  cardStatus: 'AUTHORIZED' | 'CONFIRMING' | null
   needsPrint: boolean
   items: Array<{
     productId: string | null
@@ -56,6 +58,8 @@ const SELECT = {
   printClaimedAt: true,
   printedAt: true,
   createdAt: true,
+  // Fase 2: el cargo con tarjeta (1:1), en el mismo select: sin consulta extra por renglón.
+  charge: { select: { status: true } },
   order: {
     select: {
       id: true,
@@ -106,6 +110,7 @@ function toInboxOrder(r: Row, now: Date): InboxOrder {
     total: money(r.order.total),
     remaining: money(r.order.remainingBalance),
     paymentStatus: r.order.paymentStatus,
+    cardStatus: r.charge?.status === 'AUTHORIZED' ? 'AUTHORIZED' : r.charge?.status === 'CAPTURING' ? 'CONFIRMING' : null,
     needsPrint: onlineOrderNeedsPrint({ status: r.status, printedAt: r.printedAt, printClaimedAt: r.printClaimedAt }, now),
     items: r.order.items.map(i => ({
       productId: i.productId ?? null,

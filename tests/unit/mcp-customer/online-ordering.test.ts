@@ -1,5 +1,6 @@
 // tests/unit/mcp-customer/online-ordering.test.ts
 import { z } from 'zod'
+import { prismaMock } from '@tests/__helpers__/setup'
 import { registerOnlineOrderingTools } from '../../../src/mcp/tools/onlineOrdering'
 import type { McpScope } from '../../../src/mcp/scope'
 import { settingsPatchBody } from '../../../src/schemas/online-ordering.schema'
@@ -137,6 +138,7 @@ beforeEach(() => {
   mockGetSettings.mockResolvedValue(AJUSTES)
   mockAccepting.mockResolvedValue({ status: 'OFFLINE', reason: 'NO_DEVICE', config: { ...AJUSTES } })
   mockRequirements.mockResolvedValue({ address: true, phone: false, privacyNotice: true })
+  prismaMock.ecommerceMerchant.findMany.mockResolvedValue([]) // fase 2: settingsView.card lee el comercio Stripe
 })
 
 describe('online_orders_list', () => {

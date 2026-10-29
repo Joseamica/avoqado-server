@@ -43,6 +43,7 @@ export const settingsPatchBody = z
       .refine(v => /^\d+(\.\d{1,2})?$/.test(String(v)), 'El monto admite máximo 2 decimales'),
     defaultPrepMinutes: z.number().int('Debe ser un número entero').min(1, 'Mínimo 1 minuto').max(240, 'Máximo 240 minutos'),
     acceptsPayAtPickup: z.boolean(),
+    acceptsCardOnline: z.boolean(),
     manualPause: z.boolean(),
     // ISO 8601 en UTC (`…Z`) o con desfase (`…-06:00`): el MCP (tarea 14) comparte este esquema y puede mandar hora local.
     pausedUntil: z.string().datetime({ offset: true, message: 'Fecha inválida' }).nullable(),
