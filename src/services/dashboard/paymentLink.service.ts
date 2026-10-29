@@ -953,8 +953,22 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
     throw new UnauthorizedError('No tienes acceso a esta liga de pago')
   }
 
+  // Pagos completados para el detalle del dashboard («Ver recibo» abre el detalle de cada pago, donde vive su recibo).
+  // `checkoutSessions` de arriba son los últimos 10 intentos de cualquier estado: los fallidos podían tapar a los pagados.
+  const pagosCompletados = { paymentLinkId: linkId, status: 'COMPLETED' as const }
+  const [completedPayments, completedPaymentsTotal] = await Promise.all([
+    prisma.checkoutSession.findMany({
+      where: pagosCompletados,
+      orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+      take: 50,
+      select: { id: true, amount: true, completedAt: true, paymentId: true },
+    }),
+    prisma.checkoutSession.count({ where: pagosCompletados }),
+  ])
+  const conPagos = { ...paymentLink, completedPayments, completedPaymentsTotal }
+
   const foto = (paymentLink.discount as unknown as DescuentoDeLiga | null) ?? null
-  if (!foto) return { ...paymentLink, ...vistaDeDescuento(null, null, null, new Date(), 'UTC') }
+  if (!foto) return { ...conPagos, ...vistaDeDescuento(null, null, null, new Date(), 'UTC') }
   const [fila, venue] = await Promise.all([
     foto.discountId ? prisma.discount.findFirst({ where: { id: foto.discountId, venueId }, select: DISCOUNT_RULE_SELECT }) : null,
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
@@ -966,7 +980,7 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
       : paymentLink.amount != null
         ? Number(paymentLink.amount)
         : null
-  return { ...paymentLink, ...vistaDeDescuento(foto, regla, base, new Date(), venue?.timezone ?? 'America/Mexico_City') }
+  return { ...conPagos, ...vistaDeDescuento(foto, regla, base, new Date(), venue?.timezone ?? 'America/Mexico_City') }
 }
 
 /**
