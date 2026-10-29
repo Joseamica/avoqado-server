@@ -86,7 +86,7 @@ beforeEach(() => {
   prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.onlineOrderCharge.findUnique.mockReset()
   prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ ...CHARGE, status: 'CAPTURING', onlineOrder: { orderId: 'ord1' } } as any)
-  prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('250.00'), items: [] } as any)
+  prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('250.00'), paidAmount: D('0'), items: [] } as any)
   prismaMock.payment.create.mockResolvedValue({ id: 'pay1' } as any)
   prismaMock.order.update.mockResolvedValue({} as any)
   ;(casTransitionInTx as jest.Mock).mockResolvedValue(OK_CAS)
@@ -134,6 +134,20 @@ describe('acceptCardOnlineOrder', () => {
     })
     expect(casTransitionInTx).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ kind: 'ACCEPT', allowCapturing: true }))
     expect(logAction).toHaveBeenCalledWith(expect.objectContaining({ action: 'ONLINE_ORDER_CARD_CAPTURED' }))
+  })
+
+  it('T8 fix r1: la cuenta ya tenía dinero de otro camino → se registra igual, lo cobrado suma los dos y deja ONLINE_ORDER_CARD_DOUBLE_PAYMENT', async () => {
+    capture.mockResolvedValue(succeeded())
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('250.00'), paidAmount: D('250.00'), items: [] } as any)
+    await expect(acceptCardOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK' })
+    expect(prismaMock.payment.create).toHaveBeenCalledTimes(1)
+    expect(prismaMock.order.update).toHaveBeenCalledWith({
+      where: { id: 'ord1' },
+      data: { paymentStatus: 'PAID', paidAmount: D('500.00'), remainingBalance: 0 },
+    })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT', entityId: 'ord1', data: expect.objectContaining({ source: 'ONLINE_CAPTURE' }) }),
+    )
   })
 
   it('débito → DEBIT_CARD', async () => {
@@ -257,7 +271,7 @@ describe('fix r1', () => {
 
   it('I2: el total cambió antes de registrar el cobro → revierte (sin Payment), lastError TOTAL_CHANGED y CONFIRMING_PAYMENT', async () => {
     capture.mockResolvedValue(succeeded())
-    prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('300.00'), items: [] } as any)
+    prismaMock.order.findUniqueOrThrow.mockResolvedValue({ total: D('300.00'), paidAmount: D('0'), items: [] } as any)
     await expect(acceptCardOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
     expect(casTransitionInTx).not.toHaveBeenCalled()

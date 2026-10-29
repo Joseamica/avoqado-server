@@ -69,6 +69,8 @@ export async function assertCardRefundGoesThroughOnlineOrders(
     (await db.payment.findFirst({ where: { id: i.paymentId, venueId: i.venueId }, select: { orderId: true, processorId: true } }))
   if (!payment?.orderId || !payment.processorId) return
   const card = await findCardOnlineOrderInTx(db, { venueId: i.venueId, orderId: payment.orderId })
+  // `charge.paymentIntentId` siempre existe desde AUTHORIZED (la confirmación lo escribe), y la captura escribe el `processorId` con
+  // `state.paymentIntentId ?? charge.paymentIntentId`: el mismo PI. Sin PI (PENDING_AUTH) aún no hay cobro de Stripe que proteger.
   if (card?.charge?.paymentIntentId && card.charge.paymentIntentId === payment.processorId) {
     throw new ConflictError(
       'Devuelve este pago desde Pedidos en línea para que regrese a la tarjeta del cliente.',

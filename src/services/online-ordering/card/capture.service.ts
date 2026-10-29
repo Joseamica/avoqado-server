@@ -244,7 +244,7 @@ export async function finishCapture(
   const method = state.card?.funding === 'debit' ? 'DEBIT_CARD' : sat.method
   const last4 = state.card?.last4
 
-  let done: { r: Extract<CasResult, { r: 'OK' }>; paymentId: string; postingId: string | null } | null
+  let done: { r: Extract<CasResult, { r: 'OK' }>; paymentId: string; postingId: string | null; cobroDoble: boolean } | null
   try {
     done = await prisma.$transaction(async tx => {
       if (!(await lockExistingOrderForPayment(tx, { venueId, orderId }))) throw new CaptureNotAccepted('ORDER_NOT_FOUND')
@@ -256,10 +256,15 @@ export async function finishCapture(
 
       const order = await tx.order.findUniqueOrThrow({
         where: { id: orderId },
-        select: { total: true, items: { include: { modifiers: { include: { modifier: true } } } } },
+        select: { total: true, paidAmount: true, items: { include: { modifiers: { include: { modifier: true } } } } },
       })
       // Fix r1 I2: bajo el candado, la cuenta debe valer lo cobrado; si cambió desde la primera transacción, se revierte todo.
       if (!new Prisma.Decimal(order.total).equals(capturedAmount)) throw new CaptureNotAccepted('TOTAL_CHANGED')
+      // T8 fix r1 (ruling): otro camino ya metió dinero (p. ej. la TPV registró un cobro hecho) mientras Stripe cobraba. Stripe ya
+      // cobró, así que no se rechaza: se registra el de tarjeta, lo cobrado suma los dos y, tras el commit, 🚨 + bitácora para que
+      // el negocio devuelva uno.
+      const yaCobrado = new Prisma.Decimal(order.paidAmount)
+      const cobroDoble = yaCobrado.gt(0)
       const payment = await tx.payment.create({
         data: {
           venueId,
@@ -286,7 +291,7 @@ export async function finishCapture(
       })
       await tx.order.update({
         where: { id: orderId },
-        data: { paymentStatus: PaymentStatus.PAID, paidAmount: capturedAmount, remainingBalance: 0 },
+        data: { paymentStatus: PaymentStatus.PAID, paidAmount: yaCobrado.plus(capturedAmount), remainingBalance: 0 },
       })
       const posting = await createSalePostingInTx(tx, { venueId, orderId, items: order.items as any, staffId: meta.staffId })
       // R8: como cada vale de una venta saldada (la tienda en línea hoy no vende tarjetas de regalo: no encuentra sobres).
@@ -304,7 +309,7 @@ export async function finishCapture(
       })
       // Nunca un Payment sobre un pedido no aceptado: se revierte todo.
       if (r.r !== 'OK') throw new CaptureNotAccepted(`ACCEPT_${r.r}`)
-      return { r, paymentId: payment.id, postingId: posting?.id ?? null }
+      return { r, paymentId: payment.id, postingId: posting?.id ?? null, cobroDoble }
     }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
     const why = error instanceof Error ? error.message : String(error)
@@ -328,6 +333,22 @@ export async function finishCapture(
         error: error instanceof Error ? error.message : String(error),
       }),
     )
+  }
+  if (done.cobroDoble) {
+    logger.error('🚨 [OnlineOrderCard] la tarjeta se cobró sobre una cuenta que ya tenía dinero: el cliente pagó dos veces', {
+      venueId,
+      orderId,
+      paymentId: done.paymentId,
+      chargeId,
+    })
+    void logAction({
+      staffId: meta.staffId,
+      venueId,
+      action: 'ONLINE_ORDER_CARD_DOUBLE_PAYMENT',
+      entity: 'Order',
+      entityId: orderId,
+      data: { paymentId: done.paymentId, chargeId, source: 'ONLINE_CAPTURE' },
+    })
   }
   const result = announceAccepted({ venueId, orderId, staffId: meta.staffId, minutes, marcarCocina }, done.r)
   void logAction({

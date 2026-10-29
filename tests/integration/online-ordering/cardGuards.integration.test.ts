@@ -11,6 +11,7 @@ import { addItemsToOrder, getOrder as getTpvOrder, getOrders as getTpvOrders } f
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { initiateCryptoPayment } from '@/services/b4bit/b4bit.service'
+import { applyCouponCode } from '@/services/tpv/discount.tpv.service'
 
 jest.setTimeout(60_000)
 
@@ -217,6 +218,13 @@ describe('Pedidos en línea con tarjeta — guardas de caja, terminal y panel (i
     )
     expect(await prisma.orderItem.count({ where: { orderId } })).toBe(1)
     await sinCobros(orderId)
+  })
+
+  it('aplicar un cupón desde la TPV a un pedido de tarjeta sin capturar → 409 y el total no cambia', async () => {
+    const { orderId } = await cuenta('CARD_ONLINE')
+    expect(await rechazo(applyCouponCode(venueId!, orderId, 'NOEXISTE', 'sv-x'))).toMatchObject(pagadoConTarjeta)
+    await sinCobros(orderId)
+    expect(await prisma.orderDiscount.count({ where: { orderId } })).toBe(0)
   })
 
   it('payCashOrder sobre un pedido CARD_ONLINE → 409 ONLINE_ORDER_PAID_BY_CARD y ningún Payment', async () => {
