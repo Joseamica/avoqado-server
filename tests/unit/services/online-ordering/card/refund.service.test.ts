@@ -31,6 +31,7 @@ jest.mock('@/services/dashboard/notification.dashboard.service', () => ({
 }))
 
 import { logAction } from '@/services/dashboard/activity-log.service'
+import logger from '@/config/logger'
 import { bloquearCobroParaReembolso, issueRefund } from '@/services/dashboard/refund.dashboard.service'
 import { sendVenueNotification } from '@/services/dashboard/notification.dashboard.service'
 import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
@@ -39,6 +40,7 @@ import {
   handleStripeRefundEvent,
   refundCardOnlineOrder,
   resolveReversedCardRefund,
+  NEVER_AGAIN,
 } from '@/services/online-ordering/card/refund.service'
 import { sweepCardRefunds } from '@/services/online-ordering/card/refund-reconciler.service'
 
@@ -487,6 +489,37 @@ describe('advanceCardRefund', () => {
     await sweepCardRefunds(at(HOUR), readEntry)
     expect(reverseStampForOrder).toHaveBeenCalledTimes(2) // la que falló + la que quedó
     expect(issueRefund).toHaveBeenCalledTimes(1)
+  })
+
+  it('M4: la reversa del sello que falla siempre, al rendirse (30 días + margen), deja 🚨 y ONLINE_ORDER_CARD_REFUND_STAMP_STUCK UNA vez', async () => {
+    ;(reverseStampForOrder as jest.Mock).mockRejectedValue(new Error('el candado del cliente no se suelta'))
+    // La llave única de MoneyAnomaly, como en Postgres (`skipDuplicates`).
+    const llaves = new Set<string>()
+    ;(prismaMock as any).moneyAnomaly.createMany.mockImplementation(async ({ data }: any) => {
+      const nuevas = data.filter((d: any) => !llaves.has(d.stripeEventId))
+      for (const d of nuevas) llaves.add(d.stripeEventId)
+      return { count: nuevas.length }
+    })
+    const errorSpy = jest.spyOn(logger, 'error')
+    try {
+      const r = await pedir()
+      const stampStuck = () => (logAction as jest.Mock).mock.calls.filter(c => c[0].action === 'ONLINE_ORDER_CARD_REFUND_STAMP_STUCK')
+      await sweepCardRefunds(at(15 * MIN), readEntry)
+      await sweepCardRefunds(at(30 * DAY), readEntry)
+      expect(stampStuck()).toHaveLength(0) // todavía dentro del margen: se sigue intentando sin alarma
+      await sweepCardRefunds(at(31 * DAY + MIN), readEntry)
+      expect(get(r.cardRefundId)).toMatchObject({ status: 'RECORDED', stampReversedAt: null, nextCheckAt: NEVER_AGAIN })
+      expect(stampStuck()).toHaveLength(1)
+      expect(stampStuck()[0][0]).toMatchObject({ entity: 'OnlineOrderCardRefund', entityId: r.cardRefundId, venueId: 'v1' })
+      expect(errorSpy.mock.calls.filter(([m]) => typeof m === 'string' && m.includes('sello'))).toHaveLength(1)
+      expect(llaves.has(`oocr:STAMP_STUCK:${r.cardRefundId}`)).toBe(true)
+      // Otra pasada o un aviso de Stripe que la avance a mano: ni otra alerta ni otra bitácora.
+      await sweepCardRefunds(at(400 * DAY), readEntry)
+      await expect(advanceCardRefund(r.cardRefundId, at(401 * DAY))).rejects.toThrow('el candado del cliente no se suelta')
+      expect(stampStuck()).toHaveLength(1)
+    } finally {
+      errorSpy.mockRestore()
+    }
   })
 
   it('el proceso muere entre issueRefund y el CAS: la siguiente pasada repite issueRefund con la MISMA llave y recupera el renglón', async () => {

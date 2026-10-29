@@ -498,16 +498,52 @@ async function advance(id: string, now: Date): Promise<{ status: R; alerted: boo
     return { status: cur.row.status, alerted: cur.alerted }
   } catch (error) {
     const lastError = errorText(error)
+    const nextCheckAt = nextCheckAfterError(cur.row, now)
     await prisma.onlineOrderCardRefund
-      .updateMany({
-        where: { id: cur.row.id, status: cur.row.status },
-        data: { lastError, nextCheckAt: nextCheckAfterError(cur.row, now) },
-      })
+      .updateMany({ where: { id: cur.row.id, status: cur.row.status }, data: { lastError, nextCheckAt } })
       .catch(() => undefined)
     cur.row = { ...cur.row, lastError }
     await maybeAlertStuck(cur, now, lastError).catch(() => undefined)
+    if (nextCheckAt === NEVER_AGAIN && WITH_LEDGER.includes(cur.row.status) && !cur.row.stampReversedAt) {
+      await alertStampGivenUp(cur, lastError).catch(() => undefined)
+    }
     throw error
   }
+}
+
+/**
+ * M4: la reversa del sello de la venta devuelta falló todos los días hasta el final de la revisión (30 días + margen): ya no se
+ * reintenta. `MoneyAnomaly`, 🚨 y bitácora UNA vez para que alguien quite el sello a mano.
+ */
+async function alertStampGivenUp(cur: Cur, why: string): Promise<void> {
+  const { row } = cur
+  // La anomalía (llave única por devolución) es la marca de «una sola vez», también con dos ejecutores a la vez.
+  const inserted = await prisma.moneyAnomaly.createMany({
+    data: [
+      {
+        category: 'ONLINE_ORDER_CARD_REFUND_STAMP_STUCK',
+        stripeEventId: `oocr:STAMP_STUCK:${row.id}`,
+        expectedState: { venueId: row.venueId, cardRefundId: row.id, stampReversed: true },
+        observedState: { status: row.status, stampReversedAt: null, why },
+      },
+    ],
+    skipDuplicates: true,
+  })
+  if (inserted.count === 0) return
+  logger.error('🚨 [OnlineOrderCardRefund] la reversa del sello de una venta devuelta no se pudo hacer: quítalo a mano', {
+    cardRefundId: row.id,
+    venueId: row.venueId,
+    status: row.status,
+    why,
+  })
+  await logAction({
+    staffId: row.staffId,
+    venueId: row.venueId,
+    action: 'ONLINE_ORDER_CARD_REFUND_STAMP_STUCK',
+    entity: 'OnlineOrderCardRefund',
+    entityId: row.id,
+    data: { status: row.status, why, amount: pesos(row.amountCents) },
+  })
 }
 
 export async function advanceCardRefund(id: string, now: Date = new Date()): Promise<R> {
