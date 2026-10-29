@@ -63,7 +63,8 @@ function leer(raw: unknown): LineasDelTicket | null {
   const r = esquema.safeParse(raw)
   if (!r.success) return null
   const copia = r.data
-  if (JSON.stringify(copia).length > TOPE_BYTES_DE_LA_COPIA) return null
+  // Bytes UTF-8, no caracteres: «á» pesa 2 (Codex código r1 #3).
+  if (Buffer.byteLength(JSON.stringify(copia), 'utf8') > TOPE_BYTES_DE_LA_COPIA) return null
   if (copia.lineas.reduce((s, l) => s + l.totalCents, 0) !== copia.subtotalCents) return null
   return copia
 }
@@ -86,7 +87,10 @@ export function copiaGuardada(processorData: unknown): LineasDelTicket | null {
   return raw === undefined || raw === null ? null : leer(raw)
 }
 
-/** Los renglones de la copia en el formato del recibo digital (pesos). */
+/**
+ * Los renglones de la copia en el formato del recibo digital (pesos), con lo que el papel también dice: «Cortesía» en vez del precio,
+ * la pieza de un combo sin precio y los modificadores sin precio (la copia sólo trae su texto; Codex código r1 #1).
+ */
 export function productosDeLaCopia(copia: LineasDelTicket): ProductoDelRecibo[] {
   return copia.lineas.map(l => ({
     name: l.nombre,
@@ -97,7 +101,9 @@ export function productosDeLaCopia(copia: LineasDelTicket): ProductoDelRecibo[] 
     ...(l.peso ? { peso: l.peso } : {}),
     ...(l.nota ? { nota: l.nota } : {}),
     ...(l.area ? { area: l.area } : {}),
-    modifiers: (l.modificadores ?? []).map(name => ({ name, price: 0 })),
+    ...(l.cortesia ? { cortesia: true } : {}),
+    ...(l.pieza ? { pieza: true } : {}),
+    modifiers: (l.modificadores ?? []).map(name => ({ name })),
   }))
 }
 

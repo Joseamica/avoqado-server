@@ -117,6 +117,8 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
             ...(p.peso ? { peso: p.peso } : {}),
             ...(p.nota ? { nota: p.nota } : {}),
             ...(p.area ? { areaSourceLabel: p.area } : {}),
+            ...(p.cortesia ? { cortesia: true } : {}),
+            ...(p.pieza ? { pieza: true } : {}),
           })),
       lineasDelTicket: copiaGuardada(dataSnapshot) ?? undefined,
       processedBy: dataSnapshot.processedBy,

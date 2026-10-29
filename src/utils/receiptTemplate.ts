@@ -73,13 +73,16 @@ interface ReceiptData {
     weightKg?: number | null
     /** Área y vale de origen de una línea preparada antes de pasar por caja. */
     areaSourceLabel?: string
-    /** D1, de una copia del ticket: el resumen impreso del peso y la nota del renglón. */
+    /** D1, de una copia del ticket: el resumen impreso del peso, la nota, «Cortesía» y la pieza de un combo. */
     peso?: string
     nota?: string
+    cortesia?: boolean
+    pieza?: boolean
     modifiers?: Array<{
       name: string
       quantity: number
-      price: number
+      /** Sin precio: el modificador de una copia del ticket (D1). */
+      price?: number
     }>
   }>
   processedBy?: {
@@ -840,22 +843,28 @@ export function generateReceiptHTML(data: ReceiptData): string {
                         <div class="item-card">
                             <div class="item-header">
                                 <div>
-                                    <div class="item-name">${t(item.productName)}</div>
-                                    <span class="item-quantity">${item.weightKg != null ? `Peso: ${item.weightKg} kg` : `Cantidad: ${item.quantity}`}</span>
+                                    <div class="item-name"${item.pieza ? ' style="padding-left: 16px; font-weight: normal;"' : ''}>${item.pieza ? `${item.quantity}x ` : ''}${t(item.productName)}</div>
+                                    ${item.pieza ? '' : `<span class="item-quantity">${item.weightKg != null ? `Peso: ${item.weightKg} kg` : `Cantidad: ${item.quantity}`}</span>`}
                                     ${item.peso ? `<div class="item-unit-price">${t(item.peso)}</div>` : ''}
                                     ${item.areaSourceLabel ? `<div class="item-unit-price">${t(item.areaSourceLabel)}</div>` : ''}
-                                    ${item.nota ? `<div class="item-unit-price">${t(item.nota)}</div>` : ''}
+                                    ${item.nota ? `<div class="item-unit-price">Nota: ${t(item.nota)}</div>` : ''}
                                 </div>
                                 <div style="text-align: right;">
-                                    <div class="item-price">${formatCurrency(item.total, currency)}</div>
-                                    <div class="item-unit-price">${item.weightKg != null ? `${item.weightKg} kg × ${formatCurrency(item.unitPrice, currency)}/kg` : `${item.quantity} × ${formatCurrency(item.unitPrice, currency)}`}</div>
+                                    ${
+                                      item.pieza
+                                        ? ''
+                                        : item.cortesia
+                                          ? '<div class="item-price">Cortesía</div>'
+                                          : `<div class="item-price">${formatCurrency(item.total, currency)}</div>
+                                    <div class="item-unit-price">${item.weightKg != null ? `${item.weightKg} kg × ${formatCurrency(item.unitPrice, currency)}/kg` : `${item.quantity} × ${formatCurrency(item.unitPrice, currency)}`}</div>`
+                                    }
                                 </div>
                             </div>
                             ${
                               item.modifiers && item.modifiers.length > 0
                                 ? `
                                 <div class="item-modifiers">
-                                    ${item.modifiers.map(mod => `<div class="modifier-row"><span>+ ${t(mod.name)}</span><span>${formatCurrency(mod.price, currency)}</span></div>`).join('')}
+                                    ${item.modifiers.map(mod => `<div class="modifier-row"><span>+ ${t(mod.name)}</span><span>${mod.price == null ? '' : formatCurrency(mod.price, currency)}</span></div>`).join('')}
                                 </div>
                             `
                                 : ''

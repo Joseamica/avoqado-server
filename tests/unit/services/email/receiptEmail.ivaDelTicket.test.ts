@@ -84,4 +84,19 @@ describe('correo del recibo · D1 fotocopia del ticket', () => {
     expect(s.html).toContain('&lt;b&gt;Barra&lt;/b&gt;')
     expect(s.html).toContain('&quot;&lt;script&gt;x&lt;/script&gt;&quot;')
   })
+
+  it('el texto plano dice lo mismo que el HTML: modificadores, peso, área, nota, «Cortesía» y la pieza del combo (Codex código r1 #2)', async () => {
+    const s = await enviar({
+      subtotal: 60,
+      discountAmount: 15,
+      totalAmount: 45,
+      items: [
+        { name: 'Combo', quantity: 1, price: 45, totalPrice: 45, modifiers: [{ name: 'Sin azúcar' }], peso: '0.5 kg', area: 'Barra', nota: 'para llevar' },
+        { name: 'Papas', quantity: 1, price: 0, totalPrice: 0, modifiers: [], pieza: true },
+        { name: 'Galleta', quantity: 1, price: 15, totalPrice: 15, modifiers: [], cortesia: true },
+      ],
+    })
+    for (const parte of ['+ Sin azúcar', '0.5 kg', 'Barra', 'Nota: para llevar', '1x Papas', 'Galleta x1 - Cortesía']) expect(s.text).toContain(parte)
+    expect(s.html).toContain('Cortesía')
+  })
 })

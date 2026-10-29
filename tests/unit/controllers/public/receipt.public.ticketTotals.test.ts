@@ -113,6 +113,25 @@ describe('GET /public/receipt/:accessKey — HTML legado con la copia del ticket
     expect(html).toContain('&lt;b&gt;Barra&lt;/b&gt;')
   })
 
+  it('pinta «Cortesía» en vez del precio, la pieza del combo sin precio y los modificadores sin $0.00 (Codex código r1 #1)', async () => {
+    const html = await pintar({ ...base, ticketTotals: { kind: 'COBRO', desglosado: false, subtotal: 45, serviceCharge: 0, addedTax: 0, tip: 0, total: 45 },
+      lineasDelTicket: {
+        lineas: [
+          { nombre: 'Combo Desayuno', cantidad: 1, unitarioCents: 4500, totalCents: 4500, modificadores: ['Sin azúcar'] },
+          { nombre: 'Papas', cantidad: 1, unitarioCents: 0, totalCents: 0, pieza: true },
+          { nombre: 'Galleta', cantidad: 1, unitarioCents: 1500, totalCents: 1500, cortesia: true },
+        ],
+        subtotalCents: 6000,
+        descuentoCents: 1500,
+      } })
+    const renglones = html.slice(html.indexOf('<div class="items-list">'), html.indexOf('<div class="totals-section">'))
+    expect(renglones).toContain('Cortesía')
+    expect(renglones).not.toContain('$15.00')
+    expect(renglones).toContain('1x Papas')
+    expect(renglones).not.toContain('$0.00')
+    expect(renglones).toContain('+ Sin azúcar')
+  })
+
   it('control: sin copia, el ramal de siempre pinta los `items` de la venta', async () => {
     const html = await pintar({ ...base, ticketTotals: { kind: 'COBRO', desglosado: false, subtotal: 50, serviceCharge: 0, addedTax: 0, tip: 0, total: 50 } })
     expect(html).toContain('Café Americano')

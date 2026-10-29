@@ -111,11 +111,13 @@ interface ReceiptEmailData {
     quantity: number
     price: number
     totalPrice: number
-    modifiers?: Array<{ name: string; price: number }>
-    /** D1, de una copia del ticket: el resumen impreso del peso, la nota y el área del vale. */
+    modifiers?: Array<{ name: string; price?: number }>
+    /** D1, de una copia del ticket: el resumen impreso del peso, la nota, el área del vale, «Cortesía» y la pieza de un combo. */
     peso?: string
     nota?: string
     area?: string
+    cortesia?: boolean
+    pieza?: boolean
   }>
   // Totals
   subtotal?: number
@@ -562,12 +564,12 @@ class EmailService {
               item => `
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 12px 0; font-size: 15px; color: #000;">
-            ${escapeHtml(String(item.name ?? ''))}
+            ${item.pieza ? `&nbsp;&nbsp;${item.quantity}x ` : ''}${escapeHtml(String(item.name ?? ''))}
             ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${escapeHtml(String(m.name ?? ''))}`).join(', ')}</span>` : ''}
-            ${[item.peso, item.area, item.nota].filter(Boolean).map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`).join('')}
+            ${[item.peso, item.area, item.nota && `Nota: ${item.nota}`].filter(Boolean).map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`).join('')}
           </td>
-          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">x${item.quantity}</td>
-          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(item.totalPrice)}</td>
+          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">${item.pieza ? '' : `x${item.quantity}`}</td>
+          <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${item.pieza ? '' : item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}</td>
         </tr>
         `,
             )
@@ -577,7 +579,21 @@ class EmailService {
     // Build items text for plain text version
     const itemsText =
       data.items && data.items.length > 0
-        ? data.items.map(item => `  ${item.name} x${item.quantity} - ${formatCurrency(item.totalPrice)}`).join('\n')
+        ? data.items
+            .map(item => {
+              // D1 (Codex código r1 #2): el texto plano dice lo mismo que el HTML (modificadores, peso, área y nota).
+              const renglon = item.pieza
+                ? `    ${item.quantity}x ${item.name}`
+                : `  ${item.name} x${item.quantity} - ${item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}`
+              const extras = [
+                ...(item.modifiers ?? []).map(m => `+ ${m.name}`),
+                item.peso,
+                item.area,
+                item.nota && `Nota: ${item.nota}`,
+              ].filter(Boolean)
+              return [renglon, ...extras.map(x => `      ${x}`)].join('\n')
+            })
+            .join('\n')
         : ''
 
     const html = `

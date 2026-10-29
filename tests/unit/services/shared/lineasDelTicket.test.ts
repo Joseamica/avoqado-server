@@ -61,6 +61,20 @@ describe('copiaQueCuadra', () => {
     expect(copiaQueCuadra({ lineas, subtotalCents: 100, descuentoCents: 0 }, 100)).toBeNull()
   })
 
+  it('el tope es en BYTES: con acentos no se cuela una copia de más de 8 KB (Codex código r1 #3)', () => {
+    const lineas = Array.from({ length: 8 }, () => ({
+      nombre: 'á'.repeat(120),
+      cantidad: 1,
+      unitarioCents: 1,
+      totalCents: 1,
+      modificadores: Array.from({ length: 10 }, () => 'á'.repeat(60)),
+    }))
+    const json = JSON.stringify({ lineas, subtotalCents: 8, descuentoCents: 0 })
+    expect(json.length).toBeLessThan(TOPE_BYTES_DE_LA_COPIA)
+    expect(Buffer.byteLength(json, 'utf8')).toBeGreaterThan(TOPE_BYTES_DE_LA_COPIA)
+    expect(copiaQueCuadra({ lineas, subtotalCents: 8, descuentoCents: 0 }, 8)).toBeNull()
+  })
+
   it('conserva peso, nota, área, cortesía, pieza de combo y modificadores, y tira campos desconocidos', () => {
     const queso = {
       nombre: 'Queso Oaxaca',
@@ -111,7 +125,22 @@ describe('productosDeLaCopia', () => {
     })
     expect(productos).toEqual([
       { name: 'Queso', quantity: 1, price: 420, totalPrice: 182.7, weightKg: null, peso: '0.435 kg', nota: 'n', area: 'A',
-        modifiers: [{ name: 'Sin sal', price: 0 }] },
+        modifiers: [{ name: 'Sin sal' }] },
     ])
+  })
+
+  it('conserva «Cortesía» y la pieza del combo, como el papel (Codex código r1 #1)', () => {
+    const productos = productosDeLaCopia({
+      lineas: [
+        { nombre: 'Combo', cantidad: 1, unitarioCents: 4500, totalCents: 4500 },
+        { nombre: 'Papas', cantidad: 1, unitarioCents: 0, totalCents: 0, pieza: true },
+        { nombre: 'Galleta', cantidad: 1, unitarioCents: 1500, totalCents: 1500, cortesia: true },
+      ],
+      subtotalCents: 6000,
+      descuentoCents: 1500,
+    })
+    expect(productos[0]).not.toHaveProperty('pieza')
+    expect(productos[1].pieza).toBe(true)
+    expect(productos[2].cortesia).toBe(true)
   })
 })
