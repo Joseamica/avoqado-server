@@ -13,6 +13,19 @@ function requiredEnum<T extends string>(value: unknown, allowed: readonly T[], f
   return value as T
 }
 
+const ORIGENES_DEL_COBRO = ['AVOQADO_IOS', 'AVOQADO_ANDROID', 'TPV', 'POS'] as const
+
+/**
+ * Origen de la orden del cobro de vales. Todas las versiones de iOS publicadas hasta la 1.15.x mandan «IOS», que no es un
+ * `OrderSource`: la orden tronaba con 500 y en iOS no se podía cobrar ningún vale (QA en iPhone, 28-oct-2026). Se acepta como
+ * AVOQADO_IOS para que las apps ya instaladas cobren sin actualizarse. Desconocido ⇒ 400 claro; ausente ⇒ el default del servicio.
+ */
+function origenDelCobro(value: unknown): service.MaterializeCheckoutInput['source'] {
+  if (value === undefined || value === null) return undefined
+  if (value === 'IOS') return 'AVOQADO_IOS'
+  return requiredEnum(value, ORIGENES_DEL_COBRO, 'source', 'INVALID_ORDER_SOURCE')
+}
+
 function deviceUid(req: Request): string {
   const raw = req.headers['x-device-id']
   const value = Array.isArray(raw) ? raw[0] : raw
@@ -162,7 +175,7 @@ export async function materialize(req: Request, res: Response, next: NextFunctio
         req.body.normalItems.some((item: any) => !!item.discountId) &&
         (await tienePermisoEnVenue(req, 'orders:comp')),
       performedBy: req.authContext?.userId,
-      source: req.body?.source,
+      source: origenDelCobro(req.body?.source),
       customerName: req.body?.customerName,
       note: req.body?.note,
     })
