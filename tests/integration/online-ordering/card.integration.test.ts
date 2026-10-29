@@ -1228,4 +1228,27 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(await stuckLogs(bad.id)).toBe(1)
     expect(await chargeById(bad.id)).toMatchObject({ status: 'PENDING_AUTH', attempts: 4, stuckAlertedAt: expect.any(Date) })
   })
+
+  it('fix r1: un PENDING_AUTH sin sesión de más de 23 h cuya repetición dice expires_at inválido NO se abandona: alerta una vez', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const template = await chargeOf(key)
+    const old = await expiredDraftRow({ template, session: null, updatedAt: ago(10 * MIN) })
+    await prisma.onlineOrderCharge.update({ where: { id: old.id }, data: { createdAt: ago(24 * 60 * MIN) } })
+    await quiet([old.id])
+    spy.mockClear()
+    spy.mockImplementation(async () => {
+      throw Object.assign(new Error('expires_at must be at least 30 minutes in the future'), {
+        type: 'StripeInvalidRequestError',
+        param: 'expires_at',
+      })
+    })
+
+    await expect(reconcile()).resolves.toMatchObject({ scanned: 1, abandoned: 0, errors: 0 })
+    await reconcile()
+    expect(spy).toHaveBeenCalledTimes(2)
+    expect(await chargeById(old.id)).toMatchObject({ status: 'PENDING_AUTH', checkoutSessionId: null, stuckAlertedAt: expect.any(Date) })
+    expect(await stuckLogs(old.id)).toBe(1)
+    expect(authSpy).not.toHaveBeenCalled()
+  })
 })

@@ -36,6 +36,8 @@ export interface ReconcileResult {
 const CAPTURE_IN_FLIGHT_MS = 60_000
 /** Ruling 3: un `PENDING_AUTH` vencido cuya confirmación truena este número de pasadas necesita a una persona. */
 const CONFIRM_FAILURES_ALERT = 3
+/** Stripe guarda una clave idempotente 24 h; con 1 h de margen, después de 23 h su repetición ya no prueba nada. */
+const STRIPE_IDEMPOTENCY_SAFE_MS = 23 * 60 * 60_000
 /** Ruling 3: `lastError` de un `CAPTURING` que no se arregla solo (Stripe cobró, pero la cuenta no cuadra). */
 const NEEDS_HUMAN = new Set(['TOTAL_CHANGED', 'CAPTURED_AMOUNT_MISMATCH'])
 const IN_DOUBT: ReadonlySet<S> = new Set([S.CAPTURING, S.RELEASING])
@@ -73,7 +75,7 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<Row
 }
 
 /** `PENDING_AUTH` sin sesión guardada: la MISMA clave y los MISMOS parámetros del último intento. */
-async function recoverCheckout(charge: Row): Promise<'GOT' | 'ABANDONED'> {
+async function recoverCheckout(charge: Row, now: Date): Promise<'GOT' | 'ABANDONED' | 'NEEDS_HUMAN'> {
   const merchant = chargeMerchant(charge)
   try {
     const session = await getProvider(merchant).createAuthorizationCheckout(merchant, checkoutParams(charge))
@@ -85,6 +87,12 @@ async function recoverCheckout(charge: Row): Promise<'GOT' | 'ABANDONED'> {
   } catch (error: any) {
     // La clave nunca se ejecutó y su vencimiento ya pasó (o la sesión no existe): no hay nada que el cliente pueda pagar.
     if (!expiresAtRejected(error) && error?.code !== 'resource_missing') throw error
+    // Ese rechazo sólo prueba «la clave nunca se ejecutó» dentro de la ventana de idempotencia de Stripe (24 h). Pasada esa ventana
+    // Stripe ya olvidó la clave: la sesión pudo existir y apartar la tarjeta. No se abandona a ciegas: lo ve una persona.
+    if (now.getTime() - charge.createdAt.getTime() > STRIPE_IDEMPOTENCY_SAFE_MS) {
+      await alert(charge, now, 'CHECKOUT_REPLAY_OUTSIDE_IDEMPOTENCY_WINDOW')
+      return 'NEEDS_HUMAN'
+    }
     await prisma.onlineOrderCharge.updateMany({
       where: { id: charge.id, status: S.PENDING_AUTH, checkoutSessionId: null },
       data: { status: S.ABANDONED },
@@ -107,7 +115,7 @@ async function processCapturing(charge: Row, now: Date): Promise<void> {
 async function processOne(charge: Row, now: Date): Promise<void> {
   switch (charge.status) {
     case S.PENDING_AUTH:
-      if (!charge.checkoutSessionId && (await recoverCheckout(charge)) === 'ABANDONED') return
+      if (!charge.checkoutSessionId && (await recoverCheckout(charge, now)) !== 'GOT') return
       await confirmCardAuthorization(charge.id, now)
       return
     case S.CAPTURING:
