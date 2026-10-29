@@ -3,7 +3,11 @@ import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 
 const voidAuthorization = jest.fn()
-jest.mock('@/services/payments/provider-registry', () => ({ __esModule: true, getProvider: jest.fn(() => ({ voidAuthorization })) }))
+const getAuthorization = jest.fn()
+jest.mock('@/services/payments/provider-registry', () => ({
+  __esModule: true,
+  getProvider: jest.fn(() => ({ voidAuthorization, getAuthorization })),
+}))
 
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { releaseCharge } from '@/services/online-ordering/card/release.service'
@@ -23,6 +27,9 @@ const CHARGE = {
 beforeEach(() => {
   voidAuthorization.mockReset()
   voidAuthorization.mockResolvedValue({ piStatus: 'canceled' })
+  // r2 R1: si Stripe no la suelta, se relee el PaymentIntent; por omisión sigue apartado (no se cobró a mano).
+  getAuthorization.mockReset()
+  getAuthorization.mockResolvedValue({ piStatus: 'requires_capture' })
   prismaMock.onlineOrderCharge.findUnique.mockReset()
   prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(CHARGE as any)
   prismaMock.onlineOrderCharge.updateMany.mockReset()

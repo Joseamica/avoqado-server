@@ -1270,6 +1270,106 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect((await chargeById(keep.charge.id)).status).toBe('AUTHORIZED')
   })
 
+  // ── r2 R1: la tarjeta apartada que el negocio cobró a mano en Stripe y después se rechaza, vence o cancela ──
+  /** Stripe ya no deja cancelar (el PI está succeeded) y la relectura dice cobrado por `cents`. */
+  const capturedByHand = (pi: string, cents = 25_000) => {
+    voidSpy.mockImplementation(async () => {
+      throw Object.assign(new Error('This PaymentIntent could not be canceled because it has a status of succeeded.'), {
+        type: 'StripeInvalidRequestError',
+        code: 'payment_intent_unexpected_state',
+        statusCode: 400,
+      })
+    })
+    authSpy.mockResolvedValue(capturedState({ paymentIntentId: pi, amountCents: cents }))
+  }
+  const outsideLogsOf = (entityId: string) =>
+    (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE' && p.entityId === entityId).length
+  /** Lo que debe quedar: un Payment de tarjeta COMPLETED, el cargo CAPTURED con lo cobrado, una anomalía y UNA alerta. */
+  const expectRecordedOnce = async (a: { charge: { id: string; paymentIntentId: string | null }; orderId: string }, cents = 25_000) => {
+    const c = await chargeById(a.charge.id)
+    expect(c).toMatchObject({ status: 'CAPTURED', lastError: 'CAPTURED_OUTSIDE', releasedAt: null })
+    expect(c.capturedAmount!.toFixed(2)).toBe((cents / 100).toFixed(2))
+    const pays = await paymentsOf(a.orderId)
+    expect(pays).toHaveLength(1)
+    expect(pays[0]).toMatchObject({ status: 'COMPLETED', type: 'REGULAR', processorId: a.charge.paymentIntentId, source: 'WEB' })
+    expect(pays[0].amount.toFixed(2)).toBe((cents / 100).toFixed(2))
+    expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `ooc:CAPTURED_OUTSIDE:${a.charge.id}` } })).toBe(1)
+    expect(outsideLogsOf(c.onlineOrderId!)).toBe(1)
+    expect(await stuckLogs(a.charge.id)).toBe(0)
+  }
+
+  it('r2 R1: rechazar un pedido cuya tarjeta ya se cobró a mano → registra el cobro (CAPTURED, un Payment), anomalía y alerta UNA vez', async () => {
+    const a = await authorizedOrder()
+    capturedByHand(a.charge.paymentIntentId!)
+    await expect(reject(a.orderId)).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    await expectRecordedOnce(a)
+    // El conciliador ya no lo ve atorado ni lo reintenta; otra pasada no duplica nada.
+    await quiet([a.charge.id])
+    await reconcile(new Date(Date.now() + 20 * MIN))
+    await reconcile(new Date(Date.now() + 40 * MIN))
+    await expectRecordedOnce(a)
+    // El seguimiento y la bandeja dicen la verdad: cobrado, no liberado.
+    await expect(getTrackingByToken(a.trackingToken)).resolves.toMatchObject({ status: 'REJECTED', cardStatus: 'CAPTURED' })
+    const { getInboxOrder } = await import('@/services/online-ordering/inbox.service')
+    await expect(getInboxOrder({ venueId: venueId!, orderId: a.orderId })).resolves.toMatchObject({
+      card: { status: 'CAPTURED', capturedAmount: 250 },
+    })
+    expect(captureSpy).not.toHaveBeenCalled() // no se cobró nada nuevo: se registró lo que ya pasó
+  })
+
+  it('r2 R1: vencer y cancelar el cliente con la tarjeta cobrada a mano → lo mismo (también con el monto real cobrado)', async () => {
+    const b = await authorizedOrder()
+    capturedByHand(b.charge.paymentIntentId!)
+    await expect(expireOnlineOrder({ venueId: venueId!, orderId: b.orderId, now: new Date(Date.now() + 60 * MIN) })).resolves.toEqual({
+      outcome: 'OK',
+      status: 'EXPIRED',
+    })
+    await expectRecordedOnce(b)
+
+    const c = await authorizedOrder()
+    capturedByHand(c.charge.paymentIntentId!, 20_000) // el negocio cobró de menos a mano
+    await expect(cancelOnlineOrderByCustomer({ venueId: venueId!, trackingToken: c.trackingToken })).resolves.toEqual({
+      outcome: 'OK',
+      status: 'CANCELLED_BY_CUSTOMER',
+    })
+    await expectRecordedOnce(c, 20_000)
+  })
+
+  it('r2 R1: el conciliador libera una cuenta cancelada por la caja con la tarjeta cobrada a mano → registra, sin RELEASE_STUCK', async () => {
+    const a = await authorizedOrder()
+    await prisma.order.update({ where: { id: a.orderId }, data: { status: 'CANCELLED' } })
+    await quiet([a.charge.id])
+    capturedByHand(a.charge.paymentIntentId!)
+    await reconcile()
+    await reconcile(new Date(Date.now() + 20 * MIN))
+    await expectRecordedOnce(a)
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: a.orderId } })).status).toBe('CANCELLED')
+  })
+
+  it('r2 R1: la liberación tardía de un borrador (monto distinto) que ya se cobró a mano → CAPTURED sin pedido, anomalía una vez', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const d = await chargeOf(key)
+    const pi = `pi_itest_${RUN}_${++piSeq}`
+    authSpy.mockResolvedValueOnce({ ...authorized(24_000), paymentIntentId: pi }) // apartado por otro monto → se libera tarde
+    capturedByHand(pi, 24_000)
+    await expect(confirmCardAuthorization(d.id)).resolves.toBe('CAPTURED_OUTSIDE')
+    const c = await chargeById(d.id)
+    expect(c).toMatchObject({ status: 'CAPTURED', onlineOrderId: null, lastError: 'CAPTURED_OUTSIDE' })
+    expect(c.capturedAmount!.toFixed(2)).toBe('240.00')
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+    expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `ooc:CAPTURED_OUTSIDE:${d.id}` } })).toBe(1)
+    expect(outsideLogsOf(d.id)).toBe(1)
+  })
+
+  it('r2 R1: dos liberaciones a la vez del mismo cargo cobrado a mano → un solo Payment, una anomalía, una alerta', async () => {
+    const a = await authorizedOrder()
+    await prisma.onlineOrderCharge.update({ where: { id: a.charge.id }, data: { status: 'RELEASING' } })
+    capturedByHand(a.charge.paymentIntentId!)
+    await Promise.all([releaseCharge(a.charge.id), releaseCharge(a.charge.id)])
+    await expectRecordedOnce(a)
+  })
+
   it('conciliador: PENDING_AUTH vencido pero autorizado (aviso perdido) crea el pedido', async () => {
     const key = nextKey()
     await draft({ key })

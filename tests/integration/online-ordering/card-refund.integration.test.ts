@@ -12,7 +12,7 @@ import prisma from '@/utils/prismaClient'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
-import { acceptOnlineOrder } from '@/services/online-ordering/transitions.service'
+import { acceptOnlineOrder, rejectOnlineOrder } from '@/services/online-ordering/transitions.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
@@ -90,7 +90,8 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
   const feeRefunded = new Map<string, number>()
   let nextRefundStatus: 'PENDING' | 'SUCCEEDED' | 'FAILED' = 'SUCCEEDED'
 
-  const capturedOrder = async () => {
+  /** Un pedido con la tarjeta apartada (borrador → autorización confirmada); `capturedOrder` además lo acepta (cobra). */
+  const authorizedOrder = async () => {
     const key = nextKey('cap')
     __resetPresenceDebounceForTests()
     await touchInboxPoll(venueId!)
@@ -123,6 +124,11 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
     await expect(confirmCardAuthorization(draft.id)).resolves.toBe('CREATED')
     const charge = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: draft.id } })
     const oo = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: charge.onlineOrderId! } })
+    return { orderId: oo.orderId, charge }
+  }
+  const capturedOrder = async () => {
+    const { orderId, charge } = await authorizedOrder()
+    const oo = { orderId }
     __resetPresenceDebounceForTests()
     await touchInboxPoll(venueId!)
     await expect(acceptOnlineOrder({ venueId: venueId!, orderId: oo.orderId, staffId: null })).resolves.toMatchObject({ outcome: 'OK' })
@@ -500,6 +506,43 @@ describe('Pedidos en línea con tarjeta — devolución a la tarjeta (integratio
       expect.objectContaining({ cardRefundId: row.id, amountCents: 25_000 }),
     ])
     expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: `oocr:REVERSED:${row.stripeRefundId}` } })).toBe(1)
+  })
+
+  it('r2 R1: un pedido rechazado cuya tarjeta el negocio ya había cobrado a mano en Stripe se devuelve a la tarjeta desde el panel', async () => {
+    const { orderId, charge } = await authorizedOrder()
+    const voidSpy = jest.spyOn(StripeConnectProvider.prototype, 'voidAuthorization').mockImplementation(async () => {
+      throw Object.assign(new Error('This PaymentIntent could not be canceled because it has a status of succeeded.'), {
+        type: 'StripeInvalidRequestError',
+        code: 'payment_intent_unexpected_state',
+        statusCode: 400,
+      })
+    })
+    try {
+      authSpy.mockResolvedValueOnce({
+        sessionStatus: null,
+        paymentIntentId: charge.paymentIntentId,
+        piStatus: 'succeeded',
+        amountCapturableCents: 0,
+        amountReceivedCents: 25_000,
+        captureBefore: null,
+        card: { brand: 'visa', last4: '4242', funding: 'credit' },
+        paymentMethodType: 'card',
+      })
+      await expect(rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'OTHER' })).resolves.toMatchObject({
+        outcome: 'OK',
+        status: 'REJECTED',
+      })
+    } finally {
+      voidSpy.mockRestore()
+    }
+    expect(await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).toMatchObject({ status: 'CAPTURED' })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
+
+    const r = await pedir(orderId)
+    expect(r).toMatchObject({ status: 'RECORDED', replay: false })
+    const [ledger] = await refundsOf(orderId)
+    expect(ledger.amount.toFixed(2)).toBe('-250.00')
+    expect(refundSpy).toHaveBeenCalledTimes(1)
   })
 
   it('Codex r1 C2: un refund.failed de OTRA cuenta (o de otro modo) con nuestra metadata → anomalía, sin releer Stripe ni escribir', async () => {

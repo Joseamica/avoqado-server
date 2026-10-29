@@ -722,6 +722,18 @@ const WRITERS: Record<string, Writer> = {
       'doble aceptar en paralelo captura una sola vez',
     ),
   },
+  // r2 R1: la liberación que encuentra el cobro hecho a mano en Stripe registra el Payment y deja la cuenta PAID (sin reabrirla ni
+  // aceptarla) bajo el candado de la orden; el CAS del cargo RELEASING → CAPTURED decide al único que escribe.
+  'src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: proof(
+      CARD,
+      'rejectOnlineOrder',
+      'r2 R1: rechazar un pedido cuya tarjeta ya se cobró a mano → registra el cobro (CAPTURED, un Payment), anomalía y alerta UNA vez',
+      'r2 R1: dos liberaciones a la vez del mismo cargo cobrado a mano → un solo Payment, una anomalía, una alerta',
+    ),
+  },
   // ── Fiscal sealing: runs inside the capture/cancel transaction that already holds the Order ──
   'src/services/fiscal/sellosIva.ts#sellarRenglones': {
     class: 'EXCLUDED',
@@ -1241,6 +1253,8 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
   'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
   'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
+  // r2 R1: registrar el cobro hecho a mano que encontró la liberación, con la Order.
+  'src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease': 1,
   // Fase 2 (T10): decidir la devolución a la tarjeta, la reversa de un fallo tardío y «Devolver por otro medio», cada una con la Order.
   'src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder': 1,
   'src/services/online-ordering/card/refund.service.ts#reverseRecordedRefund': 1,

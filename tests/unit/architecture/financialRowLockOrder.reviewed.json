@@ -1092,6 +1092,11 @@
       "loops": 0,
       "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
     },
+    "src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment del cobro hecho a mano; nunca bucle de Orders nuevas."
+    },
     "src/services/online-ordering/card/refund.service.ts#refundCardOnlineOrder#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,

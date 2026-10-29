@@ -15,11 +15,12 @@ import { ACCEPT_TIMEOUT_MINUTES } from '../constants'
 import { TX_OPTIONS, emitOnlineOrderCreated, lockAdmission, pickOrderNumber, writeOnlineOrderInTx } from '../order.service'
 import type { CardDraftRequest } from './draft.service'
 import { chargeMerchant } from './merchant'
+import { CAPTURED_OUTSIDE, releaseCharge } from './release.service'
 
 export type ConfirmOutcome = 'CREATED' | 'ALREADY' | 'NOT_YET' | 'ABANDONED' | 'RELEASED_LATE' | 'CAPTURED_OUTSIDE'
 
 /** Codex r1 C3: `lastError` de un borrador cuyo PaymentIntent ya se cobró fuera de Avoqado (lo ve una persona; nadie lo reintenta). */
-export const CAPTURED_OUTSIDE = 'CAPTURED_OUTSIDE'
+export { CAPTURED_OUTSIDE }
 
 /**
  * Apartado que no puede volverse pedido (monto distinto, o la llave ya tiene cuenta): se libera. CAS a `RELEASING` primero (un
@@ -39,25 +40,11 @@ async function releaseLate(charge: OnlineOrderCharge, auth: AuthorizationState, 
     amountCapturableCents: auth.amountCapturableCents,
     expectedCents: toStripeAmount(new Prisma.Decimal(charge.amount)),
   })
-  const merchant = chargeMerchant(charge)
-  await getProvider(merchant).voidAuthorization(merchant, {
-    paymentIntentId: auth.paymentIntentId!,
-    idempotencyKey: `online-order-charge:${charge.id}:release`,
-  })
-  const done = await prisma.onlineOrderCharge.updateMany({
-    where: { id: charge.id, status: OnlineOrderChargeStatus.RELEASING },
-    data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
-  })
-  if (done.count === 1) {
-    void logAction({
-      venueId: charge.venueId,
-      action: 'ONLINE_ORDER_CARD_RELEASED',
-      entity: 'OnlineOrderCharge',
-      entityId: charge.id,
-      data: { chargeId: charge.id, amount: new Prisma.Decimal(charge.amount).toFixed(2), why },
-    })
-  }
-  return 'RELEASED_LATE'
+  // r2 R1: la misma liberación que los demás caminos (misma clave del cargo, su bitácora y, si ya la cobraron a mano en Stripe,
+  // el registro del cobro con su anomalía). Si Stripe no contesta, el cargo queda RELEASING para el conciliador y aquí se lanza.
+  const r = await releaseCharge(charge.id)
+  if (r === 'STUCK') throw new Error('No se pudo liberar la tarjeta apartada; el conciliador la retoma')
+  return r === 'CAPTURED_OUTSIDE' ? 'CAPTURED_OUTSIDE' : 'RELEASED_LATE'
 }
 
 /**

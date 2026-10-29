@@ -19,7 +19,6 @@ import {
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { fundsFlowForStripePayment, mapStripeCardBrandToEnum, metodoDeStripe } from '@/services/dashboard/paymentLink.service'
 import { activarSobresDeCuentaPagadaEnTx } from '@/services/giftCards/giftCardLedger'
 import { applySalePosting, createSalePostingInTx } from '@/services/inventory/inventoryPosting.service'
 import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
@@ -38,10 +37,9 @@ import {
   type CasResult,
   type TransitionResult,
 } from '../transitions.service'
+import { captureKey, cardPaymentData } from './capturedPayment'
 import { chargeMerchant } from './merchant'
 import { releaseCharge } from './release.service'
-
-const captureKey = (orderId: string) => `online-order:${orderId}:capture`
 
 type Plan =
   | { do: 'ANSWER'; result: TransitionResult }
@@ -236,13 +234,9 @@ export async function finishCapture(
 
   const marcarCocina = await debeMarcarCocina(venueId, { orderId })
   const minutes = meta.estimatedMinutes
-  const feeAmount = new Prisma.Decimal(charge.applicationFeeCents).div(100)
-  const netAmount = Prisma.Decimal.max(capturedAmount.sub(feeAmount), 0)
-  const feePercentage = capturedAmount.gt(0) ? feeAmount.div(capturedAmount).toDecimalPlaces(4) : new Prisma.Decimal(0)
-  const sat = metodoDeStripe(state.paymentMethodType)
-  // Codex r1 #7: Stripe dice débito o crédito en `funding`; el catálogo SAT ya mapea DEBIT_CARD → 28.
-  const method = state.card?.funding === 'debit' ? 'DEBIT_CARD' : sat.method
-  const last4 = state.card?.last4
+  // r2 R1: el mismo armado que la liberación que encuentra el cobro hecho a mano (`capturedPayment.ts`).
+  const paymentData = cardPaymentData(charge, state, orderId, capturedAmount)
+  const feeAmount = new Prisma.Decimal(paymentData.feeAmount as Prisma.Decimal)
 
   let done: { r: Extract<CasResult, { r: 'OK' }>; paymentId: string; postingId: string | null; cobroDoble: boolean } | null
   try {
@@ -266,27 +260,7 @@ export async function finishCapture(
       const yaCobrado = new Prisma.Decimal(order.paidAmount)
       const cobroDoble = yaCobrado.gt(0)
       const payment = await tx.payment.create({
-        data: {
-          venueId,
-          orderId,
-          fundsFlow: fundsFlowForStripePayment(state.paymentMethodType),
-          ecommerceMerchantId: charge.ecommerceMerchantId,
-          amount: capturedAmount,
-          tipAmount: 0,
-          method,
-          tenderSatFormaPago: sat.tenderSatFormaPago,
-          source: 'WEB',
-          status: 'COMPLETED',
-          type: 'REGULAR',
-          processor: 'stripe',
-          processorId: state.paymentIntentId ?? charge.paymentIntentId,
-          feePercentage,
-          feeAmount,
-          netAmount,
-          cardBrand: mapStripeCardBrandToEnum(state.card?.brand),
-          maskedPan: last4 ? `************${last4}` : undefined,
-          idempotencyKey: captureKey(orderId),
-        },
+        data: paymentData,
         select: { id: true },
       })
       await tx.order.update({

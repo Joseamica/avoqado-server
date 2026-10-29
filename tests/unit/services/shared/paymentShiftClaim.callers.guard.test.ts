@@ -122,6 +122,12 @@ const INVENTORY: Record<string, InventoryDecision> = {
     lane: 'onlineOrderCardCapture',
     reason: 'online processor capture without cashier',
   },
+  // r2 R1: la liberación encuentra el cobro que el negocio hizo a mano en su Stripe y lo registra (sin cajero, como la captura).
+  'src/services/online-ordering/card/release.service.ts#recordCapturedOutsideOnRelease#create': {
+    decision: 'exclude',
+    lane: 'onlineOrderCardCapture',
+    reason: 'online processor capture without cashier',
+  },
   'src/services/pos-sync/posSyncOrder.service.ts#processPaymentsForOrder#create': {
     decision: 'include',
     lane: 'posSyncOrder',

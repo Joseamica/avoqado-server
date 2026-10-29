@@ -763,6 +763,13 @@ describe('devoluciones a la tarjeta de un pedido en línea', () => {
     expect(mockRefundCard).not.toHaveBeenCalled()
   })
 
+  it('r2 R1: un pedido rechazado cuya tarjeta quedó cobrada (a mano en Stripe) sí ofrece devolver a la tarjeta', async () => {
+    mockGetInboxOrder.mockResolvedValue({ ...cobrado, status: 'REJECTED' })
+    const r = parse(await call('online_order_card_refund', { venueId: 'v1', orderId: 'ord1', amount: 250, reason: 'CANCELLED_ORDER' }))
+    expect(r).toMatchObject({ ok: false, requiresConfirmation: true })
+    expect(r.preview.efecto).toContain('Se devuelven $250.00 a la tarjeta del cliente')
+  })
+
   it('online_order_card_refund sobre un pedido que no se cobró con tarjeta → no ofrece la devolución', async () => {
     mockGetInboxOrder.mockResolvedValue({ ...cobrado, paymentMode: 'PAY_AT_PICKUP', card: null })
     const r = parse(await call('online_order_card_refund', { venueId: 'v1', orderId: 'ord1', amount: 50, reason: 'OTHER' }))
