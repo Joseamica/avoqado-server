@@ -186,6 +186,7 @@ model Zone {
 model Venue {
   onlineOrderingSettings OnlineOrderingSettings?
   onlineOrders           OnlineOrder[]
+  onlineOrderCharges     OnlineOrderCharge[]
   documentRequestLinks DocumentRequestVenueLink[]
   capabilityGrants CapabilityGrant[]
   hybridPurchases HybridPurchase[]
@@ -6555,6 +6556,7 @@ model EcommerceMerchant {
   paymentLinks     PaymentLink[]
   payments         Payment[]
   reservations     Reservation[]     @relation("ReservationEcommerceMerchant")
+  onlineOrderCharges OnlineOrderCharge[]
 
   // Facturación CFDI 4.0
   fiscalConfig MerchantFiscalConfig?
@@ -20261,6 +20263,7 @@ enum OnlineOrderStatus {
 
 enum OnlineOrderPaymentMode {
   PAY_AT_PICKUP
+  CARD_ONLINE // fase 2: tarjeta apartada al pedir y cobrada al aceptar
 }
 
 enum OnlineOrderRejectReason {
@@ -20268,6 +20271,19 @@ enum OnlineOrderRejectReason {
   CLOSED
   TOO_BUSY
   OTHER
+  PAYMENT_FAILED // fase 2: la tarjeta no se pudo cobrar al aceptar
+}
+
+/// Ciclo de vida del cargo con tarjeta de un pedido en línea (fase 2): apartar al pedir, cobrar al aceptar, liberar al rechazar o vencer.
+enum OnlineOrderChargeStatus {
+  PENDING_AUTH // sesión de pago creada, el comensal aún no autoriza
+  AUTHORIZED // tarjeta apartada (capture_method=manual)
+  CAPTURING // cobrando al aceptar
+  CAPTURED
+  CAPTURE_FAILED
+  RELEASING // liberando el apartado
+  RELEASED
+  ABANDONED // el comensal nunca autorizó
 }
 
 /// Ajustes de la tienda en línea de un negocio (1:1 con Venue). Sólo aceptación manual en la v1 (decisión F1).
@@ -20280,6 +20296,8 @@ model OnlineOrderingSettings {
   minOrderAmount     Decimal   @default(0) @db.Decimal(10, 2)
   defaultPrepMinutes Int       @default(15)
   acceptsPayAtPickup Boolean   @default(true)
+  /// Fase 2: pagar con tarjeta al pedir (apartar y cobrar al aceptar). Apagado por default.
+  acceptsCardOnline  Boolean   @default(false)
   /// Pausa del gerente (ajustes, `online-orders:manage`).
   manualPause        Boolean   @default(false)
   /// Pausa temporal desde el piso (15/30/60 min, `online-orders:pause`: gerente para arriba o con su PIN en el POS).
@@ -20329,6 +20347,9 @@ model OnlineOrder {
 
   whatsappConsent Boolean @default(false)
 
+  /// Fase 2: el cargo con tarjeta de este pedido (nulo si paga al recoger).
+  charge OnlineOrderCharge?
+
   /// Quién imprime la comanda (mismo mecanismo de reclamo con TTL que la pantalla de cocina).
   printClaimedAt DateTime?
   printClaimedBy String?
@@ -20341,6 +20362,61 @@ model OnlineOrder {
   @@index([venueId, createdAt])
   /// El job de vencimiento barre TODOS los negocios: sin venueId al frente, este índice evita el barrido completo.
   @@index([status, acceptDeadlineAt])
+}
+
+/// Cargo con tarjeta de un pedido en línea (fase 2). Nace ANTES que el pedido (al abrir la sesión de pago), por eso
+/// `onlineOrderId` es nulo hasta que la tarjeta queda apartada y se crea el pedido.
+model OnlineOrderCharge {
+  id      String @id @default(cuid())
+  venueId String
+  venue   Venue  @relation(fields: [venueId], references: [id], onDelete: Cascade)
+
+  onlineOrderId String?      @unique
+  onlineOrder   OnlineOrder? @relation(fields: [onlineOrderId], references: [id], onDelete: SetNull)
+
+  ecommerceMerchantId String
+  ecommerceMerchant   EcommerceMerchant @relation(fields: [ecommerceMerchantId], references: [id], onDelete: Restrict)
+
+  /// Idempotencia de «crear pedido»: única por negocio.
+  idempotencyKey String
+  /// Capacidad de seguimiento (mismo token que tendrá el pedido).
+  trackingToken  String @unique
+  customerPhone  String
+  /// El carrito/solicitud con que se abrió la sesión, y su huella sha256 para la repetición idempotente.
+  request        Json
+  requestHash    String
+
+  checkoutSessionId String?  @unique
+  checkoutUrl       String?
+  checkoutExpiresAt DateTime
+  paymentIntentId   String?  @unique
+
+  amount              Decimal @db.Decimal(10, 2)
+  platformFeeBps      Int
+  applicationFeeCents Int
+
+  status         OnlineOrderChargeStatus @default(PENDING_AUTH)
+  authorizedAt   DateTime?
+  /// Límite en que vence el apartado de la tarjeta (se debe cobrar o liberar antes).
+  captureBefore  DateTime?
+  capturedAt     DateTime?
+  capturedAmount Decimal?                @db.Decimal(10, 2)
+  releasedAt     DateTime?
+
+  /// `{ connectAccountId, sandboxMode, providerCode }` copiado al crear: la cuenta Stripe del cargo no cambia aunque el comercio
+  /// cambie sus credenciales después.
+  merchantSnapshot Json
+  /// Intento de sesión de pago (se incrementa si se abre una nueva sesión para el mismo cargo).
+  checkoutAttempt  Int     @default(1)
+  lastError        String?
+  attempts         Int     @default(0)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([venueId, idempotencyKey])
+  @@index([status, updatedAt])
+  @@index([venueId, status, customerPhone])
 }
 
 /// Platform onboarding invitations; deliberately independent of a venue.
