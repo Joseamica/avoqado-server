@@ -1,4 +1,4 @@
-import { Prisma, ReservationStatus } from '@prisma/client'
+import { OnlineOrderChargeStatus, Prisma, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { ServiceUnavailableError } from '@/errors/AppError'
@@ -6,6 +6,7 @@ import { VerifiedWebhookEvent } from './providers/provider.interface'
 import { finalizePaymentLinkCheckout } from '@/services/dashboard/paymentLink.service'
 import { finalizeVenueCheckout } from '@/services/dashboard/venueCheckout.service'
 import { fulfillPurchase as fulfillCreditPackPurchase } from '@/services/dashboard/creditPack.public.service'
+import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import emailService from '@/services/email.service'
 import { sendReservationConfirmationWhatsApp, formatModifiersForWhatsApp } from '@/services/whatsapp.service'
 import { formatInTimeZone } from 'date-fns-tz'
@@ -624,7 +625,47 @@ async function processPaymentIntentFailed(event: VerifiedWebhookEvent) {
   }
 }
 
+/**
+ * Fase 2 — pedido en línea con tarjeta (`metadata.type === 'online_order'` en la sesión y en el PaymentIntent). Va antes de todo:
+ * con captura manual la sesión llega `unpaid`, y un tipo desconocido caería en la rama de depósitos. El aviso nunca es la única
+ * fuente: `confirmCardAuthorization` lee el PaymentIntent. ponytail: sin reclamo en `ProcessedStripeEvent` (el servicio es
+ * idempotente por CAS); agrégalo si un aviso corre dos veces en paralelo con efecto duplicado. Si lanza, Stripe reintenta.
+ */
+async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeId: string | undefined) {
+  if (!chargeId) {
+    logger.warn('⚠️ [STRIPE CONNECT] online_order event without chargeId', { eventId: event.id, type: event.type })
+    return
+  }
+  switch (event.type) {
+    case 'checkout.session.completed':
+    case 'checkout.session.expired':
+    case 'payment_intent.amount_capturable_updated': {
+      const outcome = await confirmCardAuthorization(chargeId)
+      logger.info('ℹ️ [STRIPE CONNECT] online_order authorization', { eventId: event.id, type: event.type, chargeId, outcome })
+      return
+    }
+    case 'payment_intent.canceled':
+      // Sin autorizar → abandonado; apartado (o liberándose) → liberado. Sólo por CAS: lo demás ya tiene su desenlace.
+      await prisma.onlineOrderCharge.updateMany({
+        where: { id: chargeId, status: OnlineOrderChargeStatus.PENDING_AUTH },
+        data: { status: OnlineOrderChargeStatus.ABANDONED },
+      })
+      await prisma.onlineOrderCharge.updateMany({
+        where: { id: chargeId, status: { in: [OnlineOrderChargeStatus.AUTHORIZED, OnlineOrderChargeStatus.RELEASING] } },
+        data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
+      })
+      return
+    default:
+      logger.info('ℹ️ [STRIPE CONNECT] Unhandled online_order event', { eventId: event.id, type: event.type, chargeId })
+  }
+}
+
 export async function processStripeConnectWebhookEvent(event: VerifiedWebhookEvent) {
+  const metadata = (event.data as { metadata?: Record<string, string> | null } | null)?.metadata
+  if (metadata?.type === 'online_order') {
+    await handleOnlineOrderStripeEvent(event, metadata.chargeId)
+    return
+  }
   switch (event.type) {
     case 'checkout.session.completed':
       await processCheckoutCompleted(event)

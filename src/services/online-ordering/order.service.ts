@@ -2,6 +2,7 @@
 import {
   ContratoDePrecio,
   KitchenStatus,
+  OnlineOrderChargeStatus,
   OnlineOrderPaymentMode,
   OnlineOrderStatus,
   OrderSource,
@@ -26,6 +27,7 @@ import { getAcceptingStatus } from './presence.service'
 import { buildVenueContact, type VenueContact } from './settings.service'
 import { quoteCart, toPublicQuote, type CartItemInput, type PricedLine, type QuoteResult } from './quote.service'
 import { generateTrackingToken } from './trackingToken'
+import { confirmCardAuthorization } from './card/confirm.service'
 
 export interface CreateOnlineOrderInput {
   venueId: string
@@ -182,7 +184,7 @@ export const final = <E extends AppError>(error: E): E & { final: true } => Obje
 export const TX_OPTIONS = { timeout: 15_000, maxWait: 5_000 }
 
 /** Folio corto que no choque con otra cuenta ABIERTA del mismo negocio (dentro del candado de admisión). */
-async function pickOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
+export async function pickOrderNumber(tx: Prisma.TransactionClient, venueId: string): Promise<string> {
   for (let attempt = 0; attempt < 8; attempt++) {
     const candidate = generateOrderNumber()
     const clash = await tx.order.findFirst({
@@ -552,10 +554,27 @@ export async function createOnlineOrder(input: CreateOnlineOrderInput, opts: Cre
   }
 }
 
+/** Fase 2: el borrador de tarjeta todavía no es pedido: espera el pago, o ya no se pagó (vencido o liberado). */
+export type CardDraftTrackingStatus = 'AWAITING_PAYMENT' | 'PAYMENT_NOT_COMPLETED'
+export const cardDraftTrackingStatus = (status: OnlineOrderChargeStatus): CardDraftTrackingStatus =>
+  status === OnlineOrderChargeStatus.PENDING_AUTH ? 'AWAITING_PAYMENT' : 'PAYMENT_NOT_COMPLETED'
+
+/** Fase 2: lo que el comensal ve de su tarjeta. `CONFIRMING` = cobrando al aceptar; liberar ya decidido cuenta como liberado. */
+export type PublicCardStatus = 'AUTHORIZED' | 'CONFIRMING' | 'CAPTURED' | 'RELEASED'
+const PUBLIC_CARD_STATUS: Partial<Record<OnlineOrderChargeStatus, PublicCardStatus>> = {
+  AUTHORIZED: 'AUTHORIZED',
+  CAPTURING: 'CONFIRMING',
+  CAPTURED: 'CAPTURED',
+  RELEASING: 'RELEASED',
+  RELEASED: 'RELEASED',
+}
+
 export interface PublicTracking {
   orderNumber: string
-  status: OnlineOrderStatus
+  status: OnlineOrderStatus | CardDraftTrackingStatus
   paymentMode: OnlineOrderPaymentMode
+  /** Fase 2: estado de la tarjeta; `null` al recoger y en el borrador. */
+  cardStatus?: PublicCardStatus | null
   venueId: string
   venueName: string
   venueSlug: string
@@ -573,8 +592,83 @@ export interface PublicTracking {
   canCancel: boolean
 }
 
+const VENUE_PUBLIC_SELECT = {
+  name: true,
+  slug: true,
+  timezone: true,
+  address: true,
+  city: true,
+  state: true,
+  zipCode: true,
+  phone: true,
+} as const
+/** Fase 2: la página de regreso de Stripe confirma sola si el aviso no llegó en estos ms (sin martillar a Stripe en cada consulta). */
+const DRAFT_CONFIRM_AFTER_MS = 5_000
+
 /** Estado para la página de seguimiento (el canal garantizado de avisos, R18). Nunca devuelve teléfono ni correo. */
 export async function getTrackingByToken(token: string): Promise<PublicTracking | null> {
+  const order = await orderTracking(token)
+  if (order) return order
+  const charge = await prisma.onlineOrderCharge.findUnique({
+    where: { trackingToken: token },
+    select: { id: true, status: true, updatedAt: true },
+  })
+  if (!charge) return null
+  if (charge.status === OnlineOrderChargeStatus.PENDING_AUTH && Date.now() - charge.updatedAt.getTime() > DRAFT_CONFIRM_AFTER_MS) {
+    try {
+      await confirmCardAuthorization(charge.id)
+    } catch (error) {
+      logger.warn('[OnlineOrdering] el seguimiento no pudo confirmar la tarjeta (sigue esperando)', { chargeId: charge.id, error })
+    }
+    const confirmed = await orderTracking(token)
+    if (confirmed) return confirmed
+  }
+  return draftTracking(token)
+}
+
+/** El borrador de tarjeta (sin pedido todavía): renglones y total del carrito guardado, sin folio. */
+async function draftTracking(token: string): Promise<PublicTracking | null> {
+  const c = await prisma.onlineOrderCharge.findUnique({
+    where: { trackingToken: token },
+    select: {
+      status: true,
+      request: true,
+      amount: true,
+      checkoutExpiresAt: true,
+      createdAt: true,
+      venueId: true,
+      venue: { select: VENUE_PUBLIC_SELECT },
+    },
+  })
+  if (!c) return null
+  const quote = (c.request as unknown as { quote: QuoteSnapshot }).quote
+  return {
+    orderNumber: '', // el folio nace con el pedido
+    status: cardDraftTrackingStatus(c.status),
+    paymentMode: OnlineOrderPaymentMode.CARD_ONLINE,
+    cardStatus: null,
+    venueId: c.venueId,
+    venueName: c.venue.name,
+    venueSlug: c.venue.slug,
+    venueTimezone: c.venue.timezone || 'America/Mexico_City',
+    venueContact: buildVenueContact(c.venue),
+    items: quote.lines.slice(0, 100).map(l => ({
+      name: l.productName,
+      quantity: l.quantity,
+      note: l.note ?? null,
+      modifiers: l.modifiers.map(m => ({ name: m.name, quantity: m.quantity })),
+    })),
+    total: Number(new Prisma.Decimal(c.amount).toFixed(2)),
+    paid: false,
+    estimatedReadyAt: null,
+    acceptDeadlineAt: c.checkoutExpiresAt.toISOString(), // en el borrador, cuándo vence la página de pago
+    rejectReason: null,
+    createdAt: c.createdAt.toISOString(),
+    canCancel: false,
+  }
+}
+
+async function orderTracking(token: string): Promise<PublicTracking | null> {
   const row = await prisma.onlineOrder.findUnique({
     where: { trackingToken: token },
     select: {
@@ -585,14 +679,13 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
       rejectReason: true,
       createdAt: true,
       venueId: true,
+      charge: { select: { status: true } },
       order: {
         select: {
           orderNumber: true,
           total: true,
           paymentStatus: true,
-          venue: {
-            select: { name: true, slug: true, timezone: true, address: true, city: true, state: true, zipCode: true, phone: true },
-          },
+          venue: { select: VENUE_PUBLIC_SELECT },
           items: {
             take: 100,
             orderBy: [{ sequence: 'asc' }, { id: 'asc' }],
@@ -603,10 +696,12 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
     },
   })
   if (!row) return null
+  const pending = row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING
   return {
     orderNumber: row.order.orderNumber,
     status: row.status,
     paymentMode: row.paymentMode,
+    cardStatus: row.charge ? (PUBLIC_CARD_STATUS[row.charge.status] ?? null) : null,
     venueId: row.venueId,
     venueName: row.order.venue.name,
     venueSlug: row.order.venue.slug,
@@ -624,7 +719,10 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
     acceptDeadlineAt: row.acceptDeadlineAt.toISOString(),
     rejectReason: row.rejectReason ?? null,
     createdAt: row.createdAt.toISOString(),
-    // R1: con dinero encima el comensal ya no cancela desde aquí (respondería HAS_PAYMENTS).
-    canCancel: row.status === OnlineOrderStatus.PENDING_ACCEPTANCE && row.order.paymentStatus === PaymentStatus.PENDING,
+    // R1: con dinero encima el comensal ya no cancela desde aquí (respondería HAS_PAYMENTS). Fase 2: con tarjeta, sólo apartada.
+    canCancel:
+      row.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE
+        ? pending && row.charge?.status === OnlineOrderChargeStatus.AUTHORIZED
+        : pending,
   }
 }

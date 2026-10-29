@@ -21,6 +21,7 @@ import { CARD_CHECKOUT_TTL_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE
 import { storefrontBase } from '../notifications.service'
 import {
   TX_OPTIONS,
+  cardDraftTrackingStatus,
   final,
   isDefinitiveRejection,
   lockAdmission,
@@ -28,6 +29,7 @@ import {
   onlineOrderRequestHash,
   toQuoteSnapshot,
   type CreateOnlineOrderOptions,
+  type PublicTracking,
 } from '../order.service'
 import { getAcceptingStatus } from '../presence.service'
 import { quoteCart, toPublicQuote, type CartItemInput } from '../quote.service'
@@ -49,7 +51,8 @@ export interface CreateCardDraftInput {
 export interface CardDraftResult {
   trackingToken: string
   checkoutUrl: string
-  status: 'AWAITING_PAYMENT'
+  /** Nuevo: `AWAITING_PAYMENT`. Una repetición dice el estado real, el mismo que el seguimiento (tarea 5). */
+  status: PublicTracking['status']
   total: string
   replay: boolean
 }
@@ -135,11 +138,18 @@ export async function requestCardCheckout(charge: OnlineOrderCharge, now: Date, 
   return { ...charge, checkoutSessionId: session.id, checkoutUrl: session.url }
 }
 
-const toResult = (charge: OnlineOrderCharge, replay: boolean): CardDraftResult => ({
+/** El estado que daría el seguimiento: el del pedido si ya nació, si no el del borrador. */
+async function trackingStatus(charge: OnlineOrderCharge): Promise<PublicTracking['status']> {
+  if (!charge.onlineOrderId) return cardDraftTrackingStatus(charge.status)
+  const order = await prisma.onlineOrder.findUnique({ where: { id: charge.onlineOrderId }, select: { status: true } })
+  return order?.status ?? cardDraftTrackingStatus(charge.status)
+}
+
+const toResult = (charge: OnlineOrderCharge, replay: boolean, status: PublicTracking['status']): CardDraftResult => ({
   trackingToken: charge.trackingToken,
   // ponytail: un borrador que el conciliador cerró sin sesión responde sin liga; la tienda sigue el seguimiento.
   checkoutUrl: charge.checkoutUrl ?? '',
-  status: 'AWAITING_PAYMENT',
+  status,
   total: new Prisma.Decimal(charge.amount).toFixed(2),
   replay,
 })
@@ -287,5 +297,5 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
   const { charge, replay } = decided
   const ready =
     charge.checkoutUrl || charge.status !== OnlineOrderChargeStatus.PENDING_AUTH ? charge : await requestCardCheckout(charge, now)
-  return toResult(ready, replay)
+  return toResult(ready, replay, replay ? await trackingStatus(ready) : 'AWAITING_PAYMENT')
 }

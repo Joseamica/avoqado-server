@@ -7,9 +7,10 @@
 import { OnlineOrderChargeStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
+import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
-import { createOnlineOrder, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
+import { createOnlineOrder, getTrackingByToken, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
 import { __resetPresenceDebounceForTests, touchInboxPoll } from '@/services/online-ordering/presence.service'
 import { updateSettings } from '@/services/online-ordering/settings.service'
 
@@ -51,6 +52,20 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
   /** Stripe espiado con su idempotencia: la misma clave devuelve la misma sesión. */
   const sessions = new Map<string, { id: string; url: string; expiresAt: Date }>()
   let spy: jest.SpyInstance
+  let authSpy: jest.SpyInstance
+  let voidSpy: jest.SpyInstance
+  let piSeq = 0
+  /** Lo que `getAuthorization` contesta con la tarjeta apartada por `cents`. */
+  const authorized = (cents = 25_000) => ({
+    sessionStatus: 'complete',
+    paymentIntentId: `pi_itest_${RUN}_${++piSeq}`,
+    piStatus: 'requires_capture',
+    amountCapturableCents: cents,
+    amountReceivedCents: 0,
+    captureBefore: new Date(Date.now() + 7 * 24 * 60 * MIN),
+    card: { brand: 'visa', last4: '4242', funding: 'credit' },
+    paymentMethodType: 'card',
+  })
   const stripeOk = () =>
     spy.mockImplementation(async (_m: any, p: any) => {
       if (!sessions.has(p.idempotencyKey)) {
@@ -155,11 +170,16 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     await prisma.onlineOrderingSettings.update({ where: { venueId }, data: { acceptsCardOnline: true } })
     clearPublicMenuCache()
     spy = jest.spyOn(StripeConnectProvider.prototype, 'createAuthorizationCheckout')
+    authSpy = jest.spyOn(StripeConnectProvider.prototype, 'getAuthorization')
+    voidSpy = jest.spyOn(StripeConnectProvider.prototype, 'voidAuthorization')
   })
 
   beforeEach(async () => {
     spy.mockReset()
     stripeOk()
+    authSpy.mockReset()
+    voidSpy.mockReset()
+    voidSpy.mockImplementation(async (_m: any, p: any) => ({ ...authorized(), paymentIntentId: p.paymentIntentId, piStatus: 'canceled' }))
     delete process.env.STRIPE_MIN_CHARGE_MXN_CENTS
     await expireLiveDrafts()
     await beat()
@@ -167,6 +187,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
 
   afterAll(async () => {
     spy?.mockRestore()
+    authSpy?.mockRestore()
+    voidSpy?.mockRestore()
     // Limpieza acotada: sin venueId NO se borra nada (una limpieza sin filtro vaciaría tablas enteras).
     if (!venueId) return
     const v = { venueId }
@@ -391,7 +413,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       await tx.onlineOrderCharge.update({ where: { id: c.id }, data: { status: 'AUTHORIZED', onlineOrderId: created.onlineOrderId } })
     })
 
-    await expect(draft({ key, phone })).resolves.toEqual({ ...first, replay: true })
+    // Tarea 5: la repetición dice el estado real del pedido (el mismo que el seguimiento), con el mismo token.
+    await expect(draft({ key, phone })).resolves.toEqual({ ...first, status: 'PENDING_ACCEPTANCE', replay: true })
   })
 
   it('Codex r4 #8: con la respuesta perdida, cerrar la tienda, apagar la tarjeta o cambiar el precio no convierte la repetición en rechazo', async () => {
@@ -419,5 +442,160 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       code: 'CART_INVALID',
     })
     expect(spy).not.toHaveBeenCalled()
+  })
+
+  // ── Tarea 5: confirmar la autorización (borrador → pedido) ──
+  it('confirmar crea UNA cuenta con los precios del borrador aunque el menú cambió después', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    await prisma.product.update({ where: { id: productId }, data: { price: 300 } })
+    clearPublicMenuCache()
+    try {
+      const auth = authorized()
+      authSpy.mockResolvedValue(auth)
+      const now = new Date()
+      await expect(confirmCardAuthorization(c.id, now)).resolves.toBe('CREATED')
+      expect(authSpy.mock.calls[0][1]).toEqual({ checkoutSessionId: c.checkoutSessionId })
+
+      const order = await prisma.order.findUniqueOrThrow({
+        where: { venueId_externalId: { venueId: venueId!, externalId: `web:${key}` } },
+        include: { onlineOrder: true, items: true },
+      })
+      expect(order.total.toFixed(2)).toBe('250.00')
+      expect(order.items[0].unitPrice.toFixed(2)).toBe('250.00')
+      expect(order.paymentStatus).toBe('PENDING')
+      expect(order.customerId).toBeNull()
+      expect(order.onlineOrder).toMatchObject({ paymentMode: 'CARD_ONLINE', status: 'PENDING_ACCEPTANCE', trackingToken: c.trackingToken })
+      expect(order.onlineOrder!.acceptDeadlineAt.getTime()).toBe(now.getTime() + 10 * MIN)
+      expect(await chargeOf(key)).toMatchObject({
+        status: 'AUTHORIZED',
+        paymentIntentId: auth.paymentIntentId,
+        authorizedAt: now,
+        captureBefore: auth.captureBefore,
+        onlineOrderId: order.onlineOrder!.id,
+      })
+      // Otra vez (aviso repetido, seguimiento, conciliador): no hace nada.
+      await expect(confirmCardAuthorization(c.id)).resolves.toBe('ALREADY')
+    } finally {
+      await prisma.product.update({ where: { id: productId }, data: { price: 250 } })
+      clearPublicMenuCache()
+    }
+  })
+
+  it('confirmar dos veces en paralelo crea una sola cuenta', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    const auth = authorized()
+    authSpy.mockResolvedValue(auth)
+
+    const outcomes = await Promise.all([confirmCardAuthorization(c.id), confirmCardAuthorization(c.id)])
+    expect([...outcomes].sort()).toEqual(['ALREADY', 'CREATED'])
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
+  })
+
+  it('sesión vencida sin autorizar → ABANDONED y ninguna cuenta', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    authSpy.mockResolvedValue({
+      ...authorized(),
+      sessionStatus: 'expired',
+      paymentIntentId: null,
+      piStatus: null,
+      amountCapturableCents: 0,
+    })
+
+    await expect(confirmCardAuthorization(c.id)).resolves.toBe('ABANDONED')
+    expect((await chargeOf(key)).status).toBe('ABANDONED')
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+    // Sesión abierta (el comensal sigue en la página de pago) → todavía no.
+    const k2 = nextKey()
+    await draft({ key: k2 })
+    authSpy.mockResolvedValue({ ...authorized(), sessionStatus: 'open', paymentIntentId: null, piStatus: null, amountCapturableCents: 0 })
+    await expect(confirmCardAuthorization((await chargeOf(k2)).id)).resolves.toBe('NOT_YET')
+    expect((await chargeOf(k2)).status).toBe('PENDING_AUTH')
+  })
+
+  it('monto apartado distinto → RELEASED_LATE, voidAuthorization llamado, ninguna cuenta', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    const auth = authorized(24_000)
+    authSpy.mockResolvedValue(auth)
+
+    await expect(confirmCardAuthorization(c.id)).resolves.toBe('RELEASED_LATE')
+    expect(voidSpy).toHaveBeenCalledTimes(1)
+    expect(voidSpy.mock.calls[0][1]).toEqual({
+      paymentIntentId: auth.paymentIntentId,
+      idempotencyKey: `online-order-charge:${c.id}:release`,
+    })
+    expect(await chargeOf(key)).toMatchObject({ status: 'RELEASED', paymentIntentId: auth.paymentIntentId, releasedAt: expect.any(Date) })
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+  })
+
+  it('Codex r2 #5: la llave ya tiene cuenta (externalId único) → no crea nada, libera y RELEASED_LATE', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    const req = c.request as any
+    await prisma.$transaction(tx =>
+      writeOnlineOrderInTx(tx, {
+        venueId: venueId!,
+        externalId: `web:${key}`,
+        orderNumber: `WX${seq}`,
+        quote: req.quote,
+        customer: req.customer,
+        customerId: null,
+        note: null,
+        paymentMode: 'PAY_AT_PICKUP',
+        trackingToken: `${'z'.repeat(20)}${RUN}`.slice(0, 32),
+        requestHash: 'otra',
+        acceptDeadlineAt: new Date(Date.now() + 10 * MIN),
+        whatsappConsent: false,
+      }),
+    )
+    authSpy.mockResolvedValue(authorized())
+
+    await expect(confirmCardAuthorization(c.id)).resolves.toBe('RELEASED_LATE')
+    expect(voidSpy).toHaveBeenCalledTimes(1)
+    expect(await chargeOf(key)).toMatchObject({ status: 'RELEASED', onlineOrderId: null })
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
+  })
+
+  it('seguimiento de un borrador dice AWAITING_PAYMENT y no expone teléfono; tras confirmar dice PENDING_ACCEPTANCE con cardStatus AUTHORIZED', async () => {
+    const key = nextKey()
+    const phone = nextPhone()
+    const r = await draft({ key, phone })
+
+    const t = await getTrackingByToken(r.trackingToken)
+    expect(t).toMatchObject({
+      status: 'AWAITING_PAYMENT',
+      paymentMode: 'CARD_ONLINE',
+      cardStatus: null,
+      venueId,
+      total: 250,
+      paid: false,
+      canCancel: false,
+      items: [{ name: 'Orden grande', quantity: 1, note: null, modifiers: [] }],
+    })
+    expect(JSON.stringify(t)).not.toContain(phone.slice(-8))
+    expect(authSpy).not.toHaveBeenCalled() // borrador recién creado (< 5 s): no se pregunta a Stripe
+
+    // Más de 5 s sin noticias: el seguimiento confirma solo (la página de regreso).
+    const c = await chargeOf(key)
+    await prisma.onlineOrderCharge.update({ where: { id: c.id }, data: { updatedAt: new Date(Date.now() - 10_000) } })
+    authSpy.mockResolvedValue(authorized())
+    const after = await getTrackingByToken(r.trackingToken)
+    expect(after).toMatchObject({ status: 'PENDING_ACCEPTANCE', paymentMode: 'CARD_ONLINE', cardStatus: 'AUTHORIZED', canCancel: true })
+    expect(after!.orderNumber).toMatch(/^W/)
+    expect(JSON.stringify(after)).not.toContain(phone.slice(-8))
+
+    // Un borrador abandonado ya no espera el pago.
+    const k2 = nextKey()
+    const r2 = await draft({ key: k2 })
+    await prisma.onlineOrderCharge.update({ where: { id: (await chargeOf(k2)).id }, data: { status: 'ABANDONED' } })
+    await expect(getTrackingByToken(r2.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', canCancel: false })
   })
 })

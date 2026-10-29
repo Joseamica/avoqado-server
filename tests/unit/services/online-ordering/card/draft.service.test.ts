@@ -208,7 +208,14 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
   it('Codex r3 #1: la repetición vale aunque el borrador ya tenga cuenta (no 409)', async () => {
     prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(charge({ status: 'AUTHORIZED', onlineOrderId: 'oo1' }) as any)
     prismaMock.order.findUnique.mockResolvedValue({ id: 'ord1' } as any)
-    await expect(createCardOnlineDraft(input(), PUEDE_CREAR)).resolves.toMatchObject({ replay: true, trackingToken: 'T'.repeat(32) })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({ status: 'PENDING_ACCEPTANCE' } as any)
+    // Tarea 5: con cuenta ya creada, la repetición dice SU estado real (el mismo que el seguimiento), no AWAITING_PAYMENT.
+    await expect(createCardOnlineDraft(input(), PUEDE_CREAR)).resolves.toMatchObject({
+      replay: true,
+      trackingToken: 'T'.repeat(32),
+      status: 'PENDING_ACCEPTANCE',
+    })
+    expect(prismaMock.onlineOrder.findUnique).toHaveBeenCalledWith({ where: { id: 'oo1' }, select: { status: true } })
   })
 
   it('misma llave con otra solicitud → 409 IDEMPOTENCY_KEY_CONFLICT (final)', async () => {
