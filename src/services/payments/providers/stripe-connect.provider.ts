@@ -20,6 +20,7 @@ import {
   PaymentStatus,
   RefundParams,
   RefundResult,
+  RefundState,
   TokenizeCardParams,
   TokenizeCardResult,
   VerifiedWebhookEvent,
@@ -106,6 +107,13 @@ function normalizeRequirements(requirements: Stripe.Account.Requirements | null 
     past_due: requirements.past_due ?? [],
     disabled_reason: requirements.disabled_reason ?? null,
   }
+}
+
+/** `requires_action` (y cualquier estado nuevo) es «sin desenlace»: `PENDING`. */
+function toRefundState(r: Stripe.Refund): RefundState {
+  const status =
+    r.status === 'succeeded' ? 'SUCCEEDED' : r.status === 'failed' ? 'FAILED' : r.status === 'canceled' ? 'CANCELED' : 'PENDING'
+  return { refundId: r.id, status, amountCents: r.amount, failureReason: r.failure_reason ?? null }
 }
 
 export class StripeConnectProvider implements IEcommerceProvider {
@@ -493,6 +501,43 @@ export class StripeConnectProvider implements IEcommerceProvider {
     } catch (error) {
       return this.recoverIfAlready('canceled', connectAccountId, params.paymentIntentId, error)
     }
+  }
+
+  /** Fase 2 (T10): una devolución leída de la cuenta conectada (la del cargo). */
+  async getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+    return toRefundState(await this.stripe.refunds.retrieve(refundId, {}, { stripeAccount: connectAccountId }))
+  }
+
+  /** Fase 2 (T10): todas las devoluciones del PaymentIntent, todas las páginas (tope 1000: un cobro real trae un puñado). */
+  async listRefunds(
+    merchant: EcommerceMerchantWithProvider,
+    paymentIntentId: string,
+  ): Promise<Array<RefundState & { metadata: Record<string, string> }>> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+    const refunds = await this.stripe.refunds
+      .list({ payment_intent: paymentIntentId, limit: 100 }, { stripeAccount: connectAccountId })
+      .autoPagingToArray({ limit: 1000 })
+    return refunds.map(r => ({ ...toRefundState(r), metadata: (r.metadata ?? {}) as Record<string, string> }))
+  }
+
+  /**
+   * Fase 2 (T10): lo que Stripe ya devolvió de la comisión de la plataforma de ese cobro (no se calcula: Stripe no documenta el
+   * redondeo de la devolución proporcional). El cargo vive en la cuenta conectada; la comisión es de la plataforma: si la expansión
+   * no la trae como objeto, se lee con la llave de la plataforma.
+   */
+  async getApplicationFeeRefundedCents(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<number> {
+    const connectAccountId = this.requireConnectAccountId(merchant)
+    const pi = await this.stripe.paymentIntents.retrieve(
+      paymentIntentId,
+      { expand: ['latest_charge.application_fee'] },
+      { stripeAccount: connectAccountId },
+    )
+    const charge = typeof pi.latest_charge === 'object' ? pi.latest_charge : null
+    const fee = charge?.application_fee
+    if (!fee) return 0
+    if (typeof fee === 'object') return fee.amount_refunded
+    return (await this.stripe.applicationFees.retrieve(fee)).amount_refunded
   }
 
   /**

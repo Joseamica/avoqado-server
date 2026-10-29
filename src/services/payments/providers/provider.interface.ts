@@ -70,6 +70,14 @@ export interface RefundResult {
   status: 'PENDING' | 'SUCCEEDED' | 'FAILED'
 }
 
+/** Fase 2 (T10): lo que Stripe dice HOY de una devolución (`requires_action` → `PENDING`). Centavos: sólo en la frontera. */
+export interface RefundState {
+  refundId: string
+  status: 'PENDING' | 'SUCCEEDED' | 'FAILED' | 'CANCELED'
+  amountCents: number
+  failureReason: string | null
+}
+
 export interface VerifiedWebhookEvent {
   id: string
   type: string
@@ -173,4 +181,13 @@ export interface IEcommerceProvider {
   ): Promise<AuthorizationState>
   capture(merchant: EcommerceMerchantWithProvider, params: CaptureParams): Promise<AuthorizationState>
   voidAuthorization(merchant: EcommerceMerchantWithProvider, params: VoidParams): Promise<AuthorizationState>
+
+  getRefund(merchant: EcommerceMerchantWithProvider, refundId: string): Promise<RefundState>
+  /** Todas las devoluciones del PaymentIntent (todas las páginas, con tope), con su metadata. */
+  listRefunds(
+    merchant: EcommerceMerchantWithProvider,
+    paymentIntentId: string,
+  ): Promise<Array<RefundState & { metadata: Record<string, string> }>>
+  /** Lo que Stripe ya devolvió de la comisión de la plataforma de ese cobro (`application_fee.amount_refunded`); 0 si no hay comisión. */
+  getApplicationFeeRefundedCents(merchant: EcommerceMerchantWithProvider, paymentIntentId: string): Promise<number>
 }

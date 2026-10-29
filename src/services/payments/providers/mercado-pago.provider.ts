@@ -47,6 +47,7 @@ import type {
   PaymentStatus,
   RefundParams,
   RefundResult,
+  RefundState,
   TokenizeCardParams,
   TokenizeCardResult,
   VerifiedWebhookEvent,
@@ -284,5 +285,20 @@ export class MercadoPagoProvider implements IEcommerceProvider {
 
   async voidAuthorization(_merchant: EcommerceMerchantWithProvider, _params: VoidParams): Promise<AuthorizationState> {
     throw new ProviderCapabilityError(PROVIDER_CODE, 'voidAuthorization')
+  }
+
+  async getRefund(_merchant: EcommerceMerchantWithProvider, _refundId: string): Promise<RefundState> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'getRefund')
+  }
+
+  async listRefunds(
+    _merchant: EcommerceMerchantWithProvider,
+    _paymentIntentId: string,
+  ): Promise<Array<RefundState & { metadata: Record<string, string> }>> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'listRefunds')
+  }
+
+  async getApplicationFeeRefundedCents(_merchant: EcommerceMerchantWithProvider, _paymentIntentId: string): Promise<number> {
+    throw new ProviderCapabilityError(PROVIDER_CODE, 'getApplicationFeeRefundedCents')
   }
 }
