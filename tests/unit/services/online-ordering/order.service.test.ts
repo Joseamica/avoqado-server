@@ -20,8 +20,11 @@ import { socketManager } from '@/communication/sockets/managers/socketManager'
 import { examinarRenglon } from '@/services/fiscal/cfdi.service'
 import {
   createOnlineOrder,
+  fromQuoteSnapshot,
   getTrackingByToken,
   onlineOrderRequestHash,
+  toQuoteSnapshot,
+  writeOnlineOrderInTx,
   type CreateOnlineOrderOptions,
 } from '@/services/online-ordering/order.service'
 
@@ -938,5 +941,43 @@ describe('S3: el cliente que nace de un pedido conserva su nombre', () => {
     prismaMock.onlineOrder.count.mockResolvedValueOnce(3)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'TOO_MANY_PENDING_ORDERS' })
     expect(prismaMock.customer.update).not.toHaveBeenCalled()
+  })
+})
+
+describe('el armado de la cuenta se comparte (fase 2: la tarjeta crea la cuenta al autorizarse)', () => {
+  it('writeOnlineOrderInTx arma la misma cuenta que createOnlineOrder', async () => {
+    await createOnlineOrder(input(), PUEDE_CREAR)
+    const order = (prismaMock.order.create.mock.calls[0][0] as any).data
+    const online = (prismaMock.onlineOrder.create.mock.calls[0][0] as any).data
+    prismaMock.order.create.mockClear()
+    prismaMock.onlineOrder.create.mockClear()
+
+    const r = await writeOnlineOrderInTx(prismaMock, {
+      venueId: 'v1',
+      externalId: `web:${KEY}`,
+      orderNumber: order.orderNumber,
+      quote: toQuoteSnapshot(QUOTE_OK as any),
+      customer: { name: 'María G.', phone: PHONE, email: null },
+      customerId: 'cust1',
+      note: null,
+      paymentMode: 'CARD_ONLINE',
+      trackingToken: online.trackingToken,
+      requestHash: online.requestHash,
+      acceptDeadlineAt: online.acceptDeadlineAt,
+      whatsappConsent: true,
+    })
+
+    expect(r).toEqual({ orderId: 'ord1', onlineOrderId: 'oo1' })
+    expect((prismaMock.order.create.mock.calls[0][0] as any).data).toEqual(order)
+    expect((prismaMock.onlineOrder.create.mock.calls[0][0] as any).data).toEqual({ ...online, paymentMode: 'CARD_ONLINE' })
+  })
+
+  it('QuoteSnapshot es JSON y va y vuelve con los mismos valores (los Decimal como texto)', () => {
+    const q = { ...QUOTE_OK, subtotal: D('206.005'), lines: [{ ...QUOTE_OK.lines[0], unitPrice: D('93.0000001') }] }
+    const snap = toQuoteSnapshot(q as any)
+    expect(JSON.parse(JSON.stringify(snap))).toEqual(snap)
+    expect(snap.subtotal).toBe('206.005')
+    expect(snap.lines[0].unitPrice).toBe('93.0000001')
+    expect(fromQuoteSnapshot(snap)).toEqual({ subtotal: q.subtotal, total: q.total, lines: q.lines })
   })
 })

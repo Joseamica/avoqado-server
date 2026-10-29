@@ -700,7 +700,7 @@ const WRITERS: Record<string, Writer> = {
     note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
   },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
-  'src/services/online-ordering/transitions.service.ts#casTransition': {
+  'src/services/online-ordering/transitions.service.ts#casTransitionInTx': {
     class: 'LOCKED',
     lock: LOCK,
     proof: proof(
@@ -921,7 +921,7 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     why: 'contract confirmation: one CAS UPDATE of contratoDePrecio (orderContratoDePrecioWriters), no money or lines',
   },
   'src/services/tpv/order.tpv.service.ts#createOrder': { class: 'PRIVATE_CREATION', why: 'new empty order', markers: NEW_ORDER },
-  'src/services/online-ordering/order.service.ts#createOnlineOrder': {
+  'src/services/online-ordering/order.service.ts#writeOnlineOrderInTx': {
     class: 'PRIVATE_CREATION',
     why: 'online order: new Order, lines and modifiers in one admission transaction',
     markers: NEW_ORDER,

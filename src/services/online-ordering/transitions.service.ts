@@ -1,4 +1,11 @@
-import { OnlineOrderStatus, OrderStatus, PaymentStatus, Prisma, type OnlineOrderRejectReason } from '@prisma/client'
+import {
+  OnlineOrderChargeStatus,
+  OnlineOrderStatus,
+  OrderStatus,
+  PaymentStatus,
+  Prisma,
+  type OnlineOrderRejectReason,
+} from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
@@ -19,8 +26,10 @@ export type TransitionResult =
   | { outcome: 'NOT_FOUND' }
   | { outcome: 'PAYMENT_REQUIRED' }
   | { outcome: 'HAS_PAYMENTS' }
+  /** Fase 2: el banco está cobrando la tarjeta del pedido; nada lo mueve hasta saber el desenlace. */
+  | { outcome: 'CONFIRMING_PAYMENT' }
 
-type TransitionKind = 'ACCEPT' | 'REJECT' | 'EXPIRE' | 'CUSTOMER_CANCEL' | 'READY' | 'DELIVER'
+export type TransitionKind = 'ACCEPT' | 'REJECT' | 'EXPIRE' | 'CUSTOMER_CANCEL' | 'READY' | 'DELIVER'
 
 const OPEN_ORDER = [...OPEN_ORDER_STATUSES] as OrderStatus[]
 
@@ -73,7 +82,7 @@ const RULES: Record<
   },
 }
 
-type CasResult =
+export type CasResult =
   | {
       r: 'OK'
       now: Date
@@ -82,6 +91,8 @@ type CasResult =
       orderWritten: boolean
       /** M-7: el estado al que esta transición movió la cuenta, o `null` si no la escribió. */
       orderStatus: OrderStatus | null
+      /** Fase 2: esta transición canceló y pasó el cargo AUTHORIZED → RELEASING; el llamador libera la tarjeta tras el commit. */
+      releaseChargeId?: string
     }
   | {
       r: 'STALE'
@@ -90,6 +101,8 @@ type CasResult =
       deadlinePassed: boolean
       /** R2: lo que la sincronización cerró en esta transacción; se anuncia después del commit (I-1). */
       cancelledElsewhere?: CancelledElsewhere[]
+      /** Fase 2: el cargo de tarjeta está en `CAPTURING`; no se escribió nada. */
+      confirmingPayment?: true
     }
   | { r: 'NOT_FOUND' }
   | { r: 'HAS_PAYMENTS' }
@@ -102,12 +115,7 @@ class OrderNotWritten extends Error {
   }
 }
 
-/**
- * Un solo cambio de estado, bajo el candado de la orden: candado → reloj → relectura de `OnlineOrder` y `Order` → reglas de la
- * tabla `RULES` → CAS (`updateMany` con el estado esperado) → la `Order` desde los estados permitidos. Si otro actor ganó, el
- * CAS da 0 y no se toca nada más.
- */
-async function casTransition(a: {
+export interface CasArgs {
   kind: TransitionKind
   venueId: string
   orderId: string
@@ -117,80 +125,112 @@ async function casTransition(a: {
   orderExtra?: (now: Date) => Prisma.OrderUncheckedUpdateManyInput
   /** Condición extra del CAS; recibe si la cuenta ya tiene dinero (un pedido cobrado no vence). */
   extraWhere?: (now: Date, hasMoney: boolean) => Prisma.OnlineOrderWhereInput
-}): Promise<CasResult> {
+  /** Fase 2: sólo la captura misma, que termina su propia aceptación o rechazo, corre con el cargo en `CAPTURING`. */
+  allowCapturing?: true
+}
+
+/**
+ * Un solo cambio de estado, bajo el candado de la orden, en la transacción que recibe: candado → reloj → relectura de
+ * `OnlineOrder`, su cargo de tarjeta y la `Order` → reglas de la tabla `RULES` → CAS (`updateMany` con el estado esperado) → la
+ * `Order` desde los estados permitidos. Si otro actor ganó, el CAS da 0 y no se toca nada más. M-1: lanza `OrderNotWritten`
+ * cuando cancela sin poder cancelar la cuenta, para que quien abrió la transacción la revierta entera.
+ */
+export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs): Promise<CasResult> {
   const rule = RULES[a.kind]
+  if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
+  // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida.
+  const now = a.now ?? new Date()
+  const row = await tx.onlineOrder.findFirst({
+    where: { orderId: a.orderId, venueId: a.venueId },
+    select: {
+      id: true,
+      status: true,
+      paymentMode: true,
+      acceptDeadlineAt: true,
+      order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
+    },
+  })
+  if (!row) return { r: 'NOT_FOUND' }
+  const stale = (current: OnlineOrderStatus | null, deadlinePassed = false): Extract<CasResult, { r: 'STALE' }> => ({
+    r: 'STALE',
+    now,
+    status: current,
+    deadlinePassed,
+  })
+
+  // Fase 2: mientras el banco cobra la tarjeta, nada mueve el pedido (ni lo sincroniza con una cancelación de otra vía): el
+  // desenlace lo decide la captura, que corre con `allowCapturing`. Pagar al recoger no tiene cargo.
+  const charge = await tx.onlineOrderCharge.findUnique({ where: { onlineOrderId: row.id }, select: { id: true, status: true } })
+  if (charge?.status === OnlineOrderChargeStatus.CAPTURING && a.allowCapturing !== true) {
+    return { ...stale(row.status), confirmingPayment: true }
+  }
+
+  // R2: la Order se canceló por otra vía (POS, panel, anular): el pedido se cierra con ella y nada lo revive ni lo «vence».
+  if (row.order.status === OrderStatus.CANCELLED || row.order.status === OrderStatus.DELETED) {
+    const cancelledElsewhere = await syncOnlineOrdersOfCancelledOrders(tx, { venueId: a.venueId, orderId: a.orderId }, now)
+    const after = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true } })
+    return { ...stale(after?.status ?? null), cancelledElsewhere }
+  }
+  if (!rule.from.includes(row.status)) return stale(row.status)
+
+  const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
+  if (rule.cancels) {
+    // Ninguna cuenta con dinero —ni con un cobro de terminal en curso— se cancela desde aquí: misma regla que
+    // `assertOrderCancellableUnderLock`, sin lanzar (el job y la bandeja necesitan un desenlace, no un error).
+    if (hasMoney) return { r: 'HAS_PAYMENTS' }
+    if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
+  }
+  // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
+  // un modo ya cobrado de antemano (`PREPAID_MODES`, vacío en 1a) se libra de exigirlo.
+  if (a.kind === 'DELIVER' && !PREPAID_MODES.includes(row.paymentMode) && row.order.paymentStatus !== PaymentStatus.PAID) {
+    return { r: 'PAYMENT_REQUIRED' }
+  }
+
+  const cas = await tx.onlineOrder.updateMany({
+    where: { id: row.id, status: { in: rule.from }, ...(a.extraWhere?.(now, hasMoney) ?? {}) },
+    data: { status: rule.to, ...a.onlineData(now) },
+  })
+  if (cas.count !== 1) {
+    const current = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true, acceptDeadlineAt: true } })
+    return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
+  }
+
+  const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
+  const written = await tx.order.updateMany({
+    where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },
+    data: orderData,
+  })
+  // M-1: rechazar, vencer o cancelar sin cancelar la cuenta le diría al comensal «rechazado» o «vencido» con la venta viva
+  // (p. ej. una cortesía ya cerrada sin dinero). Se revierte todo y se responde el estado vigente.
+  if (rule.cancels && written.count !== 1) throw new OrderNotWritten(now)
+  const orderWritten = written.count === 1
+
+  // Fase 2: cancelar suelta la tarjeta apartada. Se marca aquí, en la MISMA transacción; la liberación con el banco la hace el
+  // llamador después del commit, y sólo si esta transición fue la que movió el cargo.
+  let releaseChargeId: string | undefined
+  if (rule.cancels && charge?.status === OnlineOrderChargeStatus.AUTHORIZED) {
+    const released = await tx.onlineOrderCharge.updateMany({
+      where: { id: charge.id, status: OnlineOrderChargeStatus.AUTHORIZED },
+      data: { status: OnlineOrderChargeStatus.RELEASING },
+    })
+    if (released.count === 1) releaseChargeId = charge.id
+  }
+  return {
+    r: 'OK',
+    now,
+    onlineOrderId: row.id,
+    orderNumber: row.order.orderNumber,
+    orderWritten,
+    orderStatus: orderWritten ? rule.order.to : null,
+    ...(releaseChargeId ? { releaseChargeId } : {}),
+  }
+}
+
+/** `casTransitionInTx` en su propia transacción, con el presupuesto del candado de la orden. */
+async function casTransition(a: CasArgs): Promise<CasResult> {
   let result: CasResult
   try {
-    result = await prisma.$transaction(async (tx): Promise<CasResult> => {
-      if (!(await lockExistingOrderForPayment(tx, { venueId: a.venueId, orderId: a.orderId }))) return { r: 'NOT_FOUND' }
-      // R1: el reloj se toma DESPUÉS del candado: esperar la orden no puede convertir una aceptación vencida en válida.
-      const now = a.now ?? new Date()
-      const row = await tx.onlineOrder.findFirst({
-        where: { orderId: a.orderId, venueId: a.venueId },
-        select: {
-          id: true,
-          status: true,
-          paymentMode: true,
-          acceptDeadlineAt: true,
-          order: { select: { orderNumber: true, status: true, paymentStatus: true, paidAmount: true } },
-        },
-      })
-      if (!row) return { r: 'NOT_FOUND' }
-      const stale = (current: OnlineOrderStatus | null, deadlinePassed = false): Extract<CasResult, { r: 'STALE' }> => ({
-        r: 'STALE',
-        now,
-        status: current,
-        deadlinePassed,
-      })
-
-      // R2: la Order se canceló por otra vía (POS, panel, anular): el pedido se cierra con ella y nada lo revive ni lo «vence».
-      if (row.order.status === OrderStatus.CANCELLED || row.order.status === OrderStatus.DELETED) {
-        const cancelledElsewhere = await syncOnlineOrdersOfCancelledOrders(tx, { venueId: a.venueId, orderId: a.orderId }, now)
-        const after = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true } })
-        return { ...stale(after?.status ?? null), cancelledElsewhere }
-      }
-      if (!rule.from.includes(row.status)) return stale(row.status)
-
-      const hasMoney = row.order.paymentStatus !== PaymentStatus.PENDING || new Prisma.Decimal(row.order.paidAmount).gt(0)
-      if (rule.cancels) {
-        // Ninguna cuenta con dinero —ni con un cobro de terminal en curso— se cancela desde aquí: misma regla que
-        // `assertOrderCancellableUnderLock`, sin lanzar (el job y la bandeja necesitan un desenlace, no un error).
-        if (hasMoney) return { r: 'HAS_PAYMENTS' }
-        if (await findLiveTerminalCharge(tx, { venueId: a.venueId, orderId: a.orderId })) return { r: 'HAS_PAYMENTS' }
-      }
-      // Se entrega cuando YA se cobró, leído bajo el candado (el cobro lo hace el flujo normal de caja). M-2: falla CERRADO: sólo
-      // un modo ya cobrado de antemano (`PREPAID_MODES`, vacío en 1a) se libra de exigirlo.
-      if (a.kind === 'DELIVER' && !PREPAID_MODES.includes(row.paymentMode) && row.order.paymentStatus !== PaymentStatus.PAID) {
-        return { r: 'PAYMENT_REQUIRED' }
-      }
-
-      const cas = await tx.onlineOrder.updateMany({
-        where: { id: row.id, status: { in: rule.from }, ...(a.extraWhere?.(now, hasMoney) ?? {}) },
-        data: { status: rule.to, ...a.onlineData(now) },
-      })
-      if (cas.count !== 1) {
-        const current = await tx.onlineOrder.findFirst({ where: { id: row.id }, select: { status: true, acceptDeadlineAt: true } })
-        return stale(current?.status ?? null, !!current && current.acceptDeadlineAt.getTime() <= now.getTime())
-      }
-
-      const orderData: Prisma.OrderUncheckedUpdateManyInput = { status: rule.order.to, ...(a.orderExtra?.(now) ?? {}) }
-      const written = await tx.order.updateMany({
-        where: { id: a.orderId, venueId: a.venueId, status: { in: rule.order.when } },
-        data: orderData,
-      })
-      // M-1: rechazar, vencer o cancelar sin cancelar la cuenta le diría al comensal «rechazado» o «vencido» con la venta viva
-      // (p. ej. una cortesía ya cerrada sin dinero). Se revierte todo y se responde el estado vigente.
-      if (rule.cancels && written.count !== 1) throw new OrderNotWritten(now)
-      const orderWritten = written.count === 1
-      return {
-        r: 'OK',
-        now,
-        onlineOrderId: row.id,
-        orderNumber: row.order.orderNumber,
-        orderWritten,
-        orderStatus: orderWritten ? rule.order.to : null,
-      }
-    }, ORDER_LOCK_WAIT_BUDGET)
+    result = await prisma.$transaction(tx => casTransitionInTx(tx, a), ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
     if (!(error instanceof OrderNotWritten)) throw error
     const current = await prisma.onlineOrder.findFirst({ where: { orderId: a.orderId, venueId: a.venueId }, select: { status: true } })
@@ -205,7 +245,7 @@ async function casTransition(a: {
 function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
   switch (r.r) {
     case 'STALE':
-      return { outcome: 'STALE', status: r.status }
+      return r.confirmingPayment ? { outcome: 'CONFIRMING_PAYMENT' } : { outcome: 'STALE', status: r.status }
     case 'NOT_FOUND':
       return { outcome: 'NOT_FOUND' }
     case 'HAS_PAYMENTS':

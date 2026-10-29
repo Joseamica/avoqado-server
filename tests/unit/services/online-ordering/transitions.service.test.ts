@@ -31,6 +31,7 @@ import { getSettings } from '@/services/online-ordering/settings.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByCustomer,
+  casTransitionInTx,
   cancelOnlineOrderByStaff,
   expireOnlineOrder,
   markOnlineOrderDelivered,
@@ -62,6 +63,9 @@ beforeEach(() => {
   prismaMock.onlineOrder.findFirst.mockResolvedValue(row() as any)
   prismaMock.onlineOrder.updateMany.mockResolvedValue({ count: 1 })
   prismaMock.order.updateMany.mockResolvedValue({ count: 1 })
+  prismaMock.onlineOrderCharge.findUnique.mockReset() // por omisión sin cargo: pagar al recoger, igual que en 1a
+  prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(null)
+  prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 1 })
   ;(cancelOrder as jest.Mock).mockImplementation(async (_v: string, orderId: string, _r: unknown, _s: unknown, dentroDeLaTx: any) => {
     await dentroDeLaTx(prismaMock, { orderId })
   })
@@ -356,13 +360,13 @@ describe('markOnlineOrderDelivered', () => {
     expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
   })
 
-  it('M-2: entregar falla CERRADO: un modo de pago que no está en PREPAID_MODES (vacío en 1a) también exige la cuenta pagada', async () => {
+  it('M-2: la tarjeta en línea (único modo en PREPAID_MODES) ya llega cobrada: entregar no exige la cuenta pagada al recoger', async () => {
+    // Pagar al recoger, fuera de PREPAID_MODES, sigue fallando CERRADO (prueba de arriba).
     prismaMock.onlineOrder.findFirst.mockResolvedValue({
       ...row({ status: 'READY', order: { status: 'READY' } }),
       paymentMode: 'CARD_ONLINE',
     } as any)
-    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'PAYMENT_REQUIRED' })
-    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    await expect(markOnlineOrderDelivered(base)).resolves.toEqual({ outcome: 'OK', status: 'COMPLETED' })
   })
 
   it('con la orden pagada pasa a COMPLETED desde READY o ACCEPTED; la Order se completa sólo si sigue abierta', async () => {
@@ -479,5 +483,74 @@ describe('cancelOnlineOrderByStaff (R1: reutiliza la cancelación existente)', (
     await expect(cancelOnlineOrderByStaff(base)).resolves.toEqual({ outcome: 'STALE', status: 'COMPLETED' })
     expect(lanzoElGancho).toBeInstanceOf(Error)
     expect(notifyOrderEvent).not.toHaveBeenCalled()
+  })
+})
+
+describe('cargo de tarjeta (fase 2): la máquina lo lee bajo el candado', () => {
+  const CARD = { id: 'ch1', status: 'AUTHORIZED' }
+
+  it('rechazar con el cargo CAPTURING responde CONFIRMING_PAYMENT y no escribe nada', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ ...CARD, status: 'CAPTURING' } as any)
+    await expect(rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(prismaMock.onlineOrderCharge.findUnique).toHaveBeenCalledWith({
+      where: { onlineOrderId: 'oo1' },
+      select: { id: true, status: true },
+    })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+    expect(notifyOrderEvent).not.toHaveBeenCalled()
+  })
+
+  it('vencer con el cargo CAPTURING tampoco escribe', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ ...CARD, status: 'CAPTURING' } as any)
+    await expect(expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.order.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('rechazar con el cargo AUTHORIZED lo pasa a RELEASING en la misma transacción', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(CARD as any)
+    await expect(rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ch1', status: 'AUTHORIZED' },
+      data: { status: 'RELEASING' },
+    })
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+  })
+
+  it('el resultado OK lleva releaseChargeId sólo si el cargo SÍ pasó a RELEASING', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(CARD as any)
+    const args = { kind: 'REJECT' as const, venueId: 'v1', orderId: 'ord1', now: NOW, onlineData: () => ({}) }
+    await expect(casTransitionInTx(prismaMock, args)).resolves.toMatchObject({ r: 'OK', releaseChargeId: 'ch1' })
+    prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 0 }) // otro actor ya lo movió
+    const r = await casTransitionInTx(prismaMock, args)
+    expect(r).toMatchObject({ r: 'OK' })
+    expect(r).not.toHaveProperty('releaseChargeId')
+  })
+
+  it('una transición que no cancela no libera el cargo autorizado', async () => {
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ status: 'ACCEPTED', order: { status: 'CONFIRMED' } }) as any)
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(CARD as any)
+    await expect(markOnlineOrderReady(base)).resolves.toEqual({ outcome: 'OK', status: 'READY' })
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('con allowCapturing la transición sí corre sobre un cargo CAPTURING (la captura termina su propia aceptación)', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue({ ...CARD, status: 'CAPTURING' } as any)
+    const r = await casTransitionInTx(prismaMock, {
+      kind: 'ACCEPT',
+      venueId: 'v1',
+      orderId: 'ord1',
+      now: NOW,
+      allowCapturing: true,
+      onlineData: () => ({}),
+    })
+    expect(r).toMatchObject({ r: 'OK', orderStatus: 'CONFIRMED' })
+  })
+
+  it('pedido sin cargo (pagar al recoger) se comporta igual que hoy: no lee estados de tarjeta ni libera', async () => {
+    await expect(rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
   })
 })

@@ -100,7 +100,7 @@ const ESCRITORES_CON_ESTADO_VARIABLE: Record<string, string[]> = {
   // Pedidos en línea (plan 1a, R1/R2/R22): rechazar, vencer y cancelar el comensal escriben el estado de la regla de la
   // transición bajo el candado de la orden, sin dinero y sin cobro de terminal vivo. Cancelar por personal usa
   // `cancelOrderInTransaction` (PROTEGIDA arriba); las cancelaciones de otras vías se sincronizan al leer.
-  'services/online-ordering/transitions.service.ts#casTransition': ['lockExistingOrderForPayment', 'findLiveTerminalCharge'],
+  'services/online-ordering/transitions.service.ts#casTransitionInTx': ['lockExistingOrderForPayment', 'findLiveTerminalCharge'],
 }
 
 describe('Inventario de escritores que cancelan una orden (§C.6)', () => {

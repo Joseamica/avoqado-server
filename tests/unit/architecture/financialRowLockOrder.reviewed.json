@@ -662,7 +662,7 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
-    "src/services/online-ordering/transitions.service.ts#casTransition#lockExistingOrderForPayment": {
+    "src/services/online-ordering/transitions.service.ts#casTransitionInTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
