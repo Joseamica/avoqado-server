@@ -1,6 +1,7 @@
 import type { NextFunction, Request, Response } from 'express'
 import { Prisma } from '@prisma/client'
-import { UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { cardRefundKey } from '@/schemas/online-ordering.schema'
 import { listCardRefunds, refundCardOnlineOrder, resolveReversedCardRefund } from '@/services/online-ordering/card/refund.service'
 import { getOnlineMenuSummary, listOnlineMenuProducts } from '@/services/online-ordering/menuAdmin.service'
 import { setOnlineAvailability } from '@/services/online-ordering/menuAvailability.service'
@@ -84,11 +85,29 @@ export const listCardRefundsHandler = async (req: Request, res: Response, next: 
   }
 }
 
-/** Fase 2 (T10): devolver a la tarjeta. El cuerpo ya viene validado por `cardRefundSchema` (monto en pesos). */
+/**
+ * F1: la llave de la devolución, del encabezado `Idempotency-Key` (lo normal, como la TPV) o del cuerpo (compatibilidad). Si llegan
+ * las dos y no coinciden, 400: no se adivina cuál es la repetición.
+ */
+function cardRefundIdempotencyKey(req: Request): string {
+  const header = req.header('Idempotency-Key')?.trim() || undefined
+  const fromBody = req.body.idempotencyKey as string | undefined
+  if (header && fromBody && header !== fromBody) {
+    throw new BadRequestError('La llave del encabezado Idempotency-Key y la del cuerpo no coinciden.', 'IDEMPOTENCY_KEY_MISMATCH')
+  }
+  const key = header ?? fromBody
+  if (!key) throw new BadRequestError('Falta la llave de idempotencia (encabezado Idempotency-Key).', 'IDEMPOTENCY_KEY_REQUIRED')
+  const parsed = cardRefundKey.safeParse(key)
+  if (!parsed.success) throw new BadRequestError(parsed.error.issues[0].message, 'IDEMPOTENCY_KEY_INVALID')
+  return parsed.data
+}
+
+/** Fase 2 (T10): devolver a la tarjeta. El cuerpo ya viene validado por `cardRefundSchema` (monto en PESOS, no centavos). */
 export const refundCardHandler = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { venueId, orderId } = req.params
-    const { amount, reason, note, idempotencyKey } = req.body
+    const { amount, reason, note } = req.body
+    const idempotencyKey = cardRefundIdempotencyKey(req)
     const data = await refundCardOnlineOrder({
       venueId,
       orderId,
