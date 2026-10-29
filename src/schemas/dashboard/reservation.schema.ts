@@ -390,6 +390,11 @@ export const cancelBodySchema = z.object({
   reason: z.string().max(1000).optional(),
 })
 
+// D4 — «Sí llegó» y «Marcar resuelto». `nullish`: un POS que manda `null` no debe quedarse sin poder corregir.
+const textoCorto = (campo: string) => z.string().trim().max(280, `${campo} no puede pasar de 280 caracteres`).nullish()
+export const undoNoShowBodySchema = z.object({ reason: textoCorto('El motivo') })
+export const resolveNoShowCorrectionBodySchema = z.object({ note: textoCorto('La nota') })
+
 export const publicRescheduleBodySchema = z
   .object({
     // Class reschedule (swap to another session of the same class).

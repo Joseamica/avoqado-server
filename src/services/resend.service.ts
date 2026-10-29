@@ -1140,6 +1140,10 @@ export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): P
 
 /**
  * Send generic notification email (used by notification.service.ts)
+ *
+ * `opts.unsubscribeUrl` (D4): baja en un clic sin iniciar sesión — liga «Dejar de recibir estos correos» en el pie y en el
+ * texto, más `List-Unsubscribe` + `List-Unsubscribe-Post` (RFC 8058), igual que `sendLowStockDigestEmail`. Sin `opts` la
+ * salida es idéntica byte a byte a la de antes (fijado en tests/unit/services/resend.notificationEmail.test.ts).
  */
 export async function sendNotificationEmail(
   to: string,
@@ -1148,7 +1152,9 @@ export async function sendNotificationEmail(
   message: string,
   actionUrl?: string,
   actionLabel?: string,
+  opts?: { unsubscribeUrl?: string },
 ): Promise<boolean> {
+  const unsubscribeUrl = opts?.unsubscribeUrl
   if (!resend) {
     logger.warn('📧 Resend not configured - skipping notification email')
     return false
@@ -1203,7 +1209,12 @@ export async function sendNotificationEmail(
             <hr style="border: none; border-top: 1px solid #e0e0e0; margin: 32px 0 20px;">
 
             <img src="https://avoqado.io/isotipo.svg" width="24" height="24" alt="Avoqado" style="display: block; margin-bottom: 12px; opacity: 0.5;">
-            <p style="font-size: 12px; color: #666666; margin: 0;">Servicios Tecnologicos Avo S.A. de C.V.</p>
+            <p style="font-size: 12px; color: #666666; margin: 0;">Servicios Tecnologicos Avo S.A. de C.V.</p>${
+              unsubscribeUrl
+                ? `
+            <p style="font-size: 12px; color: #666666; margin: 8px 0 0;"><a href="${unsubscribeUrl}" style="color: #666666; text-decoration: underline;">Dejar de recibir estos correos</a></p>`
+                : ''
+            }
           </div>
         </body>
       </html>
@@ -1217,7 +1228,7 @@ ${message}
 ${actionUrl ? `${actionLabel || 'Ver más'}: ${actionUrl}` : ''}
 
 ---
-Este correo fue enviado por Avoqado
+Este correo fue enviado por Avoqado${unsubscribeUrl ? `\nDejar de recibir estos correos: ${unsubscribeUrl}` : ''}
     `
 
     const result = await resend.emails.send({
@@ -1226,6 +1237,12 @@ Este correo fue enviado por Avoqado
       subject,
       html,
       text,
+      ...(unsubscribeUrl && {
+        headers: {
+          'List-Unsubscribe': `<${unsubscribeUrl}>`,
+          'List-Unsubscribe-Post': 'List-Unsubscribe=One-Click',
+        },
+      }),
     })
 
     if (result.error) {
