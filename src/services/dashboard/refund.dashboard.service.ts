@@ -1052,7 +1052,8 @@ export async function issueRefund(input: IssueRefundInput): Promise<IssueRefundR
         venueId: input.venueId,
         paymentId: input.paymentId,
         expectedOrderId: originalOrder.orderId,
-        excludeCardRefundId: input.excludeCardRefundId,
+        // M3: sólo la devolución a la tarjeta de Pedidos en línea se excluye a sí misma; nadie más se salta lo que ella apartó.
+        excludeCardRefundId: input.viaOnlineOrders ? input.excludeCardRefundId : undefined,
       })
       // Same original-payment lock as every refund channel: the second caller sees the first commit.
       const replayResult = await existingAttempt(tx)

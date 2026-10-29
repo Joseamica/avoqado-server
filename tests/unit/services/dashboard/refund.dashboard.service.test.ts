@@ -381,6 +381,36 @@ describe('refund.dashboard.service', () => {
       expect(vt.netAmount.toFixed(2)).toBe('-247.10')
     })
 
+    it('M3: excludeCardRefundId sólo se respeta con viaOnlineOrders (si no, la devolución en curso sigue apartando su monto)', async () => {
+      const apartadas = () => prismaMock.onlineOrderCardRefund.findMany.mock.calls.map(([a]: any) => a.where)
+      cobroDeStripe()
+      // El cobro de Stripe bloqueado trae su PaymentIntent: así se consultan las devoluciones a la tarjeta en curso.
+      prismaMock.$queryRaw.mockReset()
+      prismaMock.$queryRaw
+        .mockResolvedValueOnce([
+          {
+            id: 'payment-original',
+            venueId: 'venue-1',
+            status: TransactionStatus.COMPLETED,
+            type: PaymentType.REGULAR,
+            method: 'CREDIT_CARD',
+            source: 'WEB',
+            amount: 250,
+            tipAmount: 0,
+            orderId: 'order-1',
+            shiftId: null,
+            merchantAccountId: null,
+            processorId: 'pi_1',
+            processorData: {},
+            fundsFlow: 'AVOQADO_PROCESSED',
+          },
+        ])
+        .mockResolvedValueOnce([])
+      await expect(pedir({ excludeCardRefundId: 'cr-mio' })).rejects.toMatchObject({ code: 'ONLINE_ORDER_REFUND_VIA_ONLINE_ORDERS' })
+      expect(apartadas().length).toBeGreaterThan(0)
+      for (const where of apartadas()) expect(where).not.toHaveProperty('id')
+    })
+
     it('T10: con viaOnlineOrders el reembolso hereda el turno del cobro (ninguno) y no le resta al turno vivo', async () => {
       cobroDeStripe()
       prismaMock.shift.findFirst.mockResolvedValue({ id: 'shift-negocio', status: 'OPEN' } as never)
