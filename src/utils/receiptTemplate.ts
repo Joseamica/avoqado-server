@@ -856,7 +856,12 @@ export function generateReceiptHTML(data: ReceiptData): string {
                                         : item.cortesia
                                           ? '<div class="item-price">Cortesía</div>'
                                           : `<div class="item-price">${formatCurrency(item.total, currency)}</div>
-                                    <div class="item-unit-price">${item.weightKg != null ? `${item.weightKg} kg × ${formatCurrency(item.unitPrice, currency)}/kg` : `${item.quantity} × ${formatCurrency(item.unitPrice, currency)}`}</div>`
+                                    ${
+                                      // D1 (Codex código r2): con el resumen impreso del peso, el precio por kilo no se vuelve a explicar como «1 × …».
+                                      item.peso
+                                        ? ''
+                                        : `<div class="item-unit-price">${item.weightKg != null ? `${item.weightKg} kg × ${formatCurrency(item.unitPrice, currency)}/kg` : `${item.quantity} × ${formatCurrency(item.unitPrice, currency)}`}</div>`
+                                    }`
                                     }
                                 </div>
                             </div>

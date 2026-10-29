@@ -132,6 +132,19 @@ describe('GET /public/receipt/:accessKey — HTML legado con la copia del ticket
     expect(renglones).toContain('+ Sin azúcar')
   })
 
+  it('un producto pesado de la copia dice su resumen de peso y NO «1 × $420.00» (Codex código r2)', async () => {
+    const html = await pintar({ ...base, ticketTotals: { kind: 'COBRO', desglosado: false, subtotal: 182.7, serviceCharge: 0, addedTax: 0, tip: 0, total: 182.7 },
+      lineasDelTicket: {
+        lineas: [{ nombre: 'Queso Oaxaca', cantidad: 1, unitarioCents: 42000, totalCents: 18270, peso: '0.435 kg × $420.00/kg' }],
+        subtotalCents: 18270,
+        descuentoCents: 0,
+      } })
+    const renglones = html.slice(html.indexOf('<div class="items-list">'), html.indexOf('<div class="totals-section">'))
+    expect(renglones).toContain('0.435 kg × $420.00/kg')
+    expect(renglones).toContain('$182.70')
+    expect(renglones).not.toContain('1 × $420.00')
+  })
+
   it('control: sin copia, el ramal de siempre pinta los `items` de la venta', async () => {
     const html = await pintar({ ...base, ticketTotals: { kind: 'COBRO', desglosado: false, subtotal: 50, serviceCharge: 0, addedTax: 0, tip: 0, total: 50 } })
     expect(html).toContain('Café Americano')
