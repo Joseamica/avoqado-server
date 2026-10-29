@@ -230,6 +230,12 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     if (!venueId) return
     const v = { venueId }
     await prisma.idempotencyRequest.deleteMany({ where: { organizationId: `venue:${venueId}` } })
+    await prisma.moneyAnomaly.deleteMany({
+      where: {
+        category: { in: ['ONLINE_ORDER_STRIPE_EVENT_FOREIGN', 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE'] },
+        expectedState: { path: ['venueId'], equals: venueId },
+      },
+    })
     await prisma.activityLog.deleteMany({ where: v })
     await prisma.paymentEffect.deleteMany({ where: v })
     await prisma.inventoryPosting.deleteMany({ where: v })
@@ -577,6 +583,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     })
     expect(await chargeOf(key)).toMatchObject({ status: 'RELEASED', paymentIntentId: auth.paymentIntentId, releasedAt: expect.any(Date) })
     expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+    // M2: la liberación tardía también deja ONLINE_ORDER_CARD_RELEASED (sobre el cargo: no hay pedido).
+    expect(releasedLogs(c.id)).toBe(1)
   })
 
   it('Codex r2 #5: la llave ya tiene cuenta (externalId único) → no crea nada, libera y RELEASED_LATE', async () => {
@@ -900,19 +908,145 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(voidSpy).not.toHaveBeenCalled()
   })
 
+  /** Un aviso del endpoint Connect con la metadata de un cargo (la cuenta y el modo, los del cargo salvo que se diga otra cosa). */
+  let evtSeq = 0
+  const connectEvent = (type: string, data: Record<string, unknown>, o: { account?: string; livemode?: boolean } = {}) =>
+    processStripeConnectWebhookEvent({
+      id: `evt_itest_${RUN}_${++evtSeq}`,
+      type,
+      account: o.account ?? 'acct_itest_1',
+      livemode: o.livemode ?? false,
+      data,
+    })
+  const meta = (chargeId: string) => ({ type: 'online_order', chargeId, venueId: venueId! })
+  const releasedLogs = (entityId: string) =>
+    (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'ONLINE_ORDER_CARD_RELEASED' && p.entityId === entityId).length
+  const anomalies = (category: string) => prisma.moneyAnomaly.count({ where: { category, stripeEventId: { contains: `${RUN}` } } })
+
   it('ruling T6: payment_intent.canceled sobre un cargo AUTHORIZED rechaza el pedido con PAYMENT_FAILED y deja el cargo RELEASED', async () => {
     const { charge, orderId } = await authorizedOrder()
-    await processStripeConnectWebhookEvent({
-      id: `evt_itest_${RUN}`,
-      type: 'payment_intent.canceled',
-      account: 'acct_itest_1',
-      data: { id: charge.paymentIntentId, metadata: { type: 'online_order', chargeId: charge.id, venueId: venueId! } },
-    } as any)
+    // Codex r1 C2: el aviso sólo encuentra el cargo; lo que se escribe sale de releer Stripe con el PaymentIntent PROPIO.
+    authSpy.mockResolvedValueOnce({ ...authorized(), paymentIntentId: charge.paymentIntentId, piStatus: 'canceled' })
+    await connectEvent('payment_intent.canceled', { id: charge.paymentIntentId, metadata: meta(charge.id) })
+    expect(authSpy.mock.calls.at(-1)![1]).toEqual({ paymentIntentId: charge.paymentIntentId })
     expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
     const c = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
     expect(c.status).toBe('RELEASED')
     expect(c.releasedAt).toBeInstanceOf(Date)
     expect(voidSpy).not.toHaveBeenCalled() // Stripe ya la canceló
+    // M2: la liberación por el aviso deja su bitácora, una sola vez.
+    expect(releasedLogs(c.onlineOrderId!)).toBe(1)
+  })
+
+  it('Codex r1 C2: un PaymentIntent AJENO cancelado con la metadata copiada no libera la tarjeta ni rechaza el pedido', async () => {
+    const errorSpy = jest.spyOn(logger, 'error')
+    try {
+      const { charge, orderId } = await authorizedOrder()
+      await connectEvent('payment_intent.canceled', { id: `pi_ajeno_${RUN}`, metadata: meta(charge.id) })
+      expect(await chargeById(charge.id)).toMatchObject({ status: 'AUTHORIZED', releasedAt: null })
+      expect(await onlineOf(orderId)).toMatchObject({ status: 'PENDING_ACCEPTANCE' })
+      expect(authSpy).toHaveBeenCalledTimes(1) // sólo la confirmación del pedido; el aviso ajeno ni se relee
+      expect(errorSpy.mock.calls.some(([m]) => typeof m === 'string' && m.startsWith('🚨'))).toBe(true)
+
+      // El PaymentIntent propio, pero Stripe dice que sigue apartado (aviso viejo o inventado): tampoco.
+      authSpy.mockResolvedValueOnce({ ...authorized(), paymentIntentId: charge.paymentIntentId })
+      await connectEvent('payment_intent.canceled', { id: charge.paymentIntentId, metadata: meta(charge.id) })
+      expect(await chargeById(charge.id)).toMatchObject({ status: 'AUTHORIZED' })
+      expect(await onlineOf(orderId)).toMatchObject({ status: 'PENDING_ACCEPTANCE' })
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('Codex r1 C2: un aviso de OTRA cuenta conectada o de otro modo (real/prueba) → anomalía y nada escrito', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    const before = await anomalies('ONLINE_ORDER_STRIPE_EVENT_FOREIGN')
+    await connectEvent('payment_intent.canceled', { id: charge.paymentIntentId, metadata: meta(charge.id) }, { account: 'acct_otro' })
+    await connectEvent('payment_intent.canceled', { id: charge.paymentIntentId, metadata: meta(charge.id) }, { livemode: true })
+    expect(await anomalies('ONLINE_ORDER_STRIPE_EVENT_FOREIGN')).toBe(before + 2)
+    expect(await chargeById(charge.id)).toMatchObject({ status: 'AUTHORIZED' })
+    expect(await onlineOf(orderId)).toMatchObject({ status: 'PENDING_ACCEPTANCE' })
+
+    // Un borrador: el «completed» de otra cuenta ni siquiera consulta a Stripe ni crea el pedido.
+    const key = nextKey()
+    await draft({ key })
+    const d = await chargeOf(key)
+    const calls = authSpy.mock.calls.length
+    await connectEvent('checkout.session.completed', { id: d.checkoutSessionId, metadata: meta(d.id) }, { account: 'acct_otro' })
+    expect(authSpy.mock.calls.length).toBe(calls)
+    expect((await chargeOf(key)).status).toBe('PENDING_AUTH')
+    expect(await anomalies('ONLINE_ORDER_STRIPE_EVENT_FOREIGN')).toBe(before + 3)
+  })
+
+  it('Codex r1 C2: payment_intent.canceled sobre un borrador relee la sesión propia: abierta → sigue esperando; vencida → ABANDONED', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const d = await chargeOf(key)
+    const open = { ...authorized(), sessionStatus: 'open', paymentIntentId: null, piStatus: null, amountCapturableCents: 0 }
+    authSpy.mockResolvedValueOnce(open)
+    await connectEvent('payment_intent.canceled', { id: `pi_cualquiera_${RUN}`, metadata: meta(d.id) })
+    expect(authSpy.mock.calls.at(-1)![1]).toEqual({ checkoutSessionId: d.checkoutSessionId })
+    expect((await chargeOf(key)).status).toBe('PENDING_AUTH')
+
+    authSpy.mockResolvedValueOnce({ ...open, sessionStatus: 'expired' })
+    await connectEvent('payment_intent.canceled', { id: `pi_cualquiera_${RUN}`, metadata: meta(d.id) })
+    expect((await chargeOf(key)).status).toBe('ABANDONED')
+  })
+
+  it('Codex r1 C3: Stripe dice succeeded (capturado a mano) sobre un borrador → sin pedido, anomalía y alerta UNA vez; nadie lo abandona ni lo libera', async () => {
+    const errorSpy = jest.spyOn(logger, 'error')
+    try {
+      const key = nextKey()
+      const r = await draft({ key })
+      const d = await chargeOf(key)
+      const pi = `pi_itest_${RUN}_${++piSeq}`
+      authSpy.mockResolvedValue(capturedState({ paymentIntentId: pi, amountCents: 25_000 }))
+      const outsideLogs = () =>
+        (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE' && p.entityId === d.id)
+
+      await expect(confirmCardAuthorization(d.id)).resolves.toBe('CAPTURED_OUTSIDE')
+      expect(await chargeById(d.id)).toMatchObject({ status: 'PENDING_AUTH', paymentIntentId: pi, lastError: 'CAPTURED_OUTSIDE' })
+      expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+      expect(outsideLogs()).toHaveLength(1)
+      expect(outsideLogs()[0][0].data).toMatchObject({ paymentIntentId: pi, amount: '250.00' })
+      expect(
+        await prisma.moneyAnomaly.count({
+          where: { category: 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE', stripeEventId: `ooc:CAPTURED_OUTSIDE:${d.id}` },
+        }),
+      ).toBe(1)
+      expect(errorSpy.mock.calls.filter(([m]) => typeof m === 'string' && m.includes('capturada fuera de Avoqado'))).toHaveLength(1)
+
+      // Otra vez (aviso, seguimiento): ni Stripe, ni otra alerta.
+      await expect(confirmCardAuthorization(d.id)).resolves.toBe('CAPTURED_OUTSIDE')
+      expect(authSpy).toHaveBeenCalledTimes(1)
+      expect(outsideLogs()).toHaveLength(1)
+
+      // El conciliador ya no lo reintenta como «todavía no» ni lo abandona al vencer la sesión; no libera dinero ya cobrado.
+      await prisma.onlineOrderCharge.update({ where: { id: d.id }, data: { checkoutExpiresAt: ago(MIN) } })
+      await quiet([d.id])
+      await expect(reconcile()).resolves.toMatchObject({ scanned: 0 })
+      expect(await chargeById(d.id)).toMatchObject({ status: 'PENDING_AUTH' })
+      expect(voidSpy).not.toHaveBeenCalled()
+      // El comensal sigue viendo «esperando el pago» (no existe un estado «en revisión»).
+      await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT' })
+    } finally {
+      errorSpy.mockRestore()
+    }
+  })
+
+  it('Codex r1 C3: un pedido con la tarjeta apartada que el negocio capturó a mano en Stripe → aceptar termina CAPTURED con UN Payment', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    captureSpy.mockRejectedValueOnce(
+      Object.assign(new Error('This PaymentIntent could not be captured because it has a status of succeeded.'), {
+        type: 'StripeInvalidRequestError',
+        code: 'payment_intent_unexpected_state',
+        statusCode: 400,
+      }),
+    )
+    authSpy.mockResolvedValueOnce(capturedState({ paymentIntentId: charge.paymentIntentId!, amountCents: 25_000 }))
+    await expect(accept(orderId)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    expect(await chargeById(charge.id)).toMatchObject({ status: 'CAPTURED' })
+    expect(await paymentsOf(orderId)).toHaveLength(1)
   })
 
   it('la cuenta ya tiene dinero de otro camino → no captura: libera y acepta normal', async () => {
@@ -1013,8 +1147,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
   const chargeById = (id: string) => prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id } })
   const ago = (ms: number) => new Date(Date.now() - ms)
   /** `logAction` está simulado en toda la integración (integration-setup): se cuentan sus llamadas. */
-  const stuckLogs = async (chargeId: string) =>
-    (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === 'ONLINE_ORDER_CARD_RELEASE_STUCK' && p.entityId === chargeId).length
+  const stuckLogs = async (chargeId: string, action = 'ONLINE_ORDER_CARD_RELEASE_STUCK') =>
+    (logAction as jest.Mock).mock.calls.filter(([p]) => p.action === action && p.entityId === chargeId).length
   /** Un pedido cuya captura quedó en duda (`CAPTURING`) hace 2 min. */
   const capturingOrder = async () => {
     const a = await authorizedOrder()
@@ -1258,7 +1392,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     await expect(reconcile(t0)).resolves.toMatchObject({ stuck: 1 })
     await reconcile(new Date(t0.getTime() + 2 * MIN))
     expect(await chargeById(charge.id)).toMatchObject({ status: 'CAPTURING', lastError: 'TOTAL_CHANGED', stuckAlertedAt: expect.any(Date) })
-    expect(await stuckLogs(charge.id)).toBe(1)
+    expect(await stuckLogs(charge.id, 'ONLINE_ORDER_CARD_CAPTURE_STUCK')).toBe(1)
     expect(await paymentsOf(orderId)).toHaveLength(0)
   })
 
@@ -1272,10 +1406,10 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
 
     await reconcile()
     await reconcile()
-    expect(await stuckLogs(bad.id)).toBe(0)
+    expect(await stuckLogs(bad.id, 'ONLINE_ORDER_CARD_CONFIRM_STUCK')).toBe(0)
     await reconcile()
     await reconcile()
-    expect(await stuckLogs(bad.id)).toBe(1)
+    expect(await stuckLogs(bad.id, 'ONLINE_ORDER_CARD_CONFIRM_STUCK')).toBe(1)
     expect(await chargeById(bad.id)).toMatchObject({ status: 'PENDING_AUTH', attempts: 4, stuckAlertedAt: expect.any(Date) })
   })
 
@@ -1298,7 +1432,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     await reconcile()
     expect(spy).toHaveBeenCalledTimes(2)
     expect(await chargeById(old.id)).toMatchObject({ status: 'PENDING_AUTH', checkoutSessionId: null, stuckAlertedAt: expect.any(Date) })
-    expect(await stuckLogs(old.id)).toBe(1)
+    expect(await stuckLogs(old.id, 'ONLINE_ORDER_CARD_CONFIRM_STUCK')).toBe(1)
     expect(authSpy).not.toHaveBeenCalled()
   })
 })

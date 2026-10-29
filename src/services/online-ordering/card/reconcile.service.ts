@@ -18,7 +18,7 @@ import { CARD_RECONCILE_BATCH, CARD_STUCK_ALERT_MINUTES } from '../constants'
 import { prepMinutes } from '../transitions.service'
 import type { ReadCandidates } from '../types'
 import { captureCharge, failCapture, finishCapture } from './capture.service'
-import { confirmCardAuthorization } from './confirm.service'
+import { CAPTURED_OUTSIDE, confirmCardAuthorization } from './confirm.service'
 import { checkoutParams, expiresAtRejected } from './draft.service'
 import { chargeMerchant } from './merchant'
 import { releaseCharge } from './release.service'
@@ -58,7 +58,12 @@ async function readCandidates(now: Date, readEntry: ReadCandidates): Promise<Row
   const page = (where: Prisma.OnlineOrderChargeWhereInput) =>
     readEntry(() => prisma.onlineOrderCharge.findMany({ where, include, orderBy: order, take: CARD_RECONCILE_BATCH }))
   const groups = await Promise.all([
-    page({ status: S.PENDING_AUTH, checkoutExpiresAt: { lte: now } }),
+    // Codex r1 C3: el borrador cobrado fuera de Avoqado ya no se reintenta (ni se abandona): lo resuelve una persona.
+    page({
+      status: S.PENDING_AUTH,
+      checkoutExpiresAt: { lte: now },
+      OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }],
+    }),
     page({ status: S.CAPTURING, updatedAt: { lte: new Date(now.getTime() - CAPTURE_IN_FLIGHT_MS) } }),
     page({ status: S.RELEASING }),
     page({
@@ -134,6 +139,13 @@ async function processOne(charge: Row, now: Date): Promise<void> {
   }
 }
 
+/** M2: la bitácora dice QUÉ se atoró: la confirmación (borrador), la captura (incluye TOTAL_CHANGED) o la liberación. */
+const STUCK_ACTION: Partial<Record<S, string>> = {
+  [S.PENDING_AUTH]: 'ONLINE_ORDER_CARD_CONFIRM_STUCK',
+  [S.CAPTURING]: 'ONLINE_ORDER_CARD_CAPTURE_STUCK',
+  [S.RELEASING]: 'ONLINE_ORDER_CARD_RELEASE_STUCK',
+}
+
 async function alert(charge: Row, now: Date, why: string): Promise<void> {
   const won = await prisma.onlineOrderCharge.updateMany({
     where: { id: charge.id, status: charge.status, stuckAlertedAt: null },
@@ -143,7 +155,7 @@ async function alert(charge: Row, now: Date, why: string): Promise<void> {
   logger.error('🚨 [OnlineOrderCard] cargo atorado', { chargeId: charge.id, status: charge.status, venueId: charge.venueId, why })
   await logAction({
     venueId: charge.venueId,
-    action: 'ONLINE_ORDER_CARD_RELEASE_STUCK',
+    action: STUCK_ACTION[charge.status] ?? 'ONLINE_ORDER_CARD_RELEASE_STUCK',
     entity: 'OnlineOrderCharge',
     entityId: charge.id,
     data: { chargeId: charge.id, status: charge.status, why, amount: new Prisma.Decimal(charge.amount).toFixed(2) },

@@ -10,13 +10,16 @@ import prisma from '@/utils/prismaClient'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { getProvider } from '@/services/payments/provider-registry'
 import type { AuthorizationState } from '@/services/payments/providers/provider.interface'
-import { toStripeAmount } from '@/services/payments/providers/money'
+import { fromStripeAmount, toStripeAmount } from '@/services/payments/providers/money'
 import { ACCEPT_TIMEOUT_MINUTES } from '../constants'
 import { TX_OPTIONS, emitOnlineOrderCreated, lockAdmission, pickOrderNumber, writeOnlineOrderInTx } from '../order.service'
 import type { CardDraftRequest } from './draft.service'
 import { chargeMerchant } from './merchant'
 
-export type ConfirmOutcome = 'CREATED' | 'ALREADY' | 'NOT_YET' | 'ABANDONED' | 'RELEASED_LATE'
+export type ConfirmOutcome = 'CREATED' | 'ALREADY' | 'NOT_YET' | 'ABANDONED' | 'RELEASED_LATE' | 'CAPTURED_OUTSIDE'
+
+/** Codex r1 C3: `lastError` de un borrador cuyo PaymentIntent ya se cobró fuera de Avoqado (lo ve una persona; nadie lo reintenta). */
+export const CAPTURED_OUTSIDE = 'CAPTURED_OUTSIDE'
 
 /**
  * Apartado que no puede volverse pedido (monto distinto, o la llave ya tiene cuenta): se libera. CAS a `RELEASING` primero (un
@@ -41,21 +44,86 @@ async function releaseLate(charge: OnlineOrderCharge, auth: AuthorizationState, 
     paymentIntentId: auth.paymentIntentId!,
     idempotencyKey: `online-order-charge:${charge.id}:release`,
   })
-  await prisma.onlineOrderCharge.updateMany({
+  const done = await prisma.onlineOrderCharge.updateMany({
     where: { id: charge.id, status: OnlineOrderChargeStatus.RELEASING },
     data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
   })
+  if (done.count === 1) {
+    void logAction({
+      venueId: charge.venueId,
+      action: 'ONLINE_ORDER_CARD_RELEASED',
+      entity: 'OnlineOrderCharge',
+      entityId: charge.id,
+      data: { chargeId: charge.id, amount: new Prisma.Decimal(charge.amount).toFixed(2), why },
+    })
+  }
   return 'RELEASED_LATE'
+}
+
+/**
+ * Codex r1 C3: el negocio capturó a mano en su Stripe una tarjeta que todavía no era pedido. No se inventa el pedido (el comensal no
+ * lo confirmó por Avoqado y la cuenta del cargo no existe): el borrador sigue `PENDING_AUTH` marcado `CAPTURED_OUTSIDE` (nadie lo
+ * abandona ni libera dinero ya cobrado), con `MoneyAnomaly` y 🚨 + bitácora UNA sola vez. El comensal sigue viendo «esperando el
+ * pago» (no hay un estado «en revisión»); el negocio devuelve el cobro desde su Stripe.
+ */
+async function capturedOutside(charge: OnlineOrderCharge, auth: AuthorizationState, now: Date): Promise<ConfirmOutcome> {
+  const amount = fromStripeAmount(auth.amountReceivedCents).toFixed(2)
+  const won = await prisma.$transaction(async tx => {
+    const marked = await tx.onlineOrderCharge.updateMany({
+      where: {
+        id: charge.id,
+        status: OnlineOrderChargeStatus.PENDING_AUTH,
+        OR: [{ lastError: null }, { lastError: { not: CAPTURED_OUTSIDE } }],
+      },
+      data: { lastError: CAPTURED_OUTSIDE, paymentIntentId: auth.paymentIntentId, stuckAlertedAt: now },
+    })
+    if (marked.count !== 1) return false
+    await tx.moneyAnomaly.createMany({
+      data: [
+        {
+          category: 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE',
+          stripeEventId: `ooc:CAPTURED_OUTSIDE:${charge.id}`,
+          expectedState: {
+            venueId: charge.venueId,
+            chargeId: charge.id,
+            status: 'PENDING_AUTH',
+            amount: new Prisma.Decimal(charge.amount).toFixed(2),
+          },
+          observedState: { paymentIntentId: auth.paymentIntentId, piStatus: auth.piStatus, amountReceived: amount },
+        },
+      ],
+      skipDuplicates: true,
+    })
+    return true
+  })
+  if (!won) return 'CAPTURED_OUTSIDE'
+  logger.error('🚨 [OnlineOrderCard] tarjeta capturada fuera de Avoqado antes de ser pedido: no se crea el pedido, devuélvela en Stripe', {
+    chargeId: charge.id,
+    venueId: charge.venueId,
+    paymentIntentId: auth.paymentIntentId,
+    amount,
+  })
+  void logAction({
+    venueId: charge.venueId,
+    action: 'ONLINE_ORDER_CARD_CAPTURED_OUTSIDE',
+    entity: 'OnlineOrderCharge',
+    entityId: charge.id,
+    data: { chargeId: charge.id, paymentIntentId: auth.paymentIntentId, amount },
+  })
+  return 'CAPTURED_OUTSIDE'
 }
 
 export async function confirmCardAuthorization(chargeId: string, now: Date = new Date()): Promise<ConfirmOutcome> {
   const charge = await prisma.onlineOrderCharge.findUnique({ where: { id: chargeId } })
   if (!charge || charge.status !== OnlineOrderChargeStatus.PENDING_AUTH) return 'ALREADY'
+  // Ya se vio cobrada fuera de Avoqado: no hay nada más que preguntarle a Stripe (lo resuelve una persona).
+  if (charge.lastError === CAPTURED_OUTSIDE) return 'CAPTURED_OUTSIDE'
   // Sin sesión guardada todavía no hay qué leer; el conciliador repite la sesión (tarea 7).
   if (!charge.checkoutSessionId) return 'NOT_YET'
 
   const merchant = chargeMerchant(charge)
   const auth = await getProvider(merchant).getAuthorization(merchant, { checkoutSessionId: charge.checkoutSessionId })
+  if (auth.piStatus === 'succeeded') return capturedOutside(charge, auth, now)
 
   if (auth.piStatus === 'requires_capture' && auth.paymentIntentId) {
     if (auth.amountCapturableCents !== toStripeAmount(new Prisma.Decimal(charge.amount))) {
