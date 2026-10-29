@@ -545,6 +545,23 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(1)
   })
 
+  it('r2 R2: sesión complete pero PaymentIntent canceled → ABANDONED por CAS, sin anomalía; repetir no escribe nada', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    authSpy.mockResolvedValue({ ...authorized(), sessionStatus: 'complete', piStatus: 'canceled', amountCapturableCents: 0 })
+
+    await expect(confirmCardAuthorization(c.id)).resolves.toBe('ABANDONED')
+    const after = await chargeOf(key)
+    expect(after.status).toBe('ABANDONED')
+    expect(await prisma.order.count({ where: { venueId: venueId!, externalId: `web:${key}` } })).toBe(0)
+    expect(await prisma.moneyAnomaly.count({ where: { stripeEventId: { contains: c.id } } })).toBe(0)
+    // Otra vez (aviso repetido o seguimiento): ni Stripe ni escrituras.
+    await expect(confirmCardAuthorization(c.id)).resolves.toBe('ALREADY')
+    expect(authSpy).toHaveBeenCalledTimes(1)
+    expect((await chargeOf(key)).updatedAt).toEqual(after.updatedAt)
+  })
+
   it('sesión vencida sin autorizar → ABANDONED y ninguna cuenta', async () => {
     const key = nextKey()
     await draft({ key })

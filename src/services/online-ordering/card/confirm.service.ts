@@ -194,7 +194,8 @@ export async function confirmCardAuthorization(chargeId: string, now: Date = new
     return 'CREATED'
   }
 
-  if (auth.sessionStatus === 'expired') {
+  // r2 R2: la sesión vencida, o un PaymentIntent cancelado (aunque la sesión diga «complete»), ya no aparta nada: abandonado.
+  if (auth.sessionStatus === 'expired' || auth.piStatus === 'canceled') {
     const r = await prisma.onlineOrderCharge.updateMany({
       where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH },
       data: { status: OnlineOrderChargeStatus.ABANDONED },
