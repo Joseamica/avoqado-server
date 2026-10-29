@@ -1,5 +1,6 @@
 import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js'
 import { z } from 'zod'
+import { BadRequestError } from '@/errors/AppError'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
@@ -81,6 +82,10 @@ function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
   }
 }
 
+/** Fase 2: el switch del pago con tarjeta se muestra como lo dice el panel: «Aceptar pago con tarjeta: no → sí». */
+const sino = (v: unknown) => (v ? 'sí' : 'no')
+const CARD_TOGGLE_LABEL = 'Aceptar pago con tarjeta'
+
 /**
  * Pedidos en línea del negocio (la tienda web del restaurante). 🔴 Responder un pedido y pausar avisan al comensal o cambian
  * lo que ve la tienda: van de DOS pasos con vista previa. Consultar aquí NO cuenta como «aparato conectado»: sólo la bandeja
@@ -91,7 +96,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_orders_list',
-    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró.',
+    'Pedidos en línea del negocio (los que el comensal hace desde la página del restaurante): por aceptar, en preparación, listos y los de las últimas 24 horas. Muestra cliente, platillos, total en pesos y si ya se cobró. Los que el comensal pagó con tarjeta al pedir traen el cobro (estado, monto apartado y monto cobrado, en pesos).',
     {
       venueId: z.string().describe('Venue a consultar (debe estar en tu scope)'),
       status: z
@@ -156,6 +161,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
+      const tarjeta = order.paymentMode === 'CARD_ONLINE'
       if (!confirm) {
         // M-13: la vista previa dice lo que se le va a avisar al comensal: los minutos al aceptar, el motivo al rechazar.
         const minutos = action === 'ACCEPT' ? (estimatedMinutes ?? (await getSettings(venueId)).defaultPrepMinutes) : null
@@ -171,9 +177,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
             ...(action === 'ACCEPT' ? { minutos } : {}),
             ...(action === 'REJECT' ? { motivo: reason, nota: note || null } : {}),
             efecto:
-              action === 'ACCEPT'
+              (action === 'ACCEPT'
                 ? `El pedido pasa a preparación y se le avisa al comensal que estará listo en unos ${minutos} minutos.`
-                : EFFECT[action],
+                : EFFECT[action]) +
+              // Fase 2: aceptar mueve dinero (se cobra lo apartado) y rechazar lo libera: la vista previa lo dice.
+              (tarjeta && action === 'ACCEPT'
+                ? ` Se cobra la tarjeta apartada${order.card ? ` ($${order.card.amount.toFixed(2)})` : ''}.`
+                : tarjeta && action === 'REJECT'
+                  ? ' El dinero apartado en la tarjeta se libera.'
+                  : ''),
           },
           mensaje: 'Vuelve a llamar con confirm:true para aplicarlo.',
         })
@@ -191,6 +203,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
                 ? await markOnlineOrderDelivered({ venueId, orderId, staffId })
                 : await cancelOnlineOrderByStaff({ venueId, orderId, staffId })
 
+      // Fase 2: aceptar un pedido con tarjeta que no se pudo cobrar lo deja RECHAZADO (y libera lo apartado): el servicio lo
+      // contesta como STALE + REJECTED y aquí se dice con todas sus letras.
+      if (action === 'ACCEPT' && tarjeta && result.outcome === 'STALE' && result.status === 'REJECTED') {
+        return text({
+          ok: false,
+          status: result.status,
+          error: 'No se pudo cobrar la tarjeta; el pedido se rechazó y el dinero apartado se liberó.',
+        })
+      }
       if (result.outcome !== 'OK') return text(fallo(result))
       // A12: ya estaba entregado (se entregó solo entre la vista previa y la confirmación): éxito sin otra bitácora.
       if (result.unchanged) {
@@ -216,14 +237,15 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_settings',
-    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado).',
+    'Ajustes de la tienda en línea del negocio, sólo lectura: si está encendida, horario, pedido mínimo en pesos, minutos de preparación, pausas, cuándo consultó la bandeja un aparato por última vez, si la tienda está abierta ahora (y por qué no) y qué le falta para poder encenderla (domicilio, teléfono, aviso de privacidad publicado). También si acepta pago con tarjeta al pedir y si su cuenta de Stripe está lista para cobrar.',
     { venueId: z.string().describe('Venue (debe estar en tu scope)') },
     async ({ venueId }) => {
       guard.venueFilter(venueId)
       guard.requirePermission('orders:read', venueId)
       // Lo mismo que `GET /settings` del panel (un solo armador): los ajustes se leen una vez y el estado sale del mismo cálculo.
-      const { lastInboxPollAt, store, requirements, ...ajustes } = await settingsView(venueId)
-      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements })
+      // `card` (fase 2) sale aparte, explícito: no se cuela dentro de `ajustes`.
+      const { lastInboxPollAt, store, requirements, card, ...ajustes } = await settingsView(venueId)
+      return text({ ok: true, ajustes: { ...ajustes, ultimoSondeoDeBandeja: lastInboxPollAt }, store, requirements, card })
     },
   )
 
@@ -250,7 +272,7 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
 
   server.tool(
     'online_ordering_configure',
-    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
+    'Cambia la tienda en línea del negocio: encendido, horario, pedido mínimo en pesos, minutos de preparación, pausa del gerente, aceptar pago con tarjeta al pedir (acceptsCardOnline; pide tener la cuenta de Stripe conectada) y qué platillos se ofrecen en línea. Muestra «de → a» y exige confirm:true.',
     {
       venueId: z.string().describe('Venue (debe estar en tu scope)'),
       changes: settingsPatchBody.optional().describe('Ajustes a cambiar, con las mismas reglas que el panel'),
@@ -274,7 +296,12 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       const actual = current as Record<string, unknown>
       const diff = Object.entries(changes ?? {})
         .filter(([campo, valor]) => JSON.stringify(actual[campo]) !== JSON.stringify(valor))
-        .map(([campo, a]) => ({ campo, de: actual[campo], a }))
+        .map(([campo, a]) => ({
+          campo,
+          de: actual[campo],
+          a,
+          ...(campo === 'acceptsCardOnline' ? { resumen: `${CARD_TOGGLE_LABEL}: ${sino(actual[campo])} → ${sino(a)}` } : {}),
+        }))
       if (diff.length === 0 && !availability) return text({ ok: true, sinCambios: true, ajustes: current })
 
       if (!confirm) {
@@ -286,7 +313,16 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
         })
       }
 
-      const actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
+      let actualizados: Awaited<ReturnType<typeof updateSettings>> | null = null
+      try {
+        actualizados = diff.length > 0 ? await updateSettings(venueId, changes!, scope.staffId) : null
+      } catch (e) {
+        // Fase 2: sin cuenta de Stripe lista, el servicio rechaza prender la tarjeta (nada se escribió): se dice claro, sin error.
+        if (e instanceof BadRequestError && e.code === 'CARD_PAYMENT_NOT_ACCEPTED') {
+          return text({ ok: false, code: 'CARD_PAYMENT_NOT_ACCEPTED', error: e.message })
+        }
+        throw e
+      }
       const ajustes = actualizados ?? current
       const platillos = availability ? await setOnlineAvailability({ venueId, ...availability, actorStaffId: scope.staffId }) : null
       await auditMcpWrite(scope, {
@@ -298,8 +334,8 @@ export function registerOnlineOrderingTools(server: McpServer, scope: McpScope) 
       })
       // Lo que quedó: el estado de la tienda y qué le falta para encenderla, del mismo armador que el panel (después de auditar:
       // un fallo al leerlo no deja el cambio sin bitácora).
-      const { store, requirements } = await settingsView(venueId, actualizados ?? settings)
-      return text({ ok: true, ajustes, store, requirements, platillosActualizados: platillos?.updated ?? 0 })
+      const { store, requirements, card } = await settingsView(venueId, actualizados ?? settings)
+      return text({ ok: true, ajustes, store, requirements, card, platillosActualizados: platillos?.updated ?? 0 })
     },
   )
 
