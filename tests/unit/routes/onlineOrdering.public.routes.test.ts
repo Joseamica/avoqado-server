@@ -476,6 +476,17 @@ describe('API pública de pedidos en línea', () => {
     })
   })
 
+  it('fase 2: cancelar mientras el banco cobra la tarjeta es 409 ONLINE_ORDER_CONFIRMING_PAYMENT', async () => {
+    ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'CONFIRMING_PAYMENT' })
+    const r = await cancel()
+    expect(r.status).toBe(409)
+    expect(r.body).toEqual({
+      success: false,
+      code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
+      error: 'Confirmando el pago con el banco. Espera unos segundos.',
+    })
+  })
+
   it('sólo NOT_FOUND es 404; un desenlace desconocido es 500, nunca «No encontramos ese pedido»', async () => {
     ;(cancelOnlineOrderByCustomer as jest.Mock).mockResolvedValue({ outcome: 'NOT_FOUND' })
     const noEsta = await cancel()

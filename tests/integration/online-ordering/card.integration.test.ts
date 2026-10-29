@@ -8,6 +8,15 @@ import { OnlineOrderChargeStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { StripeConnectProvider } from '@/services/payments/providers/stripe-connect.provider'
 import { confirmCardAuthorization } from '@/services/online-ordering/card/confirm.service'
+import { releaseCharge } from '@/services/online-ordering/card/release.service'
+import {
+  acceptOnlineOrder,
+  cancelOnlineOrderByCustomer,
+  expireOnlineOrder,
+  markOnlineOrderDelivered,
+  rejectOnlineOrder,
+} from '@/services/online-ordering/transitions.service'
+import { processStripeConnectWebhookEvent } from '@/services/payments/reservation-deposit-webhook.service'
 import { createCardOnlineDraft } from '@/services/online-ordering/card/draft.service'
 import { clearPublicMenuCache } from '@/services/online-ordering/menu.service'
 import { createOnlineOrder, getTrackingByToken, writeOnlineOrderInTx } from '@/services/online-ordering/order.service'
@@ -26,6 +35,14 @@ if (
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn(), getBroadcastingService: jest.fn(() => null) },
+}))
+jest.mock('@/communication/sockets', () => ({
+  __esModule: true,
+  default: { getBroadcastingService: jest.fn(() => null), broadcastToVenue: jest.fn() },
+}))
+jest.mock('@/services/kds/kitchenTicketAuthoring.service', () => ({
+  ...jest.requireActual('@/services/kds/kitchenTicketAuthoring.service'),
+  armarComandasTrasCommit: jest.fn(async () => undefined),
 }))
 // Comisión determinista: 1 % + IVA 16 %.
 jest.mock('@/services/superadmin/platformSettings.service', () => ({
@@ -54,6 +71,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
   let spy: jest.SpyInstance
   let authSpy: jest.SpyInstance
   let voidSpy: jest.SpyInstance
+  let captureSpy: jest.SpyInstance
   let piSeq = 0
   /** Lo que `getAuthorization` contesta con la tarjeta apartada por `cents`. */
   const authorized = (cents = 25_000) => ({
@@ -64,6 +82,17 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     amountReceivedCents: 0,
     captureBefore: new Date(Date.now() + 7 * 24 * 60 * MIN),
     card: { brand: 'visa', last4: '4242', funding: 'credit' },
+    paymentMethodType: 'card',
+  })
+  /** Lo que `capture` contesta cuando cobró lo pedido. */
+  const capturedState = (p: { paymentIntentId: string; amountCents: number }, funding = 'credit') => ({
+    sessionStatus: null,
+    paymentIntentId: p.paymentIntentId,
+    piStatus: 'succeeded',
+    amountCapturableCents: 0,
+    amountReceivedCents: p.amountCents,
+    captureBefore: null,
+    card: { brand: 'visa', last4: '4242', funding },
     paymentMethodType: 'card',
   })
   const stripeOk = () =>
@@ -172,6 +201,7 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     spy = jest.spyOn(StripeConnectProvider.prototype, 'createAuthorizationCheckout')
     authSpy = jest.spyOn(StripeConnectProvider.prototype, 'getAuthorization')
     voidSpy = jest.spyOn(StripeConnectProvider.prototype, 'voidAuthorization')
+    captureSpy = jest.spyOn(StripeConnectProvider.prototype, 'capture')
   })
 
   beforeEach(async () => {
@@ -180,6 +210,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     authSpy.mockReset()
     voidSpy.mockReset()
     voidSpy.mockImplementation(async (_m: any, p: any) => ({ ...authorized(), paymentIntentId: p.paymentIntentId, piStatus: 'canceled' }))
+    captureSpy.mockReset()
+    captureSpy.mockImplementation(async (_m: any, p: any) => capturedState(p))
     delete process.env.STRIPE_MIN_CHARGE_MXN_CENTS
     await expireLiveDrafts()
     await beat()
@@ -189,10 +221,16 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     spy?.mockRestore()
     authSpy?.mockRestore()
     voidSpy?.mockRestore()
+    captureSpy?.mockRestore()
     // Limpieza acotada: sin venueId NO se borra nada (una limpieza sin filtro vaciaría tablas enteras).
     if (!venueId) return
     const v = { venueId }
     await prisma.idempotencyRequest.deleteMany({ where: { organizationId: `venue:${venueId}` } })
+    await prisma.activityLog.deleteMany({ where: v })
+    await prisma.paymentEffect.deleteMany({ where: v })
+    await prisma.inventoryPosting.deleteMany({ where: v })
+    await prisma.venueTransaction.deleteMany({ where: v })
+    await prisma.payment.deleteMany({ where: v })
     await prisma.onlineOrderCharge.deleteMany({ where: v }) // antes del comercio (Restrict)
     await prisma.onlineOrder.deleteMany({ where: v })
     await prisma.order.deleteMany({ where: v })
@@ -621,5 +659,261 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     authSpy.mockResolvedValue(authorized())
     await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'PENDING_ACCEPTANCE', cardStatus: 'AUTHORIZED' })
     expect(authSpy).toHaveBeenCalledTimes(2)
+  })
+
+  // ── Tarea 6: aceptar cobra; rechazar, vencer y cancelar liberan ──
+  /** Un pedido con la tarjeta apartada (borrador → autorización confirmada). */
+  const authorizedOrder = async () => {
+    const key = nextKey()
+    const d = await draft({ key })
+    const c = await chargeOf(key)
+    authSpy.mockResolvedValueOnce(authorized())
+    await expect(confirmCardAuthorization(c.id)).resolves.toBe('CREATED')
+    const charge = await chargeOf(key)
+    const oo = await prisma.onlineOrder.findUniqueOrThrow({ where: { id: charge.onlineOrderId! } })
+    return { key, charge, orderId: oo.orderId, trackingToken: d.trackingToken }
+  }
+  const accept = (orderId: string, now?: Date) => acceptOnlineOrder({ venueId: venueId!, orderId, staffId: null, now })
+  const reject = (orderId: string) => rejectOnlineOrder({ venueId: venueId!, orderId, staffId: null, reason: 'OTHER' })
+  const onlineOf = (orderId: string) => prisma.onlineOrder.findFirstOrThrow({ where: { orderId } })
+  const paymentsOf = (orderId: string) => prisma.payment.findMany({ where: { orderId }, take: 10 })
+  const lost = () => Object.assign(new Error('se perdió la respuesta'), { type: 'StripeConnectionError' })
+
+  it('aceptar captura una vez y deja la cuenta pagada y aceptada', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    const r = await accept(orderId)
+    expect(r).toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+
+    expect(captureSpy).toHaveBeenCalledTimes(1)
+    expect(captureSpy.mock.calls[0][1]).toEqual({
+      paymentIntentId: charge.paymentIntentId,
+      amountCents: 25_000,
+      // calculateApplicationFeeWithVAT(25000, 100, 1600) = 290
+      applicationFeeCents: 290,
+      idempotencyKey: `online-order:${orderId}:capture`,
+    })
+    const payments = await paymentsOf(orderId)
+    expect(payments).toHaveLength(1)
+    expect(payments[0]).toMatchObject({
+      fundsFlow: 'AVOQADO_PROCESSED',
+      ecommerceMerchantId: merchantId,
+      method: 'CREDIT_CARD',
+      source: 'WEB',
+      status: 'COMPLETED',
+      type: 'REGULAR',
+      processor: 'stripe',
+      processorId: charge.paymentIntentId,
+      cardBrand: 'VISA',
+      maskedPan: '************4242',
+      idempotencyKey: `online-order:${orderId}:capture`,
+      shiftId: null,
+    })
+    expect(payments[0].amount.toFixed(2)).toBe('250.00')
+    expect(payments[0].tipAmount.toFixed(2)).toBe('0.00')
+    expect(payments[0].feeAmount.toFixed(2)).toBe('2.90')
+    expect(payments[0].netAmount.toFixed(2)).toBe('247.10')
+    const order = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
+    expect(order).toMatchObject({ paymentStatus: 'PAID', status: 'CONFIRMED' })
+    expect(order.paidAmount.toFixed(2)).toBe('250.00')
+    expect(order.remainingBalance.toFixed(2)).toBe('0.00')
+    expect((await onlineOf(orderId)).status).toBe('ACCEPTED')
+    const after = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
+    expect(after.status).toBe('CAPTURED')
+    expect(after.capturedAmount!.toFixed(2)).toBe('250.00')
+    expect(after.attempts).toBe(1)
+  })
+
+  it('doble aceptar en paralelo captura una sola vez', async () => {
+    const { orderId } = await authorizedOrder()
+    const outcomes = await Promise.all([accept(orderId), accept(orderId)])
+    expect(outcomes.filter(o => o.outcome === 'OK')).toHaveLength(1)
+    expect(captureSpy).toHaveBeenCalledTimes(1)
+    expect(await paymentsOf(orderId)).toHaveLength(1)
+  })
+
+  it('aceptar con la respuesta perdida deja CAPTURING y responde CONFIRMING_PAYMENT; rechazar y vencer después responden CONFIRMING_PAYMENT sin escribir', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    captureSpy.mockRejectedValue(lost())
+    authSpy.mockResolvedValue({ ...authorized(), paymentIntentId: charge.paymentIntentId })
+
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    const c = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
+    expect(c.status).toBe('CAPTURING')
+    expect(c.lastError).toBeTruthy()
+    expect(authSpy).toHaveBeenLastCalledWith(expect.anything(), { paymentIntentId: charge.paymentIntentId })
+
+    await expect(reject(orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    const late = new Date(Date.now() + 60 * MIN)
+    await expect(expireOnlineOrder({ venueId: venueId!, orderId, now: late })).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(captureSpy).toHaveBeenCalledTimes(1)
+    expect((await onlineOf(orderId)).status).toBe('PENDING_ACCEPTANCE')
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('CAPTURING')
+    expect(await paymentsOf(orderId)).toHaveLength(0)
+    expect(voidSpy).not.toHaveBeenCalled()
+  })
+
+  it('Stripe rechaza la captura (PI canceled) → pedido REJECTED con PAYMENT_FAILED, sin Payment', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    captureSpy.mockRejectedValue(Object.assign(new Error('canceled'), { type: 'StripeInvalidRequestError' }))
+    authSpy.mockResolvedValue({ ...authorized(), paymentIntentId: charge.paymentIntentId, piStatus: 'canceled', amountCapturableCents: 0 })
+
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+    expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('CANCELLED')
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('CAPTURE_FAILED')
+    expect(await paymentsOf(orderId)).toHaveLength(0)
+    expect(voidSpy).not.toHaveBeenCalled()
+  })
+
+  it('rechazar libera: cargo RELEASED y voidAuthorization con online-order:<id>:release; vencer libera; cancelar el cliente libera', async () => {
+    const a = await authorizedOrder()
+    await expect(reject(a.orderId)).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    expect(voidSpy).toHaveBeenCalledWith(expect.anything(), {
+      paymentIntentId: a.charge.paymentIntentId,
+      idempotencyKey: `online-order:${a.orderId}:release`,
+    })
+    const ca = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: a.charge.id } })
+    expect(ca.status).toBe('RELEASED')
+    expect(ca.releasedAt).toBeInstanceOf(Date)
+
+    const b = await authorizedOrder()
+    const late = new Date(Date.now() + 60 * MIN)
+    await expect(expireOnlineOrder({ venueId: venueId!, orderId: b.orderId, now: late })).resolves.toEqual({
+      outcome: 'OK',
+      status: 'EXPIRED',
+    })
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: b.charge.id } })).status).toBe('RELEASED')
+
+    const c = await authorizedOrder()
+    await expect(cancelOnlineOrderByCustomer({ venueId: venueId!, trackingToken: c.trackingToken })).resolves.toEqual({
+      outcome: 'OK',
+      status: 'CANCELLED_BY_CUSTOMER',
+    })
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: c.charge.id } })).status).toBe('RELEASED')
+    expect(voidSpy).toHaveBeenCalledTimes(3)
+    expect(captureSpy).not.toHaveBeenCalled()
+  })
+
+  it('liberar falla → cargo queda RELEASING y el pedido igual se ve rechazado', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    voidSpy.mockRejectedValue(lost())
+    await expect(reject(orderId)).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
+    const c = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
+    expect(c.status).toBe('RELEASING')
+    expect(c.lastError).toBeTruthy()
+    expect((await onlineOf(orderId)).status).toBe('REJECTED')
+    // El conciliador lo reintenta con la misma clave.
+    voidSpy.mockImplementation(async (_m: any, p: any) => ({ ...authorized(), paymentIntentId: p.paymentIntentId, piStatus: 'canceled' }))
+    await expect(releaseCharge(charge.id)).resolves.toBe('RELEASED')
+    expect(voidSpy.mock.calls[1][1].idempotencyKey).toBe(`online-order:${orderId}:release`)
+  })
+
+  it('un cargo RELEASING sin pedido (liberación tardía) se libera con la clave del cargo', async () => {
+    const key = nextKey()
+    await draft({ key })
+    const c = await chargeOf(key)
+    await prisma.onlineOrderCharge.update({ where: { id: c.id }, data: { status: 'RELEASING', paymentIntentId: `pi_late_${RUN}` } })
+    await expect(releaseCharge(c.id)).resolves.toBe('RELEASED')
+    expect(voidSpy.mock.calls[0][1]).toEqual({ paymentIntentId: `pi_late_${RUN}`, idempotencyKey: `online-order-charge:${c.id}:release` })
+    expect((await chargeOf(key)).status).toBe('RELEASED')
+  })
+
+  it('entregar un pedido de tarjeta ya aceptado no pide cobro', async () => {
+    const { orderId } = await authorizedOrder()
+    await expect(accept(orderId)).resolves.toMatchObject({ outcome: 'OK' })
+    await expect(markOnlineOrderDelivered({ venueId: venueId!, orderId, staffId: null })).resolves.toEqual({
+      outcome: 'OK',
+      status: 'COMPLETED',
+    })
+    expect((await prisma.order.findUniqueOrThrow({ where: { id: orderId } })).status).toBe('COMPLETED')
+  })
+
+  it('cambiar la comisión del comercio después del borrador no cambia lo que se manda a Stripe ni el feeAmount', async () => {
+    const { orderId } = await authorizedOrder()
+    await prisma.ecommerceMerchant.update({ where: { id: merchantId }, data: { platformFeeBps: 500 } })
+    try {
+      await expect(accept(orderId)).resolves.toMatchObject({ outcome: 'OK' })
+      expect(captureSpy.mock.calls[0][1].applicationFeeCents).toBe(290)
+      expect((await paymentsOf(orderId))[0].feeAmount.toFixed(2)).toBe('2.90')
+    } finally {
+      await prisma.ecommerceMerchant.update({ where: { id: merchantId }, data: { platformFeeBps: 100 } })
+    }
+  })
+
+  it('débito → Payment.method DEBIT_CARD; crédito → CREDIT_CARD', async () => {
+    const debit = await authorizedOrder()
+    captureSpy.mockImplementation(async (_m: any, p: any) => capturedState(p, 'debit'))
+    await expect(accept(debit.orderId)).resolves.toMatchObject({ outcome: 'OK' })
+    expect((await paymentsOf(debit.orderId))[0].method).toBe('DEBIT_CARD')
+
+    const credit = await authorizedOrder()
+    captureSpy.mockImplementation(async (_m: any, p: any) => capturedState(p, 'credit'))
+    await expect(accept(credit.orderId)).resolves.toMatchObject({ outcome: 'OK' })
+    expect((await paymentsOf(credit.orderId))[0].method).toBe('CREDIT_CARD')
+  })
+
+  it('autorizar en la cuenta A, cambiar las credenciales del comercio a B, aceptar → la captura va a A; igual al liberar', async () => {
+    const a = await authorizedOrder()
+    const b = await authorizedOrder()
+    await prisma.ecommerceMerchant.update({
+      where: { id: merchantId },
+      data: { providerCredentials: { connectAccountId: 'acct_itest_B' } },
+    })
+    try {
+      await expect(accept(a.orderId)).resolves.toMatchObject({ outcome: 'OK' })
+      expect(captureSpy.mock.calls[0][0].providerCredentials).toEqual({ connectAccountId: 'acct_itest_1' })
+      await expect(reject(b.orderId)).resolves.toMatchObject({ outcome: 'OK' })
+      expect(voidSpy.mock.calls[0][0].providerCredentials).toEqual({ connectAccountId: 'acct_itest_1' })
+    } finally {
+      await prisma.ecommerceMerchant.update({
+        where: { id: merchantId },
+        data: { providerCredentials: { connectAccountId: 'acct_itest_1' } },
+      })
+    }
+  })
+
+  it('Order.total distinto de charge.amount al aceptar → no captura, PAYMENT_FAILED, libera', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    await prisma.order.update({ where: { id: orderId }, data: { total: new Prisma.Decimal('300.00') } })
+    await expect(accept(orderId)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+    expect(captureSpy).not.toHaveBeenCalled()
+    expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('RELEASED')
+    expect(voidSpy).toHaveBeenCalledTimes(1)
+  })
+
+  it('ruling T6: aceptar con el cargo RELEASED o CAPTURE_FAILED rechaza con PAYMENT_FAILED sin capturar', async () => {
+    for (const status of ['RELEASED', 'CAPTURE_FAILED'] as const) {
+      const { charge, orderId } = await authorizedOrder()
+      await prisma.onlineOrderCharge.update({ where: { id: charge.id }, data: { status } })
+      await expect(accept(orderId)).resolves.toEqual({ outcome: 'STALE', status: 'REJECTED' })
+      expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
+    }
+    expect(captureSpy).not.toHaveBeenCalled()
+    expect(voidSpy).not.toHaveBeenCalled()
+  })
+
+  it('ruling T6: payment_intent.canceled sobre un cargo AUTHORIZED rechaza el pedido con PAYMENT_FAILED y deja el cargo RELEASED', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    await processStripeConnectWebhookEvent({
+      id: `evt_itest_${RUN}`,
+      type: 'payment_intent.canceled',
+      account: 'acct_itest_1',
+      data: { id: charge.paymentIntentId, metadata: { type: 'online_order', chargeId: charge.id, venueId: venueId! } },
+    } as any)
+    expect(await onlineOf(orderId)).toMatchObject({ status: 'REJECTED', rejectReason: 'PAYMENT_FAILED' })
+    const c = await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })
+    expect(c.status).toBe('RELEASED')
+    expect(c.releasedAt).toBeInstanceOf(Date)
+    expect(voidSpy).not.toHaveBeenCalled() // Stripe ya la canceló
+  })
+
+  it('la cuenta ya tiene dinero de otro camino → no captura: libera y acepta normal', async () => {
+    const { charge, orderId } = await authorizedOrder()
+    await prisma.order.update({ where: { id: orderId }, data: { paymentStatus: 'PAID', paidAmount: new Prisma.Decimal('250.00') } })
+    await expect(accept(orderId)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    expect(captureSpy).not.toHaveBeenCalled()
+    expect((await prisma.onlineOrderCharge.findUniqueOrThrow({ where: { id: charge.id } })).status).toBe('RELEASED')
   })
 })

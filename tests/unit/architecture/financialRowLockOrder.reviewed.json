@@ -1076,6 +1076,16 @@
       "count": 1,
       "loops": 0,
       "reason": "Una Order por operación: abre su transacción y la toma primero, antes de leer sus Payments."
+    },
+    "src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
+    },
+    "src/services/online-ordering/card/capture.service.ts#finishCapture#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Una venta (la cuenta del pedido en línea) y su ascendencia, antes del cargo de tarjeta y del Payment; nunca bucle de Orders nuevas."
     }
   }
 }

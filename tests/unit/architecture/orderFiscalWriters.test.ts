@@ -244,6 +244,7 @@ const RECONCILE = 'tests/integration/payments/reconcileFromPayments.atomic.integ
 const PAYMENT_GUARD = 'tests/unit/services/shared/paymentShiftClaim.callers.guard.test.ts'
 const REPARTO = 'tests/integration/payments/repartoDescuento.integration.test.ts'
 const ONLINE = 'tests/integration/online-ordering/lifecycle.integration.test.ts'
+const CARD = 'tests/integration/online-ordering/card.integration.test.ts'
 const proof = (file: string, mentions: string, ...titles: string[]): Proof[] => titles.map(title => ({ file, title, mentions }))
 
 const LOCK = ['lockExistingOrderForPayment(']
@@ -708,6 +709,17 @@ const WRITERS: Record<string, Writer> = {
       'casTransition',
       'el cobro real deja la orden cobrada y aceptar, listo y entregar no la reabren',
       'vencer o rechazar un pedido ya cobrado no cancela la venta, y aceptarlo sigue posible',
+    ),
+  },
+  // Pedidos en línea fase 2 (T6): la captura de la tarjeta marca la cuenta PAID y la acepta bajo el candado de la orden, tras releerla.
+  'src/services/online-ordering/card/capture.service.ts#finishCapture': {
+    class: 'LOCKED',
+    lock: LOCK,
+    proof: proof(
+      CARD,
+      'acceptOnlineOrder',
+      'aceptar captura una vez y deja la cuenta pagada y aceptada',
+      'doble aceptar en paralelo captura una sola vez',
     ),
   },
   // ── Fiscal sealing: runs inside the capture/cancel transaction that already holds the Order ──
@@ -1226,6 +1238,9 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/delivery-channels/core/applyDeliveryRefund.service.ts#applyDeliveryRefund': 1,
   // Pedidos en línea (plan 1a): cada transición toma el candado de la orden y la relee bajo él.
   'src/services/online-ordering/transitions.service.ts#casTransition': 1,
+  // Fase 2 (T6): la transacción corta que pasa el cargo a CAPTURING y la que registra el cobro y acepta, cada una con la Order.
+  'src/services/online-ordering/card/capture.service.ts#acceptCardOnlineOrder': 1,
+  'src/services/online-ordering/card/capture.service.ts#finishCapture': 1,
   // Tarjetas de regalo (B2): iniciar y liberar la cancelación de una venta toman la Order (abrirVentaDeTarjetasEnTx →
   // lockExistingOrderForPayment) y después sus sobres, con el presupuesto único.
   'src/services/giftCards/giftCardCancel.service.ts#iniciarCancelacionDeVenta': 1,

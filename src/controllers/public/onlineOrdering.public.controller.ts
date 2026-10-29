@@ -227,6 +227,13 @@ export async function postCancel(req: Request, res: Response) {
     if (r.outcome === 'NOT_FOUND') {
       return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
     }
+    if (r.outcome === 'CONFIRMING_PAYMENT') {
+      return res.status(409).json({
+        success: false,
+        code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
+        error: 'Confirmando el pago con el banco. Espera unos segundos.',
+      })
+    }
     // Un desenlace que cancelar no debería dar (p. ej. PAYMENT_REQUIRED) es un 500, nunca «no encontramos ese pedido».
     throw new Error(`Desenlace inesperado al cancelar un pedido en línea: ${r.outcome}`)
   } catch (error) {

@@ -52,6 +52,12 @@ function reply(res: Response, r: TransitionResult) {
       })
     case 'NOT_FOUND':
       return res.status(404).json({ success: false, code: 'ORDER_NOT_FOUND', error: 'No encontramos ese pedido.' })
+    case 'CONFIRMING_PAYMENT':
+      return res.status(409).json({
+        success: false,
+        code: 'ONLINE_ORDER_CONFIRMING_PAYMENT',
+        error: 'Confirmando el pago con el banco. Espera unos segundos.',
+      })
     default:
       // Un resultado que este mapa no conoce es un error del servidor (500), nunca un «no existe» que engañe a la caja.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)
@@ -97,7 +103,10 @@ export const inbox = async (req: Request, res: Response, next: NextFunction) => 
 export const deliveryCash = async (req: Request, res: Response, next: NextFunction) => {
   try {
     const cursor = typeof req.query.cursor === 'string' ? req.query.cursor : undefined
-    return res.json({ success: true, data: await listDeliveryCashPending({ venueId: req.params.venueId, ...(cursor !== undefined ? { cursor } : {}) }) })
+    return res.json({
+      success: true,
+      data: await listDeliveryCashPending({ venueId: req.params.venueId, ...(cursor !== undefined ? { cursor } : {}) }),
+    })
   } catch (e) {
     return next(e)
   }

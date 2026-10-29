@@ -16,6 +16,11 @@ jest.mock('@/services/online-ordering/notifications.service', () => ({
   notifyOrderEvent: jest.fn(async () => undefined),
 }))
 jest.mock('@/services/online-ordering/settings.service', () => ({ __esModule: true, getSettings: jest.fn() }))
+jest.mock('@/services/online-ordering/card/release.service', () => ({ __esModule: true, releaseCharge: jest.fn(async () => 'RELEASED') }))
+jest.mock('@/services/online-ordering/card/capture.service', () => ({
+  __esModule: true,
+  acceptCardOnlineOrder: jest.fn(async () => ({ outcome: 'CONFIRMING_PAYMENT' })),
+}))
 jest.mock('@/communication/sockets/managers/socketManager', () => ({
   __esModule: true,
   socketManager: { broadcastToVenue: jest.fn() },
@@ -28,6 +33,8 @@ import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
 import { cancelOrder } from '@/services/mobile/order.mobile.service'
 import { notifyOrderEvent } from '@/services/online-ordering/notifications.service'
 import { getSettings } from '@/services/online-ordering/settings.service'
+import { releaseCharge } from '@/services/online-ordering/card/release.service'
+import { acceptCardOnlineOrder } from '@/services/online-ordering/card/capture.service'
 import {
   acceptOnlineOrder,
   cancelOnlineOrderByCustomer,
@@ -552,5 +559,46 @@ describe('cargo de tarjeta (fase 2): la máquina lo lee bajo el candado', () => 
   it('pedido sin cargo (pagar al recoger) se comporta igual que hoy: no lee estados de tarjeta ni libera', async () => {
     await expect(rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })).resolves.toEqual({ outcome: 'OK', status: 'REJECTED' })
     expect(prismaMock.onlineOrderCharge.updateMany).not.toHaveBeenCalled()
+    expect(releaseCharge).not.toHaveBeenCalled()
+  })
+
+  it('T6: rechazar, vencer y cancelar el cliente liberan la tarjeta DESPUÉS del commit, sólo si movieron el cargo', async () => {
+    prismaMock.onlineOrderCharge.findUnique.mockResolvedValue(CARD as any)
+    let committed = false
+    ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => {
+      committed = false
+      const r = await fn(prismaMock)
+      committed = true
+      return r
+    })
+    const trasCommit: boolean[] = []
+    ;(releaseCharge as jest.Mock).mockImplementation(async () => {
+      trasCommit.push(committed)
+      return 'RELEASED'
+    })
+    await rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })
+    prismaMock.onlineOrder.findFirst.mockResolvedValue(row({ acceptDeadlineAt: new Date(NOW.getTime() - 1) }) as any)
+    await expireOnlineOrder({ venueId: 'v1', orderId: 'ord1', now: NOW })
+    prismaMock.onlineOrder.findUnique.mockResolvedValue({ orderId: 'ord1', venueId: 'v1' } as any)
+    await cancelOnlineOrderByCustomer({ venueId: 'v1', trackingToken: 'tok', now: NOW })
+    expect(releaseCharge).toHaveBeenCalledTimes(3)
+    expect(releaseCharge).toHaveBeenCalledWith('ch1')
+    expect(trasCommit).toEqual([true, true, true])
+    ;(releaseCharge as jest.Mock).mockClear()
+    prismaMock.onlineOrderCharge.updateMany.mockResolvedValue({ count: 0 }) // otro actor ya lo movió
+    await rejectOnlineOrder({ ...base, reason: 'TOO_BUSY' })
+    expect(releaseCharge).not.toHaveBeenCalled()
+  })
+
+  it('T6: aceptar un pedido CARD_ONLINE va a la captura; pagar al recoger no', async () => {
+    prismaMock.onlineOrder.count.mockResolvedValueOnce(1)
+    await expect(acceptOnlineOrder(base)).resolves.toEqual({ outcome: 'CONFIRMING_PAYMENT' })
+    expect(prismaMock.onlineOrder.count).toHaveBeenCalledWith({ where: { orderId: 'ord1', venueId: 'v1', paymentMode: 'CARD_ONLINE' } })
+    expect(acceptCardOnlineOrder).toHaveBeenCalledWith(base)
+    expect(prismaMock.onlineOrder.updateMany).not.toHaveBeenCalled()
+    ;(acceptCardOnlineOrder as jest.Mock).mockClear()
+    prismaMock.onlineOrder.count.mockResolvedValueOnce(0)
+    await expect(acceptOnlineOrder(base)).resolves.toMatchObject({ outcome: 'OK', status: 'ACCEPTED' })
+    expect(acceptCardOnlineOrder).not.toHaveBeenCalled()
   })
 })

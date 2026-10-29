@@ -73,6 +73,8 @@ function fallo(r: Exclude<TransitionResult, { outcome: 'OK' }>) {
       }
     case 'NOT_FOUND':
       return { ok: false, error: 'Ese pedido no existe en este negocio.' }
+    case 'CONFIRMING_PAYMENT':
+      return { ok: false, error: 'Confirmando el pago con el banco; vuelve a consultar en unos segundos.' }
     default:
       // Un resultado desconocido es un error del servidor, nunca un «no existe» que engañe al dueño.
       throw new Error(`Resultado de transición desconocido: ${String((r as { outcome?: unknown }).outcome)}`)

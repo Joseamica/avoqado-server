@@ -1,5 +1,6 @@
 import {
   OnlineOrderChargeStatus,
+  OnlineOrderPaymentMode,
   OnlineOrderStatus,
   OrderStatus,
   PaymentStatus,
@@ -13,6 +14,7 @@ import { debeMarcarCocina } from '@/services/kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '@/services/kds/kitchenTicketAuthoring.service'
 import { findLiveTerminalCharge } from '@/services/shared/orderCancelGuard'
 import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '@/services/shared/paymentShiftClaim'
+import { releaseCharge } from './card/release.service'
 import { announceCancelledElsewhere, syncOnlineOrdersOfCancelledOrders, type CancelledElsewhere } from './cancelledOrderSync'
 import { OPEN_ORDER_STATUSES, PREPAID_MODES } from './constants'
 import { notifyOrderEvent } from './notifications.service'
@@ -226,11 +228,18 @@ export async function casTransitionInTx(tx: Prisma.TransactionClient, a: CasArgs
   }
 }
 
+/** Escritura extra en la MISMA transacción, después del CAS (fase 2: el estado del cargo de tarjeta). Lanzar revierte todo. */
+export type AfterCasInTx = (tx: Prisma.TransactionClient, r: CasResult) => Promise<void>
+
 /** `casTransitionInTx` en su propia transacción, con el presupuesto del candado de la orden. */
-async function casTransition(a: CasArgs): Promise<CasResult> {
+async function casTransition(a: CasArgs, afterCas?: AfterCasInTx): Promise<CasResult> {
   let result: CasResult
   try {
-    result = await prisma.$transaction(tx => casTransitionInTx(tx, a), ORDER_LOCK_WAIT_BUDGET)
+    result = await prisma.$transaction(async tx => {
+      const r = await casTransitionInTx(tx, a)
+      if (afterCas) await afterCas(tx, r)
+      return r
+    }, ORDER_LOCK_WAIT_BUDGET)
   } catch (error) {
     if (!(error instanceof OrderNotWritten)) throw error
     const current = await prisma.onlineOrder.findFirst({ where: { orderId: a.orderId, venueId: a.venueId }, select: { status: true } })
@@ -255,15 +264,35 @@ function settled(r: Exclude<CasResult, { r: 'OK' }>): TransitionResult {
   }
 }
 
-export async function acceptOnlineOrder(i: {
+export interface AcceptInput {
   venueId: string
   orderId: string
   staffId: string | null
   estimatedMinutes?: number
   now?: Date
-}): Promise<TransitionResult> {
-  const { defaultPrepMinutes } = await getSettings(i.venueId)
-  const minutes = Math.min(240, Math.max(1, Math.round(i.estimatedMinutes ?? defaultPrepMinutes)))
+}
+
+export async function prepMinutes(venueId: string, estimatedMinutes?: number): Promise<number> {
+  const { defaultPrepMinutes } = await getSettings(venueId)
+  return Math.min(240, Math.max(1, Math.round(estimatedMinutes ?? defaultPrepMinutes)))
+}
+
+/** Fase 2: un pedido pagado con tarjeta en línea se acepta cobrando la tarjeta (`acceptCardOnlineOrder`); pagar al recoger, igual que hoy. */
+export async function acceptOnlineOrder(i: AcceptInput): Promise<TransitionResult> {
+  const card = await prisma.onlineOrder.count({
+    where: { orderId: i.orderId, venueId: i.venueId, paymentMode: OnlineOrderPaymentMode.CARD_ONLINE },
+  })
+  if (card > 0) {
+    // Dinámico: el módulo de la captura importa esta máquina de estados.
+    const { acceptCardOnlineOrder } = await import('./card/capture.service')
+    return acceptCardOnlineOrder(i)
+  }
+  return acceptWithoutCapture(i)
+}
+
+/** La aceptación de siempre, sin tocar ninguna tarjeta (pagar al recoger, o una cuenta que ya trae dinero de otro camino). */
+export async function acceptWithoutCapture(i: AcceptInput): Promise<TransitionResult> {
+  const minutes = await prepMinutes(i.venueId, i.estimatedMinutes)
   // Igual que el cobro: la marca de comanda sólo si hace falta (nunca lanza).
   const marcarCocina = await debeMarcarCocina(i.venueId, { orderId: i.orderId })
 
@@ -289,8 +318,15 @@ export async function acceptOnlineOrder(i: {
     }
   }
   if (r.r !== 'OK') return settled(r)
+  return announceAccepted({ venueId: i.venueId, orderId: i.orderId, staffId: i.staffId, minutes, marcarCocina }, r)
+}
 
-  if (marcarCocina && r.orderWritten) void armarComandasTrasCommit(i.venueId, i.orderId, 'ROUND')
+/** Lo de después del commit de una aceptación (comandas, bandeja, aviso al comensal, bitácora); la comparte la captura. */
+export function announceAccepted(
+  i: { venueId: string; orderId: string; staffId: string | null; minutes: number; marcarCocina: boolean },
+  r: Extract<CasResult, { r: 'OK' }>,
+): TransitionResult {
+  if (i.marcarCocina && r.orderWritten) void armarComandasTrasCommit(i.venueId, i.orderId, 'ROUND')
   emitOnlineOrderUpdated({
     venueId: i.venueId,
     orderId: i.orderId,
@@ -306,12 +342,12 @@ export async function acceptOnlineOrder(i: {
     action: 'ONLINE_ORDER_ACCEPTED',
     entity: 'OnlineOrder',
     entityId: r.onlineOrderId,
-    data: { orderNumber: r.orderNumber, estimatedMinutes: minutes },
+    data: { orderNumber: r.orderNumber, estimatedMinutes: i.minutes },
   })
   return {
     outcome: 'OK',
     status: OnlineOrderStatus.ACCEPTED,
-    estimatedReadyAt: new Date(r.now.getTime() + minutes * 60_000).toISOString(),
+    estimatedReadyAt: new Date(r.now.getTime() + i.minutes * 60_000).toISOString(),
   }
 }
 
@@ -322,15 +358,24 @@ export async function rejectOnlineOrder(i: {
   reason: OnlineOrderRejectReason
   note?: string | null
   now?: Date
+  /** Fase 2, sólo la captura fallida: rechaza con el cargo en `CAPTURING`. */
+  allowCapturing?: true
+  /** Fase 2: lo que el cargo escribe en la MISMA transacción (captura fallida, aviso de Stripe de «cancelado»). */
+  afterCas?: AfterCasInTx
 }): Promise<TransitionResult> {
-  const r = await casTransition({
-    kind: 'REJECT',
-    venueId: i.venueId,
-    orderId: i.orderId,
-    now: i.now,
-    onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
-  })
+  const r = await casTransition(
+    {
+      kind: 'REJECT',
+      venueId: i.venueId,
+      orderId: i.orderId,
+      now: i.now,
+      allowCapturing: i.allowCapturing,
+      onlineData: now => ({ rejectedAt: now, rejectReason: i.reason, rejectNote: i.note ?? null }),
+    },
+    i.afterCas,
+  )
   if (r.r !== 'OK') return settled(r)
+  if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({
     venueId: i.venueId,
@@ -362,6 +407,7 @@ export async function expireOnlineOrder(i: { venueId: string; orderId: string; n
     onlineData: now => ({ expiredAt: now }),
   })
   if (r.r !== 'OK') return settled(r)
+  if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({
     venueId: i.venueId,
@@ -475,6 +521,7 @@ export async function cancelOnlineOrderByCustomer(i: { venueId: string; tracking
     onlineData: now => ({ cancelledAt: now, cancelledBy: 'CUSTOMER' }),
   })
   if (r.r !== 'OK') return settled(r)
+  if (r.releaseChargeId) await releaseCharge(r.releaseChargeId)
 
   emitOnlineOrderUpdated({
     venueId: i.venueId,

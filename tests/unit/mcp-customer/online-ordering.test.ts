@@ -220,6 +220,13 @@ describe('online_order_respond', () => {
     expect(mockAudit).toHaveBeenCalledWith(scope, expect.objectContaining({ entity: 'OnlineOrder', entityId: 'oo1' }))
   })
 
+  it('fase 2: ACCEPT con el banco cobrando la tarjeta responde que se está confirmando el pago, sin error ni auditoría', async () => {
+    mockAccept.mockResolvedValue({ outcome: 'CONFIRMING_PAYMENT' })
+    const r = parse(await call('online_order_respond', { venueId: 'v1', orderId: 'ord1', action: 'ACCEPT', confirm: true }))
+    expect(r).toEqual({ ok: false, error: 'Confirmando el pago con el banco; vuelve a consultar en unos segundos.' })
+    expect(mockAudit).not.toHaveBeenCalled()
+  })
+
   it('CANCEL exige orders:cancel-unpaid, busca el pedido directo en el negocio y usa la cancelación del personal (R15)', async () => {
     mockGetInboxOrder.mockResolvedValue(enPreparacion)
     mockCancel.mockResolvedValue({ outcome: 'OK', status: 'CANCELLED_BY_STAFF' })

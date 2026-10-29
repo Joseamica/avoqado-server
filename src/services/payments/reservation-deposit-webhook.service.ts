@@ -1,4 +1,4 @@
-import { OnlineOrderChargeStatus, Prisma, ReservationStatus } from '@prisma/client'
+import { OnlineOrderChargeStatus, OnlineOrderRejectReason, Prisma, ReservationStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { ServiceUnavailableError } from '@/errors/AppError'
@@ -644,17 +644,39 @@ async function handleOnlineOrderStripeEvent(event: VerifiedWebhookEvent, chargeI
       logger.info('ℹ️ [STRIPE CONNECT] online_order authorization', { eventId: event.id, type: event.type, chargeId, outcome })
       return
     }
-    case 'payment_intent.canceled':
+    case 'payment_intent.canceled': {
       // Sin autorizar → abandonado; apartado (o liberándose) → liberado. Sólo por CAS: lo demás ya tiene su desenlace.
       await prisma.onlineOrderCharge.updateMany({
         where: { id: chargeId, status: OnlineOrderChargeStatus.PENDING_AUTH },
         data: { status: OnlineOrderChargeStatus.ABANDONED },
       })
-      await prisma.onlineOrderCharge.updateMany({
-        where: { id: chargeId, status: { in: [OnlineOrderChargeStatus.AUTHORIZED, OnlineOrderChargeStatus.RELEASING] } },
-        data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
+      const markReleased = (db: Prisma.TransactionClient) =>
+        db.onlineOrderCharge.updateMany({
+          where: { id: chargeId, status: { in: [OnlineOrderChargeStatus.AUTHORIZED, OnlineOrderChargeStatus.RELEASING] } },
+          data: { status: OnlineOrderChargeStatus.RELEASED, releasedAt: new Date() },
+        })
+      // Ruling T6: un pedido por aceptar cuya tarjeta soltó Stripe ya no tiene con qué cobrarse: se rechaza con PAYMENT_FAILED en
+      // la MISMA transacción que libera el cargo.
+      const charge = await prisma.onlineOrderCharge.findUnique({
+        where: { id: chargeId },
+        select: { status: true, venueId: true, onlineOrder: { select: { orderId: true } } },
       })
+      if (charge?.status === OnlineOrderChargeStatus.AUTHORIZED && charge.onlineOrder) {
+        const { rejectOnlineOrder } = await import('@/services/online-ordering/transitions.service')
+        await rejectOnlineOrder({
+          venueId: charge.venueId,
+          orderId: charge.onlineOrder.orderId,
+          staffId: null,
+          reason: OnlineOrderRejectReason.PAYMENT_FAILED,
+          afterCas: async tx => {
+            await markReleased(tx)
+          },
+        })
+      }
+      // Sin pedido, ya rechazado o si la transición se revirtió: el cargo igual queda liberado.
+      await markReleased(prisma)
       return
+    }
     default:
       logger.info('ℹ️ [STRIPE CONNECT] Unhandled online_order event', { eventId: event.id, type: event.type, chargeId })
   }
