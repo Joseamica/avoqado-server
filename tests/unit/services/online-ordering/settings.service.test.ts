@@ -444,6 +444,24 @@ describe('settings.service', () => {
       await expect(updateSettings('v1', { acceptsPayAtPickup: false }, 'staff1')).resolves.toMatchObject({ acceptsPayAtPickup: false })
     })
 
+    it('encendida con pagar al recoger apagado y tarjeta prendida: se permite', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+        row({ enabled: false, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
+      )
+      prismaMock.onlineOrderingSettings.upsert.mockResolvedValue(
+        row({ enabled: true, acceptsPayAtPickup: false, acceptsCardOnline: true }) as any,
+      )
+      await expect(updateSettings('v1', { enabled: true }, 'staff1')).resolves.toMatchObject({ enabled: true, acceptsPayAtPickup: false })
+    })
+
+    it('encender con los dos medios apagados es 400 NO_PAYMENT_MODE y no escribe', async () => {
+      prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(
+        row({ enabled: false, acceptsPayAtPickup: false, acceptsCardOnline: false }) as any,
+      )
+      await expect(updateSettings('v1', { enabled: true }, 'staff1')).rejects.toMatchObject({ statusCode: 400, code: 'NO_PAYMENT_MODE' })
+      expect(prismaMock.onlineOrderingSettings.upsert).not.toHaveBeenCalled()
+    })
+
     it('getSettings devuelve acceptsCardOnline; sin fila es false', async () => {
       prismaMock.onlineOrderingSettings.findUnique.mockResolvedValue(row({ acceptsCardOnline: true }) as any)
       await expect(getSettings('v1')).resolves.toMatchObject({ acceptsCardOnline: true })
