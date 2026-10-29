@@ -508,6 +508,8 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
       expect(order.items[0].unitPrice.toFixed(2)).toBe('250.00')
       expect(order.paymentStatus).toBe('PENDING')
       expect(order.customerId).toBeNull()
+      // Codex r1 C1: se cobra en el momento (tarjeta), nunca es fiado aunque después se le ligue un cliente.
+      expect(order.payLater).toBe(false)
       expect(order.onlineOrder).toMatchObject({ paymentMode: 'CARD_ONLINE', status: 'PENDING_ACCEPTANCE', trackingToken: c.trackingToken })
       expect(order.onlineOrder!.acceptDeadlineAt.getTime()).toBe(now.getTime() + 10 * MIN)
       expect(await chargeOf(key)).toMatchObject({

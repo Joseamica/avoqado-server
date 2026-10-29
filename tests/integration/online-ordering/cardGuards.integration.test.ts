@@ -7,7 +7,8 @@
 import { OnlineOrderChargeStatus, Prisma } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { applyOrderDiscount, cancelOrder, payCashOrder } from '@/services/mobile/order.mobile.service'
-import { addItemsToOrder, getOrder as getTpvOrder, getOrders as getTpvOrders } from '@/services/tpv/order.tpv.service'
+import { addCustomerToOrder, addItemsToOrder, getOrder as getTpvOrder, getOrders as getTpvOrders } from '@/services/tpv/order.tpv.service'
+import { settleCustomerBalance } from '@/services/dashboard/customer.dashboard.service'
 import { createManualPayment } from '@/services/dashboard/manualPayment.service'
 import { settleOrder } from '@/services/dashboard/order.dashboard.service'
 import { initiateCryptoPayment } from '@/services/b4bit/b4bit.service'
@@ -107,7 +108,9 @@ describe('Pedidos en línea con tarjeta — guardas de caja, terminal y panel (i
       await prisma.orderDiscount.deleteMany({ where: { orderId: { in: ids } } })
       await prisma.kdsOrder.deleteMany({ where: v })
       await prisma.orderItem.deleteMany({ where: { orderId: { in: ids } } })
+      await prisma.orderCustomer.deleteMany({ where: { orderId: { in: ids } } })
       await prisma.order.deleteMany({ where: v })
+      await prisma.customer.deleteMany({ where: v })
       await prisma.ecommerceMerchant.deleteMany({ where: v })
       await prisma.discount.deleteMany({ where: v })
       await prisma.product.deleteMany({ where: v })
@@ -213,9 +216,7 @@ describe('Pedidos en línea con tarjeta — guardas de caja, terminal y panel (i
   it('agregar un renglón a un pedido de tarjeta sin capturar → 409 y los renglones no cambian', async () => {
     const { orderId } = await cuenta('CARD_ONLINE')
     const { version } = await prisma.order.findUniqueOrThrow({ where: { id: orderId } })
-    expect(await rechazo(addItemsToOrder(venueId!, orderId, [{ productId, quantity: 1 }] as any, version))).toMatchObject(
-      pagadoConTarjeta,
-    )
+    expect(await rechazo(addItemsToOrder(venueId!, orderId, [{ productId, quantity: 1 }] as any, version))).toMatchObject(pagadoConTarjeta)
     expect(await prisma.orderItem.count({ where: { orderId } })).toBe(1)
     await sinCobros(orderId)
   })
@@ -241,6 +242,20 @@ describe('Pedidos en línea con tarjeta — guardas de caja, terminal y panel (i
     )
     expect(await rechazo(settleOrder(venueId!, orderId, 'qa', staffId!))).toMatchObject(pagadoConTarjeta)
     await sinCobros(orderId)
+  })
+
+  it('Codex r1 C1: ligar un cliente desde la TPV y «Liquidar saldo del cliente» no cobra en efectivo un pedido de tarjeta', async () => {
+    const tarjeta = await cuenta('CARD_ONLINE')
+    const recoger = await cuenta('PAY_AT_PICKUP')
+    const customerId = (await prisma.customer.create({ data: { venueId: venueId!, phone: `+5255${RUN.slice(-8)}`, firstName: 'Ana' } })).id
+    await addCustomerToOrder(venueId!, tarjeta.orderId, customerId, staffId)
+    await addCustomerToOrder(venueId!, recoger.orderId, customerId, staffId)
+
+    const r = await settleCustomerBalance(venueId!, customerId, 'qa', staffId!)
+    // Sólo la de pagar al recoger (fiado de siempre) se liquida; la de tarjeta ni se toca.
+    expect(r).toMatchObject({ settledOrderCount: 1, settledAmount: 250 })
+    await sinCobros(tarjeta.orderId)
+    expect(await prisma.payment.count({ where: { orderId: recoger.orderId, status: 'COMPLETED' } })).toBe(1)
   })
 
   it('cobrar con cripto un pedido de tarjeta → 409 antes de crear el cobro', async () => {

@@ -288,6 +288,9 @@ export async function writeOnlineOrderInTx(
       customerEmail: i.customer.email,
       specialRequests: i.note,
       customerId: i.customerId,
+      // Codex r1 C1: la tarjeta se cobra en el momento; nunca es fiado («Liquidar saldo», saldo y antigüedad del cliente), aunque
+      // la TPV le ligue un cliente después. Pagar al recoger queda como hoy («no se sabe»).
+      ...(i.paymentMode === OnlineOrderPaymentMode.CARD_ONLINE ? { payLater: false } : {}),
       items: {
         create: quote.lines.map((line, idx) => ({
           productId: line.productId,
