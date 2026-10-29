@@ -52,6 +52,13 @@ beforeEach(() => {
 })
 
 describe('generateDigitalReceipt · ticketTotals', () => {
+  it('D1 fotocopia (Codex plan r2 #3): este generador también congela la copia del ticket del cobro', async () => {
+    const copia = { lineas: [{ nombre: 'Café', cantidad: 1, unitarioCents: 3000, totalCents: 3000 }], subtotalCents: 3000, descuentoCents: 300 }
+    prismaMock.payment.findUnique.mockResolvedValue({ ...cobro(), processorData: { lineasDelTicket: copia } })
+    await generateDigitalReceipt('pay_1')
+    expect(snapshotCreado().lineasDelTicket).toEqual(copia)
+  })
+
   it('el snapshot nuevo lleva los totales del cobro: cargo en su renglón y todo cuadra', async () => {
     await generateDigitalReceipt('pay_1')
     expect(snapshotCreado().ticketTotals).toEqual({

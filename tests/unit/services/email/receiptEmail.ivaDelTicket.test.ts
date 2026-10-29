@@ -68,3 +68,20 @@ describe('correo del recibo · IVA y cargo', () => {
     expect(s.html).toContain('Total')
   })
 })
+
+describe('correo del recibo · D1 fotocopia del ticket', () => {
+  it('escapa los textos de cada renglón (nombre, modificador, peso, área y nota) y pinta peso, área y nota', async () => {
+    const s = await enviar({
+      subtotal: 30,
+      discountAmount: 3,
+      totalAmount: 27,
+      items: [{ name: 'Café <b>Am</b>', quantity: 1, price: 30, totalPrice: 30, modifiers: [{ name: '<i>Sin</i>', price: 0 }],
+                peso: '<u>0.5 kg</u>', area: '<b>Barra</b>', nota: '"<script>x</script>"' }],
+    })
+    for (const crudo of ['<b>Am</b>', '<i>Sin</i>', '<u>0.5 kg</u>', '<b>Barra</b>', '<script>x</script>']) expect(s.html).not.toContain(crudo)
+    expect(s.html).toContain('Café &lt;b&gt;Am&lt;/b&gt;')
+    expect(s.html).toContain('&lt;u&gt;0.5 kg&lt;/u&gt;')
+    expect(s.html).toContain('&lt;b&gt;Barra&lt;/b&gt;')
+    expect(s.html).toContain('&quot;&lt;script&gt;x&lt;/script&gt;&quot;')
+  })
+})

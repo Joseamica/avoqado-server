@@ -5,6 +5,7 @@ import { BadRequestError, InternalServerError, NotFoundError } from '../../error
 
 // Define types for the receipt snapshot
 import { ReceiptDataSnapshot } from '../../schemas/dashboard/receipt.schema'
+import { copiaGuardada, totalesConLaCopia } from '../shared/lineasDelTicket'
 import logger from '@/config/logger'
 import emailService from '../email.service'
 import { contarCobrosDeVenta, ticketTotals, ticketTotalsDelSnapshot, ticketTotalsSinDesglose } from '../shared/ticketTotals'
@@ -232,6 +233,8 @@ export async function generateAndStoreReceipt(
       order,
       cobrosDeVenta: await contarCobrosDeVenta(db, payment.orderId),
     }),
+    // D1 «fotocopia del ticket»: la copia que guardó ESTE cobro, congelada con el recibo.
+    lineasDelTicket: copiaGuardada(payment.processorData) ?? undefined,
   }
 
   // Create digital receipt
@@ -286,7 +289,8 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
     const congelados = ticketTotalsDelSnapshot(dataSnapshot)
     // Inalcanzable hoy (0 de 18,815 recibos sin el cobro en su snapshot), pero si pasa, que se vea (revisión T3 m2).
     if (!congelados) logger.warn('Correo del recibo sin el cobro en su snapshot: los totales salen en $0', { receiptId: receipt.id })
-    const totales = congelados ?? ticketTotalsSinDesglose({ amount: 0, tipAmount: 0 })
+    // D1: con copia del ticket, el subtotal y el «Descuento» del papel (sus renglones ya salen de `productosDelSnapshot`).
+    const totales = totalesConLaCopia(congelados ?? ticketTotalsSinDesglose({ amount: 0, tipAmount: 0 }), dataSnapshot)
 
     // Send actual email using the email service with full receipt data
     const emailSent = await emailService.sendReceiptEmail(receipt.recipientEmail, {

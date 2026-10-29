@@ -4,6 +4,7 @@ import { getDigitalReceiptByAccessKey } from '../../services/tpv/digitalReceipt.
 import { generateReceiptHTML } from '../../utils/receiptTemplate'
 import { NotFoundError } from '../../errors/AppError'
 import { productosDelSnapshot } from '../../services/shared/productosDelRecibo'
+import { copiaGuardada } from '../../services/shared/lineasDelTicket'
 import logger from '../../config/logger'
 
 // Public route to get a receipt by its access key
@@ -102,8 +103,9 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
       // D8: la plantilla usa el formato de la terminal (`productName`, `unitPrice`, `total`): sus `items` tal cual, o los del
       // panel (`order.items`) traducidos a ese formato.
       // D15: el recibo de UNA parte (`ticketTotals.parcial`) va por el helper, que lo vuelve un renglón «Pago parcial».
+      // D1: con copia del ticket mandan sus renglones aunque no sea `parcial` (Codex plan r3 #2).
       items:
-        dataSnapshot.ticketTotals?.parcial !== true && dataSnapshot.items?.length
+        !copiaGuardada(dataSnapshot) && dataSnapshot.ticketTotals?.parcial !== true && dataSnapshot.items?.length
         ? dataSnapshot.items
         : productosDelSnapshot(dataSnapshot).map(p => ({
             productName: p.name,
@@ -112,7 +114,11 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
             total: p.totalPrice,
             weightKg: p.weightKg ?? null,
             modifiers: p.modifiers,
+            ...(p.peso ? { peso: p.peso } : {}),
+            ...(p.nota ? { nota: p.nota } : {}),
+            ...(p.area ? { areaSourceLabel: p.area } : {}),
           })),
+      lineasDelTicket: copiaGuardada(dataSnapshot) ?? undefined,
       processedBy: dataSnapshot.processedBy,
       ticketTotals: dataSnapshot.ticketTotals ?? null, // IVA por producto, plan 7 (D3): el HTML legado pinta los totales congelados
       receiptInfo: {

@@ -3,6 +3,7 @@ import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
 import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
+import { escapeHtml } from '../controllers/public/publicHtml'
 import { isValidIANATimezone } from '../utils/sanitizeTimezone'
 import type { PriceSelection } from './launchCampaigns/publicPriceList.service'
 import { formatMoney } from './shared/receiptLayout/format'
@@ -111,6 +112,10 @@ interface ReceiptEmailData {
     price: number
     totalPrice: number
     modifiers?: Array<{ name: string; price: number }>
+    /** D1, de una copia del ticket: el resumen impreso del peso, la nota y el área del vale. */
+    peso?: string
+    nota?: string
+    area?: string
   }>
   // Totals
   subtotal?: number
@@ -557,8 +562,9 @@ class EmailService {
               item => `
         <tr style="border-bottom: 1px solid #f0f0f0;">
           <td style="padding: 12px 0; font-size: 15px; color: #000;">
-            ${item.name}
-            ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${m.name}`).join(', ')}</span>` : ''}
+            ${escapeHtml(String(item.name ?? ''))}
+            ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${escapeHtml(String(m.name ?? ''))}`).join(', ')}</span>` : ''}
+            ${[item.peso, item.area, item.nota].filter(Boolean).map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`).join('')}
           </td>
           <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">x${item.quantity}</td>
           <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${formatCurrency(item.totalPrice)}</td>
