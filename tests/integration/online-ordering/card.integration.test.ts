@@ -273,6 +273,19 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     await expect(draft({ phone })).resolves.toMatchObject({ replay: false })
   })
 
+  it('pagar al recoger con 3 borradores vivos del mismo teléfono → 409 TOO_MANY_PENDING_ORDERS; un borrador vencido no cuenta', async () => {
+    const phone = nextPhone()
+    const keys = [nextKey(), nextKey(), nextKey()]
+    for (const key of keys) await draft({ key, phone })
+    await expect(pickup(nextKey(), phone)).rejects.toMatchObject({ statusCode: 409, code: 'TOO_MANY_PENDING_ORDERS' })
+
+    await prisma.onlineOrderCharge.update({
+      where: { venueId_idempotencyKey: { venueId: venueId!, idempotencyKey: keys[0] } },
+      data: { checkoutExpiresAt: new Date(Date.now() - MIN) },
+    })
+    await expect(pickup(nextKey(), phone)).resolves.toMatchObject({ status: 'PENDING_ACCEPTANCE', replay: false })
+  })
+
   it('Codex r1 #3: si Stripe falla, el cargo SIGUE PENDING_AUTH con lastError (502); el reintento repite clave y parámetros', async () => {
     const key = nextKey()
     const phone = nextPhone()

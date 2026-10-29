@@ -113,6 +113,7 @@ beforeEach(() => {
   prismaMock.order.findUnique.mockResolvedValue(null)
   prismaMock.order.findFirst.mockResolvedValue(null)
   prismaMock.onlineOrder.count.mockResolvedValue(0)
+  prismaMock.onlineOrderCharge.count.mockResolvedValue(0) // borradores de tarjeta vigentes (fase 2)
   ;(prismaMock.$transaction as jest.Mock).mockImplementation(async (fn: any) => fn(prismaMock))
   prismaMock.order.create.mockResolvedValue({ id: 'ord1', orderNumber: 'WABCD' } as any)
   prismaMock.onlineOrder.create.mockImplementation(async (a: any) => ({ id: 'oo1', ...a.data }) as any)
@@ -407,6 +408,23 @@ describe('createOnlineOrder', () => {
     expect(where.order.customerPhone).toBe(PHONE)
   })
 
+  it('fase 2: el tope por teléfono suma los borradores de TARJETA vigentes (un vencido no cuenta)', async () => {
+    prismaMock.onlineOrderCharge.count.mockResolvedValueOnce(3)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'TOO_MANY_PENDING_ORDERS' })
+    expect(prismaMock.onlineOrderCharge.count).toHaveBeenCalledWith({
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW }, customerPhone: PHONE },
+    })
+  })
+
+  it('fase 2: el tope del negocio suma pedidos por aceptar y borradores de tarjeta vigentes', async () => {
+    prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(20)
+    prismaMock.onlineOrderCharge.count.mockResolvedValueOnce(0).mockResolvedValueOnce(10)
+    await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({ code: 'ORDERING_PAUSED' })
+    expect(prismaMock.onlineOrderCharge.count).toHaveBeenLastCalledWith({
+      where: { venueId: 'v1', status: 'PENDING_AUTH', checkoutExpiresAt: { gt: NOW } },
+    })
+  })
+
   it('el tope del negocio se repite dentro del candado: 409 ORDERING_PAUSED por saturación', async () => {
     prismaMock.onlineOrder.count.mockResolvedValueOnce(0).mockResolvedValueOnce(30)
     await expect(createOnlineOrder(input(), PUEDE_CREAR)).rejects.toMatchObject({
@@ -445,7 +463,7 @@ describe('createOnlineOrder', () => {
       },
       customer: { findFirst: jest.fn().mockResolvedValue(null), update: jest.fn() }, // S3: el nombre se completa en la misma transacción
       idempotencyRequest: { findUnique: jest.fn().mockResolvedValue(null), create: jest.fn() }, // Codex r3
-      onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null) }, // Codex r2 #5: la llave sin borrador de tarjeta
+      onlineOrderCharge: { findUnique: jest.fn().mockResolvedValue(null), count: jest.fn().mockResolvedValue(0) }, // Codex r2 #5 y topes
     }
     ;(prismaMock.$transaction as jest.Mock).mockImplementationOnce(async (fn: any) => fn(tx))
 

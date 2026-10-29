@@ -262,8 +262,9 @@ describe('createCardOnlineDraft — borrador + sesión de Stripe', () => {
   it('Codex r1 #3: si Stripe falla, el cargo sigue PENDING_AUTH con lastError → 502; el reintento repite clave y parámetros', async () => {
     createAuthorizationCheckout.mockRejectedValueOnce(new Error('stripe caído'))
     await expectCode(createCardOnlineDraft(input(), PUEDE_CREAR), 502, 'CARD_PROVIDER_UNAVAILABLE')
-    expect(prismaMock.onlineOrderCharge.update).toHaveBeenCalledWith({
-      where: { id: 'ch1' },
+    // Un gemelo que falla nunca escribe encima de una sesión ya guardada.
+    expect(prismaMock.onlineOrderCharge.updateMany).toHaveBeenCalledWith({
+      where: { id: 'ch1', checkoutSessionId: null },
       data: { lastError: 'stripe caído', attempts: { increment: 1 } },
     })
     const first = createAuthorizationCheckout.mock.calls[0][1]

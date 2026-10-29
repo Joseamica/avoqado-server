@@ -17,7 +17,7 @@ import {
 } from '@/services/payments/providers/money'
 import { getVatRateBps } from '@/services/superadmin/platformSettings.service'
 import { canonicalPhoneE164 } from '@/utils/phone'
-import { CARD_CHECKOUT_TTL_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE } from '../constants'
+import { CARD_CHECKOUT_TTL_MINUTES, MAX_PENDING_PER_PHONE, MAX_PENDING_PER_VENUE, liveCardDraftsWhere } from '../constants'
 import { storefrontBase } from '../notifications.service'
 import {
   TX_OPTIONS,
@@ -120,8 +120,9 @@ export async function requestCardCheckout(charge: OnlineOrderCharge, now: Date, 
       if (fresh.checkoutUrl) return fresh
       return requestCardCheckout(fresh, now, true)
     }
-    await prisma.onlineOrderCharge.update({
-      where: { id: charge.id },
+    // Un gemelo que falla nunca escribe encima de una sesión que otro envío ya guardó.
+    await prisma.onlineOrderCharge.updateMany({
+      where: { id: charge.id, checkoutSessionId: null },
       data: { lastError: String(error?.message ?? error).slice(0, 500), attempts: { increment: 1 } },
     })
     throw new AppError('No pudimos abrir la página de pago. Intenta de nuevo en un momento.', 502, true, 'CARD_PROVIDER_UNAVAILABLE')
@@ -230,7 +231,7 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
 
     await lockAdmission(tx, venueId)
     // Topes: pedidos por aceptar MÁS borradores con su sesión vigente.
-    const liveDrafts = { venueId, status: OnlineOrderChargeStatus.PENDING_AUTH, checkoutExpiresAt: { gt: now } }
+    const liveDrafts = liveCardDraftsWhere(venueId, now)
     const byPhone =
       (await tx.onlineOrder.count({ where: { venueId, status: OnlineOrderStatus.PENDING_ACCEPTANCE, order: { customerPhone: phone } } })) +
       (await tx.onlineOrderCharge.count({ where: { ...liveDrafts, customerPhone: phone } }))
