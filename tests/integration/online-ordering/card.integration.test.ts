@@ -598,4 +598,28 @@ describe('Pedidos en línea con tarjeta — borrador + sesión (integration, rea
     await prisma.onlineOrderCharge.update({ where: { id: (await chargeOf(k2)).id }, data: { status: 'ABANDONED' } })
     await expect(getTrackingByToken(r2.trackingToken)).resolves.toMatchObject({ status: 'PAYMENT_NOT_COMPLETED', canCancel: false })
   })
+
+  it('fix r1: el seguimiento pregunta a Stripe a lo más una vez cada 5 s por borrador, aunque lleguen consultas a la vez', async () => {
+    const key = nextKey()
+    const r = await draft({ key })
+    const c = await chargeOf(key)
+    const stillOpen = { ...authorized(), sessionStatus: 'open', paymentIntentId: null, piStatus: null, amountCapturableCents: 0 }
+    authSpy.mockResolvedValue(stillOpen)
+
+    // Dos consultas a la vez sobre un borrador de 6 s: una sola llamada a Stripe.
+    await prisma.onlineOrderCharge.update({ where: { id: c.id }, data: { updatedAt: new Date(Date.now() - 6_000) } })
+    const both = await Promise.all([getTrackingByToken(r.trackingToken), getTrackingByToken(r.trackingToken)])
+    expect(both.map(t => t!.status)).toEqual(['AWAITING_PAYMENT', 'AWAITING_PAYMENT'])
+    expect(authSpy).toHaveBeenCalledTimes(1)
+
+    // Otra consulta dentro de los 5 s siguientes: sin Stripe.
+    await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'AWAITING_PAYMENT' })
+    expect(authSpy).toHaveBeenCalledTimes(1)
+
+    // Pasados otros 5 s, la consulta que confirma muestra el pedido.
+    await prisma.onlineOrderCharge.update({ where: { id: c.id }, data: { updatedAt: new Date(Date.now() - 6_000) } })
+    authSpy.mockResolvedValue(authorized())
+    await expect(getTrackingByToken(r.trackingToken)).resolves.toMatchObject({ status: 'PENDING_ACCEPTANCE', cardStatus: 'AUTHORIZED' })
+    expect(authSpy).toHaveBeenCalledTimes(2)
+  })
 })

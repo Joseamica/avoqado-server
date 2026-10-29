@@ -615,10 +615,18 @@ export async function getTrackingByToken(token: string): Promise<PublicTracking 
   })
   if (!charge) return null
   if (charge.status === OnlineOrderChargeStatus.PENDING_AUTH && Date.now() - charge.updatedAt.getTime() > DRAFT_CONFIRM_AFTER_MS) {
-    try {
-      await confirmCardAuthorization(charge.id)
-    } catch (error) {
-      logger.warn('[OnlineOrdering] el seguimiento no pudo confirmar la tarjeta (sigue esperando)', { chargeId: charge.id, error })
+    // Se aparta el turno (CAS sobre `updatedAt`): a lo más UNA consulta a Stripe cada 5 s por borrador, aunque lleguen varias
+    // consultas a la vez. El conciliador elige por `checkoutExpiresAt`, así que refrescar `updatedAt` no le esconde nada.
+    const claimed = await prisma.onlineOrderCharge.updateMany({
+      where: { id: charge.id, status: OnlineOrderChargeStatus.PENDING_AUTH, updatedAt: charge.updatedAt },
+      data: { updatedAt: new Date() },
+    })
+    if (claimed.count === 1) {
+      try {
+        await confirmCardAuthorization(charge.id)
+      } catch (error) {
+        logger.warn('[OnlineOrdering] el seguimiento no pudo confirmar la tarjeta (sigue esperando)', { chargeId: charge.id, error })
+      }
     }
     const confirmed = await orderTracking(token)
     if (confirmed) return confirmed
