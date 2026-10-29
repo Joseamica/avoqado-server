@@ -191,7 +191,7 @@ export async function createCardOnlineDraft(input: CreateCardDraftInput, opts: C
           reason: state.reason,
         })
       }
-      // ponytail: el switch se lee directo de la fila; la tarea 9 lo suma a los ajustes de la tienda.
+      // El switch se lee directo de la fila (una columna, sin armar los ajustes completos en este camino caliente).
       const settings = await prisma.onlineOrderingSettings.findUnique({ where: { venueId }, select: { acceptsCardOnline: true } })
       if (!settings?.acceptsCardOnline) throw notAccepted()
       const merchant = await findCardMerchant(prisma, venueId)
