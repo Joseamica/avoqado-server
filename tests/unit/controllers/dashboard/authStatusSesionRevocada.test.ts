@@ -12,10 +12,12 @@ jest.mock('@/utils/passwordChangeGuard', () => ({
   mensajeDeCorte: jest.requireActual('@/utils/passwordChangeGuard').mensajeDeCorte,
 }))
 jest.mock('@/services/auth/sessionCache', () => ({ isSessionAliveCached: jest.fn() }))
+jest.mock('@/utils/tokenRevocation', () => ({ isJtiRevoked: jest.fn(async () => false) }))
 
 import { StaffRole } from '@prisma/client'
 import { generateAccessToken } from '@/jwt.service'
 import { isSessionAliveCached } from '@/services/auth/sessionCache'
+import { isJtiRevoked } from '@/utils/tokenRevocation'
 import { getAuthStatus } from '@/controllers/dashboard/auth.dashboard.controller'
 
 const sesionViva = isSessionAliveCached as jest.Mock
@@ -47,6 +49,31 @@ it('🔴 sesión cerrada a la fuerza: no autenticado, sin buscar a la persona, y
   expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ authenticated: false, user: null }))
   expect(res.clearCookie).toHaveBeenCalledWith('accessToken')
   expect(staffMock.findUnique).not.toHaveBeenCalled()
+})
+
+it('🔴 token revocado por su jti (p. ej. al empezar una suplantación): no autenticado (Codex r1)', async () => {
+  sesionViva.mockResolvedValue(true)
+  ;(isJtiRevoked as jest.Mock).mockResolvedValueOnce(true)
+  const res = fakeResponse()
+
+  await getAuthStatus(request(token(SID)), res)
+
+  expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ authenticated: false, user: null }))
+  expect(staffMock.findUnique).not.toHaveBeenCalled()
+})
+
+it('🔴 fase 4 (tokens sin sesión retirados): no autenticado, igual que el middleware', async () => {
+  const antes = process.env.AUTH_LEGACY_TOKEN_PHASE
+  process.env.AUTH_LEGACY_TOKEN_PHASE = '4'
+  try {
+    const res = fakeResponse()
+    await getAuthStatus(request(token()), res)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ authenticated: false, user: null }))
+    expect(staffMock.findUnique).not.toHaveBeenCalled()
+  } finally {
+    if (antes === undefined) delete process.env.AUTH_LEGACY_TOKEN_PHASE
+    else process.env.AUTH_LEGACY_TOKEN_PHASE = antes
+  }
 })
 
 it('regresión: con la sesión viva, el flujo sigue a buscar a la persona', async () => {

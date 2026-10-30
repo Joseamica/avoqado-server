@@ -17,12 +17,14 @@ const OTRO_NEGOCIO = 'cotronegocio0000000000000'
 const MIO = 'cempleadomio0000000000000'
 const AJENO = 'cempleadoajeno00000000000'
 
-const req = (body: object, opts: { role?: string; header?: string } = {}) =>
+/** `role` = el del token; `resolvedRole` = el vigente que dejó `checkPermission`. */
+const req = (body: object, opts: { role?: string; resolvedRole?: string; header?: string } = {}) =>
   ({
     body,
     params: {},
     headers: opts.header ? { 'x-venue-id': opts.header } : {},
     authContext: { userId: 'cdueno0000000000000000000', venueId: MI_NEGOCIO, role: opts.role ?? 'OWNER' },
+    resolvedRole: opts.resolvedRole ?? opts.role ?? 'OWNER',
   }) as any
 
 /** `asyncHandler` no devuelve la promesa: se espera a que el controlador conteste (`res.json`) o falle (`next`). */
@@ -80,9 +82,22 @@ describe('avisos que manda una persona: sólo para la gente de su negocio (D1)',
     expect(error?.statusCode).toBe(403)
   })
 
-  it('un SUPERADMIN manda a quien sea (avisos de la plataforma)', async () => {
-    const { error } = await correr(createNotification, req({ ...aviso, recipientId: AJENO }, { role: 'SUPERADMIN' }))
+  it('un SUPERADMIN manda a quien sea (avisos de la plataforma), aunque su token diga otro rol', async () => {
+    const { error } = await correr(createNotification, req({ ...aviso, recipientId: AJENO }, { role: 'ADMIN', resolvedRole: 'SUPERADMIN' }))
     expect(error).toBeUndefined()
     expect(notificationService.createNotification).toHaveBeenCalledTimes(1)
+  })
+
+  it('🔴 quien YA NO es SUPERADMIN (token viejo que lo dice) no se salta el candado (Codex r1)', async () => {
+    const { error } = await correr(createNotification, req({ ...aviso, recipientId: AJENO }, { role: 'SUPERADMIN', resolvedRole: 'ADMIN' }))
+    expect(error?.statusCode).toBe(403)
+    expect(notificationService.createNotification).not.toHaveBeenCalled()
+  })
+
+  it('compatibilidad: alguien de mi ORGANIZACIÓN (sin fila en esta sucursal) sí recibe', async () => {
+    prismaMock.staff.count.mockImplementation((async (args: any) =>
+      args.where.OR?.[1]?.organizations?.some?.organizationId === 'corg00000000000000000000a' ? 1 : 0) as never)
+    const { error } = await correr(createNotification, req({ ...aviso, recipientId: AJENO }))
+    expect(error).toBeUndefined()
   })
 })

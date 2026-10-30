@@ -18,6 +18,7 @@ import { renovarSesionConLaSucursal, sucursalDelAltaTerminada } from '../../serv
 import { buildAuthContextFromPayload } from '../../security'
 import { esSucursalReal } from '../../utils/sucursalDelToken'
 import { verifyAccessToken } from '../../jwt.service'
+import { isJtiRevoked } from '../../utils/tokenRevocation'
 import {
   mensajeDeCorte,
   motivoDeSesionInvalidada,
@@ -152,10 +153,11 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       })
     }
 
-    // 🔴 hz:f26b3afc:D2: la misma revisión de SESIÓN que `authenticateTokenMiddleware`. Sin esto, al cerrar a la fuerza
-    // una sesión (o en la fase 4 de los tokens sin `sid`) los datos daban 401 y esta ruta decía `authenticated: true`:
-    // el panel iba del login al inicio y de regreso, en ciclo.
-    const sesionCerrada = decoded.sid ? !(await isSessionAliveCached(decoded.sid)) : faseDelRolloutLegacy() >= 4
+    // 🔴 hz:f26b3afc:D2: la misma revisión de SESIÓN que `authenticateTokenMiddleware` (token revocado por `jti`, sesión
+    // `sid` cerrada, o fase 4 sin `sid`). Sin esto los datos daban 401 y esta ruta decía `authenticated: true`: el panel
+    // iba del login al inicio y de regreso, en ciclo.
+    const sesionCerrada =
+      (await isJtiRevoked(decoded.jti)) || (decoded.sid ? !(await isSessionAliveCached(decoded.sid)) : faseDelRolloutLegacy() >= 4)
     if (sesionCerrada) {
       logger.info('[AUTH] 📊 Session closed - returning unauthenticated', { conSid: !!decoded.sid })
       res.clearCookie('accessToken')

@@ -95,7 +95,8 @@ const bulkNotificationSchema = z.object({
  * trabaja en él (o en su organización). Un SUPERADMIN manda avisos de la plataforma a quien sea.
  */
 async function asegurarAvisoDeMiNegocio(req: AuthenticatedRequest, recipientIds: string[], venueIdDelCuerpo?: string) {
-  if (req.authContext?.role === 'SUPERADMIN') return
+  // El rol VIGENTE que resolvió `checkPermission`, no el del token: quien dejó de ser SUPERADMIN conserva su token viejo.
+  if ((req as { resolvedRole?: string }).resolvedRole === 'SUPERADMIN') return
   const venueId = resolveRequestVenueId(req, req.authContext ?? {})
   if (!venueId || (venueIdDelCuerpo && venueIdDelCuerpo !== venueId)) throw new ForbiddenError('Sólo puedes mandar avisos de tu negocio')
   const ids = [...new Set(recipientIds)]
