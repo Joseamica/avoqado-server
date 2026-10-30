@@ -1,3 +1,5 @@
+import { copiaGuardada, productosDeLaCopia } from './lineasDelTicket'
+
 /**
  * D8 (26-oct): los productos de un recibo digital en el formato del correo y del HTML (`name`, `price`, `totalPrice`). El
  * generador del panel los guarda así en `order.items`; el de la terminal (`digitalReceipt.tpv.service.ts`) en `items`, fuera
@@ -18,10 +20,22 @@ export interface ProductoDelRecibo {
   price: number
   totalPrice: number
   weightKg?: number | null
-  modifiers: { name: string; price: number; quantity?: number }[]
+  /** Sin `price`: el modificador de una copia del ticket, que sólo trae su texto (no se pinta precio). */
+  modifiers: { name: string; price?: number; quantity?: number }[]
+  /** D1, sólo de una copia del ticket: el resumen impreso del peso, la nota del renglón y el área del vale. */
+  peso?: string
+  nota?: string
+  area?: string
+  /** D1: «Cortesía» en vez del precio, como el papel. */
+  cortesia?: boolean
+  /** D1: componente de un combo: «1x Papas», sin precio, debajo del combo. */
+  pieza?: boolean
 }
 
 export function productosDelSnapshot(snapshot: unknown): ProductoDelRecibo[] {
+  // D1 «fotocopia del ticket»: si el cobro guardó los renglones que imprimió, esos mandan, con o sin `parcial` (Codex plan r2 #4).
+  const copia = copiaGuardada(snapshot)
+  if (copia) return productosDeLaCopia(copia)
   const productos = productosGuardados(snapshot)
   // D15: el recibo de UNA parte de una venta dividida pinta un renglón «Pago parcial» con lo que cobró, como el papel del cobro; sin
   // la marca (venta completa, o recibo de antes de D15) salen sus productos como siempre.
