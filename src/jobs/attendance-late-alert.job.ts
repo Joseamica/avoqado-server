@@ -78,7 +78,8 @@ export class AttendanceLateAlertJob {
       () =>
         prisma.venue.findMany({
           // Dos condiciones, no una: el checador prendido Y el aviso prendido.
-          where: { settings: { attendanceEnabled: true, attendanceLateAlertEnabled: true } },
+          // Sin LIVE_DEMO: los negocios demo no mandan avisos a nadie (candado demo, capa 3).
+          where: { status: { not: 'LIVE_DEMO' }, settings: { attendanceEnabled: true, attendanceLateAlertEnabled: true } },
           select: { id: true, name: true },
         }),
       { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context: 'attendance-late-alert.venues' },

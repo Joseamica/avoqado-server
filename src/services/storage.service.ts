@@ -26,6 +26,16 @@ export function buildStoragePath(path: string): string {
 }
 
 /**
+ * ¿El archivo de esta URL vive en la carpeta de ESTE negocio (`<env>/venues/<slug>/…`)? Antes de borrar un archivo que
+ * el negocio guardó (su logo), porque la URL la escribe quien edita y puede ser de otro negocio.
+ */
+export function estaEnLaCarpetaDelNegocio(url: string | null | undefined, slug: string): boolean {
+  if (!url || !slug) return false
+  const ruta = extractFilePathFromUrl(url)
+  return !!ruta && ruta.startsWith(buildStoragePath(`venues/${slug}/`))
+}
+
+/**
  * Extract file path from Firebase Storage URL
  * Example: https://firebasestorage.googleapis.com/v0/b/bucket/o/venues%2Fslug%2Fdocuments%2Ffile.pdf?alt=media
  * Returns: venues/slug/documents/file.pdf

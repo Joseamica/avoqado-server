@@ -55,6 +55,11 @@ export interface ExecutionContext {
   userId?: string
   role?: string
   terminalSerial?: string
+  /**
+   * Una ruta pública no pudo confirmar de qué negocio es (la base no contestó al buscarlo). El candado de los negocios
+   * demo no deja salir mensajes de esa operación (`services/demo/candadoDemo.ts`). Nunca se registra en el log.
+   */
+  negocioSinConfirmar?: true
   /** Present only for work that can be cancelled (the MCP guard sets it). See `RequestCancellation`. */
   cancellation?: RequestCancellation
   /**

@@ -14,6 +14,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
+import { esNegocioDemo } from '@/services/demo/candadoDemo'
 
 /**
  * Lazy Stripe singleton. We used to do `new Stripe(process.env.STRIPE_SECRET_KEY || '')`
@@ -105,31 +106,33 @@ export async function createCreditPack(
     throw new BadRequestError('No se puede incluir el mismo producto mas de una vez en un paquete')
   }
 
-  // Create Stripe product and price
+  // Create Stripe product and price — salvo en un negocio demo: sería un producto real en el Stripe de Avoqado
+  // (candado demo, capa 4). El paquete funciona igual sin Stripe, como cuando Stripe falla.
   let stripeProductId: string | undefined
   let stripePriceId: string | undefined
 
-  try {
-    const stripe = getStripe()
-    const stripeProduct = await stripe.products.create({
-      name: data.name,
-      metadata: { type: 'credit_pack', venueId },
-    })
+  if (!(await esNegocioDemo(venueId)))
+    try {
+      const stripe = getStripe()
+      const stripeProduct = await stripe.products.create({
+        name: data.name,
+        metadata: { type: 'credit_pack', venueId },
+      })
 
-    const stripePrice = await stripe.prices.create({
-      product: stripeProduct.id,
-      unit_amount: Math.round(data.price * 100),
-      currency: (data.currency || 'MXN').toLowerCase(),
-      metadata: { type: 'credit_pack', venueId },
-    })
+      const stripePrice = await stripe.prices.create({
+        product: stripeProduct.id,
+        unit_amount: Math.round(data.price * 100),
+        currency: (data.currency || 'MXN').toLowerCase(),
+        metadata: { type: 'credit_pack', venueId },
+      })
 
-    stripeProductId = stripeProduct.id
-    stripePriceId = stripePrice.id
-  } catch (error) {
-    logger.warn('⚠️ [CREDIT PACK] Failed to create Stripe product/price, continuing without', {
-      error: error instanceof Error ? error.message : 'Unknown',
-    })
-  }
+      stripeProductId = stripeProduct.id
+      stripePriceId = stripePrice.id
+    } catch (error) {
+      logger.warn('⚠️ [CREDIT PACK] Failed to create Stripe product/price, continuing without', {
+        error: error instanceof Error ? error.message : 'Unknown',
+      })
+    }
 
   const pack = await prisma.creditPack.create({
     data: {

@@ -1,6 +1,7 @@
 import { Resend } from 'resend'
 import logger from '../config/logger'
 import { isDeliverableRecipient } from '../utils/undeliverableEmail'
+import { omitirPorDemo } from './demo/candadoDemo'
 import { zonaValida } from '../utils/datetime'
 import { descargarAppHtml, descargarAppTexto } from './emailDescargarApp'
 import { escapeHtml } from '../controllers/public/publicHtml'
@@ -420,6 +421,8 @@ class EmailService {
     if (!isDeliverableRecipient(options.to, 'emailService.sendEmail', { subject: options.subject })) {
       return false
     }
+    // Negocios demo (capa 2): ni el negocio demo ni sus usuarios @demo.avoqado.io reciben correo de verdad.
+    if (await omitirPorDemo('correo', options.to)) return false
 
     try {
       // Build email payload - Resend requires at least html or text
@@ -489,6 +492,9 @@ class EmailService {
     if (!isDeliverableRecipient(options.to, 'emailService.sendEmailWithResult', { subject: options.subject })) {
       return { ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' }
     }
+    const motivoDemo = await omitirPorDemo('correo', options.to)
+    // `sin confirmar` (la base no contestó) se reintenta; un demo de verdad nunca se manda.
+    if (motivoDemo) return { ok: false, transient: motivoDemo === 'sin confirmar', errorCode: 'NEGOCIO_DEMO' }
 
     try {
       // Mismo payload que `sendEmail` — ver ahí el porqué de cada pieza. `from` y `tags` son
@@ -566,7 +572,10 @@ class EmailService {
           <td style="padding: 12px 0; font-size: 15px; color: #000;">
             ${item.pieza ? `&nbsp;&nbsp;${item.quantity}x ` : ''}${escapeHtml(String(item.name ?? ''))}
             ${item.modifiers && item.modifiers.length > 0 ? `<br><span style="font-size: 13px; color: #666;">${item.modifiers.map(m => `+ ${escapeHtml(String(m.name ?? ''))}`).join(', ')}</span>` : ''}
-            ${[item.peso, item.area, item.nota && `Nota: ${item.nota}`].filter(Boolean).map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`).join('')}
+            ${[item.peso, item.area, item.nota && `Nota: ${item.nota}`]
+              .filter(Boolean)
+              .map(x => `<br><span style="font-size: 13px; color: #666;">${escapeHtml(String(x))}</span>`)
+              .join('')}
           </td>
           <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: center;">${item.pieza ? '' : `x${item.quantity}`}</td>
           <td style="padding: 12px 0; font-size: 15px; color: #000; text-align: right;">${item.pieza ? '' : item.cortesia ? 'Cortesía' : formatCurrency(item.totalPrice)}</td>
@@ -4762,8 +4771,7 @@ Equipo de Avoqado`
    */
   async sendPriceSelectionEmail(to: string, data: PriceSelectionEmailData): Promise<boolean> {
     const esc = escapeHtmlForReferralEmail
-    const money = (totalCents: number) =>
-      new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalCents / 100)
+    const money = (totalCents: number) => new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(totalCents / 100)
     const { selection } = data
     // One line: the name travels in the subject, where a newline must never open a header.
     const who = (data.nombre || data.telefono || 'Un prospecto').replace(/\s+/g, ' ').trim()
@@ -4786,7 +4794,10 @@ Equipo de Avoqado`
     const optionRows = selection.options.map(o => {
       const extras = o.extras.length ? ` <span style="color: #666;">+ ${o.extras.map(id => esc(nameOf(id))).join(', ')}</span>` : ''
       const label = `${optionLabel(o.kind)}${extras}`
-      return row(o === selection.best ? `<strong>${label}</strong>` : label, o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents))
+      return row(
+        o === selection.best ? `<strong>${label}</strong>` : label,
+        o === selection.best ? `<strong>${money(o.totalCents)}</strong>` : money(o.totalCents),
+      )
     })
     const advice =
       selection.best.kind === 'SUELTO'
@@ -5218,6 +5229,7 @@ export async function sendReferralWelcomeEmail(input: SendReferralWelcomeEmailIn
   if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
+  if (await omitirPorDemo('correo de referidos', input.to)) return false
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,
@@ -5304,6 +5316,7 @@ export async function sendReferralTierUpEmail(input: SendReferralTierUpEmailInpu
   if (!isDeliverableRecipient(input.to, 'sendReferralEmail')) {
     return false
   }
+  if (await omitirPorDemo('correo de referidos', input.to)) return false
   try {
     const result = await resend.emails.send({
       from: FROM_EMAIL,

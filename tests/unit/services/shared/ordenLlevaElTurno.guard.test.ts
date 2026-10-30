@@ -47,6 +47,7 @@ const SIN_TURNO_A_PROPOSITO: Record<string, string> = {
     'Carga masiva de ventas PASADAS desde el Excel del cliente (`createdAt: soldAt`, de otros ' +
     'días y de otra tienda). Atarlas al turno de hoy metería ventas ajenas en el corte de alguien.',
   'onboarding/demoSeed.service.ts': 'Órdenes de DEMO con fecha inventada, repartidas semanas hacia atrás.',
+  'demo/negociosDemo.service.ts': 'Negocios demo de ventas: un mes de órdenes con fecha inventada; no son de ningún turno de caja.',
   'delivery-channels/core/deliveryOrderIngestion.service.ts':
     'Reparto (Uber/Rappi/DiDi): el pedido lo levanta el cliente en la app del marketplace y esto ' +
     'corre en su webhook, sin cajero; `scheduledFor` permite además pedidos para otro día.',

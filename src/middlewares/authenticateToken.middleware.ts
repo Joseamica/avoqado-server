@@ -7,6 +7,7 @@ import { isJtiRevoked } from '../utils/tokenRevocation'
 import { esTokenDeLaApi } from '../utils/tokenDeLaApi'
 import { mensajeDeCorte, motivoDeSesionInvalidada } from '../utils/passwordChangeGuard'
 import { enforceImpersonationRules } from './impersonationGuard.middleware'
+import { revisarCandadoDemo } from '../services/demo/candadoDemo'
 import { enrichContext } from '../observability/executionContext'
 import { getVenueName } from '../observability/venueNames'
 import { isSessionAliveCached } from '../services/auth/sessionCache'
@@ -218,6 +219,14 @@ export const authenticateTokenMiddleware = async (req: Request, res: Response, n
         })
         return
       }
+    }
+
+    // Negocios demo (LIVE_DEMO): las acciones que saldrían al mundo real se bloquean con su razón, aquí, para que una
+    // ruta nueva no se lo salte por olvido. Sólo consulta la base si la petición está en la lista.
+    const candadoDemo = await revisarCandadoDemo(req)
+    if (!candadoDemo.ok) {
+      res.status(candadoDemo.status).json({ error: 'Forbidden', code: candadoDemo.code, message: candadoDemo.message })
+      return
     }
 
     // Track activity for live demo sessions

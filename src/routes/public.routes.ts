@@ -107,8 +107,14 @@ import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
 import { getPriceList, postPriceSelection } from '../controllers/public/priceList.public.controller'
 import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
+import { negocioPorLigaDePago, negocioPorReciboDigital, negocioPorSlug } from '../middlewares/negocioDeRutaPublica.middleware'
 
 const router = Router()
+
+// El negocio de cada ruta pública entra al contexto en cuanto la URL lo identifica (logs y candado de negocios demo).
+router.param('venueSlug', negocioPorSlug)
+router.param('shortCode', negocioPorLigaDePago)
+router.param('accessKey', negocioPorReciboDigital)
 router.use('/document-requests', documentRequestsRoutes)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
@@ -651,7 +657,15 @@ const altaVerificarSchema = z.object({
 })
 const altaReenviarSchema = z.object({ body: z.object({ email: z.string().trim().email('Formato de correo invalido') }) })
 
-router.post('/alta/verificar', soloConAltaConCodigo, contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
+router.post(
+  '/alta/verificar',
+  soloConAltaConCodigo,
+  contrasenaValidaEnAlta,
+  limiteIntentosDeCodigoEnAlta,
+  limiteDiarioDeIntentosDeCodigoEnAlta,
+  validateRequest(altaVerificarSchema),
+  verificarAlta,
+)
 router.post('/alta/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest(altaReenviarSchema), reenviarAlta)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige

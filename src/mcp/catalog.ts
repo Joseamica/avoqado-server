@@ -521,6 +521,12 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
           throw new ScopeError(
             `Esta conexión requiere autorizar ${readOnly ? 'mcp:read' : 'mcp:write'}. Vuelve a conectar con ese permiso.`,
           )
+        // Negocios demo (candado, capa 4): si todos los negocios de la conexión son demo, el asistente sólo consulta;
+        // así el MCP no se vuelve una puerta trasera para lo que el panel y la app tienen bloqueado.
+        if (!readOnly && !scope.isSuperAdmin && scope.soloNegociosDemo)
+          throw new ScopeError(
+            'En el negocio de demostración, el asistente sólo puede consultar. En tu cuenta de Avoqado también puede hacer cambios.',
+          )
         if (!needsPreview) return structureToolResult(await run(...args))
         const { confirmationToken, ...input } = args[0]
         const { confirm: _confirm, ...intent } = input

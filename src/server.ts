@@ -68,6 +68,7 @@ import { announcementOutboxJob } from './jobs/announcementOutbox.job'
 import { kioskOutreachJob } from './jobs/kiosk-outreach.job'
 import { campaignSenderJob } from './jobs/campaign-sender.job'
 import { birthdaySweepJob } from './jobs/birthday-sweep.job'
+import { negociosDemoReinicioJob } from './jobs/negocios-demo-reinicio.job'
 import { gcalChannelRenewalJob } from './jobs/gcal-channel-renewal.job'
 import { gcalHorizonRefreshJob } from './jobs/gcal-horizon-refresh.job'
 import { gcalPruningJob } from './jobs/gcal-pruning.job'
@@ -301,6 +302,7 @@ const gracefulShutdown = async (signal: string) => {
       // Fase 1A: carril de envío de campañas de correo a clientes
       campaignSenderJob.stop()
       birthdaySweepJob.stop()
+      negociosDemoReinicioJob.stop()
       // Anuncios de plataforma programados
       publishScheduledAnnouncementsJob.stop()
       announcementOutboxJob.stop()
@@ -653,6 +655,8 @@ const startApplication = async (retries = 3) => {
       // Fase 1A: carril de envío de campañas de correo a clientes (cada 5 min, segundo 7)
       campaignSenderJob.start()
       birthdaySweepJob.start()
+      // Negocios demo (LIVE_DEMO, una organización «Avoqado Demo · <giro>» por giro): cada noche a las 3:00 vuelven a nacer.
+      negociosDemoReinicioJob.start()
       // Publica los anuncios de plataforma cuya hora programada ya llegó (cada 5 min)
       publishScheduledAnnouncementsJob.start()
       // Entrega los anuncios encolados (cada 30 s)

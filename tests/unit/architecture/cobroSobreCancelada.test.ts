@@ -92,6 +92,7 @@ const ESCRITORES: Record<string, { clase: string; marcadores: Array<[string, str
     marcadores: [['finalizeVenueCheckout', PROPIA]],
   },
   'services/onboarding/demoSeed.service.ts#seedOrders': { clase: 'ORDEN PROPIA (demo)', marcadores: [] },
+  'services/demo/negociosDemo.service.ts#seedHistory': { clase: 'ORDEN PROPIA (demo)', marcadores: [] },
   'services/delivery-channels/core/deliveryOrderIngestion.service.ts#ingestDeliveryOrder': {
     clase: 'VERDAD EXTERNA',
     marcadores: [['ingestDeliveryOrder', '.order.upsert(']],

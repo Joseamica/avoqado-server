@@ -32,7 +32,7 @@ function opaqueSecret(): string {
  * como estaba el día de la primera tarjeta. Rompe la paridad justo donde nadie mira.
  */
 export async function ensureLoyaltyClass(venueId: string): Promise<string> {
-  const client = await walletClient()
+  const client = await walletClient(venueId)
   const classId = googleClassId(issuerId(), venueId)
 
   let yaExiste = false
@@ -128,7 +128,7 @@ export async function issueGooglePass(venueId: string, customerId: string) {
 
   const stamps = await getStampCardStatus(venueId, customerId)
 
-  const client = await walletClient()
+  const client = await walletClient(venueId)
   try {
     await client.loyaltyobject.insert({
       requestBody: buildLoyaltyObject({

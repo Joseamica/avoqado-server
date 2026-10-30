@@ -562,6 +562,10 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: 'datos demo: órdenes sembradas sin filas de descuento',
   },
+  'src/services/demo/negociosDemo.service.ts#seedHistory': {
+    clase: 'CREACION',
+    nota: 'negocios demo de ventas: un mes de órdenes sembradas sin filas de descuento',
+  },
   'src/services/reservation/createOrderFromReservation.ts#createOrderFromReservation': {
     clase: 'CREACION',
     nota: 'la reservación crea su orden con renglones nuevos',

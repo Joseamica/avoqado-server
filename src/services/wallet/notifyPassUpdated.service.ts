@@ -117,7 +117,7 @@ async function notifyGooglePass(pass: {
     })
 
     const stamps = await getStampCardStatus(pass.venueId, pass.customerId)
-    const client = await walletClient()
+    const client = await walletClient(pass.venueId)
 
     await client.loyaltyobject.patch({
       resourceId: pass.googleObjectId,

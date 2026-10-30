@@ -340,7 +340,9 @@ export async function getLiveDemoStats(): Promise<{
  *
  * @param venueId - Venue ID to delete data for
  */
-async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number> {
+// Exportada para el reinicio nocturno de los negocios demo (`services/demo/negociosDemo.service.ts`): la misma guardia
+// LIVE_DEMO protege los dos caminos.
+export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<number> {
   // 🔒 HARD GUARD — this function ERASES a venue and everything in it.
   // It must be physically impossible to point it at a real business: if a
   // LiveDemoSession row ever references a non-LIVE_DEMO venue (bug, manual
