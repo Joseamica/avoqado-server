@@ -1,3 +1,4 @@
+import { PerformanceObserver, type PerformanceEntry } from 'node:perf_hooks'
 import { EVENT_LOOP_BUDGET_MS } from '@/services/master-catalog/catalogImportCanonical.service'
 
 export interface CatalogImportEventLoopProbeV1 {
@@ -34,22 +35,36 @@ export function readCatalogImportThreadCpuUsageV1(previousValue?: NodeJS.CpuUsag
 // charging V8/background threads, while the minimum of wall and thread-CPU
 // deltas ignores time in which this Jest thread did not run. stop() records
 // the final work slice before clearing the probe.
+//
+// WHY (29-oct): A stop-the-world garbage collection lands inside whichever turn
+// happens to be running, and no amount of cooperative slicing can yield around
+// it. Running alone on a GitHub runner, the 50k-row canonical hash showed one
+// 50.5-51 ms turn on three attempts (run 40996059064) while every slice the code
+// controls stays near 4 ms. Pauses that V8 reports are subtracted from the turns
+// they overlap, the same way descheduling is discounted above, so a turn still
+// over budget after that is the code's own work.
 export function startCatalogImportEventLoopProbeV1(): CatalogImportEventLoopProbeV1 {
   // No samples means "not measured", which expectCatalogImportEventLoopBudgetV1
   // reports out loud. It never means "measured and within budget".
   if (!CATALOG_IMPORT_EVENT_LOOP_PROBE_SUPPORTED_V1) return { stop: () => [] }
 
-  const samples: number[] = []
+  const turns: { start: number; end: number; busy: number }[] = []
+  const pauses: { start: number; end: number }[] = []
+  const recordPauses = (entries: readonly PerformanceEntry[]) => {
+    for (const entry of entries) pauses.push({ start: entry.startTime, end: entry.startTime + entry.duration })
+  }
+  const gcObserver = new PerformanceObserver(list => recordPauses(list.getEntries()))
+  gcObserver.observe({ entryTypes: ['gc'] })
   let previousWall = performance.now()
   let previousCpu = readCatalogImportThreadCpuUsageV1()
-  let stopped = false
+  let samples: number[] | undefined
 
   const sample = () => {
     const currentWall = performance.now()
     const currentCpu = readCatalogImportThreadCpuUsageV1()
     const wallDelta = currentWall - previousWall
     const cpuDelta = (currentCpu.user - previousCpu.user + (currentCpu.system - previousCpu.system)) / 1_000
-    samples.push(Math.min(wallDelta, cpuDelta))
+    turns.push({ start: previousWall, end: currentWall, busy: Math.min(wallDelta, cpuDelta) })
     previousWall = currentWall
     previousCpu = currentCpu
   }
@@ -57,10 +72,16 @@ export function startCatalogImportEventLoopProbeV1(): CatalogImportEventLoopProb
   const timer = setInterval(sample, 1)
   return {
     stop() {
-      if (!stopped) {
+      if (!samples) {
         clearInterval(timer)
         sample()
-        stopped = true
+        recordPauses(gcObserver.takeRecords())
+        gcObserver.disconnect()
+        samples = turns.map(turn => {
+          let paused = 0
+          for (const pause of pauses) paused += Math.max(0, Math.min(pause.end, turn.end) - Math.max(pause.start, turn.start))
+          return Math.max(0, turn.busy - paused)
+        })
       }
       return samples
     },
