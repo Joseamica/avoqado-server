@@ -70,7 +70,7 @@ describe('OTP Auth Public Service', () => {
       // Prior unconsumed challenges are invalidated for the normalized destination
       expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith(
         expect.objectContaining({
-          where: expect.objectContaining({ destination: PHONE_NORM, consumedAt: null }),
+          where: expect.objectContaining({ destination: PHONE_NORM, consumedAt: null, purpose: 'CUSTOMER_LOGIN' }),
           data: expect.objectContaining({ consumedAt: expect.any(Date) }),
         }),
       )
@@ -83,6 +83,8 @@ describe('OTP Auth Public Service', () => {
       expect(createArg.data.codeHash).toMatch(/^[a-f0-9]{64}$/)
       expect(createArg.data.ip).toBe('1.2.3.4')
       expect(createArg.data.expiresAt).toBeInstanceOf(Date)
+      // 1b S5 (Q5): nace con el propósito por default (CUSTOMER_LOGIN); la caja usa el suyo.
+      expect(createArg.data).not.toHaveProperty('purpose')
 
       // WhatsApp send fired to the normalized number; email untouched
       expect(sendOtpWhatsApp).toHaveBeenCalledTimes(1)
@@ -115,10 +117,12 @@ describe('OTP Auth Public Service', () => {
 
       // rate-limit y la invalidación filtran por venue: el reto de A sobrevive
       for (const call of prismaMock.otpChallenge.count.mock.calls) {
-        expect(call[0].where).toMatchObject({ venueId: 'venue-B', destination: PHONE_NORM })
+        expect(call[0].where).toMatchObject({ venueId: 'venue-B', destination: PHONE_NORM, purpose: 'CUSTOMER_LOGIN' })
       }
       expect(prismaMock.otpChallenge.updateMany).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue-B', destination: PHONE_NORM, channel: 'whatsapp' }) }),
+        expect.objectContaining({
+          where: expect.objectContaining({ venueId: 'venue-B', destination: PHONE_NORM, channel: 'whatsapp', purpose: 'CUSTOMER_LOGIN' }),
+        }),
       )
       expect(prismaMock.otpChallenge.create).toHaveBeenCalledWith(
         expect.objectContaining({ data: expect.objectContaining({ venueId: 'venue-B' }) }),
@@ -131,7 +135,9 @@ describe('OTP Auth Public Service', () => {
       await expect(verifyOtp({ venueId: 'venue-B', channel: 'whatsapp', destination: PHONE_RAW, code: '123456' })).rejects.toThrow(/expir/i)
 
       expect(prismaMock.otpChallenge.findFirst).toHaveBeenCalledWith(
-        expect.objectContaining({ where: expect.objectContaining({ venueId: 'venue-B', destination: PHONE_NORM, channel: 'whatsapp' }) }),
+        expect.objectContaining({
+          where: expect.objectContaining({ venueId: 'venue-B', destination: PHONE_NORM, channel: 'whatsapp', purpose: 'CUSTOMER_LOGIN' }),
+        }),
       )
     })
   })

@@ -24,6 +24,7 @@ import {
   WHERE_PAGO_PENDIENTE_DE_REVISION_CONTABLE,
 } from '@/services/giftCards/giftCardMarks'
 import { WHERE_PAGO_CONTABILIZABLE_SIN_ESTADO_DE_ORDEN } from '@/services/fiscal/autoPosting.service'
+import { TEXTO_DE_FALLO_DE_ENTREGA } from '@/services/giftCards/giftCardEntrega'
 import {
   LOTE_CSV,
   PAGINA_MAXIMA,
@@ -50,6 +51,8 @@ const tarjeta = (extra: Record<string, unknown> = {}) => ({
   expiresAt: null,
   deliveryChannel: 'WHATSAPP',
   deliveryStatus: 'PENDING',
+  deliveredAt: null,
+  deliveryErrorCode: null,
   recipientName: 'Ana',
   purchaserName: 'Luis',
   source: 'POS',
@@ -67,6 +70,7 @@ const detalle = (extra: Record<string, unknown> = {}) => ({
   purchaserContact: null,
   deliveredAt: null,
   deactivatedAt: null,
+  deliveryAttempts: 0,
 })
 const renglon = (id: string, iso: string, type = 'REDEEM') => ({
   id,
@@ -128,12 +132,32 @@ describe('lista', () => {
       expiresAt: null,
       deliveryChannel: 'WHATSAPP',
       deliveryStatus: 'PENDING',
+      deliveredAt: null,
+      deliveryErrorCode: null,
+      deliveryError: null,
       recipientName: 'Ana',
       purchaserName: 'Luis',
       source: 'POS',
       customer: null,
       order: { id: 'o1', orderNumber: 'ORD-1' },
     })
+  })
+
+  it('S-10: cada fila dice cuándo se envió y, si falló, el código del fallo y su texto', async () => {
+    prismaMock.giftCard.aggregate.mockResolvedValue({ _count: { _all: 3 }, _sum: { balance: D('1500') } })
+    prismaMock.giftCard.findMany.mockResolvedValue([
+      tarjeta({ id: 'gc1', deliveryStatus: 'SENT', deliveredAt: new Date('2026-10-20T17:00:00.000Z') }),
+      tarjeta({ id: 'gc2', deliveryStatus: 'FAILED', deliveryErrorCode: 'WHATSAPP_SEND_FAILED' }),
+      // Un código que escribió una versión más nueva: texto genérico, nunca `undefined`.
+      tarjeta({ id: 'gc3', deliveryStatus: 'FAILED', deliveryErrorCode: 'ALGO_NUEVO' }),
+    ])
+    const r = await listGiftCards('v1', {})
+    expect(prismaMock.giftCard.findMany.mock.calls[0][0].select).toMatchObject({ deliveredAt: true, deliveryErrorCode: true })
+    expect(r.items.map(i => [i.id, i.deliveredAt, i.deliveryErrorCode, i.deliveryError])).toEqual([
+      ['gc1', '2026-10-20T17:00:00.000Z', null, null],
+      ['gc2', null, 'WHATSAPP_SEND_FAILED', TEXTO_DE_FALLO_DE_ENTREGA.WHATSAPP_SEND_FAILED],
+      ['gc3', null, 'ALGO_NUEVO', 'No se pudo entregar la tarjeta. Reenvíala, cambia el destino o imprímela.'],
+    ])
   })
 
   it('sin página ni tamaño: 50 desde la primera', async () => {
@@ -351,6 +375,65 @@ describe('detalle con su libreta', () => {
     const r = await getGiftCardDetail('v1', 'gc1', {})
     expect(r.currentBlock).toBeNull()
     expect(bloqueosVigentes).not.toHaveBeenCalled()
+  })
+
+  it('el detalle trae la entrega con el destino enmascarado', async () => {
+    prismaMock.giftCard.findFirst.mockResolvedValue({
+      ...detalle({ deliveryStatus: 'FAILED', deliveryErrorCode: 'WHATSAPP_SEND_FAILED' }),
+      recipientPhone: '+525512345678',
+      deliveryAttempts: 4,
+    })
+    prismaMock.giftCardActivity.count.mockResolvedValue(0)
+    prismaMock.giftCardActivity.findMany.mockResolvedValueOnce([])
+    const r = await getGiftCardDetail('v1', 'gc1', {})
+    expect(r.entrega).toEqual({
+      channel: 'WHATSAPP',
+      status: 'FAILED',
+      deliveredAt: null,
+      errorCode: 'WHATSAPP_SEND_FAILED',
+      error: TEXTO_DE_FALLO_DE_ENTREGA.WHATSAPP_SEND_FAILED,
+      destino: '55•••••678',
+      intentos: 4,
+    })
+    expect(prismaMock.giftCard.findFirst.mock.calls[0][0].select).toMatchObject({
+      deliveredAt: true,
+      deliveryErrorCode: true,
+      deliveryAttempts: true,
+    })
+    // El destino completo de la entrega nunca sale en `entrega`.
+    expect(JSON.stringify(r.entrega)).not.toContain('5512345678')
+  })
+
+  it.each([
+    [
+      'correo enviado',
+      {
+        deliveryChannel: 'EMAIL',
+        deliveryStatus: 'SENT',
+        deliveredAt: new Date('2026-10-20T17:00:00.000Z'),
+        recipientEmail: 'ana@gmail.com',
+        deliveryAttempts: 1,
+      },
+      {
+        channel: 'EMAIL',
+        status: 'SENT',
+        deliveredAt: '2026-10-20T17:00:00.000Z',
+        errorCode: null,
+        error: null,
+        destino: 'a•••@gmail.com',
+        intentos: 1,
+      },
+    ],
+    [
+      'impresa (S-8: sigue PENDING y no tiene destino)',
+      { deliveryChannel: 'PRINTED', deliveryStatus: 'PENDING' },
+      { channel: 'PRINTED', status: 'PENDING', deliveredAt: null, errorCode: null, error: null, destino: null, intentos: 0 },
+    ],
+  ])('la entrega del detalle: %s', async (_caso, fila, entrega) => {
+    prismaMock.giftCard.findFirst.mockResolvedValue({ ...detalle(), ...fila })
+    prismaMock.giftCardActivity.count.mockResolvedValue(0)
+    prismaMock.giftCardActivity.findMany.mockResolvedValueOnce([])
+    expect((await getGiftCardDetail('v1', 'gc1', {})).entrega).toEqual(entrega)
   })
 
   it('🔴 nunca pide ni expone el código, su huella ni sus llaves de página', async () => {

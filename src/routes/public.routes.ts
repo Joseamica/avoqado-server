@@ -1,6 +1,6 @@
 import documentRequestsRoutes from './public/documentRequests.routes'
 import { publicOffers as publicHybridOffers, publicOffer as publicHybridOffer } from '../controllers/hybridBilling.controller'
-import express, { Router } from 'express'
+import express, { ErrorRequestHandler, Router } from 'express'
 import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
 import { z } from 'zod'
 import cors from 'cors'
@@ -23,6 +23,7 @@ import * as paymentLinkPublicController from '../controllers/public/paymentLink.
 import * as venueCheckoutController from '../controllers/public/venueCheckout.public.controller'
 import * as walletPassController from '../controllers/public/walletPass.public.controller'
 import * as walletStampsController from '../controllers/public/walletStamps.public.controller'
+import * as giftCardPublicController from '../controllers/public/giftCard.public.controller'
 import {
   submitContact,
   submitLabsBrief,
@@ -110,6 +111,50 @@ import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
 
 const router = Router()
 router.use('/document-requests', documentRequestsRoutes)
+
+// ── Tarjetas de regalo: la página pública del regalo (1b S6) ───────────────────────────────────────────────────────────
+// 🔴 VA ANTES DEL COMODÍN DE ABAJO, a propósito (K-2). `cors({ origin: '*' })` contesta los OPTIONS de TODO el router y le
+// pondría `*` a esta ruta, que enseña el código de la tarjeta. Aquí el GET termina la respuesta antes de llegar al comodín, y
+// el OPTIONS lo resuelve su propio `cors` (204) sin pasar por el límite: el preflight no cuenta.
+// 🔴 El límite lleva su propia llave: `porVisitante` es un `const` de más abajo y usarlo aquí revienta al cargar (B-S6 1).
+// Nombres de Cloudflare Pages medidos el 21-oct (dig y la página que sirven: «Pago seguro — Avoqado»): `avoqado-checkout` y
+// `avoqado-checkout-staging`, sin sufijo. `*.pages.dev` es un espacio GLOBAL (el panel quedó en `-4wx`, ver `corsOptions.ts`):
+// si un proyecto cambia de nombre, se vuelve a medir antes de tocar esto.
+export const ORIGENES_DE_LA_PAGINA_DEL_REGALO: Array<string | RegExp> = [
+  'https://pay.avoqado.io',
+  /^https:\/\/[a-z0-9-]+\.avoqado-checkout\.pages\.dev$/,
+  /^https:\/\/[a-z0-9-]+\.avoqado-checkout-staging\.pages\.dev$/,
+  'http://localhost:5174',
+]
+const corsDeLaPaginaDelRegalo = cors({ origin: ORIGENES_DE_LA_PAGINA_DEL_REGALO, methods: ['GET', 'OPTIONS'], credentials: false })
+const regaloLimit = rateLimit({
+  windowMs: 60_000,
+  max: 60,
+  keyGenerator: req => ipDelCliente(req) || 'desconocida',
+  standardHeaders: true,
+  legacyHeaders: false,
+  // El 429 también en el sobre JSON de la API y en español (el texto por omisión es inglés y plano).
+  message: {
+    success: false,
+    code: 'RATE_LIMIT_EXCEEDED',
+    message: 'Demasiadas consultas seguidas. Espera un minuto e inténtalo de nuevo.',
+  },
+})
+router.options('/gift-cards/:pageToken', corsDeLaPaginaDelRegalo)
+router.get('/gift-cards/:pageToken', corsDeLaPaginaDelRegalo, regaloLimit, giftCardPublicController.getPaginaDelRegalo)
+// 🔴 S6 m2: un token con un `%` suelto (`…/<token>%`) no se puede decodificar. Express 4 lanza `URIError` («Failed to decode
+// param '<token>%'», `status` 400) al CASAR estas dos rutas, antes de su CORS, su límite y su controller, y el manejador global
+// lo escribiría —con el token en el mensaje— a nivel `error` y contestaría 500. Aquí se contesta como cualquier token mal
+// formado (S-11), con sus encabezados y su CORS propio, y sin log: el mensaje no se escribe en ningún lado y la URL ya sale
+// tapada en el log de peticiones. Sólo ESE error: cualquier otro (el del controller, p. ej.) sigue al manejador global.
+const tokenQueNoSeDecodifica: ErrorRequestHandler = (err, req, res, next) => {
+  if (!(err instanceof URIError) || (err as { status?: number }).status !== 400) return next(err)
+  res.set({ 'Cache-Control': 'no-store', 'X-Robots-Tag': 'noindex' })
+  corsDeLaPaginaDelRegalo(req, res, errDelCors =>
+    errDelCors ? next(errDelCors) : res.json({ success: true, data: { disponible: false } }),
+  )
+}
+router.use('/gift-cards', tokenQueNoSeDecodifica)
 
 // Wildcard CORS for public endpoints — no credentials needed, safe for embedding
 router.use(cors({ origin: '*', credentials: false, methods: ['GET', 'POST', 'PATCH', 'DELETE', 'OPTIONS'] }))

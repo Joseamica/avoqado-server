@@ -3,7 +3,8 @@
  * el dashboard deja sus sobres ACTIVE con su ACTIVATE; si lo cobrado no cuadra con los sobres, no activa y deja un
  * MoneyAnomaly. Ruling A6: una cuenta CANCELADA (sobres DEACTIVATED) que recibe dinero tarde se reabre y queda pagada,
  * pero sus sobres NO se reviven y queda un MoneyAnomaly propio; también si la venta pagada se devolvió y luego llega un cobro
- * tardío de la terminal (r1), y repetirlo no duplica la fila.
+ * tardío de la terminal (r1), y repetirlo no duplica la fila. S0.3: el efectivo tardío de la cola sobre una venta de tarjetas YA
+ * cerrada (devuelta) también deja su anomalía en la transacción del cobro, sin esperar a la revisión nocturna.
  *
  * Correr: source ../urls-tarjetas.sh && TZ=UTC npx jest --selectProjects integration \
  *   --runTestsByPath tests/integration/giftCards/activacionPorCamino.integration.test.ts --ci --runInBand
@@ -278,6 +279,59 @@ describe('R8 · activación de sobres · Postgres real', () => {
     // A6 r1: volver a saldar (otro cobro duplicado) re-entra a la misma rama: sigue UNA sola fila.
     await cobroDeTerminal(`${SUF}-terminal-2`)
     expect((await anomaliasDe(r.orderId)).map(a => a.category)).toEqual(['GIFT_CARD_PAID_WITH_DEACTIVATED'])
+    expect(await estadoDe([sobreId])).toEqual({ sobres: [['DEACTIVATED', '0.00', true]], activaciones: 1 })
+  })
+
+  it('🔴 S1: efectivo tardío sobre una venta de tarjetas devuelta deja la anomalía al momento', async () => {
+    const r = await cuenta(`${SUF}-s1-devuelta`, [500])
+    await payCashOrder(venueId, r.orderId, { amount: 50000, tip: 0, staffId, idempotencyKey: `${SUF}-s1-cobro` })
+    const sobreId = r.sobres[0].id
+
+    // Cancelada y devuelta: REFUND negativo, el sobre en 0 con su DEACTIVATE ligado al reembolso y la venta REFUNDED.
+    const reembolso = await prisma.payment.create({
+      data: {
+        venueId,
+        orderId: r.orderId,
+        amount: new Prisma.Decimal(-500),
+        tipAmount: 0,
+        method: 'CASH',
+        source: 'OTHER',
+        status: 'COMPLETED',
+        type: 'REFUND',
+        feePercentage: 0,
+        feeAmount: 0,
+        netAmount: new Prisma.Decimal(-500),
+      },
+    })
+    await prisma.giftCard.update({ where: { id: sobreId }, data: { status: 'DEACTIVATED', balance: 0, deactivatedAt: new Date() } })
+    await prisma.giftCardActivity.create({
+      data: {
+        giftCardId: sobreId,
+        venueId,
+        type: 'DEACTIVATE',
+        amount: 500,
+        balanceAfter: 0,
+        reason: 'SALE_CANCELLED',
+        refundPaymentId: reembolso.id,
+        orderId: r.orderId,
+        staffId,
+      },
+    })
+    await prisma.order.update({ where: { id: r.orderId }, data: { paymentStatus: 'REFUNDED' } })
+    expect(await anomaliasDe(r.orderId)).toEqual([])
+
+    // La cola sin red reproduce el efectivo que se cobró antes de la devolución.
+    await payCashOrder(venueId, r.orderId, { amount: 50000, tip: 0, staffId, idempotencyKey: `${SUF}-s1-tardio`, isOfflineReplay: true })
+
+    // S1: la venta sigue cerrada; la anomalía ya está, sin correr la revisión nocturna; el sobre NO revive.
+    expect(await prisma.order.findUniqueOrThrow({ where: { id: r.orderId }, select: { paymentStatus: true } })).toEqual({
+      paymentStatus: 'REFUNDED',
+    })
+    const anomalias = await anomaliasDe(r.orderId)
+    expect(anomalias.map(a => [a.category, a.stripeEventId])).toEqual([
+      ['GIFT_CARD_PAID_WITH_DEACTIVATED', `giftcard:PAID_WITH_DEACTIVATED:${r.orderId}`],
+    ])
+    expect(anomalias[0].observedState).toMatchObject({ cobrado: '1000.00', reembolsado: '500.00', conservado: '500.00', respaldo: '0.00' })
     expect(await estadoDe([sobreId])).toEqual({ sobres: [['DEACTIVATED', '0.00', true]], activaciones: 1 })
   })
 })

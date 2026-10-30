@@ -53,10 +53,20 @@ jest.mock('@/services/giftCards/giftCardLedger', () => ({
   lockGiftCardsForUpdate: (...a: unknown[]) => lockGiftCardsMock(...a),
   canjearSobresEnTx: (...a: unknown[]) => canjearMock(...a),
 }))
+// 1b S2: la prueba resuelta, espiada (por default la real) para ver con qué hora se juzga bajo el candado (Q91).
+const resolverPruebaMock = jest.fn()
+jest.mock('@/services/giftCards/giftCardProof', () => ({
+  ...jest.requireActual('@/services/giftCards/giftCardProof'),
+  resolverPrueba: (...a: unknown[]) => resolverPruebaMock(...a),
+}))
 
 import { Prisma } from '@prisma/client'
+import { ConflictError } from '@/errors/AppError'
 import { generateAndStoreReceipt } from '@/services/dashboard/receipt.dashboard.service'
-import { generateGiftCardCode, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { generateGiftCardCode, generateOpaqueToken, hashGiftCardCode } from '@/services/giftCards/giftCardCode'
+import { GiftCardError } from '@/services/giftCards/giftCardErrors'
+import { reiniciarSellosParaPruebas, rechazoSellado, sellarSiEsDefinitivo } from '@/services/giftCards/giftCardPayKey'
+import { resolveGiftCardTenderForChargeInTx } from '@/services/giftCards/giftCardTender'
 import { payGiftCardBalanceOnOrder } from '@/services/mobile/order.mobile.service'
 import { mapDigitalReceiptResponse } from '@/services/tpv/payment.tpv.service'
 import { releaseTableIfSettled } from '@/services/tpv/table.tpv.service'
@@ -64,10 +74,17 @@ import { prismaMock } from '../../../__helpers__/setup'
 
 const D = (v: number) => new Prisma.Decimal(v)
 const codigo = generateGiftCardCode()
+const LIGA = generateOpaqueToken()
+/** La hora de la base leída con el candado de la llave puesto (`clock_timestamp()`, Q91). */
+const RELOJ_DE_LA_BASE = Date.parse('2026-10-20T18:00:00.000Z')
+const sqlDe = (a: any): string => (Array.isArray(a) ? a.join('?') : String(a?.sql ?? ''))
 const sobreBloqueado = (over: Record<string, unknown> = {}) => ({
   id: 'gc-1',
   venueId: 'venue-1',
   codeHash: hashGiftCardCode(codigo.normalized), // r1 (A-1): la huella vigente, la misma del código presentado
+  pageToken: LIGA, // 1b S2: la liga vigente, leída bajo el candado
+  recipientPhone: null,
+  deliveryChannel: 'PRINTED',
   status: 'ACTIVE',
   balance: D(1000),
   initialAmount: D(1000),
@@ -115,7 +132,11 @@ function cuenta(over: Record<string, unknown> = {}) {
 beforeEach(() => {
   jest.clearAllMocks()
   prismaMock.$transaction.mockImplementation(async (cb: any) => cb(prismaMock))
-  prismaMock.$queryRaw.mockResolvedValue([{ id: 'order-1' }])
+  reiniciarSellosParaPruebas()
+  resolverPruebaMock.mockImplementation(jest.requireActual('@/services/giftCards/giftCardProof').resolverPrueba)
+  prismaMock.$queryRaw.mockImplementation(async (plantilla: any) =>
+    sqlDe(plantilla).includes('clock_timestamp') ? [{ ms: BigInt(RELOJ_DE_LA_BASE) }] : [{ id: 'order-1' }],
+  )
   cuenta()
   prismaMock.payment.findUnique.mockReset().mockResolvedValue(null)
   prismaMock.payment.findMany.mockResolvedValue([])
@@ -311,8 +332,10 @@ describe('payGiftCardBalanceOnOrder', () => {
 
     // r1 (A-2): las dos peticiones pasan la consulta rápida (1.ª llamada a `payment.findUnique`: null); la perdedora falla
     // bajo el candado y, ANTES de mostrar el error, encuentra a la ganadora por la llave (2.ª llamada).
+    // 1b S2 (Q91): estas tres son la SEGUNDA red. La llave ya se lee bajo su candado (3.ª llamada: `null`); la ganadora por la
+    // llave se busca igual en el catch ante CUALQUIER error.
     it('🔴 r1 (A-2): carrera con la MISMA llave, pago parcial — la perdedora ve «quedan $X» bajo el candado pero devuelve el cobro de la ganadora', async () => {
-      prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado())
+      prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado())
       lockGiftCardsMock.mockResolvedValue([sobreBloqueado({ balance: D(100) })]) // la ganadora ya descontó $450 de $550
       const r = await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())
       expect(r).toMatchObject({ paymentId: 'payment-1', amount: 400, tipAmount: 50, replay: true })
@@ -321,7 +344,7 @@ describe('payGiftCardBalanceOnOrder', () => {
     })
 
     it('🔴 r1 (A-2): carrera con la MISMA llave, pago completo — la cuenta ya quedó PAGADA por la ganadora: su respuesta, no «ya está pagada»', async () => {
-      prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado())
+      prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado())
       cuenta({ paymentStatus: 'PAID', paidAmount: D(1050), remainingBalance: D(0), total: D(1050) })
       const r = await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())
       expect(r).toMatchObject({ paymentId: 'payment-1', replay: true })
@@ -329,7 +352,10 @@ describe('payGiftCardBalanceOnOrder', () => {
     })
 
     it('r1 (A-2): la ganadora de la carrera registró OTRO cobro con esa llave: IDEMPOTENCY_KEY_REUSED, no el error de carrera', async () => {
-      prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado({ amount: D(300) }))
+      prismaMock.payment.findUnique
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(null)
+        .mockResolvedValueOnce(pagoGuardado({ amount: D(300) }))
       lockGiftCardsMock.mockResolvedValue([sobreBloqueado({ balance: D(100) })])
       await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toMatchObject({
         code: 'IDEMPOTENCY_KEY_REUSED',
@@ -342,7 +368,7 @@ describe('payGiftCardBalanceOnOrder', () => {
       await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toMatchObject({
         code: 'GIFT_CARD_INSUFFICIENT_BALANCE',
       })
-      expect(prismaMock.payment.findUnique).toHaveBeenCalledTimes(2) // la consulta rápida y la búsqueda de la ganadora
+      expect(prismaMock.payment.findUnique).toHaveBeenCalledTimes(3) // la consulta rápida, la llave bajo su candado y la ganadora
     })
 
     it('r1 (M3): sin ganadora, el CAS perdido del núcleo sale como 409 ORDER_PAYMENT_CONFLICT con un texto para la cajera (sin «llave»)', async () => {
@@ -470,7 +496,11 @@ describe('payGiftCardBalanceOnOrder — ronda 1', () => {
   })
 
   it('🔴 fix 2: la carrera perdida (la ganadora ya saldó la cuenta) también libera la mesa', async () => {
-    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockResolvedValueOnce(pagoGuardado())
+    // 1b S2 (Q91): la perdedora ve el cobro de la ganadora bajo el candado de la llave (2.ª llamada) y sale por su respuesta.
+    prismaMock.payment.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'payment-1' })
+      .mockResolvedValueOnce(pagoGuardado())
     await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).resolves.toMatchObject({ paymentId: 'payment-1', replay: true })
     expect(releaseTableIfSettled).toHaveBeenCalledWith('venue-1', 'mesa-1')
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
@@ -486,11 +516,178 @@ describe('payGiftCardBalanceOnOrder — ronda 1', () => {
   it('🔴 fix 3: si buscar a la ganadora por la llave falla, sale el error ORIGINAL del cobro (no el de la búsqueda)', async () => {
     cuenta()
     lockGiftCardsMock.mockResolvedValue([sobreBloqueado({ balance: D(100) })])
-    prismaMock.payment.findUnique.mockResolvedValueOnce(null).mockRejectedValueOnce(new Error('la base no contesta'))
+    prismaMock.payment.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null) // bajo el candado de la llave (Q91)
+      .mockRejectedValueOnce(new Error('la base no contesta'))
     await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toMatchObject({
       code: 'GIFT_CARD_INSUFFICIENT_BALANCE',
       message: 'Quedan $100.00 en la tarjeta de regalo.',
     })
     expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+})
+
+/** 1b S2 (Q7): la liga de la tarjeta (`PAGE_TOKEN`) también paga, con la misma prueba bajo el candado que el código. */
+describe('payGiftCardBalanceOnOrder — PAGE_TOKEN', () => {
+  const porLiga = (over: Record<string, unknown> = {}) => cobro({ proof: { kind: 'PAGE_TOKEN', pageToken: LIGA }, ...over })
+
+  it('PAGE_TOKEN cobra el sobre de esa liga', async () => {
+    const r = await payGiftCardBalanceOnOrder('venue-1', 'order-1', porLiga())
+    expect(prismaMock.giftCard.findFirst).toHaveBeenCalledWith(expect.objectContaining({ where: { venueId: 'venue-1', pageToken: LIGA } }))
+    expect(lockGiftCardsMock).toHaveBeenCalledWith(prismaMock, ['gc-1'])
+    expect(canjearMock).toHaveBeenCalledWith(prismaMock, expect.objectContaining({ amount: D(450), cards: [sobreBloqueado()] }))
+    expect(r).toMatchObject({ paymentId: 'payment-1', replay: false })
+  })
+
+  it('🔴 la liga reemplazada mientras se esperaba el candado ⇒ 404 y sin payment.create', async () => {
+    lockGiftCardsMock.mockResolvedValue([sobreBloqueado({ pageToken: generateOpaqueToken() })])
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', porLiga())).rejects.toMatchObject({
+      code: 'GIFT_CARD_NOT_FOUND',
+      statusCode: 404,
+    })
+    expect(canjearMock).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('una liga que no existe en el negocio es el mismo 404, sin abrir transacción', async () => {
+    prismaMock.giftCard.findFirst.mockResolvedValue(null)
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', porLiga())).rejects.toMatchObject({
+      code: 'GIFT_CARD_NOT_FOUND',
+      statusCode: 404,
+    })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 misma llave con PAGE_TOKEN ⇒ replay: true sin mover saldo', async () => {
+    prismaMock.giftCardActivity.findMany.mockResolvedValue([
+      { giftCardId: 'gc-1', amount: D(450), balanceAfter: D(550), giftCard: { codeLast4: codigo.last4 } },
+    ])
+    prismaMock.payment.findUnique.mockResolvedValueOnce({ id: 'payment-1' }).mockResolvedValueOnce({
+      id: 'payment-1',
+      orderId: 'order-1',
+      amount: D(400),
+      tipAmount: D(50),
+      tenderType: { systemKind: 'GIFT_CARD' },
+      order: { orderNumber: 'ORD-1' },
+      receipts: [],
+    })
+    const r = await payGiftCardBalanceOnOrder('venue-1', 'order-1', porLiga())
+    expect(r).toMatchObject({ paymentId: 'payment-1', replay: true })
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(canjearMock).not.toHaveBeenCalled()
+  })
+
+  it('un kind de prueba desconocido ⇒ 400 antes de leer nada (lo rechaza la prueba, no una lista en el cobro)', async () => {
+    const err = await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro({ proof: { kind: 'WALLET_PASS', qrToken: 'qr-1' } })).catch(
+      e => e,
+    )
+    expect(err).toMatchObject({ statusCode: 400, message: 'Falta cómo se identificó la tarjeta: código, liga o teléfono.' })
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+  })
+})
+
+/** 1b S2 (Q91, Q94): la llave se ordena con su candado ANTES de decidir nada, y su rechazo definitivo queda sellado. */
+describe('payGiftCardBalanceOnOrder — la llave (Q91)', () => {
+  const pagoGuardado = (over: Record<string, unknown> = {}) => ({
+    id: 'payment-1',
+    orderId: 'order-1',
+    amount: D(400),
+    tipAmount: D(50),
+    tenderType: { systemKind: 'GIFT_CARD' },
+    order: { orderNumber: 'ORD-1' },
+    receipts: [],
+    ...over,
+  })
+  beforeEach(() => {
+    prismaMock.giftCardActivity.findMany.mockResolvedValue([
+      { giftCardId: 'gc-1', amount: D(450), balanceAfter: D(550), giftCard: { codeLast4: codigo.last4 } },
+    ])
+  })
+
+  it('🔴 lo primero de la transacción es el candado de la llave (antes del candado de la Order y de cualquier lectura)', async () => {
+    await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())
+
+    const inicioTx = prismaMock.$transaction.mock.invocationCallOrder[0]
+    const candadoDeLaLlave = prismaMock.$executeRaw.mock.invocationCallOrder[0]
+    expect(candadoDeLaLlave).toBe(inicioTx + 1)
+    expect((prismaMock.$executeRaw.mock.calls[0] as unknown[]).slice(1)).toEqual(['giftpay:venue-1:saldo-0001'])
+    const candadoDeLaOrden = prismaMock.$queryRaw.mock.calls.findIndex((c: unknown[]) => !sqlDe(c[0]).includes('clock_timestamp'))
+    expect(candadoDeLaLlave).toBeLessThan(prismaMock.$queryRaw.mock.invocationCallOrder[candadoDeLaOrden])
+    expect(candadoDeLaLlave).toBeLessThan((resolveGiftCardTenderForChargeInTx as jest.Mock).mock.invocationCallOrder[0])
+  })
+
+  it('🔴 bajo el candado la llave ya cobró ⇒ la salida de la ganadora (replay), sin tomar el sobre ni crear Payment', async () => {
+    prismaMock.payment.findUnique
+      .mockResolvedValueOnce(null) // la consulta rápida: todavía no
+      .mockResolvedValueOnce({ id: 'payment-1' }) // bajo el candado de la llave: la ganadora ya confirmó
+      .mockResolvedValueOnce(pagoGuardado())
+    const r = await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())
+    expect(r).toMatchObject({ paymentId: 'payment-1', amount: 400, tipAmount: 50, replay: true })
+    expect(lockGiftCardsMock).not.toHaveBeenCalled()
+    expect(resolveGiftCardTenderForChargeInTx).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('bajo el candado la llave ya cobró OTRA cosa ⇒ 409 IDEMPOTENCY_KEY_REUSED', async () => {
+    prismaMock.payment.findUnique
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce({ id: 'payment-1' })
+      .mockResolvedValueOnce(pagoGuardado({ amount: D(300) }))
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toMatchObject({
+      code: 'IDEMPOTENCY_KEY_REUSED',
+      statusCode: 409,
+    })
+    expect(lockGiftCardsMock).not.toHaveBeenCalled()
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la prueba se juzga con la hora leída bajo el candado (`ahora` de tomarLlaveDeCobro)', async () => {
+    const vigente = jest.fn(() => true)
+    resolverPruebaMock.mockResolvedValueOnce({ giftCardId: 'gc-1', last4: codigo.last4, vigente, rechazo: jest.fn() })
+    await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())
+    expect(vigente).toHaveBeenCalledWith(sobreBloqueado(), new Date(RELOJ_DE_LA_BASE))
+  })
+
+  it('una prueba que ya no vale bajo el candado lanza SU rechazo y nada se cobra', async () => {
+    const rechazo = new GiftCardError('GIFT_CARD_PHONE_PROOF_INVALID' as any, 'La verificación por teléfono venció. Pide otro código.', 409)
+    resolverPruebaMock.mockResolvedValueOnce({ giftCardId: 'gc-1', last4: codigo.last4, vigente: () => false, rechazo: () => rechazo })
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toBe(rechazo)
+    expect(prismaMock.payment.create).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un rechazo definitivo bajo el candado se sella; ORDER_PAYMENT_CONFLICT y ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE no', async () => {
+    lockGiftCardsMock.mockResolvedValueOnce([sobreBloqueado({ balance: D(100) })])
+    const definitivo = await payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro({ idempotencyKey: 'saldo-sella-1' })).catch(e => e)
+    expect(definitivo).toMatchObject({ code: 'GIFT_CARD_INSUFFICIENT_BALANCE' })
+    expect(rechazoSellado('venue-1', 'saldo-sella-1')).toBe(definitivo)
+
+    canjearMock.mockRejectedValueOnce(
+      new ConflictError('Otro cobro cambió esta cuenta al mismo tiempo. Intenta otra vez.', 'ORDER_PAYMENT_CONFLICT'),
+    )
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro({ idempotencyKey: 'saldo-sella-2' }))).rejects.toMatchObject({
+      code: 'ORDER_PAYMENT_CONFLICT',
+    })
+    expect(rechazoSellado('venue-1', 'saldo-sella-2')).toBeNull()
+
+    lockGiftCardsMock.mockRejectedValueOnce(
+      new ConflictError('Hay un cobro en curso en la terminal.', 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE'),
+    )
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro({ idempotencyKey: 'saldo-sella-3' }))).rejects.toMatchObject({
+      code: 'ORDER_CANCEL_BLOCKED_BY_TERMINAL_CHARGE',
+    })
+    expect(rechazoSellado('venue-1', 'saldo-sella-3')).toBeNull()
+  })
+
+  it('🔴 una llave sellada responde su rechazo antes de leer nada (el atajo del principio)', async () => {
+    const sellado = new GiftCardError('GIFT_CARD_INSUFFICIENT_BALANCE', 'Quedan $100.00 en la tarjeta de regalo.', 409, {
+      saldoDisponible: 100,
+    })
+    sellarSiEsDefinitivo('venue-1', 'saldo-0001', sellado)
+    await expect(payGiftCardBalanceOnOrder('venue-1', 'order-1', cobro())).rejects.toBe(sellado)
+    expect(prismaMock.order.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.giftCard.findFirst).not.toHaveBeenCalled()
+    expect(prismaMock.payment.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
 })

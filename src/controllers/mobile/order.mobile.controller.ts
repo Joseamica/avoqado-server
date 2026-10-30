@@ -110,205 +110,158 @@ const TURNO_DE_LA_VENTA_INVALIDO = 'shiftIdDeLaVenta debe ser texto de hasta 64 
 const CAJA_DE_LA_VENTA_INVALIDA = 'cashDrawerSessionId debe ser texto de hasta 64 caracteres'
 
 /**
- * Create order with items
- * AUTHENTICATED endpoint - requires valid JWT
- *
- * Creates an order with products/items. Returns the orderId which
- * should be sent to the TPV via BLE for payment processing.
- *
- * @route POST /api/v1/mobile/venues/:venueId/orders
+ * La validación y el armado de `CreateOrderInput` de una venta de mostrador (antes, el cuerpo de `createOrder`; extraído sin
+ * cambiarlo, S2b). La usan `createOrder` (`conPropinaDeOrden: true`, como siempre) y `pay-new-order` (`false`: ahí `tip` es la
+ * propina DEL COBRO en pesos y la lee esa ruta aparte). `usuario` es el de la sesión: el vendedor por omisión (Q76).
  */
-export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
-  try {
-    const { venueId } = req.params
-    const {
-      items,
-      staffId,
-      orderType,
-      source,
-      tableId,
-      customerId,
-      customerName,
-      customerPhone,
-      specialRequests,
-      discount,
-      orderDiscountId,
-      tip,
-      note,
-      splitType,
-      reservationId,
-      externalId,
+export function leerVentaDeMostrador(
+  body: any,
+  opciones: { conPropinaDeOrden: boolean; venueId: string; usuario?: string },
+): { input: orderMobileService.CreateOrderInput } | { error: string } {
+  const {
+    items,
+    staffId,
+    orderType,
+    source,
+    tableId,
+    customerId,
+    customerName,
+    customerPhone,
+    specialRequests,
+    discount,
+    orderDiscountId,
+    tip,
+    note,
+    splitType,
+    reservationId,
+    externalId,
+    stampRewardId,
+    stampRewardAware,
+    stampRewardExpectedDiscount,
+    isOfflineReplay,
+    createdAtLocal,
+    paymentMethod,
+  } = body
+  const turnoDeLaVenta = turnoDeLaVentaDelCuerpo(body)
+  if (!turnoDeLaVenta.valido) return { error: TURNO_DE_LA_VENTA_INVALIDO }
+  const cajaDeLaVenta = cajaDeLaVentaDelCuerpo(body)
+  if (!cajaDeLaVenta.valido) return { error: CAJA_DE_LA_VENTA_INVALIDA }
+
+  // Validate required fields
+  if (!items || !Array.isArray(items) || items.length === 0) {
+    return { error: 'Se requiere al menos un item' }
+  }
+
+  // Validate each item has required fields.
+  // Accepts either a product item (with productId), a custom line item
+  // (no productId, but must have name + unitPrice — e.g. "Otro importe"),
+  // or a promotion line (promotionRef).
+  for (const item of items) {
+    if (item?.isCortesia !== undefined && typeof item.isCortesia !== 'boolean') {
+      return { error: 'isCortesia debe ser true o false' }
+    }
+    if (item?.isCortesia === true) {
+      if (typeof item.cortesiaReason !== 'string' || !item.cortesiaReason.trim()) {
+        return { error: 'La razón de cortesía es requerida.' }
+      }
+      if (item.discountId) return { error: 'Un ítem no puede tener cortesía y descuento al mismo tiempo.' }
+      if (item.promotionRef) return { error: 'Una promoción no puede darse de cortesía al crear la cuenta' }
+    }
+    // Una línea de promoción no trae productId ni precio: trae QUÉ promoción
+    // tocó el cajero y QUÉ eligió la persona (el cliente NUNCA manda precios
+    // de promoción — el server resuelve sus líneas), así que las reglas de
+    // abajo —quantity, productId o (name + unitPrice)— no le aplican.
+    //
+    // 🔴 El criterio es el MISMO que el del servicio y el de la ruta: basta
+    // que `promotionRef` venga. Y si viene, su FORMA se valida aquí, en la
+    // frontera — un promotionRef a medias que pasara de largo entraría al
+    // motor con ids undefined y reventaría como 500 DESPUÉS de crear la
+    // orden, en vez de decirle al POS qué mandó mal.
+    if (item?.promotionRef) {
+      const ref = item.promotionRef
+      const formaValida =
+        typeof ref.promotionId === 'string' &&
+        ref.promotionId.length > 0 &&
+        typeof ref.promotionInstanceId === 'string' &&
+        ref.promotionInstanceId.length > 0 &&
+        Array.isArray(ref.selections)
+      if (!formaValida) {
+        return { error: 'promotionRef requiere promotionId, promotionInstanceId y selections' }
+      }
+      // 🔴 Una línea es promoción O producto, nunca las dos. El servicio manda
+      // al motor todo lo que traiga promotionRef, así que un item mixto
+      // perdería su producto EN SILENCIO: se cobraría el combo y no la
+      // hamburguesa que el cajero también capturó. Es subcobro, así que se
+      // rechaza en vez de adivinar cuál de los dos quiso decir.
+      const traeLineaNormal =
+        (typeof item.productId === 'string' && item.productId.length > 0) ||
+        (typeof item.name === 'string' && item.name.length > 0) ||
+        typeof item.unitPrice === 'number'
+      if (traeLineaNormal) {
+        return { error: 'Un item no puede ser producto y promoción a la vez: manda la promoción en su propia línea' }
+      }
+      // 🔴 El motor cobra UNA instancia por `promotionRef` y la cantidad se
+      // ignora: 3 combos entraban al ticket como 1 — subcobro de 2/3 del
+      // valor. El contrato es una instancia por combo. Se tolera `quantity: 1`
+      // porque es lo que emite un carrito normal (su modelo de línea trae
+      // quantity=1 por default) y no cambia un centavo.
+      if (item.quantity != null && item.quantity !== 1) {
+        return { error: 'Una promoción no lleva cantidad: manda una línea por combo, cada una con su propio promotionInstanceId' }
+      }
+      continue
+    }
+    if (!item.quantity || item.quantity < 1) {
+      return { error: 'Cada item requiere quantity >= 1' }
+    }
+    const hasProductId = typeof item.productId === 'string' && item.productId.length > 0
+    const hasCustomFields = typeof item.name === 'string' && item.name.length > 0 && typeof item.unitPrice === 'number'
+    if (!hasProductId && !hasCustomFields) {
+      return { error: 'Cada item requiere productId o (name + unitPrice)' }
+    }
+    // 🔴 Un «Otro importe» negativo bajaba la venta sin el permiso de descuentos
+    // (falda $500 + «Otro importe» −$300 = $200). Igual que la terminal (tpv.schema.ts).
+    if (!hasProductId && item.unitPrice < 0) {
+      return { error: 'El precio de un «Otro importe» no puede ser negativo' }
+    }
+    if (item.discountId != null && typeof item.discountId !== 'string') {
+      return { error: 'discountId debe ser un string' }
+    }
+  }
+
+  if (orderDiscountId != null && (typeof orderDiscountId !== 'string' || orderDiscountId.length === 0)) {
+    return { error: 'orderDiscountId debe ser el id de un descuento' }
+  }
+
+  // 🔴 Propina NEGATIVA = descuento disfrazado. El servicio suma la propina al
+  // total SIN clamp (`tipDecimal = tip/100`), así que un tip de -500 rebajaba
+  // el total en silencio. El descuento sí se clampa (`max(0, discount)`); la
+  // propina debe recibir el mismo trato en la frontera. La ruta /fast ya lo
+  // valida por Zod (`tip: min(0)`, tpv.schema.ts) — estos dos endpoints eran
+  // los únicos sin la regla. Medido en full-testingv2 2026-08-09: tip -500
+  // aceptado con 200 dejó la orden inconciliable (paidAmount ≠ suma de pagos).
+  if (opciones.conPropinaDeOrden && tip !== undefined && (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0)) {
+    return { error: 'tip no puede ser negativo (en centavos)' }
+  }
+
+  // Use authenticated user's ID if staffId not provided
+  const effectiveStaffId = staffId || opciones.usuario
+
+  if (!effectiveStaffId) {
+    return { error: 'staffId es requerido' }
+  }
+
+  if (typeof stampRewardId === 'string' && stampRewardAware !== true) {
+    // Nada se ignora en silencio: si esto aparece, hay una caja vieja ofreciendo premios.
+    logger.warn('Premio de cartilla ignorado: la caja no declara que lo descuenta (versión vieja)', {
+      venueId: opciones.venueId,
       stampRewardId,
-      stampRewardAware,
-      stampRewardExpectedDiscount,
-      isOfflineReplay,
-      createdAtLocal,
-      paymentMethod,
-    } = req.body
-    const turnoDeLaVenta = turnoDeLaVentaDelCuerpo(req.body)
-    if (!turnoDeLaVenta.valido) {
-      return res.status(400).json({ success: false, message: TURNO_DE_LA_VENTA_INVALIDO })
-    }
-    const cajaDeLaVenta = cajaDeLaVentaDelCuerpo(req.body)
-    if (!cajaDeLaVenta.valido) {
-      return res.status(400).json({ success: false, message: CAJA_DE_LA_VENTA_INVALIDA })
-    }
+    })
+  }
 
-    // Validate required fields
-    if (!items || !Array.isArray(items) || items.length === 0) {
-      return res.status(400).json({
-        success: false,
-        message: 'Se requiere al menos un item',
-      })
-    }
-
-    // Validate each item has required fields.
-    // Accepts either a product item (with productId), a custom line item
-    // (no productId, but must have name + unitPrice — e.g. "Otro importe"),
-    // or a promotion line (promotionRef).
-    for (const item of items) {
-      if (item?.isCortesia !== undefined && typeof item.isCortesia !== 'boolean') {
-        return res.status(400).json({ success: false, message: 'isCortesia debe ser true o false' })
-      }
-      if (item?.isCortesia === true) {
-        if (typeof item.cortesiaReason !== 'string' || !item.cortesiaReason.trim()) {
-          return res.status(400).json({ success: false, message: 'La razón de cortesía es requerida.' })
-        }
-        if (item.discountId)
-          return res.status(400).json({ success: false, message: 'Un ítem no puede tener cortesía y descuento al mismo tiempo.' })
-        if (item.promotionRef) {
-          return res.status(400).json({ success: false, message: 'Una promoción no puede darse de cortesía al crear la cuenta' })
-        }
-      }
-      // Una línea de promoción no trae productId ni precio: trae QUÉ promoción
-      // tocó el cajero y QUÉ eligió la persona (el cliente NUNCA manda precios
-      // de promoción — el server resuelve sus líneas), así que las reglas de
-      // abajo —quantity, productId o (name + unitPrice)— no le aplican.
-      //
-      // 🔴 El criterio es el MISMO que el del servicio y el de la ruta: basta
-      // que `promotionRef` venga. Y si viene, su FORMA se valida aquí, en la
-      // frontera — un promotionRef a medias que pasara de largo entraría al
-      // motor con ids undefined y reventaría como 500 DESPUÉS de crear la
-      // orden, en vez de decirle al POS qué mandó mal.
-      if (item?.promotionRef) {
-        const ref = item.promotionRef
-        const formaValida =
-          typeof ref.promotionId === 'string' &&
-          ref.promotionId.length > 0 &&
-          typeof ref.promotionInstanceId === 'string' &&
-          ref.promotionInstanceId.length > 0 &&
-          Array.isArray(ref.selections)
-        if (!formaValida) {
-          return res.status(400).json({
-            success: false,
-            message: 'promotionRef requiere promotionId, promotionInstanceId y selections',
-          })
-        }
-        // 🔴 Una línea es promoción O producto, nunca las dos. El servicio manda
-        // al motor todo lo que traiga promotionRef, así que un item mixto
-        // perdería su producto EN SILENCIO: se cobraría el combo y no la
-        // hamburguesa que el cajero también capturó. Es subcobro, así que se
-        // rechaza en vez de adivinar cuál de los dos quiso decir.
-        const traeLineaNormal =
-          (typeof item.productId === 'string' && item.productId.length > 0) ||
-          (typeof item.name === 'string' && item.name.length > 0) ||
-          typeof item.unitPrice === 'number'
-        if (traeLineaNormal) {
-          return res.status(400).json({
-            success: false,
-            message: 'Un item no puede ser producto y promoción a la vez: manda la promoción en su propia línea',
-          })
-        }
-        // 🔴 El motor cobra UNA instancia por `promotionRef` y la cantidad se
-        // ignora: 3 combos entraban al ticket como 1 — subcobro de 2/3 del
-        // valor. El contrato es una instancia por combo. Se tolera `quantity: 1`
-        // porque es lo que emite un carrito normal (su modelo de línea trae
-        // quantity=1 por default) y no cambia un centavo.
-        if (item.quantity != null && item.quantity !== 1) {
-          return res.status(400).json({
-            success: false,
-            message: 'Una promoción no lleva cantidad: manda una línea por combo, cada una con su propio promotionInstanceId',
-          })
-        }
-        continue
-      }
-      if (!item.quantity || item.quantity < 1) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cada item requiere quantity >= 1',
-        })
-      }
-      const hasProductId = typeof item.productId === 'string' && item.productId.length > 0
-      const hasCustomFields = typeof item.name === 'string' && item.name.length > 0 && typeof item.unitPrice === 'number'
-      if (!hasProductId && !hasCustomFields) {
-        return res.status(400).json({
-          success: false,
-          message: 'Cada item requiere productId o (name + unitPrice)',
-        })
-      }
-      // 🔴 Un «Otro importe» negativo bajaba la venta sin el permiso de descuentos
-      // (falda $500 + «Otro importe» −$300 = $200). Igual que la terminal (tpv.schema.ts).
-      if (!hasProductId && item.unitPrice < 0) {
-        return res.status(400).json({
-          success: false,
-          message: 'El precio de un «Otro importe» no puede ser negativo',
-        })
-      }
-      if (item.discountId != null && typeof item.discountId !== 'string') {
-        return res.status(400).json({
-          success: false,
-          message: 'discountId debe ser un string',
-        })
-      }
-    }
-
-    if (orderDiscountId != null && (typeof orderDiscountId !== 'string' || orderDiscountId.length === 0)) {
-      return res.status(400).json({ success: false, message: 'orderDiscountId debe ser el id de un descuento' })
-    }
-
-    // 🔴 Propina NEGATIVA = descuento disfrazado. El servicio suma la propina al
-    // total SIN clamp (`tipDecimal = tip/100`), así que un tip de -500 rebajaba
-    // el total en silencio. El descuento sí se clampa (`max(0, discount)`); la
-    // propina debe recibir el mismo trato en la frontera. La ruta /fast ya lo
-    // valida por Zod (`tip: min(0)`, tpv.schema.ts) — estos dos endpoints eran
-    // los únicos sin la regla. Medido en full-testingv2 2026-08-09: tip -500
-    // aceptado con 200 dejó la orden inconciliable (paidAmount ≠ suma de pagos).
-    if (tip !== undefined && (typeof tip !== 'number' || !Number.isFinite(tip) || tip < 0)) {
-      return res.status(400).json({
-        success: false,
-        message: 'tip no puede ser negativo (en centavos)',
-      })
-    }
-
-    // Use authenticated user's ID if staffId not provided
-    const effectiveStaffId = staffId || req.authContext?.userId
-
-    if (!effectiveStaffId) {
-      return res.status(400).json({
-        success: false,
-        message: 'staffId es requerido',
-      })
-    }
-
-    if (typeof stampRewardId === 'string' && stampRewardAware !== true) {
-      // Nada se ignora en silencio: si esto aparece, hay una caja vieja ofreciendo premios.
-      logger.warn('Premio de cartilla ignorado: la caja no declara que lo descuenta (versión vieja)', {
-        venueId,
-        stampRewardId,
-      })
-    }
-
-    const hasCortesias = items.some(item => item.isCortesia === true)
-    // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
-    // el escritor decide si la necesita sobre la fila que realmente calcula. Nunca tomarla del vendedor ni del body.
-    const needsCompAuthority = hasCortesias || !!orderDiscountId || items.some(item => !!item.discountId)
-    const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
-    if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
-
-    const order = await orderMobileService.createOrderWithItems(venueId, {
+  return {
+    input: {
       items,
       staffId: effectiveStaffId,
-      ...(needsCompAuthority ? { canCompItems, performedBy: req.authContext?.userId } : {}),
       orderType: orderType || 'TAKEOUT',
       source: source || 'AVOQADO_IOS',
       tableId,
@@ -319,7 +272,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       discount: typeof discount === 'number' ? discount : 0,
       // Descuento de catálogo de la cuenta (como `/tpv/with-items`); validado arriba.
       orderDiscountId: typeof orderDiscountId === 'string' ? orderDiscountId : null,
-      tip: typeof tip === 'number' ? tip : 0,
+      tip: opciones.conPropinaDeOrden && typeof tip === 'number' ? tip : 0,
       note,
       splitType,
       reservationId: typeof reservationId === 'string' ? reservationId : null,
@@ -346,9 +299,53 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       shiftIdDeLaVenta: turnoDeLaVenta.turno,
       // S3: la caja que el POS tenía abierta al vender, sólo en un replay de la cola. El servicio la convierte en el turno de la venta.
       cashDrawerSessionId: cajaDeLaVenta.caja,
-      // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
-      terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
-    })
+    },
+  }
+}
+
+/**
+ * Lo que la venta de mostrador toma de la SESIÓN, nunca del cuerpo. Lo comparten `createOrder` y `pay-new-order` (una venta
+ * pagada con saldo también nace con cortesías o descuentos de catálogo): la autoridad de cortesía (S9) y la terminal del token
+ * (S6). Va después de `leerVentaDeMostrador`, así el 400 de un cuerpo inválido sigue saliendo antes que el 403.
+ */
+export async function autoridadDeLaVenta(
+  req: Request,
+  venta: orderMobileService.CreateOrderInput,
+): Promise<Pick<orderMobileService.CreateOrderInput, 'canCompItems' | 'performedBy' | 'terminalSerialNumber'>> {
+  const hasCortesias = venta.items.some(item => item.isCortesia === true)
+  // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
+  // el escritor decide si la necesita sobre la fila que realmente calcula. Nunca tomarla del vendedor ni del body.
+  const needsCompAuthority = hasCortesias || !!venta.orderDiscountId || venta.items.some(item => !!item.discountId)
+  const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
+  if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
+  return {
+    ...(needsCompAuthority ? { canCompItems, performedBy: req.authContext?.userId } : {}),
+    // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
+    terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
+  }
+}
+
+/**
+ * Create order with items
+ * AUTHENTICATED endpoint - requires valid JWT
+ *
+ * Creates an order with products/items. Returns the orderId which
+ * should be sent to the TPV via BLE for payment processing.
+ *
+ * @route POST /api/v1/mobile/venues/:venueId/orders
+ */
+export const createOrder = async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const { venueId } = req.params
+    const venta = leerVentaDeMostrador(req.body, { conPropinaDeOrden: true, venueId, usuario: req.authContext?.userId })
+    if ('error' in venta) {
+      return res.status(400).json({
+        success: false,
+        message: venta.error,
+      })
+    }
+
+    const order = await orderMobileService.createOrderWithItems(venueId, { ...venta.input, ...(await autoridadDeLaVenta(req, venta.input)) })
 
     res.status(201).json({
       success: true,

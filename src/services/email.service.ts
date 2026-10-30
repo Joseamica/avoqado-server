@@ -3750,6 +3750,114 @@ Aviso de privacidad: https://avoqado.io/privacy`
     return this.sendEmail({ to: email, subject, html, text })
   }
 
+  /**
+   * Tarjetas de regalo 1b (S3, Q4): le lleva su tarjeta a quien la RECIBE. Mismo contenido que el WhatsApp: la liga de su
+   * página y el folio, NUNCA el código (E8: el código sólo se ve en la página). El lector no es el negocio ni Avoqado: el
+   * asunto nombra al negocio y nosotros sólo aparecemos en el pie (como `sendWalletPassEmail`).
+   *
+   * Devuelve el detalle (`sendEmailWithResult`): la entrega necesita el `resendId` (Q105, el rebote se cruza por él) y saber
+   * si el fallo es transitorio. `idempotencyKey` la arma la entrega (`llaveDeCorreo`, Q46).
+   */
+  async sendGiftCardDeliveryEmail(
+    email: string,
+    d: { negocio: string; monto: string; deParteDe: string; para: string | null; folio: string; url: string },
+    idempotencyKey: string,
+  ): Promise<EmailSendResult> {
+    const esc = escapeHtmlForReferralEmail
+    const subject = `Tu tarjeta de regalo de ${d.negocio}`
+    const logoUrl = 'https://avoqado.io/isotipo.svg'
+    const saludo = d.para ? `Hola ${d.para}:` : 'Hola:'
+    // Dictamen legal § 6 (LFPDPPP art. 16 fr. II y 17): quien la recibe no dio sus datos; se le avisa en versión simplificada.
+    const privacidad = `${d.negocio} usa tu nombre y tu correo sólo para entregarte esta tarjeta y avisarte de su saldo. Su aviso de privacidad y los términos están en la liga.`
+
+    const html = `
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>${esc(subject)}</title>
+</head>
+<body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif; line-height: 1.6; margin: 0; padding: 0; background-color: #ffffff; color: #000000;">
+  <div style="max-width: 600px; margin: 0 auto; padding: 32px 24px;">
+
+    <div style="padding-bottom: 32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display: inline-block; vertical-align: middle;">
+      <span style="font-size: 18px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 8px;">Avoqado</span>
+    </div>
+
+    <h1 style="margin: 0 0 8px 0; font-size: 28px; font-weight: 400; color: #000; line-height: 1.2;">
+      Recibiste una tarjeta de regalo de ${esc(d.negocio)}
+    </h1>
+    <p style="margin: 0 0 24px 0; font-size: 14px; color: #666;">
+      ${esc(saludo)} toca &laquo;Ver mi tarjeta&raquo; para ver tu c&oacute;digo y tu saldo.
+    </p>
+
+    <table cellpadding="0" cellspacing="0" style="width: 100%; border-collapse: collapse; border: 1px solid #e5e7eb; border-radius: 8px; overflow: hidden; margin-bottom: 24px;">
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">Monto</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${esc(d.monto)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666; border-bottom: 1px solid #e5e7eb;">De parte de</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000; border-bottom: 1px solid #e5e7eb;">${esc(d.deParteDe)}</td>
+      </tr>
+      <tr>
+        <td style="padding: 12px 16px; width: 160px; font-size: 13px; color: #666;">Folio</td>
+        <td style="padding: 12px 16px; font-size: 14px; color: #000;">${esc(d.folio)}</td>
+      </tr>
+    </table>
+
+    <div style="margin: 0 0 32px 0;">
+      <a href="${esc(d.url)}" style="display: inline-block; background-color:#000000; color: #ffffff; padding: 12px 24px; border-radius:6px; text-decoration: none; font-size: 14px; font-weight: 600;">
+        Ver mi tarjeta
+      </a>
+    </div>
+
+    <p style="margin: 0 0 24px 0; font-size: 13px; color: #666;">
+      ${esc(privacidad)}
+    </p>
+
+    <div style="padding-top: 8px; border-top: 1px solid #e5e7eb;">
+      <div style="margin: 16px 0;">
+        <img src="${logoUrl}" alt="Avoqado" width="24" height="24" style="display: inline-block; vertical-align: middle;">
+        <span style="font-size: 14px; font-weight: 700; color: #000; vertical-align: middle; margin-left: 6px;">Avoqado</span>
+      </div>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Recibiste este correo porque ${esc(d.deParteDe)} te regal&oacute; una tarjeta de ${esc(d.negocio)}.
+      </p>
+      <p style="margin: 0 0 8px 0; font-size: 12px; color: #999;">
+        Servicios Tecnologicos Avo S.A. de C.V.
+      </p>
+      <p style="margin: 0; font-size: 12px; color: #999;">
+        <a href="https://avoqado.io/privacy" style="color: #666; text-decoration: underline;">Aviso de privacidad</a>
+      </p>
+    </div>
+
+  </div>
+</body>
+</html>`
+
+    const text = `Recibiste una tarjeta de regalo de ${d.negocio}
+
+${saludo} abre la liga para ver tu código y tu saldo.
+
+Monto: ${d.monto}
+De parte de: ${d.deParteDe}
+Folio: ${d.folio}
+
+Ver mi tarjeta: ${d.url}
+
+${privacidad}
+
+---
+Recibiste este correo porque ${d.deParteDe} te regaló una tarjeta de ${d.negocio}.
+Servicios Tecnologicos Avo S.A. de C.V.
+Aviso de privacidad: https://avoqado.io/privacy`
+
+    return this.sendEmailWithResult({ to: email, subject, html, text, idempotencyKey })
+  }
+
   async sendReservationRescheduledEmail(email: string, data: ReservationRescheduledEmailData): Promise<boolean> {
     const subject = `Tu reservacion en ${data.venueName} cambio de horario`
     const logoUrl = 'https://avoqado.io/isotipo.svg'

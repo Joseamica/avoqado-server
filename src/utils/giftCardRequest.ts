@@ -20,3 +20,16 @@ export function aparatoDe(req: Request): string | null {
 export function origenDe(req: Request): { ipAddress?: string; userAgent?: string } {
   return { ipAddress: req.ip, userAgent: req.get('user-agent') ?? undefined }
 }
+
+/**
+ * Q110: quién EMPEZÓ la operación según el aparato (el reenvío de otra sesión). `{ iniciadoPorSegunElAparato: { iniciadoPor,
+ * iniciadoPorNombre } }` si el cuerpo trae `iniciadoPor` distinto de `staffDe(req)`; si no, `{}`. Sólo para el `data` de la
+ * bitácora: nunca autor, ni comisión, ni huella. El servidor no lo valida contra nada (es lo que dice el aparato).
+ */
+export function segunElAparato(req: Request): Record<string, unknown> {
+  const { iniciadoPor, iniciadoPorNombre } = (req.body ?? {}) as { iniciadoPor?: unknown; iniciadoPorNombre?: unknown }
+  if (typeof iniciadoPor !== 'string' || !iniciadoPor || iniciadoPor === staffDe(req)) return {}
+  return {
+    iniciadoPorSegunElAparato: { iniciadoPor, iniciadoPorNombre: typeof iniciadoPorNombre === 'string' ? iniciadoPorNombre : null },
+  }
+}
