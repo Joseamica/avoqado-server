@@ -9,6 +9,7 @@ import {
   CODIGO_NEGOCIO_DEMO,
   CODIGO_SIN_CONFIRMAR,
   conNegocio,
+  esDemoReiniciadoEnLaApp,
   esCorreoDemo,
   esNegocioDemo,
   omitirPorDemo,
@@ -309,6 +310,17 @@ describe('revisarCandadoDemo: en un demo sólo se escribe en lo permitido (Codex
 })
 
 describe('revisarCandadoDemo: reglas por usuario compartido', () => {
+  it('🔴 tras el reinicio, la app del usuario demo recibe 401 por el negocio borrado (para que vuelva a entrar)', async () => {
+    const viejo = 'cnegociobor0000000000000a'
+    const r = (url: string, user = USUARIO_DEMO) => esDemoReiniciadoEnLaApp(req('GET', url, { venue: viejo, user }), viejo)
+    expect(await r(`/api/v1/mobile/venues/${viejo}/products`)).toBe(true)
+    // Una persona real con un id que no existe sigue con su 403 de siempre; el panel lo resuelve por su lado.
+    expect(await r(`/api/v1/mobile/venues/${viejo}/products`, USUARIO_REAL)).toBe(false)
+    expect(await r(`/api/v1/dashboard/venues/${viejo}/products`)).toBe(false)
+    // Su negocio vigente no es un «reiniciado».
+    expect(await esDemoReiniciadoEnLaApp(req('GET', `/api/v1/mobile/venues/${DEMO}/products`, { user: USUARIO_DEMO }), DEMO)).toBe(false)
+  })
+
   it('🔴 el usuario demo no manda avisos de texto libre a los teléfonos de otros prospectos (Codex r7, 1)', async () => {
     const r = await revisarCandadoDemo(req('POST', '/api/v1/mobile/push/test', { venue: DEMO, user: USUARIO_DEMO }))
     expect(r).toMatchObject({ ok: false, code: CODIGO_NEGOCIO_DEMO })

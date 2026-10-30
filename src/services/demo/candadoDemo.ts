@@ -462,6 +462,28 @@ function negociosARevisar(req: Request, decodificada: string): string[] {
   return [...new Set(lista.filter((v): v is string => !!v))]
 }
 
+/**
+ * Tras el reinicio de las 3:00 el negocio viejo ya no existe y la app del POS lo sigue pidiendo: con el 403 de siempre se
+ * quedaba en «No access to this venue», en inglés y sin salida (full-testing en la SAMSUNG, 30-oct). Con 401 la app
+ * renueva la sesión, reintenta y, como el negocio sigue sin existir, cierra la sesión: el prospecto vuelve a entrar y cae
+ * en el negocio nuevo. Lo llaman SÓLO los caminos que ya iban a negar el acceso (cero costo en el camino normal), sólo
+ * para el usuario demo y sólo en la app (el panel resuelve el reinicio por su lado). Si la base no contesta, sigue el 403.
+ */
+export async function esDemoReiniciadoEnLaApp(req: Request, venueId: string | null | undefined): Promise<boolean> {
+  if (!venueId || !CUID.test(venueId) || !(req.originalUrl ?? '').startsWith('/api/v1/mobile/')) return false
+  try {
+    return (await esUsuarioDemo(req.authContext?.userId)) && (await estadoDelNegocio(venueId)) === 'no existe'
+  } catch {
+    return false
+  }
+}
+
+export const RESPUESTA_DEMO_REINICIADO = {
+  error: 'Unauthorized',
+  code: 'DEMO_REINICIADO',
+  message: 'El demo se reinició. Vuelve a iniciar sesión.',
+} as const
+
 /** Capa 1. Sólo consulta la base si la petición coincide con una regla. */
 export async function revisarCandadoDemo(req: Request): Promise<ResultadoCandadoDemo> {
   const method = (req.method ?? '').toUpperCase()
