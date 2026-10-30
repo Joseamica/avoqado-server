@@ -6,6 +6,12 @@
  * we use IP whitelisting as the primary security mechanism.
  *
  * To add new IPs: Update BLUMON_ALLOWED_IPS array below
+ *
+ * 🔴 La IP se lee del PORTERO (`ipDelCliente`: `CF-Connecting-IP`, que Cloudflare no deja inventar, o `req.ip`), nunca
+ * del primer eslabón de `X-Forwarded-For`: ése lo escribe quien llama, y Cloudflare y el proxy de Render sólo AGREGAN
+ * su eslabón al final (medido en producción el 21-oct-2026). Con el primer eslabón, cualquiera pasaba mandando
+ * `X-Forwarded-For: 3.132.184.158`. El cambio se hizo después de comprobar en producción, del 22 al 29-oct, que los 12
+ * avisos reales de Blumon traían esa misma IP en el portero (D1, `docs/audit/2026-10-21-limites-por-ip/` del workspace).
  */
 
 import { Request, Response, NextFunction } from 'express'
@@ -23,64 +29,6 @@ const BLUMON_ALLOWED_IPS = [
 ]
 
 /**
- * Get client IP, handling proxies (Render, Cloudflare, etc.)
- */
-function getClientIP(req: Request): string {
-  const forwardedFor = req.headers['x-forwarded-for']
-  if (forwardedFor) {
-    const ips = (Array.isArray(forwardedFor) ? forwardedFor[0] : forwardedFor).split(',')
-    return ips[0].trim()
-  }
-
-  const realIP = req.headers['x-real-ip']
-  if (realIP) {
-    return Array.isArray(realIP) ? realIP[0] : realIP
-  }
-
-  const cfConnectingIP = req.headers['cf-connecting-ip']
-  if (cfConnectingIP) {
-    return Array.isArray(cfConnectingIP) ? cfConnectingIP[0] : cfConnectingIP
-  }
-
-  return req.ip || req.socket?.remoteAddress || 'unknown'
-}
-
-/**
- * 🔎 D1, paso 1 (21-oct-2026): SÓLO observa; la decisión sigue siendo la de `getClientIP`.
- *
- * `getClientIP` toma el PRIMER eslabón de `X-Forwarded-For`, y ése lo escribe quien llama: Cloudflare y el proxy de
- * Render AGREGAN su eslabón al final, no reemplazan la cadena (medido en producción el 21-oct). O sea que cualquiera
- * pasa este guardia mandando `X-Forwarded-For: 3.132.184.158`. Lo correcto es leer la IP del portero
- * (`ipDelCliente`: `CF-Connecting-IP`, que Cloudflare no deja inventar, o `req.ip`).
- *
- * No se cambia a ciegas: la lista sólo trae la IP del sandbox y la de producción dice «TBD». Si los avisos REALES
- * de Blumon llegan con otra IP del portero, el cambio los rechazaría. Por eso aquí se anota, en cada aviso, qué
- * decidiría leer la IP del portero. Paso 2 —cambiar la decisión— sólo si los avisos reales dicen
- * `cambiariaLaDecision: false`. Un `warn` con `decision: 'ACEPTA'` y `cambiariaLaDecision: true` es, o un aviso real
- * que el cambio rechazaría, o alguien entrando con la IP inventada. Para distinguirlos, la observación viaja también
- * en `res.locals` y el controlador la pone en «📤 Blumon webhook processed», junto al pago que emparejó: los dos
- * registros llevan `correlationId` distintos y no se pueden unir (Codex d1-r1).
- */
-function observarIpDelPortero(req: Request, ipQueDiceElVisitante: string) {
-  const ipDelPortero = (ipDelCliente(req) ?? 'unknown').replace(/^::ffff:/, '')
-  const aceptaHoy = BLUMON_ALLOWED_IPS.includes(ipQueDiceElVisitante)
-  const datos = {
-    ipQueDiceElVisitante,
-    ipDelPortero,
-    coinciden: ipQueDiceElVisitante === ipDelPortero,
-    decision: aceptaHoy ? 'ACEPTA' : 'RECHAZA',
-    cambiariaLaDecision: aceptaHoy !== BLUMON_ALLOWED_IPS.includes(ipDelPortero),
-  }
-
-  if (datos.cambiariaLaDecision) {
-    logger.warn('🔎 [Blumon IP] leer la IP del portero CAMBIARÍA la decisión (D1, paso 1: sólo se observa)', datos)
-  } else {
-    logger.info('🔎 [Blumon IP] observación (D1, paso 1)', datos)
-  }
-  return datos
-}
-
-/**
  * Middleware to verify Blumon webhook requests come from allowed IPs
  */
 export function blumonIPWhitelist(req: Request, res: Response, next: NextFunction): void {
@@ -90,17 +38,17 @@ export function blumonIPWhitelist(req: Request, res: Response, next: NextFunctio
     return
   }
 
-  const clientIP = getClientIP(req)
-  const normalizedIP = clientIP.replace(/^::ffff:/, '')
-  res.locals.blumonIpObservada = observarIpDelPortero(req, normalizedIP)
+  const clientIP = (ipDelCliente(req) ?? 'unknown').replace(/^::ffff:/, '')
 
-  if (BLUMON_ALLOWED_IPS.includes(normalizedIP)) {
+  if (BLUMON_ALLOWED_IPS.includes(clientIP)) {
     next()
     return
   }
 
   logger.warn('🚫 Blumon webhook REJECTED: IP not in whitelist', {
-    clientIP: normalizedIP,
+    clientIP,
+    // Lo que dijo quien llamó: si trae la IP de Blumon al principio, alguien intentó hacerse pasar por Blumon.
+    xForwardedFor: req.headers['x-forwarded-for'],
     allowedIPs: BLUMON_ALLOWED_IPS,
   })
 
