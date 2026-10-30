@@ -8,6 +8,7 @@
  */
 import { prismaMock } from '@tests/__helpers__/setup'
 import { getShiftById } from '@/services/dashboard/shift.dashboard.service'
+import { contarOrdenesCobradas } from '@/services/tpv/shift.tpv.service'
 
 const CAJERA = { id: 'staff-1', firstName: 'Ana', lastName: 'López' }
 
@@ -136,5 +137,35 @@ describe('detalle del turno · la cuenta de tarjetas no es orden ni producto (FA
     ).toEqual([[CAJERA.id, 1, 150]])
     expect(detalle.topProducts).toEqual([{ name: 'Playera', quantity: 1, revenue: 150 }])
     expect([detalle.totalOrders, detalle.stats.totalOrders]).toEqual([1, 1])
+  })
+
+  // S0.4 (tarjetas 1b): la lista cuenta con `contarOrdenesCobradas`, que salta la orden con ALGÚN renglón de tarjeta. Una cuenta
+  // mezclada no debería existir (A5), pero si existiera, el detalle y la lista tienen que dar el mismo número.
+  it('una cuenta MIXTA cobrada en el turno no cuenta en el detalle, igual que en la lista', async () => {
+    const cuentaMixta = {
+      ...cuentaDeTarjetas,
+      id: 'orden-mixta',
+      orderNumber: 'GC-2',
+      items: [
+        { id: 'oi-mixta-gc', quantity: 1, unitPrice: 500, discountAmount: 0, giftCardId: 'gc1', product: null },
+        {
+          id: 'oi-mixta-playera',
+          quantity: 1,
+          unitPrice: 150,
+          discountAmount: 0,
+          giftCardId: null,
+          product: { id: 'p1', name: 'Playera' },
+        },
+      ],
+    }
+    const pagos = [cobro('pago-playera', 'orden-playera', 150, false), cobro('pago-mixta', 'orden-mixta', 650, true)]
+    prismaMock.shift.findFirst.mockResolvedValue(turno([], pagos, 150) as any)
+    prismaMock.order.findMany.mockResolvedValue([ventaDeMercancia, cuentaMixta] as any)
+
+    const detalle = await getShiftById('venue-1', 'shift-1')
+
+    expect(contarOrdenesCobradas(pagos)).toBe(1)
+    expect(detalle.totalOrders).toBe(contarOrdenesCobradas(pagos))
+    expect(detalle.orders.map((o: { id: string }) => o.id)).toEqual(['orden-playera'])
   })
 })

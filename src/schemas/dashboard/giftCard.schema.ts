@@ -140,6 +140,41 @@ const operacion = z
 
 export const operationSchema = z.object({ params: tarjetaParams, body: operacion, query: z.any().optional() })
 
+/** El mismo teléfono que acepta el POS (P-2): 10 dígitos o E.164; el servidor lo normaliza (Q25). */
+const TELEFONO = /^\+?\d{10,15}$/
+
+/**
+ * 1b S7 (P-2): `POST …/:giftCardId/resend` del panel. Sin `deliveryChannel` = reenviar al mismo destino; con él, el destino
+ * (el actual o uno nuevo: el servicio decide, D3). Acepta los CUATRO canales para que impresa o en mano salga con su `code` del
+ * servicio (C5), igual que el POS.
+ */
+export const resendSchema = z.object({
+  params: tarjetaParams,
+  body: z
+    .object({
+      operationKey,
+      deliveryChannel: z
+        .enum(['WHATSAPP', 'EMAIL', 'PRINTED', 'HANDED_TO_BUYER'], {
+          errorMap: () => ({ message: 'Elige a dónde va la tarjeta: WhatsApp, correo, imprimir o entregar al comprador' }),
+        })
+        .optional(),
+      recipientPhone: z
+        .string()
+        .trim()
+        .regex(TELEFONO, 'El teléfono debe tener 10 dígitos, sin espacios (puedes anteponer +52)')
+        .optional(),
+      recipientEmail: z.string().trim().email('El correo no es válido').max(120, 'El correo es demasiado largo').optional(),
+    })
+    .strict(CAMPO_DE_MAS)
+    .superRefine((b, ctx) => {
+      if (b.deliveryChannel === 'WHATSAPP' && !b.recipientPhone)
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recipientPhone'], message: 'Para mandarla por WhatsApp falta el teléfono' })
+      if (b.deliveryChannel === 'EMAIL' && !b.recipientEmail)
+        ctx.addIssue({ code: z.ZodIssueCode.custom, path: ['recipientEmail'], message: 'Para mandarla por correo falta el correo' })
+    }),
+  query: z.any().optional(),
+})
+
 export const summarySchema = z.object({
   params: venueParams,
   query: z.object({ from: dia('la fecha inicial'), to: dia('la fecha final') }),

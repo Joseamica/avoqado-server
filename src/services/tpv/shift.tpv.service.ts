@@ -19,7 +19,7 @@ import { SHIFT_CLOSE_STALE_MS } from './shiftCloseClaim.constants'
 import { abrirTurnoDeCaja, cerrarTurnoDeCaja, esperadoDelCajonAbierto } from '../shared/turnoDeCaja'
 import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
-import { ORDEN_DE_TARJETAS_SELECT, WHERE_ORDEN_DE_TARJETAS } from '../giftCards/giftCardMarks'
+import { ORDEN_DE_TARJETAS_SELECT, WHERE_ORDEN_DE_TARJETAS, WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
 import { ventasDelTurnoSinTarjetas } from '../shared/ventasDelTurno'
 import { COBRO_SIN_MARCA_DE_TURNO_CERRADO } from '../shared/paymentShiftClaim'
 
@@ -756,6 +756,8 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
         // «total de órdenes» que se lee al lado del total de ventas.
         where: {
           status: 'COMPLETED',
+          // S0.2 (tarjetas 1b): la cuenta de tarjetas no es una orden del turno; el MISMO predicado va en `orphanOrderCount`.
+          ...WHERE_ORDEN_SIN_TARJETAS,
           // Filter orders by date if date range is provided
           ...(parsedStartTime || parsedEndTime
             ? {
@@ -853,6 +855,7 @@ export async function getShiftsSummary(venueId: string, filters: ShiftFilters = 
       venueId,
       shiftId: null,
       status: 'COMPLETED',
+      ...WHERE_ORDEN_SIN_TARJETAS,
       // Misma ventana efectiva que los pagos huérfanos — sin ella, el resumen mezclaba
       // ventas de 24 h con un conteo de órdenes de TODA la historia (32k en Testarudo).
       createdAt: {

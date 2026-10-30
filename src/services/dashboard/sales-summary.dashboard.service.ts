@@ -1667,14 +1667,27 @@ export function flattenSalesSummaryForExport(
         percentage: round2x(m.percentage),
       })
     }
-    if (report.giftCardBalanceBreakdown) {
+    // Tarjetas de regalo (Q100), igual que «Métodos de pago» del panel (B5/M2, `SalesSummary.tsx` `lineaDeSaldo`): los métodos son
+    // DINERO; el saldo va aparte, BRUTO y sin porcentaje, y lo que regresó al saldo se dice en su propia fila. Sin sobres ni saldo
+    // en el rango no sale ninguna de las dos, con la misma condición que el panel.
+    const saldo = report.giftCardBalanceBreakdown
+    if (saldo && (saldo.count > 0 || (s.paidWithGiftCardBalance ?? 0) !== 0)) {
       rows.push({
         section: 'paymentMethods',
         label: 'Saldo de tarjeta de regalo',
-        count: report.giftCardBalanceBreakdown.count,
-        amount: round2x(report.giftCardBalanceBreakdown.amount),
+        count: saldo.count,
+        amount: round2x(saldo.amount),
         percentage: null,
       })
+      if (saldo.refunds > 0) {
+        rows.push({
+          section: 'paymentMethods',
+          label: 'Regresó al saldo de tarjetas',
+          count: null,
+          amount: round2x(saldo.refunds),
+          percentage: null,
+        })
+      }
     }
   }
   // NOTE (see Task 6 FIX 7): getSalesSummary only populates byPaymentMethodDetailed when

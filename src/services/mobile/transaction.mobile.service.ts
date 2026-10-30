@@ -95,6 +95,8 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
         maskedPan: true,
         referenceNumber: true,
         createdAt: true,
+        // 1b Q28: qué cobro es saldo de tarjeta de regalo.
+        tenderType: { select: { systemKind: true } },
         order: {
           select: {
             orderNumber: true,
@@ -137,6 +139,8 @@ export async function getTransactions(venueId: string, page: number, pageSize: n
       // Aditivos (D4, mesas40): opcionales; sin orden o sin mesa, null.
       orderType: p.order?.type ?? null,
       tableNumber: p.order?.table?.number ?? null,
+      // Aditivo (1b Q28): las apps lo nombran «Tarjeta de regalo».
+      esSaldoDeTarjeta: isGiftCardTenderKind(p.tenderType?.systemKind),
     })),
     meta: {
       total,

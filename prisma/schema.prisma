@@ -8325,6 +8325,9 @@ model OtpChallenge {
   consumedAt  DateTime?
   ip          String?
   createdAt   DateTime  @default(now())
+  /// 1b: 'CUSTOMER_LOGIN' (el cliente entra a su cuenta) | 'GIFT_CARD_PHONE' (teléfono + código en la caja). Un uso no
+  /// consume ni invalida el reto del otro.
+  purpose     String    @default("CUSTOMER_LOGIN")
 
   @@index([destination, expiresAt])
   @@index([venueId, destination, channel])
@@ -8595,6 +8598,19 @@ model GiftCard {
   deliveryStatus   GiftCardDeliveryStatus  @default(PENDING)
   deliveredAt      DateTime?
 
+  // 1b: la entrega la hace un trabajo (Q1), no una promesa en memoria.
+  deliveryAttempts      Int       @default(0)
+  deliveryNextAttemptAt DateTime?
+  deliveryClaimedAt     DateTime?
+  /// TEMPLATE_NOT_AVAILABLE · WHATSAPP_SEND_FAILED · WHATSAPP_UNDELIVERED · EMAIL_SEND_FAILED · EMAIL_INVALID_ADDRESS · UNCONFIRMED
+  deliveryErrorCode     String?
+  deliveryMessageId     String?
+  /// La `operationKey` del último reenvío o cambio de destino: deduplica el reintento y separa la llave de Resend (S3).
+  deliveryOperationKey  String?
+  /// Q37: la huella del pedido con que se creó la venta (la misma en todas sus tarjetas). El reenvío compara contra ésta,
+  /// no contra los datos de hoy, que cambiar el destino (S4) edita.
+  ventaHuella           String?
+
   source      GiftCardSource @default(POS)
   cancelToken String?        @unique
 
@@ -8609,6 +8625,8 @@ model GiftCard {
   @@index([venueId, status, createdAt])
   @@index([venueId, customerId])
   @@index([venueId, expiresAt])
+  @@index([deliveryStatus, deliveryNextAttemptAt])
+  @@index([deliveryMessageId])
 }
 
 /// La libreta del sobre: SÓLO se insertan renglones (un trigger impide UPDATE y DELETE). `amount` siempre >= 0; el tipo

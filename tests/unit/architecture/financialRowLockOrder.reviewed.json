@@ -164,6 +164,16 @@
       "count": 1,
       "loops": 0,
       "reason": "C06: executeExchangeInTransaction owns ORDER_LOCK_WAIT_BUDGET. Advisory then Venue KEY SHARE and all new/original/ancestor Orders by createdAt DESC/id DESC; credit/root/charge Payments once by id ASC before snapshots and Shift. finishExchangeInTx inherits these locks; the sweep delegates here, never opens a transaction. PostgreSQL exchangeCardLockOrder covers CHAIN/direct refunds and terminal registration."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#reclamarEntregas": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b (entrega): UN UPDATE en autocommit cuya subconsulta toma sobres por id ASC con FOR UPDATE SKIP LOCKED; nunca espera ni retiene Order ni Payment."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#cerrarAtoradas": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b (entrega): UN UPDATE en autocommit cuya subconsulta toma sobres por id ASC con FOR UPDATE SKIP LOCKED; nunca espera ni retiene Order ni Payment."
     }
   },
   "callers": {
@@ -562,10 +572,10 @@
       "loops": 0,
       "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
     },
-    "src/services/mobile/order.mobile.service.ts#createOrderWithItems#lockTableOrderScope": {
+    "src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx#lockTableOrderScope": {
       "count": 1,
       "loops": 0,
-      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
+      "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras. Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño)."
     },
     "src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction#lockExistingOrderForPayment": {
       "count": 1,
@@ -617,15 +627,15 @@
       "loops": 0,
       "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
     },
-    "src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder#lockGiftCardsForUpdate": {
+    "src/services/mobile/order.mobile.service.ts#prepararAbonoConSaldoEnTx#lockGiftCardsForUpdate": {
       "count": 1,
       "loops": 0,
-      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6)."
+      "reason": "Unión completa de sobres por id ASC; si reentra después del turno son sobres ya poseídos (R6). Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño)."
     },
-    "src/services/mobile/order.mobile.service.ts#payGiftCardBalanceOnOrder#onOrderPaid": {
+    "src/services/mobile/order.mobile.service.ts#terminarCobroConSaldo#onOrderPaid": {
       "count": 1,
       "loops": 0,
-      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores."
+      "reason": "Cada invocación abre/termina su propia transacción; el bucle externo no conserva filas de invocaciones anteriores. Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño)."
     },
     "src/services/mobile/order.mobile.service.ts#returnGiftBalanceAndCancelOrder#lockTableOrderScope": {
       "count": 1,
@@ -1042,10 +1052,10 @@
       "loops": 0,
       "reason": "Una Order por operación; el llamador abre una transacción por venta o reentra una Order ya poseída."
     },
-    "src/services/wallet/redeemStampReward.service.ts#redeemStampReward#lockExistingOrderForPayment": {
+    "src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
-      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas."
+      "reason": "Una venta y su ascendencia; primera reclamación o reentrada del MISMO conjunto, nunca bucle de Orders nuevas. Tarjetas 1b S2b: la función se extrajo sin cambiarla (el mismo sitio, otro dueño)."
     },
     "src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx#lockExistingOrderForPayment": {
       "count": 1,
@@ -1076,6 +1086,31 @@
       "count": 1,
       "loops": 0,
       "reason": "Una Order por operación: abre su transacción y la toma primero, antes de leer sus Payments."
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#bloquearVigente#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b S4 (reenviar, cambiar destino, mostrar el código): UN sobre en su propia transacción. Transacción que sólo aparta sobres (GiftCard) por id ASC, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
+    },
+    "src/services/giftCards/giftCardCuenta.service.ts#revelarCodigosDeLaCuenta#lockGiftCardsForUpdate": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b Q42: los sobres de UNA cuenta en una sola llamada; la Order sólo se LEE (sin candado). Transacción que sólo aparta sobres (GiftCard) por id ASC, sin Order ni Payment antes ni después: no forma ciclo con los cobros (Order → sobre)."
+    },
+    "src/services/mobile/order.mobile.service.ts#montoDeLaVentaNuevaEnTx#lockExistingOrderForPayment": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b (pay-new-order): la Order nació en ESTA transacción (privada hasta el commit); se aparta antes que cualquier sobre o Payment y el núcleo la reentra (mismo conjunto)."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#entregarTarjetas#cerrarAtoradas": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b (entrega): la pasada llama al helper sin transacción propia (autocommit); el helper sólo toma sobres con SKIP LOCKED y no retiene nada al volver."
+    },
+    "src/services/giftCards/giftCardDelivery.service.ts#entregarTarjetas#reclamarEntregas": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Tarjetas 1b (entrega): la pasada llama al helper sin transacción propia (autocommit); el helper sólo toma sobres con SKIP LOCKED y no retiene nada al volver."
     }
   }
 }

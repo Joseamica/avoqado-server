@@ -80,7 +80,10 @@ describe('OTP — teléfono mexicano por defecto', () => {
       consumerId: 'cons1',
     } as any)
     await verifyOtp({ venueId: VENUE, channel: 'whatsapp', destination: '55 4345 3965', code: CODE })
-    expect((prismaMock.otpChallenge.findFirst as jest.Mock).mock.calls[0][0].where).toMatchObject({ destination: NORM })
+    expect((prismaMock.otpChallenge.findFirst as jest.Mock).mock.calls[0][0].where).toMatchObject({
+      destination: NORM,
+      purpose: 'CUSTOMER_LOGIN',
+    })
   })
 
   it('🔴 Dany guardado como +5543453965 (OTP viejo) ENTRA a su cuenta: no se duplica', async () => {
