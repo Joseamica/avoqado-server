@@ -108,8 +108,14 @@ import { featureCatalogQuery } from '../services/launchCampaigns/featureCatalog.
 import { getFeatureCatalog } from '../controllers/public/featureCatalog.public.controller'
 import { getPriceList, postPriceSelection } from '../controllers/public/priceList.public.controller'
 import onlineOrderingPublicRoutes from './public/onlineOrdering.public.routes'
+import { negocioPorLigaDePago, negocioPorReciboDigital, negocioPorSlug } from '../middlewares/negocioDeRutaPublica.middleware'
 
 const router = Router()
+
+// El negocio de cada ruta pública entra al contexto en cuanto la URL lo identifica (logs y candado de negocios demo).
+router.param('venueSlug', negocioPorSlug)
+router.param('shortCode', negocioPorLigaDePago)
+router.param('accessKey', negocioPorReciboDigital)
 router.use('/document-requests', documentRequestsRoutes)
 
 // ── Tarjetas de regalo: la página pública del regalo (1b S6) ───────────────────────────────────────────────────────────
@@ -696,6 +702,8 @@ const altaVerificarSchema = z.object({
 })
 const altaReenviarSchema = z.object({ body: z.object({ email: z.string().trim().email('Formato de correo invalido') }) })
 
+// Una prueba lee esta línea tal cual (límites del alta con código, la compuerta primero): que el formateador no la parta.
+// prettier-ignore
 router.post('/alta/verificar', soloConAltaConCodigo, contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
 router.post('/alta/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest(altaReenviarSchema), reenviarAlta)
 

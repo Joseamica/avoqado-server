@@ -744,6 +744,10 @@ const WRITERS: Record<string, Writer> = {
     class: 'EXCLUDED',
     reason: 'synthetic onboarding orders created with their lines; never a live sale',
   },
+  'src/services/demo/negociosDemo.service.ts#seedHistory': {
+    class: 'EXCLUDED',
+    reason: 'synthetic orders of the sales-demo venues, created with their lines; never a live sale',
+  },
   // develop f97a82b1 (28-sep): the delete moved to runOnce and now rereads the rule under the canonical Order lock.
   'src/jobs/abandoned-orders-cleanup.job.ts#AbandonedOrdersCleanupJob.runOnce': {
     class: 'EXCLUDED',
@@ -1063,8 +1067,9 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
     const sweep = codeOf('src/jobs/exchange-card-settlement.job.ts#ExchangeCardSettlementJob.run')
     // The sweep owns no transaction: each candidate waits on the settle/cancel opener's ORDER_LOCK_WAIT_BUDGET.
     expect(sweep).not.toContain('$transaction(')
-    expect(sweep).toContain('await settleExchangeCharge(')
-    expect(sweep).toContain('await cancelExchange(')
+    // Negocios demo (candado, capa 3): la llamada va dentro del negocio de la fila.
+    expect(sweep).toMatch(/await conNegocio\(candidate\.venueId, \(\) =>\s*settleExchangeCharge\(/)
+    expect(sweep).toMatch(/await conNegocio\(candidate\.venueId, \(\) =>\s*cancelExchange\(/)
     expect(codeOf('src/services/exchanges/exchange.service.ts#settleExchangeCharge')).toContain('await executeExchangeInTransaction(')
   })
 

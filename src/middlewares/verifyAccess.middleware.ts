@@ -39,7 +39,8 @@ import {
   UserAccess,
   AccessCache,
 } from '@/services/access/access.service'
-import { ForbiddenError, ServiceUnavailableError } from '@/errors/AppError'
+import { ForbiddenError, ServiceUnavailableError, UnauthorizedError } from '@/errors/AppError'
+import { esDemoReiniciadoEnLaApp, RESPUESTA_DEMO_REINICIADO } from '@/services/demo/candadoDemo'
 import logger from '@/config/logger'
 import prisma from '@/utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
@@ -209,6 +210,9 @@ export const verifyAccess = (options: VerifyAccessOptions = {}) => {
 
         // User doesn't have access to this venue
         logger.warn(`verifyAccess: User ${userId} denied access to venue ${targetVenueId}`, error)
+        if (await esDemoReiniciadoEnLaApp(req, targetVenueId)) {
+          throw new UnauthorizedError(RESPUESTA_DEMO_REINICIADO.message, RESPUESTA_DEMO_REINICIADO.code)
+        }
         throw new ForbiddenError('No access to this venue')
       }
 

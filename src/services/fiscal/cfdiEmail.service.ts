@@ -9,6 +9,7 @@ import { logAction } from '@/services/dashboard/activity-log.service'
 import prisma from '@/utils/prismaClient'
 import { resolveFiscalProvider } from './fiscalProvider.factory'
 import type { FiscalProvider } from './providers/fiscal-provider.interface'
+import { omitirPorDemo } from '@/services/demo/candadoDemo'
 
 export type CfdiEmailOrigin = 'EMISION' | 'REENVIO' | 'MCP'
 type Proveedor = Pick<FiscalProvider, 'sendInvoiceByEmail'>
@@ -79,6 +80,11 @@ async function enviar(
       entityId: cfdi.id,
       data: { folio, destination: destination ?? 'registrado en el proveedor', origin: p.origin, ...extra },
     })
+
+  // Negocios demo (capa 2): Facturapi manda el correo aunque la llave sea de prueba; del demo no sale ninguno.
+  const motivoDemo = await omitirPorDemo('factura por correo', p.email, p.venueId)
+  if (motivoDemo === 'sin confirmar') throw new ProviderUnavailableError('No pudimos confirmar el negocio. Intenta de nuevo en un momento.')
+  if (motivoDemo) return { folio, destination }
 
   try {
     await provider.sendInvoiceByEmail(cfdi.facturapiId, p.email)

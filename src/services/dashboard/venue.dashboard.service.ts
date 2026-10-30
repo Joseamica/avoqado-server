@@ -32,7 +32,7 @@ import { Venue, AccountType, EntityType, VerificationStatus, VenueStatus, VenueO
 import { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { generateSlug, validateSlug } from '../../utils/slugify'
 import logger from '../../config/logger'
-import { deleteVenueFolder, deleteFileFromStorage } from '../storage.service'
+import { deleteVenueFolder, deleteFileFromStorage, estaEnLaCarpetaDelNegocio } from '../storage.service'
 import { historiaDeSede, sedeConPagoAlPersonalError } from './staffPay/participacion'
 import { PresupuestoDeEspera, tomarCandado } from '../../utils/esperaDeCandados'
 import {
@@ -237,7 +237,8 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     const newLogo = safeUpdateData.logo || null // Treat empty string as null
 
     // If logo is changing and there was an old logo, delete it from storage
-    if (oldLogo && oldLogo !== newLogo) {
+    // Sólo un archivo de la carpeta de este negocio: la URL del logo la escribe quien edita y puede ser de otro negocio.
+    if (oldLogo && oldLogo !== newLogo && estaEnLaCarpetaDelNegocio(oldLogo, existingVenue.slug)) {
       logger.info(`🗑️  Auto-cleanup: Deleting old logo from Firebase Storage`, {
         venueId,
         oldLogo,
@@ -261,7 +262,7 @@ export async function updateVenue(orgId: string, venueId: string, updateData: an
     const oldLogoFull = existingVenue.logoFull
     const newLogoFull = safeUpdateData.logoFull || null // Treat empty string as null
 
-    if (oldLogoFull && oldLogoFull !== newLogoFull) {
+    if (oldLogoFull && oldLogoFull !== newLogoFull && estaEnLaCarpetaDelNegocio(oldLogoFull, existingVenue.slug)) {
       logger.info(`🗑️  Auto-cleanup: Deleting old full logo from Firebase Storage`, {
         venueId,
         oldLogoFull,

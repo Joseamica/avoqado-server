@@ -1,4 +1,4 @@
-import { OrgRole, StaffRole } from '@prisma/client'
+import { OrgRole, StaffRole, VenueStatus } from '@prisma/client'
 import prisma from '@/utils/prismaClient'
 import { getUserAccess, createAccessCache } from '@/services/access/access.service'
 import type { UserAccess } from '@/services/access/access.service'
@@ -23,6 +23,11 @@ export interface McpScope {
   scopes?: string[]
   /** App OAuth detrás de esta conexión (el `cid` del token: ChatGPT, Claude…). La bitácora de cada escritura la guarda. */
   clientId?: string
+  /**
+   * Todos los negocios de la conexión son demo (`LIVE_DEMO`): el asistente sólo consulta (candado de negocios demo, capa 4).
+   * Se calcula con los negocios que la conexión ya lee; ausente = no.
+   */
+  soloNegociosDemo?: boolean
 }
 
 /**
@@ -91,19 +96,22 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
   }
 
   let venueIds: string[]
+  let estados: Map<string, string | undefined>
   if (membership?.role === 'OWNER') {
     // Org-level OWNER → every venue in the org.
-    const venues = await prisma.venue.findMany({ where: { organizationId: activeOrg }, select: { id: true } })
+    const venues = await prisma.venue.findMany({ where: { organizationId: activeOrg }, select: { id: true, status: true } })
     venueIds = venues.map(v => v.id)
+    estados = new Map(venues.map(v => [v.id, v.status]))
   } else {
     // Active ADMIN/MEMBER/VIEWER, OR no org membership at all (venue-level owner/staff with
     // StaffVenue access but no StaffOrganization row, e.g. the Mindform owner) → only their
     // assignments in this org. getUserAccess below is the final per-venue authority.
     const assignments = await prisma.staffVenue.findMany({
       where: { staffId, active: true, venue: { organizationId: activeOrg } },
-      select: { venueId: true },
+      select: { venueId: true, venue: { select: { status: true } } },
     })
     venueIds = assignments.map(a => a.venueId)
+    estados = new Map(assignments.map(a => [a.venueId, a.venue?.status]))
   }
 
   // Resolve per-venue access CONCURRENTLY (bounded). This used to be a sequential
@@ -136,11 +144,14 @@ export async function resolveScope(staffId: string, activeOrg: string): Promise<
     )
     for (const entry of batch) if (entry) perVenueAccess.set(entry[0], entry[1])
   }
+  const allowedVenueIds = [...perVenueAccess.keys()]
+  const soloNegociosDemo = allowedVenueIds.length > 0 && allowedVenueIds.every(id => estados.get(id) === VenueStatus.LIVE_DEMO)
   return {
     staffId,
     activeOrg,
     ...(membership ? { organizationId: activeOrg, orgRole: membership.role as OrgRole } : {}),
-    allowedVenueIds: [...perVenueAccess.keys()],
+    allowedVenueIds,
     perVenueAccess,
+    ...(soloNegociosDemo ? { soloNegociosDemo: true } : {}),
   }
 }

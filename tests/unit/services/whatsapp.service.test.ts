@@ -338,9 +338,13 @@ describe('tarjetas de regalo (1b S3)', () => {
   it('I1: la entrega de la tarjeta corta a los 20 s y el aborto sale como fallo de red (transitorio), no como error de Meta', async () => {
     const corte = new AbortController()
     const tope = jest.spyOn(AbortSignal, 'timeout').mockReturnValue(corte.signal)
-    // Un Meta colgado: la petición sólo termina cuando su `signal` la aborta.
+    // Un Meta colgado: la petición sólo termina cuando su `signal` la aborta. Como el `fetch` real, si el `signal` ya llegó
+    // abortado rechaza de inmediato (el candado de negocios demo revisa el envío antes de llamar a `fetch`).
     global.fetch = jest.fn(
-      (_url, opts: any) => new Promise((_resolve, reject) => opts.signal.addEventListener('abort', () => reject(opts.signal.reason))),
+      (_url, opts: any) =>
+        new Promise((_resolve, reject) =>
+          opts.signal.aborted ? reject(opts.signal.reason) : opts.signal.addEventListener('abort', () => reject(opts.signal.reason)),
+        ),
     ) as unknown as typeof global.fetch
 
     let caught: unknown

@@ -103,6 +103,20 @@ describe('resolveScope', () => {
     expect(m.venue.findMany).not.toHaveBeenCalled()
   })
 
+  it('negocios demo: la marca sale sólo si TODOS los negocios permitidos son LIVE_DEMO', async () => {
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'OWNER', isActive: true })
+    m.venue.findMany.mockResolvedValue([{ id: 'A', status: 'LIVE_DEMO' }])
+    expect((await resolveScope('owner', 'org-1')).soloNegociosDemo).toBe(true)
+    m.venue.findMany.mockResolvedValue([
+      { id: 'A', status: 'LIVE_DEMO' },
+      { id: 'B', status: 'ACTIVE' },
+    ])
+    expect((await resolveScope('owner', 'org-1')).soloNegociosDemo).toBeUndefined()
+    m.staffOrganization.findUnique.mockResolvedValue({ role: 'ADMIN', isActive: true })
+    m.staffVenue.findMany.mockResolvedValue([{ venueId: 'A', venue: { status: 'LIVE_DEMO' } }])
+    expect((await resolveScope('admin', 'org-1')).soloNegociosDemo).toBe(true)
+  })
+
   it('ADMIN with no StaffVenue -> zero venues', async () => {
     m.staffOrganization.findUnique.mockResolvedValue({ role: 'ADMIN', isActive: true })
     m.staffVenue.findMany.mockResolvedValue([])

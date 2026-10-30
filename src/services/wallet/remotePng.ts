@@ -2,6 +2,7 @@ import { createHash } from 'crypto'
 import logger from '../../config/logger'
 import { decodePng, type DecodedPng } from './pngDecode'
 import { reducirImagen } from './pngCanvas'
+import { omitirPorDemo } from '../demo/candadoDemo'
 
 /**
  * Trae una imagen que el negocio subió, para meterla en su pase.
@@ -34,6 +35,9 @@ export function isPng(buffer: Buffer): boolean {
 
 export async function fetchPng(url: string | null | undefined): Promise<Buffer | null> {
   if (!url) return null
+  // Candado de negocios demo (Codex r7, 2): en un demo la dirección la escribe cualquiera y el SERVIDOR la visitaría.
+  // Sin imagen la tarjeta sale con la de respaldo (regla 2: nunca bloquea).
+  if (await omitirPorDemo('descargar la imagen del pase')) return null
 
   try {
     const response = await fetch(url, { signal: AbortSignal.timeout(TIMEOUT_MS) })

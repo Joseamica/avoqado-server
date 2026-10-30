@@ -4,6 +4,7 @@ import logger from '../config/logger'
 import { markNoShow, PASS_ARRIVAL_PENDING } from '../services/dashboard/reservation.dashboard.service'
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
+import { conNegocio } from '../services/demo/candadoDemo'
 import { flushPendingCorrectionNotices, sendClassNoShowSummaries } from '../services/reservation/noShowNotices.service'
 
 /**
@@ -110,7 +111,8 @@ export class ReservationAutoNoShowJob {
           //   - statusLog audit entry
           //   - activity log (`RESERVATION_NO_SHOW`)
           //   - credit pack refund when `creditNoShowRefund` is true
-          await markNoShow(reservation.venueId, reservation.id, 'SYSTEM')
+          // Con el negocio de la reserva en el contexto (candado demo, capa 3): el aviso de no-show de un demo no sale.
+          await conNegocio(reservation.venueId, () => markNoShow(reservation.venueId, reservation.id, 'SYSTEM'))
 
           // Record the fee intent if the venue charges a no-show fee AND a deposit
           // was actually paid. Capture is deferred — Stripe webhook owns funds.

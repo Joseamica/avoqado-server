@@ -22,6 +22,7 @@
 
 import logger from '@/config/logger'
 import { sanitizeServiceMessage, sanitizeTemplateVar } from '@/utils/whatsappSanitize'
+import { omitirPorDemo } from './demo/candadoDemo'
 
 const WHATSAPP_API_URL = 'https://graph.facebook.com/v21.0'
 
@@ -109,6 +110,10 @@ async function sendTemplateMessage(
    */
   timeoutMs?: number,
 ): Promise<{ messageId: string }> {
+  // Negocios demo (capa 2): ningún WhatsApp sale de un negocio demo. Se contesta como enviado para no romper a quien llama.
+  const motivoDemo = await omitirPorDemo(`WhatsApp «${templateName}»`)
+  if (motivoDemo === 'sin confirmar') throw new Error('No se pudo confirmar el negocio: el WhatsApp no se envió')
+  if (motivoDemo) return { messageId: 'negocio-demo' }
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
 
@@ -518,6 +523,9 @@ export class WhatsappCloudApiError extends Error {
 // before invoking. On Cloud API failure, throws WhatsappCloudApiError so the
 // caller can branch on cloudApiErrorCode (e.g. 131047 → fall back to template).
 export async function sendServiceMessage(phone: string, body: string): Promise<{ messageId: string }> {
+  const motivoDemo = await omitirPorDemo('WhatsApp de servicio')
+  if (motivoDemo === 'sin confirmar') throw new Error('No se pudo confirmar el negocio: el WhatsApp no se envió')
+  if (motivoDemo) return { messageId: 'negocio-demo' }
   const phoneNumberId = process.env.WHATSAPP_PHONE_NUMBER_ID
   const accessToken = process.env.WHATSAPP_ACCESS_TOKEN
   if (!phoneNumberId || !accessToken) {

@@ -23,6 +23,7 @@ import {
 import prisma from '@/utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { utcTs } from '@/utils/sqlDates'
+import { conNegocio } from '@/services/demo/candadoDemo'
 import { urlDeLaPagina, type CodigoDeFalloDeEntrega } from './giftCardEntrega'
 import { anotarFalloTemprano, falloTemprano } from './giftCardFallosTempranos'
 import { formatoPesos } from './giftCardLimits'
@@ -414,7 +415,9 @@ export async function entregarTarjetas(p: { ids?: string[]; ahora?: Date } = {})
     }
     const negocio = nombres.get(e.venueId) ?? ''
     try {
-      const desenlace = await entregarUna(e, negocio, ahora)
+      // Con el negocio de la tarjeta en el contexto (candado de negocios demo, capa 3): en un demo, un prospecto puede vender
+      // una tarjeta electrónica a cualquier correo o WhatsApp, y la entrega no debe salir a esa persona real.
+      const desenlace = await conNegocio(e.venueId, () => entregarUna(e, negocio, ahora))
       if (desenlace) r[desenlace] += 1
     } catch (error) {
       avisarFallo({

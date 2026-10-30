@@ -1,6 +1,7 @@
 import { connect, constants } from 'http2'
 import { env } from '../../config/env'
 import logger from '../../config/logger'
+import { omitirPorDemo } from '../demo/candadoDemo'
 
 /**
  * El canal por el que se despierta el iPhone de un cliente.
@@ -36,8 +37,11 @@ export function apnsAvailable(): boolean {
  * Nunca lanza: devuelve el resultado. Quien llama decide qué hacer, y lo que no puede
  * pasar es que un fallo de red tumbe el cobro desde el que se llamó.
  */
-export async function sendSilentPush(deviceToken: string): Promise<PushResult> {
+export async function sendSilentPush(deviceToken: string, venueId: string): Promise<PushResult> {
   if (!apnsAvailable()) return { ok: false }
+  // Candado de negocios demo (capa 2; Codex r6, 4): un demo no le habla a Apple. Pide el negocio para que una llamada
+  // nueva no se lo salte.
+  if (await omitirPorDemo('aviso de Apple Wallet', null, venueId)) return { ok: false }
 
   const host = env.NODE_ENV === 'production' ? HOST_PROD : HOST_SANDBOX
 
