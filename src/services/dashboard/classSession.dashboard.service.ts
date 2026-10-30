@@ -158,7 +158,39 @@ export async function getClassSession(venueId: string, sessionId: string) {
   const passes = await passesForSessions(venueId, [session], venue?.timezone || 'America/Mexico_City')
   const visits = await passVisitsFor(venueId, session.reservations)
   const reservations = session.reservations.map(r => ({ ...r, passVisit: visits.get(r.id) ?? null }))
-  return { ...session, reservations, enrolled, available: session.capacity - enrolled, passes: passes?.get(session.id) ?? null }
+  // D4: las faltas van APARTE para «Sí llegó»; `reservations` y `enrolled` no cambian (las apps viejas cuentan con ellos).
+  // Tope 500 + `noShowsTotal` exacto: el cupo de una clase no tiene máximo, así que si junta más faltas el cliente dice
+  // «y N más» en vez de presentar una lista parcial como completa.
+  // ponytail: sin página siguiente; si una clase junta más de 500 faltas, paginar aquí.
+  const noShowsWhere = { venueId, classSessionId: sessionId, status: 'NO_SHOW' as const }
+  const [noShows, noShowsTotal] = await Promise.all([
+    prisma.reservation.findMany({
+      where: noShowsWhere,
+      select: {
+        id: true,
+        confirmationCode: true,
+        partySize: true,
+        guestName: true,
+        guestPhone: true,
+        customer: { select: { id: true, firstName: true, lastName: true, phone: true } },
+        noShowAt: true,
+        status: true,
+        aggregatorBooking: { select: { id: true, provider: true } }, // falta de pase: se etiqueta y no lleva «Sí llegó»
+      },
+      orderBy: [{ noShowAt: 'asc' }, { id: 'asc' }],
+      take: 500,
+    }),
+    prisma.reservation.count({ where: noShowsWhere }),
+  ])
+  return {
+    ...session,
+    reservations,
+    enrolled,
+    available: session.capacity - enrolled,
+    passes: passes?.get(session.id) ?? null,
+    noShows,
+    noShowsTotal,
+  }
 }
 
 // ---- Create ----

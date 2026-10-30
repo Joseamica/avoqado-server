@@ -46,6 +46,16 @@ describe('unsubscribeToken', () => {
     expect(verifyUnsubscribeToken(swapped)).toBeNull()
   })
 
+  it('accepts the RESERVATIONS category (avisos de «No asistió», D4)', () => {
+    const data = { staffId: 'staff_abc', venueId: 'venue_xyz', category: 'RESERVATIONS' as const }
+    expect(verifyUnsubscribeToken(signUnsubscribeToken(data))).toEqual(data)
+  })
+
+  it('rejects a CORRECTLY SIGNED token whose category is unknown (the category check, not the signature)', () => {
+    const token = signUnsubscribeToken({ ...DATA, category: 'PAYROLL' as any })
+    expect(verifyUnsubscribeToken(token)).toBeNull()
+  })
+
   it('rejects an unknown category', () => {
     const body = Buffer.from(JSON.stringify({ v: 1, p: 'unsub', s: 's', ve: 'v', c: 'PAYROLL' })).toString('base64url')
     const token = signUnsubscribeToken(DATA)
