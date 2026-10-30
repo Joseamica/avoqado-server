@@ -68,3 +68,35 @@ describe('correo del recibo · IVA y cargo', () => {
     expect(s.html).toContain('Total')
   })
 })
+
+describe('correo del recibo · D1 fotocopia del ticket', () => {
+  it('escapa los textos de cada renglón (nombre, modificador, peso, área y nota) y pinta peso, área y nota', async () => {
+    const s = await enviar({
+      subtotal: 30,
+      discountAmount: 3,
+      totalAmount: 27,
+      items: [{ name: 'Café <b>Am</b>', quantity: 1, price: 30, totalPrice: 30, modifiers: [{ name: '<i>Sin</i>', price: 0 }],
+                peso: '<u>0.5 kg</u>', area: '<b>Barra</b>', nota: '"<script>x</script>"' }],
+    })
+    for (const crudo of ['<b>Am</b>', '<i>Sin</i>', '<u>0.5 kg</u>', '<b>Barra</b>', '<script>x</script>']) expect(s.html).not.toContain(crudo)
+    expect(s.html).toContain('Café &lt;b&gt;Am&lt;/b&gt;')
+    expect(s.html).toContain('&lt;u&gt;0.5 kg&lt;/u&gt;')
+    expect(s.html).toContain('&lt;b&gt;Barra&lt;/b&gt;')
+    expect(s.html).toContain('&quot;&lt;script&gt;x&lt;/script&gt;&quot;')
+  })
+
+  it('el texto plano dice lo mismo que el HTML: modificadores, peso, área, nota, «Cortesía» y la pieza del combo (Codex código r1 #2)', async () => {
+    const s = await enviar({
+      subtotal: 60,
+      discountAmount: 15,
+      totalAmount: 45,
+      items: [
+        { name: 'Combo', quantity: 1, price: 45, totalPrice: 45, modifiers: [{ name: 'Sin azúcar' }], peso: '0.5 kg', area: 'Barra', nota: 'para llevar' },
+        { name: 'Papas', quantity: 1, price: 0, totalPrice: 0, modifiers: [], pieza: true },
+        { name: 'Galleta', quantity: 1, price: 15, totalPrice: 15, modifiers: [], cortesia: true },
+      ],
+    })
+    for (const parte of ['+ Sin azúcar', '0.5 kg', 'Barra', 'Nota: para llevar', '1x Papas', 'Galleta x1 - Cortesía']) expect(s.text).toContain(parte)
+    expect(s.html).toContain('Cortesía')
+  })
+})

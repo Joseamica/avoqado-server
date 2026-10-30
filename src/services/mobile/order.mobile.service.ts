@@ -37,6 +37,7 @@ import {
 } from '../dashboard/tenderType.dashboard.service'
 import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderProvisioning.service'
 import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
+import { copiaQueCuadra } from '../shared/lineasDelTicket'
 import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
@@ -3390,6 +3391,8 @@ export interface CashPaymentInput {
   edadDeLaVentaMs?: number
   /** S6: el serial de la terminal del TOKEN, nunca del body (`CreateOrderInput.terminalSerialNumber`). */
   terminalSerialNumber?: string | null
+  /** D1: la copia de los renglones que imprimió el cobro (sin validar; ver `copiaQueCuadra`). */
+  lineasDelTicket?: unknown
 }
 
 export interface CashPaymentResponse {
@@ -3628,6 +3631,8 @@ export interface AbonoEnTxContexto {
 export interface AbonoEnTxEntrada {
   /** Fecha contable de una operación compuesta; sólo interna, nunca tomada del cuerpo del cobro. */
   createdAt?: Date
+  /** D1: la copia de los renglones que imprimió el cobro, sin validar. Se guarda en `processorData` sólo si cuadra con lo aplicado. */
+  lineasDelTicket?: unknown
   /** El cambio espera al último abono: la tolerancia de un centavo no puede cerrar antes. */
   cierreDiferido?: boolean
   /** Lo SOLICITADO, en centavos enteros (la frontera de `payCashOrder`). */
@@ -4135,11 +4140,19 @@ export async function registrarAbonoEnTx(
   const paymentSource = countsAsDrawerCash ? (entrada.terminalId ? 'TPV' : 'APP') : 'OTHER'
   const externalSource = countsAsDrawerCash ? null : input.externalSource?.trim()?.slice(0, 50) || null
 
+  // D1 «fotocopia del ticket»: sólo si cuadra EXACTO con lo que quedó en este pago (sin propina). Si el servidor recortó el efectivo,
+  // ya no es el papel de este cobro: la parte sale como hoy. Nunca frena el cobro.
+  const copiaDelTicket = copiaQueCuadra(entrada.lineasDelTicket, Math.round(amountDecimal * 100))
+  if (entrada.lineasDelTicket != null && !copiaDelTicket) {
+    logger.warn(`payCash: la copia del ticket no cuadra con lo cobrado o no cabe; no se guarda (orden ${orderId})`)
+  }
+
   const newPayment = await tx.payment.create({
     data: {
       venueId,
       orderId,
       createdAt: entrada.createdAt,
+      processorData: copiaDelTicket ? ({ lineasDelTicket: copiaDelTicket } as unknown as Prisma.InputJsonValue) : undefined,
       amount: amountDecimal,
       tipAmount: tipDecimal,
       method: resolvedTender?.method ?? paymentMethod,
@@ -4627,6 +4640,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               cashDrawerSessionId: input.cashDrawerSessionId,
               terminalSerial: input.terminalSerialNumber ?? null,
               terminalId,
+              lineasDelTicket: input.lineasDelTicket,
               trasCandadoDeOrden:
                 amount === 0 && tip === 0
                   ? txCandado =>

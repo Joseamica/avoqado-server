@@ -517,6 +517,8 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       // Reloj monótono del aparato (ms desde la venta); sólo número: el servicio decide si es válido.
       edadDeLaVentaMs: typeof req.body.edadDeLaVentaMs === 'number' ? req.body.edadDeLaVentaMs : undefined,
       terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
+      // D1 «fotocopia del ticket»: los renglones que imprimió este cobro, opcional. El servicio la guarda sólo si cuadra con lo cobrado.
+      lineasDelTicket: req.body.lineasDelTicket,
     })
 
     res.status(200).json({
