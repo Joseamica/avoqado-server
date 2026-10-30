@@ -182,6 +182,33 @@ export function keptMarkdownDiscountRow(input: Omit<ItemDiscountRowInput, 'disco
 }
 
 /**
+ * D12: el «Ajuste de precio» que la caja escribe a mano en un producto (`adjustedUnitPrice`). UNA fila por venta con todos los
+ * renglones ajustados (`renglones` = el `ajustesDePrecio` de `buildOrderItemsData`, tal cual), como `filaDeCortesias`. El
+ * descuento ya vive en cada renglón (`discountAmount`); la fila lo duplica ⇒ espejo. No es del catálogo: `discountId` null.
+ */
+export function filaDeAjustesDePrecio(p: {
+  orderId: string
+  renglones: Array<{ itemId: string; pesos: number }>
+  appliedById: string | null
+}): Prisma.OrderDiscountUncheckedCreateInput {
+  const monto = roundPesos(p.renglones.reduce((sum, r) => sum + r.pesos, 0))
+  return {
+    orderId: p.orderId,
+    discountId: null,
+    type: 'FIXED_AMOUNT',
+    name: 'Ajuste de precio',
+    value: new Prisma.Decimal(monto),
+    amount: new Prisma.Decimal(monto),
+    taxReduction: 0,
+    isComp: false,
+    isManual: true,
+    appliedById: p.appliedById,
+    appliedToItemIds: p.renglones.map(r => r.itemId),
+    reparto: comoJson(nuevoRepartoDirigido(monto, Object.fromEntries(p.renglones.map(r => [r.itemId, r.pesos])), { espejo: true })),
+  }
+}
+
+/**
  * B2 (founder, 27-sep): el descuento de CUENTA del POS (`discount` del móvil, el descuento libre de «Cobrar») es su propia
  * fila, con su regla (la cuenta CON promociones). Vivía sólo en la cabecera y cualquier recálculo posterior lo borraba. Los
  * centavos por renglón los pone `sincronizarRepartos`. Lo usan el móvil y la terminal: un solo literal.

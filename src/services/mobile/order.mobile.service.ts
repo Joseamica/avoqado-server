@@ -17,6 +17,7 @@ import type { AutomaticServiceChargeCapture } from './service-charge.mobile.serv
  */
 
 import { createHash } from 'crypto'
+import cuid from 'cuid'
 import { OrderSource, OrderType, PaymentFundsFlow, PaymentMethod, Prisma } from '@prisma/client'
 import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, PaymentType } from '@prisma/client'
 import socketManager from '../../communication/sockets'
@@ -55,6 +56,7 @@ import {
 } from '../tpv/paymentEffects.service'
 import {
   accionDeCortesia,
+  filaDeAjustesDePrecio,
   filaDeCortesias,
   buildItemDiscountRow,
   calculateDiscountPesos,
@@ -229,6 +231,13 @@ export interface CreateOrderItemInput {
    * cuenta si la línea trae `catalogAt`; cada extra se decide con la misma regla que el producto. Basura ⇒ se ignora.
    */
   displayedModifierPrices?: Record<string, number> | null
+  /**
+   * «Ajuste de precio» (D12): el precio que la caja escribió a mano para ESTE producto, en centavos enteros por unidad (por kg
+   * en venta por peso), SIN extras. Sólo cuenta en la creación de mostrador, en renglones con `productId` y sin cortesía. El
+   * servidor lo guarda como descuento del renglón (`discountAmount` + una fila «Ajuste de precio»). Basura (misma validación
+   * que `displayedUnitPrice`) o un ajuste que no baja el precio decidido por el servidor ⇒ se ignora, nunca un 400.
+   */
+  adjustedUnitPrice?: number | null
   /**
    * Promoción tocada en el POS. OPCIONAL y sin precios: lleva QUÉ promoción y
    * QUÉ eligió la persona; la aritmética la hace el server (mismo contrato que
@@ -797,7 +806,7 @@ function sinLlavesDeLineaRepetidas(items: CreateOrderItemInput[]): CreateOrderIt
  *   los flujos que no son vales.
  * @param precioMostrado activa «se cobra el precio que vio el cliente» (sólo la creación de mostrador). SIN él, todo queda
  *   como siempre: `displayedUnitPrice`/`catalogAt` se ignoran aunque vengan (vales, presupuestos), no se consulta el
- *   historial y no hay 409.
+ *   historial y no hay 409. Lo mismo `adjustedUnitPrice` (D12): sin él, se ignora.
  * @param db cliente de la transacción de quien llama; sin él, `prisma`. Quien lo pasa ya hizo el chequeo de preparación
  *   antes de abrir su transacción (ese chequeo consulta con su propio cliente).
  */
@@ -816,6 +825,8 @@ export async function buildOrderItemsData(
   modifierSkus: Record<string, string | null>
   cambiosDePrecio: CambioDePrecio[]
   preciosRespetados: PrecioRespetado[]
+  /** D12: los renglones con «Ajuste de precio» (su `id` ya viaja en `itemsData`) y los pesos que cada uno descuenta. */
+  ajustesDePrecio: Array<{ itemId: string; pesos: number }>
 }> {
   // Validate items array
   if (!items || items.length === 0) {
@@ -827,6 +838,7 @@ export async function buildOrderItemsData(
 
   let subtotal = 0
   let itemDiscountTotal = 0
+  const ajustesDePrecio: Array<{ itemId: string; pesos: number }> = []
 
   const productInputs = items.filter(
     (item): item is CreateOrderItemInput & { productId: string } => typeof item.productId === 'string' && item.productId.length > 0,
@@ -1071,10 +1083,36 @@ export async function buildOrderItemsData(
     if (appliedDiscount) {
       validateDiscountScopeForItem(appliedDiscount, { productId: product.id, categoryId: product.categoryId })
     }
-    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
-    itemDiscountTotal += lineDiscount
+
+    // «Ajuste de precio» (D12): la caja bajó a mano el precio del producto. Se guarda como descuento del renglón; sin
+    // cortesía, y sólo si baja el precio que decidió el servidor (si no, se ignora, nunca un 400). Todo en centavos enteros:
+    // por peso `round(kg × ajuste)`, nunca pasando por pesos ($100.05/kg × 0.300 kg = $30.02 en las tres apps).
+    const ajusteCents = precioMostrado && !item.isCortesia ? precioMostradoValido(item.adjustedUnitPrice) : null
+    const lineaAjustadaCents =
+      ajusteCents !== null && ajusteCents < Math.round(Number(precio) * 100)
+        ? product.soldByWeight
+          ? Math.round(weightKg! * ajusteCents)
+          : ajusteCents * item.quantity
+        : null
+    const ajuste = lineaAjustadaCents !== null ? roundPesos(Math.max(0, lineBase - lineaAjustadaCents / 100)) : 0
+
+    let lineDiscount = 0
+    if (appliedDiscount && ajuste > 0) {
+      // El mínimo de compra se juzga contra la línea SIN ajuste (como hoy: una venta sin red no puede quedar sin crearse por un
+      // 400); el monto pega sobre la línea ajustada, armada desde centavos enteros (100 − 19.71 daría 80.2899…, un centavo menos).
+      calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
+      const baseAjustada = (lineaAjustadaCents! + Math.round(modifierTotal * 100) * item.quantity) / 100
+      lineDiscount = calculateDiscountPesos({ ...appliedDiscount, minPurchaseAmount: null }, baseAjustada)
+    } else if (appliedDiscount) {
+      lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)
+    }
+    const discountAmount = ajuste > 0 ? roundPesos(ajuste + lineDiscount) : lineDiscount
+    itemDiscountTotal += discountAmount
+    const id = ajuste > 0 ? cuid() : null
+    if (id) ajustesDePrecio.push({ itemId: id, pesos: ajuste })
 
     return {
+      ...(id ? { id } : {}),
       productId: item.productId,
       ...(serviceCourse ? { serviceCourse: serviceCourse as Prisma.InputJsonValue, course: legacyCourseForSnapshot(serviceCourse) } : {}),
       ...(item.externalId ? { externalId: item.externalId } : {}),
@@ -1085,7 +1123,7 @@ export async function buildOrderItemsData(
       unitPrice: new Prisma.Decimal(Number(precio)),
       weightQuantity: product.soldByWeight ? new Prisma.Decimal(weightKg!) : null,
       weightUnit: product.soldByWeight ? ('KILOGRAM' as const) : null,
-      discountAmount: new Prisma.Decimal(lineDiscount),
+      discountAmount: new Prisma.Decimal(discountAmount),
       appliedDiscountId: appliedDiscount?.id || null,
       taxAmount: new Prisma.Decimal(0),
       total: new Prisma.Decimal(itemTotal),
@@ -1142,7 +1180,11 @@ export async function buildOrderItemsData(
   // Caja externa: el SKU de cada extra, para que el vale lo congele SIN meterlo en
   // `modifiers.create` (OrderItemModifier no tiene esa columna y Prisma rechazaría la orden).
   const modifierSkus: Record<string, string | null> = Object.fromEntries(modifiers.map(modifier => [modifier.id, modifier.sku ?? null]))
-  return { itemsData, subtotal, itemDiscountTotal, discounts, modifierSkus, cambiosDePrecio, preciosRespetados }
+  return { itemsData, subtotal, itemDiscountTotal, discounts, modifierSkus, cambiosDePrecio, preciosRespetados, ajustesDePrecio }
+}
+
+function roundPesos(value: number): number {
+  return Math.round(value * 100) / 100
 }
 
 /**
@@ -1353,6 +1395,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
         discounts,
         cambiosDePrecio,
         preciosRespetados,
+        ajustesDePrecio,
       } = itemsNormales.length > 0
         ? await buildOrderItemsData(venueId, itemsNormales, undefined, precioMostrado, tx, input)
         : {
@@ -1362,6 +1405,7 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
             discounts: [] as Array<{ id: string; [key: string]: any }>,
             cambiosDePrecio: [] as CambioDePrecio[],
             preciosRespetados: [] as PrecioRespetado[],
+            ajustesDePrecio: [] as Array<{ itemId: string; pesos: number }>,
           }
 
       // El helper también crea vales: sólo ESTE flujo aplica cortesías, sobre el bruto ya calculado con peso y extras.
@@ -1484,12 +1528,14 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
       // discounts. One row per discounted item (same shape as TPV).
       const discountedItems = createdOrder.items.filter((item: any) => item.appliedDiscountId)
       const appliedByStaffVenue =
-        validatedStaffId && (discountedItems.length > 0 || orderDiscount || (input.discount ?? 0) > 0)
+        validatedStaffId && (discountedItems.length > 0 || ajustesDePrecio.length > 0 || orderDiscount || (input.discount ?? 0) > 0)
           ? await tx.staffVenue.findFirst({
               where: { staffId: validatedStaffId, venueId },
               select: { id: true },
             })
           : null
+      // D12: el renglón ajustado lleva el ajuste Y, si tiene, su descuento de catálogo; la fila del catálogo sólo explica lo suyo.
+      const ajusteDelRenglon = new Map(ajustesDePrecio.map(a => [a.itemId, a.pesos]))
       for (const item of discountedItems) {
         const discount = discounts.find(d => d.id === item.appliedDiscountId)
         if (!discount) continue
@@ -1498,8 +1544,18 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
             orderId: createdOrder.id,
             itemId: item.id,
             discount,
-            discountAmountPesos: Number(item.discountAmount),
+            discountAmountPesos: Number(item.discountAmount) - (ajusteDelRenglon.get(item.id) ?? 0),
             appliedById: appliedByStaffVenue?.id || null,
+          }),
+        })
+      }
+      // D12: UNA fila «Ajuste de precio» con todos los renglones ajustados (el descuento ya vive en cada uno ⇒ espejo).
+      if (ajustesDePrecio.length > 0) {
+        await tx.orderDiscount.create({
+          data: filaDeAjustesDePrecio({
+            orderId: createdOrder.id,
+            renglones: ajustesDePrecio,
+            appliedById: appliedByStaffVenue?.id ?? null,
           }),
         })
       }
