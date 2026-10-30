@@ -1,7 +1,7 @@
 import { Product, Prisma, ProductType } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import AppError, { ConflictError } from '../../errors/AppError'
-import { deleteFileFromStorage } from '../storage.service'
+import { deleteFileFromStorage, estaEnLaCarpetaDelNegocio } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
@@ -1253,7 +1253,9 @@ export async function deleteProduct(venueId: string, productId: string, userId: 
     ? (await prisma.product.count({ where: { venueId, imageUrl: url, id: { not: existingProduct.id } } })) +
       (await prisma.productGroup.count({ where: { venueId, imageUrl: url } }))
     : 0
-  if (url && otrosLaUsan === 0) {
+  // Sólo un archivo de la carpeta de ESTE negocio: la URL la escribe quien edita y puede ser de otro (Codex r10 de demos).
+  const slug = url && otrosLaUsan === 0 ? (await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } }))?.slug : null
+  if (url && otrosLaUsan === 0 && slug && estaEnLaCarpetaDelNegocio(url, slug, venueId)) {
     logger.info(`🗑️  Deleting product image from storage: ${url}`)
     await deleteFileFromStorage(url).catch(error => {
       logger.error(`❌ Failed to delete product image from storage`, error)

@@ -27,7 +27,7 @@ import {
 } from '../../schemas/dashboard/menu.schema'
 import AppError, { NotFoundError, BadRequestError } from '../../errors/AppError'
 import { generateSlug } from '../../utils/slugify'
-import { deleteFileFromStorage } from '../storage.service'
+import { deleteFileFromStorage, estaEnLaCarpetaDelNegocio } from '../storage.service'
 import logger from '../../config/logger'
 import socketManager from '../../communication/sockets'
 import { logAction } from './activity-log.service'
@@ -474,8 +474,10 @@ export async function deleteMenuCategory(venueId: string, categoryId: string): P
   const conArchivados =
     (await prisma.product.count({ where: { categoryId } })) > 0 || (await prisma.productGroup.count({ where: { categoryId } })) > 0
 
-  // Delete image from Firebase Storage if it exists (apagada, la conserva para cuando una importación la traiga de vuelta)
-  if (category.imageUrl && !conArchivados) {
+  // Delete image from Firebase Storage if it exists (apagada, la conserva para cuando una importación la traiga de vuelta).
+  // Sólo un archivo de la carpeta de ESTE negocio: la URL la escribe quien edita y puede ser de otro (Codex r10 de demos).
+  const slug = category.imageUrl ? (await prisma.venue.findUnique({ where: { id: venueId }, select: { slug: true } }))?.slug : null
+  if (category.imageUrl && !conArchivados && slug && estaEnLaCarpetaDelNegocio(category.imageUrl, slug, venueId)) {
     logger.info(`🗑️  Deleting category image from storage: ${category.imageUrl}`)
     await deleteFileFromStorage(category.imageUrl).catch(error => {
       logger.error(`❌ Failed to delete category image from storage`, error)

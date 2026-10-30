@@ -18,6 +18,12 @@ describe('estaEnLaCarpetaDelNegocio', () => {
     expect(estaEnLaCarpetaDelNegocio(url(buildStoragePath('venues/testarudo/logos/a.png')), 'studio-bloom')).toBe(false)
     expect(estaEnLaCarpetaDelNegocio(url(buildStoragePath('venues/studio-bloom-2/logos/a.png')), 'studio-bloom')).toBe(false)
   })
+  it('la foto que subió el panel (sin prefijo de ambiente, por nombre o por id) también es suya (Codex r10)', () => {
+    expect(estaEnLaCarpetaDelNegocio(url('venues/studio-bloom/productos/a.jpg'), 'studio-bloom')).toBe(true)
+    expect(estaEnLaCarpetaDelNegocio(url('venues/cvenue000000000000000000a/services/a.jpg'), 'studio-bloom', 'cvenue000000000000000000a')).toBe(true)
+    expect(estaEnLaCarpetaDelNegocio(url('venues/testarudo/productos/a.jpg'), 'studio-bloom', 'cvenue000000000000000000a')).toBe(false)
+    expect(estaEnLaCarpetaDelNegocio(url('venues/cotro0000000000000000000a/services/a.jpg'), 'studio-bloom', 'cvenue000000000000000000a')).toBe(false)
+  })
   it('KYC u otra carpeta del bucket, una URL que no es de Firebase o vacía: no es suyo', () => {
     expect(estaEnLaCarpetaDelNegocio(url(buildStoragePath('kyc/x.pdf')), 'studio-bloom')).toBe(false)
     expect(estaEnLaCarpetaDelNegocio('https://evil.example/o/venues%2Fstudio-bloom%2Fa.png', 'studio-bloom')).toBe(false)
