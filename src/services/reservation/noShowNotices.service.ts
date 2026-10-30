@@ -31,6 +31,7 @@ import { classifyUndeliverable } from '@/utils/undeliverableEmail'
 import { formatInVenueTimezone, zonaValida } from '@/utils/datetime'
 import { retry, shouldRetryDbConnectionError } from '@/utils/retry'
 import { activityActorFields } from '@/services/reservation/checkIn.service'
+import { conNegocio } from '@/services/demo/candadoDemo'
 
 /** Textos de los pendientes (Global Constraints del plan D4). Los mismos en panel, POS y MCP. */
 export const PENDING_TEXT: Record<string, string> = {
@@ -240,15 +241,18 @@ async function entregar(aviso: Aviso, faltan?: Destinatario[], enProceso = false
       if (correos++ > 0) await pausa(PAUSA_ENTRE_CORREOS_MS)
       const token = signUnsubscribeToken({ staffId: d.staffId, venueId: aviso.venueId, category: 'RESERVATIONS' })
       const email = d.email
+      // Con el negocio del aviso en el contexto (candado de negocios demo, capa 3): corre desde el job, sin petición.
       const enviar = () =>
-        sendNotificationEmail(
-          email,
-          sinEtiquetas(aviso.subject),
-          sinEtiquetas(aviso.title),
-          sinEtiquetas(aviso.emailMessage ?? aviso.message),
-          linkCorreo,
-          aviso.actionLabel,
-          { unsubscribeUrl: `${apiBase}/api/v1/public/unsubscribe?token=${token}` },
+        conNegocio(aviso.venueId, () =>
+          sendNotificationEmail(
+            email,
+            sinEtiquetas(aviso.subject),
+            sinEtiquetas(aviso.title),
+            sinEtiquetas(aviso.emailMessage ?? aviso.message),
+            linkCorreo,
+            aviso.actionLabel,
+            { unsubscribeUrl: `${apiBase}/api/v1/public/unsubscribe?token=${token}` },
+          ),
         )
       const ok = enProceso ? await conReintento(enviar, hasta) : await enviar()
       if (!ok && !enProceso) {

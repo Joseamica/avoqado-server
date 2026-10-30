@@ -1047,6 +1047,8 @@ async function seedHistory(
     const hasCustomer = Math.random() < 0.7 && customers.length > 0
     const customer = hasCustomer ? customers[Math.floor(Math.random() * customers.length)] : null
 
+    // 🔴 NO se estampa `shiftId`, y es DELIBERADO: ventas de demo con fecha inventada; atarlas a un turno metería ventas
+    // ficticias en su corte.
     const order = await prisma.order.create({
       data: {
         venueId,
@@ -1061,7 +1063,6 @@ async function seedHistory(
         taxAmount,
         total,
         contratoDePrecio: 'IVA_INCLUIDO',
-        // Sin `shiftId` a propósito: ventas de demo con fecha inventada; atarlas a un turno metería ventas ficticias en su corte.
         createdById: staffId,
         servedById: staffId,
         createdAt: orderDate,
