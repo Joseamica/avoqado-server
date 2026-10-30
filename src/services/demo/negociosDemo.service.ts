@@ -403,6 +403,13 @@ async function recrearNegocio(bp: VenueBlueprint, organizationId: string, usuari
 
   const venue = await prisma.$transaction(
     async tx => {
+      // Candado de la fila y estado releído ANTES de borrar: si un SUPERADMIN aprobó el KYC entre la lectura de arriba y
+      // aquí, el negocio ya es real y no se toca (Codex r6, 1). Ordenados por id para no cruzarse con otro candado.
+      for (const id of anteriores.map(v => v.id).sort()) {
+        const [fila] = await tx.$queryRaw<Array<{ status: string }>>`SELECT status FROM "Venue" WHERE id = ${id} FOR UPDATE`
+        if (fila && fila.status !== VenueStatus.LIVE_DEMO)
+          throw new Error(`🚨 El negocio ${id} de «${bp.name}» ya es ${fila.status}, no LIVE_DEMO: no se toca`)
+      }
       let filas = 0
       for (const v of anteriores) filas += await deleteVenueDataTx(tx, v.id)
       // La contabilidad del RFC va en la MISMA transacción: si algo falla, el demo viejo queda con sus libros (Codex r3, 5).
@@ -1201,6 +1208,11 @@ async function seedFiscalEmisor(bp: VenueBlueprint, venueId: string, ecommerceMe
   const facturapiKey = process.env.FACTURAPI_TEST_KEY
   if (!facturapiKey) {
     logger.info('   ℹ️ FACTURAPI_TEST_KEY not set → skipping FiscalEmisor (CFDI stamping disabled; other 5 explosions unaffected)')
+    return false
+  }
+  // La promesa: el demo no factura al SAT. Una llave viva aquí timbraría de verdad; sólo una de prueba de Facturapi.
+  if (!facturapiKey.startsWith('sk_test_')) {
+    logger.warn('   ⚠️ FACTURAPI_TEST_KEY no es una llave de prueba (sk_test_) → sin FiscalEmisor en el demo')
     return false
   }
 

@@ -60,6 +60,8 @@ export interface ExecutionContext {
    * demo no deja salir mensajes de esa operación (`services/demo/candadoDemo.ts`). Nunca se registra en el log.
    */
   negocioSinConfirmar?: true
+  /** El negocio que fijó `conNegocio` (candado demo): manda sobre el del token, también para un SUPERADMIN. */
+  negocioFijado?: string
   /** Present only for work that can be cancelled (the MCP guard sets it). See `RequestCancellation`. */
   cancellation?: RequestCancellation
   /**

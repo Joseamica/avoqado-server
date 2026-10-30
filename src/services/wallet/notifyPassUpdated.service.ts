@@ -57,11 +57,15 @@ export async function notifyPassUpdated(walletPassId: string): Promise<NotifyRes
     // cambió desde tal fecha?": si el pase no quedó marcado como modificado, el
     // servicio contesta 204 y el teléfono se vuelve a dormir con el saldo viejo. El
     // push por sí solo no actualiza nada.
-    await prisma.walletPass.update({ where: { id: walletPassId }, data: { updatedAt: new Date() } })
+    const { venueId } = await prisma.walletPass.update({
+      where: { id: walletPassId },
+      data: { updatedAt: new Date() },
+      select: { venueId: true },
+    })
 
     // En paralelo: son llamadas de red independientes y el mismo cliente puede tener
     // la tarjeta en varios aparatos.
-    const resultados = await Promise.all(registros.map(r => sendSilentPush(r.pushToken).then(res => ({ r, res }))))
+    const resultados = await Promise.all(registros.map(r => sendSilentPush(r.pushToken, venueId).then(res => ({ r, res }))))
 
     // 🔴 Los aparatos que ya no tienen la tarjeta se olvidan. Sin esto se les manda
     // avisos para siempre, y Apple penaliza a quien insiste contra tokens muertos.

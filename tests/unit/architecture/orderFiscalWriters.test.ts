@@ -1067,7 +1067,7 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
     expect(sweep).not.toContain('$transaction(')
     // Negocios demo (candado, capa 3): la llamada va dentro del negocio de la fila.
     expect(sweep).toMatch(/await conNegocio\(candidate\.venueId, \(\) =>\s*settleExchangeCharge\(/)
-    expect(sweep).toContain('await cancelExchange(')
+    expect(sweep).toMatch(/await conNegocio\(candidate\.venueId, \(\) =>\s*cancelExchange\(/)
     expect(codeOf('src/services/exchanges/exchange.service.ts#settleExchangeCharge')).toContain('await executeExchangeInTransaction(')
   })
 

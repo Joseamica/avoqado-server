@@ -95,7 +95,7 @@ export function conNegocio<T>(venueId: string | null | undefined, fn: () => T): 
   if (!venueId) return fn()
   const actual = getContext()
   const base = actual ?? { correlationId: randomUUID(), source: 'job' as const, entrypoint: 'sin-contexto' }
-  return runWithContext({ ...base, venueId, venueName: getVenueName(venueId) }, fn)
+  return runWithContext({ ...base, venueId, venueName: getVenueName(venueId), negocioFijado: venueId }, fn)
 }
 
 /** Por qué un mensaje no sale. `sin confirmar` = la base no contestó: no se manda, y quien llama puede reintentarlo. */
@@ -113,7 +113,10 @@ export async function omitirPorDemo(
 ): Promise<MotivoOmision | null> {
   const lista = Array.isArray(destinatarios) ? destinatarios : [destinatarios]
   const contexto = getContext()
-  const venueId = venueIdExplicito ?? contexto?.venueId
+  // El negocio del token de un SUPERADMIN es el que está mirando, no el del mensaje: aprobar el KYC de un negocio real
+  // parado en un demo apagaba sus correos (Codex r6, 2). Sin negocio, decide el destinatario.
+  const delContexto = contexto?.negocioFijado ?? (contexto?.role === 'SUPERADMIN' ? undefined : contexto?.venueId)
+  const venueId = venueIdExplicito ?? delContexto
   let motivo: MotivoOmision | null = lista.some(esCorreoDemo) ? 'destinatario demo' : null
   // Una ruta pública que no pudo confirmar su negocio no manda nada (Codex r3, 1).
   if (!motivo && !venueIdExplicito && contexto?.negocioSinConfirmar) motivo = 'sin confirmar'

@@ -8,6 +8,7 @@ import prisma from '@/utils/prismaClient'
 import {
   CODIGO_NEGOCIO_DEMO,
   CODIGO_SIN_CONFIRMAR,
+  conNegocio,
   esCorreoDemo,
   esNegocioDemo,
   omitirPorDemo,
@@ -121,6 +122,26 @@ describe('omitirPorDemo: casos de la ronda 3', () => {
   it('🔴 una ruta pública que no pudo confirmar su negocio no manda nada (Codex r3, 1)', async () => {
     const sinConfirmar = { ...ctx(undefined), negocioSinConfirmar: true as const }
     await expect(runWithContext(sinConfirmar, () => omitirPorDemo('WhatsApp'))).resolves.toBe('sin confirmar')
+  })
+})
+
+describe('omitirPorDemo: el negocio de un SUPERADMIN (Codex r6, 2)', () => {
+  const superadmin = (venueId: string): ExecutionContext => ({ ...ctx(venueId), role: 'SUPERADMIN' })
+  it('🔴 parado en un demo, aprobar un negocio real no apaga sus correos (decide el destinatario)', async () => {
+    await expect(runWithContext(superadmin(DEMO), () => omitirPorDemo('correo', 'dueno@real.mx'))).resolves.toBeNull()
+    await expect(runWithContext(superadmin(DEMO), () => omitirPorDemo('correo', 'salon@demo.avoqado.io'))).resolves.toBe(
+      'destinatario demo',
+    )
+  })
+  it('lo que fija conNegocio sí manda, también para un SUPERADMIN', async () => {
+    await expect(
+      runWithContext(superadmin(REAL), () => conNegocio(DEMO, () => omitirPorDemo('correo', 'cliente@gmail.com'))),
+    ).resolves.toBe('negocio demo')
+  })
+  it('regresión: un usuario normal sigue usando el negocio de su token', async () => {
+    await expect(runWithContext({ ...ctx(DEMO), role: 'OWNER' }, () => omitirPorDemo('correo', 'cliente@gmail.com'))).resolves.toBe(
+      'negocio demo',
+    )
   })
 })
 
