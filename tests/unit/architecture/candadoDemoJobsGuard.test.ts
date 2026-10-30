@@ -17,6 +17,7 @@ const SALTOS = 3
 
 /** Jobs que pueden llegar a un mensaje pero nunca a partir de un negocio demo. La razón es obligatoria. */
 const NUNCA_TOCAN_UN_DEMO: Record<string, string> = {
+  'giftCardDelivery.job.ts': 'cada entrega corre con conNegocio(e.venueId) en giftCardDelivery.service (la prueba de abajo lo exige)',
   'altas-a-medio-pago.job.ts': 'altas de la landing a medio pagar; un negocio demo no pasa por el alta',
   'campaign-sender.job.ts': 'sólo manda lo que se publicó (bloqueado en el demo, capa 1) o encoló cumpleaños (sólo negocios ACTIVE)',
   'cfdiGlobal.job.ts': 'el correo de la factura pasa por cfdiEmail.enviar, que revisa el negocio de la factura (capa 2)',
@@ -96,4 +97,9 @@ describe('candado demo: jobs que pueden mandar mensajes', () => {
   it('la lista de excepciones sólo tiene jobs que existen y que de verdad llegan a un mensaje', () => {
     for (const f of Object.keys(NUNCA_TOCAN_UN_DEMO)) expect(jobsConMensajes).toContain(f)
   })
+})
+
+it('las tarjetas de regalo se entregan con el negocio de cada tarjeta en el contexto (la venta está permitida en el demo)', () => {
+  const servicio = sinComentarios(fs.readFileSync(path.join(JOBS, '../services/giftCards/giftCardDelivery.service.ts'), 'utf8'))
+  expect(servicio).toMatch(/conNegocio\(e\.venueId, \(\) => entregarUna\(/)
 })
