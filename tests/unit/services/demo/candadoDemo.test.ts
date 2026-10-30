@@ -309,6 +309,13 @@ describe('revisarCandadoDemo: en un demo sólo se escribe en lo permitido (Codex
 })
 
 describe('revisarCandadoDemo: reglas por usuario compartido', () => {
+  it('🔴 el usuario demo no manda avisos de texto libre a los teléfonos de otros prospectos (Codex r7, 1)', async () => {
+    const r = await revisarCandadoDemo(req('POST', '/api/v1/mobile/push/test', { venue: DEMO, user: USUARIO_DEMO }))
+    expect(r).toMatchObject({ ok: false, code: CODIGO_NEGOCIO_DEMO })
+    // Registrar su teléfono para recibir los avisos del negocio sí puede.
+    expect((await revisarCandadoDemo(req('POST', '/api/v1/mobile/devices/register', { venue: DEMO, user: USUARIO_DEMO }))).ok).toBe(true)
+  })
+
   it('🔴 el usuario demo no cambia su cuenta ni la borra, aunque su sesión apunte a un negocio que ya no existe (Codex r2, 5)', async () => {
     const viejo = { venue: 'cnegociobor0000000000000a', user: USUARIO_DEMO }
     expect((await revisarCandadoDemo(req('PATCH', '/api/v1/dashboard/cnegociobor0000000000000a/account', viejo))).ok).toBe(false)

@@ -133,7 +133,6 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
   ].map((p): [string, string] => [p, 'IA de Avoqado: una función que el demo sí enseña; contesta en pantalla y no le escribe a nadie']),
   ['services/consumer/auth.consumer.service.ts', 'inicio de sesión de la app del cliente final (verifica con Google); no parte de un negocio'],
   ['services/mobile/push.mobile.service.ts', 'avisos push al personal: en un demo, sólo al teléfono del prospecto que entró con el usuario demo'],
-  ['services/wallet/remotePng.ts', 'descarga una imagen (entra) para dibujar la tarjeta'],
   ['utils/receiptTemplate.ts', 'el recibo digital llama a NUESTRA API desde el navegador'],
   ['mcp/oauth/loginPage.ts', 'la página de login del MCP llama a NUESTRA API'],
 ]

@@ -561,6 +561,53 @@ describe('🔴 ninguna llave foránea bloqueante queda sin atender', () => {
 
     expect(problemas).toEqual([])
   })
+
+  /**
+   * 🔴 Lo que NO muere con el cascade del venue también frena: la caja del POS, el aparato que la app registra al entrar
+   * y los vales referencian al venue (o a algo que se borra) con RESTRICT. La prueba de arriba no los veía y el reinicio
+   * nocturno de los negocios demo revertía entero (Codex r7). Cada hijo así se borra antes que su padre, o dice aquí por
+   * qué un negocio demo no lo puede crear; si apareciera uno, la limpieza falla cerrada sin borrar nada.
+   */
+  const INALCANZABLES_EN_UN_DEMO: Record<string, string> = {
+    AngelPayUserAccount: 'cuenta de cobro de AngelPay: activar cobros está cerrado en un demo',
+    CapabilityGrant: 'funciones contratadas: plan y funciones sueltas cerrados en un demo (LIVE_DEMO no paga plan)',
+    DocumentRequestVenueLink: 'solicitud de documentos (KYC): cerrada en un demo',
+    HybridContract: 'facturación híbrida: cerrada en un demo, y sus tablas son inmutables a propósito',
+    HybridPaymentPeriod: 'facturación híbrida: cerrada en un demo, y sus tablas son inmutables a propósito',
+    HybridPurchase: 'facturación híbrida: cerrada en un demo, y sus tablas son inmutables a propósito',
+    InterVenueTransfer: 'traspaso entre DOS sucursales: cada negocio demo vive solo en su organización',
+    InterVenueTransferAllocation: 'traspaso entre DOS sucursales: cada negocio demo vive solo en su organización',
+    InterVenueTransferItem: 'traspaso entre DOS sucursales: cada negocio demo vive solo en su organización',
+    OrganizationPaymentConfig: 'cuentas de comercio de la demo en vivo vieja; un negocio demo de ventas no tiene ninguna',
+    ProviderCostStructure: 'cuentas de comercio de la demo en vivo vieja; un negocio demo de ventas no tiene ninguna',
+    RateCorrectionBatch: 'cuentas de comercio de la demo en vivo vieja; un negocio demo de ventas no tiene ninguna',
+    TerminalOrder: 'comprar una terminal: cerrado en un demo',
+    VenueChatSession: 'chat con clientes: activarlo está cerrado en un demo (sin RELAY no hay sesión pública)',
+    VenueWhatsappActivation: 'chat con clientes: activarlo está cerrado en un demo',
+    VenueCommission: 'comisión de un agregador (TotalPass/Wellhub): conectarlo está cerrado en un demo',
+  }
+
+  const faltantes = (): Set<string> => {
+    const yaBorrado = new Set<string>()
+    const faltan = new Set<string>()
+    for (const paso of borradosEnOrden) {
+      const seVan = cierreDe(paso)
+      for (const padre of seVan)
+        for (const arista of bloqueantes)
+          if (arista.padre === padre && arista.hijo !== arista.padre && !yaBorrado.has(arista.hijo)) faltan.add(arista.hijo)
+      for (const modelo of seVan) yaBorrado.add(modelo)
+    }
+    return faltan
+  }
+
+  it('🔴 lo que no muere con el venue pero lo frena también se va antes (o dice por qué un demo no lo alcanza)', () => {
+    expect([...faltantes()].filter(m => !(m in INALCANZABLES_EN_UN_DEMO)).sort()).toEqual([])
+  })
+
+  it('ninguna razón sobra (si ya se borra, sale de la lista)', () => {
+    const faltan = faltantes()
+    expect(Object.keys(INALCANZABLES_EN_UN_DEMO).filter(m => !faltan.has(m))).toEqual([])
+  })
 })
 
 // Las FK del crédito no dejan borrar cobros mientras exista el vínculo.

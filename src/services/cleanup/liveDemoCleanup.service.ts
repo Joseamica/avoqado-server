@@ -385,6 +385,14 @@ export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<
   await borrar(tx.exchangeCreditLink.deleteMany({ where: { venueId } }))
   await borrar(tx.exchange.deleteMany({ where: { venueId } }))
 
+  // 0b. Vales por área (Caja externa): la familia referencia la orden, el área y el aparato con RESTRICT y nada de eso cae
+  // en cascada con el venue, así que una demo con un vale emitido revertía el reinicio entero (Codex r6/r7 de los negocios
+  // demo). De la hoja a la raíz; lo demás de la familia cascadea desde el vale.
+  await borrar(tx.areaTicketPaymentAttempt.deleteMany({ where: { order: { venueId } } }))
+  await borrar(tx.areaTicketFulfillment.deleteMany({ where: { areaTicket: { venueId } } }))
+  await borrar(tx.areaTicket.deleteMany({ where: { venueId } })) // cascada → reservas, liquidaciones externas, renglones
+  await borrar(tx.areaTicketCheckoutSession.deleteMany({ where: { venueId } }))
+
   // 1. Order items and payments
   await borrar(tx.orderItem.deleteMany({ where: { order: { venueId } } }))
   await borrar(tx.payment.deleteMany({ where: { order: { venueId } } }))
@@ -414,6 +422,8 @@ export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<
   // la hoja a la raíz) porque la guardia del DMMF en su prueba trata NoAction como bloqueante.
   await borrar(tx.inventoryMovement.deleteMany({ where: { wasteReport: { venueId } } }))
   await borrar(tx.inventoryWasteReport.deleteMany({ where: { venueId } }))
+  // Órdenes de compra (cascada → PurchaseOrderItem) ANTES que los insumos: el renglón referencia el insumo con RESTRICT.
+  await borrar(tx.purchaseOrder.deleteMany({ where: { venueId } }))
   await borrar(tx.rawMaterial.deleteMany({ where: { venueId } }))
   await borrar(tx.inventory.deleteMany({ where: { venueId } }))
 
@@ -446,8 +456,6 @@ export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<
   await borrar(tx.orderPromotion.deleteMany({ where: { promotion: { venueId } } }))
   await borrar(tx.promotion.deleteMany({ where: { venueId } }))
 
-  // Órdenes de compra (cascada → PurchaseOrderItem).
-  await borrar(tx.purchaseOrder.deleteMany({ where: { venueId } }))
 
   // Upsell: la REGLA cascadea desde su producto sugerido, así que muere en el paso 5 — pero la
   // aceptación la referencia con RESTRICT y no cuelga del producto. Va antes que los productos.
@@ -527,6 +535,18 @@ export async function deleteVenueDataTx(tx: DbClient, venueId: string): Promise<
   await borrar(tx.commissionClawback.deleteMany({ where: { OR: [{ calculation: { venueId } }, { summary: { venueId } }] } }))
   await borrar(tx.commissionPayout.deleteMany({ where: { venueId } })) // → CommissionSummary
   await borrar(tx.commissionCalculation.deleteMany({ where: { venueId } })) // → CommissionConfig
+
+  // 11.6 🔴 Lo que referencia al VENUE directo con RESTRICT y un negocio demo SÍ alcanza (Codex r7 de los negocios demo).
+  // La guardia de arriba sólo miraba parejas que mueren con el cascade; éstas no mueren con él y frenaban el borrado del
+  // venue: la caja del POS, el aparato que la app registra al entrar, la cocina, las cotizaciones, las opciones y los
+  // traspasos. La prueba exige ahora cada una (o su razón de por qué un demo no la alcanza).
+  await borrar(tx.cashDrawerSession.deleteMany({ where: { venueId } }))
+  await borrar(tx.kdsOrder.deleteMany({ where: { venueId } }))
+  await borrar(tx.estimate.deleteMany({ where: { venueId } }))
+  await borrar(tx.productOption.deleteMany({ where: { venueId } }))
+  await borrar(tx.inventoryTransfer.deleteMany({ where: { venueId } }))
+  await borrar(tx.posCommand.deleteMany({ where: { venueId } }))
+  await borrar(tx.terminal.deleteMany({ where: { venueId } }))
 
   // 12. Finally, delete the venue
   await tx.venue.delete({ where: { id: venueId } })

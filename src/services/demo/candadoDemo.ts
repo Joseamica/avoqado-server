@@ -244,6 +244,8 @@ const REGLAS_DE_NEGOCIO: Regla[] = [
 const REGLAS_DE_USUARIO: Regla[] = [
   { metodos: ['PATCH'], ruta: re(`^/api/v1/dashboard/${ID}/account${FIN_EXACTO}`), que: 'cambiar el usuario compartido del demo' },
   { metodos: ['DELETE'], ruta: re(`^/api/v1/mobile/account${FIN_EXACTO}`), que: 'borrar el usuario compartido del demo' },
+  // Texto libre a los teléfonos registrados con el usuario compartido, que son de OTROS prospectos (Codex r7, 1).
+  { metodos: ['POST'], ruta: re(`^/api/v1/mobile/push/test${FIN_EXACTO}`), que: 'mandar avisos a los teléfonos del demo' },
 ]
 
 // ── Capa 1b: en un negocio demo, sólo se escribe en lo que está PERMITIDO (Codex r5) ─────────────────────────────────

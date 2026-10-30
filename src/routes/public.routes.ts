@@ -657,15 +657,9 @@ const altaVerificarSchema = z.object({
 })
 const altaReenviarSchema = z.object({ body: z.object({ email: z.string().trim().email('Formato de correo invalido') }) })
 
-router.post(
-  '/alta/verificar',
-  soloConAltaConCodigo,
-  contrasenaValidaEnAlta,
-  limiteIntentosDeCodigoEnAlta,
-  limiteDiarioDeIntentosDeCodigoEnAlta,
-  validateRequest(altaVerificarSchema),
-  verificarAlta,
-)
+// Una prueba lee esta línea tal cual (límites del alta con código, la compuerta primero): que el formateador no la parta.
+// prettier-ignore
+router.post('/alta/verificar', soloConAltaConCodigo, contrasenaValidaEnAlta, limiteIntentosDeCodigoEnAlta, limiteDiarioDeIntentosDeCodigoEnAlta, validateRequest(altaVerificarSchema), verificarAlta)
 router.post('/alta/reenviar', soloConAltaConCodigo, limiteEnviosDeCodigoEnContacto, validateRequest(altaReenviarSchema), reenviarAlta)
 
 // Salto medido del magic link del correo de bienvenida: cuenta el clic y redirige
