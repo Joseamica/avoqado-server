@@ -16,7 +16,6 @@ const ctx = (venueId: string): ExecutionContext => ({ correlationId: 'c', source
 let email: any
 let resendService: any
 let whatsapp: any
-let remotePng: any
 // Del MISMO registro aislado que los servicios: otra copia del contexto sería otro AsyncLocalStorage.
 let runWithContext: <T>(c: ExecutionContext, fn: () => T) => T
 let __olvidarNegociosDemoParaPruebas: () => void
@@ -31,7 +30,6 @@ beforeAll(() => {
     email = require('@/services/email.service')
     resendService = require('@/services/resend.service')
     whatsapp = require('@/services/whatsapp.service')
-    remotePng = require('@/services/wallet/remotePng')
     runWithContext = require('@/observability/executionContext').runWithContext
     __olvidarNegociosDemoParaPruebas = require('@/services/demo/candadoDemo').__olvidarNegociosDemoParaPruebas
   })
@@ -127,6 +125,15 @@ describe('Google Wallet (Codex r4, 2)', () => {
 })
 
 describe('imagen del pase (Codex r7, 2)', () => {
+  // Su propio registro, con su contexto: el de Google Wallet de arriba reemplaza `runWithContext` por otra copia.
+  let remotePng: any
+  beforeAll(() => {
+    jest.isolateModules(() => {
+      remotePng = require('@/services/wallet/remotePng')
+      runWithContext = require('@/observability/executionContext').runWithContext
+      __olvidarNegociosDemoParaPruebas = require('@/services/demo/candadoDemo').__olvidarNegociosDemoParaPruebas
+    })
+  })
   it('🔴 en un negocio demo el SERVIDOR no visita la dirección que escribió el prospecto', async () => {
     await expect(runWithContext(ctx(DEMO), () => remotePng.fetchPng('https://webhook.ejemplo/disparar'))).resolves.toBeNull()
     expect(fetchMock).not.toHaveBeenCalled()

@@ -328,6 +328,9 @@ const prismaMock: any = {
   // Compras (un modelo sin registrar aquí revienta con "Cannot read properties of undefined")
   supplier: createMockModel(),
   purchaseOrder: createMockModel(),
+  // Limpieza de negocios demo (deleteVenueDataTx) borra también cotizaciones y traspasos.
+  estimate: createMockModel(),
+  inventoryTransfer: createMockModel(),
   purchaseOrderInvoice: createMockModel(),
   purchaseOrderInvoiceLine: createMockModel(),
   supplierItemCode: createMockModel(),
