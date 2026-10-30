@@ -1086,11 +1086,11 @@ export async function buildOrderItemsData(
     }
 
     // «Ajuste de precio» (D12): la caja bajó a mano el precio del producto. Se guarda como descuento del renglón; sin
-    // cortesía, y sólo si baja el precio que decidió el servidor (si no, se ignora, nunca un 400). Todo en centavos enteros:
+    // cortesía, y sólo si baja el precio que decidió el servidor (si no, o si es 0, se ignora, nunca un 400). Todo en centavos enteros:
     // por peso `round(kg × ajuste)`, nunca pasando por pesos ($100.05/kg × 0.300 kg = $30.02 en las tres apps).
     const ajusteCents = precioMostrado && !item.isCortesia ? precioMostradoValido(item.adjustedUnitPrice) : null
     const lineaAjustadaCents =
-      ajusteCents !== null && ajusteCents < Math.round(Number(precio) * 100)
+      ajusteCents !== null && ajusteCents >= 1 && ajusteCents < Math.round(Number(precio) * 100)
         ? product.soldByWeight
           ? Math.round(weightKg! * ajusteCents)
           : ajusteCents * item.quantity
@@ -1098,12 +1098,13 @@ export async function buildOrderItemsData(
     const ajuste = lineaAjustadaCents !== null ? roundPesos(Math.max(0, lineBase - lineaAjustadaCents / 100)) : 0
 
     let lineDiscount = 0
-    if (appliedDiscount && ajuste > 0) {
+    // Con el ajuste honrado (`lineaAjustadaCents`), el catálogo va en centavos aunque el descuento manual redondee a 0 (peso): las apps igual.
+    if (appliedDiscount && lineaAjustadaCents !== null) {
       // El mínimo de compra se juzga contra la línea SIN ajuste (como hoy: una venta sin red no puede quedar sin crearse por un
       // 400); el monto pega sobre la línea ajustada, armada desde centavos enteros (100 − 19.71 daría 80.2899…, un centavo menos).
       calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
       // El monto, en centavos enteros y redondeando como las apps (`calculateDiscountCents`): en pesos flotantes difiere un centavo.
-      const baseAjustadaCents = lineaAjustadaCents! + Math.round(modifierTotal * 100) * item.quantity
+      const baseAjustadaCents = lineaAjustadaCents + Math.round(modifierTotal * 100) * item.quantity
       lineDiscount = calculateDiscountCents(appliedDiscount, baseAjustadaCents) / 100
     } else if (appliedDiscount) {
       lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)

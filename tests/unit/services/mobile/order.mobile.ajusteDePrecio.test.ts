@@ -232,6 +232,25 @@ describe('«Ajuste de precio» como descuento (D12)', () => {
     expect(Number(lineasCreadas()[0].discountAmount)).toBe(30)
   })
 
+  it('ajuste honrado cuyo descuento manual redondea a 0 (por peso): el catálogo igual va en centavos enteros y no hay fila de ajuste', async () => {
+    // $100.14/kg, 0.350 kg ⇒ línea 35.05; ajustada a 10013 ¢/kg ⇒ round(0.350 × 10013) = 3505 ¢ ⇒ el ajuste vale 0.
+    // En pesos flotantes 35.05 × 50 % daba 17.52 y las apps (Math.round(3505 × 50 / 100) = 1753) 17.53.
+    prismaMock.product.findMany.mockResolvedValue([playera({ price: new Decimal(100.14), soldByWeight: true })])
+    prismaMock.discount.findMany.mockResolvedValue([descuento({ id: 'disc-50', name: '50%', value: new Decimal(50) })])
+
+    await crear({
+      items: [
+        { productId: 'prod-1', quantity: 1, weightQuantity: 0.35, discountId: 'disc-50', externalId: 'e1', adjustedUnitPrice: 10013 },
+      ],
+    })
+
+    const [catalogo] = filasDeDescuento().filter(f => f.name === '50%')
+    expect(Number(catalogo.amount)).toBe(17.53)
+    expect(netoDelRenglon()).toBeCloseTo(17.52, 2)
+    expect(filasDeAjuste()).toEqual([])
+    expect(lineasCreadas()[0].id).toBeUndefined()
+  })
+
   it('con un extra de $15: el ajuste pega al producto, el extra se cobra entero', async () => {
     prismaMock.modifier.findMany.mockResolvedValue([{ id: 'mod-1', name: 'Estampado', price: new Decimal(15), sku: null }])
 
@@ -294,6 +313,37 @@ describe('«Ajuste de precio» como descuento (D12)', () => {
     expect(Number(lineasCreadas()[0].discountAmount)).toBe(0)
     expect(Number(datosDeLaOrden().total)).toBe(100)
     expect(filasDeAjuste()).toEqual([])
+  })
+
+  it('ajuste de 0 centavos: se ignora como basura (sin descuento y sin fila)', async () => {
+    await crear({ items: [{ productId: 'prod-1', quantity: 1, externalId: 'e1', adjustedUnitPrice: 0 }] })
+
+    expect(Number(lineasCreadas()[0].discountAmount)).toBe(0)
+    expect(Number(datosDeLaOrden().total)).toBe(100)
+    expect(filasDeAjuste()).toEqual([])
+  })
+
+  it('con un descuento libre de la CUENTA (centavos): se aplica sobre lo que queda tras el ajuste', async () => {
+    await crear({ discount: 1000, items: [{ productId: 'prod-1', quantity: 1, externalId: 'e1', adjustedUnitPrice: 8000 }] })
+
+    expect(Number(lineasCreadas()[0].discountAmount)).toBe(20)
+    expect(Number(datosDeLaOrden().discountAmount)).toBe(30)
+    expect(Number(datosDeLaOrden().total)).toBe(70)
+    expect(filasDeDescuento().map(f => [f.name, Number(f.amount)])).toEqual([
+      ['Ajuste de precio', 20],
+      ['Descuento de la cuenta', 10],
+    ])
+  })
+
+  it('el descuento libre de la CUENTA nunca pasa de lo que queda tras el ajuste (9000 ¢ sobre $80 ⇒ $80, total 0)', async () => {
+    await crear({ discount: 9000, items: [{ productId: 'prod-1', quantity: 1, externalId: 'e1', adjustedUnitPrice: 8000 }] })
+
+    expect(Number(datosDeLaOrden().discountAmount)).toBe(100)
+    expect(Number(datosDeLaOrden().total)).toBe(0)
+    expect(filasDeDescuento().map(f => [f.name, Number(f.amount)])).toEqual([
+      ['Ajuste de precio', 20],
+      ['Descuento de la cuenta', 80],
+    ])
   })
 
   it('«Otro importe» (sin productId) con adjustedUnitPrice: se ignora y cobra su unitPrice', async () => {
