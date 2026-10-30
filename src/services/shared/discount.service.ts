@@ -53,6 +53,33 @@ export function calculateDiscountPesos(discount: any, basePesos: number): number
 }
 
 /**
+ * Lo que un `Discount` de catálogo rebaja a una base en CENTAVOS enteros, redondeando como las apps (`descuentoDeLineaCents`:
+ * `Math.round(baseCents × % / 100)`, sin pasar por pesos flotantes: 2135 ¢ al 10 % son 214 ¢, no 213). Lo usa la línea con
+ * «Ajuste de precio» (D12), para cobrar al centavo lo que la caja vio. No juzga `minPurchaseAmount`: quien llama decide contra
+ * qué base. Topes iguales a `calculateDiscountPesos`: `maxDiscountAmount` y la base misma; nunca menos de 0.
+ */
+export function calculateDiscountCents(discount: any, baseCents: number): number {
+  if (baseCents <= 0) return 0
+
+  let amountCents: number
+  if (discount.type === 'PERCENTAGE') {
+    amountCents = Math.round((baseCents * Number(discount.value)) / 100)
+  } else if (discount.type === 'FIXED_AMOUNT') {
+    amountCents = Math.round(Number(discount.value) * 100)
+  } else if (discount.type === 'COMP') {
+    amountCents = baseCents
+  } else {
+    throw new BadRequestError(`Unsupported discount type: ${discount.type}`)
+  }
+
+  if (discount.maxDiscountAmount) {
+    amountCents = Math.min(amountCents, Math.round(Number(discount.maxDiscountAmount) * 100))
+  }
+
+  return Math.max(0, Math.min(amountCents, baseCents))
+}
+
+/**
  * Validate that a `Discount` row is currently usable: active, within its
  * validity window, and under its total-use cap.
  *

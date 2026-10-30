@@ -195,6 +195,43 @@ describe('«Ajuste de precio» como descuento (D12)', () => {
     expect(Number(catalogo.amount)).toBe(47.65)
   })
 
+  // El descuento de catálogo de una línea ajustada se calcula en centavos enteros, como `descuentoDeLineaCents` de las apps
+  // (`Math.round(baseCents × % / 100)`): en pesos flotantes 21.35 × 10 % daba 2.13 y las apps 2.14.
+  it('ajuste a 2135 centavos con catálogo 10 %: la parte del catálogo es 2.14 (como las apps) y el renglón queda en 19.21', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([descuento()])
+
+    await crear({ items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-10', externalId: 'e1', adjustedUnitPrice: 2135 }] })
+
+    const [catalogo] = filasDeDescuento().filter(f => f.name === '10%')
+    expect(Number(catalogo.amount)).toBe(2.14)
+    expect(Number(filasDeAjuste()[0].amount)).toBe(78.65)
+    expect(Number(lineasCreadas()[0].discountAmount)).toBeCloseTo(78.65 + 2.14, 2)
+    expect(netoDelRenglon()).toBeCloseTo(19.21, 2)
+  })
+
+  it('ajuste a 2015 centavos con catálogo 50 %: la parte del catálogo es 10.08 (como las apps)', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([descuento({ id: 'disc-50', name: '50%', value: new Decimal(50) })])
+
+    await crear({ items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-50', externalId: 'e1', adjustedUnitPrice: 2015 }] })
+
+    const [catalogo] = filasDeDescuento().filter(f => f.name === '50%')
+    expect(Number(catalogo.amount)).toBe(10.08)
+    expect(netoDelRenglon()).toBeCloseTo(10.07, 2)
+  })
+
+  it('línea ajustada con catálogo 50 % y tope maxDiscountAmount 10: la parte del catálogo se topa en 10', async () => {
+    prismaMock.discount.findMany.mockResolvedValue([
+      descuento({ id: 'disc-50', name: '50%', value: new Decimal(50), maxDiscountAmount: new Decimal(10) }),
+    ])
+
+    await crear({ items: [{ productId: 'prod-1', quantity: 1, discountId: 'disc-50', externalId: 'e1', adjustedUnitPrice: 8000 }] })
+
+    const [catalogo] = filasDeDescuento().filter(f => f.name === '50%')
+    expect(Number(catalogo.amount)).toBe(10)
+    expect(Number(filasDeAjuste()[0].amount)).toBe(20)
+    expect(Number(lineasCreadas()[0].discountAmount)).toBe(30)
+  })
+
   it('con un extra de $15: el ajuste pega al producto, el extra se cobra entero', async () => {
     prismaMock.modifier.findMany.mockResolvedValue([{ id: 'mod-1', name: 'Estampado', price: new Decimal(15), sku: null }])
 

@@ -59,6 +59,7 @@ import {
   filaDeAjustesDePrecio,
   filaDeCortesias,
   buildItemDiscountRow,
+  calculateDiscountCents,
   calculateDiscountPesos,
   filaDeDescuentoDeCatalogoEnCuenta,
   filaDeDescuentoDeCuenta,
@@ -1101,8 +1102,9 @@ export async function buildOrderItemsData(
       // El mínimo de compra se juzga contra la línea SIN ajuste (como hoy: una venta sin red no puede quedar sin crearse por un
       // 400); el monto pega sobre la línea ajustada, armada desde centavos enteros (100 − 19.71 daría 80.2899…, un centavo menos).
       calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
-      const baseAjustada = (lineaAjustadaCents! + Math.round(modifierTotal * 100) * item.quantity) / 100
-      lineDiscount = calculateDiscountPesos({ ...appliedDiscount, minPurchaseAmount: null }, baseAjustada)
+      // El monto, en centavos enteros y redondeando como las apps (`calculateDiscountCents`): en pesos flotantes difiere un centavo.
+      const baseAjustadaCents = lineaAjustadaCents! + Math.round(modifierTotal * 100) * item.quantity
+      lineDiscount = calculateDiscountCents(appliedDiscount, baseAjustadaCents) / 100
     } else if (appliedDiscount) {
       lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)
     }
