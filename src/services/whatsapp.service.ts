@@ -17,6 +17,7 @@
  * - reservation_reminder: Reservation reminder (4 params: name, venue, date, time)
  * - reservation_reschedule: Reservation reschedule (5 params: name, venue, date, time, message)
  * - order_status_update: Order status update (3 params: name, venue, status)
+ * - gift_card_delivery: Gift card delivery (4 params: venue, amount, from, folio + URL button with the pageToken)
  */
 
 import logger from '@/config/logger'
@@ -103,6 +104,11 @@ async function sendTemplateMessage(
    * error #132001 ("does not exist in the translation").
    */
   languageCode: string = 'es_MX',
+  /**
+   * Tope propio de la petición (ms). Sólo lo pasa la entrega de tarjetas de regalo (1b S3, I1): su reclamo en la fila dura
+   * 5 min y sin tope undici espera hasta 300 s. Los demás llamadores no lo pasan y siguen exactamente igual.
+   */
+  timeoutMs?: number,
 ): Promise<{ messageId: string }> {
   // Negocios demo (capa 2): ningún WhatsApp sale de un negocio demo. Se contesta como enviado para no romper a quien llama.
   const motivoDemo = await omitirPorDemo(`WhatsApp «${templateName}»`)
@@ -153,6 +159,8 @@ async function sendTemplateMessage(
         Authorization: `Bearer ${accessToken}`,
       },
       body: JSON.stringify(body),
+      // El aborto cae en el `catch` de abajo como cualquier fallo de red («No se pudo enviar…»).
+      ...(timeoutMs ? { signal: AbortSignal.timeout(timeoutMs) } : {}),
     })
 
     const result = (await response.json()) as Record<string, any>
@@ -160,7 +168,12 @@ async function sendTemplateMessage(
     if (!response.ok) {
       const errorMsg = result?.error?.message || `HTTP ${response.status}`
       logger.error(`WhatsApp API error: ${errorMsg}`, { phone: fullPhone, template: templateName, status: response.status })
-      throw new Error(`Error al enviar WhatsApp: ${errorMsg}`)
+      // Con el código de Meta, quien llama distingue «la plantilla no existe / no está aprobada» de un fallo pasajero
+      // (tarjetas de regalo, S3). El mensaje no cambia: los demás llamadores siguen leyendo «Error al enviar WhatsApp».
+      throw new WhatsappCloudApiError(
+        `Error al enviar WhatsApp: ${errorMsg}`,
+        typeof result?.error?.code === 'number' ? result.error.code : undefined,
+      )
     }
 
     const messageId = result?.messages?.[0]?.id
@@ -241,6 +254,50 @@ export async function sendPaymentLinkShareWhatsApp(phone: string, data: WhatsApp
     { type: 'text', text: data.paymentLinkUrl },
   ])
   return true
+}
+
+/**
+ * Q3 (tarjetas de regalo 1b): los códigos de Meta que significan «esta plantilla no se puede usar» — la entrega pasa a
+ * «No se entregó» sin reintentos. 132001 (no existe en ese idioma) está medido en este repo (`otp_verify` en es_MX, ver
+ * `sendTemplateMessage`); 132015 (pausada) y 132016 (deshabilitada) salen de la documentación de Meta y NO se midieron aquí.
+ */
+export const CODIGOS_DE_PLANTILLA_NO_DISPONIBLE: ReadonlySet<number> = new Set([132001, 132015, 132016])
+
+/** ¿Hay con qué mandar? Sin estas dos variables `sendTemplateMessage` truena antes de llamar a Meta. */
+export function whatsappConfigurado(): boolean {
+  return Boolean(process.env.WHATSAPP_PHONE_NUMBER_ID && process.env.WHATSAPP_ACCESS_TOKEN)
+}
+
+/**
+ * Entrega una tarjeta de regalo (1b S3, Q3) con la plantilla UTILITY `gift_card_delivery` (es_MX), cuerpo:
+ *
+ *   Recibiste una tarjeta de regalo de {{1}} por {{2}}. Te la regaló {{3}}. Folio: {{4}}. …
+ *
+ * y el botón «Ver mi tarjeta» a `https://pay.avoqado.io/tarjeta/{{1}}` con el `pageToken`. Nunca lleva el código: sólo la
+ * página lo enseña (`docs/audit/2026-10-19-tarjetas-1b/plantilla-whatsapp.md`). Nombre configurable con
+ * WHATSAPP_TEMPLATE_GIFT_CARD_DELIVERY (molde `payment_link_share`). Lanza `WhatsappCloudApiError` con el código de Meta.
+ *
+ * I1: tope de 20 s, holgado para una respuesta normal de Meta, para que un envío colgado no venza el reclamo de la entrega. El
+ * aborto llega como fallo de red y la entrega lo reprograma.
+ */
+export async function sendGiftCardDeliveryWhatsApp(
+  phone: string,
+  d: { negocio: string; monto: string; deParteDe: string; folio: string; pageToken: string },
+): Promise<{ messageId: string }> {
+  const template = process.env.WHATSAPP_TEMPLATE_GIFT_CARD_DELIVERY || 'gift_card_delivery'
+  return sendTemplateMessage(
+    phone,
+    template,
+    [
+      { type: 'text', text: sanitizeTemplateVar(d.negocio, 60) },
+      { type: 'text', text: d.monto },
+      { type: 'text', text: sanitizeTemplateVar(d.deParteDe, 60) },
+      { type: 'text', text: d.folio },
+    ],
+    d.pageToken,
+    'es_MX',
+    20_000,
+  )
 }
 
 /**

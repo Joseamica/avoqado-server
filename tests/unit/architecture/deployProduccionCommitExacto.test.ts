@@ -77,6 +77,27 @@ describe('workflow: el deploy de producción', () => {
     expect(filtro(run)).toBe(filtro(pkg.scripts['test:integration']))
   })
 
+  // Las PESADAS del Cambio (50 ventas y 50 pagos en una transacción de 15 s) corren aparte y solas (29-oct-2026): junto a
+  // otros 3 procesos se pasaron del tope. Aparte, nunca fuera: salen de la corrida en paralelo con el mismo patrón y
+  // entran solas en el mismo paso, y el patrón tiene que seguir nombrando archivos que existen.
+  it('las pesadas del Cambio corren solas en el mismo paso de integración', () => {
+    const integracion = workflow.jobs['test-and-build'].steps.find((p: Record<string, any>) =>
+      String(p.run ?? '').includes('--selectProjects=integration'),
+    )
+    const run = String(integracion.run)
+    const pesadas = run.match(/PESADAS='([^']+)'/)?.[1]
+    expect(pesadas).toBeDefined()
+    expect(run).toMatch(/--maxWorkers=4 [^]*--testPathIgnorePatterns="\$PESADAS"/)
+    expect(run).toMatch(/npx jest --selectProjects=integration --runInBand [^\n]*"\$PESADAS"/)
+    const solas = ['exchangeR7', 'exchangeBatch'].map(
+      n => `${RAIZ.split(path.sep).join('/')}/tests/integration/exchanges/${n}.integration.test.ts`,
+    )
+    for (const archivo of solas) {
+      expect(fs.existsSync(archivo)).toBe(true)
+      expect(new RegExp(pesadas!).test(archivo)).toBe(true)
+    }
+  })
+
   it('las unitarias corren completas, en un job que el deploy espera', () => {
     const unitarias = workflow.jobs['unit-tests']
     expect(deploy.needs).toEqual(expect.arrayContaining(['test-and-build', 'unit-tests']))
@@ -113,7 +134,8 @@ describe('workflow: el deploy de producción', () => {
     // Lo que SÍ garantiza: cada archivo corre una sola vez (la partición de abajo es la misma que hace Jest). Detectar
     // un cronómetro NUEVO es de buena fe (import, import(), require; con o sin .ts): si uno se escapa, corre en paralelo
     // como antes del 24-oct (un rojo falso a veces), nunca se pierde una prueba.
-    const CARGA_CRONOMETRO = /(from\s+|import\(\s*|require\(\s*)['"`][^'"`\n]*(catalogImportEventLoopTestHarness|utils\/eventLoopBudget)(\.ts)?['"`]/
+    const CARGA_CRONOMETRO =
+      /(from\s+|import\(\s*|require\(\s*)['"`][^'"`\n]*(catalogImportEventLoopTestHarness|utils\/eventLoopBudget)(\.ts)?['"`]/
     const esta = path.relative(RAIZ, __filename).split(path.sep).join('/')
     const miden = archivos.filter(f => f !== esta && CARGA_CRONOMETRO.test(fs.readFileSync(path.join(RAIZ, f), 'utf8')))
     // Jest compara el patrón con la ruta ABSOLUTA y con «/»: aquí también, para que un `^tests/...` no pase aquí y falle allá.

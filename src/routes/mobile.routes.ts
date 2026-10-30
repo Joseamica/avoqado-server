@@ -70,7 +70,14 @@ import {
   soloVenueSchema as giftCardVenueSchema,
 } from '../schemas/common/giftCard.common.schema'
 import { exigirPlanDeTarjetas } from '../middlewares/giftCardsPlan.middleware'
-import { giftCardLookupRateLimiters, giftCardPayFailureRateLimiters } from '../middlewares/gift-card-lookup-rate-limit.middleware'
+import {
+  giftCardLookupRateLimiters,
+  giftCardPayFailureRateLimiters,
+  giftCardPhoneRequestRateLimiters,
+  giftCardPhoneVerifyRateLimiters,
+  giftCardResendRateLimiter,
+  giftCardRevealRateLimiters,
+} from '../middlewares/gift-card-lookup-rate-limit.middleware'
 import * as printMobileController from '../controllers/mobile/print.mobile.controller'
 import * as areaTicketMobileController from '../controllers/mobile/areaTicket.mobile.controller'
 import * as areaTicketV7MobileController from '../controllers/mobile/areaTicketV7.mobile.controller'
@@ -1712,6 +1719,21 @@ router.post(
   checkTableOwnership('order', PAYMENT_OWNERSHIP_OVERRIDES),
   giftCardMobileController.payWithBalance,
 )
+// S2b (Q58, Q61): una venta de mostrador nace y se cobra con saldo en UNA transacción. Crear la cuenta es crear una venta
+// (`orders:create`, con los candados de promociones de `POST /orders`); cobrar con saldo, `giftCards:redeem`. Los fallos gastan
+// el MISMO contador que `pay-gift-card` (la misma instancia): un código que no existe es un 404 en las dos.
+router.post(
+  '/venues/:venueId/gift-cards/pay-new-order',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.payNewOrderSchema),
+  checkPermission('orders:create'),
+  checkPermission('giftCards:redeem'),
+  // Unión con develop (S9): esta venta también puede regalar (`isCortesia`, descuento COMP); pide `orders:comp` como `POST /orders`.
+  checkCortesiaPermissionIfPresent,
+  checkPromotionGuardsIfPresent,
+  ...giftCardPayFailureRateLimiters,
+  giftCardMobileController.payNewOrder,
+)
 router.post(
   '/venues/:venueId/orders/:orderId/gift-balance-return-and-cancel',
   authenticateTokenMiddleware,
@@ -1734,6 +1756,76 @@ router.post(
   validateRequest(giftCardLiberarCancelacionSchema),
   checkPermission('giftCards:manage'),
   giftCardSaleController.releaseCancel,
+)
+// 1b S4: el detalle de la cuenta (sin códigos; su GET es la patada de la entrega, Q17/Q36), reenviar al mismo destino y mostrar el
+// código el mismo día (cajero). Lo de GERENTE —cambiar el destino y mostrar el código cualquier día— va en rutas propias con
+// `giftCards:manage`, porque sólo `checkPermission` honra el PIN del gerente (Q16). Las tres que muestran el código comparten
+// el límite de S-5. Reenviar, revelar y teléfono + código NO van al MCP: el código no viaja por el chat.
+router.get(
+  '/venues/:venueId/gift-cards/orders/:orderId',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.cuentaDeTarjetasSchema),
+  checkPermission('giftCards:read'),
+  giftCardMobileController.getCuenta,
+)
+router.post(
+  '/venues/:venueId/gift-cards/orders/:orderId/reveal',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardOperationKeyOnOrderSchema),
+  checkPermission('giftCards:sell'),
+  ...giftCardRevealRateLimiters,
+  giftCardMobileController.revealCuenta,
+)
+// 1b S5 (S-2): teléfono + código, ANTES de las rutas de `/:giftCardId`. Sin `X-Device-Id` ⇒ 400 desde el controller. Tampoco van
+// al MCP: el código no viaja por el chat.
+router.post(
+  '/venues/:venueId/gift-cards/phone/request',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.phoneRequestSchema),
+  checkPermission('giftCards:read'),
+  ...giftCardPhoneRequestRateLimiters,
+  giftCardMobileController.phoneRequest,
+)
+router.post(
+  '/venues/:venueId/gift-cards/phone/verify',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.phoneVerifySchema),
+  checkPermission('giftCards:read'),
+  ...giftCardPhoneVerifyRateLimiters,
+  giftCardMobileController.phoneVerify,
+)
+// Cierre A (C4): reenviar y cambiar el destino comparten con el `resend` del panel UN límite por tarjeta (5 por hora).
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/resend',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.resendSchema),
+  checkPermission('giftCards:sell'),
+  giftCardResendRateLimiter,
+  giftCardMobileController.resend,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/change-destination',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.changeDestinationSchema),
+  checkPermission('giftCards:manage'),
+  giftCardResendRateLimiter,
+  giftCardMobileController.changeDestination,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/reveal',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.revealSchema),
+  checkPermission('giftCards:sell'),
+  ...giftCardRevealRateLimiters,
+  giftCardMobileController.reveal,
+)
+router.post(
+  '/venues/:venueId/gift-cards/:giftCardId/reveal-manager',
+  authenticateTokenMiddleware,
+  validateRequest(giftCardMobileSchemas.revealSchema),
+  checkPermission('giftCards:manage'),
+  ...giftCardRevealRateLimiters,
+  giftCardMobileController.revealManager,
 )
 
 /**

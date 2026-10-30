@@ -442,7 +442,7 @@ async function generateWeeklyTrendsData(venueId: string, fromDate: Date, toDate:
            SUM(CASE WHEN o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} THEN o."total" ELSE 0 END) AS "current",
            SUM(CASE WHEN o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)} THEN 0 ELSE o."total" END) AS "previous"
     FROM "Order" o
-    WHERE o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED}
+    WHERE o."venueId" = ${venueId} AND ${ORDER_NOT_DISCARDED} AND ${sqlOrdenSinTarjetas('o.id')}
       AND (
         (o."createdAt" >= ${utcTs(fromDate)} AND o."createdAt" <= ${utcTs(toDate)})
         OR (o."createdAt" >= ${utcTs(prevFrom)} AND o."createdAt" <= ${utcTs(prevTo)})
@@ -1321,6 +1321,7 @@ async function getDiscountAnalysisData(venueId: string, fromDate: Date, toDate: 
       venueId,
       status: { notIn: [OrderStatus.PENDING, OrderStatus.CANCELLED, OrderStatus.DELETED] },
       createdAt: { gte: fromDate, lte: toDate },
+      ...WHERE_ORDEN_SIN_TARJETAS, // la cuenta de tarjetas no es una orden de mercancía: no baja la tasa de descuento
     },
   })
 

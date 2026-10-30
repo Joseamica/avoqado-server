@@ -51,9 +51,16 @@ function progreso(extra: Record<string, unknown>) {
 }
 
 describe('completeOnboarding (V1) con un cobro del alta sin cerrar', () => {
-  afterEach(() => jest.restoreAllMocks())
+  // Estas pruebas son del alta SIN plan obligatorio: si el `.env` local lo prende, el carril viejo responde 400 antes (D6, 30-oct).
+  const banderaAntes = process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
+  afterEach(() => {
+    jest.restoreAllMocks()
+    if (banderaAntes === undefined) delete process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
+    else process.env.ENABLE_VENUE_BASE_SUBSCRIPTION = banderaAntes
+  })
   beforeEach(() => {
     jest.clearAllMocks()
+    delete process.env.ENABLE_VENUE_BASE_SUBSCRIPTION
     ;(prisma.onboardingProgress.updateMany as jest.Mock).mockResolvedValue({ count: 0 })
   })
 

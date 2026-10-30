@@ -132,7 +132,7 @@ const RECORTA = 'recortarDescuentosDeRenglones('
 const ESCRITORES_DE_FILAS: Record<string, Fila> = {
   'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': { clase: 'ESCRIBE', marcas: ['keptMarkdownDiscountRow(', SYNC] },
   // Cobrar sin red S4: la cortesía y el descuento de catálogo de la cuenta, con las mismas filas que «Cobrar» de la terminal.
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     clase: 'ESCRIBE',
     marcas: ['filaDeCortesias(', 'buildItemDiscountRow(', 'filaDeDescuentoDeCatalogoEnCuenta(', 'filaDeDescuentoDeCuenta(', SYNC],
   },
@@ -178,7 +178,7 @@ const ESCRITORES_DE_FILAS: Record<string, Fila> = {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
-  'src/services/wallet/redeemStampReward.service.ts#redeemStampReward': {
+  'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx': {
     clase: 'ESCRIBE',
     marcas: [HISTORICO, 'nuevoRepartoDirigido(', 'nuevoRepartoDeCuenta(', 'recalculateOrderTotals('],
   },
@@ -230,7 +230,7 @@ const ORIGEN_DE_LA_CABECERA: Record<string, Origen> = {
     origen: 'FILAS',
     nota: 'Rebajas heredadas con filas espejo en la misma transacción.',
   },
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     origen: 'FILAS',
     nota: 'espejos de cortesía y de artículo + fila de cuenta del POS o de catálogo; con promociones, reafirmada',
   },
@@ -518,7 +518,7 @@ const MUTADORES_DE_RENGLONES: Record<string, Mutador> = {
     clase: 'CREACION',
     nota: '«Cobrar»: orden, renglones y filas con su reparto (B2)',
   },
-  'src/services/mobile/order.mobile.service.ts#createOrderWithItems': {
+  'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
     clase: 'CREACION',
     nota: 'venta del móvil: espejos y fila de cuenta con su reparto (B2)',
   },

@@ -30,6 +30,7 @@ import { revokeSession } from '@/services/auth/session.service'
 import { invalidateSession } from '@/services/auth/sessionCache'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
+import { zonaValida } from '@/utils/datetime'
 import { resolveMasterCatalogAccess } from '@/services/master-catalog/masterCatalogAccess.service'
 
 /**
@@ -192,6 +193,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
                 slug: true,
                 logo: true,
                 currency: true, // Locale-aware money formatting on the dashboard
+                timezone: true, // Zona del negocio: el panel arma días y rangos con ella (D4)
                 type: true, // Business type for sector-aware UI terminology
                 status: true, // Single source of truth for venue state
                 kycStatus: true, // Include KYC status for access control
@@ -266,6 +268,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             slug: true,
             logo: true,
             currency: true,
+            timezone: true,
             status: true,
             kycStatus: true,
             address: true,
@@ -308,6 +311,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: venue.slug,
           logo: venue.logo,
           currency: venue.currency,
+          timezone: zonaValida(venue.timezone),
           role: StaffRole.SUPERADMIN,
           roleDisplayName: DEFAULT_ROLE_DISPLAY_NAMES[StaffRole.SUPERADMIN],
           status: venue.status,
@@ -370,6 +374,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: string
       logo: string | null
       currency?: string // ISO 4217 code for money formatting
+      timezone?: string // IANA; una inválida sale como America/Mexico_City (zonaValida)
       type?: string // Business type for sector-aware UI terminology
       role?: any
       roleDisplayName?: string // Custom display name for the role (per-venue)
@@ -423,6 +428,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
       slug: sv.venue.slug,
       logo: sv.venue.logo,
       currency: sv.venue.currency,
+      timezone: zonaValida(sv.venue.timezone), // sin ella todo el panel usaba la hora de CDMX en cualquier sucursal (D4)
       type: sv.venue.type, // Business type for sector-aware UI
       role: sv.role,
       roleDisplayName: roleDisplayNamesByVenue.get(sv.venue.id)?.get(sv.role) ?? DEFAULT_ROLE_DISPLAY_NAMES[sv.role as StaffRole],
@@ -471,6 +477,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: true,
           logo: true,
           currency: true,
+          timezone: true,
           type: true, // Business type for sector-aware UI terminology
           status: true, // Single source of truth
           kycStatus: true, // Include KYC status
@@ -532,6 +539,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         slug: venue.slug,
         logo: venue.logo,
         currency: venue.currency,
+        timezone: zonaValida(venue.timezone),
         type: venue.type, // Business type for sector-aware UI
         status: venue.status, // Single source of truth
         kycStatus: venue.kycStatus, // Include KYC status
@@ -590,6 +598,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
             slug: true,
             logo: true,
             currency: true,
+            timezone: true,
             type: true, // Business type for sector-aware UI terminology
             status: true, // Single source of truth
             kycStatus: true, // Include KYC status
@@ -651,6 +660,7 @@ export const getAuthStatus = async (req: Request, res: Response) => {
           slug: venue.slug,
           logo: venue.logo,
           currency: venue.currency,
+          timezone: zonaValida(venue.timezone),
           type: venue.type, // Business type for sector-aware UI
           status: venue.status, // Single source of truth
           kycStatus: venue.kycStatus, // Include KYC status

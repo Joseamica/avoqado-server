@@ -90,6 +90,7 @@ import { aggregatorPassWorkerJob } from './jobs/aggregator-pass-worker.job'
 import { shopifyWorkerJob } from './jobs/shopify-worker.job'
 import { shopifyReconcileJob } from './jobs/shopify-reconcile.job'
 import { giftCardReconciliationJob } from './jobs/giftCardReconciliation.job'
+import { giftCardDeliveryJob } from './jobs/giftCardDelivery.job'
 import { cashDrawerReconcilerJob } from './jobs/cash-drawer-reconciler.job'
 import { planAccessReconciliationJob } from './jobs/plan-access-reconciliation.job'
 import { altasAMedioPagoJob } from './jobs/altas-a-medio-pago.job'
@@ -195,6 +196,7 @@ const gracefulShutdown = async (signal: string) => {
       shopifyWorkerJob.stop()
       shopifyReconcileJob.stop()
       giftCardReconciliationJob.stop()
+      giftCardDeliveryJob.stop()
       cashDrawerReconcilerJob.stop()
       planAccessReconciliationJob.stop()
       documentRequestsJob.stop()
@@ -553,6 +555,8 @@ const startApplication = async (retries = 3) => {
       shopifyReconcileJob.start()
       // Tarjetas de regalo: revisión nocturna (saldo contra libreta; activa cuentas pagadas con sobres PENDING; avisa lo demás).
       giftCardReconciliationJob.start()
+      // Tarjetas de regalo 1b: la entrega por WhatsApp y correo (reclamo en la fila, reintentos a +1, +5 y +30 min).
+      giftCardDeliveryJob.start()
       cashDrawerReconcilerJob.start()
       planAccessReconciliationJob.start()
       documentRequestsJob.start()
