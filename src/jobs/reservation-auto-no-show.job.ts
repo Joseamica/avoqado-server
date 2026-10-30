@@ -5,6 +5,13 @@ import { markNoShow, PASS_ARRIVAL_PENDING } from '../services/dashboard/reservat
 import { retry, shouldRetryDbConnectionError } from '../utils/retry'
 import { scheduleJob } from '../observability/jobContext'
 import { conNegocio } from '../services/demo/candadoDemo'
+import { flushPendingCorrectionNotices, sendClassNoShowSummaries } from '../services/reservation/noShowNotices.service'
+
+/**
+ * Los avisos del tick anterior siguen saliendo (`cron` no espera a que un tick termine, y los correos van con pausa).
+ * Sólo cubre los avisos: el marcado de «No asistió» corre en cada tick pase lo que pase.
+ */
+let avisosEnCurso = false
 
 /**
  * Auto no-show worker.
@@ -118,13 +125,18 @@ export class ReservationAutoNoShowJob {
             reservation.depositAmount.toNumber() > 0
           ) {
             const feeAmount = Number(((reservation.depositAmount.toNumber() * feePercent) / 100).toFixed(2))
-            await prisma.reservation.update({
-              where: { id: reservation.id },
+            // Conditional: a correction («sí llegó») may have landed after markNoShow committed.
+            const { count } = await prisma.reservation.updateMany({
+              where: { id: reservation.id, venueId: reservation.venueId, status: 'NO_SHOW' },
               data: { noShowFeeAmount: feeAmount },
             })
-            logger.warn(
-              `[AUTO_NO_SHOW] fee_owed=${feeAmount} reservation=${reservation.id} confirmationCode=${reservation.confirmationCode} — actual capture deferred`,
-            )
+            if (count === 0) {
+              logger.info(`🚫 [AUTO NO-SHOW] ${reservation.confirmationCode} is no longer NO_SHOW — fee not recorded`)
+            } else {
+              logger.warn(
+                `[AUTO_NO_SHOW] fee_owed=${feeAmount} reservation=${reservation.id} confirmationCode=${reservation.confirmationCode} — actual capture deferred`,
+              )
+            }
           }
 
           marked += 1
@@ -141,6 +153,28 @@ export class ReservationAutoNoShowJob {
       logger.info(`🚫 [AUTO NO-SHOW] tick: marked ${marked} reservations`)
     } catch (error) {
       logger.error('❌ [AUTO NO-SHOW] Job failed', error)
+    }
+
+    // D4: avisos durables de «No asistió», DESPUÉS de marcar (el resumen espera a que la clase no tenga PENDING/CONFIRMED).
+    // Cada uno en su try: uno que truena no tumba al otro ni al marcado. Si el tick anterior sigue mandando, se saltan.
+    if (avisosEnCurso) {
+      logger.info('🚫 [AUTO NO-SHOW] los avisos del tick anterior siguen saliendo; éste no los repite')
+      return
+    }
+    avisosEnCurso = true
+    try {
+      try {
+        await flushPendingCorrectionNotices(new Date())
+      } catch (error) {
+        logger.error('❌ [AUTO NO-SHOW] avisos de correcciones pendientes', error)
+      }
+      try {
+        await sendClassNoShowSummaries(new Date())
+      } catch (error) {
+        logger.error('❌ [AUTO NO-SHOW] resumen de «No asistió» por clase', error)
+      }
+    } finally {
+      avisosEnCurso = false
     }
   }
 }

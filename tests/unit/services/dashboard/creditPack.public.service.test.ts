@@ -44,6 +44,7 @@ import {
   fulfillPurchase,
   checkRedemptionEligibility,
   redeemForReservation,
+  refundCreditsForReservation,
 } from '../../../../src/services/dashboard/creditPack.public.service'
 import { BadRequestError, NotFoundError } from '../../../../src/errors/AppError'
 import { CreditPurchaseStatus } from '@prisma/client'
@@ -1514,6 +1515,90 @@ describe('CreditPack Public Service', () => {
 
       // Should NOT update purchase status
       expect(prismaMock.creditPackPurchase.update).not.toHaveBeenCalled()
+    })
+  })
+
+  // ==========================================
+  // refundCreditsForReservation — sólo si la reserva sigue en el estado esperado (D4, Task 0)
+  // ==========================================
+
+  describe('refundCreditsForReservation con onlyIfReservationStatus', () => {
+    const POLICY = { creditRefundMode: 'ALWAYS' as const, creditFreeRefundHoursBefore: 0, creditLateRefundPercent: 100 }
+    const redeem = {
+      id: 'ctx-1',
+      venueId: VENUE_ID,
+      customerId: CUSTOMER_ID,
+      creditPackPurchaseId: 'purchase-001',
+      creditItemBalanceId: BALANCE_ID,
+      type: 'REDEEM',
+      quantity: -1,
+      reservationId: 'res-1',
+    }
+    const sqlDe = (call: unknown[]) => (Array.isArray(call[0]) ? (call[0] as string[]).join('?') : String(call[0]))
+    const candadoDeLaReserva = () =>
+      prismaMock.$queryRaw.mock.calls.findIndex(
+        (call: unknown[]) => sqlDe(call).includes('FOR UPDATE') && sqlDe(call).includes('"Reservation"'),
+      )
+
+    beforeEach(() => {
+      prismaMock.creditTransaction.findMany.mockResolvedValue([redeem] as any)
+      // Las dos formas de $transaction (lista o función), para que la prueba no dependa de cuál use el servicio.
+      prismaMock.$transaction.mockImplementation(async (arg: any) => (typeof arg === 'function' ? arg(prismaMock) : Promise.all(arg)))
+    })
+
+    it('no devuelve la clase si la reserva ya no está en NO_SHOW (la corrigieron antes de que llegara la devolución)', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ status: 'CHECKED_IN' }])
+
+      const r = await refundCreditsForReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-1',
+        startsAt: new Date(),
+        policy: POLICY,
+        reasonPrefix: 'No-show refund',
+        onlyIfReservationStatus: 'NO_SHOW',
+      })
+
+      expect(r).toMatchObject({ creditsRefunded: 0, skipped: 'STATUS_CHANGED' })
+      expect(candadoDeLaReserva()).toBeGreaterThanOrEqual(0)
+      expect(prismaMock.creditItemBalance.update).not.toHaveBeenCalled()
+      expect(prismaMock.creditTransaction.create).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackPurchase.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('devuelve la clase si sigue en NO_SHOW, y toma el candado de la reserva ANTES de escribir', async () => {
+      prismaMock.$queryRaw.mockResolvedValueOnce([{ status: 'NO_SHOW' }])
+
+      const r = await refundCreditsForReservation({
+        venueId: VENUE_ID,
+        reservationId: 'res-1',
+        startsAt: new Date(),
+        policy: POLICY,
+        reasonPrefix: 'No-show refund',
+        onlyIfReservationStatus: 'NO_SHOW',
+      })
+
+      expect(r).toMatchObject({ creditsRefunded: 1 })
+      expect(r).not.toHaveProperty('skipped')
+      expect(prismaMock.creditItemBalance.update).toHaveBeenCalledWith({
+        where: { id: BALANCE_ID },
+        data: { remainingQuantity: { increment: 1 } },
+      })
+      const candado = candadoDeLaReserva()
+      expect(candado).toBeGreaterThanOrEqual(0)
+      expect(prismaMock.$queryRaw.mock.invocationCallOrder[candado]).toBeLessThan(
+        prismaMock.creditItemBalance.update.mock.invocationCallOrder[0],
+      )
+    })
+
+    it('sin el parámetro (cancelación), igual que hoy: no consulta el estado y devuelve', async () => {
+      const r = await refundCreditsForReservation({ venueId: VENUE_ID, reservationId: 'res-1', startsAt: new Date(), policy: POLICY })
+
+      expect(r).toEqual({ creditsRefunded: 1, policyApplied: 'ALWAYS' })
+      expect(candadoDeLaReserva()).toBe(-1)
+      expect(prismaMock.creditItemBalance.update).toHaveBeenCalledTimes(1)
+      expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({
+        data: expect.objectContaining({ type: 'REFUND', quantity: 1, reservationId: 'res-1' }),
+      })
     })
   })
 

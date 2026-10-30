@@ -200,7 +200,14 @@ describe('ClassSession Dashboard Service', () => {
 
       prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase())
       prismaMock.$queryRaw.mockResolvedValueOnce([
-        { id: 'v', reservationId: 'res-pase', status: 'PENDING', deadlineAt, confirmMode: 'AUTO', lastError: 'No pudimos comunicarnos con TotalPass; lo reintentamos.' },
+        {
+          id: 'v',
+          reservationId: 'res-pase',
+          status: 'PENDING',
+          deadlineAt,
+          confirmMode: 'AUTO',
+          lastError: 'No pudimos comunicarnos con TotalPass; lo reintentamos.',
+        },
       ])
       const auto = await getClassSession(VENUE_ID, SESSION_ID)
       expect(auto.reservations[0].passVisit?.awaitingVenue).toBe(false)
@@ -208,10 +215,23 @@ describe('ClassSession Dashboard Service', () => {
 
       prismaMock.classSession.findFirst.mockResolvedValueOnce(conPase({ status: 'CHECKED_IN' }))
       prismaMock.$queryRaw.mockResolvedValueOnce([
-        { id: 'v', reservationId: 'res-pase', status: 'EXPIRED', deadlineAt, confirmMode: 'ON_VENUE_CHECKIN', lastError: 'venció antes de validar' },
+        {
+          id: 'v',
+          reservationId: 'res-pase',
+          status: 'EXPIRED',
+          deadlineAt,
+          confirmMode: 'ON_VENUE_CHECKIN',
+          lastError: 'venció antes de validar',
+        },
       ])
       const tarde = await getClassSession(VENUE_ID, SESSION_ID)
-      expect(tarde.reservations[0].passVisit).toEqual({ id: 'v', status: 'EXPIRED', deadlineAt, awaitingVenue: false, lastError: 'venció antes de validar' })
+      expect(tarde.reservations[0].passVisit).toEqual({
+        id: 'v',
+        status: 'EXPIRED',
+        deadlineAt,
+        awaitingVenue: false,
+        lastError: 'venció antes de validar',
+      })
     })
 
     it('visita PENDING con la conexión revocada y sin lastError: dice que la conexión no está activa; con ACTIVE, null', async () => {
@@ -273,6 +293,56 @@ describe('ClassSession Dashboard Service', () => {
       // available = 10 - 5 = 5
       expect(result.available).toBe(5)
       expect(result.id).toBe(SESSION_ID)
+    })
+
+    it('D4 · trae noShows aparte (para «Sí llegó») sin tocar reservations ni enrolled', async () => {
+      prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
+      const faltas = [
+        {
+          id: 'res-ns',
+          confirmationCode: 'RES-NNN003',
+          partySize: 1,
+          guestName: null,
+          guestPhone: null,
+          customer: { id: 'c-1', firstName: 'Ana', lastName: 'Gómez', phone: null },
+          noShowAt: new Date('2026-03-01T10:15:00Z'),
+          status: 'NO_SHOW',
+          aggregatorBooking: { id: 'b-1', provider: 'TOTALPASS' }, // falta de pase: se etiqueta y no lleva «Sí llegó»
+        },
+      ]
+      prismaMock.reservation.findMany.mockResolvedValueOnce(faltas)
+      prismaMock.reservation.count.mockResolvedValueOnce(1)
+
+      const result = await getClassSession(VENUE_ID, SESSION_ID)
+
+      expect(result.noShows).toEqual(faltas)
+      expect(result.noShowsTotal).toBe(1)
+      expect(result.enrolled).toBe(5) // igual que antes: las apps viejas cuentan con reservations/enrolled
+      expect(result.available).toBe(5)
+      expect(result.reservations.map((r: any) => r.id)).toEqual(['res-a', 'res-b'])
+      const args = prismaMock.reservation.findMany.mock.calls[0][0]
+      expect(args.where).toEqual({ venueId: VENUE_ID, classSessionId: SESSION_ID, status: 'NO_SHOW' })
+      expect(args.take).toBe(500)
+      expect(Object.keys(args.select).sort()).toEqual(
+        ['aggregatorBooking', 'confirmationCode', 'customer', 'guestName', 'guestPhone', 'id', 'noShowAt', 'partySize', 'status'].sort(),
+      )
+      expect(args.select.aggregatorBooking).toEqual({ select: { id: true, provider: true } })
+    })
+
+    it('🔴 hallazgo #3: noShowsTotal es el conteo EXACTO (mismo where), aunque la lista traiga menos: nunca una lista parcial como completa', async () => {
+      prismaMock.classSession.findFirst.mockResolvedValue(makeSession())
+      const quinientas = Array.from({ length: 500 }, (_, i) => ({ id: `res-ns-${i}`, status: 'NO_SHOW' }))
+      prismaMock.reservation.findMany.mockResolvedValueOnce(quinientas as any)
+      prismaMock.reservation.count.mockResolvedValueOnce(501)
+
+      const result = await getClassSession(VENUE_ID, SESSION_ID)
+
+      expect(result.noShows).toHaveLength(500)
+      expect(result.noShowsTotal).toBe(501) // el cliente puede decir «y 1 más»
+      expect(prismaMock.reservation.count).toHaveBeenCalledWith({
+        where: { venueId: VENUE_ID, classSessionId: SESSION_ID, status: 'NO_SHOW' },
+      })
+      expect(result.enrolled).toBe(5) // reservations/enrolled no cambian
     })
 
     it('should return enrolled=0 and available=capacity when no active reservations', async () => {

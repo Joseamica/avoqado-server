@@ -538,6 +538,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   ReservationSettings: 'Reservations & Booking',
   ReservationModifier: 'Reservations & Booking',
   ReservationReminderSent: 'Reservations & Booking',
+  ReservationNoShowCorrection: 'Reservations & Booking',
   ReservationWaitlistEntry: 'Reservations & Booking',
   ReservationGoogleEventMapping: 'Reservations & Booking',
   SlotHold: 'Reservations & Booking',

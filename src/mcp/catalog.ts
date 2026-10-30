@@ -422,6 +422,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   top_products: 'read',
   trial_balance: 'read',
   undo_check_in: 'write',
+  undo_no_show: 'write',
   update_customer_display_design: 'write',
   update_fixed_asset: 'write',
   update_gift_card_settings: 'write',

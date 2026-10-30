@@ -15,7 +15,7 @@
  */
 
 import { createHash, randomBytes } from 'crypto'
-import { Prisma } from '@prisma/client'
+import { NotificationType, Prisma } from '@prisma/client'
 
 import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
@@ -33,6 +33,8 @@ import {
   venueOrganizationId,
 } from './checkIn.service'
 import { spotLabel } from './coachClass.service'
+import { undoNoShow } from './undoNoShow.service'
+import { afterNoShowCorrection, notifyNoShowNeedsReview } from './noShowNotices.service'
 
 export const CHECK_IN_NOT_FOUND = 'CHECK_IN_NOT_FOUND' as const
 export const CHECK_IN_ALREADY_CLAIMED = 'CHECK_IN_ALREADY_CLAIMED' as const
@@ -506,6 +508,32 @@ export async function getKioskRoster(args: { venueId: string; now: Date }): Prom
 /** Un toque guardado sin red se registra solo hasta 3 días después; más viejo, lo decide una persona. */
 export const KIOSK_MAX_OFFLINE_MS = 72 * 60 * 60_000
 export const CHECK_IN_TOO_OLD = 'CHECK_IN_TOO_OLD' as const
+/** D4 · candado (a): el `closesAt` del aparato vale si cae a ±60 s del que calcula el SERVIDOR (redondeo del aparato). */
+const KIOSK_CLOSES_AT_TOLERANCE_MS = 60_000
+
+/**
+ * D4 — aviso «revisa si sí llegó» una vez por reserva. La marca durable es la campanita que ya existe para esa reserva
+ * (índice `entityType + entityId`): una consulta, sin escribir nada. No filtra por motivo a propósito: `entregar` ya
+ * salta a quien tiene CUALQUIER campanita de esa reserva, así que filtrar por motivo nunca mandaría más. Nunca lanza.
+ */
+async function warnNeedsReviewOnce(venueId: string, reservationId: string, reason: 'KIOSK_TOO_OLD' | 'KIOSK_UNVERIFIED') {
+  try {
+    const bell = await prisma.notification.findFirst({
+      where: { venueId, type: NotificationType.RESERVATION_NEEDS_REVIEW, entityType: 'Reservation', entityId: reservationId },
+      select: { id: true },
+    })
+    if (!bell) await notifyNoShowNeedsReview({ venueId, reservationId, reason })
+  } catch (err) {
+    logger.error('[KIOSK CHECK-IN] No se pudo revisar el aviso de llegada', { reservationId, reason, err: (err as Error)?.message })
+  }
+}
+
+export interface KioskCheckInResult {
+  reservationId: string
+  orderId: string | null
+  /** D4: la reserva tiene una corrección de «No asistió» sin resolver (al corregir y en cada repetición). */
+  correction?: { id: string; pending: string[] }
+}
 
 /**
  * El check-in desde la lista del kiosco. Abre la orden como el toque de hoy, pero con `source: 'KIOSK'`:
@@ -513,13 +541,17 @@ export const CHECK_IN_TOO_OLD = 'CHECK_IN_TOO_OLD' as const
  *
  * `tapped` (cola sin red): el cierre que vio la persona y cuánto faltaba al tocar. La hora del toque es
  * `closesAt − msBeforeClose` — sin ningún reloj del aparato, así que corregirle la hora no la mueve.
+ *
+ * D4: si el «No asistió» le ganó a un toque guardado sin red, el SERVIDOR lo corrige solo con tres candados:
+ * (a) el `closesAt` es el que hoy calcula para esa reserva (±60 s), (b) el toque cae en la ventana y (c) tiene ≤ 72 h.
+ * Si no, queda lo de hoy (409 + rastro); con (a) roto, además se avisa al gerente.
  */
 export async function kioskCheckInReservation(args: {
   venueId: string
   reservationId: string
   now: Date
   tapped?: { closesAt: Date; msBeforeClose: number }
-}): Promise<{ reservationId: string; orderId: string | null }> {
+}): Promise<KioskCheckInResult> {
   const at = args.tapped ? new Date(args.tapped.closesAt.getTime() - args.tapped.msBeforeClose) : args.now
 
   // Antes de tocar nada. Un minuto de holgura para el redondeo del aparato, no para adelantar llegadas.
@@ -530,6 +562,13 @@ export async function kioskCheckInReservation(args: {
     )
   }
   if (args.now.getTime() - at.getTime() > KIOSK_MAX_OFFLINE_MS) {
+    // D4: el mismo 422, pero si era un «No asistió» el gerente se entera. La lectura nunca cambia la respuesta.
+    try {
+      const r = await prisma.reservation.findFirst({ where: { id: args.reservationId, venueId: args.venueId }, select: { status: true } })
+      if (r?.status === 'NO_SHOW') void warnNeedsReviewOnce(args.venueId, args.reservationId, 'KIOSK_TOO_OLD')
+    } catch (readErr) {
+      logger.error('[KIOSK CHECK-IN] No se pudo leer la reserva de una llegada vieja', { err: (readErr as Error)?.message })
+    }
     throw new ValidationError(
       'Esta llegada se guardó hace más de 3 días y ya no se puede registrar sola. Regístrala en Reservaciones.',
       CHECK_IN_TOO_OLD,
@@ -537,7 +576,7 @@ export async function kioskCheckInReservation(args: {
   }
 
   const actor = { type: 'SERVICE', servicePrincipalId: 'kiosk' } as const
-  try {
+  const checkIn = async (): Promise<KioskCheckInResult> => {
     const result = await checkInReservationAndOpenOrder({
       reservationId: args.reservationId,
       venueId: args.venueId,
@@ -545,7 +584,17 @@ export async function kioskCheckInReservation(args: {
       source: 'KIOSK',
       now: at,
     })
-    return { reservationId: args.reservationId, orderId: result.orderId }
+    // D4 · respuesta perdida: cada éxito sobre una llegada corregida (sin resolver) devuelve su corrección, así el
+    // aparato rehace el aviso con el mismo id.
+    const correction = await prisma.reservationNoShowCorrection.findFirst({
+      where: { reservationId: args.reservationId, venueId: args.venueId, resolvedAt: null },
+      select: { id: true, pending: true },
+    })
+    return { reservationId: args.reservationId, orderId: result.orderId, ...(correction ? { correction } : {}) }
+  }
+
+  try {
+    return await checkIn()
   } catch (err) {
     // Sólo el toque guardado sin red merece explicación: en vivo, la persona ve el «no» al instante.
     if (!args.tapped || !(err instanceof ConflictError) || err.code !== RESERVATION_NOT_CHECKINABLE) throw err
@@ -554,6 +603,7 @@ export async function kioskCheckInReservation(args: {
       where: { id: args.reservationId, venueId: args.venueId },
       select: {
         status: true,
+        startsAt: true,
         guestName: true,
         customer: { select: { firstName: true, lastName: true } },
         venue: { select: { timezone: true } },
@@ -561,8 +611,41 @@ export async function kioskCheckInReservation(args: {
     })
     if (r?.status !== 'NO_SHOW') throw err
 
-    // Llegó, pero el «No asistió» le ganó mientras no había red. No se revierte aquí (0.e): queda el rastro
-    // para el gerente. Mismo molde que ORDER_FROM_RESERVATION_FAILED: el rastro nunca tumba la respuesta.
+    // Llegó, pero el «No asistió» le ganó mientras no había red. Los candados se miden con el horario del SERVIDOR.
+    const grace = (await getReservationSettings(args.venueId)).scheduling.noShowGraceMin
+    const serverClosesAt = r.startsAt.getTime() + grace * 60_000
+    const verified = Math.abs(args.tapped.closesAt.getTime() - serverClosesAt) <= KIOSK_CLOSES_AT_TOLERANCE_MS
+    let corrected = false
+    if (verified && evaluateKioskWindow({ startsAt: r.startsAt, now: at, noShowGraceMin: grace })) {
+      try {
+        const undone = await prisma.$transaction(tx =>
+          undoNoShow(tx, {
+            reservationId: args.reservationId,
+            venueId: args.venueId,
+            actor,
+            source: 'KIOSK',
+            now: args.now,
+            arrivedAt: at,
+          }),
+        )
+        // La hora la midió el aparato: toda corrección del kiosco se avisa (decisión 7). Sin esperar.
+        if (undone.outcome === 'UNDONE') void afterNoShowCorrection(undone.correction.id)
+        corrected = true
+      } catch (undoErr) {
+        // Sólo un «no» de negocio de `undoNoShow` (un pase, la reserva cambió) cae a lo de hoy. Una falla de la base
+        // (P2024/P2028, conexión) sube como 5xx: el aparato reintenta en vez de dar la llegada por rechazada.
+        if (!(undoErr instanceof ConflictError || undoErr instanceof NotFoundError)) throw undoErr
+        logger.warn('[KIOSK CHECK-IN] El «No asistió» no se pudo corregir solo; queda para el gerente', {
+          reservationId: args.reservationId,
+          err: (undoErr as Error)?.message,
+        })
+      }
+    }
+    // Fuera del try: si la respuesta falla después de corregir, el aparato reintenta y la repetición devuelve lo mismo.
+    if (corrected) return checkIn()
+    if (!verified) void warnNeedsReviewOnce(args.venueId, args.reservationId, 'KIOSK_UNVERIFIED')
+
+    // Mismo molde que ORDER_FROM_RESERVATION_FAILED: el rastro nunca tumba la respuesta.
     try {
       const organizationId = await venueOrganizationId(prisma, args.venueId)
       await prisma.activityLog.create({
@@ -583,8 +666,9 @@ export async function kioskCheckInReservation(args: {
     }
 
     const name = r.customer ? shortName(r.customer.firstName, r.customer.lastName) : shortNameFromFull(r.guestName)
+    // ANDROID reconoce este rechazo por «No asistió» en el texto (QuarantineViewModel): no lo quites.
     throw new ConflictError(
-      `${name} llegó a las ${formatInTimeZone(at, r.venue.timezone, 'HH:mm')} sin conexión, pero su reserva ya estaba como «No asistió» y la app no puede deshacerlo. Avísale al gerente.`,
+      `${name} llegó a las ${formatInTimeZone(at, r.venue.timezone, 'HH:mm')} sin conexión, pero su reserva ya estaba como «No asistió». Si sí llegó, corrígelo con «Sí llegó».`,
       RESERVATION_NOT_CHECKINABLE,
     )
   }
