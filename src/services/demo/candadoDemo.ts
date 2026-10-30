@@ -306,7 +306,6 @@ export const PANEL_PERMITIDAS: ReadonlySet<string> = new Set([
   'settlement-incidents',
   'shifts',
   'staff-documents',
-  'staff-pay',
   'stock',
   'tender-types',
   'upsell-products',
@@ -353,6 +352,9 @@ export const PANEL_BLOQUEADAS: Readonly<Record<string, string>> = {
   'serialized-inventory': 'usar el inventario por número de serie',
   'setup-intent': 'contratar o cambiar el plan de Avoqado',
   shopify: 'conectar Shopify',
+  // Su historial es nómina y por diseño nunca se borra (la limpieza de demos omite la sede que lo tiene), y el demo se
+  // reinicia cada noche: activarlo dejaría datos que sobreviven al reinicio (Codex r8, 2).
+  'staff-pay': 'activar el pago al personal (su historial no se puede borrar)',
   'stores-analysis': 'usar el módulo de promotores',
   supervisor: 'usar el módulo de promotores',
   suspend: 'suspender el negocio',

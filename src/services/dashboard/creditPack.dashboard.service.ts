@@ -14,7 +14,7 @@ import prisma from '@/utils/prismaClient'
 import logger from '@/config/logger'
 import { BadRequestError, NotFoundError } from '@/errors/AppError'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { esNegocioDemo } from '@/services/demo/candadoDemo'
+import { omitirPorDemo } from '@/services/demo/candadoDemo'
 
 /**
  * Lazy Stripe singleton. We used to do `new Stripe(process.env.STRIPE_SECRET_KEY || '')`
@@ -107,11 +107,12 @@ export async function createCreditPack(
   }
 
   // Create Stripe product and price — salvo en un negocio demo: sería un producto real en el Stripe de Avoqado
-  // (candado demo, capa 4). El paquete funciona igual sin Stripe, como cuando Stripe falla.
+  // (candado demo, capa 4). El paquete funciona igual sin Stripe, como cuando Stripe falla. `omitirPorDemo` y no
+  // `esNegocioDemo`: un negocio que el reinicio acaba de borrar, o una base que no contesta, tampoco va a Stripe (Codex r8, 1).
   let stripeProductId: string | undefined
   let stripePriceId: string | undefined
 
-  if (!(await esNegocioDemo(venueId)))
+  if (!(await omitirPorDemo('producto de Stripe del paquete', null, venueId)))
     try {
       const stripe = getStripe()
       const stripeProduct = await stripe.products.create({

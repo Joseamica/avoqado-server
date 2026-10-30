@@ -94,7 +94,6 @@ const POR_QUE_NO_LO_ALCANZA: Array<[prefijo: string, razon: string]> = [
       'plan, suscripción y compras de Avoqado en Stripe: cerradas en un demo (plan, features, hybrid-billing, tpv-orders, tokens; el usuario demo sólo escribe en su negocio) y LIVE_DEMO no tiene suscripción',
     ],
   ),
-  ['services/dashboard/creditPack.dashboard.service.ts', 'el producto de Stripe de un paquete no se crea en un negocio demo'],
   [
     'services/dashboard/creditPack.public.service.ts',
     'compra de paquetes: los cobros públicos de un demo dan 403 (negocioDeRutaPublica) y el kiosco pide Stripe Connect, que un demo no tiene',
