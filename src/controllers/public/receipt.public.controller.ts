@@ -3,6 +3,7 @@ import { NextFunction, Request, Response } from 'express'
 import { getDigitalReceiptByAccessKey } from '../../services/tpv/digitalReceipt.tpv.service'
 import { generateReceiptHTML } from '../../utils/receiptTemplate'
 import { NotFoundError } from '../../errors/AppError'
+import { productosDelSnapshot } from '../../services/shared/productosDelRecibo'
 import logger from '../../config/logger'
 
 // Public route to get a receipt by its access key
@@ -98,7 +99,20 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
         table: dataSnapshot.order?.table,
         ...dataSnapshot.order,
       },
-      items: dataSnapshot.order?.items || [],
+      // D8: la plantilla usa el formato de la terminal (`productName`, `unitPrice`, `total`): sus `items` tal cual, o los del
+      // panel (`order.items`) traducidos a ese formato.
+      // D15: el recibo de UNA parte (`ticketTotals.parcial`) va por el helper, que lo vuelve un renglón «Pago parcial».
+      items:
+        dataSnapshot.ticketTotals?.parcial !== true && dataSnapshot.items?.length
+        ? dataSnapshot.items
+        : productosDelSnapshot(dataSnapshot).map(p => ({
+            productName: p.name,
+            quantity: p.quantity,
+            unitPrice: p.price,
+            total: p.totalPrice,
+            weightKg: p.weightKg ?? null,
+            modifiers: p.modifiers,
+          })),
       processedBy: dataSnapshot.processedBy,
       ticketTotals: dataSnapshot.ticketTotals ?? null, // IVA por producto, plan 7 (D3): el HTML legado pinta los totales congelados
       receiptInfo: {

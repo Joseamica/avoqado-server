@@ -185,6 +185,17 @@ export const recordPaymentBodySchema = z.object({
       // jamás se rechaza por este campo. Codex r11 #2: sin declararlo aquí, `validateRequest` lo borra del cuerpo. `nullish()`, no
       // `optional()` (revisión de 6a-1): un `null` explícito —como el `externalSource: null` de iOS— no puede tumbar un cobro.
       cobroNuevo: z.boolean({ message: 'cobroNuevo debe ser verdadero o falso.' }).nullish(),
+      // «Cobrar sin red» (D4): el turno en que se VENDIÓ; sólo lo manda la cola de la terminal al reproducir. Si ya no es el vivo,
+      // la venta queda sin turno con conciliación (nunca en el nuevo). Sin declararlo, `validateRequest` lo borraría y la venta
+      // tardía caería en silencio en el turno nuevo. No es `.cuid()` a propósito: el dinero ya se cobró y un id raro sólo puede
+      // dejarla fuera de turno (visible), nunca rechazarla. El `shiftId` que la terminal ya manda sigue sin declararse.
+      shiftIdDeLaVenta: z.string().max(64, { message: 'El turno de la venta es demasiado largo.' }).nullish(),
+      // S3 «Efectivo sin red en el turno correcto»: la caja que el POS (ANDROID/iOS) tenía abierta al cobrar; la manda su cola al
+      // reproducir una venta rápida por `/mobile/…/fast`. El servicio la convierte en el turno de la venta (liga 1:1 caja↔turno) y sólo
+      // la usa con `isOfflineReplay === true`. Misma forma que `shiftIdDeLaVenta`; sin declararla, `validateRequest` la borraría.
+      // Este esquema también valida `/tpv/orders/:o` (`recordOrderPayment`), donde se IGNORA a propósito: la TPV no tiene caja y
+      // manda `shiftIdDeLaVenta`. Sólo la lee `recordFastPayment` (la venta rápida del POS por `/mobile/…/fast`).
+      cashDrawerSessionId: z.string().max(64, { message: 'La caja de la venta es demasiado larga.' }).nullish(),
       // Detalle legible del cobro declarado a mano ("Tarjeta (terminal externa)").
       // nullable() NO es cosmético: iOS manda `externalSource: null` explícito en los
       // cobros normales, así que exigir string|undefined rechazaría cada cobro en

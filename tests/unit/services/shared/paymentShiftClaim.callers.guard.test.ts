@@ -493,12 +493,38 @@ function closedPropertyName(name: ts.PropertyName): string | undefined {
  * direct members can replace `data`, `status`, `paymentStatus`, auditor claim,
  * payment id or gate, so nested payload objects do not need interpretation.
  */
-function closedInlineObject(expression: ts.Expression | undefined): ts.ObjectLiteralExpression | undefined {
+/**
+ * S3 «Efectivo sin red en el turno correcto» (Codex r5 código #1): la venta de la cola entra al claim por UNA puerta,
+ * `...entradaDelClaim(venta)`, para que ningún llamador olvide un campo. Es el ÚNICO spread que la gramática cerrada acepta, y sólo en
+ * los argumentos de una llamada (`argumentObject`) cuando es el import canónico de `paymentShiftClaim`. Sus campos (ninguno decide
+ * estado, montos ni la orden) cuentan como propiedades: un duplicado explícito sigue rompiendo la gramática. Si `entradaDelClaim` gana
+ * un campo, va aquí también.
+ */
+const CAMPOS_DE_ENTRADA_DEL_CLAIM = ['expectedShiftId', 'cajaCapturada', 'apartePorCajaCerrada', 'cajaSinTurno', 'cajaLigadaAbierta']
+
+function esSpreadDeEntradaDelClaim(property: ts.ObjectLiteralElementLike, context: AstCall): boolean {
+  if (!ts.isSpreadAssignment(property)) return false
+  const expression = unwrapExpression(property.expression)
+  return (
+    ts.isCallExpression(expression) &&
+    ts.isIdentifier(expression.expression) &&
+    canonicalNamedImport(expression.expression, context, new Set(['entradaDelClaim'])) === 'entradaDelClaim'
+  )
+}
+
+function closedInlineObject(expression: ts.Expression | undefined, context?: AstCall): ts.ObjectLiteralExpression | undefined {
   if (!expression) return undefined
   const candidate = unwrapExpression(expression)
   if (!ts.isObjectLiteralExpression(candidate)) return undefined
   const names = new Set<string>()
   for (const property of candidate.properties) {
+    if (context && esSpreadDeEntradaDelClaim(property, context)) {
+      for (const name of CAMPOS_DE_ENTRADA_DEL_CLAIM) {
+        if (names.has(name)) return undefined
+        names.add(name)
+      }
+      continue
+    }
     if (!ts.isPropertyAssignment(property) && !ts.isShorthandPropertyAssignment(property)) return undefined
     const name = closedPropertyName(property.name)
     if (name === undefined || names.has(name)) return undefined
@@ -508,13 +534,17 @@ function closedInlineObject(expression: ts.Expression | undefined): ts.ObjectLit
 }
 
 function argumentObject(call: AstCall, argumentIndex: number): ts.ObjectLiteralExpression | undefined {
-  return closedInlineObject(call.node.arguments[argumentIndex])
+  return closedInlineObject(call.node.arguments[argumentIndex], call)
 }
 
 function hasObjectProperty(call: AstCall, argumentIndex: number, propertyName: string): boolean {
   const argument = call.node.arguments[argumentIndex]
   if (!argument || !ts.isObjectLiteralExpression(argument)) return false
-  return argument.properties.some(item => ts.isPropertyAssignment(item) && ts.isIdentifier(item.name) && item.name.text === propertyName)
+  return argument.properties.some(
+    item =>
+      (ts.isPropertyAssignment(item) && ts.isIdentifier(item.name) && item.name.text === propertyName) ||
+      (CAMPOS_DE_ENTRADA_DEL_CLAIM.includes(propertyName) && esSpreadDeEntradaDelClaim(item, call)),
+  )
 }
 
 type CompletionStatus = 'COMPLETED' | 'NON_COMPLETED' | 'UNKNOWN'
@@ -1509,7 +1539,14 @@ function claimBindingStableUntilAudit(claim: ts.Identifier, audit: AstCall): boo
   return Boolean(
     declaration &&
       !ts.isParameter(declaration.parent) &&
-      objectBindingStableUntilAudit(declaration, audit, new Set(['shiftId', 'pendingReason', 'candidateShiftId', 'observedStatus']), true),
+      // `saleShiftId` (S5, D4): la marca de venta de un turno cerrado se lee del claim para el Payment (lectura primitiva, como las demás).
+      // `saleDrawerId` (S3 «Efectivo sin red en el turno correcto»): lo mismo para la caja cerrada sin turno ligado.
+      objectBindingStableUntilAudit(
+        declaration,
+        audit,
+        new Set(['shiftId', 'pendingReason', 'candidateShiftId', 'observedStatus', 'saleShiftId', 'saleDrawerId']),
+        true,
+      ),
   )
 }
 
@@ -1779,14 +1816,13 @@ function topLevelStatementInFunction(call: AstCall): ts.Statement | undefined {
 }
 
 function bulkOrderSetPrecedesShift(calls: AstCall[], functionName: string): boolean {
-  const orderLock = callsForFunction(calls, functionName, 'lockExistingOrderForPayment')[0]
+  const orderLock = callsForFunction(calls, functionName, 'lockOrdersForUpdate')[0]
   const shiftLock = callsForFunction(calls, functionName, 'claimShiftForCapturedPayment')[0]
   if (!orderLock || !shiftLock) return false
   const orderLoop = topLevelStatementInFunction(orderLock)
   const shiftLoop = topLevelStatementInFunction(shiftLock)
-  if (!orderLoop || !shiftLoop || orderLoop === shiftLoop || !ts.isForOfStatement(orderLoop) || !ts.isForOfStatement(shiftLoop))
-    return false
-  if (orderLoop.expression.getText(orderLock.sourceFile) !== 'targetOrderIds') return false
+  if (!orderLoop || !shiftLoop || orderLoop === shiftLoop || ts.isForOfStatement(orderLoop) || !ts.isForOfStatement(shiftLoop)) return false
+  if (!/orderIds:\s*targetOrderIds\b/.test(orderLock.node.arguments[1]?.getText(orderLock.sourceFile) ?? '')) return false
   if (shiftLoop.expression.getText(shiftLock.sourceFile) !== 'targetOrderIds') return false
   if (callsInside(orderLoop, calls).some(call => call.expression === 'claimShiftForCapturedPayment')) return false
   return orderLoop.getStart(orderLock.sourceFile) < shiftLoop.getStart(shiftLock.sourceFile)
@@ -3131,6 +3167,49 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
     expect(hasObjectProperty(missingDecision, 1, 'incrementTotalOrders')).toBe(false)
   })
 
+  // 🔴 «Cobrar sin red» (S5, D4): `expectedShiftId` es el turno en que se VENDIÓ, declarado por la cola de la terminal
+  // (`shiftIdDeLaVenta`). Sólo puede QUITAR el turno (si ya no es el vivo, el cobro queda sin turno y con conciliación), nunca
+  // estampar uno del cliente. Lo pasan las tres puertas por las que sube esa cola; los carriles del panel, del webhook y del
+  // saldo del cliente no tienen «turno de la venta» y no lo pasan. Un carril nuevo tiene que clasificarse aquí a conciencia.
+  it('el turno de la venta (expectedShiftId) lo pasan SÓLO las puertas de la cola de la terminal', () => {
+    const PUERTAS_DE_LA_COLA = [
+      'src/services/mobile/order.mobile.service.ts#registrarAbonoEnTx',
+      'src/services/tpv/payment.tpv.service.ts#recordFastPayment',
+      'src/services/tpv/payment.tpv.service.ts#recordOrderPayment',
+    ]
+    const clasificacion = INCLUDED_SOURCE_FILES.flatMap(file => parseCalls(file))
+      .filter(call => call.expression === 'claimShiftForCapturedPayment' || call.expression === 'claimShiftForCompletedPayment')
+      .filter(call => hasObjectProperty(call, 1, 'expectedShiftId'))
+      .map(call => `${call.file}#${call.functionName}`)
+      .sort()
+    expect(clasificacion).toEqual(PUERTAS_DE_LA_COLA)
+  })
+
+  // S3: el único spread aceptado en la entrada del claim es el `entradaDelClaim` canónico, y sus campos siguen contando como propiedades.
+  it('la venta de la cola entra al claim sólo por el entradaDelClaim canónico, sin campos duplicados', () => {
+    const claim = (entrada: string) =>
+      parseCalls(
+        'fixture.ts',
+        `import { claimShiftForCapturedPayment, entradaDelClaim } from '@/services/shared/paymentShiftClaim'
+         function entradaFalsa(v: any) { return v }
+         async function lane(tx: any, v: any) { await claimShiftForCapturedPayment(tx, ${entrada}) }`,
+      ).find(call => call.expression === 'claimShiftForCapturedPayment') as AstCall
+
+    expect(argumentObject(claim('{ venueId: 1, ...entradaDelClaim(v) }'), 1)).toBeDefined()
+    expect(hasObjectProperty(claim('{ venueId: 1, ...entradaDelClaim(v) }'), 1, 'expectedShiftId')).toBe(true)
+    expect(hasObjectProperty(claim('{ venueId: 1, ...entradaDelClaim(v) }'), 1, 'paymentStatus')).toBe(false)
+    expect(argumentObject(claim('{ venueId: 1, ...entradaFalsa(v) }'), 1)).toBeUndefined()
+    expect(argumentObject(claim('{ venueId: 1, ...v }'), 1)).toBeUndefined()
+    expect(argumentObject(claim('{ ...entradaDelClaim(v), expectedShiftId: null }'), 1)).toBeUndefined()
+    expect(argumentObject(claim('{ ...entradaDelClaim(v), ...entradaDelClaim(v) }'), 1)).toBeUndefined()
+
+    // La lista de la guarda es la misma que devuelve `entradaDelClaim`: un campo nuevo sin anotar aquí rompe esta prueba.
+    const fuente = fs.readFileSync(path.join(process.cwd(), 'src/services/shared/paymentShiftClaim.ts'), 'utf8')
+    const cuerpo = fuente.slice(fuente.indexOf('export function entradaDelClaim'))
+    const devuelto = cuerpo.slice(cuerpo.indexOf('return {'), cuerpo.indexOf('}', cuerpo.indexOf('return {')))
+    expect([...devuelto.matchAll(/(\w+):/g)].map(m => m[1]).sort()).toEqual([...CAMPOS_DE_ENTRADA_DEL_CLAIM].sort())
+  })
+
   it('las rutas con Order existente bloquean Order antes de Payment/Shift', () => {
     const lanes = [
       ['src/services/mobile/order.mobile.service.ts', 'registrarAbonoEnTx', 'claimShiftForCapturedPayment'],
@@ -3279,7 +3358,11 @@ describe('paymentShiftClaim — inventario AST de carriles de caja', () => {
     ] as const) {
       const calls = parseCalls(file)
       const jerarquia = callsForFunction(calls, lockFn, 'lockAreaTicketCheckoutHierarchy')[0]
-      const venta = callsForFunction(calls, lockFn, 'lockExistingOrderForPayment')[0]
+      const venta = callsForFunction(
+        calls,
+        lockFn,
+        lockFn === 'settleCustomerBalance' ? 'lockOrdersForUpdate' : 'lockExistingOrderForPayment',
+      )[0]
       const vale = callsForFunction(calls, closeFn, posting)[0]
       const cierre = callsForFunction(calls, closeFn, 'cerrarSesionDeValesAlCerrarLaVenta')[0]
       expect({

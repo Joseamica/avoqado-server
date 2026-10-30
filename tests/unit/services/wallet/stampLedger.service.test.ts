@@ -13,7 +13,7 @@
  *    ahí el empleado sella de más a su amiga y nadie se entera.
  */
 import { Prisma } from '@prisma/client'
-import { grantStamp } from '../../../../src/services/wallet/stampLedger.service'
+import { getStampCardStatus, grantStamp } from '../../../../src/services/wallet/stampLedger.service'
 import { prismaMock } from '../../../__helpers__/setup'
 
 const VENUE = { id: 'v1', timezone: 'America/Mexico_City' }
@@ -445,5 +445,26 @@ describe('grantStamp', () => {
     const otro = new Prisma.PrismaClientKnownRequestError('Unique constraint failed', { code: 'P2002', clientVersion: 'test', meta })
     prismaMock.$transaction.mockRejectedValueOnce(otro)
     await expect(grantStamp('v1', 'c1', 'o1')).rejects.toBe(otro)
+  })
+})
+
+describe('getStampCardStatus', () => {
+  // Sellos a mano (23-oct): el panel manda en su CAS el id de la tarjeta que vio. Es la abierta MÁS VIEJA, la misma que llena
+  // `grantStamp` (D2) y la misma que ajusta `adjustStamps`; campo NUEVO, nada se quita.
+  it('getStampCardStatus devuelve el stampCardId de la abierta más vieja, null sin tarjeta', async () => {
+    prismaMock.stampCard.findFirst.mockReset() // sin colas «Once» de las pruebas de arriba
+    prismaMock.loyaltyConfig.findUnique.mockResolvedValue(CONFIG_SELLOS as any)
+    prismaMock.stampReward.count.mockResolvedValue(0)
+    prismaMock.stampCard.findFirst.mockResolvedValueOnce({ id: 'sc3', stampsEarned: 2, stampsRequired: 7 } as any)
+
+    expect(await getStampCardStatus('v1', 'c1')).toMatchObject({ stampCardId: 'sc3', stampsEarned: 2, stampsRequired: 7 })
+    expect((prismaMock.stampCard.findFirst as jest.Mock).mock.calls[0][0]).toMatchObject({
+      where: { venueId: 'v1', customerId: 'c1', completedAt: null },
+      orderBy: { cycle: 'asc' },
+      select: { id: true },
+    })
+
+    prismaMock.stampCard.findFirst.mockResolvedValueOnce(null)
+    expect(await getStampCardStatus('v1', 'c1')).toMatchObject({ stampCardId: null, stampsEarned: 0, stampsRequired: 7 })
   })
 })

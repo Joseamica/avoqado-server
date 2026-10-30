@@ -30,6 +30,7 @@ import logger from '../../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
 import { logAction } from '../dashboard/activity-log.service'
 import emailService from '../email.service'
+import * as resendService from '../resend.service'
 import { resolvePlanNotificationTarget } from '../access/planNotification.service'
 import {
   assertPaymentMethodBelongsToCustomer,
@@ -57,6 +58,7 @@ import { buildLaunchOfferView, launchOfferAvailability, standardFirstChargeCents
 import { LAUNCH_CAMPAIGN_SELECT, toOfferRow, type LaunchCampaignRow } from '../launchCampaigns/launchCampaign.service'
 import { PLAN_ACTIVATION_STATUS, REDEMPTION_STATUS } from '../launchCampaigns/launchCampaignEnums'
 import { idDelCuponDelDescuento } from './cuponDelDescuento'
+import { terminarAltaCobradaSinRomper, type ViaDelCierre } from './terminarAltaCobrada'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 const stripe = new Stripe(process.env.STRIPE_SECRET_KEY || '')
@@ -743,16 +745,24 @@ export async function activatePlan(
    * 🔴 R2: `soloRecuperar` = el id de la suscripción que el revisor de altas a medio pago viene a cerrar. Con él, esta
    * función sólo puede RECUPERAR esa suscripción ya cobrada: si el alta no apunta a ella, o si Stripe no la da por cobrada,
    * sale sin cobrar, sin anular y sin estrenar intento.
+   * `via`: quién terminó el alta, para la bitácora (H0). Sin él, es el cobro del navegador.
    */
-  opciones: { soloRecuperar?: string } = {},
+  opciones: { soloRecuperar?: string; via?: ViaDelCierre } = {},
 ): Promise<ActivatePlanResult> {
   const { organizationId, staffId } = input
   const now = new Date()
+  // 🔴 H0 (28-oct): con el plan confirmado el alta se termina AQUÍ, no cuando el navegador toca «Entrar». Un fallo no cambia
+  // la respuesta (el dinero ya se movió): lo retoma el barrido. Promesa: Avoqado/docs/audit/2026-10-28-alta-pagada-se-termina-sola/.
+  const terminarElAlta = () => terminarAltaCobradaSinRomper(organizationId, { via: opciones.via ?? 'cobro', staffId })
 
   // ---- PASO 1: carga ----
   const progress = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
   if (!progress) throw new NotFoundError('No encontramos tu registro', 'ONBOARDING_NOT_FOUND')
-  if (progress.completedAt) throw new ConflictError('Este registro ya terminó', 'ONBOARDING_ALREADY_COMPLETED')
+  // Un alta terminada con su plan ACTIVO sigue al PASO 2 (contesta «plan activo» con sus tres comprobaciones): el reenvío del
+  // navegador tras el reto del banco puede llegar cuando el aviso de Stripe o el barrido ya la terminaron (H0, Codex r1).
+  if (progress.completedAt && progress.planActivationStatus !== PLAN_ACTIVATION_STATUS.ACTIVE) {
+    throw new ConflictError('Este registro ya terminó', 'ONBOARDING_ALREADY_COMPLETED')
+  }
 
   // 🔴 CONSENTIMIENTO ANTES DEL CARGO (auditoría de Codex, 18-sep).
   //
@@ -821,6 +831,7 @@ export async function activatePlan(
       where: { organizationId, status: REDEMPTION_STATUS.APPLIED },
       include: { campaign: { select: { code: true } } },
     })
+    await terminarElAlta()
     return {
       status: 'ACTIVE',
       alreadyActive: true,
@@ -1362,6 +1373,37 @@ export async function activatePlan(
       data: { tier: cobrado.tier, interval: cobrado.interval, subscriptionId, offerNotApplied: true, reason: 'RECOVERED_WITHOUT_COUPON' },
     })
     // Sin correo de la oferta: prometería un precio que no se cobró. El plan quedó activo; la pantalla lo dice.
+    // Pero sí el aviso al equipo (sin oferta) y la bienvenida genérica, sin precios: el alta corta ya no la manda al
+    // crear el negocio, y este cliente PAGÓ (Codex r1, 27-oct).
+    avisarActivacion({
+      venueId: venue.id,
+      venueName: venueRecord?.name ?? null,
+      organizationId,
+      tier: cobrado.tier,
+      interval: cobrado.interval,
+      payNow: payNowCobrado,
+      firstChargeCents,
+      nextChargeAt,
+      campaign: null,
+    })
+    void resolvePlanNotificationTarget(venue.id)
+      .then(target =>
+        target.email
+          ? resendService.sendOnboardingWelcomeEmail({
+              ownerEmail: target.email,
+              ownerFirstName: target.ownerName ?? '',
+              venueName: venueRecord?.name ?? target.venueName,
+              venueSlug: venueRecord?.slug ?? venue.slug,
+              hasKycDocuments: false,
+            })
+          : false,
+      )
+      .catch(error =>
+        logger.warn('activate-plan: no se pudo mandar la bienvenida', {
+          organizationId,
+          error: error instanceof Error ? error.message : String(error),
+        }),
+      )
     throw new ConflictError(
       'Ya tienes activo el plan que pagaste en un intento anterior, así que la oferta no se puede aplicar encima. No te cobramos otra vez.',
       'PLAN_ACTIVE_WITHOUT_OFFER',
@@ -1399,7 +1441,20 @@ export async function activatePlan(
       error: error instanceof Error ? error.message : String(error),
     }),
   )
+  // Y al equipo: el aviso de «empezó el alta» sale antes del plan; éste dice quién SÍ terminó.
+  avisarActivacion({
+    venueId: venue.id,
+    venueName: venueRecord?.name ?? null,
+    organizationId,
+    tier: cobrado.tier,
+    interval: cobrado.interval,
+    payNow: payNowCobrado,
+    firstChargeCents,
+    nextChargeAt,
+    campaign,
+  })
 
+  await terminarElAlta()
   return {
     status: 'ACTIVE',
     alreadyActive: false,
@@ -1434,7 +1489,10 @@ export async function activatePlan(
  *
  * 🔴 Nunca cobra, nunca anula ni crea nada en Stripe. Cada escritura es un CAS: si el cliente vuelve a la vez, gana uno.
  */
-export async function cerrarAltaSinNavegador(organizationId: string): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
+export async function cerrarAltaSinNavegador(
+  organizationId: string,
+  via: ViaDelCierre = 'barrido',
+): Promise<'CERRADA' | 'LIBERADA' | 'NADA'> {
   const p = await prisma.onboardingProgress.findUnique({ where: { organizationId } })
   const leaseVivo = p?.planActivationLeaseUntil != null && p.planActivationLeaseUntil > new Date()
   if (!p || p.completedAt || p.planActivationStatus !== PLAN_ACTIVATION_STATUS.IN_PROGRESS || !p.planStripeSubscriptionId || leaseVivo)
@@ -1508,13 +1566,56 @@ export async function cerrarAltaSinNavegador(organizationId: string): Promise<'C
         ? { kind: 'LAUNCH', code: m.launchCampaignCode ?? '', offerVersion: Number(m.launchOfferVersion), expectedFirstChargeCents: cents }
         : { kind: 'STANDARD', expectedFirstChargeCents: cents },
     },
-    { soloRecuperar: sub.id },
+    { soloRecuperar: sub.id, via },
   )
   logger.info('altas-a-medio-pago: el cliente autorizó y cerró la pestaña — el alta se cerró sin el navegador', {
     organizationId,
     subscriptionId: sub.id,
   })
   return 'CERRADA'
+}
+
+/**
+ * Aviso al equipo de que un alta TERMINÓ con su plan (el de «empezó el alta» sale antes de la tarjeta). Nunca lanza
+ * ni se espera: corre después de que el dinero ya se movió y no puede cambiar el cobro ni la respuesta.
+ * El monto es lo que se cobra PRIMERO: en una prueba gratis la factura de hoy vale $0, así que se avisa el precio que
+ * se cobrará al terminar la prueba (el mismo que dice el correo del cliente).
+ */
+function avisarActivacion(a: {
+  venueId: string
+  venueName: string | null
+  organizationId: string
+  tier: PaidPlanTier
+  interval: PlanBillingInterval
+  payNow: boolean
+  firstChargeCents: number
+  nextChargeAt: string
+  campaign: LaunchCampaignRow | null
+}): void {
+  const primerCobro = a.payNow
+    ? a.firstChargeCents
+    : a.campaign
+      ? (a.campaign.listPriceCentsSnapshot as number)
+      : STANDARD_PLAN_GROSS_CENTS[a.tier][a.interval]
+  void resolvePlanNotificationTarget(a.venueId)
+    .then(target =>
+      resendService.sendPlanActivatedNotice({
+        venueId: a.venueId,
+        venueName: a.venueName ?? target.venueName,
+        ownerEmail: target.email,
+        planName: a.tier === 'PREMIUM' ? 'Premium' : 'Pro',
+        payNow: a.payNow,
+        firstChargeCents: primerCobro,
+        nextChargeAt: a.nextChargeAt,
+        campaignCode: a.campaign?.code ?? null,
+      }),
+    )
+    .catch(error =>
+      logger.warn('activate-plan: no se pudo avisar al equipo', {
+        organizationId: a.organizationId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
 }
 
 /**

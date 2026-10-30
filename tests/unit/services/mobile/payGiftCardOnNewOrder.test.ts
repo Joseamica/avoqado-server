@@ -326,6 +326,18 @@ describe('payGiftCardOnNewOrder', () => {
       expect(prismaMock.order.create).not.toHaveBeenCalled()
     })
 
+    // Unión con develop: el descuento de catálogo de la cuenta (`orderDiscountId`) cambia lo que la venta debe, así que es OTRO
+    // cuerpo. Sin él en la huella, la misma llave con otro descuento salía como `replay` de la primera venta.
+    it('🔴 unión: el mismo cuerpo con otro descuento de catálogo de la cuenta ⇒ 409 IDEMPOTENCY_KEY_REUSED', async () => {
+      const huella = await huellaDe()
+      ganadoraConHuella(huella)
+      await expect(payGiftCardOnNewOrder('venue-1', venta({ orderDiscountId: 'desc-1' }))).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+        statusCode: 409,
+      })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+    })
+
     it('la huella NO lleva quién lo empezó ni quién vende (Q110): el reenvío de otra sesión es el mismo cuerpo', async () => {
       const huella = await huellaDe()
       ganadoraConHuella(huella)

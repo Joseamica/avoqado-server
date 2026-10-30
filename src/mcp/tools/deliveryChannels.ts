@@ -4,19 +4,22 @@ import prisma from '@/utils/prismaClient'
 import { getDeliveryDailySummary } from '@/services/delivery-channels/core/deliverySummary.service'
 import { resolveDeliveryHours } from '@/services/delivery-channels/core/deliveryHours.service'
 import { calcularTasaInyeccion } from '@/services/delivery-channels/core/injectionRate.service'
-import { menuSyncStatusOf } from '@/services/delivery-channels/core/menuSync.service'
+import { menuSyncStatusOf, revisionDeMenuOf } from '@/services/delivery-channels/core/menuSync.service'
 import { hasAdapter } from '@/services/delivery-channels/core/adapterRegistry'
+import { listDeliveryCashPending } from '@/services/delivery-channels/core/deliveryCashPending.service'
 import type { McpScope } from '../scope'
 import { createGuard } from '../guard'
 import { text } from '../respond'
 import { planGateMessage } from '../planGate'
+import { auditMcpWrite } from '../audit'
+import AppError from '@/errors/AppError'
 
 export function registerDeliveryChannelTools(server: McpServer, scope: McpScope) {
   const guard = createGuard(scope)
 
   server.tool(
     'delivery_channels',
-    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber?". Pass venueId.',
+    'Estado de los canales de delivery del venue (Uber Eats/Rappi/DiDi vía Deliverect): canales conectados, estado (activo/pausado), modo de aceptación de pedidos, si su integración YA está lista para operar, último sync de menú, HORARIO en que acepta pedidos (y si es el configurado o un estimado), MARGEN de precios sobre el mostrador, pedidos de delivery de hoy por canal, y los últimos intentos de conectar tiendas de Uber Eats o Rappi con su resultado por tienda. Responde "¿cómo van mis canales de delivery? ¿cuántos pedidos de Uber/Rappi hoy? ¿cuál canal ya funciona de verdad? ¿a qué horas acepto pedidos en Uber? ¿qué margen tengo puesto? ¿por qué no quedó conectada mi tienda de Uber? ¿por qué no quedó conectada mi tienda de Rappi?". Pass venueId.',
     { venueId: z.string().describe('Venue cuyos canales de delivery leer (debe estar en tu scope)') },
     async ({ venueId }) => {
       const where = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
@@ -88,6 +91,10 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
           // Una sola derivación compartida con el REST del dashboard: dos copias acabarían
           // contestando distinto y nadie sabría a cuál creerle.
           menuSyncStatus: menuSyncStatusOf(l),
+          // La revisión del menú: pendiente, plazo vencido sin veredicto, último rechazo y problemas. Campo NUEVO y OPCIONAL de
+          // lectura (la tool está en el catálogo certificado: su descripción no cambia ni se quita nada). Sin huellas, y
+          // `revisionDeMenuOf` es total: una `config` ilegible sale con la forma vacía, nunca tumba la lectura.
+          menuRevision: revisionDeMenuOf(l.config),
           lastMenuHash: undefined, // la huella misma no le sirve a nadie fuera del sincronizador
           webhookSecret: undefined, // NUNCA sale del server
           config: undefined, // se expone desglosado abajo, no como blob crudo
@@ -129,6 +136,138 @@ export function registerDeliveryChannelTools(server: McpServer, scope: McpScope)
         // que todavía no vende por ahí, y las alarmas falsas enseñan a ignorarlas.
         inyeccion,
       })
+    },
+  )
+
+  // El mismo enlace que `GET /venues/:venueId/channels/rappi/connect-url` (mismas guardas: manage + PREMIUM).
+  // Import perezoso: la cadena de Rappi lee el env al usarse, y ese chequeo debe fallar aquí, no al cargar el MCP.
+  server.tool(
+    'delivery_cash_pending',
+    'Pedidos de reparto que el negocio cobra en EFECTIVO con su propio repartidor (hoy, Rappi) y que la caja todavía no ha cobrado, de los últimos 2 días: por pedido, cuánto falta por cobrar y su desglose (venta, propina y lo que se cobra por cuenta de la plataforma, que no es venta). Es la misma lista «Rappi · por cobrar» de la pantalla de pedidos en línea del POS. Responde "¿qué pedidos de Rappi faltan por cobrar? ¿cuánto efectivo me debe traer el repartidor?". Montos en pesos. Pass venueId.',
+    {
+      venueId: z.string().describe('Venue cuyos pedidos de reparto por cobrar leer (debe estar en tu scope)'),
+      cursor: z.string().max(200).optional().describe('nextCursor de la respuesta anterior, para la siguiente página'),
+    },
+    async ({ venueId, cursor }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      // Mismo permiso que la bandeja del POS; sin candado de plan (R14: atender lo que ya existe nunca se bloquea).
+      guard.requirePermission('orders:read', venueId)
+      const r = await listDeliveryCashPending({ venueId, ...(cursor !== undefined ? { cursor } : {}) })
+      const pesos = (c: number) => Math.round(c) / 100
+      return text({
+        total: r.total,
+        truncated: r.truncated,
+        nextCursor: r.nextCursor,
+        orders: r.orders.map(o => ({
+          orderId: o.orderId,
+          orderNumber: o.orderNumber,
+          plataforma: o.thirdPartyLabel,
+          estado: o.status,
+          cocina: o.kitchenStatus,
+          cliente: o.customerName,
+          creado: o.createdAt,
+          porCobrar: pesos(o.remainingBalanceCents),
+          venta: pesos(o.saleCents),
+          propina: pesos(o.tipCents),
+          deLaPlataforma: pesos(o.thirdPartyCents),
+        })),
+      })
+    },
+  )
+
+  server.tool(
+    'rappi_connect_link',
+    'Genera el enlace para que el dueño conecte SU cuenta de Rappi (Portal Partners) con Avoqado: al abrirlo autoriza y elige qué tiendas conectar. Vence en 10 minutos; si venció, se pide otro. Requiere permiso de administrar canales de delivery y plan PREMIUM. Responde "¿cómo conecto mi tienda de Rappi? ¿me pasas el enlace para conectar Rappi?". Luego el estado de cada tienda se ve con delivery_channels (conexionesRecientes). Pass venueId.',
+    { venueId: z.string().describe('Venue cuya tienda de Rappi se va a conectar (debe estar en tu scope)') },
+    async ({ venueId }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('delivery-channels:manage', venueId) // mirror the REST route's delivery-channels:manage gate
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Conectar canales de delivery') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+      // Primero la configuración ENTERA (retorno, host y webhooks), igual que el REST: nada se crea si falta algo.
+      const { preflightSelfOnboardingRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.client')
+      let base: string
+      try {
+        base = preflightSelfOnboardingRappi()
+      } catch {
+        throw new AppError('La conexión con Rappi no está configurada en el servidor.', 500, true, 'RAPPI_CONNECT_NOT_CONFIGURED')
+      }
+      const { depsDesdeEnv, crearIntentRappi } = await import('@/services/delivery-channels/providers/rappi/rappi.connect')
+      const { urlDeInicio } = await import('@/services/delivery-channels/providers/rappi/rappi.selfOnboarding')
+      // `staffId` = quien pide por el MCP; el callback público revalida ESE usuario en cada paso.
+      const { id, firmado } = await crearIntentRappi(await depsDesdeEnv(), { venueId, staffId: scope.staffId })
+      await auditMcpWrite(scope, { action: 'RAPPI_CONNECT_LINK_CREATED', entity: 'DeliveryConnectIntent', entityId: id, venueId })
+      return text({
+        ok: true,
+        url: urlDeInicio(base, firmado),
+        instrucciones:
+          'Abre este enlace con la cuenta del Portal Partners de Rappi del negocio (vence en 10 minutos). Al autorizar, eliges qué tiendas conectar a Avoqado.',
+        venceEnMinutos: 10,
+      })
+    },
+  )
+
+  server.tool(
+    'rappi_disconnect',
+    'Desconecta una tienda de Rappi del venue: Avoqado le avisa a Rappi que ya no está integrada y los pedidos nuevos de Rappi dejan de llegar a Avoqado (el historial y los ajustes se conservan; se reconecta con rappi_connect_link). Si Rappi no confirma, no se desconecta (con forzar:true se desconecta igual, y Rappi podría seguir mandando pedidos que sólo se verán en su tableta). Con pedidos de esa tienda en curso no se puede. Primero muestra qué se desconecta; se aplica al llamar de nuevo con confirm:true y el conexionId de la vista previa. Requiere permiso de administrar canales de delivery y plan PREMIUM. Responde "desconecta mi tienda de Rappi". El linkId sale de delivery_channels. Pass venueId.',
+    {
+      venueId: z.string().describe('Venue de la tienda (debe estar en tu scope)'),
+      linkId: z.string().describe('Id del canal de Rappi (de delivery_channels)'),
+      conexionId: z.string().optional().describe('El conexionId que devolvió la vista previa; obligatorio con confirm:true'),
+      confirm: z.boolean().optional().describe('true sólo después de mostrar la vista previa y que el dueño la acepte'),
+      forzar: z
+        .boolean()
+        .optional()
+        .describe(
+          'true sólo si Rappi no aceptó o no confirmó un intento anterior y el dueño acepta que Rappi podría seguir mandando pedidos',
+        ),
+    },
+    async ({ venueId, linkId, conexionId, confirm, forzar }) => {
+      guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('delivery-channels:manage', venueId) // mirror the REST route's delivery-channels:manage gate
+      const gate = await planGateMessage(venueId, 'DELIVERY_CHANNELS', 'Desconectar canales de delivery') // PREMIUM tier
+      if (gate) return text({ ok: false, planRequired: true, feature: 'DELIVERY_CHANNELS', error: gate })
+      const { conexionIdDe, contarPedidosEnCurso, desconectarTiendaRappi } = await import(
+        '@/services/delivery-channels/providers/rappi/rappi.desconectar'
+      )
+      if (confirm !== true || !conexionId) {
+        const link = await prisma.deliveryChannelLink.findFirst({
+          where: { id: linkId, venueId },
+          select: { id: true, provider: true, status: true, externalLocationId: true, externalAccountId: true, config: true },
+        })
+        if (!link) throw new AppError('Canal de delivery no encontrado', 404, true, 'NOT_FOUND')
+        if (link.provider !== 'RAPPI') throw new AppError('Sólo las tiendas de Rappi se desconectan desde aquí.', 400, true, 'SOLO_RAPPI')
+        const pedidosEnCurso = (await contarPedidosEnCurso(prisma, [link.id])).get(link.id) ?? 0
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          venueId,
+          linkId,
+          tienda: link.externalAccountId ?? link.externalLocationId,
+          storeId: link.externalLocationId,
+          estado: link.status,
+          pedidosEnCurso,
+          conexionId: conexionIdDe(link),
+          queVaAPasar:
+            link.status === 'DISABLED'
+              ? 'La tienda ya está desconectada; no hay nada que hacer.'
+              : pedidosEnCurso > 0
+                ? `Hay ${pedidosEnCurso} pedido(s) de Rappi en curso: hay que terminarlos antes de desconectar.`
+                : 'Avoqado le avisa a Rappi que la tienda ya no está integrada y deja de recibir sus pedidos nuevos. El historial y los ajustes se conservan para reconectar.',
+        })
+      }
+      const r = await desconectarTiendaRappi({ venueId, linkId, conexionId, forzar, performedBy: scope.staffId, origen: 'MCP' })
+      // Si otra persona se adelantó no hubo cambio: no se audita un hecho que no ocurrió.
+      if (!r.yaEstaba) {
+        await auditMcpWrite(scope, {
+          action: 'RAPPI_DISCONNECTED',
+          entity: 'DeliveryChannelLink',
+          entityId: linkId,
+          venueId,
+          data: { forzada: r.forzada },
+        })
+      }
+      return text({ ok: true, venueId, linkId, estado: r.link.status, yaEstaba: r.yaEstaba, forzada: r.forzada })
     },
   )
 }

@@ -19,6 +19,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '@/services/shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '@/services/shared/priorCompletedPayments'
+import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '@/services/shared/rappiEfectivoGuard'
 import { contratoDePagoManual } from '@/services/fiscal/contratoDePrecio'
 import { operationHash } from '@/utils/operationHash'
 import { isRetryableDbError } from '@/utils/serializableRetry'
@@ -198,7 +199,12 @@ export async function createManualPayment(
           await lockExistingOrderForPayment(tx, { venueId, orderId: input.orderId })
           // Bajo ese candado y antes de la primera escritura (el reclamo del turno), lo que la venta dice HOY. El reintento por
           // serialización vuelve a entrar aquí desde cero, así que también vuelve a evaluar la regla.
-          const venta = await tx.order.findFirst({ where: { id: input.orderId, venueId }, select: { paymentStatus: true } })
+          const venta = await tx.order.findFirst({
+            where: { id: input.orderId, venueId },
+            select: { paymentStatus: true, thirdPartyCashDue: true },
+          })
+          // Rappi 2b (T7): el pago manual no sabe repartir venta, propina y lo de Rappi ⇒ 409 antes de escribir.
+          if (venta) rechazarAccionDeCobroSobreRappiEnEfectivo(venta)
           // 🔴 R7-1: venta ya cobrada (PAID/REFUNDED) ⇒ 400 para todos. Cierra de raíz re-cobrar una venta cobrada (tras un
           // reembolso, o tras corregir/cancelar su cobro en el panel, la venta sigue PAID y el saldo de aquí se reabría) y, con eso,
           // colar un cliente con su lealtad (Codex r9/r10/r11). La caja del POS ya lo rechazaba («Order is already paid»). R8-1: ningún

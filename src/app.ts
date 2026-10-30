@@ -20,7 +20,8 @@ import { NODE_ENV, ACCESS_TOKEN_SECRET } from './config/env'
 import logger from './config/logger'
 import { configureCoreMiddlewares } from './config/middleware'
 import { setupSwaggerUI } from './config/swagger'
-import AppError, { BadRequestError, ConflictError } from './errors/AppError'
+import AppError, { BadRequestError, ConflictError, ServiceUnavailableError } from './errors/AppError'
+import { OrderTableTopologyChanged } from './services/shared/tableOrderLock'
 import { GiftCardError } from './services/giftCards/giftCardErrors'
 import {
   AFILIACION_EN_VARIOS_SLOTS,
@@ -52,6 +53,12 @@ import { handleMercadoPagoWebhook } from './controllers/webhook/mercadoPago.webh
 import { handleFacturapiWebhook } from './controllers/webhook/facturapi.webhook.controller'
 import { handlePassWebhook } from './controllers/aggregators/passWebhook.controller'
 import { activarUberOAuth, startUberOAuth, uberOAuthCallback } from './controllers/delivery-channels/uber.oauth.controller'
+import {
+  activarRappiOAuth,
+  rappiOAuthCallback,
+  resultadoRappiOAuth,
+  startRappiOAuth,
+} from './controllers/delivery-channels/rappi.oauth.controller'
 import {
   handleShopifyWebhook,
   SHOPIFY_WEBHOOK_MAX_BYTES,
@@ -211,6 +218,18 @@ app.post(
   activarUberOAuth,
 )
 
+// Self-onboarding de Rappi (spec 2026-09-29). PÚBLICAS a propósito, igual que las de Uber: Rappi
+// redirige aquí el navegador del comerciante sin sesión nuestra; la prueba de origen es la firma.
+app.get('/api/v1/delivery/rappi/oauth/start', requestLoggerMiddleware, startRappiOAuth)
+app.get('/api/v1/delivery/rappi/oauth/callback', requestLoggerMiddleware, rappiOAuthCallback)
+app.post(
+  '/api/v1/delivery/rappi/oauth/activate',
+  requestLoggerMiddleware,
+  express.urlencoded({ extended: false, limit: '16kb' }),
+  activarRappiOAuth,
+)
+app.get('/api/v1/delivery/rappi/oauth/result', requestLoggerMiddleware, resultadoRappiOAuth)
+
 // Customer-facing MCP OAuth 2.1 Authorization Server: DCR, /authorize (bcrypt consent), /token,
 // /revoke, and discovery metadata — all at the app root (required by the SDK).
 mountCustomerMcpAuth(app)
@@ -306,6 +325,9 @@ app.get('/health', (req: ExpressRequest, res: ExpressResponse) => {
 app.get('/api/public/healthcheck', async (req: ExpressRequest, res: ExpressResponse) => {
   const correlationId = (req as any).correlationId || 'N/A'
   const startTime = Date.now()
+  // Nunca se guarda (ni en el navegador ni en un proxy): las apps la usan para saber si el servidor contesta AHORA (el tope del
+  // cierre de caja que espera a sus ventas sin red, 24-oct-2026). Una respuesta vieja diría «sano» con el servidor caído.
+  res.set('Cache-Control', 'no-store')
 
   try {
     // Import prisma lazily to avoid circular dependency
@@ -449,6 +471,13 @@ export function globalErrorHandler(err: Error, req: ExpressRequest, res: Express
   // duros de demo quitan antes las órdenes); si una futura llega, responde 409 con su mensaje, nunca un 500 anónimo.
   if (esProductoConVentas(err)) {
     err = new ConflictError(MENSAJE_PRODUCTO_CON_VENTAS, PRODUCTO_CON_VENTAS_NO_SE_BORRA)
+  }
+
+  // D9 (26-oct): la cuenta o la mesa cambiaron en el mismo instante (`lockTableOrderScope`); se resuelve reintentando. Por las
+  // rutas sin protocolo de operación salía 500 anónimo. 503 y no 409: las apps ya tratan un 5xx/503 como «reintenta» o lo
+  // encolan, y un 409 haría rendirse a la cancelación durable de ANDROID. Sin `Retry-After` (OkHttp reenvía solo con 0).
+  if (err instanceof OrderTableTopologyChanged) {
+    err = new ServiceUnavailableError('La cuenta o la mesa cambiaron en ese mismo momento. Intenta de nuevo.', 'ORDER_TABLE_TOPOLOGY_CHANGED')
   }
 
   const bodyParseError = err as Error & { status?: number; type?: string; body?: unknown }

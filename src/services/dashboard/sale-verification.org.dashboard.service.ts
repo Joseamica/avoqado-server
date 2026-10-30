@@ -8,6 +8,11 @@ import {
   cobrosDelProtocolo,
   efectivoManualEditable,
 } from '../shared/cobroDelProtocolo'
+import { exchangeProtectedPayments, paymentProtectedByExchange } from '../exchanges/exchangeMarks'
+import { claseDeEstado, computeOrderBalance } from '../shared/orderBalance'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../shared/paymentShiftClaim'
+import { esPedidoDePlataforma, MENSAJE_ORDEN_DE_PLATAFORMA } from '../shared/ordenImportada'
+import { BadRequestError } from '../../errors/AppError'
 import {
   reviewSaleVerification as reviewSaleVerificationVenue,
   PROMOTER_FEEDBACK_MIN_CHARS,
@@ -1292,6 +1297,114 @@ const PAYMENT_FORM_TO_METHOD: Record<EditableForm, PaymentMethod> = {
   OTHER: 'OTHER',
 }
 
+const sinImporte = (v: Prisma.Decimal | null | undefined) => v == null || new Prisma.Decimal(v.toString()).isZero()
+
+/**
+ * Tablero hz:ec5af077:D2 (founder «A», 24-oct): corregir el importe de la venta mueve también su cuenta. Sólo cuando la
+ * venta es el espejo de este cobro —1 artículo, cantidad 1, sin modificadores, sin IVA aparte, descuento, cargo, envío ni
+ * propina, y ningún otro cobro vivo—, que es como la TPV registra las SIM (medido en producción). Cualquier otra forma lanza
+ * 409 `SALE_AMOUNT_NOT_SIMPLE` antes de escribir nada: repartir un importe entre varios renglones sería adivinar.
+ */
+async function cuentaQueSigueAlCobro(tx: Prisma.TransactionClient, paymentId: string, venueId: string, cuentaTomada: string | null) {
+  const cobro = await tx.payment.findUniqueOrThrow({
+    where: { id: paymentId },
+    select: { orderId: true, status: true, type: true, tipAmount: true },
+  })
+  // La cuenta se tomó ANTES que el cobro (orden global Order → Payment). Si el cobro cambió de cuenta entretanto
+  // (reasignación), la tomada ya no es la suya: se reintenta, nunca se escribe sobre una cuenta sin su candado.
+  if (cobro.orderId !== cuentaTomada) {
+    const err = createServiceError('La venta cambió mientras se corregía. Vuelve a intentarlo.', 409) as ServiceError & { code?: string }
+    err.code = 'ORDER_VERSION_CONFLICT'
+    throw err
+  }
+  const orden = await tx.order.findFirst({
+    where: { id: cobro.orderId, venueId },
+    select: {
+      id: true,
+      version: true,
+      status: true,
+      paymentStatus: true,
+      contratoDePrecio: true,
+      subtotal: true,
+      discountAmount: true,
+      serviceChargeAmount: true,
+      deliveryFeeAmount: true,
+      taxAmount: true,
+      tipAmount: true,
+      total: true,
+      paidAmount: true,
+      remainingBalance: true,
+      items: {
+        select: {
+          id: true,
+          quantity: true,
+          weightQuantity: true,
+          discountAmount: true,
+          taxAmount: true,
+          _count: { select: { modifiers: true } },
+        },
+        take: 2,
+      },
+    },
+  })
+  const otrosCobros = orden
+    ? await tx.payment.count({ where: { orderId: orden.id, id: { not: paymentId }, status: { not: 'FAILED' } } })
+    : 0
+  const articulo = orden?.items.length === 1 ? orden.items[0] : null
+  const motivos = [
+    ...(!orden ? ['la venta no tiene cuenta'] : []),
+    ...(orden && claseDeEstado(orden.status) === 'CANCELADA' ? ['la cuenta está cancelada'] : []),
+    ...(cobro.status !== 'COMPLETED' || cobro.type === 'REFUND' ? ['el cobro no es un cobro completado'] : []),
+    ...(!sinImporte(cobro.tipAmount) || (orden && !sinImporte(orden.tipAmount)) ? ['tiene propina'] : []),
+    ...(orden && !articulo ? ['no tiene exactamente un artículo'] : []),
+    ...(articulo && (articulo.quantity !== 1 || articulo.weightQuantity != null || articulo._count.modifiers > 0)
+      ? ['el artículo lleva cantidad, peso o modificadores']
+      : []),
+    ...(orden && (!sinImporte(orden.discountAmount) || (articulo && !sinImporte(articulo.discountAmount))) ? ['tiene descuento'] : []),
+    ...(orden && (!sinImporte(orden.taxAmount) || (articulo && !sinImporte(articulo.taxAmount))) ? ['tiene IVA aparte'] : []),
+    ...(orden && (!sinImporte(orden.serviceChargeAmount) || !sinImporte(orden.deliveryFeeAmount)) ? ['tiene cargo o envío'] : []),
+    ...(otrosCobros > 0 ? ['la cuenta tiene otro cobro'] : []),
+  ]
+  if (motivos.length > 0 || !orden || !articulo) {
+    const err = createServiceError(
+      `El importe de esta venta no se puede corregir aquí porque ${motivos.join(', ')}. Aquí sólo se corrigen ventas de un artículo con un solo cobro.`,
+      409,
+    ) as ServiceError & { code?: string; details?: Record<string, unknown> }
+    err.code = 'SALE_AMOUNT_NOT_SIMPLE'
+    err.details = { paymentId, motivos }
+    throw err
+  }
+  return { orden, articuloId: articulo.id, tipo: cobro.type }
+}
+
+/** Escribe la cuenta (ya tomada con `FOR UPDATE`) con el importe nuevo y devuelve el antes/después para la bitácora. */
+async function moverCuentaAlImporte(
+  tx: Prisma.TransactionClient,
+  { orden, articuloId, tipo }: Awaited<ReturnType<typeof cuentaQueSigueAlCobro>>,
+  importe: number,
+) {
+  const nuevo = new Prisma.Decimal(importe).toDecimalPlaces(2)
+  const saldo = computeOrderBalance({ ...orden, subtotal: nuevo }, [{ amount: nuevo, tipAmount: 0, type: tipo }])
+  await tx.orderItem.update({ where: { id: articuloId }, data: { unitPrice: nuevo, total: nuevo } })
+  await tx.order.update({
+    where: { id: orden.id },
+    data: {
+      subtotal: nuevo,
+      total: saldo.total,
+      paidAmount: saldo.paidAmount,
+      remainingBalance: saldo.remainingBalance,
+      ...(saldo.isFullyPaid ? { paymentStatus: 'PAID' as const } : {}),
+      version: { increment: 1 },
+    },
+  })
+  const foto = (o: { total: unknown; paidAmount: unknown; remainingBalance: unknown }) => ({
+    total: Number(o.total),
+    paidAmount: Number(o.paidAmount),
+    remainingBalance: Number(o.remainingBalance),
+  })
+  return { orderId: orden.id, antes: foto(orden), despues: foto(saldo) }
+}
+
 /**
  * Edit/correct a sale verification at org scope (back-office, OWNER-only).
  *
@@ -1342,7 +1455,7 @@ export async function editOrgSaleVerification(
       isPortabilidad: true,
       reviewNotes: true,
       rejectionReasons: true,
-      payment: { select: { id: true, amount: true, method: true } },
+      payment: { select: { id: true, amount: true, method: true, orderId: true } },
       venue: { select: { organizationId: true } },
     },
   })
@@ -1397,13 +1510,36 @@ export async function editOrgSaleVerification(
     // +$40 sin movimiento bancario). Un cobro que no es reembolso toma sólo su fila, como antes.
     let methodChanged = false
     let viaExcepcionEfectivoManual = false
+    let cuentaMovida: Awaited<ReturnType<typeof moverCuentaAlImporte>> | null = null
     if (existing.payment) {
+      // D2 (Codex r1): corregir el importe mueve la cuenta, así que la cuenta se toma PRIMERO, en el orden global de todo
+      // dinero ligado a una orden (Order → Payment, `lockExistingOrderForPayment`): un cobro tardío de la TPV o un reembolso
+      // del panel esperan a esta corrección (y la leen) en vez de cruzarse con ella o interbloquearse.
+      const cuentaTomada =
+        params.amount != null && existing.payment.orderId
+          ? (await lockExistingOrderForPayment(tx, { venueId: existing.venueId, orderId: existing.payment.orderId }))
+            ? existing.payment.orderId
+            : null
+          : null
       const candado = await bloquearConSuOriginal(tx, { paymentId: existing.payment.id, venueId: existing.venueId }, 'proteccion')
       if (!candado.existe) throw createServiceError('Venta no encontrada', 404)
-      const vigente = await tx.payment.findUniqueOrThrow({ where: { id: existing.payment.id }, select: { amount: true, method: true } })
+      const vigente = await tx.payment.findUniqueOrThrow({
+        where: { id: existing.payment.id },
+        select: { amount: true, method: true, feeAmount: true },
+      })
       methodChanged = params.paymentForm != null && derivePaymentForm(vigente.method) !== params.paymentForm
       const amountChanged = params.amount != null && new Prisma.Decimal(params.amount).toDecimalPlaces(2).comparedTo(vigente.amount) !== 0
       if (amountChanged || methodChanged) {
+        const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
+        // Rappi 2b: el total de un pedido de plataforma lo manda la plataforma (y Rappi con repartidor propio es sólo efectivo).
+        if (existing.payment.orderId) {
+          const orden = await tx.order.findFirst({
+            where: { id: existing.payment.orderId, venueId: existing.venueId },
+            select: { originSystem: true },
+          })
+          if (orden && esPedidoDePlataforma(orden))
+            throw new BadRequestError(MENSAJE_ORDEN_DE_PLATAFORMA, 'ORDEN_DE_PLATAFORMA', { originSystem: orden.originSystem })
+        }
         const esDelProtocolo = (await cobrosDelProtocolo(tx, [existing.payment.id])).has(existing.payment.id)
         // Excepción de efectivo manual (ver `efectivoManualEditable`): el cobro CASH sin afiliación lleva la llave `pricing: null`
         // y por eso «pertenece», pero no hay tarifa ni obligación que proteger. Sólo mueve la forma entre efectivo y otro.
@@ -1411,7 +1547,6 @@ export async function editOrgSaleVerification(
           esDelProtocolo && (!methodChanged || params.paymentForm !== 'CARD') && (await efectivoManualEditable(tx, existing.payment.id))
         viaExcepcionEfectivoManual = efectivoManual
         if (esDelProtocolo && !efectivoManual) {
-          const fields = [...(amountChanged ? ['amount'] : []), ...(methodChanged ? ['method'] : [])]
           const err = createServiceError(
             'Este cobro pertenece al protocolo de costo (tarifa congelada y obligación de costo): su importe y su forma de pago sólo cambian por reembolso, anulación o corrección acreditada, no desde la verificación de venta.',
             409,
@@ -1420,12 +1555,20 @@ export async function editOrgSaleVerification(
           err.details = { paymentId: existing.payment.id, fields, reason: MOTIVO_EXCLUSION_DEL_PROTOCOLO }
           throw err
         }
+        // Cambio de producto (spec 2026-10-20 §6.2, §6.7): el dinero de un cambio tampoco cambia de importe ni de forma desde aquí,
+        // ni por la excepción de efectivo manual (409 PAYMENT_PROTECTED_BY_EXCHANGE, nada se escribe).
+        if ((await exchangeProtectedPayments(tx, [existing.payment.id])).has(existing.payment.id)) {
+          throw paymentProtectedByExchange(existing.payment.id, fields)
+        }
+        // D2: la cuenta sigue al importe; se valida ANTES de escribir el cobro para que un 409 no deje nada a medias.
+        const cuenta = amountChanged ? await cuentaQueSigueAlCobro(tx, existing.payment.id, existing.venueId, cuentaTomada) : null
         // La forma corregida arrastra su `fundsFlow`: la caja y el saldo disponible lo leen por encima de `method`
         // (`tenderSemantics`). Sin esto, un CASH → OTHER seguía contando como efectivo del cajón.
         await tx.payment.update({
           where: { id: existing.payment.id },
           data: {
-            ...(amountChanged ? { amount: params.amount } : {}),
+            // El neto acompaña al importe (Codex r1 P2: el MCP mostraba importe $100 / neto $0).
+            ...(amountChanged ? { amount: params.amount, netAmount: new Prisma.Decimal(params.amount!).minus(vigente.feeAmount) } : {}),
             ...(methodChanged
               ? {
                   method: PAYMENT_FORM_TO_METHOD[params.paymentForm!],
@@ -1434,6 +1577,7 @@ export async function editOrgSaleVerification(
               : {}),
           },
         })
+        if (cuenta) cuentaMovida = await moverCuentaAlImporte(tx, cuenta, params.amount!)
       }
     }
 
@@ -1492,12 +1636,13 @@ export async function editOrgSaleVerification(
           },
           // Queda escrito que el dinero cambió por la excepción de efectivo manual, no por una corrección acreditada.
           ...(viaExcepcionEfectivoManual ? { viaExcepcionEfectivoManual: true } : {}),
+          ...(cuentaMovida ? { cuenta: cuentaMovida } : {}),
         } as Prisma.InputJsonValue,
       },
     })
 
     return sv
-  })
+  }, ORDER_LOCK_WAIT_BUDGET)
 
   logger.info(
     `[SALE_VERIFICATION_EDIT] verification=${existing.id} org=${orgId} by=${params.editedById} ` +

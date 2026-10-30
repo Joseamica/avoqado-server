@@ -1,6 +1,8 @@
 import hybridBillingRoutes from './dashboard/hybridBilling.routes'
 import serviceCourseRoutes from './dashboard/serviceCourse.routes'
 import express, { RequestHandler } from 'express'
+import { soloConAltaConCodigo } from '../config/altaLandingConCodigo'
+import { ipDelCliente } from '../utils/clientIp'
 import { z } from 'zod'
 import {
   OrdersListQuerySchema,
@@ -65,6 +67,8 @@ import * as announcementReadController from '../controllers/shared/announcement.
 import * as orderController from '../controllers/dashboard/order.dashboard.controller'
 import * as paymentController from '../controllers/dashboard/payment.dashboard.controller'
 import * as refundController from '../controllers/dashboard/refund.dashboard.controller'
+import * as exchangeController from '../controllers/dashboard/exchange.dashboard.controller'
+import { listExchangesSchema, reviewExchangeSchema, getExchangeSchema } from '../schemas/dashboard/exchange.dashboard.schema'
 import * as productController from '../controllers/dashboard/product.dashboard.controller'
 import * as reviewController from '../controllers/dashboard/review.dashboard.controller'
 import * as rolePermissionController from '../controllers/dashboard/rolePermission.controller'
@@ -178,6 +182,7 @@ import {
   requestPasswordResetSchema,
   resetPasswordSchema,
   confirmEmailChangeSchema,
+  entrarConBoletoSchema,
   switchVenueSchema,
   updateAccountSchema,
 } from '../schemas/dashboard/auth.schema'
@@ -257,6 +262,7 @@ import {
   CalculateDiscountSchema,
   RedeemPointsSchema,
   AdjustPointsSchema,
+  AdjustStampsSchema,
   LoyaltyTransactionsQuerySchema,
   LoyaltyParamsSchema,
   LoyaltyVenueParamsSchema,
@@ -1193,6 +1199,45 @@ router.post('/auth/reset-password', validateRequest(resetPasswordSchema), authDa
  *       409: { description: El correo ya lo usa otra cuenta }
  */
 router.post('/auth/confirm-email-change', validateRequest(confirmEmailChangeSchema), authDashboardController.confirmEmailChange)
+
+// Alta con código: el DASHBOARD canjea el boleto de 5 min (#boleto=) por las cookies de sesión. Detrás del interruptor:
+// apagado responde 404, igual que /public/alta/*. El boleto es un JWT firmado de un solo uso; el límite sólo frena ruido.
+const boletoRateLimiter = rateLimit({
+  windowMs: 15 * 60 * 1000,
+  max: isDevelopment ? 100 : 20,
+  keyGenerator: req => ipDelCliente(req) || 'desconocida', // detrás de Cloudflare req.ip es el borde compartido
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({ success: false, code: 'DEMASIADOS_INTENTOS', message: 'Demasiados intentos. Intenta de nuevo en unos minutos.' })
+  },
+})
+/**
+ * @openapi
+ * /api/v1/dashboard/auth/entrar-con-boleto:
+ *   post:
+ *     tags: [Dashboard - Auth]
+ *     summary: Canjea el boleto de alta (landing) por la sesión (público, detrás de ALTA_LANDING_CON_CODIGO)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [boleto]
+ *             properties:
+ *               boleto: { type: string }
+ *     responses:
+ *       200: { description: Sesión abierta (cookies) }
+ *       410: { description: "BOLETO_USADO: ya se usó, venció o no es válido" }
+ */
+router.post(
+  '/auth/entrar-con-boleto',
+  soloConAltaConCodigo,
+  boletoRateLimiter,
+  validateRequest(entrarConBoletoSchema),
+  authDashboardController.entrarConBoleto,
+)
 
 // --- Menu Category Routes ---
 
@@ -3970,6 +4015,28 @@ router.get(
 )
 
 // Refund endpoints (manual cash/dashboard refunds — not the TPV terminal flow)
+router.get(
+  '/venues/:venueId/exchanges',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(listExchangesSchema),
+  exchangeController.listExchanges,
+)
+router.get(
+  '/venues/:venueId/exchanges/:exchangeId',
+  authenticateTokenMiddleware,
+  checkPermission('payments:read'),
+  validateRequest(getExchangeSchema),
+  exchangeController.getExchange,
+)
+router.post(
+  '/venues/:venueId/exchanges/:exchangeId/review',
+  authenticateTokenMiddleware,
+  checkPermission('payments:refund'),
+  validateRequest(reviewExchangeSchema),
+  exchangeController.reviewExchange,
+)
+
 router.post(
   '/venues/:venueId/payments/:paymentId/refund',
   authenticateTokenMiddleware,
@@ -11246,6 +11313,54 @@ router.post(
   checkPermission('loyalty:adjust'),
   validateRequest(AdjustPointsSchema),
   loyaltyController.adjustPoints,
+)
+
+/**
+ * @openapi
+ * /api/v1/dashboard/venues/{venueId}/customers/{customerId}/loyalty/stamps/adjust:
+ *   post:
+ *     tags: [Loyalty Program]
+ *     summary: Manual stamp adjustment (leaves the open card at stampsEarned)
+ *     security: [{ bearerAuth: [] }]
+ *     parameters:
+ *       - name: venueId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *       - name: customerId
+ *         in: path
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [stampsEarned, expectedStampCardId, expectedStampsEarned, expectedVersion, expectedStampsRequired, reason]
+ *             properties:
+ *               stampsEarned: { type: integer, minimum: 0, maximum: 100 }
+ *               expectedStampCardId: { type: string, nullable: true }
+ *               expectedStampsEarned: { type: integer, minimum: 0 }
+ *               expectedVersion: { type: integer, minimum: 0 }
+ *               expectedStampsRequired: { type: integer, minimum: 1 }
+ *               reason: { type: string, minLength: 5, maxLength: 500 }
+ *     responses:
+ *       200:
+ *         description: Stamps adjusted successfully
+ *       400: { $ref: '#/components/responses/BadRequestError' }
+ *       404: { $ref: '#/components/responses/NotFoundError' }
+ *       409:
+ *         description: STAMPS_DISABLED or STAMPS_CHANGED (the card changed since the caller read it)
+ *       401: { $ref: '#/components/responses/UnauthorizedError' }
+ *       403: { $ref: '#/components/responses/ForbiddenError' }
+ */
+router.post(
+  '/venues/:venueId/customers/:customerId/loyalty/stamps/adjust',
+  authenticateTokenMiddleware,
+  checkPermission('loyalty:adjust'),
+  validateRequest(AdjustStampsSchema),
+  loyaltyController.adjustStampsHandler,
 )
 
 /**

@@ -17,14 +17,16 @@ import { decideCustomerApproval } from '@/services/public/customerBookingAccess.
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
+import { esRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
+import { lockOrdersForUpdate } from '../shared/tableOrderLock'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
-  lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { grantMarketingConsent, revokeMarketingConsent } from '@/services/customer/consent.service'
+import { NO_ES_COBRO_DEL_MOMENTO } from '../shared/porCobrar'
 import {
   CUSTOMER_PAGE_SIZE_DEFAULT,
   CUSTOMER_PAGE_SIZE_MAX,
@@ -208,6 +210,7 @@ export async function getCustomers(
               paymentStatus: { in: [PaymentStatus.PENDING, PaymentStatus.PARTIAL] },
               remainingBalance: { gt: 0 },
               ...CUENTA_NO_CANCELADA,
+              ...NO_ES_COBRO_DEL_MOMENTO,
             },
           },
         },
@@ -543,6 +546,10 @@ export async function createCustomer(venueId: string, data: CreateCustomerReques
  * @param performedBy - staffId del actor (authContext.userId del controller). Opcional para no
  *   romper a otros callers — patrón del repo.
  */
+/** Códigos estables del 400 de «ya registrado»: las apps traducen por código, no por el texto en inglés. */
+export const CUSTOMER_PHONE_TAKEN = 'CUSTOMER_PHONE_TAKEN'
+export const CUSTOMER_EMAIL_TAKEN = 'CUSTOMER_EMAIL_TAKEN'
+
 export async function updateCustomer(venueId: string, customerId: string, data: UpdateCustomerRequest, performedBy?: string) {
   // Check if customer exists and belongs to this venue
   const existingCustomer = await prisma.customer.findFirst({
@@ -571,7 +578,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     })
 
     if (duplicateEmail) {
-      throw new BadRequestError(`Customer with email ${data.email} already exists`)
+      throw new BadRequestError(`Customer with email ${data.email} already exists`, CUSTOMER_EMAIL_TAKEN)
     }
   }
 
@@ -585,7 +592,7 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     })
 
     if (duplicatePhone) {
-      throw new BadRequestError(`Customer with phone ${data.phone} already exists`)
+      throw new BadRequestError(`Customer with phone ${data.phone} already exists`, CUSTOMER_PHONE_TAKEN)
     }
   }
 
@@ -635,27 +642,38 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
     }
   }
 
-  const updatedCustomer = await prisma.customer.update({
-    where: { id: customerId },
-    data: {
-      email: normalizedEmail,
-      phone: data.phone,
-      firstName: data.firstName,
-      lastName: data.lastName,
-      birthDate: data.birthDate,
-      gender: data.gender,
-      customerGroupId: data.customerGroupId,
-      notes: data.notes,
-      tags: data.tags,
-      // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
-      // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
-      // hubo cambio de verdad).
-      active: data.active,
-    },
-    include: {
-      customerGroup: true,
-    },
-  })
+  const updatedCustomer = await prisma.customer
+    .update({
+      where: { id: customerId },
+      data: {
+        email: normalizedEmail,
+        phone: data.phone,
+        firstName: data.firstName,
+        lastName: data.lastName,
+        birthDate: data.birthDate,
+        gender: data.gender,
+        customerGroupId: data.customerGroupId,
+        notes: data.notes,
+        tags: data.tags,
+        // 🔴 marketingConsent ya NO se escribe aquí (Task 5) — sólo consent.service lo escribe,
+        // arriba. Si el grant/revoke falló, la fila conserva el valor previo (consistente: no
+        // hubo cambio de verdad).
+        active: data.active,
+      },
+      include: {
+        customerGroup: true,
+      },
+    })
+    .catch(error => {
+      // Dos aparatos asignan el mismo teléfono/correo a la vez: los dos pasan la búsqueda de arriba y el índice único
+      // frena al segundo. Es el mismo «ya registrado», no un 500 (Codex r1 #7, editar cliente desde el POS).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        const campos = String(error.meta?.target ?? '')
+        if (campos.includes('phone')) throw new BadRequestError(`Customer with phone ${data.phone} already exists`, CUSTOMER_PHONE_TAKEN)
+        if (campos.includes('email')) throw new BadRequestError(`Customer with email ${data.email} already exists`, CUSTOMER_EMAIL_TAKEN)
+      }
+      throw error
+    })
 
   logger.info(`Customer updated: ${customerId}`, {
     venueId,
@@ -664,10 +682,11 @@ export async function updateCustomer(venueId: string, customerId: string, data: 
 
   logAction({
     venueId,
+    staffId: performedBy,
     action: 'CUSTOMER_UPDATED',
     entity: 'Customer',
     entityId: customerId,
-    data: { email: updatedCustomer.email, phone: updatedCustomer.phone },
+    data: { email: updatedCustomer.email, phone: updatedCustomer.phone, fields: Object.keys(data) },
   })
 
   return consentWarning ? { ...updatedCustomer, consentWarning } : updatedCustomer
@@ -820,6 +839,8 @@ export async function settleCustomerBalance(
             paymentStatus: { in: ['PENDING', 'PARTIAL'] },
             remainingBalance: { gt: 0 },
             ...CUENTA_NO_CANCELADA,
+            // Un cobro con tarjeta que falló no es fiado: «Liquidar todo» lo marcaría pagado en efectivo sin que nadie pagara.
+            ...NO_ES_COBRO_DEL_MOMENTO,
           },
         },
         include: {
@@ -881,27 +902,30 @@ export async function settleCustomerBalance(
   let sesionesDeValesCerradas = 0
   await prisma.$transaction(async tx => {
     sesionesDeValesCerradas = 0
+    // El mismo cerco de borrado de demo que el cobro individual, antes de reclamar cualquier fila de su unidad.
+    await tx.$queryRaw`SELECT id FROM "Venue" WHERE id=${venueId} FOR KEY SHARE`
     // Orden global para writers de dinero sobre Orders EXISTENTES: primero se
     // toma el conjunto completo de Orders en orden estable; sólo después puede
     // tocarse Shift. Así un settle masivo nunca queda con Order A + Shift
     // esperando Order B frente a un writer unitario que ya posee B.
-    // 🔴 R11-8: por cada venta, en el MISMO orden estable, su jerarquía de vales (sesión → vales → venta; `null` sin sesión) ANTES
-    // de su candado: el orden de la finalización. Nadie toma una sesión después de una venta ajena.
+    // R11-8: TODAS las sesiones/vales antes de cualquier Order; después la unión canónica de ventas, como topología y fiscal.
     const sesionesDeVales = new Map<string, NonNullable<Awaited<ReturnType<typeof lockAreaTicketCheckoutHierarchy>>>['session']>()
     for (const orderId of targetOrderIds) {
-      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId })
+      const vales = await lockAreaTicketCheckoutHierarchy(tx, { venueId, orderId }, { lockOrder: false })
       if (vales) sesionesDeVales.set(orderId, vales.session)
-      await lockExistingOrderForPayment(tx, { venueId, orderId })
     }
+    await lockOrdersForUpdate(tx, { venueId, orderIds: targetOrderIds })
 
     for (const orderId of targetOrderIds) {
       // `pendingOrders` es únicamente el conjunto candidato. Monto, estado y
       // fencing se releen bajo lock y con alcance tenant+cliente.
       const fresh = await tx.order.findFirst({
-        where: { id: orderId, venueId, orderCustomers: { some: { customerId } } },
-        select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true },
+        where: { id: orderId, venueId, orderCustomers: { some: { customerId } }, ...NO_ES_COBRO_DEL_MOMENTO },
+        select: { total: true, tipAmount: true, remainingBalance: true, paymentStatus: true, version: true, thirdPartyCashDue: true },
       })
       if (!fresh || fresh.paymentStatus === 'PAID' || fresh.remainingBalance.lte(0)) continue
+      // Rappi 2b (T7): el barrido no liquida un pedido de Rappi en efectivo (no sabe repartir venta, propina y lo de Rappi).
+      if (esRappiEnEfectivo(fresh)) continue
 
       const paidAgg = await tx.payment.aggregate({
         where: { orderId, venueId, status: 'COMPLETED' },
@@ -1137,8 +1161,17 @@ export async function settleCustomerBalance(
 /**
  * Update customer metrics when an order is completed
  * (Called from order/payment service)
+ *
+ * `options.skipVisit`: la venta nueva de un cambio de producto (spec 2026-10-20 §7.7) no es una visita nueva. Sólo suma al gasto
+ * lo cobrado de más (`orderTotal` = esa base): ni visita ni fechas de visita. Sin la opción, todo como siempre.
  */
-export async function updateCustomerMetrics(customerId: string, orderTotal: number, orderId?: string, venueId?: string) {
+export async function updateCustomerMetrics(
+  customerId: string,
+  orderTotal: number,
+  orderId?: string,
+  venueId?: string,
+  options?: { skipVisit?: boolean },
+) {
   if (orderId) {
     const applied = await prisma.$transaction(async tx => {
       // Metrics for different orders of the same customer must serialize. Without
@@ -1175,6 +1208,17 @@ export async function updateCustomerMetrics(customerId: string, orderTotal: numb
       await tx.customerOrderMetric.create({
         data: { customerId, orderId, venueId: customer.venueId, amount: orderTotal },
       })
+      if (options?.skipVisit) {
+        // No es una visita nueva: el gasto sí sube; el promedio se reparte entre las visitas que ya había (sin visitas, no se toca).
+        await tx.customer.update({
+          where: { id: customerId },
+          data: {
+            totalSpent: newTotalSpent,
+            ...(customer.totalVisits > 0 ? { averageOrderValue: newTotalSpent / customer.totalVisits } : {}),
+          },
+        })
+        return true
+      }
       await tx.customer.update({
         where: { id: customerId },
         data: {

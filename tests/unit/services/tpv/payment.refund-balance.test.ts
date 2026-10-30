@@ -184,6 +184,8 @@ describe('recordOrderPayment (TPV) — un reembolso previo no reabre saldo', () 
         orderItem: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketCheckoutSession: { findFirst: jest.fn().mockResolvedValue(null) },
         areaTicketPaymentAttempt: { findUnique: jest.fn().mockResolvedValue(null) },
+        // These are ordinary sales; the exchange policy must read an explicit absence, not a missing delegate.
+        exchange: { findUnique: jest.fn().mockResolvedValue(null) },
         $queryRaw: jest.fn().mockResolvedValue([{ id: ORDER_ID }]),
         // El candado del intento con llave (`candadoDeIntento.ts:64-65`) corre ANTES de la guarda nueva.
         $executeRawUnsafe: jest.fn().mockResolvedValue(0),

@@ -1,5 +1,5 @@
 // services/dashboard/receipt.dashboard.service.ts
-import { DigitalReceipt, ReceiptStatus } from '@prisma/client'
+import { DigitalReceipt, Prisma, ReceiptStatus } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
 import { BadRequestError, InternalServerError, NotFoundError } from '../../errors/AppError'
 
@@ -9,11 +9,22 @@ import logger from '@/config/logger'
 import emailService from '../email.service'
 import { contarCobrosDeVenta, ticketTotals, ticketTotalsDelSnapshot, ticketTotalsSinDesglose } from '../shared/ticketTotals'
 import { ORDEN_RECIBO_CANONICO, reciboCanonicoDelPago } from '../shared/reciboCanonico'
+import { productosDelSnapshot } from '../shared/productosDelRecibo'
 
 // Main function to generate and store a digital receipt
 export async function generateAndStoreReceipt(paymentId: string, recipientEmail?: string): Promise<DigitalReceipt>
-export async function generateAndStoreReceipt(venueId: string, paymentId: string, recipientEmail?: string): Promise<DigitalReceipt>
-export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?: string): Promise<DigitalReceipt> {
+export async function generateAndStoreReceipt(
+  venueId: string,
+  paymentId: string,
+  recipientEmail?: string,
+  db?: Prisma.TransactionClient,
+): Promise<DigitalReceipt>
+export async function generateAndStoreReceipt(
+  arg1: string,
+  arg2?: string,
+  arg3?: string,
+  db: Prisma.TransactionClient = prisma,
+): Promise<DigitalReceipt> {
   let venueId: string | undefined
   let paymentId: string
   let recipientEmail: string | undefined
@@ -33,13 +44,13 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
   }
 
   const payment = venueId
-    ? await prisma.payment.findFirst({
+    ? await db.payment.findFirst({
         where: {
           id: paymentId,
           venueId,
         },
       })
-    : await prisma.payment.findUnique({
+    : await db.payment.findUnique({
         where: { id: paymentId },
       })
 
@@ -49,12 +60,12 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
 
   // Check if a digital receipt already exists for this payment
   // r4 R4-A1: el recibo canónico (el más viejo por (createdAt, id)), el mismo que el TPV, el POS y el móvil.
-  const existingReceipt = await reciboCanonicoDelPago(prisma, paymentId)
+  const existingReceipt = await reciboCanonicoDelPago(db, paymentId)
 
   if (existingReceipt) {
     // Update recipient email if provided and different
     if (recipientEmail && existingReceipt.recipientEmail !== recipientEmail) {
-      return await prisma.digitalReceipt.update({
+      return await db.digitalReceipt.update({
         where: { id: existingReceipt.id },
         data: { recipientEmail },
       })
@@ -63,7 +74,7 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
   }
 
   // Get venue data
-  const venue = await prisma.venue.findUnique({
+  const venue = await db.venue.findUnique({
     where: { id: payment.venueId },
     select: {
       id: true,
@@ -85,7 +96,7 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
   }
 
   // Get order details
-  const order = await prisma.order.findUnique({
+  const order = await db.order.findUnique({
     where: { id: payment.orderId },
   })
 
@@ -95,13 +106,13 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
 
   // Get order items and all their modifiers in 2 queries (avoids N+1)
   const [orderItems, allModifiers] = await Promise.all([
-    prisma.orderItem.findMany({
+    db.orderItem.findMany({
       where: { orderId: payment.orderId },
       include: {
         product: true,
       },
     }),
-    prisma.orderItemModifier.findMany({
+    db.orderItemModifier.findMany({
       where: { orderItem: { orderId: payment.orderId } },
       include: {
         modifier: true,
@@ -129,7 +140,7 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
     // This is a safe approach that won't throw errors if the field doesn't exist
     const orderWithCustomer: any = order
     if (orderWithCustomer.customerId) {
-      customer = await prisma.customer.findUnique({
+      customer = await db.customer.findUnique({
         where: { id: orderWithCustomer.customerId },
       })
     }
@@ -141,7 +152,7 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
   // Get processed by staff if available
   let processedBy = null
   if (payment.processedById) {
-    processedBy = await prisma.staff.findUnique({
+    processedBy = await db.staff.findUnique({
       where: { id: payment.processedById },
     })
   }
@@ -219,12 +230,12 @@ export async function generateAndStoreReceipt(arg1: string, arg2?: string, arg3?
     ticketTotals: ticketTotals({
       payment: { amount: payment.amount, tipAmount: payment.tipAmount, type: payment.type, status: payment.status },
       order,
-      cobrosDeVenta: await contarCobrosDeVenta(prisma, payment.orderId),
+      cobrosDeVenta: await contarCobrosDeVenta(db, payment.orderId),
     }),
   }
 
   // Create digital receipt
-  const digitalReceipt = await prisma.digitalReceipt.create({
+  const digitalReceipt = await db.digitalReceipt.create({
     data: {
       paymentId,
       dataSnapshot,
@@ -292,8 +303,8 @@ export async function sendReceiptByEmail(receiptId: string): Promise<DigitalRece
       receiptUrl: `${process.env.FRONTEND_URL}/receipts/public/${receipt.accessKey}`,
       receiptNumber: receipt.accessKey.slice(-4).toUpperCase(),
       orderNumber: order.number?.toString() || undefined,
-      // Order items
-      items: order.items || [],
+      // Order items (D8: también los del recibo de la terminal, que van fuera de `order`)
+      items: productosDelSnapshot(dataSnapshot),
       // Totals (IVA por producto, plan 7): misma regla de cuadre que el ticket (subtotal − descuento + cargo + IVA + propina = total)
       subtotal: totales.subtotal,
       discountAmount: totales.discount,

@@ -1,4 +1,4 @@
--- 20261020090000_tarjetas_de_regalo_1b — sólo columnas nulas o con default.
+-- 20261029090000_tarjetas_de_regalo_1b — sólo columnas nulas o con default.
 ALTER TABLE "GiftCard"
   ADD COLUMN "deliveryAttempts" INTEGER NOT NULL DEFAULT 0,
   ADD COLUMN "deliveryNextAttemptAt" TIMESTAMP(3),

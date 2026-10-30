@@ -1,5 +1,6 @@
 // La reserva global congela el periodo completo; sólo su entrada llega al PAC.
 import { textoDeTimbreEnDuda, timbreEnDuda } from './timbreEnDuda'
+import { WHERE_PAYMENT_IS_EXCHANGE_CREDIT, WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT } from '../exchanges/exchangeMarks'
 import { CsdStatus, Prisma } from '@prisma/client'
 import type { GlobalPeriodicity } from '@prisma/client'
 import prisma from '../../utils/prismaClient'
@@ -20,6 +21,7 @@ import {
   MOTIVO_MEDIO_CENTAVO_SIN_REGLA,
   MOTIVO_OCHO_SIN_REGLA,
   MOTIVO_TODO_CORTESIA,
+  conceptoDeVentaSinRenglones,
   type RenglonParaCfdi,
   consultarIntentoCapturado,
   enviarIntentoCapturado,
@@ -2357,15 +2359,34 @@ export function dondePertenece(
   unSoloEmisor: boolean,
   p: Pertenencia,
 ): Prisma.OrderWhereInput {
-  const conComercio: Prisma.PaymentWhereInput = { OR: [{ merchantAccountId: { not: null } }, { ecommerceMerchantId: { not: null } }] }
-  const deConfig = (cfg: Prisma.MerchantFiscalConfigWhereInput): Prisma.PaymentWhereInput => ({
-    OR: [{ merchantAccount: { fiscalConfig: cfg } }, { ecommerceMerchant: { fiscalConfig: cfg } }],
+  // La pertenencia del crédito sigue al dinero raíz; la forma SAT del ticket sigue siendo 17.
+  const origenValido = {
+    originPayment: { is: { AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, { venue: { fiscalEmisors: { some: { id: emisor.id } } } }] } },
+  } satisfies Prisma.ExchangeCreditLinkWhereInput
+  const porOrigen = (w: Prisma.PaymentWhereInput): Prisma.PaymentWhereInput => ({
+    OR: [
+      { AND: [WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT, w] },
+      {
+        AND: [WHERE_PAYMENT_IS_EXCHANGE_CREDIT, { exchangeCreditAsCredit: { is: { AND: [origenValido, { originPayment: { is: w } }] } } }],
+      },
+    ],
   })
+  // Sin una raíz propia comprobable no es un cobro fuera de terminal: queda SIN_EMISOR.
+  const conComercio: Prisma.PaymentWhereInput = {
+    OR: [
+      porOrigen({ OR: [{ merchantAccountId: { not: null } }, { ecommerceMerchantId: { not: null } }] }),
+      { AND: [WHERE_PAYMENT_IS_EXCHANGE_CREDIT, { NOT: { exchangeCreditAsCredit: { is: origenValido } } }] },
+    ],
+  }
+  const deConfig = (cfg: Prisma.MerchantFiscalConfigWhereInput): Prisma.PaymentWhereInput =>
+    porOrigen({
+      OR: [{ merchantAccount: { fiscalConfig: cfg } }, { ecommerceMerchant: { fiscalConfig: cfg } }],
+    })
   const nuestro = deConfig({ fiscalEmisorId: emisor.id })
   const compatible = deConfig(configQueEntraALaGlobal(emisor.id))
   const ajeno = deConfig({ fiscalEmisorId: { not: emisor.id } })
   const incompatible: Prisma.PaymentWhereInput = { AND: [conComercio, { NOT: compatible }] }
-  const efectivo: Prisma.PaymentWhereInput = { method: 'CASH' }
+  const efectivo = porOrigen({ method: 'CASH' })
   const conEfectivo = emisor.invoiceCashSales ? NUNCA : algun(efectivo)
   const sinEfectivo = emisor.invoiceCashSales ? {} : ninguno(efectivo)
   // Ajuste del founder (7-oct): lo cobrado SÓLO fuera de la terminal (ningún cobro con comercio), con un solo RFC, se revisa como efectivo o
@@ -3081,16 +3102,6 @@ function conceptosRealesDelTicket(
   return { reales, motivo: null } // con el descuento ORIGINAL: el ajuste no se congela aquí
 }
 
-/** El concepto de una venta sin renglones (importe libre): el MISMO que arma la factura individual (`loadOrderForCfdiFromDb`). */
-const ventaSinRenglones = (paidCents: number): RenglonParaCfdi => ({
-  productName: 'Venta',
-  quantity: 1,
-  unitPrice: new Prisma.Decimal(paidCents).div(100),
-  discountAmount: 0,
-  product: null,
-  tratamiento: 'IVA_16',
-})
-
 /** C1: un ticket entra a la global con su foto, o sale con UN motivo de la lista cerrada. */
 export type TicketGlobal =
   | { ok: true; orden: Omit<OrdenGlobalV2, 'huella'>; motivoReales: string | null }
@@ -3194,7 +3205,12 @@ export function ticketParaGlobal(o: GlobalCandidateOrder): TicketGlobal {
     // «precio con IVA» que la factura individual y la línea (`taxAmount` = 0 o sin renglones).
     const hoy = lineasDeHoy(o)
     if ('motivo' in hoy) return fuera(hoy.motivo, hoy.detalle)
-    return foto({ IVA_16: paidCents }, hoy.lineas, hoy.conceptos ?? [ventaSinRenglones(paidCents)], hoy.priceIncludesIva)
+    return foto(
+      { IVA_16: paidCents },
+      hoy.lineas,
+      hoy.conceptos ?? [conceptoDeVentaSinRenglones(paidCents, o.orderDiscounts)],
+      hoy.priceIncludesIva,
+    )
   }
 
   // IVA mezclado: sólo con el precio cobrado con IVA incluido (§4.2; la individual pide lo mismo).

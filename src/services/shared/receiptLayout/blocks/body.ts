@@ -13,12 +13,16 @@ export function renderOrderInfo(block: Of<'orderInfo'>, input: ReceiptInput, wid
   const { sale } = input
   const lines: LogicalLine[] = []
   const refund = sale.kind === 'REFUND'
+  const exchange = sale.kind === 'EXCHANGE'
   const row = (label: string, value: string) => twoColumnLines(label, value, width).map(l => textLine(l))
   if (refund) lines.push(textLine(LABELS.devolucionTitulo, 'center', { bold: true }))
-  lines.push(...row(refund ? LABELS.devolucion : LABELS.orden, forceReceiptText(sale.orderNumber)))
+  if (exchange) lines.push(textLine(LABELS.cambioTitulo, 'center', { bold: true }))
+  lines.push(...row(refund ? LABELS.devolucion : exchange ? LABELS.ordenCambio : LABELS.orden, forceReceiptText(sale.orderNumber)))
+  if (exchange && sale.exchangeOfOrderNumber) lines.push(...row(LABELS.deLaVenta, forceReceiptText(sale.exchangeOfOrderNumber)))
   lines.push(...row(LABELS.fecha, formatDateTime(sale.occurredAt, sale.timezone)))
   if (block.showOrderType) lines.push(...row(LABELS.tipo, forceReceiptText(sale.orderType)))
   if (sale.reprint) lines.push(...row(LABELS.reimpresion, formatDateTime(sale.reprint.printedAt, sale.timezone)))
+  if (exchange && sale.pendingUpload) lines.push(textLine(LABELS.pendienteDeSubir, 'center', { bold: true }))
   return lines
 }
 
@@ -34,7 +38,15 @@ export function renderItems(block: Of<'items'>, input: ReceiptInput, width: Pape
     textLine(divider(width)),
   ]
   const aux = (text: string) => indentedLines(text, width).map(l => textLine(l))
-  for (const item of input.sale.items) {
+  const exchange = input.sale.kind === 'EXCHANGE'
+  const items = exchange
+    ? ['RETURN', 'TAKE', null].flatMap(side => input.sale.items.filter(item => (item.exchangeSide ?? null) === side))
+    : input.sale.items
+  let previousSide: string | null | undefined
+  for (const item of items) {
+    if (exchange && item.exchangeSide && item.exchangeSide !== previousSide)
+      lines.push(textLine(item.exchangeSide === 'RETURN' ? LABELS.regresa : LABELS.seLleva, 'left', { bold: true }))
+    previousSide = item.exchangeSide
     const component = item.isComboComponent === true
     const name = forceReceiptText(component ? `${item.quantity}x ${item.name}` : item.name)
     const price = component ? '' : item.isCortesia ? LABELS.cortesia : formatMoney(item.totalPriceCents)
@@ -47,6 +59,7 @@ export function renderItems(block: Of<'items'>, input: ReceiptInput, width: Pape
     if (item.areaSourceLabel) lines.push(...aux(forceReceiptText(item.areaSourceLabel)))
     if (block.showModifiers) for (const m of item.modifiers ?? []) lines.push(...aux(`+ ${forceReceiptText(m)}`))
     if (block.showNotes && item.note) lines.push(...aux(`${LABELS.nota} ${forceReceiptText(item.note)}`))
+    if (exchange && item.exchangeSide === 'RETURN' && item.reason) lines.push(...aux(`${LABELS.motivo} ${forceReceiptText(item.reason)}`))
   }
   return lines
 }

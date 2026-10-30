@@ -65,6 +65,7 @@ describe('ticketTotals', () => {
 
   it('🔴 Codex r1 #1: $100 cobrados + $16 de propina sobre una cuenta de $116 NO es un cobro completo: leyenda', () => {
     const o = orden({ subtotal: 100, taxAmount: 16, contratoDePrecio: 'DESCONOCIDO' })
+    // D15: además es una PARTE: la venta debía $116 sin propina y este cobro pagó $100.
     expect(ticketTotals({ payment: cobro(100, 16), order: o, cobrosDeVenta: 1 })).toEqual({
       kind: 'COBRO',
       desglosado: false,
@@ -73,6 +74,7 @@ describe('ticketTotals', () => {
       addedTax: 0,
       tip: 16,
       total: 116,
+      parcial: true,
     })
   })
 
@@ -409,5 +411,43 @@ describe('totalesDelComprobante (r2 R2-9: un comprobante ya emitido no cambia al
     expect(await contarCobrosDeVenta(prismaMock, 'o1')).toBe(2)
     expect(prismaMock.payment.count.mock.calls[0][0]).toEqual({ where: { orderId: 'o1', ...COBROS_DE_VENTA } })
     expect(await contarCobrosDeVenta(prismaMock, null)).toBe(0)
+  })
+})
+
+// D15 (28-oct): el comprobante de UNA parte de una venta dividida lleva `parcial: true`, para que la reimpresión, el recibo digital y el
+// correo pinten «Pago parcial» en vez de toda la venta. Sólo para un cobro de venta real (COMPLETED, > 0) y nunca por un centavo de
+// tolerancia (Codex plan r1 #1 y #2).
+describe('ticketTotals · parcial (D15)', () => {
+  const o30 = orden({ subtotal: 30 })
+
+  it('parte 1 de 2: un solo cobro que paga menos de lo que la orden debe', () => {
+    expect(ticketTotals({ payment: cobro(15), order: o30, cobrosDeVenta: 1 })).toMatchObject({ kind: 'COBRO', desglosado: false, parcial: true, total: 15 })
+  })
+
+  it('parte 2 de 2: la orden ya tiene dos cobros de venta', () => {
+    expect(ticketTotals({ payment: cobro(15, 2), order: o30, cobrosDeVenta: 2 })).toMatchObject({ desglosado: false, parcial: true, total: 17 })
+  })
+
+  it('venta pagada completa en un solo cobro: sin la llave', () => {
+    expect(ticketTotals({ payment: cobro(30, 3), order: o30, cobrosDeVenta: 1 })).not.toHaveProperty('parcial')
+  })
+
+  it('cuenta de $2.01 saldada con $2.00 (tolerancia de un centavo): venta completa, sin la llave', () => {
+    expect(ticketTotals({ payment: cobro(2), order: orden({ subtotal: 2.01 }), cobrosDeVenta: 1 })).not.toHaveProperty('parcial')
+  })
+
+  it('intento fallido de $15 sobre $30: no es una parte cobrada', () => {
+    expect(ticketTotals({ payment: cobro(15, 0, 'REGULAR', 'FAILED'), order: o30, cobrosDeVenta: 1 })).not.toHaveProperty('parcial')
+    expect(ticketTotals({ payment: cobro(15, 0, 'REGULAR', 'FAILED'), order: o30, cobrosDeVenta: 2 })).not.toHaveProperty('parcial')
+  })
+
+  it('registro de sólo propina ($0 + propina): no es una parte', () => {
+    expect(ticketTotals({ payment: cobro(0, 5), order: o30, cobrosDeVenta: 1 })).not.toHaveProperty('parcial')
+  })
+
+  it('cobro rápido sin orden, devolución y cortesía de $0: sin la llave', () => {
+    expect(ticketTotals({ payment: cobro(15), order: null, cobrosDeVenta: 0 })).not.toHaveProperty('parcial')
+    expect(ticketTotals({ payment: cobro(-15, 0, 'REFUND'), order: o30, cobrosDeVenta: 2 })).not.toHaveProperty('parcial')
+    expect(ticketTotals({ payment: cobro(0), order: orden({ subtotal: 0 }), cobrosDeVenta: 0 })).not.toHaveProperty('parcial')
   })
 })

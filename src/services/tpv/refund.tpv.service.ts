@@ -45,6 +45,9 @@ import {
   bloquearSobresDelReembolsoEnTx,
 } from '../giftCards/giftCardCancel.service'
 import { isGiftCardTenderKind } from '../giftCards/giftCardTender'
+import { centavosQueUsaronLosCambios, laTerminalYaDevolvio, mandarCambiosARevisarEnTx } from '../exchanges/exchangeTerminalRefund'
+import { anotarRegresoDeLaVentaEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
+import { applyCustomerReturnPosting } from '../inventory/inventoryPosting.service'
 
 /**
  * Refund request data from TPV Android app
@@ -354,6 +357,11 @@ export async function recordRefund(
     )
   }
 
+  // El crédito no acredita un reembolso del SDK: sólo el POS/panel puede resolver el origen de la cadena.
+  if (originalPayment.tenderType?.systemKind === 'EXCHANGE_CREDIT') {
+    throw new BadRequestError('Lo pagado con crédito de cambio se devuelve desde el POS o el panel, por el medio de su origen.')
+  }
+
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 1.5: Reintento idempotente — se resuelve ANTES del guardia de importe
   // ═══════════════════════════════════════════════════════════════════════════
@@ -440,7 +448,19 @@ export async function recordRefund(
   const alreadyRefunded = yaDevueltoCentsPrevuelo / 100
   const remainingRefundable = remainingRefundableCents / 100
 
-  if (esteReembolsoCentsPrevuelo > remainingRefundableCents) {
+  // Cambio de producto (rM1, decisión «A»): con tarjeta, el tope es lo que el BANCO todavía tiene; lo que un cambio usó sin pasar
+  // por el banco se lee sólo en este caso raro (el bloque bloqueado es quien decide).
+  const usadoPorCambiosPrevuelo =
+    esteReembolsoCentsPrevuelo > remainingRefundableCents && laTerminalYaDevolvio(originalPayment)
+      ? centavosQueUsaronLosCambios(
+          await prisma.payment.findMany({
+            where: { venueId, type: PaymentType.REFUND, processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId } },
+            select: { amount: true, tipAmount: true, status: true, processorData: true },
+            take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
+          }),
+        )
+      : 0
+  if (esteReembolsoCentsPrevuelo > remainingRefundableCents + usadoPorCambiosPrevuelo) {
     logger.error('Refund amount exceeds remaining refundable', {
       originalPaymentId: refundData.originalPaymentId,
       requestedRefund: refundAmountInPesos,
@@ -670,7 +690,7 @@ export async function recordRefund(
           type: PaymentType.REFUND,
           processorData: { path: ['originalPaymentId'], equals: refundData.originalPaymentId },
         },
-        select: { amount: true, tipAmount: true, status: true },
+        select: { amount: true, tipAmount: true, status: true, processorData: true },
         take: MAX_REFUND_ROWS_PER_PAYMENT + 1,
       })
 
@@ -714,9 +734,13 @@ export async function recordRefund(
       const lockedTotalCents = Math.round(Number(locked.amount) * 100) + Math.round(Number(locked.tipAmount ?? 0) * 100)
       const lockedRemainingCents = lockedTotalCents - lockedAlreadyRefundedCents
       const lockedRemaining = lockedRemainingCents / 100
-      if (esteReembolsoCents > lockedRemainingCents) {
+      // Cambio de producto (rM1, decisión «A»): el SDK ya devolvió. Si un cambio usó este cobro sin pasar por el banco, se anota
+      // hasta lo que el banco todavía tiene y el cambio va a revisar (`exchangeTerminalRefund.ts`).
+      const usadoPorCambios = laTerminalYaDevolvio(locked) ? centavosQueUsaronLosCambios(filasDeReembolso) : 0
+      if (esteReembolsoCents > lockedRemainingCents + usadoPorCambios) {
         throw new BadRequestError(`Refund amount (${refundAmountInPesos}) exceeds remaining refundable amount (${lockedRemaining})`)
       }
+      const anotadaTrasUnCambio = esteReembolsoCents > lockedRemainingCents
 
       // ═══════════════════════════════════════════════════════════════════════
       // Turno del NEGOCIO: observar → reclamar OPEN o conciliar post-corte
@@ -1049,10 +1073,29 @@ export async function recordRefund(
         : { cuentaCancelada: false }
       // Codex R12-15: el costo negativo del reembolso es una obligación DURABLE (misma transacción, mutex del original).
       await asegurarObligacionDeCostoNegativo(tx, originalPayment.id, refundPayment.id)
+      if (anotadaTrasUnCambio)
+        await mandarCambiosARevisarEnTx(tx, {
+          venueId,
+          filas: filasDeReembolso,
+          originalPaymentId: locked.id,
+          refundPaymentId: refundPayment.id,
+          refundCents: esteReembolsoCents,
+          staffId: userId ?? null,
+        })
+
+      // «Regresa lo que salió menos lo que ya regresó» (28-oct): si con esta devolución la venta queda toda devuelta, lo que vuelve
+      // al almacén se decide AQUÍ, bajo el candado de la orden, restando lo que ya regresó por un cambio o por el panel. El stock
+      // se aplica después del commit (y el barrido lo recupera). Antes se decidía fuera de la transacción: dos devoluciones a la
+      // vez reponían dos veces, y una pieza ya regresada volvía a entrar.
+      const regreso =
+        locked.orderId && (await quedaTodaDevueltaEnTx(tx, venueId, locked.orderId, salesRefund))
+          ? await anotarRegresoDeLaVentaEnTx(tx, { venueId, orderId: locked.orderId, refundPaymentId: refundPayment.id, staffId: userId })
+          : null
 
       return {
         refundPayment,
         postCommitAuthority: Object.freeze({
+          regreso,
           orderId: locked.orderId,
           method: locked.method,
           fundsFlow: locked.fundsFlow,
@@ -1244,43 +1287,26 @@ export async function recordRefund(
   // only once the cumulative refunds reach the order total — i.e. the whole
   // order is reversed. Non-blocking (a restock failure must not fail the refund)
   // and processor-agnostic, so it covers both AngelPay and Blumon refunds.
-  if (postCommitAuthority.orderId && originalPayment.order) {
+  const regreso = postCommitAuthority.regreso
+  if (regreso && postCommitAuthority.orderId) {
     try {
-      const orderTotal = Number(originalPayment.order.total)
-      if (orderTotal > 0) {
-        // This refund row is already committed, so it's included in the sum.
-        const orderRefunds = await prisma.payment.findMany({
-          where: { orderId: postCommitAuthority.orderId, type: PaymentType.REFUND, status: TransactionStatus.COMPLETED },
-          select: { amount: true },
+      if (regreso.postingId) await applyCustomerReturnPosting(regreso.postingId, userId)
+      if (regreso.recetas.length)
+        await restockOrderItems({
+          venueId,
+          orderId: postCommitAuthority.orderId,
+          refundPaymentId: result.id,
+          staffId: userId,
+          items: regreso.recetas,
         })
-        const totalRefundedSale = orderRefunds.reduce((sum, p) => sum + Math.abs(Number(p.amount)), 0)
-        // 🔴 El umbral compara MERCANCÍA contra refunds de VENTA (auditoría
-        // 2026-08-12): `Order.total` incluye la propina acumulada, pero los
-        // refunds suman solo `Payment.amount` (la parte de venta — la propina
-        // viaja aparte en tipAmount). Comparar contra el total con propina
-        // hacía que una orden CON propina jamás cruzara y jamás repusiera stock.
-        const crossedToFullyRefunded = crossedFullRefundThreshold({
-          orderTotal,
-          orderTipAmount: Number(originalPayment.order.tipAmount || 0),
-          totalRefundedSale,
-          salesRefundThisTime: salesRefund,
-        })
-        if (crossedToFullyRefunded) {
-          const summary = await restockOrderItems({
-            venueId,
-            orderId: postCommitAuthority.orderId,
-            refundPaymentId: result.id,
-            staffId: userId,
-          })
-          logger.info('Order fully refunded — inventory restocked', {
-            orderId: postCommitAuthority.orderId,
-            refundPaymentId: result.id,
-            ...summary,
-          })
-        }
-      }
+      logger.info('Order fully refunded — inventory return posted', {
+        orderId: postCommitAuthority.orderId,
+        refundPaymentId: result.id,
+        postingId: regreso.postingId,
+        recetas: regreso.recetas.length,
+      })
     } catch (error) {
-      // Never fail the refund because restock failed — the money movement already succeeded.
+      // Never fail the refund because restock failed — the money movement already succeeded. El barrido aplica el posting.
       logger.error('Failed to restock inventory on full refund', {
         refundPaymentId: result.id,
         orderId: postCommitAuthority.orderId,
@@ -1311,18 +1337,22 @@ export async function recordRefund(
   // dinero YA se devolvió al cliente. Si un fallo al revertir el sello propagara, el
   // reembolso se vería fallido con el dinero fuera — infinitamente peor que un sello
   // de más. La reversión es idempotente, así que se puede reintentar después.
+  //
+  // 🔴 Sin `await` (24-oct, Codex D3-r1 #2): la reversa espera los candados de la venta y del cliente (los puntos de un cobro
+  // en curso pueden retener el de la venta), y la terminal corta la llamada a los 12 s: vería pendiente una devolución ya
+  // registrada. Igual que el POS, el panel y Uber.
   // ═══════════════════════════════════════════════════════════════════════════
-  try {
-    const { reverseStampForOrder } = await import('../wallet/stampLedger.service')
-    await reverseStampForOrder(venueId, postCommitAuthority.orderId)
-  } catch (error) {
-    logger.error('No se pudo revertir el sello de una venta reembolsada', {
-      venueId,
-      orderId: postCommitAuthority.orderId,
-      refundPaymentId: result.id,
-      error: error instanceof Error ? error.message : String(error),
+  const orderIdDelSello = postCommitAuthority.orderId
+  import('../wallet/stampLedger.service')
+    .then(({ reverseStampForOrder }) => reverseStampForOrder(venueId, orderIdDelSello))
+    .catch(error => {
+      logger.error('No se pudo revertir el sello de una venta reembolsada', {
+        venueId,
+        orderId: orderIdDelSello,
+        refundPaymentId: result.id,
+        error: error instanceof Error ? error.message : String(error),
+      })
     })
-  }
 
   // ═══════════════════════════════════════════════════════════════════════════
   // STEP 7: Generate digital receipt for refund

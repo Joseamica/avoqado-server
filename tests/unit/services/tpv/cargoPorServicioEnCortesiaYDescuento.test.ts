@@ -67,13 +67,15 @@ jest.mock('@/utils/prismaClient', () => {
     // B2c T4 (P5): la cortesía de la terminal crea su fila espejo con quien la otorga (StaffVenue) y el recorte puede retirar filas.
     staffVenue: { findFirst: jest.fn(async () => null) },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
-    $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
+    $queryRaw: jest.fn(async () => [{ id: 'order-sc' }]),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },
     // Codex 3.6 (S5): anular TODOS los platos retira de la pantalla de cocina las comandas pendientes de la venta.
     kdsOrderItem: { findMany: jest.fn(async () => []), deleteMany: jest.fn() },
     kdsOrder: { findMany: jest.fn(async () => []), deleteMany: jest.fn(), updateMany: jest.fn(async () => ({ count: 0 })) },
+    // D2 (vales): anular TODOS los platos pregunta si la venta tiene sesión de vales para dejarlos libres; aquí no la tiene.
+    areaTicketCheckoutSession: { findFirst: jest.fn(async () => null) },
   }
   // `__insideTx` deja MEDIBLE la atomicidad: cada escritura puede anotar si ocurrió
   // DENTRO del callback de `$transaction`. Sin esta bandera, con un mock que pasa el

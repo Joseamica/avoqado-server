@@ -21,6 +21,7 @@
  */
 
 import prisma from '../../../utils/prismaClient'
+import { ORDER_LOCK_WAIT_BUDGET, lockExistingOrderForPayment } from '../../shared/paymentShiftClaim'
 import { organizacionDeLaSedeActivada, venueHasServicePayAccess } from '../staffPay/acceso'
 import logger from '../../../config/logger'
 import {
@@ -33,6 +34,14 @@ import {
   PaymentType,
 } from '@prisma/client'
 import { NotFoundError, BadRequestError } from '../../../errors/AppError'
+import {
+  WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT,
+  WHERE_PAYMENT_IS_EXCHANGE_CREDIT,
+  origenEconomicoDeDevolucion,
+  sqlOrigenEconomico,
+  whereDevolucionConOrigen,
+  sqlPaymentIsNotExchangeCredit,
+} from '../../exchanges/exchangeMarks'
 import { logAction } from '../activity-log.service'
 import { writeLegacyActivityAuditTx } from '../../activityAudit.service'
 import { recalculateSummary } from './commission-aggregation.service'
@@ -430,17 +439,20 @@ const CAMPOS_DEL_REVERSO = ['baseAmount', 'tipAmount', 'discountAmount', 'taxAmo
 type CampoDelReverso = (typeof CAMPOS_DEL_REVERSO)[number]
 type CamposDelReverso = Record<CampoDelReverso, Prisma.Decimal>
 
-/** Las devoluciones COMPLETADAS de un cobro: la llave `processorData.originalPaymentId` que escriben los dos canales. */
+/**
+ * Las devoluciones COMPLETADAS de un cobro, incluidas las de su cadena por el origen económico. Sin las de
+ * crédito de cambio (spec §7.6): lo que pasó a la venta nueva no regresó a la clienta, así que no revierte comisión.
+ */
 const devolucionesDe = (venueId: string, originalPaymentId: string): Prisma.PaymentWhereInput => ({
   venueId,
   type: PaymentType.REFUND,
   status: 'COMPLETED',
-  processorData: { path: ['originalPaymentId'], equals: originalPaymentId },
+  AND: [whereDevolucionConOrigen(originalPaymentId), WHERE_PAYMENT_IS_NOT_EXCHANGE_CREDIT],
 })
 
 /**
- * Lo YA revertido de una fila original (persona + esquema) por las DEMÁS devoluciones del cobro, en positivo: lo
- * materializado (en cualquier estado: anular un reverso es decidir que esa parte no se revierte) más lo que sigue en cola.
+ * Lo YA revertido de una fila original (persona + esquema) por las DEMÁS devoluciones del cobro (las de `devolucionesDe`), en
+ * positivo: lo materializado (en cualquier estado: anular un reverso es decidir que esa parte no se revierte) más lo que sigue en cola.
  * Un efecto cuya fila ya existe —el enganche directo viejo de la terminal la creaba aparte— se cuenta una sola vez, por la
  * fila. Todo en SQL: sin tope de filas que trunque la suma (Codex plan r1-2).
  */
@@ -454,8 +466,9 @@ async function revertidoPorLasOtras(
       WHERE p."venueId" = ${w.venueId}
         AND p.type = 'REFUND'
         AND p.status = 'COMPLETED'
-        AND p."processorData"->>'originalPaymentId' = ${w.originalPaymentId}
+        AND ${sqlOrigenEconomico('p')} = ${w.originalPaymentId}
         AND p.id <> ${w.refundPaymentId}
+        AND ${sqlPaymentIsNotExchangeCredit('p')}
     ),
     revertido AS (
       SELECT cc."baseAmount" AS b, cc."tipAmount" AS t, cc."discountAmount" AS d, cc."taxAmount" AS x,
@@ -502,18 +515,22 @@ export async function createRefundCommission(
   originalPaymentId: string,
   options: CommissionOptions = {},
 ): Promise<CommissionCalculationResult[]> {
-  if (!options.db) return prisma.$transaction(tx => createRefundCommission(refundPaymentId, originalPaymentId, { ...options, db: tx }))
+  if (!options.db)
+    return prisma.$transaction(
+      tx => createRefundCommission(refundPaymentId, originalPaymentId, { ...options, db: tx }),
+      ORDER_LOCK_WAIT_BUDGET,
+    )
   const db = options.db
   const refundPayment = await db.payment.findUnique({ where: { id: refundPaymentId } })
   if (!refundPayment) throw new NotFoundError(`Refund payment ${refundPaymentId} not found`)
-  if (refundPayment.orderId)
+  if (refundPayment.orderId) await lockExistingOrderForPayment(db, { venueId: refundPayment.venueId, orderId: refundPayment.orderId })
+  if (origenEconomicoDeDevolucion(refundPayment.processorData) !== originalPaymentId) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
+  const originalPayment = await cobroOriginalDelReverso(db, refundPayment)
+  // La raíz de CHAIN ya está tomada por el helper, antes de pagos/turno; esta reentrada valida el origen económico.
+  if (originalPayment.orderId && originalPayment.orderId !== refundPayment.orderId)
     await db.$queryRaw(
-      Prisma.sql`SELECT id FROM "Order" WHERE id = ${refundPayment.orderId} AND "venueId" = ${refundPayment.venueId} FOR UPDATE`,
+      Prisma.sql`SELECT id FROM "Order" WHERE id = ${originalPayment.orderId} AND "venueId" = ${refundPayment.venueId} FOR UPDATE`,
     )
-  const originalPayment = await db.payment.findFirst({
-    where: { id: originalPaymentId, venueId: refundPayment.venueId, orderId: refundPayment.orderId },
-  })
-  if (!originalPayment) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
   const originalCalcs = await db.commissionCalculation.findMany({
     where: { paymentId: originalPaymentId, status: { not: CommissionCalcStatus.VOIDED } },
   })
@@ -699,7 +716,7 @@ export async function anularComision(
             SELECT p.id FROM "Payment" p
             WHERE p."venueId" = ${input.venueId}
               AND p.type = 'REFUND'
-              AND p."processorData"->>'originalPaymentId' = ${calc.paymentId ?? ''}
+              AND ${sqlOrigenEconomico('p')} = ${calc.paymentId ?? ''}
           )
         )
       )
@@ -1667,15 +1684,10 @@ export async function freezePaymentCommissionInTx(
  */
 export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, effect: PaymentEffect): Promise<boolean> {
   const data = effect.payload as unknown as Prisma.CommissionCalculationUncheckedCreateInput
-  if (
-    data.venueId !== effect.venueId ||
-    data.paymentId !== effect.paymentId ||
-    data.orderId !== effect.orderId ||
-    !data.configId ||
-    !data.staffId
-  ) {
+  if (data.venueId !== effect.venueId || data.paymentId !== effect.paymentId || !data.configId || !data.staffId) {
     throw new Error('INVALID_COMMISSION_SNAPSHOT')
   }
+  const original = await originalDelReverso(tx, effect, data.configId, data.staffId, data.orderId ?? null)
   // Fase 3 (A2, Codex r1-3): una fila existente en CUALQUIER estado —también VOIDED— ya está materializada. Antes se buscaba
   // excluyendo VOIDED y un efecto pendiente revivía una comisión que alguien anuló.
   const existing = await tx.commissionCalculation.findFirst({
@@ -1683,7 +1695,6 @@ export async function applyFrozenCommissionInTx(tx: Prisma.TransactionClient, ef
     select: { id: true },
   })
   if (existing) return true
-  const original = await originalDelReverso(tx, effect, data.configId, data.staffId)
   // Fase 3 (A2, Codex r2-1): un REVERSO todavía en cola no revive cuando su comisión original ya se anuló. El worker tiene
   // el candado de la orden y la anulación (`anularComision`, A4) también lo toma: una anulación no puede entrar entre esta
   // lectura y el `create`.
@@ -1704,19 +1715,51 @@ async function originalDelReverso(
   effect: PaymentEffect,
   configId: string,
   staffId: string,
+  snapshotOrderId: string | null,
 ): Promise<'NO_ES_REVERSO' | 'SIN_FILA' | 'ANULADA' | 'VIVA'> {
+  if (!effect.orderId) throw new Error('INVALID_COMMISSION_SNAPSHOT')
   const devolucion = await tx.payment.findFirst({
-    where: { id: effect.paymentId, venueId: effect.venueId },
-    select: { type: true, processorData: true },
+    where: { id: effect.paymentId, venueId: effect.venueId, orderId: effect.orderId },
   })
-  if (devolucion?.type !== PaymentType.REFUND) return 'NO_ES_REVERSO'
-  const originalPaymentId = (devolucion.processorData as { originalPaymentId?: unknown } | null)?.originalPaymentId
-  if (typeof originalPaymentId !== 'string') return 'NO_ES_REVERSO'
+  if (!devolucion) throw new Error('INVALID_COMMISSION_SNAPSHOT')
+  if (devolucion.type !== PaymentType.REFUND) {
+    if (snapshotOrderId !== effect.orderId) throw new Error('INVALID_COMMISSION_SNAPSHOT')
+    return 'NO_ES_REVERSO'
+  }
+  const original = await cobroOriginalDelReverso(tx, devolucion)
+  if (snapshotOrderId !== original.orderId) throw new Error('INVALID_COMMISSION_SNAPSHOT')
   const originales = await tx.commissionCalculation.findMany({
-    where: { venueId: effect.venueId, paymentId: originalPaymentId, configId, staffId },
+    where: { venueId: effect.venueId, paymentId: original.id, configId, staffId, orderId: original.orderId },
     select: { status: true },
     take: 10,
   })
   if (originales.length === 0) return 'SIN_FILA'
   return originales.every(o => o.status === CommissionCalcStatus.VOIDED) ? 'ANULADA' : 'VIVA'
+}
+
+/** Sólo una liga real de crédito permite que la comisión y la devolución pertenezcan a órdenes distintas. */
+async function cobroOriginalDelReverso(
+  tx: Prisma.TransactionClient,
+  refund: { type: PaymentType | null; processorData: unknown; venueId: string; orderId: string },
+) {
+  const rootPaymentId = origenEconomicoDeDevolucion(refund.processorData)
+  const originalPaymentId = (refund.processorData as { originalPaymentId?: string } | null)?.originalPaymentId
+  if (refund.type !== PaymentType.REFUND || !rootPaymentId || !originalPaymentId) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
+  const cadena = rootPaymentId !== originalPaymentId
+  if (cadena) {
+    const link = await tx.exchangeCreditLink.findFirst({
+      where: { venueId: refund.venueId, creditPaymentId: originalPaymentId, originPaymentId: rootPaymentId },
+      select: { id: true },
+    })
+    const credit = await tx.payment.findFirst({
+      where: { id: originalPaymentId, venueId: refund.venueId, orderId: refund.orderId, AND: [WHERE_PAYMENT_IS_EXCHANGE_CREDIT] },
+      select: { id: true },
+    })
+    if (!link || !credit) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
+  }
+  const original = await tx.payment.findFirst({
+    where: { id: rootPaymentId, venueId: refund.venueId, ...(cadena ? {} : { orderId: refund.orderId }) },
+  })
+  if (!original) throw new Error('REFUND_COMMISSION_SOURCE_MISMATCH')
+  return original
 }

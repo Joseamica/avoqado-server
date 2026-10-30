@@ -7,16 +7,46 @@
  */
 
 import { NextFunction, Request, Response } from 'express'
+import { customerAttributionActor } from '../../middlewares/customerAttribution.middleware'
 import logger from '../../config/logger'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as orderTpvService from '../../services/tpv/order.tpv.service'
-import { BadRequestError, UnauthorizedError } from '@/errors/AppError'
+import { BadRequestError, ForbiddenError, UnauthorizedError } from '@/errors/AppError'
 import { parseHttpOperation, manifestSchema, executeHttpOperation } from '@/services/mobile/http-operation.mobile.service'
 import { sendHttpOperationReply } from './http-operation.mobile.controller'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import { tienePermisoEnVenue } from '@/middlewares/permissionFlag.middleware'
+import { tieneCortesiaAutorizada } from '@/middlewares/cortesiaPidePermiso.middleware'
 import { versionAlMenos } from '@/services/dashboard/receiptLayout/readiness.service'
 import { cuerpoMesaAjena, MesaAjenaSoloRecuperacion } from '@/services/shared/cuentaCancelada'
+import { payLaterDesdeMetodoDePago } from '@/services/shared/porCobrar'
+import { revisarCortesiaPendiente } from '@/services/mobile/cortesia-pendiente.mobile.service'
+import { parseCourtesyReviewPublicInput, toCourtesyReviewPublicReply } from '@/services/mobile/cortesia-pendiente.public'
+import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
+
+/** La ruta ya validó shape/permiso; identidad y contexto siempre vienen de la sesión autenticada. */
+export async function reviewPendingCourtesy(req: Request, res: Response, next: NextFunction) {
+  try {
+    const auth = req.authContext as (NonNullable<Request['authContext']> & { overrideAuthorizedBy?: string }) | undefined
+    if (!auth?.userId) throw new UnauthorizedError('Autenticación requerida')
+    const input =
+      (res.locals.courtesyReviewInput as ReturnType<typeof parseCourtesyReviewPublicInput> | undefined) ??
+      parseCourtesyReviewPublicInput(req.body)
+    const reply = await revisarCortesiaPendiente(
+      req.params.venueId,
+      {
+        actorId: auth.userId,
+        isImpersonating: auth.isImpersonating === true,
+        ...(auth.overrideAuthorizedBy ? { overrideAuthorizedBy: auth.overrideAuthorizedBy } : {}),
+      },
+      input,
+    )
+    avisarBeneficiosCortesiaPendiente(req.params.venueId, reply)
+    return res.json({ success: true, data: toCourtesyReviewPublicReply(reply) })
+  } catch (error) {
+    next(error)
+  }
+}
 
 /**
  * List orders for a venue (paginated)
@@ -49,6 +79,37 @@ export const listOrders = async (req: Request, res: Response, next: NextFunction
 }
 
 /**
+ * «Cobrar sin red» (D4): `shiftIdDeLaVenta`, el turno en que se VENDIÓ. Sólo cuenta en un replay de la cola (`isOfflineReplay` true
+ * literal); sin esa marca se ignora y todo queda como hoy. Misma forma que en `/tpv` (`recordPaymentBodySchema`): texto de hasta 64.
+ * Otra cosa es un 400 (como el 400 de Zod de `/tpv`): visible para la cola, y nunca un valor sin tope en la bitácora.
+ * `''` y `null` son «no viene».
+ */
+function turnoDeLaVentaDelCuerpo(body: Record<string, unknown>): { valido: false } | { valido: true; turno: string | null } {
+  const id = idDeLaColaDelCuerpo(body, 'shiftIdDeLaVenta')
+  return id.valido ? { valido: true, turno: id.id } : id
+}
+
+/**
+ * S3 «Efectivo sin red en el turno correcto»: `cashDrawerSessionId`, la caja que el POS (ANDROID/iOS) tenía abierta al cobrar. Misma
+ * frontera que `shiftIdDeLaVenta`: sólo en un replay de la cola, texto de hasta 64, otra cosa es un 400. El servicio la convierte en
+ * el turno de la venta por la liga 1:1 caja↔turno.
+ */
+function cajaDeLaVentaDelCuerpo(body: Record<string, unknown>): { valido: false } | { valido: true; caja: string | null } {
+  const id = idDeLaColaDelCuerpo(body, 'cashDrawerSessionId')
+  return id.valido ? { valido: true, caja: id.id } : id
+}
+
+function idDeLaColaDelCuerpo(body: Record<string, unknown>, campo: string): { valido: false } | { valido: true; id: string | null } {
+  const valor = body[campo]
+  if (valor === undefined || valor === null || valor === '') return { valido: true, id: null }
+  if (typeof valor !== 'string' || valor.length > 64) return { valido: false }
+  return { valido: true, id: body.isOfflineReplay === true ? valor : null }
+}
+
+const TURNO_DE_LA_VENTA_INVALIDO = 'shiftIdDeLaVenta debe ser texto de hasta 64 caracteres'
+const CAJA_DE_LA_VENTA_INVALIDA = 'cashDrawerSessionId debe ser texto de hasta 64 caracteres'
+
+/**
  * La validación y el armado de `CreateOrderInput` de una venta de mostrador (antes, el cuerpo de `createOrder`; extraído sin
  * cambiarlo, S2b). La usan `createOrder` (`conPropinaDeOrden: true`, como siempre) y `pay-new-order` (`false`: ahí `tip` es la
  * propina DEL COBRO en pesos y la lee esa ruta aparte). `usuario` es el de la sesión: el vendedor por omisión (Q76).
@@ -68,6 +129,7 @@ export function leerVentaDeMostrador(
     customerPhone,
     specialRequests,
     discount,
+    orderDiscountId,
     tip,
     note,
     splitType,
@@ -78,7 +140,12 @@ export function leerVentaDeMostrador(
     stampRewardExpectedDiscount,
     isOfflineReplay,
     createdAtLocal,
+    paymentMethod,
   } = body
+  const turnoDeLaVenta = turnoDeLaVentaDelCuerpo(body)
+  if (!turnoDeLaVenta.valido) return { error: TURNO_DE_LA_VENTA_INVALIDO }
+  const cajaDeLaVenta = cajaDeLaVentaDelCuerpo(body)
+  if (!cajaDeLaVenta.valido) return { error: CAJA_DE_LA_VENTA_INVALIDA }
 
   // Validate required fields
   if (!items || !Array.isArray(items) || items.length === 0) {
@@ -90,6 +157,16 @@ export function leerVentaDeMostrador(
   // (no productId, but must have name + unitPrice — e.g. "Otro importe"),
   // or a promotion line (promotionRef).
   for (const item of items) {
+    if (item?.isCortesia !== undefined && typeof item.isCortesia !== 'boolean') {
+      return { error: 'isCortesia debe ser true o false' }
+    }
+    if (item?.isCortesia === true) {
+      if (typeof item.cortesiaReason !== 'string' || !item.cortesiaReason.trim()) {
+        return { error: 'La razón de cortesía es requerida.' }
+      }
+      if (item.discountId) return { error: 'Un ítem no puede tener cortesía y descuento al mismo tiempo.' }
+      if (item.promotionRef) return { error: 'Una promoción no puede darse de cortesía al crear la cuenta' }
+    }
     // Una línea de promoción no trae productId ni precio: trae QUÉ promoción
     // tocó el cajero y QUÉ eligió la persona (el cliente NUNCA manda precios
     // de promoción — el server resuelve sus líneas), así que las reglas de
@@ -141,9 +218,18 @@ export function leerVentaDeMostrador(
     if (!hasProductId && !hasCustomFields) {
       return { error: 'Cada item requiere productId o (name + unitPrice)' }
     }
+    // 🔴 Un «Otro importe» negativo bajaba la venta sin el permiso de descuentos
+    // (falda $500 + «Otro importe» −$300 = $200). Igual que la terminal (tpv.schema.ts).
+    if (!hasProductId && item.unitPrice < 0) {
+      return { error: 'El precio de un «Otro importe» no puede ser negativo' }
+    }
     if (item.discountId != null && typeof item.discountId !== 'string') {
       return { error: 'discountId debe ser un string' }
     }
+  }
+
+  if (orderDiscountId != null && (typeof orderDiscountId !== 'string' || orderDiscountId.length === 0)) {
+    return { error: 'orderDiscountId debe ser el id de un descuento' }
   }
 
   // 🔴 Propina NEGATIVA = descuento disfrazado. El servicio suma la propina al
@@ -184,11 +270,16 @@ export function leerVentaDeMostrador(
       customerPhone,
       specialRequests,
       discount: typeof discount === 'number' ? discount : 0,
+      // Descuento de catálogo de la cuenta (como `/tpv/with-items`); validado arriba.
+      orderDiscountId: typeof orderDiscountId === 'string' ? orderDiscountId : null,
       tip: opciones.conPropinaDeOrden && typeof tip === 'number' ? tip : 0,
       note,
       splitType,
       reservationId: typeof reservationId === 'string' ? reservationId : null,
       externalId: typeof externalId === 'string' ? externalId : null,
+      // «Pagar después» (fiado) como Toast: el POS manda `PAY_LATER` sólo desde su botón «Pagar después»; un cobro normal
+      // manda su método (CARD, CASH…) y, si falla, la cuenta NO es deuda del cliente. Sin método: null, la regla de antes.
+      payLater: payLaterDesdeMetodoDePago(paymentMethod),
       // 🔴 Premio de cartilla a aplicar EN LA CREACIÓN — pero SÓLO para una caja que
       // declara `stampRewardAware: true`, o sea, que resta el premio de lo que cobra.
       // Hasta Android 2.19.1 / iOS 1.12.0 la caja mandaba el premio y cobraba el precio
@@ -204,7 +295,33 @@ export function leerVentaDeMostrador(
       // cambiado. Sólo el `true` literal cuenta. La hora de captura la interpreta el servicio; los campos de línea, también.
       isOfflineReplay: isOfflineReplay === true,
       createdAtLocal: typeof createdAtLocal === 'number' || typeof createdAtLocal === 'string' ? createdAtLocal : null,
+      // «Cobrar sin red» (D4): el turno en que se vendió, sólo en un replay de la cola. Sólo puede dejar la orden sin turno.
+      shiftIdDeLaVenta: turnoDeLaVenta.turno,
+      // S3: la caja que el POS tenía abierta al vender, sólo en un replay de la cola. El servicio la convierte en el turno de la venta.
+      cashDrawerSessionId: cajaDeLaVenta.caja,
     },
+  }
+}
+
+/**
+ * Lo que la venta de mostrador toma de la SESIÓN, nunca del cuerpo. Lo comparten `createOrder` y `pay-new-order` (una venta
+ * pagada con saldo también nace con cortesías o descuentos de catálogo): la autoridad de cortesía (S9) y la terminal del token
+ * (S6). Va después de `leerVentaDeMostrador`, así el 400 de un cuerpo inválido sigue saliendo antes que el 403.
+ */
+export async function autoridadDeLaVenta(
+  req: Request,
+  venta: orderMobileService.CreateOrderInput,
+): Promise<Pick<orderMobileService.CreateOrderInput, 'canCompItems' | 'performedBy' | 'terminalSerialNumber'>> {
+  const hasCortesias = venta.items.some(item => item.isCortesia === true)
+  // El catálogo puede pasar de FIXED a COMP después del middleware. Transportar autoridad incluso si la prelectura no vio COMP;
+  // el escritor decide si la necesita sobre la fila que realmente calcula. Nunca tomarla del vendedor ni del body.
+  const needsCompAuthority = hasCortesias || !!venta.orderDiscountId || venta.items.some(item => !!item.discountId)
+  const canCompItems = needsCompAuthority && (tieneCortesiaAutorizada(req) || (await tienePermisoEnVenue(req, 'orders:comp')))
+  if (hasCortesias && !canCompItems) throw new ForbiddenError('No tienes permiso para dar cortesías')
+  return {
+    ...(needsCompAuthority ? { canCompItems, performedBy: req.authContext?.userId } : {}),
+    // S6: la terminal que vende, del TOKEN (nunca del body): orden con su `terminalId` y fuente `TPV`.
+    terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
   }
 }
 
@@ -228,7 +345,7 @@ export const createOrder = async (req: Request, res: Response, next: NextFunctio
       })
     }
 
-    const order = await orderMobileService.createOrderWithItems(venueId, venta.input)
+    const order = await orderMobileService.createOrderWithItems(venueId, { ...venta.input, ...(await autoridadDeLaVenta(req, venta.input)) })
 
     res.status(201).json({
       success: true,
@@ -292,6 +409,14 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
   try {
     const { venueId, orderId } = req.params
     const { amount, tip, staffId, idempotencyKey, method, externalSource, tenderTypeId, tenderRevision } = req.body
+    const turnoDeLaVenta = turnoDeLaVentaDelCuerpo(req.body)
+    if (!turnoDeLaVenta.valido) {
+      return res.status(400).json({ success: false, message: TURNO_DE_LA_VENTA_INVALIDO })
+    }
+    const cajaDeLaVenta = cajaDeLaVentaDelCuerpo(req.body)
+    if (!cajaDeLaVenta.valido) {
+      return res.status(400).json({ success: false, message: CAJA_DE_LA_VENTA_INVALIDA })
+    }
 
     // Métodos que el POS puede registrar a mano. NO incluye los que Avoqado
     // procesa de verdad (DIGITAL_WALLET, CRYPTOCURRENCY): esos los escribe el
@@ -382,6 +507,16 @@ export const payCash = async (req: Request, res: Response, next: NextFunction) =
       soloRecuperarPago: res.locals?.soloRecuperarPago,
       // R6-3: la propiedad de mesa estaba encendida; el cobro la vuelve a revisar bajo el candado (`checkTableOwnership`, ruta de cobro).
       propiedadDeMesa: res.locals?.propiedadDeMesa,
+      // «Cobrar sin red» (D4): el turno en que se vendió, sólo en un replay de la cola. Sólo puede dejar el pago sin turno.
+      shiftIdDeLaVenta: turnoDeLaVenta.turno ?? undefined,
+      // S3: la caja que el POS tenía abierta al cobrar, sólo en un replay de la cola.
+      cashDrawerSessionId: cajaDeLaVenta.caja ?? undefined,
+      // S6: la hora en que se cobró (sólo cuenta en un replay) y la terminal del TOKEN: pago de terminal y comanda tardía.
+      createdAtLocal:
+        typeof req.body.createdAtLocal === 'number' || typeof req.body.createdAtLocal === 'string' ? req.body.createdAtLocal : null,
+      // Reloj monótono del aparato (ms desde la venta); sólo número: el servicio decide si es válido.
+      edadDeLaVentaMs: typeof req.body.edadDeLaVentaMs === 'number' ? req.body.edadDeLaVentaMs : undefined,
+      terminalSerialNumber: req.authContext?.terminalSerialNumber ?? null,
     })
 
     res.status(200).json({
@@ -431,21 +566,28 @@ export const cancelOrder = async (req: Request, res: Response, next: NextFunctio
     if (!parsed.success || parsed.data.action !== 'cancelOrder')
       throw new BadRequestError('Datos de operación inválidos', 'HTTP_OPERATION_INVALID')
     const manifest = parsed.data
-    let result: Awaited<ReturnType<typeof orderMobileService.cancelOrderInTransaction>> | undefined
     const reply = await executeHttpOperation({ venueId, actorId: performedBy, operation, manifest }, async tx => {
-      result = await orderMobileService.cancelOrderInTransaction(tx, venueId, orderId, manifest.payload.reason ?? undefined, performedBy)
+      const result = await orderMobileService.cancelOrderInTransaction(
+        tx,
+        venueId,
+        orderId,
+        manifest.payload.reason ?? undefined,
+        performedBy,
+      )
       return {
         response: { status: 200, body: { success: true, message: 'Orden cancelada exitosamente' } },
         affectedRefs: result.affectedRefs,
+        cancelEffects: {
+          version: 1 as const,
+          phase: 'PENDING' as const,
+          orderId,
+          staffId: performedBy,
+          reason: manifest.payload.reason,
+          tableIds: result.tables.map(table => table.id),
+          valesSoltados: result.valesSoltados ?? null,
+        },
       }
     })
-    if (reply.kind === 'TERMINAL' && reply.envelope.outcome === 'APPLIED' && reply.appliedNow && result) {
-      try {
-        await orderMobileService.publishCancelledOrder(venueId, result, performedBy, manifest.payload.reason ?? undefined)
-      } catch (error) {
-        logger.error('cancelOrder committed; notification failed', error)
-      }
-    }
     return sendHttpOperationReply(res, operation, reply)
   } catch (error) {
     logger.error('Error in cancelOrder controller:', error)
@@ -658,7 +800,10 @@ export const updateOrderDetails = async (req: Request, res: Response, next: Next
     // (el servicio decide bajo el candado de la venta). Sólo se resuelve si la petición trae un `customerId` (null = sin cambio).
     const opciones =
       customerId !== undefined && customerId !== null
-        ? { puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req) }
+        ? {
+            puedeCambiarClienteEnVentaCobrada: await puedeCambiarClienteEnVentaCobrada(req),
+            customerAttribution: await customerAttributionActor(req),
+          }
         : {}
     if (!operation) {
       const result = await orderMobileService.updateOrderDetails(venueId, orderId, { name, notes, covers, customerId, orderType }, opciones)

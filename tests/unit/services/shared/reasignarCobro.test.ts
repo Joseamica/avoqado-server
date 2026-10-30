@@ -124,6 +124,15 @@ describe('validarReasignacion — cuándo un cobro puede moverse', () => {
     )
   })
 
+  it('🔴 Rappi 2b: un pedido de Rappi no da ni recibe cobros reasignados (su dinero lo reparte el servidor)', () => {
+    expect(motivosDe(validarReasignacion(caso, cobro(), vecina({ source: 'RAPPI' }), cancelada()))).toEqual(
+      expect.arrayContaining([expect.stringContaining('Rappi')]),
+    )
+    expect(motivosDe(validarReasignacion(caso, cobro(), vecina(), cancelada({ source: 'RAPPI' })))).toEqual(
+      expect.arrayContaining([expect.stringContaining('Rappi')]),
+    )
+  })
+
   it('🔴 rechaza si el cobro no está hoy en la orden de origen declarada (carrera o plan viejo)', () => {
     const v = validarReasignacion(caso, cobro({ orderId: 'otra' }), vecina(), cancelada())
     expect(motivosDe(v)).toEqual(expect.arrayContaining([expect.stringContaining('origen')]))
@@ -180,6 +189,13 @@ describe('validarReasignacion — cuándo un cobro puede moverse', () => {
     it('🔴 rechaza un cobro con SALDO de tarjeta de regalo (tender de sistema GIFT_CARD)', () => {
       expect(motivosDe(validarReasignacion(caso, cobro({ tenderSystemKind: 'GIFT_CARD' }), vecina(), cancelada()))).toEqual(
         expect.arrayContaining([expect.stringContaining('saldo de tarjeta de regalo')]),
+      )
+    })
+
+    // Cambio de producto (spec 2026-10-20 §6.2): el cobro con crédito de cambio lo escribe sólo la operación de Cambio, ligado a su raíz.
+    it('rejects an EXCHANGE_CREDIT payment (system tender) like a gift card one', () => {
+      expect(motivosDe(validarReasignacion(caso, cobro({ tenderSystemKind: 'EXCHANGE_CREDIT' }), vecina(), cancelada()))).toEqual(
+        expect.arrayContaining([expect.stringContaining('crédito de cambio')]),
       )
     })
 

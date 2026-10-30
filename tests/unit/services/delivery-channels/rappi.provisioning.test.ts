@@ -1,0 +1,1197 @@
+// El servicio compartido de intents importa el env al cargarse; el objeto vive DENTRO de la fábrica (TDZ).
+jest.mock('@/config/env', () => ({ env: {} }))
+
+import logger from '@/config/logger'
+import { logAction } from '@/services/dashboard/activity-log.service'
+import prisma from '../../../../src/utils/prismaClient'
+import { crearDbFalsa, type DbFalsa, type Fila } from '../../../__helpers__/rappiDbFake'
+import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
+import {
+  activarSeleccion,
+  cerrarSiTodoFinal,
+  confirmarTienda,
+  tiendasParaReconectar,
+  type ProvisioningDeps,
+} from '../../../../src/services/delivery-channels/providers/rappi/rappi.provisioning'
+import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+
+// La base en memoria (CAS real, merge real, «no degradar un final» sólo si el SQL lo trae) es compartida.
+let db: DbFalsa
+const p = prisma as any
+const L = p.deliveryChannelLink
+const I = p.deliveryConnectIntent
+
+const txOriginal = p.$transaction.getMockImplementation()
+beforeEach(() => {
+  db = crearDbFalsa()
+  p.$transaction.mockImplementation(txOriginal)
+  ;(logAction as jest.Mock).mockReset()
+})
+
+/** Cuántas transacciones había ABIERTAS cada vez que se llamó a `logAction`: la bitácora va después del commit. */
+function txAbiertasAlLoguear(): number[] {
+  let abiertas = 0
+  const vistas: number[] = []
+  p.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+    abiertas++
+    try {
+      return await txOriginal(cb)
+    } finally {
+      abiertas--
+    }
+  })
+  ;(logAction as jest.Mock).mockImplementation(async () => void vistas.push(abiertas))
+  return vistas
+}
+
+function sembrar(over: Fila = {}): never {
+  const i = {
+    id: 'i1',
+    venueId: 'v1',
+    state: 'ACTIVATING',
+    provider: 'RAPPI',
+    orderAcceptanceMode: 'AUTO',
+    expiresAt: new Date(Date.now() + 60_000),
+    selectionJson: ['10'],
+    resultsJson: null,
+    ...over,
+  }
+  db.intents.set(i.id, i)
+  return { ...i } as never
+}
+const tienda = (storeId: string) => ({ storeId, name: `T${storeId}`, integrated: false })
+const resultado = (s: string, intentId = 'i1') => db.intents.get(intentId)?.resultsJson?.[s]
+const aprov = (s: string) => db.links.get(s)?.config?.rappiProvisioning
+const vinculo = (storeId: string, over: Fila = {}) =>
+  db.links.set(storeId, { id: `x${storeId}`, externalLocationId: storeId, venueId: 'v1', status: 'PENDING', config: null, ...over })
+
+function deps(over: Partial<ProvisioningDeps> = {}) {
+  return {
+    aprovisionar: jest.fn(async (_t: string, ts: Array<{ storeId: string }>) => ({
+      batchId: 'b1',
+      aceptadas: ts.map(t => ({ storeId: t.storeId, integrationId: `int${t.storeId}` })),
+      rechazadas: [],
+      inciertas: [],
+    })),
+    suscribir: jest.fn(async () => ({ ok: true, fallidos: [] as string[] })),
+    // Tarea 18: «integrada sí/no». Por default sale bien; el aviso va SIN esperar y nunca decide el resultado.
+    avisarIntegrada: jest.fn(async () => ({ ok: true, status: 200, raw: '' })),
+    // D8: la lectura fresca de `integration-status` antes de reconectar; sólo se pide si hay una integrada elegida.
+    listar: jest.fn(async () => [] as Array<{ storeId: string; name: string; integrated: boolean; integrationId?: string }>),
+    tiendasEscribibles: ['10', '11', '12'],
+    ...over,
+  } as ProvisioningDeps & { aprovisionar: jest.Mock; suscribir: jest.Mock; avisarIntegrada: jest.Mock; listar: jest.Mock }
+}
+
+describe('activarSeleccion', () => {
+  // 🔴 Review Focus 1
+  it('una tienda de OTRO negocio: OTHER_VENUE, sin llamar a Rappi y sin tocar su vínculo', async () => {
+    vinculo('10', { venueId: 'OTRO', status: 'ACTIVE', config: { rappiPendingMenuHash: 'h' } })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('OTHER_VENUE')
+    expect(resultado('10').outcome).toBe('OTHER_VENUE')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(db.links.get('10')).toMatchObject({ venueId: 'OTRO', status: 'ACTIVE', config: { rappiPendingMenuHash: 'h' } })
+  })
+
+  it('fuera de la lista del piloto: ni vínculo ni HTTP, y nunca viaja en el lote de las demás', async () => {
+    const d = deps()
+    const r = await activarSeleccion(sembrar({ selectionJson: ['10', '99'] }), 'idt', [tienda('10'), tienda('99')], d)
+    expect(r['99'].outcome).toBe('NOT_ENABLED_FOR_PILOT')
+    expect(db.links.has('99')).toBe(false)
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'T10' }])
+  })
+
+  it('reclama PENDING bajo FOR UPDATE, sin activatingIntentId, y anota PROVISIONING ANTES del HTTP', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        expect(resultado('10').outcome).toBe('PROVISIONING') // R5: escrito antes de salir a la red
+        return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
+      }),
+    })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    const creada = L.createMany.mock.calls[0][0].data[0]
+    expect(creada).toMatchObject({
+      provider: 'RAPPI',
+      externalLocationId: '10',
+      externalAccountId: 'T10',
+      status: 'PENDING',
+      venueId: 'v1',
+      activatingIntentId: null,
+    })
+    expect(creada.ownerAuthorizedAt).toBeInstanceOf(Date)
+    expect(creada.webhookSecret).toMatch(/^[0-9a-f]{64}$/)
+    expect(db.sqlLeidos[0]).toContain('FOR UPDATE')
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(r['10'].outcome).toBe('PROVISIONING')
+    expect(db.links.get('10')!.activatingIntentId).toBeNull()
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', batchId: 'b1', integrationId: 'int10', creado: true })
+    expect(JSON.stringify(p.$executeRaw.mock.calls)).not.toContain('creoVinculo')
+  })
+
+  it('🔴 el vínculo que nace del aprovisionamiento queda en AUTO, aunque el intent traiga otro modo', async () => {
+    // Rappi cancela solo el pedido que no se acepta en 4–6 min: no hay modo manual. El intent de este
+    // caso parte de MANUAL a propósito; si el reclamo copiara el modo del intent, nacería MANUAL.
+    await activarSeleccion(sembrar({ orderAcceptanceMode: 'MANUAL' }), 'idt', [tienda('10')], deps())
+
+    expect(L.createMany.mock.calls[0][0].data[0].orderAcceptanceMode).toBe('AUTO')
+  })
+
+  it('su PRIMERA escritura alarga el intent 24 h (sin eso el re-chequeo lo vería EXPIRED y borraría el token)', async () => {
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], deps())
+    expect(I.updateMany.mock.invocationCallOrder[0]).toBeLessThan(L.createMany.mock.invocationCallOrder[0])
+    const falta = db.intents.get('i1')!.expiresAt.getTime() - Date.now()
+    expect(falta).toBeGreaterThan(23 * 3_600_000)
+  })
+
+  it('un intent que ya no está ACTIVATING no hace nada', async () => {
+    const d = deps()
+    expect(await activarSeleccion(sembrar({ state: 'FAILED' }), 'idt', [tienda('10')], d)).toEqual({})
+    expect(L.createMany).not.toHaveBeenCalled()
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+  })
+
+  it('reclamada por OTRA intención viva: CLAIMED_BY_OTHER, sin HTTP', async () => {
+    sembrar({ id: 'i0', state: 'ACTIVATING' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', batchId: 'b0' } } })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('CLAIMED_BY_OTHER')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(aprov('10')).toMatchObject({ intentId: 'i0', batchId: 'b0' })
+  })
+
+  // Codex D9 r2 #2 (26-oct): una reclamación que D8 conserva como PRUEBA (la reconexión falló, la fila volvió a DISABLED) no
+  // reserva la tienda, aunque su intención siga viva por OTRA tienda del mismo enlace.
+  it('la reclamación de una intención viva cuyo resultado para ESA tienda ya es final no bloquea: se reclama otra vez', async () => {
+    sembrar({
+      id: 'i0',
+      state: 'ACTIVATING',
+      selectionJson: ['10', '11'],
+      resultsJson: { '10': { outcome: 'FAILED' }, '11': { outcome: 'PROVISIONING' } },
+    })
+    vinculo('10', { status: 'DISABLED', config: { rappiProvisioning: { intentId: 'i0', since: 'x', statusPrevio: 'DISABLED' } } })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('PROVISIONING')
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'T10' }])
+    expect(aprov('10')).toMatchObject({ intentId: 'i1' })
+  })
+
+  it('la de una intención MUERTA se retoma, y el lote viejo no sobrevive a la reclamación nueva', async () => {
+    sembrar({ id: 'i0', state: 'EXPIRED' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', batchId: 'viejo', creado: true } } })
+    const d = deps({ aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [], inciertas: ['10'] })) })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(aprov('10').intentId).toBe('i1')
+    expect(aprov('10').batchId).toBeUndefined()
+  })
+
+  // H9: una fila DISABLED que I0 dejó PENDING y que I0 abandonó al morir. Adoptarla guardaba `statusPrevio: PENDING`,
+  // y si Rappi rechazaba a I1 el canal quedaba PENDING para siempre, sin nadie que lo confirmara.
+  it('adoptar la reclamación muerta de una fila PENDING conserva A QUÉ volvía: un rechazo la deja DISABLED', async () => {
+    sembrar({ id: 'i0', state: 'EXPIRED' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', statusPrevio: 'DISABLED' } } })
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(aprov('10')).toBeUndefined()
+  })
+
+  it('adoptar la reclamación muerta de una fila que ESA reclamación creó: sigue siendo borrable', async () => {
+    sembrar({ id: 'i0', state: 'EXPIRED' })
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i0', since: 'x', creado: true } } })
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(db.links.has('10')).toBe(false)
+  })
+
+  it('mismo negocio y ya ACTIVE: ALREADY_CONNECTED, y se cierra el intent (todo final)', async () => {
+    vinculo('10', { status: 'ACTIVE' })
+    const d = deps()
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('ALREADY_CONNECTED')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(db.intents.get('i1')).toMatchObject({ state: 'CONSUMED', merchantTokenEnvelope: null })
+  })
+
+  it('rechazada por Rappi: REJECTED y se borra el vínculo que CREÓ esta reclamación', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10']).toEqual({ outcome: 'REJECTED', detalle: 'not_owned' })
+    expect(resultado('10')).toMatchObject({ outcome: 'REJECTED', detalle: 'not_owned' })
+    expect(db.links.has('10')).toBe(false)
+  })
+
+  it('rechazada una tienda que estaba DISABLED: se restaura, no se borra (su historial y su config siguen)', async () => {
+    vinculo('10', { status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    const d = deps({
+      aprovisionar: jest.fn(async () => ({ aceptadas: [], rechazadas: [{ storeId: '10', motivo: 'not_owned' }], inciertas: [] })),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(db.links.get('10')).toMatchObject({ status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    expect(aprov('10')).toBeUndefined()
+  })
+
+  it('la reclamación MEZCLA config: rappiPendingMenuHash sobrevive', async () => {
+    vinculo('10', { status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], deps())
+    expect(db.links.get('10')!.config).toMatchObject({
+      rappiPendingMenuHash: 'h',
+      rappiProvisioning: { intentId: 'i1', statusPrevio: 'DISABLED' },
+    })
+    expect(db.links.get('10')!.status).toBe('PENDING')
+  })
+
+  it('el candado de la capa baja lanza: NOT_ENABLED_FOR_PILOT y se suelta el vínculo (no salió nada)', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        throw new RappiEscrituraBloqueadaError('10')
+      }),
+    })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('NOT_ENABLED_FOR_PILOT')
+    expect(db.links.has('10')).toBe(false)
+  })
+
+  it('un error de red: UNCERTAIN, conserva el vínculo PENDING y su reclamación, y el log no trae el token', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        throw new Error('socket hang up')
+      }),
+    })
+    const r = await activarSeleccion(sembrar(), 'id-token-secreto', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('UNCERTAIN')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+    expect(aprov('10').intentId).toBe('i1')
+    expect(logger.error).toHaveBeenCalledWith(expect.any(String), { intentId: 'i1', storeIds: ['10'], error: 'socket hang up' })
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('id-token-secreto')
+    expect(db.intents.get('i1')!.state).toBe('ACTIVATING')
+  })
+
+  it('202 sin decir nada de la tienda: UNCERTAIN y guarda el batchId para que el webhook la reconozca', async () => {
+    const d = deps({ aprovisionar: jest.fn(async () => ({ batchId: 'b1', aceptadas: [], rechazadas: [], inciertas: ['10'] })) })
+    const r = await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(r['10'].outcome).toBe('UNCERTAIN')
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', batchId: 'b1' })
+    expect(aprov('10').integrationId).toBeUndefined()
+  })
+
+  it('lotes de 20', async () => {
+    const ids = Array.from({ length: 21 }, (_, k) => String(100 + k))
+    const d = deps({ tiendasEscribibles: ids })
+    await activarSeleccion(sembrar({ selectionJson: ids }), 'idt', ids.map(tienda), d)
+    expect(d.aprovisionar.mock.calls.map(c => c[1].length)).toEqual([20, 1])
+  })
+})
+
+describe('confirmarTienda', () => {
+  const reclamada = (over: Fila = {}) =>
+    vinculo('10', {
+      config: { rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1', integrationId: 'int10', creado: true, ...over } },
+    })
+
+  // 🔴 Review Focus 5
+  it('ACTIVE sin vínculo nuestro: IGNORED, nunca crea uno ni suscribe', async () => {
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(L.createMany).not.toHaveBeenCalled()
+    expect(L.create).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(db.links.size).toBe(0)
+    expect(logger.error).toHaveBeenCalled()
+  })
+
+  it('ACTIVE sobre un vínculo PENDING sin reclamación de Rappi (otro camino): IGNORED', async () => {
+    vinculo('10')
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  // R7: lote viejo
+  it('un batchId distinto del guardado: IGNORED y no borra nada', async () => {
+    sembrar()
+    reclamada()
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'viejo' }, deps())).toBe('IGNORED')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+  })
+
+  it('undefined === undefined no confirma: ni sin lote de los dos lados, ni con lote vacío', async () => {
+    sembrar()
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x' } } })
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: '' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE' }, d, { intentId: 'i1' })).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('ACTIVE con el lote nuestro: suscribe ANTES de promover; ACTIVATED; no toca activatingIntentId ni ownerAuthorizedAt; cierra el intent', async () => {
+    sembrar()
+    reclamada()
+    const orden: string[] = []
+    const d = deps({ suscribir: jest.fn(async () => (orden.push('suscribir'), { ok: true, fallidos: [] })) })
+    const update = L.update.getMockImplementation()
+    L.update.mockImplementation(async (a: Fila) => (orden.push('promover'), update(a)))
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('PROMOTED')
+    expect(orden).toEqual(['suscribir', 'promover'])
+    expect(L.update.mock.calls[0][0].data).not.toHaveProperty('activatingIntentId')
+    expect(L.update.mock.calls[0][0].data).not.toHaveProperty('ownerAuthorizedAt')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+    expect(aprov('10').confirmedAt).toEqual(expect.any(String))
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+
+  // H10: la conexión efectiva queda en la bitácora (quién la inició), sólo del ganador y después del commit.
+  it('la promoción escribe DELIVERY_CHANNEL_CONNECTED una sola vez, con quien inició la conexión', async () => {
+    sembrar({ staffId: 's1', environment: 'SANDBOX' })
+    reclamada()
+    const vistas = txAbiertasAlLoguear() // el log no puede ir dentro de la transacción que promueve
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('PROMOTED')
+    expect(vistas).toEqual([0])
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
+    expect(logAction).toHaveBeenCalledTimes(1)
+    expect(logAction).toHaveBeenCalledWith({
+      staffId: 's1',
+      venueId: 'v1',
+      action: 'DELIVERY_CHANNEL_CONNECTED',
+      entity: 'DeliveryChannelLink',
+      entityId: 'x10',
+      data: { provider: 'RAPPI', externalLocationId: '10', intentId: 'i1', environment: 'SANDBOX' },
+    })
+  })
+
+  it('FAILED o INACTIVE no son una conexión: no se registran como tal', async () => {
+    sembrar()
+    reclamada()
+    await confirmarTienda({ storeId: '10', status: 'INACTIVE', batchId: 'b1' }, deps())
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('ACTIVE con el lote nuestro pero OTRO integrationId: IGNORED', async () => {
+    sembrar()
+    reclamada()
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1', integrationId: 'ajeno' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('re-chequeo: misma intención + mismo integrationId promueve; otro integrationId o sin guardado, no', async () => {
+    sembrar()
+    reclamada({ batchId: undefined })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'otro' }, deps(), { intentId: 'i1' })).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i9' })).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i1' })).toBe('PROMOTED')
+  })
+
+  it('si suscribir falla: SUBSCRIBE_FAILED, el vínculo sigue PENDING y el intent no se cierra', async () => {
+    sembrar()
+    reclamada()
+    const d = deps({ suscribir: jest.fn(async () => ({ ok: false, fallidos: ['NEW_ORDER'] })) })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('SUBSCRIBE_FAILED')
+    expect(db.links.get('10')!.status).toBe('PENDING')
+    expect(resultado('10')).toMatchObject({ outcome: 'SUBSCRIBE_FAILED', detalle: 'NEW_ORDER' })
+    expect(db.intents.get('i1')!.state).toBe('ACTIVATING')
+  })
+
+  // R5: webhook y re-chequeo al mismo tiempo — el que falla tarde no deshace el que ganó.
+  it('un SUBSCRIBE_FAILED tardío no degrada un ACTIVATED', async () => {
+    sembrar()
+    reclamada()
+    const gana = deps()
+    const pierde = deps({
+      suscribir: jest.fn(async () => {
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, gana, { intentId: 'i1' })).toBe(
+          'PROMOTED',
+        )
+        return { ok: false, fallidos: ['NEW_ORDER'] }
+      }),
+    })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, pierde)).toBe('SUBSCRIBE_FAILED')
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+  })
+
+  it('FAILED con el lote nuestro: borra el vínculo que creamos y anota FAILED', async () => {
+    sembrar()
+    reclamada()
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'b1', errorMessage: 'menú inválido' }, deps())).toBe('REMOVED')
+    expect(db.links.has('10')).toBe(false)
+    expect(resultado('10')).toMatchObject({ outcome: 'FAILED', detalle: 'menú inválido' })
+  })
+
+  it('INACTIVE con el lote nuestro: DISABLED y suelta la reclamación', async () => {
+    sembrar()
+    reclamada()
+    expect(await confirmarTienda({ storeId: '10', status: 'INACTIVE', batchId: 'b1' }, deps())).toBe('DISABLED')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(aprov('10')).toBeUndefined()
+    expect(resultado('10').outcome).toBe('FAILED')
+  })
+
+  // 🔴 H1: la reclamación vive en `config`; si apunta a la intención de OTRO negocio (o de Uber), nada se escribe.
+  it.each([
+    ['de OTRO negocio', { venueId: 'OTRO' }],
+    ['de Uber', { provider: 'UBER_EATS' }],
+  ])('una reclamación que apunta a una intención %s: IGNORED, sin suscribir ni escribir en esa intención', async (_n, ajena) => {
+    sembrar({ id: 'i9', ...ajena })
+    reclamada({ intentId: 'i9' })
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(db.intents.get('i9')!.resultsJson).toBeNull()
+    expect(db.links.get('10')).toMatchObject({ status: 'PENDING', venueId: 'v1' })
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('intención ajena'), expect.anything())
+  })
+
+  it('la promoción guarda el integrationId del webhook si el 202 no lo trajo (la baja de Rappi lo compara)', async () => {
+    sembrar()
+    reclamada({ integrationId: undefined })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1', integrationId: 'int10' }, deps())).toBe('PROMOTED')
+    expect(aprov('10').integrationId).toBe('int10')
+  })
+
+  // Esta rama nunca da de baja una tienda: un DEPROVISION firmado es de RAPPI, y una tienda muerta no puede
+  // seguir figurando conectada (el canal muerto de «La Ribera»).
+  describe('DEPROVISION de Rappi', () => {
+    const baja = (over: Record<string, unknown> = {}) =>
+      confirmarTienda({ storeId: '10', status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'lote-de-baja', ...over }, deps())
+
+    it.each(['ACTIVE', 'PAUSED'])('INACTIVE de una tienda %s: el vínculo queda DISABLED y se avisa', async status => {
+      vinculo('10', { status, config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10', confirmedAt: 'y' } } })
+      expect(await baja({ integrationId: 'int10' })).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('dio de BAJA'), expect.objectContaining({ storeId: '10' }))
+    })
+
+    it('sin integrationId en el aviso también aplica (la tienda y el proveedor ya coinciden)', async () => {
+      vinculo('10', { status: 'ACTIVE' })
+      expect(await baja()).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    it('con OTRO integrationId que el guardado no se toca: esa baja no es de nuestra integración', async () => {
+      vinculo('10', { status: 'ACTIVE', config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10' } } })
+      expect(await baja({ integrationId: 'de-otra' })).toBe('IGNORED')
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    // N4: el 202 y su ACTIVE pueden correlacionarse sólo por lote, sin integrationId (o el vínculo es manual). Comparar
+    // contra `undefined` rechazaba la baja y el canal seguía ACTIVE: sólo se rechaza si conocemos LOS DOS ids.
+    it.each([
+      ['sin integrationId guardado', { rappiProvisioning: { intentId: 'i1', since: 'x', confirmedAt: 'y' } }],
+      ['sin reclamación (vínculo manual)', null],
+    ])('aviso CON integrationId y nosotros %s: aplica por proveedor + tienda', async (_n, config) => {
+      vinculo('10', { status: 'ACTIVE', config })
+      expect(await baja({ integrationId: 'int10' })).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    // N5: el dueño ve su canal apagado; la bitácora tiene que decir cuándo y por qué — sólo si de verdad se apagó.
+    it('una baja efectiva queda en ActivityLog, con origen Rappi y DESPUÉS del commit', async () => {
+      const vistas = txAbiertasAlLoguear()
+      vinculo('10', { status: 'PAUSED' })
+      expect(await baja()).toBe('DISABLED')
+      expect(logAction).toHaveBeenCalledTimes(1)
+      expect(logAction).toHaveBeenCalledWith({
+        staffId: null,
+        venueId: 'v1',
+        action: 'DELIVERY_CHANNEL_DISCONNECTED',
+        entity: 'DeliveryChannelLink',
+        entityId: 'x10',
+        data: { provider: 'RAPPI', externalLocationId: '10', origen: 'RAPPI_DEPROVISION', statusPrevio: 'PAUSED', batchId: 'lote-de-baja' },
+      })
+      expect(vistas).toEqual([0])
+    })
+
+    it('un PENDING sigue el camino de siempre: sin nuestro lote, IGNORED y no se toca', async () => {
+      sembrar()
+      reclamada()
+      expect(await baja()).toBe('IGNORED')
+      expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+  })
+
+  // D9 (26-oct): la baja que llega por el AVISO se contrasta con la foto actual de Rappi (`GET stores-pa`) antes de apagar nada.
+  describe('baja contrastada con la foto de Rappi (D9)', () => {
+    const conFoto = (foto: jest.Mock) =>
+      confirmarTienda(
+        { storeId: '10', status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'lote-de-baja' },
+        { ...deps(), integradaEnRappi: foto },
+      )
+    const activa = () =>
+      vinculo('10', {
+        status: 'ACTIVE',
+        config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10', confirmedAt: 'y' } },
+      })
+
+    it('Rappi ya no la tiene: la conectada queda DISABLED, como antes', async () => {
+      activa()
+      const foto = jest.fn(async () => false)
+      expect(await conFoto(foto)).toBe('DISABLED')
+      expect(foto).toHaveBeenCalledWith('10')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    it('Rappi la SIGUE teniendo (baja vieja, o la foto tarda): DEFERRED y la conexión no se toca', async () => {
+      activa()
+      expect(await conFoto(jest.fn(async () => true))).toBe('DEFERRED')
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(logAction).not.toHaveBeenCalled()
+    })
+
+    // Codex D9 r3 #1: sin foto, nunca peor que antes de D9.
+    it('la foto no se pudo leer: la baja se aplica como antes', async () => {
+      activa()
+      expect(await conFoto(jest.fn(async () => Promise.reject(new Error('RAPPI_STORES_PA_HTTP_500'))))).toBe('DISABLED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    it('la conexión PENDIENTE de una tienda que Rappi ya no tiene: se devuelve CON su prueba y queda FAILED final', async () => {
+      sembrar()
+      reclamada()
+      expect(await conFoto(jest.fn(async () => false))).toBe('REMOVED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+      expect(aprov('10')).toMatchObject({ intentId: 'i1', integrationId: 'int10' }) // D8 la puede reconectar
+      expect(resultado('10')).toMatchObject({ outcome: 'FAILED', detalle: 'RAPPI_BAJA_DURANTE_LA_CONEXION' })
+      expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+      // El alta atrasada ya no la activa.
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+    })
+
+    // Codex D9 r3 #2: soltar antes de guardar el 202 perdería su `integrationId`.
+    it('la conexión pendiente cuyo 202 todavía no se guarda: DEFERRED, sin preguntar ni tocar', async () => {
+      sembrar()
+      reclamada({ batchId: undefined, integrationId: undefined })
+      const foto = jest.fn(async () => false)
+      expect(await conFoto(foto)).toBe('DEFERRED')
+      expect(foto).not.toHaveBeenCalled()
+      expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+
+    it('la conexión pendiente y Rappi sí la tiene: DEFERRED, sigue PENDING', async () => {
+      sembrar()
+      reclamada()
+      expect(await conFoto(jest.fn(async () => true))).toBe('DEFERRED')
+      expect(db.links.get('10')!.status).toBe('PENDING')
+    })
+
+    // Codex D9 r3 #3: el alta se promueve mientras la baja espera la foto; la baja atrasada no la apaga.
+    it('la fila cambió entre la foto y el candado: DEFERRED y no se apaga la conexión recién promovida', async () => {
+      sembrar()
+      reclamada()
+      const foto = jest.fn(async () => {
+        await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())
+        return false
+      })
+      expect(await conFoto(foto)).toBe('DEFERRED')
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+    })
+
+    it.each([['DISABLED'], ['sin fila']])('nada que apagar (%s): no pregunta a Rappi', async caso => {
+      if (caso === 'DISABLED') vinculo('10', { status: 'DISABLED' })
+      const foto = jest.fn(async () => false)
+      expect(await conFoto(foto)).toBe('IGNORED')
+      expect(foto).not.toHaveBeenCalled()
+    })
+  })
+
+  // N3: la intención tiene que haber ELEGIDO esa tienda; si no, la reclamación no es de ella.
+  it('una reclamación cuya intención NO seleccionó esa tienda: IGNORED, sin suscribir ni escribir', async () => {
+    sembrar({ selectionJson: ['11'] })
+    reclamada()
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(await confirmarTienda({ storeId: '10', status: 'FAILED', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(db.intents.get('i1')!.resultsJson).toBeNull()
+    expect(db.links.get('10')!.status).toBe('PENDING')
+  })
+
+  it('la confirmación repetida de una tienda ya activa: IGNORED sin alarma', async () => {
+    sembrar()
+    reclamada()
+    await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())
+    ;(logger.error as jest.Mock).mockClear()
+    const d = deps()
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('IGNORED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(logger.error).not.toHaveBeenCalled()
+  })
+
+  // Tarea 18: «integrada sí/no». `true` SÓLO cuando NOSOTROS promovemos un vínculo a ACTIVE; la baja de Rappi jamás avisa.
+  describe('integrada sí/no (Tarea 18)', () => {
+    /** El aviso sale SIN esperar (no frena el webhook ni la página de resultado): se deja correr antes de mirarlo. */
+    const asentar = () => new Promise<void>(r => setImmediate(r))
+    const promover = (d: ProvisioningDeps, esperado?: { intentId: string }) =>
+      confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1', integrationId: 'int10' }, d, esperado)
+    const FALLIDA = (args: unknown) => expect.objectContaining({ action: 'DELIVERY_INTEGRATION_STATUS_FAILED', ...(args as object) })
+    const avisosFallidos = () => (logAction as jest.Mock).mock.calls.filter(([a]) => a.action === 'DELIVERY_INTEGRATION_STATUS_FAILED')
+
+    it('al quedar ACTIVE por el aprovisionamiento ⇒ integrada=true, UNA vez y DESPUÉS del commit', async () => {
+      sembrar()
+      reclamada()
+      let abiertas = 0
+      p.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+        abiertas++
+        try {
+          return await txOriginal(cb)
+        } finally {
+          abiertas--
+        }
+      })
+      const vistas: number[] = []
+      const d = deps({ avisarIntegrada: jest.fn(async () => (vistas.push(abiertas), { ok: true, status: 200, raw: '' })) })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+
+      expect(d.avisarIntegrada).toHaveBeenCalledTimes(1)
+      expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+      expect(vistas).toEqual([0]) // ninguna transacción abierta: el HTTP nunca sostiene un candado
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(avisosFallidos()).toHaveLength(0)
+    })
+
+    it('el re-chequeo de la pantalla de resultado (misma intención + integrationId) que promueve también avisa', async () => {
+      sembrar()
+      reclamada()
+      const d = deps()
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, d, { intentId: 'i1' })).toBe('PROMOTED')
+      await asentar()
+      expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+    })
+
+    it('la confirmación repetida (webhook + re-chequeo llegan los dos) avisa UNA sola vez', async () => {
+      sembrar()
+      reclamada()
+      const d = deps()
+      expect(await promover(d)).toBe('PROMOTED')
+      expect(await promover(d)).toBe('IGNORED')
+      await asentar()
+      expect(d.avisarIntegrada).toHaveBeenCalledTimes(1)
+    })
+
+    it.each([
+      ['FAILED (se borra el vínculo)', { status: 'FAILED' as const }, 'REMOVED'],
+      ['INACTIVE de un PENDING (queda DISABLED)', { status: 'INACTIVE' as const }, 'DISABLED'],
+    ])('%s: no es una promoción ⇒ no avisa', async (_n, r, esperado) => {
+      sembrar()
+      reclamada()
+      const d = deps()
+      expect(await confirmarTienda({ storeId: '10', batchId: 'b1', ...r }, d)).toBe(esperado)
+      await asentar()
+      expect(d.avisarIntegrada).not.toHaveBeenCalled()
+    })
+
+    it('ACTIVE sin vínculo nuestro (IGNORED) y SUBSCRIBE_FAILED (no se promueve) ⇒ no avisan', async () => {
+      const ajeno = deps()
+      expect(await promover(ajeno)).toBe('IGNORED')
+
+      sembrar()
+      reclamada()
+      const sinSuscribir = deps({ suscribir: jest.fn(async () => ({ ok: false, fallidos: ['NEW_ORDER'] })) })
+      expect(await promover(sinSuscribir)).toBe('SUBSCRIBE_FAILED')
+      await asentar()
+
+      expect(ajeno.avisarIntegrada).not.toHaveBeenCalled()
+      expect(sinSuscribir.avisarIntegrada).not.toHaveBeenCalled()
+    })
+
+    // 🔴 La baja la manda RAPPI: avisarle «no integrada» a quien acaba de darla de baja no tiene sentido y podría pisar su estado.
+    it.each(['ACTIVE', 'PAUSED'])('la baja que manda Rappi (DEPROVISION de una tienda %s) NO avisa, ni true ni false', async status => {
+      vinculo('10', { status, config: { rappiProvisioning: { intentId: 'i1', since: 'x', integrationId: 'int10', confirmedAt: 'y' } } })
+      const d = deps()
+
+      expect(
+        await confirmarTienda(
+          { storeId: '10', status: 'INACTIVE', operation: 'DEPROVISION', batchId: 'lote-de-baja', integrationId: 'int10' },
+          d,
+        ),
+      ).toBe('DISABLED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('DISABLED')
+      expect(d.avisarIntegrada).not.toHaveBeenCalled()
+    })
+
+    it.each([
+      [
+        'responde 500 (lo que contesta el sandbox, M9)',
+        async () => ({ ok: false, status: 500, raw: 'Please contact support team' }),
+        { status: 500, error: 'HTTP_500', cuerpo: 'Please contact support team' },
+      ],
+      [
+        'lanza (red, timeout)',
+        async () => {
+          throw new Error('ETIMEDOUT')
+        },
+        { error: 'ETIMEDOUT' },
+      ],
+    ])('🔴 un fallo (%s) NO revierte la promoción y queda en el log y en ActivityLog', async (_n, falla, detalle) => {
+      sembrar()
+      reclamada()
+      const d = deps({ avisarIntegrada: jest.fn(falla) })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(resultado('10').outcome).toBe('ACTIVATED')
+      expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('integrada'), expect.objectContaining({ storeId: '10' }))
+      expect(avisosFallidos()).toHaveLength(1)
+      expect(logAction).toHaveBeenCalledWith(
+        FALLIDA({
+          staffId: null,
+          venueId: 'v1',
+          entity: 'DeliveryChannelLink',
+          entityId: 'x10',
+          data: expect.objectContaining({ provider: 'RAPPI', externalLocationId: '10', integrada: true, intentId: 'i1', ...detalle }),
+        }),
+      )
+      expect(avisosFallidos()[0][0].data.noSalio).toBeUndefined() // pudo haber llegado a Rappi: no se afirma que no salió
+    })
+
+    it('🔴 el candado de escritura bloquea una tienda fuera de la lista: queda como fallo (y se dice que NO salió)', async () => {
+      sembrar()
+      reclamada()
+      const d = deps({
+        avisarIntegrada: jest.fn(async () => {
+          throw new RappiEscrituraBloqueadaError('10')
+        }),
+      })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(avisosFallidos()).toHaveLength(1)
+      expect(avisosFallidos()[0][0].data).toMatchObject({ provider: 'RAPPI', integrada: true, noSalio: true })
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('integrada'), expect.objectContaining({ storeId: '10' }))
+    })
+
+    it('🔴 no frena la confirmación: aunque Rappi no conteste nunca, la promoción termina y se cierra el intent', async () => {
+      sembrar()
+      reclamada()
+      const d = deps({ avisarIntegrada: jest.fn(() => new Promise<never>(() => {})) })
+
+      expect(await promover(d)).toBe('PROMOTED') // si esperara el aviso, esta línea nunca regresaría
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+      expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+    })
+
+    it('un aviso que lanza SÍNCRONO (no una promesa rechazada) tampoco rompe la promoción', async () => {
+      sembrar()
+      reclamada()
+      const d = deps({
+        avisarIntegrada: jest.fn(() => {
+          throw new Error('boom síncrono')
+        }),
+      })
+
+      expect(await promover(d)).toBe('PROMOTED')
+      await asentar()
+      expect(avisosFallidos()).toHaveLength(1)
+    })
+
+    it('si quien llama no cableó `avisarIntegrada`: promueve igual y lo deja a la vista en el log (no es un silencio)', async () => {
+      sembrar()
+      reclamada()
+      const sinAviso: ProvisioningDeps = { ...deps(), avisarIntegrada: undefined }
+
+      expect(await promover(sinAviso)).toBe('PROMOTED')
+      await asentar()
+
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('avisarIntegrada'), expect.anything())
+    })
+  })
+})
+
+describe('orden webhook ↔ 202 (R14)', () => {
+  // El webhook llega DESPUÉS de que guardamos el lote y ANTES de que terminemos de procesar el 202.
+  it('webhook ACTIVE primero, luego el resto del 202: el resultado final sigue ACTIVATED', async () => {
+    const d = deps()
+    const update = L.update.getMockImplementation()
+    let disparado = false
+    L.update.mockImplementation(async (a: Fila) => {
+      const r = await update(a)
+      if (!disparado && a.data.config?.rappiProvisioning?.batchId) {
+        disparado = true
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('PROMOTED')
+      }
+      return r
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(disparado).toBe(true)
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+
+  it('webhook ANTES de guardar el lote: se DIFIERE (no hay prueba todavía), y el re-chequeo la rescata por integrationId', async () => {
+    const d = deps({
+      aprovisionar: jest.fn(async () => {
+        expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, d)).toBe('DEFERRED')
+        return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
+      }),
+    })
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+    expect(d.suscribir).not.toHaveBeenCalled() // diferir no suscribe ni toca la fila
+    expect(resultado('10').outcome).toBe('PROVISIONING')
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, d, { intentId: 'i1' })).toBe('PROMOTED')
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+  })
+
+  // F1: Rappi no documenta reintentos del webhook — darlo por PROCESSED en esa ventana perdía la confirmación.
+  describe('el webhook que cae entre el 202 y `correlacionar`', () => {
+    const evento = (batchId: string, storeId = '10') => ({
+      id: 'evt1',
+      status: 'RECEIVED',
+      eventType: 'STORE_PROVISIONING_STATUS',
+      orderId: null,
+      venueId: null,
+      channelLink: null,
+      payload: { batchId, operation: 'PROVISION', results: [{ storeId, status: 'ACTIVE', integrationId: `int${storeId}` }] },
+    })
+    // Desde la Tarea 8 el procesador reclama el evento y lo cierra con su token: las dos escrituras son `updateMany`
+    // condicionados. La marca es la de los cierres (los que escriben `status`); el reclamo (token y vencimiento) no cuenta.
+    const marcas = () =>
+      p.deliveryOrderEvent.updateMany.mock.calls.map((c: Fila[]) => c[0].data).flatMap((d: Fila) => ('status' in d ? [d.status] : []))
+    const procesar = (d: ProvisioningDeps) => processRappiEvent('evt1', { confirmar: r => confirmarTienda(r, d) })
+
+    beforeEach(() => {
+      p.deliveryOrderEvent.findUnique.mockReset()
+      p.deliveryOrderEvent.update.mockReset().mockResolvedValue({})
+      p.deliveryOrderEvent.updateMany.mockReset().mockResolvedValue({ count: 1 })
+    })
+
+    it('queda FAILED (no PROCESSED), y al reintentarlo tras guardar el lote se promueve', async () => {
+      p.deliveryOrderEvent.findUnique.mockResolvedValue(evento('b1'))
+      const d = deps({
+        aprovisionar: jest.fn(async () => {
+          expect(await procesar(d)).toMatchObject({ outcome: 'FAILED', error: 'PROVISIONING_DEFERRED' })
+          return { batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'int10' }], rechazadas: [], inciertas: [] }
+        }),
+      })
+      await activarSeleccion(sembrar(), 'idt', [tienda('10')], d)
+      expect(marcas()).toEqual(['FAILED'])
+      expect(db.links.get('10')!.status).toBe('PENDING')
+      expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('sin vínculo pendiente nuestro'), expect.anything())
+
+      // La reconciliación lo vuelve a tomar (sigue FAILED): ya hay lote guardado, y ahora sí es la nuestra.
+      p.deliveryOrderEvent.findUnique.mockResolvedValue({ ...evento('b1'), status: 'FAILED' })
+      expect(await procesar(d)).toMatchObject({ outcome: 'STORE_STATE' })
+      expect(marcas()).toEqual(['FAILED', 'PROCESSED'])
+      expect(db.links.get('10')!.status).toBe('ACTIVE')
+      expect(resultado('10').outcome).toBe('ACTIVATED')
+    })
+
+    it('uno ajeno de verdad (otro lote, u otra tienda sin vínculo) sigue IGNORED y el evento PROCESSED', async () => {
+      sembrar()
+      vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1', integrationId: 'int10' } } })
+      const d = deps()
+      p.deliveryOrderEvent.findUnique.mockResolvedValue(evento('ajeno'))
+      expect(await procesar(d)).toMatchObject({ outcome: 'STORE_STATE' })
+      p.deliveryOrderEvent.findUnique.mockResolvedValue(evento('b1', '77'))
+      expect(await procesar(d)).toMatchObject({ outcome: 'STORE_STATE' })
+      expect(marcas()).toEqual(['PROCESSED', 'PROCESSED'])
+      expect(db.links.get('10')!.status).toBe('PENDING')
+      expect(d.suscribir).not.toHaveBeenCalled()
+    })
+
+    it('sin lote en el webhook, o con la tienda ya confirmada, no se difiere', async () => {
+      sembrar()
+      vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x' } } })
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE' }, deps())).toBe('IGNORED')
+      vinculo('10', { status: 'ACTIVE', config: { rappiProvisioning: { intentId: 'i1', since: 'x', confirmedAt: 'y' } } })
+      expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', batchId: 'b1' }, deps())).toBe('IGNORED')
+    })
+  })
+
+  it('re-chequeo de una tienda NUESTRA aún sin integrationId guardado: IGNORED con aviso, no con alarma', async () => {
+    sembrar()
+    vinculo('10', { config: { rappiProvisioning: { intentId: 'i1', since: 'x', batchId: 'b1' } } })
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i1' })).toBe('IGNORED')
+    expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('sin prueba de correlación'), expect.anything())
+    expect(logger.error).not.toHaveBeenCalled()
+    // La de OTRA intención sí es alarma.
+    expect(await confirmarTienda({ storeId: '10', status: 'ACTIVE', integrationId: 'int10' }, deps(), { intentId: 'i9' })).toBe('IGNORED')
+    expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('sin vínculo pendiente nuestro'), expect.anything())
+  })
+})
+
+// D8 (26-oct): tras «Desconectar de todos modos» Rappi sigue listando la tienda integrada con NUESTRA integración y la
+// página la pintaba en gris. Se reconecta la MISMA fila sin aprovisionar otra vez (medido en Rappi DEV, full-testing/d5.md).
+describe('reconectar una tienda que Rappi sigue teniendo integrada (D8)', () => {
+  const asentar = () => new Promise<void>(r => setImmediate(r))
+  const integrada = (storeId = '10', integrationId = 'AVQ') => ({ storeId, name: `T${storeId}`, integrated: true, integrationId })
+  /** La fila que deja una conexión confirmada y luego «Desconectar»: DISABLED, con su config y su reclamación vieja. */
+  const desconectada = (over: Fila = {}, prov: Fila = {}) =>
+    vinculo('10', {
+      status: 'DISABLED',
+      config: {
+        rappiPendingMenuHash: 'h',
+        rappiProvisioning: {
+          intentId: 'viejo',
+          since: 'x',
+          batchId: 'bv',
+          integrationId: 'AVQ',
+          statusPrevio: 'DISABLED',
+          confirmedAt: 'y',
+          ...prov,
+        },
+      },
+      ...over,
+    })
+
+  describe('tiendasParaReconectar', () => {
+    it('sólo la integrada con nuestra fila en ESE negocio, no conectada y con el MISMO integrationId guardado', async () => {
+      desconectada()
+      expect(await tiendasParaReconectar('v1', [integrada()])).toEqual(new Set(['10']))
+      expect(await tiendasParaReconectar('v1', [integrada('10', 'OTRA')])).toEqual(new Set())
+      expect(await tiendasParaReconectar('OTRO', [integrada()])).toEqual(new Set())
+      expect(await tiendasParaReconectar('v1', [{ ...integrada(), integrated: false }])).toEqual(new Set())
+      expect(await tiendasParaReconectar('v1', [{ storeId: '10', name: 'T10', integrated: true }])).toEqual(new Set())
+      expect(await tiendasParaReconectar('v1', [integrada('11')])).toEqual(new Set())
+    })
+
+    it('una fila ACTIVE o PAUSED no es reconectable (ya está conectada); una sin conexión anterior guardada, tampoco', async () => {
+      for (const status of ['ACTIVE', 'PAUSED']) {
+        desconectada({ status })
+        expect(await tiendasParaReconectar('v1', [integrada()])).toEqual(new Set())
+      }
+      desconectada({ config: { rappiPendingMenuHash: 'h' } })
+      expect(await tiendasParaReconectar('v1', [integrada()])).toEqual(new Set())
+    })
+
+    it('sin tiendas integradas no consulta la base', async () => {
+      L.findMany.mockClear()
+      expect(await tiendasParaReconectar('v1', [tienda('10')])).toEqual(new Set())
+      expect(L.findMany).not.toHaveBeenCalled()
+    })
+  })
+
+  /** Rappi, leído otra vez al confirmar (Codex r1 #2): por default la sigue teniendo con nuestra integración. */
+  const dr = (over: Partial<ProvisioningDeps> = {}) => deps({ listar: jest.fn(async () => [integrada()]), ...over })
+
+  it('la MISMA fila vuelve a ACTIVE sin aprovisionar: suscribe, conserva config, bitácora, «integrada: sí» y cierra el intent', async () => {
+    desconectada()
+    const d = dr()
+    const r = await activarSeleccion(sembrar({ staffId: 's1', environment: 'SANDBOX' }), 'idt', [integrada()], d)
+    await asentar()
+    expect(r['10'].outcome).toBe('ACTIVATED')
+    expect(d.listar).toHaveBeenCalledWith('idt')
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(L.createMany).not.toHaveBeenCalled()
+    expect(d.suscribir).toHaveBeenCalledWith('10')
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'ACTIVE', config: { rappiPendingMenuHash: 'h' } })
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', integrationId: 'AVQ', confirmedAt: expect.any(String) })
+    expect(aprov('10').batchId).toBeUndefined() // el lote viejo no sobrevive a la reclamación nueva
+    expect(resultado('10').outcome).toBe('ACTIVATED')
+    expect(db.intents.get('i1')).toMatchObject({ state: 'CONSUMED', merchantTokenEnvelope: null })
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'DELIVERY_CHANNEL_CONNECTED', entityId: 'x10', staffId: 's1' }),
+    )
+    expect(d.avisarIntegrada).toHaveBeenCalledWith('10', true)
+  })
+
+  it('🔴 Codex r1 #2: si al confirmar Rappi ya NO la tiene integrada, va por el camino de siempre (aprovisionar)', async () => {
+    desconectada()
+    const d = dr({ listar: jest.fn(async () => [{ ...integrada(), integrated: false, integrationId: undefined }]) })
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '10', name: 'T10' }])
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(r['10'].outcome).toBe('PROVISIONING')
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'PENDING', config: { rappiPendingMenuHash: 'h' } })
+  })
+
+  it('🔴 Codex r1 #2: si al confirmar Rappi la tiene con OTRA integración, o ya no la lista: FAILED y no se toca nada', async () => {
+    for (const ahora of [[integrada('10', 'OTRA')], []]) {
+      desconectada()
+      const d = dr({ listar: jest.fn(async () => ahora) })
+      const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+      expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+      expect(db.links.get('10')).toMatchObject({ status: 'DISABLED', config: { rappiProvisioning: { intentId: 'viejo' } } })
+      expect(d.aprovisionar).not.toHaveBeenCalled()
+      expect(d.suscribir).not.toHaveBeenCalled()
+    }
+  })
+
+  it('si la lectura fresca falla: FAILED, no se reclama ni se llama a nada más; las tiendas nuevas siguen su camino', async () => {
+    desconectada()
+    const d = dr({ listar: jest.fn(async () => Promise.reject(new Error('RAPPI_INTEGRATION_STATUS_503'))) })
+    const r = await activarSeleccion(sembrar({ selectionJson: ['10', '11'] }), 'idt', [integrada(), tienda('11')], d)
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_ERROR' })
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(d.suscribir).not.toHaveBeenCalled()
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '11', name: 'T11' }])
+  })
+
+  it('otro integrationId guardado: no se reclama (FAILED) y la fila sigue DISABLED con su config', async () => {
+    desconectada({}, { integrationId: 'OTRA' })
+    const d = dr()
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+    expect(resultado('10')).toMatchObject({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+    expect(db.links.get('10')).toMatchObject({
+      status: 'DISABLED',
+      config: { rappiProvisioning: { intentId: 'viejo', integrationId: 'OTRA' } },
+    })
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('integrada sin fila nuestra: no nace una (FAILED), ni HTTP', async () => {
+    const d = dr()
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RAPPI_YA_INTEGRADA' })
+    expect(db.links.has('10')).toBe(false)
+    expect(d.aprovisionar).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('las reglas de siempre siguen: de otro negocio OTHER_VENUE, ya ACTIVE ALREADY_CONNECTED, reclamada por otra viva CLAIMED_BY_OTHER', async () => {
+    desconectada({ venueId: 'OTRO' })
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], dr()))['10'].outcome).toBe('OTHER_VENUE')
+    desconectada({ status: 'ACTIVE' })
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], dr()))['10'].outcome).toBe('ALREADY_CONNECTED')
+    sembrar({ id: 'i2', state: 'ACTIVATING' })
+    desconectada({ status: 'PENDING' }, { intentId: 'i2', confirmedAt: undefined })
+    const d = dr()
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], d))['10'].outcome).toBe('CLAIMED_BY_OTHER')
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+
+  it('🔴 Codex r1 #1: si suscribir falla, la fila REGRESA a DISABLED (nunca queda PENDING), FAILED final, y se puede reintentar', async () => {
+    desconectada()
+    const r = await activarSeleccion(
+      sembrar(),
+      'idt',
+      [integrada()],
+      dr({ suscribir: jest.fn(async () => ({ ok: false, fallidos: ['NEW_ORDER'] })) }),
+    )
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' })
+    expect(db.links.get('10')).toMatchObject({ id: 'x10', status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+    expect(aprov('10')).toMatchObject({ intentId: 'i1', integrationId: 'AVQ' }) // la prueba para el siguiente intento sigue
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+
+    // El dueño lo vuelve a intentar con otro enlace: ahora sí.
+    const d = dr()
+    const r2 = await activarSeleccion(sembrar({ id: 'i3' }), 'idt', [integrada()], d)
+    expect(r2['10'].outcome).toBe('ACTIVATED')
+    expect(db.links.get('10')!.status).toBe('ACTIVE')
+  })
+
+  it('🔴 Codex r1 #1: una baja de Rappi que cae a media reconexión se difiere; al reintentarla, deja la fila DISABLED', async () => {
+    desconectada()
+    const baja = { storeId: '10', status: 'INACTIVE' as const, operation: 'DEPROVISION' as const, integrationId: 'AVQ', batchId: 'bd' }
+    const enMedio: string[] = []
+    const d = dr({
+      suscribir: jest.fn(async () => {
+        enMedio.push(await confirmarTienda(baja, deps()))
+        return { ok: true, fallidos: [] as string[] }
+      }),
+    })
+    expect((await activarSeleccion(sembrar(), 'idt', [integrada()], d))['10'].outcome).toBe('ACTIVATED')
+    expect(enMedio).toEqual(['DEFERRED']) // el procesador de avisos lo reintenta
+    expect(await confirmarTienda(baja, deps())).toBe('DISABLED')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+  })
+
+  it('🔴 familia «baja a la vez»: si Rappi la suelta mientras se suscribe, la revisión antes de promover lo ve y no se promueve', async () => {
+    for (const despues of [[], [{ ...integrada(), integrated: false, integrationId: undefined }], [integrada('10', 'OTRA')]]) {
+      desconectada()
+      const listar = jest.fn().mockResolvedValueOnce([integrada()]).mockResolvedValueOnce(despues)
+      const d = dr({ listar })
+      const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+      expect(listar).toHaveBeenCalledTimes(2) // antes de reclamar, y tras suscribir (justo antes de promover)
+      expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' })
+      expect(db.links.get('10')).toMatchObject({ status: 'DISABLED', config: { rappiPendingMenuHash: 'h' } })
+      expect(logAction).not.toHaveBeenCalledWith(expect.objectContaining({ action: 'DELIVERY_CHANNEL_CONNECTED' }))
+      expect(d.avisarIntegrada).not.toHaveBeenCalled()
+    }
+  })
+
+  it('si la revisión antes de promover no se puede leer: no se promueve (sin verla, no queda ACTIVE)', async () => {
+    desconectada()
+    const listar = jest.fn().mockResolvedValueOnce([integrada()]).mockRejectedValueOnce(new Error('RAPPI_INTEGRATION_STATUS_503'))
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], dr({ listar }))
+    expect(r['10']).toEqual({ outcome: 'FAILED', detalle: 'RECONEXION_SIN_CONFIRMAR' })
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+  })
+
+  it('🔴 Codex r2 #1: una baja que leyó PENDING y encuentra la fila YA promovida entre sus dos lecturas se aplica (DISABLED)', async () => {
+    // La reclamación de una reconexión: sin lote, sin confirmar.
+    desconectada({ status: 'PENDING' }, { intentId: 'i1', batchId: undefined, confirmedAt: undefined })
+    sembrar()
+    const baja = { storeId: '10', status: 'INACTIVE' as const, operation: 'DEPROVISION' as const, integrationId: 'AVQ', batchId: 'bd' }
+    let n = 0
+    p.$transaction.mockImplementation(async (cb: (tx: unknown) => unknown) => {
+      const r = await txOriginal(cb)
+      if (++n === 1) db.links.get('10')!.status = 'ACTIVE' // la reconexión promovió justo después de la primera lectura
+      return r
+    })
+    expect(await confirmarTienda(baja, deps())).toBe('DISABLED')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'DELIVERY_CHANNEL_DISCONNECTED', data: expect.objectContaining({ origen: 'RAPPI_DEPROVISION' }) }),
+    )
+  })
+
+  it('junto con una tienda nueva: sólo la nueva viaja en el lote de aprovisionar', async () => {
+    desconectada()
+    const d = dr()
+    const r = await activarSeleccion(sembrar({ selectionJson: ['10', '11'] }), 'idt', [integrada(), tienda('11')], d)
+    expect(d.aprovisionar).toHaveBeenCalledTimes(1)
+    expect(d.aprovisionar).toHaveBeenCalledWith('idt', [{ storeId: '11', name: 'T11' }])
+    expect(r['10'].outcome).toBe('ACTIVATED')
+    expect(r['11'].outcome).toBe('PROVISIONING')
+  })
+
+  it('sin integradas elegidas no se vuelve a leer Rappi; fuera de la lista del piloto: ni lectura, ni reclamación, ni HTTP', async () => {
+    const d0 = dr()
+    await activarSeleccion(sembrar(), 'idt', [tienda('10')], d0)
+    expect(d0.listar).not.toHaveBeenCalled()
+
+    desconectada()
+    const d = dr({ tiendasEscribibles: ['11'] })
+    const r = await activarSeleccion(sembrar(), 'idt', [integrada()], d)
+    expect(r['10'].outcome).toBe('NOT_ENABLED_FOR_PILOT')
+    expect(db.links.get('10')!.status).toBe('DISABLED')
+    expect(d.listar).not.toHaveBeenCalled()
+    expect(d.suscribir).not.toHaveBeenCalled()
+  })
+})
+
+describe('cerrarSiTodoFinal', () => {
+  it('recorre la SELECCIÓN: parcial, vacía o con UNCERTAIN no cierra; todo final sí', async () => {
+    sembrar({ selectionJson: ['10', '11'], resultsJson: { '10': { outcome: 'ACTIVATED' } } })
+    expect(await cerrarSiTodoFinal('i1')).toBe(false)
+    db.intents.get('i1')!.resultsJson = { '10': { outcome: 'ACTIVATED' }, '11': { outcome: 'UNCERTAIN' } }
+    expect(await cerrarSiTodoFinal('i1')).toBe(false)
+    db.intents.get('i1')!.selectionJson = []
+    expect(await cerrarSiTodoFinal('i1')).toBe(false)
+    db.intents.get('i1')!.selectionJson = ['10', '11']
+    db.intents.get('i1')!.resultsJson = { '10': { outcome: 'ACTIVATED' }, '11': { outcome: 'REJECTED' } }
+    expect(await cerrarSiTodoFinal('i1')).toBe(true)
+    expect(db.intents.get('i1')!.state).toBe('CONSUMED')
+  })
+})

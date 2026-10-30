@@ -260,6 +260,10 @@ const PAYMENT_LANE = (mentions: string) =>
 
 /** Fiscal writers (detected by the scan). Keys are `file#owner`. */
 const WRITERS: Record<string, Writer> = {
+  'src/services/shared/pagadaPeroAbierta.ts#cerrarPedidoDePlataformaSoloDeEstado': {
+    class: 'METADATA',
+    reason: 'platform order closed by status and dates only; the raw UPDATE rechecks decision B without writing money columns',
+  },
   // ── TPV line and inline-discount writers (T2) ─────────────────────────────────────────────────
   'src/services/tpv/order.tpv.service.ts#addItemsToOrder': {
     class: 'LOCKED',
@@ -314,8 +318,13 @@ const WRITERS: Record<string, Writer> = {
       'src/services/dashboard/discountEngine.service.ts#applyEvaluatedDiscount',
       'src/services/dashboard/discountEngine.service.ts#applyManualDiscount',
       'src/services/dashboard/discountEngine.service.ts#removeDiscountFromOrder',
+      // Descuento en ligas de pago: la orden recién creada en la misma transacción (PRIVATE_CREATION).
+      'src/services/dashboard/paymentLink.service.ts#completeCharge',
+      'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout',
+      'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout',
       'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
       'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
+      'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
       'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
       'src/services/tpv/discount.tpv.service.ts#applyCouponCode',
       'src/services/tpv/order.tpv.service.ts#addItemsToOrder',
@@ -522,6 +531,11 @@ const WRITERS: Record<string, Writer> = {
     proof: T4('redeemPointsToOrder'),
   },
   'src/services/wallet/redeemStampReward.service.ts#canjearPremioEnTx': { class: 'LOCKED', lock: LOCK, proof: T4('redeemStampReward') },
+  'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'La orden, sus piezas y los espejos de rebaja nacen en la misma transacción del cambio.',
+  },
   // Tarjetas 1b S2b: el cuerpo de la transacción de `createOrderWithItems` se extrajo SIN cambiarlo (lo abren `createOrderWithItems`
   // y `payGiftCardOnNewOrder`, éste con el cobro con saldo en la MISMA transacción, Q58).
   'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx': {
@@ -585,6 +599,18 @@ const WRITERS: Record<string, Writer> = {
     proof: PAYMENT_LANE('registrarAbonoEnTx'),
   },
   'src/services/dashboard/order.dashboard.service.ts#settleOrder': { class: 'LOCKED', lock: LOCK, proof: PAYMENT_LANE('settleOrder') },
+  // D2 (24-oct): corregir el importe de una venta verificada mueve la cuenta. `editOrgSaleVerification` toma la cuenta con
+  // `lockExistingOrderForPayment` ANTES que el cobro y llama a este escritor dentro de la misma transacción.
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#moverCuentaAlImporte': {
+    class: 'CALLER_LOCKED',
+    callers: ['src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification'],
+    proof: proof(
+      'tests/integration/payments/ventaCorregidaMueveLaCuenta.integration.test.ts',
+      'editOrgSaleVerification',
+      'EDITOR PRIMERO · con la corrección en curso la cuenta está TOMADA',
+      'OTRO PRIMERO · si otro escritor tiene la cuenta y le agrega un cobro, la corrección espera, relee y responde 409',
+    ),
+  },
   'src/services/dashboard/manualPayment.service.ts#createManualPayment': {
     class: 'LOCKED',
     lock: LOCK,
@@ -592,7 +618,7 @@ const WRITERS: Record<string, Writer> = {
   },
   'src/services/dashboard/customer.dashboard.service.ts#settleCustomerBalance': {
     class: 'LOCKED',
-    lock: LOCK,
+    lock: ['lockOrdersForUpdate('],
     proof: proof(PAYMENT_GUARD, 'settleCustomerBalance', 'adquiere el conjunto estable completo de Orders antes de cualquier Shift'),
   },
   'src/services/b4bit/b4bit.service.ts#settleOrderForConfirmedCryptoPayment': {
@@ -607,8 +633,15 @@ const WRITERS: Record<string, Writer> = {
   },
   'src/services/tpv/payment.tpv.service.ts#settleStandalonePaymentInTx': {
     class: 'CALLER_LOCKED',
-    callers: ['src/services/tpv/payment.tpv.service.ts#recordOrderPayment'],
-    proof: PAYMENT_LANE('recordOrderPayment'),
+    callers: ['src/services/tpv/payment.tpv.service.ts#recordOrderPayment', 'src/services/exchanges/exchangeTx.ts#finishExchangeInTx'],
+    proof: [
+      ...PAYMENT_LANE('recordOrderPayment'),
+      ...proof(
+        'tests/integration/exchanges/exchangeCardSettle.integration.test.ts',
+        'settleStandalonePaymentInTx',
+        'recovers the pending SALE posting of an already paid R=0 order without another charge or deduction',
+      ),
+    ],
   },
   'src/services/tpv/payment.tpv.service.ts#updateOrderTotalsForStandalonePayment': {
     class: 'LOCKED',
@@ -651,6 +684,22 @@ const WRITERS: Record<string, Writer> = {
     class: 'PRIVATE_CREATION',
     creates: ['.order.create('],
     note: 'retroactive manual sale: new Order and line in one transaction',
+  },
+  // Descuento en ligas de pago (spec 2026-10-24): la venta de la liga nace con su fila de descuento de cuenta en la misma transacción.
+  'src/services/dashboard/paymentLink.service.ts#completeCharge': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
+  },
+  'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
+  },
+  'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
+    class: 'PRIVATE_CREATION',
+    creates: ['.order.create('],
+    note: 'paid link: new Order, lines and its link-discount row (synced) in one transaction',
   },
   // Pedidos en línea (plan 1a, R1/R22): la máquina de estados mueve `Order.status` bajo el candado de la orden, tras releerla.
   'src/services/online-ordering/transitions.service.ts#casTransition': {
@@ -706,10 +755,17 @@ const WRITERS: Record<string, Writer> = {
     class: 'METADATA',
     reason: 'kitchen ticket authoring: sentToKitchenAt stamp on lines and the kitchenPendingAt marker on the order',
   },
+  // D1 (21-oct, tablero hz:11d84b54:D1): re-cobrar el vale de una venta CANCELADA. Bajo el candado de esa Order (sesión → vales →
+  // Order), sólo en una cuenta CANCELLED/DELETED, mueve el vínculo único del vale a la procedencia; no toca dinero ni el contenido.
+  'src/services/mobile/areaTicketV7.mobile.service.ts#soltarValesDeCuentasCanceladas': {
+    class: 'METADATA',
+    reason: 'vale provenance: areaTicketLineId → releasedAreaTicketLineId on a CANCELLED order line, under its Order lock; no money',
+  },
 }
 
 /** Functions that are not fiscal writers themselves but hold the Order lock for a CALLER_LOCKED helper. */
 const LOCK_HOLDERS: Record<string, string[]> = {
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': LOCK,
   'src/services/mobile/order.mobile.service.ts#updateOrderDetailsInTransaction': LOCK,
   'src/services/dashboard/discountEngine.service.ts#applyDiscountToOrder': ['lockDiscountOrder('],
   'src/services/dashboard/discountEngine.service.ts#applyAutomaticDiscounts': ['lockDiscountOrder('],
@@ -720,6 +776,8 @@ const LOCK_HOLDERS: Record<string, string[]> = {
   ],
   'src/services/mobile/kdsOutOfStock.mobile.service.ts#enviarYAplicar': ['withDeliveryOrderLock(', ...LOCK],
   'src/services/tpv/payment.tpv.service.ts#recordOrderPayment': LOCK,
+  // C06/C09: prepared by the single exchange opener below; inherits its complete Order union before Payment/Shift.
+  'src/services/exchanges/exchangeTx.ts#finishExchangeInTx': ['const p = prepared', 'if (cardOnly)', 'p.existingCharge!'],
   // B2c T5: abrir el vale crea la orden en la MISMA transacción (creación privada, nadie más la ve) y ahí le escribe sus espejos.
   'src/services/mobile/areaTicket.mobile.service.ts#openAreaTicket': ['.order.create('],
 }
@@ -751,6 +809,11 @@ const CANCEL = (marker: string) => ({
 
 /** Every other function that writes an Order row: none touches money columns or fiscal children. */
 const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
+  'src/services/exchanges/exchangeTx.ts#finishExchangeInTx': {
+    class: 'METADATA',
+    why: 'aligns shiftId with the last EC or existing card charge (R=0); the fiscal write delegates to the caller-locked settlement',
+    markers: ['const lastPayment = settled.at(-1)?.newPayment ?? p.existingCharge!', 'shiftId: lastPayment.shiftId ?? null'],
+  },
   'src/services/tpv/order.tpv.service.ts#updateGuestInfo': {
     class: 'METADATA',
     why: 'covers/name/phone/requests/customerId (on a paid sale only with payments:create, under the link lock — R3-4)',
@@ -897,21 +960,6 @@ const NON_FISCAL_ORDER_WRITERS: Record<string, OrderWriter> = {
     markers: NEW_ORDER,
   },
   'src/services/b4bit/b4bit.service.ts#initiateCryptoPayment': { class: 'PRIVATE_CREATION', why: 'new crypto order', markers: NEW_ORDER },
-  'src/services/dashboard/paymentLink.service.ts#completeCharge': {
-    class: 'PRIVATE_CREATION',
-    why: 'new paid-link order',
-    markers: NEW_ORDER,
-  },
-  'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout': {
-    class: 'PRIVATE_CREATION',
-    why: 'new paid-link order',
-    markers: NEW_ORDER,
-  },
-  'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout': {
-    class: 'PRIVATE_CREATION',
-    why: 'new paid-link order',
-    markers: NEW_ORDER,
-  },
 }
 
 const LOCKING = new Set(['LOCKED', 'CALLER_LOCKED', 'PRIVATE_CREATION'])
@@ -994,6 +1042,40 @@ describe('Plan 3b final manifest of the writers the documentary capture depends 
       expect({ file: p.file, mentions: p.mentions, found: text.includes(p.mentions) }).toMatchObject({ found: true })
     },
   )
+
+  it('C06/C09/C13 exchange recovery delegates to one budgeted opener and inherits its Order union', () => {
+    const opener = 'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction'
+    const finish = 'src/services/exchanges/exchangeTx.ts#finishExchangeInTx'
+    expect([...new Set(calls.filter(c => c.callee === 'finishExchangeInTx').map(c => c.owner))]).toEqual([opener])
+    const body = codeOf(opener)
+    expect(body.indexOf('await prepareExchangeInTx(tx, input)')).toBeLessThan(body.indexOf('await registrarAbonoEnTx('))
+    expect(body.indexOf('await registrarAbonoEnTx(')).toBeLessThan(body.indexOf('finishExchangeInTx(tx, prepared, settled)'))
+    expect(body).toContain('ORDER_LOCK_WAIT_BUDGET')
+    expect(codeOf('src/services/exchanges/exchangeTx.ts#prepareExchangeInTx')).toMatch(
+      /if \('mode' in input\)\s+return prepareCardSettlementInTx\(tx, input\)/,
+    )
+    const prepare = codeOf('src/services/exchanges/exchangeSettle.ts#prepareCardSettlementInTx')
+    expect(prepare.indexOf('pg_advisory_xact_lock')).toBeLessThan(prepare.indexOf('lockExistingOrderForPayment('))
+    expect(prepare).toContain('additionalOrderIds: [initial.originalOrderId]')
+    expect(prepare.indexOf('lockExistingOrderForPayment(')).toBeLessThan(prepare.indexOf('exchangeChargeEvidence('))
+    expect(prepare).toContain('ORDER BY id ASC FOR UPDATE')
+    expect(codeOf(finish)).toContain('settleStandalonePaymentInTx(tx, venueId, p.newOrder.id, p.existingCharge!')
+    const sweep = codeOf('src/jobs/exchange-card-settlement.job.ts#ExchangeCardSettlementJob.run')
+    // The sweep owns no transaction: each candidate waits on the settle/cancel opener's ORDER_LOCK_WAIT_BUDGET.
+    expect(sweep).not.toContain('$transaction(')
+    expect(sweep).toContain('await settleExchangeCharge(')
+    expect(sweep).toContain('await cancelExchange(')
+    expect(codeOf('src/services/exchanges/exchange.service.ts#settleExchangeCharge')).toContain('await executeExchangeInTransaction(')
+  })
+
+  it('C05 reads the late-charge policy after Order, without taking an exchange advisory behind it', () => {
+    const body = codeOf('src/services/tpv/payment.tpv.service.ts#recordOrderPayment')
+    expect(body.indexOf('lockExistingOrderForPayment(')).toBeLessThan(body.indexOf('SAVEPOINT exchange_sale_policy'))
+    expect(body.indexOf('SAVEPOINT exchange_sale_policy')).toBeLessThan(body.indexOf('tx.exchange.findUnique('))
+    expect(body).not.toContain('pg_advisory_xact_lock')
+    expect(body).toContain('ROLLBACK TO SAVEPOINT exchange_sale_policy')
+    expect(body).toContain('suppressExchangeSaleEffects = true')
+  })
 })
 
 describe('documentary capture dependencies (what the frozen entry reads, and what protects it)', () => {
@@ -1059,6 +1141,7 @@ describe('locked-transaction helpers never receive the global client', () => {
  * the same literal values). Only the function that OPENS the transaction takes the options.
  */
 const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
+  'src/services/tpv/paymentEffects.service.ts#runClaimedPaymentEffect': 1,
   'src/services/tpv/order.tpv.service.ts#createOrder': 1,
   'src/services/tpv/order.tpv.service.ts#createOrderWithItems': 1,
   // Mesas topology-lock and controller entry points, with the same budget contract.
@@ -1080,10 +1163,14 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/tpv/discount.tpv.service.ts#applyCouponCode': 1,
   'src/services/mobile/comp-item.mobile.service.ts#compOrderItem': 1,
   'src/services/mobile/comp-item.mobile.service.ts#compWholeOrder': 1,
+  'src/services/mobile/cortesia-pendiente.mobile.service.ts#revisarCortesiaPendiente': 1,
   'src/services/mobile/service-charge.mobile.service.ts#applyServiceCharge': 1,
   'src/services/mobile/service-charge.mobile.service.ts#removeServiceCharge': 1,
   'src/services/mobile/service-charge.mobile.service.ts#syncAutomaticServiceCharges': 1,
   'src/services/mobile/order.mobile.service.ts#createOrderWithItems': 1,
+  'src/services/mobile/order.mobile.service.ts#executeExchangeInTransaction': 1,
+  // C06: exchange advisory → kitchen/topology → new Order; charged evidence rolls back before the separate settle opener.
+  'src/services/exchanges/exchange.service.ts#cancelExchange': 1,
   'src/services/mobile/order.mobile.service.ts#updateOrderDetails': 1,
   'src/services/mobile/order.mobile.service.ts#applyOrderDiscount': 1,
   'src/services/mobile/order.mobile.service.ts#removeOrderDiscount': 1,
@@ -1121,6 +1208,7 @@ const ORDER_LOCK_TRANSACTIONS: Record<string, number> = {
   'src/services/mobile/order.mobile.service.ts#mergeOrders': 1,
   'src/services/mobile/order.mobile.service.ts#cancelOrder': 1,
   'src/services/dashboard/order.dashboard.service.ts#updateOrder': 1,
+  'src/services/dashboard/sale-verification.org.dashboard.service.ts#editOrgSaleVerification': 1,
   'src/services/dashboard/order.dashboard.service.ts#deleteOrder': 1,
   'src/services/mobile/areaTicketV7.mobile.service.ts#cancelAreaTicketCheckout': 1,
   'src/services/pos-sync/posSyncOrder.service.ts#processPosOrderDeleteEvent': 1,
@@ -1167,7 +1255,7 @@ function hasOrderedOrderClaim(body: string): boolean {
   let found = false
   const visit = (node: ts.Node): void => {
     if (ts.isTaggedTemplateExpression(node) && ts.isPropertyAccessExpression(node.tag) && node.tag.name.text === '$queryRaw') {
-      found ||= /FROM\s+"Order"[\s\S]*?ORDER BY id FOR UPDATE/.test(node.template.getText(sf))
+      found ||= /FROM\s+"Order"[\s\S]*?ORDER BY "createdAt" DESC, id DESC FOR UPDATE/.test(node.template.getText(sf))
     }
     ts.forEachChild(node, visit)
   }
@@ -1187,6 +1275,13 @@ function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
   const visit = (node: ts.Node): void => {
     if (node !== scope && (ts.isFunctionDeclaration(node) || ts.isArrowFunction(node) || ts.isFunctionExpression(node))) return
     if (
+      ts.isCallExpression(node) &&
+      calleeName(node) === 'lockOrdersForUpdate' &&
+      ts.isAwaitExpression(node.parent) &&
+      node.arguments[0]?.getText(sf) === client.text
+    )
+      claims.push(node.getStart(sf))
+    if (
       ts.isTaggedTemplateExpression(node) &&
       ts.isPropertyAccessExpression(node.tag) &&
       node.tag.name.text === '$queryRaw' &&
@@ -1195,7 +1290,7 @@ function hasVenueFenceBeforeOrderedOrderClaim(body: string): boolean {
       ts.isAwaitExpression(node.parent)
     ) {
       const sql = node.template.getText(sf)
-      if (/FROM\s+"Order"[\s\S]*?ORDER BY id FOR UPDATE/.test(sql)) claims.push(node.getStart(sf))
+      if (/FROM\s+"Order"[\s\S]*?ORDER BY "createdAt" DESC, id DESC FOR UPDATE/.test(sql)) claims.push(node.getStart(sf))
       if (/FROM\s+"Venue"[\s\S]*?FOR KEY SHARE/.test(sql)) {
         const declaration = node.parent.parent
         // A nested/conditional/foreign-client fence does not prove the unconditional claim ordering.
@@ -1220,6 +1315,7 @@ function orderLockHelpers(code: Map<string, string>, calls: Call[]): Set<string>
   // `bloquearVentaParaLiga` (sellos tardíos, ronda 3): el candado de la venta de las LIGAS de cliente — la MISMA fila, en modo
   // `FOR NO KEY UPDATE` (serializa contra el cobro y las demás ligas sin chocar con las llaves foráneas de las métricas).
   const helpers = new Set(['lockExistingOrderForPayment', 'bloquearVentaParaLiga'])
+  if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockOrdersForUpdate') ?? '')) helpers.add('lockOrdersForUpdate')
   if (hasOrderedOrderClaim(code.get('src/services/shared/tableOrderLock.ts#lockTableOrderScope') ?? '')) helpers.add('lockTableOrderScope')
   for (let grew = true; grew; ) {
     grew = false
@@ -1307,11 +1403,16 @@ describe('R11 (Codex r5): quien rearma el dinero de una orden desde sus renglone
   const MARCAS = ['rechazarSiEsImportada(', 'esOrdenImportada(']
   // Nacen en Avoqado en la misma transacción (nunca son importadas), o son el ayudante mismo, cuyos llamadores ya pasan la red.
   const EXENTOS = new Set([
+    'src/services/exchanges/exchangeTx.ts#createExchangeSaleInTx',
     'src/services/tpv/order.tpv.service.ts#createOrderWithItems',
     'src/services/mobile/order.mobile.service.ts#crearVentaDeMostradorEnTx',
     'src/services/mobile/comp-item.mobile.service.ts#recalculateOrderTotals',
     // B2c T5: el vale nace en Avoqado (`openAreaTicket`): nunca es importado.
     'src/services/mobile/areaTicket.mobile.service.ts#addAreaTicketItems',
+    // Descuento en ligas de pago: la venta de la liga nace en la misma transacción (nunca es importada).
+    'src/services/dashboard/paymentLink.service.ts#completeCharge',
+    'src/services/dashboard/paymentLink.service.ts#finalizeMercadoPagoCheckout',
+    'src/services/dashboard/paymentLink.service.ts#finalizePaymentLinkCheckout',
   ])
   const rearman = [
     ...new Set(calls.filter(c => c.callee === 'sincronizarRepartos' || c.callee === 'recalculateOrderTotals').map(c => c.owner)),
@@ -1347,7 +1448,8 @@ describe('Mesas lock/budget scanner regressions', () => {
   }
 
   it('seeds only the real ordered Order SQL and propagates through a tx-only helper', () => {
-    const body = 'async function lockTableOrderScope(tx) { await tx.$queryRaw`SELECT id FROM "Order" ORDER BY id FOR UPDATE`; }'
+    const body =
+      'async function lockTableOrderScope(tx) { await tx.$queryRaw`SELECT id FROM "Order" ORDER BY "createdAt" DESC, id DESC FOR UPDATE`; }'
     const key = 'src/services/shared/tableOrderLock.ts#lockTableOrderScope'
     const call: Call = {
       callee: 'lockTableOrderScope',
@@ -1363,11 +1465,12 @@ describe('Mesas lock/budget scanner regressions', () => {
     expect(orderLockHelpers(code, [call]).has('mergeOrdersInTransaction')).toBe(true)
     expect(orderLockHelpers(new Map([[key, body.replace('FOR UPDATE', 'FOR SHARE')]]), [call]).has('lockTableOrderScope')).toBe(false)
     expect(hasOrderedOrderClaim(body.replace('"Order"', '"Table"'))).toBe(false)
+    expect(hasOrderedOrderClaim(body.replace('ORDER BY "createdAt" DESC, id DESC', 'ORDER BY id'))).toBe(false)
   })
 
   it('rejects a removed, reordered, conditional or foreign-client Venue fence', () => {
     const venue = 'const venues = await tx.$queryRaw`SELECT id FROM "Venue" FOR KEY SHARE`;'
-    const order = 'const orders = await tx.$queryRaw`SELECT id FROM "Order" ORDER BY id FOR UPDATE`;'
+    const order = 'const orders = await tx.$queryRaw`SELECT id FROM "Order" ORDER BY "createdAt" DESC, id DESC FOR UPDATE`;'
     const scope = (parts: string) => `async function lockTableOrderScope(tx) { ${parts} }`
     expect(hasVenueFenceBeforeOrderedOrderClaim(scope(venue + order))).toBe(true)
     expect(hasVenueFenceBeforeOrderedOrderClaim(scope(order))).toBe(false)

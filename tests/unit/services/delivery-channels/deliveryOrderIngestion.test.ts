@@ -1,5 +1,15 @@
-import { OrderSource, OrderType, OriginSystem, PaymentMethod, PaymentSource, PaymentStatus, TransactionStatus } from '@prisma/client'
+import {
+  Prisma,
+  OrderSource,
+  OrderType,
+  OriginSystem,
+  PaymentMethod,
+  PaymentSource,
+  PaymentStatus,
+  TransactionStatus,
+} from '@prisma/client'
 import prisma from '../../../../src/utils/prismaClient'
+import logger from '@/config/logger'
 import { socketManager } from '../../../../src/communication/sockets/managers/socketManager'
 import { SocketEventType } from '../../../../src/communication/sockets/types'
 import { ingestDeliveryOrder } from '../../../../src/services/delivery-channels/core/deliveryOrderIngestion.service'
@@ -125,6 +135,9 @@ describe('ingestDeliveryOrder', () => {
     // Default: sin estación de pantalla (comanda «Sin estación»), igual que printStation.findFirst
     // globalmente mockeado a null — los tests que no son de Task 12 no la tocan.
     estacionDePantallaParaRepartoMock.mockResolvedValue(null)
+    // Tarea 11: la comanda se crea bajo el candado de FILA de la orden (`lockExistingOrderForPayment`, un `SELECT … FOR
+    // UPDATE`). Por default la fila existe y es de este negocio; las pruebas del candado lo cambian.
+    ;(prisma.$queryRaw as jest.Mock).mockResolvedValue([{ id: 'order1' }])
   })
 
   // ============================================================
@@ -901,5 +914,98 @@ describe('ingestDeliveryOrder', () => {
     const creado = (prisma.order.upsert as jest.Mock).mock.calls[0][0].create
     expect(String(creado.discountAmount)).toBe('0')
     expect(String(creado.total)).toBe('90')
+  })
+
+  // ── Tarea 11: la comanda nace bajo el candado de la orden ──────────────────────────────
+  //
+  // 🔴 La carrera que confirmó la revisión de la Tarea 10: otro proceso cancela ENTRE que la ingesta guarda la venta y crea
+  // la comanda. El upsert ya devolvió la orden viva (`pedidoCancelado` no lo ve) y la comanda nacía viva sobre una orden
+  // CANCELLED, que ya nadie borra: la cocina prepara comida que nadie recoge. Bajo `withDeliveryOrderLock` se toma ahora el
+  // candado de FILA de la orden —el mismo que toma `cancelDeliveryOrder`— y se relee su estado antes de contar comandas.
+  describe('la comanda nace bajo el candado de la orden (Tarea 11)', () => {
+    /** El SQL de una llamada a `$queryRaw` (plantilla etiquetada: sus pedazos de texto). */
+    const sqlDe = (llamada: any[]) => (Array.isArray(llamada[0]) ? llamada[0].join('?') : String(llamada[0]))
+    const esCandadoDeFila = (llamada: any[]) => /FROM\s+"Order"[\s\S]*FOR UPDATE/.test(sqlDe(llamada))
+    /** La relectura por id contesta `status`; la búsqueda por externalId («¿ya existía?») contesta `previa`. */
+    const relecturaDice = (status: string, previa: unknown = null) =>
+      (prisma.order.findUnique as jest.Mock).mockImplementation(async ({ where }: any) => (where.id ? { status } : previa))
+
+    beforeEach(() => {
+      ;(prisma.kdsOrder.count as jest.Mock).mockResolvedValue(0)
+    })
+
+    it('🔴 la cancelación gana la carrera entre la venta y la comanda: bajo el candado se ve CANCELLED y no nace comanda', async () => {
+      // El upsert devolvió la orden VIVA (la cancelación aún no llegaba); la relectura bajo el candado ya la ve CANCELLED.
+      relecturaDice('CANCELLED')
+
+      const r = await ingestDeliveryOrder(makeNormalized(), link)
+
+      expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+      expect(r.cancelada).toBe(true)
+      expect(r.hayComanda).toBe(false)
+      expect(r.kitchenTicketCreated).toBe(false)
+      // La orden devuelta dice la verdad: Uber decide con `order.status` si cancelar un pedido cuyas instrucciones no
+      // llegaron a la cocina, y sobre uno ya cancelado no hay nada que rescatar.
+      expect(r.order.status).toBe('CANCELLED')
+      expect(prisma.order.findUnique).toHaveBeenCalledWith({ where: { id: 'order1' }, select: { status: true } })
+    })
+
+    it('🔴 orden de candados: advisory del pedido → fila de la orden → relectura → conteo de comandas → comanda', async () => {
+      relecturaDice('CONFIRMED')
+
+      const r = await ingestDeliveryOrder(makeNormalized(), link)
+
+      const raw = (prisma.$queryRaw as jest.Mock).mock
+      const advisory = raw.calls.findIndex(c => sqlDe(c).includes('pg_advisory_xact_lock'))
+      const fila = raw.calls.findIndex(esCandadoDeFila)
+      expect(advisory).toBeGreaterThanOrEqual(0)
+      expect(fila).toBeGreaterThanOrEqual(0)
+      // La fila de ESTA orden en ESTE negocio (el mismo `lockExistingOrderForPayment` de `cancelDeliveryOrder`).
+      expect(Prisma.sql(raw.calls[fila][0], ...raw.calls[fila].slice(1)).values).toEqual(['order1', 'venue1'])
+      const relectura = (prisma.order.findUnique as jest.Mock).mock.calls.findIndex(([a]: any) => a?.where?.id === 'order1')
+      const t = {
+        advisory: raw.invocationCallOrder[advisory],
+        fila: raw.invocationCallOrder[fila],
+        relectura: (prisma.order.findUnique as jest.Mock).mock.invocationCallOrder[relectura],
+        conteo: (prisma.kdsOrder.count as jest.Mock).mock.invocationCallOrder.at(-1)!,
+        comanda: (prisma.kdsOrder.create as jest.Mock).mock.invocationCallOrder[0],
+      }
+      expect(t.advisory).toBeLessThan(t.fila)
+      expect(t.fila).toBeLessThan(t.relectura)
+      expect(t.relectura).toBeLessThan(t.conteo)
+      expect(t.conteo).toBeLessThan(t.comanda)
+      // Con la orden viva, la comanda nace como siempre.
+      expect(r).toMatchObject({ cancelada: false, hayComanda: true, kitchenTicketCreated: true })
+    })
+
+    it('cancelada también cuando el upsert ya la trae CANCELLED (reingesta de un pedido cancelado): ni candado ni comanda', async () => {
+      ;(prisma.order.findUnique as jest.Mock).mockResolvedValue({ ...existingOrderRow, status: 'CANCELLED' })
+      ;(prisma.order.upsert as jest.Mock).mockResolvedValue({ ...existingOrderRow, status: 'CANCELLED' })
+
+      const r = await ingestDeliveryOrder(makeNormalized(), link)
+
+      expect(r).toMatchObject({ cancelada: true, hayComanda: false, kitchenTicketCreated: false })
+      expect((prisma.$queryRaw as jest.Mock).mock.calls.some(esCandadoDeFila)).toBe(false)
+      expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+    })
+
+    it('si el candado de fila no encuentra la orden de este negocio, no nace comanda y se grita (nunca en silencio)', async () => {
+      relecturaDice('CONFIRMED')
+      ;(prisma.$queryRaw as jest.Mock).mockImplementation(async (...c: any[]) => (esCandadoDeFila(c) ? [] : [{ id: 'order1' }]))
+
+      const r = await ingestDeliveryOrder(makeNormalized(), link)
+
+      expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+      expect(r).toMatchObject({ cancelada: false, hayComanda: false, kitchenTicketCreated: false })
+      expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('cocina'), expect.objectContaining({ orderId: 'order1' }))
+    })
+
+    it('un pedido PROGRAMADO sigue sin comanda (y sin candado): no es una comanda perdida', async () => {
+      const r = await ingestDeliveryOrder(makeNormalized({ scheduledFor: new Date('2026-07-18T20:00:00.000Z') }), link)
+
+      expect(r).toMatchObject({ cancelada: false, hayComanda: false })
+      expect((prisma.$queryRaw as jest.Mock).mock.calls.some(esCandadoDeFila)).toBe(false)
+      expect(prisma.kdsOrder.create).not.toHaveBeenCalled()
+    })
   })
 })

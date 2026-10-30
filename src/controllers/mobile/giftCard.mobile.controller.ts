@@ -18,7 +18,7 @@ import {
   payGiftCardOnNewOrder,
   returnGiftBalanceAndCancelOrder,
 } from '@/services/mobile/order.mobile.service'
-import { leerVentaDeMostrador } from '@/controllers/mobile/order.mobile.controller'
+import { autoridadDeLaVenta, leerVentaDeMostrador } from '@/controllers/mobile/order.mobile.controller'
 import { auditarReenvio, auditarTarjetas, registrarSalidaDelSecreto } from '@/services/giftCards/giftCardSurface.service'
 import {
   TEXTO_SIN_SECRETO,
@@ -152,8 +152,11 @@ export async function payNewOrder(req: Request, res: Response) {
     amount: Prisma.Decimal
     tip?: Prisma.Decimal
   }
+  // La autoridad de cortesía y la terminal son de la SESIÓN, como en `POST /orders` (unión con develop, S9 y S6).
+  const deLaSesion = await autoridadDeLaVenta(req, lectura.input)
   const data = await payGiftCardOnNewOrder(venueId, {
     ...lectura.input,
+    ...deLaSesion,
     idempotencyKey,
     proof,
     amount,

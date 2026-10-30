@@ -24,7 +24,10 @@ const database = new URL(process.env.TEST_DATABASE_URL ?? '')
 // Sólo las bases fiscales locales existentes o una desechable H1 validada por el lanzador.
 if (
   !['localhost', '127.0.0.1'].includes(database.hostname) ||
-  !(['/av_db_25_iva_test', '/avoqado_h1a_test_20260808'].includes(database.pathname) || isDisposableH1Url(database))
+  !(
+    ['/av_db_25_iva_test', '/avoqado_h1a_test_20260808', '/avoqado_cambio_r5_test_20261024'].includes(database.pathname) ||
+    isDisposableH1Url(database)
+  )
 ) {
   throw new Error('Esta suite exige la base local av_db_25_iva_test o una base H1 desechable validada.')
 }

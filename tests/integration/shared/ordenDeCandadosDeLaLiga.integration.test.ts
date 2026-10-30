@@ -14,6 +14,9 @@
  */
 import '../../__helpers__/integration-setup'
 import prisma from '@/utils/prismaClient'
+import { customerAttributionActor } from '@/middlewares/customerAttribution.middleware'
+import type { CustomerAttributionActor } from '@/services/shared/customerAttributionPolicy'
+import type { Request } from 'express'
 
 jest.mock('@/communication/sockets', () => ({ __esModule: true, default: { getBroadcastingService: jest.fn(() => null) } }))
 jest.mock('@/communication/sockets/managers/socketManager', () => {
@@ -40,6 +43,7 @@ let orgId: string | undefined
 let venueId: string | undefined
 let cajero: string
 let n = 0
+let actor: CustomerAttributionActor
 
 beforeAll(async () => {
   orgId = (
@@ -60,6 +64,10 @@ beforeAll(async () => {
   })
   await prisma.staffVenue.create({ data: { staffId: s.id, venueId, role: 'CASHIER' } })
   cajero = s.id
+  actor = await customerAttributionActor({
+    params: { venueId },
+    authContext: { userId: cajero, venueId, orgId, role: 'CASHIER' },
+  } as unknown as Request)
 })
 
 afterAll(async () => {
@@ -100,6 +108,24 @@ async function venta(opciones: { pagada?: boolean; procesada?: boolean } = {}): 
         total: 20,
         status: pagada ? 'COMPLETED' : 'PENDING',
         paymentStatus: pagada ? 'PAID' : 'PENDING',
+        ...(pagada
+          ? {
+              payments: {
+                create: {
+                  venueId: venueId!,
+                  amount: 20,
+                  feePercentage: 0,
+                  feeAmount: 0,
+                  netAmount: 20,
+                  method: 'CASH' as const,
+                  status: 'COMPLETED' as const,
+                  type: 'REGULAR' as const,
+                  processedById: cajero,
+                  createdAt: new Date(Date.now() - 60_000),
+                },
+              },
+            }
+          : {}),
         loyaltyEligibleAt: pagada ? new Date(Date.now() - 60_000) : null,
       },
     })
@@ -160,7 +186,7 @@ describe('🔴 R3-2: sin ciclos de candados en la atribución de la venta (Postg
       m = updateCustomerMetrics(c, 20, orderId, venueId!)
       const pidMetricas = await aTiempo(metricas.pid, 15_000, 'las métricas detenidas con el candado del cliente')
       // La liga toma la venta y, al insertar su vínculo, espera al cliente (lo tienen las métricas).
-      liga = addCustomerToOrder(venueId!, orderId, c, cajero, { otorgarLealtad: true })
+      liga = addCustomerToOrder(venueId!, orderId, c, cajero, { otorgarLealtad: true, customerAttribution: actor })
       const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidMetricas], consulta: /INSERT[\s\S]*"OrderCustomer"/ })
       expect(espera).not.toBeNull() // el cruce SÍ ocurrió: la liga, con la venta tomada, espera al cliente
       const pidLiga = espera!.pid
@@ -207,9 +233,9 @@ describe('🔴 R3-2: sin ciclos de candados en la atribución de la venta (Postg
     let f: Promise<{ status: string }> | undefined
     let pos: Promise<unknown> | undefined
     try {
-      f = linkCustomerToExistingOrder(venueId!, orderId, c)
+      f = linkCustomerToExistingOrder(venueId!, orderId, c, actor)
       const pidFast = await aTiempo(fast.pid, 15_000, '`/fast` detenido antes de escribir la venta')
-      pos = attachCustomerToOrder(venueId!, orderId, c, cajero)
+      pos = attachCustomerToOrder(venueId!, orderId, c, cajero, { actor })
       // Con el arreglo, el POS espera el candado de la VENTA que `/fast` ya tiene (antes: esperaba el vínculo, y `/fast` la venta).
       const espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidFast], consulta: /FOR NO KEY UPDATE/ })
       expect(espera).not.toBeNull()
@@ -245,23 +271,25 @@ function reconciliadorDe(orderId: string) {
 }
 
 describe('🔴 R3-4: editar los datos del invitado no se salta la decisión «A»', () => {
-  it('🔴 sin payments:create en una venta PAGADA con la lealtad pendiente: se guarda el nombre, Order.customerId queda intacto y el reconciliador no premia a nadie', async () => {
+  it('🔴 sin autoridad en una venta PAGADA: rechaza toda la edición y el reconciliador no premia a nadie', async () => {
     const c = await cliente('Kev')
     const orderId = await venta()
-    await updateGuestInfo(venueId!, orderId, { customerName: 'Kev', customerId: c }, { otorgarLealtad: false })
+    await expect(
+      updateGuestInfo(venueId!, orderId, { customerName: 'Kev', customerId: c }, { otorgarLealtad: false }),
+    ).rejects.toMatchObject({ statusCode: 403, code: 'CUSTOMER_ASSIGNMENT_REQUIRES_MANAGER' })
     expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { customerId: true, customerName: true } })).toEqual({
       customerId: null,
-      customerName: 'Kev',
+      customerName: null,
     })
     expect(await reconciliadorDe(orderId).runNow()).toMatchObject({ scanned: 1, applied: 1 })
     expect(await prisma.stampEvent.count({ where: { venueId, orderId } })).toBe(0)
     expect(await prisma.loyaltyTransaction.count({ where: { orderId, customerId: c } })).toBe(0)
   })
 
-  it('con payments:create: como hoy, fija Order.customerId (y el respaldo heredado lo acredita)', async () => {
+  it('con recibo propio reciente: fija Order.customerId y el respaldo heredado lo acredita', async () => {
     const c = await cliente('Kev')
     const orderId = await venta()
-    await updateGuestInfo(venueId!, orderId, { customerName: 'Kev', customerId: c }, { otorgarLealtad: true })
+    await updateGuestInfo(venueId!, orderId, { customerName: 'Kev', customerId: c }, { otorgarLealtad: true, customerAttribution: actor })
     expect(await prisma.order.findUniqueOrThrow({ where: { id: orderId }, select: { customerId: true } })).toEqual({ customerId: c })
     await reconciliadorDe(orderId).runNow()
     expect(await prisma.stampEvent.count({ where: { venueId, orderId, stampCard: { customerId: c } } })).toBe(1)

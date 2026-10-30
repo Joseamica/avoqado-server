@@ -4,7 +4,9 @@ import {
   claimShiftForCompletedPayment,
   claimShiftForCapturedPayment,
   claimShiftForRefund,
+  esVentaDeTurnoCerrado,
   lockExistingOrderForPayment,
+  marcaDeVentaDeTurnoCerrado,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
 } from '@/services/shared/paymentShiftClaim'
@@ -17,11 +19,22 @@ function makeTx(
   candidate: { id: string; status: string } | null,
   claimedCount = 1,
   settings: { enableShifts: boolean } | null = { enableShifts: true },
+  /** Los turnos que EXISTEN en este negocio (la búsqueda por id + venueId). Sin lista, cualquier id existe. */
+  turnosDelNegocio?: string[],
+  /** El `shiftId` que el servidor ya le puso a la orden (`order.findFirst`). */
+  turnoDeLaOrden: string | null = null,
 ) {
   return {
     shift: {
-      findFirst: jest.fn().mockResolvedValue(candidate),
+      findFirst: jest.fn().mockImplementation(async ({ where }: any) => {
+        if (typeof where?.id !== 'string') return candidate
+        if (where.venueId !== VENUE_ID) return null
+        return !turnosDelNegocio || turnosDelNegocio.includes(where.id) ? { id: where.id } : null
+      }),
       updateMany: jest.fn().mockResolvedValue({ count: claimedCount }),
+    },
+    order: {
+      findFirst: jest.fn().mockResolvedValue({ shiftId: turnoDeLaOrden }),
     },
     activityLog: {
       create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
@@ -381,6 +394,216 @@ describe('paymentShiftClaim — claim transaccional del turno para dinero captur
   })
 })
 
+// 🔴 «Cobrar sin red» (S5, D4): la cola de la terminal manda el turno en que se VENDIÓ. Si ya no es el vivo, la venta no entra al nuevo.
+describe('paymentShiftClaim — el turno de la venta (expectedShiftId)', () => {
+  const base = {
+    venueId: VENUE_ID,
+    amountPesos: new Prisma.Decimal('100.00'),
+    tipPesos: new Prisma.Decimal('5.00'),
+    incrementTotalOrders: true,
+    orderId: null,
+  }
+
+  it('turno de la venta = el vivo ⇒ como hoy: lo reclama y suma', async () => {
+    const tx = makeTx({ id: 'turno-A', status: 'OPEN' })
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+
+    expect(claim).toEqual({ shiftId: 'turno-A', candidateShiftId: 'turno-A', observedStatus: 'OPEN', pendingReason: null })
+    expect(tx.shift.updateMany).toHaveBeenCalledTimes(1)
+  })
+
+  it('turno de la venta cerrado y otro abierto ⇒ sin turno, SALE_SHIFT_CLOSED y NO toca los totales del vivo', async () => {
+    const tx = makeTx({ id: 'turno-B', status: 'OPEN' })
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+
+    expect(claim).toEqual({
+      shiftId: null,
+      candidateShiftId: 'turno-B',
+      observedStatus: 'OPEN',
+      pendingReason: 'SALE_SHIFT_CLOSED',
+      saleShiftId: 'turno-A',
+    })
+    expect(tx.shift.updateMany).not.toHaveBeenCalled()
+    expect(tx.orderItem.findFirst).not.toHaveBeenCalled()
+  })
+
+  it('turno de la venta cerrado y ninguno abierto ⇒ SALE_SHIFT_CLOSED sin candidato', async () => {
+    const tx = makeTx(null)
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+
+    expect(claim).toEqual({
+      shiftId: null,
+      candidateShiftId: null,
+      observedStatus: null,
+      pendingReason: 'SALE_SHIFT_CLOSED',
+      saleShiftId: 'turno-A',
+    })
+  })
+
+  it('el turno de la venta se está cerrando (CLOSING) ⇒ SALE_SHIFT_CLOSED: ya no es el vivo OPEN', async () => {
+    const tx = makeTx({ id: 'turno-A', status: 'CLOSING' })
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+
+    expect(claim).toMatchObject({
+      shiftId: null,
+      candidateShiftId: 'turno-A',
+      observedStatus: 'CLOSING',
+      pendingReason: 'SALE_SHIFT_CLOSED',
+    })
+    expect(tx.shift.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('sin turno de la venta (ausente, null o vacío) ⇒ como hoy: el vivo', async () => {
+    for (const expectedShiftId of [undefined, null, '']) {
+      const tx = makeTx({ id: 'turno-B', status: 'OPEN' })
+      const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId })
+      expect(claim).toEqual({ shiftId: 'turno-B', candidateShiftId: 'turno-B', observedStatus: 'OPEN', pendingReason: null })
+    }
+  })
+
+  it('turno de la venta = el vivo pero el cierre gana el CAS ⇒ SALE_SHIFT_CLOSED (lo cerró otro aparato), no CLAIM_LOST', async () => {
+    const tx = makeTx({ id: 'turno-A', status: 'OPEN' }, 0)
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+
+    expect(claim).toEqual({
+      shiftId: null,
+      candidateShiftId: 'turno-A',
+      observedStatus: 'OPEN',
+      pendingReason: 'SALE_SHIFT_CLOSED',
+      saleShiftId: 'turno-A',
+    })
+  })
+
+  it('el wrapper de la terminal (COMPLETED) también lo respeta', async () => {
+    const tx = makeTx({ id: 'turno-B', status: 'OPEN' })
+
+    const claim = await claimShiftForCompletedPayment(tx as never, { ...base, paymentStatus: 'COMPLETED', expectedShiftId: 'turno-A' })
+
+    expect(claim).toMatchObject({ shiftId: null, pendingReason: 'SALE_SHIFT_CLOSED', saleShiftId: 'turno-A' })
+    expect(tx.shift.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('la conciliación PAYMENT_WITHOUT_SHIFT lleva el motivo y el turno de la venta; sin turnos en el negocio, nada', async () => {
+    const tx = makeTx({ id: 'turno-B', status: 'OPEN' })
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+    const conciliar = (reconciliationEnabled: boolean) =>
+      recordPendingPaymentShiftReconciliation(tx as never, {
+        claim,
+        venueId: VENUE_ID,
+        paymentId: PAYMENT_ID,
+        orderId: 'order-1',
+        staffId: 'staff-1',
+        channel: 'recordFastPayment',
+        amountPesos: base.amountPesos,
+        tipPesos: base.tipPesos,
+        reconciliationEnabled,
+      })
+
+    await conciliar(true)
+    expect(tx.activityLog.create).toHaveBeenCalledTimes(1)
+    expect(tx.activityLog.create.mock.calls[0][0].data).toMatchObject({ action: 'PAYMENT_WITHOUT_SHIFT', entityId: PAYMENT_ID })
+    expect(tx.activityLog.create.mock.calls[0][0].data.data).toMatchObject({
+      status: 'PENDING',
+      reason: 'SALE_SHIFT_CLOSED',
+      saleShiftId: 'turno-A',
+      candidateShiftId: 'turno-B',
+      totalPesos: '105.00',
+    })
+
+    tx.activityLog.create.mockClear()
+    await conciliar(false)
+    expect(tx.activityLog.create).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Codex servidor r1 #1: un turno inventado (o de otro negocio) sacaba el efectivo del arqueo. Sólo un turno REAL de ESTE
+  // negocio puede sacar la venta del turno vivo; cualquier otro valor se ignora (como si no viniera: el vivo, como hoy).
+  it.each([
+    ['NO-EXISTE', ['turno-A']],
+    ['turno-de-otro-negocio', ['turno-A']],
+  ])('turno de la venta %s ⇒ se ignora: el vivo lo reclama y suma, sin SALE_SHIFT_CLOSED', async (pedido, existentes) => {
+    const tx = makeTx({ id: 'turno-B', status: 'OPEN' }, 1, { enableShifts: true }, existentes)
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: pedido })
+
+    expect(claim).toEqual({ shiftId: 'turno-B', candidateShiftId: 'turno-B', observedStatus: 'OPEN', pendingReason: null })
+    expect(tx.shift.updateMany).toHaveBeenCalledTimes(1)
+    // La búsqueda va acotada al negocio: un id de otro negocio no existe aquí.
+    expect(tx.shift.findFirst).toHaveBeenCalledWith({ where: { id: pedido, venueId: VENUE_ID }, select: { id: true } })
+  })
+
+  it('turno de la venta inventado y ningún turno vivo ⇒ como hoy: NO_SHIFT, nunca SALE_SHIFT_CLOSED', async () => {
+    const tx = makeTx(null, 1, { enableShifts: true }, [])
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'NO-EXISTE' })
+
+    expect(claim).toEqual({ shiftId: null, candidateShiftId: null, observedStatus: null, pendingReason: 'NO_SHIFT' })
+  })
+
+  it('turno de la venta REAL y cerrado ⇒ SALE_SHIFT_CLOSED, como hasta ahora', async () => {
+    const tx = makeTx({ id: 'turno-B', status: 'OPEN' }, 1, { enableShifts: true }, ['turno-A', 'turno-B'])
+
+    const claim = await claimShiftForCapturedPayment(tx as never, { ...base, expectedShiftId: 'turno-A' })
+
+    expect(claim).toMatchObject({ shiftId: null, pendingReason: 'SALE_SHIFT_CLOSED', saleShiftId: 'turno-A' })
+    expect(tx.shift.updateMany).not.toHaveBeenCalled()
+  })
+
+  // 🔴 Codex servidor r1 #2: la terminal creó la orden EN LÍNEA (el servidor la puso en el turno vivo B) creyendo seguir en A, perdió
+  // la respuesta y subió el pago por la cola con A. El turno que el servidor le dio a la orden manda: el de la terminal estaba viejo.
+  describe('la orden ya tiene turno del servidor', () => {
+    const conOrden = { ...base, orderId: 'order-1' }
+
+    it('orden en B (el vivo) y la terminal manda A (cerrado) ⇒ el pago va a B, como la orden', async () => {
+      const tx = makeTx({ id: 'turno-B', status: 'OPEN' }, 1, { enableShifts: true }, ['turno-A', 'turno-B'], 'turno-B')
+
+      const claim = await claimShiftForCapturedPayment(tx as never, { ...conOrden, expectedShiftId: 'turno-A' })
+
+      expect(claim).toEqual({ shiftId: 'turno-B', candidateShiftId: 'turno-B', observedStatus: 'OPEN', pendingReason: null })
+      expect(tx.shift.updateMany).toHaveBeenCalledTimes(1)
+      expect(tx.order.findFirst).toHaveBeenCalledWith({ where: { id: 'order-1', venueId: VENUE_ID }, select: { shiftId: true } })
+    })
+
+    it('orden en B, que también se cerró (C es el vivo) ⇒ SALE_SHIFT_CLOSED contra B, el turno de la orden', async () => {
+      const tx = makeTx({ id: 'turno-C', status: 'OPEN' }, 1, { enableShifts: true }, ['turno-A', 'turno-B', 'turno-C'], 'turno-B')
+
+      const claim = await claimShiftForCapturedPayment(tx as never, { ...conOrden, expectedShiftId: 'turno-A' })
+
+      expect(claim).toMatchObject({ shiftId: null, pendingReason: 'SALE_SHIFT_CLOSED', saleShiftId: 'turno-B' })
+      expect(tx.shift.updateMany).not.toHaveBeenCalled()
+    })
+
+    it('orden sin turno ⇒ el turno de la venta validado: A cerrado ⇒ SALE_SHIFT_CLOSED contra A', async () => {
+      const tx = makeTx({ id: 'turno-B', status: 'OPEN' }, 1, { enableShifts: true }, ['turno-A', 'turno-B'], null)
+
+      const claim = await claimShiftForCapturedPayment(tx as never, { ...conOrden, expectedShiftId: 'turno-A' })
+
+      expect(claim).toMatchObject({ shiftId: null, pendingReason: 'SALE_SHIFT_CLOSED', saleShiftId: 'turno-A' })
+    })
+
+    it('la terminal manda el vivo ⇒ el vivo, aunque la orden sea de un turno anterior (cuenta abierta que se cobra hoy)', async () => {
+      const tx = makeTx({ id: 'turno-B', status: 'OPEN' }, 1, { enableShifts: true }, ['turno-A', 'turno-B'], 'turno-A')
+
+      const claim = await claimShiftForCapturedPayment(tx as never, { ...conOrden, expectedShiftId: 'turno-B' })
+
+      expect(claim).toEqual({ shiftId: 'turno-B', candidateShiftId: 'turno-B', observedStatus: 'OPEN', pendingReason: null })
+    })
+
+    it('turno de la venta inventado ⇒ se ignora entero (ni siquiera se consulta la orden): el vivo', async () => {
+      const tx = makeTx({ id: 'turno-B', status: 'OPEN' }, 1, { enableShifts: true }, ['turno-B'], 'turno-A')
+
+      const claim = await claimShiftForCapturedPayment(tx as never, { ...conOrden, expectedShiftId: 'NO-EXISTE' })
+
+      expect(claim).toMatchObject({ shiftId: 'turno-B', pendingReason: null })
+      expect(tx.order.findFirst).not.toHaveBeenCalled()
+    })
+  })
+})
+
 describe('paymentShiftClaim — claim transaccional del turno para reembolsos', () => {
   it('historial de componentes incompleto: observa OPEN pero fuerza pendiente sin decrementarlo', async () => {
     const tx = makeTx({ id: 'shift-open', status: 'OPEN' })
@@ -569,5 +792,23 @@ describe('lockExistingOrderForPayment — el candado de la Order decide dinero y
     const tx = { $queryRaw: jest.fn().mockResolvedValue([]) }
 
     await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
+  })
+  it('conserva false para un lector que no devuelve filas', async () => {
+    const tx = { $queryRaw: jest.fn().mockResolvedValue(undefined) }
+    await expect(lockExistingOrderForPayment(tx as never, input)).resolves.toBe(false)
+  })
+})
+
+// 🔴 Revisión de S5 #1: el efectivo de la venta tardía ya lo contó el cajón de SU turno (cerrado). La marca va en la MISMA fila del
+// Payment (`posRawData`) para que el cajón —en línea y el barrido de respaldo— no lo sume a la caja abierta de hoy.
+describe('marca de venta de un turno cerrado (Payment.posRawData)', () => {
+  it('sólo existe con turno de la venta; se reconoce en la fila y nada más la confunde', () => {
+    expect(marcaDeVentaDeTurnoCerrado('turno-A')).toEqual({ ventaDeTurnoCerrado: 'turno-A' })
+    expect(marcaDeVentaDeTurnoCerrado(undefined)).toBeUndefined()
+
+    expect(esVentaDeTurnoCerrado({ splitType: 'FULLPAYMENT', ventaDeTurnoCerrado: 'turno-A' })).toBe(true)
+    for (const otra of [null, undefined, {}, { splitType: 'FULLPAYMENT' }, ['ventaDeTurnoCerrado'], 'ventaDeTurnoCerrado']) {
+      expect(esVentaDeTurnoCerrado(otra as never)).toBe(false)
+    }
   })
 })

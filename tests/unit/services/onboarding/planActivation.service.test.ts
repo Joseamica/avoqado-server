@@ -61,6 +61,18 @@ jest.mock('@/services/email.service', () => ({
   __esModule: true,
   default: { sendPlanConfirmationEmail: jest.fn().mockResolvedValue(true) },
 }))
+jest.mock('@/services/resend.service', () => ({
+  __esModule: true,
+  sendPlanActivatedNotice: jest.fn().mockResolvedValue(true),
+  sendOnboardingWelcomeEmail: jest.fn().mockResolvedValue(true),
+}))
+// H0 (28-oct): el cobro termina el alta en el mismo momento. El cierre se prueba en su suite (terminarAltaCobrada.test.ts);
+// aquí sólo QUIÉN lo llama y cuándo.
+const mockTerminar = jest.fn()
+jest.mock('@/services/onboarding/terminarAltaCobrada', () => ({
+  __esModule: true,
+  terminarAltaCobradaSinRomper: (...a: unknown[]) => mockTerminar(...a),
+}))
 
 import {
   activatePlan,
@@ -227,6 +239,7 @@ function facturaInicial({ total, tarjeta, saldo, status }: { total: number; tarj
 
 beforeEach(() => {
   jest.clearAllMocks()
+  mockTerminar.mockReset().mockResolvedValue(undefined)
   prepararTransaccion()
   mockAutorizar.mockReset().mockImplementation(async (_v: string, _c: string, _i: unknown, crear: () => Promise<unknown>) => crear())
   mockEntregar
@@ -502,6 +515,90 @@ describe('idempotencia y estados ya activos', () => {
 
     await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_ACTIVATION_IN_PROGRESS' })
     expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+})
+
+describe('🔴 H0: el alta con el plan confirmado se termina en el mismo cobro, no cuando el navegador toca «Entrar»', () => {
+  const REDENCION = {
+    id: 'red-1',
+    campaignId: 'lc-1',
+    advertisedPriceCents: ANUNCIADO,
+    discountMonths: 3,
+    listPriceCents: LISTA,
+    offerVersion: 1,
+    campaign: { code: 'POS22' },
+  }
+  function yaActivo(overrides: Record<string, unknown> = {}) {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(
+      progreso({
+        planActivationStatus: 'ACTIVE',
+        planStripeSubscriptionId: 'sub_1',
+        v2SetupData: { plan: { tier: 'PRO', interval: 'monthly', payNow: true } },
+        ...overrides,
+      }) as never,
+    )
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+    mockSubRetrieve.mockResolvedValue({
+      id: 'sub_1',
+      current_period_end: Math.floor(new Date('2026-12-01T00:00:00Z').getTime() / 1000),
+      latest_invoice: { amount_paid: ANUNCIADO },
+    })
+  }
+
+  it('el cobro que pasa a la primera termina el alta antes de responder', async () => {
+    prismaMock.onboardingProgress.findUnique.mockResolvedValue(progreso() as never)
+    prismaMock.launchCampaign.findUnique.mockResolvedValue(campania() as never)
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r).toMatchObject({ status: 'ACTIVE', alreadyActive: false })
+    expect(mockTerminar).toHaveBeenCalledWith('org-1', { via: 'cobro', staffId: 'staff-1' })
+  })
+
+  it('el reintento sobre un plan YA activo (sin terminar) también termina el alta', async () => {
+    yaActivo()
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(REDENCION as never)
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r).toMatchObject({ alreadyActive: true })
+    expect(mockTerminar).toHaveBeenCalledWith('org-1', { via: 'cobro', staffId: 'staff-1' })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un reintento sobre un alta YA TERMINADA con el plan activo contesta «plan activo», no 409', async () => {
+    // El reenvío del navegador después del reto del banco puede llegar cuando el aviso de Stripe ya cerró todo.
+    yaActivo({ completedAt: new Date('2026-10-28T15:54:00Z') })
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(REDENCION as never)
+
+    const r = await activatePlan({ ...BASE, offer: OFERTA_LAUNCH })
+
+    expect(r).toMatchObject({ status: 'ACTIVE', alreadyActive: true, firstChargeCents: ANUNCIADO })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 un alta terminada SIN plan activo sigue contestando 409 ONBOARDING_ALREADY_COMPLETED', async () => {
+    yaActivo({ completedAt: new Date('2026-10-28T15:54:00Z'), planActivationStatus: 'NONE' })
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'ONBOARDING_ALREADY_COMPLETED',
+    })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(mockTerminar).not.toHaveBeenCalled()
+  })
+
+  it('🔴 sobre un alta terminada, pedir OTRO plan sigue siendo PLAN_ALREADY_ACTIVATED', async () => {
+    yaActivo({ completedAt: new Date(), v2SetupData: { plan: { tier: 'PREMIUM', interval: 'monthly' } } })
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_ALREADY_ACTIVATED' })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+  })
+
+  it('🔴 sobre un alta terminada con PRUEBA, pedir la oferta no la regala (PLAN_ACTIVE_WITHOUT_OFFER)', async () => {
+    yaActivo({ completedAt: new Date(), v2SetupData: { plan: { tier: 'PRO', interval: 'monthly', payNow: false } } })
+    prismaMock.launchCampaignRedemption.findFirst.mockResolvedValue(null as never)
+    await expect(activatePlan({ ...BASE, offer: OFERTA_LAUNCH })).rejects.toMatchObject({ code: 'PLAN_ACTIVE_WITHOUT_OFFER' })
+    expect(mockSubCreate).not.toHaveBeenCalled()
+    expect(prismaMock.launchCampaign.updateMany).not.toHaveBeenCalled()
   })
 })
 
@@ -857,6 +954,14 @@ describe('camino ESTÁNDAR (sin campaña)', () => {
 
     expect(mockSubCreate.mock.calls[0][0].trial_period_days).toBe(30)
     expect(mockSubCreate.mock.calls[0][0].discounts).toBeUndefined()
+
+    // Aviso al equipo (27-oct, Codex r1): en la prueba la factura de hoy vale $0; el aviso dice lo que se cobrará al
+    // terminar la prueba, como el correo del cliente, y nunca «Primer cobro: $0.00».
+    await new Promise(r => setImmediate(r))
+    const resend = jest.requireMock('@/services/resend.service')
+    expect(resend.sendPlanActivatedNotice).toHaveBeenCalledWith(
+      expect.objectContaining({ payNow: false, firstChargeCents: 115884, planName: 'Pro', campaignCode: null }),
+    )
   })
 
   it('🔴 la promoción legacy NO se derrama a PREMIUM anual', async () => {

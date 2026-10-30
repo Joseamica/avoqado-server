@@ -118,3 +118,56 @@ describe('sonda NOT_FOUND sobre una fila vieja sin procedencia', () => {
     expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
   })
 })
+
+/**
+ * 24-oct-2026 · Better Stack mandaba el correo «🚨 Terminal-payment crítico» varias veces al día por las MISMAS 9 filas de la
+ * N86 de Testarudo (9 y 10-sep, ya canceladas): cada reconexión de la terminal —o cada reinicio del servidor, que borra la
+ * espera en memoria— volvía a escribir el 🚨 «Probe contradiction» aunque la fila ya estaba auditada. Mismo arreglo que la rama
+ * hermana de arriba: la PRIMERA contradicción de una fila es un 🚨 y queda en ActivityLog; las repeticiones salen en info.
+ */
+describe('sonda NOT_FOUND sobre una fila que la terminal sí acusó (contradicción)', () => {
+  const filaAcusada = (id: string) => ({
+    id,
+    status: 'CANCELLED',
+    acknowledgedAt: new Date('2026-09-10T17:08:14.320Z'),
+    lastDeliveredAt: new Date('2026-09-10T17:08:13.000Z'),
+    deliveryProvenance: null,
+    expiresAt: new Date(0),
+    terminalId: 'n860w173400',
+    probeActiveAt: null,
+  })
+  const CONTRADICCION = expect.stringContaining('Probe contradiction')
+
+  it('la PRIMERA contradicción de una fila sigue siendo un 🚨 y deja constancia en ActivityLog', async () => {
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(filaAcusada('fila-contradiccion-1'))
+    prismaMock.activityLog.findFirst.mockResolvedValue(null)
+    const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+
+    const ok = await terminalPaymentService.handleProbeResultFromSocket({ requestId: 'rc1', disposition: 'NOT_FOUND' }, TERMINAL)
+
+    expect(ok).toBe(true)
+    expect(logger.error).toHaveBeenCalledWith(CONTRADICCION, expect.objectContaining({ requestId: 'rc1', audited: true }))
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'TERMINAL_PAYMENT_PROBE_CONTRADICTION', entityId: 'fila-contradiccion-1' }),
+    )
+    expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+  })
+
+  it('🔴 la MISMA contradicción sobre una fila ya auditada no repite el 🚨: sale en info y la reserva se conserva igual', async () => {
+    prismaMock.terminalPaymentRequest.findFirst.mockResolvedValue(filaAcusada('fila-contradiccion-2'))
+    prismaMock.activityLog.findFirst.mockResolvedValue({ id: 'log-previo' })
+    const { logAction } = jest.requireMock('@/services/dashboard/activity-log.service')
+
+    const ok = await terminalPaymentService.handleProbeResultFromSocket({ requestId: 'rc2', disposition: 'NOT_FOUND' }, TERMINAL)
+
+    expect(ok).toBe(true)
+    expect(logger.error).not.toHaveBeenCalledWith(CONTRADICCION, expect.anything())
+    expect(logger.error).not.toHaveBeenCalledWith(expect.stringContaining('🚨'), expect.anything())
+    expect(logger.info).toHaveBeenCalledWith(
+      expect.stringContaining('Probe contradiction repeated'),
+      expect.objectContaining({ requestId: 'rc2' }),
+    )
+    expect(logAction).not.toHaveBeenCalled()
+    expect(prismaMock.terminalPaymentRequest.updateMany).not.toHaveBeenCalled()
+  })
+})

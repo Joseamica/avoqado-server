@@ -42,7 +42,7 @@ beforeAll(async () => {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
   expect(['localhost', '127.0.0.1']).toContain(url.hostname)
   // Los barridos son globales. Nunca apuntar esta prueba a una base compartida de desarrollo.
-  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/)
   await prisma.organization.create({ data: { id: fixture, name: fixture, email: `${fixture}@example.test`, phone: '5500000000' } })
   await prisma.venue.create({ data: { id: venueId, organizationId: fixture, name: fixture, slug: fixture } })
   const order = await prisma.order.create({
@@ -1756,7 +1756,9 @@ describe('Declaración del cajero', () => {
     expect(r.resolution).toMatchObject({ by: 'SUPERVISOR_PIN' })
     const link = await prisma.terminalPaymentAttemptLink.findUniqueOrThrow({ where: { attemptId } })
     expect(link.operatorResolution).toMatchObject({ staffId: owner.id, by: 'SUPERVISOR_PIN' })
-    expect(JSON.stringify(link.operatorResolution)).not.toContain('4321')
+    // Sin `bodyHash`: es un sha256 de la petición y a veces trae «4321» por azar (CI de main, 22-oct-2026). El PIN tampoco
+    // puede ir ahí: un hash no se puede leer de vuelta.
+    expect(JSON.stringify(link.operatorResolution, (k, v) => (k === 'bodyHash' ? undefined : v))).not.toContain('4321')
     const asiento = await prisma.activityLog.findFirst({
       where: { venueId, action: 'TERMINAL_PAYMENT_NO_INSTRUMENT_RESOLVED', entityId: row.id },
     })

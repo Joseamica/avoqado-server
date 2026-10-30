@@ -8,7 +8,10 @@ const esConsultaDelOutbox = (a: any) =>
   typeof a?.where?.id === 'string' &&
   'venueId' in (a?.where ?? {}) &&
   Object.keys(a?.select ?? {}).every(
-    (k: string) => k === 'orderId' || (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId),
+    (k: string) =>
+      k === 'orderId' ||
+      (k === 'order' && !!a.select.order?.select?.items?.where?.giftCardId) ||
+      (k === 'tenderType' && a.select.tenderType?.select?.systemKind === true),
   ) &&
   a?.select?.orderId === true
 /**
@@ -338,6 +341,8 @@ beforeEach(() => {
       },
       // La comisión se encola bajo un SAVEPOINT para que su fallo no tumbe el cobro.
       $executeRawUnsafe: jest.fn().mockResolvedValue(0),
+      // El referido pregunta si la orden es la venta nueva de un cambio; aquí no lo es.
+      exchange: { findUnique: jest.fn().mockResolvedValue(null) },
       commissionCalculation: { findMany: jest.fn().mockResolvedValue([]), create: jest.fn() },
       payment: {
         ...(prisma as any).payment,

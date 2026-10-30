@@ -1,3 +1,4 @@
+import { sqlPaymentIsNotExchangeCredit } from '../exchanges/exchangeMarks'
 /**
  * Sales Summary Dashboard Service
  *
@@ -1398,6 +1399,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND p."status" = 'COMPLETED'
           ${merchantSql}
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
+          AND ${sqlPaymentIsNotExchangeCredit('p')}
         GROUP BY 1, 2, 3
       `,
       prisma.$queryRaw<Array<GroupRow & { refunds: string }>>`
@@ -1413,6 +1415,7 @@ export async function getSalesSummary(venueId: string, filters: SalesSummaryFilt
           AND p."type" = 'REFUND'
           ${merchantSql}
           AND ${sqlCobroNoEsSaldoDeRegalo('p')}
+          AND ${sqlPaymentIsNotExchangeCredit('p')}
         GROUP BY 1, 2, 3
       `,
     ])

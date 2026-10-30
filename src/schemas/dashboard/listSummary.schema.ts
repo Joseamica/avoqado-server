@@ -63,7 +63,8 @@ export const PaymentsListQuerySchema = z.object({
 })
 
 export const OrdersListQuerySchema = z.object({
-  query: z.object({ page, pageSize, responseMode, ...orderListFilters }),
+  // `conFactura=1` («Nueva factura», 28-oct-2026): cada fila dice si la venta ya está facturada. Otro valor se ignora.
+  query: z.object({ page, pageSize, responseMode, ...orderListFilters, conFactura: z.enum(['1']).optional().catch(undefined) }),
 })
 
 /** Los filtros que hoy aplica el navegador, ahora como parámetros del resumen. */

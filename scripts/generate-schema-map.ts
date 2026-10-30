@@ -221,6 +221,7 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
   MenuCategoryAssignment: 'Menu, Products & Modifiers',
   Product: 'Menu, Products & Modifiers',
   ProductPriceHistory: 'Menu, Products & Modifiers',
+  ModifierPriceHistory: 'Menu, Products & Modifiers',
   ProductOption: 'Menu, Products & Modifiers',
   ProductOptionValue: 'Menu, Products & Modifiers',
   ProductModifierGroup: 'Menu, Products & Modifiers',
@@ -327,6 +328,8 @@ const MODEL_TO_DOMAIN: Record<string, string> = {
 
   // 9. Orders, KDS & Cash
   Order: 'Orders, KDS & Cash',
+  Exchange: 'Orders, KDS & Cash',
+  ExchangeCreditLink: 'Orders, KDS & Cash',
   OrderItem: 'Orders, KDS & Cash',
   OnlineOrderingSettings: 'Orders, KDS & Cash',
   OnlineOrder: 'Orders, KDS & Cash',

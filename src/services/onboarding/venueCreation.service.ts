@@ -29,6 +29,7 @@ import logger from '@/config/logger'
 import { OPERATIONAL_VENUE_STATUSES } from '@/lib/venueStatus.constants'
 import { logAction } from '../dashboard/activity-log.service'
 import { ventaSueltaAbierta } from '../access/ventaSuelta'
+import { utmLegible } from './atribucionLegible'
 import {
   assertLegacyCatalogGovernanceForVenue,
   resolveLegacyCatalogActor,
@@ -83,6 +84,12 @@ export interface CreateVenueInput {
     accountHolder: string
   }
   selectedFeatures?: string[]
+  /**
+   * El alta corta crea el negocio A MEDIO CAMINO (ensureVenueForOnboarding), antes del plan y la tarjeta. Entonces
+   * no se le da la bienvenida al cliente —creía que ya había terminado y no ponía la tarjeta (26-oct)— y el aviso
+   * interno dice «empezó el alta». La bienvenida real es el correo de confirmación del plan, al activarlo.
+   */
+  provisional?: boolean
   stripePaymentMethodId?: string // Payment method collected via Stripe Elements
   teamInvites?: Array<{
     email: string
@@ -122,6 +129,7 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     selectedFeatures,
     stripePaymentMethodId,
     teamInvites,
+    provisional = false,
   } = input
 
   // Generate unique slug
@@ -291,11 +299,15 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     // 1) Always send a full-context digest to onboarding@avoqado.io so the team can
     //    follow up even when the wizard skipped KYC docs. Fire-and-forget;
     //    failure here must NOT block onboarding completion.
+    // D12 (28-oct): el aviso dice de qué oferta y campaña viene el alta (antes sólo lo decía «Activó su plan»).
+    const atribucion = await atribucionParaElAviso(organizationId)
     void resendService
       .sendNewVenueOnboardingDigest({
+        ...atribucion,
         venueId: venue.id,
         venueName: venue.name,
         venueSlug: venue.slug,
+        stage: provisional ? 'STARTED' : 'COMPLETED',
         venueStatus,
         kycStatus,
         hasKycDocuments: Boolean(hasKycDocuments),
@@ -333,7 +345,8 @@ export async function createVenueFromOnboarding(input: CreateVenueInput): Promis
     //    next. Without this, completing onboarding lands them on a dashboard
     //    with no confirmation that anything happened on our side.
     //    Fire-and-forget; failure must NOT block onboarding.
-    if (ownerStaff?.email) {
+    //    Provisional (alta corta, antes del plan): no. Ver `CreateVenueInput.provisional`.
+    if (ownerStaff?.email && !provisional) {
       void resendService
         .sendOnboardingWelcomeEmail({
           ownerEmail: ownerStaff.email,
@@ -856,4 +869,17 @@ async function processTeamInvites(
   }
 
   logger.info(`✅ Finished processing team invites for venue ${venueId}`)
+}
+
+/** D12: oferta y campaña del alta para el aviso al equipo. Nunca bloquea ni lanza: sin dato, el aviso sale sin esos renglones. */
+async function atribucionParaElAviso(organizationId: string): Promise<{ ofertaCodigo: string | null; campanaUtm: string | null }> {
+  try {
+    const p = await prisma.onboardingProgress.findUnique({
+      where: { organizationId },
+      select: { acquisitionUtm: true, launchCampaign: { select: { code: true } } },
+    })
+    return { ofertaCodigo: p?.launchCampaign?.code ?? null, campanaUtm: utmLegible(p?.acquisitionUtm) }
+  } catch {
+    return { ofertaCodigo: null, campanaUtm: null }
+  }
 }

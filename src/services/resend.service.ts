@@ -466,9 +466,17 @@ Venue ID: ${data.venueId}
 // ---------------------------------------------------------------------------
 
 interface NewVenueOnboardingDigestData {
+  /** D12 (28-oct): la oferta de la campaña reclamada y los UTMs legibles, si los hay; sin ellos no se pinta nada. */
+  ofertaCodigo?: string | null
+  campanaUtm?: string | null
   venueId: string
   venueName: string
   venueSlug: string
+  /**
+   * STARTED: el alta corta creó el negocio a medio camino (antes del plan y la tarjeta). El correo decía «completó el
+   * wizard» y el founder creía que el cliente ya había terminado (Rigo, 26-oct). Sin valor = COMPLETED, como antes.
+   */
+  stage?: 'STARTED' | 'COMPLETED'
   venueStatus: string
   kycStatus: string
   hasKycDocuments: boolean
@@ -548,12 +556,20 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     return `${value} (https://wa.me/${intlDigits})`
   }
 
+  const empezo = data.stage === 'STARTED'
+  const titulo = empezo ? 'Empezó el alta (falta el plan)' : 'Nuevo venue en onboarding'
+  const resumen = empezo
+    ? 'creó su negocio en el alta. Todavía no elige plan ni pone su tarjeta: si no lo hace, escríbele hoy.'
+    : 'completó el wizard de onboarding.'
+  // Sólo con CLABE de verdad: el alta corta manda un bankInfo vacío y el correo imprimía «CLABE: undefined».
+  const banco = data.paymentInfo?.clabe ? data.paymentInfo : null
+
   // Plain-text body — readable inline preview in clients that hide HTML.
   const textLines: string[] = [
-    `Nuevo venue en onboarding: ${data.venueName}`,
+    `${titulo}: ${data.venueName}`,
     dateCapitalized,
     '',
-    `Un nuevo negocio completó el wizard de onboarding. KYC: ${kycLabel}.`,
+    empezo ? `${data.venueName} ${resumen}` : `Un nuevo negocio completó el wizard de onboarding. KYC: ${kycLabel}.`,
     '',
     'NEGOCIO',
     `  Nombre:        ${data.venueName}`,
@@ -564,6 +580,8 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     `  Tel negocio:   ${waPlain(data.businessInfo.phone)}`,
     `  Email negocio: ${data.businessInfo.email || '—'}`,
     `  Dirección:     ${addressLine || '—'}`,
+    ...(data.ofertaCodigo ? [`  Oferta:        ${data.ofertaCodigo}`] : []),
+    ...(data.campanaUtm ? [`  Campaña:       ${data.campanaUtm}`] : []),
     '',
     'DUEÑO (signup)',
     `  Nombre: ${ownerName || '—'}`,
@@ -572,18 +590,18 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     '',
   ]
 
-  if (data.paymentInfo) {
+  if (banco) {
     textLines.push(
       'BANCO',
-      `  CLABE:   ${data.paymentInfo.clabe}`,
-      `  Banco:   ${data.paymentInfo.bankName || '—'}`,
-      `  Titular: ${data.paymentInfo.accountHolder}`,
+      `  CLABE:   ${banco.clabe}`,
+      `  Banco:   ${banco.bankName || '—'}`,
+      `  Titular: ${banco.accountHolder || '—'}`,
       '',
     )
   }
 
   textLines.push(`Abrir en superadmin: ${reviewUrl}`)
-  textLines.push('', '---', 'Servicios Tecnologicos Avo S.A. de C.V.')
+  textLines.push('', '---', 'Servicios Tecnológicos Avo S.A. de C.V.')
   const text = textLines.join('\n')
 
   // ─────────────────────────────────────────────────────────────────────────
@@ -634,6 +652,8 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
       ${row('Tel negocio', waLink(data.businessInfo.phone))}
       ${row('Email negocio', mailto(data.businessInfo.email))}
       ${row('Dirección', plain(addressLine))}
+      ${data.ofertaCodigo ? row('Oferta', code(data.ofertaCodigo)) : ''}
+      ${data.campanaUtm ? row('Campaña', plain(data.campanaUtm)) : ''}
     </table>`
 
   const ownerSection = data.owner
@@ -646,13 +666,13 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     </table>`
     : ''
 
-  const paymentSection = data.paymentInfo
+  const paymentSection = banco
     ? `
     <h2 style="margin:32px 0 12px;font-size:13px;font-weight:600;color:#666;text-transform:uppercase;letter-spacing:0.5px;">Banco</h2>
     <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
-      ${row('CLABE', code(data.paymentInfo.clabe))}
-      ${row('Banco', plain(data.paymentInfo.bankName))}
-      ${row('Titular', plain(data.paymentInfo.accountHolder))}
+      ${row('CLABE', code(banco.clabe))}
+      ${row('Banco', plain(banco.bankName))}
+      ${row('Titular', plain(banco.accountHolder))}
     </table>`
     : ''
 
@@ -661,7 +681,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Nuevo venue en onboarding: ${escapeHtml(data.venueName)}</title>
+  <title>${escapeHtml(titulo)}: ${escapeHtml(data.venueName)}</title>
 </head>
 <body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
   <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
@@ -674,7 +694,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
 
     <!-- Title Section -->
     <h1 style="margin:0 0 8px 0;font-size:28px;font-weight:400;color:#000;line-height:1.2;">
-      Nuevo venue en onboarding
+      ${escapeHtml(titulo)}
     </h1>
     <p style="margin:0 0 24px 0;font-size:14px;color:#666;">
       ${dateCapitalized}
@@ -682,7 +702,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
 
     <!-- Summary -->
     <p style="margin:0 0 8px 0;font-size:14px;color:#000;">
-      <strong>${escapeHtml(data.venueName)}</strong> completó el wizard de onboarding.
+      <strong>${escapeHtml(data.venueName)}</strong> ${escapeHtml(resumen)}
     </p>
     <p style="margin:0 0 24px 0;font-size:14px;color:#666;">
       KYC: <strong style="color:#000;">${escapeHtml(kycLabel)}</strong>
@@ -709,7 +729,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
         <span style="font-size:14px;font-weight:700;color:#000;vertical-align:middle;margin-left:6px;">Avoqado</span>
       </div>
       <p style="margin:0 0 8px 0;font-size:12px;color:#999;">
-        Servicios Tecnologicos Avo S.A. de C.V.
+        Servicios Tecnológicos Avo S.A. de C.V.
       </p>
       <p style="margin:0;font-size:12px;color:#999;">
         Notificación automática · ${escapeHtml(data.venueId)}
@@ -726,7 +746,7 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
       from: FROM_EMAIL,
       to: ONBOARDING_EMAIL,
       // No emoji in subject — per EMAIL_STANDARDS rules + better deliverability.
-      subject: `Nuevo venue: ${data.venueName}${data.businessInfo.city ? ` (${data.businessInfo.city})` : ''}`,
+      subject: `${empezo ? 'Empezó el alta (falta el plan)' : 'Nuevo venue'}: ${data.venueName}${data.businessInfo.city ? ` (${data.businessInfo.city})` : ''}`,
       html,
       text,
     })
@@ -740,6 +760,207 @@ export async function sendNewVenueOnboardingDigest(data: NewVenueOnboardingDiges
     return true
   } catch (error) {
     logger.error(`Error sending new-venue digest for ${data.venueId}:`, error)
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aviso interno: el alta TERMINÓ (el plan quedó activo con tarjeta)
+// ---------------------------------------------------------------------------
+// El digest de arriba sale cuando el alta corta crea el negocio, antes del plan. Sin este segundo
+// aviso el equipo no distinguía a quien pagó de quien se fue en la tarjeta (7 de 8 el 26-oct).
+// ---------------------------------------------------------------------------
+
+export interface PlanActivatedNoticeData {
+  venueId: string
+  venueName: string
+  ownerEmail: string | null
+  planName: 'Pro' | 'Premium'
+  /** true = cobró hoy; false = prueba gratis con tarjeta. */
+  payNow: boolean
+  /** Lo que se cobra (o se cobrará) primero, en centavos con IVA. */
+  firstChargeCents: number
+  /** ISO del siguiente cobro según Stripe. */
+  nextChargeAt: string
+  campaignCode: string | null
+}
+
+export async function sendPlanActivatedNotice(data: PlanActivatedNoticeData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping plan-activated notice')
+    return false
+  }
+
+  const dashboardUrl = process.env.FRONTEND_URL || 'https://dashboard.avoqado.io'
+  const reviewUrl = `${dashboardUrl}/superadmin/kyc/${data.venueId}`
+  const logoUrl = 'https://avoqado.io/isotipo.svg'
+  const monto = new Intl.NumberFormat('es-MX', { style: 'currency', currency: 'MXN' }).format(data.firstChargeCents / 100)
+  const fecha = new Date(data.nextChargeAt).toLocaleDateString('es-MX', {
+    day: 'numeric',
+    month: 'long',
+    year: 'numeric',
+    timeZone: 'America/Mexico_City',
+  })
+  const cobro = data.payNow
+    ? `Pagó hoy ${monto}. Siguiente cobro: ${fecha}.`
+    : `Prueba gratis con tarjeta. Primer cobro: ${monto} el ${fecha}.`
+  const filas: Array<[string, string]> = [
+    ['Negocio', data.venueName],
+    ['Plan', data.planName],
+    ['Oferta', data.campaignCode ?? 'Sin oferta'],
+    ['Cobro', cobro],
+    ['Dueño', data.ownerEmail ?? '—'],
+  ]
+
+  const text = [
+    `Activó su plan ${data.planName}: ${data.venueName}`,
+    '',
+    ...filas.map(([k, v]) => `${k}: ${v}`),
+    '',
+    `Abrir en superadmin: ${reviewUrl}`,
+    '',
+    '---',
+    'Servicios Tecnológicos Avo S.A. de C.V.',
+  ].join('\n')
+
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Activó su plan ${escapeHtml(data.planName)}</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+    <div style="padding-bottom:32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+    <h1 style="margin:0 0 24px 0;font-size:28px;font-weight:400;color:#000;line-height:1.2;">Activó su plan ${escapeHtml(data.planName)}</h1>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      ${filas
+        .map(
+          ([k, v]) => `<tr>
+        <td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;width:120px;font-size:13px;color:#666;vertical-align:top;">${escapeHtml(k)}</td>
+        <td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#000;">${escapeHtml(v)}</td>
+      </tr>`,
+        )
+        .join('')}
+    </table>
+    <div style="margin:32px 0;text-align:left;">
+      <a href="${reviewUrl}" style="display:inline-block;background-color:#000000;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">Abrir en superadmin</a>
+    </div>
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:32px 0;" />
+    <p style="margin:0 0 8px 0;font-size:12px;color:#999;">Servicios Tecnológicos Avo S.A. de C.V.</p>
+    <p style="margin:0;font-size:12px;color:#999;">Notificación automática · ${escapeHtml(data.venueId)}</p>
+  </div>
+</body>
+</html>`
+
+  try {
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: ONBOARDING_EMAIL,
+      subject: `Activó su plan ${data.planName}: ${data.venueName}`,
+      html,
+      text,
+    })
+    if (result.error) {
+      logger.error(`Failed to send plan-activated notice for ${data.venueId}:`, result.error)
+      return false
+    }
+    return true
+  } catch (error) {
+    logger.error(`Error sending plan-activated notice for ${data.venueId}:`, error)
+    return false
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Aviso interno: alguien se registró DIRECTO en el dashboard (sin formulario de la landing)
+// ---------------------------------------------------------------------------
+// Los de la landing ya avisan («Nuevo prospecto»). Los directos no avisaban nada hasta crear el
+// negocio, así que quien se iba antes de escribir el nombre no existía para el equipo (27-oct).
+// ---------------------------------------------------------------------------
+
+export interface DirectSignupNoticeData {
+  email: string
+  nombre: string
+  metodo: 'correo' | 'google'
+  /** `OnboardingProgress.acquisitionSource` (p. ej. dashboard_signup). */
+  origen: string | null
+  /** utm_source · utm_medium · utm_campaign, ya juntos; null si llegó sin marca. */
+  campanaUtm: string | null
+  ofertaCodigo: string | null
+  /** D12: host de la página de la que llegó al registro, o «Origen no disponible». */
+  llegoDesde?: string | null
+}
+
+export async function sendDirectSignupNotice(data: DirectSignupNoticeData): Promise<boolean> {
+  if (!resend) {
+    logger.warn('📧 Resend not configured - skipping direct-signup notice')
+    return false
+  }
+  const filas: Array<[string, string]> = [
+    ['Correo', data.email],
+    ['Nombre', data.nombre || '—'],
+    ['Entró con', data.metodo === 'google' ? 'Google' : 'Correo y contraseña'],
+    ['Origen', data.origen ?? '—'],
+    ['Llegó desde', data.llegoDesde ?? 'Origen no disponible'],
+    ['Campaña', data.campanaUtm ?? 'Sin marca'],
+    ['Oferta', data.ofertaCodigo ?? 'Sin oferta'],
+  ]
+  const text = [
+    `Nuevo registro directo: ${data.email}`,
+    '',
+    'Se registró en el dashboard. Todavía no crea su negocio ni elige plan.',
+    '',
+    ...filas.map(([k, v]) => `${k}: ${v}`),
+    '',
+    '---',
+    'Servicios Tecnológicos Avo S.A. de C.V.',
+  ].join('\n')
+  const logoUrl = 'https://avoqado.io/isotipo.svg'
+  const html = `<!DOCTYPE html>
+<html>
+<head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1.0"><title>Nuevo registro directo</title></head>
+<body style="font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',Roboto,'Helvetica Neue',Arial,sans-serif;line-height:1.6;margin:0;padding:0;background-color:#ffffff;color:#000000;">
+  <div style="max-width:600px;margin:0 auto;padding:32px 24px;">
+    <div style="padding-bottom:32px;">
+      <img src="${logoUrl}" alt="Avoqado" width="32" height="32" style="display:inline-block;vertical-align:middle;">
+      <span style="font-size:18px;font-weight:700;color:#000;vertical-align:middle;margin-left:8px;">Avoqado</span>
+    </div>
+    <h1 style="margin:0 0 8px 0;font-size:28px;font-weight:400;color:#000;line-height:1.2;">Nuevo registro directo</h1>
+    <p style="margin:0 0 24px 0;font-size:14px;color:#666;">Se registró en el dashboard. Todavía no crea su negocio ni elige plan.</p>
+    <table cellpadding="0" cellspacing="0" style="width:100%;border-collapse:collapse;border:1px solid #e5e7eb;border-radius:8px;overflow:hidden;">
+      ${filas
+        .map(
+          ([k, v]) => `<tr>
+        <td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;width:120px;font-size:13px;color:#666;vertical-align:top;">${escapeHtml(k)}</td>
+        <td style="padding:12px 16px;border-bottom:1px solid #e5e7eb;font-size:14px;color:#000;">${escapeHtml(v)}</td>
+      </tr>`,
+        )
+        .join('')}
+    </table>
+    <div style="margin:32px 0;text-align:left;">
+      <a href="mailto:${escapeHtml(data.email)}" style="display:inline-block;background-color:#000000;color:#ffffff;padding:12px 24px;border-radius:6px;text-decoration:none;font-size:14px;font-weight:600;">Escribirle</a>
+    </div>
+    <hr style="border:none;border-top:1px solid #e5e7eb;margin:32px 0;" />
+    <p style="margin:0;font-size:12px;color:#999;">Servicios Tecnológicos Avo S.A. de C.V.</p>
+  </div>
+</body>
+</html>`
+  try {
+    const result = await resend.emails.send({
+      from: FROM_EMAIL,
+      to: ONBOARDING_EMAIL,
+      subject: `Nuevo registro directo: ${data.email}`,
+      html,
+      text,
+    })
+    if (result.error) {
+      logger.error('Failed to send direct-signup notice', { error: result.error })
+      return false
+    }
+    return true
+  } catch (error) {
+    logger.error('Error sending direct-signup notice', { error })
     return false
   }
 }
@@ -909,7 +1130,7 @@ export async function sendOnboardingWelcomeEmail(data: OnboardingWelcomeData): P
       // Reply-to so when the owner hits "Reply" it lands in the team inbox
       // instead of the noreply mailbox.
       replyTo: supportEmail,
-      subject: `Bienvenido a Avoqado, ${firstName || 'equipo'}`,
+      subject: firstName ? `Bienvenido a Avoqado, ${firstName}` : 'Bienvenido a Avoqado',
       html,
       text,
     })

@@ -28,6 +28,7 @@ import { applyLineRemoval } from './lineRemoval.service'
 import { assertDeliveryMoneyInvariants } from './money'
 import { contexto } from './respondToDeliveryOrder.service'
 import type { NormalizedDeliveryOrder } from './types'
+import { reverseStampForOrder } from '@/services/wallet/stampLedger.service'
 
 export type ResultadoReconciliacion = {
   /**
@@ -85,6 +86,8 @@ export async function reconcileDeliveryOrderFromProvider(
   // ponytail: se mide ANTES de pedir el tx, así la espera de conexión cuenta como gastada (conservador).
   const inicio = Date.now()
   let cerradoEnProveedor = false
+  // D4 (24-oct): el negocio de la compensación escrita, para quitar el sello DESPUÉS del commit.
+  let selloPorRevertir: string | null = null
   const r = await withDeliveryOrderLock(orderId, async (tx): Promise<ResultadoReconciliacion> => {
     const orden = await tx.order.findUnique({
       where: { id: orderId },
@@ -117,6 +120,11 @@ export async function reconcileDeliveryOrderFromProvider(
     try {
       foto = ctx.adapter.normalizeOrder(await leerConLimite(signal => ctx.adapter.fetchOrder!(ctx.externalOrderId, signal), plazo))
       assertDeliveryMoneyInvariants(foto.payment, foto.items)
+      // Rappi 2b: el reprecio (sección 5) no sabe escribir el envío como renglón ni el dinero de terceros. Hoy Rappi no tiene
+      // `fetchOrder`, así que no llega aquí; si algún día llega, no se reescribe dinero con una fórmula que lo ignora.
+      if (new Prisma.Decimal(foto.payment.shippingAsLine ?? '0').gt(0) || new Prisma.Decimal(foto.payment.thirdPartyCashDue ?? '0').gt(0)) {
+        throw new Error('la foto trae envío como renglón o dinero de terceros: el reprecio todavía no los escribe')
+      }
       if (foto.externalId !== ctx.externalOrderId) throw new Error(`la foto es del pedido ${foto.externalId}`)
       if (foto.items.some(i => !i.lineId)) throw new Error('la foto trae renglones sin id de línea: no prueba ausencias')
       cerradoEnProveedor = foto.providerClosed === true
@@ -506,8 +514,18 @@ export async function reconcileDeliveryOrderFromProvider(
       eventId: opts.eventId,
       refundPaymentId,
     })
+    selloPorRevertir = venueId
     return { outcome: 'REFUNDED' as const }
   })
+  // D4 (24-oct): la compensación es una devolución: quita el sello de la venta, igual que la terminal y el POS. Sin `await` ni
+  // lanzar; la reversa es idempotente y espera el candado del cliente.
+  if (r.outcome === 'REFUNDED' && selloPorRevertir)
+    reverseStampForOrder(selloPorRevertir, orderId).catch(error =>
+      logger.error('[Delivery] No se pudo revertir el sello de una venta compensada', {
+        orderId,
+        error: error instanceof Error ? error.message : String(error),
+      }),
+    )
   // Sólo cuenta si la pasada llegó a reconciliar: una que falló después de leer no cierra nada.
   return r.outcome === 'READ_FAILED' ? r : { ...r, providerClosed: cerradoEnProveedor }
 }

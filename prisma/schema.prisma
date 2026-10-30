@@ -921,6 +921,11 @@ model VenueSettings {
   /// de plan. Switch canónico en el dashboard; el POS sólo lo lee.
   managerPinOverrideEnabled Boolean @default(false)
 
+  /// Cambio de talla o de producto en una venta ya cobrada (spec 2026-10-20). `null` = el default por giro, que resuelve el
+  /// SERVIDOR (prendido en tiendas y servicios; apagado en restaurantes, bares y entretenimiento); `true`/`false` = decisión
+  /// explícita del negocio. Core, sin candado de plan. Switch canónico en el dashboard; el POS sólo lo lee.
+  exchangesEnabled Boolean?
+
   // Attendance verification
   requireClockInPhoto Boolean @default(false) // Require photo when clocking in (anti-fraud)
 
@@ -2104,6 +2109,29 @@ model ProductPriceHistory {
   creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
 
   @@index([productId, validFrom])
+}
+
+/// Historial de `Modifier.price` (hermano de `ProductPriceHistory`): cada precio de un extra con su intervalo
+/// `[validFrom, validTo)` en UTC; `validTo` nulo = vigente (a lo más UNA abierta por extra, índice parcial de la
+/// migración). Sirve para saber si el precio de extra que vio el cliente fue real (spec cobrar-sin-red-tpv).
+/// 🔴 Lo escriben SÓLO los disparadores DIFERIDOS de `Modifier` (migración 20261020120000): fechan el cambio al
+/// CONFIRMARSE la transacción y cubren a todo escritor (Prisma, SQL directo, importaciones). Nunca escribas aquí.
+/// `Modifier` no tiene `venueId`: el disparador lo copia de `ModifierGroup.venueId` (vía `groupId`) y por eso la FK es
+/// sólo al extra. `id` autoincremental porque un disparador no genera cuid; nunca se expone.
+model ModifierPriceHistory {
+  id         BigInt    @id @default(autoincrement())
+  venueId    String
+  modifierId String
+  modifier   Modifier  @relation(fields: [modifierId], references: [id], onDelete: Cascade)
+  price      Decimal   @db.Decimal(10, 2)
+  validFrom  DateTime
+  validTo    DateTime?
+  /// Transacción (xid8 de nivel superior, con época) que creó la fila. El disparador la usa para corregir en su lugar un
+  /// precio intermedio de la misma confirmación. Nadie la escribe a mano.
+  /// Tras un restore LÓGICO (pg_dump/pg_restore a otro cluster) el xid8 no vale: `UPDATE "ModifierPriceHistory" SET "creadoEnTx" = 0`.
+  creadoEnTx BigInt    @default(dbgenerated("((pg_current_xact_id())::text)::bigint"))
+
+  @@index([modifierId, validFrom])
 }
 
 model Inventory {
@@ -4034,11 +4062,21 @@ model Order {
   // Partial payment tracking (for split payments)
   paidAmount       Decimal @default(0) @db.Decimal(12, 2)
   remainingBalance Decimal @default(0) @db.Decimal(12, 2)
+  /// Rappi 2b: dinero que el negocio cobra en efectivo POR CUENTA de la plataforma (tarifa de servicio de Rappi en
+  /// marketplace/cash). No es venta, propina, CFDI, comisión ni lealtad. Lo escribe SÓLO la ingesta; null en todo lo demás.
+  thirdPartyCashDue Decimal? @db.Decimal(12, 2)
+  /// Rappi 2b: propina que el cliente paga en efectivo según la plataforma. La escribe SÓLO la ingesta, porque cada cobro
+  /// reescribe `tipAmount` con lo cobrado y la propina pendiente se perdería tras un abono chico. Null fuera de ese carril.
+  cashTipDue        Decimal? @db.Decimal(12, 2)
 
   // Status
   status        OrderStatus   @default(PENDING)
   kitchenStatus KitchenStatus @default(PENDING)
   paymentStatus PaymentStatus @default(PENDING)
+  /// «Pagar después» (fiado) elegido A PROPÓSITO por el cajero, como la cuenta de la casa de Toast (founder 26-oct).
+  /// true = lo mandó a pagar después; false = se creó para cobrarse en el momento (un cobro con tarjeta que falla NO es
+  /// deuda del cliente); null = no se sabe (filas viejas y caminos que no lo declaran) → la regla de antes (`porCobrar.ts`).
+  payLater      Boolean?
 
   // Durable post-payment loyalty recovery. Only the transaction that first
   // settles the order sets eligibleAt; inline processing sets processedAt, and
@@ -4378,12 +4416,26 @@ model OrderItem {
   /// Origen v7 inmutable. Único evita importar dos veces la misma línea de vale.
   areaTicketLineId String?         @unique
   areaTicketLine   AreaTicketLine? @relation(fields: [areaTicketLineId], references: [id], onDelete: SetNull)
+  /// Procedencia de un renglón de vale cuya venta se CANCELÓ y cuyo vale se volvió a cobrar en otra cuenta (21-oct-2026, tablero
+  /// hz:11d84b54:D1). El renglón se queda en su cuenta cancelada (producto, IVA, peso, asignaciones), pero suelta `areaTicketLineId`
+  /// (único) para que la cuenta nueva lo tome. Sigue siendo un renglón DE VALE para clasificar la cuenta, y nunca se descuenta ni se
+  /// cocina aquí: el vale ya es de otra cuenta (si R12-1 reabre esta con dinero tardío). Ver `renglonDeVale.ts`.
+  releasedAreaTicketLineId String?
 
   /// Tarjetas de regalo (spec 2026-10-14 § 4.4): el sobre que esta línea VENDE. Una línea = un sobre (1:1, molde
   /// `areaTicketLineId`). Una cuenta cuyas líneas TODAS tienen `giftCardId` es una «cuenta de tarjetas»: el servidor
   /// rechaza agregarle productos, descuentos, cortesías, cargos y su envío a cocina. Restrict: un sobre no se borra.
   giftCardId String?   @unique
   giftCard   GiftCard? @relation(fields: [giftCardId], references: [id], onDelete: Restrict)
+
+  /// Paquetes de créditos (Modo Autoservicio, 0.d): el paquete que esta línea VENDE. Restrict: un paquete vendido no se borra.
+  /// `creditPackSnapshot` es la FOTO de lo vendido (nombre, precio, vigencia, productos y cantidades) y es lo único que se
+  /// entrega: la dueña puede editar o apagar el paquete después del cobro sin cambiar lo que recibe la clienta. Sólo la arma
+  /// `buildCreditPackSnapshot` y sólo la entrega `fulfillCreditPacksForOrder` (`src/services/shared/creditPacksOnPaidOrder.ts`).
+  creditPackId       String?
+  creditPack         CreditPack?         @relation(fields: [creditPackId], references: [id], onDelete: Restrict)
+  creditPackSnapshot Json?
+  creditPackPurchase CreditPackPurchase?
 
   // ==========================================
   // SERIALIZED ITEM - Relation for unique barcode items
@@ -4410,6 +4462,7 @@ model OrderItem {
   @@index([syncStatus]) // ✅ NUEVO
   @@index([fulfillmentAreaId]) // pantalla "vales pendientes" por área
   @@index([orderPromotionId]) // retiro de promoción completa borra por aquí
+  @@index([releasedAreaTicketLineId]) // vale revendido: de qué cuenta cancelada salió
 }
 
 // ==========================================
@@ -4490,8 +4543,12 @@ model Modifier {
   orderItems       OrderItemModifier[]
   paymentLinkItems PaymentLinkItemModifier[]
   reservationItems ReservationModifier[]
+  priceHistory     ModifierPriceHistory[]
 
   @@index([rawMaterialId])
+  // Postgres no indexa sola la llave foránea: sin esto cada lectura de las opciones de un grupo (menú del POS, carta de
+  // pedidos en línea, panel) y el borrado en cascada de un grupo recorrían la tabla entera (26-oct, pizarrón hz:12c781a4:D2).
+  @@index([groupId])
 }
 
 model ProductModifierGroup {
@@ -4558,6 +4615,8 @@ enum ActionType {
 // ==========================================
 
 model Payment {
+  exchangeCreditAsCredit ExchangeCreditLink? @relation("ExchangeCreditAsCredit")
+  exchangeCreditsAsOrigin ExchangeCreditLink[] @relation("ExchangeCreditAsOrigin")
   paymentEffects PaymentEffect[]
   id             String          @id @default(cuid())
   venueId        String
@@ -4588,6 +4647,10 @@ model Payment {
   // Amounts
   amount    Decimal @db.Decimal(12, 2)
   tipAmount Decimal @default(0) @db.Decimal(10, 2)
+  /// Rappi 2b: parte de este cobro en efectivo que el negocio recibió por cuenta de un tercero (tarifa de Rappi). Fuera de
+  /// `amount`/`tipAmount`, o sea fuera de venta, propina, CFDI, comisión y lealtad; entra al cajón como PAY_IN
+  /// `srv-third-party:<id>`. Se escribe en la MISMA transacción que el cobro. Null en todo lo demás.
+  thirdPartyCashAmount Decimal? @db.Decimal(12, 2)
 
   // Payment info
   method    PaymentMethod
@@ -4757,9 +4820,9 @@ model VenueTenderType {
   /// Immutable after creation (service-enforced).
   baseMethod PaymentMethod
   isSystem   Boolean           @default(false)
-  /// Tender que Avoqado administra (spec tarjetas de regalo § 4.4). NULL para TODOS los demás, incluidos
-  /// Efectivo/Tarjetas/Transferencia. `GIFT_CARD` = «Tarjeta de regalo»: showOnPos=false, nadie lo edita ni lo apaga,
-  /// y `resolveTenderForCharge` lo rechaza; sólo lo usa el cobro con saldo.
+  /// Tender que Avoqado administra; NULL para TODOS los demás, incluidos Efectivo/Tarjetas/Transferencia. showOnPos=false, nadie lo
+  /// edita ni lo apaga y `resolveTenderForCharge` lo rechaza. `GIFT_CARD` = «Tarjeta de regalo» (sólo el cobro con saldo, spec tarjetas
+  /// § 4.4). `EXCHANGE_CREDIT` = «Crédito de cambio» (sólo la operación de Cambio, forma SAT 17, fuera del cajón; spec cambio § 6.2).
   systemKind TenderSystemKind?
 
   /// Does money received with this tender physically enter the cash drawer?
@@ -6619,6 +6682,7 @@ model CheckoutSession {
   description String? // Description of the payment
 
   // Customer info (optional)
+  attributedCustomerId String? // Internal attribution snapshot; payer contacts stay separate
   customerEmail String?
   customerPhone String?
   customerName  String?
@@ -7826,6 +7890,7 @@ model ActivityLog {
 // ==========================================
 
 model Customer {
+  paymentLinks PaymentLink[]
   id    String  @id @default(cuid())
   email String? // Unique per venue, not globally (allows same email in different venues)
   phone String? // Unique per venue, not globally
@@ -8495,6 +8560,7 @@ enum GiftCardSource {
 
 enum TenderSystemKind {
   GIFT_CARD
+  EXCHANGE_CREDIT
 }
 
 /// El sobre (un regalo). El código nunca se guarda en claro: `codeHash` (HMAC) para buscar, `codeEnc` (AES-GCM) para
@@ -9146,6 +9212,9 @@ model Discount {
 
   // Promociones tipo DISCOUNT que apuntan a este descuento.
   promotions Promotion[]
+
+  // Ligas de pago que tomaron este descuento del catálogo.
+  paymentLinks PaymentLink[]
 
   @@index([venueId])
   @@index([isAutomatic])
@@ -15609,8 +15678,9 @@ model CreditPack {
   stripePriceId   String?
 
   // Relations
-  items     CreditPackItem[]
-  purchases CreditPackPurchase[]
+  items      CreditPackItem[]
+  purchases  CreditPackPurchase[]
+  orderItems OrderItem[]
 
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
@@ -15661,6 +15731,11 @@ model CreditPackPurchase {
   paymentId String?  @unique
   payment   Payment? @relation("CreditPackPurchasePayment", fields: [paymentId], references: [id], onDelete: SetNull)
 
+  // Renglón de orden que vendió el paquete (Modo Autoservicio, 0.d). La unicidad hace idempotente la entrega desde la foto:
+  // un renglón entrega a lo más UNA compra (`fulfillCreditPacksForOrder`).
+  orderItemId String?    @unique
+  orderItem   OrderItem? @relation(fields: [orderItemId], references: [id], onDelete: SetNull)
+
   // Relations
   itemBalances CreditItemBalance[]
   transactions CreditTransaction[]
@@ -15685,8 +15760,10 @@ model CreditItemBalance {
   creditPackPurchaseId String
   creditPackPurchase   CreditPackPurchase @relation(fields: [creditPackPurchaseId], references: [id], onDelete: Cascade)
 
-  creditPackItemId String
-  creditPackItem   CreditPackItem @relation(fields: [creditPackItemId], references: [id])
+  // null = saldo nacido de la FOTO de un renglón de orden (0.d): el id de `CreditPackItem` cambia cada vez que la dueña edita
+  // el paquete, así que la foto no lo guarda. Restrict explícito: es la regla que ya tenía la FK cuando era obligatoria.
+  creditPackItemId String?
+  creditPackItem   CreditPackItem? @relation(fields: [creditPackItemId], references: [id], onDelete: Restrict)
 
   productId String
   product   Product @relation(fields: [productId], references: [id])
@@ -15759,6 +15836,11 @@ model PaymentLink {
   createdById         String
   createdBy           Staff             @relation("PaymentLinkCreatedBy", fields: [createdById], references: [id])
 
+  customerId   String?
+  customer     Customer? @relation(fields: [customerId], references: [id], onDelete: Restrict)
+  creationKey  String?   @db.VarChar(128)
+  creationHash String?
+
   /// Staff explicitly chosen by the link creator to receive commission
   /// attribution when the link is paid. Separate from `createdById`:
   /// the link CREATOR may be an admin/manager who shouldn't earn the
@@ -15791,6 +15873,12 @@ model PaymentLink {
   // Tipping config: { presets: [10, 15, 20], allowCustom: true } — null = disabled
   tippingConfig Json?
 
+  /// Descuento de la liga (foto): { v:1, origen, discountId, type, value, name }.
+  /// `discountId` apunta al catálogo sólo para trazabilidad; el valor vive aquí.
+  discount    Json?
+  discountId  String?
+  discountRef Discount? @relation(fields: [discountId], references: [id], onDelete: SetNull)
+
   status         PaymentLinkStatus @default(ACTIVE)
   totalCollected Decimal           @default(0) @db.Decimal(12, 2)
   paymentCount   Int               @default(0)
@@ -15800,10 +15888,13 @@ model PaymentLink {
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
+  @@index([venueId, customerId, createdAt, id])
+  @@unique([venueId, createdById, creationKey])
   @@index([venueId])
   @@index([shortCode])
   @@index([status])
   @@index([createdAt])
+  @@index([discountId, status])
 }
 
 /// Line item for an ITEM-purpose PaymentLink (bundle). Fixed quantity per
@@ -18757,6 +18848,8 @@ model PosSyncIntent {
   errorCode      String?  @db.VarChar(40) // p.ej. TABLE_OWNED_BY_OTHER, FEATURE_LOCKED
   /// Ack devuelto al cliente (ids de server, versión, folio) — se re-devuelve tal cual en reintentos.
   resultJson     Json?
+  /// Obligación interna post-commit de CANCEL HTTP; SQL NULL = sin efectos pendientes. No viaja al cliente.
+  cancelEffectsJson Json?
   createdAt      DateTime @default(now())
 
   @@unique([venueId, idempotencyKey])
@@ -19273,6 +19366,90 @@ model PaymentEffect {
   @@index([status, nextAttemptAt, id])
   @@index([status, leaseUntil, id])
   @@index([venueId, status, createdAt, id])
+}
+
+enum ExchangeStatus {
+  COMPLETED // return, new sale, credit and stock all written
+  PENDING_PAYMENT // set aside: the new sale exists, the card charge for the difference is still missing (spec §6.4)
+  COMPLETED_PENDING_CARD_REFUND // closed, with the refund of the difference still pending on the terminal (spec §6.5)
+  NEEDS_REVIEW // a person resolves it; why goes in `reviewReason` (e.g. a late charge after the hold was released, spec §6.4)
+  CANCELLED
+}
+
+/// What the exchange has to settle: nothing (`EVEN`), collect the difference (`COLLECT`) or pay it out (`PAYOUT`).
+enum ExchangeSettlementKind {
+  EVEN
+  COLLECT
+  PAYOUT
+}
+
+enum ExchangeSettlementMethod {
+  CASH
+  CARD_TERMINAL
+  BANK_TRANSFER
+  GIFT_CARD_BALANCE
+  TENDER
+}
+
+/// Cambio de talla o de producto: liga la venta original, sus devoluciones y la venta nueva (spec 2026-10-20 §6.2).
+/// `venueId` escalar a propósito, como `InventoryPosting`: no agrega relaciones inversas a Venue, Order ni Payment.
+model Exchange {
+  id                      String                    @id @default(cuid())
+  venueId                 String
+  idempotencyKey          String                    @db.VarChar(64)
+  requestHash             String                    @db.VarChar(64)
+  status                  ExchangeStatus
+  originalOrderId         String
+  originalPaymentId       String
+  newOrderId              String                    @unique
+  chargePaymentId         String?                   @unique
+  returnedAmount          Decimal                   @db.Decimal(12, 2)
+  takenAmount             Decimal                   @db.Decimal(12, 2)
+  differenceAmount        Decimal                   @db.Decimal(12, 2) // con signo: + cobra, − devuelve
+  settlementKind          ExchangeSettlementKind
+  settlementMethod        ExchangeSettlementMethod?
+  pendingCardRefundAmount Decimal                   @default(0) @db.Decimal(12, 2)
+  lines                   Json // v1: lo que regresa y lo que se lleva, con valor por pieza, motivo y si vuelve al inventario
+  result                  Json? // v1: la respuesta del POST, para devolverla igual en una repetición (RF1)
+  resultRevision          Int                       @default(0)
+  staffId                 String
+  deviceId                String?                   @db.VarChar(128)
+  createdAtLocal          DateTime?
+  isOfflineReplay         Boolean                   @default(false)
+  cashDrawerSessionId     String?
+  reviewReason            String?                   @db.VarChar(64) // bloque C
+  reviewedAt              DateTime?
+  reviewedById            String?
+  reviewNote              String?                   @db.VarChar(500)
+  createdAt               DateTime                  @default(now())
+  updatedAt               DateTime                  @updatedAt
+  creditLinks             ExchangeCreditLink[]
+
+  @@unique([venueId, idempotencyKey])
+  @@index([venueId, createdAt])
+  @@index([venueId, status, createdAt])
+  @@index([venueId, originalOrderId])
+  @@index([status, createdAt, id])
+}
+
+/// Una porción del crédito: el REFUND EXCHANGE_CREDIT de la venta original ↔ el cobro EXCHANGE_CREDIT de la nueva.
+/// `originPaymentId` es el cobro RAÍZ del dinero (si la porción salió de otro crédito, el origen de aquél): por él sale
+/// lo que después se devuelva (spec §6.7).
+model ExchangeCreditLink {
+  id                    String   @id @default(cuid())
+  venueId               String
+  exchangeId            String
+  exchange              Exchange @relation(fields: [exchangeId], references: [id], onDelete: Cascade)
+  originPaymentId       String
+  originPayment         Payment @relation("ExchangeCreditAsOrigin", fields: [originPaymentId], references: [id], onDelete: Restrict)
+  creditRefundPaymentId String   @unique
+  creditPaymentId       String   @unique
+  creditPayment         Payment @relation("ExchangeCreditAsCredit", fields: [creditPaymentId], references: [id], onDelete: Restrict)
+  amount                Decimal  @db.Decimal(12, 2)
+  createdAt             DateTime @default(now())
+
+  @@index([venueId, originPaymentId])
+  @@index([exchangeId])
 }
 
 /// La receta del ticket en papel de un venue (diseñador de tickets, spec § 7.1).

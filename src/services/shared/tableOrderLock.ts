@@ -17,6 +17,12 @@ type ScopeInput = {
   optionalOrderId?: string
 }
 export class OrderTableTopologyChanged extends Error {
+  /**
+   * D9 (26-oct): un choque se resuelve reintentando. Las ~118 rutas que responden `error.statusCode || 500` dan 503 y las apps
+   * lo reintentan o lo encolan. NO es AppError a propósito: el protocolo de operación (`http-operation.mobile.service.ts`) lo
+   * trata como RETRY, y un AppError lo haría lanzar como respuesta. El texto se queda: la cola sin red y el MCP lo leen.
+   */
+  readonly statusCode = 503
   constructor() {
     super('ORDER_TABLE_TOPOLOGY_CHANGED')
   }
@@ -85,6 +91,17 @@ function shape(scope: LockedTableScope) {
     orders: scope.orders.map(o => [o.id, o.tableId, o.status, o.paymentStatus]),
   })
 }
+
+/** Una pasada para la UNIÓN completa, también cuando no hay mesas (liquidación y recuperación de vales). */
+export async function lockOrdersForUpdate(
+  tx: Pick<Tx, '$queryRaw'>,
+  input: { venueId: string; orderIds: readonly string[] },
+): Promise<Array<{ id: string }>> {
+  if (!input.orderIds.length) return []
+  return tx.$queryRaw<
+    Array<{ id: string }>
+  >`SELECT id FROM "Order" WHERE "venueId"=${input.venueId} AND id=ANY(${[...new Set(input.orderIds)]}::text[]) ORDER BY "createdAt" DESC, id DESC FOR UPDATE`
+}
 export async function lockTableOrderScope(tx: Tx, input: ScopeInput): Promise<LockedTableScope> {
   if (
     input.optionalOrderId !== undefined &&
@@ -104,10 +121,8 @@ export async function lockTableOrderScope(tx: Tx, input: ScopeInput): Promise<Lo
   for (const id of sorted(input.kdsOrderIds ?? [])) await tomarCandadoDeComandas(tx, id)
   const ids = before.orders.map(o => o.id)
   if (ids.length) {
-    // PostgreSQL orders the entire known set in its own collation, not separately sorted JS chunks.
-    const locked = await tx.$queryRaw<
-      Array<{ id: string }>
-    >`SELECT id FROM "Order" WHERE "venueId"=${input.venueId} AND id=ANY(${ids}::text[]) ORDER BY id FOR UPDATE`
+    // R5: el mismo orden de Cambio/CHAIN y fiscal, incluso cuando el cheque pagado sólo se bloqueará para rechazarlo.
+    const locked = await lockOrdersForUpdate(tx, { venueId: input.venueId, orderIds: ids })
     const lockedIds = new Set(locked.map(order => order.id))
     const missing = ids.filter(id => !lockedIds.has(id))
     if (locked.length !== ids.length || missing.length > 0) {

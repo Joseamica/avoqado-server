@@ -21,6 +21,7 @@ import { asegurarLaLiga } from '../shared/parejaDeCierre'
 import { lockShiftLifecycleForVenue } from '../shared/shiftLifecycleLock'
 import { ORDEN_DE_TARJETAS_SELECT, WHERE_ORDEN_DE_TARJETAS, WHERE_ORDEN_SIN_TARJETAS } from '../giftCards/giftCardMarks'
 import { ventasDelTurnoSinTarjetas } from '../shared/ventasDelTurno'
+import { COBRO_SIN_MARCA_DE_TURNO_CERRADO } from '../shared/paymentShiftClaim'
 
 interface ShiftFilters {
   staffId?: string
@@ -303,6 +304,8 @@ const SHIFT_PAYMENT_TOTALS_SELECT = {
   id: true,
   amount: true,
   tipAmount: true,
+  // Rappi 2b: lo cobrado por cuenta de Rappi (entra al efectivo esperado como `totalDrawerExtra`).
+  thirdPartyCashAmount: true,
   method: true,
   fundsFlow: true,
   tenderTypeId: true,
@@ -398,8 +401,8 @@ async function rollupDeCobrosPorTurno(
     OR: [
       { shiftId: { in: ids } },
       // El huérfano se alcanza sólo por su orden, y la orden respeta el mismo rango de fechas que
-      // respetaba el `include` de las órdenes.
-      { shiftId: null, order: { venueId, shiftId: { in: ids }, ...rangoDeFechas } },
+      // respetaba el `include` de las órdenes. Una venta tardía de un turno cerrado nunca (Codex servidor r1 #2).
+      { shiftId: null, order: { venueId, shiftId: { in: ids }, ...rangoDeFechas }, ...COBRO_SIN_MARCA_DE_TURNO_CERRADO },
     ],
   }
 
@@ -1564,6 +1567,8 @@ async function broadcastClosedShift(venueId: string, updatedShift: Shift): Promi
 export interface ShiftPaymentForTotals {
   amount: Decimal | number | string | null
   tipAmount: Decimal | number | string | null
+  /** Rappi 2b: lo cobrado por cuenta de un tercero; está en el cajón pero no es venta ni propina. */
+  thirdPartyCashAmount?: Decimal | number | string | null
   method: PaymentMethod | string
   fundsFlow: PaymentFundsFlow | string | null
   tenderTypeId: string | null
@@ -1644,6 +1649,10 @@ export function aggregateShiftPayments(payments: ShiftPaymentForTotals[]): Shift
 
     if (payment.method !== 'CASH' && paymentCountsAsDrawerCash(payment)) {
       totalDrawerExtra = totalDrawerExtra.add(amount).add(tipAmount)
+    }
+    // Rappi 2b (T11): lo cobrado por cuenta de Rappi está en el cajón (su PAY_IN) pero no es venta ni propina.
+    if (payment.thirdPartyCashAmount != null && paymentCountsAsDrawerCash(payment)) {
+      totalDrawerExtra = totalDrawerExtra.add(new Decimal(payment.thirdPartyCashAmount))
     }
 
     switch (payment.method) {
@@ -1733,6 +1742,8 @@ function shiftPaymentsForCloseWhere(venueId: string, shiftId: string, startTime:
         shiftId: null,
         createdAt: { gte: startTime, lte: claimedAt },
         order: { venueId, shiftId },
+        // 🔴 Codex servidor r1 #2: una venta tardía de un turno cerrado (`ventaDeTurnoCerrado`) no la firma este corte.
+        ...COBRO_SIN_MARCA_DE_TURNO_CERRADO,
       },
     ],
   }

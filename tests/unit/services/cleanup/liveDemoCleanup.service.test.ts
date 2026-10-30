@@ -562,3 +562,21 @@ describe('🔴 ninguna llave foránea bloqueante queda sin atender', () => {
     expect(problemas).toEqual([])
   })
 })
+
+// Las FK del crédito no dejan borrar cobros mientras exista el vínculo.
+describe('exchange cleanup order', () => {
+  it('deletes exchange links and headers before payments and scopes both to the demo', async () => {
+    jest.clearAllMocks()
+    mockCascadeAlreadyDeletedSession()
+    prismaMock.liveDemoSession.findMany.mockResolvedValue([makeSession(1)])
+    await cleanupExpiredLiveDemos()
+    expect(prismaMock.exchangeCreditLink.deleteMany).toHaveBeenCalledWith({ where: { venueId: 'venue-1' } })
+    expect(prismaMock.exchange.deleteMany).toHaveBeenCalledWith({ where: { venueId: 'venue-1' } })
+    expect(prismaMock.exchangeCreditLink.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.exchange.deleteMany.mock.invocationCallOrder[0],
+    )
+    expect(prismaMock.exchange.deleteMany.mock.invocationCallOrder[0]).toBeLessThan(
+      prismaMock.payment.deleteMany.mock.invocationCallOrder[0],
+    )
+  })
+})

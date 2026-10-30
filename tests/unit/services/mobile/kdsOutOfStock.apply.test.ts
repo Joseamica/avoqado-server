@@ -1,3 +1,4 @@
+import { Prisma } from '@prisma/client'
 /**
  * Plan 3b — how the provider's answer to «no tengo este artículo» is applied (`enviarYAplicar`).
  *
@@ -103,7 +104,7 @@ describe('enviarYAplicar — the provider answer is applied under delivery advis
     expect(result.kind).toBe('HECHO')
     expect(resolveFulfillmentIssues).toHaveBeenCalledWith('ext-1', 'store-1', ['b'])
     // Tagged template: [strings, ...values] — the KDS line's Order, scoped to the ROUTE venue.
-    expect(applyTx.$queryRaw.mock.calls.map((call: any[]) => call.slice(1))).toEqual([[ORDER, VENUE]])
+    expect(applyTx.$queryRaw.mock.calls.map((call: any[]) => Prisma.sql(call[0], ...call.slice(1)).values)).toEqual([[ORDER, VENUE]])
     expect(applyTx.$queryRaw.mock.calls[0][0].join('?')).toMatch(/FROM "Order"[\s\S]*FOR UPDATE/)
     expect(applyTx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(applyTx.order.updateMany.mock.invocationCallOrder[0])
     expect(applyTx.order.updateMany.mock.invocationCallOrder[0]).toBeLessThan(

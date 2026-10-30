@@ -61,7 +61,7 @@ jest.mock('@/utils/prismaClient', () => {
       findUnique: jest.fn(),
     },
     // Diseño §C.6: voidItems toma el candado de la orden y consulta el cobro de terminal vivo DENTRO de la tx.
-    $queryRaw: jest.fn(async () => [{ id: 'order-bajo-candado' }]),
+    $queryRaw: jest.fn(async () => [{ id: 'order-1' }]),
     terminalPaymentRequest: { findFirst: jest.fn(async () => null) },
     // Auditoría Fable 11-sep (P2-8): voidItems relee lo cobrado (Payment registrados) bajo el candado.
     payment: { aggregate: jest.fn(async () => ({ _sum: { amount: null, tipAmount: null } })) },

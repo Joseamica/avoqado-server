@@ -1,4 +1,10 @@
+import type { ValesSoltados } from './areaTicketV7.mobile.service'
 import type { HttpEnvelope } from './http-operation.mobile.service'
+import { prepareExchangeInTx, finishExchangeInTx, type ExchangeTxOutcome, type ExchangeTxEarly } from '../exchanges/exchangeTx'
+import { ExchangeGenerationChanged, type ExchangeSettleTxInput } from '../exchanges/exchangeSettle'
+import { ExchangeError } from '../exchanges/exchangeErrors'
+import { rechazarLlaveDeCambio, WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO } from '../exchanges/exchangeMarks'
+import type { ExchangeTxInput } from '../exchanges/exchange.service'
 import { lockTableOrderScope } from '@/services/shared/tableOrderLock'
 import type { AutomaticServiceChargeCapture } from './service-charge.mobile.service'
 /**
@@ -16,20 +22,43 @@ import type { ContratoDePrecio, OrderStatus, OriginSystem, PaymentStatus, Paymen
 import socketManager from '../../communication/sockets'
 import { SocketEventType } from '../../communication/sockets/types'
 import logger from '../../config/logger'
-import AppError, { BadRequestError, ConflictError, NotFoundError } from '../../errors/AppError'
+import AppError, { BadRequestError, ConflictError, ForbiddenError, NotFoundError } from '../../errors/AppError'
 import { operationHash } from '../../utils/operationHash'
 import prisma from '../../utils/prismaClient'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
+import { assertCustomerAttributionUnderLock } from '../shared/ligaDeClienteEnVenta'
 import { validateStaffVenue } from '../../utils/staff-venue.util'
 import { generateAndStoreReceipt } from '../dashboard/receipt.dashboard.service'
-import { resolveTenderForCharge, computeTenderCommission, type ResolvedTenderCharge } from '../dashboard/tenderType.dashboard.service'
+import {
+  resolveTenderForCharge,
+  computeTenderCommission,
+  normalizeTenderName,
+  type ResolvedTenderCharge,
+} from '../dashboard/tenderType.dashboard.service'
+import { deliveryTenderLabel } from '../delivery-channels/core/deliveryTenderProvisioning.service'
+import { avisarDineroDeRappi, type AvisoDeRappiEfectivo } from '../shared/avisoDeRappiEfectivo'
+import { rechazarAccionDeCobroSobreRappiEnEfectivo } from '../shared/rappiEfectivoGuard'
 // Reuse the SAME helpers the TPV order/fast endpoints use so the mobile cash
 // response carries an identical `digitalReceipt` shape — mobile and TPV never
 // drift on how the receipt QR (accessKey + receiptUrl + autofactura) is built.
-import { mapDigitalReceiptResponse, resolveAutofacturaAvailable, type OrderInventoryWarning } from '../tpv/payment.tpv.service'
-import { enqueuePaymentCommissionInTx, enqueuePaymentEffect, enqueueRefundPaymentEffectsInTx } from '../tpv/paymentEffects.service'
 import {
+  mapDigitalReceiptResponse,
+  resolveAutofacturaAvailable,
+  resolveTerminalIdFromSerial,
+  type OrderInventoryWarning,
+} from '../tpv/payment.tpv.service'
+import {
+  asegurarAvisoDeVentaApartada,
+  enqueuePaymentCommissionInTx,
+  enqueuePaymentEffect,
+  enqueueRefundPaymentEffectsInTx,
+} from '../tpv/paymentEffects.service'
+import {
+  accionDeCortesia,
+  filaDeCortesias,
   buildItemDiscountRow,
   calculateDiscountPesos,
+  filaDeDescuentoDeCatalogoEnCuenta,
   filaDeDescuentoDeCuenta,
   validateDiscountActive,
   validateDiscountScopeForItem,
@@ -49,22 +78,42 @@ import {
   asegurarCambioDeClienteBajoCandado,
   esVentaYaCobrada,
 } from '../shared/ligaDeClienteEnVenta'
-import { assertNoLiveTerminalCharge, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import {
+  assertNoLiveTerminalCharge,
+  assertOrderCancellableUnderLock,
+  avisarOrdenCancelada,
+  rechazarCancelacionLocalDeRappi,
+} from '../shared/orderCancelGuard'
 import { combinarContratos } from '../fiscal/contratoDePrecio'
+import {
+  apartarClientesDelFiado,
+  clienteDelFiado,
+  combinarPayLater,
+  duenoDeLaCuenta,
+  exigirClientesApartados,
+  exigirUnSoloCliente,
+} from '../shared/porCobrar'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCapturedPayment,
+  marcaDeCajaDeLaVenta,
+  marcasDeVentaApartada,
+  turnoDeLaOrdenQueNace,
+  ventaDeLaColaEnTx,
+  entradaDelClaim,
   lockExistingOrderForPayment,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
   type CapturedPaymentChannel,
 } from '../shared/paymentShiftClaim'
+import { avisarVentaSinRed, type AvisoVentaSinRed, type DatosDelAviso } from './avisoDeVentaSinRed'
 // La aritmética canónica del saldo: UNA sola definición de "cuánto se lleva
 // pagado y cuánto falta" para los cuatro caminos de cobro. Se extrajo de este
 // mismo archivo; volver a llamarla es lo que impide que se separen otra vez.
 import {
   claseDeEstado,
   computeOrderBalance,
+  saldoDeCobroDeReparto,
   esVentaCerrada,
   estadoDeCobroAlRecibirDinero,
   estadoParaCalcular,
@@ -117,11 +166,36 @@ import {
   cambiosDeOrdenExistente,
   clasificarLinea,
   horaDeLaVenta,
+  precioDeExtraMostrado,
   precioMostradoValido,
+  preciosDeExtrasQueFueronVigentes,
   preciosQueFueronVigentes,
   ventanaDeLaLinea,
   type CambioDePrecio,
 } from './precioQueVioElCliente'
+
+/**
+ * «Cobrar sin red» (S6): una venta de la cola de una TERMINAL que sube más de estos minutos después de cobrarse no manda comanda a
+ * la cocina (el mostrador ya la entregó). Perilla del servidor.
+ */
+export const MINUTOS_PARA_COMANDA_DE_LA_COLA = 10
+
+/** El serial del token de la terminal → su `terminalId` en ESTE negocio (la misma búsqueda que `/tpv`), o `null`. */
+const terminalDelToken = (venueId: string, serial: string | null | undefined) =>
+  serial ? resolveTerminalIdFromSerial(venueId, serial) : Promise.resolve(null)
+
+const TREINTA_DIAS_MS = 30 * 86_400_000
+
+/**
+ * Cuánto tiempo pasó entre la venta y su llegada, SÓLO si la terminal lo midió con su reloj monótono (`edadDeLaVentaMs` válido).
+ * 🔴 Codex servidor r1 #8: sin ese dato (tras reiniciar el aparato no lo hay) no se adivina con el reloj de pared (`createdAtLocal`):
+ * uno atrasado hacía parecer vieja una venta de hace un minuto y su comanda no llegaba a cocina. Sin edad confiable cuenta la llegada
+ * (§4.D): la comanda sale como hoy, porque perder la de una venta reciente es peor que mandar la de una vieja.
+ */
+function edadConfiableDeLaVenta(edadDeLaVentaMs: unknown): number | null {
+  const e = edadDeLaVentaMs
+  return typeof e === 'number' && Number.isFinite(e) && e >= 0 && e <= TREINTA_DIAS_MS ? e : null
+}
 
 // MARK: - Types
 
@@ -139,6 +213,8 @@ export interface CreateOrderItemInput {
    *  (order.tpv.service.ts). Validated the same way: must exist, belong to
    *  this venue, and be currently active/within its validity window. */
   discountId?: string | null
+  isCortesia?: boolean
+  cortesiaReason?: string | null
   /** Venta por peso: kilos pesados (0.001–99.999) — REQUIRED when the product
    *  has soldByWeight=true (quantity must be 1), REJECTED otherwise. The server
    *  computes total = round(product.price × weightQuantity, 2); the client
@@ -151,6 +227,11 @@ export interface CreateOrderItemInput {
   displayedUnitPrice?: number | null
   /** El `catalogAt` del catálogo con que se agregó ESTA línea, tal cual lo dio el servidor. */
   catalogAt?: string | null
+  /**
+   * El precio de cada extra de la línea que mostró la tablet: `{ [modifierId]: centavos enteros ≥ 0 }`, por unidad. Sólo
+   * cuenta si la línea trae `catalogAt`; cada extra se decide con la misma regla que el producto. Basura ⇒ se ignora.
+   */
+  displayedModifierPrices?: Record<string, number> | null
   /**
    * Promoción tocada en el POS. OPCIONAL y sin precios: lleva QUÉ promoción y
    * QUÉ eligió la persona; la aritmética la hace el server (mismo contrato que
@@ -171,14 +252,25 @@ export interface CreateOrderItemInput {
 export interface CreateOrderInput {
   items: CreateOrderItemInput[]
   staffId: string
+  /** Server-owned: permiso y actor de la sesión, nunca del body ni del vendedor elegido. */
+  canCompItems?: boolean
+  performedBy?: string
   orderType?: 'DINE_IN' | 'TAKEOUT' | 'DELIVERY' | 'PICKUP'
   source?: 'AVOQADO_IOS' | 'AVOQADO_ANDROID' | 'TPV' | 'KIOSK' | 'QR' | 'WEB' | 'APP' | 'PHONE' | 'POS'
   tableId?: string | null
   customerId?: string | null
+  /** «Pagar después» elegido por el cajero (true), cobro del momento (false) o no se sabe (null). Ver `shared/porCobrar.ts`. */
+  payLater?: boolean | null
   customerName?: string | null
   customerPhone?: string | null
   specialRequests?: string | null
   discount?: number // cents
+  /**
+   * Descuento de catálogo de la CUENTA, como `orderDiscountId` de `/tpv/with-items`: se calcula sobre lo que queda tras los
+   * descuentos de artículo y las cortesías, y con él `discount` no se suma (en `/tpv` sólo repetía ese mismo importe).
+   * Todavía no se combina con promociones (400).
+   */
+  orderDiscountId?: string | null
   tip?: number // cents
   note?: string | null
   splitType?: string | null
@@ -209,6 +301,18 @@ export interface CreateOrderInput {
   isOfflineReplay?: boolean
   /** Epoch ms del aparato al CAPTURAR la venta (número o texto de dígitos); sólo cuenta con `isOfflineReplay`. */
   createdAtLocal?: number | string | null
+  /**
+   * «Cobrar sin red» (D4): el turno en que se VENDIÓ, sólo de la cola de la terminal. Si ya no es el vivo, la orden nace SIN
+   * turno (nunca en el nuevo); si lo es, o no viene, como hoy. Nunca se estampa: sólo puede quitar el turno.
+   */
+  shiftIdDeLaVenta?: string | null
+  /** S3: la caja que el POS tenía abierta al vender (sólo en un replay de la cola). El servicio la convierte en el turno de la venta. */
+  cashDrawerSessionId?: string | null
+  /**
+   * «Cobrar sin red» (S6): el serial de la terminal del TOKEN (`authContext.terminalSerialNumber`, nunca del body). Si es de una
+   * terminal de este negocio, la orden lleva su `terminalId` y la fuente `TPV`, como `/tpv`; si no, como hoy.
+   */
+  terminalSerialNumber?: string | null
 }
 
 export interface CreatedOrderResponse {
@@ -234,6 +338,9 @@ export interface CreatedOrderResponse {
   total: number
   items: Array<{
     id: string
+    externalId?: string | null
+    isCortesia?: boolean
+    cortesiaReason?: string | null
     productId: string | null
     productName: string | null
     quantity: number
@@ -292,7 +399,8 @@ function flattenOrderModifiers(order: any): any {
           item.modifiers?.map((om: any) => ({
             id: om.modifier?.id || om.id,
             name: om.modifier?.name || om.name,
-            price: Number(om.modifier?.price || om.price || 0),
+            // Lo COBRADO (guardado en la línea), no el precio vivo del extra: pudo cambiar, o cobrarse el que vio el cliente.
+            price: Number(om.price ?? om.modifier?.price ?? 0),
           })) || [],
       })) || [],
   }
@@ -359,6 +467,11 @@ export interface OrderDetailResponse {
     totalPaidCents: number
     remainingBalanceCents: number
     tipAmountCents: number
+    /**
+     * Rappi 2b (aditivo, sólo en pedidos con repartidor propio en efectivo): lo que falta, por partes. `remainingBalanceCents`
+     * ya es la suma de las tres. La parte de terceros no es venta: entra al cajón como «cobrado por cuenta de Rappi».
+     */
+    deliveryCashBreakdown?: { saleCents: number; tipCents: number; thirdPartyCents: number; thirdPartyLabel: string }
   }
   staffName: string | null
   /** Additive: dueño del cheque (servedById) — el POS lo compara contra su
@@ -494,6 +607,8 @@ export async function listOrders(venueId: string, input: ListOrdersInput) {
   const where: any = {
     venueId,
     status: { not: 'DELETED' },
+    // Cambio de producto: la cuenta apartada de un cambio se cobra sólo por la diferencia, desde el cambio (exchangeMarks.ts).
+    AND: [WHERE_NO_ES_CUENTA_APARTADA_DE_CAMBIO],
   }
 
   // Filter by status if provided
@@ -618,6 +733,9 @@ function toCreatedOrderResponse(order: any): CreatedOrderResponse {
     total: Number(flattenedOrder.total),
     items: flattenedOrder.items.map((item: any) => ({
       id: item.id,
+      externalId: item.externalId ?? null,
+      isCortesia: item.isCortesia ?? false,
+      cortesiaReason: item.cortesiaReason ?? null,
       productId: item.productId,
       productName: item.productName || item.product?.name,
       quantity: item.quantity,
@@ -645,6 +763,34 @@ function normalizeExternalId(externalId?: string | null): string | null {
   if (!externalId) return null
   const trimmed = externalId.trim()
   return trimmed.length > 0 ? trimmed : null
+}
+
+/**
+ * S7 («Cobrar sin red»): la venta de la cola de una terminal SÍ se registró, pero con problema ⇒ aviso al gerente, después del
+ * commit y sin esperarlo (nunca toca la respuesta; `avisarVentaSinRed` no lanza). Sólo con `isOfflineReplay` y el serial del
+ * token: la cola de Android no avisa.
+ */
+function avisarSiEsDeLaColaDeTerminal(
+  venueId: string,
+  input: { isOfflineReplay?: boolean; terminalSerialNumber?: string | null },
+  aviso: AvisoVentaSinRed,
+  data: Omit<DatosDelAviso, 'terminalSerial'>,
+): void {
+  if (input.isOfflineReplay !== true || !input.terminalSerialNumber) return
+  void avisarVentaSinRed(venueId, aviso, { ...data, terminalSerial: input.terminalSerialNumber })
+}
+
+/**
+ * S7: el precio que vio el cliente no se reconoció (`priceChanges`): la orden quedó con el precio de hoy, no con lo cobrado. Sin
+ * monto: lo cobrado no viaja al crear, y el total de la orden no es lo que se cobró.
+ */
+function avisarPrecioNoReconocido(venueId: string, input: CreateOrderInput, orden: { id: string }, cambios: unknown[]) {
+  if (cambios.length === 0) return
+  avisarSiEsDeLaColaDeTerminal(venueId, input, 'PRECIO_CAMBIADO', {
+    externalId: normalizeExternalId(input.externalId) ?? orden.id,
+    orderId: orden.id,
+    motivo: `${cambios.length === 1 ? 'un precio' : `${cambios.length} precios`} que vio el cliente no se reconoció y la orden quedó con el precio de hoy`,
+  })
 }
 
 /** El índice `@@unique([venueId, externalId])` de `Order`. Forma del P2002 medida contra Postgres (Task 4). */
@@ -692,8 +838,9 @@ export async function buildOrderItemsData(
   venueId: string,
   items: CreateOrderItemInput[],
   fulfillmentAreaId?: string | null,
-  precioMostrado?: { horaDeLaVenta: Date; rechazarSiNoSeReconoce: boolean },
+  precioMostrado?: { horaDeLaVenta: Date; llegada?: Date; rechazarSiNoSeReconoce: boolean },
   db?: Prisma.TransactionClient,
+  compAuthority?: Pick<CreateOrderInput, 'canCompItems' | 'performedBy'>,
 ): Promise<{
   itemsData: any[]
   subtotal: number
@@ -755,6 +902,13 @@ export async function buildOrderItemsData(
           },
         })
       : []
+  // 🔴 Codex servidor r2 (P2): un extra que ya no está (el dueño lo borró —borrado físico— o es de otro negocio) es un 400 explícito
+  // ANTES de leer su nombre o su precio. Antes era un TypeError ⇒ 500: la cola de la terminal reintentaba para siempre y el gerente no
+  // recibía aviso. Un 400 es definitivo para la terminal y su aviso (RECHAZADA) pide registrarla a mano. Vale para todo llamador.
+  const extrasQueNoEstan = [...new Set(allModifierIds)].filter(id => !modifiers.some(m => m.id === id))
+  if (extrasQueNoEstan.length > 0) {
+    throw new BadRequestError('Un extra de esta venta ya no existe en el catálogo', 'MODIFIER_NOT_FOUND', { modifierIds: extrasQueNoEstan })
+  }
 
   logger.info(`📱 [ORDER.MOBILE] Validated ${products.length} products, ${modifiers.length} modifiers, ${customInputs.length} custom items`)
 
@@ -778,48 +932,81 @@ export async function buildOrderItemsData(
     throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${missingIds.join(', ')}`)
   }
 
-  discounts.forEach(validateDiscountActive)
+  // De la cola (`llegada` sólo viene de ahí), el vencimiento se mide a la hora de la venta (S6); en línea, como siempre.
+  const horaDeVigencia = precioMostrado?.llegada ? precioMostrado.horaDeLaVenta : undefined
+  discounts.forEach(discount => validateDiscountActive(discount, { horaDeLaVenta: horaDeVigencia }))
+  // Estos son los descuentos que se van a calcular, no la foto previa del middleware. También protege a los cuatro callers de vales.
+  if (discounts.some(discount => discount.type === 'COMP') && (compAuthority?.canCompItems !== true || !compAuthority.performedBy)) {
+    throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
 
   // «Se cobra el precio que vio el cliente» (`precioQueVioElCliente.ts`): el precio de cada línea es el de la base, salvo
   // que la tablet haya mostrado uno MENOR que fue real en su ventana. Cada línea se decide sola (el mismo producto puede
-  // venir dos veces con precios distintos). Sin activación, `precioDeLinea` es `product.price` y nada más cambia.
+  // venir dos veces con precios distintos), y cada extra de la línea también. Sin activación, `precioDeLinea` es
+  // `product.price`, los extras su `price`, y nada más cambia.
   const precioDeLinea: Prisma.Decimal[] = productInputs.map(item => products.find(p => p.id === item.productId)!.price)
+  // Los extras respetados de cada línea, por `modifierId`; los demás se cobran a su precio de hoy.
+  const precioDeExtra: Array<Map<string, Prisma.Decimal>> = productInputs.map(() => new Map())
   const respetadas = new Set<number>()
   const cambiosDePrecio: CambioDePrecio[] = []
   if (precioMostrado) {
-    const lineas = productInputs.map((item, k) => {
-      const mostradoCents = precioMostradoValido(item.displayedUnitPrice)
+    const { horaDeLaVenta, llegada } = precioMostrado
+    // Cada precio a decidir: el del producto (`modifierId` null) y, si la línea trae `catalogAt`, el de cada extra suyo.
+    const precios = productInputs.flatMap((item, k) => {
       const catalogAt = typeof item.catalogAt === 'string' ? new Date(item.catalogAt) : null
-      const actualCents = Math.round(Number(precioDeLinea[k]) * 100)
-      const veredicto = clasificarLinea({ actualCents, mostradoCents, catalogAt, horaDeLaVenta: precioMostrado.horaDeLaVenta })
-      return { k, item, mostradoCents, catalogAt, actualCents, veredicto }
+      const precio = (modifierId: string | null, actual: Prisma.Decimal, mostradoCents: number | null) => {
+        const actualCents = Math.round(Number(actual) * 100)
+        const veredicto = clasificarLinea({ actualCents, mostradoCents, catalogAt, horaDeLaVenta, llegada })
+        return { k, item, modifierId, mostradoCents, catalogAt, actualCents, veredicto }
+      }
+      const extras = catalogAt
+        ? [...new Set(Array.isArray(item.modifierIds) ? item.modifierIds : [])].flatMap(id => {
+            const extra = modifiers.find(m => m.id === id)
+            return extra ? [precio(id, extra.price, precioDeExtraMostrado(item.displayedModifierPrices, id))] : []
+          })
+        : []
+      return [precio(null, precioDeLinea[k], precioMostradoValido(item.displayedUnitPrice)), ...extras]
     })
-    const buscar = lineas.filter(l => l.veredicto === 'BUSCAR')
-    const vigentes = buscar.length
+    const buscar = precios.filter(l => l.veredicto === 'BUSCAR')
+    const deProducto = buscar.filter(l => l.modifierId === null)
+    const deExtra = buscar.filter(l => l.modifierId !== null)
+    const ventana = (l: (typeof buscar)[number]) => ({
+      mostradoCents: l.mostradoCents!,
+      ...ventanaDeLaLinea(l.catalogAt!, horaDeLaVenta, llegada),
+    })
+    const vigentesDeProducto = deProducto.length
       ? await preciosQueFueronVigentes(
           venueId,
-          buscar.map(l => ({
-            productId: l.item.productId,
-            mostradoCents: l.mostradoCents!,
-            ...ventanaDeLaLinea(l.catalogAt!, precioMostrado.horaDeLaVenta),
-          })),
+          deProducto.map(l => ({ productId: l.item.productId, ...ventana(l) })),
           cliente,
         )
       : []
-    buscar.forEach((l, j) => {
-      if (!vigentes[j]) return
-      respetadas.add(l.k)
-      precioDeLinea[l.k] = new Prisma.Decimal(l.mostradoCents!).div(100)
-    })
+    const vigentesDeExtra = deExtra.length
+      ? await preciosDeExtrasQueFueronVigentes(
+          venueId,
+          deExtra.map(l => ({ modifierId: l.modifierId!, ...ventana(l) })),
+          cliente,
+        )
+      : []
+    const respetados = new Set([...deProducto.filter((_, j) => vigentesDeProducto[j]), ...deExtra.filter((_, j) => vigentesDeExtra[j])])
+    for (const l of respetados) {
+      const mostrado = new Prisma.Decimal(l.mostradoCents!).div(100)
+      if (l.modifierId !== null) precioDeExtra[l.k].set(l.modifierId, mostrado)
+      else {
+        respetadas.add(l.k)
+        precioDeLinea[l.k] = mostrado
+      }
+    }
     let sinReconocer = false
-    for (const l of lineas) {
-      if (l.mostradoCents === null || l.mostradoCents === l.actualCents || respetadas.has(l.k)) continue
+    for (const l of precios) {
+      if (l.mostradoCents === null || l.mostradoCents === l.actualCents || respetados.has(l)) continue
       // Bajó ⇒ se cobra el actual y sólo se avisa. Subió sin reconocerse ⇒ el actual, y en línea se rechaza.
       if (l.veredicto !== 'BAJO') sinReconocer = true
       cambiosDePrecio.push({
         externalId: typeof l.item.externalId === 'string' ? l.item.externalId : null,
         productId: l.item.productId,
         productName: products.find(p => p.id === l.item.productId)!.name,
+        ...(l.modifierId !== null ? { modifierId: l.modifierId } : {}),
         catalogAt: typeof l.item.catalogAt === 'string' ? l.item.catalogAt : null,
         displayedUnitPriceCents: l.mostradoCents,
         unitPriceCents: l.actualCents,
@@ -846,10 +1033,11 @@ export async function buildOrderItemsData(
     const product = products.find(p => p.id === item.productId)!
     const itemModifierIds = item.modifierIds || []
 
-    // Calculate modifier total
+    // Calculate modifier total — cada extra a su precio decidido (el que vio el cliente, si se respetó).
+    const precioDelExtra = (modifierId: string) => precioDeExtra[k].get(modifierId) ?? modifiers.find(m => m.id === modifierId)?.price
     const modifierTotal = itemModifierIds.reduce((sum, modifierId) => {
-      const modifier = modifiers.find(m => m.id === modifierId)
-      return sum + (modifier ? Number(modifier.price) : 0)
+      const precio = precioDelExtra(modifierId)
+      return sum + (precio ? Number(precio) : 0)
     }, 0)
 
     // ─── Venta por peso (soldByWeight) ───────────────────────────────────────
@@ -894,6 +1082,21 @@ export async function buildOrderItemsData(
         horaDelCatalogo: new Date(item.catalogAt!).toISOString(),
       })
     }
+    for (const [modifierId, precioRespetado] of precioDeExtra[k]) {
+      const extra = modifiers.find(m => m.id === modifierId)!
+      preciosRespetados.push({
+        externalId: typeof item.externalId === 'string' ? item.externalId : null,
+        productId: product.id,
+        producto: product.name,
+        modifierId,
+        extra: extra.name,
+        cantidad: item.quantity * itemModifierIds.filter(id => id === modifierId).length,
+        pesoKg: null,
+        precioRespetado: Number(precioRespetado),
+        precioActual: Number(extra.price),
+        horaDelCatalogo: new Date(item.catalogAt!).toISOString(),
+      })
+    }
     const itemTotal = lineBase + modifierTotal * item.quantity
     subtotal += itemTotal
 
@@ -928,7 +1131,7 @@ export async function buildOrderItemsData(
             modifierId,
             name: modifier.name,
             quantity: 1,
-            price: modifier.price,
+            price: precioDelExtra(modifierId)!,
           }
         }),
       },
@@ -950,6 +1153,10 @@ export async function buildOrderItemsData(
 
     return {
       productId: null,
+      // La llave de línea también en la línea libre (la terminal correlaciona su venta guardada). Basura ⇒ sin llave, como hoy.
+      ...(typeof item.externalId === 'string' && item.externalId.length >= 1 && item.externalId.length <= 256
+        ? { externalId: item.externalId }
+        : {}),
       productName: item.name || 'Otro importe',
       productSku: null,
       categoryName: null,
@@ -971,11 +1178,16 @@ export async function buildOrderItemsData(
   return { itemsData, subtotal, itemDiscountTotal, discounts, modifierSkus, cambiosDePrecio, preciosRespetados }
 }
 
-/** Una línea cobrada al precio MENOR que vio el cliente (rastro `ORDER_PREVIOUS_PRICE_HONORED`). Dinero en pesos. */
+/**
+ * Una línea (o un extra de ella, con `modifierId`) cobrada al precio MENOR que vio el cliente (rastro
+ * `ORDER_PREVIOUS_PRICE_HONORED`). Dinero en pesos; en un extra, por unidad del extra y `cantidad` = las que se cobraron.
+ */
 export type PrecioRespetado = {
   externalId: string | null
   productId: string
   producto: string
+  modifierId?: string
+  extra?: string
   cantidad: number
   pesoKg: number | null
   precioRespetado: number
@@ -998,9 +1210,12 @@ function validarOrigenYTipoDeVenta(input: Pick<CreateOrderInput, 'source' | 'ord
 
 /** Lo que la venta de mostrador resuelve ANTES de su transacción. Sólo LEE, con `prisma` (una transacción no pide otra conexión). */
 export interface PreparacionDeVenta {
-  precioMostrado: { horaDeLaVenta: Date; rechazarSiNoSeReconoce: boolean }
+  precioMostrado: { horaDeLaVenta: Date; llegada: Date | undefined; rechazarSiNoSeReconoce: boolean }
+  enLaCola: boolean
   externalId: string | null
   validatedStaffId: string | undefined
+  terminalId: string | null
+  fuente: NonNullable<CreateOrderInput['source']>
   itemsNormales: CreateOrderItemInput[]
   promocionesUnicas: Array<NonNullable<CreateOrderItemInput['promotionRef']>>
   orderNumber: string
@@ -1032,16 +1247,22 @@ export type VentaDeMostradorEnTx =
   | { order: OrdenCreada; promotionTotals: TotalesDePromocion | null; venta: VentaCalculada }
 
 /**
- * La parte de `createOrderWithItems` de ANTES de su transacción (extraída sin cambiarla, S2b): valida, resuelve el personal, el
- * cliente y la reservación, y separa las promociones. `llegada` = la hora en que llegó la petición.
+ * La parte de `createOrderWithItems` de ANTES de su transacción (extraída sin cambiarla, S2b): valida, resuelve el personal, la
+ * terminal, el cliente y la reservación, y separa las promociones. `llegada` = la hora en que llegó la petición.
  */
 export async function prepararVentaDeMostrador(
   venueId: string,
   input: CreateOrderInput,
   llegada: Date = new Date(),
 ): Promise<PreparacionDeVenta> {
-  // En línea, la hora de la venta es la llegada; de la cola, la captura del aparato (acotada a la llegada).
-  const precioMostrado = { horaDeLaVenta: horaDeLaVenta(input, llegada), rechazarSiNoSeReconoce: input.isOfflineReplay !== true }
+  // En línea, la hora de la venta es la llegada; de la cola, la captura del aparato (acotada a la llegada), y la llegada
+  // también acota la ventana de cada línea (`ventanaDeLaLinea`: el reloj del aparato puede ir atrasado o adelantado).
+  const enLaCola = input.isOfflineReplay === true
+  const precioMostrado = {
+    horaDeLaVenta: horaDeLaVenta(input, llegada),
+    llegada: enLaCola ? llegada : undefined,
+    rechazarSiNoSeReconoce: !enLaCola,
+  }
 
   // Una venta tiene que traer ALGO. Lo exigía buildOrderItemsData, que a partir
   // de aquí sólo ve las líneas normales — sin este guard, un body vacío crearía
@@ -1050,15 +1271,38 @@ export async function prepararVentaDeMostrador(
     throw new BadRequestError('Se requiere al menos un artículo o una promoción')
   }
 
+  for (const item of input.items) {
+    if (item.isCortesia !== undefined && typeof item.isCortesia !== 'boolean') {
+      throw new BadRequestError('isCortesia debe ser un booleano')
+    }
+    if (!item.isCortesia) continue
+    if (typeof item.cortesiaReason !== 'string' || !item.cortesiaReason.trim()) {
+      throw new BadRequestError('La razón de cortesía es requerida')
+    }
+    if (item.externalId != null && (typeof item.externalId !== 'string' || !item.externalId || item.externalId.length > 256)) {
+      throw new BadRequestError('Identificador de producto inválido')
+    }
+    if (item.discountId) throw new BadRequestError('Un artículo no puede tener cortesía y descuento al mismo tiempo')
+    if (item.promotionRef) throw new BadRequestError('Una promoción no puede darse de cortesía al crear la cuenta')
+    if (input.canCompItems !== true || !input.performedBy) throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
+
   await assertVenueSalesEnabled(venueId)
 
   const validatedStaffId = await validateStaffVenue(input.staffId, venueId)
+  const terminalId = await terminalDelToken(venueId, input.terminalSerialNumber)
+  const fuente = terminalId ? 'TPV' : input.source || 'AVOQADO_IOS'
 
   // Los items con `promotionRef` NO pasan por el alta normal: su precio lo
   // resuelve el motor de promociones (espejo exacto de applyAddItems en
   // sync.mobile.service.ts). Un item sin promotionRef se comporta igual que hoy.
   const itemsConPromocion = input.items.filter(it => it.promotionRef)
   const itemsNormales = sinLlavesDeLineaRepetidas(input.items.filter(it => !it.promotionRef))
+  // ponytail: con combos, la base del descuento de catálogo de la cuenta (y a qué renglones toca) no está definida; ningún
+  // cliente lo manda hoy (la terminal no vende promociones). Se define cuando alguien lo necesite.
+  if (input.orderDiscountId && itemsConPromocion.length > 0) {
+    throw new BadRequestError('El descuento de la cuenta del catálogo todavía no se puede combinar con promociones.')
+  }
   // El chequeo de preparación consulta con su propio cliente: va ANTES de la transacción y con TODAS las líneas
   // (`buildOrderItemsData` con `tx` ya no lo hace).
   await assertPreparationAuthoringAccess(venueId, input.items)
@@ -1121,8 +1365,11 @@ export async function prepararVentaDeMostrador(
 
   return {
     precioMostrado,
+    enLaCola,
     externalId: normalizeExternalId(input.externalId),
     validatedStaffId,
+    terminalId,
+    fuente,
     itemsNormales,
     promocionesUnicas,
     orderNumber,
@@ -1146,8 +1393,11 @@ export async function crearVentaDeMostradorEnTx(
 ): Promise<VentaDeMostradorEnTx> {
   const {
     precioMostrado,
+    enLaCola,
     externalId,
     validatedStaffId,
+    terminalId,
+    fuente,
     itemsNormales,
     promocionesUnicas,
     orderNumber,
@@ -1175,40 +1425,96 @@ export async function crearVentaDeMostradorEnTx(
   // vacía. Una venta de PURAS promociones (el combo ES la venta) es legítima,
   // así que se salta cuando no hay líneas normales. Con `tx`, nunca `prisma`: una transacción no puede pedir una
   // segunda conexión (con el pool lleno esperaría hasta P2024). Su 409 revierte sin escribir nada.
-  const { itemsData, subtotal, itemDiscountTotal, discounts, cambiosDePrecio, preciosRespetados } =
-    itemsNormales.length > 0
-      ? await buildOrderItemsData(venueId, itemsNormales, undefined, precioMostrado, tx)
-      : {
-          itemsData: [] as any[],
-          subtotal: 0,
-          itemDiscountTotal: 0,
-          discounts: [] as Array<{ id: string; [key: string]: any }>,
-          cambiosDePrecio: [] as CambioDePrecio[],
-          preciosRespetados: [] as PrecioRespetado[],
-        }
+  const {
+    itemsData,
+    subtotal,
+    itemDiscountTotal: catalogDiscountTotal,
+    discounts,
+    cambiosDePrecio,
+    preciosRespetados,
+  } = itemsNormales.length > 0
+    ? await buildOrderItemsData(venueId, itemsNormales, undefined, precioMostrado, tx, input)
+    : {
+        itemsData: [] as any[],
+        subtotal: 0,
+        itemDiscountTotal: 0,
+        discounts: [] as Array<{ id: string; [key: string]: any }>,
+        cambiosDePrecio: [] as CambioDePrecio[],
+        preciosRespetados: [] as PrecioRespetado[],
+      }
 
-  // Order-level flat discount (input.discount, cents) composes additively with the
-  // per-item Discount reductions above — same shape as TPV's `discountAmount =
-  // itemDiscountPesos + orderDiscountPesos` (order.tpv.service.ts createOrderWithItems).
-  // It's clamped against what's left of the subtotal *after* item discounts so the
-  // order can never go negative.
+  // El helper también crea vales: sólo ESTE flujo aplica cortesías, sobre el bruto ya calculado con peso y extras.
+  const inputsEnOrdenDeCreacion = [...itemsNormales.filter(i => i.productId), ...itemsNormales.filter(i => !i.productId)]
+  let cortesiaTotal = new Prisma.Decimal(0)
+  itemsData.forEach((item, index) => {
+    const requested = inputsEnOrdenDeCreacion[index]
+    if (!requested.isCortesia) return
+    if (requested.externalId) item.externalId = requested.externalId
+    item.isCortesia = true
+    item.cortesiaReason = requested.cortesiaReason!.trim()
+    item.discountAmount = item.total
+    cortesiaTotal = cortesiaTotal.plus(item.total)
+  })
+  const itemDiscountTotal = catalogDiscountTotal + cortesiaTotal.toNumber()
+
+  // Descuento de catálogo de la CUENTA (como `/tpv/with-items`): del negocio y vigente, o la venta entera se rechaza.
+  const orderDiscount = input.orderDiscountId ? await tx.discount.findFirst({ where: { id: input.orderDiscountId, venueId } }) : null
+  if (input.orderDiscountId && !orderDiscount) {
+    throw new BadRequestError(`Descuento no encontrado o no pertenece a este local: ${input.orderDiscountId}`)
+  }
+  if (orderDiscount) validateDiscountActive(orderDiscount, { horaDeLaVenta: enLaCola ? precioMostrado.horaDeLaVenta : undefined })
+  if (orderDiscount?.type === 'COMP' && (input.canCompItems !== true || !input.performedBy)) {
+    throw new ForbiddenError('No tienes permiso para dar cortesías')
+  }
+
+  // Order-level discount composes additively with the per-item reductions above (cortesías
+  // included) — same shape as TPV's `discountAmount = itemDiscountPesos + orderDiscountPesos`
+  // (order.tpv.service.ts createOrderWithItems), on what's left of the subtotal *after* them, so
+  // the order can never go negative. With `orderDiscountId` the catalog discount decides the
+  // amount and `discount` is not added (in /tpv it only repeated that same amount); without it,
+  // `discount` (cents) is the flat amount, clamped.
   const remainingAfterItemDiscounts = Math.max(0, subtotal - itemDiscountTotal)
-  const orderLevelDiscountDecimal = Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
+  const orderLevelDiscountDecimal = orderDiscount
+    ? calculateDiscountPesos(orderDiscount, remainingAfterItemDiscounts)
+    : Math.min(remainingAfterItemDiscounts, Math.max(0, (input.discount || 0) / 100))
+  if (orderDiscount && (input.discount ?? 0) > 0) {
+    logger.warn('[ORDER.MOBILE] Llegaron orderDiscountId y discount: manda el de catálogo y el libre no se suma', {
+      venueId,
+      orderDiscountId: orderDiscount.id,
+      discountCents: input.discount,
+      catalogoPesos: orderLevelDiscountDecimal,
+    })
+  }
   const discountDecimal = itemDiscountTotal + orderLevelDiscountDecimal
   const total = subtotal - discountDecimal + tipDecimal
-  const venta = { subtotal, discountDecimal, total, discounts, cambiosDePrecio }
+  const venta = {
+    subtotal,
+    discountDecimal,
+    total,
+    discounts: orderDiscount ? [...discounts, orderDiscount] : discounts,
+    cambiosDePrecio,
+  }
 
   if (input.tableId) await lockTableOrderScope(tx, { venueId, orderIds: [], tableIds: [input.tableId] })
   // 🔴 La venta se toma en el mostrador: la orden nace en el turno de caja abierto AHORA
   // (`../shared/turnoDeCaja.ts`), resuelto con el MISMO cliente de la transacción — pasar
   // `prisma` aquí se saldría de ella. Desde la fase 1, `getActiveShifts` cuenta las órdenes
   // del turno agrupando por `Order.shiftId`. Opcional: sin turno abierto la venta ocurre igual.
-  const currentShift = await turnoAbiertoDelNegocio(tx, venueId)
+  const turnoVivo = await turnoAbiertoDelNegocio(tx, venueId)
+  // «Cobrar sin red» (D4): una venta tardía de un turno que ya no es el vivo no entra al nuevo (su pago tampoco: `registrarAbonoEnTx`).
+  // Codex servidor r1 #1: sólo si es un turno REAL de este negocio; uno inventado o ajeno se ignora (el vivo, como hoy).
+  // S3: también la caja que el POS capturó al vender (su turno ligado, o «caja cerrada sin turno» ⇒ aparte). Una sola regla con el
+  // pago y con abrir mesa: `ventaDeLaColaEnTx` + `turnoDeLaOrdenQueNace`.
+  const ventaDeLaCola = await ventaDeLaColaEnTx(tx, venueId, {
+    shiftIdDeLaVenta: input.shiftIdDeLaVenta,
+    cashDrawerSessionId: input.isOfflineReplay === true ? input.cashDrawerSessionId : null,
+  })
+  const turnoDeLaOrden = await turnoDeLaOrdenQueNace(tx, venueId, ventaDeLaCola, turnoVivo)
 
   const createdOrder = await tx.order.create({
     data: {
       venueId,
-      shiftId: currentShift?.id ?? null,
+      shiftId: turnoDeLaOrden?.id ?? null,
       orderNumber,
       externalId,
       reservationId: linkedReservationId,
@@ -1219,8 +1525,10 @@ export async function crearVentaDeMostradorEnTx(
       paymentStatus: 'PENDING',
       kitchenStatus: 'PENDING',
       type: input.orderType || 'DINE_IN',
-      source: input.source || 'AVOQADO_IOS',
+      source: fuente,
+      terminalId,
       customerId: normalizedCustomerId,
+      payLater: input.payLater ?? null,
       subtotal: new Prisma.Decimal(subtotal),
       discountAmount: new Prisma.Decimal(discountDecimal),
       taxAmount: new Prisma.Decimal(0),
@@ -1255,7 +1563,7 @@ export async function crearVentaDeMostradorEnTx(
   // discounts. One row per discounted item (same shape as TPV).
   const discountedItems = createdOrder.items.filter((item: any) => item.appliedDiscountId)
   const appliedByStaffVenue =
-    validatedStaffId && (discountedItems.length > 0 || (input.discount ?? 0) > 0)
+    validatedStaffId && (discountedItems.length > 0 || orderDiscount || (input.discount ?? 0) > 0)
       ? await tx.staffVenue.findFirst({
           where: { staffId: validatedStaffId, venueId },
           select: { id: true },
@@ -1275,6 +1583,46 @@ export async function crearVentaDeMostradorEnTx(
     })
   }
 
+  const cortesiaItems = createdOrder.items.filter(item => item.isCortesia)
+  if (cortesiaItems.length > 0) {
+    const actor = input.performedBy!
+    const actorStaffVenue = await tx.staffVenue.findFirst({ where: { staffId: actor, venueId, active: true }, select: { id: true } })
+    await tx.orderDiscount.create({
+      data: filaDeCortesias({
+        orderId: createdOrder.id,
+        renglones: cortesiaItems.map(item => ({ id: item.id, brutoPesos: Number(item.total), motivo: item.cortesiaReason })),
+        appliedById: actorStaffVenue?.id ?? null,
+      }),
+    })
+    await sincronizarRepartos(tx, createdOrder.id)
+    for (const item of cortesiaItems) {
+      const metadata = {
+        orderItemId: item.id,
+        productId: item.productId,
+        productName: item.productName,
+        lineSubtotalGivenAway: Number(item.total),
+        cortesiaReason: item.cortesiaReason,
+      }
+      await tx.orderAction.create({
+        data: accionDeCortesia({
+          orderId: createdOrder.id,
+          performedById: actor,
+          renglon: { id: item.id, brutoPesos: Number(item.total), motivo: item.cortesiaReason },
+          productId: item.productId,
+          productName: item.productName ?? 'Otro importe',
+        }),
+      })
+      await writeLegacyActivityAuditTx(tx, {
+        staffId: actor,
+        venueId,
+        action: 'ITEM_COMPED',
+        entity: 'OrderItem',
+        entityId: item.id,
+        data: { orderId: createdOrder.id, ...metadata },
+      })
+    }
+  }
+
   // 🔴 Un precio respetado nunca queda sin rastro: la fila va en ESTA transacción y, si falla, la venta no se guarda.
   if (preciosRespetados.length > 0) {
     await writeLegacyActivityAuditTx(tx, {
@@ -1285,7 +1633,7 @@ export async function crearVentaDeMostradorEnTx(
       entityId: createdOrder.id,
       data: {
         orderNumber,
-        source: input.source || 'AVOQADO_IOS',
+        source: fuente,
         enLaCola: input.isOfflineReplay === true,
         horaDeLaVenta: precioMostrado.horaDeLaVenta.toISOString(),
         lineas: preciosRespetados,
@@ -1294,17 +1642,23 @@ export async function crearVentaDeMostradorEnTx(
   }
 
   if (promocionesUnicas.length === 0) {
-    // B2 (founder, 27-sep): el descuento de CUENTA es su propia fila; la cabecera ya lo trae (`discountDecimal`).
+    // B2 (founder, 27-sep): el descuento de CUENTA es su propia fila; la cabecera ya lo trae (`discountDecimal`). El de
+    // catálogo, sobre los renglones sin cortesía (como `/tpv/with-items`).
     if (orderLevelDiscountDecimal > 0) {
+      const appliedById = appliedByStaffVenue?.id ?? null
       await tx.orderDiscount.create({
-        data: filaDeDescuentoDeCuenta({
-          orderId: createdOrder.id,
-          montoPesos: orderLevelDiscountDecimal,
-          appliedById: appliedByStaffVenue?.id ?? null,
-        }),
+        data: orderDiscount
+          ? filaDeDescuentoDeCatalogoEnCuenta({
+              orderId: createdOrder.id,
+              discount: orderDiscount,
+              montoPesos: orderLevelDiscountDecimal,
+              appliedById,
+              renglonesSinCortesia: createdOrder.items.filter(item => !item.isCortesia).map(item => item.id),
+            })
+          : filaDeDescuentoDeCuenta({ orderId: createdOrder.id, montoPesos: orderLevelDiscountDecimal, appliedById }),
       })
-      await sincronizarRepartos(tx, createdOrder.id)
     }
+    if (orderLevelDiscountDecimal > 0) await sincronizarRepartos(tx, createdOrder.id)
     return { order: createdOrder, promotionTotals: null, venta }
   }
 
@@ -1463,12 +1817,13 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
   )
   validarOrigenYTipoDeVenta(input)
 
-  // La hora de llegada (la hora de la venta en línea; `prepararVentaDeMostrador`).
+  // La hora de llegada (la hora de la venta en línea y la que acota la ventana de cada línea; `prepararVentaDeMostrador`).
   const llegada = new Date()
 
   // Idempotency short-circuit BEFORE any validation/creation work: an offline
   // client retrying after a lost response must get the original order back.
   const externalId = normalizeExternalId(input.externalId)
+  rechazarLlaveDeCambio(externalId)
   if (externalId) {
     const existingOrder = await prisma.order.findUnique({
       where: {
@@ -1550,6 +1905,8 @@ export async function createOrderWithItems(venueId: string, input: CreateOrderIn
     })
   }
 
+  avisarPrecioNoReconocido(venueId, input, orderFinal, cambiosDePrecio)
+
   // Flatten and return response
   return {
     ...toCreatedOrderResponse(orderFinal as typeof order),
@@ -1597,8 +1954,11 @@ async function responderConOrdenExistente(
       productId: i.productId,
       productName: i.productName,
       unitPrice: Number(i.unitPrice),
+      modifiers: i.modifiers.map(m => ({ modifierId: m.modifierId, price: Number(m.price) })),
     })),
   )
+  // El primer intento ya avisó (si llegó a hacerlo): el aviso se deduplica por llave.
+  avisarPrecioNoReconocido(venueId, input, orden, cambios)
   return cambios.length ? { ...respuesta, priceChanges: cambios } : respuesta
 }
 
@@ -1655,6 +2015,8 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
           type: true,
           // 1b Q27/Q28: qué cobro es saldo de tarjeta.
           tenderType: { select: { systemKind: true } },
+          // Rappi 2b: lo cobrado por cuenta de Rappi (sólo alimenta `deliveryCashBreakdown`; no se serializa en `payments[]`).
+          thirdPartyCashAmount: true,
           processedBy: {
             select: { firstName: true, lastName: true },
           },
@@ -1691,10 +2053,11 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
   // Sólo dinero ocurrido: COMPLETED, incluido `type` para que REFUND no reabra deuda.
   // El calculador compartido suma la propina al total y al pagado; no se resta de la mercancía.
   // Proyección pura de lo ya leído: sin otra consulta ni cambios a los importes legacy.
-  const balance = computeOrderBalance(
-    flattenedOrder,
-    (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED'),
-  )
+  const completados = (flattenedOrder.payments || []).filter((p: any) => p.status === 'COMPLETED')
+  const balance = computeOrderBalance(flattenedOrder, completados)
+  // Rappi 2b: un pedido con repartidor propio en efectivo debe además propina y tarifa de Rappi (null en todo lo demás). Una venta ya
+  // cerrada no vuelve a pedir nada a la caja (Codex código r1 #5): si se saldó con otro medio, la tarifa la concilia el gerente.
+  const reparto = esVentaCerrada(flattenedOrder.paymentStatus) ? null : saldoDeCobroDeReparto(flattenedOrder, completados)
 
   return {
     id: flattenedOrder.id,
@@ -1713,8 +2076,18 @@ export async function getOrder(venueId: string, orderId: string): Promise<OrderD
     preBillBalance: {
       orderTotalCents: pesosToCents(balance.total.toNumber()),
       totalPaidCents: pesosToCents(balance.paidAmount.toNumber()),
-      remainingBalanceCents: pesosToCents(balance.remainingBalance.toNumber()),
+      remainingBalanceCents: pesosToCents((reparto ? reparto.totalACobrar : balance.remainingBalance).toNumber()),
       tipAmountCents: pesosToCents(balance.tipAmount.toNumber()),
+      ...(reparto
+        ? {
+            deliveryCashBreakdown: {
+              saleCents: pesosToCents(reparto.ventaPendiente.toNumber()),
+              tipCents: pesosToCents(reparto.propinaPendiente.toNumber()),
+              thirdPartyCents: pesosToCents(reparto.tercerosPendiente.toNumber()),
+              thirdPartyLabel: 'Rappi',
+            },
+          }
+        : {}),
     },
     staffName: flattenedOrder.servedBy ? `${flattenedOrder.servedBy.firstName} ${flattenedOrder.servedBy.lastName}`.trim() : null,
     // Additive: dueño del cheque con id — para la UI read-only de propiedad de mesa.
@@ -1825,6 +2198,7 @@ export interface OrderDetailsInput {
 }
 
 export interface OpcionesDeDetalleDeCuenta {
+  customerAttribution?: CustomerAttributionActor
   /**
    * 🔴 R4-2 (ronda 4 post-QA de sellos tardíos): ¿quien edita tiene `payments:create`? Lo resuelven el controller (resolvedor
    * efectivo), el reducer offline (`authorizeIntent`) y el MCP (`guard.tienePermiso`). Sin él, en una venta COBRADA no se cambia
@@ -1864,6 +2238,7 @@ export async function updateOrderDetailsInTransaction(
       orderId,
       clienteNuevo: input.customerId || null,
       puedeCobrar: opciones.puedeCambiarClienteEnVentaCobrada === true,
+      actor: opciones.customerAttribution,
     })
   }
 
@@ -2127,6 +2502,40 @@ export async function removeOrderDiscount(venueId: string, orderId: string, orde
 // MARK: - Separate checks (Square: dividir en cuentas separadas)
 
 /**
+ * La parte separada de un fiado sigue a nombre de su cliente (hz:01185fe7:D2): sin su `OrderCustomer` se borraba de su
+ * saldo y de «Cuentas por cobrar». Una cuenta que no es fiado se separa como antes, sin copiar al cliente.
+ */
+function clienteDeLaParteSeparada(source: {
+  payLater: boolean | null
+  customerId: string | null
+  orderCustomers: { customerId: string; isPrimary: boolean }[]
+}): Pick<Prisma.OrderUncheckedCreateInput, 'customerId' | 'orderCustomers'> {
+  const cliente = source.payLater === true ? clienteDelFiado(source) : null
+  if (!cliente) return {}
+  return {
+    customerId: cliente.dueno,
+    orderCustomers: {
+      create: [{ customerId: cliente.dueno, isPrimary: true }, ...cliente.otros.map(customerId => ({ customerId, isPrimary: false }))],
+    },
+  }
+}
+
+/**
+ * El fiado que se queda también debe salir como deuda: si su cliente estaba sólo en «Detalles» (sin `OrderCustomer`), se le
+ * pone su vínculo al dividirlo (Codex r2 de D2). Su cliente ya está apartado (`apartarClientesDelFiado`).
+ */
+async function vincularAlDuenoDelFiado(
+  tx: Prisma.TransactionClient,
+  source: { id: string; payLater: boolean | null; customerId: string | null; orderCustomers: { customerId: string; isPrimary: boolean }[] },
+) {
+  const cliente = source.payLater === true ? clienteDelFiado(source) : null
+  if (!cliente || source.orderCustomers.some(c => c.customerId === cliente.dueno)) return
+  await tx.orderCustomer.create({
+    data: { orderId: source.id, customerId: cliente.dueno, isPrimary: !source.orderCustomers.some(c => c.isPrimary) },
+  })
+}
+
+/**
  * TABLE_SERVICE — splits the selected SENT items of an open check into a NEW
  * check on the SAME table (Square's separate checks). The source keeps the
  * rest; both orders' money is recomputed from their items. The table stays
@@ -2144,6 +2553,8 @@ export async function splitOrderItemsInTransaction(
     throw new BadRequestError('itemIds es requerido')
   }
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
+  const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
     await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
   } catch (error) {
@@ -2164,14 +2575,21 @@ export async function splitOrderItemsInTransaction(
       paidAmount: true,
       shiftId: true,
       contratoDePrecio: true,
+      payLater: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
-      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true } },
+      items: { select: { id: true, orderPromotionId: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
   })
   if (!source) throw new NotFoundError('Order not found')
+  if (source.payLater === true) {
+    exigirClientesApartados(clientesApartados, source, 'dividía')
+    clienteDelFiado(source) // una cuenta con dos clientes no se divide (FIADO_CON_DOS_CLIENTES)
+  }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
@@ -2253,6 +2671,9 @@ export async function splitOrderItemsInTransaction(
       // Separar cuenta no cambia el precio que el cliente ya vio: la cuenta nueva
       // hereda el mismo contrato del origen, nunca se resuelve de nuevo.
       contratoDePrecio: source.contratoDePrecio,
+      // La marca «Pagar después» se hereda: separar no decide si es fiado (`shared/porCobrar.ts`).
+      payLater: source.payLater,
+      ...clienteDeLaParteSeparada(source),
     },
     select: { id: true, orderNumber: true, version: true },
   })
@@ -2261,6 +2682,7 @@ export async function splitOrderItemsInTransaction(
     where: { id: { in: toMove }, orderId: source.id },
     data: { orderId: created.id },
   })
+  await vincularAlDuenoDelFiado(tx, source)
 
   // La INSTANCIA de cada promoción movida completa sigue a sus líneas: si se
   // quedara en el origen, el histórico y el guard de reembolso apuntarían a
@@ -2325,6 +2747,8 @@ export async function splitOrderItems(venueId: string, orderId: string, itemIds:
  */
 export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient, venueId: string, orderId: string, staffId?: string) {
   const { recalculateOrderTotals } = await import('./comp-item.mobile.service')
+  // Negocio → Cliente → mesa (`apartarClientesDelFiado`).
+  const clientesApartados = await apartarClientesDelFiado(tx, venueId, [orderId])
   try {
     await lockTableOrderScope(tx, { venueId, orderIds: [orderId] })
   } catch (error) {
@@ -2345,14 +2769,21 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
       paidAmount: true,
       shiftId: true,
       contratoDePrecio: true,
+      payLater: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
       areaTicketCheckoutSession: { select: { id: true } },
-      items: { select: { id: true, seat: true, areaTicketLineId: true } },
+      items: { select: { id: true, seat: true, areaTicketLineId: true, releasedAreaTicketLineId: true } },
       orderDiscounts: { select: { id: true } },
       serviceCharges: { select: { id: true, isAutomatic: true } },
     },
   })
   if (!source) throw new NotFoundError('Order not found')
+  if (source.payLater === true) {
+    exigirClientesApartados(clientesApartados, source, 'dividía')
+    clienteDelFiado(source) // una cuenta con dos clientes no se divide (FIADO_CON_DOS_CLIENTES)
+  }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; rearmarla aquí cobraría
   // el IVA dos veces (P12). Esos cambios se hacen en el POS externo.
   rechazarSiEsImportada(source)
@@ -2421,6 +2852,9 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
         // Dividir por puesto no cambia el precio que el cliente ya vio: cada
         // cheque por asiento hereda el mismo contrato del origen.
         contratoDePrecio: source.contratoDePrecio,
+        // La marca «Pagar después» se hereda (`shared/porCobrar.ts`).
+        payLater: source.payLater,
+        ...clienteDeLaParteSeparada(source),
       },
       select: { id: true, orderNumber: true },
     })
@@ -2431,6 +2865,8 @@ export async function splitOrderBySeatInTransaction(tx: Prisma.TransactionClient
     movedItemIds.push(...itemIds)
     results.push({ id: newOrder.id, orderNumber: newOrder.orderNumber, seat })
   }
+
+  await vincularAlDuenoDelFiado(tx, source)
 
   // 🔴 Recalcular DENTRO de la tx (auditoría): un crash después del commit y
   // antes del recálculo dejaría el origen sobre-cobrando los asientos movidos.
@@ -2489,6 +2925,8 @@ export async function mergeOrdersInTransaction(
     throw new BadRequestError('No se puede fusionar una cuenta consigo misma')
   }
 
+  // Negocio → Cliente → mesa (`apartarClientesDelFiado`): la cuenta que queda recibe el vínculo del fiado.
+  const clientesApartados = await apartarClientesDelFiado(tx, venueId, [targetOrderId, sourceOrderId])
   let scope: Awaited<ReturnType<typeof lockTableOrderScope>>
   try {
     scope = await lockTableOrderScope(tx, { venueId, orderIds: [targetOrderId, sourceOrderId] })
@@ -2505,7 +2943,12 @@ export async function mergeOrdersInTransaction(
   // R14-1: lo que dice si un lado es cuenta con vales (su sesión, o un renglón de vale de una cuenta ya dividida antes).
   const valesDeLaCuenta = {
     areaTicketCheckoutSession: { select: { id: true } },
-    items: { where: { areaTicketLineId: { not: null } }, select: { areaTicketLineId: true }, take: 1 },
+    items: {
+      // D1: el renglón de un vale revendido (procedencia) también hace a la cuenta «con vales».
+      where: { OR: [{ areaTicketLineId: { not: null } }, { releasedAreaTicketLineId: { not: null } }] as Prisma.OrderItemWhereInput[] },
+      select: { areaTicketLineId: true, releasedAreaTicketLineId: true },
+      take: 1,
+    },
   } as const
   const [target, source] = await Promise.all([
     tx.order.findFirst({
@@ -2572,7 +3015,12 @@ export async function mergeOrdersInTransaction(
       id: true,
       specialRequests: true,
       contratoDePrecio: true,
+      payLater: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
       originSystem: true,
+      source: true,
+      posRawData: true,
       taxAmount: true,
       _count: { select: { items: true } },
       orderDiscounts: { select: { id: true }, take: 1 },
@@ -2586,13 +3034,27 @@ export async function mergeOrdersInTransaction(
       status: { notIn: ['COMPLETED', 'CANCELLED', 'DELETED'] },
       paymentStatus: { notIn: ['PAID', 'PARTIAL'] },
     },
-    select: { id: true, specialRequests: true, contratoDePrecio: true, paidAmount: true, originSystem: true },
+    select: {
+      id: true,
+      specialRequests: true,
+      contratoDePrecio: true,
+      payLater: true,
+      paidAmount: true,
+      customerId: true,
+      orderCustomers: { select: { customerId: true, isPrimary: true } },
+      originSystem: true,
+      source: true,
+      posRawData: true,
+    },
   })
   if (!freshSource || !freshTarget) {
     throw new BadRequestError('La cuenta cambió mientras se fusionaba — vuelve a intentar')
   }
   // R11 (Codex r5): la cabecera de una importada manda y sus renglones traen el IVA dentro y por pieza; fusionarla (en
   // cualquiera de los dos lados) rearmaría su dinero aquí y cobraría el IVA dos veces (P12). Se junta en el POS externo.
+  // Rappi primero: su mensaje dice qué hacer («cancélalo en la app de Rappi»); el candado general de plataforma va después.
+  rechazarCancelacionLocalDeRappi(freshSource)
+  rechazarCancelacionLocalDeRappi(freshTarget)
   rechazarSiEsImportada(freshSource)
   rechazarSiEsImportada(freshTarget)
   await rechazarSiEsCuentaDeTarjetas(tx, sourceOrderId, 'uniones con otra cuenta')
@@ -2602,6 +3064,29 @@ export async function mergeOrdersInTransaction(
   }
   if (freshSource.orderDiscounts.length > 0 || freshSource.serviceCharges.some(sc => !sc.isAutomatic)) {
     throw new BadRequestError('La cuenta origen recibió descuentos o cobros durante la fusión — vuelve a intentar')
+  }
+  // 🔴 Un fiado no se pierde al juntar (hz:01185fe7:D2): la cuenta que queda, si es fiado, queda a nombre de su cliente y con
+  // su vínculo. Si una de las dos es fiado y son de clientes DISTINTOS no se juntan, en cualquier sentido (founder 27-oct,
+  // «a»): la deuda de Ana no se vuelve de Bruno, ni la cuenta de Bruno se suma a la deuda de Ana.
+  const hayFiado = freshSource.payLater === true || freshTarget.payLater === true
+  let duenoQueQueda: string | null = null
+  if (hayFiado) {
+    exigirUnSoloCliente(freshSource)
+    exigirUnSoloCliente(freshTarget)
+    for (const lado of [freshSource, freshTarget]) if (lado.payLater === true) exigirClientesApartados(clientesApartados, lado, 'juntaba')
+    const duenoDelOrigen = duenoDeLaCuenta(freshSource)
+    const duenoDelDestino = duenoDeLaCuenta(freshTarget)
+    if (duenoDelOrigen && duenoDelDestino && duenoDelOrigen !== duenoDelDestino) {
+      throw new BadRequestError(
+        'Una de estas cuentas es un «Pagar después» y son de clientes distintos: no se pueden juntar. Cóbralas por separado.',
+        'MERGE_FIADO_DE_OTRO_CLIENTE',
+      )
+    }
+    duenoQueQueda = duenoDelDestino ?? duenoDelOrigen
+    // El vínculo se escribe con el cliente apartado; si no lo está (cambió en medio), se reintenta.
+    if (duenoQueQueda && !clientesApartados.has(duenoQueQueda)) {
+      throw new ConflictError('La cuenta cambió de cliente mientras se juntaba — vuelve a intentar', 'VERSION_CONFLICT')
+    }
   }
   // Fusionar CANCELA el origen: un cobro de terminal sin desenlace acreditado sobre él aterrizaría en una orden
   // cancelada. Mismo 409 que `cancelOrder`, con `orderId` aditivo para decir cuál cuenta lo tiene. El DESTINO no se
@@ -2683,12 +3168,27 @@ export async function mergeOrdersInTransaction(
     where: { id: target.id },
     data: {
       contratoDePrecio: combinarContratos(freshTarget.contratoDePrecio, freshSource.contratoDePrecio),
+      // Si una de las dos era fiado, lo que queda es fiado: la deuda no se esconde al juntar (`shared/porCobrar.ts`).
+      payLater: combinarPayLater(freshTarget.payLater, freshSource.payLater),
+      ...(duenoQueQueda && !freshTarget.customerId ? { customerId: duenoQueQueda } : {}),
       ...(impuestoDelOrigen.gt(0) ? { taxAmount: { increment: impuestoDelOrigen } } : {}),
       ...(freshSource.specialRequests?.trim()
         ? { specialRequests: [freshTarget.specialRequests, freshSource.specialRequests].filter(Boolean).join(' · ') }
         : {}),
     },
   })
+
+  if (duenoQueQueda) {
+    const destinoTienePrimario = freshTarget.orderCustomers.some(c => c.isPrimary)
+    const otrosDelOrigen = freshSource.payLater === true ? freshSource.orderCustomers.map(c => c.customerId) : []
+    await tx.orderCustomer.createMany({
+      data: [
+        { orderId: target.id, customerId: duenoQueQueda, isPrimary: !destinoTienePrimario },
+        ...[...new Set(otrosDelOrigen)].filter(id => id !== duenoQueQueda).map(customerId => ({ orderId: target.id, customerId, isPrimary: false })),
+      ],
+      skipDuplicates: true,
+    })
+  }
 
   const removedSource = await tx.order.update({
     where: { id: source.id },
@@ -2876,6 +3376,20 @@ export interface CashPaymentInput {
    * ingreso se está yendo por terminales ajenas.
    */
   externalSource?: string
+  /** «Cobrar sin red» (D4): el turno en que se vendió (cola de la terminal). Si ya no es el vivo, el pago queda sin turno. */
+  shiftIdDeLaVenta?: string
+  /** S3: la caja que el POS tenía abierta al cobrar (sólo en un replay de la cola). */
+  cashDrawerSessionId?: string
+  /** Epoch ms del aparato al COBRAR (número o texto de dígitos); sólo cuenta con `isOfflineReplay` (`horaDeLaVenta`). */
+  createdAtLocal?: number | string | null
+  /**
+   * S6: ms entre la venta y este envío, medidos por el aparato con su reloj MONÓTONO (inmune a un reloj de pared atrasado). Sólo con
+   * `isOfflineReplay`; si es válido (finito, ≥ 0, ≤ 30 días) es la ÚNICA edad de la regla de la comanda tardía (sin él, la comanda
+   * sale como hoy: Codex servidor r1 #8; `createdAtLocal` ya no cuenta para la comanda).
+   */
+  edadDeLaVentaMs?: number
+  /** S6: el serial de la terminal del TOKEN, nunca del body (`CreateOrderInput.terminalSerialNumber`). */
+  terminalSerialNumber?: string | null
 }
 
 export interface CashPaymentResponse {
@@ -2887,11 +3401,13 @@ export interface CashPaymentResponse {
   tipAmount: number
   method: PaymentMethod
   status: 'COMPLETED'
-  /**
-   * Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. En CENTAVOS enteros (hoy `amount + tipAmount` de lo
-   * REGISTRADO). Las apps calculan el cambio como recibido − `cashRetainedCents`. ADITIVO y opcional: nunca se quita ni se renombra.
-   */
+  /** Efectivo retenido por este cobro, en centavos enteros; Rappi2b sumará aquí su PAY_IN. Aditivo. */
   cashRetainedCents?: number
+  /**
+   * Rappi 2b (aditivo, sólo pedidos de plataforma en efectivo): lo que ESTE pago cubrió de cada parte, en centavos. El servidor reparte
+   * lo recibido (terceros → propina → venta), así que la app concilia contra esto y no contra el `amount`/`tip` que mandó.
+   */
+  deliveryCashAllocation?: { saleCents: number; tipCents: number; thirdPartyCents: number }
   /** Lo que sobró de `amount` solicitado sobre el saldo, en centavos: el cambio que debe dar el cajero. 0 si no sobró nada. */
   changeCents: number
   changeAmount?: number // Alias legacy opcional; `changeCents` es el campo autoritativo.
@@ -2970,6 +3486,11 @@ function pesosToCents(pesos: number): number {
  */
 function cambioDeReintento(pedidoCents: number, registrado: Prisma.Decimal | number | null | undefined): number {
   return Math.max(0, pedidoCents - pesosToCents(Number(registrado ?? 0)))
+}
+
+/** Lo que se quedó en la caja por ESE cobro: venta + propina + lo cobrado por cuenta de terceros (Rappi 2b), en centavos. */
+function retenidoDelCobro(pago: { amount: unknown; tipAmount: unknown; thirdPartyCashAmount?: unknown }): number {
+  return pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)) + pesosToCents(Number(pago.thirdPartyCashAmount ?? 0))
 }
 
 /**
@@ -3083,6 +3604,8 @@ export interface CuentaBajoCandado {
     version: number
     areaTicketCode: string | null
     tableId: string | null
+    /** Rappi 2b: el carril de efectivo con dinero de terceros (lo lee el cobro con saldo para rechazarlo). */
+    thirdPartyCashDue: Prisma.Decimal | null
   }>
   readonly previousPayments: ReadonlyArray<Readonly<{ amount: Prisma.Decimal; tipAmount: Prisma.Decimal; type: PaymentType | null }>>
 }
@@ -3103,6 +3626,10 @@ export interface AbonoEnTxContexto {
 }
 
 export interface AbonoEnTxEntrada {
+  /** Fecha contable de una operación compuesta; sólo interna, nunca tomada del cuerpo del cobro. */
+  createdAt?: Date
+  /** El cambio espera al último abono: la tolerancia de un centavo no puede cerrar antes. */
+  cierreDiferido?: boolean
   /** Lo SOLICITADO, en centavos enteros (la frontera de `payCashOrder`). */
   amountCents: number
   tipCents: number
@@ -3125,11 +3652,21 @@ export interface AbonoEnTxEntrada {
   colaConDefectoH1?: boolean
   /** R6-3: la propiedad de mesa, que el núcleo vuelve a revisar bajo el candado (`CashPaymentInput.propiedadDeMesa`). */
   propiedadDeMesa?: CashPaymentInput['propiedadDeMesa']
+  /** «Cobrar sin red» (D4): `CashPaymentInput.shiftIdDeLaVenta`. */
+  shiftIdDeLaVenta?: string
+  /** S3: `CashPaymentInput.cashDrawerSessionId`. */
+  cashDrawerSessionId?: string
+  /** S3: el serial de la terminal del TOKEN (para el texto del aviso de venta apartada); el POS no lo tiene. */
+  terminalSerial?: string | null
+  /** S6: la terminal del token, ya resuelta en este negocio. Con ella el pago lleva su `terminalId` y la fuente `TPV`. */
+  terminalId?: string | null
 }
 
 export interface AbonoEnTx {
   /** Caja OPEN al cobrar (leída en la misma transacción); el movimiento de efectivo va a ésa o a ninguna. */
   cajaAlCobrarId: string | null
+  /** S3 (Codex r6 código #1): es la caja que el POS capturó al cobrar sin red; vale también si la cerró el sistema sin conteo. */
+  cajaAlCobrarEsDeLaVenta: boolean
   newPayment: any
   /** El `paymentStatus` que se GUARDÓ (una venta cerrada conserva el suyo: REFUNDED sigue REFUNDED). */
   paymentStatus: 'PAID' | 'PARTIAL' | 'REFUNDED'
@@ -3146,6 +3683,9 @@ export interface AbonoEnTx {
   /** Lo que de verdad se registró como pago (≤ saldo) y lo que sobró, en centavos. */
   aplicadoCents: number
   cambioCents: number
+  /** Rappi 2b (T5b): la propina y lo de terceros que se REGISTRARON (el reparto del servidor), en centavos. */
+  propinaCents: number
+  tercerosCents: number
   /** Base de puntos en pesos, sin propinas. */
   loyaltyBase: number
   balance: OrderBalanceSnapshot
@@ -3153,6 +3693,8 @@ export interface AbonoEnTx {
   tenderResuelto: ResolvedTenderCharge | null
   /** R6-3: la mesa resultó ajena hasta la relectura bajo el candado y el dinero ya capturado se registró (rastro de R2-6). */
   mesaAjena: { ownerId: string; ownerName: string } | null
+  /** Rappi 2b: aviso que la persona tiene que conciliar con Rappi (post-commit), o null. */
+  avisoRappi: AvisoDeRappiEfectivo | null
 }
 
 /**
@@ -3177,7 +3719,8 @@ export async function registrarAbonoEnTx(
   const tip = entrada.tipCents
   const paymentMethod = entrada.method
   const amountSolicitadoDecimal = amount / 100
-  const tipDecimal = tip / 100
+  // Rappi 2b: el reparto del servidor puede cambiarla (terceros → propina → venta); todo lo de abajo usa la repartida.
+  let tipDecimal = tip / 100
   const input = {
     idempotencyKey: entrada.idempotencyKey,
     isOfflineReplay: entrada.isOfflineReplay,
@@ -3281,6 +3824,10 @@ export async function registrarAbonoEnTx(
       // Tarea 6a: una cancelada de Avoqado se reabre con cualquier dinero ya capturado; una externa, sólo cuando hoy salía
       // de CANCELADA (Codex r12 #5, r13 #1).
       originSystem: true,
+      // Rappi 2b: el carril de efectivo con dinero de terceros y su propina contractual (sólo los escribe la ingesta).
+      source: true,
+      thirdPartyCashDue: true,
+      cashTipDue: true,
       version: true,
       areaTicketCode: true,
       tableId: true,
@@ -3332,11 +3879,11 @@ export async function registrarAbonoEnTx(
   // REFUND para reportar `refundState` — filtrarlos aquí los escondería.
   const previousPayments = await tx.payment.findMany({
     where: { orderId, status: 'COMPLETED' },
-    select: { amount: true, tipAmount: true, type: true },
+    select: { amount: true, tipAmount: true, type: true, thirdPartyCashAmount: true },
   })
 
   // Tarea A7: el cobro con saldo bloquea aquí sus sobres (Order → sobres → turno) y valida el monto contra el saldo.
-  // En `payCashOrder` no viene: no cambia nada.
+  // `payCashOrder` consulta aquí la terminal antes del primer cierre en $0.
   await entrada.trasCandadoDeOrden?.(tx, { fresh, previousPayments })
 
   // 🔴 La aritmética canónica, ya no una copia local en FLOAT.
@@ -3379,8 +3926,11 @@ export async function registrarAbonoEnTx(
   // escriben los vales v6, que no tienen sesión y se cobran como cualquier cuenta (revisión de 6a-2, I-1).
   // 🔴 R2-2 (R8-1): recibir dinero nunca reabre una venta CERRADA (PAID/REFUNDED leída bajo el candado), aunque esté cancelada:
   // se registra el dinero y queda cancelada con su estado de cobro. La cancelada que DEBE se reabre como siempre.
+  // 🔴 Rappi 2b (T8): el estado de un pedido de Rappi lo dicta Rappi. Si lo canceló y después llega efectivo ya capturado, el dinero
+  // se registra, el pedido SIGUE cancelado y se avisa (post-commit). Antes salía de CANCELADA y quedaba COMPLETED si cubría.
+  const rappiCanceladaConDinero = fresh.source === 'RAPPI' && claseDeEstado(fresh.status) === 'CANCELADA' && !cobroNuevo
   const estado =
-    !cobroNuevo && !lockedAreaCheckout && !esVentaCerrada(fresh.paymentStatus)
+    !cobroNuevo && !lockedAreaCheckout && !esVentaCerrada(fresh.paymentStatus) && fresh.source !== 'RAPPI'
       ? await reabrirSiRecibeDinero(tx, {
           venueId,
           orderId,
@@ -3420,9 +3970,33 @@ export async function registrarAbonoEnTx(
   // que el aparato APLICÓ, sin el cambio (que se quedó en el aparato)— se registra tal cual: recortarlo contra un saldo que otra
   // caja movió después registraba $50 de $100 recibidos y le inventaba $50 de «cambio» que nadie entregó.
   // R2-1: la cola con H1 manda el TOTAL, no lo aplicado: se recorta como antes (efectivo de cajón).
-  const cambioCents = (conH1 ? countsAsDrawerCash : cobroNuevo) ? Math.max(0, amount - saldoCents) : 0
-  const aplicadoCents = amount - cambioCents
-  const amountDecimal = aplicadoCents / 100
+  let cambioCents = (conH1 ? countsAsDrawerCash : cobroNuevo) ? Math.max(0, amount - saldoCents) : 0
+  let aplicadoCents = amount - cambioCents
+  let amountDecimal = aplicadoCents / 100
+
+  // 🔴 Rappi 2b (T5): pedido con repartidor propio en efectivo. El reparto lo pone el SERVIDOR con lo recibido (`amount + tip`):
+  // primero lo de Rappi, luego la propina contractual, luego la venta (lo que exceda la venta es sobrepago y lo avisa S1). Así
+  // «el saldo común dice saldada» implica que Rappi y la propina ya se cubrieron. Cobro nuevo o cola H1 (que manda el TOTAL): se
+  // recorta a lo que falta y el resto es cambio. Dinero ya capturado: se registra completo. Otro medio (T5c): sin terceros (ese
+  // dinero no está en el cajón) y se avisa. `null` fuera de este carril: nada cambia.
+  const repartoAntes = saldoDeCobroDeReparto(cuenta, previousPayments)
+  let tercerosCents = 0
+  if (repartoAntes) {
+    const aCentavos = (d: Prisma.Decimal) => pesosToCents(d.toNumber())
+    const recibido = amount + tip
+    // H1 recorta sólo efectivo de cajón (como su regla de siempre): una tarjeta o transferencia ya cobrada se registra completa.
+    const aplicado = (conH1 && countsAsDrawerCash) || cobroNuevo ? Math.min(recibido, aCentavos(repartoAntes.totalACobrar)) : recibido
+    cambioCents = recibido - aplicado
+    let resto = aplicado
+    tercerosCents = countsAsDrawerCash ? Math.min(resto, aCentavos(repartoAntes.tercerosPendiente)) : 0
+    resto -= tercerosCents
+    // Un tipo de pago que no captura propina la deja en la venta (si no, el guard de abajo rechazaría dinero ya recibido).
+    const propinaCents = resolvedTender && !resolvedTender.tenderCaptureTip ? 0 : Math.min(resto, aCentavos(repartoAntes.propinaPendiente))
+    resto -= propinaCents
+    aplicadoCents = resto
+    amountDecimal = resto / 100
+    tipDecimal = propinaCents / 100
+  }
 
   if (resolvedTender && !resolvedTender.tenderCaptureTip && tipDecimal > 0) {
     throw new BadRequestError(`El tipo de pago "${resolvedTender.tenderLabel}" no acepta propina.`)
@@ -3447,11 +4021,27 @@ export async function registrarAbonoEnTx(
   const totalTip = balance.tipAmount.toNumber()
   const newTotal = balance.total.toNumber()
   const totalPaidIncludingTip = balance.paidAmount.toNumber()
-  const remainingAfterPayment = balance.remainingBalance.toNumber()
+  // Rappi 2b: lo que falta DESPUÉS de este cobro, por partes (null fuera del carril).
+  const repartoDespues = repartoAntes
+    ? saldoDeCobroDeReparto(cuenta, [
+        ...previousPayments,
+        { amount: amountDecimal, tipAmount: tipDecimal, thirdPartyCashAmount: tercerosCents / 100, type: 'REGULAR' },
+      ])
+    : null
+  // En el carril de Rappi sólo queda saldada si además la propina y lo de Rappi quedaron cubiertos (una venta neta en $0 con tarifa
+  // y propina no se cierra con $5); otro medio (T5c) puede saldar con la tarifa por conciliar, y se avisa.
+  const cubreLoDeTerceros =
+    !repartoDespues || (repartoDespues.propinaPendiente.isZero() && (repartoDespues.tercerosPendiente.isZero() || !countsAsDrawerCash))
   // Founder 3-oct: una cancelada nunca queda saldada. Con lo que debía ya salió de CANCELADA arriba; aquí sólo llega cancelada
   // la orden de una sesión de vales v7 (su finalización la rechaza y revierte todo) o una externa que no cubre (como hoy, no se
   // cierra).
-  const isFullyPaid = balance.isFullyPaid && cierreAutomaticoPermitido(estado)
+  const isFullyPaid = !entrada.cierreDiferido && balance.isFullyPaid && cierreAutomaticoPermitido(estado) && cubreLoDeTerceros
+  // La columna `remainingBalance` del carril es lo que falta de las tres partes: la lee el reintento (`readOrderBalanceSnapshot`).
+  const remainingAfterPayment = repartoDespues
+    ? isFullyPaid
+      ? 0
+      : repartoDespues.totalACobrar.toNumber()
+    : balance.remainingBalance.toNumber()
   // 🔴 S1 (R8-1, como la terminal): dinero ya capturado sobre una venta CERRADA (leída bajo el candado) ⇒ conserva su estado, saldo
   // 0 y `cerrada`: no la vuelve a cerrar ni repite lo de saldar (inventario, lealtad, comanda, referido). El dinero se registra
   // completo y sale el aviso de sobrepago después del commit. R2-1: la cola con H1 no pasa por aquí (sin estado previo cerrado:
@@ -3510,6 +4100,10 @@ export async function registrarAbonoEnTx(
   // Payment queda sin turno y se audita abajo, sin tocar el corte firmado.
   const shiftAmount = new Prisma.Decimal(amountDecimal)
   const shiftTip = new Prisma.Decimal(tipDecimal)
+  const ventaDeLaCola = await ventaDeLaColaEnTx(tx, venueId, {
+    shiftIdDeLaVenta: entrada.shiftIdDeLaVenta,
+    cashDrawerSessionId: entrada.isOfflineReplay === true ? entrada.cashDrawerSessionId : null,
+  })
   const shiftClaim = await claimShiftForCapturedPayment(tx, {
     venueId,
     amountPesos: shiftAmount,
@@ -3518,17 +4112,34 @@ export async function registrarAbonoEnTx(
     // ticket nunca cuentan dos órdenes.
     incrementTotalOrders: !previousPayments.some(payment => payment.type !== 'REFUND'),
     orderId,
+    // S3: el turno de la venta de la cola (TPV: `shiftIdDeLaVenta`; POS: el ligado a la caja capturada), si su caja cerró, y la caja
+    // sin turno que se relee tras el claim. Todo por `entradaDelClaim` (Codex r5 código #1).
+    ...entradaDelClaim(ventaDeLaCola),
   })
+
+  // Rappi 2b: el tipo de pago del canal (lo creó la ingesta) para congelar su comisión en el cobro en efectivo.
+  // Codex código r1 #4: también cuando el cobro llega con el «Efectivo» del catálogo (método CASH); un vale que cuenta como efectivo
+  // (método OTHER) conserva el suyo.
+  const tenderDelCanal =
+    repartoAntes && countsAsDrawerCash && (!resolvedTender || resolvedTender.method === 'CASH')
+      ? await tx.venueTenderType.findFirst({
+          where: { venueId, normalizedName: normalizeTenderName(deliveryTenderLabel('RAPPI')) },
+          select: { id: true, revision: true, name: true, commissionPercent: true },
+        })
+      : null
 
   // 5️⃣ El Payment se crea DESPUÉS de ganar la transición. Si la CAS falla, este
   //    insert nunca ocurre — que es exactamente lo que evita el segundo cobro.
-  const paymentSource = countsAsDrawerCash ? 'APP' : 'OTHER'
+  // S6: el efectivo de la terminal es `TPV`, como en `/tpv`. Lo que sólo se REGISTRA (tarjeta de otra terminal, transferencia) sigue
+  // `OTHER` aunque venga de la terminal: tarjeta + `TPV` es «se devuelve en el lector» (`seDevuelveEnTerminal`) y nunca pasó por él.
+  const paymentSource = countsAsDrawerCash ? (entrada.terminalId ? 'TPV' : 'APP') : 'OTHER'
   const externalSource = countsAsDrawerCash ? null : input.externalSource?.trim()?.slice(0, 50) || null
 
   const newPayment = await tx.payment.create({
     data: {
       venueId,
       orderId,
+      createdAt: entrada.createdAt,
       amount: amountDecimal,
       tipAmount: tipDecimal,
       method: resolvedTender?.method ?? paymentMethod,
@@ -3536,10 +4147,17 @@ export async function registrarAbonoEnTx(
       type: 'REGULAR',
       splitType: 'FULLPAYMENT',
       source: paymentSource,
+      terminalId: entrada.terminalId ?? null,
       externalSource,
       fundsFlow: resolvedTender ? resolvedTender.fundsFlow : fundsFlow,
       processedById: effectiveStaffId,
       shiftId: shiftClaim.shiftId,
+      // D4: su efectivo ya lo contó el cajón de SU turno (cerrado); la marca le dice al barrido del cajón que no lo adopte.
+      // S3: la venta apartada por su caja cerrada sin turno lleva su propia marca (mismo trato: ni cajón de hoy ni corte por su orden).
+      // Codex r6 código #1: la no apartada lleva su caja capturada, para que el barrido la reponga ahí y no por la hora del cobro.
+      posRawData:
+        marcasDeVentaApartada({ saleShiftId: shiftClaim.saleShiftId, saleDrawerId: shiftClaim.saleDrawerId }) ??
+        marcaDeCajaDeLaVenta(ventaDeLaCola.cajaId),
       // 🛡️ Llave de idempotencia: el índice único [venueId, idempotencyKey]
       // hace que un reintento del cliente choque (P2002) o se atrape arriba,
       // nunca cree un segundo pago.
@@ -3551,16 +4169,24 @@ export async function registrarAbonoEnTx(
       netAmount: amountDecimal + tipDecimal,
       // Snapshots inmutables del tender (todos resueltos por el server). Editar
       // el catálogo mañana NO reinterpreta este cobro.
-      tenderTypeId: resolvedTender?.tenderTypeId,
-      tenderRevision: resolvedTender?.tenderRevision,
-      tenderLabel: resolvedTender?.tenderLabel,
-      tenderCountsAsCash: resolvedTender?.tenderCountsAsCash,
-      tenderCaptureTip: resolvedTender?.tenderCaptureTip,
+      // Rappi 2b (comisión del canal, Codex r3 #2): sin tender propio, el cobro en efectivo de un pedido de Rappi congela el tipo de
+      // pago «Rappi» y su comisión sobre la venta (sin propina ni terceros), como la ingesta de un pedido pagado en línea. Sigue
+      // siendo efectivo de cajón (`fundsFlow` CASH_DRAWER manda) y la forma SAT sale del método (01), no la del canal.
+      tenderTypeId: tenderDelCanal?.id ?? resolvedTender?.tenderTypeId,
+      tenderRevision: tenderDelCanal?.revision ?? resolvedTender?.tenderRevision,
+      tenderLabel: tenderDelCanal?.name ?? resolvedTender?.tenderLabel,
+      tenderCountsAsCash: tenderDelCanal ? true : resolvedTender?.tenderCountsAsCash,
+      tenderCaptureTip: tenderDelCanal ? true : resolvedTender?.tenderCaptureTip,
+      // La forma SAT sale del «Efectivo» elegido (01) o, sin tender, del método: nunca la del tipo de pago del canal.
       tenderSatFormaPago: resolvedTender?.tenderSatFormaPago,
-      tenderCommissionPercent: resolvedTender?.tenderCommissionPercent,
-      tenderCommissionAmount: resolvedTender
-        ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
-        : undefined,
+      tenderCommissionPercent: tenderDelCanal ? tenderDelCanal.commissionPercent : resolvedTender?.tenderCommissionPercent,
+      tenderCommissionAmount: tenderDelCanal
+        ? computeTenderCommission(tenderDelCanal.commissionPercent, new Prisma.Decimal(amountDecimal))
+        : resolvedTender
+          ? computeTenderCommission(resolvedTender.tenderCommissionPercent, new Prisma.Decimal(amountDecimal))
+          : undefined,
+      // Rappi 2b (T3): lo cobrado por cuenta de Rappi, en la MISMA transacción que el cobro. Fuera de `amount`/`tipAmount`.
+      thirdPartyCashAmount: repartoAntes && countsAsDrawerCash ? new Prisma.Decimal(tercerosCents / 100) : undefined,
     },
   })
 
@@ -3652,6 +4278,18 @@ export async function registrarAbonoEnTx(
   // FT-GRAVES S-EF (medido el 8-oct): el MISMO gancho de comisión que la terminal, con el dinero, en esta transacción. Sin
   // él, este cobro y la cola sin red `PAY_CASH` (que lo reutiliza) no comisionaban. Un efecto por cobro: no se duplica.
   await enqueuePaymentCommissionInTx(tx, newPayment.id)
+  // S3 (Codex plan r3 #6): la venta apartada —su turno o su caja ya cerrados— deja en ESTA transacción la obligación durable de avisar
+  // al gerente; el trabajador de efectos es el único emisor (sin carrera con un aviso directo) y reintenta hasta que conste.
+  if (shiftClaim.saleShiftId || shiftClaim.saleDrawerId) {
+    await enqueuePaymentEffect(tx, {
+      venueId,
+      paymentId: newPayment.id,
+      orderId,
+      kind: 'AVISO_TURNO_CERRADO',
+      dedupeKey: 'aviso-turno-cerrado:' + newPayment.id,
+      payload: { externalId: input.idempotencyKey ?? orderId, montoCents: amount, orderId, terminalSerial: entrada.terminalSerial ?? null },
+    })
+  }
   // Referido: obligación durable con el dinero, como la terminal (`payment.tpv.service.ts`). Si el proceso muere antes
   // de la llamada directa de abajo, el worker de efectos la completa; el consumidor deduplica.
   if (efectosDeSaldar) {
@@ -3666,14 +4304,29 @@ export async function registrarAbonoEnTx(
   }
   // La caja ABIERTA al cobrar se fija aquí: el movimiento de efectivo va a ESA sesión y sólo si sigue abierta. Una caja
   // abierta DESPUÉS del cobro (cierre + apertura a media transacción) no se lo queda: lo repone el conciliador.
-  const cajaAlCobrar = await tx.cashDrawerSession.findFirst({
-    where: { venueId, status: 'OPEN', openedAt: { lte: newPayment.createdAt } },
-    select: { id: true },
-  })
+  // D4: el efectivo de una venta tardía ya lo contó el cajón de SU turno (cerrado): no entra a la caja abierta de hoy. S3: lo mismo si
+  // quedó aparte por su caja cerrada sin turno (veto de la rama TPV, que se conserva aunque la caja de la venta esté abierta).
+  // Codex r5 código #3: el replay con su caja capturada sólo anota en ESA caja; nunca en la que se abrió después. Codex r6 código #1: vale
+  // abierta o cerrada SOLA por el sistema (sin conteo: el billete está ahí y nadie firmó); contada, la repone el barrido en su ventana.
+  // Un cobro en línea, como antes.
+  const cajaAlCobrar =
+    shiftClaim.saleShiftId || shiftClaim.saleDrawerId
+      ? null
+      : await tx.cashDrawerSession.findFirst({
+          where: ventaDeLaCola.cajaId
+            ? {
+                id: ventaDeLaCola.cajaId,
+                venueId,
+                OR: [{ status: 'OPEN' }, { status: 'CLOSED', actualAmount: null, closedByStaffId: null }],
+              }
+            : { venueId, status: 'OPEN', openedAt: { lte: newPayment.createdAt } },
+          select: { id: true },
+        })
   await input.dentroDeLaTx?.(tx, { orderId, paymentId: newPayment.id })
 
   return {
     cajaAlCobrarId: cajaAlCobrar?.id ?? null,
+    cajaAlCobrarEsDeLaVenta: Boolean(ventaDeLaCola.cajaId),
     newPayment,
     paymentStatus: cobro.paymentStatus,
     isFullyPaid: efectosDeSaldar,
@@ -3681,6 +4334,8 @@ export async function registrarAbonoEnTx(
     reabiertaDeCancelada,
     aplicadoCents,
     cambioCents,
+    propinaCents: pesosToCents(tipDecimal),
+    tercerosCents: repartoAntes && countsAsDrawerCash ? tercerosCents : 0,
     areaTicketOrder: areaFinalization.areaTicketOrder,
     areaTicketSessionId: areaFinalization.sessionId,
     tableId: fresh.tableId,
@@ -3698,6 +4353,11 @@ export async function registrarAbonoEnTx(
     loyaltyBase: Math.max(0, newTotal - totalTip),
     tenderResuelto: resolvedTender,
     mesaAjena: mesaAjenaBajoCandado,
+    avisoRappi: rappiCanceladaConDinero
+      ? 'RAPPI_CASH_ON_CANCELLED_ORDER'
+      : repartoAntes && !countsAsDrawerCash
+        ? 'RAPPI_CASH_ORDER_OTHER_MEDIUM'
+        : null,
   }
 }
 
@@ -3732,6 +4392,8 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       serviceChargeAmount: true,
       total: true,
       remainingBalance: true,
+      // Rappi 2b: ¿es del carril de efectivo con dinero de terceros? (el cambio de un reintento se calcula distinto)
+      thirdPartyCashDue: true,
       venueId: true,
       tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
@@ -3754,10 +4416,48 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
    * (`CobroYaRegistrado`), de la carrera P2002 o de la CAS perdida. R5-2: sólo un cobro COMPLETADO de esta orden es «la misma
    * operación» y se devuelve; un intento FAILED, una devolución o una llave de otra orden ⇒ 409 sin escribir nada.
    */
+  /**
+   * S7: la venta de la cola de una terminal que llegó con problema avisa al gerente: el total ya no es lo cobrado (saldo o sobrepago de
+   * la orden). S3: la venta APARTADA (turno o caja ya cerrados) ya no avisa desde aquí: su aviso es el efecto durable `AVISO_TURNO_CERRADO`,
+   * nacido en la transacción del cobro (`registrarAbonoEnTx`).
+   * 🔴 Codex servidor r1 #6: sale de datos DURABLES (la marca del pago y el saldo guardado de la orden) para que el reintento idempotente
+   * lo repita: si el servidor murió entre el commit y el aviso, el siguiente intento lo manda; si no, lo absorbe el dedupe del aviso.
+   */
+  const avisarSiLlegoConProblema = (_posRawData: Prisma.JsonValue | undefined, saldo: Partial<OrderBalanceSnapshot>): void => {
+    const delAviso = { externalId: input.idempotencyKey ?? orderId, orderId, montoCents: amount }
+    // S3: el aviso de venta apartada (`TURNO_CERRADO`) ya no sale de aquí: lo manda el efecto durable `AVISO_TURNO_CERRADO`.
+    const saldoCents = saldo.remainingBalanceCents ?? 0
+    const sobrepagoCents =
+      saldo.totalPaidCents !== undefined && saldo.orderTotalCents !== undefined ? saldo.totalPaidCents - saldo.orderTotalCents : 0
+    if (saldoCents > 1 || sobrepagoCents > 1) {
+      avisarSiEsDeLaColaDeTerminal(venueId, input, 'PRECIO_CAMBIADO', {
+        ...delAviso,
+        motivo:
+          saldoCents > 1
+            ? `quedó un saldo pendiente de $${(saldoCents / 100).toFixed(2)}`
+            : `se registraron $${(sobrepagoCents / 100).toFixed(2)} de más`,
+      })
+    }
+  }
+
   const responderConElCobroDeLaLlave = async (pago: CobroDeLaLlave, via: string): Promise<CashPaymentResponse> => {
     assertLlaveEsEsteCobro(pago, orderId)
     logger.info(`🔄 [ORDER.MOBILE] Reintento idempotente (${via}, key=${input.idempotencyKey}) — devuelvo el pago existente ${pago.id}`)
     await liberarMesaSiQuedoSaldada(venueId, order.tableId, orderId)
+    // El saldo REAL de la orden ahora (relectura): quien reintenta la parte 1 de un cobro dividido sigue viendo lo que falta.
+    const saldo = await readOrderBalanceSnapshot(venueId, orderId)
+    avisarSiLlegoConProblema(pago.posRawData, saldo)
+    // S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante (idempotente).
+    await asegurarAvisoDeVentaApartada({
+      venueId,
+      paymentId: pago.id,
+      orderId,
+      status: pago.status,
+      posRawData: pago.posRawData,
+      externalId: input.idempotencyKey ?? orderId,
+      montoPesos: pago.amount,
+      terminalSerial: input.terminalSerialNumber ?? null,
+    })
     return {
       paymentId: pago.id,
       orderId,
@@ -3765,15 +4465,24 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       // 🔴 `pesosToCents`, no un `* 100` pelón: reconstruir desde el Decimal guardado dejaba ruido de float (`19.99 → 1998.99…`).
       amount: pesosToCents(Number(pago.amount)),
       tipAmount: pesosToCents(Number(pago.tipAmount)),
-      // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN. Mismo valor que la primera vez.
-      cashRetainedCents: pesosToCents(Number(pago.amount)) + pesosToCents(Number(pago.tipAmount)),
-      changeCents: cambioDeReintento(amount, pago.amount),
+      cashRetainedCents: retenidoDelCobro(pago),
+      ...(order.thirdPartyCashDue != null
+        ? {
+            deliveryCashAllocation: {
+              saleCents: pesosToCents(Number(pago.amount)),
+              tipCents: pesosToCents(Number(pago.tipAmount)),
+              thirdPartyCents: pesosToCents(Number(pago.thirdPartyCashAmount ?? 0)),
+            },
+          }
+        : {}),
+      // Rappi 2b: en el carril el servidor repartió lo recibido (`amount + tip`), así que el cambio es lo recibido menos lo retenido.
+      changeCents:
+        order.thirdPartyCashDue != null ? Math.max(0, amount + tip - retenidoDelCobro(pago)) : cambioDeReintento(amount, pago.amount),
       // El método REAL del pago que ya existe: devolver 'CASH' fijo reportaría como efectivo el reintento de un cobro con tarjeta.
       method: pago.method as CashPaymentResponse['method'],
       status: 'COMPLETED',
       digitalReceipt: pago.receipts?.[0] ? mapDigitalReceiptResponse(pago.receipts[0], await resolveAutofacturaAvailable(orderId)) : null,
-      // El saldo REAL de la orden ahora (relectura): quien reintenta la parte 1 de un cobro dividido sigue viendo lo que falta.
-      ...(await readOrderBalanceSnapshot(venueId, orderId)),
+      ...saldo,
     }
   }
 
@@ -3840,12 +4549,20 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // El gate se resuelve una sola vez y FUERA de la transacción monetaria: una
   // caída de settings jamás revierte un Payment real.
   const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, venueId)
+  const terminalId = await terminalDelToken(venueId, input.terminalSerialNumber)
+  // S6: una venta de la cola de la terminal que sube más de MINUTOS_PARA_COMANDA_DE_LA_COLA tarde ya la entregó el mostrador: sin
+  // comanda. Se decide AQUÍ (no sólo al armar): el barrido de comandas arma con `kitchenPendingAt`. Sólo en un replay; Android (sin
+  // serial), como hoy.
+  const edadMs = input.isOfflineReplay === true ? edadConfiableDeLaVenta(input.edadDeLaVentaMs) : null
+  const comandaTardia = terminalId !== null && edadMs !== null && edadMs > MINUTOS_PARA_COMANDA_DE_LA_COLA * 60_000
   // Etapa 3 del KDS: ¿esta venta necesita comanda de pantalla? FUERA de la transacción (nunca tumba un cobro);
   // la marca viaja en la MISMA escritura que salda la orden.
-  const marcarCocina = await debeMarcarCocina(venueId, { orderId })
+  const cocinaDelNegocio = await debeMarcarCocina(venueId, { orderId })
+  const marcarCocina = cocinaDelNegocio && !comandaTardia
 
-  // Centavos → pesos para el post-commit. Lo SOLICITADO contra lo registrado se decide en el núcleo (`aplicadoCents`).
-  const tipDecimal = tip / 100
+  // Centavos → pesos para el post-commit. Lo SOLICITADO contra lo registrado se decide en el núcleo (`aplicadoCents`). Rappi 2b (T5b):
+  // tras el commit se reemplaza por la propina DEL PAGO, que el reparto del servidor puede haber cambiado.
+  let tipDecimal = tip / 100
 
   // ══════════════════════════════════════════════════════════════════════════════
   // 🔴 COBRO ATÓMICO — arregla un doble-cobro que YA estaba desplegado.
@@ -3906,6 +4623,21 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
               dentroDeLaTx: input.dentroDeLaTx,
               colaConDefectoH1: input.colaConDefectoH1,
               propiedadDeMesa: input.propiedadDeMesa,
+              shiftIdDeLaVenta: input.shiftIdDeLaVenta,
+              cashDrawerSessionId: input.cashDrawerSessionId,
+              terminalSerial: input.terminalSerialNumber ?? null,
+              terminalId,
+              trasCandadoDeOrden:
+                amount === 0 && tip === 0
+                  ? txCandado =>
+                      assertNoLiveTerminalCharge(
+                        txCandado,
+                        { venueId, orderId },
+                        {
+                          mensaje: 'Hay un cobro en curso en la terminal. Espera su resultado antes de cerrar esta cuenta en $0.',
+                        },
+                      )
+                  : undefined,
             },
             reconciliationEnabled,
           ),
@@ -3975,8 +4707,21 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   // El tender lo resolvió el núcleo; el cajón, los sockets y la respuesta lo leen de este holder, como antes.
   tenderState.resolved = paymentResult.tenderResuelto
   const { newPayment: payment, isFullyPaid: orderFullyPaid, postingId, balance, aplicadoCents, cambioCents, loyaltyBase } = paymentResult
-  // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado.
+  // Los payloads de abajo (cajón, sockets, respuesta) llevan lo REGISTRADO, no lo solicitado: lo que el núcleo guardó en el pago (Rappi 2b, T5b: el
+  // servidor reparte venta, propina y terceros; para cualquier otra orden son los mismos valores que antes).
   const amountDecimal = aplicadoCents / 100
+  tipDecimal = paymentResult.propinaCents / 100
+  const tercerosDecimal = paymentResult.tercerosCents / 100
+  if (paymentResult.avisoRappi) {
+    avisarDineroDeRappi({
+      action: paymentResult.avisoRappi,
+      orderId,
+      venueId,
+      paymentId: payment.id,
+      staffId: effectiveStaffId ?? null,
+      data: { amount: amountDecimal, tip: tipDecimal, terceros: tercerosDecimal },
+    })
+  }
   if (cambioCents > 0) {
     logger.warn('[ORDER.MOBILE] payCash: el monto excede el saldo; se registra el saldo y el resto es cambio', {
       venueId,
@@ -4007,6 +4752,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
       staffId: effectiveStaffId ?? null,
     })
   }
+
+  // S7: la venta de la cola de una terminal que llegó con problema avisa al gerente (el reintento idempotente lo repite).
+  avisarSiLlegoConProblema(payment.posRawData, balance)
 
   // 🔴 R2-6: el dinero ya capturado se registró sobre una mesa que reasignaron (la propiedad de mesa no lo rechazó). Rastro para el
   // dueño, con el autor real. Sólo aquí: los retornos idempotentes de arriba no crearon un cobro nuevo. R6-3: también si la mesa
@@ -4066,6 +4814,7 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         paymentId: payment.id,
         targetSessionId: paymentResult.cajaAlCobrarId,
         exigirAbierta: true,
+        admiteCerradaSinConteo: paymentResult.cajaAlCobrarEsDeLaVenta,
         // El método REAL: un cobro declarado a mano (terminal ajena, transferencia)
         // o con un tender del catálogo viaja por este mismo servicio y NUNCA entró al
         // cajón — salvo que el tender diga explícitamente que sí (vale de despensa).
@@ -4077,6 +4826,9 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
         type: 'REGULAR',
         amount: amountDecimal,
         tipAmount: tipDecimal,
+        // Rappi 2b (T4): la entrada «cobrado por cuenta de Rappi», en la misma caja que la venta.
+        thirdPartyCashAmount: tercerosDecimal,
+        orderNumber: order.orderNumber,
         staffId: effectiveStaffId || input.staffId || null,
         orderId,
       })
@@ -4221,6 +4973,31 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
   if (orderFullyPaid && marcarCocina && !paymentResult.reabiertaDeCancelada) {
     await armarComandasTrasCommit(venueId, orderId, 'PAID')
   }
+  // S6 (ronda 1): «¿por qué no salió la comanda?» queda en ActivityLog, sólo cuando de verdad se omitió una (había cocina y se saldó).
+  if (orderFullyPaid && cocinaDelNegocio && comandaTardia && edadMs !== null) {
+    logger.info('[ORDER.MOBILE] Venta de la cola de la terminal que sube tarde: sin comanda de cocina', {
+      venueId,
+      orderId,
+      terminalId,
+      edadMs,
+    })
+    void (await import('../dashboard/activity-log.service')).logAction({
+      action: 'COMANDA_OMITIDA_VENTA_TARDIA',
+      entity: 'Order',
+      entityId: orderId,
+      venueId,
+      staffId: effectiveStaffId ?? null,
+      data: {
+        orderId,
+        paymentId: payment.id,
+        terminalId,
+        edadMs,
+        // Siempre el reloj monótono de la terminal (Codex servidor r1 #8): se conserva el campo para quien ya lo lee.
+        fuenteDeLaEdad: 'edadDeLaVentaMs',
+        umbralMinutos: MINUTOS_PARA_COMANDA_DE_LA_COLA,
+      },
+    })
+  }
 
   // Emit Socket.IO events for real-time updates
   const broadcastingService = socketManager.getBroadcastingService()
@@ -4249,10 +5026,18 @@ export async function payCashOrder(venueId: string, orderId: string, input: Cash
     paymentId: payment.id,
     orderId,
     orderNumber: order.orderNumber,
-    amount: aplicadoCents,
-    tipAmount: tip,
-    // Lo que se queda en el cajón por este cobro; Rappi 2b le sumará su PAY_IN.
-    cashRetainedCents: aplicadoCents + tip,
+    amount: pesosToCents(amountDecimal),
+    tipAmount: pesosToCents(tipDecimal),
+    cashRetainedCents: pesosToCents(amountDecimal) + pesosToCents(tipDecimal) + pesosToCents(tercerosDecimal),
+    ...(order.thirdPartyCashDue != null
+      ? {
+          deliveryCashAllocation: {
+            saleCents: pesosToCents(amountDecimal),
+            tipCents: pesosToCents(tipDecimal),
+            thirdPartyCents: pesosToCents(tercerosDecimal),
+          },
+        }
+      : {}),
     changeCents: cambioCents,
     method: tenderState.resolved?.method ?? paymentMethod,
     status: 'COMPLETED',
@@ -4418,9 +5203,12 @@ export async function payGiftCardBalanceOnOrder(
       tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
       customer: { select: { id: true, firstName: true, lastName: true } },
+      thirdPartyCashDue: true,
     },
   })
   if (!order) throw new NotFoundError('Order not found')
+  // Rappi 2b (T7): un cobro NUEVO con saldo no cobra un pedido de Rappi en efectivo (antes de buscar o tocar ninguna tarjeta).
+  rechazarAccionDeCobroSobreRappiEnEfectivo(order)
   if (order.areaTicketCheckoutSession) {
     throw new GiftCardError(
       'GIFT_CARD_TENDER_NOT_ALLOWED',
@@ -4611,6 +5399,8 @@ export async function prepararAbonoConSaldoEnTx(
       trasCandadoDeOrden: async (txCandado, cuenta) => {
         // Un cobro con saldo es un cobro NUEVO: sobre una cancelada no se registra (el núcleo la reabriría).
         rechazarCobroNuevoSobreCancelada(cuenta.fresh.status)
+        // Rappi 2b (T7): releído bajo el candado (la lectura de arriba fue sin él).
+        rechazarAccionDeCobroSobreRappiEnEfectivo(cuenta.fresh)
         // Codex #1 (cierre): el candado de la Order serializa escrituras, no el desenlace del banco. Con un cobro de terminal
         // cuyo resultado no está acreditado, el banco todavía puede aprobar ese dinero: descontar el saldo cobraría la venta
         // dos veces. Las salidas de repetición (la llave que ya cobró, la ganadora de una carrera) siguen antes y en el catch.
@@ -4840,6 +5630,8 @@ function huellaDeVentaConSaldo(venta: CreateOrderInput, giftCardId: string, mont
     customerPhone: venta.customerPhone ?? null,
     stampRewardId: venta.stampRewardId ?? null,
     discount: venta.discount ?? 0,
+    // Unión con develop: el descuento de catálogo de la cuenta cambia lo que la venta debe (otro cuerpo, otra huella).
+    orderDiscountId: venta.orderDiscountId ?? null,
     giftCardId,
     amount: monto.toFixed(2),
     tip: propina.toFixed(2),
@@ -5126,7 +5918,10 @@ export async function returnGiftBalanceAndCancelOrder(
       if (error instanceof NotFoundError && error.message === 'Venue not found') throw new NotFoundError('Order not found')
       throw error
     }
-    const cuenta = await tx.order.findUnique({ where: { id: orderId, venueId }, select: { id: true, status: true, paymentStatus: true } })
+    const cuenta = await tx.order.findUnique({
+      where: { id: orderId, venueId },
+      select: { id: true, status: true, paymentStatus: true, source: true, posRawData: true },
+    })
     if (!cuenta) throw new NotFoundError('Order not found')
     /** El tender de regalo y los pagos vivos de la cuenta (uno de más para saber si pasan del tope). */
     const leerCobros = async () => ({
@@ -5161,7 +5956,7 @@ export async function returnGiftBalanceAndCancelOrder(
       const soloSaldo = Boolean(tender) && cobros.length > 0 && cobros.length <= MAX_SOBRES_POR_CUENTA
       if (soloSaldo && cobros.every(c => c.tenderTypeId === tender?.id)) {
         let todoDevuelto = true
-        for (const cobro of cobros) {
+        for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
           const pendiente = pendienteDeDevolver(
             await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }),
           )
@@ -5174,6 +5969,7 @@ export async function returnGiftBalanceAndCancelOrder(
       }
       throw new BadRequestError('Esta cuenta ya está cancelada.', 'ORDER_ALREADY_CANCELLED')
     }
+    rechazarCancelacionLocalDeRappi(cuenta)
     if (cuenta.paymentStatus === 'PAID') {
       throw new GiftCardError('GIFT_CARD_TENDER_NOT_ALLOWED', 'Esta cuenta ya está pagada: para devolver dinero usa un reembolso.', 409)
     }
@@ -5201,16 +5997,16 @@ export async function returnGiftBalanceAndCancelOrder(
     // r1 (A-3) y ruling 5: Order → cobros originales → sobres → turno, TODO antes del primer `writeRefundInTx` (que reclama
     // el turno, `claimShiftForRefund`). Con dos o más cobros, bloquear los sobres del segundo teniendo ya el turno abriría
     // un ciclo de espera con otra caja que tenga ese sobre y espere el mismo turno (E4). Se bloquean los cobros en el orden
-    // de `cobros` y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
+    // de id y la UNIÓN de sus sobres en UNA llamada (el ORDER BY de `lockGiftCardsForUpdate` es el orden canónico).
     // El bucle de abajo reusa esos candados: el que vuelve a pedir `revertirCanjeEnTx` es sobre filas ya tomadas (cada
     // cobro descuenta un solo sobre, ruling 6, así que `sobresDelCanje` y la libreta leen el mismo conjunto).
-    const bloqueos: Array<Awaited<ReturnType<typeof bloquearCobroParaReembolso>>> = []
-    for (const cobro of cobros) {
-      bloqueos.push(await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
+    const bloqueos = new Map<string, Awaited<ReturnType<typeof bloquearCobroParaReembolso>>>()
+    for (const cobro of [...cobros].sort((a, b) => a.id.localeCompare(b.id))) {
+      bloqueos.set(cobro.id, await bloquearCobroParaReembolso(tx, { venueId, paymentId: cobro.id, expectedOrderId: orderId }))
     }
     // Lo que falta devolver de cada cobro. Uno ya devuelto completo no se toca (ni su sobre se bloquea).
     const porDevolver = cobros
-      .map((cobro, i) => ({ cobro, bloqueado: bloqueos[i], ...pendienteDeDevolver(bloqueos[i]) }))
+      .map(cobro => ({ cobro, bloqueado: bloqueos.get(cobro.id)!, ...pendienteDeDevolver(bloqueos.get(cobro.id)!) }))
       .filter(p => p.ventaCents + p.propinaCents > 0)
     const sobresDeLosCobros: string[] = []
     for (const p of porDevolver) sobresDeLosCobros.push(...(await sobresDelCanje(tx, { venueId, paymentId: p.cobro.id })))
@@ -5285,7 +6081,13 @@ export async function returnGiftBalanceAndCancelOrder(
  * «Agregar cliente» en «Cobro exitoso» (POST /mobile/venues/:venueId/payments/:paymentId/customer).
  * `staffId` = quien LIGA (authContext.userId del controller): es el actor del sello tardío y de la bitácora.
  */
-export async function attachCustomerToPayment(venueId: string, paymentId: string, customerId: string, staffId?: string | null) {
+export async function attachCustomerToPayment(
+  venueId: string,
+  paymentId: string,
+  customerId: string,
+  staffId?: string | null,
+  opciones: { actor?: CustomerAttributionActor; historicalOnly?: boolean } = {},
+) {
   const normalizedPaymentId = paymentId?.trim()
   const normalizedCustomerId = customerId?.trim()
 
@@ -5311,7 +6113,11 @@ export async function attachCustomerToPayment(venueId: string, paymentId: string
     throw new NotFoundError('Payment not found')
   }
 
-  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, staffId)
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, staffId, {
+    ...opciones,
+    paymentId: normalizedPaymentId,
+    actor: opciones.actor ?? { staffId, canAttachAtReceipt: true },
+  })
 }
 
 export async function attachCustomerToLatestPayment(
@@ -5323,6 +6129,7 @@ export async function attachCustomerToLatestPayment(
     staffId?: string | null
     /** Quien LIGA (authContext.userId). `staffId` sigue siendo quien COBRÓ: filtra processedById. */
     actorStaffId?: string | null
+    actor?: CustomerAttributionActor
   },
 ) {
   const normalizedCustomerId = input.customerId?.trim()
@@ -5360,7 +6167,10 @@ export async function attachCustomerToLatestPayment(
     throw new NotFoundError('Payment not found')
   }
 
-  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, input.actorStaffId)
+  return attachCustomerToOrder(venueId, payment.orderId, normalizedCustomerId, input.actorStaffId, {
+    paymentId: payment.id,
+    actor: input.actor ?? { staffId: input.actorStaffId, canAttachAtReceipt: true },
+  })
 }
 
 /**
@@ -5380,7 +6190,13 @@ const INTENTOS_DE_LIGA = 3
  * Idempotente ante el mismo cliente agregado varias veces (BAJO-3): una sola liga, ningún 500, y la fila de auditoría sólo
  * desde la llamada que CREÓ (o promovió a primario) la liga (`ligaNueva`).
  */
-export async function attachCustomerToOrder(venueId: string, orderId: string, customerId: string, staffId?: string | null) {
+export async function attachCustomerToOrder(
+  venueId: string,
+  orderId: string,
+  customerId: string,
+  staffId?: string | null,
+  opciones: { actor?: CustomerAttributionActor; historicalOnly?: boolean; paymentId?: string } = {},
+) {
   const normalizedCustomerId = customerId?.trim()
 
   if (!normalizedCustomerId) {
@@ -5433,6 +6249,7 @@ export async function attachCustomerToOrder(venueId: string, orderId: string, cu
       // R3-2 (ronda 3): `FOR NO KEY UPDATE` (`bloquearVentaParaLiga`): serializa contra el cobro y las demás ligas sin
       // interbloquearse con el `FOR KEY SHARE` de las llaves foráneas (las métricas del cobro).
       if (!(await bloquearVentaParaLiga(tx, { venueId, orderId }))) throw new NotFoundError('Order not found')
+      await assertCustomerAttributionUnderLock(tx, { venueId, orderId, customerId: normalizedCustomerId, ...opciones })
       const existingAssociation = await tx.orderCustomer.findUnique({
         where: {
           orderId_customerId: {
@@ -5594,6 +6411,9 @@ export async function cancelOrderInTransaction(
   }
   const kds = await retirarComandasDeVentaAnulada(tx, venueId, orderId, { staffId: performedBy, reason })
   await assertOrderCancellableUnderLock(tx, { venueId, orderId })
+  // 🔴 D2: una venta de vales queda como por la ruta de vales: sus vales vuelven a poder cobrarse (sin esperar por ellos).
+  const { soltarValesAlCancelarLaVenta } = await import('./areaTicketV7.mobile.service')
+  const valesSoltados = await soltarValesAlCancelarLaVenta(tx, { venueId, orderId })
   const removed = await tx.order.update({
     where: { id: orderId },
     data: { status: 'CANCELLED', ...(reason ? { specialRequests: `Cancelled: ${reason}` } : {}) },
@@ -5615,12 +6435,13 @@ export async function cancelOrderInTransaction(
     ...kds.kdsOrderIds.map(id => ({ kind: 'KdsOrder' as const, id })),
     ...kds.kdsOrderItemIds.map(id => ({ kind: 'KdsOrderItem' as const, id })),
   ]
-  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs }
+  return { orderId, table, tables: reconciled.tables, hadBoundTable: Boolean(boundTable), tpvTableFreed, affectedRefs, valesSoltados }
 }
 
 export async function publishCancelledOrder(
   venueId: string,
-  result: Awaited<ReturnType<typeof cancelOrderInTransaction>>,
+  // `valesSoltados` es opcional: «Regresar saldo y cancelar» publica una cuenta de tarjetas, que nunca trae vales (Codex r4 #1).
+  result: Omit<Awaited<ReturnType<typeof cancelOrderInTransaction>>, 'valesSoltados'> & { valesSoltados?: ValesSoltados | null },
   staffId?: string,
   reason?: string,
 ): Promise<void> {
@@ -5652,6 +6473,9 @@ export async function publishCancelledOrder(
   }
   const { logAction } = await import('../dashboard/activity-log.service')
   void logAction({ action: 'ORDER_CANCELLED', entity: 'Order', entityId: orderId, staffId, venueId, data: { reason: reason ?? null } })
+  // D2: los vales que la cancelación dejó libres, con su autor (después del commit, Codex r3 #1).
+  const { auditarValesSoltados } = await import('./areaTicketV7.mobile.service')
+  auditarValesSoltados({ venueId, orderId, staffId, soltados: result.valesSoltados })
   if (broadcastingService) {
     broadcastingService.broadcastToVenue(venueId, SocketEventType.ORDER_UPDATED, { orderId, status: 'CANCELLED' })
     // Preserve the original bound-pointer notification DTO; no fresh DB reconstruction.
@@ -5799,4 +6623,26 @@ export async function stampRewardOutcomeForExistingOrder(venueId: string, orderI
     return { applied: false, reason: 'El premio no quedó aplicado a esta venta.' }
   }
   return { applied: true, discountAmount: Number(premio.amount), rewardLabel: premio.rewardLabel }
+}
+
+/** Único abridor de la transacción del cambio; conserva el núcleo de cobro en su carril certificado. */
+export async function executeExchangeInTransaction(
+  input: ExchangeTxInput | ExchangeSettleTxInput,
+): Promise<ExchangeTxOutcome | ExchangeTxEarly> {
+  const reconciliationEnabled = await resolvePaymentShiftReconciliationEnabled(prisma, input.venueId)
+  for (let attempt = 0; ; attempt++) {
+    try {
+      return await prisma.$transaction(async tx => {
+        const prepared = await prepareExchangeInTx(tx, input)
+        if (!('newSalePayments' in prepared)) return prepared
+        const settled: AbonoEnTx[] = []
+        for (const p of prepared.newSalePayments) settled.push(await registrarAbonoEnTx(tx, p.ctx, p.entrada, reconciliationEnabled))
+        return finishExchangeInTx(tx, prepared, settled)
+      }, ORDER_LOCK_WAIT_BUDGET)
+    } catch (error) {
+      if (!(error instanceof ExchangeGenerationChanged || (error as { code?: string }).code === 'ORDER_LOCK_SCOPE_CHANGED')) throw error
+      if (attempt >= 2)
+        throw new ExchangeError('EXCHANGE_RETRY_CONFLICT', 'El cambio se movió mientras lo cerrábamos. Intenta de nuevo.', 409)
+    }
+  }
 }

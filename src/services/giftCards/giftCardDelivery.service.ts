@@ -97,7 +97,7 @@ const reclamoVencidoAntesDe = (ahora: Date) => new Date(ahora.getTime() - RECLAM
  * vendidas con la 1b o que una persona reenvió. Sin esto, al llegar a una base con tarjetas de la 1a (vendidas cuando la entrega
  * no existía: `ACTIVE` con entrega `PENDING` para siempre), el trabajo les mandaría un WhatsApp o un correo de verdad.
  *  - `ventaHuella` sólo la escribe la venta de la 1b (`giftCardOrder.service.ts`, el único lugar que crea tarjetas); la migración
- *    `20261020090000_tarjetas_de_regalo_1b` la agregó nula, así que las de la 1a (y cualquiera que un servidor de la 1a cree
+ *    `20261029090000_tarjetas_de_regalo_1b` la agregó nula, así que las de la 1a (y cualquiera que un servidor de la 1a cree
  *    después de esa migración) la tienen nula. Por eso no se usa la hora de la migración.
  *  - `deliveryOperationKey` sólo lo escriben «Reenviar» y «Cambiar destino» (`reinicioDeEntrega`, `giftCardCuenta.service.ts`):
  *    una acción humana sobre ESA tarjeta, que sí debe salir aunque sea de la 1a, con sus reintentos.

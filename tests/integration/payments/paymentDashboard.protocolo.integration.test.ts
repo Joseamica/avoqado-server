@@ -280,7 +280,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
   describe('Codex R13-2 · el PUT clasifica, valida y ESCRIBE dentro de la MISMA transacción que posee el mutex — un reembolso real que mete el cobro al protocolo nunca se cruza con el UPDATE de una edición ya clasificada como legacy', () => {
     afterEach(() => jest.restoreAllMocks())
 
-    it('PUT detenido DESPUÉS de clasificar como legacy (con el mutex tomado): el reembolso real ESPERA el mutex (bloqueado por el pid del PUT); al reanudar, el PUT commitea $120 y sólo entonces el reembolso entra al protocolo sobre $120 — el importe con el que el cobro ENTRÓ al protocolo es el que conserva', async () => {
+    it('PUT detenido DESPUÉS de clasificar como legacy (con el mutex tomado): el reembolso real ESPERA el mutex (bloqueado por el pid del PUT); al reanudar, el PUT commitea su edición (la referencia) y sólo entonces el reembolso entra al protocolo con ella — lo que el cobro traía al ENTRAR al protocolo es lo que conserva', async () => {
       const p = await legacyConCosto()
       const A = actores()
       const b = barrera()
@@ -295,7 +295,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
         await b.liberada
         return r
       })
-      const put = A.lanzar('PUT', updatePayment(f.venueId, p.id, { amount: 120 }))
+      const put = A.lanzar('PUT', updatePayment(f.venueId, p.id, { referenceNumber: 'REF-EDITADA' }))
       let refund!: ReturnType<typeof A.lanzar<Awaited<ReturnType<typeof recordRefund>>>>
       const obs = { pausado: false, bloqueado: false, amountAlEntrar: -1 }
       let fallo: Fallo = null
@@ -318,12 +318,13 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
       await A.afirmar(async () => {
         expect(obs.pausado).toBe(true)
         expect(obs.bloqueado).toBe(true)
-        await expect(put.resultado()).resolves.toMatchObject({ amount: expect.anything() })
+        await expect(put.resultado()).resolves.toMatchObject({ referenceNumber: 'REF-EDITADA' })
         const desenlaceDelReembolso = await refund.resultado()
         expect(desenlaceDelReembolso).toMatchObject({ id: expect.any(String) })
-        // Serializado: el PUT escribió $120 ANTES de que el reembolso entrara; el cobro entró al protocolo con $120 y lo conserva.
+        // Serializado: el PUT escribió la referencia ANTES de que el reembolso entrara; el cobro entró al protocolo con ella y la
+        // conserva. (Hasta el 23-oct la edición era el importe; desde «un cobro ya hecho no se corrige» el importe ya no se edita.)
         const despues = await foto(p.id)
-        expect(despues.amount).toBe(120)
+        expect(despues.ref).toBe('REF-EDITADA')
         // Codex R13-5: al ENCOLAR la obligación (cobro anterior al protocolo con costo) la marca se reactiva.
         expect(despues.efecto).toMatchObject({ status: 'PENDING' })
         expect(despues.costPending).toBe(true)
@@ -334,7 +335,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
       })
     })
 
-    it('SONDA: si el PUT escribiera FUERA de la transacción que posee el mutex, un reembolso real entraría al protocolo entre la clasificación y el UPDATE — el importe con el que el cobro entró al protocolo tiene que ser el que conserva (un UPDATE cruzado lo cambiaría)', async () => {
+    it('SONDA: si el PUT escribiera FUERA de la transacción que posee el mutex, un reembolso real entraría al protocolo entre la clasificación y el UPDATE — la referencia con la que el cobro entró al protocolo tiene que ser la que conserva (un UPDATE cruzado la cambiaría)', async () => {
       const p = await legacyConCosto()
       const A = actores()
       const b = barrera()
@@ -343,15 +344,15 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
       // cualquier otra escritura pasa intacta. En el código correcto nunca se dispara: el PUT escribe con su `tx`.
       const sonda = jest.spyOn(prisma.payment, 'update').mockImplementation((async (args: Parameters<typeof realUpdate>[0]) => {
         const where = (args as { where?: { id?: string } }).where
-        const data = (args as { data?: { amount?: unknown } }).data
-        if (where?.id === p.id && data?.amount !== undefined) {
+        const data = (args as { data?: { referenceNumber?: unknown } }).data
+        if (where?.id === p.id && data?.referenceNumber !== undefined) {
           b.pausado()
           await b.liberada
         }
         return realUpdate(args)
       }) as never)
-      const put = A.lanzar('PUT', updatePayment(f.venueId, p.id, { amount: 120 }))
-      const obs = { desenlaceDelPut: null as unknown, amountAlEntrar: -1 }
+      const put = A.lanzar('PUT', updatePayment(f.venueId, p.id, { referenceNumber: 'REF-EDITADA' }))
+      const obs = { desenlaceDelPut: null as unknown, refAlEntrar: null as string | null }
       let refund!: ReturnType<typeof A.lanzar<Awaited<ReturnType<typeof recordRefund>>>>
       let fallo: Fallo = null
       try {
@@ -363,7 +364,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
         // El reembolso real entra al protocolo AHORA (con el PUT terminado, o con el PUT detenido fuera del mutex).
         refund = A.lanzar('reembolso real', reembolsoReal(p))
         await refund.resultado()
-        obs.amountAlEntrar = Number((await pago(p.id)).amount)
+        obs.refAlEntrar = (await pago(p.id)).referenceNumber
       } catch (error) {
         fallo = { error }
       } finally {
@@ -376,7 +377,7 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
         await put.resultado()
         const despues = await foto(p.id)
         // El invariante: ninguna edición cruza una entrada al protocolo ya confirmada.
-        expect(despues.amount).toBe(obs.amountAlEntrar)
+        expect(despues.ref).toBe(obs.refAlEntrar)
         expect(despues.efecto).toMatchObject({ status: 'PENDING' })
         expect(despues.costPending).toBe(true)
         expect(
@@ -386,13 +387,18 @@ describe('Codex R12 (pasada exhaustiva) · R12-5: editar/borrar un cobro del pro
     })
   })
 
-  it('un cobro ANTERIOR al protocolo (sin snapshot ni obligación) se sigue editando y borrando como antes', async () => {
+  // Founder 23-oct («como Square»): un cobro ANTERIOR al protocolo que ya se hizo corrige lo que no es dinero; su dinero y borrarlo
+  // responden «usa Reembolso» (409 PAYMENT_SETTLED_USE_REFUND) — hasta ese día se editaba la propina y se borraba.
+  it('un cobro ANTERIOR al protocolo (sin snapshot ni obligación) ya hecho: se corrige la marca; la propina y borrarlo ⇒ «usa Reembolso»', async () => {
     const p = await legacy()
-    const editado = await updatePayment(f.venueId, p.id, { tipAmount: 7, cardBrand: 'MASTERCARD' })
-    expect(Number(editado.tipAmount)).toBe(7)
+    const editado = await updatePayment(f.venueId, p.id, { cardBrand: 'MASTERCARD' })
     expect(editado.cardBrand).toBe('MASTERCARD')
-    await deletePayment(f.venueId, p.id)
-    expect(await prisma.payment.findUnique({ where: { id: p.id } })).toBeNull()
+    await expect(updatePayment(f.venueId, p.id, { tipAmount: 7 })).rejects.toMatchObject({
+      statusCode: 409,
+      code: 'PAYMENT_SETTLED_USE_REFUND',
+    })
+    await expect(deletePayment(f.venueId, p.id)).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_SETTLED_USE_REFUND' })
+    expect(await foto(p.id)).toMatchObject({ tip: Number(p.tipAmount), cardBrand: 'MASTERCARD', status: 'COMPLETED' })
   })
 })
 
@@ -524,15 +530,15 @@ describe('Codex R14-2 · el REEMBOLSO de un cobro del protocolo también está p
     })
   })
 
-  it('CONTROL: el reembolso de un cobro LEGACY sin costo (el original NO entra al protocolo al reembolsarse) se sigue editando y borrando como antes', async () => {
+  it('CONTROL: el reembolso de un cobro LEGACY sin costo (el original NO entra al protocolo al reembolsarse) se sigue corrigiendo; borrarlo ya no (un reembolso hecho es dinero: «usa Reembolso», founder 23-oct)', async () => {
     const original = await legacy()
     const refund = await reembolsoReal(original)
     // El original sigue fuera del protocolo (sin snapshot, sin obligación): su reembolso tampoco pertenece.
     expect(await foto(original.id)).toMatchObject({ pricing: undefined, efecto: null, costo: null })
     const editado = await updatePayment(f.venueId, refund.id, { referenceNumber: 'REF-CORREGIDA' })
     expect(editado.referenceNumber).toBe('REF-CORREGIDA')
-    await deletePayment(f.venueId, refund.id)
-    expect(await prisma.payment.findUnique({ where: { id: refund.id } })).toBeNull()
+    await expect(deletePayment(f.venueId, refund.id)).rejects.toMatchObject({ statusCode: 409, code: 'PAYMENT_SETTLED_USE_REFUND' })
+    expect(await prisma.payment.findUnique({ where: { id: refund.id } })).not.toBeNull()
   })
 
   it('CARRERA con la unidad del ORIGINAL: con la fila del original tomada por la unidad de costo, el PUT sobre el REFUND espera ESE mutex (bloqueado por su pid) — y mientras espera NO tiene tomada la fila del reembolso (orden original → reembolso, el de la unidad) — y después decide (409)', async () => {

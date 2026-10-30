@@ -13,7 +13,10 @@ import { contarCongeladosRechazados } from '../../../scripts/fiscal/b4b-congelad
 import { conProducto, limpiarNegocios, nuevoNegocio, type Negocio } from './exclusionContable.fixtures'
 
 const database = new URL(process.env.TEST_DATABASE_URL ?? '')
-if (!['localhost', '127.0.0.1'].includes(database.hostname) || !/^\/(avoqado_[a-z0-9]+_test_|av_db_25_iva_test)/.test(database.pathname)) {
+if (
+  !['localhost', '127.0.0.1'].includes(database.hostname) ||
+  !/^\/(avoqado_(?:[a-z0-9]+|cambio_r5)_test_|av_db_25_iva_test)/.test(database.pathname)
+) {
   throw new Error(
     'Esta suite escribe negocios de prueba: exige una base local propia (avoqado_<x>_test_… o av_db_25_iva_test), nunca av-db-25.',
   )

@@ -2,6 +2,7 @@ import { Request, Response, NextFunction } from 'express'
 import * as orderMobileService from '../../services/mobile/order.mobile.service'
 import * as paymentTpvService from '../../services/tpv/payment.tpv.service'
 import { describeSaleStampForPayment } from '../../services/shared/loyaltyOnLateCustomer'
+import { customerAttributionActor, customerAttributionActorForRecordedPayment } from '../../middlewares/customerAttribution.middleware'
 
 /**
  * Record a fast payment (no order, just amount)
@@ -15,7 +16,13 @@ export async function recordFastPayment(req: Request, res: Response, next: NextF
 
     const paymentData = req.body
 
-    const result = await paymentTpvService.recordFastPayment(venueId, paymentData, userId, orgId)
+    const result = await paymentTpvService.recordFastPayment(
+      venueId,
+      paymentData,
+      userId,
+      orgId,
+      paymentData.customerId ? await customerAttributionActorForRecordedPayment(req) : {},
+    )
 
     res.status(201).json({
       success: true,
@@ -33,7 +40,9 @@ export async function attachCustomerToPayment(req: Request, res: Response, next:
     const { customerId } = req.body
     // El actor sale del TOKEN, nunca del body (regla authContext): es quien queda en el sello y en la bitácora.
     // `data` lleva los campos de la orden de siempre más `loyalty` (sello tardío; campo nuevo y opcional para las apps).
-    const order = await orderMobileService.attachCustomerToPayment(venueId, paymentId, customerId, req.authContext?.userId)
+    const order = await orderMobileService.attachCustomerToPayment(venueId, paymentId, customerId, req.authContext?.userId, {
+      actor: await customerAttributionActor(req),
+    })
 
     res.status(200).json({
       success: true,
@@ -57,6 +66,7 @@ export async function attachCustomerToLatestPayment(req: Request, res: Response,
       // `staffId` del body = quién COBRÓ (filtra el pago, como siempre). El actor = quien liga, del token.
       staffId,
       actorStaffId: req.authContext?.userId,
+      actor: await customerAttributionActor(req),
     })
 
     res.status(200).json({

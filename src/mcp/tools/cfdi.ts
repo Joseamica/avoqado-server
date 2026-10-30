@@ -25,6 +25,7 @@ import {
 } from '@/services/fiscal/cfdiGlobal.service'
 import { DEFAULT_TIMEZONE } from '@/utils/datetime'
 import { MOTIVO_MODALIDAD_NO_PERMITIDA } from '@/services/fiscal/saldoFiscal'
+import { CAMPOS_DE_LA_REGLA, facturaDeLaVenta, FACTURAS_QUE_CUENTAN_DE_LA_VENTA } from '@/services/fiscal/facturaDeLaVenta'
 
 /**
  * C2: lo que el operador tiene que leer cuando la cancelación quedó EN DUDA (el POST no tuvo respuesta clara). T10 (R2 e I3 de la T2): la
@@ -444,6 +445,137 @@ export function registerCfdiTools(server: McpServer, scope: McpScope) {
           // T10 ronda 1 (M5): con la cancelación rechazada, POR QUÉ (el mismo texto que ve el panel). Nuevo y opcional.
           ...(estadoDeCancelacion(r, ahora) === 'RECHAZADA' && r.lastError ? { motivoRechazoCancelacion: r.lastError } : {}),
         })),
+      })
+    },
+  )
+
+  // ─── ¿Esta venta ya está facturada? (28-oct-2026, «Nueva factura» en Facturas del dashboard) ──────────────────────────────
+  //
+  // Lectura. La regla es la del candado de emisión (`facturaDeLaVenta.ts`), la misma que marca el buscador del dashboard.
+  server.tool(
+    'order_invoice_status',
+    'Is this sale already invoiced (CFDI)? Find ONE sale by its human order number (e.g. ORD-5454) or its internal id and say whether it already has its own invoice. `estado`: VIGENTE = it has a current individual invoice (issuing another one is refused); EN_CANCELACION = the cancellation of its invoice was requested and only a new issuing attempt confirms with the SAT whether it can be invoiced again; SIN_FACTURA = no current individual invoice (being inside a global invoice does not prevent invoicing it). When there is an invoice it returns its folio, UUID, recipient and total in pesos. Only venues where you can view invoices and invoicing (CFDI) is active. If several sales match, ask which venue or sale; never pick the newest automatically.',
+    {
+      venueId: z.string().optional().describe('Focus one venue (must be in your scope); ask for it when several sales match'),
+      orderNumber: z.string().optional().describe('The human order number shown on receipts/screens (e.g. ORD-5454) — case-insensitive'),
+      orderId: z.string().optional().describe('The internal sale id; operators rarely have it, prefer orderNumber'),
+    },
+    async ({ venueId, orderNumber, orderId }) => {
+      if ([orderNumber, orderId].filter(v => v?.trim()).length !== 1) {
+        return text({
+          found: false,
+          needsInput: true,
+          field: 'orderNumber',
+          question: '¿Cuál es el número de la venta (o su identificador)? Indica sólo uno.',
+        })
+      }
+      guard.venueFilter(venueId)
+      if (venueId) guard.requirePermission('cfdi:view', venueId)
+      // Igual que `cfdi_status`: la facturación es de paga y el MCP no la salta.
+      const entitled = await venuesWithFeatureAccess(scope.allowedVenueIds, 'CFDI')
+      if (venueId && !entitled.has(venueId)) {
+        return text({
+          ok: false,
+          planRequired: true,
+          feature: 'CFDI',
+          error: 'CFDI (facturación) no está activo en este local. Requiere la feature CFDI o un plan Avoqado activo.',
+        })
+      }
+      const venueIds = venueId
+        ? [venueId]
+        : [...entitled].filter(v => {
+            const access = scope.perVenueAccess.get(v)
+            return access && hasPermission(access, 'cfdi:view')
+          })
+      if (venueIds.length === 0) {
+        return text({ ok: false, planRequired: true, feature: 'CFDI', error: 'Ninguno de tus locales tiene CFDI (facturación) activo.' })
+      }
+      const matches = await prisma.order.findMany({
+        where: {
+          venueId: { in: venueIds },
+          ...(orderId?.trim() ? { id: orderId.trim() } : { orderNumber: { equals: orderNumber!.trim(), mode: 'insensitive' as const } }),
+        },
+        select: {
+          id: true,
+          venueId: true,
+          orderNumber: true,
+          status: true,
+          paymentStatus: true,
+          total: true,
+          createdAt: true,
+          venue: { select: { name: true, timezone: true } },
+          cfdis: {
+            where: FACTURAS_QUE_CUENTAN_DE_LA_VENTA,
+            select: {
+              ...CAMPOS_DE_LA_REGLA,
+              serie: true,
+              folio: true,
+              uuid: true,
+              receptorNombre: true,
+              receptorRfc: true,
+              totalCents: true,
+              stampedAt: true,
+            },
+          },
+        },
+        orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+        take: 11,
+      })
+      if (!matches.length) {
+        return text({ found: false, reason: 'No encontré esa venta en tus locales con facturación activa.' })
+      }
+      if (matches.length > 1) {
+        return text({
+          found: false,
+          needsInput: true,
+          field: venueId ? 'orderId' : 'venueId',
+          question: venueId ? '¿Cuál de estas ventas buscas?' : '¿De qué sucursal es la venta?',
+          candidates: matches.slice(0, 10).map(m => ({
+            orderId: m.id,
+            orderNumber: m.orderNumber,
+            venueId: m.venueId,
+            venueName: m.venue?.name,
+            fecha: formatInTimeZone(m.createdAt, m.venue?.timezone ?? DEFAULT_TIMEZONE, 'yyyy-MM-dd HH:mm'),
+          })),
+          hasMore: matches.length > 10,
+          instruction: 'Pide elegir una coincidencia o acotar la sucursal. No elijas la más reciente automáticamente.',
+        })
+      }
+      const venta = matches[0]
+      const tz = venta.venue?.timezone ?? DEFAULT_TIMEZONE
+      // La que manda es la que el candado de emisión contestaría (con sustitución hay dos; Codex código r1 #1).
+      const resultado = facturaDeLaVenta(venta.cfdis)
+      const estado = resultado?.estado ?? 'SIN_FACTURA'
+      const factura = resultado?.factura ?? null
+      const explicacion = {
+        VIGENTE:
+          'La venta ya tiene su factura vigente: facturarla otra vez se rechaza. Para corregirla se sustituye o se cancela desde Facturas.',
+        EN_CANCELACION:
+          'La cancelación de su factura está pedida. Si el SAT ya la aceptó, se puede volver a facturar: al intentarlo, el sistema lo confirma.',
+        SIN_FACTURA: 'La venta no tiene factura individual vigente: se puede facturar desde Facturas › Nueva factura o desde Pedidos.',
+      }[estado]
+      return text({
+        found: true,
+        orderId: venta.id,
+        orderNumber: venta.orderNumber,
+        venueId: venta.venueId,
+        venueName: venta.venue?.name,
+        status: venta.status,
+        paymentStatus: venta.paymentStatus,
+        totalMxn: Number(venta.total),
+        fecha: formatInTimeZone(venta.createdAt, tz, 'yyyy-MM-dd HH:mm'),
+        estado,
+        explicacion,
+        factura: factura
+          ? {
+              folio: [factura.serie, factura.folio].filter(Boolean).join('-') || null,
+              uuid: factura.uuid,
+              receptorNombre: factura.receptorNombre,
+              receptorRfc: factura.receptorRfc,
+              totalMxn: (factura.totalCents ?? 0) / 100,
+              timbrada: factura.stampedAt ? formatInTimeZone(factura.stampedAt, tz, 'yyyy-MM-dd HH:mm') : null,
+            }
+          : null,
       })
     },
   )

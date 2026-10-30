@@ -35,10 +35,11 @@ export function renderTotals(block: Of<'totals'>, input: ReceiptInput, width: Pa
   // En grande, el TOTAL gasta dos columnas por carácter: se acomoda a la MITAD del ancho.
   // Si ni así cabe, negritas a ancho completo — y si tampoco, etiqueta arriba y valor abajo.
   const total = formatMoney(sale.totalCents)
+  const totalLabel = sale.kind === 'EXCHANGE' ? LABELS.diferencia : LABELS.total
   const half = Math.floor(width / 2)
-  if (LABELS.total.length + 1 + total.length <= half)
-    lines.push(...twoColumnLines(LABELS.total, total, half).map(l => textLine(l, 'left', { bold: true, double: true })))
-  else lines.push(...twoColumnLines(LABELS.total, total, width).map(l => textLine(l, 'left', { bold: true })))
+  if (totalLabel.length + 1 + total.length <= half)
+    lines.push(...twoColumnLines(totalLabel, total, half).map(l => textLine(l, 'left', { bold: true, double: true })))
+  else lines.push(...twoColumnLines(totalLabel, total, width).map(l => textLine(l, 'left', { bold: true })))
   return lines
 }
 
@@ -48,7 +49,8 @@ export function renderPayment(block: Of<'payment'>, input: ReceiptInput, width: 
   if (!t) return []
   const row = (label: string, value: string, opts: { bold?: boolean } = {}) =>
     twoColumnLines(label, value, width).map(l => textLine(l, 'left', opts))
-  const lines: LogicalLine[] = [feed(), ...row(LABELS.pago, forceReceiptText(t.label))]
+  const paymentLabel = input.sale.kind === 'EXCHANGE' && input.sale.totalCents < 0 ? LABELS.devuelto : LABELS.pago
+  const lines: LogicalLine[] = [feed(), ...row(paymentLabel, forceReceiptText(t.label))]
   if (t.kind === 'CARD') {
     if (block.showCardLastFour && t.cardLastFour) {
       lines.push(...row(LABELS.tarjeta, t.cardBrand ? `${forceReceiptText(t.cardBrand)} **** ${t.cardLastFour}` : `**** ${t.cardLastFour}`))
@@ -86,6 +88,7 @@ export function renderAreaDelivery(_block: Of<'areaDelivery'>, input: ReceiptInp
 
 /** QR del recibo digital. Sólo con URL. La leyenda por defecto no promete factura donde el negocio no la tiene (arreglo del 11-sep). */
 export function renderQr(block: Of<'qr'>, input: ReceiptInput, width: PaperWidth): LogicalLine[] {
+  if (input.sale.kind === 'EXCHANGE' && input.sale.pendingUpload) return []
   const url = input.sale.receiptUrl?.trim()
   if (!url) return []
   const caption = block.caption === QR_DEFAULT_CAPTION && input.sale.autofacturaAvailable === false ? LABELS.qrSinFactura : block.caption

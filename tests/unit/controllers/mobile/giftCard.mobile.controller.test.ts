@@ -618,6 +618,31 @@ describe('cobrar con saldo una venta nueva (pay-new-order)', () => {
     expect(payGiftCardOnNewOrder).not.toHaveBeenCalled()
   })
 
+  // Unión con develop (S9 de «Cobrar sin red»): una venta pagada con saldo también puede regalar renglones. La autoridad es de la
+  // SESIÓN, igual que en POST /orders (`autoridadDeLaVenta`); sin ella, la cortesía saldría sin permiso por esta puerta.
+  const CORTESIA = { items: [{ name: 'Blusa', quantity: 1, unitPrice: 80000, isCortesia: true, cortesiaReason: 'Invitación' }] }
+
+  it('🔴 unión: una cortesía sin orders:comp ⇒ 403 y no llega al servicio', async () => {
+    m(tienePermisoEnVenue).mockResolvedValue(false)
+    const r = await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, ...CORTESIA })
+    expect(r.status).toBe(403)
+    expect(payGiftCardOnNewOrder).not.toHaveBeenCalled()
+    expect(audit).not.toHaveBeenCalled()
+  })
+
+  it('🔴 unión: con orders:comp la venta lleva la autoridad, y quien regala es la SESIÓN (nunca el cuerpo)', async () => {
+    m(tienePermisoEnVenue).mockResolvedValue(true)
+    m(payGiftCardOnNewOrder).mockResolvedValue(RESULTADO)
+    const r = await request(app)
+      .post(`${B}/gift-cards/pay-new-order`)
+      .send({ ...VENTA, ...CORTESIA, canCompItems: true, performedBy: 'intruso' })
+    expect(r.status).toBe(200)
+    expect(tienePermisoEnVenue).toHaveBeenCalledWith(expect.anything(), 'orders:comp')
+    expect(entrada()).toMatchObject({ canCompItems: true, performedBy: 'staff-1' })
+  })
+
   it('sin la prueba de posesión ⇒ 400 del esquema', async () => {
     const r = await request(app)
       .post(`${B}/gift-cards/pay-new-order`)

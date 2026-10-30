@@ -23,6 +23,25 @@ describe('InventoryPostingSweeperJob.runNow', () => {
     jest.clearAllMocks()
   })
 
+  it('routes CUSTOMER_RETURN to the return applicator and SALE to the sale applicator', async () => {
+    const apply = jest.fn().mockResolvedValue({ applied: true })
+    const applyReturn = jest.fn().mockResolvedValue({ applied: true })
+    prismaMock.inventoryPosting.findMany.mockResolvedValue([
+      { id: 'c000000000000000000000021', venueId: 'c000000000000000000000023', effectKind: 'SALE', status: 'PENDING', attempts: 0 },
+      {
+        id: 'c000000000000000000000022',
+        venueId: 'c000000000000000000000023',
+        effectKind: 'CUSTOMER_RETURN',
+        status: 'PENDING',
+        attempts: 0,
+      },
+    ] as any)
+    expect(await makeJob({ apply, applyReturn }).runNow()).toMatchObject({ applied: 2 })
+    expect(apply.mock.calls).toEqual([['c000000000000000000000021', null]])
+    expect(applyReturn.mock.calls).toEqual([['c000000000000000000000022', null]])
+    expect(prismaMock.inventoryPosting.findMany.mock.calls[0][0]?.select).toHaveProperty('effectKind', true)
+  })
+
   it('barre PENDING/PARTIAL_FAILED rezagados Y APPLYING huérfanos, aplicando cada uno', async () => {
     const apply = jest
       .fn()

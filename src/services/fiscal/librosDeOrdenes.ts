@@ -63,6 +63,8 @@ export type MovimientoLeido = MovimientoDelLibro & {
   method: PaymentMethod | null
   /** El interruptor del comercio: `false` lo saca de lo fiscal (no del gerencial). */
   incluirEnContabilidad: boolean | null | undefined
+  /** El par EC sigue en el libro gerencial, pero no representa dinero fiscal. */
+  tenderSystemKind?: string | null
 }
 /** Cuántas consultas hizo un lote y cuántas filas trajo a Node. */
 export type LecturaDelLote = { consultas: number; filas: number }
@@ -282,6 +284,7 @@ async function recorrerMovimientos(
         amount: true,
         tipAmount: true,
         method: true,
+        tenderType: { select: { systemKind: true } },
         // Toggle por-merchant: excluir un merchant de los libros fiscales (no del gerencial).
         merchantAccount: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
         ecommerceMerchant: { select: { fiscalConfig: { select: { includeInAccounting: true } } } },
@@ -307,6 +310,7 @@ async function recorrerMovimientos(
         amountCents: centavos(m.amount),
         tipCents: centavos(m.tipAmount),
         method: m.method,
+        ...(m.tenderType?.systemKind ? { tenderSystemKind: m.tenderType.systemKind } : {}),
         processorData: processorDataDe.get(m.id),
         incluirEnContabilidad:
           m.merchantAccount?.fiscalConfig?.includeInAccounting ?? m.ecommerceMerchant?.fiscalConfig?.includeInAccounting,

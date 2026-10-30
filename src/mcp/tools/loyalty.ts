@@ -8,7 +8,7 @@ import { text } from '../respond'
 import { auditMcpWrite } from '../audit'
 import { adjustPoints, updateLoyaltyConfig } from '@/services/dashboard/loyalty.dashboard.service'
 import { getCardDesign, saveCardDesign } from '@/services/wallet/cardDesign.service'
-import { getStampCardStatus } from '@/services/wallet/stampLedger.service'
+import { adjustStamps, contarVersionDeCartilla, getStampCardStatus } from '@/services/wallet/stampLedger.service'
 import { redeemStampReward } from '@/services/wallet/redeemStampReward.service'
 import { getCustomerLoyalty, redeemPointsToOrder } from '@/services/mobile/loyalty.mobile.service'
 import { planGateMessage } from '../planGate'
@@ -136,6 +136,157 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
         return text({ ok: true, customer: name, change: points, newBalance: result.newBalance })
       } catch (err) {
         return text({ ok: false, error: (err as Error).message })
+      }
+    },
+  )
+
+  server.tool(
+    'adjust_stamps',
+    "🔴 CRITICAL (moves customer value: a stamp too many is a free product). Manually set the stamps on a customer's OPEN stamp card of a venue you can access — e.g. migrating a paper card or correcting an error. Find the customer by name/email/phone; stampsEarned is the NEW TOTAL (0-100), not a change; reaching the card goal completes it like a normal stamp; a reason (5-500 chars) is required. By DEFAULT this only PREVIEWS and returns expectedCustomerId/expectedStampCardId/expectedStampsEarned/expectedVersion/expectedStampsRequired; to apply it call again with confirm:true and those five expected* values exactly as returned. This WRITES — requires loyalty:adjust.",
+    {
+      venueId: z.string().describe('Venue that owns the customer (must be in your scope)'),
+      search: z.string().min(1).describe('Customer name, email or phone (partial, case-insensitive)'),
+      stampsEarned: z.number().int().min(0).max(100).describe('The NEW TOTAL of stamps the open card should have (not a change)'),
+      reason: z.string().trim().min(5).max(500).describe('Why — required for the audit trail (e.g. "migración del cartón de papel")'),
+      confirm: z.boolean().optional().describe('Must be true to actually apply; without it you get a preview'),
+      expectedCustomerId: z.string().optional().describe('With confirm: the customerId returned by the preview'),
+      expectedStampCardId: z
+        .string()
+        .nullable()
+        .optional()
+        .describe('With confirm: expectedStampCardId from the preview (null if no card yet)'),
+      expectedStampsEarned: z.number().int().optional().describe('With confirm: expectedStampsEarned from the preview'),
+      expectedVersion: z.number().int().optional().describe('With confirm: expectedVersion from the preview'),
+      expectedStampsRequired: z.number().int().optional().describe('With confirm: expectedStampsRequired (the card goal) from the preview'),
+    },
+    async ({
+      venueId,
+      search,
+      stampsEarned,
+      reason,
+      confirm,
+      expectedCustomerId,
+      expectedStampCardId,
+      expectedStampsEarned,
+      expectedVersion,
+      expectedStampsRequired,
+    }) => {
+      const base = guard.venueFilter(venueId) // throws ScopeError if the venue is out of scope
+      guard.requirePermission('loyalty:adjust', venueId)
+      const gate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
+      if (gate) return text({ ok: false, planRequired: true, error: gate })
+      const motivo = reason.trim()
+      if (motivo.length < 5 || motivo.length > 500) return text({ ok: false, error: 'El motivo debe tener de 5 a 500 caracteres.' })
+
+      const matches = await prisma.customer.findMany({
+        where: { ...base, ...personSearchWhere(search, { contact: true }) },
+        select: { id: true, firstName: true, lastName: true },
+        orderBy: { totalSpent: 'desc' },
+        take: 5,
+      })
+      if (matches.length === 0) {
+        return text({ ok: false, error: `No encontré ningún cliente que coincida con "${search}" en este local.` })
+      }
+      if (matches.length > 1) {
+        return text({
+          ok: false,
+          ambiguous: true,
+          error: `"${search}" coincide con varios clientes — sé más específico.`,
+          matches: matches.map(m => `${m.firstName ?? ''} ${m.lastName ?? ''}`.trim() || '(sin nombre)'),
+        })
+      }
+
+      const c = matches[0]
+      const name = `${c.firstName ?? ''} ${c.lastName ?? ''}`.trim() || '(sin nombre)'
+
+      if (!confirm) {
+        const estado = await getStampCardStatus(venueId, c.id)
+        const version = await contarVersionDeCartilla(estado.stampCardId)
+        return text({
+          ok: false,
+          requiresConfirmation: true,
+          preview: {
+            customer: name,
+            customerId: c.id,
+            currentStamps: estado.stampsEarned,
+            newStamps: stampsEarned,
+            stampsRequired: estado.stampsRequired,
+            completes: stampsEarned >= estado.stampsRequired,
+            rewardLabel: estado.rewardLabel,
+            expectedStampCardId: estado.stampCardId,
+            expectedStampsEarned: estado.stampsEarned,
+            expectedVersion: version,
+          },
+          // F8: ARRIBA, donde el catálogo los firma con el total y los copia a `confirmationArguments`. Dentro de `preview` no
+          // los veía, y confirmar con ellos rompía la firma.
+          expectedCustomerId: c.id,
+          expectedStampCardId: estado.stampCardId,
+          expectedStampsEarned: estado.stampsEarned,
+          expectedVersion: version,
+          expectedStampsRequired: estado.stampsRequired,
+          message: `Esto dejará a ${name} con ${stampsEarned} de ${estado.stampsRequired} sellos (hoy tiene ${estado.stampsEarned}). Vuelve a llamar con confirm:true y los expected* de esta vista previa.`,
+        })
+      }
+
+      // 🔴 Dos clientes sin tarjeta se ven idénticos (null/0/0): el id del cliente del preview es lo único que ata el confirm a SU cliente.
+      if (expectedCustomerId !== c.id) {
+        return text({ ok: false, error: 'El cliente de la búsqueda no es el del preview (expectedCustomerId). Vuelve a pedir el preview.' })
+      }
+      if (
+        expectedStampCardId === undefined ||
+        expectedStampsEarned === undefined ||
+        expectedVersion === undefined ||
+        expectedStampsRequired === undefined
+      ) {
+        return text({
+          ok: false,
+          error: 'Faltan expectedStampCardId, expectedStampsEarned, expectedVersion y expectedStampsRequired del preview.',
+        })
+      }
+
+      // El dueño de la organización puede no tener fila en StaffVenue: no se rechaza, el autor queda en la bitácora por Staff.id.
+      const sv = await prisma.staffVenue.findFirst({ where: { staffId: scope.staffId, venueId }, select: { id: true } })
+
+      try {
+        const result = await adjustStamps(venueId, c.id, {
+          stampsEarned,
+          expectedStampCardId,
+          expectedStampsEarned,
+          expectedVersion,
+          expectedStampsRequired,
+          reason: motivo,
+          staffVenueId: sv?.id,
+          actorStaffId: scope.staffId,
+        })
+        await auditMcpWrite(scope, {
+          action: 'STAMPS_ADJUSTED',
+          entity: 'Customer',
+          entityId: c.id,
+          venueId,
+          data: { from: result.from, to: result.to, reason: motivo, completed: result.completed },
+        })
+        return text({
+          ok: true,
+          customer: name,
+          from: result.from,
+          to: result.to,
+          delta: result.delta,
+          completed: result.completed,
+          stampsRequired: result.stampsRequired,
+        })
+      } catch (err) {
+        const e = err as Error & { code?: string; details?: { stampsEarned?: number; stampsRequired?: number; rewardLabel?: string } }
+        if (e.code === 'STAMPS_CHANGED') {
+          return text({
+            ok: false,
+            code: e.code,
+            error: e.message,
+            currentStamps: e.details?.stampsEarned,
+            stampsRequired: e.details?.stampsRequired,
+            rewardLabel: e.details?.rewardLabel,
+          })
+        }
+        return text({ ok: false, code: e.code, error: e.message })
       }
     },
   )
@@ -475,7 +626,8 @@ export function registerLoyaltyTools(server: McpServer, scope: McpScope) {
       const planGate = await planGateMessage(venueId, 'LOYALTY_PROGRAM', 'El programa de lealtad')
       if (planGate) return text({ ok: false, planRequired: true, error: planGate })
 
-      const estado = await getStampCardStatus(venueId, customerId)
+      // stampCardId es interno del ajuste a mano: la salida de esta tool certificada se queda exactamente como estaba.
+      const { stampCardId: _stampCardId, ...estado } = await getStampCardStatus(venueId, customerId)
       const pendientes = await prisma.stampReward.findMany({
         where: { venueId, customerId, status: 'PENDING' },
         select: { id: true, rewardLabel: true, rewardType: true, expiresAt: true },

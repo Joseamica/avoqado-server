@@ -6,6 +6,7 @@ export const DATABASE_JOB_SCHEDULES = {
   documentRequests: '19 */2 * * * *',
   displayModeRequestExpiry: '4 * * * * *',
   terminalPaymentWatchdog: '8,38 * * * * *',
+  exchangeCardSettlement: '7,37 * * * * *',
   blumonWebhookReconciliation: '11,41 * * * * *',
   tpvHealthMonitor: '14 */2 * * * *',
   posConnectionMonitor: '17 1-59/5 * * * *',
@@ -19,6 +20,7 @@ export const DATABASE_JOB_SCHEDULES = {
   // caja (:02), inventario (:44) y calendarios (:26/:56). Máximo 25 órdenes.
   loyaltyReconciliation: '41 */5 * * * *',
   paymentEffects: '16,46 * * * * *',
+  cancelOrderEffects: '24,54 * * * * *',
   // S4 (checkpoint 1 del webhook): worker propio de eventos PENDING de AngelPay. Segundos :13/:43, huecos libres
   // entre el reconciliador de Blumon (:11/:41) y el monitor de salud (:14).
   angelpayEventWorker: '13,43 * * * * *',

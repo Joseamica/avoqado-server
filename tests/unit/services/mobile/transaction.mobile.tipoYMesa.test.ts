@@ -8,6 +8,9 @@ import * as refundService from '@/services/dashboard/refund.dashboard.service'
 import { getTransactionDetail, getTransactions } from '@/services/mobile/transaction.mobile.service'
 
 jest.mock('@/services/dashboard/refund.dashboard.service', () => ({ listRefundsForPayment: jest.fn() }))
+jest.mock('@/services/exchanges/exchangeDetail', () => ({
+  exchangeDetailFields: jest.fn(async () => ({ fields: {}, itemExtras: new Map() })),
+}))
 
 const prismaMock = prisma as any
 const pago = (order: Record<string, unknown> | null) => ({
@@ -44,6 +47,41 @@ beforeEach(() => {
 })
 
 describe('getTransactionDetail · tipo de la orden y mesa (D4)', () => {
+  it('venta pagada anónima admite cliente, preservando importes y campos de recibo', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(
+      pago({
+        orderNumber: '42',
+        type: 'DINE_IN',
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+        customerId: null,
+        orderCustomers: [],
+        table: null,
+        items: [],
+      }),
+    )
+    const detail = await getTransactionDetail('venue_1', 'pay_1')
+    expect(detail).toMatchObject({ amount: 100, tipAmount: 0, customerId: null, customerName: null, canAssignCustomer: true })
+  })
+  it('cliente primario puesto desde la terminal bloquea acción aunque la cabecera esté vacía', async () => {
+    prismaMock.payment.findFirst.mockResolvedValue(
+      pago({
+        orderNumber: '42',
+        type: 'TAKEOUT',
+        status: 'COMPLETED',
+        paymentStatus: 'PAID',
+        customerId: null,
+        orderCustomers: [{ customerId: 'cust_1', customer: { firstName: 'Ana', lastName: 'López' } }],
+        table: null,
+        items: [],
+      }),
+    )
+    expect(await getTransactionDetail('venue_1', 'pay_1')).toMatchObject({
+      customerId: 'cust_1',
+      customerName: 'Ana López',
+      canAssignCustomer: false,
+    })
+  })
   it('cobro de la mesa 5: trae DINE_IN y "5", y la consulta los pide', async () => {
     prismaMock.payment.findFirst.mockResolvedValue(pago({ orderNumber: '42', type: 'DINE_IN', table: { number: '5' }, items: [] }))
     const d = await getTransactionDetail('venue_1', 'pay_1')

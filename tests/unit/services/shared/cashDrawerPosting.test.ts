@@ -153,4 +153,11 @@ describe('postCashSaleToDrawer — la venta en efectivo SUMA al cajón', () => {
   it('un pago de prueba (type TEST, demo en vivo) no mueve dinero real', async () => {
     await expect(postCashSaleToDrawer(pagoEnEfectivo({ type: 'TEST' }))).resolves.toBe('NOT_DRAWER_CASH')
   })
+
+  // «Cobrar sin red» (S5, D4): su efectivo ya lo contó el cajón de SU turno, cerrado. En la caja abierta de hoy sería un faltante falso.
+  it('🔴 una venta tardía de un turno cerrado no entra a ninguna caja, ni siquiera la abierta', async () => {
+    await expect(postCashSaleToDrawer(pagoEnEfectivo({ ventaDeTurnoCerrado: true }))).resolves.toBe('NOT_DRAWER_CASH')
+    expect((prismaMock as any).cashDrawerSession.findFirst).not.toHaveBeenCalled()
+    expect((prismaMock as any).cashDrawerEvent.createMany).not.toHaveBeenCalled()
+  })
 })

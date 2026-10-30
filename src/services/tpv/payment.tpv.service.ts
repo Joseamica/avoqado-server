@@ -5,6 +5,7 @@ import { BadRequestError, ConflictError, NotFoundError, ServiceUnavailableError 
 import prisma from '../../utils/prismaClient'
 import { generateDigitalReceipt } from './digitalReceipt.tpv.service'
 import { RECIBO_CANONICO } from '../shared/reciboCanonico'
+import { esRenglonDeVale, esValeRevendido } from '../shared/renglonDeVale'
 import { publishCommand } from '../../communication/rabbitmq/publisher'
 import { trackRecentPaymentCommand } from '../pos-sync/posSyncOrder.service'
 import { socketManager } from '../../communication/sockets/managers/socketManager'
@@ -19,6 +20,7 @@ import {
   MOTIVO_EVIDENCIA_DE_INGRESO_SIN_ORDEN,
 } from './evidenciaDeIngreso'
 import { OPCIONES_DE_TRANSACCION_DEL_INTENTO, candadoDeIntento, llaveDeIntento } from './candadoDeIntento'
+import { avisarDineroDeRappi } from '../shared/avisoDeRappiEfectivo'
 import { avisarSobrepago } from '../shared/avisoDeSobrepago'
 
 /**
@@ -364,13 +366,20 @@ import { awardLoyaltyForPaidOrder } from '../shared/loyaltyOnPaidOrder'
 import {
   ORDER_LOCK_WAIT_BUDGET,
   claimShiftForCompletedPayment,
+  esVentaDeCajaCerrada,
+  esVentaDeTurnoCerrado,
   lockExistingOrderForPayment,
+  marcaDeCajaDeLaVenta,
+  marcaDeCajaDeLaVentaCerrada,
+  marcaDeVentaDeTurnoCerrado,
   recordCapturedPaymentOrderReconciliation,
   recordPendingPaymentShiftReconciliation,
   resolvePaymentShiftReconciliationEnabled,
+  ventaDeLaColaEnTx,
+  entradaDelClaim,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
-import { enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
+import { asegurarAvisoDeVentaApartada, enqueuePaymentEffect, enqueuePaymentCommissionInTx } from './paymentEffects.service'
 import { COSTO_PENDIENTE_PLAZO_MS, asegurarCostoSincrono } from '../payments/deferredTransactionCost.service'
 import { esEvidenciaDeConciliacion } from './segundaCaptura'
 import { runAutoReorderForVenue } from '../dashboard/autoReorder.service'
@@ -427,6 +436,7 @@ import {
 import { getAreaTicketLineIdsCoveredByInventoryReservations } from './order.tpv.service'
 import { resolveFastPaymentTarget } from './fastPaymentTarget'
 import { linkCustomerToExistingOrder, normalizeRequestedCustomerId, resolveFastOrderCustomer } from './fastPaymentCustomer'
+import type { CustomerAttributionActor } from '../shared/customerAttributionPolicy'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { debeMarcarCocina } from '../kds/kitchenDisplayStations'
 import { armarComandasTrasCommit } from '../kds/kitchenTicketAuthoring.service'
@@ -1330,9 +1340,20 @@ async function enqueueCommittedPaymentEffects(
   reviewRating: string | undefined,
   staffId: string | undefined,
   expectsSettlement: boolean,
+  /** S3: los datos del aviso de una venta APARTADA (turno o caja ya cerrados); con ellos nace su efecto durable `AVISO_TURNO_CERRADO`. */
+  avisoDeVentaApartada?: { externalId: string; montoCents: number; terminalSerial: string | null },
+  saleEffects = true,
 ): Promise<void> {
   if (payment.status !== 'COMPLETED') return
   const source = { venueId: payment.venueId, paymentId: payment.id, orderId: payment.orderId }
+  // S3 (Codex plan r3 #6 y r4 #3): el ÚNICO emisor del aviso de una venta apartada es este efecto, nacido con el dinero.
+  if (avisoDeVentaApartada)
+    await enqueuePaymentEffect(tx, {
+      ...source,
+      kind: 'AVISO_TURNO_CERRADO',
+      dedupeKey: 'aviso-turno-cerrado:' + payment.id,
+      payload: { ...avisoDeVentaApartada, orderId: payment.orderId },
+    })
   await enqueuePaymentEffect(tx, { ...source, kind: 'RECEIPT', dedupeKey: 'receipt:' + payment.id + ':v1', payload: {} })
   const rating = reviewRating ? mapTpvRatingToNumeric(reviewRating) : null
   if (rating !== null)
@@ -1342,14 +1363,14 @@ async function enqueueCommittedPaymentEffects(
       dedupeKey: 'review:' + payment.id + ':v1',
       payload: { rating, servedById: staffId ?? null },
     })
-  if (expectsSettlement)
+  if (saleEffects && expectsSettlement)
     await enqueuePaymentEffect(tx, {
       ...source,
       kind: 'REFERRAL',
       dedupeKey: 'referral:' + payment.orderId + ':v1',
       payload: { expectsSettlement: true },
     })
-  if (payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
+  if (saleEffects && payment.type !== 'TEST') await enqueuePaymentCommissionInTx(tx, payment.id)
 }
 
 /**
@@ -1407,6 +1428,7 @@ export async function settleStandalonePaymentInTx(
           orderId,
           status: order.status,
           originSystem: order.originSystem,
+          source: order.source,
           cobrado: amount.plus(tipAmount),
           cubreComoCancelada,
           canal: 'recordOrderPayment',
@@ -1588,7 +1610,7 @@ async function updateOrderTotalsForStandalonePayment(
   if (!order) {
     throw new Error(`Order ${orderId} not found for total update`)
   }
-  const isAreaTicketOrder = order.items.some(item => item.areaTicketLineId != null)
+  const isAreaTicketOrder = order.items.some(esRenglonDeVale)
 
   // 🔴 UN REEMBOLSO NO REABRE SALDO (founder, 2026-08-18).
   //
@@ -1764,6 +1786,19 @@ async function updateOrderTotalsForStandalonePayment(
     })
   }
 
+  // 🚨 Rappi 2b (T7/T8; Codex código r1 #3): dinero YA autorizado (terminal, webhook de AngelPay) sobre un pedido de Rappi en efectivo.
+  // Se registró como siempre; aquí sólo se avisa: la tarifa de Rappi no está en el cajón, o Rappi ya lo había cancelado.
+  if (order.thirdPartyCashDue != null && currentPaymentId) {
+    avisarDineroDeRappi({
+      action: claseDeEstado(order.status) === 'CANCELADA' ? 'RAPPI_CASH_ON_CANCELLED_ORDER' : 'RAPPI_CASH_ORDER_OTHER_MEDIUM',
+      orderId,
+      venueId: order.venueId,
+      paymentId: currentPaymentId,
+      staffId: staffId ?? null,
+      data: { canal: 'terminal', amount: paymentAmount, tip: tipAmount },
+    })
+  }
+
   // 🚨 INVENTARIO INSUFICIENTE — detectar y gritar, NUNCA rechazar ni lanzar.
   //
   // Cuando este bloque corre, `prisma.$transaction` de `recordOrderPayment` YA
@@ -1797,6 +1832,8 @@ async function updateOrderTotalsForStandalonePayment(
       (item: any) =>
         item.productId &&
         (!item.paymentAllocations || item.paymentAllocations.length === 0) &&
+        // D1: el vale de este renglón se volvió a cobrar en otra cuenta; aquí no se valida ni se descuenta.
+        !esValeRevendido(item) &&
         (!item.areaTicketLineId || !coveredAreaTicketLines.has(item.areaTicketLineId)),
     )
 
@@ -1941,6 +1978,7 @@ async function updateOrderTotalsForStandalonePayment(
               orderId,
               status: current.status,
               originSystem: order.originSystem,
+              source: order.source,
               cobrado: totalPaid,
               cubreComoCancelada, // la huella garantiza que sus entradas de dinero no cambiaron desde que se calculó arriba
               canal: currentPaymentId ? 'recordOrderPayment' : 'reconcileOrderFromPayments',
@@ -2098,10 +2136,12 @@ async function updateOrderTotalsForStandalonePayment(
     // que quedó pendiente y nunca re-deduce lo ya aplicado. El loop de abajo NO
     // se toca: lo comparten 8 features del cobro y está probado en producción.
     let tpvPostingLines = new Map<string, string>()
+    let postingLinesRead = false
     try {
       if (tpvPostingId) {
         const lines = await prisma.inventoryPostingLine.findMany({ where: { postingId: tpvPostingId } })
         tpvPostingLines = new Map(lines.map(l => [l.effectKey, l.id]))
+        postingLinesRead = true
         await prisma.inventoryPosting.updateMany({
           where: { id: tpvPostingId, status: 'PENDING' },
           data: { status: 'APPLYING', attempts: { increment: 1 } },
@@ -2124,6 +2164,13 @@ async function updateOrderTotalsForStandalonePayment(
 
     // Deduct stock for each product in the order
     for (const item of updatedOrder.items) {
+      // D1: el vale de este renglón se volvió a cobrar en otra cuenta (R12-1 reabrió ésta): su producto lo descuenta la otra.
+      if (esValeRevendido(item)) {
+        logger.info('⏭️ Skipping deduction for a vale line resold in another order', { orderId, orderItemId: item.id })
+        continue
+      }
+      // R12/R13: el posting ya clasificó al dueño vivo, la liberación y el consumo previo del vale.
+      if (item.areaTicketLineId && !tpvPostingLines.has(item.id)) continue
       if (item.areaTicketLineId && coveredAreaTicketLines.has(item.areaTicketLineId)) {
         logger.info('⏭️ Skipping generic deduction for area-ticket line covered by reservation', {
           orderId,
@@ -2306,7 +2353,7 @@ async function updateOrderTotalsForStandalonePayment(
     // Estado final del posting: APPLIED si todo aplicó, PARTIAL_FAILED si algo
     // quedó pendiente (el sweeper lo recoge). Cercado por el claim APPLYING para
     // no pisar a otro worker.
-    if (tpvPostingId) {
+    if (tpvPostingId && (postingLinesRead || !updatedOrder.items.some(item => item.areaTicketLineId))) {
       void prisma.inventoryPosting
         .updateMany({
           where: { id: tpvPostingId, status: 'APPLYING' },
@@ -2736,6 +2783,23 @@ export async function getPayments(
 /**
  * Interface for payment creation data
  */
+/**
+ * S3 «Efectivo sin red en el turno correcto»: los datos del aviso al gerente de una venta de la cola que quedó APARTE (su turno, o su
+ * caja sin turno, ya se había cerrado), o `undefined`. Sustituye al aviso directo después del commit (S7 de «Cobrar sin red»): ahora
+ * lo manda SÓLO el efecto durable `AVISO_TURNO_CERRADO`, que nace con el dinero y se reintenta hasta que consta (Codex plan r4 #3).
+ */
+function avisoDeVentaApartada(
+  payment: { id: string; posRawData: Prisma.JsonValue },
+  paymentData: Pick<PaymentCreationData, 'idempotencyKey' | 'authenticatedTerminalSerial' | 'amount'>,
+): { externalId: string; montoCents: number; terminalSerial: string | null } | undefined {
+  if (!esVentaDeTurnoCerrado(payment.posRawData) && !esVentaDeCajaCerrada(payment.posRawData)) return undefined
+  return {
+    externalId: paymentData.idempotencyKey ?? payment.id,
+    montoCents: paymentData.amount,
+    terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
+  }
+}
+
 interface PaymentCreationData {
   venueId: string
   amount: number // Amount in cents
@@ -2755,6 +2819,11 @@ interface PaymentCreationData {
   // Founder 3-oct / Codex r10 #3 (Tarea 6a): «este efectivo lo tiene el cajero en la mano y todavía lo puede devolver».
   // Sólo `true` cambia algo; ausente, `null` o `false` es lo de hoy. La TPV todavía no lo manda.
   cobroNuevo?: boolean | null
+  // «Cobrar sin red» (D4): el turno en que se VENDIÓ, sólo de la cola de la terminal. Si ya no es el vivo, el cobro (y la orden
+  // rápida) quedan sin turno con conciliación `SALE_SHIFT_CLOSED`; nunca se estampa. Ausente = como hoy.
+  shiftIdDeLaVenta?: string | null
+  /** S3: la caja que el POS tenía abierta al cobrar (sólo cuenta con `isOfflineReplay === true`). */
+  cashDrawerSessionId?: string | null
   // Detalle del cobro declarado a mano ("Tarjeta (terminal externa)"). Sólo aplica a
   // métodos que NO pasaron por Avoqado; en efectivo va null. iOS manda null explícito.
   externalSource?: string | null
@@ -3118,7 +3187,7 @@ async function resolverAfiliacionDelCobro(
  * @param deviceSerialNumber Terminal serial number (e.g., "AVQD-2841548417")
  * @returns Terminal ID or null if not found
  */
-async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: string): Promise<string | null> {
+export async function resolveTerminalIdFromSerial(venueId: string, deviceSerialNumber: string): Promise<string | null> {
   try {
     const terminal = await prisma.terminal.findFirst({
       where: {
@@ -3518,6 +3587,17 @@ export async function recordOrderPayment(
         existingByKey.status === 'COMPLETED'
           ? await resumeCapturedAreaTicketPayment(venueId, orderId, existingByKey, paymentData.idempotencyKey)
           : null
+      // Codex servidor r1 #6 + S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante.
+      await asegurarAvisoDeVentaApartada({
+        venueId,
+        paymentId: existingByKey.id,
+        orderId: existingByKey.orderId,
+        status: existingByKey.status,
+        posRawData: existingByKey.posRawData,
+        externalId: paymentData.idempotencyKey ?? existingByKey.id,
+        montoPesos: existingByKey.amount,
+        terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
+      })
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, orderId)) ?? existingByKey),
         ...(areaTicketCheckoutState ? { areaTicketCheckoutState } : {}),
@@ -3656,7 +3736,7 @@ export async function recordOrderPayment(
   // Convert amounts from cents to decimal (Prisma expects Decimal)
   const totalAmount = paymentData.amount / 100
   const tipAmount = paymentData.tip / 100
-  const hasAreaTicketLines = activeOrder.items.some(item => item.areaTicketLineId != null)
+  const hasAreaTicketLines = activeOrder.items.some(esRenglonDeVale)
   if (hasAreaTicketLines && !paymentData.idempotencyKey) {
     throw new BadRequestError('Las ventas con vales requieren idempotencyKey. Reintenta el mismo pago con una llave estable.')
   }
@@ -3708,6 +3788,8 @@ export async function recordOrderPayment(
   let lockedAreaCheckout: { sessionId: string; attemptId: string } | null = null
   let areaTicketCheckoutState: string | null = null
   let committedStandaloneSettlement: CommittedStandaloneSettlement | undefined
+  let suppressExchangeSaleEffects = false
+  let isExchangeSale = false
   // Faltante de inventario detectado con el cobro YA registrado. Viaja como aviso
   // en la respuesta — nunca como error, o el cajero vuelve a pasar la tarjeta.
   let inventoryWarning: OrderInventoryWarning | null = null
@@ -3764,6 +3846,33 @@ export async function recordOrderPayment(
             'PAYMENT_ORDER_AUTHORITY_UNAVAILABLE',
           )
         }
+
+        await tx.$executeRawUnsafe('SAVEPOINT exchange_sale_policy')
+        try {
+          const exchange = await tx.exchange.findUnique({
+            where: { newOrderId: activeOrder.id, venueId },
+            select: { status: true, reviewReason: true },
+          })
+          isExchangeSale = Boolean(exchange)
+          if (exchange) {
+            const order = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId }, select: { status: true } })
+            suppressExchangeSaleEffects =
+              exchange.status === 'CANCELLED' ||
+              (exchange.status === 'NEEDS_REVIEW' && exchange.reviewReason === 'LATE_CHARGE_AFTER_RELEASE') ||
+              (exchange.status === 'PENDING_PAYMENT' && (order.status === 'CANCELLED' || order.status === 'DELETED'))
+          }
+        } catch (error) {
+          await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT exchange_sale_policy')
+          // Captured money survives an auxiliary read failure; unsafe sale effects wait for reconciliation.
+          suppressExchangeSaleEffects = true
+          isExchangeSale = true
+          logger.error('🚨 [Exchange] No se pudo comprobar el cambio; se registra el cargo sin efectos de venta', {
+            venueId,
+            orderId,
+            error,
+          })
+        }
+        await tx.$executeRawUnsafe('RELEASE SAVEPOINT exchange_sale_policy')
 
         // S0 (Codex, 13-sep): UN ganador por solicitud POS→terminal, decidido AQUÍ — bajo el candado de la fila, antes
         // de reclamar turno y antes de crear cualquier Payment. Ver `arbitrarRegistroDeSolicitud`.
@@ -3907,12 +4016,12 @@ export async function recordOrderPayment(
                 contratoDePrecio: true,
                 taxAmount: true,
                 status: true,
-                items: { select: { areaTicketLineId: true } },
+                items: { select: { areaTicketLineId: true, releasedAreaTicketLineId: true } },
               },
             })
             if (ordenBloqueada) {
               const cobroPrevio = cobroEnEfectivoSobreOrdenSaldada(
-                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(i => i.areaTicketLineId != null) },
+                { ...candidatoDeEfectivo, hasAreaTicketLines: ordenBloqueada.items.some(esRenglonDeVale) },
                 {
                   subtotal: ordenBloqueada.subtotal,
                   discountAmount: ordenBloqueada.discountAmount,
@@ -3942,6 +4051,7 @@ export async function recordOrderPayment(
           tipPesos: shiftTip,
           incrementTotalOrders: priorCompletedPaymentCount === 0,
           orderId: activeOrder.id,
+          expectedShiftId: paymentData.isOfflineReplay === true ? paymentData.shiftIdDeLaVenta : null,
         })
 
         // Create the payment record
@@ -4029,6 +4139,8 @@ export async function recordOrderPayment(
               ...(paymentData.equalPartsPartySize && { equalPartsPartySize: paymentData.equalPartsPartySize }),
               ...(paymentData.equalPartsPayedFor && { equalPartsPayedFor: paymentData.equalPartsPayedFor }),
               ...(paymentData.reviewRating && { reviewRating: paymentData.reviewRating }),
+              // D4: su efectivo ya lo contó el cajón de SU turno (cerrado); el cajón no lo vuelve a sumar (en línea ni barrido).
+              ...marcaDeVentaDeTurnoCerrado(shiftClaim?.saleShiftId),
             },
           },
           include: {
@@ -4152,7 +4264,12 @@ export async function recordOrderPayment(
 
         // Integradas y con vales por área conservan a su dueño del cierre (`cierreDelCobroSaldaLaCuenta`, el mismo criterio que la
         // reasignación de cobros).
-        if (newPayment.status === 'COMPLETED' && !lockedAreaCheckout && cierreDelCobroSaldaLaCuenta(activeOrder)) {
+        if (
+          newPayment.status === 'COMPLETED' &&
+          !suppressExchangeSaleEffects &&
+          !lockedAreaCheckout &&
+          cierreDelCobroSaldaLaCuenta(activeOrder)
+        ) {
           committedStandaloneSettlement = await settleStandalonePaymentInTx(
             tx,
             venueId,
@@ -4166,7 +4283,7 @@ export async function recordOrderPayment(
         if (newPayment.status === 'COMPLETED') {
           const paidOrder = await tx.order.findUniqueOrThrow({ where: { id: activeOrder.id, venueId } })
           let expectsSettlement = paidOrder.paymentStatus === 'PAID'
-          if (!expectsSettlement && !committedStandaloneSettlement) {
+          if (!suppressExchangeSaleEffects && !expectsSettlement && !committedStandaloneSettlement) {
             // SR and area-ticket flows retain their settlement owner. Freeze the
             // expectation now so their referral survives a delayed settlement.
             const sums = await tx.payment.aggregate({
@@ -4180,8 +4297,32 @@ export async function recordOrderPayment(
             })
             expectsSettlement = computeOrderBalance(paidOrder, [{ amount: sums._sum.amount, tipAmount: sums._sum.tipAmount }]).isFullyPaid
           }
-          await enqueueCommittedPaymentEffects(tx, newPayment, paymentData.reviewRating, validatedStaffId, expectsSettlement)
+          await enqueueCommittedPaymentEffects(
+            tx,
+            newPayment,
+            paymentData.reviewRating,
+            validatedStaffId,
+            expectsSettlement && !isExchangeSale,
+            avisoDeVentaApartada(newPayment, paymentData),
+            !suppressExchangeSaleEffects,
+          )
           await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
+          if (isExchangeSale) {
+            await tx.$executeRawUnsafe('SAVEPOINT exchange_charge_mark')
+            try {
+              const { markExchangeChargeInTx } = await import('../exchanges/exchangeCharge')
+              await markExchangeChargeInTx(tx, { venueId, orderId: activeOrder.id, paymentId: newPayment.id })
+            } catch (error) {
+              await tx.$executeRawUnsafe('ROLLBACK TO SAVEPOINT exchange_charge_mark')
+              logger.error('🚨 [Exchange] El sello del cargo no se escribió; lo encontrará el barrido', {
+                venueId,
+                orderId: activeOrder.id,
+                paymentId: newPayment.id,
+                error,
+              })
+            }
+            await tx.$executeRawUnsafe('RELEASE SAVEPOINT exchange_charge_mark')
+          }
         }
         return newPayment
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO),
@@ -4404,6 +4545,7 @@ export async function recordOrderPayment(
       tipAmount: payment.tipAmount,
       staffId: payment.processedById,
       orderId: activeOrder.id,
+      ventaDeTurnoCerrado: esVentaDeTurnoCerrado(payment.posRawData),
     }),
   )
 
@@ -4496,7 +4638,7 @@ export async function recordOrderPayment(
       })
 
       // Create commission calculation for this payment (non-blocking)
-      if (payment.type !== 'TEST') {
+      if (payment.type !== 'TEST' && !suppressExchangeSaleEffects) {
         // Real-time auto-reorder: if this sale left any ingredient at/below its
         // reorder point, create the PO + email the supplier right away instead of
         // waiting for the nightly job. Non-blocking (never affects the payment)
@@ -4566,7 +4708,9 @@ export async function recordOrderPayment(
     hasExternalId: !!activeOrder.externalId,
   })
 
-  if (isIntegratedMode) {
+  if (suppressExchangeSaleEffects) {
+    logger.warn('[Exchange] Cargo registrado sin reabrir ni aplicar efectos de venta', { venueId, orderId, paymentId: payment.id })
+  } else if (isIntegratedMode) {
     // MODO INTEGRADO: Enviar comando a POS, POS maneja los totales
     try {
       const isPartialPayment = totalAmount + tipAmount < parseFloat(activeOrder.total.toString())
@@ -4946,7 +5090,13 @@ async function verifyDelegatedPaymentLanded(
  * @param orgId Organization ID
  * @returns Created payment
  */
-export async function recordFastPayment(venueId: string, paymentData: PaymentCreationData, userId?: string, _orgId?: string) {
+export async function recordFastPayment(
+  venueId: string,
+  paymentData: PaymentCreationData,
+  userId?: string,
+  _orgId?: string,
+  customerActor: CustomerAttributionActor = {},
+) {
   const timing = paymentStepTimer(venueId, paymentData.terminalPaymentRequestId)
   logger.info('Recording fast payment', { venueId, amount: paymentData.amount, paymentData })
 
@@ -4992,6 +5142,9 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     }
 
     const target = resolveFastPaymentTarget(arbitrationRow, venueId)
+    if (arbitrationRow?.venueId === venueId && arbitrationRow.orderId && arbitrationRow.customerId) {
+      customerActor = { ...customerActor, originalCustomer: { orderId: arbitrationRow.orderId, customerId: arbitrationRow.customerId } }
+    }
 
     // 🔑 El del BODY GANA sobre el de la fila: es el dato más fresco (el cajero lo acaba
     // de elegir), mientras la fila puede llevar minutos escrita. `target.seededCustomerId`
@@ -5064,7 +5217,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         // venta que YA existe. Sólo RELLENA (nunca reasigna) y nunca lanza, así que no
         // altera la semántica del catch de abajo. Así `customerLink` viaja en TODAS las
         // respuestas exitosas de `/fast` y el cliente móvil no tiene que adivinar.
-        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, effectiveCustomerId)
+        const customerLink = await linkCustomerToExistingOrder(venueId, target.orderId, effectiveCustomerId, customerActor)
         return { ...delegated, customerLink }
       } catch (err) {
         // 🔴 La tarjeta YA se cobró. Antes de esta delegación, ese dinero por lo menos
@@ -5200,7 +5353,18 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       // si el primer intento entró anónimo, sin esto la venta se quedaba sin cliente para
       // siempre (la idempotencia devuelve el pago y nadie vuelve a mirar). Rellenar es
       // aditivo y no toca dinero; reasignar está prohibido (ver `fastPaymentCustomer.ts`).
-      const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingByKey), effectiveCustomerId)
+      const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingByKey), effectiveCustomerId, customerActor)
+      // Codex servidor r1 #6 + S3 (Codex r1 código #5): el pago apartado de antes del efecto durable recibe aquí su aviso faltante.
+      await asegurarAvisoDeVentaApartada({
+        venueId,
+        paymentId: existingByKey.id,
+        orderId: existingByKey.orderId,
+        status: existingByKey.status,
+        posRawData: existingByKey.posRawData,
+        externalId: paymentData.idempotencyKey ?? existingByKey.id,
+        montoPesos: existingByKey.amount,
+        terminalSerial: paymentData.authenticatedTerminalSerial ?? null,
+      })
       return {
         ...((await consolidarRegistroRepetido(existingByKey, paymentData as RegistroEntrante, venueId, null)) ?? existingByKey),
         digitalReceipt: await ensureDigitalReceiptResponse(existingByKey.id, existingByKey.receipts[0]),
@@ -5226,7 +5390,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
     // Return existing payment with receipt (safe retry - client gets same response)
     // Mismo relleno de cliente que el check por `idempotencyKey`: un reintento legacy
     // (TPV < v1.10.10, sin llave) también puede traer el cliente que faltaba.
-    const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingPayment), effectiveCustomerId)
+    const customerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(existingPayment), effectiveCustomerId, customerActor)
     return {
       ...existingPayment,
       digitalReceipt: await ensureDigitalReceiptResponse(existingPayment.id, existingPayment.receipts[0]),
@@ -5326,6 +5490,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
   // the concurrent retry behave exactly like an idempotent success.
   let payment: Awaited<ReturnType<typeof prisma.payment.create>> & { processedBy: any }
   let fastOrder: Awaited<ReturnType<typeof prisma.order.create>>
+  /** S3 (Codex r1 código #1): la caja que el POS capturó al cobrar sin red, si el cobro entró a su turno: el efectivo va a ESA o a ninguna. */
+  let cajaDeLaCola: string | null = null
   const s0 = {
     segundaCaptura: null as SegundaCapturaRegistrada | null,
     colision: null as ColisionDeReferenciaRegistrada | null,
@@ -5435,6 +5601,11 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
             },
           )
         }
+        // S3: el turno de la venta de la cola (TPV: `shiftIdDeLaVenta`; POS por `/mobile/…/fast`: el ligado a la caja capturada).
+        const ventaDeLaCola = await ventaDeLaColaEnTx(tx, venueId, {
+          shiftIdDeLaVenta: paymentData.isOfflineReplay === true ? paymentData.shiftIdDeLaVenta : null,
+          cashDrawerSessionId: paymentData.isOfflineReplay === true ? paymentData.cashDrawerSessionId : null,
+        })
         const shiftClaim = await claimShiftForCompletedPayment(tx, {
           paymentStatus: paymentStatusSnapshot,
           venueId,
@@ -5443,6 +5614,8 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
           incrementTotalOrders: true,
           // La venta rápida nace DESPUÉS del claim, sin tarjetas de regalo: nunca es una cuenta de tarjetas.
           orderId: null,
+          // S3: todo lo de la venta de la cola por `entradaDelClaim` (Codex r5 código #1: incluida la relectura de la caja sin turno).
+          ...entradaDelClaim(ventaDeLaCola),
         })
 
         // 🔧 FIX: Use orderReference from Android if provided (ensures photos match order number)
@@ -5629,6 +5802,12 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
               source: fuenteDelCobroRapido,
               paymentType: 'FAST',
               ...(effectiveReviewRating && { reviewRating: effectiveReviewRating }),
+              // D4: su efectivo ya lo contó el cajón de SU turno (cerrado); el cajón no lo vuelve a sumar (en línea ni barrido).
+              ...marcaDeVentaDeTurnoCerrado(shiftClaim?.saleShiftId),
+              // S3: la venta de una caja cerrada sin turno ligado, mismo trato.
+              ...marcaDeCajaDeLaVentaCerrada(shiftClaim?.saleDrawerId),
+              // S3 (Codex r6 código #1): la no apartada lleva su caja capturada, para que el barrido la reponga ahí y no por la hora.
+              ...(shiftClaim?.saleShiftId || shiftClaim?.saleDrawerId ? {} : marcaDeCajaDeLaVenta(ventaDeLaCola.cajaId)),
             },
           },
           include: {
@@ -5752,14 +5931,31 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
 
         if (newPayment.status === 'COMPLETED') {
           await tx.order.update({ where: { id: order.id }, data: { loyaltyEligibleAt: new Date(), loyaltyStaffId: validatedStaffId } })
-          await enqueueCommittedPaymentEffects(tx, newPayment, effectiveReviewRating, validatedStaffId, true)
+          await enqueueCommittedPaymentEffects(
+            tx,
+            newPayment,
+            effectiveReviewRating,
+            validatedStaffId,
+            true,
+            avisoDeVentaApartada(newPayment, paymentData),
+          )
           await encolarObligacionDeCosto(tx, newPayment, paymentData.registradoVia === 'webhook' ? 'webhook' : 'terminal')
         }
-        return { payment: newPayment, fastOrder: order }
+        return {
+          payment: newPayment,
+          fastOrder: order,
+          // 🔴 S3 (Codex r1 código #1): el replay de la cola con su caja capturada manda su efectivo a ESA caja (o a ninguna si la contaron:
+          // la repone el barrido en su ventana). Sin esto, si otro aparato cierra esa caja y abre otra entre el commit y el movimiento,
+          // sumaba al esperado de la caja nueva. Codex r6 código #3: también cuando el claim no tomó turno (`SHIFT_NOT_OPEN`, `NO_SHIFT`):
+          // el billete sigue en esa caja. Sólo la venta apartada no va a ninguna. Un cobro en línea, como hoy (la ventana de milisegundos
+          // que ya existía para todo cobro en línea está en `docs/audit/deuda-encontrada.md`).
+          cajaDeLaCola: shiftClaim?.saleShiftId || shiftClaim?.saleDrawerId ? null : (ventaDeLaCola.cajaId ?? null),
+        }
       }, OPCIONES_DE_TRANSACCION_DEL_INTENTO),
     )
     payment = result.payment
     fastOrder = result.fastOrder
+    cajaDeLaCola = result.cajaDeLaCola ?? null
   } catch (error) {
     if (error instanceof RegistroYaExistentePorReferencia) return devolverExistentePorReferencia(error.registro)
     if (error instanceof ReintentoDelGanadorDeLaSolicitud) {
@@ -5805,7 +6001,7 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
         if (winner) {
           // La carrera la ganó otra petición: su orden ya existe, así que el cliente se
           // rellena (nunca se reasigna) igual que en cualquier reintento idempotente.
-          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId)
+          const winnerCustomerLink = await linkCustomerToExistingOrder(venueId, ordenPropia(winner), effectiveCustomerId, customerActor)
           return {
             ...((await consolidarRegistroRepetido(winner, paymentData as RegistroEntrante, venueId, null)) ?? winner),
             digitalReceipt: await ensureDigitalReceiptResponse(winner.id, winner.receipts[0]),
@@ -5866,6 +6062,10 @@ export async function recordFastPayment(venueId: string, paymentData: PaymentCre
       tipAmount: payment.tipAmount,
       staffId: payment.processedById,
       orderId: fastOrder.id,
+      // S3: el replay con su caja capturada va a ESA caja, y sólo si sigue abierta o la cerró el sistema sin conteo (Codex r6 código #1).
+      ...(cajaDeLaCola ? { targetSessionId: cajaDeLaCola, exigirAbierta: true, admiteCerradaSinConteo: true } : {}),
+      // D4 y S3: la venta apartada (turno o caja ya cerrados) no entra a ninguna caja.
+      ventaDeTurnoCerrado: esVentaDeTurnoCerrado(payment.posRawData) || esVentaDeCajaCerrada(payment.posRawData),
     }),
   )
 

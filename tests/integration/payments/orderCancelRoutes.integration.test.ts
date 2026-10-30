@@ -50,7 +50,7 @@ beforeAll(async () => {
   const url = new URL(process.env.TEST_DATABASE_URL ?? '')
   expect(['localhost', '127.0.0.1']).toContain(url.hostname)
   // La base de este trabajo en la Mac, o la de CI (`avoqado_*_test_*`): nunca otra.
-  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_[a-z0-9]+_test_)/)
+  expect(url.pathname).toMatch(/^\/(codex_testarudo_test_|avoqado_(?:[a-z0-9]+|cambio_r5)_test_)/)
   await prisma.organization.create({ data: { id: fixture, name: fixture, email: `${fixture}@example.test`, phone: '5500000000' } })
   await prisma.venue.create({ data: { id: venueId, organizationId: fixture, name: fixture, slug: fixture } })
   const staff = await prisma.staff.create({ data: { email: `${fixture}@staff.test`, firstName: 'Prueba', lastName: 'Cancelaciones' } })
@@ -634,7 +634,7 @@ describe('Fusión de cuentas (mergeOrders)', () => {
           SELECT pid, pg_blocking_pids(pid) AS blockers, query FROM pg_stat_activity
           WHERE datname = current_database() AND wait_event_type = 'Lock'
             AND ${holderPid} = ANY(pg_blocking_pids(pid))
-            AND query ILIKE '%"Order"%' AND query ILIKE '%ORDER BY id FOR UPDATE%'`
+            AND query ILIKE '%"Order"%' AND query ILIKE '%ORDER BY "createdAt" DESC, id DESC FOR UPDATE%'`
         if (rows.length) {
           waiter = rows[0]
           break

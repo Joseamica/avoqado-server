@@ -26,6 +26,7 @@ import { redactUrlSecrets } from '@/middlewares/requestLogger'
 import { hasPermission } from '@/lib/permissions'
 import { liberarCancelacionSchema } from '@/schemas/common/giftCard.common.schema'
 import { validateRequest } from '@/middlewares/validation'
+import { checkCortesiaPermissionIfPresent } from '@/middlewares/cortesiaPidePermiso.middleware'
 import { lookupSchema, payGiftCardSchema } from '@/schemas/mobile/giftCard.mobile.schema'
 import { generateOpaqueToken } from '@/services/giftCards/giftCardCode'
 
@@ -278,6 +279,16 @@ describe('S2b: pay-new-order', () => {
     const h = capasDe('post', PAGAR_NUEVA)
     const redeem = h.findIndex(x => x?.requiredPermission === 'giftCards:redeem')
     expect(h.indexOf(guardia)).toBeGreaterThan(redeem)
+  })
+
+  // Unión con develop (S9 de «Cobrar sin red»): esta venta también honra `isCortesia` y el descuento COMP de catálogo, así que
+  // lleva el MISMO candado de cortesía que POST /orders, después de `orders:create` (si no, sería la puerta de atrás).
+  it('🔴 unión: lleva el candado de cortesía de POST /orders (la MISMA función), después de orders:create', () => {
+    expect(capasDe('post', '/venues/:venueId/orders')).toContain(checkCortesiaPermissionIfPresent)
+    const h = capasDe('post', PAGAR_NUEVA)
+    const crear = h.findIndex(x => x?.requiredPermission === 'orders:create')
+    expect(crear).toBeGreaterThan(-1)
+    expect(h.indexOf(checkCortesiaPermissionIfPresent)).toBeGreaterThan(crear)
   })
 
   it('🔴 en la ruta REAL, mesa/externalId/isOfflineReplay se rechazan en la validación, antes de permisos, límite y controller', async () => {

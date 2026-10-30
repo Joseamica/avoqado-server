@@ -129,6 +129,26 @@ describe('elegirCajaParaReponer — a qué caja va un cobro cuando más de una c
   it('sin ninguna caja que cubra el instante, sigue siendo «fuera de caja»', () => {
     expect(elegirCajaParaReponer({ shiftId: 'turno-viejo' }, [])).toEqual({ kind: 'OUTSIDE' })
   })
+
+  // 🔴 S3 (Codex r6 código #1): la caja que el POS capturó al cobrar sin red manda sobre la hora del cobro.
+  it('🔴 la caja capturada que cerró antes de que subiera la venta gana sobre la abierta después, sólo sin conteo', () => {
+    const despues = sesion({ id: 's-despues', shiftId: null })
+    expect(elegirCajaParaReponer({ shiftId: 'turno-a', cajaDeLaVenta: 's-a' }, [despues])).toEqual({
+      kind: 'SESSION',
+      id: 's-a',
+      fueraDeSuVentana: true,
+    })
+    expect(elegirCajaParaReponer({ shiftId: 'turno-a', cajaDeLaVenta: 's-a' }, [])).toEqual({
+      kind: 'SESSION',
+      id: 's-a',
+      fueraDeSuVentana: true,
+    })
+  })
+
+  it('la caja capturada que todavía cubre la hora del cobro se repone como cualquier otra', () => {
+    const a = sesion({ id: 's-a', shiftId: 'turno-a' })
+    expect(elegirCajaParaReponer({ shiftId: 'turno-a', cajaDeLaVenta: 's-a' }, [nueva, a])).toEqual({ kind: 'SESSION', id: 's-a' })
+  })
 })
 
 describe('CashDrawerReconcilerJob.runNow', () => {

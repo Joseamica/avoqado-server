@@ -1,0 +1,768 @@
+/**
+ * El CABLEADO del self-onboarding en `rappi.client.ts`: que el cuerpo con `cancellation_events`, los dos
+ * headers, el host alterno y el candado POR TIENDA lleguen de verdad a la petición.
+ *
+ * Las piezas puras (`cuerpoAprovisionamiento`, `leerRespuestaAprovisionamiento`, `llamarRappi`) ya tienen sus
+ * pruebas; esto cubre lo único que ellas no ven: que el cliente las use. El cliente importa `@/config/env`
+ * (que hace `process.exit` bajo Jest), así que aquí el env se sustituye por un objeto.
+ */
+/** Los ONCE webhooks, escritos a mano: cada uno necesita su secreto o nuestro endpoint le contesta 401. */
+const TODOS_LOS_EVENTOS = [
+  'NEW_ORDER',
+  'NEW_ORDER_SCHEDULED',
+  'NEW_ORDER_SCHEDULED_CANCELLED',
+  'ORDER_EVENT_CANCEL',
+  'ORDER_OTHER_EVENT',
+  'MENU_APPROVED',
+  'MENU_REJECTED',
+  'PING',
+  'STORE_CONNECTIVITY',
+  'ORDER_RT_TRACKING',
+  'STORE_PROVISIONING_STATUS',
+]
+const secretos = (sin: string[] = []) =>
+  JSON.stringify(Object.fromEntries(TODOS_LOS_EVENTOS.filter(e => !sin.includes(e)).map(e => [e, `secreto-${e}`])))
+const mockEnv: Record<string, string | undefined> = {
+  RAPPI_ENVIRONMENT: 'SANDBOX',
+  RAPPI_COUNTRY: 'MX',
+  RAPPI_CLIENT_ID_SANDBOX: 'cid',
+  RAPPI_CLIENT_SECRET_SANDBOX: 'csecret',
+  RAPPI_WRITABLE_STORE_IDS_SANDBOX: '10,11',
+  RAPPI_WEBHOOK_BASE_URL: 'https://api.ejemplo.test',
+  RAPPI_OAUTH_REDIRECT_BASE: 'https://api.ejemplo.test',
+}
+const envBase = { ...mockEnv }
+jest.mock('@/config/env', () => ({ env: mockEnv }))
+jest.mock('@/config/logger', () => ({ __esModule: true, default: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }))
+jest.mock('../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service', () => ({
+  reclamarEvento: jest.fn(async () => 'claim-login'),
+  renovarReclamo: jest.fn(async () => true),
+  cerrarEventoReclamado: jest.fn(async () => true),
+}))
+
+import {
+  apiBaseSelfOnboarding,
+  aprovisionarTiendasRappi,
+  canjearCodigoRappi,
+  clientIdRappi,
+  credencialesPresentes,
+  marcarTiendaIntegradaRappi,
+  preflightSelfOnboardingRappi,
+  rappiApi,
+  redirectUriRappi,
+  suscribirTiendaAEventos,
+  tiendaIntegradaEnRappi,
+  tiendasDelComercio,
+} from '../../../../src/services/delivery-channels/providers/rappi/rappi.client'
+import { urlDeInicio } from '../../../../src/services/delivery-channels/providers/rappi/rappi.selfOnboarding'
+import { RappiEscrituraBloqueadaError } from '../../../../src/services/delivery-channels/providers/rappi/rappi.http'
+import { _resetRappiTokenCacheForTests } from '../../../../src/services/delivery-channels/providers/rappi/rappi.token'
+import logger from '@/config/logger'
+import prisma from '@/utils/prismaClient'
+import { processRappiEvent } from '../../../../src/services/delivery-channels/providers/rappi/rappi.eventProcessor'
+import { cerrarEventoReclamado } from '../../../../src/services/delivery-channels/core/deliveryWebhookEvent.service'
+
+type Llamada = { url: string; init: RequestInit }
+
+function json(status: number, body: unknown = {}) {
+  return {
+    ok: status >= 200 && status < 300,
+    status,
+    text: async () => JSON.stringify(body),
+    json: async () => body,
+  } as unknown as Response
+}
+
+/** El login de Rappi contesta el token; todo lo demás se guarda en `llamadas` y se contesta con `responder`. */
+function simularRed(responder: (llamada: Llamada) => Response = () => json(202)) {
+  const llamadas: Llamada[] = []
+  global.fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
+    if (String(url).includes('/auth/v1/token/login/')) return json(200, { access_token: 'tok-integ', expires_in: 3600 })
+    const llamada = { url: String(url), init: init ?? {} }
+    llamadas.push(llamada)
+    return responder(llamada)
+  }) as unknown as typeof fetch
+  return llamadas
+}
+
+const tiendas = [
+  { storeId: '10', name: 'Sucursal Centro' },
+  { storeId: '11', name: 'Sucursal Norte' },
+]
+
+describe('rappi.client — self-onboarding', () => {
+  beforeEach(() => {
+    _resetRappiTokenCacheForTests()
+    mockEnv.RAPPI_ENVIRONMENT = 'SANDBOX'
+    mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = undefined
+    mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = '10,11'
+    mockEnv.RAPPI_WEBHOOK_BASE_URL = 'https://api.ejemplo.test'
+    mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test'
+    mockEnv.RAPPI_WEBHOOK_SECRETS = secretos()
+    mockEnv.RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX = 'so-cid'
+  })
+
+  // Ninguna prueba hereda llaves de otra (las de PRODUCTION de abajo no deben quedarse en el objeto compartido).
+  afterEach(() => {
+    for (const k of Object.keys(mockEnv)) delete mockEnv[k]
+    Object.assign(mockEnv, envBase)
+  })
+
+  it('un login 200 sin token abre una racha, avisa una vez y sólo un token válido anuncia recuperación', async () => {
+    jest.clearAllMocks()
+    global.fetch = jest
+      .fn()
+      .mockResolvedValueOnce(json(200, {}))
+      .mockResolvedValueOnce(json(200, {}))
+      .mockResolvedValueOnce(json(200, { access_token: 'tok', expires_in: 604800 }))
+      .mockResolvedValueOnce(json(200, {}))
+    const pedir = () => rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/stores-pa' })
+    await expect(pedir()).rejects.toThrow()
+    await expect(pedir()).rejects.toThrow()
+    expect((logger.error as jest.Mock).mock.calls.filter(([m]) => /login/.test(m))).toHaveLength(1)
+    expect((logger.warn as jest.Mock).mock.calls.filter(([m]) => /login/.test(m))).toHaveLength(1)
+    expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(0)
+    await pedir()
+    expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(1)
+  })
+
+  it.each(['JSON malformado', 'transporte'])('el fallo de login %s no llega crudo al log ni al evento', async caso => {
+    jest.clearAllMocks()
+    const marcador = 'LEAK42'
+    global.fetch = jest.fn(async () => {
+      if (caso === 'transporte') throw new Error(`falló ${marcador}`)
+      return new Response(marcador, { status: 200 })
+    }) as typeof fetch
+    const payload = {
+      order_detail: {
+        order_id: '392625',
+        created_at: '2026-04-10T11:12:57.000Z',
+        cooking_time: 10,
+        delivery_method: 'delivery',
+        payment_method: 'cc',
+        totals: { total_products: 100, total_order: 100, other_totals: { tip: 0 } },
+        items: [{ id: '1', sku: 'TACO', name: 'Taco', price: 25, quantity: 4 }],
+      },
+      store: { internal_id: '10', external_id: '10' },
+    }
+    ;(prisma.deliveryOrderEvent.findUnique as jest.Mock).mockResolvedValue({
+      id: 'evt-login',
+      status: 'RECEIVED',
+      eventType: 'NEW_ORDER',
+      orderId: null,
+      venueId: 'v1',
+      payload,
+      channelLink: { id: 'link1', venueId: 'v1', externalLocationId: '10', status: 'ACTIVE', orderAcceptanceMode: 'AUTO', config: null },
+    })
+    ;(prisma.deliveryOrderEvent.findFirst as jest.Mock).mockResolvedValue(null)
+    ;(prisma.venue.findUnique as jest.Mock).mockResolvedValue({ timezone: 'America/Mexico_City' })
+    const resultado = await processRappiEvent('evt-login')
+    expect(resultado).toMatchObject({ outcome: 'FAILED', accepted: false })
+    expect(global.fetch).toHaveBeenCalledTimes(1)
+    expect(cerrarEventoReclamado).toHaveBeenCalledWith('evt-login', 'claim-login', 'FAILED', undefined, expect.stringContaining('ACCEPT:'))
+    const salidas = JSON.stringify({
+      resultado,
+      cierre: (cerrarEventoReclamado as jest.Mock).mock.calls,
+      logs: [(logger.error as jest.Mock).mock.calls, (logger.warn as jest.Mock).mock.calls, (logger.info as jest.Mock).mock.calls],
+    })
+    expect(salidas).not.toContain(marcador)
+    expect(resultado.error).toContain('no se envió nada')
+  })
+
+  it.each(['timeout', '204 vacío', '200 malformado', 'lectura de rechazo fallida'])(
+    '%s abre la misma alarma, la repite cada hora y se recupera una vez',
+    async caso => {
+      jest.clearAllMocks()
+      const reloj = jest.spyOn(Date, 'now').mockReturnValue(1_800_000_000_000)
+      const fallo = () => {
+        if (caso === 'timeout') return Promise.reject(new Error('timeout'))
+        const respuesta = json(caso === 'lectura de rechazo fallida' ? 401 : caso === '204 vacío' ? 204 : 200)
+        respuesta.json = async () => {
+          throw new SyntaxError('cuerpo ilegible')
+        }
+        respuesta.text = async () => {
+          throw new Error('lectura interrumpida')
+        }
+        return Promise.resolve(respuesta)
+      }
+      global.fetch = jest.fn(fallo) as typeof fetch
+      const pedir = () => rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/stores-pa' })
+      try {
+        await expect(pedir()).rejects.toThrow()
+        await expect(pedir()).rejects.toThrow()
+        expect(logger.error).toHaveBeenCalledTimes(1)
+        expect(logger.warn).toHaveBeenCalledTimes(1)
+        reloj.mockReturnValue(1_800_000_000_000 + 61 * 60_000)
+        await expect(pedir()).rejects.toThrow()
+        expect(logger.error).toHaveBeenCalledTimes(2)
+        expect(logger.info).not.toHaveBeenCalled()
+        simularRed(() => json(200))
+        await pedir()
+        await pedir()
+        expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(1)
+      } finally {
+        reloj.mockRestore()
+      }
+    },
+  )
+
+  it.each(
+    (['integrations', 'utils', 'finance'] as const).flatMap(superficie =>
+      ['\n', '\r', '\0', '\t', ' ', '😀'].map(control => ({ superficie, control })),
+    ),
+  )('$superficie rechaza un token con controles antes de cachear o anunciar recuperación ($control)', async ({ superficie, control }) => {
+    jest.clearAllMocks()
+    const marcador = 'LEAK42'
+    global.fetch = jest.fn(async (_url, init) => {
+      if (String(_url).includes('/token/login/')) return json(200, { access_token: `${marcador}${control}BAD`, expires_in: 604800 })
+      // La construcción nativa incluiría el token en su error si la validación lo deja pasar.
+      new Request(String(_url), init)
+      return json(200)
+    }) as typeof fetch
+    const pedir = () => rappiApi({ superficie, metodo: 'PUT', ruta: '/api/v2/restaurants-integrations-public-api/menu', storeId: '10' })
+    for (let i = 0; i < 2; i++) await expect(pedir()).rejects.toMatchObject({ name: 'DeliveryWriteNotSentError', reason: 'UNAVAILABLE' })
+    expect(global.fetch).toHaveBeenCalledTimes(2) // sólo los dos logins; no hubo una llamada de negocio
+    expect(logger.error).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledTimes(1)
+    expect(logger.info).not.toHaveBeenCalled()
+    expect(JSON.stringify([(logger.error as jest.Mock).mock.calls, (logger.warn as jest.Mock).mock.calls])).not.toContain(marcador)
+    simularRed(() => json(200))
+    await pedir()
+    expect((logger.info as jest.Mock).mock.calls.filter(([m]) => /login volvió/.test(m))).toHaveLength(1)
+  })
+
+  // 14-oct: al activar Self Onboarding, Rappi crea OTRA aplicación (la del login del dueño) con su propio Client ID,
+  // distinto al de la integración. Con el de la integración, su login rechaza al dueño.
+  describe('client id del login del dueño', () => {
+    it('🔴 el canje del código usa el Client ID del Self Onboarding, no el de la integración', async () => {
+      const idToken = `${Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url')}.e30.firma`
+      const llamadas = simularRed(() => json(200, { id_token: idToken }))
+
+      expect(clientIdRappi()).toBe('so-cid')
+      await canjearCodigoRappi('code', 'verifier')
+
+      expect(new URLSearchParams(llamadas[0].init.body as string).get('client_id')).toBe('so-cid')
+    })
+
+    it('sin la variable ⇒ Error claro (nunca cae al Client ID de la integración)', () => {
+      mockEnv.RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX = undefined
+      expect(() => clientIdRappi()).toThrow(/RAPPI_SELF_ONBOARDING_CLIENT_ID_SANDBOX/)
+    })
+
+    it('en PRODUCTION el canje usa RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION', () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+      })
+      expect(clientIdRappi()).toBe('so-prod')
+    })
+  })
+
+  it('aprovisionar: host del self-onboarding, dos headers y el cuerpo con cancellation_events (R1, R2)', async () => {
+    const llamadas = simularRed(() => json(202, { batch_id: 'b1', accepted: [{ store_id: '10', integration_id: 'i10' }], rejected: [] }))
+
+    const r = await aprovisionarTiendasRappi('idt', tiendas)
+
+    expect(llamadas).toHaveLength(1)
+    expect(llamadas[0].url).toBe('https://api.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores/provisioning')
+    expect(llamadas[0].init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ', 'Authorization-Partners': 'Bearer idt' })
+    expect(JSON.parse(llamadas[0].init.body as string).stores).toEqual([
+      { store_id: '10', name: 'Sucursal Centro', status: 'ACTIVE', store_integration_id: '10', cancellation_events: true },
+      { store_id: '11', name: 'Sucursal Norte', status: 'ACTIVE', store_integration_id: '11', cancellation_events: true },
+    ])
+    // R6: la que Rappi no nombró queda incierta, no rechazada.
+    expect(r).toEqual({ batchId: 'b1', aceptadas: [{ storeId: '10', integrationId: 'i10' }], rechazadas: [], inciertas: ['11'] })
+  })
+
+  // H3: el login del integrador, el canje OAuth y la API — ninguna llamada a Rappi espera para siempre.
+  it('🔴 toda llamada a Rappi lleva timeout: login, canje del código y la API', async () => {
+    const idToken = `${Buffer.from(JSON.stringify({ alg: 'RS256' })).toString('base64url')}.e30.firma`
+    const senales: Array<[string, unknown]> = []
+    global.fetch = jest.fn(async (url: string | URL | Request, init?: RequestInit) => {
+      senales.push([String(url), init?.signal])
+      if (String(url).includes('/auth/v1/token/login/')) return json(200, { access_token: 'tok-integ', expires_in: 3600 })
+      if (String(url).endsWith('/oauth/token')) return json(200, { id_token: idToken })
+      return json(202, {})
+    }) as unknown as typeof fetch
+
+    await aprovisionarTiendasRappi('idt', tiendas)
+    expect(await canjearCodigoRappi('code', 'verifier')).toBe(idToken)
+
+    expect(senales.map(([u]) => u)).toEqual([
+      expect.stringContaining('/auth/v1/token/login/'),
+      expect.stringContaining('/stores/provisioning'),
+      expect.stringContaining('/oauth/token'),
+    ])
+    for (const [, senal] of senales) expect(senal).toBeInstanceOf(AbortSignal)
+  })
+
+  it('🔴 aprovisionar: una tienda fuera de la lista y NO sale ninguna petición al host de Rappi', async () => {
+    mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = '10'
+    const llamadas = simularRed()
+
+    await expect(aprovisionarTiendasRappi('idt', tiendas)).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(llamadas).toHaveLength(0)
+  })
+
+  // T5 (20-oct): Rappi ya publicó el host de México para el self-onboarding; la variable sólo lo sustituye.
+  it('el host del self-onboarding en PRODUCTION es el publicado (https://api.rappi.com.mx) si no hay variable', () => {
+    mockEnv.RAPPI_ENVIRONMENT = 'PRODUCTION'
+    expect(apiBaseSelfOnboarding()).toBe('https://api.rappi.com.mx')
+    mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = 'https://host.ejemplo.test'
+    expect(apiBaseSelfOnboarding()).toBe('https://host.ejemplo.test')
+  })
+
+  it('el host del self-onboarding en SANDBOX sigue siendo api.dev.rappi.com', () => {
+    expect(apiBaseSelfOnboarding()).toBe('https://api.dev.rappi.com')
+  })
+
+  it('🔴 PRODUCTION con un país que no es México y sin variable: se niega (no cae al host de México)', () => {
+    mockEnv.RAPPI_ENVIRONMENT = 'PRODUCTION'
+    mockEnv.RAPPI_COUNTRY = 'CO'
+    expect(() => apiBaseSelfOnboarding()).toThrow(/país/i)
+  })
+
+  // T5 (20-oct): el login se mudó al dominio nuevo y exige la barra final (sin ella: 307 a la ruta con `/`, medido el 20-oct).
+  // La API NO se mudó: sigue en el host clásico.
+  describe('hosts de Rappi: login en el dominio nuevo, API en el clásico', () => {
+    /** TODAS las URLs que salen (login incluido), en orden. El login contesta el token; lo demás, 200. */
+    function capturarFetch(): string[] {
+      const urls: string[] = []
+      global.fetch = jest.fn(async (url: string | URL | Request) => {
+        urls.push(String(url))
+        return String(url).includes('/auth/v1/token/login/') ? json(200, { access_token: 'tok', expires_in: 3600 }) : json(200, {})
+      }) as unknown as typeof fetch
+      return urls
+    }
+
+    it('🔴 el login va al dominio nuevo y CON barra final', async () => {
+      const urls = capturarFetch()
+      await rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/stores-pa' })
+      expect(urls[0]).toBe('https://api.dev.rappi.com/restaurants/auth/v1/token/login/integrations/')
+      expect(urls[1]).toMatch(/^https:\/\/microservices\.dev\.rappi\.com\/api\/v2\//)
+      expect(urls).toHaveLength(2)
+    })
+
+    it('la API de Utils pide su propio login (…/token/login/utils/) y llama en el host clásico', async () => {
+      const urls = capturarFetch()
+      await rappiApi({ superficie: 'utils', metodo: 'GET', ruta: '/api/rest-ops-utils/schedules' })
+      expect(urls).toEqual([
+        'https://api.dev.rappi.com/restaurants/auth/v1/token/login/utils/',
+        'https://microservices.dev.rappi.com/api/rest-ops-utils/schedules',
+      ])
+    })
+
+    it('PRODUCTION México: login en api.rappi.com.mx (con barra) y la API en el host clásico de México', async () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+        RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+      })
+      const urls = capturarFetch()
+      // Una LECTURA de ejemplo: el `GET …/orders` global ya no sirve aquí, lleva el candado de tiendas (Tarea 20, ronda 1).
+      await rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders/status/sent' })
+      expect(urls).toEqual([
+        'https://api.rappi.com.mx/restaurants/auth/v1/token/login/integrations/',
+        'https://services.mxgrability.rappi.com/api/v2/restaurants-integrations-public-api/orders/status/sent',
+      ])
+    })
+
+    it('🔴 PRODUCTION con otro país: el login se niega y NO sale ninguna petición', async () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_COUNTRY: 'CO',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+        RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+      })
+      const urls = capturarFetch()
+      await expect(rappiApi({ metodo: 'GET', ruta: '/api/v2/restaurants-integrations-public-api/orders/status/sent' })).rejects.toThrow(
+        /país/i,
+      )
+      expect(urls).toHaveLength(0)
+    })
+  })
+
+  it.each(['\n', '\r', '\0', '\t', ' ', 'á'])('ningún lector ni escritor usa un token del comercio inválido (%j)', async caracter => {
+    const llamadas = simularRed(l => {
+      new Request(l.url, l.init)
+      return json(200)
+    })
+    const idToken = `header.LEAK42${caracter}payload.firma`
+    await expect(tiendasDelComercio(idToken)).rejects.toThrow('RAPPI_ID_TOKEN_INVALIDO')
+    await expect(aprovisionarTiendasRappi(idToken, tiendas)).rejects.toThrow('RAPPI_ID_TOKEN_INVALIDO')
+    expect(llamadas).toHaveLength(0)
+  })
+
+  // H11: escrita a mano para detectar un evento eliminado del filtro de suscripción.
+  const SUSCRIPCIONES = [
+    ['NEW_ORDER', 'new-order'],
+    ['NEW_ORDER_SCHEDULED', 'new-order-scheduled'],
+    ['NEW_ORDER_SCHEDULED_CANCELLED', 'new-order-scheduled-cancelled'],
+    ['ORDER_EVENT_CANCEL', 'order-cancel'],
+    ['ORDER_OTHER_EVENT', 'order-other'],
+    ['MENU_APPROVED', 'menu-approved'],
+    ['MENU_REJECTED', 'menu-rejected'],
+    ['PING', 'ping'],
+    ['STORE_CONNECTIVITY', 'store-connectivity'],
+    ['ORDER_RT_TRACKING', 'order-tracking'],
+  ].map(([evento, segmento]) => ({
+    metodo: 'PUT',
+    url: `https://microservices.dev.rappi.com/api/v2/restaurants-integrations-public-api/webhook/${evento}/add-stores`,
+    cuerpo: [{ url: `https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/${segmento}`, stores: ['10'] }],
+  }))
+  const porUrl = <T extends { url: string }>(xs: T[]) => [...xs].sort((a, b) => a.url.localeCompare(b.url))
+
+  it('suscribir: EXACTAMENTE los diez webhooks de tienda (nunca el de aprovisionamiento), y reporta cuáles fallaron', async () => {
+    const llamadas = simularRed(l => (l.url.includes('/webhook/NEW_ORDER/') ? json(500) : json(200)))
+
+    const r = await suscribirTiendaAEventos('10')
+
+    const hechas = llamadas.map(l => ({ metodo: l.init.method, url: l.url, cuerpo: JSON.parse(l.init.body as string) }))
+    expect(porUrl(hechas)).toEqual(porUrl(SUSCRIPCIONES))
+    expect(r).toEqual({ ok: false, fallidos: ['NEW_ORDER'] })
+  })
+
+  it('🔴 suscribir: también pasa por el candado — tienda fuera de la lista, ninguna petición', async () => {
+    const llamadas = simularRed()
+    await expect(suscribirTiendaAEventos('99')).rejects.toThrow(RappiEscrituraBloqueadaError)
+    expect(llamadas).toHaveLength(0)
+  })
+
+  it.each([false, true])('suscribir: un 406 ya configurado sólo vale tras leer los diez destinos ENABLE (lista=%s)', async lista => {
+    const llamadas = simularRed(l => {
+      if (l.init.method === 'PUT') return json(406, { message: 'The event has aready config in stores [10].' })
+      const esperada = SUSCRIPCIONES.find(s => s.url.replace('/add-stores', '') === l.url)!
+      const event = l.url.split('/').at(-1)
+      const fila = { event, stores: [{ store_id: lista ? 10 : '10', url: esperada.cuerpo[0].url, state: 'ENABLE' }] }
+      return json(200, lista ? [fila] : fila)
+    })
+
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: true, fallidos: [] })
+    expect(llamadas).toHaveLength(20)
+    expect(
+      llamadas
+        .filter(l => l.init.method === 'GET')
+        .map(l => l.url)
+        .sort(),
+    ).toEqual(SUSCRIPCIONES.map(s => s.url.replace('/add-stores', '')).sort())
+    expect(llamadas.filter(l => l.init.method !== 'GET').map(l => JSON.parse(l.init.body as string))).toEqual(
+      SUSCRIPCIONES.map(s => s.cuerpo),
+    )
+  })
+
+  it.each([
+    { caso: 'deshabilitado', cambio: { state: 'DISABLE' } },
+    { caso: 'sin estado', cambio: { state: undefined } },
+    { caso: 'URL ajena', cambio: { url: 'https://otro.test/avisos' } },
+    { caso: 'otra tienda', cambio: { store_id: '11' } },
+  ])('suscribir: un 406 con destino $caso sigue fallido', async ({ cambio }) => {
+    simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      return json(200, {
+        event: 'MENU_APPROVED',
+        stores: [
+          { store_id: '10', url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/menu-approved', state: 'ENABLE', ...cambio },
+        ],
+      })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+  })
+
+  it.each([null, {}, { event: 'PING', stores: [] }, { event: 'MENU_APPROVED', stores: [null, '10'] }])(
+    'suscribir: un 406 sin evidencia legible no conecta (%j)',
+    async cuerpo => {
+      simularRed(l => (!l.url.includes('/webhook/MENU_APPROVED') ? json(200) : json(l.init.method === 'PUT' ? 406 : 200, cuerpo)))
+      await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+    },
+  )
+
+  it('suscribir: JSON ilegible en la comprobación no se copia al log y no corta los demás avisos', async () => {
+    jest.clearAllMocks()
+    const llamadas = simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      return new Response('LEAK42 no es JSON', { status: 200 })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+    expect(llamadas.at(-1)!.url).toContain('/webhook/ORDER_RT_TRACKING/add-stores')
+    expect(JSON.stringify((logger.error as jest.Mock).mock.calls)).not.toContain('LEAK42')
+  })
+
+  it.each([401, 403, 500, 'red'])('suscribir: una comprobación que falla (%s) no acredita el 406', async status => {
+    const llamadas = simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      if (status === 'red') throw new Error('ECONNRESET')
+      return json(status as number, {
+        event: 'MENU_APPROVED',
+        stores: [{ store_id: '10', url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/menu-approved', state: 'ENABLE' }],
+      })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+    expect(llamadas.at(-1)!.url).toContain('/webhook/ORDER_RT_TRACKING/add-stores')
+  })
+
+  it.each(['otro evento', 'evento ausente', 'destinos contradictorios'])('suscribir: evidencia de %s no acredita la tienda', async caso => {
+    simularRed(l => {
+      if (!l.url.includes('/webhook/MENU_APPROVED')) return json(200)
+      if (l.init.method === 'PUT') return json(406)
+      const tienda = { store_id: '10', url: 'https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/menu-approved', state: 'ENABLE' }
+      return json(200, {
+        event: caso === 'otro evento' ? 'PING' : caso === 'evento ausente' ? undefined : 'MENU_APPROVED',
+        stores: caso === 'destinos contradictorios' ? [tienda, { ...tienda, state: 'DISABLE' }] : [tienda],
+      })
+    })
+    await expect(suscribirTiendaAEventos('10')).resolves.toEqual({ ok: false, fallidos: ['MENU_APPROVED'] })
+  })
+
+  // ── «Integrada sí/no» (Tarea 18): PUT stores-pa/{id}/status?integrated=<bool>, host CLÁSICO, con el candado ──────
+  describe('marcarTiendaIntegradaRappi', () => {
+    const RUTA = 'https://microservices.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores-pa'
+
+    it.each([true, false])('integrada=%s: PUT al host clásico, el valor en la query y sin cuerpo', async integrada => {
+      const llamadas = simularRed(() => json(200))
+
+      const r = await marcarTiendaIntegradaRappi('10', integrada)
+
+      expect(llamadas).toHaveLength(1)
+      expect(llamadas[0].init.method).toBe('PUT')
+      expect(llamadas[0].url).toBe(`${RUTA}/10/status?integrated=${integrada}`)
+      expect(llamadas[0].init.body).toBeUndefined()
+      expect(llamadas[0].init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ' })
+      expect(r).toMatchObject({ ok: true, status: 200 })
+    })
+
+    it('🔴 va al host CLÁSICO de la API, nunca al dominio nuevo del self-onboarding (M9 no decidió el host)', async () => {
+      const llamadas = simularRed(() => json(200))
+      await marcarTiendaIntegradaRappi('10', true)
+      expect(llamadas[0].url).toContain('https://microservices.dev.rappi.com/')
+      expect(llamadas[0].url).not.toContain('api.dev.rappi.com')
+    })
+
+    it('un 500 de Rappi (lo que contesta el sandbox, M9) se DEVUELVE tal cual: no lanza', async () => {
+      simularRed(() => json(500, { message: 'There was an error trying to change the store {10} to integrated: {true}' }))
+
+      const r = await marcarTiendaIntegradaRappi('10', true)
+
+      expect(r.ok).toBe(false)
+      expect(r.status).toBe(500)
+      expect(r.raw).toContain('integrated')
+    })
+
+    it('🔴 pasa por el candado: una tienda fuera de la lista ⇒ RappiEscrituraBloqueadaError y NO sale ninguna petición', async () => {
+      const llamadas = simularRed()
+
+      await expect(marcarTiendaIntegradaRappi('99', true)).rejects.toThrow(RappiEscrituraBloqueadaError)
+      await expect(marcarTiendaIntegradaRappi('99', false)).rejects.toThrow(RappiEscrituraBloqueadaError)
+      expect(llamadas).toHaveLength(0)
+    })
+
+    it('el id de la tienda se codifica en la ruta (nunca rompe la URL)', async () => {
+      mockEnv.RAPPI_WRITABLE_STORE_IDS_SANDBOX = 'a/b?c'
+      const llamadas = simularRed(() => json(200))
+
+      await marcarTiendaIntegradaRappi('a/b?c', true)
+
+      expect(llamadas[0].url).toBe(`${RUTA}/a%2Fb%3Fc/status?integrated=true`)
+    })
+  })
+
+  // D9: la foto actual de NUESTRA integración. Forma medida en DEV el 26-oct: `[{ rappiId, integrationId, name }]`, los dos ids = la tienda.
+  describe('tiendaIntegradaEnRappi', () => {
+    const lista = [
+      { rappiId: '900175500', integrationId: '900175500', name: 'Otra' },
+      { rappiId: '10', integrationId: '10', name: 'Centro' },
+    ]
+
+    it('GET stores-pa con el token del integrador, sin candado (es lectura): está o no está', async () => {
+      const llamadas = simularRed(() => json(200, lista))
+      await expect(tiendaIntegradaEnRappi('10')).resolves.toBe(true)
+      await expect(tiendaIntegradaEnRappi('99')).resolves.toBe(false) // 99 no es escribible y aun así se pregunta
+      expect(llamadas[0].init.method).toBe('GET')
+      expect(llamadas[0].url).toBe('https://microservices.dev.rappi.com/api/v2/restaurants-integrations-public-api/stores-pa')
+      expect(llamadas[0].init.headers).toMatchObject({ 'x-authorization': 'Bearer tok-integ' })
+    })
+
+    it.each([
+      ['un 500', () => json(500, { message: 'x' })],
+      ['un cuerpo que no es lista', () => json(200, { stores: lista })],
+    ])('%s LANZA: nunca se lee como «no la tiene»', async (_n, respuesta) => {
+      simularRed(respuesta)
+      await expect(tiendaIntegradaEnRappi('10')).rejects.toThrow(/RAPPI_STORES_PA/)
+    })
+  })
+
+  // ── Las variables de una función OPCIONAL no tumban el proceso: se validan al usarse ─────────────────
+  describe('bases configurables (se validan en el punto de uso, con la barra final quitada)', () => {
+    it('redirect_uri: las barras finales NO producen `//` (no coincidiría con la registrada en Rappi)', () => {
+      mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test///'
+      expect(redirectUriRappi()).toBe('https://api.ejemplo.test/api/v1/delivery/rappi/oauth/callback')
+    })
+
+    it.each([['no-es-una-url'], ['ftp://api.ejemplo.test'], ['   '], ['https://']])(
+      'redirect_uri: %j no es una URL http(s) válida ⇒ Error claro, no un `undefined/api/...`',
+      malo => {
+        mockEnv.RAPPI_OAUTH_REDIRECT_BASE = malo
+        expect(() => redirectUriRappi()).toThrow(/RAPPI_OAUTH_REDIRECT_BASE.*http\(s\)/)
+      },
+    )
+
+    it('redirect_uri: sin la variable ⇒ Error claro', () => {
+      mockEnv.RAPPI_OAUTH_REDIRECT_BASE = undefined
+      expect(() => redirectUriRappi()).toThrow(/Falta RAPPI_OAUTH_REDIRECT_BASE/)
+    })
+
+    it('host del self-onboarding: la barra final se quita y el provisioning no sale con `//`', async () => {
+      mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = 'https://host.ejemplo.test/'
+      expect(apiBaseSelfOnboarding()).toBe('https://host.ejemplo.test')
+      const llamadas = simularRed()
+      await aprovisionarTiendasRappi('idt', tiendas)
+      expect(llamadas[0].url).toBe('https://host.ejemplo.test/api/v2/restaurants-integrations-public-api/stores/provisioning')
+    })
+
+    it('host del self-onboarding: uno MAL escrito se niega también en SANDBOX (no cae en silencio al de pruebas)', () => {
+      mockEnv.RAPPI_SELF_ONBOARDING_API_BASE = 'host.ejemplo.test'
+      expect(() => apiBaseSelfOnboarding()).toThrow(/RAPPI_SELF_ONBOARDING_API_BASE.*http\(s\)/)
+    })
+
+    it('suscribir: la barra final de la base pública no produce `//` en la URL que recibe Rappi', async () => {
+      mockEnv.RAPPI_WEBHOOK_BASE_URL = 'https://api.ejemplo.test//'
+      const llamadas = simularRed(() => json(200))
+      await suscribirTiendaAEventos('10')
+      const nueva = llamadas.find(l => l.url.includes('/webhook/NEW_ORDER/add-stores'))
+      expect(JSON.parse(nueva?.init.body as string)[0].url).toBe('https://api.ejemplo.test/api/v1/webhooks/delivery/rappi/new-order')
+    })
+
+    it('suscribir: con la base pública inválida o ausente se niega ANTES de mandar nada', async () => {
+      const llamadas = simularRed(() => json(200))
+      mockEnv.RAPPI_WEBHOOK_BASE_URL = 'api.ejemplo.test'
+      await expect(suscribirTiendaAEventos('10')).rejects.toThrow(/RAPPI_WEBHOOK_BASE_URL.*http\(s\)/)
+      mockEnv.RAPPI_WEBHOOK_BASE_URL = undefined
+      await expect(suscribirTiendaAEventos('10')).rejects.toThrow(/Falta RAPPI_WEBHOOK_BASE_URL/)
+      expect(llamadas).toHaveLength(0)
+    })
+  })
+
+  // F2: la base de webhooks se descubría faltante hasta SUSCRIBIR, con la tienda ya aprovisionada en Rappi.
+  describe('preflight: todo el self-onboarding se valida ANTES de crear el intent', () => {
+    it('devuelve la base del enlace de inicio, y el enlace sale idéntico al de antes', () => {
+      mockEnv.RAPPI_OAUTH_REDIRECT_BASE = 'https://api.ejemplo.test/'
+      expect(preflightSelfOnboardingRappi()).toBe('https://api.ejemplo.test')
+      expect(urlDeInicio(preflightSelfOnboardingRappi(), 'a+b/c=')).toBe(
+        'https://api.ejemplo.test/api/v1/delivery/rappi/oauth/start?intent=a%2Bb%2Fc%3D',
+      )
+    })
+
+    // Sin esto el dueño autorizaba en Rappi y el fallo salía DESPUÉS, con el intent ya creado.
+    it('🔴 el preflight falla ANTES de mandar al dueño a autorizar si faltan las credenciales de la integración', () => {
+      mockEnv.RAPPI_CLIENT_ID_SANDBOX = undefined
+      expect(() => preflightSelfOnboardingRappi()).toThrow(/Faltan credenciales de Rappi/)
+    })
+
+    it('PRODUCTION México sin RAPPI_SELF_ONBOARDING_API_BASE: el preflight pasa (el host ya está publicado)', () => {
+      Object.assign(mockEnv, {
+        RAPPI_ENVIRONMENT: 'PRODUCTION',
+        RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+        RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+        RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
+      })
+      expect(preflightSelfOnboardingRappi()).toBe('https://api.ejemplo.test')
+    })
+
+    it.each([
+      ['sin RAPPI_WEBHOOK_BASE_URL', { RAPPI_WEBHOOK_BASE_URL: undefined }, /Falta RAPPI_WEBHOOK_BASE_URL/],
+      ['RAPPI_WEBHOOK_BASE_URL inválida', { RAPPI_WEBHOOK_BASE_URL: 'api.ejemplo.test' }, /RAPPI_WEBHOOK_BASE_URL.*http\(s\)/],
+      ['sin RAPPI_OAUTH_REDIRECT_BASE', { RAPPI_OAUTH_REDIRECT_BASE: undefined }, /Falta RAPPI_OAUTH_REDIRECT_BASE/],
+      ['host del self-onboarding inválido', { RAPPI_SELF_ONBOARDING_API_BASE: 'host' }, /RAPPI_SELF_ONBOARDING_API_BASE/],
+      [
+        // T5: ya no hay host que inventar en México, pero otro país sigue sin tener uno verificado.
+        'PRODUCTION de otro país sin host del self-onboarding',
+        // Con las tres llaves de PRODUCTION puestas: el preflight las pide primero y aquí se prueba el host.
+        {
+          RAPPI_ENVIRONMENT: 'PRODUCTION',
+          RAPPI_COUNTRY: 'CO',
+          RAPPI_CLIENT_ID_PRODUCTION: 'int-prod',
+          RAPPI_CLIENT_SECRET_PRODUCTION: 'int-prod-secret',
+          RAPPI_SELF_ONBOARDING_CLIENT_ID_PRODUCTION: 'so-prod',
+        },
+        /país/i,
+      ],
+      // H7: Rappi acepta la suscripción aunque nos falte el secreto, y luego nuestro endpoint le contesta 401 a cada
+      // pedido — la tienda queda «conectada» y sorda. Se niega ANTES de crear la intención.
+      ['sin el secreto de NEW_ORDER', { RAPPI_WEBHOOK_SECRETS: secretos(['NEW_ORDER']) }, /RAPPI_WEBHOOK_SECRETS.*NEW_ORDER/],
+      ['sin el secreto de PING', { RAPPI_WEBHOOK_SECRETS: secretos(['PING']) }, /RAPPI_WEBHOOK_SECRETS.*PING/],
+      [
+        'sin el secreto del aviso de aprovisionamiento',
+        { RAPPI_WEBHOOK_SECRETS: secretos(['STORE_PROVISIONING_STATUS']) },
+        /RAPPI_WEBHOOK_SECRETS.*STORE_PROVISIONING_STATUS/,
+      ],
+      ['RAPPI_WEBHOOK_SECRETS ilegible', { RAPPI_WEBHOOK_SECRETS: '{no es json' }, /RAPPI_WEBHOOK_SECRETS/],
+      ['sin RAPPI_WEBHOOK_SECRETS', { RAPPI_WEBHOOK_SECRETS: undefined }, /RAPPI_WEBHOOK_SECRETS/],
+    ])('%s ⇒ se niega', (_n, cambio, error) => {
+      Object.assign(mockEnv, cambio)
+      expect(() => preflightSelfOnboardingRappi()).toThrow(error)
+    })
+  })
+
+  // Tarea 17: el PING pregunta «¿tengo llaves?» sin poder permitirse un Error (el PING nunca revienta) ni un log con la llave.
+  describe('credencialesPresentes (la pregunta del PING)', () => {
+    it('con el id y el secreto del ambiente ⇒ true', () => {
+      expect(credencialesPresentes()).toBe(true)
+    })
+
+    it('🔴 sin el id, o sin el secreto ⇒ false, sin lanzar', () => {
+      mockEnv.RAPPI_CLIENT_ID_SANDBOX = undefined
+      expect(credencialesPresentes()).toBe(false)
+
+      mockEnv.RAPPI_CLIENT_ID_SANDBOX = 'cid'
+      mockEnv.RAPPI_CLIENT_SECRET_SANDBOX = ''
+      expect(credencialesPresentes()).toBe(false)
+    })
+
+    it('mira las llaves del AMBIENTE en uso: en PRODUCTION las de SANDBOX no cuentan', () => {
+      mockEnv.RAPPI_ENVIRONMENT = 'PRODUCTION'
+      expect(credencialesPresentes()).toBe(false)
+
+      mockEnv.RAPPI_CLIENT_ID_PRODUCTION = 'cid-prod'
+      mockEnv.RAPPI_CLIENT_SECRET_PRODUCTION = 'csecret-prod'
+      expect(credencialesPresentes()).toBe(true)
+    })
+
+    it('🔴 sólo devuelve un booleano y no imprime ni loguea nada (jamás una llave)', () => {
+      const consola = [jest.spyOn(console, 'log'), jest.spyOn(console, 'error'), jest.spyOn(console, 'warn')].map(s =>
+        s.mockImplementation(() => undefined),
+      )
+      const logger = jest.requireMock('@/config/logger').default as Record<'info' | 'warn' | 'error', jest.Mock>
+      Object.values(logger).forEach(f => f.mockClear())
+
+      expect(credencialesPresentes()).toBe(true)
+      mockEnv.RAPPI_CLIENT_SECRET_SANDBOX = undefined
+      expect(credencialesPresentes()).toBe(false)
+
+      for (const s of consola) expect(s).not.toHaveBeenCalled()
+      for (const f of Object.values(logger)) expect(f).not.toHaveBeenCalled()
+      consola.forEach(s => s.mockRestore())
+    })
+  })
+
+  describe('suscribir: un fallo de red en un evento no corta a los demás', () => {
+    it('un PUT que LANZA cae en `fallidos` y el resto se sigue intentando', async () => {
+      const llamadas = simularRed(l => {
+        if (l.url.includes('/webhook/NEW_ORDER/')) throw new Error('ECONNRESET')
+        return json(200)
+      })
+      const r = await suscribirTiendaAEventos('10')
+
+      expect(porUrl(llamadas).map(l => l.url)).toEqual(porUrl(SUSCRIPCIONES).map(l => l.url)) // no se cortó en el que lanzó
+      expect(r).toEqual({ ok: false, fallidos: ['NEW_ORDER'] })
+    })
+
+    it('🔴 pero un rechazo del CANDADO no es un fallo por evento: se relanza y no se sigue', async () => {
+      const llamadas = simularRed(() => json(200))
+      await expect(suscribirTiendaAEventos('99')).rejects.toThrow(RappiEscrituraBloqueadaError)
+      expect(llamadas).toHaveLength(0)
+    })
+  })
+})

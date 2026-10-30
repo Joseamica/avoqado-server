@@ -249,6 +249,44 @@ describe('delivery-channels.routes — Fix A1 (confused-deputy: create/link = SU
     })
   })
 
+  // ── Rappi fase 3: desconectar = mismas guardas que conectar ──
+  describe('POST .../channels/:linkId/disconnect (Rappi fase 3)', () => {
+    const url = `/delivery-channels/venues/${VENUE_ID}/channels/${LINK_ID}/disconnect`
+
+    it('sin delivery-channels:manage da 403, no llega al controlador ni al feature-gate', async () => {
+      const res = await request(server)
+        .post(url)
+        .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:read' })
+        .send({ conexionId: 'i1:tienda' })
+
+      expect(res.status).toBe(403)
+      expect(mockCheckPermission).toHaveBeenCalledWith('delivery-channels:manage')
+      expect(mockCheckFeature).not.toHaveBeenCalled()
+    })
+
+    it('con delivery-channels:manage pasa el feature-gate DESPUÉS del permiso y llega a disconnectChannel', async () => {
+      const res = await request(server)
+        .post(url)
+        .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
+        .send({ conexionId: 'i1:tienda', forzar: true })
+
+      expect(res.status).toBe(200)
+      expect(res.body).toEqual({ handler: 'disconnectChannel' })
+      expect(mockCheckPermission.mock.invocationCallOrder[0]).toBeLessThan(mockCheckFeature.mock.invocationCallOrder[0])
+    })
+
+    it('sin conexionId, o con un campo de más, da 400 antes del permiso', async () => {
+      for (const body of [{}, { conexionId: 'i1:tienda', otro: 1 }, { conexionId: 'i1:tienda', forzar: 'sí' }]) {
+        const res = await request(server)
+          .post(url)
+          .set({ ...authHeader(adminCtx), 'x-test-allow-permission': 'delivery-channels:manage' })
+          .send(body)
+        expect(res.status).toBe(400)
+      }
+      expect(mockCheckPermission).not.toHaveBeenCalled()
+    })
+  })
+
   // ── Fix §10.4: permiso/membresía ANTES que feature (no fuga de estado de plan) ──
   describe('Fix §10.4: permiso antes que feature (no fuga de plan a no-miembros)', () => {
     it('permiso DENEGADO → 403 y checkFeatureAccess NUNCA corre (no revela el plan del venue)', async () => {

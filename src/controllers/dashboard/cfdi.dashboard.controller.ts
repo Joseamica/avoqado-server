@@ -187,6 +187,11 @@ export async function issueCfdiForOrderController(req: Request, res: Response): 
         status: result.cfdi.status,
         xmlUrl: result.cfdi.xmlUrl,
         pdfUrl: result.cfdi.pdfUrl,
+        // ADITIVO (28-oct, «Nueva factura»): el RFC de la factura DEVUELTA. En una recuperación (el PAC ya la había timbrado) puede
+        // no ser el que se capturó en esta petición, y el panel lo usa para enseñar esa factura en la lista.
+        ...(result.cfdi.receptorRfc ? { receptorRfc: result.cfdi.receptorRfc } : {}),
+        // ADITIVO (28-oct): cuándo se timbró. Una recuperada puede ser de un mes anterior; el panel amplía sus fechas para enseñarla.
+        ...(result.cfdi.stampedAt ? { stampedAt: new Date(result.cfdi.stampedAt).toISOString() } : {}),
       },
       ...(devoluciones?.modo ? { devoluciones: devoluciones.modo } : {}),
       ...(result.notasDeDevolucion ? { notasDeDevolucion: result.notasDeDevolucion } : {}),

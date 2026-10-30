@@ -91,6 +91,7 @@ afterAll(async () => {
   await prisma.stampReward.deleteMany({ where: { venueId } })
   await prisma.stampEvent.deleteMany({ where: { venueId } })
   await prisma.stampCard.deleteMany({ where: { venueId } })
+  await prisma.payment.deleteMany({ where: { venueId } })
   await prisma.order.deleteMany({ where: { venueId } })
   await prisma.customer.deleteMany({ where: { venueId } })
   await prisma.loyaltyConfig.deleteMany({ where: { venueId } })
@@ -438,5 +439,63 @@ describe('🔴 D3 (21-oct, «A, como Square»): una devolución nunca deja sello
     expect(await prisma.stampReward.findUnique({ where: { id: premio!.id }, select: { status: true } })).toEqual({ status: 'CANCELLED' })
     // El libro cuadra: 3 sellos − 2 reversas = 1 = 1 + 0.
     expect(await prisma.stampEvent.count({ where: { venueId, type: 'REVERSAL', stampCard: { customerId: c } } })).toBe(2)
+  })
+})
+
+/** Una devolución COMPLETED de la venta, como la escriben la terminal, el POS o Uber. */
+async function devolver(orderId: string) {
+  await prisma.payment.create({
+    data: {
+      venueId: venueId!,
+      orderId,
+      amount: -50,
+      method: 'CASH',
+      type: 'REFUND',
+      status: 'COMPLETED',
+      feePercentage: 0,
+      feeAmount: 0,
+      netAmount: -50,
+    },
+  })
+}
+
+describe('carrera cobro–devolución (24-oct): devolver mientras el cobro todavía otorga el sello (Postgres real)', () => {
+  it('🔴 la reversión espera al otorgamiento en curso y quita el sello que éste deja', async () => {
+    await programa(0, 5)
+    const c = await cliente()
+    const o = await venta()
+    // El cobro otorga con sus candados tomados y aún sin commit…
+    const aparcada = aparcarLaSiguienteTransaccion(prisma)
+    let otorgar: Promise<Awaited<ReturnType<typeof grantStamp>>> | undefined
+    let revertir: Promise<Awaited<ReturnType<typeof reverseStampForOrder>>> | undefined
+    let espera: Awaited<ReturnType<typeof esperarBloqueado>> = null
+    try {
+      otorgar = grantStamp(venueId!, c, o)
+      const pidOtorgar = await aTiempo(aparcada.pid, 8_000, 'el otorgamiento no llegó al commit')
+      // …y en ese momento se devuelve la venta. Antes la reversión no veía todavía el sello y salía sin hacer nada.
+      await devolver(o)
+      revertir = reverseStampForOrder(venueId!, o)
+      espera = await esperarBloqueado(prisma, { bloqueadoPor: [pidOtorgar], consulta: /pg_advisory_xact_lock/ })
+    } finally {
+      aparcada.soltar()
+      aparcada.restaurar()
+    }
+    const [otorgado, revertido] = await Promise.all([otorgar!, revertir!])
+    expect(espera).toMatchObject({ waitEvent: 'advisory' })
+    expect(otorgado.granted).toBe(true)
+    expect(revertido.reversed).toBe(true)
+    expect(await prisma.stampCard.findFirst({ where: { venueId, customerId: c }, select: { stampsEarned: true } })).toEqual({
+      stampsEarned: 0,
+    })
+  })
+
+  it('🔴 una venta que ya tiene una devolución no recibe sello', async () => {
+    await programa(0, 5)
+    const c = await cliente()
+    const o = await venta()
+    await devolver(o)
+
+    expect(await grantStamp(venueId!, c, o)).toMatchObject({ granted: false, reason: 'ORDER_REFUNDED' })
+    expect(await earnsDe(c)).toBe(0)
   })
 })

@@ -1,3 +1,4 @@
+import { isExchangeCreditTenderKind } from '../exchanges/exchangePredicates'
 import { CfdiStatus, OrderStatus, PaymentMethod, PaymentType, Prisma, TransactionStatus } from '@prisma/client'
 
 import AppError, { NotFoundError, ServiceUnavailableError, ValidationError } from '../../errors/AppError'
@@ -286,11 +287,13 @@ export async function estadoDeResultadosEnFoto(
     // Ruling M3 (revisión de la Tarea 3): un movimiento de 0 centavos no cuenta como aproximado. Una devolución de $0 hereda
     // `aproximada` del libro, pero su IVA es 0, no aproximado.
     const cuentaComoAproximado = parte.aproximada && m.amountCents !== 0
-    const inFiscal = paymentInFiscalScope(
-      esDevolucion ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method,
-      m.incluirEnContabilidad,
-      includeCashInAccounting,
-    )
+    const inFiscal =
+      !isExchangeCreditTenderKind(m.tenderSystemKind) &&
+      paymentInFiscalScope(
+        esDevolucion ? metodoParaAlcanceFiscal(m.method, m.processorData) : m.method,
+        m.incluirEnContabilidad,
+        includeCashInAccounting,
+      )
     if (esDevolucion) {
       const magnitudeCents = Math.abs(m.amountCents)
       ger.refunds += magnitudeCents

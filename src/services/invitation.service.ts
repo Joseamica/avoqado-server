@@ -10,6 +10,7 @@ import { ROLE_HIERARCHY } from '../lib/permissions'
 import { createStaffOrganizationMembership, getPrimaryOrganizationId, getOrganizationIdFromVenue } from './staffOrganization.service'
 import { logAction } from './dashboard/activity-log.service'
 import { assertCanAddSeatsBulk } from './access/seatCap.service'
+import { motivoContrasenaInvalida } from '../utils/contrasenaNueva'
 
 interface AcceptInvitationData {
   firstName?: string
@@ -340,14 +341,12 @@ export async function acceptInvitation(
           throw new AppError('Se requiere nombre, apellido y contrasena para crear una cuenta nueva', 400)
         }
 
-        // Validate password format for NEW accounts only.
+        // Validate password rule for NEW accounts only (8-128 chars, not a common one; no composition rules).
         // Existing users verify via bcrypt compare, so format rules don't apply to them
         // (their legacy password may not comply with current format requirements).
-        if (userData.password!.length < 8) {
-          throw new AppError('La contraseña debe tener al menos 8 caracteres', 400)
-        }
-        if (!/^(?=.*[a-z])(?=.*[A-Z])(?=.*\d)/.test(userData.password!)) {
-          throw new AppError('La contraseña debe contener al menos una minúscula, una mayúscula y un número', 400)
+        const motivoContrasena = motivoContrasenaInvalida(userData.password!)
+        if (motivoContrasena) {
+          throw new AppError(motivoContrasena, 400)
         }
 
         // Create staff record with all provided data

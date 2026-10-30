@@ -9,7 +9,7 @@
  *    separadas: fotografía nueva bajo READ COMMITTED) → escritura.
  *  · La reapertura: `candadoDeIntento` → TODOS los eventos del intento (FOR UPDATE) → los Payments implicados, DISTINTOS y en
  *    `id ASC` con `FOR NO KEY UPDATE` — dos reaperturas con Payments compartidos en orden inverso no pueden interbloquearse.
- *  · La unidad de convergencia del costo: la fila del Payment con `FOR NO KEY UPDATE NOWAIT` como PRIMERA sentencia (mutex sin
+ *  · La unidad de convergencia del costo: unión de Payment original y reembolsos por id con `FOR NO KEY UPDATE NOWAIT` como PRIMERA sentencia (mutex sin
  *    espera; NO KEY para no bloquear los INSERT ajenos por FK).
  *  · El candado consultivo: dos llaves (`namespace`, `hashtext(llave)`), con `SET LOCAL lock_timeout` en su propia sentencia.
  *  · La MISMA normalización de la llave (`llaveDeIntento`) al persistir el `attemptId` del evento y al bloquear.
@@ -290,11 +290,13 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     antes(s, 'FOR NO KEY UPDATE`', 'UPDATE "Payment"\n      SET "processorData" = (${datos} - \'angelpayWebhook\')', reapertura)
   })
 
-  it('la unidad de convergencia del costo toma la fila del Payment con FOR NO KEY UPDATE NOWAIT como PRIMERA sentencia y relee bajo ella', () => {
+  it('la unidad de convergencia del costo toma la unión del Payment original y sus reembolsos por id con NOWAIT como PRIMERA sentencia y relee bajo ella', () => {
     const s = leer('services/payments/deferredTransactionCost.service.ts')
     const desde = indice(s, 'export async function convergerCostoDeTransaccion(')
     const tx = indice(s, 'prisma.$transaction(', desde)
-    const mutex = indice(s, '/* convergencia */ WHERE "id" = ${paymentId} FOR NO KEY UPDATE NOWAIT', tx)
+    const mutex = indice(s, 'ORDER BY "id" FOR NO KEY UPDATE NOWAIT', tx)
+    expect(s.slice(tx, mutex)).toMatch(/WITH pendientes AS MATERIALIZED/)
+    expect(s.slice(tx, mutex)).toContain('OR "id" IN (SELECT id FROM pendientes)')
     // Entre abrir la transacción y el mutex no hay otra consulta.
     expect(s.slice(tx, mutex)).not.toMatch(/await tx\.(?!\$queryRaw<)/)
     antes(s, 'FOR NO KEY UPDATE NOWAIT', 'tx.payment.findUniqueOrThrow({ where: { id: paymentId } })', tx)
@@ -352,14 +354,20 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(selector.slice(desde)).toMatch(/if \(fila\?\.sinOrden\) return \{ tipo: 'ORDEN_NO_ACREDITADO' \}/)
   })
 
-  it('Codex R15-2 · la corrección por lote (apply y reverse): ORIGINALES sin esperar (NOWAIT, savepoint interior) → lote en `id ASC` (`bloquearPayments`) → relectura → clasificación; el intento entero vive en un savepoint exterior que se revierte si algo cambió', () => {
+  it('la corrección por lote conserva NOWAIT y los savepoints de originales, revalida la unión bloqueada antes de clasificar y revierte el intento si cambió', () => {
     const s = leer('services/shared/candadosDelLote.ts')
     const desde = indice(s, 'export async function bloquearLoteConOriginales(')
     antes(s, 'SAVEPOINT lote_del_protocolo', 'const foto = await fotografiar()', desde)
     antes(s, 'const foto = await fotografiar()', 'await bloquearSinEsperar(tx, original, marcador)', desde)
-    antes(s, 'await bloquearSinEsperar(tx, original, marcador)', 'await bloquearPayments(tx, bloqueables, marcador)', desde)
-    antes(s, 'await bloquearPayments(tx, bloqueables, marcador)', 'const relectura = await fotografiar()', desde)
-    antes(s, 'const relectura = await fotografiar()', 'ROLLBACK TO SAVEPOINT lote_del_protocolo', desde)
+    antes(s, 'const union = ', 'for (const original of union)', desde)
+    expect(s.slice(desde)).toMatch(/const union = .*\.sort\(\)/)
+    antes(s, 'await bloquearPayments(tx, [original], marcador)', 'const relectura = await fotografiar()', desde)
+    antes(
+      s,
+      'const relectura = await fotografiar()',
+      'ROLLBACK TO SAVEPOINT lote_del_protocolo',
+      indice(s, 'const relectura = await fotografiar()', desde),
+    )
     expect(s.slice(desde)).toMatch(/for \(let intento = 0; intento < 3; intento\+\+\)/)
     expect(s.slice(desde)).toMatch(/'RATE_CORRECTION_LOCK_UNSTABLE'/)
     // La fase de originales nunca espera: NOWAIT con su savepoint interior, y el 55P03 se traduce en «ocupado», no en error.
@@ -367,7 +375,7 @@ describe('Codex R6-2 · el candado por intento y el orden de adquisición (guard
     expect(sinEsperar).toMatch(/FOR NO KEY UPDATE NOWAIT/)
     antes(sinEsperar, 'SAVEPOINT original_sin_esperar', 'FOR NO KEY UPDATE NOWAIT')
     antes(sinEsperar, 'FOR NO KEY UPDATE NOWAIT', 'ROLLBACK TO SAVEPOINT original_sin_esperar')
-    // La fase del lote se toma A TRAVÉS del módulo hermano (`bloquearPayments` importado), y el original se pide ordenado y único.
+    // Los candidatos usan el módulo hermano; los originales siguen siendo únicos y se integran a la misma pasada por id.
     expect(s).toMatch(/import \{ bloquearPayments, type MarcadorDeCandado \} from '\.\/cobroDelProtocolo'/)
     expect(s.slice(desde)).toMatch(/const originales = \[\.\.\.new Set\(/)
     // apply y reverse: los candados del lote ANTES de clasificar, y se clasifica sólo lo bloqueado.

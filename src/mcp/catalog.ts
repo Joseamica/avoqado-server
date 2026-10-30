@@ -11,6 +11,7 @@ import { directoryInputSchema } from './directory/input'
 
 /** Explicit effects, never guessed from a name or permission suffix. New tools must declare one. */
 export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
+  review_pending_courtesy: 'write',
   venue_administration: 'read',
   update_venue_business_profile: 'write',
   update_venue_organization: 'write',
@@ -32,6 +33,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   add_ledger_account: 'write',
   add_to_waitlist: 'write',
   adjust_loyalty_points: 'write',
+  adjust_stamps: 'write',
   adjust_raw_material_stock: 'write',
   adjust_stock: 'write',
   aggregator_capacity_rules: 'read',
@@ -42,6 +44,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   area_ticket_reconciliation_queue: 'read',
   area_ticket_status: 'read',
   assign_table_check: 'write',
+  assign_customer_to_paid_sale: 'write',
   attach_customer_to_sale: 'write',
   attendance_heatmap: 'read',
   attendance_payroll_summary: 'read',
@@ -66,6 +69,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   cash_out_withdrawals: 'read',
   category_mix: 'read',
   cfdi_status: 'read',
+  order_invoice_status: 'read',
   change_sim_category: 'write',
   channel_mix: 'read',
   chart_of_accounts: 'read',
@@ -93,6 +97,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   create_launch_campaign: 'write',
   create_modifier_group: 'write',
   create_payment_link: 'write',
+  create_customer_payment_link: 'write',
+  add_customer_to_payment_link: 'write',
+  customer_payment_links: 'read',
   create_percent_promotion: 'write',
   create_product: 'write',
   create_product_with_variants: 'write',
@@ -183,6 +190,11 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   list_customer_groups: 'read',
   list_devices: 'read',
   list_discounts: 'read',
+  list_exchanges: 'read',
+  get_exchange: 'read',
+  get_exchanges_setting: 'read',
+  set_exchanges_setting: 'write',
+  review_exchange: 'write',
   list_document_requests: 'read',
   list_venue_document_requests: 'read',
   list_document_request_venue_options: 'read',
@@ -246,6 +258,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   pending_area_ticket_deliveries: 'read',
   pending_external_confirmations: 'read',
   pos_sync_status: 'read',
+  pos_sync_recovery: 'read',
   kitchen_preparation: 'read',
   preview_catalog_import: 'write',
   preview_catalog_publication: 'write',
@@ -266,6 +279,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   purchase_order_detail: 'read',
   quarantine_batch: 'write',
   quote_hybrid_purchase: 'write',
+  rappi_connect_link: 'write',
+  rappi_disconnect: 'write',
+  delivery_cash_pending: 'read',
   raw_material_presentations: 'read',
   reassign_sim_promoter: 'write',
   reassign_sim_supervisor: 'write',
@@ -321,6 +337,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   set_aggregator_capacity_rule: 'write',
   set_birthday_automation: 'write',
   set_customer_tags: 'write',
+  update_customer_contact: 'write',
   set_feature_list_price: 'write',
   set_fiscal_loss: 'write',
   set_hybrid_campaign_status: 'write',
@@ -420,6 +437,9 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   who_is_late_now: 'read',
   work_shifts: 'read',
 }
+
+/** Campos de concurrencia cuyo `null` es un valor visto (p. ej. `adjust_stamps` sin cartilla): se atan aunque valgan null. */
+const NULLABLE_CONFIRMATION_FIELDS = new Set(['expectedStampCardId'])
 
 const outputSchema = {
   status: z.enum(['success', 'needs_input', 'not_found', 'error']),
@@ -544,8 +564,19 @@ export function configureToolCatalog(server: McpServer, scope: McpScope, profile
             'expectedElecciones',
             // «Desde Shopify» (variantes, bloque 5): se confirman exactamente los pares producto + huella que se VIERON.
             'expectedItems',
+            // Sellos a mano (`adjust_stamps`, F8): se ajusta el cliente, la cartilla, el número, la versión y la meta que se VIERON.
+            'expectedCustomerId',
+            'expectedStampCardId',
+            'expectedStampsEarned',
+            'expectedVersion',
+            'expectedStampsRequired',
+            // Cortesía pendiente: ligar la cabecera y todas las líneas que se vieron, en pesos.
+            'expectedCourtesySnapshot',
           ]) {
-            if (config.inputSchema?.[field] && data[field] != null) confirmationArguments[field] = data[field]
+            // `null` es un valor que se VIO (sin cartilla): esos campos se atan por presencia. Los demás siguen con `!= null`, para
+            // no atar un `null` que el esquema de otra herramienta no acepta.
+            const presente = NULLABLE_CONFIRMATION_FIELDS.has(field) ? field in data : data[field] != null
+            if (config.inputSchema?.[field] && presente) confirmationArguments[field] = data[field]
           }
           return structureToolResult(
             text({
