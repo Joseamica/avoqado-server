@@ -32,7 +32,7 @@ async function correr(handler: any, r: any) {
   let listo!: () => void
   const termino = new Promise<void>(resolve => (listo = resolve))
   const res: any = { status: jest.fn(() => res), json: jest.fn(() => (listo(), res)) }
-  const next = jest.fn(() => listo())
+  const next = jest.fn((_error?: unknown) => listo())
   handler(r, res, next)
   await termino
   return { res, error: next.mock.calls[0]?.[0] as (Error & { statusCode?: number }) | undefined }
