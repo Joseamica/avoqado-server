@@ -14,7 +14,7 @@ import prisma from '../../utils/prismaClient'
 import { NotFoundError } from '../../errors/AppError'
 import { utcTs } from '../../utils/sqlDates'
 import { FAST_ORDER_NUMBER_PREFIX, FAST_TYPE_FILTER, OrderFilters } from './order.dashboard.service'
-import { AmountFilter, amountPredicate, andAll, decimalBind, ilikeContains, orAny } from './listSummary.shared'
+import { AmountFilter, amountPredicate, andAll, decimalBind, ilikeContains, orAny, palabrasDeBusqueda } from './listSummary.shared'
 
 /** Los filtros que hoy aplica `Orders.tsx` en el navegador, encima del listado. */
 export interface OrderClientFilters {
@@ -88,6 +88,17 @@ export function ordersSqlScope(venueId: string, filters?: OrderFilters): Prisma.
           )})
       )`,
     )
+    // Espejo de la rama «nombre completo» de `buildOrdersWhereClause` (D2): cada palabra en el nombre o en el apellido del mismo cliente.
+    const palabras = palabrasDeBusqueda(term)
+    if (palabras.length > 1) {
+      or.push(
+        Prisma.sql`EXISTS (
+          SELECT 1 FROM "OrderCustomer" oc JOIN "Customer" c ON c."id" = oc."customerId"
+          WHERE oc."orderId" = ${O}."id"
+            AND ${andAll(palabras.map(p => orAny([ilikeContains(Prisma.sql`c."firstName"`, p), ilikeContains(Prisma.sql`c."lastName"`, p)])))}
+        )`,
+      )
+    }
     parts.push(orAny(or))
   }
   return andAll(parts)
