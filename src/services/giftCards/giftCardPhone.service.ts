@@ -21,6 +21,7 @@ import { generateOtpCode, hashOtpCode } from '@/lib/otp'
 import { phoneLast10 } from '@/utils/phone'
 import { utcTs } from '@/utils/sqlDates'
 import { sendOtpWhatsApp } from '@/services/whatsapp.service'
+import { conNegocio } from '@/services/demo/candadoDemo'
 import { assertGiftCardKeys } from './giftCardCode'
 import { enmascararDestino, telefonoDeTarjeta } from './giftCardEntrega'
 import { GiftCardError } from './giftCardErrors'
@@ -153,7 +154,9 @@ export async function pedirCodigoDeTelefono(
 
   const { cards } = await tarjetasDelTelefono(venueId, destination, new Date(ahora))
   if (cards.some(c => c.usable)) {
-    void sendOtpWhatsApp(destination, code).catch(error =>
+    // Con el negocio de la tarjeta en el contexto (candado de negocios demo, capa 3): el candado no toma el negocio del token de
+    // un SUPERADMIN, y sin esto el código de una tarjeta vendida en un demo salía a un teléfono real (auditoría final 1b, #2).
+    void conNegocio(venueId, () => sendOtpWhatsApp(destination, code)).catch(error =>
       logger.warn('🎁 [tarjetas de regalo] no salió el código por WhatsApp', {
         venueId,
         destino: enmascararDestino({ deliveryChannel: 'WHATSAPP', recipientPhone: destination, recipientEmail: null }),
