@@ -330,6 +330,7 @@ const prismaMock: any = {
   purchaseOrder: createMockModel(),
   // Limpieza de negocios demo (deleteVenueDataTx) borra también cotizaciones y traspasos.
   estimate: createMockModel(),
+  deviceToken: createMockModel(), // dueños de los teléfonos (candado de avisos push de los negocios demo)
   inventoryTransfer: createMockModel(),
   purchaseOrderInvoice: createMockModel(),
   purchaseOrderInvoiceLine: createMockModel(),

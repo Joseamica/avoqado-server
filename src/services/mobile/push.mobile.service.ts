@@ -16,6 +16,7 @@ import { getFirebaseApp } from '../../config/firebase'
 import { DevicePlatform } from '@prisma/client'
 import logger from '@/config/logger'
 import * as admin from 'firebase-admin'
+import { omitirPorDemo } from '../demo/candadoDemo'
 
 // ============================================================================
 // DEVICE TOKEN MANAGEMENT
@@ -167,6 +168,18 @@ export async function sendPushToTokens(tokens: string[], payload: PushNotificati
   if (tokens.length === 0) {
     return { success: true, successCount: 0, failureCount: 0, failedTokens: [] }
   }
+
+  // Candado de negocios demo (capa 2; Codex r7 y r9): los teléfonos del usuario demo compartido son de OTROS prospectos, y
+  // un aviso automático (alerta de inventario, campanita) llega aquí sin pasar por ninguna ruta. Se decide por el dueño
+  // de cada teléfono y por el negocio del contexto; la campanita del panel no depende de esto y sigue funcionando.
+  const duenos = await prisma.deviceToken.findMany({
+    where: { token: { in: tokens } },
+    select: { staff: { select: { email: true } } },
+    take: tokens.length,
+  })
+  const motivo = await omitirPorDemo('aviso push', duenos.map(d => d.staff?.email))
+  if (motivo === 'sin confirmar') return { success: false, successCount: 0, failureCount: tokens.length, failedTokens: [] }
+  if (motivo) return { success: true, successCount: 0, failureCount: 0, failedTokens: [] }
 
   logger.info(`📤 [Push] Sending to ${tokens.length} token(s)`)
 

@@ -8,7 +8,11 @@ import prisma from '@/utils/prismaClient'
 const mockSend = jest.fn()
 jest.mock('resend', () => ({ Resend: jest.fn().mockImplementation(() => ({ emails: { send: (...a: unknown[]) => mockSend(...a) } })) }))
 
-const db = prisma as unknown as { venue: { findUnique: jest.Mock } }
+const mockSendEach = jest.fn()
+jest.mock('firebase-admin', () => ({ messaging: () => ({ sendEachForMulticast: (...a: unknown[]) => mockSendEach(...a) }) }))
+jest.mock('@/config/firebase', () => ({ getFirebaseApp: () => ({}), getStorageBucket: () => null }))
+
+const db = prisma as unknown as { venue: { findUnique: jest.Mock }; deviceToken: { findMany: jest.Mock } }
 const DEMO = 'cdemo0000000000000000000a'
 const REAL = 'creal0000000000000000000a'
 const ctx = (venueId: string): ExecutionContext => ({ correlationId: 'c', source: 'http', entrypoint: 'test', venueId })
@@ -142,5 +146,35 @@ describe('imagen del pase (Codex r7, 2)', () => {
     fetchMock.mockResolvedValue({ ok: false, status: 404 })
     await runWithContext(ctx(REAL), () => remotePng.fetchPng('https://storage.googleapis.com/b/logo.png'))
     expect(fetchMock).toHaveBeenCalledTimes(1)
+  })
+})
+
+describe('aviso push (Codex r9)', () => {
+  let push: any
+  beforeAll(() => {
+    jest.isolateModules(() => {
+      push = require('@/services/mobile/push.mobile.service')
+      runWithContext = require('@/observability/executionContext').runWithContext
+      __olvidarNegociosDemoParaPruebas = require('@/services/demo/candadoDemo').__olvidarNegociosDemoParaPruebas
+    })
+  })
+  const aviso = { title: 'Inventario bajo', body: 'lo que escribió el prospecto' }
+
+  it('🔴 los teléfonos del usuario demo compartido (otros prospectos) no reciben nada, aunque el aviso sea automático', async () => {
+    db.deviceToken.findMany.mockResolvedValue([{ staff: { email: 'bloom@demo.avoqado.io' } }, { staff: { email: 'bloom@demo.avoqado.io' } }])
+    const r = await push.sendPushToTokens(['t1', 't2'], aviso)
+    expect(r).toMatchObject({ successCount: 0, failedTokens: [] })
+    expect(mockSendEach).not.toHaveBeenCalled()
+  })
+  it('🔴 un aviso con el negocio demo en el contexto tampoco sale', async () => {
+    db.deviceToken.findMany.mockResolvedValue([{ staff: { email: 'mesero@real.mx' } }])
+    await runWithContext(ctx(DEMO), () => push.sendPushToTokens(['t1'], aviso))
+    expect(mockSendEach).not.toHaveBeenCalled()
+  })
+  it('regresión: el personal de un negocio real sí recibe su aviso', async () => {
+    db.deviceToken.findMany.mockResolvedValue([{ staff: { email: 'mesero@real.mx' } }])
+    mockSendEach.mockResolvedValue({ successCount: 1, failureCount: 0, responses: [{ success: true }] })
+    await runWithContext(ctx(REAL), () => push.sendPushToTokens(['t1'], aviso))
+    expect(mockSendEach).toHaveBeenCalledTimes(1)
   })
 })
