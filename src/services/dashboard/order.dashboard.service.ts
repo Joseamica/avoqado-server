@@ -19,6 +19,7 @@ import logger from '../../config/logger'
 import { Order, OrderStatus, PaymentType, Prisma } from '@prisma/client'
 import type { ValesSoltados } from '@/services/mobile/areaTicketV7.mobile.service'
 import { logAction } from './activity-log.service'
+import { palabrasDeBusqueda } from './listSummary.shared'
 import { applySalePosting, createSalePostingInTx } from '../inventory/inventoryPosting.service'
 import { activarSobresDeCuentaPagadaEnTx } from '../giftCards/giftCardLedger'
 import { postCashSaleToDrawer } from '../shared/cashDrawerPosting'
@@ -222,6 +223,7 @@ export function buildOrdersWhereClause(venueId: string, filters?: OrderFilters):
   if (filters.search) {
     const searchTerm = filters.search.trim()
     const searchNumber = parseFloat(searchTerm)
+    const palabras = palabrasDeBusqueda(searchTerm)
     whereClause.OR = [
       { orderNumber: { contains: searchTerm, mode: 'insensitive' } },
       ...(isNaN(searchNumber) ? [] : [{ total: { gte: searchNumber, lt: searchNumber + 1 } }]),
@@ -239,6 +241,21 @@ export function buildOrdersWhereClause(venueId: string, filters?: OrderFilters):
         },
       },
     ]
+    // «Ana López» no cabe entero ni en el nombre ni en el apellido: con dos o más palabras, cada una debe estar en el nombre o en
+    // el apellido del MISMO cliente (D2). Espejado en `ordersSqlScope` (orderSummary.dashboard.service.ts).
+    if (palabras.length > 1) {
+      whereClause.OR.push({
+        orderCustomers: {
+          some: {
+            customer: {
+              AND: palabras.map(p => ({
+                OR: [{ firstName: { contains: p, mode: 'insensitive' } }, { lastName: { contains: p, mode: 'insensitive' } }],
+              })),
+            },
+          },
+        },
+      })
+    }
   }
   return whereClause
 }
