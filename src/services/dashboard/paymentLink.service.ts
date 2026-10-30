@@ -10,7 +10,7 @@
 import prisma from '@/utils/prismaClient'
 import { createHash } from 'node:crypto'
 import { canonicalJson } from '@/services/customer-display/canonicalHash'
-import { PaymentMethod, Prisma } from '@prisma/client'
+import { PaymentLinkStatus, PaymentMethod, Prisma } from '@prisma/client'
 import { BadRequestError, ConflictError, NotFoundError, PaymentOutcomeUnknownError, UnauthorizedError } from '@/errors/AppError'
 import logger from '@/config/logger'
 import { nanoid } from 'nanoid'
@@ -497,11 +497,28 @@ export interface UpdatePaymentLinkData {
   discount?: EntradaDescuento | null
 }
 
+/** Pestañas de la lista del dashboard. «used» no es un estado de la base: es una liga de un solo uso ya cobrada (sigue ACTIVE). */
+export type VistaDeLigas = 'all' | 'active' | 'used' | 'paused' | 'expired'
+
 export interface ListPaymentLinksFilters {
   status?: string
+  /** Varios estados a la vez (filtro «Estado» del dashboard); si viene, manda sobre `status`. */
+  statuses?: string[]
+  view?: VistaDeLigas
   search?: string
   limit?: number
   offset?: number
+  /** Contadores por pestaña y totales del conjunto filtrado: los pide la tabla del dashboard; el MCP y el chatbot no. */
+  withCounts?: boolean
+}
+
+const LIGA_USADA: Prisma.PaymentLinkWhereInput = { status: 'ACTIVE', isReusable: false, paymentCount: { gt: 0 } }
+const WHERE_DE_LA_VISTA: Record<VistaDeLigas, Prisma.PaymentLinkWhereInput | null> = {
+  all: null,
+  active: { status: 'ACTIVE', OR: [{ isReusable: true }, { paymentCount: 0 }] },
+  used: LIGA_USADA,
+  paused: { status: 'PAUSED' },
+  expired: { status: 'EXPIRED' },
 }
 
 // ═══════════════════════════════════════════════════════════════════════════
@@ -772,19 +789,26 @@ const MISSING_RULE = {
  * Lists payment links for a venue with filtering
  */
 export async function getPaymentLinks(venueId: string, filters: ListPaymentLinksFilters = {}) {
-  const { status, search } = filters
-  const limit = Number.isFinite(filters.limit) ? Math.min(100, Math.max(1, Math.floor(filters.limit!))) : 20
+  const { status, statuses, view, search, withCounts } = filters
+  // Tope 200 = la página más grande que ofrece la tabla del dashboard.
+  const limit = Number.isFinite(filters.limit) ? Math.min(200, Math.max(1, Math.floor(filters.limit!))) : 20
   const offset = Number.isFinite(filters.offset) ? Math.max(0, Math.floor(filters.offset!)) : 0
 
-  const where: Prisma.PaymentLinkWhereInput = { venueId }
+  // `base` = búsqueda y estados; `where` le suma la pestaña. Los contadores de las pestañas se sacan de `base`.
+  const base: Prisma.PaymentLinkWhereInput = { venueId }
 
-  if (status) {
-    where.status = status as any
+  if (statuses?.length) {
+    base.status = { in: statuses as PaymentLinkStatus[] }
+  } else if (status) {
+    base.status = status as any
   }
 
   if (search) {
-    where.title = { contains: search, mode: 'insensitive' }
+    base.title = { contains: search, mode: 'insensitive' }
   }
+
+  const deLaVista = view ? WHERE_DE_LA_VISTA[view] : null
+  const where: Prisma.PaymentLinkWhereInput = deLaVista ? { ...base, AND: [deLaVista] } : base
 
   const [paymentLinks, total] = await Promise.all([
     prisma.paymentLink.findMany({
@@ -828,11 +852,50 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
   const reglas = new Map(filas.map(f => [f.id, reglaDeFila(f)]))
   const ahora = new Date()
   const zona = venue?.timezone ?? 'America/Mexico_City'
+
+  // «Pagada el» del dashboard: el último cobro COMPLETADO de cada liga (también si después se archivó). Un solo agregado
+  // acotado a las ligas de esta página: una liga reutilizable con miles de cobros no trae sus cobros, sólo la fecha mayor.
+  const ultimosCobros =
+    paymentLinks.length > 0
+      ? await prisma.checkoutSession.groupBy({
+          by: ['paymentLinkId'],
+          where: { paymentLinkId: { in: paymentLinks.map(l => l.id) }, status: 'COMPLETED' },
+          _max: { completedAt: true },
+        })
+      : []
+  const pagadaEl = new Map(ultimosCobros.map(c => [c.paymentLinkId, c._max.completedAt]))
+
   const withDiscount = paymentLinks.map(l => {
     const foto = (l.discount as unknown as DescuentoDeLiga | null) ?? null
     const regla = foto?.discountId ? (reglas.get(foto.discountId) ?? MISSING_RULE) : null
-    return { ...l, ...vistaDeDescuento(foto, regla, l.amount != null ? Number(l.amount) : null, ahora, zona) }
+    return {
+      ...l,
+      ...vistaDeDescuento(foto, regla, l.amount != null ? Number(l.amount) : null, ahora, zona),
+      lastPaidAt: pagadaEl.get(l.id) ?? null,
+    }
   })
+
+  // Pestañas y tarjetas del dashboard con números del servidor (antes se contaban en el navegador sobre la página que llegó).
+  // Agregados exactos: un groupBy por estado, dos conteos y una suma; nunca se traen las filas.
+  let counts: Record<VistaDeLigas, number> | undefined
+  let summary: { totalCollected: number; paidLinks: number } | undefined
+  if (withCounts) {
+    const [porEstado, usadas, cobrado, conPago] = await Promise.all([
+      prisma.paymentLink.groupBy({ by: ['status'], where: base, _count: { _all: true } }),
+      prisma.paymentLink.count({ where: { AND: [base, LIGA_USADA] } }),
+      prisma.paymentLink.aggregate({ where, _sum: { totalCollected: true } }),
+      prisma.paymentLink.count({ where: { AND: [where, { paymentCount: { gt: 0 } }] } }),
+    ])
+    const deEstado = (s: PaymentLinkStatus) => porEstado.find(f => f.status === s)?._count._all ?? 0
+    counts = {
+      all: porEstado.reduce((suma, f) => suma + f._count._all, 0),
+      active: deEstado('ACTIVE') - usadas,
+      used: usadas,
+      paused: deEstado('PAUSED'),
+      expired: deEstado('EXPIRED'),
+    }
+    summary = { totalCollected: Number(cobrado._sum.totalCollected ?? 0), paidLinks: conPago }
+  }
 
   return {
     paymentLinks: withDiscount,
@@ -840,6 +903,8 @@ export async function getPaymentLinks(venueId: string, filters: ListPaymentLinks
     limit,
     offset,
     hasMore: offset + limit < total,
+    ...(counts && { counts }),
+    ...(summary && { summary }),
   }
 }
 
@@ -888,8 +953,22 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
     throw new UnauthorizedError('No tienes acceso a esta liga de pago')
   }
 
+  // Pagos completados para el detalle del dashboard («Ver recibo» abre el detalle de cada pago, donde vive su recibo).
+  // `checkoutSessions` de arriba son los últimos 10 intentos de cualquier estado: los fallidos podían tapar a los pagados.
+  const pagosCompletados = { paymentLinkId: linkId, status: 'COMPLETED' as const }
+  const [completedPayments, completedPaymentsTotal] = await Promise.all([
+    prisma.checkoutSession.findMany({
+      where: pagosCompletados,
+      orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+      take: 50,
+      select: { id: true, amount: true, completedAt: true, paymentId: true },
+    }),
+    prisma.checkoutSession.count({ where: pagosCompletados }),
+  ])
+  const conPagos = { ...paymentLink, completedPayments, completedPaymentsTotal }
+
   const foto = (paymentLink.discount as unknown as DescuentoDeLiga | null) ?? null
-  if (!foto) return { ...paymentLink, ...vistaDeDescuento(null, null, null, new Date(), 'UTC') }
+  if (!foto) return { ...conPagos, ...vistaDeDescuento(null, null, null, new Date(), 'UTC') }
   const [fila, venue] = await Promise.all([
     foto.discountId ? prisma.discount.findFirst({ where: { id: foto.discountId, venueId }, select: DISCOUNT_RULE_SELECT }) : null,
     prisma.venue.findUnique({ where: { id: venueId }, select: { timezone: true } }),
@@ -901,7 +980,7 @@ export async function getPaymentLinkById(venueId: string, linkId: string) {
       : paymentLink.amount != null
         ? Number(paymentLink.amount)
         : null
-  return { ...paymentLink, ...vistaDeDescuento(foto, regla, base, new Date(), venue?.timezone ?? 'America/Mexico_City') }
+  return { ...conPagos, ...vistaDeDescuento(foto, regla, base, new Date(), venue?.timezone ?? 'America/Mexico_City') }
 }
 
 /**
@@ -1307,6 +1386,62 @@ export async function updatePaymentLinkBranding(
 // ═══════════════════════════════════════════════════════════════════════════
 
 /**
+ * Lo que ve quien vuelve a abrir una liga de un solo uso ya cobrada: «Pagada», cuándo, cuánto y su recibo.
+ * Tarjeta enmascarada, sin nombre, correo ni teléfono de quien pagó. Dos consultas acotadas: el último cobro completado
+ * y su pago.
+ *
+ * 🔴 Sólo el recibo del PROVEEDOR (el de Stripe), nunca el recibo digital de Avoqado que sí da `reciboParaElCliente`:
+ * aquí basta el shortCode (la liga se reenvía en chats) y la llave de ese recibo también abre la factura del cliente
+ * (`/receipt/:accessKey/cfdi`, con RFC y domicilio) y la autofactura de la venta (Codex, revisión de este cambio). La
+ * página de «Pago exitoso» sí lo da porque pide la sesión, que sólo tiene el navegador de quien pagó. Sin recibo del
+ * proveedor (Mercado Pago), la página dice «Pagada» sin botón.
+ */
+async function ligaYaPagada(paymentLink: {
+  id: string
+  venueId: string
+  title: string
+  currency: string
+  venue: {
+    name: string
+    slug: string
+    logo: string | null
+    primaryColor: string | null
+    timezone: string | null
+    paymentLinkBranding: unknown
+  }
+}) {
+  const session = await prisma.checkoutSession.findFirst({
+    where: { paymentLinkId: paymentLink.id, status: 'COMPLETED' },
+    orderBy: [{ completedAt: 'desc' }, { id: 'desc' }],
+    select: { sessionId: true, paymentId: true, amount: true, currency: true, completedAt: true },
+  })
+  const payment = session
+    ? await prisma.payment.findFirst({
+        where: { ...pagoDeLaSesion(session), venueId: paymentLink.venueId },
+        orderBy: { createdAt: 'desc' },
+        select: { receiptUrl: true, cardBrand: true, maskedPan: true },
+      })
+    : null
+  return {
+    title: paymentLink.title,
+    venue: { name: paymentLink.venue.name, slug: paymentLink.venue.slug, logo: paymentLink.venue.logo },
+    branding: mergeBranding(paymentLink.venue.paymentLinkBranding, paymentLink.venue.primaryColor),
+    timezone: paymentLink.venue.timezone || 'America/Mexico_City',
+    paidAt: session?.completedAt ? session.completedAt.toISOString() : null,
+    amount: session ? Number(session.amount) : null,
+    currency: session?.currency ?? paymentLink.currency,
+    payment: payment
+      ? {
+          cardBrand: payment.cardBrand,
+          last4: payment.maskedPan ? payment.maskedPan.replace(/^[*]+/, '').slice(-4) : null,
+          // Hoy `Payment.receiptUrl` sólo guarda el `receipt_url` de Stripe; si algún día guardara uno de Avoqado, no sale.
+          receiptUrl: payment.receiptUrl && !payment.receiptUrl.includes('/receipts/public/') ? payment.receiptUrl : null,
+        }
+      : null,
+  }
+}
+
+/**
  * Resolves a payment link by short code (public, no auth)
  * Returns venue branding + link data for the checkout page
  */
@@ -1359,6 +1494,14 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
     throw new NotFoundError('Liga de pago no encontrada')
   }
 
+  // Check if single-use link has already been paid
+  // Antes que «expirada» o «no disponible»: a quien pagó le importa que está pagada, aunque después la archiven o venza.
+  // Sigue siendo 400 con el mismo mensaje (un checkout viejo lo muestra igual que antes); el código y el detalle le dejan
+  // al checkout nuevo dibujar «Pagada» con su fecha y su recibo.
+  if (!paymentLink.isReusable && paymentLink.paymentCount > 0) {
+    throw new BadRequestError('Esta liga de pago ya fue utilizada', 'PAYMENT_LINK_ALREADY_PAID', await ligaYaPagada(paymentLink))
+  }
+
   // Check if link is active
   if (paymentLink.status !== 'ACTIVE') {
     throw new BadRequestError(paymentLink.status === 'EXPIRED' ? 'Esta liga de pago ha expirado' : 'Esta liga de pago no está disponible')
@@ -1372,11 +1515,6 @@ export async function getPaymentLinkByShortCode(shortCode: string) {
       data: { status: 'EXPIRED' },
     })
     throw new BadRequestError('Esta liga de pago ha expirado')
-  }
-
-  // Check if single-use link has already been paid
-  if (!paymentLink.isReusable && paymentLink.paymentCount > 0) {
-    throw new BadRequestError('Esta liga de pago ya fue utilizada')
   }
 
   // `paymentMethod` tells the public checkout which UX to render:

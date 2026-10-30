@@ -11,6 +11,8 @@ import { z } from 'zod'
 import { EntityType, VenueType } from '@prisma/client'
 import * as onboardingProgressService from '../services/onboarding/onboardingProgress.service'
 import * as venueCreationService from '../services/onboarding/venueCreation.service'
+import { terminarAltaCobrada } from '../services/onboarding/terminarAltaCobrada'
+import { renovarSesionConLaSucursal as renovarSesion } from '../services/onboarding/sesionTrasElAlta'
 import { ensureVenueForOnboarding } from '../services/onboarding/ensureVenue.service'
 import * as signupService from '../services/onboarding/signup.service'
 import * as testPaymentLinkService from '../services/onboarding/testPaymentLink.service'
@@ -48,12 +50,6 @@ import { optionalLaunchCampaignCode, utmSchema } from '../schemas/acquisition.sc
 import logger from '../config/logger'
 import AppError, { BadRequestError, ConflictError, NotFoundError } from '../errors/AppError'
 import prisma from '../utils/prismaClient'
-import * as authService from '../services/dashboard/auth.service'
-import { ponerCookiesDeSesion } from '../utils/cookiesDeSesion'
-import { esSucursalReal } from '../utils/sucursalDelToken'
-import { motivoDeConcesionInvalidada } from '../utils/passwordChangeGuard'
-import { revokeSession } from '../services/auth/session.service'
-import { invalidateSession } from '../services/auth/sessionCache'
 import { billingPageUrl } from '@/utils/dashboardLinks'
 
 /**
@@ -752,39 +748,9 @@ async function exigirAltaTerminada(organizationId: string): Promise<void> {
   }
 }
 
-/**
- * Terminar el alta reemite la sesión con la sucursal REAL (monitor de producción, 19-oct).
- *
- * El alta emite el token del panel con `venueId = 'pending'` (signup.service.ts) y la cookie dura 24 h: sin esto,
- * todo lo que toma la sucursal sólo del token (`/dashboard/tokens/*`, `/google-calendar/oauth/init`) fallaba un día
- * entero. Se hace EXACTAMENTE como el cambio de sucursal: `switchVenueForStaff` (misma verificación de acceso, misma
- * Session y mismo grant de refresco) y las mismas cookies.
- *
- * Nunca bloquea el alta: la sucursal ya existe, y sin tokens nuevos la persona puede cambiar de sucursal o volver a
- * entrar. No se reemite:
- * - suplantando: sería darle al superadmin una sesión normal a nombre de la persona suplantada;
- * - si la sesión YA tenía una sucursal real: un reintento desde otra pestaña no le cambia la sucursal en silencio;
- * - si hubo un corte de sesiones («cerrar todas», cambio de contraseña, cuenta desactivada) después de emitirse el
- *   token del alta (Codex r1/r2). Se revisa DESPUÉS de crear la sesión nueva, nunca antes: el corte escribe su fecha y
- *   luego cierra las Session vivas (`cerrarSesionesDeStaff`), así que la nueva o ya existía y el corte la cierra, o el
- *   corte ya se ve aquí y la cerramos nosotros. Revisar antes dejaba la ventana entre la revisión y `createSession`.
- */
+/** La renovación vive en `services/onboarding/sesionTrasElAlta.ts` (también la usa `/auth/status` desde H0, 28-oct). */
 async function renovarSesionConLaSucursal(req: Request, res: Response, venueId: string): Promise<void> {
-  const authContext = (req as any).authContext
-  if (!authContext?.userId || authContext.isImpersonating || esSucursalReal(authContext.venueId)) return
-  try {
-    const { accessToken, refreshToken, sessionId } = await authService.switchVenueForStaff(authContext.userId, authContext.orgId, venueId)
-    const emitido = typeof authContext.emitidoMs === 'number' ? new Date(authContext.emitidoMs) : undefined
-    if (await motivoDeConcesionInvalidada(authContext.userId, emitido)) {
-      await revokeSession(sessionId, 'sessions_revoked_during_onboarding')
-      await invalidateSession(sessionId)
-      return
-    }
-    ponerCookiesDeSesion(res, accessToken, refreshToken)
-  } catch (error) {
-    // error, no warn: sin esto la persona se queda 24 h en «sucursal pendiente» y el monitor debe verlo.
-    logger.error('No se pudo renovar la sesión con la sucursal al terminar el alta', { userId: authContext.userId, venueId, error })
-  }
+  await renovarSesion((req as any).authContext, res, venueId)
 }
 
 /**
@@ -1316,6 +1282,26 @@ export async function completeV2Onboarding(req: Request, res: Response, next: Ne
     // Si `activate-plan` YA cobró, el bloque de Stripe y el correo de abajo se saltan: ese
     // camino ya cobró, ya escribió el plan del local y ya mandó su propio correo.
     const planYaCobrado = progress.planActivationStatus === PLAN_ACTIVATION_STATUS.ACTIVE
+
+    // 🔴 H0 (28-oct): con el plan ya cobrado, el cierre es el MISMO que hace el cobro por su cuenta (`terminarAltaCobrada`):
+    // progreso, negocio y organización en una sola transacción. Antes este botón era el ÚNICO que terminaba el alta, y quien
+    // pagaba y cerraba la página se quedaba fuera del POS. Sin negocio (no debería pasar: el cobro lo crea) sigue el carril
+    // de siempre, que lo crea.
+    if (planYaCobrado) {
+      const cierre = await terminarAltaCobrada(organizationId, { via: 'navegador', staffId: authContext.userId, language })
+      if (cierre.estado !== 'NADA') {
+        await renovarSesionConLaSucursal(req, res, cierre.venue.id)
+        res.status(cierre.estado === 'TERMINADA' ? 201 : 200).json({
+          success: true,
+          message: cierre.estado === 'TERMINADA' ? 'Setup completed successfully' : 'Setup already completed',
+          venue: cierre.venue,
+        })
+        return
+      }
+      if (cierre.motivo !== 'SIN_NEGOCIO') {
+        throw new ConflictError('Tu registro se está terminando. Vuelve a intentar en unos segundos.', 'PLAN_ACTIVATION_IN_PROGRESS')
+      }
+    }
 
     // OPTIMISTIC LOCKING: Atomically mark as completing BEFORE creating venue
     // This prevents race condition where double-click creates 2 venues

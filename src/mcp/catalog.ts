@@ -69,6 +69,7 @@ export const TOOL_EFFECTS: Record<string, 'read' | 'write'> = {
   cash_out_withdrawals: 'read',
   category_mix: 'read',
   cfdi_status: 'read',
+  order_invoice_status: 'read',
   change_sim_category: 'write',
   channel_mix: 'read',
   chart_of_accounts: 'read',

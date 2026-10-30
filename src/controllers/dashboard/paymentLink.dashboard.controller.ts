@@ -47,14 +47,18 @@ function privateLink<T extends { customerId?: unknown; customer?: unknown; creat
 export async function listPaymentLinks(req: Request, res: Response) {
   try {
     const { venueId } = req.params
-    const { status, search, limit, offset } = req.query
+    const { status, statuses, view, search, limit, offset } = req.query
 
     const canRead = await canReadCustomers(req)
     const result = await paymentLinkService.getPaymentLinks(venueId, {
       status: status as string | undefined,
+      statuses: statuses as unknown as string[] | undefined,
+      view: view as paymentLinkService.VistaDeLigas | undefined,
       search: search as string | undefined,
       limit: limit ? Number(limit) : undefined,
       offset: offset ? Number(offset) : undefined,
+      // La tabla del dashboard pinta sus pestañas y tarjetas con estos números (el MCP y el chatbot no los piden).
+      withCounts: true,
     })
 
     res.json({

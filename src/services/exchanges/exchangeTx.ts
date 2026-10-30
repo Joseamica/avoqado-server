@@ -13,7 +13,7 @@ import { sincronizarRepartos } from '../shared/repartoDescuentoTx'
 import { assertRefundableLines, assertPromotionLineFullQuantity, bloquearCobroParaReembolso } from '../dashboard/refund.dashboard.service'
 import type { RefundMoneySemantics } from '../dashboard/refund.dashboard.service'
 import { writeRefundInTx } from '../shared/writeRefundInTx'
-import { createCustomerReturnPostingInTx } from '../inventory/inventoryPosting.service'
+import { anotarRegresoEnTx, faltaPorReponerEnTx, quedaTodaDevueltaEnTx } from '../inventory/reponerLoQueFalta'
 import type { AbonoEnTx, AbonoEnTxContexto, AbonoEnTxEntrada } from '../mobile/order.mobile.service'
 import type { TenderSemanticsPayment } from '../shared/tenderSemantics'
 import { paymentCountsAsDrawerCash } from '../shared/tenderSemantics'
@@ -717,6 +717,8 @@ async function createExchangeSaleInTx(
       source: sale.order.source as OrderSource,
       status: 'CONFIRMED',
       paymentStatus: 'PENDING',
+      // Se cobra en el momento (la diferencia, en la terminal), nunca es fiado: la deuda del cliente y «Liquidar saldo» no la cuentan.
+      payLater: false,
       kitchenStatus: 'SERVED',
       contratoDePrecio: 'IVA_INCLUIDO',
       taxAmount: pesos(0),
@@ -781,13 +783,47 @@ export async function finishExchangeInTx(
       },
     })
   }
-  const returnPosting = await createCustomerReturnPostingInTx(tx, {
+  // «Regresa lo que salió menos lo que ya regresó» (28-oct): cada pieza devuelta se topa por lo que falta de su renglón (una prenda
+  // que ya regresó por la terminal no vuelve a entrar) y la que no vuelve al estante (`restock: false`) queda resuelta igual. Si
+  // con este cambio la venta original queda toda devuelta, regresa también lo que faltaba de los demás (una devolución parcial de
+  // la terminal antes del cambio).
+  const falta = await faltaPorReponerEnTx(tx, venueId, p.sale.order.id)
+  const devueltas = new Map<string, number>()
+  for (const r of p.lines.returned) devueltas.set(r.orderItemId, (devueltas.get(r.orderItemId) ?? 0) + r.quantity)
+  const congeladas = new Map(p.returnLines.map(l => [l.orderItemId, l]))
+  const reponer = new Map<string, Parameters<typeof anotarRegresoEnTx>[1]['reponer'][number]>()
+  const noReponer: Parameters<typeof anotarRegresoEnTx>[1]['noReponer'] = []
+  const resueltasAqui = new Map<string, number>()
+  for (const [orderItemId, cantidad] of devueltas) {
+    const f = falta.get(orderItemId)
+    if (!f) continue
+    const resueltas = Math.min(cantidad, f.falta)
+    resueltasAqui.set(orderItemId, resueltas)
+    const congelada = congeladas.get(orderItemId)
+    const vuelve = Math.min(congelada?.quantity ?? 0, resueltas)
+    if (congelada && vuelve > 0)
+      reponer.set(orderItemId, { orderItemId, productId: congelada.productId, cantidad: vuelve, eligibility: congelada.eligibility })
+    if (resueltas - vuelve > 0) noReponer.push({ orderItemId, productId: f.productId, cantidad: resueltas - vuelve })
+  }
+  const estaVezPesos = p.refundRows.reduce((sum, r) => sum + r.cents, 0) / 100
+  if (await quedaTodaDevueltaEnTx(tx, venueId, p.sale.order.id, estaVezPesos))
+    for (const f of falta.values()) {
+      const resto = f.falta - (resueltasAqui.get(f.orderItemId) ?? 0)
+      if (resto <= 0) continue
+      const ya = reponer.get(f.orderItemId)
+      if (ya) ya.cantidad += resto
+      else reponer.set(f.orderItemId, { orderItemId: f.orderItemId, productId: f.productId, cantidad: resto })
+    }
+  const regreso = await anotarRegresoEnTx(tx, {
     venueId,
-    refundPaymentId: p.refundRows[0].id,
     orderId: p.sale.order.id,
+    refundPaymentId: p.refundRows[0].id,
     staffId: p.input.actorStaffId,
-    lines: p.returnLines,
+    motivo: 'Cambio de producto: regresa al inventario',
+    reponer: [...reponer.values()],
+    noReponer,
   })
+  const returnPosting = regreso.postingId ? { id: regreso.postingId } : null
   const response: ExchangeResponse = {
     id: p.exchangeId,
     status: p.finalStatus,

@@ -13,14 +13,14 @@ import { findClaimableByCodeOrSlug } from '../launchCampaigns/launchCampaign.ser
 import { crearNegocioNuevo, resolverAtribucionDelAlta } from './nuevoNegocio'
 import { AuthenticationError, BadRequestError, GoneError } from '@/errors/AppError'
 import * as jwtService from '@/jwt.service'
-import { StaffRole, OrgRole } from '@prisma/client'
+import { StaffRole, OrgRole, type Prisma } from '@prisma/client'
 import emailService from '@/services/email.service'
 import { getPrimaryOrganizationId } from '@/services/staffOrganization.service'
 import { altaLandingConCodigo } from '@/config/altaLandingConCodigo'
 import { motivoContrasenaInvalida } from '@/utils/contrasenaNueva'
 import { logAction } from '@/services/dashboard/activity-log.service'
 import logger from '@/config/logger'
-import { firmarBoletoDeAlta, leerBoletoDeAlta } from './boletoDeAlta'
+import { firmarBoletoDeAlta, huellaDeContrasena, leerBoletoDeAlta } from './boletoDeAlta'
 import { avisarRegistroDirecto } from './avisoRegistroDirecto'
 import { motivoDeConcesionInvalidada } from '@/utils/passwordChangeGuard'
 
@@ -36,6 +36,8 @@ export interface SignupInput {
   legalVersion?: string
   launchCampaignCode?: string
   utm?: Record<string, string>
+  /** D12: host de la página anterior al registro (lo manda el panel). Mal formado ⇒ se descarta. */
+  referrer?: string
   ipAddress?: string
 }
 
@@ -156,7 +158,7 @@ export async function tokensDeDuenoSinSucursal(staffId: string): Promise<{ acces
  */
 export async function signupUser(input: SignupInput): Promise<SignupResult> {
   const { email, password, firstName = '', lastName = '', organizationName = '', wizardVersion } = input
-  const { legalVersion, launchCampaignCode, hybridOfferSlug, utm, ipAddress } = input
+  const { legalVersion, launchCampaignCode, hybridOfferSlug, utm, referrer, ipAddress } = input
 
   // 1. Check if email already exists
   const existingStaff = await prisma.staff.findUnique({
@@ -180,7 +182,7 @@ export async function signupUser(input: SignupInput): Promise<SignupResult> {
   // 🔴 Una versión legal DESCONOCIDA se ignora en silencio: el asistente vuelve a pedir la
   // casilla. Guardarla dejaría un consentimiento firmado contra un texto que nadie puede
   // identificar, que es peor que no tenerlo.
-  const atribucion = await resolverAtribucionDelAlta({ legalVersion, launchCampaignCode, hybridOfferSlug, utm })
+  const atribucion = await resolverAtribucionDelAlta({ legalVersion, launchCampaignCode, hybridOfferSlug, utm, referrer })
 
   // 4. Create organization and staff in a transaction — la MISMA función que el alta con Google.
   const result = await prisma.$transaction(tx =>
@@ -698,15 +700,29 @@ const BOLETO_USADO = 'Este enlace ya se usó o venció. Inicia sesión con tu co
  */
 export async function canjearBoletoDeAlta(boleto: string): Promise<{ accessToken: string; refreshToken: string }> {
   const usado = () => new GoneError(BOLETO_USADO, 'BOLETO_USADO')
-  let leido: { staffId: string; email: string; emitidoMs: number }
+  let leido: ReturnType<typeof leerBoletoDeAlta>
   try {
     leido = leerBoletoDeAlta(boleto)
   } catch (e) {
     if (e instanceof AuthenticationError) throw usado()
     throw e
   }
-  const { staffId, email, emitidoMs } = leido
+  const { staffId, email, emitidoMs, autorizacion } = leido
   const emitido = new Date(emitidoMs)
+  // 🔴 D10 (Codex r3/r4): el boleto de «Crear contraseña y entrar» sólo vale con la cuenta EXACTAMENTE como la dejó el cambio
+  // que lo autorizó: esa hora, ESA contraseña (por su huella) y ninguna revocación en ese momento o después. Cualquier cambio
+  // de contraseña (aunque caiga en el mismo milisegundo), «cerrar todas las sesiones» o una baja lo invalidan.
+  let atadoAlCambio: Prisma.StaffWhereInput[] = []
+  if (autorizacion) {
+    const cambio = new Date(autorizacion.cambioMs)
+    const actual = await prisma.staff.findUnique({ where: { id: staffId }, select: { password: true } })
+    if (!actual?.password || huellaDeContrasena(actual.password) !== autorizacion.huella) throw usado()
+    atadoAlCambio = [
+      { lastPasswordReset: cambio },
+      { password: actual.password },
+      { OR: [{ sessionsRevokedAt: null }, { sessionsRevokedAt: { lt: cambio } }] },
+    ]
+  }
 
   if (!(await esProspectoDeLanding(staffId, { exigirSinContrasena: false }))) throw usado()
   if ((await motivoDeConcesionInvalidada(staffId, emitido)) !== null) throw usado()
@@ -723,6 +739,7 @@ export async function canjearBoletoDeAlta(boleto: string): Promise<{ accessToken
         { OR: [{ lastLoginAt: null }, { lastLoginAt: { lt: emitido } }] },
         { OR: [{ lastPasswordReset: null }, { lastPasswordReset: { lt: emitido } }] },
         { OR: [{ sessionsRevokedAt: null }, { sessionsRevokedAt: { lt: emitido } }] },
+        ...atadoAlCambio,
       ],
     },
     data: { lastLoginAt: new Date() },
@@ -740,6 +757,12 @@ export async function canjearBoletoDeAlta(boleto: string): Promise<{ accessToken
   // Los awaits de arriba dejan una ventana: un restablecimiento o «cerrar todas mis sesiones» que caiga ahí no debe
   // ser sobrevivido por tokens firmados después (Codex r5). Se revisa DE NUEVO con los tokens ya firmados.
   if ((await motivoDeConcesionInvalidada(staffId, emitido)) !== null) throw usado()
+  // …y, si viene de un cambio de contraseña, que la cuenta SIGA en ese estado (uno guardado a media petición, con hora
+  // anterior a la firma, no lo detecta la revisión por fecha de arriba).
+  if (autorizacion) {
+    const sigue = await prisma.staff.findFirst({ where: { id: staffId, active: true, AND: atadoAlCambio }, select: { id: true } })
+    if (!sigue) throw usado()
+  }
   return tokens
 }
 

@@ -188,6 +188,7 @@ const NUNCA_EN_DIRECTORIO = [
   'cash_out_org_withdrawals',
   'cash_out_withdrawals',
   'cfdi_status',
+  'order_invoice_status', // 28-oct: lee la factura de una venta (RFC del receptor, UUID)
   'close_service_pay_period',
   'confirm_order_price_contract',
   'diot',

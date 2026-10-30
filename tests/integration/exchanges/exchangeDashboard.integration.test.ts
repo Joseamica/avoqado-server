@@ -105,7 +105,9 @@ describe('exchange dashboard additions', () => {
     if (setting === null) await prisma.venueSettings.create({ data: { venueId: s.venueId, exchangesEnabled: null } })
     if (setting !== null) {
       const { body } = UpdateVenueSettingsSchema.parse({ params: { venueId: s.venueId }, body: { exchangesEnabled: setting } })
-      expect(await updateVenueSettings(s.venueId, body as Prisma.VenueSettingsUpdateInput, s.staffId)).toMatchObject({ exchangesEnabled: setting })
+      expect(await updateVenueSettings(s.venueId, body as Prisma.VenueSettingsUpdateInput, s.staffId)).toMatchObject({
+        exchangesEnabled: setting,
+      })
       const { body: flip } = UpdateVenueSettingsSchema.parse({ params: { venueId: s.venueId }, body: { exchangesEnabled: !setting } })
       await updateVenueSettings(s.venueId, flip as Prisma.VenueSettingsUpdateInput, s.staffId)
       await updateVenueSettings(s.venueId, body as Prisma.VenueSettingsUpdateInput, s.staffId)
@@ -278,9 +280,9 @@ describe('exchange dashboard additions', () => {
     const counter = clienteQueCuenta()
     try {
       const count = async () => {
-        counter.reiniciar()
+        await counter.reiniciar()
         const result = await dashboard.listExchangesForReview({ venueId: s.venueId, db: counter.db })
-        return { result, queries: counter.consultas() }
+        return { result, queries: await counter.consultas() }
       }
       const one = await count()
       expect(one.result.items[0]).toMatchObject({

@@ -42,6 +42,10 @@ jest.mock('@/services/shared/cashDrawerPosting', () => ({
   postCashRefundToDrawer: jest.fn().mockResolvedValue('POSTED'),
 }))
 jest.mock('@/services/dashboard/inventoryRestock.service', () => ({ restockOrderItems: jest.fn().mockResolvedValue({}) }))
+jest.mock('@/services/inventory/inventoryPosting.service', () => ({
+  ...jest.requireActual('@/services/inventory/inventoryPosting.service'),
+  applyCustomerReturnPosting: jest.fn().mockResolvedValue(null),
+}))
 jest.mock('@/services/payments/transactionCost.service', () => ({ createRefundTransactionCost: jest.fn().mockResolvedValue(null) }))
 jest.mock('@/services/dashboard/commission/commission-calculation.service', () => ({
   createRefundCommission: jest.fn().mockResolvedValue(null),
@@ -54,7 +58,7 @@ jest.mock('@/services/referrals/referralRefund.service', () => ({ onOrderRefunde
 
 import * as refundService from '@/services/tpv/refund.tpv.service'
 import { logAction } from '@/services/dashboard/activity-log.service'
-import { restockOrderItems } from '@/services/dashboard/inventoryRestock.service'
+import { applyCustomerReturnPosting } from '@/services/inventory/inventoryPosting.service'
 import { postCashRefundToDrawer } from '@/services/shared/cashDrawerPosting'
 import { RECIBO_CANONICO } from '@/services/shared/reciboCanonico'
 import { prismaMock } from '../../../__helpers__/setup'
@@ -113,8 +117,6 @@ function armar() {
     create: jest.fn().mockResolvedValue({ id: 'audit-1' }),
   }
   ;(prismaMock as any).venueTransaction = { create: jest.fn().mockResolvedValue({}) }
-  // Cambio de producto (rM2 #2): la devolución completa pregunta qué piezas ya regresaron con un cambio; aquí, ninguno.
-  prismaMock.exchange.findMany.mockResolvedValue([])
   ;(prismaMock as any).$transaction = jest.fn().mockImplementation(async (fn: any) => fn(prismaMock))
   ;(prismaMock as any).$queryRaw = jest.fn().mockResolvedValue([original])
   return original
@@ -396,7 +398,11 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
       order: { id: 'order-1', total: 200, tipAmount: 0 },
     })
     ;(prismaMock as any).$queryRaw.mockResolvedValueOnce([{ id: 'order-1' }]).mockResolvedValueOnce([original])
-    ;(prismaMock as any).payment.findMany.mockResolvedValueOnce([]).mockResolvedValueOnce([{ amount: -200 }])
+    ;(prismaMock as any).payment.findMany.mockResolvedValueOnce([]).mockResolvedValue([{ amount: -200 }])
+    // «Regresa lo que salió menos lo que ya regresó» (28-oct): la venta queda toda devuelta y su renglón se anota dentro de la tx.
+    ;(prismaMock as any).order.findUnique = jest.fn().mockResolvedValue({ id: 'order-1', venueId: VENUE, total: 200, tipAmount: 0 })
+    prismaMock.orderItem.findMany.mockResolvedValueOnce([{ id: 'oi-1', productId: 'prod-1', quantity: 1, areaTicketLineId: null }])
+    prismaMock.product.findMany.mockResolvedValue([])
 
     await refundService.recordRefund(VENUE, cuerpo({ staffId: 'staff-hostil' }) as never, 'staff-autenticado')
 
@@ -419,7 +425,10 @@ describe('fase 2 — el reembolso se ata al turno del NEGOCIO, no al que manda l
       entityId: 'pay-refund',
       data: { amount: 200, reason: 'cliente', method: 'CASH', source: 'TPV' },
     })
-    expect(restockOrderItems).toHaveBeenCalledWith(expect.objectContaining({ staffId: 'staff-autenticado' }))
+    expect(prismaMock.inventoryPosting.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ payloadSnapshot: expect.objectContaining({ staffId: 'staff-autenticado' }) }) }),
+    )
+    expect(applyCustomerReturnPosting).toHaveBeenCalledWith('posting-default', 'staff-autenticado')
   })
 
   it('🔴 ignora el shiftId del cuerpo y resuelve el turno abierto del negocio', async () => {

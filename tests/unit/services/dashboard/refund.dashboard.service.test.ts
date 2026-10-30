@@ -1366,6 +1366,8 @@ describe('refund.dashboard.service', () => {
       // `clearAllMocks` NO vacía las colas de `mockResolvedValueOnce` (ver el describe de turno ~:757).
       prismaMock.$queryRaw.mockReset()
       prismaMock.orderItem.findMany.mockReset()
+      // Lo que la devolución lee después (lo que falta por reponer, 28-oct): sin renglones, salvo que la prueba diga otra cosa.
+      prismaMock.orderItem.findMany.mockResolvedValue([])
       prismaMock.payment.create.mockResolvedValue({ id: 'refund-articulos-1' })
       prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as never)
     })
@@ -1685,11 +1687,15 @@ describe('refund.dashboard.service', () => {
       // `clearAllMocks` NO vacía las colas de `mockResolvedValueOnce` ni las implementaciones.
       prismaMock.$queryRaw.mockReset()
       prismaMock.orderItem.findMany.mockReset()
+      // Lo que la devolución lee después (lo que falta por reponer, 28-oct): sin renglones, salvo que la prueba diga otra cosa.
+      prismaMock.orderItem.findMany.mockResolvedValue([])
       prismaMock.payment.create.mockResolvedValue({ id: 'refund-neto-1' })
       prismaMock.shift.updateMany.mockResolvedValue({ count: 1 } as never)
     })
     afterEach(() => {
       prismaMock.orderItem.findMany.mockReset()
+      // Lo que la devolución lee después (lo que falta por reponer, 28-oct): sin renglones, salvo que la prueba diga otra cosa.
+      prismaMock.orderItem.findMany.mockResolvedValue([])
       prismaMock.orderItem.findMany.mockResolvedValue([])
     })
 
