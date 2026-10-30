@@ -5204,6 +5204,10 @@ export async function payGiftCardBalanceOnOrder(
   // Q91 (0): una llave con un rechazo definitivo sellado responde ESE rechazo, sin leer la base.
   const sellado = rechazoSellado(venueId, input.idempotencyKey)
   if (sellado) throw sellado
+  // Rappi 2b (T7): un cobro NUEVO con saldo no cobra un pedido de Rappi en efectivo, ANTES de buscar o tocar ninguna tarjeta
+  // (unión con develop: la 1b buscaba el sobre primero y un código inexistente salía 404 en vez del 409 de Rappi).
+  const deRappi = await prisma.order.findFirst({ where: { id: orderId, venueId }, select: { thirdPartyCashDue: true } })
+  if (deRappi) rechazarAccionDeCobroSobreRappiEnEfectivo(deRappi)
   // (1) El sobre que la prueba nombra, SIN validarla: la salida por llave compara contra él. Un kind desconocido es 400 aquí.
   const sobreId = await sobreDeLaPrueba(venueId, input.proof)
   if (!sobreId) throw tarjetaNoEncontrada()
@@ -5217,12 +5221,9 @@ export async function payGiftCardBalanceOnOrder(
       tableId: true,
       areaTicketCheckoutSession: { select: { id: true } },
       customer: { select: { id: true, firstName: true, lastName: true } },
-      thirdPartyCashDue: true,
     },
   })
   if (!order) throw new NotFoundError('Order not found')
-  // Rappi 2b (T7): un cobro NUEVO con saldo no cobra un pedido de Rappi en efectivo (antes de buscar o tocar ninguna tarjeta).
-  rechazarAccionDeCobroSobreRappiEnEfectivo(order)
   if (order.areaTicketCheckoutSession) {
     throw new GiftCardError(
       'GIFT_CARD_TENDER_NOT_ALLOWED',
