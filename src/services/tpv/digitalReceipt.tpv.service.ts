@@ -2,6 +2,7 @@ import prisma from '../../utils/prismaClient'
 import logger from '../../config/logger'
 import { DigitalReceipt, ReceiptStatus } from '@prisma/client'
 import { contarCobrosDeVenta, ticketTotals, type TicketTotals } from '../shared/ticketTotals'
+import { copiaGuardada, type LineasDelTicket } from '../shared/lineasDelTicket'
 import { reciboCanonicoDelPago } from '../shared/reciboCanonico'
 
 /**
@@ -79,6 +80,8 @@ interface ReceiptDataSnapshot {
    * venta lo tuvo). Ausente en recibos viejos.
    */
   ticketTotals?: TicketTotals | null
+  /** D1 «fotocopia del ticket»: los renglones que imprimió el cobro de esta parte (de `processorData`; ausente sin copia). */
+  lineasDelTicket?: LineasDelTicket
   // Receipt metadata
   receiptInfo: {
     generatedAt: string
@@ -276,6 +279,8 @@ export async function generateDigitalReceipt(paymentId: string): Promise<Digital
           order: paymentData.order,
           cobrosDeVenta: await contarCobrosDeVenta(tx, paymentData.orderId),
         }),
+        // D1 «fotocopia del ticket»: también aquí, porque la recuperación de `getReceiptForPayment` usa este generador (Codex plan r2 #3).
+        lineasDelTicket: copiaGuardada(paymentData.processorData) ?? undefined,
         receiptInfo: {
           generatedAt: new Date().toISOString(),
           currency: paymentData.venue.currency || 'MXN',
