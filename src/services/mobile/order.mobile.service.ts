@@ -5632,6 +5632,8 @@ function huellaDeVentaConSaldo(venta: CreateOrderInput, giftCardId: string, mont
     discount: venta.discount ?? 0,
     // Unión con develop: el descuento de catálogo de la cuenta cambia lo que la venta debe (otro cuerpo, otra huella).
     orderDiscountId: venta.orderDiscountId ?? null,
+    // Codex unión r1 #2: «Pagar después» decide si lo que falta es deuda del cliente.
+    payLater: venta.payLater ?? null,
     giftCardId,
     amount: monto.toFixed(2),
     tip: propina.toFixed(2),

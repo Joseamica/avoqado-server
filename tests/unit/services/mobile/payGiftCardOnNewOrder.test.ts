@@ -338,6 +338,17 @@ describe('payGiftCardOnNewOrder', () => {
       expect(prismaMock.order.create).not.toHaveBeenCalled()
     })
 
+    // Codex unión r1 #2: «Pagar después» decide si el resto es deuda del cliente; la misma llave con otra decisión es otro cuerpo.
+    it('🔴 unión: el mismo cuerpo con otro «Pagar después» ⇒ 409 IDEMPOTENCY_KEY_REUSED', async () => {
+      const huella = await huellaDe({ payLater: false })
+      ganadoraConHuella(huella)
+      await expect(payGiftCardOnNewOrder('venue-1', venta({ payLater: true }))).rejects.toMatchObject({
+        code: 'IDEMPOTENCY_KEY_REUSED',
+        statusCode: 409,
+      })
+      expect(prismaMock.order.create).not.toHaveBeenCalled()
+    })
+
     it('la huella NO lleva quién lo empezó ni quién vende (Q110): el reenvío de otra sesión es el mismo cuerpo', async () => {
       const huella = await huellaDe()
       ganadoraConHuella(huella)
