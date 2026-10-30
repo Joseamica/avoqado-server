@@ -86,7 +86,7 @@ export function decideCheckIn(status: ReservationStatus | string): 'TRANSITION' 
 
 type StatusLogEntry = { status: string; at: string; by: string | null; source?: string; reason?: string }
 
-function actorLabel(actor: CheckInActor): string {
+export function actorLabel(actor: CheckInActor): string {
   return actor.type === 'HUMAN' ? actor.staffId : `service:${actor.servicePrincipalId}`
 }
 
@@ -362,6 +362,12 @@ export async function undoCheckIn(tx: Prisma.TransactionClient, cmd: UndoCheckIn
     )
   }
 
+  // 🔴 D4: una llegada que corrigió un «No asistió» ya re-descontó la clase. Si volviera a CONFIRMED, una cancelación o
+  // un nuevo «No asistió» la devolvería otra vez. Aquí, y no en una ruta: lo comparten panel, POS, MCP y pases.
+  if (await tx.reservationNoShowCorrection.findUnique({ where: { reservationId: cmd.reservationId }, select: { id: true } })) {
+    throw new ConflictError('Esta llegada corrigió un “No asistió”; no se puede deshacer el check-in.', CHECK_IN_UNDO_NOT_APPLICABLE)
+  }
+
   // 🔴 Dinero primero: si la orden del check-in ya cobró, esto no se deshace.
   const orders = await tx.order.findMany({
     where: { reservationId: cmd.reservationId, venueId: cmd.venueId },
@@ -391,9 +397,10 @@ export async function undoCheckIn(tx: Prisma.TransactionClient, cmd: UndoCheckIn
     { status: target, at: cmd.now.toISOString(), by: actorLabel(cmd.actor), source: cmd.source, reason: cmd.reason },
   ]
 
-  // CAS: sólo gana quien todavía la encuentre en CHECKED_IN.
+  // CAS: sólo gana quien todavía la encuentre en CHECKED_IN y SIN corrección de «No asistió» (red por si la corrección
+  // se confirmó entre el chequeo de arriba y aquí).
   const cas = await tx.reservation.updateMany({
-    where: { id: cmd.reservationId, venueId: cmd.venueId, status: 'CHECKED_IN' },
+    where: { id: cmd.reservationId, venueId: cmd.venueId, status: 'CHECKED_IN', noShowCorrection: { is: null } },
     data: { status: target, checkedInAt: null, statusLog: statusLog as unknown as Prisma.InputJsonValue },
   })
   if (cas.count === 0) {

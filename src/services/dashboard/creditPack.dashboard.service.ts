@@ -404,10 +404,13 @@ export async function redeemItemManually(venueId: string, balanceId: string, sta
   }
 
   return prisma.$transaction(async tx => {
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
+    // The check above ran outside the transaction: decrement only if the row STILL has a credit, so a
+    // concurrent consumer can never drive the balance to −1.
+    const { count } = await tx.creditItemBalance.updateMany({
+      where: { id: balanceId, remainingQuantity: { gte: 1 } },
       data: { remainingQuantity: { decrement: 1 } },
     })
+    if (count === 0) throw new BadRequestError('No hay creditos disponibles para canjear')
 
     const transaction = await tx.creditTransaction.create({
       data: {
@@ -463,10 +466,23 @@ export async function adjustItemBalance(venueId: string, balanceId: string, quan
   }
 
   return prisma.$transaction(async tx => {
-    await tx.creditItemBalance.update({
-      where: { id: balanceId },
-      data: { remainingQuantity: { increment: quantity } },
-    })
+    if (quantity < 0) {
+      // A negative adjustment is a decrement: conditional on the balance it needs, like every other consumer.
+      const { count } = await tx.creditItemBalance.updateMany({
+        where: { id: balanceId, remainingQuantity: { gte: -quantity } },
+        data: { remainingQuantity: { increment: quantity } },
+      })
+      if (count === 0) {
+        const now = await tx.creditItemBalance.findUnique({ where: { id: balanceId }, select: { remainingQuantity: true } })
+        const resulting = (now?.remainingQuantity ?? 0) + quantity
+        throw new BadRequestError(`El ajuste dejaria el balance en ${resulting}, no se permite balance negativo`)
+      }
+    } else {
+      await tx.creditItemBalance.update({
+        where: { id: balanceId },
+        data: { remainingQuantity: { increment: quantity } },
+      })
+    }
 
     const transaction = await tx.creditTransaction.create({
       data: {

@@ -10727,6 +10727,10 @@ enum NotificationType {
 
   // Report notifications
   DAILY_SALES_SUMMARY // Nightly sales summary email
+  /// D4: resumen por clase de quiénes quedaron «No asistió», con su liga a «Sí llegó».
+  RESERVATION_NO_SHOW_SUMMARY
+  /// D4: una corrección de «No asistió» dejó algo para una persona (clase sin pagar, multa cobrada, llegada del kiosco).
+  RESERVATION_NEEDS_REVIEW
 
   // KYC notifications (Superadmin)
   NEW_KYC_SUBMISSION // New venue submitted KYC documents
@@ -14675,6 +14679,9 @@ model Reservation {
   aggregatorBooking AggregatorBooking?
   aggregatorVisits  AggregatorVisit[]
 
+  // D4: la corrección de un «No asistió» («Sí llegó»). A lo más una por reserva.
+  noShowCorrection ReservationNoShowCorrection?
+
   @@unique([venueId, confirmationCode])
   @@index([venueId, status, startsAt])
   @@index([venueId, startsAt, endsAt])
@@ -14713,6 +14720,28 @@ model ReservationReminderSent {
   @@unique([reservationId, offsetMinutes, channel])
   @@index([reservationId])
   @@index([sentAt])
+}
+
+// D4 — «Sí llegó»: la corrección de un «No asistió». Una por reserva (`reservationId` único = la idempotencia en la base).
+// Es a la vez el rastro de qué se revirtió (`plan`), el pendiente para una persona (`pending` + «Marcar resuelto») y la
+// bandeja de salida de los avisos (`noticeSentAt` null = falta avisar). La escribe sólo `undoNoShow.service.ts`.
+model ReservationNoShowCorrection {
+  id                String      @id @default(cuid())
+  venueId           String
+  reservationId     String      @unique
+  source            String // DASHBOARD | POS_ANDROID | POS_IOS | KIOSK | MCP
+  actorStaffId      String? // Staff.id; null si fue el kiosco
+  plan              Json // UndoNoShowPlan aplicado
+  pending           String[]
+  noticeSentAt      DateTime?
+  resolvedAt        DateTime?
+  resolvedByStaffId String?
+  resolvedNote      String?
+  createdAt         DateTime    @default(now())
+  reservation       Reservation @relation(fields: [reservationId], references: [id], onDelete: Cascade)
+
+  @@index([venueId, noticeSentAt])
+  @@index([venueId, resolvedAt])
 }
 
 model ReservationModifier {

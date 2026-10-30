@@ -155,7 +155,9 @@ const reservationCheckInBody = z
 /**
  * POST /api/v1/mobile/venues/:venueId/kiosk/reservations/:reservationId/check-in  (0.e)
  *
- * body opcional `{ closesAt, msBeforeClose }` → `{ reservationId, orderId }`.
+ * body opcional `{ closesAt, msBeforeClose }` → `{ reservationId, orderId, correction? }`.
+ * `correction: { id, pending }` (D4, opcional): el SERVIDOR corrigió un «No asistió» con este toque, o la reserva ya
+ * tiene esa corrección sin resolver (repetición). Las apps viejas lo ignoran.
  * 422 CHECK_IN_OUTSIDE_WINDOW · 422 CHECK_IN_TOO_OLD · 409 RESERVATION_NOT_CHECKINABLE.
  */
 export async function kioskReservationCheckIn(req: Request, res: Response, next: NextFunction) {

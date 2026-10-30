@@ -120,6 +120,10 @@ const createMockCustomer = (overrides: Record<string, any> = {}) => ({
 describe('Credit Pack Dashboard Service', () => {
   beforeEach(() => {
     jest.clearAllMocks()
+    // Descuentos condicionados al saldo (D4, Task 0): por default la fila sí tenía saldo.
+    prismaMock.creditItemBalance.updateMany.mockResolvedValue({ count: 1 } as any)
+    // clearAllMocks no vacía la fila de mockResolvedValueOnce: sin esto, una relectura que una prueba no consumió se le cuela a la siguiente.
+    prismaMock.creditItemBalance.findUnique.mockReset()
   })
 
   // ==========================================
@@ -855,11 +859,12 @@ describe('Credit Pack Dashboard Service', () => {
 
       expect(result).toEqual(mockTransaction)
 
-      // Should decrement balance by 1
-      expect(prismaMock.creditItemBalance.update).toHaveBeenCalledWith({
-        where: { id: 'balance-123' },
+      // Should decrement balance by 1 — sólo si la fila TODAVÍA tiene saldo (D4, Task 0)
+      expect(prismaMock.creditItemBalance.updateMany).toHaveBeenCalledWith({
+        where: { id: 'balance-123', remainingQuantity: { gte: 1 } },
         data: { remainingQuantity: { decrement: 1 } },
       })
+      expect(prismaMock.creditItemBalance.update).not.toHaveBeenCalled()
 
       // Should create REDEEM transaction
       expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({
@@ -947,6 +952,29 @@ describe('Credit Pack Dashboard Service', () => {
 
       await expect(redeemItemManually('venue-123', 'balance-123', 'staff-123')).rejects.toThrow(BadRequestError)
       await expect(redeemItemManually('venue-123', 'balance-123', 'staff-123')).rejects.toThrow('No hay creditos disponibles para canjear')
+    })
+
+    it('si otro consumidor se llevó la última clase entre la lectura y la escritura, falla con el error de saldo y no escribe nada', async () => {
+      const mockBalance = createMockBalance({
+        remainingQuantity: 1, // lo que vio la lectura de afuera
+        creditPackPurchase: {
+          id: 'purchase-123',
+          venueId: 'venue-123',
+          customerId: 'customer-123',
+          status: CreditPurchaseStatus.ACTIVE,
+          expiresAt: FUTURE_EXPIRES_AT,
+        },
+      })
+      prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
+      // Para cuando escribe, la fila ya está en 0: la condición no la encuentra.
+      prismaMock.creditItemBalance.updateMany.mockResolvedValue({ count: 0 } as any)
+
+      await expect(redeemItemManually('venue-123', 'balance-123', 'staff-123')).rejects.toThrow(
+        new BadRequestError('No hay creditos disponibles para canjear'),
+      )
+      expect(prismaMock.creditItemBalance.update).not.toHaveBeenCalled()
+      expect(prismaMock.creditTransaction.create).not.toHaveBeenCalled()
+      expect(prismaMock.creditPackPurchase.update).not.toHaveBeenCalled()
     })
 
     it('should mark purchase as EXHAUSTED when all balances reach 0', async () => {
@@ -1102,10 +1130,12 @@ describe('Credit Pack Dashboard Service', () => {
 
       expect(result).toEqual(mockTransaction)
 
-      expect(prismaMock.creditItemBalance.update).toHaveBeenCalledWith({
-        where: { id: 'balance-123' },
+      // Ajuste negativo = descuento: condicionado a que la fila TODAVÍA tenga saldo (D4, Task 0)
+      expect(prismaMock.creditItemBalance.updateMany).toHaveBeenCalledWith({
+        where: { id: 'balance-123', remainingQuantity: { gte: 2 } },
         data: { remainingQuantity: { increment: -2 } },
       })
+      expect(prismaMock.creditItemBalance.update).not.toHaveBeenCalled()
 
       expect(prismaMock.creditTransaction.create).toHaveBeenCalledWith({
         data: expect.objectContaining({
@@ -1123,6 +1153,46 @@ describe('Credit Pack Dashboard Service', () => {
       await expect(adjustItemBalance('venue-123', 'nonexistent', 1, 'reason', 'staff-123')).rejects.toThrow(
         'Balance de credito no encontrado',
       )
+    })
+
+    it('ajuste negativo: si otro consumidor bajó el saldo entre la lectura y la escritura, falla con el error de saldo y no escribe', async () => {
+      const mockBalance = createMockBalance({
+        remainingQuantity: 1, // lo que vio la lectura de afuera
+        creditPackPurchase: {
+          id: 'purchase-123',
+          venueId: 'venue-123',
+          customerId: 'customer-123',
+          status: CreditPurchaseStatus.ACTIVE,
+        },
+      })
+      prismaMock.creditItemBalance.findUnique
+        .mockResolvedValueOnce(mockBalance)
+        // relectura dentro de la transacción, ya con el saldo que dejó el otro
+        .mockResolvedValueOnce({ remainingQuantity: 0 } as any)
+      prismaMock.creditItemBalance.updateMany.mockResolvedValue({ count: 0 } as any)
+
+      await expect(adjustItemBalance('venue-123', 'balance-123', -1, 'Correccion', 'staff-123')).rejects.toThrow(
+        new BadRequestError('El ajuste dejaria el balance en -1, no se permite balance negativo'),
+      )
+      expect(prismaMock.creditItemBalance.update).not.toHaveBeenCalled()
+      expect(prismaMock.creditTransaction.create).not.toHaveBeenCalled()
+    })
+
+    it('ajuste positivo: igual que hoy (sin condición de saldo)', async () => {
+      const mockBalance = createMockBalance({
+        remainingQuantity: 0,
+        creditPackPurchase: { id: 'purchase-123', venueId: 'venue-123', customerId: 'customer-123', status: CreditPurchaseStatus.ACTIVE },
+      })
+      prismaMock.creditItemBalance.findUnique.mockResolvedValue(mockBalance)
+      prismaMock.creditTransaction.create.mockResolvedValue(createMockTransaction({ type: 'ADJUST', quantity: 2 }))
+
+      await adjustItemBalance('venue-123', 'balance-123', 2, 'Cortesia', 'staff-123')
+
+      expect(prismaMock.creditItemBalance.update).toHaveBeenCalledWith({
+        where: { id: 'balance-123' },
+        data: { remainingQuantity: { increment: 2 } },
+      })
+      expect(prismaMock.creditItemBalance.updateMany).not.toHaveBeenCalled()
     })
 
     it('should throw BadRequestError if adjustment would make balance negative', async () => {
