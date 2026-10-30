@@ -2,7 +2,9 @@ import { Request, Response } from 'express'
 import { z } from 'zod'
 import * as notificationService from '../../services/dashboard/notification.dashboard.service'
 import { NotificationType, NotificationPriority, NotificationChannel } from '@prisma/client'
-import { BadRequestError } from '../../errors/AppError'
+import { BadRequestError, ForbiddenError } from '../../errors/AppError'
+import prisma from '../../utils/prismaClient'
+import { resolveRequestVenueId } from '../../middlewares/checkPermission.middleware'
 import asyncHandler from '../../utils/asyncHandler'
 import { AuthContext } from '../../security'
 
@@ -87,11 +89,36 @@ const bulkNotificationSchema = z.object({
 // ===== CONTROLLER FUNCTIONS =====
 
 /**
+ * Un aviso que manda una PERSONA (no el sistema) sólo es para la gente de su negocio (hz:f26b3afc:D1). `checkPermission`
+ * validó el permiso en el negocio de la petición (URL → encabezado → token); antes cualquier id de la plataforma pasaba y
+ * le llegaba aviso, y push, al personal de otro negocio. Aquí: el negocio del cuerpo, si viene, es ése, y cada destinatario
+ * trabaja en él (o en su organización). Un SUPERADMIN manda avisos de la plataforma a quien sea.
+ */
+async function asegurarAvisoDeMiNegocio(req: AuthenticatedRequest, recipientIds: string[], venueIdDelCuerpo?: string) {
+  if (req.authContext?.role === 'SUPERADMIN') return
+  const venueId = resolveRequestVenueId(req, req.authContext ?? {})
+  if (!venueId || (venueIdDelCuerpo && venueIdDelCuerpo !== venueId)) throw new ForbiddenError('Sólo puedes mandar avisos de tu negocio')
+  const ids = [...new Set(recipientIds)]
+  const venue = await prisma.venue.findUnique({ where: { id: venueId }, select: { organizationId: true } })
+  const deMiNegocio = await prisma.staff.count({
+    where: {
+      id: { in: ids },
+      OR: [
+        { venues: { some: { venueId, active: true } } },
+        ...(venue ? [{ organizations: { some: { organizationId: venue.organizationId, isActive: true, leftAt: null } } }] : []),
+      ],
+    },
+  })
+  if (deMiNegocio !== ids.length) throw new ForbiddenError('Sólo puedes mandar avisos a personas de tu negocio')
+}
+
+/**
  * Create a new notification
  * POST /api/v1/dashboard/notifications
  */
 export const createNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const validatedData = createNotificationSchema.parse(req.body)
+  await asegurarAvisoDeMiNegocio(req, [validatedData.recipientId], validatedData.venueId)
 
   const notification = await notificationService.createNotification(validatedData)
 
@@ -272,6 +299,7 @@ export const updatePreferencesBulk = asyncHandler(async (req: AuthenticatedReque
  */
 export const sendBulkNotification = asyncHandler(async (req: AuthenticatedRequest, res: Response) => {
   const validatedData = bulkNotificationSchema.parse(req.body)
+  await asegurarAvisoDeMiNegocio(req, validatedData.recipientIds, validatedData.venueId)
 
   const notifications = await notificationService.sendBulkNotification(validatedData.recipientIds, {
     venueId: validatedData.venueId,

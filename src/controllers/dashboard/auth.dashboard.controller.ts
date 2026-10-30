@@ -27,7 +27,8 @@ import {
   olvidarCorteEnCache,
 } from '../../utils/passwordChangeGuard'
 import { revokeSession } from '@/services/auth/session.service'
-import { invalidateSession } from '@/services/auth/sessionCache'
+import { invalidateSession, isSessionAliveCached } from '@/services/auth/sessionCache'
+import { faseDelRolloutLegacy } from '@/middlewares/authenticateToken.middleware'
 import socketManager from '@/communication/sockets/managers/socketManager'
 import { MASTER_ADMIN_PRINCIPAL_ID } from '@/lib/authPrincipals'
 import { zonaValida } from '@/utils/datetime'
@@ -149,6 +150,16 @@ export const getAuthStatus = async (req: Request, res: Response) => {
         user: null,
         message: mensajeDeCorte(motivoDelCorte),
       })
+    }
+
+    // 🔴 hz:f26b3afc:D2: la misma revisión de SESIÓN que `authenticateTokenMiddleware`. Sin esto, al cerrar a la fuerza
+    // una sesión (o en la fase 4 de los tokens sin `sid`) los datos daban 401 y esta ruta decía `authenticated: true`:
+    // el panel iba del login al inicio y de regreso, en ciclo.
+    const sesionCerrada = decoded.sid ? !(await isSessionAliveCached(decoded.sid)) : faseDelRolloutLegacy() >= 4
+    if (sesionCerrada) {
+      logger.info('[AUTH] 📊 Session closed - returning unauthenticated', { conSid: !!decoded.sid })
+      res.clearCookie('accessToken')
+      return res.status(200).json({ authenticated: false, user: null, message: 'Sesión cerrada. Inicia sesión de nuevo.' })
     }
 
     // 🔴 H0 (28-oct): el alta ya se termina sin el navegador (el cobro, el aviso de Stripe o el barrido). Quien vuelve con la
