@@ -1141,7 +1141,10 @@ export async function buildOrderItemsData(
       const baseAjustadaCents = lineaAjustadaCents + Math.round(modifierTotal * 100) * item.quantity
       lineDiscount = calculateDiscountCents(appliedDiscount, baseAjustadaCents) / 100
     } else if (appliedDiscount) {
-      lineDiscount = calculateDiscountPesos(appliedDiscount, itemTotal)
+      // «El centavo» (30-oct): también sin ajuste, el monto en centavos enteros como las apps ($21.35 al 10 %: 2.14, no 2.13);
+      // en pesos flotantes una venta sin red de tres renglones así quedaba PARCIAL. El mínimo de compra se sigue exigiendo.
+      calculateDiscountPesos(appliedDiscount, itemTotal) // sólo para que lance si no llega al mínimo
+      lineDiscount = calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100
     }
     const discountAmount = ajuste > 0 ? roundPesos(ajuste + lineDiscount) : lineDiscount
     itemDiscountTotal += discountAmount
@@ -1190,7 +1193,9 @@ export async function buildOrderItemsData(
     if (appliedDiscount) {
       validateDiscountScopeForItem(appliedDiscount, { productId: null, categoryId: null })
     }
-    const lineDiscount = appliedDiscount ? calculateDiscountPesos(appliedDiscount, itemTotal) : 0
+    // «El centavo» (30-oct): en centavos enteros como las apps; el mínimo de compra se sigue exigiendo.
+    if (appliedDiscount) calculateDiscountPesos(appliedDiscount, itemTotal)
+    const lineDiscount = appliedDiscount ? calculateDiscountCents(appliedDiscount, Math.round(itemTotal * 100)) / 100 : 0
     itemDiscountTotal += lineDiscount
 
     return {
