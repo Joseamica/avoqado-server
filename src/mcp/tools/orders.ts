@@ -22,6 +22,7 @@ import {
 } from '@/services/mobile/cortesia-pendiente.public'
 import { auditMcpWrite } from '../audit'
 import { requireWriteScopeAlways } from '../requireWriteScopeAlways'
+import { motivoDeCancelacionSchema } from '@/schemas/dashboard/order.schema'
 import { avisarBeneficiosCortesiaPendiente } from '@/services/mobile/cortesia-pendiente-notice.mobile.service'
 
 const num = (d: { toString(): string } | null): number => (d == null ? 0 : Number(d))
@@ -95,7 +96,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
     {
       venueId: z.string().describe('Venue de la cuenta (debe estar en tu scope)'),
       orderId: z.string().describe('Id de la cuenta (el de find_order u open_orders)'),
-      reason: z.string().trim().min(3).max(300).describe('Motivo de la cancelación; queda en la bitácora'),
+      reason: motivoDeCancelacionSchema.describe('Motivo de la cancelación; queda en la bitácora'),
       confirm: z.boolean().optional().describe('true para cancelar de verdad, sólo tras la autorización del usuario'),
     },
     async ({ venueId, orderId, reason, confirm }) => {
@@ -129,13 +130,7 @@ export function registerOrderTools(server: McpServer, scope: McpScope) {
         if (error instanceof AppError) return text({ ok: false, error: error.message, ...(error.code ? { code: error.code } : {}) })
         throw error
       }
-      await auditMcpWrite(scope, {
-        action: 'ORDER_CANCELLED_VIA_MCP',
-        entity: 'Order',
-        entityId: orderId,
-        venueId,
-        data: { cuenta: order.orderNumber, reason },
-      })
+      // Sin `auditMcpWrite`: la cancelación ya deja UNA entrada (`ORDER_CANCELLED`, con autor y motivo; Codex código r1 #2).
       return text({ ok: true, cuenta: order.orderNumber, status: 'CANCELLED' })
     },
   )

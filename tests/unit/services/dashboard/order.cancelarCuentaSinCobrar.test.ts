@@ -21,7 +21,9 @@ const { logAction } = require('@/services/dashboard/activity-log.service')
 const VENUE = 'venue-1'
 const ORDER = 'order-1'
 
-function cuenta(datos: { tableId?: string | null; onlineOrder?: { id: string } | null; status?: string; paymentStatus?: string } = {}) {
+function cuenta(
+  datos: { tableId?: string | null; mesaBajoCandado?: string | null; onlineOrder?: { id: string } | null; status?: string; paymentStatus?: string } = {},
+) {
   prismaMock.order.findFirst.mockResolvedValue({
     id: ORDER,
     tableId: datos.tableId ?? null,
@@ -36,6 +38,7 @@ function cuenta(datos: { tableId?: string | null; onlineOrder?: { id: string } |
     version: 3,
     paidAmount: 0,
     tipAmount: 0,
+    tableId: datos.mesaBajoCandado ?? datos.tableId ?? null,
   } as any)
 }
 
@@ -77,6 +80,17 @@ describe('cancelarCuentaSinCobrar — el panel cancela una cuenta sin cobrar', (
 
   it('🔴 una cuenta de MESA no se cancela desde el panel: se anula en el POS', async () => {
     cuenta({ tableId: 'mesa-7' })
+
+    await expect(cancelarCuentaSinCobrar(VENUE, ORDER, 'error', 'staff-1')).rejects.toMatchObject({
+      statusCode: 400,
+      code: 'ORDER_IS_TABLE',
+    })
+    expect(prismaMock.order.update).not.toHaveBeenCalled()
+    expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('🔴 «Mover» le liga una mesa entre la lectura previa y el candado: bajo el candado se rechaza (Codex código r1 #1)', async () => {
+    cuenta({ tableId: null, mesaBajoCandado: 'mesa-7' })
 
     await expect(cancelarCuentaSinCobrar(VENUE, ORDER, 'error', 'staff-1')).rejects.toMatchObject({
       statusCode: 400,
@@ -133,7 +147,7 @@ describe('CancelarCuentaSinCobrarSchema — el motivo es obligatorio', () => {
     expect(r.data.body.reason).toBe('Cuenta duplicada')
   })
 
-  it.each([[{}], [{ reason: '' }], [{ reason: '  a  ' }], [{ reason: 'x'.repeat(301) }]])('rechaza %j', body => {
+  it.each([[{}], [{ reason: '' }], [{ reason: '  a  ' }], [{ reason: 'x'.repeat(301) }], [{ reason: 'error\u0000' }]])('rechaza %j', body => {
     expect(CancelarCuentaSinCobrarSchema.safeParse({ params, body }).success).toBe(false)
   })
 })

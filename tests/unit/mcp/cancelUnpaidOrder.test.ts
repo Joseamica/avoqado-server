@@ -2,7 +2,7 @@
  * MCP de clientes — `cancel_unpaid_order` (Amaena, 30-oct): la misma «Cancelar orden» de Cuentas por cobrar del panel.
  *   · exige mcp:write y el permiso acotado `orders:cancel-unpaid`, con el guardia REAL;
  *   · sin confirm sólo muestra la cuenta (el catálogo ata la confirmación a esa vista previa);
- *   · confirmar llama la función del panel con el autor de la conexión y audita;
+ *   · confirmar llama la función del panel con el autor de la conexión (ella deja la única entrada de bitácora);
  *   · lo que la función rechaza (mesa, en línea, con pagos) vuelve como respuesta, no como caída.
  */
 import { StaffRole } from '@prisma/client'
@@ -86,14 +86,11 @@ describe('MCP cancel_unpaid_order', () => {
     expect(cancelarCuentaSinCobrar).not.toHaveBeenCalled()
   })
 
-  it('con confirm cancela con el autor de la conexión y audita', async () => {
+  it('con confirm cancela con el autor de la conexión; la bitácora la deja la cancelación, UNA vez (Codex código r1 #2)', async () => {
     const r = json(await tool()({ ...entrada, confirm: true }))
     expect(r).toEqual({ ok: true, cuenta: 'ORD-77', status: 'CANCELLED' })
     expect(cancelarCuentaSinCobrar).toHaveBeenCalledWith('venue-1', 'order-1', 'La abrí por error', 'staff-1')
-    expect(auditMcpWrite).toHaveBeenCalledWith(
-      expect.anything(),
-      expect.objectContaining({ action: 'ORDER_CANCELLED_VIA_MCP', entityId: 'order-1', venueId: 'venue-1' }),
-    )
+    expect(auditMcpWrite).not.toHaveBeenCalled()
   })
 
   it('lo que el panel rechaza (una cuenta de mesa) vuelve como respuesta con su código y sin auditoría', async () => {

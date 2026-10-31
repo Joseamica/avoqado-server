@@ -31,7 +31,7 @@ import {
   resolvePaymentShiftReconciliationEnabled,
 } from '../shared/paymentShiftClaim'
 import { countPriorCompletedPayments } from '../shared/priorCompletedPayments'
-import { assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
+import { MENSAJE_CUENTA_DE_MESA, assertOrderCancellableUnderLock, avisarOrdenCancelada } from '../shared/orderCancelGuard'
 // La ÚNICA definición de "qué cuenta como pagado y cuánto se devolvió" — la
 // misma que usan los cuatro canales de cobro, para que la pantalla no pueda
 // contradecir al saldo persistido.
@@ -850,15 +850,15 @@ export async function cancelarCuentaSinCobrar(venueId: string, orderId: string, 
       select: { id: true, tableId: true, onlineOrder: { select: { id: true } } },
     })
     if (!order) throw new NotFoundError('Esta cuenta no existe en este negocio.')
-    if (order.tableId) {
-      throw new BadRequestError('Esta cuenta es de una mesa: anúlala desde el POS, en la mesa («Anular cuenta»).', 'ORDER_IS_TABLE')
-    }
+    // La mesa se vuelve a revisar bajo el candado (`rechazarCuentaDeMesa`): ésta sólo evita tomar candados de más.
+    if (order.tableId) throw new BadRequestError(MENSAJE_CUENTA_DE_MESA, 'ORDER_IS_TABLE')
     if (order.onlineOrder) {
       throw new BadRequestError('Es un pedido en línea: cancélalo desde «Pedidos en línea».', 'ORDER_IS_ONLINE')
     }
     return cancelOrderInTransaction(tx, venueId, orderId, undefined, staffId, undefined, {
       contarPagosRegistrados: true,
       rechazarYaCancelada: true,
+      rechazarCuentaDeMesa: true,
       mensajeConDinero: 'Esta cuenta tiene pagos registrados. Reembólsalos antes de cancelarla.',
     })
   }, ORDER_LOCK_WAIT_BUDGET)
