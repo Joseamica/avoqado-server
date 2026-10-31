@@ -20536,6 +20536,9 @@ model DocumentRequestVenueLink {
 model PlatformAccess {
   id          String   @id @default(cuid())
   email       String   @unique // siempre en minúsculas
+  // The ONE Staff that holds this row, claimed on first use by a verified person with this email: a recycled or
+  // changed email never inherits the keys. Plain id like the other CRM actor columns (no FK).
+  staffId     String?  @unique
   verScope    String? // 'propios' | 'todos' | null (sin crm:ver)
   editarScope String? // 'propios' | 'todos' | null (sin crm:editar)
   contactar   Boolean  @default(false)
@@ -20700,6 +20703,7 @@ model CrmInboundEntry {
   lastError        String?
 
   @@index([appliedAt])
+  @@index([accountId]) // deleting an account sets it null here: without it, every delete scans the table
 }
 
 /// El aviso diario de cada persona: se APARTA antes de mandarlo (la llave única impide mandarlo dos veces) y guarda el

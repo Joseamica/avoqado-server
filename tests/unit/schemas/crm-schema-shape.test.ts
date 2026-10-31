@@ -41,6 +41,8 @@ describe('CRM propio — forma del esquema', () => {
 
   it('las demás llaves únicas de las que dependen el alta de llaves, los catálogos, el barrido y el aviso diario', () => {
     expect(campo('PlatformAccess', 'email')?.isUnique).toBe(true)
+    // Ruling 10: a key row is claimed by ONE Staff, so a recycled or changed email never inherits it.
+    expect(campo('PlatformAccess', 'staffId')).toMatchObject({ isUnique: true, isRequired: false })
     expect(campo('CrmStage', 'name')?.isUnique).toBe(true)
     expect(campo('CrmLostReason', 'name')?.isUnique).toBe(true)
     expect(campo('CrmTimelineEvent', 'sourceKey')).toMatchObject({ isUnique: true, isRequired: false })

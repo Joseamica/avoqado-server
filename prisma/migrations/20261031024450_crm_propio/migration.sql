@@ -2,11 +2,14 @@
 -- Generada con `prisma migrate dev --create-only` contra una base desechable; se quitaron a mano 5 sentencias de
 -- deriva que ya existían entre el historial y el esquema de develop (Customer_tags_gin_idx, BirthdayAutomation,
 -- PaymentEffect, VenueFeature y el nombre recortado de DocumentRequestDelivery): no son de este cambio.
+-- Editada a mano antes de aplicarse en ningún lado (tarea 3, rulings 7 y 10): PlatformAccess.staffId único y el
+-- índice de CrmInboundEntry.accountId.
 
 -- CreateTable
 CREATE TABLE "PlatformAccess" (
     "id" TEXT NOT NULL,
     "email" TEXT NOT NULL,
+    "staffId" TEXT,
     "verScope" TEXT,
     "editarScope" TEXT,
     "contactar" BOOLEAN NOT NULL DEFAULT false,
@@ -163,6 +166,9 @@ CREATE TABLE "CrmDigestSend" (
 CREATE UNIQUE INDEX "PlatformAccess_email_key" ON "PlatformAccess"("email");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "PlatformAccess_staffId_key" ON "PlatformAccess"("staffId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "CrmAccount_organizationId_key" ON "CrmAccount"("organizationId");
 
 -- CreateIndex
@@ -206,6 +212,9 @@ CREATE INDEX "CrmTimelineEvent_accountId_createdAt_idx" ON "CrmTimelineEvent"("a
 
 -- CreateIndex
 CREATE INDEX "CrmInboundEntry_appliedAt_idx" ON "CrmInboundEntry"("appliedAt");
+
+-- CreateIndex
+CREATE INDEX "CrmInboundEntry_accountId_idx" ON "CrmInboundEntry"("accountId");
 
 -- CreateIndex
 CREATE UNIQUE INDEX "CrmDigestSend_staffId_day_kind_key" ON "CrmDigestSend"("staffId", "day", "kind");

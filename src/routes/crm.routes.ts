@@ -10,6 +10,8 @@ import * as crmController from '../controllers/crm/crm.controller'
 import { CRM_KEYS } from '../lib/permissions'
 import { authenticateTokenMiddleware } from '../middlewares/authenticateToken.middleware'
 import { requireCrm } from '../middlewares/requireCrm.middleware'
+import { validateRequest } from '../middlewares/validation'
+import { addTeamMemberSchema, listTeamSchema, removeTeamMemberSchema, updateTeamMemberSchema } from '../schemas/crm.schema'
 
 const router = express.Router()
 
@@ -17,5 +19,11 @@ router.use(authenticateTokenMiddleware)
 
 // Any key opens it: 403 only for whoever holds none.
 router.get('/me', requireCrm(CRM_KEYS), crmController.getMe)
+
+// «Equipo de ventas»: who holds which key. The guard goes first, so nobody without `crm:admin` learns anything here.
+router.get('/team', requireCrm('crm:admin'), validateRequest(listTeamSchema), crmController.listTeam)
+router.post('/team', requireCrm('crm:admin'), validateRequest(addTeamMemberSchema), crmController.addTeam)
+router.patch('/team/:id', requireCrm('crm:admin'), validateRequest(updateTeamMemberSchema), crmController.updateTeam)
+router.delete('/team/:id', requireCrm('crm:admin'), validateRequest(removeTeamMemberSchema), crmController.removeTeam)
 
 export default router

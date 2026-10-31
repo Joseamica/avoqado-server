@@ -1,5 +1,6 @@
 import { Prisma } from '@prisma/client'
 import { ConflictError, NotFoundError } from '@/errors/AppError'
+import { moveOpenAccountsTx } from '@/services/crm/ownership'
 import prisma from '@/utils/prismaClient'
 
 const H1_CONSTRAINT_MARKERS = [
@@ -68,6 +69,10 @@ export async function deleteOrRetainStaffWithH1ProvenanceTx(
        OR EXISTS (SELECT 1 FROM "CatalogBindingBatch" WHERE "staffId" = ${staffId})
        OR EXISTS (SELECT 1 FROM "CatalogPublicationBatch" WHERE "staffId" = ${staffId})
        OR EXISTS (SELECT 1 FROM "InventoryWasteReport" WHERE "reportedByStaffId" = ${staffId})
+       OR EXISTS (SELECT 1 FROM "CrmAccount" WHERE "ownerStaffId" = ${staffId})
+       OR EXISTS (SELECT 1 FROM "CrmActivity" WHERE "assigneeStaffId" = ${staffId} OR "doneById" = ${staffId})
+       OR EXISTS (SELECT 1 FROM "CrmTimelineEvent" WHERE "actorStaffId" = ${staffId})
+       OR EXISTS (SELECT 1 FROM "PlatformAccess" WHERE "createdById" = ${staffId})
     LIMIT 1
   `)
   // These authorities use plain String actor identifiers rather than
@@ -78,6 +83,11 @@ export async function deleteOrRetainStaffWithH1ProvenanceTx(
   await tx.mcpRefreshToken.updateMany({ where: { staffId, revokedAt: null }, data: { revokedAt } })
   await tx.oAuthState.deleteMany({ where: { userId: staffId } })
   await tx.googleOAuthSession.deleteMany({ where: { OR: [{ authUserId: staffId }, { staffId }] } })
+  // CRM keys die with the person — by the email as PlatformAccess stores it and by the row they claimed — so whoever
+  // gets this email next starts with none. Their open accounts go back to «Sin dueño». The CRM columns above count as
+  // provenance, so anyone who owned or did something in the CRM is anonymized, never hard-deleted.
+  await tx.platformAccess.updateMany({ where: { OR: [{ email: staff.email.toLowerCase() }, { staffId }] }, data: { active: false } })
+  await moveOpenAccountsTx(tx, { fromStaffId: staffId, toStaffId: null, actorStaffId: null, reason: 'STAFF_DELETED' })
   if (!provenance.length) {
     // Asignaciones de RH (StaffAssignment.staffId es Restrict): sin provenance la persona se borra entera, y su historial de
     // puestos con ella. UNA sola sentencia: la cadena de versiones (supersedesId, también Restrict) se revisa al final de

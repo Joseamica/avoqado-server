@@ -24,8 +24,10 @@ const response = () => {
   return r
 }
 
-/** A PlatformAccess row with no key at all; each test turns on what it needs. */
+/** A PlatformAccess row with no key at all, already claimed by the seller; each test turns on what it needs. */
 const accessRow = (keys: Record<string, unknown> = {}) => ({
+  id: 'caccessrw0000000000000002',
+  staffId: STAFF_ID,
   verScope: null,
   editarScope: null,
   contactar: false,
