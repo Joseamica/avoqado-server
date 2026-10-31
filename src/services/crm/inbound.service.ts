@@ -19,7 +19,7 @@ import { getInitialStage } from './accounts.service'
 import { notifyNewProspect } from './digest.service'
 import { addEvent } from './timeline.service'
 
-const LANDING = 'LANDING'
+export const LANDING = 'LANDING'
 const MAX_TEXT = 500
 const MAX_LIST = 20
 /** Long enough for any signup to finish: an entry younger than this without an outcome waits for the sweep. */
@@ -162,6 +162,21 @@ interface LandingForm {
 
 const textOf = (value: unknown) => (typeof value === 'string' && value.trim()) || null
 
+/**
+ * Where a landing account came from: the page, the UTMs and the campaign of a form — or of the signup's own mark
+ * (`LANDING_SIGNUP_CREATED`), which the sweep's backfill reads. Empty fields are left out.
+ */
+export function sourceDetailOf(form: Prisma.JsonObject): Prisma.InputJsonObject | undefined {
+  const detail = Object.entries({
+    page: textOf(form.source),
+    utm: form.utm && typeof form.utm === 'object' && !Array.isArray(form.utm) ? form.utm : null,
+    launchCampaignCode: textOf(form.launchCampaignCode),
+    pageUri: textOf(form.pageUri),
+    pageName: textOf(form.pageName),
+  }).filter(([, value]) => value !== null)
+  return detail.length ? (Object.fromEntries(detail) as Prisma.InputJsonObject) : undefined
+}
+
 /** The CRM's reading of a stored form. */
 function readForm(payload: Prisma.JsonValue, email: string): LandingForm {
   const form: Prisma.JsonObject = payload && typeof payload === 'object' && !Array.isArray(payload) ? payload : {}
@@ -171,13 +186,6 @@ function readForm(payload: Prisma.JsonValue, email: string): LandingForm {
   // does not fit the integer column: it stays in the entry.
   const branches = textOf(form.employees)
   const phone = textOf(form.phone)
-  const detail = Object.entries({
-    page: textOf(form.source),
-    utm: form.utm && typeof form.utm === 'object' && !Array.isArray(form.utm) ? form.utm : null,
-    launchCampaignCode: textOf(form.launchCampaignCode),
-    pageUri: textOf(form.pageUri),
-    pageName: textOf(form.pageName),
-  }).filter(([, value]) => value !== null)
   return {
     name,
     qualification: {
@@ -186,7 +194,7 @@ function readForm(payload: Prisma.JsonValue, email: string): LandingForm {
       sucursales: branches && /^\d{1,4}$/.test(branches) ? Number(branches) : null,
       modulos: [...new Set(modules.map(textOf).filter((module): module is string => !!module))].slice(0, MAX_LIST),
     },
-    sourceDetail: detail.length ? (Object.fromEntries(detail) as Prisma.InputJsonObject) : undefined,
+    sourceDetail: sourceDetailOf(form),
     contact: {
       name: [textOf(form.firstName), textOf(form.lastName)].filter(Boolean).join(' ') || name,
       phoneE164: phone ? canonicalPhoneE164(phone) : null,
@@ -205,23 +213,24 @@ function asOutcome(value: Prisma.JsonValue): SignupOutcome | null {
   }
 }
 
+/**
+ * The Organization a person OWNS: their active OWNER membership, the primary one first. One rule for applying an entry
+ * and for the sweep's link (task 6).
+ */
+export const OWNED_ORGANIZATION = {
+  where: { role: OrgRole.OWNER, isActive: true },
+  select: { organization: { select: { id: true, createdAt: true } } },
+  orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }],
+  take: 1,
+} satisfies Prisma.Staff$organizationsArgs
+
 /** The person with that exact email (the login's rule) and the Organization they OWN, if any. */
 type Ownership = { createdAt: Date; hasPassword: boolean; organization: { id: string; createdAt: Date } | null }
 
 async function ownershipOf(email: string): Promise<Ownership | null> {
   const staff = await prisma.staff.findUnique({
     where: { email },
-    select: {
-      active: true,
-      password: true,
-      createdAt: true,
-      organizations: {
-        where: { role: OrgRole.OWNER, isActive: true },
-        select: { organization: { select: { id: true, createdAt: true } } },
-        orderBy: [{ isPrimary: 'desc' }, { joinedAt: 'asc' }],
-        take: 1,
-      },
-    },
+    select: { active: true, password: true, createdAt: true, organizations: OWNED_ORGANIZATION },
   })
   if (!staff?.active) return null
   return { createdAt: staff.createdAt, hasPassword: staff.password !== null, organization: staff.organizations[0]?.organization ?? null }
@@ -245,11 +254,15 @@ function outcomeFromOwnership(owner: Ownership | null, receivedAt: Date): Signup
   }
 }
 
-/** The sales team's own Organization is never anybody's client (ruling 14). */
+/** The sales team's own Organization (ruling 14): never anybody's client. */
+export async function teamOrganizationId(): Promise<string | null> {
+  const team = await prisma.crmTeam.findUnique({ where: { key: 'default' }, select: { organizationId: true } })
+  return team?.organizationId ?? null
+}
+
 async function linkable(organizationId: string | null): Promise<string | null> {
   if (!organizationId) return null
-  const team = await prisma.crmTeam.findUnique({ where: { key: 'default' }, select: { organizationId: true } })
-  return team?.organizationId === organizationId ? null : organizationId
+  return (await teamOrganizationId()) === organizationId ? null : organizationId
 }
 
 function signupBranch(outcome: SignupOutcome | null) {
@@ -270,8 +283,12 @@ function qualificationChanges(current: Qualification, fresh: Qualification) {
   })
 }
 
-/** Links an account that has no Organization yet, unless another account already holds it (one per Organization). */
-async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizationId: string) {
+/**
+ * Links an account that has no Organization yet, unless another account already holds it (one per Organization); true
+ * when it did. 🔴 The caller holds the account's row lock and knows it is still unlinked: `applyTx` and the sweep's link
+ * (task 6) both take it before calling, so the LINKED key goes in with the row already theirs.
+ */
+export async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizationId: string): Promise<boolean> {
   const [holder, organization] = await Promise.all([
     tx.crmAccount.findUnique({ where: { organizationId }, select: { id: true } }),
     tx.organization.findUnique({ where: { id: organizationId }, select: { name: true } }),
@@ -282,7 +299,7 @@ async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizat
       organizationId,
       heldBy: holder?.id ?? null,
     })
-    return
+    return false
   }
   await tx.crmAccount.update({ where: { id: accountId }, data: { organizationId } })
   // Same key as the sweep's link (task 6): an account is linked once, whoever gets there first.
@@ -293,6 +310,7 @@ async function linkTx(tx: Prisma.TransactionClient, accountId: string, organizat
     sourceKey: `link:${accountId}`,
     data: { organizationId, organizationName: organization.name },
   })
+  return true
 }
 
 const customerNote = (tx: Prisma.TransactionClient, accountId: string, entryId: string) =>

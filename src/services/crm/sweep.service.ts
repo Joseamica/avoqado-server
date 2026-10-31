@@ -1,0 +1,385 @@
+/**
+ * The CRM's repair sweep (spec 2026-10-30 §5.3 step 5, plan task 6). Every five minutes it finishes what the landing
+ * capture could not, and fills in what only time brings:
+ *
+ * 1. `applyPending` — every entry not applied yet (a crash, an error, a signup still running), oldest first, through the
+ *    same `applyEntry` the landing calls: every field of the form, one account and one set of events per entry.
+ * 2. `linkLandingAccounts` — a landing account still without an Organization is linked as soon as its email owns one,
+ *    whatever path made the person an owner: the landing, the dashboard signup, an invitation. One LINKED event, no note.
+ * 3. `backfillFromOnboarding` — every landing signup (`LANDING_SIGNUP_CREATED`) without its CRM account gets one, without
+ *    the form's qualification, which old signups never kept.
+ * 4. `fillFirstMoney` — the date a linked account's Organization first got paid for real: the oldest charge of any of its
+ *    venues. Set once; commissions (another project) read it.
+ *
+ * Every pass reads one batch at most, and an item — or a whole pass — that fails never stops the rest: the next sweep
+ * retries it. Each pass's first read is a pure read, retried on a connection blip like every job's
+ * (`.claude/rules/cron-jobs.md`); nothing that writes is.
+ *
+ * Two sweeps at once (an overlap, or a second instance) only repeat work: every write is gated by a unique key (the
+ * entry's and the link's `sourceKey`, the account's source + key) or a compare-and-set (`firstMoneyAt` while empty).
+ */
+import { Prisma, TransactionStatus } from '@prisma/client'
+import logger from '../../config/logger'
+import { PRODUCTION_VENUE_STATUSES } from '../../lib/venueStatus.constants'
+import { canonicalPhoneE164 } from '../../utils/phone'
+import prisma from '../../utils/prismaClient'
+import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
+import { getInitialStage } from './accounts.service'
+import {
+  applyEntry,
+  LANDING,
+  linkTx,
+  OWNED_ORGANIZATION,
+  sourceDetailOf,
+  teamOrganizationId,
+  upsertAccountBySource,
+} from './inbound.service'
+import { addEvent } from './timeline.service'
+
+const BATCH = 200
+const SIGNUP_MARK = 'LANDING_SIGNUP_CREATED'
+/** Signups carry their mark since 18-aug-2026 (commit d0edd355f): nothing older has it, so a pass starts there. */
+const SIGNUPS_MARKED_SINCE = new Date('2026-08-18T00:00:00.000Z')
+/** Once the backfill is caught up, its cursor waits this far behind «now»: longer than any signup takes to commit. */
+const CAUGHT_UP_LAG_MS = 10 * 60_000
+
+/**
+ * Real money (spec §8, Codex plan r1 #1): a charge processed in a real venue. A plan on trial or courtesy charges
+ * nothing, a $0.00 sale moves nothing, and the onboarding's demo venue (TRIAL) comes seeded with sample sales.
+ */
+const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } satisfies Prisma.PaymentWhereInput
+const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES } } satisfies Prisma.VenueWhereInput
+
+type Cursor = { createdAt: Date; id: string }
+
+/**
+ * Where the two paged passes left off. In memory on purpose: the server runs one instance, and a restart only walks the
+ * pages once more — what is already done is skipped.
+ */
+const cursors: { link: Cursor | null; backfill: Cursor | null } = { link: null, backfill: null }
+
+/** The paged passes start over, as after a restart. */
+export function resetSweepCursors(): void {
+  cursors.link = null
+  cursors.backfill = null
+}
+
+const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
+/** The cap is the server's, whatever a caller asks for. */
+const batchOf = (limit: number) => Math.min(Math.max(limit, 1), BATCH)
+const cursorOf = ({ createdAt, id }: Cursor): Cursor => ({ createdAt, id })
+/** What comes after a cursor in (createdAt, id) order. */
+const after = (cursor: Cursor) => ({
+  OR: [{ createdAt: { gt: cursor.createdAt } }, { createdAt: cursor.createdAt, id: { gt: cursor.id } }],
+})
+
+/** A pass's first read: pure, so a connection blip (the stampede at the top of the hour) gets two more tries. */
+const entryRead = <T>(context: string, read: () => Promise<T>) =>
+  retry(read, { retries: 2, initialDelay: 1500, shouldRetry: shouldRetryDbConnectionError, context })
+
+// ── 1. Entries not applied yet ────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Applies the entries still without `appliedAt`, oldest first, and returns how many it went over. `applyEntry` never
+ * throws: a failure stays on its entry (`lastError`), and an entry whose signup is still running waits for the next pass.
+ *
+ * ponytail: an entry that always fails is retried on every pass; 200 of them at the head would hold back the rest. Give
+ * entries a retry count and a backoff if `lastError` ever piles up.
+ */
+export async function applyPending(limit = BATCH): Promise<number> {
+  const entries = await entryRead('crm-sweep.applyPending', () =>
+    prisma.crmInboundEntry.findMany({
+      where: { appliedAt: null },
+      select: { id: true },
+      orderBy: [{ receivedAt: 'asc' }, { id: 'asc' }],
+      take: batchOf(limit),
+    }),
+  )
+  for (const { id } of entries) await applyEntry(id)
+  return entries.length
+}
+
+// ── 2. Linking ────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Links landing accounts still without an Organization to the one their email owns now, by the same rule as the entry
+ * (`OWNED_ORGANIZATION`, the login's exact email), never the sales team's own; returns how many it linked. A page per
+ * pass: the cursor walks every unlinked account, so the ones that will never link (their person owns nothing) never
+ * keep a newer one waiting.
+ */
+export async function linkLandingAccounts(limit = BATCH): Promise<number> {
+  const size = batchOf(limit)
+  const from = cursors.link
+  const accounts = await entryRead('crm-sweep.linkLandingAccounts', () =>
+    prisma.crmAccount.findMany({
+      where: { source: LANDING, organizationId: null, ...(from ? after(from) : {}) },
+      select: { id: true, externalKey: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: size,
+    }),
+  )
+  // A full page: the next pass goes on after it. A short one reached the end: the next pass starts over.
+  cursors.link = accounts.length === size ? cursorOf(accounts[accounts.length - 1]) : null
+  const emails = [...new Set(accounts.flatMap(account => (account.externalKey ? [account.externalKey] : [])))]
+  if (!emails.length) return 0
+
+  // Who owns what, for the whole page in one read.
+  const [owners, team] = await Promise.all([
+    prisma.staff.findMany({
+      where: { email: { in: emails }, active: true },
+      select: { email: true, organizations: OWNED_ORGANIZATION },
+      take: emails.length,
+    }),
+    teamOrganizationId(),
+  ])
+  const owned = new Map<string, string>()
+  for (const { email, organizations } of owners) {
+    const organizationId = organizations[0]?.organization.id
+    if (organizationId && organizationId !== team) owned.set(email, organizationId)
+  }
+
+  let linked = 0
+  for (const account of accounts) {
+    const organizationId = account.externalKey ? owned.get(account.externalKey) : undefined
+    if (!organizationId) continue
+    try {
+      const done = await prisma.$transaction(async tx => {
+        // The row is locked BEFORE its `link:` key goes in, as `applyTx` does before `linkTx`: the sweep and an entry
+        // of the same email queue on it instead of deadlocking.
+        const [current] = await tx.$queryRaw<Array<{ organizationId: string | null }>>`
+          SELECT "organizationId" FROM "CrmAccount" WHERE "id" = ${account.id} FOR UPDATE`
+        // Gone, or linked in the meantime (an entry, «Ganar»).
+        if (!current || current.organizationId) return false
+        return linkTx(tx, account.id, organizationId)
+      })
+      if (done) linked++
+    } catch (error) {
+      logger.error('[CRM] A landing account could not be linked; the next sweep retries it', {
+        accountId: account.id,
+        organizationId,
+        error: errorText(error),
+      })
+    }
+  }
+  return linked
+}
+
+// ── 3. Old signups ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const asObject = (value: Prisma.JsonValue): Prisma.JsonObject => (value && typeof value === 'object' && !Array.isArray(value) ? value : {})
+
+/**
+ * Gives every landing signup its CRM account (spec §5.3): the initial load of the signups from before the CRM, and the
+ * signup whose entry could not be saved. They never kept the form's qualification, so the account says it is not
+ * available (`qualificationAvailable: false`). Nothing is created for a signup whose Organization already has its
+ * account (of any source) or no longer exists, whose person is gone, or whose entry is still pending — that one brings
+ * every field. Nothing is announced either: an initial load is not hundreds of new prospects. Returns how many it
+ * created.
+ *
+ * The mark lives in the audit trail, the platform's largest table, and has no index of its own: the pass reads it by
+ * date, forward from where it left off.
+ *
+ * ponytail: a restart walks the marked signups from the start once more (each page skipped in a few reads). Persist the
+ * cursor if landing signups ever reach the tens of thousands.
+ */
+export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
+  const size = batchOf(limit)
+  const from = cursors.backfill
+  const startedAt = Date.now()
+  const signups = await entryRead('crm-sweep.backfillFromOnboarding', () =>
+    prisma.activityLog.findMany({
+      where: { action: SIGNUP_MARK, ...(from ? after(from) : { createdAt: { gte: SIGNUPS_MARKED_SINCE } }) },
+      select: {
+        id: true,
+        createdAt: true,
+        data: true,
+        staff: { select: { email: true, firstName: true, lastName: true, phone: true } },
+      },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: size,
+    }),
+  )
+  // A full page: the next pass goes on after it. A short one reached the end, and the cursor waits a few minutes
+  // behind «now», so a quiet week is not read again on every pass. A signup that failed is retried after a restart.
+  const last = signups.length ? cursorOf(signups[signups.length - 1]) : from
+  const caughtUp: Cursor = { createdAt: new Date(startedAt - CAUGHT_UP_LAG_MS), id: '' }
+  cursors.backfill = signups.length === size || (last && last.createdAt > caughtUp.createdAt) ? last : caughtUp
+  if (!signups.length) return 0
+
+  const rows = signups.map(signup => {
+    const data = asObject(signup.data)
+    return {
+      signup,
+      data,
+      organizationId: typeof data.organizationId === 'string' ? data.organizationId : null,
+      email: signup.staff?.email.toLowerCase().trim() || null,
+    }
+  })
+  const organizationIds = [...new Set(rows.flatMap(row => (row.organizationId ? [row.organizationId] : [])))]
+  const emails = [...new Set(rows.flatMap(row => (row.email ? [row.email] : [])))]
+  const [organizations, waiting, stage] = await Promise.all([
+    prisma.organization.findMany({
+      where: { id: { in: organizationIds } },
+      select: { id: true, name: true, phone: true, crmAccount: { select: { id: true } } },
+      take: organizationIds.length,
+    }),
+    prisma.crmInboundEntry.groupBy({ by: ['externalKey'], where: { source: LANDING, externalKey: { in: emails }, appliedAt: null } }),
+    getInitialStage(),
+  ])
+  const organizationOf = new Map(organizations.map(organization => [organization.id, organization]))
+  const pending = new Set(waiting.map(entry => entry.externalKey))
+
+  let created = 0
+  for (const { signup, data, organizationId, email } of rows) {
+    const organization = organizationId ? organizationOf.get(organizationId) : undefined
+    if (!email || !organization || organization.crmAccount || pending.has(email)) continue
+    const person = signup.staff
+    const phone = person?.phone || organization.phone
+    try {
+      const wrote = await prisma.$transaction(async tx => {
+        const upserted = await upsertAccountBySource(tx, {
+          source: LANDING,
+          externalKey: email,
+          data: {
+            name: organization.name,
+            stageId: stage.id,
+            organizationId: organization.id,
+            qualificationAvailable: false,
+            sourceDetail: sourceDetailOf(data),
+          },
+          contact: {
+            name: [person?.firstName, person?.lastName].filter(Boolean).join(' ') || organization.name,
+            phoneE164: phone ? canonicalPhoneE164(phone) : null,
+            email,
+            isPrimary: true,
+          },
+        })
+        // Its landing account already existed (linked somewhere else, or waiting for the link pass).
+        if (!upserted.created) return false
+        if (upserted.account.organizationId !== organization.id) {
+          // ponytail: the Organization got its CRM account (a «Ganar») in the instant between the read and this insert;
+          // the duplicate is the team's to merge, as in `applyTx`.
+          logger.warn('[CRM] Old landing signup created unlinked: its Organization got a CRM account meanwhile', {
+            accountId: upserted.account.id,
+            organizationId: organization.id,
+          })
+        }
+        await addEvent(tx, {
+          accountId: upserted.account.id,
+          kind: 'SYSTEM',
+          actorStaffId: null,
+          data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString() },
+        })
+        return true
+      })
+      if (wrote) created++
+    } catch (error) {
+      logger.error('[CRM] An old landing signup could not get its CRM account; a restart retries it', {
+        activityLogId: signup.id,
+        organizationId: organization.id,
+        error: errorText(error),
+      })
+    }
+  }
+  return created
+}
+
+// ── 4. First money ────────────────────────────────────────────────────────────────────────────────────────────────────
+
+/**
+ * Fills `firstMoneyAt` of linked accounts that do not have it with the date of the oldest charge of ANY venue of their
+ * Organization (spec §8), never with the plan (`getVenueBaseTier` also takes a plan on trial or courtesy, and that is
+ * not money); returns how many it filled. «ANTERIOR_AL_CRM» when that charge is older than the account itself — the
+ * money did not come with the CRM (ruling 28) — and «PAGO» otherwise. Set once: written only while still empty, with
+ * its event.
+ */
+export async function fillFirstMoney(limit = BATCH): Promise<number> {
+  // Only the accounts whose Organization did charge: the many that never will would otherwise fill every batch.
+  const accounts = await entryRead('crm-sweep.fillFirstMoney', () =>
+    prisma.crmAccount.findMany({
+      where: { firstMoneyAt: null, organization: { is: { venues: { some: { ...REAL_VENUE, payments: { some: MONEY } } } } } },
+      select: { id: true, organizationId: true, createdAt: true },
+      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
+      take: batchOf(limit),
+    }),
+  )
+  const organizationIds = [...new Set(accounts.flatMap(account => (account.organizationId ? [account.organizationId] : [])))]
+  if (!organizationIds.length) return 0
+
+  // The oldest charge of every venue of those Organizations in one aggregate, then whose venue each one is.
+  const firstByVenue = await prisma.payment.groupBy({
+    by: ['venueId'],
+    where: { ...MONEY, venue: { ...REAL_VENUE, organizationId: { in: organizationIds } } },
+    _min: { createdAt: true },
+  })
+  const venues = await prisma.venue.findMany({
+    where: { id: { in: firstByVenue.map(row => row.venueId) } },
+    select: { id: true, organizationId: true },
+    take: firstByVenue.length,
+  })
+  const organizationOf = new Map(venues.map(venue => [venue.id, venue.organizationId]))
+  const firstMoney = new Map<string, Date>()
+  for (const { venueId, _min } of firstByVenue) {
+    const organizationId = organizationOf.get(venueId)
+    const at = _min.createdAt
+    if (!organizationId || !at) continue
+    const earlier = firstMoney.get(organizationId)
+    if (!earlier || at < earlier) firstMoney.set(organizationId, at)
+  }
+
+  let filled = 0
+  for (const account of accounts) {
+    const at = account.organizationId ? firstMoney.get(account.organizationId) : undefined
+    if (!at) continue
+    const source = at < account.createdAt ? 'ANTERIOR_AL_CRM' : 'PAGO'
+    try {
+      const wrote = await prisma.$transaction(async tx => {
+        const { count } = await tx.crmAccount.updateMany({
+          where: { id: account.id, firstMoneyAt: null },
+          data: { firstMoneyAt: at, firstMoneySource: source },
+        })
+        if (count === 0) return false
+        await addEvent(tx, {
+          accountId: account.id,
+          kind: 'SYSTEM',
+          actorStaffId: null,
+          data: { event: 'FIRST_MONEY', at: at.toISOString(), source },
+        })
+        return true
+      })
+      if (wrote) filled++
+    } catch (error) {
+      logger.error('[CRM] The first money date could not be written; the next sweep retries it', {
+        accountId: account.id,
+        error: errorText(error),
+      })
+    }
+  }
+  return filled
+}
+
+// ── The sweep ─────────────────────────────────────────────────────────────────────────────────────────────────────────
+
+const PASSES = [
+  ['applyPending', applyPending],
+  ['linkLandingAccounts', linkLandingAccounts],
+  ['backfillFromOnboarding', backfillFromOnboarding],
+  ['fillFirstMoney', fillFirstMoney],
+] as const
+
+/**
+ * One sweep, in this order: a pending entry is applied before the backfill could take its signup, and an account linked
+ * or created in this sweep gets its first money in the same sweep. Each pass on its own: one that fails is logged, and
+ * the next one runs.
+ */
+export async function runSweep(): Promise<void> {
+  const counts: Record<string, number> = {}
+  for (const [pass, run] of PASSES) {
+    try {
+      counts[pass] = await run()
+    } catch (error) {
+      logger.error('[CRM] A sweep pass failed; the next sweep runs it again', { pass, error: errorText(error) })
+    }
+  }
+  if (Object.values(counts).some(Boolean)) logger.info('[CRM] Sweep', counts)
+}

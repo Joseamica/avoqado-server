@@ -78,7 +78,7 @@ export function installCrmInboundFake(prismaMock: any) {
         (row.organizationId && account.organizationId === row.organizationId),
     )
     if (clash) return { count: 0 }
-    db.accounts.push({ id: nextId('acct'), organizationId: null, lastTouchAt: new Date(), ...row })
+    db.accounts.push({ id: nextId('acct'), organizationId: null, lastTouchAt: new Date(), createdAt: new Date(), ...row })
     return { count: 1 }
   })
   prismaMock.crmAccount.findUnique.mockImplementation(async ({ where }: Row) => {
