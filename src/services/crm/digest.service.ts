@@ -334,20 +334,32 @@ async function digestFor(access: CrmAccess, now: Date): Promise<Omit<DigestConte
   }
 }
 
+/** Closes a row we hold for good: «FALLO» with no tries left, so no later run retakes it. */
+const closeForGood = (id: string, now: Date) =>
+  prisma.crmDigestSend.updateMany({ where: { id, reservedAt: now }, data: { status: 'FALLO', attempts: MAX_ATTEMPTS } })
+
 /**
  * Sends a reserved row's email with the person's key for the day and marks the row — only while it is still ours (a run
  * that took over 10 minutes may have lost it to another). If the process dies after Resend took the email and before
  * this mark, the row stays reserved, a later run retakes it and sends the SAME content with the SAME key: Resend
- * recognizes it and does not deliver it again.
+ * recognizes it and does not deliver it again. A refusal that will not change (`transient: false`: an undeliverable
+ * address, a demo) closes the row instead of using up the tries; a throw counts as passing, like the email service's own.
  */
 async function deliver(row: { id: string; staffId: string }, day: string, content: DigestContent, now: Date): Promise<void> {
   let ok = false
+  let permanent = false
   try {
     const result = await emailService.sendEmailWithResult({ ...content, idempotencyKey: `crm-aviso:${row.staffId}:${day}` })
     ok = result.ok
-    if (!ok) logger.warn('[CRM] A daily digest did not go out', { staffId: row.staffId, day, error: result.errorCode ?? 'not sent' })
+    permanent = !ok && result.transient === false
+    if (!ok)
+      logger.warn('[CRM] A daily digest did not go out', { staffId: row.staffId, day, error: result.errorCode ?? 'not sent', permanent })
   } catch (error) {
     logger.warn('[CRM] A daily digest did not go out', { staffId: row.staffId, day, error: errorText(error) })
+  }
+  if (permanent) {
+    await closeForGood(row.id, now)
+    return
   }
   await prisma.crmDigestSend.updateMany({
     where: { id: row.id, reservedAt: now },
@@ -357,8 +369,9 @@ async function deliver(row: { id: string; staffId: string }, day: string, conten
 
 /**
  * Takes back what an earlier run left halfway today: rows reserved more than 10 minutes ago (the process died, before
- * or after sending) and failures with tries left. Each is taken with a compare-and-set on its reservation, so two runs
- * never both send it.
+ * or after sending) and failures with tries left. Each is taken with a compare-and-set on its status and reservation, so
+ * two runs never both send it, nor resend one its slow holder just marked. Before sending, access is asked again: who
+ * lost «Ver» since 8:30 (deactivated, key taken away) gets nothing, and the row closes for good.
  */
 async function retakeLeftovers(day: string, now: Date): Promise<void> {
   const leftovers = await entryRead('crm-daily-digest.leftovers', () =>
@@ -386,7 +399,15 @@ async function retakeLeftovers(day: string, now: Date): Promise<void> {
         where: { id: row.id, status: row.status, reservedAt: row.reservedAt },
         data: { status: 'APARTADO', reservedAt: now },
       })
-      if (count === 1) await deliver(row, day, row.content, now)
+      if (count !== 1) continue
+      // Same rule as the first send — and its claim of an unclaimed row is as intended (see `sendNew`).
+      const access = await getCrmAccess(row.staffId)
+      if (!access?.ver) {
+        logger.info('[CRM] A daily digest was not retried: that person no longer has CRM access', { staffId: row.staffId, day })
+        await closeForGood(row.id, now)
+        continue
+      }
+      await deliver(row, day, row.content, now)
     } catch (error) {
       logger.error('[CRM] A daily digest could not be retried', { id: row.id, staffId: row.staffId, day, error: errorText(error) })
     }
@@ -413,6 +434,8 @@ async function sendNew(day: string, now: Date): Promise<void> {
   for (const person of people) {
     if (started.has(person.id)) continue
     try {
+      // Intended: on an unclaimed key row `getCrmAccess` claims it (`holdsRow`), but `team` already narrowed it to the one
+      // person whose own first login would claim it — the job only does it earlier (review M-7).
       const access = await getCrmAccess(person.id)
       if (!access?.ver) continue
       const digest = await digestFor(access, now)

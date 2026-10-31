@@ -312,11 +312,14 @@ describe('runDailyDigest', () => {
       }
       const created = { id: `cdigestsd${String(sends.length).padStart(16, '0')}`, attempts: 0, ...data }
       sends.push(created)
-      return created
+      return { ...created }
     })
+    // Copies, like a real database: what a run read never changes under it when another run writes (review M-1).
     prismaMock.crmDigestSend.findMany
       .mockReset()
-      .mockImplementation(async ({ where }: { where: Record<string, unknown> }) => sends.filter(s => matches({ ...s }, where)))
+      .mockImplementation(async ({ where }: { where: Record<string, unknown> }) =>
+        sends.filter(s => matches({ ...s }, where)).map(s => ({ ...s })),
+      )
     prismaMock.crmDigestSend.updateMany
       .mockReset()
       .mockImplementation(async ({ where, data }: { where: Record<string, unknown>; data: Record<string, unknown> }) => {
@@ -427,6 +430,98 @@ describe('runDailyDigest', () => {
     expect(new Set(send.mock.calls.map(([email]) => email.idempotencyKey))).toEqual(new Set([KEY_A]))
     expect(sends).toEqual([expect.objectContaining({ status: 'FALLO', attempts: 3 })])
     expect(logger.warn).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ staffId: STAFF_A }))
+  })
+
+  it('dos_retomas_un_envio: two runs retaking the same stale row at once send it ONCE (the CAS on its reservation)', async () => {
+    const content = { to: 'a@avoqado.io', subject: 'Tus pendientes de hoy: 2 vencidas y 1 para hoy', html: '<p>g</p>', text: 'g' }
+    sends.push({
+      id: 'cdigestsd0000000000000093',
+      staffId: STAFF_A,
+      day: DAY,
+      kind: 'DIARIO',
+      status: 'APARTADO',
+      attempts: 0,
+      reservedAt: T0,
+      content,
+    })
+
+    await Promise.all([runDailyDigest(at(11)), runDailyDigest(at(11))])
+
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(send).toHaveBeenCalledWith({ ...content, idempotencyKey: KEY_A })
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'ENVIADO', reservedAt: at(11) }))
+  })
+
+  it('a run that lost its reservation never overwrites the mark of the run that took it over', async () => {
+    // 8:30: the email hangs in Resend for more than 10 minutes.
+    let finishFirst: (result: { ok: boolean; transient: boolean; errorCode?: string }) => void = () => undefined
+    send.mockImplementationOnce(() => new Promise(resolve => (finishFirst = resolve)))
+    const first = runDailyDigest(T0)
+    await new Promise(resolve => setImmediate(resolve))
+    expect(send).toHaveBeenCalledTimes(1)
+
+    // 8:41: another run retakes the row and its send goes out.
+    await runDailyDigest(at(11))
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'ENVIADO', reservedAt: at(11) }))
+
+    // The 8:30 send finally fails: its mark no longer matches the row, so «ENVIADO» stays.
+    finishFirst({ ok: false, transient: true, errorCode: 'timeout' })
+    await first
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'ENVIADO', attempts: 0 }))
+  })
+
+  it('a retake that read the row just before its slow holder marked it does not send it again (status in the CAS)', async () => {
+    // 8:30: the email hangs in Resend for more than 10 minutes.
+    let finishFirst: (result: { ok: boolean; transient: boolean }) => void = () => undefined
+    send.mockImplementationOnce(() => new Promise(resolve => (finishFirst = resolve)))
+    const first = runDailyDigest(T0)
+    await new Promise(resolve => setImmediate(resolve))
+
+    // 8:41: the retake reads the row as stale; right after that read, the 8:30 send comes back and marks it «ENVIADO»
+    // (its reservation is unchanged), and only then does the retake try its CAS.
+    prismaMock.crmDigestSend.findMany.mockImplementationOnce(async ({ where }: { where: Record<string, unknown> }) => {
+      const read = sends.filter(s => matches({ ...s }, where)).map(s => ({ ...s }))
+      finishFirst({ ok: true, transient: false })
+      await first
+      return read
+    })
+    await runDailyDigest(at(11))
+
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'ENVIADO', reservedAt: T0 }))
+  })
+
+  it('retomar_revalida_el_acceso: someone who lost CRM access after 8:30 does not get the saved email, and the row closes', async () => {
+    send.mockResolvedValueOnce({ ok: false, transient: true, errorCode: 'rate_limit' })
+    await runDailyDigest(T0)
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'FALLO', attempts: 1 }))
+
+    // Deactivated at 8:40 (or their «Ver» taken away): `getCrmAccess` is the one rule.
+    accessOf.mockResolvedValue(null)
+    await runDailyDigest(at(15))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'FALLO', attempts: 3 }))
+
+    // Closed for good: not even with the access back is it retaken that morning.
+    accessOf.mockResolvedValue({ ...access(STAFF_A), ver: null })
+    await runDailyDigest(at(30))
+    accessOf.mockImplementation(async () => access(STAFF_A))
+    await runDailyDigest(at(45))
+    expect(send).toHaveBeenCalledTimes(1)
+  })
+
+  it('error_permanente_no_reintenta: a refusal that will not change (an undeliverable address) closes the row at once', async () => {
+    send.mockResolvedValue({ ok: false, transient: false, errorCode: 'UNDELIVERABLE_RECIPIENT' })
+    await runDailyDigest(T0)
+    expect(sends[0]).toEqual(expect.objectContaining({ status: 'FALLO', attempts: 3 }))
+
+    await runDailyDigest(at(15))
+    await runDailyDigest(at(30))
+    expect(send).toHaveBeenCalledTimes(1)
+    expect(logger.warn).toHaveBeenCalledWith(
+      expect.stringContaining('[CRM]'),
+      expect.objectContaining({ error: 'UNDELIVERABLE_RECIPIENT' }),
+    )
   })
 
   it('sin_pendientes_no_manda: nothing pending reserves nothing; «sin dueño» only counts for an admin', async () => {
