@@ -309,6 +309,9 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
       prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
         const staged = { orders: [...committed.orders], payments: [...committed.payments], audits: [...committed.audits] }
         const tx = {
+          // Saldo a favor (S6): la transacción toma el candado «primer-sobre» y repite la comprobación de tarjetas activadas.
+          $queryRaw: jest.fn().mockResolvedValue([]),
+          giftCard: { findFirst: jest.fn().mockResolvedValue(null) },
           shift: {
             findFirst: jest.fn().mockResolvedValue({ id: 'shift-closing', status: 'CLOSING' }),
             updateMany: jest.fn(),
@@ -360,6 +363,9 @@ describe('createRefund (móvil) — convención canónica de reembolso', () => {
       prismaMock.$transaction.mockImplementationOnce(async (callback: any) => {
         const staged = { totalSales: committed.totalSales, orders: [...committed.orders], payments: [...committed.payments] }
         const tx = {
+          // Saldo a favor (S6): la transacción toma el candado «primer-sobre» y repite la comprobación de tarjetas activadas.
+          $queryRaw: jest.fn().mockResolvedValue([]),
+          giftCard: { findFirst: jest.fn().mockResolvedValue(null) },
           shift: {
             findFirst: jest.fn().mockResolvedValue({ id: 'shift-open', status: 'OPEN' }),
             updateMany: jest.fn().mockImplementation(async () => {

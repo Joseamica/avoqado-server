@@ -722,6 +722,11 @@
       "loops": 0,
       "reason": "Una captura completa de topología (incluye hermanas/punteros); todas las Orders en una sentencia canónica antes de mesas y escrituras."
     },
+    "src/services/mobile/refund.mobile.service.ts#createRefund#tomarCandadoPrimerSobreEnTx": {
+      "count": 1,
+      "loops": 0,
+      "reason": "Saldo a favor (S6): la devolución sin venta lo toma SIEMPRE como PRIMERA sentencia de su transacción, antes del turno, de Orders y de Payments («primer-sobre» → filas → turno), y repite la comprobación de sobres activados ya con él. Sin FOR UPDATE de Orders/Payments/sobres; la Order testigo es nueva, nunca en bucle."
+    },
     "src/services/mobile/service-charge.mobile.service.ts#requireOpenOrder#lockExistingOrderForPayment": {
       "count": 1,
       "loops": 0,
