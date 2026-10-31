@@ -561,7 +561,10 @@ describe('lists', () => {
       expect(section).toMatchObject({ total: 3, rows: [expect.objectContaining({ id: ACCOUNT })] })
 
     const mine = { assigneeStaffId: SELLER, doneAt: null }
-    const calls = prismaMock.crmAccount.findMany.mock.calls.map(([args]: [Prisma.CrmAccountFindManyArgs]) => args)
+    // `prismaMock` is `any`, so `.map` over its calls is `any` whatever the callback says: the variable carries the type.
+    const calls: Prisma.CrmAccountFindManyArgs[] = prismaMock.crmAccount.findMany.mock.calls.map(
+      ([args]: [Prisma.CrmAccountFindManyArgs]) => args,
+    )
     expect(calls).toEqual([
       {
         // What I owe from before today (Mexico City), the oldest first.

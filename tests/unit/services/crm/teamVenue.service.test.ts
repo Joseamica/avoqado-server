@@ -818,6 +818,9 @@ describe('listTeamOptions', () => {
       // Claimed, but that person changed their email since: the keys no longer reach them (`getCrmAccess` looks the row up by
       // the person's email), so `reassign` would refuse them.
       { staffId: CHANGED_ID, email: 'luis@avoqado.io' },
+      // Ruling 22: the admin added Luis's NEW address before removing the old row. Unclaimed and verified, but Luis already
+      // holds the old row: `getCrmAccess` could never claim this one for him (`staffId` is unique, P2002), so neither.
+      { staffId: null, email: 'luis.nuevo@avoqado.io' },
     ])
     prismaMock.staff.findMany.mockResolvedValue([
       // The email of a Staff may keep the capitals typed in; the keys are stored lowercase.
@@ -842,7 +845,10 @@ describe('listTeamOptions', () => {
         // An unclaimed row only goes to someone with a verified email: `getCrmAccess` never claims it for anyone else.
         where: {
           active: true,
-          OR: [{ id: { in: [SELLER_ID, CHANGED_ID] } }, { email: { in: ['beto@avoqado.io', 'nadie@avoqado.io'] }, emailVerified: true }],
+          OR: [
+            { id: { in: [SELLER_ID, CHANGED_ID] } },
+            { email: { in: ['beto@avoqado.io', 'nadie@avoqado.io', 'luis.nuevo@avoqado.io'] }, emailVerified: true },
+          ],
         },
       }),
     )

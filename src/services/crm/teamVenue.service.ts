@@ -155,7 +155,7 @@ export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId
   if (!rows.length) return []
   // The same person `getCrmAccess` would give the keys to. A claimed row: whoever claimed it, while their email still leads
   // to this row (it is looked up by the person's email). An unclaimed one: whoever holds the email today, with it verified —
-  // nobody else ever claims it.
+  // nobody else ever claims it — unless they already hold another row: `staffId` is unique, so the claim would fail (P2002).
   const claimed = rows.flatMap(row => (row.staffId ? [row.staffId] : []))
   const unclaimed = rows.flatMap(row => (row.staffId ? [] : [row.email]))
   const people = await prisma.staff.findMany({
@@ -166,7 +166,7 @@ export async function listTeamOptions(actor: CrmAccess): Promise<Array<{ staffId
   return rows.flatMap(row => {
     const person = row.staffId
       ? people.find(candidate => candidate.id === row.staffId && candidate.email.toLowerCase() === row.email)
-      : people.find(candidate => candidate.email === row.email && candidate.emailVerified)
+      : people.find(candidate => candidate.email === row.email && candidate.emailVerified && !claimed.includes(candidate.id))
     return person ? [{ staffId: person.id, name: `${person.firstName} ${person.lastName}`.trim() }] : []
   })
 }
