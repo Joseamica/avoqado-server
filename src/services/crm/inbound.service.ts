@@ -302,12 +302,13 @@ export async function linkTx(tx: Prisma.TransactionClient, accountId: string, or
     return false
   }
   await tx.crmAccount.update({ where: { id: accountId }, data: { organizationId } })
-  // Same key as the sweep's link (task 6): an account is linked once, whoever gets there first.
+  // The same key as the sweep's link (task 6), one per account AND Organization: whoever gets there first writes it, and a
+  // re-link after its Organization was deleted (`SetNull`) still leaves its own event (spec §5.10, M-4 of T6's review).
   await addEvent(tx, {
     accountId,
     kind: 'LINKED',
     actorStaffId: null,
-    sourceKey: `link:${accountId}`,
+    sourceKey: `link:${accountId}:${organizationId}`,
     data: { organizationId, organizationName: organization.name },
   })
   return true

@@ -3,10 +3,12 @@
  *
  * What these pin beyond the happy path: an entry that died before `appliedAt` is applied once (ruling 20); linking takes
  * the account's lock before its LINKED key (the note for task 6) and never takes an Organization another account holds;
- * no paged pass gets stuck behind what it can never finish; and «first money» is a real charge — not a plan on trial or
- * courtesy, not a pending or failed payment, not the demo venue's sample sales — set once, and «ANTERIOR_AL_CRM» when it
+ * no paged pass gets stuck behind what it can never finish; the backfill reads the marks with the action as a SQL literal
+ * (ruling 29b) and loads them by age (rulings 30 and 30b); and «first money» is a real charge — not a plan on trial or
+ * courtesy, not a pending or failed payment, not a demo venue's sample sales — set once, and «ANTERIOR_AL_CRM» when it
  * came before the account entered the CRM (ruling 28).
  */
+import { Prisma } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { FAKE_STAGE_ID, installCrmInboundFake } from '@tests/__helpers__/crmInboundFake'
 import logger from '@/config/logger'
@@ -80,8 +82,6 @@ function ordered(rows: Row[], orderBy: Row[] = []): Row[] {
   })
 }
 
-const venueOf = (id: string) => world.venues.find(venue => venue.id === id)
-
 /** A venue against `{ ...scalars, payments: { some } }`. */
 function venueMatches(venue: Row | undefined, { payments, ...scalars }: Row = {}): boolean {
   if (!venue || !matches(venue, scalars)) return false
@@ -103,7 +103,11 @@ function ownedBy(staff: Row, args: Row) {
     }))
 }
 
-/** The tables the sweep reads beyond the landing capture's, on top of `installCrmInboundFake`. */
+/**
+ * The tables the sweep reads beyond the landing capture's, on top of `installCrmInboundFake`. `activityLog.findMany`,
+ * `payment.groupBy` and `venue.findMany` are reset and left without an implementation: the sweep reads those tables with
+ * raw SQL now, and a call that comes back would fail loudly.
+ */
 function installSweepWorld() {
   world = { staff: [], organizations: [], venues: [], payments: [], logs: [] }
   const delegates = [
@@ -161,14 +165,6 @@ function installSweepWorld() {
       .slice(0, take)
       .map(staff => ({ email: staff.email, organizations: ownedBy(staff, select.organizations) })),
   )
-  prismaMock.activityLog.findMany.mockImplementation(async ({ where, orderBy, take }: Row) =>
-    ordered(
-      world.logs.filter(log => matches(log, where)),
-      orderBy,
-    )
-      .slice(0, take)
-      .map(log => ({ ...log, staff: world.staff.find(staff => staff.id === log.staffId) ?? null })),
-  )
   prismaMock.organization.findUnique.mockImplementation(
     async ({ where }: Row) => world.organizations.find(organization => organization.id === where.id) ?? null,
   )
@@ -181,29 +177,88 @@ function installSweepWorld() {
         return { ...organization, crmAccount: holder ? { id: holder.id } : null }
       }),
   )
-  prismaMock.payment.groupBy.mockImplementation(async ({ by: [field], where: { venue, ...scalars } }: Row) => {
-    const first = new Map<string, Date>()
-    for (const payment of world.payments) {
-      if (!matches(payment, scalars) || !venueMatches(venueOf(payment.venueId), venue)) continue
-      const current = first.get(payment[field])
-      if (!current || payment.createdAt < current) first.set(payment[field], payment.createdAt)
+  // The raw SQL on these paths: the marks, the oldest charge of each venue and an account's row lock.
+  prismaMock.$queryRaw.mockImplementation(async (first: Prisma.Sql | TemplateStringsArray, ...values: unknown[]) => {
+    if (isSql(first)) {
+      if (first.sql.includes('"ActivityLog"')) return marksRead(first)
+      if (first.sql.includes('"Payment"')) return oldestChargesRead(first)
+      throw new Error(`The sweep fake does not know: ${first.sql}`)
     }
-    return [...first].map(([value, createdAt]) => ({ [field]: value, _min: { createdAt } }))
-  })
-  prismaMock.venue.findMany.mockImplementation(async ({ where, take }: Row) =>
-    world.venues
-      .filter(venue => matches(venue, where))
-      .slice(0, take)
-      .map(venue => ({ id: venue.id, organizationId: venue.organizationId })),
-  )
-  // The only raw SQL on these paths: an account's row lock.
-  prismaMock.$queryRaw.mockImplementation(async (strings: TemplateStringsArray, ...values: unknown[]) => {
-    const sql = strings.join('?')
+    const sql = first.join('?')
     if (!sql.includes('"CrmAccount"') || !sql.includes('FOR UPDATE')) throw new Error(`The sweep fake does not know: ${sql}`)
     const account = db.accounts.find(row => row.id === values[0])
     return account ? [{ id: account.id, organizationId: account.organizationId ?? null }] : []
   })
 }
+
+/**
+ * A `Prisma.sql` object, told apart from a tagged template's strings by its shape: the generated client exports
+ * `Prisma.sql`, but `Prisma.Sql` only as a type, so `instanceof` is not available.
+ */
+const isSql = (value: unknown): value is Prisma.Sql =>
+  !!value && typeof value === 'object' && !Array.isArray(value) && 'strings' in value && 'values' in value
+
+/** The text of a raw read must hold these, or the fake would answer for a query the code no longer sends. */
+function expectSql(query: Prisma.Sql, pieces: string[]) {
+  for (const piece of pieces) if (!query.sql.includes(piece)) throw new Error(`The sweep fake expected «${piece}» in: ${query.sql}`)
+}
+
+/** The landing marks after the cursor (if any), in (createdAt, id) order, with their person's fields. */
+function marksRead(query: Prisma.Sql) {
+  expectSql(query, [`l."action" = 'LANDING_SIGNUP_CREATED'`, 'ORDER BY l."createdAt" ASC, l."id" ASC', 'LIMIT'])
+  const { values } = query
+  const limit = values[values.length - 1] as number
+  const cursor = values[0] instanceof Date ? { createdAt: values[0], id: values[1] as string } : null
+  const isAfter = (log: Row) =>
+    !cursor || log.createdAt > cursor.createdAt || (log.createdAt.getTime() === cursor.createdAt.getTime() && log.id > cursor.id)
+  return ordered(
+    world.logs.filter(log => log.action === 'LANDING_SIGNUP_CREATED' && isAfter(log)),
+    [{ createdAt: 'asc' }, { id: 'asc' }],
+  )
+    .slice(0, limit)
+    .map(log => {
+      const staff = world.staff.find(person => person.id === log.staffId)
+      return {
+        id: log.id,
+        createdAt: log.createdAt,
+        data: log.data,
+        email: staff?.email ?? null,
+        firstName: staff?.firstName ?? null,
+        lastName: staff?.lastName ?? null,
+        phone: staff?.phone ?? null,
+        active: staff?.active ?? null,
+      }
+    })
+}
+
+/**
+ * The oldest real charge of each venue of the bound Organizations. Every bind is an Organization id or a venue status,
+ * so a venue qualifies when its Organization AND its status were bound — a TRIAL one only if the code binds TRIAL.
+ */
+function oldestChargesRead(query: Prisma.Sql) {
+  expectSql(query, [
+    'CROSS JOIN LATERAL',
+    `p."status" = 'COMPLETED'`,
+    'p."amount" > 0',
+    'ORDER BY p."createdAt" ASC',
+    'LIMIT 1',
+    'v."demoExpiresAt" IS NULL',
+  ])
+  const binds = new Set(query.values)
+  return world.venues
+    .filter(venue => binds.has(venue.organizationId) && binds.has(venue.status) && (venue.demoExpiresAt ?? null) === null)
+    .flatMap(venue => {
+      const charges = world.payments.filter(payment => payment.venueId === venue.id && payment.status === 'COMPLETED' && payment.amount > 0)
+      const [oldest] = ordered(charges, [{ createdAt: 'asc' }])
+      return oldest ? [{ venueId: venue.id, organizationId: venue.organizationId, createdAt: oldest.createdAt }] : []
+    })
+}
+
+/** The raw reads the code sent, as `Prisma.Sql`. */
+const rawReads = (table: string) =>
+  (prismaMock.$queryRaw.mock.calls as unknown[][])
+    .map(([first]) => first)
+    .filter((first): first is Prisma.Sql => isSql(first) && first.sql.includes(`"${table}"`))
 
 function seedOrganization(over: Row = {}) {
   const organization = {
@@ -256,7 +311,7 @@ function seedAccount(over: Row = {}) {
 }
 
 function seedVenue(over: Row = {}) {
-  const venue = { id: cuid('venue', world.venues.length + 1), organizationId: ORG, status: 'ACTIVE', ...over }
+  const venue = { id: cuid('venue', world.venues.length + 1), organizationId: ORG, status: 'ACTIVE', demoExpiresAt: null, ...over }
   world.venues.push(venue)
   return venue
 }
@@ -374,12 +429,15 @@ describe('applyPending', () => {
     await applyEntry(entry.id)
     expect(db.entries[0]).toMatchObject({ appliedAt: null, lastError: expect.stringContaining('died') })
 
+    const before = db.events.map(event => ({ ...event }))
+
     await expect(applyPending()).resolves.toBe(1)
 
-    // The same account, and one set of events: the entry's ENTRY_APPLIED key stops the second run before it touches it.
+    // The same account and not one event more, of any kind (M-5): the entry's ENTRY_APPLIED key stops the second run
+    // before it touches the account.
     expect(db.accounts).toHaveLength(1)
     expect(db.contacts).toHaveLength(1)
-    expect(eventsOf('ENTRY_APPLIED')).toHaveLength(1)
+    expect(db.events).toEqual(before)
     expect(db.entries[0]).toMatchObject({ appliedAt: expect.any(Date), accountId: db.accounts[0].id, lastError: null })
 
     // Applied: the next sweep has nothing to do.
@@ -402,7 +460,7 @@ describe('linkLandingAccounts', () => {
       expect.objectContaining({
         accountId: account.id,
         actorStaffId: null,
-        sourceKey: `link:${account.id}`,
+        sourceKey: `link:${account.id}:${ORG}`,
         data: { organizationId: ORG, organizationName: 'Café Ana S.A.' },
       }),
     ])
@@ -496,15 +554,57 @@ describe('linkLandingAccounts', () => {
     expect(accountOf(second.id)?.organizationId).toBe(OTHER_ORG)
     expect(logger.error).toHaveBeenCalledWith(expect.stringContaining('[CRM]'), expect.objectContaining({ accountId: first.id }))
   })
+
+  it('an Organization another account holds is skipped before any transaction, and warned about once per process (M-1)', async () => {
+    const holder = seedAccount({ source: 'WHATSAPP', externalKey: '+525512345678', organizationId: ORG })
+    const landing = seedAccount()
+    seedOrganization()
+    seedStaff(EMAIL, {}, ORG)
+    const warningsFor = (accountId: string) =>
+      (logger.warn as jest.Mock).mock.calls.filter(([, context]) => (context as Row | undefined)?.accountId === accountId)
+
+    // Every pass reads it again (fewer than 200 unlinked accounts), and none opens a transaction or repeats the warning.
+    await linkLandingAccounts()
+    await linkLandingAccounts()
+
+    expect(prismaMock.$transaction).not.toHaveBeenCalled()
+    expect(warningsFor(landing.id)).toEqual([
+      [expect.stringContaining('[CRM]'), expect.objectContaining({ accountId: landing.id, organizationId: ORG, heldBy: holder.id })],
+    ])
+
+    // A new process says it once more.
+    resetSweepCursors()
+    await linkLandingAccounts()
+    expect(warningsFor(landing.id)).toHaveLength(2)
+  })
+
+  it('a re-link after its Organization was deleted leaves its own LINKED event (M-4)', async () => {
+    const account = seedAccount()
+    seedOrganization()
+    const ana = seedStaff(EMAIL, {}, ORG)
+    await linkLandingAccounts()
+
+    // The Organization is deleted (`SetNull` unlinks the account) and the person opens another business.
+    world.organizations = world.organizations.filter(organization => organization.id !== ORG)
+    Object.assign(accountOf(account.id) as Row, { organizationId: null })
+    seedOrganization({ id: OTHER_ORG, name: 'Café Ana 2' })
+    ana.memberships = [{ organizationId: OTHER_ORG, role: 'OWNER', isActive: true, isPrimary: true, joinedAt: new Date() }]
+
+    await expect(linkLandingAccounts()).resolves.toBe(1)
+
+    expect(accountOf(account.id)?.organizationId).toBe(OTHER_ORG)
+    expect(eventsOf('LINKED').map(event => event.sourceKey)).toEqual([`link:${account.id}:${ORG}`, `link:${account.id}:${OTHER_ORG}`])
+  })
 })
 
 describe('backfillFromOnboarding', () => {
   it('carga_inicial_sin_calificacion', async () => {
-    // A signup from before the CRM: its Organization and its mark, and no entry.
+    // A signup from before the CRM, three days old: its Organization and its mark, and no entry.
     seedOrganization({ name: 'Taquería Lalo', phone: '5511112222' })
     const lalo = seedStaff('lalo@taqueria.mx', { firstName: 'Lalo', lastName: 'Pérez', phone: '55 1111 2222' }, ORG)
     const signup = seedSignup(lalo.id, ORG, {
       data: { source: 'landing_oferta', organizationId: ORG, utm: { utm_source: 'meta' }, launchCampaignCode: 'POS22' },
+      createdAt: new Date(Date.now() - 3 * DAY),
     })
 
     await expect(backfillFromOnboarding()).resolves.toBe(1)
@@ -530,10 +630,11 @@ describe('backfillFromOnboarding', () => {
       expect.objectContaining({
         accountId: db.accounts[0].id,
         actorStaffId: null,
-        data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString() },
+        data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString(), archived: false },
       }),
     ])
-    // An initial load is not hundreds of new prospects to announce.
+    // Three days old: open, but not «new» enough to announce (ruling 30b).
+    expect(db.accounts[0].archivedAt ?? null).toBeNull()
     expect(notifyNewProspect).not.toHaveBeenCalled()
 
     // Twice, from the start: nothing new (spec §7, «correrla dos veces»).
@@ -564,6 +665,85 @@ describe('backfillFromOnboarding', () => {
 
     expect(db.accounts).toHaveLength(1)
     expect(db.events).toHaveLength(0)
+  })
+
+  it('carga_por_edad: más de 14 días archivada, de 1 a 14 abierta sin correo, menos de 24 h abierta y anunciada (rulings 30 y 30b)', async () => {
+    const signups = [
+      { email: 'vieja@cafe.mx', age: 20 * DAY, archived: true, announced: false },
+      { email: 'casi-vieja@cafe.mx', age: 14 * DAY - MINUTE, archived: false, announced: false },
+      { email: 'tibia@cafe.mx', age: 5 * DAY, archived: false, announced: false },
+      { email: 'de-ayer@cafe.mx', age: DAY + MINUTE, archived: false, announced: false },
+      { email: 'hoy@cafe.mx', age: 2 * 60 * MINUTE, archived: false, announced: true },
+    ]
+    signups.forEach(({ email, age }, n) => {
+      const organizationId = cuid('orgedad', n + 1)
+      seedOrganization({ id: organizationId, name: email })
+      seedSignup(seedStaff(email, {}, organizationId).id, organizationId, { createdAt: new Date(Date.now() - age) })
+    })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(5)
+
+    for (const { email, archived } of signups) {
+      const account = db.accounts.find(row => row.externalKey === email)
+      expect({ email, archived: (account?.archivedAt ?? null) !== null }).toEqual({ email, archived })
+      // Archived or open, nobody owns it yet, and its event says which.
+      expect(account).not.toHaveProperty('ownerStaffId')
+      expect(systemEvents('CREATED_FROM_SIGNUP').find(event => event.accountId === account?.id)?.data.archived).toBe(archived)
+    }
+    // Only the signup of today is a new prospect: its entry was never saved, so this is its only notice.
+    expect((notifyNewProspect as jest.Mock).mock.calls).toEqual(
+      signups.filter(({ announced }) => announced).map(({ email }) => [db.accounts.find(row => row.externalKey === email)?.id]),
+    )
+  })
+
+  it('la_marca_de_una_persona_borrada_no_crea_nada (I-2)', async () => {
+    // The platform's deletion anonymizes and keeps the row (`staffDeletion.service.ts`): inactive, struck-out email, no
+    // phone. Its mark still points at it.
+    seedOrganization()
+    const deleted = seedStaff('deleted+cstaff000000000000000001@redacted.avoqado.invalid', {
+      active: false,
+      firstName: 'Usuario',
+      lastName: 'eliminado',
+      phone: null,
+    })
+    seedSignup(deleted.id, ORG, { createdAt: new Date(Date.now() - 3 * DAY) })
+
+    await expect(backfillFromOnboarding()).resolves.toBe(0)
+
+    expect(db.accounts).toHaveLength(0)
+    expect(db.events).toHaveLength(0)
+  })
+
+  it('reads the marks with the action as a SQL literal, so any plan can use the partial index (ruling 29b)', async () => {
+    seedOrganization()
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG)
+
+    await backfillFromOnboarding()
+    // The page after the cursor.
+    await backfillFromOnboarding()
+
+    const reads = rawReads('ActivityLog')
+    expect(reads).toHaveLength(2)
+    for (const read of reads) {
+      expect(read.sql).toContain(`l."action" = 'LANDING_SIGNUP_CREATED'`)
+      expect(read.values).not.toContain('LANDING_SIGNUP_CREATED')
+    }
+    // The cursor's date goes through `utcTs`, as rawSqlDateBindGuard asks: what Postgres receives.
+    expect(reads[1].text).toContain(`(l."createdAt", l."id") > (($1 AT TIME ZONE 'UTC'), $2)`)
+    expect(prismaMock.activityLog.findMany).not.toHaveBeenCalled()
+  })
+
+  it('a mark that commits late with an earlier time is still read: the cursor waits ten minutes behind «now» (M-3)', async () => {
+    seedOrganization()
+    seedOrganization({ id: OTHER_ORG, name: 'Taller Beto' })
+    seedSignup(seedStaff(EMAIL, {}, ORG).id, ORG, { createdAt: new Date(Date.now() - 2 * MINUTE) })
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+
+    // A signup whose transaction started earlier commits now: its mark is OLDER than the one already read.
+    seedSignup(seedStaff('beto@taller.mx', {}, OTHER_ORG).id, OTHER_ORG, { createdAt: new Date(Date.now() - 3 * MINUTE) })
+    await expect(backfillFromOnboarding()).resolves.toBe(1)
+
+    expect(db.accounts.map(account => account.externalKey).sort()).toEqual([EMAIL, 'beto@taller.mx'])
   })
 })
 
@@ -659,6 +839,34 @@ describe('fillFirstMoney', () => {
     expect(accountOf(account.id)?.firstMoneyAt).toBeNull()
   })
 
+  it('a demo venue moved to ACTIVE without its conversion keeps its sample sales: still not money (I-1)', async () => {
+    // A superadmin moves the TRIAL demo to ACTIVE (or the owner suspends or closes it): the status changes, the sample
+    // sales and `demoExpiresAt` stay. Only `convertDemoVenue` deletes the sales and clears the date.
+    const account = seedAccount({ organizationId: ORG })
+    seedPayment(seedVenue({ status: 'ACTIVE', demoExpiresAt: new Date(Date.now() + 20 * DAY) }).id)
+
+    await expect(fillFirstMoney()).resolves.toBe(0)
+
+    expect(accountOf(account.id)?.firstMoneyAt).toBeNull()
+  })
+
+  it('reads the oldest charge of each venue with one LATERAL, never the whole history of the batch (M-2)', async () => {
+    seedAccount({ organizationId: ORG })
+    const venue = seedVenue()
+    for (const days of [9, 7, 5]) seedPayment(venue.id, { createdAt: new Date(Date.now() - days * DAY) })
+
+    await expect(fillFirstMoney()).resolves.toBe(1)
+
+    expect(prismaMock.payment.groupBy).not.toHaveBeenCalled()
+    const [read] = rawReads('Payment')
+    expect(read.sql).toMatch(
+      /CROSS JOIN LATERAL \(\s*SELECT p\."createdAt" FROM "Payment" p[\s\S]*ORDER BY p\."createdAt" ASC\s+LIMIT 1\s*\)/,
+    )
+    // Only ids and statuses travel as binds: no date, so nothing for the session time zone to shift.
+    expect(read.values.some(value => value instanceof Date)).toBe(false)
+    expect(db.accounts[0].firstMoneyAt).toEqual(world.payments[0].createdAt)
+  })
+
   it('pago_pendiente_o_fallido_no_cuenta', async () => {
     const account = seedAccount({ organizationId: ORG })
     const venue = seedVenue()
@@ -678,6 +886,12 @@ describe('fillFirstMoney', () => {
 })
 
 describe('todo_con_tope_de_lote', () => {
+  /** The `take` of the last call to a Prisma read that matches. */
+  const lastTake = (fn: jest.Mock, isTheRead: (args: Row) => boolean = () => true) =>
+    [...fn.mock.calls].reverse().find(([args]) => isTheRead(args))?.[0]?.take
+  /** The LIMIT of the last raw read of the marks: its last bind. */
+  const lastMarksLimit = () => rawReads('ActivityLog').at(-1)?.values.at(-1)
+
   /** Three things for a pass to do, each with its own Organization. */
   const three = [1, 2, 3].map(n => ({
     email: `p${n}@cafe.mx`,
@@ -698,7 +912,7 @@ describe('todo_con_tope_de_lote', () => {
           }),
         ),
       run: applyPending,
-      read: () => prismaMock.crmInboundEntry.findMany,
+      limit: () => lastTake(prismaMock.crmInboundEntry.findMany),
       done: () => db.entries.filter(entry => entry.appliedAt).length,
     },
     {
@@ -710,7 +924,7 @@ describe('todo_con_tope_de_lote', () => {
           seedStaff(email, {}, organizationId)
         }),
       run: linkLandingAccounts,
-      read: () => prismaMock.crmAccount.findMany,
+      limit: () => lastTake(prismaMock.crmAccount.findMany, args => args.where.source === 'LANDING'),
       done: () => db.accounts.filter(account => account.organizationId).length,
     },
     {
@@ -721,7 +935,7 @@ describe('todo_con_tope_de_lote', () => {
           seedSignup(seedStaff(email, {}, organizationId).id, organizationId, { createdAt })
         }),
       run: backfillFromOnboarding,
-      read: () => prismaMock.activityLog.findMany,
+      limit: lastMarksLimit,
       done: () => db.accounts.length,
     },
     {
@@ -732,14 +946,14 @@ describe('todo_con_tope_de_lote', () => {
           seedPayment(seedVenue({ organizationId }).id)
         }),
       run: fillFirstMoney,
-      read: () => prismaMock.crmAccount.findMany,
+      limit: () => lastTake(prismaMock.crmAccount.findMany, args => args.where.firstMoneyAt === null),
       done: () => db.accounts.filter(account => account.firstMoneyAt).length,
     },
-  ])('$pass reads one batch per pass, and the next pass goes on with the rest', async ({ seed, run, read, done }) => {
+  ])('$pass reads one batch per pass, and the next pass goes on with the rest', async ({ seed, run, limit, done }) => {
     seed()
 
     await run(2)
-    expect(read()).toHaveBeenLastCalledWith(expect.objectContaining({ take: 2 }))
+    expect(limit()).toBe(2)
     expect(done()).toBe(2)
 
     await run(2)
@@ -747,7 +961,7 @@ describe('todo_con_tope_de_lote', () => {
 
     // The cap is the server's: asked for ten thousand, it reads 200.
     await run(10_000)
-    expect(read()).toHaveBeenLastCalledWith(expect.objectContaining({ take: 200 }))
+    expect(limit()).toBe(200)
     expect(done()).toBe(3)
   })
 

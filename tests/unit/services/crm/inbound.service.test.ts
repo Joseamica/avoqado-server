@@ -275,7 +275,10 @@ describe('applyEntry', () => {
     expect(db.accounts).toHaveLength(1)
     expect(db.accounts[0].organizationId).toBe(ORG)
     expect(eventsOf('LINKED')).toEqual([
-      expect.objectContaining({ sourceKey: `link:${db.accounts[0].id}`, data: { organizationId: ORG, organizationName: 'Café Ana S.A.' } }),
+      expect.objectContaining({
+        sourceKey: `link:${db.accounts[0].id}:${ORG}`,
+        data: { organizationId: ORG, organizationName: 'Café Ana S.A.' },
+      }),
     ])
     // Same data as the account already had: nothing to record as changed.
     expect(eventsOf('FIELD_CHANGE')).toHaveLength(0)

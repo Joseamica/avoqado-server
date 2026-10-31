@@ -24,7 +24,9 @@ import { PRODUCTION_VENUE_STATUSES } from '../../lib/venueStatus.constants'
 import { canonicalPhoneE164 } from '../../utils/phone'
 import prisma from '../../utils/prismaClient'
 import { retry, shouldRetryDbConnectionError } from '../../utils/retry'
+import { utcTs } from '../../utils/sqlDates'
 import { getInitialStage } from './accounts.service'
+import { notifyNewProspect } from './digest.service'
 import {
   applyEntry,
   LANDING,
@@ -37,31 +39,39 @@ import {
 import { addEvent } from './timeline.service'
 
 const BATCH = 200
-const SIGNUP_MARK = 'LANDING_SIGNUP_CREATED'
-/** Signups carry their mark since 18-aug-2026 (commit d0edd355f): nothing older has it, so a pass starts there. */
-const SIGNUPS_MARKED_SINCE = new Date('2026-08-18T00:00:00.000Z')
+const DAY_MS = 86_400_000
 /** Once the backfill is caught up, its cursor waits this far behind «now»: longer than any signup takes to commit. */
 const CAUGHT_UP_LAG_MS = 10 * 60_000
+/** Ruling 30: a signup older than this when it is loaded enters archived — found by a search, out of the pipeline. */
+const ARCHIVE_AFTER_MS = 14 * DAY_MS
+/** Ruling 30b: of what the backfill creates, only a signup younger than this is announced. */
+const ANNOUNCE_WITHIN_MS = DAY_MS
 
 /**
  * Real money (spec §8, Codex plan r1 #1): a charge processed in a real venue. A plan on trial or courtesy charges
- * nothing, a $0.00 sale moves nothing, and the onboarding's demo venue (TRIAL) comes seeded with sample sales.
+ * nothing, a $0.00 sale moves nothing, and a demo venue comes seeded with sample sales: TRIAL and LIVE_DEMO by their
+ * status, and a TRIAL moved to another status without `convertDemoVenue` (a superadmin, a suspension, a failed
+ * clean-up) by the `demoExpiresAt` it keeps — only the conversion deletes the sales and clears the date (I-1). The
+ * oldest-charge read (`fillFirstMoney`) writes the same rule in SQL.
  */
 const MONEY = { status: TransactionStatus.COMPLETED, amount: { gt: 0 } } satisfies Prisma.PaymentWhereInput
-const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES } } satisfies Prisma.VenueWhereInput
+const REAL_VENUE = { status: { in: PRODUCTION_VENUE_STATUSES }, demoExpiresAt: null } satisfies Prisma.VenueWhereInput
 
 type Cursor = { createdAt: Date; id: string }
 
 /**
- * Where the two paged passes left off. In memory on purpose: the server runs one instance, and a restart only walks the
- * pages once more — what is already done is skipped.
+ * Where the two paged passes left off, and the landing accounts whose Organization another account holds that this
+ * process already warned about. In memory on purpose: the server runs one instance, and a restart only walks the pages
+ * once more — what is already done is skipped — and warns once more.
  */
 const cursors: { link: Cursor | null; backfill: Cursor | null } = { link: null, backfill: null }
+const warnedHeld = new Set<string>()
 
-/** The paged passes start over, as after a restart. */
+/** The paged passes start over and forget what they warned about, as after a restart. */
 export function resetSweepCursors(): void {
   cursors.link = null
   cursors.backfill = null
+  warnedHeld.clear()
 }
 
 const errorText = (error: unknown) => (error instanceof Error ? error.message : String(error))
@@ -137,11 +147,35 @@ export async function linkLandingAccounts(limit = BATCH): Promise<number> {
     const organizationId = organizations[0]?.organization.id
     if (organizationId && organizationId !== team) owned.set(email, organizationId)
   }
+  // The Organizations another account already holds (one CRM account per Organization), in one read: they are skipped
+  // before any transaction and said once per account and process (M-1). Otherwise every pass would take the lock and
+  // warn again, for good.
+  const wanted = [...new Set(owned.values())]
+  const holders = wanted.length
+    ? await prisma.crmAccount.findMany({
+        where: { organizationId: { in: wanted } },
+        select: { id: true, organizationId: true },
+        take: wanted.length,
+      })
+    : []
+  const heldBy = new Map(holders.map(holder => [holder.organizationId, holder.id]))
 
   let linked = 0
   for (const account of accounts) {
     const organizationId = account.externalKey ? owned.get(account.externalKey) : undefined
     if (!organizationId) continue
+    const holder = heldBy.get(organizationId)
+    if (holder) {
+      if (!warnedHeld.has(account.id)) {
+        warnedHeld.add(account.id)
+        logger.warn('[CRM] Landing account left unlinked: its Organization already has a CRM account', {
+          accountId: account.id,
+          organizationId,
+          heldBy: holder,
+        })
+      }
+      continue
+    }
     try {
       const done = await prisma.$transaction(async tx => {
         // The row is locked BEFORE its `link:` key goes in, as `applyTx` does before `linkTx`: the sweep and an entry
@@ -168,42 +202,60 @@ export async function linkLandingAccounts(limit = BATCH): Promise<number> {
 
 const asObject = (value: Prisma.JsonValue): Prisma.JsonObject => (value && typeof value === 'object' && !Array.isArray(value) ? value : {})
 
+/** A landing mark (`LANDING_SIGNUP_CREATED`) with its person: null fields when the person's row is gone. */
+type SignupMark = {
+  id: string
+  createdAt: Date
+  data: Prisma.JsonValue
+  email: string | null
+  firstName: string | null
+  lastName: string | null
+  phone: string | null
+  active: boolean | null
+}
+
 /**
  * Gives every landing signup its CRM account (spec §5.3): the initial load of the signups from before the CRM, and the
  * signup whose entry could not be saved. They never kept the form's qualification, so the account says it is not
- * available (`qualificationAvailable: false`). Nothing is created for a signup whose Organization already has its
- * account (of any source) or no longer exists, whose person is gone, or whose entry is still pending — that one brings
- * every field. Nothing is announced either: an initial load is not hundreds of new prospects. Returns how many it
- * created.
+ * available (`qualificationAvailable: false`). Returns how many it created.
  *
- * The mark lives in the audit trail, the platform's largest table, and has no index of its own: the pass reads it by
- * date, forward from where it left off.
+ * By the signup's age when it is loaded (rulings 30 and 30b): older than 14 days, archived — found by a search, out of
+ * the pipeline and of the daily digest —; younger, open and «Sin dueño»; and only one younger than 24 h is announced
+ * with «Nuevo prospecto»: today's signup whose entry was never saved, which nothing else announces.
  *
- * ponytail: a restart walks the marked signups from the start once more (each page skipped in a few reads). Persist the
- * cursor if landing signups ever reach the tens of thousands.
+ * Nothing is created for a signup whose person was deleted (the platform anonymizes and keeps the row, inactive: I-2) or
+ * is gone, whose Organization already has its account (of any source) or no longer exists, or whose entry is still
+ * pending — that one brings every field.
+ *
+ * The marks are read on their own partial index (`ActivityLog_landing_signup_mark_idx`, ruling 29b), with the action as
+ * a SQL LITERAL: bound as a parameter, a generic plan (the one a cached prepared statement settles on) cannot prove the
+ * index's predicate, and walks the `createdAt` index filtering by action instead (measured with EXPLAIN on the
+ * throwaway database).
+ *
+ * ponytail: a restart walks every mark from the first one again, one page of 200 per sweep on that index; until it
+ * catches up, a mark from today waits behind it, ceil(marks / 200) sweeps of 5 minutes. Persist the cursor, or read the
+ * newest marks first, when the marks reach the tens of thousands.
  */
 export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
   const size = batchOf(limit)
   const from = cursors.backfill
   const startedAt = Date.now()
   const signups = await entryRead('crm-sweep.backfillFromOnboarding', () =>
-    prisma.activityLog.findMany({
-      where: { action: SIGNUP_MARK, ...(from ? after(from) : { createdAt: { gte: SIGNUPS_MARKED_SINCE } }) },
-      select: {
-        id: true,
-        createdAt: true,
-        data: true,
-        staff: { select: { email: true, firstName: true, lastName: true, phone: true } },
-      },
-      orderBy: [{ createdAt: 'asc' }, { id: 'asc' }],
-      take: size,
-    }),
+    prisma.$queryRaw<SignupMark[]>(Prisma.sql`
+      SELECT l."id", l."createdAt", l."data", s."email", s."firstName", s."lastName", s."phone", s."active"
+      FROM "ActivityLog" l
+      LEFT JOIN "Staff" s ON s."id" = l."staffId"
+      WHERE l."action" = 'LANDING_SIGNUP_CREATED'${from ? Prisma.sql` AND (l."createdAt", l."id") > (${utcTs(from.createdAt)}, ${from.id})` : Prisma.empty}
+      ORDER BY l."createdAt" ASC, l."id" ASC
+      LIMIT ${size}`),
   )
-  // A full page: the next pass goes on after it. A short one reached the end, and the cursor waits a few minutes
-  // behind «now», so a quiet week is not read again on every pass. A signup that failed is retried after a restart.
-  const last = signups.length ? cursorOf(signups[signups.length - 1]) : from
+  // A full page: the next pass goes on after it. A short one reached the end, and the cursor stays at the EARLIER of the
+  // last mark read and ten minutes ago (M-3): a signup whose transaction started before can still commit its mark in
+  // between, and reading those minutes again costs a few rows of the index, each skipped once it has its account. A
+  // signup that failed is retried after a restart.
+  const lastRead = signups.length ? cursorOf(signups[signups.length - 1]) : from
   const caughtUp: Cursor = { createdAt: new Date(startedAt - CAUGHT_UP_LAG_MS), id: '' }
-  cursors.backfill = signups.length === size || (last && last.createdAt > caughtUp.createdAt) ? last : caughtUp
+  cursors.backfill = signups.length === size || (lastRead && lastRead.createdAt < caughtUp.createdAt) ? lastRead : caughtUp
   if (!signups.length) return 0
 
   const rows = signups.map(signup => {
@@ -212,7 +264,7 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
       signup,
       data,
       organizationId: typeof data.organizationId === 'string' ? data.organizationId : null,
-      email: signup.staff?.email.toLowerCase().trim() || null,
+      email: signup.email?.toLowerCase().trim() || null,
     }
   })
   const organizationIds = [...new Set(rows.flatMap(row => (row.organizationId ? [row.organizationId] : [])))]
@@ -232,11 +284,12 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
   let created = 0
   for (const { signup, data, organizationId, email } of rows) {
     const organization = organizationId ? organizationOf.get(organizationId) : undefined
-    if (!email || !organization || organization.crmAccount || pending.has(email)) continue
-    const person = signup.staff
-    const phone = person?.phone || organization.phone
+    if (!email || !signup.active || !organization || organization.crmAccount || pending.has(email)) continue
+    const phone = signup.phone || organization.phone
+    const age = startedAt - signup.createdAt.getTime()
+    const archived = age > ARCHIVE_AFTER_MS
     try {
-      const wrote = await prisma.$transaction(async tx => {
+      const accountId = await prisma.$transaction(async tx => {
         const upserted = await upsertAccountBySource(tx, {
           source: LANDING,
           externalKey: email,
@@ -246,16 +299,17 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
             organizationId: organization.id,
             qualificationAvailable: false,
             sourceDetail: sourceDetailOf(data),
+            ...(archived ? { archivedAt: new Date(startedAt) } : {}),
           },
           contact: {
-            name: [person?.firstName, person?.lastName].filter(Boolean).join(' ') || organization.name,
+            name: [signup.firstName, signup.lastName].filter(Boolean).join(' ') || organization.name,
             phoneE164: phone ? canonicalPhoneE164(phone) : null,
             email,
             isPrimary: true,
           },
         })
         // Its landing account already existed (linked somewhere else, or waiting for the link pass).
-        if (!upserted.created) return false
+        if (!upserted.created) return null
         if (upserted.account.organizationId !== organization.id) {
           // ponytail: the Organization got its CRM account (a «Ganar») in the instant between the read and this insert;
           // the duplicate is the team's to merge, as in `applyTx`.
@@ -268,11 +322,14 @@ export async function backfillFromOnboarding(limit = BATCH): Promise<number> {
           accountId: upserted.account.id,
           kind: 'SYSTEM',
           actorStaffId: null,
-          data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString() },
+          data: { event: 'CREATED_FROM_SIGNUP', activityLogId: signup.id, signedUpAt: signup.createdAt.toISOString(), archived },
         })
-        return true
+        return upserted.account.id
       })
-      if (wrote) created++
+      if (!accountId) continue
+      created++
+      // After the commit, and never throws: a notice that does not go out is logged, and its email key keeps it single.
+      if (age < ANNOUNCE_WITHIN_MS) await notifyNewProspect(accountId)
     } catch (error) {
       logger.error('[CRM] An old landing signup could not get its CRM account; a restart retries it', {
         activityLogId: signup.id,
@@ -306,25 +363,25 @@ export async function fillFirstMoney(limit = BATCH): Promise<number> {
   const organizationIds = [...new Set(accounts.flatMap(account => (account.organizationId ? [account.organizationId] : [])))]
   if (!organizationIds.length) return 0
 
-  // The oldest charge of every venue of those Organizations in one aggregate, then whose venue each one is.
-  const firstByVenue = await prisma.payment.groupBy({
-    by: ['venueId'],
-    where: { ...MONEY, venue: { ...REAL_VENUE, organizationId: { in: organizationIds } } },
-    _min: { createdAt: true },
-  })
-  const venues = await prisma.venue.findMany({
-    where: { id: { in: firstByVenue.map(row => row.venueId) } },
-    select: { id: true, organizationId: true },
-    take: firstByVenue.length,
-  })
-  const organizationOf = new Map(venues.map(venue => [venue.id, venue.organizationId]))
+  // The oldest real charge of each real venue of those Organizations (M-2): a LATERAL `ORDER BY … LIMIT 1` reads about one
+  // row per venue on `Payment(venueId, status, createdAt)`, never a whole history. `MONEY` and `REAL_VENUE` written in
+  // SQL; only ids and statuses travel as binds, so no date can shift with the session's time zone.
+  const firstByVenue = await prisma.$queryRaw<Array<{ venueId: string; organizationId: string; createdAt: Date }>>(Prisma.sql`
+    SELECT v."id" AS "venueId", v."organizationId", oldest."createdAt"
+    FROM "Venue" v
+    CROSS JOIN LATERAL (
+      SELECT p."createdAt" FROM "Payment" p
+      WHERE p."venueId" = v."id" AND p."status" = 'COMPLETED' AND p."amount" > 0
+      ORDER BY p."createdAt" ASC
+      LIMIT 1
+    ) oldest
+    WHERE v."organizationId" IN (${Prisma.join(organizationIds)})
+      AND v."status"::text IN (${Prisma.join(PRODUCTION_VENUE_STATUSES)})
+      AND v."demoExpiresAt" IS NULL`)
   const firstMoney = new Map<string, Date>()
-  for (const { venueId, _min } of firstByVenue) {
-    const organizationId = organizationOf.get(venueId)
-    const at = _min.createdAt
-    if (!organizationId || !at) continue
+  for (const { organizationId, createdAt } of firstByVenue) {
     const earlier = firstMoney.get(organizationId)
-    if (!earlier || at < earlier) firstMoney.set(organizationId, at)
+    if (!earlier || createdAt < earlier) firstMoney.set(organizationId, createdAt)
   }
 
   let filled = 0
