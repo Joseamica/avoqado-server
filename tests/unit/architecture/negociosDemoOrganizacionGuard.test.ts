@@ -50,6 +50,7 @@ const POR_QUE_NO_LA_HEREDA: Record<string, string> = {
   CashOutCommissionRate: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   CashOutScheduleDay: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
   PromoterBankAccount: 'Cash Out de promotores (PlayTelecom): ' + CERRADO,
+  CrmAccount: 'CRM del equipo de ventas de Avoqado: lo escriben las rutas /crm con llaves de plataforma; el usuario demo no tiene llaves',
 }
 const PREFIJOS: Array<[string, string]> = [['Catalog', 'catálogo maestro: ' + CERRADO]]
 

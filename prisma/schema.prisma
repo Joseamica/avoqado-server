@@ -161,6 +161,9 @@ model Organization {
   // Conector Shopify (spec 2026-10-07)
   shopifyStores ShopifyStore[]
 
+  /// CRM propio (spec 2026-10-30): el negocio del CRM ligado a esta organización, si lo hay (a lo más uno).
+  crmAccount CrmAccount?
+
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 }
@@ -1305,6 +1308,9 @@ model Staff {
   upsellRulesApproved UpsellRule[]           @relation("UpsellRuleApprovedBy")
   supplierItemCodes   SupplierItemCode[]
   wasteReports        InventoryWasteReport[]
+
+  /// CRM propio (spec 2026-10-30): negocios del CRM de los que esta persona es dueña.
+  crmAccountsOwned CrmAccount[] @relation("CrmAccountOwner")
 
   // Email is now @unique on the field itself (globally unique)
   @@index([email])
@@ -20516,4 +20522,199 @@ model DocumentRequestVenueLink {
   @@index([requestId, linkedAt, id])
   @@index([submissionId])
   @@index([actorId])
+}
+
+// ==========================================
+// CRM PROPIO — el equipo de ventas de Avoqado (spec docs/superpowers/specs/2026-10-30-crm-propio-design.md)
+// Tablas de PLATAFORMA, no de un venue: las usa el equipo de ventas por /api/v1/crm con sus llaves «sólo CRM».
+// Tipos, fuentes y estados son String validados con zod, NUNCA enums de Postgres: un servidor con un cliente de
+// Prisma anterior (el del 3000, o producción a media publicación) revienta al leer un valor de enum que no conoce;
+// un texto nuevo no rompe a nadie.
+// ==========================================
+
+/// Las llaves «sólo CRM» de una persona, por su correo. Una fila por persona.
+model PlatformAccess {
+  id          String   @id @default(cuid())
+  email       String   @unique // siempre en minúsculas
+  verScope    String? // 'propios' | 'todos' | null (sin crm:ver)
+  editarScope String? // 'propios' | 'todos' | null (sin crm:editar)
+  contactar   Boolean  @default(false)
+  campanas    Boolean  @default(false)
+  exportar    Boolean  @default(false)
+  ventas      Boolean  @default(false)
+  admin       Boolean  @default(false)
+  active      Boolean  @default(true)
+  createdById String
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+}
+
+/// Un negocio del CRM: va de prospecto a cliente en UN solo registro y se liga a su Organization.
+/// Abierto, ganado o perdido se deduce del `kind` de su etapa; no se guarda dos veces.
+model CrmAccount {
+  id          String   @id @default(cuid())
+  name        String
+  giro        String?
+  ventasRango String?
+  sucursales  Int?
+  modulos     String[] @default([])
+
+  // Fuente: LANDING | WHATSAPP | MANUAL | IMPORTACION | REFERIDO | OTRO. La identidad de entrada es fuente + llave
+  // externa (landing: correo normalizado; WhatsApp: teléfono E.164; HubSpot: su id); a mano va sin llave.
+  source       String
+  externalKey  String?
+  sourceDetail Json? // UTM, campaña o texto prellenado
+  referidoPor  String?
+
+  ownerStaffId   String? // null = «Sin dueño»
+  owner          Staff?   @relation("CrmAccountOwner", fields: [ownerStaffId], references: [id], onDelete: SetNull)
+  stageId        String
+  stage          CrmStage @relation(fields: [stageId], references: [id], onDelete: Restrict)
+  stageEnteredAt DateTime @default(now())
+
+  lastTouchAt    DateTime  @default(now())
+  nextActivityAt DateTime?
+
+  lostReasonId String?
+  lostReason   CrmLostReason? @relation(fields: [lostReasonId], references: [id], onDelete: Restrict)
+  lostNote     String?
+  wonAt        DateTime?
+  lostAt       DateTime?
+  archivedAt   DateTime? // fuera del embudo, de los avisos y de los reportes; se encuentra al buscar
+
+  // Cliente: un negocio del CRM por Organization. SetNull: borrar una organización nunca falla por el CRM.
+  organizationId   String?       @unique
+  organization     Organization? @relation(fields: [organizationId], references: [id], onDelete: SetNull)
+  firstMoneyAt     DateTime?
+  firstMoneySource String? // 'PAGO' | 'ANTERIOR_AL_CRM'
+
+  consentMarketing     Boolean   @default(false)
+  consentAt            DateTime?
+  consentSource        String?
+  consentNoticeVersion String?
+
+  // false = se creó desde un alta vieja, sin los datos del formulario (giro, ventas, sucursales).
+  qualificationAvailable Boolean @default(true)
+
+  contacts       CrmContact[]
+  activities     CrmActivity[]
+  timelineEvents CrmTimelineEvent[]
+  inboundEntries CrmInboundEntry[]
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@unique([source, externalKey])
+  @@index([ownerStaffId, stageId])
+  @@index([nextActivityAt])
+  @@index([source, organizationId])
+}
+
+/// Una persona de un negocio del CRM. El teléfono y el correo AVISAN de duplicados pero no son únicos: el mismo
+/// dueño puede tener dos negocios, y un índice único tumbaría escrituras legítimas.
+model CrmContact {
+  id        String     @id @default(cuid())
+  accountId String
+  account   CrmAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  name      String
+  phoneE164 String?
+  email     String?
+  role      String?
+  isPrimary Boolean    @default(false)
+  createdAt DateTime   @default(now())
+  updatedAt DateTime   @updatedAt
+
+  @@index([accountId])
+  @@index([phoneE164])
+  @@index([email])
+}
+
+/// Etapa del embudo. kind: ABIERTA | GANADA | PERDIDA (no cambia). staleDays: días sin toque para «Estancado · N días».
+model CrmStage {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  order     Int
+  kind      String
+  staleDays Int?
+  accounts  CrmAccount[]
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}
+
+/// Motivo de pérdida. No se borra: se desactiva.
+model CrmLostReason {
+  id        String       @id @default(cuid())
+  name      String       @unique
+  active    Boolean      @default(true)
+  accounts  CrmAccount[]
+  createdAt DateTime     @default(now())
+  updatedAt DateTime     @updatedAt
+}
+
+/// Actividad con responsable y fecha (llamada, WhatsApp, correo, reunión, demo, tarea). Hecha = doneAt + doneById.
+model CrmActivity {
+  id              String     @id @default(cuid())
+  accountId       String
+  account         CrmAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  type            String
+  title           String
+  dueAt           DateTime
+  assigneeStaffId String
+  doneAt          DateTime?
+  doneById        String?
+  result          String?
+  createdAt       DateTime   @default(now())
+  updatedAt       DateTime   @updatedAt
+
+  @@index([assigneeStaffId, doneAt, dueAt])
+  @@index([accountId])
+}
+
+/// Línea de tiempo de un negocio: sólo se agrega, nunca se edita. sourceKey (único) deja que el barrido no repita.
+model CrmTimelineEvent {
+  id           String     @id @default(cuid())
+  accountId    String
+  account      CrmAccount @relation(fields: [accountId], references: [id], onDelete: Cascade)
+  kind         String
+  actorStaffId String? // null = el sistema
+  data         Json
+  sourceKey    String?    @unique
+  createdAt    DateTime   @default(now())
+
+  @@index([accountId, createdAt])
+}
+
+/// El registro CRUDO y durable de cada entrada (por ahora, la landing): se escribe ANTES de procesarla.
+model CrmInboundEntry {
+  id               String      @id @default(cuid())
+  source           String
+  externalKey      String
+  payload          Json
+  receivedAt       DateTime    @default(now())
+  // { organizationId: string | null, alreadyExisted: boolean, yaEsCliente: boolean }, o null si el alta falló.
+  signupOutcome    Json?
+  signupResolvedAt DateTime?
+  appliedAt        DateTime?
+  accountId        String?
+  account          CrmAccount? @relation(fields: [accountId], references: [id], onDelete: SetNull)
+  lastError        String?
+
+  @@index([appliedAt])
+}
+
+/// El aviso diario de cada persona: se APARTA antes de mandarlo (la llave única impide mandarlo dos veces) y guarda el
+/// contenido para reintentar igual.
+model CrmDigestSend {
+  id         String   @id @default(cuid())
+  staffId    String
+  day        String // YYYY-MM-DD en hora de Ciudad de México
+  status     String // APARTADO | ENVIADO | FALLO
+  attempts   Int      @default(0)
+  kind       String // DIARIO
+  reservedAt DateTime @default(now())
+  content    Json?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
+
+  @@unique([staffId, day, kind])
 }
