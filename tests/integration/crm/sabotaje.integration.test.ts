@@ -1,12 +1,14 @@
 /**
- * Sabotaje del CRM — contra Postgres real, el JWT real y la app entera por supertest (spec 2026-10-30 §5.1, Ruling 3).
+ * CRM sabotage — against a real Postgres, the real JWT and the whole app through supertest (spec 2026-10-30 §5.1,
+ * Ruling 3).
  *
- * Un vendedor es VIEWER del venue interno y tiene TODAS las llaves `crm:*`. Esas llaves abren `/api/v1/crm` y nada más:
- * con el mismo token, todo lo del superadmin y lo de un negocio ajeno contesta 403. Con el mock global de Prisma esto no
- * se puede probar — los guardias reales (`authorizeRole`, `checkPermission`) tienen que leer la base de verdad.
+ * A seller is a VIEWER of the internal venue and holds EVERY `crm:*` key. Those keys open `/api/v1/crm` and nothing else:
+ * with the same token, everything superadmin-only and everything of another business answers 403. The global Prisma
+ * mock of the unit project cannot prove this — the real guards (`authorizeRole`, `checkPermission`) must read a real
+ * database.
  *
  * Run with:
- *   TEST_DATABASE_URL='postgresql://postgres:<contraseña>@localhost:5432/avoqado_crm_test_<fecha>' \
+ *   TEST_DATABASE_URL='postgresql://postgres:<password>@localhost:5432/avoqado_crm_test_<date>' \
  *     npx jest --selectProjects=integration --runTestsByPath tests/integration/crm/sabotaje.integration.test.ts --ci
  */
 import type { Server } from 'http'
@@ -16,37 +18,36 @@ import request from 'supertest'
 import app from '@/app'
 import prisma from '@/utils/prismaClient'
 
-const sufijo = `crm${Date.now()}`
-const correo = `vendedor-${sufijo}@test.mx`
+const suffix = `crm${Date.now()}`
+const email = `seller-${suffix}@test.mx`
 
-describe('CRM: un vendedor con todas las llaves crm:* sigue siendo VIEWER fuera del CRM', () => {
+describe('CRM: a seller with every crm:* key is still a VIEWER outside the CRM', () => {
   let server: Server
   let orgId: string | undefined
   let venueId: string | undefined
-  let otraOrgId: string | undefined
-  let otroVenueId: string | undefined
+  let otherOrgId: string | undefined
+  let otherVenueId: string | undefined
   let staffId: string | undefined
   let token: string
 
   beforeAll(async () => {
     server = app.listen(0, '127.0.0.1')
-    await new Promise<void>(listo => server.once('listening', () => listo()))
+    await new Promise<void>(done => server.once('listening', () => done()))
 
-    orgId = (await prisma.organization.create({ data: { name: `Prime ${sufijo}`, email: `prime-${sufijo}@test.mx`, phone: '5555555555' } }))
+    orgId = (await prisma.organization.create({ data: { name: `Prime ${suffix}`, email: `prime-${suffix}@test.mx`, phone: '5555555555' } }))
       .id
-    venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `Equipo de ventas ${sufijo}`, slug: `ventas-${sufijo}` } }))
-      .id
-    otraOrgId = (
-      await prisma.organization.create({ data: { name: `Cliente ${sufijo}`, email: `cliente-${sufijo}@test.mx`, phone: '5555555555' } })
+    venueId = (await prisma.venue.create({ data: { organizationId: orgId, name: `Sales team ${suffix}`, slug: `sales-${suffix}` } })).id
+    otherOrgId = (
+      await prisma.organization.create({ data: { name: `Client ${suffix}`, email: `client-${suffix}@test.mx`, phone: '5555555555' } })
     ).id
-    otroVenueId = (await prisma.venue.create({ data: { organizationId: otraOrgId, name: `Cliente ${sufijo}`, slug: `cliente-${sufijo}` } }))
+    otherVenueId = (await prisma.venue.create({ data: { organizationId: otherOrgId, name: `Client ${suffix}`, slug: `client-${suffix}` } }))
       .id
 
-    staffId = (await prisma.staff.create({ data: { email: correo, firstName: 'Vendedor', lastName: 'Sabotaje', emailVerified: true } })).id
+    staffId = (await prisma.staff.create({ data: { email, firstName: 'Seller', lastName: 'Sabotage', emailVerified: true } })).id
     await prisma.staffVenue.create({ data: { staffId, venueId, role: StaffRole.VIEWER, active: true } })
     await prisma.platformAccess.create({
       data: {
-        email: correo,
+        email,
         verScope: 'todos',
         editarScope: 'todos',
         contactar: true,
@@ -65,18 +66,18 @@ describe('CRM: un vendedor con todas las llaves crm:* sigue siendo VIEWER fuera 
 
   afterAll(async () => {
     try {
-      // Every delete is keyed by an id this file created: a `where` with an undefined value would wipe the whole table.
-      await prisma.platformAccess.deleteMany({ where: { email: correo } })
+      // Every delete is keyed by something this file created: a `where` with an undefined value would wipe the table.
+      await prisma.platformAccess.deleteMany({ where: { email } })
       if (staffId) {
         await prisma.staffVenue.deleteMany({ where: { staffId } })
         await prisma.staff.deleteMany({ where: { id: staffId } })
       }
-      const venues = [venueId, otroVenueId].filter((id): id is string => !!id)
+      const venues = [venueId, otherVenueId].filter((id): id is string => !!id)
       if (venues.length) await prisma.venue.deleteMany({ where: { id: { in: venues } } })
-      const orgs = [orgId, otraOrgId].filter((id): id is string => !!id)
+      const orgs = [orgId, otherOrgId].filter((id): id is string => !!id)
       if (orgs.length) await prisma.organization.deleteMany({ where: { id: { in: orgs } } })
     } finally {
-      await new Promise<void>(listo => server.close(() => listo()))
+      await new Promise<void>(done => server.close(() => done()))
     }
   })
 
@@ -86,21 +87,21 @@ describe('CRM: un vendedor con todas las llaves crm:* sigue siendo VIEWER fuera 
     '/api/v1/superadmin/billing',
     '/api/v1/superadmin/kyc',
     '/api/v1/dashboard/superadmin/marketing/campaigns',
-  ])('GET %s → 403', async ruta => {
-    const res = await request(server).get(ruta).set('Authorization', `Bearer ${token}`)
+  ])('GET %s → 403', async path => {
+    const res = await request(server).get(path).set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(403)
   })
 
-  it('GET /api/v1/dashboard/venues/<otro venue>/payments → 403', async () => {
-    const res = await request(server).get(`/api/v1/dashboard/venues/${otroVenueId}/payments`).set('Authorization', `Bearer ${token}`)
+  it('GET /api/v1/dashboard/venues/<another venue>/payments → 403', async () => {
+    const res = await request(server).get(`/api/v1/dashboard/venues/${otherVenueId}/payments`).set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(403)
   })
 
-  it.each(['/mcp', '/mcp/directory'])('POST %s con el token del vendedor no sirve nada', async ruta => {
+  it.each(['/mcp', '/mcp/directory'])('POST %s with the seller token serves nothing', async path => {
     const res = await request(server)
-      .post(ruta)
+      .post(path)
       .set('Authorization', `Bearer ${token}`)
       .set('Accept', 'application/json, text/event-stream')
       .send({ jsonrpc: '2.0', id: 1, method: 'tools/list' })
@@ -111,7 +112,7 @@ describe('CRM: un vendedor con todas las llaves crm:* sigue siendo VIEWER fuera 
     expect(res.body?.result).toBeUndefined()
   })
 
-  it('GET /api/v1/crm/me → 200 con sus llaves, leídas de la base', async () => {
+  it('GET /api/v1/crm/me → 200 with the keys read from the database', async () => {
     const res = await request(server).get('/api/v1/crm/me').set('Authorization', `Bearer ${token}`)
 
     expect(res.status).toBe(200)
@@ -131,9 +132,9 @@ describe('CRM: un vendedor con todas las llaves crm:* sigue siendo VIEWER fuera 
   })
 
   // Last on purpose: it takes the keys away for the rest of the file.
-  it('quitar las llaves a media sesión: la siguiente petición con el MISMO token da 403', async () => {
+  it('keys removed mid-session: the next request with the SAME token gets 403', async () => {
     await prisma.platformAccess.update({
-      where: { email: correo },
+      where: { email },
       data: { verScope: null, editarScope: null, contactar: false, campanas: false, exportar: false, ventas: false, admin: false },
     })
 
