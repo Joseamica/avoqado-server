@@ -33,7 +33,7 @@ export async function auditMcpWrite(
     action: params.action,
     entity: params.entity,
     entityId: params.entityId,
-    data: { ...params.data, ...(await mcpProvenance(scope)) },
+    data: { ...params.data, source: 'customer-mcp', ...(await mcpClientStamp(scope.clientId)) },
   })
 }
 
