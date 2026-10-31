@@ -1,23 +1,22 @@
 // controllers/public/receipt.public.controller.ts
 import { NextFunction, Request, Response } from 'express'
-import { getDigitalReceiptByAccessKey } from '../../services/tpv/digitalReceipt.tpv.service'
-import { generateReceiptHTML } from '../../utils/receiptTemplate'
+import { generateReceiptUrl, getDigitalReceiptByAccessKey } from '../../services/tpv/digitalReceipt.tpv.service'
 import { NotFoundError } from '../../errors/AppError'
-import { productosDelSnapshot } from '../../services/shared/productosDelRecibo'
-import { copiaGuardada } from '../../services/shared/lineasDelTicket'
 import logger from '../../config/logger'
 
 // Public route to get a receipt by its access key
 // GET /api/public/receipt/:accessKey
 //
-// 🔴 ESTA RUTA TIENE DOS RAMAS Y **SÓLO UNA ES LEGACY**. Lee esto antes de borrar nada.
+// 🔴 ESTA RUTA TIENE DOS RAMAS. Lee esto antes de borrar nada.
 //
-//   • Rama JSON (`Accept: application/json`) — **VIVA Y EN USO.** Es de donde el
+//   • Rama JSON (`Accept: application/json` o `*/*`) — **VIVA Y EN USO.** Es de donde el
 //     dashboard saca los datos del recibo público (`ReceiptViewer.tsx` →
 //     `GET /api/v1/public/receipt/:accessKey`). Si la quitas, tumbas la página
 //     de recibo del cliente final por completo.
-//   • Rama HTML (`Accept: text/html`, o sea: un QR escaneado con el navegador) —
-//     **LEGACY. Ya no es destino de QRs nuevos.** Ver `generateReceiptHTML` abajo.
+//   • Rama del navegador (`Accept: text/html`, o sin Accept: un QR escaneado) — redirige a esa
+//     página nueva (`${FRONTEND_URL}/receipts/public/:accessKey`), que además tiene calificación y
+//     AUTOFACTURA. Sólo la alcanzan los QR que ANDROID e iOS imprimieron del 22-jul al 4-ago-2026;
+//     la página HTML vieja que antes se pintaba aquí se quitó (D21, 31-oct-2026).
 //
 // Sus hermanas `/:accessKey/review*` y `/:accessKey/cfdi*` (public.routes.ts)
 // también están VIVAS: son justamente las que hacen funcionar la página nueva.
@@ -56,103 +55,8 @@ export async function getPublicReceipt(req: Request<{ accessKey: string }>, res:
       return
     }
 
-    // Transform dataSnapshot to include missing receiptInfo property
-    if (!receipt.dataSnapshot || typeof receipt.dataSnapshot !== 'object') {
-      throw new NotFoundError('Invalid receipt data')
-    }
-
-    const dataSnapshot = receipt.dataSnapshot as any
-
-    // Transform and validate data snapshot with proper fallbacks
-    const receiptData = {
-      payment: {
-        id: dataSnapshot.payment?.id || '',
-        amount: dataSnapshot.payment?.amount || 0,
-        tipAmount: dataSnapshot.payment?.tipAmount || 0,
-        totalAmount: dataSnapshot.payment?.totalAmount || dataSnapshot.payment?.amount + dataSnapshot.payment?.tipAmount || 0,
-        method: dataSnapshot.payment?.method || 'CASH',
-        status: dataSnapshot.payment?.status || 'COMPLETED',
-        createdAt: dataSnapshot.payment?.createdAt || new Date().toISOString(),
-        ...dataSnapshot.payment,
-      },
-      venue: {
-        id: dataSnapshot.venue?.id || '',
-        name: dataSnapshot.venue?.name || 'Establecimiento',
-        address: dataSnapshot.venue?.address || '',
-        city: dataSnapshot.venue?.city || '',
-        state: dataSnapshot.venue?.state || '',
-        phone: dataSnapshot.venue?.phone || '',
-        email: dataSnapshot.venue?.email || '',
-        logo: dataSnapshot.venue?.logo,
-        primaryColor: dataSnapshot.venue?.primaryColor || '#2563eb', // Default blue color
-        currency: dataSnapshot.venue?.currency || 'MXN',
-        ...dataSnapshot.venue,
-      },
-      order: {
-        id: dataSnapshot.order?.id || '',
-        orderNumber: dataSnapshot.order?.number || 'N/A',
-        type: dataSnapshot.order?.type || 'DINE_IN',
-        source: dataSnapshot.order?.source || 'POS',
-        subtotal: dataSnapshot.order?.subtotal || 0,
-        taxAmount: dataSnapshot.order?.taxAmount || dataSnapshot.order?.tax || 0, // Handle both field names
-        tipAmount: dataSnapshot.order?.tipAmount || 0,
-        total: dataSnapshot.order?.total || 0,
-        table: dataSnapshot.order?.table,
-        ...dataSnapshot.order,
-      },
-      // D8: la plantilla usa el formato de la terminal (`productName`, `unitPrice`, `total`): sus `items` tal cual, o los del
-      // panel (`order.items`) traducidos a ese formato.
-      // D15: el recibo de UNA parte (`ticketTotals.parcial`) va por el helper, que lo vuelve un renglón «Pago parcial».
-      // D1: con copia del ticket mandan sus renglones aunque no sea `parcial` (Codex plan r3 #2).
-      items:
-        !copiaGuardada(dataSnapshot) && dataSnapshot.ticketTotals?.parcial !== true && dataSnapshot.items?.length
-        ? dataSnapshot.items
-        : productosDelSnapshot(dataSnapshot).map(p => ({
-            productName: p.name,
-            quantity: p.quantity,
-            unitPrice: p.price,
-            total: p.totalPrice,
-            weightKg: p.weightKg ?? null,
-            modifiers: p.modifiers,
-            ...(p.peso ? { peso: p.peso } : {}),
-            ...(p.nota ? { nota: p.nota } : {}),
-            ...(p.area ? { areaSourceLabel: p.area } : {}),
-            ...(p.cortesia ? { cortesia: true } : {}),
-            ...(p.pieza ? { pieza: true } : {}),
-          })),
-      lineasDelTicket: copiaGuardada(dataSnapshot) ?? undefined,
-      processedBy: dataSnapshot.processedBy,
-      ticketTotals: dataSnapshot.ticketTotals ?? null, // IVA por producto, plan 7 (D3): el HTML legado pinta los totales congelados
-      receiptInfo: {
-        generatedAt: new Date().toISOString(),
-        currency: dataSnapshot.venue?.currency || 'MXN',
-        taxRate:
-          dataSnapshot.order?.taxAmount && dataSnapshot.order?.subtotal ? dataSnapshot.order.taxAmount / dataSnapshot.order.subtotal : 0.16, // Default 16% tax rate for Mexico
-      },
-    }
-
-    // Log basic receipt access info
-    logger.info('Generating receipt HTML', {
-      accessKey,
-      itemsCount: receiptData.items?.length || 0,
-      orderTotal: dataSnapshot.order?.total,
-    })
-
-    // ⚠️ LEGACY — esta página HTML ya NO es a donde apuntan los QRs nuevos.
-    // El destino bueno es `${FRONTEND_URL}/receipts/public/:accessKey` (dashboard),
-    // que además de calificación tiene AUTOFACTURA (CFDI); esta plantilla nunca la tuvo.
-    // Los clientes (avoqado-android / avoqado-ios / avoqado-tpv) ya reciben esa URL
-    // armada en `digitalReceipt.receiptUrl` (ver `mapDigitalReceiptResponse`).
-    // Se mantiene viva SÓLO porque hay tickets YA IMPRESOS circulando con este QR.
-    // No la borres: rompes el recibo de todo ticket impreso antes de agosto 2026.
-    const htmlContent = generateReceiptHTML(receiptData as any)
-
-    // Set proper headers for HTML response
-    res.setHeader('Content-Type', 'text/html; charset=utf-8')
-    res.setHeader('Cache-Control', 'public, max-age=3600') // Cache for 1 hour
-
-    // Send the HTML response
-    res.status(200).send(htmlContent)
+    // 302 y no 301: el navegador no lo guarda para siempre, por si un día cambia FRONTEND_URL.
+    res.redirect(302, generateReceiptUrl(receipt.accessKey, process.env.FRONTEND_URL || 'https://dashboardv2.avoqado.io'))
   } catch (error) {
     logger.error('Error accessing digital receipt', { accessKey: req.params.accessKey, error })
     next(error)
