@@ -125,6 +125,29 @@ describe('requireCrm', () => {
     expect(prismaMock.platformAccess.findUnique).toHaveBeenCalledTimes(2)
   })
 
+  it('impersonacion_siempre_403', async () => {
+    // Even a session whose person holds every key: an impersonation token never reads the CRM, and the guard decides
+    // before touching the database (review I-1: the shared guard's prefix can be dodged with `/api/v1/Crm/me`).
+    seller({ verScope: 'todos', editarScope: 'todos', contactar: true, campanas: true, exportar: true, ventas: true, admin: true })
+    const impersonating = {
+      authContext: {
+        userId: STAFF_ID,
+        realUserId: 'csuperadminactor000000001',
+        isImpersonating: true,
+        impersonation: { mode: 'user', impersonatedUserId: STAFF_ID, expiresAt: Math.floor(Date.now() / 1000) + 600, extensionsUsed: 0 },
+      },
+    } as unknown as Request
+
+    const { res, next, req } = await ask(CRM_KEYS, impersonating)
+
+    expect(res.status).toHaveBeenCalledWith(403)
+    expect(res.json).toHaveBeenCalledWith(expect.objectContaining({ code: 'CRM_FORBIDDEN' }))
+    expect(next).not.toHaveBeenCalled()
+    expect(req.crmAccess).toBeUndefined()
+    expect(prismaMock.staff.findUnique).not.toHaveBeenCalled()
+    expect(prismaMock.platformAccess.findUnique).not.toHaveBeenCalled()
+  })
+
   it('sin_sesion_401', async () => {
     const { res, next } = await ask('crm:ver', {} as Request)
 
@@ -137,7 +160,8 @@ describe('requireCrm', () => {
 describe('impersonation never reaches the CRM', () => {
   it('el_crm_se_bloquea_al_impersonar_como_el_superadmin', async () => {
     // The CRM is Avoqado's own data, like /api/v1/superadmin: an impersonation session (a superadmin seeing a venue as
-    // someone else) gets the same 403 there, even for a read.
+    // someone else) gets the same 403 there, even for a read — with the URL written as expected. A mixed-case URL gets
+    // past this prefix, which is why `requireCrm` also rejects impersonation (`impersonacion_siempre_403`).
     const impersonating = {
       method: 'GET',
       originalUrl: '/api/v1/crm/me',

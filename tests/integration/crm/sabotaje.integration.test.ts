@@ -16,6 +16,7 @@ import { StaffRole } from '@prisma/client'
 import jwt from 'jsonwebtoken'
 import request from 'supertest'
 import app from '@/app'
+import { generateImpersonationAccessToken } from '@/jwt.service'
 import prisma from '@/utils/prismaClient'
 
 const suffix = `crm${Date.now()}`
@@ -29,6 +30,7 @@ describe('CRM: a seller with every crm:* key is still a VIEWER outside the CRM',
   let otherVenueId: string | undefined
   let staffId: string | undefined
   let token: string
+  let impersonationToken: string
 
   beforeAll(async () => {
     server = app.listen(0, '127.0.0.1')
@@ -61,6 +63,15 @@ describe('CRM: a seller with every crm:* key is still a VIEWER outside the CRM',
 
     token = jwt.sign({ sub: staffId, orgId, venueId, role: StaffRole.VIEWER }, process.env.ACCESS_TOKEN_SECRET as string, {
       expiresIn: '15m',
+    })
+    // A superadmin impersonating this seller (user mode): the effective identity (`sub`) is the seller, who holds every
+    // key. The actor id is never looked up on this path, so it needs no row.
+    impersonationToken = generateImpersonationAccessToken(staffId, orgId, venueId, StaffRole.VIEWER, {
+      sub: 'csuperadminactor000000001',
+      role: StaffRole.SUPERADMIN,
+      mode: 'user',
+      expiresAt: Math.floor(Date.now() / 1000) + 600,
+      extensionsUsed: 0,
     })
   })
 
@@ -129,6 +140,16 @@ describe('CRM: a seller with every crm:* key is still a VIEWER outside the CRM',
         admin: true,
       },
     })
+  })
+
+  // Review I-1: the shared impersonation guard blocks `/api/v1/crm` case-sensitively while Express routes
+  // case-insensitively, so the mixed-case URLs reach requireCrm — which must stop them itself. Before the fix they
+  // answered 200 with the seller's keys.
+  it.each(['/api/v1/crm/me', '/api/v1/Crm/me', '/API/V1/CRM/me'])('an impersonation session gets 403 on %s', async path => {
+    const res = await request(server).get(path).set('Authorization', `Bearer ${impersonationToken}`)
+
+    expect(res.status).toBe(403)
+    expect(['IMPERSONATION_BLOCKED_ROUTE', 'CRM_FORBIDDEN']).toContain(res.body.code)
   })
 
   // Last on purpose: it takes the keys away for the rest of the file.
