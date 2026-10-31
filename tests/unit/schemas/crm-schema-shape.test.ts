@@ -10,6 +10,7 @@ import { Prisma } from '@prisma/client'
  */
 const MODELOS = [
   'PlatformAccess',
+  'CrmTeam',
   'CrmAccount',
   'CrmContact',
   'CrmStage',
@@ -24,7 +25,7 @@ const modelo = (nombre: string) => Prisma.dmmf.datamodel.models.find(m => m.name
 const campo = (nombreModelo: string, nombreCampo: string) => modelo(nombreModelo)?.fields.find(f => f.name === nombreCampo)
 
 describe('CRM propio — forma del esquema', () => {
-  it('existen los 9 modelos', () => {
+  it('existen los 10 modelos', () => {
     expect(MODELOS.filter(nombre => !modelo(nombre))).toEqual([])
   })
 
@@ -43,6 +44,10 @@ describe('CRM propio — forma del esquema', () => {
     expect(campo('PlatformAccess', 'email')?.isUnique).toBe(true)
     // Ruling 10: a key row is claimed by ONE Staff, so a recycled or changed email never inherits it.
     expect(campo('PlatformAccess', 'staffId')).toMatchObject({ isUnique: true, isRequired: false })
+    // Ruling 14: ONE sales team, with its own organization and venue, each one held by no other team row.
+    expect(campo('CrmTeam', 'key')).toMatchObject({ isUnique: true, hasDefaultValue: true, default: 'default' })
+    expect(campo('CrmTeam', 'organizationId')).toMatchObject({ isUnique: true, isRequired: true })
+    expect(campo('CrmTeam', 'venueId')).toMatchObject({ isUnique: true, isRequired: true })
     expect(campo('CrmStage', 'name')?.isUnique).toBe(true)
     expect(campo('CrmLostReason', 'name')?.isUnique).toBe(true)
     expect(campo('CrmTimelineEvent', 'sourceKey')).toMatchObject({ isUnique: true, isRequired: false })

@@ -1,13 +1,13 @@
 /**
- * Avoqado's sales team (spec 2026-10-30 §5.1): the internal venue a seller logs into, and the «Equipo de ventas» screen
- * that gives, changes and takes away CRM keys.
+ * Avoqado's sales team (spec 2026-10-30 §5.1, ruling 14): the internal venue a seller logs into, and the «Equipo de
+ * ventas» screen that gives, changes and takes away CRM keys.
  *
  * A seller is a VIEWER of ONE internal venue, «Avoqado · Equipo de ventas», only so they can log in: the token always
  * carries a venue. What they can do in the CRM is their `PlatformAccess` keys, which `requireCrm` re-reads on every
- * request. The venue lives in the organization named by `CRM_TEAM_ORGANIZATION_ID` (in production, «Grupo Avoqado
- * Prime»), never found by a client's name.
+ * request. The venue lives in an organization of its OWN, empty on purpose: as members of any other organization (Prime,
+ * the founder's test one), the sellers could read its organization screens. `CrmTeam` says which ones they are.
  */
-import { Prisma, StaffRole, VenueStatus, VerificationStatus } from '@prisma/client'
+import { InvitationStatus, Prisma, StaffRole, VenueStatus, VerificationStatus } from '@prisma/client'
 import { ForbiddenError, InternalServerError, NotFoundError, ValidationError } from '../../errors/AppError'
 import { CRM_KEY_LABELS, type CrmKey } from '../../lib/permissions'
 import type { CrmKeysInput } from '../../schemas/crm.schema'
@@ -18,46 +18,56 @@ import { effectiveKeys, getCrmAccess, type CrmAccess, type CrmKeyColumns, type C
 import { moveOpenAccountsTx } from './ownership'
 
 export const CRM_TEAM_VENUE_SLUG = 'avoqado-equipo-ventas'
-const CRM_TEAM_VENUE_NAME = 'Avoqado · Equipo de ventas'
+const CRM_TEAM_NAME = 'Avoqado · Equipo de ventas'
+const CRM_TEAM_LOCK = 'crm:team'
 const MAX_PAGE_SIZE = 100
 
 /**
- * The internal venue, created the first time it is needed and found by its slug afterwards.
+ * The team's organization and venue, created together the first time they are needed and read from `CrmTeam` afterwards.
  *
  * `seatCapExempt`: without it the third seller hits the Free plan's 2-user cap. `ACTIVE` + `VERIFIED`: it never shows up
  * in the KYC review queue.
  */
-export async function ensureCrmTeamVenue(): Promise<{ venueId: string }> {
-  const organizationId = process.env.CRM_TEAM_ORGANIZATION_ID
-  if (!organizationId) throw new InternalServerError('Falta CRM_TEAM_ORGANIZATION_ID')
+export async function ensureCrmTeamVenue(): Promise<{ venueId: string; organizationId: string }> {
+  const select = { venueId: true, organizationId: true } as const
+  const team = await prisma.crmTeam.findUnique({ where: { key: 'default' }, select })
+  if (team) return team
 
-  const select = { id: true, organizationId: true } as const
-  let venue = await prisma.venue.findUnique({ where: { slug: CRM_TEAM_VENUE_SLUG }, select })
-  if (!venue) {
+  return prisma.$transaction(async tx => {
+    // Two first calls at once: the second waits here and then finds the team the first one made.
+    await tx.$queryRaw`SELECT pg_advisory_xact_lock(hashtext(${CRM_TEAM_LOCK}))::text`
+    const made = await tx.crmTeam.findUnique({ where: { key: 'default' }, select })
+    if (made) return made
+
+    const organization = await tx.organization.create({
+      data: { name: CRM_TEAM_NAME, email: 'hola@avoqado.io', phone: '+525667976805' },
+      select: { id: true },
+    })
+    let venueId: string
     try {
-      venue = await prisma.venue.create({
-        data: {
-          organizationId,
-          name: CRM_TEAM_VENUE_NAME,
-          slug: CRM_TEAM_VENUE_SLUG,
-          seatCapExempt: true,
-          status: VenueStatus.ACTIVE,
-          kycStatus: VerificationStatus.VERIFIED,
-        },
-        select,
-      })
+      venueId = (
+        await tx.venue.create({
+          data: {
+            organizationId: organization.id,
+            name: CRM_TEAM_NAME,
+            slug: CRM_TEAM_VENUE_SLUG,
+            seatCapExempt: true,
+            status: VenueStatus.ACTIVE,
+            kycStatus: VerificationStatus.VERIFIED,
+          },
+          select: { id: true },
+        })
+      ).id
     } catch (error) {
-      // Two first calls at once: the slug is unique, so the one that loses reads the winner's venue.
-      if (!(error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002')) throw error
-      venue = await prisma.venue.findUnique({ where: { slug: CRM_TEAM_VENUE_SLUG }, select })
-      if (!venue) throw error
+      // Another venue already has the slug: it is never adopted (the sellers would become its VIEWERs).
+      if (error instanceof Prisma.PrismaClientKnownRequestError && error.code === 'P2002') {
+        throw new InternalServerError(`Ya hay un venue «${CRM_TEAM_VENUE_SLUG}» que no es del equipo de ventas: cámbiale el slug`)
+      }
+      throw error
     }
-  }
-  // A venue with our slug in another organization is never used: the sellers would become VIEWERs of someone else's venue.
-  if (venue.organizationId !== organizationId) {
-    throw new InternalServerError(`El venue ${CRM_TEAM_VENUE_SLUG} está en otra organización: muévelo a la de CRM_TEAM_ORGANIZATION_ID`)
-  }
-  return { venueId: venue.id }
+    await tx.crmTeam.create({ data: { key: 'default', organizationId: organization.id, venueId } })
+    return { venueId, organizationId: organization.id }
+  })
 }
 
 /** One row of the «Equipo de ventas» screen. `staffId` is null while the person has no Avoqado account yet. */
@@ -93,7 +103,7 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
   const unclaimed = rows.filter(row => !row.staffId).map(row => row.email)
   const people = rows.length
     ? await prisma.staff.findMany({
-        where: { OR: [{ id: { in: claimed } }, { email: { in: unclaimed } }] },
+        where: { OR: [{ id: { in: claimed } }, { email: { in: unclaimed, mode: Prisma.QueryMode.insensitive } }] },
         select: { id: true, email: true, firstName: true, lastName: true },
         take: rows.length,
       })
@@ -125,16 +135,22 @@ export async function listTeamMembers(opts: { page?: number; pageSize?: number }
   return { data, meta: { total, page, pageSize, totalPages: Math.ceil(total / pageSize) } }
 }
 
+/** A Staff by email, ignoring capitals: `Staff.email` keeps the ones the person typed (as `getCrmAccess` assumes). */
+const staffByEmail = (email: string) =>
+  prisma.staff.findFirst({ where: { email: { equals: email, mode: Prisma.QueryMode.insensitive } }, select: { id: true, active: true } })
+
 /**
- * Gives keys to a person by email. Someone who already has an Avoqado account gets a VIEWER seat in the internal venue
- * right away; anyone else, the normal team invitation to it.
+ * Gives keys to a person by email. Someone with a working Avoqado account gets a VIEWER seat in the internal venue right
+ * away; anyone else, the team invitation to it.
  */
 export async function addTeamMember(actor: CrmAccess, input: { email: string; firstName: string; lastName: string; keys: CrmKeysInput }) {
   const email = input.email.trim().toLowerCase()
   assertKeysGoTogether(input.keys)
   const existing = await prisma.platformAccess.findUnique({ where: { email } })
-  // Keys of a row that was taken away are not "already given": giving them back is giving them.
-  assertCanGive(actor, existing?.active ? existing : null, input.keys)
+  // Adding again cuts the tie (`staffId: null` below), so the keys of a row someone already claimed go to whoever holds
+  // the email NOW: the whole grant is checked. Same for a row that was taken away: giving keys back is giving them. Only
+  // an active row nobody claimed yet stays promised to the same email, so there only what changes counts.
+  assertCanGive(actor, existing?.active && !existing.staffId ? existing : null, input.keys)
   const { venueId } = await ensureCrmTeamVenue()
 
   const row = await prisma.platformAccess.upsert({
@@ -144,8 +160,20 @@ export async function addTeamMember(actor: CrmAccess, input: { email: string; fi
     update: { ...keyColumns(input.keys), active: true, staffId: null },
   })
 
-  const staff = await prisma.staff.findUnique({ where: { email }, select: { id: true } })
-  if (staff) {
+  // A provisional account (made by an earlier invitation that was never accepted) cannot log in: it gets invited again.
+  const staff = await staffByEmail(email)
+  const invited = !staff?.active
+  // On record as soon as the keys are on: if the invitation below fails, the grant is still audited.
+  void logAction({
+    staffId: actor.staffId,
+    venueId: null,
+    action: 'CRM_TEAM_MEMBER_ADDED',
+    entity: 'PlatformAccess',
+    entityId: row.id,
+    data: { email, keys: { ...input.keys }, invited },
+  })
+
+  if (staff && !invited) {
     // No seat check: the venue is exempt from the cap by construction (`ensureCrmTeamVenue`).
     await prisma.staffVenue.upsert({
       where: { staffId_venueId: { staffId: staff.id, venueId } },
@@ -154,18 +182,14 @@ export async function addTeamMember(actor: CrmAccess, input: { email: string; fi
       create: { staffId: staff.id, venueId, role: StaffRole.VIEWER, active: true },
     })
   } else {
+    // A new invitation every time: an expired one leaves no way in, and «it never arrived» is why people add again.
+    await prisma.invitation.updateMany({
+      where: { email, venueId, status: InvitationStatus.PENDING },
+      data: { status: InvitationStatus.REVOKED },
+    })
     await inviteTeamMember(venueId, actor.staffId, { role: StaffRole.VIEWER, email, firstName: input.firstName, lastName: input.lastName })
   }
-
-  void logAction({
-    staffId: actor.staffId,
-    venueId: null,
-    action: 'CRM_TEAM_MEMBER_ADDED',
-    entity: 'PlatformAccess',
-    entityId: row.id,
-    data: { email, keys: { ...input.keys }, invited: !staff },
-  })
-  return { id: row.id, email, keys: effectiveKeys(row), invited: !staff }
+  return { id: row.id, email, keys: effectiveKeys(row), invited }
 }
 
 /** Changes the keys of someone on the team. */
@@ -188,13 +212,14 @@ export async function updateTeamMember(actor: CrmAccess, id: string, keys: CrmKe
 }
 
 /**
- * Takes someone off the team. In ONE transaction: the keys stop working, the internal venue's seat closes, and their
- * open accounts go to `reasignarA` or stay «Sin dueño», each with its OWNER_CHANGE event.
+ * Takes someone off the team. In ONE transaction: the keys stop working, a pending invitation to the team is revoked, the
+ * internal venue's seat and the team organization's membership close, and their open accounts go to `reasignarA` or stay
+ * «Sin dueño», each with its OWNER_CHANGE event.
  */
 export async function removeTeamMember(actor: CrmAccess, id: string, opts: { reasignarA?: string | null }) {
   const row = await prisma.platformAccess.findFirst({ where: { id, active: true } })
   if (!row) throw new NotFoundError('Esa persona no está en el equipo de ventas', 'CRM_TEAM_MEMBER_NOT_FOUND')
-  const memberStaffId = row.staffId ?? (await prisma.staff.findUnique({ where: { email: row.email }, select: { id: true } }))?.id ?? null
+  const memberStaffId = row.staffId ?? (await staffByEmail(row.email))?.id ?? null
   const toStaffId = opts.reasignarA ?? null
   if (toStaffId) {
     if (toStaffId === memberStaffId) {
@@ -204,15 +229,23 @@ export async function removeTeamMember(actor: CrmAccess, id: string, opts: { rea
       throw new ValidationError('A quien le pasas los negocios tiene que estar en el equipo de ventas', 'CRM_REASSIGN_TARGET_INVALID')
     }
   }
-  const { venueId } = await ensureCrmTeamVenue()
+  const { venueId, organizationId } = await ensureCrmTeamVenue()
 
   const released = await prisma.$transaction(async tx => {
     // `staffId: null` too, so this person can claim a row again if an admin ever gives them keys back.
     await tx.platformAccess.update({ where: { id }, data: { active: false, staffId: null } })
+    // Accepting a pending invitation would bring them back into the team's venue and organization.
+    await tx.invitation.updateMany({
+      where: { email: row.email, venueId, status: InvitationStatus.PENDING },
+      data: { status: InvitationStatus.REVOKED },
+    })
     if (!memberStaffId) return 0
-    await tx.staffVenue.updateMany({
-      where: { staffId: memberStaffId, venueId, active: true },
-      data: { active: false, endDate: new Date() },
+    const now = new Date()
+    await tx.staffVenue.updateMany({ where: { staffId: memberStaffId, venueId, active: true }, data: { active: false, endDate: now } })
+    // The team's organization holds only this venue, so leaving the venue is leaving the organization.
+    await tx.staffOrganization.updateMany({
+      where: { staffId: memberStaffId, organizationId, isActive: true },
+      data: { isActive: false, leftAt: now },
     })
     return moveOpenAccountsTx(tx, { fromStaffId: memberStaffId, toStaffId, actorStaffId: actor.staffId, reason: 'TEAM_MEMBER_REMOVED' })
   })

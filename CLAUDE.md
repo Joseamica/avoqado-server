@@ -124,10 +124,11 @@ Permissions: Use `checkPermission('resource:action')`, NOT `authorizeRole` (lega
 `docs/guides/PERMISSIONS_GUIDE.md`
 
 **CRM propio (equipo de ventas de Avoqado, spec 2026-10-30):** el vendedor entra como VIEWER del venue interno «Avoqado ·
-Equipo de ventas» (`avoqado-equipo-ventas`, `src/services/crm/teamVenue.service.ts`), que vive en la organización de
-`CRM_TEAM_ORGANIZATION_ID` (en producción, «Grupo Avoqado Prime»); si se borra Prime, el venue se mueve a otra organización
-y la variable cambia con él. `/api/v1/crm` está **fuera** del guardia del superadmin a propósito: sólo lo abren las llaves
-`crm:*` de `PlatformAccess`, releídas en cada petición (`requireCrm`).
+Equipo de ventas», que vive en su **propia organización vacía**, del mismo nombre. Las dos las crea `ensureCrmTeamVenue`
+(`src/services/crm/teamVenue.service.ts`) y las fija la fila `CrmTeam` (`key = 'default'`). Lo que excluye al equipo
+(búsquedas, clientes) lee `CrmTeam`, nunca el slug ni el nombre. No va en Prime ni en otra organización con negocios: sus
+miembros leen las pantallas de esa organización. `/api/v1/crm` está **fuera** del guardia del superadmin a propósito: sólo
+lo abren las llaves `crm:*` de `PlatformAccess`, releídas en cada petición (`requireCrm`).
 
 ## Commands
 

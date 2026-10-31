@@ -20552,6 +20552,17 @@ model PlatformAccess {
   updatedAt   DateTime @updatedAt
 }
 
+/// El equipo de ventas: SU organización (vacía, sólo para él) y el venue donde inicia sesión el vendedor. Una sola fila
+/// (`key = 'default'`), creada por `ensureCrmTeamVenue`. Lo que excluye al equipo (búsquedas, clientes) lee esta fila,
+/// nunca un slug ni un nombre.
+model CrmTeam {
+  id             String   @id @default(cuid())
+  key            String   @unique @default("default")
+  organizationId String   @unique
+  venueId        String   @unique
+  createdAt      DateTime @default(now())
+}
+
 /// Un negocio del CRM: va de prospecto a cliente en UN solo registro y se liga a su Organization.
 /// Abierto, ganado o perdido se deduce del `kind` de su etapa; no se guarda dos veces.
 model CrmAccount {
@@ -20671,6 +20682,7 @@ model CrmActivity {
 
   @@index([assigneeStaffId, doneAt, dueAt])
   @@index([accountId])
+  @@index([doneById]) // deleting a person (and every expired demo) asks whether they did any activity
 }
 
 /// Línea de tiempo de un negocio: sólo se agrega, nunca se edita. sourceKey (único) deja que el barrido no repita.
@@ -20685,6 +20697,7 @@ model CrmTimelineEvent {
   createdAt    DateTime   @default(now())
 
   @@index([accountId, createdAt])
+  @@index([actorStaffId]) // same question for the timeline, the table that grows the most
 }
 
 /// El registro CRUDO y durable de cada entrada (por ahora, la landing): se escribe ANTES de procesarla.

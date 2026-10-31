@@ -1,12 +1,13 @@
 /**
- * Avoqado's internal sales-team venue and the «Equipo de ventas» screen (spec 2026-10-30 §5.1, plan task 3).
+ * Avoqado's internal sales team and the «Equipo de ventas» screen (spec 2026-10-30 §5.1, plan task 3, ruling 14).
  *
- * A seller logs in as a VIEWER of one internal venue, «Avoqado · Equipo de ventas», inside the organization named by
- * `CRM_TEAM_ORGANIZATION_ID`; what they can do in the CRM is their `PlatformAccess` keys. The venue must never hit the
- * Free seat cap nor the KYC queue, an admin never hands out a key they do not hold, and taking someone off the team
- * moves their open accounts in the same transaction that takes their keys away.
+ * A seller logs in as a VIEWER of one internal venue, «Avoqado · Equipo de ventas», which lives in its OWN empty
+ * organization (never Prime: its members can read Prime's organization screens). The `CrmTeam` row says which ones they
+ * are. What a seller can do in the CRM is their `PlatformAccess` keys. The venue must never hit the Free seat cap nor the
+ * KYC queue, an admin never hands out a key they do not hold, and taking someone off the team moves their open accounts —
+ * and takes back their invitation and membership — in the same transaction that takes their keys away.
  */
-import { Prisma, StaffRole, VenueStatus, VerificationStatus } from '@prisma/client'
+import { InvitationStatus, Prisma, StaffRole, VenueStatus, VerificationStatus } from '@prisma/client'
 import { prismaMock } from '@tests/__helpers__/setup'
 import { logAction } from '@/services/dashboard/activity-log.service'
 
@@ -20,11 +21,11 @@ jest.mock('@/services/dashboard/venueRoleConfig.dashboard.service', () => ({
 
 import * as teamDashboard from '@/services/dashboard/team.dashboard.service'
 import { getVenueSeatCap } from '@/services/access/seatCap.service'
-import { addTeamMemberSchema } from '@/schemas/crm.schema'
+import { addTeamMemberSchema, removeTeamMemberSchema } from '@/schemas/crm.schema'
 import type { CrmAccess } from '@/services/crm/access.service'
 import { addTeamMember, ensureCrmTeamVenue, listTeamMembers, removeTeamMember, updateTeamMember } from '@/services/crm/teamVenue.service'
 
-const ORG_ID = 'corgprime0000000000000001'
+const ORG_ID = 'corgteam00000000000000001'
 const VENUE_ID = 'cvenuecrm0000000000000001'
 const ADMIN_ID = 'cstaffadm0000000000000001'
 const SELLER_ID = 'cstaffsel0000000000000001'
@@ -84,21 +85,50 @@ const uniqueViolation = () =>
   })
 
 /**
- * The Venue table, faked in memory: what `venue.create` stores is exactly what every later read sees — the seat cap
- * included. The organization itself is NOT grandfathered, so only the venue's own flag can lift the cap.
+ * The team's tables, faked in memory. `ensureCrmTeamVenue` writes through `teamTx` — its one transaction — and what it
+ * creates is exactly what every later read sees, the seat cap included. The team's organization is NOT grandfathered, so
+ * only the venue's own flag can lift the cap.
  */
+let teamRow: { organizationId: string; venueId: string } | null
 let venueRow: Record<string, unknown> | null
-function fakeVenueTable() {
+let teamTx: any
+function fakeTeamTables() {
+  teamRow = null
   venueRow = null
+  const readTeam = async () => teamRow
+  prismaMock.crmTeam.findUnique.mockImplementation(readTeam)
   prismaMock.venue.findUnique.mockImplementation(async () =>
-    venueRow ? { ...venueRow, organization: { id: ORG_ID, name: 'Grupo Avoqado Prime', seatCapExempt: false } } : null,
+    venueRow ? { ...venueRow, organization: { id: ORG_ID, name: 'Avoqado · Equipo de ventas', seatCapExempt: false } } : null,
   )
-  prismaMock.venue.create.mockImplementation(async ({ data }: any) => (venueRow = { id: VENUE_ID, ...data }))
+  teamTx = {
+    $queryRaw: jest.fn().mockResolvedValue([{ pg_advisory_xact_lock: '' }]),
+    crmTeam: {
+      findUnique: jest.fn(readTeam),
+      create: jest.fn(async ({ data }: any) => (teamRow = { organizationId: data.organizationId, venueId: data.venueId })),
+    },
+    organization: { create: jest.fn(async ({ data }: any) => ({ id: ORG_ID, ...data })) },
+    venue: { create: jest.fn(async ({ data }: any) => (venueRow = { id: VENUE_ID, ...data })) },
+  }
+  prismaMock.$transaction.mockImplementation((callback: any) => callback(teamTx))
+}
+
+/** The team already exists — the usual case once the first person was added. */
+function teamExists() {
+  teamRow = { organizationId: ORG_ID, venueId: VENUE_ID }
+  venueRow = {
+    id: VENUE_ID,
+    organizationId: ORG_ID,
+    name: 'Avoqado · Equipo de ventas',
+    slug: 'avoqado-equipo-ventas',
+    seatCapExempt: true,
+  }
 }
 
 const configured = () => [
+  prismaMock.crmTeam.findUnique,
   prismaMock.venue.findUnique,
   prismaMock.venue.create,
+  prismaMock.organization.create,
   prismaMock.platformAccess.findUnique,
   prismaMock.platformAccess.findFirst,
   prismaMock.platformAccess.findMany,
@@ -106,16 +136,20 @@ const configured = () => [
   prismaMock.platformAccess.upsert,
   prismaMock.platformAccess.update,
   prismaMock.staff.findUnique,
+  prismaMock.staff.findFirst,
   prismaMock.staff.findMany,
   prismaMock.staff.create,
   prismaMock.staffVenue.upsert,
   prismaMock.staffVenue.updateMany,
   prismaMock.staffVenue.count,
   prismaMock.staffVenue.findFirst,
+  prismaMock.staffVenue.findUnique,
+  prismaMock.staffOrganization.create,
+  prismaMock.staffOrganization.updateMany,
   prismaMock.invitation.findFirst,
   prismaMock.invitation.count,
   prismaMock.invitation.create,
-  prismaMock.staffOrganization.create,
+  prismaMock.invitation.updateMany,
   prismaMock.venueFeature.findMany,
   prismaMock.crmAccount.groupBy,
   prismaMock.crmAccount.updateManyAndReturn,
@@ -126,10 +160,8 @@ const configured = () => [
 let invite: jest.SpyInstance
 
 beforeEach(() => {
-  process.env.CRM_TEAM_ORGANIZATION_ID = ORG_ID
   for (const fn of configured()) fn.mockReset()
-  prismaMock.$transaction.mockImplementation((callback: any) => callback(prismaMock))
-  fakeVenueTable()
+  fakeTeamTables()
   prismaMock.platformAccess.findUnique.mockResolvedValue(null)
   prismaMock.platformAccess.upsert.mockImplementation(async ({ create }: any) => storedRow({ ...create, staffId: null }))
   // By id: the admin who invites. By email: nobody has an account yet.
@@ -141,17 +173,13 @@ beforeEach(() => {
 
 afterEach(() => invite.mockRestore())
 
-afterAll(() => {
-  delete process.env.CRM_TEAM_ORGANIZATION_ID
-})
-
 describe('ensureCrmTeamVenue', () => {
   it('crea_venue_interno_exento_y_fuera_de_kyc', async () => {
     const { venueId } = await ensureCrmTeamVenue()
 
     expect(venueId).toBe(VENUE_ID)
-    expect(prismaMock.venue.create).toHaveBeenCalledTimes(1)
-    const { data } = prismaMock.venue.create.mock.calls[0][0]
+    expect(teamTx.venue.create).toHaveBeenCalledTimes(1)
+    const { data } = teamTx.venue.create.mock.calls[0][0]
     expect(data).toEqual(
       expect.objectContaining({
         organizationId: ORG_ID,
@@ -168,40 +196,52 @@ describe('ensureCrmTeamVenue', () => {
     await expect(getVenueSeatCap(venueId)).resolves.toBeNull()
   })
 
+  it('equipo_en_org_propia_no_en_prime', async () => {
+    // Ruling 14: as members of Prime (the founder's test organization) the sellers could read ~20 of its organization
+    // screens. The team gets its OWN empty organization, made in the same transaction as its venue and its CrmTeam row,
+    // and the venue goes in THAT organization — never in one that already exists.
+    await expect(ensureCrmTeamVenue()).resolves.toEqual({ venueId: VENUE_ID, organizationId: ORG_ID })
+
+    const org = teamTx.organization.create.mock.calls[0][0].data
+    expect(org).toEqual({ name: 'Avoqado · Equipo de ventas', email: 'hola@avoqado.io', phone: '+525667976805' })
+    expect(teamTx.organization.create.mock.invocationCallOrder[0]).toBeLessThan(teamTx.venue.create.mock.invocationCallOrder[0])
+    expect(teamTx.venue.create).toHaveBeenCalledWith(expect.objectContaining({ data: expect.objectContaining({ organizationId: ORG_ID }) }))
+    expect(teamTx.crmTeam.create).toHaveBeenCalledWith({ data: { key: 'default', organizationId: ORG_ID, venueId: VENUE_ID } })
+    // Under the advisory lock, before any write: two first calls at once never make two teams.
+    const [sql, lockKey] = teamTx.$queryRaw.mock.calls[0]
+    expect(sql.join('?')).toContain('pg_advisory_xact_lock(hashtext(?))::text')
+    expect(lockKey).toBe('crm:team')
+    expect(teamTx.$queryRaw.mock.invocationCallOrder[0]).toBeLessThan(teamTx.organization.create.mock.invocationCallOrder[0])
+    // Nothing of it written outside that transaction.
+    expect(prismaMock.organization.create).not.toHaveBeenCalled()
+    expect(prismaMock.venue.create).not.toHaveBeenCalled()
+  })
+
   it('idempotente_dos_veces_un_venue', async () => {
     const first = await ensureCrmTeamVenue()
     const second = await ensureCrmTeamVenue()
 
     expect(second).toEqual(first)
-    expect(prismaMock.venue.create).toHaveBeenCalledTimes(1)
-    expect(prismaMock.venue.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { slug: 'avoqado-equipo-ventas' } }))
+    expect(teamTx.organization.create).toHaveBeenCalledTimes(1)
+    expect(teamTx.venue.create).toHaveBeenCalledTimes(1)
+    // Once it exists, finding it is a single read: no transaction, no lock.
+    expect(prismaMock.$transaction).toHaveBeenCalledTimes(1)
+    expect(prismaMock.crmTeam.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { key: 'default' } }))
 
-    // Two first calls at once: the one that loses the unique slug reads the winner's venue instead of failing.
-    venueRow = null
-    prismaMock.venue.create.mockImplementationOnce(async ({ data }: any) => {
-      venueRow = { id: VENUE_ID, ...data }
-      throw uniqueViolation()
-    })
-    await expect(ensureCrmTeamVenue()).resolves.toEqual({ venueId: VENUE_ID })
+    // Two first calls at once: the one that waited on the lock finds the team the other one just made.
+    prismaMock.crmTeam.findUnique.mockResolvedValueOnce(null)
+    await expect(ensureCrmTeamVenue()).resolves.toEqual(first)
+    expect(teamTx.organization.create).toHaveBeenCalledTimes(1)
   })
 
-  it('slug_en_otra_organizacion_no_se_usa', async () => {
-    // Someone else's venue with our slug: sellers must never become VIEWERs of a client's venue.
-    venueRow = { id: 'cvenueaje0000000000000001', organizationId: 'corgajena0000000000000001', slug: 'avoqado-equipo-ventas' }
+  it('slug_ocupado_no_se_adopta', async () => {
+    // A venue that is not the team's already has the slug: it is never adopted (the sellers would become its VIEWERs),
+    // and the team row is not written, so the transaction leaves nothing half-made.
+    teamTx.venue.create.mockRejectedValueOnce(uniqueViolation())
 
     await expect(ensureCrmTeamVenue()).rejects.toMatchObject({ statusCode: 500 })
-    expect(prismaMock.venue.create).not.toHaveBeenCalled()
-  })
-
-  it('falta_la_variable_error_claro', async () => {
-    delete process.env.CRM_TEAM_ORGANIZATION_ID
-
-    await expect(ensureCrmTeamVenue()).rejects.toMatchObject({ statusCode: 500, message: 'Falta CRM_TEAM_ORGANIZATION_ID' })
-    // Adding someone fails the same way, BEFORE writing anything.
-    await expect(addTeamMember(actor(), newMember())).rejects.toMatchObject({ statusCode: 500, message: 'Falta CRM_TEAM_ORGANIZATION_ID' })
-    expect(prismaMock.venue.create).not.toHaveBeenCalled()
-    expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
-    expect(invite).not.toHaveBeenCalled()
+    expect(teamTx.crmTeam.create).not.toHaveBeenCalled()
+    expect(teamRow).toBeNull()
   })
 })
 
@@ -225,13 +265,9 @@ describe('addTeamMember', () => {
     prismaMock.staff.create.mockImplementation(async ({ data }: any) => ({ id: 'cstaffnew0000000000000001', ...data }))
     prismaMock.staffOrganization.create.mockResolvedValue({})
     prismaMock.venueFeature.findMany.mockResolvedValue([]) // no paid plan: a venue that is not exempt would be Free, capped at 2
-    // Carla already has an Avoqado account; Ana and Beto do not.
-    prismaMock.staff.findUnique.mockImplementation(async ({ where }: any) =>
-      where.id === ADMIN_ID
-        ? { id: ADMIN_ID, firstName: 'Founder', lastName: 'Avoqado' }
-        : where.email === 'carla@avoqado.io'
-          ? { id: SELLER_ID, email: 'carla@avoqado.io' }
-          : null,
+    // Carla already has a working Avoqado account; Ana and Beto do not.
+    prismaMock.staff.findFirst.mockImplementation(async ({ where }: any) =>
+      where.email.equals === 'carla@avoqado.io' ? { id: SELLER_ID, active: true } : null,
     )
 
     await addTeamMember(actor(), newMember({ email: 'carla@avoqado.io', firstName: 'Carla', lastName: 'Ruiz' }))
@@ -275,6 +311,75 @@ describe('addTeamMember', () => {
     )
   })
 
+  it('readd_con_invitacion_vencida_reinvita', async () => {
+    // I-1: Ana was invited and never accepted. The invitation made her PROVISIONAL account (inactive, no password) and has
+    // now expired. Adding her again must invite her again: a bare seat would leave her with no way to log in.
+    invite.mockImplementation(realInviteTeamMember)
+    teamExists()
+    const provisional = { id: 'cstaffprv0000000000000001', email: 'ana@avoqado.io', active: false, emailVerified: false, password: null }
+    prismaMock.platformAccess.findUnique.mockResolvedValue(storedRow({ email: 'ana@avoqado.io', staffId: null, active: false }))
+    prismaMock.staff.findFirst.mockResolvedValue(provisional)
+    prismaMock.staff.findUnique.mockImplementation(async ({ where }: any) =>
+      where.id === ADMIN_ID
+        ? { id: ADMIN_ID, firstName: 'Founder', lastName: 'Avoqado' }
+        : where.email === 'ana@avoqado.io'
+          ? provisional
+          : null,
+    )
+    prismaMock.staffVenue.findUnique.mockResolvedValue(null)
+    prismaMock.invitation.findFirst.mockResolvedValue(null) // the old one expired: no live invitation
+    prismaMock.invitation.count.mockResolvedValue(0)
+    prismaMock.staffVenue.count.mockResolvedValue(0)
+    prismaMock.invitation.create.mockImplementation(async ({ data }: any) => ({
+      id: 'cinvitati0000000000000009',
+      token: 'nuevo',
+      status: 'PENDING',
+      createdAt: new Date(),
+      ...data,
+    }))
+
+    await expect(addTeamMember(actor(), newMember())).resolves.toEqual(expect.objectContaining({ invited: true }))
+
+    expect(invite).toHaveBeenCalledWith(VENUE_ID, ADMIN_ID, expect.objectContaining({ email: 'ana@avoqado.io', role: StaffRole.VIEWER }))
+    expect(prismaMock.invitation.create).toHaveBeenCalledWith(
+      expect.objectContaining({ data: expect.objectContaining({ email: 'ana@avoqado.io', venueId: VENUE_ID, role: StaffRole.VIEWER }) }),
+    )
+    // Her provisional account is reused (no second one) and no seat is handed out before she accepts.
+    expect(prismaMock.staff.create).not.toHaveBeenCalled()
+    expect(prismaMock.staffVenue.upsert).not.toHaveBeenCalled()
+    // An invitation still alive is replaced, so «it never arrived» gets a fresh link too.
+    expect(prismaMock.invitation.updateMany).toHaveBeenCalledWith({
+      where: { email: 'ana@avoqado.io', venueId: VENUE_ID, status: InvitationStatus.PENDING },
+      data: { status: InvitationStatus.REVOKED },
+    })
+  })
+
+  it('cuenta_con_mayusculas_no_se_duplica', async () => {
+    // M-4: Staff.email may keep the capitals someone typed (getCrmAccess already reads it ignoring case). The add finds that
+    // account and gives it the seat, instead of inviting — and creating — a second account in lowercase.
+    prismaMock.staff.findFirst.mockImplementation(async ({ where }: any) =>
+      where.email.mode === 'insensitive' && where.email.equals === 'ana.lopez@avoqado.io' ? { id: SELLER_ID, active: true } : null,
+    )
+
+    await expect(addTeamMember(actor(), newMember({ email: 'Ana.Lopez@Avoqado.IO' }))).resolves.toEqual(
+      expect.objectContaining({ invited: false }),
+    )
+    expect(invite).not.toHaveBeenCalled()
+    expect(prismaMock.staffVenue.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { staffId_venueId: { staffId: SELLER_ID, venueId: VENUE_ID } } }),
+    )
+  })
+
+  it('si_la_invitacion_falla_queda_en_bitacora', async () => {
+    // M-2: the keys are on as soon as the row is saved. If the invitation then fails, the grant is still on record.
+    invite.mockRejectedValue(new Error('invitation failed'))
+
+    await expect(addTeamMember(actor(), newMember())).rejects.toThrow('invitation failed')
+    expect(logAction).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'CRM_TEAM_MEMBER_ADDED', entity: 'PlatformAccess', entityId: ROW_ID, venueId: null }),
+    )
+  })
+
   it('correo_en_minusculas', async () => {
     // The schema normalizes it...
     const parsed = addTeamMemberSchema.parse({ body: newMember({ email: '  Ana.Lopez@Avoqado.IO ' }) })
@@ -288,7 +393,9 @@ describe('addTeamMember', () => {
         create: expect.objectContaining({ email: 'ana.lopez@avoqado.io', createdById: ADMIN_ID }),
       }),
     )
-    expect(prismaMock.staff.findUnique).toHaveBeenCalledWith(expect.objectContaining({ where: { email: 'ana.lopez@avoqado.io' } }))
+    expect(prismaMock.staff.findFirst).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { email: { equals: 'ana.lopez@avoqado.io', mode: 'insensitive' } } }),
+    )
     expect(invite).toHaveBeenCalledWith(VENUE_ID, ADMIN_ID, expect.objectContaining({ email: 'ana.lopez@avoqado.io' }))
   })
 
@@ -328,6 +435,34 @@ describe('who may give which key', () => {
     expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
     expect(prismaMock.platformAccess.update).not.toHaveBeenCalled()
     expect(logAction).not.toHaveBeenCalled()
+  })
+
+  it('repost_suelta_amarre_y_valida_todo', async () => {
+    // I-2: adding again an ACTIVE row someone already claimed cuts the tie — the keys go to whoever holds the email now —
+    // so the WHOLE grant is checked, not only what changes. The founder gave Carla «Ver ventas»; an admin without it
+    // cannot pass that key on to the next holder of her address.
+    prismaMock.platformAccess.findUnique.mockResolvedValue(storedRow({ ventas: true }))
+    const withoutVentas = actor({ ventas: false })
+
+    await expect(
+      addTeamMember(withoutVentas, newMember({ email: 'carla@avoqado.io', keys: keys({ ventas: true }) })),
+    ).rejects.toMatchObject({
+      statusCode: 403,
+      code: 'CRM_KEY_ESCALATION',
+    })
+    expect(prismaMock.platformAccess.upsert).not.toHaveBeenCalled()
+
+    // What the admin does hold can be given again: the tie is cut and the next verified holder claims the row.
+    await addTeamMember(withoutVentas, newMember({ email: 'carla@avoqado.io' }))
+    expect(prismaMock.platformAccess.upsert).toHaveBeenCalledWith(
+      expect.objectContaining({ update: expect.objectContaining({ staffId: null, ventas: false }) }),
+    )
+
+    // A row nobody claimed yet stays promised to the same email: keeping a key there is not giving it.
+    prismaMock.platformAccess.upsert.mockClear()
+    prismaMock.platformAccess.findUnique.mockResolvedValue(storedRow({ staffId: null, ventas: true }))
+    await addTeamMember(withoutVentas, newMember({ email: 'carla@avoqado.io', keys: keys({ ventas: true }) }))
+    expect(prismaMock.platformAccess.upsert).toHaveBeenCalledTimes(1)
   })
 
   it('puede_editar_a_quien_tiene_mas_llaves_sin_quitarselas', async () => {
@@ -387,26 +522,28 @@ describe('who may give which key', () => {
 
 describe('removeTeamMember', () => {
   /** Beto is on the team (claimed row with «Ver negocios»), so he can receive accounts. */
-  function betoIsOnTheTeam() {
+  function personOnTheTeam(staffId: string) {
     prismaMock.staff.findUnique.mockResolvedValue({ email: 'beto@avoqado.io', active: true, emailVerified: true })
     prismaMock.staffVenue.findFirst.mockResolvedValue(null) // not a superadmin
-    prismaMock.platformAccess.findUnique.mockResolvedValue(storedRow({ id: ROW2_ID, email: 'beto@avoqado.io', staffId: OTHER_ID }))
+    prismaMock.platformAccess.findUnique.mockResolvedValue(storedRow({ id: ROW2_ID, email: 'beto@avoqado.io', staffId }))
   }
 
   /** A transaction client of its own, so the test sees which writes happened INSIDE the one transaction. */
   function transactionClient(moved: Array<{ id: string }>) {
     return {
       platformAccess: { update: jest.fn().mockResolvedValue({}) },
+      invitation: { updateMany: jest.fn().mockResolvedValue({ count: 0 }) },
       staffVenue: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
+      staffOrganization: { updateMany: jest.fn().mockResolvedValue({ count: 1 }) },
       crmAccount: { updateManyAndReturn: jest.fn().mockResolvedValue(moved) },
       crmTimelineEvent: { createMany: jest.fn().mockResolvedValue({ count: moved.length }) },
     }
   }
 
   it('baja_reasigna_en_la_misma_transaccion', async () => {
-    venueRow = { id: VENUE_ID, organizationId: ORG_ID, slug: 'avoqado-equipo-ventas' }
+    teamExists()
     prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
-    betoIsOnTheTeam()
+    personOnTheTeam(OTHER_ID)
     const tx = transactionClient([{ id: ACCOUNT_A }, { id: ACCOUNT_B }])
     prismaMock.$transaction.mockImplementationOnce((callback: any) => callback(tx))
 
@@ -460,8 +597,43 @@ describe('removeTeamMember', () => {
     expect(logAction).not.toHaveBeenCalled()
   })
 
+  it('baja_revoca_invitacion_y_membresia', async () => {
+    // Ruling 14: whoever leaves keeps nothing of the team — not a pending invitation (accepting it would let them back in)
+    // nor the membership of the team's organization — in the same transaction.
+    teamExists()
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
+    const tx = transactionClient([])
+    prismaMock.$transaction.mockImplementationOnce((callback: any) => callback(tx))
+
+    await removeTeamMember(actor(), ROW_ID, {})
+
+    expect(tx.invitation.updateMany).toHaveBeenCalledWith({
+      where: { email: 'carla@avoqado.io', venueId: VENUE_ID, status: InvitationStatus.PENDING },
+      data: { status: InvitationStatus.REVOKED },
+    })
+    expect(tx.staffOrganization.updateMany).toHaveBeenCalledWith({
+      where: { staffId: SELLER_ID, organizationId: ORG_ID, isActive: true },
+      data: { isActive: false, leftAt: expect.any(Date) },
+    })
+    expect(prismaMock.invitation.updateMany).not.toHaveBeenCalled()
+    expect(prismaMock.staffOrganization.updateMany).not.toHaveBeenCalled()
+
+    // Someone with no Avoqado account at all: their invitation is revoked all the same.
+    const noAccount = transactionClient([])
+    prismaMock.$transaction.mockImplementationOnce((callback: any) => callback(noAccount))
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow({ email: 'nadie@avoqado.io', staffId: null }))
+    prismaMock.staff.findFirst.mockResolvedValue(null)
+
+    await removeTeamMember(actor(), ROW_ID, {})
+
+    expect(noAccount.invitation.updateMany).toHaveBeenCalledWith(
+      expect.objectContaining({ where: expect.objectContaining({ email: 'nadie@avoqado.io' }) }),
+    )
+    expect(noAccount.staffOrganization.updateMany).not.toHaveBeenCalled()
+  })
+
   it('baja_sin_reasignar_quedan_sin_dueno', async () => {
-    venueRow = { id: VENUE_ID, organizationId: ORG_ID, slug: 'avoqado-equipo-ventas' }
+    teamExists()
     prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
     const tx = transactionClient([{ id: ACCOUNT_A }])
     prismaMock.$transaction.mockImplementationOnce((callback: any) => callback(tx))
@@ -482,6 +654,7 @@ describe('removeTeamMember', () => {
   })
 
   it('reasignar_a_quien_no_es_del_equipo_422', async () => {
+    teamExists()
     prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
     // Beto has no keys at all.
     prismaMock.staff.findUnique.mockResolvedValue({ email: 'beto@avoqado.io', active: true, emailVerified: true })
@@ -496,19 +669,35 @@ describe('removeTeamMember', () => {
     await expect(removeTeamMember(actor(), ROW_ID, { reasignarA: SELLER_ID })).rejects.toMatchObject({ statusCode: 422 })
     expect(prismaMock.$transaction).not.toHaveBeenCalled()
   })
+
+  it('reasignar_a_staff_uuid', async () => {
+    // M-3: some Staff ids are UUIDs (an accepted invitation can create the account with uuidv4). The schema takes any id;
+    // the service is what checks that the person is on the team.
+    const UUID = '3b241101-e2bb-4255-8caf-4136c566a962'
+    expect(removeTeamMemberSchema.parse({ params: { id: ROW_ID }, body: { reasignarA: UUID } }).body.reasignarA).toBe(UUID)
+
+    teamExists()
+    prismaMock.platformAccess.findFirst.mockResolvedValue(storedRow())
+    personOnTheTeam(UUID)
+    const tx = transactionClient([{ id: ACCOUNT_A }])
+    prismaMock.$transaction.mockImplementationOnce((callback: any) => callback(tx))
+
+    await expect(removeTeamMember(actor(), ROW_ID, { reasignarA: UUID })).resolves.toEqual({ id: ROW_ID, released: 1 })
+    expect(tx.crmAccount.updateManyAndReturn).toHaveBeenCalledWith(expect.objectContaining({ data: { ownerStaffId: UUID } }))
+  })
 })
 
 describe('listTeamMembers', () => {
   it('lista_del_equipo_acotada_a_100', async () => {
     prismaMock.platformAccess.findMany.mockResolvedValue([
       storedRow(),
-      // Not claimed yet (Beto has not entered the CRM): his account is found by email.
+      // Not claimed yet (Beto has not entered the CRM): his account is found by email, ignoring case.
       storedRow({ id: ROW2_ID, email: 'beto@avoqado.io', staffId: null, contactar: false }),
     ])
     prismaMock.platformAccess.count.mockResolvedValue(250)
     prismaMock.staff.findMany.mockResolvedValue([
       { id: SELLER_ID, email: 'carla@avoqado.io', firstName: 'Carla', lastName: 'Ruiz' },
-      { id: OTHER_ID, email: 'beto@avoqado.io', firstName: 'Beto', lastName: 'Díaz' },
+      { id: OTHER_ID, email: 'Beto@Avoqado.io', firstName: 'Beto', lastName: 'Díaz' },
     ])
     prismaMock.crmAccount.groupBy.mockResolvedValue([{ ownerStaffId: SELLER_ID, _count: { _all: 3 } }])
 
@@ -517,6 +706,11 @@ describe('listTeamMembers', () => {
 
     expect(prismaMock.platformAccess.findMany).toHaveBeenCalledWith(
       expect.objectContaining({ where: { active: true }, orderBy: [{ createdAt: 'desc' }, { id: 'desc' }], skip: 100, take: 100 }),
+    )
+    expect(prismaMock.staff.findMany).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: { OR: [{ id: { in: [SELLER_ID] } }, { email: { in: ['beto@avoqado.io'], mode: 'insensitive' } }] },
+      }),
     )
     expect(page.meta).toEqual({ total: 250, page: 2, pageSize: 100, totalPages: 3 })
     expect(page.data).toEqual([

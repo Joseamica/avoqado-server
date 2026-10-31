@@ -55,8 +55,20 @@ export const updateTeamMemberSchema = z.object({
   body: z.object({ keys: crmKeysSchema }),
 })
 
-/** DELETE /crm/team/:id — without `reasignarA`, their open accounts stay «Sin dueño». */
+/**
+ * DELETE /crm/team/:id — without `reasignarA`, their open accounts stay «Sin dueño». `reasignarA` is a Staff id, and not
+ * every one is a cuid (accepted invitations can create UUIDs): the service checks the person is on the team.
+ */
 export const removeTeamMemberSchema = z.object({
   params: z.object({ id: cuid }),
-  body: z.object({ reasignarA: cuid.nullish() }).default({}),
+  body: z
+    .object({
+      reasignarA: z
+        .string({ invalid_type_error: 'El id de la persona no es válido' })
+        .trim()
+        .min(1, 'Falta a quién pasarle los negocios')
+        .max(100, 'El id de la persona no es válido')
+        .nullish(),
+    })
+    .default({}),
 })

@@ -1,9 +1,9 @@
--- CRM propio (spec 2026-10-30): 9 tablas nuevas, sus índices y sus llaves. Aditiva: no altera ninguna tabla existente.
+-- CRM propio (spec 2026-10-30): 10 tablas nuevas, sus índices y sus llaves. Aditiva: no altera ninguna tabla existente.
 -- Generada con `prisma migrate dev --create-only` contra una base desechable; se quitaron a mano 5 sentencias de
 -- deriva que ya existían entre el historial y el esquema de develop (Customer_tags_gin_idx, BirthdayAutomation,
 -- PaymentEffect, VenueFeature y el nombre recortado de DocumentRequestDelivery): no son de este cambio.
--- Editada a mano antes de aplicarse en ningún lado (tarea 3, rulings 7 y 10): PlatformAccess.staffId único y el
--- índice de CrmInboundEntry.accountId.
+-- Editada a mano antes de aplicarse en ningún lado (tarea 3, rulings 7, 10, 14 y 15): PlatformAccess.staffId único,
+-- la tabla CrmTeam, y los índices de CrmInboundEntry.accountId, CrmActivity.doneById y CrmTimelineEvent.actorStaffId.
 
 -- CreateTable
 CREATE TABLE "PlatformAccess" (
@@ -23,6 +23,17 @@ CREATE TABLE "PlatformAccess" (
     "updatedAt" TIMESTAMP(3) NOT NULL,
 
     CONSTRAINT "PlatformAccess_pkey" PRIMARY KEY ("id")
+);
+
+-- CreateTable
+CREATE TABLE "CrmTeam" (
+    "id" TEXT NOT NULL,
+    "key" TEXT NOT NULL DEFAULT 'default',
+    "organizationId" TEXT NOT NULL,
+    "venueId" TEXT NOT NULL,
+    "createdAt" TIMESTAMP(3) NOT NULL DEFAULT CURRENT_TIMESTAMP,
+
+    CONSTRAINT "CrmTeam_pkey" PRIMARY KEY ("id")
 );
 
 -- CreateTable
@@ -169,6 +180,15 @@ CREATE UNIQUE INDEX "PlatformAccess_email_key" ON "PlatformAccess"("email");
 CREATE UNIQUE INDEX "PlatformAccess_staffId_key" ON "PlatformAccess"("staffId");
 
 -- CreateIndex
+CREATE UNIQUE INDEX "CrmTeam_key_key" ON "CrmTeam"("key");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "CrmTeam_organizationId_key" ON "CrmTeam"("organizationId");
+
+-- CreateIndex
+CREATE UNIQUE INDEX "CrmTeam_venueId_key" ON "CrmTeam"("venueId");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "CrmAccount_organizationId_key" ON "CrmAccount"("organizationId");
 
 -- CreateIndex
@@ -205,10 +225,16 @@ CREATE INDEX "CrmActivity_assigneeStaffId_doneAt_dueAt_idx" ON "CrmActivity"("as
 CREATE INDEX "CrmActivity_accountId_idx" ON "CrmActivity"("accountId");
 
 -- CreateIndex
+CREATE INDEX "CrmActivity_doneById_idx" ON "CrmActivity"("doneById");
+
+-- CreateIndex
 CREATE UNIQUE INDEX "CrmTimelineEvent_sourceKey_key" ON "CrmTimelineEvent"("sourceKey");
 
 -- CreateIndex
 CREATE INDEX "CrmTimelineEvent_accountId_createdAt_idx" ON "CrmTimelineEvent"("accountId", "createdAt");
+
+-- CreateIndex
+CREATE INDEX "CrmTimelineEvent_actorStaffId_idx" ON "CrmTimelineEvent"("actorStaffId");
 
 -- CreateIndex
 CREATE INDEX "CrmInboundEntry_appliedAt_idx" ON "CrmInboundEntry"("appliedAt");

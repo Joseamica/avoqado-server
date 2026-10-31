@@ -530,6 +530,7 @@ const prismaMock: any = {
   // CRM propio (spec 2026-10-30): same FIXED-list rule — without these entries a test touching the CRM models dies with
   // «Cannot read properties of undefined» instead of failing on its assertion.
   platformAccess: createMockModel(),
+  crmTeam: createMockModel(),
   crmAccount: createMockModel(),
   crmContact: createMockModel(),
   crmStage: createMockModel(),

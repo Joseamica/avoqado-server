@@ -1,6 +1,6 @@
 # Schema Domain Map — avoqado-server
 
-`prisma/schema.prisma` is **454 models / 408 enums / ~20,700 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
+`prisma/schema.prisma` is **455 models / 408 enums / ~20,700 lines**. Nobody reads it top to bottom. This file is the **index**: 23 domains,
 what each is for, and where it lives. Find your domain → jump to the `schema.prisma:LINE` → for field-level detail read
 `docs/DATABASE_SCHEMA.md`.
 
@@ -39,7 +39,7 @@ primary domain.
 | 20  | **AI Chatbot (Text-to-SQL)**            | The in-dashboard AI assistant: conversations, training data, learned patterns.                                 | `ChatConversation`, `ChatFeedback`, `ChatLearningEvent`, `ChatMessage`, `ChatTrainingData`, `LearnedPatterns`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
 | 21  | **Customers, Consumers & Reviews**      | End-customer identity (venue customers + cross-venue Consumers) and reviews.                                   | `BirthdayAutomation`, `ConsentEvent`, `Consumer`, `ConsumerAuthAccount`, `Customer`, `CustomerApprovalDelivery`, `CustomerApprovalOutbox`, `CustomerCampaign`, `CustomerCampaignDelivery`, `CustomerCaptureToken`, `CustomerExternalIdentity`, `CustomerGroup`, `EmailQuotaLedger`, `EmailSuppression`, `OtpChallenge`, `PrivacyNoticeVersion`, `Review`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                      |
 | 22  | **System: Audit, Webhooks & Platform**  | Cross-cutting plumbing: audit log, webhook subscriptions, partner API keys, global settings.                   | `ActivityLog`, `PartnerAPIKey`, `PlatformSettings`, `WebhookEvent`, `WebhookSubscription`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                     |
-| 23  | **CRM (equipo de ventas de Avoqado)**   | Platform-level CRM for Avoqado’s own sales team: CRM-only keys, accounts, contacts, pipeline, activities.      | `CrmAccount`, `CrmActivity`, `CrmContact`, `CrmDigestSend`, `CrmInboundEntry`, `CrmLostReason`, `CrmStage`, `CrmTimelineEvent`, `PlatformAccess`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                              |
+| 23  | **CRM (equipo de ventas de Avoqado)**   | Platform-level CRM for Avoqado’s own sales team: CRM-only keys, accounts, contacts, pipeline, activities.      | `CrmAccount`, `CrmActivity`, `CrmContact`, `CrmDigestSend`, `CrmInboundEntry`, `CrmLostReason`, `CrmStage`, `CrmTeam`, `CrmTimelineEvent`, `PlatformAccess`                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                   |
 
 > Line numbers are section starts and drift as the schema grows — treat them as "jump near here", then search for the exact `model Name {`.
 > When the map goes stale, regenerate it: `npm run schema:map` (CI runs it automatically on `prisma/schema.prisma` changes).
@@ -146,14 +146,15 @@ Every model A–Z with its location in `prisma/schema.prisma`.
 - `CreditPackItem` → `schema.prisma:L15726`
 - `CreditPackPurchase` → `schema.prisma:L15743`
 - `CreditTransaction` → `schema.prisma:L15817`
-- `CrmAccount` → `schema.prisma:L20557`
-- `CrmActivity` → `schema.prisma:L20658`
-- `CrmContact` → `schema.prisma:L20618`
-- `CrmDigestSend` → `schema.prisma:L20711`
-- `CrmInboundEntry` → `schema.prisma:L20691`
-- `CrmLostReason` → `schema.prisma:L20648`
-- `CrmStage` → `schema.prisma:L20636`
-- `CrmTimelineEvent` → `schema.prisma:L20677`
+- `CrmAccount` → `schema.prisma:L20568`
+- `CrmActivity` → `schema.prisma:L20669`
+- `CrmContact` → `schema.prisma:L20629`
+- `CrmDigestSend` → `schema.prisma:L20724`
+- `CrmInboundEntry` → `schema.prisma:L20704`
+- `CrmLostReason` → `schema.prisma:L20659`
+- `CrmStage` → `schema.prisma:L20647`
+- `CrmTeam` → `schema.prisma:L20558`
+- `CrmTimelineEvent` → `schema.prisma:L20689`
 - `Customer` → `schema.prisma:L7898`
 - `CustomerApprovalDelivery` → `schema.prisma:L10476`
 - `CustomerApprovalOutbox` → `schema.prisma:L10451`
